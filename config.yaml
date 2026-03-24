@@ -1,0 +1,32 @@
+# Codex2API 配置文件
+
+# HTTP 服务端口
+port: 8080
+
+# 下游 API 密钥鉴权（可选，留空则不鉴权）
+# api_keys:
+#   - "sk-your-key-here"
+
+# 全局代理（可选）
+# proxy_url: "http://127.0.0.1:7890"
+
+# PostgreSQL 配置（可选，不配置则使用内存模式）
+# database:
+#   host: localhost
+#   port: 5432
+#   user: codex2api
+#   password: codex2api
+#   dbname: codex2api
+#   sslmode: disable
+
+# Redis 配置（可选，不配置则不使用缓存/分布式锁）
+# redis:
+#   addr: localhost:6379
+#   password: ""
+#   db: 0
+
+# Codex 账号列表（直接导入 RT，也可通过环境变量 CODEX_REFRESH_TOKENS 设置）
+# 如果配置了数据库，首次启动会自动导入到数据库中
+accounts:
+  - refresh_token: "YOUR_REFRESH_TOKEN_HERE"
+  # proxy_url: "http://127.0.0.1:7890"

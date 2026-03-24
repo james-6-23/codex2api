@@ -1,0 +1,50 @@
+services:
+  codex2api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - CODEX_REFRESH_TOKENS=${CODEX_REFRESH_TOKENS}
+      # - CODEX_API_KEYS=sk-your-key
+      # - CODEX_PROXY_URL=http://host.docker.internal:7890
+      - DATABASE_HOST=postgres
+      - DATABASE_PORT=5432
+      - DATABASE_USER=codex2api
+      - DATABASE_PASSWORD=codex2api
+      - DATABASE_NAME=codex2api
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: codex2api
+      POSTGRES_PASSWORD: codex2api
+      POSTGRES_DB: codex2api
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U codex2api"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    volumes:
+      - redisdata:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  pgdata:
+  redisdata:
