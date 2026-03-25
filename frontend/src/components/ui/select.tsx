@@ -61,7 +61,7 @@ export function Select({
         aria-expanded={open}
         className={cn(
           'flex h-11 w-full items-center justify-between gap-3 rounded-xl border border-input bg-background px-3.5 text-left text-[15px] shadow-xs transition-[border-color,box-shadow,transform] outline-none',
-          'hover:border-primary/30 hover:bg-white/90',
+          'hover:border-primary/30 hover:bg-accent/50',
           'focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20',
           'disabled:cursor-not-allowed disabled:opacity-60',
           open && 'border-primary/35 ring-[3px] ring-primary/10'
