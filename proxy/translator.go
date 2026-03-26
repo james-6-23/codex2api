@@ -44,10 +44,16 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 		result, _ = sjson.DeleteBytes(result, field)
 	}
 
-	// 5. system → developer 角色转换
+	// 5. 转换 tools 格式: OpenAI Chat {type, function:{name,description,parameters}} → Codex {type, name, description, parameters}
+	result = convertToolsFormat(result)
+
+	// 6. 删除 Codex 不支持的 tool 相关字段
+	result, _ = sjson.DeleteBytes(result, "tool_choice")
+
+	// 7. system → developer 角色转换
 	result = convertSystemRoleToDeveloper(result)
 
-	// 6. 添加 include
+	// 8. 添加 include
 	result, _ = sjson.SetBytes(result, "include", []string{"reasoning.encrypted_content"})
 
 	return result, nil
@@ -117,6 +123,43 @@ func convertSystemRoleToDeveloper(rawJSON []byte) []byte {
 			result, _ = sjson.SetBytes(result, rolePath, "developer")
 		}
 	}
+	return result
+}
+
+// convertToolsFormat 将 OpenAI Chat 格式的 tools 转换为 Codex Responses 格式
+// OpenAI: {type:"function", function:{name, description, parameters}}
+// Codex:  {type:"function", name, description, parameters}
+func convertToolsFormat(rawJSON []byte) []byte {
+	tools := gjson.GetBytes(rawJSON, "tools")
+	if !tools.Exists() || !tools.IsArray() {
+		return rawJSON
+	}
+
+	result := rawJSON
+	for i := 0; i < int(tools.Get("#").Int()); i++ {
+		funcObj := gjson.GetBytes(result, fmt.Sprintf("tools.%d.function", i))
+		if !funcObj.Exists() {
+			continue
+		}
+
+		// 提升 function 下的字段到顶层
+		if name := funcObj.Get("name"); name.Exists() {
+			result, _ = sjson.SetBytes(result, fmt.Sprintf("tools.%d.name", i), name.String())
+		}
+		if desc := funcObj.Get("description"); desc.Exists() {
+			result, _ = sjson.SetBytes(result, fmt.Sprintf("tools.%d.description", i), desc.String())
+		}
+		if params := funcObj.Get("parameters"); params.Exists() {
+			result, _ = sjson.SetRawBytes(result, fmt.Sprintf("tools.%d.parameters", i), []byte(params.Raw))
+		}
+		if strict := funcObj.Get("strict"); strict.Exists() {
+			result, _ = sjson.SetBytes(result, fmt.Sprintf("tools.%d.strict", i), strict.Bool())
+		}
+
+		// 删除嵌套的 function 对象
+		result, _ = sjson.DeleteBytes(result, fmt.Sprintf("tools.%d.function", i))
+	}
+
 	return result
 }
 

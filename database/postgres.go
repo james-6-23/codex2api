@@ -1047,7 +1047,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, start, end time
 		l := &UsageLog{}
 		if err := rows.Scan(&l.ID, &l.AccountID, &l.Endpoint, &l.Model, &l.PromptTokens, &l.CompletionTokens, &l.TotalTokens, &l.StatusCode, &l.DurationMs,
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.CachedTokens,
-			&l.AccountEmail, &l.CreatedAt, &result.Total); err != nil {
+			&l.ServiceTier, &l.AccountEmail, &l.CreatedAt, &result.Total); err != nil {
 			return nil, err
 		}
 		result.Logs = append(result.Logs, l)
