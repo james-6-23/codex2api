@@ -91,6 +91,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/clean-banned", h.CleanBanned)
+	api.POST("/accounts/clean-error", h.CleanError)
 	api.POST("/accounts/clean-rate-limited", h.CleanRateLimited)
 	api.GET("/accounts/export", h.ExportAccounts)
 	api.POST("/accounts/migrate", h.MigrateAccounts)
@@ -1509,6 +1510,11 @@ func (h *Handler) ListModels(c *gin.Context) {
 // CleanBanned 清理封禁（unauthorized）账号
 func (h *Handler) CleanBanned(c *gin.Context) {
 	h.cleanByStatus(c, "unauthorized")
+}
+
+// CleanError 清理错误（error）账号
+func (h *Handler) CleanError(c *gin.Context) {
+	h.cleanByStatus(c, "error")
 }
 
 // CleanRateLimited 清理限流（rate_limited）账号

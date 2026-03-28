@@ -152,6 +152,8 @@ export const api = {
     request<{ total: number; success: number; failed: number; banned: number; rate_limited: number }>('/accounts/batch-test', { method: 'POST' }),
   cleanBanned: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-banned', { method: 'POST' }),
+  cleanError: () =>
+    request<{ message: string; cleaned: number }>('/accounts/clean-error', { method: 'POST' }),
   cleanRateLimited: () =>
     request<{ message: string; cleaned: number }>('/accounts/clean-rate-limited', { method: 'POST' }),
   exportAccounts: (params: { filter: 'healthy' | 'all'; ids?: number[] }) => {

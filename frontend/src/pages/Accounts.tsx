@@ -24,7 +24,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, TriangleAlert, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
 
@@ -49,6 +49,7 @@ export default function Accounts() {
   const [batchLoading, setBatchLoading] = useState(false)
   const [batchTesting, setBatchTesting] = useState(false)
   const [cleaningBanned, setCleaningBanned] = useState(false)
+  const [cleaningError, setCleaningError] = useState(false)
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
@@ -537,6 +538,26 @@ export default function Accounts() {
     }
   }
 
+  const handleCleanError = async () => {
+    const confirmed = await confirm({
+      title: t('accounts.cleanErrorTitle'),
+      description: t('accounts.cleanErrorDesc'),
+      confirmText: t('accounts.cleanConfirm'),
+      tone: 'warning',
+    })
+    if (!confirmed) return
+    setCleaningError(true)
+    try {
+      await api.cleanError()
+      showToast(t('accounts.cleanErrorSuccess'))
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.cleanErrorFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setCleaningError(false)
+    }
+  }
+
   return (
     <StateShell
       variant="page"
@@ -561,6 +582,10 @@ export default function Accounts() {
               <Button variant="outline" size="sm" disabled={cleaningBanned} onClick={() => void handleCleanBanned()}>
                 <Ban className="size-3" />
                 {cleaningBanned ? t('accounts.cleaning') : t('accounts.cleanBanned')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={cleaningError} onClick={() => void handleCleanError()}>
+                <TriangleAlert className="size-3" />
+                {cleaningError ? t('accounts.cleaning') : t('accounts.cleanError')}
               </Button>
               <Button variant="outline" size="sm" disabled={cleaningRateLimited} onClick={() => void handleCleanRateLimited()}>
                 <Timer className="size-3" />

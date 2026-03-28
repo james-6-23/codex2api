@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -135,5 +138,54 @@ func TestRefreshAccountReturnsRefreshFailure(t *testing.T) {
 	}
 	if got := payload["error"]; got != "刷新失败: upstream unavailable" {
 		t.Fatalf("error = %q, want %q", got, "刷新失败: upstream unavailable")
+	}
+}
+
+func TestCleanErrorRemovesOnlyErrorAccounts(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	store := auth.NewStore(nil, cache.NewMemory(1), &database.SystemSettings{
+		MaxConcurrency:  2,
+		TestConcurrency: 50,
+		TestModel:       "gpt-5.4",
+	})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "token-active", Status: auth.StatusReady})
+	store.AddAccount(&auth.Account{DBID: 2, Status: auth.StatusError, ErrorMsg: "refresh_token_reused"})
+	store.AddAccount(&auth.Account{DBID: 3, Status: auth.StatusCooldown, CooldownReason: "rate_limited"})
+
+	handler := &Handler{store: store}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/clean-error", nil)
+
+	handler.CleanError(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		Message string `json:"message"`
+		Cleaned int    `json:"cleaned"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Cleaned != 1 {
+		t.Fatalf("cleaned = %d, want %d", payload.Cleaned, 1)
+	}
+	if payload.Message != "已清理 1 个账号" {
+		t.Fatalf("message = %q, want %q", payload.Message, "已清理 1 个账号")
+	}
+
+	if got := store.FindByID(1); got == nil {
+		t.Fatal("active account should remain after cleaning error accounts")
+	}
+	if got := store.FindByID(2); got != nil {
+		t.Fatal("error account should be removed after cleaning")
+	}
+	if got := store.FindByID(3); got == nil {
+		t.Fatal("rate-limited account should remain after cleaning error accounts")
 	}
 }
