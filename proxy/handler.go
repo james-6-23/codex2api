@@ -486,10 +486,11 @@ func (h *Handler) Responses(c *gin.Context) {
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
 
 			// 判断是否应该重试：可重试状态码 或 模型容量不足错误
-			shouldRetry := (isRetryableStatus(resp.StatusCode) || isCodexModelCapacityError(errBody)) && attempt < maxRetries
+			capErr := isCodexModelCapacityError(errBody)
+			shouldRetry := (isRetryableStatus(resp.StatusCode) || capErr) && attempt < maxRetries
 			if shouldRetry {
 				// Capacity error 视为 429 处理，设置短期冷却
-				if isCodexModelCapacityError(errBody) && resp.StatusCode != http.StatusTooManyRequests {
+				if capErr && resp.StatusCode != http.StatusTooManyRequests {
 					h.store.MarkCooldown(account, 30*time.Second, "model_capacity")
 					log.Printf("检测到模型容量不足 (account %d)，设置 30s 冷却后重试", account.ID())
 				}
@@ -821,10 +822,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
 
 			// 判断是否应该重试：可重试状态码 或 模型容量不足错误
-			shouldRetry := (isRetryableStatus(resp.StatusCode) || isCodexModelCapacityError(errBody)) && attempt < maxRetries
+			capErr := isCodexModelCapacityError(errBody)
+			shouldRetry := (isRetryableStatus(resp.StatusCode) || capErr) && attempt < maxRetries
 			if shouldRetry {
 				// Capacity error 视为 429 处理，设置短期冷却
-				if isCodexModelCapacityError(errBody) && resp.StatusCode != http.StatusTooManyRequests {
+				if capErr && resp.StatusCode != http.StatusTooManyRequests {
 					h.store.MarkCooldown(account, 30*time.Second, "model_capacity")
 					log.Printf("检测到模型容量不足 (account %d)，设置 30s 冷却后重试", account.ID())
 				}
