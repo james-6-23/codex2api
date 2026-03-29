@@ -139,7 +139,11 @@ func main() {
 	r.Use(loggerMiddleware())
 
 	// handler 不再接收 cfg.APIKeys
-	handler := proxy.NewHandler(store, db)
+	// 从环境变量读取设备指纹配置（后续可从数据库配置）
+	deviceCfg := &proxy.DeviceProfileConfig{
+		StabilizeDeviceProfile: os.Getenv("STABILIZE_DEVICE_PROFILE") == "true",
+	}
+	handler := proxy.NewHandler(store, db, deviceCfg)
 
 	r.Use(rateLimiter.Middleware())
 	if settings.GlobalRPM > 0 {

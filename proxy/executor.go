@@ -130,7 +130,8 @@ const (
 
 // ExecuteRequest 向 Codex 上游发送请求
 // sessionID 可选，用于 prompt cache 会话绑定
-func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string) (*http.Response, error) {
+// headers 下游请求头，用于设备指纹学习
+func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -180,14 +181,24 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 
 	// ==================== 请求头（伪装 Codex CLI） ====================
-	// 每个账号使用确定性的 ClientProfile（UA + Version），模拟真实用户多样性
-	profile := ProfileForAccount(account.ID())
+	// 应用设备指纹稳定化
+	if IsDeviceProfileStabilizationEnabled(deviceCfg) {
+		profile := ResolveDeviceProfile(account, apiKey, headers, deviceCfg)
+		ApplyDeviceProfileHeaders(req, profile)
+		// 稳定化时也需要设置 Version 头，保持行为一致
+		if profile.HasVersion {
+			req.Header.Set("Version", fmt.Sprintf("%d.%d.%d", profile.Version.major, profile.Version.minor, profile.Version.patch))
+		}
+	} else {
+		// 每个账号使用确定性的 ClientProfile（UA + Version），模拟真实用户多样性
+		profile := ProfileForAccount(account.ID())
+		req.Header.Set("User-Agent", profile.UserAgent)
+		req.Header.Set("Version", profile.Version)
+	}
 
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("User-Agent", profile.UserAgent)
-	req.Header.Set("Version", profile.Version)
 	req.Header.Set("Originator", Originator)
 	req.Header.Set("Connection", "Keep-Alive")
 	if accountID != "" {
