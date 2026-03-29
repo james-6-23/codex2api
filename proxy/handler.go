@@ -290,6 +290,31 @@ func isRetryableStatus(code int) bool {
 	return code == http.StatusTooManyRequests || code == http.StatusServiceUnavailable || code == http.StatusUnauthorized || code == http.StatusInternalServerError
 }
 
+// isCodexModelCapacityError 检测 Codex 模型容量不足错误
+// 这类错误应该作为 429 处理，触发重试和冷却
+func isCodexModelCapacityError(errorBody []byte) bool {
+	if len(errorBody) == 0 {
+		return false
+	}
+
+	// 尝试从 JSON 中提取错误消息
+	candidates := []string{
+		gjson.GetBytes(errorBody, "error.message").String(),
+		gjson.GetBytes(errorBody, "message").String(),
+	}
+
+	for _, candidate := range candidates {
+		lower := strings.ToLower(strings.TrimSpace(candidate))
+		if strings.Contains(lower, "selected model is at capacity") ||
+			strings.Contains(lower, "model is at capacity. please try a different model") ||
+			strings.Contains(lower, "model is currently at capacity") {
+			return true
+		}
+	}
+
+	return false
+}
+
 func parseUsageLimitDetails(body []byte) (usageLimitDetails, bool) {
 	if len(body) == 0 {
 		return usageLimitDetails{}, false
@@ -460,7 +485,14 @@ func (h *Handler) Responses(c *gin.Context) {
 			})
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
 
-			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
+			// 判断是否应该重试：可重试状态码 或 模型容量不足错误
+			shouldRetry := (isRetryableStatus(resp.StatusCode) || isCodexModelCapacityError(errBody)) && attempt < maxRetries
+			if shouldRetry {
+				// Capacity error 视为 429 处理，设置短期冷却
+				if isCodexModelCapacityError(errBody) && resp.StatusCode != http.StatusTooManyRequests {
+					h.store.MarkCooldown(account, 30*time.Second, "model_capacity")
+					log.Printf("检测到模型容量不足 (account %d)，设置 30s 冷却后重试", account.ID())
+				}
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
 				continue
@@ -788,7 +820,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			})
 			h.applyCooldown(account, resp.StatusCode, errBody, resp)
 
-			if isRetryableStatus(resp.StatusCode) && attempt < maxRetries {
+			// 判断是否应该重试：可重试状态码 或 模型容量不足错误
+			shouldRetry := (isRetryableStatus(resp.StatusCode) || isCodexModelCapacityError(errBody)) && attempt < maxRetries
+			if shouldRetry {
+				// Capacity error 视为 429 处理，设置短期冷却
+				if isCodexModelCapacityError(errBody) && resp.StatusCode != http.StatusTooManyRequests {
+					h.store.MarkCooldown(account, 30*time.Second, "model_capacity")
+					log.Printf("检测到模型容量不足 (account %d)，设置 30s 冷却后重试", account.ID())
+				}
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
 				continue
