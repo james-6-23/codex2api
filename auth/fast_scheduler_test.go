@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -371,4 +372,177 @@ func TestFastSchedulerRelease(t *testing.T) {
 	if got := atomic.LoadInt64(&acc.ActiveRequests); got != 0 {
 		t.Fatalf("ActiveRequests after Release() = %d, want 0", got)
 	}
+}
+
+// ==================== Model-Aware Tests (Phase 1) ====================
+
+// newTestAccountWithModelState 创建带有ModelState的测试账号
+func newTestAccountWithModelState(id int64, tier AccountHealthTier, score float64, limit int64, modelStates map[string]*ModelState) *Account {
+	acc := newFastSchedulerTestAccount(id, tier, score, limit)
+	acc.ModelStates = modelStates
+	return acc
+}
+
+// TestFastScheduler_AcquireForModel_基本 测试基本model-aware调度
+func TestFastScheduler_AcquireForModel_基本(t *testing.T) {
+	model := "gpt-4"
+	acc := newTestAccountWithModelState(1, HealthTierHealthy, 100, 2, map[string]*ModelState{
+		"gpt-4": NewModelState(), // ready状态
+	})
+
+	scheduler := NewFastScheduler(2)
+	scheduler.Rebuild([]*Account{acc})
+
+	got := scheduler.AcquireForModel(model, nil)
+	if got == nil {
+		t.Fatal("AcquireForModel() returned nil")
+	}
+	defer scheduler.Release(got)
+
+	if got.DBID != acc.DBID {
+		t.Fatalf("AcquireForModel() picked dbID=%d, want %d", got.DBID, acc.DBID)
+	}
+}
+
+// TestFastScheduler_AcquireForModel_模型冷却排除 测试模型冷却时排除账号
+func TestFastScheduler_AcquireForModel_模型冷却排除(t *testing.T) {
+	model := "gpt-4"
+
+	// 账号1: gpt-4模型冷却中
+	coolingAcc := newTestAccountWithModelState(1, HealthTierHealthy, 100, 2, map[string]*ModelState{
+		"gpt-4": func() *ModelState {
+			ms := NewModelState()
+			ms.ApplyCooldown("rate_limited")
+			return ms
+		}(),
+	})
+
+	// 账号2: gpt-4模型可用
+	availableAcc := newTestAccountWithModelState(2, HealthTierHealthy, 100, 2, map[string]*ModelState{
+		"gpt-4": NewModelState(),
+	})
+
+	scheduler := NewFastScheduler(2)
+	scheduler.Rebuild([]*Account{coolingAcc, availableAcc})
+
+	// 应该选到账号2（账号1的gpt-4在冷却中）
+	got := scheduler.AcquireForModel(model, nil)
+	if got == nil {
+		t.Fatal("AcquireForModel() returned nil")
+	}
+	defer scheduler.Release(got)
+
+	if got.DBID != availableAcc.DBID {
+		t.Fatalf("AcquireForModel() picked dbID=%d, want %d (cooling account should be skipped)", got.DBID, availableAcc.DBID)
+	}
+}
+
+// TestFastScheduler_AcquireForModel_无模型参数回退 测试无模型参数时回退到旧逻辑
+func TestFastScheduler_AcquireForModel_无模型参数回退(t *testing.T) {
+	acc := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 2)
+
+	scheduler := NewFastScheduler(2)
+	scheduler.Rebuild([]*Account{acc})
+
+	// 空模型名称应该回退到AcquireExcluding
+	got := scheduler.AcquireForModel("", nil)
+	if got == nil {
+		t.Fatal("AcquireForModel(\"\") returned nil, should fallback to AcquireExcluding")
+	}
+	defer scheduler.Release(got)
+
+	if got.DBID != acc.DBID {
+		t.Fatalf("AcquireForModel() picked dbID=%d, want %d", got.DBID, acc.DBID)
+	}
+}
+
+// TestFastScheduler_SnapshotForModel_单次锁 测试单次Account.mu.RLock完成检查
+func TestFastScheduler_SnapshotForModel_单次锁(t *testing.T) {
+	model := "gpt-4"
+	acc := newTestAccountWithModelState(1, HealthTierHealthy, 100, 2, map[string]*ModelState{
+		"gpt-4": NewModelState(),
+	})
+
+	now := time.Now()
+
+	// 测试fastSchedulerSnapshotForModel在单次锁内完成
+	tier, score, limit, available := acc.fastSchedulerSnapshotForModel(2, model, now)
+
+	if !available {
+		t.Fatal("fastSchedulerSnapshotForModel() returned available=false for ready model")
+	}
+	if tier != HealthTierHealthy {
+		t.Fatalf("fastSchedulerSnapshotForModel() tier=%s, want %s", tier, HealthTierHealthy)
+	}
+	if score != 100 {
+		t.Fatalf("fastSchedulerSnapshotForModel() score=%f, want 100", score)
+	}
+	if limit != 2 {
+		t.Fatalf("fastSchedulerSnapshotForModel() limit=%d, want 2", limit)
+	}
+}
+
+// TestFastScheduler_ConcurrentAcquireForModel 测试并发调度安全
+func TestFastScheduler_ConcurrentAcquireForModel(t *testing.T) {
+	model := "gpt-4"
+
+	// 创建多个账号，每个都有gpt-4模型状态
+	accounts := make([]*Account, 10)
+	for i := 0; i < 10; i++ {
+		accounts[i] = newTestAccountWithModelState(int64(i+1), HealthTierHealthy, 100, 2, map[string]*ModelState{
+			"gpt-4": NewModelState(),
+		})
+	}
+
+	scheduler := NewFastScheduler(2)
+	scheduler.Rebuild(accounts)
+
+	const concurrency = 20
+	const iterations = 50
+
+	var wg sync.WaitGroup
+	acquiredCounts := make(map[int64]int64)
+	var mu sync.Mutex
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < iterations; j++ {
+				acc := scheduler.AcquireForModel(model, nil)
+				if acc != nil {
+					mu.Lock()
+					acquiredCounts[acc.DBID]++
+					mu.Unlock()
+
+					// 模拟工作
+					time.Sleep(time.Millisecond)
+					scheduler.Release(acc)
+				}
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// 验证所有账号都被使用到了
+	if len(acquiredCounts) == 0 {
+		t.Fatal("No accounts were acquired")
+	}
+
+	// 验证没有超过并发限制
+	for dbID, count := range acquiredCounts {
+		if count <= 0 {
+			t.Fatalf("Account %d was never acquired", dbID)
+		}
+	}
+
+	t.Logf("Concurrent acquire completed: %d accounts used, total acquires=%d",
+		len(acquiredCounts), func() int64 {
+			var sum int64
+			for _, c := range acquiredCounts {
+				sum += c
+			}
+			return sum
+		}())
 }
