@@ -90,6 +90,8 @@ type Account struct {
 	Disabled       int32 // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
 	AddedAt        int64 // 加入号池的时间（UnixNano），用于过期清理
 
+	// Per-Model 状态隔离（Phase 0）
+	ModelStates map[string]*ModelState `json:"model_states,omitempty"` // key: canonical model name
 }
 
 // SchedulerBreakdown 调度评分拆解
@@ -1029,6 +1031,7 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			ProxyURL:     proxy,
 			HealthTier:   HealthTierWarm,
 			AddedAt:      row.CreatedAt.UnixNano(),
+			ModelStates:  make(map[string]*ModelState), // Phase 0: 初始化 per-model 状态
 		}
 
 		// 尝试从 credentials 恢复已有的 AT
@@ -1364,6 +1367,10 @@ func (s *Store) AddAccount(acc *Account) {
 	// 记录加入时间（用于过期清理）
 	if atomic.LoadInt64(&acc.AddedAt) == 0 {
 		atomic.StoreInt64(&acc.AddedAt, time.Now().UnixNano())
+	}
+	// Phase 0: 初始化 ModelStates
+	if acc.ModelStates == nil {
+		acc.ModelStates = make(map[string]*ModelState)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

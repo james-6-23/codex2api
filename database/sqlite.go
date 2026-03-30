@@ -117,6 +117,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 	}{
 		{"accounts", "cooldown_reason", "TEXT DEFAULT ''"},
 		{"accounts", "cooldown_until", "TIMESTAMP NULL"},
+		{"accounts", "model_states", "TEXT DEFAULT '{}'"},
 		{"usage_logs", "input_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "output_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "reasoning_tokens", "INTEGER DEFAULT 0"},
