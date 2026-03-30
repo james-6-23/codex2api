@@ -1751,26 +1751,33 @@ func (s *Store) ApplyAccountHardFailure(acc *Account, reason string) {
 	acc.mu.Lock()
 	now := time.Now()
 
+	// 设置账号级冷却（内部实现，避免重复锁）
+	var cooldownDuration time.Duration
 	switch reason {
 	case "unauthorized":
 		// 401 认证失败
 		if !acc.LastUnauthorizedAt.IsZero() && now.Sub(acc.LastUnauthorizedAt) < 24*time.Hour {
 			// 24h内重复401，延长到24h
-			acc.SetCooldownUntil(now.Add(24*time.Hour), reason)
+			cooldownDuration = 24 * time.Hour
 		} else {
 			// 首次401，6h冷却
-			acc.SetCooldownUntil(now.Add(6*time.Hour), reason)
+			cooldownDuration = 6 * time.Hour
 		}
 		acc.LastUnauthorizedAt = now
 		acc.HealthTier = HealthTierBanned
 	case "terminal_auth":
 		// 其他终端认证错误
-		acc.SetCooldownUntil(now.Add(24*time.Hour), reason)
+		cooldownDuration = 24 * time.Hour
 		acc.HealthTier = HealthTierBanned
 	default:
 		// 其他硬故障
-		acc.SetCooldownUntil(now.Add(6*time.Hour), reason)
+		cooldownDuration = 6 * time.Hour
 	}
+
+	// 直接设置冷却字段（已持有锁）
+	acc.Status = StatusCooldown
+	acc.CooldownUtil = now.Add(cooldownDuration)
+	acc.CooldownReason = reason
 
 	acc.LastFailureAt = now
 	acc.FailureStreak++

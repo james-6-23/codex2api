@@ -223,16 +223,8 @@ func TestHandler_RetryAfter解析_30s_60s_90s(t *testing.T) {
 
 // TestHandler_ApplyFailureState_401账号级硬故障 测试401触发账号级硬故障
 func TestHandler_ApplyFailureState_401账号级硬故障(t *testing.T) {
-	// 使用最小化的Handler和Account配置，避免数据库依赖
-	handler := &Handler{}
-	account := &auth.Account{
-		DBID:        1,
-		AccessToken: "test-token",
-		PlanType:    "pro",
-		Email:       "test@example.com",
-		ModelStates: make(map[string]*auth.ModelState),
-		HealthTier:  auth.HealthTierHealthy,
-	}
+	handler, store := createTestHandler(t)
+	account := createTestAccount(store, 1, "pro")
 
 	body := `{"error": {"type": "authentication_error", "message": "Invalid token"}}`
 	resp := createMockHTTPResponse(newMockResponse(http.StatusUnauthorized, body))
@@ -503,7 +495,7 @@ func TestHandler_RetryAfter_无条件采纳(t *testing.T) {
 func TestHandler_ParseRetryAfter_CodexHeaders(t *testing.T) {
 	// 测试Codex的resets_at字段
 	futureTime := time.Now().Add(5 * time.Minute).Unix()
-	body := `{"error": {"type": "usage_limit_reached", "resets_at": ` + string(rune(futureTime)) + `}}`
+	body := fmt.Sprintf(`{"error": {"type": "usage_limit_reached", "resets_at": %d}}`, futureTime)
 
 	duration := parseRetryAfter([]byte(body))
 
@@ -513,7 +505,7 @@ func TestHandler_ParseRetryAfter_CodexHeaders(t *testing.T) {
 	}
 
 	// 测试两个字段都存在的情况（resets_at优先）
-	body2 := `{"error": {"type": "usage_limit_reached", "resets_at": ` + string(rune(futureTime)) + `, "resets_in_seconds": 120}}`
+	body2 := fmt.Sprintf(`{"error": {"type": "usage_limit_reached", "resets_at": %d, "resets_in_seconds": 120}}`, futureTime)
 	duration2 := parseRetryAfter([]byte(body2))
 
 	// 应该使用resets_at（5分钟），而不是resets_in_seconds（120秒）
@@ -535,8 +527,9 @@ func TestHandler_Compute429Cooldown_TeamPro(t *testing.T) {
 	recorder.Header().Set("x-codex-secondary-window-minutes", "10080") // 7d窗口
 	resp := recorder.Result()
 
-	body := `{"error": {"type": "rate_limit_error"}}`
-	duration := handler.compute429Cooldown(account, []byte(body), resp)
+	// 空body让逻辑走到Codex header解析
+	body := []byte{}
+	duration := handler.compute429Cooldown(account, body, resp)
 
 	// primary窗口满了（5h），应该返回5小时
 	if duration != 5*time.Hour {
@@ -549,8 +542,9 @@ func TestHandler_Compute429Cooldown_Free(t *testing.T) {
 	handler, store := createTestHandler(t)
 	account := createTestAccount(store, 1, "free")
 
-	body := `{"error": {"type": "rate_limit_error"}}`
-	duration := handler.compute429Cooldown(account, []byte(body), nil)
+	// 空body让逻辑走到plan-based判断
+	body := []byte{}
+	duration := handler.compute429Cooldown(account, body, nil)
 
 	// Free账号默认7天
 	if duration != 7*24*time.Hour {
@@ -644,28 +638,28 @@ func TestHandler_WindowMinutesToCooldown(t *testing.T) {
 	}
 }
 
-// TestHandler_ModelState_BackoffLevel 测试指数退避级别
+// TestHandler_ModelState_BackoffLevel 测试StrikeCount递增
 func TestHandler_ModelState_BackoffLevel(t *testing.T) {
 	handler, store := createTestHandler(t)
 	account := createTestAccount(store, 1, "pro")
 
 	model := "gpt-5.4"
-	body := `{"error": {"type": "rate_limit_error"}}`
+	body := []byte{} // 空body让逻辑使用指数退避
 
-	// 多次应用冷却，观察退避级别
-	expectedLevels := []int{0, 1, 2, 3, 4}
+	// 多次应用冷却，观察StrikeCount递增
+	expectedCounts := []int{1, 2, 3, 4, 5}
 
-	for i, expectedLevel := range expectedLevels {
-		resp := createMockHTTPResponse(newMockResponse(http.StatusTooManyRequests, body))
-		handler.applyFailureState(account, model, http.StatusTooManyRequests, []byte(body), resp)
+	for i, expectedCount := range expectedCounts {
+		resp := createMockHTTPResponse(newMockResponse(http.StatusTooManyRequests, string(body)))
+		handler.applyFailureState(account, model, http.StatusTooManyRequests, body, resp)
 
 		account.Mu().RLock()
 		ms := account.ModelStates[model]
-		actualLevel := ms.BackoffLevel
+		actualCount := ms.StrikeCount
 		account.Mu().RUnlock()
 
-		if actualLevel != expectedLevel {
-			t.Errorf("iteration %d: expected backoff level %d, got %d", i, expectedLevel, actualLevel)
+		if actualCount != expectedCount {
+			t.Errorf("iteration %d: expected strike count %d, got %d", i, expectedCount, actualCount)
 		}
 	}
 }
