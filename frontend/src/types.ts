@@ -51,6 +51,7 @@ export interface AccountRow {
   usage_percent_5h?: number | null
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
+  locked?: number
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>

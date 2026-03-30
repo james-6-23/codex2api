@@ -13,6 +13,7 @@ import { useToast } from '../hooks/useToast'
 import type { AccountRow, AddAccountRequest, AddATAccountRequest } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatRelativeTime, formatBeijingTime } from '../utils/time'
+import { Badge } from '@/components/ui/badge'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -24,7 +25,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, Lock, Unlock } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
 
@@ -51,6 +52,8 @@ export default function Accounts() {
   const [cleaningBanned, setCleaningBanned] = useState(false)
   const [cleaningRateLimited, setCleaningRateLimited] = useState(false)
   const [cleaningError, setCleaningError] = useState(false)
+  const [lockingIds, setLockingIds] = useState<Set<number>>(new Set())
+  const [batchLocking, setBatchLocking] = useState(false)
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null)
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null)
   const [importing, setImporting] = useState(false)
@@ -612,6 +615,58 @@ export default function Accounts() {
     }
   }
 
+  const handleToggleLock = async (account: AccountRow) => {
+    setLockingIds((prev) => new Set(prev).add(account.id))
+    try {
+      if (account.locked === 1) {
+        await api.unlockAccount(account.id)
+        showToast(t('accounts.unlockSuccess'))
+      } else {
+        await api.lockAccount(account.id)
+        showToast(t('accounts.lockSuccess'))
+      }
+      void reloadSilently()
+    } catch (error) {
+      showToast(t('accounts.lockFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setLockingIds((prev) => {
+        const next = new Set(prev)
+        next.delete(account.id)
+        return next
+      })
+    }
+  }
+
+  const handleBatchLock = async () => {
+    if (selected.size === 0) return
+    setBatchLocking(true)
+    try {
+      await api.batchLockAccounts(Array.from(selected), true)
+      showToast(t('accounts.batchLockSuccess', { count: selected.size }))
+      setSelected(new Set())
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.batchLockFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setBatchLocking(false)
+    }
+  }
+
+  const handleBatchUnlock = async () => {
+    if (selected.size === 0) return
+    setBatchLocking(true)
+    try {
+      await api.batchLockAccounts(Array.from(selected), false)
+      showToast(t('accounts.batchUnlockSuccess', { count: selected.size }))
+      setSelected(new Set())
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.batchUnlockFailed', { error: getErrorMessage(error) }), 'error')
+    } finally {
+      setBatchLocking(false)
+    }
+  }
+
   return (
     <StateShell
       variant="page"
@@ -753,6 +808,14 @@ export default function Accounts() {
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchRefresh()}>
                 {t('accounts.batchRefresh')}
               </Button>
+              <Button variant="outline" size="sm" disabled={batchLocking} onClick={() => void handleBatchLock()}>
+                <Lock className="size-3 mr-1" />
+                {t('accounts.batchLock')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLocking} onClick={() => void handleBatchUnlock()}>
+                <Unlock className="size-3 mr-1" />
+                {t('accounts.batchUnlock')}
+              </Button>
               <Button variant="destructive" size="sm" disabled={batchLoading} onClick={() => void handleBatchDelete()}>
                 {t('accounts.batchDelete')}
               </Button>
@@ -788,6 +851,7 @@ export default function Accounts() {
                       <TableHead className="text-[13px] font-semibold">{t('accounts.email')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.plan')}</TableHead>
                       <TableHead className="text-[13px] font-semibold">{t('accounts.status')}</TableHead>
+                      <TableHead className="text-[13px] font-semibold">{t('accounts.lockStatus')}</TableHead>
                       <TableHead
                         className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
                         onClick={() => { if (sortKey === 'requests') { setSortDir(d => d === 'asc' ? 'desc' : 'asc') } else { setSortKey('requests'); setSortDir('desc') }; setPage(1) }}
@@ -848,6 +912,16 @@ export default function Accounts() {
                           </div>
                         </TableCell>
                         <TableCell>
+                          {account.locked === 1 ? (
+                            <Badge variant="outline" className="bg-blue-50 text-blue-700 border-blue-200 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-800">
+                              <Lock className="w-3 h-3 mr-1" />
+                              {t('accounts.locked')}
+                            </Badge>
+                          ) : (
+                            <span className="text-[12px] text-muted-foreground">-</span>
+                          )}
+                        </TableCell>
+                        <TableCell>
                           <div className="flex items-center gap-2 text-[13px]">
                             <span className="text-emerald-600 font-medium">{account.success_requests ?? 0}</span>
                             <span className="text-muted-foreground">/</span>
@@ -888,6 +962,20 @@ export default function Accounts() {
                               title={account.at_only ? t('accounts.atRefreshDisabled') : t('accounts.refreshAccessToken')}
                             >
                               <RefreshCw className={`size-3.5 ${refreshingIds.has(account.id) ? 'animate-spin' : ''}`} />
+                            </Button>
+                            <Button
+                              variant={account.locked === 1 ? 'default' : 'outline'}
+                              size="icon"
+                              className="h-7 w-8 px-0"
+                              disabled={lockingIds.has(account.id)}
+                              onClick={() => void handleToggleLock(account)}
+                              title={account.locked === 1 ? t('accounts.unlockTitle') : t('accounts.lockTitle')}
+                            >
+                              {account.locked === 1 ? (
+                                <Unlock className={`size-3.5 ${lockingIds.has(account.id) ? 'animate-spin' : ''}`} />
+                              ) : (
+                                <Lock className={`size-3.5 ${lockingIds.has(account.id) ? 'animate-spin' : ''}`} />
+                              )}
                             </Button>
                             <Button
                               variant="destructive"

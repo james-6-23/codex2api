@@ -175,6 +175,13 @@ export const api = {
   migrateAccounts: (data: { url: string; admin_key: string }) =>
     request<{ message: string; total: number; imported: number; duplicate: number; failed: number }>(
       '/accounts/migrate', { method: 'POST', body: JSON.stringify(data) }),
+  // Account lock/unlock
+  lockAccount: (id: number) =>
+    request<MessageResponse>(`/accounts/${id}/lock`, { method: 'POST' }),
+  unlockAccount: (id: number) =>
+    request<MessageResponse>(`/accounts/${id}/unlock`, { method: 'POST' }),
+  batchLockAccounts: (ids: number[], locked: boolean) =>
+    request<MessageResponse>('/accounts/batch-lock', { method: 'POST', body: JSON.stringify({ account_ids: ids, locked }) }),
   // Proxies
   listProxies: () =>
     request<{ proxies: ProxyRow[] }>('/proxies'),
