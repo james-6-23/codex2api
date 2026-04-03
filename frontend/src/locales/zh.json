@@ -598,7 +598,8 @@
     "pagination": "共 {{total}} 个代理，第 {{page}}/{{totalPages}} 页"
   },
   "nav2": {
-    "guide": "使用教程"
+    "guide": "使用教程",
+    "apiRef": "API 文档"
   },
   "guide": {
     "title": "使用教程",
@@ -642,5 +643,31 @@
     "codexModel": "Codex 模型",
     "addMapping": "添加映射",
     "messagesEndpoint": "Anthropic Messages API 兼容端点（Claude Code）"
+  },
+  "apiRef": {
+    "title": "API 文档",
+    "description": "CodexProxy API 端点参考文档，包含请求格式和响应示例",
+    "authSection": "认证",
+    "authDesc": "所有 API 请求需要通过以下方式之一传递密钥：",
+    "responses": {
+      "title": "Create Response",
+      "desc": "创建一个 Codex Responses API 响应。支持流式和非流式模式，直接透传到上游 Codex API。"
+    },
+    "chat": {
+      "title": "Create Chat Completion",
+      "desc": "创建 OpenAI Chat Completions 格式的对话补全。请求自动翻译为 Codex 格式，响应翻译回 OpenAI 格式。"
+    },
+    "messages": {
+      "title": "Create Message",
+      "desc": "创建 Anthropic Messages API 格式的消息。请求自动翻译为 Codex 格式，响应翻译回 Anthropic 格式。模型名根据系统设置中的映射表自动转换。"
+    },
+    "models": {
+      "title": "List Models",
+      "desc": "列出当前可用的所有模型。"
+    },
+    "health": {
+      "title": "Health Check",
+      "desc": "检查服务状态和可用账号数量。此端点不需要认证。"
+    }
   }
 }

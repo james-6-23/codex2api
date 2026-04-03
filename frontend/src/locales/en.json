@@ -598,7 +598,8 @@
     "pagination": "{{total}} proxies, page {{page}}/{{totalPages}}"
   },
   "nav2": {
-    "guide": "Guide"
+    "guide": "Guide",
+    "apiRef": "API Reference"
   },
   "guide": {
     "title": "Usage Guide",
@@ -642,5 +643,31 @@
     "codexModel": "Codex Model",
     "addMapping": "Add Mapping",
     "messagesEndpoint": "Anthropic Messages API endpoint (Claude Code)"
+  },
+  "apiRef": {
+    "title": "API Reference",
+    "description": "CodexProxy API endpoint reference documentation with request formats and response examples",
+    "authSection": "Authentication",
+    "authDesc": "All API requests require a key passed via one of the following methods:",
+    "responses": {
+      "title": "Create Response",
+      "desc": "Create a Codex Responses API response. Supports streaming and non-streaming modes, directly proxied to upstream Codex API."
+    },
+    "chat": {
+      "title": "Create Chat Completion",
+      "desc": "Create an OpenAI Chat Completions format conversation completion. Requests are automatically translated to Codex format, responses translated back to OpenAI format."
+    },
+    "messages": {
+      "title": "Create Message",
+      "desc": "Create an Anthropic Messages API format message. Requests are automatically translated to Codex format, responses translated back to Anthropic format. Model names are mapped according to the mapping table in system settings."
+    },
+    "models": {
+      "title": "List Models",
+      "desc": "List all currently available models."
+    },
+    "health": {
+      "title": "Health Check",
+      "desc": "Check service status and available account count. This endpoint does not require authentication."
+    }
   }
 }

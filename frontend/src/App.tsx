@@ -8,6 +8,7 @@ import Proxies from './pages/Proxies'
 import SchedulerBoard from './pages/SchedulerBoard'
 import Settings from './pages/Settings'
 import Guide from './pages/Guide'
+import ApiReference from './pages/ApiReference'
 import Usage from './pages/Usage'
 
 export default function App() {
@@ -23,6 +24,7 @@ export default function App() {
           <Route path="/usage" element={<Usage />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/guide" element={<Guide />} />
+          <Route path="/api-reference" element={<ApiReference />} />
         </Routes>
       </Layout>
     </AuthGate>
