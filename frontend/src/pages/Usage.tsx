@@ -57,6 +57,24 @@ function formatAPIKeyOptionLabel(apiKey: APIKeyRow): string {
   return apiKey.name ? `${apiKey.name} · ${apiKey.key}` : apiKey.key
 }
 
+function formatUsageAPIKeyLabel(name?: string, maskedKey?: string): string {
+  const trimmedName = name?.trim() ?? ''
+  if (trimmedName) {
+    return trimmedName
+  }
+
+  const trimmedKey = maskedKey?.trim() ?? ''
+  if (!trimmedKey) {
+    return ''
+  }
+
+  if (trimmedKey.length <= 8) {
+    return trimmedKey
+  }
+
+  return `${trimmedKey.slice(0, 4)}...${trimmedKey.slice(-4)}`
+}
+
 export default function Usage() {
   const { t } = useTranslation()
   const { toast, showToast } = useToast()
@@ -500,21 +518,10 @@ export default function Usage() {
                         <TableCell className="text-[14px] text-muted-foreground">
                           {log.account_email || '-'}
                         </TableCell>
-                        <TableCell>
-                          {log.api_key_name || log.api_key_masked ? (
-                            <div className="min-w-[180px] text-[14px] leading-relaxed">
-                              <div className={log.api_key_name ? 'font-medium text-foreground' : 'text-muted-foreground'} style={log.api_key_name ? undefined : { fontFamily: "'Geist Mono', monospace" }}>
-                                {log.api_key_name || log.api_key_masked}
-                              </div>
-                              {log.api_key_name && log.api_key_masked && (
-                                <div className="text-[12px] text-muted-foreground" style={{ fontFamily: "'Geist Mono', monospace" }}>
-                                  {log.api_key_masked}
-                                </div>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="text-[14px] text-muted-foreground">{t('usage.unknownApiKey')}</span>
-                          )}
+                        <TableCell className="text-[14px] text-muted-foreground">
+                          <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
+                            {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}
+                          </span>
                         </TableCell>
                         <TableCell>
                           <div className="text-[16px] leading-relaxed" style={{ fontFamily: "'Geist Mono', monospace" }}>
