@@ -3,8 +3,11 @@ package proxy
 import (
 	"context"
 	"errors"
+	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/codex2api/auth"
 )
 
 func TestReadSSEStream_MergesMultilineData(t *testing.T) {
@@ -138,5 +141,75 @@ func TestShouldTransparentRetryStream(t *testing.T) {
 	}
 	if shouldTransparentRetryStream(retryable, 0, 2, false, context.Canceled, nil) {
 		t.Fatal("expected retry to stop when downstream context is canceled")
+	}
+}
+
+func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	acc := &auth.Account{
+		DBID:      42,
+		AccountID: "acct-42",
+	}
+	cfg := &DeviceProfileConfig{
+		UserAgent:              "codex_cli_rs/0.120.0 (Mac OS 15.5.0; arm64) Apple_Terminal/464",
+		PackageVersion:         "0.120.0",
+		RuntimeVersion:         "0.120.0",
+		OS:                     "MacOS",
+		Arch:                   "arm64",
+		StabilizeDeviceProfile: true,
+	}
+	downstreamHeaders := http.Header{
+		"Originator": []string{"custom-originator"},
+	}
+
+	applyCodexRequestHeaders(req, acc, "token-123", "cache-key-1", "api-key-1", cfg, downstreamHeaders)
+
+	if got := req.Header.Get("Authorization"); got != "Bearer token-123" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("Session_id"); got != "cache-key-1" {
+		t.Fatalf("Session_id = %q", got)
+	}
+	if got := req.Header.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
+	}
+	if got := req.Header.Get("User-Agent"); got != cfg.UserAgent {
+		t.Fatalf("User-Agent = %q", got)
+	}
+	if got := req.Header.Get("Version"); got != "0.120.0" {
+		t.Fatalf("Version = %q", got)
+	}
+	if got := req.Header.Get("Originator"); got != "custom-originator" {
+		t.Fatalf("Originator = %q", got)
+	}
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-42" {
+		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+}
+
+func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
+	headers := http.Header{
+		"Session_id":      []string{"session-from-header"},
+		"Conversation_id": []string{"conversation-from-header"},
+		"Authorization":   []string{"Bearer sk-test-123"},
+	}
+
+	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "session-from-header" {
+		t.Fatalf("ResolveSessionID() = %q, want %q", got, "session-from-header")
+	}
+
+	headers.Del("Session_id")
+	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "conversation-from-header" {
+		t.Fatalf("ResolveSessionID() = %q, want %q", got, "conversation-from-header")
+	}
+
+	headers.Del("Conversation_id")
+	headers.Set("Idempotency-Key", "idempotency-key-1")
+	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "idempotency-key-1" {
+		t.Fatalf("ResolveSessionID() = %q, want %q", got, "idempotency-key-1")
 	}
 }

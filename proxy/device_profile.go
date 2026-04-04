@@ -40,6 +40,7 @@ type DeviceProfileConfig struct {
 	OS                     string
 	Arch                   string
 	StabilizeDeviceProfile bool
+	BetaFeatures           string
 }
 
 // CLIVersion 表示 Codex CLI 版本
@@ -93,6 +94,25 @@ func IsDeviceProfileStabilizationEnabled(cfg *DeviceProfileConfig) bool {
 		return false
 	}
 	return cfg.StabilizeDeviceProfile
+}
+
+// DeviceProfileConfigFromEnv loads Codex header defaults from environment variables.
+func DeviceProfileConfigFromEnv(lookup func(string) string) *DeviceProfileConfig {
+	if lookup == nil {
+		lookup = func(string) string { return "" }
+	}
+	trimmed := func(key string) string {
+		return strings.TrimSpace(lookup(key))
+	}
+	return &DeviceProfileConfig{
+		UserAgent:              trimmed("CODEX_USER_AGENT"),
+		PackageVersion:         trimmed("CODEX_PACKAGE_VERSION"),
+		RuntimeVersion:         trimmed("CODEX_RUNTIME_VERSION"),
+		OS:                     trimmed("CODEX_OS"),
+		Arch:                   trimmed("CODEX_ARCH"),
+		StabilizeDeviceProfile: strings.EqualFold(trimmed("STABILIZE_DEVICE_PROFILE"), "true"),
+		BetaFeatures:           trimmed("CODEX_BETA_FEATURES"),
+	}
 }
 
 func defaultDeviceProfile(cfg *DeviceProfileConfig) deviceProfile {

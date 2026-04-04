@@ -109,7 +109,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 	// 提取 reasoning effort（从翻译后的 codex body 中）
 	reasoningEffort := extractReasoningEffort(codexBody)
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), codexBody)
+	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -424,4 +424,3 @@ func (h *Handler) Messages(c *gin.Context) {
 		sendAnthropicError(c, lastStatusCode, errType, fmt.Sprintf("Upstream returned status %d", lastStatusCode))
 	}
 }
-

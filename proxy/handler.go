@@ -426,7 +426,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	rawBody = normalizeServiceTierField(rawBody)
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), rawBody)
+	sessionID := ResolveSessionID(c.Request.Header, rawBody)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -798,7 +798,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		return
 	}
 
-	sessionID := ResolveSessionID(c.GetHeader("Authorization"), codexBody)
+	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()

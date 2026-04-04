@@ -58,6 +58,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	requestBody []byte,
 	sessionID string,
 	proxyOverride string,
+	apiKey string,
+	deviceCfg *proxy.DeviceProfileConfig,
+	ginHeaders http.Header,
 ) (*WsResponse, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -83,7 +86,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr)
+	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr, apiKey, deviceCfg, ginHeaders)
 
 	// 获取或创建连接
 	wc, err := e.manager.AcquireConnection(ctx, account, wsURL, headers, proxyOverride)
@@ -159,7 +162,7 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 }
 
 // prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken, accountID string) http.Header {
+func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -169,18 +172,36 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID string) http.H
 	headers.Set("OpenAI-Beta", responsesWebsocketBetaHeader)
 
 	// User-Agent 和版本
-	var accountIDInt int64
+	account := &auth.Account{}
 	if accountID != "" {
+		account.AccountID = accountID
 		if id, err := strconv.ParseInt(accountID, 10, 64); err == nil {
-			accountIDInt = id
+			account.DBID = id
 		}
 	}
-	profile := proxy.ProfileForAccount(accountIDInt)
-	headers.Set("User-Agent", profile.UserAgent)
-	headers.Set("Version", profile.Version)
+	if proxy.IsDeviceProfileStabilizationEnabled(deviceCfg) {
+		profile := proxy.ResolveDeviceProfile(account, apiKey, ginHeaders, deviceCfg)
+		headers.Set("User-Agent", profile.UserAgent)
+		if version := strings.TrimSpace(profile.PackageVersion); version != "" {
+			headers.Set("Version", version)
+		}
+	} else {
+		profile := proxy.ProfileForAccount(account.ID())
+		headers.Set("User-Agent", profile.UserAgent)
+		headers.Set("Version", profile.Version)
+	}
+	if betaFeatures := strings.TrimSpace(ginHeaders.Get("X-Codex-Beta-Features")); betaFeatures != "" {
+		headers.Set("X-Codex-Beta-Features", betaFeatures)
+	} else if deviceCfg != nil && strings.TrimSpace(deviceCfg.BetaFeatures) != "" {
+		headers.Set("X-Codex-Beta-Features", strings.TrimSpace(deviceCfg.BetaFeatures))
+	}
 
 	// Originator
-	headers.Set("Originator", proxy.Originator)
+	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" {
+		headers.Set("Originator", originator)
+	} else {
+		headers.Set("Originator", proxy.Originator)
+	}
 
 	// Account ID
 	if accountID != "" {
@@ -394,9 +415,9 @@ func ShutdownExecutor() {
 
 // ExecuteRequestWebsocket 通过 WebSocket 发送请求
 // 返回一个模拟的 http.Response 用于兼容现有代码
-func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string) (*http.Response, error) {
+func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *proxy.DeviceProfileConfig, headers http.Header) (*http.Response, error) {
 	exec := GetExecutor()
-	wsResp, err := exec.ExecuteRequestViaWebsocket(ctx, account, requestBody, sessionID, proxyOverride)
+	wsResp, err := exec.ExecuteRequestViaWebsocket(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers)
 	if err != nil {
 		return nil, err
 	}
