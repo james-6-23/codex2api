@@ -128,11 +128,11 @@ func TestUnbindSessionAffinityRemovesMatchingBinding(t *testing.T) {
 	store := &Store{
 		accounts: []*Account{
 			{DBID: 1, AccessToken: "tok-1"},
-			{DBID: 2, AccessToken: "tok-2"},
 		},
 		maxConcurrency: 1,
 	}
-	store.bindSessionAffinity("session-1", store.accounts[1], "http://proxy-2")
+	// 绑定一个不在 accounts 列表中的账号，unbind 后只能回退到 DBID=1
+	store.bindSessionAffinity("session-1", &Account{DBID: 2, AccessToken: "tok-2"}, "http://proxy-2")
 
 	store.UnbindSessionAffinity("session-1", 2)
 
