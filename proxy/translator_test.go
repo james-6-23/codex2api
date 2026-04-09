@@ -31,7 +31,7 @@ func TestResolveServiceTier(t *testing.T) {
 	}
 }
 
-func TestSanitizeServiceTierForUpstream_KeepsFast(t *testing.T) {
+func TestSanitizeServiceTierForUpstream_FastToPriority(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
 		"service_tier":"fast"
@@ -39,8 +39,8 @@ func TestSanitizeServiceTierForUpstream_KeepsFast(t *testing.T) {
 
 	got := sanitizeServiceTierForUpstream(raw)
 
-	if tier := gjson.GetBytes(got, "service_tier").String(); tier != "fast" {
-		t.Fatalf("fast tier should be forwarded upstream, got %q", tier)
+	if tier := gjson.GetBytes(got, "service_tier").String(); tier != "priority" {
+		t.Fatalf("fast should be mapped to priority for upstream, got %q", tier)
 	}
 }
 

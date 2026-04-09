@@ -240,14 +240,14 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 		out["reasoning"] = map[string]any{"effort": effort}
 	}
 
-	// 3. service tier（保留合法值，丢弃不支持的）
+	// 3. service tier（保留合法值，丢弃不支持的；fast 映射为上游接受的 priority）
 	tier := req.ServiceTier
 	if tier == "" {
 		tier = req.ServiceTierAlt
 	}
 	tier = strings.TrimSpace(tier)
 	if isAllowedServiceTier(tier) {
-		out["service_tier"] = tier
+		out["service_tier"] = upstreamServiceTier(tier)
 	}
 
 	// 4. tools 格式转换 + schema 清理
@@ -305,12 +305,14 @@ func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
 		}
 	}
 
-	// 4. service tier 清理
+	// 4. service tier 清理（fast 映射为上游接受的 priority）
 	delete(body, "serviceTier")
 	if tier, ok := body["service_tier"].(string); ok {
 		tier = strings.TrimSpace(tier)
 		if !isAllowedServiceTier(tier) {
 			delete(body, "service_tier")
+		} else {
+			body["service_tier"] = upstreamServiceTier(tier)
 		}
 	}
 
@@ -408,6 +410,14 @@ func isAllowedServiceTier(tier string) bool {
 	default:
 		return false
 	}
+}
+
+// upstreamServiceTier 将客户端 service_tier 映射为上游接受的值（fast → priority）
+func upstreamServiceTier(tier string) string {
+	if tier == "fast" {
+		return "priority"
+	}
+	return tier
 }
 
 // convertMessagesToInputSlice 将 OpenAI messages 转换为 Codex input 数组（纯内存操作，零中间序列化）
@@ -603,6 +613,10 @@ func sanitizeServiceTierForUpstream(body []byte) []byte {
 	switch tier {
 	case "auto", "default", "flex", "priority", "scale", "fast":
 		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		// fast 映射为上游接受的 priority
+		if tier == "fast" {
+			body, _ = sjson.SetBytes(body, "service_tier", "priority")
+		}
 		return body
 	default:
 		body, _ = sjson.DeleteBytes(body, "service_tier")
