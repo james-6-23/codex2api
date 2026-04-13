@@ -172,6 +172,81 @@ func TestCompute429CooldownPlusPrefersExactResetTime(t *testing.T) {
 	}
 }
 
+func TestApply429CooldownPremiumMarks5hRateLimitFromWindow(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 101, PlanType: "plus"}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "900")
+
+	decision := Apply429Cooldown(store, account, []byte(`{"error":{"type":"usage_limit_reached"}}`), resp)
+
+	if !decision.Premium5h {
+		t.Fatal("expected premium 5h decision")
+	}
+	if !account.IsPremium5hRateLimited() {
+		t.Fatal("expected account to enter premium 5h rate limited state")
+	}
+	pct5h, resetAt, ok := account.GetUsageSnapshot5h()
+	if !ok {
+		t.Fatal("expected 5h snapshot to be set")
+	}
+	if pct5h != 100 {
+		t.Fatalf("usage_percent_5h = %v, want 100", pct5h)
+	}
+	if got := resetAt.Sub(time.Now()); got < 14*time.Minute || got > 16*time.Minute {
+		t.Fatalf("resetAt delta = %v, want about 15m", got)
+	}
+}
+
+func TestApply429CooldownPremiumFallsBackToFiveHoursWithoutExactReset(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 102, PlanType: "pro"}
+
+	decision := Apply429Cooldown(store, account, []byte(`{"error":{"type":"rate_limit_error","message":"Too many requests"}}`), &http.Response{Header: make(http.Header)})
+
+	if !decision.Premium5h {
+		t.Fatal("expected premium 5h fallback decision")
+	}
+	if got := decision.ResetAt.Sub(time.Now()); got < 4*time.Hour+59*time.Minute || got > 5*time.Hour+time.Minute {
+		t.Fatalf("resetAt delta = %v, want about 5h", got)
+	}
+	if !account.IsPremium5hRateLimited() {
+		t.Fatal("expected account to be marked premium 5h rate limited")
+	}
+}
+
+func TestSyncCodexUsageStateTriggersPremium5hLimitWith5hHeadersOnly(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 103, PlanType: "team"}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "600")
+
+	result := SyncCodexUsageState(store, account, resp)
+
+	if !result.Used5hHeaders {
+		t.Fatal("expected 5h headers to be detected")
+	}
+	if result.HasUsage7d {
+		t.Fatal("expected no 7d usage snapshot")
+	}
+	if !result.HasUsage5h {
+		t.Fatal("expected 5h usage snapshot")
+	}
+	if !result.Persisted5hOnly {
+		t.Fatal("expected 5h-only persistence path to be selected")
+	}
+	if !result.Premium5hRateLimited {
+		t.Fatal("expected premium 5h rate limit to trigger")
+	}
+	if !account.IsPremium5hRateLimited() {
+		t.Fatal("expected account to be premium 5h rate limited")
+	}
+}
+
 func TestAuthMiddlewareSetsAPIKeyContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

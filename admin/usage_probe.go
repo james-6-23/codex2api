@@ -31,10 +31,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	}
 	defer resp.Body.Close()
 
-	usagePct, hasUsage := proxy.ParseCodexUsageHeaders(resp, account)
-	if hasUsage {
-		h.store.PersistUsageSnapshot(account, usagePct)
-	}
+	usageState := proxy.SyncCodexUsageState(h.store, account, resp)
 
 	_, _ = io.Copy(io.Discard, resp.Body)
 
@@ -42,7 +39,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	case http.StatusOK:
 		h.store.ReportRequestSuccess(account, 0)
 		// 只有用量未耗尽时才重置状态
-		if !hasUsage || usagePct < 100 {
+		if !usageState.Premium5hRateLimited && (!usageState.HasUsage7d || usageState.UsagePct7d < 100) {
 			h.store.ClearCooldown(account)
 		}
 		return nil
@@ -52,7 +49,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 		return nil
 	case http.StatusTooManyRequests:
 		h.store.ReportRequestFailure(account, "client", 0)
-		h.store.MarkCooldown(account, 5*time.Minute, "rate_limited")
+		proxy.Apply429Cooldown(h.store, account, nil, resp)
 		return nil
 	default:
 		if resp.StatusCode >= 500 {

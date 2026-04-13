@@ -80,24 +80,19 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, account); ok {
-			h.store.PersistUsageSnapshot(account, usagePct)
-		}
+		proxy.SyncCodexUsageState(h.store, account, resp)
+		errBody, _ := io.ReadAll(resp.Body)
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
 			h.store.MarkCooldown(account, 24*time.Hour, "unauthorized")
 		case http.StatusTooManyRequests:
-			h.store.MarkCooldown(account, 5*time.Minute, "rate_limited")
+			proxy.Apply429Cooldown(h.store, account, errBody, resp)
 		}
-		errBody, _ := io.ReadAll(resp.Body)
 		sendTestEvent(c, testEvent{Type: "error", Error: fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(errBody), 500))})
 		return
 	}
 
-	usagePct, hasUsage := proxy.ParseCodexUsageHeaders(resp, account)
-	if hasUsage {
-		h.store.PersistUsageSnapshot(account, usagePct)
-	}
+	usageState := proxy.SyncCodexUsageState(h.store, account, resp)
 
 	// 解析 SSE 流
 	hasContent := false
@@ -113,9 +108,11 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			}
 		case "response.completed":
 			// 测试成功即重置冷却状态，用量限制由调度器自行判断
-			h.store.ClearCooldown(account)
+			if !usageState.Premium5hRateLimited && (!usageState.HasUsage7d || usageState.UsagePct7d < 100) {
+				h.store.ClearCooldown(account)
+			}
 			// 如果上游未返回用量头，清除旧的用量缓存，避免显示过期数据
-			if !hasUsage {
+			if !usageState.HasUsage7d && !usageState.HasUsage5h {
 				account.ClearUsageCache()
 			}
 			duration := time.Since(start).Milliseconds()
@@ -228,28 +225,23 @@ func (h *Handler) BatchTest(c *gin.Context) {
 				return
 			}
 			defer resp.Body.Close()
-			io.ReadAll(resp.Body) // 消费 body
+			body, _ := io.ReadAll(resp.Body)
 
 			switch resp.StatusCode {
 			case http.StatusOK:
-				usagePct, hasUsage := proxy.ParseCodexUsageHeaders(resp, acc)
-				if hasUsage {
-					h.store.PersistUsageSnapshot(acc, usagePct)
-				}
+				usageState := proxy.SyncCodexUsageState(h.store, acc, resp)
 				// 测试成功即重置冷却状态，用量限制由调度器自行判断
-				h.store.ClearCooldown(acc)
+				if !usageState.Premium5hRateLimited && (!usageState.HasUsage7d || usageState.UsagePct7d < 100) {
+					h.store.ClearCooldown(acc)
+				}
 				atomic.AddInt64(&successCount, 1)
 			case http.StatusUnauthorized:
-				if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, acc); ok {
-					h.store.PersistUsageSnapshot(acc, usagePct)
-				}
+				proxy.SyncCodexUsageState(h.store, acc, resp)
 				h.store.MarkCooldown(acc, 24*time.Hour, "unauthorized")
 				atomic.AddInt64(&bannedCount, 1)
 			case http.StatusTooManyRequests:
-				if usagePct, ok := proxy.ParseCodexUsageHeaders(resp, acc); ok {
-					h.store.PersistUsageSnapshot(acc, usagePct)
-				}
-				h.store.MarkCooldown(acc, 5*time.Minute, "rate_limited")
+				proxy.SyncCodexUsageState(h.store, acc, resp)
+				proxy.Apply429Cooldown(h.store, acc, body, resp)
 				atomic.AddInt64(&rateLimitCount, 1)
 			default:
 				atomic.AddInt64(&failedCount, 1)

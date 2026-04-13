@@ -339,6 +339,7 @@ func linearDecay(base float64, elapsed, window time.Duration) float64 {
 func (a *Account) schedulerBreakdownLocked() SchedulerBreakdown {
 	now := time.Now()
 	breakdown := SchedulerBreakdown{}
+	premium5hLimited := a.premium5hRateLimitedLocked(now)
 
 	// 线性衰减惩罚：随时间平滑更无突变
 	if !a.LastUnauthorizedAt.IsZero() {
@@ -359,10 +360,12 @@ func (a *Account) schedulerBreakdownLocked() SchedulerBreakdown {
 	}
 
 	breakdown.FailurePenalty = float64(clampInt(a.FailureStreak*6, 0, 24))
-	breakdown.SuccessBonus = float64(clampInt(a.SuccessStreak*2, 0, 12))
+	if !premium5hLimited {
+		breakdown.SuccessBonus = float64(clampInt(a.SuccessStreak*2, 0, 12))
+	}
 
 	// 经过验证的账号（累计请求 > 10 次）优先调度
-	if atomic.LoadInt64(&a.TotalRequests) > 10 {
+	if !premium5hLimited && atomic.LoadInt64(&a.TotalRequests) > 10 {
 		breakdown.ProvenBonus = 20
 	}
 
@@ -484,6 +487,9 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	if a.HealthTier == HealthTierBanned {
 		tier = HealthTierBanned
 	}
+	if a.premium5hRateLimitedLocked(now) && tier != HealthTierBanned {
+		tier = HealthTierRisky
+	}
 
 	baseConcurrencyEffective := a.effectiveBaseConcurrencyLocked(baseLimit)
 	scoreBiasEffective := a.effectiveScoreBiasLocked(now, tier)
@@ -495,6 +501,9 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	a.ScoreBiasEffective = scoreBiasEffective
 	a.BaseConcurrencyEffective = baseConcurrencyEffective
 	a.DynamicConcurrencyLimit = concurrencyLimitForTier(baseConcurrencyEffective, tier)
+	if a.premium5hRateLimitedLocked(now) && a.DynamicConcurrencyLimit > 1 {
+		a.DynamicConcurrencyLimit = 1
+	}
 }
 
 func (a *Account) schedulerSnapshot(baseLimit int64) (AccountHealthTier, float64, float64, int64) {
@@ -523,6 +532,9 @@ func (a *Account) IsAvailable() bool {
 	// Free 账号 7d 用量 >= 100%，视为不可用
 	if a.usageExhaustedLocked() {
 		return false
+	}
+	if a.premium5hRateLimitedLocked(time.Now()) {
+		return a.AccessToken != ""
 	}
 	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
 		return false
@@ -604,6 +616,7 @@ func (a *Account) IsBanned() bool {
 func (a *Account) RuntimeStatus() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	now := time.Now()
 	if a.healthTierLocked() == HealthTierBanned {
 		return "unauthorized"
 	}
@@ -611,11 +624,14 @@ func (a *Account) RuntimeStatus() string {
 	if a.usageExhaustedLocked() {
 		return "usage_exhausted"
 	}
+	if a.premium5hRateLimitedLocked(now) {
+		return "rate_limited"
+	}
 	switch a.Status {
 	case StatusError:
 		return "error"
 	case StatusCooldown:
-		if time.Now().Before(a.CooldownUtil) {
+		if now.Before(a.CooldownUtil) {
 			if a.CooldownReason != "" {
 				return a.CooldownReason
 			}
@@ -797,11 +813,15 @@ func (a *Account) GetSchedulerDebugSnapshot(baseLimit int64) SchedulerDebugSnaps
 func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
+	now := time.Now()
 
 	if a.usageProbeInFlight || a.AccessToken == "" || a.Status == StatusError {
 		return false
 	}
 	if a.Status == StatusCooldown && a.CooldownReason == "unauthorized" {
+		return false
+	}
+	if a.premium5hRateLimitedLocked(now) {
 		return false
 	}
 	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" {
@@ -1388,6 +1408,18 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 			}
 		}
 		account.mu.Lock()
+		if account.premium5hCooldownSuppressedLocked(time.Now()) {
+			account.Status = StatusReady
+			account.CooldownUtil = time.Time{}
+			account.CooldownReason = ""
+		}
+		account.mu.Unlock()
+		if row.CooldownUntil.Valid && row.CooldownReason == "rate_limited" && account.IsPremium5hRateLimited() && s.db != nil {
+			if err := s.db.ClearCooldown(ctx, row.ID); err != nil {
+				log.Printf("[账号 %d] 清理 premium 5h 冷却状态失败: %v", row.ID, err)
+			}
+		}
+		account.mu.Lock()
 		account.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 		account.mu.Unlock()
 
@@ -1470,6 +1502,9 @@ func (s *Store) CleanByRuntimeStatus(ctx context.Context, targetStatus string) i
 
 	for _, acc := range accounts {
 		if acc == nil || acc.RuntimeStatus() != targetStatus {
+			continue
+		}
+		if targetStatus == "rate_limited" && acc.IsPremium5hRateLimited() {
 			continue
 		}
 
@@ -1920,12 +1955,13 @@ func (s *Store) ClearCooldown(acc *Account) {
 	atomic.StoreInt32(&acc.Disabled, 0) // 清除原子禁用标志
 	acc.mu.Lock()
 	wasCooling := acc.Status == StatusCooldown
+	premium5hLimited := acc.premium5hRateLimitedLocked(time.Now())
 	if acc.Status == StatusCooldown {
 		acc.Status = StatusReady
 	}
 	acc.CooldownUtil = time.Time{}
 	acc.CooldownReason = ""
-	if wasCooling {
+	if wasCooling && !premium5hLimited {
 		acc.HealthTier = HealthTierWarm
 	}
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
@@ -2500,8 +2536,10 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	dbID := acc.DBID
 	cooldownUntil := acc.CooldownUtil
 	cooldownReason := acc.CooldownReason
-	activeCooldown := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
-	expiredCooldown := acc.Status == StatusCooldown && !time.Now().Before(acc.CooldownUtil)
+	now := time.Now()
+	premiumCooldownSuppressed := acc.premium5hCooldownSuppressedLocked(now)
+	activeCooldown := acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) && !premiumCooldownSuppressed
+	expiredCooldown := acc.Status == StatusCooldown && !now.Before(acc.CooldownUtil)
 	acc.mu.RUnlock()
 
 	// 1. 尝试从缓存读取 AT
