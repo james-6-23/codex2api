@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -124,6 +125,23 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 
 	// 解析 id_token 获取账号信息
 	info := parseIDToken(tokenResp.IDToken)
+
+	// 回退：如果 id_token 中缺少 plan_type，尝试从 access_token 提取
+	if info.PlanType == "" && tokenResp.AccessToken != "" {
+		if atInfo := ParseAccessToken(tokenResp.AccessToken); atInfo != nil {
+			if atInfo.PlanType != "" {
+				log.Printf("[token] id_token 缺少 plan_type，从 access_token 回退获取: %s", atInfo.PlanType)
+				info.PlanType = atInfo.PlanType
+			}
+			// 同时回退补全其他空字段
+			if info.Email == "" && atInfo.Email != "" {
+				info.Email = atInfo.Email
+			}
+			if info.ChatGPTAccountID == "" && atInfo.ChatGPTAccountID != "" {
+				info.ChatGPTAccountID = atInfo.ChatGPTAccountID
+			}
+		}
+	}
 
 	return td, info, nil
 }

@@ -918,6 +918,10 @@ type TrafficSnapshot struct {
 
 // GetUsageStats 获取使用统计（基线 + 当前日志）
 func (db *DB) GetUsageStats(ctx context.Context) (*UsageStats, error) {
+	if db.isSQLite() {
+		return db.getUsageStatsSQLite(ctx)
+	}
+
 	stats := &UsageStats{}
 	now := time.Now()
 	todayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())

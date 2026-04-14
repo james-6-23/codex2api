@@ -116,6 +116,39 @@ func TestAccountBaseConcurrencyOverrideControlsDynamicLimit(t *testing.T) {
 	}
 }
 
+func TestNeedsUsageProbeSkipsRateLimited(t *testing.T) {
+	acc := &Account{
+		AccessToken: "token",
+		Status:      StatusCooldown,
+		CooldownReason: "rate_limited",
+	}
+	if acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("NeedsUsageProbe should return false for rate_limited cooldown")
+	}
+}
+
+func TestNeedsUsageProbeSkipsUnauthorized(t *testing.T) {
+	acc := &Account{
+		AccessToken: "token",
+		Status:      StatusCooldown,
+		CooldownReason: "unauthorized",
+	}
+	if acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("NeedsUsageProbe should return false for unauthorized cooldown")
+	}
+}
+
+func TestNeedsUsageProbeAllowsReadyAccount(t *testing.T) {
+	acc := &Account{
+		AccessToken: "token",
+		Status:      StatusReady,
+	}
+	// UsagePercent7dValid = false，应该返回 true
+	if !acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("NeedsUsageProbe should return true for ready account without valid usage data")
+	}
+}
+
 func TestStoreNextPrefersHigherDispatchScoreWithinTier(t *testing.T) {
 	premium := &Account{
 		DBID:        1,

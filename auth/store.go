@@ -805,7 +805,7 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 		return false
 	}
 	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" {
-		return true
+		return false // 429 冷却期间不探活，避免加重限流
 	}
 	if !a.UsagePercent7dValid || a.UsageUpdatedAt.IsZero() {
 		return true
@@ -2586,9 +2586,18 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 	acc.ExpiresAt = td.ExpiresAt
 	acc.ErrorMsg = ""
 	if info != nil {
-		acc.AccountID = info.ChatGPTAccountID
-		acc.Email = info.Email
-		acc.PlanType = info.PlanType
+		if info.ChatGPTAccountID != "" {
+			acc.AccountID = info.ChatGPTAccountID
+		}
+		if info.Email != "" {
+			acc.Email = info.Email
+		}
+		// 不用空值覆盖已有的 PlanType，避免 plus 号被误标为 free
+		if info.PlanType != "" {
+			acc.PlanType = info.PlanType
+		} else if acc.PlanType == "" {
+			log.Printf("[账号 %d] 刷新后 plan_type 为空，无法识别套餐类型", dbID)
+		}
 	}
 	if activeCooldown {
 		acc.Status = StatusCooldown
@@ -2617,9 +2626,15 @@ func (s *Store) refreshAccount(ctx context.Context, acc *Account) error {
 		"expires_at":    td.ExpiresAt.Format(time.RFC3339),
 	}
 	if info != nil {
-		credentials["account_id"] = info.ChatGPTAccountID
-		credentials["email"] = info.Email
-		credentials["plan_type"] = info.PlanType
+		if info.ChatGPTAccountID != "" {
+			credentials["account_id"] = info.ChatGPTAccountID
+		}
+		if info.Email != "" {
+			credentials["email"] = info.Email
+		}
+		if info.PlanType != "" {
+			credentials["plan_type"] = info.PlanType
+		}
 	}
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)
