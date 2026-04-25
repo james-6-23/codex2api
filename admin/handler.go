@@ -946,13 +946,24 @@ type importToken struct {
 	refreshToken string
 	accessToken  string // AT-only 兼容路径
 	name         string
+	email        string
+	idToken      string
+	accountID    string
+	planType     string
+	expiresAt    string
 }
 
 // jsonAccountEntry CLIProxyAPI 凭证 JSON 条目
 type jsonAccountEntry struct {
 	RefreshToken string `json:"refresh_token"`
 	AccessToken  string `json:"access_token"`
+	IDToken      string `json:"id_token"`
+	AccountID    string `json:"account_id"`
 	Email        string `json:"email"`
+	Name         string `json:"name"`
+	PlanType     string `json:"plan_type"`
+	Expired      string `json:"expired"`
+	ExpiresAt    string `json:"expires_at"`
 }
 
 type sub2apiImportPayload struct {
@@ -967,7 +978,12 @@ type sub2apiAccountEntry struct {
 type sub2apiAccountCredentials struct {
 	RefreshToken string `json:"refresh_token"`
 	AccessToken  string `json:"access_token"`
+	IDToken      string `json:"id_token"`
+	AccountID    string `json:"account_id"`
 	Email        string `json:"email"`
+	PlanType     string `json:"plan_type"`
+	ExpiresAt    string `json:"expires_at"`
+	Expired      string `json:"expired"`
 }
 
 var utf8BOM = []byte{0xef, 0xbb, 0xbf}
@@ -1014,13 +1030,19 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 		rt := strings.TrimSpace(entry.RefreshToken)
 		at := strings.TrimSpace(entry.AccessToken)
 		email := strings.TrimSpace(entry.Email)
+		name := firstNonEmpty(entry.Name, email)
 
-		if rt != "" {
-			tokens = append(tokens, importToken{refreshToken: rt, name: email})
-			continue
-		}
-		if at != "" {
-			tokens = append(tokens, importToken{accessToken: at, name: email})
+		if rt != "" || at != "" {
+			tokens = append(tokens, importToken{
+				refreshToken: rt,
+				accessToken:  at,
+				name:         name,
+				email:        email,
+				idToken:      strings.TrimSpace(entry.IDToken),
+				accountID:    strings.TrimSpace(entry.AccountID),
+				planType:     strings.TrimSpace(entry.PlanType),
+				expiresAt:    firstNonEmpty(entry.ExpiresAt, entry.Expired),
+			})
 		}
 	}
 	return tokens
@@ -1043,12 +1065,17 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 			name = email
 		}
 
-		if rt != "" {
-			tokens = append(tokens, importToken{refreshToken: rt, name: name})
-			continue
-		}
-		if at != "" {
-			tokens = append(tokens, importToken{accessToken: at, name: name})
+		if rt != "" || at != "" {
+			tokens = append(tokens, importToken{
+				refreshToken: rt,
+				accessToken:  at,
+				name:         name,
+				email:        email,
+				idToken:      strings.TrimSpace(account.Credentials.IDToken),
+				accountID:    strings.TrimSpace(account.Credentials.AccountID),
+				planType:     strings.TrimSpace(account.Credentials.PlanType),
+				expiresAt:    firstNonEmpty(account.Credentials.ExpiresAt, account.Credentials.Expired),
+			})
 		}
 	}
 
@@ -1192,14 +1219,17 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	seenAT := make(map[string]bool)
 	var unique []importToken
 	for _, t := range tokens {
-		if t.accessToken != "" {
-			if !seenAT[t.accessToken] {
-				seenAT[t.accessToken] = true
-				unique = append(unique, t)
-			}
-		} else {
+		if t.refreshToken != "" {
 			if !seenRT[t.refreshToken] {
 				seenRT[t.refreshToken] = true
+				unique = append(unique, t)
+			}
+			if t.accessToken != "" {
+				seenAT[t.accessToken] = true
+			}
+		} else if t.accessToken != "" {
+			if !seenAT[t.accessToken] {
+				seenAT[t.accessToken] = true
 				unique = append(unique, t)
 			}
 		}
@@ -1231,14 +1261,17 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	var newTokens []importToken
 	duplicateCount := 0
 	for _, t := range unique {
-		if t.accessToken != "" {
-			if existingATs[t.accessToken] {
+		switch {
+		case t.refreshToken != "":
+			if existingRTs[t.refreshToken] {
+				duplicateCount++
+			} else if t.accessToken != "" && existingATs[t.accessToken] {
 				duplicateCount++
 			} else {
 				newTokens = append(newTokens, t)
 			}
-		} else {
-			if existingRTs[t.refreshToken] {
+		case t.accessToken != "":
+			if existingATs[t.accessToken] {
 				duplicateCount++
 			} else {
 				newTokens = append(newTokens, t)
@@ -1300,7 +1333,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 			name := tok.name
 
-			if tok.accessToken != "" {
+			if tok.accessToken != "" && tok.refreshToken == "" {
 				// AT-only 导入路径
 				if name == "" {
 					name = fmt.Sprintf("at-import-%d", idx+1)
@@ -1321,32 +1354,23 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import_at")
 
-				atInfo := auth.ParseAccessToken(tok.accessToken)
-				newAcc := &auth.Account{
-					DBID:        id,
-					AccessToken: tok.accessToken,
-					ExpiresAt:   time.Now().Add(1 * time.Hour),
-					ProxyURL:    proxyURL,
-				}
-				if atInfo != nil {
-					newAcc.Email = atInfo.Email
-					newAcc.AccountID = atInfo.ChatGPTAccountID
-					newAcc.PlanType = atInfo.PlanType
-					if !atInfo.ExpiresAt.IsZero() {
-						newAcc.ExpiresAt = atInfo.ExpiresAt
-					}
+				seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+					accessToken:  tok.accessToken,
+					idToken:      tok.idToken,
+					accountID:    tok.accountID,
+					email:        tok.email,
+					planType:     tok.planType,
+					expiresAtRaw: tok.expiresAt,
+				})
+				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+				if len(tokenCredentialMap(seed)) > 0 {
 					credCtx, credCancel := context.WithTimeout(context.Background(), 3*time.Second)
-					_ = h.db.UpdateCredentials(credCtx, id, map[string]interface{}{
-						"email":      atInfo.Email,
-						"account_id": atInfo.ChatGPTAccountID,
-						"plan_type":  atInfo.PlanType,
-						"expires_at": newAcc.ExpiresAt.Format(time.RFC3339),
-					})
+					_ = h.db.UpdateCredentials(credCtx, id, tokenCredentialMap(seed))
 					credCancel()
 				}
 				h.store.AddAccount(newAcc)
 			} else {
-				// RT 导入路径
+				// RT 导入路径；如果导入文件里同时带 AT，则先沿用它，后台调度到期前再刷新。
 				if name == "" {
 					name = fmt.Sprintf("import-%d", idx+1)
 				}
@@ -1366,23 +1390,37 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				atomic.AddInt64(&current, 1)
 				h.db.InsertAccountEventAsync(id, "added", "import")
 
-				newAcc := &auth.Account{
-					DBID:         id,
-					RefreshToken: tok.refreshToken,
-					ProxyURL:     proxyURL,
+				seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+					refreshToken: tok.refreshToken,
+					accessToken:  tok.accessToken,
+					idToken:      tok.idToken,
+					accountID:    tok.accountID,
+					email:        tok.email,
+					planType:     tok.planType,
+					expiresAtRaw: tok.expiresAt,
+				})
+				if len(tokenCredentialMap(seed)) > 0 {
+					credCtx, credCancel := context.WithTimeout(context.Background(), 3*time.Second)
+					if err := h.db.UpdateCredentials(credCtx, id, tokenCredentialMap(seed)); err != nil {
+						log.Printf("导入账号 %d 更新 token 信息失败: %v", id, err)
+					}
+					credCancel()
 				}
+				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
 				h.store.AddAccount(newAcc)
 
-				// 后台异步刷新，不阻塞导入流程
-				go func(accountID int64) {
-					refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-					defer cancel()
-					if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
-						log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
-					} else {
-						log.Printf("导入账号 %d 刷新成功", accountID)
-					}
-				}(id)
+				if tok.accessToken == "" {
+					// 后台异步刷新，不阻塞导入流程
+					go func(accountID int64) {
+						refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+						defer cancel()
+						if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
+							log.Printf("导入账号 %d 刷新失败: %v", accountID, err)
+						} else {
+							log.Printf("导入账号 %d 刷新成功", accountID)
+						}
+					}(id)
+				}
 			}
 		}(i, t)
 	}
@@ -2359,6 +2397,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			BaseURL:      resinURL,
 			PlatformName: resinPlatformName,
 		})
+		if strings.TrimSpace(resinURL) != "" && strings.TrimSpace(resinPlatformName) != "" {
+			auth.ResinRequestDecorator = func(targetURL, accountID string) string {
+				return proxy.BuildReverseProxyURL(targetURL)
+			}
+		} else {
+			auth.ResinRequestDecorator = nil
+		}
 	}
 
 	// 持久化保存到数据库
@@ -2675,7 +2720,15 @@ func (h *Handler) MigrateAccounts(c *gin.Context) {
 		if name == "" {
 			name = "migrate"
 		}
-		tokens = append(tokens, importToken{refreshToken: rt, name: name})
+		tokens = append(tokens, importToken{
+			refreshToken: rt,
+			accessToken:  strings.TrimSpace(entry.AccessToken),
+			name:         name,
+			email:        strings.TrimSpace(entry.Email),
+			idToken:      strings.TrimSpace(entry.IDToken),
+			accountID:    strings.TrimSpace(entry.AccountID),
+			expiresAt:    strings.TrimSpace(entry.Expired),
+		})
 	}
 
 	log.Printf("远程迁移: 从 %s 拉取到 %d 个账号，开始导入", remoteURL, len(tokens))

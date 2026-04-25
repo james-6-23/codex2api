@@ -1,8 +1,12 @@
 package auth
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -70,5 +74,29 @@ func TestParseIDTokenEmptyReturnsEmptyInfo(t *testing.T) {
 	}
 	if info.PlanType != "" {
 		t.Fatalf("PlanType = %q, want empty", info.PlanType)
+	}
+}
+
+func TestRefreshAccessTokenRejectsEmptyAccessToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"refresh_token":"rt-new","expires_in":3600}`))
+	}))
+	defer server.Close()
+
+	oldDecorator := ResinRequestDecorator
+	ResinRequestDecorator = func(targetURL, accountID string) string {
+		return server.URL
+	}
+	defer func() {
+		ResinRequestDecorator = oldDecorator
+	}()
+
+	_, _, err := RefreshAccessToken(context.Background(), "rt-old", "", "account-1")
+	if err == nil {
+		t.Fatal("expected empty access_token error, got nil")
+	}
+	if !strings.Contains(err.Error(), "access_token") {
+		t.Fatalf("error = %q, want access_token detail", err.Error())
 	}
 }

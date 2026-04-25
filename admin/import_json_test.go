@@ -103,8 +103,8 @@ func TestParseImportJSONTokensSupportsSub2API(t *testing.T) {
 	if tokens[0].refreshToken != "rt-primary" {
 		t.Fatalf("first refreshToken = %q, want %q", tokens[0].refreshToken, "rt-primary")
 	}
-	if tokens[0].accessToken != "" {
-		t.Fatalf("first accessToken = %q, want empty because RT should win", tokens[0].accessToken)
+	if tokens[0].accessToken != "at-primary" {
+		t.Fatalf("first accessToken = %q, want %q", tokens[0].accessToken, "at-primary")
 	}
 	if tokens[0].name != "Primary Account" {
 		t.Fatalf("first name = %q, want %q", tokens[0].name, "Primary Account")
@@ -116,6 +116,37 @@ func TestParseImportJSONTokensSupportsSub2API(t *testing.T) {
 
 	if tokens[2].accessToken != "at-default-name" || tokens[2].name != "" {
 		t.Fatalf("third token = %+v, want access token with empty name for default naming", tokens[2])
+	}
+}
+
+func TestParseImportJSONTokensPreservesCPAFields(t *testing.T) {
+	data := []byte(`{
+		"type": "codex",
+		"email": "cpa@example.com",
+		"expired": "2026-04-25T12:00:00Z",
+		"id_token": "id-cpa",
+		"account_id": "acc-cpa",
+		"access_token": "at-cpa",
+		"refresh_token": "rt-cpa"
+	}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("tokens len = %d, want 1", len(tokens))
+	}
+
+	token := tokens[0]
+	if token.refreshToken != "rt-cpa" || token.accessToken != "at-cpa" {
+		t.Fatalf("token = %+v, want RT and AT preserved", token)
+	}
+	if token.email != "cpa@example.com" || token.name != "cpa@example.com" {
+		t.Fatalf("identity = name:%q email:%q, want cpa@example.com", token.name, token.email)
+	}
+	if token.idToken != "id-cpa" || token.accountID != "acc-cpa" || token.expiresAt != "2026-04-25T12:00:00Z" {
+		t.Fatalf("metadata = %+v, want CPA token metadata preserved", token)
 	}
 }
 

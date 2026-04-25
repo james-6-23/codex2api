@@ -238,10 +238,16 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		writeError(c, http.StatusBadGateway, "授权服务器未返回 refresh_token，请确认已开启 offline_access scope")
 		return
 	}
+	seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+		refreshToken: tokenResp.RefreshToken,
+		accessToken:  tokenResp.AccessToken,
+		idToken:      tokenResp.IDToken,
+		expiresIn:    tokenResp.ExpiresIn,
+	})
 
 	name := strings.TrimSpace(req.Name)
-	if name == "" && accountInfo != nil && accountInfo.Email != "" {
-		name = accountInfo.Email
+	if name == "" && seed.email != "" {
+		name = seed.email
 	}
 	if name == "" {
 		name = "oauth-account"
@@ -255,6 +261,10 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "账号写入数据库失败: "+err.Error())
 		return
 	}
+	if err := h.db.UpdateCredentials(ctx, id, tokenCredentialMap(seed)); err != nil {
+		writeError(c, http.StatusInternalServerError, "Token 写入数据库失败: "+err.Error())
+		return
+	}
 	h.db.InsertAccountEventAsync(id, "added", "oauth")
 
 	// Resin 租约继承
@@ -262,28 +272,20 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
 	}
 
-	newAcc := &auth.Account{
-		DBID:         id,
-		RefreshToken: tokenResp.RefreshToken,
-		ProxyURL:     proxyURL,
-	}
+	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
 	h.store.AddAccount(newAcc)
-
-	go func(accountID int64) {
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
-			log.Printf("OAuth 账号 %d AT 刷新失败: %v", accountID, err)
-		} else {
-			log.Printf("OAuth 账号 %d 已加入号池", accountID)
-		}
-	}(id)
 
 	email := ""
 	planType := ""
 	if accountInfo != nil {
 		email = accountInfo.Email
 		planType = accountInfo.PlanType
+	}
+	if email == "" {
+		email = seed.email
+	}
+	if planType == "" {
+		planType = seed.planType
 	}
 
 	c.JSON(http.StatusOK, gin.H{
@@ -355,8 +357,11 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, nil, fmt.Errorf("解析响应失败: %w", err)
 	}
+	if strings.TrimSpace(tokenResp.AccessToken) == "" {
+		return nil, nil, fmt.Errorf("token 兑换响应缺少 access_token")
+	}
 
-	info := auth.ParseIDToken(tokenResp.IDToken)
+	info := accountInfoFromTokens(tokenResp.IDToken, tokenResp.AccessToken)
 	return &tokenResp, info, nil
 }
 
@@ -405,11 +410,17 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		c.String(http.StatusOK, oauthCallbackPage("授权失败", "未获取到 refresh_token，请确认已开启 offline_access", false))
 		return
 	}
+	seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+		refreshToken: tokenResp.RefreshToken,
+		accessToken:  tokenResp.AccessToken,
+		idToken:      tokenResp.IDToken,
+		expiresIn:    tokenResp.ExpiresIn,
+	})
 
 	// 自动添加账号
 	name := ""
-	if accountInfo != nil && accountInfo.Email != "" {
-		name = accountInfo.Email
+	if seed.email != "" {
+		name = seed.email
 	}
 	if name == "" {
 		name = "oauth-account"
@@ -427,6 +438,14 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入数据库失败: "+err.Error(), false))
 		return
 	}
+	if err := h.db.UpdateCredentials(ctx, id, tokenCredentialMap(seed)); err != nil {
+		sess.ExchangeResult = &oauthExchangeResult{
+			Success: false,
+			Error:   "Token 写入数据库失败: " + err.Error(),
+		}
+		c.String(http.StatusOK, oauthCallbackPage("授权失败", "写入 token 失败: "+err.Error(), false))
+		return
+	}
 	h.db.InsertAccountEventAsync(id, "added", "oauth_callback")
 
 	// Resin 租约继承：将临时身份的 IP 租约迁移到正式 DBID
@@ -434,28 +453,20 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
 	}
 
-	newAcc := &auth.Account{
-		DBID:         id,
-		RefreshToken: tokenResp.RefreshToken,
-		ProxyURL:     sess.ProxyURL,
-	}
+	newAcc := accountFromCredentialSeed(id, sess.ProxyURL, seed)
 	h.store.AddAccount(newAcc)
-
-	go func(accountID int64) {
-		refreshCtx, rCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer rCancel()
-		if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
-			log.Printf("OAuth 回调账号 %d AT 刷新失败: %v", accountID, err)
-		} else {
-			log.Printf("OAuth 回调账号 %d 已加入号池", accountID)
-		}
-	}(id)
 
 	email := ""
 	planType := ""
 	if accountInfo != nil {
 		email = accountInfo.Email
 		planType = accountInfo.PlanType
+	}
+	if email == "" {
+		email = seed.email
+	}
+	if planType == "" {
+		planType = seed.planType
 	}
 
 	sess.ExchangeResult = &oauthExchangeResult{
@@ -529,4 +540,3 @@ p{color:#4a5568;line-height:1.6;margin:0}
 <body><div class="card"><div class="icon">%s</div><h1>%s</h1><p>%s</p></div></body></html>`,
 		title, color, icon, title, message)
 }
-

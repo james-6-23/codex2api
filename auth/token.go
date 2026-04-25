@@ -109,6 +109,15 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	if err := json.Unmarshal(body, &tokenResp); err != nil {
 		return nil, nil, fmt.Errorf("解析响应失败: %w", err)
 	}
+	tokenResp.AccessToken = strings.TrimSpace(tokenResp.AccessToken)
+	tokenResp.RefreshToken = strings.TrimSpace(tokenResp.RefreshToken)
+	tokenResp.IDToken = strings.TrimSpace(tokenResp.IDToken)
+	if tokenResp.AccessToken == "" {
+		return nil, nil, fmt.Errorf("刷新响应缺少 access_token")
+	}
+	if tokenResp.ExpiresIn <= 0 {
+		tokenResp.ExpiresIn = 3600
+	}
 
 	td := &TokenData{
 		AccessToken:  tokenResp.AccessToken,
@@ -271,8 +280,8 @@ func ParseAccessToken(accessToken string) *AccessTokenInfo {
 	}
 
 	var claims struct {
-		Exp            int64 `json:"exp"`
-		OpenAIAuth    *struct {
+		Exp        int64 `json:"exp"`
+		OpenAIAuth *struct {
 			ChatGPTAccountID string `json:"chatgpt_account_id"`
 			PlanType         string `json:"chatgpt_plan_type"`
 		} `json:"https://api.openai.com/auth"`
@@ -311,7 +320,7 @@ func (e *authPoolEntry) touch() {
 }
 
 const (
-	authClientPoolTTL         = 5 * time.Minute
+	authClientPoolTTL             = 5 * time.Minute
 	authClientPoolCleanupInterval = 60 * time.Second
 )
 
@@ -384,8 +393,6 @@ func buildHTTPClient(proxyURL string) *http.Client {
 	}
 	return client
 }
-
-
 
 // BuildHTTPClient builds a proxy-aware HTTP client (exported for admin OAuth flow).
 func BuildHTTPClient(proxyURL string) *http.Client {
