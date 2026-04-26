@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -20,19 +21,30 @@ type fileLogger struct {
 }
 
 var (
-	badRequestLogger = &fileLogger{path: "bad_request.log"}  // 400 错误
+	badRequestLogger  = &fileLogger{path: "bad_request.log"}  // 400 错误
 	serverErrorLogger = &fileLogger{path: "server_error.log"} // 5xx 错误
 )
 
-const logDir = "logs"
+const defaultLogDir = "logs"
+
+func errorLogDir() string {
+	if dir := strings.TrimSpace(os.Getenv("LOG_DIR")); dir != "" {
+		return dir
+	}
+	return defaultLogDir
+}
 
 func (fl *fileLogger) init() *log.Logger {
+	if security.FileLogsDisabled() {
+		return nil
+	}
 	fl.once.Do(func() {
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
+		dir := errorLogDir()
+		if err := os.MkdirAll(dir, 0o755); err != nil {
 			log.Printf("创建日志目录失败: %v", err)
 			return
 		}
-		f, err := os.OpenFile(filepath.Join(logDir, fl.path), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		f, err := os.OpenFile(filepath.Join(dir, fl.path), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 		if err != nil {
 			log.Printf("打开日志文件 %s 失败: %v", fl.path, err)
 			return

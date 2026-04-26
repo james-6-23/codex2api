@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -23,12 +24,28 @@ var (
 	auditOnce          sync.Once
 )
 
+const defaultAuditLogDir = "logs/security"
+
 // GetAuditLogger 获取默认审计日志记录器
 func GetAuditLogger() *AuditLogger {
 	auditOnce.Do(func() {
-		defaultAuditLogger = NewAuditLogger("logs/security", "audit.log", 100*1024*1024, 10)
+		if FileLogsDisabled() {
+			defaultAuditLogger = &AuditLogger{}
+			return
+		}
+		defaultAuditLogger = NewAuditLogger(securityLogDir(), "audit.log", 100*1024*1024, 10)
 	})
 	return defaultAuditLogger
+}
+
+func securityLogDir() string {
+	if dir := strings.TrimSpace(os.Getenv("SECURITY_LOG_DIR")); dir != "" {
+		return dir
+	}
+	if dir := strings.TrimSpace(os.Getenv("LOG_DIR")); dir != "" {
+		return filepath.Join(dir, "security")
+	}
+	return defaultAuditLogDir
 }
 
 // NewAuditLogger 创建新的审计日志记录器

@@ -66,6 +66,14 @@ Codex2API 采用三层配置架构：
 |------|------|--------|------|
 | `IMAGE_ASSET_DIR` | 否 | `/data/images` | 管理台生图工作台保存图片文件的服务器目录；Docker 部署建议持久化 `/data` |
 
+### 日志目录
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `LOG_DIR` | 否 | `logs` | 上游错误日志目录；只允许写临时盘的平台可设为 `/tmp/logs` |
+| `LOG_DISABLED` | 否 | `false` | 设为 `true` 时禁用文件型错误日志与安全审计日志 |
+| `SECURITY_LOG_DIR` | 否 | `${LOG_DIR}/security` | 安全审计日志目录；未设置时跟随 `LOG_DIR` |
+
 #### SQLite 模式
 
 | 变量 | 必填 | 默认值 | 说明 |
@@ -171,6 +179,9 @@ DATABASE_USER=codex2api
 DATABASE_PASSWORD=your-strong-db-password
 DATABASE_NAME=codex2api
 DATABASE_SSLMODE=disable
+IMAGE_ASSET_DIR=/data/images
+LOG_DIR=logs
+LOG_DISABLED=false
 
 # 缓存配置 (Redis)
 CACHE_DRIVER=redis
@@ -198,6 +209,8 @@ TZ=Asia/Shanghai
 DATABASE_DRIVER=sqlite
 DATABASE_PATH=/data/codex2api.db
 IMAGE_ASSET_DIR=/data/images
+LOG_DIR=logs
+LOG_DISABLED=false
 
 # 缓存配置 (内存)
 CACHE_DRIVER=memory
