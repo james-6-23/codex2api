@@ -1,46 +1,46 @@
 # Codex2API
 
-Codex2API 是一个基于 **Go + Gin + React/Vite** 的 Codex 反向代理与管理后台项目，支持：
+Codex2API is a **Go + Gin + React/Vite**-based Codex reverse proxy and admin dashboard project that supports:
 
-- 标准模式：**PostgreSQL + Redis**
-- 轻量模式：**SQLite + 内存缓存**
+- Standard mode: **PostgreSQL + Redis**
+- Lightweight mode: **SQLite + in-memory cache**
 
-它对外提供兼容 OpenAI 风格的接口，并在内部维护一套基于 **Refresh Token 账号池** 的调度、刷新、测试、限流恢复、用量观测与后台管理能力。
-
----
-
-## 目录
-
-- [快速部署](#快速部署)
-- [完整文档](#完整文档)
-- [环境配置](#环境配置)
-- [对外接口](#对外接口)
-  - [Token 上传与账号管理](#token-上传与账号管理)
-- [管理后台](#管理后台)
-- [核心能力](#核心能力)
-- [目录结构](#目录结构)
-- [常见注意事项](#常见注意事项)
-- [免责声明](#免责声明与开源协议)
+It exposes OpenAI-compatible APIs externally, while internally maintaining a complete set of capabilities built around a **Refresh Token account pool**, including scheduling, refreshing, testing, rate-limit recovery, usage monitoring, and admin management.
 
 ---
 
-## 快速部署
+## Table of Contents
 
-> 详细部署指南请参考：[DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- [Quick Deployment](#quick-deployment)
+- [Full Documentation](#full-documentation)
+- [Environment Setup](#environment-setup)
+- [External APIs](#external-apis)
+  - [Token Upload and Account Management](#token-upload-and-account-management)
+- [Admin Dashboard](#admin-dashboard)
+- [Core Capabilities](#core-capabilities)
+- [Project Structure](#project-structure)
+- [Common Notes](#common-notes)
+- [Disclaimer and License](#disclaimer-and-license)
 
-### 部署模式总览
+---
 
-| 模式 | 文件 | 适用场景 |
+## Quick Deployment
+
+> For detailed deployment instructions, see: [DEPLOYMENT.md](docs/DEPLOYMENT.md)
+
+### Deployment Modes Overview
+
+| Mode | File | Use Case |
 | --- | --- | --- |
-| Docker 镜像部署 | `docker-compose.yml` | **推荐**，服务器 / 测试环境，直接拉取预构建镜像 |
-| 本地源码容器构建 | `docker-compose.local.yml` | 本地改代码后做完整容器验证 |
-| SQLite 轻量部署 | `docker-compose.sqlite.yml` | 单机轻量部署，不依赖 PostgreSQL / Redis |
-| SQLite 本地源码构建 | `docker-compose.sqlite.local.yml` | 本地改代码后验证 SQLite 轻量模式 |
-| 本地开发 | `go run .` + `npm run dev` | 前后端联调与调试 |
+| Docker image deployment | `docker-compose.yml` | **Recommended** for servers / test environments; directly pull prebuilt images |
+| Local source container build | `docker-compose.local.yml` | Full container validation after making local code changes |
+| SQLite lightweight deployment | `docker-compose.sqlite.yml` | Lightweight single-machine deployment without PostgreSQL / Redis |
+| SQLite local source build | `docker-compose.sqlite.local.yml` | Validate SQLite lightweight mode after local code changes |
+| Local development | `go run .` + `npm run dev` | Frontend-backend joint debugging and development |
 
-### 部署命令速查
+### Deployment Commands Quick Reference
 
-标准镜像版：
+Standard image version:
 
 ```bash
 git clone https://github.com/james-6-23/codex2api.git
@@ -51,7 +51,7 @@ docker compose up -d
 docker compose logs -f codex2api
 ```
 
-标准本地构建版：
+Standard local build version:
 
 ```bash
 cp .env.example .env
@@ -59,7 +59,7 @@ docker compose -f docker-compose.local.yml up -d --build
 docker compose -f docker-compose.local.yml logs -f codex2api
 ```
 
-SQLite 镜像版：
+SQLite image version:
 
 ```bash
 cp .env.sqlite.example .env
@@ -68,7 +68,7 @@ docker compose -f docker-compose.sqlite.yml up -d
 docker compose -f docker-compose.sqlite.yml logs -f codex2api
 ```
 
-SQLite 本地构建版：
+SQLite local build version:
 
 ```bash
 cp .env.sqlite.example .env
@@ -76,67 +76,67 @@ docker compose -f docker-compose.sqlite.local.yml up -d --build
 docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 ```
 
-补充说明：
+Additional notes:
 
-- 标准版和 SQLite 版都读取 `.env`
-- 切换部署模式前，需要先用对应的示例文件覆盖当前 `.env`
-- 标准镜像版项目名固定为 `codex2api`，数据卷固定为 `codex2api_pgdata`、`codex2api_redisdata`
-- 标准本地构建版项目名固定为 `codex2api-local`，数据卷固定为 `codex2api-local_pgdata`、`codex2api-local_redisdata`
-- SQLite 镜像版项目名固定为 `codex2api-sqlite`，数据卷固定为 `codex2api-sqlite_sqlite-data`
-- SQLite 本地构建版项目名固定为 `codex2api-sqlite-local`，数据卷固定为 `codex2api-sqlite-local_sqlite-data-local`
-- 标准版容器名：`codex2api`
-- SQLite 镜像版容器名：`codex2api-sqlite`
-- SQLite 本地构建版容器名：`codex2api-sqlite-local`
-- SQLite 轻量版只启动 `codex2api` 单容器，数据保存在 `/data/codex2api.db`
-- 生图工作台图库默认保存在 `/data/images`，标准版和 SQLite 版 Docker 配置都会持久化 `/data`
-- `docker compose down` 默认不会删除命名卷；只有 `docker compose down -v`、`docker volume rm` 或 `docker volume prune` 才会删除持久化数据
-- 不同部署模式的数据卷彼此隔离；切换 compose 文件后看到空数据，通常是切到了另一组卷，而不是原卷被自动删除
+- Both the standard and SQLite versions read from `.env`
+- Before switching deployment modes, replace the current `.env` with the corresponding example file
+- The standard image version uses the fixed project name `codex2api`, with fixed volumes `codex2api_pgdata` and `codex2api_redisdata`
+- The standard local build version uses the fixed project name `codex2api-local`, with fixed volumes `codex2api-local_pgdata` and `codex2api-local_redisdata`
+- The SQLite image version uses the fixed project name `codex2api-sqlite`, with fixed volume `codex2api-sqlite_sqlite-data`
+- The SQLite local build version uses the fixed project name `codex2api-sqlite-local`, with fixed volume `codex2api-sqlite-local_sqlite-data-local`
+- Standard container name: `codex2api`
+- SQLite image container name: `codex2api-sqlite`
+- SQLite local build container name: `codex2api-sqlite-local`
+- The SQLite lightweight version starts only a single `codex2api` container, with data stored at `/data/codex2api.db`
+- The image workspace gallery is stored by default in `/data/images`; both the standard and SQLite Docker configurations persist `/data`
+- `docker compose down` does not remove named volumes by default; only `docker compose down -v`, `docker volume rm`, or `docker volume prune` will delete persistent data
+- Data volumes are isolated across different deployment modes; if you see empty data after switching compose files, you likely switched to another volume set rather than losing the original data
 
-启动后访问：
+After startup, access:
 
-- 管理台：`http://localhost:8080/admin/`
-- 健康检查：`http://localhost:8080/health`
+- Admin dashboard: `http://localhost:8080/admin/`
+- Health check: `http://localhost:8080/health`
 
-> 更多部署详情请参考：[DEPLOYMENT.md](docs/DEPLOYMENT.md)
+> For more deployment details, see: [DEPLOYMENT.md](docs/DEPLOYMENT.md)
 
 ---
 
-## 完整文档
+## Full Documentation
 
-| 文档 | 说明 | 路径 |
+| Document | Description | Path |
 |------|------|------|
-| [API 文档](docs/API.md) | 所有 API 端点、请求/响应示例、错误码说明 | `docs/API.md` |
-| [部署文档](docs/DEPLOYMENT.md) | 各种部署模式、升级指南、备份恢复 | `docs/DEPLOYMENT.md` |
-| [配置文档](docs/CONFIGURATION.md) | 环境变量、系统设置、配置优先级 | `docs/CONFIGURATION.md` |
-| [架构文档](docs/ARCHITECTURE.md) | 系统架构、调度算法、存储设计 | `docs/ARCHITECTURE.md` |
-| [故障排查](docs/TROUBLESHOOTING.md) | 常见问题排查、诊断脚本、解决方案 | `docs/TROUBLESHOOTING.md` |
-| [贡献指南](docs/CONTRIBUTING.md) | 开发规范、PR 流程、代码标准 | `docs/CONTRIBUTING.md` |
+| [API Documentation](docs/API.md) | All API endpoints, request/response examples, and error code descriptions | `docs/API.md` |
+| [Deployment Guide](docs/DEPLOYMENT.md) | Deployment modes, upgrade guide, backup and restore | `docs/DEPLOYMENT.md` |
+| [Configuration Guide](docs/CONFIGURATION.md) | Environment variables, system settings, configuration priority | `docs/CONFIGURATION.md` |
+| [Architecture Guide](docs/ARCHITECTURE.md) | System architecture, scheduling algorithms, storage design | `docs/ARCHITECTURE.md` |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issue diagnosis, diagnostic scripts, solutions | `docs/TROUBLESHOOTING.md` |
+| [Contributing Guide](docs/CONTRIBUTING.md) | Development rules, PR workflow, code standards | `docs/CONTRIBUTING.md` |
 
 ---
 
-## 环境配置
+## Environment Setup
 
 ```bash
 git pull && docker compose pull && docker compose up -d && docker compose logs -f codex2api
 ```
 
-> **⚠️ 重要：升级前请先备份数据库！**
+> **⚠️ Important: Back up the database before upgrading!**
 >
 > ```bash
 > docker exec codex2api-postgres pg_dump -U codex2api codex2api > backup_$(date +%Y%m%d_%H%M%S).sql
 > ```
 >
-> 如果升级后数据异常，可通过以下命令恢复：
+> If data becomes abnormal after upgrading, restore it with:
 >
 > ```bash
 > docker exec -i codex2api-postgres psql -U codex2api codex2api < backup_xxx.sql
 > ```
 
-如非必要，不建议在升级时执行 `docker compose down`；标准升级直接 `pull + up -d` 即可复用现有容器和命名卷。
+Unless necessary, it is not recommended to run `docker compose down` during upgrades; for standard upgrades, `pull + up -d` is enough to reuse the existing containers and named volumes.
 
-### 本地开发模式
+### Local Development Mode
 
-**后端：**
+**Backend:**
 
 ```bash
 cp .env.example .env
@@ -144,274 +144,273 @@ cd frontend && npm ci && npm run build && cd ..
 go run .
 ```
 
-> 首次启动需要先构建前端，因为 Go 使用 `go:embed` 嵌入 `frontend/dist` 。
+> On first startup, you must build the frontend first because Go embeds `frontend/dist` using `go:embed`.
 
-**前端开发服务器（联调）：**
+**Frontend development server:**
 
 ```bash
 cd frontend && npm ci && npm run dev
 ```
 
-Vite 会自动代理 `/api` 和 `/health` 到后端，开发时访问 `http://localhost:5173/admin/`。
+Vite will automatically proxy `/api` and `/health` to the backend. During development, visit `http://localhost:5173/admin/`.
 
 ---
 
-## 环境配置
+## Environment Setup
 
-### `.env` 环境变量
+### `.env` Environment Variables
 
-> 完整配置说明请参考：[CONFIGURATION.md](docs/CONFIGURATION.md)
+> For complete configuration details, see: [CONFIGURATION.md](docs/CONFIGURATION.md)
 
-| 变量 | 说明 |
+| Variable | Description |
 | --- | --- |
-| `CODEX_PORT` | HTTP 端口，默认 `8080` |
-| `ADMIN_SECRET` | 管理后台登录密钥；设置后首次访问 `/admin` 会弹出密码输入框 |
-| `DATABASE_DRIVER` | 数据库驱动，支持 `postgres` / `sqlite` |
-| `DATABASE_PATH` | SQLite 数据文件路径，`DATABASE_DRIVER=sqlite` 时生效 |
-| `DATABASE_HOST` | PostgreSQL 主机，`DATABASE_DRIVER=postgres` 时生效 |
-| `DATABASE_PORT` | PostgreSQL 端口，默认 `5432` |
-| `DATABASE_USER` | PostgreSQL 用户 |
-| `DATABASE_PASSWORD` | PostgreSQL 密码 |
-| `DATABASE_NAME` | PostgreSQL 数据库名 |
-| `DATABASE_SSLMODE` | PostgreSQL SSL 模式，默认 `disable` |
-| `CACHE_DRIVER` | 缓存驱动，支持 `redis` / `memory` |
-| `REDIS_ADDR` | Redis 地址，例如 `redis:6379`、`redis://default:pass@host:6379/0`、`rediss://default:pass@host:6379/0`，`CACHE_DRIVER=redis` 时生效 |
-| `REDIS_USERNAME` | Redis ACL 用户名，可选；URL 中带用户名时可不填 |
-| `REDIS_PASSWORD` | Redis 密码 |
-| `REDIS_DB` | Redis DB 库号 |
-| `REDIS_TLS` | 是否为 `host:port` 形式的 Redis 启用 TLS；使用 `rediss://` 时会自动启用 |
-| `REDIS_INSECURE_SKIP_VERIFY` | 跳过 Redis TLS 证书校验，默认 `false`，仅用于自签证书或排障 |
-| `TZ` | 时区，例如 `Asia/Shanghai` |
+| `CODEX_PORT` | HTTP port, default `8080` |
+| `ADMIN_SECRET` | Admin dashboard login secret; if set, a password prompt appears when first visiting `/admin` |
+| `DATABASE_DRIVER` | Database driver, supports `postgres` / `sqlite` |
+| `DATABASE_PATH` | SQLite data file path; effective when `DATABASE_DRIVER=sqlite` |
+| `DATABASE_HOST` | PostgreSQL host; effective when `DATABASE_DRIVER=postgres` |
+| `DATABASE_PORT` | PostgreSQL port, default `5432` |
+| `DATABASE_USER` | PostgreSQL username |
+| `DATABASE_PASSWORD` | PostgreSQL password |
+| `DATABASE_NAME` | PostgreSQL database name |
+| `DATABASE_SSLMODE` | PostgreSQL SSL mode, default `disable` |
+| `CACHE_DRIVER` | Cache driver, supports `redis` / `memory` |
+| `REDIS_ADDR` | Redis address, for example `redis:6379`, `redis://default:pass@host:6379/0`, or `rediss://default:pass@host:6379/0`; effective when `CACHE_DRIVER=redis` |
+| `REDIS_USERNAME` | Optional Redis ACL username; can be omitted if the URL already includes a username |
+| `REDIS_PASSWORD` | Redis password |
+| `REDIS_DB` | Redis DB index |
+| `REDIS_TLS` | Whether to enable TLS for Redis when using `host:port`; automatically enabled when using `rediss://` |
+| `REDIS_INSECURE_SKIP_VERIFY` | Skip Redis TLS certificate verification, default `false`; only for self-signed certificates or troubleshooting |
+| `TZ` | Time zone, for example `Asia/Shanghai` |
 
-> Aiven、Upstash 等云 Redis 通常要求 TLS。推荐直接将 `REDIS_ADDR` 配置为平台提供的 `rediss://...` URL；如果只填写 `host:port`，请同时设置 `REDIS_TLS=true`。
+> Cloud Redis services such as Aiven and Upstash usually require TLS. It is recommended to set `REDIS_ADDR` directly to the platform-provided `rediss://...` URL. If you only provide `host:port`, also set `REDIS_TLS=true`.
 
-标准版 `.env.example` 已显式声明 `DATABASE_DRIVER=postgres` 与 `CACHE_DRIVER=redis`；SQLite 轻量版请改用 `.env.sqlite.example`。
+The standard `.env.example` explicitly declares `DATABASE_DRIVER=postgres` and `CACHE_DRIVER=redis`; for SQLite lightweight mode, use `.env.sqlite.example` instead.
 
-### 业务运行配置
+### Business Runtime Configuration
 
-以下参数**保存在数据库 `SystemSettings` 中**，通过管理台设置页面修改：
+The following parameters are **stored in the `SystemSettings` table in the database** and can be modified from the settings page in the admin dashboard:
 
-`MaxConcurrency`、`GlobalRPM`、`TestModel`、`TestConcurrency`、`ProxyURL`、`PgMaxConns`、`RedisPoolSize`、`AdminSecret`、自动清理开关等。
+`MaxConcurrency`, `GlobalRPM`, `TestModel`, `TestConcurrency`, `ProxyURL`, `PgMaxConns`, `RedisPoolSize`, `AdminSecret`, automatic cleanup switches, and more.
 
-首次启动时程序会自动写入默认设置。
+On first startup, the program automatically writes default settings.
 
-### API Key 与管理密钥
+### API Key and Admin Secret
 
-- **对外 API Key**：以数据库中的 API Keys 为准。如果没有配置任何 Key，则 `/v1/*` 跳过鉴权。
-- **管理后台 Admin Secret**：
-  - 如果 `.env` 中设置了 `ADMIN_SECRET`，则优先使用环境变量。
-  - 如果未设置 `ADMIN_SECRET`，则回退到数据库中的 `AdminSecret`。
-  - 鉴权生效时，首次访问 `/admin` 会弹出密码输入框；前端登录成功后通过 `X-Admin-Key` 请求头访问 `/api/admin/*`。
+- **External API Key**: Determined by the API Keys stored in the database. If no Key is configured, `/v1/*` skips authentication.
+- **Admin Dashboard Secret**:
+  - If `ADMIN_SECRET` is set in `.env`, the environment variable takes precedence.
+  - If `ADMIN_SECRET` is not set, it falls back to `AdminSecret` in the database.
+  - When authentication is enabled, visiting `/admin` for the first time shows a password prompt; after frontend login succeeds, `/api/admin/*` is accessed through the `X-Admin-Key` request header.
 
 ---
 
-## 对外接口
+## External APIs
 
-| 接口 | 说明 |
+| Endpoint | Description |
 | --- | --- |
-| `POST /v1/chat/completions` | Chat Completions 风格入口 |
-| `POST /v1/responses` | Responses 风格入口 |
-| `POST /v1/images/generations` | OpenAI Images 生成入口 |
-| `POST /v1/images/edits` | OpenAI Images 编辑入口 |
-| `GET /v1/models` | 返回可用模型列表 |
-| `GET /health` | 健康检查 |
+| `POST /v1/chat/completions` | Chat Completions-style endpoint |
+| `POST /v1/responses` | Responses-style endpoint |
+| `POST /v1/images/generations` | OpenAI Images generation endpoint |
+| `POST /v1/images/edits` | OpenAI Images editing endpoint |
+| `GET /v1/models` | Returns the list of available models |
+| `GET /health` | Health check |
 
-> 完整请求/响应格式、错误码参见 [API 文档](docs/API.md)。
+> For complete request/response formats and error codes, see the [API documentation](docs/API.md).
 
-### Token 上传与账号管理
+### Token Upload and Account Management
 
-以下接口需要 `X-Admin-Key` 认证头。
+The following endpoints require the `X-Admin-Key` authentication header.
 
-#### 添加 Refresh Token 账号
+#### Add a Refresh Token account
 
 ```bash
-# 单个添加
+# Add one
 curl -X POST http://localhost:8080/api/admin/accounts \
   -H "X-Admin-Key: your-admin-secret" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-account", "refresh_token": "rt_xxxxxxxxxxxx"}'
 
-# 批量添加（换行分隔，单次最多 100 个）
+# Batch add (newline-separated, maximum 100 per request)
 curl -X POST http://localhost:8080/api/admin/accounts \
   -H "X-Admin-Key: your-admin-secret" \
   -H "Content-Type: application/json" \
   -d '{"name": "batch", "refresh_token": "rt_xxx1\nrt_xxx2\nrt_xxx3"}'
 ```
 
-#### 添加 Access Token 账号（AT-only）
+#### Add an Access Token account (AT-only)
 
 ```bash
-# 单个添加
+# Add one
 curl -X POST http://localhost:8080/api/admin/accounts/at \
   -H "X-Admin-Key: your-admin-secret" \
   -H "Content-Type: application/json" \
   -d '{"name": "my-at", "access_token": "eyJhbGciOiJSUzI1NiIs..."}'
 
-# 批量添加（换行分隔）
+# Batch add (newline-separated)
 curl -X POST http://localhost:8080/api/admin/accounts/at \
   -H "X-Admin-Key: your-admin-secret" \
   -H "Content-Type: application/json" \
   -d '{"access_token": "eyJtoken1...\neyJtoken2...\neyJtoken3..."}'
 ```
 
-#### 文件批量导入
+#### Bulk import from files
 
 ```bash
-# 导入 Refresh Token（TXT，每行一个）
+# Import Refresh Tokens (TXT, one per line)
 curl -X POST http://localhost:8080/api/admin/accounts/import \
   -H "X-Admin-Key: your-admin-secret" \
   -F "file=@tokens.txt" \
   -F "format=txt"
 
-# 导入 Refresh Token（JSON 格式）
+# Import Refresh Tokens (JSON format)
 curl -X POST http://localhost:8080/api/admin/accounts/import \
   -H "X-Admin-Key: your-admin-secret" \
   -F "file=@credentials.json" \
   -F "format=json"
 
-# 导入 Access Token（AT-TXT，每行一个）
+# Import Access Tokens (AT-TXT, one per line)
 curl -X POST http://localhost:8080/api/admin/accounts/import \
   -H "X-Admin-Key: your-admin-secret" \
   -F "file=@access_tokens.txt" \
   -F "format=at_txt"
 ```
 
-> 所有导入接口自动去重，已存在的 Token 不会重复写入。更多管理接口（导出、迁移、OAuth 授权等）参见 [API 文档](docs/API.md)。
+> All import endpoints deduplicate automatically; existing Tokens are not inserted again. For more management endpoints (export, migration, OAuth authorization, etc.), see the [API documentation](docs/API.md).
 
 ---
 
-## 管理后台
+## Admin Dashboard
 
-浏览器访问 `/admin/`，提供以下页面：
+Visit `/admin/` in your browser. It provides the following pages:
 
-| 页面 | 路径 | 功能 |
+| Page | Path | Function |
 | --- | --- | --- |
-| Dashboard | `/admin/` | 总览指标、请求趋势、延迟趋势、Token 分布、模型排行 |
-| 账号管理 | `/admin/accounts` | 导入、测试、批量处理、调度信息查看 |
-| 使用统计 | `/admin/usage` | 请求日志、统计卡片、图表、日志清空 |
-| 运维概览 | `/admin/ops` | 运行态监控与系统概览 |
-| 调度看板 | `/admin/ops/scheduler` | 调度健康度、惩罚项和评分拆解 |
-| 系统设置 | `/admin/settings` | 业务运行参数与后台密钥配置 |
+| Dashboard | `/admin/` | Overview metrics, request trends, latency trends, token distribution, model rankings |
+| Account Management | `/admin/accounts` | Import, test, batch operations, scheduling info viewing |
+| Usage Statistics | `/admin/usage` | Request logs, stat cards, charts, log clearing |
+| Operations Overview | `/admin/ops` | Runtime monitoring and system overview |
+| Scheduler Board | `/admin/ops/scheduler` | Scheduler health, penalty items, and score breakdown |
+| System Settings | `/admin/settings` | Business runtime parameters and admin secret configuration |
 
 ---
 
-## 核心能力
+## Core Capabilities
 
-### 项目定位
+### Project Positioning
 
-这个项目不是单纯的接口转发，而是一套面向长期运行的 Codex 网关与管理后台：
+This project is not just a simple forwarding layer. It is a long-running Codex gateway and admin dashboard system:
 
-- 对外提供统一的 OpenAI 风格入口，屏蔽上游多账号差异
-- 对内维护基于 `Refresh Token` 的账号池、`Access Token` 生命周期和运行时调度
-- 通过 PostgreSQL + Redis 或 SQLite + 内存缓存实现配置持久化与运行态协调
-- 通过 `/admin` 管理台提供全面的运维观测能力
+- Exposes a unified OpenAI-style endpoint externally, hiding upstream multi-account differences
+- Internally maintains a `Refresh Token`-based account pool, `Access Token` lifecycle handling, and runtime scheduling
+- Uses PostgreSQL + Redis or SQLite + in-memory cache for configuration persistence and runtime coordination
+- Provides comprehensive operational observability through the `/admin` dashboard
 
-### 架构概览
+### Architecture Overview
 
-**对外请求链路：** 客户端请求 → Gin RPM 限流 → `proxy.Handler` API Key 校验 → `auth.Store` 调度选号 → 上游请求 → 响应回传 + 用量写入
+**External request path:** client request → Gin RPM rate limiting → `proxy.Handler` API Key validation → `auth.Store` account selection → upstream request → response return + usage writeback
 
-**管理后台链路：** 浏览器 → `/admin/` 嵌入式前端 → `/api/admin/*` 管理接口 → 数据库 / 账号池 / 缓存层
+**Admin dashboard path:** browser → `/admin/` embedded frontend → `/api/admin/*` management APIs → database / account pool / cache layer
 
-### 调度系统
+### Scheduling System
 
-调度核心位于 `auth.Store`，将账号可用性、健康度、动态并发、历史错误和近期用量综合纳入选择。
+The scheduling core is located in `auth.Store`, which combines account availability, health status, dynamic concurrency, historical errors, and recent usage into account selection.
 
-**运行时状态模型：**
+**Runtime state model:**
 
-- `Status`：`ready` / `cooldown` / `error`
-- `HealthTier`：`healthy` / `warm` / `risky` / `banned`
-- `SchedulerScore`：以 100 为基线的实时调度分
-- `DynamicConcurrencyLimit`：按健康层级动态收缩的并发上限
+- `Status`: `ready` / `cooldown` / `error`
+- `HealthTier`: `healthy` / `warm` / `risky` / `banned`
+- `SchedulerScore`: real-time scheduling score with a baseline of 100
+- `DynamicConcurrencyLimit`: concurrency cap dynamically reduced by health tier
 
-**账号选择策略：**
+**Account selection strategy:**
 
-1. 过滤不可用账号（error / banned / 冷却中 / 无 AccessToken）
-2. 重算健康层级、调度分和动态并发
-3. 排除已达并发上限的账号
-4. 按 `healthy > warm > risky > banned` 排序，同层级按调度分和并发数择优
-5. 15% 概率随机打散，降低热点与饥饿
+1. Filter out unavailable accounts (`error` / `banned` / cooling down / no AccessToken)
+2. Recalculate health tier, scheduling score, and dynamic concurrency
+3. Exclude accounts that already reached their concurrency limit
+4. Sort by `healthy > warm > risky > banned`; within the same tier, prefer better scheduling score and lower concurrency
+5. Apply 15% random shuffling to reduce hotspots and starvation
 
-**动态并发规则：**
+**Dynamic concurrency rules:**
 
-| 层级 | 并发上限 |
+| Tier | Concurrency Limit |
 | --- | --- |
-| `healthy` | 系统 `MaxConcurrency` |
-| `warm` | 基础并发 ÷ 2（最少 1） |
-| `risky` | 固定 1 |
-| `banned` | 固定 0，不参与调度 |
+| `healthy` | System `MaxConcurrency` |
+| `warm` | Base concurrency ÷ 2 (minimum 1) |
+| `risky` | Fixed at 1 |
+| `banned` | Fixed at 0; excluded from scheduling |
 
-**调度分惩罚/奖励：**
+**Scheduling score penalties/rewards:**
 
-| 信号 | 影响 |
+| Signal | Impact |
 | --- | --- |
-| `unauthorized` | `-50`，24h 线性衰减 |
-| `rate_limited` | `-22`，1h 线性衰减 |
-| `timeout` | `-18`，15min 线性衰减 |
-| `server error` | `-12`，15min 线性衰减 |
-| 连续失败 | 每次 `-6`，最多 `-24` |
-| 连续成功 | 每次 `+2`，最多 `+12` |
-| 近期成功率过低 | `<75%` 扣 8，`<50%` 扣 15 |
-| Free 7d 用量 | `≥70%` 扣 8 → `≥100%` 扣 40 |
-| 延迟 EWMA | `≥5s` 扣 4 → `≥20s` 扣 15 |
+| `unauthorized` | `-50`, linearly decays over 24h |
+| `rate_limited` | `-22`, linearly decays over 1h |
+| `timeout` | `-18`, linearly decays over 15min |
+| `server error` | `-12`, linearly decays over 15min |
+| Consecutive failures | `-6` each time, up to `-24` |
+| Consecutive successes | `+2` each time, up to `+12` |
+| Recent success rate too low | `<75%` deduct 8, `<50%` deduct 15 |
+| Free 7d usage | `≥70%` deduct 8 → `≥100%` deduct 40 |
+| Latency EWMA | `≥5s` deduct 4 → `≥20s` deduct 15 |
 
-**冷却与恢复机制：**
+**Cooldown and recovery mechanisms:**
 
-- **429**：优先解析上游 `resets_at`，否则按套餐类型推断冷却时间
-- **401**：直接进入 `banned`，6h 冷却，24h 内再触发升至 24h
-- 冷却状态持久化到 PostgreSQL，重启后自动恢复
-- 后台会对 `banned` 账号做周期性低频恢复探测
+- **429**: Prefer parsing upstream `resets_at`; otherwise infer cooldown time by plan type
+- **401**: Immediately enters `banned`, cools down for 6h, escalates to 24h if triggered again within 24h
+- Cooldown state is persisted to PostgreSQL and automatically restored after restart
+- The backend periodically performs low-frequency recovery probes for `banned` accounts
 
-**调度可观测性：**
+**Scheduling observability:**
 
-- `GET /api/admin/accounts` — 健康层级、调度分、惩罚拆解
-- `GET /api/admin/ops/overview` — 系统运行态与连接池概览
-- `/admin/ops/scheduler` — 前端调度看板
+- `GET /api/admin/accounts` — health tier, scheduling score, penalty breakdown
+- `GET /api/admin/ops/overview` — system runtime state and connection pool overview
+- `/admin/ops/scheduler` — frontend scheduler board
 
 ---
 
-## 目录结构
+## Project Structure
 
 ```text
 codex2api/
-├─ main.go                      # 程序入口
-├─ Dockerfile                   # 多阶段镜像构建
-├─ docker-compose.yml           # 镜像部署模板
-├─ docker-compose.local.yml     # 本地源码构建模板
-├─ .env.example                 # 环境变量示例
-├─ admin/                       # 管理后台 API
-├─ auth/                        # 账号池、调度与 token 管理
-├─ cache/                       # Redis 缓存封装
-├─ config/                      # 环境变量加载
-├─ database/                    # PostgreSQL 访问层
-├─ proxy/                       # 对外代理、转发与限流
-└─ frontend/                    # React + Vite 管理后台
+├─ main.go                      # Program entry
+├─ Dockerfile                   # Multi-stage image build
+├─ docker-compose.yml           # Image deployment template
+├─ docker-compose.local.yml     # Local source build template
+├─ .env.example                 # Environment variable example
+├─ admin/                       # Admin dashboard API
+├─ auth/                        # Account pool, scheduling, and token management
+├─ cache/                       # Redis cache wrapper
+├─ config/                      # Environment variable loading
+├─ database/                    # PostgreSQL access layer
+├─ proxy/                       # External proxy, forwarding, and rate limiting
+└─ frontend/                    # React + Vite admin dashboard
    ├─ src/pages/                # Dashboard / Accounts / Usage / Ops / Settings
-   ├─ src/components/           # UI 组件
-   ├─ src/locales/              # 国际化语言文件 (zh/en)
-   └─ vite.config.js            # Vite 配置
+   ├─ src/components/           # UI components
+   ├─ src/locales/              # i18n language files (zh/en)
+   └─ vite.config.js            # Vite configuration
 ```
 
 ---
 
+## Common Notes
 
-## 常见注意事项
-
-- `docker-compose.yml` 拉取 GHCR 镜像用于部署；`docker-compose.local.yml` 用 `build: .` 做本地构建
-- 前端基路径固定为 `/admin/`，本地开发和生产部署一致
-- 本地手动构建 Go 二进制前需先执行 `frontend/` 的 `npm run build`
-- `.env` 只负责端口、数据库、Redis 等物理层配置；业务参数在管理台数据库里维护
-- API Key 以数据库为准，在管理台中配置
-
----
-
-## 免责声明与开源协议
-
-- 本项目仅供学习、研究与技术交流使用。
-- 本项目采用 `MIT License` 开源协议。
-- 项目不对任何直接或间接使用后果提供担保；生产环境使用风险由使用者自行承担。
+- `docker-compose.yml` pulls the GHCR image for deployment; `docker-compose.local.yml` uses `build: .` for local builds
+- The frontend base path is fixed at `/admin/`, consistent between local development and production deployment
+- Before manually building the Go binary locally, you must first run `npm run build` in `frontend/`
+- `.env` only handles infrastructure-level configuration such as port, database, and Redis; business parameters are maintained in the admin dashboard database
+- API Keys are determined by the database and configured in the admin dashboard
 
 ---
 
-## 友情链接
+## Disclaimer and License
+
+- This project is for learning, research, and technical communication only.
+- This project is open-sourced under the `MIT License`.
+- The project provides no warranty for any direct or indirect consequences of use; users assume all risks of production use.
+
+---
+
+## Friendly Links
 
 - [LINUX DO](https://linux.do/)
