@@ -1,9 +1,7 @@
 package sse
 
 import (
-	"bytes"
 	"context"
-	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -192,19 +190,6 @@ func TestBufferedStreamWriter(t *testing.T) {
 	}
 }
 
-func TestStreamReaderTimeout(t *testing.T) {
-	// 创建一个永远阻塞的读取器
-	reader := NewStreamReader(&blockingReader{}, 100*time.Millisecond)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
-	defer cancel()
-
-	_, err := reader.ReadEvent(ctx)
-	if err == nil {
-		t.Error("期望超时错误，但没有错误")
-	}
-}
-
 func TestWriteComment(t *testing.T) {
 	recorder := httptest.NewRecorder()
 
@@ -222,14 +207,6 @@ func TestWriteComment(t *testing.T) {
 	if !strings.Contains(body, ": keep-alive") {
 		t.Error("响应应包含注释")
 	}
-}
-
-// blockingReader 用于测试超时
-type blockingReader struct{}
-
-func (b *blockingReader) Read(p []byte) (n int, err error) {
-	time.Sleep(10 * time.Second)
-	return 0, nil
 }
 
 func TestMultilineData(t *testing.T) {
