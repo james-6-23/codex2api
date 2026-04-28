@@ -60,7 +60,7 @@
 ## ✅ 测试结果
 
 所有单元测试通过：
-```
+```text
 ✓ compat/image   - 3 tests passed
 ✓ compat/proxy   - 3 tests passed  
 ✓ compat/refresh - 6 tests passed

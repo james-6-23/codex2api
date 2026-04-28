@@ -449,20 +449,43 @@
                 const card = document.createElement('div');
                 card.className = 'result-card';
 
+                // 创建图片元素（避免 XSS）
+                const img = document.createElement('img');
+                img.setAttribute('data-asset-id', asset.id);
+                img.setAttribute('alt', `Generated ${idx + 1}`);
+                img.setAttribute('loading', 'lazy');
+                img.style.background = '#f0f0f0';
+                card.appendChild(img);
+
+                // 创建信息容器（避免 XSS）
+                const info = document.createElement('div');
+                info.className = 'result-info';
+
+                const sizeP = document.createElement('p');
+                sizeP.innerHTML = '<strong>尺寸:</strong> ';
+                sizeP.appendChild(document.createTextNode(asset.actual_size || asset.requested_size));
+                info.appendChild(sizeP);
+
+                const bytesP = document.createElement('p');
+                bytesP.innerHTML = '<strong>大小:</strong> ';
+                bytesP.appendChild(document.createTextNode((asset.bytes / 1024 / 1024).toFixed(2) + ' MB'));
+                info.appendChild(bytesP);
+
+                const formatP = document.createElement('p');
+                formatP.innerHTML = '<strong>格式:</strong> ';
+                formatP.appendChild(document.createTextNode(asset.output_format));
+                info.appendChild(formatP);
+
+                const modelP = document.createElement('p');
+                modelP.innerHTML = '<strong>模型:</strong> ';
+                modelP.appendChild(document.createTextNode(asset.model));
+                info.appendChild(modelP);
+
+                card.appendChild(info);
+                resultGrid.appendChild(card);
+
                 // 使用 fetch 获取图片并转换为 blob URL（支持认证）
                 loadImageWithAuth(asset.id, idx, card);
-
-                card.innerHTML = `
-                    <img data-asset-id="${asset.id}" alt="Generated ${idx + 1}" loading="lazy" style="background: #f0f0f0;">
-                    <div class="result-info">
-                        <p><strong>尺寸:</strong> ${asset.actual_size || asset.requested_size}</p>
-                        <p><strong>大小:</strong> ${(asset.bytes / 1024 / 1024).toFixed(2)} MB</p>
-                        <p><strong>格式:</strong> ${asset.output_format}</p>
-                        <p><strong>模型:</strong> ${asset.model}</p>
-                    </div>
-                `;
-
-                resultGrid.appendChild(card);
             });
 
             resultSection.classList.add('show');
