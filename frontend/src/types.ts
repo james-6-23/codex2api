@@ -87,6 +87,13 @@ export interface AccountModelStat {
   tokens: number
 }
 
+export interface TimeRangeUsage {
+  requests: number
+  tokens: number
+  account_billed: number
+  user_billed: number
+}
+
 export interface AccountUsageDetail {
   total_requests: number
   total_tokens: number
@@ -95,6 +102,8 @@ export interface AccountUsageDetail {
   reasoning_tokens: number
   cached_tokens: number
   models: AccountModelStat[]
+  usage_5h?: TimeRangeUsage
+  usage_7d?: TimeRangeUsage
 }
 
 export interface MessageResponse {
