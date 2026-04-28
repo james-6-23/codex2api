@@ -470,6 +470,57 @@ func TestPrepareCompactResponsesBody_RemovesClientSuppliedInclude(t *testing.T) 
 	}
 }
 
+func TestPrepareResponsesBody_ConvertsPlaintextCompactionToAssistantMessage(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":"hello"},
+			{"type":"compaction","summary":"previous context was compacted"}
+		]
+	}`)
+
+	got, expandedInputRaw := PrepareResponsesBody(raw)
+
+	input := gjson.GetBytes(got, "input")
+	if gotType := input.Get("1.type").String(); gotType == "compaction" {
+		t.Fatalf("plaintext compaction item should not be sent upstream, got %s", input.Raw)
+	}
+	if gotRole := input.Get("1.role").String(); gotRole != "assistant" {
+		t.Fatalf("converted compaction role = %q, want assistant; input=%s", gotRole, input.Raw)
+	}
+	if gotText := input.Get("1.content.0.text").String(); gotText != "previous context was compacted" {
+		t.Fatalf("converted compaction text = %q, want summary; input=%s", gotText, input.Raw)
+	}
+
+	expanded := gjson.Parse(expandedInputRaw)
+	if gotType := expanded.Get("1.type").String(); gotType == "compaction" {
+		t.Fatalf("expanded input cache should not retain plaintext compaction, got %s", expanded.Raw)
+	}
+}
+
+func TestPrepareCompactResponsesBody_ConvertsPlaintextCompactionToAssistantMessage(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"type":"message","role":"user","content":"hello"},
+			{"type":"compaction","summary":"previous context was compacted"}
+		]
+	}`)
+
+	got, _ := PrepareCompactResponsesBody(raw)
+
+	input := gjson.GetBytes(got, "input")
+	if gotType := input.Get("1.type").String(); gotType == "compaction" {
+		t.Fatalf("plaintext compaction item should not be sent to compact upstream, got %s", input.Raw)
+	}
+	if gotRole := input.Get("1.role").String(); gotRole != "assistant" {
+		t.Fatalf("converted compaction role = %q, want assistant; input=%s", gotRole, input.Raw)
+	}
+	if gotText := input.Get("1.content.0.text").String(); gotText != "previous context was compacted" {
+		t.Fatalf("converted compaction text = %q, want summary; input=%s", gotText, input.Raw)
+	}
+}
+
 // ==================== Function Calling 测试 ====================
 
 func TestConvertMessagesToInput_ToolRole(t *testing.T) {
