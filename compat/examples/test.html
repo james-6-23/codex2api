@@ -449,11 +449,11 @@
                 const card = document.createElement('div');
                 card.className = 'result-card';
 
-                const apiUrl = document.getElementById('apiUrl').value.trim();
-                const imageUrl = `${apiUrl}/api/admin/image-studio/assets/${asset.id}/file`;
+                // 使用 fetch 获取图片并转换为 blob URL（支持认证）
+                loadImageWithAuth(asset.id, idx, card);
 
                 card.innerHTML = `
-                    <img src="${imageUrl}" alt="Generated ${idx + 1}" loading="lazy">
+                    <img data-asset-id="${asset.id}" alt="Generated ${idx + 1}" loading="lazy" style="background: #f0f0f0;">
                     <div class="result-info">
                         <p><strong>尺寸:</strong> ${asset.actual_size || asset.requested_size}</p>
                         <p><strong>大小:</strong> ${(asset.bytes / 1024 / 1024).toFixed(2)} MB</p>
@@ -466,6 +466,41 @@
             });
 
             resultSection.classList.add('show');
+        }
+
+        // 使用 fetch 加载需要认证的图片
+        async function loadImageWithAuth(assetId, idx, card) {
+            const apiUrl = document.getElementById('apiUrl').value.trim();
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const imageUrl = `${apiUrl}/api/admin/images/assets/${assetId}/file`;
+
+            try {
+                const headers = {};
+                if (apiKey) {
+                    headers['Authorization'] = apiKey.startsWith('Bearer ') ? apiKey : `Bearer ${apiKey}`;
+                }
+
+                const response = await fetch(imageUrl, { headers });
+                if (!response.ok) {
+                    throw new Error(`HTTP ${response.status}`);
+                }
+
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+
+                // 更新图片 src
+                const img = card.querySelector(`img[data-asset-id="${assetId}"]`);
+                if (img) {
+                    img.src = blobUrl;
+                }
+            } catch (err) {
+                console.error(`Failed to load image ${assetId}:`, err);
+                const img = card.querySelector(`img[data-asset-id="${assetId}"]`);
+                if (img) {
+                    img.alt = `加载失败: ${err.message}`;
+                    img.style.background = '#fee';
+                }
+            }
         }
 
         function showError(message) {
