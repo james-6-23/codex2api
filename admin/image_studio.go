@@ -658,13 +658,14 @@ func (h *Handler) saveImageJobAssets(ctx context.Context, jobID int64, req image
 		// 本地放大处理
 		if upscale := compatImage.ValidateUpscale(req.Upscale); upscale != "" {
 			cache := compatImage.GetGlobalCache()
-			cacheKey := fmt.Sprintf("%d-%02d-%s", jobID, idx+1, upscale)
+			cacheKey := compatImage.ComputeCacheKey(imageBytes, upscale)
 
 			// 尝试从缓存获取
 			if cached, cachedCT, ok := cache.Get(cacheKey); ok {
 				imageBytes = cached
 				if cachedCT != "" {
 					mimeType = cachedCT
+					format = "png" // 缓存命中时同步 format
 				}
 				log.Printf("[image-studio] job=%d asset=%d upscale cache hit scale=%s",
 					jobID, idx+1, upscale)

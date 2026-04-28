@@ -21,18 +21,14 @@ type Event struct {
 
 // StreamReader SSE 流读取器
 type StreamReader struct {
-	reader  *bufio.Reader
-	timeout time.Duration
+	reader *bufio.Reader
 }
 
 // NewStreamReader 创建 SSE 流读取器
+// timeout 参数已废弃，使用 context 控制超时
 func NewStreamReader(r io.Reader, timeout time.Duration) *StreamReader {
-	if timeout <= 0 {
-		timeout = 60 * time.Second
-	}
 	return &StreamReader{
-		reader:  bufio.NewReader(r),
-		timeout: timeout,
+		reader: bufio.NewReader(r),
 	}
 }
 

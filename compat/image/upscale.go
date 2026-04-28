@@ -2,6 +2,8 @@ package image
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	gimage "image"
@@ -55,6 +57,12 @@ func longSideOf(scale string) int {
 
 // ErrUpscaleDecode 当原始字节解码失败(既不是主流 PNG/JPEG/GIF 也不是 webp)时返回。
 var ErrUpscaleDecode = errors.New("image upscale: decode source failed")
+
+// ComputeCacheKey 计算图片内容的缓存键（SHA256 哈希 + 放大档位）
+func ComputeCacheKey(src []byte, scale string) string {
+	hash := sha256.Sum256(src)
+	return hex.EncodeToString(hash[:16]) + "-" + scale // 使用前 16 字节（32 字符）+ 档位
+}
 
 // DoUpscale 对给定字节做 Catmull-Rom 放大并重新编码为 PNG。
 //

@@ -16,10 +16,9 @@ var imageProxySecret []byte
 func init() {
 	imageProxySecret = make([]byte, 32)
 	if _, err := rand.Read(imageProxySecret); err != nil {
-		// 降级方案：使用确定性种子
-		for i := range imageProxySecret {
-			imageProxySecret[i] = byte(i*31 + 7)
-		}
+		// crypto/rand 失败是严重的系统问题，不应降级到不安全的密钥
+		// 直接 panic 以避免生成可预测的签名
+		panic(fmt.Sprintf("failed to generate secure random key for image proxy: %v", err))
 	}
 }
 
