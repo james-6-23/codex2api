@@ -1,0 +1,16 @@
+# 图片兼容层配置示例
+
+image_compat:
+  # 是否启用 2K/4K 本地放大功能
+  enable_upscale: true
+
+  # 放大缓存大小(MB)，默认 512MB
+  # 512MB 约可缓存 50 张 4K PNG
+  upscale_cache_mb: 512
+
+  # 并发放大任务数，默认为 CPU 核心数
+  # 建议设置为核心数的 50-75%，避免影响主业务
+  upscale_concurrency: 4
+
+  # 是否启用缩略图功能
+  enable_thumbnail: true

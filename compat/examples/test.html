@@ -1,0 +1,484 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Codex2API 图片生成测试 - 2K/4K 放大功能</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 16px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 28px;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 14px;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .config-section {
+            background: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 8px;
+            font-weight: 500;
+            color: #333;
+        }
+
+        .form-group input,
+        .form-group textarea {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            font-size: 14px;
+            transition: border-color 0.3s;
+        }
+
+        .form-group input:focus,
+        .form-group textarea:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group textarea {
+            resize: vertical;
+            min-height: 100px;
+        }
+
+        .upscale-options {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 16px;
+            margin-bottom: 20px;
+        }
+
+        .upscale-card {
+            border: 2px solid #ddd;
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.3s;
+        }
+
+        .upscale-card:hover {
+            border-color: #667eea;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+        }
+
+        .upscale-card.selected {
+            border-color: #667eea;
+            background: #f0f4ff;
+        }
+
+        .upscale-card h3 {
+            font-size: 18px;
+            margin-bottom: 8px;
+            color: #333;
+        }
+
+        .upscale-card .resolution {
+            font-size: 14px;
+            color: #666;
+            margin-bottom: 8px;
+        }
+
+        .upscale-card .info {
+            font-size: 12px;
+            color: #999;
+        }
+
+        .generate-btn {
+            width: 100%;
+            padding: 16px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            font-weight: 500;
+            cursor: pointer;
+            transition: transform 0.2s;
+        }
+
+        .generate-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        .generate-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .result-section {
+            margin-top: 30px;
+            display: none;
+        }
+
+        .result-section.show {
+            display: block;
+        }
+
+        .result-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .result-header h2 {
+            font-size: 20px;
+            color: #333;
+        }
+
+        .result-stats {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .result-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .result-card {
+            border: 1px solid #ddd;
+            border-radius: 8px;
+            overflow: hidden;
+            transition: transform 0.3s;
+        }
+
+        .result-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 8px 16px rgba(0, 0, 0, 0.1);
+        }
+
+        .result-card img {
+            width: 100%;
+            display: block;
+        }
+
+        .result-info {
+            padding: 16px;
+            background: #f8f9fa;
+        }
+
+        .result-info p {
+            margin: 4px 0;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .result-info p strong {
+            color: #333;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            display: none;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .loading-spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .error {
+            background: #fee;
+            border: 1px solid #fcc;
+            color: #c33;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .error.show {
+            display: block;
+        }
+
+        .success {
+            background: #efe;
+            border: 1px solid #cfc;
+            color: #3c3;
+            padding: 16px;
+            border-radius: 8px;
+            margin-top: 20px;
+            display: none;
+        }
+
+        .success.show {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎨 Codex2API 图片生成测试</h1>
+            <p>支持原图 / 2K 高清 / 4K 超高清 三种分辨率</p>
+        </div>
+
+        <div class="content">
+            <!-- 配置区域 -->
+            <div class="config-section">
+                <h2 style="margin-bottom: 16px; color: #333;">⚙️ API 配置</h2>
+                <div class="form-group">
+                    <label for="apiUrl">API 地址</label>
+                    <input type="text" id="apiUrl" placeholder="http://localhost:8080" value="http://localhost:8080">
+                </div>
+                <div class="form-group">
+                    <label for="apiKey">API Key（可选）</label>
+                    <input type="text" id="apiKey" placeholder="Bearer YOUR_API_KEY">
+                </div>
+            </div>
+
+            <!-- 提示词输入 -->
+            <div class="form-group">
+                <label for="prompt">🖼️ 图片描述（Prompt）</label>
+                <textarea id="prompt" placeholder="例如：a beautiful sunset over mountains, highly detailed, 4k quality">a beautiful sunset over mountains, highly detailed, 4k quality</textarea>
+            </div>
+
+            <!-- 分辨率选择 -->
+            <div class="form-group">
+                <label>📐 输出分辨率</label>
+                <div class="upscale-options">
+                    <div class="upscale-card selected" data-upscale="">
+                        <h3>原图</h3>
+                        <div class="resolution">1024 × 1024</div>
+                        <div class="info">文件大小: 2-5 MB<br>生成时间: ~10 秒</div>
+                    </div>
+                    <div class="upscale-card" data-upscale="2k">
+                        <h3>2K 高清</h3>
+                        <div class="resolution">2560 × 2560</div>
+                        <div class="info">文件大小: 8-15 MB<br>生成时间: ~11 秒</div>
+                    </div>
+                    <div class="upscale-card" data-upscale="4k">
+                        <h3>4K 超高清</h3>
+                        <div class="resolution">3840 × 3840</div>
+                        <div class="info">文件大小: 20-30 MB<br>生成时间: ~12 秒</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 生成按钮 -->
+            <button class="generate-btn" id="generateBtn">🚀 生成图片</button>
+
+            <!-- 加载状态 -->
+            <div class="loading" id="loading">
+                <div class="loading-spinner"></div>
+                <p>正在生成图片，请稍候...</p>
+            </div>
+
+            <!-- 错误提示 -->
+            <div class="error" id="error"></div>
+
+            <!-- 成功提示 -->
+            <div class="success" id="success"></div>
+
+            <!-- 结果展示 -->
+            <div class="result-section" id="resultSection">
+                <div class="result-header">
+                    <h2>✅ 生成结果</h2>
+                    <div class="result-stats" id="resultStats"></div>
+                </div>
+                <div class="result-grid" id="resultGrid"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 分辨率选择逻辑
+        const upscaleCards = document.querySelectorAll('.upscale-card');
+        let selectedUpscale = '';
+
+        upscaleCards.forEach(card => {
+            card.addEventListener('click', () => {
+                upscaleCards.forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                selectedUpscale = card.dataset.upscale;
+            });
+        });
+
+        // 生成图片逻辑
+        const generateBtn = document.getElementById('generateBtn');
+        const loading = document.getElementById('loading');
+        const error = document.getElementById('error');
+        const success = document.getElementById('success');
+        const resultSection = document.getElementById('resultSection');
+        const resultGrid = document.getElementById('resultGrid');
+        const resultStats = document.getElementById('resultStats');
+
+        generateBtn.addEventListener('click', async () => {
+            const apiUrl = document.getElementById('apiUrl').value.trim();
+            const apiKey = document.getElementById('apiKey').value.trim();
+            const prompt = document.getElementById('prompt').value.trim();
+
+            // 验证输入
+            if (!apiUrl) {
+                showError('请输入 API 地址');
+                return;
+            }
+            if (!prompt) {
+                showError('请输入图片描述');
+                return;
+            }
+
+            // 显示加载状态
+            generateBtn.disabled = true;
+            loading.classList.add('show');
+            error.classList.remove('show');
+            success.classList.remove('show');
+            resultSection.classList.remove('show');
+
+            try {
+                // 构建请求
+                const headers = {
+                    'Content-Type': 'application/json'
+                };
+                if (apiKey) {
+                    headers['Authorization'] = apiKey.startsWith('Bearer ') ? apiKey : `Bearer ${apiKey}`;
+                }
+
+                const requestBody = {
+                    prompt: prompt,
+                    model: 'gpt-image-2',
+                    size: '1024x1024',
+                    quality: 'standard',
+                    output_format: 'png'
+                };
+
+                if (selectedUpscale) {
+                    requestBody.upscale = selectedUpscale;
+                }
+
+                // 发送请求
+                const startTime = Date.now();
+                const response = await fetch(`${apiUrl}/api/admin/image-studio/jobs`, {
+                    method: 'POST',
+                    headers: headers,
+                    body: JSON.stringify(requestBody)
+                });
+
+                const duration = ((Date.now() - startTime) / 1000).toFixed(2);
+
+                if (!response.ok) {
+                    const errorData = await response.json();
+                    throw new Error(errorData.error || `HTTP ${response.status}`);
+                }
+
+                const result = await response.json();
+
+                // 显示结果
+                displayResult(result.job, duration);
+                showSuccess(`生成成功！耗时 ${duration} 秒`);
+
+            } catch (err) {
+                showError(`生成失败: ${err.message}`);
+            } finally {
+                generateBtn.disabled = false;
+                loading.classList.remove('show');
+            }
+        });
+
+        function displayResult(job, duration) {
+            resultGrid.innerHTML = '';
+            resultStats.textContent = `生成 ${job.assets.length} 张图片，耗时 ${duration} 秒`;
+
+            job.assets.forEach((asset, idx) => {
+                const card = document.createElement('div');
+                card.className = 'result-card';
+
+                const apiUrl = document.getElementById('apiUrl').value.trim();
+                const imageUrl = `${apiUrl}/api/admin/image-studio/assets/${asset.id}/file`;
+
+                card.innerHTML = `
+                    <img src="${imageUrl}" alt="Generated ${idx + 1}" loading="lazy">
+                    <div class="result-info">
+                        <p><strong>尺寸:</strong> ${asset.actual_size || asset.requested_size}</p>
+                        <p><strong>大小:</strong> ${(asset.bytes / 1024 / 1024).toFixed(2)} MB</p>
+                        <p><strong>格式:</strong> ${asset.output_format}</p>
+                        <p><strong>模型:</strong> ${asset.model}</p>
+                    </div>
+                `;
+
+                resultGrid.appendChild(card);
+            });
+
+            resultSection.classList.add('show');
+        }
+
+        function showError(message) {
+            error.textContent = message;
+            error.classList.add('show');
+            setTimeout(() => error.classList.remove('show'), 5000);
+        }
+
+        function showSuccess(message) {
+            success.textContent = message;
+            success.classList.add('show');
+            setTimeout(() => success.classList.remove('show'), 5000);
+        }
+    </script>
+</body>
+</html>

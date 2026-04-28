@@ -12,6 +12,7 @@ require (
 	github.com/refraction-networking/utls v1.8.2
 	github.com/tidwall/gjson v1.18.0
 	github.com/tidwall/sjson v1.2.5
+	golang.org/x/image v0.39.0
 	golang.org/x/net v0.51.0
 	modernc.org/sqlite v1.47.0
 )

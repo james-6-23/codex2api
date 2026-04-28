@@ -20,6 +20,7 @@ import (
 	"strings"
 	"time"
 
+	compatImage "github.com/codex2api/compat/image"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
@@ -54,6 +55,7 @@ type imageGenerationJobPayload struct {
 	Style        string `json:"style"`
 	APIKeyID     int64  `json:"api_key_id"`
 	TemplateID   int64  `json:"template_id"`
+	Upscale      string `json:"upscale"` // 本地放大档位: "", "2k", "4k"
 }
 
 type imageJobResponse struct {
@@ -255,6 +257,7 @@ func (h *Handler) CreateImageGenerationJob(c *gin.Context) {
 	}
 	req.Background = normalizeOptionalImageParam(req.Background)
 	req.Style = normalizeOptionalImageParam(req.Style)
+	req.Upscale = compatImage.ValidateUpscale(req.Upscale)
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
@@ -651,6 +654,43 @@ func (h *Handler) saveImageJobAssets(ctx context.Context, jobID int64, req image
 		if err != nil {
 			return saved, err
 		}
+
+		// 本地放大处理
+		if upscale := compatImage.ValidateUpscale(req.Upscale); upscale != "" {
+			cache := compatImage.GetGlobalCache()
+			cacheKey := fmt.Sprintf("%d-%02d-%s", jobID, idx+1, upscale)
+
+			// 尝试从缓存获取
+			if cached, cachedCT, ok := cache.Get(cacheKey); ok {
+				imageBytes = cached
+				if cachedCT != "" {
+					mimeType = cachedCT
+				}
+				log.Printf("[image-studio] job=%d asset=%d upscale cache hit scale=%s",
+					jobID, idx+1, upscale)
+			} else {
+				// 执行放大
+				cache.Acquire()
+				upscaled, upCT, upErr := compatImage.DoUpscale(imageBytes, upscale)
+				cache.Release()
+
+				if upErr == nil && len(upscaled) > 0 {
+					imageBytes = upscaled
+					if upCT != "" {
+						mimeType = upCT
+						format = "png" // 放大后固定为 PNG
+					}
+					cache.Put(cacheKey, upscaled, upCT)
+					log.Printf("[image-studio] job=%d asset=%d upscaled scale=%s bytes=%d",
+						jobID, idx+1, upscale, len(upscaled))
+				} else if upErr != nil {
+					log.Printf("[image-studio] job=%d asset=%d upscale failed scale=%s error=%v",
+						jobID, idx+1, upscale, upErr)
+					// 失败时使用原图，不中断流程
+				}
+			}
+		}
+
 		width, height := imageDimensions(imageBytes)
 		actualSize := ""
 		if width > 0 && height > 0 {
