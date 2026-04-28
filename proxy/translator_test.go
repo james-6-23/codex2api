@@ -194,6 +194,37 @@ func TestPrepareResponsesBody_NormalizesNestedReasoningEffortAliases(t *testing.
 	}
 }
 
+func TestPrepareResponsesBody_DropsBlankReasoningEffort(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"test",
+		"reasoning_effort":"   "
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if gjson.GetBytes(got, "reasoning.effort").Exists() {
+		t.Fatalf("reasoning.effort should be omitted for blank effort; body=%s", got)
+	}
+}
+
+func TestPrepareResponsesBody_DropsBlankNestedReasoningEffort(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"test",
+		"reasoning":{"effort":"   ","summary":"auto"}
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	if gjson.GetBytes(got, "reasoning.effort").Exists() {
+		t.Fatalf("reasoning.effort should be omitted for blank nested effort; body=%s", got)
+	}
+	if summary := gjson.GetBytes(got, "reasoning.summary").String(); summary != "auto" {
+		t.Fatalf("reasoning.summary mismatch: got %q want auto; body=%s", summary, got)
+	}
+}
+
 func TestPrepareResponsesBody_ImageOnlyModelBuildsImageToolRequest(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-image-2",

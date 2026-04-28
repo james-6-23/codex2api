@@ -10,6 +10,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import type { HealthResponse, ModelInfo, SystemSettings } from '../types'
 import { getErrorMessage } from '../utils/error'
+import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -27,21 +28,10 @@ import { cn } from '@/lib/utils'
 
 import { ExternalLink, RefreshCw, Save, Trash2 } from 'lucide-react'
 
-// 默认模型映射
-const DEFAULT_MODEL_MAPPING: Record<string, string> = {
-  'claude-opus-4-6': 'gpt-5.4',
-  'claude-opus-4-6-20250610': 'gpt-5.4',
-  'claude-haiku-4-5-20251001': 'gpt-5.4-mini',
-  'claude-haiku-4-5': 'gpt-5.4-mini',
-  'claude-sonnet-4-6': 'gpt-5.3-codex',
-  'claude-sonnet-4-5-20250929': 'gpt-5.2',
-  'claude-opus-4-5-20251101': 'gpt-5.3-codex',
-}
-
 type ModelMappingEntry = [string, string]
 
 const getDefaultModelMappingEntries = (): ModelMappingEntry[] =>
-  Object.entries(DEFAULT_MODEL_MAPPING) as ModelMappingEntry[]
+  Object.entries(DEFAULT_CLAUDE_MODEL_MAP) as ModelMappingEntry[]
 
 const parseModelMappingEntries = (value: string): ModelMappingEntry[] => {
   try {
@@ -66,7 +56,8 @@ const serializeModelMappingEntries = (entries: ModelMappingEntry[]) => {
   const obj: Record<string, string> = {}
   for (const [key, model] of entries) {
     const trimmedKey = key.trim()
-    if (trimmedKey) obj[trimmedKey] = model.trim()
+    const trimmedModel = model.trim()
+    if (trimmedKey && trimmedModel) obj[trimmedKey] = trimmedModel
   }
   return JSON.stringify(obj)
 }

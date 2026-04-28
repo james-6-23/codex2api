@@ -11,6 +11,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import type { APIKeyRow, UsageLog, UsageStats } from '../types'
+import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
 import { formatCompactEmail } from '../lib/utils'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
@@ -32,23 +33,6 @@ import { Select } from '@/components/ui/select'
 function formatTokens(value?: number | null): string {
   if (value === undefined || value === null) return '0'
   return value.toLocaleString()
-}
-
-// Claude 模型 → Codex 模型映射（与后端 defaultAnthropicModelMap 一致）
-const DEFAULT_CLAUDE_MODEL_MAP: Record<string, string> = {
-  'claude-opus-4-6': 'gpt-5.4',
-  'claude-opus-4-6-20250610': 'gpt-5.4',
-  'claude-haiku-4-5-20251001': 'gpt-5.4-mini',
-  'claude-haiku-4-5': 'gpt-5.4-mini',
-  'claude-sonnet-4-6': 'gpt-5.3-codex',
-  'claude-sonnet-4-5-20250929': 'gpt-5.2',
-  'claude-opus-4-5-20251101': 'gpt-5.3-codex',
-  'claude-sonnet-4-5-20250514': 'gpt-5.4',
-  'claude-sonnet-4-5': 'gpt-5.4',
-  'claude-sonnet-4-20250514': 'gpt-5.4',
-  'claude-sonnet-4': 'gpt-5.4',
-  'claude-opus-4-20250514': 'gpt-5.4',
-  'claude-opus-4': 'gpt-5.4',
 }
 
 function parseClaudeModelMap(value: string): Record<string, string> {
