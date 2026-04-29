@@ -288,6 +288,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_bytes INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_format VARCHAR(20) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_size VARCHAR(32) DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS account_billed DOUBLE PRECISION DEFAULT 0;
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS user_billed DOUBLE PRECISION DEFAULT 0;
 
 	CREATE INDEX IF NOT EXISTS idx_usage_logs_api_key_created_at ON usage_logs(api_key_id, created_at);
 
@@ -1595,9 +1597,11 @@ type AccountRequestCount struct {
 
 // AccountTimeRangeUsage 每个账号在指定时间窗口内的真实请求/token 统计。
 type AccountTimeRangeUsage struct {
-	AccountID int64
-	Requests  int64
-	Tokens    int64
+	AccountID     int64
+	Requests      int64
+	Tokens        int64
+	AccountBilled float64
+	UserBilled    float64
 }
 
 // GetAccountRequestCounts 按 account_id 聚合近 7 天成功/失败请求数
@@ -1633,7 +1637,9 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 	query := `
 	SELECT account_id,
 		COUNT(*) AS requests,
-		COALESCE(SUM(total_tokens), 0) AS tokens
+		COALESCE(SUM(total_tokens), 0) AS tokens,
+		COALESCE(SUM(account_billed), 0) AS account_billed,
+		COALESCE(SUM(user_billed), 0) AS user_billed
 	FROM usage_logs
 	WHERE created_at >= $1 AND status_code <> 499
 	GROUP BY account_id
@@ -1647,7 +1653,7 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 	result := make(map[int64]*AccountTimeRangeUsage)
 	for rows.Next() {
 		usage := &AccountTimeRangeUsage{}
-		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens); err != nil {
+		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens, &usage.AccountBilled, &usage.UserBilled); err != nil {
 			return nil, err
 		}
 		result[usage.AccountID] = usage

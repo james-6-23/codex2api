@@ -296,11 +296,18 @@ type accountResponse struct {
 	LastServerErrorAt        string                     `json:"last_server_error_at,omitempty"`
 	Locked                   bool                       `json:"locked"`
 	AllowedAPIKeyIDs         []int64                    `json:"allowed_api_key_ids"`
+	// 图片配额信息
+	ImageQuotaRemaining      *int                       `json:"image_quota_remaining,omitempty"`
+	ImageQuotaTotal          *int                       `json:"image_quota_total,omitempty"`
+	TodayUsedCount           *int                       `json:"today_used_count,omitempty"`
+	ImageQuotaResetAt        string                     `json:"image_quota_reset_at,omitempty"`
 }
 
 type accountUsageWindow struct {
-	Requests int64 `json:"requests"`
-	Tokens   int64 `json:"tokens"`
+	Requests      int64   `json:"requests"`
+	Tokens        int64   `json:"tokens"`
+	AccountBilled float64 `json:"account_billed"`
+	UserBilled    float64 `json:"user_billed"`
 }
 
 type schedulerBreakdownResponse struct {
@@ -423,10 +430,20 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			resp.ErrorRequests = rc.ErrorCount
 		}
 		if usage, ok := usage5h[row.ID]; ok {
-			resp.Usage5hDetail = &accountUsageWindow{Requests: usage.Requests, Tokens: usage.Tokens}
+			resp.Usage5hDetail = &accountUsageWindow{
+				Requests:      usage.Requests,
+				Tokens:        usage.Tokens,
+				AccountBilled: usage.AccountBilled,
+				UserBilled:    usage.UserBilled,
+			}
 		}
 		if usage, ok := usage7d[row.ID]; ok {
-			resp.Usage7dDetail = &accountUsageWindow{Requests: usage.Requests, Tokens: usage.Tokens}
+			resp.Usage7dDetail = &accountUsageWindow{
+				Requests:      usage.Requests,
+				Tokens:        usage.Tokens,
+				AccountBilled: usage.AccountBilled,
+				UserBilled:    usage.UserBilled,
+			}
 		}
 		accounts = append(accounts, resp)
 	}

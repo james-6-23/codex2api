@@ -18,6 +18,8 @@ export interface StatsResponse {
 export interface AccountUsageWindow {
   requests: number
   tokens: number
+  account_billed?: number
+  user_billed?: number
 }
 
 export interface AccountRow {
@@ -66,6 +68,11 @@ export interface AccountRow {
   reset_7d_at?: ISODateString
   cooldown_until?: ISODateString
   locked?: boolean
+  // 图片配额信息
+  image_quota_remaining?: number
+  image_quota_total?: number
+  today_used_count?: number
+  image_quota_reset_at?: ISODateString
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
