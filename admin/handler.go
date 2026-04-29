@@ -285,6 +285,11 @@ type accountResponse struct {
 	UsagePercent5h           *float64                   `json:"usage_percent_5h"`
 	Reset5hAt                string                     `json:"reset_5h_at,omitempty"`
 	Reset7dAt                string                     `json:"reset_7d_at,omitempty"`
+	// 5h/7d 详细用量数据（用于列表显示）
+	Usage5hDetail            *timeRangeUsageResponse    `json:"usage_5h_detail,omitempty"`
+	Usage7dDetail            *timeRangeUsageResponse    `json:"usage_7d_detail,omitempty"`
+	// Free 账号额度信息
+	FreeQuota                *freeQuotaResponse         `json:"free_quota,omitempty"`
 	ScoreBreakdown           schedulerBreakdownResponse `json:"scheduler_breakdown"`
 	LastUnauthorizedAt       string                     `json:"last_unauthorized_at,omitempty"`
 	LastRateLimitedAt        string                     `json:"last_rate_limited_at,omitempty"`
@@ -292,6 +297,21 @@ type accountResponse struct {
 	LastServerErrorAt        string                     `json:"last_server_error_at,omitempty"`
 	Locked                   bool                       `json:"locked"`
 	AllowedAPIKeyIDs         []int64                    `json:"allowed_api_key_ids"`
+}
+
+type timeRangeUsageResponse struct {
+	Requests      int64   `json:"requests"`
+	Tokens        int64   `json:"tokens"`
+	AccountBilled float64 `json:"account_billed"`
+	UserBilled    float64 `json:"user_billed"`
+}
+
+type freeQuotaResponse struct {
+	RemainingTokens int64   `json:"remaining_tokens"` // 剩余 Token 数
+	RemainingAmount float64 `json:"remaining_amount"` // 剩余金额（美元）
+	TotalTokens     int64   `json:"total_tokens"`     // 总 Token 数
+	TotalAmount     float64 `json:"total_amount"`     // 总金额（美元）
+	ResetAt         string  `json:"reset_at"`         // 重置时间
 }
 
 type schedulerBreakdownResponse struct {
@@ -413,6 +433,64 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			resp.ErrorRequests = rc.ErrorCount
 		}
 		accounts = append(accounts, resp)
+	}
+
+	// 并发查询所有账号的 5h/7d 详细用量数据
+	type usageResult struct {
+		accountID int64
+		usage5h   *timeRangeUsageResponse
+		usage7d   *timeRangeUsageResponse
+	}
+	usageResults := make(chan usageResult, len(accounts))
+	var wg sync.WaitGroup
+
+	for i := range accounts {
+		wg.Add(1)
+		go func(acc *accountResponse) {
+			defer wg.Done()
+			result := usageResult{accountID: acc.ID}
+
+			// 查询 5h 用量
+			if usage5h, err := h.db.GetTimeRangeUsage(ctx, acc.ID, 5*time.Hour); err == nil && usage5h != nil {
+				result.usage5h = &timeRangeUsageResponse{
+					Requests:      usage5h.Requests,
+					Tokens:        usage5h.Tokens,
+					AccountBilled: usage5h.AccountBilled,
+					UserBilled:    usage5h.UserBilled,
+				}
+			}
+
+			// 查询 7d 用量
+			if usage7d, err := h.db.GetTimeRangeUsage(ctx, acc.ID, 7*24*time.Hour); err == nil && usage7d != nil {
+				result.usage7d = &timeRangeUsageResponse{
+					Requests:      usage7d.Requests,
+					Tokens:        usage7d.Tokens,
+					AccountBilled: usage7d.AccountBilled,
+					UserBilled:    usage7d.UserBilled,
+				}
+			}
+
+			usageResults <- result
+		}(&accounts[i])
+	}
+
+	// 等待所有查询完成
+	go func() {
+		wg.Wait()
+		close(usageResults)
+	}()
+
+	// 将用量数据填充到对应的账号
+	usageMap := make(map[int64]usageResult)
+	for result := range usageResults {
+		usageMap[result.accountID] = result
+	}
+
+	for i := range accounts {
+		if result, ok := usageMap[accounts[i].ID]; ok {
+			accounts[i].Usage5hDetail = result.usage5h
+			accounts[i].Usage7dDetail = result.usage7d
+		}
 	}
 
 	c.JSON(http.StatusOK, accountsResponse{Accounts: accounts})

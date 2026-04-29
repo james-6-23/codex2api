@@ -57,8 +57,33 @@ export interface AccountRow {
   usage_percent_5h?: number | null
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
+  // 5h/7d 详细用量数据
+  usage_5h_detail?: TimeRangeUsageDetail
+  usage_7d_detail?: TimeRangeUsageDetail
+  // Free 账号额度信息
+  free_quota?: FreeQuotaInfo
+  // 生图相关信息
+  image_quota_remaining?: number
+  image_quota_total?: number
+  today_used_count?: number
+  image_quota_reset_at?: ISODateString
   cooldown_until?: ISODateString
   locked?: boolean
+}
+
+export interface TimeRangeUsageDetail {
+  requests: number
+  tokens: number
+  account_billed: number
+  user_billed: number
+}
+
+export interface FreeQuotaInfo {
+  remaining_tokens: number
+  remaining_amount: number
+  total_tokens: number
+  total_amount: number
+  reset_at: string
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>

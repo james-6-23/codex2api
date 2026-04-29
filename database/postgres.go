@@ -1410,6 +1410,11 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64) (*Accou
 	return result, rows.Err()
 }
 
+// GetTimeRangeUsage 查询指定时间范围内的用量统计（公开方法）
+func (db *DB) GetTimeRangeUsage(ctx context.Context, accountID int64, duration time.Duration) (*TimeRangeUsage, error) {
+	return db.getTimeRangeUsage(ctx, accountID, duration)
+}
+
 // getTimeRangeUsage 查询指定时间范围内的用量统计
 func (db *DB) getTimeRangeUsage(ctx context.Context, accountID int64, duration time.Duration) (*TimeRangeUsage, error) {
 	startTime := time.Now().Add(-duration)

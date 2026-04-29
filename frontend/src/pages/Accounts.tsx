@@ -2709,10 +2709,25 @@ function UsageCell({ account }: { account: AccountRow }) {
   const has7d = account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
   const has5h = account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
 
+  // 格式化数字
+  const formatNumber = (num: number) => {
+    if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`
+    if (num >= 1000) return `${(num / 1000).toFixed(1)}K`
+    return num.toString()
+  }
+
   if (plan === 'free') {
     if (!has7d) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
-      <div className="w-40">
+      <div className="w-48 space-y-1">
+        {account.usage_7d_detail && (
+          <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground mb-0.5">
+            <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_7d_detail.requests)} req</span>
+            <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_7d_detail.tokens)}</span>
+            <span className="rounded bg-muted px-1.5 py-0.5" title="账号计费">A ${account.usage_7d_detail.account_billed.toFixed(2)}</span>
+            <span className="rounded bg-muted px-1.5 py-0.5" title="用户扣费">U ${account.usage_7d_detail.user_billed.toFixed(2)}</span>
+          </div>
+        )}
         <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
       </div>
     )
@@ -2721,16 +2736,48 @@ function UsageCell({ account }: { account: AccountRow }) {
   if (plan === 'pro' || plan === 'team' || plan === 'plus' || plan === 'teamplus') {
     if (!has5h && !has7d) return <span className="text-[12px] text-muted-foreground">-</span>
     return (
-      <div className="w-48 space-y-1.5">
-        {has5h && <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} />}
-        {has7d && <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />}
+      <div className="w-56 space-y-1.5">
+        {has5h && (
+          <div>
+            {account.usage_5h_detail && (
+              <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground mb-0.5">
+                <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_5h_detail.requests)} req</span>
+                <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_5h_detail.tokens)}</span>
+                <span className="rounded bg-muted px-1.5 py-0.5" title="账号计费">A ${account.usage_5h_detail.account_billed.toFixed(2)}</span>
+                <span className="rounded bg-muted px-1.5 py-0.5" title="用户扣费">U ${account.usage_5h_detail.user_billed.toFixed(2)}</span>
+              </div>
+            )}
+            <UsageBar label="5h" pct={account.usage_percent_5h!} resetAt={account.reset_5h_at} />
+          </div>
+        )}
+        {has7d && (
+          <div>
+            {account.usage_7d_detail && (
+              <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground mb-0.5">
+                <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_7d_detail.requests)} req</span>
+                <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_7d_detail.tokens)}</span>
+                <span className="rounded bg-muted px-1.5 py-0.5" title="账号计费">A ${account.usage_7d_detail.account_billed.toFixed(2)}</span>
+                <span className="rounded bg-muted px-1.5 py-0.5" title="用户扣费">U ${account.usage_7d_detail.user_billed.toFixed(2)}</span>
+              </div>
+            )}
+            <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
+          </div>
+        )}
       </div>
     )
   }
 
   if (has7d) {
     return (
-      <div className="w-40">
+      <div className="w-48 space-y-1">
+        {account.usage_7d_detail && (
+          <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground mb-0.5">
+            <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_7d_detail.requests)} req</span>
+            <span className="rounded bg-muted px-1.5 py-0.5">{formatNumber(account.usage_7d_detail.tokens)}</span>
+            <span className="rounded bg-muted px-1.5 py-0.5" title="账号计费">A ${account.usage_7d_detail.account_billed.toFixed(2)}</span>
+            <span className="rounded bg-muted px-1.5 py-0.5" title="用户扣费">U ${account.usage_7d_detail.user_billed.toFixed(2)}</span>
+          </div>
+        )}
         <UsageBar label="7d" pct={account.usage_percent_7d!} resetAt={account.reset_7d_at} />
       </div>
     )
