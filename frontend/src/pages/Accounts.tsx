@@ -1175,6 +1175,7 @@ export default function Accounts() {
                       >
                         {t('accounts.usage')} {sortKey === 'usage' ? (sortDir === 'desc' ? '↓' : '↑') : ''}
                       </TableHead>
+                      <TableHead className="text-[13px] font-semibold">生图剩余</TableHead>
                       <TableHead
                         className="text-[13px] font-semibold cursor-pointer select-none hover:text-primary transition-colors"
                         onClick={() => { if (sortKey === 'importTime') { setSortDir(d => d === 'asc' ? 'desc' : 'asc') } else { setSortKey('importTime'); setSortDir('desc') }; setPage(1) }}
@@ -1241,6 +1242,9 @@ export default function Accounts() {
                         </TableCell>
                         <TableCell>
                           <UsageCell account={account} />
+                        </TableCell>
+                        <TableCell>
+                          <ImageQuotaCell account={account} />
                         </TableCell>
                         <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">{formatBeijingTime(account.created_at)}</TableCell>
                         <TableCell className="text-[14px] text-muted-foreground">{formatRelativeTime(account.updated_at)}</TableCell>
@@ -2783,6 +2787,30 @@ function UsageCell({ account }: { account: AccountRow }) {
     )
   }
   return <span className="text-[13px] text-muted-foreground">-</span>
+}
+
+// 图片配额显示组件
+function ImageQuotaCell({ account }: { account: AccountRow }) {
+  if (account.image_quota_remaining === undefined || account.image_quota_remaining === null) {
+    return <span className="text-[12px] text-muted-foreground">-</span>
+  }
+
+  const remaining = account.image_quota_remaining
+  const total = account.image_quota_total || 0
+  const used = account.today_used_count || 0
+
+  return (
+    <div className="flex flex-col gap-1">
+      <div className="text-[13px] font-medium">
+        {remaining} 张
+      </div>
+      {total > 0 && (
+        <div className="text-[10px] text-muted-foreground">
+          今日 {used}/{total}
+        </div>
+      )}
+    </div>
+  )
 }
 
 // 冷却倒计时组件

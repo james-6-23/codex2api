@@ -62,7 +62,7 @@ export interface AccountRow {
   usage_7d_detail?: TimeRangeUsageDetail
   // Free 账号额度信息
   free_quota?: FreeQuotaInfo
-  // 生图相关信息
+  // 生图相关信息（图片配额）
   image_quota_remaining?: number
   image_quota_total?: number
   today_used_count?: number

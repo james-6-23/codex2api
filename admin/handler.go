@@ -290,6 +290,11 @@ type accountResponse struct {
 	Usage7dDetail            *timeRangeUsageResponse    `json:"usage_7d_detail,omitempty"`
 	// Free 账号额度信息
 	FreeQuota                *freeQuotaResponse         `json:"free_quota,omitempty"`
+	// 图片配额信息
+	ImageQuotaRemaining      *int                       `json:"image_quota_remaining,omitempty"`
+	ImageQuotaTotal          *int                       `json:"image_quota_total,omitempty"`
+	TodayUsedCount           *int                       `json:"today_used_count,omitempty"`
+	ImageQuotaResetAt        string                     `json:"image_quota_reset_at,omitempty"`
 	ScoreBreakdown           schedulerBreakdownResponse `json:"scheduler_breakdown"`
 	LastUnauthorizedAt       string                     `json:"last_unauthorized_at,omitempty"`
 	LastRateLimitedAt        string                     `json:"last_rate_limited_at,omitempty"`
@@ -435,18 +440,21 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		accounts = append(accounts, resp)
 	}
 
-	// 并发查询所有账号的 5h/7d 详细用量数据
+	// 并发查询所有账号的 5h/7d 详细用量数据和图片配额
 	type usageResult struct {
-		accountID int64
-		usage5h   *timeRangeUsageResponse
-		usage7d   *timeRangeUsageResponse
+		accountID           int64
+		usage5h             *timeRangeUsageResponse
+		usage7d             *timeRangeUsageResponse
+		imageQuotaRemaining *int
+		imageQuotaTotal     *int
+		imageQuotaResetAt   string
 	}
 	usageResults := make(chan usageResult, len(accounts))
 	var wg sync.WaitGroup
 
 	for i := range accounts {
 		wg.Add(1)
-		go func(acc *accountResponse) {
+		go func(acc *accountResponse, row *database.AccountRow) {
 			defer wg.Done()
 			result := usageResult{accountID: acc.ID}
 
@@ -470,8 +478,22 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 				}
 			}
 
+			// 获取图片配额信息（仅对 active 状态的账号）
+			if acc.Status == "active" || acc.Status == "ready" {
+				accessToken := row.GetCredential("access_token")
+				if accessToken != "" {
+					if quota, err := h.fetchImageQuota(ctx, accessToken, row.ProxyURL); err == nil && quota != nil {
+						result.imageQuotaRemaining = &quota.Remaining
+						result.imageQuotaTotal = &quota.Total
+						if !quota.ResetAt.IsZero() {
+							result.imageQuotaResetAt = quota.ResetAt.Format(time.RFC3339)
+						}
+					}
+				}
+			}
+
 			usageResults <- result
-		}(&accounts[i])
+		}(&accounts[i], rows[i])
 	}
 
 	// 等待所有查询完成
@@ -480,7 +502,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		close(usageResults)
 	}()
 
-	// 将用量数据填充到对应的账号
+	// 将用量数据和图片配额填充到对应的账号
 	usageMap := make(map[int64]usageResult)
 	for result := range usageResults {
 		usageMap[result.accountID] = result
@@ -490,6 +512,9 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		if result, ok := usageMap[accounts[i].ID]; ok {
 			accounts[i].Usage5hDetail = result.usage5h
 			accounts[i].Usage7dDetail = result.usage7d
+			accounts[i].ImageQuotaRemaining = result.imageQuotaRemaining
+			accounts[i].ImageQuotaTotal = result.imageQuotaTotal
+			accounts[i].ImageQuotaResetAt = result.imageQuotaResetAt
 		}
 	}
 
@@ -2991,4 +3016,116 @@ func (h *Handler) TestProxy(c *gin.Context) {
 		"latency_ms": latencyMs,
 		"location":   location,
 	})
+}
+
+// imageQuotaInfo 图片配额信息
+type imageQuotaInfo struct {
+	Remaining int       `json:"remaining"`
+	Total     int       `json:"total"`
+	ResetAt   time.Time `json:"reset_at"`
+}
+
+// fetchImageQuota 获取账号的图片配额信息
+// 调用 /backend-api/conversation/init 端点获取图片配额数据
+func (h *Handler) fetchImageQuota(ctx context.Context, accessToken, proxyURL string) (*imageQuotaInfo, error) {
+	reqBody := []byte(`{"gizmo_id":null,"requested_default_model":null,"conversation_id":null,"timezone_offset_min":-480,"system_hints":["picture_v2"]}`)
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		"https://chatgpt.com/backend-api/conversation/init", bytes.NewReader(reqBody))
+	if err != nil {
+		return nil, err
+	}
+
+	// 设置请求头（参考 gpt2api 的实现）
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Origin", "https://chatgpt.com")
+	req.Header.Set("Referer", "https://chatgpt.com/")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36")
+
+	// 创建 HTTP 客户端（支持代理）
+	client := &http.Client{Timeout: 15 * time.Second}
+	if proxyURL != "" {
+		transport, err := h.createProxyTransport(proxyURL)
+		if err == nil {
+			client.Transport = transport
+		}
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("conversation/init http=%d body=%s", resp.StatusCode, string(body))
+	}
+
+	data, _ := io.ReadAll(resp.Body)
+
+	// 解析响应
+	var payload struct {
+		LimitsProgress []struct {
+			FeatureName string `json:"feature_name"`
+			Remaining   *int   `json:"remaining"`
+			ResetAfter  string `json:"reset_after"`
+			MaxValue    *int   `json:"max_value"`
+			Cap         *int   `json:"cap"`
+			Total       *int   `json:"total"`
+			Limit       *int   `json:"limit"`
+		} `json:"limits_progress"`
+	}
+
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+
+	info := &imageQuotaInfo{
+		Remaining: -1,
+		Total:     -1,
+	}
+
+	// 查找 image_gen 相关的配额信息
+	for _, item := range payload.LimitsProgress {
+		featureName := strings.ToLower(item.FeatureName)
+		if !strings.Contains(featureName, "image") {
+			continue
+		}
+
+		if item.Remaining != nil {
+			if info.Remaining < 0 || *item.Remaining < info.Remaining {
+				info.Remaining = *item.Remaining
+			}
+		}
+
+		// 获取 total（优先级：MaxValue > Cap > Total > Limit）
+		if item.MaxValue != nil && *item.MaxValue > info.Total {
+			info.Total = *item.MaxValue
+		} else if item.Cap != nil && *item.Cap > info.Total {
+			info.Total = *item.Cap
+		} else if item.Total != nil && *item.Total > info.Total {
+			info.Total = *item.Total
+		} else if item.Limit != nil && *item.Limit > info.Total {
+			info.Total = *item.Limit
+		}
+
+		// 解析重置时间
+		if item.ResetAfter != "" {
+			if t, e := time.Parse(time.RFC3339, item.ResetAfter); e == nil {
+				if info.ResetAt.IsZero() || t.Before(info.ResetAt) {
+					info.ResetAt = t
+				}
+			}
+		}
+	}
+
+	// 如果没有找到配额信息，返回 nil
+	if info.Remaining < 0 {
+		return nil, nil
+	}
+
+	return info, nil
 }
