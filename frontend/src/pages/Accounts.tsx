@@ -2732,8 +2732,8 @@ function UsageWindowStat({ label, detail }: { label: string; detail?: AccountRow
       </div>
       {(hasAccountBilled || hasUserBilled) && (
         <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
-          {hasAccountBilled && <span>账号: ${detail.account_billed.toFixed(4)}</span>}
-          {hasUserBilled && <span>用户: ${detail.user_billed.toFixed(4)}</span>}
+          {hasAccountBilled && <span>账号: ${detail.account_billed?.toFixed(4)}</span>}
+          {hasUserBilled && <span>用户: ${detail.user_billed?.toFixed(4)}</span>}
         </div>
       )}
     </div>
