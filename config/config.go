@@ -70,7 +70,7 @@ func (c *CacheConfig) Label() string {
 // 业务逻辑参数（如 ProxyURL，APIKeys，MaxConcurrency）已全部移至数据库 SystemSettings 进行化
 type Config struct {
 	Port                   int
-	BindAddress            string // 监听地址，默认 127.0.0.1，公网监听需显式设置为 0.0.0.0
+	BindAddress            string // 监听地址，默认 0.0.0.0（兼容 Docker / 反代 / 公网）；如需仅本机访问可设为 127.0.0.1
 	AdminSecret            string
 	AllowAnonymousV1       bool // 显式允许 /v1/* 在未配置 API Key 时无鉴权放行（默认禁止）
 	MaxRequestBodySize     int
@@ -102,7 +102,7 @@ func Load(envPath string) (*Config, error) {
 	cfg.AdminSecret = strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
 	cfg.AllowAnonymousV1 = parseBoolEnv(os.Getenv("CODEX_ALLOW_ANONYMOUS"))
 	// 默认绑 0.0.0.0 以兼容 Docker 端口映射、反向代理、生产服务器等常规部署。
-	// 安全防护由 fail-closed 中间件 + 自动 ADMIN_SECRET + 启动 banner 共同保证；
+	// 安全防护由 fail-closed 中间件 + 首启自助初始化 (/api/admin/bootstrap) + 启动 banner 共同保证；
 	// 想要严格仅本机访问的用户可设 CODEX_BIND=127.0.0.1。
 	cfg.BindAddress = strings.TrimSpace(os.Getenv("CODEX_BIND"))
 	if cfg.BindAddress == "" {

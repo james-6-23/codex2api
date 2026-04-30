@@ -7,6 +7,7 @@ import logoImg from '../assets/logo.png'
 type AuthStatus = 'checking' | 'need_bootstrap' | 'need_login' | 'authenticated'
 
 const MIN_SECRET_LEN = 8
+const MAX_SECRET_LEN = 256
 
 const COPY = {
   zh: {
@@ -19,6 +20,7 @@ const COPY = {
     submitting: '正在保存…',
     errEmpty: '管理密钥不能为空',
     errTooShort: `管理密钥至少 ${MIN_SECRET_LEN} 位`,
+    errTooLong: `管理密钥不可超过 ${MAX_SECRET_LEN} 个字符`,
     errMismatch: '两次输入不一致',
     errServer: '初始化失败，请稍后再试',
     loginSubtitle: '请输入管理密钥登录',
@@ -37,6 +39,7 @@ const COPY = {
     submitting: 'Saving…',
     errEmpty: 'Admin secret cannot be empty',
     errTooShort: `Admin secret must be at least ${MIN_SECRET_LEN} characters`,
+    errTooLong: `Admin secret must not exceed ${MAX_SECRET_LEN} characters`,
     errMismatch: 'The two entries do not match',
     errServer: 'Initialization failed, please retry',
     loginSubtitle: 'Enter your admin secret to sign in',
@@ -154,6 +157,10 @@ export default function AuthGate({ children }: PropsWithChildren) {
     }
     if (secret.length < MIN_SECRET_LEN) {
       setBsError(copy.errTooShort)
+      return
+    }
+    if (secret.length > MAX_SECRET_LEN) {
+      setBsError(copy.errTooLong)
       return
     }
     if (secret !== confirm) {

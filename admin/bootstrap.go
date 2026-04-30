@@ -32,12 +32,24 @@ const (
 	bootstrapMaxSecret   = 256
 )
 
+// bootstrapAllowRate 使用 CAS 实现固定窗口限频：
+//   - 任意时刻只有一个 goroutine 能成功翻新窗口起点，其它失败者读到的就是
+//     翻新后的最新值，避免多个 goroutine 同时把 count 重置为 0。
+//   - 在并发下，最坏情况只是有一个 reset 与若干 Add 交错，但所有"翻窗"
+//     操作都是原子的，不会出现窗口被重复清零导致超额放行的情况。
 func bootstrapAllowRate() bool {
 	now := time.Now().Unix()
-	winStart := bootstrapState.windowStart.Load()
-	if now-winStart >= bootstrapWindowSec {
-		bootstrapState.windowStart.Store(now)
-		bootstrapState.count.Store(0)
+	for {
+		winStart := bootstrapState.windowStart.Load()
+		if now-winStart < bootstrapWindowSec {
+			break
+		}
+		// 仅当 windowStart 仍是我们读到的旧值时才推进；其它 goroutine 已经
+		// 推进过的话直接退出循环，复用最新窗口。
+		if bootstrapState.windowStart.CompareAndSwap(winStart, now) {
+			bootstrapState.count.Store(0)
+			break
+		}
 	}
 	return bootstrapState.count.Add(1) <= bootstrapMaxPerWin
 }
