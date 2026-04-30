@@ -26,6 +26,7 @@ type AccountRow struct {
 	CooldownReason          string
 	CooldownUntil           sql.NullTime
 	ErrorMessage            string
+	Enabled                 bool
 	Locked                  bool
 	ScoreBiasOverride       sql.NullInt64
 	BaseConcurrencyOverride sql.NullInt64
@@ -267,6 +268,7 @@ func (db *DB) migrate(ctx context.Context) error {
 
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_reason VARCHAR(50) DEFAULT '';
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ NULL;
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS locked BOOLEAN DEFAULT FALSE;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS score_bias_override INT NULL;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS base_concurrency_override INT NULL;
@@ -1849,7 +1851,7 @@ func (db *DB) GetAccountTimeRangeUsage(ctx context.Context, since time.Time) (ma
 // ListActive 获取所有未删除账号。
 func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
 		FROM accounts
 		WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
 		ORDER BY id
@@ -1878,6 +1880,7 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 			&a.CooldownReason,
 			&cooldownUntilRaw,
 			&a.ErrorMessage,
+			&a.Enabled,
 			&a.Locked,
 			&a.ScoreBiasOverride,
 			&a.BaseConcurrencyOverride,
@@ -1907,7 +1910,7 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 // GetAccountByID 获取未删除账号的完整数据库行。
 func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error) {
 	query := `
-		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
+		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), score_bias_override, base_concurrency_override, created_at, updated_at
 		FROM accounts
 		WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
 		LIMIT 1
@@ -1928,6 +1931,7 @@ func (db *DB) GetAccountByID(ctx context.Context, id int64) (*AccountRow, error)
 		&a.CooldownReason,
 		&cooldownUntilRaw,
 		&a.ErrorMessage,
+		&a.Enabled,
 		&a.Locked,
 		&a.ScoreBiasOverride,
 		&a.BaseConcurrencyOverride,
@@ -2020,6 +2024,12 @@ func nullableInt64Value(v sql.NullInt64) interface{} {
 		return nil
 	}
 	return v.Int64
+}
+
+// SetAccountEnabled 设置账号是否参与调度选择
+func (db *DB) SetAccountEnabled(ctx context.Context, id int64, enabled bool) error {
+	_, err := db.conn.ExecContext(ctx, `UPDATE accounts SET enabled = $1 WHERE id = $2`, enabled, id)
+	return err
 }
 
 // SetAccountLocked 设置账号的锁定状态

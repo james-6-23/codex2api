@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -34,6 +35,25 @@ func TestFastSchedulerAcquirePrefersHealthyTier(t *testing.T) {
 
 	if got.DBID != healthy.DBID {
 		t.Fatalf("Acquire() picked dbID=%d, want %d", got.DBID, healthy.DBID)
+	}
+}
+
+func TestFastSchedulerSkipsDispatchPausedAccount(t *testing.T) {
+	paused := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 2)
+	atomic.StoreInt32(&paused.DispatchPaused, 1)
+	fallback := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 2)
+
+	scheduler := NewFastScheduler(2)
+	scheduler.Rebuild([]*Account{paused, fallback})
+
+	got := scheduler.Acquire()
+	if got == nil {
+		t.Fatal("Acquire() returned nil")
+	}
+	defer scheduler.Release(got)
+
+	if got.DBID != fallback.DBID {
+		t.Fatalf("Acquire() picked dbID=%d, want %d", got.DBID, fallback.DBID)
 	}
 }
 
@@ -105,6 +125,94 @@ func TestStoreNextExcludingRespectsAPIKeyWhitelist(t *testing.T) {
 
 	if got.DBID != 2 {
 		t.Fatalf("NextExcluding() picked dbID=%d, want 2", got.DBID)
+	}
+}
+
+func TestStoreNextSkipsDispatchPausedAccount(t *testing.T) {
+	paused := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	atomic.StoreInt32(&paused.DispatchPaused, 1)
+	fallback := newFastSchedulerTestAccount(2, HealthTierHealthy, 80, 1)
+
+	store := &Store{
+		accounts:       []*Account{paused, fallback},
+		maxConcurrency: 1,
+	}
+
+	got := store.Next()
+	if got == nil {
+		t.Fatal("Next() returned nil")
+	}
+	defer store.Release(got)
+
+	if got.DBID != fallback.DBID {
+		t.Fatalf("Next() picked dbID=%d, want %d", got.DBID, fallback.DBID)
+	}
+}
+
+func TestDispatchPausedDoesNotBlockUsageProbe(t *testing.T) {
+	paused := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	atomic.StoreInt32(&paused.DispatchPaused, 1)
+
+	store := &Store{
+		accounts: []*Account{paused},
+	}
+	var probed int32
+	store.SetUsageProbeFunc(func(_ context.Context, account *Account) error {
+		if account.DBID != paused.DBID {
+			t.Fatalf("usage probe account dbID=%d, want %d", account.DBID, paused.DBID)
+		}
+		atomic.AddInt32(&probed, 1)
+		return nil
+	})
+
+	store.parallelProbeUsage(context.Background())
+
+	if got := atomic.LoadInt32(&probed); got != 1 {
+		t.Fatalf("usage probe calls = %d, want 1", got)
+	}
+}
+
+func TestDispatchPausedDoesNotBlockRecoveryProbe(t *testing.T) {
+	paused := newFastSchedulerTestAccount(1, HealthTierBanned, 120, 1)
+	paused.RefreshToken = "rt"
+	paused.ExpiresAt = time.Now().Add(time.Hour)
+	atomic.StoreInt32(&paused.DispatchPaused, 1)
+
+	store := &Store{
+		accounts: []*Account{paused},
+	}
+	var probed int32
+	store.SetUsageProbeFunc(func(_ context.Context, account *Account) error {
+		if account.DBID != paused.DBID {
+			t.Fatalf("recovery probe account dbID=%d, want %d", account.DBID, paused.DBID)
+		}
+		atomic.AddInt32(&probed, 1)
+		return nil
+	})
+
+	store.parallelRecoveryProbe(context.Background())
+
+	if got := atomic.LoadInt32(&probed); got != 1 {
+		t.Fatalf("recovery probe calls = %d, want 1", got)
+	}
+	if atomic.LoadInt32(&paused.DispatchPaused) != 1 {
+		t.Fatal("recovery probe cleared DispatchPaused; enable/disable must remain independent")
+	}
+}
+
+func TestDispatchPausedDoesNotBlockAutoClean(t *testing.T) {
+	paused := newFastSchedulerTestAccount(1, HealthTierBanned, 120, 1)
+	atomic.StoreInt32(&paused.DispatchPaused, 1)
+
+	store := &Store{
+		accounts: []*Account{paused},
+	}
+
+	if cleaned := store.CleanByRuntimeStatus(context.Background(), "unauthorized"); cleaned != 1 {
+		t.Fatalf("CleanByRuntimeStatus cleaned %d accounts, want 1", cleaned)
+	}
+	if got := store.AccountCount(); got != 0 {
+		t.Fatalf("AccountCount() = %d, want 0", got)
 	}
 }
 

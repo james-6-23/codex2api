@@ -97,6 +97,7 @@ type Account struct {
 	Disabled       int32 // 原子标志，1 = 立即不可调度（401 时瞬间置位，无需等锁）
 	AddedAt        int64 // 加入号池的时间（UnixNano），用于过期清理
 	Locked         int32 // 原子标志，1 = 锁定，自动清理跳过此账号
+	DispatchPaused int32 // 原子标志，1 = 禁用调度选择，不影响刷新/探针/清理
 
 	// per-account 调度配置（nil = 跟随默认）
 	ScoreBiasOverride       *int64
@@ -559,6 +560,9 @@ func (a *Account) schedulerSnapshot(baseLimit int64) (AccountHealthTier, float64
 func (a *Account) IsAvailable() bool {
 	// 原子标志优先：401 时瞬间置位，无需等锁即可拦截并发请求
 	if atomic.LoadInt32(&a.Disabled) != 0 {
+		return false
+	}
+	if atomic.LoadInt32(&a.DispatchPaused) != 0 {
 		return false
 	}
 
@@ -1501,6 +1505,9 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 		if row.Locked {
 			atomic.StoreInt32(&account.Locked, 1)
 		}
+		if !row.Enabled {
+			atomic.StoreInt32(&account.DispatchPaused, 1)
+		}
 		if row.Status == "error" {
 			account.Status = StatusError
 			account.ErrorMsg = row.ErrorMessage
@@ -2126,6 +2133,20 @@ func (s *Store) ApplyAccountAllowedAPIKeys(dbID int64, allowedAPIKeyIDs []int64)
 	acc.mu.Lock()
 	acc.setAllowedAPIKeyIDsLocked(allowedAPIKeyIDs)
 	acc.mu.Unlock()
+	s.fastSchedulerUpdate(acc)
+	return true
+}
+
+func (s *Store) ApplyAccountEnabled(dbID int64, enabled bool) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	if enabled {
+		atomic.StoreInt32(&acc.DispatchPaused, 0)
+	} else {
+		atomic.StoreInt32(&acc.DispatchPaused, 1)
+	}
 	s.fastSchedulerUpdate(acc)
 	return true
 }

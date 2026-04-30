@@ -267,6 +267,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "prompt_filter_sensitive_words", "TEXT DEFAULT ''"},
 		{"system_settings", "prompt_filter_custom_patterns", "TEXT DEFAULT '[]'"},
 		{"system_settings", "prompt_filter_disabled_patterns", "TEXT DEFAULT '[]'"},
+		{"accounts", "enabled", "INTEGER DEFAULT 1"},
 		{"accounts", "locked", "INTEGER DEFAULT 0"},
 		{"accounts", "image_quota_remaining", "INTEGER NULL"},
 		{"accounts", "image_quota_total", "INTEGER NULL"},

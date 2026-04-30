@@ -26,7 +26,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, FolderOpen, Lock, Unlock, RotateCcw, Pencil, Check, ChevronDown, Copy } from 'lucide-react'
+import { Plus, RefreshCw, Trash2, Zap, FlaskConical, Ban, Timer, AlertTriangle, Upload, Download, ArrowDownToLine, KeyRound, ExternalLink, FileText, FileJson, BarChart3, Search, Fingerprint, FolderOpen, Lock, Unlock, RotateCcw, Pencil, Check, ChevronDown, Copy, Power, PowerOff } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import AccountUsageModal from '../components/AccountUsageModal'
 
@@ -36,7 +36,7 @@ export default function Accounts() {
   const [showAdd, setShowAdd] = useState(false)
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = useState(20)
-  const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned' | 'error' | 'locked'>('all')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'normal' | 'rate_limited' | 'banned' | 'error' | 'disabled' | 'locked'>('all')
   const [searchQuery, setSearchQuery] = useState('')
   const [planFilter, setPlanFilter] = useState<'all' | 'pro' | 'plus' | 'team' | 'free'>('all')
   const [sortKey, setSortKey] = useState<'requests' | 'usage' | 'importTime' | null>(null)
@@ -161,6 +161,7 @@ export default function Accounts() {
   const rateLimitedAccounts = accounts.filter((account) => account.status === 'rate_limited' || account.status === 'usage_exhausted').length
   const bannedAccounts = accounts.filter((account) => account.status === 'unauthorized').length
   const errorAccounts = accounts.filter((account) => account.status === 'error').length
+  const disabledAccounts = accounts.filter((account) => account.enabled === false).length
   const lockedAccounts = accounts.filter((account) => account.locked).length
   const healthyAccounts = accounts.filter((account) => account.health_tier === 'healthy').length
   const warmAccounts = accounts.filter((account) => account.health_tier === 'warm').length
@@ -180,6 +181,9 @@ export default function Accounts() {
         break
       case 'error':
         if (account.status !== 'error') return false
+        break
+      case 'disabled':
+        if (account.enabled !== false) return false
         break
       case 'locked':
         if (!account.locked) return false
@@ -715,6 +719,17 @@ export default function Accounts() {
     }
   }
 
+  const handleToggleEnabled = async (account: AccountRow) => {
+    const nextEnabled = account.enabled === false
+    try {
+      await api.toggleAccountEnabled(account.id, nextEnabled)
+      showToast(nextEnabled ? t('accounts.enableSuccess') : t('accounts.disableSuccess'))
+      void reload()
+    } catch (error) {
+      showToast(t('accounts.enableFailed', { error: getErrorMessage(error) }), 'error')
+    }
+  }
+
   const handleBatchDelete = async () => {
     if (selected.size === 0) return
     const confirmed = await confirm({
@@ -774,6 +789,25 @@ export default function Accounts() {
       }
     }
     showToast(t(locked ? 'accounts.batchLockDone' : 'accounts.batchUnlockDone', { success, fail }))
+    setBatchLoading(false)
+    setSelected(new Set())
+    void reload()
+  }
+
+  const handleBatchEnabled = async (enabled: boolean) => {
+    if (selected.size === 0) return
+    setBatchLoading(true)
+    let success = 0
+    let fail = 0
+    for (const id of selected) {
+      try {
+        await api.toggleAccountEnabled(id, enabled)
+        success++
+      } catch {
+        fail++
+      }
+    }
+    showToast(t(enabled ? 'accounts.batchEnableDone' : 'accounts.batchDisableDone', { success, fail }))
     setBatchLoading(false)
     setSelected(new Set())
     void reload()
@@ -1062,7 +1096,7 @@ export default function Accounts() {
 
         <div className="toolbar-surface mb-3 flex flex-wrap items-center gap-2">
           <span className="font-semibold text-foreground">{t('accounts.filter')}</span>
-          {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')], ['error', t('accounts.filterError')], ['locked', t('accounts.filterLocked')]] as const).map(([key, label]) => (
+          {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')], ['error', t('accounts.filterError')], ['disabled', t('accounts.filterDisabled')], ['locked', t('accounts.filterLocked')]] as const).map(([key, label]) => (
             <button
               key={key}
               onClick={() => { setStatusFilter(key); setPage(1) }}
@@ -1072,7 +1106,7 @@ export default function Accounts() {
                   : 'bg-muted/50 text-muted-foreground hover:bg-muted'
               }`}
             >
-              {label} {key === 'all' ? totalAccounts : key === 'normal' ? normalAccounts : key === 'rate_limited' ? rateLimitedAccounts : key === 'banned' ? bannedAccounts : key === 'error' ? errorAccounts : lockedAccounts}
+              {label} {key === 'all' ? totalAccounts : key === 'normal' ? normalAccounts : key === 'rate_limited' ? rateLimitedAccounts : key === 'banned' ? bannedAccounts : key === 'error' ? errorAccounts : key === 'disabled' ? disabledAccounts : lockedAccounts}
             </button>
           ))}
         </div>
@@ -1118,6 +1152,12 @@ export default function Accounts() {
             <div className="flex flex-wrap items-center justify-end gap-1.5 max-lg:justify-start">
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchRefresh()}>
                 {t('accounts.batchRefresh')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchEnabled(true)}>
+                <Power className="size-3 mr-1" />{t('accounts.enable')}
+              </Button>
+              <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchEnabled(false)}>
+                <PowerOff className="size-3 mr-1" />{t('accounts.disable')}
               </Button>
               <Button variant="outline" size="sm" disabled={batchLoading} onClick={() => void handleBatchLock(true)}>
                 <Lock className="size-3 mr-1" />{t('accounts.lock')}
@@ -1206,6 +1246,11 @@ export default function Accounts() {
                               AT
                             </span>
                           )}
+                          {account.enabled === false && (
+                            <span className="ml-1.5 inline-flex items-center rounded-md bg-zinc-100 px-1.5 py-0.5 text-[10px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-300 dark:ring-zinc-400/20">
+                              <PowerOff className="size-2.5 mr-0.5" />{t('accounts.disabled')}
+                            </span>
+                          )}
                           {account.locked && (
                             <span className="ml-1.5 inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
                               <Lock className="size-2.5 mr-0.5" />{t('accounts.lock')}
@@ -1292,6 +1337,15 @@ export default function Accounts() {
                               title={account.at_only ? t('accounts.authJsonDisabled') : t('accounts.generateAuthJson')}
                             >
                               <FileJson className="size-3.5" />
+                            </Button>
+                            <Button
+                              variant={account.enabled === false ? 'default' : 'outline'}
+                              size="icon"
+                              className="h-7 w-8 px-0"
+                              onClick={() => void handleToggleEnabled(account)}
+                              title={account.enabled === false ? t('accounts.enableHint') : t('accounts.disableHint')}
+                            >
+                              {account.enabled === false ? <PowerOff className="size-3.5" /> : <Power className="size-3.5" />}
                             </Button>
                             <Button
                               variant={account.locked ? 'default' : 'outline'}
