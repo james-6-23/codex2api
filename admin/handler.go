@@ -1686,9 +1686,9 @@ func (h *Handler) ToggleAccountEnabled(c *gin.Context) {
 	}
 
 	var req struct {
-		Enabled bool `json:"enabled"`
+		Enabled *bool `json:"enabled" binding:"required"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil {
+	if err := c.ShouldBindJSON(&req); err != nil || req.Enabled == nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
@@ -1696,14 +1696,18 @@ func (h *Handler) ToggleAccountEnabled(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
 	defer cancel()
 
-	if err := h.db.SetAccountEnabled(ctx, id, req.Enabled); err != nil {
+	if err := h.db.SetAccountEnabled(ctx, id, *req.Enabled); err != nil {
+		if err == sql.ErrNoRows {
+			writeError(c, http.StatusNotFound, "账号不存在")
+			return
+		}
 		writeError(c, http.StatusInternalServerError, "更新启用状态失败: "+err.Error())
 		return
 	}
 
-	h.store.ApplyAccountEnabled(id, req.Enabled)
+	h.store.ApplyAccountEnabled(id, *req.Enabled)
 
-	if req.Enabled {
+	if *req.Enabled {
 		writeMessage(c, http.StatusOK, "账号已启用")
 	} else {
 		writeMessage(c, http.StatusOK, "账号已禁用")

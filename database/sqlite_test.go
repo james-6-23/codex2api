@@ -55,8 +55,15 @@ func TestSQLiteAccountsEnabledDefaultsAndCanToggle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListActive 返回错误: %v", err)
 	}
+	if len(rows) != 1 {
+		t.Fatalf("ListActive 返回 %d 条，want 1", len(rows))
+	}
 	if rows[0].Enabled {
 		t.Fatal("disabled account Enabled = true, want false")
+	}
+
+	if err := db.SetAccountEnabled(ctx, id+1, false); err != sql.ErrNoRows {
+		t.Fatalf("SetAccountEnabled missing account error = %v, want sql.ErrNoRows", err)
 	}
 }
 

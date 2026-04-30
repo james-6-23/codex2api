@@ -2028,8 +2028,18 @@ func nullableInt64Value(v sql.NullInt64) interface{} {
 
 // SetAccountEnabled 设置账号是否参与调度选择
 func (db *DB) SetAccountEnabled(ctx context.Context, id int64, enabled bool) error {
-	_, err := db.conn.ExecContext(ctx, `UPDATE accounts SET enabled = $1 WHERE id = $2`, enabled, id)
-	return err
+	res, err := db.conn.ExecContext(ctx, `UPDATE accounts SET enabled = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, enabled, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 // SetAccountLocked 设置账号的锁定状态

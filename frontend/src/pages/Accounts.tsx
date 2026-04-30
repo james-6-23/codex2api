@@ -799,18 +799,21 @@ export default function Accounts() {
     setBatchLoading(true)
     let success = 0
     let fail = 0
-    for (const id of selected) {
-      try {
-        await api.toggleAccountEnabled(id, enabled)
-        success++
-      } catch {
-        fail++
+    try {
+      for (const id of selected) {
+        try {
+          await api.toggleAccountEnabled(id, enabled)
+          success++
+        } catch {
+          fail++
+        }
       }
+      showToast(t(enabled ? 'accounts.batchEnableDone' : 'accounts.batchDisableDone', { success, fail }))
+      setSelected(new Set())
+      void reload()
+    } finally {
+      setBatchLoading(false)
     }
-    showToast(t(enabled ? 'accounts.batchEnableDone' : 'accounts.batchDisableDone', { success, fail }))
-    setBatchLoading(false)
-    setSelected(new Set())
-    void reload()
   }
 
   const handleResetStatus = async (account: AccountRow) => {
@@ -1345,7 +1348,7 @@ export default function Accounts() {
                               onClick={() => void handleToggleEnabled(account)}
                               title={account.enabled === false ? t('accounts.enableHint') : t('accounts.disableHint')}
                             >
-                              {account.enabled === false ? <PowerOff className="size-3.5" /> : <Power className="size-3.5" />}
+                              {account.enabled === false ? <Power className="size-3.5" /> : <PowerOff className="size-3.5" />}
                             </Button>
                             <Button
                               variant={account.locked ? 'default' : 'outline'}
