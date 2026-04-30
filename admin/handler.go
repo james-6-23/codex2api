@@ -100,6 +100,11 @@ func (h *Handler) SetPoolSizes(pgMaxConns, redisPoolSize int) {
 func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.GET("/p/img/:id", h.GetSignedImageAssetFile)
 
+	// 首次初始化端点（无需鉴权，仅在系统未配置 ADMIN_SECRET 时可用）
+	// 这两个端点必须注册在 adminAuthMiddleware 之外，否则会被 fail-closed 拦截。
+	r.GET("/api/admin/bootstrap-status", h.GetBootstrapStatus)
+	r.POST("/api/admin/bootstrap", h.PostBootstrap)
+
 	api := r.Group("/api/admin")
 	api.Use(h.adminAuthMiddleware())
 	api.GET("/stats", h.GetStats)
@@ -167,12 +172,22 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 }
 
 // adminAuthMiddleware 管理接口鉴权中间件（增强版，增加安全审计日志）
+//
+// 安全策略（fail-closed）：
+//   - 未配置 ADMIN_SECRET 时一律拒绝（503），防止 /api/admin/* 裸奔。
+//   - 用户应通过前端「首次初始化」页面（无鉴权的 /api/admin/bootstrap 端点）
+//     设置初始密钥，或者在 .env 中显式设置 ADMIN_SECRET 后重启。
 func (h *Handler) adminAuthMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		adminSecret, source := h.resolveAdminSecret(c.Request.Context())
 		if adminSecret == "" {
-			// 未配置管理密钥，跳过鉴权
-			c.Next()
+			// fail-closed：拒绝并提示用户配置 ADMIN_SECRET
+			security.SecurityAuditLog("ADMIN_BLOCKED_NO_SECRET", fmt.Sprintf("path=%s ip=%s", c.Request.URL.Path, c.ClientIP()))
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error": "管理接口未初始化：ADMIN_SECRET 尚未配置。请在浏览器访问 /admin/ 完成首次初始化，或在 .env 中设置 ADMIN_SECRET 后重启。",
+				"code":  "bootstrap_required",
+			})
+			c.Abort()
 			return
 		}
 

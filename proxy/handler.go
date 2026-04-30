@@ -551,11 +551,28 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 }
 
 // authMiddleware API Key 鉴权中间件（增强版，带安全日志）
+//
+// 安全策略（fail-closed）：
+//   - 默认情况下，未配置任何 API Key 时直接拒绝请求（503），避免裸奔账号池。
+//   - 仅当显式设置 CODEX_ALLOW_ANONYMOUS=true 时才在无密钥情况下放行（兼容内网/测试）。
 func (h *Handler) authMiddleware() gin.HandlerFunc {
+	allowAnonymous := h.cfg != nil && h.cfg.AllowAnonymousV1
 	return func(c *gin.Context) {
-		// 如果没有配置任何密钥，跳过鉴权
+		// 如果没有配置任何密钥
 		if !h.hasAnyKeys() {
-			c.Next()
+			if allowAnonymous {
+				// 显式允许匿名访问（旧行为，仅在 CODEX_ALLOW_ANONYMOUS=true 时启用）
+				c.Next()
+				return
+			}
+			// fail-closed：未配置 API Key 即拒绝，避免账号池被未授权调用
+			security.SecurityAuditLog("V1_BLOCKED_NO_KEYS", fmt.Sprintf("path=%s ip=%s", c.Request.URL.Path, c.ClientIP()))
+			api.SendError(c, api.NewAPIError(
+				api.ErrCodeServiceUnavailable,
+				"Service is not configured: no API key has been created yet. Please add at least one API key in the admin dashboard, or set CODEX_ALLOW_ANONYMOUS=true to disable this check.",
+				api.ErrorTypeServer,
+			))
+			c.Abort()
 			return
 		}
 

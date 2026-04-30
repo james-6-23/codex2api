@@ -261,11 +261,19 @@ func main() {
 		})
 	})
 
-	addr := fmt.Sprintf(":%d", cfg.Port)
+	// 6.5 启动安全状态自检 banner
+	printSecurityBanner(db, cfg, settings)
+
+	addr := fmt.Sprintf("%s:%d", cfg.BindAddress, cfg.Port)
+	displayHost := cfg.BindAddress
+	if displayHost == "0.0.0.0" || displayHost == "::" {
+		displayHost = "localhost"
+	}
 	log.Println("==========================================")
 	log.Printf("  Codex2API v2 已启动")
-	log.Printf("  HTTP:   http://0.0.0.0%s", addr)
-	log.Printf("  管理台: http://0.0.0.0%s/admin/", addr)
+	log.Printf("  Listen: %s", addr)
+	log.Printf("  HTTP:   http://%s:%d", displayHost, cfg.Port)
+	log.Printf("  管理台: http://%s:%d/admin/", displayHost, cfg.Port)
 	log.Printf("  API:    POST /v1/chat/completions")
 	log.Printf("  API:    POST /v1/responses")
 	log.Printf("  API:    POST /v1/images/generations")
@@ -340,6 +348,76 @@ func loggerMiddleware() gin.HandlerFunc {
 			log.Printf("%s %s %d %v%s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency, tagStr)
 		}
 	}
+}
+
+// printSecurityBanner 启动时打印安全状态自检 banner：
+//   - 不再自动生成 ADMIN_SECRET。若两端都空，则提示用户首次访问页面进行初始化。
+//   - 检查 API Key 数量、监听地址、匿名开关，命中风险时给出对应提示。
+func printSecurityBanner(db *database.DB, cfg *config.Config, settings *database.SystemSettings) {
+	if db == nil || cfg == nil || settings == nil {
+		return
+	}
+
+	envSecret := strings.TrimSpace(cfg.AdminSecret)
+	dbSecret := strings.TrimSpace(settings.AdminSecret)
+	needsBootstrap := envSecret == "" && dbSecret == ""
+
+	apiKeyCount := 0
+	{
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if rows, err := db.ListAPIKeys(ctx); err == nil {
+			apiKeyCount = len(rows)
+		}
+		cancel()
+	}
+
+	bind := strings.TrimSpace(cfg.BindAddress)
+	publicBind := bind == "" || bind == "0.0.0.0" || bind == "::"
+	const sep = "=========================================================="
+	log.Println(sep)
+	log.Println("[SECURITY] Codex2API 安全状态自检")
+	log.Println(sep)
+
+	switch {
+	case needsBootstrap:
+		log.Println("⚠ 尚未配置 ADMIN_SECRET（环境变量与数据库均为空）。")
+		log.Printf("  请使用浏览器访问管理台 http://%s:%d/admin/ 完成首次初始化，", bannerDisplayHost(bind), cfg.Port)
+		log.Println("  设置一个强随机的管理密钥；该密钥也将作为登录密钥。")
+		log.Println("  在初始化完成之前，所有 /api/admin/* 接口（除初始化端点外）均返回 503。")
+	case envSecret != "":
+		log.Println("✓ ADMIN_SECRET 来源：环境变量 (.env)")
+	default:
+		log.Println("✓ ADMIN_SECRET 来源：数据库（如需修改请进入「设置」页面）")
+	}
+
+	if apiKeyCount == 0 {
+		if cfg.AllowAnonymousV1 {
+			log.Println("⚠ /v1/* 当前处于【匿名访问】模式（CODEX_ALLOW_ANONYMOUS=true）。")
+			log.Println("  任何能访问端口的人均可调用 /v1/* 消耗你的账号池配额，请仅在内网/测试环境使用！")
+		} else {
+			log.Println("⚠ 尚未创建任何对外 API Key。/v1/* 接口在创建第一把 Key 之前会返回 503。")
+			log.Println("  请进入管理台「API 密钥」页面创建至少一把 Key 后再对外提供服务。")
+		}
+	} else {
+		log.Printf("✓ 已配置 %d 个对外 API Key，/v1/* 强制鉴权已生效。", apiKeyCount)
+	}
+
+	if publicBind {
+		log.Printf("ℹ 监听地址 = %s （所有网卡，兼容 Docker / 反代 / 公网）。", bind)
+		log.Println("  生产环境请确认已部署反向代理 + HTTPS、配置防火墙白名单，并使用强 ADMIN_SECRET 与 API Key。")
+		log.Println("  如希望服务只在本机回环可达，可设置 CODEX_BIND=127.0.0.1。")
+	} else {
+		log.Printf("✓ 监听地址 = %s （受限访问）。", bind)
+	}
+
+	log.Println(sep)
+}
+
+func bannerDisplayHost(bind string) string {
+	if bind == "" || bind == "0.0.0.0" || bind == "::" {
+		return "<your-host>"
+	}
+	return bind
 }
 
 func shouldSkipAccessLog(method string, path string, status int) bool {

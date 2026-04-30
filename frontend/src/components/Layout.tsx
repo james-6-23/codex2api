@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import logoImg from '../assets/logo.png'
 import { useTheme } from '../hooks/useTheme'
 import { useVersionCheck } from '../hooks/useVersionCheck'
+import SecurityBanner from './SecurityBanner'
 
 type NavDef = {
   to: string
@@ -178,6 +179,7 @@ export default function Layout({ children }: PropsWithChildren) {
             </div>
           </header>
 
+          <SecurityBanner />
           <div className="min-h-full">{children}</div>
         </main>
 
