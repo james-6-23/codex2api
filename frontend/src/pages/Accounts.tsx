@@ -1521,14 +1521,14 @@ export default function Accounts() {
           </div>
         ) : null}
 
-        <div className="mb-3 grid gap-3 xl:grid-cols-2">
-          <div className="toolbar-surface flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-foreground">{t('accounts.filter')}</span>
+        <div className="mb-3 grid gap-3 xl:grid-cols-[minmax(0,1fr)_max-content]">
+          <div className="toolbar-surface flex items-center gap-1.5 overflow-x-auto xl:flex-nowrap">
+            <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">{t('accounts.filter')}</span>
             {([['all', t('accounts.filterAll')], ['normal', t('accounts.filterNormal')], ['rate_limited', t('accounts.filterRateLimited')], ['banned', t('accounts.filterBanned')], ['error', t('accounts.filterError')], ['disabled', t('accounts.filterDisabled')], ['locked', t('accounts.filterLocked')]] as const).map(([key, label]) => (
               <button
                 key={key}
                 onClick={() => { setStatusFilter(key); setPage(1) }}
-                className={`rounded-md px-2.5 py-1 font-semibold transition-colors ${
+                className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1 font-semibold transition-colors ${
                   statusFilter === key
                     ? 'bg-primary text-primary-foreground'
                     : 'bg-muted/50 text-muted-foreground hover:bg-muted'
@@ -1539,8 +1539,8 @@ export default function Accounts() {
             ))}
           </div>
 
-          <div className="toolbar-surface flex flex-wrap items-center gap-2">
-            <span className="font-semibold text-foreground">{t('accounts.schedulerView')}</span>
+          <div className="toolbar-surface flex items-center gap-1.5 overflow-x-auto xl:flex-nowrap">
+            <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">{t('accounts.schedulerView')}</span>
             <SchedulerChip label={t('accounts.healthy')} value={healthyAccounts} tone="success" />
             <SchedulerChip label={t('accounts.warm')} value={warmAccounts} tone="warning" />
             <SchedulerChip label={t('accounts.risky')} value={riskyAccounts} tone="danger" />
@@ -1548,8 +1548,8 @@ export default function Accounts() {
           </div>
         </div>
 
-        <div className="mb-4 flex flex-wrap items-center gap-2">
-          <div className="relative w-72 max-sm:w-full">
+        <div className="mb-4 flex items-center gap-2 overflow-x-auto max-lg:flex-wrap">
+          <div className="relative w-64 shrink-0 max-sm:w-full">
             <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
             <Input
               className="pl-9 h-8 rounded-lg text-[13px]"
@@ -1558,12 +1558,12 @@ export default function Accounts() {
               onChange={(e: ChangeEvent<HTMLInputElement>) => { setSearchQuery(e.target.value); setPage(1) }}
             />
           </div>
-          <div className="flex items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
+          <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5">
             {(['all', 'pro', 'prolite', 'plus', 'team', 'free'] as const).map((key) => (
               <button
                 key={key}
                 onClick={() => { setPlanFilter(key); setPage(1) }}
-                className={`rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
                   planFilter === key
                     ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
@@ -1578,7 +1578,7 @@ export default function Accounts() {
             ))}
           </div>
           <Select
-            className="w-44"
+            className="w-36 shrink-0"
             compact
             value={tagFilter || 'all'}
             onValueChange={(value) => { setTagFilter(value === 'all' ? '' : value); setPage(1) }}
@@ -1588,7 +1588,7 @@ export default function Accounts() {
             ]}
           />
           <Select
-            className="w-44"
+            className="w-36 shrink-0"
             compact
             value={groupFilter === null ? 'all' : String(groupFilter)}
             onValueChange={(value) => { setGroupFilter(value === 'all' ? null : Number(value)); setPage(1) }}
@@ -1597,22 +1597,24 @@ export default function Accounts() {
               ...allGroups.map((group) => ({ value: String(group.id), label: group.name })),
             ]}
           />
-          <ColumnSettingsMenu
-            columns={visibleColumns}
-            onToggle={(column) => setVisibleColumns((current) => ({ ...current, [column]: !current[column] }))}
-            labels={{
-              sequence: t('accounts.sequence'),
-              email: t('accounts.email'),
-              plan: t('accounts.plan'),
-              status: t('accounts.status'),
-              requests: t('accounts.requests'),
-              usage: t('accounts.usage'),
-              importTime: t('accounts.importTime'),
-              updatedAt: t('accounts.updatedAt'),
-              actions: t('accounts.actions'),
-            }}
-            title={t('accounts.columnSettings')}
-          />
+          <div className="ml-auto shrink-0">
+            <ColumnSettingsMenu
+              columns={visibleColumns}
+              onToggle={(column) => setVisibleColumns((current) => ({ ...current, [column]: !current[column] }))}
+              labels={{
+                sequence: t('accounts.sequence'),
+                email: t('accounts.email'),
+                plan: t('accounts.plan'),
+                status: t('accounts.status'),
+                requests: t('accounts.requests'),
+                usage: t('accounts.usage'),
+                importTime: t('accounts.importTime'),
+                updatedAt: t('accounts.updatedAt'),
+                actions: t('accounts.actions'),
+              }}
+              title={t('accounts.columnSettings')}
+            />
+          </div>
         </div>
 
         {selected.size > 0 && (

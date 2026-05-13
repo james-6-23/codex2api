@@ -1054,16 +1054,16 @@ export default function Usage() {
         {/* Logs table */}
         <Card>
           <CardContent className="p-4">
-            <div className="flex items-center justify-between gap-4 mb-4 flex-wrap">
-              <div className="flex items-center gap-3">
-                <h3 className="text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
-                <div className="inline-flex rounded-lg border border-border bg-muted/50 p-0.5">
+            <div className="mb-4 flex items-center justify-between gap-3 overflow-x-auto">
+              <div className="flex shrink-0 items-center gap-3">
+                <h3 className="whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
+                <div className="inline-flex shrink-0 rounded-lg border border-border bg-muted/50 p-0.5">
                   {TIME_RANGE_OPTIONS.map((key) => (
                     <button
                       key={key}
                       type="button"
                       onClick={() => { setTimeRange(key); setPage(1) }}
-                      className={`px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
+                      className={`whitespace-nowrap px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
                         timeRange === key
                           ? 'bg-background text-foreground shadow-sm border border-border'
                           : 'text-muted-foreground hover:text-foreground'
@@ -1074,8 +1074,8 @@ export default function Usage() {
                   ))}
                 </div>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="text-xs text-muted-foreground">{logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}</span>
+              <div className="flex shrink-0 items-center gap-3">
+                <span className="whitespace-nowrap text-xs text-muted-foreground">{logsLoading ? t('common.loading') : t('usage.recordsCount', { count: logsTotal })}</span>
                 <Button
                   variant="destructive"
                   size="sm"
@@ -1109,9 +1109,9 @@ export default function Usage() {
             </div>
 
             {/* 筛选栏 */}
-            <div className="toolbar-surface mb-4 flex flex-wrap items-center gap-2">
+            <div className="toolbar-surface mb-4 flex items-center gap-2 overflow-x-auto whitespace-nowrap">
               {/* 搜索框 */}
-              <div className="relative w-72 max-sm:w-full">
+              <div className="relative w-60 shrink-0 max-sm:w-full">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
                 <Input
                   className="pl-8 h-8 rounded-lg text-[13px]"
@@ -1123,7 +1123,7 @@ export default function Usage() {
 
               {/* 模型下拉 */}
               <Select
-                className="w-44"
+                className="w-36 shrink-0"
                 compact
                 value={filterModel}
                 onValueChange={(v) => { setFilterModel(v); setPage(1) }}
@@ -1136,7 +1136,7 @@ export default function Usage() {
 
               {/* 端点下拉 */}
               <Select
-                className="w-52"
+                className="w-44 shrink-0"
                 compact
                 value={filterEndpoint}
                 onValueChange={(v) => { setFilterEndpoint(v); setPage(1) }}
@@ -1153,7 +1153,7 @@ export default function Usage() {
 
               {showAPIKeyFilter && (
                 <Select
-                  className="w-60"
+                  className="w-48 shrink-0"
                   compact
                   value={filterApiKeyId}
                   onValueChange={(v) => { setFilterApiKeyId(v); setPage(1) }}
@@ -1164,7 +1164,7 @@ export default function Usage() {
 
               {/* 类型下拉 */}
               <Select
-                className="w-32"
+                className="w-28 shrink-0"
                 compact
                 value={filterStream}
                 onValueChange={(v) => { setFilterStream(v as '' | 'true' | 'false'); setPage(1) }}
@@ -1180,7 +1180,7 @@ export default function Usage() {
                 <button
                   type="button"
                   onClick={() => { setFilterFast(filterFast === 'true' ? '' : 'true'); setPage(1) }}
-                  className={`h-8 px-2.5 rounded-lg border text-[13px] font-medium transition-colors inline-flex items-center gap-1 ${
+                  className={`h-8 shrink-0 px-2.5 rounded-lg border text-[13px] font-medium transition-colors inline-flex items-center gap-1 whitespace-nowrap ${
                     filterFast === 'true'
                       ? 'border-blue-500/40 bg-blue-500/12 text-blue-600 dark:bg-blue-500/20 dark:text-blue-400'
                       : 'border-border bg-background text-muted-foreground hover:text-foreground hover:bg-muted/50'
@@ -1202,14 +1202,14 @@ export default function Usage() {
                     setFilterStream(''); setFilterFast('')
                     setPage(1)
                   }}
-                  className="h-8 px-2.5 rounded-lg border border-border bg-background text-[13px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors inline-flex items-center gap-1"
+                  className="h-8 shrink-0 px-2.5 rounded-lg border border-border bg-background text-[13px] text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors inline-flex items-center gap-1 whitespace-nowrap"
                 >
                   <X className="size-3.5" />
                   {t('usage.clearFilters')}
                 </button>
               )}
 
-              <div className="ml-auto max-sm:ml-0">
+              <div className="ml-auto shrink-0">
                 <ColumnSettingsDropdown
                   open={columnSettingsOpen}
                   columns={visibleColumns}
