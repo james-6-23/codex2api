@@ -1,10 +1,23 @@
-import { useState, useEffect, useCallback } from 'react'
+import { useState, useEffect, useCallback, useMemo } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Globe, Plus, Trash2, Play, MapPin, Loader2, Zap, ChevronLeft, ChevronRight, Eye, EyeOff } from 'lucide-react'
+import { Globe, Plus, Trash2, Play, MapPin, Loader2, Zap, ChevronLeft, ChevronRight, Eye, EyeOff, AlertTriangle, Pencil } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
 import { api, type ProxyRow, type ProxyTestResult } from '../api'
+import ToastNotice from '../components/ToastNotice'
+import { useToast } from '../hooks/useToast'
+import { getErrorMessage } from '../utils/error'
 
 const PAGE_SIZE = 10
+const TEST_ALL_CONCURRENCY = 4
+
+function validateProxyInput(url: string): boolean {
+  try {
+    const parsed = new URL(url)
+    return Boolean(parsed.hostname) && ['http:', 'https:', 'socks5:', 'socks5h:'].includes(parsed.protocol)
+  } catch {
+    return false
+  }
+}
 
 function latencyColor(ms: number): string {
   if (ms <= 0) return 'text-muted-foreground'
@@ -33,6 +46,7 @@ function maskUrl(url: string): string {
 
 export default function Proxies() {
   const { t, i18n } = useTranslation()
+  const { toast, showToast } = useToast()
   const [proxies, setProxies] = useState<ProxyRow[]>([])
   const [loading, setLoading] = useState(true)
   const [poolEnabled, setPoolEnabled] = useState(false)
@@ -43,8 +57,15 @@ export default function Proxies() {
   const [selected, setSelected] = useState<Set<number>>(new Set())
   const [testingIds, setTestingIds] = useState<Set<number>>(new Set())
   const [testAllLoading, setTestAllLoading] = useState(false)
+  const [testAllDone, setTestAllDone] = useState(0)
+  const [testAllFailed, setTestAllFailed] = useState(0)
   const [page, setPage] = useState(1)
   const [revealedIds, setRevealedIds] = useState<Set<number>>(new Set())
+  const [editingProxy, setEditingProxy] = useState<ProxyRow | null>(null)
+  const [editUrl, setEditUrl] = useState('')
+  const [editLabel, setEditLabel] = useState('')
+  const [editSaving, setEditSaving] = useState(false)
+  const [editError, setEditError] = useState('')
 
   const ipApiLang = i18n.language?.startsWith('zh') ? 'zh-CN' : 'en'
 
@@ -53,9 +74,11 @@ export default function Proxies() {
       const [proxyRes, settingsRes] = await Promise.all([api.listProxies(), api.getSettings()])
       setProxies(proxyRes.proxies)
       setPoolEnabled(settingsRes.proxy_pool_enabled)
-    } catch { /* ignore */ }
+    } catch (error) {
+      showToast(t('proxies.loadFailed', { error: getErrorMessage(error) }), 'error') // TODO: Track B adds i18n key
+    }
     setLoading(false)
-  }, [])
+  }, [showToast, t])
 
   useEffect(() => { reload() }, [reload])
 
@@ -86,7 +109,9 @@ export default function Proxies() {
       setAddLabel('')
       setShowAdd(false)
       await reload()
-    } catch { /* ignore */ }
+    } catch (error) {
+      showToast(t('proxies.addFailed', { error: getErrorMessage(error) }), 'error') // TODO: Track B adds i18n key
+    }
     setAddLoading(false)
   }
 
@@ -94,7 +119,9 @@ export default function Proxies() {
     try {
       await api.deleteProxy(id)
       await reload()
-    } catch { /* ignore */ }
+    } catch (error) {
+      showToast(t('proxies.deleteFailed', { error: getErrorMessage(error) }), 'error') // TODO: Track B adds i18n key
+    }
   }
 
   const handleBatchDelete = async () => {
@@ -103,7 +130,37 @@ export default function Proxies() {
       await api.batchDeleteProxies([...selected])
       setSelected(new Set())
       await reload()
-    } catch { /* ignore */ }
+    } catch (error) {
+      showToast(t('proxies.batchDeleteFailed', { error: getErrorMessage(error) }), 'error') // TODO: Track B adds i18n key
+    }
+  }
+
+  const startEdit = (p: ProxyRow) => {
+    setEditingProxy(p)
+    setEditUrl(p.url)
+    setEditLabel(p.label || '')
+    setEditError('')
+  }
+
+  const handleEditSave = async () => {
+    if (!editingProxy) return
+    const trimmedUrl = editUrl.trim()
+    if (!trimmedUrl || !validateProxyInput(trimmedUrl)) {
+      setEditError(t('proxies.invalidProxyUrl')) // TODO: Track B adds i18n key
+      return
+    }
+    setEditSaving(true)
+    setEditError('')
+    try {
+      await api.updateProxy(editingProxy.id, { url: trimmedUrl, label: editLabel.trim() || undefined })
+      setEditingProxy(null)
+      await reload()
+      showToast(t('proxies.proxyUpdated')) // TODO: Track B adds i18n key
+    } catch (error) {
+      setEditError(getErrorMessage(error))
+    } finally {
+      setEditSaving(false)
+    }
   }
 
   const handleToggle = async (p: ProxyRow) => {
@@ -124,7 +181,9 @@ export default function Proxies() {
             : px
         ))
       }
-    } catch { /* ignore */ }
+    } catch (error) {
+      showToast(t('proxies.testFailed', { error: getErrorMessage(error) }), 'error') // TODO: Track B adds i18n key
+    }
     setTestingIds(prev => {
       const next = new Set(prev)
       next.delete(p.id)
@@ -134,7 +193,13 @@ export default function Proxies() {
 
   const handleTestAll = async () => {
     setTestAllLoading(true)
-    for (const p of proxies) {
+    setTestAllDone(0)
+    setTestAllFailed(0)
+    let failedCount = 0
+    let firstError = ''
+    let nextIndex = 0
+    const queue = [...proxies]
+    const testOne = async (p: ProxyRow) => {
       setTestingIds(prev => new Set(prev).add(p.id))
       try {
         const result = await api.testProxy(p.url, p.id, ipApiLang)
@@ -145,12 +210,33 @@ export default function Proxies() {
               : px
           ))
         }
-      } catch { /* ignore */ }
-      setTestingIds(prev => {
-        const next = new Set(prev)
-        next.delete(p.id)
-        return next
-      })
+      } catch (error) {
+        failedCount += 1
+        setTestAllFailed(failedCount)
+        if (!firstError) firstError = getErrorMessage(error)
+      } finally {
+        setTestAllDone(prev => prev + 1)
+        setTestingIds(prev => {
+          const next = new Set(prev)
+          next.delete(p.id)
+          return next
+        })
+      }
+    }
+
+    const worker = async () => {
+      for (;;) {
+        const current = nextIndex
+        nextIndex += 1
+        const proxy = queue[current]
+        if (!proxy) return
+        await testOne(proxy)
+      }
+    }
+
+    await Promise.all(Array.from({ length: Math.min(TEST_ALL_CONCURRENCY, queue.length) }, worker))
+    if (failedCount > 0) {
+      showToast(t('proxies.testAllFailed', { count: failedCount, error: firstError }), 'error') // TODO: Track B adds i18n key
     }
     setTestAllLoading(false)
   }
@@ -224,7 +310,9 @@ export default function Proxies() {
               className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm font-semibold text-foreground transition-colors hover:bg-muted/50 disabled:opacity-50"
             >
               {testAllLoading ? <Loader2 className="size-4 animate-spin" /> : <Zap className="size-4" />}
-              {testAllLoading ? t('proxies.testingAll') : t('proxies.testAll')}
+              {testAllLoading
+                ? t('proxies.testingAllProgress', { done: testAllDone, total: proxies.length, failed: testAllFailed }) // TODO: Track B adds i18n key
+                : t('proxies.testAll')}
             </button>
           )}
 
@@ -412,6 +500,13 @@ export default function Proxies() {
                           <td className="p-3">
                             <div className="flex items-center gap-1.5 justify-end">
                               <button
+                                onClick={() => startEdit(p)}
+                                className="flex items-center justify-center size-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
+                                title={t('proxies.editProxy')} // TODO: Track B adds i18n key
+                              >
+                                <Pencil className="size-3.5" />
+                              </button>
+                              <button
                                 onClick={() => handleTest(p)}
                                 disabled={isTesting}
                                 className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-50"
@@ -477,6 +572,60 @@ export default function Proxies() {
           )}
         </CardContent>
       </Card>
+
+      {/* Edit Proxy Dialog */}
+      {editingProxy && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm" onClick={() => setEditingProxy(null)}>
+          <div className="w-full max-w-md rounded-xl border border-border bg-card p-6 shadow-2xl" onClick={e => e.stopPropagation()}>
+            <h3 className="text-base font-semibold text-foreground mb-4">{t('proxies.editProxyTitle')}</h3> {/* TODO: Track B adds i18n key */}
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">{t('proxies.editUrlLabel')}</label> {/* TODO: Track B adds i18n key */}
+                <input
+                  type="text"
+                  value={editUrl}
+                  onChange={e => { setEditUrl(e.target.value); setEditError('') }}
+                  className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+                  placeholder="http://user:pass@ip:port"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">{t('proxies.editLabelLabel')}</label> {/* TODO: Track B adds i18n key */}
+                <input
+                  type="text"
+                  value={editLabel}
+                  onChange={e => setEditLabel(e.target.value)}
+                  className="w-full px-3 py-2 text-sm rounded-md border border-border bg-background text-foreground placeholder:text-muted-foreground outline-none focus:ring-2 focus:ring-primary/30"
+                  placeholder={t('proxies.labelPlaceholder')}
+                />
+              </div>
+              {editError && (
+                <div className="flex items-center gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">
+                  <AlertTriangle className="size-4 shrink-0" />
+                  {editError}
+                </div>
+              )}
+              <div className="flex items-center justify-end gap-2 pt-2">
+                <button
+                  onClick={() => setEditingProxy(null)}
+                  className="px-4 py-2 rounded-md text-sm font-medium border border-border text-foreground hover:bg-muted/50 transition-colors"
+                >
+                  {t('common.cancel')}
+                </button>
+                <button
+                  onClick={() => void handleEditSave()}
+                  disabled={editSaving || !editUrl.trim()}
+                  className="px-4 py-2 rounded-md text-sm font-semibold bg-primary text-primary-foreground hover:bg-primary/90 transition-colors disabled:opacity-50"
+                >
+                  {editSaving ? t('common.saving') : t('common.save')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <ToastNotice toast={toast} />
     </div>
   )
 }

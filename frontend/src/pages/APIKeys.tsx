@@ -1,4 +1,4 @@
-import type { ChangeEvent, FormEvent, ReactNode } from 'react'
+import type { ChangeEvent, FormEvent, KeyboardEvent, ReactNode } from 'react'
 import { useCallback, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
@@ -26,6 +26,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import {
+  Check,
   Copy,
   CalendarClock,
   CircleDollarSign,
@@ -34,9 +35,11 @@ import {
   Fingerprint,
   KeyRound,
   LockKeyhole,
+  Pencil,
   Plus,
   ShieldCheck,
   Trash2,
+  X,
 } from 'lucide-react'
 
 type ExpireMode = 'never' | '7' | '30' | '90' | 'custom'
@@ -65,6 +68,9 @@ export default function APIKeys() {
   const [visibleKeys, setVisibleKeys] = useState<Set<number>>(new Set())
   const [creating, setCreating] = useState(false)
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set())
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const [editingName, setEditingName] = useState('')
+  const [saving, setSaving] = useState(false)
   const { toast, showToast } = useToast()
   const { confirm, confirmDialog } = useConfirmDialog()
 
@@ -207,6 +213,27 @@ export default function APIKeys() {
     })
   }
 
+  const handleRenameKey = async (id: number) => {
+    const trimmed = editingName.trim()
+    if (!trimmed) return
+    setSaving(true)
+    try {
+      await api.updateAPIKey(id, { name: trimmed })
+      showToast(t('apiKeys.keyRenamed')) // TODO: Track B adds i18n key apiKeys.keyRenamed
+      setEditingId(null)
+      void reload()
+    } catch (error) {
+      showToast(`${t('apiKeys.renameFailed')}: ${getErrorMessage(error)}`, 'error') // TODO: Track B adds i18n key apiKeys.renameFailed
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const startEditing = (keyRow: APIKeyRow) => {
+    setEditingId(keyRow.id)
+    setEditingName(keyRow.name)
+  }
+
   return (
     <StateShell
       variant="page"
@@ -295,19 +322,44 @@ export default function APIKeys() {
                         return (
                           <TableRow key={keyRow.id} className={isNew ? 'bg-[hsl(var(--success-bg))]' : ''}>
                             <TableCell className="font-medium text-foreground">
-                              <div className="flex items-center gap-2">
-                                <span>{keyRow.name}</span>
-                                {isNew ? (
-                                  <Badge variant="outline" className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]">
-                                    {t('apiKeys.newBadge')}
-                                  </Badge>
-                                ) : null}
-                                {status !== 'active' ? (
-                                  <Badge variant={status === 'expired' ? 'secondary' : 'destructive'}>
-                                    {t(`apiKeys.status.${status}`)}
-                                  </Badge>
-                                ) : null}
-                              </div>
+                              {editingId === keyRow.id ? (
+                                <div className="flex items-center gap-1.5">
+                                  <Input
+                                    className="h-7 w-40 text-[13px]"
+                                    value={editingName}
+                                    onChange={(e: ChangeEvent<HTMLInputElement>) => setEditingName(e.target.value)}
+                                    onKeyDown={(e: KeyboardEvent<HTMLInputElement>) => {
+                                      if (e.key === 'Enter') void handleRenameKey(keyRow.id)
+                                      if (e.key === 'Escape') setEditingId(null)
+                                    }}
+                                    autoFocus
+                                    disabled={saving}
+                                  />
+                                  <Button variant="ghost" size="icon-xs" onClick={() => void handleRenameKey(keyRow.id)} disabled={saving || !editingName.trim()}>
+                                    <Check className="size-3.5" />
+                                  </Button>
+                                  <Button variant="ghost" size="icon-xs" onClick={() => setEditingId(null)} disabled={saving}>
+                                    <X className="size-3.5" />
+                                  </Button>
+                                </div>
+                              ) : (
+                                <div className="flex items-center gap-2">
+                                  <span>{keyRow.name}</span>
+                                  {isNew ? (
+                                    <Badge variant="outline" className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]">
+                                      {t('apiKeys.newBadge')}
+                                    </Badge>
+                                  ) : null}
+                                  {status !== 'active' ? (
+                                    <Badge variant={status === 'expired' ? 'secondary' : 'destructive'}>
+                                      {t(`apiKeys.status.${status}`)}
+                                    </Badge>
+                                  ) : null}
+                                  <Button variant="ghost" size="icon-xs" onClick={() => startEditing(keyRow)} title={t('apiKeys.renameKey')}> {/* TODO: Track B adds i18n key apiKeys.renameKey */}
+                                    <Pencil className="size-3" />
+                                  </Button>
+                                </div>
+                              )}
                             </TableCell>
                             <TableCell>
                               <div className="flex min-w-[260px] items-center gap-2">
