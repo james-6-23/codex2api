@@ -650,7 +650,7 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 - **`txt`** — 每行一个 Refresh Token:
 
-  ```
+  ```text
   rt_xxxxxx1
   rt_xxxxxx2
   rt_xxxxxx3
@@ -666,7 +666,7 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
   ```
 
 - **`at_txt`** — 每行一个 Access Token（AT-only 模式）:
-  ```
+  ```text
   eyJhbGciOiJSUzI1NiIs...token1
   eyJhbGciOiJSUzI1NiIs...token2
   ```
@@ -705,7 +705,7 @@ curl -X POST http://localhost:8080/api/admin/accounts/import \
 
 **响应:** SSE 流式进度
 
-```
+```text
 data: {"type":"progress","current":5,"total":10,"success":3,"duplicate":1,"failed":1}
 
 data: {"type":"complete","current":10,"total":10,"success":8,"duplicate":1,"failed":1}

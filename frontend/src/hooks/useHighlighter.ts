@@ -15,15 +15,20 @@ function getHighlighter() {
       import("shiki/langs/json.mjs"),
       import("shiki/langs/shellscript.mjs"),
       import("shiki/langs/toml.mjs"),
-    ]).then(
-      ([core, engine, darkPlus, githubLight, json, shellscript, toml]) => {
-        return core.createHighlighterCore({
-          themes: [githubLight.default, darkPlus.default],
-          langs: [json.default, toml.default, shellscript.default],
-          engine: engine.createJavaScriptRegexEngine(),
-        });
-      },
-    );
+    ])
+      .then(
+        ([core, engine, darkPlus, githubLight, json, shellscript, toml]) => {
+          return core.createHighlighterCore({
+            themes: [githubLight.default, darkPlus.default],
+            langs: [json.default, toml.default, shellscript.default],
+            engine: engine.createJavaScriptRegexEngine(),
+          });
+        },
+      )
+      .catch((error) => {
+        highlighterPromise = null;
+        throw error;
+      });
   }
   return highlighterPromise;
 }
@@ -75,22 +80,34 @@ export function useHighlightedHtml(code: string, lang?: string) {
       };
     }
 
-    getHighlighter().then((hl) => {
-      if (cancelled) return;
-      try {
-        const result = hl.codeToHtml(code, {
-          lang: resolvedLang,
-          theme: isDark ? "dark-plus" : "github-light-default",
-        });
-        const cacheKey = `${isDark ? "dark" : "light"}:${resolvedLang}:${code}`;
-        const nextHtml = isDark ? result : tuneLightTheme(result);
-        if (htmlCache.size >= MAX_CACHE_SIZE) {
-          const firstKey = htmlCache.keys().next().value;
-          if (firstKey) htmlCache.delete(firstKey);
+    getHighlighter()
+      .then((hl) => {
+        if (cancelled) return;
+        try {
+          const result = hl.codeToHtml(code, {
+            lang: resolvedLang,
+            theme: isDark ? "dark-plus" : "github-light-default",
+          });
+          const cacheKey = `${isDark ? "dark" : "light"}:${resolvedLang}:${code}`;
+          const nextHtml = isDark ? result : tuneLightTheme(result);
+          if (htmlCache.size >= MAX_CACHE_SIZE) {
+            const firstKey = htmlCache.keys().next().value;
+            if (firstKey) htmlCache.delete(firstKey);
+          }
+          htmlCache.set(cacheKey, nextHtml);
+          setHtml(nextHtml);
+        } catch (error) {
+          console.warn("highlight failed", {
+            resolvedLang,
+            isDark,
+            codeLength: code.length,
+            error,
+          });
+          setHtml("");
         }
-        htmlCache.set(cacheKey, nextHtml);
-        setHtml(nextHtml);
-      } catch (error) {
+      })
+      .catch((error) => {
+        if (cancelled) return;
         console.warn("highlight failed", {
           resolvedLang,
           isDark,
@@ -98,8 +115,7 @@ export function useHighlightedHtml(code: string, lang?: string) {
           error,
         });
         setHtml("");
-      }
-    });
+      });
 
     return () => {
       cancelled = true;

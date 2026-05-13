@@ -453,6 +453,22 @@ export const EndpointDoc = memo(function EndpointDoc({
   const activeBody =
     responseExamples.find((r) => r.code === activeStatus)?.body ?? "";
   const [tryOpen, setTryOpen] = useState(false);
+  const supportsJsonBody =
+    method === "GET" ||
+    method === "DELETE" ||
+    !defaultBody ||
+    (() => {
+      try {
+        JSON.parse(defaultBody);
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+  const supportsTryIt =
+    !path.includes(":") &&
+    path !== "/api/admin/accounts/import" &&
+    supportsJsonBody;
 
   return (
     <Card id={id} className="mb-4 scroll-mt-20 py-0">
@@ -472,6 +488,7 @@ export const EndpointDoc = memo(function EndpointDoc({
           <Button
             size="sm"
             onClick={() => setTryOpen(true)}
+            disabled={!supportsTryIt}
             className="h-8 gap-1.5 bg-emerald-600 text-white shrink-0 hover:bg-emerald-600/90 dark:bg-emerald-500/90 dark:hover:bg-emerald-500"
           >
             <Play className="size-3.5" />
@@ -479,7 +496,7 @@ export const EndpointDoc = memo(function EndpointDoc({
           </Button>
         </div>
 
-        {tryOpen && (
+        {supportsTryIt && tryOpen && (
           <TryItDialog
             open={tryOpen}
             onClose={() => setTryOpen(false)}
