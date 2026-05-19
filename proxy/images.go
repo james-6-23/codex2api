@@ -1028,6 +1028,12 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 					continue
 				}
 				c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{"message": readErr.Error(), "type": "upstream_error"}})
+				h.logUsageForRequest(c, &database.UsageLogInput{
+					AccountID: account.ID(),
+					Endpoint:  inboundEndpoint,
+					Model:     requestModel,
+					StatusCode: http.StatusBadGateway,
+				})
 				return
 			}
 		}
@@ -1049,6 +1055,12 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				}
 			}
 			// Non-retryable -- deliver error response already written above.
+			h.logUsageForRequest(c, &database.UsageLogInput{
+				AccountID: account.ID(),
+				Endpoint:  inboundEndpoint,
+				Model:     requestModel,
+				StatusCode: http.StatusBadGateway,
+			})
 			return
 		}
 		logInput := &database.UsageLogInput{
