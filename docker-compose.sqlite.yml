@@ -5,7 +5,9 @@ services:
     image: ghcr.io/james-6-23/codex2api:latest
     container_name: codex2api-sqlite
     ports:
-      - "${BIND_HOST:-0.0.0.0}:${CODEX_PORT:-8080}:${CODEX_PORT:-8080}"
+      # Bind to localhost only by default for security.
+      # To expose on all interfaces, set BIND_HOST=0.0.0.0 in .env or override here.
+      - "127.0.0.1:${CODEX_PORT:-8080}:${CODEX_PORT:-8080}"
     env_file:
       - .env
     volumes:
