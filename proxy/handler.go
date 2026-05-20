@@ -2953,6 +2953,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	if account == nil || resp == nil {
 		return result
 	}
+	if store != nil {
+		store.UpdateAccountPlanType(account, resp.Header.Get("x-codex-plan-type"))
+	}
 
 	result.Used5hHeaders = responseHasCodex5hHeaders(resp)
 	result.UsagePct7d, result.HasUsage7d = parseCodexUsageHeaders(resp, account)

@@ -769,6 +769,50 @@ func TestApply429CooldownUsageLimitUpdatesFreePlanMetadata(t *testing.T) {
 	}
 }
 
+func TestSyncCodexUsageStateUpdatesPlanTypeFromHeader(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New returned error: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "plan-header-account", map[string]interface{}{
+		"plan_type": "free",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials returned error: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: id, AccessToken: "at", PlanType: "free"}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-plan-type", "Enterprise")
+	resp.Header.Set("x-codex-primary-used-percent", "12")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "1200")
+	resp.Header.Set("x-codex-secondary-used-percent", "3")
+	resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+	resp.Header.Set("x-codex-secondary-reset-after-seconds", "600000")
+
+	result := SyncCodexUsageState(store, account, resp)
+
+	if got := account.GetPlanType(); got != "enterprise" {
+		t.Fatalf("account plan_type = %q, want enterprise", got)
+	}
+	if !result.Used5hHeaders || !result.HasUsage5h || !result.HasUsage7d {
+		t.Fatalf("usage sync result = %#v, want 5h and 7d headers detected", result)
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID returned error: %v", err)
+	}
+	if got := row.GetCredential("plan_type"); got != "enterprise" {
+		t.Fatalf("persisted plan_type = %q, want enterprise", got)
+	}
+}
+
 func TestApply429CooldownUnknown429UsesModelCooldown(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 102, PlanType: "pro"}

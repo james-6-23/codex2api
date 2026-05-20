@@ -38,21 +38,22 @@ import (
 
 // Handler 管理后台 API 处理器
 type Handler struct {
-	store          *auth.Store
-	cache          cache.TokenCache
-	db             *database.DB
-	rateLimiter    *proxy.RateLimiter
-	refreshAccount func(context.Context, int64) error
-	cpuSampler     *cpuSampler
-	startedAt      time.Time
-	pgMaxConns     int
-	redisPoolSize  int
-	databaseDriver string
-	databaseLabel  string
-	cacheDriver    string
-	cacheLabel     string
-	adminSecretEnv string
-	imageProxy     *proxy.Handler
+	store                  *auth.Store
+	cache                  cache.TokenCache
+	db                     *database.DB
+	rateLimiter            *proxy.RateLimiter
+	refreshAccount         func(context.Context, int64) error
+	syncAccountPlanOnReset func(context.Context, *auth.Account) error
+	cpuSampler             *cpuSampler
+	startedAt              time.Time
+	pgMaxConns             int
+	redisPoolSize          int
+	databaseDriver         string
+	databaseLabel          string
+	cacheDriver            string
+	cacheLabel             string
+	adminSecretEnv         string
+	imageProxy             *proxy.Handler
 
 	// 图表聚合内存缓存（10秒 TTL）
 	chartCacheMu   sync.RWMutex
@@ -170,6 +171,7 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 		handler.imageProxy.SetRuntimeCache(tc)
 	}
 	handler.refreshAccount = handler.refreshSingleAccount
+	handler.syncAccountPlanOnReset = handler.syncSingleAccountPlanOnReset
 	if db != nil {
 		if err := db.MarkInterruptedImageJobs(context.Background()); err != nil {
 			log.Printf("标记中断生图任务失败: %v", err)
@@ -2520,6 +2522,7 @@ func (h *Handler) ResetAccountStatus(c *gin.Context) {
 
 	h.store.ClearCooldown(acc)
 	acc.ClearUsageCache()
+	h.syncAccountPlanAfterReset(c.Request.Context(), acc)
 	writeMessage(c, http.StatusOK, "账号状态已重置")
 }
 
@@ -2543,6 +2546,7 @@ func (h *Handler) BatchResetStatus(c *gin.Context) {
 		}
 		h.store.ClearCooldown(acc)
 		acc.ClearUsageCache()
+		h.syncAccountPlanAfterReset(c.Request.Context(), acc)
 		success++
 	}
 
@@ -2551,6 +2555,38 @@ func (h *Handler) BatchResetStatus(c *gin.Context) {
 		"success": success,
 		"failed":  fail,
 	})
+}
+
+func (h *Handler) syncAccountPlanAfterReset(parent context.Context, acc *auth.Account) {
+	if h == nil || h.syncAccountPlanOnReset == nil || acc == nil {
+		return
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 15*time.Second)
+	defer cancel()
+	if err := h.syncAccountPlanOnReset(ctx, acc); err != nil {
+		log.Printf("[account %d] sync Codex plan type after reset failed: %v", acc.DBID, err)
+	}
+}
+
+func (h *Handler) syncSingleAccountPlanOnReset(ctx context.Context, acc *auth.Account) error {
+	if h == nil || h.store == nil || acc == nil || acc.IsOpenAIResponsesAPI() || acc.GetAccessToken() == "" {
+		return nil
+	}
+	model, err := h.connectionTestModelForAccount(ctx, acc, "")
+	if err != nil {
+		return err
+	}
+	resp, err := proxy.ExecuteRequest(ctx, acc, buildTestPayload(model), "", h.store.ResolveProxyForAccount(acc), "", nil, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+	proxy.SyncCodexUsageState(h.store, acc, resp)
+	return nil
 }
 
 func (h *Handler) refreshSingleAccount(ctx context.Context, id int64) error {
