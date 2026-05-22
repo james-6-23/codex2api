@@ -750,7 +750,7 @@ export default function Accounts() {
     const payload: AddAccountRequest =
       credential === "st"
         ? { ...addForm, refresh_token: "" }
-        : addForm;
+        : { ...addForm, session_token: "" };
     if (
       !payload.refresh_token?.trim() &&
       !payload.session_token?.trim()
@@ -3034,7 +3034,7 @@ export default function Accounts() {
           <Modal
             show={showAdd}
             title={t("accounts.addTitle")}
-            contentClassName="sm:max-w-[640px]"
+            contentClassName="sm:max-w-[780px]"
             onClose={() => {
               setShowAdd(false);
               setAddMethod("rt");
@@ -3130,7 +3130,7 @@ export default function Accounts() {
             <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
               <button
                 onClick={() => setAddMethod("rt")}
-                className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "rt"
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -3141,7 +3141,7 @@ export default function Accounts() {
               </button>
               <button
                 onClick={() => setAddMethod("st")}
-                className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "st"
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -3152,7 +3152,7 @@ export default function Accounts() {
               </button>
               <button
                 onClick={() => setAddMethod("at")}
-                className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "at"
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -3163,7 +3163,7 @@ export default function Accounts() {
               </button>
               <button
                 onClick={() => setAddMethod("openai")}
-                className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "openai"
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -3179,7 +3179,7 @@ export default function Accounts() {
                   setOauthSession(null);
                   setOauthCallbackUrl("");
                 }}
-                className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "oauth"
                     ? "bg-background shadow-sm text-foreground"
                     : "text-muted-foreground hover:text-foreground"
@@ -3207,23 +3207,6 @@ export default function Accounts() {
                       }))
                     }
                     rows={6}
-                  />
-                </div>
-                <div>
-                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
-                    {t("accounts.sessionTokenLabel")}
-                  </label>
-                  <textarea
-                    className="w-full min-h-[120px] p-3 border border-input rounded-xl bg-background text-sm resize-y focus:outline-none focus:ring-2 focus:ring-ring"
-                    placeholder={t("accounts.sessionTokenOptionalPlaceholder")}
-                    value={addForm.session_token ?? ""}
-                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
-                      setAddForm((form) => ({
-                        ...form,
-                        session_token: event.target.value,
-                      }))
-                    }
-                    rows={4}
                   />
                 </div>
                 <div>
