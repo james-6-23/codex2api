@@ -337,8 +337,6 @@ func usePriorityPricing(serviceTier string, pricing *ModelPricing) bool {
 
 func serviceTierCostMultiplier(serviceTier string) float64 {
 	switch normalizeServiceTier(serviceTier) {
-	case "priority", "fast":
-		return 2.0
 	case "flex":
 		return 0.5
 	default:
