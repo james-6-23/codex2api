@@ -785,11 +785,23 @@ func TestUsageLogsBillFastByActualServiceTier(t *testing.T) {
 
 	wantPriority := calculateCost(1000, 500, 200, "gpt-5.4", "priority")
 	wantDefault := calculateCost(1000, 500, 200, "gpt-5.4", "default")
-	if logs[0].ServiceTier != "fast" || logs[0].AccountBilled != wantPriority {
-		t.Fatalf("priority-billed fast log = tier %q billed %.12f, want tier fast billed %.12f", logs[0].ServiceTier, logs[0].AccountBilled, wantPriority)
+	seenPriority := false
+	seenDefault := false
+	for _, log := range logs {
+		if log.ServiceTier != "fast" {
+			t.Fatalf("log tier = %q, want fast", log.ServiceTier)
+		}
+		switch log.AccountBilled {
+		case wantPriority:
+			seenPriority = true
+		case wantDefault:
+			seenDefault = true
+		default:
+			t.Fatalf("unexpected billed amount %.12f, want %.12f or %.12f", log.AccountBilled, wantPriority, wantDefault)
+		}
 	}
-	if logs[1].ServiceTier != "fast" || logs[1].AccountBilled != wantDefault {
-		t.Fatalf("default-billed fast log = tier %q billed %.12f, want tier fast billed %.12f", logs[1].ServiceTier, logs[1].AccountBilled, wantDefault)
+	if !seenPriority || !seenDefault {
+		t.Fatalf("billing tiers seen priority=%v default=%v, want both", seenPriority, seenDefault)
 	}
 }
 

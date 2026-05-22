@@ -119,6 +119,15 @@ func TestCalculateCostHandlesCachedTokensAndServiceTier(t *testing.T) {
 			want:         0.0075,
 		},
 		{
+			name:         "fast tier falls back to standard pricing when priority price is unknown",
+			model:        "gpt-4o",
+			serviceTier:  "fast",
+			inputTokens:  1000,
+			outputTokens: 500,
+			cachedTokens: 200,
+			want:         0.0075,
+		},
+		{
 			name:         "applies flex multiplier",
 			model:        "gpt-5.4",
 			serviceTier:  "flex",

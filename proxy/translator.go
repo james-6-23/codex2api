@@ -1803,14 +1803,14 @@ func resolveServiceTier(actualTier, requestedTier string) string {
 
 // resolveBillingServiceTier keeps UI tier normalization separate from billing:
 // fast/priority intent is billed as priority only when the upstream does not
-// report a concrete tier, or when it confirms priority. If upstream downgrades
-// to default, billing must follow the actual default tier.
+// report a concrete tier, or when it confirms fast/priority. Any concrete
+// upstream tier wins so billing follows the actual tier reported by upstream.
 func resolveBillingServiceTier(actualTier, requestedTier string) string {
 	actualTier = strings.ToLower(strings.TrimSpace(actualTier))
-	switch actualTier {
-	case "priority", "fast":
-		return "priority"
-	case "default", "auto", "flex", "scale":
+	if actualTier != "" {
+		if actualTier == "priority" || actualTier == "fast" {
+			return "priority"
+		}
 		return actualTier
 	}
 
