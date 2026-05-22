@@ -205,7 +205,11 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 		return nil, nil, fmt.Errorf("创建 session 请求失败: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "CodexProxy/1.9")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Sec-Fetch-Dest", "empty")
+	req.Header.Set("Sec-Fetch-Mode", "cors")
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
 	req.AddCookie(&http.Cookie{Name: "__Secure-next-auth.session-token", Value: sessionToken})
 	if ResinRequestDecorator != nil && accountID != "" {
 		req.Header.Set("X-Resin-Account", accountID)
@@ -215,7 +219,7 @@ func RefreshWithSessionToken(ctx context.Context, sessionToken string, proxyURL 
 	if ResinRequestDecorator != nil && accountID != "" {
 		client = &http.Client{Timeout: 30 * time.Second}
 	} else {
-		client = buildHTTPClient(proxyURL)
+		client = buildUTLSHTTPClient(proxyURL)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
