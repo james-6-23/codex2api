@@ -63,6 +63,7 @@ import {
   Check,
   ChevronDown,
   Copy,
+  Cookie,
   Power,
   PowerOff,
   Hourglass,
@@ -269,6 +270,7 @@ export default function Accounts() {
   const [sortDir, setSortDir] = useState<"asc" | "desc">("desc");
   const [addForm, setAddForm] = useState<AddAccountRequest>({
     refresh_token: "",
+    session_token: "",
     proxy_url: "",
   });
   const [submitting, setSubmitting] = useState(false);
@@ -345,9 +347,9 @@ export default function Accounts() {
     failed: 0,
     done: false,
   });
-  const [addMethod, setAddMethod] = useState<"rt" | "at" | "openai" | "oauth">(
-    "rt",
-  );
+  const [addMethod, setAddMethod] = useState<
+    "rt" | "st" | "at" | "openai" | "oauth"
+  >("rt");
   const [atForm, setAtForm] = useState<AddATAccountRequest>({
     access_token: "",
     proxy_url: "",
@@ -744,14 +746,23 @@ export default function Accounts() {
     }
   }, [allPageSelected, pagedAccountIds]);
 
-  const handleAdd = async () => {
-    if (!addForm.refresh_token.trim()) return;
+  const handleAdd = async (credential: "rt" | "st" = "rt") => {
+    const payload: AddAccountRequest =
+      credential === "st"
+        ? { ...addForm, refresh_token: "" }
+        : addForm;
+    if (
+      !payload.refresh_token?.trim() &&
+      !payload.session_token?.trim()
+    ) {
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.addAccount(addForm);
+      await api.addAccount(payload);
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
-      setAddForm({ refresh_token: "", proxy_url: "" });
+      setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
       void reload();
     } catch (error) {
       showToast(
@@ -3064,7 +3075,14 @@ export default function Accounts() {
                 {addMethod === "rt" ? (
                   <Button
                     onClick={() => void handleAdd()}
-                    disabled={submitting || !addForm.refresh_token.trim()}
+                    disabled={submitting || !addForm.refresh_token?.trim()}
+                  >
+                    {submitting ? t("accounts.adding") : t("accounts.submit")}
+                  </Button>
+                ) : addMethod === "st" ? (
+                  <Button
+                    onClick={() => void handleAdd("st")}
+                    disabled={submitting || !addForm.session_token?.trim()}
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
@@ -3109,7 +3127,7 @@ export default function Accounts() {
             }
           >
             {/* Tab switcher */}
-            <div className="flex gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
+            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
               <button
                 onClick={() => setAddMethod("rt")}
                 className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
@@ -3120,6 +3138,17 @@ export default function Accounts() {
               >
                 <RefreshCw className="size-3.5" />
                 {t("accounts.addMethodRT")}
+              </button>
+              <button
+                onClick={() => setAddMethod("st")}
+                className={`flex-1 flex items-center justify-center gap-1.5 rounded-lg py-2 text-sm font-semibold transition-all ${
+                  addMethod === "st"
+                    ? "bg-background shadow-sm text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <Cookie className="size-3.5" />
+                {t("accounts.addMethodSessionToken")}
               </button>
               <button
                 onClick={() => setAddMethod("at")}
@@ -3170,11 +3199,63 @@ export default function Accounts() {
                   <textarea
                     className="w-full min-h-[160px] p-3 border border-input rounded-xl bg-background text-sm resize-y focus:outline-none focus:ring-2 focus:ring-ring"
                     placeholder={t("accounts.refreshTokenPlaceholder")}
-                    value={addForm.refresh_token}
+                    value={addForm.refresh_token ?? ""}
                     onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
                       setAddForm((form) => ({
                         ...form,
                         refresh_token: event.target.value,
+                      }))
+                    }
+                    rows={6}
+                  />
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.sessionTokenLabel")}
+                  </label>
+                  <textarea
+                    className="w-full min-h-[120px] p-3 border border-input rounded-xl bg-background text-sm resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                    placeholder={t("accounts.sessionTokenOptionalPlaceholder")}
+                    value={addForm.session_token ?? ""}
+                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                      setAddForm((form) => ({
+                        ...form,
+                        session_token: event.target.value,
+                      }))
+                    }
+                    rows={4}
+                  />
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.proxyUrl")}
+                  </label>
+                  <Input
+                    placeholder={t("accounts.proxyUrlPlaceholder")}
+                    value={addForm.proxy_url}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setAddForm((form) => ({
+                        ...form,
+                        proxy_url: event.target.value,
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+            ) : addMethod === "st" ? (
+              <div className="space-y-4">
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.sessionTokenLabel")} *
+                  </label>
+                  <textarea
+                    className="w-full min-h-[160px] p-3 border border-input rounded-xl bg-background text-sm resize-y focus:outline-none focus:ring-2 focus:ring-ring"
+                    placeholder={t("accounts.sessionTokenPlaceholder")}
+                    value={addForm.session_token ?? ""}
+                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                      setAddForm((form) => ({
+                        ...form,
+                        session_token: event.target.value,
                       }))
                     }
                     rows={6}

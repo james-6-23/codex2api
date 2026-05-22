@@ -103,7 +103,8 @@ export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
 
 export interface AddAccountRequest {
   name?: string
-  refresh_token: string
+  refresh_token?: string
+  session_token?: string
   proxy_url: string
 }
 
