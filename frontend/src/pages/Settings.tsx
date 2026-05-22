@@ -426,6 +426,7 @@ export default function Settings() {
     image_s3_prefix: '',
     image_s3_force_path_style: false,
   })
+  const lazyModeActive = settingsForm.lazy_mode
   const [savingSettings, setSavingSettings] = useState(false)
   const [testingImageStorage, setTestingImageStorage] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
@@ -695,25 +696,28 @@ export default function Settings() {
                     type="number"
                     min={1}
                     max={1440}
-                    value={settingsForm.background_refresh_interval_minutes}
+                    value={lazyModeActive ? 0 : settingsForm.background_refresh_interval_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')}>
                   <Input
-                    type="number"
+                    type={lazyModeActive ? 'text' : 'number'}
                     min={1}
                     max={10080}
-                    value={settingsForm.usage_probe_max_age_minutes}
+                    value={lazyModeActive ? '∞' : settingsForm.usage_probe_max_age_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
                   <Input
-                    type="number"
+                    type={lazyModeActive ? 'text' : 'number'}
                     min={1}
                     max={10080}
-                    value={settingsForm.recovery_probe_interval_minutes}
+                    value={lazyModeActive ? '∞' : settingsForm.recovery_probe_interval_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
@@ -897,8 +901,9 @@ export default function Settings() {
               </SettingField>
               <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')}>
                 <Select
-                  value={settingsForm.auto_clean_full_usage ? 'true' : 'false'}
+                  value={lazyModeActive ? 'false' : settingsForm.auto_clean_full_usage ? 'true' : 'false'}
                   onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_full_usage: value === 'true' }))}
+                  disabled={lazyModeActive}
                   options={booleanOptions}
                 />
               </SettingField>
