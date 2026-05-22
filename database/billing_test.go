@@ -101,6 +101,15 @@ func TestCalculateCostHandlesCachedTokensAndServiceTier(t *testing.T) {
 			want:         0.0191,
 		},
 		{
+			name:         "uses priority prices for fast tier",
+			model:        "gpt-5.4",
+			serviceTier:  "fast",
+			inputTokens:  1000,
+			outputTokens: 500,
+			cachedTokens: 200,
+			want:         0.0191,
+		},
+		{
 			name:         "applies flex multiplier",
 			model:        "gpt-5.4",
 			serviceTier:  "flex",
@@ -277,7 +286,7 @@ func TestCodexAutoReviewModelNormalizesToGPT54(t *testing.T) {
 func TestCodexAutoReviewLongContextPricing(t *testing.T) {
 	// codex-auto-review maps to gpt-5.4 which has long context pricing.
 	long := CalculateCostBreakdown(300000, 500, 100, "codex-auto-review", "")
-	assertFloatEqual(t, long.InputPricePerMToken, 5.0)    // long input price
+	assertFloatEqual(t, long.InputPricePerMToken, 5.0)     // long input price
 	assertFloatEqual(t, long.OutputPricePerMToken, 22.5)   // long output price
 	assertFloatEqual(t, long.CacheReadPricePerMToken, 0.5) // long cache read price
 }

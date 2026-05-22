@@ -737,6 +737,62 @@ func TestUsageLogsReturnBillingFields(t *testing.T) {
 	}
 }
 
+func TestUsageLogsBillFastByActualServiceTier(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:          1,
+		Endpoint:           "/v1/responses",
+		Model:              "gpt-5.4",
+		StatusCode:         200,
+		InputTokens:        1000,
+		OutputTokens:       500,
+		CachedTokens:       200,
+		ServiceTier:        "fast",
+		BillingServiceTier: "default",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:          1,
+		Endpoint:           "/v1/responses",
+		Model:              "gpt-5.4",
+		StatusCode:         200,
+		InputTokens:        1000,
+		OutputTokens:       500,
+		CachedTokens:       200,
+		ServiceTier:        "fast",
+		BillingServiceTier: "priority",
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 2 {
+		t.Fatalf("len(logs) = %d, want 2", len(logs))
+	}
+
+	wantPriority := calculateCost(1000, 500, 200, "gpt-5.4", "priority")
+	wantDefault := calculateCost(1000, 500, 200, "gpt-5.4", "default")
+	if logs[0].ServiceTier != "fast" || logs[0].AccountBilled != wantPriority {
+		t.Fatalf("priority-billed fast log = tier %q billed %.12f, want tier fast billed %.12f", logs[0].ServiceTier, logs[0].AccountBilled, wantPriority)
+	}
+	if logs[1].ServiceTier != "fast" || logs[1].AccountBilled != wantDefault {
+		t.Fatalf("default-billed fast log = tier %q billed %.12f, want tier fast billed %.12f", logs[1].ServiceTier, logs[1].AccountBilled, wantDefault)
+	}
+}
+
 func TestUsageLogsReturnErrorMessage(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 

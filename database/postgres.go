@@ -1543,8 +1543,13 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		billingModel = log.Model
 	}
 
-	// 计算账号计费金额（标准费用）
-	accountBilled := calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, log.ServiceTier)
+	billingServiceTier := log.BillingServiceTier
+	if billingServiceTier == "" {
+		billingServiceTier = log.ServiceTier
+	}
+
+	// 计算账号计费金额（基于上游实际 service tier）
+	accountBilled := calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, billingServiceTier)
 
 	// 用户计费金额与账号计费金额相同（简化版，未来可支持倍率）
 	userBilled := accountBilled
@@ -1598,38 +1603,39 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 // UsageLogInput 日志写入参数
 type UsageLogInput struct {
-	AccountID         int64
-	Endpoint          string
-	Model             string
-	EffectiveModel    string
-	PromptTokens      int
-	CompletionTokens  int
-	TotalTokens       int
-	StatusCode        int
-	DurationMs        int
-	InputTokens       int
-	OutputTokens      int
-	ReasoningTokens   int
-	FirstTokenMs      int
-	ReasoningEffort   string
-	InboundEndpoint   string
-	UpstreamEndpoint  string
-	Stream            bool
-	CachedTokens      int
-	ServiceTier       string
-	APIKeyID          int64
-	APIKeyName        string
-	APIKeyMasked      string
-	ImageCount        int
-	ImageWidth        int
-	ImageHeight       int
-	ImageBytes        int
-	ImageFormat       string
-	ImageSize         string
-	IsRetryAttempt    bool
-	AttemptIndex      int
-	UpstreamErrorKind string
-	ErrorMessage      string
+	AccountID          int64
+	Endpoint           string
+	Model              string
+	EffectiveModel     string
+	PromptTokens       int
+	CompletionTokens   int
+	TotalTokens        int
+	StatusCode         int
+	DurationMs         int
+	InputTokens        int
+	OutputTokens       int
+	ReasoningTokens    int
+	FirstTokenMs       int
+	ReasoningEffort    string
+	InboundEndpoint    string
+	UpstreamEndpoint   string
+	Stream             bool
+	CachedTokens       int
+	ServiceTier        string
+	BillingServiceTier string
+	APIKeyID           int64
+	APIKeyName         string
+	APIKeyMasked       string
+	ImageCount         int
+	ImageWidth         int
+	ImageHeight        int
+	ImageBytes         int
+	ImageFormat        string
+	ImageSize          string
+	IsRetryAttempt     bool
+	AttemptIndex       int
+	UpstreamErrorKind  string
+	ErrorMessage       string
 }
 
 func (l *UsageLog) populateBillingBreakdown() {
