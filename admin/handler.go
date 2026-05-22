@@ -517,8 +517,8 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			Status:                   row.Status,
 			ErrorMessage:             row.ErrorMessage,
 			ATOnly:                   !isOpenAIResponsesAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
-		CreditEnabled:            row.CreditEnabled,
-		CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
+			CreditEnabled:            row.CreditEnabled,
+			CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
 			AccountType:              row.Type,
 			OpenAIResponsesAPI:       isOpenAIResponsesAccount,
 			BaseURL:                  baseURL,
@@ -1191,16 +1191,18 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		}
 		h.store.AddAccount(newAcc)
 
-		// 异步刷新 AT
-		go func(accountID int64) {
-			refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
-			if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
-				log.Printf("新账号 %d 刷新失败: %v", accountID, err)
-			} else {
-				log.Printf("新账号 %d 刷新成功，已加入号池", accountID)
-			}
-		}(id)
+		if !h.store.GetLazyMode() {
+			// 异步刷新 AT
+			go func(accountID int64) {
+				refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := h.store.RefreshSingle(refreshCtx, accountID); err != nil {
+					log.Printf("新账号 %d 刷新失败: %v", accountID, err)
+				} else {
+					log.Printf("新账号 %d 刷新成功，已加入号池", accountID)
+				}
+			}(id)
+		}
 	}
 
 	// 记录安全审计日志
@@ -2300,7 +2302,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
 				h.store.AddAccount(newAcc)
 
-				if tok.accessToken == "" {
+				if tok.accessToken == "" && !h.store.GetLazyMode() {
 					// 后台异步刷新，不阻塞导入流程
 					go func(accountID int64) {
 						refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -3561,6 +3563,7 @@ type settingsResponse struct {
 	BackgroundRefreshIntervalMinutes int    `json:"background_refresh_interval_minutes"`
 	UsageProbeMaxAgeMinutes          int    `json:"usage_probe_max_age_minutes"`
 	RecoveryProbeIntervalMinutes     int    `json:"recovery_probe_interval_minutes"`
+	LazyMode                         bool   `json:"lazy_mode"`
 	ProxyURL                         string `json:"proxy_url"`
 	PgMaxConns                       int    `json:"pg_max_conns"`
 	RedisPoolSize                    int    `json:"redis_pool_size"`
@@ -3621,6 +3624,7 @@ type updateSettingsReq struct {
 	BackgroundRefreshIntervalMinutes *int    `json:"background_refresh_interval_minutes"`
 	UsageProbeMaxAgeMinutes          *int    `json:"usage_probe_max_age_minutes"`
 	RecoveryProbeIntervalMinutes     *int    `json:"recovery_probe_interval_minutes"`
+	LazyMode                         *bool   `json:"lazy_mode"`
 	ProxyURL                         *string `json:"proxy_url"`
 	PgMaxConns                       *int    `json:"pg_max_conns"`
 	RedisPoolSize                    *int    `json:"redis_pool_size"`
@@ -3761,6 +3765,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:          h.store.GetUsageProbeMaxAgeMinutes(),
 		RecoveryProbeIntervalMinutes:     h.store.GetRecoveryProbeIntervalMinutes(),
+		LazyMode:                         h.store.GetLazyMode(),
 		ProxyURL:                         h.store.GetProxyURL(),
 		PgMaxConns:                       h.pgMaxConns,
 		RedisPoolSize:                    h.redisPoolSize,
@@ -3773,7 +3778,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanExpired:                 h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:                 h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:             h.store.FastSchedulerEnabled(),
-			SchedulerMode:                    h.store.GetSchedulerMode(),
+		SchedulerMode:                    h.store.GetSchedulerMode(),
 		MaxRetries:                       h.store.GetMaxRetries(),
 		MaxRateLimitRetries:              h.store.GetMaxRateLimitRetries(),
 		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
@@ -3927,6 +3932,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		h.store.SetRecoveryProbeInterval(time.Duration(v) * time.Minute)
 		log.Printf("设置已更新: recovery_probe_interval_minutes = %d", v)
+	}
+
+	if req.LazyMode != nil {
+		h.store.SetLazyMode(*req.LazyMode)
+		log.Printf("设置已更新: lazy_mode = %t", *req.LazyMode)
 	}
 
 	if req.ProxyURL != nil {
@@ -4241,6 +4251,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:          h.store.GetUsageProbeMaxAgeMinutes(),
 		RecoveryProbeIntervalMinutes:     h.store.GetRecoveryProbeIntervalMinutes(),
+		LazyMode:                         h.store.GetLazyMode(),
 		ProxyURL:                         h.store.GetProxyURL(),
 		PgMaxConns:                       h.pgMaxConns,
 		RedisPoolSize:                    h.redisPoolSize,
@@ -4252,7 +4263,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:                 h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:                 h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:             h.store.FastSchedulerEnabled(),
-			SchedulerMode:                    h.store.GetSchedulerMode(),
+		SchedulerMode:                    h.store.GetSchedulerMode(),
 		MaxRetries:                       h.store.GetMaxRetries(),
 		MaxRateLimitRetries:              h.store.GetMaxRateLimitRetries(),
 		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && hasAdminSecret,
@@ -4304,6 +4315,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		BackgroundRefreshIntervalMinutes: h.store.GetBackgroundRefreshIntervalMinutes(),
 		UsageProbeMaxAgeMinutes:          h.store.GetUsageProbeMaxAgeMinutes(),
 		RecoveryProbeIntervalMinutes:     h.store.GetRecoveryProbeIntervalMinutes(),
+		LazyMode:                         h.store.GetLazyMode(),
 		ProxyURL:                         h.store.GetProxyURL(),
 		PgMaxConns:                       h.pgMaxConns,
 		RedisPoolSize:                    h.redisPoolSize,
@@ -4316,7 +4328,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanExpired:                 h.store.GetAutoCleanExpired(),
 		ProxyPoolEnabled:                 h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:             h.store.FastSchedulerEnabled(),
-			SchedulerMode:                    h.store.GetSchedulerMode(),
+		SchedulerMode:                    h.store.GetSchedulerMode(),
 		MaxRetries:                       h.store.GetMaxRetries(),
 		MaxRateLimitRetries:              h.store.GetMaxRateLimitRetries(),
 		AllowRemoteMigration:             h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",

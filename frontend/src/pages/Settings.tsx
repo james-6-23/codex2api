@@ -378,6 +378,7 @@ export default function Settings() {
     background_refresh_interval_minutes: 2,
     usage_probe_max_age_minutes: 10,
     recovery_probe_interval_minutes: 30,
+    lazy_mode: false,
     pg_max_conns: 50,
     redis_pool_size: 30,
     auto_clean_unauthorized: false,
@@ -714,6 +715,13 @@ export default function Settings() {
                     max={10080}
                     value={settingsForm.recovery_probe_interval_minutes}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')}>
+                  <Select
+                    value={settingsForm.lazy_mode ? 'true' : 'false'}
+                    onValueChange={(value) => setSettingsForm((f) => ({ ...f, lazy_mode: value === 'true' }))}
+                    options={booleanOptions}
                   />
                 </SettingField>
                 <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')}>
