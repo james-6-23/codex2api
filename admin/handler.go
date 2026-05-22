@@ -410,6 +410,7 @@ type accountResponse struct {
 	ProxyURL                 string                     `json:"proxy_url"`
 	CreatedAt                string                     `json:"created_at"`
 	UpdatedAt                string                     `json:"updated_at"`
+	CodexUsageUpdatedAt      string                     `json:"codex_usage_updated_at,omitempty"`
 	ActiveRequests           int64                      `json:"active_requests"`
 	TotalRequests            int64                      `json:"total_requests"`
 	LastUsedAt               string                     `json:"last_used_at"`
@@ -534,6 +535,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			BaseConcurrencyEffective: effectiveBaseConcurrency(row.BaseConcurrencyOverride, int64(h.store.GetMaxConcurrency())),
 			CreatedAt:                row.CreatedAt.Format(time.RFC3339),
 			UpdatedAt:                row.UpdatedAt.Format(time.RFC3339),
+			CodexUsageUpdatedAt:      row.GetCredential("codex_usage_updated_at"),
 		}
 		if acc, ok := accountMap[row.ID]; ok {
 			acc.Mu().RLock()

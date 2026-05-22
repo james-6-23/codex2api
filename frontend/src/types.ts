@@ -65,6 +65,7 @@ export interface AccountRow {
   proxy_url: string
   created_at: ISODateString
   updated_at: ISODateString
+  codex_usage_updated_at?: ISODateString
   active_requests?: number
   total_requests?: number
   last_used_at?: ISODateString
