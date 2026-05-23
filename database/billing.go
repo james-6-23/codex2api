@@ -41,12 +41,12 @@ var (
 
 	modelPricingRules = []modelPricingRule{
 		{model: "gpt-5.5", pricing: ModelPricing{
-			InputPricePerMToken:             5.0,
-			InputPricePerMTokenPriority:     12.5,
-			OutputPricePerMToken:            30.0,
-			OutputPricePerMTokenPriority:    75.0,
-			CacheReadPricePerMToken:         0.5,
-			CacheReadPricePerMTokenPriority: 1.25,
+			InputPricePerMToken:                 5.0,
+			InputPricePerMTokenPriority:         12.5,
+			OutputPricePerMToken:                30.0,
+			OutputPricePerMTokenPriority:        75.0,
+			CacheReadPricePerMToken:             0.5,
+			CacheReadPricePerMTokenPriority:     1.25,
 			LongInputPricePerMToken:             10.0,
 			LongInputPricePerMTokenPriority:     25.0,
 			LongOutputPricePerMToken:            45.0,
@@ -55,10 +55,10 @@ var (
 			LongCacheReadPricePerMTokenPriority: 2.5,
 		}},
 		{model: "gpt-5.5-pro", pricing: ModelPricing{
-			InputPricePerMToken:         30.0,
-			InputPricePerMTokenPriority: 75.0,
-			OutputPricePerMToken:        180.0,
-			OutputPricePerMTokenPriority: 450.0,
+			InputPricePerMToken:              30.0,
+			InputPricePerMTokenPriority:      75.0,
+			OutputPricePerMToken:             180.0,
+			OutputPricePerMTokenPriority:     450.0,
 			LongInputPricePerMToken:          60.0,
 			LongInputPricePerMTokenPriority:  150.0,
 			LongOutputPricePerMToken:         270.0,
@@ -67,12 +67,12 @@ var (
 		{model: "gpt-5.4-mini", pricing: ModelPricing{InputPricePerMToken: 0.75, OutputPricePerMToken: 4.5, CacheReadPricePerMToken: 0.075}},
 		{model: "gpt-5.4-nano", pricing: ModelPricing{InputPricePerMToken: 0.2, OutputPricePerMToken: 1.25, CacheReadPricePerMToken: 0.02}},
 		{model: "gpt-5.4", pricing: ModelPricing{
-			InputPricePerMToken:             2.5,
-			InputPricePerMTokenPriority:     5.0,
-			OutputPricePerMToken:            15.0,
-			OutputPricePerMTokenPriority:    30.0,
-			CacheReadPricePerMToken:         0.25,
-			CacheReadPricePerMTokenPriority: 0.5,
+			InputPricePerMToken:                 2.5,
+			InputPricePerMTokenPriority:         5.0,
+			OutputPricePerMToken:                15.0,
+			OutputPricePerMTokenPriority:        30.0,
+			CacheReadPricePerMToken:             0.25,
+			CacheReadPricePerMTokenPriority:     0.5,
 			LongInputPricePerMToken:             5.0,
 			LongInputPricePerMTokenPriority:     10.0,
 			LongOutputPricePerMToken:            22.5,
@@ -81,10 +81,10 @@ var (
 			LongCacheReadPricePerMTokenPriority: 1.0,
 		}},
 		{model: "gpt-5.4-pro", pricing: ModelPricing{
-			InputPricePerMToken:         30.0,
-			InputPricePerMTokenPriority: 75.0,
-			OutputPricePerMToken:        180.0,
-			OutputPricePerMTokenPriority: 450.0,
+			InputPricePerMToken:              30.0,
+			InputPricePerMTokenPriority:      75.0,
+			OutputPricePerMToken:             180.0,
+			OutputPricePerMTokenPriority:     450.0,
 			LongInputPricePerMToken:          60.0,
 			LongInputPricePerMTokenPriority:  150.0,
 			LongOutputPricePerMToken:         270.0,
@@ -326,7 +326,8 @@ func geminiFamilyPricing(model string) *ModelPricing {
 }
 
 func usePriorityPricing(serviceTier string, pricing *ModelPricing) bool {
-	if normalizeServiceTier(serviceTier) != "priority" {
+	tier := normalizeServiceTier(serviceTier)
+	if tier != "priority" && tier != "fast" {
 		return false
 	}
 	return pricing.InputPricePerMTokenPriority > 0 ||
@@ -336,8 +337,6 @@ func usePriorityPricing(serviceTier string, pricing *ModelPricing) bool {
 
 func serviceTierCostMultiplier(serviceTier string) float64 {
 	switch normalizeServiceTier(serviceTier) {
-	case "priority":
-		return 2.0
 	case "flex":
 		return 0.5
 	default:

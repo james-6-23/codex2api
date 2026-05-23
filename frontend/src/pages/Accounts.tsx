@@ -7,7 +7,7 @@ import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
 import ToastNotice from "../components/ToastNotice";
-import { useDataLoader } from "../hooks/useDataLoader";
+import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { useToast } from "../hooks/useToast";
 import type {
@@ -19,6 +19,7 @@ import type {
   APIKeyRow,
   OpsOverviewResponse,
   AccountGroup,
+  SystemSettings,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatCompactEmail } from "../lib/utils";
@@ -399,22 +400,37 @@ export default function Accounts() {
   const atFileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
+  const lazyModeRef = useRef<boolean | null>(null);
   const { toast, showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
 
-  const loadAccounts = useCallback(async () => {
-    const [accountsResponse, apiKeysResponse, opsOverview, groupsResponse] =
+  const loadAccounts = useCallback(async (options?: LoadOptions) => {
+    const shouldLoadSettings = !options?.silent || lazyModeRef.current === null;
+    const [
+      accountsResponse,
+      apiKeysResponse,
+      opsOverview,
+      groupsResponse,
+      settings,
+    ] =
       await Promise.all([
         api.getAccounts(),
         api.getAPIKeys(),
         api.getOpsOverview().catch((): OpsOverviewResponse | null => null),
         api.listAccountGroups().catch(() => ({ groups: [] })),
+        shouldLoadSettings
+          ? api.getSettings().catch((): SystemSettings | null => null)
+          : Promise.resolve<SystemSettings | null>(null),
       ]);
+    if (settings) {
+      lazyModeRef.current = settings.lazy_mode;
+    }
     setAllGroups(groupsResponse.groups ?? []);
     return {
       accounts: accountsResponse.accounts ?? [],
       apiKeys: apiKeysResponse.keys ?? [],
       opsOverview,
+      lazyMode: lazyModeRef.current ?? false,
     };
   }, []);
 
@@ -422,17 +438,20 @@ export default function Accounts() {
     accounts: AccountRow[];
     apiKeys: APIKeyRow[];
     opsOverview: OpsOverviewResponse | null;
+    lazyMode: boolean;
   }>({
     initialData: {
       accounts: [],
       apiKeys: [],
       opsOverview: null,
+      lazyMode: false,
     },
     load: loadAccounts,
   });
   const accounts = data.accounts;
   const apiKeys = data.apiKeys;
   const opsOverview = data.opsOverview;
+  const lazyMode = data.lazyMode;
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
 
   useEffect(() => {
@@ -2866,8 +2885,29 @@ export default function Accounts() {
                               </TableCell>
                             )}
                             {visibleColumns.updatedAt && (
-                              <TableCell className="text-[14px] text-muted-foreground">
-                                {formatRelativeTime(account.updated_at)}
+                              <TableCell className="text-[13px] text-muted-foreground whitespace-nowrap">
+                                {lazyMode ? (
+                                  <div className="space-y-0.5 leading-tight">
+                                    <div title={t("accounts.recordUpdatedAt")}>
+                                      <span className="mr-1 text-[11px] text-muted-foreground/70">
+                                        {t("accounts.recordUpdatedAtShort")}
+                                      </span>
+                                      {formatRelativeTime(account.updated_at)}
+                                    </div>
+                                    <div title={t("accounts.usageUpdatedAt")}>
+                                      <span className="mr-1 text-[11px] text-muted-foreground/70">
+                                        {t("accounts.usageUpdatedAtShort")}
+                                      </span>
+                                      {account.codex_usage_updated_at
+                                        ? formatRelativeTime(
+                                            account.codex_usage_updated_at,
+                                          )
+                                        : t("accounts.noUsageUpdatedAt")}
+                                    </div>
+                                  </div>
+                                ) : (
+                                  formatRelativeTime(account.updated_at)
+                                )}
                               </TableCell>
                             )}
                             {visibleColumns.actions && (

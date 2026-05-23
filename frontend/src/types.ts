@@ -65,6 +65,7 @@ export interface AccountRow {
   proxy_url: string
   created_at: ISODateString
   updated_at: ISODateString
+  codex_usage_updated_at?: ISODateString
   active_requests?: number
   total_requests?: number
   last_used_at?: ISODateString
@@ -294,6 +295,7 @@ export interface SystemSettings {
   background_refresh_interval_minutes: number
   usage_probe_max_age_minutes: number
   recovery_probe_interval_minutes: number
+  lazy_mode: boolean
   proxy_url?: string
   pg_max_conns: number
   redis_pool_size: number

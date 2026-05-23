@@ -628,6 +628,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS max_rate_limit_retries INT DEFAULT 1;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_error BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_expired BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS lazy_mode BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS model_mapping TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_refresh_interval_minutes INT DEFAULT 2;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_probe_max_age_minutes INT DEFAULT 10;
@@ -1090,6 +1091,7 @@ type SystemSettings struct {
 	AutoCleanFullUsage               bool
 	AutoCleanError                   bool
 	AutoCleanExpired                 bool
+	LazyMode                         bool
 	ProxyPoolEnabled                 bool
 	FastSchedulerEnabled             bool
 	MaxRetries                       int
@@ -1135,6 +1137,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(allow_remote_migration, false),
 		       COALESCE(auto_clean_error, false),
 		       COALESCE(auto_clean_expired, false),
+		       COALESCE(lazy_mode, false),
 		       COALESCE(model_mapping, '{}'),
 		       COALESCE(background_refresh_interval_minutes, 2),
 		       COALESCE(usage_probe_max_age_minutes, 10),
@@ -1165,7 +1168,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
 		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.MaxRetries, &s.MaxRateLimitRetries, &s.AllowRemoteMigration,
-		&s.AutoCleanError, &s.AutoCleanExpired, &s.ModelMapping,
+		&s.AutoCleanError, &s.AutoCleanExpired, &s.LazyMode, &s.ModelMapping,
 		&s.BackgroundRefreshIntervalMinutes, &s.UsageProbeMaxAgeMinutes, &s.RecoveryProbeIntervalMinutes,
 		&s.SchedulerMode,
 		&s.ResinURL, &s.ResinPlatformName,
@@ -1190,7 +1193,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 			INSERT INTO system_settings (
 				id, site_name, site_logo, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 				auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,
-				fast_scheduler_enabled, max_retries, max_rate_limit_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, model_mapping,
+				fast_scheduler_enabled, max_retries, max_rate_limit_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, lazy_mode, model_mapping,
 				background_refresh_interval_minutes, usage_probe_max_age_minutes, recovery_probe_interval_minutes,
 				resin_url, resin_platform_name, prompt_filter_enabled, prompt_filter_mode, prompt_filter_threshold,
 				prompt_filter_strict_threshold, prompt_filter_log_matches, prompt_filter_max_text_length,
@@ -1200,7 +1203,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				image_storage_config,
 				scheduler_mode
 			)
-			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)
+			VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45)
 			ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1222,6 +1225,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				allow_remote_migration  = EXCLUDED.allow_remote_migration,
 				auto_clean_error        = EXCLUDED.auto_clean_error,
 				auto_clean_expired      = EXCLUDED.auto_clean_expired,
+				lazy_mode               = EXCLUDED.lazy_mode,
 				model_mapping           = EXCLUDED.model_mapping,
 				background_refresh_interval_minutes = EXCLUDED.background_refresh_interval_minutes,
 				usage_probe_max_age_minutes = EXCLUDED.usage_probe_max_age_minutes,
@@ -1249,7 +1253,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
-		s.FastSchedulerEnabled, s.MaxRetries, s.MaxRateLimitRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.ModelMapping,
+		s.FastSchedulerEnabled, s.MaxRetries, s.MaxRateLimitRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.LazyMode, s.ModelMapping,
 		s.BackgroundRefreshIntervalMinutes, s.UsageProbeMaxAgeMinutes, s.RecoveryProbeIntervalMinutes,
 		s.ResinURL, s.ResinPlatformName, s.PromptFilterEnabled, s.PromptFilterMode, s.PromptFilterThreshold,
 		s.PromptFilterStrictThreshold, s.PromptFilterLogMatches, s.PromptFilterMaxTextLength,
@@ -1543,8 +1547,13 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		billingModel = log.Model
 	}
 
-	// 计算账号计费金额（标准费用）
-	accountBilled := calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, log.ServiceTier)
+	billingServiceTier := log.BillingServiceTier
+	if billingServiceTier == "" {
+		billingServiceTier = log.ServiceTier
+	}
+
+	// 计算账号计费金额（基于上游实际 service tier）
+	accountBilled := calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, billingServiceTier)
 
 	// 用户计费金额与账号计费金额相同（简化版，未来可支持倍率）
 	userBilled := accountBilled
@@ -1598,38 +1607,39 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 // UsageLogInput 日志写入参数
 type UsageLogInput struct {
-	AccountID         int64
-	Endpoint          string
-	Model             string
-	EffectiveModel    string
-	PromptTokens      int
-	CompletionTokens  int
-	TotalTokens       int
-	StatusCode        int
-	DurationMs        int
-	InputTokens       int
-	OutputTokens      int
-	ReasoningTokens   int
-	FirstTokenMs      int
-	ReasoningEffort   string
-	InboundEndpoint   string
-	UpstreamEndpoint  string
-	Stream            bool
-	CachedTokens      int
-	ServiceTier       string
-	APIKeyID          int64
-	APIKeyName        string
-	APIKeyMasked      string
-	ImageCount        int
-	ImageWidth        int
-	ImageHeight       int
-	ImageBytes        int
-	ImageFormat       string
-	ImageSize         string
-	IsRetryAttempt    bool
-	AttemptIndex      int
-	UpstreamErrorKind string
-	ErrorMessage      string
+	AccountID          int64
+	Endpoint           string
+	Model              string
+	EffectiveModel     string
+	PromptTokens       int
+	CompletionTokens   int
+	TotalTokens        int
+	StatusCode         int
+	DurationMs         int
+	InputTokens        int
+	OutputTokens       int
+	ReasoningTokens    int
+	FirstTokenMs       int
+	ReasoningEffort    string
+	InboundEndpoint    string
+	UpstreamEndpoint   string
+	Stream             bool
+	CachedTokens       int
+	ServiceTier        string
+	BillingServiceTier string
+	APIKeyID           int64
+	APIKeyName         string
+	APIKeyMasked       string
+	ImageCount         int
+	ImageWidth         int
+	ImageHeight        int
+	ImageBytes         int
+	ImageFormat        string
+	ImageSize          string
+	IsRetryAttempt     bool
+	AttemptIndex       int
+	UpstreamErrorKind  string
+	ErrorMessage       string
 }
 
 func (l *UsageLog) populateBillingBreakdown() {

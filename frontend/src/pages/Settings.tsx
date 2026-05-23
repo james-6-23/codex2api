@@ -368,6 +368,15 @@ export default function Settings() {
     { label: t('settings.imageStorageLocal'), value: 'local' },
     { label: t('settings.imageStorageS3'), value: 's3' },
   ]
+  const normalizeLazySettingsForm = useCallback((settings: SystemSettings): SystemSettings => {
+    if (!settings.lazy_mode) {
+      return settings
+    }
+    return {
+      ...settings,
+      auto_clean_full_usage: false,
+    }
+  }, [])
   const [settingsForm, setSettingsForm] = useState<SystemSettings>({
     site_name: 'CodexProxy',
     site_logo: '',
@@ -378,6 +387,7 @@ export default function Settings() {
     background_refresh_interval_minutes: 2,
     usage_probe_max_age_minutes: 10,
     recovery_probe_interval_minutes: 30,
+    lazy_mode: false,
     pg_max_conns: 50,
     redis_pool_size: 30,
     auto_clean_unauthorized: false,
@@ -425,6 +435,7 @@ export default function Settings() {
     image_s3_prefix: '',
     image_s3_force_path_style: false,
   })
+  const lazyModeActive = settingsForm.lazy_mode
   const [savingSettings, setSavingSettings] = useState(false)
   const [testingImageStorage, setTestingImageStorage] = useState(false)
   const [loadedAdminSecret, setLoadedAdminSecret] = useState('')
@@ -438,7 +449,7 @@ export default function Settings() {
 
   const loadSettingsData = useCallback(async () => {
     const [health, settings, modelsResp] = await Promise.all([api.getHealth(), api.getSettings(), api.getModels()])
-    setSettingsForm(settings)
+    setSettingsForm(normalizeLazySettingsForm(settings))
     applyBranding({ site_name: settings.site_name, site_logo: settings.site_logo })
     setLoadedAdminSecret(settings.admin_secret ?? '')
     setModelList(modelsResp.models ?? [])
@@ -448,7 +459,7 @@ export default function Settings() {
     return {
       health,
     }
-  }, [applyBranding])
+  }, [applyBranding, normalizeLazySettingsForm])
 
   const { data, loading, error, reload } = useDataLoader<{
     health: HealthResponse | null
@@ -463,8 +474,8 @@ export default function Settings() {
     setSavingSettings(true)
     try {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
-      const updated = await api.updateSettings(settingsForm)
-      setSettingsForm(updated)
+      const updated = await api.updateSettings(normalizeLazySettingsForm(settingsForm))
+      setSettingsForm(normalizeLazySettingsForm(updated))
       applyBranding({ site_name: updated.site_name, site_logo: updated.site_logo })
       setLoadedAdminSecret(updated.admin_secret ?? '')
       if (updated.admin_auth_source !== 'env') {
@@ -694,26 +705,36 @@ export default function Settings() {
                     type="number"
                     min={1}
                     max={1440}
-                    value={settingsForm.background_refresh_interval_minutes}
+                    value={lazyModeActive ? 0 : settingsForm.background_refresh_interval_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')}>
                   <Input
-                    type="number"
+                    type={lazyModeActive ? 'text' : 'number'}
                     min={1}
                     max={10080}
-                    value={settingsForm.usage_probe_max_age_minutes}
+                    value={lazyModeActive ? '∞' : settingsForm.usage_probe_max_age_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
                   <Input
-                    type="number"
+                    type={lazyModeActive ? 'text' : 'number'}
                     min={1}
                     max={10080}
-                    value={settingsForm.recovery_probe_interval_minutes}
+                    value={lazyModeActive ? '∞' : settingsForm.recovery_probe_interval_minutes}
+                    disabled={lazyModeActive}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')}>
+                  <Select
+                    value={settingsForm.lazy_mode ? 'true' : 'false'}
+                    onValueChange={(value) => setSettingsForm((f) => normalizeLazySettingsForm({ ...f, lazy_mode: value === 'true' }))}
+                    options={booleanOptions}
                   />
                 </SettingField>
                 <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')}>
@@ -889,8 +910,9 @@ export default function Settings() {
               </SettingField>
               <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')}>
                 <Select
-                  value={settingsForm.auto_clean_full_usage ? 'true' : 'false'}
-                  onValueChange={(value) => setSettingsForm((f) => ({ ...f, auto_clean_full_usage: value === 'true' }))}
+                  value={lazyModeActive ? 'false' : settingsForm.auto_clean_full_usage ? 'true' : 'false'}
+                  onValueChange={(value) => setSettingsForm((f) => normalizeLazySettingsForm({ ...f, auto_clean_full_usage: value === 'true' }))}
+                  disabled={lazyModeActive}
                   options={booleanOptions}
                 />
               </SettingField>

@@ -1481,6 +1481,7 @@ type Store struct {
 	autoCleanFullUsage        atomic.Bool
 	autoCleanError            atomic.Bool
 	autoCleanExpired          atomic.Bool
+	lazyMode                  atomic.Bool
 	autoCleanupBatch          atomic.Bool
 	maxRetries                int64 // 请求失败最大重试次数（换号重试）
 	maxRateLimitRetries       int64 // 429 最大换号重试次数
@@ -1488,6 +1489,7 @@ type Store struct {
 	usageProbeMaxAge          int64 // 用量探针快照最大缓存时长（ns）
 	recoveryProbeInterval     int64 // 恢复探测最小间隔（ns）
 	backgroundRefreshWakeCh   chan struct{}
+	lazyRefreshInFlight       sync.Map
 	stopCh                    chan struct{}
 	stopOnce                  sync.Once
 	wg                        sync.WaitGroup
@@ -1855,6 +1857,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			BackgroundRefreshIntervalMinutes: 2,
 			UsageProbeMaxAgeMinutes:          10,
 			RecoveryProbeIntervalMinutes:     30,
+			LazyMode:                         false,
 			ProxyURL:                         "",
 			MaxRateLimitRetries:              1,
 			SchedulerMode:                    "round_robin",
@@ -1880,6 +1883,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanFullUsage.Store(settings.AutoCleanFullUsage)
 	s.autoCleanError.Store(settings.AutoCleanError)
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
+	s.lazyMode.Store(settings.LazyMode)
 	retries := int64(settings.MaxRetries)
 	if retries <= 0 {
 		retries = 2 // 默认重试 2 次
@@ -2154,6 +2158,17 @@ func (s *Store) SetAutoCleanExpired(enabled bool) {
 	s.autoCleanExpired.Store(enabled)
 }
 
+// GetLazyMode 获取是否启用惰性模式。
+func (s *Store) GetLazyMode() bool {
+	return s.lazyMode.Load()
+}
+
+// SetLazyMode 设置惰性模式。启用后不主动刷新/探测账号，只在调度命中时刷新 AT。
+func (s *Store) SetLazyMode(enabled bool) {
+	s.lazyMode.Store(enabled)
+	s.rebuildFastScheduler()
+}
+
 // SetBackgroundRefreshInterval 设置后台刷新/探针巡检间隔。
 func (s *Store) SetBackgroundRefreshInterval(d time.Duration) {
 	if d <= 0 {
@@ -2418,16 +2433,18 @@ func (s *Store) StartBackgroundRefresh() {
 		for {
 			select {
 			case <-refreshTimer.C:
-				s.parallelRefreshAll(context.Background())
-				s.TriggerUsageProbeAsync()
-				s.TriggerRecoveryProbeAsync()
+				if !s.GetLazyMode() {
+					s.parallelRefreshAll(context.Background())
+					s.TriggerUsageProbeAsync()
+					s.TriggerRecoveryProbeAsync()
+				}
 				refreshTimer.Reset(s.GetBackgroundRefreshInterval())
 			case <-s.backgroundRefreshWakeCh:
 				resetRefreshTimer()
 			case <-autoCleanupTicker.C:
 				s.TriggerAutoCleanupAsync()
 			case <-fullUsageCleanupTicker.C:
-				if s.GetAutoCleanFullUsage() {
+				if s.GetAutoCleanFullUsage() && !s.GetLazyMode() {
 					go s.CleanFullUsageAccounts(context.Background())
 				}
 			case <-expiredCleanupTicker.C:
@@ -2505,6 +2522,9 @@ func (s *Store) NextExcluding(apiKeyID int64, exclude map[int64]bool) *Account {
 
 // NextExcludingWithFilter 获取下一个可用账号，并应用请求级账号过滤器。
 func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	if s.GetLazyMode() {
+		return s.nextExcludingWithFilterLazy(apiKeyID, exclude, filter)
+	}
 	if scheduler := s.getFastScheduler(); scheduler != nil {
 		for attempts := 0; attempts < 16; attempts++ {
 			acc := scheduler.AcquireExcludingWithFilter(apiKeyID, exclude, filter)
@@ -2572,6 +2592,173 @@ func (s *Store) NextExcludingWithFilter(apiKeyID int64, exclude map[int64]bool, 
 		atomic.AddInt64(&best.TotalRequests, 1)
 		atomic.StoreInt64(&best.LastUsedAt, time.Now().UnixNano())
 		return best
+	}
+	return nil
+}
+
+func (s *Store) accountLazySelectable(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	if atomic.LoadInt32(&acc.Disabled) != 0 || atomic.LoadInt32(&acc.DispatchPaused) != 0 {
+		return false
+	}
+
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	now := time.Now()
+	if acc.Status == StatusError {
+		return false
+	}
+	if acc.healthTierLocked() == HealthTierBanned {
+		return false
+	}
+	if acc.usageExhaustedLocked() {
+		return false
+	}
+	if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) {
+		return false
+	}
+	if acc.premium5hRateLimitedLocked(now) {
+		return false
+	}
+	if acc.isOpenAIResponsesAPILocked() {
+		return true
+	}
+	return strings.TrimSpace(acc.AccessToken) != "" ||
+		strings.TrimSpace(acc.RefreshToken) != "" ||
+		strings.TrimSpace(acc.SessionToken) != ""
+}
+
+func (s *Store) ensureLazyDispatchReady(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	if s.lazyNeedsDispatchRefresh(acc) {
+		s.triggerLazyRefreshAsync(acc)
+		return false
+	}
+	return acc.IsAvailable()
+}
+
+func (s *Store) lazyNeedsDispatchRefresh(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	acc.mu.RLock()
+	openAIResponses := acc.isOpenAIResponsesAPILocked()
+	hasRefreshCredential := strings.TrimSpace(acc.RefreshToken) != "" || strings.TrimSpace(acc.SessionToken) != ""
+	acc.mu.RUnlock()
+	return !openAIResponses && hasRefreshCredential && acc.NeedsRefresh()
+}
+
+func (s *Store) triggerLazyRefreshAsync(acc *Account) {
+	if acc == nil || acc.DBID == 0 {
+		return
+	}
+	dbID := acc.DBID
+	if _, loaded := s.lazyRefreshInFlight.LoadOrStore(dbID, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer s.lazyRefreshInFlight.Delete(dbID)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.refreshAccount(ctx, acc); err != nil {
+			log.Printf("[账号 %d] lazy mode 预热刷新失败: %v", dbID, err)
+		}
+	}()
+}
+
+func (s *Store) lazyCanRefreshForMetadata(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	if acc.isOpenAIResponsesAPILocked() {
+		return false
+	}
+	return acc.AccessToken == "" &&
+		(strings.TrimSpace(acc.RefreshToken) != "" || strings.TrimSpace(acc.SessionToken) != "") &&
+		acc.Status != StatusError &&
+		acc.healthTierLocked() != HealthTierBanned
+}
+
+func (s *Store) acquireLazyCandidate(acc *Account, maxConcurrency int64) bool {
+	if !s.ensureLazyDispatchReady(acc) {
+		return false
+	}
+	_, _, _, limit := acc.schedulerSnapshot(maxConcurrency)
+	if limit <= 0 {
+		return false
+	}
+	return tryAcquireAccount(acc, limit)
+}
+
+func (s *Store) nextExcludingWithFilterLazy(apiKeyID int64, exclude map[int64]bool, filter AccountFilter) *Account {
+	for attempts := 0; attempts < 16; attempts++ {
+		s.mu.RLock()
+
+		var best *Account
+		var metadataRefreshCandidate *Account
+		bestPriority := -1
+		bestDispatchScore := -math.MaxFloat64
+		var bestLoad int64 = math.MaxInt64
+		maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
+
+		for _, acc := range s.accounts {
+			if exclude != nil && exclude[acc.DBID] {
+				continue
+			}
+			if !s.accountLazySelectable(acc) {
+				continue
+			}
+			if !s.accountAllowedForAPIKey(acc, apiKeyID) {
+				continue
+			}
+			if filter != nil && !filter(acc) {
+				if metadataRefreshCandidate == nil && s.lazyCanRefreshForMetadata(acc) {
+					metadataRefreshCandidate = acc
+				}
+				continue
+			}
+			if s.lazyNeedsDispatchRefresh(acc) {
+				s.triggerLazyRefreshAsync(acc)
+				continue
+			}
+
+			load := atomic.LoadInt64(&acc.ActiveRequests)
+			tier, _, dispatchScore, limit := acc.schedulerSnapshot(maxConcurrency)
+			if limit <= 0 || load >= limit {
+				continue
+			}
+
+			priority := tierPriority(tier)
+			if priority > bestPriority ||
+				(priority == bestPriority && (dispatchScore > bestDispatchScore ||
+					(dispatchScore == bestDispatchScore && load < bestLoad) ||
+					(dispatchScore == bestDispatchScore && load == bestLoad && fastRandN(2) == 0))) {
+				bestPriority = priority
+				bestDispatchScore = dispatchScore
+				bestLoad = load
+				best = acc
+			}
+		}
+		s.mu.RUnlock()
+
+		if best == nil {
+			if metadataRefreshCandidate != nil && s.ensureLazyDispatchReady(metadataRefreshCandidate) {
+				continue
+			}
+			return nil
+		}
+		if s.accountHasCachedCooldown(best) {
+			continue
+		}
+		if s.acquireLazyCandidate(best, maxConcurrency) {
+			return best
+		}
 	}
 	return nil
 }
@@ -2724,7 +2911,14 @@ func (s *Store) takeByIDExcluding(id int64, apiKeyID int64, exclude map[int64]bo
 		}
 	}
 	s.mu.RUnlock()
-	if target == nil || !target.IsAvailable() {
+	if target == nil {
+		return nil
+	}
+	if s.GetLazyMode() {
+		if !s.accountLazySelectable(target) {
+			return nil
+		}
+	} else if !target.IsAvailable() {
 		return nil
 	}
 	if s.accountHasCachedCooldown(target) {
@@ -2739,6 +2933,13 @@ func (s *Store) takeByIDExcluding(id int64, apiKeyID int64, exclude map[int64]bo
 
 	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
 	now := time.Now()
+	if s.GetLazyMode() {
+		if !s.acquireLazyCandidate(target, maxConcurrency) {
+			return nil
+		}
+		return target
+	}
+
 	_, _, limit, _, available := target.fastSchedulerSnapshot(maxConcurrency, now)
 	if !available || limit <= 0 {
 		return nil
@@ -2776,7 +2977,11 @@ func (s *Store) hasDispatchCandidateWithFilter(apiKeyID int64, exclude map[int64
 		if exclude != nil && exclude[acc.DBID] {
 			continue
 		}
-		if !acc.IsAvailable() {
+		if s.GetLazyMode() {
+			if !s.accountLazySelectable(acc) {
+				continue
+			}
+		} else if !acc.IsAvailable() {
 			continue
 		}
 		if s.accountHasCachedCooldown(acc) {
@@ -3678,6 +3883,9 @@ func (s *Store) SetUsageProbeFunc(fn func(context.Context, *Account) error) {
 
 // TriggerUsageProbeAsync 异步触发一次批量用量探针
 func (s *Store) TriggerUsageProbeAsync() {
+	if s.GetLazyMode() {
+		return
+	}
 	if !s.usageProbeBatch.CompareAndSwap(false, true) {
 		return
 	}
@@ -3690,6 +3898,9 @@ func (s *Store) TriggerUsageProbeAsync() {
 
 // TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测
 func (s *Store) TriggerRecoveryProbeAsync() {
+	if s.GetLazyMode() {
+		return
+	}
 	if !s.recoveryProbeBatch.CompareAndSwap(false, true) {
 		return
 	}
@@ -4052,8 +4263,9 @@ func (s *Store) AvailableCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	count := 0
+	lazy := s.GetLazyMode()
 	for _, acc := range s.accounts {
-		if acc.IsAvailable() {
+		if (lazy && s.accountLazySelectable(acc)) || (!lazy && acc.IsAvailable()) {
 			count++
 		}
 	}

@@ -1801,6 +1801,28 @@ func resolveServiceTier(actualTier, requestedTier string) string {
 	return final
 }
 
+// resolveBillingServiceTier keeps UI tier normalization separate from billing:
+// fast/priority intent is billed as priority only when the upstream does not
+// report a concrete tier, or when it confirms fast/priority. Any concrete
+// upstream tier wins so billing follows the actual tier reported by upstream.
+func resolveBillingServiceTier(actualTier, requestedTier string) string {
+	actualTier = strings.ToLower(strings.TrimSpace(actualTier))
+	if actualTier != "" {
+		if actualTier == "priority" || actualTier == "fast" {
+			return "priority"
+		}
+		return actualTier
+	}
+
+	requestedTier = strings.ToLower(strings.TrimSpace(requestedTier))
+	switch requestedTier {
+	case "priority", "fast":
+		return "priority"
+	default:
+		return requestedTier
+	}
+}
+
 // 上游不支持的 JSON Schema 验证约束关键字
 var unsupportedSchemaKeys = map[string]bool{
 	"uniqueItems":      true,
