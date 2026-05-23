@@ -7,7 +7,7 @@ import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
 import ToastNotice from "../components/ToastNotice";
-import { useDataLoader } from "../hooks/useDataLoader";
+import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { useToast } from "../hooks/useToast";
 import type {
@@ -398,10 +398,12 @@ export default function Accounts() {
   const atFileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const selectAllRef = useRef<HTMLInputElement>(null);
+  const lazyModeRef = useRef<boolean | null>(null);
   const { toast, showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
 
-  const loadAccounts = useCallback(async () => {
+  const loadAccounts = useCallback(async (options?: LoadOptions) => {
+    const shouldLoadSettings = !options?.silent || lazyModeRef.current === null;
     const [
       accountsResponse,
       apiKeysResponse,
@@ -414,14 +416,19 @@ export default function Accounts() {
         api.getAPIKeys(),
         api.getOpsOverview().catch((): OpsOverviewResponse | null => null),
         api.listAccountGroups().catch(() => ({ groups: [] })),
-        api.getSettings().catch((): SystemSettings | null => null),
+        shouldLoadSettings
+          ? api.getSettings().catch((): SystemSettings | null => null)
+          : Promise.resolve<SystemSettings | null>(null),
       ]);
+    if (settings) {
+      lazyModeRef.current = settings.lazy_mode;
+    }
     setAllGroups(groupsResponse.groups ?? []);
     return {
       accounts: accountsResponse.accounts ?? [],
       apiKeys: apiKeysResponse.keys ?? [],
       opsOverview,
-      lazyMode: settings?.lazy_mode ?? false,
+      lazyMode: lazyModeRef.current ?? false,
     };
   }, []);
 

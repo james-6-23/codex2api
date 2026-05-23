@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getErrorMessage } from '../utils/error'
 
-interface LoadOptions {
+export interface LoadOptions {
   silent?: boolean
 }
 
 interface UseDataLoaderOptions<T> {
   initialData: T
-  load: () => Promise<T>
+  load: (options?: LoadOptions) => Promise<T>
   onError?: (message: string, error: unknown) => void
 }
 
@@ -25,7 +25,7 @@ export function useDataLoader<T>({ initialData, load, onError }: UseDataLoaderOp
     }
 
     try {
-      const nextData = await load()
+      const nextData = await load(options)
       setData(nextData)
       setError(null)
       return nextData

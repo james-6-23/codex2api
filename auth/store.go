@@ -1489,6 +1489,7 @@ type Store struct {
 	usageProbeMaxAge          int64 // 用量探针快照最大缓存时长（ns）
 	recoveryProbeInterval     int64 // 恢复探测最小间隔（ns）
 	backgroundRefreshWakeCh   chan struct{}
+	lazyRefreshInFlight       sync.Map
 	stopCh                    chan struct{}
 	stopOnce                  sync.Once
 	wg                        sync.WaitGroup
@@ -2633,25 +2634,40 @@ func (s *Store) ensureLazyDispatchReady(acc *Account) bool {
 	if acc == nil {
 		return false
 	}
-	acc.mu.RLock()
-	openAIResponses := acc.isOpenAIResponsesAPILocked()
-	acc.mu.RUnlock()
-	if openAIResponses {
-		return true
-	}
-	acc.mu.RLock()
-	hasRefreshCredential := strings.TrimSpace(acc.RefreshToken) != "" || strings.TrimSpace(acc.SessionToken) != ""
-	acc.mu.RUnlock()
-	if acc.NeedsRefresh() && hasRefreshCredential {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := s.refreshAccount(ctx, acc)
-		cancel()
-		if err != nil {
-			log.Printf("[账号 %d] lazy mode 调度前刷新失败: %v", acc.DBID, err)
-			return false
-		}
+	if s.lazyNeedsDispatchRefresh(acc) {
+		s.triggerLazyRefreshAsync(acc)
+		return false
 	}
 	return acc.IsAvailable()
+}
+
+func (s *Store) lazyNeedsDispatchRefresh(acc *Account) bool {
+	if acc == nil {
+		return false
+	}
+	acc.mu.RLock()
+	openAIResponses := acc.isOpenAIResponsesAPILocked()
+	hasRefreshCredential := strings.TrimSpace(acc.RefreshToken) != "" || strings.TrimSpace(acc.SessionToken) != ""
+	acc.mu.RUnlock()
+	return !openAIResponses && hasRefreshCredential && acc.NeedsRefresh()
+}
+
+func (s *Store) triggerLazyRefreshAsync(acc *Account) {
+	if acc == nil || acc.DBID == 0 {
+		return
+	}
+	dbID := acc.DBID
+	if _, loaded := s.lazyRefreshInFlight.LoadOrStore(dbID, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer s.lazyRefreshInFlight.Delete(dbID)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if err := s.refreshAccount(ctx, acc); err != nil {
+			log.Printf("[账号 %d] lazy mode 预热刷新失败: %v", dbID, err)
+		}
+	}()
 }
 
 func (s *Store) lazyCanRefreshForMetadata(acc *Account) bool {
@@ -2705,6 +2721,10 @@ func (s *Store) nextExcludingWithFilterLazy(apiKeyID int64, exclude map[int64]bo
 				if metadataRefreshCandidate == nil && s.lazyCanRefreshForMetadata(acc) {
 					metadataRefreshCandidate = acc
 				}
+				continue
+			}
+			if s.lazyNeedsDispatchRefresh(acc) {
+				s.triggerLazyRefreshAsync(acc)
 				continue
 			}
 
@@ -4243,8 +4263,9 @@ func (s *Store) AvailableCount() int {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	count := 0
+	lazy := s.GetLazyMode()
 	for _, acc := range s.accounts {
-		if (s.GetLazyMode() && s.accountLazySelectable(acc)) || (!s.GetLazyMode() && acc.IsAvailable()) {
+		if (lazy && s.accountLazySelectable(acc)) || (!lazy && acc.IsAvailable()) {
 			count++
 		}
 	}
