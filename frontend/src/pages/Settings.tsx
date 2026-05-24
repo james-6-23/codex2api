@@ -5,7 +5,6 @@ import { api, resetAdminAuthState, setAdminKey } from '../api'
 import { formatBeijingTime, getTimezone, setTimezone } from '../utils/time'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
-import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import type { HealthResponse, ModelInfo, SystemSettings } from '../types'
@@ -1262,7 +1261,6 @@ export default function Settings() {
           </div>
         </div>
 
-        <ToastNotice toast={toast} />
       </>
     </StateShell>
   )

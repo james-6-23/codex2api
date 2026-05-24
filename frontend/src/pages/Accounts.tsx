@@ -6,7 +6,6 @@ import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
-import ToastNotice from "../components/ToastNotice";
 import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import {
@@ -1734,7 +1733,7 @@ export default function Accounts() {
           failed: result.failed,
         }),
       );
-      void reload();
+      void reloadSilently();
     } catch (error) {
       showToast(
         t("accounts.batchTestFailed", { error: getErrorMessage(error) }),
@@ -4786,8 +4785,6 @@ export default function Accounts() {
           </Modal>
 
           {confirmDialog}
-
-          <ToastNotice toast={toast} />
         </>
       </StateShell>
     </div>

@@ -4,7 +4,6 @@ import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
-import ToastNotice from '../components/ToastNotice'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
 import { formatBeijingTime } from '../utils/time'
@@ -1483,7 +1482,6 @@ export default function ImageStudio() {
         {activeView === 'studio' && <ImageNoticeCarousel />}
       </div>
       <ImageStudioTabs activeView={activeView} />
-      <ToastNotice toast={toast} />
       {confirmDialog}
 
       {activeView === 'studio' && (

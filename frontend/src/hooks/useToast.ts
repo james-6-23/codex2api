@@ -1,27 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ToastState, ToastType } from '../types'
+import { useToastContext } from '../components/ToastProvider'
 
-export function useToast(timeoutMs = 3000) {
-  const [toast, setToast] = useState<ToastState | null>(null)
-  const timeoutRef = useRef<number | null>(null)
-
-  const clearToastTimer = useCallback(() => {
-    if (timeoutRef.current !== null) {
-      window.clearTimeout(timeoutRef.current)
-      timeoutRef.current = null
-    }
-  }, [])
-
-  const showToast = useCallback((msg: string, type: ToastType = 'success') => {
-    clearToastTimer()
-    setToast({ msg, type })
-    timeoutRef.current = window.setTimeout(() => {
-      setToast(null)
-      timeoutRef.current = null
-    }, timeoutMs)
-  }, [clearToastTimer, timeoutMs])
-
-  useEffect(() => clearToastTimer, [clearToastTimer])
-
-  return { toast, showToast, setToast }
+// 兼容旧调用方：`const { toast, showToast } = useToast()` 不变。
+// timeoutMs 参数已废弃 —— 全局 ToastProvider 用统一默认时长；
+// 如需单次自定义时长，直接 `showToast(msg, type, ms)`。
+export function useToast(_timeoutMs?: number) {
+  void _timeoutMs
+  return useToastContext()
 }

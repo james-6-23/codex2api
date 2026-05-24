@@ -7,7 +7,6 @@ import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
-import ToastNotice from '../components/ToastNotice'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
@@ -325,7 +324,6 @@ export default function PromptFilter() {
           />
         ) : null}
 
-        <ToastNotice toast={toast} />
       </>
     </StateShell>
   )

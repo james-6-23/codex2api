@@ -20,7 +20,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { api, type ProxyRow, type ProxyTestResult } from "../api";
 import Modal from "../components/Modal";
-import ToastNotice from "../components/ToastNotice";
 import { useToast } from "../hooks/useToast";
 import { getErrorMessage } from "../utils/error";
 
@@ -826,7 +825,6 @@ export default function Proxies() {
         </div>
       </Modal>
 
-      <ToastNotice toast={toast} />
     </div>
   );
 }

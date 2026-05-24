@@ -4,6 +4,7 @@ import AuthGate from './components/AuthGate'
 import Layout from './components/Layout'
 import RouteErrorBoundary from './components/RouteErrorBoundary'
 import StateShell from './components/StateShell'
+import { ToastProvider } from './components/ToastProvider'
 import { BrandingProvider } from './branding'
 import Dashboard from './pages/Dashboard'
 
@@ -23,31 +24,33 @@ export default function App() {
   return (
     <BrandingProvider>
       <AuthGate>
-        <Layout>
-          <RouteErrorBoundary>
-            <Suspense fallback={<StateShell variant="page" loading>{null}</StateShell>}>
-              <Routes>
-                <Route path="/" element={<Dashboard />} />
-                <Route path="/accounts" element={<Accounts />} />
-                <Route path="/api-keys" element={<APIKeys />} />
-                <Route path="/proxies" element={<Proxies />} />
-                <Route path="/images" element={<Navigate to="/images/studio" replace />} />
-                <Route path="/images/:view" element={<ImageStudio />} />
-                <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
-                <Route path="/prompt-filter/:view" element={<PromptFilter />} />
-                <Route path="/ops" element={<Navigate to="/ops/overview" replace />} />
-                <Route path="/ops/overview" element={<Operations />} />
-                <Route path="/ops/errors" element={<OperationsErrors />} />
-                <Route path="/ops/scheduler" element={<SchedulerBoard />} />
-                <Route path="/usage" element={<Usage />} />
-                <Route path="/settings" element={<Settings />} />
-                <Route path="/docs" element={<Docs />} />
-                <Route path="/guide" element={<Navigate to="/docs" replace />} />
-                <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />
-              </Routes>
-            </Suspense>
-          </RouteErrorBoundary>
-        </Layout>
+        <ToastProvider>
+          <Layout>
+            <RouteErrorBoundary>
+              <Suspense fallback={<StateShell variant="page" loading>{null}</StateShell>}>
+                <Routes>
+                  <Route path="/" element={<Dashboard />} />
+                  <Route path="/accounts" element={<Accounts />} />
+                  <Route path="/api-keys" element={<APIKeys />} />
+                  <Route path="/proxies" element={<Proxies />} />
+                  <Route path="/images" element={<Navigate to="/images/studio" replace />} />
+                  <Route path="/images/:view" element={<ImageStudio />} />
+                  <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
+                  <Route path="/prompt-filter/:view" element={<PromptFilter />} />
+                  <Route path="/ops" element={<Navigate to="/ops/overview" replace />} />
+                  <Route path="/ops/overview" element={<Operations />} />
+                  <Route path="/ops/errors" element={<OperationsErrors />} />
+                  <Route path="/ops/scheduler" element={<SchedulerBoard />} />
+                  <Route path="/usage" element={<Usage />} />
+                  <Route path="/settings" element={<Settings />} />
+                  <Route path="/docs" element={<Docs />} />
+                  <Route path="/guide" element={<Navigate to="/docs" replace />} />
+                  <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />
+                </Routes>
+              </Suspense>
+            </RouteErrorBoundary>
+          </Layout>
+        </ToastProvider>
       </AuthGate>
     </BrandingProvider>
   )

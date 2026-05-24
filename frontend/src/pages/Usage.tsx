@@ -7,7 +7,6 @@ import { getTimeRangeISO, type TimeRangeKey } from '../lib/timeRange'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
-import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { useToast } from '../hooks/useToast'
@@ -1521,7 +1520,6 @@ export default function Usage() {
         </Card>
         </div>
 
-        <ToastNotice toast={toast} />
         {confirmDialog}
       </>
     </StateShell>

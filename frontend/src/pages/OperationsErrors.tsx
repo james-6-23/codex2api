@@ -18,7 +18,6 @@ import OpsTabs from '../components/OpsTabs'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import StateShell from '../components/StateShell'
-import ToastNotice from '../components/ToastNotice'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
@@ -568,7 +567,6 @@ export default function OperationsErrors() {
             </DialogContent>
           ) : null}
         </Dialog>
-        <ToastNotice toast={toast} />
       </>
     </StateShell>
   )

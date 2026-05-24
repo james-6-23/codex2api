@@ -6,7 +6,6 @@ import ChipInput from "../components/ChipInput";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import StateShell from "../components/StateShell";
-import ToastNotice from "../components/ToastNotice";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { useDataLoader } from "../hooks/useDataLoader";
 import { useToast } from "../hooks/useToast";
@@ -892,7 +891,6 @@ export default function APIKeys() {
           ) : null}
         </Modal>
 
-        <ToastNotice toast={toast} />
         {confirmDialog}
       </>
     </StateShell>

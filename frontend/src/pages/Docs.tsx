@@ -12,7 +12,6 @@ import {
   Server,
 } from "lucide-react";
 import { api, getAdminKey } from "../api";
-import ToastNotice from "../components/ToastNotice";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -994,7 +993,6 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
         </div>
       </div>
 
-      <ToastNotice toast={toast} />
 
       <div className="xl:hidden mb-3 -mx-2 overflow-x-auto px-2">
         <div className="flex gap-1.5 pb-1">
