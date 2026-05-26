@@ -121,6 +121,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 	// 提取 reasoning effort（从翻译后的 codex body 中）
 	reasoningEffort := extractReasoningEffort(codexBody)
+	serviceTier := extractServiceTier(codexBody)
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
@@ -225,6 +226,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				InboundEndpoint:   "/v1/messages",
 				UpstreamEndpoint:  "/v1/responses",
 				Stream:            isStream,
+				ServiceTier:       resolveServiceTier("", serviceTier),
 				IsRetryAttempt:    shouldRetry,
 				AttemptIndex:      attempt + 1,
 				UpstreamErrorKind: upstreamErrorKind(resp.StatusCode, errBody, decision),
@@ -257,6 +259,7 @@ func (h *Handler) Messages(c *gin.Context) {
 
 		var firstTokenMs int
 		var usage *UsageInfo
+		var actualServiceTier string
 		ttftRecorded := false
 		gotTerminal := false
 		deltaCharCount := 0
@@ -301,6 +304,9 @@ func (h *Handler) Messages(c *gin.Context) {
 				// 提取 usage
 				if eventType == "response.completed" {
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
+					if tier := parsed.Get("response.service_tier").String(); tier != "" {
+						actualServiceTier = tier
+					}
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
@@ -359,6 +365,9 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				if eventType == "response.completed" {
 					usage = extractUsageFromResult(parsed.Get("response.usage"))
+					if tier := parsed.Get("response.service_tier").String(); tier != "" {
+						actualServiceTier = tier
+					}
 					lastCompletedData = data
 					gotTerminal = true
 					return false
@@ -418,6 +427,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 		}
 
+		resolvedServiceTier := resolveServiceTier(actualServiceTier, serviceTier)
+		c.Set("x-service-tier", resolvedServiceTier)
+
 		logInput := &database.UsageLogInput{
 			AccountID:        account.ID(),
 			Endpoint:         "/v1/messages",
@@ -430,6 +442,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			InboundEndpoint:  "/v1/messages",
 			UpstreamEndpoint: "/v1/responses",
 			Stream:           isStream,
+			ServiceTier:      resolvedServiceTier,
 		}
 		if logStatusCode != http.StatusOK {
 			logInput.ErrorMessage = usageLogErrorMessage(logStatusCode, []byte(outcome.failureMessage))

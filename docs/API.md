@@ -33,6 +33,8 @@
 
 Codex2API 提供兼容 OpenAI 风格的 API 接口，同时包含完整的管理后台 API。
 
+Anthropic `/v1/messages` 仅将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
+
 **Base URL:** `http://localhost:8080` (默认端口)
 
 **请求格式:**

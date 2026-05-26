@@ -239,6 +239,7 @@ func TranslateStreamChunk(data []byte, model, chunkID string) ([]byte, bool)
 - `messages` → `input`
 - `max_tokens/temperature` → 删除（Codex 不支持）
 - `reasoning_effort` → `reasoning.effort`
+- Anthropic `/v1/messages` 的 `speed:"fast"` → Codex `service_tier:"priority"`（Anthropic 入参 `service_tier` 为 Priority Tier，不参与 fast mode 映射）
 - SSE 事件类型转换
 
 ---

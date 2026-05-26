@@ -62,6 +62,9 @@ func TestTranslateAnthropicToCodex_DefaultsReasoningHighWithSummary(t *testing.T
 	if summary := gjson.GetBytes(got, "reasoning.summary").String(); summary != "auto" {
 		t.Fatalf("reasoning.summary = %q, want auto; body=%s", summary, got)
 	}
+	if tier := gjson.GetBytes(got, "service_tier"); tier.Exists() {
+		t.Fatalf("service_tier should be omitted when speed is absent; body=%s", got)
+	}
 }
 
 func TestTranslateAnthropicToCodex_ThinkingBudgetDoesNotControlEffort(t *testing.T) {
@@ -78,6 +81,78 @@ func TestTranslateAnthropicToCodex_ThinkingBudgetDoesNotControlEffort(t *testing
 
 	if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "high" {
 		t.Fatalf("reasoning.effort = %q, want high; body=%s", effort, got)
+	}
+}
+
+func TestTranslateAnthropicToCodex_SpeedFastMapsToCodexPriority(t *testing.T) {
+	cases := []struct {
+		name     string
+		field    string
+		wantTier bool
+	}{
+		{"absent omits priority", "", false},
+		{"speed fast maps to priority", `,"speed":"fast"`, true},
+		{"speed standard omits priority", `,"speed":"standard"`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			raw := []byte(`{
+				"model":"claude-sonnet-4-5",
+				"messages":[{"role":"user","content":"hello"}]` + tc.field + `
+			}`)
+
+			got, _, err := TranslateAnthropicToCodexWithModels(raw, "", []string{"gpt-5.4"})
+			if err != nil {
+				t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
+			}
+
+			tier := gjson.GetBytes(got, "service_tier")
+			if tc.wantTier {
+				if tier.String() != "priority" {
+					t.Fatalf("service_tier = %q, want priority; body=%s", tier.String(), got)
+				}
+				if speed := gjson.GetBytes(got, "speed"); speed.Exists() {
+					t.Fatalf("speed should not be forwarded to Codex body; body=%s", got)
+				}
+				return
+			}
+			if tier.Exists() {
+				t.Fatalf("service_tier should be omitted; body=%s", got)
+			}
+			if speed := gjson.GetBytes(got, "speed"); speed.Exists() {
+				t.Fatalf("speed should not be forwarded to Codex body; body=%s", got)
+			}
+		})
+	}
+}
+
+func TestAnthropicUsageServiceTierResolution(t *testing.T) {
+	cases := []struct {
+		name   string
+		speed  string
+		actual string
+		want   string
+	}{
+		{"no fast intent", "", "default", "default"},
+		{"fast intent upstream default", "fast", "default", "fast"},
+		{"fast intent upstream priority", "fast", "priority", "fast"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			field := ""
+			if tc.speed != "" {
+				field = `,"speed":"` + tc.speed + `"`
+			}
+			raw := []byte(`{"model":"claude-opus-4-7","messages":[{"role":"user","content":"hi"}]` + field + `}`)
+			codexBody, _, err := TranslateAnthropicToCodexWithModels(raw, "", []string{"gpt-5.5"})
+			if err != nil {
+				t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
+			}
+			got := resolveServiceTier(tc.actual, extractServiceTier(codexBody))
+			if got != tc.want {
+				t.Fatalf("resolveServiceTier(%q, %q) = %q, want %q", tc.actual, extractServiceTier(codexBody), got, tc.want)
+			}
+		})
 	}
 }
 

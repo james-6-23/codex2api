@@ -26,6 +26,7 @@ type anthropicRequest struct {
 	OutputConfig *anthropicOutputConfig `json:"output_config,omitempty"`
 	ToolChoice   json.RawMessage        `json:"tool_choice,omitempty"`
 	Metadata     json.RawMessage        `json:"metadata,omitempty"`
+	Speed        string                 `json:"speed,omitempty"`
 }
 
 type anthropicThinking struct {
@@ -240,6 +241,10 @@ func TranslateAnthropicToCodex(rawJSON []byte, modelMappingJSON string) ([]byte,
 	return TranslateAnthropicToCodexWithModels(rawJSON, modelMappingJSON, SupportedModels)
 }
 
+func shouldUseCodexPriorityForAnthropicSpeed(speed string) bool {
+	return strings.ToLower(strings.TrimSpace(speed)) == "fast"
+}
+
 // TranslateAnthropicToCodexWithModels 将 Anthropic Messages 请求转换为 Codex Responses 格式
 // 返回: (codex 请求体, 原始 Anthropic model 名, error)
 func TranslateAnthropicToCodexWithModels(rawJSON []byte, modelMappingJSON string, supportedModels []string) ([]byte, string, error) {
@@ -269,6 +274,12 @@ func TranslateAnthropicToCodexWithModels(rawJSON []byte, modelMappingJSON string
 	out["reasoning"] = map[string]any{
 		"effort":  resolveReasoningEffort(req.OutputConfig),
 		"summary": "auto",
+	}
+
+	if shouldUseCodexPriorityForAnthropicSpeed(req.Speed) {
+		if upstreamTier, ok := upstreamServiceTier("priority"); ok {
+			out["service_tier"] = upstreamTier
+		}
 	}
 
 	// tools
