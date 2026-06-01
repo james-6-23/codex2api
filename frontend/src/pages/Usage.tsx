@@ -1508,6 +1508,16 @@ export default function Usage() {
                             {isImageUsageLog(log) && (
                               <ImageUsageBadge log={log} />
                             )}
+                            {log.compact && (
+                              <Badge
+                                variant="outline"
+                                className="text-[11px] font-semibold gap-0.5 border-transparent bg-teal-500/12 text-teal-700 dark:bg-teal-500/20 dark:text-teal-300"
+                                title={t('usage.compactRequestTooltip')}
+                              >
+                                <Box className="size-3" />
+                                {t('usage.compactRequest')}
+                              </Badge>
+                            )}
                             {isFastTier(log.billing_service_tier || log.service_tier) && (
                               <Badge
                                 variant="outline"

@@ -809,6 +809,7 @@ export interface UsageLog {
   inbound_endpoint: string
   upstream_endpoint: string
   stream: boolean
+  compact: boolean
   cached_tokens: number
   service_tier: string
   requested_service_tier: string

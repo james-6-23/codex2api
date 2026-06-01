@@ -336,6 +336,52 @@ func TestResponsesEndpointsAllowCompactionInputType(t *testing.T) {
 	}
 }
 
+func TestPopulateCompactUsageMetaFromRequest(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	t.Run("responses compact endpoint", func(t *testing.T) {
+		input := &database.UsageLogInput{Endpoint: "/v1/responses/compact"}
+
+		populateCompactUsageMetaFromRequest(nil, input)
+
+		if !input.Compact {
+			t.Fatal("Compact = false, want true for /v1/responses/compact")
+		}
+	})
+
+	t.Run("compaction input item", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("raw_body", []byte(`{
+			"model":"gpt-5.4",
+			"input":[
+				{"type":"message","role":"user","content":"hello"},
+				{"type":"compaction","summary":"previous context was compacted"}
+			]
+		}`))
+		input := &database.UsageLogInput{Endpoint: "/v1/responses"}
+
+		populateCompactUsageMetaFromRequest(ctx, input)
+
+		if !input.Compact {
+			t.Fatal("Compact = false, want true for compaction input item")
+		}
+	})
+
+	t.Run("normal responses request", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("raw_body", []byte(`{"model":"gpt-5.4","input":[{"type":"message","role":"user","content":"hello"}]}`))
+		input := &database.UsageLogInput{Endpoint: "/v1/responses"}
+
+		populateCompactUsageMetaFromRequest(ctx, input)
+
+		if input.Compact {
+			t.Fatal("Compact = true, want false for normal responses input")
+		}
+	})
+}
+
 func TestResponsesEndpointsAllowGPT55MaxOutputTokens128K(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

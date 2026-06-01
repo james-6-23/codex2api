@@ -380,7 +380,7 @@ func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 		t.Fatalf("sqliteTableColumns 返回错误: %v", err)
 	}
 
-	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size", "effective_model", "account_billed", "user_billed", "is_retry_attempt", "attempt_index", "upstream_error_kind", "error_message"} {
+	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size", "effective_model", "compact", "account_billed", "user_billed", "is_retry_attempt", "attempt_index", "upstream_error_kind", "error_message"} {
 		if _, ok := columns[name]; !ok {
 			t.Fatalf("usage_logs 缺少列 %q", name)
 		}
@@ -1470,6 +1470,7 @@ func TestUsageLogsFilterByAPIKeyID(t *testing.T) {
 			Model:        "gpt-5.4",
 			StatusCode:   200,
 			DurationMs:   220,
+			Compact:      true,
 			APIKeyID:     targetAPIKeyID,
 			APIKeyName:   "Team A",
 			APIKeyMasked: "sk-a****...****1111",
@@ -1502,6 +1503,7 @@ func TestUsageLogsFilterByAPIKeyID(t *testing.T) {
 	}
 
 	foundSnapshot := false
+	foundCompact := false
 	for _, usageLog := range recentLogs {
 		if usageLog.APIKeyID == targetAPIKeyID {
 			foundSnapshot = true
@@ -1511,10 +1513,22 @@ func TestUsageLogsFilterByAPIKeyID(t *testing.T) {
 			if usageLog.APIKeyMasked != "sk-a****...****1111" {
 				t.Fatalf("APIKeyMasked = %q, want %q", usageLog.APIKeyMasked, "sk-a****...****1111")
 			}
+			if usageLog.Endpoint == "/v1/responses" {
+				foundCompact = true
+				if !usageLog.Compact {
+					t.Fatal("Compact = false, want true for compact usage log")
+				}
+			}
+			if usageLog.Endpoint == "/v1/chat/completions" && usageLog.Compact {
+				t.Fatal("Compact = true, want false for normal usage log")
+			}
 		}
 	}
 	if !foundSnapshot {
 		t.Fatal("未找到带 API 密钥快照的最近日志")
+	}
+	if !foundCompact {
+		t.Fatal("未找到 compact 使用日志")
 	}
 
 	page, err := db.ListUsageLogsByTimeRangePaged(ctx, UsageLogFilter{
@@ -1540,6 +1554,9 @@ func TestUsageLogsFilterByAPIKeyID(t *testing.T) {
 		}
 		if usageLog.APIKeyName != "Team A" {
 			t.Fatalf("APIKeyName = %q, want %q", usageLog.APIKeyName, "Team A")
+		}
+		if usageLog.Endpoint == "/v1/responses" && !usageLog.Compact {
+			t.Fatal("Compact = false, want true in paged usage logs")
 		}
 	}
 }

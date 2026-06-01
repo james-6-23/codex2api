@@ -1060,6 +1060,8 @@
     "allEndpoints": "All Endpoints",
     "allTypes": "All Types",
     "imageRequest": "Image",
+    "compactRequest": "Compact",
+    "compactRequestTooltip": "This request contains compacted conversation context",
     "imageTooltipTitle": "Image Info",
     "imageTooltipCount": "Count",
     "imageTooltipResolution": "Resolution",

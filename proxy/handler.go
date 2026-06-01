@@ -514,7 +514,65 @@ func populateAPIKeyMetaFromContext(c *gin.Context, input *database.UsageLogInput
 
 func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInput) {
 	populateAPIKeyMetaFromContext(c, input)
+	populateCompactUsageMetaFromRequest(c, input)
 	h.logUsage(input)
+}
+
+func populateCompactUsageMetaFromRequest(c *gin.Context, input *database.UsageLogInput) {
+	if input == nil || input.Compact {
+		return
+	}
+	if isCompactUsageEndpoint(input.Endpoint) || isCompactUsageEndpoint(input.InboundEndpoint) || isCompactUsageEndpoint(input.UpstreamEndpoint) {
+		input.Compact = true
+		return
+	}
+	if c == nil {
+		return
+	}
+	if body, ok := rawRequestBodyFromContext(c); ok && requestBodyHasCompactionInput(body) {
+		input.Compact = true
+	}
+}
+
+func isCompactUsageEndpoint(endpoint string) bool {
+	return strings.TrimSpace(endpoint) == "/v1/responses/compact"
+}
+
+func rawRequestBodyFromContext(c *gin.Context) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+	v, exists := c.Get("raw_body")
+	if !exists || v == nil {
+		return nil, false
+	}
+	switch body := v.(type) {
+	case []byte:
+		if len(body) == 0 {
+			return nil, false
+		}
+		return body, true
+	case string:
+		if body == "" {
+			return nil, false
+		}
+		return []byte(body), true
+	default:
+		return nil, false
+	}
+}
+
+func requestBodyHasCompactionInput(body []byte) bool {
+	input := gjson.GetBytes(body, "input")
+	if !input.IsArray() {
+		return false
+	}
+	for _, item := range input.Array() {
+		if strings.EqualFold(strings.TrimSpace(item.Get("type").String()), "compaction") {
+			return true
+		}
+	}
+	return false
 }
 
 // extractReasoningEffort 从请求体提取推理强度
@@ -1123,6 +1181,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
 	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	c.Set("raw_body", rawBody)
 
 	// Validate request
 	validator := api.NewValidator(rawBody)
@@ -1965,6 +2024,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
 	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	c.Set("raw_body", rawBody)
 
 	// Validate request
 	validator := api.NewValidator(rawBody)

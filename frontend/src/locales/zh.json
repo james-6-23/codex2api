@@ -1060,6 +1060,8 @@
     "allEndpoints": "全部端点",
     "allTypes": "全部类型",
     "imageRequest": "图像",
+    "compactRequest": "Compact",
+    "compactRequestTooltip": "本次请求包含压缩后的上下文",
     "imageTooltipTitle": "图像信息",
     "imageTooltipCount": "数量",
     "imageTooltipResolution": "分辨率",
