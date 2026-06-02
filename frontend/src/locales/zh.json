@@ -1325,6 +1325,8 @@
     "showFullUsageNumbersDesc": "开启后 Usage 页请求数、Tokens 等统计显示完整数字；关闭时默认显示 1.2M、3.4B 等紧凑单位。",
     "fastSchedulerEnabled": "快速调度器",
     "fastSchedulerEnabledDesc": "启用后，账号选择将使用内存快速调度算法，大幅降低高并发场景下的调度延迟。适合大号池（100+ 账号）场景。",
+    "codexWebsocket": "WebSocket（Codex 上游）",
+    "codexWebsocketDesc": "控制代理与 Codex 上游之间的 WebSocket 长连接行为。全部默认关闭，不影响现有 HTTP 请求路径。",
     "codexForceWebsocket": "Codex 上游强制 WebSocket",
     "codexForceWebsocketDesc": "启用后，对 Codex 上游的请求将走 WebSocket 长连接（复用连接池），减少每次请求的 TLS/连接握手开销，更接近官方 CLI 体验。默认关闭，关闭时走原有 HTTP 请求。",
     "codexWSKeepaliveEnabled": "WS 连接保活",

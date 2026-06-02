@@ -1325,6 +1325,8 @@
     "showFullUsageNumbersDesc": "When enabled, the Usage page shows full request and token counts. When disabled, it uses compact units like 1.2M and 3.4B.",
     "fastSchedulerEnabled": "Fast Scheduler",
     "fastSchedulerEnabledDesc": "Uses an in-memory fast scheduling algorithm, significantly reducing dispatch latency under high concurrency. Recommended for large account pools (100+).",
+    "codexWebsocket": "WebSocket (Codex Upstream)",
+    "codexWebsocketDesc": "Controls the persistent WebSocket connection between the proxy and the Codex upstream. All options are off by default and do not affect the existing HTTP request path.",
     "codexForceWebsocket": "Force Codex Upstream WebSocket",
     "codexForceWebsocketDesc": "When enabled, requests to the Codex upstream use a persistent WebSocket (with connection pooling), cutting per-request TLS/handshake overhead to better match the official CLI. Disabled by default; when off, requests use the existing HTTP path.",
     "codexWSKeepaliveEnabled": "WS Keepalive",
