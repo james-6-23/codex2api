@@ -19,7 +19,7 @@ RUN VITE_APP_VERSION=${BUILD_VERSION} npm run build
 # Stage 2: 构建 Go 后端
 # 使用 BUILDPLATFORM 原生运行 + TARGETARCH 交叉编译
 # ============================================================
-FROM --platform=$BUILDPLATFORM golang:1.26.3-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS go-builder
 
 ARG TARGETARCH
 
