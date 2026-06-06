@@ -7,7 +7,7 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import StatCard from '../components/StatCard'
 import UsageStatsSummary from '../components/UsageStatsSummary'
-import type { StatsResponse, UsageStats, ChartAggregation } from '../types'
+import type { StatsResponse, SystemSettings, UsageStats, ChartAggregation } from '../types'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { Card, CardContent } from '@/components/ui/card'
 import { Users, CheckCircle, Gauge, XCircle, Activity } from 'lucide-react'
@@ -52,18 +52,20 @@ export default function Dashboard() {
 
   // 仅加载轻量级统计数据（秒级响应）
   const loadDashboardStats = useCallback(async () => {
-    const [stats, usageStats] = await Promise.all([
+    const [stats, usageStats, settings] = await Promise.all([
       api.getStats(),
       api.getUsageStats(),
+      api.getSettings().catch((): SystemSettings | null => null),
     ])
-    return { stats, usageStats }
+    return { stats, usageStats, settings }
   }, [])
 
   const { data, loading, error, reload, reloadSilently } = useDataLoader<{
     stats: StatsResponse | null
     usageStats: UsageStats | null
+    settings: SystemSettings | null
   }>({
-    initialData: { stats: null, usageStats: null },
+    initialData: { stats: null, usageStats: null, settings: null },
     load: loadDashboardStats,
   })
 
@@ -108,7 +110,8 @@ export default function Dashboard() {
     return () => window.clearInterval(timer)
   }, [reloadSilently, timeRange, loadChartData])
 
-  const { stats, usageStats } = data
+  const { stats, usageStats, settings } = data
+  const showFullUsageNumbers = settings?.show_full_usage_numbers ?? false
   const total = stats?.total ?? 0
   const available = stats?.available ?? 0
   const rateLimited = stats?.rate_limited ?? 0
@@ -162,7 +165,7 @@ export default function Dashboard() {
         {/* Usage stats */}
         {usageStats && (
           <div className="space-y-6">
-            <UsageStatsSummary stats={usageStats} />
+            <UsageStatsSummary stats={usageStats} showFullUsageNumbers={showFullUsageNumbers} />
             <Suspense fallback={<ChartsSkeleton />}>
               <DashboardUsageCharts
                 chartData={chartData}

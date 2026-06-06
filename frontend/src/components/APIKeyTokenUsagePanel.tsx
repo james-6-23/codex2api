@@ -4,6 +4,7 @@ import { api } from "../api";
 import { useToast } from "../hooks/useToast";
 import type { APIKeyTokenStat } from "../types";
 import { formatCompactEmail } from "../lib/utils";
+import { formatUsageNumber } from "../lib/usageFormat";
 import { getErrorMessage } from "../utils/error";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -89,8 +90,9 @@ function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
 }
 
 export default function APIKeyTokenUsagePanel() {
-  const { t } = useTranslation();
+  const { t, i18n } = useTranslation();
   const { showToast } = useToast();
+  const locale = i18n.language;
 
   const [rangeKey, setRangeKey] = useState<RangeKey>("today");
   const [customStart, setCustomStart] = useState<string>(() =>
@@ -105,6 +107,7 @@ export default function APIKeyTokenUsagePanel() {
   const [search, setSearch] = useState("");
   const [sortKey, setSortKey] = useState<SortKey>("total_tokens");
   const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [showFullUsageNumbers, setShowFullUsageNumbers] = useState(false);
 
   const range = useMemo(() => {
     const now = new Date();
@@ -143,6 +146,22 @@ export default function APIKeyTokenUsagePanel() {
     void reload();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [range?.start, range?.end]);
+
+  useEffect(() => {
+    let active = true;
+    const loadSettings = async () => {
+      try {
+        const settings = await api.getSettings();
+        if (active) setShowFullUsageNumbers(settings.show_full_usage_numbers);
+      } catch {
+        if (active) setShowFullUsageNumbers(false);
+      }
+    };
+    void loadSettings();
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const filteredItems = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -388,11 +407,17 @@ export default function APIKeyTokenUsagePanel() {
                     </div>
                   </TableCell>
                   <TableCell className="text-right tabular-nums">{formatNumber(item.requests)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatNumber(item.input_tokens)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatNumber(item.output_tokens)}</TableCell>
-                  <TableCell className="text-right tabular-nums">{formatNumber(item.cached_tokens)}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatUsageNumber(item.input_tokens, showFullUsageNumbers, locale)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatUsageNumber(item.output_tokens, showFullUsageNumbers, locale)}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatUsageNumber(item.cached_tokens, showFullUsageNumbers, locale)}
+                  </TableCell>
                   <TableCell className="text-right font-semibold tabular-nums">
-                    {formatNumber(item.total_tokens)}
+                    {formatUsageNumber(item.total_tokens, showFullUsageNumbers, locale)}
                   </TableCell>
                   <TableCell
                     className={`text-right tabular-nums ${

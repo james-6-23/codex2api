@@ -13,6 +13,7 @@ import { useToast } from '../hooks/useToast'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import type { APIKeyRow, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats } from '../types'
 import { formatCompactEmail } from '../lib/utils'
+import { formatUsageNumber as formatTokens } from '../lib/usageFormat'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -29,32 +30,6 @@ import {
 import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
-
-function formatTokens(value?: number | null, showFullNumbers = false): string {
-  if (value === undefined || value === null) return '0'
-  const numericValue = Number(value)
-  if (!Number.isFinite(numericValue)) return '0'
-  const roundedValue = Math.round(numericValue)
-  if (showFullNumbers) return roundedValue.toLocaleString()
-
-  const absValue = Math.abs(numericValue)
-  const units = [
-    { value: 1_000_000_000_000, suffix: 'T' },
-    { value: 1_000_000_000, suffix: 'B' },
-    { value: 1_000_000, suffix: 'M' },
-    { value: 1_000, suffix: 'K' },
-  ]
-  const unit = units.find((item) => absValue >= item.value)
-  if (!unit) return roundedValue.toLocaleString()
-
-  const scaled = numericValue / unit.value
-  const fractionDigits = Math.abs(scaled) >= 100 ? 0 : Math.abs(scaled) >= 10 ? 1 : 2
-  const compact = scaled
-    .toFixed(fractionDigits)
-    .replace(/\.0+$/, '')
-    .replace(/(\.\d*?)0+$/, '$1')
-  return `${compact}${unit.suffix}`
-}
 
 function getStatusBadgeClassName(statusCode: number): string {
   if (statusCode === 200) {
