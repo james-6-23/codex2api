@@ -3470,7 +3470,11 @@ export default function Accounts() {
                 ) : null}
 
                 {shouldRenderDesktopTable ? (
-                  <div className="data-table-shell hidden lg:block">
+                  <div
+                    className={`data-table-shell hidden lg:block ${
+                      sortedAccounts.length <= pageSize ? "account-table-shell-fit-content" : ""
+                    }`}
+                  >
                   <Table>
                     <TableHeader>
                       <TableRow>

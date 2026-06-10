@@ -940,6 +940,11 @@
     max-height: min(680px, calc(100vh - 280px));
   }
 
+  .account-table-shell-fit-content [data-slot="table-container"] {
+    max-height: none;
+    overflow-y: visible;
+  }
+
   .data-table-shell [data-slot="table-head"],
   .data-table-shell thead th {
     position: sticky;
