@@ -1977,3 +1977,87 @@ func TestGetAccountsBilledSinceUsesPerAccountWindows(t *testing.T) {
 		t.Fatalf("account 3 billed = %.2f, want 0", got[3])
 	}
 }
+
+func TestFlushLogsRequeuesBatchWhenSQLiteBeginFails(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	close(db.logStop)
+	db.logWg.Wait()
+
+	ctx := context.Background()
+	for _, endpoint := range []string{"/v1/responses", "/v1/chat/completions"} {
+		if err := db.InsertUsageLog(ctx, &UsageLogInput{
+			Endpoint:    endpoint,
+			Model:       "gpt-5.4",
+			StatusCode:  200,
+			InputTokens: 1000,
+		}); err != nil {
+			t.Fatalf("InsertUsageLog 返回错误: %v", err)
+		}
+	}
+	if err := db.conn.Close(); err != nil {
+		t.Fatalf("关闭 sqlite 连接返回错误: %v", err)
+	}
+
+	db.flushLogs()
+
+	db.logMu.Lock()
+	defer db.logMu.Unlock()
+	if len(db.logBuf) != 2 {
+		t.Fatalf("len(logBuf) = %d, want 2", len(db.logBuf))
+	}
+	if db.logBuf[0].Endpoint != "/v1/responses" || db.logBuf[1].Endpoint != "/v1/chat/completions" {
+		t.Fatalf("requeued endpoints = %q, %q", db.logBuf[0].Endpoint, db.logBuf[1].Endpoint)
+	}
+}
+
+func TestFlushLogsRollsBackAndRequeuesWhenQuotaUpdateFails(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	close(db.logStop)
+	db.logWg.Wait()
+	defer db.conn.Close()
+
+	ctx := context.Background()
+	if _, err := db.conn.ExecContext(ctx, `ALTER TABLE api_keys RENAME TO api_keys_broken`); err != nil {
+		t.Fatalf("rename api_keys 返回错误: %v", err)
+	}
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		APIKeyID:    123,
+		Endpoint:    "/v1/responses",
+		Model:       "gpt-5.4",
+		StatusCode:  200,
+		InputTokens: 1000,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+
+	db.flushLogs()
+
+	db.logMu.Lock()
+	if len(db.logBuf) != 1 {
+		db.logMu.Unlock()
+		t.Fatalf("len(logBuf) = %d, want 1", len(db.logBuf))
+	}
+	if db.logBuf[0].APIKeyID != 123 {
+		db.logMu.Unlock()
+		t.Fatalf("requeued APIKeyID = %d, want 123", db.logBuf[0].APIKeyID)
+	}
+	db.logMu.Unlock()
+
+	var count int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_logs`).Scan(&count); err != nil {
+		t.Fatalf("count usage_logs 返回错误: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("usage_logs count = %d, want 0 after rolled-back flush", count)
+	}
+}

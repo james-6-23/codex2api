@@ -125,6 +125,10 @@ func (a *AccountRow) GetCredentialStringSlice(key string) []string {
 	return stringSliceFromValue(value)
 }
 
+type sqlExecer interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+}
+
 // DB PostgreSQL 数据库操作
 type DB struct {
 	conn   *sql.DB
@@ -2050,21 +2054,55 @@ func (db *DB) flushLogs() {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second) // 增加超时时间
 	defer cancel()
 
+	var err error
 	// 使用批处理插入优化性能
 	if db.driver == "postgres" {
-		err := db.batchInsertLogs(ctx, batch)
-		if err != nil {
-			log.Printf("批量写入日志失败: %v", err)
-		}
+		err = db.batchInsertLogs(ctx, batch)
+	} else {
+		err = db.insertSQLiteUsageLogBatch(ctx, batch)
+	}
+	if err != nil {
+		log.Printf("批量写入日志失败，已重新放回缓冲区等待重试: %v", err)
+		db.requeueUsageLogBatch(batch)
 		return
+	}
+
+	if len(batch) > 10 {
+		log.Printf("批量写入 %d 条使用日志", len(batch))
+	}
+}
+
+func (db *DB) requeueUsageLogBatch(batch []usageLogEntry) {
+	if len(batch) == 0 {
+		return
+	}
+	db.logMu.Lock()
+	defer db.logMu.Unlock()
+
+	if len(db.logBuf) == 0 {
+		requeued := make([]usageLogEntry, len(batch), len(batch)+db.GetUsageLogBatchSize())
+		copy(requeued, batch)
+		db.logBuf = requeued
+		return
+	}
+
+	requeued := make([]usageLogEntry, 0, len(batch)+len(db.logBuf))
+	requeued = append(requeued, batch...)
+	requeued = append(requeued, db.logBuf...)
+	db.logBuf = requeued
+}
+
+func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEntry) error {
+	if len(batch) == 0 {
+		return nil
 	}
 
 	// SQLite 使用事务插入
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
-		log.Printf("批量写入日志失败（开始事务）: %v", err)
-		return
+		return fmt.Errorf("开始事务: %w", err)
 	}
+	defer tx.Rollback()
 
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT INTO usage_logs (account_id, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
@@ -2074,9 +2112,7 @@ func (db *DB) flushLogs() {
 			  is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket)
 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40)`)
 	if err != nil {
-		tx.Rollback()
-		log.Printf("批量写入日志失败（准备语句）: %v", err)
-		return
+		return fmt.Errorf("准备语句: %w", err)
 	}
 	defer stmt.Close()
 
@@ -2086,23 +2122,17 @@ func (db *DB) flushLogs() {
 			e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
 			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
 			e.IsRetryAttempt, e.AttemptIndex, e.UpstreamErrorKind, e.ErrorMessage, e.ViaWebsocket); err != nil {
-			tx.Rollback()
-			log.Printf("批量写入日志失败（执行）: %v", err)
-			return
+			return fmt.Errorf("执行插入: %w", err)
 		}
 	}
 
+	if err := db.applyAPIKeyQuotaUsageWithExec(ctx, tx, batch); err != nil {
+		return fmt.Errorf("更新 API Key 额度用量: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
-		log.Printf("批量写入日志失败（提交）: %v", err)
-		return
+		return fmt.Errorf("提交事务: %w", err)
 	}
-	if err := db.applyAPIKeyQuotaUsage(ctx, batch); err != nil {
-		log.Printf("更新 API Key 额度用量失败: %v", err)
-	}
-
-	if len(batch) > 10 {
-		log.Printf("批量写入 %d 条使用日志", len(batch))
-	}
+	return nil
 }
 
 // batchInsertLogs 使用 PostgreSQL 的批量插入优化
@@ -2111,6 +2141,12 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 	if len(batch) == 0 {
 		return nil
 	}
+
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开始事务: %w", err)
+	}
+	defer tx.Rollback()
 
 	const maxRowsPerBatch = 1600
 
@@ -2122,18 +2158,21 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 		}
 		subBatch := batch[start:end]
 
-		if err := db.batchInsertLogsChunk(ctx, subBatch); err != nil {
+		if err := db.batchInsertLogsChunk(ctx, tx, subBatch); err != nil {
 			return err
 		}
-		if err := db.applyAPIKeyQuotaUsage(ctx, subBatch); err != nil {
-			return err
-		}
+	}
+	if err := db.applyAPIKeyQuotaUsageWithExec(ctx, tx, batch); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交事务: %w", err)
 	}
 	return nil
 }
 
 // batchInsertLogsChunk 插入单批日志（内部辅助函数）
-func (db *DB) batchInsertLogsChunk(ctx context.Context, batch []usageLogEntry) error {
+func (db *DB) batchInsertLogsChunk(ctx context.Context, execer sqlExecer, batch []usageLogEntry) error {
 	if len(batch) == 0 {
 		return nil
 	}
@@ -2164,12 +2203,19 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, batch []usageLogEntry) e
 		is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket)
 		VALUES %s`, strings.Join(valueStrings, ","))
 
-	_, err := db.conn.ExecContext(ctx, query, valueArgs...)
+	_, err := execer.ExecContext(ctx, query, valueArgs...)
 	return err
 }
 
 func (db *DB) applyAPIKeyQuotaUsage(ctx context.Context, batch []usageLogEntry) error {
-	if db == nil || len(batch) == 0 {
+	if db == nil {
+		return nil
+	}
+	return db.applyAPIKeyQuotaUsageWithExec(ctx, db.conn, batch)
+}
+
+func (db *DB) applyAPIKeyQuotaUsageWithExec(ctx context.Context, execer sqlExecer, batch []usageLogEntry) error {
+	if db == nil || execer == nil || len(batch) == 0 {
 		return nil
 	}
 	usageByKey := make(map[int64]float64)
@@ -2183,7 +2229,7 @@ func (db *DB) applyAPIKeyQuotaUsage(ctx context.Context, batch []usageLogEntry) 
 		if amount <= 0 {
 			continue
 		}
-		if _, err := db.conn.ExecContext(ctx, `UPDATE api_keys SET quota_used = COALESCE(quota_used, 0) + $1 WHERE id = $2`, amount, id); err != nil {
+		if _, err := execer.ExecContext(ctx, `UPDATE api_keys SET quota_used = COALESCE(quota_used, 0) + $1 WHERE id = $2`, amount, id); err != nil {
 			return err
 		}
 	}
