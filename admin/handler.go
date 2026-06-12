@@ -878,6 +878,7 @@ type updateAccountSchedulerReq struct {
 	AutoPause5hDisabled     json.RawMessage `json:"auto_pause_5h_disabled"`
 	AutoPause7dDisabled     json.RawMessage `json:"auto_pause_7d_disabled"`
 	ProxyURL                *string         `json:"proxy_url"`
+	ProxyID                 json.RawMessage `json:"proxy_id"`
 }
 
 // UpdateAccountScheduler 更新账号调度配置。
@@ -985,6 +986,11 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	proxyID, err := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
@@ -1003,6 +1009,19 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "allowed_api_key_ids 包含不存在的 API Key ID: "+strings.Join(values, ", "))
 			return
 		}
+	}
+	var managedProxyURL string
+	if proxyID.Set && proxyID.Valid {
+		if err := h.validateEnabledProxyID(ctx, proxyID.Value); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		proxyRow, err := h.db.GetEnabledProxyByID(ctx, proxyID.Value)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "代理服务不存在或已禁用")
+			return
+		}
+		managedProxyURL = strings.TrimSpace(proxyRow.URL)
 	}
 	if groupIDs.Set {
 		missingGroupIDs, err := h.db.VerifyAccountGroupIDs(ctx, groupIDs.Values)
@@ -1024,6 +1043,13 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 	if req.ProxyURL != nil {
 		proxyURL = database.OptionalString{Set: true, Value: *req.ProxyURL}
 	}
+	proxyIDUpdate := database.OptionalNullInt64{}
+	if proxyID.Set {
+		proxyIDUpdate.Set = true
+		if proxyID.Valid {
+			proxyIDUpdate.Value = sql.NullInt64{Int64: proxyID.Value, Valid: true}
+		}
+	}
 	credentialUpdates := make(map[string]interface{})
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -1040,7 +1066,7 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 	if len(credentialUpdates) == 0 {
 		credentialUpdates = nil
 	}
-	if err := h.db.UpdateAccountSchedulerMetadata(ctx, id, scoreBiasOverride, baseConcurrencyOverride, skipWarmTier, allowedAPIKeyIDs, database.OptionalStringSlice{Set: tags.Set, Values: tags.Values}, groupIDs, proxyURL, credentialUpdates); err != nil {
+	if err := h.db.UpdateAccountSchedulerMetadata(ctx, id, scoreBiasOverride, baseConcurrencyOverride, skipWarmTier, allowedAPIKeyIDs, database.OptionalStringSlice{Set: tags.Set, Values: tags.Values}, groupIDs, proxyURL, proxyIDUpdate, credentialUpdates); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "账号不存在")
 			return
@@ -1098,11 +1124,67 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 	if h.store != nil && groupIDs.Set {
 		h.store.ApplyAccountGroups(id, groupIDs.Values)
 	}
-	if h.store != nil && req.ProxyURL != nil {
-		h.store.ApplyAccountProxyURL(id, *req.ProxyURL)
+	if h.store != nil {
+		if proxyID.Set {
+			if proxyID.Valid {
+				value := proxyID.Value
+				h.store.ApplyAccountProxyBinding(id, &value, managedProxyURL)
+			} else {
+				effectiveURL := ""
+				if req.ProxyURL != nil {
+					effectiveURL = *req.ProxyURL
+				} else if current := h.store.FindByID(id); current != nil {
+					current.Mu().RLock()
+					effectiveURL = current.ProxyURL
+					current.Mu().RUnlock()
+				} else if row, err := h.db.GetAccountByID(ctx, id); err == nil {
+					effectiveURL = row.ProxyURL
+				}
+				h.store.ApplyAccountProxyBinding(id, nil, effectiveURL)
+			}
+		} else if req.ProxyURL != nil {
+			h.store.ApplyAccountProxyURL(id, *req.ProxyURL)
+		}
 	}
 
 	writeMessage(c, http.StatusOK, "账号调度配置已更新")
+}
+
+type optionalProxyID struct {
+	Set   bool
+	Valid bool
+	Value int64
+}
+
+func parseOptionalProxyID(raw json.RawMessage, field string) (optionalProxyID, error) {
+	if len(raw) == 0 {
+		return optionalProxyID{}, nil
+	}
+	if string(raw) == "null" {
+		return optionalProxyID{Set: true}, nil
+	}
+	var number json.Number
+	if err := json.Unmarshal(raw, &number); err != nil {
+		return optionalProxyID{}, fmt.Errorf("%s 必须是正整数或 null", field)
+	}
+	value, err := number.Int64()
+	if err != nil || value <= 0 {
+		return optionalProxyID{}, fmt.Errorf("%s 必须是正整数或 null", field)
+	}
+	return optionalProxyID{Set: true, Valid: true, Value: value}, nil
+}
+
+func (h *Handler) validateEnabledProxyID(ctx context.Context, proxyID int64) error {
+	if proxyID <= 0 || h == nil || h.db == nil {
+		return errors.New("代理服务不存在或已禁用")
+	}
+	if _, err := h.db.GetEnabledProxyByID(ctx, proxyID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("代理服务不存在或已禁用")
+		}
+		return err
+	}
+	return nil
 }
 
 type optionalStringSlice struct {
@@ -1428,10 +1510,11 @@ func (h *Handler) getAccountUsageWindows(ctx context.Context) (map[int64]*databa
 }
 
 type addAccountReq struct {
-	Name         string `json:"name"`
-	RefreshToken string `json:"refresh_token"`
-	SessionToken string `json:"session_token"`
-	ProxyURL     string `json:"proxy_url"`
+	Name         string          `json:"name"`
+	RefreshToken string          `json:"refresh_token"`
+	SessionToken string          `json:"session_token"`
+	ProxyURL     string          `json:"proxy_url"`
+	ProxyID      json.RawMessage `json:"proxy_id"`
 }
 
 func splitAccountCredentialLines(raw string, sanitize bool) []string {
@@ -1483,6 +1566,11 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	proxyID, err := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// 按行分割，支持批量添加。refresh_token 与 session_token 同时填写时，
 	// session_token 可填写一行应用到所有 RT，也可与 RT 行数一一对应。
@@ -1522,6 +1610,16 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		return
 	}
 
+	if proxyID.Set && proxyID.Valid {
+		validateCtx, validateCancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		if err := h.validateEnabledProxyID(validateCtx, proxyID.Value); err != nil {
+			validateCancel()
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		validateCancel()
+	}
+
 	if strings.EqualFold(c.Query("stream"), "true") {
 		h.streamAddAccounts(c, req, seeds)
 		return
@@ -1529,6 +1627,23 @@ func (h *Handler) AddAccount(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
+
+	effectiveProxyURL := req.ProxyURL
+	var boundProxyID *int64
+	if proxyID.Set && proxyID.Valid {
+		if err := h.validateEnabledProxyID(ctx, proxyID.Value); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		proxyRow, err := h.db.GetEnabledProxyByID(ctx, proxyID.Value)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "代理服务不存在或已禁用")
+			return
+		}
+		effectiveProxyURL = strings.TrimSpace(proxyRow.URL)
+		value := proxyID.Value
+		boundProxyID = &value
+	}
 
 	successCount := 0
 	failCount := 0
@@ -1541,7 +1656,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentialsAndProxyID(ctx, name, tokenCredentialMap(seed), effectiveProxyURL, boundProxyID)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -1552,7 +1667,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		h.db.InsertAccountEventAsync(id, "added", "manual")
 
 		// 热加载：直接加入内存池
-		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc := accountFromCredentialSeed(id, effectiveProxyURL, boundProxyID, seed)
 		h.store.AddAccount(newAcc)
 
 		if newAcc.GetAccessToken() != "" {
@@ -1592,6 +1707,21 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
+	proxyID, _ := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	effectiveProxyURL := req.ProxyURL
+	var boundProxyID *int64
+	if proxyID.Set && proxyID.Valid {
+		if proxyRow, err := h.db.GetEnabledProxyByID(ctx, proxyID.Value); err == nil {
+			effectiveProxyURL = strings.TrimSpace(proxyRow.URL)
+			value := proxyID.Value
+			boundProxyID = &value
+		} else {
+			failCount = total
+			sendImportEvent(c, importEvent{Type: "complete", Current: total, Total: total, Success: 0, Duplicate: 0, Failed: failCount})
+			return
+		}
+	}
+
 	for i, seed := range seeds {
 		name := req.Name
 		if name == "" {
@@ -1600,7 +1730,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentialsAndProxyID(ctx, name, tokenCredentialMap(seed), effectiveProxyURL, boundProxyID)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -1614,7 +1744,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 		successCount++
 		h.db.InsertAccountEventAsync(id, "added", "manual")
 
-		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		newAcc := accountFromCredentialSeed(id, effectiveProxyURL, boundProxyID, seed)
 		h.store.AddAccount(newAcc)
 
 		if newAcc.GetAccessToken() != "" {
@@ -1638,9 +1768,10 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 
 // addATAccountReq AT 模式添加账号请求
 type addATAccountReq struct {
-	Name        string `json:"name"`
-	AccessToken string `json:"access_token"`
-	ProxyURL    string `json:"proxy_url"`
+	Name        string          `json:"name"`
+	AccessToken string          `json:"access_token"`
+	ProxyURL    string          `json:"proxy_url"`
+	ProxyID     json.RawMessage `json:"proxy_id"`
 }
 
 // AddATAccount 添加 AT-only 账号（支持批量：access_token 按行分割）
@@ -1673,6 +1804,11 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	proxyID, err := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	// 按行分割，支持批量添加
 	lines := strings.Split(req.AccessToken, "\n")
@@ -1697,6 +1833,23 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
+	effectiveProxyURL := req.ProxyURL
+	var boundProxyID *int64
+	if proxyID.Set && proxyID.Valid {
+		if err := h.validateEnabledProxyID(ctx, proxyID.Value); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		proxyRow, err := h.db.GetEnabledProxyByID(ctx, proxyID.Value)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "代理服务不存在或已禁用")
+			return
+		}
+		effectiveProxyURL = strings.TrimSpace(proxyRow.URL)
+		value := proxyID.Value
+		boundProxyID = &value
+	}
+
 	successCount := 0
 	failCount := 0
 
@@ -1708,7 +1861,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
-		id, err := h.db.InsertATAccount(ctx, name, at, req.ProxyURL)
+		id, err := h.db.InsertATAccountWithProxyID(ctx, name, at, effectiveProxyURL, boundProxyID)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -1726,7 +1879,8 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			DBID:        id,
 			AccessToken: at,
 			ExpiresAt:   time.Now().Add(1 * time.Hour),
-			ProxyURL:    req.ProxyURL,
+			ProxyURL:    effectiveProxyURL,
+			ProxyID:     cloneOptionalInt64(boundProxyID),
 		}
 		if atInfo != nil {
 			newAcc.Email = atInfo.Email
@@ -1774,11 +1928,12 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 }
 
 type addOpenAIResponsesAccountReq struct {
-	Name     string   `json:"name"`
-	BaseURL  string   `json:"base_url"`
-	APIKey   string   `json:"api_key"`
-	Models   []string `json:"models"`
-	ProxyURL string   `json:"proxy_url"`
+	Name     string          `json:"name"`
+	BaseURL  string          `json:"base_url"`
+	APIKey   string          `json:"api_key"`
+	Models   []string        `json:"models"`
+	ProxyURL string          `json:"proxy_url"`
+	ProxyID  json.RawMessage `json:"proxy_id"`
 }
 
 type fetchOpenAIResponsesModelsReq struct {
@@ -1825,6 +1980,11 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	proxyID, err := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -1834,6 +1994,23 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
+
+	effectiveProxyURL := req.ProxyURL
+	var boundProxyID *int64
+	if proxyID.Set && proxyID.Valid {
+		if err := h.validateEnabledProxyID(ctx, proxyID.Value); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		proxyRow, err := h.db.GetEnabledProxyByID(ctx, proxyID.Value)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "代理服务不存在或已禁用")
+			return
+		}
+		effectiveProxyURL = strings.TrimSpace(proxyRow.URL)
+		value := proxyID.Value
+		boundProxyID = &value
+	}
 
 	existing, err := h.db.GetAllOpenAIAPIKeys(ctx)
 	if err != nil {
@@ -1857,7 +2034,7 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		"plan_type":     "api",
 		"email":         baseURL,
 	}
-	id, err := h.db.InsertOpenAIResponsesAccount(ctx, name, credentials, req.ProxyURL)
+	id, err := h.db.InsertOpenAIResponsesAccountWithProxyID(ctx, name, credentials, effectiveProxyURL, boundProxyID)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -1866,7 +2043,8 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 
 	h.store.AddAccount(&auth.Account{
 		DBID:         id,
-		ProxyURL:     req.ProxyURL,
+		ProxyURL:     effectiveProxyURL,
+		ProxyID:      cloneOptionalInt64(boundProxyID),
 		HealthTier:   auth.HealthTierHealthy,
 		UpstreamType: auth.UpstreamOpenAIResponses,
 		BaseURL:      baseURL,
@@ -2835,7 +3013,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					codex5HResetAt:      tok.codex5HResetAt,
 					codexUsageUpdatedAt: tok.codexUsageUpdatedAt,
 				})
-				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+				newAcc := accountFromCredentialSeed(id, proxyURL, nil, seed)
 				if len(tokenCredentialMap(seed)) > 0 {
 					credCtx, credCancel := context.WithTimeout(context.Background(), 3*time.Second)
 					_ = h.db.UpdateCredentials(credCtx, id, tokenCredentialMap(seed))
@@ -2909,7 +3087,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					}
 					credCancel()
 				}
-				newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+				newAcc := accountFromCredentialSeed(id, proxyURL, nil, seed)
 				h.store.AddAccount(newAcc)
 				h.applyImportedAccountUsageState(newAcc, "import")
 
@@ -4750,161 +4928,161 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 // ==================== Settings ====================
 
 type settingsResponse struct {
-	SiteName                           string `json:"site_name"`
-	SiteLogo                           string `json:"site_logo"`
-	BackgroundImage                    string `json:"background_image"`
-	BackgroundOpacity                  int    `json:"background_opacity"`
-	BackgroundBlur                     int    `json:"background_blur"`
-	BackgroundGlassOpacity             int    `json:"background_glass_opacity"`
-	BackgroundGlassBlur                int    `json:"background_glass_blur"`
-	MaxConcurrency                     int    `json:"max_concurrency"`
-	GlobalRPM                          int    `json:"global_rpm"`
-	TestModel                          string `json:"test_model"`
-	TestConcurrency                    int    `json:"test_concurrency"`
-	BackgroundRefreshIntervalMinutes   int    `json:"background_refresh_interval_minutes"`
-	UsageProbeMaxAgeMinutes            int    `json:"usage_probe_max_age_minutes"`
-	UsageProbeConcurrency              int    `json:"usage_probe_concurrency"`
-	UsageProbeResponsesFallbackEnabled bool   `json:"usage_probe_responses_fallback_enabled"`
-	RecoveryProbeIntervalMinutes       int    `json:"recovery_probe_interval_minutes"`
-	LazyMode                           bool   `json:"lazy_mode"`
-	ProxyURL                           string `json:"proxy_url"`
-	PgMaxConns                         int    `json:"pg_max_conns"`
-	RedisPoolSize                      int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized              bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited               bool   `json:"auto_clean_rate_limited"`
-	AdminSecret                        string `json:"admin_secret"`
-	AdminAuthSource                    string `json:"admin_auth_source"`
-	AutoCleanFullUsage                 bool   `json:"auto_clean_full_usage"`
-	AutoCleanError                     bool   `json:"auto_clean_error"`
-	AutoCleanExpired                   bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled                   bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled               bool   `json:"fast_scheduler_enabled"`
-	CodexForceWebsocket                bool   `json:"codex_force_websocket"`
-	CodexWSKeepaliveEnabled            bool   `json:"codex_ws_keepalive_enabled"`
-	CodexWSKeepaliveIntervalSec        int    `json:"codex_ws_keepalive_interval_sec"`
-	CodexWSHideUpstreamErrors          bool   `json:"codex_ws_hide_upstream_errors"`
-	CodexWSSilentRetryEnabled          bool   `json:"codex_ws_silent_retry_enabled"`
-	CodexWSSilentMaxRetries            int    `json:"codex_ws_silent_max_retries"`
-	SchedulerMode                      string `json:"scheduler_mode"`
-	AffinityMode                       string `json:"affinity_mode"`
-	MaxRetries                         int    `json:"max_retries"`
-	MaxRateLimitRetries                int    `json:"max_rate_limit_retries"`
-	AllowRemoteMigration               bool   `json:"allow_remote_migration"`
-	DatabaseDriver                     string `json:"database_driver"`
-	DatabaseLabel                      string `json:"database_label"`
-	CacheDriver                        string `json:"cache_driver"`
-	CacheLabel                         string `json:"cache_label"`
-	ExpiredCleaned                     int    `json:"expired_cleaned,omitempty"`
-	ModelMapping                       string `json:"model_mapping"`
-	CodexModelMapping                  string `json:"codex_model_mapping"`
-	ReasoningEffortModels              string `json:"reasoning_effort_models"`
-	ResinURL                           string `json:"resin_url"`
-	ResinPlatformName                  string `json:"resin_platform_name"`
-	PromptFilterEnabled                bool   `json:"prompt_filter_enabled"`
-	PromptFilterMode                   string `json:"prompt_filter_mode"`
-	PromptFilterThreshold              int    `json:"prompt_filter_threshold"`
-	PromptFilterStrictThreshold        int    `json:"prompt_filter_strict_threshold"`
-	PromptFilterLogMatches             bool   `json:"prompt_filter_log_matches"`
-	PromptFilterMaxTextLength          int    `json:"prompt_filter_max_text_length"`
-	PromptFilterSensitiveWords         string `json:"prompt_filter_sensitive_words"`
-	PromptFilterCustomPatterns         string `json:"prompt_filter_custom_patterns"`
-	PromptFilterDisabledPatterns       string `json:"prompt_filter_disabled_patterns"`
-	ClientCompatMode                   string `json:"client_compat_mode"`
-	CodexMinCLIVersion                 string `json:"codex_min_cli_version"`
-	UsageLogMode                       string `json:"usage_log_mode"`
-	UsageLogBatchSize                  int    `json:"usage_log_batch_size"`
-	UsageLogFlushIntervalSeconds       int    `json:"usage_log_flush_interval_seconds"`
-	StreamFlushPolicy                  string `json:"stream_flush_policy"`
-	StreamFlushIntervalMS              int    `json:"stream_flush_interval_ms"`
-	FirstTokenMode                     string `json:"first_token_mode"`
-	FirstTokenTimeoutSeconds           int    `json:"first_token_timeout_seconds"`
-	BillingTierPolicy                  string `json:"billing_tier_policy"`
-	ShowFullUsageNumbers               bool   `json:"show_full_usage_numbers"`
-	ImageStorageBackend                string `json:"image_storage_backend"`
-	ImageS3Endpoint                    string `json:"image_s3_endpoint"`
-	ImageS3Region                      string `json:"image_s3_region"`
-	ImageS3Bucket                      string `json:"image_s3_bucket"`
-	ImageS3AccessKey                   string `json:"image_s3_access_key"`
-	ImageS3SecretKey                   string `json:"image_s3_secret_key"`
-	ImageS3Prefix                      string `json:"image_s3_prefix"`
-	ImageS3ForcePathStyle              bool   `json:"image_s3_force_path_style"`
+	SiteName                           string  `json:"site_name"`
+	SiteLogo                           string  `json:"site_logo"`
+	BackgroundImage                    string  `json:"background_image"`
+	BackgroundOpacity                  int     `json:"background_opacity"`
+	BackgroundBlur                     int     `json:"background_blur"`
+	BackgroundGlassOpacity             int     `json:"background_glass_opacity"`
+	BackgroundGlassBlur                int     `json:"background_glass_blur"`
+	MaxConcurrency                     int     `json:"max_concurrency"`
+	GlobalRPM                          int     `json:"global_rpm"`
+	TestModel                          string  `json:"test_model"`
+	TestConcurrency                    int     `json:"test_concurrency"`
+	BackgroundRefreshIntervalMinutes   int     `json:"background_refresh_interval_minutes"`
+	UsageProbeMaxAgeMinutes            int     `json:"usage_probe_max_age_minutes"`
+	UsageProbeConcurrency              int     `json:"usage_probe_concurrency"`
+	UsageProbeResponsesFallbackEnabled bool    `json:"usage_probe_responses_fallback_enabled"`
+	RecoveryProbeIntervalMinutes       int     `json:"recovery_probe_interval_minutes"`
+	LazyMode                           bool    `json:"lazy_mode"`
+	ProxyURL                           string  `json:"proxy_url"`
+	PgMaxConns                         int     `json:"pg_max_conns"`
+	RedisPoolSize                      int     `json:"redis_pool_size"`
+	AutoCleanUnauthorized              bool    `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited               bool    `json:"auto_clean_rate_limited"`
+	AdminSecret                        string  `json:"admin_secret"`
+	AdminAuthSource                    string  `json:"admin_auth_source"`
+	AutoCleanFullUsage                 bool    `json:"auto_clean_full_usage"`
+	AutoCleanError                     bool    `json:"auto_clean_error"`
+	AutoCleanExpired                   bool    `json:"auto_clean_expired"`
+	ProxyPoolEnabled                   bool    `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled               bool    `json:"fast_scheduler_enabled"`
+	CodexForceWebsocket                bool    `json:"codex_force_websocket"`
+	CodexWSKeepaliveEnabled            bool    `json:"codex_ws_keepalive_enabled"`
+	CodexWSKeepaliveIntervalSec        int     `json:"codex_ws_keepalive_interval_sec"`
+	CodexWSHideUpstreamErrors          bool    `json:"codex_ws_hide_upstream_errors"`
+	CodexWSSilentRetryEnabled          bool    `json:"codex_ws_silent_retry_enabled"`
+	CodexWSSilentMaxRetries            int     `json:"codex_ws_silent_max_retries"`
+	SchedulerMode                      string  `json:"scheduler_mode"`
+	AffinityMode                       string  `json:"affinity_mode"`
+	MaxRetries                         int     `json:"max_retries"`
+	MaxRateLimitRetries                int     `json:"max_rate_limit_retries"`
+	AllowRemoteMigration               bool    `json:"allow_remote_migration"`
+	DatabaseDriver                     string  `json:"database_driver"`
+	DatabaseLabel                      string  `json:"database_label"`
+	CacheDriver                        string  `json:"cache_driver"`
+	CacheLabel                         string  `json:"cache_label"`
+	ExpiredCleaned                     int     `json:"expired_cleaned,omitempty"`
+	ModelMapping                       string  `json:"model_mapping"`
+	CodexModelMapping                  string  `json:"codex_model_mapping"`
+	ReasoningEffortModels              string  `json:"reasoning_effort_models"`
+	ResinURL                           string  `json:"resin_url"`
+	ResinPlatformName                  string  `json:"resin_platform_name"`
+	PromptFilterEnabled                bool    `json:"prompt_filter_enabled"`
+	PromptFilterMode                   string  `json:"prompt_filter_mode"`
+	PromptFilterThreshold              int     `json:"prompt_filter_threshold"`
+	PromptFilterStrictThreshold        int     `json:"prompt_filter_strict_threshold"`
+	PromptFilterLogMatches             bool    `json:"prompt_filter_log_matches"`
+	PromptFilterMaxTextLength          int     `json:"prompt_filter_max_text_length"`
+	PromptFilterSensitiveWords         string  `json:"prompt_filter_sensitive_words"`
+	PromptFilterCustomPatterns         string  `json:"prompt_filter_custom_patterns"`
+	PromptFilterDisabledPatterns       string  `json:"prompt_filter_disabled_patterns"`
+	ClientCompatMode                   string  `json:"client_compat_mode"`
+	CodexMinCLIVersion                 string  `json:"codex_min_cli_version"`
+	UsageLogMode                       string  `json:"usage_log_mode"`
+	UsageLogBatchSize                  int     `json:"usage_log_batch_size"`
+	UsageLogFlushIntervalSeconds       int     `json:"usage_log_flush_interval_seconds"`
+	StreamFlushPolicy                  string  `json:"stream_flush_policy"`
+	StreamFlushIntervalMS              int     `json:"stream_flush_interval_ms"`
+	FirstTokenMode                     string  `json:"first_token_mode"`
+	FirstTokenTimeoutSeconds           int     `json:"first_token_timeout_seconds"`
+	BillingTierPolicy                  string  `json:"billing_tier_policy"`
+	ShowFullUsageNumbers               bool    `json:"show_full_usage_numbers"`
+	ImageStorageBackend                string  `json:"image_storage_backend"`
+	ImageS3Endpoint                    string  `json:"image_s3_endpoint"`
+	ImageS3Region                      string  `json:"image_s3_region"`
+	ImageS3Bucket                      string  `json:"image_s3_bucket"`
+	ImageS3AccessKey                   string  `json:"image_s3_access_key"`
+	ImageS3SecretKey                   string  `json:"image_s3_secret_key"`
+	ImageS3Prefix                      string  `json:"image_s3_prefix"`
+	ImageS3ForcePathStyle              bool    `json:"image_s3_force_path_style"`
 	AutoPause5hThreshold               float64 `json:"auto_pause_5h_threshold"`
 	AutoPause7dThreshold               float64 `json:"auto_pause_7d_threshold"`
 }
 
 type updateSettingsReq struct {
-	SiteName                           *string `json:"site_name"`
-	SiteLogo                           *string `json:"site_logo"`
-	BackgroundImage                    *string `json:"background_image"`
-	BackgroundOpacity                  *int    `json:"background_opacity"`
-	BackgroundBlur                     *int    `json:"background_blur"`
-	BackgroundGlassOpacity             *int    `json:"background_glass_opacity"`
-	BackgroundGlassBlur                *int    `json:"background_glass_blur"`
-	MaxConcurrency                     *int    `json:"max_concurrency"`
-	GlobalRPM                          *int    `json:"global_rpm"`
-	TestModel                          *string `json:"test_model"`
-	TestConcurrency                    *int    `json:"test_concurrency"`
-	BackgroundRefreshIntervalMinutes   *int    `json:"background_refresh_interval_minutes"`
-	UsageProbeMaxAgeMinutes            *int    `json:"usage_probe_max_age_minutes"`
-	UsageProbeConcurrency              *int    `json:"usage_probe_concurrency"`
-	UsageProbeResponsesFallbackEnabled *bool   `json:"usage_probe_responses_fallback_enabled"`
-	RecoveryProbeIntervalMinutes       *int    `json:"recovery_probe_interval_minutes"`
-	LazyMode                           *bool   `json:"lazy_mode"`
-	ProxyURL                           *string `json:"proxy_url"`
-	PgMaxConns                         *int    `json:"pg_max_conns"`
-	RedisPoolSize                      *int    `json:"redis_pool_size"`
-	AutoCleanUnauthorized              *bool   `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited               *bool   `json:"auto_clean_rate_limited"`
-	AdminSecret                        *string `json:"admin_secret"`
-	AutoCleanFullUsage                 *bool   `json:"auto_clean_full_usage"`
-	AutoCleanError                     *bool   `json:"auto_clean_error"`
-	AutoCleanExpired                   *bool   `json:"auto_clean_expired"`
-	ProxyPoolEnabled                   *bool   `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled               *bool   `json:"fast_scheduler_enabled"`
-	CodexForceWebsocket                *bool   `json:"codex_force_websocket"`
-	CodexWSKeepaliveEnabled            *bool   `json:"codex_ws_keepalive_enabled"`
-	CodexWSKeepaliveIntervalSec        *int    `json:"codex_ws_keepalive_interval_sec"`
-	CodexWSHideUpstreamErrors          *bool   `json:"codex_ws_hide_upstream_errors"`
-	CodexWSSilentRetryEnabled          *bool   `json:"codex_ws_silent_retry_enabled"`
-	CodexWSSilentMaxRetries            *int    `json:"codex_ws_silent_max_retries"`
-	SchedulerMode                      *string `json:"scheduler_mode"`
-	AffinityMode                       *string `json:"affinity_mode"`
-	MaxRetries                         *int    `json:"max_retries"`
-	MaxRateLimitRetries                *int    `json:"max_rate_limit_retries"`
-	AllowRemoteMigration               *bool   `json:"allow_remote_migration"`
-	ModelMapping                       *string `json:"model_mapping"`
-	CodexModelMapping                  *string `json:"codex_model_mapping"`
-	ReasoningEffortModels              *string `json:"reasoning_effort_models"`
-	ResinURL                           *string `json:"resin_url"`
-	ResinPlatformName                  *string `json:"resin_platform_name"`
-	PromptFilterEnabled                *bool   `json:"prompt_filter_enabled"`
-	PromptFilterMode                   *string `json:"prompt_filter_mode"`
-	PromptFilterThreshold              *int    `json:"prompt_filter_threshold"`
-	PromptFilterStrictThreshold        *int    `json:"prompt_filter_strict_threshold"`
-	PromptFilterLogMatches             *bool   `json:"prompt_filter_log_matches"`
-	PromptFilterMaxTextLength          *int    `json:"prompt_filter_max_text_length"`
-	PromptFilterSensitiveWords         *string `json:"prompt_filter_sensitive_words"`
-	PromptFilterCustomPatterns         *string `json:"prompt_filter_custom_patterns"`
-	PromptFilterDisabledPatterns       *string `json:"prompt_filter_disabled_patterns"`
-	ClientCompatMode                   *string `json:"client_compat_mode"`
-	CodexMinCLIVersion                 *string `json:"codex_min_cli_version"`
-	UsageLogMode                       *string `json:"usage_log_mode"`
-	UsageLogBatchSize                  *int    `json:"usage_log_batch_size"`
-	UsageLogFlushIntervalSeconds       *int    `json:"usage_log_flush_interval_seconds"`
-	StreamFlushPolicy                  *string `json:"stream_flush_policy"`
-	StreamFlushIntervalMS              *int    `json:"stream_flush_interval_ms"`
-	FirstTokenMode                     *string `json:"first_token_mode"`
-	FirstTokenTimeoutSeconds           *int    `json:"first_token_timeout_seconds"`
-	BillingTierPolicy                  *string `json:"billing_tier_policy"`
-	ShowFullUsageNumbers               *bool   `json:"show_full_usage_numbers"`
-	ImageStorageBackend                *string `json:"image_storage_backend"`
-	ImageS3Endpoint                    *string `json:"image_s3_endpoint"`
-	ImageS3Region                      *string `json:"image_s3_region"`
-	ImageS3Bucket                      *string `json:"image_s3_bucket"`
-	ImageS3AccessKey                   *string `json:"image_s3_access_key"`
-	ImageS3SecretKey                   *string `json:"image_s3_secret_key"`
-	ImageS3Prefix                      *string `json:"image_s3_prefix"`
-	ImageS3ForcePathStyle              *bool   `json:"image_s3_force_path_style"`
+	SiteName                           *string  `json:"site_name"`
+	SiteLogo                           *string  `json:"site_logo"`
+	BackgroundImage                    *string  `json:"background_image"`
+	BackgroundOpacity                  *int     `json:"background_opacity"`
+	BackgroundBlur                     *int     `json:"background_blur"`
+	BackgroundGlassOpacity             *int     `json:"background_glass_opacity"`
+	BackgroundGlassBlur                *int     `json:"background_glass_blur"`
+	MaxConcurrency                     *int     `json:"max_concurrency"`
+	GlobalRPM                          *int     `json:"global_rpm"`
+	TestModel                          *string  `json:"test_model"`
+	TestConcurrency                    *int     `json:"test_concurrency"`
+	BackgroundRefreshIntervalMinutes   *int     `json:"background_refresh_interval_minutes"`
+	UsageProbeMaxAgeMinutes            *int     `json:"usage_probe_max_age_minutes"`
+	UsageProbeConcurrency              *int     `json:"usage_probe_concurrency"`
+	UsageProbeResponsesFallbackEnabled *bool    `json:"usage_probe_responses_fallback_enabled"`
+	RecoveryProbeIntervalMinutes       *int     `json:"recovery_probe_interval_minutes"`
+	LazyMode                           *bool    `json:"lazy_mode"`
+	ProxyURL                           *string  `json:"proxy_url"`
+	PgMaxConns                         *int     `json:"pg_max_conns"`
+	RedisPoolSize                      *int     `json:"redis_pool_size"`
+	AutoCleanUnauthorized              *bool    `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited               *bool    `json:"auto_clean_rate_limited"`
+	AdminSecret                        *string  `json:"admin_secret"`
+	AutoCleanFullUsage                 *bool    `json:"auto_clean_full_usage"`
+	AutoCleanError                     *bool    `json:"auto_clean_error"`
+	AutoCleanExpired                   *bool    `json:"auto_clean_expired"`
+	ProxyPoolEnabled                   *bool    `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled               *bool    `json:"fast_scheduler_enabled"`
+	CodexForceWebsocket                *bool    `json:"codex_force_websocket"`
+	CodexWSKeepaliveEnabled            *bool    `json:"codex_ws_keepalive_enabled"`
+	CodexWSKeepaliveIntervalSec        *int     `json:"codex_ws_keepalive_interval_sec"`
+	CodexWSHideUpstreamErrors          *bool    `json:"codex_ws_hide_upstream_errors"`
+	CodexWSSilentRetryEnabled          *bool    `json:"codex_ws_silent_retry_enabled"`
+	CodexWSSilentMaxRetries            *int     `json:"codex_ws_silent_max_retries"`
+	SchedulerMode                      *string  `json:"scheduler_mode"`
+	AffinityMode                       *string  `json:"affinity_mode"`
+	MaxRetries                         *int     `json:"max_retries"`
+	MaxRateLimitRetries                *int     `json:"max_rate_limit_retries"`
+	AllowRemoteMigration               *bool    `json:"allow_remote_migration"`
+	ModelMapping                       *string  `json:"model_mapping"`
+	CodexModelMapping                  *string  `json:"codex_model_mapping"`
+	ReasoningEffortModels              *string  `json:"reasoning_effort_models"`
+	ResinURL                           *string  `json:"resin_url"`
+	ResinPlatformName                  *string  `json:"resin_platform_name"`
+	PromptFilterEnabled                *bool    `json:"prompt_filter_enabled"`
+	PromptFilterMode                   *string  `json:"prompt_filter_mode"`
+	PromptFilterThreshold              *int     `json:"prompt_filter_threshold"`
+	PromptFilterStrictThreshold        *int     `json:"prompt_filter_strict_threshold"`
+	PromptFilterLogMatches             *bool    `json:"prompt_filter_log_matches"`
+	PromptFilterMaxTextLength          *int     `json:"prompt_filter_max_text_length"`
+	PromptFilterSensitiveWords         *string  `json:"prompt_filter_sensitive_words"`
+	PromptFilterCustomPatterns         *string  `json:"prompt_filter_custom_patterns"`
+	PromptFilterDisabledPatterns       *string  `json:"prompt_filter_disabled_patterns"`
+	ClientCompatMode                   *string  `json:"client_compat_mode"`
+	CodexMinCLIVersion                 *string  `json:"codex_min_cli_version"`
+	UsageLogMode                       *string  `json:"usage_log_mode"`
+	UsageLogBatchSize                  *int     `json:"usage_log_batch_size"`
+	UsageLogFlushIntervalSeconds       *int     `json:"usage_log_flush_interval_seconds"`
+	StreamFlushPolicy                  *string  `json:"stream_flush_policy"`
+	StreamFlushIntervalMS              *int     `json:"stream_flush_interval_ms"`
+	FirstTokenMode                     *string  `json:"first_token_mode"`
+	FirstTokenTimeoutSeconds           *int     `json:"first_token_timeout_seconds"`
+	BillingTierPolicy                  *string  `json:"billing_tier_policy"`
+	ShowFullUsageNumbers               *bool    `json:"show_full_usage_numbers"`
+	ImageStorageBackend                *string  `json:"image_storage_backend"`
+	ImageS3Endpoint                    *string  `json:"image_s3_endpoint"`
+	ImageS3Region                      *string  `json:"image_s3_region"`
+	ImageS3Bucket                      *string  `json:"image_s3_bucket"`
+	ImageS3AccessKey                   *string  `json:"image_s3_access_key"`
+	ImageS3SecretKey                   *string  `json:"image_s3_secret_key"`
+	ImageS3Prefix                      *string  `json:"image_s3_prefix"`
+	ImageS3ForcePathStyle              *bool    `json:"image_s3_force_path_style"`
 	AutoPause5hThreshold               *float64 `json:"auto_pause_5h_threshold"`
 	AutoPause7dThreshold               *float64 `json:"auto_pause_7d_threshold"`
 }

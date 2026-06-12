@@ -233,7 +233,7 @@ func TestParseImportJSONTokensPreservesCPAFields(t *testing.T) {
 }
 
 func TestAccountFromCredentialSeedRestoresUsageSnapshots(t *testing.T) {
-	account := accountFromCredentialSeed(42, "", tokenCredentialSeed{
+	account := accountFromCredentialSeed(42, "", nil, tokenCredentialSeed{
 		planType:            "free",
 		codex7DUsedPercent:  "3",
 		codex7DResetAt:      "2026-05-15T20:33:11+08:00",

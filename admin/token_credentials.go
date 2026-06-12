@@ -145,7 +145,7 @@ func tokenCredentialMap(seed tokenCredentialSeed) map[string]interface{} {
 	return credentials
 }
 
-func accountFromCredentialSeed(id int64, proxyURL string, seed tokenCredentialSeed) *auth.Account {
+func accountFromCredentialSeed(id int64, proxyURL string, proxyID *int64, seed tokenCredentialSeed) *auth.Account {
 	seed = normalizeTokenCredentialSeed(seed)
 	account := &auth.Account{
 		DBID:                  id,
@@ -157,6 +157,7 @@ func accountFromCredentialSeed(id int64, proxyURL string, seed tokenCredentialSe
 		Email:                 seed.email,
 		PlanType:              seed.planType,
 		ProxyURL:              proxyURL,
+		ProxyID:               cloneOptionalInt64(proxyID),
 		Status:                auth.StatusReady,
 		SubscriptionExpiresAt: seed.subscriptionExpiresAt,
 	}
@@ -171,6 +172,14 @@ func accountFromCredentialSeed(id int64, proxyURL string, seed tokenCredentialSe
 		account.SetUsageSnapshot5h(pct, parseSeedRFC3339(seed.codex5HResetAt))
 	}
 	return account
+}
+
+func cloneOptionalInt64(value *int64) *int64 {
+	if value == nil || *value <= 0 {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func parseSeedUsagePercent(raw string) (float64, bool) {

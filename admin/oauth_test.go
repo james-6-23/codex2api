@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,6 +176,84 @@ func TestExchangeOAuthCodeTriggersUsageProbe(t *testing.T) {
 	}
 }
 
+func TestOAuthProxyIDFlows(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	store.SetProxyURL("http://global-proxy:8080")
+	handler := &Handler{db: db, store: store}
+	proxyID := insertTestProxy(t, db, "http://managed-oauth-proxy:8080", true)
+	disabledProxyID := insertTestProxy(t, db, "http://managed-oauth-disabled:8080", false)
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/generate-auth-url", strings.NewReader(fmt.Sprintf(`{"proxy_id":%d}`, disabledProxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.GenerateOAuthURL(ctx)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("GenerateOAuthURL disabled status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	assertErrorMessage(t, recorder, "代理服务不存在或已禁用")
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/generate-auth-url", strings.NewReader(fmt.Sprintf(`{"proxy_id":%d}`, proxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.GenerateOAuthURL(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GenerateOAuthURL status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var genPayload struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &genPayload); err != nil {
+		t.Fatalf("decode generate payload: %v", err)
+	}
+	sess, ok := globalOAuthStore.get(genPayload.SessionID)
+	if !ok || sess.ProxyID == nil || *sess.ProxyID != proxyID {
+		t.Fatalf("session proxy id = %+v, ok=%v, want %d", sess, ok, proxyID)
+	}
+	globalOAuthStore.delete(genPayload.SessionID)
+
+	newOAuthExchangeTestServer(t)
+	sessionID := "oauth-proxy-session"
+	globalOAuthStore.set(sessionID, &oauthSession{State: "state-proxy", CodeVerifier: "verifier-proxy", RedirectURI: oauthDefaultRedirectURI, ProxyID: &proxyID, CreatedAt: time.Now()})
+	t.Cleanup(func() { globalOAuthStore.delete(sessionID) })
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/oauth/exchange-code", strings.NewReader(`{"session_id":"oauth-proxy-session","code":"code-proxy","state":"state-proxy"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.ExchangeOAuthCode(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("ExchangeOAuthCode status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var exchangePayload struct {
+		ID int64 `json:"id"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &exchangePayload); err != nil {
+		t.Fatalf("decode exchange payload: %v", err)
+	}
+	assertRuntimeAndStoredProxyForID(t, db, store, exchangePayload.ID, proxyID)
+
+	callbackSessionID := "oauth-callback-proxy-session"
+	callbackSess := &oauthSession{State: "state-callback-proxy", CodeVerifier: "verifier-callback-proxy", RedirectURI: oauthDefaultRedirectURI, ProxyID: &proxyID, CreatedAt: time.Now()}
+	globalOAuthStore.set(callbackSessionID, callbackSess)
+	t.Cleanup(func() { globalOAuthStore.delete(callbackSessionID) })
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/oauth/callback?code=code-callback-proxy&state=state-callback-proxy", nil)
+	handler.OAuthCallback(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("OAuthCallback status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	if callbackSess.ExchangeResult == nil || !callbackSess.ExchangeResult.Success {
+		t.Fatalf("callback exchange result = %+v, want success", callbackSess.ExchangeResult)
+	}
+	assertRuntimeAndStoredProxyForID(t, db, store, callbackSess.ExchangeResult.ID, proxyID)
+}
 func TestOAuthCallbackTriggersUsageProbe(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

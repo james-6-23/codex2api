@@ -1580,6 +1580,108 @@ func TestForceUsageProbeTriggersInLazyMode(t *testing.T) {
 	}
 }
 
+func TestUpdateAccountSchedulerProxyIDValidationAndRuntime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	accountID := insertTestAccount(t, db)
+	proxyID := insertTestProxy(t, db, "http://managed-proxy:8080", true)
+	disabledProxyID := insertTestProxy(t, db, "http://disabled-proxy:8080", false)
+
+	runtimeProxyID := int64(99)
+	store := &auth.Store{}
+	runtimeAccount := &auth.Account{DBID: accountID, AccessToken: "token", ProxyURL: "http://legacy-proxy:8080", ProxyID: &runtimeProxyID}
+	store.AddAccount(runtimeAccount)
+	handler := &Handler{db: db, store: store}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", accountID)}}
+	ctx.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/scheduler", accountID), strings.NewReader(fmt.Sprintf(`{"proxy_id":%d}`, disabledProxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateAccountScheduler(ctx)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("disabled proxy status = %d, want %d: %s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+	assertErrorMessage(t, recorder, "代理服务不存在或已禁用")
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", accountID)}}
+	ctx.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/scheduler", accountID), strings.NewReader(fmt.Sprintf(`{"proxy_id":%d}`, proxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateAccountScheduler(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("valid proxy status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	row, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if !row.ProxyID.Valid || row.ProxyID.Int64 != proxyID {
+		t.Fatalf("stored proxy_id = %+v, want %d", row.ProxyID, proxyID)
+	}
+	if got := runtimeAccount.GetProxyID(); got == nil || *got != proxyID {
+		t.Fatalf("runtime proxy_id = %v, want %d", got, proxyID)
+	}
+	if runtimeAccount.ProxyURL != "http://managed-proxy:8080" {
+		t.Fatalf("runtime proxy_url = %q, want managed URL", runtimeAccount.ProxyURL)
+	}
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", accountID)}}
+	ctx.Request = httptest.NewRequest(http.MethodPatch, fmt.Sprintf("/api/admin/accounts/%d/scheduler", accountID), strings.NewReader(`{"proxy_url":"http://legacy-updated:8080"}`))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateAccountScheduler(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("url-only status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := runtimeAccount.GetProxyID(); got == nil || *got != proxyID {
+		t.Fatalf("runtime proxy_id after URL-only patch = %v, want %d", got, proxyID)
+	}
+}
+
+func TestAddAccountVariantsPersistAndSeedProxyID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	proxyID := insertTestProxy(t, db, "http://managed-add-proxy:8080", true)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	store.SetLazyMode(true)
+	handler := &Handler{db: db, store: store}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts", strings.NewReader(fmt.Sprintf(`{"refresh_token":"rt_proxy","proxy_url":"http://legacy:8080","proxy_id":%d}`, proxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.AddAccount(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("AddAccount status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	assertRuntimeAndStoredProxyForID(t, db, store, 1, proxyID)
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/at", strings.NewReader(fmt.Sprintf(`{"access_token":"at_proxy","proxy_url":"http://legacy-at:8080","proxy_id":%d}`, proxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.AddATAccount(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("AddATAccount status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	assertRuntimeAndStoredProxyForID(t, db, store, 2, proxyID)
+
+	recorder = httptest.NewRecorder()
+	ctx, _ = gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/openai-responses", strings.NewReader(fmt.Sprintf(`{"api_key":"sk-proxy-openai","base_url":"https://api.openai.com","models":["gpt-4.1"],"proxy_url":"http://legacy-oai:8080","proxy_id":%d}`, proxyID)))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	handler.AddOpenAIResponsesAccount(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("AddOpenAIResponsesAccount status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	assertRuntimeAndStoredProxyForID(t, db, store, 3, proxyID)
+}
+
 func newTestAdminDB(t *testing.T) *database.DB {
 	t.Helper()
 
@@ -1614,6 +1716,43 @@ func insertTestAPIKey(t *testing.T, db *database.DB, name string) int64 {
 		t.Fatalf("insert api key: %v", err)
 	}
 	return id
+}
+
+func insertTestProxy(t *testing.T, db *database.DB, url string, enabled bool) int64 {
+	t.Helper()
+
+	id, err := db.InsertProxy(context.Background(), url, "test-proxy")
+	if err != nil {
+		t.Fatalf("insert proxy: %v", err)
+	}
+	if !enabled {
+		if err := db.UpdateProxy(context.Background(), id, nil, nil, &enabled); err != nil {
+			t.Fatalf("disable proxy: %v", err)
+		}
+	}
+	return id
+}
+
+func assertRuntimeAndStoredProxyForID(t *testing.T, db *database.DB, store *auth.Store, accountID int64, proxyID int64) {
+	t.Helper()
+
+	row, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID(%d): %v", accountID, err)
+	}
+	if !row.ProxyID.Valid || row.ProxyID.Int64 != proxyID {
+		t.Fatalf("account %d stored proxy_id = %+v, want %d", accountID, row.ProxyID, proxyID)
+	}
+	acc := store.FindByID(accountID)
+	if acc == nil {
+		t.Fatalf("runtime account %d not found", accountID)
+	}
+	if got := acc.GetProxyID(); got == nil || *got != proxyID {
+		t.Fatalf("account %d runtime proxy_id = %v, want %d", accountID, got, proxyID)
+	}
+	if acc.ProxyURL != row.ProxyURL || acc.ProxyURL == "" {
+		t.Fatalf("account %d runtime proxy_url = %q, stored %q", accountID, acc.ProxyURL, row.ProxyURL)
+	}
 }
 
 func assertErrorMessage(t *testing.T, recorder *httptest.ResponseRecorder, want string) {

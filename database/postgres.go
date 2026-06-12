@@ -4011,7 +4011,7 @@ func (db *DB) UpdateAccountSchedulerConfig(ctx context.Context, id int64, scoreB
 
 // UpdateAccountSchedulerMetadata applies scheduler overrides and UI metadata in
 // one transaction. Runtime store updates should happen only after this returns.
-func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scoreBiasOverride OptionalNullInt64, baseConcurrencyOverride OptionalNullInt64, skipWarmTier OptionalBool, allowedAPIKeyIDs OptionalInt64Slice, tags OptionalStringSlice, groupIDs OptionalInt64Slice, proxyURL OptionalString, credentialUpdates map[string]interface{}) error {
+func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scoreBiasOverride OptionalNullInt64, baseConcurrencyOverride OptionalNullInt64, skipWarmTier OptionalBool, allowedAPIKeyIDs OptionalInt64Slice, tags OptionalStringSlice, groupIDs OptionalInt64Slice, proxyURL OptionalString, proxyID OptionalNullInt64, credentialUpdates map[string]interface{}) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -4061,6 +4061,9 @@ func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scor
 	}
 	if proxyURL.Set {
 		add("proxy_url", strings.TrimSpace(proxyURL.Value))
+	}
+	if proxyID.Set {
+		add("proxy_id", nullableInt64Value(proxyID.Value))
 	}
 	if allowedAPIKeyIDs.Set {
 		if credentialUpdates == nil {
@@ -4710,6 +4713,10 @@ func (db *DB) GetAllRefreshTokens(ctx context.Context) (map[string]bool, error) 
 
 // InsertATAccount 插入 AT-only 账号（无 refresh_token）
 func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken string, proxyURL string) (int64, error) {
+	return db.InsertATAccountWithProxyID(ctx, name, accessToken, proxyURL, nil)
+}
+
+func (db *DB) InsertATAccountWithProxyID(ctx context.Context, name string, accessToken string, proxyURL string, proxyID *int64) (int64, error) {
 	credentials := map[string]interface{}{
 		"access_token": accessToken,
 	}
@@ -4717,11 +4724,15 @@ func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken stri
 	if err != nil {
 		return 0, err
 	}
+	var proxyIDValue interface{}
+	if proxyID != nil {
+		proxyIDValue = *proxyID
+	}
 
 	return db.insertRowID(ctx,
-		`INSERT INTO accounts (name, credentials, proxy_url) VALUES ($1, $2, $3) RETURNING id`,
-		`INSERT INTO accounts (name, credentials, proxy_url) VALUES ($1, $2, $3)`,
-		name, credJSON, proxyURL,
+		`INSERT INTO accounts (name, credentials, proxy_url, proxy_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+		`INSERT INTO accounts (name, credentials, proxy_url, proxy_id) VALUES ($1, $2, $3, $4)`,
+		name, credJSON, proxyURL, proxyIDValue,
 	)
 }
 
@@ -4743,6 +4754,10 @@ func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, cre
 }
 
 func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
+	return db.InsertOpenAIResponsesAccountWithProxyID(ctx, name, credentials, proxyURL, nil)
+}
+
+func (db *DB) InsertOpenAIResponsesAccountWithProxyID(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string, proxyID *int64) (int64, error) {
 	if credentials == nil {
 		credentials = map[string]interface{}{}
 	}
@@ -4750,11 +4765,15 @@ func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, cre
 	if err != nil {
 		return 0, err
 	}
+	var proxyIDValue interface{}
+	if proxyID != nil {
+		proxyIDValue = *proxyID
+	}
 
 	return db.insertRowID(ctx,
-		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, 'openai', 'responses_api', $2, $3) RETURNING id`,
-		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, 'openai', 'responses_api', $2, $3)`,
-		name, credJSON, proxyURL,
+		`INSERT INTO accounts (name, platform, type, credentials, proxy_url, proxy_id) VALUES ($1, 'openai', 'responses_api', $2, $3, $4) RETURNING id`,
+		`INSERT INTO accounts (name, platform, type, credentials, proxy_url, proxy_id) VALUES ($1, 'openai', 'responses_api', $2, $3, $4)`,
+		name, credJSON, proxyURL, proxyIDValue,
 	)
 }
 

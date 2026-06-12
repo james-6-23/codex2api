@@ -39,6 +39,7 @@ type oauthSession struct {
 	CodeVerifier string
 	RedirectURI  string
 	ProxyURL     string
+	ProxyID      *int64
 	CreatedAt    time.Time
 
 	// 回调自动捕获字段
@@ -138,8 +139,9 @@ func oauthCodeChallenge(verifier string) string {
 // POST /api/admin/oauth/generate-auth-url
 func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 	var req struct {
-		ProxyURL    string `json:"proxy_url"`
-		RedirectURI string `json:"redirect_uri"`
+		ProxyURL    string          `json:"proxy_url"`
+		ProxyID     json.RawMessage `json:"proxy_id"`
+		RedirectURI string          `json:"redirect_uri"`
 	}
 	_ = c.ShouldBindJSON(&req)
 
@@ -148,6 +150,23 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		// OpenAI OAuth 仅注册了 localhost:1455 回调，始终使用固定默认值
 		// 避免因请求 Host 端口不同（如 localhost:3000）导致回调校验失败（#80）
 		redirectURI = oauthDefaultRedirectURI
+	}
+
+	proxyID, err := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	var boundProxyID *int64
+	if proxyID.Set && proxyID.Valid {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+		defer cancel()
+		if err := h.validateEnabledProxyID(ctx, proxyID.Value); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		value := proxyID.Value
+		boundProxyID = &value
 	}
 
 	state, err := oauthRandomHex(32)
@@ -171,6 +190,7 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		CodeVerifier: codeVerifier,
 		RedirectURI:  redirectURI,
 		ProxyURL:     strings.TrimSpace(req.ProxyURL),
+		ProxyID:      cloneOptionalInt64(boundProxyID),
 		CreatedAt:    time.Now(),
 	})
 
@@ -195,11 +215,12 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 // POST /api/admin/oauth/exchange-code
 func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 	var req struct {
-		SessionID string `json:"session_id"`
-		Code      string `json:"code"`
-		State     string `json:"state"`
-		Name      string `json:"name"`
-		ProxyURL  string `json:"proxy_url"`
+		SessionID string          `json:"session_id"`
+		Code      string          `json:"code"`
+		State     string          `json:"state"`
+		Name      string          `json:"name"`
+		ProxyURL  string          `json:"proxy_url"`
+		ProxyID   json.RawMessage `json:"proxy_id"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
@@ -220,11 +241,37 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		return
 	}
 
+	proxyIDOverride, err := parseOptionalProxyID(req.ProxyID, "proxy_id")
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	boundProxyID := cloneOptionalInt64(sess.ProxyID)
+	if proxyIDOverride.Set {
+		if proxyIDOverride.Valid {
+			value := proxyIDOverride.Value
+			boundProxyID = &value
+		} else {
+			boundProxyID = nil
+		}
+	}
+
 	proxyURL := sess.ProxyURL
 	if trimmed := strings.TrimSpace(req.ProxyURL); trimmed != "" {
 		proxyURL = trimmed
 	}
-	if proxyURL == "" {
+	if boundProxyID != nil {
+		if err := h.validateEnabledProxyID(c.Request.Context(), *boundProxyID); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+		proxyRow, err := h.db.GetEnabledProxyByID(c.Request.Context(), *boundProxyID)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, "代理服务不存在或已禁用")
+			return
+		}
+		proxyURL = strings.TrimSpace(proxyRow.URL)
+	} else if proxyURL == "" {
 		proxyURL = h.store.GetProxyURL()
 	}
 
@@ -259,7 +306,7 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	id, err := h.db.InsertAccount(ctx, name, tokenResp.RefreshToken, proxyURL)
+	id, err := h.db.InsertAccountWithProxyID(ctx, name, tokenResp.RefreshToken, proxyURL, boundProxyID)
 	if err != nil {
 		writeError(c, http.StatusInternalServerError, "账号写入数据库失败: "+err.Error())
 		return
@@ -275,7 +322,7 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
 	}
 
-	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+	newAcc := accountFromCredentialSeed(id, proxyURL, boundProxyID, seed)
 	h.store.AddAccount(newAcc)
 
 	if newAcc.GetAccessToken() != "" {
@@ -401,8 +448,22 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	sess.CallbackAt = time.Now()
 
 	// 执行 code exchange（Resin 临时身份）
+	boundProxyID := cloneOptionalInt64(sess.ProxyID)
 	proxyURL := sess.ProxyURL
-	if proxyURL == "" {
+	if boundProxyID != nil {
+		if err := h.validateEnabledProxyID(c.Request.Context(), *boundProxyID); err != nil {
+			sess.ExchangeResult = &oauthExchangeResult{Success: false, Error: err.Error()}
+			c.String(http.StatusOK, oauthCallbackPage("授权失败", err.Error(), false))
+			return
+		}
+		proxyRow, err := h.db.GetEnabledProxyByID(c.Request.Context(), *boundProxyID)
+		if err != nil {
+			sess.ExchangeResult = &oauthExchangeResult{Success: false, Error: "代理服务不存在或已禁用"}
+			c.String(http.StatusOK, oauthCallbackPage("授权失败", "代理服务不存在或已禁用", false))
+			return
+		}
+		proxyURL = strings.TrimSpace(proxyRow.URL)
+	} else if proxyURL == "" {
 		proxyURL = h.store.GetProxyURL()
 	}
 	resinTempID := "oauth-" + sessionID
@@ -443,7 +504,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	id, err := h.db.InsertAccount(ctx, name, tokenResp.RefreshToken, proxyURL)
+	id, err := h.db.InsertAccountWithProxyID(ctx, name, tokenResp.RefreshToken, proxyURL, boundProxyID)
 	if err != nil {
 		sess.ExchangeResult = &oauthExchangeResult{
 			Success: false,
@@ -467,7 +528,7 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		go proxy.InheritLease(resinTempID, fmt.Sprintf("%d", id))
 	}
 
-	newAcc := accountFromCredentialSeed(id, proxyURL, seed)
+	newAcc := accountFromCredentialSeed(id, proxyURL, boundProxyID, seed)
 	h.store.AddAccount(newAcc)
 
 	if newAcc.GetAccessToken() != "" {
