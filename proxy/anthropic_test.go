@@ -207,65 +207,206 @@ func TestTranslateAnthropicToCodexDoesNotCanonicalizeDisabledModelAlias(t *testi
 
 func TestSanitizeToolInputJSON(t *testing.T) {
 	tests := []struct {
-		name string
-		in   string
-		want string
+		name     string
+		toolName string
+		in       string
+		want     string
 	}{
 		{
-			name: "drops empty string optional field",
-			in:   `{"file_path":"/etc/hosts","pages":""}`,
-			want: `{"file_path":"/etc/hosts"}`,
+			name:     "drops Read empty pages field",
+			toolName: "Read",
+			in:       `{"file_path":"/etc/hosts","pages":""}`,
+			want:     `{"file_path":"/etc/hosts"}`,
 		},
 		{
-			name: "drops null field",
-			in:   `{"file_path":"/etc/hosts","limit":null}`,
-			want: `{"file_path":"/etc/hosts"}`,
+			name:     "preserves Read null field",
+			toolName: "Read",
+			in:       `{"file_path":"/etc/hosts","limit":null}`,
+			want:     `{"file_path":"/etc/hosts","limit":null}`,
 		},
 		{
-			name: "drops multiple empties",
-			in:   `{"file_path":"/x","pages":"","limit":null,"offset":0}`,
-			want: `{"file_path":"/x","offset":0}`,
+			name:     "only drops Read empty pages",
+			toolName: "Read",
+			in:       `{"file_path":"/x","pages":"","limit":null,"offset":0}`,
+			want:     `{"file_path":"/x","limit":null,"offset":0}`,
 		},
 		{
-			name: "preserves empty object",
-			in:   `{"options":{}}`,
-			want: `{"options":{}}`,
+			name:     "preserves Write empty content",
+			toolName: "Write",
+			in:       `{"file_path":"/tmp/a.txt","content":""}`,
+			want:     `{"file_path":"/tmp/a.txt","content":""}`,
 		},
 		{
-			name: "preserves empty array",
-			in:   `{"items":[]}`,
-			want: `{"items":[]}`,
+			name:     "preserves Edit empty new_string",
+			toolName: "Edit",
+			in:       `{"file_path":"/tmp/a.txt","old_string":"abc","new_string":""}`,
+			want:     `{"file_path":"/tmp/a.txt","old_string":"abc","new_string":""}`,
 		},
 		{
-			name: "preserves whitespace strings",
-			in:   `{"sep":" "}`,
-			want: `{"sep":" "}`,
+			name:     "preserves non-Read empty string",
+			toolName: "Search",
+			in:       `{"query":""}`,
+			want:     `{"query":""}`,
 		},
 		{
-			name: "no-op when nothing to drop",
-			in:   `{"file_path":"/etc/hosts"}`,
-			want: `{"file_path":"/etc/hosts"}`,
+			name:     "preserves empty object",
+			toolName: "Read",
+			in:       `{"options":{}}`,
+			want:     `{"options":{}}`,
 		},
 		{
-			name: "invalid JSON returned as-is",
-			in:   `{"file_path":`,
-			want: `{"file_path":`,
+			name:     "preserves empty array",
+			toolName: "Read",
+			in:       `{"items":[]}`,
+			want:     `{"items":[]}`,
 		},
 		{
-			name: "empty input returned as-is",
-			in:   ``,
-			want: ``,
+			name:     "preserves whitespace strings",
+			toolName: "Read",
+			in:       `{"sep":" "}`,
+			want:     `{"sep":" "}`,
+		},
+		{
+			name:     "no-op when nothing to drop",
+			toolName: "Read",
+			in:       `{"file_path":"/etc/hosts"}`,
+			want:     `{"file_path":"/etc/hosts"}`,
+		},
+		{
+			name:     "invalid JSON returned as-is",
+			toolName: "Read",
+			in:       `{"file_path":`,
+			want:     `{"file_path":`,
+		},
+		{
+			name:     "empty input returned as-is",
+			toolName: "Read",
+			in:       ``,
+			want:     ``,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := sanitizeToolInputJSON(tc.in)
+			got := sanitizeToolInputJSON(tc.toolName, tc.in)
 			// Compare as JSON to ignore key ordering.
 			if !jsonEqual(t, got, tc.want) {
-				t.Fatalf("sanitizeToolInputJSON(%q) = %q, want equivalent to %q",
-					tc.in, got, tc.want)
+				t.Fatalf("sanitizeToolInputJSON(%q, %q) = %q, want equivalent to %q",
+					tc.toolName, tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestTranslateAnthropicToCodex_PreservesWriteEmptyContentInAssistantToolUse(t *testing.T) {
+	raw := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"assistant",
+			"content":[{
+				"type":"tool_use",
+				"id":"toolu_write",
+				"name":"Write",
+				"input":{"file_path":"/tmp/a.txt","content":""}
+			}]
+		}]
+	}`)
+
+	body, _, err := TranslateAnthropicToCodexWithModels(raw, "", []string{"gpt-5.4"})
+	if err != nil {
+		t.Fatalf("TranslateAnthropicToCodexWithModels returned error: %v", err)
+	}
+
+	args := gjson.GetBytes(body, "input.0.arguments").String()
+	want := `{"file_path":"/tmp/a.txt","content":""}`
+	if !jsonEqual(t, args, want) {
+		t.Fatalf("assistant Write arguments = %q, want equivalent to %q; body=%s", args, want, body)
+	}
+}
+
+func TestBuildAnthropicResponseFromCompleted_ToolInputSanitizerIsNarrow(t *testing.T) {
+	completed := []byte(`{
+		"response":{
+			"status":"completed",
+			"output":[
+				{
+					"type":"function_call",
+					"call_id":"call_read",
+					"name":"Read",
+					"arguments":` + mustJSONString(`{"file_path":"/tmp/demo.py","limit":2000,"offset":0,"pages":""}`) + `
+				},
+				{
+					"type":"function_call",
+					"call_id":"call_write",
+					"name":"Write",
+					"arguments":` + mustJSONString(`{"file_path":"/tmp/empty.txt","content":""}`) + `
+				},
+				{
+					"type":"function_call",
+					"call_id":"call_edit",
+					"name":"Edit",
+					"arguments":` + mustJSONString(`{"file_path":"/tmp/a.txt","old_string":"abc","new_string":""}`) + `
+				}
+			]
+		}
+	}`)
+
+	resp := buildAnthropicResponseFromCompleted(completed, "claude-sonnet-4-5")
+	if len(resp.Content) != 3 {
+		t.Fatalf("len(content) = %d, want 3: %+v", len(resp.Content), resp.Content)
+	}
+
+	if !jsonEqual(t, string(resp.Content[0].Input), `{"file_path":"/tmp/demo.py","limit":2000,"offset":0}`) {
+		t.Fatalf("Read input = %s", resp.Content[0].Input)
+	}
+	if !jsonEqual(t, string(resp.Content[1].Input), `{"file_path":"/tmp/empty.txt","content":""}`) {
+		t.Fatalf("Write input = %s", resp.Content[1].Input)
+	}
+	if !jsonEqual(t, string(resp.Content[2].Input), `{"file_path":"/tmp/a.txt","old_string":"abc","new_string":""}`) {
+		t.Fatalf("Edit input = %s", resp.Content[2].Input)
+	}
+}
+
+func TestAnthropicStreamTranslator_PreservesWriteEmptyContent(t *testing.T) {
+	tr := newAnthropicStreamTranslator("claude-sonnet-4-5")
+
+	tr.translateEvent([]byte(`{"type":"response.created"}`))
+	tr.translateEvent([]byte(`{
+		"type":"response.output_item.added",
+		"output_index":0,
+		"item":{"type":"function_call","call_id":"call_write","name":"Write"}
+	}`))
+
+	deltas := []string{
+		`{"file_path":"/tmp/empty.txt"`,
+		`,"content":""`,
+		`}`,
+	}
+	var streamed []anthropicStreamEvent
+	for _, d := range deltas {
+		evt := []byte(`{"type":"response.function_call_arguments.delta","delta":` +
+			mustJSONString(d) + `}`)
+		streamed = append(streamed, tr.translateEvent(evt)...)
+	}
+	for _, evt := range streamed {
+		if evt.Type == "content_block_delta" {
+			t.Fatalf("expected no content_block_delta during streaming, got %+v", evt)
+		}
+	}
+
+	closing := tr.translateEvent([]byte(`{"type":"response.output_item.done"}`))
+	var sawDelta bool
+	for _, evt := range closing {
+		if evt.Type != "content_block_delta" {
+			continue
+		}
+		sawDelta = true
+		want := `{"file_path":"/tmp/empty.txt","content":""}`
+		if evt.Delta == nil || evt.Delta.Type != "input_json_delta" || !jsonEqual(t, evt.Delta.PartialJSON, want) {
+			t.Fatalf("Write stream input = %+v, want equivalent to %q", evt.Delta, want)
+		}
+	}
+	if !sawDelta {
+		t.Fatalf("expected one content_block_delta with Write input on close")
 	}
 }
 
