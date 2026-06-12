@@ -841,10 +841,10 @@ func TestGetUsageLogsAllowsFiveHundredPageSize(t *testing.T) {
 			t.Fatalf("InsertUsageLog %d returned error: %v", i, err)
 		}
 	}
+	dbClosed = true
 	if err := db.Close(); err != nil {
 		t.Fatalf("flush usage logs: %v", err)
 	}
-	dbClosed = true
 
 	rawDB, err := sql.Open("sqlite", dbPath)
 	if err != nil {
