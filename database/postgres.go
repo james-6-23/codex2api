@@ -3377,7 +3377,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 	if f.Page < 1 {
 		f.Page = 1
 	}
-	if f.PageSize < 1 || f.PageSize > 200 {
+	if f.PageSize < 1 || f.PageSize > 500 {
 		f.PageSize = 20
 	}
 

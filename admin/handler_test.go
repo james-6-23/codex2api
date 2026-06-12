@@ -10,6 +10,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -807,6 +808,63 @@ func TestGetUsageLogsRejectsInvalidAPIKeyID(t *testing.T) {
 	}
 	if got := payload["error"]; got != "api_key_id 参数无效，需要正整数" {
 		t.Fatalf("error = %q, want %q", got, "api_key_id 参数无效，需要正整数")
+	}
+}
+
+func TestGetUsageLogsAllowsFiveHundredPageSize(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	tempDir := t.TempDir()
+	dbPath := filepath.Join(tempDir, "usage-page-size-500.sqlite")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("new test db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	seedDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open seed db: %v", err)
+	}
+	t.Cleanup(func() { _ = seedDB.Close() })
+
+	base := time.Date(2026, 6, 4, 0, 0, 0, 0, time.UTC)
+	for i := 0; i < 501; i++ {
+		createdAt := base.Add(time.Duration(i) * time.Minute)
+		endpoint := fmt.Sprintf("/v1/log-%03d", i)
+		if _, err := seedDB.Exec(`
+			INSERT INTO usage_logs (account_id, endpoint, model, status_code, created_at)
+			VALUES (1, $1, 'gpt-5.4', 200, $2)
+		`, endpoint, createdAt); err != nil {
+			t.Fatalf("insert usage log %d: %v", i, err)
+		}
+	}
+
+	handler := &Handler{db: db}
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	start := base.Add(-time.Minute).Format(time.RFC3339)
+	end := base.Add(502 * time.Minute).Format(time.RFC3339)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/usage/logs?start="+url.QueryEscape(start)+"&end="+url.QueryEscape(end)+"&page=2&page_size=500", nil)
+
+	handler.GetUsageLogs(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var payload database.UsageLogPage
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload.Total != 501 {
+		t.Fatalf("payload.Total = %d, want %d", payload.Total, 501)
+	}
+	if len(payload.Logs) != 1 {
+		t.Fatalf("len(payload.Logs) = %d, want %d", len(payload.Logs), 1)
+	}
+	if got := payload.Logs[0].Endpoint; got != "/v1/log-000" {
+		t.Fatalf("last page endpoint = %q, want %q", got, "/v1/log-000")
 	}
 }
 

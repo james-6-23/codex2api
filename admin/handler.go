@@ -3872,7 +3872,7 @@ func parseOpsErrorLogFilter(c *gin.Context, withPaging bool) (database.UsageLogF
 			}
 		}
 		if ps := c.Query("page_size"); ps != "" {
-			if n, err := strconv.Atoi(ps); err == nil && n > 0 && n <= 200 {
+			if n, err := strconv.Atoi(ps); err == nil && n > 0 && n <= 500 {
 				filter.PageSize = n
 			}
 		}
@@ -4215,7 +4215,7 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 			page, _ := strconv.Atoi(pageStr)
 			pageSize := 20
 			if ps := c.Query("page_size"); ps != "" {
-				if n, err := strconv.Atoi(ps); err == nil && n > 0 && n <= 200 {
+				if n, err := strconv.Atoi(ps); err == nil && n > 0 && n <= 500 {
 					pageSize = n
 				}
 			}
