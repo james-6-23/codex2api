@@ -1139,6 +1139,13 @@ export interface OAuthURLResponse {
   session_id: string
 }
 
+export interface UpdateOAuthAccountRequest {
+  session_id: string
+  code: string
+  state: string
+  proxy_url?: string
+}
+
 export interface OAuthExchangeResponse {
   message: string
   id: number
