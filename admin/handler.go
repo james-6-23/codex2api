@@ -308,6 +308,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/batch-test", h.BatchTest)
 	api.POST("/accounts/batch-refresh", h.BatchRefreshAccounts)
 	api.POST("/accounts/batch-delete", h.BatchDeleteAccounts)
+	api.POST("/accounts/batch-update", h.BatchUpdateAccounts)
 	api.POST("/accounts/batch-reset-status", h.BatchResetStatus)
 	api.POST("/accounts/clean-banned", h.CleanBanned)
 	api.POST("/accounts/clean-rate-limited", h.CleanRateLimited)
@@ -889,6 +890,121 @@ type updateAccountSchedulerReq struct {
 	ProxyURL                *string         `json:"proxy_url"`
 }
 
+type accountSchedulerUpdate struct {
+	ScoreBiasOverride       database.OptionalNullInt64
+	BaseConcurrencyOverride database.OptionalNullInt64
+	SkipWarmTier            database.OptionalBool
+	AllowedAPIKeyIDs        database.OptionalInt64Slice
+	Tags                    optionalStringSlice
+	GroupIDs                database.OptionalInt64Slice
+	AutoPause5hThreshold    optionalFloat64
+	AutoPause7dThreshold    optionalFloat64
+	AutoPause5hDisabled     database.OptionalBool
+	AutoPause7dDisabled     database.OptionalBool
+	ProxyURL                database.OptionalString
+	CredentialUpdates       map[string]interface{}
+}
+
+func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedulerUpdate, error) {
+	scoreBiasOverride, err := parseOptionalIntegerField(req.ScoreBiasOverride, "score_bias_override", -200, 200)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	baseConcurrencyOverride, err := parseOptionalIntegerField(req.BaseConcurrencyOverride, "base_concurrency_override", 1, 50)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	skipWarmTier, err := parseOptionalBoolField(req.SkipWarmTier, "skip_warm_tier")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	allowedAPIKeyIDs, err := parseOptionalIntegerSliceField(req.AllowedAPIKeyIDs, "allowed_api_key_ids")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	groupIDs, err := parseOptionalIntegerSliceField(req.GroupIDs, "group_ids")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	autoPause5hThreshold, err := parseOptionalRatioField(req.AutoPause5hThreshold, "auto_pause_5h_threshold")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	autoPause7dThreshold, err := parseOptionalRatioField(req.AutoPause7dThreshold, "auto_pause_7d_threshold")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	autoPause5hDisabled, err := parseOptionalBoolField(req.AutoPause5hDisabled, "auto_pause_5h_disabled")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	autoPause7dDisabled, err := parseOptionalBoolField(req.AutoPause7dDisabled, "auto_pause_7d_disabled")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+
+	proxyURL := database.OptionalString{}
+	if req.ProxyURL != nil {
+		proxyURL = database.OptionalString{Set: true, Value: *req.ProxyURL}
+	}
+	credentialUpdates := make(map[string]interface{})
+	if autoPause5hThreshold.Set {
+		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
+	}
+	if autoPause7dThreshold.Set {
+		credentialUpdates["auto_pause_7d_threshold"] = autoPause7dThreshold.Value
+	}
+	if autoPause5hDisabled.Set {
+		credentialUpdates["auto_pause_5h_disabled"] = autoPause5hDisabled.Value
+	}
+	if autoPause7dDisabled.Set {
+		credentialUpdates["auto_pause_7d_disabled"] = autoPause7dDisabled.Value
+	}
+	if len(credentialUpdates) == 0 {
+		credentialUpdates = nil
+	}
+
+	return accountSchedulerUpdate{
+		ScoreBiasOverride:       scoreBiasOverride,
+		BaseConcurrencyOverride: baseConcurrencyOverride,
+		SkipWarmTier:            skipWarmTier,
+		AllowedAPIKeyIDs:        allowedAPIKeyIDs,
+		Tags:                    tags,
+		GroupIDs:                groupIDs,
+		AutoPause5hThreshold:    autoPause5hThreshold,
+		AutoPause7dThreshold:    autoPause7dThreshold,
+		AutoPause5hDisabled:     autoPause5hDisabled,
+		AutoPause7dDisabled:     autoPause7dDisabled,
+		ProxyURL:                proxyURL,
+		CredentialUpdates:       credentialUpdates,
+	}, nil
+}
+
+func (u accountSchedulerUpdate) hasChanges() bool {
+	return u.ScoreBiasOverride.Set ||
+		u.BaseConcurrencyOverride.Set ||
+		u.SkipWarmTier.Set ||
+		u.AllowedAPIKeyIDs.Set ||
+		u.Tags.Set ||
+		u.GroupIDs.Set ||
+		u.AutoPause5hThreshold.Set ||
+		u.AutoPause7dThreshold.Set ||
+		u.AutoPause5hDisabled.Set ||
+		u.AutoPause7dDisabled.Set ||
+		u.ProxyURL.Set
+}
+
+func optionalBoolFromPtr(value *bool) database.OptionalBool {
+	if value == nil {
+		return database.OptionalBool{}
+	}
+	return database.OptionalBool{Set: true, Value: *value}
+}
+
 // UpdateAccountScheduler 更新账号调度配置。
 // UpdateAccountCredit 更新账号信用设置
 func (h *Handler) UpdateAccountCredit(c *gin.Context) {
@@ -944,52 +1060,7 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 		return
 	}
 
-	scoreBiasOverride, err := parseOptionalIntegerField(req.ScoreBiasOverride, "score_bias_override", -200, 200)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	baseConcurrencyOverride, err := parseOptionalIntegerField(req.BaseConcurrencyOverride, "base_concurrency_override", 1, 50)
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	skipWarmTier, err := parseOptionalBoolField(req.SkipWarmTier, "skip_warm_tier")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	allowedAPIKeyIDs, err := parseOptionalIntegerSliceField(req.AllowedAPIKeyIDs, "allowed_api_key_ids")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	tags, err := parseOptionalStringSliceField(req.Tags, "tags")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	groupIDs, err := parseOptionalIntegerSliceField(req.GroupIDs, "group_ids")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	autoPause5hThreshold, err := parseOptionalRatioField(req.AutoPause5hThreshold, "auto_pause_5h_threshold")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	autoPause7dThreshold, err := parseOptionalRatioField(req.AutoPause7dThreshold, "auto_pause_7d_threshold")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	autoPause5hDisabled, err := parseOptionalBoolField(req.AutoPause5hDisabled, "auto_pause_5h_disabled")
-	if err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-	autoPause7dDisabled, err := parseOptionalBoolField(req.AutoPause7dDisabled, "auto_pause_7d_disabled")
+	update, err := parseAccountSchedulerUpdate(req)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
@@ -998,8 +1069,8 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
-	if allowedAPIKeyIDs.Set {
-		missingAPIKeyIDs, err := h.findMissingAPIKeyIDs(ctx, allowedAPIKeyIDs.Values)
+	if update.AllowedAPIKeyIDs.Set {
+		missingAPIKeyIDs, err := h.findMissingAPIKeyIDs(ctx, update.AllowedAPIKeyIDs.Values)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "校验 API Key 失败: "+err.Error())
 			return
@@ -1013,8 +1084,8 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 			return
 		}
 	}
-	if groupIDs.Set {
-		missingGroupIDs, err := h.db.VerifyAccountGroupIDs(ctx, groupIDs.Values)
+	if update.GroupIDs.Set {
+		missingGroupIDs, err := h.db.VerifyAccountGroupIDs(ctx, update.GroupIDs.Values)
 		if err != nil {
 			writeError(c, http.StatusInternalServerError, "校验账号分组失败: "+err.Error())
 			return
@@ -1029,27 +1100,7 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 		}
 	}
 
-	proxyURL := database.OptionalString{}
-	if req.ProxyURL != nil {
-		proxyURL = database.OptionalString{Set: true, Value: *req.ProxyURL}
-	}
-	credentialUpdates := make(map[string]interface{})
-	if autoPause5hThreshold.Set {
-		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
-	}
-	if autoPause7dThreshold.Set {
-		credentialUpdates["auto_pause_7d_threshold"] = autoPause7dThreshold.Value
-	}
-	if autoPause5hDisabled.Set {
-		credentialUpdates["auto_pause_5h_disabled"] = autoPause5hDisabled.Value
-	}
-	if autoPause7dDisabled.Set {
-		credentialUpdates["auto_pause_7d_disabled"] = autoPause7dDisabled.Value
-	}
-	if len(credentialUpdates) == 0 {
-		credentialUpdates = nil
-	}
-	if err := h.db.UpdateAccountSchedulerMetadata(ctx, id, scoreBiasOverride, baseConcurrencyOverride, skipWarmTier, allowedAPIKeyIDs, database.OptionalStringSlice{Set: tags.Set, Values: tags.Values}, groupIDs, proxyURL, credentialUpdates); err != nil {
+	if err := h.db.UpdateAccountSchedulerMetadata(ctx, id, update.ScoreBiasOverride, update.BaseConcurrencyOverride, update.SkipWarmTier, update.AllowedAPIKeyIDs, database.OptionalStringSlice{Set: update.Tags.Set, Values: update.Tags.Values}, update.GroupIDs, update.ProxyURL, update.CredentialUpdates); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "账号不存在")
 			return
@@ -1057,61 +1108,66 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "更新账号调度配置失败: "+err.Error())
 		return
 	}
-	if h.store != nil {
-		if scoreBiasOverride.Set || baseConcurrencyOverride.Set || skipWarmTier.Set {
-			current := h.store.FindByID(id)
-			var score *int64
-			var concurrency *int64
-			var skipWarm *bool
-			if current != nil {
-				current.Mu().RLock()
-				if current.ScoreBiasOverride != nil {
-					value := *current.ScoreBiasOverride
-					score = &value
-				}
-				if current.BaseConcurrencyOverride != nil {
-					value := *current.BaseConcurrencyOverride
-					concurrency = &value
-				}
-				skipValue := current.SkipWarmTier
-				skipWarm = &skipValue
-				current.Mu().RUnlock()
-			}
-			if scoreBiasOverride.Set {
-				score = nullableInt64Pointer(scoreBiasOverride.Value)
-			}
-			if baseConcurrencyOverride.Set {
-				concurrency = nullableInt64Pointer(baseConcurrencyOverride.Value)
-			}
-			if skipWarmTier.Set {
-				skipWarm = &skipWarmTier.Value
-			}
-			h.store.ApplyAccountSchedulerOverrides(id, score, concurrency, skipWarm)
-		}
-		if allowedAPIKeyIDs.Set {
-			h.store.ApplyAccountAllowedAPIKeys(id, allowedAPIKeyIDs.Values)
-		}
-		if autoPause5hThreshold.Set || autoPause7dThreshold.Set || autoPause5hDisabled.Set || autoPause7dDisabled.Set {
-			h.store.ApplyAccountQuotaAutoPauseConfig(
-				id,
-				optionalFloat64Ptr(autoPause5hThreshold),
-				optionalFloat64Ptr(autoPause7dThreshold),
-				optionalBoolPtr(autoPause5hDisabled),
-				optionalBoolPtr(autoPause7dDisabled),
-			)
-		}
-	}
-	if h.store != nil && tags.Set {
-		h.store.ApplyAccountTags(id, tags.Values)
-	}
-	if h.store != nil && groupIDs.Set {
-		h.store.ApplyAccountGroups(id, groupIDs.Values)
-	}
-	if h.store != nil && req.ProxyURL != nil {
-		h.store.ApplyAccountProxyURL(id, *req.ProxyURL)
-	}
+	h.applyAccountSchedulerRuntimeUpdate(id, update)
 
 	writeMessage(c, http.StatusOK, "账号调度配置已更新")
+}
+
+func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSchedulerUpdate) {
+	if h.store == nil {
+		return
+	}
+	if update.ScoreBiasOverride.Set || update.BaseConcurrencyOverride.Set || update.SkipWarmTier.Set {
+		current := h.store.FindByID(id)
+		var score *int64
+		var concurrency *int64
+		var skipWarm *bool
+		if current != nil {
+			current.Mu().RLock()
+			if current.ScoreBiasOverride != nil {
+				value := *current.ScoreBiasOverride
+				score = &value
+			}
+			if current.BaseConcurrencyOverride != nil {
+				value := *current.BaseConcurrencyOverride
+				concurrency = &value
+			}
+			skipValue := current.SkipWarmTier
+			skipWarm = &skipValue
+			current.Mu().RUnlock()
+		}
+		if update.ScoreBiasOverride.Set {
+			score = nullableInt64Pointer(update.ScoreBiasOverride.Value)
+		}
+		if update.BaseConcurrencyOverride.Set {
+			concurrency = nullableInt64Pointer(update.BaseConcurrencyOverride.Value)
+		}
+		if update.SkipWarmTier.Set {
+			skipWarm = &update.SkipWarmTier.Value
+		}
+		h.store.ApplyAccountSchedulerOverrides(id, score, concurrency, skipWarm)
+	}
+	if update.AllowedAPIKeyIDs.Set {
+		h.store.ApplyAccountAllowedAPIKeys(id, update.AllowedAPIKeyIDs.Values)
+	}
+	if update.AutoPause5hThreshold.Set || update.AutoPause7dThreshold.Set || update.AutoPause5hDisabled.Set || update.AutoPause7dDisabled.Set {
+		h.store.ApplyAccountQuotaAutoPauseConfig(
+			id,
+			optionalFloat64Ptr(update.AutoPause5hThreshold),
+			optionalFloat64Ptr(update.AutoPause7dThreshold),
+			optionalBoolPtr(update.AutoPause5hDisabled),
+			optionalBoolPtr(update.AutoPause7dDisabled),
+		)
+	}
+	if update.Tags.Set {
+		h.store.ApplyAccountTags(id, update.Tags.Values)
+	}
+	if update.GroupIDs.Set {
+		h.store.ApplyAccountGroups(id, update.GroupIDs.Values)
+	}
+	if update.ProxyURL.Set {
+		h.store.ApplyAccountProxyURL(id, update.ProxyURL.Value)
+	}
 }
 
 type optionalStringSlice struct {
@@ -3005,6 +3061,13 @@ type batchAccountIDsRequest struct {
 	IDs []int64 `json:"ids"`
 }
 
+type batchUpdateAccountsReq struct {
+	updateAccountSchedulerReq
+	IDs     []int64 `json:"ids"`
+	Enabled *bool   `json:"enabled"`
+	Locked  *bool   `json:"locked"`
+}
+
 // DeleteAccount 删除账号
 func (h *Handler) DeleteAccount(c *gin.Context) {
 	idStr := c.Param("id")
@@ -3303,6 +3366,113 @@ func (h *Handler) runBatchDeleteAccounts(ctx context.Context, ids []int64, onPro
 	}
 
 	return success, fail
+}
+
+// BatchUpdateAccounts 批量更新账号启用、锁定和调度元信息。
+// POST /api/admin/accounts/batch-update
+func (h *Handler) BatchUpdateAccounts(c *gin.Context) {
+	var req batchUpdateAccountsReq
+	decoder := json.NewDecoder(c.Request.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+
+	ids := uniqueAccountIDs(req.IDs)
+	if len(ids) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供要更新的账号 ID 列表")
+		return
+	}
+
+	schedulerUpdate, err := parseAccountSchedulerUpdate(req.updateAccountSchedulerReq)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	enabled := optionalBoolFromPtr(req.Enabled)
+	locked := optionalBoolFromPtr(req.Locked)
+	if !enabled.Set && !locked.Set && !schedulerUpdate.hasChanges() {
+		writeError(c, http.StatusBadRequest, "请提供要更新的字段")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	defer cancel()
+
+	if schedulerUpdate.AllowedAPIKeyIDs.Set {
+		missingAPIKeyIDs, err := h.findMissingAPIKeyIDs(ctx, schedulerUpdate.AllowedAPIKeyIDs.Values)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "校验 API Key 失败: "+err.Error())
+			return
+		}
+		if len(missingAPIKeyIDs) > 0 {
+			values := make([]string, 0, len(missingAPIKeyIDs))
+			for _, value := range missingAPIKeyIDs {
+				values = append(values, strconv.FormatInt(value, 10))
+			}
+			writeError(c, http.StatusBadRequest, "allowed_api_key_ids 包含不存在的 API Key ID: "+strings.Join(values, ", "))
+			return
+		}
+	}
+	if schedulerUpdate.GroupIDs.Set {
+		missingGroupIDs, err := h.db.VerifyAccountGroupIDs(ctx, schedulerUpdate.GroupIDs.Values)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "校验账号分组失败: "+err.Error())
+			return
+		}
+		if len(missingGroupIDs) > 0 {
+			values := make([]string, 0, len(missingGroupIDs))
+			for _, value := range missingGroupIDs {
+				values = append(values, strconv.FormatInt(value, 10))
+			}
+			writeError(c, http.StatusBadRequest, "group_ids 包含不存在的分组 ID: "+strings.Join(values, ", "))
+			return
+		}
+	}
+
+	updatedIDs, err := h.db.BatchUpdateAccountMetadata(ctx, ids, database.BatchAccountMetadataUpdate{
+		Enabled:                 enabled,
+		Locked:                  locked,
+		ScoreBiasOverride:       schedulerUpdate.ScoreBiasOverride,
+		BaseConcurrencyOverride: schedulerUpdate.BaseConcurrencyOverride,
+		SkipWarmTier:            schedulerUpdate.SkipWarmTier,
+		AllowedAPIKeyIDs:        schedulerUpdate.AllowedAPIKeyIDs,
+		Tags:                    database.OptionalStringSlice{Set: schedulerUpdate.Tags.Set, Values: schedulerUpdate.Tags.Values},
+		GroupIDs:                schedulerUpdate.GroupIDs,
+		ProxyURL:                schedulerUpdate.ProxyURL,
+		CredentialUpdates:       schedulerUpdate.CredentialUpdates,
+	})
+	if err != nil {
+		writeError(c, http.StatusInternalServerError, "批量更新账号失败: "+err.Error())
+		return
+	}
+
+	if h.store != nil {
+		for _, id := range updatedIDs {
+			if enabled.Set {
+				h.store.ApplyAccountEnabled(id, enabled.Value)
+			}
+			if locked.Set {
+				if acc := h.store.FindByID(id); acc != nil {
+					if locked.Value {
+						atomic.StoreInt32(&acc.Locked, 1)
+					} else {
+						atomic.StoreInt32(&acc.Locked, 0)
+					}
+				}
+			}
+			h.applyAccountSchedulerRuntimeUpdate(id, schedulerUpdate)
+		}
+	}
+
+	success := int64(len(updatedIDs))
+	failed := int64(len(ids)) - success
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("已更新 %d 个账号，失败 %d 个", success, failed),
+		"success": success,
+		"failed":  failed,
+	})
 }
 
 // RefreshAccount 手动刷新账号 AT

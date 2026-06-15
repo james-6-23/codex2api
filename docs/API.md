@@ -502,6 +502,34 @@ data: [DONE]
 }
 ```
 
+#### POST /api/admin/accounts/batch-update
+
+批量更新账号启用、锁定、标签、分组和调度元信息。字段省略时保持原值；`ids` 会自动去重，已删除或不存在的账号计入 `failed`。
+
+**请求:**
+
+```json
+{
+  "ids": [1, 2, 3],
+  "enabled": false,
+  "locked": true,
+  "tags": ["ops", "paid"],
+  "group_ids": [1],
+  "auto_pause_5h_threshold": 0.8,
+  "auto_pause_7d_disabled": true
+}
+```
+
+**响应:**
+
+```json
+{
+  "message": "已更新 3 个账号，失败 0 个",
+  "success": 3,
+  "failed": 0
+}
+```
+
 #### POST /api/admin/accounts
 
 添加 Refresh Token 账号（支持批量）。

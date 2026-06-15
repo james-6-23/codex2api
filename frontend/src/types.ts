@@ -205,6 +205,12 @@ export interface UpdateAccountSchedulerRequest {
   auto_pause_7d_disabled?: boolean
 }
 
+export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
+  ids: number[]
+  enabled?: boolean
+  locked?: boolean
+}
+
 export interface AccountGroup {
   id: number
   name: string

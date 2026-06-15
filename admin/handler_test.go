@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1427,6 +1428,116 @@ func TestUpdateAccountSchedulerUpdatesRuntimeOverrides(t *testing.T) {
 	if runtimeAccount.AutoPause7dDisabled {
 		t.Fatal("runtime auto_pause_7d_disabled = true, want false")
 	}
+}
+
+func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	accountID1, err := db.InsertAccount(ctx, "batch-1", "rt_batch_1", "")
+	if err != nil {
+		t.Fatalf("InsertAccount 1: %v", err)
+	}
+	accountID2, err := db.InsertAccount(ctx, "batch-2", "rt_batch_2", "")
+	if err != nil {
+		t.Fatalf("InsertAccount 2: %v", err)
+	}
+	groupID, err := db.CreateAccountGroup(ctx, "Batch Group", "", "#2563eb", 0, 0, 0)
+	if err != nil {
+		t.Fatalf("CreateAccountGroup: %v", err)
+	}
+
+	runtimeAccount1 := &auth.Account{DBID: accountID1, AccessToken: "token-1", Status: auth.StatusReady, PlanType: "pro"}
+	runtimeAccount2 := &auth.Account{DBID: accountID2, AccessToken: "token-2", Status: auth.StatusReady, PlanType: "pro"}
+	store := auth.NewStore(nil, nil, nil)
+	store.AddAccount(runtimeAccount1)
+	store.AddAccount(runtimeAccount2)
+	handler := &Handler{db: db, store: store}
+
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d,%d],"enabled":false,"locked":true,"tags":["Ops","ops","blue"],"group_ids":[%d],"auto_pause_5h_threshold":0.8,"auto_pause_7d_disabled":true}`,
+		accountID1, accountID2, accountID1, accountID2+1000, groupID)
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/batch-update", strings.NewReader(body))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.BatchUpdateAccounts(ginCtx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d, body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if payload["success"] != float64(2) || payload["failed"] != float64(1) {
+		t.Fatalf("payload = %#v, want success=2 failed=1", payload)
+	}
+
+	rows, err := db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	byID := make(map[int64]*database.AccountRow, len(rows))
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	for _, id := range []int64{accountID1, accountID2} {
+		row := byID[id]
+		if row == nil {
+			t.Fatalf("account %d missing from ListActive", id)
+		}
+		if row.Enabled || !row.Locked {
+			t.Fatalf("account %d enabled/locked = %v/%v, want false/true", id, row.Enabled, row.Locked)
+		}
+		if len(row.Tags) != 2 || row.Tags[0] != "Ops" || row.Tags[1] != "blue" {
+			t.Fatalf("account %d tags = %v, want [Ops blue]", id, row.Tags)
+		}
+		threshold5h, ok := row.GetCredentialFloat64("auto_pause_5h_threshold")
+		if !ok || threshold5h != 0.8 {
+			t.Fatalf("account %d auto_pause_5h_threshold = (%v, %t), want (0.8, true)", id, threshold5h, ok)
+		}
+		if !row.GetCredentialBool("auto_pause_7d_disabled") {
+			t.Fatalf("account %d auto_pause_7d_disabled = false, want true", id)
+		}
+		groupIDs, err := db.GetAccountGroupIDs(ctx, id)
+		if err != nil {
+			t.Fatalf("GetAccountGroupIDs(%d): %v", id, err)
+		}
+		if len(groupIDs) != 1 || groupIDs[0] != groupID {
+			t.Fatalf("account %d group ids = %v, want [%d]", id, groupIDs, groupID)
+		}
+	}
+
+	if atomic.LoadInt32(&runtimeAccount1.DispatchPaused) != 1 || atomic.LoadInt32(&runtimeAccount2.DispatchPaused) != 1 {
+		t.Fatal("runtime dispatch pause flags were not updated")
+	}
+	if atomic.LoadInt32(&runtimeAccount1.Locked) != 1 || atomic.LoadInt32(&runtimeAccount2.Locked) != 1 {
+		t.Fatal("runtime locked flags were not updated")
+	}
+	runtimeAccount1.Mu().RLock()
+	if len(runtimeAccount1.Tags) != 2 || runtimeAccount1.Tags[0] != "Ops" || runtimeAccount1.Tags[1] != "blue" || len(runtimeAccount1.GroupIDs) != 1 || runtimeAccount1.GroupIDs[0] != groupID {
+		t.Fatalf("runtime account 1 metadata tags=%v groups=%v", runtimeAccount1.Tags, runtimeAccount1.GroupIDs)
+	}
+	runtimeAccount1.Mu().RUnlock()
+}
+
+func TestBatchUpdateAccountsRejectsMissingUpdateFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	handler := &Handler{}
+	recorder := httptest.NewRecorder()
+	ginCtx, _ := gin.CreateTestContext(recorder)
+	ginCtx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/batch-update", strings.NewReader(`{"ids":[1,2]}`))
+	ginCtx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.BatchUpdateAccounts(ginCtx)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	assertErrorMessage(t, recorder, "请提供要更新的字段")
 }
 
 // AT-only 账号(没有 refresh_token,只靠 access_token)是规避 Codex Plus "add

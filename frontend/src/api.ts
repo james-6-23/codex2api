@@ -50,6 +50,7 @@ import type {
   UsageStats,
   AccountGroup,
   AccountGroupsResponse,
+  BatchUpdateAccountsRequest,
   BackgroundUploadResponse,
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
@@ -238,6 +239,8 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/enable`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   toggleAccountLock: (id: number, locked: boolean) =>
     request<MessageResponse>(`/accounts/${id}/lock`, { method: 'POST', body: JSON.stringify({ locked }) }),
+  batchUpdateAccounts: (data: BatchUpdateAccountsRequest) =>
+    request<{ message: string; success: number; failed: number }>('/accounts/batch-update', { method: 'POST', body: JSON.stringify(data) }),
   resetAccountStatus: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/reset-status`, { method: 'POST' }),
   resetCredits: (id: number) =>

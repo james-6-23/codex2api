@@ -76,6 +76,32 @@ type OptionalNullInt64 struct {
 	Value sql.NullInt64
 }
 
+type BatchAccountMetadataUpdate struct {
+	Enabled                 OptionalBool
+	Locked                  OptionalBool
+	ScoreBiasOverride       OptionalNullInt64
+	BaseConcurrencyOverride OptionalNullInt64
+	SkipWarmTier            OptionalBool
+	AllowedAPIKeyIDs        OptionalInt64Slice
+	Tags                    OptionalStringSlice
+	GroupIDs                OptionalInt64Slice
+	ProxyURL                OptionalString
+	CredentialUpdates       map[string]interface{}
+}
+
+func (u BatchAccountMetadataUpdate) HasChanges() bool {
+	return u.Enabled.Set ||
+		u.Locked.Set ||
+		u.ScoreBiasOverride.Set ||
+		u.BaseConcurrencyOverride.Set ||
+		u.SkipWarmTier.Set ||
+		u.AllowedAPIKeyIDs.Set ||
+		u.Tags.Set ||
+		u.GroupIDs.Set ||
+		u.ProxyURL.Set ||
+		len(u.CredentialUpdates) > 0
+}
+
 // AccountCredentialIndex holds pre-built sets of existing credentials for fast import dedup.
 type AccountCredentialIndex struct {
 	RefreshTokens map[string]bool
@@ -4109,6 +4135,227 @@ func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scor
 		}
 	}
 	return tx.Commit()
+}
+
+func (db *DB) BatchUpdateAccountMetadata(ctx context.Context, ids []int64, update BatchAccountMetadataUpdate) ([]int64, error) {
+	ids = normalizeIDSlice(ids)
+	if len(ids) == 0 || !update.HasChanges() {
+		return nil, nil
+	}
+
+	tx, err := db.conn.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	credentialUpdates := cloneCredentialUpdates(update.CredentialUpdates)
+	if update.AllowedAPIKeyIDs.Set {
+		if credentialUpdates == nil {
+			credentialUpdates = make(map[string]interface{}, 1)
+		}
+		credentialUpdates["allowed_api_key_ids"] = normalizePositiveInt64Slice(update.AllowedAPIKeyIDs.Values)
+	}
+
+	active, err := db.selectBatchAccounts(ctx, tx, ids, len(credentialUpdates) > 0)
+	if err != nil {
+		return nil, err
+	}
+	if len(active.ids) == 0 {
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return nil, nil
+	}
+
+	if err := db.batchUpdateAccountColumns(ctx, tx, active.ids, update); err != nil {
+		return nil, err
+	}
+	if len(credentialUpdates) > 0 {
+		if err := db.batchUpdateAccountCredentials(ctx, tx, active.credentials, credentialUpdates); err != nil {
+			return nil, err
+		}
+	}
+	if update.GroupIDs.Set {
+		if err := db.batchReplaceAccountGroups(ctx, tx, active.ids, update.GroupIDs.Values); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return active.ids, nil
+}
+
+type batchAccountCredentials struct {
+	ids         []int64
+	credentials map[int64]map[string]interface{}
+}
+
+func (db *DB) selectBatchAccounts(ctx context.Context, tx *sql.Tx, ids []int64, includeCredentials bool) (batchAccountCredentials, error) {
+	placeholders := dbPlaceholders(db.isSQLite(), 1, len(ids))
+	columns := "id"
+	if includeCredentials {
+		columns = "id, credentials"
+	}
+	query := fmt.Sprintf(`SELECT %s FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted' AND id IN (%s)`, columns, strings.Join(placeholders, ","))
+	if !db.isSQLite() {
+		query += ` FOR UPDATE`
+	}
+	rows, err := tx.QueryContext(ctx, query, argsFromInt64s(ids)...)
+	if err != nil {
+		return batchAccountCredentials{}, err
+	}
+	defer rows.Close()
+
+	out := batchAccountCredentials{
+		ids:         make([]int64, 0, len(ids)),
+		credentials: make(map[int64]map[string]interface{}, len(ids)),
+	}
+	for rows.Next() {
+		var id int64
+		if includeCredentials {
+			var raw interface{}
+			if err := rows.Scan(&id, &raw); err != nil {
+				return batchAccountCredentials{}, err
+			}
+			out.credentials[id] = decodeCredentials(raw)
+		} else if err := rows.Scan(&id); err != nil {
+			return batchAccountCredentials{}, err
+		}
+		out.ids = append(out.ids, id)
+	}
+	return out, rows.Err()
+}
+
+func cloneCredentialUpdates(updates map[string]interface{}) map[string]interface{} {
+	if len(updates) == 0 {
+		return nil
+	}
+	out := make(map[string]interface{}, len(updates))
+	for key, value := range updates {
+		out[key] = value
+	}
+	return out
+}
+
+func (db *DB) batchUpdateAccountColumns(ctx context.Context, tx *sql.Tx, ids []int64, update BatchAccountMetadataUpdate) error {
+	sets := make([]string, 0, 8)
+	args := make([]interface{}, 0, 10+len(ids))
+	touchUpdatedAt := false
+	add := func(column string, value interface{}, touch bool) {
+		args = append(args, value)
+		ph := "?"
+		if !db.isSQLite() {
+			ph = fmt.Sprintf("$%d", len(args))
+		}
+		sets = append(sets, column+" = "+ph)
+		touchUpdatedAt = touchUpdatedAt || touch
+	}
+	if update.Enabled.Set {
+		add("enabled", update.Enabled.Value, true)
+	}
+	if update.Locked.Set {
+		add("locked", update.Locked.Value, false)
+	}
+	if update.ScoreBiasOverride.Set {
+		add("score_bias_override", nullableInt64Value(update.ScoreBiasOverride.Value), true)
+	}
+	if update.BaseConcurrencyOverride.Set {
+		add("base_concurrency_override", nullableInt64Value(update.BaseConcurrencyOverride.Value), true)
+	}
+	if update.SkipWarmTier.Set {
+		add("skip_warm_tier", update.SkipWarmTier.Value, true)
+	}
+	if update.Tags.Set {
+		if db.isSQLite() {
+			add("tags", encodeTagsJSON(update.Tags.Values), true)
+		} else {
+			args = append(args, encodeTagsJSON(update.Tags.Values))
+			sets = append(sets, fmt.Sprintf("tags = $%d::jsonb", len(args)))
+			touchUpdatedAt = true
+		}
+	}
+	if update.ProxyURL.Set {
+		add("proxy_url", strings.TrimSpace(update.ProxyURL.Value), true)
+	}
+	if len(sets) == 0 {
+		return nil
+	}
+
+	if touchUpdatedAt {
+		sets = append(sets, "updated_at = CURRENT_TIMESTAMP")
+	}
+	start := len(args) + 1
+	placeholders := dbPlaceholders(db.isSQLite(), start, len(ids))
+	args = append(args, argsFromInt64s(ids)...)
+	query := fmt.Sprintf("UPDATE accounts SET %s WHERE id IN (%s)", strings.Join(sets, ", "), strings.Join(placeholders, ","))
+	_, err := tx.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (db *DB) batchUpdateAccountCredentials(ctx context.Context, tx *sql.Tx, current map[int64]map[string]interface{}, updates map[string]interface{}) error {
+	query := `UPDATE accounts SET credentials = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`
+	if !db.isSQLite() {
+		query = `UPDATE accounts SET credentials = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
+	}
+	for id, credentials := range current {
+		merged := mergeCredentialMaps(credentials, updates)
+		credJSON, err := json.Marshal(merged)
+		if err != nil {
+			return fmt.Errorf("序列化 credentials 失败: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, query, credJSON, id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) batchReplaceAccountGroups(ctx context.Context, tx *sql.Tx, accountIDs []int64, groupIDs []int64) error {
+	placeholders := dbPlaceholders(db.isSQLite(), 1, len(accountIDs))
+	args := argsFromInt64s(accountIDs)
+	if _, err := tx.ExecContext(ctx, fmt.Sprintf("DELETE FROM account_group_members WHERE account_id IN (%s)", strings.Join(placeholders, ",")), args...); err != nil {
+		return err
+	}
+
+	groupIDs = normalizeIDSlice(groupIDs)
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	insertQ := "INSERT INTO account_group_members (account_id, group_id) VALUES ($1, $2)"
+	if db.isSQLite() {
+		insertQ = "INSERT INTO account_group_members (account_id, group_id) VALUES (?, ?)"
+	}
+	for _, accountID := range accountIDs {
+		for _, groupID := range groupIDs {
+			if _, err := tx.ExecContext(ctx, insertQ, accountID, groupID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func dbPlaceholders(sqlite bool, start, n int) []string {
+	placeholders := make([]string, n)
+	for i := 0; i < n; i++ {
+		if sqlite {
+			placeholders[i] = "?"
+		} else {
+			placeholders[i] = fmt.Sprintf("$%d", start+i)
+		}
+	}
+	return placeholders
+}
+
+func argsFromInt64s(ids []int64) []interface{} {
+	args := make([]interface{}, len(ids))
+	for i, id := range ids {
+		args[i] = id
+	}
+	return args
 }
 
 func nullableInt64Value(v sql.NullInt64) interface{} {
