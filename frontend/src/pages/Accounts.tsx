@@ -217,14 +217,18 @@ function persistAccountViewMode(mode: AccountViewMode) {
 const ACCOUNT_PAGE_MODE_KEY = "codex2api:accounts:page-mode";
 type AccountPageMode = "pool" | "personal";
 
-function getInitialAccountPageMode(): AccountPageMode {
+// 自用模式自动判定阈值：用户从未手动设置过时，号池账号数 < 该值则默认自用模式。
+const ACCOUNT_PERSONAL_MODE_AUTO_THRESHOLD = 10;
+
+// 返回用户保存过的页面模式；从未设置过返回 null（用于触发按账号数自动判定）。
+function getStoredAccountPageMode(): AccountPageMode | null {
   try {
     const raw = window.localStorage.getItem(ACCOUNT_PAGE_MODE_KEY);
     if (raw === "pool" || raw === "personal") return raw;
   } catch {
     // ignore
   }
-  return "pool";
+  return null;
 }
 
 function persistAccountPageMode(mode: AccountPageMode) {
@@ -694,8 +698,12 @@ export default function Accounts() {
     getInitialAccountViewMode,
   );
   const [pageMode, setPageMode] = useState<AccountPageMode>(
-    getInitialAccountPageMode,
+    () => getStoredAccountPageMode() ?? "pool",
   );
+  // 用户是否手动设置过页面模式（设置过则一律尊重用户，不再按账号数自动判定）。
+  const pageModeUserSetRef = useRef(getStoredAccountPageMode() !== null);
+  // 自动判定只在首次（账号加载完成后）应用一次。
+  const pageModeAutoAppliedRef = useRef(false);
   const isDesktopLayout = useMediaQuery("(min-width: 1024px)");
   const fileInputRef = useRef<HTMLInputElement>(null);
   const jsonInputRef = useRef<HTMLInputElement>(null);
@@ -1005,9 +1013,20 @@ export default function Accounts() {
     persistAccountViewMode(viewMode);
   }, [viewMode]);
 
+  // 首次升级（用户从未手动设置过页面模式）时，按号池账号数自动判定：
+  // 账号数 < 阈值则默认开启自用模式。等账号加载完成后只应用一次；之后用户在
+  // 下拉里手动切换才会持久化并一律尊重用户选择。
   useEffect(() => {
-    persistAccountPageMode(pageMode);
-  }, [pageMode]);
+    if (pageModeUserSetRef.current) return;
+    if (pageModeAutoAppliedRef.current) return;
+    if (loading) return;
+    pageModeAutoAppliedRef.current = true;
+    setPageMode(
+      accounts.length < ACCOUNT_PERSONAL_MODE_AUTO_THRESHOLD
+        ? "personal"
+        : "pool",
+    );
+  }, [loading, accounts.length]);
 
   useEffect(() => {
     setGroupFilter((current) => pruneAccountGroupFilter(current, allGroups));
@@ -3008,9 +3027,13 @@ export default function Accounts() {
                 className="w-32"
                 compact
                 value={pageMode}
-                onValueChange={(value) =>
-                  setPageMode(value === "personal" ? "personal" : "pool")
-                }
+                onValueChange={(value) => {
+                  const mode = value === "personal" ? "personal" : "pool";
+                  // 用户手动选择：标记并持久化，之后一律尊重用户、不再自动判定。
+                  pageModeUserSetRef.current = true;
+                  persistAccountPageMode(mode);
+                  setPageMode(mode);
+                }}
                 options={[
                   { value: "pool", label: t("accounts.pageModePool") },
                   { value: "personal", label: t("accounts.pageModePersonal") },
@@ -3462,6 +3485,7 @@ export default function Accounts() {
               <FolderOpen className="size-3.5" />
               {t("accounts.groupManage")}
             </Button>
+            {!isPersonalMode && (
             <div className="flex w-full shrink-0 items-center gap-1.5 @min-[1600px]/accounts:ml-auto @min-[1600px]/accounts:w-auto">
               <div className="hidden lg:inline-flex items-center rounded-md border border-border bg-muted/50 p-0.5">
                 <button
@@ -3524,6 +3548,7 @@ export default function Accounts() {
                 title={t("accounts.columnSettings")}
               />
             </div>
+            )}
           </div>
 
           {selected.size > 0 && (
@@ -8401,11 +8426,11 @@ function AccountMobileCard({
       </div>
 
       {((account.tags ?? []).length > 0 ||
-        (showEmailDomainTags && getAccountEmailDomain(account)) ||
+        (!isPersonal && showEmailDomainTags && getAccountEmailDomain(account)) ||
         groups.length > 0) && (
         <div className="mt-3 space-y-1.5 border-t border-border pt-2">
           <ChipList items={account.tags ?? []} tone="purple" />
-          {showEmailDomainTags && getAccountEmailDomain(account) && (
+          {!isPersonal && showEmailDomainTags && getAccountEmailDomain(account) && (
             <div className="mt-1.5 flex flex-wrap gap-1">
               <EmailDomainBadge domain={getAccountEmailDomain(account)} t={t} />
             </div>
@@ -8429,7 +8454,7 @@ function AccountMobileCard({
         />
         <AccountMobileActionButton
           title={t("accounts.usageDetail")}
-          label={isPersonal ? t("accounts.usageDetail") : undefined}
+          label={isPersonal ? t("accounts.actionUsageDetail") : undefined}
           onClick={onUsage}
           icon={<BarChart3 className="size-3.5" />}
         />
@@ -8445,7 +8470,7 @@ function AccountMobileCard({
               ? t("accounts.atRefreshDisabled")
               : t("accounts.refreshAccessToken")
           }
-          label={isPersonal ? t("common.refresh") : undefined}
+          label={isPersonal ? t("accounts.actionRefreshAT") : undefined}
           disabled={refreshDisabled}
           onClick={onRefresh}
           icon={
@@ -8474,8 +8499,8 @@ function AccountMobileCard({
           label={
             isPersonal
               ? account.enabled === false
-                ? t("accounts.enable")
-                : t("accounts.disable")
+                ? t("accounts.actionEnableScheduling")
+                : t("accounts.actionDisableScheduling")
               : undefined
           }
           variant={account.enabled === false ? "default" : "outline"}
@@ -8495,8 +8520,8 @@ function AccountMobileCard({
           label={
             isPersonal
               ? account.locked
-                ? t("accounts.unlock")
-                : t("accounts.lock")
+                ? t("accounts.actionUnlockAccount")
+                : t("accounts.actionLockAccount")
               : undefined
           }
           variant={account.locked ? "default" : "outline"}
