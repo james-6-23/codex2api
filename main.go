@@ -255,6 +255,11 @@ func main() {
 	// 6. 启动 HTTP 服务
 	gin.SetMode(gin.ReleaseMode)
 	r := gin.New()
+	// Gin 默认信任所有代理头（X-Forwarded-For/X-Real-IP），会让公网客户端伪造 c.ClientIP()。
+	// 默认禁用可信代理，避免绕过 bootstrap 本机来源限制与 IP 限流；如需反代真实 IP，后续应显式配置可信代理 CIDR。
+	if err := configureTrustedProxies(r); err != nil {
+		log.Fatalf("配置可信代理失败: %v", err)
+	}
 	r.Use(api.RecoveryMiddleware())
 	r.Use(api.RequestContextMiddleware())
 	r.Use(api.VersionMiddleware())
@@ -393,6 +398,13 @@ func main() {
 	wsrelay.ShutdownExecutor()
 	proxy.CloseErrorLogger()
 	log.Println("已关闭")
+}
+
+func configureTrustedProxies(r *gin.Engine) error {
+	if r == nil {
+		return nil
+	}
+	return r.SetTrustedProxies(nil)
 }
 
 // loggerMiddleware 简单日志中间件（增强版，支持敏感信息脱敏）

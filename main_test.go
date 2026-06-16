@@ -11,6 +11,32 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestConfigureTrustedProxiesRejectsForwardedForSpoofing(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	r := gin.New()
+	if err := configureTrustedProxies(r); err != nil {
+		t.Fatalf("configureTrustedProxies() error = %v", err)
+	}
+	r.GET("/client-ip", func(c *gin.Context) {
+		c.String(http.StatusOK, c.ClientIP())
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/client-ip", nil)
+	req.RemoteAddr = "203.0.113.10:12345"
+	req.Header.Set("X-Forwarded-For", "127.0.0.1")
+	req.Header.Set("X-Real-IP", "127.0.0.1")
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if got := strings.TrimSpace(w.Body.String()); got != "203.0.113.10" {
+		t.Fatalf("ClientIP() = %q, want remote addr and not spoofed loopback", got)
+	}
+}
+
 func TestLoggerMiddlewareRedactsSensitiveContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -54,5 +80,4 @@ func TestLoggerMiddlewareRedactsSensitiveContext(t *testing.T) {
 			t.Fatalf("log output missing %q: %s", expected, got)
 		}
 	}
-
 }
