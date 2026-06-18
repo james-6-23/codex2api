@@ -569,6 +569,8 @@
     "proxyTestUnknownError": "Unknown error",
     "submit": "Add",
     "testConnection": "Test Connection",
+    "refreshUsage": "Refresh usage",
+    "usageRefreshFailed": "Failed to refresh usage",
     "connecting": "Connecting…",
     "streaming": "Streaming data…",
     "receivingResponse": "Receiving response…",

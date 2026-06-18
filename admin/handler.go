@@ -311,6 +311,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/invite", h.SendInvite)
 	api.GET("/accounts/:id/test", h.TestConnection)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
+	api.POST("/accounts/:id/usage/refresh", h.RefreshAccountUsage)
 	api.GET("/accounts/:id/auth-json", h.GetAccountAuthJSON)
 	api.PATCH("/accounts/:id/credit", h.UpdateAccountCredit)
 	api.POST("/accounts/batch-test", h.BatchTest)
@@ -3147,6 +3148,46 @@ func (h *Handler) GetAccountUsage(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, detail)
+}
+
+// RefreshAccountUsage 同步刷新单个账号的用量快照（优先走零成本的 wham 端点），
+// 完成后返回该账号最新的 5h/7d 用量字段，供前端用量列即时更新进度条。
+// POST /api/admin/accounts/:id/usage/refresh
+func (h *Handler) RefreshAccountUsage(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+
+	account := h.store.FindByID(id)
+	if account == nil {
+		writeError(c, http.StatusNotFound, "账号不在运行时池中")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	if err := h.ProbeUsageSnapshot(ctx, account); err != nil {
+		writeError(c, http.StatusBadGateway, fmt.Sprintf("刷新用量失败: %s", err.Error()))
+		return
+	}
+
+	resp := gin.H{"refreshed": true}
+	if pct, ok := account.GetUsagePercent5h(); ok {
+		resp["usage_percent_5h"] = pct
+	}
+	if pct, ok := account.GetUsagePercent7d(); ok {
+		resp["usage_percent_7d"] = pct
+	}
+	if t := account.GetReset5hAt(); !t.IsZero() {
+		resp["reset_5h_at"] = t.Format(time.RFC3339)
+	}
+	if t := account.GetReset7dAt(); !t.IsZero() {
+		resp["reset_7d_at"] = t.Format(time.RFC3339)
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 type batchAccountIDsRequest struct {

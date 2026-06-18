@@ -997,6 +997,9 @@ export default function Accounts() {
   const lazyMode = data.lazyMode;
   const healthBars = data.healthBars;
   const usageReloadAttemptsRef = useRef<Map<number, number>>(new Map());
+  // 测试连接后需要强制刷新用量的账号 id：即使其用量数据已存在（如已显示 100%），
+  // 也要在后台探针跑完后重新拉取，确保进度条更新为最新值。
+  const forceUsageReloadRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
     persistAnalysisVisibility(showAnalysisCharts);
@@ -1064,14 +1067,22 @@ export default function Accounts() {
     const missingUsageIds = accounts
       .filter(needsUsageReload)
       .map((account) => account.id);
-    const missingUsageIdSet = new Set(missingUsageIds);
+    // 测试连接后被标记强制刷新的账号也要参与重拉，即使其用量数据已存在。
+    // 仅保留仍在当前列表中的 id，避免泄漏。
+    const accountIdSet = new Set(accounts.map((account) => account.id));
+    const forceIds = Array.from(forceUsageReloadRef.current).filter((id) =>
+      accountIdSet.has(id),
+    );
+    forceUsageReloadRef.current = new Set(forceIds);
+    const reloadIds = Array.from(new Set([...missingUsageIds, ...forceIds]));
+    const reloadIdSet = new Set(reloadIds);
     for (const id of Array.from(usageReloadAttemptsRef.current.keys())) {
-      if (!missingUsageIdSet.has(id)) {
+      if (!reloadIdSet.has(id)) {
         usageReloadAttemptsRef.current.delete(id);
       }
     }
 
-    const retryIds = missingUsageIds.filter(
+    const retryIds = reloadIds.filter(
       (id) => (usageReloadAttemptsRef.current.get(id) ?? 0) < 6,
     );
     if (retryIds.length === 0) {
@@ -1083,6 +1094,11 @@ export default function Accounts() {
         id,
         (usageReloadAttemptsRef.current.get(id) ?? 0) + 1,
       );
+    }
+    // 强制刷新的账号已安排本轮重拉，移除标记，避免无谓地反复重拉到上限。
+    // 若重拉后数据仍未更新且该账号确实缺数据，会由 needsUsageReload 接管继续重试。
+    for (const id of forceIds) {
+      forceUsageReloadRef.current.delete(id);
     }
 
     const timer = window.setTimeout(() => {
@@ -3716,6 +3732,7 @@ export default function Accounts() {
                             void handleResetCredits(account)
                           }
                           onDelete={() => void handleDelete(account)}
+                          onUsageRefreshed={() => void reloadSilently()}
                         />
                       );
                     })}
@@ -4093,7 +4110,10 @@ export default function Accounts() {
                             )}
                             {visibleColumns.usage && (
                               <TableCell>
-                                <UsageCell account={account} />
+                                <UsageCell
+                                  account={account}
+                                  onRefreshed={() => void reloadSilently()}
+                                />
                               </TableCell>
                             )}
                             {visibleColumns.billed && (
@@ -5093,6 +5113,9 @@ export default function Accounts() {
             <TestConnectionModal
               account={testingAccount}
               onSettled={() => {
+                // 标记该账号强制刷新用量，配合后台探针确保进度条更新为最新值。
+                forceUsageReloadRef.current.add(testingAccount.id);
+                usageReloadAttemptsRef.current.delete(testingAccount.id);
                 void reloadSilently();
               }}
               onClose={() => setTestingAccount(null)}
@@ -8205,6 +8228,7 @@ function AccountMobileCard({
   onResetStatus,
   onResetCredits,
   onDelete,
+  onUsageRefreshed,
 }: {
   account: AccountRow;
   sequence: number;
@@ -8228,6 +8252,7 @@ function AccountMobileCard({
   onResetStatus: () => void;
   onResetCredits: () => void;
   onDelete: () => void;
+  onUsageRefreshed?: () => void;
 }) {
   const displayName = account.openai_responses_api
     ? formatAccountName(account)
@@ -8406,7 +8431,7 @@ function AccountMobileCard({
                   {t("accounts.actionUsageDetail")}
                 </button>
               </div>
-              <UsageCell account={account} wide />
+              <UsageCell account={account} wide onRefreshed={onUsageRefreshed} />
             </div>
 
             <div className="grid min-w-0 gap-2 sm:grid-cols-2">
@@ -8774,7 +8799,7 @@ function AccountMobileCard({
           label={t("accounts.usage")}
           className="col-span-2 min-h-[116px] max-[380px]:col-span-1"
         >
-          <UsageCell account={account} />
+          <UsageCell account={account} onRefreshed={onUsageRefreshed} />
         </AccountMobileMetric>
       </div>
 
@@ -9620,10 +9645,45 @@ function UsageWindowStat({
 function UsageCell({
   account,
   wide = false,
+  onRefreshed,
 }: {
   account: AccountRow;
   wide?: boolean;
+  onRefreshed?: () => void;
 }) {
+  const { t } = useTranslation();
+  const { showToast } = useToast();
+  const [refreshing, setRefreshing] = useState(false);
+
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      await api.refreshAccountUsage(account.id);
+      onRefreshed?.();
+    } catch (err) {
+      showToast(
+        err instanceof Error ? err.message : t("accounts.usageRefreshFailed"),
+        "error",
+      );
+    } finally {
+      setRefreshing(false);
+    }
+  }, [account.id, onRefreshed, refreshing, showToast, t]);
+
+  const refreshButton = (
+    <button
+      type="button"
+      onClick={handleRefresh}
+      disabled={refreshing}
+      title={t("accounts.refreshUsage")}
+      aria-label={t("accounts.refreshUsage")}
+      className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+    >
+      <RefreshCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
+    </button>
+  );
+
   const plan = normalizePlanType(account.plan_type);
   const has7d =
     account.usage_percent_7d !== null && account.usage_percent_7d !== undefined;
@@ -9648,44 +9708,50 @@ function UsageCell({
     if (!has5h && !has7d && !has5hDetail && !has7dDetail && !has5hReset && !has7dReset)
       return <span className="text-[12px] text-muted-foreground">-</span>;
     return (
-      <div className={`${wide ? "w-full" : "w-52"} space-y-1.5`}>
-        {has5h ? (
-          <UsageBar
-            label="5h"
-            pct={account.usage_percent_5h!}
-            resetAt={account.reset_5h_at}
-            detail={account.usage_5h_detail}
-          />
-        ) : (
-          <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
-        )}
-        {has7d ? (
-          <UsageBar
-            label="7d"
-            pct={account.usage_percent_7d!}
-            resetAt={account.reset_7d_at}
-            detail={account.usage_7d_detail}
-          />
-        ) : (
-          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
-        )}
+      <div className={`${wide ? "w-full" : "w-52"} flex items-start gap-1`}>
+        <div className="flex-1 space-y-1.5">
+          {has5h ? (
+            <UsageBar
+              label="5h"
+              pct={account.usage_percent_5h!}
+              resetAt={account.reset_5h_at}
+              detail={account.usage_5h_detail}
+            />
+          ) : (
+            <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
+          )}
+          {has7d ? (
+            <UsageBar
+              label="7d"
+              pct={account.usage_percent_7d!}
+              resetAt={account.reset_7d_at}
+              detail={account.usage_7d_detail}
+            />
+          ) : (
+            <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+          )}
+        </div>
+        {refreshButton}
       </div>
     );
   }
 
   if (sevenDayPresent) {
     return (
-      <div className={wide ? "w-full" : "w-48"}>
-        {has7d ? (
-          <UsageBar
-            label="7d"
-            pct={account.usage_percent_7d!}
-            resetAt={account.reset_7d_at}
-            detail={account.usage_7d_detail}
-          />
-        ) : (
-          <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
-        )}
+      <div className={`${wide ? "w-full" : "w-48"} flex items-start gap-1`}>
+        <div className="flex-1">
+          {has7d ? (
+            <UsageBar
+              label="7d"
+              pct={account.usage_percent_7d!}
+              resetAt={account.reset_7d_at}
+              detail={account.usage_7d_detail}
+            />
+          ) : (
+            <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+          )}
+        </div>
+        {refreshButton}
       </div>
     );
   }

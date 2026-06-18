@@ -254,6 +254,14 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
   forceUsageProbe: () =>
     request<{ triggered: boolean; concurrency: number; reason?: string; mode?: string }>(`/accounts/usage/probe`, { method: 'POST' }),
+  refreshAccountUsage: (id: number) =>
+    request<{
+      refreshed: boolean
+      usage_percent_5h?: number
+      usage_percent_7d?: number
+      reset_5h_at?: string
+      reset_7d_at?: string
+    }>(`/accounts/${id}/usage/refresh`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
   listAccountGroups: () => request<AccountGroupsResponse>('/account-groups'),

@@ -569,6 +569,8 @@
     "proxyTestUnknownError": "未知错误",
     "submit": "添加",
     "testConnection": "测试连接",
+    "refreshUsage": "刷新用量",
+    "usageRefreshFailed": "刷新用量失败",
     "connecting": "连接中…",
     "streaming": "数据流传输中…",
     "receivingResponse": "接收响应中…",
