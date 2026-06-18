@@ -21,6 +21,7 @@ func TestQueryWhamUsage_ParsesPlusAccountResponse(t *testing.T) {
 		"account_id": "user-abc",
 		"email": "rundown_consist_3o@icloud.com",
 		"plan_type": "plus",
+		"subscription_expires_at": "2026-07-17T09:30:23Z",
 		"rate_limit": {
 			"allowed": true,
 			"limit_reached": false,
@@ -79,6 +80,10 @@ func TestQueryWhamUsage_ParsesPlusAccountResponse(t *testing.T) {
 	if usage.PlanType != "plus" {
 		t.Errorf("PlanType = %q, want plus", usage.PlanType)
 	}
+	wantSubscriptionExpiresAt := time.Date(2026, 7, 17, 9, 30, 23, 0, time.UTC)
+	if got := usage.SubscriptionExpiresAt(); !got.Equal(wantSubscriptionExpiresAt) {
+		t.Errorf("SubscriptionExpiresAt() = %s, want %s", got.Format(time.RFC3339), wantSubscriptionExpiresAt.Format(time.RFC3339))
+	}
 	if usage.RateLimit.PrimaryWindow == nil || usage.RateLimit.PrimaryWindow.UsedPercent != 83 {
 		t.Errorf("primary used_percent = %+v, want 83", usage.RateLimit.PrimaryWindow)
 	}
@@ -108,6 +113,7 @@ func TestApplyWhamUsage_PersistsPlanAnd5h7d(t *testing.T) {
 	reset5h := now.Add(3 * time.Hour).Unix()
 	reset7d := now.Add(5 * 24 * time.Hour).Unix()
 	usage := &WhamUsage{PlanType: "plus"}
+	usage.SubscriptionExpiresAtRaw = whamTimeRaw("2026-07-17T09:30:23Z")
 	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 83, LimitWindowSeconds: 18000, ResetAt: reset5h}
 	usage.RateLimit.SecondaryWindow = &WhamUsageWindow{UsedPercent: 30, LimitWindowSeconds: 604800, ResetAt: reset7d}
 
@@ -132,6 +138,84 @@ func TestApplyWhamUsage_PersistsPlanAnd5h7d(t *testing.T) {
 	}
 	if got := row.GetCredential("plan_type"); got != "plus" {
 		t.Errorf("persisted plan_type = %q, want plus", got)
+	}
+	wantSubscriptionExpiresAt := time.Date(2026, 7, 17, 9, 30, 23, 0, time.UTC)
+	if !account.SubscriptionExpiresAt.Equal(wantSubscriptionExpiresAt) {
+		t.Errorf("account SubscriptionExpiresAt = %s, want %s", account.SubscriptionExpiresAt.Format(time.RFC3339), wantSubscriptionExpiresAt.Format(time.RFC3339))
+	}
+	if got := row.GetCredential("subscription_expires_at"); got != wantSubscriptionExpiresAt.Format(time.RFC3339) {
+		t.Errorf("persisted subscription_expires_at = %q, want %q", got, wantSubscriptionExpiresAt.Format(time.RFC3339))
+	}
+}
+
+func TestApplyWhamUsage_PersistsSubscriptionExpiresAtWhenMemoryAlreadyMatches(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "wham-subscription-retry", map[string]interface{}{"plan_type": "plus"}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	expiresAt := time.Date(2026, 7, 17, 9, 30, 23, 0, time.UTC)
+	account := &auth.Account{DBID: id, AccessToken: "at", PlanType: "plus", AccountID: "acc", SubscriptionExpiresAt: expiresAt}
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.SubscriptionExpiresAtRaw = whamTimeRaw(expiresAt.Format(time.RFC3339))
+
+	ApplyWhamUsage(store, account, usage)
+
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := row.GetCredential("subscription_expires_at"); got != expiresAt.Format(time.RFC3339) {
+		t.Fatalf("persisted subscription_expires_at = %q, want %q", got, expiresAt.Format(time.RFC3339))
+	}
+}
+
+func TestWhamUsageSubscriptionExpiresAtFallbacks(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want time.Time
+	}{
+		{
+			name: "subscription_active_until",
+			body: `{"subscription_active_until":"2026-07-17T09:30:23.123Z"}`,
+			want: time.Date(2026, 7, 17, 9, 30, 23, 123000000, time.UTC),
+		},
+		{
+			name: "chatgpt_subscription_active_until",
+			body: `{"chatgpt_subscription_active_until":"2026-07-17T09:30:23Z"}`,
+			want: time.Date(2026, 7, 17, 9, 30, 23, 0, time.UTC),
+		},
+		{
+			name: "unix_seconds",
+			body: `{"subscription_expires_at":1784280623}`,
+			want: time.Unix(1784280623, 0),
+		},
+		{
+			name: "unix_milliseconds",
+			body: `{"subscription_expires_at":1784280623000}`,
+			want: time.UnixMilli(1784280623000),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var usage WhamUsage
+			if err := json.Unmarshal([]byte(tc.body), &usage); err != nil {
+				t.Fatalf("json.Unmarshal: %v", err)
+			}
+			if got := usage.SubscriptionExpiresAt(); !got.Equal(tc.want) {
+				t.Fatalf("SubscriptionExpiresAt() = %s, want %s", got.Format(time.RFC3339Nano), tc.want.Format(time.RFC3339Nano))
+			}
+		})
 	}
 }
 
@@ -343,6 +427,7 @@ func TestWhamUsageJSON_RoundTrip(t *testing.T) {
 func TestQueryWhamUsage_ParsesRateLimitResetCredits(t *testing.T) {
 	body := `{
 		"plan_type": "plus",
+		"subscription_expires_at": "2026-07-17T09:30:23Z",
 		"rate_limit": {"allowed": true},
 		"rate_limit_reset_credits": {"available_count": 4}
 	}`

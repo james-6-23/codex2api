@@ -4860,6 +4860,49 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 	}
 }
 
+// UpdateAccountSubscriptionExpiresAt persists the latest subscription expiration observed from upstream.
+func (s *Store) UpdateAccountSubscriptionExpiresAt(acc *Account, expiresAt time.Time) bool {
+	if s == nil || acc == nil || expiresAt.IsZero() {
+		return false
+	}
+
+	acc.mu.Lock()
+	changed := acc.SubscriptionExpiresAt.IsZero() || !acc.SubscriptionExpiresAt.Equal(expiresAt)
+	if changed {
+		acc.SubscriptionExpiresAt = expiresAt
+		acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+	}
+	acc.mu.Unlock()
+	if changed {
+		s.fastSchedulerUpdate(acc)
+	}
+
+	if s.db == nil {
+		return changed
+	}
+
+	formatted := expiresAt.Format(time.RFC3339)
+	if !changed {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		row, err := s.db.GetAccountByID(ctx, acc.DBID)
+		if err != nil {
+			log.Printf("[账号 %d] 读取 subscription_expires_at 失败: %v", acc.DBID, err)
+			return changed
+		}
+		if row.GetCredential("subscription_expires_at") == formatted {
+			return changed
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.db.UpdateCredentials(ctx, acc.DBID, map[string]interface{}{"subscription_expires_at": formatted}); err != nil {
+		log.Printf("[账号 %d] 持久化 subscription_expires_at 失败: %v", acc.DBID, err)
+	}
+	return changed
+}
+
 // UpdateAccountPlanType persists the latest Codex plan type observed from upstream headers.
 func (s *Store) UpdateAccountPlanType(acc *Account, planType string) bool {
 	if s == nil || acc == nil {

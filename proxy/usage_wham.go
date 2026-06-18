@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,6 +35,12 @@ type WhamUsage struct {
 	Email     string `json:"email"`
 	PlanType  string `json:"plan_type"`
 
+	// OpenAI 续费后 JWT 里的 chatgpt_subscription_active_until 不一定会立即随授权刷新，
+	// wham/usage 返回的服务端当前订阅到期时间用于同步管理端展示与调度权重。
+	SubscriptionExpiresAtRaw          whamTimeRaw `json:"subscription_expires_at,omitempty"`
+	SubscriptionActiveUntilRaw        whamTimeRaw `json:"subscription_active_until,omitempty"`
+	ChatGPTSubscriptionActiveUntilRaw whamTimeRaw `json:"chatgpt_subscription_active_until,omitempty"`
+
 	RateLimit struct {
 		Allowed         bool             `json:"allowed"`
 		LimitReached    bool             `json:"limit_reached"`
@@ -60,6 +67,64 @@ type WhamUsage struct {
 	RateLimitResetCredits *struct {
 		AvailableCount int `json:"available_count"`
 	} `json:"rate_limit_reset_credits,omitempty"`
+}
+
+type whamTimeRaw string
+
+func (w *whamTimeRaw) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		*w = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err == nil {
+		*w = whamTimeRaw(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(trimmed, &n); err == nil {
+		*w = whamTimeRaw(n.String())
+		return nil
+	}
+	return nil
+}
+
+func (w *WhamUsage) SubscriptionExpiresAt() time.Time {
+	if w == nil {
+		return time.Time{}
+	}
+	for _, raw := range []whamTimeRaw{
+		w.SubscriptionExpiresAtRaw,
+		w.SubscriptionActiveUntilRaw,
+		w.ChatGPTSubscriptionActiveUntilRaw,
+	} {
+		if t := parseWhamTime(string(raw)); !t.IsZero() {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
+func parseWhamTime(raw string) time.Time {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t
+	}
+	if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
+		return t
+	}
+	if unix, err := strconv.ParseInt(s, 10, 64); err == nil && unix > 0 {
+		// 兼容秒级与毫秒级 unix 时间戳。
+		if unix > 1_000_000_000_000 {
+			return time.UnixMilli(unix)
+		}
+		return time.Unix(unix, 0)
+	}
+	return time.Time{}
 }
 
 // WhamUsageWindow 是单个限流窗口（primary=5h，secondary=7d）。
@@ -235,6 +300,9 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 
 	if store != nil && usage.PlanType != "" {
 		store.UpdateAccountPlanType(account, usage.PlanType)
+	}
+	if store != nil {
+		store.UpdateAccountSubscriptionExpiresAt(account, usage.SubscriptionExpiresAt())
 	}
 
 	// 记录「主动重置次数」（OpenAI 官方剩余的手动重置额度次数）。
