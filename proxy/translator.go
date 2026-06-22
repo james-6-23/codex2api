@@ -1783,9 +1783,25 @@ func isAllowedServiceTier(tier string) bool {
 	}
 }
 
+func disableFastMode() bool {
+	return CurrentRuntimeSettings().DisableFastMode
+}
+
+func isFastServiceTier(tier string) bool {
+	switch tier {
+	case "fast", "priority":
+		return true
+	default:
+		return false
+	}
+}
+
 // upstreamServiceTier 将客户端 service_tier 映射为上游接受的值。
 // Codex 上游当前只接受 priority；auto/default/flex/scale 都不应显式转发。
 func upstreamServiceTier(tier string) (string, bool) {
+	if disableFastMode() && isFastServiceTier(tier) {
+		return "", false
+	}
 	switch tier {
 	case "fast", "priority":
 		return "priority", true
@@ -2012,6 +2028,11 @@ func normalizeServiceTierField(body []byte) []byte {
 func sanitizeServiceTierForUpstream(body []byte) []byte {
 	tier := strings.TrimSpace(gjson.GetBytes(body, "service_tier").String())
 	if tier == "" {
+		body, _ = sjson.DeleteBytes(body, "serviceTier")
+		return body
+	}
+	if disableFastMode() && isFastServiceTier(tier) {
+		body, _ = sjson.DeleteBytes(body, "service_tier")
 		body, _ = sjson.DeleteBytes(body, "serviceTier")
 		return body
 	}

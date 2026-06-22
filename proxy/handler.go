@@ -705,9 +705,17 @@ func extractReasoningEffort(body []byte) string {
 // extractServiceTier 从请求体提取服务等级
 func extractServiceTier(body []byte) string {
 	if tier := gjson.GetBytes(body, "service_tier").String(); tier != "" {
+		tier = strings.TrimSpace(tier)
+		if disableFastMode() && isFastServiceTier(tier) {
+			return ""
+		}
 		return tier
 	}
-	return gjson.GetBytes(body, "serviceTier").String()
+	tier := strings.TrimSpace(gjson.GetBytes(body, "serviceTier").String())
+	if disableFastMode() && isFastServiceTier(tier) {
+		return ""
+	}
+	return tier
 }
 
 const upstreamErrorKindMessageTooBig = "message_too_big"

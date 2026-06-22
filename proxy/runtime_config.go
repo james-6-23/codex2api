@@ -28,7 +28,7 @@ const (
 	//   per-api-key —— 无显式会话的请求按下游 API Key 共享上游身份（恢复 v2 旧行为，
 	//                  保留隐式 prompt cache 命中）。
 	// 用环境变量 CODEX_REQUEST_ISOLATION_MODE 覆盖默认值。
-	RequestIsolationModeIsolated = "isolated"
+	RequestIsolationModeIsolated  = "isolated"
 	RequestIsolationModePerAPIKey = "per-api-key"
 
 	defaultClientCompatMode      = ClientCompatModePreserve
@@ -41,6 +41,7 @@ const (
 	defaultFirstTokenTimeoutSec  = 0
 	maxFirstTokenTimeoutSec      = 600
 	defaultBillingTierPolicy     = BillingTierPolicyActual
+	defaultDisableFastMode       = false
 	defaultCodexWSHideErrors     = true
 	defaultCodexWSSilentRetry    = true
 	defaultCodexWSSilentRetries  = 2
@@ -55,6 +56,7 @@ type RuntimeSettings struct {
 	FirstTokenMode        string
 	FirstTokenTimeoutSec  int
 	BillingTierPolicy     string
+	DisableFastMode       bool // Ignore client fast/priority service tier requests when true.
 	CodexForceWebsocket   bool // 强制 Codex 上游走 WebSocket（默认 false）
 	CodexWSHideErrors     bool // 隐藏 Codex WS 上游原始错误（默认 true）
 	CodexWSSilentRetry    bool // 首包前 Codex WS 上游错误静默换号重试（默认 true）
@@ -84,6 +86,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		FirstTokenMode:        defaultFirstTokenMode,
 		FirstTokenTimeoutSec:  defaultFirstTokenTimeoutSec,
 		BillingTierPolicy:     defaultBillingTierPolicy,
+		DisableFastMode:       defaultDisableFastModeFromEnv(),
 		CodexWSHideErrors:     defaultCodexWSHideErrors,
 		CodexWSSilentRetry:    defaultCodexWSSilentRetry,
 		CodexWSSilentRetries:  defaultCodexWSSilentRetries,
@@ -96,6 +99,24 @@ func DefaultRuntimeSettings() RuntimeSettings {
 // 按 API Key 共享缓存行为，作为依赖隐式缓存命中的部署的逃生阀。
 func defaultRequestIsolationMode() string {
 	return NormalizeRequestIsolationMode(os.Getenv("CODEX_REQUEST_ISOLATION_MODE"))
+}
+
+func defaultDisableFastModeFromEnv() bool {
+	for _, key := range []string{"CODEX_DISABLE_FAST_MODE", "DISABLE_FAST_MODE"} {
+		if truthyRuntimeEnv(os.Getenv(key)) {
+			return true
+		}
+	}
+	return defaultDisableFastMode
+}
+
+func truthyRuntimeEnv(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "1", "true", "yes", "y", "on", "enable", "enabled":
+		return true
+	default:
+		return false
+	}
 }
 
 // NormalizeRequestIsolationMode 归一化隔离模式，空/未知值回落到 isolated。

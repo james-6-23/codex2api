@@ -125,6 +125,14 @@ func TestResolveUsageServiceTiersSplitsRequestedActualBilling(t *testing.T) {
 	}
 }
 
+func TestDefaultRuntimeSettingsReadsDisableFastModeEnv(t *testing.T) {
+	t.Setenv("CODEX_DISABLE_FAST_MODE", "true")
+
+	if !DefaultRuntimeSettings().DisableFastMode {
+		t.Fatal("DisableFastMode should be true when CODEX_DISABLE_FAST_MODE=true")
+	}
+}
+
 func TestSanitizeServiceTierForUpstream_FastToPriority(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
@@ -159,6 +167,33 @@ func TestSanitizeServiceTierForUpstream_DropsUnsupportedClientTiers(t *testing.T
 	}
 }
 
+func TestSanitizeServiceTierForUpstream_DisableFastModeDropsFastTiers(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+	next := previous
+	next.DisableFastMode = true
+	ApplyRuntimeSettings(next)
+
+	for _, tier := range []string{"fast", "priority"} {
+		t.Run(tier, func(t *testing.T) {
+			raw := []byte(fmt.Sprintf(`{
+				"model":"gpt-5.4",
+				"service_tier":%q,
+				"serviceTier":%q
+			}`, tier, tier))
+
+			got := sanitizeServiceTierForUpstream(raw)
+
+			if gjson.GetBytes(got, "service_tier").Exists() {
+				t.Fatalf("%s service_tier should be omitted when fast mode is disabled, got body=%s", tier, got)
+			}
+			if gjson.GetBytes(got, "serviceTier").Exists() {
+				t.Fatalf("serviceTier should be removed when fast mode is disabled, got body=%s", got)
+			}
+		})
+	}
+}
+
 func TestTranslateRequest_PreservesSupportedServiceTier(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
@@ -180,6 +215,32 @@ func TestTranslateRequest_PreservesSupportedServiceTier(t *testing.T) {
 	}
 	if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "high" {
 		t.Fatalf("reasoning.effort mismatch: got %q want %q", effort, "high")
+	}
+}
+
+func TestTranslateRequest_DisableFastModeDropsClientFastTier(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+	next := previous
+	next.DisableFastMode = true
+	ApplyRuntimeSettings(next)
+
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"messages":[{"role":"user","content":"hello"}],
+		"serviceTier":"priority"
+	}`)
+
+	got, err := TranslateRequest(raw)
+	if err != nil {
+		t.Fatalf("TranslateRequest returned error: %v", err)
+	}
+
+	if gjson.GetBytes(got, "service_tier").Exists() {
+		t.Fatalf("service_tier should be omitted when fast mode is disabled, got body=%s", got)
+	}
+	if gotTier := extractServiceTier(raw); gotTier != "" {
+		t.Fatalf("extractServiceTier should ignore fast tier when disabled, got %q", gotTier)
 	}
 }
 

@@ -48,6 +48,7 @@ Codex2API 采用三层配置架构：
 | `ADMIN_SECRET` | 否 | - | 管理后台登录密钥 |
 | `CODEX_ALLOW_ANONYMOUS` | 否 | `false` | 设为 `true` 时，未配置任何对外 API Key 也允许 `/v1/*` 直接调用（仅限内网测试场景） |
 | `FAST_SCHEDULER_ENABLED` | 否 | `false` | 通过环境变量启用快速调度器（也可在管理后台运行时开启） |
+| `CODEX_DISABLE_FAST_MODE` | 否 | `false` | 设为 `true` 时忽略客户端 fast/priority 档位请求；OpenAI `service_tier=fast|priority` 和 Anthropic `speed=fast` 都按普通请求处理 |
 | `TZ` | 否 | UTC | 时区，如 `Asia/Shanghai` |
 
 ### Codex 上游稳定性配置
