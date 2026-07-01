@@ -5,11 +5,12 @@ import (
 	"fmt"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	xproxy "golang.org/x/net/proxy"
+
+	"github.com/codex2api/security"
 )
 
 type contextDialer interface {
@@ -25,7 +26,7 @@ func ConfigureTransportProxy(transport *http.Transport, rawProxyURL string, base
 		baseDialer = &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	}
 
-	u, err := url.Parse(rawProxyURL)
+	u, err := security.ParseProxyURL(rawProxyURL)
 	if err != nil {
 		return fmt.Errorf("parse proxy url: %w", err)
 	}

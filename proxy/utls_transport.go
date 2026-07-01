@@ -16,6 +16,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 	xproxy "golang.org/x/net/proxy"
+
+	"github.com/codex2api/security"
 )
 
 // ==================== utls RoundTripper（Chrome 指纹 + HTTP/2） ====================
@@ -71,7 +73,7 @@ func NewUTLSHttpClient(proxyURL string) *http.Client {
 
 // buildProxyDialer 根据代理 URL 创建拨号器
 func buildProxyDialer(proxyURL string) (xproxy.Dialer, error) {
-	u, err := url.Parse(proxyURL)
+	u, err := security.ParseProxyURL(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析代理 URL 失败: %w", err)
 	}
