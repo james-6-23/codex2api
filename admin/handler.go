@@ -1440,8 +1440,9 @@ func effectiveScoreBias(planType string, override sql.NullInt64) int64 {
 	if override.Valid {
 		return override.Int64
 	}
-	switch strings.ToLower(strings.TrimSpace(planType)) {
-	case "pro", "plus", "team":
+	// 与 auth.defaultScoreBiasForPlan 保持一致；k12 是教育版 team (issue #282)
+	switch auth.NormalizePlanType(planType) {
+	case "pro", "plus", "team", "k12":
 		return 50
 	default:
 		return 0

@@ -142,6 +142,16 @@ func TestK12RateLimitedAccountIsFencedFromScheduling(t *testing.T) {
 	}
 }
 
+// issue #282: k12 是教育版 team 工作区，调度权重应与 team 对齐。
+func TestK12GetsTeamSchedulerBias(t *testing.T) {
+	if got := defaultScoreBiasForPlan("k12"); got != 50 {
+		t.Fatalf("defaultScoreBiasForPlan(k12) = %d, want 50 (same as team)", got)
+	}
+	if !IsPlusOrHigherPlan("k12") {
+		t.Fatal("IsPlusOrHigherPlan(k12) = false, want true")
+	}
+}
+
 func TestCleanByRuntimeStatusSkipsPremium5hRateLimitedAccount(t *testing.T) {
 	acc := newPremium5hTestAccount("plus", time.Now().Add(20*time.Minute))
 	store := &Store{

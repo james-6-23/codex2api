@@ -7567,8 +7567,15 @@ function isUnsampledQuotaAccount(account: AccountRow): boolean {
   if (status === "unauthorized" || account.openai_responses_api) {
     return false;
   }
-  const value = account.usage_percent_7d;
-  return typeof value !== "number" || !Number.isFinite(value);
+  // k12 等 team 型工作区可能只返回 5h 窗口：任一窗口有数据即算已采样，
+  // 否则这类账号会永远显示"未采样" (issue #282)。
+  const has7d =
+    typeof account.usage_percent_7d === "number" &&
+    Number.isFinite(account.usage_percent_7d);
+  const has5h =
+    typeof account.usage_percent_5h === "number" &&
+    Number.isFinite(account.usage_percent_5h);
+  return !has7d && !has5h;
 }
 
 function getAccountRateLimitWindow(
@@ -7669,6 +7676,8 @@ function isSubscriptionPlan(planType?: string): boolean {
       "business",
       "edu",
       "education",
+      "k12",
+      "go",
     ].includes(normalized)
   ) {
     return true;
@@ -7990,6 +7999,7 @@ function getDefaultScoreBias(planType?: string): number {
     case "pro":
     case "plus":
     case "team":
+    case "k12":
       return 50;
     default:
       return 0;

@@ -56,7 +56,7 @@ func IsPlusOrHigherPlan(plan string) bool {
 		return false
 	}
 	switch normalized {
-	case "plus", "pro", "team", "teamplus", "enterprise", "business", "edu", "education":
+	case "plus", "pro", "team", "teamplus", "enterprise", "business", "edu", "education", "k12", "go":
 		return true
 	default:
 		return strings.Contains(normalized, "plus") ||

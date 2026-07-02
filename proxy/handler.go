@@ -3814,8 +3814,8 @@ func compute429Cooldown(account *auth.Account, body []byte, resp *http.Response)
 		// Free 只有 7d 窗口，429 = 额度耗尽，冷却 7 天
 		return 7 * 24 * time.Hour
 
-	case "team", "teamplus", "pro", "plus", "enterprise":
-		// Team/Pro/Plus 有 5h + 7d 双窗口，需要判断是哪个窗口触发了限制
+	case "team", "teamplus", "pro", "plus", "enterprise", "k12", "edu", "education":
+		// Team/Pro/Plus 及教育版(k12/edu)有 5h + 7d 双窗口，需要判断是哪个窗口触发了限制
 		return detectTeamCooldownWindow(resp)
 
 	default:

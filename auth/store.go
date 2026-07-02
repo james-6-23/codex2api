@@ -530,7 +530,8 @@ func concurrencyLimitForTier(baseLimit int64, tier AccountHealthTier) int64 {
 
 func defaultScoreBiasForPlan(planType string) int64 {
 	switch NormalizePlanType(planType) {
-	case "pro", "plus", "team":
+	// k12 是教育版 team 工作区，行为与 team 一致 (issue #282)
+	case "pro", "plus", "team", "k12":
 		return 50
 	default:
 		return 0
