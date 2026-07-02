@@ -312,8 +312,9 @@ function normalizePlanType(planType?: string): string {
   return raw
 }
 
+// Plans that carry a rolling 5h usage window (mirrors Go isPremium5hPlan).
 function isPremiumUsagePlan(planType?: string): boolean {
-  return ['plus', 'pro', 'team', 'teamplus'].includes(normalizePlanType(planType))
+  return ['plus', 'pro', 'team', 'teamplus', 'k12', 'edu', 'education', 'go'].includes(normalizePlanType(planType))
 }
 
 function isEligibleForQuotaWindow(account: AccountRow, windowKey: QuotaWindow): boolean {

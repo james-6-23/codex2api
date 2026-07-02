@@ -534,7 +534,7 @@ export default function Accounts() {
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [planFilter, setPlanFilter] = useState<
-    "all" | "pro" | "prolite" | "plus" | "team" | "free"
+    "all" | "pro" | "prolite" | "plus" | "team" | "k12" | "free"
   >("all");
   const [sortKey, setSortKey] = useState<
     "requests" | "usage" | "importTime" | null
@@ -1082,11 +1082,7 @@ export default function Accounts() {
       // 与 UsageCell 的显示判定保持一致:plan_type 可能滞后于真实订阅状态,
       // 看到 5h 重置时间就当订阅账号处理,触发拉取 5h 数据。
       const looksLikeSubscription =
-        plan === "pro" ||
-        plan === "team" ||
-        plan === "plus" ||
-        plan === "teamplus" ||
-        !!account.reset_5h_at;
+        isPremiumUsagePlan(plan) || !!account.reset_5h_at;
 
       if (looksLikeSubscription) {
         return !has5h || !has7d;
@@ -3459,7 +3455,9 @@ export default function Accounts() {
               />
             </div>
             <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5 max-sm:w-full max-sm:flex-wrap">
-              {(["all", "pro", "prolite", "plus", "team", "free"] as const).map(
+              {(
+                ["all", "pro", "prolite", "plus", "team", "k12", "free"] as const
+              ).map(
                 (key) => (
                   <button
                     key={key}
@@ -3477,7 +3475,9 @@ export default function Accounts() {
                       ? t("accounts.filterAll")
                       : key === "prolite"
                         ? "ProLite"
-                        : key.charAt(0).toUpperCase() + key.slice(1)}
+                        : key === "k12"
+                          ? "K12"
+                          : key.charAt(0).toUpperCase() + key.slice(1)}
                   </button>
                 ),
               )}
@@ -7541,10 +7541,19 @@ function isActiveAutoPauseWindowReached(
   return value / 100 >= threshold;
 }
 
+// Plans that carry a rolling 5h usage window (mirrors Go isPremium5hPlan).
+// k12/edu are paid education workspaces with 5h limits (issue #307/#309).
 function isPremiumUsagePlan(planType?: string): boolean {
-  return ["plus", "pro", "team", "teamplus"].includes(
-    normalizePlanType(planType),
-  );
+  return [
+    "plus",
+    "pro",
+    "team",
+    "teamplus",
+    "k12",
+    "edu",
+    "education",
+    "go",
+  ].includes(normalizePlanType(planType));
 }
 
 type RateLimitWindow = "5h" | "7d";
@@ -7955,6 +7964,7 @@ function PlanBadge({ planType }: { planType?: string }) {
       "bg-purple-50 text-purple-600 ring-purple-400/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/25",
     plus: "bg-blue-100 text-blue-700 ring-blue-500/30 dark:bg-blue-500/20 dark:text-blue-300 dark:ring-blue-400/30",
     team: "bg-amber-100 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30",
+    k12: "bg-emerald-100 text-emerald-700 ring-emerald-500/30 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/30",
     free: "bg-zinc-100 text-zinc-500 ring-zinc-400/20 dark:bg-zinc-500/10 dark:text-zinc-400 dark:ring-zinc-400/15",
   };
 
@@ -9830,11 +9840,7 @@ function UsageCell({
   const fiveHourPresent = has5h || has5hDetail || has5hReset;
   const sevenDayPresent = has7d || has7dDetail || has7dReset;
   // plan 表明是订阅型时,即使数据暂未拉到也按订阅布局占位,避免抖动
-  const planSuggestsPremium =
-    plan === "pro" ||
-    plan === "team" ||
-    plan === "plus" ||
-    plan === "teamplus";
+  const planSuggestsPremium = isPremiumUsagePlan(plan);
   const showFiveHour = fiveHourPresent || planSuggestsPremium;
 
   if (showFiveHour) {
