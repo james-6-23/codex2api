@@ -279,6 +279,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if len(useWebsocket) > 0 {
 		wantWebsocket = useWebsocket[0]
 	}
+	if wantWebsocket && strings.TrimSpace(sessionID) == "" {
+		wantWebsocket = false
+	}
 	poolRouteKey := ""
 	if wantWebsocket {
 		sessionID = strings.TrimSpace(sessionID)

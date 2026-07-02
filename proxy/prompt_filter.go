@@ -15,30 +15,45 @@ import (
 
 // promptFilterFullTextMaxRunes limits the persisted redacted blocked-request text preview.
 const promptFilterFullTextMaxRunes = 32000
+const codexAmbientSuggestionClassifierPrefix = "Classify Codex ambient suggestion candidates for policy safety."
+const codex55UnrestrictedInstructionsPatternName = "codex55_unrestricted_instructions"
+const promptCyberPolicyMessage = "This content was flagged for possible cybersecurity risk. If this seems wrong, start a new session or rephrase the request."
+
+func promptCyberPolicyError() *api.APIError {
+	return api.NewAPIError(
+		api.ErrorCode("cyber_policy"),
+		promptCyberPolicyMessage,
+		api.ErrorTypeInvalidRequest,
+	)
+}
+
+func sendPromptCyberPolicyBlockedOpenAI(c *gin.Context) {
+	api.SendErrorWithStatus(c, promptCyberPolicyError(), http.StatusBadRequest)
+}
 
 func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endpoint string, model string) bool {
 	if h == nil || h.store == nil {
 		return false
 	}
 	cfg := h.store.GetPromptFilterConfig()
+	text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
+	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
+		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
+		return h.inspectSemanticReviewOpenAI(c, rawBody, endpoint, model)
+	}
 	verdict := promptfilter.Inspect(rawBody, endpoint, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 	if verdict.Action == promptfilter.ActionWarn {
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
 	}
-	if verdict.Action != promptfilter.ActionBlock {
-		return false
+	if verdict.Action == promptfilter.ActionBlock {
+		sendPromptCyberPolicyBlockedOpenAI(c)
+		return true
 	}
-	api.SendErrorWithStatus(c, api.NewAPIError(
-		api.ErrorCode("prompt_blocked"),
-		"Request contains content blocked by prompt filter",
-		api.ErrorTypeInvalidRequest,
-	), http.StatusBadRequest)
-	return true
+	return h.inspectSemanticReviewOpenAI(c, rawBody, endpoint, model)
 }
 
 func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, endpoint string, model string) bool {
@@ -46,6 +61,10 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 		return false
 	}
 	cfg := h.store.GetPromptFilterConfig()
+	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
+		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
+		return h.inspectSemanticReviewTextOpenAI(c, text, endpoint, model)
+	}
 	verdict := promptfilter.InspectText(text, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
@@ -54,15 +73,11 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if verdict.Action == promptfilter.ActionWarn {
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
 	}
-	if verdict.Action != promptfilter.ActionBlock {
-		return false
+	if verdict.Action == promptfilter.ActionBlock {
+		sendPromptCyberPolicyBlockedOpenAI(c)
+		return true
 	}
-	api.SendErrorWithStatus(c, api.NewAPIError(
-		api.ErrorCode("prompt_blocked"),
-		"Request contains content blocked by prompt filter",
-		api.ErrorTypeInvalidRequest,
-	), http.StatusBadRequest)
-	return true
+	return h.inspectSemanticReviewTextOpenAI(c, text, endpoint, model)
 }
 
 func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, endpoint string, model string) bool {
@@ -70,9 +85,13 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		return false
 	}
 	cfg := h.store.GetPromptFilterConfig()
+	text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
+	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
+		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
+		return h.inspectSemanticReviewAnthropic(c, rawBody, endpoint, model)
+	}
 	verdict := promptfilter.Inspect(rawBody, endpoint, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
@@ -83,7 +102,7 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request contains content blocked by prompt filter")
 		return true
 	}
-	return false
+	return h.inspectSemanticReviewAnthropic(c, rawBody, endpoint, model)
 }
 
 func (h *Handler) logPromptFilterVerdict(c *gin.Context, endpoint string, model string, source string, errorCode string, verdict promptfilter.Verdict) {
@@ -193,7 +212,62 @@ func shouldReviewPromptFilterVerdict(verdict promptfilter.Verdict, cfg promptfil
 	if verdict.Action != promptfilter.ActionWarn && verdict.Action != promptfilter.ActionBlock {
 		return false
 	}
+	if promptFilterVerdictIsFinal(verdict) {
+		return false
+	}
 	return promptfilter.NormalizeReviewConfig(cfg.Review).Ready()
+}
+
+func promptFilterVerdictIsFinal(verdict promptfilter.Verdict) bool {
+	for _, match := range verdict.Matched {
+		if match.Name == codex55UnrestrictedInstructionsPatternName {
+			return true
+		}
+	}
+	return false
+}
+
+func codexAmbientSuggestionClassifierBypass(text string, cfg promptfilter.Config) (promptfilter.Verdict, bool) {
+	if !isCodexAmbientSuggestionClassifier(text) {
+		return promptfilter.Verdict{}, false
+	}
+	cfg = promptfilter.NormalizeConfig(cfg)
+	return promptfilter.Verdict{
+		Enabled:   cfg.Enabled,
+		Mode:      cfg.Mode,
+		Action:    promptfilter.ActionAllow,
+		Score:     0,
+		Threshold: cfg.Threshold,
+		Matched: []promptfilter.Match{{
+			Name:     "internal_policy_classifier_bypass",
+			Weight:   0,
+			Category: "meta_safety",
+		}},
+		Reason:      "allowed internal Codex ambient suggestion policy classifier",
+		TextPreview: text,
+		FullText:    text,
+	}, true
+}
+
+func isCodexAmbientSuggestionClassifier(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "" || !strings.HasPrefix(trimmed, codexAmbientSuggestionClassifierPrefix) {
+		return false
+	}
+	lower := strings.ToLower(trimmed)
+	required := []string{
+		"ambient suggestion candidates",
+		"suggestion_id:",
+		"return a json object",
+		"\"exclude\"",
+		"only output the json object",
+	}
+	for _, needle := range required {
+		if !strings.Contains(lower, needle) {
+			return false
+		}
+	}
+	return true
 }
 
 func (h *Handler) reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {

@@ -9,7 +9,6 @@ import (
 	"testing"
 
 	"github.com/codex2api/auth"
-	"github.com/tidwall/gjson"
 )
 
 func TestReadSSEStream_MergesMultilineData(t *testing.T) {
@@ -538,7 +537,7 @@ func TestExecuteRequestExplicitFalseBypassesForcedWebsocket(t *testing.T) {
 	}
 }
 
-func TestExecuteRequestForcedWebsocketUsesStatelessSessionWhenMissing(t *testing.T) {
+func TestExecuteRequestForcedWebsocketFallsBackToHTTPWithoutExplicitSession(t *testing.T) {
 	previousSettings := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
 	nextSettings := previousSettings
@@ -549,52 +548,22 @@ func TestExecuteRequestForcedWebsocketUsesStatelessSessionWhenMissing(t *testing
 
 	previousWS := WebsocketExecuteFunc
 	t.Cleanup(func() { WebsocketExecuteFunc = previousWS })
-	var gotSessionIDs []string
-	var gotCacheKeys []string
-	var gotPoolKeys []string
+	wsCalled := false
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
-		gotSessionIDs = append(gotSessionIDs, sessionID)
-		gotCacheKeys = append(gotCacheKeys, gjson.GetBytes(requestBody, "prompt_cache_key").String())
-		gotPoolKeys = append(gotPoolKeys, poolRouteKey)
-		return &http.Response{
-			StatusCode: http.StatusOK,
-			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_test"}`)),
-		}, nil
+		wsCalled = true
+		return nil, errors.New("websocket should not be used for sessionless requests")
 	}
 
-	for i := 0; i < 2; i++ {
-		resp, err := ExecuteRequest(context.Background(), &auth.Account{DBID: 1, AccessToken: "token"}, []byte(`{"model":"gpt-5.4"}`), "", "", "sk-local", nil, http.Header{})
-		if err != nil {
-			t.Fatalf("ExecuteRequest() error = %v", err)
-		}
-		resp.Body.Close()
+	_, err := ExecuteRequest(context.Background(), &auth.Account{DBID: 1}, []byte(`{"model":"gpt-5.4"}`), "", "", "sk-local", nil, http.Header{})
+	if err == nil {
+		t.Fatal("ExecuteRequest() error = nil, want HTTP path missing account error")
 	}
-	for _, sessionID := range gotSessionIDs {
-		if !strings.HasPrefix(sessionID, "stateless-") {
-			t.Fatalf("sessionID = %q, want stateless-*", sessionID)
-		}
-	}
-	if gotSessionIDs[0] == gotSessionIDs[1] {
-		t.Fatalf("stateless sessionIDs should differ per request, both = %q", gotSessionIDs[0])
-	}
-	// per-api-key 模式下 prompt cache key 必须确定性：两次请求一致，且不等于一次性连接 ID。
-	if gotCacheKeys[0] == "" || gotCacheKeys[0] != gotCacheKeys[1] {
-		t.Fatalf("prompt_cache_key = %q / %q, want identical deterministic key", gotCacheKeys[0], gotCacheKeys[1])
-	}
-	if strings.HasPrefix(gotCacheKeys[0], "stateless-") {
-		t.Fatalf("prompt_cache_key = %q, must not be a stateless connection ID", gotCacheKeys[0])
-	}
-	// per-api-key 模式不拆分连接池键（cache key 本身既是上游身份也是 baseKey）。
-	if gotPoolKeys[0] != "" {
-		t.Fatalf("per-api-key mode poolRouteKey = %q, want empty", gotPoolKeys[0])
+	if wsCalled {
+		t.Fatal("WebsocketExecuteFunc was called for a sessionless request")
 	}
 }
 
-// TestExecuteRequestForcedWebsocketIsolatedMode 验证默认隔离模式：无显式会话时
-// 上游 prompt_cache_key 每请求唯一（隔离），但连接池路由键(poolRouteKey)按 API Key
-// 稳定，从而保住 8 槽池复用与抗握手限流。
-func TestExecuteRequestForcedWebsocketIsolatedMode(t *testing.T) {
+func TestExecuteRequestForcedWebsocketUsesExplicitSession(t *testing.T) {
 	previousSettings := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
 	nextSettings := previousSettings
@@ -604,11 +573,12 @@ func TestExecuteRequestForcedWebsocketIsolatedMode(t *testing.T) {
 
 	previousWS := WebsocketExecuteFunc
 	t.Cleanup(func() { WebsocketExecuteFunc = previousWS })
-	var gotCacheKeys []string
-	var gotPoolKeys []string
+	var gotSessionID string
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
-		gotCacheKeys = append(gotCacheKeys, gjson.GetBytes(requestBody, "prompt_cache_key").String())
-		gotPoolKeys = append(gotPoolKeys, poolRouteKey)
+		gotSessionID = sessionID
+		if poolRouteKey != "" {
+			t.Fatalf("explicit session poolRouteKey = %q, want empty", poolRouteKey)
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
@@ -616,27 +586,13 @@ func TestExecuteRequestForcedWebsocketIsolatedMode(t *testing.T) {
 		}, nil
 	}
 
-	for i := 0; i < 2; i++ {
-		resp, err := ExecuteRequest(context.Background(), &auth.Account{DBID: 1, AccessToken: "token"}, []byte(`{"model":"gpt-5.4"}`), "", "", "sk-local", nil, http.Header{})
-		if err != nil {
-			t.Fatalf("ExecuteRequest() error = %v", err)
-		}
-		resp.Body.Close()
+	resp, err := ExecuteRequest(context.Background(), &auth.Account{DBID: 1, AccessToken: "token"}, []byte(`{"model":"gpt-5.4"}`), "explicit-session-1", "", "sk-local", nil, http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteRequest() error = %v", err)
 	}
-	// 上游身份隔离：两次 prompt_cache_key 不同，且都非空、非 stateless 连接 ID。
-	if gotCacheKeys[0] == "" || gotCacheKeys[0] == gotCacheKeys[1] {
-		t.Fatalf("isolated prompt_cache_key = %q / %q, want distinct per request", gotCacheKeys[0], gotCacheKeys[1])
-	}
-	if strings.HasPrefix(gotCacheKeys[0], "stateless-") {
-		t.Fatalf("prompt_cache_key = %q, must not be a stateless connection ID", gotCacheKeys[0])
-	}
-	// 连接池键稳定：两次 poolRouteKey 一致且非空，按 API Key 派生（抗握手风暴）。
-	if gotPoolKeys[0] == "" || gotPoolKeys[0] != gotPoolKeys[1] {
-		t.Fatalf("isolated poolRouteKey = %q / %q, want identical stable key", gotPoolKeys[0], gotPoolKeys[1])
-	}
-	// 池键不能等于每请求唯一的上游身份键，否则槽位池失效。
-	if gotPoolKeys[0] == gotCacheKeys[0] {
-		t.Fatalf("poolRouteKey must not equal per-request upstream cache key")
+	resp.Body.Close()
+	if gotSessionID != "explicit-session-1" {
+		t.Fatalf("sessionID = %q, want explicit-session-1", gotSessionID)
 	}
 }
 

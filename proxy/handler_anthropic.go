@@ -150,7 +150,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(explicitSessionID, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -184,7 +184,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		isRelayAccount := account.IsOpenAIResponsesAPI()
-		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount
+		useWebsocket := shouldUseSessionScopedWebsocket(h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount, explicitSessionID)
 		upstreamEndpoint := "/v1/responses"
 		if isRelayAccount {
 			relayBaseURL, _ := account.OpenAIResponsesCredentials()

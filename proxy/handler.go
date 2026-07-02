@@ -1455,6 +1455,11 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
+	if probeCapture, handled := h.prepareProbeShortCircuit(c, rawBody, "/v1/responses", logModel, gjson.GetBytes(rawBody, "stream").Bool(), "responses"); handled {
+		return
+	} else if probeCapture != nil {
+		defer probeCapture.finish()
+	}
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses", model) {
 		return
 	}
@@ -1468,7 +1473,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	sessionID := ResolveSessionID(c.Request.Header, rawBody)
 	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(explicitSessionID, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -1541,7 +1546,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
-		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig
+		useWebsocket := shouldUseSessionScopedWebsocket(h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig, explicitSessionID)
 		// 生图请求强制走 HTTP：WebSocket 传输大体积图片数据会卡死（issue #220）；
 		// 自然语言生图意图也需保留 image_generation 工具（issue #288）。
 		if useWebsocket && rawResponsesBodyShouldForceHTTPForImageGeneration(rawBody) {
@@ -2358,6 +2363,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		sendImageOnlyModelError(c, model)
 		return
 	}
+	if probeCapture, handled := h.prepareProbeShortCircuit(c, rawBody, "/v1/responses/compact", logModel, false, "responses_compact"); handled {
+		return
+	} else if probeCapture != nil {
+		defer probeCapture.finish()
+	}
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses/compact", model) {
 		return
 	}
@@ -2368,8 +2378,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		return
 	}
 	sessionID := ResolveSessionID(c.Request.Header, rawBody)
+	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(explicitSessionID, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -2865,6 +2876,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+	if probeCapture, handled := h.prepareProbeShortCircuit(c, rawBody, "/v1/chat/completions", responseModel, gjson.GetBytes(rawBody, "stream").Bool(), "chat"); handled {
+		return
+	} else if probeCapture != nil {
+		defer probeCapture.finish()
+	}
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/chat/completions", model) {
 		return
 	}
@@ -2902,7 +2918,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	sessionID := ResolveSessionID(c.Request.Header, codexBody)
 	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(explicitSessionID, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -2938,7 +2954,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		isRelayAccount := account.IsOpenAIResponsesAPI()
-		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount
+		useWebsocket := shouldUseSessionScopedWebsocket(h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount, explicitSessionID)
 		// 显式生图请求强制走 HTTP：WebSocket 传输大体积图片数据会卡死（issue #220）。
 		if useWebsocket && explicitlyRequestsImageGeneration(codexBody) {
 			useWebsocket = false

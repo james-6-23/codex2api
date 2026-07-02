@@ -2326,6 +2326,29 @@ func TestSessionAffinityKeySeparatesDifferentAPIKeys(t *testing.T) {
 	}
 }
 
+func TestAccountAffinityUsesOnlyExplicitSessionID(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer sk-test")
+	body := []byte(`{}`)
+
+	if fallback := ResolveSessionID(headers, body); fallback == "" {
+		t.Fatal("ResolveSessionID should still provide an upstream fallback session")
+	}
+	explicit := ResolveExplicitSessionID(headers, body)
+	if explicit != "" {
+		t.Fatalf("explicit session = %q, want empty", explicit)
+	}
+	if got := sessionAffinityKey(explicit, 1); got != "" {
+		t.Fatalf("account affinity key from API-key fallback = %q, want empty", got)
+	}
+
+	headers.Set("Session_id", "session-1")
+	explicit = ResolveExplicitSessionID(headers, body)
+	if got := sessionAffinityKey(explicit, 1); got != "session-1::api-key:1" {
+		t.Fatalf("explicit account affinity key = %q, want session-1::api-key:1", got)
+	}
+}
+
 // TestResponsesWebSocketStripsInjectedImageTool verifies that a plain
 // conversation request — which PrepareResponsesWebSocketBody auto-injects an
 // image_generation tool into — has that tool stripped before going to the

@@ -184,7 +184,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	sessionID := ResolveSessionID(c.Request.Header, rawBody)
 	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(explicitSessionID, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -278,7 +278,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
-		useWebsocket := !forceHTTPAfterWSMessageTooBig
+		useWebsocket := shouldUseSessionScopedWebsocket(!forceHTTPAfterWSMessageTooBig, explicitSessionID)
 		// 生图请求改走 HTTP 上游（客户端仍是 WS）：WebSocket 上游传输大体积
 		// 图片数据会卡死（issue #220）；自然语言生图意图也需保留图片工具（issue #288）。
 		if useWebsocket && rawResponsesBodyShouldForceHTTPForImageGeneration(rawBody) {
@@ -734,21 +734,21 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 		return false
 	}
 	cfg := h.store.GetPromptFilterConfig()
+	text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
+	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
+		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
+		return h.inspectSemanticReviewOpenAIForWebSocket(c, conn, rawBody, endpoint, model)
+	}
 	verdict := promptfilter.Inspect(rawBody, endpoint, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
-	if verdict.Action != promptfilter.ActionBlock {
-		return false
+	if verdict.Action == promptfilter.ActionBlock {
+		_ = writeResponsesWSError(conn, promptCyberPolicyError())
+		return true
 	}
-	_ = writeResponsesWSError(conn, api.NewAPIError(
-		api.ErrorCode("prompt_blocked"),
-		"Request contains content blocked by prompt filter",
-		api.ErrorTypeInvalidRequest,
-	))
-	return true
+	return h.inspectSemanticReviewOpenAIForWebSocket(c, conn, rawBody, endpoint, model)
 }
 
 func isResponsesWebSocketUpgradeRequest(r *http.Request) bool {
