@@ -309,10 +309,16 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 		return 0, nil
 	}
 	seed = normalizeTokenCredentialSeed(seed)
-	if seed.email == "" || seed.accountID == "" {
+	// 身份键优先用工作区 ID；个人账号 JWT 可能只有 user_id，此时用它兜底，
+	// 否则 AT 轮换后按原文去重永远失配，同一账号会被重复导入。
+	identity := seed.accountID
+	if identity == "" {
+		identity = seed.userID
+	}
+	if seed.email == "" || identity == "" {
 		return 0, nil
 	}
-	id, err := h.db.FindActiveAccountByOAuthIdentity(ctx, seed.email, seed.accountID, excludeID)
+	id, err := h.db.FindActiveAccountByOAuthIdentity(ctx, seed.email, identity, excludeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -324,7 +330,7 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 
 func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string) (int64, bool, error) {
 	seed = normalizeTokenCredentialSeed(seed)
-	if seed.email == "" || seed.accountID == "" {
+	if seed.email == "" || (seed.accountID == "" && seed.userID == "") {
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), proxyURL)
 		if err != nil {
 			return 0, false, err

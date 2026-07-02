@@ -236,6 +236,55 @@ func TestFindActiveAccountByOAuthIdentity(t *testing.T) {
 	}
 }
 
+// 个人账号 JWT 可能没有工作区 account_id，只有 user_id（user-...）；此外旧版
+// wham 回填曾把 user_id 写进 account_id 字段。身份匹配必须两个键都认，
+// 否则 AT 轮换后同一账号会被重复导入。
+func TestFindActiveAccountByOAuthIdentityMatchesUserID(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// 账号 A：credentials 里存的是 user_id 键
+	idA, err := db.InsertAccountWithCredentials(ctx, "uid-key", map[string]interface{}{
+		"access_token": "at-uid-key",
+		"email":        "solo@example.com",
+		"user_id":      "user-abc123",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials A 返回错误: %v", err)
+	}
+	got, err := db.FindActiveAccountByOAuthIdentity(ctx, "solo@example.com", "user-abc123")
+	if err != nil {
+		t.Fatalf("match by user_id key 返回错误: %v", err)
+	}
+	if got != idA {
+		t.Fatalf("matched id = %d, want %d", got, idA)
+	}
+
+	// 账号 B：旧版 wham 回填把 user_id 污染进了 account_id 字段
+	idB, err := db.InsertAccountWithCredentials(ctx, "polluted", map[string]interface{}{
+		"access_token": "at-polluted",
+		"email":        "legacy@example.com",
+		"account_id":   "user-def456", // 实为 user_id
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials B 返回错误: %v", err)
+	}
+	got, err = db.FindActiveAccountByOAuthIdentity(ctx, "legacy@example.com", "user-def456")
+	if err != nil {
+		t.Fatalf("match polluted account_id 返回错误: %v", err)
+	}
+	if got != idB {
+		t.Fatalf("matched id = %d, want %d", got, idB)
+	}
+}
+
 func TestSQLiteDataMigrationDedupesOAuthIdentityOnce(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	ctx := context.Background()
