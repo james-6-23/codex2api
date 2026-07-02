@@ -223,3 +223,41 @@ func usageEffectiveModelForMapping(originalModel string, effectiveModel string, 
 	}
 	return effectiveModel
 }
+
+// compactOpenAIModelSuffix 是 newapi 等聚合网关为 /responses/compact 请求追加的模型名
+// 后缀。例如 newapi 把 gpt-5.4 路由到 compact 端点时会发送 gpt-5.4-openai-compact，
+// 而真实 Codex 上游只认识基础模型名 gpt-5.4。
+const compactOpenAIModelSuffix = "-openai-compact"
+
+// stripCompactModelSuffix 去除 compact 模型名上的 -openai-compact 后缀，返回去除后的
+// 模型名与是否发生改写。仅供 /v1/responses/compact 使用：让 newapi 侧渠道仍能以
+// gpt-5.4-openai-compact 命名，而 codex2api 内部按 gpt-5.4 校验与转发上游。
+func stripCompactModelSuffix(model string) (string, bool) {
+	trimmed := strings.TrimSpace(model)
+	if trimmed == "" {
+		return model, false
+	}
+	if !strings.HasSuffix(strings.ToLower(trimmed), compactOpenAIModelSuffix) {
+		return model, false
+	}
+	stripped := strings.TrimSpace(trimmed[:len(trimmed)-len(compactOpenAIModelSuffix)])
+	if stripped == "" {
+		return model, false
+	}
+	return stripped, true
+}
+
+// stripCompactModelSuffixFromBody 若请求体的 model 带 -openai-compact 后缀则去除，
+// 返回改写后的 body、去后缀的模型名与是否改写。JSON 无效或无 model 字段时原样返回。
+func stripCompactModelSuffixFromBody(rawBody []byte) ([]byte, string, bool) {
+	model := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
+	stripped, ok := stripCompactModelSuffix(model)
+	if !ok {
+		return rawBody, model, false
+	}
+	updated, err := sjson.SetBytes(rawBody, "model", stripped)
+	if err != nil {
+		return rawBody, model, false
+	}
+	return updated, stripped, true
+}

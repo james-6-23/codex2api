@@ -672,3 +672,82 @@ func TestUpdateOAuthAccountCodeUpdatesExistingAccountInPlace(t *testing.T) {
 		t.Fatal("usage probe was not triggered after OAuth account update")
 	}
 }
+
+// TestUpsertOAuthIdentityAccountClearsBanOnReimport 验证：当一个账号此前被封禁
+// （401 unauthorized）后，重新导入同一身份的有效凭证会清除封禁/错误状态，
+// 使账号脱离 banned 并重新可用（具体可用性仍交由后续 probe 判定）。
+func TestUpsertOAuthIdentityAccountClearsBanOnReimport(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, cache.NewMemory(1), nil)
+	handler := &Handler{db: db, store: store}
+
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "banned", map[string]interface{}{
+		"refresh_token": "old-refresh",
+		"access_token":  "old-access",
+		"email":         "banned@example.com",
+		"account_id":    "acc-banned",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	if err := store.LoadAccountByID(ctx, id); err != nil {
+		t.Fatalf("LoadAccountByID: %v", err)
+	}
+	acc := store.FindByID(id)
+	if acc == nil {
+		t.Fatalf("runtime account %d not found", id)
+	}
+	// 模拟上游 401 封禁
+	store.MarkCooldownWithError(acc, time.Hour, "unauthorized", "401 unauthorized")
+	acc.Mu().RLock()
+	bannedTier := acc.HealthTier
+	acc.Mu().RUnlock()
+	if bannedTier != auth.HealthTierBanned {
+		t.Fatalf("precondition: HealthTier = %q, want banned", bannedTier)
+	}
+
+	// 重新导入同一身份的有效凭证（新的 access token）
+	seed := tokenCredentialSeed{
+		accessToken: "fresh-access",
+		email:       "banned@example.com",
+		accountID:   "acc-banned",
+	}
+	newID, updated, err := handler.upsertOAuthIdentityAccount(ctx, "banned", "", seed, "manual_at")
+	if err != nil {
+		t.Fatalf("upsertOAuthIdentityAccount: %v", err)
+	}
+	if newID != id {
+		t.Fatalf("upsert created new account %d, want update of %d (dedup failed)", newID, id)
+	}
+	if !updated {
+		t.Fatal("upsert reported insert, want update of existing banned account")
+	}
+
+	// DB 错误/封禁态应已被清除
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if row.Status == "error" {
+		t.Fatalf("DB status = %q, want cleared", row.Status)
+	}
+	if strings.EqualFold(strings.TrimSpace(row.CooldownReason), "unauthorized") {
+		t.Fatalf("DB cooldown_reason = %q, want cleared", row.CooldownReason)
+	}
+
+	// 运行时账号应脱离 banned
+	acc = store.FindByID(id)
+	if acc == nil {
+		t.Fatalf("runtime account %d missing after reimport", id)
+	}
+	acc.Mu().RLock()
+	tier := acc.HealthTier
+	acc.Mu().RUnlock()
+	if tier == auth.HealthTierBanned {
+		t.Fatalf("runtime HealthTier = %q, want not banned after reimport", tier)
+	}
+}

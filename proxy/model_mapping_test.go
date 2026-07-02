@@ -183,3 +183,62 @@ func TestApplyConfiguredModelMappingToBodyIgnoresClaudeMappingSetting(t *testing
 		t.Fatalf("body model = %q, want gpt-5.2; body=%s", got, body)
 	}
 }
+
+func TestStripCompactModelSuffix(t *testing.T) {
+	tests := []struct {
+		name      string
+		model     string
+		want      string
+		wantMatch bool
+	}{
+		{name: "gpt-5.4 compact", model: "gpt-5.4-openai-compact", want: "gpt-5.4", wantMatch: true},
+		{name: "gpt-5.5 compact", model: "gpt-5.5-openai-compact", want: "gpt-5.5", wantMatch: true},
+		{name: "case insensitive suffix", model: "gpt-5.4-OpenAI-Compact", want: "gpt-5.4", wantMatch: true},
+		{name: "trims whitespace", model: "  gpt-5.4-openai-compact  ", want: "gpt-5.4", wantMatch: true},
+		{name: "no suffix untouched", model: "gpt-5.4", want: "gpt-5.4", wantMatch: false},
+		{name: "codex base untouched", model: "gpt-5.3-codex", want: "gpt-5.3-codex", wantMatch: false},
+		{name: "suffix only stays", model: "-openai-compact", want: "-openai-compact", wantMatch: false},
+		{name: "empty stays", model: "", want: "", wantMatch: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, matched := stripCompactModelSuffix(tt.model)
+			if matched != tt.wantMatch {
+				t.Fatalf("stripCompactModelSuffix(%q) matched = %v, want %v", tt.model, matched, tt.wantMatch)
+			}
+			if got != tt.want {
+				t.Fatalf("stripCompactModelSuffix(%q) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestStripCompactModelSuffixFromBody(t *testing.T) {
+	body, model, matched := stripCompactModelSuffixFromBody([]byte(`{"model":"gpt-5.4-openai-compact","input":"hi"}`))
+	if !matched {
+		t.Fatalf("expected compact suffix to be stripped")
+	}
+	if model != "gpt-5.4" {
+		t.Fatalf("stripped model = %q, want gpt-5.4", model)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.4" {
+		t.Fatalf("body model = %q, want gpt-5.4; body=%s", got, body)
+	}
+	// input 等其它字段保持不变
+	if got := gjson.GetBytes(body, "input").String(); got != "hi" {
+		t.Fatalf("input should be preserved, got %q", got)
+	}
+
+	// 无后缀请求原样返回，不改写。
+	orig := []byte(`{"model":"gpt-5.4","input":"hi"}`)
+	body2, model2, matched2 := stripCompactModelSuffixFromBody(orig)
+	if matched2 {
+		t.Fatalf("plain model should not be rewritten")
+	}
+	if model2 != "gpt-5.4" {
+		t.Fatalf("model = %q, want gpt-5.4", model2)
+	}
+	if string(body2) != string(orig) {
+		t.Fatalf("body should be untouched, got %s", body2)
+	}
+}

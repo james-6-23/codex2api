@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultDeviceProfileUserAgent      = latestCodexCLIUserAgentPrefix
+	defaultDeviceProfileUserAgent      = defaultCodexCLIUserAgent
 	defaultDeviceProfilePackageVersion = latestCodexCLIVersion
 	defaultDeviceProfileRuntimeVersion = latestCodexCLIVersion
 	defaultDeviceProfileOS             = "MacOS"
@@ -26,8 +26,8 @@ const (
 
 var (
 	codexClientVersionPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(?:^|[\s(;])(?:codex_cli_rs|codex_vscode|codex_app|codex_chatgpt_desktop|codex_atlas|codex_exec|codex_sdk_ts|opencode)/v?(\d+)\.(\d+)\.(\d+)(?:$|[\s;)])`),
-		regexp.MustCompile(`(?i)(?:^|[\s(;])codex\s+v?(\d+)\.(\d+)\.(\d+)(?:$|[\s;)])`),
+		regexp.MustCompile(`(?i)(?:^|[\s(;])(?:codex-tui|codex_cli_rs|codex_vscode|codex_app|codex_chatgpt_desktop|codex_atlas|codex_exec|codex_sdk_ts|opencode)/v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)(?:$|[\s;)])`),
+		regexp.MustCompile(`(?i)(?:^|[\s(;])codex\s+v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)(?:$|[\s;)])`),
 	}
 
 	deviceProfileCache            = make(map[string]deviceProfileCacheEntry)
@@ -180,30 +180,44 @@ func parseCodexCLIVersion(userAgent string) (cliVersion, bool) {
 }
 
 func parseCodexClientVersion(userAgent string) (cliVersion, bool) {
+	version, _, ok := parseCodexClientVersionDetails(userAgent)
+	return version, ok
+}
+
+func parseCodexClientVersionDetails(userAgent string) (cliVersion, string, bool) {
 	userAgent = strings.TrimSpace(userAgent)
 	if userAgent == "" {
-		return cliVersion{}, false
+		return cliVersion{}, "", false
 	}
 	for _, pattern := range codexClientVersionPatterns {
 		matches := pattern.FindStringSubmatch(userAgent)
-		if len(matches) != 4 {
+		if len(matches) != 2 {
 			continue
 		}
-		major, err := strconv.Atoi(matches[1])
-		if err != nil {
-			return cliVersion{}, false
+		rawVersion := strings.TrimSpace(matches[1])
+		coreVersion := rawVersion
+		if idx := strings.IndexByte(coreVersion, '-'); idx >= 0 {
+			coreVersion = coreVersion[:idx]
 		}
-		minor, err := strconv.Atoi(matches[2])
-		if err != nil {
-			return cliVersion{}, false
+		parts := strings.Split(coreVersion, ".")
+		if len(parts) != 3 {
+			return cliVersion{}, "", false
 		}
-		patch, err := strconv.Atoi(matches[3])
+		major, err := strconv.Atoi(parts[0])
 		if err != nil {
-			return cliVersion{}, false
+			return cliVersion{}, "", false
 		}
-		return cliVersion{major: major, minor: minor, patch: patch}, true
+		minor, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return cliVersion{}, "", false
+		}
+		patch, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return cliVersion{}, "", false
+		}
+		return cliVersion{major: major, minor: minor, patch: patch}, rawVersion, true
 	}
-	return cliVersion{}, false
+	return cliVersion{}, "", false
 }
 
 func shouldUpgradeDeviceProfile(candidate, current deviceProfile) bool {
@@ -266,6 +280,16 @@ func firstNonEmptyHeader(headers http.Header, name, fallback string) string {
 	}
 	if value := strings.TrimSpace(headers.Get(name)); value != "" {
 		return value
+	}
+	for key, values := range headers {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
 	}
 	return fallback
 }

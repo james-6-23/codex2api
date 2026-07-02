@@ -559,20 +559,21 @@ func responsesBodyRequestsImageGeneration(body []byte) bool {
 	return false
 }
 
-// explicitlyRequestsImageGeneration 判断请求是否显式要求图片生成：image-only
-// 模型、tool_choice=image_generation、顶层图片选项字段，或 tools[] 中显式声明的
-// image_generation 工具。WebSocket 上游传输大体积图片数据会卡死，这类请求必须
-// 改走 HTTP（issue #220）。
-func explicitlyRequestsImageGeneration(body []byte) bool {
-	return responsesBodyRequestsImageGeneration(body) || responsesBodyHasImageGenerationTool(body)
-}
-
-// rawResponsesBodyShouldForceHTTPForImageGeneration must receive the downstream
-// raw Responses body before PrepareResponsesBody injects the default
-// image_generation tool. Passing a prepared Codex body would misclassify plain
-// chat as an image request.
+// rawResponsesBodyShouldForceHTTPForImageGeneration 判断请求是否"真的要生图"，
+// 从而必须改走 HTTP 上游——WebSocket 上游传输大体积图片数据会卡死（issue #220）。
+//
+// 只在"真实生图意图"时强制 HTTP：image-only 模型、tool_choice=image_generation、
+// 顶层图片选项字段（responsesBodyRequestsImageGeneration），或 prompt 中的自然语言
+// 生图意图（issue #288）。它刻意**不**因 tools[] 里单纯存在 image_generation 工具而
+// 触发：客户端把生图工具无差别注入到每个请求时（issue #304），否则会把普通请求也全部
+// 打到 HTTP、丢掉 WebSocket。这类"注入但未使用"的工具改由 WS 路径上的
+// stripResponsesImageGenerationTool 剥离。
+//
+// /v1/responses 路径须传入下游 raw body（PrepareResponsesBody 注入默认工具之前）；
+// chat 路径传入翻译后的 Codex body（TranslateRequest 不会自动注入图片工具）。两者都
+// 不应含自动注入的 tool_choice=image_generation，否则普通请求会被误判。
 func rawResponsesBodyShouldForceHTTPForImageGeneration(body []byte) bool {
-	return explicitlyRequestsImageGeneration(body) || responsesBodyHasNaturalImageGenerationIntent(body)
+	return responsesBodyRequestsImageGeneration(body) || responsesBodyHasNaturalImageGenerationIntent(body)
 }
 
 func responsesBodyHasNaturalImageGenerationIntent(body []byte) bool {
@@ -781,10 +782,11 @@ var imageIntentPositivePhrases = []string{
 }
 
 // stripResponsesImageGenerationTool 移除请求体中的 image_generation 工具及指向它的
-// tool_choice。仅在 WebSocket 上游模式下、且请求未显式要求生图时使用：此时 body 中
-// 的 image_generation 工具一定是 PrepareResponsesBody 自动注入的，移除后可防止模型
-// 自主调用图片工具产生大体积数据导致 WS 流卡死（issue #220）。显式生图请求已被
-// explicitlyRequestsImageGeneration 判定为强制 HTTP，不会走到这里。
+// tool_choice。仅在 WebSocket 上游模式下使用：此时 body 中的 image_generation 工具
+// 要么是 PrepareResponsesBody 自动注入的，要么是客户端无差别注入的（issue #304）——
+// 两者都未表达真实生图意图（真实意图已被 rawResponsesBodyShouldForceHTTPForImageGeneration
+// 判定为强制 HTTP，不会走到这里）。移除后可防止模型自主调用图片工具产生大体积数据导致
+// WS 流卡死（issue #220）。
 func stripResponsesImageGenerationTool(body []byte) []byte {
 	tools := gjson.GetBytes(body, "tools")
 	if tools.Exists() && tools.IsArray() {

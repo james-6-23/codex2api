@@ -86,6 +86,10 @@ export interface AccountRow {
   auto_pause_7d_threshold?: number | null
   auto_pause_5h_disabled?: boolean
   auto_pause_7d_disabled?: boolean
+  dispatch_count_limit?: number | null
+  dispatch_count_used?: number
+  dispatch_count_reset_at?: ISODateString
+  dispatch_count_limited?: boolean
   usage_5h_detail?: AccountUsageWindow
   usage_7d_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
@@ -172,12 +176,14 @@ export interface AddAccountRequest {
   refresh_token?: string
   session_token?: string
   proxy_url: string
+  allow_duplicate?: boolean
 }
 
 export interface AddATAccountRequest {
   name?: string
   access_token: string
   proxy_url: string
+  allow_duplicate?: boolean
 }
 
 export interface AddOpenAIResponsesAccountRequest {
@@ -220,6 +226,7 @@ export interface UpdateAccountSchedulerRequest {
   auto_pause_7d_threshold?: number | null
   auto_pause_5h_disabled?: boolean
   auto_pause_7d_disabled?: boolean
+  dispatch_count_limit?: number | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -513,108 +520,6 @@ export interface RuntimeStatusResponse {
   checks: RuntimeCheck[]
 }
 
-export interface ResetRadarResponse {
-  source_name: string
-  source_url: string
-  rss_url: string
-  current_status_url: string
-  fetched_at: ISODateString
-  cached: boolean
-  schema_version: string
-  status: string
-  window_open: boolean
-  message: string
-  recommended_action: string
-  checked_at: ISODateString
-  monitored_at: ISODateString
-  current_window: {
-    state: string
-    message: string
-    opened_at?: ISODateString | null
-    source?: string | null
-  }
-  last_window: {
-    id: string
-    title: string
-    status: string
-    opened_at: ISODateString
-    closed_at: ISODateString
-    window_minutes: number
-    window_human: string
-    scope: string
-    summary: string
-    sources?: Array<{
-      type: string
-      url: string
-    }>
-  }
-  metrics: {
-    last_3_months_window_minutes: number
-    last_3_months_window_human: string
-  }
-  prediction: {
-    level: string
-    probability_24h: number
-    probability_48h: number
-    expected_window: string
-    reasoning_summary: string
-    should_notify: boolean
-    updated_at: ISODateString
-    source: string
-    signal_summary_24h: {
-      total: number
-      counts: {
-        openai_status: number
-        official_x: number
-        community_x: number
-        x_reply: number
-        market_x: number
-      }
-      top_signals?: Array<{
-        source: string
-        score: number
-        text: string
-        url: string
-      }>
-    }
-  }
-  feed: {
-    title: string
-    description: string
-    last_build_date: string
-    ttl: number
-    error?: string
-    items: Array<{
-      title: string
-      link: string
-      guid: string
-      pub_date: string
-      published_at: ISODateString
-      summary: string
-      event: 'open' | 'close' | 'info' | string
-    }>
-  }
-  hook: {
-    signal_detected: boolean
-    signal_id?: string
-    signal_type?: 'close' | string
-    triggered: boolean
-    running: boolean
-    last_triggered_signal_id?: string
-    last_triggered_at?: ISODateString
-    last_completed_at?: ISODateString
-    message: string
-    last_result?: {
-      total: number
-      success: number
-      failed: number
-      banned: number
-      rate_limited: number
-      error?: string
-    } | null
-  }
-}
-
 export interface SystemSettings {
   site_name: string
   site_logo: string
@@ -679,12 +584,14 @@ export interface SystemSettings {
   prompt_filter_review_enabled: boolean
   prompt_filter_review_api_key?: string
   prompt_filter_review_api_key_configured?: boolean
+  prompt_filter_review_api_key_count?: number
   prompt_filter_review_base_url: string
   prompt_filter_review_model: string
   prompt_filter_review_timeout_seconds: number
   prompt_filter_review_fail_closed: boolean
   client_compat_mode: 'preserve' | 'auto' | 'force' | string
   codex_min_cli_version: string
+  codex_user_agent_config: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
   usage_log_batch_size: number
   usage_log_flush_interval_seconds: number

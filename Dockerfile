@@ -23,6 +23,9 @@ FROM --platform=$BUILDPLATFORM golang:1.26.4-alpine AS go-builder
 
 ARG TARGETARCH
 
+# 国内构建走 goproxy.cn，避免直连 proxy.golang.org 断流（unexpected EOF）
+ENV GOPROXY=https://goproxy.cn,direct
+
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \

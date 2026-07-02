@@ -59,8 +59,8 @@ func TestQueryWhamUsage_ParsesPlusAccountResponse(t *testing.T) {
 		if r.Header.Get("Originator") != Originator {
 			t.Errorf("Originator = %q, want %q", r.Header.Get("Originator"), Originator)
 		}
-		if !strings.HasPrefix(r.Header.Get("User-Agent"), "codex_cli_rs/") {
-			t.Errorf("User-Agent = %q, want codex_cli_rs prefix", r.Header.Get("User-Agent"))
+		if !strings.HasPrefix(r.Header.Get("User-Agent"), "codex-tui/") {
+			t.Errorf("User-Agent = %q, want codex-tui prefix", r.Header.Get("User-Agent"))
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(body))

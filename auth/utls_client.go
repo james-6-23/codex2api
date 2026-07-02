@@ -16,6 +16,8 @@ import (
 	utls "github.com/refraction-networking/utls"
 	"golang.org/x/net/http2"
 	xproxy "golang.org/x/net/proxy"
+
+	"github.com/codex2api/security"
 )
 
 // utlsAuthRoundTripper 使用 Chrome TLS 指纹的 http.RoundTripper，
@@ -157,7 +159,7 @@ func (t *utlsAuthRoundTripper) CloseIdleConnections() {
 // ---- proxy dialer helpers (auth 包内独立实现，避免循环依赖) ----
 
 func buildAuthProxyDialer(proxyURL string) (xproxy.Dialer, error) {
-	u, err := url.Parse(proxyURL)
+	u, err := security.ParseProxyURL(proxyURL)
 	if err != nil {
 		return nil, fmt.Errorf("解析代理 URL 失败: %w", err)
 	}

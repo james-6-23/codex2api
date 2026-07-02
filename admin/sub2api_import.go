@@ -178,7 +178,7 @@ func (h *Handler) ImportFromSub2API(c *gin.Context) {
 		return
 	}
 
-	h.importAccountsCommon(c, tokens, "")
+	h.importAccountsCommon(c, tokens, "", false)
 }
 
 // sub2apiAccountInternal 后端聚合的中间结构，包含 credentials + 状态。

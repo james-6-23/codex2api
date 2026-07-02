@@ -30,12 +30,20 @@ func normalizePlanType(plan string) string {
 	return NormalizePlanType(plan)
 }
 
+// isPremium5hPlan reports whether the plan carries a rolling 5h usage window
+// (premium 5h rate-limit semantics). Free-tier plans only have the 7d window.
+// Education (k12/edu) and other paid workspace plans do have the 5h window —
+// excluding them made 429'd k12 accounts show as available and let the wham
+// usage probe clear their cooldown while still limited (issue #306/#309).
+// The plan gate errs broad on purpose: MarkPremium5hRateLimited and
+// premium5hRateLimitedLocked additionally require an actually observed 5h
+// window at 100%, so a plan without a real 5h window can never get stuck.
 func isPremium5hPlan(plan string) bool {
 	switch normalizePlanType(plan) {
-	case "plus", "pro", "team":
+	case "plus", "pro", "team", "k12", "edu", "education", "go":
 		return true
 	default:
-		return false
+		return IsPlusOrHigherPlan(plan)
 	}
 }
 
@@ -48,7 +56,7 @@ func IsPlusOrHigherPlan(plan string) bool {
 		return false
 	}
 	switch normalized {
-	case "plus", "pro", "team", "teamplus", "enterprise", "business", "edu", "education":
+	case "plus", "pro", "team", "teamplus", "enterprise", "business", "edu", "education", "k12", "go":
 		return true
 	default:
 		return strings.Contains(normalized, "plus") ||

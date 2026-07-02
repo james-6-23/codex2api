@@ -160,7 +160,7 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", latestCodexCLIUserAgentPrefix)
+	req.Header.Set("User-Agent", defaultCodexCLIUserAgent)
 	req.Header.Set("Originator", Originator)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
@@ -257,7 +257,7 @@ func consumeResetCreditWithURL(ctx context.Context, account *auth.Account, proxy
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", latestCodexCLIUserAgentPrefix)
+	req.Header.Set("User-Agent", defaultCodexCLIUserAgent)
 	req.Header.Set("Originator", Originator)
 	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)

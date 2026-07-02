@@ -302,6 +302,36 @@ func TestNeedsUsageProbeRequires5hSnapshotWhen5hAutoPauseEnabled(t *testing.T) {
 	}
 }
 
+// TestNeedsUsageProbeRefreshesStale5hAfterWindowReset 验证 Bug B 修复：
+// 5h 窗口的重置时间已过、但快照仍是重置前的高用量时，应触发一次 wham 刷新，
+// 让用量进度条跟随官方窗口重置而恢复，而不是一直停在旧值（如 100%）。
+func TestNeedsUsageProbeRefreshesStale5hAfterWindowReset(t *testing.T) {
+	now := time.Now()
+	acc := &Account{
+		AccessToken:         "token",
+		Status:              StatusReady,
+		UsagePercent7d:      12,
+		UsagePercent7dValid: true,
+		UsageUpdatedAt:      now, // 7d 快照新鲜，隔离 7d 路径
+		// 5h：窗口重置时间已过，但快照仍是重置前采集的 100%
+		UsagePercent5h:      100,
+		UsagePercent5hValid: true,
+		Reset5hAt:           now.Add(-1 * time.Minute),
+		UsageUpdatedAt5h:    now.Add(-3 * time.Hour),
+	}
+	acc.MarkResetCreditsProbed(now) // 隔离 reset-credits 过期影响，专测窗口重置路径
+
+	if !acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("NeedsUsageProbe() = false, want true: 5h window reset passed but snapshot is stale")
+	}
+
+	// 刷新后（快照刚更新、重置时间在未来）：不应再反复触发探针。
+	acc.SetUsageSnapshot5hAt(8, now.Add(5*time.Hour), now)
+	if acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("NeedsUsageProbe() = true, want false after 5h snapshot refreshed")
+	}
+}
+
 func TestPersistUsageSnapshotKeeps5hProbeRequiredWhen5hSnapshotMissing(t *testing.T) {
 	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	acc := &Account{

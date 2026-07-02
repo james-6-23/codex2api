@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -32,10 +31,10 @@ const (
 
 func shouldSendWebsocketUserAgent() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_WS_SEND_USER_AGENT"))) {
-	case "1", "true", "yes", "y", "on":
-		return true
-	default:
+	case "0", "false", "no", "n", "off":
 		return false
+	default:
+		return true
 	}
 }
 
@@ -112,7 +111,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders)
+	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders)
 
 	// Resin 反代：注入账号身份头
 	if proxy.IsResinEnabled() {
@@ -224,7 +223,7 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 }
 
 // prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
+func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -233,28 +232,16 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, ap
 	// Beta header 启用 WebSocket 响应 API
 	headers.Set("OpenAI-Beta", responsesWebsocketBetaHeader)
 
+	usedGeneratedHeaders := false
 	if shouldSendWebsocketUserAgent() {
-		account := &auth.Account{}
-		if accountID != "" {
-			account.AccountID = accountID
-			if id, err := strconv.ParseInt(accountID, 10, 64); err == nil {
-				account.DBID = id
-			}
+		if account == nil {
+			account = &auth.Account{AccountID: accountID}
 		}
-		if proxy.IsDeviceProfileStabilizationEnabled(deviceCfg) {
-			profile := proxy.ResolveDeviceProfile(account, apiKey, ginHeaders, deviceCfg)
-			headers.Set("User-Agent", profile.UserAgent)
-			if version := strings.TrimSpace(profile.PackageVersion); version != "" {
-				headers.Set("Version", version)
-			}
-		} else if userAgent := strings.TrimSpace(ginHeaders.Get("User-Agent")); proxy.IsCodexOfficialClientByHeaders(userAgent, ginHeaders.Get("Originator")) && userAgent != "" {
-			headers.Set("User-Agent", userAgent)
-			if version := strings.TrimSpace(ginHeaders.Get("Version")); version != "" {
-				headers.Set("Version", version)
-			}
-		} else {
-			headers.Set("User-Agent", proxy.MinimalCodexCLIUserAgentForHeaders())
-			headers.Set("Version", proxy.LatestCodexCLIVersionForHeaders())
+		var userAgent, version string
+		userAgent, version, usedGeneratedHeaders = proxy.ResolveCodexOutboundClientHeadersWithDecision(account, apiKey, deviceCfg, ginHeaders)
+		headers.Set("User-Agent", userAgent)
+		if version != "" {
+			headers.Set("Version", version)
 		}
 	}
 	if betaFeatures := strings.TrimSpace(ginHeaders.Get("X-Codex-Beta-Features")); betaFeatures != "" {
@@ -264,7 +251,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken, accountID, sessionID, ap
 	}
 
 	// Originator
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); originator != "" && proxy.IsCodexOfficialClientByHeaders("", originator) {
+	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); !usedGeneratedHeaders && originator != "" && proxy.IsCodexOfficialClientByHeaders("", originator) {
 		headers.Set("Originator", originator)
 	} else {
 		headers.Set("Originator", proxy.Originator)
@@ -305,10 +292,16 @@ type WsResponse struct {
 	manager     *Manager
 	readErrChan chan error
 	closed      bool
-	// connBroken 标记读流因上游 WS 异常(非正常关闭)而终止；Close() 据此销毁坏连接
-	// 而非归还连接池复用。受 mu 保护。
+	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
+	// Close() 据此销毁坏连接而非归还连接池复用。受 mu 保护。
 	connBroken bool
-	mu         sync.Mutex
+	// streamCompleted 标记读流已消费到明确的终止边界(response.completed /
+	// response.failed / 上游 error 帧)。Close() 只在此标记为 true 且未标记
+	// connBroken 时才归还连接复用；其余情况(下游断开、ctx 取消、上游关闭、
+	// 握手失败后未读流等)上游可能仍在该连接上推送残留帧，归还复用会把上一个
+	// 请求的响应串给下一个用户(issue #308)，必须销毁。受 mu 保护。
+	streamCompleted bool
+	mu              sync.Mutex
 }
 
 // ReadStream 读取 SSE 流
@@ -347,6 +340,9 @@ func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
 		// 解析并处理消息
 		if err := r.handleMessage(payload, callback); err != nil {
 			if err == io.EOF {
+				// 到达终止边界(完成/失败/错误帧)。若中途下游写入失败已标记
+				// connBroken，Close() 仍会销毁连接。
+				r.markStreamCompleted()
 				return nil
 			}
 			return err
@@ -370,6 +366,10 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 
 	// 调用回调
 	if !callback(payload) {
+		// 下游写入失败(broken pipe / 客户端断开)：响应流在非终止边界被截断，
+		// 上游仍会在这条连接上继续推送本响应的剩余帧。连接必须销毁，
+		// 归还池中复用会把残留帧串给下一个请求(issue #308)。
+		r.markConnBroken()
 		return io.EOF
 	}
 
@@ -432,10 +432,17 @@ func normalizeCompletionEvent(payload []byte) []byte {
 	return payload
 }
 
-// markConnBroken 标记底层连接因上游 WS 异常而不可复用（幂等，受 mu 保护）。
+// markConnBroken 标记底层连接因上游 WS 异常或下游写入失败而不可复用（幂等，受 mu 保护）。
 func (r *WsResponse) markConnBroken() {
 	r.mu.Lock()
 	r.connBroken = true
+	r.mu.Unlock()
+}
+
+// markStreamCompleted 标记读流已消费到明确的终止边界（幂等，受 mu 保护）。
+func (r *WsResponse) markStreamCompleted() {
+	r.mu.Lock()
+	r.streamCompleted = true
 	r.mu.Unlock()
 }
 
@@ -455,15 +462,17 @@ func (r *WsResponse) Close() error {
 		r.conn.session.RemovePendingRequest(r.pendingReq.RequestID)
 	}
 
-	// 根据读流是否异常终止决定连接去向：
-	//   - 正常完成：归还连接池继续复用。
-	//   - 上游 WS 异常(close 1006/1009/1011、broken pipe 等)：销毁坏连接并移出连接池，
-	//     否则坏连接会被误判为可复用，导致后续请求首字变慢/断流，且底层 fd 滞留 CLOSE_WAIT。
+	// 根据读流的结束方式决定连接去向：
+	//   - 读到终止边界(completed/failed/error 帧)且无异常：归还连接池继续复用。
+	//   - 其余任何情况一律销毁并移出连接池：
+	//     * 上游 WS 异常(close 1006/1009/1011、read error) → 坏连接复用会断流且 fd 滞留 CLOSE_WAIT；
+	//     * 下游写入失败 / ctx 取消 / 上游正常关闭 / 握手失败后未读流 → 流没消费到边界，
+	//       上游可能仍在推送残留帧，复用会串会话(issue #308)。
 	if r.conn != nil {
-		if r.connBroken {
-			r.manager.DiscardConnection(r.conn)
-		} else {
+		if !r.connBroken && r.streamCompleted {
 			r.manager.ReleaseConnection(r.conn)
+		} else {
+			r.manager.DiscardConnection(r.conn)
 		}
 	}
 
@@ -569,8 +578,10 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 	go func() {
 		select {
 		case <-ctx.Done():
-			_ = wsResp.Close()
+			// 先关 pipe 再关 WS 响应：pipe 以第一个错误为准，保证下游读到的是
+			// cancellation 而不是随后销毁连接引发的 read error。
 			_ = pw.CloseWithError(ctx.Err())
+			_ = wsResp.Close()
 		case <-done:
 		}
 	}()

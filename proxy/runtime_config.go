@@ -28,7 +28,7 @@ const (
 	//   per-api-key —— 无显式会话的请求按下游 API Key 共享上游身份（恢复 v2 旧行为，
 	//                  保留隐式 prompt cache 命中）。
 	// 用环境变量 CODEX_REQUEST_ISOLATION_MODE 覆盖默认值。
-	RequestIsolationModeIsolated = "isolated"
+	RequestIsolationModeIsolated  = "isolated"
 	RequestIsolationModePerAPIKey = "per-api-key"
 
 	defaultClientCompatMode      = ClientCompatModePreserve
@@ -50,6 +50,7 @@ const (
 type RuntimeSettings struct {
 	ClientCompatMode      string
 	CodexMinCLIVersion    string
+	CodexUserAgentConfig  string
 	StreamFlushPolicy     string
 	StreamFlushIntervalMS int
 	FirstTokenMode        string
@@ -79,6 +80,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
 		ClientCompatMode:      defaultClientCompatMode,
 		CodexMinCLIVersion:    defaultCodexMinCLIVersion,
+		CodexUserAgentConfig:  DefaultCodexUserAgentConfigJSON(),
 		StreamFlushPolicy:     defaultStreamFlushPolicy,
 		StreamFlushIntervalMS: defaultStreamFlushIntervalMS,
 		FirstTokenMode:        defaultFirstTokenMode,
@@ -166,6 +168,11 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	} else {
 		settings.CodexMinCLIVersion = strings.TrimSpace(settings.CodexMinCLIVersion)
 	}
+	if normalized, err := NormalizeCodexUserAgentConfigJSON(settings.CodexUserAgentConfig); err == nil {
+		settings.CodexUserAgentConfig = normalized
+	} else {
+		settings.CodexUserAgentConfig = defaults.CodexUserAgentConfig
+	}
 	if settings.StreamFlushIntervalMS < minStreamFlushIntervalMS {
 		settings.StreamFlushIntervalMS = defaults.StreamFlushIntervalMS
 	}
@@ -192,6 +199,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 	if settings != nil {
 		next.ClientCompatMode = settings.ClientCompatMode
 		next.CodexMinCLIVersion = settings.CodexMinCLIVersion
+		next.CodexUserAgentConfig = settings.CodexUserAgentConfig
 		next.StreamFlushPolicy = settings.StreamFlushPolicy
 		next.StreamFlushIntervalMS = settings.StreamFlushIntervalMS
 		next.FirstTokenMode = settings.FirstTokenMode

@@ -373,7 +373,7 @@ func TestImportAccountsJSONReturnsExistingNoTokenMessageForUnsupportedJSON(t *te
 	ctx.Request = req
 
 	handler := &Handler{}
-	handler.importAccountsJSON(ctx, "")
+	handler.importAccountsJSON(ctx, "", false)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -397,7 +397,7 @@ func TestImportAccountsJSONRejectsInvalidJSONFile(t *testing.T) {
 	ctx.Request = req
 
 	handler := &Handler{}
-	handler.importAccountsJSON(ctx, "")
+	handler.importAccountsJSON(ctx, "", false)
 
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
@@ -432,7 +432,7 @@ func TestImportAccountsCommonDoesNotCollapseConflictingChatGPTAccountID(t *testi
 	handler.importAccountsCommon(ctx, []importToken{
 		{name: "sub2api-1", refreshToken: "rt-shared-id-1", accessToken: "at-shared-id-1", chatgptAccountID: "same-exported-id"},
 		{name: "sub2api-2", refreshToken: "rt-shared-id-2", accessToken: "at-shared-id-2", chatgptAccountID: "same-exported-id"},
-	}, "")
+	}, "", false)
 
 	rows, err := db.ListActive(context.Background())
 	if err != nil {
@@ -482,7 +482,7 @@ func TestImportAccountsCommonUpdatesExistingOAuthIdentity(t *testing.T) {
 		email:        "Import@Example.com",
 		accountID:    "acc-import",
 		planType:     "team",
-	}}, "")
+	}}, "", false)
 
 	select {
 	case id := <-probed:
@@ -553,7 +553,7 @@ func TestImportAccountsCommonSkipsExistingOAuthIdentityWithSameCredentials(t *te
 		accessToken:  "at-same",
 		email:        "Same@Example.com",
 		accountID:    "acc-same",
-	}}, "")
+	}}, "", false)
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
@@ -607,7 +607,7 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithExistingAccount(t *t
 	handler.importAccountsCommon(ctx, []importToken{
 		{refreshToken: "rt-new-1", email: "ambiguous@example.com", accountID: "acc-ambiguous"},
 		{refreshToken: "rt-new-2", email: "Ambiguous@Example.com", accountID: "acc-ambiguous"},
-	}, "")
+	}, "", false)
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
@@ -652,7 +652,7 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithoutExistingAccount(t
 	handler.importAccountsCommon(ctx, []importToken{
 		{refreshToken: "rt-new-1", email: "new-ambiguous@example.com", accountID: "acc-new-ambiguous"},
 		{refreshToken: "rt-new-2", email: "New-Ambiguous@Example.com", accountID: "acc-new-ambiguous"},
-	}, "")
+	}, "", false)
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
@@ -697,7 +697,7 @@ func TestImportAccountsCommonCollapsesIdenticalOAuthIdentityInFile(t *testing.T)
 	handler.importAccountsCommon(ctx, []importToken{
 		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "same-file@example.com", accountID: "acc-same-file"},
 		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "Same-File@Example.com", accountID: "acc-same-file"},
-	}, "")
+	}, "", false)
 
 	if !strings.Contains(recorder.Body.String(), `"type":"complete"`) ||
 		!strings.Contains(recorder.Body.String(), `"success":1`) ||
@@ -739,7 +739,7 @@ func TestImportAccountsCommonTriggersUsageProbeForImportedAccountWithAccessToken
 	handler.importAccountsCommon(ctx, []importToken{{
 		refreshToken: "rt-import-probe",
 		accessToken:  "at-import-probe",
-	}}, "")
+	}}, "", false)
 
 	select {
 	case id := <-probed:
@@ -775,7 +775,7 @@ func TestImportAccountsCommonMarksImported7dUsageAsRateLimited(t *testing.T) {
 		planType:           "team",
 		codex7DUsedPercent: "100",
 		codex7DResetAt:     resetAt.Format(time.RFC3339),
-	}}, "")
+	}}, "", false)
 
 	accounts := store.Accounts()
 	if len(accounts) != 1 {
@@ -828,7 +828,7 @@ func TestImportAccountsCommonRefreshesAndProbesRTOnlyImport(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
-	handler.importAccountsCommon(ctx, []importToken{{refreshToken: "rt-import-refresh-probe"}}, "")
+	handler.importAccountsCommon(ctx, []importToken{{refreshToken: "rt-import-refresh-probe"}}, "", false)
 
 	select {
 	case id := <-probed:
@@ -875,7 +875,7 @@ func TestImportAccountsCommonRefreshesOAuthIdentityRTOnlyImport(t *testing.T) {
 		refreshToken: "rt-oauth-identity-refresh-probe",
 		email:        "identity-refresh@example.com",
 		accountID:    "acc-identity-refresh",
-	}}, "")
+	}}, "", false)
 
 	select {
 	case id := <-probed:
@@ -983,4 +983,101 @@ func newMultipartRequest(t *testing.T, files map[string]string) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", &body)
 	req.Header.Set("Content-Type", writer.FormDataContentType())
 	return req
+}
+
+// TestImportAccountsCommonAllowDuplicateBypassesDedup 验证：勾选"允许重复添加"后，
+// 同一 OAuth 身份会被作为独立账号新建，而不是更新已有账号。
+func TestImportAccountsCommonAllowDuplicateBypassesDedup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{
+		db:    db,
+		store: store,
+		probeUsage: func(context.Context, *auth.Account) error {
+			return nil
+		},
+	}
+
+	if _, err := db.InsertAccountWithCredentials(context.Background(), "existing", map[string]interface{}{
+		"refresh_token": "rt-dup",
+		"email":         "dup@example.com",
+		"account_id":    "acc-dup",
+	}, ""); err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
+
+	handler.importAccountsCommon(ctx, []importToken{{
+		refreshToken: "rt-dup-2",
+		email:        "dup@example.com",
+		accountID:    "acc-dup",
+	}}, "", true)
+
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("active rows = %d, want 2 (duplicate allowed)", len(rows))
+	}
+}
+
+// TestAddAccountDedupsRefreshToken 验证：RT 单账号添加默认按 RT 原文对已有库去重。
+func TestAddAccountDedupsRefreshToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{
+		db:    db,
+		store: store,
+		probeUsage: func(context.Context, *auth.Account) error {
+			return nil
+		},
+	}
+
+	if _, err := db.InsertAccountWithCredentials(context.Background(), "existing", map[string]interface{}{
+		"refresh_token": "rt-existing",
+	}, ""); err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	doAdd := func(body string) map[string]interface{} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts", strings.NewReader(body))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		handler.AddAccount(ctx)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
+	}
+
+	// 默认：重复 RT 应被跳过
+	resp := doAdd(`{"refresh_token":"rt-existing"}`)
+	if dup := resp["duplicate"]; dup != float64(1) {
+		t.Fatalf("duplicate = %v, want 1", dup)
+	}
+	if rows, _ := db.ListActive(context.Background()); len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1 (duplicate skipped)", len(rows))
+	}
+
+	// 勾选允许重复：同一 RT 应被新建
+	resp = doAdd(`{"refresh_token":"rt-existing","allow_duplicate":true}`)
+	if suc := resp["success"]; suc != float64(1) {
+		t.Fatalf("success = %v, want 1", suc)
+	}
+	if rows, _ := db.ListActive(context.Background()); len(rows) != 2 {
+		t.Fatalf("active rows = %d, want 2 (duplicate allowed)", len(rows))
+	}
 }

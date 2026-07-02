@@ -37,7 +37,7 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 		"Originator": []string{"custom-originator"},
 	}
 
-	headers := exec.prepareWebsocketHeaders("token-123", "42", "session-123", "api-key-1", cfg, ginHeaders)
+	headers := exec.prepareWebsocketHeaders("token-123", &auth.Account{DBID: 42, AccountID: "42"}, "42", "session-123", "api-key-1", cfg, ginHeaders)
 
 	if got := headers.Get("Authorization"); got != "Bearer token-123" {
 		t.Fatalf("Authorization = %q", got)
@@ -68,7 +68,8 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	}
 }
 
-func TestPrepareWebsocketHeadersOmitsUserAgentByDefault(t *testing.T) {
+func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
+	t.Setenv("CODEX_WS_SEND_USER_AGENT", "")
 	exec := NewExecutor()
 	ginHeaders := http.Header{
 		"X-Codex-Turn-State":                    []string{"turn-state"},
@@ -77,13 +78,13 @@ func TestPrepareWebsocketHeadersOmitsUserAgentByDefault(t *testing.T) {
 		"X-Responsesapi-Include-Timing-Metrics": []string{"true"},
 	}
 
-	headers := exec.prepareWebsocketHeaders("token-123", "42", "session-123", "api-key-1", nil, ginHeaders)
+	headers := exec.prepareWebsocketHeaders("token-123", &auth.Account{DBID: 42, AccountID: "42"}, "42", "session-123", "api-key-1", nil, ginHeaders)
 
-	if got := headers.Get("User-Agent"); got != "" {
-		t.Fatalf("User-Agent = %q, want empty", got)
+	if got := headers.Get("User-Agent"); got != proxy.MinimalCodexCLIUserAgentForHeaders() {
+		t.Fatalf("User-Agent = %q, want %q", got, proxy.MinimalCodexCLIUserAgentForHeaders())
 	}
-	if got := headers.Get("Version"); got != "" {
-		t.Fatalf("Version = %q, want empty", got)
+	if got := headers.Get("Version"); got != proxy.LatestCodexCLIVersionForHeaders() {
+		t.Fatalf("Version = %q, want %q", got, proxy.LatestCodexCLIVersionForHeaders())
 	}
 	if got := headers.Get("OpenAI-Beta"); got != responsesWebsocketBetaHeader {
 		t.Fatalf("OpenAI-Beta = %q", got)
@@ -98,6 +99,53 @@ func TestPrepareWebsocketHeadersOmitsUserAgentByDefault(t *testing.T) {
 	}
 	if got := headers.Get("Conversation_id"); got != "session-123" {
 		t.Fatalf("Conversation_id = %q", got)
+	}
+}
+
+func TestPrepareWebsocketHeadersCanOptOutOfUserAgent(t *testing.T) {
+	t.Setenv("CODEX_WS_SEND_USER_AGENT", "false")
+	exec := NewExecutor()
+
+	headers := exec.prepareWebsocketHeaders("token-123", &auth.Account{DBID: 42, AccountID: "42"}, "42", "session-123", "api-key-1", nil, http.Header{})
+
+	if got := headers.Get("User-Agent"); got != "" {
+		t.Fatalf("User-Agent = %q, want empty", got)
+	}
+	if got := headers.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
+	}
+}
+
+func TestPrepareWebsocketHeadersHonorsForcedGeneratedUserAgent(t *testing.T) {
+	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")
+	prev := proxy.CurrentRuntimeSettings()
+	proxy.ApplyRuntimeSettings(proxy.RuntimeSettings{ClientCompatMode: proxy.ClientCompatModeForce})
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(prev) })
+	exec := NewExecutor()
+	account := &auth.Account{DBID: 43, AccountID: "42"}
+	ginHeaders := http.Header{
+		"User-Agent": []string{"codex_vscode/1.2.3"},
+		"Originator": []string{"codex_vscode"},
+		"Version":    []string{"1.2.3"},
+	}
+
+	headers := exec.prepareWebsocketHeaders("token-123", account, "42", "session-123", "api-key-1", nil, ginHeaders)
+
+	got := headers.Get("User-Agent")
+	if got == ginHeaders.Get("User-Agent") {
+		t.Fatalf("User-Agent preserved client UA %q in forced mode", got)
+	}
+	if got != proxy.ProfileForAccount(account.DBID).UserAgent {
+		t.Fatalf("User-Agent = %q, want real account profile %q", got, proxy.ProfileForAccount(account.DBID).UserAgent)
+	}
+	if !strings.HasPrefix(got, "codex-tui/") || !strings.Contains(got, " (") {
+		t.Fatalf("User-Agent = %q, want generated full codex-tui profile", got)
+	}
+	if version := headers.Get("Version"); version != proxy.LatestCodexCLIVersionForHeaders() {
+		t.Fatalf("Version = %q, want %q", version, proxy.LatestCodexCLIVersionForHeaders())
+	}
+	if originator := headers.Get("Originator"); originator != proxy.Originator {
+		t.Fatalf("Originator = %q, want %q", originator, proxy.Originator)
 	}
 }
 

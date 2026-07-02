@@ -40,6 +40,7 @@ type FastScheduler struct {
 	positions     map[int64]fastSchedulerPosition
 	cursors       [3]atomic.Uint64
 	groupCheck    func(apiKeyID int64, account *Account) bool
+	acquire       func(account *Account, concurrencyLimit int64) bool
 }
 
 func NewFastScheduler(baseLimit int64, schedulerMode string) *FastScheduler {
@@ -67,6 +68,15 @@ func (s *FastScheduler) SetGroupCheck(check func(apiKeyID int64, account *Accoun
 	}
 	s.mu.Lock()
 	s.groupCheck = check
+	s.mu.Unlock()
+}
+
+func (s *FastScheduler) SetAcquireFunc(acquire func(account *Account, concurrencyLimit int64) bool) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.acquire = acquire
 	s.mu.Unlock()
 }
 
@@ -131,6 +141,7 @@ func (s *Store) BuildFastScheduler() *FastScheduler {
 		return NewFastScheduler(1, "round_robin")
 	}
 	scheduler := NewFastScheduler(atomic.LoadInt64(&s.maxConcurrency), s.GetSchedulerMode())
+	s.configureFastScheduler(scheduler)
 
 	s.mu.RLock()
 	accounts := make([]*Account, len(s.accounts))
@@ -332,7 +343,7 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 		if !available || limit <= 0 {
 			continue
 		}
-		if !tryAcquireAccount(entry.acc, limit) {
+		if !s.tryAcquireAccount(entry.acc, limit) {
 			continue
 		}
 		return entry.acc, false
@@ -345,6 +356,13 @@ func (s *FastScheduler) Release(acc *Account) {
 		return
 	}
 	atomic.AddInt64(&acc.ActiveRequests, -1)
+}
+
+func (s *FastScheduler) tryAcquireAccount(acc *Account, limit int64) bool {
+	if s != nil && s.acquire != nil {
+		return s.acquire(acc, limit)
+	}
+	return tryAcquireAccount(acc, limit)
 }
 
 func (s *FastScheduler) BucketSizes() map[AccountHealthTier]int {

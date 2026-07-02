@@ -184,7 +184,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		isRelayAccount := account.IsOpenAIResponsesAPI()
-		useWebsocket := shouldUseSessionScopedWebsocket(h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount, explicitSessionID)
+		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount
 		upstreamEndpoint := "/v1/responses"
 		if isRelayAccount {
 			relayBaseURL, _ := account.OpenAIResponsesCredentials()

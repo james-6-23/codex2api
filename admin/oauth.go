@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
@@ -336,16 +337,24 @@ func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL
 	if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, 0); err != nil {
 		return 0, false, err
 	} else if duplicateID > 0 {
+		row, err := h.db.GetAccountByID(ctx, duplicateID)
+		if err != nil {
+			return 0, false, err
+		}
 		effectiveProxyURL := strings.TrimSpace(proxyURL)
 		if effectiveProxyURL == "" {
-			row, err := h.db.GetAccountByID(ctx, duplicateID)
-			if err != nil {
-				return 0, false, err
-			}
 			effectiveProxyURL = strings.TrimSpace(row.ProxyURL)
 		}
 		if err := h.db.UpdateOAuthAccountCredentials(ctx, duplicateID, tokenCredentialMap(seed), effectiveProxyURL); err != nil {
 			return 0, false, err
+		}
+		// 重新导入有效凭证时，若该账号此前处于错误/封禁（401）态，清除错误状态，
+		// 让重新加载后的运行时账号脱离 banned，并交由后续 probe 重新判定。
+		// 仅针对 error / unauthorized，避免误清合法的限速冷却（rate_limited）。
+		if accountErrorStateNeedsReset(row) {
+			if err := h.db.ClearError(ctx, duplicateID); err != nil {
+				log.Printf("重新导入清除账号 %d 错误状态失败: %v", duplicateID, err)
+			}
 		}
 		if err := h.reloadTokenAccount(ctx, duplicateID, source); err != nil {
 			return 0, false, err
@@ -361,6 +370,19 @@ func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL
 	h.db.InsertAccountEventAsync(id, "added", source)
 	h.loadInsertedTokenAccount(id, proxyURL, seed, source)
 	return id, false, nil
+}
+
+// accountErrorStateNeedsReset 判断一个已存在账号是否处于"重新导入有效凭证后应清除"的
+// 错误/封禁态：status='error'（RT 失效、鉴权失败等）或 401 unauthorized 冷却。
+// 限速冷却（rate_limited*）不在此列，避免重新导入误清合法的限速窗口。
+func accountErrorStateNeedsReset(row *database.AccountRow) bool {
+	if row == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(row.Status), "error") {
+		return true
+	}
+	return strings.EqualFold(strings.TrimSpace(row.CooldownReason), "unauthorized")
 }
 
 func (h *Handler) loadInsertedTokenAccount(id int64, proxyURL string, seed tokenCredentialSeed, source string) {

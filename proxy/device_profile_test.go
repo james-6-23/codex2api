@@ -19,6 +19,22 @@ func TestParseCodexCLIVersion(t *testing.T) {
 		wantOK    bool
 	}{
 		{
+			name:      "valid codex-tui version",
+			ua:        "codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)",
+			wantMajor: 0,
+			wantMinor: 142,
+			wantPatch: 3,
+			wantOK:    true,
+		},
+		{
+			name:      "valid codex-tui prerelease version",
+			ua:        "codex-tui/0.142.0-alpha.10 (Mac OS 13.7.8; arm64) xterm-256color (codex-tui; 0.142.0-alpha.10)",
+			wantMajor: 0,
+			wantMinor: 142,
+			wantPatch: 0,
+			wantOK:    true,
+		},
+		{
 			name:      "valid codex_cli_rs version",
 			ua:        "codex_cli_rs/0.117.0 (Mac OS 15.5.0; arm64) Apple_Terminal/464",
 			wantMajor: 0,
@@ -67,9 +83,12 @@ func TestParseCodexCLIVersion(t *testing.T) {
 			wantOK:    true,
 		},
 		{
-			name:   "invalid pre-release version",
-			ua:     "codex_cli_rs/0.136.0-beta",
-			wantOK: false,
+			name:      "valid legacy pre-release version",
+			ua:        "codex_cli_rs/0.136.0-beta",
+			wantMajor: 0,
+			wantMinor: 136,
+			wantPatch: 0,
+			wantOK:    true,
 		},
 		{
 			name:   "invalid four segment version",

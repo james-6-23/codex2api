@@ -58,6 +58,14 @@ func bootstrapAllowRate() bool {
 	return newCount <= bootstrapMaxPerWin
 }
 
+// bootstrapAllowClientIP 判断该来源 IP 是否允许执行页面初始化。
+//
+// 规则：
+//   - loopback 永远允许；
+//   - BOOTSTRAP_ALLOWED_CIDR 已设置时以其为准（逗号分隔 CIDR；设为 none 表示仅 loopback）；
+//   - 未设置时默认放行私有/链路本地地址——Docker 端口映射后宿主机访问的源 IP 是
+//     网桥地址(如 172.17.0.1)而非 loopback，若只认 loopback 会把最常见的本地
+//     Docker 部署挡在初始化页面外(issue #199)。公网 IP 默认仍拒绝。
 func bootstrapAllowClientIP(clientIP string) bool {
 	ip := net.ParseIP(strings.TrimSpace(clientIP))
 	if ip == nil {
@@ -66,7 +74,14 @@ func bootstrapAllowClientIP(clientIP string) bool {
 	if ip.IsLoopback() {
 		return true
 	}
-	for _, cidr := range strings.Split(os.Getenv("BOOTSTRAP_ALLOWED_CIDR"), ",") {
+	cidrEnv := strings.TrimSpace(os.Getenv("BOOTSTRAP_ALLOWED_CIDR"))
+	if cidrEnv == "" {
+		return ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+	if strings.EqualFold(cidrEnv, "none") {
+		return false
+	}
+	for _, cidr := range strings.Split(cidrEnv, ",") {
 		cidr = strings.TrimSpace(cidr)
 		if cidr == "" {
 			continue
@@ -253,7 +268,7 @@ func (h *Handler) GetSetupHints(c *gin.Context) {
 func (h *Handler) PostBootstrap(c *gin.Context) {
 	if !bootstrapAllowClientIP(c.ClientIP()) {
 		security.SecurityAuditLog("BOOTSTRAP_REJECTED_IP", "ip="+c.ClientIP())
-		c.JSON(http.StatusForbidden, gin.H{"error": "当前来源不允许执行初始化"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "当前来源 IP (" + c.ClientIP() + ") 不允许执行页面初始化。可任选其一：1) 在 .env 中设置 ADMIN_SECRET 后重建容器，跳过页面初始化直接登录；2) 设置 BOOTSTRAP_ALLOWED_CIDR 环境变量放行你的来源网段（如 BOOTSTRAP_ALLOWED_CIDR=203.0.113.0/24）。"})
 		return
 	}
 

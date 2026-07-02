@@ -26,16 +26,32 @@ import { getErrorMessage } from "../utils/error";
 const PAGE_SIZE = 10;
 const TEST_ALL_CONCURRENCY = 4;
 
+const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
+
 function validateProxyInput(url: string): boolean {
+  const trimmed = url.trim();
+  if (!trimmed) return false;
+  // 优先用 URL 严格解析（覆盖 IPv6 等）。
   try {
-    const parsed = new URL(url);
-    return (
-      Boolean(parsed.hostname) &&
-      ["http:", "https:", "socks5:", "socks5h:"].includes(parsed.protocol)
-    );
+    const parsed = new URL(trimmed);
+    if (Boolean(parsed.hostname) && PROXY_SCHEMES.includes(parsed.protocol)) {
+      return true;
+    }
   } catch {
-    return false;
+    /* 落到下方宽松校验 */
   }
+  // 宽松结构校验：密码可能含 # / ? @ 等特殊字符，会让 new URL 抛错（issue #293）。
+  // 形如 scheme://[user[:pass]@]host[:port]，userinfo 贪婪匹配到最后一个 '@'。
+  const m = /^([a-z0-9+.-]+):\/\/(?:.*@)?([^@\s:/?#]+)(?::(\d{1,5}))?\/?$/i.exec(
+    trimmed,
+  );
+  if (!m) return false;
+  if (!PROXY_SCHEMES.includes(`${m[1].toLowerCase()}:`)) return false;
+  if (m[3] !== undefined) {
+    const port = Number(m[3]);
+    if (port < 1 || port > 65535) return false;
+  }
+  return true;
 }
 
 function latencyColor(ms: number): string {

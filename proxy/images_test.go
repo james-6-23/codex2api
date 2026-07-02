@@ -222,29 +222,6 @@ func TestResponsesBodyRequestsImageGenerationDetectsExplicitIntent(t *testing.T)
 	}
 }
 
-func TestExplicitlyRequestsImageGeneration(t *testing.T) {
-	cases := []struct {
-		name string
-		body []byte
-		want bool
-	}{
-		{"explicit_tools_array", []byte(`{"model":"gpt-5.5","tools":[{"type":"image_generation"}]}`), true},
-		{"object_tool_choice", []byte(`{"model":"gpt-5.5","tool_choice":{"type":"image_generation"}}`), true},
-		{"string_tool_choice", []byte(`{"model":"gpt-5.5","tool_choice":"image_generation"}`), true},
-		{"image_model", []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`), true},
-		{"top_level_option", []byte(`{"model":"gpt-5.5","input":"hi","size":"1024x1024"}`), true},
-		{"plain_request", []byte(`{"model":"gpt-5.5","input":"hello"}`), false},
-		{"function_tool_only", []byte(`{"model":"gpt-5.5","tools":[{"type":"function","name":"lookup"}]}`), false},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := explicitlyRequestsImageGeneration(tc.body); got != tc.want {
-				t.Fatalf("explicitlyRequestsImageGeneration(%s) = %v, want %v", tc.body, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestResponsesBodyHasNaturalImageGenerationIntent(t *testing.T) {
 	cases := []struct {
 		name string
@@ -314,8 +291,14 @@ func TestRawResponsesBodyShouldForceHTTPForImageGeneration(t *testing.T) {
 	}{
 		{"explicit_tool_choice", []byte(`{"model":"gpt-5.5","tool_choice":{"type":"image_generation"}}`), true},
 		{"natural_language_generation", []byte(`{"model":"gpt-5.5","input":"生成一张未来城市海报"}`), true},
+		{"image_only_model", []byte(`{"model":"gpt-image-2","prompt":"draw a cat"}`), true},
+		{"top_level_option", []byte(`{"model":"gpt-5.5","input":"hi","size":"1024x1024"}`), true},
 		{"plain_request", []byte(`{"model":"gpt-5.5","input":"hello"}`), false},
 		{"image_generation_code_request", []byte(`{"model":"gpt-5.5","input":"帮我写一个生成图片的 Python 脚本"}`), false},
+		// issue #304: 注入的 image_generation 工具但无 tool_choice / 无自然语言意图，
+		// 不应因工具单纯存在而强制 HTTP，普通请求继续走 WS。
+		{"injected_tool_without_intent", []byte(`{"model":"gpt-5.5","input":"hello","tools":[{"type":"image_generation"}]}`), false},
+		{"injected_tool_plain_chat", []byte(`{"model":"gpt-5.5","input":"解释一下这段报错","tools":[{"type":"image_generation","model":"gpt-image-2"},{"type":"function","name":"lookup"}]}`), false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -382,7 +365,7 @@ func TestTranslateRequestDoesNotFlagPlainChatAsImageGeneration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TranslateRequest: %v", err)
 	}
-	if explicitlyRequestsImageGeneration(codexBody) {
+	if rawResponsesBodyShouldForceHTTPForImageGeneration(codexBody) {
 		t.Fatalf("plain chat request should not be flagged as image generation: %s", codexBody)
 	}
 }

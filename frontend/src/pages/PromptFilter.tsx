@@ -55,6 +55,7 @@ type PromptFilterForm = Pick<
   | 'prompt_filter_review_enabled'
   | 'prompt_filter_review_api_key'
   | 'prompt_filter_review_api_key_configured'
+  | 'prompt_filter_review_api_key_count'
   | 'prompt_filter_review_base_url'
   | 'prompt_filter_review_model'
   | 'prompt_filter_review_timeout_seconds'
@@ -98,6 +99,7 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_review_enabled: false,
   prompt_filter_review_api_key: '',
   prompt_filter_review_api_key_configured: false,
+  prompt_filter_review_api_key_count: 0,
   prompt_filter_review_base_url: 'https://api.openai.com',
   prompt_filter_review_model: 'omni-moderation-latest',
   prompt_filter_review_timeout_seconds: 10,
@@ -159,6 +161,7 @@ const normalizePromptFilterForm = (settings?: SystemSettings | null): PromptFilt
   prompt_filter_review_enabled: Boolean(settings?.prompt_filter_review_enabled),
   prompt_filter_review_api_key: '',
   prompt_filter_review_api_key_configured: Boolean(settings?.prompt_filter_review_api_key_configured),
+  prompt_filter_review_api_key_count: settings?.prompt_filter_review_api_key_count || 0,
   prompt_filter_review_base_url: settings?.prompt_filter_review_base_url || 'https://api.openai.com',
   prompt_filter_review_model: settings?.prompt_filter_review_model || 'omni-moderation-latest',
   prompt_filter_review_timeout_seconds: settings?.prompt_filter_review_timeout_seconds || 10,
@@ -180,6 +183,9 @@ function parseJSONList<T>(raw: string, fallback: T[] = []): T[] {
 
 function promptFilterSavePayload(form: PromptFilterForm): Partial<SystemSettings> {
   const payload: Partial<SystemSettings> = { ...form }
+  // 展示用字段，不参与写入。
+  delete payload.prompt_filter_review_api_key_configured
+  delete payload.prompt_filter_review_api_key_count
   if (!payload.prompt_filter_review_api_key?.trim()) {
     delete payload.prompt_filter_review_api_key
   }
@@ -565,12 +571,18 @@ function OverviewView({
                 </Field>
               </div>
               <Field label={t('promptFilter.reviewApiKey')}>
-                <Input
-                  type="password"
+                <Textarea
+                  rows={4}
+                  className="font-mono"
                   value={form.prompt_filter_review_api_key ?? ''}
-                  placeholder={form.prompt_filter_review_api_key_configured ? t('promptFilter.reviewApiKeyConfigured') : t('promptFilter.reviewApiKeyPlaceholder')}
+                  placeholder={
+                    form.prompt_filter_review_api_key_configured
+                      ? t('promptFilter.reviewApiKeyConfigured', { n: form.prompt_filter_review_api_key_count })
+                      : t('promptFilter.reviewApiKeyPlaceholder')
+                  }
                   onChange={(event) => setForm((current) => ({ ...current, prompt_filter_review_api_key: event.target.value }))}
                 />
+                <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewApiKeyHint')}</span>
               </Field>
             </div>
             <Button onClick={onSave} disabled={saving}>

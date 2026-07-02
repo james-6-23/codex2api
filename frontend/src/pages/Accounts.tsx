@@ -377,6 +377,27 @@ function percentThresholdInputToRatio(value: string): number | null {
   return parsed / 100;
 }
 
+function formatDispatchCountLimitInput(value?: number | null): string {
+  if (typeof value !== "number" || value <= 0) return "";
+  return String(Math.trunc(value));
+}
+
+function isDispatchCountLimitInputInvalid(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (!/^\d+$/.test(trimmed)) return true;
+  const parsed = Number.parseInt(trimmed, 10);
+  return parsed < 0 || parsed > 1000000;
+}
+
+function dispatchCountLimitInputToValue(value: string): number | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  const parsed = Number.parseInt(trimmed, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) return null;
+  return parsed;
+}
+
 function getMediaQueryMatch(query: string): boolean {
   if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
     return false;
@@ -513,7 +534,7 @@ export default function Accounts() {
   >("all");
   const [searchQuery, setSearchQuery] = useState("");
   const [planFilter, setPlanFilter] = useState<
-    "all" | "pro" | "prolite" | "plus" | "team" | "free"
+    "all" | "pro" | "prolite" | "plus" | "team" | "k12" | "free"
   >("all");
   const [sortKey, setSortKey] = useState<
     "requests" | "usage" | "importTime" | null
@@ -572,6 +593,8 @@ export default function Accounts() {
     useState(false);
   const [editAutoPause7dDisabled, setEditAutoPause7dDisabled] =
     useState(false);
+  const [editDispatchCountLimitInput, setEditDispatchCountLimitInput] =
+    useState("");
   const [allowedAPIKeySelection, setAllowedAPIKeySelection] = useState<
     number[]
   >([]);
@@ -590,6 +613,7 @@ export default function Accounts() {
   const [editOpenAIModelsLoading, setEditOpenAIModelsLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportPicker, setShowImportPicker] = useState(false);
+  const [importProxyUrl, setImportProxyUrl] = useState("");
   const [showSub2APIImport, setShowSub2APIImport] = useState(false);
   const [dragging, setDragging] = useState(false);
   const dragCounter = useRef(0);
@@ -631,6 +655,8 @@ export default function Accounts() {
     access_token: "",
     proxy_url: "",
   });
+  // 允许重复添加：勾选后本次添加/导入跳过去重，强制新建（添加弹窗与导入弹窗共用）。
+  const [allowDuplicate, setAllowDuplicate] = useState(false);
   const [openAIForm, setOpenAIForm] =
     useState<AddOpenAIResponsesAccountRequest>({
       base_url: "https://api.openai.com",
@@ -1056,11 +1082,7 @@ export default function Accounts() {
       // 与 UsageCell 的显示判定保持一致:plan_type 可能滞后于真实订阅状态,
       // 看到 5h 重置时间就当订阅账号处理,触发拉取 5h 数据。
       const looksLikeSubscription =
-        plan === "pro" ||
-        plan === "team" ||
-        plan === "plus" ||
-        plan === "teamplus" ||
-        !!account.reset_5h_at;
+        isPremiumUsagePlan(plan) || !!account.reset_5h_at;
 
       if (looksLikeSubscription) {
         return !has5h || !has7d;
@@ -1375,8 +1397,8 @@ export default function Accounts() {
   const handleAdd = async (credential: "rt" | "st" = "rt") => {
     const payload: AddAccountRequest =
       credential === "st"
-        ? { ...addForm, refresh_token: "" }
-        : { ...addForm, session_token: "" };
+        ? { ...addForm, refresh_token: "", allow_duplicate: allowDuplicate }
+        : { ...addForm, session_token: "", allow_duplicate: allowDuplicate };
     if (
       !payload.refresh_token?.trim() &&
       !payload.session_token?.trim()
@@ -1420,7 +1442,7 @@ export default function Accounts() {
     if (!atForm.access_token.trim()) return;
     setSubmitting(true);
     try {
-      await api.addATAccount(atForm);
+      await api.addATAccount({ ...atForm, allow_duplicate: allowDuplicate });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setAtForm({ access_token: "", proxy_url: "" });
@@ -1828,6 +1850,9 @@ export default function Accounts() {
     try {
       const formData = new FormData();
       if (format !== "txt") formData.append("format", format);
+      const trimmedImportProxy = importProxyUrl.trim();
+      if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
+      if (allowDuplicate) formData.append("allow_duplicate", "true");
       for (const f of files) formData.append("file", f);
       const res = await fetch("/api/admin/accounts/import", {
         method: "POST",
@@ -2712,6 +2737,9 @@ export default function Accounts() {
     );
     setEditAutoPause5hDisabled(account.auto_pause_5h_disabled ?? false);
     setEditAutoPause7dDisabled(account.auto_pause_7d_disabled ?? false);
+    setEditDispatchCountLimitInput(
+      formatDispatchCountLimitInput(account.dispatch_count_limit),
+    );
     setAllowedAPIKeySelection(
       filterExistingAPIKeyIDs(account.allowed_api_key_ids ?? [], apiKeys),
     );
@@ -2747,6 +2775,7 @@ export default function Accounts() {
     setEditAutoPause7dThresholdInput("");
     setEditAutoPause5hDisabled(false);
     setEditAutoPause7dDisabled(false);
+    setEditDispatchCountLimitInput("");
     setAllowedAPIKeySelection([]);
     setEditProxyUrl("");
     setEditTags([]);
@@ -2787,6 +2816,17 @@ export default function Accounts() {
   const editAutoPause7dThresholdInvalid = isPercentThresholdInputInvalid(
     editAutoPause7dThresholdInput,
   );
+  const editDispatchCountLimitInvalid = isDispatchCountLimitInputInvalid(
+    editDispatchCountLimitInput,
+  );
+  const editDispatchCountLimitPreview =
+    editDispatchCountLimitInvalid
+      ? null
+      : dispatchCountLimitInputToValue(editDispatchCountLimitInput);
+  const editDispatchCountResetTime =
+    editDispatchCountLimitPreview && editingAccount
+      ? formatResetAt(editingAccount.dispatch_count_reset_at)
+      : null;
   const batchAutoPause5hThresholdInvalid = isPercentThresholdInputInvalid(
     batchAutoPause5hThresholdInput,
   );
@@ -2844,7 +2884,8 @@ export default function Accounts() {
       scoreInputInvalid ||
       concurrencyInputInvalid ||
       editAutoPause5hThresholdInvalid ||
-      editAutoPause7dThresholdInvalid
+      editAutoPause7dThresholdInvalid ||
+      editDispatchCountLimitInvalid
     ) {
       showToast(t("accounts.schedulerInvalidInput"), "error");
       return;
@@ -2869,6 +2910,9 @@ export default function Accounts() {
         ),
         auto_pause_5h_disabled: editAutoPause5hDisabled,
         auto_pause_7d_disabled: editAutoPause7dDisabled,
+        dispatch_count_limit: dispatchCountLimitInputToValue(
+          editDispatchCountLimitInput,
+        ),
       };
       await api.updateAccountScheduler(editingAccount.id, payload);
       showToast(t("accounts.schedulerSaveSuccess"));
@@ -3411,7 +3455,9 @@ export default function Accounts() {
               />
             </div>
             <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5 max-sm:w-full max-sm:flex-wrap">
-              {(["all", "pro", "prolite", "plus", "team", "free"] as const).map(
+              {(
+                ["all", "pro", "prolite", "plus", "team", "k12", "free"] as const
+              ).map(
                 (key) => (
                   <button
                     key={key}
@@ -3429,7 +3475,9 @@ export default function Accounts() {
                       ? t("accounts.filterAll")
                       : key === "prolite"
                         ? "ProLite"
-                        : key.charAt(0).toUpperCase() + key.slice(1)}
+                        : key === "k12"
+                          ? "K12"
+                          : key.charAt(0).toUpperCase() + key.slice(1)}
                   </button>
                 ),
               )}
@@ -4337,6 +4385,7 @@ export default function Accounts() {
             contentClassName="sm:max-w-[780px]"
             onClose={() => {
               setShowAdd(false);
+              setAllowDuplicate(false);
               setAddMethod("oauth");
               setOauthStep("generate");
               setOauthSession(null);
@@ -4352,10 +4401,24 @@ export default function Accounts() {
             }}
             footer={
               <>
+                {(addMethod === "rt" ||
+                  addMethod === "st" ||
+                  addMethod === "at") && (
+                  <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                    <input
+                      type="checkbox"
+                      className="size-3.5"
+                      checked={allowDuplicate}
+                      onChange={(e) => setAllowDuplicate(e.target.checked)}
+                    />
+                    {t("accounts.allowDuplicate")}
+                  </label>
+                )}
                 <Button
                   variant="outline"
                   onClick={() => {
                     setShowAdd(false);
+                    setAllowDuplicate(false);
                     setAddMethod("oauth");
                     setOauthStep("generate");
                     setOauthSession(null);
@@ -4813,6 +4876,26 @@ export default function Accounts() {
             contentClassName="sm:max-w-[640px]"
             onClose={() => setShowImportPicker(false)}
           >
+            <div className="mb-4 space-y-1.5">
+              {renderProxyInput({
+                value: importProxyUrl,
+                testKey: "import-batch",
+                label: t("accounts.importProxyLabel"),
+                onChange: setImportProxyUrl,
+              })}
+              <p className="text-[11px] text-muted-foreground">
+                {t("accounts.importProxyHint")}
+              </p>
+              <label className="flex cursor-pointer items-center gap-2 pt-1 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={allowDuplicate}
+                  onChange={(e) => setAllowDuplicate(e.target.checked)}
+                />
+                {t("accounts.allowDuplicate")}
+              </label>
+            </div>
             <div className="grid grid-cols-2 gap-3">
               <button
                 className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
@@ -5177,7 +5260,8 @@ export default function Accounts() {
                         (scoreInputInvalid ||
                           concurrencyInputInvalid ||
                           editAutoPause5hThresholdInvalid ||
-                          editAutoPause7dThresholdInvalid)) ||
+                          editAutoPause7dThresholdInvalid ||
+                          editDispatchCountLimitInvalid)) ||
                       openAIAccountInputInvalid
                     }
                   >
@@ -5557,10 +5641,9 @@ export default function Accounts() {
                                         editingAccount,
                                       ),
                                   })}
-                              </div>
                             </div>
-                          )}
-                        </div>
+                          </div>
+                        )}
                       </div>
 
                       <div className="rounded-xl border border-border p-4">
@@ -5587,6 +5670,53 @@ export default function Accounts() {
                               className={`pointer-events-none block size-4 rounded-full bg-white shadow transition-transform ${skipWarmTier ? "translate-x-4" : "translate-x-0"}`}
                             />
                           </button>
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-border p-4 md:col-span-2">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.dispatchCountLimitTitle")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.dispatchCountLimitHint")}
+                        </div>
+                        <div className="mt-3">
+                          <label className="mb-1.5 block text-xs font-semibold text-muted-foreground">
+                            {t("accounts.dispatchCountLimitLabel")}
+                          </label>
+                          <Input
+                            inputMode="numeric"
+                            value={editDispatchCountLimitInput}
+                            placeholder={t(
+                              "accounts.dispatchCountLimitPlaceholder",
+                            )}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              setEditDispatchCountLimitInput(event.target.value)
+                            }
+                          />
+                          <div
+                            className={`mt-1.5 text-xs ${editDispatchCountLimitInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                          >
+                            {editDispatchCountLimitInvalid
+                              ? t("accounts.dispatchCountLimitRange")
+                              : editDispatchCountLimitPreview
+                                ? t("accounts.dispatchCountLimitStatus", {
+                                    used:
+                                      editingAccount.dispatch_count_used ?? 0,
+                                    limit: editDispatchCountLimitPreview,
+                                  })
+                                : t("accounts.dispatchCountLimitDisabled")}
+                          </div>
+                          {editDispatchCountResetTime ? (
+                            <div
+                              className="mt-1 text-xs text-muted-foreground"
+                              title={editDispatchCountResetTime.title}
+                            >
+                              {t("accounts.dispatchCountLimitResetAt", {
+                                time: editDispatchCountResetTime.label,
+                              })}
+                            </div>
+                          ) : null}
                         </div>
                       </div>
 
@@ -5642,32 +5772,33 @@ export default function Accounts() {
                         <div className="mt-1 text-xs text-muted-foreground">
                           {t("accounts.allowedAPIKeysHint")}
                         </div>
-                          <div className="mt-3">
-                            <APIKeyMultiSelect
-                              options={apiKeys}
-                              value={allowedAPIKeySelection}
-                              disabled={apiKeys.length === 0}
-                              onChange={setAllowedAPIKeySelection}
-                              allLabel={t("accounts.allowedAPIKeysAll")}
-                              selectedLabel={t(
-                                "accounts.allowedAPIKeysSelected",
-                                {
-                                  count: allowedAPIKeySelection.length,
-                                },
-                              )}
-                              placeholder={t("accounts.allowedAPIKeysPlaceholder")}
-                              emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
-                              emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
-                            />
-                          </div>
-                    </div>
+                        <div className="mt-3">
+                          <APIKeyMultiSelect
+                            options={apiKeys}
+                            value={allowedAPIKeySelection}
+                            disabled={apiKeys.length === 0}
+                            onChange={setAllowedAPIKeySelection}
+                            allLabel={t("accounts.allowedAPIKeysAll")}
+                            selectedLabel={t(
+                              "accounts.allowedAPIKeysSelected",
+                              {
+                                count: allowedAPIKeySelection.length,
+                              },
+                            )}
+                            placeholder={t("accounts.allowedAPIKeysPlaceholder")}
+                            emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
+                            emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
+                          />
+                        </div>
+                      </div>
 
-                    <div className="rounded-xl border border-border p-4">
-                      {renderProxyInput({
-                        value: editProxyUrl,
-                        testKey: "edit-account-proxy",
-                        onChange: setEditProxyUrl,
-                      })}
+                      <div className="rounded-xl border border-border p-4">
+                        {renderProxyInput({
+                          value: editProxyUrl,
+                          testKey: "edit-account-proxy",
+                          onChange: setEditProxyUrl,
+                        })}
+                      </div>
                     </div>
 
                     <div className="grid gap-4 md:grid-cols-2">
@@ -7410,10 +7541,19 @@ function isActiveAutoPauseWindowReached(
   return value / 100 >= threshold;
 }
 
+// Plans that carry a rolling 5h usage window (mirrors Go isPremium5hPlan).
+// k12/edu are paid education workspaces with 5h limits (issue #307/#309).
 function isPremiumUsagePlan(planType?: string): boolean {
-  return ["plus", "pro", "team", "teamplus"].includes(
-    normalizePlanType(planType),
-  );
+  return [
+    "plus",
+    "pro",
+    "team",
+    "teamplus",
+    "k12",
+    "edu",
+    "education",
+    "go",
+  ].includes(normalizePlanType(planType));
 }
 
 type RateLimitWindow = "5h" | "7d";
@@ -7427,8 +7567,15 @@ function isUnsampledQuotaAccount(account: AccountRow): boolean {
   if (status === "unauthorized" || account.openai_responses_api) {
     return false;
   }
-  const value = account.usage_percent_7d;
-  return typeof value !== "number" || !Number.isFinite(value);
+  // k12 等 team 型工作区可能只返回 5h 窗口：任一窗口有数据即算已采样，
+  // 否则这类账号会永远显示"未采样" (issue #282)。
+  const has7d =
+    typeof account.usage_percent_7d === "number" &&
+    Number.isFinite(account.usage_percent_7d);
+  const has5h =
+    typeof account.usage_percent_5h === "number" &&
+    Number.isFinite(account.usage_percent_5h);
+  return !has7d && !has5h;
 }
 
 function getAccountRateLimitWindow(
@@ -7529,6 +7676,8 @@ function isSubscriptionPlan(planType?: string): boolean {
       "business",
       "edu",
       "education",
+      "k12",
+      "go",
     ].includes(normalized)
   ) {
     return true;
@@ -7824,6 +7973,7 @@ function PlanBadge({ planType }: { planType?: string }) {
       "bg-purple-50 text-purple-600 ring-purple-400/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/25",
     plus: "bg-blue-100 text-blue-700 ring-blue-500/30 dark:bg-blue-500/20 dark:text-blue-300 dark:ring-blue-400/30",
     team: "bg-amber-100 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30",
+    k12: "bg-emerald-100 text-emerald-700 ring-emerald-500/30 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/30",
     free: "bg-zinc-100 text-zinc-500 ring-zinc-400/20 dark:bg-zinc-500/10 dark:text-zinc-400 dark:ring-zinc-400/15",
   };
 
@@ -7849,6 +7999,7 @@ function getDefaultScoreBias(planType?: string): number {
     case "pro":
     case "plus":
     case "team":
+    case "k12":
       return 50;
     default:
       return 0;
@@ -9699,11 +9850,7 @@ function UsageCell({
   const fiveHourPresent = has5h || has5hDetail || has5hReset;
   const sevenDayPresent = has7d || has7dDetail || has7dReset;
   // plan 表明是订阅型时,即使数据暂未拉到也按订阅布局占位,避免抖动
-  const planSuggestsPremium =
-    plan === "pro" ||
-    plan === "team" ||
-    plan === "plus" ||
-    plan === "teamplus";
+  const planSuggestsPremium = isPremiumUsagePlan(plan);
   const showFiveHour = fiveHourPresent || planSuggestsPremium;
 
   if (showFiveHour) {

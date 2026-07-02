@@ -38,7 +38,6 @@ import type {
   PublicAPIKeyUsageResponse,
   RecycleBinAccountsResponse,
   RuntimeStatusResponse,
-  ResetRadarResponse,
   SiteBranding,
   StatsResponse,
   SetupHintsResponse,
@@ -299,7 +298,6 @@ export const api = {
   getHealth: () => request<HealthResponse>('/health'),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
-  getResetRadar: () => request<ResetRadarResponse>('/reset-radar'),
   getOpsErrorSummary: (params: {
     start: string
     end: string

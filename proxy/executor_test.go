@@ -5,8 +5,10 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 )
@@ -293,8 +295,113 @@ func TestApplyCodexRequestHeadersUsesMinimalFallbackByDefault(t *testing.T) {
 
 	applyCodexRequestHeaders(req, acc, "token-123", "", "api-key-1", nil, http.Header{})
 
-	if got := req.Header.Get("User-Agent"); got != latestCodexCLIUserAgentPrefix {
-		t.Fatalf("User-Agent = %q, want minimal Codex CLI %q", got, latestCodexCLIUserAgentPrefix)
+	if got := req.Header.Get("User-Agent"); got != defaultCodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q, want minimal Codex CLI %q", got, defaultCodexCLIUserAgent)
+	}
+	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
+		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	}
+}
+
+func TestApplyCodexRequestHeadersUsesCustomGeneratedUserAgentConfig(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	normalized, err := NormalizeCodexUserAgentConfigJSON(`{"client_name":"codex-tui","client_version":"0.142.0-alpha.10","os_name":"Mac OS","os_version":"13.7.8","arch":"arm64","terminal":"xterm-256color"}`)
+	if err != nil {
+		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
+	}
+	ApplyRuntimeSettings(RuntimeSettings{
+		ClientCompatMode:     ClientCompatModeForce,
+		CodexUserAgentConfig: normalized,
+	})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", nil, http.Header{})
+
+	wantUA := "codex-tui/0.142.0-alpha.10 (Mac OS 13.7.8; arm64) xterm-256color (codex-tui; 0.142.0-alpha.10)"
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := req.Header.Get("Version"); got != "0.142.0-alpha.10" {
+		t.Fatalf("Version = %q, want 0.142.0-alpha.10", got)
+	}
+}
+
+func TestApplyCodexRequestHeadersRawUserAgentWithoutVersionOmitsVersionHeader(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	normalized, err := NormalizeCodexUserAgentConfigJSON(`{"raw_user_agent":"my-router"}`)
+	if err != nil {
+		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
+	}
+	ApplyRuntimeSettings(RuntimeSettings{
+		ClientCompatMode:     ClientCompatModeForce,
+		CodexUserAgentConfig: normalized,
+	})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", nil, http.Header{})
+
+	if got := req.Header.Get("User-Agent"); got != "my-router" {
+		t.Fatalf("User-Agent = %q, want raw override", got)
+	}
+	if got := req.Header.Get("Version"); got != "" {
+		t.Fatalf("Version = %q, want empty", got)
+	}
+}
+
+func TestApplyCodexRequestHeadersRaisesGeneratedUserAgentToAutoMinimum(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	normalized, err := NormalizeCodexUserAgentConfigJSON(`{"client_name":"codex-tui","client_version":"0.142.0","os_name":"Linux","os_version":"Unknown","arch":"x86_64","terminal":"xterm-256color"}`)
+	if err != nil {
+		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
+	}
+	ApplyRuntimeSettings(RuntimeSettings{
+		ClientCompatMode:     ClientCompatModeAuto,
+		CodexMinCLIVersion:   "0.150.0",
+		CodexUserAgentConfig: normalized,
+	})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	downstreamHeaders := http.Header{
+		"User-Agent": []string{"codex-tui/0.100.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.100.0)"},
+		"Originator": []string{"codex-tui"},
+	}
+
+	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", nil, downstreamHeaders)
+
+	wantUA := "codex-tui/0.150.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.150.0)"
+	if got := req.Header.Get("User-Agent"); got != wantUA {
+		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
+	}
+	if got := req.Header.Get("Version"); got != "0.150.0" {
+		t.Fatalf("Version = %q, want 0.150.0", got)
+	}
+}
+
+func TestApplyCodexRequestHeadersRepairsBlankStabilizedProfileUserAgent(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	cfg := &DeviceProfileConfig{StabilizeDeviceProfile: true}
+	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", cfg, http.Header{})
+
+	if got := req.Header.Get("User-Agent"); got != defaultCodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexCLIUserAgent)
 	}
 	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
 		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
@@ -408,8 +515,8 @@ func TestApplyCodexRequestHeadersFallsBackForNonOfficialClient(t *testing.T) {
 
 	applyCodexRequestHeaders(req, acc, "token-123", "", "api-key-1", nil, downstreamHeaders)
 
-	if got := req.Header.Get("User-Agent"); got != latestCodexCLIUserAgentPrefix {
-		t.Fatalf("User-Agent = %q, want %q", got, latestCodexCLIUserAgentPrefix)
+	if got := req.Header.Get("User-Agent"); got != defaultCodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexCLIUserAgent)
 	}
 	if got := req.Header.Get("Originator"); got != Originator {
 		t.Fatalf("Originator = %q, want %q", got, Originator)
@@ -441,6 +548,108 @@ func TestApplyCodexRequestHeadersPreservesOpenCodeClient(t *testing.T) {
 	}
 	if got := req.Header.Get("Originator"); got != "opencode" {
 		t.Fatalf("Originator = %q, want %q", got, "opencode")
+	}
+}
+
+func TestApplyOpenAIResponsesRequestHeadersSetsCodexUserAgent(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://relay.example/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	headers := http.Header{
+		"User-Agent":          []string{"curl/8.0"},
+		"OpenAI-Organization": []string{"org-123"},
+		"Idempotency-Key":     []string{"idem-123"},
+	}
+
+	applyOpenAIResponsesRequestHeaders(req, &auth.Account{DBID: 42}, "relay-token", headers)
+
+	if got := req.Header.Get("User-Agent"); got != defaultCodexCLIUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, defaultCodexCLIUserAgent)
+	}
+	if got := req.Header.Get("Version"); got != latestCodexCLIVersion {
+		t.Fatalf("Version = %q, want %q", got, latestCodexCLIVersion)
+	}
+	if got := req.Header.Get("Authorization"); got != "Bearer relay-token" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("OpenAI-Organization"); got != "org-123" {
+		t.Fatalf("OpenAI-Organization = %q", got)
+	}
+	if got := req.Header.Get("Idempotency-Key"); got != "idem-123" {
+		t.Fatalf("Idempotency-Key = %q", got)
+	}
+}
+
+func TestOpenAIResponsesExecutorsDoNotLeakGoDefaultUserAgent(t *testing.T) {
+	type result struct {
+		path      string
+		ua        string
+		version   string
+		auth      string
+		accept    string
+		bodyBytes int
+	}
+	results := make(chan result, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = r.Body.Close()
+		results <- result{
+			path:      r.URL.Path,
+			ua:        r.Header.Get("User-Agent"),
+			version:   r.Header.Get("Version"),
+			auth:      r.Header.Get("Authorization"),
+			accept:    r.Header.Get("Accept"),
+			bodyBytes: len(body),
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_test"}`))
+	}))
+	t.Cleanup(server.Close)
+
+	account := &auth.Account{
+		DBID:         42,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      server.URL,
+		APIKey:       "relay-token",
+	}
+
+	resp, err := ExecuteOpenAIResponsesRequest(context.Background(), account, []byte(`{"model":"gpt-5.4"}`), "", http.Header{"User-Agent": []string{"curl/8.0"}})
+	if err != nil {
+		t.Fatalf("ExecuteOpenAIResponsesRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = ExecuteOpenAIResponsesCompactRequest(context.Background(), account, []byte(`{"model":"gpt-5.4"}`), "", nil)
+	if err != nil {
+		t.Fatalf("ExecuteOpenAIResponsesCompactRequest() error = %v", err)
+	}
+	resp.Body.Close()
+
+	for _, wantPath := range []string{"/v1/responses", "/v1/responses/compact"} {
+		select {
+		case got := <-results:
+			if got.path != wantPath {
+				t.Fatalf("path = %q, want %q", got.path, wantPath)
+			}
+			if got.ua == "" || got.ua == "Go-http-client/2.0" || !strings.HasPrefix(got.ua, "codex-tui/") {
+				t.Fatalf("%s User-Agent = %q, want codex-tui and not Go default", wantPath, got.ua)
+			}
+			if got.version != latestCodexCLIVersion {
+				t.Fatalf("%s Version = %q, want %q", wantPath, got.version, latestCodexCLIVersion)
+			}
+			if got.auth != "Bearer relay-token" {
+				t.Fatalf("%s Authorization = %q", wantPath, got.auth)
+			}
+			if got.accept != "application/json, text/event-stream" {
+				t.Fatalf("%s Accept = %q", wantPath, got.accept)
+			}
+			if got.bodyBytes == 0 {
+				t.Fatalf("%s request body was empty", wantPath)
+			}
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for %s", wantPath)
+		}
 	}
 }
 
@@ -537,29 +746,43 @@ func TestExecuteRequestExplicitFalseBypassesForcedWebsocket(t *testing.T) {
 	}
 }
 
-func TestExecuteRequestForcedWebsocketFallsBackToHTTPWithoutExplicitSession(t *testing.T) {
+func TestExecuteRequestForcedWebsocketUsesStatelessSessionWithoutExplicitSession(t *testing.T) {
 	previousSettings := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
 	nextSettings := previousSettings
 	nextSettings.CodexForceWebsocket = true
-	// per-api-key 模式：恢复 v2 旧行为，断言 prompt_cache_key 跨请求确定性（回归保护 8ea79aa）。
-	nextSettings.RequestIsolationMode = RequestIsolationModePerAPIKey
+	nextSettings.RequestIsolationMode = RequestIsolationModeIsolated
 	ApplyRuntimeSettings(nextSettings)
 
 	previousWS := WebsocketExecuteFunc
 	t.Cleanup(func() { WebsocketExecuteFunc = previousWS })
-	wsCalled := false
+	var gotSessionID string
+	var gotPoolRouteKey string
+	var gotBody []byte
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
-		wsCalled = true
-		return nil, errors.New("websocket should not be used for sessionless requests")
+		gotSessionID = sessionID
+		gotPoolRouteKey = poolRouteKey
+		gotBody = append([]byte(nil), requestBody...)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(`{"id":"resp_test"}`)),
+		}, nil
 	}
 
-	_, err := ExecuteRequest(context.Background(), &auth.Account{DBID: 1}, []byte(`{"model":"gpt-5.4"}`), "", "", "sk-local", nil, http.Header{})
-	if err == nil {
-		t.Fatal("ExecuteRequest() error = nil, want HTTP path missing account error")
+	resp, err := ExecuteRequest(context.Background(), &auth.Account{DBID: 1, AccessToken: "token"}, []byte(`{"model":"gpt-5.4"}`), "", "", "sk-local", nil, http.Header{})
+	if err != nil {
+		t.Fatalf("ExecuteRequest() error = %v", err)
 	}
-	if wsCalled {
-		t.Fatal("WebsocketExecuteFunc was called for a sessionless request")
+	resp.Body.Close()
+	if gotSessionID == "" {
+		t.Fatal("sessionless forced websocket should receive a stateless session id")
+	}
+	if gotPoolRouteKey == "" {
+		t.Fatal("sessionless isolated websocket should receive a stable pool route key")
+	}
+	if !strings.Contains(string(gotBody), `"prompt_cache_key"`) {
+		t.Fatalf("sessionless isolated websocket body missing prompt_cache_key: %s", gotBody)
 	}
 }
 
