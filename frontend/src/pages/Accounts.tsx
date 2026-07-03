@@ -2158,7 +2158,7 @@ export default function Accounts() {
   };
 
   const handlePasteImport = async () => {
-    if (!pasteImportText.trim()) return;
+    if (!pasteImportText.trim() || importing) return;
     const trimmed = pasteImportText.trim();
     let items: unknown[];
     try {
@@ -2170,9 +2170,9 @@ export default function Accounts() {
     }
     const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
     const file = new File([blob], "paste.json", { type: "application/json" });
+    await importFiles([file], "json");
     setShowPasteImport(false);
     setPasteImportText("");
-    await importFiles([file], "json");
   };
 
   const handleExport = async (
@@ -4990,7 +4990,11 @@ export default function Accounts() {
             show={showImportPicker}
             title={t("accounts.importTitle")}
             contentClassName="sm:max-w-[640px]"
-            onClose={() => setShowImportPicker(false)}
+            onClose={() => {
+              setShowImportPicker(false);
+              setShowPasteImport(false);
+              setPasteImportText('');
+            }}
           >
             <div className="mb-4 space-y-1.5">
               {renderProxyInput({

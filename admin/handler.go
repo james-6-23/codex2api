@@ -2544,7 +2544,7 @@ type jsonAccountEntry struct {
 	Account               jsonAccountAccount     `json:"account"`
 	Expired               importJSONScalarString `json:"expired"`
 	ExpiresAt             importJSONScalarString `json:"expires_at"`
-	Expires               importJSONScalarString                 `json:"expires"`
+	Expires               importJSONScalarString `json:"expires"`
 	Codex7DUsedPercent    importJSONScalarString `json:"codex_7d_used_percent"`
 	Codex7DResetAt        string                 `json:"codex_7d_reset_at"`
 	Codex5HUsedPercent    importJSONScalarString `json:"codex_5h_used_percent"`
@@ -2591,7 +2591,7 @@ type sub2apiAccountCredentials struct {
 	Account               jsonAccountAccount     `json:"account"`
 	ExpiresAt             importJSONScalarString `json:"expires_at"`
 	Expired               importJSONScalarString `json:"expired"`
-	Expires               importJSONScalarString                 `json:"expires"`
+	Expires               importJSONScalarString `json:"expires"`
 	Codex7DUsedPercent    importJSONScalarString `json:"codex_7d_used_percent"`
 	Codex7DResetAt        string                 `json:"codex_7d_reset_at"`
 	Codex5HUsedPercent    importJSONScalarString `json:"codex_5h_used_percent"`
