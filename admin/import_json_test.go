@@ -1081,3 +1081,99 @@ func TestAddAccountDedupsRefreshToken(t *testing.T) {
 		t.Fatalf("active rows = %d, want 2 (duplicate allowed)", len(rows))
 	}
 }
+
+// 先导入 AT（个人账号，只有 user_id 身份），后导入裸 RT——RT 刷新后身份可知，
+// 应把新凭证合并进已有 AT 账号（RT 升级）、软删新账号，且旧账号的用量快照保留。
+func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{db: db, store: store}
+
+	// 已有 AT 账号：带用量统计
+	oldID, err := db.InsertAccountWithCredentials(context.Background(), "at-first", map[string]interface{}{
+		"access_token":          "at-rotation-1",
+		"email":                 "solo@example.com",
+		"user_id":               "user-merge1",
+		"codex_7d_used_percent": "42.5",
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert old: %v", err)
+	}
+
+	// 新导入的 RT 账号：刷新完成后身份与旧账号相同
+	newID, err := db.InsertAccountWithCredentials(context.Background(), "rt-later", map[string]interface{}{
+		"refresh_token": "rt-fresh",
+		"access_token":  "at-rotation-2",
+		"email":         "solo@example.com",
+		"user_id":       "user-merge1",
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert new: %v", err)
+	}
+	store.AddAccount(&auth.Account{DBID: newID, RefreshToken: "rt-fresh"})
+
+	if merged := handler.mergeRefreshedDuplicateIntoExisting(newID, "test"); !merged {
+		t.Fatal("expected duplicate to be merged into existing account")
+	}
+
+	oldRow, err := db.GetAccountByID(context.Background(), oldID)
+	if err != nil {
+		t.Fatalf("GetAccountByID old: %v", err)
+	}
+	if got := oldRow.GetCredential("refresh_token"); got != "rt-fresh" {
+		t.Fatalf("refresh_token = %q, want rt-fresh (RT 应升级进旧账号)", got)
+	}
+	if got := oldRow.GetCredential("access_token"); got != "at-rotation-2" {
+		t.Fatalf("access_token = %q, want at-rotation-2", got)
+	}
+	if got := oldRow.GetCredential("codex_7d_used_percent"); got != "42.5" {
+		t.Fatalf("codex_7d_used_percent = %q, want 42.5 (用量统计必须保留)", got)
+	}
+
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != oldID {
+		t.Fatalf("active rows = %d (first id %d), want 1 row with id %d", len(rows), rows[0].ID, oldID)
+	}
+}
+
+// 勾选"允许重复添加"导入的 RT 账号刷新后不得被合并。
+func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{db: db, store: store}
+
+	if _, err := db.InsertAccountWithCredentials(context.Background(), "primary", map[string]interface{}{
+		"access_token": "at-primary",
+		"email":        "solo@example.com",
+		"user_id":      "user-keep1",
+	}, ""); err != nil {
+		t.Fatalf("Insert primary: %v", err)
+	}
+	forcedID, err := db.InsertAccountWithCredentials(context.Background(), "forced", map[string]interface{}{
+		"refresh_token":   "rt-forced",
+		"email":           "solo@example.com",
+		"user_id":         "user-keep1",
+		"allow_duplicate": "true",
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert forced: %v", err)
+	}
+
+	if merged := handler.mergeRefreshedDuplicateIntoExisting(forcedID, "test"); merged {
+		t.Fatal("allow_duplicate copy must not be merged")
+	}
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("active rows = %d, want 2 (forced copy preserved)", len(rows))
+	}
+}

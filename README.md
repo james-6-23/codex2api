@@ -69,6 +69,26 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 ---
 
+## Sponsors
+
+> Want to appear here? Open an issue on GitHub.
+
+<table>
+<tr>
+<td width="180" align="center" valign="middle"><a href="https://aihub.top/register?aff=42WZVXN9KS4S"><img src="assets/aihub-logo.jpg" width="160" alt="AIHub"></a></td>
+<td valign="middle"><b><a href="https://aihub.top/register?aff=42WZVXN9KS4S">AIHub</a></b> is a high-availability AI model API relay platform for individual developers and enterprise teams. Supports Codex/Claude Code at ~1/10 official pricing. Register using the link and promo code <code>CODEX2API</code> to get $3 test credit. </td>
+</tr>
+</table>
+
+<table>
+<tr>
+<td width="180" align="center" valign="middle"><a href="https://ai.centos.hk"><b>星辰·AI</b></a></td>
+<td valign="middle"><b><a href="https://ai.centos.hk">星辰·AI</a></b> provides stable and high-speed relay services for Claude Code / Codex / Gemini, suitable for both individual developers and teams.</td>
+</tr>
+</table>
+
+---
+
 ## Contents
 
 - [Live Demo](#live-demo)
@@ -87,19 +107,6 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 - [Disclaimer and License](#disclaimer-and-license)
 - [Star History](#star-history)
 - [Links](#links)
-
----
-
-## Sponsors
-
-> Want to appear here? Open an issue on GitHub.
-
-<table>
-<tr>
-<td width="180" align="center" valign="middle"><a href="https://ai.centos.hk"><b>星辰·AI</b></a></td>
-<td valign="middle">Thanks to <b><a href="https://ai.centos.hk">星辰·AI</a></b> for sponsoring this project! 星辰·AI provides stable and high-speed relay services for Claude Code / Codex / Gemini, suitable for both individual developers and teams.</td>
-</tr>
-</table>
 
 ---
 

@@ -1442,6 +1442,23 @@ export default function Accounts() {
     if (!atForm.access_token.trim()) return;
     setSubmitting(true);
     try {
+      const tokenCount = atForm.access_token
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean).length;
+
+      if (tokenCount > 1) {
+        const res = await postAdminSSE("/accounts/at?stream=true", {
+          ...atForm,
+          allow_duplicate: allowDuplicate,
+        });
+        setShowAdd(false);
+        await readImportSSE(res);
+        showToast(t("accounts.addSuccess"));
+        setAtForm({ access_token: "", proxy_url: "" });
+        return;
+      }
+
       await api.addATAccount({ ...atForm, allow_duplicate: allowDuplicate });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);

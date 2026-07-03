@@ -5232,8 +5232,13 @@ func (db *DB) GetAllChatGPTAccountIDs(ctx context.Context) (map[string]bool, err
 }
 
 // FindActiveAccountByOAuthIdentity returns the first non-deleted account with
-// the same email and ChatGPT account id. It accepts both historical credential
-// key names: account_id and chatgpt_account_id.
+// the same email and OAuth identity. The identity matches when either the
+// ChatGPT workspace id (credential keys account_id / chatgpt_account_id) or
+// the OpenAI user id (credential key user_id, "user-...") equals accountID —
+// personal-plan JWTs may lack a workspace id, and legacy rows may have had
+// account_id polluted with a user_id by the old wham backfill, so matching
+// user_id against account_id keys (and vice versa) keeps dedup working for
+// both shapes.
 func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, accountID string, excludeIDs ...int64) (int64, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	accountID = strings.TrimSpace(accountID)
@@ -5262,11 +5267,17 @@ func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, accou
 		if _, ok := excluded[id]; ok {
 			continue
 		}
+		// 勾选"允许重复添加"强制导入的副本不作为判重锚点：后续正常导入
+		// 应命中/更新主账号，而不是把凭证写进用户故意保留的副本。
+		if strings.EqualFold(strings.TrimSpace(credentialString(raw, "allow_duplicate")), "true") {
+			continue
+		}
 		if strings.ToLower(strings.TrimSpace(credentialString(raw, "email"))) != email {
 			continue
 		}
 		if strings.TrimSpace(credentialString(raw, "account_id")) == accountID ||
-			strings.TrimSpace(credentialString(raw, "chatgpt_account_id")) == accountID {
+			strings.TrimSpace(credentialString(raw, "chatgpt_account_id")) == accountID ||
+			strings.TrimSpace(credentialString(raw, "user_id")) == accountID {
 			return id, nil
 		}
 	}

@@ -908,6 +908,15 @@ func responseFailedStatusCode(payload []byte) int {
 		return http.StatusPaymentRequired
 	case strings.Contains(codeOrType, "forbidden"):
 		return http.StatusForbidden
+	// 确定性客户端错误：输入超上下文窗口/字段超长/模型不存在等，换号重试
+	// 也必然失败。归为 400，避免落入 default 500 触发透明重试并惩罚账号
+	// 健康度 (issue #310)。
+	case strings.Contains(codeOrType, "context_length") ||
+		strings.Contains(codeOrType, "context_window") ||
+		strings.Contains(codeOrType, "above_max_length") ||
+		strings.Contains(codeOrType, "model_not_found") ||
+		strings.Contains(codeOrType, "unsupported"):
+		return http.StatusBadRequest
 	case strings.Contains(codeOrType, "invalid") || strings.Contains(codeOrType, "bad_request"):
 		return http.StatusBadRequest
 	default:

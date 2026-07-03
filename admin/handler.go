@@ -185,7 +185,79 @@ func (h *Handler) refreshImportedAccountAndProbe(accountID int64, source string)
 		return
 	}
 	log.Printf("导入账号 %d 刷新成功", accountID)
+	// 裸 RT 导入时身份要等首次刷新后才可知：此刻回查身份重复，
+	// 若与已有账号同一身份则合并凭证并移除本账号（保留旧账号的用量统计）。
+	if h.mergeRefreshedDuplicateIntoExisting(accountID, source) {
+		return
+	}
 	h.probeImportedAccountUsage(context.Background(), accountID, source)
+}
+
+// mergeRefreshedDuplicateIntoExisting 检查刚刷新完的新导入账号是否与已有账号
+// 同一 OAuth 身份。若重复，把新凭证（refresh_token 优先级最高，可自动续期）
+// 合并进已有账号——codex_* 用量快照键不在更新集里，旧账号的用量统计与按
+// 账号 ID 关联的请求历史全部保留——然后软删新插入的账号。返回 true 表示已合并。
+func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string) bool {
+	if h == nil || h.db == nil || h.store == nil {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	newRow, err := h.db.GetAccountByID(ctx, newID)
+	if err != nil || newRow == nil {
+		return false
+	}
+	// 勾选"允许重复添加"导入的副本是用户故意保留的，不合并。
+	if strings.EqualFold(strings.TrimSpace(newRow.GetCredential("allow_duplicate")), "true") {
+		return false
+	}
+	email := strings.TrimSpace(newRow.GetCredential("email"))
+	identity := strings.TrimSpace(newRow.GetCredential("account_id"))
+	if identity == "" {
+		identity = strings.TrimSpace(newRow.GetCredential("chatgpt_account_id"))
+	}
+	if identity == "" {
+		identity = strings.TrimSpace(newRow.GetCredential("user_id"))
+	}
+	if email == "" || identity == "" {
+		return false
+	}
+	oldID, err := h.db.FindActiveAccountByOAuthIdentity(ctx, email, identity, newID)
+	if err != nil || oldID <= 0 {
+		return false
+	}
+
+	updates := make(map[string]interface{})
+	for _, key := range []string{"refresh_token", "session_token", "access_token", "access_token_type", "id_token", "expires_at", "email", "account_id", "user_id", "plan_type", "subscription_expires_at"} {
+		if v := strings.TrimSpace(newRow.GetCredential(key)); v != "" {
+			updates[key] = v
+		}
+	}
+	if len(updates) == 0 {
+		return false
+	}
+	proxyURL := strings.TrimSpace(newRow.ProxyURL)
+	if proxyURL == "" {
+		if oldRow, err := h.db.GetAccountByID(ctx, oldID); err == nil && oldRow != nil {
+			proxyURL = strings.TrimSpace(oldRow.ProxyURL)
+		}
+	}
+	if err := h.db.UpdateOAuthAccountCredentials(ctx, oldID, updates, proxyURL); err != nil {
+		log.Printf("合并导入账号 %d 凭证到已有账号 %d 失败: %v", newID, oldID, err)
+		return false
+	}
+	if err := h.reloadTokenAccount(ctx, oldID, source); err != nil {
+		log.Printf("合并后重载账号 %d 失败: %v", oldID, err)
+	}
+	if err := h.db.SoftDeleteAccount(ctx, newID); err != nil {
+		log.Printf("软删重复导入账号 %d 失败: %v", newID, err)
+	}
+	h.store.RemoveAccount(newID)
+	h.db.InsertAccountEventAsync(newID, "deleted", fmt.Sprintf("merged_into_%d", oldID))
+	h.db.InsertAccountEventAsync(oldID, "updated", "rt_upgrade_merge")
+	log.Printf("导入账号 %d 与已有账号 %d 同一 OAuth 身份，已合并凭证（RT 升级）并保留用量统计 (source=%s)", newID, oldID, source)
+	return true
 }
 
 func (h *Handler) deleteRuntimeCache(ctx context.Context, namespace, key string) {
@@ -1677,7 +1749,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 
 	var seeds []tokenCredentialSeed
 	for i := 0; i < total; i++ {
-		seed := tokenCredentialSeed{}
+		seed := tokenCredentialSeed{allowDuplicate: req.AllowDuplicate}
 		if len(refreshTokens) > 0 {
 			seed.refreshToken = refreshTokens[i]
 		}
@@ -1904,6 +1976,11 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		return
 	}
 
+	if strings.EqualFold(c.Query("stream"), "true") {
+		h.streamAddATAccounts(c, req, tokens)
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
@@ -1912,8 +1989,9 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	updatedCount := 0
 	duplicateCount := 0
 
-	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email+account_id，如 codex_at）
-	// 按 access_token 原文去重；身份型 AT 由 upsertOAuthIdentityAccount 按 OAuth 身份去重/更新。
+	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email + 工作区/用户 ID，如 codex_at）
+	// 按 access_token 原文去重；身份型 AT 由 upsertOAuthIdentityAccount 按 OAuth 身份
+	//（email + account_id/user_id）去重/更新——AT 会轮换，仅按原文去重会重复导入同一账号。
 	// 勾选"允许重复添加"时跳过全部去重，强制新建。
 	existingATs := make(map[string]bool)
 	seenAT := make(map[string]bool)
@@ -1934,9 +2012,10 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		}
 
 		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
-			accessToken: at,
+			accessToken:    at,
+			allowDuplicate: req.AllowDuplicate,
 		})
-		if !req.AllowDuplicate && seed.email != "" && seed.accountID != "" {
+		if !req.AllowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -2003,6 +2082,102 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		"updated":   updatedCount,
 		"duplicate": duplicateCount,
 		"failed":    failCount,
+	})
+}
+
+// streamAddATAccounts 以 SSE 流式推送 AT 批量添加进度（与 streamAddAccounts 对齐）。
+func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, tokens []string) {
+	setupSSE(c)
+
+	total := len(tokens)
+	successCount := 0
+	failCount := 0
+	updatedCount := 0
+	duplicateCount := 0
+	sendImportEvent(c, importEvent{
+		Type: "progress", Current: 0, Total: total,
+		Success: 0, Duplicate: 0, Failed: 0,
+	})
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
+	defer cancel()
+
+	existingATs := make(map[string]bool)
+	seenAT := make(map[string]bool)
+	if !req.AllowDuplicate {
+		if got, err := h.db.GetAllAccessTokens(ctx); err != nil {
+			log.Printf("查询已有 AT 失败: %v", err)
+		} else {
+			existingATs = got
+		}
+	}
+
+	progress := func(current int) {
+		sendImportEvent(c, importEvent{
+			Type: "progress", Current: current, Total: total,
+			Success: successCount, Duplicate: duplicateCount, Failed: failCount,
+		})
+	}
+
+	for i, at := range tokens {
+		name := req.Name
+		if name == "" {
+			name = fmt.Sprintf("at-account-%d", i+1)
+		} else if total > 1 {
+			name = fmt.Sprintf("%s-%d", req.Name, i+1)
+		}
+
+		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{accessToken: at, allowDuplicate: req.AllowDuplicate})
+		if !req.AllowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
+			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
+			if err != nil {
+				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
+				failCount++
+			} else {
+				successCount++
+				if updated {
+					updatedCount++
+					duplicateCount++ // 前端进度条以 duplicate 展示"已有账号更新"
+				}
+				log.Printf("AT 账号 %d 已加入或更新号池 (id=%d)", i+1, id)
+			}
+			progress(i + 1)
+			continue
+		}
+
+		if !req.AllowDuplicate {
+			if existingATs[at] || seenAT[at] {
+				duplicateCount++
+				progress(i + 1)
+				continue
+			}
+			seenAT[at] = true
+		}
+
+		id, err := h.db.InsertATAccount(ctx, name, at, req.ProxyURL)
+		if err != nil {
+			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
+			failCount++
+			progress(i + 1)
+			continue
+		}
+
+		successCount++
+		h.db.InsertAccountEventAsync(id, "added", "manual_at")
+		newAcc := accountFromCredentialSeed(id, req.ProxyURL, seed)
+		h.store.AddAccount(newAcc)
+		if creds := tokenCredentialMap(seed); len(creds) > 0 {
+			if err := h.db.UpdateCredentials(ctx, id, creds); err != nil {
+				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
+			}
+		}
+		progress(i + 1)
+	}
+
+	security.SecurityAuditLog("AT_ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, updatedCount, duplicateCount, failCount, c.ClientIP()))
+	sendImportEvent(c, importEvent{
+		Type: "complete", Current: total, Total: total,
+		Success: successCount, Duplicate: duplicateCount, Failed: failCount,
 	})
 }
 
@@ -2646,6 +2821,11 @@ func importTokenOAuthIdentityKey(t importToken, conflicts map[string]bool) strin
 	if accountID == "" && strings.TrimSpace(t.accountID) == "" {
 		accountID = strings.TrimSpace(t.chatgptAccountID)
 	}
+	// 个人账号可能只有 user_id（无工作区 account_id），用它兜底做身份键，
+	// 否则文件导入会退化为凭证原文比对，AT 轮换后重复导入。
+	if accountID == "" {
+		accountID = strings.TrimSpace(seed.userID)
+	}
 	if email == "" || accountID == "" {
 		return ""
 	}
@@ -3134,11 +3314,12 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			name := tok.name
 
 			seed := importTokenSeed(tok, conflictingChatGPTIDs)
+			seed.allowDuplicate = allowDuplicate
 			importSource := "import"
 			if tok.accessToken != "" && tok.refreshToken == "" {
 				importSource = "import_at"
 			}
-			if !allowDuplicate && seed.email != "" && seed.accountID != "" {
+			if !allowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
 				if name == "" {
 					if importSource == "import_at" {
 						name = fmt.Sprintf("at-import-%d", idx+1)

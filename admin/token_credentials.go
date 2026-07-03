@@ -9,12 +9,19 @@ import (
 )
 
 type tokenCredentialSeed struct {
-	refreshToken          string
-	sessionToken          string
-	accessToken           string
-	accessTokenType       string
-	idToken               string
-	accountID             string
+	refreshToken    string
+	sessionToken    string
+	accessToken     string
+	accessTokenType string
+	idToken         string
+	accountID       string
+	// userID 是 OpenAI 用户 ID（user-...），个人账号的 JWT 可能没有工作区
+	// account_id，此时以 email+userID 作为 OAuth 身份去重键 (重复导入问题)。
+	userID string
+	// allowDuplicate 标记该账号是用户勾选"允许重复添加"强制导入的副本。
+	// 持久化为 credentials.allow_duplicate，身份判重与启动时的 dedupe 迁移
+	// 都会跳过带标记的账号，避免把用户故意保留的重复当垃圾合并。
+	allowDuplicate        bool
 	email                 string
 	planType              string
 	expiresAt             time.Time
@@ -36,6 +43,7 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 	seed.accessTokenType = strings.TrimSpace(seed.accessTokenType)
 	seed.idToken = strings.TrimSpace(seed.idToken)
 	seed.accountID = strings.TrimSpace(seed.accountID)
+	seed.userID = strings.TrimSpace(seed.userID)
 	seed.email = strings.TrimSpace(seed.email)
 	seed.planType = strings.TrimSpace(seed.planType)
 	seed.expiresAtRaw = strings.TrimSpace(seed.expiresAtRaw)
@@ -56,6 +64,9 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 	if info := accountInfoFromTokens(seed.idToken, accessTokenForJWT); info != nil {
 		if seed.accountID == "" {
 			seed.accountID = info.ChatGPTAccountID
+		}
+		if seed.userID == "" {
+			seed.userID = info.UserID
 		}
 		if seed.email == "" {
 			seed.email = info.Email
@@ -104,6 +115,9 @@ func accountInfoFromTokens(idToken, accessToken string) *auth.AccountInfo {
 		if info.ChatGPTAccountID == "" {
 			info.ChatGPTAccountID = atInfo.ChatGPTAccountID
 		}
+		if info.UserID == "" {
+			info.UserID = atInfo.UserID
+		}
 		if info.Email == "" {
 			info.Email = atInfo.Email
 		}
@@ -140,6 +154,12 @@ func tokenCredentialMap(seed tokenCredentialSeed) map[string]interface{} {
 	}
 	if seed.accountID != "" {
 		credentials["account_id"] = seed.accountID
+	}
+	if seed.userID != "" {
+		credentials["user_id"] = seed.userID
+	}
+	if seed.allowDuplicate {
+		credentials["allow_duplicate"] = "true"
 	}
 	if seed.email != "" {
 		credentials["email"] = seed.email

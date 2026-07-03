@@ -152,3 +152,43 @@ func TestRefreshWithSessionToken(t *testing.T) {
 		t.Fatalf("Email = %q, want session@example.com", info.Email)
 	}
 }
+
+// 个人账号 JWT 可能没有 chatgpt_account_id，只有 user_id；解析必须带出它，
+// 供 AT 导入按 email+user_id 做身份去重（重复导入问题）。
+func TestParseAccessTokenExtractsUserID(t *testing.T) {
+	jwt := makeTestJWT(map[string]interface{}{
+		"exp": 9999999999,
+		"https://api.openai.com/auth": map[string]interface{}{
+			"user_id":           "user-QJuZktEjr1Sbbiq19lRnZTow",
+			"chatgpt_plan_type": "pro",
+		},
+		"https://api.openai.com/profile": map[string]interface{}{
+			"email": "solo@example.com",
+		},
+	})
+
+	info := ParseAccessToken(jwt)
+	if info == nil {
+		t.Fatal("ParseAccessToken returned nil")
+	}
+	if info.UserID != "user-QJuZktEjr1Sbbiq19lRnZTow" {
+		t.Fatalf("UserID = %q, want user-QJuZktEjr1Sbbiq19lRnZTow", info.UserID)
+	}
+	if info.ChatGPTAccountID != "" {
+		t.Fatalf("ChatGPTAccountID = %q, want empty", info.ChatGPTAccountID)
+	}
+}
+
+func TestParseAccessTokenChatGPTUserIDFallback(t *testing.T) {
+	jwt := makeTestJWT(map[string]interface{}{
+		"exp": 9999999999,
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_user_id": "user-fallback-1",
+		},
+	})
+
+	info := ParseAccessToken(jwt)
+	if info == nil || info.UserID != "user-fallback-1" {
+		t.Fatalf("UserID = %v, want user-fallback-1", info)
+	}
+}

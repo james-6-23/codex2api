@@ -44,6 +44,7 @@ type TokenData struct {
 type AccountInfo struct {
 	Email                 string    `json:"email"`
 	ChatGPTAccountID      string    `json:"chatgpt_account_id"`
+	UserID                string    `json:"user_id"`
 	PlanType              string    `json:"chatgpt_plan_type"`
 	SubscriptionExpiresAt time.Time `json:"-"`
 }
@@ -355,6 +356,8 @@ func parseIDToken(idToken string) *AccountInfo {
 		Email      string `json:"email"`
 		OpenAIAuth *struct {
 			ChatGPTAccountID               string `json:"chatgpt_account_id"`
+			UserID                         string `json:"user_id"`
+			ChatGPTUserID                  string `json:"chatgpt_user_id"`
 			PlanType                       string `json:"chatgpt_plan_type"`
 			ChatGPTSubscriptionActiveUntil string `json:"chatgpt_subscription_active_until"`
 		} `json:"https://api.openai.com/auth"`
@@ -366,6 +369,7 @@ func parseIDToken(idToken string) *AccountInfo {
 	info := &AccountInfo{Email: claims.Email}
 	if claims.OpenAIAuth != nil {
 		info.ChatGPTAccountID = claims.OpenAIAuth.ChatGPTAccountID
+		info.UserID = firstNonEmptyTrimmed(claims.OpenAIAuth.UserID, claims.OpenAIAuth.ChatGPTUserID)
 		info.PlanType = claims.OpenAIAuth.PlanType
 		if s := claims.OpenAIAuth.ChatGPTSubscriptionActiveUntil; s != "" {
 			if t, err := time.Parse(time.RFC3339, s); err == nil {
@@ -380,9 +384,19 @@ func parseIDToken(idToken string) *AccountInfo {
 type AccessTokenInfo struct {
 	Email                 string
 	ChatGPTAccountID      string
+	UserID                string
 	PlanType              string
 	ExpiresAt             time.Time
 	SubscriptionExpiresAt time.Time
+}
+
+func firstNonEmptyTrimmed(values ...string) string {
+	for _, v := range values {
+		if trimmed := strings.TrimSpace(v); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
 }
 
 // ParseAccessToken 解析 Access Token 的 JWT payload（不验签）
@@ -417,6 +431,8 @@ func ParseAccessToken(accessToken string) *AccessTokenInfo {
 		Exp        int64 `json:"exp"`
 		OpenAIAuth *struct {
 			ChatGPTAccountID               string `json:"chatgpt_account_id"`
+			UserID                         string `json:"user_id"`
+			ChatGPTUserID                  string `json:"chatgpt_user_id"`
 			PlanType                       string `json:"chatgpt_plan_type"`
 			ChatGPTSubscriptionActiveUntil string `json:"chatgpt_subscription_active_until"`
 		} `json:"https://api.openai.com/auth"`
@@ -434,6 +450,7 @@ func ParseAccessToken(accessToken string) *AccessTokenInfo {
 	}
 	if claims.OpenAIAuth != nil {
 		info.ChatGPTAccountID = claims.OpenAIAuth.ChatGPTAccountID
+		info.UserID = firstNonEmptyTrimmed(claims.OpenAIAuth.UserID, claims.OpenAIAuth.ChatGPTUserID)
 		info.PlanType = claims.OpenAIAuth.PlanType
 		if s := claims.OpenAIAuth.ChatGPTSubscriptionActiveUntil; s != "" {
 			if t, err := time.Parse(time.RFC3339, s); err == nil {
