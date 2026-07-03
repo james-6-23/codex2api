@@ -160,7 +160,14 @@ func (h *Handler) probeImportedAccountUsage(ctx context.Context, accountID int64
 	defer cancel()
 	if err := probeFn(probeCtx, account); err != nil {
 		log.Printf("导入账号 %d 用量采样失败 (%s): %v", accountID, source, err)
+		return
 	}
+	// AT / codex_at 账号的 OAuth 身份（email + account_id）在插入时无法从
+	// JWT 解出，由上面的 wham 探针补齐并落库。身份既已可知，此刻回查是否与
+	// 已有账号同一身份：若重复则把凭证合并进旧账号并软删本账号——与 RT 路径
+	// refreshImportedAccountAndProbe 对称，补上 AT 导入/添加事后无法去重的缺口
+	// （codex_at 原文轮换 + 存量 account_id 被 user_id 污染都会导致插入期判重失配）。
+	h.mergeRefreshedDuplicateIntoExisting(accountID, source)
 }
 
 func (h *Handler) triggerImportedAccountUsageProbe(accountID int64, source string) {
@@ -2022,11 +2029,14 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 				failCount++
 				continue
 			}
-			successCount++
 			if updated {
+				// 已有账号只更新凭证，不计入"新增"。
 				updatedCount++
+				log.Printf("AT 账号 %d 命中已有身份并更新凭证 (id=%d)", i+1, id)
+			} else {
+				successCount++
+				log.Printf("AT 账号 %d 已加入号池 (id=%d)", i+1, id)
 			}
-			log.Printf("AT 账号 %d 已加入或更新号池 (id=%d)", i+1, id)
 			continue
 		}
 
@@ -2060,14 +2070,17 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
 			}
 		}
+		// 触发 wham 用量探针：codex_at 的身份此刻未知，探针补齐身份后会回查
+		// 并合并同身份的已有账号（见 probeImportedAccountUsage）。
+		h.triggerImportedAccountUsageProbe(id, "manual_at")
 		log.Printf("AT 账号 %d 已加入号池 (id=%d, email=%s)", i+1, id, newAcc.Email)
 	}
 
 	security.SecurityAuditLog("AT_ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, updatedCount, duplicateCount, failCount, c.ClientIP()))
 
-	msg := fmt.Sprintf("成功添加 %d 个 AT 账号", successCount)
+	msg := fmt.Sprintf("成功新增 %d 个 AT 账号", successCount)
 	if updatedCount > 0 {
-		msg += fmt.Sprintf("（其中 %d 个为已有账号更新）", updatedCount)
+		msg += fmt.Sprintf("，%d 个已有账号更新", updatedCount)
 	}
 	if duplicateCount > 0 {
 		msg += fmt.Sprintf("，%d 个重复跳过", duplicateCount)
@@ -2096,7 +2109,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 	duplicateCount := 0
 	sendImportEvent(c, importEvent{
 		Type: "progress", Current: 0, Total: total,
-		Success: 0, Duplicate: 0, Failed: 0,
+		Success: 0, Updated: 0, Duplicate: 0, Failed: 0,
 	})
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
@@ -2115,7 +2128,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 	progress := func(current int) {
 		sendImportEvent(c, importEvent{
 			Type: "progress", Current: current, Total: total,
-			Success: successCount, Duplicate: duplicateCount, Failed: failCount,
+			Success: successCount, Updated: updatedCount, Duplicate: duplicateCount, Failed: failCount,
 		})
 	}
 
@@ -2133,13 +2146,13 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 				failCount++
+			} else if updated {
+				// 已有账号只更新凭证，不计入"新增"（重复添加时新增应为 0）。
+				updatedCount++
+				log.Printf("AT 账号 %d 命中已有身份并更新凭证 (id=%d)", i+1, id)
 			} else {
 				successCount++
-				if updated {
-					updatedCount++
-					duplicateCount++ // 前端进度条以 duplicate 展示"已有账号更新"
-				}
-				log.Printf("AT 账号 %d 已加入或更新号池 (id=%d)", i+1, id)
+				log.Printf("AT 账号 %d 已加入号池 (id=%d)", i+1, id)
 			}
 			progress(i + 1)
 			continue
@@ -2171,13 +2184,15 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 				log.Printf("AT 账号 %d 更新 credentials 失败: %v", id, err)
 			}
 		}
+		// 与非流式路径一致：探针补齐 codex_at 身份后回查合并同身份的已有账号。
+		h.triggerImportedAccountUsageProbe(id, "manual_at")
 		progress(i + 1)
 	}
 
 	security.SecurityAuditLog("AT_ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, updatedCount, duplicateCount, failCount, c.ClientIP()))
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
-		Success: successCount, Duplicate: duplicateCount, Failed: failCount,
+		Success: successCount, Updated: updatedCount, Duplicate: duplicateCount, Failed: failCount,
 	})
 }
 
@@ -3048,6 +3063,7 @@ type importEvent struct {
 	Current   int    `json:"current"`
 	Total     int    `json:"total"`
 	Success   int    `json:"success"`
+	Updated   int    `json:"updated"`
 	Duplicate int    `json:"duplicate"`
 	Failed    int    `json:"failed"`
 }
@@ -3278,6 +3294,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	setupSSE(c)
 
 	var successCount int64
+	var updatedCount int64
 	var failCount int64
 	var current int64
 	sem := make(chan struct{}, 20) // 并发插入上限
@@ -3293,10 +3310,11 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			case <-ticker.C:
 				cur := int(atomic.LoadInt64(&current))
 				suc := int(atomic.LoadInt64(&successCount))
+				upd := int(atomic.LoadInt64(&updatedCount))
 				fai := int(atomic.LoadInt64(&failCount))
 				sendImportEvent(c, importEvent{
 					Type: "progress", Current: cur + duplicateCount, Total: total,
-					Success: suc, Duplicate: duplicateCount, Failed: fai,
+					Success: suc, Updated: upd, Duplicate: duplicateCount, Failed: fai,
 				})
 			case <-done:
 				return
@@ -3329,7 +3347,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 				}
 
 				upsertCtx, upsertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, _, err := h.upsertOAuthIdentityAccount(upsertCtx, name, proxyURL, seed, importSource)
+				id, updated, err := h.upsertOAuthIdentityAccount(upsertCtx, name, proxyURL, seed, importSource)
 				upsertCancel()
 				if err != nil {
 					log.Printf("导入账号 %d/%d 更新或写入失败: %v", idx+1, len(newTokens), err)
@@ -3338,7 +3356,12 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					return
 				}
 
-				atomic.AddInt64(&successCount, 1)
+				if updated {
+					// 已有账号只更新凭证，不计入"新增"。
+					atomic.AddInt64(&updatedCount, 1)
+				} else {
+					atomic.AddInt64(&successCount, 1)
+				}
 				atomic.AddInt64(&current, 1)
 				if h.store != nil {
 					if acc := h.store.FindByID(id); acc != nil {
@@ -3436,13 +3459,14 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 	// 发送完成事件
 	suc := int(atomic.LoadInt64(&successCount))
+	upd := int(atomic.LoadInt64(&updatedCount))
 	fai := int(atomic.LoadInt64(&failCount))
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
-		Success: suc, Duplicate: duplicateCount, Failed: fai,
+		Success: suc, Updated: upd, Duplicate: duplicateCount, Failed: fai,
 	})
 
-	log.Printf("导入完成: success=%d, duplicate=%d, failed=%d, total=%d", suc, duplicateCount, fai, total)
+	log.Printf("导入完成: success=%d, updated=%d, duplicate=%d, failed=%d, total=%d", suc, upd, duplicateCount, fai, total)
 }
 
 // importAccountsATTXT 通过 TXT 文件导入 AT-only 账号（每行一个 Access Token）

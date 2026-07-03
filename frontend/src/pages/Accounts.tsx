@@ -636,6 +636,7 @@ export default function Accounts() {
     current: number;
     total: number;
     success: number;
+    updated: number;
     duplicate: number;
     failed: number;
     done: boolean;
@@ -644,6 +645,7 @@ export default function Accounts() {
     current: 0,
     total: 0,
     success: 0,
+    updated: 0,
     duplicate: 0,
     failed: 0,
     done: false,
@@ -1442,28 +1444,16 @@ export default function Accounts() {
     if (!atForm.access_token.trim()) return;
     setSubmitting(true);
     try {
-      const tokenCount = atForm.access_token
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean).length;
-
-      if (tokenCount > 1) {
-        const res = await postAdminSSE("/accounts/at?stream=true", {
-          ...atForm,
-          allow_duplicate: allowDuplicate,
-        });
-        setShowAdd(false);
-        await readImportSSE(res);
-        showToast(t("accounts.addSuccess"));
-        setAtForm({ access_token: "", proxy_url: "" });
-        return;
-      }
-
-      await api.addATAccount({ ...atForm, allow_duplicate: allowDuplicate });
-      showToast(t("accounts.addSuccess"));
+      // 始终走流式：即使只添加一个 access_token 也展示进度条，并能反映
+      // 身份去重/合并结果（已有账号更新、重复跳过）。
+      const res = await postAdminSSE("/accounts/at?stream=true", {
+        ...atForm,
+        allow_duplicate: allowDuplicate,
+      });
       setShowAdd(false);
+      await readImportSSE(res);
+      showToast(t("accounts.addSuccess"));
       setAtForm({ access_token: "", proxy_url: "" });
-      void reload();
     } catch (error) {
       showToast(
         t("accounts.addFailed", { error: getErrorMessage(error) }),
@@ -1805,6 +1795,7 @@ export default function Accounts() {
       current: 0,
       total: 0,
       success: 0,
+      updated: 0,
       duplicate: 0,
       failed: 0,
       done: false,
@@ -1830,6 +1821,7 @@ export default function Accounts() {
             current: number;
             total: number;
             success: number;
+            updated: number;
             duplicate: number;
             failed: number;
           };
@@ -1838,6 +1830,7 @@ export default function Accounts() {
             current: event.current,
             total: event.total,
             success: event.success,
+            updated: event.updated ?? 0,
             duplicate: event.duplicate,
             failed: event.failed,
             done: event.type === "complete",
@@ -1860,6 +1853,7 @@ export default function Accounts() {
       current: 0,
       total: 0,
       success: 0,
+      updated: 0,
       duplicate: 0,
       failed: 0,
       done: false,
@@ -1894,6 +1888,7 @@ export default function Accounts() {
             current: data.total ?? 0,
             total: data.total ?? 0,
             success: data.success ?? 0,
+            updated: data.updated ?? 0,
             duplicate: data.duplicate ?? 0,
             failed: data.failed ?? 0,
             done: true,
@@ -1908,6 +1903,7 @@ export default function Accounts() {
         current: 1,
         total: 1,
         success: 0,
+        updated: 0,
         duplicate: 0,
         failed: 1,
         done: true,
@@ -6329,8 +6325,8 @@ export default function Accounts() {
                   ? `${importProgress.current} / ${importProgress.total}  (${Math.round((importProgress.current / importProgress.total) * 100)}%)`
                   : t("accounts.importPreparing")}
               </div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="rounded-xl bg-emerald-500/10 px-3 py-2">
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <div className="rounded-xl bg-emerald-500/10 px-2 py-2">
                   <div className="text-lg font-bold text-emerald-600">
                     {importProgress.success}
                   </div>
@@ -6338,7 +6334,15 @@ export default function Accounts() {
                     {t("accounts.importSuccess")}
                   </div>
                 </div>
-                <div className="rounded-xl bg-amber-500/10 px-3 py-2">
+                <div className="rounded-xl bg-sky-500/10 px-2 py-2">
+                  <div className="text-lg font-bold text-sky-600">
+                    {importProgress.updated}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {t("accounts.importUpdated")}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-amber-500/10 px-2 py-2">
                   <div className="text-lg font-bold text-amber-600">
                     {importProgress.duplicate}
                   </div>
@@ -6346,7 +6350,7 @@ export default function Accounts() {
                     {t("accounts.importDuplicate")}
                   </div>
                 </div>
-                <div className="rounded-xl bg-red-500/10 px-3 py-2">
+                <div className="rounded-xl bg-red-500/10 px-2 py-2">
                   <div className="text-lg font-bold text-red-600">
                     {importProgress.failed}
                   </div>
