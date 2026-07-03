@@ -769,6 +769,16 @@ type streamOutcome struct {
 	failureKind    string
 	failureMessage string
 	penalize       bool
+	// verifyAccountAuth 标记这是一次 WS 上游读流失败（如 close 1008 policy violation）。
+	// WS 通道下 token 失效表现为上游主动关闭而非 401，需异步跑一次探针确认账号鉴权状态，
+	// 命中 401 才按 unauthorized 冷却，避免失效账号不被封、反复被调度。
+	verifyAccountAuth bool
+}
+
+// isWebsocketUpstreamClose 判断读流错误是否来自 WS 上游异常关闭/读失败。
+// wsrelay 的读错误统一以 "websocket read error:" 前缀包裹（见 wsrelay/executor.go）。
+func isWebsocketUpstreamClose(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "websocket read error")
 }
 
 func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) streamOutcome {
@@ -798,10 +808,11 @@ func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) st
 			kind = "transport"
 		}
 		return streamOutcome{
-			logStatusCode:  logStatusUpstreamStreamBreak,
-			failureKind:    kind,
-			failureMessage: fmt.Sprintf("上游流读取失败: %v", readErr),
-			penalize:       true,
+			logStatusCode:     logStatusUpstreamStreamBreak,
+			failureKind:       kind,
+			failureMessage:    fmt.Sprintf("上游流读取失败: %v", readErr),
+			penalize:          true,
+			verifyAccountAuth: isWebsocketUpstreamClose(readErr),
 		}
 	}
 
@@ -1810,6 +1821,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 			}
 			ttftGuard.Stop()
+			if outcome.verifyAccountAuth {
+				h.store.VerifyAccountAuthAsync(account)
+			}
 			var responseFailedDecision codex429Decision
 			if len(terminalFailurePayload) > 0 {
 				outcome = classifyResponseFailedOutcome(terminalFailurePayload)
@@ -2204,6 +2218,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 		}
 		ttftGuard.Stop()
+		if outcome.verifyAccountAuth {
+			h.store.VerifyAccountAuthAsync(account)
+		}
 		var responseFailedDecision codex429Decision
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
@@ -3269,6 +3286,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 		}
 		ttftGuard.Stop()
+		if outcome.verifyAccountAuth {
+			h.store.VerifyAccountAuthAsync(account)
+		}
 		var responseFailedDecision codex429Decision
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)

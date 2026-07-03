@@ -86,6 +86,7 @@ type Account struct {
 
 	usageProbeInFlight          bool
 	recoveryProbeInFlight       bool
+	lastAuthVerifyAt            time.Time // WS 上游异常关闭后触发的鉴权验证探针节流时间戳
 	AutoPause5hThreshold        float64 // 0..1, 0 = disabled
 	AutoPause7dThreshold        float64 // 0..1, 0 = disabled
 	AutoPause5hDisabled         bool
@@ -5362,6 +5363,51 @@ func (s *Store) SetUsageProbeFunc(fn func(context.Context, *Account) error) {
 	s.usageProbeMu.Lock()
 	defer s.usageProbeMu.Unlock()
 	s.usageProbe = fn
+}
+
+// wsAuthVerifyMinInterval 限制同一账号 WS 鉴权验证探针的最小触发间隔，
+// 避免高频 WS 上游异常关闭下反复探针。
+const wsAuthVerifyMinInterval = 30 * time.Second
+
+// VerifyAccountAuthAsync 在 WS 上游异常关闭（如 close 1008 policy violation）后，
+// 异步对单个账号跑一次用量探针（wham 优先、零额度成本）。
+//
+// 背景：token 失效在 HTTP 通道会返回 401 → 走 applyCooldown 标记 unauthorized 冷却；
+// 但在 WS 通道上游是用 close 1008 踢连接，被归类为普通 transport 失败，账号不会被封、
+// 仍留在号池反复失败。这里用一次探针把"看不见的 401"补成与 HTTP 一致的处理：
+// 探针命中 401 时 usage_probe 会 MarkCooldownWithError(unauthorized)；若只是内容策略/
+// 网络抖动触发的 1008，探针返回正常，不会误封。带最小间隔节流。
+func (s *Store) VerifyAccountAuthAsync(account *Account) {
+	if s == nil || account == nil {
+		return
+	}
+	s.usageProbeMu.RLock()
+	probeFn := s.usageProbe
+	s.usageProbeMu.RUnlock()
+	if probeFn == nil {
+		return
+	}
+
+	now := time.Now()
+	account.mu.Lock()
+	if !account.lastAuthVerifyAt.IsZero() && now.Sub(account.lastAuthVerifyAt) < wsAuthVerifyMinInterval {
+		account.mu.Unlock()
+		return
+	}
+	account.lastAuthVerifyAt = now
+	account.mu.Unlock()
+
+	if !account.TryBeginUsageProbe() {
+		return
+	}
+	go func() {
+		defer account.FinishUsageProbe()
+		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		defer cancel()
+		if err := probeFn(ctx, account); err != nil {
+			log.Printf("[账号 %d] WS 上游异常关闭后鉴权验证探针失败: %v", account.DBID, err)
+		}
+	}()
 }
 
 // TriggerUsageProbeAsync 异步触发一次批量用量探针
