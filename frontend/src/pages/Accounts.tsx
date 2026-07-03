@@ -615,6 +615,8 @@ export default function Accounts() {
   const [showImportPicker, setShowImportPicker] = useState(false);
   const [importProxyUrl, setImportProxyUrl] = useState("");
   const [showSub2APIImport, setShowSub2APIImport] = useState(false);
+  const [showPasteImport, setShowPasteImport] = useState(false);
+  const [pasteImportText, setPasteImportText] = useState("");
   const [dragging, setDragging] = useState(false);
   const dragCounter = useRef(0);
   const [showExportPicker, setShowExportPicker] = useState(false);
@@ -651,12 +653,14 @@ export default function Accounts() {
     done: false,
   });
   const [addMethod, setAddMethod] = useState<
-    "rt" | "st" | "at" | "openai" | "oauth"
+    "rt" | "st" | "at" | "session" | "openai" | "oauth"
   >("oauth");
   const [atForm, setAtForm] = useState<AddATAccountRequest>({
     access_token: "",
     proxy_url: "",
   });
+  const [sessionJson, setSessionJson] = useState("");
+  const [sessionProxyUrl, setSessionProxyUrl] = useState("");
   // 允许重复添加：勾选后本次添加/导入跳过去重，强制新建（添加弹窗与导入弹窗共用）。
   const [allowDuplicate, setAllowDuplicate] = useState(false);
   const [openAIForm, setOpenAIForm] =
@@ -1528,6 +1532,33 @@ export default function Accounts() {
     }
   };
 
+  const handleAddSession = async () => {
+    if (!sessionJson.trim() || importing) return;
+    setSubmitting(true);
+    try {
+      // 解析 session JSON，构造为文件导入
+      const trimmed = sessionJson.trim();
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      // 支持单个对象或数组
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
+      const file = new File([blob], "session.json", { type: "application/json" });
+      await importFiles([file], "json", sessionProxyUrl);
+      setShowAdd(false);
+      setSessionJson("");
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        showToast(t("accounts.sessionJsonInvalid"), "error");
+      } else {
+        showToast(
+          t("accounts.addFailed", { error: getErrorMessage(error) }),
+          "error",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
   const handleAddOpenAIResponses = async () => {
     const models = openAIForm.models;
     if (!openAIForm.api_key.trim() || models.length === 0) return;
@@ -1846,6 +1877,7 @@ export default function Accounts() {
   const importFiles = async (
     files: File[],
     format: "txt" | "json" | "json_at" | "at_txt",
+    proxyOverride?: string,
   ) => {
     setImporting(true);
     setImportProgress({
@@ -1861,7 +1893,7 @@ export default function Accounts() {
     try {
       const formData = new FormData();
       if (format !== "txt") formData.append("format", format);
-      const trimmedImportProxy = importProxyUrl.trim();
+      const trimmedImportProxy = (proxyOverride ?? importProxyUrl).trim();
       if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
       if (allowDuplicate) formData.append("allow_duplicate", "true");
       for (const f of files) formData.append("file", f);
@@ -2119,6 +2151,24 @@ export default function Accounts() {
     }
 
     if (folderInputRef.current) folderInputRef.current.value = "";
+  };
+
+  const handlePasteImport = async () => {
+    if (!pasteImportText.trim() || importing) return;
+    const trimmed = pasteImportText.trim();
+    let items: unknown[];
+    try {
+      const parsed = JSON.parse(trimmed);
+      items = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      showToast(t("accounts.sessionJsonInvalid"), "error");
+      return;
+    }
+    const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
+    const file = new File([blob], "paste.json", { type: "application/json" });
+    await importFiles([file], "json");
+    setShowPasteImport(false);
+    setPasteImportText("");
   };
 
   const handleExport = async (
@@ -4411,12 +4461,15 @@ export default function Accounts() {
                 proxy_url: "",
               });
               setOpenAIModelDraft("");
+              setSessionJson("");
+              setSessionProxyUrl("");
             }}
             footer={
               <>
                 {(addMethod === "rt" ||
                   addMethod === "st" ||
-                  addMethod === "at") && (
+                  addMethod === "at" ||
+                  addMethod === "session") && (
                   <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"
@@ -4444,6 +4497,8 @@ export default function Accounts() {
                       proxy_url: "",
                     });
                     setOpenAIModelDraft("");
+                    setSessionJson("");
+                    setSessionProxyUrl("");
                   }}
                 >
                   {t("common.cancel")}
@@ -4466,6 +4521,13 @@ export default function Accounts() {
                   <Button
                     onClick={() => void handleAddAT()}
                     disabled={submitting || !atForm.access_token.trim()}
+                  >
+                    {submitting ? t("accounts.adding") : t("accounts.submit")}
+                  </Button>
+                ) : addMethod === "session" ? (
+                  <Button
+                    onClick={() => void handleAddSession()}
+                    disabled={importing || submitting || !sessionJson.trim()}
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
@@ -4503,7 +4565,7 @@ export default function Accounts() {
             }
           >
             {/* Tab switcher */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
               <button
                 onClick={() => {
                   setAddMethod("oauth");
@@ -4552,6 +4614,17 @@ export default function Accounts() {
               >
                 <Fingerprint className="size-3.5" />
                 {t("accounts.addMethodAT")}
+              </button>
+              <button
+                onClick={() => setAddMethod("session")}
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
+                  addMethod === "session"
+                    ? "bg-background shadow-sm text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <ExternalLink className="size-3.5" />
+                {t("accounts.addMethodSession")}
               </button>
               <button
                 onClick={() => setAddMethod("openai")}
@@ -4654,6 +4727,32 @@ export default function Accounts() {
                       ...form,
                       proxy_url: value,
                     })),
+                })}
+              </div>
+            ) : addMethod === "session" ? (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-800 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-300">
+                  {t("accounts.sessionHint")}
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.sessionJsonLabel")} *
+                  </label>
+                  <textarea
+                    className="w-full min-h-[260px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                    placeholder={t("accounts.sessionJsonPlaceholder")}
+                    value={sessionJson}
+                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                      setSessionJson(event.target.value)
+                    }
+                    rows={10}
+                  />
+                </div>
+                {renderProxyInput({
+                  value: sessionProxyUrl,
+                  testKey: "add-session-json",
+                  label: t("accounts.importProxyLabel"),
+                  onChange: setSessionProxyUrl,
                 })}
               </div>
             ) : addMethod === "openai" ? (
@@ -4887,7 +4986,11 @@ export default function Accounts() {
             show={showImportPicker}
             title={t("accounts.importTitle")}
             contentClassName="sm:max-w-[640px]"
-            onClose={() => setShowImportPicker(false)}
+            onClose={() => {
+              setShowImportPicker(false);
+              setShowPasteImport(false);
+              setPasteImportText('');
+            }}
           >
             <div className="mb-4 space-y-1.5">
               {renderProxyInput({
@@ -4995,7 +5098,53 @@ export default function Accounts() {
                   </div>
                 </div>
               </button>
+              <button
+                className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+                onClick={() => {
+                  setShowPasteImport(true);
+                  setPasteImportText("");
+                }}
+              >
+                <Copy className="size-5 shrink-0 text-muted-foreground" />
+                <div>
+                  <div className="text-sm font-medium">
+                    {t("accounts.importPasteText")}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {t("accounts.importPasteTextDesc")}
+                  </div>
+                </div>
+              </button>
             </div>
+
+            {showPasteImport && (
+              <div className="mt-4 space-y-3">
+                <textarea
+                  className="w-full min-h-[240px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                  placeholder={t("accounts.sessionJsonPlaceholder")}
+                  value={pasteImportText}
+                  onChange={(e) => setPasteImportText(e.target.value)}
+                  rows={10}
+                />
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setShowPasteImport(false);
+                      setPasteImportText("");
+                    }}
+                  >
+                    {t("common.cancel")}
+                  </Button>
+                  <Button
+                    onClick={() => void handlePasteImport()}
+                    disabled={importing || !pasteImportText.trim()}
+                  >
+                    {t("accounts.submit")}
+                  </Button>
+                </div>
+              </div>
+            )}
           </Modal>
           <Sub2APIImportModal
             show={showSub2APIImport}
