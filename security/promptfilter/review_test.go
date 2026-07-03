@@ -96,6 +96,28 @@ func TestApplyReviewResultAllowsWhenReviewFailsOpen(t *testing.T) {
 	}
 }
 
+func TestApplyReviewResultBlocksHighRiskWhenReviewFailsOpen(t *testing.T) {
+	verdict := Verdict{Action: ActionBlock, Score: HighRiskReviewFailureScore}
+	got := ApplyReviewResult(verdict, false, "omni-moderation-latest", context.DeadlineExceeded, ReviewConfig{FailClosed: false, Model: "omni-moderation-latest"})
+	if got.Action != ActionBlock {
+		t.Fatalf("action = %s, want block", got.Action)
+	}
+	if got.ReviewError == "" {
+		t.Fatal("expected review_error to be recorded")
+	}
+	if !strings.Contains(got.Reason, "high-risk") {
+		t.Fatalf("reason = %q, want high-risk marker", got.Reason)
+	}
+}
+
+func TestApplyReviewResultBlocksStrictMatchWhenReviewFailsOpen(t *testing.T) {
+	verdict := Verdict{Action: ActionBlock, Matched: []Match{{Name: "credential_theft", Strict: true}}}
+	got := ApplyReviewResult(verdict, false, "omni-moderation-latest", context.DeadlineExceeded, ReviewConfig{FailClosed: false, Model: "omni-moderation-latest"})
+	if got.Action != ActionBlock {
+		t.Fatalf("action = %s, want block", got.Action)
+	}
+}
+
 func TestParseReviewAPIKeys(t *testing.T) {
 	cases := []struct {
 		name string

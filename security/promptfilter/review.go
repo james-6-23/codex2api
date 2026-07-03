@@ -17,6 +17,7 @@ const (
 	DefaultReviewBaseURL        = "https://api.openai.com"
 	DefaultReviewModel          = "omni-moderation-latest"
 	DefaultReviewTimeoutSeconds = 10
+	HighRiskReviewFailureScore = 200
 )
 
 type ReviewClient struct {
@@ -222,6 +223,9 @@ func ApplyReviewResult(verdict Verdict, flagged bool, model string, reviewErr er
 		if cfg.FailClosed {
 			verdict.Action = ActionBlock
 			verdict.Reason = "prompt review failed: " + reviewErr.Error()
+		} else if reviewFailureShouldFailClosed(verdict) {
+			verdict.Action = ActionBlock
+			verdict.Reason = "high-risk prompt review failed: " + reviewErr.Error()
 		} else {
 			verdict.Action = ActionAllow
 			verdict.Reason = "prompt review failed; allowed by policy: " + reviewErr.Error()
@@ -235,6 +239,18 @@ func ApplyReviewResult(verdict Verdict, flagged bool, model string, reviewErr er
 	}
 	verdict.Reason = "prompt review confirmed local filter match"
 	return verdict
+}
+
+func reviewFailureShouldFailClosed(verdict Verdict) bool {
+	if verdict.Score >= HighRiskReviewFailureScore || verdict.RawScore >= HighRiskReviewFailureScore || verdict.StrictHit {
+		return true
+	}
+	for _, match := range verdict.Matched {
+		if match.Strict {
+			return true
+		}
+	}
+	return false
 }
 
 func reviewEndpoint(baseURL string) (string, error) {
