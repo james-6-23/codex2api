@@ -1177,3 +1177,66 @@ func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
 		t.Fatalf("active rows = %d, want 2 (forced copy preserved)", len(rows))
 	}
 }
+
+func TestParseImportJSONTokensSupportsChatGPTSessionJSON(t *testing.T) {
+	data := []byte(`{"user":{"id":"user-abc123","name":"John Doe","email":"john@example.com"},"accessToken":"at-session-test","expires":"2026-12-31T23:59:59Z"}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("tokens len = %d, want 1", len(tokens))
+	}
+	if tokens[0].accessToken != "at-session-test" {
+		t.Fatalf("accessToken = %q, want at-session-test", tokens[0].accessToken)
+	}
+	if tokens[0].email != "john@example.com" {
+		t.Fatalf("email = %q, want john@example.com", tokens[0].email)
+	}
+	if tokens[0].name != "John Doe" {
+		t.Fatalf("name = %q, want John Doe", tokens[0].name)
+	}
+	if tokens[0].expiresAt != "2026-12-31T23:59:59Z" {
+		t.Fatalf("expiresAt = %q, want 2026-12-31T23:59:59Z", tokens[0].expiresAt)
+	}
+}
+
+func TestParseImportJSONTokensSupportsChatGPTSessionJSONArray(t *testing.T) {
+	data := []byte(`[{"user":{"id":"user-1","name":"Alice","email":"alice@example.com"},"accessToken":"at-alice"},{"user":{"id":"user-2","name":"Bob"},"accessToken":"at-bob","expires":1767225600}]`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("tokens len = %d, want 2", len(tokens))
+	}
+	if tokens[0].accessToken != "at-alice" || tokens[0].email != "alice@example.com" {
+		t.Fatalf("first token = %+v, want at-alice / alice@example.com", tokens[0])
+	}
+	if tokens[1].accessToken != "at-bob" {
+		t.Fatalf("second accessToken = %q, want at-bob", tokens[1].accessToken)
+	}
+	if tokens[1].name != "Bob" {
+		t.Fatalf("second name = %q, want Bob (from user.name)", tokens[1].name)
+	}
+	if tokens[1].email != "" {
+		t.Fatalf("second email = %q, want empty (no user.email, no top-level email)", tokens[1].email)
+	}
+	if tokens[1].expiresAt != "1767225600" {
+		t.Fatalf("second expiresAt = %q, want 1767225600", tokens[1].expiresAt)
+	}
+}
+
+func TestParseImportJSONTokensHandlesSessionJSONWithoutAccessToken(t *testing.T) {
+	data := []byte(`{"user":{"email":"no-token@example.com"},"expires":"2026-12-31T23:59:59Z"}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("tokens len = %d, want 0 (no access_token or refresh_token)", len(tokens))
+	}
+}

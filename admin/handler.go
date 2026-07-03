@@ -2531,20 +2531,38 @@ type jsonAccountEntry struct {
 	SessionToken          string                 `json:"session_token"`
 	SessionTokenCamel     string                 `json:"sessionToken"`
 	AccessToken           string                 `json:"access_token"`
+	AccessTokenCamel      string                 `json:"accessToken"`
 	IDToken               string                 `json:"id_token"`
+	IDTokenCamel          string                 `json:"idToken"`
 	AccountID             string                 `json:"account_id"`
 	ChatGPTAccountID      string                 `json:"chatgpt_account_id"`
 	Email                 string                 `json:"email"`
 	Name                  string                 `json:"name"`
 	PlanType              string                 `json:"plan_type"`
+	PlanTypeCamel         string                 `json:"planType"`
+	User                  jsonAccountUser        `json:"user"`
+	Account               jsonAccountAccount     `json:"account"`
+	Expired               importJSONScalarString `json:"expired"`
+	ExpiresAt             importJSONScalarString `json:"expires_at"`
+	Expires               importJSONScalarString                 `json:"expires"`
 	Codex7DUsedPercent    importJSONScalarString `json:"codex_7d_used_percent"`
 	Codex7DResetAt        string                 `json:"codex_7d_reset_at"`
 	Codex5HUsedPercent    importJSONScalarString `json:"codex_5h_used_percent"`
 	Codex5HResetAt        string                 `json:"codex_5h_reset_at"`
 	Codex5HUsageUpdatedAt string                 `json:"codex_5h_usage_updated_at"`
 	CodexUsageUpdatedAt   string                 `json:"codex_usage_updated_at"`
-	Expired               importJSONScalarString `json:"expired"`
-	ExpiresAt             importJSONScalarString `json:"expires_at"`
+}
+
+type jsonAccountUser struct {
+	Email string `json:"email"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+}
+
+type jsonAccountAccount struct {
+	PlanType      string `json:"plan_type"`
+	PlanTypeCamel string `json:"planType"`
+	ID            string `json:"id"`
 }
 
 type sub2apiImportPayload struct {
@@ -2561,19 +2579,25 @@ type sub2apiAccountCredentials struct {
 	SessionToken          string                 `json:"session_token"`
 	SessionTokenCamel     string                 `json:"sessionToken"`
 	AccessToken           string                 `json:"access_token"`
+	AccessTokenCamel      string                 `json:"accessToken"`
 	IDToken               string                 `json:"id_token"`
+	IDTokenCamel          string                 `json:"idToken"`
 	AccountID             string                 `json:"account_id"`
 	ChatGPTAccountID      string                 `json:"chatgpt_account_id"`
 	Email                 string                 `json:"email"`
 	PlanType              string                 `json:"plan_type"`
+	PlanTypeCamel         string                 `json:"planType"`
+	User                  jsonAccountUser        `json:"user"`
+	Account               jsonAccountAccount     `json:"account"`
+	ExpiresAt             importJSONScalarString `json:"expires_at"`
+	Expired               importJSONScalarString `json:"expired"`
+	Expires               importJSONScalarString                 `json:"expires"`
 	Codex7DUsedPercent    importJSONScalarString `json:"codex_7d_used_percent"`
 	Codex7DResetAt        string                 `json:"codex_7d_reset_at"`
 	Codex5HUsedPercent    importJSONScalarString `json:"codex_5h_used_percent"`
 	Codex5HResetAt        string                 `json:"codex_5h_reset_at"`
 	Codex5HUsageUpdatedAt string                 `json:"codex_5h_usage_updated_at"`
 	CodexUsageUpdatedAt   string                 `json:"codex_usage_updated_at"`
-	ExpiresAt             importJSONScalarString `json:"expires_at"`
-	Expired               importJSONScalarString `json:"expired"`
 }
 
 type importJSONScalarString string
@@ -2648,9 +2672,13 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 	for _, entry := range entries {
 		rt := strings.TrimSpace(entry.RefreshToken)
 		st := firstNonEmpty(entry.SessionToken, entry.SessionTokenCamel)
-		at := strings.TrimSpace(entry.AccessToken)
-		email := strings.TrimSpace(entry.Email)
-		name := firstNonEmpty(entry.Name, email)
+		at := firstNonEmpty(entry.AccessToken, entry.AccessTokenCamel)
+		idTok := firstNonEmpty(entry.IDToken, entry.IDTokenCamel)
+		email := firstNonEmpty(entry.Email, entry.User.Email)
+		name := firstNonEmpty(entry.Name, entry.User.Name, email)
+		planType := firstNonEmpty(entry.PlanType, entry.PlanTypeCamel, entry.Account.PlanType, entry.Account.PlanTypeCamel)
+		accID := firstNonEmpty(entry.AccountID, entry.User.ID, entry.Account.ID)
+		expiresAt := firstNonEmpty(entry.ExpiresAt.String(), entry.Expired.String(), entry.Expires.String())
 
 		if rt != "" || st != "" || at != "" {
 			tokens = append(tokens, importToken{
@@ -2659,11 +2687,11 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 				accessToken:           at,
 				name:                  name,
 				email:                 email,
-				idToken:               strings.TrimSpace(entry.IDToken),
+				idToken:               idTok,
 				accountID:             strings.TrimSpace(entry.AccountID),
-				chatgptAccountID:      strings.TrimSpace(entry.ChatGPTAccountID),
-				planType:              strings.TrimSpace(entry.PlanType),
-				expiresAt:             firstNonEmpty(entry.ExpiresAt.String(), entry.Expired.String()),
+				chatgptAccountID:      firstNonEmpty(entry.ChatGPTAccountID, accID),
+				planType:              planType,
+				expiresAt:             expiresAt,
 				codex7DUsedPercent:    strings.TrimSpace(entry.Codex7DUsedPercent.String()),
 				codex7DResetAt:        strings.TrimSpace(entry.Codex7DResetAt),
 				codex5HUsedPercent:    strings.TrimSpace(entry.Codex5HUsedPercent.String()),
@@ -2684,15 +2712,20 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 
 	tokens := make([]importToken, 0, len(payload.Accounts))
 	for _, account := range payload.Accounts {
-		rt := strings.TrimSpace(account.Credentials.RefreshToken)
-		st := firstNonEmpty(account.Credentials.SessionToken, account.Credentials.SessionTokenCamel)
-		at := strings.TrimSpace(account.Credentials.AccessToken)
-		name := strings.TrimSpace(account.Name)
-		email := strings.TrimSpace(account.Credentials.Email)
+		c := account.Credentials
+		rt := strings.TrimSpace(c.RefreshToken)
+		st := firstNonEmpty(c.SessionToken, c.SessionTokenCamel)
+		at := firstNonEmpty(c.AccessToken, c.AccessTokenCamel)
+		idTok := firstNonEmpty(c.IDToken, c.IDTokenCamel)
+		name := firstNonEmpty(account.Name, c.User.Name)
+		email := firstNonEmpty(c.Email, c.User.Email)
 
 		if name == "" {
 			name = email
 		}
+		planType := firstNonEmpty(c.PlanType, c.PlanTypeCamel, c.Account.PlanType, c.Account.PlanTypeCamel)
+		accID := firstNonEmpty(c.AccountID, c.User.ID, c.Account.ID)
+		expiresAt := firstNonEmpty(c.ExpiresAt.String(), c.Expired.String(), c.Expires.String())
 
 		if rt != "" || st != "" || at != "" {
 			tokens = append(tokens, importToken{
@@ -2701,17 +2734,17 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 				accessToken:           at,
 				name:                  name,
 				email:                 email,
-				idToken:               strings.TrimSpace(account.Credentials.IDToken),
-				accountID:             strings.TrimSpace(account.Credentials.AccountID),
-				chatgptAccountID:      strings.TrimSpace(account.Credentials.ChatGPTAccountID),
-				planType:              strings.TrimSpace(account.Credentials.PlanType),
-				expiresAt:             firstNonEmpty(account.Credentials.ExpiresAt.String(), account.Credentials.Expired.String()),
-				codex7DUsedPercent:    strings.TrimSpace(account.Credentials.Codex7DUsedPercent.String()),
-				codex7DResetAt:        strings.TrimSpace(account.Credentials.Codex7DResetAt),
-				codex5HUsedPercent:    strings.TrimSpace(account.Credentials.Codex5HUsedPercent.String()),
-				codex5HResetAt:        strings.TrimSpace(account.Credentials.Codex5HResetAt),
-				codex5HUsageUpdatedAt: strings.TrimSpace(account.Credentials.Codex5HUsageUpdatedAt),
-				codexUsageUpdatedAt:   strings.TrimSpace(account.Credentials.CodexUsageUpdatedAt),
+				idToken:               idTok,
+				accountID:             strings.TrimSpace(c.AccountID),
+				chatgptAccountID:      firstNonEmpty(c.ChatGPTAccountID, accID),
+				planType:              planType,
+				expiresAt:             expiresAt,
+				codex7DUsedPercent:    strings.TrimSpace(c.Codex7DUsedPercent.String()),
+				codex7DResetAt:        strings.TrimSpace(c.Codex7DResetAt),
+				codex5HUsedPercent:    strings.TrimSpace(c.Codex5HUsedPercent.String()),
+				codex5HResetAt:        strings.TrimSpace(c.Codex5HResetAt),
+				codex5HUsageUpdatedAt: strings.TrimSpace(c.Codex5HUsageUpdatedAt),
+				codexUsageUpdatedAt:   strings.TrimSpace(c.CodexUsageUpdatedAt),
 			})
 		}
 	}
