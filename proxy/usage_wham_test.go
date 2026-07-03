@@ -432,6 +432,34 @@ func TestApplyWhamUsage_MarksPremium5hLimitedAt100Percent(t *testing.T) {
 	}
 }
 
+func TestApplyWhamUsage_CreditAccountSkipsPremium5hWindowLimit(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	account := &auth.Account{
+		DBID:                  1,
+		AccessToken:           "at",
+		PlanType:              "plus",
+		Status:                auth.StatusReady,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	now := time.Now()
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 100, LimitWindowSeconds: 18000, ResetAt: now.Add(2 * time.Hour).Unix()}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Premium5hRateLimited {
+		t.Fatalf("Premium5hRateLimited = true, want false for credit account")
+	}
+	if account.IsPremium5hRateLimited() {
+		t.Fatal("credit account should not be in premium 5h rate-limited state after ApplyWhamUsage")
+	}
+	pct5h, _, ok := account.GetUsageSnapshot5h()
+	if !ok || pct5h != 100 {
+		t.Fatalf("5h snapshot = (%v, %v), want 100 with valid snapshot", pct5h, ok)
+	}
+}
+
 func TestApplyWhamUsage_Marks7dLimitedAt100Percent(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 1, AccessToken: "at", PlanType: "team", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy}
@@ -447,6 +475,36 @@ func TestApplyWhamUsage_Marks7dLimitedAt100Percent(t *testing.T) {
 	}
 	if got := account.RuntimeStatus(); got != "rate_limited" {
 		t.Fatalf("RuntimeStatus() = %q, want rate_limited", got)
+	}
+}
+
+func TestApplyWhamUsage_CreditAccountSkips7dWindowLimit(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	account := &auth.Account{
+		DBID:                  1,
+		AccessToken:           "at",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		HealthTier:            auth.HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	now := time.Now()
+	usage := &WhamUsage{PlanType: "team"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 20, LimitWindowSeconds: 18000, ResetAt: now.Add(2 * time.Hour).Unix()}
+	usage.RateLimit.SecondaryWindow = &WhamUsageWindow{UsedPercent: 100, LimitWindowSeconds: 604800, ResetAt: now.Add(5 * 24 * time.Hour).Unix()}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Usage7dRateLimited {
+		t.Fatalf("Usage7dRateLimited = true, want false for credit account")
+	}
+	if got := account.RuntimeStatus(); got != "active" {
+		t.Fatalf("RuntimeStatus() = %q, want active for credit account", got)
+	}
+	pct7d, ok := account.GetUsagePercent7d()
+	if !ok || pct7d != 100 {
+		t.Fatalf("7d snapshot = (%v, %v), want 100 with valid snapshot", pct7d, ok)
 	}
 }
 

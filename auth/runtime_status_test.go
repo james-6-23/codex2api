@@ -102,6 +102,31 @@ func TestMarkUsage7dRateLimitedUsesActiveResetWindow(t *testing.T) {
 	}
 }
 
+func TestMarkUsage7dRateLimitedSkipsCreditUsageWindow(t *testing.T) {
+	store := NewStore(nil, nil, nil)
+	acc := &Account{
+		DBID:                  1,
+		AccessToken:           "at-test",
+		PlanType:              "team",
+		Status:                StatusReady,
+		HealthTier:            HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+	acc.SetUsagePercent7d(100)
+	acc.SetReset7dAt(time.Now().Add(time.Hour))
+
+	if store.MarkUsage7dRateLimited(acc) {
+		t.Fatal("MarkUsage7dRateLimited() = true, want false for credit account")
+	}
+	if got := acc.RuntimeStatus(); got != "active" {
+		t.Fatalf("RuntimeStatus() = %q, want active for credit account", got)
+	}
+	if !acc.IsAvailable() {
+		t.Fatal("IsAvailable() = false, want true for credit account")
+	}
+}
+
 func TestMarkUsage7dRateLimitedSkipsExpiredResetWindow(t *testing.T) {
 	store := NewStore(nil, nil, nil)
 	acc := &Account{

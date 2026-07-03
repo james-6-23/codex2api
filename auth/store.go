@@ -135,7 +135,7 @@ type Account struct {
 	ScoreBiasOverride       *int64
 	BaseConcurrencyOverride *int64
 	CreditEnabled           bool // 信用账号标记
-	CreditSkipUsageWindow   bool // 跳过用量窗口惩罚
+	CreditSkipUsageWindow   bool // 跳过用量窗口惩罚和本地限流标记
 	SkipWarmTier            bool // 跳过 warm 层级降级
 	AllowedAPIKeyIDs        []int64
 	allowedAPIKeySet        map[int64]struct{}
@@ -1078,9 +1078,23 @@ func resolveEffectiveThreshold(accountThreshold float64, groupIDs []int64, s *St
 	return s.GetGlobalAutoPause7dThreshold()
 }
 
+func (a *Account) creditSkipsUsageWindowLocked() bool {
+	return a.CreditEnabled && a.CreditSkipUsageWindow
+}
+
+// SkipsUsageWindowLimits 判断账号是否应跳过 5h/7d 用量窗口触发的本地限流。
+func (a *Account) SkipsUsageWindowLimits() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.creditSkipsUsageWindowLocked()
+}
+
 // usageExhaustedLocked 判断 Free 账号 7d 用量是否已耗尽（需持有 mu 读锁）
 func (a *Account) usageExhaustedLocked() bool {
-	if a.CreditEnabled && a.CreditSkipUsageWindow {
+	if a.creditSkipsUsageWindowLocked() {
 		return false
 	}
 	return a.UsagePercent7dValid && strings.EqualFold(a.PlanType, "free") && a.UsagePercent7d >= 100
@@ -1228,6 +1242,9 @@ func (a *Account) GetUsagePercent7d() (float64, bool) {
 // metadata falls back to a full 7d cooldown, while stale reset times are ignored.
 func (s *Store) MarkUsage7dRateLimited(acc *Account) bool {
 	if s == nil || acc == nil || acc.IsBanned() {
+		return false
+	}
+	if acc.SkipsUsageWindowLimits() {
 		return false
 	}
 
