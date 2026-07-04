@@ -31,6 +31,7 @@ const (
 	systemUpdateUserAgent        = "Codex2API-Updater"
 	systemUpdateMaxDownloadBytes = 200 * 1024 * 1024
 	systemUpdateRestartDelay     = 900 * time.Millisecond
+	systemUpdateReleaseCacheTTL  = 2 * time.Minute
 )
 
 var (
@@ -47,7 +48,11 @@ type systemUpdater struct {
 	executablePath func() (string, error)
 	restartProcess func() error
 	restartDelay   time.Duration
-	mu             sync.Mutex
+
+	mu                    sync.Mutex
+	releaseCacheMu        sync.Mutex
+	releaseCache          *systemGitHubRelease
+	releaseCacheExpiresAt time.Time
 }
 
 type systemReleaseClient interface {
@@ -165,9 +170,11 @@ func (h *Handler) PerformSystemUpdate(c *gin.Context) {
 }
 
 func (h *Handler) systemUpdater() *systemUpdater {
-	if h.systemUpdate == nil {
-		h.systemUpdate = newSystemUpdater()
-	}
+	h.systemUpdateOnce.Do(func() {
+		if h.systemUpdate == nil {
+			h.systemUpdate = newSystemUpdater()
+		}
+	})
 	return h.systemUpdate
 }
 
@@ -242,7 +249,7 @@ func (u *systemUpdater) inspect(ctx context.Context) (*systemUpdateInspection, e
 		info.UnsupportedReason = "Windows 运行时暂不支持在线替换正在运行的可执行文件"
 	}
 
-	release, err := u.client.FetchLatestRelease(ctx)
+	release, err := u.fetchLatestRelease(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -269,6 +276,38 @@ func (u *systemUpdater) inspect(ctx context.Context) (*systemUpdateInspection, e
 		asset:         asset,
 		checksumAsset: checksum,
 	}, nil
+}
+
+func (u *systemUpdater) fetchLatestRelease(ctx context.Context) (*systemGitHubRelease, error) {
+	now := time.Now()
+	u.releaseCacheMu.Lock()
+	defer u.releaseCacheMu.Unlock()
+
+	if u.releaseCache != nil && now.Before(u.releaseCacheExpiresAt) {
+		return cloneSystemGitHubRelease(u.releaseCache), nil
+	}
+
+	release, err := u.client.FetchLatestRelease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if release == nil {
+		return nil, fmt.Errorf("GitHub release 响应为空")
+	}
+
+	u.releaseCache = cloneSystemGitHubRelease(release)
+	u.releaseCacheExpiresAt = now.Add(systemUpdateReleaseCacheTTL)
+
+	return cloneSystemGitHubRelease(release), nil
+}
+
+func cloneSystemGitHubRelease(release *systemGitHubRelease) *systemGitHubRelease {
+	if release == nil {
+		return nil
+	}
+	cloned := *release
+	cloned.Assets = append([]systemGitHubAsset(nil), release.Assets...)
+	return &cloned
 }
 
 func (u *systemUpdater) applyBinaryUpdate(ctx context.Context, inspection *systemUpdateInspection) (string, error) {

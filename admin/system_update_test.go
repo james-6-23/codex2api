@@ -10,6 +10,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,6 +19,7 @@ type fakeSystemReleaseClient struct {
 	release   *systemGitHubRelease
 	files     map[string][]byte
 	fetchErr  error
+	fetches   int
 	downloads int
 }
 
@@ -25,6 +27,7 @@ func (c *fakeSystemReleaseClient) FetchLatestRelease(context.Context) (*systemGi
 	if c.fetchErr != nil {
 		return nil, c.fetchErr
 	}
+	c.fetches++
 	return c.release, nil
 }
 
@@ -165,6 +168,61 @@ func TestSystemUpdaterRejectsNonSemverBuild(t *testing.T) {
 	}
 	if info.Supported {
 		t.Fatal("Supported = true, want false")
+	}
+}
+
+func TestSystemUpdaterCachesLatestRelease(t *testing.T) {
+	client := &fakeSystemReleaseClient{release: &systemGitHubRelease{
+		TagName: "v2.4.4",
+		Assets:  []systemGitHubAsset{{Name: "codex2api_2.4.4_linux_amd64.tar.gz"}},
+	}}
+	updater := &systemUpdater{
+		currentVersion: "v2.4.3",
+		client:         client,
+		goos:           "linux",
+		goarch:         "amd64",
+	}
+
+	if _, err := updater.Check(context.Background()); err != nil {
+		t.Fatalf("first Check() error: %v", err)
+	}
+	if _, err := updater.Check(context.Background()); err != nil {
+		t.Fatalf("second Check() error: %v", err)
+	}
+	if client.fetches != 1 {
+		t.Fatalf("FetchLatestRelease calls = %d, want 1", client.fetches)
+	}
+}
+
+func TestHandlerSystemUpdaterConcurrentSingleInstance(t *testing.T) {
+	handler := &Handler{}
+	const workers = 32
+	results := make(chan *systemUpdater, workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
+
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			results <- handler.systemUpdater()
+		}()
+	}
+
+	wg.Wait()
+	close(results)
+
+	var first *systemUpdater
+	for updater := range results {
+		if updater == nil {
+			t.Fatal("systemUpdater() returned nil")
+		}
+		if first == nil {
+			first = updater
+			continue
+		}
+		if updater != first {
+			t.Fatal("systemUpdater() returned multiple instances")
+		}
 	}
 }
 

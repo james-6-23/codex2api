@@ -47,6 +47,7 @@ type Handler struct {
 	db                     *database.DB
 	rateLimiter            *proxy.RateLimiter
 	systemUpdate           *systemUpdater
+	systemUpdateOnce       sync.Once
 	refreshAccount         func(context.Context, int64) error
 	probeUsage             func(context.Context, *auth.Account) error
 	syncAccountPlanOnReset func(context.Context, *auth.Account) error

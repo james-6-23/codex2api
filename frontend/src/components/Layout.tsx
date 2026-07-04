@@ -46,6 +46,7 @@ export default function Layout({ children }: PropsWithChildren) {
   const [updatingVersion, setUpdatingVersion] = useState(false)
   const [restartingAfterUpdate, setRestartingAfterUpdate] = useState(false)
   const restartPollRef = useRef<number | null>(null)
+  const restartPollActiveRef = useRef(false)
   // 侧栏折叠状态。lg+ 屏才生效;collapsed=true 时只显示 icon,列宽从 264 → 64。
   // localStorage 持久化跨刷新保留选择。
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -77,8 +78,9 @@ export default function Layout({ children }: PropsWithChildren) {
   const updateUnavailableReason = updateInfo?.unsupported_reason
 
   const stopRestartPolling = useCallback(() => {
+    restartPollActiveRef.current = false
     if (restartPollRef.current !== null) {
-      window.clearInterval(restartPollRef.current)
+      window.clearTimeout(restartPollRef.current)
       restartPollRef.current = null
     }
   }, [])
@@ -86,25 +88,34 @@ export default function Layout({ children }: PropsWithChildren) {
   const pollForUpdatedVersion = useCallback((targetVersion: string) => {
     stopRestartPolling()
     const normalizedTarget = targetVersion.replace(/^v/i, '')
-    window.setTimeout(() => {
-      let attempts = 0
-      restartPollRef.current = window.setInterval(async () => {
+    let attempts = 0
+    restartPollActiveRef.current = true
+
+    const scheduleNext = (delayMs: number) => {
+      restartPollRef.current = window.setTimeout(async () => {
+        if (!restartPollActiveRef.current) return
         attempts += 1
         try {
           const info = await api.getSystemUpdate()
           if (info.current_version.replace(/^v/i, '') === normalizedTarget) {
             stopRestartPolling()
             window.location.reload()
+            return
           }
         } catch {
           // service may be restarting
         }
+        if (!restartPollActiveRef.current) return
         if (attempts >= 60) {
           stopRestartPolling()
           setRestartingAfterUpdate(false)
+          return
         }
-      }, 1500)
-    }, 2500)
+        scheduleNext(1500)
+      }, delayMs)
+    }
+
+    scheduleNext(2500)
   }, [stopRestartPolling])
 
   const handleApplyUpdate = async () => {
