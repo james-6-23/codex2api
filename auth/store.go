@@ -169,6 +169,10 @@ const (
 	defaultUsageProbeMaxAge          = 10 * time.Minute
 	defaultUsageProbeConcurrency     = 16
 	defaultRecoveryProbeInterval     = 30 * time.Minute
+	// probeBoundaryLag 是「到点即探」定时器相对边界时刻的滞后量：稍晚于重置/冷却
+	// 结束再探，确保 NeedsUsageProbe 里 `!ResetAt.After(now)` 已成立，并给上游与
+	// 本地之间的时钟偏差留出余量，避免探早了仍拿到重置前的旧数据。
+	probeBoundaryLag = 2 * time.Second
 	premium5hUrgencyWindow           = 4 * time.Hour
 	premium5hUrgencyMaxBonus         = 25.0
 	premium5hUrgencyMinRemainingPct  = 5.0
@@ -1855,6 +1859,42 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	return false
 }
 
+// nextProbeBoundary 返回该账号「到点即应触发 wham 探针」的最近未来时刻：
+//   - 5h / 7d 窗口重置：快照仍停在重置前采集的数据，窗口一翻新就该刷新进度条；
+//   - 限流冷却结束（非 unauthorized——那类探针会 401 无意义）：恢复可用的瞬间确认真实用量/状态。
+//
+// 只返回严格晚于 now 的时刻；这些时刻正是 NeedsUsageProbe 的重置/冷却判据会翻转为
+// true 的边界，因此 Store 在此刻精确探针一次即可命中，无需等巡检周期。
+func (a *Account) nextProbeBoundary(now time.Time) (time.Time, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.AccessToken == "" || a.Status == StatusError {
+		return time.Time{}, false
+	}
+	var next time.Time
+	consider := func(t time.Time) {
+		if t.IsZero() || !t.After(now) {
+			return
+		}
+		if next.IsZero() || t.Before(next) {
+			next = t
+		}
+	}
+	if a.UsagePercent5hValid && a.UsageUpdatedAt5h.Before(a.Reset5hAt) {
+		consider(a.Reset5hAt)
+	}
+	if a.UsagePercent7dValid && a.UsageUpdatedAt.Before(a.Reset7dAt) {
+		consider(a.Reset7dAt)
+	}
+	if a.Status == StatusCooldown && a.CooldownReason != "unauthorized" {
+		consider(a.CooldownUtil)
+	}
+	if next.IsZero() {
+		return time.Time{}, false
+	}
+	return next, true
+}
+
 // InLimitedState 报告账号是否处于"应避免 /responses 探活"的限流/冷却状态
 // （429 冷却或 premium 5h 限流）。此时用量探针应只走 wham（零成本），
 // 失败也不回退 /responses，避免加重限流或消耗额度。
@@ -1983,7 +2023,15 @@ type Store struct {
 	usageProbeResponsesFallbackEnabled atomic.Bool
 	recoveryProbeInterval              int64 // 恢复探测最小间隔（ns）
 	backgroundRefreshWakeCh            chan struct{}
-	lazyRefreshInFlight                sync.Map
+	// 到点即探：限流冷却 / 5h·7d 窗口重置的倒计时归零那一刻，精确唤醒一次 wham 探针，
+	// 让用量进度条随官方窗口翻新立即刷新，而不是干等下一个巡检周期。
+	// boundaryProbeWakeCh 由 wakeBoundaryProbe 非阻塞写入（任何锁下都安全），
+	// 后台 goroutine 收到后全量扫描各账号最近边界并重排单个定时器。
+	// armedBoundaryAt 记录当前已武装的最近边界（UnixNano，0=未武装），
+	// 供 wakeBoundaryProbe 判断「新边界是否更早、值不值得打扰」。
+	boundaryProbeWakeCh chan struct{}
+	armedBoundaryAt     int64
+	lazyRefreshInFlight sync.Map
 	stopCh                             chan struct{}
 	stopOnce                           sync.Once
 	wg                                 sync.WaitGroup
@@ -2119,6 +2167,11 @@ func cooldownTTL(resetAt time.Time) (time.Duration, bool) {
 }
 
 func (s *Store) setCachedAccountCooldown(accountID int64, reason string, resetAt time.Time) {
+	// 所有冷却设置（429 / premium 5h / usage_limit）都经此漏斗——在这里挂「到点即探」唤醒：
+	// 冷却倒计时归零那一刻精确探针一次，刷新用量进度条。unauthorized 除外（探针必 401，无意义）。
+	if normalizeCooldownReason(reason) != "unauthorized" {
+		s.WakeBoundaryProbe(resetAt)
+	}
 	if s == nil || s.tokenCache == nil || accountID == 0 {
 		return
 	}
@@ -2416,6 +2469,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		db:                      db,
 		tokenCache:              tc,
 		backgroundRefreshWakeCh: make(chan struct{}, 1),
+		boundaryProbeWakeCh:     make(chan struct{}, 1),
 		stopCh:                  make(chan struct{}),
 		proxyPoolEnabled:        settings.ProxyPoolEnabled,
 		sessionBindings:         make(map[string]sessionAffinity),
@@ -3246,11 +3300,17 @@ func (s *Store) StartBackgroundRefresh() {
 		expiredCleanupTicker := time.NewTicker(15 * time.Minute)
 		// 添加定时重建 FastScheduler 以优化性能
 		rebuildSchedulerTicker := time.NewTicker(10 * time.Minute)
+		// 到点即探定时器：始终武装到「最近的限流冷却/窗口重置边界」，倒计时归零即探针刷新。
+		boundaryProbeTimer := time.NewTimer(time.Hour)
+		if !boundaryProbeTimer.Stop() {
+			<-boundaryProbeTimer.C
+		}
 		defer refreshTimer.Stop()
 		defer autoCleanupTicker.Stop()
 		defer fullUsageCleanupTicker.Stop()
 		defer expiredCleanupTicker.Stop()
 		defer rebuildSchedulerTicker.Stop()
+		defer boundaryProbeTimer.Stop()
 
 		resetRefreshTimer := func() {
 			if !refreshTimer.Stop() {
@@ -3261,6 +3321,9 @@ func (s *Store) StartBackgroundRefresh() {
 			}
 			refreshTimer.Reset(s.GetBackgroundRefreshInterval())
 		}
+
+		// 启动时先武装一次；此后每次巡检/唤醒/到点后都会重排，保证始终盯住最近边界。
+		s.armNextBoundaryProbe(boundaryProbeTimer)
 
 		for {
 			select {
@@ -3273,6 +3336,16 @@ func (s *Store) StartBackgroundRefresh() {
 					s.TriggerRecoveryProbeAsync()
 				}
 				refreshTimer.Reset(s.GetBackgroundRefreshInterval())
+				// 巡检可能刷新了各账号的重置时间，顺带重排「到点即探」定时器，
+				// 兜底那些两次唤醒之间未显式 WakeBoundaryProbe 的边界变化。
+				s.armNextBoundaryProbe(boundaryProbeTimer)
+			case <-boundaryProbeTimer.C:
+				// 某账号的限流冷却/窗口重置刚归零：立即探针刷新真实用量，再武装下一个边界。
+				s.TriggerUsageProbeAsync()
+				s.armNextBoundaryProbe(boundaryProbeTimer)
+			case <-s.boundaryProbeWakeCh:
+				// 有更早的新边界出现（如刚吃到 429 冷却），重排到该时刻。
+				s.armNextBoundaryProbe(boundaryProbeTimer)
 			case <-s.backgroundRefreshWakeCh:
 				resetRefreshTimer()
 			case <-autoCleanupTicker.C:
@@ -5459,6 +5532,11 @@ func (s *Store) ApplyUsageLimitMetadata(acc *Account, planType string, resetAt t
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
 
+	// free plan 的 7d 窗口重置时刻武装「到点即探」，重置一到即刷新进度条。
+	if plan == "free" {
+		s.WakeBoundaryProbe(resetAt)
+	}
+
 	if s.db == nil || len(fields) == 0 {
 		return
 	}
@@ -5532,6 +5610,66 @@ func (s *Store) TriggerUsageProbeAsync() {
 		defer s.usageProbeBatch.Store(false)
 		s.parallelProbeUsage(context.Background())
 	}()
+}
+
+// WakeBoundaryProbe 提示「到点即探」调度器：某账号的限流冷却 / 窗口重置边界发生了变化，
+// 可能出现了比当前武装更早的边界，需要重排定时器。at 为该边界时刻（IsZero 表示未知，
+// 强制重排）。仅当 at 严格早于当前武装边界（或未武装）时才打扰后台 goroutine，避免
+// 高频 429/流量刷新导致的无谓重排。本方法只做一次非阻塞 channel 写入，任何锁下调用都安全。
+func (s *Store) WakeBoundaryProbe(at time.Time) {
+	if s == nil || s.boundaryProbeWakeCh == nil {
+		return
+	}
+	if !at.IsZero() {
+		if !at.After(time.Now()) {
+			return // 边界已过，交给常规巡检/探针即可
+		}
+		armed := atomic.LoadInt64(&s.armedBoundaryAt)
+		if armed != 0 && at.UnixNano() >= armed {
+			return // 已有更早或同刻的唤醒计划，定时器到点后会重新扫描接管更晚的边界
+		}
+	}
+	select {
+	case s.boundaryProbeWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// armNextBoundaryProbe 扫描所有账号，找出最近的「到点即探」边界并把 timer 重排到该时刻
+// （加 probeBoundaryLag 滞后）。无待处理边界时停表。只在后台刷新 goroutine 内调用
+// （该 goroutine 不持有任何账号锁，故此处逐账号取 RLock 不会死锁）。
+func (s *Store) armNextBoundaryProbe(timer *time.Timer) {
+	now := time.Now()
+	s.mu.RLock()
+	accounts := make([]*Account, len(s.accounts))
+	copy(accounts, s.accounts)
+	s.mu.RUnlock()
+
+	var next time.Time
+	for _, acc := range accounts {
+		if t, ok := acc.nextProbeBoundary(now); ok {
+			if next.IsZero() || t.Before(next) {
+				next = t
+			}
+		}
+	}
+
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	if next.IsZero() {
+		atomic.StoreInt64(&s.armedBoundaryAt, 0)
+		return
+	}
+	atomic.StoreInt64(&s.armedBoundaryAt, next.UnixNano())
+	d := time.Until(next) + probeBoundaryLag
+	if d < 0 {
+		d = probeBoundaryLag
+	}
+	timer.Reset(d)
 }
 
 // TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测

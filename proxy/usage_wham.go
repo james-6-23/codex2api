@@ -329,6 +329,10 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		result.Reset5hAt = resetAt
 		result.HasUsage5h = true
 		result.Used5hHeaders = true
+		if store != nil {
+			// 5h 窗口重置时刻武装「到点即探」，窗口翻新即刷新进度条。
+			store.WakeBoundaryProbe(resetAt)
+		}
 	}
 
 	if w7d != nil {
@@ -337,6 +341,7 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		result.UsagePct7d = w7d.UsedPercent
 		result.HasUsage7d = true
 		if store != nil {
+			store.WakeBoundaryProbe(resetAt)
 			store.PersistUsageSnapshot(account, w7d.UsedPercent)
 			if result.UsagePct7d >= 100 {
 				result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
