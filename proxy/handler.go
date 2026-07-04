@@ -1018,6 +1018,19 @@ func shouldSuppressRetryableResponseFailedBeforeFirstToken(eventType string, ter
 	return responseFailedRetryable(terminalFailurePayload)
 }
 
+// shouldReturnHTTPErrorForResponseFailed 判断:流式请求在首 token 之前收到
+// response.failed(且尚未向下游写任何内容、客户端也未断开)时,应当中止 SSE 转发,
+// 交由循环外按真实 HTTP 错误码返回,而不是把失败包装成 200 + [DONE]。
+//
+// 背景:pending 尚未 flush 时下游 HTTP 200 header 还没发出(见 stream_flush_writer.go),
+// 此时若把 response.failed 写进流并补 [DONE],上游中转层(如 New API 的 pass-through
+// Responses 渠道)会把它当成一次正常完成、按其本地预估的 input token 计费,
+// 造成"上游拒绝(0 输出)却按 input 收费"。#310 已让 context_length_exceeded 等确定性
+// 客户端错误不再换号重试,但流式下游返回仍是 200 + [DONE],本函数补上这一半。
+func shouldReturnHTTPErrorForResponseFailed(eventType string, ttftRecorded, wroteAnyBody, clientGone bool) bool {
+	return eventType == "response.failed" && !ttftRecorded && !wroteAnyBody && !clientGone
+}
+
 func imageGenerationOutputKey(item gjson.Result) string {
 	if key := strings.TrimSpace(item.Get("id").String()); key != "" {
 		return key
@@ -2214,6 +2227,13 @@ func (h *Handler) Responses(c *gin.Context) {
 					return false
 				}
 
+				// 首 token 前的 response.failed 不写进下游流:不可重试(如 context_length_exceeded)
+				// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 + [DONE] 让中转层误计费。
+				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
+					pendingFirstTokenEvents.Reset()
+					return false
+				}
+
 				if !clientGone {
 					shouldDefer := !ttftRecorded && !gotTerminal && isPreContentLifecycleEvent(eventType)
 					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, data, shouldDefer)
@@ -2344,7 +2364,13 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			}
 		}
-		if !isStream {
+		if isStream && len(terminalFailurePayload) > 0 && !wroteAnyBody {
+			// 流式:首 token 前上游失败、HTTP 200 尚未发出,返回真实错误码而非静默的成功流,
+			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+			c.JSON(logStatusCode, gin.H{
+				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+			})
+		} else if !isStream {
 			if len(terminalFailurePayload) > 0 {
 				c.JSON(logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
@@ -3285,6 +3311,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					return false
 				}
 
+				// 首 token 前的 response.failed 不写进下游流:不可重试(如 context_length_exceeded)
+				// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 + [DONE] 让中转层误计费。
+				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
+					pendingFirstTokenChunks.Reset()
+					return false
+				}
+
 				if !clientGone && chunk != nil {
 					shouldDefer := !ttftRecorded && !gotTerminal && isPreContentLifecycleEvent(eventType)
 					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenChunks, chunk, shouldDefer)
@@ -3428,7 +3461,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 			}
 		}
-		if !isStream {
+		if isStream && len(terminalFailurePayload) > 0 && !wroteAnyBody {
+			// 流式:首 token 前上游失败、HTTP 200 尚未发出,返回真实错误码而非静默的成功流,
+			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+			c.JSON(logStatusCode, gin.H{
+				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+			})
+		} else if !isStream {
 			if len(terminalFailurePayload) > 0 {
 				c.JSON(logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
