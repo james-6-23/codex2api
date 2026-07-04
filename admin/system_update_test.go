@@ -20,7 +20,6 @@ type fakeSystemReleaseClient struct {
 	files     map[string][]byte
 	fetchErr  error
 	fetches   int
-	downloads int
 }
 
 func (c *fakeSystemReleaseClient) FetchLatestRelease(context.Context) (*systemGitHubRelease, error) {
@@ -36,7 +35,6 @@ func (c *fakeSystemReleaseClient) DownloadFile(_ context.Context, rawURL, dest s
 	if !ok {
 		return os.ErrNotExist
 	}
-	c.downloads++
 	return os.WriteFile(dest, data, 0644)
 }
 
