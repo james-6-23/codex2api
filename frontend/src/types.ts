@@ -329,6 +329,30 @@ export interface MessageResponse {
   message: string
 }
 
+export interface SystemUpdateInfo {
+  current_version: string
+  latest_version: string
+  has_update: boolean
+  supported: boolean
+  unsupported_reason?: string
+  runtime_os: string
+  runtime_arch: string
+  mode: string
+  release_url?: string
+  asset_name?: string
+  published_at?: string
+  warning?: string
+}
+
+export interface SystemUpdateResult extends MessageResponse {
+  current_version: string
+  latest_version: string
+  need_restart: boolean
+  restarting: boolean
+  mode: string
+  backup_path?: string
+}
+
 export interface CreateAccountResponse extends MessageResponse {
   id: number
 }

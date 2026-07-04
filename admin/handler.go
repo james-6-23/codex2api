@@ -46,6 +46,7 @@ type Handler struct {
 	cache                  cache.TokenCache
 	db                     *database.DB
 	rateLimiter            *proxy.RateLimiter
+	systemUpdate           *systemUpdater
 	refreshAccount         func(context.Context, int64) error
 	probeUsage             func(context.Context, *auth.Account) error
 	syncAccountPlanOnReset func(context.Context, *auth.Account) error
@@ -416,6 +417,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.DELETE("/account-groups/:id", h.DeleteAccountGroup)
 	api.GET("/health", h.GetHealth)
 	api.GET("/runtime-status", h.GetRuntimeStatus)
+	api.GET("/system/update", h.GetSystemUpdate)
+	api.POST("/system/update", h.PerformSystemUpdate)
 	api.GET("/ops/overview", h.GetOpsOverview)
 	api.GET("/ops/runtime-status", h.GetRuntimeStatus)
 	api.GET("/ops/errors", h.GetOpsErrorLogs)
