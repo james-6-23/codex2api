@@ -70,6 +70,7 @@ type Account struct {
 	Email          string
 	PlanType       string
 	ProxyURL       string
+	CustomHeaders  map[string]string
 	UpstreamType   string
 	BaseURL        string
 	APIKey         string
@@ -341,6 +342,15 @@ func (a *Account) GetAccessToken() string {
 	return strings.TrimSpace(a.AccessToken)
 }
 
+func (a *Account) GetCustomHeaders() map[string]string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return cloneStringMap(a.CustomHeaders)
+}
+
 func clampInt(value, minValue, maxValue int) int {
 	if value < minValue {
 		return minValue
@@ -374,6 +384,17 @@ func cloneStringSlice(values []string) []string {
 	}
 	cloned := make([]string, len(values))
 	copy(cloned, values)
+	return cloned
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
 	return cloned
 }
 
@@ -3211,16 +3232,17 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	}
 
 	account := &Account{
-		DBID:         row.ID,
-		RefreshToken: rt,
-		SessionToken: st,
-		ProxyURL:     strings.TrimSpace(row.ProxyURL),
-		HealthTier:   HealthTierWarm,
-		AddedAt:      row.CreatedAt.UnixNano(),
-		UpstreamType: upstreamType,
-		BaseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		APIKey:       strings.TrimSpace(apiKey),
-		Models:       models,
+		DBID:          row.ID,
+		RefreshToken:  rt,
+		SessionToken:  st,
+		ProxyURL:      strings.TrimSpace(row.ProxyURL),
+		CustomHeaders: row.GetCredentialStringMap("custom_headers"),
+		HealthTier:    HealthTierWarm,
+		AddedAt:       row.CreatedAt.UnixNano(),
+		UpstreamType:  upstreamType,
+		BaseURL:       strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		APIKey:        strings.TrimSpace(apiKey),
+		Models:        models,
 	}
 	if isOpenAIResponsesAccount {
 		account.HealthTier = HealthTierHealthy
@@ -5016,6 +5038,17 @@ func (s *Store) ApplyAccountProxyURL(dbID int64, proxyURL string) bool {
 	}
 	acc.mu.Lock()
 	acc.ProxyURL = strings.TrimSpace(proxyURL)
+	acc.mu.Unlock()
+	return true
+}
+
+func (s *Store) ApplyAccountCustomHeaders(dbID int64, headers map[string]string) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	acc.CustomHeaders = cloneStringMap(headers)
 	acc.mu.Unlock()
 	return true
 }

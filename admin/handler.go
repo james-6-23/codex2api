@@ -648,6 +648,7 @@ type accountResponse struct {
 	OpenAIResponsesAPI       bool                       `json:"openai_responses_api,omitempty"`
 	BaseURL                  string                     `json:"base_url,omitempty"`
 	Models                   []string                   `json:"models,omitempty"`
+	CustomHeaders            map[string]string          `json:"custom_headers,omitempty"`
 	HealthTier               string                     `json:"health_tier"`
 	SchedulerScore           float64                    `json:"scheduler_score"`
 	DispatchScore            float64                    `json:"dispatch_score"`
@@ -817,6 +818,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			OpenAIResponsesAPI:       isOpenAIResponsesAccount,
 			BaseURL:                  baseURL,
 			Models:                   row.GetCredentialStringSlice("models"),
+			CustomHeaders:            row.GetCredentialStringMap("custom_headers"),
 			ProxyURL:                 row.ProxyURL,
 			Enabled:                  row.Enabled,
 			Locked:                   row.Locked,
@@ -1011,6 +1013,7 @@ type updateAccountSchedulerReq struct {
 	AutoPause7dDisabled     json.RawMessage `json:"auto_pause_7d_disabled"`
 	DispatchCountLimit      json.RawMessage `json:"dispatch_count_limit"`
 	ProxyURL                json.RawMessage `json:"proxy_url"`
+	CustomHeaders           json.RawMessage `json:"custom_headers"`
 }
 
 type accountSchedulerUpdate struct {
@@ -1026,6 +1029,7 @@ type accountSchedulerUpdate struct {
 	AutoPause7dDisabled     database.OptionalBool
 	DispatchCountLimit      database.OptionalNullInt64
 	ProxyURL                database.OptionalString
+	CustomHeaders           optionalCustomHeaders
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -1079,7 +1083,14 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if err != nil {
 		return accountSchedulerUpdate{}, err
 	}
+	customHeaders, err := parseOptionalCustomHeadersField(req.CustomHeaders)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	credentialUpdates := make(map[string]interface{})
+	if customHeaders.Set {
+		credentialUpdates["custom_headers"] = cloneCustomHeaders(customHeaders.Values)
+	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
 	}
@@ -1116,6 +1127,7 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		AutoPause7dDisabled:     autoPause7dDisabled,
 		DispatchCountLimit:      dispatchCountLimit,
 		ProxyURL:                proxyURL,
+		CustomHeaders:           customHeaders,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -1288,6 +1300,90 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	if update.ProxyURL.Set {
 		h.store.ApplyAccountProxyURL(id, update.ProxyURL.Value)
 	}
+	if update.CustomHeaders.Set {
+		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)
+	}
+}
+
+type optionalCustomHeaders struct {
+	Set    bool
+	Values map[string]string
+}
+
+func parseOptionalCustomHeadersField(raw json.RawMessage) (optionalCustomHeaders, error) {
+	if len(raw) == 0 {
+		return optionalCustomHeaders{}, nil
+	}
+	if string(raw) == "null" {
+		return optionalCustomHeaders{Set: true}, nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(raw, &headers); err != nil {
+		return optionalCustomHeaders{}, fmt.Errorf("custom_headers 必须是对象或 null")
+	}
+	normalized, err := normalizeCustomHeaders(headers)
+	if err != nil {
+		return optionalCustomHeaders{}, err
+	}
+	return optionalCustomHeaders{Set: true, Values: normalized}, nil
+}
+
+func normalizeCustomHeaders(headers map[string]string) (map[string]string, error) {
+	if len(headers) == 0 {
+		return nil, nil
+	}
+	if len(headers) > 64 {
+		return nil, fmt.Errorf("custom_headers 最多支持 64 个请求头")
+	}
+	out := make(map[string]string, len(headers))
+	for rawName, rawValue := range headers {
+		name := strings.TrimSpace(rawName)
+		if name == "" {
+			continue
+		}
+		if len(name) > 128 || !isValidHeaderName(name) {
+			return nil, fmt.Errorf("custom_headers 包含无效请求头名称: %s", name)
+		}
+		value := strings.TrimSpace(rawValue)
+		if strings.ContainsAny(value, "\r\n") {
+			return nil, fmt.Errorf("custom_headers.%s 不能包含换行符", name)
+		}
+		if len(value) > 8192 {
+			return nil, fmt.Errorf("custom_headers.%s 不能超过 8192 字符", name)
+		}
+		out[http.CanonicalHeaderKey(name)] = value
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func isValidHeaderName(name string) bool {
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		switch c {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return name != ""
+}
+
+func cloneCustomHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for name, value := range headers {
+		out[name] = value
+	}
+	return out
 }
 
 type optionalStringSlice struct {
@@ -1646,11 +1742,12 @@ func (h *Handler) getAccountUsageWindows(ctx context.Context) (map[int64]*databa
 }
 
 type addAccountReq struct {
-	Name           string `json:"name"`
-	RefreshToken   string `json:"refresh_token"`
-	SessionToken   string `json:"session_token"`
-	ProxyURL       string `json:"proxy_url"`
-	AllowDuplicate bool   `json:"allow_duplicate"`
+	Name           string            `json:"name"`
+	RefreshToken   string            `json:"refresh_token"`
+	SessionToken   string            `json:"session_token"`
+	ProxyURL       string            `json:"proxy_url"`
+	CustomHeaders  map[string]string `json:"custom_headers"`
+	AllowDuplicate bool              `json:"allow_duplicate"`
 }
 
 func splitAccountCredentialLines(raw string, sanitize bool) []string {
@@ -1750,6 +1847,12 @@ func (h *Handler) AddAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.CustomHeaders = customHeaders
 
 	// 按行分割，支持批量添加。refresh_token 与 session_token 同时填写时，
 	// session_token 可填写一行应用到所有 RT，也可与 RT 行数一一对应。
@@ -1766,7 +1869,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 
 	var seeds []tokenCredentialSeed
 	for i := 0; i < total; i++ {
-		seed := tokenCredentialSeed{allowDuplicate: req.AllowDuplicate}
+		seed := tokenCredentialSeed{allowDuplicate: req.AllowDuplicate, customHeaders: customHeaders}
 		if len(refreshTokens) > 0 {
 			seed.refreshToken = refreshTokens[i]
 		}
@@ -1936,10 +2039,11 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 
 // addATAccountReq AT 模式添加账号请求
 type addATAccountReq struct {
-	Name           string `json:"name"`
-	AccessToken    string `json:"access_token"`
-	ProxyURL       string `json:"proxy_url"`
-	AllowDuplicate bool   `json:"allow_duplicate"`
+	Name           string            `json:"name"`
+	AccessToken    string            `json:"access_token"`
+	ProxyURL       string            `json:"proxy_url"`
+	CustomHeaders  map[string]string `json:"custom_headers"`
+	AllowDuplicate bool              `json:"allow_duplicate"`
 }
 
 // AddATAccount 添加 AT-only 账号（支持批量：access_token 按行分割）
@@ -1972,6 +2076,12 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	req.CustomHeaders = customHeaders
 
 	// 按行分割，支持批量添加
 	lines := strings.Split(req.AccessToken, "\n")
@@ -2031,6 +2141,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
 			accessToken:    at,
 			allowDuplicate: req.AllowDuplicate,
+			customHeaders:  customHeaders,
 		})
 		if !req.AllowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
@@ -2150,7 +2261,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
-		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{accessToken: at, allowDuplicate: req.AllowDuplicate})
+		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{accessToken: at, allowDuplicate: req.AllowDuplicate, customHeaders: req.CustomHeaders})
 		if !req.AllowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
 			if err != nil {
@@ -2207,11 +2318,12 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 }
 
 type addOpenAIResponsesAccountReq struct {
-	Name     string   `json:"name"`
-	BaseURL  string   `json:"base_url"`
-	APIKey   string   `json:"api_key"`
-	Models   []string `json:"models"`
-	ProxyURL string   `json:"proxy_url"`
+	Name          string            `json:"name"`
+	BaseURL       string            `json:"base_url"`
+	APIKey        string            `json:"api_key"`
+	Models        []string          `json:"models"`
+	ProxyURL      string            `json:"proxy_url"`
+	CustomHeaders map[string]string `json:"custom_headers"`
 }
 
 type fetchOpenAIResponsesModelsReq struct {
@@ -2258,6 +2370,11 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -2290,6 +2407,9 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		"plan_type":     "api",
 		"email":         baseURL,
 	}
+	if len(customHeaders) > 0 {
+		credentials["custom_headers"] = cloneCustomHeaders(customHeaders)
+	}
 	id, err := h.db.InsertOpenAIResponsesAccount(ctx, name, credentials, req.ProxyURL)
 	if err != nil {
 		writeInternalError(c, err)
@@ -2298,15 +2418,16 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 	h.db.InsertAccountEventAsync(id, "added", "manual_openai_responses")
 
 	h.store.AddAccount(&auth.Account{
-		DBID:         id,
-		ProxyURL:     req.ProxyURL,
-		HealthTier:   auth.HealthTierHealthy,
-		UpstreamType: auth.UpstreamOpenAIResponses,
-		BaseURL:      baseURL,
-		APIKey:       req.APIKey,
-		Models:       models,
-		Email:        baseURL,
-		PlanType:     "api",
+		DBID:          id,
+		ProxyURL:      req.ProxyURL,
+		HealthTier:    auth.HealthTierHealthy,
+		UpstreamType:  auth.UpstreamOpenAIResponses,
+		BaseURL:       baseURL,
+		APIKey:        req.APIKey,
+		Models:        models,
+		CustomHeaders: customHeaders,
+		Email:         baseURL,
+		PlanType:      "api",
 	})
 
 	security.SecurityAuditLog("OPENAI_RESPONSES_ACCOUNT_ADDED", fmt.Sprintf("account_id=%d models=%d ip=%s", id, len(models), c.ClientIP()))
@@ -2428,6 +2549,11 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
 	}
+	customHeaders, err := normalizeCustomHeaders(req.CustomHeaders)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -2444,11 +2570,12 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 	}
 
 	credentials := map[string]interface{}{
-		"upstream_type": auth.UpstreamOpenAIResponses,
-		"base_url":      baseURL,
-		"models":        models,
-		"plan_type":     "api",
-		"email":         baseURL,
+		"upstream_type":  auth.UpstreamOpenAIResponses,
+		"base_url":       baseURL,
+		"models":         models,
+		"plan_type":      "api",
+		"email":          baseURL,
+		"custom_headers": cloneCustomHeaders(customHeaders),
 	}
 	if req.APIKey != "" {
 		credentials["api_key"] = req.APIKey
@@ -2468,6 +2595,7 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 	}
 	if h.store != nil {
 		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, req.ProxyURL)
+		h.store.ApplyAccountCustomHeaders(id, customHeaders)
 	}
 	h.db.InsertAccountEventAsync(id, "updated", "manual_openai_responses")
 
@@ -2895,16 +3023,21 @@ func (h *Handler) ImportAccounts(c *gin.Context) {
 	format := c.DefaultPostForm("format", "txt")
 	proxyURL := c.PostForm("proxy_url")
 	allowDuplicate := parseBoolForm(c.PostForm("allow_duplicate"))
+	customHeaders, err := parseCustomHeadersForm(c.PostForm("custom_headers"))
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	switch format {
 	case "json":
-		h.importAccountsJSON(c, proxyURL, allowDuplicate)
+		h.importAccountsJSON(c, proxyURL, allowDuplicate, customHeaders)
 	case "json_at":
-		h.importAccountsJSONPreferAT(c, proxyURL, allowDuplicate)
+		h.importAccountsJSONPreferAT(c, proxyURL, allowDuplicate, customHeaders)
 	case "at_txt":
-		h.importAccountsATTXT(c, proxyURL, allowDuplicate)
+		h.importAccountsATTXT(c, proxyURL, allowDuplicate, customHeaders)
 	default:
-		h.importAccountsTXT(c, proxyURL, allowDuplicate)
+		h.importAccountsTXT(c, proxyURL, allowDuplicate, customHeaders)
 	}
 }
 
@@ -2916,6 +3049,18 @@ func parseBoolForm(v string) bool {
 	default:
 		return false
 	}
+}
+
+func parseCustomHeadersForm(raw string) (map[string]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil, nil
+	}
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(trimmed), &headers); err != nil {
+		return nil, fmt.Errorf("custom_headers 必须是 JSON 对象")
+	}
+	return normalizeCustomHeaders(headers)
 }
 
 type uploadedImportFile struct {
@@ -2974,7 +3119,7 @@ func importTokensFromTextFiles(files []uploadedImportFile, makeToken func(string
 }
 
 // importAccountsTXT 通过 TXT 文件导入（每行一个 RT）
-func (h *Handler) importAccountsTXT(c *gin.Context, proxyURL string, allowDuplicate bool) {
+func (h *Handler) importAccountsTXT(c *gin.Context, proxyURL string, allowDuplicate bool, customHeaders ...map[string]string) {
 	files, err := readUploadedImportFiles(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
@@ -2989,11 +3134,11 @@ func (h *Handler) importAccountsTXT(c *gin.Context, proxyURL string, allowDuplic
 		return
 	}
 
-	h.importAccountsCommon(c, tokens, proxyURL, allowDuplicate)
+	h.importAccountsCommon(c, tokens, proxyURL, allowDuplicate, firstCustomHeaders(customHeaders))
 }
 
 // importAccountsJSON 通过 JSON 文件导入（兼容 CLIProxyAPI 凭证格式）
-func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string, allowDuplicate bool) {
+func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string, allowDuplicate bool, customHeaders ...map[string]string) {
 	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
 		writeError(c, http.StatusBadRequest, "解析表单失败")
 		return
@@ -3039,12 +3184,12 @@ func (h *Handler) importAccountsJSON(c *gin.Context, proxyURL string, allowDupli
 		return
 	}
 
-	h.importAccountsCommon(c, allTokens, proxyURL, allowDuplicate)
+	h.importAccountsCommon(c, allTokens, proxyURL, allowDuplicate, firstCustomHeaders(customHeaders))
 }
 
 // importAccountsJSONPreferAT 通过 JSON 文件导入，但只信任 access_token，
 // 用于一些导出工具中 refresh_token / session_token 是占位/重复值的场景。
-func (h *Handler) importAccountsJSONPreferAT(c *gin.Context, proxyURL string, allowDuplicate bool) {
+func (h *Handler) importAccountsJSONPreferAT(c *gin.Context, proxyURL string, allowDuplicate bool, customHeaders ...map[string]string) {
 	if err := c.Request.ParseMultipartForm(32 << 20); err != nil {
 		writeError(c, http.StatusBadRequest, "解析表单失败")
 		return
@@ -3097,7 +3242,14 @@ func (h *Handler) importAccountsJSONPreferAT(c *gin.Context, proxyURL string, al
 		return
 	}
 
-	h.importAccountsCommon(c, allTokens, proxyURL, allowDuplicate)
+	h.importAccountsCommon(c, allTokens, proxyURL, allowDuplicate, firstCustomHeaders(customHeaders))
+}
+
+func firstCustomHeaders(headers []map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	return headers[0]
 }
 
 // importEvent SSE 导入进度事件
@@ -3137,7 +3289,8 @@ func sendSSEJSON(c *gin.Context, event any) {
 }
 
 // importAccountsCommon 公共的去重、并发插入、SSE 进度推送逻辑（支持 RT 和 AT-only 混合导入）
-func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, proxyURL string, allowDuplicate bool) {
+func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, proxyURL string, allowDuplicate bool, customHeaders ...map[string]string) {
+	importCustomHeaders := firstCustomHeaders(customHeaders)
 	// 文件内去重：
 	// 1) 当条目可解析出 email + account_id 时，以它作为 OAuth 身份键；
 	//    同身份同 RT/ST/AT 折叠，同身份不同 RT/ST/AT 整组跳过，避免任选一个覆盖。
@@ -3376,6 +3529,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 
 			seed := importTokenSeed(tok, conflictingChatGPTIDs)
 			seed.allowDuplicate = allowDuplicate
+			seed.customHeaders = cloneCustomHeaders(importCustomHeaders)
 			importSource := "import"
 			if tok.accessToken != "" && tok.refreshToken == "" {
 				importSource = "import_at"
@@ -3513,7 +3667,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 }
 
 // importAccountsATTXT 通过 TXT 文件导入 AT-only 账号（每行一个 Access Token）
-func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string, allowDuplicate bool) {
+func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string, allowDuplicate bool, customHeaders ...map[string]string) {
 	files, err := readUploadedImportFiles(c)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
@@ -3528,7 +3682,7 @@ func (h *Handler) importAccountsATTXT(c *gin.Context, proxyURL string, allowDupl
 		return
 	}
 
-	h.importAccountsCommon(c, tokens, proxyURL, allowDuplicate)
+	h.importAccountsCommon(c, tokens, proxyURL, allowDuplicate, firstCustomHeaders(customHeaders))
 }
 
 // GetAccountUsage 查询单个账号的用量统计
