@@ -69,6 +69,7 @@ type PromptFilterForm = Pick<
   | 'prompt_filter_semantic_review_model'
   | 'prompt_filter_semantic_review_timeout_ms'
   | 'prompt_filter_semantic_review_max_concurrency'
+  | 'prompt_filter_semantic_review_failure_policy'
 >
 
 type LogFilters = {
@@ -122,6 +123,7 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_semantic_review_model: 'gpt-5.4-mini',
   prompt_filter_semantic_review_timeout_ms: 2500,
   prompt_filter_semantic_review_max_concurrency: 4,
+  prompt_filter_semantic_review_failure_policy: 'block',
 }
 
 const emptyFilters: LogFilters = {
@@ -193,6 +195,7 @@ const normalizePromptFilterForm = (settings?: SystemSettings | null): PromptFilt
   prompt_filter_semantic_review_model: settings?.prompt_filter_semantic_review_model || 'gpt-5.4-mini',
   prompt_filter_semantic_review_timeout_ms: settings?.prompt_filter_semantic_review_timeout_ms || 2500,
   prompt_filter_semantic_review_max_concurrency: settings?.prompt_filter_semantic_review_max_concurrency || 4,
+  prompt_filter_semantic_review_failure_policy: settings?.prompt_filter_semantic_review_failure_policy || 'block',
 })
 
 function normalizePromptFilterView(value?: string): PromptFilterView {
@@ -281,6 +284,11 @@ export default function PromptFilter() {
   const booleanOptions = [
     { label: t('common.enabled'), value: 'true' },
     { label: t('common.disabled'), value: 'false' },
+  ]
+  const semanticFailurePolicyOptions = [
+    { label: t('promptFilter.semanticReviewFailureBlock'), value: 'block' },
+    { label: t('promptFilter.semanticReviewFailureAllow'), value: 'allow' },
+    { label: t('promptFilter.semanticReviewFailureWarn'), value: 'warn' },
   ]
   const endpointOptions = [
     { label: '/v1/responses', value: '/v1/responses' },
@@ -677,6 +685,13 @@ function OverviewView({
                     max={100}
                     value={form.prompt_filter_semantic_review_max_concurrency}
                     onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_max_concurrency: parseInt(event.target.value, 10) || 4 }))}
+                  />
+                </Field>
+                <Field label={t('promptFilter.semanticReviewFailurePolicy')}>
+                  <Select
+                    value={form.prompt_filter_semantic_review_failure_policy || 'block'}
+                    onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_semantic_review_failure_policy: value }))}
+                    options={semanticFailurePolicyOptions}
                   />
                 </Field>
               </div>

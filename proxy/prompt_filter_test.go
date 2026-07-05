@@ -446,6 +446,51 @@ func TestPromptFilterHighRiskReviewDisagreementFailsClosedOnSemanticError(t *tes
 	assertCyberPolicyErrorCode(t, recorder.Body.Bytes())
 }
 
+func TestPromptFilterHighRiskReviewDisagreementAllowsOnSemanticErrorWhenConfigured(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	promptReviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":false}]}`))
+	}))
+	defer promptReviewServer.Close()
+
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"temporary"}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	previousClient := promptfilter.DefaultReviewClient
+	promptfilter.DefaultReviewClient = promptfilter.ReviewClient{HTTPClient: promptReviewServer.Client()}
+	t.Cleanup(func() {
+		promptfilter.DefaultReviewClient = previousClient
+	})
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "true")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_FAILURE_POLICY", "allow")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskDisagreementStore(promptReviewServer.URL)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI blocked high-risk local match after semantic review error with allow failure policy")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want untouched 200 recorder", recorder.Code)
+	}
+}
+
 func newHighRiskDisagreementStore(reviewURL string) *auth.Store {
 	return auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:              2,

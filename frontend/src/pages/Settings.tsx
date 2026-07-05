@@ -855,6 +855,7 @@ export default function Settings() {
     prompt_filter_semantic_review_model: 'gpt-5.4-mini',
     prompt_filter_semantic_review_timeout_ms: 2500,
     prompt_filter_semantic_review_max_concurrency: 4,
+    prompt_filter_semantic_review_failure_policy: 'block',
     client_compat_mode: 'preserve',
     codex_min_cli_version: '0.118.0',
     codex_user_agent_config: '{}',

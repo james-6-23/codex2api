@@ -30,6 +30,10 @@ const (
 	semanticReviewDefaultMaxChars       = 20000
 	semanticReviewDefaultCacheTTL       = 30 * time.Minute
 	semanticReviewDefaultMaxConcurrency = int64(4)
+
+	SemanticReviewFailurePolicyBlock = "block"
+	SemanticReviewFailurePolicyAllow = "allow"
+	SemanticReviewFailurePolicyWarn  = "warn"
 )
 
 var (
@@ -53,6 +57,7 @@ type semanticReviewConfig struct {
 	MaxConcurrency      int64
 	LogAllows           bool
 	FailOpen            bool
+	FailurePolicy       string
 	Endpoints           map[string]bool
 }
 
@@ -136,6 +141,7 @@ func loadSemanticReviewConfig() semanticReviewConfig {
 		MaxConcurrency:      int64(envInt("CODEX_SEMANTIC_REVIEW_MAX_CONCURRENCY", int(semanticReviewDefaultMaxConcurrency), 1, 100)),
 		LogAllows:           envBool("CODEX_SEMANTIC_REVIEW_LOG_ALLOWS", true),
 		FailOpen:            envBool("CODEX_SEMANTIC_REVIEW_FAIL_OPEN", true),
+		FailurePolicy:       NormalizeSemanticReviewFailurePolicy(os.Getenv("CODEX_SEMANTIC_REVIEW_FAILURE_POLICY")),
 		Endpoints:           semanticReviewEndpoints(os.Getenv("CODEX_SEMANTIC_REVIEW_ENDPOINTS")),
 	}
 	if cfg.Mode == "" {
@@ -148,6 +154,17 @@ func loadSemanticReviewConfig() semanticReviewConfig {
 		cfg.Model = semanticReviewDefaultModel
 	}
 	return cfg
+}
+
+func NormalizeSemanticReviewFailurePolicy(value string) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case SemanticReviewFailurePolicyAllow:
+		return SemanticReviewFailurePolicyAllow
+	case SemanticReviewFailurePolicyWarn:
+		return SemanticReviewFailurePolicyWarn
+	default:
+		return SemanticReviewFailurePolicyBlock
+	}
 }
 
 func TestSemanticReviewConnection(ctx context.Context, in SemanticReviewConnectionTestConfig) SemanticReviewConnectionTestResult {
@@ -303,6 +320,7 @@ func (h *Handler) loadSemanticReviewDisagreementConfig(ctx context.Context) sema
 	if settings.PromptFilterSemanticReviewMaxConcurrency > 0 {
 		cfg.MaxConcurrency = int64(clampSemanticReviewInt(settings.PromptFilterSemanticReviewMaxConcurrency, 1, 100))
 	}
+	cfg.FailurePolicy = NormalizeSemanticReviewFailurePolicy(settings.PromptFilterSemanticReviewFailurePolicy)
 	return cfg
 }
 
@@ -419,8 +437,7 @@ func (h *Handler) inspectSemanticReviewDisagreementText(c *gin.Context, text str
 	} else {
 		result, reviewErr = runSemanticReview(c.Request.Context(), cfg, endpoint, model, text)
 		if reviewErr != nil {
-			action = promptfilter.ActionBlock
-			reason = "high-risk prompt review disagreement semantic review failed: " + reviewErr.Error()
+			action, reason = semanticReviewFailureAction(cfg.FailurePolicy, reviewErr)
 		} else if result.Block {
 			action = promptfilter.ActionBlock
 			reason = result.Reason
@@ -436,6 +453,9 @@ func (h *Handler) inspectSemanticReviewDisagreementText(c *gin.Context, text str
 	}
 
 	h.logSemanticReviewVerdictWithSource(c, "semantic_review_disagreement", endpoint, model, text, cfg, result, action, reason, reviewErr)
+	if action == promptfilter.ActionWarn {
+		c.Header("X-Prompt-Filter-Warning", reason)
+	}
 	if action != promptfilter.ActionBlock {
 		return false
 	}
@@ -443,6 +463,21 @@ func (h *Handler) inspectSemanticReviewDisagreementText(c *gin.Context, text str
 		writeBlock()
 	}
 	return true
+}
+
+func semanticReviewFailureAction(policy string, reviewErr error) (string, string) {
+	errText := ""
+	if reviewErr != nil {
+		errText = reviewErr.Error()
+	}
+	switch NormalizeSemanticReviewFailurePolicy(policy) {
+	case SemanticReviewFailurePolicyAllow:
+		return promptfilter.ActionAllow, "high-risk prompt review disagreement semantic review failed; allowed by failure policy: " + errText
+	case SemanticReviewFailurePolicyWarn:
+		return promptfilter.ActionWarn, "high-risk prompt review disagreement semantic review failed; warning by failure policy: " + errText
+	default:
+		return promptfilter.ActionBlock, "high-risk prompt review disagreement semantic review failed: " + errText
+	}
 }
 
 func runSemanticReview(ctx context.Context, cfg semanticReviewConfig, endpoint string, model string, text string) (semanticReviewResult, error) {

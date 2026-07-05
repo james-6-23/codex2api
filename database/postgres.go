@@ -802,6 +802,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_model TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_timeout_ms INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_max_concurrency INT DEFAULT 0;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_failure_policy TEXT DEFAULT 'block';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS client_compat_mode VARCHAR(20) DEFAULT 'preserve';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.118.0';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_user_agent_config TEXT DEFAULT '{}';
@@ -1363,86 +1364,87 @@ func NormalizeSiteName(value string) string {
 
 // SystemSettings 运行时设置项
 type SystemSettings struct {
-	SiteName                           string
-	SiteLogo                           string
-	BackgroundConfig                   string // JSON: {"image":"...","opacity":18,"blur":0}
-	MaxConcurrency                     int
-	GlobalRPM                          int
-	TestModel                          string
-	TestConcurrency                    int
-	ProxyURL                           string
-	PgMaxConns                         int
-	RedisPoolSize                      int
-	AutoCleanUnauthorized              bool
-	AutoCleanRateLimited               bool
-	AdminSecret                        string
-	AutoCleanFullUsage                 bool
-	AutoCleanError                     bool
-	AutoCleanExpired                   bool
-	LazyMode                           bool
-	ProxyPoolEnabled                   bool
-	FastSchedulerEnabled               bool
-	MaxRetries                         int
-	MaxRateLimitRetries                int
-	AllowRemoteMigration               bool
-	ModelMapping                       string // JSON: {"anthropic_model": "codex_model", ...}
-	CodexModelMapping                  string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
-	ReasoningEffortModels              string // JSON: [{"model":"gpt-5.5","effort":"xhigh"}, ...]
-	BackgroundRefreshIntervalMinutes   int
-	UsageProbeMaxAgeMinutes            int
-	UsageProbeConcurrency              int
-	UsageProbeResponsesFallbackEnabled bool
-	RecoveryProbeIntervalMinutes       int
-	SchedulerMode                      string
-	AffinityMode                       string // session 粘性模式: bounded / off / strict
-	ResinURL                           string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
-	ResinPlatformName                  string // Resin 平台标识，例如 codex2api
-	PromptFilterEnabled                bool
-	PromptFilterMode                   string
-	PromptFilterThreshold              int
-	PromptFilterStrictThreshold        int
-	PromptFilterLogMatches             bool
-	PromptFilterMaxTextLength          int
-	PromptFilterSensitiveWords         string
-	PromptFilterCustomPatterns         string
-	PromptFilterDisabledPatterns       string
-	PromptFilterReviewEnabled          bool
-	PromptFilterReviewAll              bool
-	PromptFilterReviewAPIKey           string
-	PromptFilterReviewBaseURL          string
-	PromptFilterReviewModel            string
-	PromptFilterReviewTimeoutSeconds   int
-	PromptFilterReviewFailClosed       bool
-	PromptFilterSemanticReviewEnabled  bool
-	PromptFilterSemanticReviewAPIKey   string
-	PromptFilterSemanticReviewBaseURL  string
-	PromptFilterSemanticReviewModel    string
-	PromptFilterSemanticReviewTimeoutMS int
+	SiteName                                 string
+	SiteLogo                                 string
+	BackgroundConfig                         string // JSON: {"image":"...","opacity":18,"blur":0}
+	MaxConcurrency                           int
+	GlobalRPM                                int
+	TestModel                                string
+	TestConcurrency                          int
+	ProxyURL                                 string
+	PgMaxConns                               int
+	RedisPoolSize                            int
+	AutoCleanUnauthorized                    bool
+	AutoCleanRateLimited                     bool
+	AdminSecret                              string
+	AutoCleanFullUsage                       bool
+	AutoCleanError                           bool
+	AutoCleanExpired                         bool
+	LazyMode                                 bool
+	ProxyPoolEnabled                         bool
+	FastSchedulerEnabled                     bool
+	MaxRetries                               int
+	MaxRateLimitRetries                      int
+	AllowRemoteMigration                     bool
+	ModelMapping                             string // JSON: {"anthropic_model": "codex_model", ...}
+	CodexModelMapping                        string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
+	ReasoningEffortModels                    string // JSON: [{"model":"gpt-5.5","effort":"xhigh"}, ...]
+	BackgroundRefreshIntervalMinutes         int
+	UsageProbeMaxAgeMinutes                  int
+	UsageProbeConcurrency                    int
+	UsageProbeResponsesFallbackEnabled       bool
+	RecoveryProbeIntervalMinutes             int
+	SchedulerMode                            string
+	AffinityMode                             string // session 粘性模式: bounded / off / strict
+	ResinURL                                 string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
+	ResinPlatformName                        string // Resin 平台标识，例如 codex2api
+	PromptFilterEnabled                      bool
+	PromptFilterMode                         string
+	PromptFilterThreshold                    int
+	PromptFilterStrictThreshold              int
+	PromptFilterLogMatches                   bool
+	PromptFilterMaxTextLength                int
+	PromptFilterSensitiveWords               string
+	PromptFilterCustomPatterns               string
+	PromptFilterDisabledPatterns             string
+	PromptFilterReviewEnabled                bool
+	PromptFilterReviewAll                    bool
+	PromptFilterReviewAPIKey                 string
+	PromptFilterReviewBaseURL                string
+	PromptFilterReviewModel                  string
+	PromptFilterReviewTimeoutSeconds         int
+	PromptFilterReviewFailClosed             bool
+	PromptFilterSemanticReviewEnabled        bool
+	PromptFilterSemanticReviewAPIKey         string
+	PromptFilterSemanticReviewBaseURL        string
+	PromptFilterSemanticReviewModel          string
+	PromptFilterSemanticReviewTimeoutMS      int
 	PromptFilterSemanticReviewMaxConcurrency int
-	ClientCompatMode                   string
-	CodexMinCLIVersion                 string
-	CodexUserAgentConfig               string
-	UsageLogMode                       string
-	UsageLogBatchSize                  int
-	UsageLogFlushIntervalSeconds       int
-	StreamFlushPolicy                  string
-	StreamFlushIntervalMS              int
-	FirstTokenMode                     string
-	FirstTokenTimeoutSeconds           int
-	BillingTierPolicy                  string
-	ImageStorageConfig                 string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
-	ShowFullUsageNumbers               bool
-	PublicKeyUsagePageEnabled          bool
-	CodexForceWebsocket                bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
-	CodexWSKeepaliveEnabled            bool // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
-	CodexWSKeepaliveIntervalSec        int  // WS 保活 Ping 间隔（秒），默认 60
-	CodexWSHideUpstreamErrors          bool // 隐藏上游 WS 原始错误，默认 true
-	CodexWSSilentRetryEnabled          bool // 首包前 WS 上游错误静默换号重试，默认 true
-	CodexWSSilentMaxRetries            int  // WS 静默换号最大重试次数，默认 2
-	AutoPause5hThreshold               float64
-	AutoPause7dThreshold               float64
-	AutoPause5hGuardBandPercent        float64
-	AutoPause5hGuardConcurrency        int
+	PromptFilterSemanticReviewFailurePolicy  string
+	ClientCompatMode                         string
+	CodexMinCLIVersion                       string
+	CodexUserAgentConfig                     string
+	UsageLogMode                             string
+	UsageLogBatchSize                        int
+	UsageLogFlushIntervalSeconds             int
+	StreamFlushPolicy                        string
+	StreamFlushIntervalMS                    int
+	FirstTokenMode                           string
+	FirstTokenTimeoutSeconds                 int
+	BillingTierPolicy                        string
+	ImageStorageConfig                       string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
+	ShowFullUsageNumbers                     bool
+	PublicKeyUsagePageEnabled                bool
+	CodexForceWebsocket                      bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
+	CodexWSKeepaliveEnabled                  bool // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
+	CodexWSKeepaliveIntervalSec              int  // WS 保活 Ping 间隔（秒），默认 60
+	CodexWSHideUpstreamErrors                bool // 隐藏上游 WS 原始错误，默认 true
+	CodexWSSilentRetryEnabled                bool // 首包前 WS 上游错误静默换号重试，默认 true
+	CodexWSSilentMaxRetries                  int  // WS 静默换号最大重试次数，默认 2
+	AutoPause5hThreshold                     float64
+	AutoPause7dThreshold                     float64
+	AutoPause5hGuardBandPercent              float64
+	AutoPause5hGuardConcurrency              int
 }
 
 func normalizeBillingTierPolicy(policy string) string {
@@ -1451,6 +1453,15 @@ func normalizeBillingTierPolicy(policy string) string {
 		return "requested"
 	default:
 		return "actual"
+	}
+}
+
+func normalizeSemanticReviewFailurePolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "allow", "warn":
+		return strings.ToLower(strings.TrimSpace(policy))
+	default:
+		return "block"
 	}
 }
 
@@ -1536,7 +1547,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_semantic_review_base_url, ''),
 		       COALESCE(prompt_filter_semantic_review_model, ''),
 		       COALESCE(prompt_filter_semantic_review_timeout_ms, 0),
-		       COALESCE(prompt_filter_semantic_review_max_concurrency, 0)
+		       COALESCE(prompt_filter_semantic_review_max_concurrency, 0),
+		       COALESCE(NULLIF(TRIM(prompt_filter_semantic_review_failure_policy), ''), 'block')
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1580,6 +1592,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.PromptFilterSemanticReviewModel,
 		&s.PromptFilterSemanticReviewTimeoutMS,
 		&s.PromptFilterSemanticReviewMaxConcurrency,
+		&s.PromptFilterSemanticReviewFailurePolicy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1594,6 +1607,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	}
 	s.FirstTokenMode = normalizeFirstTokenMode(s.FirstTokenMode)
 	s.BillingTierPolicy = normalizeBillingTierPolicy(s.BillingTierPolicy)
+	s.PromptFilterSemanticReviewFailurePolicy = normalizeSemanticReviewFailurePolicy(s.PromptFilterSemanticReviewFailurePolicy)
 	return s, err
 }
 
@@ -1609,6 +1623,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 	}
 	firstTokenMode := normalizeFirstTokenMode(s.FirstTokenMode)
 	billingTierPolicy := normalizeBillingTierPolicy(s.BillingTierPolicy)
+	semanticReviewFailurePolicy := normalizeSemanticReviewFailurePolicy(s.PromptFilterSemanticReviewFailurePolicy)
 	_, err := db.conn.ExecContext(ctx, `
 			INSERT INTO system_settings (
 				id, site_name, site_logo, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
@@ -1649,9 +1664,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					prompt_filter_semantic_review_base_url,
 					prompt_filter_semantic_review_model,
 					prompt_filter_semantic_review_timeout_ms,
-					prompt_filter_semantic_review_max_concurrency
+					prompt_filter_semantic_review_max_concurrency,
+					prompt_filter_semantic_review_failure_policy
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1732,7 +1748,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					prompt_filter_semantic_review_base_url = EXCLUDED.prompt_filter_semantic_review_base_url,
 					prompt_filter_semantic_review_model = EXCLUDED.prompt_filter_semantic_review_model,
 					prompt_filter_semantic_review_timeout_ms = EXCLUDED.prompt_filter_semantic_review_timeout_ms,
-					prompt_filter_semantic_review_max_concurrency = EXCLUDED.prompt_filter_semantic_review_max_concurrency
+					prompt_filter_semantic_review_max_concurrency = EXCLUDED.prompt_filter_semantic_review_max_concurrency,
+					prompt_filter_semantic_review_failure_policy = EXCLUDED.prompt_filter_semantic_review_failure_policy
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1751,7 +1768,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexWSHideUpstreamErrors, s.CodexWSSilentRetryEnabled, normalizeCodexWSSilentMaxRetries(s.CodexWSSilentMaxRetries),
 		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency, s.PromptFilterReviewAll,
 		s.PromptFilterSemanticReviewEnabled, s.PromptFilterSemanticReviewAPIKey, s.PromptFilterSemanticReviewBaseURL,
-		s.PromptFilterSemanticReviewModel, s.PromptFilterSemanticReviewTimeoutMS, s.PromptFilterSemanticReviewMaxConcurrency)
+		s.PromptFilterSemanticReviewModel, s.PromptFilterSemanticReviewTimeoutMS, s.PromptFilterSemanticReviewMaxConcurrency,
+		semanticReviewFailurePolicy)
 	return err
 }
 

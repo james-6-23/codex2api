@@ -598,6 +598,7 @@ export interface SystemSettings {
   prompt_filter_semantic_review_model: string
   prompt_filter_semantic_review_timeout_ms: number
   prompt_filter_semantic_review_max_concurrency: number
+  prompt_filter_semantic_review_failure_policy: 'block' | 'allow' | 'warn' | string
   client_compat_mode: 'preserve' | 'auto' | 'force' | string
   codex_min_cli_version: string
   codex_user_agent_config: string
