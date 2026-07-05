@@ -334,6 +334,44 @@ func TestPromptFilterHighRiskReviewDisagreementAllowsWhenSemanticClears(t *testi
 	}
 }
 
+func TestPromptFilterAllowedHighRiskSemanticReviewRunsWithoutPromptReview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	semanticCalls := 0
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		semanticCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"semantic-model","choices":[{"message":{"content":"{\"block\":true,\"confidence\":0.95,\"category\":\"credential_theft\",\"reason\":\"local high-risk request\"}"}}]}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "false")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskSemanticReviewStore("", false, promptfilter.ModeMonitor)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if !blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI allowed high-risk local allow after semantic review flagged it")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if semanticCalls != 1 {
+		t.Fatalf("semantic review calls = %d, want 1 without prompt review dependency", semanticCalls)
+	}
+	assertCyberPolicyErrorCode(t, recorder.Body.Bytes())
+}
+
 func TestPromptFilterHighRiskReviewDisagreementUsesDatabaseSemanticConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetSemanticReviewTestState(t)
@@ -492,12 +530,16 @@ func TestPromptFilterHighRiskReviewDisagreementAllowsOnSemanticErrorWhenConfigur
 }
 
 func newHighRiskDisagreementStore(reviewURL string) *auth.Store {
+	return newHighRiskSemanticReviewStore(reviewURL, true, promptfilter.ModeBlock)
+}
+
+func newHighRiskSemanticReviewStore(reviewURL string, reviewEnabled bool, mode string) *auth.Store {
 	return auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency:              2,
 		TestConcurrency:             1,
 		TestModel:                   "gpt-5.4",
 		PromptFilterEnabled:         true,
-		PromptFilterMode:            promptfilter.ModeBlock,
+		PromptFilterMode:            mode,
 		PromptFilterThreshold:       50,
 		PromptFilterStrictThreshold: 90,
 		PromptFilterLogMatches:      true,
@@ -510,7 +552,7 @@ func newHighRiskDisagreementStore(reviewURL string) *auth.Store {
 			Strict:   true,
 		}}),
 		PromptFilterDisabledPatterns:     "[]",
-		PromptFilterReviewEnabled:        true,
+		PromptFilterReviewEnabled:        reviewEnabled,
 		PromptFilterReviewAPIKey:         "review-key",
 		PromptFilterReviewBaseURL:        reviewURL,
 		PromptFilterReviewModel:          "omni-moderation-latest",

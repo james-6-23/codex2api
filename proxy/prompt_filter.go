@@ -246,16 +246,13 @@ func promptFilterVerdictIsFinal(verdict promptfilter.Verdict) bool {
 	return false
 }
 
-func promptFilterReviewClearedHighRisk(verdict promptfilter.Verdict) bool {
-	return verdict.Reviewed &&
-		!verdict.ReviewFlagged &&
-		strings.TrimSpace(verdict.ReviewError) == "" &&
-		verdict.Action == promptfilter.ActionAllow &&
+func promptFilterAllowedHighRisk(verdict promptfilter.Verdict) bool {
+	return verdict.Action == promptfilter.ActionAllow &&
 		promptfilter.IsHighRiskReviewVerdict(verdict)
 }
 
 func (h *Handler) inspectHighRiskReviewDisagreement(c *gin.Context, verdict promptfilter.Verdict, text string, endpoint string, model string, writeBlock func()) (bool, bool) {
-	if !promptFilterReviewClearedHighRisk(verdict) {
+	if !promptFilterAllowedHighRisk(verdict) {
 		return false, false
 	}
 	blocked := h.inspectSemanticReviewDisagreementText(c, text, endpoint, model, writeBlock)
