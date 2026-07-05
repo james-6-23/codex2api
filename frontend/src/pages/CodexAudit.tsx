@@ -375,19 +375,50 @@ function SimpleTable({ columns, rows, empty }: { columns: string[]; rows: string
     return <EmptyState>{empty}</EmptyState>
   }
   return (
-    <div className="w-full max-w-full overflow-x-auto rounded-lg border border-border/70">
-      <Table className="min-w-[560px]">
-        <TableHeader className="bg-muted/40">
-          <TableRow>{columns.map((column) => <TableHead key={column} className="text-xs font-semibold text-muted-foreground">{column}</TableHead>)}</TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row, rowIndex) => (
-            <TableRow key={rowIndex} className="hover:bg-muted/30">
-              {row.map((cell, cellIndex) => <TableCell key={cellIndex} className="text-[13px]">{cell}</TableCell>)}
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
+    <>
+      <div className="grid gap-2 sm:hidden">
+        {rows.map((row, rowIndex) => (
+          <MobileTableCard key={rowIndex} columns={columns} row={row} />
+        ))}
+      </div>
+      <div className="hidden w-full max-w-full overflow-x-auto rounded-lg border border-border/70 sm:block">
+        <Table className="min-w-[560px]">
+          <TableHeader className="bg-muted/40">
+            <TableRow>{columns.map((column) => <TableHead key={column} className="text-xs font-semibold text-muted-foreground">{column}</TableHead>)}</TableRow>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row, rowIndex) => (
+              <TableRow key={rowIndex} className="hover:bg-muted/30">
+                {row.map((cell, cellIndex) => <TableCell key={cellIndex} className="text-[13px]">{cell}</TableCell>)}
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
+  )
+}
+
+function MobileTableCard({ columns, row }: { columns: string[]; row: string[] }) {
+  return (
+    <div className="min-w-0 rounded-lg border border-border/60 bg-muted/20 p-3">
+      <div className="grid grid-cols-2 gap-2">
+        {columns.map((column, index) => (
+          <MobileField key={column} label={column} value={row[index] || '-'} />
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function MobileField({ label, value, wide = false, wrap = false }: { label: string; value: ReactNode; wide?: boolean; wrap?: boolean }) {
+  const title = typeof value === 'string' ? value : undefined
+  return (
+    <div className={`min-w-0 ${wide ? 'col-span-2' : ''}`}>
+      <div className="text-[11px] leading-none text-muted-foreground">{label}</div>
+      <div className={`mt-1 text-xs font-medium text-foreground ${wrap ? 'line-clamp-3 break-words' : 'truncate'}`} title={title}>
+        {value}
+      </div>
     </div>
   )
 }
@@ -452,34 +483,54 @@ function PromptSampleTable({ rows }: { rows: PromptFilterLog[] }) {
     return <EmptyState>暂无可疑样本</EmptyState>
   }
   return (
-    <div className="w-full max-w-full overflow-x-auto rounded-lg border border-border/70">
-      <Table className="min-w-[760px]">
-        <TableHeader className="bg-muted/40">
-          <TableRow>
-            <TableHead className="text-xs font-semibold text-muted-foreground">时间</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">来源</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">动作</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">分数</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">审查</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">预览</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.id} className="hover:bg-muted/30">
-              <TableCell className="whitespace-nowrap text-[12px]">{formatBeijingTime(row.created_at)}</TableCell>
-              <TableCell className="text-[12px]">{row.source || '-'}</TableCell>
-              <TableCell><Badge className={actionClass(row.action)}>{row.action || '-'}</Badge></TableCell>
-              <TableCell className="font-medium">{row.score}</TableCell>
-              <TableCell className="text-[12px]">{row.review_model ? `${row.review_model} / ${row.review_flagged ? 'flagged' : 'clear'}` : '-'}</TableCell>
-              <TableCell className="min-w-[360px] max-w-[640px] text-[12px] leading-5 text-muted-foreground">
-                <span className="line-clamp-3">{row.text_preview || row.review_error || '-'}</span>
-              </TableCell>
+    <>
+      <div className="grid gap-2 sm:hidden">
+        {rows.map((row) => (
+          <div key={row.id} className="min-w-0 rounded-lg border border-border/60 bg-muted/20 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-foreground">{formatBeijingTime(row.created_at)}</div>
+                <div className="mt-1 truncate text-xs text-muted-foreground">{row.source || '-'}</div>
+              </div>
+              <Badge className={`${actionClass(row.action)} shrink-0`}>{row.action || '-'}</Badge>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <MobileField label="分数" value={String(row.score)} />
+              <MobileField label="审查" value={row.review_model ? `${row.review_model} / ${row.review_flagged ? 'flagged' : 'clear'}` : '-'} />
+              <MobileField label="预览" value={row.text_preview || row.review_error || '-'} wide wrap />
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="hidden w-full max-w-full overflow-x-auto rounded-lg border border-border/70 sm:block">
+        <Table className="min-w-[760px]">
+          <TableHeader className="bg-muted/40">
+            <TableRow>
+              <TableHead className="text-xs font-semibold text-muted-foreground">时间</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">来源</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">动作</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">分数</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">审查</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">预览</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.id} className="hover:bg-muted/30">
+                <TableCell className="whitespace-nowrap text-[12px]">{formatBeijingTime(row.created_at)}</TableCell>
+                <TableCell className="text-[12px]">{row.source || '-'}</TableCell>
+                <TableCell><Badge className={actionClass(row.action)}>{row.action || '-'}</Badge></TableCell>
+                <TableCell className="font-medium">{row.score}</TableCell>
+                <TableCell className="text-[12px]">{row.review_model ? `${row.review_model} / ${row.review_flagged ? 'flagged' : 'clear'}` : '-'}</TableCell>
+                <TableCell className="min-w-[360px] max-w-[640px] text-[12px] leading-5 text-muted-foreground">
+                  <span className="line-clamp-3">{row.text_preview || row.review_error || '-'}</span>
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   )
 }
 
@@ -488,30 +539,53 @@ function UsageSampleTable({ rows, empty, showFirstToken = false }: { rows: Usage
     return <EmptyState>{empty}</EmptyState>
   }
   return (
-    <div className="w-full max-w-full overflow-x-auto rounded-lg border border-border/70">
-      <Table className="min-w-[620px]">
-        <TableHeader className="bg-muted/40">
-          <TableRow>
-            <TableHead className="text-xs font-semibold text-muted-foreground">时间</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">模型</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">状态</TableHead>
-            <TableHead className="text-xs font-semibold text-muted-foreground">{showFirstToken ? '首字' : '错误'}</TableHead>
-          </TableRow>
-        </TableHeader>
-        <TableBody>
-          {rows.map((row) => (
-            <TableRow key={row.id} className="hover:bg-muted/30">
-              <TableCell className="whitespace-nowrap text-[12px]">{formatBeijingTime(row.created_at)}</TableCell>
-              <TableCell className="text-[12px]">{row.effective_model || row.model || '-'}</TableCell>
-              <TableCell><Badge variant="outline">{row.status_code}</Badge></TableCell>
-              <TableCell className="max-w-[520px] text-[12px] leading-5 text-muted-foreground">
-                {showFirstToken ? formatMS(row.first_token_ms) : <span className="line-clamp-2">{row.upstream_error_kind || row.error_message || '-'}</span>}
-              </TableCell>
+    <>
+      <div className="grid gap-2 sm:hidden">
+        {rows.map((row) => (
+          <div key={row.id} className="min-w-0 rounded-lg border border-border/60 bg-muted/20 p-3">
+            <div className="flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-xs font-medium text-foreground">{formatBeijingTime(row.created_at)}</div>
+                <div className="mt-1 truncate text-xs text-muted-foreground">{row.effective_model || row.model || '-'}</div>
+              </div>
+              <Badge variant="outline" className="shrink-0 bg-background/70">{row.status_code}</Badge>
+            </div>
+            <div className="mt-3">
+              <MobileField
+                label={showFirstToken ? '首字' : '错误'}
+                value={showFirstToken ? formatMS(row.first_token_ms) : (row.upstream_error_kind || row.error_message || '-')}
+                wide
+                wrap={!showFirstToken}
+              />
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="hidden w-full max-w-full overflow-x-auto rounded-lg border border-border/70 sm:block">
+        <Table className="min-w-[620px]">
+          <TableHeader className="bg-muted/40">
+            <TableRow>
+              <TableHead className="text-xs font-semibold text-muted-foreground">时间</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">模型</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">状态</TableHead>
+              <TableHead className="text-xs font-semibold text-muted-foreground">{showFirstToken ? '首字' : '错误'}</TableHead>
             </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
+          </TableHeader>
+          <TableBody>
+            {rows.map((row) => (
+              <TableRow key={row.id} className="hover:bg-muted/30">
+                <TableCell className="whitespace-nowrap text-[12px]">{formatBeijingTime(row.created_at)}</TableCell>
+                <TableCell className="text-[12px]">{row.effective_model || row.model || '-'}</TableCell>
+                <TableCell><Badge variant="outline">{row.status_code}</Badge></TableCell>
+                <TableCell className="max-w-[520px] text-[12px] leading-5 text-muted-foreground">
+                  {showFirstToken ? formatMS(row.first_token_ms) : <span className="line-clamp-2">{row.upstream_error_kind || row.error_message || '-'}</span>}
+                </TableCell>
+              </TableRow>
+            ))}
+          </TableBody>
+        </Table>
+      </div>
+    </>
   )
 }
 
