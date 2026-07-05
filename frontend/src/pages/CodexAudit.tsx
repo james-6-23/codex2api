@@ -163,14 +163,18 @@ export default function CodexAudit() {
         title="Codex2API 巡检"
         description="集中查看误伤、漏网、cyb、探针、首字延迟和运行健康。"
         actions={
-          <>
-            <Select value={String(rangeHours)} onValueChange={(value) => setRangeHours(Number(value))} options={rangeOptions} />
-            <Select value={String(refreshSeconds)} onValueChange={(value) => setRefreshSeconds(Number(value))} options={refreshOptions} />
-            <Button variant="outline" onClick={() => void reload()} disabled={loading}>
+          <div className="flex flex-wrap items-end justify-end gap-2 max-sm:w-full max-sm:justify-start">
+            <HeaderControl label="巡检范围">
+              <Select value={String(rangeHours)} onValueChange={(value) => setRangeHours(Number(value))} options={rangeOptions} triggerClassName="h-10 rounded-lg text-sm" />
+            </HeaderControl>
+            <HeaderControl label="自动刷新">
+              <Select value={String(refreshSeconds)} onValueChange={(value) => setRefreshSeconds(Number(value))} options={refreshOptions} triggerClassName="h-10 rounded-lg text-sm" />
+            </HeaderControl>
+            <Button variant="outline" className="h-10 max-sm:w-full" onClick={() => void reload()} disabled={loading}>
               <RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />
               刷新
             </Button>
-          </>
+          </div>
         }
       />
 
@@ -291,6 +295,15 @@ export default function CodexAudit() {
         ) : null}
       </StateShell>
     </>
+  )
+}
+
+function HeaderControl({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="grid w-[164px] gap-1.5 max-sm:w-full">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      {children}
+    </label>
   )
 }
 
