@@ -96,7 +96,7 @@ func (h *Handler) prepareProbeShortCircuit(c *gin.Context, rawBody []byte, endpo
 	decision := classifyProbeShortCircuit(c, rawBody, endpoint, model, stream, responseKind, cfg.Window, cfg.MaxEntries)
 	if cfg.LogOnly {
 		if decision.Probe {
-			h.logLocalProbeObserved(c, endpoint, model, stream, responseKind, decision)
+			h.logLocalProbeObserved(c, endpoint, model, stream, responseKind, decision, "log_only")
 		}
 		return nil, false
 	}
@@ -104,6 +104,7 @@ func (h *Handler) prepareProbeShortCircuit(c *gin.Context, rawBody []byte, endpo
 		if !decision.Probe {
 			return nil, false
 		}
+		h.logLocalProbeObserved(c, endpoint, model, stream, responseKind, decision, "first_pass")
 		writer := &probeCaptureWriter{ResponseWriter: c.Writer, limit: cfg.MaxCacheBytes}
 		c.Writer = writer
 		return &probeResponseCapture{key: decision.Key, writer: writer, maxCacheBytes: cfg.MaxCacheBytes, maxEntries: cfg.MaxEntries}, false
@@ -672,9 +673,13 @@ func (h *Handler) logLocalProbeShortCircuit(c *gin.Context, endpoint string, mod
 	h.logUsageForRequest(c, input)
 }
 
-func (h *Handler) logLocalProbeObserved(c *gin.Context, endpoint string, model string, stream bool, responseKind string, decision probeShortCircuitDecision) {
+func (h *Handler) logLocalProbeObserved(c *gin.Context, endpoint string, model string, stream bool, responseKind string, decision probeShortCircuitDecision, mode string) {
 	if h == nil || h.db == nil {
 		return
+	}
+	mode = strings.TrimSpace(mode)
+	if mode == "" {
+		mode = "observe"
 	}
 	streamValue := "false"
 	if stream {
@@ -685,7 +690,7 @@ func (h *Handler) logLocalProbeObserved(c *gin.Context, endpoint string, model s
 		Endpoint:        endpoint,
 		Model:           model,
 		Action:          promptfilter.ActionAllow,
-		Mode:            "log_only",
+		Mode:            mode,
 		Score:           0,
 		Threshold:       0,
 		MatchedPatterns: promptfilter.MatchesJSON([]promptfilter.Match{{Name: decision.Signature, Weight: 0, Category: "probe"}}),
