@@ -17,6 +17,7 @@ import (
 	"golang.org/x/net/http2"
 	xproxy "golang.org/x/net/proxy"
 
+	"github.com/codex2api/internal/codexfp"
 	"github.com/codex2api/security"
 )
 
@@ -108,8 +109,7 @@ func (t *utlsAuthRoundTripper) createConnection(host, addr string) (*http2.Clien
 		return nil, fmt.Errorf("TLS 握手失败: %w", err)
 	}
 
-	tr := &http2.Transport{}
-	h2Conn, err := tr.NewClientConn(tlsConn)
+	h2Conn, err := codexfp.NewCodexH2ClientConn(tlsConn)
 	if err != nil {
 		tlsConn.Close()
 		return nil, fmt.Errorf("HTTP/2 连接创建失败: %w", err)

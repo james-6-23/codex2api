@@ -894,14 +894,19 @@ func safeUTF8Suffix(text string, maxBytes int) string {
 }
 
 func defensiveContextDiscount(text string) int {
+	// Fig-leaf guard: if the request asks the model to actually build/emit a
+	// runnable offensive artifact, the "defensive" wording is not credited.
+	if operationalArtifactPattern.MatchString(text) {
+		return 0
+	}
 	discount := 0
 	for _, pattern := range defensiveContextPatterns {
 		if pattern.MatchString(text) {
-			discount += 30
+			discount += 20
 		}
 	}
-	if discount > 90 {
-		return 90
+	if discount > 50 {
+		return 50
 	}
 	return discount
 }
