@@ -1334,6 +1334,8 @@
     "semanticReviewFailureBlock": "Block request",
     "semanticReviewFailureAllow": "Allow and log",
     "semanticReviewFailureWarn": "Warn and allow",
+    "semanticReviewLogRetentionDays": "Semantic Review Log Retention Days",
+    "semanticReviewLogRetentionHint": "0 disables automatic cleanup; only semantic review logs are deleted.",
     "semanticReviewBaseUrl": "Semantic Review Base URL",
     "semanticReviewModel": "Semantic Review Model",
     "semanticReviewApiKey": "Semantic Review API Key",

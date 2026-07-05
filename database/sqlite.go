@@ -451,6 +451,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "prompt_filter_semantic_review_timeout_ms", "INTEGER DEFAULT 0"},
 		{"system_settings", "prompt_filter_semantic_review_max_concurrency", "INTEGER DEFAULT 0"},
 		{"system_settings", "prompt_filter_semantic_review_failure_policy", "TEXT DEFAULT 'block'"},
+		{"system_settings", "prompt_filter_semantic_review_log_retention_days", "INTEGER DEFAULT 0"},
 		{"prompt_filter_logs", "review_model", "TEXT DEFAULT ''"},
 		{"prompt_filter_logs", "review_flagged", "INTEGER DEFAULT 0"},
 		{"prompt_filter_logs", "review_error", "TEXT DEFAULT ''"},

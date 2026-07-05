@@ -5592,6 +5592,7 @@ type settingsResponse struct {
 	PromptFilterSemanticReviewTimeoutMS        int     `json:"prompt_filter_semantic_review_timeout_ms"`
 	PromptFilterSemanticReviewMaxConcurrency   int     `json:"prompt_filter_semantic_review_max_concurrency"`
 	PromptFilterSemanticReviewFailurePolicy    string  `json:"prompt_filter_semantic_review_failure_policy"`
+	PromptFilterSemanticReviewLogRetentionDays int     `json:"prompt_filter_semantic_review_log_retention_days"`
 	ClientCompatMode                           string  `json:"client_compat_mode"`
 	CodexMinCLIVersion                         string  `json:"codex_min_cli_version"`
 	CodexUserAgentConfig                       string  `json:"codex_user_agent_config"`
@@ -5620,108 +5621,110 @@ type settingsResponse struct {
 }
 
 type updateSettingsReq struct {
-	SiteName                                 *string  `json:"site_name"`
-	SiteLogo                                 *string  `json:"site_logo"`
-	BackgroundImage                          *string  `json:"background_image"`
-	BackgroundOpacity                        *int     `json:"background_opacity"`
-	BackgroundBlur                           *int     `json:"background_blur"`
-	BackgroundGlassOpacity                   *int     `json:"background_glass_opacity"`
-	BackgroundGlassBlur                      *int     `json:"background_glass_blur"`
-	MaxConcurrency                           *int     `json:"max_concurrency"`
-	GlobalRPM                                *int     `json:"global_rpm"`
-	TestModel                                *string  `json:"test_model"`
-	TestConcurrency                          *int     `json:"test_concurrency"`
-	BackgroundRefreshIntervalMinutes         *int     `json:"background_refresh_interval_minutes"`
-	UsageProbeMaxAgeMinutes                  *int     `json:"usage_probe_max_age_minutes"`
-	UsageProbeConcurrency                    *int     `json:"usage_probe_concurrency"`
-	UsageProbeResponsesFallbackEnabled       *bool    `json:"usage_probe_responses_fallback_enabled"`
-	RecoveryProbeIntervalMinutes             *int     `json:"recovery_probe_interval_minutes"`
-	LazyMode                                 *bool    `json:"lazy_mode"`
-	ProxyURL                                 *string  `json:"proxy_url"`
-	PgMaxConns                               *int     `json:"pg_max_conns"`
-	RedisPoolSize                            *int     `json:"redis_pool_size"`
-	AutoCleanUnauthorized                    *bool    `json:"auto_clean_unauthorized"`
-	AutoCleanRateLimited                     *bool    `json:"auto_clean_rate_limited"`
-	AdminSecret                              *string  `json:"admin_secret"`
-	AutoCleanFullUsage                       *bool    `json:"auto_clean_full_usage"`
-	AutoCleanError                           *bool    `json:"auto_clean_error"`
-	AutoCleanExpired                         *bool    `json:"auto_clean_expired"`
-	ProxyPoolEnabled                         *bool    `json:"proxy_pool_enabled"`
-	FastSchedulerEnabled                     *bool    `json:"fast_scheduler_enabled"`
-	CodexForceWebsocket                      *bool    `json:"codex_force_websocket"`
-	CodexWSKeepaliveEnabled                  *bool    `json:"codex_ws_keepalive_enabled"`
-	CodexWSKeepaliveIntervalSec              *int     `json:"codex_ws_keepalive_interval_sec"`
-	CodexWSHideUpstreamErrors                *bool    `json:"codex_ws_hide_upstream_errors"`
-	CodexWSSilentRetryEnabled                *bool    `json:"codex_ws_silent_retry_enabled"`
-	CodexWSSilentMaxRetries                  *int     `json:"codex_ws_silent_max_retries"`
-	SchedulerMode                            *string  `json:"scheduler_mode"`
-	AffinityMode                             *string  `json:"affinity_mode"`
-	MaxRetries                               *int     `json:"max_retries"`
-	MaxRateLimitRetries                      *int     `json:"max_rate_limit_retries"`
-	AllowRemoteMigration                     *bool    `json:"allow_remote_migration"`
-	ModelMapping                             *string  `json:"model_mapping"`
-	CodexModelMapping                        *string  `json:"codex_model_mapping"`
-	ReasoningEffortModels                    *string  `json:"reasoning_effort_models"`
-	ResinURL                                 *string  `json:"resin_url"`
-	ResinPlatformName                        *string  `json:"resin_platform_name"`
-	PromptFilterEnabled                      *bool    `json:"prompt_filter_enabled"`
-	PromptFilterMode                         *string  `json:"prompt_filter_mode"`
-	PromptFilterThreshold                    *int     `json:"prompt_filter_threshold"`
-	PromptFilterStrictThreshold              *int     `json:"prompt_filter_strict_threshold"`
-	PromptFilterLogMatches                   *bool    `json:"prompt_filter_log_matches"`
-	PromptFilterMaxTextLength                *int     `json:"prompt_filter_max_text_length"`
-	PromptFilterSensitiveWords               *string  `json:"prompt_filter_sensitive_words"`
-	PromptFilterCustomPatterns               *string  `json:"prompt_filter_custom_patterns"`
-	PromptFilterDisabledPatterns             *string  `json:"prompt_filter_disabled_patterns"`
-	PromptFilterReviewEnabled                *bool    `json:"prompt_filter_review_enabled"`
-	PromptFilterReviewAll                    *bool    `json:"prompt_filter_review_all"`
-	PromptFilterReviewAPIKey                 *string  `json:"prompt_filter_review_api_key"`
-	PromptFilterReviewBaseURL                *string  `json:"prompt_filter_review_base_url"`
-	PromptFilterReviewModel                  *string  `json:"prompt_filter_review_model"`
-	PromptFilterReviewTimeoutSeconds         *int     `json:"prompt_filter_review_timeout_seconds"`
-	PromptFilterReviewFailClosed             *bool    `json:"prompt_filter_review_fail_closed"`
-	PromptFilterSemanticReviewEnabled        *bool    `json:"prompt_filter_semantic_review_enabled"`
-	PromptFilterSemanticReviewAPIKey         *string  `json:"prompt_filter_semantic_review_api_key"`
-	PromptFilterSemanticReviewBaseURL        *string  `json:"prompt_filter_semantic_review_base_url"`
-	PromptFilterSemanticReviewModel          *string  `json:"prompt_filter_semantic_review_model"`
-	PromptFilterSemanticReviewTimeoutMS      *int     `json:"prompt_filter_semantic_review_timeout_ms"`
-	PromptFilterSemanticReviewMaxConcurrency *int     `json:"prompt_filter_semantic_review_max_concurrency"`
-	PromptFilterSemanticReviewFailurePolicy  *string  `json:"prompt_filter_semantic_review_failure_policy"`
-	ClientCompatMode                         *string  `json:"client_compat_mode"`
-	CodexMinCLIVersion                       *string  `json:"codex_min_cli_version"`
-	CodexUserAgentConfig                     *string  `json:"codex_user_agent_config"`
-	UsageLogMode                             *string  `json:"usage_log_mode"`
-	UsageLogBatchSize                        *int     `json:"usage_log_batch_size"`
-	UsageLogFlushIntervalSeconds             *int     `json:"usage_log_flush_interval_seconds"`
-	StreamFlushPolicy                        *string  `json:"stream_flush_policy"`
-	StreamFlushIntervalMS                    *int     `json:"stream_flush_interval_ms"`
-	FirstTokenMode                           *string  `json:"first_token_mode"`
-	FirstTokenTimeoutSeconds                 *int     `json:"first_token_timeout_seconds"`
-	BillingTierPolicy                        *string  `json:"billing_tier_policy"`
-	ShowFullUsageNumbers                     *bool    `json:"show_full_usage_numbers"`
-	PublicKeyUsagePageEnabled                *bool    `json:"public_key_usage_page_enabled"`
-	ImageStorageBackend                      *string  `json:"image_storage_backend"`
-	ImageS3Endpoint                          *string  `json:"image_s3_endpoint"`
-	ImageS3Region                            *string  `json:"image_s3_region"`
-	ImageS3Bucket                            *string  `json:"image_s3_bucket"`
-	ImageS3AccessKey                         *string  `json:"image_s3_access_key"`
-	ImageS3SecretKey                         *string  `json:"image_s3_secret_key"`
-	ImageS3Prefix                            *string  `json:"image_s3_prefix"`
-	ImageS3ForcePathStyle                    *bool    `json:"image_s3_force_path_style"`
-	AutoPause5hThreshold                     *float64 `json:"auto_pause_5h_threshold"`
-	AutoPause7dThreshold                     *float64 `json:"auto_pause_7d_threshold"`
-	AutoPause5hGuardBandPercent              *float64 `json:"auto_pause_5h_guard_band_percent"`
-	AutoPause5hGuardConcurrency              *int     `json:"auto_pause_5h_guard_concurrency"`
+	SiteName                                   *string  `json:"site_name"`
+	SiteLogo                                   *string  `json:"site_logo"`
+	BackgroundImage                            *string  `json:"background_image"`
+	BackgroundOpacity                          *int     `json:"background_opacity"`
+	BackgroundBlur                             *int     `json:"background_blur"`
+	BackgroundGlassOpacity                     *int     `json:"background_glass_opacity"`
+	BackgroundGlassBlur                        *int     `json:"background_glass_blur"`
+	MaxConcurrency                             *int     `json:"max_concurrency"`
+	GlobalRPM                                  *int     `json:"global_rpm"`
+	TestModel                                  *string  `json:"test_model"`
+	TestConcurrency                            *int     `json:"test_concurrency"`
+	BackgroundRefreshIntervalMinutes           *int     `json:"background_refresh_interval_minutes"`
+	UsageProbeMaxAgeMinutes                    *int     `json:"usage_probe_max_age_minutes"`
+	UsageProbeConcurrency                      *int     `json:"usage_probe_concurrency"`
+	UsageProbeResponsesFallbackEnabled         *bool    `json:"usage_probe_responses_fallback_enabled"`
+	RecoveryProbeIntervalMinutes               *int     `json:"recovery_probe_interval_minutes"`
+	LazyMode                                   *bool    `json:"lazy_mode"`
+	ProxyURL                                   *string  `json:"proxy_url"`
+	PgMaxConns                                 *int     `json:"pg_max_conns"`
+	RedisPoolSize                              *int     `json:"redis_pool_size"`
+	AutoCleanUnauthorized                      *bool    `json:"auto_clean_unauthorized"`
+	AutoCleanRateLimited                       *bool    `json:"auto_clean_rate_limited"`
+	AdminSecret                                *string  `json:"admin_secret"`
+	AutoCleanFullUsage                         *bool    `json:"auto_clean_full_usage"`
+	AutoCleanError                             *bool    `json:"auto_clean_error"`
+	AutoCleanExpired                           *bool    `json:"auto_clean_expired"`
+	ProxyPoolEnabled                           *bool    `json:"proxy_pool_enabled"`
+	FastSchedulerEnabled                       *bool    `json:"fast_scheduler_enabled"`
+	CodexForceWebsocket                        *bool    `json:"codex_force_websocket"`
+	CodexWSKeepaliveEnabled                    *bool    `json:"codex_ws_keepalive_enabled"`
+	CodexWSKeepaliveIntervalSec                *int     `json:"codex_ws_keepalive_interval_sec"`
+	CodexWSHideUpstreamErrors                  *bool    `json:"codex_ws_hide_upstream_errors"`
+	CodexWSSilentRetryEnabled                  *bool    `json:"codex_ws_silent_retry_enabled"`
+	CodexWSSilentMaxRetries                    *int     `json:"codex_ws_silent_max_retries"`
+	SchedulerMode                              *string  `json:"scheduler_mode"`
+	AffinityMode                               *string  `json:"affinity_mode"`
+	MaxRetries                                 *int     `json:"max_retries"`
+	MaxRateLimitRetries                        *int     `json:"max_rate_limit_retries"`
+	AllowRemoteMigration                       *bool    `json:"allow_remote_migration"`
+	ModelMapping                               *string  `json:"model_mapping"`
+	CodexModelMapping                          *string  `json:"codex_model_mapping"`
+	ReasoningEffortModels                      *string  `json:"reasoning_effort_models"`
+	ResinURL                                   *string  `json:"resin_url"`
+	ResinPlatformName                          *string  `json:"resin_platform_name"`
+	PromptFilterEnabled                        *bool    `json:"prompt_filter_enabled"`
+	PromptFilterMode                           *string  `json:"prompt_filter_mode"`
+	PromptFilterThreshold                      *int     `json:"prompt_filter_threshold"`
+	PromptFilterStrictThreshold                *int     `json:"prompt_filter_strict_threshold"`
+	PromptFilterLogMatches                     *bool    `json:"prompt_filter_log_matches"`
+	PromptFilterMaxTextLength                  *int     `json:"prompt_filter_max_text_length"`
+	PromptFilterSensitiveWords                 *string  `json:"prompt_filter_sensitive_words"`
+	PromptFilterCustomPatterns                 *string  `json:"prompt_filter_custom_patterns"`
+	PromptFilterDisabledPatterns               *string  `json:"prompt_filter_disabled_patterns"`
+	PromptFilterReviewEnabled                  *bool    `json:"prompt_filter_review_enabled"`
+	PromptFilterReviewAll                      *bool    `json:"prompt_filter_review_all"`
+	PromptFilterReviewAPIKey                   *string  `json:"prompt_filter_review_api_key"`
+	PromptFilterReviewBaseURL                  *string  `json:"prompt_filter_review_base_url"`
+	PromptFilterReviewModel                    *string  `json:"prompt_filter_review_model"`
+	PromptFilterReviewTimeoutSeconds           *int     `json:"prompt_filter_review_timeout_seconds"`
+	PromptFilterReviewFailClosed               *bool    `json:"prompt_filter_review_fail_closed"`
+	PromptFilterSemanticReviewEnabled          *bool    `json:"prompt_filter_semantic_review_enabled"`
+	PromptFilterSemanticReviewAPIKey           *string  `json:"prompt_filter_semantic_review_api_key"`
+	PromptFilterSemanticReviewBaseURL          *string  `json:"prompt_filter_semantic_review_base_url"`
+	PromptFilterSemanticReviewModel            *string  `json:"prompt_filter_semantic_review_model"`
+	PromptFilterSemanticReviewTimeoutMS        *int     `json:"prompt_filter_semantic_review_timeout_ms"`
+	PromptFilterSemanticReviewMaxConcurrency   *int     `json:"prompt_filter_semantic_review_max_concurrency"`
+	PromptFilterSemanticReviewFailurePolicy    *string  `json:"prompt_filter_semantic_review_failure_policy"`
+	PromptFilterSemanticReviewLogRetentionDays *int     `json:"prompt_filter_semantic_review_log_retention_days"`
+	ClientCompatMode                           *string  `json:"client_compat_mode"`
+	CodexMinCLIVersion                         *string  `json:"codex_min_cli_version"`
+	CodexUserAgentConfig                       *string  `json:"codex_user_agent_config"`
+	UsageLogMode                               *string  `json:"usage_log_mode"`
+	UsageLogBatchSize                          *int     `json:"usage_log_batch_size"`
+	UsageLogFlushIntervalSeconds               *int     `json:"usage_log_flush_interval_seconds"`
+	StreamFlushPolicy                          *string  `json:"stream_flush_policy"`
+	StreamFlushIntervalMS                      *int     `json:"stream_flush_interval_ms"`
+	FirstTokenMode                             *string  `json:"first_token_mode"`
+	FirstTokenTimeoutSeconds                   *int     `json:"first_token_timeout_seconds"`
+	BillingTierPolicy                          *string  `json:"billing_tier_policy"`
+	ShowFullUsageNumbers                       *bool    `json:"show_full_usage_numbers"`
+	PublicKeyUsagePageEnabled                  *bool    `json:"public_key_usage_page_enabled"`
+	ImageStorageBackend                        *string  `json:"image_storage_backend"`
+	ImageS3Endpoint                            *string  `json:"image_s3_endpoint"`
+	ImageS3Region                              *string  `json:"image_s3_region"`
+	ImageS3Bucket                              *string  `json:"image_s3_bucket"`
+	ImageS3AccessKey                           *string  `json:"image_s3_access_key"`
+	ImageS3SecretKey                           *string  `json:"image_s3_secret_key"`
+	ImageS3Prefix                              *string  `json:"image_s3_prefix"`
+	ImageS3ForcePathStyle                      *bool    `json:"image_s3_force_path_style"`
+	AutoPause5hThreshold                       *float64 `json:"auto_pause_5h_threshold"`
+	AutoPause7dThreshold                       *float64 `json:"auto_pause_7d_threshold"`
+	AutoPause5hGuardBandPercent                *float64 `json:"auto_pause_5h_guard_band_percent"`
+	AutoPause5hGuardConcurrency                *int     `json:"auto_pause_5h_guard_concurrency"`
 }
 
 type promptFilterSemanticReviewResolved struct {
-	Enabled        bool
-	APIKey         string
-	BaseURL        string
-	Model          string
-	TimeoutMS      int
-	MaxConcurrency int
-	FailurePolicy  string
+	Enabled          bool
+	APIKey           string
+	BaseURL          string
+	Model            string
+	TimeoutMS        int
+	MaxConcurrency   int
+	FailurePolicy    string
+	LogRetentionDays int
 }
 
 func adminEnvBool(name string, fallback bool) bool {
@@ -5797,6 +5800,7 @@ func resolvePromptFilterSemanticReview(settings *database.SystemSettings) prompt
 		resolved.MaxConcurrency = clampAdminInt(settings.PromptFilterSemanticReviewMaxConcurrency, 1, 100)
 	}
 	resolved.FailurePolicy = proxy.NormalizeSemanticReviewFailurePolicy(settings.PromptFilterSemanticReviewFailurePolicy)
+	resolved.LogRetentionDays = clampAdminInt(settings.PromptFilterSemanticReviewLogRetentionDays, 0, 3650)
 	return resolved
 }
 
@@ -6366,36 +6370,37 @@ func (h *Handler) GetSettings(c *gin.Context) {
 			}
 			return 1
 		}(),
-		PromptFilterSemanticReviewBaseURL:        semanticReviewCfg.BaseURL,
-		PromptFilterSemanticReviewModel:          semanticReviewCfg.Model,
-		PromptFilterSemanticReviewTimeoutMS:      semanticReviewCfg.TimeoutMS,
-		PromptFilterSemanticReviewMaxConcurrency: semanticReviewCfg.MaxConcurrency,
-		PromptFilterSemanticReviewFailurePolicy:  semanticReviewCfg.FailurePolicy,
-		ClientCompatMode:                         runtimeCfg.ClientCompatMode,
-		CodexMinCLIVersion:                       runtimeCfg.CodexMinCLIVersion,
-		CodexUserAgentConfig:                     runtimeCfg.CodexUserAgentConfig,
-		UsageLogMode:                             h.db.GetUsageLogMode(),
-		UsageLogBatchSize:                        h.db.GetUsageLogBatchSize(),
-		UsageLogFlushIntervalSeconds:             h.db.GetUsageLogFlushIntervalSeconds(),
-		StreamFlushPolicy:                        runtimeCfg.StreamFlushPolicy,
-		StreamFlushIntervalMS:                    runtimeCfg.StreamFlushIntervalMS,
-		FirstTokenMode:                           runtimeCfg.FirstTokenMode,
-		FirstTokenTimeoutSeconds:                 runtimeCfg.FirstTokenTimeoutSec,
-		BillingTierPolicy:                        runtimeCfg.BillingTierPolicy,
-		ShowFullUsageNumbers:                     showFullUsageNumbers,
-		PublicKeyUsagePageEnabled:                publicKeyUsagePageEnabled,
-		ImageStorageBackend:                      imgCfg.Backend,
-		ImageS3Endpoint:                          imgCfg.Endpoint,
-		ImageS3Region:                            imgCfg.Region,
-		ImageS3Bucket:                            imgCfg.Bucket,
-		ImageS3AccessKey:                         imgCfg.AccessKey,
-		ImageS3SecretKey:                         imgCfg.SecretKey,
-		ImageS3Prefix:                            imgPrefix,
-		ImageS3ForcePathStyle:                    imgCfg.ForcePathStyle,
-		AutoPause5hThreshold:                     h.store.GetGlobalAutoPause5hThreshold(),
-		AutoPause7dThreshold:                     h.store.GetGlobalAutoPause7dThreshold(),
-		AutoPause5hGuardBandPercent:              h.store.GetAutoPause5hGuardBandPercent(),
-		AutoPause5hGuardConcurrency:              h.store.GetAutoPause5hGuardConcurrency(),
+		PromptFilterSemanticReviewBaseURL:          semanticReviewCfg.BaseURL,
+		PromptFilterSemanticReviewModel:            semanticReviewCfg.Model,
+		PromptFilterSemanticReviewTimeoutMS:        semanticReviewCfg.TimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency:   semanticReviewCfg.MaxConcurrency,
+		PromptFilterSemanticReviewFailurePolicy:    semanticReviewCfg.FailurePolicy,
+		PromptFilterSemanticReviewLogRetentionDays: semanticReviewCfg.LogRetentionDays,
+		ClientCompatMode:                           runtimeCfg.ClientCompatMode,
+		CodexMinCLIVersion:                         runtimeCfg.CodexMinCLIVersion,
+		CodexUserAgentConfig:                       runtimeCfg.CodexUserAgentConfig,
+		UsageLogMode:                               h.db.GetUsageLogMode(),
+		UsageLogBatchSize:                          h.db.GetUsageLogBatchSize(),
+		UsageLogFlushIntervalSeconds:               h.db.GetUsageLogFlushIntervalSeconds(),
+		StreamFlushPolicy:                          runtimeCfg.StreamFlushPolicy,
+		StreamFlushIntervalMS:                      runtimeCfg.StreamFlushIntervalMS,
+		FirstTokenMode:                             runtimeCfg.FirstTokenMode,
+		FirstTokenTimeoutSeconds:                   runtimeCfg.FirstTokenTimeoutSec,
+		BillingTierPolicy:                          runtimeCfg.BillingTierPolicy,
+		ShowFullUsageNumbers:                       showFullUsageNumbers,
+		PublicKeyUsagePageEnabled:                  publicKeyUsagePageEnabled,
+		ImageStorageBackend:                        imgCfg.Backend,
+		ImageS3Endpoint:                            imgCfg.Endpoint,
+		ImageS3Region:                              imgCfg.Region,
+		ImageS3Bucket:                              imgCfg.Bucket,
+		ImageS3AccessKey:                           imgCfg.AccessKey,
+		ImageS3SecretKey:                           imgCfg.SecretKey,
+		ImageS3Prefix:                              imgPrefix,
+		ImageS3ForcePathStyle:                      imgCfg.ForcePathStyle,
+		AutoPause5hThreshold:                       h.store.GetGlobalAutoPause5hThreshold(),
+		AutoPause7dThreshold:                       h.store.GetGlobalAutoPause7dThreshold(),
+		AutoPause5hGuardBandPercent:                h.store.GetAutoPause5hGuardBandPercent(),
+		AutoPause5hGuardConcurrency:                h.store.GetAutoPause5hGuardConcurrency(),
 	})
 }
 
@@ -6873,6 +6878,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	semanticReviewTimeoutMS := 0
 	semanticReviewMaxConcurrency := 0
 	semanticReviewFailurePolicy := proxy.SemanticReviewFailurePolicyBlock
+	semanticReviewLogRetentionDays := 0
 	if existingSettings != nil {
 		semanticReviewEnabled = existingSettings.PromptFilterSemanticReviewEnabled
 		semanticReviewAPIKey = existingSettings.PromptFilterSemanticReviewAPIKey
@@ -6881,6 +6887,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		semanticReviewTimeoutMS = existingSettings.PromptFilterSemanticReviewTimeoutMS
 		semanticReviewMaxConcurrency = existingSettings.PromptFilterSemanticReviewMaxConcurrency
 		semanticReviewFailurePolicy = proxy.NormalizeSemanticReviewFailurePolicy(existingSettings.PromptFilterSemanticReviewFailurePolicy)
+		semanticReviewLogRetentionDays = clampAdminInt(existingSettings.PromptFilterSemanticReviewLogRetentionDays, 0, 3650)
 	}
 	if req.PromptFilterSemanticReviewEnabled != nil {
 		semanticReviewEnabled = *req.PromptFilterSemanticReviewEnabled
@@ -6904,6 +6911,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	if req.PromptFilterSemanticReviewFailurePolicy != nil {
 		semanticReviewFailurePolicy = proxy.NormalizeSemanticReviewFailurePolicy(*req.PromptFilterSemanticReviewFailurePolicy)
+	}
+	if req.PromptFilterSemanticReviewLogRetentionDays != nil {
+		semanticReviewLogRetentionDays = clampAdminInt(*req.PromptFilterSemanticReviewLogRetentionDays, 0, 3650)
 	}
 
 	promptFilterCfg := h.store.GetPromptFilterConfig()
@@ -7084,87 +7094,88 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 
 	// 持久化保存到数据库
 	err := h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
-		SiteName:                                 siteName,
-		SiteLogo:                                 siteLogo,
-		MaxConcurrency:                           h.store.GetMaxConcurrency(),
-		GlobalRPM:                                h.rateLimiter.GetRPM(),
-		TestModel:                                h.store.GetTestModel(),
-		TestConcurrency:                          h.store.GetTestConcurrency(),
-		BackgroundRefreshIntervalMinutes:         h.store.GetBackgroundRefreshIntervalMinutes(),
-		UsageProbeMaxAgeMinutes:                  h.store.GetUsageProbeMaxAgeMinutes(),
-		UsageProbeConcurrency:                    h.store.GetUsageProbeConcurrency(),
-		UsageProbeResponsesFallbackEnabled:       h.store.UsageProbeResponsesFallbackEnabled(),
-		RecoveryProbeIntervalMinutes:             h.store.GetRecoveryProbeIntervalMinutes(),
-		LazyMode:                                 h.store.GetLazyMode(),
-		ProxyURL:                                 h.store.GetProxyURL(),
-		PgMaxConns:                               h.pgMaxConns,
-		RedisPoolSize:                            h.redisPoolSize,
-		AutoCleanUnauthorized:                    h.store.GetAutoCleanUnauthorized(),
-		AutoCleanRateLimited:                     h.store.GetAutoCleanRateLimited(),
-		AdminSecret:                              currentAdminSecret,
-		AutoCleanFullUsage:                       h.store.GetAutoCleanFullUsage(),
-		AutoCleanError:                           h.store.GetAutoCleanError(),
-		AutoCleanExpired:                         h.store.GetAutoCleanExpired(),
-		ProxyPoolEnabled:                         h.store.GetProxyPoolEnabled(),
-		FastSchedulerEnabled:                     h.store.FastSchedulerEnabled(),
-		CodexForceWebsocket:                      h.store.CodexForceWebsocket(),
-		CodexWSKeepaliveEnabled:                  h.store.CodexWSKeepaliveEnabled(),
-		CodexWSKeepaliveIntervalSec:              h.store.CodexWSKeepaliveIntervalSec(),
-		CodexWSHideUpstreamErrors:                h.store.CodexWSHideUpstreamErrors(),
-		CodexWSSilentRetryEnabled:                h.store.CodexWSSilentRetryEnabled(),
-		CodexWSSilentMaxRetries:                  h.store.CodexWSSilentMaxRetries(),
-		SchedulerMode:                            h.store.GetSchedulerMode(),
-		AffinityMode:                             h.store.GetAffinityMode(),
-		MaxRetries:                               h.store.GetMaxRetries(),
-		MaxRateLimitRetries:                      h.store.GetMaxRateLimitRetries(),
-		AllowRemoteMigration:                     h.store.GetAllowRemoteMigration() && hasAdminSecret,
-		ModelMapping:                             h.store.GetModelMapping(),
-		CodexModelMapping:                        h.store.GetCodexModelMapping(),
-		ReasoningEffortModels:                    h.store.GetReasoningEffortModels(),
-		ResinURL:                                 resinURL,
-		ResinPlatformName:                        resinPlatformName,
-		PromptFilterEnabled:                      promptFilterCfg.Enabled,
-		PromptFilterMode:                         promptFilterCfg.Mode,
-		PromptFilterThreshold:                    promptFilterCfg.Threshold,
-		PromptFilterStrictThreshold:              promptFilterCfg.StrictThreshold,
-		PromptFilterLogMatches:                   promptFilterCfg.LogMatches,
-		PromptFilterMaxTextLength:                promptFilterCfg.MaxTextLength,
-		PromptFilterSensitiveWords:               promptFilterCfg.SensitiveWords,
-		PromptFilterCustomPatterns:               promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
-		PromptFilterDisabledPatterns:             promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
-		PromptFilterReviewEnabled:                promptFilterCfg.Review.Enabled,
-		PromptFilterReviewAll:                    promptFilterCfg.Review.All,
-		PromptFilterReviewAPIKey:                 promptFilterCfg.Review.APIKey,
-		PromptFilterReviewBaseURL:                promptFilterCfg.Review.BaseURL,
-		PromptFilterReviewModel:                  promptFilterCfg.Review.Model,
-		PromptFilterReviewTimeoutSeconds:         promptFilterCfg.Review.TimeoutSeconds,
-		PromptFilterReviewFailClosed:             promptFilterCfg.Review.FailClosed,
-		PromptFilterSemanticReviewEnabled:        semanticReviewEnabled,
-		PromptFilterSemanticReviewAPIKey:         semanticReviewAPIKey,
-		PromptFilterSemanticReviewBaseURL:        semanticReviewBaseURL,
-		PromptFilterSemanticReviewModel:          semanticReviewModel,
-		PromptFilterSemanticReviewTimeoutMS:      semanticReviewTimeoutMS,
-		PromptFilterSemanticReviewMaxConcurrency: semanticReviewMaxConcurrency,
-		PromptFilterSemanticReviewFailurePolicy:  semanticReviewFailurePolicy,
-		ClientCompatMode:                         runtimeCfg.ClientCompatMode,
-		CodexMinCLIVersion:                       runtimeCfg.CodexMinCLIVersion,
-		CodexUserAgentConfig:                     runtimeCfg.CodexUserAgentConfig,
-		UsageLogMode:                             usageLogMode,
-		UsageLogBatchSize:                        usageLogBatchSize,
-		UsageLogFlushIntervalSeconds:             usageLogFlushIntervalSeconds,
-		StreamFlushPolicy:                        runtimeCfg.StreamFlushPolicy,
-		StreamFlushIntervalMS:                    runtimeCfg.StreamFlushIntervalMS,
-		FirstTokenMode:                           runtimeCfg.FirstTokenMode,
-		FirstTokenTimeoutSeconds:                 runtimeCfg.FirstTokenTimeoutSec,
-		BillingTierPolicy:                        runtimeCfg.BillingTierPolicy,
-		ShowFullUsageNumbers:                     showFullUsageNumbers,
-		PublicKeyUsagePageEnabled:                publicKeyUsagePageEnabled,
-		ImageStorageConfig:                       imgConfigJSON,
-		BackgroundConfig:                         encodeBackgroundConfig(bgCfg),
-		AutoPause5hThreshold:                     h.store.GetGlobalAutoPause5hThreshold(),
-		AutoPause7dThreshold:                     h.store.GetGlobalAutoPause7dThreshold(),
-		AutoPause5hGuardBandPercent:              h.store.GetAutoPause5hGuardBandPercent(),
-		AutoPause5hGuardConcurrency:              h.store.GetAutoPause5hGuardConcurrency(),
+		SiteName:                                   siteName,
+		SiteLogo:                                   siteLogo,
+		MaxConcurrency:                             h.store.GetMaxConcurrency(),
+		GlobalRPM:                                  h.rateLimiter.GetRPM(),
+		TestModel:                                  h.store.GetTestModel(),
+		TestConcurrency:                            h.store.GetTestConcurrency(),
+		BackgroundRefreshIntervalMinutes:           h.store.GetBackgroundRefreshIntervalMinutes(),
+		UsageProbeMaxAgeMinutes:                    h.store.GetUsageProbeMaxAgeMinutes(),
+		UsageProbeConcurrency:                      h.store.GetUsageProbeConcurrency(),
+		UsageProbeResponsesFallbackEnabled:         h.store.UsageProbeResponsesFallbackEnabled(),
+		RecoveryProbeIntervalMinutes:               h.store.GetRecoveryProbeIntervalMinutes(),
+		LazyMode:                                   h.store.GetLazyMode(),
+		ProxyURL:                                   h.store.GetProxyURL(),
+		PgMaxConns:                                 h.pgMaxConns,
+		RedisPoolSize:                              h.redisPoolSize,
+		AutoCleanUnauthorized:                      h.store.GetAutoCleanUnauthorized(),
+		AutoCleanRateLimited:                       h.store.GetAutoCleanRateLimited(),
+		AdminSecret:                                currentAdminSecret,
+		AutoCleanFullUsage:                         h.store.GetAutoCleanFullUsage(),
+		AutoCleanError:                             h.store.GetAutoCleanError(),
+		AutoCleanExpired:                           h.store.GetAutoCleanExpired(),
+		ProxyPoolEnabled:                           h.store.GetProxyPoolEnabled(),
+		FastSchedulerEnabled:                       h.store.FastSchedulerEnabled(),
+		CodexForceWebsocket:                        h.store.CodexForceWebsocket(),
+		CodexWSKeepaliveEnabled:                    h.store.CodexWSKeepaliveEnabled(),
+		CodexWSKeepaliveIntervalSec:                h.store.CodexWSKeepaliveIntervalSec(),
+		CodexWSHideUpstreamErrors:                  h.store.CodexWSHideUpstreamErrors(),
+		CodexWSSilentRetryEnabled:                  h.store.CodexWSSilentRetryEnabled(),
+		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
+		SchedulerMode:                              h.store.GetSchedulerMode(),
+		AffinityMode:                               h.store.GetAffinityMode(),
+		MaxRetries:                                 h.store.GetMaxRetries(),
+		MaxRateLimitRetries:                        h.store.GetMaxRateLimitRetries(),
+		AllowRemoteMigration:                       h.store.GetAllowRemoteMigration() && hasAdminSecret,
+		ModelMapping:                               h.store.GetModelMapping(),
+		CodexModelMapping:                          h.store.GetCodexModelMapping(),
+		ReasoningEffortModels:                      h.store.GetReasoningEffortModels(),
+		ResinURL:                                   resinURL,
+		ResinPlatformName:                          resinPlatformName,
+		PromptFilterEnabled:                        promptFilterCfg.Enabled,
+		PromptFilterMode:                           promptFilterCfg.Mode,
+		PromptFilterThreshold:                      promptFilterCfg.Threshold,
+		PromptFilterStrictThreshold:                promptFilterCfg.StrictThreshold,
+		PromptFilterLogMatches:                     promptFilterCfg.LogMatches,
+		PromptFilterMaxTextLength:                  promptFilterCfg.MaxTextLength,
+		PromptFilterSensitiveWords:                 promptFilterCfg.SensitiveWords,
+		PromptFilterCustomPatterns:                 promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
+		PromptFilterDisabledPatterns:               promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
+		PromptFilterReviewEnabled:                  promptFilterCfg.Review.Enabled,
+		PromptFilterReviewAll:                      promptFilterCfg.Review.All,
+		PromptFilterReviewAPIKey:                   promptFilterCfg.Review.APIKey,
+		PromptFilterReviewBaseURL:                  promptFilterCfg.Review.BaseURL,
+		PromptFilterReviewModel:                    promptFilterCfg.Review.Model,
+		PromptFilterReviewTimeoutSeconds:           promptFilterCfg.Review.TimeoutSeconds,
+		PromptFilterReviewFailClosed:               promptFilterCfg.Review.FailClosed,
+		PromptFilterSemanticReviewEnabled:          semanticReviewEnabled,
+		PromptFilterSemanticReviewAPIKey:           semanticReviewAPIKey,
+		PromptFilterSemanticReviewBaseURL:          semanticReviewBaseURL,
+		PromptFilterSemanticReviewModel:            semanticReviewModel,
+		PromptFilterSemanticReviewTimeoutMS:        semanticReviewTimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency:   semanticReviewMaxConcurrency,
+		PromptFilterSemanticReviewFailurePolicy:    semanticReviewFailurePolicy,
+		PromptFilterSemanticReviewLogRetentionDays: semanticReviewLogRetentionDays,
+		ClientCompatMode:                           runtimeCfg.ClientCompatMode,
+		CodexMinCLIVersion:                         runtimeCfg.CodexMinCLIVersion,
+		CodexUserAgentConfig:                       runtimeCfg.CodexUserAgentConfig,
+		UsageLogMode:                               usageLogMode,
+		UsageLogBatchSize:                          usageLogBatchSize,
+		UsageLogFlushIntervalSeconds:               usageLogFlushIntervalSeconds,
+		StreamFlushPolicy:                          runtimeCfg.StreamFlushPolicy,
+		StreamFlushIntervalMS:                      runtimeCfg.StreamFlushIntervalMS,
+		FirstTokenMode:                             runtimeCfg.FirstTokenMode,
+		FirstTokenTimeoutSeconds:                   runtimeCfg.FirstTokenTimeoutSec,
+		BillingTierPolicy:                          runtimeCfg.BillingTierPolicy,
+		ShowFullUsageNumbers:                       showFullUsageNumbers,
+		PublicKeyUsagePageEnabled:                  publicKeyUsagePageEnabled,
+		ImageStorageConfig:                         imgConfigJSON,
+		BackgroundConfig:                           encodeBackgroundConfig(bgCfg),
+		AutoPause5hThreshold:                       h.store.GetGlobalAutoPause5hThreshold(),
+		AutoPause7dThreshold:                       h.store.GetGlobalAutoPause7dThreshold(),
+		AutoPause5hGuardBandPercent:                h.store.GetAutoPause5hGuardBandPercent(),
+		AutoPause5hGuardConcurrency:                h.store.GetAutoPause5hGuardConcurrency(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -7183,13 +7194,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		adminSecretForDisplay = ""
 	}
 	semanticReviewResponse := resolvePromptFilterSemanticReview(&database.SystemSettings{
-		PromptFilterSemanticReviewEnabled:        semanticReviewEnabled,
-		PromptFilterSemanticReviewAPIKey:         semanticReviewAPIKey,
-		PromptFilterSemanticReviewBaseURL:        semanticReviewBaseURL,
-		PromptFilterSemanticReviewModel:          semanticReviewModel,
-		PromptFilterSemanticReviewTimeoutMS:      semanticReviewTimeoutMS,
-		PromptFilterSemanticReviewMaxConcurrency: semanticReviewMaxConcurrency,
-		PromptFilterSemanticReviewFailurePolicy:  semanticReviewFailurePolicy,
+		PromptFilterSemanticReviewEnabled:          semanticReviewEnabled,
+		PromptFilterSemanticReviewAPIKey:           semanticReviewAPIKey,
+		PromptFilterSemanticReviewBaseURL:          semanticReviewBaseURL,
+		PromptFilterSemanticReviewModel:            semanticReviewModel,
+		PromptFilterSemanticReviewTimeoutMS:        semanticReviewTimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency:   semanticReviewMaxConcurrency,
+		PromptFilterSemanticReviewFailurePolicy:    semanticReviewFailurePolicy,
+		PromptFilterSemanticReviewLogRetentionDays: semanticReviewLogRetentionDays,
 	})
 
 	c.JSON(http.StatusOK, settingsResponse{
@@ -7268,35 +7280,36 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			}
 			return 1
 		}(),
-		PromptFilterSemanticReviewBaseURL:        semanticReviewResponse.BaseURL,
-		PromptFilterSemanticReviewModel:          semanticReviewResponse.Model,
-		PromptFilterSemanticReviewTimeoutMS:      semanticReviewResponse.TimeoutMS,
-		PromptFilterSemanticReviewMaxConcurrency: semanticReviewResponse.MaxConcurrency,
-		PromptFilterSemanticReviewFailurePolicy:  semanticReviewResponse.FailurePolicy,
-		ClientCompatMode:                         runtimeCfg.ClientCompatMode,
-		CodexMinCLIVersion:                       runtimeCfg.CodexMinCLIVersion,
-		CodexUserAgentConfig:                     runtimeCfg.CodexUserAgentConfig,
-		UsageLogMode:                             usageLogMode,
-		UsageLogBatchSize:                        usageLogBatchSize,
-		UsageLogFlushIntervalSeconds:             usageLogFlushIntervalSeconds,
-		StreamFlushPolicy:                        runtimeCfg.StreamFlushPolicy,
-		StreamFlushIntervalMS:                    runtimeCfg.StreamFlushIntervalMS,
-		FirstTokenMode:                           runtimeCfg.FirstTokenMode,
-		FirstTokenTimeoutSeconds:                 runtimeCfg.FirstTokenTimeoutSec,
-		BillingTierPolicy:                        runtimeCfg.BillingTierPolicy,
-		ShowFullUsageNumbers:                     showFullUsageNumbers,
-		ImageStorageBackend:                      imgCfg.Backend,
-		ImageS3Endpoint:                          imgCfg.Endpoint,
-		ImageS3Region:                            imgCfg.Region,
-		ImageS3Bucket:                            imgCfg.Bucket,
-		ImageS3AccessKey:                         imgCfg.AccessKey,
-		ImageS3SecretKey:                         imgCfg.SecretKey,
-		ImageS3Prefix:                            strings.TrimSuffix(imgCfg.Prefix, "/"),
-		ImageS3ForcePathStyle:                    imgCfg.ForcePathStyle,
-		AutoPause5hThreshold:                     h.store.GetGlobalAutoPause5hThreshold(),
-		AutoPause7dThreshold:                     h.store.GetGlobalAutoPause7dThreshold(),
-		AutoPause5hGuardBandPercent:              h.store.GetAutoPause5hGuardBandPercent(),
-		AutoPause5hGuardConcurrency:              h.store.GetAutoPause5hGuardConcurrency(),
+		PromptFilterSemanticReviewBaseURL:          semanticReviewResponse.BaseURL,
+		PromptFilterSemanticReviewModel:            semanticReviewResponse.Model,
+		PromptFilterSemanticReviewTimeoutMS:        semanticReviewResponse.TimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency:   semanticReviewResponse.MaxConcurrency,
+		PromptFilterSemanticReviewFailurePolicy:    semanticReviewResponse.FailurePolicy,
+		PromptFilterSemanticReviewLogRetentionDays: semanticReviewResponse.LogRetentionDays,
+		ClientCompatMode:                           runtimeCfg.ClientCompatMode,
+		CodexMinCLIVersion:                         runtimeCfg.CodexMinCLIVersion,
+		CodexUserAgentConfig:                       runtimeCfg.CodexUserAgentConfig,
+		UsageLogMode:                               usageLogMode,
+		UsageLogBatchSize:                          usageLogBatchSize,
+		UsageLogFlushIntervalSeconds:               usageLogFlushIntervalSeconds,
+		StreamFlushPolicy:                          runtimeCfg.StreamFlushPolicy,
+		StreamFlushIntervalMS:                      runtimeCfg.StreamFlushIntervalMS,
+		FirstTokenMode:                             runtimeCfg.FirstTokenMode,
+		FirstTokenTimeoutSeconds:                   runtimeCfg.FirstTokenTimeoutSec,
+		BillingTierPolicy:                          runtimeCfg.BillingTierPolicy,
+		ShowFullUsageNumbers:                       showFullUsageNumbers,
+		ImageStorageBackend:                        imgCfg.Backend,
+		ImageS3Endpoint:                            imgCfg.Endpoint,
+		ImageS3Region:                              imgCfg.Region,
+		ImageS3Bucket:                              imgCfg.Bucket,
+		ImageS3AccessKey:                           imgCfg.AccessKey,
+		ImageS3SecretKey:                           imgCfg.SecretKey,
+		ImageS3Prefix:                              strings.TrimSuffix(imgCfg.Prefix, "/"),
+		ImageS3ForcePathStyle:                      imgCfg.ForcePathStyle,
+		AutoPause5hThreshold:                       h.store.GetGlobalAutoPause5hThreshold(),
+		AutoPause7dThreshold:                       h.store.GetGlobalAutoPause7dThreshold(),
+		AutoPause5hGuardBandPercent:                h.store.GetAutoPause5hGuardBandPercent(),
+		AutoPause5hGuardConcurrency:                h.store.GetAutoPause5hGuardConcurrency(),
 	})
 }
 

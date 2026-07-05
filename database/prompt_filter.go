@@ -271,3 +271,22 @@ func (db *DB) ClearPromptFilterLogs(ctx context.Context) error {
 	_, err := db.conn.ExecContext(ctx, `TRUNCATE TABLE prompt_filter_logs RESTART IDENTITY`)
 	return err
 }
+
+func (db *DB) DeleteSemanticPromptFilterLogsBefore(ctx context.Context, before time.Time) (int64, error) {
+	if db == nil {
+		return 0, nil
+	}
+	result, err := db.conn.ExecContext(ctx, `
+		DELETE FROM prompt_filter_logs
+		WHERE created_at < $1
+		  AND source IN ('semantic_review', 'semantic_review_disagreement')
+	`, db.timeArg(before))
+	if err != nil {
+		return 0, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return 0, nil
+	}
+	return rows, nil
+}

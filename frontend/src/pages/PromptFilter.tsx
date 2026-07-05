@@ -70,6 +70,7 @@ type PromptFilterForm = Pick<
   | 'prompt_filter_semantic_review_timeout_ms'
   | 'prompt_filter_semantic_review_max_concurrency'
   | 'prompt_filter_semantic_review_failure_policy'
+  | 'prompt_filter_semantic_review_log_retention_days'
 >
 
 type LogFilters = {
@@ -124,6 +125,7 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_semantic_review_timeout_ms: 2500,
   prompt_filter_semantic_review_max_concurrency: 4,
   prompt_filter_semantic_review_failure_policy: 'block',
+  prompt_filter_semantic_review_log_retention_days: 0,
 }
 
 const emptyFilters: LogFilters = {
@@ -196,6 +198,7 @@ const normalizePromptFilterForm = (settings?: SystemSettings | null): PromptFilt
   prompt_filter_semantic_review_timeout_ms: settings?.prompt_filter_semantic_review_timeout_ms || 2500,
   prompt_filter_semantic_review_max_concurrency: settings?.prompt_filter_semantic_review_max_concurrency || 4,
   prompt_filter_semantic_review_failure_policy: settings?.prompt_filter_semantic_review_failure_policy || 'block',
+  prompt_filter_semantic_review_log_retention_days: settings?.prompt_filter_semantic_review_log_retention_days ?? 0,
 })
 
 function normalizePromptFilterView(value?: string): PromptFilterView {
@@ -693,6 +696,16 @@ function OverviewView({
                     onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_semantic_review_failure_policy: value }))}
                     options={semanticFailurePolicyOptions}
                   />
+                </Field>
+                <Field label={t('promptFilter.semanticReviewLogRetentionDays')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={form.prompt_filter_semantic_review_log_retention_days}
+                    onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_log_retention_days: Math.max(0, Math.min(3650, parseInt(event.target.value, 10) || 0)) }))}
+                  />
+                  <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.semanticReviewLogRetentionHint')}</span>
                 </Field>
               </div>
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(180px,0.8fr)]">

@@ -1334,6 +1334,8 @@
     "semanticReviewFailureBlock": "拦截请求",
     "semanticReviewFailureAllow": "放行并记录",
     "semanticReviewFailureWarn": "警告并放行",
+    "semanticReviewLogRetentionDays": "语义复核日志保留天数",
+    "semanticReviewLogRetentionHint": "0 表示不自动清理；仅清理语义复核日志，不影响普通请求日志。",
     "semanticReviewBaseUrl": "语义复核 Base URL",
     "semanticReviewModel": "语义复核模型",
     "semanticReviewApiKey": "语义复核 API Key",

@@ -856,6 +856,7 @@ export default function Settings() {
     prompt_filter_semantic_review_timeout_ms: 2500,
     prompt_filter_semantic_review_max_concurrency: 4,
     prompt_filter_semantic_review_failure_policy: 'block',
+    prompt_filter_semantic_review_log_retention_days: 0,
     client_compat_mode: 'preserve',
     codex_min_cli_version: '0.118.0',
     codex_user_agent_config: '{}',
