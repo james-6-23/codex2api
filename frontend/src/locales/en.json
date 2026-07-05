@@ -11,7 +11,8 @@
     "console": "Console",
     "proxies": "Proxies",
     "images": "Images",
-    "promptFilter": "Prompt Filter"
+    "promptFilter": "Prompt Filter",
+    "codexAudit": "Codex Audit"
   },
   "common": {
     "online": "Online",
@@ -1335,6 +1336,16 @@
     "semanticReviewApiKeyPlaceholder": "sk-...",
     "semanticReviewApiKeyConfigured": "{{n}} key(s) configured; leave blank to keep",
     "semanticReviewApiKeyHint": "Used for high-risk disagreement review. Admin settings take precedence; when left empty, server environment configuration is still used.",
+    "semanticReviewConnectivity": "Model Connectivity Test",
+    "semanticReviewConnectivityDesc": "Send one safe classification request with the active configuration to verify Base URL, API key, model, and JSON parsing.",
+    "semanticReviewTest": "Test Connectivity",
+    "semanticReviewTesting": "Testing",
+    "semanticReviewTestStatus": "Status",
+    "semanticReviewTestFailed": "Failed",
+    "semanticReviewTestLatency": "Latency",
+    "semanticReviewTestModel": "Response Model",
+    "semanticReviewTestDecision": "Decision",
+    "semanticReviewTestReason": "Details",
     "testerTitle": "Rule Tester",
     "testEndpoint": "Endpoint",
     "testModel": "Model",

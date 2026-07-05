@@ -12,6 +12,7 @@ import type {
   CreateAccountResponse,
   CreateAPIKeyResponse,
   CreateAPIKeyRequest,
+  CodexAuditReport,
   FetchOpenAIResponsesModelsRequest,
   FetchOpenAIResponsesModelsResponse,
   CreateImageJobPayload,
@@ -35,6 +36,7 @@ import type {
   PromptFilterRulePatternTestResponse,
   PromptFilterRulesResponse,
   PromptFilterTestResponse,
+  SemanticReviewConnectionTestResponse,
   PublicAPIKeyUsageResponse,
   RecycleBinAccountsResponse,
   RuntimeStatusResponse,
@@ -296,6 +298,15 @@ export const api = {
   updateAccountCredit: (id: number, data: { credit_enabled: boolean; credit_skip_usage_window: boolean }) =>
     request<MessageResponse>(`/accounts/${id}/credit`, { method: 'PATCH', body: JSON.stringify(data) }),
   getHealth: () => request<HealthResponse>('/health'),
+  getCodexAuditReport: (params: { hours?: number; start?: string; end?: string; bucketMinutes?: number; limit?: number } = {}) => {
+    const search = new URLSearchParams()
+    if (params.hours) search.set('hours', String(params.hours))
+    if (params.start) search.set('start', params.start)
+    if (params.end) search.set('end', params.end)
+    if (params.bucketMinutes) search.set('bucket_minutes', String(params.bucketMinutes))
+    if (params.limit) search.set('limit', String(params.limit))
+    return request<CodexAuditReport>(`/audit/codex2api?${search.toString()}`)
+  },
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
   getOpsErrorSummary: (params: {
@@ -510,6 +521,8 @@ export const api = {
   },
   testPromptFilter: (data: { text: string; endpoint?: string; model?: string }) =>
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
+  testSemanticReviewConnection: (data: { text?: string; endpoint?: string; request_model?: string } = {}) =>
+    request<SemanticReviewConnectionTestResponse>('/prompt-filter/semantic-review/test', { method: 'POST', body: JSON.stringify(data) }),
   testPromptFilterRulePattern: (data: { pattern: string; text: string }) =>
     request<PromptFilterRulePatternTestResponse>('/prompt-filter/rules/test', { method: 'POST', body: JSON.stringify(data) }),
   getPromptFilterRules: () =>

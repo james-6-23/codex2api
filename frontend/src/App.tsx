@@ -22,6 +22,7 @@ const APIKeyUsagePortal = lazy(() => import('./pages/APIKeyUsagePortal'))
 const Usage = lazy(() => import('./pages/Usage'))
 const ImageStudio = lazy(() => import('./pages/ImageStudio'))
 const PromptFilter = lazy(() => import('./pages/PromptFilter'))
+const CodexAudit = lazy(() => import('./pages/CodexAudit'))
 const ThemeSettings = lazy(() => import('./pages/ThemeSettings'))
 
 export default function App() {
@@ -57,6 +58,7 @@ function AdminApp() {
           <Route path="/images/:view" element={<ImageStudio />} />
           <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
           <Route path="/prompt-filter/:view" element={<PromptFilter />} />
+          <Route path="/codex-audit" element={<CodexAudit />} />
           <Route path="/ops" element={<Navigate to="/ops/overview" replace />} />
           <Route path="/ops/overview" element={<Operations />} />
           <Route path="/ops/runtime" element={<RuntimeStatus />} />

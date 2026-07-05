@@ -11,7 +11,8 @@
     "console": "控制台",
     "proxies": "代理管理",
     "images": "生图工作台",
-    "promptFilter": "Prompt 检查"
+    "promptFilter": "Prompt 检查",
+    "codexAudit": "Codex 巡检"
   },
   "common": {
     "online": "在线",
@@ -1335,6 +1336,16 @@
     "semanticReviewApiKeyPlaceholder": "sk-...",
     "semanticReviewApiKeyConfigured": "已配置 {{n}} 个 key，留空保持不变",
     "semanticReviewApiKeyHint": "用于高风险分歧复核。后台配置优先；留空时继续使用服务器环境变量中的配置。",
+    "semanticReviewConnectivity": "模型联通性测试",
+    "semanticReviewConnectivityDesc": "使用当前已生效配置发起一次安全分类请求，验证 Base URL、API Key、模型与 JSON 解析是否正常。",
+    "semanticReviewTest": "测试联通性",
+    "semanticReviewTesting": "测试中",
+    "semanticReviewTestStatus": "状态",
+    "semanticReviewTestFailed": "失败",
+    "semanticReviewTestLatency": "耗时",
+    "semanticReviewTestModel": "响应模型",
+    "semanticReviewTestDecision": "判定",
+    "semanticReviewTestReason": "说明",
     "testerTitle": "规则测试",
     "testEndpoint": "端点",
     "testModel": "模型",

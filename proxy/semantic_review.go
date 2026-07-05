@@ -65,6 +65,32 @@ type semanticReviewResult struct {
 	Cached     bool    `json:"-"`
 }
 
+type SemanticReviewConnectionTestConfig struct {
+	APIKey       string
+	BaseURL      string
+	Model        string
+	Timeout      time.Duration
+	Endpoint     string
+	RequestModel string
+	Text         string
+}
+
+type SemanticReviewConnectionTestResult struct {
+	OK            bool    `json:"ok"`
+	Configured    bool    `json:"configured"`
+	BaseURL       string  `json:"base_url"`
+	Model         string  `json:"model"`
+	ResponseModel string  `json:"response_model,omitempty"`
+	Endpoint      string  `json:"endpoint"`
+	RequestModel  string  `json:"request_model"`
+	LatencyMS     int64   `json:"latency_ms"`
+	Block         bool    `json:"block"`
+	Confidence    float64 `json:"confidence"`
+	Category      string  `json:"category"`
+	Reason        string  `json:"reason"`
+	Error         string  `json:"error,omitempty"`
+}
+
 type semanticReviewRequest struct {
 	Model       string                  `json:"model"`
 	Messages    []semanticReviewMessage `json:"messages"`
@@ -122,6 +148,61 @@ func loadSemanticReviewConfig() semanticReviewConfig {
 		cfg.Model = semanticReviewDefaultModel
 	}
 	return cfg
+}
+
+func TestSemanticReviewConnection(ctx context.Context, in SemanticReviewConnectionTestConfig) SemanticReviewConnectionTestResult {
+	baseURL := strings.TrimRight(strings.TrimSpace(in.BaseURL), "/")
+	model := strings.TrimSpace(in.Model)
+	endpoint := strings.TrimSpace(in.Endpoint)
+	if endpoint == "" {
+		endpoint = "/v1/responses"
+	}
+	requestModel := strings.TrimSpace(in.RequestModel)
+	if requestModel == "" {
+		requestModel = "gpt-5.4"
+	}
+	text := strings.TrimSpace(in.Text)
+	if text == "" {
+		text = "Connectivity check for a defensive cybersecurity policy classifier. This request is benign and should be allowed."
+	}
+	timeout := in.Timeout
+	if timeout <= 0 {
+		timeout = time.Duration(semanticReviewDefaultTimeoutMS) * time.Millisecond
+	}
+	cfg := semanticReviewConfig{
+		Enabled:        true,
+		APIKey:         strings.TrimSpace(in.APIKey),
+		BaseURL:        baseURL,
+		Model:          model,
+		Timeout:        timeout,
+		MaxChars:       semanticReviewDefaultMaxChars,
+		MaxConcurrency: 1,
+	}
+	result := SemanticReviewConnectionTestResult{
+		Configured:   cfg.APIKey != "" && cfg.BaseURL != "" && cfg.Model != "",
+		BaseURL:      cfg.BaseURL,
+		Model:        cfg.Model,
+		Endpoint:     endpoint,
+		RequestModel: requestModel,
+	}
+	if !result.Configured {
+		result.Error = "semantic review base_url, model, or api key is not configured"
+		return result
+	}
+	start := time.Now()
+	review, err := callSemanticReviewModel(ctx, cfg, endpoint, requestModel, text)
+	result.LatencyMS = time.Since(start).Milliseconds()
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	result.OK = true
+	result.ResponseModel = review.Model
+	result.Block = review.Block
+	result.Confidence = review.Confidence
+	result.Category = review.Category
+	result.Reason = review.Reason
+	return result
 }
 
 func semanticReviewEndpoints(raw string) map[string]bool {

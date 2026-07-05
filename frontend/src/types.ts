@@ -709,6 +709,111 @@ export interface PromptFilterTestResponse {
   verdict: PromptFilterVerdict
 }
 
+export interface SemanticReviewConnectionTestResponse {
+  ok: boolean
+  configured: boolean
+  base_url: string
+  model: string
+  response_model?: string
+  endpoint: string
+  request_model: string
+  latency_ms: number
+  block: boolean
+  confidence: number
+  category: string
+  reason: string
+  error?: string
+}
+
+export interface CodexAuditPromptFilterRow {
+  source: string
+  action: string
+  mode: string
+  review_model: string
+  review_flagged: boolean
+  count: number
+  min_score: number
+  max_score: number
+  review_errors: number
+}
+
+export interface CodexAuditUsageSummary {
+  requests: number
+  errors_4xx: number
+  errors_5xx: number
+  websocket_requests: number
+  websocket_ratio: number
+  policy_like_errors: number
+  first_token_samples: number
+  first_token_min_ms: number
+  first_token_p50_ms: number
+  first_token_p95_ms: number
+  first_token_max_ms: number
+}
+
+export interface CodexAuditSummary {
+  prompt_logs: number
+  prompt_blocks: number
+  review_flagged: number
+  review_errors: number
+  high_score_allowed: number
+  semantic_disagreements: number
+  semantic_disagreement_blocks: number
+  upstream_cyber_policy: number
+  probe_observed: number
+  probe_short_circuits: number
+}
+
+export interface CodexAuditTimelinePoint {
+  bucket: string
+  requests: number
+  prompt_blocks: number
+  review_flagged: number
+  upstream_cyber_policy: number
+  errors_4xx: number
+  errors_5xx: number
+  first_token_p95_ms: number
+}
+
+export interface CodexAuditModelRow {
+  model: string
+  requests: number
+  errors_4xx: number
+  errors_5xx: number
+  websocket: number
+  first_token_p95_ms: number
+}
+
+export interface CodexAuditProbeRow {
+  api_key_id: number
+  api_key_name: string
+  api_key_masked: string
+  endpoint: string
+  model: string
+  count: number
+  first_seen: string
+  last_seen: string
+  span_seconds: number
+}
+
+export interface CodexAuditReport {
+  window_start: string
+  window_end: string
+  generated_at: string
+  verdict: string
+  summary: CodexAuditSummary
+  prompt_filter: CodexAuditPromptFilterRow[]
+  usage: CodexAuditUsageSummary
+  timeline: CodexAuditTimelinePoint[]
+  models: CodexAuditModelRow[]
+  suspicious_samples: PromptFilterLog[]
+  probe_observed: CodexAuditProbeRow[]
+  probe_short_circuits: CodexAuditProbeRow[]
+  policy_errors: UsageLog[]
+  slow_requests: UsageLog[]
+  notes: string[]
+}
+
 export interface PromptFilterRulePatternTestResponse {
   matched: boolean
   error?: string

@@ -12,7 +12,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
-import type { PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterVerdict, SystemSettings } from '../types'
+import type { PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterVerdict, SemanticReviewConnectionTestResponse, SystemSettings } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -507,11 +507,31 @@ function OverviewView({
   onSave: () => void
 }) {
   const { t } = useTranslation()
+  const [semanticTesting, setSemanticTesting] = useState(false)
+  const [semanticTestResult, setSemanticTestResult] = useState<SemanticReviewConnectionTestResponse | null>(null)
+  const [semanticTestError, setSemanticTestError] = useState<string | null>(null)
   const stats = useMemo(() => ({
     blocks: recentLogs.filter((log) => log.action === 'block').length,
     upstream: recentLogs.filter((log) => log.source === 'upstream_cyber_policy').length,
     latest: recentLogs[0]?.created_at,
   }), [recentLogs])
+
+  const runSemanticReviewTest = async () => {
+    setSemanticTesting(true)
+    setSemanticTestError(null)
+    try {
+      const result = await api.testSemanticReviewConnection({
+        endpoint: testEndpoint,
+        request_model: testModel,
+      })
+      setSemanticTestResult(result)
+    } catch (err) {
+      setSemanticTestError(getErrorMessage(err))
+      setSemanticTestResult(null)
+    } finally {
+      setSemanticTesting(false)
+    }
+  }
 
   return (
     <>
@@ -689,6 +709,38 @@ function OverviewView({
                 />
                 <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.semanticReviewApiKeyHint')}</span>
               </Field>
+              <div className="rounded-lg border border-border bg-background/60 p-3">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-foreground">{t('promptFilter.semanticReviewConnectivity')}</div>
+                    <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.semanticReviewConnectivityDesc')}</p>
+                  </div>
+                  <Button type="button" variant="outline" onClick={() => void runSemanticReviewTest()} disabled={semanticTesting}>
+                    <RefreshCw className={cn('size-3.5', semanticTesting && 'animate-spin')} />
+                    {semanticTesting ? t('promptFilter.semanticReviewTesting') : t('promptFilter.semanticReviewTest')}
+                  </Button>
+                </div>
+                {semanticTestResult || semanticTestError ? (
+                  <div className={cn(
+                    'mt-3 rounded-md border p-3 text-xs leading-5',
+                    semanticTestResult?.ok
+                      ? 'border-emerald-500/20 bg-emerald-500/8 text-emerald-700 dark:text-emerald-300'
+                      : 'border-destructive/20 bg-destructive/8 text-destructive'
+                  )}>
+                    {semanticTestResult ? (
+                      <div className="grid gap-1 sm:grid-cols-2">
+                        <span>{t('promptFilter.semanticReviewTestStatus')}: {semanticTestResult.ok ? t('common.success') : t('promptFilter.semanticReviewTestFailed')}</span>
+                        <span>{t('promptFilter.semanticReviewTestLatency')}: {semanticTestResult.latency_ms || 0} ms</span>
+                        <span>{t('promptFilter.semanticReviewTestModel')}: {semanticTestResult.response_model || semanticTestResult.model || '-'}</span>
+                        <span>{t('promptFilter.semanticReviewTestDecision')}: {semanticTestResult.block ? 'block' : 'allow'} / {Math.round((semanticTestResult.confidence || 0) * 100)}%</span>
+                        <span className="sm:col-span-2">{t('promptFilter.semanticReviewTestReason')}: {semanticTestResult.error || semanticTestResult.reason || '-'}</span>
+                      </div>
+                    ) : (
+                      <span>{semanticTestError}</span>
+                    )}
+                  </div>
+                ) : null}
+              </div>
             </div>
             <Button onClick={onSave} disabled={saving}>
               <Save className="size-4" />
@@ -817,7 +869,7 @@ function LogsView({ clearLogs, clearing }: { clearLogs: () => Promise<void>; cle
             <Select value={draftFilters.action} onValueChange={(value) => setDraftFilters((current) => ({ ...current, action: value }))} options={[{ label: t('common.all'), value: '' }, { label: 'block', value: 'block' }, { label: 'warn', value: 'warn' }, { label: 'allow', value: 'allow' }]} />
           </Field>
           <Field label={t('promptFilter.source')}>
-            <Select value={draftFilters.source} onValueChange={(value) => setDraftFilters((current) => ({ ...current, source: value }))} options={[{ label: t('common.all'), value: '' }, { label: 'local_filter', value: 'local_filter' }, { label: 'upstream_cyber_policy', value: 'upstream_cyber_policy' }]} />
+            <Select value={draftFilters.source} onValueChange={(value) => setDraftFilters((current) => ({ ...current, source: value }))} options={[{ label: t('common.all'), value: '' }, { label: 'local_filter', value: 'local_filter' }, { label: 'semantic_review_disagreement', value: 'semantic_review_disagreement' }, { label: 'upstream_cyber_policy', value: 'upstream_cyber_policy' }]} />
           </Field>
           <Field label={t('promptFilter.endpoint')}>
             <Input value={draftFilters.endpoint} onChange={(event) => setDraftFilters((current) => ({ ...current, endpoint: event.target.value }))} placeholder="/v1/responses" />

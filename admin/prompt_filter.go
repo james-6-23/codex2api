@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 )
@@ -28,6 +29,12 @@ type promptFilterTestRequest struct {
 
 type promptFilterTestResponse struct {
 	Verdict promptfilter.Verdict `json:"verdict"`
+}
+
+type promptFilterSemanticReviewTestRequest struct {
+	Text         string `json:"text"`
+	Endpoint     string `json:"endpoint"`
+	RequestModel string `json:"request_model"`
 }
 
 type promptFilterRulePatternTestRequest struct {
@@ -214,6 +221,45 @@ func (h *Handler) TestPromptFilter(c *gin.Context) {
 		verdict = reviewPromptFilterVerdict(c.Request.Context(), req.Text, verdict, cfg)
 	}
 	c.JSON(http.StatusOK, promptFilterTestResponse{Verdict: verdict})
+}
+
+func (h *Handler) TestPromptFilterSemanticReview(c *gin.Context) {
+	var req promptFilterSemanticReviewTestRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求体无效")
+		return
+	}
+	if strings.TrimSpace(req.Text) != "" && len([]rune(req.Text)) > 20000 {
+		writeError(c, http.StatusBadRequest, "text 不能超过 20000 个字符")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 35*time.Second)
+	defer cancel()
+
+	settings, err := h.db.GetSystemSettings(ctx)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if settings == nil {
+		settings = &database.SystemSettings{PromptFilterSemanticReviewEnabled: true}
+	}
+	resolved := resolvePromptFilterSemanticReview(settings)
+	timeout := time.Duration(resolved.TimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		timeout = 2500 * time.Millisecond
+	}
+	result := proxy.TestSemanticReviewConnection(ctx, proxy.SemanticReviewConnectionTestConfig{
+		APIKey:       resolved.APIKey,
+		BaseURL:      resolved.BaseURL,
+		Model:        resolved.Model,
+		Timeout:      timeout,
+		Endpoint:     req.Endpoint,
+		RequestModel: req.RequestModel,
+		Text:         req.Text,
+	})
+	c.JSON(http.StatusOK, result)
 }
 
 func (h *Handler) TestPromptFilterRulePattern(c *gin.Context) {
