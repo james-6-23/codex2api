@@ -796,6 +796,12 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_model TEXT DEFAULT 'omni-moderation-latest';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_timeout_seconds INT DEFAULT 10;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_fail_closed BOOLEAN DEFAULT TRUE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_enabled BOOLEAN DEFAULT TRUE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_api_key TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_base_url TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_model TEXT DEFAULT '';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_timeout_ms INT DEFAULT 0;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_semantic_review_max_concurrency INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS client_compat_mode VARCHAR(20) DEFAULT 'preserve';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.118.0';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_user_agent_config TEXT DEFAULT '{}';
@@ -1407,6 +1413,12 @@ type SystemSettings struct {
 	PromptFilterReviewModel            string
 	PromptFilterReviewTimeoutSeconds   int
 	PromptFilterReviewFailClosed       bool
+	PromptFilterSemanticReviewEnabled  bool
+	PromptFilterSemanticReviewAPIKey   string
+	PromptFilterSemanticReviewBaseURL  string
+	PromptFilterSemanticReviewModel    string
+	PromptFilterSemanticReviewTimeoutMS int
+	PromptFilterSemanticReviewMaxConcurrency int
 	ClientCompatMode                   string
 	CodexMinCLIVersion                 string
 	CodexUserAgentConfig               string
@@ -1518,7 +1530,13 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(auto_pause_7d_threshold, 0),
 		       COALESCE(auto_pause_5h_guard_band_percent, 5),
 		       COALESCE(auto_pause_5h_guard_concurrency, 1),
-		       COALESCE(prompt_filter_review_all, false)
+		       COALESCE(prompt_filter_review_all, false),
+		       COALESCE(prompt_filter_semantic_review_enabled, true),
+		       COALESCE(prompt_filter_semantic_review_api_key, ''),
+		       COALESCE(prompt_filter_semantic_review_base_url, ''),
+		       COALESCE(prompt_filter_semantic_review_model, ''),
+		       COALESCE(prompt_filter_semantic_review_timeout_ms, 0),
+		       COALESCE(prompt_filter_semantic_review_max_concurrency, 0)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1556,6 +1574,12 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.AutoPause5hGuardBandPercent,
 		&s.AutoPause5hGuardConcurrency,
 		&s.PromptFilterReviewAll,
+		&s.PromptFilterSemanticReviewEnabled,
+		&s.PromptFilterSemanticReviewAPIKey,
+		&s.PromptFilterSemanticReviewBaseURL,
+		&s.PromptFilterSemanticReviewModel,
+		&s.PromptFilterSemanticReviewTimeoutMS,
+		&s.PromptFilterSemanticReviewMaxConcurrency,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1619,9 +1643,15 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					auto_pause_7d_threshold,
 					auto_pause_5h_guard_band_percent,
 					auto_pause_5h_guard_concurrency,
-					prompt_filter_review_all
+					prompt_filter_review_all,
+					prompt_filter_semantic_review_enabled,
+					prompt_filter_semantic_review_api_key,
+					prompt_filter_semantic_review_base_url,
+					prompt_filter_semantic_review_model,
+					prompt_filter_semantic_review_timeout_ms,
+					prompt_filter_semantic_review_max_concurrency
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1696,7 +1726,13 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					auto_pause_7d_threshold = EXCLUDED.auto_pause_7d_threshold,
 					auto_pause_5h_guard_band_percent = EXCLUDED.auto_pause_5h_guard_band_percent,
 					auto_pause_5h_guard_concurrency = EXCLUDED.auto_pause_5h_guard_concurrency,
-					prompt_filter_review_all = EXCLUDED.prompt_filter_review_all
+					prompt_filter_review_all = EXCLUDED.prompt_filter_review_all,
+					prompt_filter_semantic_review_enabled = EXCLUDED.prompt_filter_semantic_review_enabled,
+					prompt_filter_semantic_review_api_key = EXCLUDED.prompt_filter_semantic_review_api_key,
+					prompt_filter_semantic_review_base_url = EXCLUDED.prompt_filter_semantic_review_base_url,
+					prompt_filter_semantic_review_model = EXCLUDED.prompt_filter_semantic_review_model,
+					prompt_filter_semantic_review_timeout_ms = EXCLUDED.prompt_filter_semantic_review_timeout_ms,
+					prompt_filter_semantic_review_max_concurrency = EXCLUDED.prompt_filter_semantic_review_max_concurrency
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1713,7 +1749,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.FirstTokenTimeoutSeconds, firstTokenMode, billingTierPolicy, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, s.ShowFullUsageNumbers, s.PublicKeyUsagePageEnabled, reasoningEffortModels,
 		s.CodexForceWebsocket, s.CodexWSKeepaliveEnabled, normalizeCodexWSKeepaliveInterval(s.CodexWSKeepaliveIntervalSec),
 		s.CodexWSHideUpstreamErrors, s.CodexWSSilentRetryEnabled, normalizeCodexWSSilentMaxRetries(s.CodexWSSilentMaxRetries),
-		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency, s.PromptFilterReviewAll)
+		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency, s.PromptFilterReviewAll,
+		s.PromptFilterSemanticReviewEnabled, s.PromptFilterSemanticReviewAPIKey, s.PromptFilterSemanticReviewBaseURL,
+		s.PromptFilterSemanticReviewModel, s.PromptFilterSemanticReviewTimeoutMS, s.PromptFilterSemanticReviewMaxConcurrency)
 	return err
 }
 

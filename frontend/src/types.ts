@@ -590,6 +590,14 @@ export interface SystemSettings {
   prompt_filter_review_model: string
   prompt_filter_review_timeout_seconds: number
   prompt_filter_review_fail_closed: boolean
+  prompt_filter_semantic_review_enabled: boolean
+  prompt_filter_semantic_review_api_key?: string
+  prompt_filter_semantic_review_api_key_configured?: boolean
+  prompt_filter_semantic_review_api_key_count?: number
+  prompt_filter_semantic_review_base_url: string
+  prompt_filter_semantic_review_model: string
+  prompt_filter_semantic_review_timeout_ms: number
+  prompt_filter_semantic_review_max_concurrency: number
   client_compat_mode: 'preserve' | 'auto' | 'force' | string
   codex_min_cli_version: string
   codex_user_agent_config: string

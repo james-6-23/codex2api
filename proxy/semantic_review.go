@@ -187,6 +187,44 @@ func envInt(name string, fallback, min, max int) int {
 	return parsed
 }
 
+func clampSemanticReviewInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func (h *Handler) loadSemanticReviewDisagreementConfig(ctx context.Context) semanticReviewConfig {
+	cfg := loadSemanticReviewConfig()
+	if h == nil || h.db == nil {
+		return cfg
+	}
+	settings, err := h.db.GetSystemSettings(ctx)
+	if err != nil || settings == nil {
+		return cfg
+	}
+	cfg.DisagreementEnabled = settings.PromptFilterSemanticReviewEnabled
+	if key := strings.TrimSpace(settings.PromptFilterSemanticReviewAPIKey); key != "" {
+		cfg.APIKey = key
+	}
+	if baseURL := strings.TrimRight(strings.TrimSpace(settings.PromptFilterSemanticReviewBaseURL), "/"); baseURL != "" {
+		cfg.BaseURL = baseURL
+	}
+	if model := strings.TrimSpace(settings.PromptFilterSemanticReviewModel); model != "" {
+		cfg.Model = model
+	}
+	if settings.PromptFilterSemanticReviewTimeoutMS > 0 {
+		cfg.Timeout = time.Duration(clampSemanticReviewInt(settings.PromptFilterSemanticReviewTimeoutMS, 100, 30000)) * time.Millisecond
+	}
+	if settings.PromptFilterSemanticReviewMaxConcurrency > 0 {
+		cfg.MaxConcurrency = int64(clampSemanticReviewInt(settings.PromptFilterSemanticReviewMaxConcurrency, 1, 100))
+	}
+	return cfg
+}
+
 func (cfg semanticReviewConfig) readyFor(endpoint string) bool {
 	if !cfg.Enabled || cfg.APIKey == "" || cfg.BaseURL == "" || cfg.Model == "" {
 		return false
@@ -282,7 +320,7 @@ func (h *Handler) inspectSemanticReviewText(c *gin.Context, text string, endpoin
 }
 
 func (h *Handler) inspectSemanticReviewDisagreementText(c *gin.Context, text string, endpoint string, model string, writeBlock func()) bool {
-	cfg := loadSemanticReviewConfig()
+	cfg := h.loadSemanticReviewDisagreementConfig(c.Request.Context())
 	text = prepareSemanticReviewText(text, cfg.MaxChars)
 	action := promptfilter.ActionAllow
 	reason := ""

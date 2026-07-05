@@ -61,6 +61,14 @@ type PromptFilterForm = Pick<
   | 'prompt_filter_review_model'
   | 'prompt_filter_review_timeout_seconds'
   | 'prompt_filter_review_fail_closed'
+  | 'prompt_filter_semantic_review_enabled'
+  | 'prompt_filter_semantic_review_api_key'
+  | 'prompt_filter_semantic_review_api_key_configured'
+  | 'prompt_filter_semantic_review_api_key_count'
+  | 'prompt_filter_semantic_review_base_url'
+  | 'prompt_filter_semantic_review_model'
+  | 'prompt_filter_semantic_review_timeout_ms'
+  | 'prompt_filter_semantic_review_max_concurrency'
 >
 
 type LogFilters = {
@@ -106,6 +114,14 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_review_model: 'omni-moderation-latest',
   prompt_filter_review_timeout_seconds: 10,
   prompt_filter_review_fail_closed: true,
+  prompt_filter_semantic_review_enabled: true,
+  prompt_filter_semantic_review_api_key: '',
+  prompt_filter_semantic_review_api_key_configured: false,
+  prompt_filter_semantic_review_api_key_count: 0,
+  prompt_filter_semantic_review_base_url: 'https://api.openai.com/v1',
+  prompt_filter_semantic_review_model: 'gpt-5.4-mini',
+  prompt_filter_semantic_review_timeout_ms: 2500,
+  prompt_filter_semantic_review_max_concurrency: 4,
 }
 
 const emptyFilters: LogFilters = {
@@ -169,6 +185,14 @@ const normalizePromptFilterForm = (settings?: SystemSettings | null): PromptFilt
   prompt_filter_review_model: settings?.prompt_filter_review_model || 'omni-moderation-latest',
   prompt_filter_review_timeout_seconds: settings?.prompt_filter_review_timeout_seconds || 10,
   prompt_filter_review_fail_closed: settings?.prompt_filter_review_fail_closed ?? true,
+  prompt_filter_semantic_review_enabled: settings?.prompt_filter_semantic_review_enabled ?? true,
+  prompt_filter_semantic_review_api_key: '',
+  prompt_filter_semantic_review_api_key_configured: Boolean(settings?.prompt_filter_semantic_review_api_key_configured),
+  prompt_filter_semantic_review_api_key_count: settings?.prompt_filter_semantic_review_api_key_count || 0,
+  prompt_filter_semantic_review_base_url: settings?.prompt_filter_semantic_review_base_url || 'https://api.openai.com/v1',
+  prompt_filter_semantic_review_model: settings?.prompt_filter_semantic_review_model || 'gpt-5.4-mini',
+  prompt_filter_semantic_review_timeout_ms: settings?.prompt_filter_semantic_review_timeout_ms || 2500,
+  prompt_filter_semantic_review_max_concurrency: settings?.prompt_filter_semantic_review_max_concurrency || 4,
 })
 
 function normalizePromptFilterView(value?: string): PromptFilterView {
@@ -189,8 +213,13 @@ function promptFilterSavePayload(form: PromptFilterForm): Partial<SystemSettings
   // 展示用字段，不参与写入。
   delete payload.prompt_filter_review_api_key_configured
   delete payload.prompt_filter_review_api_key_count
+  delete payload.prompt_filter_semantic_review_api_key_configured
+  delete payload.prompt_filter_semantic_review_api_key_count
   if (!payload.prompt_filter_review_api_key?.trim()) {
     delete payload.prompt_filter_review_api_key
+  }
+  if (!payload.prompt_filter_semantic_review_api_key?.trim()) {
+    delete payload.prompt_filter_semantic_review_api_key
   }
   return payload
 }
@@ -596,6 +625,69 @@ function OverviewView({
                   onChange={(event) => setForm((current) => ({ ...current, prompt_filter_review_api_key: event.target.value }))}
                 />
                 <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.reviewApiKeyHint')}</span>
+              </Field>
+            </div>
+
+            <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-4">
+              <div>
+                <SectionTitle title={t('promptFilter.semanticReviewTitle')} />
+                <p className="mt-1 text-sm text-muted-foreground">{t('promptFilter.semanticReviewDesc')}</p>
+              </div>
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(190px,1fr))] gap-4">
+                <Field label={t('promptFilter.semanticReviewEnabled')}>
+                  <Select
+                    value={form.prompt_filter_semantic_review_enabled ? 'true' : 'false'}
+                    onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_semantic_review_enabled: value === 'true' }))}
+                    options={booleanOptions}
+                  />
+                </Field>
+                <Field label={t('promptFilter.semanticReviewTimeout')}>
+                  <Input
+                    type="number"
+                    min={100}
+                    max={30000}
+                    value={form.prompt_filter_semantic_review_timeout_ms}
+                    onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_timeout_ms: parseInt(event.target.value, 10) || 2500 }))}
+                  />
+                </Field>
+                <Field label={t('promptFilter.semanticReviewMaxConcurrency')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={form.prompt_filter_semantic_review_max_concurrency}
+                    onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_max_concurrency: parseInt(event.target.value, 10) || 4 }))}
+                  />
+                </Field>
+              </div>
+              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(180px,0.8fr)]">
+                <Field label={t('promptFilter.semanticReviewBaseUrl')}>
+                  <Input
+                    value={form.prompt_filter_semantic_review_base_url}
+                    placeholder="https://api.openai.com/v1"
+                    onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_base_url: event.target.value }))}
+                  />
+                </Field>
+                <Field label={t('promptFilter.semanticReviewModel')}>
+                  <Input
+                    value={form.prompt_filter_semantic_review_model}
+                    placeholder="gpt-5.4-mini"
+                    onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_model: event.target.value }))}
+                  />
+                </Field>
+              </div>
+              <Field label={t('promptFilter.semanticReviewApiKey')}>
+                <Input
+                  className="font-mono"
+                  value={form.prompt_filter_semantic_review_api_key ?? ''}
+                  placeholder={
+                    form.prompt_filter_semantic_review_api_key_configured
+                      ? t('promptFilter.semanticReviewApiKeyConfigured', { n: form.prompt_filter_semantic_review_api_key_count })
+                      : t('promptFilter.semanticReviewApiKeyPlaceholder')
+                  }
+                  onChange={(event) => setForm((current) => ({ ...current, prompt_filter_semantic_review_api_key: event.target.value }))}
+                />
+                <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.semanticReviewApiKeyHint')}</span>
               </Field>
             </div>
             <Button onClick={onSave} disabled={saving}>

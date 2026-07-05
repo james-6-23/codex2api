@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 
 	"github.com/codex2api/auth"
@@ -330,6 +331,72 @@ func TestPromptFilterHighRiskReviewDisagreementAllowsWhenSemanticClears(t *testi
 	}
 	if semanticCalls != 1 {
 		t.Fatalf("semantic review calls = %d, want 1", semanticCalls)
+	}
+}
+
+func TestPromptFilterHighRiskReviewDisagreementUsesDatabaseSemanticConfig(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	promptReviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":false}]}`))
+	}))
+	defer promptReviewServer.Close()
+
+	semanticModel := ""
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req semanticReviewRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode semantic request: %v", err)
+		}
+		semanticModel = req.Model
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"db-semantic-model","choices":[{"message":{"content":"{\"block\":false,\"confidence\":0.1,\"category\":\"benign\",\"reason\":\"db config used\"}"}}]}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "semantic-review.db"))
+	if err != nil {
+		t.Fatalf("database.New(sqlite): %v", err)
+	}
+	defer db.Close()
+	if err := db.UpdateSystemSettings(t.Context(), &database.SystemSettings{
+		PromptFilterSemanticReviewEnabled:        true,
+		PromptFilterSemanticReviewAPIKey:         "db-semantic-key",
+		PromptFilterSemanticReviewBaseURL:        semanticServer.URL,
+		PromptFilterSemanticReviewModel:          "db-semantic-model",
+		PromptFilterSemanticReviewTimeoutMS:      1200,
+		PromptFilterSemanticReviewMaxConcurrency: 2,
+	}); err != nil {
+		t.Fatalf("UpdateSystemSettings: %v", err)
+	}
+
+	previousClient := promptfilter.DefaultReviewClient
+	promptfilter.DefaultReviewClient = promptfilter.ReviewClient{HTTPClient: promptReviewServer.Client()}
+	t.Cleanup(func() {
+		promptfilter.DefaultReviewClient = previousClient
+	})
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "false")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "env-semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", "https://env.example.com/v1")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "env-semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskDisagreementStore(promptReviewServer.URL)
+	handler := NewHandler(store, db, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI blocked after database semantic review cleared disagreement")
+	}
+	if semanticModel != "db-semantic-model" {
+		t.Fatalf("semantic model = %q, want db-semantic-model", semanticModel)
 	}
 }
 

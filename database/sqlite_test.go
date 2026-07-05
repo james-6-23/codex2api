@@ -1094,6 +1094,12 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		PromptFilterReviewModel:          "review-model",
 		PromptFilterReviewTimeoutSeconds: 7,
 		PromptFilterReviewFailClosed:     false,
+		PromptFilterSemanticReviewEnabled: true,
+		PromptFilterSemanticReviewAPIKey: "sk-semantic-test",
+		PromptFilterSemanticReviewBaseURL: "https://semantic.example.com/v1",
+		PromptFilterSemanticReviewModel: "semantic-model",
+		PromptFilterSemanticReviewTimeoutMS: 1234,
+		PromptFilterSemanticReviewMaxConcurrency: 6,
 		ClientCompatMode:                 "preserve",
 		CodexMinCLIVersion:               "0.118.0",
 		CodexUserAgentConfig:             `{"terminal":"xterm-256color","os_name":"Linux","os_version":"Unknown"}`,
@@ -1169,6 +1175,24 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if settings.PromptFilterReviewFailClosed {
 		t.Fatal("PromptFilterReviewFailClosed = true, want false")
+	}
+	if !settings.PromptFilterSemanticReviewEnabled {
+		t.Fatal("PromptFilterSemanticReviewEnabled = false, want true")
+	}
+	if settings.PromptFilterSemanticReviewAPIKey != "sk-semantic-test" {
+		t.Fatalf("PromptFilterSemanticReviewAPIKey = %q, want sk-semantic-test", settings.PromptFilterSemanticReviewAPIKey)
+	}
+	if settings.PromptFilterSemanticReviewBaseURL != "https://semantic.example.com/v1" {
+		t.Fatalf("PromptFilterSemanticReviewBaseURL = %q, want https://semantic.example.com/v1", settings.PromptFilterSemanticReviewBaseURL)
+	}
+	if settings.PromptFilterSemanticReviewModel != "semantic-model" {
+		t.Fatalf("PromptFilterSemanticReviewModel = %q, want semantic-model", settings.PromptFilterSemanticReviewModel)
+	}
+	if settings.PromptFilterSemanticReviewTimeoutMS != 1234 {
+		t.Fatalf("PromptFilterSemanticReviewTimeoutMS = %d, want 1234", settings.PromptFilterSemanticReviewTimeoutMS)
+	}
+	if settings.PromptFilterSemanticReviewMaxConcurrency != 6 {
+		t.Fatalf("PromptFilterSemanticReviewMaxConcurrency = %d, want 6", settings.PromptFilterSemanticReviewMaxConcurrency)
 	}
 	if !settings.CodexWSHideUpstreamErrors {
 		t.Fatal("CodexWSHideUpstreamErrors = false, want true")

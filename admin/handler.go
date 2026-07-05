@@ -5582,6 +5582,13 @@ type settingsResponse struct {
 	PromptFilterReviewModel            string  `json:"prompt_filter_review_model"`
 	PromptFilterReviewTimeoutSeconds   int     `json:"prompt_filter_review_timeout_seconds"`
 	PromptFilterReviewFailClosed       bool    `json:"prompt_filter_review_fail_closed"`
+	PromptFilterSemanticReviewEnabled  bool    `json:"prompt_filter_semantic_review_enabled"`
+	PromptFilterSemanticReviewAPIKeyConfigured bool `json:"prompt_filter_semantic_review_api_key_configured"`
+	PromptFilterSemanticReviewAPIKeyCount int  `json:"prompt_filter_semantic_review_api_key_count"`
+	PromptFilterSemanticReviewBaseURL  string  `json:"prompt_filter_semantic_review_base_url"`
+	PromptFilterSemanticReviewModel    string  `json:"prompt_filter_semantic_review_model"`
+	PromptFilterSemanticReviewTimeoutMS int    `json:"prompt_filter_semantic_review_timeout_ms"`
+	PromptFilterSemanticReviewMaxConcurrency int `json:"prompt_filter_semantic_review_max_concurrency"`
 	ClientCompatMode                   string  `json:"client_compat_mode"`
 	CodexMinCLIVersion                 string  `json:"codex_min_cli_version"`
 	CodexUserAgentConfig               string  `json:"codex_user_agent_config"`
@@ -5670,6 +5677,12 @@ type updateSettingsReq struct {
 	PromptFilterReviewModel            *string  `json:"prompt_filter_review_model"`
 	PromptFilterReviewTimeoutSeconds   *int     `json:"prompt_filter_review_timeout_seconds"`
 	PromptFilterReviewFailClosed       *bool    `json:"prompt_filter_review_fail_closed"`
+	PromptFilterSemanticReviewEnabled  *bool    `json:"prompt_filter_semantic_review_enabled"`
+	PromptFilterSemanticReviewAPIKey   *string  `json:"prompt_filter_semantic_review_api_key"`
+	PromptFilterSemanticReviewBaseURL  *string  `json:"prompt_filter_semantic_review_base_url"`
+	PromptFilterSemanticReviewModel    *string  `json:"prompt_filter_semantic_review_model"`
+	PromptFilterSemanticReviewTimeoutMS *int     `json:"prompt_filter_semantic_review_timeout_ms"`
+	PromptFilterSemanticReviewMaxConcurrency *int `json:"prompt_filter_semantic_review_max_concurrency"`
 	ClientCompatMode                   *string  `json:"client_compat_mode"`
 	CodexMinCLIVersion                 *string  `json:"codex_min_cli_version"`
 	CodexUserAgentConfig               *string  `json:"codex_user_agent_config"`
@@ -5695,6 +5708,89 @@ type updateSettingsReq struct {
 	AutoPause7dThreshold               *float64 `json:"auto_pause_7d_threshold"`
 	AutoPause5hGuardBandPercent        *float64 `json:"auto_pause_5h_guard_band_percent"`
 	AutoPause5hGuardConcurrency        *int     `json:"auto_pause_5h_guard_concurrency"`
+}
+
+type promptFilterSemanticReviewResolved struct {
+	Enabled        bool
+	APIKey        string
+	BaseURL       string
+	Model         string
+	TimeoutMS     int
+	MaxConcurrency int
+}
+
+func adminEnvBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	switch strings.ToLower(value) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return fallback
+	}
+}
+
+func adminEnvInt(name string, fallback, min, max int) int {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return clampAdminInt(parsed, min, max)
+}
+
+func clampAdminInt(value, min, max int) int {
+	if value < min {
+		return min
+	}
+	if value > max {
+		return max
+	}
+	return value
+}
+
+func resolvePromptFilterSemanticReview(settings *database.SystemSettings) promptFilterSemanticReviewResolved {
+	resolved := promptFilterSemanticReviewResolved{
+		Enabled:        adminEnvBool("CODEX_SEMANTIC_REVIEW_DISAGREEMENT_ENABLED", true),
+		APIKey:         strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_API_KEY")),
+		BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_BASE_URL")), "/"),
+		Model:          strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_MODEL")),
+		TimeoutMS:      adminEnvInt("CODEX_SEMANTIC_REVIEW_TIMEOUT_MS", 2500, 100, 30000),
+		MaxConcurrency: adminEnvInt("CODEX_SEMANTIC_REVIEW_MAX_CONCURRENCY", 4, 1, 100),
+	}
+	if resolved.BaseURL == "" {
+		resolved.BaseURL = "https://api.openai.com/v1"
+	}
+	if resolved.Model == "" {
+		resolved.Model = "gpt-5.4-mini"
+	}
+	if settings == nil {
+		return resolved
+	}
+	resolved.Enabled = settings.PromptFilterSemanticReviewEnabled
+	if key := strings.TrimSpace(settings.PromptFilterSemanticReviewAPIKey); key != "" {
+		resolved.APIKey = key
+	}
+	if baseURL := strings.TrimRight(strings.TrimSpace(settings.PromptFilterSemanticReviewBaseURL), "/"); baseURL != "" {
+		resolved.BaseURL = baseURL
+	}
+	if model := strings.TrimSpace(settings.PromptFilterSemanticReviewModel); model != "" {
+		resolved.Model = model
+	}
+	if settings.PromptFilterSemanticReviewTimeoutMS > 0 {
+		resolved.TimeoutMS = clampAdminInt(settings.PromptFilterSemanticReviewTimeoutMS, 100, 30000)
+	}
+	if settings.PromptFilterSemanticReviewMaxConcurrency > 0 {
+		resolved.MaxConcurrency = clampAdminInt(settings.PromptFilterSemanticReviewMaxConcurrency, 1, 100)
+	}
+	return resolved
 }
 
 type brandingResponse struct {
@@ -6180,6 +6276,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		publicKeyUsagePageEnabled = dbSettings.PublicKeyUsagePageEnabled
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
+	semanticReviewCfg := resolvePromptFilterSemanticReview(dbSettings)
 	runtimeCfg := proxy.CurrentRuntimeSettings()
 	imgCfg := imagestore.CurrentConfig()
 	imgPrefix := strings.TrimSuffix(imgCfg.Prefix, "/")
@@ -6254,6 +6351,18 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		PromptFilterReviewModel:            promptFilterCfg.Review.Model,
 		PromptFilterReviewTimeoutSeconds:   promptFilterCfg.Review.TimeoutSeconds,
 		PromptFilterReviewFailClosed:       promptFilterCfg.Review.FailClosed,
+		PromptFilterSemanticReviewEnabled:  semanticReviewCfg.Enabled,
+		PromptFilterSemanticReviewAPIKeyConfigured: semanticReviewCfg.APIKey != "",
+		PromptFilterSemanticReviewAPIKeyCount: func() int {
+			if semanticReviewCfg.APIKey == "" {
+				return 0
+			}
+			return 1
+		}(),
+		PromptFilterSemanticReviewBaseURL:        semanticReviewCfg.BaseURL,
+		PromptFilterSemanticReviewModel:          semanticReviewCfg.Model,
+		PromptFilterSemanticReviewTimeoutMS:      semanticReviewCfg.TimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency: semanticReviewCfg.MaxConcurrency,
 		ClientCompatMode:                   runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:                 runtimeCfg.CodexMinCLIVersion,
 		CodexUserAgentConfig:               runtimeCfg.CodexUserAgentConfig,
@@ -6749,6 +6858,41 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		usageLogFlushIntervalSeconds = h.db.GetUsageLogFlushIntervalSeconds()
 	}
 
+	semanticReviewEnabled := true
+	semanticReviewAPIKey := ""
+	semanticReviewBaseURL := ""
+	semanticReviewModel := ""
+	semanticReviewTimeoutMS := 0
+	semanticReviewMaxConcurrency := 0
+	if existingSettings != nil {
+		semanticReviewEnabled = existingSettings.PromptFilterSemanticReviewEnabled
+		semanticReviewAPIKey = existingSettings.PromptFilterSemanticReviewAPIKey
+		semanticReviewBaseURL = existingSettings.PromptFilterSemanticReviewBaseURL
+		semanticReviewModel = existingSettings.PromptFilterSemanticReviewModel
+		semanticReviewTimeoutMS = existingSettings.PromptFilterSemanticReviewTimeoutMS
+		semanticReviewMaxConcurrency = existingSettings.PromptFilterSemanticReviewMaxConcurrency
+	}
+	if req.PromptFilterSemanticReviewEnabled != nil {
+		semanticReviewEnabled = *req.PromptFilterSemanticReviewEnabled
+	}
+	if req.PromptFilterSemanticReviewAPIKey != nil {
+		if key := strings.TrimSpace(*req.PromptFilterSemanticReviewAPIKey); key != "" {
+			semanticReviewAPIKey = key
+		}
+	}
+	if req.PromptFilterSemanticReviewBaseURL != nil {
+		semanticReviewBaseURL = strings.TrimRight(strings.TrimSpace(*req.PromptFilterSemanticReviewBaseURL), "/")
+	}
+	if req.PromptFilterSemanticReviewModel != nil {
+		semanticReviewModel = strings.TrimSpace(*req.PromptFilterSemanticReviewModel)
+	}
+	if req.PromptFilterSemanticReviewTimeoutMS != nil {
+		semanticReviewTimeoutMS = clampAdminInt(*req.PromptFilterSemanticReviewTimeoutMS, 100, 30000)
+	}
+	if req.PromptFilterSemanticReviewMaxConcurrency != nil {
+		semanticReviewMaxConcurrency = clampAdminInt(*req.PromptFilterSemanticReviewMaxConcurrency, 1, 100)
+	}
+
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	promptFilterChanged := false
 	if req.PromptFilterEnabled != nil {
@@ -6982,6 +7126,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterReviewModel:            promptFilterCfg.Review.Model,
 		PromptFilterReviewTimeoutSeconds:   promptFilterCfg.Review.TimeoutSeconds,
 		PromptFilterReviewFailClosed:       promptFilterCfg.Review.FailClosed,
+		PromptFilterSemanticReviewEnabled:  semanticReviewEnabled,
+		PromptFilterSemanticReviewAPIKey:   semanticReviewAPIKey,
+		PromptFilterSemanticReviewBaseURL:  semanticReviewBaseURL,
+		PromptFilterSemanticReviewModel:    semanticReviewModel,
+		PromptFilterSemanticReviewTimeoutMS: semanticReviewTimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency: semanticReviewMaxConcurrency,
 		ClientCompatMode:                   runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:                 runtimeCfg.CodexMinCLIVersion,
 		CodexUserAgentConfig:               runtimeCfg.CodexUserAgentConfig,
@@ -7018,6 +7168,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if adminAuthSource == "env" {
 		adminSecretForDisplay = ""
 	}
+	semanticReviewResponse := resolvePromptFilterSemanticReview(&database.SystemSettings{
+		PromptFilterSemanticReviewEnabled:        semanticReviewEnabled,
+		PromptFilterSemanticReviewAPIKey:         semanticReviewAPIKey,
+		PromptFilterSemanticReviewBaseURL:        semanticReviewBaseURL,
+		PromptFilterSemanticReviewModel:          semanticReviewModel,
+		PromptFilterSemanticReviewTimeoutMS:      semanticReviewTimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency: semanticReviewMaxConcurrency,
+	})
 
 	c.JSON(http.StatusOK, settingsResponse{
 		SiteName:                           siteName,
@@ -7087,6 +7245,18 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterReviewModel:            promptFilterCfg.Review.Model,
 		PromptFilterReviewTimeoutSeconds:   promptFilterCfg.Review.TimeoutSeconds,
 		PromptFilterReviewFailClosed:       promptFilterCfg.Review.FailClosed,
+		PromptFilterSemanticReviewEnabled:  semanticReviewResponse.Enabled,
+		PromptFilterSemanticReviewAPIKeyConfigured: semanticReviewResponse.APIKey != "",
+		PromptFilterSemanticReviewAPIKeyCount: func() int {
+			if semanticReviewResponse.APIKey == "" {
+				return 0
+			}
+			return 1
+		}(),
+		PromptFilterSemanticReviewBaseURL:        semanticReviewResponse.BaseURL,
+		PromptFilterSemanticReviewModel:          semanticReviewResponse.Model,
+		PromptFilterSemanticReviewTimeoutMS:      semanticReviewResponse.TimeoutMS,
+		PromptFilterSemanticReviewMaxConcurrency: semanticReviewResponse.MaxConcurrency,
 		ClientCompatMode:                   runtimeCfg.ClientCompatMode,
 		CodexMinCLIVersion:                 runtimeCfg.CodexMinCLIVersion,
 		CodexUserAgentConfig:               runtimeCfg.CodexUserAgentConfig,
