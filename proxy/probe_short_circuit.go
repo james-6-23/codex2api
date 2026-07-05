@@ -65,8 +65,8 @@ type probeCachedResponse struct {
 }
 
 type probeResponseCapture struct {
-	key          string
-	writer       *probeCaptureWriter
+	key           string
+	writer        *probeCaptureWriter
 	maxCacheBytes int
 	maxEntries    int
 }
@@ -463,24 +463,24 @@ func probeSignature(text string) (string, bool) {
 		return "", false
 	}
 	exact := map[string]string{
-		"hi":                                                                                   "hello",
-		"hello":                                                                                "hello",
-		"ping":                                                                                 "ping",
-		"pong":                                                                                 "ping",
-		"test":                                                                                 "test",
-		"ok":                                                                                   "ok",
-		"hello world":                                                                          "hello_world",
-		"count to seven":                                                                       "count_to_seven",
-		"count to 7":                                                                           "count_to_seven",
-		"whats the opposite of dark":                                                           "opposite_dark",
-		"what is the opposite of dark":                                                         "opposite_dark",
-		"2 \u4e58 2 \u7b49\u4e8e\u51e0":                                                       "two_times_two",
-		"2\u4e582\u7b49\u4e8e\u51e0":                                                          "two_times_two",
-		"2*2\u7b49\u4e8e\u51e0":                                                               "two_times_two",
-		"2\u00d72\u7b49\u4e8e\u51e0":                                                          "two_times_two",
-		"2 x 2 equals what":                                                                    "two_times_two",
-		"what is 2+2":                                                                          "two_plus_two",
-		"what is two plus two":                                                                 "two_plus_two",
+		"hi":                            "hello",
+		"hello":                         "hello",
+		"ping":                          "ping",
+		"pong":                          "ping",
+		"test":                          "test",
+		"ok":                            "ok",
+		"hello world":                   "hello_world",
+		"count to seven":                "count_to_seven",
+		"count to 7":                    "count_to_seven",
+		"whats the opposite of dark":    "opposite_dark",
+		"what is the opposite of dark":  "opposite_dark",
+		"2 \u4e58 2 \u7b49\u4e8e\u51e0": "two_times_two",
+		"2\u4e582\u7b49\u4e8e\u51e0":    "two_times_two",
+		"2*2\u7b49\u4e8e\u51e0":         "two_times_two",
+		"2\u00d72\u7b49\u4e8e\u51e0":    "two_times_two",
+		"2 x 2 equals what":             "two_times_two",
+		"what is 2+2":                   "two_plus_two",
+		"what is two plus two":          "two_plus_two",
 		"call the probe_ping function with ok=true to acknowledge readiness you must use the tool": "probe_ping",
 	}
 	if signature, ok := exact[normalized]; ok {
@@ -638,17 +638,24 @@ func writeSSEJSON(c *gin.Context, value any) {
 
 func (h *Handler) logLocalProbeShortCircuit(c *gin.Context, endpoint string, model string, stream bool, responseKind string, decision probeShortCircuitDecision) {
 	input := &database.UsageLogInput{
-		AccountID:          0,
-		Endpoint:           endpoint,
-		Model:              model,
-		EffectiveModel:     model,
-		StatusCode:         http.StatusOK,
-		DurationMs:         0,
-		InboundEndpoint:    endpoint,
-		UpstreamEndpoint:   probeShortCircuitEndpoint,
-		Stream:             stream,
-		UpstreamErrorKind:  "local_probe_short_circuit",
-		ErrorMessage:       "repeated probe short-circuited: " + decision.Signature,
+		AccountID:         0,
+		Endpoint:          endpoint,
+		Model:             model,
+		EffectiveModel:    model,
+		StatusCode:        http.StatusOK,
+		DurationMs:        0,
+		InboundEndpoint:   endpoint,
+		UpstreamEndpoint:  probeShortCircuitEndpoint,
+		Stream:            stream,
+		UpstreamErrorKind: "local_probe_short_circuit",
+		ErrorMessage: fmt.Sprintf(
+			"repeated probe short-circuited: %s body_hash=%s response_kind=%s stream=%t cached=%t",
+			decision.Signature,
+			shortProbeHash(decision.BodyHash),
+			responseKind,
+			stream,
+			decision.Cached != nil,
+		),
 		PromptTokens:       0,
 		CompletionTokens:   0,
 		TotalTokens:        0,

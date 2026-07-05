@@ -764,6 +764,7 @@ export interface CodexAuditSummary {
   upstream_cyber_policy: number
   probe_observed: number
   probe_short_circuits: number
+  probe_high_frequency: number
 }
 
 export interface CodexAuditTimelinePoint {
@@ -792,10 +793,14 @@ export interface CodexAuditProbeRow {
   api_key_masked: string
   endpoint: string
   model: string
+  signature: string
+  stream: boolean
   count: number
   first_seen: string
   last_seen: string
   span_seconds: number
+  average_interval_seconds: number
+  rate_per_minute: number
 }
 
 export interface CodexAuditReport {
@@ -811,6 +816,7 @@ export interface CodexAuditReport {
   suspicious_samples: PromptFilterLog[]
   probe_observed: CodexAuditProbeRow[]
   probe_short_circuits: CodexAuditProbeRow[]
+  probe_high_frequency: CodexAuditProbeRow[]
   policy_errors: UsageLog[]
   slow_requests: UsageLog[]
   notes: string[]

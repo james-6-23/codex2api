@@ -210,7 +210,7 @@ export default function CodexAudit() {
                     <SignalTile label="首字 P95" value={formatMS(report.usage.first_token_p95_ms)} detail={`${formatNumber(report.usage.first_token_samples)} 个样本`} icon={<Clock3 />} tone={firstTokenTone} />
                     <SignalTile label="WS 占比" value={formatPercent(report.usage.websocket_ratio || 0)} detail={`${formatNumber(report.usage.websocket_requests)} 个 WS 请求`} icon={<Zap />} tone={(report.usage.websocket_ratio || 0) >= 0.85 ? 'ok' : 'warn'} />
                     <SignalTile label="语义分歧" value={formatNumber(report.summary.semantic_disagreements)} detail={`拦截 ${formatNumber(report.summary.semantic_disagreement_blocks)}`} icon={<Gauge />} tone={report.summary.semantic_disagreement_blocks ? 'warn' : 'neutral'} />
-                    <SignalTile label="探针短路" value={formatNumber(report.summary.probe_short_circuits)} detail={`观测 ${formatNumber(report.summary.probe_observed)}`} icon={<CheckCircle2 />} tone={report.summary.probe_short_circuits ? 'neutral' : 'ok'} />
+                    <SignalTile label="高频探针" value={formatNumber(report.summary.probe_high_frequency || 0)} detail={`已短路 ${formatNumber(report.summary.probe_short_circuits)} / 观测 ${formatNumber(report.summary.probe_observed)}`} icon={<CheckCircle2 />} tone={report.summary.probe_high_frequency ? 'warn' : 'ok'} />
                   </div>
                 </div>
               </CardContent>
@@ -261,12 +261,12 @@ export default function CodexAudit() {
                 />
               </Panel>
 
-              <Panel title="探针行为" description="观察高频探针和本地缓存短路效果。">
-                <SubsectionTitle title="高频探针" />
-                <ProbeTable rows={report.probe_observed || []} />
+              <Panel title="探针行为" description="观察高频探针是否已被本地短路，以及是否仍有只观测未短路的探针。">
+                <SubsectionTitle title="高频探针（已本地短路）" />
+                <ProbeTable rows={(report.probe_high_frequency?.length ? report.probe_high_frequency : report.probe_short_circuits) || []} />
                 <div className="mt-4">
-                  <SubsectionTitle title="本地短路探针" />
-                  <ProbeTable rows={report.probe_short_circuits || []} />
+                  <SubsectionTitle title="只观测未短路" />
+                  <ProbeTable rows={report.probe_observed || []} />
                 </div>
               </Panel>
             </div>
@@ -398,12 +398,16 @@ function ProbeTable({ rows }: { rows: CodexAuditReport['probe_observed'] }) {
   }
   return (
     <SimpleTable
-      columns={['API Key', '端点', '模型', '次数', '跨度']}
+      columns={['API Key', '签名', '端点', '模型', '流式', '次数', '频率', '平均间隔', '跨度']}
       rows={rows.map((row) => [
         row.api_key_name || row.api_key_masked || String(row.api_key_id || '-'),
+        row.signature || '-',
         row.endpoint || '-',
         row.model || '-',
+        row.stream ? '是' : '否',
         formatNumber(row.count),
+        formatRate(row.rate_per_minute || 0),
+        formatDuration(row.average_interval_seconds || 0),
         formatDuration(row.span_seconds || 0),
       ])}
       empty="暂无探针记录"
@@ -532,6 +536,13 @@ function formatDuration(seconds: number) {
   if (seconds >= 3600) return `${Math.round(seconds / 3600)}h`
   if (seconds >= 60) return `${Math.round(seconds / 60)}m`
   return `${Math.round(seconds)}s`
+}
+
+function formatRate(value?: number) {
+  const rate = value || 0
+  if (!rate) return '-'
+  if (rate >= 10) return `${Math.round(rate)}/min`
+  return `${rate.toFixed(1)}/min`
 }
 
 function formatShortTime(value: string) {

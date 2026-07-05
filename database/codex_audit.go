@@ -29,6 +29,7 @@ type CodexAuditReport struct {
 	SuspiciousSamples  []*PromptFilterLog          `json:"suspicious_samples"`
 	ProbeObserved      []CodexAuditProbeRow        `json:"probe_observed"`
 	ProbeShortCircuits []CodexAuditProbeRow        `json:"probe_short_circuits"`
+	ProbeHighFrequency []CodexAuditProbeRow        `json:"probe_high_frequency"`
 	PolicyErrors       []*UsageLog                 `json:"policy_errors"`
 	SlowRequests       []*UsageLog                 `json:"slow_requests"`
 	Notes              []string                    `json:"notes"`
@@ -45,6 +46,7 @@ type CodexAuditSummary struct {
 	UpstreamCyberPolicy        int64 `json:"upstream_cyber_policy"`
 	ProbeObserved              int64 `json:"probe_observed"`
 	ProbeShortCircuits         int64 `json:"probe_short_circuits"`
+	ProbeHighFrequency         int64 `json:"probe_high_frequency"`
 }
 
 type CodexAuditPromptFilterRow struct {
@@ -94,15 +96,19 @@ type CodexAuditModelRow struct {
 }
 
 type CodexAuditProbeRow struct {
-	APIKeyID     int64     `json:"api_key_id"`
-	APIKeyName   string    `json:"api_key_name"`
-	APIKeyMasked string    `json:"api_key_masked"`
-	Endpoint     string    `json:"endpoint"`
-	Model        string    `json:"model"`
-	Count        int64     `json:"count"`
-	FirstSeen    time.Time `json:"first_seen"`
-	LastSeen     time.Time `json:"last_seen"`
-	SpanSeconds  float64   `json:"span_seconds"`
+	APIKeyID               int64     `json:"api_key_id"`
+	APIKeyName             string    `json:"api_key_name"`
+	APIKeyMasked           string    `json:"api_key_masked"`
+	Endpoint               string    `json:"endpoint"`
+	Model                  string    `json:"model"`
+	Signature              string    `json:"signature"`
+	Stream                 bool      `json:"stream"`
+	Count                  int64     `json:"count"`
+	FirstSeen              time.Time `json:"first_seen"`
+	LastSeen               time.Time `json:"last_seen"`
+	SpanSeconds            float64   `json:"span_seconds"`
+	AverageIntervalSeconds float64   `json:"average_interval_seconds"`
+	RatePerMinute          float64   `json:"rate_per_minute"`
 }
 
 func (db *DB) BuildCodexAuditReport(ctx context.Context, query CodexAuditQuery) (*CodexAuditReport, error) {
@@ -159,6 +165,9 @@ func (db *DB) BuildCodexAuditReport(ctx context.Context, query CodexAuditQuery) 
 		return nil, err
 	}
 	if report.ProbeShortCircuits, err = db.codexAuditProbeShortCircuits(ctx, start, end, query.Limit); err != nil {
+		return nil, err
+	}
+	if report.ProbeHighFrequency, err = db.codexAuditProbeHighFrequency(ctx, start, end, query.Limit); err != nil {
 		return nil, err
 	}
 	if report.PolicyErrors, err = db.codexAuditUsageSamples(ctx, start, end, query.Limit, "policy"); err != nil {
@@ -442,12 +451,28 @@ func (db *DB) codexAuditSuspiciousSamples(ctx context.Context, start, end time.T
 func (db *DB) codexAuditProbeObserved(ctx context.Context, start, end time.Time, limit int) ([]CodexAuditProbeRow, error) {
 	startArg, endArg := db.timeRangeArgs(start, end)
 	rows, err := db.conn.QueryContext(ctx, `
-		SELECT COALESCE(api_key_id, 0), COALESCE(api_key_name, ''), COALESCE(api_key_masked, ''),
-		       COALESCE(endpoint, ''), COALESCE(model, ''), COUNT(*), MIN(created_at), MAX(created_at)
+		WITH grouped AS (
+			SELECT COALESCE(api_key_id, 0) AS api_key_id,
+			       COALESCE(api_key_name, '') AS api_key_name,
+			       COALESCE(api_key_masked, '') AS api_key_masked,
+			       COALESCE(endpoint, '') AS endpoint,
+			       COALESCE(model, '') AS model,
+			       COALESCE(substring(COALESCE(text_preview, '') FROM 'signature=([^ ]+)'), '') AS signature,
+			       COALESCE(text_preview, '') LIKE '%stream=true%' AS stream,
+			       COUNT(*) AS n,
+			       MIN(created_at) AS first_seen,
+			       MAX(created_at) AS last_seen,
+			       EXTRACT(EPOCH FROM MAX(created_at) - MIN(created_at))::float8 AS span_seconds
 		FROM prompt_filter_logs
 		WHERE created_at >= $1 AND created_at <= $2 AND source = 'local_probe_observed'
-		GROUP BY 1, 2, 3, 4, 5
-		ORDER BY COUNT(*) DESC, MIN(created_at)
+			GROUP BY 1, 2, 3, 4, 5, 6, 7
+		)
+		SELECT api_key_id, api_key_name, api_key_masked, endpoint, model, signature, stream, n, first_seen, last_seen,
+		       COALESCE(span_seconds, 0),
+		       CASE WHEN n > 1 THEN COALESCE(span_seconds, 0) / (n - 1) ELSE 0 END AS average_interval_seconds,
+		       CASE WHEN COALESCE(span_seconds, 0) > 0 THEN n * 60.0 / span_seconds ELSE n * 60.0 END AS rate_per_minute
+		FROM grouped
+		ORDER BY n DESC, first_seen
 		LIMIT $3
 	`, startArg, endArg, limit)
 	if err != nil {
@@ -460,12 +485,63 @@ func (db *DB) codexAuditProbeObserved(ctx context.Context, start, end time.Time,
 func (db *DB) codexAuditProbeShortCircuits(ctx context.Context, start, end time.Time, limit int) ([]CodexAuditProbeRow, error) {
 	startArg, endArg := db.timeRangeArgs(start, end)
 	rows, err := db.conn.QueryContext(ctx, `
-		SELECT COALESCE(api_key_id, 0), COALESCE(api_key_name, ''), COALESCE(api_key_masked, ''),
-		       COALESCE(inbound_endpoint, endpoint, ''), COALESCE(NULLIF(effective_model, ''), model, ''), COUNT(*), MIN(created_at), MAX(created_at)
+		WITH grouped AS (
+			SELECT COALESCE(api_key_id, 0) AS api_key_id,
+			       COALESCE(api_key_name, '') AS api_key_name,
+			       COALESCE(api_key_masked, '') AS api_key_masked,
+			       COALESCE(inbound_endpoint, endpoint, '') AS endpoint,
+			       COALESCE(NULLIF(effective_model, ''), model, '') AS model,
+			       COALESCE(substring(COALESCE(error_message, '') FROM 'repeated probe short-circuited: ([^ ]+)'), '') AS signature,
+			       COALESCE(stream, false) AS stream,
+			       COUNT(*) AS n,
+			       MIN(created_at) AS first_seen,
+			       MAX(created_at) AS last_seen,
+			       EXTRACT(EPOCH FROM MAX(created_at) - MIN(created_at))::float8 AS span_seconds
 		FROM usage_logs
 		WHERE created_at >= $1 AND created_at <= $2 AND upstream_error_kind = 'local_probe_short_circuit'
-		GROUP BY 1, 2, 3, 4, 5
-		ORDER BY COUNT(*) DESC, MIN(created_at)
+			GROUP BY 1, 2, 3, 4, 5, 6, 7
+		)
+		SELECT api_key_id, api_key_name, api_key_masked, endpoint, model, signature, stream, n, first_seen, last_seen,
+		       COALESCE(span_seconds, 0),
+		       CASE WHEN n > 1 THEN COALESCE(span_seconds, 0) / (n - 1) ELSE 0 END AS average_interval_seconds,
+		       CASE WHEN COALESCE(span_seconds, 0) > 0 THEN n * 60.0 / span_seconds ELSE n * 60.0 END AS rate_per_minute
+		FROM grouped
+		ORDER BY n DESC, first_seen
+		LIMIT $3
+	`, startArg, endArg, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCodexAuditProbeRows(rows)
+}
+
+func (db *DB) codexAuditProbeHighFrequency(ctx context.Context, start, end time.Time, limit int) ([]CodexAuditProbeRow, error) {
+	startArg, endArg := db.timeRangeArgs(start, end)
+	rows, err := db.conn.QueryContext(ctx, `
+		WITH grouped AS (
+			SELECT COALESCE(api_key_id, 0) AS api_key_id,
+			       COALESCE(api_key_name, '') AS api_key_name,
+			       COALESCE(api_key_masked, '') AS api_key_masked,
+			       COALESCE(inbound_endpoint, endpoint, '') AS endpoint,
+			       COALESCE(NULLIF(effective_model, ''), model, '') AS model,
+			       COALESCE(substring(COALESCE(error_message, '') FROM 'repeated probe short-circuited: ([^ ]+)'), '') AS signature,
+			       COALESCE(stream, false) AS stream,
+			       COUNT(*) AS n,
+			       MIN(created_at) AS first_seen,
+			       MAX(created_at) AS last_seen,
+			       EXTRACT(EPOCH FROM MAX(created_at) - MIN(created_at))::float8 AS span_seconds
+			FROM usage_logs
+			WHERE created_at >= $1 AND created_at <= $2 AND upstream_error_kind = 'local_probe_short_circuit'
+			GROUP BY 1, 2, 3, 4, 5, 6, 7
+		)
+		SELECT api_key_id, api_key_name, api_key_masked, endpoint, model, signature, stream, n, first_seen, last_seen,
+		       COALESCE(span_seconds, 0),
+		       CASE WHEN n > 1 THEN COALESCE(span_seconds, 0) / (n - 1) ELSE 0 END AS average_interval_seconds,
+		       CASE WHEN COALESCE(span_seconds, 0) > 0 THEN n * 60.0 / span_seconds ELSE n * 60.0 END AS rate_per_minute
+		FROM grouped
+		WHERE n > 0
+		ORDER BY rate_per_minute DESC, n DESC, first_seen
 		LIMIT $3
 	`, startArg, endArg, limit)
 	if err != nil {
@@ -480,7 +556,21 @@ func scanCodexAuditProbeRows(rows scannerRows) ([]CodexAuditProbeRow, error) {
 	for rows.Next() {
 		var item CodexAuditProbeRow
 		var firstRaw, lastRaw any
-		if err := rows.Scan(&item.APIKeyID, &item.APIKeyName, &item.APIKeyMasked, &item.Endpoint, &item.Model, &item.Count, &firstRaw, &lastRaw); err != nil {
+		if err := rows.Scan(
+			&item.APIKeyID,
+			&item.APIKeyName,
+			&item.APIKeyMasked,
+			&item.Endpoint,
+			&item.Model,
+			&item.Signature,
+			&item.Stream,
+			&item.Count,
+			&firstRaw,
+			&lastRaw,
+			&item.SpanSeconds,
+			&item.AverageIntervalSeconds,
+			&item.RatePerMinute,
+		); err != nil {
 			return nil, err
 		}
 		first, err := parseDBTimeValue(firstRaw)
@@ -493,7 +583,6 @@ func scanCodexAuditProbeRows(rows scannerRows) ([]CodexAuditProbeRow, error) {
 		}
 		item.FirstSeen = first
 		item.LastSeen = last
-		item.SpanSeconds = last.Sub(first).Seconds()
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -655,6 +744,9 @@ func summarizeCodexAudit(report *CodexAuditReport) CodexAuditSummary {
 	}
 	for _, row := range report.ProbeShortCircuits {
 		summary.ProbeShortCircuits += row.Count
+	}
+	for _, row := range report.ProbeHighFrequency {
+		summary.ProbeHighFrequency += row.Count
 	}
 	return summary
 }
