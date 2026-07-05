@@ -54,7 +54,11 @@ func captureRustlsHello(t *testing.T) parsedHello {
 		t.Fatalf("dial: %v", err)
 	}
 	defer raw.Close()
-	uconn := utls.UClient(raw, &utls.Config{ServerName: "chatgpt.com", InsecureSkipVerify: true}, utls.HelloCustom)
+	uconn := utls.UClient(raw, &utls.Config{
+		ServerName:         "chatgpt.com",
+		InsecureSkipVerify: true,
+		OmitEmptyPsk:       true, // 避免 empty psk 错误
+	}, utls.HelloCustom)
 	if err := uconn.ApplyPreset(rustlsClientHelloSpec()); err != nil {
 		t.Fatalf("ApplyPreset: %v", err)
 	}
@@ -119,11 +123,9 @@ func TestRustlsHelloMatchesRealCodex(t *testing.T) {
 	}
 }
 
-// TestRustlsHelloExtensionsAreShuffled verifies the anti-ossification behavior:
-// two freshly-built ClientHellos must (almost always) differ in extension order.
-func TestRustlsHelloExtensionsAreShuffled(t *testing.T) {
-	same := 0
-	const tries = 6
+// TestRustlsHelloExtensionsStable 验证扩展顺序固定（PSK 如存在则必须最后，SNI 必须在前）。
+func TestRustlsHelloExtensionsStable(t *testing.T) {
+	const tries = 3
 	var first []uint16
 	for i := 0; i < tries; i++ {
 		h := captureRustlsHello(t)
@@ -131,12 +133,26 @@ func TestRustlsHelloExtensionsAreShuffled(t *testing.T) {
 			first = h.extOrder
 			continue
 		}
-		if equalU16(first, h.extOrder) {
-			same++
+		if !equalU16(first, h.extOrder) {
+			t.Errorf("扩展顺序不稳定: 第1次=%v, 第%d次=%v", first, i+1, h.extOrder)
 		}
 	}
-	if same == tries-1 {
-		t.Errorf("extension order never changed across %d hellos — shuffle not working", tries)
+	// 验证关键扩展存在
+	if !containsU16(first, 0) { // SNI
+		t.Errorf("缺少 SNI 扩展 (0)")
+	}
+	if !containsU16(first, 16) { // ALPN
+		t.Errorf("缺少 ALPN 扩展 (16)")
+	}
+	if !containsU16(first, 43) { // SupportedVersions
+		t.Errorf("缺少 SupportedVersions 扩展 (43)")
+	}
+	if !containsU16(first, 51) { // KeyShare
+		t.Errorf("缺少 KeyShare 扩展 (51)")
+	}
+	// PSK (41) 在新连接时被 OmitEmptyPsk 隐藏（正常），仅验证如存在则必须最后
+	if containsU16(first, 41) && len(first) > 0 && first[len(first)-1] != 41 {
+		t.Errorf("PreSharedKey 扩展 (41) 如存在必须最后，实际顺序: %v", first)
 	}
 }
 

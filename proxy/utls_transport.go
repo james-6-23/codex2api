@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
-	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -134,9 +133,11 @@ func rustlsClientHelloSpec() *utls.ClientHelloSpec {
 			{Group: utls.X25519},
 		}},
 		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+		// PreSharedKeyExtension 必须是最后一个扩展（TLS 1.3 RFC 8446 §4.2.11 要求）。
+		// 空占位让 uTLS 在启用 session cache 时自动填充 PSK 数据（resumption）。
+		&utls.UtlsPreSharedKeyExtension{},
 	}
-	// rustls 每次握手随机排列扩展（RFC 8701 抗僵化）。
-	rand.Shuffle(len(exts), func(i, j int) { exts[i], exts[j] = exts[j], exts[i] })
+	// 注意：扩展顺序有协议依赖（SNI 在前、PSK 必须最后），不能随机打乱。
 
 	return &utls.ClientHelloSpec{
 		CipherSuites: []uint16{
@@ -346,6 +347,9 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	tlsConfig := &utls.Config{
 		ServerName:         host,
 		ClientSessionCache: utlsSessionCache,
+		// OmitEmptyPsk: 新连接（无 session 可 resume）时自动隐藏空 PSK 扩展，
+		// 避免 "empty psk detected" 错误；有 session 时 uTLS 会填充真实 PSK。
+		OmitEmptyPsk: true,
 	}
 
 	// 3. 使用 utls 握手（默认 Chrome 指纹；rustls 模式用 HelloCustom + 自定义 spec）
