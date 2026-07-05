@@ -35,15 +35,16 @@ const (
 	defaultCodexCLIUserAgent       = latestCodexCLIUserAgentPrefix + " (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; " + latestCodexCLIVersion + ")"
 
 	// ---- strict 模式：与官方 codex-rs 逐字节对齐 ----
-	// 官方默认 originator 为 codex_cli_rs（codex-rs/login/src/auth/default_client.rs:41
-	// DEFAULT_ORIGINATOR = "codex_cli_rs"），且 get_codex_user_agent() 生成的 UA 无尾部
-	// "(originator; version)" 后缀（USER_AGENT_SUFFIX 默认为空）。格式：
-	//   {originator}/{version} ({os_type} {os_version}; {arch}) {terminal}
+	// 官方默认 originator 为 codex_cli_rs（codex-rs/login/src/auth/default_client.rs
+	// DEFAULT_ORIGINATOR = "codex_cli_rs"）。实测 codex 0.142.5 → chatgpt.com 的 UA
+	// **保留**尾部 "(originator; version)" 后缀（见 codex-fpcap/BASELINE.md），格式：
+	//   {originator}/{version} ({os_type} {os_version}; {arch}) {terminal} ({originator}; {version})
 	strictCodexClientName = "codex_cli_rs"
-	// strict 模式默认 UA：codex_cli_rs/<ver> (Mac OS 15.5.0; arm64) xterm-256color
+	// strict 默认 UA：codex_cli_rs/<ver> (Mac OS 15.5.0; arm64) xterm-256color (codex_cli_rs; <ver>)
 	strictDefaultCodexCLIUserAgent = strictCodexClientName + "/" + latestCodexCLIVersion +
 		" (" + defaultCodexUserAgentOSName + " " + defaultCodexUserAgentOSVersion + "; " +
-		defaultCodexUserAgentArch + ") " + defaultCodexUserAgentTerminal
+		defaultCodexUserAgentArch + ") " + defaultCodexUserAgentTerminal +
+		" (" + strictCodexClientName + "; " + latestCodexCLIVersion + ")"
 )
 
 // StrictDefaultOriginator 官方 codex-rs 的默认 originator 值。
@@ -293,23 +294,15 @@ func formatCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, te
 	return fmt.Sprintf("%s/%s (%s; %s) %s (%s; %s)", clientName, clientVersion, platform, arch, terminal, clientName, clientVersion)
 }
 
-// formatStrictCodexUserAgent 生成与官方 codex-rs get_codex_user_agent() 逐字节一致的
-// User-Agent：{name}/{ver} ({os} {osver}; {arch}) {terminal}，无尾部 "(name; ver)" 后缀。
-// clientName 缺省用 codex_cli_rs（官方 DEFAULT_ORIGINATOR）。
+// formatStrictCodexUserAgent 生成与实测 codex 0.142.5 一致的 strict User-Agent：
+//   {name}/{ver} ({os} {osver}; {arch}) {terminal} ({name}; {ver})
+// 即与 legacy 同形（含尾部后缀），仅默认 originator 用 codex_cli_rs。
 func formatStrictCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, terminal string) string {
 	clientName = firstNonEmptyString(clientName, strictCodexClientName)
-	clientVersion = firstNonEmptyString(clientVersion, latestCodexCLIVersion)
-	osName = firstNonEmptyString(osName, defaultCodexUserAgentOSName)
-	osVersion = firstNonEmptyString(osVersion, defaultCodexUserAgentOSVersion)
-	arch = firstNonEmptyString(arch, defaultCodexUserAgentArch)
-	terminal = firstNonEmptyString(terminal, defaultCodexUserAgentTerminal)
-	platform := strings.TrimSpace(osName + " " + osVersion)
-	return fmt.Sprintf("%s/%s (%s; %s) %s", clientName, clientVersion, platform, arch, terminal)
+	return formatCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, terminal)
 }
 
-// stripCodexUserAgentSuffix 去掉 legacy profile UA 末尾的 " (name; ver)" 后缀，
-// 使其符合官方 codex-rs 格式（strict 模式复用现有 profile 池的平台/终端分布，
-// 仅纠正 originator 前缀与去除后缀）。
+// stripCodexUserAgentSuffix 去掉 UA 末尾的 " (name; ver)" 后缀（工具函数，供归一化/解析用）。
 func stripCodexUserAgentSuffix(userAgent string) string {
 	userAgent = strings.TrimSpace(userAgent)
 	// 官方格式共有 4 个空格分隔段：name/ver (os osver; arch) terminal
@@ -323,15 +316,12 @@ func stripCodexUserAgentSuffix(userAgent string) string {
 	return userAgent
 }
 
-// strictProfileUserAgent 把 legacy profile 的 UA 转换为 strict 形态：
-// codex_cli_rs 前缀 + 去尾部后缀，保留原 profile 的 OS/版本/终端分布。
+// strictProfileUserAgent 把 legacy profile 的 UA 转换为 strict 形态：把 originator
+// （codex-tui）在前缀与尾部后缀里都替换为 codex_cli_rs，保留原 profile 的 OS/版本/终端
+// 分布与尾部后缀（实测 0.142.5 保留后缀）。
 func strictProfileUserAgent(legacyUserAgent string) string {
-	ua := stripCodexUserAgentSuffix(legacyUserAgent)
-	// 替换开头的 client name 段（codex-tui/... → codex_cli_rs/...）
-	if slash := strings.IndexByte(ua, '/'); slash > 0 {
-		return strictCodexClientName + ua[slash:]
-	}
-	return ua
+	ua := strings.TrimSpace(legacyUserAgent)
+	return strings.ReplaceAll(ua, latestCodexClientName, strictCodexClientName)
 }
 
 func effectiveCodexClientVersion(version, versionFloor string) string {

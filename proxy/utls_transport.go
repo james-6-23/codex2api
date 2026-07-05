@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -17,6 +18,7 @@ import (
 	"golang.org/x/net/http2"
 	xproxy "golang.org/x/net/proxy"
 
+	"github.com/codex2api/internal/codexfp"
 	"github.com/codex2api/security"
 )
 
@@ -38,8 +40,11 @@ type utlsRoundTripper struct {
 	pending     map[string]*sync.Cond        // 防止重复连接创建
 	dialer      xproxy.Dialer                // 底层拨号器（支持代理）
 
-	clientHelloID   utls.ClientHelloID    // TLS 指纹 preset
-	clientHelloSpec *utls.ClientHelloSpec // HelloCustom 时的自定义 spec（否则 nil）
+	clientHelloID utls.ClientHelloID // TLS 指纹 preset
+	// specFactory 在 HelloCustom 时按连接生成 spec（否则 nil）。用工厂而非固定
+	// 指针，是因为真实 rustls 每次握手都随机打乱扩展顺序（反 ossification），
+	// 固定顺序本身会成为"从不打乱"的指纹破绽。
+	specFactory func() *utls.ClientHelloSpec
 }
 
 // utlsSessionCache 在所有 uTLS 连接间共享 TLS 会话缓存，让重连走 TLS resumption。
@@ -53,14 +58,15 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 }
 
 // NewUTLSRustlsTransport 创建使用 rustls 指纹的 RoundTripper，与官方 codex-rs
-// （reqwest + rustls 0.23）的 JA3/JA4 对齐。用于 CODEX_TRANSPORT_MODE=utls_rustls。
+// （reqwest + rustls，实测 codex 0.142.5）的 JA3/JA4 对齐。每连接扩展随机排序。
+// 用于 CODEX_TRANSPORT_MODE=utls_rustls。
 func NewUTLSRustlsTransport(proxyURL string) http.RoundTripper {
-	spec := rustlsClientHelloSpec()
-	return NewUTLSTransportWithHello(proxyURL, utls.HelloCustom, &spec)
+	return NewUTLSTransportWithHello(proxyURL, utls.HelloCustom, rustlsClientHelloSpec)
 }
 
-// NewUTLSTransportWithHello 用指定 ClientHelloID / spec 创建 RoundTripper。
-func NewUTLSTransportWithHello(proxyURL string, helloID utls.ClientHelloID, spec *utls.ClientHelloSpec) http.RoundTripper {
+// NewUTLSTransportWithHello 用指定 ClientHelloID / spec 工厂创建 RoundTripper。
+// specFactory 仅在 helloID 为 HelloCustom 时使用，且每次连接调用一次。
+func NewUTLSTransportWithHello(proxyURL string, helloID utls.ClientHelloID, specFactory func() *utls.ClientHelloSpec) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
 
 	if proxyURL != "" {
@@ -74,72 +80,79 @@ func NewUTLSTransportWithHello(proxyURL string, helloID utls.ClientHelloID, spec
 	}
 
 	return &utlsRoundTripper{
-		connections:     make(map[string]*http2.ClientConn),
-		pending:         make(map[string]*sync.Cond),
-		dialer:          dialer,
-		clientHelloID:   helloID,
-		clientHelloSpec: spec,
+		connections: make(map[string]*http2.ClientConn),
+		pending:     make(map[string]*sync.Cond),
+		dialer:      dialer,
+		clientHelloID: helloID,
+		specFactory:   specFactory,
 	}
 }
 
-// rustlsClientHelloSpec 构造与 rustls 0.23（aws-lc-rs provider，启用 tls12 feature）
-// 默认 ClientHello 对齐的 spec。关键特征（区别于浏览器）：
-//   - 无 GREASE（rustls 不实现 RFC 8701）；
-//   - TLS 1.3 cipher 顺序 AES_256 优先：0x1302, 0x1301, 0x1303；
-//   - 随后 6 个 ECDHE TLS 1.2 GCM/ChaCha 套件；
-//   - 曲线 X25519, P-256, P-384；无多余扩展（extra_exts 为空）。
-//
-// 参考 docs.rs/rustls DEFAULT_CIPHER_SUITES 与官方 provider 顺序。
-func rustlsClientHelloSpec() utls.ClientHelloSpec {
-	return utls.ClientHelloSpec{
+// rustlsClientHelloSpec 构造与真实 codex-rs（rustls，实测 codex 0.142.5 → chatgpt.com，
+// 见 codex-fpcap/BASELINE.md）逐特征对齐的 ClientHello，并**每次调用随机打乱扩展顺序**
+// （rustls 的反 ossification 行为——固定顺序本身会成为"从不打乱"的指纹破绽）。
+// 实测特征：
+//   - cipher（AES256 优先）: 1302 1301 1303 c02c c02b cca9 c030 c02f cca8 + SCSV(00ff)
+//   - 无 GREASE；无 renegotiation_info 扩展（改用 00ff SCSV 空重协商）
+//   - supported_groups: X25519MLKEM768(后量子), X25519, P256, P384
+//   - key_share: X25519MLKEM768, X25519
+//   - sigalgs: ecdsa384, ecdsa256, ecdsa521, ed25519, pss512/384/256, pkcs1_512/384/256
+//   - ec_point_formats: uncompressed
+//   - 新建连接扩展集合 11 个，顺序每连接随机
+func rustlsClientHelloSpec() *utls.ClientHelloSpec {
+	exts := []utls.TLSExtension{
+		&utls.SNIExtension{},
+		&utls.StatusRequestExtension{},
+		&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
+			utls.X25519MLKEM768,
+			utls.X25519,
+			utls.CurveP256,
+			utls.CurveP384,
+		}},
+		&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}}, // uncompressed
+		&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
+			utls.ECDSAWithP384AndSHA384,
+			utls.ECDSAWithP256AndSHA256,
+			utls.ECDSAWithP521AndSHA512,
+			utls.Ed25519,
+			utls.PSSWithSHA512,
+			utls.PSSWithSHA384,
+			utls.PSSWithSHA256,
+			utls.PKCS1WithSHA512,
+			utls.PKCS1WithSHA384,
+			utls.PKCS1WithSHA256,
+		}},
+		&utls.ExtendedMasterSecretExtension{},
+		&utls.SessionTicketExtension{},
+		&utls.SupportedVersionsExtension{Versions: []uint16{
+			utls.VersionTLS13,
+			utls.VersionTLS12,
+		}},
+		&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
+		&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
+			{Group: utls.X25519MLKEM768},
+			{Group: utls.X25519},
+		}},
+		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+	}
+	// rustls 每次握手随机排列扩展（RFC 8701 抗僵化）。
+	rand.Shuffle(len(exts), func(i, j int) { exts[i], exts[j] = exts[j], exts[i] })
+
+	return &utls.ClientHelloSpec{
 		CipherSuites: []uint16{
-			// TLS 1.3（rustls 默认顺序：AES_256 优先）
 			utls.TLS_AES_256_GCM_SHA384,
 			utls.TLS_AES_128_GCM_SHA256,
 			utls.TLS_CHACHA20_POLY1305_SHA256,
-			// TLS 1.2 ECDHE（aws-lc-rs provider 顺序）
-			utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 			utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
 			utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
-			utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 			utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+			utls.FAKE_TLS_EMPTY_RENEGOTIATION_INFO_SCSV, // 0x00ff，rustls 用它替代 reneg 扩展
 		},
 		CompressionMethods: []byte{0x00}, // compressionNone
-		Extensions: []utls.TLSExtension{
-			// 无 GREASE，无 padding。顺序贴近 rustls 生成的 ClientHello。
-			&utls.SNIExtension{},
-			&utls.ExtendedMasterSecretExtension{},
-			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
-			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
-				utls.X25519,
-				utls.CurveP256,
-				utls.CurveP384,
-			}},
-			&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}}, // uncompressed
-			&utls.SessionTicketExtension{},
-			&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
-			&utls.StatusRequestExtension{},
-			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
-				utls.ECDSAWithP256AndSHA256,
-				utls.ECDSAWithP384AndSHA384,
-				utls.ECDSAWithP521AndSHA512,
-				utls.PSSWithSHA256,
-				utls.PSSWithSHA384,
-				utls.PSSWithSHA512,
-				utls.PKCS1WithSHA256,
-				utls.PKCS1WithSHA384,
-				utls.PKCS1WithSHA512,
-			}},
-			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
-				{Group: utls.X25519},
-			}},
-			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
-			&utls.SupportedVersionsExtension{Versions: []uint16{
-				utls.VersionTLS13,
-				utls.VersionTLS12,
-			}},
-		},
+		Extensions:         exts,
 	}
 }
 
@@ -341,8 +354,9 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		helloID = utls.HelloChrome_Auto
 	}
 	tlsConn := utls.UClient(conn, tlsConfig, helloID)
-	if helloID.Client == utls.HelloCustom.Client && t.clientHelloSpec != nil {
-		if err := tlsConn.ApplyPreset(t.clientHelloSpec); err != nil {
+	if helloID.Client == utls.HelloCustom.Client && t.specFactory != nil {
+		spec := t.specFactory() // 每连接新建（rustls 风格随机扩展序）
+		if err := tlsConn.ApplyPreset(spec); err != nil {
 			conn.Close()
 			return nil, fmt.Errorf("应用自定义 TLS 指纹失败: %w", err)
 		}
@@ -357,9 +371,9 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		return nil, fmt.Errorf("TLS 握手失败: %w", err)
 	}
 
-	// 4. 创建 HTTP/2 连接
-	tr := &http2.Transport{}
-	h2Conn, err := tr.NewClientConn(tlsConn)
+	// 4. 创建 HTTP/2 连接（SETTINGS/WINDOW_UPDATE 对齐真实 codex-rs reqwest/h2，
+	//    而非 Go 默认值——否则一开连接就暴露是 Go net/http 客户端）
+	h2Conn, err := codexfp.NewCodexH2ClientConn(tlsConn)
 	if err != nil {
 		tlsConn.Close()
 		return nil, fmt.Errorf("HTTP/2 连接创建失败: %w", err)

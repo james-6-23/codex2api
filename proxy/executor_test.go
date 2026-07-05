@@ -688,10 +688,19 @@ func TestOpenAIResponsesExecutorsDoNotLeakGoDefaultUserAgent(t *testing.T) {
 	}
 }
 
-func TestCodexTransportModeDefaultsToStandard(t *testing.T) {
+func TestCodexTransportModeDefaultsToRustlsFallback(t *testing.T) {
+	// 新默认：对齐 codex-rs 的 rustls uTLS + h2 SETTINGS，带握手失败自动回退。
 	t.Setenv("CODEX_TRANSPORT_MODE", "")
+	if _, ok := newCodexTransport("").(*rustlsFallbackTransport); !ok {
+		t.Fatalf("newCodexTransport default = %T, want *rustlsFallbackTransport", newCodexTransport(""))
+	}
+}
+
+func TestCodexTransportModeCanForceStandard(t *testing.T) {
+	// 显式 opt-out 仍可回到 Go 原生传输。
+	t.Setenv("CODEX_TRANSPORT_MODE", "standard")
 	if _, ok := newCodexTransport("").(*http.Transport); !ok {
-		t.Fatalf("newCodexTransport default = %T, want *http.Transport", newCodexTransport(""))
+		t.Fatalf("newCodexTransport standard = %T, want *http.Transport", newCodexTransport(""))
 	}
 }
 

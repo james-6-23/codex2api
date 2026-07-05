@@ -19,6 +19,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
+	"github.com/klauspost/compress/zstd"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -82,14 +83,15 @@ const (
 
 func codexTransportModeFromEnv() string {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_TRANSPORT_MODE"))) {
-	case "", "standard", "go", "default":
+	case "standard", "go", "native":
 		return codexTransportModeStandard
 	case "utls", "utls_chrome", "chrome":
 		return codexTransportModeUTLSChrome
-	case "utls_rustls", "rustls", "codex", "codex_cli_rs":
+	case "", "default", "utls_rustls", "rustls", "codex", "codex_cli_rs":
+		// 新默认：对齐真实 codex-rs 的 rustls TLS 指纹 + h2 SETTINGS（握手失败自动回退）。
 		return codexTransportModeUTLSRustls
 	default:
-		return codexTransportModeStandard
+		return codexTransportModeUTLSRustls
 	}
 }
 
@@ -152,11 +154,96 @@ func newCodexTransport(proxyURL string) http.RoundTripper {
 	switch codexTransportModeFromEnv() {
 	case codexTransportModeUTLSChrome:
 		return NewUTLSTransport(proxyURL)
-	case codexTransportModeUTLSRustls:
-		return NewUTLSRustlsTransport(proxyURL)
-	default:
+	case codexTransportModeStandard:
 		return newCodexStandardTransport(proxyURL)
+	case codexTransportModeUTLSRustls:
+		return newRustlsFallbackTransport(proxyURL)
+	default:
+		return newRustlsFallbackTransport(proxyURL)
 	}
+}
+
+// newRustlsFallbackTransport 首选对齐 codex-rs 的 rustls uTLS 传输；当**连接建立阶段**
+// （拨号 / TLS 握手 / h2 建连）失败时，粘性回退到标准 Go 传输，保证不断连。
+func newRustlsFallbackTransport(proxyURL string) http.RoundTripper {
+	return &rustlsFallbackTransport{
+		primary:  NewUTLSRustlsTransport(proxyURL),
+		fallback: newCodexStandardTransport(proxyURL),
+	}
+}
+
+// rustlsFallbackTransport 包装 rustls uTLS 主传输 + 标准回退传输。仅在建连阶段失败
+// 且请求可安全重放（无 body 或存在 GetBody）时回退，避免重复副作用。一旦回退即粘住，
+// 后续请求直接走标准传输，避免每次重复失败的握手开销。
+type rustlsFallbackTransport struct {
+	primary  http.RoundTripper
+	fallback http.RoundTripper
+	mu       sync.Mutex
+	tripped  bool
+}
+
+func (t *rustlsFallbackTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	tripped := t.tripped
+	t.mu.Unlock()
+	if tripped {
+		return t.fallback.RoundTrip(req)
+	}
+
+	resp, err := t.primary.RoundTrip(req)
+	if err == nil {
+		return resp, nil
+	}
+	// 只在“连接没建起来”且请求可重放时回退——此时尚未发出任何请求字节，安全。
+	if !isConnEstablishmentError(err) || !requestReplayable(req) {
+		return resp, err
+	}
+	if req.GetBody != nil {
+		if body, gbErr := req.GetBody(); gbErr == nil {
+			req.Body = body
+		} else {
+			return resp, err
+		}
+	}
+	t.mu.Lock()
+	t.tripped = true
+	t.mu.Unlock()
+	log.Printf("[CodexTransport] rustls uTLS 建连失败，粘性回退 standard 传输: %v", err)
+	return t.fallback.RoundTrip(req)
+}
+
+func (t *rustlsFallbackTransport) CloseIdleConnections() {
+	type idleCloser interface{ CloseIdleConnections() }
+	if c, ok := t.primary.(idleCloser); ok {
+		c.CloseIdleConnections()
+	}
+	if c, ok := t.fallback.(idleCloser); ok {
+		c.CloseIdleConnections()
+	}
+}
+
+func requestReplayable(req *http.Request) bool {
+	return req.Body == nil || req.Body == http.NoBody || req.GetBody != nil
+}
+
+// isConnEstablishmentError 判断错误是否发生在连接建立阶段（拨号 / TLS 握手 / h2 建连），
+// 这些错误发生在任何请求字节发出之前，回退是安全的。对应 utls_transport.go 里
+// createConnection 包装的错误信息。
+func isConnEstablishmentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	for _, needle := range []string{
+		"tls 握手失败", "tcp 连接失败", "http/2 连接创建失败", "应用自定义 tls 指纹失败",
+		"tls handshake", "handshake failure", "connection refused", "no route to host",
+		"i/o timeout", "connection reset",
+	} {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
 }
 
 func codexFingerprintDebugEnabled() bool {
@@ -385,6 +472,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	// ==================== 请求头（伪装 Codex CLI） ====================
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+	applyCodexRequestBodyEncoding(req, requestBody)
 
 	// Resin 反代：注入账号身份头
 	if IsResinEnabled() {
@@ -527,6 +615,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+	applyCodexRequestBodyEncoding(req, requestBody)
 
 	if IsResinEnabled() {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))
@@ -683,9 +772,19 @@ func deterministicCodexClientUUID(kind, seed string) string {
 	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:x-codex:"+kind+":"+seed)).String()
 }
 
-// applyStrictCodexClientHeaders 在 strict 模式下注入与官方 codex-rs 客户端对齐的
-// x-codex-* 指纹头。seed 用账号 ID（无则用 apiKey），保证同账号稳定。
-func applyStrictCodexClientHeaders(req *http.Request, accountID, apiKey string) {
+// codexBetaFeaturesValue 是实测 codex 0.142.5 /responses 请求携带的 x-codex-beta-features。
+// 该值随版本/灰度变化，集中在此便于跟随真实客户端更新。
+const codexBetaFeaturesValue = "remote_compaction_v2"
+
+// applyCodexClientFingerprintHeaders 注入与真实 codex 0.142.5 一致的 x-codex-* 客户端指纹头
+// （见 codex-fpcap/BASELINE.md）。真实客户端**不发** x-codex-installation-id（installation_id
+// 放在 x-codex-turn-metadata JSON 内），而是发：x-codex-beta-features、x-codex-window-id(带:0)、
+// x-codex-turn-metadata(JSON)、x-client-request-id、thread-id。installation/session 用账号级
+// 确定性 UUID 保持同账号稳定；turn_id 每请求新生成。HTTP 与 WS 两条路径共用本函数。
+func applyCodexClientFingerprintHeaders(h http.Header, accountID, apiKey, sessionID string) {
+	if h == nil {
+		return
+	}
 	seed := strings.TrimSpace(accountID)
 	if seed == "" {
 		seed = strings.TrimSpace(apiKey)
@@ -693,13 +792,31 @@ func applyStrictCodexClientHeaders(req *http.Request, accountID, apiKey string) 
 	if seed == "" {
 		return
 	}
-	// installation-id：一次安装稳定；window-id：一个 TUI 窗口稳定。
-	// 二者派生自不同命名子空间，避免相同取值。
-	if req.Header.Get("x-codex-installation-id") == "" {
-		req.Header.Set("x-codex-installation-id", deterministicCodexClientUUID("installation", seed))
+	installationID := deterministicCodexClientUUID("installation", seed)
+	sid := strings.TrimSpace(sessionID)
+	if sid == "" {
+		sid = deterministicCodexClientUUID("session", seed)
 	}
-	if req.Header.Get("x-codex-window-id") == "" {
-		req.Header.Set("x-codex-window-id", deterministicCodexClientUUID("window", seed))
+	threadID := sid
+	windowID := sid + ":0"
+	turnID := uuid.NewString()
+
+	if h.Get("x-codex-beta-features") == "" {
+		h.Set("x-codex-beta-features", codexBetaFeaturesValue)
+	}
+	if h.Get("x-codex-window-id") == "" {
+		h.Set("x-codex-window-id", windowID)
+	}
+	if h.Get("x-codex-turn-metadata") == "" {
+		meta := fmt.Sprintf(`{"installation_id":%q,"session_id":%q,"thread_id":%q,"turn_id":%q,"window_id":%q,"request_kind":"turn","thread_source":"user","sandbox":"none","turn_started_at_unix_ms":%d}`,
+			installationID, sid, threadID, turnID, windowID, time.Now().UnixMilli())
+		h.Set("x-codex-turn-metadata", meta)
+	}
+	if h.Get("x-client-request-id") == "" {
+		h.Set("x-client-request-id", sid)
+	}
+	if h.Get("thread-id") == "" {
+		h.Set("thread-id", threadID)
 	}
 }
 
@@ -735,19 +852,43 @@ func ApplyStrictCodexWSHeaders(headers http.Header, accountID, apiKey, sessionID
 		headers.Del("Conversation_id")
 		headers.Set("session-id", sessionID)
 	}
-	// x-codex-* 客户端指纹
-	seed := strings.TrimSpace(accountID)
-	if seed == "" {
-		seed = strings.TrimSpace(apiKey)
+	// x-codex-* 客户端指纹（与 HTTP 路径共用，对齐真实 codex 0.142.5）
+	applyCodexClientFingerprintHeaders(headers, accountID, apiKey, sessionID)
+}
+
+// codexZstdEncoder 无状态一次性 zstd 编码器（EncodeAll 并发安全）。
+var codexZstdEncoder, _ = zstd.NewWriter(nil)
+
+func codexZstdRequestEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_ZSTD_REQUEST_BODY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
 	}
-	if seed != "" {
-		if headers.Get("x-codex-installation-id") == "" {
-			headers.Set("x-codex-installation-id", deterministicCodexClientUUID("installation", seed))
-		}
-		if headers.Get("x-codex-window-id") == "" {
-			headers.Set("x-codex-window-id", deterministicCodexClientUUID("window", seed))
-		}
+}
+
+// applyCodexRequestBodyEncoding 用 zstd 压缩请求体以对齐真实 codex 0.142.5
+// （content-encoding: zstd）。默认关闭——因请求体编码影响每一次请求且无法在此环境
+// 用真实会话验证 200，需运营侧用金丝雀账号确认后，通过 CODEX_ZSTD_REQUEST_BODY=1 开启。
+// 仅在 strict 伪装模式下生效；同时重设 GetBody 以保证回退/重试可安全重放。
+func applyCodexRequestBodyEncoding(req *http.Request, rawBody []byte) {
+	if req == nil || len(rawBody) == 0 {
+		return
 	}
+	if !CurrentRuntimeSettings().MimicStrictHeaders() || !codexZstdRequestEnabled() {
+		return
+	}
+	if strings.TrimSpace(req.Header.Get("Content-Encoding")) != "" {
+		return
+	}
+	compressed := codexZstdEncoder.EncodeAll(rawBody, nil)
+	req.Body = io.NopCloser(bytes.NewReader(compressed))
+	req.ContentLength = int64(len(compressed))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(compressed)), nil
+	}
+	req.Header.Set("Content-Encoding", "zstd")
 }
 
 func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
@@ -796,10 +937,10 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		}
 	}
 
-	// ---- OpenAI-Beta ----（strict：HTTP 路径补齐；legacy：不动，保持现状）
-	if strict && req.Header.Get("OpenAI-Beta") == "" {
-		req.Header.Set("OpenAI-Beta", codexOpenAIBetaHTTPValue)
-	}
+	// ---- OpenAI-Beta ----
+	// 实测 codex 0.142.5：HTTP /responses 回退路径**不发** OpenAI-Beta（仅 WebSocket
+	// 握手发 responses_websockets=2026-02-06，见 wsrelay）。故 strict 下 HTTP 不再补该头。
+	// 若下游显式带了 OpenAI-Beta 则透传（保持兼容）。
 
 	applyCodexAllowedForwardHeaders(req, downstreamHeaders)
 	if accountID != "" {
@@ -821,7 +962,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	}
 
 	if strict {
-		applyStrictCodexClientHeaders(req, accountID, apiKey)
+		applyCodexClientFingerprintHeaders(req.Header, accountID, apiKey, cacheKey)
 	}
 }
 

@@ -69,7 +69,14 @@ var defaultPatternConfigs = []PatternConfig{
 	{Name: "race_condition_exploit", Pattern: `(?i)\b(race\s+condition\s+exploit|toctou|time[-\s]?of[-\s]?check\s+time[-\s]?of[-\s]?use)\b|竞态条件漏洞`, Weight: 30, Category: "exploit"},
 	{Name: "hardware_implant", Pattern: `(?i)\b(hardware\s+implant|usb\s+rubber\s+ducky|malicious\s+usb|hardware\s+keylogger)\b|硬件植入|恶意usb`, Weight: 60, Category: "physical_attack", Strict: true},
 	{Name: "social_media_hijack", Pattern: `(?i)\b(account\s+takeover|social\s+media\s+hijacking|credential\s+stuffing)\b|账号接管|撞库攻击`, Weight: 40, Category: "credential_attack"},
+	// --- operational authoring patterns (build-verb + malicious artifact): high signal, low false-positive ---
+	{Name: "malware_authoring", Pattern: `(?i)\b(write|create|generate|build|develop|code|program|make)\b[^.!?\n]{0,50}\b(malware|virus|trojan|worm|ransomware|spyware|info[-\s]?stealer|stealer|rootkit|\brat\b|remote\s+access\s+trojan|bootkit|wiper)\b|(?:写|编写|生成|制作|开发)[^。！？\n]{0,30}(恶意软件|病毒|木马|蠕虫|勒索软件|间谍软件|窃密程序)`, Weight: 90, Category: "malware", Strict: true},
+	{Name: "mfa_bypass", Pattern: `(?i)\b(bypass|defeat|circumvent|disable|get\s+around)\b[^.!?\n]{0,30}\b(2fa|mfa|two[-\s]?factor|multi[-\s]?factor|otp|one[-\s]?time\s+password|authenticator)\b|绕过[^。！？\n]{0,20}(二次验证|双因素|两步验证|otp|验证码)`, Weight: 70, Category: "credential_attack", Strict: true},
+	{Name: "phishing_generation", Pattern: `(?i)\b(write|generate|create|draft|compose|craft)\b[^.!?\n]{0,40}\b(phishing|spear[-\s]?phishing|smishing|scam)\b[^.!?\n]{0,20}\b(email|e-mail|message|sms|text|page|template|lure)\b|(?:写|生成|制作|起草)[^。！？\n]{0,30}(钓鱼|诈骗)[^。！？\n]{0,15}(邮件|短信|页面|模板)`, Weight: 75, Category: "social_engineering", Strict: true},
+	{Name: "fraud_carding", Pattern: `(?i)\b(carding|card\s+dumps?|cvv\s+dumps?|dumps?\s+(?:with|and)\s+pins?|fullz|bank\s+drops?|cashout\s+(?:method|guide))\b|信用卡盗刷|盗刷教程`, Weight: 70, Category: "fraud", Strict: true},
+	{Name: "spam_automation", Pattern: `(?i)\b(mass|bulk|automated)\b[^.!?\n]{0,20}\b(spam|unsolicited\s+email|robocall|sms\s+blast)\b|群发[^。！？\n]{0,15}(垃圾邮件|短信|骚扰)`, Weight: 35, Category: "abuse"},
 }
+
 
 var sensitiveRedactionPatterns = []struct {
 	re          *regexp.Regexp
@@ -88,3 +95,12 @@ var defensiveContextPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(do\s+not\s+provide|without\s+code|no\s+commands|high\s+level|non[-\s]?operational|refusal|unsafe)\b`),
 	regexp.MustCompile(`防御|修复|检测|加固|不要提供|不提供代码`),
 }
+
+// operationalArtifactPattern detects requests that ask the model to actually
+// BUILD/emit a runnable offensive artifact (code/script/payload/tool/command).
+// When present, the "defensive context" discount is suppressed: genuine defensive
+// questions explain/describe indicators ("no code", "high level"), whereas an
+// attacker's fig-leaf pairs defensive words with "write me a working keylogger".
+// This closes the discount bypass without over-blocking real defensive discussion.
+var operationalArtifactPattern = regexp.MustCompile(`(?i)\b(write|generate|create|build|craft|make|produce|develop|implement|compile|deploy|obfuscate|weaponize)\b[^.!?\n]{0,60}\b(code|script|program|tool|payload|exploit|malware|keylogger|ransomware|stealer|rootkit|shell|shellcode|binary|executable|command|one[-\s]?liner|snippet|implementation|poc|proof[-\s]?of[-\s]?concept)\b|\b(full|complete|working|functional|ready[-\s]?to[-\s]?(?:use|run)|copy[-\s]?paste)\b[^.!?\n]{0,40}\b(code|script|payload|exploit|tool|program)\b|(?:写|编写|生成|制作|实现|构造|给出|提供)[^。！？\n]{0,30}(代码|脚本|payload|载荷|程序|工具|命令|完整|可运行)`)
+
