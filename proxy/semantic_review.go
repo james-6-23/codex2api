@@ -41,18 +41,19 @@ var (
 )
 
 type semanticReviewConfig struct {
-	Enabled        bool
-	Mode           string
-	APIKey         string
-	BaseURL        string
-	Model          string
-	Timeout        time.Duration
-	MaxChars       int
-	CacheTTL       time.Duration
-	MaxConcurrency int64
-	LogAllows      bool
-	FailOpen       bool
-	Endpoints      map[string]bool
+	Enabled             bool
+	DisagreementEnabled bool
+	Mode                string
+	APIKey              string
+	BaseURL             string
+	Model               string
+	Timeout             time.Duration
+	MaxChars            int
+	CacheTTL            time.Duration
+	MaxConcurrency      int64
+	LogAllows           bool
+	FailOpen            bool
+	Endpoints           map[string]bool
 }
 
 type semanticReviewResult struct {
@@ -97,18 +98,19 @@ type semanticReviewCacheEntry struct {
 
 func loadSemanticReviewConfig() semanticReviewConfig {
 	cfg := semanticReviewConfig{
-		Enabled:        envBool("CODEX_SEMANTIC_REVIEW_ENABLED", false),
-		Mode:           normalizeSemanticReviewMode(os.Getenv("CODEX_SEMANTIC_REVIEW_MODE")),
-		APIKey:         strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_API_KEY")),
-		BaseURL:        strings.TrimRight(strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_BASE_URL")), "/"),
-		Model:          strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_MODEL")),
-		Timeout:        time.Duration(envInt("CODEX_SEMANTIC_REVIEW_TIMEOUT_MS", semanticReviewDefaultTimeoutMS, 100, 30000)) * time.Millisecond,
-		MaxChars:       envInt("CODEX_SEMANTIC_REVIEW_MAX_CHARS", semanticReviewDefaultMaxChars, 1000, 200000),
-		CacheTTL:       time.Duration(envInt("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", int(semanticReviewDefaultCacheTTL/time.Second), 0, 86400)) * time.Second,
-		MaxConcurrency: int64(envInt("CODEX_SEMANTIC_REVIEW_MAX_CONCURRENCY", int(semanticReviewDefaultMaxConcurrency), 1, 100)),
-		LogAllows:      envBool("CODEX_SEMANTIC_REVIEW_LOG_ALLOWS", true),
-		FailOpen:       envBool("CODEX_SEMANTIC_REVIEW_FAIL_OPEN", true),
-		Endpoints:      semanticReviewEndpoints(os.Getenv("CODEX_SEMANTIC_REVIEW_ENDPOINTS")),
+		Enabled:             envBool("CODEX_SEMANTIC_REVIEW_ENABLED", false),
+		DisagreementEnabled: envBool("CODEX_SEMANTIC_REVIEW_DISAGREEMENT_ENABLED", true),
+		Mode:                normalizeSemanticReviewMode(os.Getenv("CODEX_SEMANTIC_REVIEW_MODE")),
+		APIKey:              strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_API_KEY")),
+		BaseURL:             strings.TrimRight(strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_BASE_URL")), "/"),
+		Model:               strings.TrimSpace(os.Getenv("CODEX_SEMANTIC_REVIEW_MODEL")),
+		Timeout:             time.Duration(envInt("CODEX_SEMANTIC_REVIEW_TIMEOUT_MS", semanticReviewDefaultTimeoutMS, 100, 30000)) * time.Millisecond,
+		MaxChars:            envInt("CODEX_SEMANTIC_REVIEW_MAX_CHARS", semanticReviewDefaultMaxChars, 1000, 200000),
+		CacheTTL:            time.Duration(envInt("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", int(semanticReviewDefaultCacheTTL/time.Second), 0, 86400)) * time.Second,
+		MaxConcurrency:      int64(envInt("CODEX_SEMANTIC_REVIEW_MAX_CONCURRENCY", int(semanticReviewDefaultMaxConcurrency), 1, 100)),
+		LogAllows:           envBool("CODEX_SEMANTIC_REVIEW_LOG_ALLOWS", true),
+		FailOpen:            envBool("CODEX_SEMANTIC_REVIEW_FAIL_OPEN", true),
+		Endpoints:           semanticReviewEndpoints(os.Getenv("CODEX_SEMANTIC_REVIEW_ENDPOINTS")),
 	}
 	if cfg.Mode == "" {
 		cfg.Mode = promptfilter.ModeBlock
@@ -192,6 +194,13 @@ func (cfg semanticReviewConfig) readyFor(endpoint string) bool {
 	return cfg.Endpoints[endpoint]
 }
 
+func (cfg semanticReviewConfig) readyForDisagreement(endpoint string) bool {
+	if !cfg.DisagreementEnabled || cfg.APIKey == "" || cfg.BaseURL == "" || cfg.Model == "" {
+		return false
+	}
+	return cfg.Endpoints[endpoint]
+}
+
 func (h *Handler) inspectSemanticReviewOpenAI(c *gin.Context, rawBody []byte, endpoint string, model string) bool {
 	return h.inspectSemanticReviewText(c, promptfilter.ExtractText(rawBody, endpoint, promptfilter.DefaultMaxTextLength), endpoint, model, func() {
 		sendPromptCyberPolicyBlockedOpenAI(c)
@@ -263,6 +272,51 @@ func (h *Handler) inspectSemanticReviewText(c *gin.Context, text string, endpoin
 		h.logSemanticReviewVerdict(c, endpoint, model, text, cfg, result, action, reason, reviewErr)
 	}
 
+	if action != promptfilter.ActionBlock {
+		return false
+	}
+	if writeBlock != nil {
+		writeBlock()
+	}
+	return true
+}
+
+func (h *Handler) inspectSemanticReviewDisagreementText(c *gin.Context, text string, endpoint string, model string, writeBlock func()) bool {
+	cfg := loadSemanticReviewConfig()
+	text = prepareSemanticReviewText(text, cfg.MaxChars)
+	action := promptfilter.ActionAllow
+	reason := ""
+	result := semanticReviewResult{Model: cfg.Model}
+	var reviewErr error
+
+	if !cfg.readyForDisagreement(endpoint) {
+		reviewErr = fmt.Errorf("semantic review is not configured for high-risk prompt review disagreement")
+		action = promptfilter.ActionBlock
+		reason = "high-risk prompt review disagreement could not be reviewed: " + reviewErr.Error()
+	} else if strings.TrimSpace(text) == "" {
+		reviewErr = fmt.Errorf("semantic review text empty for high-risk prompt review disagreement")
+		action = promptfilter.ActionBlock
+		reason = "high-risk prompt review disagreement could not be reviewed: " + reviewErr.Error()
+	} else {
+		result, reviewErr = runSemanticReview(c.Request.Context(), cfg, endpoint, model, text)
+		if reviewErr != nil {
+			action = promptfilter.ActionBlock
+			reason = "high-risk prompt review disagreement semantic review failed: " + reviewErr.Error()
+		} else if result.Block {
+			action = promptfilter.ActionBlock
+			reason = result.Reason
+			if reason == "" {
+				reason = "semantic review flagged high-risk prompt review disagreement"
+			}
+		} else {
+			reason = result.Reason
+			if reason == "" {
+				reason = "semantic review cleared high-risk prompt review disagreement"
+			}
+		}
+	}
+
+	h.logSemanticReviewVerdictWithSource(c, "semantic_review_disagreement", endpoint, model, text, cfg, result, action, reason, reviewErr)
 	if action != promptfilter.ActionBlock {
 		return false
 	}
@@ -483,6 +537,10 @@ func (c *semanticReviewCache) set(key string, result semanticReviewResult, ttl t
 }
 
 func (h *Handler) logSemanticReviewVerdict(c *gin.Context, endpoint string, model string, text string, cfg semanticReviewConfig, result semanticReviewResult, action string, reason string, reviewErr error) {
+	h.logSemanticReviewVerdictWithSource(c, "semantic_review", endpoint, model, text, cfg, result, action, reason, reviewErr)
+}
+
+func (h *Handler) logSemanticReviewVerdictWithSource(c *gin.Context, source string, endpoint string, model string, text string, cfg semanticReviewConfig, result semanticReviewResult, action string, reason string, reviewErr error) {
 	if h == nil || h.db == nil {
 		return
 	}
@@ -522,7 +580,7 @@ func (h *Handler) logSemanticReviewVerdict(c *gin.Context, endpoint string, mode
 		verdict.ReviewModel = cfg.Model
 	}
 	input := &database.PromptFilterLogInput{
-		Source:          "semantic_review",
+		Source:          source,
 		Endpoint:        endpoint,
 		Model:           model,
 		Action:          verdict.Action,

@@ -582,6 +582,7 @@ export interface SystemSettings {
   prompt_filter_custom_patterns: string
   prompt_filter_disabled_patterns: string
   prompt_filter_review_enabled: boolean
+  prompt_filter_review_all: boolean
   prompt_filter_review_api_key?: string
   prompt_filter_review_api_key_configured?: boolean
   prompt_filter_review_api_key_count?: number

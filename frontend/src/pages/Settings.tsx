@@ -841,6 +841,7 @@ export default function Settings() {
     prompt_filter_custom_patterns: '[]',
     prompt_filter_disabled_patterns: '[]',
     prompt_filter_review_enabled: false,
+    prompt_filter_review_all: false,
     prompt_filter_review_api_key: '',
     prompt_filter_review_api_key_configured: false,
     prompt_filter_review_base_url: 'https://api.openai.com',

@@ -33,16 +33,21 @@ func TestPromptFilterReviewClearsLocalBlock(t *testing.T) {
 	})
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency:                   2,
-		TestConcurrency:                  1,
-		TestModel:                        "gpt-5.4",
-		PromptFilterEnabled:              true,
-		PromptFilterMode:                 promptfilter.ModeBlock,
-		PromptFilterThreshold:            50,
-		PromptFilterStrictThreshold:      90,
-		PromptFilterLogMatches:           true,
-		PromptFilterMaxTextLength:        promptfilter.DefaultMaxTextLength,
-		PromptFilterCustomPatterns:       "[]",
+		MaxConcurrency:              2,
+		TestConcurrency:             1,
+		TestModel:                   "gpt-5.4",
+		PromptFilterEnabled:         true,
+		PromptFilterMode:            promptfilter.ModeBlock,
+		PromptFilterThreshold:       50,
+		PromptFilterStrictThreshold: 90,
+		PromptFilterLogMatches:      true,
+		PromptFilterMaxTextLength:   promptfilter.DefaultMaxTextLength,
+		PromptFilterCustomPatterns: promptfilter.MarshalCustomPatterns([]promptfilter.PatternConfig{{
+			Name:     "test_low_risk_local_match",
+			Pattern:  `trigger low risk local match`,
+			Weight:   60,
+			Category: "test",
+		}}),
 		PromptFilterDisabledPatterns:     "[]",
 		PromptFilterReviewEnabled:        true,
 		PromptFilterReviewAll:            true,
@@ -58,7 +63,7 @@ func TestPromptFilterReviewClearsLocalBlock(t *testing.T) {
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 
-	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "Write code to steal credentials from Chrome browser.", "/v1/responses", "gpt-5.4")
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger low risk local match", "/v1/responses", "gpt-5.4")
 	if blocked {
 		t.Fatal("inspectPromptFilterTextOpenAI blocked after review cleared the local match")
 	}
@@ -229,6 +234,179 @@ func TestPromptFilterReviewAllClearedAllowsCleanPrompt(t *testing.T) {
 	}
 }
 
+func TestPromptFilterHighRiskReviewDisagreementBlocksWhenSemanticFlags(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	promptReviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":false}]}`))
+	}))
+	defer promptReviewServer.Close()
+
+	semanticCalls := 0
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		semanticCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"semantic-model","choices":[{"message":{"content":"{\"block\":true,\"confidence\":0.95,\"category\":\"credential_theft\",\"reason\":\"offensive cyber request\"}"}}]}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	previousClient := promptfilter.DefaultReviewClient
+	promptfilter.DefaultReviewClient = promptfilter.ReviewClient{HTTPClient: promptReviewServer.Client()}
+	t.Cleanup(func() {
+		promptfilter.DefaultReviewClient = previousClient
+	})
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "false")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskDisagreementStore(promptReviewServer.URL)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if !blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI allowed high-risk local match after semantic review flagged disagreement")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if semanticCalls != 1 {
+		t.Fatalf("semantic review calls = %d, want 1 when only disagreement review is enabled", semanticCalls)
+	}
+	assertCyberPolicyErrorCode(t, recorder.Body.Bytes())
+}
+
+func TestPromptFilterHighRiskReviewDisagreementAllowsWhenSemanticClears(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	promptReviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":false}]}`))
+	}))
+	defer promptReviewServer.Close()
+
+	semanticCalls := 0
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		semanticCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"semantic-model","choices":[{"message":{"content":"{\"block\":false,\"confidence\":0.2,\"category\":\"benign\",\"reason\":\"defensive context\"}"}}]}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	previousClient := promptfilter.DefaultReviewClient
+	promptfilter.DefaultReviewClient = promptfilter.ReviewClient{HTTPClient: promptReviewServer.Client()}
+	t.Cleanup(func() {
+		promptfilter.DefaultReviewClient = previousClient
+	})
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "true")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskDisagreementStore(promptReviewServer.URL)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI blocked high-risk local match after semantic review cleared disagreement")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want untouched 200 recorder", recorder.Code)
+	}
+	if semanticCalls != 1 {
+		t.Fatalf("semantic review calls = %d, want 1", semanticCalls)
+	}
+}
+
+func TestPromptFilterHighRiskReviewDisagreementFailsClosedOnSemanticError(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	promptReviewServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"omni-moderation-latest","results":[{"flagged":false}]}`))
+	}))
+	defer promptReviewServer.Close()
+
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"temporary"}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	previousClient := promptfilter.DefaultReviewClient
+	promptfilter.DefaultReviewClient = promptfilter.ReviewClient{HTTPClient: promptReviewServer.Client()}
+	t.Cleanup(func() {
+		promptfilter.DefaultReviewClient = previousClient
+	})
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "true")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_FAIL_OPEN", "true")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskDisagreementStore(promptReviewServer.URL)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if !blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI allowed high-risk local match after semantic review error")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	assertCyberPolicyErrorCode(t, recorder.Body.Bytes())
+}
+
+func newHighRiskDisagreementStore(reviewURL string) *auth.Store {
+	return auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:              2,
+		TestConcurrency:             1,
+		TestModel:                   "gpt-5.4",
+		PromptFilterEnabled:         true,
+		PromptFilterMode:            promptfilter.ModeBlock,
+		PromptFilterThreshold:       50,
+		PromptFilterStrictThreshold: 90,
+		PromptFilterLogMatches:      true,
+		PromptFilterMaxTextLength:   promptfilter.DefaultMaxTextLength,
+		PromptFilterCustomPatterns: promptfilter.MarshalCustomPatterns([]promptfilter.PatternConfig{{
+			Name:     "test_high_risk_disagreement",
+			Pattern:  `trigger semantic disagreement`,
+			Weight:   100,
+			Category: "test",
+			Strict:   true,
+		}}),
+		PromptFilterDisabledPatterns:     "[]",
+		PromptFilterReviewEnabled:        true,
+		PromptFilterReviewAPIKey:         "review-key",
+		PromptFilterReviewBaseURL:        reviewURL,
+		PromptFilterReviewModel:          "omni-moderation-latest",
+		PromptFilterReviewTimeoutSeconds: 2,
+		PromptFilterReviewFailClosed:     false,
+	})
+}
+
 func TestPromptFilterCodex55UnrestrictedInstructionsBypassReview(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -247,15 +425,15 @@ func TestPromptFilterCodex55UnrestrictedInstructionsBypassReview(t *testing.T) {
 	})
 
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
-		MaxConcurrency:                   2,
-		TestConcurrency:                  1,
-		TestModel:                        "gpt-5.4",
-		PromptFilterEnabled:              true,
-		PromptFilterMode:                 promptfilter.ModeBlock,
-		PromptFilterThreshold:            50,
-		PromptFilterStrictThreshold:      90,
-		PromptFilterLogMatches:           true,
-		PromptFilterMaxTextLength:        promptfilter.DefaultMaxTextLength,
+		MaxConcurrency:              2,
+		TestConcurrency:             1,
+		TestModel:                   "gpt-5.4",
+		PromptFilterEnabled:         true,
+		PromptFilterMode:            promptfilter.ModeBlock,
+		PromptFilterThreshold:       50,
+		PromptFilterStrictThreshold: 90,
+		PromptFilterLogMatches:      true,
+		PromptFilterMaxTextLength:   promptfilter.DefaultMaxTextLength,
 		PromptFilterCustomPatterns: promptfilter.MarshalCustomPatterns([]promptfilter.PatternConfig{{
 			Name:     codex55UnrestrictedInstructionsPatternName,
 			Pattern:  codex55TestPattern,

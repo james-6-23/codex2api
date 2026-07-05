@@ -17,7 +17,7 @@ const (
 	DefaultReviewBaseURL        = "https://api.openai.com"
 	DefaultReviewModel          = "omni-moderation-latest"
 	DefaultReviewTimeoutSeconds = 10
-	HighRiskReviewFailureScore = 200
+	HighRiskReviewFailureScore  = 200
 )
 
 type ReviewClient struct {
@@ -242,6 +242,10 @@ func ApplyReviewResult(verdict Verdict, flagged bool, model string, reviewErr er
 }
 
 func reviewFailureShouldFailClosed(verdict Verdict) bool {
+	return IsHighRiskReviewVerdict(verdict)
+}
+
+func IsHighRiskReviewVerdict(verdict Verdict) bool {
 	if verdict.Score >= HighRiskReviewFailureScore || verdict.RawScore >= HighRiskReviewFailureScore || verdict.StrictHit {
 		return true
 	}

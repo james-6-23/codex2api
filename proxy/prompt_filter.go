@@ -53,6 +53,11 @@ func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endp
 		sendPromptCyberPolicyBlockedOpenAI(c)
 		return true
 	}
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		sendPromptCyberPolicyBlockedOpenAI(c)
+	}); handled {
+		return blocked
+	}
 	return h.inspectSemanticReviewOpenAI(c, rawBody, endpoint, model)
 }
 
@@ -76,6 +81,11 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if verdict.Action == promptfilter.ActionBlock {
 		sendPromptCyberPolicyBlockedOpenAI(c)
 		return true
+	}
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		sendPromptCyberPolicyBlockedOpenAI(c)
+	}); handled {
+		return blocked
 	}
 	return h.inspectSemanticReviewTextOpenAI(c, text, endpoint, model)
 }
@@ -101,6 +111,11 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	if verdict.Action == promptfilter.ActionBlock {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request contains content blocked by prompt filter")
 		return true
+	}
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request blocked by semantic safety review")
+	}); handled {
+		return blocked
 	}
 	return h.inspectSemanticReviewAnthropic(c, rawBody, endpoint, model)
 }
@@ -229,6 +244,22 @@ func promptFilterVerdictIsFinal(verdict promptfilter.Verdict) bool {
 		}
 	}
 	return false
+}
+
+func promptFilterReviewClearedHighRisk(verdict promptfilter.Verdict) bool {
+	return verdict.Reviewed &&
+		!verdict.ReviewFlagged &&
+		strings.TrimSpace(verdict.ReviewError) == "" &&
+		verdict.Action == promptfilter.ActionAllow &&
+		promptfilter.IsHighRiskReviewVerdict(verdict)
+}
+
+func (h *Handler) inspectHighRiskReviewDisagreement(c *gin.Context, verdict promptfilter.Verdict, text string, endpoint string, model string, writeBlock func()) (bool, bool) {
+	if !promptFilterReviewClearedHighRisk(verdict) {
+		return false, false
+	}
+	blocked := h.inspectSemanticReviewDisagreementText(c, text, endpoint, model, writeBlock)
+	return true, blocked
 }
 
 func codexAmbientSuggestionClassifierBypass(text string, cfg promptfilter.Config) (promptfilter.Verdict, bool) {

@@ -748,6 +748,11 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 		_ = writeResponsesWSError(conn, promptCyberPolicyError())
 		return true
 	}
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		_ = writeResponsesWSError(conn, promptCyberPolicyError())
+	}); handled {
+		return blocked
+	}
 	return h.inspectSemanticReviewOpenAIForWebSocket(c, conn, rawBody, endpoint, model)
 }
 

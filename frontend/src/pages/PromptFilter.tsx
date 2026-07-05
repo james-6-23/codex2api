@@ -53,6 +53,7 @@ type PromptFilterForm = Pick<
   | 'prompt_filter_custom_patterns'
   | 'prompt_filter_disabled_patterns'
   | 'prompt_filter_review_enabled'
+  | 'prompt_filter_review_all'
   | 'prompt_filter_review_api_key'
   | 'prompt_filter_review_api_key_configured'
   | 'prompt_filter_review_api_key_count'
@@ -97,6 +98,7 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_custom_patterns: '[]',
   prompt_filter_disabled_patterns: '[]',
   prompt_filter_review_enabled: false,
+  prompt_filter_review_all: false,
   prompt_filter_review_api_key: '',
   prompt_filter_review_api_key_configured: false,
   prompt_filter_review_api_key_count: 0,
@@ -159,6 +161,7 @@ const normalizePromptFilterForm = (settings?: SystemSettings | null): PromptFilt
   prompt_filter_custom_patterns: settings?.prompt_filter_custom_patterns || '[]',
   prompt_filter_disabled_patterns: settings?.prompt_filter_disabled_patterns || '[]',
   prompt_filter_review_enabled: Boolean(settings?.prompt_filter_review_enabled),
+  prompt_filter_review_all: Boolean(settings?.prompt_filter_review_all),
   prompt_filter_review_api_key: '',
   prompt_filter_review_api_key_configured: Boolean(settings?.prompt_filter_review_api_key_configured),
   prompt_filter_review_api_key_count: settings?.prompt_filter_review_api_key_count || 0,
@@ -546,6 +549,16 @@ function OverviewView({
                     value={form.prompt_filter_review_enabled ? 'true' : 'false'}
                     onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_review_enabled: value === 'true' }))}
                     options={booleanOptions}
+                  />
+                </Field>
+                <Field label={t('promptFilter.reviewAll')}>
+                  <Select
+                    value={form.prompt_filter_review_all ? 'true' : 'false'}
+                    onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_review_all: value === 'true' }))}
+                    options={[
+                      { label: t('promptFilter.reviewAllEnabled'), value: 'true' },
+                      { label: t('promptFilter.reviewAllDisabled'), value: 'false' },
+                    ]}
                   />
                 </Field>
                 <Field label={t('promptFilter.reviewFailClosed')}>
