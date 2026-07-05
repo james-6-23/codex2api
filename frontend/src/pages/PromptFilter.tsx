@@ -402,6 +402,7 @@ export default function PromptFilter() {
             saving={saving}
             modeOptions={modeOptions}
             booleanOptions={booleanOptions}
+            semanticFailurePolicyOptions={semanticFailurePolicyOptions}
             endpointOptions={endpointOptions}
             recentLogs={data.recentLogs}
             totalLogs={data.totalLogs}
@@ -480,6 +481,7 @@ function OverviewView({
   saving,
   modeOptions,
   booleanOptions,
+  semanticFailurePolicyOptions,
   endpointOptions,
   recentLogs,
   totalLogs,
@@ -501,6 +503,7 @@ function OverviewView({
   saving: boolean
   modeOptions: { label: string; value: string }[]
   booleanOptions: { label: string; value: string }[]
+  semanticFailurePolicyOptions: { label: string; value: string }[]
   endpointOptions: { label: string; value: string }[]
   recentLogs: PromptFilterLog[]
   totalLogs: number
