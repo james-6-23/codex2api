@@ -397,21 +397,53 @@ function ProbeTable({ rows }: { rows: CodexAuditReport['probe_observed'] }) {
     return <EmptyState compact>暂无探针记录</EmptyState>
   }
   return (
-    <SimpleTable
-      columns={['API Key', '签名', '端点', '模型', '流式', '次数', '频率', '平均间隔', '跨度']}
-      rows={rows.map((row) => [
-        row.api_key_name || row.api_key_masked || String(row.api_key_id || '-'),
-        row.signature || '-',
-        row.endpoint || '-',
-        row.model || '-',
-        row.stream ? '是' : '否',
-        formatNumber(row.count),
-        formatRate(row.rate_per_minute || 0),
-        formatDuration(row.average_interval_seconds || 0),
-        formatDuration(row.span_seconds || 0),
-      ])}
-      empty="暂无探针记录"
-    />
+    <div className="grid gap-2">
+      {rows.map((row, index) => {
+        const apiKeyName = row.api_key_name || row.api_key_masked || String(row.api_key_id || '-')
+        return (
+          <div
+            key={`${row.api_key_id}-${row.endpoint}-${row.model}-${row.signature}-${row.stream}-${index}`}
+            className="min-w-0 rounded-lg border border-border/60 bg-muted/20 p-3"
+          >
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="truncate text-sm font-medium text-foreground" title={apiKeyName}>
+                  {apiKeyName}
+                </div>
+                <div className="mt-1 truncate text-xs text-muted-foreground" title={`${row.model || '-'} · ${row.endpoint || '-'}`}>
+                  {row.model || '-'} · {row.endpoint || '-'}
+                </div>
+              </div>
+              <Badge variant="outline" className="shrink-0 bg-background/70 text-xs">
+                {formatNumber(row.count)} 次
+              </Badge>
+            </div>
+
+            <div className="mt-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+              <ProbeMeta label="签名" value={row.signature || '-'} wide wrap />
+              <ProbeMeta label="流式" value={row.stream ? '是' : '否'} />
+              <ProbeMeta label="频率" value={formatRate(row.rate_per_minute || 0)} />
+              <ProbeMeta label="平均间隔" value={formatDuration(row.average_interval_seconds || 0)} />
+              <ProbeMeta label="跨度" value={formatDuration(row.span_seconds || 0)} />
+            </div>
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
+function ProbeMeta({ label, value, wide = false, wrap = false }: { label: string; value: string; wide?: boolean; wrap?: boolean }) {
+  return (
+    <div className={`min-w-0 rounded-md bg-background/70 px-2.5 py-2 ring-1 ring-border/45 ${wide ? 'col-span-2' : ''}`}>
+      <div className="text-[11px] leading-none text-muted-foreground">{label}</div>
+      <div
+        className={`mt-1 text-xs font-medium text-foreground ${wrap ? 'line-clamp-2 break-all' : 'truncate'}`}
+        title={value}
+      >
+        {value}
+      </div>
+    </div>
   )
 }
 
