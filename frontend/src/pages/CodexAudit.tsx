@@ -37,6 +37,13 @@ type AuditData = {
 
 type Tone = 'ok' | 'warn' | 'bad' | 'neutral'
 
+const chartColors = {
+  request: '#2563eb',
+  block: '#ef4444',
+  cyber: '#f97316',
+  error: '#6366f1',
+}
+
 const rangeOptions = [
   { label: '最近 30 分钟', value: '0.5' },
   { label: '最近 1 小时', value: '1' },
@@ -213,10 +220,10 @@ export default function CodexAudit() {
                     <XAxis dataKey="label" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
                     <YAxis tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
                     <RechartsTooltip contentStyle={chartTooltipStyle} />
-                    <Line type="monotone" dataKey="requests" name="请求" stroke="hsl(var(--primary))" strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
-                    <Line type="monotone" dataKey="prompt_blocks" name="拦截" stroke="#ef4444" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-                    <Line type="monotone" dataKey="upstream_cyber_policy" name="上游 cyb" stroke="#f97316" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
-                    <Line type="monotone" dataKey="errors_5xx" name="5xx" stroke="#6366f1" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                    <Line type="monotone" dataKey="requests" name="请求" stroke={chartColors.request} strokeWidth={2.5} dot={false} activeDot={{ r: 4 }} />
+                    <Line type="monotone" dataKey="prompt_blocks" name="拦截" stroke={chartColors.block} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                    <Line type="monotone" dataKey="upstream_cyber_policy" name="上游 cyb" stroke={chartColors.cyber} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                    <Line type="monotone" dataKey="errors_5xx" name="5xx" stroke={chartColors.error} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
                   </LineChart>
                 </ResponsiveContainer>
               </ChartPanel>
@@ -228,7 +235,7 @@ export default function CodexAudit() {
                     <XAxis type="number" tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
                     <YAxis type="category" dataKey="model" width={128} tick={{ fontSize: 11 }} stroke="hsl(var(--muted-foreground))" tickLine={false} axisLine={false} />
                     <RechartsTooltip contentStyle={chartTooltipStyle} />
-                    <Bar dataKey="requests" name="请求" fill="hsl(var(--primary))" radius={[0, 6, 6, 0]} />
+                    <Bar dataKey="requests" name="请求" fill={chartColors.request} radius={[0, 6, 6, 0]} />
                   </BarChart>
                 </ResponsiveContainer>
               </ChartPanel>
