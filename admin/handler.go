@@ -5575,6 +5575,7 @@ type settingsResponse struct {
 	PromptFilterCustomPatterns         string  `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns       string  `json:"prompt_filter_disabled_patterns"`
 	PromptFilterReviewEnabled          bool    `json:"prompt_filter_review_enabled"`
+	PromptFilterReviewAll              bool    `json:"prompt_filter_review_all"`
 	PromptFilterReviewAPIKeyConfigured bool    `json:"prompt_filter_review_api_key_configured"`
 	PromptFilterReviewAPIKeyCount      int     `json:"prompt_filter_review_api_key_count"`
 	PromptFilterReviewBaseURL          string  `json:"prompt_filter_review_base_url"`
@@ -5663,6 +5664,7 @@ type updateSettingsReq struct {
 	PromptFilterCustomPatterns         *string  `json:"prompt_filter_custom_patterns"`
 	PromptFilterDisabledPatterns       *string  `json:"prompt_filter_disabled_patterns"`
 	PromptFilterReviewEnabled          *bool    `json:"prompt_filter_review_enabled"`
+	PromptFilterReviewAll              *bool    `json:"prompt_filter_review_all"`
 	PromptFilterReviewAPIKey           *string  `json:"prompt_filter_review_api_key"`
 	PromptFilterReviewBaseURL          *string  `json:"prompt_filter_review_base_url"`
 	PromptFilterReviewModel            *string  `json:"prompt_filter_review_model"`
@@ -6245,6 +6247,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		PromptFilterCustomPatterns:         promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:       promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 		PromptFilterReviewEnabled:          promptFilterCfg.Review.Enabled,
+		PromptFilterReviewAll:              promptFilterCfg.Review.All,
 		PromptFilterReviewAPIKeyConfigured: promptFilterCfg.Review.APIKey != "",
 		PromptFilterReviewAPIKeyCount:      len(promptFilterCfg.Review.APIKeyList()),
 		PromptFilterReviewBaseURL:          promptFilterCfg.Review.BaseURL,
@@ -6798,6 +6801,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		promptFilterCfg.Review.Enabled = *req.PromptFilterReviewEnabled
 		promptFilterChanged = true
 	}
+	if req.PromptFilterReviewAll != nil {
+		promptFilterCfg.Review.All = *req.PromptFilterReviewAll
+		promptFilterChanged = true
+	}
 	if req.PromptFilterReviewAPIKey != nil {
 		if key := strings.TrimSpace(*req.PromptFilterReviewAPIKey); key != "" {
 			promptFilterCfg.Review.APIKey = key
@@ -6969,6 +6976,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterCustomPatterns:         promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:       promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 		PromptFilterReviewEnabled:          promptFilterCfg.Review.Enabled,
+		PromptFilterReviewAll:              promptFilterCfg.Review.All,
 		PromptFilterReviewAPIKey:           promptFilterCfg.Review.APIKey,
 		PromptFilterReviewBaseURL:          promptFilterCfg.Review.BaseURL,
 		PromptFilterReviewModel:            promptFilterCfg.Review.Model,
@@ -7072,6 +7080,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PromptFilterCustomPatterns:         promptfilter.MarshalCustomPatterns(promptFilterCfg.CustomPatterns),
 		PromptFilterDisabledPatterns:       promptfilter.MarshalDisabledPatterns(promptFilterCfg.DisabledPatterns),
 		PromptFilterReviewEnabled:          promptFilterCfg.Review.Enabled,
+		PromptFilterReviewAll:              promptFilterCfg.Review.All,
 		PromptFilterReviewAPIKeyConfigured: promptFilterCfg.Review.APIKey != "",
 		PromptFilterReviewAPIKeyCount:      len(promptFilterCfg.Review.APIKeyList()),
 		PromptFilterReviewBaseURL:          promptFilterCfg.Review.BaseURL,

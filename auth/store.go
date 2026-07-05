@@ -4053,6 +4053,7 @@ func promptFilterConfigFromSettings(settings *database.SystemSettings) promptfil
 	}
 	cfg.Review = promptfilter.ReviewConfig{
 		Enabled:        settings.PromptFilterReviewEnabled,
+		All:            settings.PromptFilterReviewAll,
 		APIKey:         settings.PromptFilterReviewAPIKey,
 		BaseURL:        settings.PromptFilterReviewBaseURL,
 		Model:          settings.PromptFilterReviewModel,

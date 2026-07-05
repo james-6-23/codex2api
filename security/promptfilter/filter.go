@@ -47,6 +47,7 @@ type Config struct {
 
 type ReviewConfig struct {
 	Enabled        bool   `json:"enabled"`
+	All            bool   `json:"all"`
 	APIKey         string `json:"api_key,omitempty"`
 	BaseURL        string `json:"base_url"`
 	Model          string `json:"model"`

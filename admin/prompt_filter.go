@@ -286,13 +286,33 @@ func positiveQueryInt(c *gin.Context, key string, fallback int) int {
 }
 
 func shouldReviewPromptFilterVerdict(verdict promptfilter.Verdict, cfg promptfilter.Config) bool {
-	if verdict.Action != promptfilter.ActionWarn && verdict.Action != promptfilter.ActionBlock {
+	if verdict.Reviewed || verdict.Action == promptfilter.ActionBlock && verdict.StrictHit {
 		return false
 	}
-	return promptfilter.NormalizeReviewConfig(cfg.Review).Ready()
+	review := promptfilter.NormalizeReviewConfig(cfg.Review)
+	if !review.Ready() {
+		return false
+	}
+	if verdict.Action == promptfilter.ActionWarn || verdict.Action == promptfilter.ActionBlock {
+		return true
+	}
+	return review.All && verdict.Action == promptfilter.ActionAllow
 }
 
 func reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
 	flagged, model, err := promptfilter.DefaultReviewClient.ReviewText(ctx, text, cfg.Review)
-	return promptfilter.ApplyReviewResult(verdict, flagged, model, err, cfg.Review)
+	verdict = promptfilter.ApplyReviewResult(verdict, flagged, model, err, cfg.Review)
+	if err == nil && !flagged && len(verdict.Matched) == 0 {
+		verdict.Reason = "prompt review cleared request"
+	}
+	if err == nil && flagged {
+		switch promptfilter.NormalizeConfig(cfg).Mode {
+		case promptfilter.ModeBlock:
+			verdict.Action = promptfilter.ActionBlock
+		case promptfilter.ModeWarn:
+			verdict.Action = promptfilter.ActionWarn
+		}
+		verdict.Reason = "prompt review flagged request"
+	}
+	return verdict
 }

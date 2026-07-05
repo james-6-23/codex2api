@@ -790,6 +790,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_custom_patterns TEXT DEFAULT '[]';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_disabled_patterns TEXT DEFAULT '[]';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_all BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_api_key TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_base_url TEXT DEFAULT 'https://api.openai.com';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_review_model TEXT DEFAULT 'omni-moderation-latest';
@@ -1400,6 +1401,7 @@ type SystemSettings struct {
 	PromptFilterCustomPatterns         string
 	PromptFilterDisabledPatterns       string
 	PromptFilterReviewEnabled          bool
+	PromptFilterReviewAll              bool
 	PromptFilterReviewAPIKey           string
 	PromptFilterReviewBaseURL          string
 	PromptFilterReviewModel            string
@@ -1511,11 +1513,12 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(codex_ws_keepalive_interval_sec, 60),
 			       COALESCE(codex_ws_hide_upstream_errors, true),
 			       COALESCE(codex_ws_silent_retry_enabled, true),
-			       COALESCE(codex_ws_silent_max_retries, 2),
-			       COALESCE(auto_pause_5h_threshold, 0),
-			       COALESCE(auto_pause_7d_threshold, 0),
-			       COALESCE(auto_pause_5h_guard_band_percent, 5),
-			       COALESCE(auto_pause_5h_guard_concurrency, 1)
+		       COALESCE(codex_ws_silent_max_retries, 2),
+		       COALESCE(auto_pause_5h_threshold, 0),
+		       COALESCE(auto_pause_7d_threshold, 0),
+		       COALESCE(auto_pause_5h_guard_band_percent, 5),
+		       COALESCE(auto_pause_5h_guard_concurrency, 1),
+		       COALESCE(prompt_filter_review_all, false)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1552,6 +1555,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.AutoPause7dThreshold,
 		&s.AutoPause5hGuardBandPercent,
 		&s.AutoPause5hGuardConcurrency,
+		&s.PromptFilterReviewAll,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1614,9 +1618,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					auto_pause_5h_threshold,
 					auto_pause_7d_threshold,
 					auto_pause_5h_guard_band_percent,
-					auto_pause_5h_guard_concurrency
+					auto_pause_5h_guard_concurrency,
+					prompt_filter_review_all
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1690,7 +1695,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					auto_pause_5h_threshold = EXCLUDED.auto_pause_5h_threshold,
 					auto_pause_7d_threshold = EXCLUDED.auto_pause_7d_threshold,
 					auto_pause_5h_guard_band_percent = EXCLUDED.auto_pause_5h_guard_band_percent,
-					auto_pause_5h_guard_concurrency = EXCLUDED.auto_pause_5h_guard_concurrency
+					auto_pause_5h_guard_concurrency = EXCLUDED.auto_pause_5h_guard_concurrency,
+					prompt_filter_review_all = EXCLUDED.prompt_filter_review_all
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1707,7 +1713,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.FirstTokenTimeoutSeconds, firstTokenMode, billingTierPolicy, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, s.ShowFullUsageNumbers, s.PublicKeyUsagePageEnabled, reasoningEffortModels,
 		s.CodexForceWebsocket, s.CodexWSKeepaliveEnabled, normalizeCodexWSKeepaliveInterval(s.CodexWSKeepaliveIntervalSec),
 		s.CodexWSHideUpstreamErrors, s.CodexWSSilentRetryEnabled, normalizeCodexWSSilentMaxRetries(s.CodexWSSilentMaxRetries),
-		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency)
+		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency, s.PromptFilterReviewAll)
 	return err
 }
 

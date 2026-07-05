@@ -1088,6 +1088,7 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		PromptFilterCustomPatterns:       "[]",
 		PromptFilterDisabledPatterns:     "[]",
 		PromptFilterReviewEnabled:        true,
+		PromptFilterReviewAll:            true,
 		PromptFilterReviewAPIKey:         "sk-review-test",
 		PromptFilterReviewBaseURL:        "https://review.example.com",
 		PromptFilterReviewModel:          "review-model",
@@ -1150,6 +1151,9 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if !settings.PromptFilterReviewEnabled {
 		t.Fatal("PromptFilterReviewEnabled = false, want true")
+	}
+	if !settings.PromptFilterReviewAll {
+		t.Fatal("PromptFilterReviewAll = false, want true")
 	}
 	if settings.PromptFilterReviewAPIKey != "sk-review-test" {
 		t.Fatalf("PromptFilterReviewAPIKey = %q, want sk-review-test", settings.PromptFilterReviewAPIKey)

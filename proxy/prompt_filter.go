@@ -109,7 +109,7 @@ func (h *Handler) logPromptFilterVerdict(c *gin.Context, endpoint string, model 
 	if h == nil || h.db == nil || !verdict.Enabled {
 		return
 	}
-	if source == "local_filter" && len(verdict.Matched) == 0 {
+	if source == "local_filter" && len(verdict.Matched) == 0 && !verdict.Reviewed {
 		return
 	}
 	if h.store != nil {
@@ -209,13 +209,17 @@ func populatePromptFilterAPIKeyMeta(c *gin.Context, input *database.PromptFilter
 }
 
 func shouldReviewPromptFilterVerdict(verdict promptfilter.Verdict, cfg promptfilter.Config) bool {
-	if verdict.Action != promptfilter.ActionWarn && verdict.Action != promptfilter.ActionBlock {
-		return false
-	}
 	if promptFilterVerdictIsFinal(verdict) {
 		return false
 	}
-	return promptfilter.NormalizeReviewConfig(cfg.Review).Ready()
+	review := promptfilter.NormalizeReviewConfig(cfg.Review)
+	if !review.Ready() {
+		return false
+	}
+	if verdict.Action == promptfilter.ActionWarn || verdict.Action == promptfilter.ActionBlock {
+		return true
+	}
+	return review.All && verdict.Action == promptfilter.ActionAllow
 }
 
 func promptFilterVerdictIsFinal(verdict promptfilter.Verdict) bool {
@@ -272,5 +276,18 @@ func isCodexAmbientSuggestionClassifier(text string) bool {
 
 func (h *Handler) reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
 	flagged, model, err := promptfilter.DefaultReviewClient.ReviewText(ctx, text, cfg.Review)
-	return promptfilter.ApplyReviewResult(verdict, flagged, model, err, cfg.Review)
+	verdict = promptfilter.ApplyReviewResult(verdict, flagged, model, err, cfg.Review)
+	if err == nil && !flagged && len(verdict.Matched) == 0 {
+		verdict.Reason = "prompt review cleared request"
+	}
+	if err == nil && flagged {
+		switch promptfilter.NormalizeConfig(cfg).Mode {
+		case promptfilter.ModeBlock:
+			verdict.Action = promptfilter.ActionBlock
+		case promptfilter.ModeWarn:
+			verdict.Action = promptfilter.ActionWarn
+		}
+		verdict.Reason = "prompt review flagged request"
+	}
+	return verdict
 }
