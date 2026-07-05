@@ -219,7 +219,7 @@ export default function Layout({ children }: PropsWithChildren) {
         </div>
       ) : null}
       <div
-        className={`relative z-10 grid max-w-full grid-cols-1 max-lg:px-3 lg:grid-cols-[var(--admin-layout-columns)] transition-[grid-template-columns] ${containerEase}`}
+        className={`relative z-10 grid w-full min-w-0 max-w-full grid-cols-1 overflow-x-hidden max-lg:px-3 lg:grid-cols-[var(--admin-layout-columns)] transition-[grid-template-columns] ${containerEase}`}
         style={{
           '--admin-layout-columns': sidebarCollapsed ? '64px minmax(0,1fr)' : '264px minmax(0,1fr)',
         } as CSSProperties}
@@ -423,7 +423,7 @@ export default function Layout({ children }: PropsWithChildren) {
         </aside>
 
         {/* Main content */}
-        <main className="min-w-0 p-5 max-lg:p-3 max-lg:pb-[92px]">
+        <main className="w-full min-w-0 max-w-full overflow-x-hidden p-5 max-lg:p-3 max-lg:pb-[92px]">
           {/* Mobile topbar */}
           <header data-slot="admin-mobile-topbar" className="hidden max-lg:flex min-w-0 w-full max-w-full items-center justify-between gap-2 overflow-hidden mb-4 p-3 border border-border rounded-lg bg-card/95 shadow-sm">
             <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -463,7 +463,7 @@ export default function Layout({ children }: PropsWithChildren) {
           </header>
 
           <SecurityBanner />
-          <div className="min-h-full">{children}</div>
+          <div className="min-h-full w-full min-w-0 max-w-full">{children}</div>
         </main>
 
         {/* Mobile bottom nav */}

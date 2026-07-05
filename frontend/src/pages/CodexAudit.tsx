@@ -163,14 +163,14 @@ export default function CodexAudit() {
         title="Codex2API 巡检"
         description="集中查看误伤、漏网、cyb、探针、首字延迟和运行健康。"
         actions={
-          <div className="flex flex-wrap items-end justify-end gap-2 max-sm:w-full max-sm:justify-start">
+          <div className="grid w-full min-w-0 gap-2 sm:w-auto sm:grid-cols-[164px_164px_auto] sm:items-end">
             <HeaderControl label="巡检范围">
               <Select value={String(rangeHours)} onValueChange={(value) => setRangeHours(Number(value))} options={rangeOptions} triggerClassName="h-10 rounded-lg text-sm" />
             </HeaderControl>
             <HeaderControl label="自动刷新">
               <Select value={String(refreshSeconds)} onValueChange={(value) => setRefreshSeconds(Number(value))} options={refreshOptions} triggerClassName="h-10 rounded-lg text-sm" />
             </HeaderControl>
-            <Button variant="outline" className="h-10 max-sm:w-full" onClick={() => void reload()} disabled={loading}>
+            <Button variant="outline" className="h-10 w-full sm:w-auto" onClick={() => void reload()} disabled={loading}>
               <RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />
               刷新
             </Button>
@@ -180,11 +180,11 @@ export default function CodexAudit() {
 
       <StateShell loading={loading && !report} error={error} isEmpty={!loading && !report} onRetry={() => void reload()} emptyTitle="暂无巡检数据">
         {report ? (
-          <div className="space-y-4">
-            <Card className="overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-muted/40 shadow-sm">
-              <CardContent className="p-0">
-                <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(520px,2fr)]">
-                  <div className="border-b border-border/70 p-5 lg:border-b-0 lg:border-r">
+          <div className="w-full min-w-0 max-w-full space-y-4">
+            <Card className="w-full min-w-0 overflow-hidden border-border/70 bg-gradient-to-br from-background via-background to-muted/40 shadow-sm">
+              <CardContent className="min-w-0 p-0">
+                <div className="grid min-w-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_minmax(520px,2fr)]">
+                  <div className="min-w-0 border-b border-border/70 p-4 sm:p-5 lg:border-b-0 lg:border-r">
                     <div className="flex items-start justify-between gap-4">
                       <div className={`flex size-12 items-center justify-center rounded-lg ${toneIconClass(meta.tone)} [&>svg]:size-6`}>
                         {meta.tone === 'ok' ? <ShieldCheck /> : meta.tone === 'warn' ? <ShieldAlert /> : <ShieldX />}
@@ -202,7 +202,7 @@ export default function CodexAudit() {
                     </div>
                   </div>
 
-                  <div className="grid gap-px bg-border/70 sm:grid-cols-2 xl:grid-cols-4">
+                  <div className="grid min-w-0 grid-cols-1 gap-px bg-border/70 sm:grid-cols-2 xl:grid-cols-4">
                     <SignalTile label="请求总量" value={formatNumber(report.usage.requests)} detail={`错误率 ${formatPercent(errorRate)}`} icon={<Activity />} tone={errorTone} />
                     <SignalTile label="拦截命中" value={formatNumber(report.summary.prompt_blocks)} detail={`拦截率 ${formatPercent(blockRate)}`} icon={<ShieldX />} tone={report.summary.prompt_blocks ? 'warn' : 'ok'} />
                     <SignalTile label="疑似漏网" value={formatNumber(report.summary.upstream_cyber_policy)} detail="上游 cyb / policy 信号" icon={<AlertTriangle />} tone={report.summary.upstream_cyber_policy ? 'bad' : 'ok'} />
@@ -216,7 +216,7 @@ export default function CodexAudit() {
               </CardContent>
             </Card>
 
-            <div className="grid gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
+            <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
               <ChartPanel title="请求与风险趋势" description="按时间窗口聚合请求、拦截、上游 cyb 和 5xx。">
                 <ResponsiveContainer width="100%" height={286}>
                   <LineChart data={timeline} margin={{ top: 12, right: 18, bottom: 0, left: 0 }}>
@@ -245,7 +245,7 @@ export default function CodexAudit() {
               </ChartPanel>
             </div>
 
-            <div className="grid gap-4 xl:grid-cols-2">
+            <div className="grid min-w-0 gap-4 xl:grid-cols-2">
               <Panel title="Prompt Filter 聚合" description="按来源、动作、审查模型和分数区间聚合。">
                 <SimpleTable
                   columns={['来源', '动作', '审查模型', '数量', '分数', '异常']}
@@ -275,7 +275,7 @@ export default function CodexAudit() {
               <PromptSampleTable rows={report.suspicious_samples || []} />
             </Panel>
 
-            <div className="grid gap-4 xl:grid-cols-2">
+            <div className="grid min-w-0 gap-4 xl:grid-cols-2">
               <Panel title="Policy-like 错误" description="从请求日志中提取 policy、cyber、violat、safety 相关错误。">
                 <UsageSampleTable rows={report.policy_errors || []} empty="暂无 policy-like 错误" />
               </Panel>
@@ -300,7 +300,7 @@ export default function CodexAudit() {
 
 function HeaderControl({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <label className="grid w-[164px] gap-1.5 max-sm:w-full">
+    <label className="grid w-full min-w-0 gap-1.5 sm:w-[164px]">
       <span className="text-xs font-medium text-muted-foreground">{label}</span>
       {children}
     </label>
@@ -309,7 +309,7 @@ function HeaderControl({ label, children }: { label: string; children: ReactNode
 
 function SignalTile({ label, value, detail, icon, tone }: { label: string; value: ReactNode; detail: string; icon: ReactNode; tone: Tone }) {
   return (
-    <div className="bg-background/95 p-4">
+    <div className="min-w-0 bg-background/95 p-4">
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-xs font-medium text-muted-foreground">{label}</div>
@@ -319,26 +319,26 @@ function SignalTile({ label, value, detail, icon, tone }: { label: string; value
           {icon}
         </div>
       </div>
-      <div className="mt-3 text-xs text-muted-foreground">{detail}</div>
+      <div className="mt-3 truncate text-xs text-muted-foreground">{detail}</div>
     </div>
   )
 }
 
 function WindowLine({ label, value, tone = 'neutral' }: { label: string; value: ReactNode; tone?: Tone }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-md border border-border/70 bg-background/70 px-3 py-2">
-      <span className="text-xs text-muted-foreground">{label}</span>
-      <span className={`truncate text-right text-xs font-medium ${toneTextClass(tone)}`}>{value}</span>
+    <div className="flex min-w-0 flex-col gap-1 rounded-md border border-border/70 bg-background/70 px-3 py-2 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+      <span className="shrink-0 text-xs text-muted-foreground">{label}</span>
+      <span className={`min-w-0 truncate text-xs font-medium sm:text-right ${toneTextClass(tone)}`}>{value}</span>
     </div>
   )
 }
 
 function ChartPanel({ title, description, children }: { title: string; description: string; children: ReactNode }) {
   return (
-    <Card className="border-border/70 shadow-sm">
-      <CardContent className="p-5">
-        <div className="mb-4 flex items-start justify-between gap-4">
-          <div>
+    <Card className="min-w-0 overflow-hidden border-border/70 shadow-sm">
+      <CardContent className="min-w-0 p-4 sm:p-5">
+        <div className="mb-4 flex min-w-0 items-start justify-between gap-4">
+          <div className="min-w-0">
             <div className="flex items-center gap-2 text-base font-semibold text-foreground">
               <BarChart3 className="size-4 text-primary" />
               {title}
@@ -354,9 +354,9 @@ function ChartPanel({ title, description, children }: { title: string; descripti
 
 function Panel({ title, description, children }: { title: string; description?: string; children: ReactNode }) {
   return (
-    <Card className="border-border/70 shadow-sm">
-      <CardContent className="p-5">
-        <div className="mb-4">
+    <Card className="min-w-0 overflow-hidden border-border/70 shadow-sm">
+      <CardContent className="min-w-0 p-4 sm:p-5">
+        <div className="mb-4 min-w-0">
           <h2 className="text-base font-semibold text-foreground">{title}</h2>
           {description ? <p className="mt-1 text-sm text-muted-foreground">{description}</p> : null}
         </div>
@@ -375,8 +375,8 @@ function SimpleTable({ columns, rows, empty }: { columns: string[]; rows: string
     return <EmptyState>{empty}</EmptyState>
   }
   return (
-    <div className="overflow-x-auto rounded-lg border border-border/70">
-      <Table>
+    <div className="w-full max-w-full overflow-x-auto rounded-lg border border-border/70">
+      <Table className="min-w-[560px]">
         <TableHeader className="bg-muted/40">
           <TableRow>{columns.map((column) => <TableHead key={column} className="text-xs font-semibold text-muted-foreground">{column}</TableHead>)}</TableRow>
         </TableHeader>
@@ -416,8 +416,8 @@ function PromptSampleTable({ rows }: { rows: PromptFilterLog[] }) {
     return <EmptyState>暂无可疑样本</EmptyState>
   }
   return (
-    <div className="overflow-x-auto rounded-lg border border-border/70">
-      <Table>
+    <div className="w-full max-w-full overflow-x-auto rounded-lg border border-border/70">
+      <Table className="min-w-[760px]">
         <TableHeader className="bg-muted/40">
           <TableRow>
             <TableHead className="text-xs font-semibold text-muted-foreground">时间</TableHead>
@@ -452,8 +452,8 @@ function UsageSampleTable({ rows, empty, showFirstToken = false }: { rows: Usage
     return <EmptyState>{empty}</EmptyState>
   }
   return (
-    <div className="overflow-x-auto rounded-lg border border-border/70">
-      <Table>
+    <div className="w-full max-w-full overflow-x-auto rounded-lg border border-border/70">
+      <Table className="min-w-[620px]">
         <TableHeader className="bg-muted/40">
           <TableRow>
             <TableHead className="text-xs font-semibold text-muted-foreground">时间</TableHead>

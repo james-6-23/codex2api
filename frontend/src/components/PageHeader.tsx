@@ -28,8 +28,8 @@ export default function PageHeader({
   const resolvedRefreshLabel = refreshLabel ?? t('common.refresh')
 
   return (
-    <div data-slot="page-header" className="flex items-end justify-between gap-5 mb-6 max-sm:flex-col max-sm:items-stretch">
-      <div className="max-w-[760px]">
+    <div data-slot="page-header" className="mb-6 flex w-full min-w-0 max-w-full items-end justify-between gap-5 max-sm:flex-col max-sm:items-stretch">
+      <div className="min-w-0 max-w-[760px] max-sm:max-w-full">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-2xl font-semibold leading-tight text-foreground sm:text-[28px]">
             {title}
@@ -49,7 +49,7 @@ export default function PageHeader({
               {actionMeta}
             </div>
           ) : null}
-          <div className="flex flex-wrap items-center justify-end gap-2 max-sm:w-full max-sm:justify-start">
+          <div className="flex min-w-0 flex-wrap items-center justify-end gap-2 max-sm:w-full max-sm:justify-start">
             {actions}
             {onRefresh ? (
               <Button variant="outline" onClick={onRefresh} className="max-sm:w-full">
