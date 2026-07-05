@@ -29,21 +29,38 @@ import (
 //   - 代理支持：HTTP(S) 和 SOCKS5
 
 // utlsRoundTripper 实现 http.RoundTripper 接口
-// 使用 utls 模拟 Chrome 浏览器的 TLS 指纹以绕过 TLS 指纹检测
+// 使用 utls 模拟目标客户端的 TLS 指纹以绕过 TLS 指纹检测。
+// clientHelloID 决定 ClientHello 形态：默认 HelloChrome_Auto（伪装浏览器）；
+// 当使用 HelloCustom 时，clientHelloSpec 提供自定义 spec（如 rustls 指纹）。
 type utlsRoundTripper struct {
-	mu         sync.Mutex
+	mu          sync.Mutex
 	connections map[string]*http2.ClientConn // HTTP/2 连接池，按 host 索引
 	pending     map[string]*sync.Cond        // 防止重复连接创建
-	dialer     xproxy.Dialer                 // 底层拨号器（支持代理）
+	dialer      xproxy.Dialer                // 底层拨号器（支持代理）
+
+	clientHelloID   utls.ClientHelloID    // TLS 指纹 preset
+	clientHelloSpec *utls.ClientHelloSpec // HelloCustom 时的自定义 spec（否则 nil）
 }
 
 // utlsSessionCache 在所有 uTLS 连接间共享 TLS 会话缓存，让重连走 TLS resumption。
 // 必须实例级共享（而非每次 new），否则缓存无法命中。
 var utlsSessionCache = utls.NewLRUClientSessionCache(256)
 
-// NewUTLSTransport 创建使用 Chrome TLS 指纹的 RoundTripper
-// 支持 HTTP(S) 和 SOCKS5 代理
+// NewUTLSTransport 创建使用 Chrome TLS 指纹的 RoundTripper（向后兼容入口）。
+// 支持 HTTP(S) 和 SOCKS5 代理。
 func NewUTLSTransport(proxyURL string) http.RoundTripper {
+	return NewUTLSTransportWithHello(proxyURL, utls.HelloChrome_Auto, nil)
+}
+
+// NewUTLSRustlsTransport 创建使用 rustls 指纹的 RoundTripper，与官方 codex-rs
+// （reqwest + rustls 0.23）的 JA3/JA4 对齐。用于 CODEX_TRANSPORT_MODE=utls_rustls。
+func NewUTLSRustlsTransport(proxyURL string) http.RoundTripper {
+	spec := rustlsClientHelloSpec()
+	return NewUTLSTransportWithHello(proxyURL, utls.HelloCustom, &spec)
+}
+
+// NewUTLSTransportWithHello 用指定 ClientHelloID / spec 创建 RoundTripper。
+func NewUTLSTransportWithHello(proxyURL string, helloID utls.ClientHelloID, spec *utls.ClientHelloSpec) http.RoundTripper {
 	var dialer xproxy.Dialer = xproxy.Direct
 
 	if proxyURL != "" {
@@ -57,9 +74,72 @@ func NewUTLSTransport(proxyURL string) http.RoundTripper {
 	}
 
 	return &utlsRoundTripper{
-		connections: make(map[string]*http2.ClientConn),
-		pending:     make(map[string]*sync.Cond),
-		dialer:      dialer,
+		connections:     make(map[string]*http2.ClientConn),
+		pending:         make(map[string]*sync.Cond),
+		dialer:          dialer,
+		clientHelloID:   helloID,
+		clientHelloSpec: spec,
+	}
+}
+
+// rustlsClientHelloSpec 构造与 rustls 0.23（aws-lc-rs provider，启用 tls12 feature）
+// 默认 ClientHello 对齐的 spec。关键特征（区别于浏览器）：
+//   - 无 GREASE（rustls 不实现 RFC 8701）；
+//   - TLS 1.3 cipher 顺序 AES_256 优先：0x1302, 0x1301, 0x1303；
+//   - 随后 6 个 ECDHE TLS 1.2 GCM/ChaCha 套件；
+//   - 曲线 X25519, P-256, P-384；无多余扩展（extra_exts 为空）。
+//
+// 参考 docs.rs/rustls DEFAULT_CIPHER_SUITES 与官方 provider 顺序。
+func rustlsClientHelloSpec() utls.ClientHelloSpec {
+	return utls.ClientHelloSpec{
+		CipherSuites: []uint16{
+			// TLS 1.3（rustls 默认顺序：AES_256 优先）
+			utls.TLS_AES_256_GCM_SHA384,
+			utls.TLS_AES_128_GCM_SHA256,
+			utls.TLS_CHACHA20_POLY1305_SHA256,
+			// TLS 1.2 ECDHE（aws-lc-rs provider 顺序）
+			utls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
+			utls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+			utls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+			utls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+		},
+		CompressionMethods: []byte{0x00}, // compressionNone
+		Extensions: []utls.TLSExtension{
+			// 无 GREASE，无 padding。顺序贴近 rustls 生成的 ClientHello。
+			&utls.SNIExtension{},
+			&utls.ExtendedMasterSecretExtension{},
+			&utls.RenegotiationInfoExtension{Renegotiation: utls.RenegotiateOnceAsClient},
+			&utls.SupportedCurvesExtension{Curves: []utls.CurveID{
+				utls.X25519,
+				utls.CurveP256,
+				utls.CurveP384,
+			}},
+			&utls.SupportedPointsExtension{SupportedPoints: []byte{0x00}}, // uncompressed
+			&utls.SessionTicketExtension{},
+			&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
+			&utls.StatusRequestExtension{},
+			&utls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []utls.SignatureScheme{
+				utls.ECDSAWithP256AndSHA256,
+				utls.ECDSAWithP384AndSHA384,
+				utls.ECDSAWithP521AndSHA512,
+				utls.PSSWithSHA256,
+				utls.PSSWithSHA384,
+				utls.PSSWithSHA512,
+				utls.PKCS1WithSHA256,
+				utls.PKCS1WithSHA384,
+				utls.PKCS1WithSHA512,
+			}},
+			&utls.KeyShareExtension{KeyShares: []utls.KeyShare{
+				{Group: utls.X25519},
+			}},
+			&utls.PSKKeyExchangeModesExtension{Modes: []uint8{utls.PskModeDHE}},
+			&utls.SupportedVersionsExtension{Versions: []uint16{
+				utls.VersionTLS13,
+				utls.VersionTLS12,
+			}},
+		},
 	}
 }
 
@@ -255,8 +335,18 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 		ClientSessionCache: utlsSessionCache,
 	}
 
-	// 3. 使用 utls 握手（Chrome 指纹）
-	tlsConn := utls.UClient(conn, tlsConfig, utls.HelloChrome_Auto)
+	// 3. 使用 utls 握手（默认 Chrome 指纹；rustls 模式用 HelloCustom + 自定义 spec）
+	helloID := t.clientHelloID
+	if helloID.Client == "" {
+		helloID = utls.HelloChrome_Auto
+	}
+	tlsConn := utls.UClient(conn, tlsConfig, helloID)
+	if helloID.Client == utls.HelloCustom.Client && t.clientHelloSpec != nil {
+		if err := tlsConn.ApplyPreset(t.clientHelloSpec); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("应用自定义 TLS 指纹失败: %w", err)
+		}
+	}
 
 	// 设置握手超时
 	handshakeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -348,4 +438,3 @@ func (c *uTLSHTTPClientWrapper) Do(req *http.Request) (*http.Response, error) {
 func (c *uTLSHTTPClientWrapper) CloseIdleConnections() {
 	c.transport.CloseIdleConnections()
 }
-

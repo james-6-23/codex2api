@@ -74,6 +74,10 @@ func evictExpiredClients() {
 const (
 	codexTransportModeStandard   = "standard"
 	codexTransportModeUTLSChrome = "utls_chrome"
+	// codexTransportModeUTLSRustls 用 utls HelloCustom 手搭 rustls 指纹，与官方
+	// codex-rs（reqwest + rustls 0.23）的 JA3/JA4 对齐。默认不启用（防 regression），
+	// 由 CODEX_TRANSPORT_MODE=utls_rustls 显式开启，灰度验证握手连通后再切。
+	codexTransportModeUTLSRustls = "utls_rustls"
 )
 
 func codexTransportModeFromEnv() string {
@@ -82,6 +86,8 @@ func codexTransportModeFromEnv() string {
 		return codexTransportModeStandard
 	case "utls", "utls_chrome", "chrome":
 		return codexTransportModeUTLSChrome
+	case "utls_rustls", "rustls", "codex", "codex_cli_rs":
+		return codexTransportModeUTLSRustls
 	default:
 		return codexTransportModeStandard
 	}
@@ -146,6 +152,8 @@ func newCodexTransport(proxyURL string) http.RoundTripper {
 	switch codexTransportModeFromEnv() {
 	case codexTransportModeUTLSChrome:
 		return NewUTLSTransport(proxyURL)
+	case codexTransportModeUTLSRustls:
+		return NewUTLSRustlsTransport(proxyURL)
 	default:
 		return newCodexStandardTransport(proxyURL)
 	}
@@ -571,6 +579,11 @@ func generatedCodexClientHeaders(account *auth.Account, settings RuntimeSettings
 		accountID = account.ID()
 	}
 	profile := ProfileForAccount(accountID)
+	if settings.MimicStrictHeaders() {
+		// strict 模式：originator 前缀改 codex_cli_rs、去除 UA 尾部后缀，
+		// 与官方 codex-rs get_codex_user_agent() 对齐。
+		profile = StrictProfileForAccount(accountID)
+	}
 	userAgent := strings.TrimSpace(profile.UserAgent)
 	version := strings.TrimSpace(profile.Version)
 	if userAgent == "" {
@@ -632,6 +645,9 @@ func resolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, dev
 	if userAgent, version, ok := codexUserAgentFromConfig(settings.CodexUserAgentConfig, versionFloor); ok {
 		return userAgent, version, true
 	}
+	if settings.MimicStrictHeaders() {
+		return strictDefaultCodexCLIUserAgent, latestCodexCLIVersion, false
+	}
 	return defaultCodexCLIUserAgent, latestCodexCLIVersion, false
 }
 
@@ -655,6 +671,85 @@ func applyCodexAllowedForwardHeaders(req *http.Request, downstreamHeaders http.H
 	}
 }
 
+// codexOpenAIBetaHTTPValue 是 HTTP /responses 路径应携带的 OpenAI-Beta 值。
+// 官方 codex-rs 在 WS 路径发 responses_websockets=2026-02-06；HTTP 路径历史上
+// 由 responses=experimental 启用 Responses API。此处用于 strict 模式补齐 HTTP 头。
+const codexOpenAIBetaHTTPValue = "responses=experimental"
+
+// deterministicCodexClientUUID 生成账号级确定性 UUID（v5/SHA1），用于伪造
+// x-codex-installation-id / x-codex-window-id 等客户端指纹头，使同一账号在多次请求
+// 间保持稳定身份（真实 CLI 的这些 id 在一次安装/一个窗口内是固定的）。
+func deterministicCodexClientUUID(kind, seed string) string {
+	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:x-codex:"+kind+":"+seed)).String()
+}
+
+// applyStrictCodexClientHeaders 在 strict 模式下注入与官方 codex-rs 客户端对齐的
+// x-codex-* 指纹头。seed 用账号 ID（无则用 apiKey），保证同账号稳定。
+func applyStrictCodexClientHeaders(req *http.Request, accountID, apiKey string) {
+	seed := strings.TrimSpace(accountID)
+	if seed == "" {
+		seed = strings.TrimSpace(apiKey)
+	}
+	if seed == "" {
+		return
+	}
+	// installation-id：一次安装稳定；window-id：一个 TUI 窗口稳定。
+	// 二者派生自不同命名子空间，避免相同取值。
+	if req.Header.Get("x-codex-installation-id") == "" {
+		req.Header.Set("x-codex-installation-id", deterministicCodexClientUUID("installation", seed))
+	}
+	if req.Header.Get("x-codex-window-id") == "" {
+		req.Header.Set("x-codex-window-id", deterministicCodexClientUUID("window", seed))
+	}
+}
+
+// MimicStrictHeadersEnabled 导出当前是否处于 strict 伪装模式，供 wsrelay 等其他包复用，
+// 使 HTTP 与 WS 两条上游路径的伪装行为保持一致。
+func MimicStrictHeadersEnabled() bool {
+	return CurrentRuntimeSettings().MimicStrictHeaders()
+}
+
+// StrictDefaultOriginatorValue 导出官方默认 originator（codex_cli_rs）。
+func StrictDefaultOriginatorValue() string { return StrictDefaultOriginator }
+
+// ApplyStrictCodexWSHeaders 在 strict 模式下调整 WS 握手头，使其与 HTTP 路径及官方
+// codex-rs 客户端一致：originator 等于默认值时移除、会话头改用 session-id/thread-id、
+// 注入 x-codex-* 客户端指纹头。仅在 strict 模式调用。
+//   - hadDownstreamOriginator: 下游是否显式带了非默认官方 originator（决定是否保留）
+//   - sessionID: 会话/缓存键（空则不设会话头）
+func ApplyStrictCodexWSHeaders(headers http.Header, accountID, apiKey, sessionID, downstreamOriginator string, usedGeneratedHeaders bool) {
+	if headers == nil {
+		return
+	}
+	// Originator：对齐 add_originator_header
+	if !usedGeneratedHeaders && strings.TrimSpace(downstreamOriginator) != "" &&
+		!strings.EqualFold(strings.TrimSpace(downstreamOriginator), StrictDefaultOriginator) &&
+		IsCodexOfficialClientByHeaders("", downstreamOriginator) {
+		headers.Set("Originator", strings.TrimSpace(downstreamOriginator))
+	} else {
+		headers.Del("Originator")
+	}
+	// 会话头：session-id / thread-id（连字符）
+	if strings.TrimSpace(sessionID) != "" {
+		headers.Del("Session_id")
+		headers.Del("Conversation_id")
+		headers.Set("session-id", sessionID)
+	}
+	// x-codex-* 客户端指纹
+	seed := strings.TrimSpace(accountID)
+	if seed == "" {
+		seed = strings.TrimSpace(apiKey)
+	}
+	if seed != "" {
+		if headers.Get("x-codex-installation-id") == "" {
+			headers.Set("x-codex-installation-id", deterministicCodexClientUUID("installation", seed))
+		}
+		if headers.Get("x-codex-window-id") == "" {
+			headers.Set("x-codex-window-id", deterministicCodexClientUUID("window", seed))
+		}
+	}
+}
+
 func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
 	if req == nil {
 		return
@@ -667,6 +762,8 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		account.Mu().RUnlock()
 	}
 
+	strict := CurrentRuntimeSettings().MimicStrictHeaders()
+
 	userAgent, version, usedGeneratedHeaders := resolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
 	req.Header.Set("User-Agent", userAgent)
 
@@ -677,18 +774,54 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if version != "" {
 		req.Header.Set("Version", version)
 	}
-	if originator := strings.TrimSpace(downstreamHeaders.Get("Originator")); !usedGeneratedHeaders && originator != "" && IsCodexOfficialClientByHeaders("", originator) {
-		req.Header.Set("Originator", originator)
+
+	// ---- Originator ----
+	// strict：对齐官方 add_originator_header —— 当 originator 等于默认值(codex_cli_rs)
+	// 时不发 Originator 头（服务端从 UA 解析）；仅当下游显式带了非默认的官方 originator
+	// 才转发。legacy：保持历史行为，始终发 Originator（默认 codex-tui）。
+	downstreamOriginator := strings.TrimSpace(downstreamHeaders.Get("Originator"))
+	if strict {
+		if !usedGeneratedHeaders && downstreamOriginator != "" &&
+			!strings.EqualFold(downstreamOriginator, StrictDefaultOriginator) &&
+			IsCodexOfficialClientByHeaders("", downstreamOriginator) {
+			req.Header.Set("Originator", downstreamOriginator)
+		} else {
+			req.Header.Del("Originator")
+		}
 	} else {
-		req.Header.Set("Originator", Originator)
+		if !usedGeneratedHeaders && downstreamOriginator != "" && IsCodexOfficialClientByHeaders("", downstreamOriginator) {
+			req.Header.Set("Originator", downstreamOriginator)
+		} else {
+			req.Header.Set("Originator", Originator)
+		}
 	}
+
+	// ---- OpenAI-Beta ----（strict：HTTP 路径补齐；legacy：不动，保持现状）
+	if strict && req.Header.Get("OpenAI-Beta") == "" {
+		req.Header.Set("OpenAI-Beta", codexOpenAIBetaHTTPValue)
+	}
+
 	applyCodexAllowedForwardHeaders(req, downstreamHeaders)
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
+
+	// ---- 会话/线程头 ----
+	// strict：对齐官方 build_session_headers —— 用连字符 session-id/thread-id。
+	// legacy：保持历史 Session_id + 删除 Conversation_id。
 	if cacheKey != "" {
-		req.Header.Set("Session_id", cacheKey)
-		req.Header.Del("Conversation_id")
+		if strict {
+			req.Header.Del("Session_id")
+			req.Header.Del("Conversation_id")
+			req.Header.Set("session-id", cacheKey)
+		} else {
+			req.Header.Set("Session_id", cacheKey)
+			req.Header.Del("Conversation_id")
+		}
+	}
+
+	if strict {
+		applyStrictCodexClientHeaders(req, accountID, apiKey)
 	}
 }
 

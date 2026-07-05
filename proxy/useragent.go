@@ -33,7 +33,21 @@ const (
 	defaultCodexUserAgentArch      = "arm64"
 	defaultCodexUserAgentTerminal  = "xterm-256color"
 	defaultCodexCLIUserAgent       = latestCodexCLIUserAgentPrefix + " (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; " + latestCodexCLIVersion + ")"
+
+	// ---- strict 模式：与官方 codex-rs 逐字节对齐 ----
+	// 官方默认 originator 为 codex_cli_rs（codex-rs/login/src/auth/default_client.rs:41
+	// DEFAULT_ORIGINATOR = "codex_cli_rs"），且 get_codex_user_agent() 生成的 UA 无尾部
+	// "(originator; version)" 后缀（USER_AGENT_SUFFIX 默认为空）。格式：
+	//   {originator}/{version} ({os_type} {os_version}; {arch}) {terminal}
+	strictCodexClientName = "codex_cli_rs"
+	// strict 模式默认 UA：codex_cli_rs/<ver> (Mac OS 15.5.0; arm64) xterm-256color
+	strictDefaultCodexCLIUserAgent = strictCodexClientName + "/" + latestCodexCLIVersion +
+		" (" + defaultCodexUserAgentOSName + " " + defaultCodexUserAgentOSVersion + "; " +
+		defaultCodexUserAgentArch + ") " + defaultCodexUserAgentTerminal
 )
+
+// StrictDefaultOriginator 官方 codex-rs 的默认 originator 值。
+const StrictDefaultOriginator = strictCodexClientName
 
 type CodexUserAgentConfig struct {
 	RawUserAgent  string `json:"raw_user_agent,omitempty"`
@@ -277,6 +291,47 @@ func formatCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, te
 	terminal = firstNonEmptyString(terminal, defaultCodexUserAgentTerminal)
 	platform := strings.TrimSpace(osName + " " + osVersion)
 	return fmt.Sprintf("%s/%s (%s; %s) %s (%s; %s)", clientName, clientVersion, platform, arch, terminal, clientName, clientVersion)
+}
+
+// formatStrictCodexUserAgent 生成与官方 codex-rs get_codex_user_agent() 逐字节一致的
+// User-Agent：{name}/{ver} ({os} {osver}; {arch}) {terminal}，无尾部 "(name; ver)" 后缀。
+// clientName 缺省用 codex_cli_rs（官方 DEFAULT_ORIGINATOR）。
+func formatStrictCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, terminal string) string {
+	clientName = firstNonEmptyString(clientName, strictCodexClientName)
+	clientVersion = firstNonEmptyString(clientVersion, latestCodexCLIVersion)
+	osName = firstNonEmptyString(osName, defaultCodexUserAgentOSName)
+	osVersion = firstNonEmptyString(osVersion, defaultCodexUserAgentOSVersion)
+	arch = firstNonEmptyString(arch, defaultCodexUserAgentArch)
+	terminal = firstNonEmptyString(terminal, defaultCodexUserAgentTerminal)
+	platform := strings.TrimSpace(osName + " " + osVersion)
+	return fmt.Sprintf("%s/%s (%s; %s) %s", clientName, clientVersion, platform, arch, terminal)
+}
+
+// stripCodexUserAgentSuffix 去掉 legacy profile UA 末尾的 " (name; ver)" 后缀，
+// 使其符合官方 codex-rs 格式（strict 模式复用现有 profile 池的平台/终端分布，
+// 仅纠正 originator 前缀与去除后缀）。
+func stripCodexUserAgentSuffix(userAgent string) string {
+	userAgent = strings.TrimSpace(userAgent)
+	// 官方格式共有 4 个空格分隔段：name/ver (os osver; arch) terminal
+	// legacy 多出 " (name; ver)" 后缀。定位最后一个 " (" 且其后含 ";" 且以 ")" 结尾。
+	if idx := strings.LastIndex(userAgent, " ("); idx > 0 && strings.HasSuffix(userAgent, ")") {
+		tail := userAgent[idx:]
+		if strings.Contains(tail, ";") {
+			return strings.TrimSpace(userAgent[:idx])
+		}
+	}
+	return userAgent
+}
+
+// strictProfileUserAgent 把 legacy profile 的 UA 转换为 strict 形态：
+// codex_cli_rs 前缀 + 去尾部后缀，保留原 profile 的 OS/版本/终端分布。
+func strictProfileUserAgent(legacyUserAgent string) string {
+	ua := stripCodexUserAgentSuffix(legacyUserAgent)
+	// 替换开头的 client name 段（codex-tui/... → codex_cli_rs/...）
+	if slash := strings.IndexByte(ua, '/'); slash > 0 {
+		return strictCodexClientName + ua[slash:]
+	}
+	return ua
 }
 
 func effectiveCodexClientVersion(version, versionFloor string) string {
@@ -533,4 +588,15 @@ func ProfileForAccount(accountID int64) ClientProfile {
 	}
 
 	return clientProfiles[idx]
+}
+
+// StrictProfileForAccount 返回 strict 模式（对齐官方 codex-rs）的确定性 profile：
+// 复用 ProfileForAccount 的账号→平台/终端映射，仅把 originator 前缀纠正为 codex_cli_rs
+// 并去除 legacy UA 的尾部后缀。这样同一账号在两种模式下平台指纹保持一致。
+func StrictProfileForAccount(accountID int64) ClientProfile {
+	base := ProfileForAccount(accountID)
+	return ClientProfile{
+		UserAgent: strictProfileUserAgent(base.UserAgent),
+		Version:   base.Version,
+	}
 }

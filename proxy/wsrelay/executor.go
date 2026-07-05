@@ -250,11 +250,16 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		headers.Set("X-Codex-Beta-Features", strings.TrimSpace(deviceCfg.BetaFeatures))
 	}
 
-	// Originator
-	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); !usedGeneratedHeaders && originator != "" && proxy.IsCodexOfficialClientByHeaders("", originator) {
-		headers.Set("Originator", originator)
-	} else {
-		headers.Set("Originator", proxy.Originator)
+	strict := proxy.MimicStrictHeadersEnabled()
+	downstreamOriginator := strings.TrimSpace(ginHeaders.Get("Originator"))
+
+	// Originator（legacy：始终发；strict：由 ApplyStrictCodexWSHeaders 统一处理）
+	if !strict {
+		if !usedGeneratedHeaders && downstreamOriginator != "" && proxy.IsCodexOfficialClientByHeaders("", downstreamOriginator) {
+			headers.Set("Originator", downstreamOriginator)
+		} else {
+			headers.Set("Originator", proxy.Originator)
+		}
 	}
 	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
@@ -266,7 +271,13 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	if accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
-	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+
+	sessionID = strings.TrimSpace(sessionID)
+	if strict {
+		// strict：originator 条件移除 + session-id/thread-id + x-codex-* 指纹，
+		// 与 HTTP 路径及官方 codex-rs 客户端逐字节一致。
+		proxy.ApplyStrictCodexWSHeaders(headers, accountID, apiKey, sessionID, downstreamOriginator, usedGeneratedHeaders)
+	} else if sessionID != "" {
 		headers.Set("Session_id", sessionID)
 		headers.Set("Conversation_id", sessionID)
 	}

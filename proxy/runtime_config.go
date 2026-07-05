@@ -31,6 +31,16 @@ const (
 	RequestIsolationModeIsolated  = "isolated"
 	RequestIsolationModePerAPIKey = "per-api-key"
 
+	// CodexMimicMode 控制对上游伪装真实 Codex CLI 的严格程度。取值：
+	//   legacy —— 保持本项目历史行为（Originator=codex-tui、握手头用 Session_id/
+	//             Conversation_id、UA 带尾部后缀）。默认值，零 regression。
+	//   strict —— 逐字节对齐官方 codex-rs 客户端（originator 默认 codex_cli_rs 且等于
+	//             默认值时不发 Originator 头、会话头改用 session-id/thread-id、HTTP 路径
+	//             补发 OpenAI-Beta 与 x-codex-* 客户端指纹头）。
+	// 用环境变量 CODEX_MIMIC_MODE 覆盖默认值；灰度验证上游不拒绝后再切 strict。
+	CodexMimicModeLegacy = "legacy"
+	CodexMimicModeStrict = "strict"
+
 	defaultClientCompatMode      = ClientCompatModePreserve
 	defaultCodexMinCLIVersion    = "0.118.0"
 	defaultStreamFlushPolicy     = StreamFlushPolicyImmediate
@@ -62,6 +72,13 @@ type RuntimeSettings struct {
 	CodexWSSilentRetries  int  // Codex WS 静默换号最大重试次数（默认 2）
 	// RequestIsolationMode 控制无显式会话请求的上游身份隔离粒度（isolated|per-api-key，默认 isolated）。
 	RequestIsolationMode string
+	// CodexMimicMode 控制对上游伪装真实 Codex CLI 的严格程度（legacy|strict，默认 legacy）。
+	CodexMimicMode string
+}
+
+// MimicStrictHeaders 返回是否启用严格伪装（与官方 codex-rs 客户端逐字节对齐）。
+func (s RuntimeSettings) MimicStrictHeaders() bool {
+	return NormalizeCodexMimicMode(s.CodexMimicMode) == CodexMimicModeStrict
 }
 
 // IsolateRequestsByDefault 返回是否对无显式会话的请求默认按每请求隔离上游身份。
@@ -90,6 +107,23 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		CodexWSSilentRetry:    defaultCodexWSSilentRetry,
 		CodexWSSilentRetries:  defaultCodexWSSilentRetries,
 		RequestIsolationMode:  defaultRequestIsolationMode(),
+		CodexMimicMode:        defaultCodexMimicMode(),
+	}
+}
+
+// defaultCodexMimicMode 从环境变量解析默认伪装模式；缺省为 legacy（保持历史行为）。
+// CODEX_MIMIC_MODE=strict 切换到与官方 codex-rs 客户端逐字节对齐的严格模式。
+func defaultCodexMimicMode() string {
+	return NormalizeCodexMimicMode(os.Getenv("CODEX_MIMIC_MODE"))
+}
+
+// NormalizeCodexMimicMode 归一化伪装模式，空/未知值回落到 legacy。
+func NormalizeCodexMimicMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case CodexMimicModeStrict, "codex_cli_rs", "cli_rs", "real":
+		return CodexMimicModeStrict
+	default:
+		return CodexMimicModeLegacy
 	}
 }
 
@@ -163,6 +197,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	settings.FirstTokenMode = NormalizeFirstTokenMode(settings.FirstTokenMode)
 	settings.BillingTierPolicy = NormalizeBillingTierPolicy(settings.BillingTierPolicy)
 	settings.RequestIsolationMode = NormalizeRequestIsolationMode(settings.RequestIsolationMode)
+	settings.CodexMimicMode = NormalizeCodexMimicMode(settings.CodexMimicMode)
 	if strings.TrimSpace(settings.CodexMinCLIVersion) == "" {
 		settings.CodexMinCLIVersion = defaults.CodexMinCLIVersion
 	} else {
