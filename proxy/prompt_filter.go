@@ -45,18 +45,31 @@ func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endp
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
+	var semanticHandled bool
+	var semanticBlocked bool
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		sendPromptCyberPolicyBlockedOpenAI(c)
+	}); handled {
+		semanticHandled = true
+		semanticBlocked = blocked
+		if !blocked && verdict.Action == promptfilter.ActionBlock {
+			verdict.Action = promptfilter.ActionAllow
+			verdict.Reason = "semantic review cleared local high-risk prompt filter block"
+		}
+	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 	if verdict.Action == promptfilter.ActionWarn {
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
+	}
+	if semanticBlocked {
+		return true
 	}
 	if verdict.Action == promptfilter.ActionBlock {
 		sendPromptCyberPolicyBlockedOpenAI(c)
 		return true
 	}
-	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
-		sendPromptCyberPolicyBlockedOpenAI(c)
-	}); handled {
-		return blocked
+	if semanticHandled {
+		return false
 	}
 	return h.inspectSemanticReviewOpenAI(c, rawBody, endpoint, model)
 }
@@ -74,18 +87,31 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
+	var semanticHandled bool
+	var semanticBlocked bool
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		sendPromptCyberPolicyBlockedOpenAI(c)
+	}); handled {
+		semanticHandled = true
+		semanticBlocked = blocked
+		if !blocked && verdict.Action == promptfilter.ActionBlock {
+			verdict.Action = promptfilter.ActionAllow
+			verdict.Reason = "semantic review cleared local high-risk prompt filter block"
+		}
+	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 	if verdict.Action == promptfilter.ActionWarn {
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
+	}
+	if semanticBlocked {
+		return true
 	}
 	if verdict.Action == promptfilter.ActionBlock {
 		sendPromptCyberPolicyBlockedOpenAI(c)
 		return true
 	}
-	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
-		sendPromptCyberPolicyBlockedOpenAI(c)
-	}); handled {
-		return blocked
+	if semanticHandled {
+		return false
 	}
 	return h.inspectSemanticReviewTextOpenAI(c, text, endpoint, model)
 }
@@ -104,18 +130,31 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
+	var semanticHandled bool
+	var semanticBlocked bool
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request blocked by semantic safety review")
+	}); handled {
+		semanticHandled = true
+		semanticBlocked = blocked
+		if !blocked && verdict.Action == promptfilter.ActionBlock {
+			verdict.Action = promptfilter.ActionAllow
+			verdict.Reason = "semantic review cleared local high-risk prompt filter block"
+		}
+	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 	if verdict.Action == promptfilter.ActionWarn {
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
+	}
+	if semanticBlocked {
+		return true
 	}
 	if verdict.Action == promptfilter.ActionBlock {
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request contains content blocked by prompt filter")
 		return true
 	}
-	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request blocked by semantic safety review")
-	}); handled {
-		return blocked
+	if semanticHandled {
+		return false
 	}
 	return h.inspectSemanticReviewAnthropic(c, rawBody, endpoint, model)
 }
@@ -251,8 +290,22 @@ func promptFilterAllowedHighRisk(verdict promptfilter.Verdict) bool {
 		promptfilter.IsHighRiskReviewVerdict(verdict)
 }
 
+func promptFilterBlockedByLocalHighRisk(verdict promptfilter.Verdict) bool {
+	if verdict.Action != promptfilter.ActionBlock {
+		return false
+	}
+	if promptfilter.IsHighRiskReviewVerdict(verdict) {
+		return true
+	}
+	threshold := verdict.Threshold
+	if threshold <= 0 {
+		threshold = promptfilter.DefaultThreshold
+	}
+	return verdict.Score >= threshold || verdict.RawScore >= threshold
+}
+
 func (h *Handler) inspectHighRiskReviewDisagreement(c *gin.Context, verdict promptfilter.Verdict, text string, endpoint string, model string, writeBlock func()) (bool, bool) {
-	if !promptFilterAllowedHighRisk(verdict) {
+	if !promptFilterAllowedHighRisk(verdict) && !promptFilterBlockedByLocalHighRisk(verdict) {
 		return false, false
 	}
 	blocked := h.inspectSemanticReviewDisagreementText(c, text, endpoint, model, writeBlock)

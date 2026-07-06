@@ -372,6 +372,81 @@ func TestPromptFilterAllowedHighRiskSemanticReviewRunsWithoutPromptReview(t *tes
 	assertCyberPolicyErrorCode(t, recorder.Body.Bytes())
 }
 
+func TestPromptFilterLocalBlockSemanticReviewAllowsWithoutPromptReview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	semanticCalls := 0
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		semanticCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"semantic-model","choices":[{"message":{"content":"{\"block\":false,\"confidence\":0.2,\"category\":\"benign\",\"reason\":\"safe development context\"}"}}]}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "false")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskSemanticReviewStore("", false, promptfilter.ModeBlock)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI blocked local high-risk match after semantic review cleared it")
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want untouched 200 recorder", recorder.Code)
+	}
+	if semanticCalls != 1 {
+		t.Fatalf("semantic review calls = %d, want 1 for local block without prompt review", semanticCalls)
+	}
+}
+
+func TestPromptFilterLocalBlockSemanticReviewBlocksWithoutPromptReview(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	resetSemanticReviewTestState(t)
+
+	semanticCalls := 0
+	semanticServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		semanticCalls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"semantic-model","choices":[{"message":{"content":"{\"block\":true,\"confidence\":0.95,\"category\":\"credential_theft\",\"reason\":\"unsafe cyber request\"}"}}]}`))
+	}))
+	defer semanticServer.Close()
+	semanticReviewHTTPClient = semanticServer.Client()
+
+	t.Setenv("CODEX_SEMANTIC_REVIEW_ENABLED", "false")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_API_KEY", "semantic-key")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_BASE_URL", semanticServer.URL)
+	t.Setenv("CODEX_SEMANTIC_REVIEW_MODEL", "semantic-model")
+	t.Setenv("CODEX_SEMANTIC_REVIEW_CACHE_TTL_SECONDS", "0")
+
+	store := newHighRiskSemanticReviewStore("", false, promptfilter.ModeBlock)
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	blocked := handler.inspectPromptFilterTextOpenAI(ctx, "trigger semantic disagreement", "/v1/responses", "gpt-5.4")
+	if !blocked {
+		t.Fatal("inspectPromptFilterTextOpenAI allowed local high-risk match after semantic review flagged it")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if semanticCalls != 1 {
+		t.Fatalf("semantic review calls = %d, want 1 for local block without prompt review", semanticCalls)
+	}
+	assertCyberPolicyErrorCode(t, recorder.Body.Bytes())
+}
+
 func TestPromptFilterHighRiskReviewDisagreementUsesDatabaseSemanticConfig(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	resetSemanticReviewTestState(t)

@@ -743,15 +743,28 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
 		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
 	}
+	var semanticHandled bool
+	var semanticBlocked bool
+	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
+		_ = writeResponsesWSError(conn, promptCyberPolicyError())
+	}); handled {
+		semanticHandled = true
+		semanticBlocked = blocked
+		if !blocked && verdict.Action == promptfilter.ActionBlock {
+			verdict.Action = promptfilter.ActionAllow
+			verdict.Reason = "semantic review cleared local high-risk prompt filter block"
+		}
+	}
 	h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
+	if semanticBlocked {
+		return true
+	}
 	if verdict.Action == promptfilter.ActionBlock {
 		_ = writeResponsesWSError(conn, promptCyberPolicyError())
 		return true
 	}
-	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
-		_ = writeResponsesWSError(conn, promptCyberPolicyError())
-	}); handled {
-		return blocked
+	if semanticHandled {
+		return false
 	}
 	return h.inspectSemanticReviewOpenAIForWebSocket(c, conn, rawBody, endpoint, model)
 }
