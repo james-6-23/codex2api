@@ -841,14 +841,19 @@
 
   * {
     @apply border-border;
-    scrollbar-width: none;
-    -ms-overflow-style: none;
   }
 
-  *::-webkit-scrollbar {
-    display: none;
-    width: 0;
-    height: 0;
+  @media (hover: hover) and (pointer: fine) {
+    * {
+      scrollbar-width: none;
+      -ms-overflow-style: none;
+    }
+
+    *::-webkit-scrollbar {
+      display: none;
+      width: 0;
+      height: 0;
+    }
   }
 
   body {
