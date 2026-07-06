@@ -38,6 +38,44 @@ func shouldSendWebsocketUserAgent() bool {
 	}
 }
 
+// statelessOneShotEnabled 是否禁用无显式会话请求的 WS 连接复用（每请求独享连接、
+// 用完即毁）。这是杜绝一切连接级状态跨请求/跨用户泄漏的硬隔离逃生阀，代价是
+// 逐请求握手（高 RPM 下可能触发上游握手限流 503）。
+func statelessOneShotEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_WS_STATELESS_ONESHOT"))) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	default:
+		return false
+	}
+}
+
+// resolveHandshakeSessionID 决定 WS 握手头 Session_id/Conversation_id 的取值。
+// 该头是逐连接冻结的：建连时发送一次，连接复用时永不更新。因此对会在多个请求
+// （乃至共享同一 API Key 的多个终端用户）间复用的 stateless 连接，绝不能携带任何
+// "单个请求的身份"（如每请求随机 prompt_cache_key）——若上游按连接级
+// Conversation_id 绑定会话状态，第一个请求的对话身份会泄漏给后续复用该连接的
+// 所有用户，造成跨用户上下文污染（issue #268/#308 同类，"用户2串到用户1的上下文"）。
+//
+//   - 显式会话（非 stateless）：连接按会话专用，头 = 会话 ID（原行为）。
+//   - stateless + 默认隔离（poolRouteKey 非空）：返回空串 → 不发送该组头，
+//     上游没有任何可绑定的连接级会话身份；逐请求身份完全由帧体内每请求唯一的
+//     prompt_cache_key 承担。
+//   - stateless + per-api-key 模式（poolRouteKey 为空）：沿用帧体的确定性
+//     cache key（该模式显式选择按 Key 共享上游缓存，头与帧体一致才有缓存收益）。
+func resolveHandshakeSessionID(sessionID, poolRouteKey string, wsBody []byte) string {
+	if !proxy.IsStatelessWebsocketSessionID(sessionID) {
+		return sessionID
+	}
+	if strings.TrimSpace(poolRouteKey) != "" {
+		return ""
+	}
+	if cacheKey := strings.TrimSpace(gjson.GetBytes(wsBody, "prompt_cache_key").String()); cacheKey != "" {
+		return cacheKey
+	}
+	return sessionID
+}
+
 // ==================== WebSocket 执行器 ====================
 
 // Executor WebSocket 执行器
@@ -88,15 +126,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 准备请求体
 	wsBody := e.prepareWebsocketBody(requestBody, sessionID)
 
-	// 握手头中的 Session_id/Conversation_id 会影响上游 prompt cache 路由，必须与
-	// 请求体的确定性 prompt_cache_key 一致；stateless 连接 ID 是每请求随机的，
-	// 发给上游会导致 prompt cache 永远 miss，它只用于本地连接池隔离。
-	headerSessionID := sessionID
-	if proxy.IsStatelessWebsocketSessionID(sessionID) {
-		if cacheKey := strings.TrimSpace(gjson.GetBytes(wsBody, "prompt_cache_key").String()); cacheKey != "" {
-			headerSessionID = cacheKey
-		}
-	}
+	headerSessionID := resolveHandshakeSessionID(sessionID, poolRouteKey, wsBody)
 
 	// 构建 WebSocket URL
 	httpURL := proxy.CodexBaseURL + CodexWsEndpoint
@@ -122,37 +152,51 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 的槽位池内复用连接，避免持续高 RPM 下逐请求握手触发上游限流。
 	//
 	// 连接池 baseKey 必须按 API Key 稳定，绝不能等于每请求唯一的上游身份键，否则
-	// 默认隔离模式下 headerSessionID 每请求都变 → 槽位池失效 → 逐请求握手触发 503。
+	// 默认隔离模式下每请求都变 → 槽位池失效 → 逐请求握手触发 503。
 	// poolRouteKey（来自上游确定性键）非空时优先用它作 baseKey：连接复用按 API Key
 	// 稳定命中同一组 8 槽。
 	//
 	// 隔离说明：默认隔离模式下，每请求的上游身份隔离由写入每个 response.create 帧体的
 	// 每请求唯一 prompt_cache_key 保证（见 proxy/executor.go 注入处）。握手头里的
-	// Session_id/Conversation_id 只在建连时发送一次、对一条复用连接的生命周期保持不变
-	// （复用连接上不是逐请求轮换），因此不能依赖它做逐请求隔离。
+	// Session_id/Conversation_id 是逐连接冻结的，绝不能携带任何单个请求的身份
+	// （见 resolveHandshakeSessionID）。
+	//
+	// CODEX_WS_STATELESS_ONESHOT=1 时禁用槽位复用：每个无会话请求独享一条连接、
+	// 用完即毁（彻底杜绝任何连接级状态跨请求泄漏，代价是逐请求握手）。
+	// 续链亲和：上游无服务端存储时，previous_response_id 的上下文只存活在产出
+	// 该响应的那条 WS 连接里。带续链 ID 的请求优先取回原连接（独占成功才用），
+	// 否则落到随机槽位会触发上游 "previous response not found"。
 	poolSessionID := sessionID
-	effectiveProxy := effectiveProxyURL(account, proxyOverride)
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
-	if proxy.IsStatelessWebsocketSessionID(sessionID) && headerSessionID != sessionID {
-		baseKey := headerSessionID
-		if strings.TrimSpace(poolRouteKey) != "" {
-			baseKey = poolRouteKey
+	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
+		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey); pwc != nil {
+			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
-		wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, StatelessConnectionSlots, headers, proxyOverride)
-	} else {
-		wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
+	}
+	baseKey := strings.TrimSpace(poolRouteKey)
+	if baseKey == "" && headerSessionID != sessionID {
+		baseKey = headerSessionID
+	}
+	if wc == nil {
+		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
+			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, StatelessConnectionSlots, headers, proxyOverride)
+		} else {
+			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
+		}
 	}
 	if err2 != nil {
 		return nil, err2
 	}
 
-	// 发送请求，失败时最多重试 2 次（重建连接）
+	// 发送请求，失败时最多重试 2 次（重建连接）。
+	// 用 DiscardConnection 按连接指针精确清理：续链亲和取回的连接其 PoolKey
+	// 可能与当前请求的 proxy 组合不同，按参数重算 key 会漏删。
 	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
 	for retries := 0; sendErr != nil && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)
-		e.manager.RemoveConnection(account.ID(), wsURL, poolSessionID, effectiveProxy)
+		e.manager.DiscardConnection(wc)
 
 		// 短暂退避，避免瞬间重连风暴
 		select {
@@ -169,7 +213,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 	if sendErr != nil {
 		wc.session.RemovePendingRequest(pr.RequestID)
-		e.manager.RemoveConnection(account.ID(), wsURL, poolSessionID, effectiveProxy)
+		e.manager.DiscardConnection(wc)
 		return nil, fmt.Errorf("发送 WebSocket 请求失败: %w", sendErr)
 	}
 
@@ -181,6 +225,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		pendingReq:  pr,
 		sessionID:   poolSessionID,
 		manager:     e.manager,
+		apiKey:      apiKey,
 		readErrChan: make(chan error, 1),
 	}, nil
 }
@@ -299,6 +344,8 @@ type WsResponse struct {
 	manager     *Manager
 	readErrChan chan error
 	closed      bool
+	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
+	apiKey string
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
 	// Close() 据此销毁坏连接而非归还连接池复用。受 mu 保护。
 	connBroken bool
@@ -383,6 +430,17 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	// 检查是否是终止事件
 	eventType := gjson.GetBytes(payload, "type").String()
 	if eventType == "response.completed" || eventType == "response.failed" {
+		// 续链亲和：记录本响应由哪条连接产出，后续带 previous_response_id 的
+		// 请求可回到原连接（上游无服务端存储时上下文只存活在连接内）。
+		if eventType == "response.completed" && r.manager != nil && r.conn != nil {
+			if respID := gjson.GetBytes(payload, "response.id").String(); respID != "" {
+				accountID := int64(0)
+				if r.conn.session != nil {
+					accountID = r.conn.session.AccountID
+				}
+				r.manager.BindResponseConn(respID, r.conn, r.sessionID, accountID, r.apiKey)
+			}
+		}
 		return io.EOF
 	}
 
