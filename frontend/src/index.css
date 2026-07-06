@@ -856,10 +856,23 @@
     }
   }
 
+  html {
+    min-height: 100%;
+    overscroll-behavior-y: none;
+    background: var(--color-background);
+  }
+
+  body,
+  #root {
+    min-height: 100vh;
+    min-height: 100dvh;
+    overscroll-behavior-y: none;
+  }
+
   body {
     @apply bg-background text-foreground antialiased;
     font-family: var(--font-sans);
-    min-height: 100vh;
+    overflow-x: hidden;
     background: linear-gradient(180deg, var(--color-background) 0%, color-mix(in oklab, var(--color-background) 97%, black 3%) 100%);
   }
 
