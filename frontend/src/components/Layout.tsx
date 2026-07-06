@@ -195,6 +195,32 @@ export default function Layout({ children }: PropsWithChildren) {
         backgroundImage: `url(${JSON.stringify(backgroundImage)})`,
       }
     : undefined
+  const mobileNav = (
+    <nav
+      data-slot="admin-mobile-nav"
+      className="fixed left-3 right-3 bottom-[calc(env(safe-area-inset-bottom)+0.75rem)] z-40 hidden max-lg:flex gap-1 overflow-x-auto rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur-[20px] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      aria-label="Mobile navigation"
+    >
+      {navDefs.map((item) => {
+        const active = isNavActive(item)
+        return (
+          <NavLink
+            key={item.to}
+            to={item.to}
+            end={item.end}
+            className={`flex min-w-[74px] flex-col items-center justify-center gap-1 min-h-[54px] px-2 py-1.5 border rounded-lg text-center text-[10px] font-bold transition-colors duration-150 ${
+              active
+                ? 'bg-primary/10 border-primary/20 text-primary'
+                : 'border-transparent text-muted-foreground'
+            }`}
+          >
+            {item.icon}
+            <span className="w-full truncate leading-tight">{t(item.labelKey)}</span>
+          </NavLink>
+        )
+      })}
+    </nav>
+  )
 
   return (
     <div className="relative min-h-dvh">
@@ -423,7 +449,7 @@ export default function Layout({ children }: PropsWithChildren) {
         </aside>
 
         {/* Main content */}
-        <main className="relative z-0 w-full min-w-0 max-w-full p-5 max-lg:p-3 max-lg:pb-[92px]">
+        <main className="relative z-0 w-full min-w-0 max-w-full p-5 max-lg:p-3 max-lg:pb-[calc(92px+env(safe-area-inset-bottom))]">
           {/* Mobile topbar */}
           <header data-slot="admin-mobile-topbar" className="hidden max-lg:flex min-w-0 w-full max-w-full items-center justify-between gap-2 overflow-hidden mb-4 p-3 border border-border rounded-lg bg-card/95 shadow-sm">
             <div className="flex min-w-0 flex-1 items-center gap-3">
@@ -465,29 +491,8 @@ export default function Layout({ children }: PropsWithChildren) {
           <SecurityBanner />
           <div className="min-h-full w-full min-w-0 max-w-full">{children}</div>
         </main>
-
-        {/* Mobile bottom nav */}
-        <nav data-slot="admin-mobile-nav" className="fixed left-3 right-3 bottom-3 z-40 hidden max-lg:flex gap-1 overflow-x-auto rounded-xl border border-border bg-card/95 p-1.5 shadow-lg backdrop-blur-[20px] [contain:layout_paint] [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden" aria-label="Mobile navigation">
-          {navDefs.map((item) => {
-            const active = isNavActive(item)
-            return (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                end={item.end}
-                className={`flex min-w-[74px] flex-col items-center justify-center gap-1 min-h-[54px] px-2 py-1.5 border rounded-lg text-center text-[10px] font-bold transition-colors duration-150 ${
-                  active
-                    ? 'bg-primary/10 border-primary/20 text-primary'
-                    : 'border-transparent text-muted-foreground'
-                }`}
-              >
-                {item.icon}
-                <span className="w-full truncate leading-tight">{t(item.labelKey)}</span>
-              </NavLink>
-            )
-          })}
-        </nav>
       </div>
+      {typeof document !== 'undefined' ? createPortal(mobileNav, document.body) : mobileNav}
     </div>
   )
 }
