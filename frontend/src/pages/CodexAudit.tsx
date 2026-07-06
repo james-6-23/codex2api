@@ -393,16 +393,16 @@ function ProbePanel({ report }: { report: CodexAuditReport }) {
 const AUDIT_PAGE_SIZE = 10
 
 // usePaged 对已加载的记录做客户端分页（巡检报表每类样本上限 30，分页即可，无需改后端）。
-function usePaged<T>(rows: T[]) {
+function usePaged<T>(rows: T[], pageSize = AUDIT_PAGE_SIZE) {
   const [page, setPage] = useState(1)
   const total = rows.length
-  const totalPages = Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE))
+  const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const currentPage = Math.min(Math.max(page, 1), totalPages)
   const pageRows = useMemo(
-    () => rows.slice((currentPage - 1) * AUDIT_PAGE_SIZE, currentPage * AUDIT_PAGE_SIZE),
-    [rows, currentPage],
+    () => rows.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [rows, currentPage, pageSize],
   )
-  return { pageRows, page: currentPage, totalPages, setPage, total }
+  return { pageRows, page: currentPage, totalPages, setPage, total, pageSize }
 }
 
 function SimpleTable({ columns, rows, empty }: { columns: string[]; rows: string[][]; empty: string }) {
@@ -462,8 +462,10 @@ function MobileField({ label, value, wide = false, wrap = false }: { label: stri
   )
 }
 
+const PROBE_PAGE_SIZE = 5
+
 function ProbeTable({ rows }: { rows: CodexAuditReport['probe_observed'] }) {
-  const { pageRows, page, totalPages, setPage, total } = usePaged(rows)
+  const { pageRows, page, totalPages, setPage, total, pageSize } = usePaged(rows, PROBE_PAGE_SIZE)
   if (!rows.length) {
     return <EmptyState compact>暂无探针记录</EmptyState>
   }
@@ -502,8 +504,8 @@ function ProbeTable({ rows }: { rows: CodexAuditReport['probe_observed'] }) {
         )
       })}
       </div>
-      {total > AUDIT_PAGE_SIZE ? (
-        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+      {total > pageSize ? (
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={pageSize} />
       ) : null}
     </>
   )
