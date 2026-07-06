@@ -14,6 +14,7 @@ import {
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
+import Pagination from '../components/Pagination'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { formatBeijingTime } from '../utils/time'
 import type { CodexAuditReport, HealthResponse, PromptFilterLog, UsageLog } from '../types'
@@ -370,14 +371,30 @@ function SubsectionTitle({ title }: { title: string }) {
   return <h3 className="mb-2 text-sm font-semibold text-foreground">{title}</h3>
 }
 
+const AUDIT_PAGE_SIZE = 10
+
+// usePaged 对已加载的记录做客户端分页（巡检报表每类样本上限 30，分页即可，无需改后端）。
+function usePaged<T>(rows: T[]) {
+  const [page, setPage] = useState(1)
+  const total = rows.length
+  const totalPages = Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE))
+  const currentPage = Math.min(Math.max(page, 1), totalPages)
+  const pageRows = useMemo(
+    () => rows.slice((currentPage - 1) * AUDIT_PAGE_SIZE, currentPage * AUDIT_PAGE_SIZE),
+    [rows, currentPage],
+  )
+  return { pageRows, page: currentPage, totalPages, setPage, total }
+}
+
 function SimpleTable({ columns, rows, empty }: { columns: string[]; rows: string[][]; empty: string }) {
+  const { pageRows, page, totalPages, setPage, total } = usePaged(rows)
   if (!rows.length) {
     return <EmptyState>{empty}</EmptyState>
   }
   return (
     <>
       <div className="grid gap-2 sm:hidden">
-        {rows.map((row, rowIndex) => (
+        {pageRows.map((row, rowIndex) => (
           <MobileTableCard key={rowIndex} columns={columns} row={row} />
         ))}
       </div>
@@ -387,7 +404,7 @@ function SimpleTable({ columns, rows, empty }: { columns: string[]; rows: string
             <TableRow>{columns.map((column) => <TableHead key={column} className="text-xs font-semibold text-muted-foreground">{column}</TableHead>)}</TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((row, rowIndex) => (
+            {pageRows.map((row, rowIndex) => (
               <TableRow key={rowIndex} className="hover:bg-muted/30">
                 {row.map((cell, cellIndex) => <TableCell key={cellIndex} className="text-[13px]">{cell}</TableCell>)}
               </TableRow>
@@ -395,6 +412,9 @@ function SimpleTable({ columns, rows, empty }: { columns: string[]; rows: string
           </TableBody>
         </Table>
       </div>
+      {total > AUDIT_PAGE_SIZE ? (
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+      ) : null}
     </>
   )
 }
@@ -424,12 +444,14 @@ function MobileField({ label, value, wide = false, wrap = false }: { label: stri
 }
 
 function ProbeTable({ rows }: { rows: CodexAuditReport['probe_observed'] }) {
+  const { pageRows, page, totalPages, setPage, total } = usePaged(rows)
   if (!rows.length) {
     return <EmptyState compact>暂无探针记录</EmptyState>
   }
   return (
-    <div className="grid gap-2">
-      {rows.map((row, index) => {
+    <>
+      <div className="grid gap-2">
+      {pageRows.map((row, index) => {
         const apiKeyName = row.api_key_name || row.api_key_masked || String(row.api_key_id || '-')
         return (
           <div
@@ -460,7 +482,11 @@ function ProbeTable({ rows }: { rows: CodexAuditReport['probe_observed'] }) {
           </div>
         )
       })}
-    </div>
+      </div>
+      {total > AUDIT_PAGE_SIZE ? (
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+      ) : null}
+    </>
   )
 }
 
@@ -479,13 +505,14 @@ function ProbeMeta({ label, value, wide = false, wrap = false }: { label: string
 }
 
 function PromptSampleTable({ rows }: { rows: PromptFilterLog[] }) {
+  const { pageRows, page, totalPages, setPage, total } = usePaged(rows)
   if (!rows.length) {
     return <EmptyState>暂无可疑样本</EmptyState>
   }
   return (
     <>
       <div className="grid gap-2 sm:hidden">
-        {rows.map((row) => (
+        {pageRows.map((row) => (
           <div key={row.id} className="min-w-0 rounded-lg border border-border/60 bg-muted/20 p-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -515,7 +542,7 @@ function PromptSampleTable({ rows }: { rows: PromptFilterLog[] }) {
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((row) => (
+            {pageRows.map((row) => (
               <TableRow key={row.id} className="hover:bg-muted/30">
                 <TableCell className="whitespace-nowrap text-[12px]">{formatBeijingTime(row.created_at)}</TableCell>
                 <TableCell className="text-[12px]">{row.source || '-'}</TableCell>
@@ -530,18 +557,22 @@ function PromptSampleTable({ rows }: { rows: PromptFilterLog[] }) {
           </TableBody>
         </Table>
       </div>
+      {total > AUDIT_PAGE_SIZE ? (
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+      ) : null}
     </>
   )
 }
 
 function UsageSampleTable({ rows, empty, showFirstToken = false }: { rows: UsageLog[]; empty: string; showFirstToken?: boolean }) {
+  const { pageRows, page, totalPages, setPage, total } = usePaged(rows)
   if (!rows.length) {
     return <EmptyState>{empty}</EmptyState>
   }
   return (
     <>
       <div className="grid gap-2 sm:hidden">
-        {rows.map((row) => (
+        {pageRows.map((row) => (
           <div key={row.id} className="min-w-0 rounded-lg border border-border/60 bg-muted/20 p-3">
             <div className="flex items-start justify-between gap-3">
               <div className="min-w-0">
@@ -572,7 +603,7 @@ function UsageSampleTable({ rows, empty, showFirstToken = false }: { rows: Usage
             </TableRow>
           </TableHeader>
           <TableBody>
-            {rows.map((row) => (
+            {pageRows.map((row) => (
               <TableRow key={row.id} className="hover:bg-muted/30">
                 <TableCell className="whitespace-nowrap text-[12px]">{formatBeijingTime(row.created_at)}</TableCell>
                 <TableCell className="text-[12px]">{row.effective_model || row.model || '-'}</TableCell>
@@ -585,6 +616,9 @@ function UsageSampleTable({ rows, empty, showFirstToken = false }: { rows: Usage
           </TableBody>
         </Table>
       </div>
+      {total > AUDIT_PAGE_SIZE ? (
+        <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+      ) : null}
     </>
   )
 }
