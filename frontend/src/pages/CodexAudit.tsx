@@ -264,14 +264,7 @@ export default function CodexAudit() {
                 />
               </Panel>
 
-              <Panel title="探针行为" description="观察高频探针是否已被本地短路，以及是否仍有只观测未短路的探针。">
-                <SubsectionTitle title="高频探针（已本地短路）" />
-                <ProbeTable rows={(report.probe_high_frequency?.length ? report.probe_high_frequency : report.probe_short_circuits) || []} />
-                <div className="mt-4">
-                  <SubsectionTitle title="只观测未短路" />
-                  <ProbeTable rows={report.probe_observed || []} />
-                </div>
-              </Panel>
+              <ProbePanel report={report} />
             </div>
 
             <Panel title="可疑样本" description="高分放行、语义分歧、上游 cyb 等需要人工复核的样本。">
@@ -362,8 +355,39 @@ function Panel({ title, description, children }: { title: string; description?: 
   )
 }
 
-function SubsectionTitle({ title }: { title: string }) {
-  return <h3 className="mb-2 text-sm font-semibold text-foreground">{title}</h3>
+function ProbePanel({ report }: { report: CodexAuditReport }) {
+  const highFrequency = (report.probe_high_frequency?.length ? report.probe_high_frequency : report.probe_short_circuits) || []
+  const observed = report.probe_observed || []
+  const [tab, setTab] = useState<'high_frequency' | 'observed'>('high_frequency')
+  const tabs = [
+    { key: 'high_frequency', label: '高频（已短路）', count: highFrequency.length },
+    { key: 'observed', label: '只观测未短路', count: observed.length },
+  ] as const
+  return (
+    <Panel title="探针行为" description="观察高频探针是否已被本地短路，以及是否仍有只观测未短路的探针。">
+      <div className="mb-3 inline-flex items-center gap-0.5 rounded-lg border border-border bg-muted/30 p-0.5">
+        {tabs.map(({ key, label, count }) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setTab(key)}
+            className={`inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[13px] font-semibold transition-colors ${
+              tab === key
+                ? 'bg-background text-foreground shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {label}
+            <span className={`rounded-full px-1.5 text-[11px] font-medium leading-4 ${tab === key ? 'bg-muted text-foreground' : 'bg-muted/60 text-muted-foreground'}`}>
+              {formatNumber(count)}
+            </span>
+          </button>
+        ))}
+      </div>
+      {/* key 用于在切换 tab 时重置 usePaged 的页码 */}
+      <ProbeTable key={tab} rows={tab === 'high_frequency' ? highFrequency : observed} />
+    </Panel>
+  )
 }
 
 const AUDIT_PAGE_SIZE = 10
