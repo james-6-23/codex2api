@@ -976,7 +976,13 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			billing5hWindows[accounts[i].ID] = t.Add(-5 * time.Hour)
 		}
 		if t := acc.GetReset7dAt(); !t.IsZero() {
-			billing7dWindows[accounts[i].ID] = t.AddDate(0, 0, -7)
+			// 长窗口起点 = reset - 真实周期。free/team 是月窗(约 30 天),
+			// 写死减 7 天会把起点算到未来,成本恒为 0 (issue #324)。
+			windowDur := 7 * 24 * time.Hour
+			if sec := acc.GetWindow7dSeconds(); sec > 0 {
+				windowDur = time.Duration(sec) * time.Second
+			}
+			billing7dWindows[accounts[i].ID] = t.Add(-windowDur)
 		}
 	}
 

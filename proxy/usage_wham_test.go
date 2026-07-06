@@ -412,8 +412,7 @@ func TestApplyWhamUsage_ClassifiesByWindowSeconds(t *testing.T) {
 	}
 }
 
-// 当 limit_window_seconds 缺失或为未知值时，按字段位置兜底分类
-// （与 CPA-Manager pickClassifiedWindows 的 allowOrderFallback 行为一致）。
+// 当 limit_window_seconds 缺失或为未知值时，按字段位置兜底分类。
 func TestPickClassifiedWhamWindows_FallsBackToPositionForUnknownSeconds(t *testing.T) {
 	primary := &WhamUsageWindow{UsedPercent: 50, LimitWindowSeconds: 0} // 未知/缺失
 	secondary := &WhamUsageWindow{UsedPercent: 20, LimitWindowSeconds: 0}
@@ -490,6 +489,33 @@ func TestApplyWhamUsage_CapturesMonthlyWindowLength(t *testing.T) {
 
 	ApplyWhamUsage(store, account, usage)
 
+	if got := account.GetWindow7dSeconds(); got != 2_592_000 {
+		t.Fatalf("Window7dSeconds=%d, want 2592000", got)
+	}
+	if kind := account.Window7dKind(); kind != "monthly" {
+		t.Fatalf("Window7dKind=%q, want monthly", kind)
+	}
+}
+
+// TestApplyWhamUsage_FreePlanMonthlyWindow 验证 free plan 的唯一限流窗口(月窗)
+// 也被识别为 monthly：free 只有 primary=2592000s、无 secondary (issue #324，
+// 前端据 usage_window_7d_kind 把标签显示为 30d 而非 7d)。
+func TestApplyWhamUsage_FreePlanMonthlyWindow(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 1, AccessToken: "at", PlanType: "free"}
+
+	now := time.Now()
+	usage := &WhamUsage{PlanType: "free"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 63, LimitWindowSeconds: 2_592_000, ResetAt: now.Add(18 * 24 * time.Hour).Unix()}
+
+	result := ApplyWhamUsage(store, account, usage)
+
+	if !result.HasUsage7d {
+		t.Fatal("expected free monthly window to land in the 7d slot")
+	}
+	if result.HasUsage5h {
+		t.Fatal("free monthly window must not be classified as 5h")
+	}
 	if got := account.GetWindow7dSeconds(); got != 2_592_000 {
 		t.Fatalf("Window7dSeconds=%d, want 2592000", got)
 	}

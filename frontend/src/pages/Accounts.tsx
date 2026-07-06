@@ -30,6 +30,7 @@ import type {
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
+import { formatLongUsageWindowLabel } from "../lib/usageFormat";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -10444,7 +10445,7 @@ function UsageBar({
   return (
     <div>
       <div className="flex items-center gap-1.5">
-        <span className="text-[11px] font-medium text-muted-foreground w-5 shrink-0">
+        <span className="text-[11px] font-medium text-muted-foreground w-7 shrink-0">
           {label}
         </span>
         <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden min-w-[72px]">
@@ -10458,13 +10459,13 @@ function UsageBar({
         </span>
       </div>
       {detailText && (
-        <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">
+        <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[34px]">
           {detailText}
         </div>
       )}
       {resetTime && (
         <div
-          className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]"
+          className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[34px]"
           title={resetTime.title}
         >
           ⏱ {resetTime.label}
@@ -10494,7 +10495,7 @@ function UsageWindowStat({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <span className="w-5 shrink-0">{label}</span>
+        <span className="w-7 shrink-0">{label}</span>
         <span>
           {formatCompactUsageNumber(detail?.requests)}{" "}
           {t("accounts.usageReqUnit")} /{" "}
@@ -10503,7 +10504,7 @@ function UsageWindowStat({
         </span>
       </div>
       {(accountBilledText || userBilledText) && (
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-[34px]">
           {accountBilledText && (
             <span>
               {t("accounts.accountBilledLabel")}: ${accountBilledText}
@@ -10581,6 +10582,8 @@ function UsageCell({
 
   const fiveHourPresent = has5h || has5hDetail || has5hReset;
   const sevenDayPresent = has7d || has7dDetail || has7dReset;
+  // 长窗口标签:free/team plan 实为月窗(约 30 天),按真实周期显示 30d 而非误标 7d (issue #324)
+  const longWindowLabel = formatLongUsageWindowLabel(account);
   // plan 表明是订阅型时,即使数据暂未拉到也按订阅布局占位,避免抖动
   const planSuggestsPremium = isPremiumUsagePlan(plan);
   const showFiveHour = fiveHourPresent || planSuggestsPremium;
@@ -10603,13 +10606,13 @@ function UsageCell({
           )}
           {has7d ? (
             <UsageBar
-              label="7d"
+              label={longWindowLabel}
               pct={account.usage_percent_7d!}
               resetAt={account.reset_7d_at}
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
           )}
         </div>
         {refreshButton}
@@ -10623,13 +10626,13 @@ function UsageCell({
         <div className="flex-1">
           {has7d ? (
             <UsageBar
-              label="7d"
+              label={longWindowLabel}
               pct={account.usage_percent_7d!}
               resetAt={account.reset_7d_at}
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
           )}
         </div>
         {refreshButton}
@@ -10644,11 +10647,12 @@ function BilledCell({ account }: { account: AccountRow }) {
   const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
   const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
   if (h5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
+  const longLabel = formatLongUsageWindowLabel(account);
   return (
     <span className="text-[12px] text-muted-foreground">
       {h5 !== null ? `5h: $${h5}` : "5h: -"}
       {" / "}
-      {d7 !== null ? `7d: $${d7}` : "7d: -"}
+      {d7 !== null ? `${longLabel}: $${d7}` : `${longLabel}: -`}
     </span>
   );
 }

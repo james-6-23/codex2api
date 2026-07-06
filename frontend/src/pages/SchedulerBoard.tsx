@@ -10,6 +10,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import StatusBadge from '../components/StatusBadge'
 import type { AccountRow, OpsOverviewResponse } from '../types'
 import { formatCompactEmail } from '../lib/utils'
+import { formatLongUsageWindowLabel } from '../lib/usageFormat'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -267,7 +268,7 @@ export default function SchedulerBoard() {
                           </Badge>
                           {account.usage_percent_7d !== null && account.usage_percent_7d !== undefined ? (
                             <Badge variant="outline" className="text-[12px]">
-                              7d {account.usage_percent_7d.toFixed(1)}%
+                              {formatLongUsageWindowLabel(account)} {account.usage_percent_7d.toFixed(1)}%
                             </Badge>
                           ) : null}
                         </div>
@@ -423,7 +424,7 @@ function buildScoreReasonTags(account: AccountRow, t: any) {
     tags.push({ label: `${t('scheduler.reasonFailure')} -${Math.round(breakdown.failure_penalty)}`, className: 'border-transparent bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300' })
   }
   if (breakdown.usage_penalty_7d > 0) {
-    tags.push({ label: `7d -${Math.round(breakdown.usage_penalty_7d)}`, className: 'border-transparent bg-fuchsia-500/10 text-fuchsia-600 dark:bg-fuchsia-500/20 dark:text-fuchsia-300' })
+    tags.push({ label: `${formatLongUsageWindowLabel(account)} -${Math.round(breakdown.usage_penalty_7d)}`, className: 'border-transparent bg-fuchsia-500/10 text-fuchsia-600 dark:bg-fuchsia-500/20 dark:text-fuchsia-300' })
   }
   if ((breakdown.usage_urgency_bonus_5h ?? 0) > 0) {
     tags.push({ label: `${t('scheduler.reason5hUrgency')} +${Math.round(breakdown.usage_urgency_bonus_5h ?? 0)}`, className: 'border-transparent bg-teal-500/10 text-teal-700 dark:bg-teal-500/20 dark:text-teal-300' })

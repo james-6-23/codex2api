@@ -374,7 +374,7 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 	return result
 }
 
-// 已知窗口长度（秒）。和 CPA-Manager src/utils/quota/codexQuota.ts 保持一致。
+// 已知窗口长度（秒），与上游 wham 返回的 limit_window_seconds 取值对应。
 const (
 	whamWindow5hSeconds int64 = 18_000
 	whamWindow7dSeconds int64 = 604_800

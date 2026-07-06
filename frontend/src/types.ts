@@ -96,6 +96,10 @@ export interface AccountRow {
   usage_7d_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
+  // 长窗口(7d 槽)真实类型: "monthly"(free/team 月窗)/"weekly"/未知。
+  // free/team plan 的长窗口实为约 30 天,标签应显示 30d 而非 7d (issue #324)。
+  usage_window_7d_kind?: 'monthly' | 'weekly' | ''
+  usage_window_7d_seconds?: number
   billed_5h?: number
   billed_7d?: number
   cooldown_until?: ISODateString
