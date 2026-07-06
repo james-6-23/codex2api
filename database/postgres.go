@@ -729,6 +729,7 @@ func (db *DB) migrate(ctx context.Context) error {
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
+			test_content       TEXT DEFAULT 'hi',
 			test_concurrency   INT DEFAULT 50,
 			proxy_url          VARCHAR(500) DEFAULT '',
 			pg_max_conns       INT DEFAULT 50,
@@ -754,6 +755,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS site_name TEXT DEFAULT 'CodexProxy';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS site_logo TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_unauthorized BOOLEAN DEFAULT FALSE;
@@ -828,6 +830,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_pause_5h_guard_band_percent DOUBLE PRECISION DEFAULT 5;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_pause_5h_guard_concurrency INT DEFAULT 1;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_min_concurrency INT DEFAULT 1;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_windows TEXT DEFAULT '5h,7d';
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
@@ -1013,15 +1018,18 @@ type APIKeyRow struct {
 // APIKeyLimits 是 API Key 级别的细粒度限流/配额配置。
 // 0 或空字段表示该项不限。落库为 JSON,允许平滑扩展字段。
 //
-// - ModelAllow / ModelDeny: 模型白/黑名单。同时配置时白名单生效,黑名单忽略。
-// - RPM: 每分钟请求数 (滑动 60s 窗口)。
-// - RPD: 每天请求数 (滑动 24h 窗口)。
-// - MaxConcurrency: 同一 API Key 在当前实例内允许的最大并发请求数。
-// - CostLimit5h / CostLimit7d: 美元成本上限,滑动 5h / 7d 窗口,与账号侧窗口语义一致。
-// - TokenLimit5h / TokenLimit7d: token 上限,滑动 5h / 7d 窗口。
+//   - ModelAllow / ModelDeny: 模型白/黑名单。同时配置时白名单生效,黑名单忽略。
+//   - RPM: 每分钟请求数 (滑动 60s 窗口)。
+//   - RPD: 每天请求数 (滑动 24h 窗口)。
+//   - MaxConcurrency: 同一 API Key 在当前实例内允许的最大并发请求数。
+//   - CostLimit5h / CostLimit7d: 美元成本上限,滑动 5h / 7d 窗口,与账号侧窗口语义一致。
+//   - TokenLimit5h / TokenLimit7d: token 上限,滑动 5h / 7d 窗口。
+//   - PlanAllow: 账号套餐白名单(plus/pro/team/...)。非空时该 Key 仅调度命中其一的账号,
+//     语义与 AllowedGroupIDs 类似,均在账号选择阶段过滤。空表示不限套餐。
 type APIKeyLimits struct {
 	ModelAllow     []string `json:"model_allow,omitempty"`
 	ModelDeny      []string `json:"model_deny,omitempty"`
+	PlanAllow      []string `json:"plan_allow,omitempty"`
 	RPM            int      `json:"rpm,omitempty"`
 	RPD            int      `json:"rpd,omitempty"`
 	MaxConcurrency int      `json:"max_concurrency,omitempty"`
@@ -1035,7 +1043,7 @@ type APIKeyLimits struct {
 
 // IsZero 判断是否为空 limits(全部字段都未配置)
 func (l APIKeyLimits) IsZero() bool {
-	return len(l.ModelAllow) == 0 && len(l.ModelDeny) == 0 &&
+	return len(l.ModelAllow) == 0 && len(l.ModelDeny) == 0 && len(l.PlanAllow) == 0 &&
 		l.RPM == 0 && l.RPD == 0 && l.MaxConcurrency == 0 &&
 		l.CostLimit5h == 0 && l.CostLimit7d == 0 && l.CostLimit30d == 0 &&
 		l.TokenLimit5h == 0 && l.TokenLimit7d == 0 && l.TokenLimit30d == 0
@@ -1367,10 +1375,11 @@ func NormalizeSiteName(value string) string {
 type SystemSettings struct {
 	SiteName                                   string
 	SiteLogo                                   string
-	BackgroundConfig                           string // JSON: {"image":"...","opacity":18,"blur":0}
+	BackgroundConfig                           string
 	MaxConcurrency                             int
 	GlobalRPM                                  int
 	TestModel                                  string
+	TestContent                                string
 	TestConcurrency                            int
 	ProxyURL                                   string
 	PgMaxConns                                 int
@@ -1387,18 +1396,18 @@ type SystemSettings struct {
 	MaxRetries                                 int
 	MaxRateLimitRetries                        int
 	AllowRemoteMigration                       bool
-	ModelMapping                               string // JSON: {"anthropic_model": "codex_model", ...}
-	CodexModelMapping                          string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
-	ReasoningEffortModels                      string // JSON: [{"model":"gpt-5.5","effort":"xhigh"}, ...]
+	ModelMapping                               string
+	CodexModelMapping                          string
+	ReasoningEffortModels                      string
 	BackgroundRefreshIntervalMinutes           int
 	UsageProbeMaxAgeMinutes                    int
 	UsageProbeConcurrency                      int
 	UsageProbeResponsesFallbackEnabled         bool
 	RecoveryProbeIntervalMinutes               int
 	SchedulerMode                              string
-	AffinityMode                               string // session 粘性模式: bounded / off / strict
-	ResinURL                                   string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
-	ResinPlatformName                          string // Resin 平台标识，例如 codex2api
+	AffinityMode                               string
+	ResinURL                                   string
+	ResinPlatformName                          string
 	PromptFilterEnabled                        bool
 	PromptFilterMode                           string
 	PromptFilterThreshold                      int
@@ -1434,19 +1443,22 @@ type SystemSettings struct {
 	FirstTokenMode                             string
 	FirstTokenTimeoutSeconds                   int
 	BillingTierPolicy                          string
-	ImageStorageConfig                         string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
+	ImageStorageConfig                         string
 	ShowFullUsageNumbers                       bool
 	PublicKeyUsagePageEnabled                  bool
-	CodexForceWebsocket                        bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
-	CodexWSKeepaliveEnabled                    bool // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
-	CodexWSKeepaliveIntervalSec                int  // WS 保活 Ping 间隔（秒），默认 60
-	CodexWSHideUpstreamErrors                  bool // 隐藏上游 WS 原始错误，默认 true
-	CodexWSSilentRetryEnabled                  bool // 首包前 WS 上游错误静默换号重试，默认 true
-	CodexWSSilentMaxRetries                    int  // WS 静默换号最大重试次数，默认 2
+	CodexForceWebsocket                        bool
+	CodexWSKeepaliveEnabled                    bool
+	CodexWSKeepaliveIntervalSec                int
+	CodexWSHideUpstreamErrors                  bool
+	CodexWSSilentRetryEnabled                  bool
+	CodexWSSilentMaxRetries                    int
 	AutoPause5hThreshold                       float64
 	AutoPause7dThreshold                       float64
 	AutoPause5hGuardBandPercent                float64
 	AutoPause5hGuardConcurrency                int
+	SmartPacingEnabled                         bool
+	SmartPacingMinConcurrency                  int
+	SmartPacingWindows                         string
 }
 
 func normalizeBillingTierPolicy(policy string) string {
@@ -1486,12 +1498,46 @@ func normalizeFirstTokenMode(mode string) string {
 	}
 }
 
+// normalizeSmartPacingMinConcurrencyDB 归一化智能配速并发下限（1..1000，默认 1）。
+func normalizeSmartPacingMinConcurrencyDB(value int) int {
+	if value < 1 {
+		return 1
+	}
+	if value > 1000 {
+		return 1000
+	}
+	return value
+}
+
+// normalizeSmartPacingWindowsDB 归一化配速窗口为 "5h,7d" / "5h" / "7d"，非法回退 "5h,7d"。
+func normalizeSmartPacingWindowsDB(raw string) string {
+	var w5h, w7d bool
+	for _, part := range strings.Split(strings.ToLower(strings.TrimSpace(raw)), ",") {
+		switch strings.TrimSpace(part) {
+		case "5h":
+			w5h = true
+		case "7d":
+			w7d = true
+		}
+	}
+	switch {
+	case w5h && w7d:
+		return "5h,7d"
+	case w5h:
+		return "5h"
+	case w7d:
+		return "7d"
+	default:
+		return "5h,7d"
+	}
+}
+
 // GetSystemSettings 加载全局设置
 func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s := &SystemSettings{}
 	err := db.conn.QueryRowContext(ctx, `
 		SELECT COALESCE(site_name, 'CodexProxy'), COALESCE(site_logo, ''),
-		       max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
+		       max_concurrency, global_rpm, test_model, COALESCE(test_content, 'hi'), test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 		       auto_clean_unauthorized, auto_clean_rate_limited, COALESCE(admin_secret, ''), COALESCE(auto_clean_full_usage, false),
 		       COALESCE(proxy_pool_enabled, false),
 		       COALESCE(fast_scheduler_enabled, false),
@@ -1561,11 +1607,14 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_semantic_review_timeout_ms, 0),
 		       COALESCE(prompt_filter_semantic_review_max_concurrency, 0),
 		       COALESCE(NULLIF(TRIM(prompt_filter_semantic_review_failure_policy), ''), 'block'),
-		       COALESCE(prompt_filter_semantic_review_log_retention_days, 0)
+		       COALESCE(prompt_filter_semantic_review_log_retention_days, 0),
+		       COALESCE(smart_pacing_enabled, false),
+		       COALESCE(smart_pacing_min_concurrency, 1),
+		       COALESCE(smart_pacing_windows, '5h,7d')
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
-		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
+		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestContent, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
 		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.MaxRetries, &s.MaxRateLimitRetries, &s.AllowRemoteMigration,
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.LazyMode, &s.ModelMapping, &s.CodexModelMapping,
@@ -1607,12 +1656,19 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.PromptFilterSemanticReviewMaxConcurrency,
 		&s.PromptFilterSemanticReviewFailurePolicy,
 		&s.PromptFilterSemanticReviewLogRetentionDays,
+		&s.SmartPacingEnabled,
+		&s.SmartPacingMinConcurrency,
+		&s.SmartPacingWindows,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	s.SiteName = NormalizeSiteName(s.SiteName)
 	s.SiteLogo = strings.TrimSpace(s.SiteLogo)
+	s.TestContent = strings.TrimSpace(s.TestContent)
+	if s.TestContent == "" {
+		s.TestContent = "hi"
+	}
 	if strings.TrimSpace(s.ReasoningEffortModels) == "" {
 		s.ReasoningEffortModels = "[]"
 	}
@@ -1640,9 +1696,13 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 	billingTierPolicy := normalizeBillingTierPolicy(s.BillingTierPolicy)
 	semanticReviewFailurePolicy := normalizeSemanticReviewFailurePolicy(s.PromptFilterSemanticReviewFailurePolicy)
 	semanticReviewLogRetentionDays := normalizeSemanticReviewLogRetentionDays(s.PromptFilterSemanticReviewLogRetentionDays)
+	testContent := strings.TrimSpace(s.TestContent)
+	if testContent == "" {
+		testContent = "hi"
+	}
 	_, err := db.conn.ExecContext(ctx, `
 			INSERT INTO system_settings (
-				id, site_name, site_logo, max_concurrency, global_rpm, test_model, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
+				id, site_name, site_logo, max_concurrency, global_rpm, test_model, test_content, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 				auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,
 				fast_scheduler_enabled, max_retries, max_rate_limit_retries, allow_remote_migration, auto_clean_error, auto_clean_expired, lazy_mode, model_mapping, codex_model_mapping,
 					background_refresh_interval_minutes, usage_probe_max_age_minutes, recovery_probe_interval_minutes,
@@ -1682,15 +1742,19 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					prompt_filter_semantic_review_timeout_ms,
 					prompt_filter_semantic_review_max_concurrency,
 					prompt_filter_semantic_review_failure_policy,
-					prompt_filter_semantic_review_log_retention_days
+					prompt_filter_semantic_review_log_retention_days,
+					smart_pacing_enabled,
+					smart_pacing_min_concurrency,
+					smart_pacing_windows
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
 				max_concurrency         = EXCLUDED.max_concurrency,
 				global_rpm              = EXCLUDED.global_rpm,
 				test_model              = EXCLUDED.test_model,
+				test_content            = EXCLUDED.test_content,
 				test_concurrency        = EXCLUDED.test_concurrency,
 				proxy_url               = EXCLUDED.proxy_url,
 			pg_max_conns            = EXCLUDED.pg_max_conns,
@@ -1767,9 +1831,12 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					prompt_filter_semantic_review_timeout_ms = EXCLUDED.prompt_filter_semantic_review_timeout_ms,
 					prompt_filter_semantic_review_max_concurrency = EXCLUDED.prompt_filter_semantic_review_max_concurrency,
 					prompt_filter_semantic_review_failure_policy = EXCLUDED.prompt_filter_semantic_review_failure_policy,
-					prompt_filter_semantic_review_log_retention_days = EXCLUDED.prompt_filter_semantic_review_log_retention_days
+					prompt_filter_semantic_review_log_retention_days = EXCLUDED.prompt_filter_semantic_review_log_retention_days,
+					smart_pacing_enabled = EXCLUDED.smart_pacing_enabled,
+					smart_pacing_min_concurrency = EXCLUDED.smart_pacing_min_concurrency,
+					smart_pacing_windows = EXCLUDED.smart_pacing_windows
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
-		s.MaxConcurrency, s.GlobalRPM, s.TestModel, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
+		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
 		s.FastSchedulerEnabled, s.MaxRetries, s.MaxRateLimitRetries, s.AllowRemoteMigration, s.AutoCleanError, s.AutoCleanExpired, s.LazyMode, s.ModelMapping, s.CodexModelMapping,
 		s.BackgroundRefreshIntervalMinutes, s.UsageProbeMaxAgeMinutes, s.RecoveryProbeIntervalMinutes,
@@ -1787,7 +1854,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency, s.PromptFilterReviewAll,
 		s.PromptFilterSemanticReviewEnabled, s.PromptFilterSemanticReviewAPIKey, s.PromptFilterSemanticReviewBaseURL,
 		s.PromptFilterSemanticReviewModel, s.PromptFilterSemanticReviewTimeoutMS, s.PromptFilterSemanticReviewMaxConcurrency,
-		semanticReviewFailurePolicy, semanticReviewLogRetentionDays)
+		semanticReviewFailurePolicy, semanticReviewLogRetentionDays,
+		s.SmartPacingEnabled, normalizeSmartPacingMinConcurrencyDB(s.SmartPacingMinConcurrency), normalizeSmartPacingWindowsDB(s.SmartPacingWindows))
 	return err
 }
 

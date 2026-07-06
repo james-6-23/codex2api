@@ -133,7 +133,14 @@ const ACCOUNT_GROUP_COLORS = [
   "#0891b2",
   "#64748b",
 ] as const;
+const CUSTOM_HEADERS_PLACEHOLDER = `{
+  "Authorization": "Bearer upstream-token",
+  "X-Custom-Header": "value"
+}`;
 type AccountTableColumn = (typeof ACCOUNT_TABLE_COLUMNS)[number];
+type CustomHeadersParseResult =
+  | { ok: true; value: Record<string, string> | null }
+  | { ok: false };
 type AccountGroupDraft = {
   id: number | null;
   name: string;
@@ -310,6 +317,39 @@ function parseModelTokens(value: string): string[] {
       seen.add(key);
       return true;
     });
+}
+
+function formatCustomHeadersText(
+  headers?: Record<string, string> | null,
+): string {
+  if (!headers || Object.keys(headers).length === 0) return "";
+  return JSON.stringify(headers, null, 2);
+}
+
+function parseCustomHeadersText(value: string): CustomHeadersParseResult {
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: true, value: null };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { ok: false };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false };
+  }
+
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (entries.some(([, headerValue]) => typeof headerValue !== "string")) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    value: Object.fromEntries(entries) as Record<string, string>,
+  };
 }
 
 function mergeModelLists(current: string[], incoming: string[]): string[] {
@@ -545,6 +585,7 @@ export default function Accounts() {
     session_token: "",
     proxy_url: "",
   });
+  const [addCustomHeadersText, setAddCustomHeadersText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [refreshingIds, setRefreshingIds] = useState<Set<number>>(new Set());
@@ -599,6 +640,7 @@ export default function Accounts() {
     number[]
   >([]);
   const [editProxyUrl, setEditProxyUrl] = useState("");
+  const [editCustomHeadersText, setEditCustomHeadersText] = useState("");
   const [testingProxyKey, setTestingProxyKey] = useState<string | null>(null);
   const [editOpenAIForm, setEditOpenAIForm] =
     useState<UpdateOpenAIResponsesAccountRequest>({
@@ -614,7 +656,10 @@ export default function Accounts() {
   const [importing, setImporting] = useState(false);
   const [showImportPicker, setShowImportPicker] = useState(false);
   const [importProxyUrl, setImportProxyUrl] = useState("");
+  const [importCustomHeadersText, setImportCustomHeadersText] = useState("");
   const [showSub2APIImport, setShowSub2APIImport] = useState(false);
+  const [showPasteImport, setShowPasteImport] = useState(false);
+  const [pasteImportText, setPasteImportText] = useState("");
   const [dragging, setDragging] = useState(false);
   const dragCounter = useRef(0);
   const [showExportPicker, setShowExportPicker] = useState(false);
@@ -636,6 +681,7 @@ export default function Accounts() {
     current: number;
     total: number;
     success: number;
+    updated: number;
     duplicate: number;
     failed: number;
     done: boolean;
@@ -644,17 +690,20 @@ export default function Accounts() {
     current: 0,
     total: 0,
     success: 0,
+    updated: 0,
     duplicate: 0,
     failed: 0,
     done: false,
   });
   const [addMethod, setAddMethod] = useState<
-    "rt" | "st" | "at" | "openai" | "oauth"
+    "rt" | "st" | "at" | "session" | "openai" | "oauth"
   >("oauth");
   const [atForm, setAtForm] = useState<AddATAccountRequest>({
     access_token: "",
     proxy_url: "",
   });
+  const [sessionJson, setSessionJson] = useState("");
+  const [sessionProxyUrl, setSessionProxyUrl] = useState("");
   // 允许重复添加：勾选后本次添加/导入跳过去重，强制新建（添加弹窗与导入弹窗共用）。
   const [allowDuplicate, setAllowDuplicate] = useState(false);
   const [openAIForm, setOpenAIForm] =
@@ -835,6 +884,43 @@ export default function Accounts() {
       </div>
     );
   };
+
+  const renderCustomHeadersTextarea = ({
+    value,
+    onChange,
+  }: {
+    value: string;
+    onChange: (value: string) => void;
+  }) => (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <label className="block text-sm font-semibold text-muted-foreground">
+          上游自定义请求头 JSON
+        </label>
+        <Button
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={() => onChange(CUSTOM_HEADERS_PLACEHOLDER)}
+        >
+          插入模板
+        </Button>
+      </div>
+      <textarea
+        className="w-full min-h-[140px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+        placeholder={CUSTOM_HEADERS_PLACEHOLDER}
+        value={value}
+        onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+          onChange(event.target.value)
+        }
+        rows={6}
+        spellCheck={false}
+      />
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        留空表示不设置；JSON 必须是对象，所有请求头值都必须是字符串。
+      </p>
+    </div>
+  );
 
   useEffect(() => {
     return () => {
@@ -1395,10 +1481,25 @@ export default function Accounts() {
   }, [allPageSelected, pagedAccountIds]);
 
   const handleAdd = async (credential: "rt" | "st" = "rt") => {
+    const parsedCustomHeaders = parseCustomHeadersText(addCustomHeadersText);
+    if (!parsedCustomHeaders.ok) {
+      showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
+      return;
+    }
     const payload: AddAccountRequest =
       credential === "st"
-        ? { ...addForm, refresh_token: "", allow_duplicate: allowDuplicate }
-        : { ...addForm, session_token: "", allow_duplicate: allowDuplicate };
+        ? {
+            ...addForm,
+            refresh_token: "",
+            allow_duplicate: allowDuplicate,
+            custom_headers: parsedCustomHeaders.value,
+          }
+        : {
+            ...addForm,
+            session_token: "",
+            allow_duplicate: allowDuplicate,
+            custom_headers: parsedCustomHeaders.value,
+          };
     if (
       !payload.refresh_token?.trim() &&
       !payload.session_token?.trim()
@@ -1420,6 +1521,7 @@ export default function Accounts() {
         await readImportSSE(res);
         showToast(t("accounts.addSuccess"));
         setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
+        setAddCustomHeadersText("");
         return;
       }
 
@@ -1427,6 +1529,7 @@ export default function Accounts() {
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setAddForm({ refresh_token: "", session_token: "", proxy_url: "" });
+      setAddCustomHeadersText("");
       void reload();
     } catch (error) {
       showToast(
@@ -1440,30 +1543,25 @@ export default function Accounts() {
 
   const handleAddAT = async () => {
     if (!atForm.access_token.trim()) return;
+    const parsedCustomHeaders = parseCustomHeadersText(addCustomHeadersText);
+    if (!parsedCustomHeaders.ok) {
+      showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
+      return;
+    }
     setSubmitting(true);
     try {
-      const tokenCount = atForm.access_token
-        .split("\n")
-        .map((line) => line.trim())
-        .filter(Boolean).length;
-
-      if (tokenCount > 1) {
-        const res = await postAdminSSE("/accounts/at?stream=true", {
-          ...atForm,
-          allow_duplicate: allowDuplicate,
-        });
-        setShowAdd(false);
-        await readImportSSE(res);
-        showToast(t("accounts.addSuccess"));
-        setAtForm({ access_token: "", proxy_url: "" });
-        return;
-      }
-
-      await api.addATAccount({ ...atForm, allow_duplicate: allowDuplicate });
-      showToast(t("accounts.addSuccess"));
+      // 始终走流式：即使只添加一个 access_token 也展示进度条，并能反映
+      // 身份去重/合并结果（已有账号更新、重复跳过）。
+      const res = await postAdminSSE("/accounts/at?stream=true", {
+        ...atForm,
+        allow_duplicate: allowDuplicate,
+        custom_headers: parsedCustomHeaders.value,
+      });
       setShowAdd(false);
+      await readImportSSE(res);
+      showToast(t("accounts.addSuccess"));
       setAtForm({ access_token: "", proxy_url: "" });
-      void reload();
+      setAddCustomHeadersText("");
     } catch (error) {
       showToast(
         t("accounts.addFailed", { error: getErrorMessage(error) }),
@@ -1538,12 +1636,49 @@ export default function Accounts() {
     }
   };
 
+  const handleAddSession = async () => {
+    if (!sessionJson.trim() || importing) return;
+    setSubmitting(true);
+    try {
+      // 解析 session JSON，构造为文件导入
+      const trimmed = sessionJson.trim();
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      // 支持单个对象或数组
+      const items = Array.isArray(parsed) ? parsed : [parsed];
+      const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
+      const file = new File([blob], "session.json", { type: "application/json" });
+      await importFiles([file], "json", sessionProxyUrl, addCustomHeadersText);
+      setShowAdd(false);
+      setSessionJson("");
+      setAddCustomHeadersText("");
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        showToast(t("accounts.sessionJsonInvalid"), "error");
+      } else {
+        showToast(
+          t("accounts.addFailed", { error: getErrorMessage(error) }),
+          "error",
+        );
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
   const handleAddOpenAIResponses = async () => {
     const models = openAIForm.models;
     if (!openAIForm.api_key.trim() || models.length === 0) return;
+    const parsedCustomHeaders = parseCustomHeadersText(addCustomHeadersText);
+    if (!parsedCustomHeaders.ok) {
+      showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
+      return;
+    }
     setSubmitting(true);
     try {
-      await api.addOpenAIResponsesAccount({ ...openAIForm, models });
+      await api.addOpenAIResponsesAccount({
+        ...openAIForm,
+        models,
+        custom_headers: parsedCustomHeaders.value,
+      });
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setOpenAIForm({
@@ -1553,6 +1688,7 @@ export default function Accounts() {
         proxy_url: "",
       });
       setOpenAIModelDraft("");
+      setAddCustomHeadersText("");
       void reload();
     } catch (error) {
       showToast(
@@ -1601,11 +1737,17 @@ export default function Accounts() {
       showToast(t("accounts.openaiAccountInvalid"), "error");
       return;
     }
+    const parsedCustomHeaders = parseCustomHeadersText(editCustomHeadersText);
+    if (!parsedCustomHeaders.ok) {
+      showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
+      return;
+    }
     setEditSubmitting(true);
     try {
       await api.updateOpenAIResponsesAccount(editingAccount.id, {
         ...editOpenAIForm,
         api_key: editOpenAIForm.api_key?.trim() || undefined,
+        custom_headers: parsedCustomHeaders.value,
       });
       showToast(t("accounts.openaiAccountSaveSuccess"));
       await reload();
@@ -1698,6 +1840,7 @@ export default function Accounts() {
       setOauthSession(null);
       setOauthCallbackUrl("");
       setOauthName("");
+      setAddCustomHeadersText("");
       void reload();
     } catch (error) {
       showToast(
@@ -1805,6 +1948,7 @@ export default function Accounts() {
       current: 0,
       total: 0,
       success: 0,
+      updated: 0,
       duplicate: 0,
       failed: 0,
       done: false,
@@ -1830,6 +1974,7 @@ export default function Accounts() {
             current: number;
             total: number;
             success: number;
+            updated: number;
             duplicate: number;
             failed: number;
           };
@@ -1838,6 +1983,7 @@ export default function Accounts() {
             current: event.current,
             total: event.total,
             success: event.success,
+            updated: event.updated ?? 0,
             duplicate: event.duplicate,
             failed: event.failed,
             done: event.type === "complete",
@@ -1853,13 +1999,21 @@ export default function Accounts() {
   const importFiles = async (
     files: File[],
     format: "txt" | "json" | "json_at" | "at_txt",
+    proxyOverride?: string,
+    customHeadersText?: string,
   ) => {
+    const parsedCustomHeaders = parseCustomHeadersText(customHeadersText ?? "");
+    if (!parsedCustomHeaders.ok) {
+      showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
+      return;
+    }
     setImporting(true);
     setImportProgress({
       show: true,
       current: 0,
       total: 0,
       success: 0,
+      updated: 0,
       duplicate: 0,
       failed: 0,
       done: false,
@@ -1867,8 +2021,14 @@ export default function Accounts() {
     try {
       const formData = new FormData();
       if (format !== "txt") formData.append("format", format);
-      const trimmedImportProxy = importProxyUrl.trim();
+      const trimmedImportProxy = (proxyOverride ?? importProxyUrl).trim();
       if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
+      if (parsedCustomHeaders.value) {
+        formData.append(
+          "custom_headers",
+          JSON.stringify(parsedCustomHeaders.value),
+        );
+      }
       if (allowDuplicate) formData.append("allow_duplicate", "true");
       for (const f of files) formData.append("file", f);
       const res = await fetch("/api/admin/accounts/import", {
@@ -1894,6 +2054,7 @@ export default function Accounts() {
             current: data.total ?? 0,
             total: data.total ?? 0,
             success: data.success ?? 0,
+            updated: data.updated ?? 0,
             duplicate: data.duplicate ?? 0,
             failed: data.failed ?? 0,
             done: true,
@@ -1908,6 +2069,7 @@ export default function Accounts() {
         current: 1,
         total: 1,
         success: 0,
+        updated: 0,
         duplicate: 0,
         failed: 1,
         done: true,
@@ -2060,7 +2222,7 @@ export default function Accounts() {
       return;
     }
     setShowImportPicker(false);
-    await importFiles(files, "txt");
+    await importFiles(files, "txt", undefined, importCustomHeadersText);
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -2068,7 +2230,12 @@ export default function Accounts() {
     const files = event.target.files;
     if (!files || files.length === 0) return;
     setShowImportPicker(false);
-    await importFiles(Array.from(files), "json");
+    await importFiles(
+      Array.from(files),
+      "json",
+      undefined,
+      importCustomHeadersText,
+    );
     if (jsonInputRef.current) jsonInputRef.current.value = "";
   };
 
@@ -2076,7 +2243,12 @@ export default function Accounts() {
     const files = event.target.files;
     if (!files || files.length === 0) return;
     setShowImportPicker(false);
-    await importFiles(Array.from(files), "json_at");
+    await importFiles(
+      Array.from(files),
+      "json_at",
+      undefined,
+      importCustomHeadersText,
+    );
     if (jsonAtInputRef.current) jsonAtInputRef.current.value = "";
   };
 
@@ -2088,7 +2260,7 @@ export default function Accounts() {
       return;
     }
     setShowImportPicker(false);
-    await importFiles(files, "at_txt");
+    await importFiles(files, "at_txt", undefined, importCustomHeadersText);
     if (atFileInputRef.current) atFileInputRef.current.value = "";
   };
 
@@ -2116,13 +2288,31 @@ export default function Accounts() {
     );
 
     if (jsonFiles.length > 0) {
-      await importFiles(jsonFiles, "json");
+      await importFiles(jsonFiles, "json", undefined, importCustomHeadersText);
     }
     if (txtFiles.length > 0) {
-      await importFiles(txtFiles, "txt");
+      await importFiles(txtFiles, "txt", undefined, importCustomHeadersText);
     }
 
     if (folderInputRef.current) folderInputRef.current.value = "";
+  };
+
+  const handlePasteImport = async () => {
+    if (!pasteImportText.trim() || importing) return;
+    const trimmed = pasteImportText.trim();
+    let items: unknown[];
+    try {
+      const parsed = JSON.parse(trimmed);
+      items = Array.isArray(parsed) ? parsed : [parsed];
+    } catch {
+      showToast(t("accounts.sessionJsonInvalid"), "error");
+      return;
+    }
+    const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
+    const file = new File([blob], "paste.json", { type: "application/json" });
+    await importFiles([file], "json", undefined, importCustomHeadersText);
+    setShowPasteImport(false);
+    setPasteImportText("");
   };
 
   const handleExport = async (
@@ -2761,6 +2951,7 @@ export default function Accounts() {
       filterExistingAPIKeyIDs(account.allowed_api_key_ids ?? [], apiKeys),
     );
     setEditProxyUrl(account.proxy_url ?? "");
+    setEditCustomHeadersText(formatCustomHeadersText(account.custom_headers));
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
     setEditOpenAIForm({
@@ -2795,6 +2986,7 @@ export default function Accounts() {
     setEditDispatchCountLimitInput("");
     setAllowedAPIKeySelection([]);
     setEditProxyUrl("");
+    setEditCustomHeadersText("");
     setEditTags([]);
     setEditGroupIds([]);
     setEditOpenAIForm({
@@ -2907,6 +3099,11 @@ export default function Accounts() {
       showToast(t("accounts.schedulerInvalidInput"), "error");
       return;
     }
+    const parsedCustomHeaders = parseCustomHeadersText(editCustomHeadersText);
+    if (!parsedCustomHeaders.ok) {
+      showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
+      return;
+    }
 
     setEditSubmitting(true);
     try {
@@ -2930,6 +3127,7 @@ export default function Accounts() {
         dispatch_count_limit: dispatchCountLimitInputToValue(
           editDispatchCountLimitInput,
         ),
+        custom_headers: parsedCustomHeaders.value,
       };
       await api.updateAccountScheduler(editingAccount.id, payload);
       showToast(t("accounts.schedulerSaveSuccess"));
@@ -4415,12 +4613,16 @@ export default function Accounts() {
                 proxy_url: "",
               });
               setOpenAIModelDraft("");
+              setSessionJson("");
+              setSessionProxyUrl("");
+              setAddCustomHeadersText("");
             }}
             footer={
               <>
                 {(addMethod === "rt" ||
                   addMethod === "st" ||
-                  addMethod === "at") && (
+                  addMethod === "at" ||
+                  addMethod === "session") && (
                   <label className="mr-auto flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
                     <input
                       type="checkbox"
@@ -4448,6 +4650,9 @@ export default function Accounts() {
                       proxy_url: "",
                     });
                     setOpenAIModelDraft("");
+                    setSessionJson("");
+                    setSessionProxyUrl("");
+                    setAddCustomHeadersText("");
                   }}
                 >
                   {t("common.cancel")}
@@ -4470,6 +4675,13 @@ export default function Accounts() {
                   <Button
                     onClick={() => void handleAddAT()}
                     disabled={submitting || !atForm.access_token.trim()}
+                  >
+                    {submitting ? t("accounts.adding") : t("accounts.submit")}
+                  </Button>
+                ) : addMethod === "session" ? (
+                  <Button
+                    onClick={() => void handleAddSession()}
+                    disabled={importing || submitting || !sessionJson.trim()}
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
@@ -4507,7 +4719,7 @@ export default function Accounts() {
             }
           >
             {/* Tab switcher */}
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
+            <div className="grid grid-cols-3 sm:grid-cols-6 gap-1 p-1 mb-5 rounded-xl bg-muted/50 border border-border">
               <button
                 onClick={() => {
                   setAddMethod("oauth");
@@ -4558,6 +4770,17 @@ export default function Accounts() {
                 {t("accounts.addMethodAT")}
               </button>
               <button
+                onClick={() => setAddMethod("session")}
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
+                  addMethod === "session"
+                    ? "bg-background shadow-sm text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <ExternalLink className="size-3.5" />
+                {t("accounts.addMethodSession")}
+              </button>
+              <button
                 onClick={() => setAddMethod("openai")}
                 className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
                   addMethod === "openai"
@@ -4598,6 +4821,10 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
+                {renderCustomHeadersTextarea({
+                  value: addCustomHeadersText,
+                  onChange: setAddCustomHeadersText,
+                })}
               </div>
             ) : addMethod === "st" ? (
               <div className="space-y-4">
@@ -4626,6 +4853,10 @@ export default function Accounts() {
                       ...form,
                       proxy_url: value,
                     })),
+                })}
+                {renderCustomHeadersTextarea({
+                  value: addCustomHeadersText,
+                  onChange: setAddCustomHeadersText,
                 })}
               </div>
             ) : addMethod === "at" ? (
@@ -4658,6 +4889,40 @@ export default function Accounts() {
                       ...form,
                       proxy_url: value,
                     })),
+                })}
+                {renderCustomHeadersTextarea({
+                  value: addCustomHeadersText,
+                  onChange: setAddCustomHeadersText,
+                })}
+              </div>
+            ) : addMethod === "session" ? (
+              <div className="space-y-4">
+                <div className="rounded-xl border border-teal-200 bg-teal-50 px-4 py-3 text-sm text-teal-800 dark:border-teal-800 dark:bg-teal-950/50 dark:text-teal-300">
+                  {t("accounts.sessionHint")}
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.sessionJsonLabel")} *
+                  </label>
+                  <textarea
+                    className="w-full min-h-[260px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                    placeholder={t("accounts.sessionJsonPlaceholder")}
+                    value={sessionJson}
+                    onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+                      setSessionJson(event.target.value)
+                    }
+                    rows={10}
+                  />
+                </div>
+                {renderProxyInput({
+                  value: sessionProxyUrl,
+                  testKey: "add-session-json",
+                  label: t("accounts.importProxyLabel"),
+                  onChange: setSessionProxyUrl,
+                })}
+                {renderCustomHeadersTextarea({
+                  value: addCustomHeadersText,
+                  onChange: setAddCustomHeadersText,
                 })}
               </div>
             ) : addMethod === "openai" ? (
@@ -4787,6 +5052,10 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
+                {renderCustomHeadersTextarea({
+                  value: addCustomHeadersText,
+                  onChange: setAddCustomHeadersText,
+                })}
               </div>
             ) : (
               <div className="space-y-5">
@@ -4891,7 +5160,11 @@ export default function Accounts() {
             show={showImportPicker}
             title={t("accounts.importTitle")}
             contentClassName="sm:max-w-[640px]"
-            onClose={() => setShowImportPicker(false)}
+            onClose={() => {
+              setShowImportPicker(false);
+              setShowPasteImport(false);
+              setPasteImportText('');
+            }}
           >
             <div className="mb-4 space-y-1.5">
               {renderProxyInput({
@@ -4903,6 +5176,10 @@ export default function Accounts() {
               <p className="text-[11px] text-muted-foreground">
                 {t("accounts.importProxyHint")}
               </p>
+              {renderCustomHeadersTextarea({
+                value: importCustomHeadersText,
+                onChange: setImportCustomHeadersText,
+              })}
               <label className="flex cursor-pointer items-center gap-2 pt-1 text-xs text-muted-foreground">
                 <input
                   type="checkbox"
@@ -4999,7 +5276,53 @@ export default function Accounts() {
                   </div>
                 </div>
               </button>
+              <button
+                className="flex items-center gap-3 rounded-xl border border-border px-4 py-3 text-left hover:bg-muted/50 transition-colors"
+                onClick={() => {
+                  setShowPasteImport(true);
+                  setPasteImportText("");
+                }}
+              >
+                <Copy className="size-5 shrink-0 text-muted-foreground" />
+                <div>
+                  <div className="text-sm font-medium">
+                    {t("accounts.importPasteText")}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {t("accounts.importPasteTextDesc")}
+                  </div>
+                </div>
+              </button>
             </div>
+
+            {showPasteImport && (
+              <div className="mt-4 space-y-3">
+                <textarea
+                  className="w-full min-h-[240px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+                  placeholder={t("accounts.sessionJsonPlaceholder")}
+                  value={pasteImportText}
+                  onChange={(e) => setPasteImportText(e.target.value)}
+                  rows={10}
+                />
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="outline"
+                    onClick={() => {
+                      setShowPasteImport(false);
+                      setPasteImportText("");
+                    }}
+                  >
+                    {t("common.cancel")}
+                  </Button>
+                  <Button
+                    onClick={() => void handlePasteImport()}
+                    disabled={importing || !pasteImportText.trim()}
+                  >
+                    {t("accounts.submit")}
+                  </Button>
+                </div>
+              </div>
+            )}
           </Modal>
           <Sub2APIImportModal
             show={showSub2APIImport}
@@ -5451,6 +5774,10 @@ export default function Accounts() {
                           proxy_url: value,
                         })),
                     })}
+                    {renderCustomHeadersTextarea({
+                      value: editCustomHeadersText,
+                      onChange: setEditCustomHeadersText,
+                    })}
                   </div>
                 ) : editTab === "account" && isOAuthAccount(editingAccount) ? (
                   <div className="space-y-4">
@@ -5814,6 +6141,13 @@ export default function Accounts() {
                           value: editProxyUrl,
                           testKey: "edit-account-proxy",
                           onChange: setEditProxyUrl,
+                        })}
+                      </div>
+
+                      <div className="rounded-xl border border-border p-4 md:col-span-2">
+                        {renderCustomHeadersTextarea({
+                          value: editCustomHeadersText,
+                          onChange: setEditCustomHeadersText,
                         })}
                       </div>
                     </div>
@@ -6329,8 +6663,8 @@ export default function Accounts() {
                   ? `${importProgress.current} / ${importProgress.total}  (${Math.round((importProgress.current / importProgress.total) * 100)}%)`
                   : t("accounts.importPreparing")}
               </div>
-              <div className="grid grid-cols-3 gap-3 text-center">
-                <div className="rounded-xl bg-emerald-500/10 px-3 py-2">
+              <div className="grid grid-cols-4 gap-2 text-center">
+                <div className="rounded-xl bg-emerald-500/10 px-2 py-2">
                   <div className="text-lg font-bold text-emerald-600">
                     {importProgress.success}
                   </div>
@@ -6338,7 +6672,15 @@ export default function Accounts() {
                     {t("accounts.importSuccess")}
                   </div>
                 </div>
-                <div className="rounded-xl bg-amber-500/10 px-3 py-2">
+                <div className="rounded-xl bg-sky-500/10 px-2 py-2">
+                  <div className="text-lg font-bold text-sky-600">
+                    {importProgress.updated}
+                  </div>
+                  <div className="text-[11px] text-muted-foreground">
+                    {t("accounts.importUpdated")}
+                  </div>
+                </div>
+                <div className="rounded-xl bg-amber-500/10 px-2 py-2">
                   <div className="text-lg font-bold text-amber-600">
                     {importProgress.duplicate}
                   </div>
@@ -6346,7 +6688,7 @@ export default function Accounts() {
                     {t("accounts.importDuplicate")}
                   </div>
                 </div>
-                <div className="rounded-xl bg-red-500/10 px-3 py-2">
+                <div className="rounded-xl bg-red-500/10 px-2 py-2">
                   <div className="text-lg font-bold text-red-600">
                     {importProgress.failed}
                   </div>

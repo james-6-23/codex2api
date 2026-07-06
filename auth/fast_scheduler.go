@@ -499,6 +499,7 @@ func (a *Account) fastSchedulerSnapshot(baseLimit int64, now time.Time) (Account
 			baseConcurrencyEffective = a.effectiveBaseConcurrencyLocked(baseLimit)
 		}
 		limit = a.quotaAutoPause5hGuardConcurrencyLimitLocked(concurrencyLimitForTier(baseConcurrencyEffective, tier), now)
+		limit = a.smartPacingConcurrencyLimitLocked(limit, now)
 	}
 
 	available := a.Status != StatusError && tier != HealthTierBanned && a.hasDispatchCredentialLocked()

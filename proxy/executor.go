@@ -891,6 +891,19 @@ func applyCodexRequestBodyEncoding(req *http.Request, rawBody []byte) {
 	req.Header.Set("Content-Encoding", "zstd")
 }
 
+func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
+	if req == nil || account == nil {
+		return
+	}
+	for name, value := range account.GetCustomHeaders() {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		req.Header.Set(name, value)
+	}
+}
+
 func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
 	if req == nil {
 		return
@@ -964,6 +977,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if strict {
 		applyCodexClientFingerprintHeaders(req.Header, accountID, apiKey, cacheKey)
 	}
+	applyAccountCustomHeaders(req, account)
 }
 
 func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account, apiKey string, headers http.Header) {
@@ -985,6 +999,7 @@ func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account
 			}
 		}
 	}
+	applyAccountCustomHeaders(req, account)
 }
 
 // ResolveSessionID 从下游请求提取或生成 session ID

@@ -1068,6 +1068,7 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		MaxConcurrency:                             2,
 		GlobalRPM:                                  0,
 		TestModel:                                  "gpt-5.4",
+		TestContent:                                "say pong",
 		TestConcurrency:                            50,
 		BackgroundRefreshIntervalMinutes:           2,
 		UsageProbeMaxAgeMinutes:                    10,
@@ -1135,6 +1136,9 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if settings.FirstTokenTimeoutSeconds != 17 {
 		t.Fatalf("FirstTokenTimeoutSeconds = %d, want 17", settings.FirstTokenTimeoutSeconds)
+	}
+	if settings.TestContent != "say pong" {
+		t.Fatalf("TestContent = %q, want say pong", settings.TestContent)
 	}
 	if settings.FirstTokenMode != "loose" {
 		t.Fatalf("FirstTokenMode = %q, want loose", settings.FirstTokenMode)

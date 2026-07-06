@@ -68,6 +68,31 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	}
 }
 
+func TestPrepareWebsocketHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
+	exec := NewExecutor()
+	account := &auth.Account{
+		DBID:      42,
+		AccountID: "42",
+		CustomHeaders: map[string]string{
+			"Authorization":      "Bearer websocket-override",
+			"Chatgpt-Account-Id": "acct-override",
+			"X-Custom-Header":    "custom-value",
+		},
+	}
+
+	headers := exec.prepareWebsocketHeaders("token-123", account, "42", "session-123", "api-key-1", nil, http.Header{})
+
+	if got := headers.Get("Authorization"); got != "Bearer websocket-override" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := headers.Get("Chatgpt-Account-Id"); got != "acct-override" {
+		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+	if got := headers.Get("X-Custom-Header"); got != "custom-value" {
+		t.Fatalf("X-Custom-Header = %q", got)
+	}
+}
+
 func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 	t.Setenv("CODEX_WS_SEND_USER_AGENT", "")
 	exec := NewExecutor()

@@ -92,6 +92,46 @@ func TestQueryWhamUsage_ParsesPlusAccountResponse(t *testing.T) {
 	}
 }
 
+func TestQueryWhamUsage_UsesCustomHeaderAccountIDOverride(t *testing.T) {
+	var gotAccountID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAccountID = r.Header.Get("chatgpt-account-id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"plan_type": "plus", "rate_limit": {}}`))
+	}))
+	defer server.Close()
+
+	account := &auth.Account{
+		DBID:          1,
+		AccessToken:   "at-123",
+		AccountID:     "acc-1",
+		CustomHeaders: map[string]string{"Chatgpt-Account-Id": "acc-override"},
+	}
+	if _, _, err := queryWhamUsageWithURL(context.Background(), account, "", server.URL); err != nil {
+		t.Fatalf("queryWhamUsageWithURL error: %v", err)
+	}
+	if gotAccountID != "acc-override" {
+		t.Errorf("chatgpt-account-id = %q, want acc-override", gotAccountID)
+	}
+}
+
+func TestApplyWhamUsage_SkipsIdentityWriteBackWhenAccountIDOverridden(t *testing.T) {
+	account := &auth.Account{
+		DBID:          1,
+		AccessToken:   "at",
+		AccountID:     "acc-real",
+		CustomHeaders: map[string]string{"Chatgpt-Account-Id": "acc-override"},
+	}
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4"})
+
+	usage := &WhamUsage{PlanType: "plus", AccountID: "acc-override", Email: "a@b.c"}
+	ApplyWhamUsage(store, account, usage)
+
+	if got := account.AccountID; got != "acc-real" {
+		t.Errorf("AccountID = %q, want acc-real (identity must not be overwritten by overridden workspace)", got)
+	}
+}
+
 func TestApplyWhamUsage_PersistsPlanAnd5h7d(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
@@ -415,6 +455,49 @@ func TestPickClassifiedWhamWindows_LongResetPrimaryFallsBackTo7d(t *testing.T) {
 	}
 }
 
+// TestPickClassifiedWhamWindows_TeamMonthlyWindowRoutesTo7dSlot 验证 team plan 的
+// 月窗(约 30 天 = 2592000s)被归入长窗口(7d)槽，而非漏掉或误进 5h。
+func TestPickClassifiedWhamWindows_TeamMonthlyWindowRoutesTo7dSlot(t *testing.T) {
+	now := time.Now()
+	primary := &WhamUsageWindow{UsedPercent: 40, LimitWindowSeconds: 18000, ResetAt: now.Add(2 * time.Hour).Unix()}
+	monthly := &WhamUsageWindow{UsedPercent: 12, LimitWindowSeconds: 2_592_000, ResetAt: now.Add(20 * 24 * time.Hour).Unix()}
+
+	w5h, w7d := pickClassifiedWhamWindows(primary, monthly, "team", now)
+	if w5h != primary {
+		t.Fatalf("expected primary→5h, got %v", w5h)
+	}
+	if w7d != monthly {
+		t.Fatalf("expected monthly(2592000s)→7d slot, got %v", w7d)
+	}
+
+	// 28–31 天容差：29 天窗口也应识别为月窗。
+	tolMonthly := &WhamUsageWindow{UsedPercent: 5, LimitWindowSeconds: 29 * 24 * 60 * 60, ResetAt: now.Add(29 * 24 * time.Hour).Unix()}
+	if _, w7dTol := pickClassifiedWhamWindows(primary, tolMonthly, "team", now); w7dTol != tolMonthly {
+		t.Fatalf("expected 29d window→7d slot via tolerance, got %v", w7dTol)
+	}
+}
+
+// TestApplyWhamUsage_CapturesMonthlyWindowLength 验证 team 月窗的真实周期秒数被记入账号，
+// 供智能配速按真实周期(而非固定 7 天)计算。
+func TestApplyWhamUsage_CapturesMonthlyWindowLength(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 1, AccessToken: "at", PlanType: "team"}
+
+	now := time.Now()
+	usage := &WhamUsage{PlanType: "team"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 40, LimitWindowSeconds: 18000, ResetAt: now.Add(2 * time.Hour).Unix()}
+	usage.RateLimit.SecondaryWindow = &WhamUsageWindow{UsedPercent: 12, LimitWindowSeconds: 2_592_000, ResetAt: now.Add(20 * 24 * time.Hour).Unix()}
+
+	ApplyWhamUsage(store, account, usage)
+
+	if got := account.GetWindow7dSeconds(); got != 2_592_000 {
+		t.Fatalf("Window7dSeconds=%d, want 2592000", got)
+	}
+	if kind := account.Window7dKind(); kind != "monthly" {
+		t.Fatalf("Window7dKind=%q, want monthly", kind)
+	}
+}
+
 func TestApplyWhamUsage_MarksPremium5hLimitedAt100Percent(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus"}
@@ -429,6 +512,34 @@ func TestApplyWhamUsage_MarksPremium5hLimitedAt100Percent(t *testing.T) {
 	}
 	if !account.IsPremium5hRateLimited() {
 		t.Error("account should be in premium 5h rate-limited state after ApplyWhamUsage")
+	}
+}
+
+func TestApplyWhamUsage_CreditAccountSkipsPremium5hWindowLimit(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	account := &auth.Account{
+		DBID:                  1,
+		AccessToken:           "at",
+		PlanType:              "plus",
+		Status:                auth.StatusReady,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	now := time.Now()
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 100, LimitWindowSeconds: 18000, ResetAt: now.Add(2 * time.Hour).Unix()}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Premium5hRateLimited {
+		t.Fatalf("Premium5hRateLimited = true, want false for credit account")
+	}
+	if account.IsPremium5hRateLimited() {
+		t.Fatal("credit account should not be in premium 5h rate-limited state after ApplyWhamUsage")
+	}
+	pct5h, _, ok := account.GetUsageSnapshot5h()
+	if !ok || pct5h != 100 {
+		t.Fatalf("5h snapshot = (%v, %v), want 100 with valid snapshot", pct5h, ok)
 	}
 }
 
@@ -447,6 +558,36 @@ func TestApplyWhamUsage_Marks7dLimitedAt100Percent(t *testing.T) {
 	}
 	if got := account.RuntimeStatus(); got != "rate_limited" {
 		t.Fatalf("RuntimeStatus() = %q, want rate_limited", got)
+	}
+}
+
+func TestApplyWhamUsage_CreditAccountSkips7dWindowLimit(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
+	account := &auth.Account{
+		DBID:                  1,
+		AccessToken:           "at",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		HealthTier:            auth.HealthTierHealthy,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+
+	now := time.Now()
+	usage := &WhamUsage{PlanType: "team"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 20, LimitWindowSeconds: 18000, ResetAt: now.Add(2 * time.Hour).Unix()}
+	usage.RateLimit.SecondaryWindow = &WhamUsageWindow{UsedPercent: 100, LimitWindowSeconds: 604800, ResetAt: now.Add(5 * 24 * time.Hour).Unix()}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Usage7dRateLimited {
+		t.Fatalf("Usage7dRateLimited = true, want false for credit account")
+	}
+	if got := account.RuntimeStatus(); got != "active" {
+		t.Fatalf("RuntimeStatus() = %q, want active for credit account", got)
+	}
+	pct7d, ok := account.GetUsagePercent7d()
+	if !ok || pct7d != 100 {
+		t.Fatalf("7d snapshot = (%v, %v), want 100 with valid snapshot", pct7d, ok)
 	}
 }
 

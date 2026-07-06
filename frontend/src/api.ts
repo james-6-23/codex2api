@@ -42,6 +42,8 @@ import type {
   RuntimeStatusResponse,
   SiteBranding,
   StatsResponse,
+  SystemUpdateInfo,
+  SystemUpdateResult,
   SetupHintsResponse,
   CPAExportEntry,
   SystemSettings,
@@ -309,6 +311,9 @@ export const api = {
   },
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
+  getSystemUpdate: () => request<SystemUpdateInfo>('/system/update'),
+  performSystemUpdate: () =>
+    request<SystemUpdateResult>('/system/update', { method: 'POST' }),
   getOpsErrorSummary: (params: {
     start: string
     end: string

@@ -1049,3 +1049,62 @@ func TestFastSchedulerSetSchedulerModeResortsBuckets(t *testing.T) {
 	}
 	s.Release(first)
 }
+
+func TestStoreNextExcludingRespectsAPIKeyAllowedPlans(t *testing.T) {
+	plus := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	plus.PlanType = "plus"
+	team := newFastSchedulerTestAccount(2, HealthTierHealthy, 110, 1)
+	team.PlanType = "team"
+	free := newFastSchedulerTestAccount(3, HealthTierHealthy, 100, 1)
+	free.PlanType = "free"
+
+	store := &Store{
+		accounts:       []*Account{plus, team, free},
+		maxConcurrency: 1,
+	}
+	store.rebuildAccountIndex()
+	// Key 1 只允许 plus / team 套餐的账号。
+	store.SetAPIKeyAllowedPlans(1, []string{"Plus", "team"})
+
+	if !store.APIKeyAllowsAccount(1, plus) {
+		t.Fatal("plus account should be allowed by plus/team filter")
+	}
+	if !store.APIKeyAllowsAccount(1, team) {
+		t.Fatal("team account should be allowed by plus/team filter")
+	}
+	if store.APIKeyAllowsAccount(1, free) {
+		t.Fatal("free account should be rejected by plus/team filter")
+	}
+
+	// 把 plus/team 排除后,唯一剩下的 free 账号不应被调度。
+	if got := store.NextExcluding(1, map[int64]bool{1: true, 2: true}); got != nil {
+		store.Release(got)
+		t.Fatalf("NextExcluding() picked dbID=%d, want nil (free plan excluded)", got.DBID)
+	}
+	// 不加套餐限制的 Key 2 仍可调度到 free 账号。
+	if !store.APIKeyAllowsAccount(2, free) {
+		t.Fatal("unrestricted key should allow free account")
+	}
+}
+
+func TestStoreAPIKeyPlanFilterMatchesProLiteDistinctly(t *testing.T) {
+	prolite := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+	prolite.PlanType = "prolite"
+	pro := newFastSchedulerTestAccount(2, HealthTierHealthy, 110, 1)
+	pro.PlanType = "pro"
+
+	store := &Store{
+		accounts:       []*Account{prolite, pro},
+		maxConcurrency: 1,
+	}
+	store.rebuildAccountIndex()
+	// 选择 "prolite" 只匹配 prolite 账号,不应命中 pro 账号(两者相互独立)。
+	store.SetAPIKeyAllowedPlans(1, []string{"prolite"})
+
+	if !store.APIKeyAllowsAccount(1, prolite) {
+		t.Fatal("prolite account should be allowed by prolite filter")
+	}
+	if store.APIKeyAllowsAccount(1, pro) {
+		t.Fatal("pro account should NOT be allowed by prolite-only filter")
+	}
+}

@@ -317,6 +317,60 @@ func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T
 	}
 }
 
+func TestApplyCodexRequestHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	acc := &auth.Account{
+		DBID:      42,
+		AccountID: "acct-default",
+		CustomHeaders: map[string]string{
+			"Authorization":      "Bearer upstream-override",
+			"Chatgpt-Account-Id": "acct-override",
+			"X-Custom-Header":    "custom-value",
+		},
+	}
+
+	applyCodexRequestHeaders(req, acc, "token-123", "cache-key-1", "api-key-1", nil, http.Header{})
+
+	if got := req.Header.Get("Authorization"); got != "Bearer upstream-override" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("Chatgpt-Account-Id"); got != "acct-override" {
+		t.Fatalf("Chatgpt-Account-Id = %q", got)
+	}
+	if got := req.Header.Get("X-Custom-Header"); got != "custom-value" {
+		t.Fatalf("X-Custom-Header = %q", got)
+	}
+}
+
+func TestApplyOpenAIResponsesRequestHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+
+	acc := &auth.Account{
+		DBID: 42,
+		CustomHeaders: map[string]string{
+			"Authorization":       "Bearer upstream-override",
+			"OpenAI-Organization": "org-override",
+		},
+	}
+	downstreamHeaders := http.Header{"OpenAI-Organization": []string{"org-downstream"}}
+
+	applyOpenAIResponsesRequestHeaders(req, acc, "api-key-1", downstreamHeaders)
+
+	if got := req.Header.Get("Authorization"); got != "Bearer upstream-override" {
+		t.Fatalf("Authorization = %q", got)
+	}
+	if got := req.Header.Get("OpenAI-Organization"); got != "org-override" {
+		t.Fatalf("OpenAI-Organization = %q", got)
+	}
+}
+
 func TestApplyCodexRequestHeadersUsesMinimalFallbackByDefault(t *testing.T) {
 	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
 	if err != nil {

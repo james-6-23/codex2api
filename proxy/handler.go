@@ -477,6 +477,7 @@ func (h *Handler) syncAPIKeyAllowedGroups(row *database.APIKeyRow) {
 		return
 	}
 	h.store.SetAPIKeyAllowedGroups(row.ID, row.AllowedGroupIDs)
+	h.store.SetAPIKeyAllowedPlans(row.ID, row.Limits.PlanAllow)
 }
 
 // isValidKey 检查 key 是否有效（配置文件 + DB）
@@ -769,6 +770,16 @@ type streamOutcome struct {
 	failureKind    string
 	failureMessage string
 	penalize       bool
+	// verifyAccountAuth 标记这是一次 WS 上游读流失败（如 close 1008 policy violation）。
+	// WS 通道下 token 失效表现为上游主动关闭而非 401，需异步跑一次探针确认账号鉴权状态，
+	// 命中 401 才按 unauthorized 冷却，避免失效账号不被封、反复被调度。
+	verifyAccountAuth bool
+}
+
+// isWebsocketUpstreamClose 判断读流错误是否来自 WS 上游异常关闭/读失败。
+// wsrelay 的读错误统一以 "websocket read error:" 前缀包裹（见 wsrelay/executor.go）。
+func isWebsocketUpstreamClose(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "websocket read error")
 }
 
 func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) streamOutcome {
@@ -798,10 +809,11 @@ func classifyStreamOutcome(ctxErr, readErr, writeErr error, gotTerminal bool) st
 			kind = "transport"
 		}
 		return streamOutcome{
-			logStatusCode:  logStatusUpstreamStreamBreak,
-			failureKind:    kind,
-			failureMessage: fmt.Sprintf("上游流读取失败: %v", readErr),
-			penalize:       true,
+			logStatusCode:     logStatusUpstreamStreamBreak,
+			failureKind:       kind,
+			failureMessage:    fmt.Sprintf("上游流读取失败: %v", readErr),
+			penalize:          true,
+			verifyAccountAuth: isWebsocketUpstreamClose(readErr),
 		}
 	}
 
@@ -1815,6 +1827,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 			}
 			ttftGuard.Stop()
+			if outcome.verifyAccountAuth {
+				h.store.VerifyAccountAuthAsync(account)
+			}
 			var responseFailedDecision codex429Decision
 			if len(terminalFailurePayload) > 0 {
 				outcome = classifyResponseFailedOutcome(terminalFailurePayload)
@@ -2209,6 +2224,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 		}
 		ttftGuard.Stop()
+		if outcome.verifyAccountAuth {
+			h.store.VerifyAccountAuthAsync(account)
+		}
 		var responseFailedDecision codex429Decision
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
@@ -3285,6 +3303,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			outcome = firstTokenTimeoutOutcome(currentFirstTokenTimeout())
 		}
 		ttftGuard.Stop()
+		if outcome.verifyAccountAuth {
+			h.store.VerifyAccountAuthAsync(account)
+		}
 		var responseFailedDecision codex429Decision
 		if len(terminalFailurePayload) > 0 {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
@@ -3924,7 +3945,11 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	}
 
 	result.UsagePct5h, result.Reset5hAt, result.HasUsage5h = account.GetUsageSnapshot5h()
-	if result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 {
+	if store != nil && result.HasUsage5h {
+		// 被动 /responses 头刷新了 5h 窗口重置时刻：武装「到点即探」，窗口翻新即刷新进度条。
+		store.WakeBoundaryProbe(result.Reset5hAt)
+	}
+	if result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
 		if store != nil {
 			store.MarkPremium5hRateLimited(account, result.Reset5hAt)
 		}
@@ -3985,6 +4010,7 @@ func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64
 	if w7d.valid {
 		resetAt := now.Add(time.Duration(w7d.resetSec) * time.Second)
 		account.SetReset7dAt(resetAt)
+		account.SetWindow7dSeconds(int64(w7d.windowMin * 60))
 		account.SetUsagePercent7d(w7d.usedPct)
 		return w7d.usedPct, true
 	}

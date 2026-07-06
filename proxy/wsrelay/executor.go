@@ -281,6 +281,13 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		headers.Set("Session_id", sessionID)
 		headers.Set("Conversation_id", sessionID)
 	}
+	for name, value := range account.GetCustomHeaders() {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		headers.Set(name, value)
+	}
 
 	return headers
 }

@@ -35,6 +35,16 @@ func TestBuildTestPayloadUsesSelectedModel(t *testing.T) {
 	}
 }
 
+func TestBuildConnectionTestPayloadUsesStoreContent(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetTestContent("say pong")
+
+	payload := buildConnectionTestPayload(store, "gpt-5.5")
+	if got := gjson.GetBytes(payload, "input.0.content.0.text").String(); got != "say pong" {
+		t.Fatalf("test content = %q, want say pong", got)
+	}
+}
+
 func TestFormatUsageLimitedTestErrorReportsSuccessfulProbeAsLimited(t *testing.T) {
 	msg, limited := formatUsageLimitedTestError(proxy.CodexUsageSyncResult{
 		Premium5hRateLimited: true,

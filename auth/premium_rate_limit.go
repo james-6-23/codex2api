@@ -75,6 +75,9 @@ func (a *Account) IsPremium5hPlan() bool {
 }
 
 func (a *Account) premium5hRateLimitedLocked(now time.Time) bool {
+	if a.creditSkipsUsageWindowLocked() {
+		return false
+	}
 	if !isPremium5hPlan(a.PlanType) {
 		return false
 	}

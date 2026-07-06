@@ -39,6 +39,7 @@ export interface AccountRow {
   openai_responses_api?: boolean
   base_url?: string
   models?: string[]
+  custom_headers?: Record<string, string> | null
   health_tier?: string
   scheduler_score?: number
   dispatch_score?: number
@@ -177,6 +178,7 @@ export interface AddAccountRequest {
   session_token?: string
   proxy_url: string
   allow_duplicate?: boolean
+  custom_headers?: Record<string, string> | null
 }
 
 export interface AddATAccountRequest {
@@ -184,6 +186,7 @@ export interface AddATAccountRequest {
   access_token: string
   proxy_url: string
   allow_duplicate?: boolean
+  custom_headers?: Record<string, string> | null
 }
 
 export interface AddOpenAIResponsesAccountRequest {
@@ -192,6 +195,7 @@ export interface AddOpenAIResponsesAccountRequest {
   api_key: string
   models: string[]
   proxy_url: string
+  custom_headers?: Record<string, string> | null
 }
 
 export interface UpdateOpenAIResponsesAccountRequest {
@@ -200,6 +204,7 @@ export interface UpdateOpenAIResponsesAccountRequest {
   api_key?: string
   models: string[]
   proxy_url: string
+  custom_headers?: Record<string, string> | null
 }
 
 export interface FetchOpenAIResponsesModelsRequest {
@@ -227,6 +232,7 @@ export interface UpdateAccountSchedulerRequest {
   auto_pause_5h_disabled?: boolean
   auto_pause_7d_disabled?: boolean
   dispatch_count_limit?: number | null
+  custom_headers?: Record<string, string> | null
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -327,6 +333,30 @@ export interface AccountUsageDetail {
 
 export interface MessageResponse {
   message: string
+}
+
+export interface SystemUpdateInfo {
+  current_version: string
+  latest_version: string
+  has_update: boolean
+  supported: boolean
+  unsupported_reason?: string
+  runtime_os: string
+  runtime_arch: string
+  mode: string
+  release_url?: string
+  asset_name?: string
+  published_at?: string
+  warning?: string
+}
+
+export interface SystemUpdateResult extends MessageResponse {
+  current_version: string
+  latest_version: string
+  need_restart: boolean
+  restarting: boolean
+  mode: string
+  backup_path?: string
 }
 
 export interface CreateAccountResponse extends MessageResponse {
@@ -531,6 +561,7 @@ export interface SystemSettings {
   max_concurrency: number
   global_rpm: number
   test_model: string
+  test_content: string
   test_concurrency: number
   background_refresh_interval_minutes: number
 	  usage_probe_max_age_minutes: number
@@ -626,6 +657,9 @@ export interface SystemSettings {
   auto_pause_7d_threshold: number
   auto_pause_5h_guard_band_percent: number
   auto_pause_5h_guard_concurrency: number
+  smart_pacing_enabled: boolean
+  smart_pacing_min_concurrency: number
+  smart_pacing_windows: string
 }
 
 export interface SetupHintsResponse {
@@ -1072,6 +1106,7 @@ export interface ChartAggregation {
 export interface APIKeyLimits {
   model_allow?: string[]
   model_deny?: string[]
+  plan_allow?: string[]
   rpm?: number
   rpd?: number
   max_concurrency?: number

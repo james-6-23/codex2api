@@ -11,6 +11,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
 	"github.com/codex2api/proxy"
@@ -354,6 +355,7 @@ func defaultBootstrapSettings() *database.SystemSettings {
 		MaxConcurrency:                   2,
 		GlobalRPM:                        0,
 		TestModel:                        "gpt-5.4",
+		TestContent:                      auth.DefaultTestContent,
 		TestConcurrency:                  50,
 		BackgroundRefreshIntervalMinutes: 2,
 		UsageProbeMaxAgeMinutes:          10,
@@ -385,5 +387,7 @@ func defaultBootstrapSettings() *database.SystemSettings {
 		CodexWSSilentMaxRetries:          2,
 		AutoPause5hGuardBandPercent:      5,
 		AutoPause5hGuardConcurrency:      1,
+		SmartPacingMinConcurrency:        1,
+		SmartPacingWindows:               "5h,7d",
 	}
 }

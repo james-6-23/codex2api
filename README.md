@@ -272,7 +272,7 @@ The standard `.env.example` declares `DATABASE_DRIVER=postgres` and `CACHE_DRIVE
 
 Runtime business settings are stored in the database `SystemSettings` table and can be updated from the admin settings page.
 
-Examples include `MaxConcurrency`, `GlobalRPM`, `TestModel`, `TestConcurrency`, `ProxyURL`, `PgMaxConns`, `RedisPoolSize`, `AdminSecret`, `SchedulerMode`, and auto-cleanup switches.
+Examples include `MaxConcurrency`, `GlobalRPM`, `TestModel`, `TestContent`, `TestConcurrency`, `ProxyURL`, `PgMaxConns`, `RedisPoolSize`, `AdminSecret`, `SchedulerMode`, and auto-cleanup switches.
 
 Default settings are written automatically on first startup.
 

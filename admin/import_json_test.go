@@ -1082,8 +1082,73 @@ func TestAddAccountDedupsRefreshToken(t *testing.T) {
 	}
 }
 
-// 先导入 AT（个人账号，只有 user_id 身份），后导入裸 RT——RT 刷新后身份可知，
-// 应把新凭证合并进已有 AT 账号（RT 升级）、软删新账号，且旧账号的用量快照保留。
+// 重复添加同一身份的 AT（JWT 身份）时，命中已有账号应计入"更新"而非"新增"，
+// 新增计数保持为 0（不再把更新的账号重复计进 success/duplicate）。
+func TestAddATAccountCountsUpdateNotNew(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{
+		db:    db,
+		store: store,
+		probeUsage: func(context.Context, *auth.Account) error {
+			return nil
+		},
+	}
+
+	makeAT := func(exp time.Time) string {
+		return makeAdminTestJWT(t, map[string]interface{}{
+			"exp": exp.Unix(),
+			"https://api.openai.com/profile": map[string]interface{}{
+				"email": "solo@example.com",
+			},
+			"https://api.openai.com/auth": map[string]interface{}{
+				"chatgpt_account_id": "acc-count-1",
+				"chatgpt_plan_type":  "team",
+			},
+		})
+	}
+
+	doAddAT := func(token string) map[string]interface{} {
+		body, _ := json.Marshal(map[string]interface{}{"access_token": token})
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/at", strings.NewReader(string(body)))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		handler.AddATAccount(ctx)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+		}
+		var resp map[string]interface{}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return resp
+	}
+
+	// 首次添加：应新增 1。
+	resp := doAddAT(makeAT(time.Now().Add(2 * time.Hour)))
+	if resp["success"] != float64(1) || resp["updated"] != float64(0) {
+		t.Fatalf("first add: success=%v updated=%v, want 1/0", resp["success"], resp["updated"])
+	}
+
+	// 再次添加同身份（AT 已轮换，exp 不同）：应计入更新，新增为 0。
+	resp = doAddAT(makeAT(time.Now().Add(3 * time.Hour)))
+	if resp["success"] != float64(0) {
+		t.Fatalf("re-add success = %v, want 0 (更新不应计入新增)", resp["success"])
+	}
+	if resp["updated"] != float64(1) {
+		t.Fatalf("re-add updated = %v, want 1", resp["updated"])
+	}
+
+	// 库里始终只有一个账号。
+	if rows, _ := db.ListActive(context.Background()); len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1", len(rows))
+	}
+}
+
+// 先导入 AT（个人账号，只有 user_id 身份），后导入裸 RT——RT 刷新后身份可知，// 应把新凭证合并进已有 AT 账号（RT 升级）、软删新账号，且旧账号的用量快照保留。
 func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1141,9 +1206,66 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	}
 }
 
-// 勾选"允许重复添加"导入的 RT 账号刷新后不得被合并。
-func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
+// codex_at 手动添加：插入时身份未知，wham 探针补齐身份后应回查并把凭证
+// 合并进同身份的已有账号、软删新账号，且旧账号的用量统计保留。
+// 覆盖 AT 导入/添加事后无法去重的缺口（与 RT 路径对称）。
+func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{db: db, store: store}
+
+	// 已有账号：身份完整、带用量统计。
+	oldID, err := db.InsertAccountWithCredentials(context.Background(), "at-first", map[string]interface{}{
+		"access_token":          "at-old",
+		"email":                 "solo@example.com",
+		"account_id":            "user-probe1",
+		"codex_7d_used_percent": "37.0",
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert old: %v", err)
+	}
+
+	// 新添加的 codex_at 账号：插入时无身份，仅有 access_token 原文。
+	newID, err := db.InsertAccountWithCredentials(context.Background(), "at-new", map[string]interface{}{
+		"access_token": "at-new",
+	}, "")
+	if err != nil {
+		t.Fatalf("Insert new: %v", err)
+	}
+	store.AddAccount(&auth.Account{DBID: newID, AccessToken: "at-new", Status: auth.StatusReady})
+
+	// 模拟 wham 探针：补齐 email + account_id（与旧账号同一身份）并落库。
+	handler.probeUsage = func(ctx context.Context, acc *auth.Account) error {
+		store.UpdateAccountIdentity(acc, "solo@example.com", "user-probe1")
+		return nil
+	}
+
+	handler.probeImportedAccountUsage(context.Background(), newID, "manual_at")
+
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != oldID {
+		t.Fatalf("active rows = %d, want 1 row id %d (新账号应被合并软删)", len(rows), oldID)
+	}
+
+	oldRow, err := db.GetAccountByID(context.Background(), oldID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := oldRow.GetCredential("access_token"); got != "at-new" {
+		t.Fatalf("access_token = %q, want at-new (新 AT 应升级进旧账号)", got)
+	}
+	if got := oldRow.GetCredential("codex_7d_used_percent"); got != "37.0" {
+		t.Fatalf("codex_7d_used_percent = %q, want 37.0 (用量统计必须保留)", got)
+	}
+}
+
+// 勾选"允许重复添加"导入的 RT 账号刷新后不得被合并。
+func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
 	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
@@ -1175,5 +1297,68 @@ func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
 	}
 	if len(rows) != 2 {
 		t.Fatalf("active rows = %d, want 2 (forced copy preserved)", len(rows))
+	}
+}
+
+func TestParseImportJSONTokensSupportsChatGPTSessionJSON(t *testing.T) {
+	data := []byte(`{"user":{"id":"user-abc123","name":"John Doe","email":"john@example.com"},"accessToken":"at-session-test","expires":"2026-12-31T23:59:59Z"}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("tokens len = %d, want 1", len(tokens))
+	}
+	if tokens[0].accessToken != "at-session-test" {
+		t.Fatalf("accessToken = %q, want at-session-test", tokens[0].accessToken)
+	}
+	if tokens[0].email != "john@example.com" {
+		t.Fatalf("email = %q, want john@example.com", tokens[0].email)
+	}
+	if tokens[0].name != "John Doe" {
+		t.Fatalf("name = %q, want John Doe", tokens[0].name)
+	}
+	if tokens[0].expiresAt != "2026-12-31T23:59:59Z" {
+		t.Fatalf("expiresAt = %q, want 2026-12-31T23:59:59Z", tokens[0].expiresAt)
+	}
+}
+
+func TestParseImportJSONTokensSupportsChatGPTSessionJSONArray(t *testing.T) {
+	data := []byte(`[{"user":{"id":"user-1","name":"Alice","email":"alice@example.com"},"accessToken":"at-alice"},{"user":{"id":"user-2","name":"Bob"},"accessToken":"at-bob","expires":1767225600}]`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 2 {
+		t.Fatalf("tokens len = %d, want 2", len(tokens))
+	}
+	if tokens[0].accessToken != "at-alice" || tokens[0].email != "alice@example.com" {
+		t.Fatalf("first token = %+v, want at-alice / alice@example.com", tokens[0])
+	}
+	if tokens[1].accessToken != "at-bob" {
+		t.Fatalf("second accessToken = %q, want at-bob", tokens[1].accessToken)
+	}
+	if tokens[1].name != "Bob" {
+		t.Fatalf("second name = %q, want Bob (from user.name)", tokens[1].name)
+	}
+	if tokens[1].email != "" {
+		t.Fatalf("second email = %q, want empty (no user.email, no top-level email)", tokens[1].email)
+	}
+	if tokens[1].expiresAt != "1767225600" {
+		t.Fatalf("second expiresAt = %q, want 1767225600", tokens[1].expiresAt)
+	}
+}
+
+func TestParseImportJSONTokensHandlesSessionJSONWithoutAccessToken(t *testing.T) {
+	data := []byte(`{"user":{"email":"no-token@example.com"},"expires":"2026-12-31T23:59:59Z"}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 0 {
+		t.Fatalf("tokens len = %d, want 0 (no access_token or refresh_token)", len(tokens))
 	}
 }

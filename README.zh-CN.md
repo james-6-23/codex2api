@@ -323,7 +323,7 @@ Vite 会自动代理 `/api` 和 `/health` 到后端，开发时访问 `http://lo
 
 以下参数**保存在数据库 `SystemSettings` 中**，通过管理台设置页面修改：
 
-`MaxConcurrency`、`GlobalRPM`、`TestModel`、`TestConcurrency`、`ProxyURL`、`PgMaxConns`、`RedisPoolSize`、`AdminSecret`、`SchedulerMode`、自动清理开关等。
+`MaxConcurrency`、`GlobalRPM`、`TestModel`、`TestContent`、`TestConcurrency`、`ProxyURL`、`PgMaxConns`、`RedisPoolSize`、`AdminSecret`、`SchedulerMode`、自动清理开关等。
 
 首次启动时程序会自动写入默认设置。
 

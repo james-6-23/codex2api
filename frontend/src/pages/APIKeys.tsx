@@ -68,6 +68,7 @@ interface EditKeyFormState {
 interface LimitsFormState {
   modelAllow: string[];
   modelDeny: string[];
+  planAllow: string[];
   rpm: string;
   rpd: string;
   maxConcurrency: string;
@@ -94,6 +95,7 @@ const TOKEN_LIMIT_UNIT_ORDER: TokenLimitUnit[] = ["b", "m", "k", "token"];
 const emptyLimitsForm: LimitsFormState = {
   modelAllow: [],
   modelDeny: [],
+  planAllow: [],
   rpm: "",
   rpd: "",
   maxConcurrency: "",
@@ -1178,6 +1180,7 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
   return {
     modelAllow: Array.isArray(limits.model_allow) ? limits.model_allow : [],
     modelDeny: Array.isArray(limits.model_deny) ? limits.model_deny : [],
+    planAllow: Array.isArray(limits.plan_allow) ? limits.plan_allow : [],
     rpm: limits.rpm && limits.rpm > 0 ? String(limits.rpm) : "",
     rpd: limits.rpd && limits.rpd > 0 ? String(limits.rpd) : "",
     maxConcurrency:
@@ -1247,6 +1250,7 @@ function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
   return {
     model_allow: form.modelAllow.map((m) => m.trim()).filter(Boolean),
     model_deny: form.modelDeny.map((m) => m.trim()).filter(Boolean),
+    plan_allow: form.planAllow.map((p) => p.trim()).filter(Boolean),
     rpm: intNum(form.rpm),
     rpd: intNum(form.rpd),
     max_concurrency: intNum(form.maxConcurrency),
@@ -1486,6 +1490,7 @@ function LimitsEditor({
   const hasAny =
     value.modelAllow.length > 0 ||
     value.modelDeny.length > 0 ||
+    value.planAllow.length > 0 ||
     value.rpm !== "" ||
     value.rpd !== "" ||
     value.maxConcurrency !== "" ||
@@ -1540,6 +1545,19 @@ function LimitsEditor({
             />
             <p className="text-[10px] text-muted-foreground">
               {t("apiKeys.limits.modelDenyHint")}
+            </p>
+          </div>
+          <div className="space-y-2">
+            <label className="text-xs font-medium">
+              {t("apiKeys.limits.planAllow")}
+            </label>
+            <PlanMultiSelect
+              value={value.planAllow}
+              onChange={(planAllow) => patch({ planAllow })}
+              allLabel={t("apiKeys.limits.planAllowAll")}
+            />
+            <p className="text-[10px] text-muted-foreground">
+              {t("apiKeys.limits.planAllowHint")}
             </p>
           </div>
           <div className="grid grid-cols-2 gap-3">
@@ -1608,6 +1626,69 @@ function LimitsEditor({
         </span>
       </button>
       {open && limitsContent}
+    </div>
+  );
+}
+
+// PLAN_FILTER_OPTIONS 与后端 cleanPlanAllow 的白名单保持一致(pro 与 prolite 相互独立)。
+const PLAN_FILTER_OPTIONS = [
+  "free",
+  "plus",
+  "pro",
+  "prolite",
+  "team",
+  "k12",
+  "go",
+] as const;
+
+// PlanMultiSelect 让 API Key 选择只调度哪些账号套餐。空表示不限套餐。
+function PlanMultiSelect({
+  value,
+  onChange,
+  allLabel,
+}: {
+  value: string[];
+  onChange: (value: string[]) => void;
+  allLabel: string;
+}) {
+  return (
+    <div className="rounded-lg border border-border bg-background p-2">
+      <div className="flex flex-wrap gap-1.5">
+        <button
+          type="button"
+          onClick={() => onChange([])}
+          className={`rounded-md border px-2.5 py-1 text-xs font-semibold transition-colors ${
+            value.length === 0
+              ? "border-primary bg-primary text-primary-foreground"
+              : "border-border bg-muted/30 text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          {allLabel}
+        </button>
+        {PLAN_FILTER_OPTIONS.map((plan) => {
+          const active = value.includes(plan);
+          return (
+            <button
+              key={plan}
+              type="button"
+              onClick={() =>
+                onChange(
+                  active
+                    ? value.filter((p) => p !== plan)
+                    : [...value, plan],
+                )
+              }
+              className={`rounded-md border px-2.5 py-1 text-xs font-semibold uppercase transition-colors ${
+                active
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border bg-muted/30 text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {plan}
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 }

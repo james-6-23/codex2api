@@ -100,7 +100,7 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 // probeUsageViaResponses 原有探针：发送最小 /responses 请求，
 // 通过响应头同步 Codex 用量状态。会真实消耗少量 token。
 func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Account) error {
-	payload := buildTestPayload(h.store.GetTestModel())
+	payload := buildConnectionTestPayload(h.store, h.store.GetTestModel())
 	resp, err := proxy.ExecuteRequest(ctx, account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
 	if err != nil {
 		return err

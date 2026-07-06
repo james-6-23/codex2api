@@ -1,6 +1,10 @@
 package database
 
-import "strconv"
+import (
+	"fmt"
+	"strconv"
+	"strings"
+)
 
 func (a *AccountRow) GetCredentialFloat64(key string) (float64, bool) {
 	if a == nil || a.Credentials == nil {
@@ -47,4 +51,51 @@ func (a *AccountRow) GetCredentialBool(key string) bool {
 	default:
 		return false
 	}
+}
+
+func (a *AccountRow) GetCredentialStringMap(key string) map[string]string {
+	if a == nil || a.Credentials == nil {
+		return nil
+	}
+	v, ok := a.Credentials[key]
+	if !ok || v == nil {
+		return nil
+	}
+	switch val := v.(type) {
+	case map[string]string:
+		return cloneTrimmedStringMap(val)
+	case map[string]interface{}:
+		out := make(map[string]string, len(val))
+		for key, raw := range val {
+			name := strings.TrimSpace(key)
+			if name == "" || raw == nil {
+				continue
+			}
+			out[name] = strings.TrimSpace(fmt.Sprint(raw))
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func cloneTrimmedStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(values))
+	for key, value := range values {
+		name := strings.TrimSpace(key)
+		if name == "" {
+			continue
+		}
+		out[name] = strings.TrimSpace(value)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

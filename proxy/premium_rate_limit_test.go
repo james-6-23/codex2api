@@ -129,3 +129,38 @@ func TestSyncCodexUsageStatePremium5hOnlyHeadersMarksRateLimited(t *testing.T) {
 		t.Fatal("account should enter premium 5h rate_limited state from headers alone")
 	}
 }
+
+func TestSyncCodexUsageStateCreditAccountSkipsPremium5hWindowLimit(t *testing.T) {
+	store := newProxyPremiumTestStore()
+	acc := &auth.Account{
+		DBID:                  1,
+		AccessToken:           "token",
+		PlanType:              "team",
+		Status:                auth.StatusReady,
+		CreditEnabled:         true,
+		CreditSkipUsageWindow: true,
+	}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "900")
+
+	result := SyncCodexUsageState(store, acc, resp)
+
+	if !result.HasUsage5h {
+		t.Fatal("HasUsage5h = false, want true")
+	}
+	if !result.Persisted5hOnly {
+		t.Fatal("Persisted5hOnly = false, want true")
+	}
+	if result.Premium5hRateLimited {
+		t.Fatal("Premium5hRateLimited = true, want false for credit account")
+	}
+	if acc.IsPremium5hRateLimited() {
+		t.Fatal("credit account should not enter premium 5h rate_limited state from usage-window headers")
+	}
+	pct5h, _, ok := acc.GetUsageSnapshot5h()
+	if !ok || pct5h != 100 {
+		t.Fatalf("5h snapshot = (%v, %v), want 100 with valid snapshot", pct5h, ok)
+	}
+}

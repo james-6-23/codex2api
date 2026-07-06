@@ -89,7 +89,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 
 	// 构建最小测试请求体（参考 sub2api createOpenAITestPayload）
-	payload := buildTestPayload(testModel)
+	payload := buildConnectionTestPayload(h.store, testModel)
 
 	// 发送请求
 	start := time.Now()
@@ -271,8 +271,22 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 }
 
-// buildTestPayload 构建最小测试请求体
+func buildConnectionTestPayload(store *auth.Store, model string) []byte {
+	content := auth.DefaultTestContent
+	if store != nil {
+		content = store.GetTestContent()
+	}
+	return buildTestPayloadWithContent(model, content)
+}
+
+// buildTestPayload 构建默认最小测试请求体
 func buildTestPayload(model string) []byte {
+	return buildTestPayloadWithContent(model, auth.DefaultTestContent)
+}
+
+// buildTestPayloadWithContent 构建带自定义用户输入内容的最小测试请求体
+func buildTestPayloadWithContent(model string, content string) []byte {
+	content = auth.NormalizeTestContent(content)
 	payload := []byte(`{}`)
 	payload, _ = sjson.SetBytes(payload, "model", model)
 	payload, _ = sjson.SetBytes(payload, "input", []map[string]any{
@@ -281,7 +295,7 @@ func buildTestPayload(model string) []byte {
 			"content": []map[string]any{
 				{
 					"type": "input_text",
-					"text": "hi",
+					"text": content,
 				},
 			},
 		},
@@ -879,7 +893,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		h.store.MarkError(acc, "批量测试失败: "+modelErr.Error())
 		return "failed", modelErr.Error()
 	}
-	payload := buildTestPayload(testModel)
+	payload := buildConnectionTestPayload(h.store, testModel)
 	start := time.Now()
 
 	var resp *http.Response
@@ -977,7 +991,7 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 		}
 		return "failed", modelErr.Error()
 	}
-	payload := buildTestPayload(testModel)
+	payload := buildConnectionTestPayload(h.store, testModel)
 
 	var resp *http.Response
 	var err error
