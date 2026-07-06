@@ -286,11 +286,17 @@ func promptFilterVerdictIsFinal(verdict promptfilter.Verdict) bool {
 }
 
 func promptFilterAllowedHighRisk(verdict promptfilter.Verdict) bool {
+	if promptFilterVerdictIsFinal(verdict) {
+		return false
+	}
 	return verdict.Action == promptfilter.ActionAllow &&
 		promptfilter.IsHighRiskReviewVerdict(verdict)
 }
 
 func promptFilterBlockedByLocalHighRisk(verdict promptfilter.Verdict) bool {
+	if promptFilterVerdictIsFinal(verdict) {
+		return false
+	}
 	if verdict.Action != promptfilter.ActionBlock {
 		return false
 	}
