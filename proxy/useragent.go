@@ -26,7 +26,7 @@ type ClientProfile struct {
 
 const (
 	latestCodexClientName          = "codex-tui"
-	latestCodexCLIVersion          = "0.142.3"
+	latestCodexCLIVersion          = "0.142.5"
 	latestCodexCLIUserAgentPrefix  = "codex-tui/" + latestCodexCLIVersion
 	defaultCodexUserAgentOSName    = "Mac OS"
 	defaultCodexUserAgentOSVersion = "15.5.0"
