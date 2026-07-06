@@ -70,6 +70,7 @@ type Account struct {
 	Email          string
 	PlanType       string
 	ProxyURL       string
+	CustomHeaders  map[string]string
 	UpstreamType   string
 	BaseURL        string
 	APIKey         string
@@ -83,7 +84,11 @@ type Account struct {
 	UsagePercent7d      float64 // 7d 窗口使用率 0-100+
 	UsagePercent7dValid bool
 	Reset7dAt           time.Time // 7d 窗口重置时间
-	UsagePercent5h      float64   // 5h 窗口使用率 0-100+
+	// Window7dSeconds 是「长窗口」(即 7d 槽)的真实周期秒数：plus/pro 通常为 7d(604800)，
+	// team plan 实为 monthly(约 2592000)。0 = 未知(按 7d 默认处理)。智能配速的自然速率
+	// 需按真实周期计算，否则 team 的月窗被当成 7 天 → natural 速率偏大 → 过度限流。
+	Window7dSeconds     int64
+	UsagePercent5h      float64 // 5h 窗口使用率 0-100+
 	UsagePercent5hValid bool
 	Reset5hAt           time.Time // 5h 窗口重置时间
 	UsageUpdatedAt      time.Time // 7d 用量快照刷新时间
@@ -102,8 +107,8 @@ type Account struct {
 	usageProbeInFlight          bool
 	recoveryProbeInFlight       bool
 	lastAuthVerifyAt            time.Time // WS 上游异常关闭后触发的鉴权验证探针节流时间戳
-	AutoPause5hThreshold        float64 // 0..1, 0 = disabled
-	AutoPause7dThreshold        float64 // 0..1, 0 = disabled
+	AutoPause5hThreshold        float64   // 0..1, 0 = disabled
+	AutoPause7dThreshold        float64   // 0..1, 0 = disabled
 	AutoPause5hDisabled         bool
 	AutoPause7dDisabled         bool
 	effectiveAutoPause5h        float64 // resolved: account > group > global
@@ -184,6 +189,10 @@ const (
 	defaultUsageProbeMaxAge          = 10 * time.Minute
 	defaultUsageProbeConcurrency     = 16
 	defaultRecoveryProbeInterval     = 30 * time.Minute
+	// probeBoundaryLag 是「到点即探」定时器相对边界时刻的滞后量：稍晚于重置/冷却
+	// 结束再探，确保 NeedsUsageProbe 里 `!ResetAt.After(now)` 已成立，并给上游与
+	// 本地之间的时钟偏差留出余量，避免探早了仍拿到重置前的旧数据。
+	probeBoundaryLag                 = 2 * time.Second
 	premium5hUrgencyWindow           = 4 * time.Hour
 	premium5hUrgencyMaxBonus         = 25.0
 	premium5hUrgencyMinRemainingPct  = 5.0
@@ -333,6 +342,41 @@ func (a *Account) GetAccessToken() string {
 	return strings.TrimSpace(a.AccessToken)
 }
 
+func (a *Account) GetCustomHeaders() map[string]string {
+	if a == nil {
+		return nil
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return cloneStringMap(a.CustomHeaders)
+}
+
+// EffectiveAccountID 返回实际用于上游路由的工作区 ID:自定义请求头覆盖了
+// Chatgpt-Account-Id 时以覆盖值为准(与 proxy/wsrelay 转发行为一致),
+// 额度探测等旁路请求必须用它,否则统计的是与流量不同的空间。
+func (a *Account) EffectiveAccountID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if v := strings.TrimSpace(a.CustomHeaders["Chatgpt-Account-Id"]); v != "" {
+		return v
+	}
+	return strings.TrimSpace(a.AccountID)
+}
+
+// AccountIDOverridden 判断自定义请求头是否把流量导向了与 OAuth 身份不同的空间。
+func (a *Account) AccountIDOverridden() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	v := strings.TrimSpace(a.CustomHeaders["Chatgpt-Account-Id"])
+	return v != "" && v != strings.TrimSpace(a.AccountID)
+}
+
 func clampInt(value, minValue, maxValue int) int {
 	if value < minValue {
 		return minValue
@@ -366,6 +410,17 @@ func cloneStringSlice(values []string) []string {
 	}
 	cloned := make([]string, len(values))
 	copy(cloned, values)
+	return cloned
+}
+
+func cloneStringMap(values map[string]string) map[string]string {
+	if len(values) == 0 {
+		return nil
+	}
+	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
 	return cloned
 }
 
@@ -1025,6 +1080,23 @@ func parseSmartPacingWindows(raw string) (bool, bool) {
 	return w5h, w7d
 }
 
+// 长窗口(7d 槽)周期识别：team plan 的第二限流窗口实为月窗(约 30 天 = 2592000s)，
+// 而非 plus/pro 的周窗(7 天 = 604800s)。用 28–31 天容差兼容服务端的轻微抖动。
+const (
+	monthlyWindowMinSeconds int64 = 28 * 24 * 60 * 60
+	monthlyWindowMaxSeconds int64 = 31 * 24 * 60 * 60
+)
+
+func isMonthlyWindowSeconds(sec int64) bool {
+	return sec >= monthlyWindowMinSeconds && sec <= monthlyWindowMaxSeconds
+}
+
+// IsMonthlyWindowSeconds 判断窗口周期是否属月窗(28–31 天，含 2592000 精确值)。
+// 导出供 proxy 层的 wham/header 窗口分类复用，保证判据单一真源。
+func IsMonthlyWindowSeconds(sec int64) bool {
+	return isMonthlyWindowSeconds(sec)
+}
+
 // normalizeSmartPacingWindows 归一化为规范字符串（用于持久化与展示）。
 func normalizeSmartPacingWindows(raw string) string {
 	w5h, w7d := parseSmartPacingWindows(raw)
@@ -1065,6 +1137,15 @@ func smartPacingRatio(usage float64, valid bool, resetAt time.Time, window time.
 		return 0, false
 	}
 	return sustainable / natural, true
+}
+
+// window7dDurationLocked 返回长窗口(7d 槽)用于配速的周期时长：已知真实长度(team 月窗)时
+// 用真实值，否则回退到默认 7 天。调用方须持有 a.mu。
+func (a *Account) window7dDurationLocked() time.Duration {
+	if a.Window7dSeconds > 0 {
+		return time.Duration(a.Window7dSeconds) * time.Second
+	}
+	return smartPacingWindow7d
 }
 
 func normalizeAutoPause5hGuardBandPercent(value float64) float64 {
@@ -1138,7 +1219,8 @@ func (a *Account) smartPacingConcurrencyLimitLocked(limit int64, now time.Time) 
 		}
 	}
 	if a.smartPacingWindows7d {
-		if r, ok := smartPacingRatio(a.UsagePercent7d, a.UsagePercent7dValid, a.Reset7dAt, smartPacingWindow7d, now); ok && r < ratio {
+		// 用长窗口的真实周期(team 为月窗)算自然速率，避免月窗被当 7 天导致过度限流。
+		if r, ok := smartPacingRatio(a.UsagePercent7d, a.UsagePercent7dValid, a.Reset7dAt, a.window7dDurationLocked(), now); ok && r < ratio {
 			ratio = r
 		}
 	}
@@ -1493,6 +1575,39 @@ func (a *Account) SetReset7dAt(t time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.Reset7dAt = t
+}
+
+// SetWindow7dSeconds 记录长窗口(7d 槽)的真实周期秒数。仅在拿到有效长度(>0)时写入，
+// 避免不知道长度的路径(载入/种子)用 0 覆盖已探测到的真实值。
+func (a *Account) SetWindow7dSeconds(sec int64) {
+	if sec <= 0 {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Window7dSeconds = sec
+}
+
+// GetWindow7dSeconds 返回长窗口(7d 槽)的真实周期秒数(0=未知)。
+func (a *Account) GetWindow7dSeconds() int64 {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.Window7dSeconds
+}
+
+// Window7dKind 返回长窗口(7d 槽)的类型标签："monthly"(team 月窗)/"weekly"/""(未知)，
+// 供管理端把进度条标成「30天」而非误标「7天」。判据与 wham 分类的月窗容差一致。
+func (a *Account) Window7dKind() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	switch {
+	case a.Window7dSeconds <= 0:
+		return ""
+	case isMonthlyWindowSeconds(a.Window7dSeconds):
+		return "monthly"
+	default:
+		return "weekly"
+	}
 }
 
 // GetReset5hAt 获取 5h 窗口重置时间
@@ -1870,6 +1985,42 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	return false
 }
 
+// nextProbeBoundary 返回该账号「到点即应触发 wham 探针」的最近未来时刻：
+//   - 5h / 7d 窗口重置：快照仍停在重置前采集的数据，窗口一翻新就该刷新进度条；
+//   - 限流冷却结束（非 unauthorized——那类探针会 401 无意义）：恢复可用的瞬间确认真实用量/状态。
+//
+// 只返回严格晚于 now 的时刻；这些时刻正是 NeedsUsageProbe 的重置/冷却判据会翻转为
+// true 的边界，因此 Store 在此刻精确探针一次即可命中，无需等巡检周期。
+func (a *Account) nextProbeBoundary(now time.Time) (time.Time, bool) {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.AccessToken == "" || a.Status == StatusError {
+		return time.Time{}, false
+	}
+	var next time.Time
+	consider := func(t time.Time) {
+		if t.IsZero() || !t.After(now) {
+			return
+		}
+		if next.IsZero() || t.Before(next) {
+			next = t
+		}
+	}
+	if a.UsagePercent5hValid && a.UsageUpdatedAt5h.Before(a.Reset5hAt) {
+		consider(a.Reset5hAt)
+	}
+	if a.UsagePercent7dValid && a.UsageUpdatedAt.Before(a.Reset7dAt) {
+		consider(a.Reset7dAt)
+	}
+	if a.Status == StatusCooldown && a.CooldownReason != "unauthorized" {
+		consider(a.CooldownUtil)
+	}
+	if next.IsZero() {
+		return time.Time{}, false
+	}
+	return next, true
+}
+
 // InLimitedState 报告账号是否处于"应避免 /responses 探活"的限流/冷却状态
 // （429 冷却或 premium 5h 限流）。此时用量探针应只走 wham（零成本），
 // 失败也不回退 /responses，避免加重限流或消耗额度。
@@ -1999,10 +2150,18 @@ type Store struct {
 	usageProbeResponsesFallbackEnabled atomic.Bool
 	recoveryProbeInterval              int64 // 恢复探测最小间隔（ns）
 	backgroundRefreshWakeCh            chan struct{}
-	lazyRefreshInFlight                sync.Map
-	stopCh                             chan struct{}
-	stopOnce                           sync.Once
-	wg                                 sync.WaitGroup
+	// 到点即探：限流冷却 / 5h·7d 窗口重置的倒计时归零那一刻，精确唤醒一次 wham 探针，
+	// 让用量进度条随官方窗口翻新立即刷新，而不是干等下一个巡检周期。
+	// boundaryProbeWakeCh 由 wakeBoundaryProbe 非阻塞写入（任何锁下都安全），
+	// 后台 goroutine 收到后全量扫描各账号最近边界并重排单个定时器。
+	// armedBoundaryAt 记录当前已武装的最近边界（UnixNano，0=未武装），
+	// 供 wakeBoundaryProbe 判断「新边界是否更早、值不值得打扰」。
+	boundaryProbeWakeCh chan struct{}
+	armedBoundaryAt     int64
+	lazyRefreshInFlight sync.Map
+	stopCh              chan struct{}
+	stopOnce            sync.Once
+	wg                  sync.WaitGroup
 
 	// 代理池
 	proxyPool        []string // 已启用的代理 URL 列表
@@ -2135,6 +2294,11 @@ func cooldownTTL(resetAt time.Time) (time.Duration, bool) {
 }
 
 func (s *Store) setCachedAccountCooldown(accountID int64, reason string, resetAt time.Time) {
+	// 所有冷却设置（429 / premium 5h / usage_limit）都经此漏斗——在这里挂「到点即探」唤醒：
+	// 冷却倒计时归零那一刻精确探针一次，刷新用量进度条。unauthorized 除外（探针必 401，无意义）。
+	if normalizeCooldownReason(reason) != "unauthorized" {
+		s.WakeBoundaryProbe(resetAt)
+	}
 	if s == nil || s.tokenCache == nil || accountID == 0 {
 		return
 	}
@@ -2433,6 +2597,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		db:                      db,
 		tokenCache:              tc,
 		backgroundRefreshWakeCh: make(chan struct{}, 1),
+		boundaryProbeWakeCh:     make(chan struct{}, 1),
 		stopCh:                  make(chan struct{}),
 		proxyPoolEnabled:        settings.ProxyPoolEnabled,
 		sessionBindings:         make(map[string]sessionAffinity),
@@ -3093,16 +3258,17 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	}
 
 	account := &Account{
-		DBID:         row.ID,
-		RefreshToken: rt,
-		SessionToken: st,
-		ProxyURL:     strings.TrimSpace(row.ProxyURL),
-		HealthTier:   HealthTierWarm,
-		AddedAt:      row.CreatedAt.UnixNano(),
-		UpstreamType: upstreamType,
-		BaseURL:      strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		APIKey:       strings.TrimSpace(apiKey),
-		Models:       models,
+		DBID:          row.ID,
+		RefreshToken:  rt,
+		SessionToken:  st,
+		ProxyURL:      strings.TrimSpace(row.ProxyURL),
+		CustomHeaders: row.GetCredentialStringMap("custom_headers"),
+		HealthTier:    HealthTierWarm,
+		AddedAt:       row.CreatedAt.UnixNano(),
+		UpstreamType:  upstreamType,
+		BaseURL:       strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		APIKey:        strings.TrimSpace(apiKey),
+		Models:        models,
 	}
 	if isOpenAIResponsesAccount {
 		account.HealthTier = HealthTierHealthy
@@ -3264,11 +3430,17 @@ func (s *Store) StartBackgroundRefresh() {
 		expiredCleanupTicker := time.NewTicker(15 * time.Minute)
 		// 添加定时重建 FastScheduler 以优化性能
 		rebuildSchedulerTicker := time.NewTicker(10 * time.Minute)
+		// 到点即探定时器：始终武装到「最近的限流冷却/窗口重置边界」，倒计时归零即探针刷新。
+		boundaryProbeTimer := time.NewTimer(time.Hour)
+		if !boundaryProbeTimer.Stop() {
+			<-boundaryProbeTimer.C
+		}
 		defer refreshTimer.Stop()
 		defer autoCleanupTicker.Stop()
 		defer fullUsageCleanupTicker.Stop()
 		defer expiredCleanupTicker.Stop()
 		defer rebuildSchedulerTicker.Stop()
+		defer boundaryProbeTimer.Stop()
 
 		resetRefreshTimer := func() {
 			if !refreshTimer.Stop() {
@@ -3279,6 +3451,9 @@ func (s *Store) StartBackgroundRefresh() {
 			}
 			refreshTimer.Reset(s.GetBackgroundRefreshInterval())
 		}
+
+		// 启动时先武装一次；此后每次巡检/唤醒/到点后都会重排，保证始终盯住最近边界。
+		s.armNextBoundaryProbe(boundaryProbeTimer)
 
 		for {
 			select {
@@ -3291,6 +3466,16 @@ func (s *Store) StartBackgroundRefresh() {
 					s.TriggerRecoveryProbeAsync()
 				}
 				refreshTimer.Reset(s.GetBackgroundRefreshInterval())
+				// 巡检可能刷新了各账号的重置时间，顺带重排「到点即探」定时器，
+				// 兜底那些两次唤醒之间未显式 WakeBoundaryProbe 的边界变化。
+				s.armNextBoundaryProbe(boundaryProbeTimer)
+			case <-boundaryProbeTimer.C:
+				// 某账号的限流冷却/窗口重置刚归零：立即探针刷新真实用量，再武装下一个边界。
+				s.TriggerUsageProbeAsync()
+				s.armNextBoundaryProbe(boundaryProbeTimer)
+			case <-s.boundaryProbeWakeCh:
+				// 有更早的新边界出现（如刚吃到 429 冷却），重排到该时刻。
+				s.armNextBoundaryProbe(boundaryProbeTimer)
 			case <-s.backgroundRefreshWakeCh:
 				resetRefreshTimer()
 			case <-autoCleanupTicker.C:
@@ -4883,6 +5068,17 @@ func (s *Store) ApplyAccountProxyURL(dbID int64, proxyURL string) bool {
 	return true
 }
 
+func (s *Store) ApplyAccountCustomHeaders(dbID int64, headers map[string]string) bool {
+	acc := s.FindByID(dbID)
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	acc.CustomHeaders = cloneStringMap(headers)
+	acc.mu.Unlock()
+	return true
+}
+
 func (s *Store) ApplyAccountEnabled(dbID int64, enabled bool) bool {
 	acc := s.FindByID(dbID)
 	if acc == nil {
@@ -5490,6 +5686,11 @@ func (s *Store) ApplyUsageLimitMetadata(acc *Account, planType string, resetAt t
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
 
+	// free plan 的 7d 窗口重置时刻武装「到点即探」，重置一到即刷新进度条。
+	if plan == "free" {
+		s.WakeBoundaryProbe(resetAt)
+	}
+
 	if s.db == nil || len(fields) == 0 {
 		return
 	}
@@ -5563,6 +5764,66 @@ func (s *Store) TriggerUsageProbeAsync() {
 		defer s.usageProbeBatch.Store(false)
 		s.parallelProbeUsage(context.Background())
 	}()
+}
+
+// WakeBoundaryProbe 提示「到点即探」调度器：某账号的限流冷却 / 窗口重置边界发生了变化，
+// 可能出现了比当前武装更早的边界，需要重排定时器。at 为该边界时刻（IsZero 表示未知，
+// 强制重排）。仅当 at 严格早于当前武装边界（或未武装）时才打扰后台 goroutine，避免
+// 高频 429/流量刷新导致的无谓重排。本方法只做一次非阻塞 channel 写入，任何锁下调用都安全。
+func (s *Store) WakeBoundaryProbe(at time.Time) {
+	if s == nil || s.boundaryProbeWakeCh == nil {
+		return
+	}
+	if !at.IsZero() {
+		if !at.After(time.Now()) {
+			return // 边界已过，交给常规巡检/探针即可
+		}
+		armed := atomic.LoadInt64(&s.armedBoundaryAt)
+		if armed != 0 && at.UnixNano() >= armed {
+			return // 已有更早或同刻的唤醒计划，定时器到点后会重新扫描接管更晚的边界
+		}
+	}
+	select {
+	case s.boundaryProbeWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// armNextBoundaryProbe 扫描所有账号，找出最近的「到点即探」边界并把 timer 重排到该时刻
+// （加 probeBoundaryLag 滞后）。无待处理边界时停表。只在后台刷新 goroutine 内调用
+// （该 goroutine 不持有任何账号锁，故此处逐账号取 RLock 不会死锁）。
+func (s *Store) armNextBoundaryProbe(timer *time.Timer) {
+	now := time.Now()
+	s.mu.RLock()
+	accounts := make([]*Account, len(s.accounts))
+	copy(accounts, s.accounts)
+	s.mu.RUnlock()
+
+	var next time.Time
+	for _, acc := range accounts {
+		if t, ok := acc.nextProbeBoundary(now); ok {
+			if next.IsZero() || t.Before(next) {
+				next = t
+			}
+		}
+	}
+
+	if !timer.Stop() {
+		select {
+		case <-timer.C:
+		default:
+		}
+	}
+	if next.IsZero() {
+		atomic.StoreInt64(&s.armedBoundaryAt, 0)
+		return
+	}
+	atomic.StoreInt64(&s.armedBoundaryAt, next.UnixNano())
+	d := time.Until(next) + probeBoundaryLag
+	if d < 0 {
+		d = probeBoundaryLag
+	}
+	timer.Reset(d)
 }
 
 // TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测

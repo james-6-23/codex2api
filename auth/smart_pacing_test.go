@@ -182,4 +182,34 @@ func TestSmartPacingConcurrencyLimitLocked(t *testing.T) {
 			t.Fatalf("got %d, 期望被 7d 窗口压到 [1,8)", got)
 		}
 	})
+
+	// team 月窗按真实 30 天周期配速，而非固定 7 天：同样的用量/剩余时间下，
+	// 误当 7 天会过度限流，用真实月窗则判为匀速不限流。
+	t.Run("team 月窗按真实周期配速", func(t *testing.T) {
+		newTeamMonthly := func() *Account {
+			return &Account{
+				smartPacingEnabled:        true,
+				smartPacingMinConcurrency: 1,
+				smartPacingWindows5h:      false, // 隔离，只看长窗口
+				smartPacingWindows7d:      true,
+				UsagePercent7d:            50,
+				UsagePercent7dValid:       true,
+				Reset7dAt:                 now.Add(15 * 24 * time.Hour), // 30天窗口过半、用量过半 → 匀速
+			}
+		}
+
+		// 已知月窗长度(30天=2592000s)：ratio=1.0 → 不限流。
+		a := newTeamMonthly()
+		a.Window7dSeconds = 2_592_000
+		if got := a.smartPacingConcurrencyLimitLocked(8, now); got != 8 {
+			t.Fatalf("月窗按真实周期应判匀速不限流，got %d want 8", got)
+		}
+
+		// 未知长度(=0)回退固定 7 天：同样数据会被误判超前燃烧而压并发，
+		// 印证若不修分类，team 账号会被过度限流。
+		b := newTeamMonthly()
+		if got := b.smartPacingConcurrencyLimitLocked(8, now); got >= 8 {
+			t.Fatalf("回退 7 天应过度限流(证明缺口)，got %d want <8", got)
+		}
+	})
 }

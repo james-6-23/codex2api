@@ -162,7 +162,9 @@ func queryWhamUsageWithURL(ctx context.Context, account *auth.Account, proxyURL,
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", defaultCodexCLIUserAgent)
 	req.Header.Set("Originator", Originator)
-	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
+	// 用 EffectiveAccountID:自定义头覆盖了工作区 ID 时,额度必须查覆盖后的空间,
+	// 否则进度条/自动暂停/智能配速统计的是与实际流量不同的空间。
+	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
@@ -259,7 +261,8 @@ func consumeResetCreditWithURL(ctx context.Context, account *auth.Account, proxy
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", defaultCodexCLIUserAgent)
 	req.Header.Set("Originator", Originator)
-	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
+	// 与 wham 查询一致,重置额度也作用于自定义头覆盖后的空间。
+	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("chatgpt-account-id", accountID)
 	}
 
@@ -305,7 +308,13 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		// 只回填真正的工作区 ID。此前 account_id 缺失时用 user_id 兜底写入
 		// account_id 字段，会污染 OAuth 身份去重键（JWT 解出的工作区 ID 与
 		// 库里存的 user-... 永远对不上），导致同一账号重复导入(串号池)。
-		store.UpdateAccountIdentity(account, usage.Email, strings.TrimSpace(usage.AccountID))
+		// 自定义头覆盖了工作区 ID 时,wham 返回的是覆盖后空间的 ID,
+		// 不能回写进 OAuth 身份字段(会覆盖真实身份并与覆盖值反复打架)。
+		identityAccountID := strings.TrimSpace(usage.AccountID)
+		if account.AccountIDOverridden() {
+			identityAccountID = ""
+		}
+		store.UpdateAccountIdentity(account, usage.Email, identityAccountID)
 		store.UpdateAccountSubscriptionExpiresAt(account, usage.SubscriptionExpiresAt())
 	}
 
@@ -329,14 +338,20 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		result.Reset5hAt = resetAt
 		result.HasUsage5h = true
 		result.Used5hHeaders = true
+		if store != nil {
+			// 5h 窗口重置时刻武装「到点即探」，窗口翻新即刷新进度条。
+			store.WakeBoundaryProbe(resetAt)
+		}
 	}
 
 	if w7d != nil {
 		resetAt := whamWindowResetAt(w7d, now)
 		account.SetReset7dAt(resetAt)
+		account.SetWindow7dSeconds(w7d.LimitWindowSeconds)
 		result.UsagePct7d = w7d.UsedPercent
 		result.HasUsage7d = true
 		if store != nil {
+			store.WakeBoundaryProbe(resetAt)
 			store.PersistUsageSnapshot(account, w7d.UsedPercent)
 			if result.UsagePct7d >= 100 {
 				result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
@@ -382,12 +397,13 @@ func pickClassifiedWhamWindows(primary, secondary *WhamUsageWindow, planType str
 		if w == nil {
 			continue
 		}
-		switch w.LimitWindowSeconds {
-		case whamWindow5hSeconds:
+		switch {
+		case w.LimitWindowSeconds == whamWindow5hSeconds:
 			if w5h == nil {
 				w5h = w
 			}
-		case whamWindow7dSeconds:
+		// 长窗口槽(7d)：plus/pro 为周窗(604800)，team plan 为月窗(约 2592000，28–31 天容差)。
+		case w.LimitWindowSeconds == whamWindow7dSeconds || auth.IsMonthlyWindowSeconds(w.LimitWindowSeconds):
 			if w7d == nil {
 				w7d = w
 			}

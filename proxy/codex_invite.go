@@ -85,7 +85,8 @@ func SendCodexInvite(ctx context.Context, account *auth.Account, proxyURL, refer
 	req.Header.Set("Oai-Language", inviteLanguage)
 	req.Header.Set("Originator", inviteOriginator)
 	req.Header.Set("User-Agent", inviteUserAgent)
-	if accountID := strings.TrimSpace(account.AccountID); accountID != "" {
+	// 邀请操作作用于自定义头覆盖后的空间,与实际流量指向一致。
+	if accountID := account.EffectiveAccountID(); accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 

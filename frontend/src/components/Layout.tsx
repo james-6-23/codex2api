@@ -1,12 +1,14 @@
-import { type CSSProperties, type PropsWithChildren, type ReactNode, useEffect, useRef, useState } from 'react'
+import { type CSSProperties, type PropsWithChildren, type ReactNode, useCallback, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { NavLink, useLocation } from 'react-router-dom'
-import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut } from 'lucide-react'
+import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import { resetAdminAuthState } from '../api'
+import { api, resetAdminAuthState } from '../api'
 import { DEFAULT_SITE_LOGO, isBrandingVideo, useBranding } from '../branding'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { useTheme } from '../hooks/useTheme'
+import { useToast } from '../hooks/useToast'
+import { getErrorMessage } from '../utils/error'
 import SecurityBanner from './SecurityBanner'
 
 type NavDef = {
@@ -34,12 +36,17 @@ const navDefs: NavDef[] = [
 export default function Layout({ children }: PropsWithChildren) {
   const location = useLocation()
   const { t, i18n } = useTranslation()
-  const { hasUpdate, latestVersion } = useVersionCheck(location.pathname)
+  const { hasUpdate, latestVersion, updateInfo, refreshVersion } = useVersionCheck(location.pathname)
   const { siteName, siteLogo, backgroundImage, backgroundOpacity, backgroundBlur, backgroundGlassOpacity, backgroundGlassBlur } = useBranding()
   const { theme, toggle } = useTheme()
+  const { showToast } = useToast()
   const [spinning, setSpinning] = useState(false)
   const logoSrc = siteLogo || DEFAULT_SITE_LOGO
   const [showVersionPopover, setShowVersionPopover] = useState(false)
+  const [updatingVersion, setUpdatingVersion] = useState(false)
+  const [restartingAfterUpdate, setRestartingAfterUpdate] = useState(false)
+  const restartPollRef = useRef<number | null>(null)
+  const restartPollActiveRef = useRef(false)
   // 侧栏折叠状态。lg+ 屏才生效;collapsed=true 时只显示 icon,列宽从 264 → 64。
   // localStorage 持久化跨刷新保留选择。
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
@@ -64,9 +71,71 @@ export default function Layout({ children }: PropsWithChildren) {
   const versionPopoverRef = useRef<HTMLDivElement | null>(null)
   const versionButtonRef = useRef<HTMLButtonElement | null>(null)
   const [versionPopoverPos, setVersionPopoverPos] = useState<{ top: number; left: number } | null>(null)
-  const releaseURL = latestVersion
+  const releaseURL = updateInfo?.release_url || (latestVersion
     ? `https://github.com/james-6-23/codex2api/releases/tag/${encodeURIComponent(latestVersion)}`
-    : undefined
+    : undefined)
+  const canApplyUpdate = hasUpdate && updateInfo?.supported !== false
+  const updateUnavailableReason = updateInfo?.unsupported_reason
+
+  const stopRestartPolling = useCallback(() => {
+    restartPollActiveRef.current = false
+    if (restartPollRef.current !== null) {
+      window.clearTimeout(restartPollRef.current)
+      restartPollRef.current = null
+    }
+  }, [])
+
+  const pollForUpdatedVersion = useCallback((targetVersion: string) => {
+    stopRestartPolling()
+    const normalizedTarget = targetVersion.replace(/^v/i, '')
+    let attempts = 0
+    restartPollActiveRef.current = true
+
+    const scheduleNext = (delayMs: number) => {
+      restartPollRef.current = window.setTimeout(async () => {
+        if (!restartPollActiveRef.current) return
+        attempts += 1
+        try {
+          const info = await api.getSystemUpdate()
+          if (info.current_version.replace(/^v/i, '') === normalizedTarget) {
+            stopRestartPolling()
+            window.location.reload()
+            return
+          }
+        } catch {
+          // service may be restarting
+        }
+        if (!restartPollActiveRef.current) return
+        if (attempts >= 60) {
+          stopRestartPolling()
+          setRestartingAfterUpdate(false)
+          return
+        }
+        scheduleNext(1500)
+      }, delayMs)
+    }
+
+    scheduleNext(2500)
+  }, [stopRestartPolling])
+
+  const handleApplyUpdate = async () => {
+    if (!canApplyUpdate || updatingVersion || restartingAfterUpdate) return
+    setUpdatingVersion(true)
+    try {
+      const result = await api.performSystemUpdate()
+      showToast(result.message || t('common.updateApplied'), 'success')
+      setRestartingAfterUpdate(Boolean(result.restarting))
+      if (result.restarting) {
+        pollForUpdatedVersion(result.latest_version)
+      } else {
+        void refreshVersion(true)
+      }
+    } catch (error) {
+      showToast(getErrorMessage(error, t('common.updateFailed')), 'error')
+    } finally {
+      setUpdatingVersion(false)
+    }
+  }
 
   useEffect(() => {
     if (!showVersionPopover) return
@@ -99,6 +168,8 @@ export default function Layout({ children }: PropsWithChildren) {
       window.removeEventListener('scroll', updatePosition, true)
     }
   }, [showVersionPopover])
+
+  useEffect(() => stopRestartPolling, [stopRestartPolling])
 
   useEffect(() => {
     const root = document.documentElement
@@ -278,6 +349,38 @@ export default function Layout({ children }: PropsWithChildren) {
                             <div className="mt-1 text-[11px] text-muted-foreground">
                               {t('common.latestVersion', { version: latestVersion })}
                             </div>
+                          )}
+                          {hasUpdate && updateUnavailableReason && (
+                            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700">
+                              {updateUnavailableReason}
+                            </div>
+                          )}
+                          {hasUpdate && updateInfo?.warning && (
+                            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-2 text-[11px] font-medium leading-relaxed text-amber-700">
+                              {updateInfo.warning}
+                            </div>
+                          )}
+                          {hasUpdate && (
+                            <button
+                              type="button"
+                              className="mt-3 inline-flex w-full items-center justify-center gap-1.5 rounded-md bg-primary px-2.5 py-1.5 text-[12px] font-semibold text-primary-foreground transition-colors hover:bg-primary/90 disabled:cursor-not-allowed disabled:opacity-60"
+                              disabled={!canApplyUpdate || updatingVersion || restartingAfterUpdate}
+                              title={!canApplyUpdate ? updateUnavailableReason : undefined}
+                              onClick={handleApplyUpdate}
+                            >
+                              {restartingAfterUpdate ? (
+                                <RefreshCw className="size-3.5 animate-spin" />
+                              ) : updatingVersion ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <Download className="size-3.5" />
+                              )}
+                              {restartingAfterUpdate
+                                ? t('common.restarting')
+                                : updatingVersion
+                                  ? t('common.updating')
+                                  : t('common.updateNow')}
+                            </button>
                           )}
                           {releaseURL && (
                             <a
