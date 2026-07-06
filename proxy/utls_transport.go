@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"log"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -133,11 +134,17 @@ func rustlsClientHelloSpec() *utls.ClientHelloSpec {
 			{Group: utls.X25519},
 		}},
 		&utls.ALPNExtension{AlpnProtocols: []string{"h2", "http/1.1"}},
-		// PreSharedKeyExtension 必须是最后一个扩展（TLS 1.3 RFC 8446 §4.2.11 要求）。
-		// 空占位让 uTLS 在启用 session cache 时自动填充 PSK 数据（resumption）。
+		// PreSharedKeyExtension 必须是最后一个扩展（TLS 1.3 RFC 8446 §4.2.11，
+		// uTLS 也会硬校验 "must be the last extension"）。空占位让 uTLS 在启用
+		// session cache 时自动填充 PSK（resumption）；无 session 时由 OmitEmptyPsk 省略。
 		&utls.UtlsPreSharedKeyExtension{},
 	}
-	// 注意：扩展顺序有协议依赖（SNI 在前、PSK 必须最后），不能随机打乱。
+	// rustls 每次握手随机排列扩展（RFC 8701 抗僵化）——实测 codex 0.142.5 连 SNI 都参与
+	// 打乱，JA3 每次不同。唯一约束：pre_shared_key 必须钉在最后，故只打乱 exts[0:n-1]。
+	// （上次崩溃根因是缺 PSK 扩展 + session cache，非打乱本身；PSK 已补齐后打乱是安全的。）
+	if n := len(exts); n > 1 {
+		rand.Shuffle(n-1, func(i, j int) { exts[i], exts[j] = exts[j], exts[i] })
+	}
 
 	return &utls.ClientHelloSpec{
 		CipherSuites: []uint16{

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -123,36 +124,33 @@ func TestRustlsHelloMatchesRealCodex(t *testing.T) {
 	}
 }
 
-// TestRustlsHelloExtensionsStable 验证扩展顺序固定（PSK 如存在则必须最后，SNI 必须在前）。
-func TestRustlsHelloExtensionsStable(t *testing.T) {
-	const tries = 3
-	var first []uint16
+// TestRustlsHelloExtensionsShuffled 验证扩展每次随机打乱（对齐真实 codex 反 ossification），
+// 但 pre_shared_key(41) 若存在必须最后（TLS 1.3 约束）。多次抓取应出现不同顺序。
+func TestRustlsHelloExtensionsShuffled(t *testing.T) {
+	seen := map[string]bool{}
+	const tries = 8
 	for i := 0; i < tries; i++ {
 		h := captureRustlsHello(t)
-		if i == 0 {
-			first = h.extOrder
-			continue
+		// 关键扩展必须存在
+		for _, ext := range []uint16{0, 16, 43, 51} { // SNI, ALPN, SupportedVersions, KeyShare
+			if !containsU16(h.extOrder, ext) {
+				t.Fatalf("缺少扩展 0x%04x, 实际: %v", ext, h.extOrder)
+			}
 		}
-		if !equalU16(first, h.extOrder) {
-			t.Errorf("扩展顺序不稳定: 第1次=%v, 第%d次=%v", first, i+1, h.extOrder)
+		// PSK(41) 若存在必须最后
+		if containsU16(h.extOrder, 41) && h.extOrder[len(h.extOrder)-1] != 41 {
+			t.Fatalf("PreSharedKey(41) 必须最后, 实际顺序: %v", h.extOrder)
 		}
+		// 记录顺序指纹
+		key := ""
+		for _, e := range h.extOrder {
+			key += fmt.Sprintf("%d,", e)
+		}
+		seen[key] = true
 	}
-	// 验证关键扩展存在
-	if !containsU16(first, 0) { // SNI
-		t.Errorf("缺少 SNI 扩展 (0)")
-	}
-	if !containsU16(first, 16) { // ALPN
-		t.Errorf("缺少 ALPN 扩展 (16)")
-	}
-	if !containsU16(first, 43) { // SupportedVersions
-		t.Errorf("缺少 SupportedVersions 扩展 (43)")
-	}
-	if !containsU16(first, 51) { // KeyShare
-		t.Errorf("缺少 KeyShare 扩展 (51)")
-	}
-	// PSK (41) 在新连接时被 OmitEmptyPsk 隐藏（正常），仅验证如存在则必须最后
-	if containsU16(first, 41) && len(first) > 0 && first[len(first)-1] != 41 {
-		t.Errorf("PreSharedKey 扩展 (41) 如存在必须最后，实际顺序: %v", first)
+	// 8 次里应出现多种顺序（随机打乱生效）；若全同则打乱失效
+	if len(seen) < 2 {
+		t.Errorf("扩展顺序 %d 次全相同, 随机打乱未生效", tries)
 	}
 }
 
