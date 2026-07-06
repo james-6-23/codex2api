@@ -854,6 +854,7 @@ export interface CodexAuditReport {
   policy_errors: UsageLog[]
   slow_requests: UsageLog[]
   notes: string[]
+  last_cyber_policy_at?: string
 }
 
 export interface PromptFilterRulePatternTestResponse {

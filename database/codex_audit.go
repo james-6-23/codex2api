@@ -33,6 +33,7 @@ type CodexAuditReport struct {
 	PolicyErrors       []*UsageLog                 `json:"policy_errors"`
 	SlowRequests       []*UsageLog                 `json:"slow_requests"`
 	Notes              []string                    `json:"notes"`
+	LastCyberPolicyAt  *time.Time                  `json:"last_cyber_policy_at,omitempty"`
 }
 
 type CodexAuditSummary struct {
@@ -178,7 +179,32 @@ func (db *DB) BuildCodexAuditReport(ctx context.Context, query CodexAuditQuery) 
 	}
 	report.Summary = summarizeCodexAudit(report)
 	report.Verdict = codexAuditVerdict(report)
+	if report.LastCyberPolicyAt, err = db.codexAuditLastCyberPolicyAt(ctx, end); err != nil {
+		return nil, err
+	}
 	return report, nil
+}
+
+// codexAuditLastCyberPolicyAt 查询窗口外最近一次 upstream_cyber_policy 事件（30 天回看），
+// 供前端在当前窗口 cyb=0 时提示「最近一次 cyb」，避免短窗口误判为一直无风险。
+func (db *DB) codexAuditLastCyberPolicyAt(ctx context.Context, end time.Time) (*time.Time, error) {
+	start := end.Add(-30 * 24 * time.Hour)
+	startArg, endArg := db.timeRangeArgs(start, end)
+	var raw any
+	if err := db.conn.QueryRowContext(ctx, `
+		SELECT MAX(created_at) FROM prompt_filter_logs
+		WHERE source = 'upstream_cyber_policy' AND created_at >= $1 AND created_at <= $2
+	`, startArg, endArg).Scan(&raw); err != nil {
+		return nil, err
+	}
+	if raw == nil {
+		return nil, nil
+	}
+	ts, err := parseDBTimeValue(raw)
+	if err != nil {
+		return nil, nil
+	}
+	return &ts, nil
 }
 
 func (db *DB) codexAuditPromptFilterRows(ctx context.Context, start, end time.Time) ([]CodexAuditPromptFilterRow, error) {
