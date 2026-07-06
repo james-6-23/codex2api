@@ -52,6 +52,8 @@ const rangeOptions = [
   { label: '最近 6 小时', value: '6' },
   { label: '最近 12 小时', value: '12' },
   { label: '最近 24 小时', value: '24' },
+  { label: '最近 3 天', value: '72' },
+  { label: '最近 7 天', value: '168' },
 ]
 
 const refreshOptions = [
@@ -115,7 +117,7 @@ export default function CodexAudit() {
   const [refreshSeconds, setRefreshSeconds] = useState(() => loadStoredNumber('codex_audit_refresh_seconds', 60))
 
   const loadData = useCallback(async (): Promise<AuditData> => {
-    const bucketMinutes = rangeHours <= 1 ? 5 : rangeHours <= 6 ? 10 : 30
+    const bucketMinutes = rangeHours <= 1 ? 5 : rangeHours <= 6 ? 10 : rangeHours <= 24 ? 30 : 120
     const [report, health] = await Promise.all([
       api.getCodexAuditReport({ hours: rangeHours, bucketMinutes, limit: 30 }),
       api.getHealth(),
@@ -285,13 +287,6 @@ export default function CodexAudit() {
               </Panel>
             </div>
 
-            {report.notes?.length ? (
-              <Panel title="说明">
-                <ul className="space-y-2 text-sm leading-6 text-muted-foreground">
-                  {report.notes.map((note, index) => <li key={index}>{note}</li>)}
-                </ul>
-              </Panel>
-            ) : null}
           </div>
         ) : null}
       </StateShell>
