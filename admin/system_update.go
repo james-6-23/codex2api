@@ -46,7 +46,7 @@ type systemUpdater struct {
 	goos               string
 	goarch             string
 	executablePath     func() (string, error)
-	restartProcess     func() error
+	restartProcess     func(string) error
 	restartDelay       time.Duration
 	runningInContainer func() bool
 
@@ -228,12 +228,12 @@ func (u *systemUpdater) PerformUpdate(ctx context.Context) (*systemUpdateResult,
 		return nil, fmt.Errorf("%w: 未找到适配 %s/%s 的发布资产", errSystemUpdateUnsupported, u.goos, u.goarch)
 	}
 
-	backupPath, err := u.applyBinaryUpdate(ctx, inspection)
+	exePath, backupPath, err := u.applyBinaryUpdate(ctx, inspection)
 	if err != nil {
 		return nil, err
 	}
 
-	u.scheduleRestart()
+	u.scheduleRestart(exePath)
 	return &systemUpdateResult{
 		Message:        "更新已应用，服务正在重启",
 		CurrentVersion: inspection.info.CurrentVersion,
@@ -332,23 +332,23 @@ func cloneSystemGitHubRelease(release *systemGitHubRelease) *systemGitHubRelease
 	return &cloned
 }
 
-func (u *systemUpdater) applyBinaryUpdate(ctx context.Context, inspection *systemUpdateInspection) (string, error) {
+func (u *systemUpdater) applyBinaryUpdate(ctx context.Context, inspection *systemUpdateInspection) (string, string, error) {
 	asset := inspection.asset
 	if asset == nil {
-		return "", fmt.Errorf("更新资产为空")
+		return "", "", fmt.Errorf("更新资产为空")
 	}
 	if err := validateSystemUpdateURL(asset.BrowserDownloadURL); err != nil {
-		return "", fmt.Errorf("发布资产 URL 不可信: %w", err)
+		return "", "", fmt.Errorf("发布资产 URL 不可信: %w", err)
 	}
 	if inspection.checksumAsset != nil {
 		if err := validateSystemUpdateURL(inspection.checksumAsset.BrowserDownloadURL); err != nil {
-			return "", fmt.Errorf("校验和 URL 不可信: %w", err)
+			return "", "", fmt.Errorf("校验和 URL 不可信: %w", err)
 		}
 	}
 
 	exePath, err := u.executablePath()
 	if err != nil {
-		return "", fmt.Errorf("获取当前可执行文件路径失败: %w", err)
+		return "", "", fmt.Errorf("获取当前可执行文件路径失败: %w", err)
 	}
 	if resolved, err := filepath.EvalSymlinks(exePath); err == nil {
 		exePath = resolved
@@ -357,34 +357,34 @@ func (u *systemUpdater) applyBinaryUpdate(ctx context.Context, inspection *syste
 
 	tempDir, err := os.MkdirTemp(exeDir, ".codex2api-update-*")
 	if err != nil {
-		return "", fmt.Errorf("创建更新临时目录失败: %w", err)
+		return "", "", fmt.Errorf("创建更新临时目录失败: %w", err)
 	}
 	defer func() { _ = os.RemoveAll(tempDir) }()
 
 	archivePath := filepath.Join(tempDir, filepath.Base(asset.Name))
 	if err := u.client.DownloadFile(ctx, asset.BrowserDownloadURL, archivePath, systemUpdateMaxDownloadBytes); err != nil {
-		return "", fmt.Errorf("下载更新包失败: %w", err)
+		return "", "", fmt.Errorf("下载更新包失败: %w", err)
 	}
 	if err := verifySystemUpdateChecksum(ctx, u.client, archivePath, asset, inspection.checksumAsset); err != nil {
-		return "", err
+		return "", "", err
 	}
 
 	newBinaryPath := filepath.Join(tempDir, systemBinaryName(u.goos))
 	if err := extractSystemUpdateBinary(archivePath, newBinaryPath); err != nil {
-		return "", fmt.Errorf("解压更新包失败: %w", err)
+		return "", "", fmt.Errorf("解压更新包失败: %w", err)
 	}
 	if err := os.Chmod(newBinaryPath, 0755); err != nil {
-		return "", fmt.Errorf("设置新程序执行权限失败: %w", err)
+		return "", "", fmt.Errorf("设置新程序执行权限失败: %w", err)
 	}
 
 	backupPath := exePath + ".backup"
 	if err := replaceExecutable(exePath, newBinaryPath, backupPath); err != nil {
-		return "", err
+		return "", "", err
 	}
-	return backupPath, nil
+	return exePath, backupPath, nil
 }
 
-func (u *systemUpdater) scheduleRestart() {
+func (u *systemUpdater) scheduleRestart(exePath string) {
 	restart := u.restartProcess
 	if restart == nil {
 		return
@@ -395,7 +395,7 @@ func (u *systemUpdater) scheduleRestart() {
 	}
 	go func() {
 		time.Sleep(delay)
-		if err := restart(); err != nil {
+		if err := restart(exePath); err != nil {
 			log.Printf("在线更新后重启失败: %v", err)
 		}
 	}()

@@ -16,10 +16,10 @@ import (
 )
 
 type fakeSystemReleaseClient struct {
-	release   *systemGitHubRelease
-	files     map[string][]byte
-	fetchErr  error
-	fetches   int
+	release  *systemGitHubRelease
+	files    map[string][]byte
+	fetchErr error
+	fetches  int
 }
 
 func (c *fakeSystemReleaseClient) FetchLatestRelease(context.Context) (*systemGitHubRelease, error) {
@@ -268,7 +268,7 @@ func TestSystemUpdaterPerformUpdateReplacesBinaryAndKeepsBackup(t *testing.T) {
 	archive := buildSystemUpdateTarball(t, "codex2api", []byte("new-binary"))
 	archiveHash := sha256.Sum256(archive)
 	archiveURL := "https://github.com/james-6-23/codex2api/releases/download/v2.4.4/codex2api_2.4.4_linux_amd64.tar.gz"
-	restarted := make(chan struct{}, 1)
+	restarted := make(chan string, 1)
 	client := &fakeSystemReleaseClient{
 		release: &systemGitHubRelease{
 			TagName: "v2.4.4",
@@ -287,8 +287,8 @@ func TestSystemUpdaterPerformUpdateReplacesBinaryAndKeepsBackup(t *testing.T) {
 		goos:           "linux",
 		goarch:         "amd64",
 		executablePath: func() (string, error) { return currentPath, nil },
-		restartProcess: func() error {
-			restarted <- struct{}{}
+		restartProcess: func(path string) error {
+			restarted <- path
 			return nil
 		},
 		restartDelay: 0,
@@ -308,7 +308,10 @@ func TestSystemUpdaterPerformUpdateReplacesBinaryAndKeepsBackup(t *testing.T) {
 		t.Fatalf("backup binary = %q, want old-binary", got)
 	}
 	select {
-	case <-restarted:
+	case path := <-restarted:
+		if path != currentPath {
+			t.Fatalf("restart path = %q, want %q", path, currentPath)
+		}
 	case <-time.After(time.Second):
 		t.Fatal("restart was not scheduled")
 	}
@@ -340,7 +343,7 @@ func TestSystemUpdaterPerformUpdateRejectsChecksumMismatch(t *testing.T) {
 		goos:           "linux",
 		goarch:         "amd64",
 		executablePath: func() (string, error) { return currentPath, nil },
-		restartProcess: func() error { t.Fatal("restart should not be called"); return nil },
+		restartProcess: func(string) error { t.Fatal("restart should not be called"); return nil },
 	}
 
 	_, err := updater.PerformUpdate(context.Background())
