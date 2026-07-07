@@ -23,9 +23,9 @@ func TestCacheCompletedResponseCachesCodexNativeToolCalls(t *testing.T) {
 	expandedInput := []byte(`[{"type":"message","role":"user","content":"find a tool"}]`)
 	completed := []byte(`{"type":"response.completed","response":{"id":"resp_native","output":[{"type":"tool_search_call","id":"ts_123","call_id":"call_search","status":"completed"}]}}`)
 
-	cacheCompletedResponse(expandedInput, completed)
+	cacheCompletedResponse("key:1", expandedInput, completed)
 
-	cached := getResponseCache("resp_native")
+	cached := getResponseCache("key:1", "resp_native")
 	if len(cached) != 2 {
 		t.Fatalf("cached items = %d, want 2", len(cached))
 	}
@@ -40,13 +40,13 @@ func TestCacheCompletedResponseCachesCodexNativeToolCalls(t *testing.T) {
 func TestExpandPreviousResponseUsesCachedCodexNativeToolContext(t *testing.T) {
 	resetResponseCacheForTest()
 
-	cacheCompletedResponse(
+	cacheCompletedResponse("key:1",
 		[]byte(`[{"type":"message","role":"user","content":"run mcp tool"}]`),
 		[]byte(`{"type":"response.completed","response":{"id":"resp_mcp","output":[{"type":"mcp_tool_call","call_id":"call_mcp","name":"read","arguments":"{}"}]}}`),
 	)
 
 	body := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_mcp","input":[{"type":"mcp_tool_call_output","call_id":"call_mcp","output":"ok"}]}`)
-	got, prevID := expandPreviousResponse(body)
+	got, prevID := expandPreviousResponse(body, "key:1")
 
 	if prevID != "resp_mcp" {
 		t.Fatalf("prevID = %q, want resp_mcp", prevID)
@@ -77,12 +77,12 @@ func TestExpandPreviousResponseUsesRuntimeCacheAfterLocalMiss(t *testing.T) {
 		json.RawMessage(`{"type":"message","role":"user","content":"run mcp tool"}`),
 		json.RawMessage(`{"type":"mcp_tool_call","call_id":"call_mcp","name":"read","arguments":"{}"}`),
 	}
-	if err := tc.SetResponseContext(ctx, "resp_remote", items, time.Minute); err != nil {
+	if err := tc.SetResponseContext(ctx, responseCacheStoreKey("key:1", "resp_remote"), items, time.Minute); err != nil {
 		t.Fatalf("SetResponseContext: %v", err)
 	}
 
 	body := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_remote","input":[{"type":"mcp_tool_call_output","call_id":"call_mcp","output":"ok"}]}`)
-	got, prevID := expandPreviousResponse(body)
+	got, prevID := expandPreviousResponse(body, "key:1")
 
 	if prevID != "resp_remote" {
 		t.Fatalf("prevID = %q, want resp_remote", prevID)
@@ -99,7 +99,7 @@ func TestExpandPreviousResponseUsesRuntimeCacheAfterLocalMiss(t *testing.T) {
 func TestExpandPreviousResponseSkipsInjectionWhenInputHasFunctionCall(t *testing.T) {
 	resetResponseCacheForTest()
 
-	cacheCompletedResponse(
+	cacheCompletedResponse("key:1",
 		[]byte(`[{"type":"message","role":"user","content":"call tool"}]`),
 		[]byte(`{"type":"response.completed","response":{"id":"resp_dup","output":[{"type":"function_call","call_id":"call_abc","name":"get_weather","arguments":"{}"}]}}`),
 	)
@@ -109,7 +109,7 @@ func TestExpandPreviousResponseSkipsInjectionWhenInputHasFunctionCall(t *testing
 		`{"type":"function_call","call_id":"call_abc","name":"get_weather","arguments":"{}"},` +
 		`{"type":"function_call_output","call_id":"call_abc","output":"sunny"}` +
 		`]}`)
-	got, prevID := expandPreviousResponse(body)
+	got, prevID := expandPreviousResponse(body, "key:1")
 
 	if prevID != "resp_dup" {
 		t.Fatalf("prevID = %q, want resp_dup", prevID)
@@ -132,7 +132,7 @@ func TestExpandPreviousResponseLeavesBodyUntouchedOnCacheMiss(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_missing","input":[` +
 		`{"type":"function_call_output","call_id":"call_missing","output":"x"}` +
 		`]}`)
-	got, prevID := expandPreviousResponse(body)
+	got, prevID := expandPreviousResponse(body, "key:1")
 
 	if prevID != "resp_missing" {
 		t.Fatalf("prevID = %q, want resp_missing (returned for downstream cache linkage)", prevID)
@@ -161,10 +161,10 @@ func TestCacheCompletedResponseDoesNotCacheNonCallIDToolCalls(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			resetResponseCacheForTest()
 
-			cacheCompletedResponse([]byte(`[{"type":"message","role":"user","content":"hello"}]`), test.body)
+			cacheCompletedResponse("key:1", []byte(`[{"type":"message","role":"user","content":"hello"}]`), test.body)
 
 			respID := gjson.GetBytes(test.body, "response.id").String()
-			if cached := getResponseCache(respID); cached != nil {
+			if cached := getResponseCache("key:1", respID); cached != nil {
 				t.Fatalf("expected no cache for %s, got %d items", test.name, len(cached))
 			}
 		})
@@ -174,7 +174,7 @@ func TestCacheCompletedResponseDoesNotCacheNonCallIDToolCalls(t *testing.T) {
 func TestCacheCompletedResponseSkipsReasoningAndMessageOutputItems(t *testing.T) {
 	resetResponseCacheForTest()
 
-	cacheCompletedResponse(
+	cacheCompletedResponse("key:1",
 		[]byte(`[`+
 			`{"type":"reasoning","id":"rs_input","encrypted_content":"stale"},`+
 			`{"type":"message","id":"msg_input","role":"user","content":"call a tool"}`+
@@ -186,7 +186,7 @@ func TestCacheCompletedResponseSkipsReasoningAndMessageOutputItems(t *testing.T)
 			`]}}`),
 	)
 
-	cached := getResponseCache("resp_reasoning")
+	cached := getResponseCache("key:1", "resp_reasoning")
 	if len(cached) != 2 {
 		t.Fatalf("cached items = %d, want input message + function_call only", len(cached))
 	}
@@ -201,5 +201,60 @@ func TestCacheCompletedResponseSkipsReasoningAndMessageOutputItems(t *testing.T)
 	}
 	if id := gjson.GetBytes(cached[1], "id"); id.Exists() {
 		t.Fatalf("cached function_call id should be stripped, got %s", id.Raw)
+	}
+}
+
+// TestGetResponseCacheIsolatesOwners 验证 previous_response_id 缓存按 owner(下游
+// API Key)隔离：用户B拿着用户A的 response_id 查询必须 miss，杜绝跨用户注入他人
+// 对话历史（"用户2串到用户1的上下文"类泄露）。
+func TestGetResponseCacheIsolatesOwners(t *testing.T) {
+	resetResponseCacheForTest()
+
+	cacheCompletedResponse("key:1",
+		[]byte(`[{"type":"message","role":"user","content":"user A secret"}]`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_shared","output":[{"type":"function_call","call_id":"call_a","name":"lookup","arguments":"{}"}]}}`),
+	)
+
+	if cached := getResponseCache("key:1", "resp_shared"); len(cached) == 0 {
+		t.Fatal("owner key:1 should hit its own cache")
+	}
+	if cached := getResponseCache("key:2", "resp_shared"); cached != nil {
+		t.Fatalf("owner key:2 must NOT read key:1's cache, got %d items", len(cached))
+	}
+	if cached := getResponseCache("anon", "resp_shared"); cached != nil {
+		t.Fatalf("anon owner must NOT read key:1's cache, got %d items", len(cached))
+	}
+}
+
+// TestExpandPreviousResponseCrossOwnerMiss 验证跨 owner 的 previous_response_id
+// 展开按缓存未命中处理，body 原样透传（不注入别人的历史）。
+func TestExpandPreviousResponseCrossOwnerMiss(t *testing.T) {
+	resetResponseCacheForTest()
+
+	cacheCompletedResponse("key:1",
+		[]byte(`[{"type":"message","role":"user","content":"user A secret"}]`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_cross","output":[{"type":"mcp_tool_call","call_id":"call_x","name":"read","arguments":"{}"}]}}`),
+	)
+
+	body := []byte(`{"model":"gpt-5.4","previous_response_id":"resp_cross","input":[{"role":"user","content":"user B question"}]}`)
+	got, prevID := expandPreviousResponse(body, "key:2")
+
+	if prevID != "resp_cross" {
+		t.Fatalf("prevID = %q, want resp_cross", prevID)
+	}
+	if string(got) != string(body) {
+		t.Fatalf("cross-owner expansion must be a no-op; got=%s", got)
+	}
+}
+
+func TestResponseCacheOwner(t *testing.T) {
+	if got := responseCacheOwner(42); got != "key:42" {
+		t.Fatalf("responseCacheOwner(42) = %q, want key:42", got)
+	}
+	if got := responseCacheOwner(0); got != "anon" {
+		t.Fatalf("responseCacheOwner(0) = %q, want anon", got)
+	}
+	if got := responseCacheOwner(-1); got != "anon" {
+		t.Fatalf("responseCacheOwner(-1) = %q, want anon", got)
 	}
 }

@@ -22,11 +22,18 @@ const WhamUsageURL = "https://chatgpt.com/backend-api/wham/usage"
 // WhamResetCreditsConsumeURL 是「消耗 1 次主动重置次数、立即重置额度」的端点。
 const WhamResetCreditsConsumeURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"
 
+// WhamResetCreditsURL 列出账号所有「主动重置次数」凭据（含各自的发放/过期时间）。
+// 与 wham/usage 一样不消耗任何额度（issue #322：展示每张重置券的有效期明细）。
+const WhamResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-reset-credits"
+
 // whamURLForTest 允许测试替换默认 URL。生产代码不要赋值。
 var whamURLForTest = ""
 
 // whamConsumeURLForTest 允许测试替换重置端点 URL。生产代码不要赋值。
 var whamConsumeURLForTest = ""
+
+// whamResetCreditsURLForTest 允许测试替换重置券列表端点 URL。生产代码不要赋值。
+var whamResetCreditsURLForTest = ""
 
 // WhamUsage 是 /backend-api/wham/usage 的响应结构。
 type WhamUsage struct {
@@ -202,6 +209,100 @@ type WhamResetCredit struct {
 	RedeemedAt string `json:"redeemed_at,omitempty"`
 }
 
+// WhamResetCreditItem 是 /wham/rate-limit-reset-credits 列表里的单张重置券。
+// reset_type=codex_rate_limits 且 status=available 的即「当前可用」的券。
+type WhamResetCreditItem struct {
+	ID        string `json:"id"`
+	ResetType string `json:"reset_type"`
+	Status    string `json:"status"`
+	GrantedAt string `json:"granted_at"`
+	ExpiresAt string `json:"expires_at"`
+}
+
+// WhamResetCreditsList 是 /wham/rate-limit-reset-credits 的响应结构。
+type WhamResetCreditsList struct {
+	AvailableCount int                   `json:"available_count"`
+	Credits        []WhamResetCreditItem `json:"credits"`
+}
+
+// AvailableCodexCredits 返回列表中可用的 codex 限流重置券（reset_type=codex_rate_limits
+// 且 status=available 且带过期时间），其余状态（已消耗/已过期/非 codex 类型）一律过滤。
+func (l *WhamResetCreditsList) AvailableCodexCredits() []WhamResetCreditItem {
+	if l == nil {
+		return nil
+	}
+	out := make([]WhamResetCreditItem, 0, len(l.Credits))
+	for _, c := range l.Credits {
+		if c.ResetType != "codex_rate_limits" {
+			continue
+		}
+		if c.Status != "available" {
+			continue
+		}
+		if strings.TrimSpace(c.ExpiresAt) == "" {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// QueryWhamResetCredits 调用 /backend-api/wham/rate-limit-reset-credits 获取账号
+// 重置券明细（每张的发放/过期时间）。零额度成本，与 QueryWhamUsage 同款请求形态。
+// 非 200 时返回 resp（body 未读）供调用方处理。
+func QueryWhamResetCredits(ctx context.Context, account *auth.Account, proxyURL string) (*WhamResetCreditsList, *http.Response, error) {
+	url := WhamResetCreditsURL
+	if whamResetCreditsURLForTest != "" {
+		url = whamResetCreditsURLForTest
+	}
+	return queryWhamResetCreditsWithURL(ctx, account, proxyURL, url)
+}
+
+func queryWhamResetCreditsWithURL(ctx context.Context, account *auth.Account, proxyURL, url string) (*WhamResetCreditsList, *http.Response, error) {
+	if account == nil {
+		return nil, nil, fmt.Errorf("account is nil")
+	}
+	accessToken := account.GetAccessToken()
+	if accessToken == "" {
+		return nil, nil, fmt.Errorf("account has no access token")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("build reset-credits list request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", defaultCodexCLIUserAgent)
+	req.Header.Set("Originator", Originator)
+	// 与 wham 查询一致,重置券按自定义头覆盖后的空间查询。
+	if accountID := account.EffectiveAccountID(); accountID != "" {
+		req.Header.Set("chatgpt-account-id", accountID)
+	}
+
+	client := &http.Client{Transport: newCodexTransport(proxyURL)}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reset-credits list request: %w", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, resp, fmt.Errorf("reset-credits list returned status %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	_ = resp.Body.Close()
+	if err != nil {
+		return nil, resp, fmt.Errorf("read reset-credits list response: %w", err)
+	}
+
+	var list WhamResetCreditsList
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, resp, fmt.Errorf("parse reset-credits list response: %w", err)
+	}
+	return &list, resp, nil
+}
+
 // WhamResetResult 是 /wham/rate-limit-reset-credits/consume 成功响应的投影。
 // windows_reset 表示本次重置了几个限流窗口，可用于即时反馈，省去重置后再查一次 usage。
 type WhamResetResult struct {
@@ -374,7 +475,7 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 	return result
 }
 
-// 已知窗口长度（秒）。和 CPA-Manager src/utils/quota/codexQuota.ts 保持一致。
+// 已知窗口长度（秒），与上游 wham 返回的 limit_window_seconds 取值对应。
 const (
 	whamWindow5hSeconds int64 = 18_000
 	whamWindow7dSeconds int64 = 604_800
@@ -382,7 +483,7 @@ const (
 
 // pickClassifiedWhamWindows 把 primary/secondary 两个窗口归类到 5h/7d 槽位。
 //
-// 策略对齐 CPA-Manager 的 pickClassifiedWindows：
+// 分类策略：
 //  1. 第一遍：按 limit_window_seconds 精确匹配（18000→5h，604800→7d）
 //  2. 第二遍：把 free plan 或 reset 明显超过 5h 的未知窗口归到 7d
 //  3. 最后按字段位置兜底（primary→5h、secondary→7d），只填补空槽位

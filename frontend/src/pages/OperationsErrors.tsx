@@ -199,6 +199,7 @@ export default function OperationsErrors() {
       error_kind: log.upstream_error_kind,
       error_message: log.error_message,
       account_id: log.account_id,
+      account_name: log.account_name,
       account_email: log.account_email,
       api_key_id: log.api_key_id,
       api_key_name: log.api_key_name,
@@ -472,7 +473,9 @@ export default function OperationsErrors() {
                           </div>
                         </TableCell>
                         <TableCell className={`${errorTableTextClass} text-muted-foreground`}>
-                          {formatCompactEmail(log.account_email) || `ID ${log.account_id}`}
+                          <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatAccountTitle(log)}>
+                            {formatAccountLabel(log)}
+                          </span>
                         </TableCell>
                         <TableCell className={`${errorTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[160px] truncate" title={formatAPIKeyLabel(log)}>
@@ -550,7 +553,7 @@ export default function OperationsErrors() {
                   <DetailRow label="Reasoning" value={selectedLog.reasoning_effort || '-'} />
                 </DetailPanel>
                 <DetailPanel title={t('opsErrors.runtimeContext')}>
-                  <DetailRow label={t('usage.tableAccount')} value={`${formatCompactEmail(selectedLog.account_email) || '-'} · ID ${selectedLog.account_id}`} />
+                  <DetailRow label={t('usage.tableAccount')} value={formatAccountDetail(selectedLog)} />
                   <DetailRow label={t('usage.tableApiKey')} value={formatAPIKeyLabel(selectedLog) || t('usage.unknownApiKey')} />
                   <DetailRow label={t('usage.tableDuration')} value={formatDuration(selectedLog.duration_ms)} mono />
                   <DetailRow label={t('usage.tableFirstToken')} value={selectedLog.first_token_ms > 0 ? formatDuration(selectedLog.first_token_ms) : '-'} mono />
@@ -637,6 +640,31 @@ function formatAPIKeyLabel(log: UsageLog): string {
   if (!masked) return ''
   if (masked.length <= 8) return masked
   return `${masked.slice(0, 4)}...${masked.slice(-4)}`
+}
+
+function formatAccountLabel(log: UsageLog): string {
+  // 邮箱优先：身份账号一律显示邮箱，账号名仅作为无邮箱账号（如 relay API-key 账号）的兜底。
+  // 避免 AT 导入未命名时的占位名（at-account-N 等）盖过真实邮箱身份。
+  const accountEmail = log.account_email?.trim()
+  if (accountEmail) return formatCompactEmail(accountEmail)
+  const accountName = log.account_name?.trim()
+  if (accountName) return accountName
+  return log.account_id > 0 ? `ID ${log.account_id}` : '-'
+}
+
+function formatAccountTitle(log: UsageLog): string {
+  const accountEmail = log.account_email?.trim()
+  const accountName = log.account_name?.trim()
+  if (accountEmail && accountName && accountEmail !== accountName) {
+    return `${accountEmail} · ${accountName}`
+  }
+  return accountEmail || accountName || (log.account_id > 0 ? `ID ${log.account_id}` : '-')
+}
+
+function formatAccountDetail(log: UsageLog): string {
+  const title = formatAccountTitle(log)
+  if (log.account_id <= 0) return title
+  return title === `ID ${log.account_id}` ? title : `${title} · ID ${log.account_id}`
 }
 
 function formatEndpoint(log: UsageLog): string {

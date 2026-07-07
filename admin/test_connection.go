@@ -276,7 +276,9 @@ func buildConnectionTestPayload(store *auth.Store, model string) []byte {
 	if store != nil {
 		content = store.GetTestContent()
 	}
-	return buildTestPayloadWithContent(model, content)
+	// 多行内容按行随机抽取 + 变量展开（issue #320），减少批量账号
+	// 共用同一句测活内容的指纹特征。单行配置行为不变。
+	return buildTestPayloadWithContent(model, auth.RenderTestContent(content))
 }
 
 // buildTestPayload 构建默认最小测试请求体
@@ -518,6 +520,13 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 		return "", fmt.Errorf("该 Responses API 账号没有可用于测试的文本模型")
 	}
 	if requested != "" {
+		if mappedModel, ok := proxy.ResolveAccountModelMapping(account, requested); ok && mappedModel != "" {
+			for _, model := range textModels {
+				if strings.EqualFold(model, mappedModel) {
+					return mappedModel, nil
+				}
+			}
+		}
 		for _, model := range textModels {
 			if strings.EqualFold(model, requested) {
 				return model, nil

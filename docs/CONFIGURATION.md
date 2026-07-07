@@ -151,7 +151,7 @@ Codex2API 采用三层配置架构：
 | 字段 | 类型 | 默认值 | 说明 |
 |------|------|--------|------|
 | `TestModel` | string | "gpt-5.5" | 测试连接使用的模型 |
-| `TestContent` | string | "hi" | 测试连接发送给上游的用户输入内容 |
+| `TestContent` | string | "hi" | 测试连接发送给上游的用户输入内容。多行时每次随机抽取一行；支持 `{{time}}`、`{{date}}`、`{{datetime}}`、`{{timestamp}}`、`{{rand}}`、`{{rand:min-max}}` 变量 |
 | `TestConcurrency` | int | 50 | 批量测试并发数，范围 1-200 |
 
 ### 代理配置

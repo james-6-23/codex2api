@@ -384,6 +384,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/lock", h.ToggleAccountLock)
 	api.POST("/accounts/:id/reset-status", h.ResetAccountStatus)
 	api.POST("/accounts/:id/reset-credits", h.ResetCredits)
+	api.GET("/accounts/:id/reset-credits", h.GetResetCredits)
 	api.POST("/accounts/:id/invite", h.SendInvite)
 	api.GET("/accounts/:id/test", h.TestConnection)
 	api.GET("/accounts/:id/usage", h.GetAccountUsage)
@@ -650,6 +651,7 @@ type accountResponse struct {
 	OpenAIResponsesAPI       bool                       `json:"openai_responses_api,omitempty"`
 	BaseURL                  string                     `json:"base_url,omitempty"`
 	Models                   []string                   `json:"models,omitempty"`
+	ModelMapping             string                     `json:"model_mapping,omitempty"`
 	CustomHeaders            map[string]string          `json:"custom_headers,omitempty"`
 	HealthTier               string                     `json:"health_tier"`
 	SchedulerScore           float64                    `json:"scheduler_score"`
@@ -820,6 +822,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			OpenAIResponsesAPI:       isOpenAIResponsesAccount,
 			BaseURL:                  baseURL,
 			Models:                   row.GetCredentialStringSlice("models"),
+			ModelMapping:             row.GetCredential("model_mapping"),
 			CustomHeaders:            row.GetCredentialStringMap("custom_headers"),
 			ProxyURL:                 row.ProxyURL,
 			Enabled:                  row.Enabled,
@@ -976,7 +979,13 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			billing5hWindows[accounts[i].ID] = t.Add(-5 * time.Hour)
 		}
 		if t := acc.GetReset7dAt(); !t.IsZero() {
-			billing7dWindows[accounts[i].ID] = t.AddDate(0, 0, -7)
+			// 长窗口起点 = reset - 真实周期。free/team 是月窗(约 30 天),
+			// 写死减 7 天会把起点算到未来,成本恒为 0 (issue #324)。
+			windowDur := 7 * 24 * time.Hour
+			if sec := acc.GetWindow7dSeconds(); sec > 0 {
+				windowDur = time.Duration(sec) * time.Second
+			}
+			billing7dWindows[accounts[i].ID] = t.Add(-windowDur)
 		}
 	}
 
@@ -1359,6 +1368,62 @@ func normalizeCustomHeaders(headers map[string]string) (map[string]string, error
 		return nil, nil
 	}
 	return out, nil
+}
+
+func normalizeAccountModelMapping(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	tok, err := dec.Token()
+	if err != nil {
+		return "", fmt.Errorf("模型映射必须是 JSON 对象")
+	}
+	delim, ok := tok.(json.Delim)
+	if !ok || delim != '{' {
+		return "", fmt.Errorf("模型映射必须是 JSON 对象")
+	}
+	for dec.More() {
+		keyTok, err := dec.Token()
+		if err != nil {
+			return "", fmt.Errorf("模型映射格式错误")
+		}
+		key, ok := keyTok.(string)
+		if !ok || strings.TrimSpace(key) == "" {
+			return "", fmt.Errorf("模型映射的源模型不能为空")
+		}
+		// 源模型别名会进入 /v1/models 响应、模型校验和使用日志，
+		// 必须与 models 列表同标准校验，防止任意字符串注入。
+		if err := security.ValidateModelName(strings.TrimSpace(key)); err != nil {
+			return "", fmt.Errorf("模型映射的源模型 %q 无效: %w", key, err)
+		}
+		var value string
+		if err := dec.Decode(&value); err != nil {
+			return "", fmt.Errorf("模型映射的目标模型必须是字符串")
+		}
+		if strings.TrimSpace(value) == "" {
+			return "", fmt.Errorf("模型映射的目标模型不能为空")
+		}
+		if err := security.ValidateModelName(strings.TrimSpace(value)); err != nil {
+			return "", fmt.Errorf("模型映射的目标模型 %q 无效: %w", value, err)
+		}
+	}
+	endTok, err := dec.Token()
+	if err != nil {
+		return "", fmt.Errorf("模型映射格式错误")
+	}
+	end, ok := endTok.(json.Delim)
+	if !ok || end != '}' {
+		return "", fmt.Errorf("模型映射格式错误")
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return "", fmt.Errorf("模型映射只能包含一个 JSON 对象")
+	}
+	return raw, nil
 }
 
 func isValidHeaderName(name string) bool {
@@ -2324,6 +2389,7 @@ type addOpenAIResponsesAccountReq struct {
 	BaseURL       string            `json:"base_url"`
 	APIKey        string            `json:"api_key"`
 	Models        []string          `json:"models"`
+	ModelMapping  string            `json:"model_mapping"`
 	ProxyURL      string            `json:"proxy_url"`
 	CustomHeaders map[string]string `json:"custom_headers"`
 }
@@ -2377,6 +2443,11 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	modelMapping, err := normalizeAccountModelMapping(req.ModelMapping)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -2406,6 +2477,7 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		"base_url":      baseURL,
 		"api_key":       req.APIKey,
 		"models":        models,
+		"model_mapping": modelMapping,
 		"plan_type":     "api",
 		"email":         baseURL,
 	}
@@ -2427,6 +2499,7 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		BaseURL:       baseURL,
 		APIKey:        req.APIKey,
 		Models:        models,
+		ModelMapping:  modelMapping,
 		CustomHeaders: customHeaders,
 		Email:         baseURL,
 		PlanType:      "api",
@@ -2556,6 +2629,11 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	modelMapping, err := normalizeAccountModelMapping(req.ModelMapping)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	for _, model := range models {
 		if err := security.ValidateModelName(model); err != nil {
 			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
@@ -2575,6 +2653,7 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		"upstream_type":  auth.UpstreamOpenAIResponses,
 		"base_url":       baseURL,
 		"models":         models,
+		"model_mapping":  modelMapping,
 		"plan_type":      "api",
 		"email":          baseURL,
 		"custom_headers": cloneCustomHeaders(customHeaders),
@@ -2596,7 +2675,7 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		return
 	}
 	if h.store != nil {
-		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, req.ProxyURL)
+		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, modelMapping, req.ProxyURL)
 		h.store.ApplyAccountCustomHeaders(id, customHeaders)
 	}
 	h.db.InsertAccountEventAsync(id, "updated", "manual_openai_responses")
@@ -4866,6 +4945,7 @@ type opsErrorExportEntry struct {
 	ErrorKind          string    `json:"error_kind"`
 	ErrorMessage       string    `json:"error_message"`
 	AccountID          int64     `json:"account_id"`
+	AccountName        string    `json:"account_name"`
 	AccountEmail       string    `json:"account_email"`
 	APIKeyID           int64     `json:"api_key_id"`
 	APIKeyName         string    `json:"api_key_name"`
@@ -5055,6 +5135,7 @@ func newOpsErrorExportEntry(logRow *database.UsageLog) opsErrorExportEntry {
 		ErrorKind:          logRow.UpstreamErrorKind,
 		ErrorMessage:       logRow.ErrorMessage,
 		AccountID:          logRow.AccountID,
+		AccountName:        logRow.AccountName,
 		AccountEmail:       logRow.AccountEmail,
 		APIKeyID:           logRow.APIKeyID,
 		APIKeyName:         logRow.APIKeyName,

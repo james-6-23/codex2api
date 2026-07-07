@@ -1008,10 +1008,20 @@ func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account
 //  2. Header: Conversation_id
 //  3. Header: Idempotency-Key
 //  4. Body:   prompt_cache_key
-//  5. 基于 Bearer API Key 的确定性 UUID
+//  5. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
+//     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
+//  6. 基于 Bearer API Key 的确定性 UUID
+//
+// 第 5 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
+// 用户共用时，粘性粒度从"整个 Key 挤一个账号"细化为"每段对话独立粘定"。
+// 该值只参与本地路由（affinityKey），默认隔离模式下不发往上游。
 func ResolveSessionID(headers http.Header, body []byte) string {
 	if explicit := ResolveExplicitSessionID(headers, body); explicit != "" {
 		return explicit
+	}
+
+	if seed := deriveContentSessionSeed(body); seed != "" {
+		return seed
 	}
 
 	// 基于下游用户的 API Key 生成确定性 cache key（参考 CLIProxyAPI codex_executor.go:621）

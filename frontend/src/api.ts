@@ -39,6 +39,7 @@ import type {
   SemanticReviewConnectionTestResponse,
   PublicAPIKeyUsageResponse,
   RecycleBinAccountsResponse,
+  ResetCreditsDetailResponse,
   RuntimeStatusResponse,
   SiteBranding,
   StatsResponse,
@@ -285,6 +286,8 @@ export const api = {
     request<MessageResponse>(`/accounts/${id}/reset-status`, { method: 'POST' }),
   resetCredits: (id: number) =>
     request<{ message: string; rate_limit_reset_credits?: number }>(`/accounts/${id}/reset-credits`, { method: 'POST' }),
+  getResetCredits: (id: number) =>
+    request<ResetCreditsDetailResponse>(`/accounts/${id}/reset-credits`),
   getAccountHealthBars: () =>
     request<AccountHealthBarsResponse>('/accounts/health-bars'),
   sendInvite: (id: number, data: { emails?: string[]; emails_text?: string; referral_key?: string; proxy_url?: string; max_emails?: number }) =>

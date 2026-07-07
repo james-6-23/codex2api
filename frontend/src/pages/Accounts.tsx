@@ -30,6 +30,7 @@ import type {
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
+import { formatLongUsageWindowLabel } from "../lib/usageFormat";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -137,10 +138,25 @@ const CUSTOM_HEADERS_PLACEHOLDER = `{
   "Authorization": "Bearer upstream-token",
   "X-Custom-Header": "value"
 }`;
+const MODEL_MAPPING_PLACEHOLDER = `{
+  "client-model": "upstream-model",
+  "legacy-*": "gpt-4.1"
+}`;
 type AccountTableColumn = (typeof ACCOUNT_TABLE_COLUMNS)[number];
 type CustomHeadersParseResult =
   | { ok: true; value: Record<string, string> | null }
   | { ok: false };
+type ModelMappingParseResult =
+  | { ok: true; value: string }
+  | { ok: false };
+type ModelMappingEntriesParseResult =
+  | { ok: true; entries: ModelMappingEntry[] }
+  | { ok: false };
+type ModelMappingMode = "form" | "json";
+type ModelMappingEntry = {
+  from: string;
+  to: string;
+};
 type AccountGroupDraft = {
   id: number | null;
   name: string;
@@ -350,6 +366,107 @@ function parseCustomHeadersText(value: string): CustomHeadersParseResult {
     ok: true,
     value: Object.fromEntries(entries) as Record<string, string>,
   };
+}
+
+function emptyModelMappingEntries(): ModelMappingEntry[] {
+  return [{ from: "", to: "" }];
+}
+
+function parseModelMappingEntries(value: string): ModelMappingEntriesParseResult {
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: true, entries: emptyModelMappingEntries() };
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch {
+    return { ok: false };
+  }
+
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { ok: false };
+  }
+
+  const entries = Object.entries(parsed as Record<string, unknown>);
+  if (
+    entries.some(
+      ([from, to]) => !from.trim() || typeof to !== "string" || !to.trim(),
+    )
+  ) {
+    return { ok: false };
+  }
+
+  return {
+    ok: true,
+    entries:
+      entries.length > 0
+        ? entries.map(([from, to]) => ({
+            from,
+            to: String(to),
+          }))
+        : emptyModelMappingEntries(),
+  };
+}
+
+function parseModelMappingText(value: string): ModelMappingParseResult {
+  const trimmed = value.trim();
+  if (!trimmed) return { ok: true, value: "" };
+  if (!parseModelMappingEntries(trimmed).ok) return { ok: false };
+  return { ok: true, value: trimmed };
+}
+
+function exactModelMappingAliases(
+  value?: string,
+  supportedModels: string[] = [],
+): string[] {
+  const parsed = parseModelMappingEntries(value ?? "");
+  if (!parsed.ok) return [];
+  const supported = new Set(
+    supportedModels.map((model) => model.trim().toLowerCase()).filter(Boolean),
+  );
+  return parsed.entries
+    .filter((entry) => {
+      const alias = entry.from.trim();
+      const target = entry.to.trim().toLowerCase();
+      return (
+        alias &&
+        !alias.includes("*") &&
+        isConnectionTestModel(alias) &&
+        (supported.size === 0 || supported.has(target))
+      );
+    })
+    .map((entry) => entry.from.trim());
+}
+
+function serializeModelMappingEntries(
+  entries: ModelMappingEntry[],
+): ModelMappingParseResult {
+  const out: Record<string, string> = {};
+  const seen = new Set<string>();
+  for (const entry of entries) {
+    const from = entry.from.trim();
+    const to = entry.to.trim();
+    if (!from && !to) continue;
+    if (!from || !to) return { ok: false };
+    const key = from.toLowerCase();
+    if (seen.has(key)) return { ok: false };
+    seen.add(key);
+    out[from] = to;
+  }
+  if (Object.keys(out).length === 0) {
+    return { ok: true, value: "" };
+  }
+  return { ok: true, value: JSON.stringify(out, null, 2) };
+}
+
+function resolveModelMappingValue(
+  mode: ModelMappingMode,
+  text: string,
+  entries: ModelMappingEntry[],
+): ModelMappingParseResult {
+  return mode === "json"
+    ? parseModelMappingText(text)
+    : serializeModelMappingEntries(entries);
 }
 
 function mergeModelLists(current: string[], incoming: string[]): string[] {
@@ -652,6 +769,12 @@ export default function Accounts() {
     });
   const [openAIModelDraft, setOpenAIModelDraft] = useState("");
   const [editOpenAIModelDraft, setEditOpenAIModelDraft] = useState("");
+  const [editOpenAIModelMappingText, setEditOpenAIModelMappingText] =
+    useState("");
+  const [editOpenAIModelMappingMode, setEditOpenAIModelMappingMode] =
+    useState<ModelMappingMode>("form");
+  const [editOpenAIModelMappingEntries, setEditOpenAIModelMappingEntries] =
+    useState<ModelMappingEntry[]>(emptyModelMappingEntries);
   const [editOpenAIModelsLoading, setEditOpenAIModelsLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportPicker, setShowImportPicker] = useState(false);
@@ -713,6 +836,12 @@ export default function Accounts() {
       models: [],
       proxy_url: "",
     });
+  const [openAIModelMappingText, setOpenAIModelMappingText] = useState("");
+  const [openAIModelMappingMode, setOpenAIModelMappingMode] =
+    useState<ModelMappingMode>("form");
+  const [openAIModelMappingEntries, setOpenAIModelMappingEntries] = useState<
+    ModelMappingEntry[]
+  >(emptyModelMappingEntries);
   const [openAIModelsLoading, setOpenAIModelsLoading] = useState(false);
   const [oauthStep, setOauthStep] = useState<"generate" | "exchange">(
     "generate",
@@ -921,6 +1050,177 @@ export default function Accounts() {
       </p>
     </div>
   );
+
+  const renderModelMappingEditor = ({
+    value,
+    onChange,
+    mode,
+    onModeChange,
+    entries,
+    onEntriesChange,
+  }: {
+    value: string;
+    onChange: (value: string) => void;
+    mode: ModelMappingMode;
+    onModeChange: (value: ModelMappingMode) => void;
+    entries: ModelMappingEntry[];
+    onEntriesChange: (value: ModelMappingEntry[]) => void;
+  }) => {
+    const switchToForm = () => {
+      const parsed = parseModelMappingEntries(value);
+      if (!parsed.ok) {
+        showToast("当前 JSON 无法转成填空模式，请先修正 JSON", "error");
+        return;
+      }
+      onEntriesChange(parsed.entries);
+      onModeChange("form");
+    };
+
+    const switchToJSON = () => {
+      const serialized = serializeModelMappingEntries(entries);
+      if (!serialized.ok) {
+        showToast("模型映射行必须成对填写，源模型不能重复", "error");
+        return;
+      }
+      onChange(serialized.value);
+      onModeChange("json");
+    };
+
+    const updateEntry = (
+      index: number,
+      field: keyof ModelMappingEntry,
+      nextValue: string,
+    ) => {
+      onEntriesChange(
+        entries.map((entry, entryIndex) =>
+          entryIndex === index ? { ...entry, [field]: nextValue } : entry,
+        ),
+      );
+    };
+
+    const removeEntry = (index: number) => {
+      const next = entries.filter((_, entryIndex) => entryIndex !== index);
+      onEntriesChange(next.length > 0 ? next : emptyModelMappingEntries());
+    };
+
+    const insertTemplate = () => {
+      if (mode === "json") {
+        onChange(MODEL_MAPPING_PLACEHOLDER);
+        return;
+      }
+      onEntriesChange([
+        { from: "client-model", to: "upstream-model" },
+        { from: "legacy-*", to: "gpt-4.1" },
+      ]);
+    };
+
+    return (
+      <div>
+      <div className="flex items-center justify-between mb-2">
+        <label className="block text-sm font-semibold text-muted-foreground">
+          单渠道模型映射
+        </label>
+        <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-lg border border-border bg-muted/40 p-0.5">
+            <button
+              type="button"
+              onClick={switchToForm}
+              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                mode === "form"
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              填空
+            </button>
+            <button
+              type="button"
+              onClick={switchToJSON}
+              className={`rounded-md px-2.5 py-1 text-xs font-semibold transition-colors ${
+                mode === "json"
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              JSON
+            </button>
+          </div>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={insertTemplate}
+          >
+            插入模板
+          </Button>
+        </div>
+      </div>
+      {mode === "form" ? (
+        <div className="space-y-2">
+          {entries.map((entry, index) => (
+            <div
+              key={index}
+              className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]"
+            >
+              <Input
+                placeholder="客户端模型，如 client-model / legacy-*"
+                value={entry.from}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  updateEntry(index, "from", event.target.value)
+                }
+              />
+              <Input
+                placeholder="上游模型，如 gpt-4.1"
+                value={entry.to}
+                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                  updateEntry(index, "to", event.target.value)
+                }
+              />
+              <Button
+                type="button"
+                variant="outline"
+                size="icon"
+                className="h-10 w-10"
+                onClick={() => removeEntry(index)}
+                disabled={
+                  entries.length === 1 && !entry.from.trim() && !entry.to.trim()
+                }
+                title="删除映射"
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+          ))}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            onClick={() =>
+              onEntriesChange([...entries, { from: "", to: "" }])
+            }
+          >
+            <Plus className="size-3.5" />
+            添加映射
+          </Button>
+        </div>
+      ) : (
+        <textarea
+          className="w-full min-h-[140px] p-3 border border-input rounded-xl bg-background text-sm resize-y font-mono focus:outline-none focus:ring-2 focus:ring-ring"
+          placeholder={MODEL_MAPPING_PLACEHOLDER}
+          value={value}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+            onChange(event.target.value)
+          }
+          rows={6}
+          spellCheck={false}
+        />
+      )}
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        留空表示使用原模型；左侧是客户端请求模型，右侧是该渠道上游模型，支持 * 通配。JSON 模式格式为 {"{"}"client-model":"upstream-model"{"}"}。
+      </p>
+    </div>
+    );
+  };
 
   useEffect(() => {
     return () => {
@@ -1672,11 +1972,21 @@ export default function Accounts() {
       showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
       return;
     }
+    const parsedModelMapping = resolveModelMappingValue(
+      openAIModelMappingMode,
+      openAIModelMappingText,
+      openAIModelMappingEntries,
+    );
+    if (!parsedModelMapping.ok) {
+      showToast("单渠道模型映射必须成对填写；JSON 模式必须是字符串对象，源模型不能重复", "error");
+      return;
+    }
     setSubmitting(true);
     try {
       await api.addOpenAIResponsesAccount({
         ...openAIForm,
         models,
+        model_mapping: parsedModelMapping.value,
         custom_headers: parsedCustomHeaders.value,
       });
       showToast(t("accounts.addSuccess"));
@@ -1688,6 +1998,9 @@ export default function Accounts() {
         proxy_url: "",
       });
       setOpenAIModelDraft("");
+      setOpenAIModelMappingText("");
+      setOpenAIModelMappingMode("form");
+      setOpenAIModelMappingEntries(emptyModelMappingEntries());
       setAddCustomHeadersText("");
       void reload();
     } catch (error) {
@@ -1742,11 +2055,21 @@ export default function Accounts() {
       showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
       return;
     }
+    const parsedModelMapping = resolveModelMappingValue(
+      editOpenAIModelMappingMode,
+      editOpenAIModelMappingText,
+      editOpenAIModelMappingEntries,
+    );
+    if (!parsedModelMapping.ok) {
+      showToast("单渠道模型映射必须成对填写；JSON 模式必须是字符串对象，源模型不能重复", "error");
+      return;
+    }
     setEditSubmitting(true);
     try {
       await api.updateOpenAIResponsesAccount(editingAccount.id, {
         ...editOpenAIForm,
         api_key: editOpenAIForm.api_key?.trim() || undefined,
+        model_mapping: parsedModelMapping.value,
         custom_headers: parsedCustomHeaders.value,
       });
       showToast(t("accounts.openaiAccountSaveSuccess"));
@@ -2962,6 +3285,14 @@ export default function Accounts() {
       proxy_url: account.proxy_url ?? "",
     });
     setEditOpenAIModelDraft("");
+    setEditOpenAIModelMappingText(account.model_mapping ?? "");
+    setEditOpenAIModelMappingMode("form");
+    {
+      const parsedMapping = parseModelMappingEntries(account.model_mapping ?? "");
+      setEditOpenAIModelMappingEntries(
+        parsedMapping.ok ? parsedMapping.entries : emptyModelMappingEntries(),
+      );
+    }
     setEditOAuthStep("generate");
     setEditOAuthSession(null);
     setEditOAuthProxyUrl(account.proxy_url ?? "");
@@ -2997,6 +3328,9 @@ export default function Accounts() {
       proxy_url: "",
     });
     setEditOpenAIModelDraft("");
+    setEditOpenAIModelMappingText("");
+    setEditOpenAIModelMappingMode("form");
+    setEditOpenAIModelMappingEntries(emptyModelMappingEntries());
     setEditOAuthStep("generate");
     setEditOAuthSession(null);
     setEditOAuthProxyUrl("");
@@ -4613,6 +4947,9 @@ export default function Accounts() {
                 proxy_url: "",
               });
               setOpenAIModelDraft("");
+              setOpenAIModelMappingText("");
+              setOpenAIModelMappingMode("form");
+              setOpenAIModelMappingEntries(emptyModelMappingEntries());
               setSessionJson("");
               setSessionProxyUrl("");
               setAddCustomHeadersText("");
@@ -4650,6 +4987,9 @@ export default function Accounts() {
                       proxy_url: "",
                     });
                     setOpenAIModelDraft("");
+                    setOpenAIModelMappingText("");
+                    setOpenAIModelMappingMode("form");
+                    setOpenAIModelMappingEntries(emptyModelMappingEntries());
                     setSessionJson("");
                     setSessionProxyUrl("");
                     setAddCustomHeadersText("");
@@ -5043,6 +5383,14 @@ export default function Accounts() {
                     })}
                   </p>
                 </div>
+                {renderModelMappingEditor({
+                  value: openAIModelMappingText,
+                  onChange: setOpenAIModelMappingText,
+                  mode: openAIModelMappingMode,
+                  onModeChange: setOpenAIModelMappingMode,
+                  entries: openAIModelMappingEntries,
+                  onEntriesChange: setOpenAIModelMappingEntries,
+                })}
                 {renderProxyInput({
                   value: openAIForm.proxy_url,
                   testKey: "add-openai-responses",
@@ -5765,6 +6113,14 @@ export default function Accounts() {
                         })}
                       </p>
                     </div>
+                    {renderModelMappingEditor({
+                      value: editOpenAIModelMappingText,
+                      onChange: setEditOpenAIModelMappingText,
+                      mode: editOpenAIModelMappingMode,
+                      onModeChange: setEditOpenAIModelMappingMode,
+                      entries: editOpenAIModelMappingEntries,
+                      onEntriesChange: setEditOpenAIModelMappingEntries,
+                    })}
                     {renderProxyInput({
                       value: editOpenAIForm.proxy_url,
                       testKey: "edit-openai-responses",
@@ -9713,13 +10069,24 @@ function TestConnectionModal({
           const accountModels = (account.models ?? []).filter(
             isConnectionTestModel,
           );
+          const mappingAliases = exactModelMappingAliases(
+            account.model_mapping,
+            accountModels,
+          );
+          const testModels = uniqueTestModels(
+            [...mappingAliases, ...accountModels],
+            undefined,
+            false,
+          );
           const preferredModel =
-            accountModels.find(
+            testModels.find(
               (item) =>
                 item.toLowerCase() === settings.test_model.toLowerCase(),
-            ) ?? accountModels[0];
+            ) ??
+            mappingAliases[0] ??
+            accountModels[0];
           const nextModels = uniqueTestModels(
-            accountModels,
+            testModels,
             preferredModel,
             false,
           );
@@ -9742,8 +10109,15 @@ function TestConnectionModal({
       } catch {
         if (!active) return;
         if (isOpenAIResponsesAccount) {
+          const accountModels = (account.models ?? []).filter(
+            isConnectionTestModel,
+          );
+          const mappingAliases = exactModelMappingAliases(
+            account.model_mapping,
+            accountModels,
+          );
           const fallbackModels = uniqueTestModels(
-            (account.models ?? []).filter(isConnectionTestModel),
+            [...mappingAliases, ...accountModels],
             undefined,
             false,
           );
@@ -9766,7 +10140,7 @@ function TestConnectionModal({
     return () => {
       active = false;
     };
-  }, [account.models, isOpenAIResponsesAccount]);
+  }, [account.model_mapping, account.models, isOpenAIResponsesAccount]);
 
   useEffect(() => {
     if (!modelOptionsReady || !selectedModel) return;
@@ -10071,7 +10445,7 @@ function UsageBar({
   return (
     <div>
       <div className="flex items-center gap-1.5">
-        <span className="text-[11px] font-medium text-muted-foreground w-5 shrink-0">
+        <span className="text-[11px] font-medium text-muted-foreground w-7 shrink-0">
           {label}
         </span>
         <div className="flex-1 h-1.5 rounded-full bg-muted overflow-hidden min-w-[72px]">
@@ -10085,13 +10459,13 @@ function UsageBar({
         </span>
       </div>
       {detailText && (
-        <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]">
+        <div className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[34px]">
           {detailText}
         </div>
       )}
       {resetTime && (
         <div
-          className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[26px]"
+          className="text-[11px] font-medium text-muted-foreground mt-0.5 pl-[34px]"
           title={resetTime.title}
         >
           ⏱ {resetTime.label}
@@ -10121,7 +10495,7 @@ function UsageWindowStat({
   return (
     <div className="flex flex-col gap-0.5">
       <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
-        <span className="w-5 shrink-0">{label}</span>
+        <span className="w-7 shrink-0">{label}</span>
         <span>
           {formatCompactUsageNumber(detail?.requests)}{" "}
           {t("accounts.usageReqUnit")} /{" "}
@@ -10130,7 +10504,7 @@ function UsageWindowStat({
         </span>
       </div>
       {(accountBilledText || userBilledText) && (
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-6">
+        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-[34px]">
           {accountBilledText && (
             <span>
               {t("accounts.accountBilledLabel")}: ${accountBilledText}
@@ -10208,6 +10582,8 @@ function UsageCell({
 
   const fiveHourPresent = has5h || has5hDetail || has5hReset;
   const sevenDayPresent = has7d || has7dDetail || has7dReset;
+  // 长窗口标签:free/team plan 实为月窗(约 30 天),按真实周期显示 30d 而非误标 7d (issue #324)
+  const longWindowLabel = formatLongUsageWindowLabel(account);
   // plan 表明是订阅型时,即使数据暂未拉到也按订阅布局占位,避免抖动
   const planSuggestsPremium = isPremiumUsagePlan(plan);
   const showFiveHour = fiveHourPresent || planSuggestsPremium;
@@ -10230,13 +10606,13 @@ function UsageCell({
           )}
           {has7d ? (
             <UsageBar
-              label="7d"
+              label={longWindowLabel}
               pct={account.usage_percent_7d!}
               resetAt={account.reset_7d_at}
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
           )}
         </div>
         {refreshButton}
@@ -10250,13 +10626,13 @@ function UsageCell({
         <div className="flex-1">
           {has7d ? (
             <UsageBar
-              label="7d"
+              label={longWindowLabel}
               pct={account.usage_percent_7d!}
               resetAt={account.reset_7d_at}
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label="7d" detail={account.usage_7d_detail} />
+            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
           )}
         </div>
         {refreshButton}
@@ -10271,11 +10647,12 @@ function BilledCell({ account }: { account: AccountRow }) {
   const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
   const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
   if (h5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
+  const longLabel = formatLongUsageWindowLabel(account);
   return (
     <span className="text-[12px] text-muted-foreground">
       {h5 !== null ? `5h: $${h5}` : "5h: -"}
       {" / "}
-      {d7 !== null ? `7d: $${d7}` : "7d: -"}
+      {d7 !== null ? `${longLabel}: $${d7}` : `${longLabel}: -`}
     </span>
   );
 }

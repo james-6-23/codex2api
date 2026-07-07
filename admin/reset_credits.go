@@ -17,6 +17,76 @@ import (
 	"github.com/google/uuid"
 )
 
+// GetResetCredits 查询账号「主动重置次数」的明细（每张券的发放/过期时间）。
+// GET /api/accounts/:id/reset-credits
+//
+// 调官方 wham/rate-limit-reset-credits 列表端点（零额度成本），按
+// reset_type=codex_rate_limits + status=available 过滤，
+// 返回可用张数与逐张有效期，供前端展示"哪张券什么时候过期"(issue #322)。
+// 顺带用权威 available_count 校准本地缓存的剩余次数。
+func (h *Handler) GetResetCredits(c *gin.Context) {
+	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "无效的账号 ID")
+		return
+	}
+
+	account := h.findAccountByID(id)
+	if account == nil {
+		writeError(c, http.StatusNotFound, "账号不存在")
+		return
+	}
+	if account.GetAccessToken() == "" {
+		writeError(c, http.StatusBadRequest, "账号没有可用的 access token，请先刷新账号")
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
+	defer cancel()
+
+	list, resp, err := proxy.QueryWhamResetCredits(ctx, account, h.store.ResolveProxyForAccount(account))
+	if err != nil {
+		status := upstreamResetStatus(resp)
+		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
+			_ = resp.Body.Close()
+			switch status {
+			case http.StatusUnauthorized:
+				writeError(c, http.StatusBadGateway, "上游鉴权失败（401），请先刷新账号后重试")
+			case http.StatusTooManyRequests:
+				writeError(c, http.StatusBadGateway, "上游限流（429），请稍后重试")
+			default:
+				writeError(c, http.StatusBadGateway, "查询重置次数失败："+upstreamResetErrorMessage(status, body))
+			}
+			return
+		}
+		writeError(c, http.StatusBadGateway, "查询重置次数失败："+err.Error())
+		return
+	}
+
+	credits := list.AvailableCodexCredits()
+	// 权威可用张数：优先上游 available_count，缺失(0 且有券)时以过滤后的张数兜底。
+	available := list.AvailableCount
+	if available == 0 && len(credits) > 0 {
+		available = len(credits)
+	}
+	// 上游明细是权威数据，顺带校准本地缓存，让列表/弹窗立即一致。
+	account.SetRateLimitResetCredits(available)
+
+	items := make([]gin.H, 0, len(credits))
+	for _, credit := range credits {
+		items = append(items, gin.H{
+			"id":         credit.ID,
+			"granted_at": credit.GrantedAt,
+			"expires_at": credit.ExpiresAt,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"available_count": available,
+		"credits":         items,
+	})
+}
+
 // ResetCredits 消耗账号 1 次「主动重置次数」以立即重置 Codex 额度。
 // POST /api/accounts/:id/reset-credits
 //

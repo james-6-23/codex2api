@@ -1469,15 +1469,25 @@ type responsesBodyPrepareOptions struct {
 	forceStoreFalse            bool
 	expandPreviousResponse     bool
 	preservePreviousResponseID bool
+	// cacheOwner 是 previous_response_id 展开时使用的缓存归属命名空间
+	//（见 responseCacheOwner）。owner 不匹配的缓存按未命中处理，防跨用户注入。
+	cacheOwner string
 }
 
 // PrepareResponsesBody 将 Responses API 原始请求转换为上游可接受的格式
 // 采用 Unmarshal→map 操作→Marshal 模式，替代逐字段 sjson 操作
 // 返回: (处理后的 body, 展开后的 input JSON 原始文本)
 func PrepareResponsesBody(rawBody []byte) ([]byte, string) {
+	return PrepareResponsesBodyForOwner(rawBody, "")
+}
+
+// PrepareResponsesBodyForOwner 同 PrepareResponsesBody，但 previous_response_id
+// 展开限定在 owner 的缓存命名空间内（owner 见 responseCacheOwner）。
+func PrepareResponsesBodyForOwner(rawBody []byte, owner string) ([]byte, string) {
 	return prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
 		forceStoreFalse:        true,
 		expandPreviousResponse: true,
+		cacheOwner:             owner,
 	})
 }
 
@@ -1633,10 +1643,10 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	normalizeResponsesImageGenerationTools(body, promptText)
 	applyResponsesImageGenerationBridgeInstructions(body)
 
-	// 6. 展开 previous_response_id
+	// 6. 展开 previous_response_id（限定在请求归属的缓存命名空间，防跨用户注入）
 	prevID, _ := body["previous_response_id"].(string)
 	if opts.expandPreviousResponse && prevID != "" {
-		if cached := getResponseCache(prevID); cached != nil {
+		if cached := getResponseCache(opts.cacheOwner, prevID); cached != nil {
 			var cachedItems []any
 			for _, item := range cached {
 				var v any
@@ -1739,7 +1749,13 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 // PrepareCompactResponsesBody 将 /responses/compact 请求转换为上游可接受的格式。
 // 它复用通用 Responses 预处理，但会移除 compact 端点不接受的自动注入字段。
 func PrepareCompactResponsesBody(rawBody []byte) ([]byte, string) {
-	body, expandedInputRaw := PrepareResponsesBody(rawBody)
+	return PrepareCompactResponsesBodyForOwner(rawBody, "")
+}
+
+// PrepareCompactResponsesBodyForOwner 同 PrepareCompactResponsesBody，但
+// previous_response_id 展开限定在 owner 的缓存命名空间内。
+func PrepareCompactResponsesBodyForOwner(rawBody []byte, owner string) ([]byte, string) {
+	body, expandedInputRaw := PrepareResponsesBodyForOwner(rawBody, owner)
 	body, _ = sjson.DeleteBytes(body, "include")
 	body, _ = sjson.DeleteBytes(body, "store")
 	body, _ = sjson.DeleteBytes(body, "stream")

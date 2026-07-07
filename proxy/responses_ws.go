@@ -184,7 +184,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	sessionID := ResolveSessionID(c.Request.Header, rawBody)
 	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(explicitSessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	respCacheOwner := responseCacheOwner(apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -422,7 +423,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 		}
 
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, expandedInputRaw, start, ttftGuard, silentRetryEnabled, hideUpstreamErrors, useWebsocket); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, expandedInputRaw, start, ttftGuard, silentRetryEnabled, hideUpstreamErrors, useWebsocket); err != nil {
 			var retryErr *responsesWSRetryableStreamError
 			if errors.As(err, &retryErr) {
 				lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
@@ -469,6 +470,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	logEffectiveModel string,
 	reasoningEffort string,
 	serviceTier string,
+	respCacheOwner string,
 	expandedInputRaw string,
 	start time.Time,
 	ttftGuard *firstTokenTimeoutGuard,
@@ -534,7 +536,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			if tier := parsed.Get("response.service_tier").String(); tier != "" {
 				actualServiceTier = tier
 			}
-			cacheCompletedResponse([]byte(expandedInputRaw), data)
+			cacheCompletedResponse(respCacheOwner, []byte(expandedInputRaw), data)
 			gotTerminal = true
 		}
 		if eventType == "response.failed" {

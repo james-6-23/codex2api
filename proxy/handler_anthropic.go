@@ -184,6 +184,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 		isRelayAccount := account.IsOpenAIResponsesAPI()
+		attemptEffectiveModel := effectiveModel
 		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount
 		upstreamEndpoint := "/v1/responses"
 		if isRelayAccount {
@@ -219,7 +220,12 @@ func (h *Handler) Messages(c *gin.Context) {
 		var resp *http.Response
 		var reqErr error
 		if isRelayAccount {
-			resp, reqErr = ExecuteOpenAIResponsesRequest(upstreamCtx, account, codexBody, proxyURL, downstreamHeaders)
+			upstreamBody := codexBody
+			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(upstreamBody, account); ok {
+				upstreamBody = mappedBody
+				attemptEffectiveModel = mappedModel
+			}
+			resp, reqErr = ExecuteOpenAIResponsesRequest(upstreamCtx, account, upstreamBody, proxyURL, downstreamHeaders)
 		} else {
 			resp, reqErr = ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		}
@@ -288,14 +294,14 @@ func (h *Handler) Messages(c *gin.Context) {
 			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, string(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody)
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:            account.ID(),
 				Endpoint:             "/v1/messages",
 				Model:                model,
-				EffectiveModel:       effectiveModel,
+				EffectiveModel:       attemptEffectiveModel,
 				StatusCode:           resp.StatusCode,
 				DurationMs:           durationMs,
 				ReasoningEffort:      reasoningEffort,
@@ -319,7 +325,13 @@ func (h *Handler) Messages(c *gin.Context) {
 				continue
 			}
 
-			// 最终错误：用 Anthropic 格式返回
+			// 最终错误：用 Anthropic 格式返回。
+			// 上游账号 401（OAuth token 失效）是账号侧问题，不是下游客户端凭证无效；
+			// 原样以 401 透传会让客户端误判自己的 key 失效（issue #323），改写为 503。
+			if resp.StatusCode == http.StatusUnauthorized && !isMissingScopeUnauthorized(errBody) {
+				sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", "账号池暂无可用账号（上游账号鉴权失效），请稍后重试")
+				return
+			}
 			errType := mapHTTPStatusToAnthropicError(resp.StatusCode)
 			msg := gjson.GetBytes(errBody, "error.message").String()
 			if msg == "" {
@@ -334,7 +346,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		c.Set("x-account-email", account.Email)
 		account.Mu().RUnlock()
 		c.Set("x-account-proxy", proxyURL)
-		c.Set("x-model", effectiveModel)
+		c.Set("x-model", attemptEffectiveModel)
 		c.Set("x-reasoning-effort", reasoningEffort)
 
 		var firstTokenMs int
@@ -498,7 +510,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			outcome = classifyResponseFailedOutcome(terminalFailurePayload)
 			// 流式 response.failed 也要把额度耗尽/限流账号冷却下来，
 			// 否则该账号会保持高分继续被调度（与 /v1/responses 路径保持一致）。
-			responseFailedDecision := h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, effectiveModel)
+			responseFailedDecision := h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)
 			if responseFailedDecision.Reason != "" {
 				outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
 			}
@@ -564,7 +576,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			AccountID:            account.ID(),
 			Endpoint:             "/v1/messages",
 			Model:                model,
-			EffectiveModel:       effectiveModel,
+			EffectiveModel:       attemptEffectiveModel,
 			StatusCode:           logStatusCode,
 			DurationMs:           totalDuration,
 			FirstTokenMs:         firstTokenMs,
@@ -602,7 +614,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			h.store.ReportRequestFailure(account, outcome.failureKind, time.Duration(totalDuration)*time.Millisecond)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		} else if outcome.logStatusCode == http.StatusOK {
-			h.store.ClearModelCooldown(account, effectiveModel)
+			h.store.ClearModelCooldown(account, attemptEffectiveModel)
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)

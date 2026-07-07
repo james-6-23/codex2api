@@ -75,6 +75,7 @@ type Account struct {
 	BaseURL        string
 	APIKey         string
 	Models         []string
+	ModelMapping   string
 	Status         AccountStatus
 	CooldownUtil   time.Time
 	CooldownReason string // rate_limited / unauthorized / 空
@@ -310,6 +311,18 @@ func (a *Account) OpenAIResponsesModels() []string {
 		return []string{}
 	}
 	return cloneStringSlice(a.Models)
+}
+
+func (a *Account) OpenAIResponsesModelMapping() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.isOpenAIResponsesAPILocked() {
+		return ""
+	}
+	return strings.TrimSpace(a.ModelMapping)
 }
 
 func (a *Account) OpenAIResponsesCredentials() (baseURL, apiKey string) {
@@ -1080,7 +1093,7 @@ func parseSmartPacingWindows(raw string) (bool, bool) {
 	return w5h, w7d
 }
 
-// 长窗口(7d 槽)周期识别：team plan 的第二限流窗口实为月窗(约 30 天 = 2592000s)，
+// 长窗口(7d 槽)周期识别：free/team plan 的限流长窗口实为月窗(约 30 天 = 2592000s)，
 // 而非 plus/pro 的周窗(7 天 = 604800s)。用 28–31 天容差兼容服务端的轻微抖动。
 const (
 	monthlyWindowMinSeconds int64 = 28 * 24 * 60 * 60
@@ -1595,8 +1608,8 @@ func (a *Account) GetWindow7dSeconds() int64 {
 	return a.Window7dSeconds
 }
 
-// Window7dKind 返回长窗口(7d 槽)的类型标签："monthly"(team 月窗)/"weekly"/""(未知)，
-// 供管理端把进度条标成「30天」而非误标「7天」。判据与 wham 分类的月窗容差一致。
+// Window7dKind 返回长窗口(7d 槽)的类型标签："monthly"(free/team 月窗)/"weekly"/""(未知)，
+// 供管理端把进度条标成「30天」而非误标「7天」(issue #324)。判据与 wham 分类的月窗容差一致。
 func (a *Account) Window7dKind() string {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -2220,6 +2233,9 @@ type sessionAffinity struct {
 }
 
 const defaultSessionAffinityTTL = time.Hour
+
+// maxSessionBindings 会话粘性表的软上限。超限时在 bind 路径全量清一轮过期项。
+const maxSessionBindings = 65536
 
 // Bounded affinity 默认阈值。命中任一即触发解绑下次走完整挑号策略。
 const (
@@ -3251,6 +3267,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	baseURL := row.GetCredential("base_url")
 	apiKey := row.GetCredential("api_key")
 	models := normalizeModelList(row.GetCredentialStringSlice("models"))
+	modelMapping := strings.TrimSpace(row.GetCredential("model_mapping"))
 	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount {
 		log.Printf("[账号 %d] 缺少 refresh_token、session_token 和 access_token，跳过", row.ID)
@@ -3269,6 +3286,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		BaseURL:       strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:        strings.TrimSpace(apiKey),
 		Models:        models,
+		ModelMapping:  modelMapping,
 	}
 	if isOpenAIResponsesAccount {
 		account.HealthTier = HealthTierHealthy
@@ -3897,6 +3915,16 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	s.sessionMu.Lock()
 	if s.sessionBindings == nil {
 		s.sessionBindings = make(map[string]sessionAffinity)
+	}
+	// 有界保护：过期绑定只在同 key 再次命中时才被动删除，对话结束后的绑定
+	// 永远不会再被查询、会静默泄漏。粘性键按内容种子派生（每段对话一个）后
+	// 键数量随对话数增长，超限时全量清一轮过期项。
+	if len(s.sessionBindings) >= maxSessionBindings {
+		for k, b := range s.sessionBindings {
+			if !b.expiresAt.After(now) {
+				delete(s.sessionBindings, k)
+			}
+		}
 	}
 	// 同账号的连续 Bind 视为复用,沿用 boundAt 与 requestCount 以保持 bounded 上限计数;
 	// 换账号时则按新绑定从 0 开始计。
@@ -5033,7 +5061,7 @@ func (s *Store) accountAllowedForAPIKey(acc *Account, apiKeyID int64) bool {
 	return acc.AllowsAPIKey(apiKeyID) && s.APIKeyAllowsAccount(apiKeyID, acc)
 }
 
-func (s *Store) ApplyOpenAIResponsesConfig(dbID int64, baseURL, apiKey string, models []string, proxyURL string) bool {
+func (s *Store) ApplyOpenAIResponsesConfig(dbID int64, baseURL, apiKey string, models []string, modelMapping string, proxyURL string) bool {
 	acc := s.FindByID(dbID)
 	if acc == nil {
 		return false
@@ -5046,6 +5074,7 @@ func (s *Store) ApplyOpenAIResponsesConfig(dbID int64, baseURL, apiKey string, m
 		acc.APIKey = strings.TrimSpace(apiKey)
 	}
 	acc.Models = normalizeModelList(models)
+	acc.ModelMapping = strings.TrimSpace(modelMapping)
 	acc.ProxyURL = strings.TrimSpace(proxyURL)
 	acc.Email = acc.BaseURL
 	acc.PlanType = "api"

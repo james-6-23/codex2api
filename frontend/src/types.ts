@@ -39,6 +39,7 @@ export interface AccountRow {
   openai_responses_api?: boolean
   base_url?: string
   models?: string[]
+  model_mapping?: string
   custom_headers?: Record<string, string> | null
   health_tier?: string
   scheduler_score?: number
@@ -95,6 +96,10 @@ export interface AccountRow {
   usage_7d_detail?: AccountUsageWindow
   reset_5h_at?: ISODateString
   reset_7d_at?: ISODateString
+  // 长窗口(7d 槽)真实类型: "monthly"(free/team 月窗)/"weekly"/未知。
+  // free/team plan 的长窗口实为约 30 天,标签应显示 30d 而非 7d (issue #324)。
+  usage_window_7d_kind?: 'monthly' | 'weekly' | ''
+  usage_window_7d_seconds?: number
   billed_5h?: number
   billed_7d?: number
   cooldown_until?: ISODateString
@@ -117,6 +122,18 @@ export interface AccountRow {
 }
 
 export type AccountsResponse = ApiListResponse<'accounts', AccountRow>
+
+// 单张「主动重置次数」券的有效期明细（issue #322）。
+export interface ResetCreditItem {
+  id: string
+  granted_at?: ISODateString
+  expires_at: ISODateString
+}
+
+export interface ResetCreditsDetailResponse {
+  available_count: number
+  credits: ResetCreditItem[]
+}
 
 // AccountHealthBucket 是「健康状态」条单个时间窗口内的请求成败计数。
 export interface AccountHealthBucket {
@@ -194,6 +211,7 @@ export interface AddOpenAIResponsesAccountRequest {
   base_url: string
   api_key: string
   models: string[]
+  model_mapping?: string
   proxy_url: string
   custom_headers?: Record<string, string> | null
 }
@@ -203,6 +221,7 @@ export interface UpdateOpenAIResponsesAccountRequest {
   base_url: string
   api_key?: string
   models: string[]
+  model_mapping?: string
   proxy_url: string
   custom_headers?: Record<string, string> | null
 }
@@ -1043,6 +1062,7 @@ export interface UsageLog {
   image_bytes: number
   image_format: string
   image_size: string
+  account_name: string
   account_email: string
   created_at: ISODateString
   account_billed: number

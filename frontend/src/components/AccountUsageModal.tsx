@@ -15,8 +15,9 @@ import {
 } from 'lucide-react'
 import Modal from './Modal'
 import { api } from '../api'
-import type { AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail } from '../types'
+import type { AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem } from '../types'
 import { getErrorMessage } from '../utils/error'
+import { formatBeijingTime } from '../utils/time'
 
 const COLORS = [
   '#0f766e',
@@ -651,10 +652,34 @@ function ResetCreditsSection({
       ? account.rate_limit_reset_credits
       : null
   const [count, setCount] = useState<number | null>(initial)
+  const [credits, setCredits] = useState<ResetCreditItem[] | null>(null)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [confirming, setConfirming] = useState(false)
   const [resetting, setResetting] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [done, setDone] = useState(false)
+
+  // 打开弹窗时拉取重置券明细（每张的有效期，issue #322）。
+  // 明细端点同时返回权威可用张数，一并校准本地计数。
+  // 仅对已知有重置次数语义的账号发起（count===null 表示非 Codex 账号或未探测）。
+  const loadDetail = useCallback(async () => {
+    setDetailError(null)
+    try {
+      const res = await api.getResetCredits(account.id)
+      setCredits(res.credits ?? [])
+      if (typeof res.available_count === 'number') {
+        setCount(res.available_count)
+      }
+    } catch (err) {
+      // 明细拉取失败不影响原有的次数展示与重置按钮,仅提示明细不可用。
+      setDetailError(getErrorMessage(err))
+    }
+  }, [account.id])
+
+  useEffect(() => {
+    if (initial === null) return
+    void loadDetail()
+  }, [initial, loadDetail])
 
   // 次数未知（非 Codex 账号或尚未探测）时不显示该区块。
   if (count === null) return null
@@ -672,6 +697,8 @@ function ResetCreditsSection({
       setDone(true)
       setConfirming(false)
       onResetDone?.()
+      // 重置消耗了一张券,重新拉取明细同步有效期列表。
+      void loadDetail()
     } catch (err) {
       setError(getErrorMessage(err))
     } finally {
@@ -733,6 +760,76 @@ function ResetCreditsSection({
           {t('accounts.resetCreditsConfirmMessage')}
         </p>
       )}
+      <ResetCreditExpiryList credits={credits} detailError={detailError} />
+    </div>
+  )
+}
+
+// 重置券有效期明细列表：按过期时间升序展示每张券,最快过期的在最前,
+// 并对 7 天内到期的券以醒目色提示,方便优先消耗快过期的券(issue #322)。
+function ResetCreditExpiryList({
+  credits,
+  detailError,
+}: {
+  credits: ResetCreditItem[] | null
+  detailError: string | null
+}) {
+  const { t } = useTranslation()
+
+  const sorted = useMemo(() => {
+    if (!credits) return []
+    return credits
+      .map((credit, index) => {
+        const expiresAtMs = new Date(credit.expires_at).getTime()
+        return Number.isFinite(expiresAtMs)
+          ? { key: credit.id || String(index), expiresAtMs, credit }
+          : null
+      })
+      .filter((item): item is { key: string; expiresAtMs: number; credit: ResetCreditItem } =>
+        Boolean(item),
+      )
+      .sort((a, b) => a.expiresAtMs - b.expiresAtMs || a.key.localeCompare(b.key))
+  }, [credits])
+
+  if (detailError) {
+    return (
+      <p className="mt-3 text-xs text-muted-foreground">
+        {t('accounts.resetCreditsDetailUnavailable')}
+      </p>
+    )
+  }
+  if (!credits || sorted.length === 0) return null
+
+  const nowMs = Date.now()
+  const soonThresholdMs = 7 * 24 * 60 * 60 * 1000
+
+  return (
+    <div className="mt-3 border-t pt-3">
+      <p className="mb-2 text-xs font-medium text-muted-foreground">
+        {t('accounts.resetCreditsExpiryTitle')}
+      </p>
+      <ul className="space-y-1">
+        {sorted.map((item, index) => {
+          const expiringSoon = item.expiresAtMs - nowMs <= soonThresholdMs
+          return (
+            <li
+              key={item.key}
+              className="flex items-center justify-between gap-3 text-xs"
+            >
+              <span className="text-muted-foreground">
+                {t('accounts.resetCreditsExpiryItem', { index: index + 1 })}
+              </span>
+              <span
+                className={`tabular-nums ${expiringSoon ? 'font-medium text-amber-600' : 'text-foreground'}`}
+              >
+                {t('accounts.resetCreditsExpiresAt', {
+                  time: formatBeijingTime(item.credit.expires_at),
+                })}
+              </span>
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }

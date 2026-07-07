@@ -174,6 +174,31 @@ function formatUsageAPIKeyLabel(name?: string, maskedKey?: string): string {
   return `${trimmedKey.slice(0, 4)}...${trimmedKey.slice(-4)}`
 }
 
+function formatUsageAccountLabel(log: UsageLog): string {
+  // 邮箱优先：身份账号一律显示邮箱，账号名仅作为无邮箱账号（如 relay API-key 账号）的兜底。
+  // 避免 AT 导入未命名时的占位名（at-account-N 等）盖过真实邮箱身份。
+  const accountEmail = log.account_email?.trim()
+  if (accountEmail) {
+    return formatCompactEmail(accountEmail)
+  }
+
+  const accountName = log.account_name?.trim()
+  if (accountName) {
+    return accountName
+  }
+
+  return log.account_id > 0 ? `ID ${log.account_id}` : '-'
+}
+
+function formatUsageAccountTitle(log: UsageLog): string {
+  const accountEmail = log.account_email?.trim()
+  const accountName = log.account_name?.trim()
+  if (accountEmail && accountName && accountEmail !== accountName) {
+    return `${accountEmail} · ${accountName}`
+  }
+  return accountEmail || accountName || (log.account_id > 0 ? `ID ${log.account_id}` : '-')
+}
+
 function isImageUsageLog(log: UsageLog): boolean {
   const endpoint = log.inbound_endpoint || log.endpoint || ''
   return endpoint.includes('/images/') || log.model?.startsWith('gpt-image-') || (log.image_count ?? 0) > 0
@@ -1813,7 +1838,9 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
-                          {formatCompactEmail(log.account_email)}
+                          <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatUsageAccountTitle(log)}>
+                            {formatUsageAccountLabel(log)}
+                          </span>
                         </TableCell>}
                         {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>

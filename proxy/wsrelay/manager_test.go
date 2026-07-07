@@ -2,6 +2,7 @@ package wsrelay
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"sync"
 	"testing"
@@ -308,4 +309,146 @@ func TestAcquireReusableConnectionSkipsBusySlot(t *testing.T) {
 		t.Fatalf("usedKey = %q, want cache-key#1", usedKey)
 	}
 	got.session.RemovePendingRequest(pr.RequestID)
+}
+
+// ==================== 续链亲和(response_id → 连接绑定) ====================
+
+func newBoundTestConn(t *testing.T, manager *Manager, accountID int64, sessionKey string) *WsConnection {
+	t.Helper()
+	key := manager.poolKey(accountID, "wss://example.test/responses", sessionKey, "")
+	session := NewSession(accountID, manager)
+	session.SetConnected(true)
+	wc := &WsConnection{session: session, URL: "wss://example.test/responses", PoolKey: key}
+	wc.SetState(StateConnected)
+	wc.Touch()
+	manager.connections.Store(key, wc)
+	manager.sessions.Store(key, session)
+	return wc
+}
+
+func TestBindAndLookupResponseConn(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	manager.probeFunc = func(wc *WsConnection) bool { return true }
+
+	wc := newBoundTestConn(t, manager, 7, "base#0")
+	manager.BindResponseConn("resp_abc", wc, "base#0", 7, "key-A")
+
+	got, slotKey := manager.lookupResponseConn("resp_abc", 7, "key-A")
+	if got != wc {
+		t.Fatal("lookup should return the bound connection")
+	}
+	if slotKey != "base#0" {
+		t.Fatalf("slotKey = %q, want base#0", slotKey)
+	}
+
+	// 账号不匹配 → miss(续链换号后不得复用别人账号的连接)
+	if got, _ := manager.lookupResponseConn("resp_abc", 8, "key-A"); got != nil {
+		t.Fatal("lookup with wrong account must miss")
+	}
+
+	// 连接被移出池(销毁/重建) → miss
+	manager.connections.Delete(wc.PoolKey)
+	if got, _ := manager.lookupResponseConn("resp_abc", 7, "key-A"); got != nil {
+		t.Fatal("lookup after conn removed from pool must miss")
+	}
+}
+
+func TestLookupResponseConnRejectsRebuiltSlot(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	wc := newBoundTestConn(t, manager, 7, "base#0")
+	manager.BindResponseConn("resp_old", wc, "base#0", 7, "key-A")
+
+	// 同 PoolKey 槽位被重建为新连接:旧绑定必须失效(指针校验)
+	replacement := &WsConnection{session: NewSession(7, manager), URL: wc.URL, PoolKey: wc.PoolKey}
+	replacement.SetState(StateConnected)
+	replacement.Touch()
+	manager.connections.Store(wc.PoolKey, replacement)
+
+	if got, _ := manager.lookupResponseConn("resp_old", 7, "key-A"); got != nil {
+		t.Fatal("binding to a replaced connection must miss")
+	}
+}
+
+func TestAcquirePreferredConnection(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	manager.probeFunc = func(wc *WsConnection) bool { return true }
+
+	wc := newBoundTestConn(t, manager, 7, "base#3")
+	manager.BindResponseConn("resp_chain", wc, "base#3", 7, "key-A")
+
+	got, pr, slotKey := manager.AcquirePreferredConnection("resp_chain", 7, "key-A")
+	if got != wc {
+		t.Fatal("AcquirePreferredConnection should return the bound connection")
+	}
+	if pr == nil {
+		t.Fatal("pending request must be registered")
+	}
+	if slotKey != "base#3" {
+		t.Fatalf("slotKey = %q, want base#3", slotKey)
+	}
+	if wc.session.PendingCount() != 1 {
+		t.Fatalf("PendingCount = %d, want 1", wc.session.PendingCount())
+	}
+
+	// 连接忙(已有在途请求)时不等待,直接回退常规路径
+	got2, pr2, _ := manager.AcquirePreferredConnection("resp_chain", 7, "key-A")
+	if got2 != nil || pr2 != nil {
+		t.Fatal("busy preferred connection must not be acquired")
+	}
+}
+
+func TestAcquirePreferredConnectionProbeFailureEvicts(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	manager.probeFunc = func(wc *WsConnection) bool { return false }
+
+	wc := newBoundTestConn(t, manager, 7, "base#0")
+	manager.BindResponseConn("resp_dead", wc, "base#0", 7, "key-A")
+
+	got, pr, _ := manager.AcquirePreferredConnection("resp_dead", 7, "key-A")
+	if got != nil || pr != nil {
+		t.Fatal("dead preferred connection must not be acquired")
+	}
+	if _, ok := manager.connections.Load(wc.PoolKey); ok {
+		t.Fatal("dead connection must be evicted from pool")
+	}
+}
+
+func TestBindResponseConnBounded(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	wc := newBoundTestConn(t, manager, 7, "base#0")
+	for i := 0; i < responseConnBindingMaxEntries+10; i++ {
+		manager.BindResponseConn(fmt.Sprintf("resp_%d", i), wc, "base#0", 7, "key-A")
+	}
+	manager.respConnMu.Lock()
+	size := len(manager.respConnBindings)
+	manager.respConnMu.Unlock()
+	if size > responseConnBindingMaxEntries {
+		t.Fatalf("binding map size = %d, exceeds cap %d", size, responseConnBindingMaxEntries)
+	}
+}
+
+func TestLookupResponseConnIsolatesAPIKeys(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	wc := newBoundTestConn(t, manager, 7, "base#0")
+	manager.BindResponseConn("resp_owned", wc, "base#0", 7, "key-A")
+
+	// 别的 API Key 拿着同一个 response_id 不得命中(防跨 Key 定向挤连接)
+	if got, _ := manager.lookupResponseConn("resp_owned", 7, "key-B"); got != nil {
+		t.Fatal("lookup with different api key must miss")
+	}
+	if got, _ := manager.lookupResponseConn("resp_owned", 7, ""); got != nil {
+		t.Fatal("lookup with empty api key must miss when binding has one")
+	}
+	if got, _ := manager.lookupResponseConn("resp_owned", 7, "key-A"); got != wc {
+		t.Fatal("owner api key must hit")
+	}
 }

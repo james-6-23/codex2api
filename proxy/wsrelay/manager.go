@@ -181,12 +181,40 @@ type Manager struct {
 	// pool key 级别串行化，避免同一逻辑 session 在 acquire 阶段竞争同一条连接
 	keyLocks sync.Map
 
+	// response_id -> 连接 绑定（续链亲和）。上游 chatgpt backend 无服务端存储时，
+	// previous_response_id 的上下文只存活在产生该响应的那条 WS 连接里；带续链 ID
+	// 的请求必须回到原连接，落到别的槽位会得到 "previous response not found"。
+	// 参考 sub2api openai_ws_state_store 的 BindResponseConn/GetResponseConn。
+	respConnMu       sync.Mutex
+	respConnBindings map[string]responseConnBinding
+
 	// 可选的探活函数（用于测试替换），nil 时使用默认 probeConnection
 	probeFunc func(wc *WsConnection) bool
 
 	// 可选的保活 Ping 函数（用于测试替换），nil 时使用默认 SendHeartbeat
 	keepalivePingFunc func(wc *WsConnection) error
 }
+
+// responseConnBinding 记录某个 response_id 由哪条连接产出。
+// conn 指针同时用作身份校验：同 poolKey 下连接被重建后旧绑定自动失效。
+// apiKey 为产出该响应的下游 API Key（明文，仅存内存），lookup 时要求匹配，
+// 防止跨 Key 用他人 response_id 定向挤上他人连接（与 response cache 的
+// owner 隔离同一原则）。
+type responseConnBinding struct {
+	conn       *WsConnection
+	sessionKey string
+	accountID  int64
+	apiKey     string
+	expiresAt  time.Time
+}
+
+const (
+	// responseConnBindingTTL 续链绑定的存活时间。上游空闲连接本身在 IdleTimeout
+	// (5min) 后被清理，绑定活得再久也无意义，与其对齐。
+	responseConnBindingTTL = IdleTimeout
+	// responseConnBindingMaxEntries 绑定表上限，防止内存膨胀。
+	responseConnBindingMaxEntries = 4096
+)
 
 // wsWriteBufferPool 在所有上游 WS 连接间共享写缓冲，降低高并发下的内存占用。
 var wsWriteBufferPool = &sync.Pool{}
@@ -602,6 +630,98 @@ func (m *Manager) DiscardConnection(wc *WsConnection) {
 			m.sessions.CompareAndDelete(wc.PoolKey, wc.session)
 		}
 	}
+}
+
+// BindResponseConn 记录 response_id 由哪条连接产出（续链亲和）。
+func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionKey string, accountID int64, apiKey string) {
+	responseID = strings.TrimSpace(responseID)
+	if m == nil || responseID == "" || wc == nil {
+		return
+	}
+	now := time.Now()
+	m.respConnMu.Lock()
+	if m.respConnBindings == nil {
+		m.respConnBindings = make(map[string]responseConnBinding, 64)
+	}
+	// 有界保护：先清一轮过期项，仍超限则拒绝新增（旧绑定比新绑定更可能被续链）。
+	if len(m.respConnBindings) >= responseConnBindingMaxEntries {
+		for k, b := range m.respConnBindings {
+			if now.After(b.expiresAt) {
+				delete(m.respConnBindings, k)
+			}
+		}
+	}
+	if len(m.respConnBindings) < responseConnBindingMaxEntries {
+		m.respConnBindings[responseID] = responseConnBinding{
+			conn:       wc,
+			sessionKey: sessionKey,
+			accountID:  accountID,
+			apiKey:     apiKey,
+			expiresAt:  now.Add(responseConnBindingTTL),
+		}
+	}
+	m.respConnMu.Unlock()
+}
+
+// lookupResponseConn 返回 response_id 绑定的连接及其池内 sessionKey。
+// 绑定过期、账号/API Key 不匹配、连接已断开/被重建（池内同 key 已非同一指针）
+// 时返回 nil。
+func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey string) (*WsConnection, string) {
+	responseID = strings.TrimSpace(responseID)
+	if m == nil || responseID == "" {
+		return nil, ""
+	}
+	now := time.Now()
+	m.respConnMu.Lock()
+	binding, ok := m.respConnBindings[responseID]
+	if ok && (now.After(binding.expiresAt) || binding.accountID != accountID || binding.apiKey != apiKey) {
+		if now.After(binding.expiresAt) {
+			delete(m.respConnBindings, responseID)
+		}
+		ok = false
+	}
+	m.respConnMu.Unlock()
+	if !ok || binding.conn == nil {
+		return nil, ""
+	}
+	// 指针级校验：连接必须仍在池中且是同一条（防止复用已重建槽位的陈旧绑定）。
+	if v, exists := m.connections.Load(binding.conn.PoolKey); !exists || v != binding.conn {
+		return nil, ""
+	}
+	if !binding.conn.IsConnected() || binding.conn.IsExpired() {
+		return nil, ""
+	}
+	return binding.conn, binding.sessionKey
+}
+
+// AcquirePreferredConnection 尝试独占 response_id 绑定的原连接（续链亲和）。
+// 成功返回 (连接, pendingRequest, 池内 sessionKey)；绑定失效或连接忙时返回 nil，
+// 调用方回退到常规 acquire 路径。忙时不等待：续链上下文虽在原连接，但排队会
+// 阻塞在前一个长响应后面，且该场景（同会话并发续链）极少，退化为缓存 miss 更稳。
+func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string) (*WsConnection, *PendingRequest, string) {
+	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey)
+	if wc == nil {
+		return nil, nil, ""
+	}
+	lock := m.keyLock(wc.PoolKey)
+	lock.Lock()
+	defer lock.Unlock()
+	// 加锁后复验：期间可能被其他请求占用或销毁。
+	if v, exists := m.connections.Load(wc.PoolKey); !exists || v != wc {
+		return nil, nil, ""
+	}
+	if !canReuseConnection(wc) {
+		return nil, nil, ""
+	}
+	if !m.probe(wc) {
+		m.connections.Delete(wc.PoolKey)
+		m.sessions.Delete(wc.PoolKey)
+		wc.Close()
+		return nil, nil, ""
+	}
+	pr := wc.session.AddPendingRequest(sessionKey)
+	wc.Touch()
+	return wc, pr, sessionKey
 }
 
 // poolKey 生成连接池键

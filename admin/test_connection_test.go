@@ -45,6 +45,27 @@ func TestBuildConnectionTestPayloadUsesStoreContent(t *testing.T) {
 	}
 }
 
+// TestBuildConnectionTestPayloadRandomizesMultiLineContent 验证多行测活内容
+// 按行随机抽取并展开变量（issue #320）。
+func TestBuildConnectionTestPayloadRandomizesMultiLineContent(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetTestContent("ping-a\nping-b\ncount {{rand:1-1}}")
+
+	seen := map[string]bool{}
+	for i := 0; i < 200; i++ {
+		payload := buildConnectionTestPayload(store, "gpt-5.5")
+		seen[gjson.GetBytes(payload, "input.0.content.0.text").String()] = true
+	}
+	for _, want := range []string{"ping-a", "ping-b", "count 1"} {
+		if !seen[want] {
+			t.Fatalf("candidate %q never sent in 200 draws; seen=%v", want, seen)
+		}
+	}
+	if len(seen) != 3 {
+		t.Fatalf("unexpected payload variants: %v", seen)
+	}
+}
+
 func TestFormatUsageLimitedTestErrorReportsSuccessfulProbeAsLimited(t *testing.T) {
 	msg, limited := formatUsageLimitedTestError(proxy.CodexUsageSyncResult{
 		Premium5hRateLimited: true,
