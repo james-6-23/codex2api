@@ -1023,10 +1023,13 @@ func shouldSuppressRetryableResponseFailedBeforeFirstToken(eventType string, ter
 // 交由循环外按真实 HTTP 错误码返回,而不是把失败包装成 200 + [DONE]。
 //
 // 背景:pending 尚未 flush 时下游 HTTP 200 header 还没发出(见 stream_flush_writer.go),
-// 此时若把 response.failed 写进流并补 [DONE],上游中转层(如 New API 的 pass-through
-// Responses 渠道)会把它当成一次正常完成、按其本地预估的 input token 计费,
+// 此时若把 response.failed 写进流并补 [DONE],把本服务当上游的计费型中转层
+// 会把它当成一次正常完成、按其本地预估的 input token 计费,
 // 造成"上游拒绝(0 输出)却按 input 收费"。#310 已让 context_length_exceeded 等确定性
 // 客户端错误不再换号重试,但流式下游返回仍是 200 + [DONE],本函数补上这一半。
+//
+// 注意:命中后除了中止转发,循环后的收尾 flush 也必须跳过(见 wroteAnyBody 守卫),
+// 否则空 buffer 的 flusher.Flush 仍会提前提交 200 header,让循环外的 c.JSON(4xx) 失效。
 func shouldReturnHTTPErrorForResponseFailed(eventType string, ttftRecorded, wroteAnyBody, clientGone bool) bool {
 	return eventType == "response.failed" && !ttftRecorded && !wroteAnyBody && !clientGone
 }
@@ -2160,6 +2163,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
+		// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
+		abortedForHTTPError := false
 		var responseJSON []byte
 		var imageLogInfo imageUsageLogInfo
 		var terminalFailurePayload []byte
@@ -2231,6 +2237,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 + [DONE] 让中转层误计费。
 				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
 					pendingFirstTokenEvents.Reset()
+					abortedForHTTPError = true
 					return false
 				}
 
@@ -2246,7 +2253,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
-			if writeErr == nil {
+			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
+			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
+			if writeErr == nil && wroteAnyBody {
 				writeErr = streamWriter.Flush()
 			}
 		} else {
@@ -2364,9 +2373,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			}
 		}
-		if isStream && len(terminalFailurePayload) > 0 && !wroteAnyBody {
-			// 流式:首 token 前上游失败、HTTP 200 尚未发出,返回真实错误码而非静默的成功流,
+		if isStream && abortedForHTTPError && !wroteAnyBody {
+			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
+			// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
 			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+			c.Header("Content-Type", "application/json; charset=utf-8")
 			c.JSON(logStatusCode, gin.H{
 				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 			})
@@ -3250,6 +3261,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
+		// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
+		abortedForHTTPError := false
 		var compactResult []byte
 		var terminalFailurePayload []byte
 
@@ -3315,6 +3329,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 + [DONE] 让中转层误计费。
 				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
 					pendingFirstTokenChunks.Reset()
+					abortedForHTTPError = true
 					return false
 				}
 
@@ -3357,7 +3372,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 				return true
 			})
-			if writeErr == nil {
+			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
+			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
+			if writeErr == nil && wroteAnyBody {
 				writeErr = streamWriter.Flush()
 			}
 		} else {
@@ -3461,9 +3478,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 			}
 		}
-		if isStream && len(terminalFailurePayload) > 0 && !wroteAnyBody {
-			// 流式:首 token 前上游失败、HTTP 200 尚未发出,返回真实错误码而非静默的成功流,
+		if isStream && abortedForHTTPError && !wroteAnyBody {
+			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
+			// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
 			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+			c.Header("Content-Type", "application/json; charset=utf-8")
 			c.JSON(logStatusCode, gin.H{
 				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
 			})
