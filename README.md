@@ -75,6 +75,13 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 
 <table>
 <tr>
+<td width="180" align="center" valign="middle"><a href="https://www.fastaitoken.com/register"><img src="assets/fastaitoken-logo.jpg" width="90" alt="FastAIToken"></a></td>
+<td valign="middle"><b><a href="https://www.fastaitoken.com/register">FastAIToken</a></b> is a developer-first AI API gateway providing unified access to leading models including OpenAI, Claude, and Gemini. Fully OpenAI-API compatible and works seamlessly with Claude Code, Codex, Gemini CLI, Cherry Studio, Cline, and Continue. With a 1:1 top-up ratio (¥1 = $1 API credit) and routes ranging from 0.02× OpenAI (limited time) to 1.2× Claude Max, plus a public status page and 24/7 human support. Enterprise-ready with invoice support and 99% SLA dedicated account pools.</td>
+</tr>
+</table>
+
+<table>
+<tr>
 <td width="180" align="center" valign="middle"><a href="https://aihub.top/register?aff=42WZVXN9KS4S"><img src="assets/aihub-logo.jpg" width="160" alt="AIHub"></a></td>
 <td valign="middle"><b><a href="https://aihub.top/register?aff=42WZVXN9KS4S">AIHub</a></b> is a high-availability AI model API relay platform for individual developers and enterprise teams. Supports Codex/Claude Code at ~1/10 official pricing. Register using the link and promo code <code>CODEX2API</code> to get $3 test credit. </td>
 </tr>

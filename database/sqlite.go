@@ -228,7 +228,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					codex_ws_keepalive_interval_sec INTEGER DEFAULT 60,
 					codex_ws_hide_upstream_errors INTEGER DEFAULT 1,
 					codex_ws_silent_retry_enabled INTEGER DEFAULT 1,
-					codex_ws_silent_max_retries INTEGER DEFAULT 2
+					codex_ws_silent_max_retries INTEGER DEFAULT 2,
+					retry_interval_ms INTEGER DEFAULT 0,
+					transport_retry_policy TEXT DEFAULT 'rotate'
 				);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -422,6 +424,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "codex_ws_hide_upstream_errors", "INTEGER DEFAULT 1"},
 		{"system_settings", "codex_ws_silent_retry_enabled", "INTEGER DEFAULT 1"},
 		{"system_settings", "codex_ws_silent_max_retries", "INTEGER DEFAULT 2"},
+		{"system_settings", "retry_interval_ms", "INTEGER DEFAULT 0"},
+		{"system_settings", "transport_retry_policy", "TEXT DEFAULT 'rotate'"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "max_rate_limit_retries", "INTEGER DEFAULT 1"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},
@@ -458,6 +462,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"prompt_filter_logs", "review_flagged", "INTEGER DEFAULT 0"},
 		{"prompt_filter_logs", "review_error", "TEXT DEFAULT ''"},
 		{"prompt_filter_logs", "full_text", "TEXT DEFAULT ''"},
+		{"prompt_filter_logs", "client_request_id", "TEXT DEFAULT ''"},
 		{"system_settings", "client_compat_mode", "TEXT DEFAULT 'preserve'"},
 		{"system_settings", "codex_min_cli_version", "TEXT DEFAULT '0.118.0'"},
 		{"system_settings", "codex_user_agent_config", "TEXT DEFAULT '{}'"},

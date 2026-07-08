@@ -90,6 +90,9 @@ export function resetAdminAuthState() {
   window.dispatchEvent(new Event(ADMIN_AUTH_REQUIRED_EVENT))
 }
 
+// RequestInit 扩展:timeoutMs 可选,开启后到时自动 abort 请求。
+type RequestOptions = RequestInit & { timeoutMs?: number }
+
 function extractAdminErrorMessage(body: string, status: number): string {
   if (!body.trim()) {
     return `HTTP ${status}`
@@ -107,7 +110,7 @@ function extractAdminErrorMessage(body: string, status: number): string {
   return body
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const headers = new Headers(options.headers)
   const isFormData = typeof FormData !== 'undefined' && options.body instanceof FormData
   if (options.body !== undefined && options.body !== null && !isFormData && !headers.has('Content-Type')) {
@@ -119,11 +122,31 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers.set('X-Admin-Key', adminKey)
   }
 
-  const res = await fetch(BASE + path, {
-    ...options,
-    cache: options.cache ?? 'no-store',
-    headers,
-  })
+  // 可选的客户端超时:调用方通过 timeoutMs 显式开启,不传则保持原有“无超时”行为,
+  // 避免影响下载/导出等长耗时接口。仅在调用方未自带 signal 时接管中止逻辑。
+  const { timeoutMs, ...init } = options
+  let timeoutId: ReturnType<typeof setTimeout> | undefined
+  if (timeoutMs && timeoutMs > 0 && !init.signal && typeof AbortController !== 'undefined') {
+    const controller = new AbortController()
+    init.signal = controller.signal
+    timeoutId = setTimeout(() => controller.abort(), timeoutMs)
+  }
+
+  let res: Response
+  try {
+    res = await fetch(BASE + path, {
+      ...init,
+      cache: init.cache ?? 'no-store',
+      headers,
+    })
+  } catch (err) {
+    if (timeoutId !== undefined && err instanceof DOMException && err.name === 'AbortError') {
+      throw new Error('请求超时，请稍后重试')
+    }
+    throw err
+  } finally {
+    if (timeoutId !== undefined) clearTimeout(timeoutId)
+  }
 
   if (!res.ok) {
     const body = await res.text()
@@ -314,9 +337,11 @@ export const api = {
   },
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
-  getSystemUpdate: () => request<SystemUpdateInfo>('/system/update'),
+  getSystemUpdate: () => request<SystemUpdateInfo>('/system/update', { timeoutMs: 20_000 }),
   performSystemUpdate: () =>
-    request<SystemUpdateResult>('/system/update', { method: 'POST' }),
+    // 后端下载上游二进制最长约 10 分钟,客户端给到 11 分钟兜底:既不会误伤慢下载,
+    // 又能保证请求最终有界返回,不会无限期卡在“更新中”。
+    request<SystemUpdateResult>('/system/update', { method: 'POST', timeoutMs: 11 * 60_000 }),
   getOpsErrorSummary: (params: {
     start: string
     end: string

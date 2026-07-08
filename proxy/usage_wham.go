@@ -29,6 +29,14 @@ const WhamResetCreditsURL = "https://chatgpt.com/backend-api/wham/rate-limit-res
 // whamURLForTest 允许测试替换默认 URL。生产代码不要赋值。
 var whamURLForTest = ""
 
+// SetWhamUsageURLForTest 供其他包的测试替换 wham 用量端点 URL，返回恢复函数。
+// 生产代码不要调用。
+func SetWhamUsageURLForTest(url string) (restore func()) {
+	old := whamURLForTest
+	whamURLForTest = url
+	return func() { whamURLForTest = old }
+}
+
 // whamConsumeURLForTest 允许测试替换重置端点 URL。生产代码不要赋值。
 var whamConsumeURLForTest = ""
 

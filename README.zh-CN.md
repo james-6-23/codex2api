@@ -75,6 +75,13 @@
 
 <table>
 <tr>
+<td width="180" align="center" valign="middle"><a href="https://www.fastaitoken.com/register"><img src="assets/fastaitoken-logo.jpg" width="90" alt="FastAIToken"></a></td>
+<td valign="middle"><b><a href="https://www.fastaitoken.com/register">FastAIToken</a></b> 是面向开发者的 AI API 聚合平台，支持 OpenAI、Claude、Gemini 等主流大模型，兼容 OpenAI API 协议，可无缝接入 Claude Code、Codex、Gemini CLI、Cherry Studio、Cline、Continue 等开发工具。采用充值 1:1（1 元 = 1 美元 API 额度），分组覆盖 0.02× OpenAI 福利（限时）到 1.2× Claude Max，并提供公开状态页与 7×24 小时真人技术支持。支持企业开票，提供 99% SLA 企业级稳定号池。</td>
+</tr>
+</table>
+
+<table>
+<tr>
 <td width="180" align="center" valign="middle"><a href="https://aihub.top/register?aff=42WZVXN9KS4S"><img src="assets/aihub-logo.jpg" width="160" alt="AIHub"></a></td>
 <td valign="middle"><b><a href="https://aihub.top/register?aff=42WZVXN9KS4S">AIHub</a></b> 是一家面向个人开发者和企业团队的高可用 AI 模型 API 中转平台。支持 Codex/Claude Code，价格大约是官方的 1 折不到！通过链接注册，使用优惠码 <code>CODEX2API</code> 即可获得 3$ 测试额度。</td>
 </tr>

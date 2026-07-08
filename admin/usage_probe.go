@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -13,11 +14,19 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// errWhamUnauthorized 标记 wham 探针遭遇 401。
+// wham（ChatGPT 后端额度端点）与 /responses 网关的鉴权口径不同：纯 AT 导入
+// （codex_at）的账号可能因 token 缺工作区 claim 等原因在 wham 恒 401，
+// 但真实流量完全可用（issue #328）。因此 wham 401 不能单方面定罪封号，
+// 须由 ProbeUsageSnapshot 决定是否用 /responses 探针裁决。
+var errWhamUnauthorized = errors.New("wham usage probe unauthorized")
+
 // ProbeUsageSnapshot 主动刷新账号用量。
 //
 // 优先尝试 /backend-api/wham/usage（零额度成本的结构化端点）；
 // 失败时（4xx/5xx/网络）回退到给 /backend-api/codex/responses 发一个最小请求
 // （会真实计入用量但保证向下兼容）。
+// 鉴权裁决：wham 401 不单方面封号，由 /responses 回退探针定夺（issue #328）。
 func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account) error {
 	if account == nil {
 		return nil
@@ -38,6 +47,15 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	// 1) 优先用 wham（零成本）
 	if err := h.probeUsageViaWham(ctx, account, limited); err == nil {
 		return nil
+	} else if errors.Is(err, errWhamUnauthorized) {
+		// wham 401 不直接封号（codex_at 账号可能 wham 恒 401 但流量可用，issue #328）：
+		// 能回退时交给 /responses 探针做鉴权最终裁决（200 恢复 / 401 才封）；
+		// 不能回退时仅记录不封——真正失效的 token 会在真实流量 401 时被网关冷却。
+		if whamOnly {
+			log.Printf("[账号 %d] wham 探针 401，缺少 /responses 佐证（限流/lazy/回退关闭），跳过封禁: %v", account.DBID, err)
+			return err
+		}
+		log.Printf("[账号 %d] wham 探针 401，交由 /responses 探针裁决鉴权状态: %v", account.DBID, err)
 	} else {
 		if whamOnly {
 			log.Printf("[账号 %d] wham 用量探测失败，已按配置/限流状态跳过 /responses 探针: %v", account.DBID, err)
@@ -64,8 +82,9 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 		_ = resp.Body.Close()
 		switch resp.StatusCode {
 		case http.StatusUnauthorized:
-			h.store.ReportRequestFailure(account, "client", 0)
-			h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", fmt.Sprintf("用量探针 wham 上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
+			// 不在此处上报失败/封号：wham 401 对 codex_at 账号可能是误报，
+			// 反复计入失败样本还会污染健康统计。交由 ProbeUsageSnapshot 裁决。
+			return fmt.Errorf("%w: 上游返回 %d: %s", errWhamUnauthorized, resp.StatusCode, truncate(string(body), 300))
 		case http.StatusTooManyRequests:
 			h.store.ReportRequestFailure(account, "client", 0)
 		}

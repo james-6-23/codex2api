@@ -1019,6 +1019,22 @@ func shouldSuppressRetryableResponseFailedBeforeFirstToken(eventType string, ter
 	return responseFailedRetryable(terminalFailurePayload)
 }
 
+// shouldReturnHTTPErrorForResponseFailed 判断:流式请求在首 token 之前收到
+// response.failed(且尚未向下游写任何内容、客户端也未断开)时,应当中止 SSE 转发,
+// 交由循环外按真实 HTTP 错误码返回,而不是把失败包装成 200 + [DONE]。
+//
+// 背景:pending 尚未 flush 时下游 HTTP 200 header 还没发出(见 stream_flush_writer.go),
+// 此时若把 response.failed 写进流并补 [DONE],把本服务当上游的计费型中转层
+// 会把它当成一次正常完成、按其本地预估的 input token 计费,
+// 造成"上游拒绝(0 输出)却按 input 收费"。#310 已让 context_length_exceeded 等确定性
+// 客户端错误不再换号重试,但流式下游返回仍是 200 + [DONE],本函数补上这一半。
+//
+// 注意:命中后除了中止转发,循环后的收尾 flush 也必须跳过(见 wroteAnyBody 守卫),
+// 否则空 buffer 的 flusher.Flush 仍会提前提交 200 header,让循环外的 c.JSON(4xx) 失效。
+func shouldReturnHTTPErrorForResponseFailed(eventType string, ttftRecorded, wroteAnyBody, clientGone bool) bool {
+	return eventType == "response.failed" && !ttftRecorded && !wroteAnyBody && !clientGone
+}
+
 func imageGenerationOutputKey(item gjson.Result) string {
 	if key := strings.TrimSpace(item.Get("id").String()); key != "" {
 		return key
@@ -1391,6 +1407,42 @@ func shouldRetryRequestError(err error, generalRetries *int, maxGeneralRetries i
 	return false
 }
 
+const transportRetryPolicySticky = "sticky"
+
+// waitBeforeRetry 在两次重试之间等待管理端配置的重试间隔(retry_interval_ms,0 = 立即重试)。
+// 等待期间客户端断开返回 false,调用方应放弃本次重试(issue #331)。
+func (h *Handler) waitBeforeRetry(ctx context.Context) bool {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if h == nil || h.store == nil {
+		return true
+	}
+	interval := time.Duration(h.store.GetRetryIntervalMS()) * time.Millisecond
+	if interval <= 0 {
+		return true
+	}
+	if ctx == nil {
+		time.Sleep(interval)
+		return true
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// stickyTransportRetryEnabled 返回是否对传输类失败粘滞同号重试(issue #331)。
+// 网络波动/代理换节点等连接级故障的根源不在账号:粘滞模式下不换号、不记账号失败、
+// 不解绑会话亲和,等重试间隔后同号重试;换号(rotate,默认)保持旧行为。
+func (h *Handler) stickyTransportRetryEnabled() bool {
+	return h != nil && h.store != nil && h.store.GetTransportRetryPolicy() == transportRetryPolicySticky
+}
+
 func IsDeactivatedWorkspaceError(body []byte) bool {
 	for _, path := range []string{"detail.code", "error.code", "code"} {
 		code := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String()))
@@ -1698,17 +1750,21 @@ func (h *Handler) Responses(c *gin.Context) {
 				if retryable {
 					shouldRetry = shouldRetryRequestError(reqErr, &generalRetries, maxRetries)
 				}
-				if kind != "" && !(timedOut && shouldRetry) {
+				// 传输类失败粘滞同号重试:不记账号失败、不解绑亲和、不硬排除(issue #331)
+				stickyRetry := shouldRetry && !timedOut && kind != "" && h.stickyTransportRetryEnabled()
+				if kind != "" && !(timedOut && shouldRetry) && !stickyRetry {
 					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 				}
 				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				if !stickyRetry {
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				}
 				if timedOut && shouldRetry {
 					retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 					log.Printf("OpenAI Responses 上游首字超时，断开并重试 (attempt %d/%d, account %d): %v", attempt+1, maxRetries+1, account.ID(), reqErr)
 					continue
 				}
-				if !timedOut {
+				if !timedOut && !stickyRetry {
 					retryExclusions.MarkHard(account.ID())
 				}
 
@@ -1719,6 +1775,12 @@ func (h *Handler) Responses(c *gin.Context) {
 
 				log.Printf("OpenAI Responses 上游请求失败 (attempt %d): %v", attempt+1, reqErr)
 				if shouldRetry {
+					if stickyRetry {
+						log.Printf("传输错误粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d)", account.ID(), attempt+1, maxRetries+1)
+					}
+					if !h.waitBeforeRetry(c.Request.Context()) {
+						return
+					}
 					continue
 				}
 				ErrorToGinResponse(c, reqErr)
@@ -1791,6 +1853,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				if shouldRetry {
 					lastStatusCode = resp.StatusCode
 					lastBody = errBody
+					if !h.waitBeforeRetry(c.Request.Context()) {
+						return
+					}
 					continue
 				}
 
@@ -1812,6 +1877,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			var readErr error
 			var writeErr error
 			wroteAnyBody := false
+			// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
+			// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
+			abortedForHTTPError := false
 			var imageLogInfo imageUsageLogInfo
 			var terminalFailurePayload []byte
 
@@ -1861,6 +1929,13 @@ func (h *Handler) Responses(c *gin.Context) {
 						pendingFirstTokenEvents.Reset()
 						return false
 					}
+					// 首 token 前的 response.failed 不写进下游流:不可重试(如 context_length_exceeded)
+					// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 流让中转层误计费。
+					if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
+						pendingFirstTokenEvents.Reset()
+						abortedForHTTPError = true
+						return false
+					}
 					if image, ok := extractImageFromOutputItemDone(data, logModel); ok {
 						imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
 					}
@@ -1876,7 +1951,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					return eventType != "response.completed" && eventType != "response.failed"
 				})
-				if writeErr == nil {
+				// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
+				// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
+				if writeErr == nil && wroteAnyBody {
 					writeErr = streamWriter.Flush()
 				}
 			} else {
@@ -1926,7 +2003,20 @@ func (h *Handler) Responses(c *gin.Context) {
 				resp.Body.Close()
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				// 首字超时已白等一轮,不再叠加重试间隔;其余首包前断流按配置间隔等待
+				if !isFirstTokenTimeoutOutcome(outcome) && !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
 				continue
+			}
+			if isStream && abortedForHTTPError && !wroteAnyBody {
+				// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
+				// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
+				// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.JSON(outcome.logStatusCode, gin.H{
+					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+				})
 			}
 			if !isStream && readErr != nil {
 				c.JSON(http.StatusBadGateway, gin.H{
@@ -2036,17 +2126,21 @@ func (h *Handler) Responses(c *gin.Context) {
 			if retryable {
 				shouldRetry = shouldRetryRequestError(reqErr, &generalRetries, maxRetries)
 			}
-			if kind != "" && !(timedOut && shouldRetry) {
+			// 传输类失败粘滞同号重试:不记账号失败、不解绑亲和、不硬排除(issue #331)
+			stickyRetry := shouldRetry && !timedOut && kind != "" && h.stickyTransportRetryEnabled()
+			if kind != "" && !(timedOut && shouldRetry) && !stickyRetry {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			if !stickyRetry {
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			}
 			if timedOut && shouldRetry {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 				log.Printf("上游首字超时，断开并重试 (attempt %d/%d, account %d, /v1/responses): %v", attempt+1, maxRetries+1, account.ID(), reqErr)
 				continue
 			}
-			if !timedOut {
+			if !timedOut && !stickyRetry {
 				retryExclusions.MarkHard(account.ID())
 			}
 
@@ -2058,6 +2152,12 @@ func (h *Handler) Responses(c *gin.Context) {
 
 			log.Printf("上游请求失败 (attempt %d): %v", attempt+1, reqErr)
 			if shouldRetry {
+				if stickyRetry {
+					log.Printf("传输错误粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, /v1/responses)", account.ID(), attempt+1, maxRetries+1)
+				}
+				if !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
 				continue
 			}
 			ErrorToGinResponse(c, reqErr)
@@ -2128,6 +2228,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			if shouldRetry {
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
+				if !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
 				continue
 			}
 
@@ -2153,6 +2256,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
+		// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
+		abortedForHTTPError := false
 		var responseJSON []byte
 		var imageLogInfo imageUsageLogInfo
 		var terminalFailurePayload []byte
@@ -2220,6 +2326,14 @@ func (h *Handler) Responses(c *gin.Context) {
 					return false
 				}
 
+				// 首 token 前的 response.failed 不写进下游流:不可重试(如 context_length_exceeded)
+				// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 + [DONE] 让中转层误计费。
+				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
+					pendingFirstTokenEvents.Reset()
+					abortedForHTTPError = true
+					return false
+				}
+
 				if !clientGone {
 					shouldDefer := !ttftRecorded && !gotTerminal && isPreContentLifecycleEvent(eventType)
 					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, data, shouldDefer)
@@ -2232,7 +2346,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				return eventType != "response.completed" && eventType != "response.failed"
 			})
-			if writeErr == nil {
+			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
+			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
+			if writeErr == nil && wroteAnyBody {
 				writeErr = streamWriter.Flush()
 			}
 		} else {
@@ -2331,6 +2447,10 @@ func (h *Handler) Responses(c *gin.Context) {
 			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			// 首字超时已白等一轮,不再叠加重试间隔;其余首包前断流按配置间隔等待
+			if !isFirstTokenTimeoutOutcome(outcome) && !h.waitBeforeRetry(c.Request.Context()) {
+				return
+			}
 			continue
 		}
 
@@ -2350,7 +2470,15 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			}
 		}
-		if !isStream {
+		if isStream && abortedForHTTPError && !wroteAnyBody {
+			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
+			// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
+			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+			c.Header("Content-Type", "application/json; charset=utf-8")
+			c.JSON(logStatusCode, gin.H{
+				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+			})
+		} else if !isStream {
 			if len(terminalFailurePayload) > 0 {
 				c.JSON(logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
@@ -2649,6 +2777,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				if shouldRetry {
 					lastStatusCode = resp.StatusCode
 					lastBody = errBody
+					if !h.waitBeforeRetry(c.Request.Context()) {
+						return
+					}
 					continue
 				}
 
@@ -2836,6 +2967,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			if shouldRetry {
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
+				if !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
 				continue
 			}
 
@@ -3145,17 +3279,21 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if retryable {
 				shouldRetry = shouldRetryRequestError(reqErr, &generalRetries, maxRetries)
 			}
-			if kind != "" && !(timedOut && shouldRetry) {
+			// 传输类失败粘滞同号重试:不记账号失败、不解绑亲和、不硬排除(issue #331)
+			stickyRetry := shouldRetry && !timedOut && kind != "" && h.stickyTransportRetryEnabled()
+			if kind != "" && !(timedOut && shouldRetry) && !stickyRetry {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			if !stickyRetry {
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			}
 			if timedOut && shouldRetry {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 				log.Printf("上游首字超时，断开并重试 (attempt %d/%d, account %d, /v1/chat/completions): %v", attempt+1, maxRetries+1, account.ID(), reqErr)
 				continue
 			}
-			if !timedOut {
+			if !timedOut && !stickyRetry {
 				retryExclusions.MarkHard(account.ID())
 			}
 
@@ -3167,6 +3305,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 			log.Printf("上游请求失败 (attempt %d): %v", attempt+1, reqErr)
 			if shouldRetry {
+				if stickyRetry {
+					log.Printf("传输错误粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, /v1/chat/completions)", account.ID(), attempt+1, maxRetries+1)
+				}
+				if !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
 				continue
 			}
 			ErrorToGinResponse(c, reqErr)
@@ -3216,6 +3360,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if shouldRetry {
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
+				if !h.waitBeforeRetry(c.Request.Context()) {
+					return
+				}
 				continue
 			}
 
@@ -3241,6 +3388,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		var readErr error
 		var writeErr error
 		wroteAnyBody := false
+		// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
+		// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
+		abortedForHTTPError := false
 		var compactResult []byte
 		var terminalFailurePayload []byte
 
@@ -3302,6 +3452,14 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					return false
 				}
 
+				// 首 token 前的 response.failed 不写进下游流:不可重试(如 context_length_exceeded)
+				// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 + [DONE] 让中转层误计费。
+				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
+					pendingFirstTokenChunks.Reset()
+					abortedForHTTPError = true
+					return false
+				}
+
 				if !clientGone && chunk != nil {
 					shouldDefer := !ttftRecorded && !gotTerminal && isPreContentLifecycleEvent(eventType)
 					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenChunks, chunk, shouldDefer)
@@ -3341,7 +3499,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 				return true
 			})
-			if writeErr == nil {
+			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
+			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
+			if writeErr == nil && wroteAnyBody {
 				writeErr = streamWriter.Flush()
 			}
 		} else {
@@ -3426,6 +3586,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			resp.Body.Close()
 			h.store.Release(account)
 			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			// 首字超时已白等一轮,不再叠加重试间隔;其余首包前断流按配置间隔等待
+			if !isFirstTokenTimeoutOutcome(outcome) && !h.waitBeforeRetry(c.Request.Context()) {
+				return
+			}
 			continue
 		}
 
@@ -3445,7 +3609,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 			}
 		}
-		if !isStream {
+		if isStream && abortedForHTTPError && !wroteAnyBody {
+			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
+			// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
+			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+			c.Header("Content-Type", "application/json; charset=utf-8")
+			c.JSON(logStatusCode, gin.H{
+				"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+			})
+		} else if !isStream {
 			if len(terminalFailurePayload) > 0 {
 				c.JSON(logStatusCode, gin.H{
 					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},

@@ -737,6 +737,10 @@ export default function Settings() {
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
     { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
   ]
+  const transportRetryPolicyOptions = [
+    { label: t('settings.transportRetryPolicyRotate'), value: 'rotate' },
+    { label: t('settings.transportRetryPolicySticky'), value: 'sticky' },
+  ]
   const affinityModeOptions = [
     { label: t('settings.affinityModeBounded'), value: 'bounded' },
     { label: t('settings.affinityModeOff'), value: 'off' },
@@ -822,6 +826,8 @@ export default function Settings() {
     affinity_mode: 'bounded',
     max_retries: 2,
     max_rate_limit_retries: 1,
+    retry_interval_ms: 0,
+    transport_retry_policy: 'rotate',
     allow_remote_migration: false,
     database_driver: 'postgres',
     database_label: 'PostgreSQL',
@@ -1396,6 +1402,23 @@ export default function Settings() {
                     max={10}
                     value={settingsForm.max_rate_limit_retries}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.retryIntervalMs')} description={t('settings.retryIntervalMsDesc')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={30000}
+                    step={100}
+                    value={settingsForm.retry_interval_ms}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, retry_interval_ms: parseInt(e.target.value) || 0 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.transportRetryPolicy')} description={t('settings.transportRetryPolicyDesc')}>
+                  <Select
+                    value={settingsForm.transport_retry_policy || 'rotate'}
+                    onValueChange={(value) => autoSaveStringField('transport_retry_policy', value)}
+                    options={transportRetryPolicyOptions}
                   />
                 </SettingField>
               </div>

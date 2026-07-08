@@ -74,6 +74,10 @@ type Handler struct {
 	// 「主动重置次数」消耗操作的账号级互斥锁（dbID -> *sync.Mutex），
 	// 串行化同一账号的并发重置，避免重复消耗与次数计数竞态。
 	resetCreditLocks sync.Map
+
+	// 重复账号合并互斥锁：串行化 mergeRefreshedDuplicateIntoExisting，
+	// 防止并发导入同一身份的多个账号时互相合并、把双方都软删（账号丢失）。
+	mergeDuplicateMu sync.Mutex
 }
 
 type chartCacheEntry struct {
@@ -210,6 +214,11 @@ func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string
 	if h == nil || h.db == nil || h.store == nil {
 		return false
 	}
+	// 串行化合并：并发导入同一身份的多个账号时，两个合并流程若交错执行，
+	// 可能互相把对方选为“已有账号”，导致双方都被软删（账号丢失）。
+	h.mergeDuplicateMu.Lock()
+	defer h.mergeDuplicateMu.Unlock()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
@@ -256,13 +265,16 @@ func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string
 		log.Printf("合并导入账号 %d 凭证到已有账号 %d 失败: %v", newID, oldID, err)
 		return false
 	}
-	if err := h.reloadTokenAccount(ctx, oldID, source); err != nil {
-		log.Printf("合并后重载账号 %d 失败: %v", oldID, err)
-	}
+	// 先软删新账号、再重载旧账号：reloadTokenAccount 会异步触发旧账号的
+	// 探针→再合并，若此刻新账号仍活跃，反向查重会把旧账号合并进新账号，
+	// 两边都被软删。软删前置让后续任何查重都看不到新账号。
 	if err := h.db.SoftDeleteAccount(ctx, newID); err != nil {
 		log.Printf("软删重复导入账号 %d 失败: %v", newID, err)
 	}
 	h.store.RemoveAccount(newID)
+	if err := h.reloadTokenAccount(ctx, oldID, source); err != nil {
+		log.Printf("合并后重载账号 %d 失败: %v", oldID, err)
+	}
 	h.db.InsertAccountEventAsync(newID, "deleted", fmt.Sprintf("merged_into_%d", oldID))
 	h.db.InsertAccountEventAsync(oldID, "updated", "rt_upgrade_merge")
 	log.Printf("导入账号 %d 与已有账号 %d 同一 OAuth 身份，已合并凭证（RT 升级）并保留用量统计 (source=%s)", newID, oldID, source)
@@ -5964,6 +5976,8 @@ type settingsResponse struct {
 	SmartPacingEnabled                         bool    `json:"smart_pacing_enabled"`
 	SmartPacingMinConcurrency                  int     `json:"smart_pacing_min_concurrency"`
 	SmartPacingWindows                         string  `json:"smart_pacing_windows"`
+	RetryIntervalMS                            int     `json:"retry_interval_ms"`
+	TransportRetryPolicy                       string  `json:"transport_retry_policy"`
 }
 
 type updateSettingsReq struct {
@@ -6064,6 +6078,8 @@ type updateSettingsReq struct {
 	SmartPacingEnabled                         *bool    `json:"smart_pacing_enabled"`
 	SmartPacingMinConcurrency                  *int     `json:"smart_pacing_min_concurrency"`
 	SmartPacingWindows                         *string  `json:"smart_pacing_windows"`
+	RetryIntervalMS                            *int     `json:"retry_interval_ms"`
+	TransportRetryPolicy                       *string  `json:"transport_retry_policy"`
 }
 
 type promptFilterSemanticReviewResolved struct {
@@ -6763,6 +6779,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SmartPacingEnabled:                         h.store.GetSmartPacingEnabled(),
 		SmartPacingMinConcurrency:                  h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                         h.store.GetSmartPacingWindows(),
+		RetryIntervalMS:                            h.store.GetRetryIntervalMS(),
+		TransportRetryPolicy:                       h.store.GetTransportRetryPolicy(),
 	})
 }
 
@@ -7136,6 +7154,24 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		}
 		h.store.SetMaxRateLimitRetries(v)
 		log.Printf("设置已更新: max_rate_limit_retries = %d", v)
+	}
+
+	if req.RetryIntervalMS != nil {
+		v := *req.RetryIntervalMS
+		if v < 0 {
+			v = 0
+		}
+		if v > 30000 {
+			v = 30000
+		}
+		h.store.SetRetryIntervalMS(v)
+		log.Printf("设置已更新: retry_interval_ms = %d", v)
+	}
+
+	if req.TransportRetryPolicy != nil {
+		v := database.NormalizeTransportRetryPolicy(*req.TransportRetryPolicy)
+		h.store.SetTransportRetryPolicy(v)
+		log.Printf("设置已更新: transport_retry_policy = %s", v)
 	}
 
 	if req.AllowRemoteMigration != nil {
@@ -7578,6 +7614,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SmartPacingEnabled:                         h.store.GetSmartPacingEnabled(),
 		SmartPacingMinConcurrency:                  h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                         h.store.GetSmartPacingWindows(),
+		RetryIntervalMS:                            h.store.GetRetryIntervalMS(),
+		TransportRetryPolicy:                       h.store.GetTransportRetryPolicy(),
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
@@ -7717,6 +7755,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SmartPacingEnabled:                         h.store.GetSmartPacingEnabled(),
 		SmartPacingMinConcurrency:                  h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                         h.store.GetSmartPacingWindows(),
+		RetryIntervalMS:                            h.store.GetRetryIntervalMS(),
+		TransportRetryPolicy:                       h.store.GetTransportRetryPolicy(),
 	})
 }
 

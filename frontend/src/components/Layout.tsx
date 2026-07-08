@@ -75,7 +75,7 @@ export default function Layout({ children }: PropsWithChildren) {
   const releaseURL = updateInfo?.release_url || (latestVersion
     ? `https://github.com/james-6-23/codex2api/releases/tag/${encodeURIComponent(latestVersion)}`
     : undefined)
-  const canApplyUpdate = hasUpdate && updateInfo?.supported !== false
+  const canApplyUpdate = hasUpdate && Boolean(updateInfo) && updateInfo?.supported !== false
   const updateUnavailableReason = updateInfo?.unsupported_reason
 
   const stopRestartPolling = useCallback(() => {
@@ -110,6 +110,9 @@ export default function Layout({ children }: PropsWithChildren) {
         if (attempts >= 60) {
           stopRestartPolling()
           setRestartingAfterUpdate(false)
+          // 90s 内未观察到版本切换:服务可能仍在重启(容器/守护进程拉起较慢),
+          // 提示用户稍后手动刷新,而不是静默恢复按钮让人以为“没反应”。
+          showToast(t('common.restartTimeout'), 'error')
           return
         }
         scheduleNext(1500)
@@ -117,7 +120,7 @@ export default function Layout({ children }: PropsWithChildren) {
     }
 
     scheduleNext(2500)
-  }, [stopRestartPolling])
+  }, [stopRestartPolling, showToast, t])
 
   const handleApplyUpdate = async () => {
     if (!canApplyUpdate || updatingVersion || restartingAfterUpdate) return
@@ -137,6 +140,12 @@ export default function Layout({ children }: PropsWithChildren) {
       setUpdatingVersion(false)
     }
   }
+
+  useEffect(() => {
+    if (showVersionPopover && hasUpdate && !updateInfo) {
+      void refreshVersion(true)
+    }
+  }, [showVersionPopover, hasUpdate, updateInfo, refreshVersion])
 
   useEffect(() => {
     if (!showVersionPopover) return

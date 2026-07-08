@@ -4,6 +4,6 @@ package admin
 
 import "fmt"
 
-func defaultRestartProcess() error {
+func defaultRestartProcess(string) error {
 	return fmt.Errorf("online restart is not supported on Windows")
 }

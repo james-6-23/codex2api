@@ -833,6 +833,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_min_concurrency INT DEFAULT 1;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_windows TEXT DEFAULT '5h,7d';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS retry_interval_ms INT DEFAULT 0;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS transport_retry_policy VARCHAR(20) DEFAULT 'rotate';
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
@@ -1460,6 +1462,8 @@ type SystemSettings struct {
 	SmartPacingEnabled                         bool
 	SmartPacingMinConcurrency                  int
 	SmartPacingWindows                         string
+	RetryIntervalMS                            int    // 重试间隔毫秒（0 = 立即重试，保持旧行为）
+	TransportRetryPolicy                       string // 传输错误重试策略: rotate（换号，旧行为）/ sticky（同号延迟重试）
 }
 
 func normalizeBillingTierPolicy(policy string) string {
@@ -1611,7 +1615,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_semantic_review_log_retention_days, 0),
 		       COALESCE(smart_pacing_enabled, false),
 		       COALESCE(smart_pacing_min_concurrency, 1),
-		       COALESCE(smart_pacing_windows, '5h,7d')
+		       COALESCE(smart_pacing_windows, '5h,7d'),
+		       COALESCE(retry_interval_ms, 0),
+		       COALESCE(NULLIF(TRIM(transport_retry_policy), ''), 'rotate')
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1660,6 +1666,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.SmartPacingEnabled,
 		&s.SmartPacingMinConcurrency,
 		&s.SmartPacingWindows,
+		&s.RetryIntervalMS,
+		&s.TransportRetryPolicy,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1746,9 +1754,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					prompt_filter_semantic_review_log_retention_days,
 					smart_pacing_enabled,
 					smart_pacing_min_concurrency,
-					smart_pacing_windows
+					smart_pacing_windows,
+					retry_interval_ms,
+					transport_retry_policy
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1835,7 +1845,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					prompt_filter_semantic_review_log_retention_days = EXCLUDED.prompt_filter_semantic_review_log_retention_days,
 					smart_pacing_enabled = EXCLUDED.smart_pacing_enabled,
 					smart_pacing_min_concurrency = EXCLUDED.smart_pacing_min_concurrency,
-					smart_pacing_windows = EXCLUDED.smart_pacing_windows
+					smart_pacing_windows = EXCLUDED.smart_pacing_windows,
+					retry_interval_ms = EXCLUDED.retry_interval_ms,
+					transport_retry_policy = EXCLUDED.transport_retry_policy
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1856,7 +1868,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.PromptFilterSemanticReviewEnabled, s.PromptFilterSemanticReviewAPIKey, s.PromptFilterSemanticReviewBaseURL,
 		s.PromptFilterSemanticReviewModel, s.PromptFilterSemanticReviewTimeoutMS, s.PromptFilterSemanticReviewMaxConcurrency,
 		semanticReviewFailurePolicy, semanticReviewLogRetentionDays,
-		s.SmartPacingEnabled, normalizeSmartPacingMinConcurrencyDB(s.SmartPacingMinConcurrency), normalizeSmartPacingWindowsDB(s.SmartPacingWindows))
+		s.SmartPacingEnabled, normalizeSmartPacingMinConcurrencyDB(s.SmartPacingMinConcurrency), normalizeSmartPacingWindowsDB(s.SmartPacingWindows),
+		normalizeRetryIntervalMSDB(s.RetryIntervalMS), NormalizeTransportRetryPolicy(s.TransportRetryPolicy))
 	return err
 }
 
@@ -1866,6 +1879,27 @@ func normalizeCodexWSKeepaliveInterval(sec int) int {
 		return 60
 	}
 	return sec
+}
+
+// normalizeRetryIntervalMSDB 把重试间隔限制在 0-30000ms(0 = 立即重试)。
+func normalizeRetryIntervalMSDB(ms int) int {
+	if ms < 0 {
+		return 0
+	}
+	if ms > 30000 {
+		return 30000
+	}
+	return ms
+}
+
+// NormalizeTransportRetryPolicy 归一化传输错误重试策略,空/未知值回落到 rotate(换号,旧行为)。
+func NormalizeTransportRetryPolicy(policy string) string {
+	switch strings.ToLower(strings.TrimSpace(policy)) {
+	case "sticky":
+		return "sticky"
+	default:
+		return "rotate"
+	}
 }
 
 // normalizeCodexWSSilentMaxRetries 把 WS 静默重试次数限制在 0-10。
