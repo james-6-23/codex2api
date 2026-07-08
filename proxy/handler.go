@@ -171,6 +171,7 @@ const (
 const (
 	contextAPIKeyID     = "apiKeyID"
 	contextAPIKeyName   = "apiKeyName"
+	contextPromptFilterText = "promptFilterText"
 	contextAPIKeyMasked = "apiKeyMasked"
 	contextAPIKeyRow    = "apiKeyRow"
 )

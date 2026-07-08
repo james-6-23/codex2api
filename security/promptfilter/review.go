@@ -37,7 +37,9 @@ type reviewResponse struct {
 }
 
 type reviewResult struct {
-	Flagged bool `json:"flagged"`
+	Flagged        bool               `json:"flagged"`
+	Categories     map[string]bool    `json:"categories"`
+	CategoryScores map[string]float64 `json:"category_scores"`
 }
 
 func NormalizeReviewConfig(cfg ReviewConfig) ReviewConfig {
@@ -112,7 +114,7 @@ func ValidateReviewConfig(cfg ReviewConfig) error {
 // reviewKeyCursor 为多 key 轮询提供全局起点游标，让并发请求均匀分摊 TPM 额度。
 var reviewKeyCursor atomic.Uint64
 
-func (c ReviewClient) ReviewText(ctx context.Context, text string, cfg ReviewConfig) (bool, string, error) {
+func (c ReviewClient) ReviewText(ctx context.Context, text string, cfg ReviewConfig, requestEndpoint string) (bool, string, error) {
 	cfg = NormalizeReviewConfig(cfg)
 	if !cfg.Ready() {
 		return false, cfg.Model, nil
@@ -138,7 +140,7 @@ func (c ReviewClient) ReviewText(ctx context.Context, text string, cfg ReviewCon
 	var lastErr error
 	for i := 0; i < len(keys); i++ {
 		key := keys[(start+uint64(i))%uint64(len(keys))]
-		flagged, model, retriable, reqErr := c.reviewOnce(ctx, endpoint, key, payload, cfg)
+		flagged, model, retriable, reqErr := c.reviewOnce(ctx, endpoint, key, payload, cfg, requestEndpoint)
 		if reqErr == nil {
 			return flagged, model, nil
 		}
@@ -155,7 +157,7 @@ func (c ReviewClient) ReviewText(ctx context.Context, text string, cfg ReviewCon
 
 // reviewOnce 用单个 key 发起一次 Moderations 请求。retriable 表示该错误是否
 // 值得切换到下一个 key 重试（限流/失效 key/服务端错误/网络错误）。
-func (c ReviewClient) reviewOnce(ctx context.Context, endpoint, apiKey string, payload []byte, cfg ReviewConfig) (flagged bool, model string, retriable bool, err error) {
+func (c ReviewClient) reviewOnce(ctx context.Context, endpoint, apiKey string, payload []byte, cfg ReviewConfig, requestEndpoint string) (flagged bool, model string, retriable bool, err error) {
 	timeoutCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.TimeoutSeconds)*time.Second)
 	defer cancel()
 
@@ -188,7 +190,7 @@ func (c ReviewClient) reviewOnce(ctx context.Context, endpoint, apiKey string, p
 		return false, cfg.Model, false, fmt.Errorf("review response missing results")
 	}
 	for _, result := range decoded.Results {
-		if result.Flagged {
+		if reviewOnceBlocks(result, requestEndpoint) {
 			flagged = true
 			break
 		}
@@ -208,6 +210,52 @@ func reviewStatusRetriable(status int) bool {
 		return true
 	}
 	return status >= 500
+}
+
+// isImageModerationTarget 判断请求端点是否为生图端点（/v1/images/*）。
+func isImageModerationTarget(endpoint string) bool {
+	return strings.Contains(strings.ToLower(endpoint), "image")
+}
+
+// reviewOnceBlocks 依据请求端点选择 omni 拦截口径：生图端点只按性相关类别拦（reviewResultBlocks），
+// 文本端点仍按 omni 全类别 flagged 判定，保留 illicit（黑客等）/violence/hate 等对文本的覆盖。
+func reviewOnceBlocks(r reviewResult, requestEndpoint string) bool {
+	if isImageModerationTarget(requestEndpoint) {
+		return reviewResultBlocks(r)
+	}
+	return r.Flagged
+}
+
+// reviewResultBlocks 仅用于生图端点：只按性相关类别拦截——未成年性内容零容忍（类别命中或分数≥0.15），
+// 成人色情按 OpenAI 校准的类别判定；violence/self-harm 等不由本层硬拦。文本端点不走此函数。
+// 网络攻击风险仍由本地规则、语义复核与上游 cyber_policy 兜底。
+func reviewResultBlocks(r reviewResult) bool {
+	// 非标准审核响应（既无类别也无分数）时退回旧行为，避免静默关审核。
+	if len(r.Categories) == 0 && len(r.CategoryScores) == 0 {
+		return r.Flagged
+	}
+	// 未成年性内容：类别命中或低分即拦（零容忍）。
+	if r.Categories["sexual/minors"] || r.CategoryScores["sexual/minors"] >= 0.15 {
+		return true
+	}
+	// 成人色情：按 OpenAI 自身校准的类别判定拦截。
+	if r.Categories["sexual"] {
+		return true
+	}
+	// 作恶指导：炸弹/毒品/武器/暴恐（illicit / illicit-violent）。压测确认化学课(火药三要素)、
+	// 抗战暴行、坑儒、武侠喷血等良性中文内容此两类均为 0.00，炸弹/毒品/暴恐为 0.94+，分离干净。
+	if r.Categories["illicit"] || r.CategoryScores["illicit"] >= 0.5 {
+		return true
+	}
+	if r.Categories["illicit/violent"] || r.CategoryScores["illicit/violent"] >= 0.5 {
+		return true
+	}
+	// 仇恨/威胁：良性中文样本此类均为 0，按 OpenAI 校准类别拦截。
+	if r.Categories["hate"] || r.Categories["hate/threatening"] || r.Categories["harassment/threatening"] {
+		return true
+	}
+	// 不拦 violence / violence-graphic / self-harm：武侠喷血(0.85)、历史屠杀、游戏Boss战、历史自刎都踩这些类，拦了必误伤本服务核心内容，交由上游生图模型把关。
+	return false
 }
 
 func ApplyReviewResult(verdict Verdict, flagged bool, model string, reviewErr error, cfg ReviewConfig) Verdict {

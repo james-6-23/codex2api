@@ -31,6 +31,7 @@ type PromptFilterLog struct {
 }
 
 type PromptFilterLogInput struct {
+	ClientRequestID string
 	Source          string
 	Endpoint        string
 	Model           string
@@ -70,12 +71,12 @@ func (db *DB) InsertPromptFilterLog(ctx context.Context, input *PromptFilterLogI
 	_, err := db.conn.ExecContext(ctx, `
 		INSERT INTO prompt_filter_logs (
 			source, endpoint, model, action, mode, score, threshold_value, matched_patterns, text_preview,
-			api_key_id, api_key_name, api_key_masked, client_ip, error_code, review_model, review_flagged, review_error, full_text
+			api_key_id, api_key_name, api_key_masked, client_ip, error_code, review_model, review_flagged, review_error, full_text, client_request_id
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
 	`, input.Source, input.Endpoint, input.Model, input.Action, input.Mode, input.Score, input.Threshold,
 		input.MatchedPatterns, input.TextPreview, input.APIKeyID, input.APIKeyName, input.APIKeyMasked, input.ClientIP, input.ErrorCode,
-		input.ReviewModel, input.ReviewFlagged, input.ReviewError, input.FullText)
+		input.ReviewModel, input.ReviewFlagged, input.ReviewError, input.FullText, input.ClientRequestID)
 	return err
 }
 

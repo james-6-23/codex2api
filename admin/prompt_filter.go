@@ -74,7 +74,7 @@ func (h *Handler) inspectImagePromptFilter(c *gin.Context, text string, model st
 	cfg := h.store.GetPromptFilterConfig()
 	verdict := promptfilter.InspectText(text, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		verdict = reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
+		verdict = reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg, endpoint)
 	}
 	if verdict.Action == promptfilter.ActionWarn {
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
@@ -218,7 +218,7 @@ func (h *Handler) TestPromptFilter(c *gin.Context) {
 	cfg.Enabled = true
 	verdict := promptfilter.InspectText(req.Text, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		verdict = reviewPromptFilterVerdict(c.Request.Context(), req.Text, verdict, cfg)
+		verdict = reviewPromptFilterVerdict(c.Request.Context(), req.Text, verdict, cfg, req.Endpoint)
 	}
 	c.JSON(http.StatusOK, promptFilterTestResponse{Verdict: verdict})
 }
@@ -345,8 +345,8 @@ func shouldReviewPromptFilterVerdict(verdict promptfilter.Verdict, cfg promptfil
 	return review.All && verdict.Action == promptfilter.ActionAllow
 }
 
-func reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
-	flagged, model, err := promptfilter.DefaultReviewClient.ReviewText(ctx, text, cfg.Review)
+func reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config, endpoint string) promptfilter.Verdict {
+	flagged, model, err := promptfilter.DefaultReviewClient.ReviewText(ctx, text, cfg.Review, endpoint)
 	verdict = promptfilter.ApplyReviewResult(verdict, flagged, model, err, cfg.Review)
 	if err == nil && !flagged && len(verdict.Matched) == 0 {
 		verdict.Reason = "prompt review cleared request"

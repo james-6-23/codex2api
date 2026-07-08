@@ -1,5 +1,5 @@
 import { type ReactNode, useCallback, useEffect, useMemo, useState } from 'react'
-import { Activity, AlertTriangle, BarChart3, CheckCircle2, Clock3, Gauge, RefreshCw, ShieldAlert, ShieldCheck, ShieldX, Zap } from 'lucide-react'
+import { Activity, AlertTriangle, BarChart3, CheckCircle2, ChevronDown, Clock3, Gauge, RefreshCw, ShieldAlert, ShieldCheck, ShieldX, Zap } from 'lucide-react'
 import {
   Bar,
   BarChart,
@@ -17,6 +17,7 @@ import StateShell from '../components/StateShell'
 import Pagination from '../components/Pagination'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { formatBeijingTime } from '../utils/time'
+import { getErrorMessage } from '../utils/error'
 import type { CodexAuditReport, HealthResponse, PromptFilterLog, UsageLog } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -163,7 +164,7 @@ export default function CodexAudit() {
   return (
     <>
       <PageHeader
-        title="Codex2API 巡检"
+        title="审计"
         description="集中查看误伤、漏网、cyb、探针、首字延迟和运行健康。"
         actions={
           <div className="grid w-full min-w-0 gap-2 sm:w-auto sm:grid-cols-[164px_164px_auto] sm:items-end">
@@ -218,6 +219,8 @@ export default function CodexAudit() {
                 </div>
               </CardContent>
             </Card>
+
+            <CyberMissPanel />
 
             <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
               <ChartPanel title="请求与风险趋势" description="按时间窗口聚合请求、拦截、上游 cyb 和 5xx。">
@@ -284,6 +287,115 @@ export default function CodexAudit() {
         ) : null}
       </StateShell>
     </>
+  )
+}
+
+function CyberMissPanel() {
+  const [logs, setLogs] = useState<PromptFilterLog[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await api.getPromptFilterLogs({ source: 'upstream_cyber_policy', page, pageSize: AUDIT_PAGE_SIZE })
+      setLogs(res.logs ?? [])
+      setTotal(res.total ?? 0)
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [page])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const totalPages = Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE))
+
+  return (
+    <Card className="w-full min-w-0 overflow-hidden border-amber-500/30 bg-amber-500/[0.05] shadow-sm">
+      <CardContent className="min-w-0 p-4 sm:p-5">
+        <div className="mb-4 flex items-start justify-between gap-3 max-sm:flex-col">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-400">
+              <ShieldAlert className="size-5" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-foreground">漏放案卷 · 放行却被上游拦下</h3>
+              <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+                本地过滤与语义判官都放行、却被上游 cyber_policy 拦截的请求。每一条都是账号池的一次违规风险，也是复盘检测盲区、积累知识库的素材。已记录脱敏原始请求与上游原因，点开看完整案卷。
+              </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-3 max-sm:w-full max-sm:justify-between">
+            <div className="text-right">
+              <div className="text-2xl font-bold tabular-nums text-amber-600 dark:text-amber-400">{total}</div>
+              <div className="text-[11px] leading-tight text-muted-foreground">累计漏放</div>
+            </div>
+            <Button variant="outline" onClick={() => void load()} disabled={loading}>
+              <RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />
+              刷新
+            </Button>
+          </div>
+        </div>
+
+        {error ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{error}</div>
+        ) : total === 0 ? (
+          <div className="rounded-lg border border-border/60 bg-background/60 p-6 text-center text-xs text-muted-foreground">
+            {loading ? '加载中…' : '暂无漏放记录 —— 本地过滤与语义判官拦住了全部触发上游 cyber 策略的请求'}
+          </div>
+        ) : (
+          <>
+            <div className="space-y-2">
+              {logs.map((log) => (
+                <CyberMissRow key={log.id} log={log} />
+              ))}
+            </div>
+            {total > AUDIT_PAGE_SIZE ? (
+              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function CyberMissRow({ log }: { log: PromptFilterLog }) {
+  const [open, setOpen] = useState(false)
+  const full = (log.full_text || '').trim()
+  const preview = (log.text_preview || '').trim()
+  return (
+    <div className="min-w-0 rounded-lg border border-border/60 bg-background/70">
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="flex w-full min-w-0 items-center gap-2 px-3 py-2.5 text-left sm:gap-3"
+      >
+        <Badge className="shrink-0 border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300">cyber_policy</Badge>
+        <span className="hidden shrink-0 whitespace-nowrap text-[11px] text-muted-foreground sm:inline">{formatBeijingTime(log.created_at)}</span>
+        <span className="hidden shrink-0 whitespace-nowrap text-[11px] text-muted-foreground md:inline">{log.endpoint}</span>
+        <span className="hidden shrink-0 whitespace-nowrap text-[11px] text-muted-foreground md:inline">{log.model || '-'}</span>
+        <span className="min-w-0 flex-1 truncate text-xs text-foreground">{preview || '（改动前的旧记录，未留原始请求）'}</span>
+        <ChevronDown className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open ? (
+        <div className="border-t border-border/60 px-3 py-3">
+          <div className="mb-2 flex flex-wrap gap-x-4 gap-y-1 text-[11px] text-muted-foreground sm:hidden">
+            <span>{formatBeijingTime(log.created_at)}</span>
+            <span>{log.endpoint}</span>
+            <span>{log.model || '-'}</span>
+          </div>
+          <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted/40 p-3 text-[12px] leading-5 text-foreground">{full || '（无详情）'}</pre>
+        </div>
+      ) : null}
+    </div>
   )
 }
 

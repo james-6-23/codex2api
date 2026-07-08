@@ -12,7 +12,7 @@
     "proxies": "代理管理",
     "images": "生图工作台",
     "promptFilter": "Prompt 检查",
-    "codexAudit": "Codex 巡检"
+    "codexAudit": "审计"
   },
   "common": {
     "online": "在线",

@@ -37,13 +37,14 @@ func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endp
 	}
 	cfg := h.store.GetPromptFilterConfig()
 	text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
+	c.Set(contextPromptFilterText, text)
 	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
 		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 		return h.inspectSemanticReviewOpenAI(c, rawBody, endpoint, model)
 	}
 	verdict := promptfilter.Inspect(rawBody, endpoint, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
+		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg, endpoint)
 	}
 	var semanticHandled bool
 	var semanticBlocked bool
@@ -75,6 +76,7 @@ func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endp
 }
 
 func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, endpoint string, model string) bool {
+	c.Set(contextPromptFilterText, text)
 	if h == nil || h.store == nil {
 		return false
 	}
@@ -85,7 +87,7 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	}
 	verdict := promptfilter.InspectText(text, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
+		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg, endpoint)
 	}
 	var semanticHandled bool
 	var semanticBlocked bool
@@ -122,18 +124,19 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	}
 	cfg := h.store.GetPromptFilterConfig()
 	text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
+	c.Set(contextPromptFilterText, text)
 	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
 		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 		return h.inspectSemanticReviewAnthropic(c, rawBody, endpoint, model)
 	}
 	verdict := promptfilter.Inspect(rawBody, endpoint, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
+		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg, endpoint)
 	}
 	var semanticHandled bool
 	var semanticBlocked bool
 	if handled, blocked := h.inspectHighRiskReviewDisagreement(c, verdict, text, endpoint, model, func() {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request blocked by semantic safety review")
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", promptCyberPolicyMessage)
 	}); handled {
 		semanticHandled = true
 		semanticBlocked = blocked
@@ -150,7 +153,7 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		return true
 	}
 	if verdict.Action == promptfilter.ActionBlock {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request contains content blocked by prompt filter")
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", promptCyberPolicyMessage)
 		return true
 	}
 	if semanticHandled {
@@ -194,6 +197,7 @@ func (h *Handler) logPromptFilterVerdict(c *gin.Context, endpoint string, model 
 		input.FullText = promptfilter.RedactedPreview(verdict.FullText, promptFilterFullTextMaxRunes)
 	}
 	populatePromptFilterAPIKeyMeta(c, input)
+	input.ClientRequestID = strings.TrimSpace(c.GetHeader("X-Client-Request-Id"))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	_ = h.db.InsertPromptFilterLog(ctx, input)
@@ -208,16 +212,30 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 		return
 	}
 	cfg := h.store.GetPromptFilterConfig()
+	reqText := ""
+	if v, ok := c.Get(contextPromptFilterText); ok {
+		if s, ok2 := v.(string); ok2 {
+			reqText = strings.TrimSpace(s)
+		}
+	}
+	upstreamReason := promptfilter.RedactSensitive(string(body))
+	fullText := upstreamReason
+	if reqText != "" {
+		fullText = `【上游拦截原因】
+` + upstreamReason + `
+
+【请求内容】
+` + reqText
+	}
 	verdict := promptfilter.Verdict{
-		Enabled:   true,
-		Mode:      cfg.Mode,
-		Action:    promptfilter.ActionBlock,
-		Score:     0,
-		Threshold: cfg.Threshold,
-		Reason:    "upstream returned cyber policy",
-		// 上游 cyber_policy 没有本地提取文本，把脱敏后的上游错误体作为「详细内容」记录，
-		// 方便在日志里看清触发详情，同时避免持久化敏感字段。
-		FullText: promptfilter.RedactSensitive(string(body)),
+		Enabled:     true,
+		Mode:        cfg.Mode,
+		Action:      promptfilter.ActionBlock,
+		Score:       0,
+		Threshold:   cfg.Threshold,
+		Reason:      "upstream returned cyber policy",
+		TextPreview: reqText,
+		FullText:    fullText,
 	}
 	h.logPromptFilterVerdict(c, endpoint, model, "upstream_cyber_policy", errorCode, verdict)
 }
@@ -361,8 +379,8 @@ func isCodexAmbientSuggestionClassifier(text string) bool {
 	return true
 }
 
-func (h *Handler) reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
-	flagged, model, err := promptfilter.DefaultReviewClient.ReviewText(ctx, text, cfg.Review)
+func (h *Handler) reviewPromptFilterVerdict(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config, endpoint string) promptfilter.Verdict {
+	flagged, model, err := promptfilter.DefaultReviewClient.ReviewText(ctx, text, cfg.Review, endpoint)
 	verdict = promptfilter.ApplyReviewResult(verdict, flagged, model, err, cfg.Review)
 	if err == nil && !flagged && len(verdict.Matched) == 0 {
 		verdict.Reason = "prompt review cleared request"

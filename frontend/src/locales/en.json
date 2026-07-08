@@ -12,7 +12,7 @@
     "proxies": "Proxies",
     "images": "Images",
     "promptFilter": "Prompt Filter",
-    "codexAudit": "Codex Audit"
+    "codexAudit": "Audit"
   },
   "common": {
     "online": "Online",

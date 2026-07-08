@@ -779,8 +779,9 @@ const codexBetaFeaturesValue = "remote_compaction_v2"
 // applyCodexClientFingerprintHeaders 注入与真实 codex 0.142.5 一致的 x-codex-* 客户端指纹头
 // （见 codex-fpcap/BASELINE.md）。真实客户端**不发** x-codex-installation-id（installation_id
 // 放在 x-codex-turn-metadata JSON 内），而是发：x-codex-beta-features、x-codex-window-id(带:0)、
-// x-codex-turn-metadata(JSON)、x-client-request-id、thread-id。installation/session 用账号级
-// 确定性 UUID 保持同账号稳定；turn_id 每请求新生成。HTTP 与 WS 两条路径共用本函数。
+// x-codex-turn-metadata(JSON)、x-client-request-id、thread-id。installation 用账号级确定性 UUID
+// 保持同账号稳定（设备身份）；session/thread 等会话身份仅在显式会话时跟随会话，
+// 无显式会话时逐次随机（防跨用户串流，见函数内注释）；turn_id 每次新生成。HTTP 与 WS 两条路径共用本函数。
 func applyCodexClientFingerprintHeaders(h http.Header, accountID, apiKey, sessionID string) {
 	if h == nil {
 		return
@@ -795,7 +796,14 @@ func applyCodexClientFingerprintHeaders(h http.Header, accountID, apiKey, sessio
 	installationID := deterministicCodexClientUUID("installation", seed)
 	sid := strings.TrimSpace(sessionID)
 	if sid == "" {
-		sid = deterministicCodexClientUUID("session", seed)
+		// 无显式会话时绝不能按账号/Key 派生确定性会话身份：同账号所有并发请求会携带
+		// 完全相同的 session/thread/window/x-client-request-id，上游会把不同终端用户的
+		// 并发流关联成同一对话线程，导致响应互串（2026-07-09 生产事故：/v1/chat/completions
+		// 桥接用户收到他人响应；issue #268/#308 同类）。改为逐次随机：WS 路径在握手时调用
+		// 一次 → 每连接唯一；HTTP 路径逐请求调用 → 每请求唯一。对上游而言每个连接/请求都是
+		// 一次独立的 codex 会话，与真实客户端“一个对话一个 thread”（且 session 为随机 v4）
+		// 的行为一致。installation_id 仍按账号稳定（设备身份，非会话身份）。
+		sid = uuid.NewString()
 	}
 	threadID := sid
 	windowID := sid + ":0"

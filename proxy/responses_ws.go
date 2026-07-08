@@ -737,13 +737,14 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	}
 	cfg := h.store.GetPromptFilterConfig()
 	text := promptfilter.ExtractText(rawBody, endpoint, cfg.MaxTextLength)
+	c.Set(contextPromptFilterText, text)
 	if verdict, ok := codexAmbientSuggestionClassifierBypass(text, cfg); ok {
 		h.logPromptFilterVerdict(c, endpoint, model, "local_filter", "", verdict)
 		return h.inspectSemanticReviewOpenAIForWebSocket(c, conn, rawBody, endpoint, model)
 	}
 	verdict := promptfilter.Inspect(rawBody, endpoint, cfg)
 	if shouldReviewPromptFilterVerdict(verdict, cfg) {
-		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg)
+		verdict = h.reviewPromptFilterVerdict(c.Request.Context(), text, verdict, cfg, endpoint)
 	}
 	var semanticHandled bool
 	var semanticBlocked bool
