@@ -18,7 +18,7 @@ import Pagination from '../components/Pagination'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { formatBeijingTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
-import type { CodexAuditReport, HealthResponse, PromptFilterLog, UsageLog } from '../types'
+import type { AccountRow, CodexAuditReport, HealthResponse, PromptFilterLog, UsageLog } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -36,6 +36,7 @@ type AuditData = {
   report: CodexAuditReport | null
   health: HealthResponse | null
   sessionBleedTotal: number
+  accounts: AccountRow[]
 }
 
 type Tone = 'ok' | 'warn' | 'bad' | 'neutral'
@@ -120,16 +121,17 @@ export default function CodexAudit() {
 
   const loadData = useCallback(async (): Promise<AuditData> => {
     const bucketMinutes = rangeHours <= 1 ? 5 : rangeHours <= 6 ? 10 : rangeHours <= 24 ? 30 : 120
-    const [report, health, bleed] = await Promise.all([
+    const [report, health, bleed, accountsResp] = await Promise.all([
       api.getCodexAuditReport({ hours: rangeHours, bucketMinutes, limit: 30 }),
       api.getHealth(),
       api.getPromptFilterLogs({ source: 'session_bleed', pageSize: 1 }),
+      api.getAccounts(),
     ])
-    return { report, health, sessionBleedTotal: bleed.total ?? 0 }
+    return { report, health, sessionBleedTotal: bleed.total ?? 0, accounts: accountsResp.accounts ?? [] }
   }, [rangeHours])
 
   const { data, loading, error, reload } = useDataLoader<AuditData>({
-    initialData: { report: null, health: null, sessionBleedTotal: 0 },
+    initialData: { report: null, health: null, sessionBleedTotal: 0, accounts: [] },
     load: loadData,
   })
 
@@ -147,6 +149,7 @@ export default function CodexAudit() {
   const report = data.report
   const health = data.health
   const sessionBleedTotal = data.sessionBleedTotal ?? 0
+  const accounts = data.accounts ?? []
   const meta = verdictMeta[report?.verdict || 'normal'] || {
     label: report?.verdict || '-',
     title: '巡检状态待确认',
@@ -218,7 +221,8 @@ export default function CodexAudit() {
                     <SignalTile label="首字 P95" value={formatMS(report.usage.first_token_p95_ms)} detail={`${formatNumber(report.usage.first_token_samples)} 个样本`} icon={<Clock3 />} tone={firstTokenTone} />
                     <SignalTile label="WS 占比" value={formatPercent(report.usage.websocket_ratio || 0)} detail={`${formatNumber(report.usage.websocket_requests)} 个 WS 请求`} icon={<Zap />} tone={(report.usage.websocket_ratio || 0) >= 0.85 ? 'ok' : 'warn'} />
                     <SignalTile label="语义分歧" value={formatNumber(report.summary.semantic_disagreements)} detail={`拦截 ${formatNumber(report.summary.semantic_disagreement_blocks)}`} icon={<Gauge />} tone={report.summary.semantic_disagreement_blocks ? 'warn' : 'neutral'} />
-                    <SignalTile label="高频探针" value={formatNumber(report.summary.probe_high_frequency || 0)} detail={`已短路 ${formatNumber(report.summary.probe_short_circuits)} / 观测 ${formatNumber(report.summary.probe_observed)}`} icon={<CheckCircle2 />} tone={report.summary.probe_high_frequency ? 'warn' : 'ok'} />
+                    <SignalTile label="高频探针" value={formatNumber(report.summary.probe_high_frequency || 0)} detail={`已短路 ${formatNumber(report.summary.probe_short_circuits)} / 观测 ${formatNumber(report.summary.probe_observed)}`} icon={<CheckCircle2 />} tone={report.summary.probe_high_frequency ? 'warn' : 'ok'} className="sm:col-span-2 xl:col-span-2" />
+                    <AccountPoolTile accounts={accounts} />
                   </div>
                 </div>
               </CardContent>
@@ -494,9 +498,50 @@ function HeaderControl({ label, children }: { label: string; children: ReactNode
   )
 }
 
-function SignalTile({ label, value, detail, icon, tone }: { label: string; value: ReactNode; detail: string; icon: ReactNode; tone: Tone }) {
+function AccountPoolTile({ accounts }: { accounts: AccountRow[] }) {
+  const active = accounts.filter((a) => a.status === 'active' && a.enabled !== false && !a.locked)
+  const healthy = active.length > 0 && active.length === accounts.length
   return (
-    <div className="min-w-0 bg-background/95 p-4">
+    <div className="min-w-0 bg-background/95 p-4 sm:col-span-2 xl:col-span-2">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <div className="flex size-7 items-center justify-center rounded-lg bg-primary/10 text-primary [&>svg]:size-4"><BarChart3 /></div>
+          <span className="text-xs font-medium text-muted-foreground">账号池 · 上游 Pro 号 · 7d 配额 / 并发</span>
+        </div>
+        <div className={`inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[11px] font-medium ${healthy ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' : 'bg-amber-500/10 text-amber-600 dark:text-amber-400'}`}>
+          <span className={`size-1.5 rounded-full ${healthy ? 'bg-emerald-500' : 'bg-amber-500'}`} />
+          {active.length}/{accounts.length} 活跃
+        </div>
+      </div>
+      <div className="space-y-1.5">
+        {accounts.slice(0, 6).map((a) => {
+          const pct = Math.round(a.usage_percent_7d ?? 0)
+          const busy = a.active_requests ?? 0
+          const cap = a.base_concurrency_effective ?? 5
+          const isActive = a.status === 'active' && a.enabled !== false && !a.locked
+          const barColor = pct >= 90 ? 'bg-red-500' : pct >= 70 ? 'bg-amber-500' : 'bg-emerald-500'
+          return (
+            <div key={a.id} className="flex items-center gap-2 text-xs">
+              <span className={`size-1.5 shrink-0 rounded-full ${isActive ? 'bg-emerald-500' : 'bg-muted-foreground/40'}`} />
+              <span className="min-w-0 flex-1 truncate text-foreground">{a.email || a.name || `#${a.id}`}</span>
+              <span className="hidden shrink-0 rounded bg-muted px-1.5 py-0.5 text-[10px] uppercase text-muted-foreground sm:inline">{a.plan_type || '-'}</span>
+              <div className="hidden h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-muted sm:block">
+                <div className={`h-full ${barColor}`} style={{ width: `${Math.min(100, Math.max(0, pct))}%` }} />
+              </div>
+              <span className="w-14 shrink-0 text-right tabular-nums text-muted-foreground">7d {pct}%</span>
+              <span className="w-9 shrink-0 text-right tabular-nums text-muted-foreground">{busy}/{cap}</span>
+            </div>
+          )
+        })}
+        {accounts.length === 0 ? <div className="py-3 text-center text-xs text-muted-foreground">加载中…</div> : null}
+      </div>
+    </div>
+  )
+}
+
+function SignalTile({ label, value, detail, icon, tone, className }: { label: string; value: ReactNode; detail: string; icon: ReactNode; tone: Tone; className?: string }) {
+  return (
+    <div className={`min-w-0 bg-background/95 p-4 ${className ?? ''}`}>
       <div className="flex items-center justify-between gap-3">
         <div className="min-w-0">
           <div className="text-xs font-medium text-muted-foreground">{label}</div>
