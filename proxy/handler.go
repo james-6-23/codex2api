@@ -1822,6 +1822,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			var readErr error
 			var writeErr error
 			wroteAnyBody := false
+			// 首 token 前收到不可重试的 response.failed 时置位:中止 SSE 转发、
+			// 不做 transport flush(避免提前提交 200 header),循环外按真实错误码返回 JSON。
+			abortedForHTTPError := false
 			var imageLogInfo imageUsageLogInfo
 			var terminalFailurePayload []byte
 
@@ -1871,6 +1874,13 @@ func (h *Handler) Responses(c *gin.Context) {
 						pendingFirstTokenEvents.Reset()
 						return false
 					}
+					// 首 token 前的 response.failed 不写进下游流:不可重试(如 context_length_exceeded)
+					// 或已达重试上限时,交由循环外按真实错误码返回,而不是 200 流让中转层误计费。
+					if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) {
+						pendingFirstTokenEvents.Reset()
+						abortedForHTTPError = true
+						return false
+					}
 					if image, ok := extractImageFromOutputItemDone(data, logModel); ok {
 						imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
 					}
@@ -1886,7 +1896,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					return eventType != "response.completed" && eventType != "response.failed"
 				})
-				if writeErr == nil {
+				// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
+				// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
+				if writeErr == nil && wroteAnyBody {
 					writeErr = streamWriter.Flush()
 				}
 			} else {
@@ -1937,6 +1949,15 @@ func (h *Handler) Responses(c *gin.Context) {
 				h.store.Release(account)
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 				continue
+			}
+			if isStream && abortedForHTTPError && !wroteAnyBody {
+				// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
+				// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
+				// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.JSON(outcome.logStatusCode, gin.H{
+					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
+				})
 			}
 			if !isStream && readErr != nil {
 				c.JSON(http.StatusBadGateway, gin.H{

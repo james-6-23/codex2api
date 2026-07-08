@@ -499,6 +499,10 @@ func (h *Handler) streamResponsesWSUpstream(
 	var imageLogInfo imageUsageLogInfo
 	var terminalFailurePayload []byte
 	wroteAnyBody := false
+	// 首 token 前收到不可重试的 response.failed 时置位:不把原始失败帧透传给客户端,
+	// 循环外改写 error 帧并按错误类别用非正常 close code 关闭,
+	// 让下游中转/计费方明确感知失败,而不是把它当成一次正常结束的会话。
+	abortedForErrorClose := false
 	pendingFirstTokenMessages := make([][]byte, 0, 4)
 	pendingFirstTokenBytes := 0
 
@@ -562,6 +566,18 @@ func (h *Handler) streamResponsesWSUpstream(
 				if (silentRetryEnabled || hideUpstreamErrors) && eventType == "response.failed" && !ttftRecorded && !wroteAnyBody && responseFailedRetryable(terminalFailurePayload) {
 					pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
 					pendingFirstTokenBytes = 0
+					return false
+				}
+				// 首 token 前的不可重试 response.failed(如 context_length_exceeded)
+				// 不透传原始失败帧:丢弃前导缓冲并提前结束读取,循环外按真实错误
+				// 语义返回 error 帧 + 非正常 close code(与 SSE 路径返回 4xx 对齐)。
+				// 可重试的失败不在此拦截:silent retry 开启时由上面的分支换号重试,
+				// 关闭时按既有约定原样透传失败帧。
+				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, clientGone) &&
+					!responseFailedRetryable(terminalFailurePayload) {
+					pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
+					pendingFirstTokenBytes = 0
+					abortedForErrorClose = true
 					return false
 				}
 				if len(pendingFirstTokenMessages) > 0 && !flushPendingFirstTokenMessages() {
@@ -674,6 +690,14 @@ func (h *Handler) streamResponsesWSUpstream(
 
 	if writeErr != nil {
 		return errResponsesWSClientGone
+	}
+	if abortedForErrorClose && !wroteAnyBody {
+		// 首 token 前上游失败且未向客户端写过任何帧:发结构化 error 帧后按错误类别
+		// 关闭连接,避免下游把"正常收尾的会话"当成功并按预估 input token 计费。
+		apiErr := api.NewAPIError(api.ErrCodeUpstreamError, outcome.failureMessage, api.ErrorTypeUpstream)
+		clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
+		_ = writeResponsesWSError(conn, clientErr)
+		return newResponsesWSCloseError(responsesWSCloseCodeForStatus(outcome.logStatusCode), clientErr.Message, apiErr)
 	}
 	if outcome.logStatusCode != http.StatusOK && hideUpstreamErrors && len(terminalFailurePayload) > 0 && !wroteAnyBody {
 		apiErr := api.NewAPIError(api.ErrCodeUpstreamError, outcome.failureMessage, api.ErrorTypeUpstream)
@@ -817,6 +841,19 @@ func newResponsesWSCloseError(code int, reason string, err error) error {
 		code:   code,
 		reason: truncateWebSocketCloseReason(reason),
 		err:    err,
+	}
+}
+
+// responsesWSCloseCodeForStatus 把上游失败的 HTTP 语义状态码映射为 WebSocket close code:
+// 429 → 1013(稍后重试);其余 4xx 确定性客户端错误 → 1008(策略拒绝);5xx → 1011。
+func responsesWSCloseCodeForStatus(statusCode int) int {
+	switch {
+	case statusCode == http.StatusTooManyRequests:
+		return websocket.CloseTryAgainLater
+	case statusCode >= 400 && statusCode < 500:
+		return websocket.ClosePolicyViolation
+	default:
+		return websocket.CloseInternalServerErr
 	}
 }
 

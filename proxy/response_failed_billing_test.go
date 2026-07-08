@@ -2,13 +2,19 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/codex2api/auth"
+	"github.com/codex2api/config"
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 )
 
@@ -160,5 +166,111 @@ func TestStreamFirstTokenFailureWireBehavior(t *testing.T) {
 				t.Errorf("body = %q, want contains %q", body, tc.wantBodyHas)
 			}
 		})
+	}
+}
+
+// 入站 WS 路径的等价修复:首 token 前不可重试的 response.failed 不透传原始失败帧,
+// 改为 error 帧 + 按错误类别的非正常 close code(与 SSE 路径返回真实 4xx 对齐)。
+func TestResponsesWSCloseCodeForStatus(t *testing.T) {
+	cases := []struct {
+		status int
+		want   int
+	}{
+		{http.StatusTooManyRequests, websocket.CloseTryAgainLater},
+		{http.StatusBadRequest, websocket.ClosePolicyViolation},
+		{http.StatusUnauthorized, websocket.ClosePolicyViolation},
+		{http.StatusForbidden, websocket.ClosePolicyViolation},
+		{http.StatusPaymentRequired, websocket.ClosePolicyViolation},
+		{http.StatusInternalServerError, websocket.CloseInternalServerErr},
+		{http.StatusBadGateway, websocket.CloseInternalServerErr},
+		{http.StatusOK, websocket.CloseInternalServerErr},
+	}
+	for _, tc := range cases {
+		if got := responsesWSCloseCodeForStatus(tc.status); got != tc.want {
+			t.Errorf("responsesWSCloseCodeForStatus(%d) = %d, want %d", tc.status, got, tc.want)
+		}
+	}
+}
+
+// 端到端:入站 WS 首 token 前收到不可重试的 response.failed(context_length_exceeded)
+// 时,客户端应收到结构化 error 帧 + ClosePolicyViolation 关闭,而不是原始失败帧 +
+// 正常收尾(后者会被下游中转/计费方当成一次成功会话)。且确定性客户端错误不换号重试。
+func TestResponsesWebSocketNonRetryableFailureReturnsErrorClose(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	previousSettings := CurrentRuntimeSettings()
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+		ApplyRuntimeSettings(previousSettings)
+	})
+	nextSettings := previousSettings
+	nextSettings.CodexWSSilentRetry = true
+	nextSettings.CodexWSHideErrors = false
+	nextSettings.CodexWSSilentRetries = 2
+	ApplyRuntimeSettings(nextSettings)
+
+	attemptCh := make(chan int64, 4)
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
+		attemptCh <- account.ID()
+		sse := `data: {"type":"response.created"}` + "\n\n" +
+			`data: {"type":"response.failed","response":{"error":{"code":"context_length_exceeded","message":"input too long"}}}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "pro", AccountID: "acct-1"})
+	store.AddAccount(&auth.Account{DBID: 2, AccessToken: "at-2", PlanType: "pro", AccountID: "acct-2"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, resp.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(`{"model":"gpt-5.4","input":"hello"}`)); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	_, first, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read error frame: %v", err)
+	}
+	if eventType := gjson.GetBytes(first, "type").String(); eventType != "error" {
+		t.Fatalf("first event type = %q, want \"error\" (原始 response.failed 帧不应透传) body=%s", eventType, first)
+	}
+	if !strings.Contains(string(first), "input too long") {
+		t.Fatalf("error frame should carry upstream message when hiding disabled: %s", first)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := conn.ReadMessage(); !websocket.IsCloseError(err, websocket.ClosePolicyViolation) {
+		t.Fatalf("expected close %d (policy violation for deterministic 4xx), got err=%v", websocket.ClosePolicyViolation, err)
+	}
+
+	select {
+	case <-attemptCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first attempt")
+	}
+	select {
+	case got := <-attemptCh:
+		t.Fatalf("unexpected retry on account %d for non-retryable failure", got)
+	case <-time.After(100 * time.Millisecond):
 	}
 }
