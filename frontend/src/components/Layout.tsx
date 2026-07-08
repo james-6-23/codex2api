@@ -74,7 +74,7 @@ export default function Layout({ children }: PropsWithChildren) {
   const releaseURL = updateInfo?.release_url || (latestVersion
     ? `https://github.com/james-6-23/codex2api/releases/tag/${encodeURIComponent(latestVersion)}`
     : undefined)
-  const canApplyUpdate = hasUpdate && updateInfo?.supported !== false
+  const canApplyUpdate = hasUpdate && Boolean(updateInfo) && updateInfo?.supported !== false
   const updateUnavailableReason = updateInfo?.unsupported_reason
 
   const stopRestartPolling = useCallback(() => {
@@ -139,6 +139,12 @@ export default function Layout({ children }: PropsWithChildren) {
       setUpdatingVersion(false)
     }
   }
+
+  useEffect(() => {
+    if (showVersionPopover && hasUpdate && !updateInfo) {
+      void refreshVersion(true)
+    }
+  }, [showVersionPopover, hasUpdate, updateInfo, refreshVersion])
 
   useEffect(() => {
     if (!showVersionPopover) return
