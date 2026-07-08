@@ -5909,6 +5909,8 @@ type settingsResponse struct {
 	AffinityMode                       string  `json:"affinity_mode"`
 	MaxRetries                         int     `json:"max_retries"`
 	MaxRateLimitRetries                int     `json:"max_rate_limit_retries"`
+	RetryIntervalMS                    int     `json:"retry_interval_ms"`
+	TransportRetryPolicy               string  `json:"transport_retry_policy"`
 	AllowRemoteMigration               bool    `json:"allow_remote_migration"`
 	DatabaseDriver                     string  `json:"database_driver"`
 	DatabaseLabel                      string  `json:"database_label"`
@@ -6006,6 +6008,8 @@ type updateSettingsReq struct {
 	AffinityMode                       *string  `json:"affinity_mode"`
 	MaxRetries                         *int     `json:"max_retries"`
 	MaxRateLimitRetries                *int     `json:"max_rate_limit_retries"`
+	RetryIntervalMS                    *int     `json:"retry_interval_ms"`
+	TransportRetryPolicy               *string  `json:"transport_retry_policy"`
 	AllowRemoteMigration               *bool    `json:"allow_remote_migration"`
 	ModelMapping                       *string  `json:"model_mapping"`
 	CodexModelMapping                  *string  `json:"codex_model_mapping"`
@@ -6596,6 +6600,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AffinityMode:                       h.store.GetAffinityMode(),
 		MaxRetries:                         h.store.GetMaxRetries(),
 		MaxRateLimitRetries:                h.store.GetMaxRateLimitRetries(),
+		RetryIntervalMS:                    h.store.GetRetryIntervalMS(),
+		TransportRetryPolicy:               h.store.GetTransportRetryPolicy(),
 		AllowRemoteMigration:               h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:                     h.databaseDriver,
 		DatabaseLabel:                      h.databaseLabel,
@@ -7025,6 +7031,24 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: max_rate_limit_retries = %d", v)
 	}
 
+	if req.RetryIntervalMS != nil {
+		v := *req.RetryIntervalMS
+		if v < 0 {
+			v = 0
+		}
+		if v > 30000 {
+			v = 30000
+		}
+		h.store.SetRetryIntervalMS(v)
+		log.Printf("设置已更新: retry_interval_ms = %d", v)
+	}
+
+	if req.TransportRetryPolicy != nil {
+		v := database.NormalizeTransportRetryPolicy(*req.TransportRetryPolicy)
+		h.store.SetTransportRetryPolicy(v)
+		log.Printf("设置已更新: transport_retry_policy = %s", v)
+	}
+
 	if req.AllowRemoteMigration != nil {
 		if *req.AllowRemoteMigration && !hasAdminSecret {
 			writeError(c, http.StatusBadRequest, "请先设置管理密钥，再启用远程迁移")
@@ -7364,6 +7388,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AffinityMode:                       h.store.GetAffinityMode(),
 		MaxRetries:                         h.store.GetMaxRetries(),
 		MaxRateLimitRetries:                h.store.GetMaxRateLimitRetries(),
+		RetryIntervalMS:                    h.store.GetRetryIntervalMS(),
+		TransportRetryPolicy:               h.store.GetTransportRetryPolicy(),
 		AllowRemoteMigration:               h.store.GetAllowRemoteMigration() && hasAdminSecret,
 		ModelMapping:                       h.store.GetModelMapping(),
 		CodexModelMapping:                  h.store.GetCodexModelMapping(),

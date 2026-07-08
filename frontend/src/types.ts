@@ -611,6 +611,8 @@ export interface SystemSettings {
   affinity_mode?: string
   max_retries: number
   max_rate_limit_retries: number
+  retry_interval_ms: number
+  transport_retry_policy: string
   allow_remote_migration: boolean
   database_driver: string
   database_label: string

@@ -2193,6 +2193,10 @@ type Store struct {
 	codexWSSilentRetryEnabled   atomic.Bool  // 首包前上游 WS 错误静默换号重试，默认开启
 	codexWSSilentMaxRetries     atomic.Int64 // WS 静默换号最大重试次数，默认 2
 
+	// 重试间隔与传输错误重试策略（issue #331）
+	retryIntervalMS      atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
+	transportRetryPolicy atomic.Value // 传输错误重试策略: rotate / sticky
+
 	// 智能刷新调度器
 	refreshScheduler atomic.Pointer[RefreshSchedulerIntegration]
 
@@ -2671,6 +2675,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSHideUpstreamErrors.Store(settings.CodexWSHideUpstreamErrors)
 	s.codexWSSilentRetryEnabled.Store(settings.CodexWSSilentRetryEnabled)
 	s.codexWSSilentMaxRetries.Store(normalizeWSSilentMaxRetries(settings.CodexWSSilentMaxRetries))
+	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(settings.RetryIntervalMS)))
+	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(settings.TransportRetryPolicy))
 
 	s.globalAutoPause5hThreshold = normalizeQuotaAutoPauseThreshold(settings.AutoPause5hThreshold)
 	s.globalAutoPause7dThreshold = normalizeQuotaAutoPauseThreshold(settings.AutoPause7dThreshold)
@@ -4306,6 +4312,52 @@ func (s *Store) SetMaxRateLimitRetries(n int) {
 
 func (s *Store) GetMaxRateLimitRetries() int {
 	return int(atomic.LoadInt64(&s.maxRateLimitRetries))
+}
+
+// normalizeRetryIntervalMS 把重试间隔限制在 0-30000ms(0 = 立即重试)。
+func normalizeRetryIntervalMS(ms int) int {
+	if ms < 0 {
+		return 0
+	}
+	if ms > 30000 {
+		return 30000
+	}
+	return ms
+}
+
+// SetRetryIntervalMS 动态更新重试间隔（毫秒）。
+func (s *Store) SetRetryIntervalMS(ms int) {
+	if s == nil {
+		return
+	}
+	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(ms)))
+}
+
+// GetRetryIntervalMS 获取当前重试间隔（毫秒），0 = 立即重试。
+func (s *Store) GetRetryIntervalMS() int {
+	if s == nil {
+		return 0
+	}
+	return int(s.retryIntervalMS.Load())
+}
+
+// SetTransportRetryPolicy 动态更新传输错误重试策略（rotate / sticky）。
+func (s *Store) SetTransportRetryPolicy(policy string) {
+	if s == nil {
+		return
+	}
+	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(policy))
+}
+
+// GetTransportRetryPolicy 获取传输错误重试策略，缺省 rotate（换号，旧行为）。
+func (s *Store) GetTransportRetryPolicy() string {
+	if s == nil {
+		return "rotate"
+	}
+	if v, ok := s.transportRetryPolicy.Load().(string); ok && v != "" {
+		return v
+	}
+	return "rotate"
 }
 
 // GetAllowRemoteMigration 获取是否允许远程迁移
