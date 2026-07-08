@@ -793,18 +793,16 @@ func applyCodexClientFingerprintHeaders(h http.Header, accountID, apiKey, sessio
 	if seed == "" {
 		return
 	}
-	installationID := deterministicCodexClientUUID("installation", seed)
 	sid := strings.TrimSpace(sessionID)
 	if sid == "" {
-		// 无显式会话时绝不能按账号/Key 派生确定性会话身份：同账号所有并发请求会携带
-		// 完全相同的 session/thread/window/x-client-request-id，上游会把不同终端用户的
-		// 并发流关联成同一对话线程，导致响应互串（2026-07-09 生产事故：/v1/chat/completions
-		// 桥接用户收到他人响应；issue #268/#308 同类）。改为逐次随机：WS 路径在握手时调用
-		// 一次 → 每连接唯一；HTTP 路径逐请求调用 → 每请求唯一。对上游而言每个连接/请求都是
-		// 一次独立的 codex 会话，与真实客户端“一个对话一个 thread”（且 session 为随机 v4）
-		// 的行为一致。installation_id 仍按账号稳定（设备身份，非会话身份）。
-		sid = uuid.NewString()
+		// 官方 A（2026-07-09）：无显式会话请求（桥接 stateless）不发任何会话级 x-codex-* 身份头。
+		// WS 握手头逐连接冻结，复用连接上后续用户会继承建连那次的会话身份 → 上游把不同终端用户的
+		// 并发流当成同一对话 → 跨用户串扰（2026-07-09 生产事故；issue #268/#308）。与官方 james-6-23
+		// 一致：stateless 不发会话身份，隔离靠帧体每请求唯一 prompt_cache_key；连接级伪装（TLS/UA/
+		// Originator）保留。显式会话（真 codex 会话）照发全套 byte-exact 指纹，下面不变。
+		return
 	}
+	installationID := deterministicCodexClientUUID("installation", seed)
 	threadID := sid
 	windowID := sid + ":0"
 	turnID := uuid.NewString()

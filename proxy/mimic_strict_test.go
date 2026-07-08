@@ -198,27 +198,22 @@ func TestApplyCodexRequestHeadersStrictForwardsExplicitOriginator(t *testing.T) 
 // 无显式会话时，指纹身份头必须逐次唯一——绝不能按账号/Key 派生确定性值。
 // 账号级恒定的 session/thread/window/x-client-request-id 会让上游把同账号不同
 // 终端用户的并发请求关联成同一对话线程，导致响应互串（2026-07-09 生产事故）。
-func TestApplyCodexClientFingerprintHeadersStatelessUniquePerCall(t *testing.T) {
-	h1 := http.Header{}
+func TestApplyCodexClientFingerprintHeadersStatelessDropsSessionIdentity(t *testing.T) {
+	// 官方 A：无显式会话（桥接 stateless）不发任何会话级 x-codex-* 身份头，杜绝复用连接上
+	// 跨用户串扰（2026-07-09 事故）；显式会话仍发全套 byte-exact 指纹。
+	h := http.Header{}
+	applyCodexClientFingerprintHeaders(h, "acct-123", "apikey-1", "")
+	for _, k := range []string{"thread-id", "x-codex-window-id", "x-codex-turn-metadata", "x-client-request-id", "x-codex-beta-features"} {
+		if v := h.Get(k); v != "" {
+			t.Fatalf("stateless must NOT send session header %s, got %q", k, v)
+		}
+	}
 	h2 := http.Header{}
-	applyCodexClientFingerprintHeaders(h1, "acct-123", "apikey-1", "")
-	applyCodexClientFingerprintHeaders(h2, "acct-123", "apikey-1", "")
-	if h1.Get("thread-id") == "" || h2.Get("thread-id") == "" {
-		t.Fatalf("stateless thread-id must be set")
-	}
-	if h1.Get("thread-id") == h2.Get("thread-id") {
-		t.Fatalf("stateless thread-id must be unique per call, got identical %q", h1.Get("thread-id"))
-	}
-	if h1.Get("x-client-request-id") == h2.Get("x-client-request-id") {
-		t.Fatalf("stateless x-client-request-id must be unique per call")
-	}
-	if det := deterministicCodexClientUUID("session", "acct-123"); h1.Get("thread-id") == det || h2.Get("thread-id") == det {
-		t.Fatalf("stateless identity must never be the account-deterministic session UUID")
-	}
-	// 显式会话仍跟随会话（原行为不变）
-	h3 := http.Header{}
-	applyCodexClientFingerprintHeaders(h3, "acct-123", "apikey-1", "sess-1")
-	if got := h3.Get("thread-id"); got != "sess-1" {
+	applyCodexClientFingerprintHeaders(h2, "acct-123", "apikey-1", "sess-1")
+	if got := h2.Get("thread-id"); got != "sess-1" {
 		t.Fatalf("explicit session thread-id = %q, want sess-1", got)
+	}
+	if h2.Get("x-codex-turn-metadata") == "" || h2.Get("x-client-request-id") == "" || h2.Get("x-codex-window-id") == "" {
+		t.Fatalf("explicit session must send full fingerprint")
 	}
 }
