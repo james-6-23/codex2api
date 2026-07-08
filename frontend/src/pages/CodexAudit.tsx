@@ -221,6 +221,7 @@ export default function CodexAudit() {
             </Card>
 
             <CyberMissPanel />
+            <SessionBleedPanel />
 
             <div className="grid min-w-0 gap-4 xl:grid-cols-[minmax(0,1.45fr)_minmax(360px,0.85fr)]">
               <ChartPanel title="请求与风险趋势" description="按时间窗口聚合请求、拦截、上游 cyb 和 5xx。">
@@ -352,6 +353,87 @@ function CyberMissPanel() {
           </div>
         ) : (
           <>
+            <div className="space-y-2">
+              {logs.map((log) => (
+                <CyberMissRow key={log.id} log={log} />
+              ))}
+            </div>
+            {total > AUDIT_PAGE_SIZE ? (
+              <Pagination page={page} totalPages={totalPages} onPageChange={setPage} totalItems={total} pageSize={AUDIT_PAGE_SIZE} />
+            ) : null}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  )
+}
+
+function SessionBleedPanel() {
+  const [logs, setLogs] = useState<PromptFilterLog[]>([])
+  const [total, setTotal] = useState(0)
+  const [page, setPage] = useState(1)
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError(null)
+    try {
+      const res = await api.getPromptFilterLogs({ source: 'session_bleed', page, pageSize: AUDIT_PAGE_SIZE })
+      setLogs(res.logs ?? [])
+      setTotal(res.total ?? 0)
+    } catch (err) {
+      setError(getErrorMessage(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [page])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  const totalPages = Math.max(1, Math.ceil(total / AUDIT_PAGE_SIZE))
+  const clean = total === 0
+
+  return (
+    <Card className={clean ? 'w-full min-w-0 overflow-hidden border-emerald-500/30 bg-emerald-500/[0.05] shadow-sm' : 'w-full min-w-0 overflow-hidden border-red-500/50 bg-red-500/[0.08] shadow-sm'}>
+      <CardContent className="min-w-0 p-4 sm:p-5">
+        <div className="mb-4 flex items-start justify-between gap-3 max-sm:flex-col">
+          <div className="flex items-start gap-3">
+            <div className={clean ? 'mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400' : 'mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl bg-red-500/15 text-red-600 dark:text-red-400'}>
+              <ShieldAlert className="size-5" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-semibold text-foreground">会话串扰监测 · 被动实时检测</h3>
+              <p className="mt-1 max-w-2xl text-xs leading-relaxed text-muted-foreground">
+                在真实流量的上游 WS 读流上校验 response_id 一致性：一个请求流本应自始至终同一个 response_id，出现第二个不同的即别的请求的帧串入本流（跨用户串扰）。零探针、零误报、实时上报，无需人工发检测。
+              </p>
+            </div>
+          </div>
+          <div className="flex shrink-0 items-center gap-3 max-sm:w-full max-sm:justify-between">
+            <div className="text-right">
+              <div className={clean ? 'text-2xl font-bold tabular-nums text-emerald-600 dark:text-emerald-400' : 'text-2xl font-bold tabular-nums text-red-600 dark:text-red-400'}>{total}</div>
+              <div className="text-[11px] leading-tight text-muted-foreground">检测到的串扰</div>
+            </div>
+            <Button variant="outline" onClick={() => void load()} disabled={loading}>
+              <RefreshCw className={loading ? 'size-3.5 animate-spin' : 'size-3.5'} />
+              刷新
+            </Button>
+          </div>
+        </div>
+
+        {error ? (
+          <div className="rounded-lg border border-destructive/40 bg-destructive/10 p-3 text-xs text-destructive">{error}</div>
+        ) : clean ? (
+          <div className="rounded-lg border border-emerald-500/30 bg-emerald-500/[0.06] p-6 text-center text-xs text-emerald-700 dark:text-emerald-400">
+            {loading ? '加载中…' : '✓ 被动监测运行中，未检测到任何会话串扰'}
+          </div>
+        ) : (
+          <>
+            <div className="mb-3 rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs font-medium text-red-700 dark:text-red-400">
+              ⚠️ 检测到 {total} 起会话串扰！请立即排查（多半是 stateless 会话身份被重新引入，或连接复用异常）。
+            </div>
             <div className="space-y-2">
               {logs.map((log) => (
                 <CyberMissRow key={log.id} log={log} />

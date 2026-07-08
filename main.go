@@ -292,6 +292,20 @@ func main() {
 	// 注册 WebSocket 执行函数（避免 proxy ↔ wsrelay 循环依赖）
 	proxy.WebsocketExecuteFunc = wsrelay.ExecuteRequestWebsocket
 
+	// 被动会话串扰检测：ws 读流内 response_id 一致性异常 → 异步记一条 session_bleed 审计事件
+	wsrelay.OnSessionBleedDetected = func(accountID int64, prev, cur string) {
+		go func() {
+			_ = db.InsertPromptFilterLog(context.Background(), &database.PromptFilterLogInput{
+				Source:      "session_bleed",
+				Action:      "block",
+				Endpoint:    "/v1/responses",
+				ErrorCode:   "session_bleed_detected",
+				TextPreview: fmt.Sprintf("⚠️会话串扰：一个请求流出现两个 response_id (%s ≠ %s), account=%d", prev, cur, accountID),
+				FullText:    fmt.Sprintf("【会话串扰检测·被动】\n同一请求流内出现两个不同的 response_id → 别的请求的帧串入本流（帧级串扰）。\nprev_response_id: %s\ncur_response_id: %s\n上游账号: %d\n检测：真实流量、ws 读流 response_id 一致性，零误报。", prev, cur, accountID),
+			})
+		}()
+	}
+
 	// 上游 WS 空闲连接保活常驻任务（默认关闭：goroutine 常驻但仅在运行时开关开启时才发送 Ping）
 	wsKeepalive := wsrelay.NewKeepaliveTask(
 		wsrelay.GetManager(),
