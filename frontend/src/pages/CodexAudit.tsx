@@ -35,6 +35,7 @@ import {
 type AuditData = {
   report: CodexAuditReport | null
   health: HealthResponse | null
+  sessionBleedTotal: number
 }
 
 type Tone = 'ok' | 'warn' | 'bad' | 'neutral'
@@ -119,15 +120,16 @@ export default function CodexAudit() {
 
   const loadData = useCallback(async (): Promise<AuditData> => {
     const bucketMinutes = rangeHours <= 1 ? 5 : rangeHours <= 6 ? 10 : rangeHours <= 24 ? 30 : 120
-    const [report, health] = await Promise.all([
+    const [report, health, bleed] = await Promise.all([
       api.getCodexAuditReport({ hours: rangeHours, bucketMinutes, limit: 30 }),
       api.getHealth(),
+      api.getPromptFilterLogs({ source: 'session_bleed', pageSize: 1 }),
     ])
-    return { report, health }
+    return { report, health, sessionBleedTotal: bleed.total ?? 0 }
   }, [rangeHours])
 
   const { data, loading, error, reload } = useDataLoader<AuditData>({
-    initialData: { report: null, health: null },
+    initialData: { report: null, health: null, sessionBleedTotal: 0 },
     load: loadData,
   })
 
@@ -144,6 +146,7 @@ export default function CodexAudit() {
 
   const report = data.report
   const health = data.health
+  const sessionBleedTotal = data.sessionBleedTotal ?? 0
   const meta = verdictMeta[report?.verdict || 'normal'] || {
     label: report?.verdict || '-',
     title: '巡检状态待确认',
@@ -210,6 +213,7 @@ export default function CodexAudit() {
                     <SignalTile label="请求总量" value={formatNumber(report.usage.requests)} detail={`错误率 ${formatPercent(errorRate)}`} icon={<Activity />} tone={errorTone} />
                     <SignalTile label="拦截命中" value={formatNumber(report.summary.prompt_blocks)} detail={`拦截率 ${formatPercent(blockRate)}`} icon={<ShieldX />} tone={report.summary.prompt_blocks ? 'warn' : 'ok'} />
                     <SignalTile label="疑似漏网" value={formatNumber(report.summary.upstream_cyber_policy)} detail={report.summary.upstream_cyber_policy ? '上游 cyb / policy 信号' : report.last_cyber_policy_at ? `最近一次 cyb ${formatBeijingTime(report.last_cyber_policy_at)}` : '上游 cyb / policy 信号'} icon={<AlertTriangle />} tone={report.summary.upstream_cyber_policy ? 'bad' : report.last_cyber_policy_at ? 'warn' : 'ok'} />
+                    <SignalTile label="会话串扰" value={formatNumber(sessionBleedTotal)} detail={sessionBleedTotal ? '⚠️ 立即排查！' : '被动监测中·真实流量'} icon={<ShieldAlert />} tone={sessionBleedTotal ? 'bad' : 'ok'} />
                     <SignalTile label="审查异常" value={formatNumber(report.summary.review_errors)} detail="审核/语义复核错误" icon={<ShieldAlert />} tone={report.summary.review_errors ? 'bad' : 'ok'} />
                     <SignalTile label="首字 P95" value={formatMS(report.usage.first_token_p95_ms)} detail={`${formatNumber(report.usage.first_token_samples)} 个样本`} icon={<Clock3 />} tone={firstTokenTone} />
                     <SignalTile label="WS 占比" value={formatPercent(report.usage.websocket_ratio || 0)} detail={`${formatNumber(report.usage.websocket_requests)} 个 WS 请求`} icon={<Zap />} tone={(report.usage.websocket_ratio || 0) >= 0.85 ? 'ok' : 'warn'} />
