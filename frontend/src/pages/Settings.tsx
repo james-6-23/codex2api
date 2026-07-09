@@ -26,7 +26,46 @@ import {
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 
-import { ExternalLink, RefreshCw, Save, Trash2, Upload, X } from 'lucide-react'
+import { Switch } from '@/components/ui/switch'
+import {
+  Sheet,
+  SheetBody,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
+  Activity,
+  ChevronDown,
+  ChevronRight,
+  CircleHelp,
+  Database,
+  ExternalLink,
+  Gauge,
+  Image as ImageIcon,
+  Layers,
+  Link2,
+  Loader2,
+  Palette,
+  RefreshCw,
+  Save,
+  Shield,
+  Trash2,
+  Upload,
+  Wifi,
+  Wrench,
+  X,
+} from 'lucide-react'
+import { Link } from 'react-router-dom'
+
+type ModelPanelKey = 'registry' | 'anthropic' | 'codex' | 'reasoning'
 
 type ModelMappingEntry = [string, string]
 const EMPTY_MODEL_MAPPING_ENTRIES: ModelMappingEntry[] = []
@@ -580,6 +619,9 @@ function SettingsCard({
   className,
   contentClassName,
   footer,
+  icon,
+  badge,
+  tone = 'default',
 }: {
   title: string
   description?: string
@@ -587,20 +629,72 @@ function SettingsCard({
   className?: string
   contentClassName?: string
   footer?: ReactNode
+  icon?: ReactNode
+  badge?: ReactNode
+  tone?: 'default' | 'danger'
 }) {
   return (
-    <Card className={cn('py-0', className)}>
-      <CardContent className={cn('p-5', contentClassName)}>
-        <div className="mb-4 shrink-0">
-          <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
-          {description ? (
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
+    <Card
+      className={cn(
+        'py-0',
+        tone === 'danger' && 'border-destructive/25 bg-destructive/[0.02]',
+        className,
+      )}
+    >
+      <CardContent className={cn('p-4 sm:p-5', contentClassName)}>
+        <div className="mb-4 flex shrink-0 items-start gap-3">
+          {icon ? (
+            <div
+              className={cn(
+                'flex size-9 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset',
+                tone === 'danger'
+                  ? 'bg-destructive/10 text-destructive ring-destructive/15'
+                  : 'bg-primary/10 text-primary ring-primary/15',
+              )}
+              aria-hidden="true"
+            >
+              <span className="[&_svg]:size-4">{icon}</span>
+            </div>
           ) : null}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
+              {badge}
+            </div>
+            {description ? (
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
+            ) : null}
+          </div>
         </div>
         {children}
         {footer ? <div className="mt-5 border-t border-border pt-4">{footer}</div> : null}
       </CardContent>
     </Card>
+  )
+}
+
+function SettingHelp({ text }: { text: string }) {
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex size-5 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label={text}
+          >
+            <CircleHelp className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          sideOffset={6}
+          className="max-w-[280px] bg-popover px-3 py-2 text-left text-xs leading-relaxed text-popover-foreground shadow-md"
+        >
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -610,20 +704,133 @@ function SettingField({
   warning,
   children,
   className,
+  layout = 'stack',
+  suffix,
 }: {
   label: string
   description?: string
   warning?: string
   children: ReactNode
   className?: string
+  layout?: 'stack' | 'switch'
+  suffix?: string
 }) {
+  const control = suffix ? (
+    <div className="relative min-w-0">
+      <div className="[&_[data-slot=input]]:pr-11 [&_input]:pr-11">{children}</div>
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium tabular-nums text-muted-foreground">
+        {suffix}
+      </span>
+    </div>
+  ) : (
+    children
+  )
+
+  if (layout === 'switch') {
+    return (
+      <div
+        className={cn(
+          'flex min-w-0 items-center justify-between gap-3 rounded-xl border border-border/70 bg-muted/15 px-3 py-2.5',
+          className,
+        )}
+      >
+        <div className="min-w-0 space-y-0.5">
+          <div className="flex items-center gap-1.5">
+            <label className="block text-sm font-semibold leading-snug text-foreground">{label}</label>
+            {description ? <SettingHelp text={description} /> : null}
+          </div>
+          {warning ? (
+            <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-400">{warning}</p>
+          ) : null}
+        </div>
+        <div className="shrink-0">{control}</div>
+      </div>
+    )
+  }
+
   return (
     <div className={cn('min-w-0 space-y-2', className)}>
-      <label className="block text-sm font-semibold leading-none text-foreground">{label}</label>
-      {children}
-      {description ? <p className="text-xs leading-relaxed text-muted-foreground">{description}</p> : null}
-      {warning ? <p className="text-xs leading-relaxed text-amber-600">{warning}</p> : null}
+      <div className="flex items-center gap-1.5">
+        <label className="block text-sm font-semibold leading-none text-foreground">{label}</label>
+        {description ? <SettingHelp text={description} /> : null}
+      </div>
+      {control}
+      {warning ? (
+        <p className="text-xs leading-relaxed text-amber-600 dark:text-amber-400">{warning}</p>
+      ) : null}
     </div>
+  )
+}
+
+function SettingsSkeleton() {
+  return (
+    <div className="space-y-4" aria-busy="true" aria-live="polite">
+      <div className="mx-auto h-14 w-full max-w-3xl animate-pulse rounded-full bg-muted" />
+      <div className="space-y-2">
+        <div className="h-8 w-40 animate-pulse rounded-lg bg-muted" />
+        <div className="h-4 w-72 max-w-full animate-pulse rounded-md bg-muted/70" />
+      </div>
+      <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="h-[76px] animate-pulse rounded-xl border border-border bg-muted/40" />
+        ))}
+      </div>
+      <div className="grid gap-4 xl:grid-cols-3">
+        {[0, 1, 2].map((i) => (
+          <Card key={i} className="py-0">
+            <CardContent className="space-y-3 p-5">
+              <div className="h-4 w-28 animate-pulse rounded bg-muted" />
+              <div className="h-9 w-full animate-pulse rounded-lg bg-muted/70" />
+              <div className="h-9 w-full animate-pulse rounded-lg bg-muted/60" />
+              <div className="h-9 w-2/3 animate-pulse rounded-lg bg-muted/50" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ModelSummaryCard({
+  title,
+  description,
+  meta,
+  onOpen,
+  openLabel,
+}: {
+  title: string
+  description: string
+  meta: string
+  onOpen: () => void
+  openLabel: string
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group flex w-full items-start gap-3 rounded-xl border border-border bg-card p-4 text-left shadow-sm transition-all hover:border-primary/30 hover:shadow-md"
+    >
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
+        <Layers className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-sm font-semibold text-foreground">{title}</div>
+            <p className="mt-0.5 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+              {description}
+            </p>
+          </div>
+          <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+        </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <Badge variant="secondary" className="tabular-nums">
+            {meta}
+          </Badge>
+          <span className="text-[11px] font-semibold text-primary">{openLabel}</span>
+        </div>
+      </div>
+    </button>
   )
 }
 
@@ -635,10 +842,37 @@ function StatusTile({
   children: ReactNode
 }) {
   return (
-    <div data-slot="status-tile" className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-muted/25 p-3">
-      <span className="text-[11px] font-bold uppercase text-muted-foreground">{label}</span>
+    <div
+      data-slot="status-tile"
+      className="flex min-h-[76px] flex-col justify-between gap-2 rounded-xl border border-border bg-muted/25 p-3.5"
+    >
+      <span className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">{label}</span>
       <div className="text-sm font-semibold text-foreground">{children}</div>
     </div>
+  )
+}
+
+function SettingsSection({
+  id,
+  title,
+  description,
+  children,
+}: {
+  id: string
+  title: string
+  description?: string
+  children: ReactNode
+}) {
+  return (
+    <section id={id} data-settings-section={id} className="scroll-mt-24 space-y-3 sm:scroll-mt-28">
+      <div className="px-0.5">
+        <h2 className="text-sm font-semibold tracking-tight text-foreground">{title}</h2>
+        {description ? (
+          <p className="mt-0.5 text-xs text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+      {children}
+    </section>
   )
 }
 
@@ -797,10 +1031,6 @@ export default function Settings() {
   const { t } = useTranslation()
   const { applyBranding } = useBranding()
   const defaultClaudeModelMappingEntries = useMemo(() => getDefaultModelMappingEntries(), [])
-  const booleanOptions = [
-    { label: t('common.disabled'), value: 'false' },
-    { label: t('common.enabled'), value: 'true' },
-  ]
   const schedulerModeOptions = [
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
     { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
@@ -1077,10 +1307,10 @@ export default function Settings() {
     }
   }, [commitSettingsForm, finishAutoSaveRequest, showToast, t])
 
-  const autoSaveBooleanField = useCallback((field: keyof SystemSettings, value: string, extraPatch: Partial<SystemSettings> = {}) => {
+  const autoSaveBooleanField = useCallback((field: keyof SystemSettings, value: boolean, extraPatch: Partial<SystemSettings> = {}) => {
     void autoSaveSettingsPatch({
       ...extraPatch,
-      [field]: value === 'true',
+      [field]: value,
     } as Partial<SystemSettings>)
   }, [autoSaveSettingsPatch])
 
@@ -1352,6 +1582,19 @@ export default function Settings() {
   const enabledModelCount = visibleModelItems.filter((model) => model.enabled).length
   const modelsLastSyncedLabel = modelsLastSyncedAt ? formatBeijingTime(modelsLastSyncedAt) : t('settings.modelsNeverSynced')
   const modelsSourceLabel = modelsSourceURL || 'https://developers.openai.com/codex/models'
+  const anthropicMappingCount = useMemo(
+    () => parseModelMappingEntries(settingsForm.model_mapping, defaultClaudeModelMappingEntries).length,
+    [defaultClaudeModelMappingEntries, settingsForm.model_mapping],
+  )
+  const codexMappingCount = useMemo(
+    () => parseModelMappingEntries(settingsForm.codex_model_mapping).length,
+    [settingsForm.codex_model_mapping],
+  )
+  const reasoningEffortCount = useMemo(
+    () => parseReasoningEffortModelEntries(settingsForm.reasoning_effort_models).length,
+    [settingsForm.reasoning_effort_models],
+  )
+  const showInitialSkeleton = loading && !health
   const codexUserAgentConfig = useMemo(
     () => parseCodexUserAgentConfig(settingsForm.codex_user_agent_config),
     [settingsForm.codex_user_agent_config],
@@ -1379,17 +1622,100 @@ export default function Settings() {
     </Button>
   )
 
+  const settingsSections = useMemo(
+    () =>
+      [
+        { id: 'settings-overview', label: t('settings.nav.overview'), icon: <Activity className="size-4" /> },
+        { id: 'settings-traffic', label: t('settings.nav.traffic'), icon: <Gauge className="size-4" /> },
+        { id: 'settings-runtime', label: t('settings.nav.runtime'), icon: <Wrench className="size-4" /> },
+        { id: 'settings-storage', label: t('settings.nav.storage'), icon: <ImageIcon className="size-4" /> },
+        { id: 'settings-appearance', label: t('settings.nav.appearance'), icon: <Palette className="size-4" /> },
+        { id: 'settings-security', label: t('settings.nav.security'), icon: <Shield className="size-4" /> },
+        { id: 'settings-models', label: t('settings.nav.models'), icon: <Layers className="size-4" /> },
+        { id: 'settings-reference', label: t('settings.nav.reference'), icon: <Link2 className="size-4" /> },
+      ] as const,
+    [t],
+  )
+  const [activeSection, setActiveSection] = useState<string>('settings-overview')
+  const [endpointsOpen, setEndpointsOpen] = useState(false)
+  const [modelPanel, setModelPanel] = useState<ModelPanelKey | null>(null)
+  const scrollToSection = useCallback((id: string) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    setActiveSection(id)
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
+  if (showInitialSkeleton) {
+    return <SettingsSkeleton />
+  }
+
   return (
     <StateShell
       variant="page"
-      loading={loading}
-      error={error}
+      loading={false}
+      error={error && !health ? error : null}
       onRetry={() => void reload()}
       loadingTitle={t('settings.loadingTitle')}
       loadingDescription={t('settings.loadingDesc')}
       errorTitle={t('settings.errorTitle')}
     >
       <>
+        {/* 占位，避免 fixed 导航挡住首屏 */}
+        <div aria-hidden="true" className="mb-5 h-14 sm:h-[4.25rem]" />
+
+        {/* 顶部分段导航 + 自动保存状态：视口顶部居中固定 */}
+        <div
+          className={cn(
+            'fixed left-1/2 top-[max(0.625rem,env(safe-area-inset-top,0px))] z-50 flex -translate-x-1/2 items-center gap-2',
+            'max-w-[min(72rem,calc(100vw-1.25rem))]',
+          )}
+        >
+          <nav
+            aria-label={t('settings.navLabel')}
+            className={cn(
+              'flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-full border border-border/80 bg-card/95 p-1.5 shadow-[0_10px_40px_hsl(222_30%_12%/0.12)] backdrop-blur-xl',
+              'ring-1 ring-black/[0.03] dark:ring-white/[0.06]',
+              '[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+            )}
+          >
+            {settingsSections.map((section) => {
+              const active = activeSection === section.id
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => scrollToSection(section.id)}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-2 rounded-full px-3.5 py-2 text-[13px] font-semibold tracking-tight transition-all duration-200 sm:px-4 sm:py-2.5 sm:text-sm',
+                    active
+                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'shrink-0 [&_svg]:size-4 sm:[&_svg]:size-[1.05rem]',
+                      active ? 'opacity-100' : 'opacity-75',
+                    )}
+                  >
+                    {section.icon}
+                  </span>
+                  <span className="whitespace-nowrap">{section.label}</span>
+                </button>
+              )
+            })}
+          </nav>
+          {autoSaveStatusMeta ? (
+            <div className="hidden shrink-0 items-center gap-1.5 rounded-full border border-border/80 bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur-xl sm:inline-flex">
+              {autoSaveStatus === 'saving' ? (
+                <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+              ) : null}
+              {autoSaveStatusMeta}
+            </div>
+          ) : null}
+        </div>
+
         <PageHeader
           title={t('settings.title')}
           description={t('settings.description')}
@@ -1398,7 +1724,17 @@ export default function Settings() {
         />
 
         <div className="space-y-4 pb-20 sm:pb-0">
-          <SettingsCard title={t('settings.systemStatus')}>
+          <div className="space-y-6">
+          <SettingsSection id="settings-overview" title={t('settings.nav.overview')} description={t('settings.nav.overviewDesc')}>
+          <SettingsCard
+            title={t('settings.systemStatus')}
+            icon={<Activity className="size-4" />}
+            badge={
+              <Badge variant="secondary" className="text-[11px]">
+                {t('settings.nav.live')}
+              </Badge>
+            }
+          >
             <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4">
               <StatusTile label={t('settings.service')}>
                 <Badge variant={health?.status === 'ok' ? 'default' : 'destructive'} className="gap-1.5">
@@ -1423,11 +1759,13 @@ export default function Settings() {
               </StatusTile>
             </div>
           </SettingsCard>
+          </SettingsSection>
 
+          <SettingsSection id="settings-traffic" title={t('settings.nav.traffic')} description={t('settings.nav.trafficDesc')}>
           <div className="grid gap-4 xl:grid-cols-3">
-            <SettingsCard title={t('settings.trafficProtection')}>
+            <SettingsCard title={t('settings.trafficProtection')} icon={<Gauge className="size-4" />}>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
-                <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')}>
+                <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
                   <Input
                     type="number"
                     min={1}
@@ -1436,7 +1774,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_concurrency: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.globalRpm')} description={t('settings.globalRpmRange')}>
+                <SettingField label={t('settings.globalRpm')} description={t('settings.globalRpmRange')} suffix={t('settings.unit.rpm')}>
                   <Input
                     type="number"
                     min={0}
@@ -1444,7 +1782,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, global_rpm: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.maxRetries')} description={t('settings.maxRetriesRange')}>
+                <SettingField label={t('settings.maxRetries')} description={t('settings.maxRetriesRange')} suffix={t('settings.unit.times')}>
                   <Input
                     type="number"
                     min={0}
@@ -1453,7 +1791,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')}>
+                <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')} suffix={t('settings.unit.times')}>
                   <Input
                     type="number"
                     min={0}
@@ -1462,7 +1800,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.retryIntervalMs')} description={t('settings.retryIntervalMsDesc')}>
+                <SettingField label={t('settings.retryIntervalMs')} description={t('settings.retryIntervalMsDesc')} suffix="ms">
                   <Input
                     type="number"
                     min={0}
@@ -1482,9 +1820,9 @@ export default function Settings() {
               </div>
             </SettingsCard>
 
-            <SettingsCard title={t('settings.probeScheduling')}>
+            <SettingsCard title={t('settings.probeScheduling')} icon={<RefreshCw className="size-4" />}>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
-                <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')}>
+                <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')} suffix={t('settings.unit.min')}>
                   <Input
                     type="number"
                     min={1}
@@ -1493,7 +1831,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')}>
+                <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')} suffix={t('settings.unit.min')}>
                   <Input
                     type="number"
                     min={1}
@@ -1502,7 +1840,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.usageProbeConcurrency')} description={t('settings.usageProbeConcurrencyDesc')}>
+                <SettingField label={t('settings.usageProbeConcurrency')} description={t('settings.usageProbeConcurrencyDesc')} suffix={t('settings.unit.concurrency')}>
                   <Input
                     type="number"
                     min={1}
@@ -1511,11 +1849,10 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')}>
-                  <Select
-                    value={settingsForm.usage_probe_responses_fallback_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('usage_probe_responses_fallback_enabled', value)}
-                    options={booleanOptions}
+                <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.usage_probe_responses_fallback_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('usage_probe_responses_fallback_enabled', checked)}
                   />
                 </SettingField>
                 <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
@@ -1528,23 +1865,21 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')}>
-                  <Select
-                    value={settingsForm.lazy_mode ? 'true' : 'false'}
-                    onValueChange={(value) => {
-                      const enabled = value === 'true'
+                <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.lazy_mode}
+                    onCheckedChange={(enabled) => {
                       void autoSaveSettingsPatch({
-                        lazy_mode: enabled,
+                      lazy_mode: enabled,
                         auto_clean_full_usage: enabled ? false : settingsFormRef.current.auto_clean_full_usage,
-                      })
-                    }}
-                    options={booleanOptions}
+                        })
+                      }}
                   />
                 </SettingField>
               </div>
             </SettingsCard>
 
-            <SettingsCard title={t('settings.schedulingStrategy')}>
+            <SettingsCard title={t('settings.schedulingStrategy')} icon={<Layers className="size-4" />}>
               <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
                 <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
                   <Select
@@ -1574,11 +1909,10 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, test_concurrency: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')}>
-                  <Select
-                    value={settingsForm.fast_scheduler_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('fast_scheduler_enabled', value)}
-                    options={booleanOptions}
+                <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.fast_scheduler_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('fast_scheduler_enabled', checked)}
                   />
                 </SettingField>
                 <SettingField label={t('settings.schedulerMode')} description={t('settings.schedulerModeDesc')}>
@@ -1599,7 +1933,7 @@ export default function Settings() {
             </SettingsCard>
           </div>
 
-          <SettingsCard title={t('settings.globalAutoPauseTitle')} description={t('settings.globalAutoPauseDesc')}>
+          <SettingsCard title={t('settings.globalAutoPauseTitle')} description={t('settings.globalAutoPauseDesc')} icon={<Activity className="size-4" />}>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
               <SettingField label={t('settings.globalAutoPause5h')} description={t('settings.globalAutoPauseHint')}>
                 <Input
@@ -1688,11 +2022,10 @@ export default function Settings() {
                   }}
                 />
               </SettingField>
-              <SettingField label={t('settings.smartPacingEnabled')} description={t('settings.smartPacingEnabledHint')}>
-                <Select
-                  value={settingsForm.smart_pacing_enabled ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('smart_pacing_enabled', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.smartPacingEnabled')} description={t('settings.smartPacingEnabledHint')} layout="switch">
+                <Switch
+                  checked={settingsForm.smart_pacing_enabled}
+                  onCheckedChange={(checked) => autoSaveBooleanField('smart_pacing_enabled', checked)}
                 />
               </SettingField>
               <SettingField label={t('settings.smartPacingWindows')} description={t('settings.smartPacingWindowsHint')}>
@@ -1736,58 +2069,88 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <SettingsCard title={t('settings.codexWebsocket')} description={t('settings.codexWebsocketDesc')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
-              <SettingField label={t('settings.codexForceWebsocket')} description={t('settings.codexForceWebsocketDesc')}>
-                <Select
-                  value={settingsForm.codex_force_websocket ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_force_websocket', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSKeepaliveEnabled')} description={t('settings.codexWSKeepaliveEnabledDesc')}>
-                <Select
-                  value={settingsForm.codex_ws_keepalive_enabled ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_ws_keepalive_enabled', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSKeepaliveInterval')} description={t('settings.codexWSKeepaliveIntervalDesc')}>
-                <Input
-                  type="number"
-                  min={10}
-                  max={600}
-                  value={settingsForm.codex_ws_keepalive_interval_sec}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: parseInt(e.target.value) || 60 }))}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSHideUpstreamErrors')} description={t('settings.codexWSHideUpstreamErrorsDesc')}>
-                <Select
-                  value={settingsForm.codex_ws_hide_upstream_errors ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_ws_hide_upstream_errors', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSSilentRetryEnabled')} description={t('settings.codexWSSilentRetryEnabledDesc')}>
-                <Select
-                  value={settingsForm.codex_ws_silent_retry_enabled ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_ws_silent_retry_enabled', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSSilentMaxRetries')} description={t('settings.codexWSSilentMaxRetriesDesc')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={10}
-                  value={settingsForm.codex_ws_silent_max_retries}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: parseInt(e.target.value) || 0 }))}
-                />
-              </SettingField>
+          </SettingsSection>
+
+          <SettingsSection id="settings-runtime" title={t('settings.nav.runtime')} description={t('settings.nav.runtimeDesc')}>
+          <SettingsCard title={t('settings.codexWebsocket')} description={t('settings.codexWebsocketDesc')} icon={<Wifi className="size-4" />}>
+            <div className="space-y-4">
+              {/* 开关：整齐 2～3 列，不与数字输入混排 */}
+              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SettingField label={t('settings.codexForceWebsocket')} description={t('settings.codexForceWebsocketDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_force_websocket}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_force_websocket', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexWSKeepaliveEnabled')} description={t('settings.codexWSKeepaliveEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_ws_keepalive_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_keepalive_enabled', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexWSHideUpstreamErrors')} description={t('settings.codexWSHideUpstreamErrorsDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_ws_hide_upstream_errors}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_hide_upstream_errors', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexWSSilentRetryEnabled')} description={t('settings.codexWSSilentRetryEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_ws_silent_retry_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_silent_retry_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+
+              {/* 数值：独立分区，与开关关联时可禁用 */}
+              <div className="grid gap-4 border-t border-border pt-4 sm:grid-cols-2">
+                <SettingField
+                  label={t('settings.codexWSKeepaliveInterval')}
+                  description={t('settings.codexWSKeepaliveIntervalDesc')}
+                  suffix={t('settings.unit.sec')}
+                  className={cn(!settingsForm.codex_ws_keepalive_enabled && 'opacity-60')}
+                >
+                  <Input
+                    type="number"
+                    min={10}
+                    max={600}
+                    disabled={!settingsForm.codex_ws_keepalive_enabled}
+                    value={settingsForm.codex_ws_keepalive_interval_sec}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: parseInt(e.target.value) || 60 }))}
+                    onBlur={() => {
+                      if (!settingsForm.codex_ws_keepalive_enabled) return
+                      void autoSaveSettingsPatch({
+                        codex_ws_keepalive_interval_sec: settingsForm.codex_ws_keepalive_interval_sec,
+                      })
+                    }}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.codexWSSilentMaxRetries')}
+                  description={t('settings.codexWSSilentMaxRetriesDesc')}
+                  suffix={t('settings.unit.times')}
+                  className={cn(!settingsForm.codex_ws_silent_retry_enabled && 'opacity-60')}
+                >
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10}
+                    disabled={!settingsForm.codex_ws_silent_retry_enabled}
+                    value={settingsForm.codex_ws_silent_max_retries}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: parseInt(e.target.value) || 0 }))}
+                    onBlur={() => {
+                      if (!settingsForm.codex_ws_silent_retry_enabled) return
+                      void autoSaveSettingsPatch({
+                        codex_ws_silent_max_retries: settingsForm.codex_ws_silent_max_retries,
+                      })
+                    }}
+                  />
+                </SettingField>
+              </div>
             </div>
           </SettingsCard>
 
-          <SettingsCard title={t('settings.runtimeOptimization')} description={t('settings.runtimeOptimizationDesc')}>
+          <SettingsCard title={t('settings.runtimeOptimization')} description={t('settings.runtimeOptimizationDesc')} icon={<Wrench className="size-4" />}>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
               <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
                 <Select
@@ -1930,7 +2293,74 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <SettingsCard title={t('settings.imageStorage')} description={t('settings.imageStorageDesc')}>
+          <SettingsCard
+            title={showConnectionPool ? t('settings.connectionPool') : t('settings.resinTitle')}
+            description={showConnectionPool ? t('settings.nav.poolRestartHint') : t('settings.resinDesc')}
+            icon={<Database className="size-4" />}
+            badge={
+              showConnectionPool ? (
+                <Badge variant="outline" className="text-[11px]">
+                  {t('settings.nav.restartRequired')}
+                </Badge>
+              ) : null
+            }
+          >
+            <div className="space-y-5">
+              {showConnectionPool ? (
+                <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
+                  {isExternalDatabase ? (
+                    <SettingField label={t('settings.pgMaxConns')} description={t('settings.pgMaxConnsRange')}>
+                      <Input
+                        type="number"
+                        min={5}
+                        max={500}
+                        value={settingsForm.pg_max_conns}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, pg_max_conns: parseInt(e.target.value) || 50 }))}
+                      />
+                    </SettingField>
+                  ) : null}
+                  {isExternalCache ? (
+                    <SettingField label={t('settings.redisPoolSize')} description={t('settings.redisPoolSizeRange')}>
+                      <Input
+                        type="number"
+                        min={5}
+                        max={500}
+                        value={settingsForm.redis_pool_size}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, redis_pool_size: parseInt(e.target.value) || 30 }))}
+                      />
+                    </SettingField>
+                  ) : null}
+                </div>
+              ) : null}
+              {showConnectionPool ? (
+                <div className="border-t border-border pt-4">
+                  <h4 className="text-sm font-semibold text-foreground">{t('settings.resinTitle')}</h4>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('settings.resinDesc')}</p>
+                </div>
+              ) : null}
+              <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
+                <SettingField label={t('settings.resinUrl')} description={t('settings.resinUrlDesc')}>
+                  <Input
+                    placeholder="http://127.0.0.1:2260/your-token"
+                    value={settingsForm.resin_url}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_url: e.target.value }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.resinPlatformName')} description={t('settings.resinPlatformNameDesc')}>
+                  <Input
+                    placeholder="codex2api"
+                    value={settingsForm.resin_platform_name}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_platform_name: e.target.value }))}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          </SettingsSection>
+
+          <SettingsSection id="settings-storage" title={t('settings.nav.storage')} description={t('settings.nav.storageDesc')}>
+          <SettingsCard title={t('settings.imageStorage')} description={t('settings.imageStorageDesc')} icon={<ImageIcon className="size-4" />}>
             <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
               <SettingField label={t('settings.imageStorageBackend')} description={t('settings.imageStorageBackendDesc')}>
                 <Select
@@ -1983,11 +2413,10 @@ export default function Settings() {
                       onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_prefix: e.target.value }))}
                     />
                   </SettingField>
-                  <SettingField label={t('settings.imageS3ForcePathStyle')} description={t('settings.imageS3ForcePathStyleDesc')}>
-                    <Select
-                      value={settingsForm.image_s3_force_path_style ? 'true' : 'false'}
-                      onValueChange={(value) => autoSaveBooleanField('image_s3_force_path_style', value)}
-                      options={booleanOptions}
+                  <SettingField label={t('settings.imageS3ForcePathStyle')} description={t('settings.imageS3ForcePathStyleDesc')} layout="switch">
+                    <Switch
+                      checked={settingsForm.image_s3_force_path_style}
+                      onCheckedChange={(checked) => autoSaveBooleanField('image_s3_force_path_style', checked)}
                     />
                   </SettingField>
                 </>
@@ -2008,49 +2437,54 @@ export default function Settings() {
             ) : null}
           </SettingsCard>
 
-          <SettingsCard title={t('settings.autoCleanup')}>
+          <SettingsCard title={t('settings.autoCleanup')} icon={<Trash2 className="size-4" />} tone="danger">
             <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
-              <SettingField label={t('settings.autoCleanUnauthorized')} description={t('settings.autoCleanUnauthorizedDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_unauthorized ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_unauthorized', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanUnauthorized')} description={t('settings.autoCleanUnauthorizedDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_unauthorized}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_unauthorized', checked)}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanRateLimited')} description={t('settings.autoCleanRateLimitedDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_rate_limited ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_rate_limited', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanRateLimited')} description={t('settings.autoCleanRateLimitedDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_rate_limited}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_rate_limited', checked)}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')}>
-                <Select
-                  value={lazyModeActive ? 'false' : settingsForm.auto_clean_full_usage ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_full_usage', value)}
+              <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')} layout="switch">
+                <Switch
+                  checked={lazyModeActive ? false : settingsForm.auto_clean_full_usage}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_full_usage', checked)}
                   disabled={lazyModeActive}
-                  options={booleanOptions}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanError')} description={t('settings.autoCleanErrorDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_error ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_error', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanError')} description={t('settings.autoCleanErrorDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_error}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_error', checked)}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanExpired')} description={t('settings.autoCleanExpiredDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_expired ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_expired', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanExpired')} description={t('settings.autoCleanExpiredDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_expired}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_expired', checked)}
                 />
               </SettingField>
             </div>
           </SettingsCard>
+          </SettingsSection>
 
-          <div className="grid gap-4 xl:grid-cols-2">
-            <SettingsCard title={t('settings.security')}>
+          <SettingsSection id="settings-security" title={t('settings.nav.security')} description={t('settings.nav.securityDesc')}>
+            <SettingsCard
+              title={t('settings.security')}
+              icon={<Shield className="size-4" />}
+              tone="danger"
+              badge={
+                <Badge variant="outline" className="border-destructive/30 text-[11px] text-destructive">
+                  {t('settings.nav.sensitive')}
+                </Badge>
+              }
+            >
               <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
                 <SettingField
                   label={t('settings.adminSecret')}
@@ -2075,20 +2509,23 @@ export default function Settings() {
                 <SettingField
                   label={t('settings.allowRemoteMigration')}
                   description={t('settings.allowRemoteMigrationDesc')}
-                  warning={!canConfigureRemoteMigration ? t('settings.allowRemoteMigrationRequiresSecret') : undefined}
+                  warning={
+                    !canConfigureRemoteMigration
+                      ? t('settings.allowRemoteMigrationRequiresSecret')
+                      : undefined
+                  }
+                  layout="switch"
                 >
-                  <Select
-                    value={settingsForm.allow_remote_migration ? 'true' : 'false'}
+                  <Switch
+                    checked={settingsForm.allow_remote_migration}
                     disabled={!canConfigureRemoteMigration}
-                    onValueChange={(value) => autoSaveBooleanField('allow_remote_migration', value)}
-                    options={booleanOptions}
+                    onCheckedChange={(checked) => autoSaveBooleanField('allow_remote_migration', checked)}
                   />
                 </SettingField>
-                <SettingField label={t('settings.promptFilterEnabled')} description={t('settings.promptFilterEnabledDesc')}>
-                  <Select
-                    value={settingsForm.prompt_filter_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('prompt_filter_enabled', value)}
-                    options={booleanOptions}
+                <SettingField label={t('settings.promptFilterEnabled')} description={t('settings.promptFilterEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.prompt_filter_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('prompt_filter_enabled', checked)}
                   />
                 </SettingField>
                 <SettingField label={t('settings.promptFilterMode')} description={t('settings.promptFilterModeDesc')}>
@@ -2104,8 +2541,10 @@ export default function Settings() {
                 </SettingField>
               </div>
             </SettingsCard>
+          </SettingsSection>
 
-            <SettingsCard title={t('settings.display')}>
+          <SettingsSection id="settings-appearance" title={t('settings.nav.appearance')} description={t('settings.nav.appearanceDesc')}>
+            <SettingsCard title={t('settings.display')} icon={<Palette className="size-4" />}>
               <div className="space-y-4">
                 <SettingField label={t('settings.siteName')} description={t('settings.siteNameDesc')}>
                   <Input
@@ -2180,18 +2619,16 @@ export default function Settings() {
                     ]}
                   />
                 </SettingField>
-                <SettingField label={t('settings.showFullUsageNumbers')} description={t('settings.showFullUsageNumbersDesc')}>
-                  <Select
-                    value={settingsForm.show_full_usage_numbers ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('show_full_usage_numbers', value)}
-                    options={booleanOptions}
+                <SettingField label={t('settings.showFullUsageNumbers')} description={t('settings.showFullUsageNumbersDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.show_full_usage_numbers}
+                    onCheckedChange={(checked) => autoSaveBooleanField('show_full_usage_numbers', checked)}
                   />
                 </SettingField>
               </div>
             </SettingsCard>
-          </div>
 
-          <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')}>
+          <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')} icon={<ImageIcon className="size-4" />}>
             <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.65fr)]">
               <div className="relative aspect-[16/7] min-h-[160px] overflow-hidden rounded-xl border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3] sm:min-h-[220px]">
                 {backgroundImagePreview && backgroundIsVideo ? (
@@ -2311,239 +2748,282 @@ export default function Settings() {
               </div>
             </div>
           </SettingsCard>
+          </SettingsSection>
 
-          <SettingsCard title={showConnectionPool ? t('settings.connectionPool') : t('settings.resinTitle')} description={showConnectionPool ? undefined : t('settings.resinDesc')}>
-            <div className="space-y-5">
-              {showConnectionPool ? (
-                <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
-                  {isExternalDatabase ? (
-                    <SettingField label={t('settings.pgMaxConns')} description={t('settings.pgMaxConnsRange')}>
-                      <Input
-                        type="number"
-                        min={5}
-                        max={500}
-                        value={settingsForm.pg_max_conns}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, pg_max_conns: parseInt(e.target.value) || 50 }))}
-                      />
-                    </SettingField>
-                  ) : null}
-                  {isExternalCache ? (
-                    <SettingField label={t('settings.redisPoolSize')} description={t('settings.redisPoolSizeRange')}>
-                      <Input
-                        type="number"
-                        min={5}
-                        max={500}
-                        value={settingsForm.redis_pool_size}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, redis_pool_size: parseInt(e.target.value) || 30 }))}
-                      />
-                    </SettingField>
-                  ) : null}
-                </div>
-              ) : null}
-              {showConnectionPool ? (
-                <div className="border-t border-border pt-4">
-                  <h4 className="text-sm font-semibold text-foreground">{t('settings.resinTitle')}</h4>
-                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('settings.resinDesc')}</p>
-                </div>
-              ) : null}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
-                <SettingField label={t('settings.resinUrl')} description={t('settings.resinUrlDesc')}>
-                  <Input
-                    placeholder="http://127.0.0.1:2260/your-token"
-                    value={settingsForm.resin_url}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_url: e.target.value }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.resinPlatformName')} description={t('settings.resinPlatformNameDesc')}>
-                  <Input
-                    placeholder="codex2api"
-                    value={settingsForm.resin_platform_name}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_platform_name: e.target.value }))}
-                  />
-                </SettingField>
+          <SettingsSection id="settings-models" title={t('settings.nav.models')} description={t('settings.nav.modelsDesc')}>
+            <div className="mb-3 flex flex-wrap items-center justify-between gap-2 rounded-xl border border-border bg-card/80 px-3.5 py-2.5 shadow-sm">
+              <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant="secondary" className="tabular-nums">
+                  {t('settings.modelsEnabled')}: {enabledModelCount}
+                </Badge>
+                <span className="hidden sm:inline">·</span>
+                <span className="truncate">
+                  {t('settings.modelsLastSynced')}: {modelsLastSyncedLabel}
+                </span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={modelsSourceLabel}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                >
+                  <ExternalLink className="size-3.5" />
+                  {t('settings.nav.openSource')}
+                </a>
+                <Button size="sm" variant="outline" onClick={() => void handleSyncModels()} disabled={syncingModels}>
+                  <RefreshCw className={cn('size-3.5', syncingModels && 'animate-spin')} />
+                  {syncingModels ? t('settings.modelsSyncing') : t('settings.syncUpstreamModels')}
+                </Button>
               </div>
             </div>
-          </SettingsCard>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ModelSummaryCard
+                title={t('settings.modelRegistry')}
+                description={t('settings.modelRegistryDesc')}
+                meta={t('settings.nav.modelCount', { count: enabledModelCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('registry')}
+              />
+              <ModelSummaryCard
+                title={t('settings2.anthropicModelMapping')}
+                description={t('settings2.anthropicModelMappingDesc')}
+                meta={t('settings.nav.mappingCount', { count: anthropicMappingCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('anthropic')}
+              />
+              <ModelSummaryCard
+                title={t('settings2.codexModelMapping')}
+                description={t('settings2.codexModelMappingDesc')}
+                meta={t('settings.nav.mappingCount', { count: codexMappingCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('codex')}
+              />
+              <ModelSummaryCard
+                title={t('settings2.reasoningEffortModels')}
+                description={t('settings2.reasoningEffortModelsDesc')}
+                meta={t('settings.nav.mappingCount', { count: reasoningEffortCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('reasoning')}
+              />
+            </div>
 
-          <div className="grid items-stretch gap-4 lg:grid-cols-2">
-            <SettingsCard
-              title={t('settings.modelRegistry')}
-              description={t('settings.modelRegistryDesc')}
-              className="h-full lg:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <div className="flex min-h-0 flex-1 flex-col gap-4">
-                <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
-                  <StatusTile label={t('settings.modelsEnabled')}>
-                    {enabledModelCount}
-                  </StatusTile>
-                  <StatusTile label={t('settings.modelsLastSynced')}>
-                    <span className="text-xs font-semibold">{modelsLastSyncedLabel}</span>
-                  </StatusTile>
-                </div>
-                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-                  <a
-                    href={modelsSourceLabel}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-                  >
-                    <ExternalLink className="size-3.5 shrink-0" />
-                    <span className="truncate">{modelsSourceLabel}</span>
-                  </a>
-                  <Button size="sm" variant="outline" onClick={() => void handleSyncModels()} disabled={syncingModels}>
-                    <RefreshCw className={cn('size-4', syncingModels && 'animate-spin')} />
-                    {syncingModels ? t('settings.modelsSyncing') : t('settings.syncUpstreamModels')}
-                  </Button>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-wrap content-start gap-2 overflow-auto rounded-lg border border-border bg-muted/20 p-3">
-                  {visibleModelItems.map((model) => (
-                    <div key={model.id} className="flex h-fit flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5">
-                      <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
-                      <Badge variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'} className="text-[11px]">
-                        {model.source === 'official_codex_docs'
-                          ? t('settings.modelSourceOfficial')
-                          : model.source === 'reasoning_effort'
-                            ? t('settings.modelSourceReasoning')
-                            : t('settings.modelSourceBuiltin')}
-                      </Badge>
-                      {model.pro_only ? <Badge variant="outline" className="text-[11px]">{t('settings.modelProOnly')}</Badge> : null}
-                      {model.category === 'image' ? <Badge variant="outline" className="text-[11px]">{t('settings.modelImage')}</Badge> : null}
+            <Sheet open={modelPanel !== null} onOpenChange={(open) => { if (!open) setModelPanel(null) }}>
+              <SheetContent
+                side="right"
+                className="sm:w-[min(calc(100%-2rem),720px)] sm:max-w-[min(calc(100%-2rem),720px)]"
+              >
+                <SheetHeader>
+                  <SheetTitle>
+                    {modelPanel === 'registry'
+                      ? t('settings.modelRegistry')
+                      : modelPanel === 'anthropic'
+                        ? t('settings2.anthropicModelMapping')
+                        : modelPanel === 'codex'
+                          ? t('settings2.codexModelMapping')
+                          : t('settings2.reasoningEffortModels')}
+                  </SheetTitle>
+                  <SheetDescription>
+                    {modelPanel === 'registry'
+                      ? t('settings.modelRegistryDesc')
+                      : modelPanel === 'anthropic'
+                        ? t('settings2.anthropicModelMappingDesc')
+                        : modelPanel === 'codex'
+                          ? t('settings2.codexModelMappingDesc')
+                          : t('settings2.reasoningEffortModelsDesc')}
+                  </SheetDescription>
+                </SheetHeader>
+                <SheetBody className="space-y-4">
+                  {modelPanel === 'registry' ? (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <StatusTile label={t('settings.modelsEnabled')}>{enabledModelCount}</StatusTile>
+                        <StatusTile label={t('settings.modelsLastSynced')}>
+                          <span className="text-xs font-semibold">{modelsLastSyncedLabel}</span>
+                        </StatusTile>
+                      </div>
+                      <div className="flex max-h-[min(60dvh,520px)] flex-wrap content-start gap-2 overflow-auto rounded-xl border border-border bg-muted/20 p-3">
+                        {visibleModelItems.map((model) => (
+                          <div
+                            key={model.id}
+                            className="flex h-fit flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5"
+                          >
+                            <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
+                            <Badge
+                              variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'}
+                              className="text-[11px]"
+                            >
+                              {model.source === 'official_codex_docs'
+                                ? t('settings.modelSourceOfficial')
+                                : model.source === 'reasoning_effort'
+                                  ? t('settings.modelSourceReasoning')
+                                  : t('settings.modelSourceBuiltin')}
+                            </Badge>
+                            {model.pro_only ? (
+                              <Badge variant="outline" className="text-[11px]">{t('settings.modelProOnly')}</Badge>
+                            ) : null}
+                            {model.category === 'image' ? (
+                              <Badge variant="outline" className="text-[11px]">{t('settings.modelImage')}</Badge>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
                     </div>
-                  ))}
-                </div>
-              </div>
-            </SettingsCard>
+                  ) : null}
+                  {modelPanel === 'anthropic' ? (
+                    <ModelMappingEditor
+                      value={settingsForm.model_mapping}
+                      onChange={(v) => setSettingsForm((f) => ({ ...f, model_mapping: v }))}
+                      fallbackEntries={defaultClaudeModelMappingEntries}
+                      sourceLabel={t('settings2.anthropicModel')}
+                      targetLabel={t('settings2.codexModel')}
+                      sourcePlaceholder="claude-opus-4-6"
+                      targetPlaceholder="gpt-5.5"
+                    />
+                  ) : null}
+                  {modelPanel === 'codex' ? (
+                    <ModelMappingEditor
+                      value={settingsForm.codex_model_mapping}
+                      onChange={(v) => setSettingsForm((f) => ({ ...f, codex_model_mapping: v }))}
+                      sourceOptions={codexModelOptions}
+                      targetOptions={codexModelOptions}
+                      sourceLabel={t('settings2.requestedModel')}
+                      targetLabel={t('settings2.targetModel')}
+                      sourcePlaceholder="gpt-5.2"
+                      targetPlaceholder="gpt-5.5"
+                    />
+                  ) : null}
+                  {modelPanel === 'reasoning' ? (
+                    <ReasoningEffortModelsEditor
+                      value={settingsForm.reasoning_effort_models}
+                      onChange={(v) => setSettingsForm((f) => ({ ...f, reasoning_effort_models: v }))}
+                      baseModelOptions={textModelOptions}
+                    />
+                  ) : null}
+                </SheetBody>
+              </SheetContent>
+            </Sheet>
+          </SettingsSection>
 
-            <SettingsCard
-              title={t('settings2.anthropicModelMapping')}
-              description={t('settings2.anthropicModelMappingDesc')}
-              className="h-full min-h-0 lg:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <ModelMappingEditor
-                value={settingsForm.model_mapping}
-                onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
-                fallbackEntries={defaultClaudeModelMappingEntries}
-                sourceLabel={t('settings2.anthropicModel')}
-                targetLabel={t('settings2.codexModel')}
-                sourcePlaceholder="claude-opus-4-6"
-                targetPlaceholder="gpt-5.5"
-              />
-            </SettingsCard>
-
-            <SettingsCard
-              title={t('settings2.codexModelMapping')}
-              description={t('settings2.codexModelMappingDesc')}
-              className="h-full min-h-0 lg:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <ModelMappingEditor
-                value={settingsForm.codex_model_mapping}
-                onChange={(v) => setSettingsForm(f => ({ ...f, codex_model_mapping: v }))}
-                sourceOptions={codexModelOptions}
-                targetOptions={codexModelOptions}
-                sourceLabel={t('settings2.requestedModel')}
-                targetLabel={t('settings2.targetModel')}
-                sourcePlaceholder="gpt-5.2"
-                targetPlaceholder="gpt-5.5"
-              />
-            </SettingsCard>
-
-            <SettingsCard
-              title={t('settings2.reasoningEffortModels')}
-              description={t('settings2.reasoningEffortModelsDesc')}
-              className="h-full min-h-0 lg:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <ReasoningEffortModelsEditor
-                value={settingsForm.reasoning_effort_models}
-                onChange={(v) => setSettingsForm(f => ({ ...f, reasoning_effort_models: v }))}
-                baseModelOptions={textModelOptions}
-              />
-            </SettingsCard>
-          </div>
-
-          <div className="grid gap-4">
-            <SettingsCard title={t('settings.apiEndpoints')}>
-              {/* Mobile endpoint cards */}
-              <div className="grid gap-2 sm:hidden">
-                {([
-                  { method: 'POST', path: '/v1/chat/completions', desc: t('settings.openaiCompat'), tone: 'default' as const },
-                  { method: 'POST', path: '/v1/responses', desc: t('settings.responsesApi'), tone: 'outline' as const },
-                  { method: 'POST', path: '/v1/messages', desc: t('settings2.messagesEndpoint'), tone: 'outline' as const },
-                  { method: 'POST', path: '/v1/images/generations', desc: t('settings.imageGenerationApi'), tone: 'outline' as const },
-                  { method: 'POST', path: '/v1/images/edits', desc: t('settings.imageEditApi'), tone: 'outline' as const },
-                  { method: 'GET', path: '/v1/models', desc: t('settings.modelList'), tone: 'secondary' as const },
-                ]).map((item) => (
-                  <div
-                    key={item.path}
-                    className="rounded-xl border border-border bg-background/70 px-3 py-2.5"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Badge variant={item.tone} className="text-[11px] shrink-0">
-                        {item.method}
-                      </Badge>
-                      <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-foreground">
-                        {item.path}
-                      </code>
+          <SettingsSection id="settings-reference" title={t('settings.nav.reference')} description={t('settings.nav.referenceDesc')}>
+            <div className="overflow-hidden rounded-xl border border-border bg-card/85 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setEndpointsOpen((open) => !open)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
+                    <Link2 className="size-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-foreground">
+                      {t('settings.apiEndpoints')}
                     </div>
-                    <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
-                      {item.desc}
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t('settings.nav.endpointsHint')}
                     </p>
                   </div>
-                ))}
-              </div>
-
-              {/* Desktop table */}
-              <div className="data-table-shell hidden sm:block">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="text-[12px] font-semibold">{t('settings.method')}</TableHead>
-                      <TableHead className="text-[12px] font-semibold">{t('settings.path')}</TableHead>
-                      <TableHead className="text-[12px] font-semibold">{t('settings.endpointDesc')}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    <TableRow>
-                      <TableCell><Badge variant="default" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/chat/completions</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.openaiCompat')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/responses</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.responsesApi')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/messages</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings2.messagesEndpoint')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/images/generations</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageGenerationApi')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/images/edits</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageEditApi')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="secondary" className="text-[12px]">GET</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/models</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.modelList')}</TableCell>
-                    </TableRow>
-                  </TableBody>
-                </Table>
-              </div>
-            </SettingsCard>
-          </div>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    'size-4 shrink-0 text-muted-foreground transition-transform',
+                    endpointsOpen && 'rotate-180',
+                  )}
+                />
+              </button>
+              {endpointsOpen ? (
+                <div className="space-y-3 border-t border-border px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-muted-foreground">
+                      {t('settings.nav.endpointsReadonly')}
+                    </p>
+                    <Link
+                      to="/docs#model-api"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                    >
+                      <ExternalLink className="size-3.5" />
+                      {t('settings.nav.openDocs')}
+                    </Link>
+                  </div>
+                  <div className="grid gap-2 sm:hidden">
+                    {([
+                      { method: 'POST', path: '/v1/chat/completions', desc: t('settings.openaiCompat'), tone: 'default' as const },
+                      { method: 'POST', path: '/v1/responses', desc: t('settings.responsesApi'), tone: 'outline' as const },
+                      { method: 'POST', path: '/v1/messages', desc: t('settings2.messagesEndpoint'), tone: 'outline' as const },
+                      { method: 'POST', path: '/v1/images/generations', desc: t('settings.imageGenerationApi'), tone: 'outline' as const },
+                      { method: 'POST', path: '/v1/images/edits', desc: t('settings.imageEditApi'), tone: 'outline' as const },
+                      { method: 'GET', path: '/v1/models', desc: t('settings.modelList'), tone: 'secondary' as const },
+                    ]).map((item) => (
+                      <div
+                        key={item.path}
+                        className="rounded-xl border border-border bg-background/70 px-3 py-2.5"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Badge variant={item.tone} className="shrink-0 text-[11px]">
+                            {item.method}
+                          </Badge>
+                          <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-foreground">
+                            {item.path}
+                          </code>
+                        </div>
+                        <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                          {item.desc}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="data-table-shell hidden sm:block">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-[12px] font-semibold">{t('settings.method')}</TableHead>
+                          <TableHead className="text-[12px] font-semibold">{t('settings.path')}</TableHead>
+                          <TableHead className="text-[12px] font-semibold">{t('settings.endpointDesc')}</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell><Badge variant="default" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/chat/completions</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.openaiCompat')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/responses</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.responsesApi')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/messages</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings2.messagesEndpoint')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/images/generations</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageGenerationApi')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/images/edits</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageEditApi')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="secondary" className="text-[12px]">GET</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/models</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.modelList')}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </SettingsSection>
 
           <div className="flex justify-end max-lg:sticky max-lg:bottom-[calc(5.5rem+env(safe-area-inset-bottom,0px))] max-lg:z-20 max-lg:-mx-1 max-lg:rounded-xl max-lg:border max-lg:border-border max-lg:bg-card/95 max-lg:p-2 max-lg:shadow-lg max-lg:backdrop-blur-md">
             {renderSaveButton('w-full sm:w-auto')}
+          </div>
           </div>
         </div>
 
