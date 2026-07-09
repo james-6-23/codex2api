@@ -1587,7 +1587,7 @@ export default function Settings() {
       category: id.includes('image') ? 'image' : 'codex',
       source: 'builtin',
       pro_only: id === 'gpt-5.3-codex-spark',
-      api_key_auth_available: id !== 'gpt-5.5',
+      api_key_auth_available: !['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'].includes(id),
     }))
   }, [modelItems, modelList])
   const codexModelOptions = visibleModelItems
