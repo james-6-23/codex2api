@@ -779,6 +779,35 @@ func requestBodyHasCompactionInput(body []byte) bool {
 	return gjsonResultHasCompactionInput(input)
 }
 
+// storeHasAvailableCodexAccount 判断账号池中是否还有可调度的官方（非中转）账号。
+// 注意这是池级判断，不含 API Key 级的账号分组/套餐约束——极端情况下（Key 被限定
+// 只能用中转账号且池中有官方账号）body-signal 请求会等待官方账号而非提升，
+// 该组合目前视为配置矛盾，不做额外处理。
+func (h *Handler) storeHasAvailableCodexAccount() bool {
+	if h == nil || h.store == nil {
+		return false
+	}
+	for _, account := range h.store.Accounts() {
+		if account.IsOpenAIResponsesAPI() {
+			continue
+		}
+		if account.IsAvailable() {
+			return true
+		}
+	}
+	return false
+}
+
+// excludeRelayAccountsFilter 在既有过滤器上追加"排除中转账号"约束。
+func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
+	return func(account *auth.Account) bool {
+		if account == nil || account.IsOpenAIResponsesAPI() {
+			return false
+		}
+		return inner == nil || inner(account)
+	}
+}
+
 func gjsonResultHasCompactionInput(result gjson.Result) bool {
 	if !result.Exists() {
 		return false
@@ -1615,6 +1644,24 @@ func (h *Handler) Responses(c *gin.Context) {
 	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
 	setRawRequestBody(c, rawBody)
 
+	// body-signal compact：较新的 Codex 客户端把会话压缩触发器作为 input item
+	// （type=compaction_trigger）嵌进普通 /responses 请求体，而不调用
+	// /responses/compact。官方 ChatGPT OAuth 账号的原生上游直接接受该形态，
+	// 透传即正确；中转（OpenAI Responses API）账号的普通 /v1/responses 通常
+	// 不接受，会 400 或返回非压缩响应导致客户端报
+	// "expected exactly one compaction output item"。
+	// 处理：池中还有可用官方账号时，把这类请求钉在官方账号上保持原生透传；
+	// 官方账号全不可用（如纯中转部署）时整体提升到 compact 专用链路——
+	// 该链路对两类账号都能正确完成压缩。
+	pinBodySignalToCodexAccounts := false
+	if requestBodyHasCompactionInput(rawBody) {
+		if !h.storeHasAvailableCodexAccount() {
+			h.ResponsesCompact(c)
+			return
+		}
+		pinBodySignalToCodexAccounts = true
+	}
+
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRulesForModel(mappedModel)
@@ -1704,6 +1751,9 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	if pinBodySignalToCodexAccounts {
+		accountFilter = excludeRelayAccountsFilter(accountFilter)
+	}
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
