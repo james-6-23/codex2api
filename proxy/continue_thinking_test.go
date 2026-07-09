@@ -342,8 +342,18 @@ func TestFoldContinuationRoundRejected(t *testing.T) {
 	if res.StopReason != continueStopRoundError {
 		t.Fatalf("StopReason = %q, want continuation_error", res.StopReason)
 	}
-	if len(res.Rounds) != 2 || res.Rounds[1].StatusCode != http.StatusBadRequest {
-		t.Fatalf("失败轮应记入 Rounds: %+v", res.Rounds)
+	// 失败的续想开轮记入 FailedContinuation（与真实成功轮 Rounds 分开，避免重复计费）。
+	if len(res.Rounds) != 1 {
+		t.Fatalf("Rounds 应只含 1 个成功轮, got %+v", res.Rounds)
+	}
+	if res.FailedContinuation == nil || res.FailedContinuation.StatusCode != http.StatusBadRequest {
+		t.Fatalf("失败续想应记入 FailedContinuation: %+v", res.FailedContinuation)
+	}
+	if res.FinalUsage == nil || res.FinalUsage.ReasoningTokens != 516 {
+		t.Fatalf("FinalUsage 应为最后成功轮真实用量: %+v", res.FinalUsage)
+	}
+	if !res.GotTerminal {
+		t.Fatalf("续想失败已合成终态, GotTerminal 应为 true")
 	}
 	final := c.events[len(c.events)-1]
 	if gjson.GetBytes(final, "type").String() != "response.incomplete" {
@@ -353,6 +363,70 @@ func TestFoldContinuationRoundRejected(t *testing.T) {
 		t.Fatalf("incomplete reason 错误: %s", final)
 	}
 	assertMonotonicSeq(t, c.events)
+}
+
+func TestFoldFirstRoundContinuationFailsBillsRound1(t *testing.T) {
+	// 第 1 轮命中指纹但首次续想开轮即失败：FinalUsage 必须保留第 1 轮真实用量
+	// （否则整轮消耗漏记），且已合成终态（否则会被误判断流惩罚账号）。
+	c := &foldCollector{
+		nextErr: []error{fmt.Errorf("dial timeout")},
+	}
+	res := c.fold(testBaseBody, 8, sseResponse(
+		evCreated(),
+		evReasoningAdded(1, 0),
+		evReasoningDone(2, 0, "enc-a"),
+		evCompleted(3, 4000, 516, 516),
+	))
+	if res.RoundsRun != 1 || res.StopReason != continueStopRoundError {
+		t.Fatalf("unexpected: RoundsRun=%d stop=%s", res.RoundsRun, res.StopReason)
+	}
+	if res.FinalUsage == nil || res.FinalUsage.InputTokens != 4000 || res.FinalUsage.ReasoningTokens != 516 {
+		t.Fatalf("第 1 轮真实用量应保留在 FinalUsage: %+v", res.FinalUsage)
+	}
+	if res.FailedContinuation == nil {
+		t.Fatalf("首次续想失败应记入 FailedContinuation")
+	}
+	if !res.GotTerminal {
+		t.Fatalf("已合成终态, GotTerminal 应为 true(避免误判断流)")
+	}
+}
+
+func TestFoldTwoRoundsThenOpenFailsNoDoubleCount(t *testing.T) {
+	// r1 命中 → r2 命中 → 开 r3 失败。Rounds 应含 r1、r2 两个成功轮，
+	// FailedContinuation 单独记 r3 失败；FinalUsage=r2，收尾计费 r2，
+	// logContinueThinkingRounds 计费 r1 + 失败占位，绝不重复计 r2。
+	c := &foldCollector{
+		nextResp: []*http.Response{sseResponse(
+			evCreated(),
+			evReasoningAdded(1, 0),
+			evReasoningDone(2, 0, "enc-b"),
+			evCompleted(3, 120, 900, 516), // r2 也命中指纹
+		)},
+		nextErr: []error{nil, fmt.Errorf("r3 dial fail")}, // 第 2 次 openRound(开 r3)失败
+	}
+	res := c.fold(testBaseBody, 8, sseResponse(
+		evCreated(),
+		evReasoningAdded(1, 0),
+		evReasoningDone(2, 0, "enc-a"),
+		evCompleted(3, 100, 600, 516),
+	))
+	if res.StopReason != continueStopRoundError {
+		t.Fatalf("StopReason = %q, want continuation_error", res.StopReason)
+	}
+	if len(res.Rounds) != 2 {
+		t.Fatalf("Rounds 应含 2 个成功轮, got %d: %+v", len(res.Rounds), res.Rounds)
+	}
+	if res.FailedContinuation == nil {
+		t.Fatalf("r3 失败应记入 FailedContinuation")
+	}
+	if res.FinalUsage == nil || res.FinalUsage.OutputTokens != 900 {
+		t.Fatalf("FinalUsage 应为 r2: %+v", res.FinalUsage)
+	}
+	// 记账口径核对：收尾计 FinalUsage(r2)，logContinueThinkingRounds 计 Rounds[:len-1]=[r1] + 失败占位。
+	// 断言 Rounds[:len-1] 恰为 [r1]，不含 r2，避免与收尾重复计费。
+	if res.Rounds[0].Usage == nil || res.Rounds[0].Usage.InputTokens != 100 {
+		t.Fatalf("Rounds[0] 应为 r1: %+v", res.Rounds[0].Usage)
+	}
 }
 
 func TestFoldFirstRoundEOFSilent(t *testing.T) {
@@ -367,6 +441,31 @@ func TestFoldFirstRoundEOFSilent(t *testing.T) {
 		if gjson.GetBytes(ev, "type").String() == "response.incomplete" {
 			t.Fatalf("第 1 轮无输出 EOF 不应合成 incomplete: %s", ev)
 		}
+	}
+}
+
+func TestFoldFirstRoundEOFWithBufferedContentFlushes(t *testing.T) {
+	// 第 1 轮缓冲了 message 内容后 EOF（无 terminal）：不应静默丢弃，
+	// 应冲刷缓冲内容并合成 incomplete，避免客户端收到空的 200 流。
+	c := &foldCollector{}
+	res := c.fold(testBaseBody, 8, sseResponse(
+		evCreated(),
+		evMessageAdded(1, 0),
+		evMessageDelta(2, 0, "partial answer"),
+		// 无 terminal
+	))
+	if !res.GotTerminal || res.StopReason != continueStopUpstreamEOF {
+		t.Fatalf("有缓冲内容的 EOF 应合成终态: %+v", res)
+	}
+	joined := ""
+	for _, ev := range c.events {
+		joined += string(ev)
+	}
+	if !strings.Contains(joined, "partial answer") {
+		t.Fatalf("缓冲内容应被冲刷给客户端, events=%v", c.eventTypes())
+	}
+	if c.eventTypes()[len(c.eventTypes())-1] != "response.incomplete" {
+		t.Fatalf("末事件应为 incomplete: %v", c.eventTypes())
 	}
 }
 
