@@ -3,6 +3,7 @@ package wsrelay
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -475,7 +476,9 @@ func (r *WsResponse) buildErrorEvent(payload []byte) ([]byte, bool) {
 
 	// 构造 response.failed 事件：下游 ReadSSEStream 已识别该类型为终止失败，
 	// 与 HTTP 路径的错误语义对齐；同时保留原始上游错误对象供客户端排查。
-	errObj := gjson.GetBytes(payload, "error").Raw
+	// 上游错误对象可能是带换行的 pretty-printed JSON，必须压缩成单行，
+	// 否则经 SSE data: 行编码后下游只能读到第一行（错误信息被截断）。
+	errObj := compactJSONOneLine(gjson.GetBytes(payload, "error").Raw)
 	if errObj == "" {
 		errObj = fmt.Sprintf(`{"message":%q,"code":%d}`, errMsg, status)
 	}
@@ -495,6 +498,19 @@ func normalizeCompletionEvent(payload []byte) []byte {
 		}
 	}
 	return payload
+}
+
+// compactJSONOneLine 把可能带换行的 JSON 压缩为单行；非法 JSON 或空串返回 ""。
+func compactJSONOneLine(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(raw)); err != nil {
+		return ""
+	}
+	return buf.String()
 }
 
 // markConnBroken 标记底层连接因上游 WS 异常或下游写入失败而不可复用（幂等，受 mu 保护）。
@@ -658,6 +674,15 @@ func websocketResponseToHTTP(ctx context.Context, wsResp *WsResponse, statusCode
 		defer wsResp.Close()
 
 		err := wsResp.ReadStream(func(data []byte) bool {
+			// SSE 的 data: 负载以换行为界，含换行的帧（如 pretty-printed JSON）
+			// 必须先压缩成单行，否则下游解析器只能读到第一行。
+			if bytes.IndexByte(data, '\n') >= 0 {
+				if compacted := compactJSONOneLine(string(data)); compacted != "" {
+					data = []byte(compacted)
+				} else {
+					data = bytes.ReplaceAll(data, []byte("\n"), []byte(" "))
+				}
+			}
 			// 将数据编码为 SSE 格式
 			if _, err := pw.Write([]byte("data: ")); err != nil {
 				return false

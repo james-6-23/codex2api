@@ -26,7 +26,47 @@ import {
 } from '@/components/ui/table'
 import { cn } from '@/lib/utils'
 
-import { ExternalLink, RefreshCw, Save, Trash2, Upload, X } from 'lucide-react'
+import { Switch } from '@/components/ui/switch'
+import {
+  Sheet,
+  SheetBody,
+  SheetContent,
+  SheetDescription,
+  SheetHeader,
+  SheetTitle,
+} from '@/components/ui/sheet'
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from '@/components/ui/tooltip'
+import {
+  Activity,
+  Brain,
+  ChevronDown,
+  ChevronRight,
+  CircleHelp,
+  Database,
+  ExternalLink,
+  Gauge,
+  Image as ImageIcon,
+  Layers,
+  Link2,
+  Loader2,
+  Palette,
+  RefreshCw,
+  Save,
+  Shield,
+  Trash2,
+  Upload,
+  Wifi,
+  Wrench,
+  X,
+} from 'lucide-react'
+import { Link } from 'react-router-dom'
+
+type ModelPanelKey = 'registry' | 'anthropic' | 'codex' | 'reasoning'
 
 type ModelMappingEntry = [string, string]
 const EMPTY_MODEL_MAPPING_ENTRIES: ModelMappingEntry[] = []
@@ -46,7 +86,7 @@ type CodexUserAgentConfig = {
 }
 
 const EMPTY_REASONING_EFFORT_MODEL_ENTRIES: ReasoningEffortModelEntry[] = []
-const REASONING_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'].map((effort) => ({
+const REASONING_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'].map((effort) => ({
   label: effort,
   value: effort,
 }))
@@ -97,7 +137,7 @@ const serializeModelMappingEntries = (entries: ModelMappingEntry[]) => {
 const normalizeReasoningEffortValue = (effort: string) => {
   const value = effort.trim().toLowerCase()
   if (value === 'max') return 'xhigh'
-  return ['low', 'medium', 'high', 'xhigh'].includes(value) ? value : 'xhigh'
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'].includes(value) ? value : 'xhigh'
 }
 
 const normalizeBillingTierPolicyValue = (value?: string | null): 'actual' | 'requested' =>
@@ -345,53 +385,66 @@ function ModelMappingEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground">
+      <div className="hidden shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground sm:grid">
         <span>{sourceLabel}</span>
         <span>{targetLabel}</span>
         <span />
       </div>
-      <div className="min-h-[180px] flex-1 space-y-1.5 overflow-y-auto pr-1">
+      <div className="min-h-[180px] flex-1 space-y-2 overflow-y-auto pr-0.5 sm:space-y-1.5 sm:pr-1">
         {mappings.map(([k, v], i) => (
-          <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-1.5">
-            {sourceOptions ? (
-              <Select
-                compact
-                value={k.trim()}
-                options={sourceSelectOptions}
-                placeholder={sourcePlaceholder}
-                disabled={sourceSelectOptions.length === 0}
-                onValueChange={(next) => handleChange(i, 0, next)}
-              />
-            ) : (
-              <Input
-                className="h-8 px-2 font-mono text-xs"
-                placeholder={sourcePlaceholder}
-                value={k}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
-              />
-            )}
-            {targetOptions ? (
-              <Select
-                compact
-                value={v.trim()}
-                options={targetSelectOptions}
-                placeholder={targetPlaceholder}
-                disabled={targetSelectOptions.length === 0}
-                onValueChange={(next) => handleChange(i, 1, next)}
-              />
-            ) : (
-              <Input
-                className="h-8 px-2 font-mono text-xs"
-                placeholder={targetPlaceholder}
-                value={v}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
-              />
-            )}
+          <div
+            key={i}
+            className="grid grid-cols-1 gap-2 rounded-xl border border-border bg-background/70 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] sm:items-center sm:gap-1.5 sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0"
+          >
+            <div className="min-w-0 space-y-1 sm:space-y-0">
+              <span className="text-[11px] font-semibold text-muted-foreground sm:hidden">
+                {sourceLabel}
+              </span>
+              {sourceOptions ? (
+                <Select
+                  compact
+                  value={k.trim()}
+                  options={sourceSelectOptions}
+                  placeholder={sourcePlaceholder}
+                  disabled={sourceSelectOptions.length === 0}
+                  onValueChange={(next) => handleChange(i, 0, next)}
+                />
+              ) : (
+                <Input
+                  className="h-8 px-2 font-mono text-xs"
+                  placeholder={sourcePlaceholder}
+                  value={k}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
+                />
+              )}
+            </div>
+            <div className="min-w-0 space-y-1 sm:space-y-0">
+              <span className="text-[11px] font-semibold text-muted-foreground sm:hidden">
+                {targetLabel}
+              </span>
+              {targetOptions ? (
+                <Select
+                  compact
+                  value={v.trim()}
+                  options={targetSelectOptions}
+                  placeholder={targetPlaceholder}
+                  disabled={targetSelectOptions.length === 0}
+                  onValueChange={(next) => handleChange(i, 1, next)}
+                />
+              ) : (
+                <Input
+                  className="h-8 px-2 font-mono text-xs"
+                  placeholder={targetPlaceholder}
+                  value={v}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
+                />
+              )}
+            </div>
             <button
               type="button"
               onClick={() => handleRemove(i)}
               aria-label={t('common.delete')}
-              className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+              className="flex size-8 items-center justify-center justify-self-end rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 sm:justify-self-auto"
             >
               <Trash2 className="size-3.5" />
             </button>
@@ -455,47 +508,102 @@ function ReasoningEffortModelsEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="overflow-x-auto pb-1">
-        <div className="w-fit min-w-[32rem]">
-          <div className="grid shrink-0 grid-cols-[minmax(0,13rem)_8rem_max-content_2rem] gap-2 px-1 text-xs font-semibold text-muted-foreground">
-            <span>{t('settings2.baseModel')}</span>
-            <span>{t('settings2.reasoningEffort')}</span>
-            <span>{t('settings2.generatedModel')}</span>
-            <span />
-          </div>
-          <div className="mt-2 max-h-[220px] space-y-1.5 overflow-y-auto pr-1">
-            {entries.map((entry, i) => (
-              <div key={i} className="grid grid-cols-[minmax(0,13rem)_8rem_max-content_2rem] items-center gap-2">
-                <Select
-                  compact
-                  value={entry.model.trim()}
-                  options={modelOptions}
-                  placeholder={t('settings2.selectBaseModel')}
-                  disabled={modelOptions.length === 0}
-                  onValueChange={(model) => handleChange(i, { model })}
-                />
+      {/* Mobile: stacked cards */}
+      <div className="max-h-[320px] space-y-2 overflow-y-auto pr-0.5 sm:hidden">
+        {entries.map((entry, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-border bg-background/70 p-3 space-y-2"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-muted-foreground">
+                {t('settings2.baseModel')}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleRemove(i)}
+                aria-label={t('common.delete')}
+                className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
+            <Select
+              compact
+              value={entry.model.trim()}
+              options={modelOptions}
+              placeholder={t('settings2.selectBaseModel')}
+              disabled={modelOptions.length === 0}
+              onValueChange={(model) => handleChange(i, { model })}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <div className="min-w-0 space-y-1">
+                <span className="text-[11px] font-semibold text-muted-foreground">
+                  {t('settings2.reasoningEffort')}
+                </span>
                 <Select
                   compact
                   value={normalizeReasoningEffortValue(entry.effort)}
                   options={REASONING_EFFORT_OPTIONS}
                   onValueChange={(effort) => handleChange(i, { effort })}
                 />
-                <div className="flex min-w-0">
-                  <Badge variant="secondary" className="max-w-full px-2 py-1 font-mono text-[11px]">
-                    <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
-                  </Badge>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleRemove(i)}
-                  aria-label={t('common.delete')}
-                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
               </div>
-            ))}
+              <div className="min-w-0 space-y-1">
+                <span className="text-[11px] font-semibold text-muted-foreground">
+                  {t('settings2.generatedModel')}
+                </span>
+                <Badge variant="secondary" className="max-w-full px-2 py-1.5 font-mono text-[11px]">
+                  <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
+                </Badge>
+              </div>
+            </div>
           </div>
+        ))}
+      </div>
+
+      {/* Desktop: compact grid */}
+      <div className="hidden min-h-0 flex-1 flex-col gap-2 sm:flex">
+        <div className="grid shrink-0 grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,1fr)_2rem] gap-2 px-1 text-xs font-semibold text-muted-foreground">
+          <span>{t('settings2.baseModel')}</span>
+          <span>{t('settings2.reasoningEffort')}</span>
+          <span>{t('settings2.generatedModel')}</span>
+          <span />
+        </div>
+        <div className="max-h-[220px] space-y-1.5 overflow-y-auto pr-1">
+          {entries.map((entry, i) => (
+            <div
+              key={i}
+              className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,1fr)_2rem] items-center gap-2"
+            >
+              <Select
+                compact
+                value={entry.model.trim()}
+                options={modelOptions}
+                placeholder={t('settings2.selectBaseModel')}
+                disabled={modelOptions.length === 0}
+                onValueChange={(model) => handleChange(i, { model })}
+              />
+              <Select
+                compact
+                value={normalizeReasoningEffortValue(entry.effort)}
+                options={REASONING_EFFORT_OPTIONS}
+                onValueChange={(effort) => handleChange(i, { effort })}
+              />
+              <div className="flex min-w-0">
+                <Badge variant="secondary" className="max-w-full px-2 py-1 font-mono text-[11px]">
+                  <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
+                </Badge>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleRemove(i)}
+                aria-label={t('common.delete')}
+                className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
+          ))}
         </div>
       </div>
       <Button type="button" variant="outline" size="sm" className="self-start" onClick={handleAdd}>
@@ -505,6 +613,11 @@ function ReasoningEffortModelsEditor({
   )
 }
 
+/** Shared form grids — explicit columns so col-span / alignment stay predictable. */
+const SETTINGS_FIELD_GRID = 'grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2'
+const SETTINGS_FIELD_GRID_3 = 'grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2 xl:grid-cols-3'
+const SETTINGS_SWITCH_GRID = 'grid grid-cols-1 gap-3 sm:grid-cols-2'
+
 function SettingsCard({
   title,
   description,
@@ -512,6 +625,9 @@ function SettingsCard({
   className,
   contentClassName,
   footer,
+  icon,
+  badge,
+  tone = 'default',
 }: {
   title: string
   description?: string
@@ -519,20 +635,74 @@ function SettingsCard({
   className?: string
   contentClassName?: string
   footer?: ReactNode
+  icon?: ReactNode
+  badge?: ReactNode
+  tone?: 'default' | 'danger'
 }) {
   return (
-    <Card className={cn('py-0', className)}>
-      <CardContent className={cn('p-5', contentClassName)}>
-        <div className="mb-4 shrink-0">
-          <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
-          {description ? (
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
+    <Card
+      className={cn(
+        'gap-0 py-0',
+        tone === 'danger' && 'border-destructive/25 bg-destructive/[0.02]',
+        className,
+      )}
+    >
+      <CardContent className={cn('p-4 sm:p-5', contentClassName)}>
+        <div className="mb-4 flex shrink-0 items-start gap-3">
+          {icon ? (
+            <div
+              className={cn(
+                'mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg ring-1 ring-inset sm:size-9 sm:rounded-xl',
+                tone === 'danger'
+                  ? 'bg-destructive/10 text-destructive ring-destructive/15'
+                  : 'bg-primary/10 text-primary ring-primary/15',
+              )}
+              aria-hidden="true"
+            >
+              <span className="[&_svg]:size-3.5 sm:[&_svg]:size-4">{icon}</span>
+            </div>
           ) : null}
+          <div className="min-w-0 flex-1 pt-0.5">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+              <h3 className="text-[15px] font-semibold leading-snug tracking-tight text-foreground sm:text-base">
+                {title}
+              </h3>
+              {badge}
+            </div>
+            {description ? (
+              <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{description}</p>
+            ) : null}
+          </div>
         </div>
         {children}
-        {footer ? <div className="mt-5 border-t border-border pt-4">{footer}</div> : null}
+        {footer ? <div className="mt-4 border-t border-border pt-4 sm:mt-5">{footer}</div> : null}
       </CardContent>
     </Card>
+  )
+}
+
+function SettingHelp({ text }: { text: string }) {
+  return (
+    <TooltipProvider delayDuration={200}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            className="inline-flex size-4 shrink-0 items-center justify-center rounded-full text-muted-foreground/80 transition-colors hover:bg-muted hover:text-foreground"
+            aria-label={text}
+          >
+            <CircleHelp className="size-3.5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          sideOffset={6}
+          className="max-w-[280px] bg-popover px-3 py-2 text-left text-xs leading-relaxed text-popover-foreground shadow-md"
+        >
+          {text}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   )
 }
 
@@ -542,20 +712,146 @@ function SettingField({
   warning,
   children,
   className,
+  layout = 'stack',
+  suffix,
 }: {
   label: string
   description?: string
   warning?: string
   children: ReactNode
   className?: string
+  layout?: 'stack' | 'switch'
+  suffix?: string
+}) {
+  const control = suffix ? (
+    <div className="relative min-w-0">
+      <div className="[&_[data-slot=input]]:pr-11 [&_[data-slot=select-trigger]]:pr-11 [&_input]:pr-11">
+        {children}
+      </div>
+      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium tabular-nums text-muted-foreground">
+        {suffix}
+      </span>
+    </div>
+  ) : (
+    children
+  )
+
+  if (layout === 'switch') {
+    return (
+      <div
+        className={cn(
+          'flex min-h-[48px] min-w-0 items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5',
+          className,
+        )}
+      >
+        <div className="min-w-0 flex-1 space-y-0.5">
+          <div className="flex items-center gap-1.5">
+            <label className="block text-[13px] font-medium leading-snug text-foreground sm:text-sm">
+              {label}
+            </label>
+            {description ? <SettingHelp text={description} /> : null}
+          </div>
+          {warning ? (
+            <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400 sm:text-xs">
+              {warning}
+            </p>
+          ) : null}
+        </div>
+        <div className="flex shrink-0 items-center self-center">{control}</div>
+      </div>
+    )
+  }
+
+  return (
+    <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
+      <div className="flex min-h-5 items-center gap-1.5">
+        <label className="block text-[13px] font-medium leading-none text-foreground sm:text-sm">
+          {label}
+        </label>
+        {description ? <SettingHelp text={description} /> : null}
+      </div>
+      <div className="min-w-0">{control}</div>
+      {warning ? (
+        <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400 sm:text-xs">
+          {warning}
+        </p>
+      ) : null}
+    </div>
+  )
+}
+
+function SettingsSkeleton() {
+  return (
+    <div className="space-y-6" aria-busy="true" aria-live="polite">
+      <div className="mx-auto h-14 w-full max-w-3xl animate-pulse rounded-full bg-muted" />
+      <div className="space-y-2">
+        <div className="h-8 w-40 animate-pulse rounded-lg bg-muted" />
+        <div className="h-4 w-72 max-w-full animate-pulse rounded-md bg-muted/70" />
+      </div>
+      <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className="h-[72px] animate-pulse rounded-lg border border-border bg-muted/40" />
+        ))}
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2">
+        {[0, 1].map((i) => (
+          <Card key={i} className="gap-0 py-0">
+            <CardContent className="space-y-3 p-5">
+              <div className="h-4 w-28 animate-pulse rounded bg-muted" />
+              <div className="grid grid-cols-2 gap-3">
+                <div className="h-9 w-full animate-pulse rounded-md bg-muted/70" />
+                <div className="h-9 w-full animate-pulse rounded-md bg-muted/60" />
+                <div className="h-9 w-full animate-pulse rounded-md bg-muted/50" />
+                <div className="h-9 w-full animate-pulse rounded-md bg-muted/40" />
+              </div>
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function ModelSummaryCard({
+  title,
+  description,
+  meta,
+  onOpen,
+  openLabel,
+}: {
+  title: string
+  description: string
+  meta: string
+  onOpen: () => void
+  openLabel: string
 }) {
   return (
-    <div className={cn('min-w-0 space-y-2', className)}>
-      <label className="block text-sm font-semibold leading-none text-foreground">{label}</label>
-      {children}
-      {description ? <p className="text-xs leading-relaxed text-muted-foreground">{description}</p> : null}
-      {warning ? <p className="text-xs leading-relaxed text-amber-600">{warning}</p> : null}
-    </div>
+    <button
+      type="button"
+      onClick={onOpen}
+      className="group flex w-full items-start gap-3 rounded-lg border border-border/80 bg-card p-3.5 text-left shadow-sm transition-all hover:border-primary/30 hover:bg-muted/20 hover:shadow-md sm:p-4"
+    >
+      <div className="mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary ring-1 ring-primary/15">
+        <Layers className="size-4" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0">
+            <div className="text-[13px] font-semibold leading-snug text-foreground sm:text-sm">{title}</div>
+            <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-muted-foreground">
+              {description}
+            </p>
+          </div>
+          <ChevronRight className="mt-0.5 size-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5 group-hover:text-foreground" />
+        </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+          <Badge variant="secondary" className="tabular-nums">
+            {meta}
+          </Badge>
+          <span className="text-[11px] font-semibold text-primary">{openLabel}</span>
+        </div>
+      </div>
+    </button>
   )
 }
 
@@ -567,10 +863,41 @@ function StatusTile({
   children: ReactNode
 }) {
   return (
-    <div data-slot="status-tile" className="flex min-h-[76px] flex-col justify-between gap-2 rounded-lg border border-border bg-muted/25 p-3">
-      <span className="text-[11px] font-bold uppercase text-muted-foreground">{label}</span>
-      <div className="text-sm font-semibold text-foreground">{children}</div>
+    <div
+      data-slot="status-tile"
+      className="flex min-h-[72px] flex-col justify-between gap-2.5 rounded-lg border border-border/80 bg-muted/20 px-3.5 py-3"
+    >
+      <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+        {label}
+      </span>
+      <div className="flex min-h-6 items-center text-sm font-semibold tabular-nums text-foreground">
+        {children}
+      </div>
     </div>
+  )
+}
+
+function SettingsSection({
+  id,
+  title,
+  description,
+  children,
+}: {
+  id: string
+  title: string
+  description?: string
+  children: ReactNode
+}) {
+  return (
+    <section id={id} data-settings-section={id} className="scroll-mt-24 space-y-3.5 sm:scroll-mt-28">
+      <div className="px-0.5">
+        <h2 className="text-sm font-semibold tracking-tight text-foreground">{title}</h2>
+        {description ? (
+          <p className="mt-0.5 max-w-2xl text-xs leading-relaxed text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+      <div className="space-y-4">{children}</div>
+    </section>
   )
 }
 
@@ -729,10 +1056,6 @@ export default function Settings() {
   const { t } = useTranslation()
   const { applyBranding } = useBranding()
   const defaultClaudeModelMappingEntries = useMemo(() => getDefaultModelMappingEntries(), [])
-  const booleanOptions = [
-    { label: t('common.disabled'), value: 'false' },
-    { label: t('common.enabled'), value: 'true' },
-  ]
   const schedulerModeOptions = [
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
     { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
@@ -822,6 +1145,8 @@ export default function Settings() {
     codex_ws_hide_upstream_errors: true,
     codex_ws_silent_retry_enabled: true,
     codex_ws_silent_max_retries: 2,
+    codex_continue_thinking_enabled: false,
+    codex_continue_max_rounds: 8,
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
     max_retries: 2,
@@ -1019,10 +1344,10 @@ export default function Settings() {
     }
   }, [commitSettingsForm, finishAutoSaveRequest, showToast, t])
 
-  const autoSaveBooleanField = useCallback((field: keyof SystemSettings, value: string, extraPatch: Partial<SystemSettings> = {}) => {
+  const autoSaveBooleanField = useCallback((field: keyof SystemSettings, value: boolean, extraPatch: Partial<SystemSettings> = {}) => {
     void autoSaveSettingsPatch({
       ...extraPatch,
-      [field]: value === 'true',
+      [field]: value,
     } as Partial<SystemSettings>)
   }, [autoSaveSettingsPatch])
 
@@ -1272,7 +1597,7 @@ export default function Settings() {
       category: id.includes('image') ? 'image' : 'codex',
       source: 'builtin',
       pro_only: id === 'gpt-5.3-codex-spark',
-      api_key_auth_available: id !== 'gpt-5.5',
+      api_key_auth_available: !['gpt-5.5', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'].includes(id),
     }))
   }, [modelItems, modelList])
   const codexModelOptions = visibleModelItems
@@ -1294,6 +1619,19 @@ export default function Settings() {
   const enabledModelCount = visibleModelItems.filter((model) => model.enabled).length
   const modelsLastSyncedLabel = modelsLastSyncedAt ? formatBeijingTime(modelsLastSyncedAt) : t('settings.modelsNeverSynced')
   const modelsSourceLabel = modelsSourceURL || 'https://developers.openai.com/codex/models'
+  const anthropicMappingCount = useMemo(
+    () => parseModelMappingEntries(settingsForm.model_mapping, defaultClaudeModelMappingEntries).length,
+    [defaultClaudeModelMappingEntries, settingsForm.model_mapping],
+  )
+  const codexMappingCount = useMemo(
+    () => parseModelMappingEntries(settingsForm.codex_model_mapping).length,
+    [settingsForm.codex_model_mapping],
+  )
+  const reasoningEffortCount = useMemo(
+    () => parseReasoningEffortModelEntries(settingsForm.reasoning_effort_models).length,
+    [settingsForm.reasoning_effort_models],
+  )
+  const showInitialSkeleton = loading && !health
   const codexUserAgentConfig = useMemo(
     () => parseCodexUserAgentConfig(settingsForm.codex_user_agent_config),
     [settingsForm.codex_user_agent_config],
@@ -1321,27 +1659,119 @@ export default function Settings() {
     </Button>
   )
 
+  const settingsSections = useMemo(
+    () =>
+      [
+        { id: 'settings-overview', label: t('settings.nav.overview'), icon: <Activity className="size-4" /> },
+        { id: 'settings-traffic', label: t('settings.nav.traffic'), icon: <Gauge className="size-4" /> },
+        { id: 'settings-runtime', label: t('settings.nav.runtime'), icon: <Wrench className="size-4" /> },
+        { id: 'settings-storage', label: t('settings.nav.storage'), icon: <ImageIcon className="size-4" /> },
+        { id: 'settings-appearance', label: t('settings.nav.appearance'), icon: <Palette className="size-4" /> },
+        { id: 'settings-security', label: t('settings.nav.security'), icon: <Shield className="size-4" /> },
+        { id: 'settings-models', label: t('settings.nav.models'), icon: <Layers className="size-4" /> },
+        { id: 'settings-reference', label: t('settings.nav.reference'), icon: <Link2 className="size-4" /> },
+      ] as const,
+    [t],
+  )
+  const [activeSection, setActiveSection] = useState<string>('settings-overview')
+  const [endpointsOpen, setEndpointsOpen] = useState(false)
+  const [modelPanel, setModelPanel] = useState<ModelPanelKey | null>(null)
+  const scrollToSection = useCallback((id: string) => {
+    const el = document.getElementById(id)
+    if (!el) return
+    setActiveSection(id)
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+  }, [])
+
+  if (showInitialSkeleton) {
+    return <SettingsSkeleton />
+  }
+
   return (
     <StateShell
       variant="page"
-      loading={loading}
-      error={error}
+      loading={false}
+      error={error && !health ? error : null}
       onRetry={() => void reload()}
       loadingTitle={t('settings.loadingTitle')}
       loadingDescription={t('settings.loadingDesc')}
       errorTitle={t('settings.errorTitle')}
     >
       <>
+        {/* 占位，避免 fixed 导航挡住首屏 */}
+        <div aria-hidden="true" className="mb-5 h-14 sm:h-[4.25rem]" />
+
+        {/* 顶部分段导航 + 自动保存状态：视口顶部居中固定 */}
+        <div
+          className={cn(
+            'fixed left-1/2 top-[max(0.625rem,env(safe-area-inset-top,0px))] z-50 flex -translate-x-1/2 items-center gap-2',
+            'max-w-[min(72rem,calc(100vw-1.25rem))]',
+          )}
+        >
+          <nav
+            aria-label={t('settings.navLabel')}
+            className={cn(
+              'flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded-full border border-border/80 bg-card/95 p-1.5 shadow-[0_10px_40px_hsl(222_30%_12%/0.12)] backdrop-blur-xl',
+              'ring-1 ring-black/[0.03] dark:ring-white/[0.06]',
+              '[-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+            )}
+          >
+            {settingsSections.map((section) => {
+              const active = activeSection === section.id
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => scrollToSection(section.id)}
+                  className={cn(
+                    'inline-flex shrink-0 items-center gap-2 rounded-full px-3.5 py-2 text-[13px] font-semibold tracking-tight transition-all duration-200 sm:px-4 sm:py-2.5 sm:text-sm',
+                    active
+                      ? 'bg-primary text-primary-foreground shadow-sm'
+                      : 'text-muted-foreground hover:bg-muted/70 hover:text-foreground',
+                  )}
+                >
+                  <span
+                    className={cn(
+                      'shrink-0 [&_svg]:size-4 sm:[&_svg]:size-[1.05rem]',
+                      active ? 'opacity-100' : 'opacity-75',
+                    )}
+                  >
+                    {section.icon}
+                  </span>
+                  <span className="whitespace-nowrap">{section.label}</span>
+                </button>
+              )
+            })}
+          </nav>
+          {autoSaveStatusMeta ? (
+            <div className="hidden shrink-0 items-center gap-1.5 rounded-full border border-border/80 bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur-xl sm:inline-flex">
+              {autoSaveStatus === 'saving' ? (
+                <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+              ) : null}
+              {autoSaveStatusMeta}
+            </div>
+          ) : null}
+        </div>
+
         <PageHeader
           title={t('settings.title')}
           description={t('settings.description')}
           actionMeta={autoSaveStatusMeta}
-          actions={renderSaveButton('max-sm:w-full')}
+          actions={renderSaveButton('shrink-0')}
         />
 
-        <div className="space-y-4">
-          <SettingsCard title={t('settings.systemStatus')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+        <div className="space-y-6 pb-20 sm:pb-0">
+          <SettingsSection id="settings-overview" title={t('settings.nav.overview')} description={t('settings.nav.overviewDesc')}>
+          <SettingsCard
+            title={t('settings.systemStatus')}
+            icon={<Activity className="size-4" />}
+            badge={
+              <Badge variant="secondary" className="text-[11px]">
+                {t('settings.nav.live')}
+              </Badge>
+            }
+          >
+            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4">
               <StatusTile label={t('settings.service')}>
                 <Badge variant={health?.status === 'ok' ? 'default' : 'destructive'} className="gap-1.5">
                   <span className={`size-1.5 rounded-full ${health?.status === 'ok' ? 'bg-emerald-500' : 'bg-red-400'}`} />
@@ -1365,11 +1795,13 @@ export default function Settings() {
               </StatusTile>
             </div>
           </SettingsCard>
+          </SettingsSection>
 
-          <div className="grid gap-4 xl:grid-cols-3">
-            <SettingsCard title={t('settings.trafficProtection')}>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
-                <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')}>
+          <SettingsSection id="settings-traffic" title={t('settings.nav.traffic')} description={t('settings.nav.trafficDesc')}>
+          <div className="grid gap-4 lg:grid-cols-2">
+            <SettingsCard title={t('settings.trafficProtection')} icon={<Gauge className="size-4" />}>
+              <div className={SETTINGS_FIELD_GRID}>
+                <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
                   <Input
                     type="number"
                     min={1}
@@ -1378,7 +1810,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_concurrency: parseInt(e.target.value) || 1 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.globalRpm')} description={t('settings.globalRpmRange')}>
+                <SettingField label={t('settings.globalRpm')} description={t('settings.globalRpmRange')} suffix={t('settings.unit.rpm')}>
                   <Input
                     type="number"
                     min={0}
@@ -1386,7 +1818,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, global_rpm: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.maxRetries')} description={t('settings.maxRetriesRange')}>
+                <SettingField label={t('settings.maxRetries')} description={t('settings.maxRetriesRange')} suffix={t('settings.unit.times')}>
                   <Input
                     type="number"
                     min={0}
@@ -1395,7 +1827,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')}>
+                <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')} suffix={t('settings.unit.times')}>
                   <Input
                     type="number"
                     min={0}
@@ -1404,7 +1836,7 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
                   />
                 </SettingField>
-                <SettingField label={t('settings.retryIntervalMs')} description={t('settings.retryIntervalMsDesc')}>
+                <SettingField label={t('settings.retryIntervalMs')} description={t('settings.retryIntervalMsDesc')} suffix="ms">
                   <Input
                     type="number"
                     min={0}
@@ -1424,87 +1856,78 @@ export default function Settings() {
               </div>
             </SettingsCard>
 
-            <SettingsCard title={t('settings.probeScheduling')}>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
-                <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')}>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={1440}
-                    value={settingsForm.background_refresh_interval_minutes}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: parseInt(e.target.value) || 1 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')}>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={10080}
-                    value={settingsForm.usage_probe_max_age_minutes}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.usageProbeConcurrency')} description={t('settings.usageProbeConcurrencyDesc')}>
-                  <Input
-                    type="number"
-                    min={1}
-                    max={128}
-                    value={settingsForm.usage_probe_concurrency}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: parseInt(e.target.value) || 1 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')}>
-                  <Select
-                    value={settingsForm.usage_probe_responses_fallback_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('usage_probe_responses_fallback_enabled', value)}
-                    options={booleanOptions}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
-                  <Input
-                    type={lazyModeActive ? 'text' : 'number'}
-                    min={1}
-                    max={10080}
-                    value={lazyModeActive ? '∞' : settingsForm.recovery_probe_interval_minutes}
-                    disabled={lazyModeActive}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')}>
-                  <Select
-                    value={settingsForm.lazy_mode ? 'true' : 'false'}
-                    onValueChange={(value) => {
-                      const enabled = value === 'true'
-                      void autoSaveSettingsPatch({
-                        lazy_mode: enabled,
-                        auto_clean_full_usage: enabled ? false : settingsFormRef.current.auto_clean_full_usage,
-                      })
-                    }}
-                    options={booleanOptions}
-                  />
-                </SettingField>
+            <SettingsCard title={t('settings.probeScheduling')} icon={<RefreshCw className="size-4" />}>
+              <div className="space-y-4">
+                <div className={SETTINGS_FIELD_GRID}>
+                  <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')} suffix={t('settings.unit.min')}>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={1440}
+                      value={settingsForm.background_refresh_interval_minutes}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: parseInt(e.target.value) || 1 }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')} suffix={t('settings.unit.min')}>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={10080}
+                      value={settingsForm.usage_probe_max_age_minutes}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.usageProbeConcurrency')} description={t('settings.usageProbeConcurrencyDesc')} suffix={t('settings.unit.concurrency')}>
+                    <Input
+                      type="number"
+                      min={1}
+                      max={128}
+                      value={settingsForm.usage_probe_concurrency}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: parseInt(e.target.value) || 1 }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
+                    <Input
+                      type={lazyModeActive ? 'text' : 'number'}
+                      min={1}
+                      max={10080}
+                      value={lazyModeActive ? '∞' : settingsForm.recovery_probe_interval_minutes}
+                      disabled={lazyModeActive}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
+                    />
+                  </SettingField>
+                </div>
+                <div className={SETTINGS_SWITCH_GRID}>
+                  <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')} layout="switch">
+                    <Switch
+                      checked={settingsForm.usage_probe_responses_fallback_enabled}
+                      onCheckedChange={(checked) => autoSaveBooleanField('usage_probe_responses_fallback_enabled', checked)}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.lazyMode')} description={t('settings.lazyModeDesc')} layout="switch">
+                    <Switch
+                      checked={settingsForm.lazy_mode}
+                      onCheckedChange={(enabled) => {
+                        void autoSaveSettingsPatch({
+                          lazy_mode: enabled,
+                          auto_clean_full_usage: enabled ? false : settingsFormRef.current.auto_clean_full_usage,
+                        })
+                      }}
+                    />
+                  </SettingField>
+                </div>
               </div>
             </SettingsCard>
+          </div>
 
-            <SettingsCard title={t('settings.schedulingStrategy')}>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4">
+          <SettingsCard title={t('settings.schedulingStrategy')} icon={<Layers className="size-4" />}>
+            <div className="space-y-4">
+              <div className={SETTINGS_FIELD_GRID_3}>
                 <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
                   <Select
                     value={settingsForm.test_model}
                     onValueChange={(value) => autoSaveStringField('test_model', value)}
                     options={textModelOptions}
-                  />
-                </SettingField>
-                <SettingField className="md:col-span-2" label={t('settings.testContent')} description={t('settings.testContentDesc')}>
-                  <textarea
-                    rows={3}
-                    value={settingsForm.test_content}
-                    placeholder={t('settings.testContentPlaceholder')}
-                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm(f => ({ ...f, test_content: e.target.value }))}
-                    onBlur={(e) => autoSaveStringField('test_content', e.currentTarget.value)}
-                    className={cn(
-                      'flex min-h-[92px] w-full resize-y rounded-lg border border-input bg-background px-3 py-2 text-sm text-foreground shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50',
-                    )}
                   />
                 </SettingField>
                 <SettingField label={t('settings.testConcurrency')} description={t('settings.testConcurrencyRange')}>
@@ -1514,13 +1937,6 @@ export default function Settings() {
                     max={200}
                     value={settingsForm.test_concurrency}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, test_concurrency: parseInt(e.target.value) || 1 }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')}>
-                  <Select
-                    value={settingsForm.fast_scheduler_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('fast_scheduler_enabled', value)}
-                    options={booleanOptions}
                   />
                 </SettingField>
                 <SettingField label={t('settings.schedulerMode')} description={t('settings.schedulerModeDesc')}>
@@ -1537,343 +1953,501 @@ export default function Settings() {
                     options={affinityModeOptions}
                   />
                 </SettingField>
+                <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.testContent')} description={t('settings.testContentDesc')}>
+                  <textarea
+                    rows={3}
+                    value={settingsForm.test_content}
+                    placeholder={t('settings.testContentPlaceholder')}
+                    onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setSettingsForm(f => ({ ...f, test_content: e.target.value }))}
+                    onBlur={(e) => autoSaveStringField('test_content', e.currentTarget.value)}
+                    className={cn(
+                      'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
+                    )}
+                  />
+                </SettingField>
               </div>
-            </SettingsCard>
-          </div>
-
-          <SettingsCard title={t('settings.globalAutoPauseTitle')} description={t('settings.globalAutoPauseDesc')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
-              <SettingField label={t('settings.globalAutoPause5h')} description={t('settings.globalAutoPauseHint')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={0.1}
-                  inputMode="decimal"
-                  placeholder={t('settings.globalAutoPausePlaceholder')}
-                  value={settingsForm.auto_pause_5h_threshold > 0 ? (settingsForm.auto_pause_5h_threshold * 100).toFixed(1).replace(/\.0$/, '') : ''}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const raw = e.target.value
-                    const ratio = raw === '' ? 0 : Math.max(0, Math.min(1, parseFloat(raw) / 100))
-                    setSettingsForm(f => ({ ...f, auto_pause_5h_threshold: isNaN(ratio) ? 0 : ratio }))
-                  }}
-                  onBlur={() => {
-                    void autoSaveSettingsPatch({ auto_pause_5h_threshold: settingsForm.auto_pause_5h_threshold })
-                  }}
-                />
-              </SettingField>
-              <SettingField label={t('settings.globalAutoPause7d')} description={t('settings.globalAutoPauseHint')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={0.1}
-                  inputMode="decimal"
-                  placeholder={t('settings.globalAutoPausePlaceholder')}
-                  value={settingsForm.auto_pause_7d_threshold > 0 ? (settingsForm.auto_pause_7d_threshold * 100).toFixed(1).replace(/\.0$/, '') : ''}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const raw = e.target.value
-                    const ratio = raw === '' ? 0 : Math.max(0, Math.min(1, parseFloat(raw) / 100))
-                    setSettingsForm(f => ({ ...f, auto_pause_7d_threshold: isNaN(ratio) ? 0 : ratio }))
-                  }}
-                  onBlur={() => {
-                    void autoSaveSettingsPatch({ auto_pause_7d_threshold: settingsForm.auto_pause_7d_threshold })
-                  }}
-                />
-              </SettingField>
-              <SettingField label={t('settings.autoPause5hGuardBand')} description={t('settings.autoPause5hGuardBandHint')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={100}
-                  step={0.1}
-                  inputMode="decimal"
-                  placeholder={t('settings.autoPause5hGuardBandPlaceholder')}
-                  value={settingsForm.auto_pause_5h_guard_band_percent > 0 ? settingsForm.auto_pause_5h_guard_band_percent : ''}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const raw = e.target.value
-                    if (raw === '') {
-                      setSettingsForm(f => ({ ...f, auto_pause_5h_guard_band_percent: 0 }))
-                      return
-                    }
-                    const parsed = parseFloat(raw)
-                    if (Number.isNaN(parsed)) return
-                    const value = Math.max(0, Math.min(100, parsed))
-                    setSettingsForm(f => ({ ...f, auto_pause_5h_guard_band_percent: value }))
-                  }}
-                  onBlur={() => {
-                    void autoSaveSettingsPatch({ auto_pause_5h_guard_band_percent: settingsForm.auto_pause_5h_guard_band_percent })
-                  }}
-                />
-              </SettingField>
-              <SettingField label={t('settings.autoPause5hGuardConcurrency')} description={t('settings.autoPause5hGuardConcurrencyHint')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={1000}
-                  step={1}
-                  inputMode="numeric"
-                  value={settingsForm.auto_pause_5h_guard_concurrency ?? 1}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const raw = e.target.value
-                    if (raw === '') {
-                      setSettingsForm(f => ({ ...f, auto_pause_5h_guard_concurrency: 0 }))
-                      return
-                    }
-                    const parsed = Number.parseInt(raw, 10)
-                    if (Number.isNaN(parsed)) return
-                    const value = Math.max(0, Math.min(1000, parsed))
-                    setSettingsForm(f => ({ ...f, auto_pause_5h_guard_concurrency: value }))
-                  }}
-                  onBlur={() => {
-                    void autoSaveSettingsPatch({ auto_pause_5h_guard_concurrency: settingsForm.auto_pause_5h_guard_concurrency })
-                  }}
-                />
-              </SettingField>
-              <SettingField label={t('settings.smartPacingEnabled')} description={t('settings.smartPacingEnabledHint')}>
-                <Select
-                  value={settingsForm.smart_pacing_enabled ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('smart_pacing_enabled', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.smartPacingWindows')} description={t('settings.smartPacingWindowsHint')}>
-                <Select
-                  value={settingsForm.smart_pacing_windows || '5h,7d'}
-                  onValueChange={(value) => {
-                    setSettingsForm(f => ({ ...f, smart_pacing_windows: value }))
-                    void autoSaveSettingsPatch({ smart_pacing_windows: value })
-                  }}
-                  options={[
-                    { value: '5h,7d', label: t('settings.smartPacingWindowsBoth') },
-                    { value: '5h', label: t('settings.smartPacingWindows5h') },
-                    { value: '7d', label: t('settings.smartPacingWindows7d') },
-                  ]}
-                />
-              </SettingField>
-              <SettingField label={t('settings.smartPacingMinConcurrency')} description={t('settings.smartPacingMinConcurrencyHint')}>
-                <Input
-                  type="number"
-                  min={1}
-                  max={1000}
-                  step={1}
-                  inputMode="numeric"
-                  value={settingsForm.smart_pacing_min_concurrency ?? 1}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                    const raw = e.target.value
-                    if (raw === '') {
-                      setSettingsForm(f => ({ ...f, smart_pacing_min_concurrency: 1 }))
-                      return
-                    }
-                    const parsed = Number.parseInt(raw, 10)
-                    if (Number.isNaN(parsed)) return
-                    const value = Math.max(1, Math.min(1000, parsed))
-                    setSettingsForm(f => ({ ...f, smart_pacing_min_concurrency: value }))
-                  }}
-                  onBlur={() => {
-                    void autoSaveSettingsPatch({ smart_pacing_min_concurrency: settingsForm.smart_pacing_min_concurrency })
-                  }}
-                />
-              </SettingField>
-            </div>
-          </SettingsCard>
-
-          <SettingsCard title={t('settings.codexWebsocket')} description={t('settings.codexWebsocketDesc')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
-              <SettingField label={t('settings.codexForceWebsocket')} description={t('settings.codexForceWebsocketDesc')}>
-                <Select
-                  value={settingsForm.codex_force_websocket ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_force_websocket', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSKeepaliveEnabled')} description={t('settings.codexWSKeepaliveEnabledDesc')}>
-                <Select
-                  value={settingsForm.codex_ws_keepalive_enabled ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_ws_keepalive_enabled', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSKeepaliveInterval')} description={t('settings.codexWSKeepaliveIntervalDesc')}>
-                <Input
-                  type="number"
-                  min={10}
-                  max={600}
-                  value={settingsForm.codex_ws_keepalive_interval_sec}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: parseInt(e.target.value) || 60 }))}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSHideUpstreamErrors')} description={t('settings.codexWSHideUpstreamErrorsDesc')}>
-                <Select
-                  value={settingsForm.codex_ws_hide_upstream_errors ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_ws_hide_upstream_errors', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSSilentRetryEnabled')} description={t('settings.codexWSSilentRetryEnabledDesc')}>
-                <Select
-                  value={settingsForm.codex_ws_silent_retry_enabled ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('codex_ws_silent_retry_enabled', value)}
-                  options={booleanOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexWSSilentMaxRetries')} description={t('settings.codexWSSilentMaxRetriesDesc')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={10}
-                  value={settingsForm.codex_ws_silent_max_retries}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: parseInt(e.target.value) || 0 }))}
-                />
-              </SettingField>
-            </div>
-          </SettingsCard>
-
-          <SettingsCard title={t('settings.runtimeOptimization')} description={t('settings.runtimeOptimizationDesc')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(230px,1fr))] gap-4">
-              <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
-                <Select
-                  value={settingsForm.client_compat_mode}
-                  onValueChange={(value) => autoSaveStringField('client_compat_mode', value)}
-                  options={clientCompatOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
-                <Input
-                  value={settingsForm.codex_min_cli_version}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUserAgentRaw')} description={t('settings.codexUserAgentRawDesc')}>
-                <Input
-                  className="font-mono text-xs"
-                  value={codexUserAgentConfig.raw_user_agent ?? ''}
-                  placeholder="codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)"
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ raw_user_agent: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUAClientName')} description={t('settings.codexUAClientNameDesc')}>
-                <Input
-                  value={codexUserAgentConfig.client_name ?? ''}
-                  placeholder={DEFAULT_CODEX_UA_CONFIG.client_name}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ client_name: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUAClientVersion')} description={t('settings.codexUAClientVersionDesc')}>
-                <Input
-                  value={codexUserAgentConfig.client_version ?? ''}
-                  placeholder={DEFAULT_CODEX_UA_CONFIG.client_version}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ client_version: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUAOSName')} description={t('settings.codexUAOSNameDesc')}>
-                <Input
-                  value={codexUserAgentConfig.os_name ?? ''}
-                  placeholder={DEFAULT_CODEX_UA_CONFIG.os_name}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ os_name: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUAOSVersion')} description={t('settings.codexUAOSVersionDesc')}>
-                <Input
-                  value={codexUserAgentConfig.os_version ?? ''}
-                  placeholder={DEFAULT_CODEX_UA_CONFIG.os_version}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ os_version: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUAArch')} description={t('settings.codexUAArchDesc')}>
-                <Input
-                  value={codexUserAgentConfig.arch ?? ''}
-                  placeholder={DEFAULT_CODEX_UA_CONFIG.arch}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ arch: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <SettingField label={t('settings.codexUATerminal')} description={t('settings.codexUATerminalDesc')}>
-                <Input
-                  value={codexUserAgentConfig.terminal ?? ''}
-                  placeholder={DEFAULT_CODEX_UA_CONFIG.terminal}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ terminal: e.target.value })}
-                  onBlur={saveCodexUserAgentConfig}
-                />
-              </SettingField>
-              <div className="min-w-0 rounded-md border border-border/70 bg-muted/30 p-3 text-xs text-muted-foreground sm:col-span-2 lg:col-span-3">
-                <div className="mb-1 font-medium text-foreground">{t('settings.codexUAPreview')}</div>
-                <div className="break-all font-mono text-[11px] leading-5 text-foreground">{codexUserAgentPreview}</div>
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.fastSchedulerEnabled')} description={t('settings.fastSchedulerEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.fast_scheduler_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('fast_scheduler_enabled', checked)}
+                  />
+                </SettingField>
               </div>
-              <SettingField label={t('settings.usageLogMode')} description={t('settings.usageLogModeDesc')}>
-                <Select
-                  value={settingsForm.usage_log_mode}
-                  onValueChange={(value) => autoSaveStringField('usage_log_mode', value)}
-                  options={usageLogModeOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.usageLogBatchSize')} description={t('settings.usageLogBatchSizeDesc')}>
-                <Input
-                  type="number"
-                  min={1}
-                  max={10000}
-                  value={settingsForm.usage_log_batch_size}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_batch_size: parseInt(e.target.value) || 200 }))}
-                />
-              </SettingField>
-              <SettingField label={t('settings.usageLogFlushInterval')} description={t('settings.usageLogFlushIntervalDesc')}>
-                <Input
-                  type="number"
-                  min={1}
-                  max={300}
-                  value={settingsForm.usage_log_flush_interval_seconds}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_flush_interval_seconds: parseInt(e.target.value) || 5 }))}
-                />
-              </SettingField>
-              <SettingField label={t('settings.billingTierPolicy')} description={t('settings.billingTierPolicyDesc')}>
-                <Select
-                  value={settingsForm.billing_tier_policy}
-                  onValueChange={(value) => autoSaveStringField('billing_tier_policy', value)}
-                  options={billingTierPolicyOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.streamFlushPolicy')} description={t('settings.streamFlushPolicyDesc')}>
-                <Select
-                  value={settingsForm.stream_flush_policy}
-                  onValueChange={(value) => autoSaveStringField('stream_flush_policy', value)}
-                  options={streamFlushPolicyOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.streamFlushInterval')} description={t('settings.streamFlushIntervalDesc')}>
-                <Input
-                  type="number"
-                  min={1}
-                  max={1000}
-                  value={settingsForm.stream_flush_interval_ms}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: parseInt(e.target.value) || 20 }))}
-                />
-              </SettingField>
-              <SettingField label={t('settings.firstTokenMode')} description={t('settings.firstTokenModeDesc')}>
-                <Select
-                  value={settingsForm.first_token_mode}
-                  onValueChange={(value) => autoSaveStringField('first_token_mode', value)}
-                  options={firstTokenModeOptions}
-                />
-              </SettingField>
-              <SettingField label={t('settings.firstTokenTimeout')} description={t('settings.firstTokenTimeoutDesc')}>
-                <Input
-                  type="number"
-                  min={0}
-                  max={600}
-                  value={settingsForm.first_token_timeout_seconds}
-                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: parseInt(e.target.value) || 0 }))}
-                />
-              </SettingField>
             </div>
           </SettingsCard>
 
-          <SettingsCard title={t('settings.imageStorage')} description={t('settings.imageStorageDesc')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
+          <SettingsCard title={t('settings.globalAutoPauseTitle')} description={t('settings.globalAutoPauseDesc')} icon={<Activity className="size-4" />}>
+            <div className="space-y-4">
+              <div className={SETTINGS_FIELD_GRID_3}>
+                <SettingField label={t('settings.globalAutoPause5h')} description={t('settings.globalAutoPauseHint')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    inputMode="decimal"
+                    placeholder={t('settings.globalAutoPausePlaceholder')}
+                    value={settingsForm.auto_pause_5h_threshold > 0 ? (settingsForm.auto_pause_5h_threshold * 100).toFixed(1).replace(/\.0$/, '') : ''}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const raw = e.target.value
+                      const ratio = raw === '' ? 0 : Math.max(0, Math.min(1, parseFloat(raw) / 100))
+                      setSettingsForm(f => ({ ...f, auto_pause_5h_threshold: isNaN(ratio) ? 0 : ratio }))
+                    }}
+                    onBlur={() => {
+                      void autoSaveSettingsPatch({ auto_pause_5h_threshold: settingsForm.auto_pause_5h_threshold })
+                    }}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.globalAutoPause7d')} description={t('settings.globalAutoPauseHint')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    inputMode="decimal"
+                    placeholder={t('settings.globalAutoPausePlaceholder')}
+                    value={settingsForm.auto_pause_7d_threshold > 0 ? (settingsForm.auto_pause_7d_threshold * 100).toFixed(1).replace(/\.0$/, '') : ''}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const raw = e.target.value
+                      const ratio = raw === '' ? 0 : Math.max(0, Math.min(1, parseFloat(raw) / 100))
+                      setSettingsForm(f => ({ ...f, auto_pause_7d_threshold: isNaN(ratio) ? 0 : ratio }))
+                    }}
+                    onBlur={() => {
+                      void autoSaveSettingsPatch({ auto_pause_7d_threshold: settingsForm.auto_pause_7d_threshold })
+                    }}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.autoPause5hGuardBand')} description={t('settings.autoPause5hGuardBandHint')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={100}
+                    step={0.1}
+                    inputMode="decimal"
+                    placeholder={t('settings.autoPause5hGuardBandPlaceholder')}
+                    value={settingsForm.auto_pause_5h_guard_band_percent > 0 ? settingsForm.auto_pause_5h_guard_band_percent : ''}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const raw = e.target.value
+                      if (raw === '') {
+                        setSettingsForm(f => ({ ...f, auto_pause_5h_guard_band_percent: 0 }))
+                        return
+                      }
+                      const parsed = parseFloat(raw)
+                      if (Number.isNaN(parsed)) return
+                      const value = Math.max(0, Math.min(100, parsed))
+                      setSettingsForm(f => ({ ...f, auto_pause_5h_guard_band_percent: value }))
+                    }}
+                    onBlur={() => {
+                      void autoSaveSettingsPatch({ auto_pause_5h_guard_band_percent: settingsForm.auto_pause_5h_guard_band_percent })
+                    }}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.autoPause5hGuardConcurrency')} description={t('settings.autoPause5hGuardConcurrencyHint')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1000}
+                    step={1}
+                    inputMode="numeric"
+                    value={settingsForm.auto_pause_5h_guard_concurrency ?? 1}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const raw = e.target.value
+                      if (raw === '') {
+                        setSettingsForm(f => ({ ...f, auto_pause_5h_guard_concurrency: 0 }))
+                        return
+                      }
+                      const parsed = Number.parseInt(raw, 10)
+                      if (Number.isNaN(parsed)) return
+                      const value = Math.max(0, Math.min(1000, parsed))
+                      setSettingsForm(f => ({ ...f, auto_pause_5h_guard_concurrency: value }))
+                    }}
+                    onBlur={() => {
+                      void autoSaveSettingsPatch({ auto_pause_5h_guard_concurrency: settingsForm.auto_pause_5h_guard_concurrency })
+                    }}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.smartPacingWindows')} description={t('settings.smartPacingWindowsHint')}>
+                  <Select
+                    value={settingsForm.smart_pacing_windows || '5h,7d'}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, smart_pacing_windows: value }))
+                      void autoSaveSettingsPatch({ smart_pacing_windows: value })
+                    }}
+                    options={[
+                      { value: '5h,7d', label: t('settings.smartPacingWindowsBoth') },
+                      { value: '5h', label: t('settings.smartPacingWindows5h') },
+                      { value: '7d', label: t('settings.smartPacingWindows7d') },
+                    ]}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.smartPacingMinConcurrency')} description={t('settings.smartPacingMinConcurrencyHint')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    step={1}
+                    inputMode="numeric"
+                    value={settingsForm.smart_pacing_min_concurrency ?? 1}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const raw = e.target.value
+                      if (raw === '') {
+                        setSettingsForm(f => ({ ...f, smart_pacing_min_concurrency: 1 }))
+                        return
+                      }
+                      const parsed = Number.parseInt(raw, 10)
+                      if (Number.isNaN(parsed)) return
+                      const value = Math.max(1, Math.min(1000, parsed))
+                      setSettingsForm(f => ({ ...f, smart_pacing_min_concurrency: value }))
+                    }}
+                    onBlur={() => {
+                      void autoSaveSettingsPatch({ smart_pacing_min_concurrency: settingsForm.smart_pacing_min_concurrency })
+                    }}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.smartPacingEnabled')} description={t('settings.smartPacingEnabledHint')} layout="switch">
+                  <Switch
+                    checked={settingsForm.smart_pacing_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('smart_pacing_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          </SettingsSection>
+
+          <SettingsSection id="settings-runtime" title={t('settings.nav.runtime')} description={t('settings.nav.runtimeDesc')}>
+          <SettingsCard title={t('settings.codexWebsocket')} description={t('settings.codexWebsocketDesc')} icon={<Wifi className="size-4" />}>
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
+                <SettingField label={t('settings.codexForceWebsocket')} description={t('settings.codexForceWebsocketDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_force_websocket}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_force_websocket', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexWSKeepaliveEnabled')} description={t('settings.codexWSKeepaliveEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_ws_keepalive_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_keepalive_enabled', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexWSHideUpstreamErrors')} description={t('settings.codexWSHideUpstreamErrorsDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_ws_hide_upstream_errors}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_hide_upstream_errors', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexWSSilentRetryEnabled')} description={t('settings.codexWSSilentRetryEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_ws_silent_retry_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_silent_retry_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+
+              <div className={cn(SETTINGS_FIELD_GRID, 'border-t border-border/80 pt-4')}>
+                <SettingField
+                  label={t('settings.codexWSKeepaliveInterval')}
+                  description={t('settings.codexWSKeepaliveIntervalDesc')}
+                  suffix={t('settings.unit.sec')}
+                  className={cn(!settingsForm.codex_ws_keepalive_enabled && 'opacity-60')}
+                >
+                  <Input
+                    type="number"
+                    min={10}
+                    max={600}
+                    disabled={!settingsForm.codex_ws_keepalive_enabled}
+                    value={settingsForm.codex_ws_keepalive_interval_sec}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: parseInt(e.target.value) || 60 }))}
+                    onBlur={() => {
+                      if (!settingsForm.codex_ws_keepalive_enabled) return
+                      void autoSaveSettingsPatch({
+                        codex_ws_keepalive_interval_sec: settingsForm.codex_ws_keepalive_interval_sec,
+                      })
+                    }}
+                  />
+                </SettingField>
+                <SettingField
+                  label={t('settings.codexWSSilentMaxRetries')}
+                  description={t('settings.codexWSSilentMaxRetriesDesc')}
+                  suffix={t('settings.unit.times')}
+                  className={cn(!settingsForm.codex_ws_silent_retry_enabled && 'opacity-60')}
+                >
+                  <Input
+                    type="number"
+                    min={0}
+                    max={10}
+                    disabled={!settingsForm.codex_ws_silent_retry_enabled}
+                    value={settingsForm.codex_ws_silent_max_retries}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: parseInt(e.target.value) || 0 }))}
+                    onBlur={() => {
+                      if (!settingsForm.codex_ws_silent_retry_enabled) return
+                      void autoSaveSettingsPatch({
+                        codex_ws_silent_max_retries: settingsForm.codex_ws_silent_max_retries,
+                      })
+                    }}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.codexContinueThinking')} description={t('settings.codexContinueThinkingDesc')} icon={<Brain className="size-4" />}>
+            <div className="space-y-4">
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.codexContinueThinking')} description={t('settings.codexContinueThinkingDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.codex_continue_thinking_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('codex_continue_thinking_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_FIELD_GRID}>
+                <SettingField
+                  label={t('settings.codexContinueMaxRounds')}
+                  description={t('settings.codexContinueMaxRoundsDesc')}
+                  className={cn(!settingsForm.codex_continue_thinking_enabled && 'opacity-60')}
+                >
+                  <Input
+                    type="number"
+                    min={1}
+                    max={32}
+                    disabled={!settingsForm.codex_continue_thinking_enabled}
+                    value={settingsForm.codex_continue_max_rounds}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_continue_max_rounds: parseInt(e.target.value) || 8 }))}
+                    onBlur={() => {
+                      if (!settingsForm.codex_continue_thinking_enabled) return
+                      void autoSaveSettingsPatch({
+                        codex_continue_max_rounds: settingsForm.codex_continue_max_rounds,
+                      })
+                    }}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.runtimeOptimization')} description={t('settings.runtimeOptimizationDesc')} icon={<Wrench className="size-4" />}>
+            <div className="space-y-4">
+              <div className={SETTINGS_FIELD_GRID_3}>
+                <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
+                  <Select
+                    value={settingsForm.client_compat_mode}
+                    onValueChange={(value) => autoSaveStringField('client_compat_mode', value)}
+                    options={clientCompatOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
+                  <Input
+                    value={settingsForm.codex_min_cli_version}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
+                  />
+                </SettingField>
+                <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.codexUserAgentRaw')} description={t('settings.codexUserAgentRawDesc')}>
+                  <Input
+                    className="font-mono text-xs"
+                    value={codexUserAgentConfig.raw_user_agent ?? ''}
+                    placeholder="codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)"
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ raw_user_agent: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexUAClientName')} description={t('settings.codexUAClientNameDesc')}>
+                  <Input
+                    value={codexUserAgentConfig.client_name ?? ''}
+                    placeholder={DEFAULT_CODEX_UA_CONFIG.client_name}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ client_name: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexUAClientVersion')} description={t('settings.codexUAClientVersionDesc')}>
+                  <Input
+                    value={codexUserAgentConfig.client_version ?? ''}
+                    placeholder={DEFAULT_CODEX_UA_CONFIG.client_version}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ client_version: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexUAOSName')} description={t('settings.codexUAOSNameDesc')}>
+                  <Input
+                    value={codexUserAgentConfig.os_name ?? ''}
+                    placeholder={DEFAULT_CODEX_UA_CONFIG.os_name}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ os_name: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexUAOSVersion')} description={t('settings.codexUAOSVersionDesc')}>
+                  <Input
+                    value={codexUserAgentConfig.os_version ?? ''}
+                    placeholder={DEFAULT_CODEX_UA_CONFIG.os_version}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ os_version: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexUAArch')} description={t('settings.codexUAArchDesc')}>
+                  <Input
+                    value={codexUserAgentConfig.arch ?? ''}
+                    placeholder={DEFAULT_CODEX_UA_CONFIG.arch}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ arch: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.codexUATerminal')} description={t('settings.codexUATerminalDesc')}>
+                  <Input
+                    value={codexUserAgentConfig.terminal ?? ''}
+                    placeholder={DEFAULT_CODEX_UA_CONFIG.terminal}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ terminal: e.target.value })}
+                    onBlur={saveCodexUserAgentConfig}
+                  />
+                </SettingField>
+                <div className="min-w-0 rounded-lg border border-border/70 bg-muted/25 p-3 sm:col-span-2 xl:col-span-3">
+                  <div className="mb-1.5 text-[13px] font-medium text-foreground">{t('settings.codexUAPreview')}</div>
+                  <div className="break-all font-mono text-[11px] leading-5 text-muted-foreground">{codexUserAgentPreview}</div>
+                </div>
+              </div>
+
+              <div className={cn(SETTINGS_FIELD_GRID_3, 'border-t border-border/80 pt-4')}>
+                <SettingField label={t('settings.usageLogMode')} description={t('settings.usageLogModeDesc')}>
+                  <Select
+                    value={settingsForm.usage_log_mode}
+                    onValueChange={(value) => autoSaveStringField('usage_log_mode', value)}
+                    options={usageLogModeOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.usageLogBatchSize')} description={t('settings.usageLogBatchSizeDesc')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={10000}
+                    value={settingsForm.usage_log_batch_size}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_batch_size: parseInt(e.target.value) || 200 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.usageLogFlushInterval')} description={t('settings.usageLogFlushIntervalDesc')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={300}
+                    value={settingsForm.usage_log_flush_interval_seconds}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_flush_interval_seconds: parseInt(e.target.value) || 5 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.billingTierPolicy')} description={t('settings.billingTierPolicyDesc')}>
+                  <Select
+                    value={settingsForm.billing_tier_policy}
+                    onValueChange={(value) => autoSaveStringField('billing_tier_policy', value)}
+                    options={billingTierPolicyOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.streamFlushPolicy')} description={t('settings.streamFlushPolicyDesc')}>
+                  <Select
+                    value={settingsForm.stream_flush_policy}
+                    onValueChange={(value) => autoSaveStringField('stream_flush_policy', value)}
+                    options={streamFlushPolicyOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.streamFlushInterval')} description={t('settings.streamFlushIntervalDesc')}>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={1000}
+                    value={settingsForm.stream_flush_interval_ms}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: parseInt(e.target.value) || 20 }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.firstTokenMode')} description={t('settings.firstTokenModeDesc')}>
+                  <Select
+                    value={settingsForm.first_token_mode}
+                    onValueChange={(value) => autoSaveStringField('first_token_mode', value)}
+                    options={firstTokenModeOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.firstTokenTimeout')} description={t('settings.firstTokenTimeoutDesc')}>
+                  <Input
+                    type="number"
+                    min={0}
+                    max={600}
+                    value={settingsForm.first_token_timeout_seconds}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: parseInt(e.target.value) || 0 }))}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard
+            title={showConnectionPool ? t('settings.connectionPool') : t('settings.resinTitle')}
+            description={showConnectionPool ? t('settings.nav.poolRestartHint') : t('settings.resinDesc')}
+            icon={<Database className="size-4" />}
+            badge={
+              showConnectionPool ? (
+                <Badge variant="outline" className="text-[11px]">
+                  {t('settings.nav.restartRequired')}
+                </Badge>
+              ) : null
+            }
+          >
+            <div className="space-y-4">
+              {showConnectionPool ? (
+                <div className={SETTINGS_FIELD_GRID}>
+                  {isExternalDatabase ? (
+                    <SettingField label={t('settings.pgMaxConns')} description={t('settings.pgMaxConnsRange')}>
+                      <Input
+                        type="number"
+                        min={5}
+                        max={500}
+                        value={settingsForm.pg_max_conns}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, pg_max_conns: parseInt(e.target.value) || 50 }))}
+                      />
+                    </SettingField>
+                  ) : null}
+                  {isExternalCache ? (
+                    <SettingField label={t('settings.redisPoolSize')} description={t('settings.redisPoolSizeRange')}>
+                      <Input
+                        type="number"
+                        min={5}
+                        max={500}
+                        value={settingsForm.redis_pool_size}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, redis_pool_size: parseInt(e.target.value) || 30 }))}
+                      />
+                    </SettingField>
+                  ) : null}
+                </div>
+              ) : null}
+              {showConnectionPool ? (
+                <div className="border-t border-border/80 pt-4">
+                  <h4 className="text-[13px] font-semibold text-foreground sm:text-sm">{t('settings.resinTitle')}</h4>
+                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('settings.resinDesc')}</p>
+                </div>
+              ) : null}
+              <div className={SETTINGS_FIELD_GRID}>
+                <SettingField label={t('settings.resinUrl')} description={t('settings.resinUrlDesc')}>
+                  <Input
+                    placeholder="http://127.0.0.1:2260/your-token"
+                    value={settingsForm.resin_url}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_url: e.target.value }))}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.resinPlatformName')} description={t('settings.resinPlatformNameDesc')}>
+                  <Input
+                    placeholder="codex2api"
+                    value={settingsForm.resin_platform_name}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_platform_name: e.target.value }))}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          </SettingsSection>
+
+          <SettingsSection id="settings-storage" title={t('settings.nav.storage')} description={t('settings.nav.storageDesc')}>
+          <SettingsCard title={t('settings.imageStorage')} description={t('settings.imageStorageDesc')} icon={<ImageIcon className="size-4" />}>
+            <div className={SETTINGS_FIELD_GRID_3}>
               <SettingField label={t('settings.imageStorageBackend')} description={t('settings.imageStorageBackendDesc')}>
                 <Select
                   value={settingsForm.image_storage_backend}
@@ -1925,11 +2499,10 @@ export default function Settings() {
                       onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, image_s3_prefix: e.target.value }))}
                     />
                   </SettingField>
-                  <SettingField label={t('settings.imageS3ForcePathStyle')} description={t('settings.imageS3ForcePathStyleDesc')}>
-                    <Select
-                      value={settingsForm.image_s3_force_path_style ? 'true' : 'false'}
-                      onValueChange={(value) => autoSaveBooleanField('image_s3_force_path_style', value)}
-                      options={booleanOptions}
+                  <SettingField label={t('settings.imageS3ForcePathStyle')} description={t('settings.imageS3ForcePathStyleDesc')} layout="switch">
+                    <Switch
+                      checked={settingsForm.image_s3_force_path_style}
+                      onCheckedChange={(checked) => autoSaveBooleanField('image_s3_force_path_style', checked)}
                     />
                   </SettingField>
                 </>
@@ -1950,116 +2523,166 @@ export default function Settings() {
             ) : null}
           </SettingsCard>
 
-          <SettingsCard title={t('settings.autoCleanup')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
-              <SettingField label={t('settings.autoCleanUnauthorized')} description={t('settings.autoCleanUnauthorizedDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_unauthorized ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_unauthorized', value)}
-                  options={booleanOptions}
+          <SettingsCard title={t('settings.autoCleanup')} icon={<Trash2 className="size-4" />} tone="danger">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+              <SettingField label={t('settings.autoCleanUnauthorized')} description={t('settings.autoCleanUnauthorizedDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_unauthorized}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_unauthorized', checked)}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanRateLimited')} description={t('settings.autoCleanRateLimitedDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_rate_limited ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_rate_limited', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanRateLimited')} description={t('settings.autoCleanRateLimitedDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_rate_limited}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_rate_limited', checked)}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')}>
-                <Select
-                  value={lazyModeActive ? 'false' : settingsForm.auto_clean_full_usage ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_full_usage', value)}
+              <SettingField label={t('settings.autoCleanFullUsage')} description={t('settings.autoCleanFullUsageDesc')} layout="switch">
+                <Switch
+                  checked={lazyModeActive ? false : settingsForm.auto_clean_full_usage}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_full_usage', checked)}
                   disabled={lazyModeActive}
-                  options={booleanOptions}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanError')} description={t('settings.autoCleanErrorDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_error ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_error', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanError')} description={t('settings.autoCleanErrorDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_error}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_error', checked)}
                 />
               </SettingField>
-              <SettingField label={t('settings.autoCleanExpired')} description={t('settings.autoCleanExpiredDesc')}>
-                <Select
-                  value={settingsForm.auto_clean_expired ? 'true' : 'false'}
-                  onValueChange={(value) => autoSaveBooleanField('auto_clean_expired', value)}
-                  options={booleanOptions}
+              <SettingField label={t('settings.autoCleanExpired')} description={t('settings.autoCleanExpiredDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.auto_clean_expired}
+                  onCheckedChange={(checked) => autoSaveBooleanField('auto_clean_expired', checked)}
                 />
               </SettingField>
             </div>
           </SettingsCard>
+          </SettingsSection>
 
-          <div className="grid gap-4 xl:grid-cols-2">
-            <SettingsCard title={t('settings.security')}>
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
-                <SettingField
-                  label={t('settings.adminSecret')}
-                  description={t('settings.adminSecretDesc')}
-                  warning={settingsForm.admin_auth_source === 'env' ? t('settings.adminSecretEnvOverride') : undefined}
-                >
-                  <Input
-                    type="text"
-                    placeholder={t('settings.adminSecretPlaceholder')}
-                    value={settingsForm.admin_secret}
-                    disabled={settingsForm.admin_auth_source === 'env'}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => {
-                      const nextSecret = e.target.value
-                      return {
-                        ...f,
-                        admin_secret: nextSecret,
-                        allow_remote_migration: nextSecret.trim() === '' ? false : f.allow_remote_migration,
-                      }
-                    })}
-                  />
-                </SettingField>
-                <SettingField
-                  label={t('settings.allowRemoteMigration')}
-                  description={t('settings.allowRemoteMigrationDesc')}
-                  warning={!canConfigureRemoteMigration ? t('settings.allowRemoteMigrationRequiresSecret') : undefined}
-                >
-                  <Select
-                    value={settingsForm.allow_remote_migration ? 'true' : 'false'}
-                    disabled={!canConfigureRemoteMigration}
-                    onValueChange={(value) => autoSaveBooleanField('allow_remote_migration', value)}
-                    options={booleanOptions}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.promptFilterEnabled')} description={t('settings.promptFilterEnabledDesc')}>
-                  <Select
-                    value={settingsForm.prompt_filter_enabled ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('prompt_filter_enabled', value)}
-                    options={booleanOptions}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.promptFilterMode')} description={t('settings.promptFilterModeDesc')}>
-                  <Select
-                    value={settingsForm.prompt_filter_mode}
-                    onValueChange={(value) => autoSaveStringField('prompt_filter_mode', value)}
-                    options={[
-                      { label: t('promptFilter.modeMonitor'), value: 'monitor' },
-                      { label: t('promptFilter.modeWarn'), value: 'warn' },
-                      { label: t('promptFilter.modeBlock'), value: 'block' },
-                    ]}
-                  />
-                </SettingField>
+          <SettingsSection id="settings-security" title={t('settings.nav.security')} description={t('settings.nav.securityDesc')}>
+            <SettingsCard
+              title={t('settings.security')}
+              icon={<Shield className="size-4" />}
+              tone="danger"
+              badge={
+                <Badge variant="outline" className="border-destructive/30 text-[11px] text-destructive">
+                  {t('settings.nav.sensitive')}
+                </Badge>
+              }
+            >
+              <div className="space-y-4">
+                <div className={SETTINGS_FIELD_GRID}>
+                  <SettingField
+                    label={t('settings.adminSecret')}
+                    description={t('settings.adminSecretDesc')}
+                    warning={settingsForm.admin_auth_source === 'env' ? t('settings.adminSecretEnvOverride') : undefined}
+                  >
+                    <Input
+                      type="text"
+                      placeholder={t('settings.adminSecretPlaceholder')}
+                      value={settingsForm.admin_secret}
+                      disabled={settingsForm.admin_auth_source === 'env'}
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => {
+                        const nextSecret = e.target.value
+                        return {
+                          ...f,
+                          admin_secret: nextSecret,
+                          allow_remote_migration: nextSecret.trim() === '' ? false : f.allow_remote_migration,
+                        }
+                      })}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.promptFilterMode')} description={t('settings.promptFilterModeDesc')}>
+                    <Select
+                      value={settingsForm.prompt_filter_mode}
+                      onValueChange={(value) => autoSaveStringField('prompt_filter_mode', value)}
+                      options={[
+                        { label: t('promptFilter.modeMonitor'), value: 'monitor' },
+                        { label: t('promptFilter.modeWarn'), value: 'warn' },
+                        { label: t('promptFilter.modeBlock'), value: 'block' },
+                      ]}
+                    />
+                  </SettingField>
+                </div>
+                <div className={SETTINGS_SWITCH_GRID}>
+                  <SettingField
+                    label={t('settings.allowRemoteMigration')}
+                    description={t('settings.allowRemoteMigrationDesc')}
+                    warning={
+                      !canConfigureRemoteMigration
+                        ? t('settings.allowRemoteMigrationRequiresSecret')
+                        : undefined
+                    }
+                    layout="switch"
+                  >
+                    <Switch
+                      checked={settingsForm.allow_remote_migration}
+                      disabled={!canConfigureRemoteMigration}
+                      onCheckedChange={(checked) => autoSaveBooleanField('allow_remote_migration', checked)}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.promptFilterEnabled')} description={t('settings.promptFilterEnabledDesc')} layout="switch">
+                    <Switch
+                      checked={settingsForm.prompt_filter_enabled}
+                      onCheckedChange={(checked) => autoSaveBooleanField('prompt_filter_enabled', checked)}
+                    />
+                  </SettingField>
+                </div>
               </div>
             </SettingsCard>
+          </SettingsSection>
 
-            <SettingsCard title={t('settings.display')}>
+          <SettingsSection id="settings-appearance" title={t('settings.nav.appearance')} description={t('settings.nav.appearanceDesc')}>
+            <SettingsCard title={t('settings.display')} icon={<Palette className="size-4" />}>
               <div className="space-y-4">
-                <SettingField label={t('settings.siteName')} description={t('settings.siteNameDesc')}>
-                  <Input
-                    value={settingsForm.site_name}
-                    maxLength={80}
-                    placeholder="CodexProxy"
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, site_name: e.target.value }))}
-                  />
-                </SettingField>
+                <div className={SETTINGS_FIELD_GRID}>
+                  <SettingField label={t('settings.siteName')} description={t('settings.siteNameDesc')}>
+                    <Input
+                      value={settingsForm.site_name}
+                      maxLength={80}
+                      placeholder="CodexProxy"
+                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, site_name: e.target.value }))}
+                    />
+                  </SettingField>
+                  <SettingField label={t('settings.timezone')} description={t('settings.timezoneDesc')}>
+                    <Select
+                      value={getTimezone()}
+                      onValueChange={(value) => {
+                        setTimezone(value)
+                        window.location.reload()
+                      }}
+                      options={[
+                        { label: t('settings.timezoneAuto'), value: Intl.DateTimeFormat().resolvedOptions().timeZone },
+                        { label: '(UTC) UTC', value: 'UTC' },
+                        { label: '(GMT+08:00) Asia/Shanghai', value: 'Asia/Shanghai' },
+                        { label: '(GMT+09:00) Asia/Tokyo', value: 'Asia/Tokyo' },
+                        { label: '(GMT+09:00) Asia/Seoul', value: 'Asia/Seoul' },
+                        { label: '(GMT+08:00) Asia/Singapore', value: 'Asia/Singapore' },
+                        { label: '(GMT+08:00) Asia/Hong_Kong', value: 'Asia/Hong_Kong' },
+                        { label: '(GMT+08:00) Asia/Taipei', value: 'Asia/Taipei' },
+                        { label: '(GMT+07:00) Asia/Bangkok', value: 'Asia/Bangkok' },
+                        { label: '(GMT+04:00) Asia/Dubai', value: 'Asia/Dubai' },
+                        { label: '(GMT+05:30) Asia/Kolkata', value: 'Asia/Kolkata' },
+                        { label: '(GMT+01:00) Europe/London', value: 'Europe/London' },
+                        { label: '(GMT+02:00) Europe/Paris', value: 'Europe/Paris' },
+                        { label: '(GMT+02:00) Europe/Berlin', value: 'Europe/Berlin' },
+                        { label: '(GMT+03:00) Europe/Moscow', value: 'Europe/Moscow' },
+                        { label: '(GMT+02:00) Europe/Amsterdam', value: 'Europe/Amsterdam' },
+                        { label: '(GMT+02:00) Europe/Rome', value: 'Europe/Rome' },
+                        { label: '(GMT-04:00) America/New_York', value: 'America/New_York' },
+                        { label: '(GMT-07:00) America/Los_Angeles', value: 'America/Los_Angeles' },
+                        { label: '(GMT-05:00) America/Chicago', value: 'America/Chicago' },
+                        { label: '(GMT-03:00) America/Sao_Paulo', value: 'America/Sao_Paulo' },
+                        { label: '(GMT+10:00) Australia/Sydney', value: 'Australia/Sydney' },
+                        { label: '(GMT+12:00) Pacific/Auckland', value: 'Pacific/Auckland' },
+                      ]}
+                    />
+                  </SettingField>
+                </div>
                 <SettingField label={t('settings.siteLogo')} description={t('settings.siteLogoDesc')}>
-                  <div className="flex items-start gap-3">
-                    <div className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border bg-background shadow-sm">
+                  <div className="flex items-center gap-3">
+                    <div className="flex size-11 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-border bg-background shadow-sm">
                       <img src={siteLogoPreview} alt={settingsForm.site_name || 'CodexProxy'} className="size-full object-cover" />
                     </div>
                     <div className="min-w-0 flex-1 space-y-2">
@@ -2070,11 +2693,11 @@ export default function Settings() {
                       />
                       <div className="flex flex-wrap gap-2">
                         <Button type="button" variant="outline" size="sm" onClick={() => logoFileInputRef.current?.click()}>
-                          <Upload className="size-4" />
+                          <Upload className="size-3.5" />
                           {t('settings.siteLogoUpload')}
                         </Button>
                         <Button type="button" variant="ghost" size="sm" onClick={() => setSettingsForm(f => ({ ...f, site_logo: '' }))}>
-                          <X className="size-4" />
+                          <X className="size-3.5" />
                           {t('settings.siteLogoReset')}
                         </Button>
                       </div>
@@ -2088,54 +2711,20 @@ export default function Settings() {
                     </div>
                   </div>
                 </SettingField>
-                <SettingField label={t('settings.timezone')} description={t('settings.timezoneDesc')}>
-                  <Select
-                    value={getTimezone()}
-                    onValueChange={(value) => {
-                      setTimezone(value)
-                      window.location.reload()
-                    }}
-                    options={[
-                      { label: t('settings.timezoneAuto'), value: Intl.DateTimeFormat().resolvedOptions().timeZone },
-                      { label: '(UTC) UTC', value: 'UTC' },
-                      { label: '(GMT+08:00) Asia/Shanghai', value: 'Asia/Shanghai' },
-                      { label: '(GMT+09:00) Asia/Tokyo', value: 'Asia/Tokyo' },
-                      { label: '(GMT+09:00) Asia/Seoul', value: 'Asia/Seoul' },
-                      { label: '(GMT+08:00) Asia/Singapore', value: 'Asia/Singapore' },
-                      { label: '(GMT+08:00) Asia/Hong_Kong', value: 'Asia/Hong_Kong' },
-                      { label: '(GMT+08:00) Asia/Taipei', value: 'Asia/Taipei' },
-                      { label: '(GMT+07:00) Asia/Bangkok', value: 'Asia/Bangkok' },
-                      { label: '(GMT+04:00) Asia/Dubai', value: 'Asia/Dubai' },
-                      { label: '(GMT+05:30) Asia/Kolkata', value: 'Asia/Kolkata' },
-                      { label: '(GMT+01:00) Europe/London', value: 'Europe/London' },
-                      { label: '(GMT+02:00) Europe/Paris', value: 'Europe/Paris' },
-                      { label: '(GMT+02:00) Europe/Berlin', value: 'Europe/Berlin' },
-                      { label: '(GMT+03:00) Europe/Moscow', value: 'Europe/Moscow' },
-                      { label: '(GMT+02:00) Europe/Amsterdam', value: 'Europe/Amsterdam' },
-                      { label: '(GMT+02:00) Europe/Rome', value: 'Europe/Rome' },
-                      { label: '(GMT-04:00) America/New_York', value: 'America/New_York' },
-                      { label: '(GMT-07:00) America/Los_Angeles', value: 'America/Los_Angeles' },
-                      { label: '(GMT-05:00) America/Chicago', value: 'America/Chicago' },
-                      { label: '(GMT-03:00) America/Sao_Paulo', value: 'America/Sao_Paulo' },
-                      { label: '(GMT+10:00) Australia/Sydney', value: 'Australia/Sydney' },
-                      { label: '(GMT+12:00) Pacific/Auckland', value: 'Pacific/Auckland' },
-                    ]}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.showFullUsageNumbers')} description={t('settings.showFullUsageNumbersDesc')}>
-                  <Select
-                    value={settingsForm.show_full_usage_numbers ? 'true' : 'false'}
-                    onValueChange={(value) => autoSaveBooleanField('show_full_usage_numbers', value)}
-                    options={booleanOptions}
-                  />
-                </SettingField>
+                <div className={SETTINGS_SWITCH_GRID}>
+                  <SettingField label={t('settings.showFullUsageNumbers')} description={t('settings.showFullUsageNumbersDesc')} layout="switch">
+                    <Switch
+                      checked={settingsForm.show_full_usage_numbers}
+                      onCheckedChange={(checked) => autoSaveBooleanField('show_full_usage_numbers', checked)}
+                    />
+                  </SettingField>
+                </div>
               </div>
             </SettingsCard>
-          </div>
 
-          <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')}>
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
-              <div className="relative aspect-[16/7] min-h-[220px] overflow-hidden rounded-lg border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3]">
+          <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')} icon={<ImageIcon className="size-4" />}>
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.4fr)_minmax(280px,0.6fr)] xl:items-start">
+              <div className="relative aspect-[16/7] min-h-[160px] overflow-hidden rounded-lg border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3] sm:min-h-[200px]">
                 {backgroundImagePreview && backgroundIsVideo ? (
                   <video
                     src={backgroundImagePreview}
@@ -2167,8 +2756,8 @@ export default function Settings() {
                   </div>
                 )}
               </div>
-              <div className="flex min-w-0 flex-col justify-between gap-5">
-                <div className="min-w-0 space-y-3">
+              <div className="flex min-w-0 flex-col gap-4">
+                <div className="min-w-0 space-y-2.5">
                   <Input
                     value={settingsForm.background_image}
                     placeholder="/wallpaper.jpg or https://..."
@@ -2176,11 +2765,11 @@ export default function Settings() {
                   />
                   <div className="flex flex-wrap gap-2">
                     <Button type="button" variant="outline" size="sm" onClick={() => backgroundFileInputRef.current?.click()}>
-                      <Upload className="size-4" />
+                      <Upload className="size-3.5" />
                       {t('settings.backgroundImageUpload')}
                     </Button>
                     <Button type="button" variant="ghost" size="sm" onClick={() => setSettingsForm(f => ({ ...f, background_image: '' }))}>
-                      <X className="size-4" />
+                      <X className="size-3.5" />
                       {t('settings.backgroundImageReset')}
                     </Button>
                   </div>
@@ -2192,270 +2781,337 @@ export default function Settings() {
                     onChange={handleBackgroundImageUpload}
                   />
                 </div>
-                <div className="grid gap-4">
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
-                      <span>{t('settings.backgroundOpacity')}</span>
-                      <span>{settingsForm.background_opacity}%</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={settingsForm.background_opacity}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_opacity: parseInt(e.target.value) || 0 }))}
-                      className="w-full accent-primary"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
-                      <span>{t('settings.backgroundBlur')}</span>
-                      <span>{settingsForm.background_blur}px</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={24}
-                      value={settingsForm.background_blur}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_blur: parseInt(e.target.value) || 0 }))}
-                      className="w-full accent-primary"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
-                      <span>{t('settings.backgroundGlassOpacity')}</span>
-                      <span>{settingsForm.background_glass_opacity}%</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={100}
-                      value={settingsForm.background_glass_opacity}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_glass_opacity: parseInt(e.target.value) || 0 }))}
-                      className="w-full accent-primary"
-                    />
-                  </div>
-                  <div className="space-y-2">
-                    <div className="flex items-center justify-between gap-3 text-xs font-semibold text-muted-foreground">
-                      <span>{t('settings.backgroundGlassBlur')}</span>
-                      <span>{settingsForm.background_glass_blur}px</span>
-                    </div>
-                    <input
-                      type="range"
-                      min={0}
-                      max={20}
-                      value={settingsForm.background_glass_blur}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_glass_blur: parseInt(e.target.value) || 0 }))}
-                      className="w-full accent-primary"
-                    />
-                  </div>
-                </div>
-              </div>
-            </div>
-          </SettingsCard>
-
-          <SettingsCard title={showConnectionPool ? t('settings.connectionPool') : t('settings.resinTitle')} description={showConnectionPool ? undefined : t('settings.resinDesc')}>
-            <div className="space-y-5">
-              {showConnectionPool ? (
-                <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
-                  {isExternalDatabase ? (
-                    <SettingField label={t('settings.pgMaxConns')} description={t('settings.pgMaxConnsRange')}>
-                      <Input
-                        type="number"
-                        min={5}
-                        max={500}
-                        value={settingsForm.pg_max_conns}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, pg_max_conns: parseInt(e.target.value) || 50 }))}
+                <div className="grid gap-3.5 rounded-lg border border-border/60 bg-muted/15 p-3.5">
+                  {([
+                    {
+                      label: t('settings.backgroundOpacity'),
+                      value: settingsForm.background_opacity,
+                      unit: '%',
+                      min: 0,
+                      max: 100,
+                      onChange: (v: number) => setSettingsForm(f => ({ ...f, background_opacity: v })),
+                    },
+                    {
+                      label: t('settings.backgroundBlur'),
+                      value: settingsForm.background_blur,
+                      unit: 'px',
+                      min: 0,
+                      max: 24,
+                      onChange: (v: number) => setSettingsForm(f => ({ ...f, background_blur: v })),
+                    },
+                    {
+                      label: t('settings.backgroundGlassOpacity'),
+                      value: settingsForm.background_glass_opacity,
+                      unit: '%',
+                      min: 0,
+                      max: 100,
+                      onChange: (v: number) => setSettingsForm(f => ({ ...f, background_glass_opacity: v })),
+                    },
+                    {
+                      label: t('settings.backgroundGlassBlur'),
+                      value: settingsForm.background_glass_blur,
+                      unit: 'px',
+                      min: 0,
+                      max: 20,
+                      onChange: (v: number) => setSettingsForm(f => ({ ...f, background_glass_blur: v })),
+                    },
+                  ] as const).map((slider) => (
+                    <div key={slider.label} className="space-y-1.5">
+                      <div className="flex items-center justify-between gap-3 text-xs">
+                        <span className="font-medium text-muted-foreground">{slider.label}</span>
+                        <span className="min-w-[3rem] text-right font-semibold tabular-nums text-foreground">
+                          {slider.value}{slider.unit}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min={slider.min}
+                        max={slider.max}
+                        value={slider.value}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) => slider.onChange(parseInt(e.target.value) || 0)}
+                        className="h-1.5 w-full cursor-pointer accent-primary"
                       />
-                    </SettingField>
-                  ) : null}
-                  {isExternalCache ? (
-                    <SettingField label={t('settings.redisPoolSize')} description={t('settings.redisPoolSizeRange')}>
-                      <Input
-                        type="number"
-                        min={5}
-                        max={500}
-                        value={settingsForm.redis_pool_size}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, redis_pool_size: parseInt(e.target.value) || 30 }))}
-                      />
-                    </SettingField>
-                  ) : null}
-                </div>
-              ) : null}
-              {showConnectionPool ? (
-                <div className="border-t border-border pt-4">
-                  <h4 className="text-sm font-semibold text-foreground">{t('settings.resinTitle')}</h4>
-                  <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('settings.resinDesc')}</p>
-                </div>
-              ) : null}
-              <div className="grid grid-cols-[repeat(auto-fit,minmax(260px,1fr))] gap-4">
-                <SettingField label={t('settings.resinUrl')} description={t('settings.resinUrlDesc')}>
-                  <Input
-                    placeholder="http://127.0.0.1:2260/your-token"
-                    value={settingsForm.resin_url}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_url: e.target.value }))}
-                  />
-                </SettingField>
-                <SettingField label={t('settings.resinPlatformName')} description={t('settings.resinPlatformNameDesc')}>
-                  <Input
-                    placeholder="codex2api"
-                    value={settingsForm.resin_platform_name}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, resin_platform_name: e.target.value }))}
-                  />
-                </SettingField>
-              </div>
-            </div>
-          </SettingsCard>
-
-          <div className="grid items-stretch gap-4 xl:grid-cols-2">
-            <SettingsCard
-              title={t('settings.modelRegistry')}
-              description={t('settings.modelRegistryDesc')}
-              className="h-full xl:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <div className="flex min-h-0 flex-1 flex-col gap-4">
-                <div className="grid grid-cols-[repeat(auto-fit,minmax(150px,1fr))] gap-3">
-                  <StatusTile label={t('settings.modelsEnabled')}>
-                    {enabledModelCount}
-                  </StatusTile>
-                  <StatusTile label={t('settings.modelsLastSynced')}>
-                    <span className="text-xs font-semibold">{modelsLastSyncedLabel}</span>
-                  </StatusTile>
-                </div>
-                <div className="flex shrink-0 flex-wrap items-center justify-between gap-2">
-                  <a
-                    href={modelsSourceLabel}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex min-w-0 items-center gap-1.5 text-xs font-medium text-primary hover:underline"
-                  >
-                    <ExternalLink className="size-3.5 shrink-0" />
-                    <span className="truncate">{modelsSourceLabel}</span>
-                  </a>
-                  <Button size="sm" variant="outline" onClick={() => void handleSyncModels()} disabled={syncingModels}>
-                    <RefreshCw className={cn('size-4', syncingModels && 'animate-spin')} />
-                    {syncingModels ? t('settings.modelsSyncing') : t('settings.syncUpstreamModels')}
-                  </Button>
-                </div>
-                <div className="flex min-h-0 flex-1 flex-wrap content-start gap-2 overflow-auto rounded-lg border border-border bg-muted/20 p-3">
-                  {visibleModelItems.map((model) => (
-                    <div key={model.id} className="flex h-fit flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5">
-                      <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
-                      <Badge variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'} className="text-[11px]">
-                        {model.source === 'official_codex_docs'
-                          ? t('settings.modelSourceOfficial')
-                          : model.source === 'reasoning_effort'
-                            ? t('settings.modelSourceReasoning')
-                            : t('settings.modelSourceBuiltin')}
-                      </Badge>
-                      {model.pro_only ? <Badge variant="outline" className="text-[11px]">{t('settings.modelProOnly')}</Badge> : null}
-                      {model.category === 'image' ? <Badge variant="outline" className="text-[11px]">{t('settings.modelImage')}</Badge> : null}
                     </div>
                   ))}
                 </div>
               </div>
-            </SettingsCard>
+            </div>
+          </SettingsCard>
+          </SettingsSection>
 
-            <SettingsCard
-              title={t('settings2.anthropicModelMapping')}
-              description={t('settings2.anthropicModelMappingDesc')}
-              className="h-full xl:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <ModelMappingEditor
-                value={settingsForm.model_mapping}
-                onChange={(v) => setSettingsForm(f => ({ ...f, model_mapping: v }))}
-                fallbackEntries={defaultClaudeModelMappingEntries}
-                sourceLabel={t('settings2.anthropicModel')}
-                targetLabel={t('settings2.codexModel')}
-                sourcePlaceholder="claude-opus-4-6"
-                targetPlaceholder="gpt-5.5"
-              />
-            </SettingsCard>
-
-            <SettingsCard
-              title={t('settings2.codexModelMapping')}
-              description={t('settings2.codexModelMappingDesc')}
-              className="h-full xl:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <ModelMappingEditor
-                value={settingsForm.codex_model_mapping}
-                onChange={(v) => setSettingsForm(f => ({ ...f, codex_model_mapping: v }))}
-                sourceOptions={codexModelOptions}
-                targetOptions={codexModelOptions}
-                sourceLabel={t('settings2.requestedModel')}
-                targetLabel={t('settings2.targetModel')}
-                sourcePlaceholder="gpt-5.2"
-                targetPlaceholder="gpt-5.5"
-              />
-            </SettingsCard>
-
-            <SettingsCard
-              title={t('settings2.reasoningEffortModels')}
-              description={t('settings2.reasoningEffortModelsDesc')}
-              className="h-full xl:h-[430px]"
-              contentClassName="flex h-full min-h-0 flex-col"
-            >
-              <ReasoningEffortModelsEditor
-                value={settingsForm.reasoning_effort_models}
-                onChange={(v) => setSettingsForm(f => ({ ...f, reasoning_effort_models: v }))}
-                baseModelOptions={textModelOptions}
-              />
-            </SettingsCard>
-          </div>
-
-          <div className="grid gap-4">
-            <SettingsCard title={t('settings.apiEndpoints')}>
-              <div className="data-table-shell">
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead className="text-[12px] font-semibold">{t('settings.method')}</TableHead>
-                      <TableHead className="text-[12px] font-semibold">{t('settings.path')}</TableHead>
-                      <TableHead className="text-[12px] font-semibold">{t('settings.endpointDesc')}</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    <TableRow>
-                      <TableCell><Badge variant="default" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/chat/completions</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.openaiCompat')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/responses</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.responsesApi')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/messages</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings2.messagesEndpoint')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/images/generations</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageGenerationApi')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/images/edits</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageEditApi')}</TableCell>
-                    </TableRow>
-                    <TableRow>
-                      <TableCell><Badge variant="secondary" className="text-[12px]">GET</Badge></TableCell>
-                      <TableCell className="font-mono text-[13px]">/v1/models</TableCell>
-                      <TableCell className="text-[13px] text-muted-foreground">{t('settings.modelList')}</TableCell>
-                    </TableRow>
-                  </TableBody>
-                </Table>
+          <SettingsSection id="settings-models" title={t('settings.nav.models')} description={t('settings.nav.modelsDesc')}>
+            <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-lg border border-border/80 bg-card/80 px-3.5 py-2.5 shadow-sm">
+              <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <Badge variant="secondary" className="tabular-nums">
+                  {t('settings.modelsEnabled')}: {enabledModelCount}
+                </Badge>
+                <span className="hidden sm:inline text-border">·</span>
+                <span className="truncate">
+                  {t('settings.modelsLastSynced')}: {modelsLastSyncedLabel}
+                </span>
               </div>
-            </SettingsCard>
-          </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <a
+                  href={modelsSourceLabel}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                >
+                  <ExternalLink className="size-3.5" />
+                  {t('settings.nav.openSource')}
+                </a>
+                <Button size="sm" variant="outline" onClick={() => void handleSyncModels()} disabled={syncingModels}>
+                  <RefreshCw className={cn('size-3.5', syncingModels && 'animate-spin')} />
+                  {syncingModels ? t('settings.modelsSyncing') : t('settings.syncUpstreamModels')}
+                </Button>
+              </div>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <ModelSummaryCard
+                title={t('settings.modelRegistry')}
+                description={t('settings.modelRegistryDesc')}
+                meta={t('settings.nav.modelCount', { count: enabledModelCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('registry')}
+              />
+              <ModelSummaryCard
+                title={t('settings2.anthropicModelMapping')}
+                description={t('settings2.anthropicModelMappingDesc')}
+                meta={t('settings.nav.mappingCount', { count: anthropicMappingCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('anthropic')}
+              />
+              <ModelSummaryCard
+                title={t('settings2.codexModelMapping')}
+                description={t('settings2.codexModelMappingDesc')}
+                meta={t('settings.nav.mappingCount', { count: codexMappingCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('codex')}
+              />
+              <ModelSummaryCard
+                title={t('settings2.reasoningEffortModels')}
+                description={t('settings2.reasoningEffortModelsDesc')}
+                meta={t('settings.nav.mappingCount', { count: reasoningEffortCount })}
+                openLabel={t('settings.nav.manage')}
+                onOpen={() => setModelPanel('reasoning')}
+              />
+            </div>
 
-          <div className="flex justify-end">
-            {renderSaveButton('max-sm:w-full')}
+            <Sheet open={modelPanel !== null} onOpenChange={(open) => { if (!open) setModelPanel(null) }}>
+              <SheetContent
+                side="right"
+                className="sm:w-[min(calc(100%-2rem),720px)] sm:max-w-[min(calc(100%-2rem),720px)]"
+              >
+                <SheetHeader>
+                  <SheetTitle>
+                    {modelPanel === 'registry'
+                      ? t('settings.modelRegistry')
+                      : modelPanel === 'anthropic'
+                        ? t('settings2.anthropicModelMapping')
+                        : modelPanel === 'codex'
+                          ? t('settings2.codexModelMapping')
+                          : t('settings2.reasoningEffortModels')}
+                  </SheetTitle>
+                  <SheetDescription>
+                    {modelPanel === 'registry'
+                      ? t('settings.modelRegistryDesc')
+                      : modelPanel === 'anthropic'
+                        ? t('settings2.anthropicModelMappingDesc')
+                        : modelPanel === 'codex'
+                          ? t('settings2.codexModelMappingDesc')
+                          : t('settings2.reasoningEffortModelsDesc')}
+                  </SheetDescription>
+                </SheetHeader>
+                <SheetBody className="space-y-4">
+                  {modelPanel === 'registry' ? (
+                    <div className="space-y-3">
+                      <div className="grid grid-cols-2 gap-3">
+                        <StatusTile label={t('settings.modelsEnabled')}>{enabledModelCount}</StatusTile>
+                        <StatusTile label={t('settings.modelsLastSynced')}>
+                          <span className="text-xs font-semibold">{modelsLastSyncedLabel}</span>
+                        </StatusTile>
+                      </div>
+                      <div className="flex max-h-[min(60dvh,520px)] flex-wrap content-start gap-2 overflow-auto rounded-xl border border-border bg-muted/20 p-3">
+                        {visibleModelItems.map((model) => (
+                          <div
+                            key={model.id}
+                            className="flex h-fit flex-wrap items-center gap-1.5 rounded-md border border-border bg-background px-2.5 py-1.5"
+                          >
+                            <span className="font-mono text-xs font-semibold text-foreground">{model.id}</span>
+                            <Badge
+                              variant={model.source === 'official_codex_docs' ? 'default' : 'secondary'}
+                              className="text-[11px]"
+                            >
+                              {model.source === 'official_codex_docs'
+                                ? t('settings.modelSourceOfficial')
+                                : model.source === 'reasoning_effort'
+                                  ? t('settings.modelSourceReasoning')
+                                  : t('settings.modelSourceBuiltin')}
+                            </Badge>
+                            {model.pro_only ? (
+                              <Badge variant="outline" className="text-[11px]">{t('settings.modelProOnly')}</Badge>
+                            ) : null}
+                            {model.category === 'image' ? (
+                              <Badge variant="outline" className="text-[11px]">{t('settings.modelImage')}</Badge>
+                            ) : null}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+                  {modelPanel === 'anthropic' ? (
+                    <ModelMappingEditor
+                      value={settingsForm.model_mapping}
+                      onChange={(v) => setSettingsForm((f) => ({ ...f, model_mapping: v }))}
+                      fallbackEntries={defaultClaudeModelMappingEntries}
+                      sourceLabel={t('settings2.anthropicModel')}
+                      targetLabel={t('settings2.codexModel')}
+                      sourcePlaceholder="claude-opus-4-6"
+                      targetPlaceholder="gpt-5.5"
+                    />
+                  ) : null}
+                  {modelPanel === 'codex' ? (
+                    <ModelMappingEditor
+                      value={settingsForm.codex_model_mapping}
+                      onChange={(v) => setSettingsForm((f) => ({ ...f, codex_model_mapping: v }))}
+                      sourceOptions={codexModelOptions}
+                      targetOptions={codexModelOptions}
+                      sourceLabel={t('settings2.requestedModel')}
+                      targetLabel={t('settings2.targetModel')}
+                      sourcePlaceholder="gpt-5.2"
+                      targetPlaceholder="gpt-5.5"
+                    />
+                  ) : null}
+                  {modelPanel === 'reasoning' ? (
+                    <ReasoningEffortModelsEditor
+                      value={settingsForm.reasoning_effort_models}
+                      onChange={(v) => setSettingsForm((f) => ({ ...f, reasoning_effort_models: v }))}
+                      baseModelOptions={textModelOptions}
+                    />
+                  ) : null}
+                </SheetBody>
+              </SheetContent>
+            </Sheet>
+          </SettingsSection>
+
+          <SettingsSection id="settings-reference" title={t('settings.nav.reference')} description={t('settings.nav.referenceDesc')}>
+            <div className="overflow-hidden rounded-xl border border-border bg-card/85 shadow-sm">
+              <button
+                type="button"
+                onClick={() => setEndpointsOpen((open) => !open)}
+                className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <div className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
+                    <Link2 className="size-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-sm font-semibold text-foreground">
+                      {t('settings.apiEndpoints')}
+                    </div>
+                    <p className="mt-0.5 text-xs text-muted-foreground">
+                      {t('settings.nav.endpointsHint')}
+                    </p>
+                  </div>
+                </div>
+                <ChevronDown
+                  className={cn(
+                    'size-4 shrink-0 text-muted-foreground transition-transform',
+                    endpointsOpen && 'rotate-180',
+                  )}
+                />
+              </button>
+              {endpointsOpen ? (
+                <div className="space-y-3 border-t border-border px-4 py-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <p className="text-xs text-muted-foreground">
+                      {t('settings.nav.endpointsReadonly')}
+                    </p>
+                    <Link
+                      to="/docs#model-api"
+                      className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                    >
+                      <ExternalLink className="size-3.5" />
+                      {t('settings.nav.openDocs')}
+                    </Link>
+                  </div>
+                  <div className="grid gap-2 sm:hidden">
+                    {([
+                      { method: 'POST', path: '/v1/chat/completions', desc: t('settings.openaiCompat'), tone: 'default' as const },
+                      { method: 'POST', path: '/v1/responses', desc: t('settings.responsesApi'), tone: 'outline' as const },
+                      { method: 'POST', path: '/v1/messages', desc: t('settings2.messagesEndpoint'), tone: 'outline' as const },
+                      { method: 'POST', path: '/v1/images/generations', desc: t('settings.imageGenerationApi'), tone: 'outline' as const },
+                      { method: 'POST', path: '/v1/images/edits', desc: t('settings.imageEditApi'), tone: 'outline' as const },
+                      { method: 'GET', path: '/v1/models', desc: t('settings.modelList'), tone: 'secondary' as const },
+                    ]).map((item) => (
+                      <div
+                        key={item.path}
+                        className="rounded-xl border border-border bg-background/70 px-3 py-2.5"
+                      >
+                        <div className="flex items-center gap-2">
+                          <Badge variant={item.tone} className="shrink-0 text-[11px]">
+                            {item.method}
+                          </Badge>
+                          <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-foreground">
+                            {item.path}
+                          </code>
+                        </div>
+                        <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                          {item.desc}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="data-table-shell hidden sm:block">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="text-[12px] font-semibold">{t('settings.method')}</TableHead>
+                          <TableHead className="text-[12px] font-semibold">{t('settings.path')}</TableHead>
+                          <TableHead className="text-[12px] font-semibold">{t('settings.endpointDesc')}</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        <TableRow>
+                          <TableCell><Badge variant="default" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/chat/completions</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.openaiCompat')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/responses</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.responsesApi')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/messages</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings2.messagesEndpoint')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/images/generations</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageGenerationApi')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="outline" className="text-[12px]">POST</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/images/edits</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.imageEditApi')}</TableCell>
+                        </TableRow>
+                        <TableRow>
+                          <TableCell><Badge variant="secondary" className="text-[12px]">GET</Badge></TableCell>
+                          <TableCell className="font-mono text-[13px]">/v1/models</TableCell>
+                          <TableCell className="text-[13px] text-muted-foreground">{t('settings.modelList')}</TableCell>
+                        </TableRow>
+                      </TableBody>
+                    </Table>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </SettingsSection>
+
+          <div className="flex justify-end max-lg:sticky max-lg:bottom-[calc(5.5rem+env(safe-area-inset-bottom,0px))] max-lg:z-20 max-lg:-mx-1 max-lg:rounded-xl max-lg:border max-lg:border-border max-lg:bg-card/95 max-lg:p-2 max-lg:shadow-lg max-lg:backdrop-blur-md">
+            {renderSaveButton('w-full sm:w-auto')}
           </div>
         </div>
 

@@ -71,11 +71,11 @@ export default function DocsTOC({ items, title }: DocsTOCProps) {
   }
 
   return (
-    <div className="rounded-lg border border-border bg-card/90 p-3 shadow-sm backdrop-blur-sm">
-        <div className="mb-2 px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+    <div className="flex h-full max-h-full flex-col overflow-hidden rounded-lg border border-border bg-card/90 p-3 shadow-sm backdrop-blur-sm">
+        <div className="mb-2 shrink-0 px-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           {title}
         </div>
-        <nav className="max-h-[calc(100dvh-8rem)] space-y-0.5 overflow-y-auto pr-1">
+        <nav className="min-h-0 flex-1 space-y-0.5 overflow-y-auto overscroll-contain pr-1 [-ms-overflow-style:none] [scrollbar-width:thin]">
           {items.map((parent) => {
             const isExpanded = expandedParent === parent.id
             const isParentActive = activeId === parent.id

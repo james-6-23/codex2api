@@ -2740,3 +2740,62 @@ func TestPromptFilterLogsPersistReviewMetadata(t *testing.T) {
 		t.Fatalf("review metadata = %+v", got)
 	}
 }
+
+func TestSQLiteSystemSettingsContinueThinkingRoundtrip(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+
+	// 播种默认行（全新库无 system_settings 行），并确认续想默认关闭、轮数 8。
+	seed := &SystemSettings{
+		MaxConcurrency:         2,
+		TestConcurrency:        1,
+		TestModel:              "gpt-5.4",
+		CodexContinueMaxRounds: 8,
+	}
+	if err := db.UpdateSystemSettings(ctx, seed); err != nil {
+		t.Fatalf("UpdateSystemSettings(seed): %v", err)
+	}
+	got, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if got.CodexContinueThinkingEnabled {
+		t.Errorf("默认应关闭续想, got enabled")
+	}
+	if got.CodexContinueMaxRounds != 8 {
+		t.Errorf("默认轮数 = %d, want 8", got.CodexContinueMaxRounds)
+	}
+
+	// 写入后读回。
+	got.CodexContinueThinkingEnabled = true
+	got.CodexContinueMaxRounds = 15
+	if err := db.UpdateSystemSettings(ctx, got); err != nil {
+		t.Fatalf("UpdateSystemSettings: %v", err)
+	}
+	after, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings(2): %v", err)
+	}
+	if !after.CodexContinueThinkingEnabled || after.CodexContinueMaxRounds != 15 {
+		t.Fatalf("往返后 = {enabled=%v rounds=%d}, want {true 15}", after.CodexContinueThinkingEnabled, after.CodexContinueMaxRounds)
+	}
+
+	// 越界轮数落库时归一到上界 32。
+	after.CodexContinueMaxRounds = 100
+	if err := db.UpdateSystemSettings(ctx, after); err != nil {
+		t.Fatalf("UpdateSystemSettings(clamp): %v", err)
+	}
+	clamped, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings(3): %v", err)
+	}
+	if clamped.CodexContinueMaxRounds != 32 {
+		t.Errorf("越界轮数应归一到 32, got %d", clamped.CodexContinueMaxRounds)
+	}
+}

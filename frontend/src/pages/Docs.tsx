@@ -43,7 +43,7 @@ const FALLBACK_MODELS = [
 type CCSwitchApp = "claude" | "codex" | "gemini";
 type QuickToolTab = "codex-cli" | "claude-code" | "cc-switch" | "cherry-studio";
 type QuickServiceTier = "default" | "fast";
-type QuickReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type QuickReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
 
 const CC_SWITCH_LOGO = "https://ccswitch.io/assets/cc-switch-logo-BPrI77SG.png";
 const LOBE_ICON_BASE =
@@ -1150,10 +1150,13 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
                         setQuickReasoningEffort(value as QuickReasoningEffort)
                       }
                       options={[
+                        { label: "None", value: "none" },
+                        { label: "Minimal", value: "minimal" },
                         { label: "Low", value: "low" },
                         { label: "Medium", value: "medium" },
                         { label: "High", value: "high" },
                         { label: "xhigh", value: "xhigh" },
+                        { label: "ultra", value: "ultra" },
                       ]}
                     />
                   </FieldBox>
@@ -1615,25 +1618,32 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
           ))}
         </div>
 
-        <aside className="relative hidden xl:block">
-          <div className="absolute -top-11 right-0">
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => void handleCopyMarkdown()}
-              disabled={copyingMd}
-              className="gap-1.5"
-            >
-              {copyingMd ? (
-                <Check className="size-3.5 text-emerald-500" />
-              ) : (
-                <Copy className="size-3.5" />
-              )}
-              {t("docs.copyMarkdown")}
-            </Button>
-          </div>
-          <div className="sticky top-4">
-            <DocsTOC items={tocItems} title={t("docs.tocTitle")} />
+        {/*
+          sticky + self-start on the grid item:
+          - self-start: aside height = content (not stretched), required for sticky to pin
+          - sticky top-4: stays in the viewport while the left column scrolls to the end
+        */}
+        <aside className="sticky top-4 z-10 hidden max-h-[calc(100dvh-2rem)] self-start xl:block">
+          <div className="flex h-full max-h-[calc(100dvh-2rem)] flex-col gap-3">
+            <div className="flex shrink-0 justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => void handleCopyMarkdown()}
+                disabled={copyingMd}
+                className="gap-1.5"
+              >
+                {copyingMd ? (
+                  <Check className="size-3.5 text-emerald-500" />
+                ) : (
+                  <Copy className="size-3.5" />
+                )}
+                {t("docs.copyMarkdown")}
+              </Button>
+            </div>
+            <div className="min-h-0 flex-1 overflow-hidden">
+              <DocsTOC items={tocItems} title={t("docs.tocTitle")} />
+            </div>
           </div>
         </aside>
       </div>

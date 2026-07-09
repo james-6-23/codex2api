@@ -22,7 +22,38 @@ import {
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { Copy, Download, Eye, Image as ImageIcon, Loader2, Pencil, Play, Plus, RefreshCcw, Save, Search, Sparkles, Star, Trash2, Upload, X } from 'lucide-react'
+import {
+  Check,
+  ChevronDown,
+  Clapperboard,
+  Copy,
+  Download,
+  Eye,
+  Image as ImageIcon,
+  LayoutTemplate,
+  Loader2,
+  Monitor,
+  Package,
+  Palette,
+  Pencil,
+  Play,
+  Plus,
+  RectangleHorizontal,
+  RectangleVertical,
+  RefreshCcw,
+  Save,
+  Search,
+  ShoppingBag,
+  Sparkles,
+  Square,
+  Star,
+  Sticker,
+  Trash2,
+  Upload,
+  X,
+} from 'lucide-react'
+import type { LucideIcon } from 'lucide-react'
+import { cn } from '@/lib/utils'
 
 const IMAGE_VIEWS = ['studio', 'prompts', 'gallery', 'history'] as const
 type ImageView = typeof IMAGE_VIEWS[number]
@@ -77,6 +108,47 @@ const SIZE_OPTIONS = [
 const SIZE_2K_VALUES = new Set(['auto', '2048x2048', '2560x1440', '1440x2560'])
 const SIZE_4K_VALUES = new Set(['auto', '3840x2160', '2160x3840', '2880x2880'])
 
+const ASPECT_RATIO_IDS = ['auto', '1:1', '16:9', '9:16'] as const
+type AspectRatioId = typeof ASPECT_RATIO_IDS[number]
+
+const ASPECT_RATIO_SIZE_MAP: Record<string, Record<Exclude<AspectRatioId, 'auto'>, string>> = {
+  'gpt-image-2': {
+    '1:1': '1024x1024',
+    '16:9': '1536x864',
+    '9:16': '864x1536',
+  },
+  [IMAGE_MODEL_2K_ALIAS]: {
+    '1:1': '2048x2048',
+    '16:9': '2560x1440',
+    '9:16': '1440x2560',
+  },
+  [IMAGE_MODEL_4K_ALIAS]: {
+    '1:1': '2880x2880',
+    '16:9': '3840x2160',
+    '9:16': '2160x3840',
+  },
+}
+
+const SIZE_TO_ASPECT: Record<string, AspectRatioId> = {
+  auto: 'auto',
+  '1024x1024': '1:1',
+  '2048x2048': '1:1',
+  '2880x2880': '1:1',
+  '1536x864': '16:9',
+  '2560x1440': '16:9',
+  '3840x2160': '16:9',
+  '864x1536': '9:16',
+  '1440x2560': '9:16',
+  '2160x3840': '9:16',
+}
+
+const ASPECT_RATIO_ICONS: Record<AspectRatioId, LucideIcon> = {
+  auto: Sparkles,
+  '1:1': Square,
+  '16:9': RectangleHorizontal,
+  '9:16': RectangleVertical,
+}
+
 const QUALITY_OPTIONS = [
   { label: 'Auto', value: 'auto' },
   { label: 'High', value: 'high' },
@@ -96,36 +168,54 @@ const STYLE_PRESETS = [
   {
     id: 'cinematic',
     value: 'Cinematic realistic photography, natural light, subtle film grain, rich but controlled color grading, soft shadows, professional composition, high detail.',
+    icon: Clapperboard,
+    swatch: 'bg-gradient-to-br from-amber-700 via-stone-800 to-slate-950',
   },
   {
     id: 'commerce',
     value: 'Clean commercial product photography, premium studio lighting, crisp edges, realistic materials, neutral background, catalog-ready composition, high detail.',
+    icon: ShoppingBag,
+    swatch: 'bg-gradient-to-br from-slate-100 via-white to-sky-100 text-slate-700',
   },
   {
     id: 'sticker',
     value: 'Cute sticker illustration, bold clean outline, simple readable shapes, vibrant colors, playful expression, isolated subject, transparent-background friendly.',
+    icon: Sticker,
+    swatch: 'bg-gradient-to-br from-pink-400 via-rose-300 to-orange-300 text-rose-900',
   },
   {
     id: 'toy',
     value: 'Premium 3D designer toy style, soft rounded forms, glossy vinyl material, studio render lighting, collectible figure presentation, charming details.',
+    icon: Package,
+    swatch: 'bg-gradient-to-br from-violet-500 via-fuchsia-400 to-amber-300 text-violet-950',
   },
   {
     id: 'icon',
     value: 'Modern flat vector icon style, geometric shapes, simple silhouette, balanced negative space, clean edges, limited color palette, app-icon ready.',
+    icon: LayoutTemplate,
+    swatch: 'bg-gradient-to-br from-blue-500 via-indigo-500 to-cyan-400',
   },
   {
     id: 'poster',
     value: 'Vintage editorial poster style, bold typography space, textured print grain, strong focal composition, retro color palette, dramatic visual hierarchy.',
+    icon: Palette,
+    swatch: 'bg-gradient-to-br from-red-700 via-amber-600 to-yellow-500',
   },
   {
     id: 'anime',
     value: 'Polished anime illustration style, expressive character design, clean line art, soft cel shading, luminous color accents, detailed atmosphere.',
+    icon: Sparkles,
+    swatch: 'bg-gradient-to-br from-fuchsia-500 via-purple-400 to-sky-300 text-fuchsia-950',
   },
   {
     id: 'wallpaper',
     value: 'Minimal premium wallpaper style, spacious composition, refined lighting, elegant color contrast, calm background depth, suitable for desktop or mobile wallpaper.',
+    icon: Monitor,
+    swatch: 'bg-gradient-to-br from-slate-900 via-indigo-950 to-emerald-900',
   },
 ] as const
+
+const MAX_INPUT_IMAGES = 10
 
 function normalizeImageView(value?: string): ImageView {
   return IMAGE_VIEWS.includes(value as ImageView) ? value as ImageView : 'studio'
@@ -163,9 +253,20 @@ function sizeOptionsForModel(model: string) {
   }
 }
 
+function aspectFromSize(size: string): AspectRatioId {
+  return SIZE_TO_ASPECT[stringsTrimOrAuto(size)] ?? 'auto'
+}
+
+function sizeForAspect(model: string, aspect: AspectRatioId): string {
+  if (aspect === 'auto') return 'auto'
+  const map = ASPECT_RATIO_SIZE_MAP[model] ?? ASPECT_RATIO_SIZE_MAP['gpt-image-2']
+  return map[aspect]
+}
+
 function normalizeImageSizeForModel(model: string, size: string): string {
   const value = stringsTrimOrAuto(size)
-  return sizeOptionsForModel(model).some(option => option.value === value) ? value : 'auto'
+  if (sizeOptionsForModel(model).some(option => option.value === value)) return value
+  return sizeForAspect(model, aspectFromSize(value))
 }
 
 function stringsTrimOrAuto(value: string): string {
@@ -432,42 +533,51 @@ export default function ImageStudio() {
   const [templateTags, setTemplateTags] = useState('')
   const [imageToImageMode, setImageToImageMode] = useState(false)
   const [inputImageDataURLs, setInputImageDataURLs] = useState<string[]>([])
+  const inputImageDataURLsRef = useRef(inputImageDataURLs)
+  inputImageDataURLsRef.current = inputImageDataURLs
+  const [advancedOpen, setAdvancedOpen] = useState(false)
+  const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
 
-  const handleImageFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files
-    if (!files || files.length === 0) return
-    const MAX_INPUT_IMAGES = 10
-    const currentCount = inputImageDataURLs.length
-    if (currentCount >= MAX_INPUT_IMAGES) {
+  const appendInputImages = useCallback((files: FileList | File[]) => {
+    const list = Array.from(files).filter(file => file.type.startsWith('image/'))
+    if (list.length === 0) return
+
+    // Read length outside the state updater so toast/FileReader side effects run once
+    // (React may re-invoke pure updaters under StrictMode / concurrent rendering).
+    const prevLength = inputImageDataURLsRef.current.length
+    if (prevLength >= MAX_INPUT_IMAGES) {
       showToast(t('images.maxInputImages', { max: MAX_INPUT_IMAGES }), 'error')
-      e.target.value = ''
       return
     }
-    const remaining = MAX_INPUT_IMAGES - currentCount
-    const filesToRead = Array.from(files).slice(0, remaining)
-    const reads: Promise<string>[] = []
-    for (let i = 0; i < filesToRead.length; i++) {
-      reads.push(new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result as string)
-        reader.onerror = () => reject(new Error('Failed to read file'))
-        reader.readAsDataURL(filesToRead[i])
-      }))
+    const remaining = MAX_INPUT_IMAGES - prevLength
+    const filesToRead = list.slice(0, remaining)
+    if (list.length > remaining) {
+      showToast(t('images.maxInputImages', { max: MAX_INPUT_IMAGES }), 'error')
     }
-    Promise.allSettled(reads).then(results => {
+
+    void Promise.allSettled(filesToRead.map(file => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error('Failed to read file'))
+      reader.readAsDataURL(file)
+    }))).then(results => {
       const dataURLs: string[] = []
       for (const r of results) {
         if (r.status === 'fulfilled') dataURLs.push(r.value)
       }
       if (dataURLs.length > 0) {
-        setInputImageDataURLs(prev => [...prev, ...dataURLs].slice(0, MAX_INPUT_IMAGES))
+        setInputImageDataURLs(current => [...current, ...dataURLs].slice(0, MAX_INPUT_IMAGES))
       }
       if (dataURLs.length < results.length) {
         showToast(t('images.loadFailed'), 'error')
       }
     })
+  }, [showToast, t])
+
+  const handleImageFileChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.length) appendInputImages(e.target.files)
     e.target.value = ''
-  }, [showToast, t, inputImageDataURLs])
+  }, [appendInputImages])
 
   useEffect(() => {
     if (view && !IMAGE_VIEWS.includes(view as ImageView)) {
@@ -1033,7 +1143,6 @@ export default function ImageStudio() {
   const templateSelectOptions = templates.length > 0
     ? [{ label: t('images.noTemplateSelected'), value: '' }, ...templates.map(template => ({ label: template.name || `#${template.id}`, value: String(template.id) }))]
     : [{ label: t('images.noTemplates'), value: '' }]
-  const sizeOptions = useMemo(() => sizeOptionsForModel(model), [model])
   const backgroundOptions = useMemo(() => [
     { label: t('images.backgroundOptions.auto'), value: 'auto' },
     { label: t('images.backgroundOptions.opaque'), value: 'opaque' },
@@ -1080,149 +1189,265 @@ export default function ImageStudio() {
 
   const changeGenerationModel = (value: string) => {
     setModel(value)
-    setSize(current => normalizeImageSizeForModel(value, current))
+    setSize(current => sizeForAspect(value, aspectFromSize(current)))
+  }
+
+  const selectedAspect = aspectFromSize(size)
+
+  const submitGeneration = () => {
+    void submitJob(createJobPayload(), imageToImageMode ? 'edit' : 'text')
   }
 
   const generationForm = (
-    <Card className="xl:sticky xl:top-4">
-      <CardContent className="flex flex-col gap-4 xl:min-h-[calc(100dvh-168px)]">
-        <Field label={t('images.selectTemplate')}>
-          <Select
-            value={selectedTemplateId ? String(selectedTemplateId) : ''}
-            onValueChange={selectTemplateForGeneration}
-            options={templateSelectOptions}
-            disabled={templates.length === 0}
-          />
-        </Field>
+    <Card className="overflow-hidden">
+      <CardContent className="space-y-3 p-3 sm:p-4">
+        {/* 顶栏工具行：模式 / 模板 / 模型 / 比例 / 操作 */}
+        <div className="flex flex-col gap-2.5 lg:flex-row lg:items-end">
+          <div className="flex min-w-0 flex-1 flex-col gap-2.5 sm:flex-row sm:items-end">
+            <div className="flex shrink-0 rounded-xl border border-border bg-muted/40 p-1 sm:w-auto">
+              <button
+                type="button"
+                className={cn(
+                  'inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all sm:flex-none',
+                  !imageToImageMode
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                onClick={() => setImageToImageMode(false)}
+              >
+                <ImageIcon className="size-3.5" />
+                {t('images.textToImage')}
+              </button>
+              <button
+                type="button"
+                className={cn(
+                  'inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-semibold transition-all sm:flex-none',
+                  imageToImageMode
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground',
+                )}
+                onClick={() => setImageToImageMode(true)}
+              >
+                <Upload className="size-3.5" />
+                {t('images.imageToImage')}
+              </button>
+            </div>
 
-        <div className="flex items-center gap-2">
-          <span className="text-xs font-semibold text-muted-foreground">{t('images.mode')}:</span>
-          <div className="flex rounded-md border border-input bg-muted/50 p-0.5">
-            <button
-              type="button"
-              className={`rounded-[3px] px-3 py-1 text-xs font-semibold transition-colors ${!imageToImageMode ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
-              onClick={() => setImageToImageMode(false)}
-            >
-              <ImageIcon className="mr-1 inline-block size-3" />
-              {t('images.textToImage')}
-            </button>
-            <button
-              type="button"
-              className={`rounded-[3px] px-3 py-1 text-xs font-semibold transition-colors ${imageToImageMode ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}
-              onClick={() => setImageToImageMode(true)}
-            >
-              <Upload className="mr-1 inline-block size-3" />
-              {t('images.imageToImage')}
-            </button>
+            <div className="min-w-0 flex-1 sm:max-w-[220px]">
+              <Field label={t('images.selectTemplate')}>
+                <Select
+                  value={selectedTemplateId ? String(selectedTemplateId) : ''}
+                  onValueChange={selectTemplateForGeneration}
+                  options={templateSelectOptions}
+                  disabled={templates.length === 0}
+                  compact
+                />
+              </Field>
+            </div>
+
+            <div className="min-w-0 flex-1 sm:max-w-[200px]">
+              <Field label={t('images.model')}>
+                <Select value={model} onValueChange={changeGenerationModel} options={IMAGE_MODELS} compact />
+              </Field>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-end gap-2">
+            <div className="space-y-1">
+              <div className="flex items-center gap-1.5">
+                <span className="text-xs font-semibold text-muted-foreground">{t('images.aspectRatio')}</span>
+                {selectedAspect !== 'auto' && (
+                  <span className="text-[10px] tabular-nums text-muted-foreground">{size}</span>
+                )}
+              </div>
+              <div className="flex gap-1">
+                {ASPECT_RATIO_IDS.map(aspect => {
+                  const Icon = ASPECT_RATIO_ICONS[aspect]
+                  const active = selectedAspect === aspect
+                  return (
+                    <button
+                      key={aspect}
+                      type="button"
+                      onClick={() => setSize(sizeForAspect(model, aspect))}
+                      title={t(`images.aspect.${aspect === '1:1' ? 'square' : aspect === '16:9' ? 'landscape' : aspect === '9:16' ? 'portrait' : 'auto'}`)}
+                      className={cn(
+                        'inline-flex h-8 min-w-8 items-center justify-center gap-1 rounded-lg border px-2 text-[10px] font-semibold transition-all',
+                        active
+                          ? 'border-primary/40 bg-primary/10 text-primary shadow-xs'
+                          : 'border-border/80 bg-muted/20 text-muted-foreground hover:border-primary/25 hover:bg-muted/40 hover:text-foreground',
+                      )}
+                    >
+                      <Icon className="size-3.5" />
+                      <span className="hidden xs:inline sm:inline">
+                        {t(`images.aspect.${aspect === '1:1' ? 'square' : aspect === '16:9' ? 'landscape' : aspect === '9:16' ? 'portrait' : 'auto'}`)}
+                      </span>
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
+
+            <div className="ml-auto flex items-center gap-1.5 sm:ml-0">
+              <Button
+                variant="outline"
+                size="sm"
+                className="shrink-0"
+                disabled={submitting || !hasGenerationDraft}
+                onClick={clearGenerationForm}
+              >
+                <X className="size-3.5" />
+                <span className="hidden sm:inline">{t('images.clearSelection')}</span>
+              </Button>
+              <Button
+                size="sm"
+                className={cn(
+                  'min-w-[7.5rem] transition-shadow',
+                  prompt.trim() && !submitting && 'shadow-[0_0_0_1px_color-mix(in_oklab,var(--color-primary)_35%,transparent),0_8px_20px_-10px_color-mix(in_oklab,var(--color-primary)_55%,transparent)]',
+                )}
+                disabled={submitting || !prompt.trim()}
+                onClick={submitGeneration}
+              >
+                {submitting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
+                {t('images.generateImage')}
+              </Button>
+            </div>
           </div>
         </div>
 
-        <div className="grid gap-3 md:grid-cols-3">
-          <Field label={t('images.model')}><Select value={model} onValueChange={changeGenerationModel} options={IMAGE_MODELS} compact /></Field>
-          <Field label={t('images.size')}><Select value={size} onValueChange={setSize} options={sizeOptions} compact /></Field>
-          <Field label={t('images.quality')}><Select value={quality} onValueChange={setQuality} options={QUALITY_OPTIONS} compact /></Field>
-          <Field label={t('images.format')}><Select value={outputFormat} onValueChange={setOutputFormat} options={FORMAT_OPTIONS} compact /></Field>
-          <Field label={t('images.background')}><Select value={background} onValueChange={setBackground} options={backgroundOptions} compact /></Field>
-          <Field label={t('images.localUpscale')}><Select value={upscale} onValueChange={setUpscale} options={upscaleOptions} compact /></Field>
-          <Field label={t('images.apiKey')}>
-            <Select
-              value={apiKeyID}
-              onValueChange={setAPIKeyID}
-              options={[{ label: t('images.autoApiKey'), value: '' }, ...apiKeys.map(key => ({ label: key.name ? `${key.name} · ${key.key}` : key.key, value: String(key.id) }))]}
+        {/* Prompt + 可选参考图 */}
+        <div className={cn('grid gap-3', imageToImageMode && 'lg:grid-cols-[minmax(0,1fr)_minmax(200px,280px)]')}>
+          <label className="flex min-w-0 flex-col gap-1.5">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-xs font-semibold text-muted-foreground">{t('images.prompt')}</span>
+              <span className="text-[11px] tabular-nums text-muted-foreground">
+                {t('images.promptChars', { count: prompt.length })}
+                <span className="ml-2 hidden text-muted-foreground/70 sm:inline">{t('images.promptShortcut')}</span>
+              </span>
+            </div>
+            <textarea
+              value={prompt}
+              onChange={e => setPrompt(e.target.value)}
+              onKeyDown={e => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && prompt.trim() && !submitting) {
+                  e.preventDefault()
+                  submitGeneration()
+                }
+              }}
+              className="min-h-[88px] w-full resize-y rounded-xl border border-input bg-transparent px-3 py-2.5 text-sm leading-6 shadow-xs outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 dark:bg-input/30 sm:min-h-[100px]"
+              placeholder={t('images.promptPlaceholder')}
+            />
+          </label>
+
+          {imageToImageMode && (
+            <ReferenceImageDropzone
+              images={inputImageDataURLs}
+              onFiles={appendInputImages}
+              onFileInput={handleImageFileChange}
+              onRemove={index => setInputImageDataURLs(prev => prev.filter((_, i) => i !== index))}
               compact
             />
-          </Field>
+          )}
         </div>
-
-        <Field label={t('images.style')}>
-          <Input value={style} onChange={e => setStyle(e.target.value)} placeholder={t('images.stylePlaceholder')} />
-        </Field>
 
         <StylePresetPicker value={style} onChange={setStyle} onApply={() => showToast(t('images.stylePresetApplied'), 'success')} />
 
-        {imageToImageMode && (
-          <div className="space-y-2">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-semibold text-muted-foreground">{t('images.inputImage')}</span>
-              <label className="inline-flex cursor-pointer items-center rounded-md px-2 py-1 text-xs font-semibold text-primary hover:bg-primary/10 transition-colors">
-                <Upload className="mr-1 size-3" />
-                {t('images.upload')}
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={handleImageFileChange}
-                />
-              </label>
-            </div>
-            {inputImageDataURLs.length > 0 ? (
-              <div className="flex flex-wrap gap-2">
-                {inputImageDataURLs.map((dataURL, index) => (
-                  <div key={`${index}-${dataURL.slice(0, 40)}`} className="group relative">
-                    <img src={dataURL} alt={`Input ${index + 1}`} className="h-20 w-20 rounded-md border border-border object-cover" />
-                    <button
-                      type="button"
-                      className="absolute -top-1.5 -right-1.5 flex size-5 items-center justify-center rounded-full bg-destructive text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100"
-                      onClick={() => setInputImageDataURLs(prev => prev.filter((_, i) => i !== index))}
-                      title={t('images.removeImage')}
-                    >
-                      <X className="size-3" />
-                    </button>
-                  </div>
-                ))}
+        {/* 高级折叠 */}
+        <div className="overflow-hidden rounded-xl border border-border/80">
+          <button
+            type="button"
+            onClick={() => setAdvancedOpen(open => !open)}
+            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-xs font-semibold text-muted-foreground transition-colors hover:bg-muted/40 hover:text-foreground"
+          >
+            <span className="inline-flex items-center gap-2">
+              {t('images.advancedParams')}
+              <span className="font-normal text-muted-foreground/80">
+                {size === 'auto' ? t('images.autoSizeHint') : t('images.explicitSizeHint', { size })}
+              </span>
+            </span>
+            <ChevronDown className={cn('size-3.5 shrink-0 transition-transform', advancedOpen && 'rotate-180')} />
+          </button>
+          {advancedOpen ? (
+            <div className="space-y-3 border-t border-border px-3 py-3">
+              <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+                <Field label={t('images.quality')}>
+                  <Select value={quality} onValueChange={setQuality} options={QUALITY_OPTIONS} compact />
+                </Field>
+                <Field label={t('images.format')}>
+                  <Select value={outputFormat} onValueChange={setOutputFormat} options={FORMAT_OPTIONS} compact />
+                </Field>
+                <Field label={t('images.background')}>
+                  <Select value={background} onValueChange={setBackground} options={backgroundOptions} compact />
+                </Field>
+                <Field label={t('images.localUpscale')}>
+                  <Select value={upscale} onValueChange={setUpscale} options={upscaleOptions} compact />
+                </Field>
               </div>
-            ) : (
-              <label className="flex cursor-pointer flex-col items-center justify-center rounded-md border border-dashed border-border bg-muted/30 py-6 text-center text-xs text-muted-foreground hover:bg-muted/50 transition-colors">
-                <Upload className="mb-1 size-4 opacity-50" />
-                {t('images.inputImageHint')}
-                <input
-                  type="file"
-                  accept="image/*"
-                  multiple
-                  className="hidden"
-                  onChange={handleImageFileChange}
-                />
-              </label>
-            )}
-          </div>
-        )}
-
-        <label className="flex min-h-0 flex-1 flex-col space-y-1.5">
-          <span className="text-xs font-semibold text-muted-foreground">{t('images.prompt')}</span>
-          <textarea
-            value={prompt}
-            onChange={e => setPrompt(e.target.value)}
-            className="min-h-[260px] w-full flex-1 resize-none rounded-md border border-input bg-transparent px-3 py-2 text-sm leading-6 shadow-xs outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 xl:min-h-0 dark:bg-input/30"
-            placeholder={t('images.promptPlaceholder')}
-          />
-        </label>
-
-        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px]">
-          <div className="grid gap-3 md:grid-cols-2">
-            <Input value={templateName} onChange={e => setTemplateName(e.target.value)} placeholder={t('images.templateName')} />
-            <Input value={templateTags} onChange={e => setTemplateTags(e.target.value)} placeholder={t('images.templateTags')} />
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" className="flex-1" disabled={!prompt.trim()} onClick={() => void saveCurrentPromptAsTemplate()}><Save className="size-4" />{t('images.saveTemplate')}</Button>
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
-          <div className="text-xs text-muted-foreground">{size === 'auto' ? t('images.autoSizeHint') : t('images.explicitSizeHint', { size })}</div>
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <Button variant="outline" disabled={submitting || !hasGenerationDraft} onClick={clearGenerationForm}>
-              <X className="size-4" />
-              {t('images.clearSelection')}
-            </Button>
-            <Button disabled={submitting || !prompt.trim()} onClick={() => void submitJob(createJobPayload(), imageToImageMode ? 'edit' : 'text')}>
-              {submitting ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
-              {t('images.generate')}
-            </Button>
-          </div>
+              <div className="grid gap-2 sm:grid-cols-2">
+                <Field label={t('images.apiKey')}>
+                  <Select
+                    value={apiKeyID}
+                    onValueChange={setAPIKeyID}
+                    options={[
+                      { label: t('images.autoApiKey'), value: '' },
+                      ...apiKeys.map(key => ({
+                        label: key.name ? `${key.name} · ${key.key}` : key.key,
+                        value: String(key.id),
+                      })),
+                    ]}
+                    compact
+                  />
+                </Field>
+                <Field label={t('images.style')}>
+                  <Input value={style} onChange={e => setStyle(e.target.value)} placeholder={t('images.stylePlaceholder')} />
+                </Field>
+              </div>
+              <div className="space-y-2 border-t border-border/70 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setSaveTemplateOpen(open => !open)}
+                  className="text-xs font-semibold text-primary hover:underline"
+                >
+                  {t('images.saveTemplateSection')}
+                </button>
+                {saveTemplateOpen ? (
+                  <div className="grid gap-2 sm:grid-cols-[1fr_1fr_auto]">
+                    <Input value={templateName} onChange={e => setTemplateName(e.target.value)} placeholder={t('images.templateName')} />
+                    <Input value={templateTags} onChange={e => setTemplateTags(e.target.value)} placeholder={t('images.templateTags')} />
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      disabled={!prompt.trim()}
+                      onClick={() => void saveCurrentPromptAsTemplate()}
+                    >
+                      <Save className="size-3.5" />
+                      {t('images.saveTemplate')}
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
         </div>
       </CardContent>
     </Card>
+  )
+
+  const studioCanvas = (
+    <StudioCanvas
+      currentJob={currentJob}
+      latestAsset={latestAsset}
+      imageURL={latestAsset ? assetPreviewURL(latestAsset, assetURLs) : undefined}
+      prompt={currentJob?.prompt || (latestAsset ? promptForAsset(latestAsset) : '')}
+      onPreview={() => latestAsset && setPreviewAsset(latestAsset)}
+      onDownload={() => latestAsset && void downloadAsset(latestAsset)}
+      onCopyPrompt={() => {
+        if (currentJob?.prompt) void copyPrompt(currentJob.prompt)
+        else if (latestAsset) void copyPrompt(promptForAsset(latestAsset) || latestAsset.revised_prompt || '')
+      }}
+      onRerun={() => currentJob && rerunFromJob(currentJob)}
+      onSaveTemplate={() => latestAsset && void saveAssetPromptAsTemplate(latestAsset)}
+      onDelete={() => latestAsset && void deleteAsset(latestAsset)}
+    />
   )
 
   const templateLibrary = (
@@ -1281,85 +1506,85 @@ export default function ImageStudio() {
     </div>
   )
 
-  const currentJobPanel = (
-    <Card>
-      <CardContent className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold">{t('images.currentJob')}</h2>
-          {currentJob && (
-            <div className="flex items-center gap-1.5">
-              <Badge className={jobStatusClass(currentJob.status)}>{t(`images.status.${currentJob.status}`, { defaultValue: currentJob.status })}</Badge>
-              {!isImageJobBusy(currentJob) && (
-                <Button size="icon-xs" variant="ghost" onClick={() => void deleteJob(currentJob)} aria-label={t('images.deleteJob')} title={t('images.deleteJob')}>
-                  <Trash2 className="size-3" />
-                </Button>
-              )}
-            </div>
-          )}
-        </div>
-        {currentJob ? (
-          <>
-            <div className="space-y-1 text-xs text-muted-foreground">
-              <div className="flex justify-between gap-3"><span>ID</span><span className="font-geist-mono">{currentJob.id}</span></div>
-              <div className="flex justify-between gap-3"><span>{t('images.duration')}</span><span>{formatDuration(currentJob.duration_ms)}</span></div>
-              <div className="flex justify-between gap-3"><span>{t('images.createdAt')}</span><span>{formatBeijingTime(currentJob.created_at)}</span></div>
-              <div className="flex justify-between gap-3"><span>{t('images.apiKey')}</span><span className="truncate">{currentJob.api_key_name || currentJob.api_key_masked || '-'}</span></div>
-            </div>
-            {['queued', 'running'].includes(currentJob.status) && (
-              <div className="flex items-center gap-2 rounded-lg bg-muted px-3 py-2 text-sm text-muted-foreground">
-                <Loader2 className="size-4 animate-spin" />
-                {t('images.waiting')}
-              </div>
-            )}
-            {currentJob.error_message && <div className="rounded-lg border border-red-500/20 bg-red-500/10 p-3 text-sm text-red-700 dark:text-red-200">{currentJob.error_message}</div>}
-            {latestAsset && (
-              <AssetCard
-                asset={latestAsset}
-                imageURL={assetThumbnailURL(latestAsset, assetURLs)}
-                prompt={currentJob.prompt}
-                compact
-                onPreview={() => setPreviewAsset(latestAsset)}
-                onDownload={() => void downloadAsset(latestAsset)}
-                onDelete={() => void deleteAsset(latestAsset)}
-                onCopyPrompt={() => void copyPrompt(currentJob.prompt)}
-                onRerun={() => rerunFromJob(currentJob)}
-                onSaveTemplate={() => void saveAssetPromptAsTemplate(latestAsset)}
-              />
-            )}
-          </>
-        ) : (
-          <div className="rounded-lg border border-dashed border-border p-6 text-center text-sm text-muted-foreground">{t('images.noCurrentJob')}</div>
-        )}
-      </CardContent>
-    </Card>
-  )
-
-  const recentJobsPanel = (
-    <Card>
-      <CardContent className="space-y-3">
-        <div className="flex items-center justify-between">
-          <h2 className="font-semibold">{t('images.recentJobs')}</h2>
-          <div className="flex items-center gap-1">
-            <Button size="xs" variant="ghost" onClick={() => navigate('/images/history')}>{t('images.viewAllJobs')}</Button>
-            <Button size="icon-sm" variant="ghost" onClick={() => void loadJobs()}><RefreshCcw className="size-4" /></Button>
+  // 底部任务条：横向胶片时间线（适配垂直布局）
+  const jobTimelinePanel = (
+    <Card className="overflow-hidden py-0">
+      <CardContent className="flex flex-col gap-0 p-0">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-3.5 py-2">
+          <h2 className="text-sm font-semibold">{t('images.jobTimeline')}</h2>
+          <div className="flex items-center gap-0.5">
+            <Button size="xs" variant="ghost" onClick={() => navigate('/images/history')}>
+              {t('images.viewAllJobs')}
+            </Button>
+            <Button size="icon-sm" variant="ghost" onClick={() => void loadJobs()}>
+              <RefreshCcw className="size-3.5" />
+            </Button>
           </div>
         </div>
-        <div className="space-y-2">
-          {recentJobs.map(job => (
-            <button key={job.id} className="w-full rounded-lg border border-border p-3 text-left transition-colors hover:bg-muted/50" onClick={() => setCurrentJob(job)}>
-              <div className="flex items-center justify-between gap-2">
-                <span className="truncate text-sm font-semibold">#{job.id}</span>
-                <Badge className={jobStatusClass(job.status)}>{t(`images.status.${job.status}`, { defaultValue: job.status })}</Badge>
-              </div>
-              <div className="mt-1 line-clamp-2 text-xs leading-5 text-muted-foreground">{job.prompt}</div>
-              <div className="mt-2 flex items-center justify-between text-[11px] text-muted-foreground">
-                <span>{formatDuration(job.duration_ms)}</span>
-                <span>{formatBeijingTime(job.created_at)}</span>
-              </div>
-            </button>
-          ))}
-          {!loading && recentJobs.length === 0 && (
-            <div className="rounded-lg border border-dashed border-border p-5 text-center text-sm text-muted-foreground">{t('images.noJobs')}</div>
+        <div className="overflow-x-auto p-2.5">
+          {recentJobs.length === 0 && !currentJob && !loading ? (
+            <div className="rounded-xl border border-dashed border-border px-3 py-6 text-center text-xs text-muted-foreground">
+              {t('images.noJobs')}
+            </div>
+          ) : (
+            <div className="flex min-w-0 gap-2">
+              {(() => {
+                const seen = new Set<number>()
+                const list: ImageGenerationJob[] = []
+                if (currentJob) {
+                  list.push(currentJob)
+                  seen.add(currentJob.id)
+                }
+                for (const job of recentJobs) {
+                  if (seen.has(job.id)) continue
+                  list.push(job)
+                  seen.add(job.id)
+                }
+                return list.map(job => {
+                  const active = currentJob?.id === job.id
+                  const thumb = job.assets?.[0]
+                  const thumbURL = thumb ? assetThumbnailURL(thumb, assetURLs) : undefined
+                  return (
+                    <button
+                      key={job.id}
+                      type="button"
+                      className={cn(
+                        'flex w-[200px] shrink-0 items-start gap-2 rounded-xl border p-2 text-left transition-colors',
+                        active
+                          ? 'border-primary/40 bg-primary/6'
+                          : 'border-border/70 hover:border-border hover:bg-muted/45',
+                      )}
+                      onClick={() => setCurrentJob(job)}
+                    >
+                      <div className="relative size-11 shrink-0 overflow-hidden rounded-lg border border-border bg-muted">
+                        {thumbURL ? (
+                          <img src={thumbURL} alt="" className="size-full object-cover" />
+                        ) : isImageJobBusy(job) ? (
+                          <div className="flex size-full items-center justify-center">
+                            <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                          </div>
+                        ) : (
+                          <div className="flex size-full items-center justify-center">
+                            <ImageIcon className="size-3.5 text-muted-foreground" />
+                          </div>
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center justify-between gap-1">
+                          <span className="font-mono text-[12px] font-semibold tabular-nums">#{job.id}</span>
+                          <Badge className={cn(jobStatusClass(job.status), 'text-[10px]')}>
+                            {t(`images.status.${job.status}`, { defaultValue: job.status })}
+                          </Badge>
+                        </div>
+                        <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-muted-foreground">
+                          {job.prompt || '—'}
+                        </div>
+                      </div>
+                    </button>
+                  )
+                })
+              })()}
+            </div>
           )}
         </div>
       </CardContent>
@@ -1452,7 +1677,7 @@ export default function ImageStudio() {
           <Button variant="outline" size="sm" disabled={assetPage >= maxAssetPage} onClick={() => setAssetPage(page => page + 1)}>{t('common.next')}</Button>
         </div>
       </div>
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 xl:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:gap-2.5 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
         {assets.map(asset => (
           <AssetCard
             key={asset.id}
@@ -1485,12 +1710,11 @@ export default function ImageStudio() {
       {confirmDialog}
 
       {activeView === 'studio' && (
-        <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_360px]">
-          <main className="space-y-4">{generationForm}</main>
-          <aside className="space-y-4">
-            {currentJobPanel}
-            {recentJobsPanel}
-          </aside>
+        <div className="flex min-w-0 flex-col gap-3">
+          {/* 垂直布局：顶部创作栏 → 画布 → 任务条 */}
+          <div className="min-w-0">{generationForm}</div>
+          <div className="min-w-0">{studioCanvas}</div>
+          <div className="min-w-0">{jobTimelinePanel}</div>
         </div>
       )}
 
@@ -1635,6 +1859,283 @@ function ImageStudioTabs({ activeView }: { activeView: ImageView }) {
   )
 }
 
+function StudioCanvas({
+  currentJob,
+  latestAsset,
+  imageURL,
+  prompt,
+  onPreview,
+  onDownload,
+  onCopyPrompt,
+  onRerun,
+  onSaveTemplate,
+  onDelete,
+}: {
+  currentJob: ImageGenerationJob | null
+  latestAsset?: ImageAsset
+  imageURL?: string
+  prompt: string
+  onPreview: () => void
+  onDownload: () => void
+  onCopyPrompt: () => void
+  onRerun: () => void
+  onSaveTemplate: () => void
+  onDelete: () => void
+}) {
+  const { t } = useTranslation()
+  const busy = currentJob ? isImageJobBusy(currentJob) : false
+  const failed = currentJob?.status === 'failed'
+  const hasResult = Boolean(latestAsset && imageURL)
+  const stageLabel = currentJob?.status === 'queued'
+    ? t('images.canvasQueued')
+    : t('images.canvasGenerating')
+
+  return (
+    <Card className="overflow-hidden border-border/80 py-0 shadow-sm">
+      <CardContent className="relative flex min-h-[min(48dvh,480px)] flex-col p-0 sm:min-h-[min(44dvh,440px)]">
+        {/* 状态 pill：浮在画布角，不占整行标题栏 */}
+        {currentJob ? (
+          <div className="pointer-events-none absolute left-3 top-3 z-10 flex items-center gap-1.5 sm:left-4 sm:top-4">
+            <Badge className={cn(jobStatusClass(currentJob.status), 'pointer-events-auto shadow-sm backdrop-blur-sm')}>
+              {t(`images.status.${currentJob.status}`, { defaultValue: currentJob.status })}
+            </Badge>
+            <span className="rounded-full bg-background/80 px-2 py-0.5 font-mono text-[10px] text-muted-foreground shadow-sm backdrop-blur-sm">
+              #{currentJob.id}
+            </span>
+          </div>
+        ) : null}
+
+        <div className="image-studio-canvas-bg relative flex min-h-0 flex-1 items-center justify-center p-3 sm:p-5">
+          {!currentJob && (
+            <div className="flex max-w-xs flex-col items-center gap-3 px-3 text-center animate-image-studio-fade-in">
+              <div className="flex size-14 items-center justify-center rounded-2xl border border-border/70 bg-card/90 shadow-sm">
+                <Sparkles className="size-6 text-primary" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-foreground">{t('images.canvasEmptyTitle')}</div>
+                <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('images.canvasEmptyDesc')}</p>
+              </div>
+            </div>
+          )}
+
+          {currentJob && busy && (
+            <div className="flex w-full max-w-md flex-col items-center animate-image-studio-fade-in">
+              <div className="image-studio-checkerboard relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-border/70 shadow-inner">
+                <div className="absolute inset-0 bg-gradient-to-br from-primary/8 via-transparent to-primary/5" />
+                <div className="absolute inset-y-0 w-1/2 animate-image-studio-shimmer bg-gradient-to-r from-transparent via-white/25 to-transparent dark:via-white/10" />
+                <div className="absolute inset-0 flex flex-col items-center justify-center gap-3">
+                  <div className="flex size-12 items-center justify-center rounded-2xl border border-primary/20 bg-background/80 shadow-sm backdrop-blur-sm">
+                    <Loader2 className="size-6 animate-spin text-primary" />
+                  </div>
+                  <div className="text-center">
+                    <div className="text-sm font-semibold text-foreground">{stageLabel}</div>
+                    <p className="mt-1 text-[11px] text-muted-foreground">{t('images.canvasGeneratingHint')}</p>
+                  </div>
+                  <div className="h-1 w-36 overflow-hidden rounded-full bg-muted">
+                    <div className="h-full w-1/2 animate-image-studio-progress rounded-full bg-primary/70" />
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {currentJob && failed && !hasResult && (
+            <div className="flex max-w-sm flex-col items-center gap-3 px-2 text-center animate-image-studio-fade-in">
+              <div className="rounded-2xl border border-destructive/25 bg-destructive/10 px-4 py-3.5 animate-image-studio-shake">
+                <div className="text-sm font-semibold text-destructive">{t('images.canvasFailed')}</div>
+                {currentJob.error_message ? (
+                  <p className="mt-1.5 line-clamp-4 text-xs leading-relaxed text-destructive/90">
+                    {currentJob.error_message}
+                  </p>
+                ) : null}
+              </div>
+              <Button size="sm" variant="outline" onClick={onRerun}>
+                <RefreshCcw className="size-3.5" />
+                {t('images.rerun')}
+              </Button>
+            </div>
+          )}
+
+          {hasResult && latestAsset && (
+            <div
+              key={latestAsset.id}
+              className="group relative flex max-h-full w-full max-w-4xl flex-col items-center animate-image-studio-result-in"
+            >
+              <div className="image-studio-checkerboard relative max-h-[min(46dvh,460px)] w-full overflow-hidden rounded-2xl border border-border/70 shadow-md">
+                <button
+                  type="button"
+                  onClick={onPreview}
+                  className="block w-full cursor-zoom-in bg-card/40"
+                  aria-label={t('images.openPreview')}
+                >
+                  <img
+                    src={imageURL}
+                    alt={prompt || latestAsset.filename}
+                    className="mx-auto max-h-[min(46dvh,460px)] w-full object-contain"
+                  />
+                </button>
+                {/* 悬停工具条（与预览按钮分离，避免嵌套 button） */}
+                <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center bg-gradient-to-t from-black/55 via-black/25 to-transparent px-3 pb-3 pt-10 opacity-0 transition-opacity group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 max-sm:pointer-events-auto max-sm:opacity-100">
+                  <div className="flex flex-wrap items-center justify-center gap-1 rounded-full border border-white/15 bg-black/55 p-1 shadow-lg backdrop-blur-md">
+                    <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onPreview} title={t('images.openPreview')}>
+                      <Eye className="size-3.5" />
+                    </Button>
+                    <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onDownload} title={t('images.download')}>
+                      <Download className="size-3.5" />
+                    </Button>
+                    <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onCopyPrompt} title={t('images.copyPrompt')}>
+                      <Copy className="size-3.5" />
+                    </Button>
+                    <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onRerun} title={t('images.rerun')}>
+                      <RefreshCcw className="size-3.5" />
+                    </Button>
+                    <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onSaveTemplate} title={t('images.saveAsTemplate')}>
+                      <Save className="size-3.5" />
+                    </Button>
+                    <Button size="icon-sm" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onDelete} title={t('common.delete')}>
+                      <Trash2 className="size-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+              <div className="mt-2.5 flex flex-wrap justify-center gap-x-3 gap-y-0.5 text-[11px] text-muted-foreground animate-image-studio-fade-in-delay">
+                <span>{assetResolution(latestAsset)}</span>
+                <span>{formatBytes(latestAsset.bytes)}</span>
+                <span>{latestAsset.model}</span>
+              </div>
+            </div>
+          )}
+        </div>
+      </CardContent>
+    </Card>
+  )
+}
+
+function ReferenceImageDropzone({
+  images,
+  onFiles,
+  onFileInput,
+  onRemove,
+  compact = false,
+}: {
+  images: string[]
+  onFiles: (files: FileList | File[]) => void
+  onFileInput: (e: React.ChangeEvent<HTMLInputElement>) => void
+  onRemove: (index: number) => void
+  compact?: boolean
+}) {
+  const { t } = useTranslation()
+  const [dragging, setDragging] = useState(false)
+  const dragDepth = useRef(0)
+  const thumbClass = compact
+    ? 'h-16 w-16 rounded-lg sm:h-[4.5rem] sm:w-[4.5rem]'
+    : 'h-24 w-24 rounded-xl sm:h-28 sm:w-28'
+
+  const onDragEnter = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragDepth.current += 1
+    setDragging(true)
+  }
+  const onDragLeave = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragDepth.current = Math.max(0, dragDepth.current - 1)
+    if (dragDepth.current === 0) setDragging(false)
+  }
+  const onDragOver = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+  }
+  const onDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    dragDepth.current = 0
+    setDragging(false)
+    if (e.dataTransfer.files?.length) onFiles(e.dataTransfer.files)
+  }
+
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold text-muted-foreground">{t('images.inputImage')}</span>
+        {images.length > 0 ? (
+          <label className="inline-flex cursor-pointer items-center rounded-md px-2 py-1 text-xs font-semibold text-primary transition-colors hover:bg-primary/10">
+            <Upload className="mr-1 size-3" />
+            {t('images.upload')}
+            <input type="file" accept="image/*" multiple className="hidden" onChange={onFileInput} />
+          </label>
+        ) : null}
+      </div>
+      {images.length > 0 ? (
+        <div
+          className={cn(
+            'rounded-xl border border-border/80 bg-muted/15 p-2 transition-colors',
+            dragging && 'border-primary/50 bg-primary/8',
+          )}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+        >
+          <div className="flex flex-wrap gap-1.5">
+            {images.map((dataURL, index) => (
+              <div key={`${index}-${dataURL.slice(0, 40)}`} className="group relative">
+                <img
+                  src={dataURL}
+                  alt={`Input ${index + 1}`}
+                  className={cn(thumbClass, 'border border-border object-cover shadow-sm')}
+                />
+                <button
+                  type="button"
+                  className="absolute -right-1.5 -top-1.5 flex size-5 items-center justify-center rounded-full bg-destructive text-destructive-foreground opacity-0 transition-opacity group-hover:opacity-100 max-sm:opacity-100"
+                  onClick={() => onRemove(index)}
+                  title={t('images.removeImage')}
+                >
+                  <X className="size-3" />
+                </button>
+              </div>
+            ))}
+            {images.length < MAX_INPUT_IMAGES && (
+              <label
+                className={cn(
+                  thumbClass,
+                  'flex cursor-pointer flex-col items-center justify-center gap-0.5 border border-dashed border-border/80 text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary',
+                )}
+              >
+                <Plus className="size-3.5" />
+                <span className="text-[10px] font-semibold">{t('images.upload')}</span>
+                <input type="file" accept="image/*" multiple className="hidden" onChange={onFileInput} />
+              </label>
+            )}
+          </div>
+        </div>
+      ) : (
+        <label
+          className={cn(
+            'flex h-full min-h-[88px] cursor-pointer flex-col items-center justify-center rounded-xl border border-dashed px-3 text-center transition-all sm:min-h-[100px]',
+            compact ? 'py-4' : 'py-9',
+            dragging
+              ? 'border-primary bg-primary/10 text-primary shadow-sm'
+              : 'border-border bg-muted/25 text-muted-foreground hover:border-primary/35 hover:bg-muted/40',
+          )}
+          onDragEnter={onDragEnter}
+          onDragLeave={onDragLeave}
+          onDragOver={onDragOver}
+          onDrop={onDrop}
+        >
+          <Upload className={cn('opacity-70', compact ? 'mb-1 size-4' : 'mb-2 size-4')} />
+          <span className="text-xs font-semibold text-foreground">{t('images.dropImageTitle')}</span>
+          {!compact && (
+            <span className="mt-1 max-w-[220px] text-[11px] leading-relaxed">{t('images.inputImageHint')}</span>
+          )}
+          <input type="file" accept="image/*" multiple className="hidden" onChange={onFileInput} />
+        </label>
+      )}
+    </div>
+  )
+}
+
 function Field({ label, children }: { label: string; children: ReactNode }) {
   return (
     <label className="space-y-1.5">
@@ -1763,33 +2264,55 @@ function StylePresetPicker({
   }
 
   return (
-    <div className={compact ? 'rounded-md border border-dashed border-border/80 bg-muted/20 p-2.5' : 'rounded-lg border border-border/70 bg-muted/20 p-3'}>
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+    <div className={cn('space-y-2', compact && 'space-y-1.5')}>
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-1.5 text-xs font-semibold text-muted-foreground">
           <Sparkles className="size-3.5" />
           {t('images.stylePresets')}
         </div>
-        {value.trim() && (
-          <button type="button" className="text-xs font-semibold text-muted-foreground transition hover:text-foreground" onClick={() => onChange('')}>
+        {value.trim() ? (
+          <button type="button" className="text-[11px] font-semibold text-muted-foreground transition hover:text-foreground" onClick={() => onChange('')}>
             {t('images.clearStyle')}
           </button>
-        )}
+        ) : null}
       </div>
-      <div className={compact ? 'flex flex-wrap gap-1.5' : 'grid gap-2 sm:grid-cols-2 xl:grid-cols-4'}>
+      <div
+        className={cn(
+          'flex gap-2 overflow-x-auto pb-1 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden',
+          compact ? 'snap-x snap-mandatory' : '',
+        )}
+      >
         {STYLE_PRESETS.map(preset => {
           const active = value.trim() === preset.value
+          const Icon = preset.icon
           return (
             <button
               key={preset.id}
               type="button"
               onClick={() => applyPreset(preset.value)}
-              className={`min-w-0 border text-left transition ${
+              className={cn(
+                'group relative flex w-[76px] shrink-0 snap-start flex-col items-center gap-1.5 rounded-xl border p-1.5 text-center transition-all',
                 active
-                  ? 'border-primary/35 bg-primary/10 text-primary shadow-xs'
-                  : 'border-border/70 bg-background/70 text-foreground hover:border-primary/30 hover:bg-primary/5'
-              } ${compact ? 'rounded-full px-2.5 py-1 text-xs' : 'rounded-md px-3 py-2'}`}
+                  ? 'border-primary/45 bg-primary/8 shadow-sm ring-2 ring-primary/20'
+                  : 'border-border/70 bg-background/60 hover:border-primary/30 hover:bg-muted/30',
+              )}
             >
-              <span className={`block truncate font-semibold ${compact ? 'text-xs' : 'text-sm'}`}>{t(`images.stylePreset.${preset.id}`)}</span>
+              <span
+                className={cn(
+                  'relative flex size-12 items-center justify-center overflow-hidden rounded-lg text-white shadow-inner',
+                  preset.swatch,
+                )}
+              >
+                <Icon className="size-4 drop-shadow-sm" />
+                {active ? (
+                  <span className="absolute right-0.5 top-0.5 flex size-3.5 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm">
+                    <Check className="size-2.5" strokeWidth={3} />
+                  </span>
+                ) : null}
+              </span>
+              <span className={cn('line-clamp-2 w-full text-[10px] font-semibold leading-tight', active ? 'text-primary' : 'text-foreground')}>
+                {t(`images.stylePreset.${preset.id}`)}
+              </span>
             </button>
           )
         })}
@@ -1996,6 +2519,39 @@ function AssetCard({
   const { t } = useTranslation()
   const previewTitle = t('images.openPreview')
   const imageFrameClass = assetDisplayFrameClass(asset, compact, gallery)
+
+  if (gallery) {
+    return (
+      <Card className="group/card gap-0 overflow-hidden border-border/80 p-0 shadow-sm transition-shadow hover:shadow-md">
+        <div className={cn('image-studio-checkerboard relative', imageFrameClass)}>
+          {imageURL ? (
+            <button type="button" onClick={onPreview} className="h-full w-full cursor-zoom-in" aria-label={previewTitle}>
+              <img src={imageURL} alt={prompt || asset.filename} className="h-full w-full object-cover transition duration-300 group-hover/card:scale-[1.02]" />
+            </button>
+          ) : (
+            <div className="flex h-full items-center justify-center text-muted-foreground">
+              <ImageIcon className="size-8" />
+            </div>
+          )}
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/70 via-black/30 to-transparent px-2.5 pb-2.5 pt-10 opacity-0 transition-opacity group-hover/card:pointer-events-auto group-hover/card:opacity-100 group-focus-within/card:pointer-events-auto group-focus-within/card:opacity-100 max-sm:pointer-events-auto max-sm:opacity-100">
+            <div className="mb-1.5 flex items-center justify-between gap-2 text-[10px] text-white/85">
+              <span className="truncate">{assetResolution(asset)}</span>
+              <span className="shrink-0">{formatBytes(asset.bytes)}</span>
+            </div>
+            <div className="flex flex-wrap gap-1">
+              <Button size="icon-xs" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onPreview} title={previewTitle}><Eye className="size-3" /></Button>
+              <Button size="icon-xs" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onDownload} title={t('images.download')}><Download className="size-3" /></Button>
+              <Button size="icon-xs" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onCopyPrompt} title={t('images.copyPrompt')}><Copy className="size-3" /></Button>
+              <Button size="icon-xs" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onRerun} title={t('images.rerun')}><RefreshCcw className="size-3" /></Button>
+              <Button size="icon-xs" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onSaveTemplate} title={t('images.saveAsTemplate')}><Save className="size-3" /></Button>
+              <Button size="icon-xs" variant="ghost" className="text-white hover:bg-white/15 hover:text-white" onClick={onDelete} title={t('common.delete')}><Trash2 className="size-3" /></Button>
+            </div>
+          </div>
+        </div>
+      </Card>
+    )
+  }
+
   return (
     <Card className="gap-3 overflow-hidden p-0">
       <div className={`relative bg-muted ${imageFrameClass}`}>
@@ -2021,23 +2577,13 @@ function AssetCard({
           <span>{asset.model}</span>
           <span className="text-right">{imageAssetFormat(asset)}</span>
         </div>
-        {gallery ? (
-          <div className="flex flex-wrap gap-1">
-            <Button size="icon-xs" variant="outline" onClick={onDownload} aria-label={t('images.download')} title={t('images.download')}><Download className="size-3" /></Button>
-            <Button size="icon-xs" variant="outline" onClick={onCopyPrompt} aria-label={t('images.copyPrompt')} title={t('images.copyPrompt')}><Copy className="size-3" /></Button>
-            <Button size="icon-xs" variant="outline" onClick={onRerun} aria-label={t('images.rerun')} title={t('images.rerun')}><RefreshCcw className="size-3" /></Button>
-            <Button size="icon-xs" variant="outline" onClick={onSaveTemplate} aria-label={t('images.saveAsTemplate')} title={t('images.saveAsTemplate')}><Save className="size-3" /></Button>
-            <Button size="icon-xs" variant="ghost" onClick={onDelete} aria-label={t('common.delete')} title={t('common.delete')}><Trash2 className="size-3" /></Button>
-          </div>
-        ) : (
-          <div className="flex flex-wrap gap-1">
-            <Button size="xs" variant="outline" onClick={onDownload}><Download className="size-3" />{t('images.download')}</Button>
-            <Button size="xs" variant="outline" onClick={onCopyPrompt}><Copy className="size-3" />{t('images.copyPrompt')}</Button>
-            <Button size="xs" variant="outline" onClick={onRerun}><RefreshCcw className="size-3" />{t('images.rerun')}</Button>
-            <Button size="xs" variant="outline" onClick={onSaveTemplate}><Save className="size-3" />{t('images.saveAsTemplate')}</Button>
-            <Button size="icon-xs" variant="ghost" onClick={onDelete} aria-label={t('common.delete')}><Trash2 className="size-3" /></Button>
-          </div>
-        )}
+        <div className="flex flex-wrap gap-1">
+          <Button size="xs" variant="outline" onClick={onDownload}><Download className="size-3" />{t('images.download')}</Button>
+          <Button size="xs" variant="outline" onClick={onCopyPrompt}><Copy className="size-3" />{t('images.copyPrompt')}</Button>
+          <Button size="xs" variant="outline" onClick={onRerun}><RefreshCcw className="size-3" />{t('images.rerun')}</Button>
+          <Button size="xs" variant="outline" onClick={onSaveTemplate}><Save className="size-3" />{t('images.saveAsTemplate')}</Button>
+          <Button size="icon-xs" variant="ghost" onClick={onDelete} aria-label={t('common.delete')}><Trash2 className="size-3" /></Button>
+        </div>
       </div>
     </Card>
   )

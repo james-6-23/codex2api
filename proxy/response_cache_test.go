@@ -63,6 +63,37 @@ func TestExpandPreviousResponseUsesCachedCodexNativeToolContext(t *testing.T) {
 	}
 }
 
+// shell_call / apply_patch_call 是上游新版工具调用项，需与 function_call 一样
+// 参与 call_id 续链缓存，否则 store=false 回放会丢上下文。
+func TestExpandPreviousResponseCachesShellAndApplyPatchCalls(t *testing.T) {
+	resetResponseCacheForTest()
+
+	cacheCompletedResponse("key:1",
+		[]byte(`[{"type":"message","role":"user","content":"run a command"}]`),
+		[]byte(`{"type":"response.completed","response":{"id":"resp_shell","output":[{"type":"shell_call","id":"sc_1","call_id":"call_shell","action":{"command":["echo","hi"]}},{"type":"apply_patch_call","id":"ap_1","call_id":"call_patch","action":{"patch":"x"}}]}}`),
+	)
+
+	body := []byte(`{"model":"gpt-5.5","previous_response_id":"resp_shell","input":[{"type":"shell_call_output","call_id":"call_shell","output":"hi"}]}`)
+	got, prevID := expandPreviousResponse(body, "key:1")
+
+	if prevID != "resp_shell" {
+		t.Fatalf("prevID = %q, want resp_shell", prevID)
+	}
+	input := gjson.GetBytes(got, "input").Array()
+	if len(input) != 4 {
+		t.Fatalf("expanded input count = %d, want 4; body=%s", len(input), got)
+	}
+	if typ := input[1].Get("type").String(); typ != "shell_call" {
+		t.Fatalf("cached item 1 type = %q, want shell_call", typ)
+	}
+	if input[1].Get("id").Exists() {
+		t.Fatalf("cached shell_call id should be stripped: %s", input[1].Raw)
+	}
+	if typ := input[2].Get("type").String(); typ != "apply_patch_call" {
+		t.Fatalf("cached item 2 type = %q, want apply_patch_call", typ)
+	}
+}
+
 func TestExpandPreviousResponseUsesRuntimeCacheAfterLocalMiss(t *testing.T) {
 	resetResponseCacheForTest()
 	tc := cache.NewMemory(10)

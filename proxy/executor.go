@@ -136,6 +136,9 @@ func newCodexStandardTransport(proxyURL string) http.RoundTripper {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.MaxIdleConnsPerHost = 4
 	transport.IdleConnTimeout = 90 * time.Second
+	// 兜住"连接建立后上游迟迟不回响应头"的假死场景。响应头（含 SSE 的
+	// 200 头）在正常情况下远早于首 token 到达，5 分钟已非常宽裕。
+	transport.ResponseHeaderTimeout = 5 * time.Minute
 	if transport.TLSClientConfig == nil {
 		transport.TLSClientConfig = &tls.Config{}
 	}
@@ -305,7 +308,12 @@ func getPooledClient(account *auth.Account, proxyURL string) *http.Client {
 	entry := &poolEntry{
 		client: &http.Client{
 			Transport: transport,
-			Timeout:   10 * time.Minute,
+			// 不设整体超时：http.Client.Timeout 覆盖包括读响应体在内的完整
+			// 生命周期，流式回答超过上限会在数据正常传输中被切断（issue #287，
+			// 复杂任务单回合可超过 10 分钟）。生命周期由请求 context 控制
+			// （下游断开即取消），假死场景由拨号超时 + ResponseHeaderTimeout
+			// + 流层断流检测兜底，与 uTLS 路径(NewUTLSHttpClient)语义一致。
+			Timeout: 0,
 		},
 	}
 	entry.touch()

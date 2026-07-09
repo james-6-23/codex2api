@@ -1,8 +1,10 @@
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
-import { useCallback, useEffect, useRef, useState, useMemo } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
+import { createPortal } from "react-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import Modal from "../components/Modal";
-import PageHeader from "../components/PageHeader";import Pagination from "../components/Pagination";
+import PageHeader from "../components/PageHeader";
+import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
 import StatusBadge from "../components/StatusBadge";
 import { useDataLoader, type LoadOptions } from "../hooks/useDataLoader";
@@ -89,10 +91,12 @@ import {
   ArrowLeft,
   ToggleLeft,
   ToggleRight,
+  MoreHorizontal,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
 import AccountHealthBar from "../components/AccountHealthBar";
+import AccountDetailSheet from "../components/AccountDetailSheet";
 import CodexInviteView from "../components/CodexInviteView";
 import Sub2APIImportModal from "../components/Sub2APIImportModal";
 import AccountQuotaDistributionChart from "../components/AccountQuotaDistributionChart";
@@ -101,6 +105,7 @@ import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
 import AccountGroupFilterSelect, {
   EMPTY_ACCOUNT_GROUP_FILTER,
   accountMatchesGroupFilter,
+  isAccountGroupFilterEmpty,
   pruneAccountGroupFilter,
   type AccountGroupFilterValue,
 } from "../components/AccountGroupFilterSelect";
@@ -733,6 +738,7 @@ export default function Accounts() {
   const [cleaningError, setCleaningError] = useState(false);
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
+  const [detailAccountId, setDetailAccountId] = useState<number | null>(null);
   const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null);
   const [editSubmitting, setEditSubmitting] = useState(false);
   const [editTab, setEditTab] = useState<"scheduler" | "account">("scheduler");
@@ -1713,6 +1719,40 @@ export default function Accounts() {
     () => pagedAccounts.map((account) => account.id),
     [pagedAccounts],
   );
+  // 详情抽屉：始终从最新 accounts 列表取行，保证刷新后状态同步。
+  const detailAccount = useMemo(
+    () =>
+      detailAccountId == null
+        ? null
+        : (accounts.find((account) => account.id === detailAccountId) ?? null),
+    [accounts, detailAccountId],
+  );
+  const detailNavIndex = useMemo(() => {
+    if (detailAccountId == null) return -1;
+    return sortedAccounts.findIndex((account) => account.id === detailAccountId);
+  }, [detailAccountId, sortedAccounts]);
+  const openAccountDetail = useCallback((account: AccountRow) => {
+    setDetailAccountId(account.id);
+  }, []);
+  const closeAccountDetail = useCallback(() => {
+    setDetailAccountId(null);
+  }, []);
+  const goDetailPrev = useCallback(() => {
+    if (detailNavIndex <= 0) return;
+    setDetailAccountId(sortedAccounts[detailNavIndex - 1]?.id ?? null);
+  }, [detailNavIndex, sortedAccounts]);
+  const goDetailNext = useCallback(() => {
+    if (detailNavIndex < 0 || detailNavIndex >= sortedAccounts.length - 1) return;
+    setDetailAccountId(sortedAccounts[detailNavIndex + 1]?.id ?? null);
+  }, [detailNavIndex, sortedAccounts]);
+
+  // 账号被删除或过滤后从列表消失时，自动关闭详情抽屉。
+  useEffect(() => {
+    if (detailAccountId == null) return;
+    if (!accounts.some((account) => account.id === detailAccountId)) {
+      setDetailAccountId(null);
+    }
+  }, [accounts, detailAccountId]);
   // 自用模式（personal）下，主体列表强制走每行 2 列卡片，桌面端也不渲染表格。
   const isPersonalMode = pageMode === "personal";
   const shouldRenderMobileCards =
@@ -3653,69 +3693,91 @@ export default function Accounts() {
               />
             }
             actions={
-              <div className="flex flex-wrap items-center justify-end gap-1.5">
-                <Button
-                  variant="outline"
-                  aria-pressed={showAnalysisCharts}
-                  onClick={() => setShowAnalysisCharts((visible) => !visible)}
-                  className="max-sm:w-full"
-                >
-                  <BarChart3 className="size-3.5" />
-                  {showAnalysisCharts
-                    ? t("accounts.hideAnalysisCharts")
-                    : t("accounts.showAnalysisCharts")}
-                </Button>
-                <HeaderActionMenu
-                  label={t("accounts.maintenanceActions")}
-                  icon={<Zap className="size-3.5" />}
-                  items={[
+              <>
+                {(() => {
+                  // 「管理」只收低频项；测试连接 / 导入 / 导出 / 清理常驻在外。
+                  const manageSections: HeaderActionMenuSection[] = [
                     {
-                      key: "refresh-tokens",
-                      label: t("accounts.refreshTokens"),
-                      icon: (
-                        <RefreshCw
-                          className={`size-3.5 ${batchRefreshing ? "animate-spin" : ""}`}
-                        />
-                      ),
-                      disabled:
-                        batchLoading || batchTesting || accounts.length === 0,
-                      onSelect: () =>
-                        void handleBatchRefresh(
-                          accounts.map((account) => account.id),
-                        ),
+                      key: "maintenance",
+                      label: t("accounts.maintenanceActions"),
+                      items: [
+                        {
+                          key: "refresh-tokens",
+                          label: t("accounts.refreshTokens"),
+                          icon: (
+                            <RefreshCw
+                              className={`size-3.5 ${batchRefreshing ? "animate-spin" : ""}`}
+                            />
+                          ),
+                          disabled:
+                            batchLoading ||
+                            batchTesting ||
+                            accounts.length === 0,
+                          onSelect: () =>
+                            void handleBatchRefresh(
+                              accounts.map((account) => account.id),
+                            ),
+                        },
+                        {
+                          key: "lock-subscription",
+                          label: lockingSubscriptionAccounts
+                            ? t("accounts.lockingSubscriptionAccounts")
+                            : t("accounts.lockSubscriptionAccounts"),
+                          icon: <Lock className="size-3.5" />,
+                          disabled:
+                            batchLoading ||
+                            batchTesting ||
+                            lockingSubscriptionAccounts ||
+                            accounts.length === 0,
+                          title: t("accounts.lockSubscriptionAccountsHint", {
+                            count: subscriptionAccountsToLock.length,
+                          }),
+                          onSelect: () => void handleLockSubscriptionAccounts(),
+                        },
+                      ],
                     },
                     {
-                      key: "test-connection",
-                      label: batchTesting
-                        ? t("accounts.batchTesting")
-                        : t("accounts.testConnection"),
-                      icon: <FlaskConical className="size-3.5" />,
-                      disabled:
-                        batchLoading || batchTesting || accounts.length === 0,
-                      onSelect: () => void handleBatchTest(),
+                      key: "data",
+                      label: t("accounts.dataActions"),
+                      items: [
+                        {
+                          key: "migrate",
+                          label: migrating
+                            ? t("accounts.migrating")
+                            : t("accounts.migrateImport"),
+                          icon: <ArrowDownToLine className="size-3.5" />,
+                          disabled: migrating,
+                          onSelect: () => setShowMigrate(true),
+                        },
+                        {
+                          key: "sub2api",
+                          label: t("accounts.sub2api.entry"),
+                          icon: <Cloud className="size-3.5" />,
+                          onSelect: () => setShowSub2APIImport(true),
+                        },
+                      ],
                     },
                     {
-                      key: "lock-subscription",
-                      label: lockingSubscriptionAccounts
-                        ? t("accounts.lockingSubscriptionAccounts")
-                        : t("accounts.lockSubscriptionAccounts"),
-                      icon: <Lock className="size-3.5" />,
-                      disabled:
-                        batchLoading ||
-                        batchTesting ||
-                        lockingSubscriptionAccounts ||
-                        accounts.length === 0,
-                      title: t("accounts.lockSubscriptionAccountsHint", {
-                        count: subscriptionAccountsToLock.length,
-                      }),
-                      onSelect: () => void handleLockSubscriptionAccounts(),
+                      key: "tools",
+                      label: t("accounts.toolsActions"),
+                      items: [
+                        {
+                          key: "recycle",
+                          label: t("accounts.recycleBin"),
+                          icon: <Recycle className="size-3.5" />,
+                          onSelect: () => setShowRecycleBin(true),
+                        },
+                        {
+                          key: "invite",
+                          label: t("invite.entry"),
+                          icon: <Mail className="size-3.5" />,
+                          onSelect: () => setShowInvite(true),
+                        },
+                      ],
                     },
-                  ]}
-                />
-                <HeaderActionMenu
-                  label={t("accounts.cleanupActions")}
-                  icon={<Trash2 className="size-3.5" />}
-                  items={[
+                  ];
+
+                  const cleanupItems: HeaderActionMenuItem[] = [
                     {
                       key: "clean-banned",
                       label: cleaningBanned
@@ -3743,67 +3805,99 @@ export default function Accounts() {
                       disabled: cleaningError,
                       onSelect: () => void handleCleanError(),
                     },
-                  ]}
-                />
-                <HeaderActionMenu
-                  label={t("accounts.dataActions")}
-                  icon={<FolderOpen className="size-3.5" />}
-                  items={[
-                    {
-                      key: "import",
-                      label: importing
-                        ? t("accounts.importing")
-                        : t("accounts.importFile"),
-                      icon: <Upload className="size-3.5" />,
-                      disabled: importing,
-                      onSelect: () => setShowImportPicker(true),
-                    },
-                    {
-                      key: "export",
-                      label: exporting
-                        ? t("accounts.exporting")
-                        : t("accounts.export"),
-                      icon: <Download className="size-3.5" />,
-                      disabled: exporting,
-                      onSelect: () => setShowExportPicker(true),
-                    },
-                    {
-                      key: "migrate",
-                      label: migrating
-                        ? t("accounts.migrating")
-                        : t("accounts.migrateImport"),
-                      icon: <ArrowDownToLine className="size-3.5" />,
-                      disabled: migrating,
-                      onSelect: () => setShowMigrate(true),
-                    },
-                    {
-                      key: "sub2api",
-                      label: t("accounts.sub2api.entry"),
-                      icon: <Cloud className="size-3.5" />,
-                      onSelect: () => setShowSub2APIImport(true),
-                    },
-                  ]}
-                />
-                <Button
-                  variant="outline"
-                  onClick={() => setShowRecycleBin(true)}
-                  className="max-sm:w-full"
-                >
-                  <Recycle className="size-3.5" />
-                  {t("accounts.recycleBin")}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => setShowInvite(true)}
-                  className="max-sm:w-full"
-                >
-                  <Mail className="size-3.5" />
-                  {t("invite.entry")}
-                </Button>
-                <Button onClick={() => setShowAdd(true)}>
-                  <Plus className="size-3.5" />
-                  {t("accounts.addAccount")}
-                </Button>
+                  ];
+
+                  return (
+                    <div className="flex w-full flex-wrap items-center gap-1.5 sm:w-auto sm:justify-end">
+                      <Button
+                        size="sm"
+                        className="min-w-0 sm:flex-none"
+                        onClick={() => setShowAdd(true)}
+                      >
+                        <Plus className="size-3.5" />
+                        {t("accounts.addAccount")}
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        disabled={
+                          batchLoading || batchTesting || accounts.length === 0
+                        }
+                        onClick={() => void handleBatchTest()}
+                      >
+                        <FlaskConical className="size-3.5" />
+                        <span className="hidden md:inline">
+                          {batchTesting
+                            ? t("accounts.batchTesting")
+                            : t("accounts.testConnection")}
+                        </span>
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        disabled={importing}
+                        onClick={() => setShowImportPicker(true)}
+                      >
+                        <Upload className="size-3.5" />
+                        <span className="hidden md:inline">
+                          {importing
+                            ? t("accounts.importing")
+                            : t("accounts.importFile")}
+                        </span>
+                      </Button>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        disabled={exporting}
+                        onClick={() => setShowExportPicker(true)}
+                      >
+                        <Download className="size-3.5" />
+                        <span className="hidden md:inline">
+                          {exporting
+                            ? t("accounts.exporting")
+                            : t("accounts.export")}
+                        </span>
+                      </Button>
+                      <HeaderActionMenu
+                        label={t("accounts.cleanupActions")}
+                        icon={<Trash2 className="size-3.5" />}
+                        align="end"
+                        items={cleanupItems}
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="shrink-0"
+                        aria-pressed={showAnalysisCharts}
+                        onClick={() =>
+                          setShowAnalysisCharts((visible) => !visible)
+                        }
+                        title={
+                          showAnalysisCharts
+                            ? t("accounts.hideAnalysisCharts")
+                            : t("accounts.showAnalysisCharts")
+                        }
+                      >
+                        <BarChart3 className="size-3.5" />
+                        <span className="hidden sm:inline">
+                          {showAnalysisCharts
+                            ? t("accounts.hideAnalysisCharts")
+                            : t("accounts.showAnalysisCharts")}
+                        </span>
+                      </Button>
+                      <HeaderActionMenu
+                        label={t("accounts.manageActions")}
+                        icon={<SlidersHorizontal className="size-3.5" />}
+                        align="end"
+                        sections={manageSections}
+                      />
+                    </div>
+                  );
+                })()}
+
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -3846,42 +3940,62 @@ export default function Accounts() {
                     directory: "",
                   } as React.InputHTMLAttributes<HTMLInputElement>)}
                 />
-              </div>
+              </>
             }
           />
 
-          <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+          <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
             <CompactStat
               label={t("accounts.totalAccounts")}
               chipLabel={t("accounts.filterAll")}
               value={totalAccounts}
               tone="neutral"
+              active={statusFilter === "all"}
+              onClick={() => {
+                setStatusFilter("all");
+                setPage(1);
+              }}
             />
             <CompactStat
               label={t("accounts.normalAccounts")}
               chipLabel={t("accounts.filterNormal")}
               value={normalAccounts}
               tone="success"
+              active={statusFilter === "normal"}
+              onClick={() => {
+                setStatusFilter("normal");
+                setPage(1);
+              }}
             />
             <CompactStat
               label={t("accounts.rateLimited")}
               chipLabel={t("accounts.filterRateLimited")}
               value={rateLimitedAccounts}
               tone="warning"
+              active={statusFilter === "rate_limited"}
               details={[
                 { label: "5h", value: rateLimited5hAccounts },
                 { label: "7d", value: rateLimited7dAccounts },
               ]}
+              onClick={() => {
+                setStatusFilter("rate_limited");
+                setPage(1);
+              }}
             />
             <CompactStat
               label={t("accounts.abnormalAccounts")}
               chipLabel={t("accounts.filterAbnormal")}
               value={abnormalAccounts}
               tone="danger"
+              active={statusFilter === "abnormal"}
               details={[
                 { label: t("accounts.abnormalBannedShort"), value: bannedAccounts },
                 { label: t("accounts.abnormalErrorShort"), value: errorAccounts },
               ]}
+              onClick={() => {
+                setStatusFilter("abnormal");
+                setPage(1);
+              }}
             />
           </div>
 
@@ -3911,60 +4025,52 @@ export default function Accounts() {
             </div>
           ) : null}
 
-          <div className="mb-3 grid gap-3 @min-[1600px]/accounts:grid-cols-[minmax(0,1fr)_max-content]">
-            <div className="toolbar-surface flex flex-wrap items-center gap-1.5 overflow-visible @min-[1600px]/accounts:flex-nowrap">
-              <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
+          <div className="toolbar-surface mb-3 flex flex-col gap-2.5">
+            <div className="flex items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
                 {t("accounts.filter")}
               </span>
               {(
                 [
-                  ["all", t("accounts.filterAll")],
-                  ["normal", t("accounts.filterNormal")],
-                  ["rate_limited", t("accounts.filterRateLimited")],
-                  ["abnormal", t("accounts.filterAbnormal")],
-                  ["banned", t("accounts.filterBanned")],
-                  ["error", t("accounts.filterError")],
-                  ["unsampled", t("accounts.filterUnsampled")],
-                  ["disabled", t("accounts.filterDisabled")],
-                  ["locked", t("accounts.filterLocked")],
+                  ["all", t("accounts.filterAll"), totalAccounts],
+                  ["normal", t("accounts.filterNormal"), normalAccounts],
+                  [
+                    "rate_limited",
+                    t("accounts.filterRateLimited"),
+                    rateLimitedAccounts,
+                  ],
+                  ["abnormal", t("accounts.filterAbnormal"), abnormalAccounts],
+                  ["banned", t("accounts.filterBanned"), bannedAccounts],
+                  ["error", t("accounts.filterError"), errorAccounts],
+                  [
+                    "unsampled",
+                    t("accounts.filterUnsampled"),
+                    unsampledAccounts,
+                  ],
+                  ["disabled", t("accounts.filterDisabled"), disabledAccounts],
+                  ["locked", t("accounts.filterLocked"), lockedAccounts],
                 ] as const
-              ).map(([key, label]) => (
+              ).map(([key, label, count]) => (
                 <button
                   key={key}
+                  type="button"
                   onClick={() => {
                     setStatusFilter(key);
                     setPage(1);
                   }}
-                  className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1 font-semibold transition-colors ${
+                  className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[12px] font-semibold transition-colors ${
                     statusFilter === key
                       ? "bg-primary text-primary-foreground"
                       : "bg-muted/50 text-muted-foreground hover:bg-muted"
                   }`}
                 >
-                  {label}{" "}
-                  {key === "all"
-                    ? totalAccounts
-                    : key === "normal"
-                      ? normalAccounts
-                      : key === "rate_limited"
-                        ? rateLimitedAccounts
-                        : key === "abnormal"
-                          ? abnormalAccounts
-                          : key === "banned"
-                            ? bannedAccounts
-                            : key === "error"
-                              ? errorAccounts
-                              : key === "unsampled"
-                                ? unsampledAccounts
-                                : key === "disabled"
-                                  ? disabledAccounts
-                                  : lockedAccounts}
+                  {label} {count}
                 </button>
               ))}
             </div>
 
-            <div className="toolbar-surface flex flex-wrap items-center gap-1.5 overflow-visible @min-[1600px]/accounts:flex-nowrap">
-              <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="mr-0.5 shrink-0 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
                 {t("accounts.schedulerView")}
               </span>
               <SchedulerChip
@@ -3988,35 +4094,33 @@ export default function Accounts() {
                 tone="neutral"
               />
             </div>
-          </div>
 
-          <div className="mb-4 flex flex-wrap items-center gap-2 overflow-visible @min-[1600px]/accounts:flex-nowrap">
-            <div className="relative w-64 shrink-0 max-sm:w-full">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
-              <Input
-                className="pl-9 h-8 rounded-lg text-[13px]"
-                placeholder={t("accounts.searchPlaceholder")}
-                value={searchQuery}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                  setSearchQuery(e.target.value);
-                  setPage(1);
-                }}
-              />
-            </div>
-            <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5 max-sm:w-full max-sm:flex-wrap">
-              {(
-                ["all", "pro", "prolite", "plus", "team", "k12", "free"] as const
-              ).map(
-                (key) => (
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+              <div className="relative w-full shrink-0 sm:w-64">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  className="h-9 rounded-lg pl-9 text-[13px] sm:h-8"
+                  placeholder={t("accounts.searchPlaceholder")}
+                  value={searchQuery}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                    setSearchQuery(e.target.value);
+                    setPage(1);
+                  }}
+                />
+              </div>
+              <div className="flex max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted/30 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                {(
+                  ["all", "pro", "prolite", "plus", "team", "k12", "free"] as const
+                ).map((key) => (
                   <button
                     key={key}
                     onClick={() => {
                       setPlanFilter(key);
                       setPage(1);
                     }}
-                    className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
                       planFilter === key
-                        ? "bg-background shadow-sm text-foreground"
+                        ? "bg-background text-foreground shadow-sm"
                         : "text-muted-foreground hover:text-foreground"
                     }`}
                   >
@@ -4028,148 +4132,263 @@ export default function Accounts() {
                           ? "K12"
                           : key.charAt(0).toUpperCase() + key.slice(1)}
                   </button>
-                ),
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
+                <Select
+                  className="w-full min-w-0 sm:w-36"
+                  compact
+                  value={tagFilter || "all"}
+                  onValueChange={(value) => {
+                    setTagFilter(value === "all" ? "" : value);
+                    setPage(1);
+                  }}
+                  options={[
+                    { value: "all", label: t("accounts.tagsFilter") },
+                    ...allTags.map((tag) => ({ value: tag, label: tag })),
+                  ]}
+                />
+                <Select
+                  className="w-full min-w-0 sm:w-44 lg:w-52"
+                  compact
+                  value={domainFilter || "all"}
+                  onValueChange={(value) => {
+                    setDomainFilter(value === "all" ? "" : value);
+                    setPage(1);
+                  }}
+                  options={[
+                    { value: "all", label: t("accounts.emailDomainFilter") },
+                    ...emailDomainStats.map((stat) => ({
+                      value: stat.domain,
+                      triggerLabel: stat.domain,
+                      label: t("accounts.emailDomainFilterOption", {
+                        domain: stat.domain,
+                        banned: stat.banned,
+                        total: stat.total,
+                      }),
+                    })),
+                  ]}
+                />
+                <AccountGroupFilterSelect
+                  className="w-full min-w-0 sm:w-40"
+                  groups={allGroups}
+                  value={groupFilter}
+                  onChange={(value) => {
+                    setGroupFilter(value);
+                    setPage(1);
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="min-w-0"
+                  aria-pressed={showEmailDomainTags}
+                  onClick={() => setShowEmailDomainTags((visible) => !visible)}
+                >
+                  {showEmailDomainTags ? (
+                    <EyeOff className="size-3.5" />
+                  ) : (
+                    <Eye className="size-3.5" />
+                  )}
+                  <span className="truncate">
+                    {showEmailDomainTags
+                      ? t("accounts.hideEmailDomainTags")
+                      : t("accounts.showEmailDomainTags")}
+                  </span>
+                </Button>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="min-w-0"
+                  onClick={() => setShowGroupManager(true)}
+                >
+                  <FolderOpen className="size-3.5" />
+                  <span className="truncate">{t("accounts.groupManage")}</span>
+                </Button>
+              </div>
+
+              {!isPersonalMode && (
+                <div className="flex w-full shrink-0 items-center gap-1.5 sm:ml-auto sm:w-auto">
+                  <div className="hidden lg:inline-flex items-center rounded-md border border-border bg-muted/50 p-0.5">
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("table")}
+                      title={t("accounts.viewModeTable")}
+                      aria-label={t("accounts.viewModeTable")}
+                      aria-pressed={viewMode === "table"}
+                      className={`inline-flex items-center gap-1 rounded-sm px-2 py-1 text-[12px] font-medium transition-colors ${
+                        viewMode === "table"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Rows3 className="size-3.5" />
+                      {t("accounts.viewModeTable")}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setViewMode("grid")}
+                      title={t("accounts.viewModeGrid")}
+                      aria-label={t("accounts.viewModeGrid")}
+                      aria-pressed={viewMode === "grid"}
+                      className={`inline-flex items-center gap-1 rounded-sm px-2 py-1 text-[12px] font-medium transition-colors ${
+                        viewMode === "grid"
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <LayoutGrid className="size-3.5" />
+                      {t("accounts.viewModeGrid")}
+                    </button>
+                  </div>
+                  <ColumnSettingsMenu
+                    columns={visibleColumns}
+                    onToggle={(column) =>
+                      setVisibleColumns((current) => ({
+                        ...current,
+                        [column]: !current[column],
+                      }))
+                    }
+                    onReset={() =>
+                      setVisibleColumns(getDefaultAccountVisibleColumns())
+                    }
+                    resetTitle={t("accounts.columnReset")}
+                    labels={{
+                      sequence: t("accounts.sequence"),
+                      email: t("accounts.email"),
+                      plan: t("accounts.plan"),
+                      tags: t("accounts.tagsLabel"),
+                      groups: t("accounts.groupsLabel"),
+                      status: t("accounts.status"),
+                      requests: t("accounts.requests"),
+                      usage: t("accounts.usage"),
+                      billed: t("accounts.billed"),
+                      importTime: t("accounts.importTime"),
+                      updatedAt: t("accounts.updatedAt"),
+                      actions: t("accounts.actions"),
+                    }}
+                    title={t("accounts.columnSettings")}
+                  />
+                </div>
               )}
             </div>
-            <Select
-              className="w-36 shrink-0"
-              compact
-              value={tagFilter || "all"}
-              onValueChange={(value) => {
-                setTagFilter(value === "all" ? "" : value);
-                setPage(1);
-              }}
-              options={[
-                { value: "all", label: t("accounts.tagsFilter") },
-                ...allTags.map((tag) => ({ value: tag, label: tag })),
-              ]}
-            />
-            <Select
-              className="w-64 shrink-0"
-              compact
-              value={domainFilter || "all"}
-              onValueChange={(value) => {
-                setDomainFilter(value === "all" ? "" : value);
-                setPage(1);
-              }}
-              options={[
-                { value: "all", label: t("accounts.emailDomainFilter") },
-                ...emailDomainStats.map((stat) => ({
-                  value: stat.domain,
-                  triggerLabel: stat.domain,
-                  label: t("accounts.emailDomainFilterOption", {
-                    domain: stat.domain,
-                    banned: stat.banned,
-                    total: stat.total,
-                  }),
-                })),
-              ]}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              aria-pressed={showEmailDomainTags}
-              onClick={() => setShowEmailDomainTags((visible) => !visible)}
-            >
-              {showEmailDomainTags ? (
-                <EyeOff className="size-3.5" />
-              ) : (
-                <Eye className="size-3.5" />
-              )}
-              {showEmailDomainTags
-                ? t("accounts.hideEmailDomainTags")
-                : t("accounts.showEmailDomainTags")}
-            </Button>
-            <AccountGroupFilterSelect
-              className="w-40 shrink-0"
-              groups={allGroups}
-              value={groupFilter}
-              onChange={(value) => {
-                setGroupFilter(value);
-                setPage(1);
-              }}
-            />
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              className="shrink-0"
-              onClick={() => setShowGroupManager(true)}
-            >
-              <FolderOpen className="size-3.5" />
-              {t("accounts.groupManage")}
-            </Button>
-            {!isPersonalMode && (
-            <div className="flex w-full shrink-0 items-center gap-1.5 @min-[1600px]/accounts:ml-auto @min-[1600px]/accounts:w-auto">
-              <div className="hidden lg:inline-flex items-center rounded-md border border-border bg-muted/50 p-0.5">
+
+            {(statusFilter !== "all" ||
+              planFilter !== "all" ||
+              Boolean(tagFilter) ||
+              Boolean(domainFilter) ||
+              !isAccountGroupFilterEmpty(groupFilter)) && (
+              <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
+                {statusFilter !== "all" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setStatusFilter("all");
+                      setPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15"
+                  >
+                    {statusFilter === "normal"
+                      ? t("accounts.filterNormal")
+                      : statusFilter === "rate_limited"
+                        ? t("accounts.filterRateLimited")
+                        : statusFilter === "abnormal"
+                          ? t("accounts.filterAbnormal")
+                          : statusFilter === "banned"
+                            ? t("accounts.filterBanned")
+                            : statusFilter === "error"
+                              ? t("accounts.filterError")
+                              : statusFilter === "unsampled"
+                                ? t("accounts.filterUnsampled")
+                                : statusFilter === "disabled"
+                                  ? t("accounts.filterDisabled")
+                                  : t("accounts.filterLocked")}
+                    <X className="size-3" />
+                  </button>
+                )}
+                {planFilter !== "all" && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPlanFilter("all");
+                      setPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted/80"
+                  >
+                    {planFilter === "prolite"
+                      ? "ProLite"
+                      : planFilter === "k12"
+                        ? "K12"
+                        : planFilter.charAt(0).toUpperCase() + planFilter.slice(1)}
+                    <X className="size-3" />
+                  </button>
+                )}
+                {tagFilter && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTagFilter("");
+                      setPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted/80"
+                  >
+                    {tagFilter}
+                    <X className="size-3" />
+                  </button>
+                )}
+                {domainFilter && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setDomainFilter("");
+                      setPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted/80"
+                  >
+                    {domainFilter}
+                    <X className="size-3" />
+                  </button>
+                )}
+                {!isAccountGroupFilterEmpty(groupFilter) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setGroupFilter(EMPTY_ACCOUNT_GROUP_FILTER);
+                      setPage(1);
+                    }}
+                    className="inline-flex items-center gap-1 rounded-full bg-muted px-2.5 py-1 text-[11px] font-medium text-foreground transition-colors hover:bg-muted/80"
+                  >
+                    {t("accounts.groupsLabel")}
+                    <X className="size-3" />
+                  </button>
+                )}
                 <button
                   type="button"
-                  onClick={() => setViewMode("table")}
-                  title={t("accounts.viewModeTable")}
-                  aria-label={t("accounts.viewModeTable")}
-                  aria-pressed={viewMode === "table"}
-                  className={`inline-flex items-center gap-1 rounded-sm px-2 py-1 text-[12px] font-medium transition-colors ${
-                    viewMode === "table"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
+                  onClick={() => {
+                    setStatusFilter("all");
+                    setPlanFilter("all");
+                    setTagFilter("");
+                    setDomainFilter("");
+                    setGroupFilter(EMPTY_ACCOUNT_GROUP_FILTER);
+                    setSearchQuery("");
+                    setPage(1);
+                  }}
+                  className="ml-auto text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
                 >
-                  <Rows3 className="size-3.5" />
-                  {t("accounts.viewModeTable")}
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setViewMode("grid")}
-                  title={t("accounts.viewModeGrid")}
-                  aria-label={t("accounts.viewModeGrid")}
-                  aria-pressed={viewMode === "grid"}
-                  className={`inline-flex items-center gap-1 rounded-sm px-2 py-1 text-[12px] font-medium transition-colors ${
-                    viewMode === "grid"
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground"
-                  }`}
-                >
-                  <LayoutGrid className="size-3.5" />
-                  {t("accounts.viewModeGrid")}
+                  {t("accounts.clearFilters")}
                 </button>
               </div>
-              <ColumnSettingsMenu
-                columns={visibleColumns}
-                onToggle={(column) =>
-                  setVisibleColumns((current) => ({
-                    ...current,
-                    [column]: !current[column],
-                  }))
-                }
-                onReset={() =>
-                  setVisibleColumns(getDefaultAccountVisibleColumns())
-                }
-                resetTitle={t("accounts.columnReset")}
-                labels={{
-                  sequence: t("accounts.sequence"),
-                  email: t("accounts.email"),
-                  plan: t("accounts.plan"),
-                  tags: t("accounts.tagsLabel"),
-                  groups: t("accounts.groupsLabel"),
-                  status: t("accounts.status"),
-                  requests: t("accounts.requests"),
-                  usage: t("accounts.usage"),
-                  billed: t("accounts.billed"),
-                  importTime: t("accounts.importTime"),
-                  updatedAt: t("accounts.updatedAt"),
-                  actions: t("accounts.actions"),
-                }}
-                title={t("accounts.columnSettings")}
-              />
-            </div>
             )}
           </div>
 
           {selected.size > 0 && (
-            <div className="sticky top-2 z-20 mb-4 flex items-center justify-between gap-3 rounded-lg border border-primary/20 bg-card/95 px-3 py-2.5 text-sm font-semibold text-primary shadow-lg backdrop-blur-sm max-lg:flex-col max-lg:items-stretch">
-              <span>{t("common.selected", { count: selected.size })}</span>
+            <div className="sticky top-2 z-20 mb-4 flex items-center justify-between gap-3 rounded-xl border border-primary/20 bg-card/95 px-3 py-2 text-sm shadow-lg backdrop-blur-sm max-lg:flex-col max-lg:items-stretch">
+              <span className="font-semibold text-primary">
+                {t("common.selected", { count: selected.size })}
+              </span>
               <div className="flex flex-wrap items-center justify-end gap-1.5 max-lg:justify-start">
                 <Button
                   variant="outline"
@@ -4178,9 +4397,9 @@ export default function Accounts() {
                   onClick={() => void handleBatchRefresh()}
                 >
                   <RefreshCw
-                    className={`size-3 mr-1 ${batchRefreshing ? "animate-spin" : ""}`}
+                    className={`size-3.5 ${batchRefreshing ? "animate-spin" : ""}`}
                   />
-                  {t("accounts.batchRefresh")}
+                  <span className="hidden sm:inline">{t("accounts.batchRefresh")}</span>
                 </Button>
                 <Button
                   variant="outline"
@@ -4188,10 +4407,12 @@ export default function Accounts() {
                   disabled={batchLoading || batchTesting}
                   onClick={() => void handleBatchTest(Array.from(selected))}
                 >
-                  <FlaskConical className="size-3 mr-1" />
-                  {batchTesting
-                    ? t("accounts.batchTesting")
-                    : t("accounts.batchTest")}
+                  <FlaskConical className="size-3.5" />
+                  <span className="hidden sm:inline">
+                    {batchTesting
+                      ? t("accounts.batchTesting")
+                      : t("accounts.batchTest")}
+                  </span>
                 </Button>
                 <Button
                   variant="outline"
@@ -4199,8 +4420,8 @@ export default function Accounts() {
                   disabled={batchLoading || batchTesting}
                   onClick={() => void handleBatchEnabled(true)}
                 >
-                  <Power className="size-3 mr-1" />
-                  {t("accounts.enable")}
+                  <Power className="size-3.5" />
+                  <span className="hidden sm:inline">{t("accounts.enable")}</span>
                 </Button>
                 <Button
                   variant="outline"
@@ -4208,64 +4429,62 @@ export default function Accounts() {
                   disabled={batchLoading || batchTesting}
                   onClick={() => void handleBatchEnabled(false)}
                 >
-                  <PowerOff className="size-3 mr-1" />
-                  {t("accounts.disable")}
+                  <PowerOff className="size-3.5" />
+                  <span className="hidden sm:inline">{t("accounts.disable")}</span>
                 </Button>
+                <HeaderActionMenu
+                  label={t("accounts.batchMore")}
+                  icon={<MoreHorizontal className="size-3.5" />}
+                  align="end"
+                  compact
+                  items={[
+                    {
+                      key: "lock",
+                      label: t("accounts.lock"),
+                      icon: <Lock className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: () => void handleBatchLock(true),
+                    },
+                    {
+                      key: "unlock",
+                      label: t("accounts.unlock"),
+                      icon: <Unlock className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: () => void handleBatchLock(false),
+                    },
+                    {
+                      key: "meta",
+                      label: t("accounts.batchMetaEdit"),
+                      icon: <FolderOpen className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: openBatchMetaEditor,
+                    },
+                    {
+                      key: "auto-pause",
+                      label: t("accounts.batchAutoPauseEdit"),
+                      icon: <Hourglass className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: openBatchQuotaAutoPauseEditor,
+                    },
+                    {
+                      key: "reset-status",
+                      label: t("accounts.batchResetStatus"),
+                      icon: <RotateCcw className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: () => void handleBatchResetStatus(),
+                    },
+                    {
+                      key: "delete",
+                      label: t("accounts.batchDelete"),
+                      icon: <Trash2 className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      destructive: true,
+                      onSelect: () => void handleBatchDelete(),
+                    },
+                  ]}
+                />
                 <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={batchLoading || batchTesting}
-                  onClick={() => void handleBatchLock(true)}
-                >
-                  <Lock className="size-3 mr-1" />
-                  {t("accounts.lock")}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={batchLoading || batchTesting}
-                  onClick={() => void handleBatchLock(false)}
-                >
-                  <Unlock className="size-3 mr-1" />
-                  {t("accounts.unlock")}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={batchLoading || batchTesting}
-                  onClick={openBatchMetaEditor}
-                >
-                  <FolderOpen className="size-3 mr-1" />
-                  {t("accounts.batchMetaEdit")}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={batchLoading || batchTesting}
-                  onClick={openBatchQuotaAutoPauseEditor}
-                >
-                  <Hourglass className="size-3 mr-1" />
-                  {t("accounts.batchAutoPauseEdit")}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  disabled={batchLoading || batchTesting}
-                  onClick={() => void handleBatchResetStatus()}
-                >
-                  <RotateCcw className="size-3 mr-1" />
-                  {t("accounts.batchResetStatus")}
-                </Button>
-                <Button
-                  variant="destructive"
-                  size="sm"
-                  disabled={batchLoading || batchTesting}
-                  onClick={() => void handleBatchDelete()}
-                >
-                  {t("accounts.batchDelete")}
-                </Button>
-                <Button
-                  variant="outline"
+                  variant="ghost"
                   size="sm"
                   onClick={() => setSelected(new Set())}
                 >
@@ -4306,6 +4525,7 @@ export default function Accounts() {
                           account={account}
                           sequence={(currentPage - 1) * pageSize + index + 1}
                           selected={isSelected}
+                          detailOpen={detailAccountId === account.id}
                           allGroups={allGroups}
                           lazyMode={lazyMode}
                           showEmailDomainTags={showEmailDomainTags}
@@ -4315,6 +4535,7 @@ export default function Accounts() {
                           variant={isPersonalMode ? "personal" : "mobile"}
                           t={t}
                           onToggleSelect={() => toggleSelect(account.id)}
+                          onOpenDetail={() => openAccountDetail(account)}
                           onEdit={() => openSchedulerEditor(account)}
                           onUsage={() => setUsageAccount(account)}
                           onTest={() => setTestingAccount(account)}
@@ -4475,10 +4696,29 @@ export default function Accounts() {
                     <TableBody>
                       {pagedAccounts.map((account, index) => {
                         const isSelected = selected.has(account.id);
+                        const isDetailOpen = detailAccountId === account.id;
                         return (
                           <TableRow
                             key={account.id}
-                            className={isSelected ? "bg-primary/5" : ""}
+                            data-state={isSelected ? "selected" : undefined}
+                            className={`cursor-pointer ${
+                              isDetailOpen
+                                ? "bg-primary/8"
+                                : isSelected
+                                  ? "bg-primary/5"
+                                  : ""
+                            }`}
+                            onClick={(event) => {
+                              const target = event.target as HTMLElement | null;
+                              if (
+                                target?.closest(
+                                  'button, a, input, label, [role="menuitem"], [role="menu"], [data-slot="button"], [data-slot="select-trigger"]',
+                                )
+                              ) {
+                                return;
+                              }
+                              openAccountDetail(account);
+                            }}
                           >
                             <TableCell>
                               <input
@@ -4486,6 +4726,7 @@ export default function Accounts() {
                                 className="size-4 cursor-pointer accent-primary"
                                 checked={isSelected}
                                 onChange={() => toggleSelect(account.id)}
+                                onClick={(event) => event.stopPropagation()}
                               />
                             </TableCell>
                             {visibleColumns.sequence && (
@@ -4499,11 +4740,19 @@ export default function Accounts() {
                             {visibleColumns.email && (
                               <TableCell className="min-w-[220px] whitespace-normal text-[14px] text-muted-foreground">
                                 <div className="flex min-w-0 flex-col items-start gap-1">
-                                  <span className="break-all">
+                                  <button
+                                    type="button"
+                                    className="break-all text-left font-medium text-foreground transition-colors hover:text-primary"
+                                    title={t("accounts.openDetail")}
+                                    onClick={(event) => {
+                                      event.stopPropagation();
+                                      openAccountDetail(account);
+                                    }}
+                                  >
                                     {account.openai_responses_api
                                       ? formatAccountName(account)
                                       : formatAccountListEmail(account)}
-                                  </span>
+                                  </button>
                                   {account.chatgpt_account_id && (
                                     <span
                                       className="max-w-full truncate font-mono text-[10px] leading-tight text-muted-foreground/70"
@@ -4612,8 +4861,32 @@ export default function Accounts() {
                             )}
                             {visibleColumns.status && (
                               <TableCell>
-                                <div className="space-y-1.5">
-                                  <div className="flex min-h-6 items-center gap-2 whitespace-nowrap">
+                                <div
+                                  className="min-w-[168px] max-w-[240px] space-y-1.5"
+                                  title={[
+                                    t("accounts.healthSummary", {
+                                      health: formatHealthTier(
+                                        account.health_tier,
+                                        t,
+                                      ),
+                                      score: Math.round(
+                                        getDispatchScore(account),
+                                      ),
+                                      concurrency:
+                                        account.dynamic_concurrency_limit ?? "-",
+                                    }),
+                                    account.status === "error" &&
+                                    account.error_message
+                                      ? account.error_message
+                                      : "",
+                                    (account.model_cooldowns?.length ?? 0) > 0
+                                      ? `model ${account.model_cooldowns?.[0]?.model}${(account.model_cooldowns?.length ?? 0) > 1 ? ` +${(account.model_cooldowns?.length ?? 1) - 1}` : ""}`
+                                      : "",
+                                  ]
+                                    .filter(Boolean)
+                                    .join("\n")}
+                                >
+                                  <div className="flex min-h-6 flex-wrap items-center gap-1.5">
                                     <StatusBadge
                                       status={account.status}
                                       detail={
@@ -4625,7 +4898,7 @@ export default function Accounts() {
                                     <AccountStatusCountdown account={account} />
                                     {(account.active_requests ?? 0) > 0 && (
                                       <span
-                                        className="inline-flex items-center gap-1 rounded-md bg-blue-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 ring-1 ring-inset ring-blue-500/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20"
+                                        className="inline-flex items-center gap-1 rounded-md bg-blue-500/10 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-blue-600 dark:text-blue-400"
                                         title={t("accounts.activeRequestsTooltip", {
                                           count: account.active_requests ?? 0,
                                         })}
@@ -4638,48 +4911,9 @@ export default function Accounts() {
                                       </span>
                                     )}
                                   </div>
-                                  {account.status === "error" &&
-                                    account.error_message && (
-                                      <div
-                                        className="max-w-[180px] truncate text-[11px] leading-tight text-red-500"
-                                        title={account.error_message}
-                                      >
-                                        {account.error_message}
-                                      </div>
-                                    )}
-                                  {(account.model_cooldowns?.length ?? 0) >
-                                    0 && (
-                                    <div className="text-[11px] leading-tight text-amber-600">
-                                      model{" "}
-                                      {account.model_cooldowns?.[0]?.model}
-                                      {(account.model_cooldowns?.length ?? 0) >
-                                      1
-                                        ? ` +${(account.model_cooldowns?.length ?? 1) - 1}`
-                                        : ""}
-                                    </div>
-                                  )}
-                                  <div className="text-[11px] text-muted-foreground">
-                                    {t("accounts.healthSummary", {
-                                      health: formatHealthTier(
-                                        account.health_tier,
-                                        t,
-                                      ),
-                                      score: Math.round(
-                                        getDispatchScore(account),
-                                      ),
-                                      concurrency:
-                                        account.dynamic_concurrency_limit ??
-                                        "-",
-                                    })}
-                                  </div>
-                                  <div className="space-y-0.5 pt-0.5">
-                                    <div className="text-[10px] text-muted-foreground/70">
-                                      {t("accounts.healthBarLabel")}
-                                    </div>
-                                    <AccountHealthBar
-                                      buckets={healthBars[String(account.id)]}
-                                    />
-                                  </div>
+                                  <AccountHealthBar
+                                    buckets={healthBars[String(account.id)]}
+                                  />
                                 </div>
                               </TableCell>
                             )}
@@ -4753,155 +4987,71 @@ export default function Accounts() {
                             )}
                             {visibleColumns.actions && (
                               <TableCell className="text-right">
-                                <div className="flex items-center gap-1 justify-end">
+                                <div className="flex items-center justify-end gap-0.5">
                                   <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="size-8"
                                     onClick={() => openSchedulerEditor(account)}
                                     title={t("accounts.editScheduler")}
                                   >
                                     <Pencil className="size-3.5" />
                                   </Button>
                                   <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="size-8"
                                     onClick={() => setUsageAccount(account)}
                                     title={t("accounts.usageDetail")}
                                   >
                                     <BarChart3 className="size-3.5" />
                                   </Button>
                                   <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="size-8"
                                     onClick={() => setTestingAccount(account)}
                                     title={t("accounts.testConnection")}
                                   >
                                     <Zap className="size-3.5" />
                                   </Button>
                                   <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    disabled={
-                                      refreshingIds.has(account.id) ||
-                                      account.at_only ||
-                                      account.openai_responses_api
-                                    }
-                                    onClick={() => void handleRefresh(account)}
-                                    title={
-                                      account.at_only ||
-                                      account.openai_responses_api
-                                        ? t("accounts.atRefreshDisabled")
-                                        : t("accounts.refreshAccessToken")
-                                    }
-                                  >
-                                    <RefreshCw
-                                      className={`size-3.5 ${refreshingIds.has(account.id) ? "animate-spin" : ""}`}
-                                    />
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    disabled={
-                                      authJsonExportingIds.has(account.id) ||
-                                      account.at_only ||
-                                      account.openai_responses_api
-                                    }
-                                    onClick={() =>
-                                      void handleGenerateAuthJSON(account)
-                                    }
-                                    title={
-                                      account.at_only ||
-                                      account.openai_responses_api
-                                        ? t("accounts.authJsonDisabled")
-                                        : t("accounts.generateAuthJson")
-                                    }
-                                  >
-                                    <FileJson className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant={
-                                      account.enabled === false
-                                        ? "default"
-                                        : "outline"
-                                    }
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() =>
-                                      void handleToggleEnabled(account)
-                                    }
-                                    title={
-                                      account.enabled === false
-                                        ? t("accounts.enableHint")
-                                        : t("accounts.disableHint")
-                                    }
-                                  >
-                                    {account.enabled === false ? (
-                                      <Power className="size-3.5" />
-                                    ) : (
-                                      <PowerOff className="size-3.5" />
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant={
-                                      account.locked ? "default" : "outline"
-                                    }
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() =>
-                                      void handleToggleLock(account)
-                                    }
-                                    title={
-                                      account.locked
-                                        ? t("accounts.unlockHint")
-                                        : t("accounts.lockHint")
-                                    }
-                                  >
-                                    {account.locked ? (
-                                      <Lock className="size-3.5" />
-                                    ) : (
-                                      <Unlock className="size-3.5" />
-                                    )}
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    onClick={() =>
-                                      void handleResetStatus(account)
-                                    }
-                                    title={t("accounts.resetStatusHint")}
-                                  >
-                                    <RotateCcw className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="outline"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
-                                    disabled={
-                                      (account.rate_limit_reset_credits ?? 0) <=
-                                      0
-                                    }
-                                    onClick={() =>
-                                      void handleResetCredits(account)
-                                    }
-                                    title={t("accounts.resetCreditsButton")}
-                                  >
-                                    <Timer className="size-3.5" />
-                                  </Button>
-                                  <Button
-                                    variant="destructive"
-                                    size="icon"
-                                    className="h-7 w-8 px-0"
+                                    variant="ghost"
+                                    size="icon-sm"
+                                    className="size-8 text-destructive hover:bg-destructive/10 hover:text-destructive"
                                     onClick={() => void handleDelete(account)}
                                     title={t("accounts.deleteAccount")}
                                   >
                                     <Trash2 className="size-3.5" />
                                   </Button>
+                                  <AccountRowActionsMenu
+                                    t={t}
+                                    account={account}
+                                    refreshing={refreshingIds.has(account.id)}
+                                    authJsonExporting={authJsonExportingIds.has(
+                                      account.id,
+                                    )}
+                                    includeTest={false}
+                                    includeDelete={false}
+                                    onTest={() => setTestingAccount(account)}
+                                    onRefresh={() => void handleRefresh(account)}
+                                    onGenerateAuthJson={() =>
+                                      void handleGenerateAuthJSON(account)
+                                    }
+                                    onToggleEnabled={() =>
+                                      void handleToggleEnabled(account)
+                                    }
+                                    onToggleLock={() =>
+                                      void handleToggleLock(account)
+                                    }
+                                    onResetStatus={() =>
+                                      void handleResetStatus(account)
+                                    }
+                                    onResetCredits={() =>
+                                      void handleResetCredits(account)
+                                    }
+                                    onDelete={() => void handleDelete(account)}
+                                  />
                                 </div>
                               </TableCell>
                             )}
@@ -5902,6 +6052,90 @@ export default function Accounts() {
               onCreditsReset={() => void reload()}
             />
           )}
+
+          <AccountDetailSheet
+            account={detailAccount}
+            groups={
+              detailAccount
+                ? resolveAccountGroups(detailAccount.group_ids ?? [], allGroups)
+                : []
+            }
+            healthBuckets={
+              detailAccount
+                ? healthBars[String(detailAccount.id)]
+                : undefined
+            }
+            sequence={
+              detailNavIndex >= 0 ? detailNavIndex + 1 : undefined
+            }
+            usageSlot={
+              detailAccount ? (
+                <UsageCell
+                  account={detailAccount}
+                  wide
+                  onRefreshed={() => void reloadSilently()}
+                />
+              ) : null
+            }
+            canGoPrev={detailNavIndex > 0}
+            canGoNext={
+              detailNavIndex >= 0 &&
+              detailNavIndex < sortedAccounts.length - 1
+            }
+            refreshing={
+              detailAccount
+                ? refreshingIds.has(detailAccount.id)
+                : false
+            }
+            authJsonExporting={
+              detailAccount
+                ? authJsonExportingIds.has(detailAccount.id)
+                : false
+            }
+            onClose={closeAccountDetail}
+            onPrev={goDetailPrev}
+            onNext={goDetailNext}
+            onEdit={() => {
+              if (!detailAccount) return;
+              openSchedulerEditor(detailAccount);
+            }}
+            onUsage={() => {
+              if (!detailAccount) return;
+              setUsageAccount(detailAccount);
+            }}
+            onTest={() => {
+              if (!detailAccount) return;
+              setTestingAccount(detailAccount);
+            }}
+            onRefresh={() => {
+              if (!detailAccount) return;
+              void handleRefresh(detailAccount);
+            }}
+            onGenerateAuthJson={() => {
+              if (!detailAccount) return;
+              void handleGenerateAuthJSON(detailAccount);
+            }}
+            onToggleEnabled={() => {
+              if (!detailAccount) return;
+              void handleToggleEnabled(detailAccount);
+            }}
+            onToggleLock={() => {
+              if (!detailAccount) return;
+              void handleToggleLock(detailAccount);
+            }}
+            onResetStatus={() => {
+              if (!detailAccount) return;
+              void handleResetStatus(detailAccount);
+            }}
+            onResetCredits={() => {
+              if (!detailAccount) return;
+              void handleResetCredits(detailAccount);
+            }}
+            onDelete={() => {
+              if (!detailAccount) return;
+              void handleDelete(detailAccount);
+            }}
+          />
 
           <Modal
             show={Boolean(editingAccount)}
@@ -7419,20 +7653,20 @@ function RecycleBinView({
         description={t("accounts.recycleBinDesc")}
         onRefresh={() => void load()}
         actions={
-          <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
             <Button
               variant="outline"
+              size="sm"
               onClick={onClose}
-              className="max-sm:w-full"
             >
               <ArrowLeft className="size-3.5" />
               {t("accounts.recycleBinBack")}
             </Button>
             <Button
               variant="outline"
+              size="sm"
               aria-pressed={autoRestore}
               onClick={toggleAutoRestore}
-              className="max-sm:w-full"
               title={t("accounts.recycleBinAutoRestoreHint")}
             >
               {autoRestore ? (
@@ -7440,29 +7674,31 @@ function RecycleBinView({
               ) : (
                 <ToggleLeft className="size-4 text-muted-foreground" />
               )}
-              {t("accounts.recycleBinAutoRestore")}
+              <span className="max-sm:hidden">{t("accounts.recycleBinAutoRestore")}</span>
             </Button>
             <Button
               variant="outline"
+              size="sm"
               disabled={busy || loading || rows.length === 0}
               onClick={() => void handleBatchTestRun()}
-              className="max-sm:w-full"
             >
               <FlaskConical
                 className={`size-3.5 ${batchTesting ? "animate-pulse" : ""}`}
               />
-              {batchTesting
-                ? t("accounts.batchTesting")
-                : t("accounts.recycleBinTestAll")}
+              <span className="max-sm:hidden">
+                {batchTesting
+                  ? t("accounts.batchTesting")
+                  : t("accounts.recycleBinTestAll")}
+              </span>
             </Button>
             <Button
               variant="destructive"
+              size="sm"
               disabled={busy || loading || rows.length === 0}
               onClick={openEmptyConfirm}
-              className="max-sm:w-full"
             >
               <Trash2 className="size-3.5" />
-              {t("accounts.recycleBinEmptyBin")}
+              <span className="max-sm:hidden">{t("accounts.recycleBinEmptyBin")}</span>
             </Button>
           </div>
         }
@@ -8412,28 +8648,85 @@ interface HeaderActionMenuItem {
   icon: ReactNode;
   disabled?: boolean;
   title?: string;
+  destructive?: boolean;
   onSelect: () => void;
+}
+
+interface HeaderActionMenuSection {
+  key: string;
+  label?: string;
+  items: HeaderActionMenuItem[];
 }
 
 function HeaderActionMenu({
   label,
   icon,
   items,
+  sections,
+  align = "end",
+  compact = false,
+  triggerVariant = "outline",
 }: {
   label: string;
   icon: ReactNode;
-  items: HeaderActionMenuItem[];
+  items?: HeaderActionMenuItem[];
+  sections?: HeaderActionMenuSection[];
+  align?: "start" | "end";
+  compact?: boolean;
+  triggerVariant?: "outline" | "default" | "ghost" | "secondary" | "destructive";
 }) {
   const [open, setOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{
+    top: number;
+    left: number;
+    openUpward: boolean;
+  } | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const resolvedSections: HeaderActionMenuSection[] =
+    sections && sections.length > 0
+      ? sections.filter((section) => section.items.length > 0)
+      : items && items.length > 0
+        ? [{ key: "default", items }]
+        : [];
+
+  const updateMenuPosition = useCallback(() => {
+    const trigger = rootRef.current;
+    if (!trigger) return;
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = Math.min(288, window.innerWidth - 16);
+    const gap = 8;
+    const spaceBelow = window.innerHeight - rect.bottom - gap;
+    const spaceAbove = rect.top - gap;
+    // Prefer opening downward; flip up when near the bottom of the viewport.
+    const openUpward = spaceBelow < 240 && spaceAbove > spaceBelow;
+    let left =
+      align === "start" ? rect.left : rect.right - menuWidth;
+    left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
+    const top = openUpward ? rect.top - gap : rect.bottom + gap;
+    setMenuPos({ top, left, openUpward });
+  }, [align]);
+
+  useLayoutEffect(() => {
+    if (!open) {
+      setMenuPos(null);
+      return;
+    }
+    updateMenuPosition();
+  }, [open, updateMenuPosition]);
 
   useEffect(() => {
     if (!open) return;
 
     const handlePointerDown = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) {
-        setOpen(false);
+      const target = event.target as Node;
+      if (
+        rootRef.current?.contains(target) ||
+        menuRef.current?.contains(target)
+      ) {
+        return;
       }
+      setOpen(false);
     };
 
     const handleEscape = (event: KeyboardEvent) => {
@@ -8442,58 +8735,120 @@ function HeaderActionMenu({
       }
     };
 
+    const handleReposition = () => updateMenuPosition();
+
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleEscape);
+    window.addEventListener("resize", handleReposition);
+    // Capture scroll from nested table shells so the portal menu stays aligned.
+    window.addEventListener("scroll", handleReposition, true);
 
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
+      window.removeEventListener("resize", handleReposition);
+      window.removeEventListener("scroll", handleReposition, true);
     };
-  }, [open]);
+  }, [open, updateMenuPosition]);
+
+  const renderItem = (item: HeaderActionMenuItem) => (
+    <button
+      key={item.key}
+      type="button"
+      role="menuitem"
+      disabled={item.disabled}
+      title={item.title}
+      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+        item.destructive
+          ? "text-destructive hover:bg-destructive/10"
+          : "text-foreground hover:bg-accent/70"
+      }`}
+      onClick={() => {
+        if (item.disabled) return;
+        setOpen(false);
+        item.onSelect();
+      }}
+    >
+      <span
+        className={`flex size-5 shrink-0 items-center justify-center ${
+          item.destructive ? "text-destructive" : "text-muted-foreground"
+        }`}
+      >
+        {item.icon}
+      </span>
+      <span className="min-w-0 flex-1 truncate">{item.label}</span>
+    </button>
+  );
+
+  const menu =
+    open && menuPos
+      ? createPortal(
+          <div
+            ref={menuRef}
+            data-slot="action-menu-popover"
+            className="fixed z-[200] max-h-[min(70dvh,480px)] w-[min(18rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-xl border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.18)] backdrop-blur-sm"
+            style={
+              menuPos.openUpward
+                ? {
+                    left: menuPos.left,
+                    bottom: window.innerHeight - menuPos.top,
+                  }
+                : {
+                    left: menuPos.left,
+                    top: menuPos.top,
+                  }
+            }
+          >
+            <div role="menu" className="space-y-1">
+              {resolvedSections.map((section, sectionIndex) => (
+                <div key={section.key}>
+                  {section.label ? (
+                    <div
+                      className={`px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground ${
+                        sectionIndex > 0
+                          ? "mt-1.5 border-t border-border/70 pt-2"
+                          : "pt-0.5"
+                      }`}
+                    >
+                      {section.label}
+                    </div>
+                  ) : sectionIndex > 0 ? (
+                    <div className="my-1 border-t border-border/70" />
+                  ) : null}
+                  <div className="space-y-0.5">
+                    {section.items.map(renderItem)}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>,
+          document.body,
+        )
+      : null;
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative shrink-0">
       <Button
         type="button"
-        variant="outline"
+        variant={triggerVariant}
         size="sm"
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={label}
         onClick={() => setOpen((current) => !current)}
+        className={compact ? "px-2.5" : undefined}
       >
         {icon}
-        {label}
-        <ChevronDown
-          className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
-        />
+        {!compact ? (
+          <>
+            {label}
+            <ChevronDown
+              className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+            />
+          </>
+        ) : null}
       </Button>
-
-      {open ? (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-56 overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm">
-          <div role="menu" className="space-y-0.5">
-            {items.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                role="menuitem"
-                disabled={item.disabled}
-                title={item.title}
-                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
-                onClick={() => {
-                  if (item.disabled) return;
-                  setOpen(false);
-                  item.onSelect();
-                }}
-              >
-                <span className="flex size-5 shrink-0 items-center justify-center text-muted-foreground">
-                  {item.icon}
-                </span>
-                <span className="min-w-0 flex-1 truncate">{item.label}</span>
-              </button>
-            ))}
-          </div>
-        </div>
-      ) : null}
+      {menu}
     </div>
   );
 }
@@ -8805,51 +9160,63 @@ function CompactStat({
   value,
   tone,
   details,
+  active = false,
+  onClick,
 }: {
   label: string;
   chipLabel?: string;
   value: number;
   tone: "neutral" | "success" | "warning" | "danger";
   details?: Array<{ label: string; value: number }>;
+  active?: boolean;
+  onClick?: () => void;
 }) {
   const toneStyle = {
     neutral: {
-      chip: "bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300",
+      chip: "bg-muted text-muted-foreground",
       dot: "bg-slate-500",
     },
     success: {
-      chip: "bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300",
+      chip: "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
       dot: "bg-emerald-500",
     },
     warning: {
-      chip: "bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300",
+      chip: "bg-amber-500/10 text-amber-700 dark:text-amber-300",
       dot: "bg-amber-500",
     },
     danger: {
-      chip: "bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300",
+      chip: "bg-red-500/10 text-red-700 dark:text-red-300",
       dot: "bg-red-500",
     },
   }[tone];
 
-  return (
-    <div className="flex min-h-[88px] items-center justify-between gap-3 rounded-lg border border-border bg-card/85 px-3 py-2.5 shadow-sm">
+  const className = `flex min-h-[72px] w-full items-center justify-between gap-2 rounded-xl border px-2.5 py-2 text-left shadow-sm transition-[border-color,box-shadow,background-color,transform] duration-200 sm:min-h-[84px] sm:gap-3 sm:px-3 sm:py-2.5 ${
+    active
+      ? "border-primary/40 bg-primary/5 ring-1 ring-primary/25 shadow-sm"
+      : "border-border bg-card/85 hover:border-border hover:bg-card"
+  } ${onClick ? "cursor-pointer hover:shadow-sm active:scale-[0.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" : ""}`;
+
+  const content = (
+    <>
       <div className="min-w-0">
-        <div className="text-[12px] font-semibold text-muted-foreground">
+        <div className="truncate text-[11px] font-medium text-muted-foreground sm:text-[12px]">
           {label}
         </div>
-        <div className="mt-1 text-[24px] font-bold leading-none text-foreground">
+        <div className="mt-1.5 text-[22px] font-semibold leading-none tabular-nums tracking-tight text-foreground sm:text-[26px]">
           {value}
         </div>
       </div>
-      <div className="flex min-h-[58px] shrink-0 flex-col items-end gap-1.5">
+      <div className="flex min-h-[48px] shrink-0 flex-col items-end gap-1 sm:min-h-[54px] sm:gap-1.5">
         <div
-          className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-semibold ${toneStyle.chip}`}
+          className={`inline-flex items-center gap-1.5 rounded-full px-1.5 py-0.5 text-[11px] font-medium sm:px-2 sm:py-1 sm:text-[12px] ${toneStyle.chip}`}
         >
-          <span className={`size-2 rounded-full ${toneStyle.dot}`} />
-          {chipLabel ?? label}
+          <span className={`size-1.5 rounded-full sm:size-1.5 ${toneStyle.dot}`} />
+          <span className="max-w-[4.5rem] truncate sm:max-w-none">
+            {chipLabel ?? label}
+          </span>
         </div>
         {details && details.length > 0 && (
-          <div className="flex flex-col items-end gap-0.5 text-[11px] font-semibold leading-4 text-muted-foreground">
+          <div className="flex flex-col items-end gap-0.5 text-[11px] font-medium leading-4 text-muted-foreground">
             {details.map((item) => (
               <div
                 key={item.label}
@@ -8865,8 +9232,23 @@ function CompactStat({
           </div>
         )}
       </div>
-    </div>
+    </>
   );
+
+  if (onClick) {
+    return (
+      <button
+        type="button"
+        onClick={onClick}
+        aria-pressed={active}
+        className={className}
+      >
+        {content}
+      </button>
+    );
+  }
+
+  return <div className={className}>{content}</div>;
 }
 
 function SchedulerChip({
@@ -8879,22 +9261,165 @@ function SchedulerChip({
   tone: "neutral" | "success" | "warning" | "danger";
 }) {
   const toneStyle = {
-    neutral:
-      "bg-slate-500/10 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300",
+    neutral: "bg-muted text-muted-foreground",
     success:
-      "bg-emerald-500/10 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300",
+      "bg-emerald-500/10 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
     warning:
-      "bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-300",
-    danger: "bg-red-500/10 text-red-600 dark:bg-red-500/20 dark:text-red-300",
+      "bg-amber-500/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+    danger: "bg-red-500/10 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  }[tone];
+  const dotStyle = {
+    neutral: "bg-slate-400",
+    success: "bg-emerald-500",
+    warning: "bg-amber-500",
+    danger: "bg-red-500",
   }[tone];
 
   return (
     <span
-      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 font-semibold ${toneStyle}`}
+      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[12px] font-medium ${toneStyle}`}
     >
+      <span className={`size-1.5 rounded-full ${dotStyle}`} />
       <span>{label}</span>
-      <span>{value}</span>
+      <span className="tabular-nums">{value}</span>
     </span>
+  );
+}
+
+function AccountRowActionsMenu({
+  t,
+  account,
+  refreshing,
+  authJsonExporting,
+  includeTest = true,
+  includeDelete = true,
+  onTest,
+  onRefresh,
+  onGenerateAuthJson,
+  onToggleEnabled,
+  onToggleLock,
+  onResetStatus,
+  onResetCredits,
+  onDelete,
+}: {
+  t: ReturnType<typeof useTranslation>["t"];
+  account: AccountRow;
+  refreshing: boolean;
+  authJsonExporting: boolean;
+  includeTest?: boolean;
+  includeDelete?: boolean;
+  onTest: () => void;
+  onRefresh: () => void;
+  onGenerateAuthJson: () => void;
+  onToggleEnabled: () => void;
+  onToggleLock: () => void;
+  onResetStatus: () => void;
+  onResetCredits: () => void;
+  onDelete: () => void;
+}) {
+  const refreshDisabled =
+    refreshing || account.at_only || account.openai_responses_api;
+  const authJsonDisabled =
+    authJsonExporting || account.at_only || account.openai_responses_api;
+  const resetCredits = account.rate_limit_reset_credits ?? 0;
+
+  const items: HeaderActionMenuItem[] = [
+    ...(includeTest
+      ? [
+          {
+            key: "test",
+            label: t("accounts.testConnection"),
+            icon: <Zap className="size-3.5" />,
+            onSelect: onTest,
+          },
+        ]
+      : []),
+    {
+      key: "refresh",
+      label: t("accounts.refreshAccessToken"),
+      icon: (
+        <RefreshCw
+          className={`size-3.5 ${refreshing ? "animate-spin" : ""}`}
+        />
+      ),
+      disabled: refreshDisabled,
+      title:
+        account.at_only || account.openai_responses_api
+          ? t("accounts.atRefreshDisabled")
+          : undefined,
+      onSelect: onRefresh,
+    },
+    {
+      key: "auth-json",
+      label: t("accounts.generateAuthJson"),
+      icon: <FileJson className="size-3.5" />,
+      disabled: authJsonDisabled,
+      title:
+        account.at_only || account.openai_responses_api
+          ? t("accounts.authJsonDisabled")
+          : undefined,
+      onSelect: onGenerateAuthJson,
+    },
+    {
+      key: "toggle-enabled",
+      label:
+        account.enabled === false
+          ? t("accounts.actionEnableScheduling")
+          : t("accounts.actionDisableScheduling"),
+      icon:
+        account.enabled === false ? (
+          <Power className="size-3.5" />
+        ) : (
+          <PowerOff className="size-3.5" />
+        ),
+      onSelect: onToggleEnabled,
+    },
+    {
+      key: "toggle-lock",
+      label: account.locked
+        ? t("accounts.actionUnlockAccount")
+        : t("accounts.actionLockAccount"),
+      icon: account.locked ? (
+        <Unlock className="size-3.5" />
+      ) : (
+        <Lock className="size-3.5" />
+      ),
+      onSelect: onToggleLock,
+    },
+    {
+      key: "reset-status",
+      label: t("accounts.resetStatus"),
+      icon: <RotateCcw className="size-3.5" />,
+      onSelect: onResetStatus,
+    },
+    {
+      key: "reset-credits",
+      label: t("accounts.resetCreditsButton"),
+      icon: <Timer className="size-3.5" />,
+      disabled: resetCredits <= 0,
+      onSelect: onResetCredits,
+    },
+    ...(includeDelete
+      ? [
+          {
+            key: "delete",
+            label: t("accounts.deleteAccount"),
+            icon: <Trash2 className="size-3.5" />,
+            destructive: true,
+            onSelect: onDelete,
+          },
+        ]
+      : []),
+  ];
+
+  return (
+    <HeaderActionMenu
+      label={t("accounts.rowActions")}
+      icon={<MoreHorizontal className="size-3.5" />}
+      align="end"
+      compact
+      items={items}
+    />
   );
 }
 
@@ -8908,23 +9433,24 @@ function ChipList({
   if (items.length === 0) return null;
   const visible = items.slice(0, 3);
   const hidden = items.length - visible.length;
+  // Keep tag chips intentionally muted so semantic status colors stay dominant.
   const toneClass =
     tone === "purple"
-      ? "bg-purple-500/10 text-purple-700 ring-purple-500/20 dark:text-purple-300"
-      : "bg-blue-500/10 text-blue-700 ring-blue-500/20 dark:text-blue-300";
+      ? "bg-muted text-muted-foreground ring-border/80"
+      : "bg-muted/80 text-muted-foreground ring-border/70";
 
   return (
     <div className="mt-1.5 flex flex-wrap gap-1">
       {visible.map((item) => (
         <span
           key={item}
-          className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-semibold ring-1 ring-inset ${toneClass}`}
+          className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset ${toneClass}`}
         >
           {item}
         </span>
       ))}
       {hidden > 0 && (
-        <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+        <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
           +{hidden}
         </span>
       )}
@@ -8944,7 +9470,7 @@ function EmailDomainBadge({
 
   return (
     <span
-      className="inline-flex max-w-full items-center break-all rounded-md bg-cyan-500/10 px-1.5 py-0.5 text-left text-[10px] font-semibold leading-tight text-cyan-700 ring-1 ring-inset ring-cyan-500/20 dark:text-cyan-300"
+      className="inline-flex max-w-full items-center break-all rounded-md bg-muted px-1.5 py-0.5 text-left text-[10px] font-medium leading-tight text-muted-foreground ring-1 ring-inset ring-border/80"
       title={`${t("accounts.emailDomainSystemTag")}: ${label}`}
     >
       {label}
@@ -9077,6 +9603,7 @@ function AccountMobileCard({
   account,
   sequence,
   selected,
+  detailOpen = false,
   allGroups,
   lazyMode,
   showEmailDomainTags,
@@ -9086,6 +9613,7 @@ function AccountMobileCard({
   variant = "mobile",
   t,
   onToggleSelect,
+  onOpenDetail,
   onEdit,
   onUsage,
   onTest,
@@ -9101,6 +9629,7 @@ function AccountMobileCard({
   account: AccountRow;
   sequence: number;
   selected: boolean;
+  detailOpen?: boolean;
   allGroups: AccountGroup[];
   lazyMode: boolean;
   showEmailDomainTags: boolean;
@@ -9110,6 +9639,7 @@ function AccountMobileCard({
   variant?: "mobile" | "personal";
   t: ReturnType<typeof useTranslation>["t"];
   onToggleSelect: () => void;
+  onOpenDetail: () => void;
   onEdit: () => void;
   onUsage: () => void;
   onTest: () => void;
@@ -9127,10 +9657,6 @@ function AccountMobileCard({
     : formatAccountListEmail(account);
   const fullName = formatAccountName(account);
   const groups = resolveAccountGroups(account.group_ids ?? [], allGroups);
-  const refreshDisabled =
-    refreshing || account.at_only || account.openai_responses_api;
-  const authJsonDisabled =
-    authJsonExporting || account.at_only || account.openai_responses_api;
   // 自用模式用独立的信息架构：更强调账号身份、用量、健康和少量高频操作。
   const isPersonal = variant === "personal";
   const avatarInitial = (displayName.trim()[0] || "?").toUpperCase();
@@ -9146,10 +9672,10 @@ function AccountMobileCard({
   if (isPersonal) {
     return (
       <article
-        className={`group flex h-full min-w-0 flex-col overflow-hidden rounded-lg border bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg ${
-          selected
+        className={`group flex h-full min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-sm transition-colors ${
+          detailOpen || selected
             ? "border-primary/40 bg-primary/5 ring-1 ring-primary/20"
-            : "border-border"
+            : "border-border hover:border-border/80"
         }`}
       >
         <div className="flex min-w-0 items-start gap-4 p-5 pb-4">
@@ -9162,9 +9688,14 @@ function AccountMobileCard({
           />
 
           <div className="flex shrink-0 flex-col items-center gap-2">
-            <div className="flex size-12 items-center justify-center rounded-lg bg-sky-50 text-lg font-semibold text-sky-700 ring-1 ring-inset ring-sky-200 dark:bg-sky-950/70 dark:text-sky-300 dark:ring-sky-800">
+            <button
+              type="button"
+              onClick={onOpenDetail}
+              title={t("accounts.openDetail")}
+              className="flex size-12 items-center justify-center rounded-lg bg-sky-50 text-lg font-semibold text-sky-700 ring-1 ring-inset ring-sky-200 transition-colors hover:bg-sky-100 dark:bg-sky-950/70 dark:text-sky-300 dark:ring-sky-800 dark:hover:bg-sky-900"
+            >
               {avatarInitial}
-            </div>
+            </button>
             {resetCredits > 0 && (
               <button
                 type="button"
@@ -9199,12 +9730,14 @@ function AccountMobileCard({
 
             <div className="mt-2 flex min-w-0 flex-wrap items-start justify-between gap-3">
               <div className="min-w-0 flex-1">
-                <div
-                  className="break-all text-lg font-semibold leading-tight text-foreground"
+                <button
+                  type="button"
+                  onClick={onOpenDetail}
                   title={fullName}
+                  className="break-all text-left text-lg font-semibold leading-tight text-foreground transition-colors hover:text-primary"
                 >
                   {displayName}
-                </div>
+                </button>
                 {chatgptAccountId && (
                   <div
                     className="mt-1 max-w-full truncate font-mono text-[10px] leading-tight text-muted-foreground/70"
@@ -9392,7 +9925,13 @@ function AccountMobileCard({
         )}
 
         <div className="mt-auto border-t border-border/70 bg-muted/15 p-4">
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <AccountMobileActionButton
+              title={t("accounts.openDetail")}
+              label={t("accounts.openDetail")}
+              onClick={onOpenDetail}
+              icon={<Eye className="size-3.5" />}
+            />
             <AccountMobileActionButton
               title={t("accounts.editScheduler")}
               label={t("accounts.editScheduler")}
@@ -9400,96 +9939,24 @@ function AccountMobileCard({
               icon={<Pencil className="size-3.5" />}
             />
             <AccountMobileActionButton
-              title={t("accounts.testConnection")}
-              label={t("accounts.testConnection")}
-              onClick={onTest}
-              icon={<Zap className="size-3.5" />}
+              title={t("accounts.usageDetail")}
+              label={t("accounts.actionUsageDetail")}
+              onClick={onUsage}
+              icon={<BarChart3 className="size-3.5" />}
             />
-            <AccountMobileActionButton
-              title={
-                account.at_only || account.openai_responses_api
-                  ? t("accounts.atRefreshDisabled")
-                  : t("accounts.refreshAccessToken")
-              }
-              label={t("accounts.actionRefreshAT")}
-              disabled={refreshDisabled}
-              onClick={onRefresh}
-              icon={
-                <RefreshCw
-                  className={`size-3.5 ${refreshing ? "animate-spin" : ""}`}
-                />
-              }
-            />
-            <AccountMobileActionButton
-              title={
-                account.at_only || account.openai_responses_api
-                  ? t("accounts.authJsonDisabled")
-                  : t("accounts.generateAuthJson")
-              }
-              label={t("accounts.actionAuthJson")}
-              disabled={authJsonDisabled}
-              onClick={onGenerateAuthJson}
-              icon={<FileJson className="size-3.5" />}
-            />
-            <AccountMobileActionButton
-              title={
-                account.enabled === false
-                  ? t("accounts.enableHint")
-                  : t("accounts.disableHint")
-              }
-              label={
-                account.enabled === false
-                  ? t("accounts.actionEnableScheduling")
-                  : t("accounts.actionDisableScheduling")
-              }
-              variant={account.enabled === false ? "default" : "outline"}
-              onClick={onToggleEnabled}
-              icon={
-                account.enabled === false ? (
-                  <Power className="size-3.5" />
-                ) : (
-                  <PowerOff className="size-3.5" />
-                )
-              }
-            />
-            <AccountMobileActionButton
-              title={
-                account.locked ? t("accounts.unlockHint") : t("accounts.lockHint")
-              }
-              label={
-                account.locked
-                  ? t("accounts.actionUnlockAccount")
-                  : t("accounts.actionLockAccount")
-              }
-              variant={account.locked ? "default" : "outline"}
-              onClick={onToggleLock}
-              icon={
-                account.locked ? (
-                  <Lock className="size-3.5" />
-                ) : (
-                  <Unlock className="size-3.5" />
-                )
-              }
-            />
-            <AccountMobileActionButton
-              title={t("accounts.resetStatusHint")}
-              label={t("accounts.resetStatus")}
-              onClick={onResetStatus}
-              icon={<RotateCcw className="size-3.5" />}
-            />
-            <AccountMobileActionButton
-              title={t("accounts.resetCreditsButton")}
-              label={t("accounts.resetCreditsButton")}
-              disabled={resetCredits <= 0}
-              onClick={onResetCredits}
-              icon={<Timer className="size-3.5" />}
-            />
-            <AccountMobileActionButton
-              title={t("accounts.deleteAccount")}
-              label={t("accounts.deleteAccount")}
-              variant="destructive"
-              onClick={onDelete}
-              icon={<Trash2 className="size-3.5" />}
+            <AccountRowActionsMenu
+              t={t}
+              account={account}
+              refreshing={refreshing}
+              authJsonExporting={authJsonExporting}
+              onTest={onTest}
+              onRefresh={onRefresh}
+              onGenerateAuthJson={onGenerateAuthJson}
+              onToggleEnabled={onToggleEnabled}
+              onToggleLock={onToggleLock}
+              onResetStatus={onResetStatus}
+              onResetCredits={onResetCredits}
+              onDelete={onDelete}
             />
           </div>
         </div>
@@ -9499,8 +9966,10 @@ function AccountMobileCard({
 
   return (
     <article
-      className={`min-w-0 rounded-lg border bg-card p-3 shadow-sm ${
-        selected ? "border-primary/40 bg-primary/5 ring-1 ring-primary/20" : "border-border"
+      className={`min-w-0 rounded-xl border bg-card p-3 shadow-sm transition-colors ${
+        detailOpen || selected
+          ? "border-primary/40 bg-primary/5 ring-1 ring-primary/20"
+          : "border-border"
       }`}
     >
       <div className="flex min-w-0 items-start gap-3">
@@ -9530,12 +9999,14 @@ function AccountMobileCard({
                     />
                   )}
                 </div>
-                <div
-                  className="mt-1 break-all text-[15px] font-semibold leading-tight text-foreground"
-                  title={fullName}
+                <button
+                  type="button"
+                  className="mt-1 break-all text-left text-[15px] font-semibold leading-tight text-foreground transition-colors hover:text-primary"
+                  title={t("accounts.openDetail")}
+                  onClick={onOpenDetail}
                 >
                   {displayName}
-                </div>
+                </button>
                 {chatgptAccountId && (
                   <div
                     className="mt-1 min-h-[14px] max-w-full truncate font-mono text-[10px] leading-tight text-muted-foreground/70"
@@ -9598,17 +10069,14 @@ function AccountMobileCard({
                 : ""}
             </div>
           )}
-          <div className="mt-1 text-[11px] text-muted-foreground">
-            {t("accounts.healthSummary", {
+          <div
+            className="mt-1.5"
+            title={t("accounts.healthSummary", {
               health: formatHealthTier(account.health_tier, t),
               score: Math.round(getDispatchScore(account)),
               concurrency: account.dynamic_concurrency_limit ?? "-",
             })}
-          </div>
-          <div className="mt-1.5 space-y-0.5">
-            <div className="text-[10px] text-muted-foreground/70">
-              {t("accounts.healthBarLabel")}
-            </div>
+          >
             <AccountHealthBar buckets={healthBuckets} />
           </div>
         </div>
@@ -9685,9 +10153,12 @@ function AccountMobileCard({
         </div>
       )}
 
-      <div
-        className="mt-3 grid grid-cols-5 gap-1.5 max-[380px]:grid-cols-4"
-      >
+      <div className="mt-3 flex flex-wrap items-center gap-1.5">
+        <AccountMobileActionButton
+          title={t("accounts.openDetail")}
+          onClick={onOpenDetail}
+          icon={<Eye className="size-3.5" />}
+        />
         <AccountMobileActionButton
           title={t("accounts.editScheduler")}
           onClick={onEdit}
@@ -9698,81 +10169,19 @@ function AccountMobileCard({
           onClick={onUsage}
           icon={<BarChart3 className="size-3.5" />}
         />
-        <AccountMobileActionButton
-          title={t("accounts.testConnection")}
-          onClick={onTest}
-          icon={<Zap className="size-3.5" />}
-        />
-        <AccountMobileActionButton
-          title={
-            account.at_only || account.openai_responses_api
-              ? t("accounts.atRefreshDisabled")
-              : t("accounts.refreshAccessToken")
-          }
-          disabled={refreshDisabled}
-          onClick={onRefresh}
-          icon={
-            <RefreshCw
-              className={`size-3.5 ${refreshing ? "animate-spin" : ""}`}
-            />
-          }
-        />
-        <AccountMobileActionButton
-          title={
-            account.at_only || account.openai_responses_api
-              ? t("accounts.authJsonDisabled")
-              : t("accounts.generateAuthJson")
-          }
-          disabled={authJsonDisabled}
-          onClick={onGenerateAuthJson}
-          icon={<FileJson className="size-3.5" />}
-        />
-        <AccountMobileActionButton
-          title={
-            account.enabled === false
-              ? t("accounts.enableHint")
-              : t("accounts.disableHint")
-          }
-          variant={account.enabled === false ? "default" : "outline"}
-          onClick={onToggleEnabled}
-          icon={
-            account.enabled === false ? (
-              <Power className="size-3.5" />
-            ) : (
-              <PowerOff className="size-3.5" />
-            )
-          }
-        />
-        <AccountMobileActionButton
-          title={
-            account.locked ? t("accounts.unlockHint") : t("accounts.lockHint")
-          }
-          variant={account.locked ? "default" : "outline"}
-          onClick={onToggleLock}
-          icon={
-            account.locked ? (
-              <Lock className="size-3.5" />
-            ) : (
-              <Unlock className="size-3.5" />
-            )
-          }
-        />
-        <AccountMobileActionButton
-          title={t("accounts.resetStatusHint")}
-          onClick={onResetStatus}
-          icon={<RotateCcw className="size-3.5" />}
-        />
-        <AccountMobileActionButton
-          title={t("accounts.resetCreditsButton")}
-          disabled={(account.rate_limit_reset_credits ?? 0) <= 0}
-          onClick={onResetCredits}
-          icon={<Timer className="size-3.5" />}
-        />
-        <AccountMobileActionButton
-          title={t("accounts.deleteAccount")}
-          variant="destructive"
-          onClick={onDelete}
-          icon={<Trash2 className="size-3.5" />}
+        <AccountRowActionsMenu
+          t={t}
+          account={account}
+          refreshing={refreshing}
+          authJsonExporting={authJsonExporting}
+          onTest={onTest}
+          onRefresh={onRefresh}
+          onGenerateAuthJson={onGenerateAuthJson}
+          onToggleEnabled={onToggleEnabled}
+          onToggleLock={onToggleLock}
+          onResetStatus={onResetStatus}
+          onResetCredits={onResetCredits}
+          onDelete={onDelete}
         />
       </div>
     </article>

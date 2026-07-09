@@ -1067,6 +1067,70 @@ func TestPrepareResponsesBody_SparkModelKeepsExplicitImageGenerationTool(t *test
 	}
 }
 
+func TestPrepareResponsesBody_ImageGenNamespaceToolSkipsInjectionAndBridge(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"draw a poster",
+		"tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	tools := gjson.GetBytes(got, "tools")
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == "image_generation" {
+			t.Fatalf("hosted image_generation tool should not be injected alongside image_gen namespace, got %s", string(got))
+		}
+	}
+	if gjson.GetBytes(got, "tools.0.name").String() != "image_gen" {
+		t.Fatalf("namespace image_gen tool should be preserved, got %s", string(got))
+	}
+	if instructions := gjson.GetBytes(got, "instructions").String(); strings.Contains(instructions, codexImageGenerationBridgeMarker) {
+		t.Fatalf("bridge instructions should not be injected when image_gen namespace is present, got %q", instructions)
+	}
+}
+
+func TestPrepareResponsesBody_ImageGenNamespaceInAdditionalToolsSkipsInjection(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"namespace","name":"image_gen"}]},
+			{"role":"user","content":"draw a poster"}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	for _, tool := range gjson.GetBytes(got, "tools").Array() {
+		if tool.Get("type").String() == "image_generation" {
+			t.Fatalf("hosted image_generation tool should not be injected for additional_tools image_gen, got %s", string(got))
+		}
+	}
+	if instructions := gjson.GetBytes(got, "instructions").String(); strings.Contains(instructions, codexImageGenerationBridgeMarker) {
+		t.Fatalf("bridge instructions should not be injected, got %q", instructions)
+	}
+}
+
+func TestPrepareResponsesBody_NonImageNamespaceToolStillInjectsDefault(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"hello",
+		"tools":[{"type":"namespace","name":"code_tools","tools":[{"type":"function","name":"run"}]}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	found := false
+	for _, tool := range gjson.GetBytes(got, "tools").Array() {
+		if tool.Get("type").String() == "image_generation" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("non-image namespace tool should not suppress default injection, got %s", string(got))
+	}
+}
+
 func TestPrepareResponsesBody_NormalizesNestedReasoningEffortAliases(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",
@@ -2359,6 +2423,63 @@ func TestExtractToolCallsFromOutput(t *testing.T) {
 	}
 	if tcs[2].ID != "call_3" || tcs[2].Name != "custom_exec" || tcs[2].Arguments != `{"cmd":"pwd"}` {
 		t.Fatalf("custom tool call mismatch: %+v", tcs[2])
+	}
+}
+
+// issue #330：上游要求 tool_search_call.arguments 为 object、function_call.arguments
+// 为 string；回放历史时类型不符会被上游 400 拒绝，需在发送前修正。
+func TestNormalizeResponsesToolCallArgumentTypes(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"tool_search_call","call_id":"c1","arguments":"{\"queries\":[\"weather\"]}"},
+			{"type":"tool_search_call","call_id":"c2","arguments":""},
+			{"type":"tool_search_call","call_id":"c3","arguments":{"queries":["ok"]}},
+			{"type":"function_call","call_id":"c4","name":"get_weather","arguments":{"city":"NYC"}},
+			{"type":"function_call","call_id":"c5","name":"get_time","arguments":"{}"},
+			{"type":"tool_search_call","call_id":"c6","arguments":"not-json"},
+			{"type":"message","role":"user","content":"hi"}
+		]
+	}`)
+
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !normalizeResponsesToolCallArgumentTypes(body) {
+		t.Fatal("expected modification, got false")
+	}
+
+	got, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	items := gjson.GetBytes(got, "input").Array()
+
+	if !items[0].Get("arguments").IsObject() {
+		t.Fatalf("tool_search_call string arguments should be parsed to object: %s", items[0].Raw)
+	}
+	if items[0].Get("arguments.queries.0").String() != "weather" {
+		t.Fatalf("parsed arguments should keep content: %s", items[0].Raw)
+	}
+	if !items[1].Get("arguments").IsObject() {
+		t.Fatalf("empty string arguments should become empty object: %s", items[1].Raw)
+	}
+	if !items[2].Get("arguments").IsObject() {
+		t.Fatalf("object arguments should stay object: %s", items[2].Raw)
+	}
+	if items[3].Get("arguments").Type != gjson.String {
+		t.Fatalf("function_call object arguments should be serialized to string: %s", items[3].Raw)
+	}
+	if items[3].Get("arguments").String() != `{"city":"NYC"}` {
+		t.Fatalf("serialized arguments should keep content, got %q", items[3].Get("arguments").String())
+	}
+	if items[4].Get("arguments").String() != "{}" {
+		t.Fatalf("function_call string arguments should be untouched: %s", items[4].Raw)
+	}
+	if items[5].Get("arguments").String() != "not-json" {
+		t.Fatalf("unparseable tool_search_call arguments should be left as-is: %s", items[5].Raw)
 	}
 }
 

@@ -53,14 +53,19 @@ export function Select({
     if (!trigger) return
     const rect = trigger.getBoundingClientRect()
     const viewportHeight = window.innerHeight
+    const viewportWidth = window.innerWidth
     const spaceBelow = viewportHeight - rect.bottom - DROPDOWN_GAP - VIEWPORT_PADDING
     const spaceAbove = rect.top - DROPDOWN_GAP - VIEWPORT_PADDING
     const openUp = spaceBelow < Math.min(DROPDOWN_MAX_HEIGHT, 160) && spaceAbove > spaceBelow
     const maxHeight = Math.max(120, Math.min(DROPDOWN_MAX_HEIGHT, openUp ? spaceAbove : spaceBelow))
+    // Keep dropdown fully inside the viewport on small screens.
+    const width = Math.min(rect.width, viewportWidth - VIEWPORT_PADDING * 2)
+    const maxLeft = viewportWidth - width - VIEWPORT_PADDING
+    const left = Math.min(Math.max(VIEWPORT_PADDING, rect.left), Math.max(VIEWPORT_PADDING, maxLeft))
     setPosition({
       top: openUp ? rect.top - DROPDOWN_GAP : rect.bottom + DROPDOWN_GAP,
-      left: rect.left,
-      width: rect.width,
+      left,
+      width,
       maxHeight,
       openUp,
     })
@@ -125,8 +130,9 @@ export function Select({
         aria-haspopup="listbox"
         aria-expanded={open}
         className={cn(
-          'flex w-full items-center justify-between gap-3 border border-input bg-background text-left shadow-xs transition-[border-color,box-shadow,transform] outline-none',
-          compact ? 'h-8 rounded-lg px-2.5 text-[13px]' : 'h-11 rounded-xl px-3.5 text-[15px]',
+          'flex w-full items-center justify-between gap-2 border border-input bg-background text-left shadow-xs transition-[border-color,box-shadow,transform] outline-none',
+          // Match Input (h-9) so form grids stay vertically aligned.
+          compact ? 'h-8 rounded-md px-2.5 text-[13px]' : 'h-9 rounded-md px-3 text-sm',
           'hover:border-primary/30 hover:bg-accent/50',
           'focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20',
           'disabled:cursor-not-allowed disabled:opacity-60',
@@ -158,14 +164,14 @@ export function Select({
                 width: position.width,
               }}
               className={cn(
-                'pointer-events-auto z-[1000] overflow-hidden border border-border bg-popover shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm rounded-lg'
+                'pointer-events-auto z-[1000] overflow-hidden rounded-md border border-border bg-popover shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm'
               )}
             >
               <div
-                className={cn('overflow-auto', compact ? 'p-1' : 'p-2')}
+                className={cn('overflow-auto', compact ? 'p-1' : 'p-1.5')}
                 style={{ maxHeight: position.maxHeight }}
               >
-                <div role="listbox" aria-activedescendant={value || undefined} className={compact ? 'space-y-0.5' : 'space-y-1'}>
+                <div role="listbox" aria-activedescendant={value || undefined} className="space-y-0.5">
                   {options.map((option) => {
                     const isSelected = option.value === value
                     return (
@@ -176,8 +182,8 @@ export function Select({
                         role="option"
                         aria-selected={isSelected}
                         className={cn(
-                          'flex w-full items-center justify-between gap-3 text-left transition-colors',
-                          compact ? 'rounded-md px-2 py-1.5 text-[13px]' : 'rounded-md px-3 py-2.5 text-[15px]',
+                          'flex w-full items-center justify-between gap-2 text-left transition-colors',
+                          compact ? 'rounded-md px-2 py-1.5 text-[13px]' : 'rounded-md px-2.5 py-2 text-sm',
                           isSelected
                             ? 'bg-primary/10 text-primary'
                             : 'text-foreground hover:bg-accent/70 hover:text-accent-foreground'

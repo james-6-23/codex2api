@@ -171,7 +171,7 @@ export default function SchedulerBoard() {
 
         {overview ? (
           <>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-6">
+            <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
               <SummaryPill label={t('scheduler.totalAccounts')} value={formatNumber(accounts.length)} />
               <SummaryPill label={t('scheduler.availableAccounts')} value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
               <SummaryPill label="Healthy + Warm" value={formatNumber(schedulerCounts.healthy + schedulerCounts.warm)} />

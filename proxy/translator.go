@@ -305,6 +305,52 @@ func hasResponsesImageGenerationTool(body map[string]any) bool {
 	return false
 }
 
+// isImageGenNamespaceTool 识别 namespace 形式的生图工具声明：
+// { "type": "namespace", "name": "image_gen", ... }。Codex 的 /image 技能用
+// 这种形式声明生图能力，而非扁平的 { "type": "image_generation" }。
+func isImageGenNamespaceTool(tool map[string]any) bool {
+	return strings.TrimSpace(firstNonEmptyAnyString(tool["type"])) == "namespace" &&
+		strings.TrimSpace(firstNonEmptyAnyString(tool["name"])) == "image_gen"
+}
+
+// hasResponsesImageGenNamespaceTool 检测客户端是否自带 namespace 生图声明，
+// 覆盖两个位置：顶层 tools[]，以及 input[] 里 type=additional_tools 项内嵌的
+// 工具列表（Responses Lite 格式）。带这种声明的客户端已有自己的生图链路，
+// 不应再叠加注入 hosted image_generation 工具和桥接 instructions——桥接文案
+// 假设 image_gen namespace 缺席，在其在场时注入语义恰好相反。
+func hasResponsesImageGenNamespaceTool(body map[string]any) bool {
+	if tools, ok := body["tools"].([]any); ok {
+		for _, rawTool := range tools {
+			if toolMap, ok := rawTool.(map[string]any); ok && isImageGenNamespaceTool(toolMap) {
+				return true
+			}
+		}
+	}
+	input, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyAnyString(item["type"])) != "additional_tools" {
+			continue
+		}
+		tools, ok := item["tools"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawTool := range tools {
+			if toolMap, ok := rawTool.(map[string]any); ok && isImageGenNamespaceTool(toolMap) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func responsesImageGenerationToolChoice(body map[string]any) string {
 	if len(body) == 0 {
 		return ""
@@ -636,6 +682,10 @@ func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
 	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
 		return false
 	}
+	// 客户端自带 namespace 生图声明时不叠加注入(见 hasResponsesImageGenNamespaceTool)。
+	if hasResponsesImageGenNamespaceTool(body) {
+		return false
+	}
 	// 不为拒绝 hosted 图片工具的模型自动注入默认图片工具及桥接 instructions；
 	// 用户显式自带的图片工具仍由上面 hasResponsesImageGenerationTool 分支保留。
 	if responsesModelRejectsHostedImageTool(body) {
@@ -652,6 +702,10 @@ func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
 
 func shouldInjectOpenAIResponsesImageGenerationTool(body map[string]any) bool {
 	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
+		return false
+	}
+	// 与 ChatGPT 路径一致:namespace 生图声明在场时不叠加注入。
+	if hasResponsesImageGenNamespaceTool(body) {
 		return false
 	}
 	if hasResponsesImageGenerationToolChoice(body) {
@@ -777,6 +831,55 @@ func normalizeResponsesCompactionItems(body map[string]any) bool {
 
 	if modified {
 		body["input"] = out
+	}
+	return modified
+}
+
+// normalizeResponsesToolCallArgumentTypes 修正 input[] 中工具调用项 arguments 的
+// JSON 类型。上游对不同 item 类型的要求不对称：function_call.arguments 必须是
+// string（JSON 编码），tool_search_call.arguments 必须是 object。客户端与缓存
+// 回放通常把上一轮输出项原样回灌，类型不符会被上游 400 拒绝：
+// "Invalid type for 'input[N].arguments': expected an object, but got a string
+// instead."（issue #330）。
+func normalizeResponsesToolCallArgumentTypes(body map[string]any) bool {
+	inputItems, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+
+	modified := false
+	for _, raw := range inputItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		args, hasArgs := item["arguments"]
+		if !hasArgs {
+			continue
+		}
+		switch firstNonEmptyAnyString(item["type"]) {
+		case "function_call":
+			if _, isString := args.(string); isString {
+				continue
+			}
+			if encoded, err := json.Marshal(args); err == nil {
+				item["arguments"] = string(encoded)
+				modified = true
+			}
+		case "tool_search_call":
+			s, isString := args.(string)
+			if !isString {
+				continue
+			}
+			var obj map[string]any
+			if strings.TrimSpace(s) == "" {
+				obj = map[string]any{}
+			} else if err := json.Unmarshal([]byte(s), &obj); err != nil || obj == nil {
+				continue
+			}
+			item["arguments"] = obj
+			modified = true
+		}
 	}
 	return modified
 }
@@ -1662,6 +1765,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	normalizeResponsesCompactionItems(body)
 	normalizeResponsesContentPartTypes(body)
 	normalizeResponsesInputMessageContent(body)
+	normalizeResponsesToolCallArgumentTypes(body)
 	normalizeResponsesInputItemIDs(body)
 	dropBareReasoningInputItems(body)
 
@@ -1780,7 +1884,7 @@ func normalizeReasoningEffort(effort string) string {
 		return ""
 	}
 	switch effort {
-	case "low", "medium", "high", "xhigh":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "ultra":
 		return effort
 	case "max":
 		return "xhigh"

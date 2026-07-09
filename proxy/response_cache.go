@@ -257,6 +257,7 @@ func inputHasFunctionCallOutput(input gjson.Result) bool {
 	input.ForEach(func(_, v gjson.Result) bool {
 		switch v.Get("type").String() {
 		case "function_call_output", "tool_call_output", "local_shell_call_output",
+			"shell_call_output", "apply_patch_call_output",
 			"tool_search_call_output", "custom_tool_call_output", "mcp_tool_call_output":
 			found = true
 			return false
@@ -355,6 +356,8 @@ func isCodexToolCallContextType(typ string) bool {
 	case "function_call",
 		"tool_call",
 		"local_shell_call",
+		"shell_call",
+		"apply_patch_call",
 		"tool_search_call",
 		"custom_tool_call",
 		"mcp_tool_call":

@@ -5380,6 +5380,9 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 		cost30d, _ = h.db.GetAllAPIKeysWindowCost(ctx, 30*24*time.Hour)
 	}
 
+	// 最近使用时间：一次聚合，失败不阻断列表
+	lastUsedByID, _ := h.db.ListAPIKeyLastUsedAt(ctx)
+
 	// 转换为脱敏响应
 	maskedKeys := make([]*MaskedAPIKeyRow, 0, len(keys))
 	for _, k := range keys {
@@ -5396,6 +5399,12 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 				detail.Cost30d = cost30d[k.ID]
 			}
 			mk.WindowUsage = detail
+		}
+		if lastUsedByID != nil {
+			if lastUsed, ok := lastUsedByID[k.ID]; ok && !lastUsed.IsZero() {
+				formatted := lastUsed.Format(time.RFC3339)
+				mk.LastUsedAt = &formatted
+			}
 		}
 		maskedKeys = append(maskedKeys, mk)
 	}
@@ -5907,6 +5916,8 @@ type settingsResponse struct {
 	CodexWSHideUpstreamErrors                  bool    `json:"codex_ws_hide_upstream_errors"`
 	CodexWSSilentRetryEnabled                  bool    `json:"codex_ws_silent_retry_enabled"`
 	CodexWSSilentMaxRetries                    int     `json:"codex_ws_silent_max_retries"`
+	CodexContinueThinkingEnabled               bool    `json:"codex_continue_thinking_enabled"`
+	CodexContinueMaxRounds                     int     `json:"codex_continue_max_rounds"`
 	SchedulerMode                              string  `json:"scheduler_mode"`
 	AffinityMode                               string  `json:"affinity_mode"`
 	MaxRetries                                 int     `json:"max_retries"`
@@ -6016,6 +6027,8 @@ type updateSettingsReq struct {
 	CodexWSHideUpstreamErrors                  *bool    `json:"codex_ws_hide_upstream_errors"`
 	CodexWSSilentRetryEnabled                  *bool    `json:"codex_ws_silent_retry_enabled"`
 	CodexWSSilentMaxRetries                    *int     `json:"codex_ws_silent_max_retries"`
+	CodexContinueThinkingEnabled               *bool    `json:"codex_continue_thinking_enabled"`
+	CodexContinueMaxRounds                     *int     `json:"codex_continue_max_rounds"`
 	SchedulerMode                              *string  `json:"scheduler_mode"`
 	AffinityMode                               *string  `json:"affinity_mode"`
 	MaxRetries                                 *int     `json:"max_retries"`
@@ -6706,6 +6719,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexWSHideUpstreamErrors:                  h.store.CodexWSHideUpstreamErrors(),
 		CodexWSSilentRetryEnabled:                  h.store.CodexWSSilentRetryEnabled(),
 		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
+		CodexContinueThinkingEnabled:               h.store.CodexContinueThinkingEnabled(),
+		CodexContinueMaxRounds:                     h.store.CodexContinueMaxRounds(),
 		SchedulerMode:                              h.store.GetSchedulerMode(),
 		AffinityMode:                               h.store.GetAffinityMode(),
 		MaxRetries:                                 h.store.GetMaxRetries(),
@@ -7120,6 +7135,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetCodexWSSilentMaxRetries(v)
 		runtimeCfg.CodexWSSilentRetries = v
 		log.Printf("设置已更新: codex_ws_silent_max_retries = %d", v)
+	}
+
+	if req.CodexContinueThinkingEnabled != nil {
+		h.store.SetCodexContinueThinkingEnabled(*req.CodexContinueThinkingEnabled)
+		runtimeCfg.CodexContinueThinking = *req.CodexContinueThinkingEnabled
+		log.Printf("设置已更新: codex_continue_thinking_enabled = %t", *req.CodexContinueThinkingEnabled)
+	}
+
+	if req.CodexContinueMaxRounds != nil {
+		v := database.NormalizeCodexContinueMaxRounds(*req.CodexContinueMaxRounds)
+		h.store.SetCodexContinueMaxRounds(v)
+		runtimeCfg.CodexContinueMaxRounds = v
+		log.Printf("设置已更新: codex_continue_max_rounds = %d", v)
 	}
 
 	if req.SchedulerMode != nil {
@@ -7558,6 +7586,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSHideUpstreamErrors:                  h.store.CodexWSHideUpstreamErrors(),
 		CodexWSSilentRetryEnabled:                  h.store.CodexWSSilentRetryEnabled(),
 		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
+		CodexContinueThinkingEnabled:               h.store.CodexContinueThinkingEnabled(),
+		CodexContinueMaxRounds:                     h.store.CodexContinueMaxRounds(),
 		SchedulerMode:                              h.store.GetSchedulerMode(),
 		AffinityMode:                               h.store.GetAffinityMode(),
 		MaxRetries:                                 h.store.GetMaxRetries(),
@@ -7681,6 +7711,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSHideUpstreamErrors:                  h.store.CodexWSHideUpstreamErrors(),
 		CodexWSSilentRetryEnabled:                  h.store.CodexWSSilentRetryEnabled(),
 		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
+		CodexContinueThinkingEnabled:               h.store.CodexContinueThinkingEnabled(),
+		CodexContinueMaxRounds:                     h.store.CodexContinueMaxRounds(),
 		SchedulerMode:                              h.store.GetSchedulerMode(),
 		AffinityMode:                               h.store.GetAffinityMode(),
 		MaxRetries:                                 h.store.GetMaxRetries(),

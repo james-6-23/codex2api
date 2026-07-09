@@ -1,6 +1,7 @@
 package wsrelay
 
 import (
+	"bytes"
 	"io"
 	"testing"
 
@@ -91,6 +92,28 @@ func TestBuildErrorEvent_NonErrorPassthrough(t *testing.T) {
 		if _, isErr := r.buildErrorEvent(payload); isErr {
 			t.Fatalf("non-error payload wrongly flagged as error: %s", payload)
 		}
+	}
+}
+
+// TestBuildErrorEvent_PrettyPrintedErrorCompacted 验证上游 pretty-printed（带换行）
+// 错误对象被压缩为单行后嵌入事件。若不压缩，SSE data: 行编码在第一个换行处截断，
+// 下游只能看到 `..."error":{` 而丢失具体错误信息。
+func TestBuildErrorEvent_PrettyPrintedErrorCompacted(t *testing.T) {
+	r := &WsResponse{}
+	upstream := []byte("{\"type\":\"error\",\"status\":400,\"error\":{\n  \"message\": \"Invalid type for 'input[61].arguments': expected an object, but got a string instead.\",\n  \"type\": \"invalid_request_error\",\n  \"param\": \"input[61].arguments\",\n  \"code\": \"invalid_type\"\n}}")
+
+	event, isErr := r.buildErrorEvent(upstream)
+	if !isErr {
+		t.Fatal("expected error frame to be detected")
+	}
+	if bytes.IndexByte(event, '\n') >= 0 {
+		t.Fatalf("event must be single-line for SSE data encoding: %s", event)
+	}
+	if msg := gjson.GetBytes(event, "response.error.message").String(); msg != "Invalid type for 'input[61].arguments': expected an object, but got a string instead." {
+		t.Fatalf("error message not preserved: %q", msg)
+	}
+	if param := gjson.GetBytes(event, "response.error.param").String(); param != "input[61].arguments" {
+		t.Fatalf("error param not preserved: %q", param)
 	}
 }
 

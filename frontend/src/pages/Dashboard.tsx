@@ -163,8 +163,61 @@ export default function Dashboard() {
           }
         />
 
+        {/* Hero summary */}
+        <div className="relative mb-5 overflow-hidden rounded-2xl border border-border/80 bg-card p-4 shadow-sm sm:mb-6 sm:p-5">
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top_left,color-mix(in_oklab,var(--color-primary)_12%,transparent),transparent_55%)]"
+          />
+          <div className="relative z-10 flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+            <div className="min-w-0">
+              <div className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">
+                {t('dashboard.heroLabel')}
+              </div>
+              <div className="mt-1 flex flex-wrap items-end gap-x-3 gap-y-1">
+                <div className="text-3xl font-bold tabular-nums tracking-tight text-foreground sm:text-4xl">
+                  {available}
+                  <span className="text-lg font-semibold text-muted-foreground sm:text-xl">/{total}</span>
+                </div>
+                <div className="pb-1 text-sm text-muted-foreground">
+                  {t('dashboard.heroAvailable')}
+                </div>
+              </div>
+              <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/12 px-2.5 py-1 font-semibold text-emerald-700 dark:text-emerald-300">
+                  <span className="size-1.5 rounded-full bg-emerald-500" />
+                  {total > 0
+                    ? t('dashboard.heroAvailability', {
+                        rate: Math.round((available / Math.max(total, 1)) * 100),
+                      })
+                    : t('dashboard.heroNoAccounts')}
+                </span>
+                <span className="inline-flex items-center rounded-full bg-muted/80 px-2.5 py-1 font-medium">
+                  {t('dashboard.heroTodayRequests', { count: todayRequests })}
+                </span>
+                {errorCount > 0 ? (
+                  <span className="inline-flex items-center rounded-full bg-destructive/12 px-2.5 py-1 font-semibold text-destructive">
+                    {t('dashboard.heroErrors', { count: errorCount })}
+                  </span>
+                ) : null}
+                {rateLimited > 0 ? (
+                  <span className="inline-flex items-center rounded-full bg-amber-500/12 px-2.5 py-1 font-semibold text-amber-700 dark:text-amber-300">
+                    {t('dashboard.heroRateLimited', { count: rateLimited })}
+                  </span>
+                ) : null}
+              </div>
+            </div>
+            {total === 0 ? (
+              <div className="rounded-xl border border-dashed border-border bg-background/70 px-4 py-3 text-left text-sm text-muted-foreground lg:max-w-sm">
+                <div className="font-semibold text-foreground">{t('dashboard.heroEmptyTitle')}</div>
+                <p className="mt-1 leading-relaxed">{t('dashboard.heroEmptyDesc')}</p>
+              </div>
+            ) : null}
+          </div>
+        </div>
+
         {/* Account status */}
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-6">
+        <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-5 sm:gap-4">
           <StatCard icon={icons.total} iconClass="blue" label={t('dashboard.totalAccounts')} value={total} />
           <StatCard
             icon={icons.available}

@@ -32,6 +32,46 @@ import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
+/** Color ramp for reasoning effort: cool/muted → hot/intense. */
+function getReasoningEffortBadgeClassName(effort: string): string {
+  switch (effort.trim().toLowerCase()) {
+    case 'none':
+    case 'off':
+      return 'border-transparent bg-slate-500/12 text-slate-500 dark:bg-slate-500/20 dark:text-slate-400'
+    case 'minimal':
+    case 'min':
+      return 'border-transparent bg-sky-500/12 text-sky-600 dark:bg-sky-500/20 dark:text-sky-400'
+    case 'low':
+      return 'border-transparent bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
+    case 'medium':
+    case 'med':
+      return 'border-transparent bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400'
+    case 'high':
+      return 'border-transparent bg-orange-500/14 text-orange-600 dark:bg-orange-500/22 dark:text-orange-400'
+    case 'xhigh':
+    case 'max':
+      return 'border-transparent bg-rose-500/14 text-rose-600 dark:bg-rose-500/22 dark:text-rose-400'
+    case 'ultra':
+      return 'border-transparent bg-violet-500/14 text-violet-600 dark:bg-violet-500/22 dark:text-violet-300'
+    default:
+      return 'border-transparent bg-muted text-muted-foreground'
+  }
+}
+
+function ReasoningEffortBadge({ effort }: { effort: string }) {
+  const label = effort.trim()
+  if (!label) return null
+  return (
+    <Badge
+      variant="outline"
+      title={`reasoning: ${label}`}
+      className={`text-[11px] font-semibold lowercase tracking-wide ${getReasoningEffortBadgeClassName(label)}`}
+    >
+      {label}
+    </Badge>
+  )
+}
+
 function getStatusBadgeClassName(statusCode: number): string {
   if (statusCode === 200) {
     return 'border-transparent bg-emerald-500/14 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300'
@@ -1100,7 +1140,7 @@ function EmptyPanel({ accent, icon, text }: { accent: PanelAccentKey; icon: Reac
   )
 }
 
-type UsageTableColumn = 'status' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'firstToken' | 'duration' | 'time'
+type UsageTableColumn = 'status' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'firstToken' | 'tokensPerSec' | 'duration' | 'time'
 
 const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string }> = [
   { key: 'status', labelKey: 'usage.tableStatus' },
@@ -1114,6 +1154,7 @@ const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string 
   { key: 'cost', labelKey: 'usage.tableCost' },
   { key: 'cached', labelKey: 'usage.tableCached' },
   { key: 'firstToken', labelKey: 'usage.tableFirstToken' },
+  { key: 'tokensPerSec', labelKey: 'usage.tableTokensPerSec' },
   { key: 'duration', labelKey: 'usage.tableDuration' },
   { key: 'time', labelKey: 'usage.tableTime' },
 ]
@@ -1131,8 +1172,58 @@ const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   cost: true,
   cached: true,
   firstToken: true,
+  tokensPerSec: true,
   duration: true,
   time: true,
+}
+
+/**
+ * Output tokens/sec from existing log fields — no backend change needed.
+ * Prefers generation window (duration − first_token) so TTFT does not drag the rate down.
+ */
+function computeOutputTokensPerSec(log: UsageLog): number | null {
+  if (log.status_code >= 400) return null
+  const outputTokens = Math.max(0, log.output_tokens || log.completion_tokens || 0)
+  if (outputTokens <= 0 || log.duration_ms <= 0) return null
+
+  let generationMs = log.duration_ms
+  if (log.first_token_ms > 0 && log.first_token_ms < log.duration_ms) {
+    generationMs = log.duration_ms - log.first_token_ms
+  }
+  // Guard tiny windows (e.g. first token almost equals end) that explode the rate.
+  if (generationMs < 20) generationMs = log.duration_ms
+  if (generationMs <= 0) return null
+
+  return outputTokens / (generationMs / 1000)
+}
+
+function formatTokensPerSec(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '-'
+  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
+  if (value >= 100) return value.toFixed(0)
+  if (value >= 10) return value.toFixed(1)
+  return value.toFixed(2)
+}
+
+function tokensPerSecClassName(value: number): string {
+  // Rough bands for visual scan; absolute numbers vary by model.
+  if (value >= 80) return 'text-emerald-600 dark:text-emerald-400'
+  if (value >= 30) return 'text-foreground'
+  if (value >= 10) return 'text-amber-600 dark:text-amber-400'
+  return 'text-red-500 dark:text-red-400'
+}
+
+function TokensPerSecCell({ log }: { log: UsageLog }) {
+  const value = computeOutputTokensPerSec(log)
+  if (value == null) {
+    return <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+  }
+  return (
+    <span className={`${usageTableMonoClass} ${tokensPerSecClassName(value)}`} title={`${value.toFixed(2)} tok/s`}>
+      {formatTokensPerSec(value)}
+      <span className="ml-0.5 text-[11px] font-medium opacity-70">tok/s</span>
+    </span>
+  )
 }
 
 function getInitialUsageVisibleColumns(): Record<UsageTableColumn, boolean> {
@@ -1544,10 +1635,10 @@ export default function Usage() {
         {/* Logs table */}
         <Card>
           <CardContent className="p-4">
-            <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:overflow-x-auto">
-              <div className="flex shrink-0 items-center gap-3">
-                <h3 className="whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
-                <div className="inline-flex shrink-0 rounded-lg border border-border bg-muted/50 p-0.5">
+            <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:flex-col max-lg:items-stretch max-lg:overflow-visible">
+              <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                <h3 className="shrink-0 whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
+                <div className="inline-flex max-w-full flex-wrap rounded-xl border border-border bg-muted/50 p-0.5">
                   {USAGE_TIME_RANGE_OPTIONS.map((key) => (
                     <button
                       key={key}
@@ -1557,7 +1648,7 @@ export default function Usage() {
                         setPage(1)
                         setShowCustomPopover(false)
                       }}
-                      className={`whitespace-nowrap px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
+                      className={`whitespace-nowrap px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
                         timeRange === key
                           ? 'bg-background text-foreground shadow-sm border border-border'
                           : 'text-muted-foreground hover:text-foreground'
@@ -1570,7 +1661,7 @@ export default function Usage() {
                     ref={customChipRef}
                     type="button"
                     onClick={() => setShowCustomPopover((v) => !v)}
-                    className={`whitespace-nowrap px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
+                    className={`whitespace-nowrap px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
                       timeRange === 'custom'
                         ? 'bg-background text-foreground shadow-sm border border-border'
                         : 'text-muted-foreground hover:text-foreground'
@@ -1630,7 +1721,7 @@ export default function Usage() {
             </div>
 
             {/* 筛选栏 */}
-            <div className="toolbar-surface mb-4 flex items-center gap-2 overflow-visible whitespace-nowrap max-lg:overflow-x-auto">
+            <div className="toolbar-surface mb-4 flex flex-wrap items-center gap-2 overflow-visible max-lg:gap-1.5">
               {/* 搜索框 */}
               <div className="relative w-60 shrink-0 max-sm:w-full">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
@@ -1759,7 +1850,139 @@ export default function Usage() {
               emptyTitle={t('usage.emptyTitle')}
               emptyDescription={hasActiveFilters ? t('usage.emptyFilteredDesc') : t('usage.emptyDesc')}
             >
-              <div className="data-table-shell">
+              {/* Mobile log cards */}
+              <TooltipProvider>
+              <div className="grid gap-3 lg:hidden">
+                {logs.map((log: UsageLog) => {
+                  const durationLabel = log.duration_ms > 1000
+                    ? `${(log.duration_ms / 1000).toFixed(1)}s`
+                    : `${log.duration_ms}ms`
+                  const firstTokenLabel = log.first_token_ms > 0
+                    ? (log.first_token_ms > 1000
+                      ? `${(log.first_token_ms / 1000).toFixed(1)}s`
+                      : `${log.first_token_ms}ms`)
+                    : null
+                  return (
+                    <div
+                      key={log.id}
+                      className="rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                          <StatusCodeBadge log={log} />
+                          {log.upstream_error_kind === 'cyber_policy' ? <CyberPolicyDetailButton log={log} /> : null}
+                          {log.via_websocket ? (
+                            <Badge
+                              variant="outline"
+                              className="border-transparent bg-cyan-500/12 text-[11px] font-semibold uppercase text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400"
+                            >
+                              ws
+                            </Badge>
+                          ) : null}
+                          <Badge variant="outline" className={usageTableBadgeClass}>
+                            {log.model || '-'}
+                          </Badge>
+                          {log.reasoning_effort ? (
+                            <ReasoningEffortBadge effort={log.reasoning_effort} />
+                          ) : null}
+                          {isFastTier(log.billing_service_tier || log.service_tier) ? (
+                            <Badge
+                              variant="outline"
+                              className="gap-0.5 border-transparent bg-blue-500/12 text-[11px] font-semibold text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
+                            >
+                              <Zap className="size-3" />
+                              Fast
+                            </Badge>
+                          ) : null}
+                          <Badge
+                            variant="outline"
+                            className={usageTableBadgeClass}
+                            style={{
+                              background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)',
+                              color: log.stream ? '#6366f1' : '#6b7280',
+                              borderColor: 'transparent',
+                            }}
+                          >
+                            {log.stream ? 'stream' : 'sync'}
+                          </Badge>
+                        </div>
+                        <div className="shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+                          {formatBeijingTime(log.created_at)}
+                        </div>
+                      </div>
+
+                      <div className="mt-2.5 space-y-1 text-xs text-muted-foreground">
+                        <div className="truncate" title={formatUsageAccountTitle(log)}>
+                          <span className="font-semibold text-foreground/80">{t('usage.tableAccount')}: </span>
+                          {formatUsageAccountLabel(log)}
+                        </div>
+                        <div className="truncate font-mono">
+                          <span className="font-sans font-semibold text-foreground/80">{t('usage.tableEndpoint')}: </span>
+                          {log.inbound_endpoint || log.endpoint || '-'}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableToken')}</div>
+                          <div className="mt-1 font-mono tabular-nums">
+                            {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
+                              <>
+                                <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
+                                <span className="mx-0.5 text-border">/</span>
+                                <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
+                              </>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableCost')}</div>
+                          <div className="mt-1">
+                            <UsageCostCell log={log} />
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableDuration')}</div>
+                          <div className={`mt-1 font-mono tabular-nums ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-foreground'}`}>
+                            {durationLabel}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableFirstToken')}</div>
+                          <div className={`mt-1 font-mono tabular-nums ${
+                            !firstTokenLabel
+                              ? 'text-muted-foreground'
+                              : log.first_token_ms > 5000
+                                ? 'text-red-500'
+                                : log.first_token_ms > 2000
+                                  ? 'text-amber-500'
+                                  : 'text-emerald-500'
+                          }`}>
+                            {firstTokenLabel || '-'}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div
+                            className="text-[11px] font-semibold text-muted-foreground"
+                            title={t('usage.tableTokensPerSecHint')}
+                          >
+                            {t('usage.tableTokensPerSec')}
+                          </div>
+                          <div className="mt-1">
+                            <TokensPerSecCell log={log} />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              </TooltipProvider>
+
+              {/* Desktop table */}
+              <div className="data-table-shell hidden lg:block">
                 <TooltipProvider>
                 <Table>
                   <TableHeader>
@@ -1775,6 +1998,16 @@ export default function Usage() {
                       {visibleColumns.cost && <TableHead className={usageTableHeadClass}>{t('usage.tableCost')}</TableHead>}
                       {visibleColumns.cached && <TableHead className={usageTableHeadClass}>{t('usage.tableCached')}</TableHead>}
                       {visibleColumns.firstToken && <TableHead className={usageTableHeadClass}><span title={t('usage.tableFirstTokenHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableFirstToken')}</span></TableHead>}
+                      {visibleColumns.tokensPerSec && (
+                        <TableHead className={usageTableHeadClass}>
+                          <span
+                            title={t('usage.tableTokensPerSecHint')}
+                            className="cursor-help underline decoration-dotted underline-offset-2"
+                          >
+                            {t('usage.tableTokensPerSec')}
+                          </span>
+                        </TableHead>
+                      )}
                       {visibleColumns.duration && <TableHead className={usageTableHeadClass}>{t('usage.tableDuration')}</TableHead>}
                       {visibleColumns.time && <TableHead className={usageTableHeadClass}>{t('usage.tableTime')}</TableHead>}
                     </TableRow>
@@ -1808,20 +2041,9 @@ export default function Usage() {
                                 → {log.effective_model}
                               </Badge>
                             )}
-                            {log.reasoning_effort && (
-                              <Badge
-                                variant="outline"
-                                className={`text-[11px] font-medium border-transparent ${
-                                  log.reasoning_effort === 'xhigh' || log.reasoning_effort === 'high'
-                                    ? 'bg-red-500/12 text-red-600 dark:bg-red-500/20 dark:text-red-400'
-                                    : log.reasoning_effort === 'medium'
-                                      ? 'bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400'
-                                      : 'bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
-                                }`}
-                              >
-                                {log.reasoning_effort}
-                              </Badge>
-                            )}
+                            {log.reasoning_effort ? (
+                              <ReasoningEffortBadge effort={log.reasoning_effort} />
+                            ) : null}
                             {isImageUsageLog(log) && (
                               <ImageUsageBadge log={log} />
                             )}
@@ -1924,6 +2146,11 @@ export default function Usage() {
                             </span>
                           ) : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}
                         </TableCell>}
+                        {visibleColumns.tokensPerSec && (
+                          <TableCell>
+                            <TokensPerSecCell log={log} />
+                          </TableCell>
+                        )}
                         {visibleColumns.duration && <TableCell>
                           <span className={`${usageTableMonoClass} ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>
                             {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}

@@ -213,6 +213,17 @@ function setupMonitoringDetail(
   return copy.monitoringFull
 }
 
+function AuthBackdrop() {
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 overflow-hidden">
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,color-mix(in_oklab,var(--color-primary)_14%,transparent),transparent_55%)]" />
+      <div className="absolute -left-24 top-16 size-72 rounded-full bg-primary/10 blur-3xl" />
+      <div className="absolute -right-16 bottom-10 size-80 rounded-full bg-[hsl(var(--info))]/10 blur-3xl" />
+      <div className="absolute inset-0 opacity-[0.035] [background-image:linear-gradient(var(--color-foreground)_1px,transparent_1px),linear-gradient(90deg,var(--color-foreground)_1px,transparent_1px)] [background-size:28px_28px]" />
+    </div>
+  )
+}
+
 function PanelShell({
   children,
   siteName,
@@ -225,12 +236,15 @@ function PanelShell({
   subtitle: string
 }) {
   return (
-    <div className="flex min-h-dvh items-center justify-center bg-background px-4 py-8">
-      <div className="w-full max-w-[880px]">
-        <div className="mb-6 text-center">
-          <img src={logoSrc} alt={siteName} className="mx-auto mb-4 size-14 rounded-lg object-cover shadow-sm" />
-          <h1 className="text-[26px] font-bold text-foreground">{siteName}</h1>
-          <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
+    <div className="relative flex min-h-dvh items-center justify-center bg-background px-4 py-10">
+      <AuthBackdrop />
+      <div className="relative z-10 w-full max-w-[920px]">
+        <div className="mb-7 text-center">
+          <div className="mx-auto mb-4 inline-flex rounded-2xl bg-card/80 p-1.5 shadow-sm ring-1 ring-border/80 backdrop-blur-sm">
+            <img src={logoSrc} alt={siteName} className="size-14 rounded-xl object-cover" />
+          </div>
+          <h1 className="text-[28px] font-bold tracking-tight text-foreground">{siteName}</h1>
+          <p className="mx-auto mt-1.5 max-w-lg text-sm leading-relaxed text-muted-foreground">{subtitle}</p>
         </div>
         {children}
       </div>
@@ -248,9 +262,9 @@ function SetupCard({
   children: ReactNode
 }) {
   return (
-    <section className="rounded-lg border border-border bg-card p-5 shadow-sm">
-      <div className="mb-4 flex items-center gap-2">
-        <div className="flex size-8 items-center justify-center rounded-md bg-primary/10 text-primary">
+    <section className="rounded-2xl border border-border/80 bg-card/90 p-5 shadow-sm backdrop-blur-sm">
+      <div className="mb-4 flex items-center gap-2.5">
+        <div className="flex size-9 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
           {icon}
         </div>
         <h2 className="text-base font-bold text-foreground">{title}</h2>
@@ -600,9 +614,12 @@ export default function AuthGate({ children }: PropsWithChildren) {
 
   if (status === 'checking') {
     return (
-      <div className="flex min-h-dvh items-center justify-center">
-        <div className="text-center">
-          <div className="mx-auto mb-3 size-8 animate-spin rounded-full border-3 border-primary/30 border-t-primary" />
+      <div className="relative flex min-h-dvh items-center justify-center bg-background">
+        <AuthBackdrop />
+        <div className="relative z-10 text-center">
+          <div className="mx-auto mb-3 flex size-12 items-center justify-center rounded-2xl bg-card/80 shadow-sm ring-1 ring-border/80">
+            <div className="size-6 animate-spin rounded-full border-[2.5px] border-primary/25 border-t-primary" />
+          </div>
           <p className="text-sm text-muted-foreground">{copy.loadingText}</p>
         </div>
       </div>
@@ -821,9 +838,9 @@ export default function AuthGate({ children }: PropsWithChildren) {
   if (status === 'setup_complete') {
     return (
       <PanelShell siteName={siteName} logoSrc={logoSrc} subtitle={copy.completeSubtitle}>
-        <div className="mx-auto max-w-[640px] rounded-lg border border-border bg-card p-5 shadow-sm">
-          <div className="mb-4 flex items-center gap-2">
-            <div className="flex size-8 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+        <div className="mx-auto max-w-[640px] rounded-2xl border border-border/80 bg-card/90 p-5 shadow-lg backdrop-blur-sm sm:p-6">
+          <div className="mb-4 flex items-center gap-2.5">
+            <div className="flex size-9 items-center justify-center rounded-xl bg-emerald-500/10 text-emerald-600 ring-1 ring-emerald-500/20 dark:text-emerald-400">
               <CheckCircle2 className="size-4" />
             </div>
             <h2 className="text-base font-bold text-foreground">{copy.completeTitle}</h2>
@@ -838,7 +855,7 @@ export default function AuthGate({ children }: PropsWithChildren) {
               markSetupReviewDone()
               setStatus('authenticated')
             }}
-            className="mt-5 flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary px-4 text-[15px] font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
+            className="mt-5 flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 text-[15px] font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90"
           >
             {copy.enterAdmin}
             <ArrowRight className="size-4" />
@@ -850,18 +867,29 @@ export default function AuthGate({ children }: PropsWithChildren) {
 
   if (status === 'need_login') {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-background">
-        <div className="mx-4 w-full max-w-[400px]">
-          <div className="mb-6 text-center">
-            <img src={logoSrc} alt={siteName} className="mx-auto mb-4 size-14 rounded-lg object-cover shadow-sm" />
-            <h1 className="text-[26px] font-bold text-foreground">{siteName}</h1>
-            <p className="mt-1 text-sm text-muted-foreground">{copy.loginSubtitle}</p>
+      <div className="relative flex min-h-dvh items-center justify-center bg-background px-4 py-10">
+        <AuthBackdrop />
+        <div className="relative z-10 mx-auto w-full max-w-[420px]">
+          <div className="mb-7 text-center">
+            <div className="mx-auto mb-4 inline-flex rounded-2xl bg-card/80 p-1.5 shadow-sm ring-1 ring-border/80 backdrop-blur-sm">
+              <img src={logoSrc} alt={siteName} className="size-14 rounded-xl object-cover" />
+            </div>
+            <h1 className="text-[28px] font-bold tracking-tight text-foreground">{siteName}</h1>
+            <p className="mt-1.5 text-sm text-muted-foreground">{copy.loginSubtitle}</p>
           </div>
 
-          <div className="rounded-lg border border-border bg-card p-5 shadow-sm">
+          <div className="rounded-2xl border border-border/80 bg-card/90 p-5 shadow-lg backdrop-blur-sm sm:p-6">
+            <div className="mb-5 flex items-center gap-2.5">
+              <div className="flex size-9 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
+                <KeyRound className="size-4" />
+              </div>
+              <div>
+                <div className="text-sm font-semibold text-foreground">{t('settings.adminSecret')}</div>
+                <div className="text-[12px] text-muted-foreground">{copy.loginSubtitle}</div>
+              </div>
+            </div>
             <div className="space-y-4">
               <div>
-                <label className="mb-2 block text-sm font-semibold text-muted-foreground">{t('settings.adminSecret')}</label>
                 <input
                   type="password"
                   value={inputKey}
@@ -869,18 +897,20 @@ export default function AuthGate({ children }: PropsWithChildren) {
                   onKeyDown={(e) => { if (e.key === 'Enter') void handleLogin() }}
                   placeholder={copy.loginPlaceholder}
                   autoFocus
-                  className="h-10 w-full rounded-md border border-input bg-background px-3.5 text-[15px] outline-none transition-all focus:border-primary/40 focus:ring-2 focus:ring-primary/10"
+                  className="h-11 w-full rounded-xl border border-input bg-background/80 px-3.5 text-[15px] outline-none transition-all focus:border-primary/40 focus:ring-2 focus:ring-primary/15"
                 />
               </div>
 
               {error && (
-                <div className="px-1 text-sm font-medium text-red-500">{error}</div>
+                <div className="rounded-lg border border-red-500/20 bg-red-500/8 px-3 py-2 text-sm font-medium text-red-600 dark:text-red-400">
+                  {error}
+                </div>
               )}
 
               <button
                 onClick={() => void handleLogin()}
                 disabled={submitting}
-                className="flex h-10 w-full items-center justify-center gap-2 rounded-md bg-primary text-[15px] font-semibold text-primary-foreground shadow-sm transition-colors hover:bg-primary/90 disabled:opacity-50"
+                className="flex h-11 w-full items-center justify-center gap-2 rounded-xl bg-primary text-[15px] font-semibold text-primary-foreground shadow-sm transition-all hover:bg-primary/90 hover:shadow-md disabled:opacity-50"
               >
                 {submitting ? <RefreshCw className="size-4 animate-spin" /> : <ArrowRight className="size-4" />}
                 {submitting ? copy.loadingText : copy.loginButton}

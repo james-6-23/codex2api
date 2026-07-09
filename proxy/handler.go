@@ -622,6 +622,62 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	h.logUsage(input)
 }
 
+// logContinueThinkingRounds 为思考截断续想中「被折叠隐藏」的上游轮次补记真实用量。
+// 每一轮续想都是一次独立的上游请求，各自产生真实 token 消耗；对客户端折叠成单响应
+// 后，最终成功轮的用量由本 attempt 收尾统一记账，这里补记除最终成功轮外的其余各轮
+// （res.Rounds 除最后一条）以及失败的续想开轮（res.FailedContinuation），
+// 使账面消耗与实际上游请求数一致，且不与收尾记账重复计费。
+func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResult, account *auth.Account, logModel, logEffectiveModel, reasoningEffort string, useWebsocket bool, requestedServiceTier string) {
+	logRound := func(round continueRoundStat) {
+		usageTiers := resolveUsageServiceTiers("", requestedServiceTier)
+		statusCode := round.StatusCode
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+		logInput := &database.UsageLogInput{
+			AccountID:            account.ID(),
+			Endpoint:             "/v1/responses",
+			Model:                logModel,
+			EffectiveModel:       logEffectiveModel,
+			StatusCode:           statusCode,
+			DurationMs:           round.DurationMs,
+			ReasoningEffort:      reasoningEffort,
+			InboundEndpoint:      "/v1/responses",
+			UpstreamEndpoint:     "/v1/responses",
+			Stream:               true,
+			ViaWebsocket:         useWebsocket,
+			ServiceTier:          usageTiers.ServiceTier,
+			RequestedServiceTier: usageTiers.RequestedServiceTier,
+			ActualServiceTier:    usageTiers.ActualServiceTier,
+			BillingServiceTier:   usageTiers.BillingServiceTier,
+			// 隐藏的续想轮不是「重试」：不置 IsRetryAttempt/AttemptIndex，
+			// 否则会污染重试统计并与外层 attempt 编号混淆。
+		}
+		if round.ErrMessage != "" {
+			logInput.ErrorMessage = usageLogErrorMessage(statusCode, []byte(round.ErrMessage))
+			logInput.UpstreamErrorKind = "continue_thinking_error"
+		}
+		if round.Usage != nil {
+			logInput.PromptTokens = round.Usage.PromptTokens
+			logInput.CompletionTokens = round.Usage.CompletionTokens
+			logInput.TotalTokens = round.Usage.TotalTokens
+			logInput.InputTokens = round.Usage.InputTokens
+			logInput.OutputTokens = round.Usage.OutputTokens
+			logInput.ReasoningTokens = round.Usage.ReasoningTokens
+			logInput.CachedTokens = round.Usage.CachedTokens
+		}
+		h.logUsageForRequest(c, logInput)
+	}
+
+	// res.Rounds 的最后一条是最终成功轮，其用量由本 attempt 收尾统一记账，此处排除。
+	for i := 0; i+1 < len(res.Rounds); i++ {
+		logRound(res.Rounds[i])
+	}
+	if res.FailedContinuation != nil {
+		logRound(*res.FailedContinuation)
+	}
+}
+
 // markCyberPolicyUsageKind 在使用日志里把 cyber_policy 报错单独标记成 cyber_policy
 // 类型，便于「使用统计」页识别并点击查看触发详情。仅改写日志展示字段，不参与
 // 账号调度 / 冷却评分（那条路径用的是另外的 failureKind）。
@@ -722,6 +778,35 @@ func setRawRequestBody(c *gin.Context, body []byte) {
 func requestBodyHasCompactionInput(body []byte) bool {
 	input := gjson.GetBytes(body, "input")
 	return gjsonResultHasCompactionInput(input)
+}
+
+// storeHasAvailableCodexAccount 判断账号池中是否还有可调度的官方（非中转）账号。
+// 注意这是池级判断，不含 API Key 级的账号分组/套餐约束——极端情况下（Key 被限定
+// 只能用中转账号且池中有官方账号）body-signal 请求会等待官方账号而非提升，
+// 该组合目前视为配置矛盾，不做额外处理。
+func (h *Handler) storeHasAvailableCodexAccount() bool {
+	if h == nil || h.store == nil {
+		return false
+	}
+	for _, account := range h.store.Accounts() {
+		if account.IsOpenAIResponsesAPI() {
+			continue
+		}
+		if account.IsAvailable() {
+			return true
+		}
+	}
+	return false
+}
+
+// excludeRelayAccountsFilter 在既有过滤器上追加"排除中转账号"约束。
+func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
+	return func(account *auth.Account) bool {
+		if account == nil || account.IsOpenAIResponsesAPI() {
+			return false
+		}
+		return inner == nil || inner(account)
+	}
 }
 
 func gjsonResultHasCompactionInput(result gjson.Result) bool {
@@ -1229,7 +1314,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1.POST("/messages", h.Messages)
 	v1.POST("/messages/count_tokens", h.CountTokens)
 	v1.POST("/responses/input_tokens", h.ResponsesInputTokens)
-	v1.GET("/models", h.ListModels)
+	// Codex CLI / Codex App 从 /models?client_version=... 刷新模型选单，期望
+	// manifest 格式；client_version 是 Codex 客户端的天然指纹，普通 OpenAI
+	// 客户端不携带，其余请求保持 OpenAI 格式列表不变。
+	v1.GET("/models", h.listModelsOrManifest)
 
 	// 无前缀路由（兼容 base_url 已包含 /v1 的客户端）
 	r.POST("/chat/completions", auth, h.ChatCompletions)
@@ -1241,12 +1329,13 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/messages", auth, h.Messages)
 	r.POST("/messages/count_tokens", auth, h.CountTokens)
 	r.POST("/responses/input_tokens", auth, h.ResponsesInputTokens)
-	r.GET("/models", auth, h.ListModels)
+	r.GET("/models", auth, h.listModelsOrManifest)
 
 	codexDirect := r.Group("/backend-api/codex")
 	codexDirect.Use(auth)
 	codexDirect.POST("/responses", h.Responses)
 	codexDirect.GET("/responses", h.ResponsesWebSocket)
+	codexDirect.GET("/models", h.CodexModelsManifestHandler)
 	codexDirect.POST("/responses/*subpath", func(c *gin.Context) {
 		subpath := strings.TrimSpace(c.Param("subpath"))
 		if subpath == "/compact" || strings.HasPrefix(subpath, "/compact/") {
@@ -1556,6 +1645,24 @@ func (h *Handler) Responses(c *gin.Context) {
 	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
 	setRawRequestBody(c, rawBody)
 
+	// body-signal compact：较新的 Codex 客户端把会话压缩触发器作为 input item
+	// （type=compaction_trigger）嵌进普通 /responses 请求体，而不调用
+	// /responses/compact。官方 ChatGPT OAuth 账号的原生上游直接接受该形态，
+	// 透传即正确；中转（OpenAI Responses API）账号的普通 /v1/responses 通常
+	// 不接受，会 400 或返回非压缩响应导致客户端报
+	// "expected exactly one compaction output item"。
+	// 处理：池中还有可用官方账号时，把这类请求钉在官方账号上保持原生透传；
+	// 官方账号全不可用（如纯中转部署）时整体提升到 compact 专用链路——
+	// 该链路对两类账号都能正确完成压缩。
+	pinBodySignalToCodexAccounts := false
+	if requestBodyHasCompactionInput(rawBody) {
+		if !h.storeHasAvailableCodexAccount() {
+			h.ResponsesCompact(c)
+			return
+		}
+		pinBodySignalToCodexAccounts = true
+	}
+
 	// Validate request
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRulesForModel(mappedModel)
@@ -1650,6 +1757,9 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	if pinBodySignalToCodexAccounts {
+		accountFilter = excludeRelayAccountsFilter(accountFilter)
+	}
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -2286,7 +2396,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 但继续读上游直到 response.completed/failed，以拿到准确 usage。
 			clientGone := false
 			var pendingFirstTokenEvents bytes.Buffer
-			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+			forward := func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
@@ -2345,7 +2455,69 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 				}
 				return eventType != "response.completed" && eventType != "response.failed"
-			})
+			}
+
+			// 思考截断自动续想（默认关闭）：开启时用折叠状态机包裹 forward，
+			// 命中 518n-2 截断指纹则用同一账号续发上游并折叠成单响应；
+			// 关闭时保持原有逐事件透传路径，字节级零变化。
+			contEnabled, contMaxRounds := codexContinueThinkingSettings()
+			if contEnabled {
+				fold := &continueFold{
+					baseBody:  upstreamBody,
+					maxRounds: contMaxRounds,
+					forward:   forward,
+					observe: func(data []byte) {
+						// 被缓冲（暂未转发给客户端）的事件只用来保活首字超时 guard，
+						// 避免纯 message 响应在整体缓冲期间被误判超时。这里不置位
+						// ttftRecorded/firstTokenMs：客户端此刻尚未收到任何字节，真正的
+						// 首 token 计时在 flushBuffered 经 forward 冲刷时才发生，
+						// 否则会破坏首包前 response.failed 的抑制/换号语义。
+						ttftGuard.MarkProgress(gjson.GetBytes(data, "type").String())
+					},
+					clientGone: func() bool { return clientGone || c.Request.Context().Err() != nil },
+					openRound: func(body []byte) (*http.Response, error) {
+						// 续想轮复用同一账号与上游通道（reasoning encrypted_content 绑定账号，
+						// 换号会被上游拒绝），沿用与客户端解耦的 drainable context。
+						if lastUpstreamCancel != nil {
+							lastUpstreamCancel()
+						}
+						rctx, rcancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+						lastUpstreamCancel = rcancel
+						roundBody := body
+						if useWebsocket {
+							roundBody = stripResponsesImageGenerationTool(body)
+						}
+						roundResp, roundErr := ExecuteRequest(rctx, account, roundBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+						// 续想轮同样消耗账号额度：成功开轮后同步上游用量头，
+						// 否则多轮隐藏请求的额度对自动暂停/配速不可见。
+						if roundErr == nil && roundResp != nil && roundResp.StatusCode == http.StatusOK {
+							SyncCodexUsageState(h.store, account, roundResp)
+						}
+						return roundResp, roundErr
+					},
+				}
+				foldRes := runContinueThinkingFold(resp, fold)
+				readErr = foldRes.ReadErr
+				// 折叠可能产出合成/重构的 response.incomplete 终态（续想失败/EOF），
+				// forward 只对 completed/failed 置位 gotTerminal，这里据折叠结果补齐，
+				// 否则正常收尾的折叠流会被误判为断流：惩罚账号、解绑亲和、用估算值覆盖真实 usage。
+				if foldRes.GotTerminal {
+					gotTerminal = true
+				}
+				// 折叠拦截了各轮真实终态，forward 未必看到 response.completed，
+				// 用折叠汇总的最终轮真实 usage 作为本 attempt 收尾计费值。
+				if foldRes.FinalUsage != nil {
+					usage = foldRes.FinalUsage
+				}
+				// 除最终轮外的各真实轮 + 失败的续想开轮各补记一条真实用量，
+				// 最终轮由本 attempt 收尾统一记账，避免重复或漏记。
+				h.logContinueThinkingRounds(c, foldRes, account, logModel, logEffectiveModel, reasoningEffort, useWebsocket, serviceTier)
+				if foldRes.FinalResponse != nil {
+					resp = foldRes.FinalResponse
+				}
+			} else {
+				readErr = ReadSSEStream(resp.Body, forward)
+			}
 			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
 			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
 			if writeErr == nil && wroteAnyBody {
@@ -4359,6 +4531,17 @@ func (h *Handler) handleUpstreamError(c *gin.Context, account *auth.Account, sta
 }
 
 // ListModels 列出可用模型
+// listModelsOrManifest 按客户端形态分发模型列表：带 client_version 查询参数的是
+// Codex 客户端在刷新模型选单（期望 manifest 格式，解析失败会静默冻结在本地缓存），
+// 其余客户端返回 OpenAI 兼容列表。
+func (h *Handler) listModelsOrManifest(c *gin.Context) {
+	if strings.TrimSpace(c.Query("client_version")) != "" {
+		h.CodexModelsManifestHandler(c)
+		return
+	}
+	h.ListModels(c)
+}
+
 func (h *Handler) ListModels(c *gin.Context) {
 	ctx := context.Background()
 	if c != nil && c.Request != nil {

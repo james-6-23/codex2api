@@ -55,6 +55,10 @@ const (
 	defaultCodexWSSilentRetry    = true
 	defaultCodexWSSilentRetries  = 2
 	maxCodexWSSilentRetries      = 10
+
+	defaultCodexContinueMaxRounds = 8
+	minCodexContinueMaxRounds     = 1
+	maxCodexContinueMaxRounds     = 32
 )
 
 type RuntimeSettings struct {
@@ -70,6 +74,9 @@ type RuntimeSettings struct {
 	CodexWSHideErrors     bool // 隐藏 Codex WS 上游原始错误（默认 true）
 	CodexWSSilentRetry    bool // 首包前 Codex WS 上游错误静默换号重试（默认 true）
 	CodexWSSilentRetries  int  // Codex WS 静默换号最大重试次数（默认 2）
+	// CodexContinueThinking 检测到上游按 518n-2 指纹截断思考时自动续想并折叠成单响应（默认 false）。
+	CodexContinueThinking  bool
+	CodexContinueMaxRounds int // 单次请求最大续想轮数，含首轮（默认 8，范围 1-32）
 	// RequestIsolationMode 控制无显式会话请求的上游身份隔离粒度（isolated|per-api-key，默认 isolated）。
 	RequestIsolationMode string
 	// CodexMimicMode 控制对上游伪装真实 Codex CLI 的严格程度（legacy|strict，默认 legacy）。
@@ -95,19 +102,20 @@ func init() {
 
 func DefaultRuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
-		ClientCompatMode:      defaultClientCompatMode,
-		CodexMinCLIVersion:    defaultCodexMinCLIVersion,
-		CodexUserAgentConfig:  DefaultCodexUserAgentConfigJSON(),
-		StreamFlushPolicy:     defaultStreamFlushPolicy,
-		StreamFlushIntervalMS: defaultStreamFlushIntervalMS,
-		FirstTokenMode:        defaultFirstTokenMode,
-		FirstTokenTimeoutSec:  defaultFirstTokenTimeoutSec,
-		BillingTierPolicy:     defaultBillingTierPolicy,
-		CodexWSHideErrors:     defaultCodexWSHideErrors,
-		CodexWSSilentRetry:    defaultCodexWSSilentRetry,
-		CodexWSSilentRetries:  defaultCodexWSSilentRetries,
-		RequestIsolationMode:  defaultRequestIsolationMode(),
-		CodexMimicMode:        defaultCodexMimicMode(),
+		ClientCompatMode:       defaultClientCompatMode,
+		CodexMinCLIVersion:     defaultCodexMinCLIVersion,
+		CodexUserAgentConfig:   DefaultCodexUserAgentConfigJSON(),
+		StreamFlushPolicy:      defaultStreamFlushPolicy,
+		StreamFlushIntervalMS:  defaultStreamFlushIntervalMS,
+		FirstTokenMode:         defaultFirstTokenMode,
+		FirstTokenTimeoutSec:   defaultFirstTokenTimeoutSec,
+		BillingTierPolicy:      defaultBillingTierPolicy,
+		CodexWSHideErrors:      defaultCodexWSHideErrors,
+		CodexWSSilentRetry:     defaultCodexWSSilentRetry,
+		CodexWSSilentRetries:   defaultCodexWSSilentRetries,
+		CodexContinueMaxRounds: defaultCodexContinueMaxRounds,
+		RequestIsolationMode:   defaultRequestIsolationMode(),
+		CodexMimicMode:         defaultCodexMimicMode(),
 	}
 }
 
@@ -226,6 +234,12 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	if settings.CodexWSSilentRetries > maxCodexWSSilentRetries {
 		settings.CodexWSSilentRetries = maxCodexWSSilentRetries
 	}
+	if settings.CodexContinueMaxRounds < minCodexContinueMaxRounds {
+		settings.CodexContinueMaxRounds = defaults.CodexContinueMaxRounds
+	}
+	if settings.CodexContinueMaxRounds > maxCodexContinueMaxRounds {
+		settings.CodexContinueMaxRounds = maxCodexContinueMaxRounds
+	}
 	return settings
 }
 
@@ -244,6 +258,8 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSHideErrors = settings.CodexWSHideUpstreamErrors
 		next.CodexWSSilentRetry = settings.CodexWSSilentRetryEnabled
 		next.CodexWSSilentRetries = settings.CodexWSSilentMaxRetries
+		next.CodexContinueThinking = settings.CodexContinueThinkingEnabled
+		next.CodexContinueMaxRounds = settings.CodexContinueMaxRounds
 	}
 	next = NormalizeRuntimeSettings(next)
 	runtimeSettings.Store(next)
@@ -281,4 +297,10 @@ func currentFirstTokenTimeout() time.Duration {
 
 func currentFirstTokenMode() string {
 	return CurrentRuntimeSettings().FirstTokenMode
+}
+
+// codexContinueThinkingSettings 返回续想折叠开关与最大轮数（一次快照读取）。
+func codexContinueThinkingSettings() (bool, int) {
+	s := CurrentRuntimeSettings()
+	return s.CodexContinueThinking, s.CodexContinueMaxRounds
 }

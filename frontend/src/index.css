@@ -7,31 +7,31 @@
   --font-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', ui-monospace, monospace;
   --font-geist-mono: 'Cascadia Mono', 'Cascadia Code', Consolas, 'JetBrains Mono', 'Fira Code', 'SFMono-Regular', ui-monospace, monospace;
 
-  --radius-sm: 0.25rem;
-  --radius-md: 0.375rem;
-  --radius-lg: 0.5rem;
-  --radius-xl: 0.625rem;
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
 
-  /* Light theme (default) */
-  --color-background: hsl(220 20% 97%);
-  --color-foreground: hsl(222 38% 12%);
+  /* Light theme (default) — slightly richer primary & softer surfaces */
+  --color-background: hsl(220 24% 96%);
+  --color-foreground: hsl(222 40% 11%);
   --color-card: hsl(0 0% 100%);
-  --color-card-foreground: hsl(222 38% 12%);
+  --color-card-foreground: hsl(222 40% 11%);
   --color-popover: hsl(0 0% 100%);
-  --color-popover-foreground: hsl(222 38% 12%);
-  --color-primary: hsl(211 76% 45%);
+  --color-popover-foreground: hsl(222 40% 11%);
+  --color-primary: hsl(214 84% 46%);
   --color-primary-foreground: hsl(0 0% 100%);
   --color-secondary: hsl(214 22% 92%);
-  --color-secondary-foreground: hsl(222 26% 28%);
-  --color-muted: hsl(214 22% 92%);
-  --color-muted-foreground: hsl(220 9% 43%);
-  --color-accent: hsl(188 36% 90%);
-  --color-accent-foreground: hsl(222 38% 12%);
+  --color-secondary-foreground: hsl(222 26% 26%);
+  --color-muted: hsl(214 22% 93%);
+  --color-muted-foreground: hsl(220 10% 42%);
+  --color-accent: hsl(210 48% 94%);
+  --color-accent-foreground: hsl(222 40% 11%);
   --color-destructive: hsl(0 60% 48%);
   --color-destructive-foreground: hsl(0 0% 100%);
-  --color-border: hsl(214 18% 86%);
-  --color-input: hsl(214 18% 86%);
-  --color-ring: hsl(211 76% 45%);
+  --color-border: hsl(214 18% 88%);
+  --color-input: hsl(214 18% 88%);
+  --color-ring: hsl(214 84% 46%);
 }
 
 @layer base {
@@ -873,6 +873,8 @@
     @apply bg-background text-foreground antialiased;
     font-family: var(--font-sans);
     overflow-x: hidden;
+    min-height: 100vh;
+    min-height: 100dvh;
     background: linear-gradient(180deg, var(--color-background) 0%, color-mix(in oklab, var(--color-background) 97%, black 3%) 100%);
   }
 
@@ -880,6 +882,25 @@
   body.dark {
     background: linear-gradient(180deg, var(--color-background) 0%, color-mix(in oklab, var(--color-background) 97%, black 3%) 100%);
   }
+}
+
+/* Safe-area helpers for notched phones / home indicator */
+@utility safe-pb {
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@utility safe-pt {
+  padding-top: env(safe-area-inset-top, 0px);
+}
+@utility safe-px {
+  padding-left: env(safe-area-inset-left, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+}
+@utility pb-safe-nav {
+  padding-bottom: calc(5.75rem + env(safe-area-inset-bottom, 0px));
+}
+@utility touch-target {
+  min-height: 2.75rem;
+  min-width: 2.75rem;
 }
 
 @layer components {
@@ -955,15 +976,23 @@
   }
 
   .toolbar-surface {
-    @apply relative z-30 overflow-visible rounded-lg border border-border bg-card/80 px-3 py-2.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm;
+    @apply relative z-30 overflow-visible rounded-xl border border-border bg-card/85 px-3 py-2.5 text-[12px] text-muted-foreground shadow-sm backdrop-blur-sm;
   }
 
   .data-table-shell {
-    @apply relative z-0 overflow-auto rounded-lg border border-border bg-card;
+    @apply relative z-0 overflow-auto rounded-xl border border-border bg-card;
   }
 
   .data-table-shell [data-slot="table-container"] {
-    max-height: min(680px, calc(100vh - 280px));
+    max-height: min(680px, calc(100dvh - 280px));
+  }
+
+  .stat-card-accent {
+    background: linear-gradient(
+      135deg,
+      color-mix(in oklab, var(--color-primary) 12%, transparent) 0%,
+      transparent 62%
+    );
   }
 
   .account-table-shell-fit-content [data-slot="table-container"] {
@@ -985,7 +1014,7 @@
   }
 
   [data-slot="card"] {
-    @apply transition-[border-color,box-shadow,transform,background-color] duration-200;
+    @apply rounded-xl shadow-sm transition-[border-color,box-shadow,transform,background-color] duration-200;
   }
 
   button,
@@ -1093,6 +1122,19 @@
   }
 }
 
+@media (max-width: 1023px) {
+  @keyframes toast-slide-in {
+    from {
+      opacity: 0;
+      transform: translateY(16px) scale(0.98);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0) scale(1);
+    }
+  }
+}
+
 @keyframes image-notice-marquee {
   0%, 12% {
     transform: translateX(0);
@@ -1104,6 +1146,82 @@
 
 .animate-image-notice-marquee {
   animation: image-notice-marquee 4.5s ease-in-out both;
+}
+
+/* Image studio canvas */
+.image-studio-canvas-bg {
+  background:
+    radial-gradient(ellipse at center, color-mix(in oklab, var(--color-muted) 42%, transparent), transparent 68%),
+    linear-gradient(180deg, color-mix(in oklab, var(--color-muted) 18%, transparent), transparent 40%);
+}
+
+.image-studio-checkerboard {
+  background-color: color-mix(in oklab, var(--color-muted) 35%, var(--color-background));
+  background-image:
+    linear-gradient(45deg, color-mix(in oklab, var(--color-border) 55%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in oklab, var(--color-border) 55%, transparent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in oklab, var(--color-border) 55%, transparent) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in oklab, var(--color-border) 55%, transparent) 75%);
+  background-size: 18px 18px;
+  background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+}
+
+@keyframes image-studio-shimmer {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(220%); }
+}
+
+.animate-image-studio-shimmer {
+  animation: image-studio-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes image-studio-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.animate-image-studio-progress {
+  animation: image-studio-progress 1.35s ease-in-out infinite;
+}
+
+@keyframes image-studio-result-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-image-studio-result-in {
+  animation: image-studio-result-in 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes image-studio-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-image-studio-fade-in {
+  animation: image-studio-fade-in 0.28s ease-out both;
+}
+
+.animate-image-studio-fade-in-delay {
+  animation: image-studio-fade-in 0.35s ease-out 0.08s both;
+}
+
+@keyframes image-studio-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
+.animate-image-studio-shake {
+  animation: image-studio-shake 0.42s ease-out both;
 }
 
 /* Spinner */

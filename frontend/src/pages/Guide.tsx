@@ -417,7 +417,7 @@ export default function Guide() {
           </Card>
         </div>
 
-        <aside className="sticky top-4 hidden xl:block">
+        <aside className="sticky top-4 hidden max-h-[calc(100dvh-2rem)] self-start overflow-y-auto xl:block">
           <div className="rounded-lg border border-border bg-card p-4">
             <div className="mb-3 text-xs font-bold uppercase tracking-wide text-muted-foreground">On this page</div>
             <nav className="space-y-1">

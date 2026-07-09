@@ -2680,3 +2680,155 @@ func TestResolveAPIKeyDistinguishesDBFailureFrom404(t *testing.T) {
 		t.Fatal("db failure must return a non-nil error so middleware answers 503, not 401")
 	}
 }
+
+// body-signal compact:中转账号池收到带 compaction_trigger 的普通 /responses
+// 请求时,必须整体提升到 compact 专用链路(上游命中 /v1/responses/compact),
+// 否则中转上游返回非压缩响应,客户端报 expected exactly one compaction output item。
+func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenPath string
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_compaction_test",
+			"object":"response.compaction",
+			"created_at":1710000000,
+			"model":"gpt-4.1-direct",
+			"output":[{"type":"compaction_summary","summary":"user likes blue"}],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-4.1-direct"},
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{
+		"model":"gpt-4.1-direct",
+		"stream":true,
+		"input":[
+			{"role":"user","content":"my favorite color is blue"},
+			{"type":"compaction_trigger"}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if seenPath != "/v1/responses/compact" {
+		t.Fatalf("upstream path = %q, want /v1/responses/compact (body-signal must be promoted)", seenPath)
+	}
+	if gjson.GetBytes(seenBody, "stream").Exists() {
+		t.Fatalf("promoted upstream body should not carry stream, got %s", seenBody)
+	}
+	if id := gjson.GetBytes(recorder.Body.Bytes(), "id").String(); id != "resp_compaction_test" {
+		t.Fatalf("response id = %q, want resp_compaction_test; body=%s", id, recorder.Body.String())
+	}
+}
+
+// 不带 compaction_trigger 的普通请求不受提升逻辑影响,仍走 /v1/responses。
+func TestResponses_PlainRequestNotPromotedOnRelayOnlyPool(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_plain_test",
+			"object":"response",
+			"created_at":1710000000,
+			"model":"gpt-4.1-direct",
+			"output":[],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-4.1-direct"},
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-4.1-direct","input":"hello"}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if seenPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses (no promotion for plain request)", seenPath)
+	}
+}
+
+// 池中还有可用官方账号时,body-signal 请求被钉在官方账号上(不落中转)。
+func TestBodySignalCompactFilters(t *testing.T) {
+	relay := &auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://relay.example.com",
+		APIKey:       "sk-relay",
+	}
+	codex := &auth.Account{DBID: 2, AccessToken: "at-codex"}
+
+	filter := excludeRelayAccountsFilter(nil)
+	if filter(relay) {
+		t.Fatal("relay account must be excluded by pinned filter")
+	}
+	if !filter(codex) {
+		t.Fatal("codex account must pass pinned filter")
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	handler := NewHandler(store, nil, nil, nil)
+	if handler.storeHasAvailableCodexAccount() {
+		t.Fatal("empty pool should report no codex account")
+	}
+	store.AddAccount(relay)
+	if handler.storeHasAvailableCodexAccount() {
+		t.Fatal("relay-only pool should report no codex account")
+	}
+	store.AddAccount(codex)
+	if !handler.storeHasAvailableCodexAccount() {
+		t.Fatal("pool with codex account should report available")
+	}
+}
