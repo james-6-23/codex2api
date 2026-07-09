@@ -817,6 +817,7 @@ export interface CodexAuditSummary {
   semantic_disagreements: number
   semantic_disagreement_blocks: number
   upstream_cyber_policy: number
+  session_bleed: number
   probe_observed: number
   probe_short_circuits: number
   probe_high_frequency: number

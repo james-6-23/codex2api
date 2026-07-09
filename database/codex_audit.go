@@ -45,6 +45,7 @@ type CodexAuditSummary struct {
 	SemanticDisagreements      int64 `json:"semantic_disagreements"`
 	SemanticDisagreementBlocks int64 `json:"semantic_disagreement_blocks"`
 	UpstreamCyberPolicy        int64 `json:"upstream_cyber_policy"`
+	SessionBleed               int64 `json:"session_bleed"`
 	ProbeObserved              int64 `json:"probe_observed"`
 	ProbeShortCircuits         int64 `json:"probe_short_circuits"`
 	ProbeHighFrequency         int64 `json:"probe_high_frequency"`
@@ -754,6 +755,9 @@ func summarizeCodexAudit(report *CodexAuditReport) CodexAuditSummary {
 		summary.ReviewErrors += row.ReviewErrors
 		if row.Source == "upstream_cyber_policy" {
 			summary.UpstreamCyberPolicy += row.Count
+		}
+		if row.Source == "session_bleed" {
+			summary.SessionBleed += row.Count
 		}
 		if row.Source == "semantic_review_disagreement" {
 			summary.SemanticDisagreements += row.Count
