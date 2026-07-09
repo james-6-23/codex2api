@@ -43,7 +43,7 @@ const FALLBACK_MODELS = [
 type CCSwitchApp = "claude" | "codex" | "gemini";
 type QuickToolTab = "codex-cli" | "claude-code" | "cc-switch" | "cherry-studio";
 type QuickServiceTier = "default" | "fast";
-type QuickReasoningEffort = "low" | "medium" | "high" | "xhigh";
+type QuickReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
 
 const CC_SWITCH_LOGO = "https://ccswitch.io/assets/cc-switch-logo-BPrI77SG.png";
 const LOBE_ICON_BASE =
@@ -1150,10 +1150,13 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
                         setQuickReasoningEffort(value as QuickReasoningEffort)
                       }
                       options={[
+                        { label: "None", value: "none" },
+                        { label: "Minimal", value: "minimal" },
                         { label: "Low", value: "low" },
                         { label: "Medium", value: "medium" },
                         { label: "High", value: "high" },
                         { label: "xhigh", value: "xhigh" },
+                        { label: "ultra", value: "ultra" },
                       ]}
                     />
                   </FieldBox>

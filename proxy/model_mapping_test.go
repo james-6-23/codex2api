@@ -140,6 +140,49 @@ func TestApplyReasoningEffortModelAliasToBody(t *testing.T) {
 	}
 }
 
+// ultra 是预埋的思考强度档位（未来新模型可能支持），必须在 alias 配置与
+// 请求级 effort 归一化中原样透传，而不是被钳位回 high。
+func TestApplyReasoningEffortModelAliasSupportsUltra(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetReasoningEffortModels(`[{"model":"gpt-5.5","effort":"ultra"}]`)
+	handler := NewHandler(store, nil, nil, nil)
+
+	body, original, effective, mapped := handler.applyConfiguredModelMappingToBody(
+		[]byte(`{"model":"gpt-5.5(ultra)","input":"hello"}`),
+		[]string{"gpt-5.5", "gpt-5.5(ultra)"},
+	)
+	if !mapped {
+		t.Fatal("expected ultra alias to be resolved")
+	}
+	if original != "gpt-5.5(ultra)" || effective != "gpt-5.5" {
+		t.Fatalf("original/effective = %q/%q, want gpt-5.5(ultra)/gpt-5.5", original, effective)
+	}
+	if got := gjson.GetBytes(body, "reasoning.effort").String(); got != "ultra" {
+		t.Fatalf("reasoning.effort = %q, want ultra; body=%s", got, body)
+	}
+}
+
+func TestNormalizeReasoningEffortLevels(t *testing.T) {
+	cases := map[string]string{
+		"none":    "none",
+		"minimal": "minimal",
+		"low":     "low",
+		"medium":  "medium",
+		"high":    "high",
+		"xhigh":   "xhigh",
+		"ultra":   "ultra",
+		"ULTRA":   "ultra",
+		"max":     "xhigh",
+		"unknown": "high",
+		"":        "",
+	}
+	for input, want := range cases {
+		if got := normalizeReasoningEffort(input); got != want {
+			t.Errorf("normalizeReasoningEffort(%q) = %q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestApplyReasoningEffortModelAliasBeforeCodexMapping(t *testing.T) {
 	store := auth.NewStore(nil, nil, nil)
 	store.SetReasoningEffortModels(`[{"model":"gpt-5.5","effort":"xhigh"}]`)

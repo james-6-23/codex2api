@@ -1930,7 +1930,7 @@ export default function Usage() {
                               <Badge
                                 variant="outline"
                                 className={`text-[11px] font-medium border-transparent ${
-                                  log.reasoning_effort === 'xhigh' || log.reasoning_effort === 'high'
+                                  log.reasoning_effort === 'ultra' || log.reasoning_effort === 'xhigh' || log.reasoning_effort === 'high'
                                     ? 'bg-red-500/12 text-red-600 dark:bg-red-500/20 dark:text-red-400'
                                     : log.reasoning_effort === 'medium'
                                       ? 'bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400'

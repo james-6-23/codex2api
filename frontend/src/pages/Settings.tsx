@@ -86,7 +86,7 @@ type CodexUserAgentConfig = {
 }
 
 const EMPTY_REASONING_EFFORT_MODEL_ENTRIES: ReasoningEffortModelEntry[] = []
-const REASONING_EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh'].map((effort) => ({
+const REASONING_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'].map((effort) => ({
   label: effort,
   value: effort,
 }))
@@ -137,7 +137,7 @@ const serializeModelMappingEntries = (entries: ModelMappingEntry[]) => {
 const normalizeReasoningEffortValue = (effort: string) => {
   const value = effort.trim().toLowerCase()
   if (value === 'max') return 'xhigh'
-  return ['low', 'medium', 'high', 'xhigh'].includes(value) ? value : 'xhigh'
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'].includes(value) ? value : 'xhigh'
 }
 
 const normalizeBillingTierPolicyValue = (value?: string | null): 'actual' | 'requested' =>

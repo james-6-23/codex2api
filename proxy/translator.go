@@ -1830,7 +1830,7 @@ func normalizeReasoningEffort(effort string) string {
 		return ""
 	}
 	switch effort {
-	case "low", "medium", "high", "xhigh":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "ultra":
 		return effort
 	case "max":
 		return "xhigh"

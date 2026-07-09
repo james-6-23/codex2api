@@ -71,7 +71,7 @@ func parseReasoningEffortModelEntries(value string, supportedModels []string, st
 		effort := normalizeConfiguredReasoningEffort(entry.Effort)
 		if model == "" || effort == "" {
 			if strict {
-				return nil, fmt.Errorf("reasoning_effort_models[%d] 需要非空 model 且 effort 必须是 low/medium/high/xhigh", i)
+				return nil, fmt.Errorf("reasoning_effort_models[%d] 需要非空 model 且 effort 必须是 none/minimal/low/medium/high/xhigh/ultra", i)
 			}
 			continue
 		}
@@ -103,7 +103,7 @@ func normalizeReasoningEffortBaseModel(model string, supportedModels []string) s
 
 func normalizeConfiguredReasoningEffort(effort string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
-	case "low", "medium", "high", "xhigh":
+	case "none", "minimal", "low", "medium", "high", "xhigh", "ultra":
 		return strings.ToLower(strings.TrimSpace(effort))
 	case "max":
 		return "xhigh"
