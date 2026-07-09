@@ -621,6 +621,59 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	h.logUsage(input)
 }
 
+// logContinueThinkingRounds 为思考截断续想中「被折叠隐藏」的上游轮次补记真实用量。
+// 每一轮续想都是一次独立的上游请求，各自产生真实 token 消耗；对客户端折叠成单响应
+// 后，最终轮的用量由本 attempt 收尾统一记账，这里只补记除最终轮外的其余各轮，
+// 使账面消耗与实际上游请求数一致。失败的续想轮（无 usage）记一条错误占位。
+func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResult, account *auth.Account, logModel, logEffectiveModel, reasoningEffort string, useWebsocket bool, requestedServiceTier string) {
+	// 最后一条 Rounds 对应最终轮（成功）或失败续想轮占位；成功最终轮交由收尾统一记账。
+	upTo := len(res.Rounds)
+	if res.StopReason != continueStopRoundError && upTo > 0 {
+		upTo--
+	}
+	for i := 0; i < upTo; i++ {
+		round := res.Rounds[i]
+		usageTiers := resolveUsageServiceTiers("", requestedServiceTier)
+		statusCode := round.StatusCode
+		if statusCode == 0 {
+			statusCode = http.StatusOK
+		}
+		logInput := &database.UsageLogInput{
+			AccountID:            account.ID(),
+			Endpoint:             "/v1/responses",
+			Model:                logModel,
+			EffectiveModel:       logEffectiveModel,
+			StatusCode:           statusCode,
+			DurationMs:           round.DurationMs,
+			ReasoningEffort:      reasoningEffort,
+			InboundEndpoint:      "/v1/responses",
+			UpstreamEndpoint:     "/v1/responses",
+			Stream:               true,
+			ViaWebsocket:         useWebsocket,
+			ServiceTier:          usageTiers.ServiceTier,
+			RequestedServiceTier: usageTiers.RequestedServiceTier,
+			ActualServiceTier:    usageTiers.ActualServiceTier,
+			BillingServiceTier:   usageTiers.BillingServiceTier,
+			IsRetryAttempt:       true,
+			AttemptIndex:         i + 1,
+		}
+		if round.ErrMessage != "" {
+			logInput.ErrorMessage = usageLogErrorMessage(statusCode, []byte(round.ErrMessage))
+			logInput.UpstreamErrorKind = "continue_thinking_error"
+		}
+		if round.Usage != nil {
+			logInput.PromptTokens = round.Usage.PromptTokens
+			logInput.CompletionTokens = round.Usage.CompletionTokens
+			logInput.TotalTokens = round.Usage.TotalTokens
+			logInput.InputTokens = round.Usage.InputTokens
+			logInput.OutputTokens = round.Usage.OutputTokens
+			logInput.ReasoningTokens = round.Usage.ReasoningTokens
+			logInput.CachedTokens = round.Usage.CachedTokens
+		}
+		h.logUsageForRequest(c, logInput)
+	}
+}
+
 // markCyberPolicyUsageKind 在使用日志里把 cyber_policy 报错单独标记成 cyber_policy
 // 类型，便于「使用统计」页识别并点击查看触发详情。仅改写日志展示字段，不参与
 // 账号调度 / 冷却评分（那条路径用的是另外的 failureKind）。
@@ -2280,7 +2333,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 但继续读上游直到 response.completed/failed，以拿到准确 usage。
 			clientGone := false
 			var pendingFirstTokenEvents bytes.Buffer
-			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
+			forward := func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := parsed.Get("type").String()
 
@@ -2339,7 +2392,55 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 				}
 				return eventType != "response.completed" && eventType != "response.failed"
-			})
+			}
+
+			// 思考截断自动续想（默认关闭）：开启时用折叠状态机包裹 forward，
+			// 命中 518n-2 截断指纹则用同一账号续发上游并折叠成单响应；
+			// 关闭时保持原有逐事件透传路径，字节级零变化。
+			contEnabled, contMaxRounds := codexContinueThinkingSettings()
+			if contEnabled {
+				fold := &continueFold{
+					baseBody:  upstreamBody,
+					maxRounds: contMaxRounds,
+					forward:   forward,
+					observe: func(data []byte) {
+						// 被缓冲（暂未转发）的事件也要喂 TTFT guard，
+						// 否则纯 message 响应会被整体缓冲到 terminal 才计首 token，
+						// 配置了首字超时的部署会误杀健康流。
+						et := gjson.GetBytes(data, "type").String()
+						ttftGuard.MarkProgress(et)
+						if !ttftRecorded && isFirstTokenResultForMode(gjson.ParseBytes(data), currentFirstTokenMode()) {
+							firstTokenMs = int(time.Since(start).Milliseconds())
+							ttftRecorded = true
+						}
+					},
+					clientGone: func() bool { return clientGone || c.Request.Context().Err() != nil },
+					openRound: func(body []byte) (*http.Response, error) {
+						// 续想轮复用同一账号与上游通道（reasoning encrypted_content 绑定账号，
+						// 换号会被上游拒绝），沿用与客户端解耦的 drainable context。
+						if lastUpstreamCancel != nil {
+							lastUpstreamCancel()
+						}
+						rctx, rcancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+						lastUpstreamCancel = rcancel
+						roundBody := body
+						if useWebsocket {
+							roundBody = stripResponsesImageGenerationTool(body)
+						}
+						return ExecuteRequest(rctx, account, roundBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+					},
+				}
+				foldRes := runContinueThinkingFold(resp, fold)
+				readErr = foldRes.ReadErr
+				if foldRes.RoundsRun > 1 {
+					// 隐藏的续想轮各自消耗一次真实上游请求，逐轮单独记账（真实用量），
+					// 最终轮的真实 usage 交由本 attempt 收尾统一记账。
+					h.logContinueThinkingRounds(c, foldRes, account, logModel, logEffectiveModel, reasoningEffort, useWebsocket, serviceTier)
+					usage = foldRes.FinalUsage
+				}
+			} else {
+				readErr = ReadSSEStream(resp.Body, forward)
+			}
 			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
 			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
 			if writeErr == nil && wroteAnyBody {
