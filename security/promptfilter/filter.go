@@ -930,3 +930,77 @@ func reasonForVerdict(action string, score int, threshold int, matches []Match) 
 	}
 	return fmt.Sprintf("prompt matched: score %d (%s)", score, strings.Join(names, ", "))
 }
+
+// looksLikeTechnicalCyberIntent 高召回、低误伤地识别"纯技术化网络攻击"意图——
+// 这类请求常无自然语言攻击关键词(本地正则 score=0)、omni 也打不出 flag,
+// 但语义判官有识别力。命中即把它路由进判官二审(即便本地 Allow)。
+// 判定=【底层能力词】与【攻击动作词】共现(单独出现视为正常逆向/调试/运维,不命中),
+// 避免误伤海量正常 codex 逆向/安全研究/网络编程用户。真正拦不拦由判官定,本函数只负责"送审"。
+func looksLikeTechnicalCyberIntent(text string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	// 底层能力/系统操作词(逆向、内存、网络栈层面)
+	lowLevel := []string{
+		"gdb", "ptrace", "/proc/", "syscall", "shellcode", "assembl", "反汇编", "汇编",
+		"内存patch", "memory patch", "hook", "inline hook", "dialtcp", "dialudp",
+		"resolvehost", "getaddrinfo", "ld_preload", "dlopen", "0x14", "0x1a", "0x40", "0x7f",
+		"iat ", "got表", "plt表", " intercept", "拦截函数", "运行时篡改",
+	}
+	// 攻击/规避动作词(把上面能力用于"绕过/劫持/注入/窃取/持久化"等对抗性目的)
+	offensive := []string{
+		"绕过", "劫持", "注入", "篡改", "伪造", "欺骗", "bypass", "hijack", "inject",
+		"spoof", "tamper", "evade", "规避", "免杀", "exfiltrat", "窃取", "外传",
+		"persistence", "持久化", "提权", "privilege escalat", "backdoor", "后门",
+		"中间人", "mitm", "poison", "投毒", "redirect traffic", "重定向流量", "改写dns", "劫持dns",
+	}
+	hasLow, hasOff := false, false
+	for _, w := range lowLevel {
+		if strings.Contains(lower, w) { hasLow = true; break }
+	}
+	if !hasLow { return false }
+	for _, w := range offensive {
+		if strings.Contains(lower, w) { hasOff = true; break }
+	}
+	return hasOff
+}
+
+// LooksLikeTechnicalCyberIntent 导出封装,供 proxy 层路由判断使用。
+func LooksLikeTechnicalCyberIntent(text string) bool {
+	return looksLikeTechnicalCyberIntent(text)
+}
+
+// ExtractUserText 仅提取"用户输入侧"文本(input / messages),丢弃 instructions(codex/agent
+// 的 system prompt 外壳,通常 1.6 万字符固定模板)。用于语义判官送审:
+// ① 体积从 ~2 万字符降到几 k,规避第三方复核端点对大体积请求的高失败率;
+// ② 判官聚焦真实用户意图,不被无害外壳干扰(外壳还常含"You are Codex..."诱导判官放行)。
+// 本地打分仍用 ExtractText(全量),此函数专供判官。
+func ExtractUserText(body []byte, endpoint string, maxLen int) string {
+	if len(body) == 0 || !gjson.ValidBytes(body) {
+		return ""
+	}
+	var parts []string
+	addResultText := func(result gjson.Result) {
+		if result.Exists() {
+			collectGJSONText(result, &parts)
+		}
+	}
+	ep := strings.ToLower(strings.TrimSpace(endpoint))
+	switch ep {
+	case "chat", "chat_completions", "/v1/chat/completions":
+		addResultText(gjson.GetBytes(body, "messages"))
+	case "messages", "anthropic", "/v1/messages":
+		addResultText(gjson.GetBytes(body, "messages"))
+	default:
+		// codex /v1/responses 等:只取 input / messages,显式不取 instructions
+		addResultText(gjson.GetBytes(body, "input"))
+		addResultText(gjson.GetBytes(body, "messages"))
+	}
+	joined := strings.TrimSpace(strings.Join(parts, "\n"))
+	if joined == "" {
+		// 兜底:user 段为空时退回全量,避免判官拿到空文本静默放行
+		return ExtractText(body, endpoint, maxLen)
+	}
+	return limitScanText(joined, maxLen)
+}

@@ -303,12 +303,18 @@ func promptFilterVerdictIsFinal(verdict promptfilter.Verdict) bool {
 	return false
 }
 
-func promptFilterAllowedHighRisk(verdict promptfilter.Verdict) bool {
+func promptFilterAllowedHighRisk(verdict promptfilter.Verdict, text string) bool {
 	if promptFilterVerdictIsFinal(verdict) {
 		return false
 	}
-	return verdict.Action == promptfilter.ActionAllow &&
-		promptfilter.IsHighRiskReviewVerdict(verdict)
+	if verdict.Action != promptfilter.ActionAllow {
+		return false
+	}
+	// 本地已判高危 → 送判官复核(原逻辑)；
+	// 或本地漏判(score 低)但命中"纯技术化网络攻击"高召回特征 → 强制送判官二审。
+	// 后者专治"汇编/GDB 改内存劫持 DNS"这类本地正则 score=0、omni 也打不出 flag 的漏放。
+	return promptfilter.IsHighRiskReviewVerdict(verdict) ||
+		promptfilter.LooksLikeTechnicalCyberIntent(text)
 }
 
 func promptFilterBlockedByLocalHighRisk(verdict promptfilter.Verdict) bool {
@@ -329,7 +335,7 @@ func promptFilterBlockedByLocalHighRisk(verdict promptfilter.Verdict) bool {
 }
 
 func (h *Handler) inspectHighRiskReviewDisagreement(c *gin.Context, verdict promptfilter.Verdict, text string, endpoint string, model string, writeBlock func()) (bool, bool) {
-	if !promptFilterAllowedHighRisk(verdict) && !promptFilterBlockedByLocalHighRisk(verdict) {
+	if !promptFilterAllowedHighRisk(verdict, text) && !promptFilterBlockedByLocalHighRisk(verdict) {
 		return false, false
 	}
 	blocked := h.inspectSemanticReviewDisagreementText(c, text, endpoint, model, writeBlock)
