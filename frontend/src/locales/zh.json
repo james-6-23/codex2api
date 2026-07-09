@@ -1825,7 +1825,11 @@
     "smartPacingMinConcurrency": "配速并发下限",
     "smartPacingMinConcurrencyHint": "配速时并发不会低于该值，保证账号不被完全饿死。默认 1。",
     "globalAutoPausePlaceholder": "留空或 0 表示不启用",
-    "globalAutoPauseHint": "填 0 表示不启用全局默认阈值。优先级: 账号 > 分组 > 全局。"
+    "globalAutoPauseHint": "填 0 表示不启用全局默认阈值。优先级: 账号 > 分组 > 全局。",
+    "codexContinueThinking": "思考截断自动续想",
+    "codexContinueThinkingDesc": "检测到上游按特征指纹截断思考（“516 降智”）时，自动携带已有思考续发请求并折叠成单次响应。每次续想都是一次真实上游请求，会成倍放大额度消耗，且属于显式绕过上游截断行为，风险自负。默认关闭。",
+    "codexContinueMaxRounds": "最大续想轮数",
+    "codexContinueMaxRoundsDesc": "单次请求允许的上游请求总轮数（含首轮），到达上限后按当前结果返回。范围 1-32，默认 8。"
   },
   "proxies": {
     "description": "管理代理池，支持轮询分配给账号使用",

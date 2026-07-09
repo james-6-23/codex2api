@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/tooltip'
 import {
   Activity,
+  Brain,
   ChevronDown,
   ChevronRight,
   CircleHelp,
@@ -1120,6 +1121,8 @@ export default function Settings() {
     codex_ws_hide_upstream_errors: true,
     codex_ws_silent_retry_enabled: true,
     codex_ws_silent_max_retries: 2,
+    codex_continue_thinking_enabled: false,
+    codex_continue_max_rounds: 8,
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
     max_retries: 2,
@@ -2147,6 +2150,37 @@ export default function Settings() {
                   />
                 </SettingField>
               </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.codexContinueThinking')} description={t('settings.codexContinueThinkingDesc')} icon={<Brain className="size-4" />}>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <SettingField label={t('settings.codexContinueThinking')} description={t('settings.codexContinueThinkingDesc')} layout="switch">
+                <Switch
+                  checked={settingsForm.codex_continue_thinking_enabled}
+                  onCheckedChange={(checked) => autoSaveBooleanField('codex_continue_thinking_enabled', checked)}
+                />
+              </SettingField>
+              <SettingField
+                label={t('settings.codexContinueMaxRounds')}
+                description={t('settings.codexContinueMaxRoundsDesc')}
+                className={cn(!settingsForm.codex_continue_thinking_enabled && 'opacity-60')}
+              >
+                <Input
+                  type="number"
+                  min={1}
+                  max={32}
+                  disabled={!settingsForm.codex_continue_thinking_enabled}
+                  value={settingsForm.codex_continue_max_rounds}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_continue_max_rounds: parseInt(e.target.value) || 8 }))}
+                  onBlur={() => {
+                    if (!settingsForm.codex_continue_thinking_enabled) return
+                    void autoSaveSettingsPatch({
+                      codex_continue_max_rounds: settingsForm.codex_continue_max_rounds,
+                    })
+                  }}
+                />
+              </SettingField>
             </div>
           </SettingsCard>
 

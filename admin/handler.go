@@ -5914,6 +5914,8 @@ type settingsResponse struct {
 	CodexWSHideUpstreamErrors          bool    `json:"codex_ws_hide_upstream_errors"`
 	CodexWSSilentRetryEnabled          bool    `json:"codex_ws_silent_retry_enabled"`
 	CodexWSSilentMaxRetries            int     `json:"codex_ws_silent_max_retries"`
+	CodexContinueThinkingEnabled       bool    `json:"codex_continue_thinking_enabled"`
+	CodexContinueMaxRounds             int     `json:"codex_continue_max_rounds"`
 	SchedulerMode                      string  `json:"scheduler_mode"`
 	AffinityMode                       string  `json:"affinity_mode"`
 	MaxRetries                         int     `json:"max_retries"`
@@ -6013,6 +6015,8 @@ type updateSettingsReq struct {
 	CodexWSHideUpstreamErrors          *bool    `json:"codex_ws_hide_upstream_errors"`
 	CodexWSSilentRetryEnabled          *bool    `json:"codex_ws_silent_retry_enabled"`
 	CodexWSSilentMaxRetries            *int     `json:"codex_ws_silent_max_retries"`
+	CodexContinueThinkingEnabled       *bool    `json:"codex_continue_thinking_enabled"`
+	CodexContinueMaxRounds             *int     `json:"codex_continue_max_rounds"`
 	SchedulerMode                      *string  `json:"scheduler_mode"`
 	AffinityMode                       *string  `json:"affinity_mode"`
 	MaxRetries                         *int     `json:"max_retries"`
@@ -6605,6 +6609,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexWSHideUpstreamErrors:          h.store.CodexWSHideUpstreamErrors(),
 		CodexWSSilentRetryEnabled:          h.store.CodexWSSilentRetryEnabled(),
 		CodexWSSilentMaxRetries:            h.store.CodexWSSilentMaxRetries(),
+		CodexContinueThinkingEnabled:       h.store.CodexContinueThinkingEnabled(),
+		CodexContinueMaxRounds:             h.store.CodexContinueMaxRounds(),
 		SchedulerMode:                      h.store.GetSchedulerMode(),
 		AffinityMode:                       h.store.GetAffinityMode(),
 		MaxRetries:                         h.store.GetMaxRetries(),
@@ -7006,6 +7012,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: codex_ws_silent_max_retries = %d", v)
 	}
 
+	if req.CodexContinueThinkingEnabled != nil {
+		h.store.SetCodexContinueThinkingEnabled(*req.CodexContinueThinkingEnabled)
+		runtimeCfg.CodexContinueThinking = *req.CodexContinueThinkingEnabled
+		log.Printf("设置已更新: codex_continue_thinking_enabled = %t", *req.CodexContinueThinkingEnabled)
+	}
+
+	if req.CodexContinueMaxRounds != nil {
+		v := database.NormalizeCodexContinueMaxRounds(*req.CodexContinueMaxRounds)
+		h.store.SetCodexContinueMaxRounds(v)
+		runtimeCfg.CodexContinueMaxRounds = v
+		log.Printf("设置已更新: codex_continue_max_rounds = %d", v)
+	}
+
 	if req.SchedulerMode != nil {
 		h.store.SetSchedulerMode(*req.SchedulerMode)
 		log.Printf("设置已更新: scheduler_mode = %s", *req.SchedulerMode)
@@ -7393,6 +7412,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSHideUpstreamErrors:          h.store.CodexWSHideUpstreamErrors(),
 		CodexWSSilentRetryEnabled:          h.store.CodexWSSilentRetryEnabled(),
 		CodexWSSilentMaxRetries:            h.store.CodexWSSilentMaxRetries(),
+		CodexContinueThinkingEnabled:       h.store.CodexContinueThinkingEnabled(),
+		CodexContinueMaxRounds:             h.store.CodexContinueMaxRounds(),
 		SchedulerMode:                      h.store.GetSchedulerMode(),
 		AffinityMode:                       h.store.GetAffinityMode(),
 		MaxRetries:                         h.store.GetMaxRetries(),
@@ -7497,6 +7518,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSHideUpstreamErrors:          h.store.CodexWSHideUpstreamErrors(),
 		CodexWSSilentRetryEnabled:          h.store.CodexWSSilentRetryEnabled(),
 		CodexWSSilentMaxRetries:            h.store.CodexWSSilentMaxRetries(),
+		CodexContinueThinkingEnabled:       h.store.CodexContinueThinkingEnabled(),
+		CodexContinueMaxRounds:             h.store.CodexContinueMaxRounds(),
 		SchedulerMode:                      h.store.GetSchedulerMode(),
 		AffinityMode:                       h.store.GetAffinityMode(),
 		MaxRetries:                         h.store.GetMaxRetries(),

@@ -2193,6 +2193,10 @@ type Store struct {
 	codexWSSilentRetryEnabled   atomic.Bool  // 首包前上游 WS 错误静默换号重试，默认开启
 	codexWSSilentMaxRetries     atomic.Int64 // WS 静默换号最大重试次数，默认 2
 
+	// Codex 思考截断自动续想（默认关闭，不影响现有路径）
+	codexContinueThinkingEnabled atomic.Bool  // 检测到上游截断思考时自动续想并折叠成单响应
+	codexContinueMaxRounds       atomic.Int64 // 单次请求最大续想轮数（含首轮），默认 8
+
 	// 重试间隔与传输错误重试策略（issue #331）
 	retryIntervalMS      atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
 	transportRetryPolicy atomic.Value // 传输错误重试策略: rotate / sticky
@@ -2604,6 +2608,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			CodexWSHideUpstreamErrors:          true,
 			CodexWSSilentRetryEnabled:          true,
 			CodexWSSilentMaxRetries:            2,
+			CodexContinueMaxRounds:             8,
 			AutoPause5hGuardBandPercent:        defaultAutoPause5hGuardBandPercent,
 			AutoPause5hGuardConcurrency:        defaultAutoPause5hGuardConcurrency,
 			SmartPacingMinConcurrency:          defaultSmartPacingMinConcurrency,
@@ -2675,6 +2680,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSHideUpstreamErrors.Store(settings.CodexWSHideUpstreamErrors)
 	s.codexWSSilentRetryEnabled.Store(settings.CodexWSSilentRetryEnabled)
 	s.codexWSSilentMaxRetries.Store(normalizeWSSilentMaxRetries(settings.CodexWSSilentMaxRetries))
+	s.codexContinueThinkingEnabled.Store(settings.CodexContinueThinkingEnabled)
+	s.codexContinueMaxRounds.Store(int64(database.NormalizeCodexContinueMaxRounds(settings.CodexContinueMaxRounds)))
 	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(settings.RetryIntervalMS)))
 	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(settings.TransportRetryPolicy))
 
@@ -2905,6 +2912,38 @@ func (s *Store) CodexWSSilentMaxRetries() int {
 		return 2
 	}
 	return int(s.codexWSSilentMaxRetries.Load())
+}
+
+// SetCodexContinueThinkingEnabled 设置是否在上游截断思考时自动续想。
+func (s *Store) SetCodexContinueThinkingEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.codexContinueThinkingEnabled.Store(enabled)
+}
+
+// CodexContinueThinkingEnabled 返回是否在上游截断思考时自动续想。
+func (s *Store) CodexContinueThinkingEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.codexContinueThinkingEnabled.Load()
+}
+
+// SetCodexContinueMaxRounds 设置单次请求最大续想轮数（含首轮）。
+func (s *Store) SetCodexContinueMaxRounds(rounds int) {
+	if s == nil {
+		return
+	}
+	s.codexContinueMaxRounds.Store(int64(database.NormalizeCodexContinueMaxRounds(rounds)))
+}
+
+// CodexContinueMaxRounds 返回单次请求最大续想轮数（含首轮）。
+func (s *Store) CodexContinueMaxRounds() int {
+	if s == nil {
+		return 8
+	}
+	return int(s.codexContinueMaxRounds.Load())
 }
 
 // GetProxyURL 获取全局代理地址
