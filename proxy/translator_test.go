@@ -1067,6 +1067,70 @@ func TestPrepareResponsesBody_SparkModelKeepsExplicitImageGenerationTool(t *test
 	}
 }
 
+func TestPrepareResponsesBody_ImageGenNamespaceToolSkipsInjectionAndBridge(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"draw a poster",
+		"tools":[{"type":"namespace","name":"image_gen","tools":[{"type":"function","name":"imagegen"}]}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	tools := gjson.GetBytes(got, "tools")
+	for _, tool := range tools.Array() {
+		if tool.Get("type").String() == "image_generation" {
+			t.Fatalf("hosted image_generation tool should not be injected alongside image_gen namespace, got %s", string(got))
+		}
+	}
+	if gjson.GetBytes(got, "tools.0.name").String() != "image_gen" {
+		t.Fatalf("namespace image_gen tool should be preserved, got %s", string(got))
+	}
+	if instructions := gjson.GetBytes(got, "instructions").String(); strings.Contains(instructions, codexImageGenerationBridgeMarker) {
+		t.Fatalf("bridge instructions should not be injected when image_gen namespace is present, got %q", instructions)
+	}
+}
+
+func TestPrepareResponsesBody_ImageGenNamespaceInAdditionalToolsSkipsInjection(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"namespace","name":"image_gen"}]},
+			{"role":"user","content":"draw a poster"}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	for _, tool := range gjson.GetBytes(got, "tools").Array() {
+		if tool.Get("type").String() == "image_generation" {
+			t.Fatalf("hosted image_generation tool should not be injected for additional_tools image_gen, got %s", string(got))
+		}
+	}
+	if instructions := gjson.GetBytes(got, "instructions").String(); strings.Contains(instructions, codexImageGenerationBridgeMarker) {
+		t.Fatalf("bridge instructions should not be injected, got %q", instructions)
+	}
+}
+
+func TestPrepareResponsesBody_NonImageNamespaceToolStillInjectsDefault(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":"hello",
+		"tools":[{"type":"namespace","name":"code_tools","tools":[{"type":"function","name":"run"}]}]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	found := false
+	for _, tool := range gjson.GetBytes(got, "tools").Array() {
+		if tool.Get("type").String() == "image_generation" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("non-image namespace tool should not suppress default injection, got %s", string(got))
+	}
+}
+
 func TestPrepareResponsesBody_NormalizesNestedReasoningEffortAliases(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",

@@ -305,6 +305,52 @@ func hasResponsesImageGenerationTool(body map[string]any) bool {
 	return false
 }
 
+// isImageGenNamespaceTool 识别 namespace 形式的生图工具声明：
+// { "type": "namespace", "name": "image_gen", ... }。Codex 的 /image 技能用
+// 这种形式声明生图能力，而非扁平的 { "type": "image_generation" }。
+func isImageGenNamespaceTool(tool map[string]any) bool {
+	return strings.TrimSpace(firstNonEmptyAnyString(tool["type"])) == "namespace" &&
+		strings.TrimSpace(firstNonEmptyAnyString(tool["name"])) == "image_gen"
+}
+
+// hasResponsesImageGenNamespaceTool 检测客户端是否自带 namespace 生图声明，
+// 覆盖两个位置：顶层 tools[]，以及 input[] 里 type=additional_tools 项内嵌的
+// 工具列表（Responses Lite 格式）。带这种声明的客户端已有自己的生图链路，
+// 不应再叠加注入 hosted image_generation 工具和桥接 instructions——桥接文案
+// 假设 image_gen namespace 缺席，在其在场时注入语义恰好相反。
+func hasResponsesImageGenNamespaceTool(body map[string]any) bool {
+	if tools, ok := body["tools"].([]any); ok {
+		for _, rawTool := range tools {
+			if toolMap, ok := rawTool.(map[string]any); ok && isImageGenNamespaceTool(toolMap) {
+				return true
+			}
+		}
+	}
+	input, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+	for _, rawItem := range input {
+		item, ok := rawItem.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.TrimSpace(firstNonEmptyAnyString(item["type"])) != "additional_tools" {
+			continue
+		}
+		tools, ok := item["tools"].([]any)
+		if !ok {
+			continue
+		}
+		for _, rawTool := range tools {
+			if toolMap, ok := rawTool.(map[string]any); ok && isImageGenNamespaceTool(toolMap) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func responsesImageGenerationToolChoice(body map[string]any) string {
 	if len(body) == 0 {
 		return ""
@@ -636,6 +682,10 @@ func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
 	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
 		return false
 	}
+	// 客户端自带 namespace 生图声明时不叠加注入(见 hasResponsesImageGenNamespaceTool)。
+	if hasResponsesImageGenNamespaceTool(body) {
+		return false
+	}
 	// 不为拒绝 hosted 图片工具的模型自动注入默认图片工具及桥接 instructions；
 	// 用户显式自带的图片工具仍由上面 hasResponsesImageGenerationTool 分支保留。
 	if responsesModelRejectsHostedImageTool(body) {
@@ -652,6 +702,10 @@ func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
 
 func shouldInjectOpenAIResponsesImageGenerationTool(body map[string]any) bool {
 	if len(body) == 0 || hasResponsesImageGenerationTool(body) {
+		return false
+	}
+	// 与 ChatGPT 路径一致:namespace 生图声明在场时不叠加注入。
+	if hasResponsesImageGenNamespaceTool(body) {
 		return false
 	}
 	if hasResponsesImageGenerationToolChoice(body) {
