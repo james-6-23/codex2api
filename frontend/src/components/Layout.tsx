@@ -18,19 +18,17 @@ type NavDef = {
   icon: ReactNode
   end?: boolean
   activePrefix?: string
-  /** Shown in the mobile bottom bar (primary destinations). */
-  mobilePrimary?: boolean
 }
 
 const navDefs: NavDef[] = [
-  { to: '/', labelKey: 'nav.dashboard', icon: <LayoutDashboard className="size-[18px]" />, end: true, mobilePrimary: true },
-  { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[18px]" />, mobilePrimary: true },
+  { to: '/', labelKey: 'nav.dashboard', icon: <LayoutDashboard className="size-[18px]" />, end: true },
+  { to: '/accounts', labelKey: 'nav.accounts', icon: <Users className="size-[18px]" /> },
   { to: '/api-keys', labelKey: 'nav.apiKeys', icon: <KeyRound className="size-[18px]" /> },
   { to: '/proxies', labelKey: 'nav.proxies', icon: <Globe className="size-[18px]" /> },
   { to: '/images/studio', labelKey: 'nav.images', icon: <ImageIcon className="size-[18px]" />, activePrefix: '/images' },
   { to: '/prompt-filter/overview', labelKey: 'nav.promptFilter', icon: <ShieldAlert className="size-[18px]" />, activePrefix: '/prompt-filter' },
-  { to: '/ops/overview', labelKey: 'nav.ops', icon: <Server className="size-[18px]" />, activePrefix: '/ops', mobilePrimary: true },
-  { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" />, mobilePrimary: true },
+  { to: '/ops/overview', labelKey: 'nav.ops', icon: <Server className="size-[18px]" />, activePrefix: '/ops' },
+  { to: '/usage', labelKey: 'nav.usage', icon: <Activity className="size-[18px]" /> },
   { to: '/theme', labelKey: 'nav.theme', icon: <Palette className="size-[18px]" /> },
   { to: '/settings', labelKey: 'nav.settings', icon: <Settings className="size-[18px]" /> },
   { to: '/docs', labelKey: 'nav2.docs', icon: <BookOpen className="size-[18px]" /> },

@@ -533,40 +533,44 @@ export default function ImageStudio() {
   const [templateTags, setTemplateTags] = useState('')
   const [imageToImageMode, setImageToImageMode] = useState(false)
   const [inputImageDataURLs, setInputImageDataURLs] = useState<string[]>([])
+  const inputImageDataURLsRef = useRef(inputImageDataURLs)
+  inputImageDataURLsRef.current = inputImageDataURLs
   const [advancedOpen, setAdvancedOpen] = useState(false)
   const [saveTemplateOpen, setSaveTemplateOpen] = useState(false)
 
   const appendInputImages = useCallback((files: FileList | File[]) => {
     const list = Array.from(files).filter(file => file.type.startsWith('image/'))
     if (list.length === 0) return
-    setInputImageDataURLs(prev => {
-      if (prev.length >= MAX_INPUT_IMAGES) {
-        showToast(t('images.maxInputImages', { max: MAX_INPUT_IMAGES }), 'error')
-        return prev
+
+    // Read length outside the state updater so toast/FileReader side effects run once
+    // (React may re-invoke pure updaters under StrictMode / concurrent rendering).
+    const prevLength = inputImageDataURLsRef.current.length
+    if (prevLength >= MAX_INPUT_IMAGES) {
+      showToast(t('images.maxInputImages', { max: MAX_INPUT_IMAGES }), 'error')
+      return
+    }
+    const remaining = MAX_INPUT_IMAGES - prevLength
+    const filesToRead = list.slice(0, remaining)
+    if (list.length > remaining) {
+      showToast(t('images.maxInputImages', { max: MAX_INPUT_IMAGES }), 'error')
+    }
+
+    void Promise.allSettled(filesToRead.map(file => new Promise<string>((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(reader.result as string)
+      reader.onerror = () => reject(new Error('Failed to read file'))
+      reader.readAsDataURL(file)
+    }))).then(results => {
+      const dataURLs: string[] = []
+      for (const r of results) {
+        if (r.status === 'fulfilled') dataURLs.push(r.value)
       }
-      const remaining = MAX_INPUT_IMAGES - prev.length
-      const filesToRead = list.slice(0, remaining)
-      if (list.length > remaining) {
-        showToast(t('images.maxInputImages', { max: MAX_INPUT_IMAGES }), 'error')
+      if (dataURLs.length > 0) {
+        setInputImageDataURLs(current => [...current, ...dataURLs].slice(0, MAX_INPUT_IMAGES))
       }
-      void Promise.allSettled(filesToRead.map(file => new Promise<string>((resolve, reject) => {
-        const reader = new FileReader()
-        reader.onload = () => resolve(reader.result as string)
-        reader.onerror = () => reject(new Error('Failed to read file'))
-        reader.readAsDataURL(file)
-      }))).then(results => {
-        const dataURLs: string[] = []
-        for (const r of results) {
-          if (r.status === 'fulfilled') dataURLs.push(r.value)
-        }
-        if (dataURLs.length > 0) {
-          setInputImageDataURLs(current => [...current, ...dataURLs].slice(0, MAX_INPUT_IMAGES))
-        }
-        if (dataURLs.length < results.length) {
-          showToast(t('images.loadFailed'), 'error')
-        }
-      })
-      return prev
+      if (dataURLs.length < results.length) {
+        showToast(t('images.loadFailed'), 'error')
+      }
     })
   }, [showToast, t])
 

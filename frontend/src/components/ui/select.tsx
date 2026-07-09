@@ -59,14 +59,13 @@ export function Select({
     const openUp = spaceBelow < Math.min(DROPDOWN_MAX_HEIGHT, 160) && spaceAbove > spaceBelow
     const maxHeight = Math.max(120, Math.min(DROPDOWN_MAX_HEIGHT, openUp ? spaceAbove : spaceBelow))
     // Keep dropdown fully inside the viewport on small screens.
-    const minWidth = Math.min(rect.width, viewportWidth - VIEWPORT_PADDING * 2)
-    const preferredWidth = Math.max(minWidth, Math.min(rect.width, viewportWidth - VIEWPORT_PADDING * 2))
-    const maxLeft = viewportWidth - preferredWidth - VIEWPORT_PADDING
+    const width = Math.min(rect.width, viewportWidth - VIEWPORT_PADDING * 2)
+    const maxLeft = viewportWidth - width - VIEWPORT_PADDING
     const left = Math.min(Math.max(VIEWPORT_PADDING, rect.left), Math.max(VIEWPORT_PADDING, maxLeft))
     setPosition({
       top: openUp ? rect.top - DROPDOWN_GAP : rect.bottom + DROPDOWN_GAP,
       left,
-      width: preferredWidth,
+      width,
       maxHeight,
       openUp,
     })

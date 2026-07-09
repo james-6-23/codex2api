@@ -328,7 +328,9 @@ export default function AccountDetailSheet({
 
                 {(account.model_cooldowns?.length ?? 0) > 0 ? (
                   <div className="rounded-lg bg-amber-500/10 px-2.5 py-2 text-[12px] text-amber-700 dark:text-amber-300">
-                    model {account.model_cooldowns?.[0]?.model}
+                    {t("accounts.modelCooldown", {
+                      model: account.model_cooldowns?.[0]?.model ?? "",
+                    })}
                     {(account.model_cooldowns?.length ?? 0) > 1
                       ? ` +${(account.model_cooldowns?.length ?? 1) - 1}`
                       : ""}
@@ -464,22 +466,24 @@ export default function AccountDetailSheet({
                         {t("accounts.detailAuthType")}
                       </span>
                       <span className="font-medium text-foreground">
-                        Access Token
+                        {t("accounts.detailAuthTypeAT")}
                       </span>
                     </div>
                   )}
                   {account.openai_responses_api && (
                     <div className="flex justify-between gap-3">
-                      <span className="text-muted-foreground">API</span>
+                      <span className="text-muted-foreground">
+                        {t("accounts.detailApiLabel")}
+                      </span>
                       <span className="font-medium text-foreground">
-                        Responses
+                        {t("accounts.detailApiResponses")}
                       </span>
                     </div>
                   )}
                   {account.base_url && (
                     <div className="flex justify-between gap-3">
                       <span className="shrink-0 text-muted-foreground">
-                        Base URL
+                        {t("accounts.detailBaseUrl")}
                       </span>
                       <span className="min-w-0 break-all text-right font-mono text-[11px] text-foreground">
                         {account.base_url}

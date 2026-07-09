@@ -463,16 +463,24 @@ function resolveTheme(mode: ThemeMode): Theme {
 }
 
 function getInitialThemeMode(): ThemeMode {
-  const stored = localStorage.getItem(STORAGE_KEY)
-  if (isThemeMode(stored)) return stored
-  // Legacy: only light/dark was stored — treat as explicit choice.
-  if (stored === 'light' || stored === 'dark') return stored
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY)
+    if (isThemeMode(stored)) return stored
+    // Legacy: only light/dark was stored — treat as explicit choice.
+    if (stored === 'light' || stored === 'dark') return stored
+  } catch {
+    /* localStorage unavailable (private mode / blocked) */
+  }
   return DEFAULT_THEME_MODE
 }
 
 function getInitialColorTheme(): ColorTheme {
-  const stored = localStorage.getItem(COLOR_THEME_STORAGE_KEY)
-  if (isColorTheme(stored)) return stored
+  try {
+    const stored = localStorage.getItem(COLOR_THEME_STORAGE_KEY)
+    if (isColorTheme(stored)) return stored
+  } catch {
+    /* localStorage unavailable (private mode / blocked) */
+  }
   return DEFAULT_COLOR_THEME
 }
 
@@ -486,7 +494,11 @@ function applyResolvedTheme(nextTheme: Theme) {
 }
 
 function persistThemeMode(mode: ThemeMode) {
-  localStorage.setItem(STORAGE_KEY, mode)
+  try {
+    localStorage.setItem(STORAGE_KEY, mode)
+  } catch {
+    /* localStorage unavailable (private mode / blocked) */
+  }
   applyResolvedTheme(resolveTheme(mode))
 }
 
@@ -496,7 +508,11 @@ function persistColorTheme(nextColorTheme: ColorTheme) {
     root.classList.remove(`theme-${theme.id}`)
   })
   root.classList.add(`theme-${nextColorTheme}`)
-  localStorage.setItem(COLOR_THEME_STORAGE_KEY, nextColorTheme)
+  try {
+    localStorage.setItem(COLOR_THEME_STORAGE_KEY, nextColorTheme)
+  } catch {
+    /* localStorage unavailable (private mode / blocked) */
+  }
 }
 
 interface ThemeContextValue {

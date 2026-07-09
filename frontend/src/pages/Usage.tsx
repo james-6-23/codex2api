@@ -1779,6 +1779,7 @@ export default function Usage() {
                       <div className="flex items-start justify-between gap-2">
                         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
                           <StatusCodeBadge log={log} />
+                          {log.upstream_error_kind === 'cyber_policy' ? <CyberPolicyDetailButton log={log} /> : null}
                           {log.via_websocket ? (
                             <Badge
                               variant="outline"

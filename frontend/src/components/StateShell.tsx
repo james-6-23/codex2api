@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import type { HTMLAttributes, ReactNode } from 'react'
 import { Button } from '@/components/ui/button'
 import { AlertCircle, Inbox, Loader2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -24,16 +24,18 @@ function ShellFrame({
   children,
   className,
   role,
+  ...rest
 }: {
   variant: 'page' | 'section'
   children: ReactNode
   className?: string
   role?: string
-}) {
+} & HTMLAttributes<HTMLDivElement>) {
   const minH = variant === 'page' ? 'min-h-[320px]' : 'min-h-[220px]'
   return (
     <div
       role={role}
+      {...rest}
       className={cn(
         'relative flex flex-col items-center justify-center gap-3 overflow-hidden rounded-2xl border border-border/80 bg-card/85 p-8 text-center shadow-sm',
         minH,

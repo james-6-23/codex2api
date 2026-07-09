@@ -873,7 +873,7 @@ export default function Proxies() {
                         <button
                           key={n}
                           onClick={() => setPage(n)}
-                          className={`flex items-center justify-center size-8 rounded-lg text-xs font-medium transition-all ${
+                          className={`flex items-center justify-center size-9 rounded-lg text-xs font-medium transition-all ${
                             n === page
                               ? "bg-primary text-primary-foreground shadow-sm"
                               : "border border-border text-foreground hover:bg-muted/50"
@@ -888,7 +888,7 @@ export default function Proxies() {
                         setPage((p) => Math.min(totalPages, p + 1))
                       }
                       disabled={page >= totalPages}
-                      className="flex items-center justify-center size-8 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                      className="flex items-center justify-center size-9 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                     >
                       <ChevronRight className="size-4" />
                     </button>
