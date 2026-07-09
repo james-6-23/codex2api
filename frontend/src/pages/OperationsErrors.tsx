@@ -244,7 +244,7 @@ export default function OperationsErrors() {
         />
         <OpsTabs />
 
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-4 mb-6">
+        <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
           <SummaryPill
             label={t('opsErrors.totalErrors')}
             value={formatNumber(data.summary?.total_errors ?? 0)}

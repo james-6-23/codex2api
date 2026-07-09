@@ -550,7 +550,169 @@ export default function APIKeys() {
                 emptyTitle={t("apiKeys.noKeys")}
                 emptyDescription={t("apiKeys.noKeysDesc")}
               >
-                <div className="data-table-shell">
+                {/* Mobile cards */}
+                <div className="grid gap-3 lg:hidden">
+                  {keys.map((keyRow) => {
+                    const isVisible = visibleKeys.has(keyRow.id);
+                    const isNew = createdKeyId === keyRow.id;
+                    const displayKey = isVisible
+                      ? keyRow.raw_key || keyRow.key
+                      : keyRow.key;
+                    const copyValue = keyRow.raw_key || keyRow.key;
+                    const status = getAPIKeyStatus(keyRow);
+                    return (
+                      <div
+                        key={keyRow.id}
+                        className={`rounded-xl border border-border bg-background/70 p-3.5 shadow-sm ${
+                          isNew ? "ring-1 ring-[hsl(var(--success))]/30 bg-[hsl(var(--success-bg))]" : ""
+                        }`}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className="truncate text-sm font-semibold text-foreground">
+                                {keyRow.name}
+                              </span>
+                              {isNew ? (
+                                <Badge
+                                  variant="outline"
+                                  className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]"
+                                >
+                                  {t("apiKeys.newBadge")}
+                                </Badge>
+                              ) : null}
+                              {status !== "active" ? (
+                                <Badge
+                                  variant={
+                                    status === "expired"
+                                      ? "secondary"
+                                      : "destructive"
+                                  }
+                                >
+                                  {t(`apiKeys.status.${status}`)}
+                                </Badge>
+                              ) : null}
+                            </div>
+                            <div className="mt-1 text-[11px] text-muted-foreground">
+                              {formatRelativeTime(keyRow.created_at, {
+                                variant: "compact",
+                              })}
+                              {" · "}
+                              {formatExpiration(keyRow, t)}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-3 flex items-center gap-1.5">
+                          <code
+                            className="min-w-0 flex-1 truncate rounded-lg bg-muted px-2 py-1.5 font-mono text-[12px] text-foreground"
+                            title={displayKey}
+                          >
+                            {displayKey}
+                          </code>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            disabled={!keyRow.raw_key}
+                            onClick={() => toggleVisible(keyRow.id)}
+                            title={
+                              isVisible
+                                ? t("apiKeys.hideKey")
+                                : t("apiKeys.showKey")
+                            }
+                          >
+                            {isVisible ? (
+                              <EyeOff className="size-3.5" />
+                            ) : (
+                              <Eye className="size-3.5" />
+                            )}
+                          </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon-sm"
+                            onClick={() => void handleCopy(copyValue)}
+                            title={t("common.copy")}
+                          >
+                            <Copy className="size-3.5" />
+                          </Button>
+                        </div>
+
+                        <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                          <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                            <div className="text-[11px] font-semibold text-muted-foreground">
+                              {t("apiKeys.allowedGroups")}
+                            </div>
+                            <div className="mt-1">
+                              <AllowedGroupsDisplay
+                                ids={keyRow.allowed_group_ids ?? []}
+                                groups={groups}
+                                t={t}
+                              />
+                            </div>
+                          </div>
+                          <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                            <div className="text-[11px] font-semibold text-muted-foreground">
+                              {t("apiKeys.quotaColumn")}
+                            </div>
+                            <div className="mt-1 font-medium text-foreground">
+                              {formatQuotaLimit(keyRow, t)}
+                            </div>
+                            {keyRow.quota_limit > 0 ? (
+                              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                                <div
+                                  className="h-full rounded-full bg-primary"
+                                  style={{
+                                    width: `${Math.min(100, Math.max(0, (keyRow.quota_used / keyRow.quota_limit) * 100))}%`,
+                                  }}
+                                />
+                              </div>
+                            ) : null}
+                            {keyRow.window_usage && keyRow.limits ? (
+                              <WindowCostBars limits={keyRow.limits} usage={keyRow.window_usage} />
+                            ) : null}
+                          </div>
+                        </div>
+
+                        <div className="mt-3 flex flex-wrap gap-1.5">
+                          {keyRow.quota_limit > 0 ? (
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              disabled={resettingIds.has(keyRow.id)}
+                              onClick={() => void handleResetQuota(keyRow)}
+                              className="flex-1 min-w-[7rem]"
+                            >
+                              <RotateCcw className="size-3.5" />
+                              {t("apiKeys.resetQuota")}
+                            </Button>
+                          ) : null}
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => startEditing(keyRow)}
+                            className="flex-1 min-w-[6rem]"
+                          >
+                            <Pencil className="size-3.5" />
+                            {t("apiKeys.editKey")}
+                          </Button>
+                          <Button
+                            variant="destructive"
+                            size="sm"
+                            disabled={deletingIds.has(keyRow.id)}
+                            onClick={() => void handleDeleteKey(keyRow.id)}
+                            className="flex-1 min-w-[6rem]"
+                          >
+                            <Trash2 className="size-3.5" />
+                            {t("common.delete")}
+                          </Button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Desktop table */}
+                <div className="data-table-shell hidden lg:block">
                   <Table>
                     <TableHeader>
                       <TableRow>

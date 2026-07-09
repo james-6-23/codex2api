@@ -1544,10 +1544,10 @@ export default function Usage() {
         {/* Logs table */}
         <Card>
           <CardContent className="p-4">
-            <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:overflow-x-auto">
-              <div className="flex shrink-0 items-center gap-3">
-                <h3 className="whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
-                <div className="inline-flex shrink-0 rounded-lg border border-border bg-muted/50 p-0.5">
+            <div className="mb-4 flex items-center justify-between gap-3 overflow-visible max-lg:flex-col max-lg:items-stretch max-lg:overflow-visible">
+              <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+                <h3 className="shrink-0 whitespace-nowrap text-base font-semibold text-foreground">{t('usage.requestLogs')}</h3>
+                <div className="inline-flex max-w-full flex-wrap rounded-xl border border-border bg-muted/50 p-0.5">
                   {USAGE_TIME_RANGE_OPTIONS.map((key) => (
                     <button
                       key={key}
@@ -1557,7 +1557,7 @@ export default function Usage() {
                         setPage(1)
                         setShowCustomPopover(false)
                       }}
-                      className={`whitespace-nowrap px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
+                      className={`whitespace-nowrap px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
                         timeRange === key
                           ? 'bg-background text-foreground shadow-sm border border-border'
                           : 'text-muted-foreground hover:text-foreground'
@@ -1570,7 +1570,7 @@ export default function Usage() {
                     ref={customChipRef}
                     type="button"
                     onClick={() => setShowCustomPopover((v) => !v)}
-                    className={`whitespace-nowrap px-2.5 py-1 text-xs font-medium rounded-md transition-all duration-200 ${
+                    className={`whitespace-nowrap px-2.5 py-1.5 text-xs font-medium rounded-lg transition-all duration-200 ${
                       timeRange === 'custom'
                         ? 'bg-background text-foreground shadow-sm border border-border'
                         : 'text-muted-foreground hover:text-foreground'
@@ -1630,7 +1630,7 @@ export default function Usage() {
             </div>
 
             {/* 筛选栏 */}
-            <div className="toolbar-surface mb-4 flex items-center gap-2 overflow-visible whitespace-nowrap max-lg:overflow-x-auto">
+            <div className="toolbar-surface mb-4 flex flex-wrap items-center gap-2 overflow-visible max-lg:gap-1.5">
               {/* 搜索框 */}
               <div className="relative w-60 shrink-0 max-sm:w-full">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 size-3.5 text-muted-foreground pointer-events-none" />
@@ -1759,7 +1759,124 @@ export default function Usage() {
               emptyTitle={t('usage.emptyTitle')}
               emptyDescription={hasActiveFilters ? t('usage.emptyFilteredDesc') : t('usage.emptyDesc')}
             >
-              <div className="data-table-shell">
+              {/* Mobile log cards */}
+              <TooltipProvider>
+              <div className="grid gap-3 lg:hidden">
+                {logs.map((log: UsageLog) => {
+                  const durationLabel = log.duration_ms > 1000
+                    ? `${(log.duration_ms / 1000).toFixed(1)}s`
+                    : `${log.duration_ms}ms`
+                  const firstTokenLabel = log.first_token_ms > 0
+                    ? (log.first_token_ms > 1000
+                      ? `${(log.first_token_ms / 1000).toFixed(1)}s`
+                      : `${log.first_token_ms}ms`)
+                    : null
+                  return (
+                    <div
+                      key={log.id}
+                      className="rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+                          <StatusCodeBadge log={log} />
+                          {log.via_websocket ? (
+                            <Badge
+                              variant="outline"
+                              className="border-transparent bg-cyan-500/12 text-[11px] font-semibold uppercase text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400"
+                            >
+                              ws
+                            </Badge>
+                          ) : null}
+                          <Badge variant="outline" className={usageTableBadgeClass}>
+                            {log.model || '-'}
+                          </Badge>
+                          {isFastTier(log.billing_service_tier || log.service_tier) ? (
+                            <Badge
+                              variant="outline"
+                              className="gap-0.5 border-transparent bg-blue-500/12 text-[11px] font-semibold text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
+                            >
+                              <Zap className="size-3" />
+                              Fast
+                            </Badge>
+                          ) : null}
+                          <Badge
+                            variant="outline"
+                            className={usageTableBadgeClass}
+                            style={{
+                              background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)',
+                              color: log.stream ? '#6366f1' : '#6b7280',
+                              borderColor: 'transparent',
+                            }}
+                          >
+                            {log.stream ? 'stream' : 'sync'}
+                          </Badge>
+                        </div>
+                        <div className="shrink-0 text-right text-[11px] tabular-nums text-muted-foreground">
+                          {formatBeijingTime(log.created_at)}
+                        </div>
+                      </div>
+
+                      <div className="mt-2.5 space-y-1 text-xs text-muted-foreground">
+                        <div className="truncate" title={formatUsageAccountTitle(log)}>
+                          <span className="font-semibold text-foreground/80">{t('usage.tableAccount')}: </span>
+                          {formatUsageAccountLabel(log)}
+                        </div>
+                        <div className="truncate font-mono">
+                          <span className="font-sans font-semibold text-foreground/80">{t('usage.tableEndpoint')}: </span>
+                          {log.inbound_endpoint || log.endpoint || '-'}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableToken')}</div>
+                          <div className="mt-1 font-mono tabular-nums">
+                            {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
+                              <>
+                                <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
+                                <span className="mx-0.5 text-border">/</span>
+                                <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
+                              </>
+                            ) : (
+                              <span className="text-muted-foreground">-</span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableCost')}</div>
+                          <div className="mt-1">
+                            <UsageCostCell log={log} />
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableDuration')}</div>
+                          <div className={`mt-1 font-mono tabular-nums ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-foreground'}`}>
+                            {durationLabel}
+                          </div>
+                        </div>
+                        <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                          <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableFirstToken')}</div>
+                          <div className={`mt-1 font-mono tabular-nums ${
+                            !firstTokenLabel
+                              ? 'text-muted-foreground'
+                              : log.first_token_ms > 5000
+                                ? 'text-red-500'
+                                : log.first_token_ms > 2000
+                                  ? 'text-amber-500'
+                                  : 'text-emerald-500'
+                          }`}>
+                            {firstTokenLabel || '-'}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  )
+                })}
+              </div>
+              </TooltipProvider>
+
+              {/* Desktop table */}
+              <div className="data-table-shell hidden lg:block">
                 <TooltipProvider>
                 <Table>
                   <TableHeader>

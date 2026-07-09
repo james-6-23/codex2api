@@ -71,7 +71,7 @@ export default function Operations() {
 
         {overview ? (
           <>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-4 mb-6">
+            <div className="mb-6 grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4 sm:gap-4">
               <SummaryPill label={t('ops.uptime')} value={formatUptime(overview.uptime_seconds, t)} />
               <SummaryPill label={t('ops.accountPool')} value={`${overview.runtime.available_accounts} / ${overview.runtime.total_accounts}`} />
               <SummaryPill label={t('ops.todayRequests')} value={formatNumber(overview.traffic.today_requests)} />

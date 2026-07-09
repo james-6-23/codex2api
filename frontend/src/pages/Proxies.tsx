@@ -502,10 +502,10 @@ export default function Proxies() {
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-3 gap-4">
+      <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-3 sm:gap-4">
         <Card className="py-0">
           <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold text-foreground">
+            <div className="text-2xl font-bold tabular-nums text-foreground">
               {proxies.length}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
@@ -515,7 +515,7 @@ export default function Proxies() {
         </Card>
         <Card className="py-0">
           <CardContent className="p-4 text-center">
-            <div className="text-2xl font-bold text-emerald-600 dark:text-emerald-400">
+            <div className="text-2xl font-bold tabular-nums text-emerald-600 dark:text-emerald-400">
               {enabledCount}
             </div>
             <div className="text-xs text-muted-foreground mt-1">
@@ -552,7 +552,127 @@ export default function Proxies() {
             </div>
           ) : (
             <>
-              <div className="data-table-shell">
+              {/* Mobile cards */}
+              <div className="grid gap-3 p-3 lg:hidden">
+                {pagedProxies.map((p) => {
+                  const isTesting = testingIds.has(p.id);
+                  return (
+                    <div
+                      key={p.id}
+                      className="rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
+                    >
+                      <div className="flex items-start gap-2.5">
+                        <input
+                          type="checkbox"
+                          checked={selected.has(p.id)}
+                          onChange={() => {
+                            const next = new Set(selected);
+                            if (next.has(p.id)) next.delete(p.id);
+                            else next.add(p.id);
+                            setSelected(next);
+                          }}
+                          className="mt-1 size-4 rounded"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-start gap-2">
+                            <button
+                              onClick={() => {
+                                setRevealedIds((prev) => {
+                                  const next = new Set(prev);
+                                  if (next.has(p.id)) next.delete(p.id);
+                                  else next.add(p.id);
+                                  return next;
+                                });
+                              }}
+                              className="flex size-9 shrink-0 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                              title={
+                                revealedIds.has(p.id)
+                                  ? t("proxies.hideProxyUrl")
+                                  : t("proxies.showProxyUrl")
+                              }
+                            >
+                              {revealedIds.has(p.id) ? (
+                                <EyeOff className="size-3.5" />
+                              ) : (
+                                <Eye className="size-3.5" />
+                              )}
+                            </button>
+                            <span className="min-w-0 flex-1 break-all font-mono text-[12px] font-medium leading-relaxed text-foreground">
+                              {revealedIds.has(p.id) ? p.url : maskUrl(p.url)}
+                            </span>
+                          </div>
+
+                          <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                            <button
+                              onClick={() => handleToggle(p)}
+                              className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-semibold transition-all ${
+                                p.enabled
+                                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
+                                  : "border-border bg-muted/50 text-muted-foreground"
+                              }`}
+                            >
+                              <span
+                                className={`size-1.5 rounded-full ${p.enabled ? "bg-emerald-500" : "bg-muted-foreground/50"}`}
+                              />
+                              {p.enabled
+                                ? t("proxies.enabled")
+                                : t("proxies.disabled")}
+                            </button>
+                            {p.test_latency_ms > 0 ? (
+                              <span
+                                className={`inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${latencyColor(p.test_latency_ms)} ${latencyBg(p.test_latency_ms)}`}
+                              >
+                                {p.test_latency_ms}ms
+                              </span>
+                            ) : null}
+                            {isTesting ? (
+                              <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                            ) : p.test_location ? (
+                              <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                                <MapPin className="size-3 text-primary" />
+                                {p.test_location}
+                                {p.test_ip ? ` · ${p.test_ip}` : ""}
+                              </span>
+                            ) : null}
+                          </div>
+
+                          <div className="mt-3 flex flex-wrap gap-1.5">
+                            <button
+                              onClick={() => startEdit(p)}
+                              className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-foreground hover:bg-muted/50"
+                            >
+                              <Pencil className="size-3.5" />
+                              {t("proxies.editProxy")}
+                            </button>
+                            <button
+                              onClick={() => handleTest(p)}
+                              disabled={isTesting}
+                              className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-foreground hover:bg-muted/50 disabled:opacity-50"
+                            >
+                              {isTesting ? (
+                                <Loader2 className="size-3.5 animate-spin" />
+                              ) : (
+                                <Play className="size-3.5" />
+                              )}
+                              {t("proxies.test")}
+                            </button>
+                            <button
+                              onClick={() => handleDelete(p.id)}
+                              className="inline-flex min-h-9 items-center justify-center rounded-lg px-2.5 text-destructive hover:bg-destructive/10"
+                              title={t("common.delete")}
+                            >
+                              <Trash2 className="size-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              {/* Desktop table */}
+              <div className="data-table-shell hidden lg:block">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="border-b border-border text-left text-muted-foreground">
@@ -732,7 +852,7 @@ export default function Proxies() {
 
               {/* Pagination */}
               {totalPages > 1 && (
-                <div className="flex items-center justify-between px-4 py-3 border-t border-border">
+                <div className="flex flex-col gap-2 px-4 py-3 border-t border-border sm:flex-row sm:items-center sm:justify-between">
                   <span className="text-xs text-muted-foreground">
                     {t("proxies.pagination", {
                       total: proxies.length,
@@ -744,7 +864,7 @@ export default function Proxies() {
                     <button
                       onClick={() => setPage((p) => Math.max(1, p - 1))}
                       disabled={page <= 1}
-                      className="flex items-center justify-center size-8 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
+                      className="flex items-center justify-center size-9 rounded-lg border border-border text-foreground hover:bg-muted/50 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
                     >
                       <ChevronLeft className="size-4" />
                     </button>

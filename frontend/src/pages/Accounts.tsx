@@ -89,6 +89,7 @@ import {
   ArrowLeft,
   ToggleLeft,
   ToggleRight,
+  MoreHorizontal,
 } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import AccountUsageModal from "../components/AccountUsageModal";
@@ -3653,157 +3654,305 @@ export default function Accounts() {
               />
             }
             actions={
-              <div className="flex flex-wrap items-center justify-end gap-1.5">
-                <Button
-                  variant="outline"
-                  aria-pressed={showAnalysisCharts}
-                  onClick={() => setShowAnalysisCharts((visible) => !visible)}
-                  className="max-sm:w-full"
-                >
-                  <BarChart3 className="size-3.5" />
-                  {showAnalysisCharts
-                    ? t("accounts.hideAnalysisCharts")
-                    : t("accounts.showAnalysisCharts")}
-                </Button>
-                <HeaderActionMenu
-                  label={t("accounts.maintenanceActions")}
-                  icon={<Zap className="size-3.5" />}
-                  items={[
-                    {
-                      key: "refresh-tokens",
-                      label: t("accounts.refreshTokens"),
-                      icon: (
-                        <RefreshCw
-                          className={`size-3.5 ${batchRefreshing ? "animate-spin" : ""}`}
-                        />
-                      ),
-                      disabled:
-                        batchLoading || batchTesting || accounts.length === 0,
-                      onSelect: () =>
-                        void handleBatchRefresh(
-                          accounts.map((account) => account.id),
+              <>
+                {/* Desktop / tablet: full action strip */}
+                <div className="hidden flex-wrap items-center justify-end gap-1.5 sm:flex">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    aria-pressed={showAnalysisCharts}
+                    onClick={() => setShowAnalysisCharts((visible) => !visible)}
+                  >
+                    <BarChart3 className="size-3.5" />
+                    {showAnalysisCharts
+                      ? t("accounts.hideAnalysisCharts")
+                      : t("accounts.showAnalysisCharts")}
+                  </Button>
+                  <HeaderActionMenu
+                    label={t("accounts.maintenanceActions")}
+                    icon={<Zap className="size-3.5" />}
+                    items={[
+                      {
+                        key: "refresh-tokens",
+                        label: t("accounts.refreshTokens"),
+                        icon: (
+                          <RefreshCw
+                            className={`size-3.5 ${batchRefreshing ? "animate-spin" : ""}`}
+                          />
                         ),
-                    },
-                    {
-                      key: "test-connection",
-                      label: batchTesting
-                        ? t("accounts.batchTesting")
-                        : t("accounts.testConnection"),
-                      icon: <FlaskConical className="size-3.5" />,
-                      disabled:
-                        batchLoading || batchTesting || accounts.length === 0,
-                      onSelect: () => void handleBatchTest(),
-                    },
-                    {
-                      key: "lock-subscription",
-                      label: lockingSubscriptionAccounts
-                        ? t("accounts.lockingSubscriptionAccounts")
-                        : t("accounts.lockSubscriptionAccounts"),
-                      icon: <Lock className="size-3.5" />,
-                      disabled:
-                        batchLoading ||
-                        batchTesting ||
-                        lockingSubscriptionAccounts ||
-                        accounts.length === 0,
-                      title: t("accounts.lockSubscriptionAccountsHint", {
-                        count: subscriptionAccountsToLock.length,
-                      }),
-                      onSelect: () => void handleLockSubscriptionAccounts(),
-                    },
-                  ]}
-                />
-                <HeaderActionMenu
-                  label={t("accounts.cleanupActions")}
-                  icon={<Trash2 className="size-3.5" />}
-                  items={[
-                    {
-                      key: "clean-banned",
-                      label: cleaningBanned
-                        ? t("accounts.cleaning")
-                        : t("accounts.cleanBanned"),
-                      icon: <Ban className="size-3.5" />,
-                      disabled: cleaningBanned,
-                      onSelect: () => void handleCleanBanned(),
-                    },
-                    {
-                      key: "clean-rate-limited",
-                      label: cleaningRateLimited
-                        ? t("accounts.cleaning")
-                        : t("accounts.cleanRateLimited"),
-                      icon: <Timer className="size-3.5" />,
-                      disabled: cleaningRateLimited,
-                      onSelect: () => void handleCleanRateLimited(),
-                    },
-                    {
-                      key: "clean-error",
-                      label: cleaningError
-                        ? t("accounts.cleaning")
-                        : t("accounts.cleanError"),
-                      icon: <AlertTriangle className="size-3.5" />,
-                      disabled: cleaningError,
-                      onSelect: () => void handleCleanError(),
-                    },
-                  ]}
-                />
-                <HeaderActionMenu
-                  label={t("accounts.dataActions")}
-                  icon={<FolderOpen className="size-3.5" />}
-                  items={[
-                    {
-                      key: "import",
-                      label: importing
-                        ? t("accounts.importing")
-                        : t("accounts.importFile"),
-                      icon: <Upload className="size-3.5" />,
-                      disabled: importing,
-                      onSelect: () => setShowImportPicker(true),
-                    },
-                    {
-                      key: "export",
-                      label: exporting
-                        ? t("accounts.exporting")
-                        : t("accounts.export"),
-                      icon: <Download className="size-3.5" />,
-                      disabled: exporting,
-                      onSelect: () => setShowExportPicker(true),
-                    },
-                    {
-                      key: "migrate",
-                      label: migrating
-                        ? t("accounts.migrating")
-                        : t("accounts.migrateImport"),
-                      icon: <ArrowDownToLine className="size-3.5" />,
-                      disabled: migrating,
-                      onSelect: () => setShowMigrate(true),
-                    },
-                    {
-                      key: "sub2api",
-                      label: t("accounts.sub2api.entry"),
-                      icon: <Cloud className="size-3.5" />,
-                      onSelect: () => setShowSub2APIImport(true),
-                    },
-                  ]}
-                />
-                <Button
-                  variant="outline"
-                  onClick={() => setShowRecycleBin(true)}
-                  className="max-sm:w-full"
-                >
-                  <Recycle className="size-3.5" />
-                  {t("accounts.recycleBin")}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => setShowInvite(true)}
-                  className="max-sm:w-full"
-                >
-                  <Mail className="size-3.5" />
-                  {t("invite.entry")}
-                </Button>
-                <Button onClick={() => setShowAdd(true)}>
-                  <Plus className="size-3.5" />
-                  {t("accounts.addAccount")}
-                </Button>
+                        disabled:
+                          batchLoading || batchTesting || accounts.length === 0,
+                        onSelect: () =>
+                          void handleBatchRefresh(
+                            accounts.map((account) => account.id),
+                          ),
+                      },
+                      {
+                        key: "test-connection",
+                        label: batchTesting
+                          ? t("accounts.batchTesting")
+                          : t("accounts.testConnection"),
+                        icon: <FlaskConical className="size-3.5" />,
+                        disabled:
+                          batchLoading || batchTesting || accounts.length === 0,
+                        onSelect: () => void handleBatchTest(),
+                      },
+                      {
+                        key: "lock-subscription",
+                        label: lockingSubscriptionAccounts
+                          ? t("accounts.lockingSubscriptionAccounts")
+                          : t("accounts.lockSubscriptionAccounts"),
+                        icon: <Lock className="size-3.5" />,
+                        disabled:
+                          batchLoading ||
+                          batchTesting ||
+                          lockingSubscriptionAccounts ||
+                          accounts.length === 0,
+                        title: t("accounts.lockSubscriptionAccountsHint", {
+                          count: subscriptionAccountsToLock.length,
+                        }),
+                        onSelect: () => void handleLockSubscriptionAccounts(),
+                      },
+                    ]}
+                  />
+                  <HeaderActionMenu
+                    label={t("accounts.cleanupActions")}
+                    icon={<Trash2 className="size-3.5" />}
+                    items={[
+                      {
+                        key: "clean-banned",
+                        label: cleaningBanned
+                          ? t("accounts.cleaning")
+                          : t("accounts.cleanBanned"),
+                        icon: <Ban className="size-3.5" />,
+                        disabled: cleaningBanned,
+                        onSelect: () => void handleCleanBanned(),
+                      },
+                      {
+                        key: "clean-rate-limited",
+                        label: cleaningRateLimited
+                          ? t("accounts.cleaning")
+                          : t("accounts.cleanRateLimited"),
+                        icon: <Timer className="size-3.5" />,
+                        disabled: cleaningRateLimited,
+                        onSelect: () => void handleCleanRateLimited(),
+                      },
+                      {
+                        key: "clean-error",
+                        label: cleaningError
+                          ? t("accounts.cleaning")
+                          : t("accounts.cleanError"),
+                        icon: <AlertTriangle className="size-3.5" />,
+                        disabled: cleaningError,
+                        onSelect: () => void handleCleanError(),
+                      },
+                    ]}
+                  />
+                  <HeaderActionMenu
+                    label={t("accounts.dataActions")}
+                    icon={<FolderOpen className="size-3.5" />}
+                    items={[
+                      {
+                        key: "import",
+                        label: importing
+                          ? t("accounts.importing")
+                          : t("accounts.importFile"),
+                        icon: <Upload className="size-3.5" />,
+                        disabled: importing,
+                        onSelect: () => setShowImportPicker(true),
+                      },
+                      {
+                        key: "export",
+                        label: exporting
+                          ? t("accounts.exporting")
+                          : t("accounts.export"),
+                        icon: <Download className="size-3.5" />,
+                        disabled: exporting,
+                        onSelect: () => setShowExportPicker(true),
+                      },
+                      {
+                        key: "migrate",
+                        label: migrating
+                          ? t("accounts.migrating")
+                          : t("accounts.migrateImport"),
+                        icon: <ArrowDownToLine className="size-3.5" />,
+                        disabled: migrating,
+                        onSelect: () => setShowMigrate(true),
+                      },
+                      {
+                        key: "sub2api",
+                        label: t("accounts.sub2api.entry"),
+                        icon: <Cloud className="size-3.5" />,
+                        onSelect: () => setShowSub2APIImport(true),
+                      },
+                    ]}
+                  />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowRecycleBin(true)}
+                  >
+                    <Recycle className="size-3.5" />
+                    {t("accounts.recycleBin")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setShowInvite(true)}
+                  >
+                    <Mail className="size-3.5" />
+                    {t("invite.entry")}
+                  </Button>
+                  <Button size="sm" onClick={() => setShowAdd(true)}>
+                    <Plus className="size-3.5" />
+                    {t("accounts.addAccount")}
+                  </Button>
+                </div>
+
+                {/* Mobile: primary + overflow menu */}
+                <div className="flex w-full items-center gap-1.5 sm:hidden">
+                  <Button
+                    size="sm"
+                    className="min-w-0 flex-1"
+                    onClick={() => setShowAdd(true)}
+                  >
+                    <Plus className="size-3.5" />
+                    {t("accounts.addAccount")}
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="shrink-0"
+                    aria-pressed={showAnalysisCharts}
+                    onClick={() => setShowAnalysisCharts((visible) => !visible)}
+                    title={
+                      showAnalysisCharts
+                        ? t("accounts.hideAnalysisCharts")
+                        : t("accounts.showAnalysisCharts")
+                    }
+                  >
+                    <BarChart3 className="size-3.5" />
+                  </Button>
+                  <HeaderActionMenu
+                    label={t("common.more")}
+                    icon={<MoreHorizontal className="size-3.5" />}
+                    align="end"
+                    compact
+                    items={[
+                      {
+                        key: "refresh-tokens",
+                        label: t("accounts.refreshTokens"),
+                        icon: (
+                          <RefreshCw
+                            className={`size-3.5 ${batchRefreshing ? "animate-spin" : ""}`}
+                          />
+                        ),
+                        disabled:
+                          batchLoading || batchTesting || accounts.length === 0,
+                        onSelect: () =>
+                          void handleBatchRefresh(
+                            accounts.map((account) => account.id),
+                          ),
+                      },
+                      {
+                        key: "test-connection",
+                        label: batchTesting
+                          ? t("accounts.batchTesting")
+                          : t("accounts.testConnection"),
+                        icon: <FlaskConical className="size-3.5" />,
+                        disabled:
+                          batchLoading || batchTesting || accounts.length === 0,
+                        onSelect: () => void handleBatchTest(),
+                      },
+                      {
+                        key: "lock-subscription",
+                        label: lockingSubscriptionAccounts
+                          ? t("accounts.lockingSubscriptionAccounts")
+                          : t("accounts.lockSubscriptionAccounts"),
+                        icon: <Lock className="size-3.5" />,
+                        disabled:
+                          batchLoading ||
+                          batchTesting ||
+                          lockingSubscriptionAccounts ||
+                          accounts.length === 0,
+                        onSelect: () => void handleLockSubscriptionAccounts(),
+                      },
+                      {
+                        key: "clean-banned",
+                        label: cleaningBanned
+                          ? t("accounts.cleaning")
+                          : t("accounts.cleanBanned"),
+                        icon: <Ban className="size-3.5" />,
+                        disabled: cleaningBanned,
+                        onSelect: () => void handleCleanBanned(),
+                      },
+                      {
+                        key: "clean-rate-limited",
+                        label: cleaningRateLimited
+                          ? t("accounts.cleaning")
+                          : t("accounts.cleanRateLimited"),
+                        icon: <Timer className="size-3.5" />,
+                        disabled: cleaningRateLimited,
+                        onSelect: () => void handleCleanRateLimited(),
+                      },
+                      {
+                        key: "clean-error",
+                        label: cleaningError
+                          ? t("accounts.cleaning")
+                          : t("accounts.cleanError"),
+                        icon: <AlertTriangle className="size-3.5" />,
+                        disabled: cleaningError,
+                        onSelect: () => void handleCleanError(),
+                      },
+                      {
+                        key: "import",
+                        label: importing
+                          ? t("accounts.importing")
+                          : t("accounts.importFile"),
+                        icon: <Upload className="size-3.5" />,
+                        disabled: importing,
+                        onSelect: () => setShowImportPicker(true),
+                      },
+                      {
+                        key: "export",
+                        label: exporting
+                          ? t("accounts.exporting")
+                          : t("accounts.export"),
+                        icon: <Download className="size-3.5" />,
+                        disabled: exporting,
+                        onSelect: () => setShowExportPicker(true),
+                      },
+                      {
+                        key: "migrate",
+                        label: migrating
+                          ? t("accounts.migrating")
+                          : t("accounts.migrateImport"),
+                        icon: <ArrowDownToLine className="size-3.5" />,
+                        disabled: migrating,
+                        onSelect: () => setShowMigrate(true),
+                      },
+                      {
+                        key: "sub2api",
+                        label: t("accounts.sub2api.entry"),
+                        icon: <Cloud className="size-3.5" />,
+                        onSelect: () => setShowSub2APIImport(true),
+                      },
+                      {
+                        key: "recycle",
+                        label: t("accounts.recycleBin"),
+                        icon: <Recycle className="size-3.5" />,
+                        onSelect: () => setShowRecycleBin(true),
+                      },
+                      {
+                        key: "invite",
+                        label: t("invite.entry"),
+                        icon: <Mail className="size-3.5" />,
+                        onSelect: () => setShowInvite(true),
+                      },
+                    ]}
+                  />
+                </div>
+
                 <input
                   ref={fileInputRef}
                   type="file"
@@ -3846,11 +3995,11 @@ export default function Accounts() {
                     directory: "",
                   } as React.InputHTMLAttributes<HTMLInputElement>)}
                 />
-              </div>
+              </>
             }
           />
 
-          <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+          <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-4">
             <CompactStat
               label={t("accounts.totalAccounts")}
               chipLabel={t("accounts.filterAll")}
@@ -3911,9 +4060,9 @@ export default function Accounts() {
             </div>
           ) : null}
 
-          <div className="mb-3 grid gap-3 @min-[1600px]/accounts:grid-cols-[minmax(0,1fr)_max-content]">
-            <div className="toolbar-surface flex flex-wrap items-center gap-1.5 overflow-visible @min-[1600px]/accounts:flex-nowrap">
-              <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
+          <div className="mb-3 grid gap-2 sm:gap-3 @min-[1600px]/accounts:grid-cols-[minmax(0,1fr)_max-content]">
+            <div className="toolbar-surface flex items-center gap-1.5 overflow-x-auto overflow-y-visible [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden @min-[1600px]/accounts:flex-nowrap">
+              <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
                 {t("accounts.filter")}
               </span>
               {(
@@ -3935,7 +4084,7 @@ export default function Accounts() {
                     setStatusFilter(key);
                     setPage(1);
                   }}
-                  className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1 font-semibold transition-colors ${
+                  className={`shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[12px] font-semibold transition-colors ${
                     statusFilter === key
                       ? "bg-primary text-primary-foreground"
                       : "bg-muted/50 text-muted-foreground hover:bg-muted"
@@ -3963,8 +4112,8 @@ export default function Accounts() {
               ))}
             </div>
 
-            <div className="toolbar-surface flex flex-wrap items-center gap-1.5 overflow-visible @min-[1600px]/accounts:flex-nowrap">
-              <span className="shrink-0 whitespace-nowrap font-semibold text-foreground">
+            <div className="toolbar-surface flex items-center gap-1.5 overflow-x-auto overflow-y-visible [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden @min-[1600px]/accounts:flex-nowrap">
+              <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
                 {t("accounts.schedulerView")}
               </span>
               <SchedulerChip
@@ -3990,11 +4139,11 @@ export default function Accounts() {
             </div>
           </div>
 
-          <div className="mb-4 flex flex-wrap items-center gap-2 overflow-visible @min-[1600px]/accounts:flex-nowrap">
-            <div className="relative w-64 shrink-0 max-sm:w-full">
-              <Search className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+          <div className="mb-4 flex flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="relative w-full shrink-0 sm:w-64">
+              <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
               <Input
-                className="pl-9 h-8 rounded-lg text-[13px]"
+                className="h-9 rounded-lg pl-9 text-[13px] sm:h-8"
                 placeholder={t("accounts.searchPlaceholder")}
                 value={searchQuery}
                 onChange={(e: ChangeEvent<HTMLInputElement>) => {
@@ -4003,7 +4152,7 @@ export default function Accounts() {
                 }}
               />
             </div>
-            <div className="flex shrink-0 items-center gap-1 rounded-lg border border-border bg-muted/30 p-0.5 max-sm:w-full max-sm:flex-wrap">
+            <div className="flex max-w-full shrink-0 items-center gap-1 overflow-x-auto rounded-lg border border-border bg-muted/30 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
               {(
                 ["all", "pro", "prolite", "plus", "team", "k12", "free"] as const
               ).map(
@@ -4014,7 +4163,7 @@ export default function Accounts() {
                       setPlanFilter(key);
                       setPage(1);
                     }}
-                    className={`whitespace-nowrap rounded-md px-2.5 py-1 text-[12px] font-medium transition-colors ${
+                    className={`shrink-0 whitespace-nowrap rounded-md px-2.5 py-1.5 text-[12px] font-medium transition-colors ${
                       planFilter === key
                         ? "bg-background shadow-sm text-foreground"
                         : "text-muted-foreground hover:text-foreground"
@@ -4031,8 +4180,9 @@ export default function Accounts() {
                 ),
               )}
             </div>
+            <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center sm:gap-2">
             <Select
-              className="w-36 shrink-0"
+              className="w-full min-w-0 sm:w-36"
               compact
               value={tagFilter || "all"}
               onValueChange={(value) => {
@@ -4045,7 +4195,7 @@ export default function Accounts() {
               ]}
             />
             <Select
-              className="w-64 shrink-0"
+              className="w-full min-w-0 sm:w-52 lg:w-64"
               compact
               value={domainFilter || "all"}
               onValueChange={(value) => {
@@ -4069,7 +4219,7 @@ export default function Accounts() {
               type="button"
               variant="outline"
               size="sm"
-              className="shrink-0"
+              className="min-w-0"
               aria-pressed={showEmailDomainTags}
               onClick={() => setShowEmailDomainTags((visible) => !visible)}
             >
@@ -4078,12 +4228,14 @@ export default function Accounts() {
               ) : (
                 <Eye className="size-3.5" />
               )}
-              {showEmailDomainTags
-                ? t("accounts.hideEmailDomainTags")
-                : t("accounts.showEmailDomainTags")}
+              <span className="truncate">
+                {showEmailDomainTags
+                  ? t("accounts.hideEmailDomainTags")
+                  : t("accounts.showEmailDomainTags")}
+              </span>
             </Button>
             <AccountGroupFilterSelect
-              className="w-40 shrink-0"
+              className="w-full min-w-0 sm:w-40"
               groups={allGroups}
               value={groupFilter}
               onChange={(value) => {
@@ -4095,12 +4247,13 @@ export default function Accounts() {
               type="button"
               variant="outline"
               size="sm"
-              className="shrink-0"
+              className="min-w-0"
               onClick={() => setShowGroupManager(true)}
             >
               <FolderOpen className="size-3.5" />
-              {t("accounts.groupManage")}
+              <span className="truncate">{t("accounts.groupManage")}</span>
             </Button>
+            </div>
             {!isPersonalMode && (
             <div className="flex w-full shrink-0 items-center gap-1.5 @min-[1600px]/accounts:ml-auto @min-[1600px]/accounts:w-auto">
               <div className="hidden lg:inline-flex items-center rounded-md border border-border bg-muted/50 p-0.5">
@@ -7419,20 +7572,20 @@ function RecycleBinView({
         description={t("accounts.recycleBinDesc")}
         onRefresh={() => void load()}
         actions={
-          <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5 sm:justify-end">
             <Button
               variant="outline"
+              size="sm"
               onClick={onClose}
-              className="max-sm:w-full"
             >
               <ArrowLeft className="size-3.5" />
               {t("accounts.recycleBinBack")}
             </Button>
             <Button
               variant="outline"
+              size="sm"
               aria-pressed={autoRestore}
               onClick={toggleAutoRestore}
-              className="max-sm:w-full"
               title={t("accounts.recycleBinAutoRestoreHint")}
             >
               {autoRestore ? (
@@ -7440,29 +7593,31 @@ function RecycleBinView({
               ) : (
                 <ToggleLeft className="size-4 text-muted-foreground" />
               )}
-              {t("accounts.recycleBinAutoRestore")}
+              <span className="max-sm:hidden">{t("accounts.recycleBinAutoRestore")}</span>
             </Button>
             <Button
               variant="outline"
+              size="sm"
               disabled={busy || loading || rows.length === 0}
               onClick={() => void handleBatchTestRun()}
-              className="max-sm:w-full"
             >
               <FlaskConical
                 className={`size-3.5 ${batchTesting ? "animate-pulse" : ""}`}
               />
-              {batchTesting
-                ? t("accounts.batchTesting")
-                : t("accounts.recycleBinTestAll")}
+              <span className="max-sm:hidden">
+                {batchTesting
+                  ? t("accounts.batchTesting")
+                  : t("accounts.recycleBinTestAll")}
+              </span>
             </Button>
             <Button
               variant="destructive"
+              size="sm"
               disabled={busy || loading || rows.length === 0}
               onClick={openEmptyConfirm}
-              className="max-sm:w-full"
             >
               <Trash2 className="size-3.5" />
-              {t("accounts.recycleBinEmptyBin")}
+              <span className="max-sm:hidden">{t("accounts.recycleBinEmptyBin")}</span>
             </Button>
           </div>
         }
@@ -8419,10 +8574,14 @@ function HeaderActionMenu({
   label,
   icon,
   items,
+  align = "end",
+  compact = false,
 }: {
   label: string;
   icon: ReactNode;
   items: HeaderActionMenuItem[];
+  align?: "start" | "end";
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -8452,24 +8611,34 @@ function HeaderActionMenu({
   }, [open]);
 
   return (
-    <div ref={rootRef} className="relative">
+    <div ref={rootRef} className="relative shrink-0">
       <Button
         type="button"
         variant="outline"
         size="sm"
         aria-haspopup="menu"
         aria-expanded={open}
+        aria-label={label}
         onClick={() => setOpen((current) => !current)}
+        className={compact ? "px-2.5" : undefined}
       >
         {icon}
-        {label}
-        <ChevronDown
-          className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
-        />
+        {!compact ? (
+          <>
+            {label}
+            <ChevronDown
+              className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
+            />
+          </>
+        ) : null}
       </Button>
 
       {open ? (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-56 overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm">
+        <div
+          className={`absolute top-[calc(100%+0.5rem)] z-50 max-h-[min(70dvh,420px)] w-[min(18rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-xl border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm ${
+            align === "start" ? "left-0" : "right-0"
+          }`}
+        >
           <div role="menu" className="space-y-0.5">
             {items.map((item) => (
               <button
@@ -8478,7 +8647,7 @@ function HeaderActionMenu({
                 role="menuitem"
                 disabled={item.disabled}
                 title={item.title}
-                className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
+                className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2.5 text-left text-sm text-foreground transition-colors hover:bg-accent/70 disabled:cursor-not-allowed disabled:opacity-50"
                 onClick={() => {
                   if (item.disabled) return;
                   setOpen(false);
@@ -8832,21 +9001,21 @@ function CompactStat({
   }[tone];
 
   return (
-    <div className="flex min-h-[88px] items-center justify-between gap-3 rounded-lg border border-border bg-card/85 px-3 py-2.5 shadow-sm">
+    <div className="flex min-h-[76px] items-center justify-between gap-2 rounded-xl border border-border bg-card/85 px-2.5 py-2 shadow-sm sm:min-h-[88px] sm:gap-3 sm:px-3 sm:py-2.5">
       <div className="min-w-0">
-        <div className="text-[12px] font-semibold text-muted-foreground">
+        <div className="truncate text-[11px] font-semibold text-muted-foreground sm:text-[12px]">
           {label}
         </div>
-        <div className="mt-1 text-[24px] font-bold leading-none text-foreground">
+        <div className="mt-1 text-[22px] font-bold leading-none tabular-nums text-foreground sm:text-[24px]">
           {value}
         </div>
       </div>
-      <div className="flex min-h-[58px] shrink-0 flex-col items-end gap-1.5">
+      <div className="flex min-h-[52px] shrink-0 flex-col items-end gap-1 sm:min-h-[58px] sm:gap-1.5">
         <div
-          className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] font-semibold ${toneStyle.chip}`}
+          className={`inline-flex items-center gap-1.5 rounded-md px-1.5 py-0.5 text-[11px] font-semibold sm:px-2 sm:py-1 sm:text-[12px] ${toneStyle.chip}`}
         >
-          <span className={`size-2 rounded-full ${toneStyle.dot}`} />
-          {chipLabel ?? label}
+          <span className={`size-1.5 rounded-full sm:size-2 ${toneStyle.dot}`} />
+          <span className="max-w-[4.5rem] truncate sm:max-w-none">{chipLabel ?? label}</span>
         </div>
         {details && details.length > 0 && (
           <div className="flex flex-col items-end gap-0.5 text-[11px] font-semibold leading-4 text-muted-foreground">

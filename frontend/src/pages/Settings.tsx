@@ -345,53 +345,66 @@ function ModelMappingEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="grid shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground">
+      <div className="hidden shrink-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] gap-1.5 px-1 text-xs font-semibold text-muted-foreground sm:grid">
         <span>{sourceLabel}</span>
         <span>{targetLabel}</span>
         <span />
       </div>
-      <div className="min-h-[180px] flex-1 space-y-1.5 overflow-y-auto pr-1">
+      <div className="min-h-[180px] flex-1 space-y-2 overflow-y-auto pr-0.5 sm:space-y-1.5 sm:pr-1">
         {mappings.map(([k, v], i) => (
-          <div key={i} className="grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] items-center gap-1.5">
-            {sourceOptions ? (
-              <Select
-                compact
-                value={k.trim()}
-                options={sourceSelectOptions}
-                placeholder={sourcePlaceholder}
-                disabled={sourceSelectOptions.length === 0}
-                onValueChange={(next) => handleChange(i, 0, next)}
-              />
-            ) : (
-              <Input
-                className="h-8 px-2 font-mono text-xs"
-                placeholder={sourcePlaceholder}
-                value={k}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
-              />
-            )}
-            {targetOptions ? (
-              <Select
-                compact
-                value={v.trim()}
-                options={targetSelectOptions}
-                placeholder={targetPlaceholder}
-                disabled={targetSelectOptions.length === 0}
-                onValueChange={(next) => handleChange(i, 1, next)}
-              />
-            ) : (
-              <Input
-                className="h-8 px-2 font-mono text-xs"
-                placeholder={targetPlaceholder}
-                value={v}
-                onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
-              />
-            )}
+          <div
+            key={i}
+            className="grid grid-cols-1 gap-2 rounded-xl border border-border bg-background/70 p-3 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_2rem] sm:items-center sm:gap-1.5 sm:rounded-none sm:border-0 sm:bg-transparent sm:p-0"
+          >
+            <div className="min-w-0 space-y-1 sm:space-y-0">
+              <span className="text-[11px] font-semibold text-muted-foreground sm:hidden">
+                {sourceLabel}
+              </span>
+              {sourceOptions ? (
+                <Select
+                  compact
+                  value={k.trim()}
+                  options={sourceSelectOptions}
+                  placeholder={sourcePlaceholder}
+                  disabled={sourceSelectOptions.length === 0}
+                  onValueChange={(next) => handleChange(i, 0, next)}
+                />
+              ) : (
+                <Input
+                  className="h-8 px-2 font-mono text-xs"
+                  placeholder={sourcePlaceholder}
+                  value={k}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 0, e.target.value)}
+                />
+              )}
+            </div>
+            <div className="min-w-0 space-y-1 sm:space-y-0">
+              <span className="text-[11px] font-semibold text-muted-foreground sm:hidden">
+                {targetLabel}
+              </span>
+              {targetOptions ? (
+                <Select
+                  compact
+                  value={v.trim()}
+                  options={targetSelectOptions}
+                  placeholder={targetPlaceholder}
+                  disabled={targetSelectOptions.length === 0}
+                  onValueChange={(next) => handleChange(i, 1, next)}
+                />
+              ) : (
+                <Input
+                  className="h-8 px-2 font-mono text-xs"
+                  placeholder={targetPlaceholder}
+                  value={v}
+                  onChange={(e: ChangeEvent<HTMLInputElement>) => handleChange(i, 1, e.target.value)}
+                />
+              )}
+            </div>
             <button
               type="button"
               onClick={() => handleRemove(i)}
               aria-label={t('common.delete')}
-              className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+              className="flex size-8 items-center justify-center justify-self-end rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10 sm:justify-self-auto"
             >
               <Trash2 className="size-3.5" />
             </button>
@@ -455,47 +468,102 @@ function ReasoningEffortModelsEditor({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
-      <div className="overflow-x-auto pb-1">
-        <div className="w-fit min-w-[32rem]">
-          <div className="grid shrink-0 grid-cols-[minmax(0,13rem)_8rem_max-content_2rem] gap-2 px-1 text-xs font-semibold text-muted-foreground">
-            <span>{t('settings2.baseModel')}</span>
-            <span>{t('settings2.reasoningEffort')}</span>
-            <span>{t('settings2.generatedModel')}</span>
-            <span />
-          </div>
-          <div className="mt-2 max-h-[220px] space-y-1.5 overflow-y-auto pr-1">
-            {entries.map((entry, i) => (
-              <div key={i} className="grid grid-cols-[minmax(0,13rem)_8rem_max-content_2rem] items-center gap-2">
-                <Select
-                  compact
-                  value={entry.model.trim()}
-                  options={modelOptions}
-                  placeholder={t('settings2.selectBaseModel')}
-                  disabled={modelOptions.length === 0}
-                  onValueChange={(model) => handleChange(i, { model })}
-                />
+      {/* Mobile: stacked cards */}
+      <div className="max-h-[320px] space-y-2 overflow-y-auto pr-0.5 sm:hidden">
+        {entries.map((entry, i) => (
+          <div
+            key={i}
+            className="rounded-xl border border-border bg-background/70 p-3 space-y-2"
+          >
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-muted-foreground">
+                {t('settings2.baseModel')}
+              </span>
+              <button
+                type="button"
+                onClick={() => handleRemove(i)}
+                aria-label={t('common.delete')}
+                className="flex size-8 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
+            <Select
+              compact
+              value={entry.model.trim()}
+              options={modelOptions}
+              placeholder={t('settings2.selectBaseModel')}
+              disabled={modelOptions.length === 0}
+              onValueChange={(model) => handleChange(i, { model })}
+            />
+            <div className="grid grid-cols-2 gap-2">
+              <div className="min-w-0 space-y-1">
+                <span className="text-[11px] font-semibold text-muted-foreground">
+                  {t('settings2.reasoningEffort')}
+                </span>
                 <Select
                   compact
                   value={normalizeReasoningEffortValue(entry.effort)}
                   options={REASONING_EFFORT_OPTIONS}
                   onValueChange={(effort) => handleChange(i, { effort })}
                 />
-                <div className="flex min-w-0">
-                  <Badge variant="secondary" className="max-w-full px-2 py-1 font-mono text-[11px]">
-                    <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
-                  </Badge>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleRemove(i)}
-                  aria-label={t('common.delete')}
-                  className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
               </div>
-            ))}
+              <div className="min-w-0 space-y-1">
+                <span className="text-[11px] font-semibold text-muted-foreground">
+                  {t('settings2.generatedModel')}
+                </span>
+                <Badge variant="secondary" className="max-w-full px-2 py-1.5 font-mono text-[11px]">
+                  <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
+                </Badge>
+              </div>
+            </div>
           </div>
+        ))}
+      </div>
+
+      {/* Desktop: compact grid */}
+      <div className="hidden min-h-0 flex-1 flex-col gap-2 sm:flex">
+        <div className="grid shrink-0 grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,1fr)_2rem] gap-2 px-1 text-xs font-semibold text-muted-foreground">
+          <span>{t('settings2.baseModel')}</span>
+          <span>{t('settings2.reasoningEffort')}</span>
+          <span>{t('settings2.generatedModel')}</span>
+          <span />
+        </div>
+        <div className="max-h-[220px] space-y-1.5 overflow-y-auto pr-1">
+          {entries.map((entry, i) => (
+            <div
+              key={i}
+              className="grid grid-cols-[minmax(0,1.2fr)_minmax(0,0.8fr)_minmax(0,1fr)_2rem] items-center gap-2"
+            >
+              <Select
+                compact
+                value={entry.model.trim()}
+                options={modelOptions}
+                placeholder={t('settings2.selectBaseModel')}
+                disabled={modelOptions.length === 0}
+                onValueChange={(model) => handleChange(i, { model })}
+              />
+              <Select
+                compact
+                value={normalizeReasoningEffortValue(entry.effort)}
+                options={REASONING_EFFORT_OPTIONS}
+                onValueChange={(effort) => handleChange(i, { effort })}
+              />
+              <div className="flex min-w-0">
+                <Badge variant="secondary" className="max-w-full px-2 py-1 font-mono text-[11px]">
+                  <span className="truncate">{reasoningEffortAlias(entry) || '-'}</span>
+                </Badge>
+              </div>
+              <button
+                type="button"
+                onClick={() => handleRemove(i)}
+                aria-label={t('common.delete')}
+                className="flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
+              >
+                <Trash2 className="size-3.5" />
+              </button>
+            </div>
+          ))}
         </div>
       </div>
       <Button type="button" variant="outline" size="sm" className="self-start" onClick={handleAdd}>
@@ -1326,12 +1394,12 @@ export default function Settings() {
           title={t('settings.title')}
           description={t('settings.description')}
           actionMeta={autoSaveStatusMeta}
-          actions={renderSaveButton('max-sm:w-full')}
+          actions={renderSaveButton('shrink-0')}
         />
 
-        <div className="space-y-4">
+        <div className="space-y-4 pb-20 sm:pb-0">
           <SettingsCard title={t('settings.systemStatus')}>
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(180px,1fr))] gap-3">
+            <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-2 xl:grid-cols-4">
               <StatusTile label={t('settings.service')}>
                 <Badge variant={health?.status === 'ok' ? 'default' : 'destructive'} className="gap-1.5">
                   <span className={`size-1.5 rounded-full ${health?.status === 'ok' ? 'bg-emerald-500' : 'bg-red-400'}`} />
@@ -2124,8 +2192,8 @@ export default function Settings() {
           </div>
 
           <SettingsCard title={t('settings.backgroundImage')} description={t('settings.backgroundImageDesc')}>
-            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
-              <div className="relative aspect-[16/7] min-h-[220px] overflow-hidden rounded-lg border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3]">
+            <div className="grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(0,0.65fr)]">
+              <div className="relative aspect-[16/7] min-h-[160px] overflow-hidden rounded-xl border border-border bg-muted/40 shadow-sm max-sm:aspect-[4/3] sm:min-h-[220px]">
                 {backgroundImagePreview && backgroundIsVideo ? (
                   <video
                     src={backgroundImagePreview}
@@ -2297,11 +2365,11 @@ export default function Settings() {
             </div>
           </SettingsCard>
 
-          <div className="grid items-stretch gap-4 xl:grid-cols-2">
+          <div className="grid items-stretch gap-4 lg:grid-cols-2">
             <SettingsCard
               title={t('settings.modelRegistry')}
               description={t('settings.modelRegistryDesc')}
-              className="h-full xl:h-[430px]"
+              className="h-full lg:h-[430px]"
               contentClassName="flex h-full min-h-0 flex-col"
             >
               <div className="flex min-h-0 flex-1 flex-col gap-4">
@@ -2350,7 +2418,7 @@ export default function Settings() {
             <SettingsCard
               title={t('settings2.anthropicModelMapping')}
               description={t('settings2.anthropicModelMappingDesc')}
-              className="h-full xl:h-[430px]"
+              className="h-full min-h-0 lg:h-[430px]"
               contentClassName="flex h-full min-h-0 flex-col"
             >
               <ModelMappingEditor
@@ -2367,7 +2435,7 @@ export default function Settings() {
             <SettingsCard
               title={t('settings2.codexModelMapping')}
               description={t('settings2.codexModelMappingDesc')}
-              className="h-full xl:h-[430px]"
+              className="h-full min-h-0 lg:h-[430px]"
               contentClassName="flex h-full min-h-0 flex-col"
             >
               <ModelMappingEditor
@@ -2385,7 +2453,7 @@ export default function Settings() {
             <SettingsCard
               title={t('settings2.reasoningEffortModels')}
               description={t('settings2.reasoningEffortModelsDesc')}
-              className="h-full xl:h-[430px]"
+              className="h-full min-h-0 lg:h-[430px]"
               contentClassName="flex h-full min-h-0 flex-col"
             >
               <ReasoningEffortModelsEditor
@@ -2398,7 +2466,37 @@ export default function Settings() {
 
           <div className="grid gap-4">
             <SettingsCard title={t('settings.apiEndpoints')}>
-              <div className="data-table-shell">
+              {/* Mobile endpoint cards */}
+              <div className="grid gap-2 sm:hidden">
+                {([
+                  { method: 'POST', path: '/v1/chat/completions', desc: t('settings.openaiCompat'), tone: 'default' as const },
+                  { method: 'POST', path: '/v1/responses', desc: t('settings.responsesApi'), tone: 'outline' as const },
+                  { method: 'POST', path: '/v1/messages', desc: t('settings2.messagesEndpoint'), tone: 'outline' as const },
+                  { method: 'POST', path: '/v1/images/generations', desc: t('settings.imageGenerationApi'), tone: 'outline' as const },
+                  { method: 'POST', path: '/v1/images/edits', desc: t('settings.imageEditApi'), tone: 'outline' as const },
+                  { method: 'GET', path: '/v1/models', desc: t('settings.modelList'), tone: 'secondary' as const },
+                ]).map((item) => (
+                  <div
+                    key={item.path}
+                    className="rounded-xl border border-border bg-background/70 px-3 py-2.5"
+                  >
+                    <div className="flex items-center gap-2">
+                      <Badge variant={item.tone} className="text-[11px] shrink-0">
+                        {item.method}
+                      </Badge>
+                      <code className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-foreground">
+                        {item.path}
+                      </code>
+                    </div>
+                    <p className="mt-1.5 text-[12px] leading-relaxed text-muted-foreground">
+                      {item.desc}
+                    </p>
+                  </div>
+                ))}
+              </div>
+
+              {/* Desktop table */}
+              <div className="data-table-shell hidden sm:block">
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -2444,8 +2542,8 @@ export default function Settings() {
             </SettingsCard>
           </div>
 
-          <div className="flex justify-end">
-            {renderSaveButton('max-sm:w-full')}
+          <div className="flex justify-end max-lg:sticky max-lg:bottom-[calc(5.5rem+env(safe-area-inset-bottom,0px))] max-lg:z-20 max-lg:-mx-1 max-lg:rounded-xl max-lg:border max-lg:border-border max-lg:bg-card/95 max-lg:p-2 max-lg:shadow-lg max-lg:backdrop-blur-md">
+            {renderSaveButton('w-full sm:w-auto')}
           </div>
         </div>
 
