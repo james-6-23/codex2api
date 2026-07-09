@@ -1121,6 +1121,82 @@
   animation: image-notice-marquee 4.5s ease-in-out both;
 }
 
+/* Image studio canvas */
+.image-studio-canvas-bg {
+  background:
+    radial-gradient(ellipse at center, color-mix(in oklab, var(--color-muted) 42%, transparent), transparent 68%),
+    linear-gradient(180deg, color-mix(in oklab, var(--color-muted) 18%, transparent), transparent 40%);
+}
+
+.image-studio-checkerboard {
+  background-color: color-mix(in oklab, var(--color-muted) 35%, var(--color-background));
+  background-image:
+    linear-gradient(45deg, color-mix(in oklab, var(--color-border) 55%, transparent) 25%, transparent 25%),
+    linear-gradient(-45deg, color-mix(in oklab, var(--color-border) 55%, transparent) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, color-mix(in oklab, var(--color-border) 55%, transparent) 75%),
+    linear-gradient(-45deg, transparent 75%, color-mix(in oklab, var(--color-border) 55%, transparent) 75%);
+  background-size: 18px 18px;
+  background-position: 0 0, 0 9px, 9px -9px, -9px 0;
+}
+
+@keyframes image-studio-shimmer {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(220%); }
+}
+
+.animate-image-studio-shimmer {
+  animation: image-studio-shimmer 1.6s ease-in-out infinite;
+}
+
+@keyframes image-studio-progress {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+.animate-image-studio-progress {
+  animation: image-studio-progress 1.35s ease-in-out infinite;
+}
+
+@keyframes image-studio-result-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+.animate-image-studio-result-in {
+  animation: image-studio-result-in 0.38s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes image-studio-fade-in {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-image-studio-fade-in {
+  animation: image-studio-fade-in 0.28s ease-out both;
+}
+
+.animate-image-studio-fade-in-delay {
+  animation: image-studio-fade-in 0.35s ease-out 0.08s both;
+}
+
+@keyframes image-studio-shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-3px); }
+  40% { transform: translateX(3px); }
+  60% { transform: translateX(-2px); }
+  80% { transform: translateX(2px); }
+}
+
+.animate-image-studio-shake {
+  animation: image-studio-shake 0.42s ease-out both;
+}
+
 /* Spinner */
 @keyframes spin {
   to { transform: rotate(360deg); }
