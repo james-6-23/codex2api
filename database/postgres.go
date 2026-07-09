@@ -817,6 +817,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_hide_upstream_errors BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_silent_retry_enabled BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_silent_max_retries INT DEFAULT 2;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_continue_thinking_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_continue_max_rounds INT DEFAULT 8;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_pause_5h_guard_band_percent DOUBLE PRECISION DEFAULT 5;
@@ -1436,6 +1438,8 @@ type SystemSettings struct {
 	CodexWSHideUpstreamErrors          bool // 隐藏上游 WS 原始错误，默认 true
 	CodexWSSilentRetryEnabled          bool // 首包前 WS 上游错误静默换号重试，默认 true
 	CodexWSSilentMaxRetries            int  // WS 静默换号最大重试次数，默认 2
+	CodexContinueThinkingEnabled       bool // 检测到上游截断思考时自动续想并折叠成单响应，默认 false
+	CodexContinueMaxRounds             int  // 单次请求最大续想轮数（含首轮），默认 8
 	AutoPause5hThreshold               float64
 	AutoPause7dThreshold               float64
 	AutoPause5hGuardBandPercent        float64
@@ -1562,6 +1566,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(codex_ws_hide_upstream_errors, true),
 			       COALESCE(codex_ws_silent_retry_enabled, true),
 			       COALESCE(codex_ws_silent_max_retries, 2),
+			       COALESCE(codex_continue_thinking_enabled, false),
+			       COALESCE(codex_continue_max_rounds, 8),
 			       COALESCE(auto_pause_5h_threshold, 0),
 			       COALESCE(auto_pause_7d_threshold, 0),
 			       COALESCE(auto_pause_5h_guard_band_percent, 5),
@@ -1603,6 +1609,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexWSHideUpstreamErrors,
 		&s.CodexWSSilentRetryEnabled,
 		&s.CodexWSSilentMaxRetries,
+		&s.CodexContinueThinkingEnabled,
+		&s.CodexContinueMaxRounds,
 		&s.AutoPause5hThreshold,
 		&s.AutoPause7dThreshold,
 		&s.AutoPause5hGuardBandPercent,
@@ -1687,9 +1695,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					smart_pacing_min_concurrency,
 					smart_pacing_windows,
 					retry_interval_ms,
-					transport_retry_policy
+					transport_retry_policy,
+					codex_continue_thinking_enabled,
+					codex_continue_max_rounds
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1769,7 +1779,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					smart_pacing_min_concurrency = EXCLUDED.smart_pacing_min_concurrency,
 					smart_pacing_windows = EXCLUDED.smart_pacing_windows,
 					retry_interval_ms = EXCLUDED.retry_interval_ms,
-					transport_retry_policy = EXCLUDED.transport_retry_policy
+					transport_retry_policy = EXCLUDED.transport_retry_policy,
+					codex_continue_thinking_enabled = EXCLUDED.codex_continue_thinking_enabled,
+					codex_continue_max_rounds = EXCLUDED.codex_continue_max_rounds
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1788,7 +1800,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexWSHideUpstreamErrors, s.CodexWSSilentRetryEnabled, normalizeCodexWSSilentMaxRetries(s.CodexWSSilentMaxRetries),
 		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency,
 		s.SmartPacingEnabled, normalizeSmartPacingMinConcurrencyDB(s.SmartPacingMinConcurrency), normalizeSmartPacingWindowsDB(s.SmartPacingWindows),
-		normalizeRetryIntervalMSDB(s.RetryIntervalMS), NormalizeTransportRetryPolicy(s.TransportRetryPolicy))
+		normalizeRetryIntervalMSDB(s.RetryIntervalMS), NormalizeTransportRetryPolicy(s.TransportRetryPolicy),
+		s.CodexContinueThinkingEnabled, NormalizeCodexContinueMaxRounds(s.CodexContinueMaxRounds))
 	return err
 }
 
@@ -1830,6 +1843,17 @@ func normalizeCodexWSSilentMaxRetries(retries int) int {
 		return 10
 	}
 	return retries
+}
+
+// NormalizeCodexContinueMaxRounds 把续想最大轮数限制在 1-32,非正值回落默认 8。
+func NormalizeCodexContinueMaxRounds(rounds int) int {
+	if rounds <= 0 {
+		return 8
+	}
+	if rounds > 32 {
+		return 32
+	}
+	return rounds
 }
 
 // normalizeAffinityMode 把 SystemSettings.AffinityMode 落库前归一,空字符串 → "bounded"。

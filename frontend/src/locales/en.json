@@ -1825,7 +1825,11 @@
     "smartPacingMinConcurrency": "Pacing Min Concurrency",
     "smartPacingMinConcurrencyHint": "Concurrency will not drop below this value while pacing, so an account is never fully starved. Default is 1.",
     "globalAutoPausePlaceholder": "Blank or 0 to disable",
-    "globalAutoPauseHint": "Enter 0 to disable global default. Priority: Account > Group > Global."
+    "globalAutoPauseHint": "Enter 0 to disable global default. Priority: Account > Group > Global.",
+    "codexContinueThinking": "Auto-Continue Truncated Reasoning",
+    "codexContinueThinkingDesc": "When upstream truncates reasoning at the known fingerprint, silently resend with prior reasoning and fold rounds into one response. Each round is a real upstream request that multiplies quota usage, and this explicitly bypasses upstream truncation — use at your own risk. Disabled by default.",
+    "codexContinueMaxRounds": "Max Continue Rounds",
+    "codexContinueMaxRoundsDesc": "Total upstream rounds allowed per request (including the first). Returns current result once reached. Range 1-32, default 8."
   },
   "proxies": {
     "description": "Manage proxy pool with round-robin distribution to accounts",
