@@ -2362,6 +2362,63 @@ func TestExtractToolCallsFromOutput(t *testing.T) {
 	}
 }
 
+// issue #330：上游要求 tool_search_call.arguments 为 object、function_call.arguments
+// 为 string；回放历史时类型不符会被上游 400 拒绝，需在发送前修正。
+func TestNormalizeResponsesToolCallArgumentTypes(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.5",
+		"input":[
+			{"type":"tool_search_call","call_id":"c1","arguments":"{\"queries\":[\"weather\"]}"},
+			{"type":"tool_search_call","call_id":"c2","arguments":""},
+			{"type":"tool_search_call","call_id":"c3","arguments":{"queries":["ok"]}},
+			{"type":"function_call","call_id":"c4","name":"get_weather","arguments":{"city":"NYC"}},
+			{"type":"function_call","call_id":"c5","name":"get_time","arguments":"{}"},
+			{"type":"tool_search_call","call_id":"c6","arguments":"not-json"},
+			{"type":"message","role":"user","content":"hi"}
+		]
+	}`)
+
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if !normalizeResponsesToolCallArgumentTypes(body) {
+		t.Fatal("expected modification, got false")
+	}
+
+	got, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	items := gjson.GetBytes(got, "input").Array()
+
+	if !items[0].Get("arguments").IsObject() {
+		t.Fatalf("tool_search_call string arguments should be parsed to object: %s", items[0].Raw)
+	}
+	if items[0].Get("arguments.queries.0").String() != "weather" {
+		t.Fatalf("parsed arguments should keep content: %s", items[0].Raw)
+	}
+	if !items[1].Get("arguments").IsObject() {
+		t.Fatalf("empty string arguments should become empty object: %s", items[1].Raw)
+	}
+	if !items[2].Get("arguments").IsObject() {
+		t.Fatalf("object arguments should stay object: %s", items[2].Raw)
+	}
+	if items[3].Get("arguments").Type != gjson.String {
+		t.Fatalf("function_call object arguments should be serialized to string: %s", items[3].Raw)
+	}
+	if items[3].Get("arguments").String() != `{"city":"NYC"}` {
+		t.Fatalf("serialized arguments should keep content, got %q", items[3].Get("arguments").String())
+	}
+	if items[4].Get("arguments").String() != "{}" {
+		t.Fatalf("function_call string arguments should be untouched: %s", items[4].Raw)
+	}
+	if items[5].Get("arguments").String() != "not-json" {
+		t.Fatalf("unparseable tool_search_call arguments should be left as-is: %s", items[5].Raw)
+	}
+}
+
 func TestNormalizeResponsesCompactionItemsConvertsToDeveloperMessage(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.4",

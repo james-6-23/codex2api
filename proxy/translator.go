@@ -781,6 +781,55 @@ func normalizeResponsesCompactionItems(body map[string]any) bool {
 	return modified
 }
 
+// normalizeResponsesToolCallArgumentTypes 修正 input[] 中工具调用项 arguments 的
+// JSON 类型。上游对不同 item 类型的要求不对称：function_call.arguments 必须是
+// string（JSON 编码），tool_search_call.arguments 必须是 object。客户端与缓存
+// 回放通常把上一轮输出项原样回灌，类型不符会被上游 400 拒绝：
+// "Invalid type for 'input[N].arguments': expected an object, but got a string
+// instead."（issue #330）。
+func normalizeResponsesToolCallArgumentTypes(body map[string]any) bool {
+	inputItems, ok := body["input"].([]any)
+	if !ok {
+		return false
+	}
+
+	modified := false
+	for _, raw := range inputItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		args, hasArgs := item["arguments"]
+		if !hasArgs {
+			continue
+		}
+		switch firstNonEmptyAnyString(item["type"]) {
+		case "function_call":
+			if _, isString := args.(string); isString {
+				continue
+			}
+			if encoded, err := json.Marshal(args); err == nil {
+				item["arguments"] = string(encoded)
+				modified = true
+			}
+		case "tool_search_call":
+			s, isString := args.(string)
+			if !isString {
+				continue
+			}
+			var obj map[string]any
+			if strings.TrimSpace(s) == "" {
+				obj = map[string]any{}
+			} else if err := json.Unmarshal([]byte(s), &obj); err != nil || obj == nil {
+				continue
+			}
+			item["arguments"] = obj
+			modified = true
+		}
+	}
+	return modified
+}
+
 func normalizeResponsesInputMessageContent(body map[string]any) bool {
 	inputItems, ok := body["input"].([]any)
 	if !ok {
@@ -1662,6 +1711,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	normalizeResponsesCompactionItems(body)
 	normalizeResponsesContentPartTypes(body)
 	normalizeResponsesInputMessageContent(body)
+	normalizeResponsesToolCallArgumentTypes(body)
 	normalizeResponsesInputItemIDs(body)
 	dropBareReasoningInputItems(body)
 
