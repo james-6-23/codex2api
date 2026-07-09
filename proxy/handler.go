@@ -623,16 +623,11 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 
 // logContinueThinkingRounds 为思考截断续想中「被折叠隐藏」的上游轮次补记真实用量。
 // 每一轮续想都是一次独立的上游请求，各自产生真实 token 消耗；对客户端折叠成单响应
-// 后，最终轮的用量由本 attempt 收尾统一记账，这里只补记除最终轮外的其余各轮，
-// 使账面消耗与实际上游请求数一致。失败的续想轮（无 usage）记一条错误占位。
+// 后，最终成功轮的用量由本 attempt 收尾统一记账，这里补记除最终成功轮外的其余各轮
+// （res.Rounds 除最后一条）以及失败的续想开轮（res.FailedContinuation），
+// 使账面消耗与实际上游请求数一致，且不与收尾记账重复计费。
 func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResult, account *auth.Account, logModel, logEffectiveModel, reasoningEffort string, useWebsocket bool, requestedServiceTier string) {
-	// 最后一条 Rounds 对应最终轮（成功）或失败续想轮占位；成功最终轮交由收尾统一记账。
-	upTo := len(res.Rounds)
-	if res.StopReason != continueStopRoundError && upTo > 0 {
-		upTo--
-	}
-	for i := 0; i < upTo; i++ {
-		round := res.Rounds[i]
+	logRound := func(round continueRoundStat) {
 		usageTiers := resolveUsageServiceTiers("", requestedServiceTier)
 		statusCode := round.StatusCode
 		if statusCode == 0 {
@@ -654,8 +649,8 @@ func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResu
 			RequestedServiceTier: usageTiers.RequestedServiceTier,
 			ActualServiceTier:    usageTiers.ActualServiceTier,
 			BillingServiceTier:   usageTiers.BillingServiceTier,
-			IsRetryAttempt:       true,
-			AttemptIndex:         i + 1,
+			// 隐藏的续想轮不是「重试」：不置 IsRetryAttempt/AttemptIndex，
+			// 否则会污染重试统计并与外层 attempt 编号混淆。
 		}
 		if round.ErrMessage != "" {
 			logInput.ErrorMessage = usageLogErrorMessage(statusCode, []byte(round.ErrMessage))
@@ -671,6 +666,14 @@ func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResu
 			logInput.CachedTokens = round.Usage.CachedTokens
 		}
 		h.logUsageForRequest(c, logInput)
+	}
+
+	// res.Rounds 的最后一条是最终成功轮，其用量由本 attempt 收尾统一记账，此处排除。
+	for i := 0; i+1 < len(res.Rounds); i++ {
+		logRound(res.Rounds[i])
+	}
+	if res.FailedContinuation != nil {
+		logRound(*res.FailedContinuation)
 	}
 }
 
@@ -2404,15 +2407,12 @@ func (h *Handler) Responses(c *gin.Context) {
 					maxRounds: contMaxRounds,
 					forward:   forward,
 					observe: func(data []byte) {
-						// 被缓冲（暂未转发）的事件也要喂 TTFT guard，
-						// 否则纯 message 响应会被整体缓冲到 terminal 才计首 token，
-						// 配置了首字超时的部署会误杀健康流。
-						et := gjson.GetBytes(data, "type").String()
-						ttftGuard.MarkProgress(et)
-						if !ttftRecorded && isFirstTokenResultForMode(gjson.ParseBytes(data), currentFirstTokenMode()) {
-							firstTokenMs = int(time.Since(start).Milliseconds())
-							ttftRecorded = true
-						}
+						// 被缓冲（暂未转发给客户端）的事件只用来保活首字超时 guard，
+						// 避免纯 message 响应在整体缓冲期间被误判超时。这里不置位
+						// ttftRecorded/firstTokenMs：客户端此刻尚未收到任何字节，真正的
+						// 首 token 计时在 flushBuffered 经 forward 冲刷时才发生，
+						// 否则会破坏首包前 response.failed 的抑制/换号语义。
+						ttftGuard.MarkProgress(gjson.GetBytes(data, "type").String())
 					},
 					clientGone: func() bool { return clientGone || c.Request.Context().Err() != nil },
 					openRound: func(body []byte) (*http.Response, error) {
@@ -2427,16 +2427,33 @@ func (h *Handler) Responses(c *gin.Context) {
 						if useWebsocket {
 							roundBody = stripResponsesImageGenerationTool(body)
 						}
-						return ExecuteRequest(rctx, account, roundBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+						roundResp, roundErr := ExecuteRequest(rctx, account, roundBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+						// 续想轮同样消耗账号额度：成功开轮后同步上游用量头，
+						// 否则多轮隐藏请求的额度对自动暂停/配速不可见。
+						if roundErr == nil && roundResp != nil && roundResp.StatusCode == http.StatusOK {
+							SyncCodexUsageState(h.store, account, roundResp)
+						}
+						return roundResp, roundErr
 					},
 				}
 				foldRes := runContinueThinkingFold(resp, fold)
 				readErr = foldRes.ReadErr
-				if foldRes.RoundsRun > 1 {
-					// 隐藏的续想轮各自消耗一次真实上游请求，逐轮单独记账（真实用量），
-					// 最终轮的真实 usage 交由本 attempt 收尾统一记账。
-					h.logContinueThinkingRounds(c, foldRes, account, logModel, logEffectiveModel, reasoningEffort, useWebsocket, serviceTier)
+				// 折叠可能产出合成/重构的 response.incomplete 终态（续想失败/EOF），
+				// forward 只对 completed/failed 置位 gotTerminal，这里据折叠结果补齐，
+				// 否则正常收尾的折叠流会被误判为断流：惩罚账号、解绑亲和、用估算值覆盖真实 usage。
+				if foldRes.GotTerminal {
+					gotTerminal = true
+				}
+				// 折叠拦截了各轮真实终态，forward 未必看到 response.completed，
+				// 用折叠汇总的最终轮真实 usage 作为本 attempt 收尾计费值。
+				if foldRes.FinalUsage != nil {
 					usage = foldRes.FinalUsage
+				}
+				// 除最终轮外的各真实轮 + 失败的续想开轮各补记一条真实用量，
+				// 最终轮由本 attempt 收尾统一记账，避免重复或漏记。
+				h.logContinueThinkingRounds(c, foldRes, account, logModel, logEffectiveModel, reasoningEffort, useWebsocket, serviceTier)
+				if foldRes.FinalResponse != nil {
+					resp = foldRes.FinalResponse
 				}
 			} else {
 				readErr = ReadSSEStream(resp.Body, forward)

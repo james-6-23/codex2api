@@ -52,12 +52,17 @@ type continueRoundStat struct {
 
 // continueFoldResult 是一次折叠的汇总结果。
 type continueFoldResult struct {
-	Rounds      []continueRoundStat
-	FinalUsage  *UsageInfo // 最终轮的真实 usage（终态计费用，区别于回给客户端的重构值）
-	GotTerminal bool
-	ReadErr     error
-	StopReason  string
-	RoundsRun   int
+	// Rounds 仅含「成功读到终态」的真实上游轮次，按顺序排列；最后一条对应 FinalUsage。
+	Rounds []continueRoundStat
+	// FailedContinuation 记录失败的续想开轮尝试（openRound 出错 / 非 200 / 组包失败），
+	// 与 Rounds 分开，避免逐轮记账时与最终成功轮混淆导致重复计费。
+	FailedContinuation *continueRoundStat
+	FinalUsage         *UsageInfo     // 最终成功轮的真实 usage（终态计费用）
+	FinalResponse      *http.Response // 最终轮响应（body 已关，仅供读 header 做 cooldown/quota 同步）
+	GotTerminal        bool           // 客户端是否已收到终态事件（据此判定是否算正常结束）
+	ReadErr            error
+	StopReason         string
+	RoundsRun          int
 }
 
 // continueFold 是折叠状态机的外部依赖与配置。
@@ -157,7 +162,7 @@ func (st *foldState) rebuildTerminalEvent(terminal []byte, finalRoundUsage *Usag
 	}
 	resp := []byte(base)
 	tresp := gjson.GetBytes(terminal, "response")
-	for _, key := range []string{"status", "error", "incomplete_details", "service_tier"} {
+	for _, key := range []string{"status", "status_code", "error", "incomplete_details", "service_tier"} {
 		if v := tresp.Get(key); v.Exists() {
 			resp, _ = sjson.SetRawBytes(resp, key, []byte(v.Raw))
 		}
@@ -405,13 +410,22 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 	for {
 		roundNo++
 		result.RoundsRun = roundNo
+		result.FinalResponse = resp
 		roundStart := time.Now()
 		outcome := st.readRound(resp.Body, roundNo, f)
 		resp.Body.Close()
 
+		statusCode := http.StatusOK
+		if outcome.terminal != nil {
+			if t := gjson.GetBytes(outcome.terminal, "type").String(); t == "response.failed" || t == "response.incomplete" {
+				// 非 completed 终态一定是最终轮（fold 只在 completed+命中指纹时续想），
+				// 这里记录真实状态而非一律 200，便于统计区分。
+				statusCode = 0
+			}
+		}
 		stat := continueRoundStat{
 			Usage:      outcome.usage,
-			StatusCode: http.StatusOK,
+			StatusCode: statusCode,
 			DurationMs: int(time.Since(roundStart).Milliseconds()),
 		}
 		result.Rounds = append(result.Rounds, stat)
@@ -430,10 +444,15 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 		}
 
 		if outcome.terminal == nil {
-			// 上游 EOF 无终态。第 1 轮且未定稿任何输出时保持静默，让上层的
-			// 透明断流重试接管；否则合成 incomplete 给客户端一个终态。
+			// 上游 EOF 无终态。第 1 轮且从未产出任何输出（含缓冲）时保持静默，让上层的
+			// 透明断流重试接管；否则冲刷已缓冲内容 + 合成 incomplete 给客户端一个终态，
+			// 避免缓冲内容被丢弃或客户端收到空的 200 流。
 			result.StopReason = continueStopUpstreamEOF
-			if roundNo == 1 && len(st.finalOutput) == 0 && !st.flushedAny {
+			if roundNo == 1 && len(st.finalOutput) == 0 && !st.flushedAny && len(outcome.buffered) == 0 {
+				return result
+			}
+			if !st.flushBuffered(outcome.buffered, f) {
+				result.StopReason = continueStopForwardAbort
 				return result
 			}
 			f.forward(st.syntheticIncompleteEvent("upstream_eof", outcome.usage))
@@ -475,13 +494,14 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 
 		nextBody, err := buildContinuationBody(f.baseBody, st.replayTail)
 		if err != nil {
+			result.FailedContinuation = &continueRoundStat{ErrMessage: err.Error()}
 			f.forward(st.syntheticIncompleteEvent("upstream_error", outcome.usage))
 			result.StopReason = continueStopRoundError
 			return result
 		}
 		nextResp, err := f.openRound(nextBody)
 		if err != nil {
-			result.Rounds = append(result.Rounds, continueRoundStat{ErrMessage: err.Error()})
+			result.FailedContinuation = &continueRoundStat{ErrMessage: err.Error()}
 			f.forward(st.syntheticIncompleteEvent("upstream_error", outcome.usage))
 			result.StopReason = continueStopRoundError
 			return result
@@ -489,10 +509,10 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 		if nextResp.StatusCode != http.StatusOK {
 			errBody, _ := io.ReadAll(io.LimitReader(nextResp.Body, 2048))
 			nextResp.Body.Close()
-			result.Rounds = append(result.Rounds, continueRoundStat{
+			result.FailedContinuation = &continueRoundStat{
 				StatusCode: nextResp.StatusCode,
 				ErrMessage: fmt.Sprintf("continuation round rejected: %s", upstreamErrorConsoleBody(errBody)),
-			})
+			}
 			f.forward(st.syntheticIncompleteEvent("upstream_error", outcome.usage))
 			result.StopReason = continueStopRoundError
 			return result
