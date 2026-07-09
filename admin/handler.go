@@ -5378,6 +5378,9 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 		cost30d, _ = h.db.GetAllAPIKeysWindowCost(ctx, 30*24*time.Hour)
 	}
 
+	// 最近使用时间：一次聚合，失败不阻断列表
+	lastUsedByID, _ := h.db.ListAPIKeyLastUsedAt(ctx)
+
 	// 转换为脱敏响应
 	maskedKeys := make([]*MaskedAPIKeyRow, 0, len(keys))
 	for _, k := range keys {
@@ -5394,6 +5397,12 @@ func (h *Handler) ListAPIKeys(c *gin.Context) {
 				detail.Cost30d = cost30d[k.ID]
 			}
 			mk.WindowUsage = detail
+		}
+		if lastUsedByID != nil {
+			if lastUsed, ok := lastUsedByID[k.ID]; ok && !lastUsed.IsZero() {
+				formatted := lastUsed.Format(time.RFC3339)
+				mk.LastUsedAt = &formatted
+			}
 		}
 		maskedKeys = append(maskedKeys, mk)
 	}

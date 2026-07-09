@@ -130,6 +130,43 @@ func (db *DB) ListAPIKeyTokenStats(ctx context.Context, rangeStart, rangeEnd tim
 	return items, nil
 }
 
+// ListAPIKeyLastUsedAt 返回每个 API Key 最近一次请求时间（来自 usage_logs）。
+// 仅包含有调用记录的 key；索引 idx_usage_logs_api_key_created_at 支撑该聚合。
+func (db *DB) ListAPIKeyLastUsedAt(ctx context.Context) (map[int64]time.Time, error) {
+	query := `
+		SELECT api_key_id, MAX(created_at)
+		FROM usage_logs
+		WHERE api_key_id > 0
+		  AND status_code <> 499
+		GROUP BY api_key_id
+	`
+	rows, err := db.conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	result := make(map[int64]time.Time)
+	for rows.Next() {
+		var id int64
+		var lastUsedRaw interface{}
+		if err := rows.Scan(&id, &lastUsedRaw); err != nil {
+			return nil, err
+		}
+		t, err := parseDBTimeValue(lastUsedRaw)
+		if err != nil {
+			return nil, err
+		}
+		if !t.IsZero() {
+			result[id] = t
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
 // GetAllAPIKeysWindowCost 批量聚合所有 API Key 在 [now-window, now] 窗口内的 user_billed。
 // 返回 map[apiKeyID] → cost。仅包含有使用记录的 key。
 func (db *DB) GetAllAPIKeysWindowCost(ctx context.Context, window time.Duration) (map[int64]float64, error) {

@@ -64,6 +64,7 @@ type MaskedAPIKeyRow struct {
 	Limits          database.APIKeyLimits    `json:"limits"`
 	WindowUsage     *APIKeyWindowUsageDetail `json:"window_usage,omitempty"`
 	Status          string                   `json:"status"`
+	LastUsedAt      *string                  `json:"last_used_at,omitempty"`
 	CreatedAt       string                   `json:"created_at"`
 }
 

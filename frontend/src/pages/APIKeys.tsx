@@ -1,5 +1,11 @@
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
-import { useCallback, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { useTranslation } from "react-i18next";
 import { api } from "../api";
 import APIKeyTokenUsagePanel from "../components/APIKeyTokenUsagePanel";
@@ -7,10 +13,17 @@ import ChipInput from "../components/ChipInput";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import StateShell from "../components/StateShell";
+import StatCard from "../components/StatCard";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { useDataLoader } from "../hooks/useDataLoader";
 import { useToast } from "../hooks/useToast";
-import type { AccountGroup, APIKeyLimits, APIKeyRow, APIKeyWindowUsage, SystemSettings } from "../types";
+import type {
+  AccountGroup,
+  APIKeyLimits,
+  APIKeyRow,
+  APIKeyWindowUsage,
+  SystemSettings,
+} from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { Badge } from "@/components/ui/badge";
@@ -26,25 +39,40 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { cn } from "@/lib/utils";
 import {
+  Check,
   Copy,
   CalendarClock,
   CircleDollarSign,
+  ChevronDown,
   Eye,
   EyeOff,
   ExternalLink,
-  Fingerprint,
+  ArrowUpDown,
+  Gauge,
   KeyRound,
+  Loader2,
   LockKeyhole,
   Pencil,
   Plus,
   RotateCcw,
+  Search,
+  ShieldAlert,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
+  XCircle,
 } from "lucide-react";
 
 type ExpireMode = "never" | "7" | "30" | "90" | "custom";
 type TokenLimitUnit = "token" | "k" | "m" | "b";
+type StatusFilter = "all" | "active" | "expired" | "quota_exhausted" | "expiring_soon";
+type APIKeyStatus = "active" | "expired" | "quota_exhausted";
+type SortMode = "created_desc" | "last_used_desc" | "quota_usage_desc" | "name_asc";
+
+const KEY_REVEAL_MS = 30_000;
+const EXPIRING_SOON_MS = 7 * 24 * 60 * 60 * 1000;
 
 interface CreateKeyFormState {
   name: string;
@@ -135,17 +163,37 @@ export default function APIKeys() {
   const [createForm, setCreateForm] =
     useState<CreateKeyFormState>(initialCreateForm);
   const [createdKeyId, setCreatedKeyId] = useState<number | null>(null);
+  const [createdReveal, setCreatedReveal] = useState<{
+    id: number;
+    name: string;
+    key: string;
+  } | null>(null);
+  const [createdRevealAck, setCreatedRevealAck] = useState(false);
   const [visibleKeys, setVisibleKeys] = useState<Set<number>>(new Set());
+  const revealTimers = useRef<Map<number, number>>(new Map());
   const [activeTab, setActiveTab] = useState<"keys" | "token-usage">("keys");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortMode, setSortMode] = useState<SortMode>("created_desc");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [creating, setCreating] = useState(false);
   const [deletingIds, setDeletingIds] = useState<Set<number>>(new Set());
   const [editingKey, setEditingKey] = useState<APIKeyRow | null>(null);
   const [editForm, setEditForm] = useState<EditKeyFormState>(initialEditForm);
   const [editTab, setEditTab] = useState<"basic" | "limits">("basic");
+  const [editDirty, setEditDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingPublicUsagePage, setSavingPublicUsagePage] = useState(false);
-  const { toast, showToast } = useToast();
+  const [refreshing, setRefreshing] = useState(false);
+  const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
+
+  useEffect(() => {
+    return () => {
+      revealTimers.current.forEach((timer) => window.clearTimeout(timer));
+      revealTimers.current.clear();
+    };
+  }, []);
 
   const loadKeys = useCallback(async () => {
     const [keysResponse, groupsResponse, modelsResponse, settingsResponse] = await Promise.all([
@@ -166,7 +214,7 @@ export default function APIKeys() {
     };
   }, []);
 
-  const { data, loading, error, reload } = useDataLoader<{
+  const { data, setData, loading, error, reload, reloadSilently } = useDataLoader<{
     keys: APIKeyRow[];
     groups: AccountGroup[];
     modelOptions: string[];
@@ -179,21 +227,125 @@ export default function APIKeys() {
   const groups = data.groups;
   const modelOptions = data.modelOptions;
   const publicUsagePageEnabled = data.settings?.public_key_usage_page_enabled ?? true;
+  const showInitialSkeleton = loading && keys.length === 0;
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await reloadSilently();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [reloadSilently]);
 
   const keyUsageUrl = useMemo(() => {
     if (typeof window === "undefined") return "/key-usage";
     return `${window.location.origin}/key-usage`;
   }, []);
 
-  const latestKey = useMemo(() => {
-    return keys
-      .slice()
-      .sort(
-        (a, b) =>
-          new Date(b.created_at || 0).getTime() -
-          new Date(a.created_at || 0).getTime(),
-      )[0];
+  const statusCounts = useMemo(() => {
+    const counts = {
+      all: keys.length,
+      active: 0,
+      expired: 0,
+      quota_exhausted: 0,
+      expiring_soon: 0,
+    };
+    const now = Date.now();
+    for (const keyRow of keys) {
+      const status = getAPIKeyStatus(keyRow);
+      if (status === "active") counts.active += 1;
+      else if (status === "expired") counts.expired += 1;
+      else counts.quota_exhausted += 1;
+
+      if (
+        status === "active" &&
+        keyRow.expires_at &&
+        new Date(keyRow.expires_at).getTime() - now <= EXPIRING_SOON_MS &&
+        new Date(keyRow.expires_at).getTime() > now
+      ) {
+        counts.expiring_soon += 1;
+      }
+    }
+    return counts;
   }, [keys]);
+
+  const filteredKeys = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    const now = Date.now();
+    const filtered = keys.filter((keyRow) => {
+      const status = getAPIKeyStatus(keyRow);
+      if (statusFilter === "active" && status !== "active") return false;
+      if (statusFilter === "expired" && status !== "expired") return false;
+      if (statusFilter === "quota_exhausted" && status !== "quota_exhausted")
+        return false;
+      if (statusFilter === "expiring_soon") {
+        if (status !== "active" || !keyRow.expires_at) return false;
+        const expiresAt = new Date(keyRow.expires_at).getTime();
+        if (!(expiresAt > now && expiresAt - now <= EXPIRING_SOON_MS))
+          return false;
+      }
+      if (!q) return true;
+      const haystack = [
+        keyRow.name,
+        keyRow.key,
+        keyRow.raw_key,
+        String(keyRow.id),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+
+    const sorted = filtered.slice();
+    sorted.sort((a, b) => {
+      switch (sortMode) {
+        case "name_asc":
+          return a.name.localeCompare(b.name, undefined, {
+            sensitivity: "base",
+          });
+        case "last_used_desc": {
+          const aTime = a.last_used_at
+            ? new Date(a.last_used_at).getTime()
+            : 0;
+          const bTime = b.last_used_at
+            ? new Date(b.last_used_at).getTime()
+            : 0;
+          if (bTime !== aTime) return bTime - aTime;
+          return (
+            new Date(b.created_at || 0).getTime() -
+            new Date(a.created_at || 0).getTime()
+          );
+        }
+        case "quota_usage_desc": {
+          const aRatio =
+            a.quota_limit > 0 ? a.quota_used / a.quota_limit : -1;
+          const bRatio =
+            b.quota_limit > 0 ? b.quota_used / b.quota_limit : -1;
+          if (bRatio !== aRatio) return bRatio - aRatio;
+          return b.total_used - a.total_used;
+        }
+        case "created_desc":
+        default:
+          return (
+            new Date(b.created_at || 0).getTime() -
+            new Date(a.created_at || 0).getTime()
+          );
+      }
+    });
+    return sorted;
+  }, [keys, searchQuery, sortMode, statusFilter]);
+
+  const sortOptions = useMemo(
+    () => [
+      { label: t("apiKeys.sortCreated"), value: "created_desc" },
+      { label: t("apiKeys.sortLastUsed"), value: "last_used_desc" },
+      { label: t("apiKeys.sortQuotaUsage"), value: "quota_usage_desc" },
+      { label: t("apiKeys.sortName"), value: "name_asc" },
+    ],
+    [t],
+  );
 
   const expireOptions = useMemo(
     () => [
@@ -226,7 +378,16 @@ export default function APIKeys() {
           : t("apiKeys.publicUsageDisabledToast"),
         "success",
       );
-      await reload();
+      setData((current) => ({
+        ...current,
+        settings: current.settings
+          ? {
+              ...current.settings,
+              public_key_usage_page_enabled: nextEnabled,
+            }
+          : current.settings,
+      }));
+      await reloadSilently();
     } catch (err) {
       showToast(getErrorMessage(err), "error");
     } finally {
@@ -263,11 +424,19 @@ export default function APIKeys() {
 
       const result = await api.createAPIKey(payload);
       setCreatedKeyId(result.id);
-      setVisibleKeys((prev) => new Set(prev).add(result.id));
+      setCreatedReveal({
+        id: result.id,
+        name: result.name,
+        key: result.key,
+      });
+      setCreatedRevealAck(false);
       setCreateForm(initialCreateForm);
       setCreateDialogOpen(false);
+      setStatusFilter("all");
+      setSearchQuery("");
+      setActiveTab("keys");
       showToast(t("apiKeys.keyCreateSuccess"));
-      void reload();
+      void reloadSilently();
     } catch (error) {
       showToast(
         `${t("apiKeys.createFailed")}: ${getErrorMessage(error)}`,
@@ -289,6 +458,11 @@ export default function APIKeys() {
     if (!confirmed) return;
 
     setDeletingIds((prev) => new Set(prev).add(id));
+    const previous = keys;
+    setData((current) => ({
+      ...current,
+      keys: current.keys.filter((item) => item.id !== id),
+    }));
     try {
       await api.deleteAPIKey(id);
       showToast(t("apiKeys.keyDeleted"));
@@ -298,8 +472,9 @@ export default function APIKeys() {
         next.delete(id);
         return next;
       });
-      void reload();
+      void reloadSilently();
     } catch (error) {
+      setData((current) => ({ ...current, keys: previous }));
       showToast(
         `${t("apiKeys.deleteFailed")}: ${getErrorMessage(error)}`,
         "error",
@@ -326,11 +501,26 @@ export default function APIKeys() {
     if (!confirmed) return;
 
     setResettingIds((prev) => new Set(prev).add(keyRow.id));
+    const previousUsed = keyRow.quota_used;
+    setData((current) => ({
+      ...current,
+      keys: current.keys.map((item) =>
+        item.id === keyRow.id ? { ...item, quota_used: 0 } : item,
+      ),
+    }));
     try {
       await api.updateAPIKey(keyRow.id, { reset_quota: true });
       showToast(t("apiKeys.resetQuotaSuccess"));
-      void reload();
+      void reloadSilently();
     } catch (error) {
+      setData((current) => ({
+        ...current,
+        keys: current.keys.map((item) =>
+          item.id === keyRow.id
+            ? { ...item, quota_used: previousUsed }
+            : item,
+        ),
+      }));
       showToast(
         `${t("apiKeys.resetQuotaFailed")}: ${getErrorMessage(error)}`,
         "error",
@@ -371,13 +561,50 @@ export default function APIKeys() {
     }
   };
 
+  const hideKey = useCallback((id: number) => {
+    const existing = revealTimers.current.get(id);
+    if (existing) {
+      window.clearTimeout(existing);
+      revealTimers.current.delete(id);
+    }
+    setVisibleKeys((prev) => {
+      if (!prev.has(id)) return prev;
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
   const toggleVisible = (id: number) => {
     setVisibleKeys((prev) => {
       const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+      if (next.has(id)) {
+        const existing = revealTimers.current.get(id);
+        if (existing) {
+          window.clearTimeout(existing);
+          revealTimers.current.delete(id);
+        }
+        next.delete(id);
+        return next;
+      }
+      next.add(id);
+      const existing = revealTimers.current.get(id);
+      if (existing) window.clearTimeout(existing);
+      const timer = window.setTimeout(() => {
+        hideKey(id);
+      }, KEY_REVEAL_MS);
+      revealTimers.current.set(id, timer);
       return next;
     });
+  };
+
+  const closeCreatedReveal = () => {
+    if (!createdRevealAck) {
+      showToast(t("apiKeys.createdRevealAckRequired"), "error");
+      return;
+    }
+    setCreatedReveal(null);
+    setCreatedRevealAck(false);
   };
 
   const startEditing = (keyRow: APIKeyRow) => {
@@ -390,17 +617,30 @@ export default function APIKeys() {
       allowedGroupIds: keyRow.allowed_group_ids ?? [],
       limits: limitsFromAPIKey(keyRow.limits),
     });
+    setEditDirty(false);
+    setEditTab("basic");
   };
 
-  const closeEditDialog = () => {
+  const closeEditDialog = async () => {
     if (saving) return;
+    if (editDirty) {
+      const confirmed = await confirm({
+        title: t("apiKeys.discardEditTitle"),
+        description: t("apiKeys.discardEditDesc"),
+        confirmText: t("apiKeys.discardEditConfirm"),
+        tone: "warning",
+      });
+      if (!confirmed) return;
+    }
     setEditingKey(null);
     setEditForm(initialEditForm);
     setEditTab("basic");
+    setEditDirty(false);
   };
 
   const updateEditForm = (patch: Partial<EditKeyFormState>) => {
     setEditForm((current) => ({ ...current, ...patch }));
+    setEditDirty(true);
   };
 
   const handleSaveEdit = async (event?: FormEvent<HTMLFormElement>) => {
@@ -414,17 +654,54 @@ export default function APIKeys() {
     setSaving(true);
     try {
       const quotaLimit = parseQuotaLimit(editForm.quotaLimit, t);
+      const expirationPayload = buildExpirationPayload(editForm, t, {
+        clearNever: true,
+      });
+      const limitsPayload = limitsFormToPayload(editForm.limits);
       await api.updateAPIKey(editingKey.id, {
         name: trimmed,
         quota_limit: quotaLimit,
         allowed_group_ids: editForm.allowedGroupIds,
-        limits: limitsFormToPayload(editForm.limits),
-        ...buildExpirationPayload(editForm, t, { clearNever: true }),
+        limits: limitsPayload,
+        ...expirationPayload,
       });
+
+      // 乐观更新列表行，再静默同步
+      setData((current) => ({
+        ...current,
+        keys: current.keys.map((item) => {
+          if (item.id !== editingKey.id) return item;
+          const nextExpires =
+            "expires_at" in expirationPayload
+              ? (expirationPayload.expires_at as string | null | undefined)
+              : "expires_in_days" in expirationPayload &&
+                  expirationPayload.expires_in_days
+                ? new Date(
+                    Date.now() +
+                      Number(expirationPayload.expires_in_days) *
+                        24 *
+                        60 *
+                        60 *
+                        1000,
+                  ).toISOString()
+                : item.expires_at;
+          return {
+            ...item,
+            name: trimmed,
+            quota_limit: quotaLimit,
+            allowed_group_ids: editForm.allowedGroupIds,
+            limits: limitsPayload,
+            expires_at: nextExpires ?? null,
+          };
+        }),
+      }));
+
       showToast(t("apiKeys.keyUpdated"));
       setEditingKey(null);
       setEditForm(initialEditForm);
-      void reload();
+      setEditTab("basic");
+      setEditDirty(false);
+      void reloadSilently();
     } catch (error) {
       showToast(
         `${t("apiKeys.updateFailed")}: ${getErrorMessage(error)}`,
@@ -435,11 +712,15 @@ export default function APIKeys() {
     }
   };
 
+  if (showInitialSkeleton) {
+    return <APIKeysSkeleton />;
+  }
+
   return (
     <StateShell
       variant="page"
-      loading={loading}
-      error={error}
+      loading={false}
+      error={error && keys.length === 0 ? error : null}
       onRetry={() => void reload()}
       loadingTitle={t("apiKeys.loadingTitle")}
       loadingDescription={t("apiKeys.loadingDesc")}
@@ -449,7 +730,23 @@ export default function APIKeys() {
         <PageHeader
           title={t("apiKeys.title")}
           description={t("apiKeys.description")}
-          onRefresh={() => void reload()}
+          onRefresh={() => void handleRefresh()}
+          refreshLabel={
+            refreshing ? t("common.loading") : t("common.refresh")
+          }
+          actionMeta={
+            <span className="inline-flex items-center gap-1.5">
+              <span
+                className={cn(
+                  "size-1.5 rounded-full",
+                  keys.length > 0 ? "bg-[hsl(var(--success))]" : "bg-[hsl(var(--warning))]",
+                )}
+              />
+              {keys.length > 0
+                ? t("apiKeys.authEnabledDesc")
+                : t("apiKeys.authDisabledDesc")}
+            </span>
+          }
           actions={
             <Button
               onClick={() => setCreateDialogOpen(true)}
@@ -461,51 +758,104 @@ export default function APIKeys() {
           }
         />
 
-        <div className="mb-4 grid gap-3 md:grid-cols-3">
-          <KeySummaryCard
-            icon={<KeyRound className="size-5" />}
-            label={t("apiKeys.totalKeys")}
-            value={String(keys.length)}
-            sub={
-              keys.length > 0
-                ? t("apiKeys.totalKeysDesc")
-                : t("apiKeys.noKeysShort")
-            }
-            tone="info"
-          />
-          <KeySummaryCard
-            icon={<ShieldCheck className="size-5" />}
-            label={t("apiKeys.authMode")}
-            value={
-              keys.length > 0
-                ? t("apiKeys.authEnabled")
-                : t("apiKeys.authDisabled")
-            }
-            sub={
-              keys.length > 0
-                ? t("apiKeys.authEnabledDesc")
-                : t("apiKeys.authDisabledDesc")
-            }
-            tone={keys.length > 0 ? "success" : "warning"}
-          />
-          <KeySummaryCard
-            icon={<Fingerprint className="size-5" />}
-            label={t("apiKeys.newestKey")}
-            value={latestKey?.name || "-"}
-            sub={
-              latestKey
-                ? formatRelativeTime(latestKey.created_at, {
-                    variant: "compact",
-                  })
-                : t("apiKeys.noLatest")
-            }
-            tone="neutral"
-          />
+        <div className="mb-4 grid grid-cols-2 gap-3 xl:grid-cols-4">
+          <button
+            type="button"
+            className="text-left"
+            onClick={() => {
+              setStatusFilter("all");
+              setActiveTab("keys");
+            }}
+          >
+            <StatCard
+              icon={<KeyRound className="size-[18px]" />}
+              iconClass="purple"
+              label={t("apiKeys.totalKeys")}
+              value={statusCounts.all}
+              sub={
+                keys.length > 0
+                  ? t("apiKeys.totalKeysDesc")
+                  : t("apiKeys.noKeysShort")
+              }
+              className={cn(
+                "h-full cursor-pointer",
+                statusFilter === "all" && "ring-2 ring-primary/30",
+              )}
+            />
+          </button>
+          <button
+            type="button"
+            className="text-left"
+            onClick={() => {
+              setStatusFilter("active");
+              setActiveTab("keys");
+            }}
+          >
+            <StatCard
+              icon={<ShieldCheck className="size-[18px]" />}
+              iconClass="green"
+              label={t("apiKeys.status.active")}
+              value={statusCounts.active}
+              sub={t("apiKeys.filterActiveDesc")}
+              className={cn(
+                "h-full cursor-pointer",
+                statusFilter === "active" && "ring-2 ring-primary/30",
+              )}
+            />
+          </button>
+          <button
+            type="button"
+            className="text-left"
+            onClick={() => {
+              setStatusFilter("expiring_soon");
+              setActiveTab("keys");
+            }}
+          >
+            <StatCard
+              icon={<CalendarClock className="size-[18px]" />}
+              iconClass="amber"
+              label={t("apiKeys.status.expiring_soon")}
+              value={statusCounts.expiring_soon}
+              sub={t("apiKeys.filterExpiringDesc")}
+              className={cn(
+                "h-full cursor-pointer",
+                statusFilter === "expiring_soon" && "ring-2 ring-primary/30",
+              )}
+            />
+          </button>
+          <button
+            type="button"
+            className="text-left"
+            onClick={() => {
+              setStatusFilter(
+                statusCounts.quota_exhausted > 0
+                  ? "quota_exhausted"
+                  : "expired",
+              );
+              setActiveTab("keys");
+            }}
+          >
+            <StatCard
+              icon={<XCircle className="size-[18px]" />}
+              iconClass="red"
+              label={t("apiKeys.filterIssues")}
+              value={statusCounts.expired + statusCounts.quota_exhausted}
+              sub={t("apiKeys.filterIssuesDesc", {
+                expired: statusCounts.expired,
+                exhausted: statusCounts.quota_exhausted,
+              })}
+              className={cn(
+                "h-full cursor-pointer",
+                (statusFilter === "expired" ||
+                  statusFilter === "quota_exhausted") &&
+                  "ring-2 ring-primary/30",
+              )}
+            />
+          </button>
         </div>
 
         <div className="space-y-4">
-          {/* Tab 切换：密钥列表 / Token 用量统计（issue #162）*/}
-          <div className="inline-flex items-center gap-0.5 rounded-lg border border-border bg-muted/30 p-0.5">
+          <div className="inline-flex items-center gap-0.5 rounded-xl border border-border bg-muted/30 p-0.5">
             {(
               [
                 ["keys", t("apiKeys.tabKeys")],
@@ -516,11 +866,12 @@ export default function APIKeys() {
                 key={key}
                 type="button"
                 onClick={() => setActiveTab(key)}
-                className={`rounded-md px-3 py-1.5 text-[13px] font-semibold transition-colors ${
+                className={cn(
+                  "rounded-lg px-3.5 py-1.5 text-[13px] font-semibold transition-colors",
                   activeTab === key
                     ? "bg-background text-foreground shadow-sm"
-                    : "text-muted-foreground hover:text-foreground"
-                }`}
+                    : "text-muted-foreground hover:text-foreground",
+                )}
               >
                 {label}
               </button>
@@ -528,20 +879,85 @@ export default function APIKeys() {
           </div>
 
           {activeTab === "keys" && (
-          <Card>
-            <CardContent className="p-3 sm:p-4">
-              <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-                <div>
-                  <h3 className="text-base font-semibold text-foreground">
-                    {t("apiKeys.tableTitle")}
-                  </h3>
-                  <p className="mt-1 text-sm text-muted-foreground">
-                    {t("apiKeys.tableDesc")}
-                  </p>
+            <>
+              <div className="toolbar-surface flex flex-col gap-2.5">
+                <div className="flex items-center gap-1.5 overflow-x-auto [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                  <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
+                    {t("apiKeys.filter")}
+                  </span>
+                  {(
+                    [
+                      ["all", t("common.all"), statusCounts.all],
+                      [
+                        "active",
+                        t("apiKeys.status.active"),
+                        statusCounts.active,
+                      ],
+                      [
+                        "expiring_soon",
+                        t("apiKeys.status.expiring_soon"),
+                        statusCounts.expiring_soon,
+                      ],
+                      [
+                        "expired",
+                        t("apiKeys.status.expired"),
+                        statusCounts.expired,
+                      ],
+                      [
+                        "quota_exhausted",
+                        t("apiKeys.status.quota_exhausted"),
+                        statusCounts.quota_exhausted,
+                      ],
+                    ] as const
+                  ).map(([key, label, count]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setStatusFilter(key)}
+                      className={cn(
+                        "shrink-0 whitespace-nowrap rounded-lg px-2.5 py-1.5 text-[12px] font-semibold transition-colors",
+                        statusFilter === key
+                          ? "bg-primary text-primary-foreground"
+                          : "bg-muted/50 text-muted-foreground hover:bg-muted",
+                      )}
+                    >
+                      {label} {count}
+                    </button>
+                  ))}
                 </div>
-                <Badge variant={keys.length > 0 ? "default" : "secondary"}>
-                  {t("apiKeys.keyCount", { count: keys.length })}
-                </Badge>
+                <div className="flex flex-wrap items-center gap-2">
+                  <div className="relative min-w-0 flex-1 sm:max-w-sm">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      value={searchQuery}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setSearchQuery(event.target.value)
+                      }
+                      placeholder={t("apiKeys.searchPlaceholder")}
+                      className="h-8 pl-8 text-[13px]"
+                    />
+                  </div>
+                  <div className="flex min-w-[10.5rem] items-center gap-1.5">
+                    <ArrowUpDown className="size-3.5 shrink-0 text-muted-foreground" />
+                    <Select
+                      value={sortMode}
+                      onValueChange={(value) =>
+                        setSortMode(value as SortMode)
+                      }
+                      options={sortOptions}
+                      compact
+                    />
+                  </div>
+                  <Badge variant="secondary" className="tabular-nums">
+                    {t("apiKeys.showingCount", {
+                      shown: filteredKeys.length,
+                      total: keys.length,
+                    })}
+                  </Badge>
+                  {refreshing ? (
+                    <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                  ) : null}
+                </div>
               </div>
 
               <StateShell
@@ -549,350 +965,525 @@ export default function APIKeys() {
                 isEmpty={keys.length === 0}
                 emptyTitle={t("apiKeys.noKeys")}
                 emptyDescription={t("apiKeys.noKeysDesc")}
+                action={
+                  <Button onClick={() => setCreateDialogOpen(true)}>
+                    <Plus className="size-3.5" />
+                    {t("apiKeys.createKey")}
+                  </Button>
+                }
               >
-                {/* Mobile cards */}
-                <div className="grid gap-3 lg:hidden">
-                  {keys.map((keyRow) => {
-                    const isVisible = visibleKeys.has(keyRow.id);
-                    const isNew = createdKeyId === keyRow.id;
-                    const displayKey = isVisible
-                      ? keyRow.raw_key || keyRow.key
-                      : keyRow.key;
-                    const copyValue = keyRow.raw_key || keyRow.key;
-                    const status = getAPIKeyStatus(keyRow);
-                    return (
-                      <div
-                        key={keyRow.id}
-                        className={`rounded-xl border border-border bg-background/70 p-3.5 shadow-sm ${
-                          isNew ? "ring-1 ring-[hsl(var(--success))]/30 bg-[hsl(var(--success-bg))]" : ""
-                        }`}
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <div className="flex flex-wrap items-center gap-1.5">
-                              <span className="truncate text-sm font-semibold text-foreground">
-                                {keyRow.name}
-                              </span>
-                              {isNew ? (
-                                <Badge
-                                  variant="outline"
-                                  className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]"
-                                >
-                                  {t("apiKeys.newBadge")}
-                                </Badge>
-                              ) : null}
-                              {status !== "active" ? (
-                                <Badge
-                                  variant={
-                                    status === "expired"
-                                      ? "secondary"
-                                      : "destructive"
-                                  }
-                                >
-                                  {t(`apiKeys.status.${status}`)}
-                                </Badge>
-                              ) : null}
-                            </div>
-                            <div className="mt-1 text-[11px] text-muted-foreground">
-                              {formatRelativeTime(keyRow.created_at, {
-                                variant: "compact",
-                              })}
-                              {" · "}
-                              {formatExpiration(keyRow, t)}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="mt-3 flex items-center gap-1.5">
-                          <code
-                            className="min-w-0 flex-1 truncate rounded-lg bg-muted px-2 py-1.5 font-mono text-[12px] text-foreground"
-                            title={displayKey}
-                          >
-                            {displayKey}
-                          </code>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            disabled={!keyRow.raw_key}
-                            onClick={() => toggleVisible(keyRow.id)}
-                            title={
-                              isVisible
-                                ? t("apiKeys.hideKey")
-                                : t("apiKeys.showKey")
-                            }
-                          >
-                            {isVisible ? (
-                              <EyeOff className="size-3.5" />
-                            ) : (
-                              <Eye className="size-3.5" />
-                            )}
-                          </Button>
-                          <Button
-                            variant="ghost"
-                            size="icon-sm"
-                            onClick={() => void handleCopy(copyValue)}
-                            title={t("common.copy")}
-                          >
-                            <Copy className="size-3.5" />
-                          </Button>
-                        </div>
-
-                        <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
-                          <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
-                            <div className="text-[11px] font-semibold text-muted-foreground">
-                              {t("apiKeys.allowedGroups")}
-                            </div>
-                            <div className="mt-1">
-                              <AllowedGroupsDisplay
-                                ids={keyRow.allowed_group_ids ?? []}
-                                groups={groups}
-                                t={t}
-                              />
-                            </div>
-                          </div>
-                          <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
-                            <div className="text-[11px] font-semibold text-muted-foreground">
-                              {t("apiKeys.quotaColumn")}
-                            </div>
-                            <div className="mt-1 font-medium text-foreground">
-                              {formatQuotaLimit(keyRow, t)}
-                            </div>
-                            {keyRow.quota_limit > 0 ? (
-                              <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
-                                <div
-                                  className="h-full rounded-full bg-primary"
-                                  style={{
-                                    width: `${Math.min(100, Math.max(0, (keyRow.quota_used / keyRow.quota_limit) * 100))}%`,
-                                  }}
-                                />
-                              </div>
-                            ) : null}
-                            {keyRow.window_usage && keyRow.limits ? (
-                              <WindowCostBars limits={keyRow.limits} usage={keyRow.window_usage} />
-                            ) : null}
-                          </div>
-                        </div>
-
-                        <div className="mt-3 flex flex-wrap gap-1.5">
-                          {keyRow.quota_limit > 0 ? (
-                            <Button
-                              variant="outline"
-                              size="sm"
-                              disabled={resettingIds.has(keyRow.id)}
-                              onClick={() => void handleResetQuota(keyRow)}
-                              className="flex-1 min-w-[7rem]"
-                            >
-                              <RotateCcw className="size-3.5" />
-                              {t("apiKeys.resetQuota")}
-                            </Button>
-                          ) : null}
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => startEditing(keyRow)}
-                            className="flex-1 min-w-[6rem]"
-                          >
-                            <Pencil className="size-3.5" />
-                            {t("apiKeys.editKey")}
-                          </Button>
-                          <Button
-                            variant="destructive"
-                            size="sm"
-                            disabled={deletingIds.has(keyRow.id)}
-                            onClick={() => void handleDeleteKey(keyRow.id)}
-                            className="flex-1 min-w-[6rem]"
-                          >
-                            <Trash2 className="size-3.5" />
-                            {t("common.delete")}
-                          </Button>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-
-                {/* Desktop table */}
-                <div className="data-table-shell hidden lg:block">
-                  <Table>
-                    <TableHeader>
-                      <TableRow>
-                        <TableHead>{t("common.name")}</TableHead>
-                        <TableHead>{t("apiKeys.keyColumn")}</TableHead>
-                        <TableHead>{t("apiKeys.allowedGroups")}</TableHead>
-                        <TableHead>{t("apiKeys.quotaColumn")}</TableHead>
-                        <TableHead>{t("apiKeys.expiresColumn")}</TableHead>
-                        <TableHead>{t("common.createdAt")}</TableHead>
-                        <TableHead className="text-right">
-                          {t("common.actions")}
-                        </TableHead>
-                      </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                      {keys.map((keyRow) => {
+                {keys.length > 0 && filteredKeys.length === 0 ? (
+                  <div className="flex min-h-[220px] flex-col items-center justify-center gap-2 rounded-2xl border border-dashed border-border bg-card/60 px-6 py-10 text-center">
+                    <Search className="size-5 text-muted-foreground" />
+                    <div className="text-sm font-semibold text-foreground">
+                      {t("apiKeys.noFilterResults")}
+                    </div>
+                    <p className="max-w-sm text-sm text-muted-foreground">
+                      {t("apiKeys.noFilterResultsDesc")}
+                    </p>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      onClick={() => {
+                        setStatusFilter("all");
+                        setSearchQuery("");
+                      }}
+                    >
+                      {t("apiKeys.clearFilters")}
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    {/* Mobile cards */}
+                    <div className="grid gap-3 lg:hidden">
+                      {filteredKeys.map((keyRow) => {
                         const isVisible = visibleKeys.has(keyRow.id);
                         const isNew = createdKeyId === keyRow.id;
+                        const isBusy =
+                          deletingIds.has(keyRow.id) ||
+                          resettingIds.has(keyRow.id);
                         const displayKey = isVisible
                           ? keyRow.raw_key || keyRow.key
                           : keyRow.key;
                         const copyValue = keyRow.raw_key || keyRow.key;
-                        const status = getAPIKeyStatus(keyRow);
                         return (
-                          <TableRow
+                          <div
                             key={keyRow.id}
-                            className={
-                              isNew ? "bg-[hsl(var(--success-bg))]" : ""
-                            }
+                            className={cn(
+                              "rounded-2xl border border-border/80 bg-card p-3.5 shadow-sm transition-opacity",
+                              isNew &&
+                                "ring-1 ring-[hsl(var(--success))]/35 bg-[hsl(var(--success-bg))]",
+                              isBusy && "opacity-70",
+                            )}
                           >
-                            <TableCell className="font-medium text-foreground">
-                              <div className="flex items-center gap-2">
-                                <span>{keyRow.name}</span>
-                                {isNew ? (
-                                  <Badge
-                                    variant="outline"
-                                    className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]"
-                                  >
-                                    {t("apiKeys.newBadge")}
-                                  </Badge>
-                                ) : null}
-                                {status !== "active" ? (
-                                  <Badge
-                                    variant={
-                                      status === "expired"
-                                        ? "secondary"
-                                        : "destructive"
-                                    }
-                                  >
-                                    {t(`apiKeys.status.${status}`)}
-                                  </Badge>
-                                ) : null}
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <span className="truncate text-sm font-semibold text-foreground">
+                                    {keyRow.name}
+                                  </span>
+                                  {isNew ? (
+                                    <Badge
+                                      variant="outline"
+                                      className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]"
+                                    >
+                                      {t("apiKeys.newBadge")}
+                                    </Badge>
+                                  ) : null}
+                                  <KeyStatusBadge
+                                    status={getAPIKeyStatus(keyRow)}
+                                    t={t}
+                                  />
+                                  {isBusy ? (
+                                    <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                                  ) : null}
+                                </div>
+                                <div className="mt-1 text-[11px] text-muted-foreground">
+                                  {t("apiKeys.lastUsedLabel")}:{" "}
+                                  {formatLastUsed(keyRow, t)}
+                                  {" · "}
+                                  {formatExpiration(keyRow, t)}
+                                </div>
                               </div>
-                            </TableCell>
-                            <TableCell>
-                              <div className="flex min-w-[260px] items-center gap-2">
-                                <code
-                                  className="min-w-0 max-w-[420px] truncate rounded-md bg-muted px-2 py-1 font-mono text-[13px] text-foreground"
-                                  title={displayKey}
-                                >
-                                  {displayKey}
-                                </code>
-                                <Button
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  disabled={!keyRow.raw_key}
-                                  onClick={() => toggleVisible(keyRow.id)}
-                                  title={
-                                    isVisible
-                                      ? t("apiKeys.hideKey")
-                                      : t("apiKeys.showKey")
-                                  }
-                                >
-                                  {isVisible ? (
-                                    <EyeOff className="size-3.5" />
-                                  ) : (
-                                    <Eye className="size-3.5" />
-                                  )}
-                                </Button>
-                                <Button
-                                  variant="ghost"
-                                  size="icon-xs"
-                                  onClick={() => void handleCopy(copyValue)}
-                                  title={t("common.copy")}
-                                >
-                                  <Copy className="size-3.5" />
-                                </Button>
+                            </div>
+
+                            <div className="mt-3 flex items-center gap-1.5">
+                              <code
+                                className="min-w-0 flex-1 truncate rounded-lg bg-muted/70 px-2.5 py-1.5 font-mono text-[12px] tabular-nums text-foreground"
+                                title={displayKey}
+                              >
+                                {displayKey}
+                              </code>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                disabled={!keyRow.raw_key}
+                                onClick={() => toggleVisible(keyRow.id)}
+                                title={
+                                  isVisible
+                                    ? t("apiKeys.hideKey")
+                                    : t("apiKeys.showKey")
+                                }
+                              >
+                                {isVisible ? (
+                                  <EyeOff className="size-3.5" />
+                                ) : (
+                                  <Eye className="size-3.5" />
+                                )}
+                              </Button>
+                              <Button
+                                variant="ghost"
+                                size="icon-sm"
+                                onClick={() => void handleCopy(copyValue)}
+                                title={t("common.copy")}
+                              >
+                                <Copy className="size-3.5" />
+                              </Button>
+                            </div>
+
+                            <div className="mt-3 space-y-2">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <AllowedGroupsDisplay
+                                  ids={keyRow.allowed_group_ids ?? []}
+                                  groups={groups}
+                                  t={t}
+                                />
                               </div>
-                            </TableCell>
-                            <TableCell className="min-w-[180px]">
-                              <AllowedGroupsDisplay
-                                ids={keyRow.allowed_group_ids ?? []}
-                                groups={groups}
-                                t={t}
-                              />
-                            </TableCell>
-                            <TableCell className="min-w-[150px] text-sm text-muted-foreground">
-                              <div className="space-y-1">
-                                <div className="font-medium text-foreground">
-                                  {formatQuotaLimit(keyRow, t)}
+                              <div className="rounded-xl border border-border/70 bg-muted/20 px-2.5 py-2">
+                                <div className="flex items-center justify-between gap-2 text-[11px]">
+                                  <span className="font-semibold text-muted-foreground">
+                                    {t("apiKeys.quotaColumn")}
+                                  </span>
+                                  <span className="font-medium text-foreground">
+                                    {formatQuotaLimit(keyRow, t)}
+                                  </span>
                                 </div>
                                 {keyRow.quota_limit > 0 ? (
-                                  <div className="h-1.5 w-28 overflow-hidden rounded-full bg-muted">
-                                    <div
-                                      className="h-full rounded-full bg-primary"
-                                      style={{
-                                        width: `${Math.min(100, Math.max(0, (keyRow.quota_used / keyRow.quota_limit) * 100))}%`,
-                                      }}
-                                    />
-                                  </div>
-                                ) : null}
-                                {keyRow.total_used > 0 ? (
-                                  <div className="text-[11px] text-muted-foreground">
-                                    {t("apiKeys.totalUsedLabel", { amount: formatUSD(keyRow.total_used) })}
-                                    {keyRow.reset_count > 0 ? (
-                                      <span className="ml-1.5">
-                                        ({t("apiKeys.resetCountLabel", { count: keyRow.reset_count })})
-                                      </span>
-                                    ) : null}
-                                  </div>
+                                  <UsageBar
+                                    used={keyRow.quota_used}
+                                    limit={keyRow.quota_limit}
+                                    className="mt-1.5"
+                                  />
                                 ) : null}
                                 {keyRow.window_usage && keyRow.limits ? (
-                                  <WindowCostBars limits={keyRow.limits} usage={keyRow.window_usage} />
+                                  <WindowCostBars
+                                    limits={keyRow.limits}
+                                    usage={keyRow.window_usage}
+                                  />
                                 ) : null}
                               </div>
-                            </TableCell>
-                            <TableCell className="text-muted-foreground">
-                              {formatExpiration(keyRow, t)}
-                            </TableCell>
-                            <TableCell className="text-muted-foreground">
-                              {formatRelativeTime(keyRow.created_at, {
-                                variant: "compact",
-                              })}
-                            </TableCell>
-                            <TableCell>
-                              <div className="flex justify-end gap-1.5">
-                                {keyRow.quota_limit > 0 ? (
-                                  <Button
-                                    variant="outline"
-                                    size="sm"
-                                    disabled={resettingIds.has(keyRow.id)}
-                                    onClick={() =>
-                                      void handleResetQuota(keyRow)
-                                    }
-                                    title={t("apiKeys.resetQuota")}
-                                  >
-                                    <RotateCcw className="size-3.5" />
-                                    {t("apiKeys.resetQuota")}
-                                  </Button>
-                                ) : null}
+                            </div>
+
+                            <div className="mt-3 flex flex-wrap gap-1.5">
+                              {keyRow.quota_limit > 0 ? (
                                 <Button
                                   variant="outline"
                                   size="sm"
-                                  onClick={() => startEditing(keyRow)}
+                                  disabled={resettingIds.has(keyRow.id)}
+                                  onClick={() => void handleResetQuota(keyRow)}
+                                  className="min-w-[7rem] flex-1"
                                 >
-                                  <Pencil className="size-3.5" />
-                                  {t("apiKeys.editKey")}
+                                  {resettingIds.has(keyRow.id) ? (
+                                    <Loader2 className="size-3.5 animate-spin" />
+                                  ) : (
+                                    <RotateCcw className="size-3.5" />
+                                  )}
+                                  {t("apiKeys.resetQuota")}
                                 </Button>
-                                <Button
-                                  variant="destructive"
-                                  size="sm"
-                                  disabled={deletingIds.has(keyRow.id)}
-                                  onClick={() =>
-                                    void handleDeleteKey(keyRow.id)
-                                  }
-                                >
+                              ) : null}
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={isBusy}
+                                onClick={() => startEditing(keyRow)}
+                                className="min-w-[6rem] flex-1"
+                              >
+                                <Pencil className="size-3.5" />
+                                {t("apiKeys.editKey")}
+                              </Button>
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                disabled={deletingIds.has(keyRow.id)}
+                                onClick={() => void handleDeleteKey(keyRow.id)}
+                                className="min-w-[6rem] flex-1"
+                              >
+                                {deletingIds.has(keyRow.id) ? (
+                                  <Loader2 className="size-3.5 animate-spin" />
+                                ) : (
                                   <Trash2 className="size-3.5" />
-                                  {t("common.delete")}
-                                </Button>
-                              </div>
-                            </TableCell>
-                          </TableRow>
+                                )}
+                                {t("common.delete")}
+                              </Button>
+                            </div>
+                          </div>
                         );
                       })}
-                    </TableBody>
-                  </Table>
-                </div>
+                    </div>
+
+                    {/* Desktop table */}
+                    <div className="data-table-shell hidden lg:block">
+                      <Table>
+                        <TableHeader>
+                          <TableRow>
+                            <TableHead>{t("common.name")}</TableHead>
+                            <TableHead>{t("apiKeys.keyColumn")}</TableHead>
+                            <TableHead>{t("apiKeys.allowedGroups")}</TableHead>
+                            <TableHead>{t("apiKeys.quotaColumn")}</TableHead>
+                            <TableHead>{t("apiKeys.lastUsedColumn")}</TableHead>
+                            <TableHead>{t("apiKeys.expiresColumn")}</TableHead>
+                            <TableHead className="text-right">
+                              {t("common.actions")}
+                            </TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {filteredKeys.map((keyRow) => {
+                            const isVisible = visibleKeys.has(keyRow.id);
+                            const isNew = createdKeyId === keyRow.id;
+                            const isBusy =
+                              deletingIds.has(keyRow.id) ||
+                              resettingIds.has(keyRow.id);
+                            const displayKey = isVisible
+                              ? keyRow.raw_key || keyRow.key
+                              : keyRow.key;
+                            const copyValue = keyRow.raw_key || keyRow.key;
+                            return (
+                              <TableRow
+                                key={keyRow.id}
+                                className={cn(
+                                  isNew && "bg-[hsl(var(--success-bg))]",
+                                  isBusy && "opacity-70",
+                                )}
+                              >
+                                <TableCell className="font-medium text-foreground">
+                                  <div className="flex min-w-[140px] flex-col gap-1.5">
+                                    <div className="flex flex-wrap items-center gap-1.5">
+                                      <span className="truncate">
+                                        {keyRow.name}
+                                      </span>
+                                      {isNew ? (
+                                        <Badge
+                                          variant="outline"
+                                          className="border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]"
+                                        >
+                                          {t("apiKeys.newBadge")}
+                                        </Badge>
+                                      ) : null}
+                                      {isBusy ? (
+                                        <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
+                                      ) : null}
+                                    </div>
+                                    <KeyStatusBadge
+                                      status={getAPIKeyStatus(keyRow)}
+                                      t={t}
+                                    />
+                                  </div>
+                                </TableCell>
+                                <TableCell>
+                                  <div className="flex min-w-[240px] items-center gap-1">
+                                    <code
+                                      className="min-w-0 max-w-[360px] truncate rounded-md bg-muted/70 px-2 py-1 font-mono text-[12px] tabular-nums text-foreground"
+                                      title={displayKey}
+                                    >
+                                      {displayKey}
+                                    </code>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-xs"
+                                      disabled={!keyRow.raw_key}
+                                      onClick={() => toggleVisible(keyRow.id)}
+                                      title={
+                                        isVisible
+                                          ? t("apiKeys.hideKey")
+                                          : t("apiKeys.showKey")
+                                      }
+                                    >
+                                      {isVisible ? (
+                                        <EyeOff className="size-3.5" />
+                                      ) : (
+                                        <Eye className="size-3.5" />
+                                      )}
+                                    </Button>
+                                    <Button
+                                      variant="ghost"
+                                      size="icon-xs"
+                                      onClick={() =>
+                                        void handleCopy(copyValue)
+                                      }
+                                      title={t("common.copy")}
+                                    >
+                                      <Copy className="size-3.5" />
+                                    </Button>
+                                  </div>
+                                </TableCell>
+                                <TableCell className="min-w-[160px]">
+                                  <AllowedGroupsDisplay
+                                    ids={keyRow.allowed_group_ids ?? []}
+                                    groups={groups}
+                                    t={t}
+                                  />
+                                </TableCell>
+                                <TableCell className="min-w-[160px] text-sm text-muted-foreground">
+                                  <div className="space-y-1">
+                                    <div className="font-medium text-foreground">
+                                      {formatQuotaLimit(keyRow, t)}
+                                    </div>
+                                    {keyRow.quota_limit > 0 ? (
+                                      <UsageBar
+                                        used={keyRow.quota_used}
+                                        limit={keyRow.quota_limit}
+                                        className="w-28"
+                                        showPercent
+                                      />
+                                    ) : null}
+                                    {keyRow.total_used > 0 ? (
+                                      <div className="text-[11px] text-muted-foreground">
+                                        {t("apiKeys.totalUsedLabel", {
+                                          amount: formatUSD(keyRow.total_used),
+                                        })}
+                                        {keyRow.reset_count > 0 ? (
+                                          <span className="ml-1.5">
+                                            (
+                                            {t("apiKeys.resetCountLabel", {
+                                              count: keyRow.reset_count,
+                                            })}
+                                            )
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    ) : null}
+                                    {keyRow.window_usage && keyRow.limits ? (
+                                      <WindowCostBars
+                                        limits={keyRow.limits}
+                                        usage={keyRow.window_usage}
+                                      />
+                                    ) : null}
+                                  </div>
+                                </TableCell>
+                                <TableCell className="whitespace-nowrap text-muted-foreground">
+                                  <div className="flex flex-col gap-0.5">
+                                    <span>{formatLastUsed(keyRow, t)}</span>
+                                    <span className="text-[11px] text-muted-foreground/80">
+                                      {t("apiKeys.createdLabel")}:{" "}
+                                      {formatRelativeTime(keyRow.created_at, {
+                                        variant: "compact",
+                                      })}
+                                    </span>
+                                  </div>
+                                </TableCell>
+                                <TableCell className="text-muted-foreground">
+                                  {formatExpiration(keyRow, t)}
+                                </TableCell>
+                                <TableCell>
+                                  <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                    {keyRow.quota_limit > 0 ? (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        disabled={resettingIds.has(keyRow.id)}
+                                        onClick={() =>
+                                          void handleResetQuota(keyRow)
+                                        }
+                                        title={t("apiKeys.resetQuota")}
+                                      >
+                                        {resettingIds.has(keyRow.id) ? (
+                                          <Loader2 className="size-3.5 animate-spin" />
+                                        ) : (
+                                          <RotateCcw className="size-3.5" />
+                                        )}
+                                        {t("apiKeys.resetQuota")}
+                                      </Button>
+                                    ) : null}
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={isBusy}
+                                      onClick={() => startEditing(keyRow)}
+                                      title={t("apiKeys.editKey")}
+                                    >
+                                      <Pencil className="size-3.5" />
+                                      {t("apiKeys.editKey")}
+                                    </Button>
+                                    <Button
+                                      variant="destructive"
+                                      size="sm"
+                                      disabled={deletingIds.has(keyRow.id)}
+                                      onClick={() =>
+                                        void handleDeleteKey(keyRow.id)
+                                      }
+                                      title={t("common.delete")}
+                                    >
+                                      {deletingIds.has(keyRow.id) ? (
+                                        <Loader2 className="size-3.5 animate-spin" />
+                                      ) : (
+                                        <Trash2 className="size-3.5" />
+                                      )}
+                                      {t("common.delete")}
+                                    </Button>
+                                  </div>
+                                </TableCell>
+                              </TableRow>
+                            );
+                          })}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  </>
+                )}
               </StateShell>
-            </CardContent>
-          </Card>
+
+              <div className="overflow-hidden rounded-xl border border-border bg-card/85 shadow-sm">
+                <button
+                  type="button"
+                  onClick={() => setSettingsOpen((open) => !open)}
+                  className="flex w-full items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-muted/30"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <LockKeyhole className="size-3.5" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-sm font-semibold text-foreground">
+                        {t("apiKeys.securityTitle")}
+                      </div>
+                      <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                        <span>
+                          {keys.length > 0
+                            ? t("apiKeys.authEnabled")
+                            : t("apiKeys.authDisabled")}
+                        </span>
+                        <span className="text-border">·</span>
+                        <Badge
+                          variant={
+                            publicUsagePageEnabled ? "secondary" : "outline"
+                          }
+                          className={
+                            publicUsagePageEnabled
+                              ? "text-[hsl(var(--success))]"
+                              : "text-muted-foreground"
+                          }
+                        >
+                          {publicUsagePageEnabled
+                            ? t("apiKeys.publicUsageEnabled")
+                            : t("apiKeys.publicUsageDisabled")}
+                        </Badge>
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronDown
+                    className={cn(
+                      "size-4 shrink-0 text-muted-foreground transition-transform",
+                      settingsOpen && "rotate-180",
+                    )}
+                  />
+                </button>
+                {settingsOpen ? (
+                  <div className="space-y-3 border-t border-border px-4 py-3">
+                    <p className="text-sm leading-relaxed text-muted-foreground">
+                      {t("apiKeys.keyAuthNote")}
+                    </p>
+                    <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("apiKeys.publicUsageTitle")}
+                        </div>
+                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          {t("apiKeys.publicUsageDesc")}
+                        </p>
+                        {publicUsagePageEnabled ? (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <code
+                              className="min-w-0 max-w-full truncate rounded-md bg-muted px-2 py-1 font-mono text-[12px] text-foreground"
+                              title={keyUsageUrl}
+                            >
+                              {keyUsageUrl}
+                            </code>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              onClick={() => void handleCopy(keyUsageUrl)}
+                              title={t("apiKeys.publicUsageCopyUrl")}
+                            >
+                              <Copy className="size-3.5" />
+                            </Button>
+                            <a
+                              href={keyUsageUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                            >
+                              <ExternalLink className="size-3.5" />
+                              {t("apiKeys.publicUsageOpen")}
+                            </a>
+                          </div>
+                        ) : null}
+                      </div>
+                      <Button
+                        variant={
+                          publicUsagePageEnabled ? "outline" : "default"
+                        }
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => void handleTogglePublicUsagePage()}
+                        disabled={savingPublicUsagePage}
+                      >
+                        {publicUsagePageEnabled ? (
+                          <EyeOff className="size-3.5" />
+                        ) : (
+                          <Eye className="size-3.5" />
+                        )}
+                        {savingPublicUsagePage
+                          ? t("common.saving")
+                          : publicUsagePageEnabled
+                            ? t("apiKeys.disablePublicUsage")
+                            : t("apiKeys.enablePublicUsage")}
+                      </Button>
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            </>
           )}
 
           {activeTab === "token-usage" && (
@@ -902,92 +1493,6 @@ export default function APIKeys() {
               </CardContent>
             </Card>
           )}
-
-          <Card className="py-0">
-            <CardContent className="flex flex-col gap-3 p-4 sm:flex-row sm:items-center sm:justify-between">
-              <div className="flex min-w-0 items-start gap-3">
-                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <LockKeyhole className="size-4" />
-                </div>
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold text-foreground">
-                    {t("apiKeys.securityTitle")}
-                  </div>
-                  <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
-                    {t("apiKeys.keyAuthNote")}
-                  </p>
-                  <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <Badge
-                      variant={publicUsagePageEnabled ? "secondary" : "outline"}
-                      className={publicUsagePageEnabled ? "text-emerald-700 dark:text-emerald-400" : "text-muted-foreground"}
-                    >
-                      {publicUsagePageEnabled
-                        ? t("apiKeys.publicUsageEnabled")
-                        : t("apiKeys.publicUsageDisabled")}
-                    </Badge>
-                    <span className="text-xs text-muted-foreground">
-                      {t("apiKeys.publicUsageDesc")}
-                    </span>
-                  </div>
-                  {publicUsagePageEnabled ? (
-                    <div className="mt-2 flex flex-wrap items-center gap-2">
-                      <span className="text-xs font-semibold text-muted-foreground">
-                        {t("apiKeys.publicUsageUrlLabel")}
-                      </span>
-                      <code
-                        className="min-w-0 max-w-full truncate rounded-md bg-muted px-2 py-1 font-mono text-[12px] text-foreground"
-                        title={keyUsageUrl}
-                      >
-                        {keyUsageUrl}
-                      </code>
-                      <Button
-                        variant="ghost"
-                        size="icon-xs"
-                        onClick={() => void handleCopy(keyUsageUrl)}
-                        title={t("apiKeys.publicUsageCopyUrl")}
-                      >
-                        <Copy className="size-3.5" />
-                      </Button>
-                      <a
-                        href={keyUsageUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
-                      >
-                        <ExternalLink className="size-3.5" />
-                        {t("apiKeys.publicUsageOpen")}
-                      </a>
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-              <div className="flex shrink-0 flex-wrap items-center gap-2">
-                <Button
-                  variant={publicUsagePageEnabled ? "outline" : "default"}
-                  onClick={() => void handleTogglePublicUsagePage()}
-                  disabled={savingPublicUsagePage}
-                >
-                  {publicUsagePageEnabled ? (
-                    <EyeOff className="size-3.5" />
-                  ) : (
-                    <Eye className="size-3.5" />
-                  )}
-                  {savingPublicUsagePage
-                    ? t("common.saving")
-                    : publicUsagePageEnabled
-                      ? t("apiKeys.disablePublicUsage")
-                      : t("apiKeys.enablePublicUsage")}
-                </Button>
-                <Button
-                  variant="outline"
-                  onClick={() => setCreateDialogOpen(true)}
-                >
-                  <Plus className="size-3.5" />
-                  {t("apiKeys.createKey")}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
         </div>
 
         <Modal
@@ -1126,14 +1631,14 @@ export default function APIKeys() {
         <Modal
           show={Boolean(editingKey)}
           title={t("apiKeys.editTitle")}
-          onClose={closeEditDialog}
+          onClose={() => void closeEditDialog()}
           contentClassName="sm:max-w-[640px]"
           footer={
             <>
               <Button
                 type="button"
                 variant="outline"
-                onClick={closeEditDialog}
+                onClick={() => void closeEditDialog()}
                 disabled={saving}
               >
                 {t("common.cancel")}
@@ -1141,8 +1646,11 @@ export default function APIKeys() {
               <Button
                 type="submit"
                 form="edit-api-key-form"
-                disabled={saving || !editForm.name.trim()}
+                disabled={saving || !editForm.name.trim() || !editDirty}
               >
+                {saving ? (
+                  <Loader2 className="size-3.5 animate-spin" />
+                ) : null}
                 {saving ? t("common.saving") : t("common.save")}
               </Button>
             </>
@@ -1293,6 +1801,86 @@ export default function APIKeys() {
           ) : null}
         </Modal>
 
+        <Modal
+          show={Boolean(createdReveal)}
+          title={t("apiKeys.createdRevealTitle")}
+          onClose={closeCreatedReveal}
+          contentClassName="sm:max-w-[560px]"
+          footer={
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => {
+                  if (createdReveal) void handleCopy(createdReveal.key);
+                }}
+              >
+                <Copy className="size-3.5" />
+                {t("common.copy")}
+              </Button>
+              <Button
+                type="button"
+                onClick={closeCreatedReveal}
+                disabled={!createdRevealAck}
+              >
+                <Check className="size-3.5" />
+                {t("apiKeys.createdRevealDone")}
+              </Button>
+            </>
+          }
+        >
+          {createdReveal ? (
+            <div className="space-y-4">
+              <div className="flex items-start gap-3 rounded-xl border border-[hsl(var(--warning))]/25 bg-[hsl(var(--warning-bg))] p-3">
+                <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-[hsl(var(--warning))]/15 text-[hsl(var(--warning))]">
+                  <ShieldAlert className="size-4" />
+                </div>
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-foreground">
+                    {t("apiKeys.createdRevealWarnTitle")}
+                  </div>
+                  <p className="mt-1 text-sm leading-relaxed text-muted-foreground">
+                    {t("apiKeys.createdRevealWarnDesc")}
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="text-xs font-semibold text-muted-foreground">
+                  {createdReveal.name}
+                </div>
+                <div className="flex items-center gap-2">
+                  <code className="min-w-0 flex-1 break-all rounded-xl border border-border bg-muted/50 px-3 py-2.5 font-mono text-[13px] leading-relaxed text-foreground">
+                    {createdReveal.key}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={() => void handleCopy(createdReveal.key)}
+                    title={t("common.copy")}
+                  >
+                    <Copy className="size-4" />
+                  </Button>
+                </div>
+              </div>
+
+              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border bg-card px-3 py-2.5">
+                <input
+                  type="checkbox"
+                  className="mt-0.5 size-4 rounded border-border accent-primary"
+                  checked={createdRevealAck}
+                  onChange={(event) =>
+                    setCreatedRevealAck(event.target.checked)
+                  }
+                />
+                <span className="text-sm leading-relaxed text-foreground">
+                  {t("apiKeys.createdRevealAck")}
+                </span>
+              </label>
+            </div>
+          ) : null}
+        </Modal>
+
         {confirmDialog}
       </>
     </StateShell>
@@ -1433,9 +2021,7 @@ function toDateTimeLocalValue(value?: string | null) {
   return local.toISOString().slice(0, 16);
 }
 
-function getAPIKeyStatus(
-  keyRow: APIKeyRow,
-): "active" | "expired" | "quota_exhausted" {
+function getAPIKeyStatus(keyRow: APIKeyRow): APIKeyStatus {
   if (keyRow.status === "expired" || keyRow.status === "quota_exhausted") {
     return keyRow.status;
   }
@@ -1449,6 +2035,76 @@ function getAPIKeyStatus(
     return "quota_exhausted";
   }
   return "active";
+}
+
+function usageToneClass(pct: number) {
+  if (pct >= 90) return "bg-destructive";
+  if (pct >= 70) return "bg-[hsl(var(--warning))]";
+  return "bg-[hsl(var(--success))]";
+}
+
+function UsageBar({
+  used,
+  limit,
+  className,
+  showPercent = false,
+}: {
+  used: number;
+  limit: number;
+  className?: string;
+  showPercent?: boolean;
+}) {
+  if (!limit || limit <= 0) return null;
+  const pct = Math.min(100, Math.max(0, (used / limit) * 100));
+  return (
+    <div className={cn("space-y-1", className)}>
+      <div className="h-1.5 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn("h-full rounded-full transition-all", usageToneClass(pct))}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {showPercent ? (
+        <div className="text-[10px] font-medium tabular-nums text-muted-foreground">
+          {pct.toFixed(0)}%
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function KeyStatusBadge({
+  status,
+  t,
+}: {
+  status: APIKeyStatus;
+  t: Translator;
+}) {
+  const config = {
+    active: {
+      dot: "bg-[hsl(var(--success))]",
+      className:
+        "border-transparent bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]",
+    },
+    expired: {
+      dot: "bg-muted-foreground",
+      className: "border-transparent bg-muted text-muted-foreground",
+    },
+    quota_exhausted: {
+      dot: "bg-destructive",
+      className: "border-transparent bg-destructive/10 text-destructive",
+    },
+  }[status];
+
+  return (
+    <Badge
+      variant="outline"
+      className={cn("gap-1.5 px-1.5 py-0 text-[11px] font-semibold", config.className)}
+    >
+      <span className={cn("size-1.5 rounded-full", config.dot)} />
+      {t(`apiKeys.status.${status}`)}
+    </Badge>
+  );
 }
 
 function formatQuotaLimit(keyRow: APIKeyRow, t: Translator) {
@@ -1466,6 +2122,13 @@ function formatExpiration(keyRow: APIKeyRow, t: Translator) {
     return t("apiKeys.neverExpires");
   }
   return formatBeijingTime(keyRow.expires_at);
+}
+
+function formatLastUsed(keyRow: APIKeyRow, t: Translator) {
+  if (!keyRow.last_used_at) {
+    return t("apiKeys.neverUsed");
+  }
+  return formatRelativeTime(keyRow.last_used_at, { variant: "compact" });
 }
 
 function formatUSD(value: number) {
@@ -1490,14 +2153,17 @@ function WindowCostBars({
     bars.push({ label: "7d", used: usage.cost_7d, limit: limits.cost_limit_7d });
   }
   if (limits.cost_limit_30d && limits.cost_limit_30d > 0) {
-    bars.push({ label: "30d", used: usage.cost_30d, limit: limits.cost_limit_30d });
+    bars.push({
+      label: "30d",
+      used: usage.cost_30d,
+      limit: limits.cost_limit_30d,
+    });
   }
   if (bars.length === 0) return null;
   return (
     <div className="mt-1.5 space-y-1">
       {bars.map((bar) => {
         const pct = Math.min(100, Math.max(0, (bar.used / bar.limit) * 100));
-        const isOver = pct >= 100;
         return (
           <div key={bar.label} className="flex items-center gap-1.5">
             <span className="w-6 text-[10px] font-medium text-muted-foreground">
@@ -1505,11 +2171,14 @@ function WindowCostBars({
             </span>
             <div className="h-1.5 w-20 overflow-hidden rounded-full bg-muted">
               <div
-                className={`h-full rounded-full ${isOver ? "bg-destructive" : "bg-primary/70"}`}
+                className={cn(
+                  "h-full rounded-full transition-all",
+                  usageToneClass(pct),
+                )}
                 style={{ width: `${pct}%` }}
               />
             </div>
-            <span className="text-[10px] text-muted-foreground">
+            <span className="text-[10px] tabular-nums text-muted-foreground">
               {formatUSD(bar.used)}/{formatUSD(bar.limit)}
             </span>
           </div>
@@ -1635,7 +2304,7 @@ function GroupMultiSelect({
   );
 }
 
-// LimitsEditor 渲染 API Key 的"高级限制"配置:模型白/黑名单 + 滑动窗口配额。
+// LimitsEditor 渲染 API Key 的"高级限制"配置:模型策略 / 限流 / 成本 / Token 分区卡片。
 // 默认折叠,有任一字段非默认时展开。
 function LimitsEditor({
   value,
@@ -1677,12 +2346,24 @@ function LimitsEditor({
     onChange({ ...value, ...next });
 
   const limitsContent = (
-    <div className={expanded ? "space-y-3" : "space-y-3 border-t border-border p-3"}>
-      <p className="text-[11px] text-muted-foreground">
+    <div
+      className={cn(
+        "space-y-3",
+        expanded ? "" : "border-t border-border p-3",
+      )}
+    >
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
         {t("apiKeys.limits.desc")}
       </p>
-          <div className="space-y-2">
-            <label className="text-xs font-medium">
+
+      <LimitSection
+        icon={<SlidersHorizontal className="size-3.5" />}
+        title={t("apiKeys.limits.sectionModels")}
+        description={t("apiKeys.limits.sectionModelsDesc")}
+      >
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">
               {t("apiKeys.limits.modelAllow")}
             </label>
             <ChipInput
@@ -1695,8 +2376,8 @@ function LimitsEditor({
               {t("apiKeys.limits.modelAllowHint")}
             </p>
           </div>
-          <div className="space-y-2">
-            <label className="text-xs font-medium">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">
               {t("apiKeys.limits.modelDeny")}
             </label>
             <ChipInput
@@ -1709,8 +2390,8 @@ function LimitsEditor({
               {t("apiKeys.limits.modelDenyHint")}
             </p>
           </div>
-          <div className="space-y-2">
-            <label className="text-xs font-medium">
+          <div className="space-y-1.5">
+            <label className="text-xs font-medium text-foreground">
               {t("apiKeys.limits.planAllow")}
             </label>
             <PlanMultiSelect
@@ -1722,58 +2403,109 @@ function LimitsEditor({
               {t("apiKeys.limits.planAllowHint")}
             </p>
           </div>
-          <div className="grid grid-cols-2 gap-3">
-            <LimitNumberField
-              label={t("apiKeys.limits.rpm")}
-              value={value.rpm}
-              onChange={(rpm) => patch({ rpm })}
-              suffix={t("apiKeys.limits.rpmSuffix")}
-            />
-            <LimitNumberField
-              label={t("apiKeys.limits.rpd")}
-              value={value.rpd}
-              onChange={(rpd) => patch({ rpd })}
-              suffix={t("apiKeys.limits.rpdSuffix")}
-            />
-            <LimitNumberField
-              label={t("apiKeys.limits.maxConcurrency")}
-              value={value.maxConcurrency}
-              onChange={(maxConcurrency) => patch({ maxConcurrency })}
-              suffix={t("apiKeys.limits.concurrencySuffix")}
-            />
-            <LimitNumberField
-              label={t("apiKeys.limits.cost5h")}
-              value={value.costLimit5h}
-              onChange={(costLimit5h) => patch({ costLimit5h })}
-              suffix="$"
-              step="0.01"
-            />
-            <LimitNumberField
-              label={t("apiKeys.limits.cost7d")}
-              value={value.costLimit7d}
-              onChange={(costLimit7d) => patch({ costLimit7d })}
-              suffix="$"
-              step="0.01"
-            />
-            <LimitNumberField
-              label={t("apiKeys.limits.cost30d")}
-              value={value.costLimit30d}
-              onChange={(costLimit30d) => patch({ costLimit30d })}
-              suffix="$"
-              step="0.01"
-            />
-          </div>
         </div>
-    );
+      </LimitSection>
+
+      <LimitSection
+        icon={<Gauge className="size-3.5" />}
+        title={t("apiKeys.limits.sectionRate")}
+        description={t("apiKeys.limits.sectionRateDesc")}
+      >
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <LimitNumberField
+            label={t("apiKeys.limits.rpm")}
+            value={value.rpm}
+            onChange={(rpm) => patch({ rpm })}
+            suffix={t("apiKeys.limits.rpmSuffix")}
+          />
+          <LimitNumberField
+            label={t("apiKeys.limits.rpd")}
+            value={value.rpd}
+            onChange={(rpd) => patch({ rpd })}
+            suffix={t("apiKeys.limits.rpdSuffix")}
+          />
+          <LimitNumberField
+            label={t("apiKeys.limits.maxConcurrency")}
+            value={value.maxConcurrency}
+            onChange={(maxConcurrency) => patch({ maxConcurrency })}
+            suffix={t("apiKeys.limits.concurrencySuffix")}
+          />
+        </div>
+      </LimitSection>
+
+      <LimitSection
+        icon={<CircleDollarSign className="size-3.5" />}
+        title={t("apiKeys.limits.sectionCost")}
+        description={t("apiKeys.limits.sectionCostDesc")}
+      >
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
+          <LimitNumberField
+            label={t("apiKeys.limits.cost5h")}
+            value={value.costLimit5h}
+            onChange={(costLimit5h) => patch({ costLimit5h })}
+            suffix="$"
+            step="0.01"
+          />
+          <LimitNumberField
+            label={t("apiKeys.limits.cost7d")}
+            value={value.costLimit7d}
+            onChange={(costLimit7d) => patch({ costLimit7d })}
+            suffix="$"
+            step="0.01"
+          />
+          <LimitNumberField
+            label={t("apiKeys.limits.cost30d")}
+            value={value.costLimit30d}
+            onChange={(costLimit30d) => patch({ costLimit30d })}
+            suffix="$"
+            step="0.01"
+          />
+        </div>
+      </LimitSection>
+
+      <LimitSection
+        icon={<KeyRound className="size-3.5" />}
+        title={t("apiKeys.limits.sectionTokens")}
+        description={t("apiKeys.limits.sectionTokensDesc")}
+      >
+        <div className="grid grid-cols-1 gap-3">
+          <TokenLimitField
+            label={t("apiKeys.limits.tokens5h")}
+            value={value.tokenLimit5h}
+            unit={value.tokenLimit5hUnit}
+            unitOptions={tokenUnitOptions}
+            onValueChange={(tokenLimit5h) => patch({ tokenLimit5h })}
+            onUnitChange={(tokenLimit5hUnit) => patch({ tokenLimit5hUnit })}
+          />
+          <TokenLimitField
+            label={t("apiKeys.limits.tokens7d")}
+            value={value.tokenLimit7d}
+            unit={value.tokenLimit7dUnit}
+            unitOptions={tokenUnitOptions}
+            onValueChange={(tokenLimit7d) => patch({ tokenLimit7d })}
+            onUnitChange={(tokenLimit7dUnit) => patch({ tokenLimit7dUnit })}
+          />
+          <TokenLimitField
+            label={t("apiKeys.limits.tokens30d")}
+            value={value.tokenLimit30d}
+            unit={value.tokenLimit30dUnit}
+            unitOptions={tokenUnitOptions}
+            onValueChange={(tokenLimit30d) => patch({ tokenLimit30d })}
+            onUnitChange={(tokenLimit30dUnit) => patch({ tokenLimit30dUnit })}
+          />
+        </div>
+      </LimitSection>
+    </div>
+  );
 
   if (expanded) return limitsContent;
 
   return (
-    <div className="rounded-lg border border-border">
+    <div className="overflow-hidden rounded-xl border border-border">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
-        className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium hover:bg-muted/30 transition-colors"
+        className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium transition-colors hover:bg-muted/30"
       >
         <span className="flex items-center gap-2">
           <span>{t("apiKeys.limits.title")}</span>
@@ -1788,6 +2520,105 @@ function LimitsEditor({
         </span>
       </button>
       {open && limitsContent}
+    </div>
+  );
+}
+
+function LimitSection({
+  icon,
+  title,
+  description,
+  children,
+}: {
+  icon: ReactNode;
+  title: string;
+  description: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-border/80 bg-muted/15 p-3">
+      <div className="mb-3 flex items-start gap-2.5">
+        <div className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-background text-primary shadow-sm ring-1 ring-border/70">
+          {icon}
+        </div>
+        <div className="min-w-0">
+          <div className="text-xs font-semibold uppercase tracking-wide text-foreground">
+            {title}
+          </div>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+            {description}
+          </p>
+        </div>
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function APIKeysSkeleton() {
+  return (
+    <div className="space-y-4" aria-busy="true" aria-live="polite">
+      <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+        <div className="space-y-2">
+          <div className="h-8 w-40 animate-pulse rounded-lg bg-muted" />
+          <div className="h-4 w-72 max-w-full animate-pulse rounded-md bg-muted/70" />
+        </div>
+        <div className="flex gap-2">
+          <div className="h-8 w-20 animate-pulse rounded-lg bg-muted" />
+          <div className="h-8 w-28 animate-pulse rounded-lg bg-muted" />
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3 xl:grid-cols-4">
+        {[0, 1, 2, 3].map((i) => (
+          <Card key={i} className="py-0">
+            <CardContent className="space-y-3 p-4">
+              <div className="h-3 w-16 animate-pulse rounded bg-muted" />
+              <div className="h-7 w-12 animate-pulse rounded bg-muted" />
+              <div className="h-3 w-24 animate-pulse rounded bg-muted/70" />
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+      <div className="h-9 w-52 animate-pulse rounded-xl bg-muted/60" />
+      <div className="toolbar-surface space-y-2.5">
+        <div className="flex gap-2">
+          {[0, 1, 2, 3, 4].map((i) => (
+            <div
+              key={i}
+              className="h-7 w-16 animate-pulse rounded-lg bg-muted"
+            />
+          ))}
+        </div>
+        <div className="h-8 w-full max-w-sm animate-pulse rounded-lg bg-muted/70" />
+      </div>
+      <div className="data-table-shell hidden overflow-hidden lg:block">
+        <div className="space-y-0">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <div
+              key={i}
+              className="flex items-center gap-4 border-b border-border/70 px-4 py-3.5 last:border-b-0"
+            >
+              <div className="h-4 w-28 animate-pulse rounded bg-muted" />
+              <div className="h-4 w-40 animate-pulse rounded bg-muted/70" />
+              <div className="h-4 w-20 animate-pulse rounded bg-muted/60" />
+              <div className="h-4 w-24 animate-pulse rounded bg-muted/50" />
+              <div className="ml-auto h-4 w-16 animate-pulse rounded bg-muted/40" />
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="grid gap-3 lg:hidden">
+        {[0, 1, 2].map((i) => (
+          <div
+            key={i}
+            className="space-y-3 rounded-2xl border border-border/80 bg-card p-3.5"
+          >
+            <div className="h-4 w-32 animate-pulse rounded bg-muted" />
+            <div className="h-8 w-full animate-pulse rounded-lg bg-muted/70" />
+            <div className="h-12 w-full animate-pulse rounded-xl bg-muted/50" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
@@ -1958,46 +2789,4 @@ function FormField({
   );
 }
 
-function KeySummaryCard({
-  icon,
-  label,
-  value,
-  sub,
-  tone,
-}: {
-  icon: ReactNode;
-  label: string;
-  value: string;
-  sub: string;
-  tone: "neutral" | "info" | "success" | "warning";
-}) {
-  const toneClassName = {
-    neutral: "bg-muted text-muted-foreground",
-    info: "bg-primary/10 text-primary",
-    success: "bg-[hsl(var(--success-bg))] text-[hsl(var(--success))]",
-    warning: "bg-[hsl(var(--warning-bg))] text-[hsl(var(--warning))]",
-  }[tone];
 
-  return (
-    <Card className="py-0">
-      <CardContent className="flex items-center justify-between gap-3 p-4">
-        <div className="min-w-0">
-          <div className="text-[11px] font-bold uppercase text-muted-foreground">
-            {label}
-          </div>
-          <div className="mt-2 truncate text-[24px] font-bold leading-none text-foreground">
-            {value}
-          </div>
-          <div className="mt-2 truncate text-xs text-muted-foreground">
-            {sub}
-          </div>
-        </div>
-        <div
-          className={`flex size-10 shrink-0 items-center justify-center rounded-lg ${toneClassName}`}
-        >
-          {icon}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
