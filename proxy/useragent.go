@@ -15,8 +15,8 @@ import (
 //   {originator}/{version} ({OS} {OS_version}; {arch}) {terminal} ({originator}; {version})
 //
 // 示例：
-//   codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)
-//   codex-tui/0.142.0-alpha.10 (Mac OS 13.7.8; arm64) xterm-256color (codex-tui; 0.142.0-alpha.10)
+//   codex-tui/0.144.1 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.144.1)
+//   codex-tui/0.144.0-alpha.10 (Mac OS 13.7.8; arm64) xterm-256color (codex-tui; 0.144.0-alpha.10)
 
 // ClientProfile 表示一个模拟客户端的完整身份
 type ClientProfile struct {
@@ -26,7 +26,7 @@ type ClientProfile struct {
 
 const (
 	latestCodexClientName          = "codex-tui"
-	latestCodexCLIVersion          = "0.142.3"
+	latestCodexCLIVersion          = "0.144.1"
 	latestCodexCLIUserAgentPrefix  = "codex-tui/" + latestCodexCLIVersion
 	defaultCodexUserAgentOSName    = "Mac OS"
 	defaultCodexUserAgentOSVersion = "15.5.0"
@@ -157,7 +157,7 @@ func validateCodexUserAgentConfig(cfg CodexUserAgentConfig) error {
 		}
 	}
 	if cfg.ClientVersion != "" && !validCodexClientVersionString(cfg.ClientVersion) {
-		return errors.New("codex User-Agent client_version must be a semantic version like 0.142.3 or 0.142.0-alpha.10")
+		return errors.New("codex User-Agent client_version must be a semantic version like 0.144.1 or 0.144.0-alpha.10")
 	}
 	tokenFields := map[string]string{
 		"client_name":    cfg.ClientName,

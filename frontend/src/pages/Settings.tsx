@@ -95,7 +95,7 @@ const AUTO_SAVE_TOAST_MS = 2000
 const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   raw_user_agent: '',
   client_name: 'codex-tui',
-  client_version: '0.142.3',
+  client_version: '0.144.1',
   os_name: 'Mac OS',
   os_version: '15.5.0',
   arch: 'arm64',
@@ -2241,7 +2241,7 @@ export default function Settings() {
                   <Input
                     className="font-mono text-xs"
                     value={codexUserAgentConfig.raw_user_agent ?? ''}
-                    placeholder="codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)"
+                    placeholder="codex-tui/0.144.1 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.144.1)"
                     onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ raw_user_agent: e.target.value })}
                     onBlur={saveCodexUserAgentConfig}
                   />
