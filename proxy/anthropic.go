@@ -57,6 +57,39 @@ type anthropicContentBlock struct {
 	IsError   bool                  `json:"is_error,omitempty"`
 }
 
+func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
+	type contentBlock struct {
+		Type      string                `json:"type"`
+		Text      *string               `json:"text,omitempty"`
+		Thinking  *string               `json:"thinking,omitempty"`
+		Source    *anthropicImageSource `json:"source,omitempty"`
+		ID        string                `json:"id,omitempty"`
+		Name      string                `json:"name,omitempty"`
+		Input     json.RawMessage       `json:"input,omitempty"`
+		ToolUseID string                `json:"tool_use_id,omitempty"`
+		Content   json.RawMessage       `json:"content,omitempty"`
+		IsError   bool                  `json:"is_error,omitempty"`
+	}
+
+	out := contentBlock{
+		Type:      b.Type,
+		Source:    b.Source,
+		ID:        b.ID,
+		Name:      b.Name,
+		Input:     b.Input,
+		ToolUseID: b.ToolUseID,
+		Content:   b.Content,
+		IsError:   b.IsError,
+	}
+	if b.Type == "text" || b.Text != "" {
+		out.Text = &b.Text
+	}
+	if b.Type == "thinking" || b.Thinking != "" {
+		out.Thinking = &b.Thinking
+	}
+	return json.Marshal(out)
+}
+
 type anthropicImageSource struct {
 	Type      string `json:"type"`
 	MediaType string `json:"media_type"`

@@ -42,6 +42,56 @@ func TestSendAnthropicStreamErrorEscapesJSON(t *testing.T) {
 	}
 }
 
+func TestAnthropicStreamContentBlockStartPreservesEmptyFields(t *testing.T) {
+	tests := []struct {
+		name  string
+		block anthropicContentBlock
+		field string
+	}{
+		{"thinking block", anthropicContentBlock{Type: "thinking"}, "thinking"},
+		{"text block", anthropicContentBlock{Type: "text"}, "text"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			idx := 0
+			data, err := json.Marshal(anthropicStreamEvent{
+				Type:         "content_block_start",
+				Index:        &idx,
+				ContentBlock: &tc.block,
+			})
+			if err != nil {
+				t.Fatalf("marshal content_block_start: %v", err)
+			}
+
+			field := gjson.GetBytes(data, "content_block."+tc.field)
+			if !field.Exists() || field.String() != "" {
+				t.Fatalf("content_block.%s = %q, exists=%v; body=%s", tc.field, field.String(), field.Exists(), data)
+			}
+		})
+	}
+}
+
+func TestAnthropicStreamToolUseStartOmitsTextAndThinkingFields(t *testing.T) {
+	idx := 0
+	data, err := json.Marshal(anthropicStreamEvent{
+		Type:  "content_block_start",
+		Index: &idx,
+		ContentBlock: &anthropicContentBlock{
+			Type:  "tool_use",
+			ID:    "toolu_abc",
+			Name:  "Read",
+			Input: json.RawMessage("{}"),
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal content_block_start: %v", err)
+	}
+	if gjson.GetBytes(data, "content_block.text").Exists() || gjson.GetBytes(data, "content_block.thinking").Exists() {
+		t.Fatalf("tool_use content_block_start should not include text/thinking fields; body=%s", data)
+	}
+}
+
 func TestTranslateAnthropicToCodex_OutputConfigEffortTakesPrecedence(t *testing.T) {
 	raw := []byte(`{
 		"model":"claude-sonnet-4-5",
