@@ -295,16 +295,11 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		headers.Set("X-Codex-Beta-Features", strings.TrimSpace(deviceCfg.BetaFeatures))
 	}
 
-	strict := proxy.MimicStrictHeadersEnabled()
-	downstreamOriginator := strings.TrimSpace(ginHeaders.Get("Originator"))
-
-	// Originator（legacy：始终发；strict：由 ApplyStrictCodexWSHeaders 统一处理）
-	if !strict {
-		if !usedGeneratedHeaders && downstreamOriginator != "" && proxy.IsCodexOfficialClientByHeaders("", downstreamOriginator) {
-			headers.Set("Originator", downstreamOriginator)
-		} else {
-			headers.Set("Originator", proxy.Originator)
-		}
+	// Originator
+	if originator := strings.TrimSpace(ginHeaders.Get("Originator")); !usedGeneratedHeaders && originator != "" && proxy.IsCodexOfficialClientByHeaders("", originator) {
+		headers.Set("Originator", originator)
+	} else {
+		headers.Set("Originator", proxy.Originator)
 	}
 	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
@@ -316,13 +311,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	if accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
-
-	sessionID = strings.TrimSpace(sessionID)
-	if strict {
-		// strict：originator 条件移除 + session-id/thread-id + x-codex-* 指纹，
-		// 与 HTTP 路径及官方 codex-rs 客户端逐字节一致。
-		proxy.ApplyStrictCodexWSHeaders(headers, accountID, apiKey, sessionID, downstreamOriginator, usedGeneratedHeaders)
-	} else if sessionID != "" {
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
 		headers.Set("Session_id", sessionID)
 		headers.Set("Conversation_id", sessionID)
 	}
@@ -357,9 +346,6 @@ type WsResponse struct {
 	closed      bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
-	// streamRespID 本请求流首个 response_id；被动串扰检测用——一个请求流本应自始至终
-	// 一个 response_id，出现第二个不同的即别的请求帧串入本流（帧级串扰）。
-	streamRespID string
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
 	// Close() 据此销毁坏连接而非归还连接池复用。受 mu 保护。
 	connBroken bool
@@ -371,11 +357,6 @@ type WsResponse struct {
 	streamCompleted bool
 	mu              sync.Mutex
 }
-
-// OnSessionBleedDetected 被动会话串扰检测钩子：当一个请求流内出现第二个不同的
-// response_id（别的请求的帧串入本流）时调用。由 proxy 在 main.go 注册为异步写库。
-// nil 时不检测。纯观察，不影响流式行为。
-var OnSessionBleedDetected func(accountID int64, prevRespID, newRespID string)
 
 // ReadStream 读取 SSE 流
 func (r *WsResponse) ReadStream(callback func(data []byte) bool) error {
@@ -444,23 +425,6 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 		// 归还池中复用会把残留帧串给下一个请求(issue #308)。
 		r.markConnBroken()
 		return io.EOF
-	}
-
-	// 被动会话串扰检测：一个请求流应自始至终一个 response_id；出现第二个不同的
-	// = 别的请求的帧串入本流（帧级串扰，issue #268/#308 家族）。纯观察不改行为。
-	if rid := gjson.GetBytes(payload, "response.id").String(); rid != "" {
-		if r.streamRespID == "" {
-			r.streamRespID = rid
-		} else if rid != r.streamRespID {
-			if OnSessionBleedDetected != nil {
-				accountID := int64(0)
-				if r.conn != nil && r.conn.session != nil {
-					accountID = r.conn.session.AccountID
-				}
-				OnSessionBleedDetected(accountID, r.streamRespID, rid)
-			}
-			r.streamRespID = rid
-		}
 	}
 
 	// 检查是否是终止事件

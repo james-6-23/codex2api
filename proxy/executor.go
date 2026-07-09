@@ -765,102 +765,9 @@ func applyCodexAllowedForwardHeaders(req *http.Request, downstreamHeaders http.H
 // 由 responses=experimental 启用 Responses API。此处用于 strict 模式补齐 HTTP 头。
 const codexOpenAIBetaHTTPValue = "responses=experimental"
 
-// deterministicCodexClientUUID 生成账号级确定性 UUID（v5/SHA1），用于伪造
-// x-codex-installation-id / x-codex-window-id 等客户端指纹头，使同一账号在多次请求
-// 间保持稳定身份（真实 CLI 的这些 id 在一次安装/一个窗口内是固定的）。
-func deterministicCodexClientUUID(kind, seed string) string {
-	return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:x-codex:"+kind+":"+seed)).String()
-}
-
 // codexBetaFeaturesValue 是实测 codex 0.142.5 /responses 请求携带的 x-codex-beta-features。
 // 该值随版本/灰度变化，集中在此便于跟随真实客户端更新。
 const codexBetaFeaturesValue = "remote_compaction_v2"
-
-// applyCodexClientFingerprintHeaders 注入与真实 codex 0.142.5 一致的 x-codex-* 客户端指纹头
-// （见 codex-fpcap/BASELINE.md）。真实客户端**不发** x-codex-installation-id（installation_id
-// 放在 x-codex-turn-metadata JSON 内），而是发：x-codex-beta-features、x-codex-window-id(带:0)、
-// x-codex-turn-metadata(JSON)、x-client-request-id、thread-id。installation 用账号级确定性 UUID
-// 保持同账号稳定（设备身份）；session/thread 等会话身份仅在显式会话时跟随会话，
-// 无显式会话时逐次随机（防跨用户串流，见函数内注释）；turn_id 每次新生成。HTTP 与 WS 两条路径共用本函数。
-func applyCodexClientFingerprintHeaders(h http.Header, accountID, apiKey, sessionID string) {
-	if h == nil {
-		return
-	}
-	seed := strings.TrimSpace(accountID)
-	if seed == "" {
-		seed = strings.TrimSpace(apiKey)
-	}
-	if seed == "" {
-		return
-	}
-	sid := strings.TrimSpace(sessionID)
-	if sid == "" {
-		// 官方 A（2026-07-09）：无显式会话请求（桥接 stateless）不发任何会话级 x-codex-* 身份头。
-		// WS 握手头逐连接冻结，复用连接上后续用户会继承建连那次的会话身份 → 上游把不同终端用户的
-		// 并发流当成同一对话 → 跨用户串扰（2026-07-09 生产事故；issue #268/#308）。与官方 james-6-23
-		// 一致：stateless 不发会话身份，隔离靠帧体每请求唯一 prompt_cache_key；连接级伪装（TLS/UA/
-		// Originator）保留。显式会话（真 codex 会话）照发全套 byte-exact 指纹，下面不变。
-		return
-	}
-	installationID := deterministicCodexClientUUID("installation", seed)
-	threadID := sid
-	windowID := sid + ":0"
-	turnID := uuid.NewString()
-
-	if h.Get("x-codex-beta-features") == "" {
-		h.Set("x-codex-beta-features", codexBetaFeaturesValue)
-	}
-	if h.Get("x-codex-window-id") == "" {
-		h.Set("x-codex-window-id", windowID)
-	}
-	if h.Get("x-codex-turn-metadata") == "" {
-		meta := fmt.Sprintf(`{"installation_id":%q,"session_id":%q,"thread_id":%q,"turn_id":%q,"window_id":%q,"request_kind":"turn","thread_source":"user","sandbox":"none","turn_started_at_unix_ms":%d}`,
-			installationID, sid, threadID, turnID, windowID, time.Now().UnixMilli())
-		h.Set("x-codex-turn-metadata", meta)
-	}
-	if h.Get("x-client-request-id") == "" {
-		h.Set("x-client-request-id", sid)
-	}
-	if h.Get("thread-id") == "" {
-		h.Set("thread-id", threadID)
-	}
-}
-
-// MimicStrictHeadersEnabled 导出当前是否处于 strict 伪装模式，供 wsrelay 等其他包复用，
-// 使 HTTP 与 WS 两条上游路径的伪装行为保持一致。
-func MimicStrictHeadersEnabled() bool {
-	return CurrentRuntimeSettings().MimicStrictHeaders()
-}
-
-// StrictDefaultOriginatorValue 导出官方默认 originator（codex_cli_rs）。
-func StrictDefaultOriginatorValue() string { return StrictDefaultOriginator }
-
-// ApplyStrictCodexWSHeaders 在 strict 模式下调整 WS 握手头，使其与 HTTP 路径及官方
-// codex-rs 客户端一致：originator 等于默认值时移除、会话头改用 session-id/thread-id、
-// 注入 x-codex-* 客户端指纹头。仅在 strict 模式调用。
-//   - hadDownstreamOriginator: 下游是否显式带了非默认官方 originator（决定是否保留）
-//   - sessionID: 会话/缓存键（空则不设会话头）
-func ApplyStrictCodexWSHeaders(headers http.Header, accountID, apiKey, sessionID, downstreamOriginator string, usedGeneratedHeaders bool) {
-	if headers == nil {
-		return
-	}
-	// Originator：对齐 add_originator_header
-	if !usedGeneratedHeaders && strings.TrimSpace(downstreamOriginator) != "" &&
-		!strings.EqualFold(strings.TrimSpace(downstreamOriginator), StrictDefaultOriginator) &&
-		IsCodexOfficialClientByHeaders("", downstreamOriginator) {
-		headers.Set("Originator", strings.TrimSpace(downstreamOriginator))
-	} else {
-		headers.Del("Originator")
-	}
-	// 会话头：session-id / thread-id（连字符）
-	if strings.TrimSpace(sessionID) != "" {
-		headers.Del("Session_id")
-		headers.Del("Conversation_id")
-		headers.Set("session-id", sessionID)
-	}
-	// x-codex-* 客户端指纹（与 HTTP 路径共用，对齐真实 codex 0.142.5）
-	applyCodexClientFingerprintHeaders(headers, accountID, apiKey, sessionID)
-}
 
 // codexZstdEncoder 无状态一次性 zstd 编码器（EncodeAll 并发安全）。
 var codexZstdEncoder, _ = zstd.NewWriter(nil)
@@ -922,8 +829,6 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		account.Mu().RUnlock()
 	}
 
-	strict := CurrentRuntimeSettings().MimicStrictHeaders()
-
 	userAgent, version, usedGeneratedHeaders := resolveCodexOutboundClientHeaders(account, apiKey, deviceCfg, downstreamHeaders)
 	req.Header.Set("User-Agent", userAgent)
 
@@ -934,54 +839,18 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if version != "" {
 		req.Header.Set("Version", version)
 	}
-
-	// ---- Originator ----
-	// strict：对齐官方 add_originator_header —— 当 originator 等于默认值(codex_cli_rs)
-	// 时不发 Originator 头（服务端从 UA 解析）；仅当下游显式带了非默认的官方 originator
-	// 才转发。legacy：保持历史行为，始终发 Originator（默认 codex-tui）。
-	downstreamOriginator := strings.TrimSpace(downstreamHeaders.Get("Originator"))
-	if strict {
-		if !usedGeneratedHeaders && downstreamOriginator != "" &&
-			!strings.EqualFold(downstreamOriginator, StrictDefaultOriginator) &&
-			IsCodexOfficialClientByHeaders("", downstreamOriginator) {
-			req.Header.Set("Originator", downstreamOriginator)
-		} else {
-			req.Header.Del("Originator")
-		}
+	if originator := strings.TrimSpace(downstreamHeaders.Get("Originator")); !usedGeneratedHeaders && originator != "" && IsCodexOfficialClientByHeaders("", originator) {
+		req.Header.Set("Originator", originator)
 	} else {
-		if !usedGeneratedHeaders && downstreamOriginator != "" && IsCodexOfficialClientByHeaders("", downstreamOriginator) {
-			req.Header.Set("Originator", downstreamOriginator)
-		} else {
-			req.Header.Set("Originator", Originator)
-		}
+		req.Header.Set("Originator", Originator)
 	}
-
-	// ---- OpenAI-Beta ----
-	// 实测 codex 0.142.5：HTTP /responses 回退路径**不发** OpenAI-Beta（仅 WebSocket
-	// 握手发 responses_websockets=2026-02-06，见 wsrelay）。故 strict 下 HTTP 不再补该头。
-	// 若下游显式带了 OpenAI-Beta 则透传（保持兼容）。
-
 	applyCodexAllowedForwardHeaders(req, downstreamHeaders)
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
-
-	// ---- 会话/线程头 ----
-	// strict：对齐官方 build_session_headers —— 用连字符 session-id/thread-id。
-	// legacy：保持历史 Session_id + 删除 Conversation_id。
 	if cacheKey != "" {
-		if strict {
-			req.Header.Del("Session_id")
-			req.Header.Del("Conversation_id")
-			req.Header.Set("session-id", cacheKey)
-		} else {
-			req.Header.Set("Session_id", cacheKey)
-			req.Header.Del("Conversation_id")
-		}
-	}
-
-	if strict {
-		applyCodexClientFingerprintHeaders(req.Header, accountID, apiKey, cacheKey)
+		req.Header.Set("Session_id", cacheKey)
+		req.Header.Del("Conversation_id")
 	}
 	applyAccountCustomHeaders(req, account)
 }
