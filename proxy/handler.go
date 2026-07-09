@@ -1284,7 +1284,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	v1.POST("/messages", h.Messages)
 	v1.POST("/messages/count_tokens", h.CountTokens)
 	v1.POST("/responses/input_tokens", h.ResponsesInputTokens)
-	v1.GET("/models", h.ListModels)
+	// Codex CLI / Codex App 从 /models?client_version=... 刷新模型选单，期望
+	// manifest 格式；client_version 是 Codex 客户端的天然指纹，普通 OpenAI
+	// 客户端不携带，其余请求保持 OpenAI 格式列表不变。
+	v1.GET("/models", h.listModelsOrManifest)
 
 	// 无前缀路由（兼容 base_url 已包含 /v1 的客户端）
 	r.POST("/chat/completions", auth, h.ChatCompletions)
@@ -1296,12 +1299,13 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/messages", auth, h.Messages)
 	r.POST("/messages/count_tokens", auth, h.CountTokens)
 	r.POST("/responses/input_tokens", auth, h.ResponsesInputTokens)
-	r.GET("/models", auth, h.ListModels)
+	r.GET("/models", auth, h.listModelsOrManifest)
 
 	codexDirect := r.Group("/backend-api/codex")
 	codexDirect.Use(auth)
 	codexDirect.POST("/responses", h.Responses)
 	codexDirect.GET("/responses", h.ResponsesWebSocket)
+	codexDirect.GET("/models", h.CodexModelsManifestHandler)
 	codexDirect.POST("/responses/*subpath", func(c *gin.Context) {
 		subpath := strings.TrimSpace(c.Param("subpath"))
 		if subpath == "/compact" || strings.HasPrefix(subpath, "/compact/") {
@@ -4460,6 +4464,17 @@ func (h *Handler) handleUpstreamError(c *gin.Context, account *auth.Account, sta
 }
 
 // ListModels 列出可用模型
+// listModelsOrManifest 按客户端形态分发模型列表：带 client_version 查询参数的是
+// Codex 客户端在刷新模型选单（期望 manifest 格式，解析失败会静默冻结在本地缓存），
+// 其余客户端返回 OpenAI 兼容列表。
+func (h *Handler) listModelsOrManifest(c *gin.Context) {
+	if strings.TrimSpace(c.Query("client_version")) != "" {
+		h.CodexModelsManifestHandler(c)
+		return
+	}
+	h.ListModels(c)
+}
+
 func (h *Handler) ListModels(c *gin.Context) {
 	ctx := context.Background()
 	if c != nil && c.Request != nil {

@@ -178,3 +178,102 @@ func TestReasoningEffortModelsAreIncludedInCatalog(t *testing.T) {
 		t.Fatalf("reasoning alias should not be used for direct connection tests")
 	}
 }
+
+func TestExtractManifestModelSlugs(t *testing.T) {
+	manifest := []byte(`{"models":[
+		{"slug":"gpt-5.5","prefer_websockets":true},
+		{"slug":"gpt-5.5"},
+		{"slug":"  "},
+		{"slug":"bad slug with spaces"},
+		{"slug":"gpt-9-new"}
+	]}`)
+	got := ExtractManifestModelSlugs(manifest)
+	want := []string{"gpt-5.5", "gpt-9-new"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("ExtractManifestModelSlugs = %v, want %v", got, want)
+	}
+
+	if got := ExtractManifestModelSlugs([]byte(`{"data":[{"id":"x"}]}`)); got != nil {
+		t.Fatalf("non-manifest shape should yield nil, got %v", got)
+	}
+	if got := ExtractManifestModelSlugs(nil); got != nil {
+		t.Fatalf("empty body should yield nil, got %v", got)
+	}
+}
+
+func TestLearnModelsFromManifest_AddsOnlyUnknownAndNeverTouchesExisting(t *testing.T) {
+	db := newTestModelRegistryDB(t)
+	ctx := context.Background()
+
+	// 预置一条管理员禁用的行:学习绝不能翻案。
+	disabled := database.ModelRegistryRow{
+		ID: "gpt-old", Enabled: false, Category: ModelCategoryCodex, Source: "manual",
+		APIKeyAuthAvailable: true,
+	}
+	if err := db.UpsertModelRegistryRows(ctx, []database.ModelRegistryRow{disabled}); err != nil {
+		t.Fatalf("seed disabled row: %v", err)
+	}
+
+	manifest := []byte(`{"models":[
+		{"slug":"gpt-5.5"},
+		{"slug":"gpt-old"},
+		{"slug":"gpt-9-new"}
+	]}`)
+	added, err := LearnModelsFromManifest(ctx, db, manifest, time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("LearnModelsFromManifest error: %v", err)
+	}
+	if !slices.Equal(added, []string{"gpt-9-new"}) {
+		t.Fatalf("added = %v, want [gpt-9-new] (builtin/existing must be skipped)", added)
+	}
+
+	rows, err := db.ListModelRegistry(ctx)
+	if err != nil {
+		t.Fatalf("ListModelRegistry: %v", err)
+	}
+	var sawNew, sawOld bool
+	for _, row := range rows {
+		switch row.ID {
+		case "gpt-9-new":
+			sawNew = true
+			if !row.Enabled || row.Source != ModelSourceUpstreamManifest {
+				t.Fatalf("learned row = %+v, want enabled with source %s", row, ModelSourceUpstreamManifest)
+			}
+		case "gpt-old":
+			sawOld = true
+			if row.Enabled {
+				t.Fatal("disabled row must never be re-enabled by manifest learning")
+			}
+		}
+	}
+	if !sawNew || !sawOld {
+		t.Fatalf("registry rows missing expected entries: new=%v old=%v", sawNew, sawOld)
+	}
+
+	// 学习后的模型立即进入请求侧支持列表。
+	if !slices.Contains(SupportedModelIDs(ctx, db), "gpt-9-new") {
+		t.Fatal("learned model should appear in SupportedModelIDs immediately")
+	}
+	if slices.Contains(SupportedModelIDs(ctx, db), "gpt-old") {
+		t.Fatal("disabled model must stay out of SupportedModelIDs")
+	}
+}
+
+func TestLearnModelsFromManifest_AllKnownIsNoOp(t *testing.T) {
+	db := newTestModelRegistryDB(t)
+	added, err := LearnModelsFromManifest(context.Background(), db,
+		[]byte(`{"models":[{"slug":"gpt-5.5"},{"slug":"gpt-5.4"}]}`), time.Now().UTC())
+	if err != nil {
+		t.Fatalf("LearnModelsFromManifest error: %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want empty for builtin-only manifest", added)
+	}
+	rows, err := db.ListModelRegistry(context.Background())
+	if err != nil {
+		t.Fatalf("ListModelRegistry: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("no rows should be written for all-known manifest, got %d", len(rows))
+	}
+}

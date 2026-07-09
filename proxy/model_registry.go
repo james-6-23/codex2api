@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/codex2api/database"
+	"github.com/codex2api/security"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -24,6 +26,7 @@ const (
 	ModelSourceBuiltin           = "builtin"
 	ModelSourceOfficialCodexDocs = "official_codex_docs"
 	ModelSourceReasoningEffort   = "reasoning_effort"
+	ModelSourceUpstreamManifest  = "upstream_manifest"
 )
 
 // ModelInfo describes one model exposed by this proxy.
@@ -489,4 +492,85 @@ func modelRegistryMetadataEqual(a database.ModelRegistryRow, b database.ModelReg
 		valueOrDefault(a.Source, "manual") == valueOrDefault(b.Source, "manual") &&
 		a.ProOnly == b.ProOnly &&
 		a.APIKeyAuthAvailable == b.APIKeyAuthAvailable
+}
+
+// ExtractManifestModelSlugs 从上游模型清单里提取 models[].slug。
+// 只依赖 slug 这一个身份字段，清单 schema 的其余演进不影响提取；
+// 非法/超长的名字直接丢弃。解析不出任何 slug 时返回空切片（调用方按 no-op 处理）。
+func ExtractManifestModelSlugs(manifest []byte) []string {
+	if len(manifest) == 0 {
+		return nil
+	}
+	items := gjson.GetBytes(manifest, "models")
+	if !items.IsArray() {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	slugs := make([]string, 0, 8)
+	items.ForEach(func(_, item gjson.Result) bool {
+		slug := strings.TrimSpace(item.Get("slug").String())
+		if slug == "" {
+			return true
+		}
+		if err := security.ValidateModelName(slug); err != nil {
+			return true
+		}
+		key := strings.ToLower(slug)
+		if _, dup := seen[key]; dup {
+			return true
+		}
+		seen[key] = struct{}{}
+		slugs = append(slugs, slug)
+		return true
+	})
+	return slugs
+}
+
+// LearnModelsFromManifest 把上游清单里注册表尚不认识的模型学习进注册表。
+//
+// 严格"只增不改不删"：
+//   - 只插入内置列表和注册表全部行（含已禁用）都没有的新 slug——已存在的行
+//     一个字段不碰，管理员禁用过的模型不会被翻案；
+//   - 清单里缺席的模型不删除：清单反映的是本次所用账号的真实权限，不同套餐
+//     账号看到的清单不同，缺席不代表全局下线，注册表收敛为账号池权限的并集。
+//
+// 返回本次新插入的模型 ID（无新增时为空）。
+func LearnModelsFromManifest(ctx context.Context, db *database.DB, manifest []byte, seenAt time.Time) ([]string, error) {
+	if db == nil {
+		return nil, nil
+	}
+	slugs := ExtractManifestModelSlugs(manifest)
+	if len(slugs) == 0 {
+		return nil, nil
+	}
+
+	known := make(map[string]struct{}, len(builtinModelInfos))
+	for _, info := range builtinModelInfos {
+		known[strings.ToLower(info.ID)] = struct{}{}
+	}
+	rows, err := db.ListModelRegistry(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range rows {
+		known[strings.ToLower(strings.TrimSpace(row.ID))] = struct{}{}
+	}
+
+	newRows := make([]database.ModelRegistryRow, 0, len(slugs))
+	added := make([]string, 0, len(slugs))
+	for _, slug := range slugs {
+		if _, exists := known[strings.ToLower(slug)]; exists {
+			continue
+		}
+		info := modelInfoForID(slug, ModelSourceUpstreamManifest)
+		newRows = append(newRows, modelInfoToRow(info, seenAt))
+		added = append(added, slug)
+	}
+	if len(newRows) == 0 {
+		return nil, nil
+	}
+	if err := db.UpsertModelRegistryRows(ctx, newRows); err != nil {
+		return nil, err
+	}
+	return added, nil
 }
