@@ -1285,14 +1285,49 @@ func TestPopulateCompactUsageMetaFromRequest(t *testing.T) {
 		}
 	})
 
-	t.Run("compaction input item", func(t *testing.T) {
+	t.Run("durable compaction history item", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
 		ctx.Set("raw_body", []byte(`{
 			"model":"gpt-5.4",
 			"input":[
 				{"type":"message","role":"user","content":"hello"},
-				{"type":"compaction","summary":"previous context was compacted"}
+				{"type":"compaction","encrypted_content":"opaque-history"}
+			]
+		}`))
+		input := &database.UsageLogInput{Endpoint: "/v1/responses"}
+
+		populateCompactUsageMetaFromRequest(ctx, input)
+
+		if input.Compact {
+			t.Fatal("Compact = true, want false for durable compaction history item")
+		}
+	})
+
+	t.Run("durable context compaction history item", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("raw_body", []byte(`{
+			"model":"gpt-5.4",
+			"input":{"type":"context_compaction","id":"cmp_123"}
+		}`))
+		input := &database.UsageLogInput{Endpoint: "/v1/responses"}
+
+		populateCompactUsageMetaFromRequest(ctx, input)
+
+		if input.Compact {
+			t.Fatal("Compact = true, want false for durable context_compaction history item")
+		}
+	})
+
+	t.Run("top level compaction trigger array item", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("raw_body", []byte(`{
+			"model":"gpt-5.4",
+			"input":[
+				{"type":"message","role":"user","content":"hello"},
+				{"type":"compaction_trigger"}
 			]
 		}`))
 		input := &database.UsageLogInput{Endpoint: "/v1/responses"}
@@ -1300,23 +1335,36 @@ func TestPopulateCompactUsageMetaFromRequest(t *testing.T) {
 		populateCompactUsageMetaFromRequest(ctx, input)
 
 		if !input.Compact {
-			t.Fatal("Compact = false, want true for compaction input item")
+			t.Fatal("Compact = false, want true for top-level compaction_trigger array item")
 		}
 	})
 
-	t.Run("nested compaction input item", func(t *testing.T) {
+	t.Run("top level compaction trigger object", func(t *testing.T) {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Set("raw_body", []byte(`{
+			"model":"gpt-5.4",
+			"input":{"type":"compaction_trigger"}
+		}`))
+		input := &database.UsageLogInput{Endpoint: "/v1/responses"}
+
+		populateCompactUsageMetaFromRequest(ctx, input)
+
+		if !input.Compact {
+			t.Fatal("Compact = false, want true for top-level compaction_trigger object")
+		}
+	})
+
+	t.Run("nested compaction trigger in tool output", func(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		ctx, _ := gin.CreateTestContext(recorder)
 		ctx.Set("raw_body", []byte(`{
 			"model":"gpt-5.4",
 			"input":[
 				{
-					"type":"message",
-					"role":"developer",
-					"content":[
-						{"type":"input_text","text":"keep this context"},
-						{"type":"compaction","summary":"previous context was compacted"}
-					]
+					"type":"function_call_output",
+					"call_id":"call_123",
+					"output":{"type":"compaction_trigger","value":"ordinary tool data"}
 				}
 			]
 		}`))
@@ -1324,8 +1372,8 @@ func TestPopulateCompactUsageMetaFromRequest(t *testing.T) {
 
 		populateCompactUsageMetaFromRequest(ctx, input)
 
-		if !input.Compact {
-			t.Fatal("Compact = false, want true for nested compaction input item")
+		if input.Compact {
+			t.Fatal("Compact = true, want false for nested compaction_trigger in tool output")
 		}
 	})
 
@@ -2728,6 +2776,64 @@ func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
 	}
 	if id := gjson.GetBytes(recorder.Body.Bytes(), "id").String(); id != "resp_compaction_test" {
 		t.Fatalf("response id = %q, want resp_compaction_test; body=%s", id, recorder.Body.String())
+	}
+}
+
+// A durable compaction item is conversation history, not a request control. It must remain on the
+// normal Responses path even when the account pool contains only relay accounts.
+func TestResponses_CompactionHistoryNotPromotedOnRelayOnlyPool(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenPath string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_history_test",
+			"object":"response",
+			"created_at":1710000000,
+			"model":"gpt-4.1-direct",
+			"output":[],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-4.1-direct"},
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{
+		"model":"gpt-4.1-direct",
+		"input":[
+			{"type":"compaction","encrypted_content":"opaque-history"},
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"continue"}]}
+		]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if seenPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses for durable compaction history", seenPath)
 	}
 }
 

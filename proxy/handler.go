@@ -718,7 +718,7 @@ func populateCompactUsageMetaFromRequest(c *gin.Context, input *database.UsageLo
 	if c == nil {
 		return
 	}
-	if body, ok := rawRequestBodyFromContext(c); ok && requestBodyHasCompactionInput(body) {
+	if body, ok := rawRequestBodyFromContext(c); ok && requestBodyHasCompactionTrigger(body) {
 		input.Compact = true
 	}
 }
@@ -774,9 +774,27 @@ func setRawRequestBody(c *gin.Context, body []byte) {
 	}
 }
 
-func requestBodyHasCompactionInput(body []byte) bool {
+// requestBodyHasCompactionTrigger reports whether input itself, or one of the direct input array
+// items, is the Codex compaction request control. Durable compaction history items and nested tool
+// output data are conversation content, not new compaction requests.
+func requestBodyHasCompactionTrigger(body []byte) bool {
 	input := gjson.GetBytes(body, "input")
-	return gjsonResultHasCompactionInput(input)
+	if !input.Exists() {
+		return false
+	}
+	if !input.IsArray() {
+		return gjsonResultIsCompactionTrigger(input)
+	}
+
+	found := false
+	input.ForEach(func(_, item gjson.Result) bool {
+		if gjsonResultIsCompactionTrigger(item) {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
 }
 
 // storeHasAvailableCodexAccount 判断账号池中是否还有可调度的官方（非中转）账号。
@@ -808,26 +826,8 @@ func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 	}
 }
 
-func gjsonResultHasCompactionInput(result gjson.Result) bool {
-	if !result.Exists() {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(result.Get("type").String())) {
-	case "compaction", "compaction_trigger", "context_compaction":
-		return true
-	}
-	if !result.IsArray() && !result.IsObject() {
-		return false
-	}
-	found := false
-	result.ForEach(func(_, value gjson.Result) bool {
-		if gjsonResultHasCompactionInput(value) {
-			found = true
-			return false
-		}
-		return true
-	})
-	return found
+func gjsonResultIsCompactionTrigger(result gjson.Result) bool {
+	return result.IsObject() && strings.EqualFold(strings.TrimSpace(result.Get("type").String()), "compaction_trigger")
 }
 
 // extractReasoningEffort 从请求体提取推理强度
@@ -1654,7 +1654,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 官方账号全不可用（如纯中转部署）时整体提升到 compact 专用链路——
 	// 该链路对两类账号都能正确完成压缩。
 	pinBodySignalToCodexAccounts := false
-	if requestBodyHasCompactionInput(rawBody) {
+	if requestBodyHasCompactionTrigger(rawBody) {
 		if !h.storeHasAvailableCodexAccount() {
 			h.ResponsesCompact(c)
 			return
