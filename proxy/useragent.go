@@ -104,11 +104,25 @@ func IsCodexStrictOfficialClientByHeaders(userAgent, originator string) bool {
 }
 
 func LatestCodexCLIVersionForHeaders() string {
+	return effectiveLatestCodexCLIVersion()
+}
+
+// effectiveLatestCodexCLIVersion 返回当前生效的"最新 Codex CLI 版本"：
+// 取内置常量与远端同步版本(CodexSyncedCLIVersion)中的较大者，绝不低于内置常量，
+// 因此过期或非法的远端值不会导致降级。
+func effectiveLatestCodexCLIVersion() string {
+	synced := normalizeCodexClientVersionText(CurrentRuntimeSettings().CodexSyncedCLIVersion)
+	if synced == "" {
+		return latestCodexCLIVersion
+	}
+	if cmp, ok := compareCodexClientVersions(synced, latestCodexCLIVersion); ok && cmp > 0 {
+		return synced
+	}
 	return latestCodexCLIVersion
 }
 
 func MinimalCodexCLIUserAgentForHeaders() string {
-	return defaultCodexCLIUserAgent
+	return replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveLatestCodexCLIVersion())
 }
 
 func DefaultCodexUserAgentConfigJSON() string {
@@ -250,7 +264,7 @@ func codexUserAgentFromConfig(raw, versionFloor string) (userAgent, version stri
 		return cfg.RawUserAgent, codexVersionFromUserAgent(cfg.RawUserAgent, strings.TrimSpace(cfg.ClientVersion)), true
 	}
 	clientName := firstNonEmptyString(cfg.ClientName, latestCodexClientName)
-	clientVersion := effectiveCodexClientVersion(firstNonEmptyString(cfg.ClientVersion, latestCodexCLIVersion), versionFloor)
+	clientVersion := effectiveCodexClientVersion(firstNonEmptyString(cfg.ClientVersion, effectiveLatestCodexCLIVersion()), versionFloor)
 	osName := firstNonEmptyString(cfg.OSName, defaultCodexUserAgentOSName)
 	osVersion := firstNonEmptyString(cfg.OSVersion, defaultCodexUserAgentOSVersion)
 	arch := firstNonEmptyString(cfg.Arch, defaultCodexUserAgentArch)

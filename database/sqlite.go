@@ -232,7 +232,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					codex_continue_thinking_enabled INTEGER DEFAULT 0,
 					codex_continue_max_rounds INTEGER DEFAULT 8,
 					retry_interval_ms INTEGER DEFAULT 0,
-					transport_retry_policy TEXT DEFAULT 'rotate'
+					transport_retry_policy TEXT DEFAULT 'rotate',
+					codex_synced_cli_version TEXT DEFAULT ''
 				);`,
 		`CREATE TABLE IF NOT EXISTS model_registry (
 			id TEXT PRIMARY KEY,
@@ -430,6 +431,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "codex_continue_max_rounds", "INTEGER DEFAULT 8"},
 		{"system_settings", "retry_interval_ms", "INTEGER DEFAULT 0"},
 		{"system_settings", "transport_retry_policy", "TEXT DEFAULT 'rotate'"},
+		{"system_settings", "codex_synced_cli_version", "TEXT DEFAULT ''"},
 		{"system_settings", "max_retries", "INTEGER DEFAULT 2"},
 		{"system_settings", "max_rate_limit_retries", "INTEGER DEFAULT 1"},
 		{"system_settings", "allow_remote_migration", "INTEGER DEFAULT 0"},

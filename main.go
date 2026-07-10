@@ -264,6 +264,10 @@ func main() {
 	store.TriggerAutoCleanupAsync()
 	defer store.Stop()
 
+	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后每 12h）；
+	// 出上游新版本门槛时无需发版即可跟进。CODEX_DISABLE_CLI_VERSION_SYNC 可关。
+	proxy.StartCodexCLIVersionSync(context.Background(), db, 12*time.Hour, store.GetProxyURL)
+
 	log.Printf("账号就绪: %d/%d 可用", store.AvailableCount(), store.AccountCount())
 
 	// 6. 启动 HTTP 服务

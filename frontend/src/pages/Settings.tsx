@@ -1219,6 +1219,8 @@ export default function Settings() {
   const [modelsLastSyncedAt, setModelsLastSyncedAt] = useState<string | undefined>()
   const [modelsSourceURL, setModelsSourceURL] = useState('')
   const [syncingModels, setSyncingModels] = useState(false)
+  const [syncingCliVersion, setSyncingCliVersion] = useState(false)
+  const [syncedCliVersion, setSyncedCliVersion] = useState('')
   const logoFileInputRef = useRef<HTMLInputElement>(null)
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
@@ -1520,6 +1522,22 @@ export default function Settings() {
       showToast(`${t('settings.imageS3TestFailed')}: ${getErrorMessage(error)}`, 'error')
     } finally {
       setTestingImageStorage(false)
+    }
+  }
+
+  const handleSyncCliVersion = async () => {
+    setSyncingCliVersion(true)
+    try {
+      const result = await api.syncCodexCLIVersion()
+      setSyncedCliVersion(result.effective_version)
+      showToast(t('settings.cliVersionSyncSuccess', {
+        version: result.effective_version,
+        fetched: result.fetched_version || '-',
+      }))
+    } catch (error) {
+      showToast(`${t('settings.cliVersionSyncFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setSyncingCliVersion(false)
     }
   }
 
@@ -2236,6 +2254,17 @@ export default function Settings() {
                     value={settingsForm.codex_min_cli_version}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
                   />
+                </SettingField>
+                <SettingField label={t('settings.codexCliVersionSync')} description={t('settings.codexCliVersionSyncDesc')}>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="outline" onClick={() => void handleSyncCliVersion()} disabled={syncingCliVersion}>
+                      <RefreshCw className={cn('size-3.5', syncingCliVersion && 'animate-spin')} />
+                      {syncingCliVersion ? t('settings.cliVersionSyncing') : t('settings.cliVersionSyncNow')}
+                    </Button>
+                    {syncedCliVersion && (
+                      <span className="font-mono text-xs text-muted-foreground">{syncedCliVersion}</span>
+                    )}
+                  </div>
                 </SettingField>
                 <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.codexUserAgentRaw')} description={t('settings.codexUserAgentRawDesc')}>
                   <Input
