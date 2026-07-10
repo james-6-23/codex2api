@@ -38,7 +38,7 @@ func (r errReadCloser) Close() error {
 }
 
 func TestSupportedModelsIncludeLatestRequestedModels(t *testing.T) {
-	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
 		if !slices.Contains(SupportedModels, model) {
 			t.Fatalf("SupportedModels missing %q", model)
 		}
@@ -46,10 +46,11 @@ func TestSupportedModelsIncludeLatestRequestedModels(t *testing.T) {
 }
 
 func TestSupportedModelsExcludeBelowGPT52(t *testing.T) {
+	// 5.3 只保留 spark；gpt-5.3-codex、gpt-5.2 及更低模型已下线。
 	for _, model := range []string{
 		"gpt-5", "gpt-5-codex", "gpt-5-codex-mini",
 		"gpt-5.1", "gpt-5.1-codex", "gpt-5.1-codex-mini", "gpt-5.1-codex-max",
-		"gpt-5.2-codex",
+		"gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex",
 	} {
 		if slices.Contains(SupportedModels, model) {
 			t.Fatalf("SupportedModels should not include %q", model)
@@ -83,7 +84,7 @@ func TestListModelsIncludesLatestRequestedModels(t *testing.T) {
 	for _, model := range payload.Data {
 		ids = append(ids, model.ID)
 	}
-	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-image-2"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-image-2"} {
 		if !slices.Contains(ids, model) {
 			t.Fatalf("/v1/models missing %q in %v", model, ids)
 		}
@@ -94,7 +95,7 @@ func TestListModelsIncludesLatestRequestedModels(t *testing.T) {
 		}
 	}
 
-	for _, model := range []string{"gpt-5", "gpt-5.1", "gpt-5.2-codex"} {
+	for _, model := range []string{"gpt-5", "gpt-5.1", "gpt-5.2", "gpt-5.2-codex", "gpt-5.3-codex"} {
 		if slices.Contains(ids, model) {
 			t.Fatalf("/v1/models should not include %q in %v", model, ids)
 		}
@@ -2722,6 +2723,7 @@ func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
 	body := []byte(`{
 		"model":"gpt-4.1-direct",
 		"stream":true,
+		"client_metadata":{"x-codex-window-id":"w-1","x-codex-installation-id":"i-1"},
 		"input":[
 			{"role":"user","content":"my favorite color is blue"},
 			{"type":"compaction_trigger"}
@@ -2743,6 +2745,10 @@ func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
 	}
 	if gjson.GetBytes(seenBody, "stream").Exists() {
 		t.Fatalf("promoted upstream body should not carry stream, got %s", seenBody)
+	}
+	// compact 端点不认识 client_metadata,提升时必须剥除(issue #340)。
+	if gjson.GetBytes(seenBody, "client_metadata").Exists() {
+		t.Fatalf("promoted upstream body should not carry client_metadata, got %s", seenBody)
 	}
 	if id := gjson.GetBytes(recorder.Body.Bytes(), "id").String(); id != "resp_compaction_test" {
 		t.Fatalf("response id = %q, want resp_compaction_test; body=%s", id, recorder.Body.String())

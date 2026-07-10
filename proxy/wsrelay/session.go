@@ -26,6 +26,12 @@ const (
 	// 空闲超时：5 分钟无活动则断开
 	IdleTimeout = 5 * time.Minute
 
+	// 连接最大寿命：上游 chatgpt backend 对每条 Responses WS 连接强制 60 分钟
+	// 寿命上限，超限后该连接上的 response.create 一律返回
+	// websocket_connection_limit_reached（且 Ping 探活仍成功，无法靠探活识别）。
+	// 提前到 50 分钟在空闲时主动轮转销毁，避免活跃会话撞线（issue #346）。
+	MaxConnLifetime = 50 * time.Minute
+
 	// 握手超时：30 秒
 	HandshakeTimeout = 30 * time.Second
 

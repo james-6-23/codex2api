@@ -2768,3 +2768,143 @@ func TestTranslateRequest_NormalizesWebSearchPreviewToolType(t *testing.T) {
 		t.Fatalf("expected unknown field to be stripped; body=%s", got)
 	}
 }
+
+// compact 端点不接受 client_metadata(Unknown parameter),两条 compact 准备
+// 路径都必须剥除;普通 /responses 路径不剥(引擎指纹与中转链依赖透传)。
+func TestPrepareCompactBodiesStripClientMetadata(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"stream":true,
+		"client_metadata":{"x-codex-window-id":"w-1"},
+		"input":[{"role":"user","content":"hello"},{"type":"compaction_trigger"}]
+	}`)
+
+	codexBody, _ := PrepareCompactResponsesBodyForOwner(raw, "")
+	if gjson.GetBytes(codexBody, "client_metadata").Exists() {
+		t.Fatalf("codex compact body should strip client_metadata, got %s", codexBody)
+	}
+
+	relayBody := PrepareOpenAIResponsesCompactBody(raw)
+	if gjson.GetBytes(relayBody, "client_metadata").Exists() {
+		t.Fatalf("relay compact body should strip client_metadata, got %s", relayBody)
+	}
+}
+
+// max 档位按模型放行:gpt-5.6 起上游接受并回显,旧模型上游 400,须钳到 xhigh。
+func TestNormalizeReasoningEffortForModel_MaxGatedByModel(t *testing.T) {
+	cases := []struct {
+		effort, model, want string
+	}{
+		{"max", "gpt-5.6-sol", "max"},
+		{"MAX", "gpt-5.6-terra", "max"},
+		{"max", "gpt-5.6", "max"},
+		{"max", "gpt-6.0", "max"},
+		{"max", "gpt-5.4", "xhigh"},
+		{"max", "gpt-5.5", "xhigh"},
+		{"max", "", "xhigh"},
+		{"max", "claude-opus", "xhigh"},
+		{"xhigh", "gpt-5.6-sol", "xhigh"},
+		{"none", "gpt-5.4", "none"},
+	}
+	for _, tc := range cases {
+		if got := normalizeReasoningEffortForModel(tc.effort, tc.model); got != tc.want {
+			t.Errorf("normalizeReasoningEffortForModel(%q, %q) = %q, want %q", tc.effort, tc.model, got, tc.want)
+		}
+	}
+}
+
+func TestPrepareResponsesBody_MaxEffortPassthroughByModel(t *testing.T) {
+	got, _ := PrepareResponsesBody([]byte(`{"model":"gpt-5.6-sol","input":"hi","reasoning":{"effort":"max"}}`))
+	if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "max" {
+		t.Fatalf("gpt-5.6-sol effort = %q, want max; body=%s", effort, got)
+	}
+
+	got, _ = PrepareResponsesBody([]byte(`{"model":"gpt-5.4","input":"hi","reasoning":{"effort":"max"}}`))
+	if effort := gjson.GetBytes(got, "reasoning.effort").String(); effort != "xhigh" {
+		t.Fatalf("gpt-5.4 effort = %q, want xhigh; body=%s", effort, got)
+	}
+}
+
+// issue #342: gpt-5.6 multi-agent 保留工具 collaboration.* 必须原样透传，
+// 通用 schema 清洗(剥 format/minItems/pattern 等)会破坏上游要求的逐字匹配。
+func TestPrepareResponsesBody_ReservedCollaborationToolPassthrough(t *testing.T) {
+	raw := []byte(`{
+		"model":"gpt-5.6-sol",
+		"input":"hi",
+		"tools":[
+			{"type":"function","name":"collaboration.spawn_agent","description":"reserved","parameters":{
+				"type":"object",
+				"properties":{
+					"agent":{"type":"string","pattern":"^[a-z]+$","minLength":1},
+					"tasks":{"type":"array","items":{"type":"string"},"minItems":1,"uniqueItems":true}
+				},
+				"required":["agent"],
+				"additionalProperties":false
+			}},
+			{"type":"function","name":"my_tool","parameters":{
+				"type":"object",
+				"properties":{"x":{"type":"string","minLength":2,"format":"email"}}
+			}}
+		]
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+	tools := gjson.GetBytes(got, "tools").Array()
+
+	// 定位两个工具（顺序可能变，按 name 找）。
+	var reserved, normal gjson.Result
+	for _, tl := range tools {
+		switch tl.Get("name").String() {
+		case "collaboration.spawn_agent":
+			reserved = tl
+		case "my_tool":
+			normal = tl
+		}
+	}
+
+	// 保留工具：受限 schema 关键字必须全部保留。
+	if !reserved.Exists() {
+		t.Fatalf("reserved tool missing; body=%s", got)
+	}
+	for _, path := range []string{
+		"parameters.properties.agent.pattern",
+		"parameters.properties.agent.minLength",
+		"parameters.properties.tasks.minItems",
+		"parameters.properties.tasks.uniqueItems",
+	} {
+		if !reserved.Get(path).Exists() {
+			t.Fatalf("reserved tool lost schema key %q (sanitizer mangled it); body=%s", path, got)
+		}
+	}
+	if reserved.Get("parameters.additionalProperties").String() != "false" {
+		t.Fatalf("reserved tool additionalProperties changed; body=%s", got)
+	}
+
+	// 对照：普通工具仍被清洗（受限关键字被剥离）。
+	if !normal.Exists() {
+		t.Fatalf("normal tool missing; body=%s", got)
+	}
+	if normal.Get("parameters.properties.x.minLength").Exists() ||
+		normal.Get("parameters.properties.x.format").Exists() {
+		t.Fatalf("normal function tool should still be sanitized; body=%s", got)
+	}
+}
+
+func TestIsReservedCodexTool(t *testing.T) {
+	cases := []struct {
+		tool map[string]any
+		want bool
+	}{
+		{map[string]any{"type": "function", "name": "collaboration.spawn_agent"}, true},
+		{map[string]any{"type": "function", "name": "Collaboration.Send_Message"}, true},
+		{map[string]any{"type": "function", "function": map[string]any{"name": "collaboration.wait"}}, true},
+		{map[string]any{"type": "function", "name": "my_tool"}, false},
+		{map[string]any{"type": "function", "name": "collaborate_now"}, false},
+		{map[string]any{"type": "function"}, false},
+	}
+	for i, c := range cases {
+		if got := isReservedCodexTool(c.tool); got != c.want {
+			t.Errorf("case %d: isReservedCodexTool = %v, want %v", i, got, c.want)
+		}
+	}
+}

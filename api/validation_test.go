@@ -165,6 +165,21 @@ func TestValidateResponsesAPIRequestAcceptsCompactV2InputTypes(t *testing.T) {
 	}
 }
 
+func TestValidateResponsesAPIRequestAcceptsAgentMessageInput(t *testing.T) {
+	// multi-agent 会话续写时,历史里的代理间消息会随 input 回放(issue #341)。
+	result := ValidateResponsesAPIRequest(
+		[]byte(`{"model":"gpt-5.5","input":[
+			{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]},
+			{"type":"agent_message","author":"/root","recipient":"/root/worker","content":[{"type":"input_text","text":"Message Type: MESSAGE"}]}
+		]}`),
+		[]string{"gpt-5.5"},
+	)
+
+	if !result.Valid {
+		t.Fatalf("expected agent_message input to be valid, got %#v", result.Errors)
+	}
+}
+
 func TestSendListIncludesOptionalHasMore(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

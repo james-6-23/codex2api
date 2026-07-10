@@ -81,6 +81,13 @@ type RuntimeSettings struct {
 	RequestIsolationMode string
 	// CodexMimicMode 控制对上游伪装真实 Codex CLI 的严格程度（legacy|strict，默认 legacy）。
 	CodexMimicMode string
+	// CodexSyncedCLIVersion 是从 openai/codex releases 同步到的最新 Codex CLI 版本；
+	// 用于抬升出站 UA / manifest 的模拟版本，绝不低于内置常量，空表示未同步。
+	CodexSyncedCLIVersion string
+	// CodexCLIVersionSyncEnabled 控制后台定时同步 Codex CLI 版本（默认 true）。
+	CodexCLIVersionSyncEnabled bool
+	// CodexCLIVersionSyncIntervalHours 定时同步间隔（小时，默认 12，范围 1-720）。
+	CodexCLIVersionSyncIntervalHours int
 }
 
 // MimicStrictHeaders 返回是否启用严格伪装（与官方 codex-rs 客户端逐字节对齐）。
@@ -102,20 +109,22 @@ func init() {
 
 func DefaultRuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
-		ClientCompatMode:       defaultClientCompatMode,
-		CodexMinCLIVersion:     defaultCodexMinCLIVersion,
-		CodexUserAgentConfig:   DefaultCodexUserAgentConfigJSON(),
-		StreamFlushPolicy:      defaultStreamFlushPolicy,
-		StreamFlushIntervalMS:  defaultStreamFlushIntervalMS,
-		FirstTokenMode:         defaultFirstTokenMode,
-		FirstTokenTimeoutSec:   defaultFirstTokenTimeoutSec,
-		BillingTierPolicy:      defaultBillingTierPolicy,
-		CodexWSHideErrors:      defaultCodexWSHideErrors,
-		CodexWSSilentRetry:     defaultCodexWSSilentRetry,
-		CodexWSSilentRetries:   defaultCodexWSSilentRetries,
-		CodexContinueMaxRounds: defaultCodexContinueMaxRounds,
-		RequestIsolationMode:   defaultRequestIsolationMode(),
-		CodexMimicMode:         defaultCodexMimicMode(),
+		ClientCompatMode:                 defaultClientCompatMode,
+		CodexMinCLIVersion:               defaultCodexMinCLIVersion,
+		CodexUserAgentConfig:             DefaultCodexUserAgentConfigJSON(),
+		StreamFlushPolicy:                defaultStreamFlushPolicy,
+		StreamFlushIntervalMS:            defaultStreamFlushIntervalMS,
+		FirstTokenMode:                   defaultFirstTokenMode,
+		FirstTokenTimeoutSec:             defaultFirstTokenTimeoutSec,
+		BillingTierPolicy:                defaultBillingTierPolicy,
+		CodexWSHideErrors:                defaultCodexWSHideErrors,
+		CodexWSSilentRetry:               defaultCodexWSSilentRetry,
+		CodexWSSilentRetries:             defaultCodexWSSilentRetries,
+		CodexContinueMaxRounds:           defaultCodexContinueMaxRounds,
+		RequestIsolationMode:             defaultRequestIsolationMode(),
+		CodexMimicMode:                   defaultCodexMimicMode(),
+		CodexCLIVersionSyncEnabled:       true,
+		CodexCLIVersionSyncIntervalHours: 12,
 	}
 }
 
@@ -260,6 +269,9 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSSilentRetries = settings.CodexWSSilentMaxRetries
 		next.CodexContinueThinking = settings.CodexContinueThinkingEnabled
 		next.CodexContinueMaxRounds = settings.CodexContinueMaxRounds
+		next.CodexSyncedCLIVersion = settings.CodexSyncedCLIVersion
+		next.CodexCLIVersionSyncEnabled = settings.CodexCLIVersionSyncEnabled
+		next.CodexCLIVersionSyncIntervalHours = settings.CodexCLIVersionSyncIntervalHours
 	}
 	next = NormalizeRuntimeSettings(next)
 	runtimeSettings.Store(next)

@@ -86,7 +86,7 @@ type CodexUserAgentConfig = {
 }
 
 const EMPTY_REASONING_EFFORT_MODEL_ENTRIES: ReasoningEffortModelEntry[] = []
-const REASONING_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'].map((effort) => ({
+const REASONING_EFFORT_OPTIONS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra', 'max'].map((effort) => ({
   label: effort,
   value: effort,
 }))
@@ -95,7 +95,7 @@ const AUTO_SAVE_TOAST_MS = 2000
 const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   raw_user_agent: '',
   client_name: 'codex-tui',
-  client_version: '0.142.3',
+  client_version: '0.144.1',
   os_name: 'Mac OS',
   os_version: '15.5.0',
   arch: 'arm64',
@@ -136,8 +136,8 @@ const serializeModelMappingEntries = (entries: ModelMappingEntry[]) => {
 
 const normalizeReasoningEffortValue = (effort: string) => {
   const value = effort.trim().toLowerCase()
-  if (value === 'max') return 'xhigh'
-  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra'].includes(value) ? value : 'xhigh'
+  // max 仅 gpt-5.6+ 上游支持,后端会按模型钳位,前端保留原值让用户可配
+  return ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra', 'max'].includes(value) ? value : 'xhigh'
 }
 
 const normalizeBillingTierPolicyValue = (value?: string | null): 'actual' | 'requested' =>
@@ -1191,6 +1191,8 @@ export default function Settings() {
     prompt_filter_semantic_review_log_retention_days: 0,
     client_compat_mode: 'preserve',
     codex_min_cli_version: '0.118.0',
+    codex_cli_version_sync_enabled: true,
+    codex_cli_version_sync_interval_hours: 12,
     codex_user_agent_config: '{}',
     usage_log_mode: 'full',
     usage_log_batch_size: 200,
@@ -1229,6 +1231,8 @@ export default function Settings() {
   const [modelsLastSyncedAt, setModelsLastSyncedAt] = useState<string | undefined>()
   const [modelsSourceURL, setModelsSourceURL] = useState('')
   const [syncingModels, setSyncingModels] = useState(false)
+  const [syncingCliVersion, setSyncingCliVersion] = useState(false)
+  const [syncedCliVersion, setSyncedCliVersion] = useState('')
   const logoFileInputRef = useRef<HTMLInputElement>(null)
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
@@ -1373,6 +1377,7 @@ export default function Settings() {
     persistedBrandingRef.current = branding
     applyBranding(branding)
     setLoadedAdminSecret(settings.admin_secret ?? '')
+    setSyncedCliVersion(settings.codex_synced_cli_version ?? '')
     setModelList(modelsResp.models ?? [])
     setModelItems(modelsResp.items ?? [])
     setModelsLastSyncedAt(modelsResp.last_synced_at)
@@ -1530,6 +1535,22 @@ export default function Settings() {
       showToast(`${t('settings.imageS3TestFailed')}: ${getErrorMessage(error)}`, 'error')
     } finally {
       setTestingImageStorage(false)
+    }
+  }
+
+  const handleSyncCliVersion = async () => {
+    setSyncingCliVersion(true)
+    try {
+      const result = await api.syncCodexCLIVersion()
+      setSyncedCliVersion(result.effective_version)
+      showToast(t('settings.cliVersionSyncSuccess', {
+        version: result.effective_version,
+        fetched: result.fetched_version || '-',
+      }))
+    } catch (error) {
+      showToast(`${t('settings.cliVersionSyncFailed')}: ${getErrorMessage(error)}`, 'error')
+    } finally {
+      setSyncingCliVersion(false)
     }
   }
 
@@ -2247,11 +2268,75 @@ export default function Settings() {
                     onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
                   />
                 </SettingField>
+                <SettingField label={t('settings.codexCliVersionSync')} description={t('settings.codexCliVersionSyncDesc')}>
+                  <div className="flex items-center gap-2">
+                    <Button size="sm" variant="outline" onClick={() => void handleSyncCliVersion()} disabled={syncingCliVersion}>
+                      <RefreshCw className={cn('size-3.5', syncingCliVersion && 'animate-spin')} />
+                      {syncingCliVersion ? t('settings.cliVersionSyncing') : t('settings.cliVersionSyncNow')}
+                    </Button>
+                    {syncedCliVersion && (
+                      <span className="font-mono text-xs text-muted-foreground">{syncedCliVersion}</span>
+                    )}
+                  </div>
+                </SettingField>
+                {/* CLI 版本自动同步：开关 + 间隔成对横排，行高一致 */}
+                <div className="sm:col-span-2 grid gap-0 overflow-hidden rounded-lg border border-border/60 bg-muted/15 sm:grid-cols-2 sm:divide-x sm:divide-border/60">
+                  <div className="flex min-h-[48px] items-center justify-between gap-3 px-3 py-2.5">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="text-[13px] font-medium leading-snug text-foreground sm:text-sm">
+                        {t('settings.codexCliVersionAutoSync')}
+                      </span>
+                      <SettingHelp text={t('settings.codexCliVersionAutoSyncDesc')} />
+                    </div>
+                    <Switch
+                      checked={settingsForm.codex_cli_version_sync_enabled}
+                      onCheckedChange={(checked) => autoSaveBooleanField('codex_cli_version_sync_enabled', checked)}
+                    />
+                  </div>
+                  <div
+                    className={cn(
+                      'flex min-h-[48px] items-center justify-between gap-3 border-t border-border/60 px-3 py-2.5 sm:border-t-0',
+                      !settingsForm.codex_cli_version_sync_enabled && 'opacity-60',
+                    )}
+                  >
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="text-[13px] font-medium leading-snug text-foreground sm:text-sm">
+                        {t('settings.codexCliVersionSyncInterval')}
+                      </span>
+                      <SettingHelp text={t('settings.codexCliVersionSyncIntervalDesc')} />
+                    </div>
+                    <div className="relative w-[7.25rem] shrink-0">
+                      <Input
+                        type="number"
+                        min={1}
+                        max={720}
+                        className="h-9 pr-10 tabular-nums"
+                        disabled={!settingsForm.codex_cli_version_sync_enabled}
+                        value={settingsForm.codex_cli_version_sync_interval_hours}
+                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                          setSettingsForm((f) => ({
+                            ...f,
+                            codex_cli_version_sync_interval_hours: parseInt(e.target.value) || 12,
+                          }))
+                        }
+                        onBlur={() => {
+                          if (!settingsForm.codex_cli_version_sync_enabled) return
+                          void autoSaveSettingsPatch({
+                            codex_cli_version_sync_interval_hours: settingsForm.codex_cli_version_sync_interval_hours,
+                          })
+                        }}
+                      />
+                      <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-muted-foreground">
+                        {t('settings.unit.hour')}
+                      </span>
+                    </div>
+                  </div>
+                </div>
                 <SettingField className="sm:col-span-2 xl:col-span-3" label={t('settings.codexUserAgentRaw')} description={t('settings.codexUserAgentRawDesc')}>
                   <Input
                     className="font-mono text-xs"
                     value={codexUserAgentConfig.raw_user_agent ?? ''}
-                    placeholder="codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)"
+                    placeholder="codex-tui/0.144.1 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.144.1)"
                     onChange={(e: ChangeEvent<HTMLInputElement>) => updateCodexUserAgentConfig({ raw_user_agent: e.target.value })}
                     onBlur={saveCodexUserAgentConfig}
                   />

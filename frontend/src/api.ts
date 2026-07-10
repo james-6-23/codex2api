@@ -562,6 +562,13 @@ export const api = {
     request<PromptFilterRulesResponse>('/prompt-filter/rules'),
   getModels: () => request<ModelsResponse>('/models'),
   syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
+  syncCodexCLIVersion: () =>
+    request<{
+      fetched_version: string
+      effective_version: string
+      builtin_version: string
+      updated: boolean
+    }>('/codex-cli-version/sync', { method: 'POST' }),
   batchTestAccounts: (ids?: number[]) =>
     request<{ total: number; success: number; failed: number; banned: number; rate_limited: number }>('/accounts/batch-test', {
       method: 'POST',

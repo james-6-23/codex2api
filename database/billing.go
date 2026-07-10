@@ -66,6 +66,25 @@ var (
 			LongOutputPricePerMToken:         270.0,
 			LongOutputPricePerMTokenPriority: 675.0,
 		}},
+		// gpt-5.6-sol: standard 同 gpt-5.5，但 priority 为 2× standard（$10/$60），
+		// 低于 gpt-5.5 的 2.5×，故不复用 gpt-5.5 条目。priority 留空由 fast 档兜底 2×。
+		{model: "gpt-5.6-sol", pricing: ModelPricing{
+			InputPricePerMToken:         5.0,
+			OutputPricePerMToken:        30.0,
+			CacheReadPricePerMToken:     0.5,
+			LongInputPricePerMToken:     10.0,
+			LongOutputPricePerMToken:    45.0,
+			LongCacheReadPricePerMToken: 1.0,
+		}},
+		// gpt-5.6-luna: 全新最低档。priority 均为 2× standard，由 fast 档兜底自动得出。
+		{model: "gpt-5.6-luna", pricing: ModelPricing{
+			InputPricePerMToken:         1.0,
+			OutputPricePerMToken:        6.0,
+			CacheReadPricePerMToken:     0.1,
+			LongInputPricePerMToken:     2.0,
+			LongOutputPricePerMToken:    9.0,
+			LongCacheReadPricePerMToken: 0.2,
+		}},
 		{model: "gpt-5.4-mini", pricing: ModelPricing{InputPricePerMToken: 0.75, OutputPricePerMToken: 4.5, CacheReadPricePerMToken: 0.075}},
 		{model: "gpt-5.4-nano", pricing: ModelPricing{InputPricePerMToken: 0.2, OutputPricePerMToken: 1.25, CacheReadPricePerMToken: 0.02}},
 		{model: "gpt-5.4", pricing: ModelPricing{
@@ -236,6 +255,20 @@ func normalizeCodexBillingModel(model string) (string, bool) {
 		return "gpt-5.5-pro", true
 	case strings.Contains(compact, "gpt-5.5") || strings.Contains(compact, "gpt5-5") || strings.Contains(compact, "gpt5.5"):
 		return "gpt-5.5", true
+	// GPT-5.6 三个变体官方定价各不相同（developers.openai.com/api/docs/pricing）：
+	//   sol   $5/$30（standard，priority 2× = $10/$60）——同 gpt-5.5 standard 但 priority 更低
+	//   terra $2.5/$15 —— 与 gpt-5.4 完全一致，直接复用
+	//   luna  $1/$6 —— 全新档位
+	// priority 均为 standard 的 2×，由 serviceTierCostMultiplier 兜底自动得出，无需显式配置。
+	case strings.Contains(compact, "gpt-5.6-sol") || strings.Contains(compact, "gpt5-6-sol") || strings.Contains(compact, "gpt5.6-sol"):
+		return "gpt-5.6-sol", true
+	case strings.Contains(compact, "gpt-5.6-terra") || strings.Contains(compact, "gpt5-6-terra") || strings.Contains(compact, "gpt5.6-terra"):
+		return "gpt-5.4", true
+	case strings.Contains(compact, "gpt-5.6-luna") || strings.Contains(compact, "gpt5-6-luna") || strings.Contains(compact, "gpt5.6-luna"):
+		return "gpt-5.6-luna", true
+	case strings.Contains(compact, "gpt-5.6") || strings.Contains(compact, "gpt5-6") || strings.Contains(compact, "gpt5.6"):
+		// 未知 gpt-5.6 变体：按最贵的 sol 兜底，避免低估计费。
+		return "gpt-5.6-sol", true
 	case strings.Contains(compact, "gpt-5.4-mini") || strings.Contains(compact, "gpt5-4-mini") || strings.Contains(compact, "gpt5.4-mini"):
 		return "gpt-5.4-mini", true
 	case strings.Contains(compact, "gpt-5.4-nano") || strings.Contains(compact, "gpt5-4-nano") || strings.Contains(compact, "gpt5.4-nano"):

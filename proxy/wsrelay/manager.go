@@ -49,6 +49,10 @@ type WsConnection struct {
 	// 最后使用时间
 	lastUsed atomic.Int64
 
+	// 创建时间（UnixNano），用于连接年龄判断（上游有 60 分钟连接寿命上限）。
+	// 构造后不再修改；为 0 表示未知（测试用字面量构造），视为未到龄。
+	createdAt int64
+
 	// 写操作锁
 	writeMu sync.Mutex
 
@@ -75,9 +79,10 @@ func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
 // NewWsConnection 创建 WebSocket 连接
 func NewWsConnection(conn *websocket.Conn, session *Session, wsURL string) *WsConnection {
 	wc := &WsConnection{
-		conn:    conn,
-		session: session,
-		URL:     wsURL,
+		conn:      conn,
+		session:   session,
+		URL:       wsURL,
+		createdAt: time.Now().UnixNano(),
 	}
 	wc.lastUsed.Store(time.Now().UnixNano())
 	wc.state.Store(int32(StateConnected))
@@ -93,6 +98,16 @@ func (wc *WsConnection) Touch() {
 func (wc *WsConnection) IsExpired() bool {
 	lastUsed := time.Unix(0, wc.lastUsed.Load())
 	return time.Since(lastUsed) > IdleTimeout
+}
+
+// IsOverAge 检查连接是否超过最大寿命（MaxConnLifetime）。到龄连接不能再接新请求：
+// 上游按连接建立时间计 60 分钟寿命，撞线后 response.create 一律报错，但 Ping
+// 探活仍成功，必须按年龄主动识别。
+func (wc *WsConnection) IsOverAge() bool {
+	if wc.createdAt == 0 {
+		return false
+	}
+	return time.Since(time.Unix(0, wc.createdAt)) > MaxConnLifetime
 }
 
 // IsConnected 检查是否已连接
@@ -258,11 +273,11 @@ func (m *Manager) cleanupLoop() {
 	}
 }
 
-// evictExpired 清理过期连接和会话
+// evictExpired 清理过期连接和会话（含到龄且空闲的连接，主动轮转避免撞上游寿命上限）
 func (m *Manager) evictExpired() {
 	m.connections.Range(func(key, value any) bool {
 		wc := value.(*WsConnection)
-		if wc.IsExpired() || !wc.IsConnected() {
+		if wc.IsExpired() || !wc.IsConnected() || isRotatableOverAge(wc) {
 			m.connections.Delete(key)
 			wc.Close()
 		}
@@ -377,10 +392,11 @@ func (m *Manager) AcquireConnection(
 				lock.Unlock()
 				continue
 			}
-			if wc.IsConnected() && !wc.IsExpired() && wc.session != nil {
+			if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && !isRotatableOverAge(wc) {
 				lock.Unlock()
 				// 连接被同 session 的前一个请求占用：指数退避轮询等待其空闲，
 				// 累计等待超过上限则返回错误，避免无界阻塞与固定间隔空转抢锁。
+				// 到龄连接也会走到这里等在途请求结束，结束后下一轮循环轮转重建。
 				if waited >= AcquireMaxWait {
 					return nil, nil, fmt.Errorf("acquire websocket connection timed out after %s waiting for busy session", AcquireMaxWait)
 				}
@@ -459,7 +475,7 @@ func (m *Manager) AcquireReusableConnection(
 				m.connections.Delete(key)
 				m.sessions.Delete(key)
 				wc.Close()
-			} else if !wc.IsConnected() || wc.IsExpired() {
+			} else if !wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc) {
 				m.connections.Delete(key)
 				m.sessions.Delete(key)
 				wc.Close()
@@ -499,13 +515,23 @@ func canReuseConnection(wc *WsConnection) bool {
 	if wc == nil {
 		return false
 	}
-	if !wc.IsConnected() || wc.IsExpired() {
+	if !wc.IsConnected() || wc.IsExpired() || wc.IsOverAge() {
 		return false
 	}
 	if wc.session == nil {
 		return false
 	}
 	return wc.session.PendingCount() == 0
+}
+
+// isRotatableOverAge 连接已到龄且当前无在途请求，可安全轮转（销毁重建）。
+// 到龄但仍有在途请求的连接不动：50 分钟阈值留了 10 分钟余量，在途流仍能正常
+// 收完，等其结束后再轮转，避免掐断在途响应。
+func isRotatableOverAge(wc *WsConnection) bool {
+	if wc == nil || !wc.IsOverAge() {
+		return false
+	}
+	return wc.session == nil || wc.session.PendingCount() == 0
 }
 
 // probeConnection 发送 Ping 检测连接是否真正存活
@@ -688,7 +714,7 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 	if v, exists := m.connections.Load(binding.conn.PoolKey); !exists || v != binding.conn {
 		return nil, ""
 	}
-	if !binding.conn.IsConnected() || binding.conn.IsExpired() {
+	if !binding.conn.IsConnected() || binding.conn.IsExpired() || binding.conn.IsOverAge() {
 		return nil, ""
 	}
 	return binding.conn, binding.sessionKey

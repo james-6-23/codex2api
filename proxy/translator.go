@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -1344,7 +1345,7 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 	// 2. reasoning effort + summary
 	// 显式向 Codex 请求 summary,否则上游不会发 response.reasoning_summary_text.delta,
 	// chat/completions 客户端就拿不到思考内容(issue #156)。
-	if effort := normalizeReasoningEffort(req.ReasoningEffort); effort != "" {
+	if effort := normalizeReasoningEffortForModel(req.ReasoningEffort, req.Model); effort != "" {
 		out["reasoning"] = map[string]any{
 			"effort":  effort,
 			"summary": "auto",
@@ -1475,6 +1476,11 @@ func normalizeResponsesFunctionTools(body map[string]any) bool {
 		tool, ok := rawTool.(map[string]any)
 		if !ok {
 			kept = append(kept, rawTool)
+			continue
+		}
+		// 保留工具原样透传，不摊平 function 子对象、不改写字段（issue #342）。
+		if isReservedCodexTool(tool) {
+			kept = append(kept, tool)
 			continue
 		}
 		toolType := strings.TrimSpace(firstNonEmptyAnyString(tool["type"]))
@@ -1667,9 +1673,10 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	}
 	promptText := extractResponsesPromptText(body)
 
-	// 3. reasoning_effort → reasoning.effort 自动转换 + 钳位
+	// 3. reasoning_effort → reasoning.effort 自动转换 + 钳位（max 按模型放行）
+	effortModel := firstNonEmptyAnyString(body["model"])
 	if re, ok := body["reasoning_effort"].(string); ok {
-		if normalized := normalizeReasoningEffort(re); normalized != "" {
+		if normalized := normalizeReasoningEffortForModel(re, effortModel); normalized != "" {
 			reasoning, _ := body["reasoning"].(map[string]any)
 			if reasoning == nil {
 				reasoning = map[string]any{}
@@ -1682,7 +1689,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	}
 	if reasoning, ok := body["reasoning"].(map[string]any); ok {
 		if effort, ok := reasoning["effort"].(string); ok {
-			if normalized := normalizeReasoningEffort(effort); normalized != "" {
+			if normalized := normalizeReasoningEffortForModel(effort, effortModel); normalized != "" {
 				reasoning["effort"] = normalized
 			} else {
 				delete(reasoning, "effort")
@@ -1720,6 +1727,11 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		for _, t := range tools {
 			toolMap, ok := t.(map[string]any)
 			if !ok {
+				continue
+			}
+			// 保留工具（collaboration.* 等）原样透传：上游要求其 schema 逐字
+			// 匹配官方配置，任何补描述/清洗都会破坏匹配并被拒（issue #342）。
+			if isReservedCodexTool(toolMap) {
 				continue
 			}
 			// 补充默认描述
@@ -1810,8 +1822,9 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 		return rawBody
 	}
 
+	effortModel := firstNonEmptyAnyString(body["model"])
 	if re, ok := body["reasoning_effort"].(string); ok {
-		if normalized := normalizeReasoningEffort(re); normalized != "" {
+		if normalized := normalizeReasoningEffortForModel(re, effortModel); normalized != "" {
 			reasoning, _ := body["reasoning"].(map[string]any)
 			if reasoning == nil {
 				reasoning = map[string]any{}
@@ -1824,7 +1837,7 @@ func PrepareOpenAIResponsesBody(rawBody []byte) []byte {
 	}
 	if reasoning, ok := body["reasoning"].(map[string]any); ok {
 		if effort, ok := reasoning["effort"].(string); ok {
-			if normalized := normalizeReasoningEffort(effort); normalized != "" {
+			if normalized := normalizeReasoningEffortForModel(effort, effortModel); normalized != "" {
 				reasoning["effort"] = normalized
 			} else {
 				delete(reasoning, "effort")
@@ -1863,21 +1876,28 @@ func PrepareCompactResponsesBodyForOwner(rawBody []byte, owner string) ([]byte, 
 	body, _ = sjson.DeleteBytes(body, "include")
 	body, _ = sjson.DeleteBytes(body, "store")
 	body, _ = sjson.DeleteBytes(body, "stream")
+	// 普通 /responses 请求携带的客户端指纹元数据,compact 端点不认识该参数
+	// (Unknown parameter: 'client_metadata')——body-signal 压缩提升会把普通
+	// 请求形状的 body 送进本函数,须在此剥除。
+	body, _ = sjson.DeleteBytes(body, "client_metadata")
 	return body, expandedInputRaw
 }
 
 // PrepareOpenAIResponsesCompactBody 为中转（OpenAI Responses API）账号准备
 // /responses/compact 请求体。它复用 OpenAI Responses 预处理，并移除 compact
-// 端点不接受的自动注入字段（include/store/stream）。
+// 端点不接受的自动注入字段（include/store/stream/client_metadata）。
 func PrepareOpenAIResponsesCompactBody(rawBody []byte) []byte {
 	body := PrepareOpenAIResponsesBody(rawBody)
 	body, _ = sjson.DeleteBytes(body, "include")
 	body, _ = sjson.DeleteBytes(body, "store")
 	body, _ = sjson.DeleteBytes(body, "stream")
+	body, _ = sjson.DeleteBytes(body, "client_metadata")
 	return body
 }
 
-// normalizeReasoningEffort 将 reasoning_effort 钳位到上游支持的值
+// normalizeReasoningEffort 将 reasoning_effort 钳位到上游支持的值。
+// max 仅 gpt-5.6 起的模型支持(旧模型上游 400),无模型上下文时安全钳到 xhigh;
+// 有模型上下文的调用方用 normalizeReasoningEffortForModel。
 func normalizeReasoningEffort(effort string) string {
 	effort = strings.ToLower(strings.TrimSpace(effort))
 	if effort == "" {
@@ -1891,6 +1911,45 @@ func normalizeReasoningEffort(effort string) string {
 	default:
 		return "high"
 	}
+}
+
+// normalizeReasoningEffortForModel 在通用钳位基础上按模型放行 max：
+// gpt-5.6 起上游接受 effort=max 并原样回显；旧模型返回
+// "Invalid value: 'max'"，一律钳到 xhigh。
+func normalizeReasoningEffortForModel(effort, model string) string {
+	if strings.ToLower(strings.TrimSpace(effort)) == "max" && modelSupportsMaxReasoningEffort(model) {
+		return "max"
+	}
+	return normalizeReasoningEffort(effort)
+}
+
+// modelSupportsMaxReasoningEffort 判断模型是否支持 reasoning.effort=max
+// （gpt-5.6 及更高版本；带变体后缀如 gpt-5.6-sol 同样识别）。
+func modelSupportsMaxReasoningEffort(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if !strings.HasPrefix(model, "gpt-") {
+		return false
+	}
+	version := strings.TrimPrefix(model, "gpt-")
+	if dash := strings.IndexByte(version, '-'); dash >= 0 {
+		version = version[:dash]
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	if major > 5 {
+		return true
+	}
+	return major == 5 && minor >= 6
 }
 
 // isAllowedServiceTier 判断 service_tier 是否在上游允许的范围内
@@ -2457,6 +2516,37 @@ func sanitizeStructuredOutputSchema(format map[string]any) bool {
 func isFunctionTool(tool map[string]any) bool {
 	toolType, _ := tool["type"].(string)
 	return strings.TrimSpace(toolType) == "function"
+}
+
+// reservedCodexToolNamePrefixes 列出上游为模型保留的工具命名空间。这类工具
+// （如 gpt-5.6 multi-agent v2 的 collaboration.spawn_agent）要求 schema 与上游
+// 官方配置逐字匹配，代理的通用 schema 清洗（stripUnsupportedSchemaKeys 等）会破坏
+// 匹配，导致上游 400 "reserved for use by this model and must match the configured
+// schema"（issue #342）。这类工具必须原样透传，不补描述、不清洗、不摊平。
+var reservedCodexToolNamePrefixes = []string{"collaboration."}
+
+// isReservedCodexTool 判断工具名是否落在上游保留命名空间。
+// 兼容 Responses 扁平形态（顶层 name）与 Chat Completions 嵌套形态（function.name）。
+func isReservedCodexTool(tool map[string]any) bool {
+	if tool == nil {
+		return false
+	}
+	name := strings.TrimSpace(firstNonEmptyAnyString(tool["name"]))
+	if name == "" {
+		if fn, ok := tool["function"].(map[string]any); ok {
+			name = strings.TrimSpace(firstNonEmptyAnyString(fn["name"]))
+		}
+	}
+	if name == "" {
+		return false
+	}
+	lower := strings.ToLower(name)
+	for _, prefix := range reservedCodexToolNamePrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func normalizeFunctionToolParameters(tool map[string]any) {

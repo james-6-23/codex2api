@@ -410,6 +410,12 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 	// 上游错误帧：透传给下游(转成 SSE 错误事件)，而不是转成 Go error 后静默关闭 pipe。
 	// 否则下游只会读到一个底层 read error → 表现为空响应，无从得知具体错误。
 	if errEvent, isErr := r.buildErrorEvent(payload); isErr {
+		// 连接级寿命限制错误：针对连接而非单个请求，这条连接上的后续
+		// response.create 一律失败，而 Ping 探活仍会成功；归还池会持续毒害
+		// 后续请求（含续链亲和定向回来的），必须标记销毁 (issue #346)。
+		if isConnLimitErrorFrame(payload) {
+			r.markConnBroken()
+		}
 		// 把错误内容作为 SSE 数据写给下游，让客户端看到完整错误 JSON。
 		callback(errEvent)
 		// 错误即终止：结束流(等价于 response.failed)。
@@ -487,6 +493,17 @@ func (r *WsResponse) buildErrorEvent(payload []byte) ([]byte, bool) {
 		event = fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","status_code":%d,"error":%s}}`, status, errObj)
 	}
 	return []byte(event), true
+}
+
+// isConnLimitErrorFrame 判断上游错误帧是否为连接级寿命限制错误
+// (websocket_connection_limit_reached)：该错误按连接而非按请求生效，
+// 复用此连接必然继续失败。
+func isConnLimitErrorFrame(payload []byte) bool {
+	code := gjson.GetBytes(payload, "error.code").String()
+	if code == "" {
+		code = gjson.GetBytes(payload, "code").String()
+	}
+	return code == "websocket_connection_limit_reached"
 }
 
 // normalizeCompletionEvent 标准化完成事件类型

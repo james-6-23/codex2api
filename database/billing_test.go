@@ -176,6 +176,33 @@ func TestGPT55PricingDoesNotMatchGPT54(t *testing.T) {
 	_ = gpt54
 }
 
+// gpt-5.6 三个变体官方定价各不相同（developers.openai.com/api/docs/pricing）：
+// sol $5/$30、terra $2.5/$15、luna $1/$6（standard）；priority 均为 2× standard。
+func TestGPT56VariantPricing(t *testing.T) {
+	cases := []struct {
+		model                   string
+		input, output, cache    float64
+		priorityIn, priorityOut float64
+	}{
+		{"gpt-5.6-sol", 5.0, 30.0, 0.5, 10.0, 60.0},
+		{"gpt-5.6-terra", 2.5, 15.0, 0.25, 5.0, 30.0},
+		{"gpt-5.6-luna", 1.0, 6.0, 0.1, 2.0, 12.0},
+		{"gpt-5.6-sol-high", 5.0, 30.0, 0.5, 10.0, 60.0},
+	}
+	for _, c := range cases {
+		p := GetModelPricing(c.model)
+		assertFloatEqual(t, p.InputPricePerMToken, c.input)
+		assertFloatEqual(t, p.OutputPricePerMToken, c.output)
+		assertFloatEqual(t, p.CacheReadPricePerMToken, c.cache)
+
+		// priority(fast)档短上下文：用 100K tokens(低于长上下文阈值 272K)。
+		const n = 100_000
+		got := CalculateCost(n, n, 0, c.model, "fast")
+		want := (c.priorityIn + c.priorityOut) * float64(n) / 1_000_000.0
+		assertFloatEqual(t, got, want)
+	}
+}
+
 func TestSparkPricingUsesGpt51CodexFallback(t *testing.T) {
 	spark := GetModelPricing("gpt-5.3-codex-spark-high")
 

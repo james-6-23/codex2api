@@ -28,3 +28,20 @@ func TestAccountRowGetCredentialInt64SliceMissingFieldReturnsEmptySlice(t *testi
 		t.Fatalf("got = %v, want empty slice", got)
 	}
 }
+
+func TestNormalizeCodexCLIVersionSyncIntervalHours(t *testing.T) {
+	cases := map[int]int{
+		0:    12,
+		-5:   12,
+		1:    1,
+		12:   12,
+		720:  720,
+		721:  720,
+		9999: 720,
+	}
+	for in, want := range cases {
+		if got := NormalizeCodexCLIVersionSyncIntervalHours(in); got != want {
+			t.Errorf("NormalizeCodexCLIVersionSyncIntervalHours(%d) = %d, want %d", in, got, want)
+		}
+	}
+}

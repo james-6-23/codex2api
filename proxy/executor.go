@@ -689,6 +689,9 @@ func generatedCodexClientHeaders(account *auth.Account, settings RuntimeSettings
 	if version == "" {
 		version = codexVersionFromUserAgent(userAgent, latestCodexCLIVersion)
 	}
+	// 画像池钉的是内置常量版本；抬升到当前生效的最新版（含远端同步值），
+	// 再叠加显式的最低版本门槛。
+	version = effectiveCodexClientVersion(version, effectiveLatestCodexCLIVersion())
 	version = effectiveCodexClientVersion(version, versionFloor)
 	userAgent = replaceCodexUserAgentVersion(userAgent, version)
 	return userAgent, version
@@ -745,7 +748,8 @@ func resolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, dev
 	if settings.MimicStrictHeaders() {
 		return strictDefaultCodexCLIUserAgent, latestCodexCLIVersion, false
 	}
-	return defaultCodexCLIUserAgent, latestCodexCLIVersion, false
+	effectiveVersion := effectiveLatestCodexCLIVersion()
+	return replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveVersion), effectiveVersion, false
 }
 
 func ResolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) (userAgent, version string) {

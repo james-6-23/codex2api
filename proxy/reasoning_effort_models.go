@@ -16,7 +16,7 @@ type ReasoningEffortModel struct {
 
 func ReasoningEffortModelAlias(model, effort string) string {
 	model = strings.TrimSpace(model)
-	effort = normalizeConfiguredReasoningEffort(effort)
+	effort = normalizeConfiguredReasoningEffort(effort, model)
 	if model == "" || effort == "" {
 		return ""
 	}
@@ -68,7 +68,7 @@ func parseReasoningEffortModelEntries(value string, supportedModels []string, st
 	seen := make(map[string]struct{}, len(raw))
 	for i, entry := range raw {
 		model := normalizeReasoningEffortBaseModel(entry.Model, supportedModels)
-		effort := normalizeConfiguredReasoningEffort(entry.Effort)
+		effort := normalizeConfiguredReasoningEffort(entry.Effort, model)
 		if model == "" || effort == "" {
 			if strict {
 				return nil, fmt.Errorf("reasoning_effort_models[%d] 需要非空 model 且 effort 必须是 none/minimal/low/medium/high/xhigh/ultra", i)
@@ -101,11 +101,16 @@ func normalizeReasoningEffortBaseModel(model string, supportedModels []string) s
 	return strings.ToLower(model)
 }
 
-func normalizeConfiguredReasoningEffort(effort string) string {
+// normalizeConfiguredReasoningEffort 归一化设置里配置的思考强度档位。
+// max 仅 gpt-5.6 起的模型放行,旧模型配置 max 会被钳到 xhigh(上游不接受)。
+func normalizeConfiguredReasoningEffort(effort, model string) string {
 	switch strings.ToLower(strings.TrimSpace(effort)) {
 	case "none", "minimal", "low", "medium", "high", "xhigh", "ultra":
 		return strings.ToLower(strings.TrimSpace(effort))
 	case "max":
+		if modelSupportsMaxReasoningEffort(model) {
+			return "max"
+		}
 		return "xhigh"
 	default:
 		return ""

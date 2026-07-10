@@ -15,8 +15,8 @@ import (
 //   {originator}/{version} ({OS} {OS_version}; {arch}) {terminal} ({originator}; {version})
 //
 // 示例：
-//   codex-tui/0.142.3 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.142.3)
-//   codex-tui/0.142.0-alpha.10 (Mac OS 13.7.8; arm64) xterm-256color (codex-tui; 0.142.0-alpha.10)
+//   codex-tui/0.144.1 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.144.1)
+//   codex-tui/0.144.0-alpha.10 (Mac OS 13.7.8; arm64) xterm-256color (codex-tui; 0.144.0-alpha.10)
 
 // ClientProfile 表示一个模拟客户端的完整身份
 type ClientProfile struct {
@@ -26,7 +26,7 @@ type ClientProfile struct {
 
 const (
 	latestCodexClientName          = "codex-tui"
-	latestCodexCLIVersion          = "0.142.5"
+	latestCodexCLIVersion          = "0.144.1"
 	latestCodexCLIUserAgentPrefix  = "codex-tui/" + latestCodexCLIVersion
 	defaultCodexUserAgentOSName    = "Mac OS"
 	defaultCodexUserAgentOSVersion = "15.5.0"
@@ -119,11 +119,25 @@ func IsCodexStrictOfficialClientByHeaders(userAgent, originator string) bool {
 }
 
 func LatestCodexCLIVersionForHeaders() string {
+	return effectiveLatestCodexCLIVersion()
+}
+
+// effectiveLatestCodexCLIVersion 返回当前生效的"最新 Codex CLI 版本"：
+// 取内置常量与远端同步版本(CodexSyncedCLIVersion)中的较大者，绝不低于内置常量，
+// 因此过期或非法的远端值不会导致降级。
+func effectiveLatestCodexCLIVersion() string {
+	synced := normalizeCodexClientVersionText(CurrentRuntimeSettings().CodexSyncedCLIVersion)
+	if synced == "" {
+		return latestCodexCLIVersion
+	}
+	if cmp, ok := compareCodexClientVersions(synced, latestCodexCLIVersion); ok && cmp > 0 {
+		return synced
+	}
 	return latestCodexCLIVersion
 }
 
 func MinimalCodexCLIUserAgentForHeaders() string {
-	return defaultCodexCLIUserAgent
+	return replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveLatestCodexCLIVersion())
 }
 
 func DefaultCodexUserAgentConfigJSON() string {
@@ -172,7 +186,7 @@ func validateCodexUserAgentConfig(cfg CodexUserAgentConfig) error {
 		}
 	}
 	if cfg.ClientVersion != "" && !validCodexClientVersionString(cfg.ClientVersion) {
-		return errors.New("codex User-Agent client_version must be a semantic version like 0.142.3 or 0.142.0-alpha.10")
+		return errors.New("codex User-Agent client_version must be a semantic version like 0.144.1 or 0.144.0-alpha.10")
 	}
 	tokenFields := map[string]string{
 		"client_name":    cfg.ClientName,
@@ -265,7 +279,7 @@ func codexUserAgentFromConfig(raw, versionFloor string) (userAgent, version stri
 		return cfg.RawUserAgent, codexVersionFromUserAgent(cfg.RawUserAgent, strings.TrimSpace(cfg.ClientVersion)), true
 	}
 	clientName := firstNonEmptyString(cfg.ClientName, latestCodexClientName)
-	clientVersion := effectiveCodexClientVersion(firstNonEmptyString(cfg.ClientVersion, latestCodexCLIVersion), versionFloor)
+	clientVersion := effectiveCodexClientVersion(firstNonEmptyString(cfg.ClientVersion, effectiveLatestCodexCLIVersion()), versionFloor)
 	osName := firstNonEmptyString(cfg.OSName, defaultCodexUserAgentOSName)
 	osVersion := firstNonEmptyString(cfg.OSVersion, defaultCodexUserAgentOSVersion)
 	arch := firstNonEmptyString(cfg.Arch, defaultCodexUserAgentArch)
@@ -295,7 +309,9 @@ func formatCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, te
 }
 
 // formatStrictCodexUserAgent 生成与实测 codex 0.142.5 一致的 strict User-Agent：
-//   {name}/{ver} ({os} {osver}; {arch}) {terminal} ({name}; {ver})
+//
+//	{name}/{ver} ({os} {osver}; {arch}) {terminal} ({name}; {ver})
+//
 // 即与 legacy 同形（含尾部后缀），仅默认 originator 用 codex_cli_rs。
 func formatStrictCodexUserAgent(clientName, clientVersion, osName, osVersion, arch, terminal string) string {
 	clientName = firstNonEmptyString(clientName, strictCodexClientName)

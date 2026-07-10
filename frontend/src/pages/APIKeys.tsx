@@ -31,6 +31,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Select, type SelectOption } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import {
   Table,
   TableBody,
@@ -109,6 +110,7 @@ interface LimitsFormState {
   tokenLimit7dUnit: TokenLimitUnit;
   tokenLimit30d: string;
   tokenLimit30dUnit: TokenLimitUnit;
+  disableImageGeneration: boolean;
 }
 
 const TOKEN_LIMIT_UNIT_MULTIPLIERS: Record<TokenLimitUnit, number> = {
@@ -136,6 +138,7 @@ const emptyLimitsForm: LimitsFormState = {
   tokenLimit7dUnit: "token",
   tokenLimit30d: "",
   tokenLimit30dUnit: "token",
+  disableImageGeneration: false,
 };
 
 const initialCreateForm: CreateKeyFormState = {
@@ -1955,6 +1958,7 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
     tokenLimit7dUnit: token7d.unit,
     tokenLimit30d: token30d.value,
     tokenLimit30dUnit: token30d.unit,
+    disableImageGeneration: limits.disable_image_generation === true,
   };
 }
 
@@ -2010,6 +2014,7 @@ function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
     token_limit_5h: parseTokenLimit(form.tokenLimit5h, form.tokenLimit5hUnit),
     token_limit_7d: parseTokenLimit(form.tokenLimit7d, form.tokenLimit7dUnit),
     token_limit_30d: parseTokenLimit(form.tokenLimit30d, form.tokenLimit30dUnit),
+    disable_image_generation: form.disableImageGeneration || undefined,
   };
 }
 
@@ -2330,7 +2335,8 @@ function LimitsEditor({
     value.costLimit30d !== "" ||
     value.tokenLimit5h !== "" ||
     value.tokenLimit7d !== "" ||
-    value.tokenLimit30d !== "";
+    value.tokenLimit30d !== "" ||
+    value.disableImageGeneration;
   const [open, setOpen] = useState(hasAny || !!expanded);
   const tokenUnitOptions = useMemo(
     () =>
@@ -2402,6 +2408,20 @@ function LimitsEditor({
             <p className="text-[10px] text-muted-foreground">
               {t("apiKeys.limits.planAllowHint")}
             </p>
+          </div>
+          <div className="flex items-start justify-between gap-3 rounded-md border border-border/60 px-3 py-2">
+            <div className="space-y-0.5">
+              <label className="text-xs font-medium text-foreground">
+                {t("apiKeys.limits.disableImageGeneration")}
+              </label>
+              <p className="text-[10px] text-muted-foreground">
+                {t("apiKeys.limits.disableImageGenerationHint")}
+              </p>
+            </div>
+            <Switch
+              checked={value.disableImageGeneration}
+              onCheckedChange={(disableImageGeneration) => patch({ disableImageGeneration })}
+            />
           </div>
         </div>
       </LimitSection>

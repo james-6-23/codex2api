@@ -2196,6 +2196,8 @@ type Store struct {
 	// Codex 思考截断自动续想（默认关闭，不影响现有路径）
 	codexContinueThinkingEnabled atomic.Bool  // 检测到上游截断思考时自动续想并折叠成单响应
 	codexContinueMaxRounds       atomic.Int64 // 单次请求最大续想轮数（含首轮），默认 8
+	codexCLIVersionSyncEnabled   atomic.Bool  // 后台定时同步 Codex CLI 模拟版本，默认 true
+	codexCLIVersionSyncInterval  atomic.Int64 // 定时同步间隔（小时），默认 12
 
 	// 重试间隔与传输错误重试策略（issue #331）
 	retryIntervalMS      atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
@@ -2682,6 +2684,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSSilentMaxRetries.Store(normalizeWSSilentMaxRetries(settings.CodexWSSilentMaxRetries))
 	s.codexContinueThinkingEnabled.Store(settings.CodexContinueThinkingEnabled)
 	s.codexContinueMaxRounds.Store(int64(database.NormalizeCodexContinueMaxRounds(settings.CodexContinueMaxRounds)))
+	s.codexCLIVersionSyncEnabled.Store(settings.CodexCLIVersionSyncEnabled)
+	s.codexCLIVersionSyncInterval.Store(int64(database.NormalizeCodexCLIVersionSyncIntervalHours(settings.CodexCLIVersionSyncIntervalHours)))
 	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(settings.RetryIntervalMS)))
 	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(settings.TransportRetryPolicy))
 
@@ -2944,6 +2948,38 @@ func (s *Store) CodexContinueMaxRounds() int {
 		return 8
 	}
 	return int(s.codexContinueMaxRounds.Load())
+}
+
+// SetCodexCLIVersionSyncEnabled 设置是否后台定时同步 Codex CLI 模拟版本。
+func (s *Store) SetCodexCLIVersionSyncEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.codexCLIVersionSyncEnabled.Store(enabled)
+}
+
+// CodexCLIVersionSyncEnabled 返回是否后台定时同步 Codex CLI 模拟版本。
+func (s *Store) CodexCLIVersionSyncEnabled() bool {
+	if s == nil {
+		return true
+	}
+	return s.codexCLIVersionSyncEnabled.Load()
+}
+
+// SetCodexCLIVersionSyncIntervalHours 设置定时同步间隔（小时，钳到 1-720）。
+func (s *Store) SetCodexCLIVersionSyncIntervalHours(hours int) {
+	if s == nil {
+		return
+	}
+	s.codexCLIVersionSyncInterval.Store(int64(database.NormalizeCodexCLIVersionSyncIntervalHours(hours)))
+}
+
+// CodexCLIVersionSyncIntervalHours 返回定时同步间隔（小时）。
+func (s *Store) CodexCLIVersionSyncIntervalHours() int {
+	if s == nil {
+		return 12
+	}
+	return int(s.codexCLIVersionSyncInterval.Load())
 }
 
 // GetProxyURL 获取全局代理地址

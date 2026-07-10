@@ -86,6 +86,13 @@ func (h *Handler) enforceAPIKeyLimits(c *gin.Context, model string) (int, string
 		}
 	}
 
+	// 1b. 生图禁用 (本机校验:模型/端点/请求体意图,无 I/O)
+	if limits.DisableImageGeneration {
+		if msg := checkAPIKeyImageGeneration(c, model); msg != "" {
+			return http.StatusForbidden, msg
+		}
+	}
+
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
 
@@ -195,6 +202,32 @@ func checkAPIKeyModel(model string, limits database.APIKeyLimits) string {
 	for _, m := range limits.ModelDeny {
 		if strings.ToLower(strings.TrimSpace(m)) == model {
 			return fmt.Sprintf("Model %q is denied for this API key", model)
+		}
+	}
+	return ""
+}
+
+// checkAPIKeyImageGeneration 在该 Key 禁用生图时，判断本次请求是否触及生图能力。
+// 命中(生图模型 / /v1/images 端点 / 请求体带 image_generation 工具或生图意图)返回错误文案，
+// 否则返回 ""。纯本机校验：模型名 + 端点路径 + 客户端原始请求体（自动注入的图片工具在此之后才发生，
+// 不会误伤普通文本请求）。
+func checkAPIKeyImageGeneration(c *gin.Context, model string) string {
+	const msg = "Image generation is disabled for this API key (gpt-image models and the image_generation tool are not permitted)."
+
+	if isImageOnlyModel(strings.TrimSpace(model)) {
+		return msg
+	}
+
+	if c != nil && c.Request != nil && c.Request.URL != nil {
+		path := c.Request.URL.Path
+		if strings.Contains(path, "/images/generations") || strings.Contains(path, "/images/edits") {
+			return msg
+		}
+	}
+
+	if body, ok := rawRequestBodyFromContext(c); ok && len(body) > 0 {
+		if responsesBodyHasImageGenerationTool(body) || responsesBodyRequestsImageGeneration(body) {
+			return msg
 		}
 	}
 	return ""

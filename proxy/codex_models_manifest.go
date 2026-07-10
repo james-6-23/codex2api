@@ -163,7 +163,7 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 
 	clientVersion = strings.TrimSpace(clientVersion)
 	if clientVersion == "" {
-		clientVersion = latestCodexCLIVersion
+		clientVersion = effectiveLatestCodexCLIVersion()
 	}
 	requestURL := endpoint + "?client_version=" + url.QueryEscape(clientVersion)
 

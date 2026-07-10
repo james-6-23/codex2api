@@ -71,9 +71,8 @@ var builtinModelInfos = []ModelInfo{
 	modelInfoForID("gpt-5.5", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.4", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.4-mini", ModelSourceBuiltin),
-	modelInfoForID("gpt-5.3-codex", ModelSourceBuiltin),
+	// 5.3 只保留 spark 变体；gpt-5.3-codex 及 5.2/更低模型已下线（含上游同步过滤）。
 	modelInfoForID("gpt-5.3-codex-spark", ModelSourceBuiltin),
-	modelInfoForID("gpt-5.2", ModelSourceBuiltin),
 	// codex-auto-review — Codex internal auto-review model.
 	// Upstream confirms: returns effective model "gpt-5.4" (tested 2026-05-20).
 	// Available on Plus/Pro/Team/Business per official catalog; excludes free.
@@ -226,6 +225,11 @@ func mergeModelInfos(rows []database.ModelRegistryRow) []ModelInfo {
 		if info.ID == "" {
 			continue
 		}
+		// 退役模型（5.3 非 spark、5.2 及以下、gpt-4*）即使注册表里有残留行也不再暴露，
+		// 保证升级后 DB 旧行不会让它们复现。
+		if isRetiredCodexModel(info.ID) {
+			continue
+		}
 		byID[info.ID] = info
 	}
 
@@ -245,6 +249,46 @@ func mergeModelInfos(rows []database.ModelRegistryRow) []ModelInfo {
 	})
 	result = append(result, extras...)
 	return result
+}
+
+// isRetiredCodexModel 判断模型是否已下线（不再对外暴露 / 不参与校验）：
+// gpt-5.3 非 spark、gpt-5.2 及更低、gpt-4* 均退役；image、codex-auto-review、
+// 非 gpt- 前缀及 5.4+ 保留。是 isAllowedUpstreamCodexModel 的"暴露侧"补集，
+// 但对 image/非 gpt 模型返回 false（保留）。
+func isRetiredCodexModel(id string) bool {
+	id = strings.TrimSpace(strings.ToLower(id))
+	if !strings.HasPrefix(id, "gpt-") || strings.Contains(id, "image") {
+		return false
+	}
+	version := strings.TrimPrefix(id, "gpt-")
+	if dash := strings.IndexByte(version, '-'); dash >= 0 {
+		version = version[:dash]
+	}
+	parts := strings.Split(version, ".")
+	if len(parts) < 2 {
+		return false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return false
+	}
+	if major > 5 {
+		return false
+	}
+	if major < 5 {
+		return true
+	}
+	if minor >= 4 {
+		return false
+	}
+	if minor == 3 {
+		return !strings.Contains(id, "spark")
+	}
+	return true
 }
 
 func appendReasoningEffortModelInfos(items []ModelInfo, settingsJSON string) []ModelInfo {
@@ -374,9 +418,14 @@ func modelSortRank(id string) int {
 	return len(builtinModelInfos) + 1000
 }
 
+// isAllowedUpstreamCodexModel 判断上游发现的模型是否允许进入本地注册表
+// （官方文档同步 + manifest 学习共用）。策略：
+//   - gpt-5.4 及更高版本：允许
+//   - gpt-5.3：只允许 spark 变体（gpt-5.3-codex-spark），其余 5.3 下线
+//   - gpt-5.2 及更低、image、非 gpt- 前缀：拒绝
 func isAllowedUpstreamCodexModel(id string) bool {
 	id = strings.TrimSpace(strings.ToLower(id))
-	if id == "" || id == "gpt-5.2-codex" || strings.Contains(id, "image") {
+	if id == "" || strings.Contains(id, "image") {
 		return false
 	}
 	if !strings.HasPrefix(id, "gpt-") {
@@ -401,7 +450,19 @@ func isAllowedUpstreamCodexModel(id string) bool {
 	if major > 5 {
 		return true
 	}
-	return major == 5 && minor >= 2
+	if major < 5 {
+		return false
+	}
+	// major == 5
+	if minor >= 4 {
+		return true
+	}
+	if minor == 3 {
+		// 5.3 只保留 spark
+		return strings.Contains(id, "spark")
+	}
+	return false
+
 }
 
 // SyncOfficialCodexModels fetches the fixed official docs page and merges discovered models.
@@ -560,6 +621,10 @@ func LearnModelsFromManifest(ctx context.Context, db *database.DB, manifest []by
 	added := make([]string, 0, len(slugs))
 	for _, slug := range slugs {
 		if _, exists := known[strings.ToLower(slug)]; exists {
+			continue
+		}
+		// 上游同步不引入 5.3 以下模型（5.3 仅 spark）；与官方文档同步同一策略。
+		if !isAllowedUpstreamCodexModel(slug) {
 			continue
 		}
 		info := modelInfoForID(slug, ModelSourceUpstreamManifest)

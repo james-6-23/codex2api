@@ -452,6 +452,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-filter/rules", h.GetPromptFilterRules)
 	api.GET("/models", h.ListModels)
 	api.POST("/models/sync", h.SyncModels)
+	api.POST("/codex-cli-version/sync", h.SyncCodexCLIVersion)
 	api.GET("/image-prompts", h.ListImagePromptTemplates)
 	api.POST("/image-prompts", h.CreateImagePromptTemplate)
 	api.PATCH("/image-prompts/:id", h.UpdateImagePromptTemplate)
@@ -5703,18 +5704,19 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		return out
 	}
 	out := database.APIKeyLimits{
-		ModelAllow:     clean(in.ModelAllow),
-		ModelDeny:      clean(in.ModelDeny),
-		PlanAllow:      cleanPlanAllow(in.PlanAllow),
-		RPM:            maxInt(in.RPM, 0),
-		RPD:            maxInt(in.RPD, 0),
-		MaxConcurrency: maxInt(in.MaxConcurrency, 0),
-		CostLimit5h:    maxFloat(in.CostLimit5h, 0),
-		CostLimit7d:    maxFloat(in.CostLimit7d, 0),
-		CostLimit30d:   maxFloat(in.CostLimit30d, 0),
-		TokenLimit5h:   maxInt64(in.TokenLimit5h, 0),
-		TokenLimit7d:   maxInt64(in.TokenLimit7d, 0),
-		TokenLimit30d:  maxInt64(in.TokenLimit30d, 0),
+		ModelAllow:             clean(in.ModelAllow),
+		ModelDeny:              clean(in.ModelDeny),
+		PlanAllow:              cleanPlanAllow(in.PlanAllow),
+		RPM:                    maxInt(in.RPM, 0),
+		RPD:                    maxInt(in.RPD, 0),
+		MaxConcurrency:         maxInt(in.MaxConcurrency, 0),
+		CostLimit5h:            maxFloat(in.CostLimit5h, 0),
+		CostLimit7d:            maxFloat(in.CostLimit7d, 0),
+		CostLimit30d:           maxFloat(in.CostLimit30d, 0),
+		TokenLimit5h:           maxInt64(in.TokenLimit5h, 0),
+		TokenLimit7d:           maxInt64(in.TokenLimit7d, 0),
+		TokenLimit30d:          maxInt64(in.TokenLimit30d, 0),
+		DisableImageGeneration: in.DisableImageGeneration,
 	}
 	return out
 }
@@ -5918,6 +5920,9 @@ type settingsResponse struct {
 	CodexWSSilentMaxRetries                    int     `json:"codex_ws_silent_max_retries"`
 	CodexContinueThinkingEnabled               bool    `json:"codex_continue_thinking_enabled"`
 	CodexContinueMaxRounds                     int     `json:"codex_continue_max_rounds"`
+	CodexCLIVersionSyncEnabled                 bool    `json:"codex_cli_version_sync_enabled"`
+	CodexCLIVersionSyncIntervalHours           int     `json:"codex_cli_version_sync_interval_hours"`
+	CodexSyncedCLIVersion                      string  `json:"codex_synced_cli_version"`
 	SchedulerMode                              string  `json:"scheduler_mode"`
 	AffinityMode                               string  `json:"affinity_mode"`
 	MaxRetries                                 int     `json:"max_retries"`
@@ -6029,6 +6034,8 @@ type updateSettingsReq struct {
 	CodexWSSilentMaxRetries                    *int     `json:"codex_ws_silent_max_retries"`
 	CodexContinueThinkingEnabled               *bool    `json:"codex_continue_thinking_enabled"`
 	CodexContinueMaxRounds                     *int     `json:"codex_continue_max_rounds"`
+	CodexCLIVersionSyncEnabled                 *bool    `json:"codex_cli_version_sync_enabled"`
+	CodexCLIVersionSyncIntervalHours           *int     `json:"codex_cli_version_sync_interval_hours"`
 	SchedulerMode                              *string  `json:"scheduler_mode"`
 	AffinityMode                               *string  `json:"affinity_mode"`
 	MaxRetries                                 *int     `json:"max_retries"`
@@ -6721,6 +6728,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
 		CodexContinueThinkingEnabled:               h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:                     h.store.CodexContinueMaxRounds(),
+		CodexCLIVersionSyncEnabled:                 h.store.CodexCLIVersionSyncEnabled(),
+		CodexCLIVersionSyncIntervalHours:           h.store.CodexCLIVersionSyncIntervalHours(),
+		CodexSyncedCLIVersion:                      proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                              h.store.GetSchedulerMode(),
 		AffinityMode:                               h.store.GetAffinityMode(),
 		MaxRetries:                                 h.store.GetMaxRetries(),
@@ -7148,6 +7158,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetCodexContinueMaxRounds(v)
 		runtimeCfg.CodexContinueMaxRounds = v
 		log.Printf("设置已更新: codex_continue_max_rounds = %d", v)
+	}
+
+	if req.CodexCLIVersionSyncEnabled != nil {
+		h.store.SetCodexCLIVersionSyncEnabled(*req.CodexCLIVersionSyncEnabled)
+		runtimeCfg.CodexCLIVersionSyncEnabled = *req.CodexCLIVersionSyncEnabled
+		log.Printf("设置已更新: codex_cli_version_sync_enabled = %t", *req.CodexCLIVersionSyncEnabled)
+	}
+
+	if req.CodexCLIVersionSyncIntervalHours != nil {
+		v := database.NormalizeCodexCLIVersionSyncIntervalHours(*req.CodexCLIVersionSyncIntervalHours)
+		h.store.SetCodexCLIVersionSyncIntervalHours(v)
+		runtimeCfg.CodexCLIVersionSyncIntervalHours = v
+		log.Printf("设置已更新: codex_cli_version_sync_interval_hours = %d", v)
 	}
 
 	if req.SchedulerMode != nil {
@@ -7588,6 +7611,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
 		CodexContinueThinkingEnabled:               h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:                     h.store.CodexContinueMaxRounds(),
+		CodexCLIVersionSyncEnabled:                 h.store.CodexCLIVersionSyncEnabled(),
+		CodexCLIVersionSyncIntervalHours:           h.store.CodexCLIVersionSyncIntervalHours(),
+		CodexSyncedCLIVersion:                      proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                              h.store.GetSchedulerMode(),
 		AffinityMode:                               h.store.GetAffinityMode(),
 		MaxRetries:                                 h.store.GetMaxRetries(),
@@ -7713,6 +7739,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSSilentMaxRetries:                    h.store.CodexWSSilentMaxRetries(),
 		CodexContinueThinkingEnabled:               h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:                     h.store.CodexContinueMaxRounds(),
+		CodexCLIVersionSyncEnabled:                 h.store.CodexCLIVersionSyncEnabled(),
+		CodexCLIVersionSyncIntervalHours:           h.store.CodexCLIVersionSyncIntervalHours(),
+		CodexSyncedCLIVersion:                      proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                              h.store.GetSchedulerMode(),
 		AffinityMode:                               h.store.GetAffinityMode(),
 		MaxRetries:                                 h.store.GetMaxRetries(),
@@ -8141,6 +8170,24 @@ func (h *Handler) SyncModels(c *gin.Context) {
 	defer cancel()
 
 	result, err := proxy.SyncOfficialCodexModels(ctx, h.db)
+	if err != nil {
+		writeError(c, http.StatusBadGateway, err.Error())
+		return
+	}
+	c.JSON(http.StatusOK, result)
+}
+
+// SyncCodexCLIVersion 从 openai/codex releases 拉取最新稳定版本，
+// 抬升出站 UA / manifest 的模拟版本（绝不降级），供设置页「立即同步」按钮调用。
+func (h *Handler) SyncCodexCLIVersion(c *gin.Context) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
+	defer cancel()
+
+	proxyURL := ""
+	if h.store != nil {
+		proxyURL = h.store.GetProxyURL()
+	}
+	result, err := proxy.SyncCodexCLIVersion(ctx, h.db, proxyURL)
 	if err != nil {
 		writeError(c, http.StatusBadGateway, err.Error())
 		return

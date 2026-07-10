@@ -31,15 +31,19 @@ func TestParseOfficialCodexModelIDs(t *testing.T) {
 		<code>codex -m gpt-4.1</code>
 	`
 	models, skipped := ParseOfficialCodexModelIDs(html)
-	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark", "gpt-5.2"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark"} {
 		if !slices.Contains(models, model) {
 			t.Fatalf("parsed models missing %q in %v", model, models)
 		}
 	}
-	for _, model := range []string{"gpt-5.2-codex", "gpt-4.1"} {
+	// 5.3 只保留 spark；gpt-5.2 及以下、gpt-5.2-codex、gpt-4.1 均被过滤。
+	for _, model := range []string{"gpt-5.2", "gpt-5.2-codex", "gpt-4.1"} {
 		if !slices.Contains(skipped, model) {
 			t.Fatalf("skipped models missing %q in %v", model, skipped)
 		}
+	}
+	if slices.Contains(models, "gpt-5.2") {
+		t.Fatalf("gpt-5.2 should be filtered out, got %v", models)
 	}
 }
 
@@ -217,14 +221,14 @@ func TestLearnModelsFromManifest_AddsOnlyUnknownAndNeverTouchesExisting(t *testi
 	manifest := []byte(`{"models":[
 		{"slug":"gpt-5.5"},
 		{"slug":"gpt-old"},
-		{"slug":"gpt-9-new"}
+		{"slug":"gpt-9.9-new"}
 	]}`)
 	added, err := LearnModelsFromManifest(ctx, db, manifest, time.Date(2026, 7, 9, 0, 0, 0, 0, time.UTC))
 	if err != nil {
 		t.Fatalf("LearnModelsFromManifest error: %v", err)
 	}
-	if !slices.Equal(added, []string{"gpt-9-new"}) {
-		t.Fatalf("added = %v, want [gpt-9-new] (builtin/existing must be skipped)", added)
+	if !slices.Equal(added, []string{"gpt-9.9-new"}) {
+		t.Fatalf("added = %v, want [gpt-9.9-new] (builtin/existing must be skipped)", added)
 	}
 
 	rows, err := db.ListModelRegistry(ctx)
@@ -234,7 +238,7 @@ func TestLearnModelsFromManifest_AddsOnlyUnknownAndNeverTouchesExisting(t *testi
 	var sawNew, sawOld bool
 	for _, row := range rows {
 		switch row.ID {
-		case "gpt-9-new":
+		case "gpt-9.9-new":
 			sawNew = true
 			if !row.Enabled || row.Source != ModelSourceUpstreamManifest {
 				t.Fatalf("learned row = %+v, want enabled with source %s", row, ModelSourceUpstreamManifest)
@@ -251,7 +255,7 @@ func TestLearnModelsFromManifest_AddsOnlyUnknownAndNeverTouchesExisting(t *testi
 	}
 
 	// 学习后的模型立即进入请求侧支持列表。
-	if !slices.Contains(SupportedModelIDs(ctx, db), "gpt-9-new") {
+	if !slices.Contains(SupportedModelIDs(ctx, db), "gpt-9.9-new") {
 		t.Fatal("learned model should appear in SupportedModelIDs immediately")
 	}
 	if slices.Contains(SupportedModelIDs(ctx, db), "gpt-old") {
@@ -275,5 +279,31 @@ func TestLearnModelsFromManifest_AllKnownIsNoOp(t *testing.T) {
 	}
 	if len(rows) != 0 {
 		t.Fatalf("no rows should be written for all-known manifest, got %d", len(rows))
+	}
+}
+
+// 上游同步/学习的模型准入策略：5.4+ 放行，5.3 仅 spark，5.2 及以下下线。
+func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
+	cases := map[string]bool{
+		"gpt-5.6-sol":         true,
+		"gpt-5.5":             true,
+		"gpt-5.4":             true,
+		"gpt-5.4-mini":        true,
+		"gpt-6.0":             true,
+		"gpt-5.3-codex-spark": true,
+		"gpt-5.3-codex":       false,
+		"gpt-5.3":             false,
+		"gpt-5.2":             false,
+		"gpt-5.2-codex":       false,
+		"gpt-5.1-codex":       false,
+		"gpt-4.1":             false,
+		"gpt-4o":              false,
+		"gpt-image-2":         false,
+		"":                    false,
+	}
+	for id, want := range cases {
+		if got := isAllowedUpstreamCodexModel(id); got != want {
+			t.Errorf("isAllowedUpstreamCodexModel(%q) = %v, want %v", id, got, want)
+		}
 	}
 }
