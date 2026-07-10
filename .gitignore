@@ -39,3 +39,5 @@ CLIProxyAPI/
 sub2api/
 new-api/
 .gstack/
+.gocache/
+.gopath/

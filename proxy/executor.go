@@ -19,7 +19,6 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
-	"github.com/klauspost/compress/zstd"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -480,7 +479,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	// ==================== 请求头（伪装 Codex CLI） ====================
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
-	applyCodexRequestBodyEncoding(req, requestBody)
 
 	// Resin 反代：注入账号身份头
 	if IsResinEnabled() {
@@ -623,7 +621,6 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 
 	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
-	applyCodexRequestBodyEncoding(req, requestBody)
 
 	if IsResinEnabled() {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))
@@ -676,11 +673,6 @@ func generatedCodexClientHeaders(account *auth.Account, settings RuntimeSettings
 		accountID = account.ID()
 	}
 	profile := ProfileForAccount(accountID)
-	if settings.MimicStrictHeaders() {
-		// strict 模式：originator 前缀改 codex_cli_rs、去除 UA 尾部后缀，
-		// 与官方 codex-rs get_codex_user_agent() 对齐。
-		profile = StrictProfileForAccount(accountID)
-	}
 	userAgent := strings.TrimSpace(profile.UserAgent)
 	version := strings.TrimSpace(profile.Version)
 	if userAgent == "" {
@@ -745,9 +737,6 @@ func resolveCodexOutboundClientHeaders(account *auth.Account, apiKey string, dev
 	if userAgent, version, ok := codexUserAgentFromConfig(settings.CodexUserAgentConfig, versionFloor); ok {
 		return userAgent, version, true
 	}
-	if settings.MimicStrictHeaders() {
-		return strictDefaultCodexCLIUserAgent, latestCodexCLIVersion, false
-	}
 	effectiveVersion := effectiveLatestCodexCLIVersion()
 	return replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveVersion), effectiveVersion, false
 }
@@ -770,50 +759,6 @@ func applyCodexAllowedForwardHeaders(req *http.Request, downstreamHeaders http.H
 			req.Header.Set(name, value)
 		}
 	}
-}
-
-// codexOpenAIBetaHTTPValue 是 HTTP /responses 路径应携带的 OpenAI-Beta 值。
-// 官方 codex-rs 在 WS 路径发 responses_websockets=2026-02-06；HTTP 路径历史上
-// 由 responses=experimental 启用 Responses API。此处用于 strict 模式补齐 HTTP 头。
-const codexOpenAIBetaHTTPValue = "responses=experimental"
-
-// codexBetaFeaturesValue 是实测 codex 0.142.5 /responses 请求携带的 x-codex-beta-features。
-// 该值随版本/灰度变化，集中在此便于跟随真实客户端更新。
-const codexBetaFeaturesValue = "remote_compaction_v2"
-
-// codexZstdEncoder 无状态一次性 zstd 编码器（EncodeAll 并发安全）。
-var codexZstdEncoder, _ = zstd.NewWriter(nil)
-
-func codexZstdRequestEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_ZSTD_REQUEST_BODY"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-// applyCodexRequestBodyEncoding 用 zstd 压缩请求体以对齐真实 codex 0.142.5
-// （content-encoding: zstd）。默认关闭——因请求体编码影响每一次请求且无法在此环境
-// 用真实会话验证 200，需运营侧用金丝雀账号确认后，通过 CODEX_ZSTD_REQUEST_BODY=1 开启。
-// 仅在 strict 伪装模式下生效；同时重设 GetBody 以保证回退/重试可安全重放。
-func applyCodexRequestBodyEncoding(req *http.Request, rawBody []byte) {
-	if req == nil || len(rawBody) == 0 {
-		return
-	}
-	if !CurrentRuntimeSettings().MimicStrictHeaders() || !codexZstdRequestEnabled() {
-		return
-	}
-	if strings.TrimSpace(req.Header.Get("Content-Encoding")) != "" {
-		return
-	}
-	compressed := codexZstdEncoder.EncodeAll(rawBody, nil)
-	req.Body = io.NopCloser(bytes.NewReader(compressed))
-	req.ContentLength = int64(len(compressed))
-	req.GetBody = func() (io.ReadCloser, error) {
-		return io.NopCloser(bytes.NewReader(compressed)), nil
-	}
-	req.Header.Set("Content-Encoding", "zstd")
 }
 
 func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
