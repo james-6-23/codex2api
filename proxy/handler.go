@@ -1334,6 +1334,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	// manifest 格式；client_version 是 Codex 客户端的天然指纹，普通 OpenAI
 	// 客户端不携带，其余请求保持 OpenAI 格式列表不变。
 	v1.GET("/models", h.listModelsOrManifest)
+	// Codex CLI web_search = "live" 的 standalone 联网搜索端点 (issue #359)
+	v1.POST("/alpha/search", h.CodexAlphaSearchHandler)
 
 	// 无前缀路由（兼容 base_url 已包含 /v1 的客户端）
 	r.POST("/chat/completions", auth, h.ChatCompletions)
@@ -1346,12 +1348,14 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	r.POST("/messages/count_tokens", auth, h.CountTokens)
 	r.POST("/responses/input_tokens", auth, h.ResponsesInputTokens)
 	r.GET("/models", auth, h.listModelsOrManifest)
+	r.POST("/alpha/search", auth, h.CodexAlphaSearchHandler)
 
 	codexDirect := r.Group("/backend-api/codex")
 	codexDirect.Use(auth)
 	codexDirect.POST("/responses", h.Responses)
 	codexDirect.GET("/responses", h.ResponsesWebSocket)
 	codexDirect.GET("/models", h.CodexModelsManifestHandler)
+	codexDirect.POST("/alpha/search", h.CodexAlphaSearchHandler)
 	codexDirect.POST("/responses/*subpath", func(c *gin.Context) {
 		subpath := strings.TrimSpace(c.Param("subpath"))
 		if subpath == "/compact" || strings.HasPrefix(subpath, "/compact/") {
