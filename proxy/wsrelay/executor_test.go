@@ -69,6 +69,25 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	}
 }
 
+// TestPrepareWebsocketHeadersForwardsAttestationOnlyWhenPresent 验证 WS 路径同样
+// 只在下游携带 DeviceCheck token（openai/codex#20619）时透传，缺失不伪造。
+func TestPrepareWebsocketHeadersForwardsAttestationOnlyWhenPresent(t *testing.T) {
+	exec := NewExecutor()
+	acc := &auth.Account{DBID: 42, AccountID: "42"}
+
+	withToken := exec.prepareWebsocketHeaders("token-123", acc, "42", "session-123", "api-key-1", nil, http.Header{
+		"X-Oai-Attestation": []string{"v1.real-devicecheck-token"},
+	})
+	if got := withToken.Get("X-Oai-Attestation"); got != "v1.real-devicecheck-token" {
+		t.Fatalf("X-Oai-Attestation = %q, want passthrough of downstream token", got)
+	}
+
+	without := exec.prepareWebsocketHeaders("token-123", acc, "42", "session-123", "api-key-1", nil, http.Header{})
+	if got := without.Get("X-Oai-Attestation"); got != "" {
+		t.Fatalf("X-Oai-Attestation = %q, want empty (never fabricate)", got)
+	}
+}
+
 func TestPrepareWebsocketHeadersAppliesAccountCustomHeadersLast(t *testing.T) {
 	exec := NewExecutor()
 	account := &auth.Account{

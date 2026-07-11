@@ -311,7 +311,9 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	} else {
 		headers.Set("Originator", proxy.Originator)
 	}
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
+	// X-Oai-Attestation：DeviceCheck 设备认证头（上游 openai/codex#20619），
+	// 仅在下游携带时透传，本代理不伪造（假 token 服务端验证必败，反而暴露）。
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
 			headers.Set(name, value)
 		}

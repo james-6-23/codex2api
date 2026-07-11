@@ -247,6 +247,11 @@ var codexAllowedForwardHeaders = []string{
 	"X-Codex-Turn-Metadata",
 	"X-Client-Request-Id",
 	"X-Codex-Beta-Features",
+	// DeviceCheck 设备认证头（上游 openai/codex#20619）。仅在下游真实 Codex
+	// 客户端携带时原样透传——本代理无法（也不该）伪造：token 是 Apple 硬件
+	// 背书、服务端向 Apple 验证，假值必然验证失败、比"不携带"更暴露特征。
+	// 缺失是合法状态（纯 CLI / 非 macOS 客户端本就不发）。
+	"X-Oai-Attestation",
 }
 
 // WebsocketExecuteFunc WebSocket 执行函数（由 wsrelay 包在 main.go 中注册，避免循环依赖）
