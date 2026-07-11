@@ -384,3 +384,128 @@ func TestStripCompactModelSuffixFromBody(t *testing.T) {
 		t.Fatalf("body should be untouched, got %s", body2)
 	}
 }
+
+// 合成的 -openai-compact 别名不得命中 "gpt-*"、"*" 之类通用规则，
+// 否则会压过基础名本应命中的精确规则（issue: PR #350 回归）。
+func TestCompactSyntheticAliasDoesNotMatchGenericWildcardRules(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetCodexModelMapping(`{"gpt-5.5":"model-a","gpt-*":"model-b"}`)
+	handler := NewHandler(store, nil, nil, nil)
+
+	body, _, effective, mapped := handler.applyConfiguredCompactModelMappingToBody(
+		[]byte(`{"model":"gpt-5.5","input":"hello"}`),
+		[]string{"gpt-5.5", "model-a", "model-b"},
+	)
+
+	if !mapped || effective != "model-a" {
+		t.Fatalf("effective = %q (mapped=%v), want exact base rule model-a", effective, mapped)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "model-a" {
+		t.Fatalf("body model = %q, want model-a", got)
+	}
+}
+
+// 显式针对 compact 别名的通配规则（*-openai-compact）仍可命中合成别名。
+func TestCompactSyntheticAliasMatchesCompactScopedWildcardRule(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetCodexModelMapping(`{"*-openai-compact":"gpt-5.5"}`)
+	handler := NewHandler(store, nil, nil, nil)
+
+	_, _, effective, mapped := handler.applyConfiguredCompactModelMappingToBody(
+		[]byte(`{"model":"gpt-5.6-sol","input":"hello"}`),
+		[]string{"gpt-5.6-sol", "gpt-5.5"},
+	)
+
+	if !mapped || effective != "gpt-5.5" {
+		t.Fatalf("effective = %q (mapped=%v), want gpt-5.5 via *-openai-compact rule", effective, mapped)
+	}
+}
+
+// 映射目标携带 -openai-compact 后缀时须剥离后再写入请求体：
+// 上游 compact 端点只认真实模型名（issue: PR #350 回归，导致上游收到
+// gpt-5.6-sol-openai-compact 而压缩失败）。
+func TestCompactMappingTargetSuffixIsStripped(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.SetCodexModelMapping(`{"gpt-5.6-sol-openai-compact":"gpt-5.4-openai-compact"}`)
+	handler := NewHandler(store, nil, nil, nil)
+
+	body, _, effective, mapped := handler.applyConfiguredCompactModelMappingToBody(
+		[]byte(`{"model":"gpt-5.6-sol-openai-compact","input":"hello"}`),
+		[]string{"gpt-5.6-sol", "gpt-5.4"},
+	)
+
+	if !mapped || effective != "gpt-5.4" {
+		t.Fatalf("effective = %q (mapped=%v), want suffix-stripped gpt-5.4", effective, mapped)
+	}
+	if got := gjson.GetBytes(body, "model").String(); got != "gpt-5.4" {
+		t.Fatalf("body model = %q, want gpt-5.4", got)
+	}
+}
+
+// 账号级映射：合成别名命中恒等规则（suffixed→suffixed）时不得把带后缀
+// 名字发往上游；候选回退到基础名后应保持 PR #350 之前的行为。
+func TestResolveAccountCompactModelMappingNormalizesIdentitySuffixRule(t *testing.T) {
+	account := &auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "http://example.invalid",
+		APIKey:       "sk-x",
+		Models:       []string{"gpt-5.6-sol", "gpt-5.6-sol-openai-compact"},
+		ModelMapping: `{"gpt-5.6-sol-openai-compact":"gpt-5.6-sol-openai-compact"}`,
+		PlanType:     "api",
+	}
+
+	mapped, ok := resolveAccountCompactModelMappingForCandidates(account, compactMappingCandidates("gpt-5.6-sol"))
+	if !ok || mapped != "gpt-5.6-sol" {
+		t.Fatalf("mapped = %q (ok=%v), want base gpt-5.6-sol", mapped, ok)
+	}
+}
+
+// 账号级映射：合成别名不吃通用通配规则，基础名的精确规则优先。
+func TestResolveAccountCompactModelMappingKeepsExactBaseRulePrecedence(t *testing.T) {
+	account := &auth.Account{
+		DBID:         2,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "http://example.invalid",
+		APIKey:       "sk-x",
+		Models:       []string{"model-a", "model-b"},
+		ModelMapping: `{"gpt-5.5":"model-a","gpt-*":"model-b"}`,
+		PlanType:     "api",
+	}
+
+	mapped, ok := resolveAccountCompactModelMappingForCandidates(account, compactMappingCandidates("gpt-5.5"))
+	if !ok || mapped != "model-a" {
+		t.Fatalf("mapped = %q (ok=%v), want exact base rule model-a", mapped, ok)
+	}
+}
+
+// 恒等 suffixed→suffixed 规则不得把仅列出带后缀名字的账号从 compact 池中
+// 踢除（PR #350 之前该规则是死配置，账号按基础名参与过滤）。
+func TestCompactAccountFilterParityWithStaleSuffixRule(t *testing.T) {
+	rejected := &auth.Account{
+		DBID:         3,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "http://example.invalid",
+		APIKey:       "sk-x",
+		Models:       []string{"gpt-5.6-sol-openai-compact"},
+		ModelMapping: `{"gpt-5.6-sol-openai-compact":"gpt-5.6-sol-openai-compact"}`,
+		PlanType:     "api",
+	}
+	accepted := &auth.Account{
+		DBID:         4,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "http://example.invalid",
+		APIKey:       "sk-x",
+		Models:       []string{"gpt-5.6-sol", "gpt-5.6-sol-openai-compact"},
+		ModelMapping: `{"gpt-5.6-sol-openai-compact":"gpt-5.6-sol-openai-compact"}`,
+		PlanType:     "api",
+	}
+
+	filter := accountFilterForCompactResponsesModelWithOriginal("gpt-5.6-sol", "gpt-5.6-sol", false)
+	if filter(rejected) {
+		t.Error("account without the base model should stay rejected (pre-#350 parity)")
+	}
+	if !filter(accepted) {
+		t.Error("account listing the base model should be accepted")
+	}
+}

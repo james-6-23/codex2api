@@ -75,12 +75,15 @@ func parseModelMappingRules(mappingJSON string) []modelMappingRule {
 }
 
 func resolveConfiguredModelMapping(model string, mappingJSON string, supportedModels []string) (string, bool) {
+	return resolveModelMappingFromRules(model, parseModelMappingRules(mappingJSON), supportedModels)
+}
+
+func resolveModelMappingFromRules(model string, rules []modelMappingRule, supportedModels []string) (string, bool) {
 	model = strings.TrimSpace(model)
 	if model == "" {
 		return "", false
 	}
 
-	rules := parseModelMappingRules(mappingJSON)
 	if len(rules) == 0 {
 		return model, false
 	}
@@ -357,12 +360,21 @@ func stripCompactModelSuffixFromBody(rawBody []byte) ([]byte, string, bool) {
 	return updated, stripped, true
 }
 
-// compactModelMappingCandidates returns endpoint-qualified aliases before their
+// compactMappingCandidate 是 compact 请求做模型映射时的一个尝试名。synthetic 标记
+// 该名字是内部拼出的 <model>-openai-compact 别名（客户端并未真的发它）：这类别名
+// 只允许命中显式以 -openai-compact 结尾的规则，避免 "gpt-*"、"*" 之类通用规则被
+// 合成别名劫持、压过基础名本应命中的规则。
+type compactMappingCandidate struct {
+	model     string
+	synthetic bool
+}
+
+// compactMappingCandidates returns endpoint-qualified aliases before their
 // base names so compact-specific rules override general model rules.
-func compactModelMappingCandidates(models ...string) []string {
-	candidates := make([]string, 0, len(models)*2)
+func compactMappingCandidates(models ...string) []compactMappingCandidate {
+	candidates := make([]compactMappingCandidate, 0, len(models)*2)
 	seen := make(map[string]struct{}, len(models)*2)
-	add := func(model string) {
+	add := func(model string, synthetic bool) {
 		model = strings.TrimSpace(model)
 		if model == "" {
 			return
@@ -372,7 +384,7 @@ func compactModelMappingCandidates(models ...string) []string {
 			return
 		}
 		seen[key] = struct{}{}
-		candidates = append(candidates, model)
+		candidates = append(candidates, compactMappingCandidate{model: model, synthetic: synthetic})
 	}
 
 	for _, model := range models {
@@ -381,14 +393,86 @@ func compactModelMappingCandidates(models ...string) []string {
 			continue
 		}
 		if baseModel, stripped := stripCompactModelSuffix(model); stripped {
-			add(model)
-			add(baseModel)
+			add(model, false)
+			add(baseModel, false)
 			continue
 		}
-		add(model + compactOpenAIModelSuffix)
-		add(model)
+		add(model+compactOpenAIModelSuffix, true)
+		add(model, false)
 	}
 	return candidates
+}
+
+// compactAliasScopedRules 过滤出显式针对 -openai-compact 别名的规则（From 以该
+// 后缀结尾，含 "*-openai-compact" 这类通配）。合成别名只在这些规则里匹配。
+func compactAliasScopedRules(rules []modelMappingRule) []modelMappingRule {
+	scoped := make([]modelMappingRule, 0, len(rules))
+	for _, rule := range rules {
+		if strings.HasSuffix(strings.ToLower(rule.From), compactOpenAIModelSuffix) {
+			scoped = append(scoped, rule)
+		}
+	}
+	return scoped
+}
+
+// normalizeCompactMappingTarget 剥离映射目标上的 -openai-compact 后缀。codex2api
+// 发往上游的始终是 /v1/responses/compact 端点，该后缀只是入站别名约定；把它原样
+// 转发会让上游按字面模型名查找而失败（中转模型列表里的 xxx-openai-compact 通常
+// 只是路由标记，不是可直接请求的模型）。
+func normalizeCompactMappingTarget(model string) string {
+	if base, stripped := stripCompactModelSuffix(model); stripped {
+		return base
+	}
+	return model
+}
+
+// resolveAccountCompactModelMappingForCandidates 按候选顺序解析账号级映射：
+// 合成别名只匹配 compact 专用规则，真实名字走全部规则；命中目标统一去后缀。
+func resolveAccountCompactModelMappingForCandidates(account *auth.Account, candidates []compactMappingCandidate) (string, bool) {
+	if account == nil {
+		return "", false
+	}
+	accountModels := account.OpenAIResponsesModels()
+	if len(accountModels) == 0 {
+		return "", false
+	}
+	rules := parseModelMappingRules(account.OpenAIResponsesModelMapping())
+	if len(rules) == 0 {
+		return "", false
+	}
+	scopedRules := compactAliasScopedRules(rules)
+	for _, candidate := range candidates {
+		candidateRules := rules
+		if candidate.synthetic {
+			candidateRules = scopedRules
+		}
+		mappedModel, ok := resolveModelMappingFromRules(candidate.model, candidateRules, accountModels)
+		if !ok || mappedModel == "" {
+			continue
+		}
+		return normalizeCompactMappingTarget(mappedModel), true
+	}
+	return "", false
+}
+
+// applyAccountCompactModelMappingToBody 是 compact 链路的账号级映射改写：
+// 与 applyAccountModelMappingToBodyForModels 相同的语义，但候选带 synthetic
+// 标记且映射目标不允许携带 -openai-compact 后缀进入上游请求体。
+func (h *Handler) applyAccountCompactModelMappingToBody(rawBody []byte, account *auth.Account, modelCandidates ...string) ([]byte, string, bool) {
+	model := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
+	if model == "" || !gjson.ValidBytes(rawBody) || account == nil || !account.IsOpenAIResponsesAPI() {
+		return rawBody, model, false
+	}
+	candidates := compactMappingCandidates(append(modelCandidates, model)...)
+	mappedModel, ok := resolveAccountCompactModelMappingForCandidates(account, candidates)
+	if !ok || mappedModel == "" || strings.EqualFold(mappedModel, model) {
+		return rawBody, model, false
+	}
+	updatedBody, err := sjson.SetBytes(rawBody, "model", mappedModel)
+	if err != nil {
+		return rawBody, model, false
+	}
+	return updatedBody, mappedModel, true
 }
 
 // applyConfiguredCompactModelMappingToBody resolves the endpoint-qualified
@@ -401,10 +485,14 @@ func (h *Handler) applyConfiguredCompactModelMappingToBody(rawBody []byte, suppo
 		return rawBody, originalModel, originalModel, false
 	}
 
-	candidates := compactModelMappingCandidates(originalModel)
-	if len(candidates) > 0 {
+	if candidates := compactMappingCandidates(originalModel); len(candidates) > 0 {
 		compactAlias := candidates[0]
-		if mappedModel, ok := resolveConfiguredModelMapping(compactAlias, h.store.GetCodexModelMapping(), supportedModels); ok && mappedModel != "" && !strings.EqualFold(mappedModel, compactAlias) {
+		rules := parseModelMappingRules(h.store.GetCodexModelMapping())
+		if compactAlias.synthetic {
+			rules = compactAliasScopedRules(rules)
+		}
+		if mappedModel, ok := resolveModelMappingFromRules(compactAlias.model, rules, supportedModels); ok && mappedModel != "" && !strings.EqualFold(mappedModel, compactAlias.model) {
+			mappedModel = normalizeCompactMappingTarget(mappedModel)
 			effectiveModel := mappedModel
 			updatedBody := rawBody
 			var err error

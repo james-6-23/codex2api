@@ -3040,3 +3040,109 @@ func TestBodySignalCompactFilters(t *testing.T) {
 		t.Fatal("pool with codex account should report available")
 	}
 }
+
+// 回归（PR #350）：中转账号映射里存在 suffixed→suffixed 的恒等规则时，
+// 客户端用基础名触发压缩，上游必须仍收到基础名 gpt-5.6-sol，
+// 而不是被合成别名命中规则后原样转发 gpt-5.6-sol-openai-compact。
+func TestResponsesCompactStaleSuffixIdentityRuleKeepsBaseModelUpstream(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_compact_identity",
+			"object":"response",
+			"model":"gpt-5.6-sol",
+			"output":[],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-5.6-sol", "gpt-5.6-sol-openai-compact"},
+		ModelMapping: `{"gpt-5.6-sol-openai-compact":"gpt-5.6-sol-openai-compact"}`,
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-5.6-sol","input":"hello","stream":true}`)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body)).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.ResponsesCompact(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if model := gjson.GetBytes(seenBody, "model").String(); model != "gpt-5.6-sol" {
+		t.Fatalf("upstream model = %q, want base gpt-5.6-sol; body=%s", model, seenBody)
+	}
+}
+
+// 统计展示：客户端用 -openai-compact 别名请求压缩时，usage 上下文中的模型
+// 应折算为基础名，且"仅剥后缀"不算映射（不产生 effective_model 箭头）。
+func TestResponsesCompactSuffixOnlyRequestLogsBaseModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_compact_display",
+			"object":"response",
+			"model":"gpt-5.6-sol",
+			"output":[],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-5.6-sol"},
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{"model":"gpt-5.6-sol-openai-compact","input":"hello","stream":true}`)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewReader(body)).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.ResponsesCompact(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+	if got := ctx.GetString("x-model"); got != "gpt-5.6-sol" {
+		t.Fatalf("x-model = %q, want base gpt-5.6-sol (suffix stripped for display)", got)
+	}
+}

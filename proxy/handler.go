@@ -242,10 +242,19 @@ func accountFilterForResponsesModelWithOriginal(originalModel string, effectiveM
 }
 
 func accountFilterForCompactResponsesModelWithOriginal(originalModel string, effectiveModel string, allowCodexAccounts bool) auth.AccountFilter {
-	return accountFilterForResponsesModelCandidates(compactModelMappingCandidates(originalModel, effectiveModel), effectiveModel, allowCodexAccounts)
+	candidates := compactMappingCandidates(originalModel, effectiveModel)
+	return accountFilterForResponsesModelResolver(effectiveModel, allowCodexAccounts, func(account *auth.Account) (string, bool) {
+		return resolveAccountCompactModelMappingForCandidates(account, candidates)
+	})
 }
 
 func accountFilterForResponsesModelCandidates(modelCandidates []string, effectiveModel string, allowCodexAccounts bool) auth.AccountFilter {
+	return accountFilterForResponsesModelResolver(effectiveModel, allowCodexAccounts, func(account *auth.Account) (string, bool) {
+		return resolveAccountModelMappingForCandidates(account, modelCandidates...)
+	})
+}
+
+func accountFilterForResponsesModelResolver(effectiveModel string, allowCodexAccounts bool, resolveMapping func(*auth.Account) (string, bool)) auth.AccountFilter {
 	effectiveModel = strings.TrimSpace(effectiveModel)
 	codexFilter := accountFilterForModel(effectiveModel)
 	return func(account *auth.Account) bool {
@@ -254,7 +263,7 @@ func accountFilterForResponsesModelCandidates(modelCandidates []string, effectiv
 		}
 		if account.IsOpenAIResponsesAPI() {
 			routedModel := effectiveModel
-			if mappedModel, ok := resolveAccountModelMappingForCandidates(account, modelCandidates...); ok && mappedModel != "" {
+			if mappedModel, ok := resolveMapping(account); ok && mappedModel != "" {
 				routedModel = mappedModel
 			}
 			return account.SupportsOpenAIResponsesModel(routedModel) && (routedModel == "" || !account.IsModelRateLimited(routedModel))
@@ -2751,9 +2760,16 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	}
 
 	model := strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
-	logModel := requestModel
-	if logModel == "" {
-		logModel = model
+	// routingModel 保留客户端原始模型名（可能带 -openai-compact 后缀），供账号级
+	// compact 映射与账号过滤匹配别名规则；logModel 用于统计与日志展示，别名后缀
+	// 只是端点路由约定，展示时一律折算成基础模型名（仅剥后缀不算映射，不显示箭头）。
+	routingModel := requestModel
+	if routingModel == "" {
+		routingModel = model
+	}
+	logModel := routingModel
+	if baseModel, stripped := stripCompactModelSuffix(logModel); stripped {
+		logModel = baseModel
 	}
 	if err := security.ValidateModelName(model); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{
@@ -2810,7 +2826,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	}
 	// compact 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
-	accountFilter := accountFilterForCompactResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 
 	// compact 走中转账号时需要 OpenAI Responses 形态的请求体
@@ -2858,7 +2874,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			baseURL, _ := account.OpenAIResponsesCredentials()
 			upstreamEndpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses/compact")
 			upstreamBody := openAIResponsesBody
-			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBodyForModels(upstreamBody, account, compactModelMappingCandidates(logModel, effectiveModel)...); ok {
+			if mappedBody, mappedModel, ok := h.applyAccountCompactModelMappingToBody(upstreamBody, account, routingModel, effectiveModel); ok {
 				upstreamBody = mappedBody
 				attemptEffectiveModel = mappedModel
 				attemptLogEffectiveModel = usageEffectiveModelForMapping(logModel, attemptEffectiveModel, true)
