@@ -111,6 +111,7 @@ Run it as a full **PostgreSQL + Redis** production stack or as a single-containe
 - [Core Capabilities](#core-capabilities)
 - [Project Structure](#project-structure)
 - [Notes](#notes)
+- [Community](#community)
 - [Disclaimer and License](#disclaimer-and-license)
 - [Star History](#star-history)
 - [Links](#links)
@@ -522,6 +523,14 @@ codex2api/
 - Before manually building the Go binary, run `npm run build` in `frontend/`.
 - `.env` controls physical runtime settings such as port, database, and Redis. Business settings are stored in the database and managed from the admin dashboard.
 - API keys are stored in the database and configured through the admin dashboard.
+
+---
+
+## Community
+
+- QQ group: [Join the "codex2api" group chat](https://qun.qq.com/universal-share/share?ac=1&authKey=6vwawW4MeqdACT7PajnHlf2lLkjfuNXEMSos67l9FBiAJ8t%2BKeaXJXB0dgsnhFa1&busi_data=eyJncm91cENvZGUiOiI4MTY3Mzk4NDIiLCJ0b2tlbiI6ImU1YW1KR3dNaXZoUXZDUWpYTWVncmdmMXhQV1RwQ21tbEhkdjB5VW45aWVPSjhFM2grMkRHNGdhWnhEU29oS08iLCJ1aW4iOiIxMTYzNDc2OTQ5In0%3D&data=adSomD6r40Al25rBr8PocFCKumQR5oxi1kq5jXjXxeJ49Z5cj4QLzbNf6vfIQKWMORrJntrZtcoyQuHg2ksUeA&svctype=4&tempid=h5_group_info) (group ID: 816739842)
+
+Join the group to discuss deployment, usage, and development questions.
 
 ---
 
