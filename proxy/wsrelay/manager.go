@@ -29,27 +29,6 @@ const (
 	StateClosing      ConnectionState = 3
 )
 
-const (
-	// pumpFrameBuffer 常驻 reader 到消费者之间业务帧的缓冲深度
-	//（与 PendingRequest.StreamChan 对齐）。
-	pumpFrameBuffer = 64
-
-	// pumpReadDeadline 常驻 reader 的单次读截止。空闲连接正常应先被
-	// IdleTimeout(5min) 清理逐出，这里只兜底略长一点；上游 Ping/Pong 到达时顺延。
-	// 活跃请求的"帧间超时"由消费端(ReadStream)按 ReadTimeout 单独计时。
-	pumpReadDeadline = IdleTimeout + 30*time.Second
-)
-
-// errStrayFrame 无在途请求时到达的业务帧：上一响应的残留。该连接的
-// 服务端状态已不可信，绝不能再复用（issue #308 同源）。
-var errStrayFrame = fmt.Errorf("stray data frame on idle websocket connection")
-
-// wsFrame 常驻 reader 转发给消费者的一帧业务数据。
-type wsFrame struct {
-	msgType int
-	data    []byte
-}
-
 // WsConnection WebSocket 连接包装
 type WsConnection struct {
 	// WebSocket 连接
@@ -77,25 +56,34 @@ type WsConnection struct {
 	// 写操作锁
 	writeMu sync.Mutex
 
+	// 永久 reader、业务帧 lease 与探活状态。读取状态按需初始化，兼容测试中
+	// 通过字面量构造且没有底层 socket 的 WsConnection。
+	readStateOnce       sync.Once
+	readPumpOnce        sync.Once
+	readFailureOnce     sync.Once
+	controlHandlersOnce sync.Once
+	readState           *wsReadState
+
+	probeGateOnce sync.Once
+	probeGate     chan struct{}
+	probeStateMu  sync.Mutex
+	probePayload  string
+	probeResult   chan struct{}
+
+	// 底层 socket 与断开回调只关闭/调用一次。
+	closeOnce          sync.Once
+	closeErr           error
+	disconnectNotified atomic.Bool
+
 	// HTTP 握手响应
 	httpResp *http.Response
 
 	// 连接关闭回调
 	onDisconnected func(accountID int64)
 
-	// ---- 常驻 read pump（issue #349）----
-	// gorilla/websocket 只在读方法运行期间处理 Ping/Pong/Close 控制帧。
-	// 连接空闲期没有 reader 时，上游 keepalive Ping 得不到 Pong 会被判死并
-	// 收到 Close 1011，而本地状态仍是 Connected、写 Ping 探活照样成功，
-	// 复用即首读暴雷。pump 让连接自建立起就有唯一常驻读者：控制帧实时
-	// 消化（Ping 自动回 Pong）、Close/读错误立即翻状态，业务帧经 frames
-	// 转发给当前消费者。
-	frames      chan wsFrame
-	stop        chan struct{}
-	stopOnce    sync.Once
-	pumpStarted atomic.Bool
-	readErrMu   sync.Mutex
-	readErr     error
+	// 永久 reader 失败回调。Manager 使用指针级 CompareAndDelete 精确移除
+	// 当前连接，避免误删同 PoolKey 下已经重建的连接。
+	onReadFailure func(wc *WsConnection)
 }
 
 func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
@@ -111,98 +99,17 @@ func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
 	return strings.TrimSpace(proxyURL)
 }
 
-// NewWsConnection 创建 WebSocket 连接并启动常驻 read pump。
+// NewWsConnection 创建 WebSocket 连接
 func NewWsConnection(conn *websocket.Conn, session *Session, wsURL string) *WsConnection {
 	wc := &WsConnection{
 		conn:      conn,
 		session:   session,
 		URL:       wsURL,
 		createdAt: time.Now().UnixNano(),
-		frames:    make(chan wsFrame, pumpFrameBuffer),
-		stop:      make(chan struct{}),
 	}
 	wc.lastUsed.Store(time.Now().UnixNano())
 	wc.state.Store(int32(StateConnected))
-	wc.startReadPump()
 	return wc
-}
-
-// startReadPump 启动常驻 reader（幂等；测试用字面量构造的连接无 pump，
-// ReadMessage 会回退到直接读）。
-func (wc *WsConnection) startReadPump() {
-	if wc.conn == nil || wc.frames == nil || !wc.pumpStarted.CompareAndSwap(false, true) {
-		return
-	}
-	// Ping 处理：gorilla 默认 handler 已自动回 Pong；这里额外顺延读截止，
-	// 上游 keepalive 活跃说明连接健康，不该被 pump 兜底超时误杀。
-	wc.conn.SetPingHandler(func(appData string) error {
-		_ = wc.conn.SetReadDeadline(time.Now().Add(pumpReadDeadline))
-		err := wc.conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(WriteTimeout))
-		if err == websocket.ErrCloseSent {
-			return nil
-		}
-		return err
-	})
-	go wc.readPump()
-}
-
-// readPump 唯一读者：循环 ReadMessage 直到连接死亡。控制帧（Ping/Pong/Close）
-// 在读循环内被 gorilla 实时处理；业务帧转发给当前消费者。
-// 发送阻塞（缓冲 64）：消费慢时 pump 停读，靠 TCP 流控向上游背压，与旧
-// per-request 读循环阻塞在下游写时的行为一致；连接销毁时经 stop 解除阻塞。
-// 无消费者时到达的帧滞留缓冲，复用前由 drainStrayFrames 检出并废弃连接。
-func (wc *WsConnection) readPump() {
-	defer close(wc.frames)
-	for {
-		_ = wc.conn.SetReadDeadline(time.Now().Add(pumpReadDeadline))
-		msgType, data, err := wc.conn.ReadMessage()
-		if err != nil {
-			wc.setReadErr(err)
-			wc.Close()
-			return
-		}
-		wc.Touch()
-		select {
-		case wc.frames <- wsFrame{msgType: msgType, data: data}:
-		case <-wc.stop:
-			return
-		}
-	}
-}
-
-// setReadErr 记录 pump 终止原因（只记第一个）。
-func (wc *WsConnection) setReadErr(err error) {
-	wc.readErrMu.Lock()
-	if wc.readErr == nil {
-		wc.readErr = err
-	}
-	wc.readErrMu.Unlock()
-}
-
-// getReadErr 返回 pump 的终止原因。
-func (wc *WsConnection) getReadErr() error {
-	wc.readErrMu.Lock()
-	defer wc.readErrMu.Unlock()
-	return wc.readErr
-}
-
-// drainStrayFrames 复用前排空池内滞留的业务帧。有帧滞留说明上一响应
-// 在此连接上留了尾巴，连接不可复用；返回 true 表示干净可用。
-func (wc *WsConnection) drainStrayFrames() bool {
-	if wc.frames == nil {
-		return true
-	}
-	select {
-	case _, ok := <-wc.frames:
-		if !ok {
-			return false // pump 已退出，连接已死
-		}
-		wc.setReadErr(errStrayFrame)
-		wc.Close()
-		return false
-	default:
-		return true
-	}
 }
 
 // Touch 更新最后使用时间
@@ -233,22 +140,20 @@ func (wc *WsConnection) IsConnected() bool {
 
 // Close 安全关闭连接
 func (wc *WsConnection) Close() error {
-	if wc.state.CompareAndSwap(int32(StateConnected), int32(StateClosing)) ||
-		wc.state.CompareAndSwap(int32(StateConnecting), int32(StateClosing)) {
-		// 通知 read pump 与消费者退出
-		if wc.stop != nil {
-			wc.stopOnce.Do(func() { close(wc.stop) })
-		}
-		// 调用断开回调
-		if wc.onDisconnected != nil && wc.session != nil {
-			wc.onDisconnected(wc.session.AccountID)
-		}
-		if wc.conn != nil {
-			return wc.conn.Close()
-		}
+	if wc == nil {
 		return nil
 	}
-	return nil
+	wc.closeOnce.Do(func() {
+		wc.state.Store(int32(StateClosing))
+		if wc.conn != nil {
+			wc.closeErr = wc.conn.Close()
+		}
+		wc.state.Store(int32(StateDisconnected))
+	})
+	if wc.onDisconnected != nil && wc.session != nil && wc.disconnectNotified.CompareAndSwap(false, true) {
+		wc.onDisconnected(wc.session.AccountID)
+	}
+	return wc.closeErr
 }
 
 // SetState 设置连接状态
@@ -261,52 +166,22 @@ func (wc *WsConnection) WriteMessage(messageType int, data []byte) error {
 	wc.writeMu.Lock()
 	defer wc.writeMu.Unlock()
 
-	if !wc.IsConnected() {
+	if !wc.IsConnected() || wc.conn == nil {
 		return fmt.Errorf("websocket connection is not connected")
+	}
+	leaseID, tracksLease, err := wc.beginReadLeaseWrite(messageType)
+	if err != nil {
+		return err
 	}
 
 	wc.conn.SetWriteDeadline(time.Now().Add(WriteTimeout))
 	defer wc.conn.SetWriteDeadline(time.Time{})
 
-	return wc.conn.WriteMessage(messageType, data)
-}
-
-// ReadMessage 读取一帧业务消息（带超时）。有 pump 时从 frames 消费——
-// 控制帧已由 pump 在读循环内实时处理；无 pump（测试字面量构造）回退直读。
-func (wc *WsConnection) ReadMessage() (int, []byte, error) {
-	if wc.frames == nil {
-		wc.conn.SetReadDeadline(time.Now().Add(ReadTimeout))
-		defer wc.conn.SetReadDeadline(time.Time{})
-		msgType, data, err := wc.conn.ReadMessage()
-		if err == nil {
-			wc.Touch()
-		}
-		return msgType, data, err
+	writeErr := wc.conn.WriteMessage(messageType, data)
+	if tracksLease {
+		return wc.completeReadLeaseWrite(leaseID, writeErr)
 	}
-
-	timer := time.NewTimer(ReadTimeout)
-	defer timer.Stop()
-	select {
-	case frame, ok := <-wc.frames:
-		if !ok {
-			// pump 已退出：返回其记录的真实终止原因（如 close 1011）
-			if err := wc.getReadErr(); err != nil {
-				return 0, nil, err
-			}
-			return 0, nil, fmt.Errorf("websocket connection closed")
-		}
-		return frame.msgType, frame.data, nil
-	case <-wc.stop:
-		if err := wc.getReadErr(); err != nil {
-			return 0, nil, err
-		}
-		return 0, nil, fmt.Errorf("websocket connection closed")
-	case <-timer.C:
-		// 帧间超时语义与原 per-read deadline 一致：连接不再可信
-		wc.setReadErr(fmt.Errorf("websocket read timeout after %s", ReadTimeout))
-		wc.Close()
-		return 0, nil, wc.getReadErr()
-	}
+	return writeErr
 }
 
 // HTTPResponse 返回 HTTP 握手响应
@@ -518,6 +393,7 @@ func (m *Manager) AcquireConnection(
 	lock := m.keyLock(key)
 	wait := AcquireInitialBackoff
 	var waited time.Duration
+	var createLeaseFailures int
 
 	for {
 		lock.Lock()
@@ -526,19 +402,22 @@ func (m *Manager) AcquireConnection(
 			if canReuseConnection(wc) {
 				// 发送 Ping 探活，确认连接真正存活
 				if m.probe(wc) {
-					pr := wc.session.AddPendingRequest(sessionKey)
-					wc.Touch()
+					pr, leaseErr := m.addPendingAndBeginReadLease(wc, sessionKey)
+					if leaseErr == nil {
+						wc.Touch()
+						lock.Unlock()
+						return wc, pr, nil
+					}
+					m.DiscardConnection(wc)
 					lock.Unlock()
-					return wc, pr, nil
+					continue
 				}
 				// 探活失败，清理死连接
-				m.connections.Delete(key)
-				m.sessions.Delete(key)
-				wc.Close()
+				m.DiscardConnection(wc)
 				lock.Unlock()
 				continue
 			}
-			if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && !isRotatableOverAge(wc) {
+			if wc.IsConnected() && !wc.IsExpired() && wc.session != nil && wc.session.PendingCount() > 0 && !isRotatableOverAge(wc) {
 				lock.Unlock()
 				// 连接被同 session 的前一个请求占用：指数退避轮询等待其空闲，
 				// 累计等待超过上限则返回错误，避免无界阻塞与固定间隔空转抢锁。
@@ -560,9 +439,7 @@ func (m *Manager) AcquireConnection(
 				}
 				continue
 			}
-			m.connections.Delete(key)
-			m.sessions.Delete(key)
-			wc.Close()
+			m.DiscardConnection(wc)
 		}
 
 		wc, err := m.createConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)
@@ -573,7 +450,30 @@ func (m *Manager) AcquireConnection(
 
 		// 存储新连接并立即占位 pending request，避免返回后才记账产生竞态
 		m.connections.Store(key, wc)
-		pr := wc.session.AddPendingRequest(sessionKey)
+		pr, leaseErr := m.addPendingAndBeginReadLease(wc, sessionKey)
+		if leaseErr == nil {
+			if earlyErr := wc.waitForEarlyReadFailure(ctx, newConnectionReadFailureGrace); earlyErr != nil {
+				wc.session.RemovePendingRequest(pr.RequestID)
+				leaseErr = earlyErr
+			}
+		}
+		if leaseErr != nil {
+			m.DiscardConnection(wc)
+			lock.Unlock()
+			if ctx.Err() != nil {
+				return nil, nil, ctx.Err()
+			}
+			createLeaseFailures++
+			if createLeaseFailures >= maxCreateLeaseAttempts {
+				return nil, nil, fmt.Errorf("reserve new websocket connection after %d attempts: %w", createLeaseFailures, leaseErr)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			default:
+			}
+			continue
+		}
 		lock.Unlock()
 
 		if fn := m.getOnConnected(); fn != nil {
@@ -588,6 +488,15 @@ func (m *Manager) AcquireConnection(
 // 复用的持久连接槽位数。槽位内空闲连接直接复用,避免每个请求都重新握手——
 // 持续高 RPM 下逐请求握手会触发上游 WS 握手限流（bad handshake → 503）。
 const StatelessConnectionSlots = 8
+
+// maxCreateLeaseAttempts bounds retries when a freshly completed handshake is
+// already rejected by its permanent reader before the first request lease can
+// be reserved (for example, an immediately queued peer Close frame).
+const maxCreateLeaseAttempts = 3
+
+// Give the permanent reader a small, bounded window to surface a Close/error
+// already queued with the handshake before returning a newly reserved lease.
+const newConnectionReadFailureGrace = 5 * time.Millisecond
 
 // AcquireReusableConnection 在固定槽位内复用或创建连接，返回实际使用的 session key。
 // 第一遍只复用已存在且空闲的连接；第二遍在空槽位新建持久连接；槽位全忙时回退到
@@ -613,18 +522,19 @@ func (m *Manager) AcquireReusableConnection(
 			wc := v.(*WsConnection)
 			if canReuseConnection(wc) {
 				if m.probe(wc) {
-					pr := wc.session.AddPendingRequest(slotSession)
-					wc.Touch()
+					pr, leaseErr := m.addPendingAndBeginReadLease(wc, slotSession)
+					if leaseErr == nil {
+						wc.Touch()
+						lock.Unlock()
+						return wc, pr, slotSession, nil
+					}
+					m.DiscardConnection(wc)
 					lock.Unlock()
-					return wc, pr, slotSession, nil
+					continue
 				}
-				m.connections.Delete(key)
-				m.sessions.Delete(key)
-				wc.Close()
-			} else if !wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc) {
-				m.connections.Delete(key)
-				m.sessions.Delete(key)
-				wc.Close()
+				m.DiscardConnection(wc)
+			} else if !wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc) || wc.session == nil || wc.session.PendingCount() == 0 {
+				m.DiscardConnection(wc)
 			}
 		}
 		lock.Unlock()
@@ -645,7 +555,21 @@ func (m *Manager) AcquireReusableConnection(
 			return nil, nil, "", err
 		}
 		m.connections.Store(key, wc)
-		pr := wc.session.AddPendingRequest(slotSession)
+		pr, leaseErr := m.addPendingAndBeginReadLease(wc, slotSession)
+		if leaseErr == nil {
+			if earlyErr := wc.waitForEarlyReadFailure(ctx, newConnectionReadFailureGrace); earlyErr != nil {
+				wc.session.RemovePendingRequest(pr.RequestID)
+				leaseErr = earlyErr
+			}
+		}
+		if leaseErr != nil {
+			m.DiscardConnection(wc)
+			lock.Unlock()
+			if ctx.Err() != nil {
+				return nil, nil, "", ctx.Err()
+			}
+			continue
+		}
 		lock.Unlock()
 		if fn := m.getOnConnected(); fn != nil {
 			fn(account.ID(), wc.session)
@@ -655,6 +579,22 @@ func (m *Manager) AcquireReusableConnection(
 	// 槽位全忙：回退一次性连接
 	wc, pr, err := m.AcquireConnection(ctx, account, wsURL, fallbackKey, headers, proxyOverride)
 	return wc, pr, fallbackKey, err
+}
+
+// addPendingAndBeginReadLease keeps the Session reservation and the pump lease
+// atomic from an acquire caller's perspective. On failure it rolls the pending
+// request back; the caller discards the unusable connection while holding its
+// pool-key acquisition lock.
+func (m *Manager) addPendingAndBeginReadLease(wc *WsConnection, sessionKey string) (*PendingRequest, error) {
+	if wc == nil || wc.session == nil {
+		return nil, fmt.Errorf("begin websocket read lease: connection has no session")
+	}
+	pr := wc.session.AddPendingRequest(sessionKey)
+	if err := wc.BeginReadLease(pr.RequestID); err != nil {
+		wc.session.RemovePendingRequest(pr.RequestID)
+		return nil, fmt.Errorf("reserve websocket connection: %w", err)
+	}
+	return pr, nil
 }
 
 func canReuseConnection(wc *WsConnection) bool {
@@ -667,7 +607,7 @@ func canReuseConnection(wc *WsConnection) bool {
 	if wc.session == nil {
 		return false
 	}
-	return wc.session.PendingCount() == 0
+	return wc.session.PendingCount() == 0 && wc.readPumpReusable()
 }
 
 // isRotatableOverAge 连接已到龄且当前无在途请求，可安全轮转（销毁重建）。
@@ -680,15 +620,9 @@ func isRotatableOverAge(wc *WsConnection) bool {
 	return wc.session == nil || wc.session.PendingCount() == 0
 }
 
-// probeConnection 检测连接是否真正存活。
-// 常驻 read pump 让状态实时可信：上游 Close/读错误到达时 pump 已把状态翻成
-// 非 Connected，这里只需检查状态并排空滞留脏帧，无需（也不能）写 Ping 判活——
-// 只写不读的 Ping 探活在对端已发 Close 时照样成功（issue #349）。
+// probeConnection 发送 Ping 检测连接是否真正存活
 func probeConnection(wc *WsConnection) bool {
-	if !wc.IsConnected() || wc.conn == nil {
-		return false
-	}
-	return wc.drainStrayFrames()
+	return probeConnectionWithTimeout(wc, defaultProbeTimeout)
 }
 
 // probe 调用探活函数���支持测试替换）
@@ -749,20 +683,17 @@ func (m *Manager) createConnection(
 		return nil, fmt.Errorf("websocket handshake failed: %w", err)
 	}
 
-	// 创建连接包装（构造内启动常驻 read pump，Ping handler 由 pump 设置）
+	// 创建连接包装
 	wc := NewWsConnection(conn, session, wsURL)
 	wc.PoolKey = poolKey
 	wc.httpResp = resp
 	wc.onDisconnected = m.getOnDisconnected()
+	wc.onReadFailure = m.DiscardConnection
 	session.SetConnected(true)
 
-	// 设置 Pong 处理器（我方主动 Ping 的响应）：刷新活跃时间并顺延 pump 读截止
-	conn.SetPongHandler(func(appData string) error {
-		session.HandlePong()
-		wc.Touch()
-		_ = conn.SetReadDeadline(time.Now().Add(pumpReadDeadline))
-		return nil
-	})
+	// 控制帧处理器必须在唯一永久 reader 启动前安装。
+	wc.installControlHandlers()
+	wc.StartReadPump()
 
 	return wc, nil
 }
@@ -794,13 +725,17 @@ func (m *Manager) DiscardConnection(wc *WsConnection) {
 	if wc == nil {
 		return
 	}
-	wc.Close()
 	if wc.PoolKey != "" {
 		m.connections.CompareAndDelete(wc.PoolKey, wc)
 		if wc.session != nil {
 			m.sessions.CompareAndDelete(wc.PoolKey, wc.session)
 		}
 	}
+	if wc.session != nil {
+		wc.session.StopHeartbeat()
+		wc.session.SetConnected(false)
+	}
+	_ = wc.Close()
 }
 
 // BindResponseConn 记录 response_id 由哪条连接产出（续链亲和）。
@@ -882,15 +817,20 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 		return nil, nil, ""
 	}
 	if !canReuseConnection(wc) {
+		if wc.session == nil || wc.session.PendingCount() == 0 {
+			m.DiscardConnection(wc)
+		}
 		return nil, nil, ""
 	}
 	if !m.probe(wc) {
-		m.connections.Delete(wc.PoolKey)
-		m.sessions.Delete(wc.PoolKey)
-		wc.Close()
+		m.DiscardConnection(wc)
 		return nil, nil, ""
 	}
-	pr := wc.session.AddPendingRequest(sessionKey)
+	pr, err := m.addPendingAndBeginReadLease(wc, sessionKey)
+	if err != nil {
+		m.DiscardConnection(wc)
+		return nil, nil, ""
+	}
 	wc.Touch()
 	return wc, pr, sessionKey
 }
@@ -957,11 +897,7 @@ func (m *Manager) SendHeartbeat(wc *WsConnection) error {
 	err := wc.conn.WriteControl(websocket.PingMessage, []byte{}, deadline)
 	if err != nil {
 		log.Printf("WebSocket Ping 失败 (account %d): %v", wc.session.AccountID, err)
-		wc.Close()
-		if wc.PoolKey != "" {
-			m.connections.Delete(wc.PoolKey)
-			m.sessions.Delete(wc.PoolKey)
-		}
+		m.DiscardConnection(wc)
 		return err
 	}
 	return nil
@@ -969,6 +905,9 @@ func (m *Manager) SendHeartbeat(wc *WsConnection) error {
 
 // StartHeartbeat 启动连接心跳
 func (m *Manager) StartHeartbeat(wc *WsConnection) {
+	if wc == nil || wc.session == nil || !wc.IsConnected() || !wc.session.IsConnected() {
+		return
+	}
 	wc.session.StartHeartbeat(func() error {
 		return m.SendHeartbeat(wc)
 	})

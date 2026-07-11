@@ -37,6 +37,9 @@ func TestDiscardConnectionClosesAndRemovesFromPool(t *testing.T) {
 	if wc.IsConnected() {
 		t.Fatal("expected discarded connection to be closed (state != connected)")
 	}
+	if session.IsConnected() {
+		t.Fatal("expected discarded session heartbeat to be stopped")
+	}
 }
 
 // TestDiscardConnectionKeepsReplacedConnection 验证 DiscardConnection 使用
@@ -68,6 +71,24 @@ func TestDiscardConnectionKeepsReplacedConnection(t *testing.T) {
 	}
 	if v, ok := manager.sessions.Load(key); !ok || v.(*Session) != newSession {
 		t.Fatal("DiscardConnection must not remove the replaced session under the same key")
+	}
+}
+
+func TestStartHeartbeatSkipsRetiredConnection(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	session := NewSession(1, manager)
+	session.SetConnected(false)
+	wc := &WsConnection{session: session}
+	wc.SetState(StateDisconnected)
+
+	manager.StartHeartbeat(wc)
+	session.mu.Lock()
+	timer := session.heartbeatTimer
+	session.mu.Unlock()
+	if timer != nil {
+		t.Fatal("retired connection created a new heartbeat timer")
 	}
 }
 

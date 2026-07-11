@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha1"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -485,5 +486,28 @@ func TestStatelessOneShotEnabled(t *testing.T) {
 	t.Setenv("CODEX_WS_STATELESS_ONESHOT", "1")
 	if !statelessOneShotEnabled() {
 		t.Fatal("CODEX_WS_STATELESS_ONESHOT=1 must disable slot reuse")
+	}
+}
+
+func TestShouldRetryWebsocketSendError(t *testing.T) {
+	messageTooBig := fmt.Errorf("send interrupted: %w", &websocket.CloseError{
+		Code: websocket.CloseMessageTooBig,
+		Text: "message too big",
+	})
+	if shouldRetryWebsocketSendError(messageTooBig) {
+		t.Fatal("close 1009 must return to the handler for HTTP fallback without rebuilding WebSocket connections")
+	}
+
+	if !shouldRetryWebsocketSendError(errors.New("temporary write failure")) {
+		t.Fatal("ordinary transport write failures should retain the bounded reconnect retry")
+	}
+	if !shouldRetryWebsocketSendError(fmt.Errorf("send interrupted: %w", &websocket.CloseError{
+		Code: websocket.CloseInternalServerErr,
+		Text: "temporary upstream failure",
+	})) {
+		t.Fatal("retryable peer closes other than 1009 should retain the bounded reconnect retry")
+	}
+	if shouldRetryWebsocketSendError(nil) {
+		t.Fatal("nil is not a retryable send error")
 	}
 }
