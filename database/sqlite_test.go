@@ -1115,6 +1115,8 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		CodexWSSilentRetryEnabled:        true,
 		CodexWSSilentMaxRetries:          4,
 		IgnoreUsageLimitStatus:           true,
+		AutoResetCreditsEnabled:          true,
+		AutoResetCreditsBeforeExpiryMin:  75,
 	}); err != nil {
 		t.Fatalf("UpdateSystemSettings 返回错误: %v", err)
 	}
@@ -1131,6 +1133,12 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if !settings.IgnoreUsageLimitStatus {
 		t.Fatal("IgnoreUsageLimitStatus = false, want true")
+	}
+	if !settings.AutoResetCreditsEnabled {
+		t.Fatal("AutoResetCreditsEnabled = false, want true")
+	}
+	if settings.AutoResetCreditsBeforeExpiryMin != 75 {
+		t.Fatalf("AutoResetCreditsBeforeExpiryMin = %d, want 75", settings.AutoResetCreditsBeforeExpiryMin)
 	}
 	if settings.TestContent != "say pong" {
 		t.Fatalf("TestContent = %q, want say pong", settings.TestContent)
@@ -1232,6 +1240,49 @@ func TestSystemSettingsNormalizeBlankBillingTierPolicy(t *testing.T) {
 	}
 	if stored != "actual" {
 		t.Fatalf("stored billing_tier_policy = %q, want actual", stored)
+	}
+}
+
+func TestSQLitePartialBackgroundSettingsUpdatesPreserveAutoResetCredits(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	settings := &SystemSettings{
+		AutoResetCreditsEnabled:         true,
+		AutoResetCreditsBeforeExpiryMin: 90,
+		ModelPricingOverrides:           `{"old":{"input":1}}`,
+		ModelPricingSyncURL:             "https://old.example/pricing.json",
+	}
+	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+		t.Fatalf("UpdateSystemSettings: %v", err)
+	}
+	if err := db.UpdateCodexSyncedCLIVersion(ctx, "9.9.9"); err != nil {
+		t.Fatalf("UpdateCodexSyncedCLIVersion: %v", err)
+	}
+	if err := db.UpdateModelPricingSettings(ctx, `{"new":{"input":2}}`, "https://new.example/pricing.json"); err != nil {
+		t.Fatalf("UpdateModelPricingSettings: %v", err)
+	}
+
+	got, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetSystemSettings returned nil")
+	}
+	if !got.AutoResetCreditsEnabled || got.AutoResetCreditsBeforeExpiryMin != 90 {
+		t.Fatalf("auto reset settings = (%v,%d), want (true,90)", got.AutoResetCreditsEnabled, got.AutoResetCreditsBeforeExpiryMin)
+	}
+	if got.CodexSyncedCLIVersion != "9.9.9" {
+		t.Fatalf("CodexSyncedCLIVersion = %q, want 9.9.9", got.CodexSyncedCLIVersion)
+	}
+	if got.ModelPricingOverrides != `{"new":{"input":2}}` || got.ModelPricingSyncURL != "https://new.example/pricing.json" {
+		t.Fatalf("model pricing = %q / %q", got.ModelPricingOverrides, got.ModelPricingSyncURL)
 	}
 }
 

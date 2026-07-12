@@ -248,6 +248,33 @@ func (tc *redisTokenCache) ReleaseRefreshLock(ctx context.Context, accountID int
 	return tc.client.Del(ctx, refreshLockKey(accountID)).Err()
 }
 
+func redisLeaseKey(namespace, key string) string {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(namespace) + "\x00" + strings.TrimSpace(key)))
+	return "codex:lease:" + hex.EncodeToString(sum[:])
+}
+
+func (tc *redisTokenCache) AcquireLease(ctx context.Context, namespace, key, owner string, ttl time.Duration) (bool, error) {
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return false, fmt.Errorf("lease owner is empty")
+	}
+	if ttl <= 0 {
+		ttl = 30 * time.Second
+	}
+	return tc.client.SetNX(ctx, redisLeaseKey(namespace, key), owner, ttl).Result()
+}
+
+var releaseLeaseScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
+
+func (tc *redisTokenCache) ReleaseLease(ctx context.Context, namespace, key, owner string) error {
+	return releaseLeaseScript.Run(ctx, tc.client, []string{redisLeaseKey(namespace, key)}, strings.TrimSpace(owner)).Err()
+}
+
 // ==================== 等待锁释放 ====================
 
 // WaitForRefreshComplete 等待另一个进程完成刷新（轮询锁 + 读取缓存）

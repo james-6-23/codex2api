@@ -28,9 +28,9 @@ var modelPricingSyncURLForTest = ""
 // ModelPricingSyncResult 是一次定价同步的结果投影。
 type ModelPricingSyncResult struct {
 	SourceURL string `json:"source_url"`
-	Fetched   int    `json:"fetched"`  // 从 URL 解析到的模型数
-	Applied   int    `json:"applied"`  // 实际写入的 synced 条目数
-	Skipped   int    `json:"skipped"`  // 因已有 custom 覆盖而跳过的模型数
+	Fetched   int    `json:"fetched"` // 从 URL 解析到的模型数
+	Applied   int    `json:"applied"` // 实际写入的 synced 条目数
+	Skipped   int    `json:"skipped"` // 因已有 custom 覆盖而跳过的模型数
 }
 
 // SyncModelPricingFromURL 从 JSON URL 拉取定价并写入 synced 覆盖。
@@ -91,10 +91,8 @@ func SyncModelPricingFromURL(ctx context.Context, db *database.DB, syncURL, prox
 	if err != nil {
 		return result, err
 	}
-	settings.ModelPricingOverrides = blob
 	// 字段为空则清空存储来源（下次回退默认）；非空则存为来源。
-	settings.ModelPricingSyncURL = fieldURL
-	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+	if err := db.UpdateModelPricingSettings(ctx, blob, fieldURL); err != nil {
 		return result, err
 	}
 	database.SetModelPricingOverrides(current)

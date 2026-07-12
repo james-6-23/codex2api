@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -16,6 +17,12 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+const resetCreditLeaseTTL = 45 * time.Second
+
+const resetCreditCooldownNamespace = "reset-credit-cooldown"
+
+const autoResetCreditHandledIDRetention = 8 * 24 * time.Hour
 
 // GetResetCredits 查询账号「主动重置次数」的明细（每张券的发放/过期时间）。
 // GET /api/accounts/:id/reset-credits
@@ -44,7 +51,7 @@ func (h *Handler) GetResetCredits(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
-	list, resp, err := proxy.QueryWhamResetCredits(ctx, account, h.store.ResolveProxyForAccount(account))
+	list, resp, err := h.queryResetCreditsUpstream(ctx, account, h.store.ResolveProxyForAccount(account))
 	if err != nil {
 		status := upstreamResetStatus(resp)
 		if resp != nil {
@@ -78,7 +85,7 @@ func (h *Handler) GetResetCredits(c *gin.Context) {
 		items = append(items, gin.H{
 			"id":         credit.ID,
 			"granted_at": credit.GrantedAt,
-			"expires_at": credit.ExpiresAt,
+			"expires_at": credit.EffectiveConsumableUntil(),
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{
@@ -119,8 +126,8 @@ func (h *Handler) ResetCredits(c *gin.Context) {
 		return
 	}
 
-	// 账号级互斥：同一账号的重置串行执行，避免并发重复消耗与计数竞态。
-	lock := h.resetCreditLock(id)
+	// 工作区级互斥：同一上游工作区的重置串行执行，避免并发重复消耗与计数竞态。
+	lock := h.resetCreditLock(account)
 	lock.Lock()
 	defer lock.Unlock()
 
@@ -133,72 +140,251 @@ func (h *Handler) ResetCredits(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	proxyURL := h.store.ResolveProxyForAccount(account)
 	// 整个重置操作（含 401 刷新后的重试）复用同一个幂等键，
 	// 让上游对重复请求去重，避免多扣一次重置次数。
 	redeemRequestID := uuid.New().String()
+	outcome, failure := h.consumeResetCreditLocked(ctx, account, redeemRequestID, "manual")
+	if failure != nil {
+		h.writeManualResetCreditFailure(c, account, failure)
+		return
+	}
+	if outcome.InProgress {
+		writeError(c, http.StatusConflict, "该工作区正在执行额度重置，请稍后重试")
+		return
+	}
+	log.Printf("[账号 %d] 主动重置额度成功，windows_reset=%d，剩余次数=%d", account.DBID, outcome.WindowsReset, outcome.Remaining)
 
-	result, resp, err := proxy.ConsumeResetCreditParsed(ctx, account, proxyURL, redeemRequestID)
+	payload := gin.H{"message": "已重置额度"}
+	if outcome.Remaining >= 0 {
+		payload["rate_limit_reset_credits"] = outcome.Remaining
+	}
+	if outcome.WindowsReset > 0 {
+		payload["windows_reset"] = outcome.WindowsReset
+	}
+	c.JSON(http.StatusOK, payload)
+}
+
+type resetCreditConsumeOutcome struct {
+	WindowsReset   int
+	Remaining      int
+	AlreadyHandled bool
+	InProgress     bool
+}
+
+type resetCreditConsumeFailure struct {
+	Status     int
+	Body       []byte
+	RequestErr error
+	RefreshErr error
+}
+
+// consumeResetCreditLocked 执行一次共享的重置消费流程。调用方必须持有工作区级
+// resetCreditLock，确保手动与自动路径不会在同一进程内并发消耗。
+func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Account, redeemRequestID, source string) (resetCreditConsumeOutcome, *resetCreditConsumeFailure) {
+	if source == "auto" && strings.TrimSpace(redeemRequestID) != "" {
+		if h.autoResetCreditRequestHandled(redeemRequestID, time.Now()) {
+			remaining := -1
+			if count, ok := account.GetRateLimitResetCredits(); ok {
+				remaining = count
+			}
+			return resetCreditConsumeOutcome{Remaining: remaining, AlreadyHandled: true}, nil
+		}
+	}
+	acquired, releaseLease, leaseErr := h.acquireResetCreditLease(ctx, account)
+	if leaseErr != nil {
+		return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("acquire reset-credit lease: %w", leaseErr)}
+	}
+	if !acquired {
+		return resetCreditConsumeOutcome{InProgress: true}, nil
+	}
+	defer releaseLease()
+	if source == "auto" {
+		coolingDown, cooldownErr := h.resetCreditCooldownActive(ctx, account)
+		if cooldownErr != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("recheck reset-credit cooldown: %w", cooldownErr)}
+		}
+		if coolingDown {
+			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
+		}
+	}
+	proxyURL := h.store.ResolveProxyForAccount(account)
+	result, resp, err := h.consumeResetCreditUpstream(ctx, account, proxyURL, redeemRequestID)
 	status := upstreamResetStatus(resp)
 
-	// 上游鉴权失败：刷新一次 token 后用同一幂等键重试。
+	// 上游鉴权失败：刷新一次 token 后，用同一幂等键重试。
 	if status == http.StatusUnauthorized {
 		drainResetResponse(resp)
-		if refreshErr := h.refreshAccountForReset(ctx, id); refreshErr != nil {
-			log.Printf("[账号 %d] 重置额度时刷新 token 失败: %v", account.DBID, refreshErr)
-			writeError(c, http.StatusBadGateway, "上游鉴权失败（401），自动刷新账号失败，请手动刷新后重试")
-			return
+		if refreshErr := h.refreshAccountForReset(ctx, account.DBID); refreshErr != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{Status: status, RefreshErr: refreshErr}
 		}
-		// 重新解析代理（刷新可能改变 Resin 粘性等），再用同一幂等键重试。
 		proxyURL = h.store.ResolveProxyForAccount(account)
-		result, resp, err = proxy.ConsumeResetCreditParsed(ctx, account, proxyURL, redeemRequestID)
+		result, resp, err = h.consumeResetCreditUpstream(ctx, account, proxyURL, redeemRequestID)
 		status = upstreamResetStatus(resp)
 	}
 
-	// 非 2xx：读取并关闭 body 用于错误详情（2xx 时 body 已由 ConsumeResetCreditParsed 关闭）。
 	if resp != nil && (status < 200 || status >= 300) {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8<<10))
 		_ = resp.Body.Close()
-		switch status {
-		case http.StatusUnauthorized:
-			writeError(c, http.StatusBadGateway, "上游鉴权失败（401），请先刷新账号后重试")
-		case http.StatusTooManyRequests:
-			writeError(c, http.StatusBadGateway, "上游限流（429），请稍后重试")
-		default:
-			writeError(c, http.StatusBadGateway, "重置失败："+upstreamResetErrorMessage(status, body))
-		}
-		return
+		return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{Status: status, Body: body, RequestErr: err}
 	}
-	if err != nil && resp == nil {
-		writeError(c, http.StatusBadGateway, "重置请求失败："+err.Error())
-		return
+	if err != nil {
+		return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{Status: status, RequestErr: err}
 	}
 
-	// 重置成功。#6：直接用 consume 响应（windows_reset）即时反馈，并本地乐观递减剩余次数，
-	// 省掉重置后那次同步的 wham/usage 往返；窗口快照与精确次数交给后台探针异步对齐。
-	windowsReset := 0
+	outcome := resetCreditConsumeOutcome{Remaining: h.applyOptimisticResetDecrement(account)}
 	if result != nil {
-		windowsReset = result.WindowsReset
+		outcome.WindowsReset = result.WindowsReset
 	}
-	remaining := h.applyOptimisticResetDecrement(account)
-
-	// #7：把"主动重置"作为账号事件落库，留下可追溯的审计记录。
-	if h.db != nil {
-		h.db.InsertAccountEventAsync(account.DBID, "reset_credit", "manual")
+	if source == "auto" && strings.TrimSpace(redeemRequestID) != "" {
+		h.rememberAutoResetCreditRequest(redeemRequestID, time.Now())
 	}
-	log.Printf("[账号 %d] 主动重置额度成功，windows_reset=%d，剩余次数=%d", account.DBID, windowsReset, remaining)
-
-	// 后台异步刷新用量窗口/精确次数与冷却状态（不阻塞响应）。
+	h.markResetCreditSuccess(account)
+	h.recordResetCreditEvent(account.DBID, source)
 	h.refreshUsageAfterReset(account)
+	return outcome, nil
+}
 
-	payload := gin.H{"message": "已重置额度"}
-	if remaining >= 0 {
-		payload["rate_limit_reset_credits"] = remaining
+func (h *Handler) autoResetCreditRequestHandled(redeemRequestID string, now time.Time) bool {
+	if h == nil {
+		return false
 	}
-	if windowsReset > 0 {
-		payload["windows_reset"] = windowsReset
+	value, ok := h.resetCreditSuccessfulIDs.Load(redeemRequestID)
+	if !ok {
+		return false
 	}
-	c.JSON(http.StatusOK, payload)
+	expiresAt, ok := value.(time.Time)
+	if !ok || !expiresAt.After(now) {
+		h.resetCreditSuccessfulIDs.Delete(redeemRequestID)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) rememberAutoResetCreditRequest(redeemRequestID string, now time.Time) {
+	if h == nil {
+		return
+	}
+	h.resetCreditSuccessfulIDs.Range(func(key, value any) bool {
+		expiresAt, ok := value.(time.Time)
+		if !ok || !expiresAt.After(now) {
+			h.resetCreditSuccessfulIDs.Delete(key)
+		}
+		return true
+	})
+	h.resetCreditSuccessfulIDs.Store(redeemRequestID, now.Add(autoResetCreditHandledIDRetention))
+}
+
+func (h *Handler) acquireResetCreditLease(ctx context.Context, account *auth.Account) (bool, func(), error) {
+	if h == nil || h.cache == nil {
+		return true, func() {}, nil
+	}
+	owner := uuid.New().String()
+	key := resetCreditLockKey(account)
+	acquired, err := h.cache.AcquireLease(ctx, "reset-credit", key, owner, resetCreditLeaseTTL)
+	if err != nil || !acquired {
+		return acquired, func() {}, err
+	}
+	return true, func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		if releaseErr := h.cache.ReleaseLease(releaseCtx, "reset-credit", key, owner); releaseErr != nil {
+			log.Printf("[账号 %d] 释放主动重置分布式租约失败: %v", account.DBID, releaseErr)
+		}
+	}, nil
+}
+
+func (h *Handler) resetCreditConsumedRecently(account *auth.Account, now time.Time, window time.Duration) bool {
+	if h == nil || account == nil || window <= 0 {
+		return false
+	}
+	value, ok := h.resetCreditLastSuccess.Load(resetCreditLockKey(account))
+	if !ok {
+		return false
+	}
+	consumedAt, ok := value.(time.Time)
+	if !ok {
+		return false
+	}
+	return consumedAt.After(now) || now.Sub(consumedAt) < window
+}
+
+func (h *Handler) resetCreditCooldownActive(ctx context.Context, account *auth.Account) (bool, error) {
+	if h.resetCreditConsumedRecently(account, time.Now(), autoResetCreditsScanInterval) {
+		return true, nil
+	}
+	if h == nil || h.cache == nil {
+		return false, nil
+	}
+	_, found, err := h.cache.GetRuntime(ctx, resetCreditCooldownNamespace, resetCreditLockKey(account))
+	return found, err
+}
+
+func (h *Handler) markResetCreditSuccess(account *auth.Account) {
+	if h == nil || account == nil {
+		return
+	}
+	key := resetCreditLockKey(account)
+	h.resetCreditLastSuccess.Store(key, time.Now())
+	if h.cache == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := h.cache.SetRuntime(ctx, resetCreditCooldownNamespace, key, json.RawMessage(`true`), autoResetCreditsScanInterval); err != nil {
+		log.Printf("[账号 %d] 写入主动重置冷却标记失败: %v", account.DBID, err)
+	}
+}
+
+func (h *Handler) writeManualResetCreditFailure(c *gin.Context, account *auth.Account, failure *resetCreditConsumeFailure) {
+	if failure == nil {
+		return
+	}
+	if failure.RefreshErr != nil {
+		log.Printf("[账号 %d] 重置额度时刷新 token 失败: %v", account.DBID, failure.RefreshErr)
+		writeError(c, http.StatusBadGateway, "上游鉴权失败（401），自动刷新账号失败，请手动刷新后重试")
+		return
+	}
+	switch failure.Status {
+	case http.StatusUnauthorized:
+		writeError(c, http.StatusBadGateway, "上游鉴权失败（401），请先刷新账号后重试")
+	case http.StatusTooManyRequests:
+		writeError(c, http.StatusBadGateway, "上游限流（429），请稍后重试")
+	case 0:
+		if failure.RequestErr != nil {
+			writeError(c, http.StatusBadGateway, "重置请求失败："+failure.RequestErr.Error())
+			return
+		}
+		writeError(c, http.StatusBadGateway, "重置请求失败")
+	default:
+		writeError(c, http.StatusBadGateway, "重置失败："+upstreamResetErrorMessage(failure.Status, failure.Body))
+	}
+}
+
+func (h *Handler) queryResetCreditsUpstream(ctx context.Context, account *auth.Account, proxyURL string) (*proxy.WhamResetCreditsList, *http.Response, error) {
+	if h != nil && h.queryResetCredits != nil {
+		return h.queryResetCredits(ctx, account, proxyURL)
+	}
+	return proxy.QueryWhamResetCredits(ctx, account, proxyURL)
+}
+
+func (h *Handler) consumeResetCreditUpstream(ctx context.Context, account *auth.Account, proxyURL, redeemRequestID string) (*proxy.WhamResetResult, *http.Response, error) {
+	if h != nil && h.consumeResetCredit != nil {
+		return h.consumeResetCredit(ctx, account, proxyURL, redeemRequestID)
+	}
+	return proxy.ConsumeResetCreditParsed(ctx, account, proxyURL, redeemRequestID)
+}
+
+func (h *Handler) recordResetCreditEvent(accountID int64, source string) {
+	if h == nil {
+		return
+	}
+	if h.recordAccountEvent != nil {
+		h.recordAccountEvent(accountID, "reset_credit", source)
+		return
+	}
+	if h.db != nil {
+		h.db.InsertAccountEventAsync(accountID, "reset_credit", source)
+	}
 }
 
 // applyOptimisticResetDecrement 在重置成功后本地把剩余次数 -1（available_count 会随之减少），
@@ -218,25 +404,53 @@ func (h *Handler) applyOptimisticResetDecrement(account *auth.Account) int {
 // refreshUsageAfterReset 在后台刷新账号用量（窗口快照、精确剩余次数、冷却状态）。
 // 使用独立 context，避免随 HTTP 请求结束被取消；失败仅记录，不影响已成功的重置。
 func (h *Handler) refreshUsageAfterReset(account *auth.Account) {
+	probe := h.usageProbeFunc()
+	if probe == nil {
+		return
+	}
+	h.resetCreditPostMu.Lock()
+	if h.resetCreditPostClosed {
+		h.resetCreditPostMu.Unlock()
+		return
+	}
+	parentCtx := h.resetCreditPostCtx
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	h.resetCreditPostWG.Add(1)
+	h.resetCreditPostMu.Unlock()
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer h.resetCreditPostWG.Done()
+		ctx, cancel := context.WithTimeout(parentCtx, 30*time.Second)
 		defer cancel()
-		if err := h.ProbeUsageSnapshot(ctx, account); err != nil {
+		if err := probe(ctx, account); err != nil {
 			log.Printf("[账号 %d] 重置后后台刷新用量失败: %v", account.DBID, err)
 		}
 	}()
 }
 
-// resetCreditLock 返回指定账号的重置互斥锁（按需创建）。
-func (h *Handler) resetCreditLock(id int64) *sync.Mutex {
-	if v, ok := h.resetCreditLocks.Load(id); ok {
+// resetCreditLock 返回有效工作区级别的重置互斥锁（按需创建）。同一工作区
+// 即使被重复导入为多条数据库记录，手动与自动消费也必须在本进程内串行。
+func (h *Handler) resetCreditLock(account *auth.Account) *sync.Mutex {
+	key := resetCreditLockKey(account)
+	if v, ok := h.resetCreditLocks.Load(key); ok {
 		return v.(*sync.Mutex)
 	}
 	mu := &sync.Mutex{}
-	if actual, loaded := h.resetCreditLocks.LoadOrStore(id, mu); loaded {
+	if actual, loaded := h.resetCreditLocks.LoadOrStore(key, mu); loaded {
 		return actual.(*sync.Mutex)
 	}
 	return mu
+}
+
+func resetCreditLockKey(account *auth.Account) string {
+	if account == nil {
+		return "account:nil"
+	}
+	if identity := strings.TrimSpace(account.EffectiveAccountID()); identity != "" {
+		return "workspace:" + identity
+	}
+	return "db:" + strconv.FormatInt(account.DBID, 10)
 }
 
 // refreshAccountForReset 在重置遇到 401 时刷新账号 token，复用注入的刷新函数

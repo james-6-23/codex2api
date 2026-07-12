@@ -76,6 +76,10 @@ type RuntimeSettings struct {
 	CodexCLIVersionSyncEnabled bool
 	// CodexCLIVersionSyncIntervalHours 定时同步间隔（小时，默认 12，范围 1-720）。
 	CodexCLIVersionSyncIntervalHours int
+	// AutoResetCreditsEnabled 控制 Plus/Pro 主动重置次数的临期自动消费（默认 false）。
+	AutoResetCreditsEnabled bool
+	// AutoResetCreditsBeforeExpiryMin 是进入自动消费窗口的提前分钟数（默认 60）。
+	AutoResetCreditsBeforeExpiryMin int
 }
 
 // IsolateRequestsByDefault 返回是否对无显式会话的请求默认按每请求隔离上游身份。
@@ -92,21 +96,22 @@ func init() {
 
 func DefaultRuntimeSettings() RuntimeSettings {
 	return RuntimeSettings{
-		ClientCompatMode:       defaultClientCompatMode,
-		CodexMinCLIVersion:     defaultCodexMinCLIVersion,
-		CodexUserAgentConfig:   DefaultCodexUserAgentConfigJSON(),
-		StreamFlushPolicy:      defaultStreamFlushPolicy,
-		StreamFlushIntervalMS:  defaultStreamFlushIntervalMS,
-		FirstTokenMode:         defaultFirstTokenMode,
-		FirstTokenTimeoutSec:   defaultFirstTokenTimeoutSec,
-		BillingTierPolicy:      defaultBillingTierPolicy,
-		CodexWSHideErrors:      defaultCodexWSHideErrors,
-		CodexWSSilentRetry:     defaultCodexWSSilentRetry,
-		CodexWSSilentRetries:   defaultCodexWSSilentRetries,
-		CodexContinueMaxRounds: defaultCodexContinueMaxRounds,
-		RequestIsolationMode:   defaultRequestIsolationMode(),
+		ClientCompatMode:                 defaultClientCompatMode,
+		CodexMinCLIVersion:               defaultCodexMinCLIVersion,
+		CodexUserAgentConfig:             DefaultCodexUserAgentConfigJSON(),
+		StreamFlushPolicy:                defaultStreamFlushPolicy,
+		StreamFlushIntervalMS:            defaultStreamFlushIntervalMS,
+		FirstTokenMode:                   defaultFirstTokenMode,
+		FirstTokenTimeoutSec:             defaultFirstTokenTimeoutSec,
+		BillingTierPolicy:                defaultBillingTierPolicy,
+		CodexWSHideErrors:                defaultCodexWSHideErrors,
+		CodexWSSilentRetry:               defaultCodexWSSilentRetry,
+		CodexWSSilentRetries:             defaultCodexWSSilentRetries,
+		CodexContinueMaxRounds:           defaultCodexContinueMaxRounds,
+		RequestIsolationMode:             defaultRequestIsolationMode(),
 		CodexCLIVersionSyncEnabled:       true,
 		CodexCLIVersionSyncIntervalHours: 12,
+		AutoResetCreditsBeforeExpiryMin:  60,
 	}
 }
 
@@ -214,6 +219,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	if settings.CodexContinueMaxRounds > maxCodexContinueMaxRounds {
 		settings.CodexContinueMaxRounds = maxCodexContinueMaxRounds
 	}
+	settings.AutoResetCreditsBeforeExpiryMin = database.NormalizeAutoResetCreditsBeforeExpiryMinutes(settings.AutoResetCreditsBeforeExpiryMin)
 	return settings
 }
 
@@ -237,6 +243,8 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexSyncedCLIVersion = settings.CodexSyncedCLIVersion
 		next.CodexCLIVersionSyncEnabled = settings.CodexCLIVersionSyncEnabled
 		next.CodexCLIVersionSyncIntervalHours = settings.CodexCLIVersionSyncIntervalHours
+		next.AutoResetCreditsEnabled = settings.AutoResetCreditsEnabled
+		next.AutoResetCreditsBeforeExpiryMin = settings.AutoResetCreditsBeforeExpiryMin
 	}
 	next = NormalizeRuntimeSettings(next)
 	runtimeSettings.Store(next)

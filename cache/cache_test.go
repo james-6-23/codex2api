@@ -277,6 +277,35 @@ func TestMemoryTokenCache_ReleaseRefreshLock(t *testing.T) {
 	}
 }
 
+func TestMemoryTokenCache_LeaseRequiresMatchingOwner(t *testing.T) {
+	tc := NewMemory(10)
+	t.Cleanup(func() { _ = tc.Close() })
+	ctx := context.Background()
+
+	acquired, err := tc.AcquireLease(ctx, "reset-credit", "workspace:1", "owner-a", time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("first AcquireLease = (%v,%v), want (true,nil)", acquired, err)
+	}
+	acquired, err = tc.AcquireLease(ctx, "reset-credit", "workspace:1", "owner-b", time.Minute)
+	if err != nil || acquired {
+		t.Fatalf("second AcquireLease = (%v,%v), want (false,nil)", acquired, err)
+	}
+	if err := tc.ReleaseLease(ctx, "reset-credit", "workspace:1", "owner-b"); err != nil {
+		t.Fatalf("ReleaseLease wrong owner: %v", err)
+	}
+	acquired, err = tc.AcquireLease(ctx, "reset-credit", "workspace:1", "owner-b", time.Minute)
+	if err != nil || acquired {
+		t.Fatalf("AcquireLease after wrong-owner release = (%v,%v), want (false,nil)", acquired, err)
+	}
+	if err := tc.ReleaseLease(ctx, "reset-credit", "workspace:1", "owner-a"); err != nil {
+		t.Fatalf("ReleaseLease owner-a: %v", err)
+	}
+	acquired, err = tc.AcquireLease(ctx, "reset-credit", "workspace:1", "owner-b", time.Minute)
+	if err != nil || !acquired {
+		t.Fatalf("AcquireLease after owner release = (%v,%v), want (true,nil)", acquired, err)
+	}
+}
+
 func TestMemoryTokenCache_WaitForRefreshComplete(t *testing.T) {
 	tc := NewMemory(10)
 	ctx := context.Background()

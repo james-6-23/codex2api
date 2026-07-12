@@ -51,6 +51,9 @@ type Handler struct {
 	refreshAccount         func(context.Context, int64) error
 	probeUsage             func(context.Context, *auth.Account) error
 	syncAccountPlanOnReset func(context.Context, *auth.Account) error
+	queryResetCredits      func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
+	consumeResetCredit     func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
+	recordAccountEvent     func(int64, string, string)
 	cpuSampler             *cpuSampler
 	startedAt              time.Time
 	pgMaxConns             int
@@ -71,9 +74,20 @@ type Handler struct {
 	reqCountCache     map[int64]*database.AccountRequestCount
 	reqCountExpiresAt time.Time
 
-	// 「主动重置次数」消耗操作的账号级互斥锁（dbID -> *sync.Mutex），
-	// 串行化同一账号的并发重置，避免重复消耗与次数计数竞态。
-	resetCreditLocks sync.Map
+	// 「主动重置次数」消耗操作的工作区级互斥锁（workspace -> *sync.Mutex），
+	// 串行化同一上游工作区的并发重置，避免重复消耗与次数计数竞态。
+	resetCreditLocks          sync.Map
+	resetCreditLastSuccess    sync.Map
+	resetCreditSuccessfulIDs  sync.Map
+	autoResetCreditsWake      chan struct{}
+	autoResetCreditsStartOnce sync.Once
+	autoResetCreditsWG        sync.WaitGroup
+	resetCreditPostMu         sync.Mutex
+	resetCreditPostWG         sync.WaitGroup
+	resetCreditPostCtx        context.Context
+	resetCreditPostCancel     context.CancelFunc
+	resetCreditPostClosed     bool
+	settingsUpdateMu          sync.Mutex
 
 	// 重复账号合并互斥锁：串行化 mergeRefreshedDuplicateIntoExisting，
 	// 防止并发导入同一身份的多个账号时互相合并、把双方都软删（账号丢失）。
@@ -341,7 +355,11 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 	handler.refreshAccount = handler.refreshSingleAccount
 	handler.probeUsage = handler.ProbeUsageSnapshot
 	handler.syncAccountPlanOnReset = handler.syncSingleAccountPlanOnReset
+	handler.queryResetCredits = proxy.QueryWhamResetCredits
+	handler.consumeResetCredit = proxy.ConsumeResetCreditParsed
+	handler.autoResetCreditsWake = make(chan struct{}, 1)
 	if db != nil {
+		handler.recordAccountEvent = db.InsertAccountEventAsync
 		if err := db.MarkInterruptedImageJobs(context.Background()); err != nil {
 			log.Printf("标记中断生图任务失败: %v", err)
 		}
@@ -6021,6 +6039,8 @@ type settingsResponse struct {
 	AutoCleanFullUsage                 bool    `json:"auto_clean_full_usage"`
 	AutoCleanError                     bool    `json:"auto_clean_error"`
 	AutoCleanExpired                   bool    `json:"auto_clean_expired"`
+	AutoResetCreditsEnabled            bool    `json:"auto_reset_credits_enabled"`
+	AutoResetCreditsBeforeExpiryMin    int     `json:"auto_reset_credits_before_expiry_min"`
 	ProxyPoolEnabled                   bool    `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled               bool    `json:"fast_scheduler_enabled"`
 	CodexForceWebsocket                bool    `json:"codex_force_websocket"`
@@ -6126,6 +6146,8 @@ type updateSettingsReq struct {
 	AutoCleanFullUsage                 *bool    `json:"auto_clean_full_usage"`
 	AutoCleanError                     *bool    `json:"auto_clean_error"`
 	AutoCleanExpired                   *bool    `json:"auto_clean_expired"`
+	AutoResetCreditsEnabled            *bool    `json:"auto_reset_credits_enabled"`
+	AutoResetCreditsBeforeExpiryMin    *int     `json:"auto_reset_credits_before_expiry_min"`
 	ProxyPoolEnabled                   *bool    `json:"proxy_pool_enabled"`
 	FastSchedulerEnabled               *bool    `json:"fast_scheduler_enabled"`
 	CodexForceWebsocket                *bool    `json:"codex_force_websocket"`
@@ -6688,6 +6710,12 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	runtimeCfg := proxy.CurrentRuntimeSettings()
+	autoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
+	autoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
+	if dbSettings != nil {
+		autoResetCreditsEnabled = dbSettings.AutoResetCreditsEnabled
+		autoResetCreditsBeforeExpiryMin = dbSettings.AutoResetCreditsBeforeExpiryMin
+	}
 	imgCfg := imagestore.CurrentConfig()
 	imgPrefix := strings.TrimSuffix(imgCfg.Prefix, "/")
 	bgCfg := defaultBackgroundConfig()
@@ -6723,6 +6751,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AutoCleanFullUsage:                 h.store.GetAutoCleanFullUsage(),
 		AutoCleanError:                     h.store.GetAutoCleanError(),
 		AutoCleanExpired:                   h.store.GetAutoCleanExpired(),
+		AutoResetCreditsEnabled:            autoResetCreditsEnabled,
+		AutoResetCreditsBeforeExpiryMin:    autoResetCreditsBeforeExpiryMin,
 		ProxyPoolEnabled:                   h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:               h.store.FastSchedulerEnabled(),
 		CodexForceWebsocket:                h.store.CodexForceWebsocket(),
@@ -6807,6 +6837,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	h.settingsUpdateMu.Lock()
+	defer h.settingsUpdateMu.Unlock()
 	if req.AutoPause5hThreshold != nil {
 		if err := validateAutoPauseThreshold("auto_pause_5h_threshold", *req.AutoPause5hThreshold); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
@@ -6846,6 +6878,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	}
+	if req.AutoResetCreditsBeforeExpiryMin != nil {
+		if *req.AutoResetCreditsBeforeExpiryMin < 10 || *req.AutoResetCreditsBeforeExpiryMin > 10080 {
+			writeError(c, http.StatusBadRequest, "auto_reset_credits_before_expiry_min 需在 10 到 10080 分钟之间")
+			return
+		}
+	}
 
 	currentAdminSecret := ""
 	siteName := database.DefaultSiteName
@@ -6853,7 +6891,15 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	bgCfg := defaultBackgroundConfig()
 	showFullUsageNumbers := false
 	publicKeyUsagePageEnabled := true
-	existingSettings, _ := h.db.GetSystemSettings(c.Request.Context())
+	modelPricingOverrides := "{}"
+	modelPricingSyncURL := ""
+	persistedAutoResetCreditsEnabled := false
+	persistedAutoResetCreditsBeforeExpiryMin := 60
+	existingSettings, settingsErr := h.db.GetSystemSettings(c.Request.Context())
+	if settingsErr != nil {
+		writeError(c, http.StatusInternalServerError, "读取现有设置失败："+settingsErr.Error())
+		return
+	}
 	if existingSettings != nil {
 		currentAdminSecret = existingSettings.AdminSecret
 		siteName = database.NormalizeSiteName(existingSettings.SiteName)
@@ -6861,6 +6907,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		bgCfg = decodeBackgroundConfig(existingSettings.BackgroundConfig)
 		showFullUsageNumbers = existingSettings.ShowFullUsageNumbers
 		publicKeyUsagePageEnabled = existingSettings.PublicKeyUsagePageEnabled
+		modelPricingOverrides = existingSettings.ModelPricingOverrides
+		modelPricingSyncURL = existingSettings.ModelPricingSyncURL
+		persistedAutoResetCreditsEnabled = existingSettings.AutoResetCreditsEnabled
+		persistedAutoResetCreditsBeforeExpiryMin = existingSettings.AutoResetCreditsBeforeExpiryMin
 	}
 	if req.AdminSecret != nil {
 		if h.adminSecretEnv == "" {
@@ -6910,6 +6960,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	hasAdminSecret := strings.TrimSpace(currentAdminSecret) != "" || strings.TrimSpace(h.adminSecretEnv) != ""
 	runtimeCfg := proxy.CurrentRuntimeSettings()
+	previousAutoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
+	previousAutoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
+	// 数据库是多实例下的权威来源；用持久值作为本次 partial update 的基线，
+	// 避免旧实例保存无关字段时把自动消费配置回滚成自己的陈旧快照。
+	runtimeCfg.AutoResetCreditsEnabled = persistedAutoResetCreditsEnabled
+	runtimeCfg.AutoResetCreditsBeforeExpiryMin = persistedAutoResetCreditsBeforeExpiryMin
+	autoResetCreditsChanged := (req.AutoResetCreditsEnabled != nil && *req.AutoResetCreditsEnabled != persistedAutoResetCreditsEnabled) ||
+		(req.AutoResetCreditsBeforeExpiryMin != nil && *req.AutoResetCreditsBeforeExpiryMin != persistedAutoResetCreditsBeforeExpiryMin)
 	usageLogMode := h.db.GetUsageLogMode()
 	usageLogBatchSize := h.db.GetUsageLogBatchSize()
 	usageLogFlushIntervalSeconds := h.db.GetUsageLogFlushIntervalSeconds()
@@ -7326,7 +7384,23 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetIgnoreUsageLimitStatus(*req.IgnoreUsageLimitStatus)
 		log.Printf("设置已更新: ignore_usage_limit_status = %t", *req.IgnoreUsageLimitStatus)
 	}
-	runtimeCfg = proxy.ApplyRuntimeSettings(runtimeCfg)
+	if req.AutoResetCreditsEnabled != nil {
+		runtimeCfg.AutoResetCreditsEnabled = *req.AutoResetCreditsEnabled
+		log.Printf("设置已更新: auto_reset_credits_enabled = %t", *req.AutoResetCreditsEnabled)
+	}
+	if req.AutoResetCreditsBeforeExpiryMin != nil {
+		runtimeCfg.AutoResetCreditsBeforeExpiryMin = *req.AutoResetCreditsBeforeExpiryMin
+		log.Printf("设置已更新: auto_reset_credits_before_expiry_min = %d", *req.AutoResetCreditsBeforeExpiryMin)
+	}
+	// 自动消费属于不可逆操作。先归一化待保存值，但在数据库确认保存成功前，
+	// 运行态继续使用旧的自动消费配置，避免持久化失败后后台任务仍然开始消费。
+	runtimeCfg = proxy.NormalizeRuntimeSettings(runtimeCfg)
+	effectiveRuntimeCfg := runtimeCfg
+	if autoResetCreditsChanged {
+		effectiveRuntimeCfg.AutoResetCreditsEnabled = previousAutoResetCreditsEnabled
+		effectiveRuntimeCfg.AutoResetCreditsBeforeExpiryMin = previousAutoResetCreditsBeforeExpiryMin
+	}
+	effectiveRuntimeCfg = proxy.ApplyRuntimeSettings(effectiveRuntimeCfg)
 
 	usageLogChanged := false
 	if req.UsageLogMode != nil {
@@ -7547,6 +7621,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanFullUsage:                 h.store.GetAutoCleanFullUsage(),
 		AutoCleanError:                     h.store.GetAutoCleanError(),
 		AutoCleanExpired:                   h.store.GetAutoCleanExpired(),
+		AutoResetCreditsEnabled:            runtimeCfg.AutoResetCreditsEnabled,
+		AutoResetCreditsBeforeExpiryMin:    runtimeCfg.AutoResetCreditsBeforeExpiryMin,
 		ProxyPoolEnabled:                   h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:               h.store.FastSchedulerEnabled(),
 		CodexForceWebsocket:                h.store.CodexForceWebsocket(),
@@ -7610,9 +7686,19 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SmartPacingMinConcurrency:          h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                 h.store.GetSmartPacingWindows(),
 		IgnoreUsageLimitStatus:             h.store.IgnoreUsageLimitStatus(),
+		ModelPricingOverrides:              modelPricingOverrides,
+		ModelPricingSyncURL:                modelPricingSyncURL,
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if autoResetCreditsChanged {
+			runtimeCfg = effectiveRuntimeCfg
+			writeError(c, http.StatusInternalServerError, "保存自动消耗设置失败，设置未生效")
+			return
+		}
+	} else if autoResetCreditsChanged {
+		runtimeCfg = proxy.ApplyRuntimeSettings(runtimeCfg)
+		h.triggerAutoResetCreditsScan()
 	}
 
 	if h.store.GetAutoCleanUnauthorized() || h.store.GetAutoCleanRateLimited() || h.store.GetAutoCleanError() {
@@ -7657,6 +7743,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AutoCleanFullUsage:                 h.store.GetAutoCleanFullUsage(),
 		AutoCleanError:                     h.store.GetAutoCleanError(),
 		AutoCleanExpired:                   h.store.GetAutoCleanExpired(),
+		AutoResetCreditsEnabled:            runtimeCfg.AutoResetCreditsEnabled,
+		AutoResetCreditsBeforeExpiryMin:    runtimeCfg.AutoResetCreditsBeforeExpiryMin,
 		ProxyPoolEnabled:                   h.store.GetProxyPoolEnabled(),
 		FastSchedulerEnabled:               h.store.FastSchedulerEnabled(),
 		CodexForceWebsocket:                h.store.CodexForceWebsocket(),

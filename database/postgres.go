@@ -836,6 +836,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS retry_interval_ms INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS transport_retry_policy VARCHAR(20) DEFAULT 'rotate';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS ignore_usage_limit_status BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
@@ -1469,6 +1471,10 @@ type SystemSettings struct {
 	CodexCLIVersionSyncEnabled bool
 	// CodexCLIVersionSyncIntervalHours 是定时同步间隔（小时，默认 12，范围 1-720）。
 	CodexCLIVersionSyncIntervalHours int
+	// AutoResetCreditsEnabled 控制 Plus/Pro 主动重置次数的临期自动消费（默认关闭）。
+	AutoResetCreditsEnabled bool
+	// AutoResetCreditsBeforeExpiryMin 是进入临期窗口的提前分钟数（默认 60，范围 10-10080）。
+	AutoResetCreditsBeforeExpiryMin int
 	// ModelPricingOverrides 是模型定价覆盖 JSON（model → ModelPricingOverride），
 	// custom/synced 覆盖代码默认；空为 "{}"。
 	ModelPricingOverrides string
@@ -1492,6 +1498,21 @@ func normalizeFirstTokenMode(mode string) string {
 	default:
 		return "strict"
 	}
+}
+
+// NormalizeAutoResetCreditsBeforeExpiryMinutes 将临期自动消费阈值限制在
+// 10 分钟到 7 天；非正值回退默认 60 分钟。
+func NormalizeAutoResetCreditsBeforeExpiryMinutes(minutes int) int {
+	if minutes <= 0 {
+		return 60
+	}
+	if minutes < 10 {
+		return 10
+	}
+	if minutes > 10080 {
+		return 10080
+	}
+	return minutes
 }
 
 // normalizeSmartPacingMinConcurrencyDB 归一化智能配速并发下限（1..1000，默认 1）。
@@ -1607,7 +1628,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(codex_cli_version_sync_interval_hours, 12),
 			       COALESCE(model_pricing_overrides, '{}'),
 			       COALESCE(model_pricing_sync_url, ''),
-			       COALESCE(ignore_usage_limit_status, false)
+			       COALESCE(ignore_usage_limit_status, false),
+			       COALESCE(auto_reset_credits_enabled, false),
+			       COALESCE(auto_reset_credits_before_expiry_min, 60)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1657,6 +1680,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.ModelPricingOverrides,
 		&s.ModelPricingSyncURL,
 		&s.IgnoreUsageLimitStatus,
+		&s.AutoResetCreditsEnabled,
+		&s.AutoResetCreditsBeforeExpiryMin,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1678,6 +1703,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	}
 	s.FirstTokenMode = normalizeFirstTokenMode(s.FirstTokenMode)
 	s.BillingTierPolicy = normalizeBillingTierPolicy(s.BillingTierPolicy)
+	s.AutoResetCreditsBeforeExpiryMin = NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin)
 	return s, err
 }
 
@@ -1743,9 +1769,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_cli_version_sync_interval_hours,
 					model_pricing_overrides,
 					model_pricing_sync_url,
-					ignore_usage_limit_status
+					ignore_usage_limit_status,
+					auto_reset_credits_enabled,
+					auto_reset_credits_before_expiry_min
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1833,7 +1861,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_cli_version_sync_interval_hours = EXCLUDED.codex_cli_version_sync_interval_hours,
 					model_pricing_overrides = EXCLUDED.model_pricing_overrides,
 					model_pricing_sync_url = EXCLUDED.model_pricing_sync_url,
-					ignore_usage_limit_status = EXCLUDED.ignore_usage_limit_status
+					ignore_usage_limit_status = EXCLUDED.ignore_usage_limit_status,
+					auto_reset_credits_enabled = EXCLUDED.auto_reset_credits_enabled,
+					auto_reset_credits_before_expiry_min = EXCLUDED.auto_reset_credits_before_expiry_min
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1857,7 +1887,32 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		strings.TrimSpace(s.CodexSyncedCLIVersion),
 		s.CodexCLIVersionSyncEnabled, NormalizeCodexCLIVersionSyncIntervalHours(s.CodexCLIVersionSyncIntervalHours),
 		normalizeModelPricingOverridesJSON(s.ModelPricingOverrides), strings.TrimSpace(s.ModelPricingSyncURL),
-		s.IgnoreUsageLimitStatus)
+		s.IgnoreUsageLimitStatus, s.AutoResetCreditsEnabled,
+		NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin))
+	return err
+}
+
+// UpdateCodexSyncedCLIVersion 只更新后台同步得到的 Codex CLI 版本，避免用
+// 读取到的旧 SystemSettings 快照覆盖管理员刚保存的其他设置。
+func (db *DB) UpdateCodexSyncedCLIVersion(ctx context.Context, version string) error {
+	_, err := db.conn.ExecContext(ctx, `
+		INSERT INTO system_settings (id, codex_synced_cli_version)
+		VALUES (1, $1)
+		ON CONFLICT (id) DO UPDATE SET
+			codex_synced_cli_version = EXCLUDED.codex_synced_cli_version
+	`, strings.TrimSpace(version))
+	return err
+}
+
+// UpdateModelPricingSettings 原子更新模型定价覆盖及其同步来源，不回写整行设置。
+func (db *DB) UpdateModelPricingSettings(ctx context.Context, overridesJSON, syncURL string) error {
+	_, err := db.conn.ExecContext(ctx, `
+		INSERT INTO system_settings (id, model_pricing_overrides, model_pricing_sync_url)
+		VALUES (1, $1, $2)
+		ON CONFLICT (id) DO UPDATE SET
+			model_pricing_overrides = EXCLUDED.model_pricing_overrides,
+			model_pricing_sync_url = EXCLUDED.model_pricing_sync_url
+	`, normalizeModelPricingOverridesJSON(overridesJSON), strings.TrimSpace(syncURL))
 	return err
 }
 

@@ -220,11 +220,21 @@ type WhamResetCredit struct {
 // WhamResetCreditItem 是 /wham/rate-limit-reset-credits 列表里的单张重置券。
 // reset_type=codex_rate_limits 且 status=available 的即「当前可用」的券。
 type WhamResetCreditItem struct {
-	ID        string `json:"id"`
-	ResetType string `json:"reset_type"`
-	Status    string `json:"status"`
-	GrantedAt string `json:"granted_at"`
-	ExpiresAt string `json:"expires_at"`
+	ID              string `json:"id"`
+	ResetType       string `json:"reset_type"`
+	Status          string `json:"status"`
+	GrantedAt       string `json:"granted_at"`
+	ExpiresAt       string `json:"expires_at"`
+	ConsumableUntil string `json:"consumable_until"`
+}
+
+// EffectiveConsumableUntil 返回上游声明的实际可消费截止时间。
+// 新版接口使用 consumable_until；旧版/兼容响应仍可能只带 expires_at。
+func (c WhamResetCreditItem) EffectiveConsumableUntil() string {
+	if value := strings.TrimSpace(c.ConsumableUntil); value != "" {
+		return value
+	}
+	return strings.TrimSpace(c.ExpiresAt)
 }
 
 // WhamResetCreditsList 是 /wham/rate-limit-reset-credits 的响应结构。
@@ -247,7 +257,7 @@ func (l *WhamResetCreditsList) AvailableCodexCredits() []WhamResetCreditItem {
 		if c.Status != "available" {
 			continue
 		}
-		if strings.TrimSpace(c.ExpiresAt) == "" {
+		if c.EffectiveConsumableUntil() == "" {
 			continue
 		}
 		out = append(out, c)

@@ -33,6 +33,8 @@ type TokenCache interface {
 	DeleteAccessToken(ctx context.Context, accountID int64) error
 	AcquireRefreshLock(ctx context.Context, accountID int64, ttl time.Duration) (bool, error)
 	ReleaseRefreshLock(ctx context.Context, accountID int64) error
+	AcquireLease(ctx context.Context, namespace, key, owner string, ttl time.Duration) (bool, error)
+	ReleaseLease(ctx context.Context, namespace, key, owner string) error
 	WaitForRefreshComplete(ctx context.Context, accountID int64, timeout time.Duration) (string, error)
 	SetSessionAffinity(ctx context.Context, key string, binding SessionAffinityBinding, ttl time.Duration) error
 	GetSessionAffinity(ctx context.Context, key string) (SessionAffinityBinding, bool, error)

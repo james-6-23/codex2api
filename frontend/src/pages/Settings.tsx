@@ -1135,6 +1135,8 @@ export default function Settings() {
     auto_clean_full_usage: false,
     proxy_pool_enabled: false,
     fast_scheduler_enabled: false,
+    auto_reset_credits_enabled: false,
+    auto_reset_credits_before_expiry_min: 60,
     codex_force_websocket: false,
     codex_ws_keepalive_enabled: false,
     codex_ws_keepalive_interval_sec: 60,
@@ -1993,6 +1995,75 @@ export default function Settings() {
               </div>
             </SettingsCard>
           </div>
+
+          <SettingsCard
+            title={t('settings.autoResetCreditsTitle')}
+            description={t('settings.autoResetCreditsDesc')}
+            icon={<RefreshCw className="size-4" />}
+          >
+            <div className={cn(SETTINGS_SWITCH_GRID, 'items-stretch')}>
+              <SettingField
+                label={t('settings.autoResetCreditsEnabled')}
+                description={t('settings.autoResetCreditsEnabledDesc')}
+                layout="switch"
+                className="h-full"
+              >
+                <Switch
+                  checked={settingsForm.auto_reset_credits_enabled}
+                  onCheckedChange={(checked) => autoSaveBooleanField(
+                    'auto_reset_credits_enabled',
+                    checked,
+                    checked
+                      ? { auto_reset_credits_before_expiry_min: settingsFormRef.current.auto_reset_credits_before_expiry_min }
+                      : {},
+                  )}
+                />
+              </SettingField>
+              <div
+                className={cn(
+                  'flex min-h-[48px] min-w-0 items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5',
+                  !settingsForm.auto_reset_credits_enabled && 'opacity-60',
+                )}
+              >
+                <div className="min-w-0 flex-1 space-y-0.5">
+                  <div className="flex items-center gap-1.5">
+                    <label className="block text-[13px] font-medium leading-snug text-foreground sm:text-sm">
+                      {t('settings.autoResetCreditsBeforeExpiry')}
+                    </label>
+                    <SettingHelp text={t('settings.autoResetCreditsBeforeExpiryDesc')} />
+                  </div>
+                </div>
+                <div className="relative w-[7.5rem] shrink-0 sm:w-[8.5rem]">
+                  <Input
+                    type="number"
+                    min={10}
+                    max={10080}
+                    step={10}
+                    disabled={!settingsForm.auto_reset_credits_enabled}
+                    className="pr-11"
+                    value={settingsForm.auto_reset_credits_before_expiry_min}
+                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
+                      const parsed = Number.parseInt(e.target.value, 10)
+                      if (Number.isNaN(parsed)) return
+                      commitSettingsForm({
+                        ...settingsFormRef.current,
+                        auto_reset_credits_before_expiry_min: Math.max(10, Math.min(10080, parsed)),
+                      })
+                    }}
+                    onBlur={() => {
+                      if (!settingsForm.auto_reset_credits_enabled) return
+                      void autoSaveSettingsPatch({
+                        auto_reset_credits_before_expiry_min: settingsFormRef.current.auto_reset_credits_before_expiry_min,
+                      })
+                    }}
+                  />
+                  <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium tabular-nums text-muted-foreground">
+                    {t('settings.unit.min')}
+                  </span>
+                </div>
+              </div>
+            </div>
+          </SettingsCard>
 
           <SettingsCard title={t('settings.schedulingStrategy')} icon={<Layers className="size-4" />}>
             <div className="space-y-4">

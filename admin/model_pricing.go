@@ -224,8 +224,7 @@ func (h *Handler) UpdateModelPricing(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings.ModelPricingOverrides = blob
-	if err := h.db.UpdateSystemSettings(ctx, settings); err != nil {
+	if err := h.db.UpdateModelPricingSettings(ctx, blob, settings.ModelPricingSyncURL); err != nil {
 		writeError(c, http.StatusInternalServerError, err.Error())
 		return
 	}
