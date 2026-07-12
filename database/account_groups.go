@@ -9,21 +9,22 @@ import (
 )
 
 type AccountGroup struct {
-	ID                   int64
-	Name                 string
-	Description          string
-	Color                string
-	SortOrder            int64
-	MemberCount          int64
-	AutoPause5hThreshold float64
-	AutoPause7dThreshold float64
-	CreatedAt            time.Time
-	UpdatedAt            time.Time
+	ID                      int64
+	Name                    string
+	Description             string
+	Color                   string
+	SortOrder               int64
+	BaseConcurrencyOverride sql.NullInt64
+	MemberCount             int64
+	AutoPause5hThreshold    float64
+	AutoPause7dThreshold    float64
+	CreatedAt               time.Time
+	UpdatedAt               time.Time
 }
 
 func (db *DB) ListAccountGroups(ctx context.Context) ([]AccountGroup, error) {
 	rows, err := db.conn.QueryContext(ctx, `
-		SELECT g.id, g.name, g.description, g.color, g.sort_order,
+		SELECT g.id, g.name, g.description, g.color, g.sort_order, g.base_concurrency_override,
 			COALESCE(COUNT(a.id), 0),
 			COALESCE(g.auto_pause_5h_threshold, 0), COALESCE(g.auto_pause_7d_threshold, 0),
 			g.created_at, g.updated_at
@@ -32,7 +33,7 @@ func (db *DB) ListAccountGroups(ctx context.Context) ([]AccountGroup, error) {
 		LEFT JOIN accounts a ON a.id = m.account_id
 			AND a.status <> 'deleted'
 			AND COALESCE(a.error_message, '') <> 'deleted'
-		GROUP BY g.id, g.name, g.description, g.color, g.sort_order,
+		GROUP BY g.id, g.name, g.description, g.color, g.sort_order, g.base_concurrency_override,
 			g.auto_pause_5h_threshold, g.auto_pause_7d_threshold, g.created_at, g.updated_at
 		ORDER BY g.sort_order, g.name`)
 	if err != nil {
@@ -43,7 +44,7 @@ func (db *DB) ListAccountGroups(ctx context.Context) ([]AccountGroup, error) {
 	for rows.Next() {
 		var g AccountGroup
 		var createdRaw, updatedRaw interface{}
-		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.Color, &g.SortOrder, &g.MemberCount, &g.AutoPause5hThreshold, &g.AutoPause7dThreshold, &createdRaw, &updatedRaw); err != nil {
+		if err := rows.Scan(&g.ID, &g.Name, &g.Description, &g.Color, &g.SortOrder, &g.BaseConcurrencyOverride, &g.MemberCount, &g.AutoPause5hThreshold, &g.AutoPause7dThreshold, &createdRaw, &updatedRaw); err != nil {
 			return nil, err
 		}
 		var parseErr error
@@ -60,7 +61,7 @@ func (db *DB) ListAccountGroups(ctx context.Context) ([]AccountGroup, error) {
 	return groups, rows.Err()
 }
 
-func (db *DB) CreateAccountGroup(ctx context.Context, name, description, color string, autoPause5h, autoPause7d float64, sortOrder ...int64) (int64, error) {
+func (db *DB) CreateAccountGroup(ctx context.Context, name, description, color string, autoPause5h, autoPause7d float64, baseConcurrencyOverride sql.NullInt64, sortOrder ...int64) (int64, error) {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return 0, fmt.Errorf("group name is required")
@@ -70,7 +71,7 @@ func (db *DB) CreateAccountGroup(ctx context.Context, name, description, color s
 		order = sortOrder[0]
 	}
 	if db.isSQLite() {
-		res, err := db.conn.ExecContext(ctx, `INSERT INTO account_groups (name, description, color, sort_order, auto_pause_5h_threshold, auto_pause_7d_threshold) VALUES (?, ?, ?, ?, ?, ?)`, name, description, color, order, autoPause5h, autoPause7d)
+		res, err := db.conn.ExecContext(ctx, `INSERT INTO account_groups (name, description, color, sort_order, auto_pause_5h_threshold, auto_pause_7d_threshold, base_concurrency_override) VALUES (?, ?, ?, ?, ?, ?, ?)`, name, description, color, order, autoPause5h, autoPause7d, nullableInt64Value(baseConcurrencyOverride))
 		if err != nil {
 			if isUniqueViolation(err) {
 				return 0, ErrDuplicateAccountGroupName
@@ -80,7 +81,7 @@ func (db *DB) CreateAccountGroup(ctx context.Context, name, description, color s
 		return res.LastInsertId()
 	}
 	var id int64
-	err := db.conn.QueryRowContext(ctx, `INSERT INTO account_groups (name, description, color, sort_order, auto_pause_5h_threshold, auto_pause_7d_threshold) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`, name, description, color, order, autoPause5h, autoPause7d).Scan(&id)
+	err := db.conn.QueryRowContext(ctx, `INSERT INTO account_groups (name, description, color, sort_order, auto_pause_5h_threshold, auto_pause_7d_threshold, base_concurrency_override) VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`, name, description, color, order, autoPause5h, autoPause7d, nullableInt64Value(baseConcurrencyOverride)).Scan(&id)
 	if err != nil {
 		if isUniqueViolation(err) {
 			return 0, ErrDuplicateAccountGroupName
@@ -91,8 +92,9 @@ func (db *DB) CreateAccountGroup(ctx context.Context, name, description, color s
 }
 
 type UpdateAccountGroupOpts struct {
-	AutoPause5hThreshold *float64
-	AutoPause7dThreshold *float64
+	AutoPause5hThreshold    *float64
+	AutoPause7dThreshold    *float64
+	BaseConcurrencyOverride OptionalNullInt64
 }
 
 func (db *DB) UpdateAccountGroup(ctx context.Context, id int64, name, description, color *string, opts *UpdateAccountGroupOpts, sortOrder ...*int64) error {
@@ -128,6 +130,9 @@ func (db *DB) UpdateAccountGroup(ctx context.Context, id int64, name, descriptio
 		}
 		if opts.AutoPause7dThreshold != nil {
 			add("auto_pause_7d_threshold", *opts.AutoPause7dThreshold)
+		}
+		if opts.BaseConcurrencyOverride.Set {
+			add("base_concurrency_override", nullableInt64Value(opts.BaseConcurrencyOverride.Value))
 		}
 	}
 	if len(sets) == 0 {

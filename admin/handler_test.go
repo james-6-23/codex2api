@@ -663,7 +663,7 @@ func TestUpdateAPIKeyRefreshesRuntimeStoreAndCache(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	groupID, err := db.CreateAccountGroup(ctx, "Team", "", "#2563eb", 0, 0, 0)
+	groupID, err := db.CreateAccountGroup(ctx, "Team", "", "#2563eb", 0, 0, sql.NullInt64{}, 0)
 	if err != nil {
 		t.Fatalf("CreateAccountGroup 返回错误: %v", err)
 	}
@@ -1585,7 +1585,7 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertAccount 2: %v", err)
 	}
-	groupID, err := db.CreateAccountGroup(ctx, "Batch Group", "", "#2563eb", 0, 0, 0)
+	groupID, err := db.CreateAccountGroup(ctx, "Batch Group", "", "#2563eb", 0, 0, sql.NullInt64{}, 0)
 	if err != nil {
 		t.Fatalf("CreateAccountGroup: %v", err)
 	}

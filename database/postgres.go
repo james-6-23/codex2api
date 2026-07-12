@@ -610,17 +610,19 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS skip_warm_tier BOOLEAN DEFAULT FALSE;
 
 	CREATE TABLE IF NOT EXISTS account_groups (
-		id          SERIAL PRIMARY KEY,
-		name        VARCHAR(80) UNIQUE NOT NULL,
-		description TEXT DEFAULT '',
-		color       VARCHAR(20) DEFAULT '',
-		sort_order  INT DEFAULT 0,
-		created_at  TIMESTAMPTZ DEFAULT NOW(),
-		updated_at  TIMESTAMPTZ DEFAULT NOW()
+		id                        SERIAL PRIMARY KEY,
+		name                      VARCHAR(80) UNIQUE NOT NULL,
+		description               TEXT DEFAULT '',
+		color                     VARCHAR(20) DEFAULT '',
+		sort_order                INT DEFAULT 0,
+		base_concurrency_override INT NULL,
+		created_at                TIMESTAMPTZ DEFAULT NOW(),
+		updated_at                TIMESTAMPTZ DEFAULT NOW()
 	);
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS description TEXT DEFAULT '';
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS color VARCHAR(20) DEFAULT '';
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS sort_order INT DEFAULT 0;
+	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS base_concurrency_override INT NULL;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ DEFAULT NOW();
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT NOW();
 

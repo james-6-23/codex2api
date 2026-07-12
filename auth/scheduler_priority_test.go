@@ -118,3 +118,77 @@ func TestFastSchedulerPrefersHigherPrioritySegment(t *testing.T) {
 	scheduler.Release(first)
 	scheduler.Release(second)
 }
+
+// FastScheduler 的调度优先级必须全局先于健康桶：高优先级 warm
+// 账号仍应先于低优先级 healthy 账号。
+func TestFastSchedulerPriorityPrecedesHealthTier(t *testing.T) {
+	for _, mode := range []string{"round_robin", "remaining_quota"} {
+		t.Run(mode, func(t *testing.T) {
+			lowHealthy := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+			highWarm := newFastSchedulerTestAccount(2, HealthTierWarm, 80, 1)
+			highWarm.SetSchedulerPriority(10)
+
+			scheduler := NewFastScheduler(1, mode)
+			scheduler.Rebuild([]*Account{lowHealthy, highWarm})
+
+			got := scheduler.Acquire()
+			if got == nil {
+				t.Fatal("Acquire() returned nil")
+			}
+			defer scheduler.Release(got)
+			if got.DBID != highWarm.DBID {
+				t.Fatalf("Acquire() picked dbID=%d, want high-priority warm account %d", got.DBID, highWarm.DBID)
+			}
+		})
+	}
+}
+
+// 同一高优先级的所有健康桶都无可用容量后，才回落到低优先级账号。
+func TestFastSchedulerFallsBackAfterHigherPriorityIsFullAcrossHealthTiers(t *testing.T) {
+	for _, mode := range []string{"round_robin", "remaining_quota"} {
+		t.Run(mode, func(t *testing.T) {
+			lowHealthy := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
+			highHealthy := newFastSchedulerTestAccount(2, HealthTierHealthy, 100, 1)
+			highWarm := newFastSchedulerTestAccount(3, HealthTierWarm, 80, 1)
+			highHealthy.SetSchedulerPriority(10)
+			highWarm.SetSchedulerPriority(10)
+
+			scheduler := NewFastScheduler(1, mode)
+			scheduler.Rebuild([]*Account{lowHealthy, highWarm, highHealthy})
+
+			first := scheduler.Acquire()
+			if first == nil || first.DBID != highHealthy.DBID {
+				if first == nil {
+					t.Fatal("first Acquire() returned nil")
+				}
+				t.Fatalf("first Acquire() picked dbID=%d, want high-priority healthy account %d", first.DBID, highHealthy.DBID)
+			}
+			second := scheduler.Acquire()
+			if second == nil {
+				scheduler.Release(first)
+				t.Fatal("second Acquire() returned nil")
+			}
+			if second.DBID != highWarm.DBID {
+				scheduler.Release(first)
+				scheduler.Release(second)
+				t.Fatalf("second Acquire() picked dbID=%d, want high-priority warm account %d", second.DBID, highWarm.DBID)
+			}
+			third := scheduler.Acquire()
+			if third == nil {
+				scheduler.Release(first)
+				scheduler.Release(second)
+				t.Fatal("third Acquire() returned nil")
+			}
+			if third.DBID != lowHealthy.DBID {
+				scheduler.Release(first)
+				scheduler.Release(second)
+				scheduler.Release(third)
+				t.Fatalf("third Acquire() picked dbID=%d, want lower-priority healthy fallback %d", third.DBID, lowHealthy.DBID)
+			}
+
+			scheduler.Release(first)
+			scheduler.Release(second)
+			scheduler.Release(third)
+		})
+	}
+}

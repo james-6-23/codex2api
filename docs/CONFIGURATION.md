@@ -170,8 +170,12 @@ Codex2API 采用三层配置架构：
 | `credit_enabled` | bool | false | 标记账号为信用计费模式 |
 | `credit_skip_usage_window` | bool | false | 跳过 7 天/5 小时用量窗口惩罚（适用于信用账号） |
 | `score_bias_override` | int/null | null | 手工覆盖调度权重分，`null` 跟随套餐默认 |
-| `base_concurrency_override` | int/null | null | 手工覆盖基础并发值，`null` 跟随全局默认 |
+| `base_concurrency_override` | int/null | null | 手工覆盖基础并发值，`null` 时先继承所属分组的最小有效值，再回退到全局默认 |
 | `skip_warm_tier` | bool | false | 跳过 warm 层级；仅把 warm 提升为 healthy，不覆盖 risky/banned |
+
+### 分组级基础并发
+
+账号分组可设置 `base_concurrency_override`（`1..50`，`null` 表示不覆盖）。基础并发按“账号显式覆盖 > 所属分组中最小的有效值 > 全局 `max_concurrency`”解析；最终动态并发仍会受健康档位、用量保护和智能配速限制。
 
 ### 连接池配置
 

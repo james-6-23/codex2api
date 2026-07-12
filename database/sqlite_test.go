@@ -1235,6 +1235,86 @@ func TestSystemSettingsNormalizeBlankBillingTierPolicy(t *testing.T) {
 	}
 }
 
+func TestSQLiteMigratesAccountGroupBaseConcurrencyOverride(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open legacy sqlite 返回错误: %v", err)
+	}
+	if _, err := legacy.Exec(`CREATE TABLE account_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT UNIQUE NOT NULL)`); err != nil {
+		legacy.Close()
+		t.Fatalf("创建旧 account_groups 表返回错误: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("关闭旧 SQLite 返回错误: %v", err)
+	}
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 迁移旧库返回错误: %v", err)
+	}
+	defer db.Close()
+
+	var columnCount int
+	if err := db.conn.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM pragma_table_info('account_groups') WHERE name = 'base_concurrency_override'`).Scan(&columnCount); err != nil {
+		t.Fatalf("查询迁移列返回错误: %v", err)
+	}
+	if columnCount != 1 {
+		t.Fatalf("base_concurrency_override column count = %d, want 1", columnCount)
+	}
+}
+
+func TestAccountGroupBaseConcurrencyOverrideCRUD(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	groupID, err := db.CreateAccountGroup(ctx, "Concurrency", "", "", 0, 0, sql.NullInt64{Int64: 6, Valid: true})
+	if err != nil {
+		t.Fatalf("CreateAccountGroup 返回错误: %v", err)
+	}
+
+	assertOverride := func(want sql.NullInt64) {
+		t.Helper()
+		groups, err := db.ListAccountGroups(ctx)
+		if err != nil {
+			t.Fatalf("ListAccountGroups 返回错误: %v", err)
+		}
+		if len(groups) != 1 || groups[0].ID != groupID {
+			t.Fatalf("groups = %#v, want group %d", groups, groupID)
+		}
+		got := groups[0].BaseConcurrencyOverride
+		if got.Valid != want.Valid || (got.Valid && got.Int64 != want.Int64) {
+			t.Fatalf("BaseConcurrencyOverride = %+v, want %+v", got, want)
+		}
+	}
+
+	assertOverride(sql.NullInt64{Int64: 6, Valid: true})
+	if err := db.UpdateAccountGroup(ctx, groupID, nil, nil, nil, &UpdateAccountGroupOpts{
+		BaseConcurrencyOverride: OptionalNullInt64{Set: true, Value: sql.NullInt64{Int64: 3, Valid: true}},
+	}); err != nil {
+		t.Fatalf("UpdateAccountGroup set override 返回错误: %v", err)
+	}
+	assertOverride(sql.NullInt64{Int64: 3, Valid: true})
+
+	name := "Concurrency renamed"
+	if err := db.UpdateAccountGroup(ctx, groupID, &name, nil, nil, nil); err != nil {
+		t.Fatalf("UpdateAccountGroup unrelated field 返回错误: %v", err)
+	}
+	assertOverride(sql.NullInt64{Int64: 3, Valid: true})
+
+	if err := db.UpdateAccountGroup(ctx, groupID, nil, nil, nil, &UpdateAccountGroupOpts{
+		BaseConcurrencyOverride: OptionalNullInt64{Set: true},
+	}); err != nil {
+		t.Fatalf("UpdateAccountGroup clear override 返回错误: %v", err)
+	}
+	assertOverride(sql.NullInt64{})
+}
+
 func TestDeleteAccountGroupDoesNotBroadenScopedAPIKey(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
@@ -1245,11 +1325,11 @@ func TestDeleteAccountGroupDoesNotBroadenScopedAPIKey(t *testing.T) {
 	defer db.Close()
 
 	ctx := context.Background()
-	groupA, err := db.CreateAccountGroup(ctx, "Group A", "", "#2563eb", 0, 0, 0)
+	groupA, err := db.CreateAccountGroup(ctx, "Group A", "", "#2563eb", 0, 0, sql.NullInt64{}, 0)
 	if err != nil {
 		t.Fatalf("CreateAccountGroup A 返回错误: %v", err)
 	}
-	groupB, err := db.CreateAccountGroup(ctx, "Group B", "", "#16a34a", 0, 0, 1)
+	groupB, err := db.CreateAccountGroup(ctx, "Group B", "", "#16a34a", 0, 0, sql.NullInt64{}, 1)
 	if err != nil {
 		t.Fatalf("CreateAccountGroup B 返回错误: %v", err)
 	}

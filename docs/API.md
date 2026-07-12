@@ -1120,7 +1120,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 
 ### 账号分组管理
 
-账号分组用于把账号池划分为多个可调度集合。API Key 的 `allowed_group_ids` 可以限制下游密钥只能使用指定分组；账号自己的 `allowed_api_key_ids` 也可以反向限制哪些 API Key 能调度该账号。
+账号分组用于把账号池划分为多个可调度集合。API Key 的 `allowed_group_ids` 可以限制下游密钥只能使用指定分组；账号自己的 `allowed_api_key_ids` 也可以反向限制哪些 API Key 能调度该账号。分组还可以通过 `base_concurrency_override` 为成员账号提供基础并发继承值：账号级覆盖优先，账号属于多个分组时取最小的有效分组值，均未设置时回退到全局 `max_concurrency`。
 
 #### GET /api/admin/account-groups
 
@@ -1137,6 +1137,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
       "description": "付费团队账号",
       "color": "#2563eb",
       "sort_order": 0,
+      "base_concurrency_override": 4,
       "member_count": 8,
       "created_at": "2026-05-13T00:00:00Z",
       "updated_at": "2026-05-13T00:00:00Z"
@@ -1156,7 +1157,8 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
   "name": "Team",
   "description": "付费团队账号",
   "color": "#2563eb",
-  "sort_order": 0
+  "sort_order": 0,
+  "base_concurrency_override": 4
 }
 ```
 
@@ -1180,9 +1182,12 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
   "name": "Team Plus",
   "description": "高优先级账号",
   "color": "#16a34a",
-  "sort_order": 10
+  "sort_order": 10,
+  "base_concurrency_override": 2
 }
 ```
+
+`base_concurrency_override` 的有效范围为 `1..50`。创建时省略或传 `null` 表示不设置分组覆盖；PATCH 时传 `null` 会清除已有值并恢复继承。该值只决定基础并发，健康档位、用量保护和智能配速仍可能继续下调实际并发。
 
 **响应:**
 

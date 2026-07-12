@@ -164,6 +164,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			description TEXT DEFAULT '',
 			color TEXT DEFAULT '',
 			sort_order INTEGER DEFAULT 0,
+			base_concurrency_override INTEGER NULL,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
@@ -407,6 +408,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"account_groups", "description", "TEXT DEFAULT ''"},
 		{"account_groups", "color", "TEXT DEFAULT ''"},
 		{"account_groups", "sort_order", "INTEGER DEFAULT 0"},
+		{"account_groups", "base_concurrency_override", "INTEGER NULL"},
 		{"account_groups", "created_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
 		{"account_groups", "updated_at", "TIMESTAMP DEFAULT CURRENT_TIMESTAMP"},
 		{"system_settings", "site_name", "TEXT DEFAULT 'CodexProxy'"},

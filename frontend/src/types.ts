@@ -276,6 +276,7 @@ export interface AccountGroup {
   color: string
   sort_order: number
   member_count: number
+  base_concurrency_override: number | null
   auto_pause_5h_threshold: number
   auto_pause_7d_threshold: number
   created_at: ISODateString
@@ -291,6 +292,7 @@ export interface CreateAccountGroupRequest {
   description?: string
   color?: string
   sort_order?: number
+  base_concurrency_override?: number | null
   auto_pause_5h_threshold?: number
   auto_pause_7d_threshold?: number
 }
@@ -300,6 +302,7 @@ export interface UpdateAccountGroupRequest {
   description?: string
   color?: string
   sort_order?: number
+  base_concurrency_override?: number | null
   auto_pause_5h_threshold?: number
   auto_pause_7d_threshold?: number
 }

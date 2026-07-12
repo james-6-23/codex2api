@@ -163,6 +163,7 @@ type Account struct {
 	DispatchScore            float64
 	ScoreBiasEffective       int64
 	BaseConcurrencyEffective int64
+	groupBaseConcurrency     int64 // resolved from memberships; 0 means no group override
 	DynamicConcurrencyLimit  int64
 	LatencyEWMA              float64
 	SuccessStreak            int
@@ -902,6 +903,9 @@ func (a *Account) effectiveBaseConcurrencyLocked(storeBaseLimit int64) int64 {
 	if a.BaseConcurrencyOverride != nil && *a.BaseConcurrencyOverride > 0 {
 		return *a.BaseConcurrencyOverride
 	}
+	if a.groupBaseConcurrency > 0 {
+		return a.groupBaseConcurrency
+	}
 	if storeBaseLimit <= 0 {
 		return 1
 	}
@@ -1362,6 +1366,24 @@ func resolveEffectiveThreshold(accountThreshold float64, groupIDs []int64, s *St
 		return s.GetGlobalAutoPause5hThreshold()
 	}
 	return s.GetGlobalAutoPause7dThreshold()
+}
+
+func (a *Account) recomputeEffectiveGroupBaseConcurrency(s *Store) {
+	a.groupBaseConcurrency = resolveGroupBaseConcurrency(a.GroupIDs, s)
+}
+
+func resolveGroupBaseConcurrency(groupIDs []int64, s *Store) int64 {
+	if s == nil {
+		return 0
+	}
+	var best int64
+	for _, groupID := range groupIDs {
+		value, ok := s.getGroupBaseConcurrencyOverride(groupID)
+		if ok && value > 0 && (best == 0 || value < best) {
+			best = value
+		}
+	}
+	return best
 }
 
 func (a *Account) creditSkipsUsageWindowLocked() bool {
@@ -2297,14 +2319,15 @@ type Store struct {
 	sessionMu             sync.RWMutex
 	sessionBindings       map[string]sessionAffinity
 
-	globalAutoPause5hThreshold  float64  // protected by mu
-	globalAutoPause7dThreshold  float64  // protected by mu
-	autoPause5hGuardBandPercent float64  // protected by mu, percentage points
-	autoPause5hGuardConcurrency int      // protected by mu, 0 = disabled
-	smartPacingEnabled          bool     // protected by mu; issue #312 智能配速总开关
-	smartPacingMinConcurrency   int      // protected by mu, 配速并发下限
-	smartPacingWindows          string   // protected by mu, "5h,7d" / "5h" / "7d"
-	groupAutoPauseThresholds    sync.Map // int64 -> [2]float64 {5h, 7d}
+	globalAutoPause5hThreshold    float64  // protected by mu
+	globalAutoPause7dThreshold    float64  // protected by mu
+	autoPause5hGuardBandPercent   float64  // protected by mu, percentage points
+	autoPause5hGuardConcurrency   int      // protected by mu, 0 = disabled
+	smartPacingEnabled            bool     // protected by mu; issue #312 智能配速总开关
+	smartPacingMinConcurrency     int      // protected by mu, 配速并发下限
+	smartPacingWindows            string   // protected by mu, "5h,7d" / "5h" / "7d"
+	groupAutoPauseThresholds      sync.Map // int64 -> [2]float64 {5h, 7d}
+	groupBaseConcurrencyOverrides sync.Map // int64 -> int64; missing means inherit global
 }
 
 // sessionAffinity 记录某个 sessionKey 当前粘附到哪个账号/代理。
@@ -3407,6 +3430,9 @@ func (s *Store) loadFromDB(ctx context.Context) error {
 		for _, g := range groups {
 			if g.AutoPause5hThreshold > 0 || g.AutoPause7dThreshold > 0 {
 				s.groupAutoPauseThresholds.Store(g.ID, [2]float64{g.AutoPause5hThreshold, g.AutoPause7dThreshold})
+			}
+			if g.BaseConcurrencyOverride.Valid {
+				s.groupBaseConcurrencyOverrides.Store(g.ID, g.BaseConcurrencyOverride.Int64)
 			}
 		}
 	}
@@ -4858,6 +4884,57 @@ func (s *Store) getGroupAutoPauseThresholds(groupID int64) (float64, float64) {
 	return 0, 0
 }
 
+// SetGroupBaseConcurrencyOverride updates a group's inherited per-account base
+// concurrency. A nil value clears the group override and falls back to other
+// memberships or the global setting.
+func (s *Store) SetGroupBaseConcurrencyOverride(groupID int64, value *int64) {
+	if s == nil || groupID <= 0 {
+		return
+	}
+	if value == nil {
+		s.groupBaseConcurrencyOverrides.Delete(groupID)
+	} else {
+		s.groupBaseConcurrencyOverrides.Store(groupID, *value)
+	}
+	s.recomputeAllGroupBaseConcurrency()
+}
+
+func (s *Store) DeleteGroupBaseConcurrencyOverride(groupID int64) {
+	s.SetGroupBaseConcurrencyOverride(groupID, nil)
+}
+
+func (s *Store) GetGroupBaseConcurrencyOverride(groupID int64) (int64, bool) {
+	return s.getGroupBaseConcurrencyOverride(groupID)
+}
+
+func (s *Store) getGroupBaseConcurrencyOverride(groupID int64) (int64, bool) {
+	if s == nil || groupID <= 0 {
+		return 0, false
+	}
+	value, ok := s.groupBaseConcurrencyOverrides.Load(groupID)
+	if !ok {
+		return 0, false
+	}
+	return value.(int64), true
+}
+
+func (s *Store) recomputeAllGroupBaseConcurrency() {
+	if s == nil {
+		return
+	}
+	baseLimit := atomic.LoadInt64(&s.maxConcurrency)
+	for _, acc := range s.Accounts() {
+		if acc == nil {
+			continue
+		}
+		acc.mu.Lock()
+		acc.recomputeEffectiveGroupBaseConcurrency(s)
+		acc.recomputeSchedulerLocked(baseLimit)
+		acc.mu.Unlock()
+		s.fastSchedulerUpdate(acc)
+	}
+}
+
 func (s *Store) recomputeAllEffectiveAutoPause() {
 	for _, acc := range s.Accounts() {
 		acc.mu.Lock()
@@ -4879,6 +4956,7 @@ func (s *Store) AddAccount(acc *Account) {
 	defer s.mu.Unlock()
 	acc.mu.Lock()
 	acc.recomputeEffectiveIgnoreUsageLimitStatus(s.IgnoreUsageLimitStatus())
+	acc.recomputeEffectiveGroupBaseConcurrency(s)
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.accounts = append(s.accounts, acc)
@@ -5072,7 +5150,9 @@ func (s *Store) ApplyAccountGroups(dbID int64, groupIDs []int64) bool {
 	}
 	acc.mu.Lock()
 	acc.GroupIDs = cloneInt64Slice(groupIDs)
+	acc.recomputeEffectiveGroupBaseConcurrency(s)
 	acc.recomputeEffectiveAutoPause(s)
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
 	return true
@@ -5107,7 +5187,9 @@ func (s *Store) ApplyAccountGroupMemberships(memberships map[int64][]int64) {
 	for _, acc := range s.Accounts() {
 		acc.mu.Lock()
 		acc.GroupIDs = cloneInt64Slice(memberships[acc.DBID])
+		acc.recomputeEffectiveGroupBaseConcurrency(s)
 		acc.recomputeEffectiveAutoPause(s)
+		acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 		acc.mu.Unlock()
 		s.fastSchedulerUpdate(acc)
 	}

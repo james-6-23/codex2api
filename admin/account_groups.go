@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
@@ -20,30 +21,32 @@ const (
 )
 
 type accountGroupResponse struct {
-	ID                   int64   `json:"id"`
-	Name                 string  `json:"name"`
-	Description          string  `json:"description"`
-	Color                string  `json:"color"`
-	SortOrder            int64   `json:"sort_order"`
-	MemberCount          int64   `json:"member_count"`
-	AutoPause5hThreshold float64 `json:"auto_pause_5h_threshold"`
-	AutoPause7dThreshold float64 `json:"auto_pause_7d_threshold"`
-	CreatedAt            string  `json:"created_at"`
-	UpdatedAt            string  `json:"updated_at"`
+	ID                      int64   `json:"id"`
+	Name                    string  `json:"name"`
+	Description             string  `json:"description"`
+	Color                   string  `json:"color"`
+	SortOrder               int64   `json:"sort_order"`
+	BaseConcurrencyOverride *int64  `json:"base_concurrency_override"`
+	MemberCount             int64   `json:"member_count"`
+	AutoPause5hThreshold    float64 `json:"auto_pause_5h_threshold"`
+	AutoPause7dThreshold    float64 `json:"auto_pause_7d_threshold"`
+	CreatedAt               string  `json:"created_at"`
+	UpdatedAt               string  `json:"updated_at"`
 }
 
 func toAccountGroupResponse(g database.AccountGroup) accountGroupResponse {
 	return accountGroupResponse{
-		ID:                   g.ID,
-		Name:                 g.Name,
-		Description:          g.Description,
-		Color:                g.Color,
-		SortOrder:            g.SortOrder,
-		MemberCount:          g.MemberCount,
-		AutoPause5hThreshold: g.AutoPause5hThreshold,
-		AutoPause7dThreshold: g.AutoPause7dThreshold,
-		CreatedAt:            g.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:            g.UpdatedAt.Format(time.RFC3339),
+		ID:                      g.ID,
+		Name:                    g.Name,
+		Description:             g.Description,
+		Color:                   g.Color,
+		SortOrder:               g.SortOrder,
+		BaseConcurrencyOverride: nullableInt64Pointer(g.BaseConcurrencyOverride),
+		MemberCount:             g.MemberCount,
+		AutoPause5hThreshold:    g.AutoPause5hThreshold,
+		AutoPause7dThreshold:    g.AutoPause7dThreshold,
+		CreatedAt:               g.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:               g.UpdatedAt.Format(time.RFC3339),
 	}
 }
 
@@ -63,12 +66,13 @@ func (h *Handler) ListAccountGroups(c *gin.Context) {
 }
 
 type createAccountGroupReq struct {
-	Name                 string  `json:"name"`
-	Description          string  `json:"description"`
-	Color                string  `json:"color"`
-	SortOrder            *int64  `json:"sort_order"`
-	AutoPause5hThreshold float64 `json:"auto_pause_5h_threshold"`
-	AutoPause7dThreshold float64 `json:"auto_pause_7d_threshold"`
+	Name                    string          `json:"name"`
+	Description             string          `json:"description"`
+	Color                   string          `json:"color"`
+	SortOrder               *int64          `json:"sort_order"`
+	BaseConcurrencyOverride json.RawMessage `json:"base_concurrency_override"`
+	AutoPause5hThreshold    float64         `json:"auto_pause_5h_threshold"`
+	AutoPause7dThreshold    float64         `json:"auto_pause_7d_threshold"`
 }
 
 func validateAutoPauseThreshold(name string, value float64) error {
@@ -76,6 +80,14 @@ func validateAutoPauseThreshold(name string, value float64) error {
 		return errors.New(name + " 需在 0 到 1 之间")
 	}
 	return nil
+}
+
+func parseAccountGroupBaseConcurrencyOverride(raw json.RawMessage) (database.OptionalNullInt64, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if strings.HasPrefix(trimmed, `"`) {
+		return database.OptionalNullInt64{}, errors.New("base_concurrency_override 必须是整数或 null")
+	}
+	return parseOptionalIntegerField(raw, "base_concurrency_override", 1, 50)
 }
 
 func (h *Handler) CreateAccountGroup(c *gin.Context) {
@@ -111,6 +123,11 @@ func (h *Handler) CreateAccountGroup(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	baseConcurrencyOverride, err := parseAccountGroupBaseConcurrencyOverride(req.BaseConcurrencyOverride)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 	groups, err := h.db.ListAccountGroups(ctx)
@@ -122,7 +139,7 @@ func (h *Handler) CreateAccountGroup(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "分组数量已达上限")
 		return
 	}
-	id, err := h.db.CreateAccountGroup(ctx, name, description, color, req.AutoPause5hThreshold, req.AutoPause7dThreshold, sortOrder)
+	id, err := h.db.CreateAccountGroup(ctx, name, description, color, req.AutoPause5hThreshold, req.AutoPause7dThreshold, baseConcurrencyOverride.Value, sortOrder)
 	if err != nil {
 		if errors.Is(err, database.ErrDuplicateAccountGroupName) {
 			writeError(c, http.StatusConflict, err.Error())
@@ -134,16 +151,21 @@ func (h *Handler) CreateAccountGroup(c *gin.Context) {
 	if h.store != nil && (req.AutoPause5hThreshold > 0 || req.AutoPause7dThreshold > 0) {
 		h.store.SetGroupAutoPauseThresholds(id, req.AutoPause5hThreshold, req.AutoPause7dThreshold)
 	}
+	if h.store != nil && baseConcurrencyOverride.Value.Valid {
+		value := baseConcurrencyOverride.Value.Int64
+		h.store.SetGroupBaseConcurrencyOverride(id, &value)
+	}
 	c.JSON(http.StatusOK, gin.H{"id": id, "message": "分组已创建"})
 }
 
 type updateAccountGroupReq struct {
-	Name                 *string  `json:"name"`
-	Description          *string  `json:"description"`
-	Color                *string  `json:"color"`
-	SortOrder            *int64   `json:"sort_order"`
-	AutoPause5hThreshold *float64 `json:"auto_pause_5h_threshold"`
-	AutoPause7dThreshold *float64 `json:"auto_pause_7d_threshold"`
+	Name                    *string         `json:"name"`
+	Description             *string         `json:"description"`
+	Color                   *string         `json:"color"`
+	SortOrder               *int64          `json:"sort_order"`
+	BaseConcurrencyOverride json.RawMessage `json:"base_concurrency_override"`
+	AutoPause5hThreshold    *float64        `json:"auto_pause_5h_threshold"`
+	AutoPause7dThreshold    *float64        `json:"auto_pause_7d_threshold"`
 }
 
 func (h *Handler) UpdateAccountGroup(c *gin.Context) {
@@ -193,11 +215,17 @@ func (h *Handler) UpdateAccountGroup(c *gin.Context) {
 			return
 		}
 	}
+	baseConcurrencyOverride, err := parseAccountGroupBaseConcurrencyOverride(req.BaseConcurrencyOverride)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	var opts *database.UpdateAccountGroupOpts
-	if req.AutoPause5hThreshold != nil || req.AutoPause7dThreshold != nil {
+	if req.AutoPause5hThreshold != nil || req.AutoPause7dThreshold != nil || baseConcurrencyOverride.Set {
 		opts = &database.UpdateAccountGroupOpts{
-			AutoPause5hThreshold: req.AutoPause5hThreshold,
-			AutoPause7dThreshold: req.AutoPause7dThreshold,
+			AutoPause5hThreshold:    req.AutoPause5hThreshold,
+			AutoPause7dThreshold:    req.AutoPause7dThreshold,
+			BaseConcurrencyOverride: baseConcurrencyOverride,
 		}
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
@@ -214,7 +242,7 @@ func (h *Handler) UpdateAccountGroup(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
-	if opts != nil && h.store != nil {
+	if opts != nil && h.store != nil && (opts.AutoPause5hThreshold != nil || opts.AutoPause7dThreshold != nil) {
 		t5h, t7d := h.store.GetGroupAutoPauseThresholds(id)
 		if opts.AutoPause5hThreshold != nil {
 			t5h = *opts.AutoPause5hThreshold
@@ -223,6 +251,9 @@ func (h *Handler) UpdateAccountGroup(c *gin.Context) {
 			t7d = *opts.AutoPause7dThreshold
 		}
 		h.store.SetGroupAutoPauseThresholds(id, t5h, t7d)
+	}
+	if baseConcurrencyOverride.Set && h.store != nil {
+		h.store.SetGroupBaseConcurrencyOverride(id, nullableInt64Pointer(baseConcurrencyOverride.Value))
 	}
 	writeMessage(c, http.StatusOK, "分组已更新")
 }
@@ -250,6 +281,7 @@ func (h *Handler) DeleteAccountGroup(c *gin.Context) {
 	}
 	if h.store != nil {
 		h.store.DeleteGroupAutoPauseThresholds(id)
+		h.store.DeleteGroupBaseConcurrencyOverride(id)
 		for _, acc := range h.store.Accounts() {
 			acc.Mu().RLock()
 			groups := removeInt64(acc.GroupIDs, id)

@@ -19,7 +19,7 @@ type fastSchedulerEntry struct {
 	dbID          int64
 	dispatchScore float64
 	proven        bool
-	priority      int64 // 账号调度优先级（issue #358）：桶内降序排列，高优先级段先被轮询
+	priority      int64 // 账号调度优先级（issue #358）：全局降序选择，同优先级内再按健康桶调度
 }
 
 type fastSchedulerPosition struct {
@@ -31,7 +31,8 @@ type fastSchedulerPosition struct {
 // 它不在请求热路径内重算全量 score，而是直接复用 Account 上已缓存的
 // HealthTier / DispatchScore / DynamicConcurrencyLimit。
 //
-// 调度策略：按健康层级分桶，桶内按调度分排序后 round-robin。
+// 调度策略：调度优先级全局优先；同优先级内按健康层级分桶，
+// 桶内按调度分排序后 round-robin。
 // 验证过的账号只作为同分 tie-breaker，避免历史请求量盖过额度快重置优先级。
 type FastScheduler struct {
 	mu            sync.RWMutex
@@ -291,42 +292,57 @@ func (s *FastScheduler) AcquireExcludingWithFilter(apiKeyID int64, exclude map[i
 	defer s.mu.Unlock()
 
 	baseLimit := s.baseLimit
-	var zeroCursor atomic.Uint64
 	for {
 		changed := false
-		for tierIdx, tier := range fastSchedulerTierOrder {
-			bucket := s.buckets[tier]
-			if len(bucket) == 0 {
-				continue
+		// 每个健康桶都已按 priority DESC 排序。用三路归并的方式逐级取全局
+		// 最高优先级，并在该优先级内按 healthy -> warm -> risky 扫描。
+		// 只有所有健康桶的当前优先级都不可用时，才会回落到下一优先级。
+		var segmentStarts [3]int
+	priorityLoop:
+		for {
+			var nextPriority int64
+			foundPriority := false
+			for tierIdx, tier := range fastSchedulerTierOrder {
+				bucket := s.buckets[tier]
+				start := segmentStarts[tierIdx]
+				if start >= len(bucket) {
+					continue
+				}
+				priority := bucket[start].priority
+				if !foundPriority || priority > nextPriority {
+					nextPriority = priority
+					foundPriority = true
+				}
+			}
+			if !foundPriority {
+				break
 			}
 
-			cursor := &s.cursors[tierIdx]
-			if s.schedulerMode == "remaining_quota" {
-				zeroCursor.Store(0)
-				cursor = &zeroCursor
-			}
-			// 桶内按调度优先级降序排列：相同优先级为一段，段内 round-robin，
-			// 高优先级段拿不到账号才轮到下一段（issue #358）。
-			segStart := 0
-			stale := false
-			for segStart < len(bucket) {
+			for tierIdx, tier := range fastSchedulerTierOrder {
+				bucket := s.buckets[tier]
+				segStart := segmentStarts[tierIdx]
+				if segStart >= len(bucket) || bucket[segStart].priority != nextPriority {
+					continue
+				}
 				segEnd := segStart + 1
-				for segEnd < len(bucket) && bucket[segEnd].priority == bucket[segStart].priority {
+				for segEnd < len(bucket) && bucket[segEnd].priority == nextPriority {
 					segEnd++
 				}
-				acc, segStale := s.scanRangeLocked(tier, segStart, segEnd, cursor, baseLimit, now, apiKeyID, exclude, filter)
+
+				cursor := &s.cursors[tierIdx]
+				var zeroCursor atomic.Uint64
+				if s.schedulerMode == "remaining_quota" {
+					cursor = &zeroCursor
+				}
+				acc, stale := s.scanRangeLocked(tier, segStart, segEnd, cursor, baseLimit, now, apiKeyID, exclude, filter)
 				if acc != nil {
 					return acc
 				}
-				if segStale {
-					stale = true
-					break
+				if stale {
+					changed = true
+					break priorityLoop
 				}
-				segStart = segEnd
-			}
-			if stale {
-				changed = true
-				break
+				segmentStarts[tierIdx] = segEnd
 			}
 		}
 		if !changed {
