@@ -1707,7 +1707,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	return s, err
 }
 
-// UpdateSystemSettings 更新全局设置（upsert：无行时自动插入）
+// UpdateSystemSettings 更新全局设置（upsert：无行时自动插入）。
+// codex_synced_cli_version 与 model_pricing_* 由各自的窄更新独立维护；冲突更新时
+// 保留数据库当前值，避免管理员保存其他设置时回滚后台同步刚写入的数据。
 func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error {
 	reasoningEffortModels := strings.TrimSpace(s.ReasoningEffortModels)
 	if reasoningEffortModels == "" {
@@ -1856,11 +1858,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					transport_retry_policy = EXCLUDED.transport_retry_policy,
 					codex_continue_thinking_enabled = EXCLUDED.codex_continue_thinking_enabled,
 					codex_continue_max_rounds = EXCLUDED.codex_continue_max_rounds,
-					codex_synced_cli_version = EXCLUDED.codex_synced_cli_version,
 					codex_cli_version_sync_enabled = EXCLUDED.codex_cli_version_sync_enabled,
 					codex_cli_version_sync_interval_hours = EXCLUDED.codex_cli_version_sync_interval_hours,
-					model_pricing_overrides = EXCLUDED.model_pricing_overrides,
-					model_pricing_sync_url = EXCLUDED.model_pricing_sync_url,
 					ignore_usage_limit_status = EXCLUDED.ignore_usage_limit_status,
 					auto_reset_credits_enabled = EXCLUDED.auto_reset_credits_enabled,
 					auto_reset_credits_before_expiry_min = EXCLUDED.auto_reset_credits_before_expiry_min

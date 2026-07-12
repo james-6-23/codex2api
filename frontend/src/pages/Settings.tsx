@@ -2019,12 +2019,7 @@ export default function Settings() {
                   )}
                 />
               </SettingField>
-              <div
-                className={cn(
-                  'flex min-h-[48px] min-w-0 items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5',
-                  !settingsForm.auto_reset_credits_enabled && 'opacity-60',
-                )}
-              >
+              <div className="flex min-h-[48px] min-w-0 items-center justify-between gap-3 rounded-lg border border-border/60 bg-muted/20 px-3 py-2.5">
                 <div className="min-w-0 flex-1 space-y-0.5">
                   <div className="flex items-center gap-1.5">
                     <label className="block text-[13px] font-medium leading-snug text-foreground sm:text-sm">
@@ -2039,7 +2034,6 @@ export default function Settings() {
                     min={10}
                     max={10080}
                     step={10}
-                    disabled={!settingsForm.auto_reset_credits_enabled}
                     className="pr-11"
                     value={settingsForm.auto_reset_credits_before_expiry_min}
                     onChange={(e: ChangeEvent<HTMLInputElement>) => {
@@ -2051,7 +2045,6 @@ export default function Settings() {
                       })
                     }}
                     onBlur={() => {
-                      if (!settingsForm.auto_reset_credits_enabled) return
                       void autoSaveSettingsPatch({
                         auto_reset_credits_before_expiry_min: settingsFormRef.current.auto_reset_credits_before_expiry_min,
                       })

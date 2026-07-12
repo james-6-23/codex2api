@@ -3,6 +3,7 @@ package proxy
 import (
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -88,7 +89,10 @@ func (s RuntimeSettings) IsolateRequestsByDefault() bool {
 	return NormalizeRequestIsolationMode(s.RequestIsolationMode) != RequestIsolationModePerAPIKey
 }
 
-var runtimeSettings atomic.Value // stores RuntimeSettings
+var (
+	runtimeSettings         atomic.Value // stores RuntimeSettings
+	runtimeSettingsUpdateMu sync.Mutex
+)
 
 func init() {
 	runtimeSettings.Store(DefaultRuntimeSettings())
@@ -224,6 +228,9 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 }
 
 func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSettings {
+	runtimeSettingsUpdateMu.Lock()
+	defer runtimeSettingsUpdateMu.Unlock()
+
 	next := DefaultRuntimeSettings()
 	if settings != nil {
 		next.ClientCompatMode = settings.ClientCompatMode
@@ -246,22 +253,43 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.AutoResetCreditsEnabled = settings.AutoResetCreditsEnabled
 		next.AutoResetCreditsBeforeExpiryMin = settings.AutoResetCreditsBeforeExpiryMin
 	}
-	next = NormalizeRuntimeSettings(next)
-	runtimeSettings.Store(next)
-	return next
+	return storeRuntimeSettings(next)
 }
 
 func ApplyRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
-	settings = NormalizeRuntimeSettings(settings)
-	runtimeSettings.Store(settings)
-	return settings
+	runtimeSettingsUpdateMu.Lock()
+	defer runtimeSettingsUpdateMu.Unlock()
+	return storeRuntimeSettings(settings)
+}
+
+// UpdateRuntimeSettings 在与完整设置写入共享的临界区内更新运行时配置。
+// 后台任务应使用这个函数只修改自己拥有的字段，避免旧快照覆盖管理员刚保存的设置。
+func UpdateRuntimeSettings(update func(RuntimeSettings) RuntimeSettings) RuntimeSettings {
+	runtimeSettingsUpdateMu.Lock()
+	defer runtimeSettingsUpdateMu.Unlock()
+
+	next := currentRuntimeSettings()
+	if update != nil {
+		next = update(next)
+	}
+	return storeRuntimeSettings(next)
 }
 
 func CurrentRuntimeSettings() RuntimeSettings {
+	return currentRuntimeSettings()
+}
+
+func currentRuntimeSettings() RuntimeSettings {
 	if v, ok := runtimeSettings.Load().(RuntimeSettings); ok {
 		return NormalizeRuntimeSettings(v)
 	}
 	return DefaultRuntimeSettings()
+}
+
+func storeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
+	settings = NormalizeRuntimeSettings(settings)
+	runtimeSettings.Store(settings)
+	return settings
 }
 
 func currentStreamFlushInterval() time.Duration {

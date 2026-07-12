@@ -7400,7 +7400,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		effectiveRuntimeCfg.AutoResetCreditsEnabled = previousAutoResetCreditsEnabled
 		effectiveRuntimeCfg.AutoResetCreditsBeforeExpiryMin = previousAutoResetCreditsBeforeExpiryMin
 	}
-	effectiveRuntimeCfg = proxy.ApplyRuntimeSettings(effectiveRuntimeCfg)
+	effectiveRuntimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
+		// CodexSyncedCLIVersion 由后台同步任务独立维护；管理员保存其他设置时
+		// 必须保留临界区内读到的最新值，避免反向回滚同步结果。
+		effectiveRuntimeCfg.CodexSyncedCLIVersion = current.CodexSyncedCLIVersion
+		return effectiveRuntimeCfg
+	})
 
 	usageLogChanged := false
 	if req.UsageLogMode != nil {
@@ -7697,7 +7702,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	} else if autoResetCreditsChanged {
-		runtimeCfg = proxy.ApplyRuntimeSettings(runtimeCfg)
+		runtimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
+			runtimeCfg.CodexSyncedCLIVersion = current.CodexSyncedCLIVersion
+			return runtimeCfg
+		})
 		h.triggerAutoResetCreditsScan()
 	}
 

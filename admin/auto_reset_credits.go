@@ -269,7 +269,7 @@ func (h *Handler) loadAutoResetCreditsConfig(ctx context.Context) (autoResetCred
 		return autoResetCreditsConfig{}, err
 	}
 	if settings == nil {
-		return autoResetCreditsConfig{BeforeExpiryMin: 60}, nil
+		return autoResetCreditsConfig{BeforeExpiryMin: proxy.DefaultRuntimeSettings().AutoResetCreditsBeforeExpiryMin}, nil
 	}
 	return autoResetCreditsConfig{
 		Enabled:         settings.AutoResetCreditsEnabled,

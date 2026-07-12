@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestExtractCodexCLIVersion(t *testing.T) {
@@ -97,5 +98,59 @@ func TestGeneratedCodexClientHeaders_UsesSyncedVersion(t *testing.T) {
 	}
 	if !strings.Contains(ua, "0.200.0") {
 		t.Fatalf("generated UA = %q, want to contain 0.200.0", ua)
+	}
+}
+
+func TestUpdateRuntimeSettingsSerializesConcurrentFieldPatches(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+
+	initial := DefaultRuntimeSettings()
+	initial.ClientCompatMode = ClientCompatModePreserve
+	initial.CodexSyncedCLIVersion = ""
+	ApplyRuntimeSettings(initial)
+
+	syncPatchEntered := make(chan struct{})
+	releaseSyncPatch := make(chan struct{})
+	syncPatchDone := make(chan struct{})
+	go func() {
+		UpdateRuntimeSettings(func(settings RuntimeSettings) RuntimeSettings {
+			close(syncPatchEntered)
+			<-releaseSyncPatch
+			settings.CodexSyncedCLIVersion = "9.9.9"
+			return settings
+		})
+		close(syncPatchDone)
+	}()
+	<-syncPatchEntered
+
+	adminPatchStarted := make(chan struct{})
+	adminPatchDone := make(chan struct{})
+	go func() {
+		close(adminPatchStarted)
+		UpdateRuntimeSettings(func(settings RuntimeSettings) RuntimeSettings {
+			settings.ClientCompatMode = ClientCompatModeForce
+			return settings
+		})
+		close(adminPatchDone)
+	}()
+	<-adminPatchStarted
+
+	adminPatchSerialized := true
+	select {
+	case <-adminPatchDone:
+		adminPatchSerialized = false
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(releaseSyncPatch)
+	<-syncPatchDone
+	<-adminPatchDone
+
+	if !adminPatchSerialized {
+		t.Fatal("concurrent runtime patch completed while another patch held the update lock")
+	}
+	got := CurrentRuntimeSettings()
+	if got.ClientCompatMode != ClientCompatModeForce || got.CodexSyncedCLIVersion != "9.9.9" {
+		t.Fatalf("runtime settings = compat:%q synced:%q, want force / 9.9.9", got.ClientCompatMode, got.CodexSyncedCLIVersion)
 	}
 }

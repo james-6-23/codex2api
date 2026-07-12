@@ -1275,6 +1275,22 @@ func TestSQLitePartialBackgroundSettingsUpdatesPreserveAutoResetCredits(t *testi
 	if got == nil {
 		t.Fatal("GetSystemSettings returned nil")
 	}
+	// 模拟管理员从旧快照保存无关设置；后台刚写入的模型定价不能被回滚。
+	staleFullUpdate := *got
+	staleFullUpdate.SiteName = "Concurrent Admin Save"
+	staleFullUpdate.CodexSyncedCLIVersion = "0.0.1"
+	staleFullUpdate.ModelPricingOverrides = `{"old":{"input":1}}`
+	staleFullUpdate.ModelPricingSyncURL = "https://old.example/pricing.json"
+	if err := db.UpdateSystemSettings(ctx, &staleFullUpdate); err != nil {
+		t.Fatalf("UpdateSystemSettings(stale full update): %v", err)
+	}
+	got, err = db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings after stale full update: %v", err)
+	}
+	if got == nil {
+		t.Fatal("GetSystemSettings after stale full update returned nil")
+	}
 	if !got.AutoResetCreditsEnabled || got.AutoResetCreditsBeforeExpiryMin != 90 {
 		t.Fatalf("auto reset settings = (%v,%d), want (true,90)", got.AutoResetCreditsEnabled, got.AutoResetCreditsBeforeExpiryMin)
 	}
