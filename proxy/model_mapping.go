@@ -328,8 +328,9 @@ func usageEffectiveModelForMapping(originalModel string, effectiveModel string, 
 const compactOpenAIModelSuffix = "-openai-compact"
 
 // stripCompactModelSuffix 去除 compact 模型名上的 -openai-compact 后缀，返回去除后的
-// 模型名与是否发生改写。仅供 /v1/responses/compact 使用：让 newapi 侧渠道仍能以
-// gpt-5.4-openai-compact 命名，而 codex2api 内部按 gpt-5.4 校验与转发上游。
+// 模型名与是否发生改写。供显式 /v1/responses/compact 及普通 /v1/responses 中的
+// compaction_trigger 使用：让 newapi 侧渠道仍能以 gpt-5.4-openai-compact 命名，
+// 而 codex2api 内部按 gpt-5.4 校验与转发上游。
 func stripCompactModelSuffix(model string) (string, bool) {
 	trimmed := strings.TrimSpace(model)
 	if trimmed == "" {
@@ -415,10 +416,10 @@ func compactAliasScopedRules(rules []modelMappingRule) []modelMappingRule {
 	return scoped
 }
 
-// normalizeCompactMappingTarget 剥离映射目标上的 -openai-compact 后缀。codex2api
-// 发往上游的始终是 /v1/responses/compact 端点，该后缀只是入站别名约定；把它原样
-// 转发会让上游按字面模型名查找而失败（中转模型列表里的 xxx-openai-compact 通常
-// 只是路由标记，不是可直接请求的模型）。
+// normalizeCompactMappingTarget 剥离映射目标上的 -openai-compact 后缀。无论 compact
+// 语义最终走显式 /v1/responses/compact，还是为了保留 SSE 而走带 compaction_trigger
+// 的 /v1/responses，该后缀都只是入站别名约定；把它原样转发会让上游按字面模型名
+// 查找而失败（中转模型列表里的 xxx-openai-compact 通常只是路由标记）。
 func normalizeCompactMappingTarget(model string) string {
 	if base, stripped := stripCompactModelSuffix(model); stripped {
 		return base

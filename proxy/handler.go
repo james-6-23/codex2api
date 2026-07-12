@@ -1668,18 +1668,26 @@ func (h *Handler) Responses(c *gin.Context) {
 	// 不接受，会 400 或返回非压缩响应导致客户端报
 	// "expected exactly one compaction output item"。
 	// 处理：池中还有可用官方账号时，把这类请求钉在官方账号上保持原生透传；
-	// 官方账号全不可用（如纯中转部署）时整体提升到 compact 专用链路——
-	// 该链路对两类账号都能正确完成压缩。
-	pinBodySignalToCodexAccounts := requestBodyHasCompactionTrigger(rawBody)
-	if pinBodySignalToCodexAccounts {
-		if !h.storeHasAvailableCodexAccount() {
-			h.ResponsesCompact(c)
-			return
-		}
+	// 纯中转池的流式请求也必须继续走 /responses SSE，否则 ResponsesCompact 的
+	// 一次性 JSON 会让客户端在收到 response.completed 前遇到 EOF（issue #361）。
+	// 非流式请求仍可提升到 compact 专用链路，保留只实现 /responses/compact 的
+	// 中转兼容性。
+	bodySignalCompact := requestBodyHasCompactionTrigger(rawBody)
+	pinBodySignalToCodexAccounts := bodySignalCompact && h.storeHasAvailableCodexAccount()
+	streamingRelayBodySignal := bodySignalCompact && !pinBodySignalToCodexAccounts && gjson.GetBytes(rawBody, "stream").Bool()
+	if bodySignalCompact && !pinBodySignalToCodexAccounts && !streamingRelayBodySignal {
+		h.ResponsesCompact(c)
+		return
 	}
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
-	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	var requestModel, mappedModel string
+	var mappingApplied bool
+	if streamingRelayBodySignal {
+		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredCompactModelMappingToBody(rawBody, supportedModels)
+	} else {
+		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	}
 	setRawRequestBody(c, rawBody)
 
 	// Validate request
@@ -1769,7 +1777,13 @@ func (h *Handler) Responses(c *gin.Context) {
 	if releaseAPIKeyConcurrency != nil {
 		defer releaseAPIKeyConcurrency()
 	}
-	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	allowCodexAccounts := modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db))
+	var accountFilter auth.AccountFilter
+	if streamingRelayBodySignal {
+		accountFilter = accountFilterForCompactResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
+	} else {
+		accountFilter = accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
+	}
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	if pinBodySignalToCodexAccounts {
 		accountFilter = excludeRelayAccountsFilter(accountFilter)
@@ -1854,7 +1868,15 @@ func (h *Handler) Responses(c *gin.Context) {
 			baseURL, _ := account.OpenAIResponsesCredentials()
 			upstreamEndpoint := auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses")
 			upstreamBody := getOpenAIResponsesBody()
-			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBodyForModels(upstreamBody, account, logModel, effectiveModel); ok {
+			var mappedBody []byte
+			var mappedModel string
+			var accountMappingApplied bool
+			if streamingRelayBodySignal {
+				mappedBody, mappedModel, accountMappingApplied = h.applyAccountCompactModelMappingToBody(upstreamBody, account, logModel, effectiveModel)
+			} else {
+				mappedBody, mappedModel, accountMappingApplied = h.applyAccountModelMappingToBodyForModels(upstreamBody, account, logModel, effectiveModel)
+			}
+			if accountMappingApplied {
 				upstreamBody = mappedBody
 				attemptEffectiveModel = mappedModel
 				attemptLogEffectiveModel = usageEffectiveModelForMapping(logModel, attemptEffectiveModel, true)

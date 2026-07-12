@@ -2764,10 +2764,10 @@ func TestResolveAPIKeyDistinguishesDBFailureFrom404(t *testing.T) {
 	}
 }
 
-// body-signal compact:中转账号池收到带 compaction_trigger 的普通 /responses
-// 请求时,必须整体提升到 compact 专用链路(上游命中 /v1/responses/compact),
-// 否则中转上游返回非压缩响应,客户端报 expected exactly one compaction output item。
-func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
+// body-signal compact:中转账号池收到带 compaction_trigger 的流式 /responses
+// 请求时，必须保留 /responses 的 SSE 协议；compact 专用模型映射只能改写模型，
+// 不能把请求改道到返回一次性 JSON 的 /responses/compact（issue #361）。
+func TestResponses_BodySignalCompactStaysStreamingOnRelayOnlyPool(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	var seenPath string
@@ -2775,15 +2775,22 @@ func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		seenBody, _ = io.ReadAll(r.Body)
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{
-			"id":"resp_compaction_test",
-			"object":"response.compaction",
-			"created_at":1710000000,
-			"model":"gpt-4.1-direct",
-			"output":[{"type":"compaction_summary","summary":"user likes blue"}],
-			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
-		}`))
+		if r.URL.Path == "/v1/responses/compact" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{
+				"id":"resp_compaction_test",
+				"object":"response.compaction",
+				"created_at":1710000000,
+				"model":"gpt-4.1-direct",
+				"output":[{"type":"compaction_summary","summary":"user likes blue"}],
+				"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+			}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.created","response":{"id":"resp_compaction_test"}}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_compaction_test","status":"completed","output":[{"type":"compaction_summary","summary":"user likes blue"}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
 	}))
 	defer upstream.Close()
 
@@ -2823,21 +2830,137 @@ func TestResponses_BodySignalCompactPromotedOnRelayOnlyPool(t *testing.T) {
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
 	}
-	if seenPath != "/v1/responses/compact" {
-		t.Fatalf("upstream path = %q, want /v1/responses/compact (body-signal must be promoted)", seenPath)
+	if seenPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses to preserve streaming", seenPath)
 	}
-	if gjson.GetBytes(seenBody, "stream").Exists() {
-		t.Fatalf("promoted upstream body should not carry stream, got %s", seenBody)
+	if !gjson.GetBytes(seenBody, "stream").Bool() {
+		t.Fatalf("upstream body must preserve stream=true, got %s", seenBody)
 	}
-	// compact 端点不认识 client_metadata,提升时必须剥除(issue #340)。
-	if gjson.GetBytes(seenBody, "client_metadata").Exists() {
-		t.Fatalf("promoted upstream body should not carry client_metadata, got %s", seenBody)
+	if !requestBodyHasCompactionTrigger(seenBody) {
+		t.Fatalf("upstream body lost compaction_trigger: %s", seenBody)
 	}
 	if model := gjson.GetBytes(seenBody, "model").String(); model != "gpt-4.1-direct" {
-		t.Fatalf("promoted compact model = %q, want one-pass mapping to gpt-4.1-direct; body=%s", model, seenBody)
+		t.Fatalf("streaming compact model = %q, want one-pass mapping to gpt-4.1-direct; body=%s", model, seenBody)
 	}
-	if id := gjson.GetBytes(recorder.Body.Bytes(), "id").String(); id != "resp_compaction_test" {
-		t.Fatalf("response id = %q, want resp_compaction_test; body=%s", id, recorder.Body.String())
+	if contentType := recorder.Header().Get("Content-Type"); !strings.Contains(contentType, "text/event-stream") {
+		t.Fatalf("Content-Type = %q, want text/event-stream; body=%s", contentType, recorder.Body.String())
+	}
+	if !strings.Contains(recorder.Body.String(), `"type":"response.completed"`) {
+		t.Fatalf("downstream stream missing response.completed; body=%s", recorder.Body.String())
+	}
+}
+
+// 流式 body-signal 继续走 /responses 时，也必须保留账号级 compact 专用映射；
+// 否则 compact-only alias 无法选中中转账号，或会把错误模型发给上游（PR #350）。
+func TestResponses_BodySignalCompactStreamingUsesAccountCompactMapping(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenPath string
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_account_mapping","status":"completed","output":[{"type":"compaction_summary","summary":"mapped"}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-4.1-direct"},
+		ModelMapping: `{"gpt-5.4-openai-compact":"gpt-4.1-direct"}`,
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{
+		"model":"gpt-5.4",
+		"stream":true,
+		"input":[{"type":"compaction_trigger"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if seenPath != "/v1/responses" {
+		t.Fatalf("upstream path = %q, want /v1/responses", seenPath)
+	}
+	if model := gjson.GetBytes(seenBody, "model").String(); model != "gpt-4.1-direct" {
+		t.Fatalf("upstream model = %q, want account compact mapping target gpt-4.1-direct; body=%s", model, seenBody)
+	}
+}
+
+// 非流式 body-signal 没有 SSE 契约，继续使用 compact 专用端点以兼容只实现
+// /responses/compact 的中转账号。
+func TestResponses_NonStreamingBodySignalCompactStillUsesCompactEndpoint(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var seenPath string
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenPath = r.URL.Path
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp_non_stream_compaction",
+			"object":"response.compaction",
+			"output":[{"type":"compaction_summary","summary":"done"}],
+			"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      2,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	store.AddAccount(&auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "sk-direct",
+		Models:       []string{"gpt-4.1-direct"},
+		PlanType:     "api",
+	})
+	handler := NewHandler(store, nil, nil, nil)
+
+	body := []byte(`{
+		"model":"gpt-4.1-direct",
+		"stream":false,
+		"input":[{"type":"compaction_trigger"}]
+	}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if seenPath != "/v1/responses/compact" {
+		t.Fatalf("upstream path = %q, want /v1/responses/compact", seenPath)
+	}
+	if gjson.GetBytes(seenBody, "stream").Exists() {
+		t.Fatalf("compact upstream body should not carry stream, got %s", seenBody)
 	}
 }
 
