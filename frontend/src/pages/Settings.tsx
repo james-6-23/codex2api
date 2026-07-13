@@ -14,6 +14,7 @@ import { DEFAULT_SITE_LOGO, isBrandingVideo, sanitizeBrandingImage, sanitizeBran
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { DraftNumberInput } from '@/components/ui/draft-number-input'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import {
@@ -1878,48 +1879,47 @@ export default function Settings() {
             <SettingsCard title={t('settings.trafficProtection')} icon={<Gauge className="size-4" />}>
               <div className={SETTINGS_FIELD_GRID}>
                 <SettingField label={t('settings.maxConcurrency')} description={t('settings.maxConcurrencyRange')} suffix={t('settings.unit.concurrency')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={50}
                     value={settingsForm.max_concurrency}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_concurrency: parseInt(e.target.value) || 1 }))}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, max_concurrency: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.globalRpm')} description={t('settings.globalRpmRange')} suffix={t('settings.unit.rpm')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     value={settingsForm.global_rpm}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, global_rpm: parseInt(e.target.value) || 0 }))}
+                    emptyValue={0}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, global_rpm: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.maxRetries')} description={t('settings.maxRetriesRange')} suffix={t('settings.unit.times')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={10}
                     value={settingsForm.max_retries}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_retries: parseInt(e.target.value) || 0 }))}
+                    emptyValue={0}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, max_retries: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.maxRateLimitRetries')} description={t('settings.maxRateLimitRetriesRange')} suffix={t('settings.unit.times')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={10}
                     value={settingsForm.max_rate_limit_retries}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: parseInt(e.target.value) || 0 }))}
+                    emptyValue={0}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, max_rate_limit_retries: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.retryIntervalMs')} description={t('settings.retryIntervalMsDesc')} suffix="ms">
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={30000}
                     step={100}
                     value={settingsForm.retry_interval_ms}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, retry_interval_ms: parseInt(e.target.value) || 0 }))}
+                    emptyValue={0}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, retry_interval_ms: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.transportRetryPolicy')} description={t('settings.transportRetryPolicyDesc')}>
@@ -1936,41 +1936,40 @@ export default function Settings() {
               <div className="space-y-4">
                 <div className={SETTINGS_FIELD_GRID}>
                   <SettingField label={t('settings.backgroundRefreshInterval')} description={t('settings.backgroundRefreshIntervalDesc')} suffix={t('settings.unit.min')}>
-                    <Input
-                      type="number"
+                    <DraftNumberInput
                       min={1}
                       max={1440}
                       value={settingsForm.background_refresh_interval_minutes}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: parseInt(e.target.value) || 1 }))}
+                      onValueChange={(value) => setSettingsForm(f => ({ ...f, background_refresh_interval_minutes: value }))}
                     />
                   </SettingField>
                   <SettingField label={t('settings.usageProbeMaxAge')} description={t('settings.usageProbeMaxAgeDesc')} suffix={t('settings.unit.min')}>
-                    <Input
-                      type="number"
+                    <DraftNumberInput
                       min={1}
                       max={10080}
                       value={settingsForm.usage_probe_max_age_minutes}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: parseInt(e.target.value) || 1 }))}
+                      onValueChange={(value) => setSettingsForm(f => ({ ...f, usage_probe_max_age_minutes: value }))}
                     />
                   </SettingField>
                   <SettingField label={t('settings.usageProbeConcurrency')} description={t('settings.usageProbeConcurrencyDesc')} suffix={t('settings.unit.concurrency')}>
-                    <Input
-                      type="number"
+                    <DraftNumberInput
                       min={1}
                       max={128}
                       value={settingsForm.usage_probe_concurrency}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: parseInt(e.target.value) || 1 }))}
+                      onValueChange={(value) => setSettingsForm(f => ({ ...f, usage_probe_concurrency: value }))}
                     />
                   </SettingField>
                   <SettingField label={t('settings.recoveryProbeInterval')} description={t('settings.recoveryProbeIntervalDesc')}>
-                    <Input
-                      type={lazyModeActive ? 'text' : 'number'}
-                      min={1}
-                      max={10080}
-                      value={lazyModeActive ? '∞' : settingsForm.recovery_probe_interval_minutes}
-                      disabled={lazyModeActive}
-                      onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: parseInt(e.target.value) || 1 }))}
-                    />
+                    {lazyModeActive ? (
+                      <Input value="∞" disabled />
+                    ) : (
+                      <DraftNumberInput
+                        min={1}
+                        max={10080}
+                        value={settingsForm.recovery_probe_interval_minutes}
+                        onValueChange={(value) => setSettingsForm(f => ({ ...f, recovery_probe_interval_minutes: value }))}
+                      />
+                    )}
                   </SettingField>
                 </div>
                 <div className={SETTINGS_SWITCH_GRID}>
@@ -2029,24 +2028,21 @@ export default function Settings() {
                   </div>
                 </div>
                 <div className="relative w-[7.5rem] shrink-0 sm:w-[8.5rem]">
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={10}
                     max={10080}
                     step={10}
                     className="pr-11"
                     value={settingsForm.auto_reset_credits_before_expiry_min}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const parsed = Number.parseInt(e.target.value, 10)
-                      if (Number.isNaN(parsed)) return
+                    onValueChange={(value) => {
                       commitSettingsForm({
                         ...settingsFormRef.current,
-                        auto_reset_credits_before_expiry_min: Math.max(10, Math.min(10080, parsed)),
+                        auto_reset_credits_before_expiry_min: value,
                       })
                     }}
-                    onBlur={() => {
+                    onValueCommit={(value) => {
                       void autoSaveSettingsPatch({
-                        auto_reset_credits_before_expiry_min: settingsFormRef.current.auto_reset_credits_before_expiry_min,
+                        auto_reset_credits_before_expiry_min: value,
                       })
                     }}
                   />
@@ -2069,12 +2065,11 @@ export default function Settings() {
                   />
                 </SettingField>
                 <SettingField label={t('settings.testConcurrency')} description={t('settings.testConcurrencyRange')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={200}
                     value={settingsForm.test_concurrency}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, test_concurrency: parseInt(e.target.value) || 1 }))}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, test_concurrency: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.schedulerMode')} description={t('settings.schedulerModeDesc')}>
@@ -2119,89 +2114,75 @@ export default function Settings() {
             <div className="space-y-4">
               <div className={SETTINGS_FIELD_GRID_3}>
                 <SettingField label={t('settings.globalAutoPause5h')} description={t('settings.globalAutoPauseHint')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={100}
                     step={0.1}
                     inputMode="decimal"
                     placeholder={t('settings.globalAutoPausePlaceholder')}
-                    value={settingsForm.auto_pause_5h_threshold > 0 ? (settingsForm.auto_pause_5h_threshold * 100).toFixed(1).replace(/\.0$/, '') : ''}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const raw = e.target.value
-                      const ratio = raw === '' ? 0 : Math.max(0, Math.min(1, parseFloat(raw) / 100))
-                      setSettingsForm(f => ({ ...f, auto_pause_5h_threshold: isNaN(ratio) ? 0 : ratio }))
+                    integer={false}
+                    emptyValue={0}
+                    value={settingsForm.auto_pause_5h_threshold * 100}
+                    formatValue={(value) => value > 0 ? value.toFixed(1).replace(/\.0$/, '') : ''}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, auto_pause_5h_threshold: value / 100 }))
                     }}
-                    onBlur={() => {
-                      void autoSaveSettingsPatch({ auto_pause_5h_threshold: settingsForm.auto_pause_5h_threshold })
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ auto_pause_5h_threshold: value / 100 })
                     }}
                   />
                 </SettingField>
                 <SettingField label={t('settings.globalAutoPause7d')} description={t('settings.globalAutoPauseHint')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={100}
                     step={0.1}
                     inputMode="decimal"
                     placeholder={t('settings.globalAutoPausePlaceholder')}
-                    value={settingsForm.auto_pause_7d_threshold > 0 ? (settingsForm.auto_pause_7d_threshold * 100).toFixed(1).replace(/\.0$/, '') : ''}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const raw = e.target.value
-                      const ratio = raw === '' ? 0 : Math.max(0, Math.min(1, parseFloat(raw) / 100))
-                      setSettingsForm(f => ({ ...f, auto_pause_7d_threshold: isNaN(ratio) ? 0 : ratio }))
+                    integer={false}
+                    emptyValue={0}
+                    value={settingsForm.auto_pause_7d_threshold * 100}
+                    formatValue={(value) => value > 0 ? value.toFixed(1).replace(/\.0$/, '') : ''}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, auto_pause_7d_threshold: value / 100 }))
                     }}
-                    onBlur={() => {
-                      void autoSaveSettingsPatch({ auto_pause_7d_threshold: settingsForm.auto_pause_7d_threshold })
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ auto_pause_7d_threshold: value / 100 })
                     }}
                   />
                 </SettingField>
                 <SettingField label={t('settings.autoPause5hGuardBand')} description={t('settings.autoPause5hGuardBandHint')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={100}
                     step={0.1}
                     inputMode="decimal"
                     placeholder={t('settings.autoPause5hGuardBandPlaceholder')}
-                    value={settingsForm.auto_pause_5h_guard_band_percent > 0 ? settingsForm.auto_pause_5h_guard_band_percent : ''}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const raw = e.target.value
-                      if (raw === '') {
-                        setSettingsForm(f => ({ ...f, auto_pause_5h_guard_band_percent: 0 }))
-                        return
-                      }
-                      const parsed = parseFloat(raw)
-                      if (Number.isNaN(parsed)) return
-                      const value = Math.max(0, Math.min(100, parsed))
+                    integer={false}
+                    emptyValue={0}
+                    value={settingsForm.auto_pause_5h_guard_band_percent}
+                    formatValue={(value) => value > 0 ? String(value) : ''}
+                    onValueChange={(value) => {
                       setSettingsForm(f => ({ ...f, auto_pause_5h_guard_band_percent: value }))
                     }}
-                    onBlur={() => {
-                      void autoSaveSettingsPatch({ auto_pause_5h_guard_band_percent: settingsForm.auto_pause_5h_guard_band_percent })
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ auto_pause_5h_guard_band_percent: value })
                     }}
                   />
                 </SettingField>
                 <SettingField label={t('settings.autoPause5hGuardConcurrency')} description={t('settings.autoPause5hGuardConcurrencyHint')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={1000}
                     step={1}
                     inputMode="numeric"
                     value={settingsForm.auto_pause_5h_guard_concurrency ?? 1}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const raw = e.target.value
-                      if (raw === '') {
-                        setSettingsForm(f => ({ ...f, auto_pause_5h_guard_concurrency: 0 }))
-                        return
-                      }
-                      const parsed = Number.parseInt(raw, 10)
-                      if (Number.isNaN(parsed)) return
-                      const value = Math.max(0, Math.min(1000, parsed))
+                    emptyValue={0}
+                    onValueChange={(value) => {
                       setSettingsForm(f => ({ ...f, auto_pause_5h_guard_concurrency: value }))
                     }}
-                    onBlur={() => {
-                      void autoSaveSettingsPatch({ auto_pause_5h_guard_concurrency: settingsForm.auto_pause_5h_guard_concurrency })
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ auto_pause_5h_guard_concurrency: value })
                     }}
                   />
                 </SettingField>
@@ -2220,26 +2201,17 @@ export default function Settings() {
                   />
                 </SettingField>
                 <SettingField label={t('settings.smartPacingMinConcurrency')} description={t('settings.smartPacingMinConcurrencyHint')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={1000}
                     step={1}
                     inputMode="numeric"
                     value={settingsForm.smart_pacing_min_concurrency ?? 1}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => {
-                      const raw = e.target.value
-                      if (raw === '') {
-                        setSettingsForm(f => ({ ...f, smart_pacing_min_concurrency: 1 }))
-                        return
-                      }
-                      const parsed = Number.parseInt(raw, 10)
-                      if (Number.isNaN(parsed)) return
-                      const value = Math.max(1, Math.min(1000, parsed))
+                    onValueChange={(value) => {
                       setSettingsForm(f => ({ ...f, smart_pacing_min_concurrency: value }))
                     }}
-                    onBlur={() => {
-                      void autoSaveSettingsPatch({ smart_pacing_min_concurrency: settingsForm.smart_pacing_min_concurrency })
+                    onValueCommit={(value) => {
+                      void autoSaveSettingsPatch({ smart_pacing_min_concurrency: value })
                     }}
                   />
                 </SettingField>
@@ -2304,17 +2276,16 @@ export default function Settings() {
                   suffix={t('settings.unit.sec')}
                   className={cn(!settingsForm.codex_ws_keepalive_enabled && 'opacity-60')}
                 >
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={10}
                     max={600}
                     disabled={!settingsForm.codex_ws_keepalive_enabled}
                     value={settingsForm.codex_ws_keepalive_interval_sec}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: parseInt(e.target.value) || 60 }))}
-                    onBlur={() => {
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_ws_keepalive_interval_sec: value }))}
+                    onValueCommit={(value) => {
                       if (!settingsForm.codex_ws_keepalive_enabled) return
                       void autoSaveSettingsPatch({
-                        codex_ws_keepalive_interval_sec: settingsForm.codex_ws_keepalive_interval_sec,
+                        codex_ws_keepalive_interval_sec: value,
                       })
                     }}
                   />
@@ -2325,17 +2296,17 @@ export default function Settings() {
                   suffix={t('settings.unit.times')}
                   className={cn(!settingsForm.codex_ws_silent_retry_enabled && 'opacity-60')}
                 >
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={10}
                     disabled={!settingsForm.codex_ws_silent_retry_enabled}
                     value={settingsForm.codex_ws_silent_max_retries}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: parseInt(e.target.value) || 0 }))}
-                    onBlur={() => {
+                    emptyValue={0}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_ws_silent_max_retries: value }))}
+                    onValueCommit={(value) => {
                       if (!settingsForm.codex_ws_silent_retry_enabled) return
                       void autoSaveSettingsPatch({
-                        codex_ws_silent_max_retries: settingsForm.codex_ws_silent_max_retries,
+                        codex_ws_silent_max_retries: value,
                       })
                     }}
                   />
@@ -2360,17 +2331,16 @@ export default function Settings() {
                   description={t('settings.codexContinueMaxRoundsDesc')}
                   className={cn(!settingsForm.codex_continue_thinking_enabled && 'opacity-60')}
                 >
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={32}
                     disabled={!settingsForm.codex_continue_thinking_enabled}
                     value={settingsForm.codex_continue_max_rounds}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_continue_max_rounds: parseInt(e.target.value) || 8 }))}
-                    onBlur={() => {
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, codex_continue_max_rounds: value }))}
+                    onValueCommit={(value) => {
                       if (!settingsForm.codex_continue_thinking_enabled) return
                       void autoSaveSettingsPatch({
-                        codex_continue_max_rounds: settingsForm.codex_continue_max_rounds,
+                        codex_continue_max_rounds: value,
                       })
                     }}
                   />
@@ -2433,23 +2403,22 @@ export default function Settings() {
                       <SettingHelp text={t('settings.codexCliVersionSyncIntervalDesc')} />
                     </div>
                     <div className="relative w-[7.25rem] shrink-0">
-                      <Input
-                        type="number"
+                      <DraftNumberInput
                         min={1}
                         max={720}
                         className="h-9 pr-10 tabular-nums"
                         disabled={!settingsForm.codex_cli_version_sync_enabled}
                         value={settingsForm.codex_cli_version_sync_interval_hours}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+                        onValueChange={(value) =>
                           setSettingsForm((f) => ({
                             ...f,
-                            codex_cli_version_sync_interval_hours: parseInt(e.target.value) || 12,
+                            codex_cli_version_sync_interval_hours: value,
                           }))
                         }
-                        onBlur={() => {
+                        onValueCommit={(value) => {
                           if (!settingsForm.codex_cli_version_sync_enabled) return
                           void autoSaveSettingsPatch({
-                            codex_cli_version_sync_interval_hours: settingsForm.codex_cli_version_sync_interval_hours,
+                            codex_cli_version_sync_interval_hours: value,
                           })
                         }}
                       />
@@ -2531,21 +2500,19 @@ export default function Settings() {
                   />
                 </SettingField>
                 <SettingField label={t('settings.usageLogBatchSize')} description={t('settings.usageLogBatchSizeDesc')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={10000}
                     value={settingsForm.usage_log_batch_size}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_batch_size: parseInt(e.target.value) || 200 }))}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, usage_log_batch_size: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.usageLogFlushInterval')} description={t('settings.usageLogFlushIntervalDesc')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={300}
                     value={settingsForm.usage_log_flush_interval_seconds}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, usage_log_flush_interval_seconds: parseInt(e.target.value) || 5 }))}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, usage_log_flush_interval_seconds: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.billingTierPolicy')} description={t('settings.billingTierPolicyDesc')}>
@@ -2563,12 +2530,11 @@ export default function Settings() {
                   />
                 </SettingField>
                 <SettingField label={t('settings.streamFlushInterval')} description={t('settings.streamFlushIntervalDesc')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={1}
                     max={1000}
                     value={settingsForm.stream_flush_interval_ms}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: parseInt(e.target.value) || 20 }))}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, stream_flush_interval_ms: value }))}
                   />
                 </SettingField>
                 <SettingField label={t('settings.firstTokenMode')} description={t('settings.firstTokenModeDesc')}>
@@ -2579,12 +2545,12 @@ export default function Settings() {
                   />
                 </SettingField>
                 <SettingField label={t('settings.firstTokenTimeout')} description={t('settings.firstTokenTimeoutDesc')}>
-                  <Input
-                    type="number"
+                  <DraftNumberInput
                     min={0}
                     max={600}
                     value={settingsForm.first_token_timeout_seconds}
-                    onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: parseInt(e.target.value) || 0 }))}
+                    emptyValue={0}
+                    onValueChange={(value) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: value }))}
                   />
                 </SettingField>
               </div>
@@ -2608,23 +2574,21 @@ export default function Settings() {
                 <div className={SETTINGS_FIELD_GRID}>
                   {isExternalDatabase ? (
                     <SettingField label={t('settings.pgMaxConns')} description={t('settings.pgMaxConnsRange')}>
-                      <Input
-                        type="number"
+                      <DraftNumberInput
                         min={5}
                         max={500}
                         value={settingsForm.pg_max_conns}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, pg_max_conns: parseInt(e.target.value) || 50 }))}
+                        onValueChange={(value) => setSettingsForm(f => ({ ...f, pg_max_conns: value }))}
                       />
                     </SettingField>
                   ) : null}
                   {isExternalCache ? (
                     <SettingField label={t('settings.redisPoolSize')} description={t('settings.redisPoolSizeRange')}>
-                      <Input
-                        type="number"
+                      <DraftNumberInput
                         min={5}
                         max={500}
                         value={settingsForm.redis_pool_size}
-                        onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, redis_pool_size: parseInt(e.target.value) || 30 }))}
+                        onValueChange={(value) => setSettingsForm(f => ({ ...f, redis_pool_size: value }))}
                       />
                     </SettingField>
                   ) : null}

@@ -9,10 +9,12 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/gorilla/websocket"
 )
 
 func TestManagerStopIdempotent(t *testing.T) {
@@ -141,6 +143,66 @@ func TestAcquireConnectionReusesIdleConnectedConnection(t *testing.T) {
 	session.RemovePendingRequest(pr.RequestID)
 }
 
+func TestAcquireConnectionProbeDoesNotBlockDifferentPoolKey(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	account := &auth.Account{DBID: 42, DynamicConcurrencyLimit: 4}
+	wsURL := "wss://example.test/responses"
+	slowConn, _ := newTestSlotConnection(manager, account, wsURL, "session-slow")
+	fastConn, _ := newTestSlotConnection(manager, account, wsURL, "session-fast")
+
+	slowProbeStarted := make(chan struct{})
+	releaseSlowProbe := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSlow := func() { releaseOnce.Do(func() { close(releaseSlowProbe) }) }
+	defer releaseSlow()
+	var startedOnce sync.Once
+	manager.probeFunc = func(wc *WsConnection) bool {
+		if wc == slowConn {
+			startedOnce.Do(func() { close(slowProbeStarted) })
+			<-releaseSlowProbe
+		}
+		return true
+	}
+
+	type result struct {
+		wc      *WsConnection
+		pending *PendingRequest
+		err     error
+	}
+	slowResult := make(chan result, 1)
+	go func() {
+		wc, pending, err := manager.AcquireConnection(context.Background(), account, wsURL, "session-slow", http.Header{}, "")
+		slowResult <- result{wc: wc, pending: pending, err: err}
+	}()
+	select {
+	case <-slowProbeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow pool-key probe did not start")
+	}
+
+	fastResult := make(chan result, 1)
+	go func() {
+		wc, pending, err := manager.AcquireConnection(context.Background(), account, wsURL, "session-fast", http.Header{}, "")
+		fastResult <- result{wc: wc, pending: pending, err: err}
+	}()
+	select {
+	case got := <-fastResult:
+		if got.err != nil || got.wc != fastConn || got.pending == nil {
+			t.Fatalf("fast acquire = (%p, %v, %v), want existing healthy connection", got.wc, got.pending, got.err)
+		}
+		got.wc.session.RemovePendingRequest(got.pending.RequestID)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("different pool-key acquire was blocked by another connection's network probe")
+	}
+	releaseSlow()
+	slow := <-slowResult
+	if slow.err != nil || slow.wc != slowConn || slow.pending == nil {
+		t.Fatalf("slow acquire after probe release = (%p, %v, %v)", slow.wc, slow.pending, slow.err)
+	}
+	slow.wc.session.RemovePendingRequest(slow.pending.RequestID)
+}
+
 func TestPoolKeyIncludesSessionKey(t *testing.T) {
 	manager := NewManager()
 	t.Cleanup(manager.Stop)
@@ -252,6 +314,163 @@ func TestAcquireConnectionWaitsWhileSessionHasPendingRequest(t *testing.T) {
 	}
 }
 
+func TestAcquireConnectionCapsIdleConnectionsAtAccountConcurrency(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	account := &auth.Account{DBID: 42, DynamicConcurrencyLimit: 2}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	connections := make([]*WsConnection, 0, 3)
+
+	for i := 0; i < 3; i++ {
+		wc, pending, err := manager.AcquireConnection(
+			context.Background(),
+			account,
+			wsURL,
+			fmt.Sprintf("session-%d", i),
+			http.Header{},
+			"",
+		)
+		if err != nil {
+			t.Fatalf("AcquireConnection(%d) error = %v", i, err)
+		}
+		wc.session.RemovePendingRequest(pending.RequestID)
+		manager.ReleaseConnection(wc)
+		connections = append(connections, wc)
+		time.Sleep(2 * time.Millisecond)
+	}
+
+	if got := manager.ConnectionCount(); got != 2 {
+		t.Fatalf("ConnectionCount = %d, want account concurrency cap 2", got)
+	}
+	if connections[0].IsConnected() {
+		t.Fatal("oldest idle connection should be evicted when the account cap is reached")
+	}
+}
+
+func TestAcquireConnectionTrimsIdleConnectionsAfterDynamicLimitDecrease(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	manager.probeFunc = func(*WsConnection) bool { return true }
+	account := &auth.Account{DBID: 42, DynamicConcurrencyLimit: 3}
+	wsURL := "wss://example.test/responses"
+	connections := make([]*WsConnection, 0, 3)
+
+	for i := 0; i < 3; i++ {
+		wc, _ := newTestSlotConnection(manager, account, wsURL, fmt.Sprintf("session-%d", i))
+		connections = append(connections, wc)
+	}
+	if got := manager.ConnectionCount(); got != 3 {
+		t.Fatalf("ConnectionCount before limit decrease = %d, want 3", got)
+	}
+
+	account.Mu().Lock()
+	account.DynamicConcurrencyLimit = 1
+	account.Mu().Unlock()
+	protected := connections[1]
+	got, pending, err := manager.AcquireConnection(
+		context.Background(), account, wsURL, "session-1", http.Header{}, "",
+	)
+	if err != nil {
+		t.Fatalf("AcquireConnection after limit decrease error = %v", err)
+	}
+	if got != protected {
+		t.Fatal("existing session connection should be reused after the limit decrease")
+	}
+	if count := manager.ConnectionCount(); count != 1 {
+		t.Fatalf("ConnectionCount after limit decrease = %d, want 1", count)
+	}
+	if !protected.IsConnected() {
+		t.Fatal("the connection selected for reuse must remain connected")
+	}
+	for i, wc := range connections {
+		if wc != protected && wc.IsConnected() {
+			t.Fatalf("idle connection %d remained connected after the limit decreased", i)
+		}
+	}
+	got.session.RemovePendingRequest(pending.RequestID)
+}
+
+func TestAcquireConnectionCountsPendingDialTowardAccountCap(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if attempts.Add(1) == 1 {
+			close(started)
+		}
+		<-release
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	account := &auth.Account{DBID: 42, DynamicConcurrencyLimit: 1}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	type acquireResult struct {
+		wc      *WsConnection
+		pending *PendingRequest
+		err     error
+	}
+	firstResult := make(chan acquireResult, 1)
+	go func() {
+		wc, pending, err := manager.AcquireConnection(
+			context.Background(), account, wsURL, "session-first", http.Header{}, "",
+		)
+		firstResult <- acquireResult{wc: wc, pending: pending, err: err}
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("first websocket dial did not reach the server")
+	}
+
+	secondCtx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	_, _, secondErr := manager.AcquireConnection(
+		secondCtx, account, wsURL, "session-second", http.Header{}, "",
+	)
+	if secondErr == nil {
+		t.Fatal("second dial should wait for account connection capacity")
+	}
+	if got := attempts.Load(); got != 1 {
+		t.Fatalf("websocket dial attempts = %d, want 1 while first dial is pending", got)
+	}
+
+	close(release)
+	result := <-firstResult
+	if result.err != nil {
+		t.Fatalf("first AcquireConnection error = %v", result.err)
+	}
+	result.wc.session.RemovePendingRequest(result.pending.RequestID)
+}
+
 func newTestSlotConnection(manager *Manager, account *auth.Account, wsURL, slotSession string) (*WsConnection, *Session) {
 	key := manager.poolKey(account.ID(), wsURL, slotSession, "")
 	session := NewSession(account.ID(), manager)
@@ -289,6 +508,67 @@ func TestAcquireReusableConnectionReusesIdleSlot(t *testing.T) {
 		t.Fatalf("usedKey = %q, want cache-key#0", usedKey)
 	}
 	got.session.RemovePendingRequest(pr.RequestID)
+}
+
+func TestAcquireReusableConnectionProbeDoesNotBlockDifferentPoolKey(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	account := &auth.Account{DBID: 42, DynamicConcurrencyLimit: 4}
+	wsURL := "wss://example.test/responses"
+	slowConn, _ := newTestSlotConnection(manager, account, wsURL, "slow-cache#0")
+	fastConn, _ := newTestSlotConnection(manager, account, wsURL, "fast-cache#0")
+
+	slowProbeStarted := make(chan struct{})
+	releaseSlowProbe := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSlow := func() { releaseOnce.Do(func() { close(releaseSlowProbe) }) }
+	defer releaseSlow()
+	var startedOnce sync.Once
+	manager.probeFunc = func(wc *WsConnection) bool {
+		if wc == slowConn {
+			startedOnce.Do(func() { close(slowProbeStarted) })
+			<-releaseSlowProbe
+		}
+		return true
+	}
+
+	type result struct {
+		wc      *WsConnection
+		pending *PendingRequest
+		key     string
+		err     error
+	}
+	slowResult := make(chan result, 1)
+	go func() {
+		wc, pending, key, err := manager.AcquireReusableConnection(context.Background(), account, wsURL, "slow-cache", "slow-fallback", 4, http.Header{}, "")
+		slowResult <- result{wc: wc, pending: pending, key: key, err: err}
+	}()
+	select {
+	case <-slowProbeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow reusable-slot probe did not start")
+	}
+
+	fastResult := make(chan result, 1)
+	go func() {
+		wc, pending, key, err := manager.AcquireReusableConnection(context.Background(), account, wsURL, "fast-cache", "fast-fallback", 4, http.Header{}, "")
+		fastResult <- result{wc: wc, pending: pending, key: key, err: err}
+	}()
+	select {
+	case got := <-fastResult:
+		if got.err != nil || got.wc != fastConn || got.pending == nil || got.key != "fast-cache#0" {
+			t.Fatalf("fast reusable acquire = (%p, %v, %q, %v), want healthy fast-cache#0", got.wc, got.pending, got.key, got.err)
+		}
+		got.wc.session.RemovePendingRequest(got.pending.RequestID)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("different reusable pool key was blocked by another connection's network probe")
+	}
+	releaseSlow()
+	slow := <-slowResult
+	if slow.err != nil || slow.wc != slowConn || slow.pending == nil || slow.key != "slow-cache#0" {
+		t.Fatalf("slow reusable acquire after probe release = (%p, %v, %q, %v)", slow.wc, slow.pending, slow.key, slow.err)
+	}
+	slow.wc.session.RemovePendingRequest(slow.pending.RequestID)
 }
 
 func TestAcquireReusableConnectionSkipsBusySlot(t *testing.T) {
@@ -403,6 +683,66 @@ func TestAcquirePreferredConnection(t *testing.T) {
 	if got2 != nil || pr2 != nil {
 		t.Fatal("busy preferred connection must not be acquired")
 	}
+}
+
+func TestAcquirePreferredConnectionProbeDoesNotBlockDifferentPoolKey(t *testing.T) {
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	slowConn := newBoundTestConn(t, manager, 7, "slow#0")
+	fastConn := newBoundTestConn(t, manager, 7, "fast#0")
+	manager.BindResponseConn("resp_slow", slowConn, "slow#0", 7, "key-A")
+	manager.BindResponseConn("resp_fast", fastConn, "fast#0", 7, "key-A")
+
+	slowProbeStarted := make(chan struct{})
+	releaseSlowProbe := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseSlow := func() { releaseOnce.Do(func() { close(releaseSlowProbe) }) }
+	defer releaseSlow()
+	var startedOnce sync.Once
+	manager.probeFunc = func(wc *WsConnection) bool {
+		if wc == slowConn {
+			startedOnce.Do(func() { close(slowProbeStarted) })
+			<-releaseSlowProbe
+		}
+		return true
+	}
+
+	type result struct {
+		wc      *WsConnection
+		pending *PendingRequest
+		key     string
+	}
+	slowResult := make(chan result, 1)
+	go func() {
+		wc, pending, key := manager.AcquirePreferredConnection("resp_slow", 7, "key-A")
+		slowResult <- result{wc: wc, pending: pending, key: key}
+	}()
+	select {
+	case <-slowProbeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("slow preferred-connection probe did not start")
+	}
+
+	fastResult := make(chan result, 1)
+	go func() {
+		wc, pending, key := manager.AcquirePreferredConnection("resp_fast", 7, "key-A")
+		fastResult <- result{wc: wc, pending: pending, key: key}
+	}()
+	select {
+	case got := <-fastResult:
+		if got.wc != fastConn || got.pending == nil || got.key != "fast#0" {
+			t.Fatalf("fast preferred acquire = (%p, %v, %q), want healthy fast#0", got.wc, got.pending, got.key)
+		}
+		got.wc.session.RemovePendingRequest(got.pending.RequestID)
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("different preferred pool key was blocked by another connection's network probe")
+	}
+	releaseSlow()
+	slow := <-slowResult
+	if slow.wc != slowConn || slow.pending == nil || slow.key != "slow#0" {
+		t.Fatalf("slow preferred acquire after probe release = (%p, %v, %q)", slow.wc, slow.pending, slow.key)
+	}
+	slow.wc.session.RemovePendingRequest(slow.pending.RequestID)
 }
 
 func TestAcquirePreferredConnectionProbeFailureEvicts(t *testing.T) {

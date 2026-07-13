@@ -1053,6 +1053,46 @@ func TestUpdateSettingsPersistsAutoResetCreditsAcrossPartialUpdates(t *testing.T
 	}
 }
 
+func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(
+		http.MethodPut,
+		"/api/admin/settings",
+		strings.NewReader(`{"retry_interval_ms":2500,"transport_retry_policy":"sticky"}`),
+	)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateSettings(ctx)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+	}
+
+	var response settingsResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.RetryIntervalMS != 2500 {
+		t.Fatalf("retry_interval_ms = %d, want 2500", response.RetryIntervalMS)
+	}
+	if response.TransportRetryPolicy != "sticky" {
+		t.Fatalf("transport_retry_policy = %q, want sticky", response.TransportRetryPolicy)
+	}
+}
+
 func TestUpdateSettingsRejectsAutoResetCreditsWindowOutOfRange(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := &Handler{}
@@ -1807,7 +1847,7 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 	store.AddAccount(runtimeAccount2)
 	handler := &Handler{db: db, store: store}
 
-	body := fmt.Sprintf(`{"ids":[%d,%d,%d,%d],"enabled":false,"locked":true,"tags":["Ops","ops","blue"],"group_ids":[%d],"auto_pause_5h_threshold":0.8,"auto_pause_7d_disabled":true}`,
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d,%d],"enabled":false,"locked":true,"tags":["Ops","ops","blue"],"group_ids":[%d],"score_bias_override":33,"base_concurrency_override":5,"scheduler_priority":7,"auto_pause_5h_threshold":0.8,"auto_pause_7d_disabled":true}`,
 		accountID1, accountID2, accountID1, accountID2+1000, groupID)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
@@ -1846,6 +1886,15 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 		if len(row.Tags) != 2 || row.Tags[0] != "Ops" || row.Tags[1] != "blue" {
 			t.Fatalf("account %d tags = %v, want [Ops blue]", id, row.Tags)
 		}
+		if !row.ScoreBiasOverride.Valid || row.ScoreBiasOverride.Int64 != 33 {
+			t.Fatalf("account %d score_bias_override = %+v, want 33", id, row.ScoreBiasOverride)
+		}
+		if !row.BaseConcurrencyOverride.Valid || row.BaseConcurrencyOverride.Int64 != 5 {
+			t.Fatalf("account %d base_concurrency_override = %+v, want 5", id, row.BaseConcurrencyOverride)
+		}
+		if priority, ok := row.GetCredentialInt64("scheduler_priority"); !ok || priority != 7 {
+			t.Fatalf("account %d scheduler_priority = (%d, %t), want (7, true)", id, priority, ok)
+		}
 		threshold5h, ok := row.GetCredentialFloat64("auto_pause_5h_threshold")
 		if !ok || threshold5h != 0.8 {
 			t.Fatalf("account %d auto_pause_5h_threshold = (%v, %t), want (0.8, true)", id, threshold5h, ok)
@@ -1873,6 +1922,57 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 		t.Fatalf("runtime account 1 metadata tags=%v groups=%v", runtimeAccount1.Tags, runtimeAccount1.GroupIDs)
 	}
 	runtimeAccount1.Mu().RUnlock()
+	for _, account := range []*auth.Account{runtimeAccount1, runtimeAccount2} {
+		if scoreBias, ok := account.GetScoreBiasOverride(); !ok || scoreBias != 33 {
+			t.Fatalf("runtime account %d score bias = (%d, %t), want (33, true)", account.ID(), scoreBias, ok)
+		}
+		if baseConcurrency, ok := account.GetBaseConcurrencyOverride(); !ok || baseConcurrency != 5 {
+			t.Fatalf("runtime account %d base concurrency = (%d, %t), want (5, true)", account.ID(), baseConcurrency, ok)
+		}
+		if priority := account.GetSchedulerPriority(); priority != 7 {
+			t.Fatalf("runtime account %d scheduler priority = %d, want 7", account.ID(), priority)
+		}
+	}
+
+	resetRecorder := httptest.NewRecorder()
+	resetCtx, _ := gin.CreateTestContext(resetRecorder)
+	resetCtx.Request = httptest.NewRequest(
+		http.MethodPost,
+		"/api/admin/accounts/batch-update",
+		strings.NewReader(fmt.Sprintf(`{"ids":[%d,%d],"score_bias_override":null,"base_concurrency_override":null,"scheduler_priority":null}`, accountID1, accountID2)),
+	)
+	resetCtx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.BatchUpdateAccounts(resetCtx)
+	if resetRecorder.Code != http.StatusOK {
+		t.Fatalf("reset status = %d, want %d, body=%s", resetRecorder.Code, http.StatusOK, resetRecorder.Body.String())
+	}
+	rows, err = db.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive after reset: %v", err)
+	}
+	for _, row := range rows {
+		if row.ID != accountID1 && row.ID != accountID2 {
+			continue
+		}
+		if row.ScoreBiasOverride.Valid || row.BaseConcurrencyOverride.Valid {
+			t.Fatalf("account %d overrides after reset = score %+v concurrency %+v, want null", row.ID, row.ScoreBiasOverride, row.BaseConcurrencyOverride)
+		}
+		if priority, _ := row.GetCredentialInt64("scheduler_priority"); priority != 0 {
+			t.Fatalf("account %d scheduler_priority after reset = %d, want 0", row.ID, priority)
+		}
+	}
+	for _, account := range []*auth.Account{runtimeAccount1, runtimeAccount2} {
+		if _, ok := account.GetScoreBiasOverride(); ok {
+			t.Fatalf("runtime account %d score bias still overridden after reset", account.ID())
+		}
+		if _, ok := account.GetBaseConcurrencyOverride(); ok {
+			t.Fatalf("runtime account %d base concurrency still overridden after reset", account.ID())
+		}
+		if priority := account.GetSchedulerPriority(); priority != 0 {
+			t.Fatalf("runtime account %d scheduler priority after reset = %d, want 0", account.ID(), priority)
+		}
+	}
 }
 
 func TestBatchUpdateAccountsRejectsMissingUpdateFields(t *testing.T) {

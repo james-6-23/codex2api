@@ -447,7 +447,7 @@ Browser -> embedded /admin frontend -> /api/admin/* -> database / account pool /
 
 ### Scheduler
 
-The scheduler lives in `auth.Store`. It evaluates availability, health tier, dynamic concurrency, historical errors, and recent usage before selecting an account.
+The scheduler lives in `auth.Store`. It evaluates availability, scheduler priority, health tier, dynamic concurrency, historical errors, and recent usage before selecting an account.
 
 Runtime state:
 
@@ -455,14 +455,17 @@ Runtime state:
 - `HealthTier`: `healthy`, `warm`, `risky`, `banned`
 - `SchedulerScore`: real-time scheduling score based on a baseline of 100
 - `DynamicConcurrencyLimit`: concurrency limit adjusted by health tier
+- `SchedulerPriority`: strict account priority; higher-priority accounts are considered before health tier, score, or current load
 
 Selection strategy:
 
 1. Filter unavailable accounts, including `error`, `banned`, cooldown accounts, and accounts without an Access Token.
 2. Recompute health tier, scheduler score, and dynamic concurrency.
 3. Exclude accounts that have reached their concurrency limit.
-4. Prefer `healthy > warm > risky > banned`; within the same tier, prefer higher score and lower concurrency.
+4. Prefer higher `SchedulerPriority`, then `healthy > warm > risky > banned`; within the same priority and tier, prefer higher score and lower concurrency.
 5. Apply a 15% random shuffle to reduce hotspots and starvation.
+
+When multiple end users share one downstream API key, send `X-Codex2API-Affinity-Key` with a stable user or conversation identifier. Codex2API hashes it for local account affinity only and never forwards it upstream.
 
 Concurrency rules:
 
@@ -472,6 +475,8 @@ Concurrency rules:
 | `warm` | Base concurrency / 2, at least 1 |
 | `risky` | Fixed at 1 |
 | `banned` | Fixed at 0, not schedulable |
+
+The persistent upstream WebSocket pool is also capped by each account's current `DynamicConcurrencyLimit`, so connection reuse cannot grow beyond the account's effective concurrency.
 
 Observability:
 

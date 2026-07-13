@@ -7770,6 +7770,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AffinityMode:                       h.store.GetAffinityMode(),
 		MaxRetries:                         h.store.GetMaxRetries(),
 		MaxRateLimitRetries:                h.store.GetMaxRateLimitRetries(),
+		RetryIntervalMS:                    h.store.GetRetryIntervalMS(),
+		TransportRetryPolicy:               h.store.GetTransportRetryPolicy(),
 		AllowRemoteMigration:               h.store.GetAllowRemoteMigration() && adminAuthSource != "disabled",
 		DatabaseDriver:                     h.databaseDriver,
 		DatabaseLabel:                      h.databaseLabel,

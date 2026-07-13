@@ -147,10 +147,9 @@ func (h *Handler) Messages(c *gin.Context) {
 	// 提取 reasoning effort（从翻译后的 codex body 中）
 	reasoningEffort := extractReasoningEffort(codexBody)
 	serviceTier := extractServiceTier(codexBody)
-	sessionID := ResolveSessionID(c.Request.Header, codexBody)
-	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, codexBody)
+	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, codexBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -160,7 +159,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	var lastStatusCode int
 	var lastBody []byte
 	retryExclusions := newRetryAccountExclusions()
-	forceHTTPAfterWSMessageTooBig := false
+	var wsHTTPFallback websocketHTTPFallbackState
 
 	var lastUpstreamCancel context.CancelFunc
 	defer func() {
@@ -170,7 +169,10 @@ func (h *Handler) Messages(c *gin.Context) {
 	}()
 
 	for attempt := 0; ; attempt++ {
-		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
+		if !retainedHTTPFallback {
+			account, stickyProxyURL = h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		}
 		if account == nil {
 			if lastStatusCode == http.StatusTooManyRequests && len(lastBody) > 0 {
 				sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "All accounts rate limited")
@@ -182,10 +184,15 @@ func (h *Handler) Messages(c *gin.Context) {
 
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		if !retainedHTTPFallback {
+			h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		}
+		if wsHTTPFallback.ForceHTTP() {
+			log.Printf("上游 WebSocket 1009 后启动 HTTP 降级尝试 (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/messages, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
+		}
 		isRelayAccount := account.IsOpenAIResponsesAPI()
 		attemptEffectiveModel := effectiveModel
-		useWebsocket := h.shouldUseWebsocketForHTTP() && !forceHTTPAfterWSMessageTooBig && !isRelayAccount
+		useWebsocket := h.shouldUseWebsocketForHTTP() && !wsHTTPFallback.ForceHTTP() && !isRelayAccount
 		upstreamEndpoint := "/v1/responses"
 		if isRelayAccount {
 			relayBaseURL, _ := account.OpenAIResponsesCredentials()
@@ -210,7 +217,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 
 		downstreamHeaders := c.Request.Header.Clone()
-		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionID, explicitSessionID, useWebsocket)
+		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, useWebsocket)
 		if lastUpstreamCancel != nil {
 			lastUpstreamCancel()
 		}
@@ -238,11 +245,13 @@ func (h *Handler) Messages(c *gin.Context) {
 				reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
 			}
 			kind := classifyTransportFailure(reqErr)
+			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
+				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/messages", account.ID(), attempt+1, durationMs, 0, logStatusUpstreamStreamBreak)
+			}
 			if useWebsocket && kind == upstreamErrorKindMessageTooBig {
-				log.Printf("上游 WebSocket 请求帧过大，自动降级 HTTP 重试 (attempt %d, account %d, /v1/messages): %v", attempt+1, account.ID(), reqErr)
-				forceHTTPAfterWSMessageTooBig = true
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				wsElapsed := time.Since(start)
+				wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(reqErr.Error()))
+				log.Printf("上游 WebSocket 1009，保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/messages, ws_elapsed_ms=%d): %v", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), reqErr)
 				continue
 			}
 			retryable := IsRetryableError(reqErr) || kind != ""
@@ -279,6 +288,9 @@ func (h *Handler) Messages(c *gin.Context) {
 
 		if resp.StatusCode != http.StatusOK {
 			ttftGuard.Stop()
+			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
+				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/messages", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
+			}
 			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
@@ -515,13 +527,15 @@ func (h *Handler) Messages(c *gin.Context) {
 				outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
 			}
 		}
+		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
+			wsHTTPFallback.LogHTTPAttemptCompletion("/v1/messages", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
+		}
 		if shouldFallbackWebsocketMessageTooBigToHTTP(outcome, useWebsocket, wroteAnyBody, c.Request.Context().Err(), writeErr) {
-			log.Printf("上游 WebSocket 消息过大，首包前自动降级 HTTP 重试 (attempt %d, account %d, /v1/messages): %s",
-				attempt+1, account.ID(), outcome.failureMessage)
-			forceHTTPAfterWSMessageTooBig = true
+			wsElapsed := time.Since(start)
 			resp.Body.Close()
-			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(outcome.failureMessage))
+			log.Printf("上游 WebSocket 1009，首包前保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/messages, ws_elapsed_ms=%d): %s",
+				wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), outcome.failureMessage)
 			continue
 		}
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {

@@ -72,7 +72,7 @@ func TestClassifyStreamOutcome(t *testing.T) {
 			readErr:      errors.New("websocket read error: websocket: close 1009 (message too big)"),
 			wantStatus:   logStatusUpstreamStreamBreak,
 			wantKind:     upstreamErrorKindMessageTooBig,
-			wantPenalize: true,
+			wantPenalize: false,
 		},
 		{
 			name:         "upstream early eof",
@@ -103,7 +103,7 @@ func TestShouldFallbackWebsocketMessageTooBigToHTTP(t *testing.T) {
 		logStatusCode:  logStatusUpstreamStreamBreak,
 		failureKind:    upstreamErrorKindMessageTooBig,
 		failureMessage: "上游流读取失败: websocket read error: websocket: close 1009 (message too big)",
-		penalize:       true,
+		penalize:       false,
 	}
 
 	if !shouldFallbackWebsocketMessageTooBigToHTTP(outcome, true, false, nil, nil) {
@@ -117,6 +117,23 @@ func TestShouldFallbackWebsocketMessageTooBigToHTTP(t *testing.T) {
 	}
 	if shouldFallbackWebsocketMessageTooBigToHTTP(outcome, true, false, context.Canceled, nil) {
 		t.Fatal("should not fall back after downstream context is canceled")
+	}
+}
+
+func TestWebsocketMessageTooBigSource(t *testing.T) {
+	readLimitErr := errors.New("websocket read error: websocket: read limit exceeded")
+	if got := classifyTransportFailure(readLimitErr); got != upstreamErrorKindMessageTooBig {
+		t.Fatalf("local read-limit failure kind = %q, want %q", got, upstreamErrorKindMessageTooBig)
+	}
+	outcome := classifyStreamOutcome(nil, readLimitErr, nil, false)
+	if outcome.failureKind != upstreamErrorKindMessageTooBig || outcome.penalize || outcome.verifyAccountAuth {
+		t.Fatalf("local read-limit outcome = %+v, want message-too-big without penalty or auth verification", outcome)
+	}
+	if got := websocketMessageTooBigSource(outcome.failureMessage); got != "local_read_limit" {
+		t.Fatalf("local read-limit source = %q", got)
+	}
+	if got := websocketMessageTooBigSource("websocket read error: websocket: close 1009 (message too big)"); got != "peer_close" {
+		t.Fatalf("peer close source = %q", got)
 	}
 }
 
@@ -1050,6 +1067,94 @@ func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 	if got := ResolveSessionID(headers, []byte(`{"prompt_cache_key":"body-key"}`)); got != "idempotency-key-1" {
 		t.Fatalf("ResolveSessionID() = %q, want %q", got, "idempotency-key-1")
 	}
+}
+
+func TestResolveSessionIDUsesLocalAffinityHeader(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"same prompt"}]}`)
+	baseHeaders := http.Header{"Authorization": []string{"Bearer shared-key"}}
+	headersA := baseHeaders.Clone()
+	headersA.Set("X-Codex2API-Affinity-Key", "user-a")
+	headersB := headersA.Clone()
+	headersB.Set("X-Codex2API-Affinity-Key", "user-b")
+
+	identityWithoutAffinity := resolveRequestSessionIdentity(baseHeaders, body)
+	identityA := resolveRequestSessionIdentity(headersA, body)
+	identityB := resolveRequestSessionIdentity(headersB, body)
+	idA := identityA.affinityID
+	idARepeat := ResolveSessionID(headersA, body)
+	idB := identityB.affinityID
+	if idA == "" || idA != idARepeat {
+		t.Fatalf("affinity id must be non-empty and stable: first=%q repeat=%q", idA, idARepeat)
+	}
+	if idA == idB {
+		t.Fatalf("different affinity headers produced the same id %q", idA)
+	}
+	if idA == "user-a" || idB == "user-b" {
+		t.Fatal("raw downstream affinity identifiers must not be retained")
+	}
+	if explicit := ResolveExplicitSessionID(headersA, body); explicit != "" {
+		t.Fatalf("local affinity header leaked into upstream explicit session id: %q", explicit)
+	}
+	if identityA.upstreamSeed != identityWithoutAffinity.upstreamSeed || identityB.upstreamSeed != identityWithoutAffinity.upstreamSeed {
+		t.Fatalf("local affinity changed upstream seed: without=%q a=%q b=%q", identityWithoutAffinity.upstreamSeed, identityA.upstreamSeed, identityB.upstreamSeed)
+	}
+	if identityA.explicitUpstreamID != "" || identityB.explicitUpstreamID != "" {
+		t.Fatalf("local affinity became an explicit upstream id: a=%q b=%q", identityA.explicitUpstreamID, identityB.explicitUpstreamID)
+	}
+}
+
+func TestLocalAffinityDoesNotAffectPerAPIKeyHTTPUpstreamSessionID(t *testing.T) {
+	previousSettings := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
+	nextSettings := previousSettings
+	nextSettings.RequestIsolationMode = RequestIsolationModePerAPIKey
+	ApplyRuntimeSettings(nextSettings)
+
+	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"same prompt"}]}`)
+	baseHeaders := http.Header{"Authorization": []string{"Bearer shared-key"}}
+	affinityHeaders := baseHeaders.Clone()
+	affinityHeaders.Set("X-Codex2API-Affinity-Key", "user-a")
+
+	withoutAffinity := resolveRequestSessionIdentity(baseHeaders, body)
+	withAffinity := resolveRequestSessionIdentity(affinityHeaders, body)
+	withoutUpstreamID := resolveUpstreamSessionID(7, withoutAffinity.upstreamSeed, withoutAffinity.explicitUpstreamID, false)
+	withUpstreamID := resolveUpstreamSessionID(7, withAffinity.upstreamSeed, withAffinity.explicitUpstreamID, false)
+	if withoutUpstreamID == "" || withUpstreamID != withoutUpstreamID {
+		t.Fatalf("per-api-key HTTP upstream id changed with local affinity: without=%q with=%q", withoutUpstreamID, withUpstreamID)
+	}
+	if withUpstreamID == withAffinity.affinityID {
+		t.Fatalf("local affinity id leaked as upstream id %q", withUpstreamID)
+	}
+}
+
+func TestLocalAffinityPreservesExplicitAndAPIKeyUpstreamSeeds(t *testing.T) {
+	t.Run("explicit session", func(t *testing.T) {
+		headers := http.Header{
+			"Authorization": []string{"Bearer shared-key"},
+			"Session_id":    []string{"explicit-session"},
+		}
+		headers.Set("X-Codex2API-Affinity-Key", "user-a")
+		identity := resolveRequestSessionIdentity(headers, []byte(`{"model":"gpt-5.4"}`))
+		if identity.upstreamSeed != "explicit-session" || identity.explicitUpstreamID != "explicit-session" {
+			t.Fatalf("explicit upstream identity changed: seed=%q explicit=%q", identity.upstreamSeed, identity.explicitUpstreamID)
+		}
+		if identity.affinityID == identity.upstreamSeed {
+			t.Fatalf("local affinity did not remain separate from explicit upstream seed %q", identity.upstreamSeed)
+		}
+	})
+
+	t.Run("api key fallback", func(t *testing.T) {
+		headers := http.Header{"Authorization": []string{"Bearer shared-key"}}
+		headers.Set("X-Codex2API-Affinity-Key", "user-a")
+		identity := resolveRequestSessionIdentity(headers, []byte(`{}`))
+		wantSeed := uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:shared-key")).String()
+		if identity.upstreamSeed != wantSeed || identity.explicitUpstreamID != "" {
+			t.Fatalf("API-key upstream fallback changed: seed=%q explicit=%q want=%q", identity.upstreamSeed, identity.explicitUpstreamID, wantSeed)
+		}
+		if identity.affinityID == identity.upstreamSeed {
+			t.Fatalf("local affinity did not remain separate from API-key upstream seed %q", identity.upstreamSeed)
+		}
+	})
 }
 
 func TestResolveExplicitSessionIDDoesNotUseAPIKeyFallback(t *testing.T) {

@@ -14,6 +14,10 @@ func TestClassifyStreamOutcomeFlagsWSCloseForAuthVerify(t *testing.T) {
 	if out := classifyStreamOutcome(nil, wsErr, nil, false); !out.verifyAccountAuth {
 		t.Fatalf("WS close 应置 verifyAccountAuth，得到 %+v", out)
 	}
+	messageTooBig := errors.New("websocket read error: websocket: close 1009 (message too big)")
+	if out := classifyStreamOutcome(nil, messageTooBig, nil, false); out.verifyAccountAuth || out.penalize {
+		t.Fatalf("WS close 1009 不应触发鉴权探针或账号处罚，得到 %+v", out)
+	}
 
 	if out := classifyStreamOutcome(nil, errors.New("connection reset by peer"), nil, false); out.verifyAccountAuth {
 		t.Fatal("普通 transport 失败不应触发鉴权验证")

@@ -271,7 +271,7 @@ func CORSMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Header("Access-Control-Allow-Origin", "*")
 		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS, PATCH")
-		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Request-ID, X-API-Version")
+		c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Accept, Authorization, X-Request-ID, X-API-Version, X-Codex2API-Affinity-Key")
 		c.Header("Access-Control-Expose-Headers", "X-Request-ID, X-API-Version, X-API-Supported-Versions")
 		c.Header("Access-Control-Max-Age", "86400")
 

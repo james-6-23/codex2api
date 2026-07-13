@@ -934,6 +934,16 @@ export default function Accounts() {
   const [batchTags, setBatchTags] = useState<string[]>([]);
   const [batchUpdateGroups, setBatchUpdateGroups] = useState(false);
   const [batchGroupIds, setBatchGroupIds] = useState<number[]>([]);
+  const [batchUpdateScoreBias, setBatchUpdateScoreBias] = useState(false);
+  const [batchScoreBiasInput, setBatchScoreBiasInput] = useState("");
+  const [batchUpdateBaseConcurrency, setBatchUpdateBaseConcurrency] =
+    useState(false);
+  const [batchBaseConcurrencyInput, setBatchBaseConcurrencyInput] =
+    useState("");
+  const [batchUpdateSchedulerPriority, setBatchUpdateSchedulerPriority] =
+    useState(false);
+  const [batchSchedulerPriorityInput, setBatchSchedulerPriorityInput] =
+    useState("");
   const [batchMetaSubmitting, setBatchMetaSubmitting] = useState(false);
   const [showBatchQuotaAutoPauseEditor, setShowBatchQuotaAutoPauseEditor] =
     useState(false);
@@ -3133,6 +3143,12 @@ export default function Accounts() {
     setBatchTags([]);
     setBatchUpdateGroups(false);
     setBatchGroupIds([]);
+    setBatchUpdateScoreBias(false);
+    setBatchScoreBiasInput("");
+    setBatchUpdateBaseConcurrency(false);
+    setBatchBaseConcurrencyInput("");
+    setBatchUpdateSchedulerPriority(false);
+    setBatchSchedulerPriorityInput("");
     setShowBatchMetaEditor(true);
   };
 
@@ -3142,6 +3158,12 @@ export default function Accounts() {
     setBatchTags([]);
     setBatchUpdateGroups(true);
     setBatchGroupIds([]);
+    setBatchUpdateScoreBias(false);
+    setBatchScoreBiasInput("");
+    setBatchUpdateBaseConcurrency(false);
+    setBatchBaseConcurrencyInput("");
+    setBatchUpdateSchedulerPriority(false);
+    setBatchSchedulerPriorityInput("");
     setShowBatchMetaEditor(true);
   };
 
@@ -3171,9 +3193,47 @@ export default function Accounts() {
     }
   };
 
+  const batchScoreBiasTrimmed = batchScoreBiasInput.trim();
+  const batchScoreBiasValue = batchScoreBiasTrimmed
+    ? parseIntegerInput(batchScoreBiasTrimmed)
+    : null;
+  const batchScoreBiasInvalid =
+    batchUpdateScoreBias &&
+    batchScoreBiasTrimmed !== "" &&
+    (batchScoreBiasValue === null ||
+      batchScoreBiasValue < -200 ||
+      batchScoreBiasValue > 200);
+  const batchBaseConcurrencyTrimmed = batchBaseConcurrencyInput.trim();
+  const batchBaseConcurrencyValue = batchBaseConcurrencyTrimmed
+    ? parseIntegerInput(batchBaseConcurrencyTrimmed)
+    : null;
+  const batchBaseConcurrencyInvalid =
+    batchUpdateBaseConcurrency &&
+    batchBaseConcurrencyTrimmed !== "" &&
+    (batchBaseConcurrencyValue === null ||
+      batchBaseConcurrencyValue < 1 ||
+      batchBaseConcurrencyValue > 50);
+  const batchSchedulerPriorityInvalid =
+    batchUpdateSchedulerPriority &&
+    isSchedulerPriorityInputInvalid(batchSchedulerPriorityInput);
+  const batchMetaHasUpdates =
+    batchUpdateTags ||
+    batchUpdateGroups ||
+    batchUpdateScoreBias ||
+    batchUpdateBaseConcurrency ||
+    batchUpdateSchedulerPriority;
+  const batchMetaInvalid =
+    batchScoreBiasInvalid ||
+    batchBaseConcurrencyInvalid ||
+    batchSchedulerPriorityInvalid;
+
   const handleBatchSaveMeta = async () => {
     const ids = Array.from(selected);
-    if (ids.length === 0 || (!batchUpdateTags && !batchUpdateGroups)) return;
+    if (ids.length === 0 || !batchMetaHasUpdates) return;
+    if (batchMetaInvalid) {
+      showToast(t("accounts.schedulerInvalidInput"), "error");
+      return;
+    }
     setBatchMetaSubmitting(true);
     try {
       const result = await api.batchUpdateAccounts(
@@ -3183,6 +3243,14 @@ export default function Accounts() {
           tags: batchTags,
           updateGroups: batchUpdateGroups,
           groupIds: batchGroupIds,
+          updateScoreBias: batchUpdateScoreBias,
+          scoreBias: batchScoreBiasValue,
+          updateBaseConcurrency: batchUpdateBaseConcurrency,
+          baseConcurrency: batchBaseConcurrencyValue,
+          updateSchedulerPriority: batchUpdateSchedulerPriority,
+          schedulerPriority: schedulerPriorityInputToValue(
+            batchSchedulerPriorityInput,
+          ),
         }),
       );
       showToast(
@@ -7215,7 +7283,7 @@ export default function Accounts() {
                 ? "accounts.batchGroupTitle"
                 : "accounts.batchMetaTitle",
             )}
-            contentClassName="sm:max-w-[560px]"
+            contentClassName="sm:max-w-[760px]"
             onClose={() => {
               if (batchMetaSubmitting) return;
               setShowBatchMetaEditor(false);
@@ -7235,7 +7303,8 @@ export default function Accounts() {
                   onClick={() => void handleBatchSaveMeta()}
                   disabled={
                     batchMetaSubmitting ||
-                    (!batchUpdateTags && !batchUpdateGroups)
+                    !batchMetaHasUpdates ||
+                    batchMetaInvalid
                   }
                 >
                   {batchMetaSubmitting
@@ -7296,6 +7365,118 @@ export default function Accounts() {
                     disabled={!batchUpdateTags}
                     maxVisible={6}
                   />
+                </div>
+              ) : null}
+              {batchMetaMode === "all" ? (
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div className="rounded-xl border border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.schedulerScoreLabel")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.schedulerScoreHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateScoreBias}
+                        onCheckedChange={setBatchUpdateScoreBias}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.schedulerScoreLabel")}`}
+                      />
+                    </div>
+                    <Input
+                      className="mt-3"
+                      inputMode="numeric"
+                      value={batchScoreBiasInput}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setBatchScoreBiasInput(event.target.value)
+                      }
+                      placeholder={t("accounts.schedulerScorePlaceholder")}
+                      disabled={!batchUpdateScoreBias}
+                    />
+                    <div
+                      className={`mt-1.5 text-xs ${batchScoreBiasInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                    >
+                      {batchScoreBiasInvalid
+                        ? t("accounts.schedulerScoreRange")
+                        : t("accounts.batchMetaResetHint")}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.schedulerConcurrencyLabel")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.schedulerConcurrencyHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateBaseConcurrency}
+                        onCheckedChange={setBatchUpdateBaseConcurrency}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.schedulerConcurrencyLabel")}`}
+                      />
+                    </div>
+                    <Input
+                      className="mt-3"
+                      inputMode="numeric"
+                      value={batchBaseConcurrencyInput}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setBatchBaseConcurrencyInput(event.target.value)
+                      }
+                      placeholder={t(
+                        "accounts.schedulerConcurrencyPlaceholder",
+                      )}
+                      disabled={!batchUpdateBaseConcurrency}
+                    />
+                    <div
+                      className={`mt-1.5 text-xs ${batchBaseConcurrencyInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                    >
+                      {batchBaseConcurrencyInvalid
+                        ? t("accounts.schedulerConcurrencyRange")
+                        : t("accounts.batchMetaResetHint")}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.schedulerPriorityTitle")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.schedulerPriorityHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateSchedulerPriority}
+                        onCheckedChange={setBatchUpdateSchedulerPriority}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.schedulerPriorityTitle")}`}
+                      />
+                    </div>
+                    <Input
+                      className="mt-3"
+                      inputMode="numeric"
+                      value={batchSchedulerPriorityInput}
+                      onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                        setBatchSchedulerPriorityInput(event.target.value)
+                      }
+                      placeholder={t(
+                        "accounts.schedulerPriorityPlaceholder",
+                      )}
+                      disabled={!batchUpdateSchedulerPriority}
+                    />
+                    <div
+                      className={`mt-1.5 text-xs ${batchSchedulerPriorityInvalid ? "text-red-500" : "text-muted-foreground"}`}
+                    >
+                      {batchSchedulerPriorityInvalid
+                        ? t("accounts.schedulerPriorityRange")
+                        : t("accounts.batchMetaResetHint")}
+                    </div>
+                  </div>
                 </div>
               ) : null}
               <div className="rounded-xl border border-border p-4">

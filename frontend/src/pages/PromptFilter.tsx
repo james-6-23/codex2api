@@ -25,6 +25,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
+import { DraftNumberInput } from '@/components/ui/draft-number-input'
 import { Select } from '@/components/ui/select'
 import {
   Table,
@@ -519,16 +520,16 @@ function OverviewView({
                 />
               </Field>
               <Field label={t('promptFilter.threshold')}>
-                <Input type="number" min={1} max={100} value={form.prompt_filter_threshold} onChange={(event) => setForm((current) => ({ ...current, prompt_filter_threshold: parseInt(event.target.value, 10) || 1 }))} />
+                <DraftNumberInput min={1} max={100} value={form.prompt_filter_threshold} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_threshold: value }))} />
               </Field>
               <Field label={t('promptFilter.strictThreshold')}>
-                <Input type="number" min={1} max={100} value={form.prompt_filter_strict_threshold} onChange={(event) => setForm((current) => ({ ...current, prompt_filter_strict_threshold: parseInt(event.target.value, 10) || 1 }))} />
+                <DraftNumberInput min={1} max={100} value={form.prompt_filter_strict_threshold} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_strict_threshold: value }))} />
               </Field>
               <Field label={t('promptFilter.logMatches')}>
                 <Select value={form.prompt_filter_log_matches ? 'true' : 'false'} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_log_matches: value === 'true' }))} options={booleanOptions} />
               </Field>
               <Field label={t('promptFilter.maxTextLength')}>
-                <Input type="number" min={1024} max={262144} value={form.prompt_filter_max_text_length} onChange={(event) => setForm((current) => ({ ...current, prompt_filter_max_text_length: parseInt(event.target.value, 10) || 81920 }))} />
+                <DraftNumberInput min={1024} max={262144} value={form.prompt_filter_max_text_length} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_max_text_length: value }))} />
               </Field>
             </div>
             <Field label={t('promptFilter.sensitiveWords')}>
@@ -559,7 +560,7 @@ function OverviewView({
                   />
                 </Field>
                 <Field label={t('promptFilter.reviewTimeout')}>
-                  <Input type="number" min={1} max={60} value={form.prompt_filter_review_timeout_seconds} onChange={(event) => setForm((current) => ({ ...current, prompt_filter_review_timeout_seconds: parseInt(event.target.value, 10) || 10 }))} />
+                  <DraftNumberInput min={1} max={60} value={form.prompt_filter_review_timeout_seconds} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_review_timeout_seconds: value }))} />
                 </Field>
               </div>
               <div className="grid gap-4 lg:grid-cols-[minmax(0,1.3fr)_minmax(180px,0.8fr)]">

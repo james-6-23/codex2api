@@ -276,16 +276,16 @@ func IsolateCodexSessionID(apiKeyID int64, raw string) string {
 //     Session_id），WS 返回 ""（交给 ExecuteRequest 的 stateless 路径，连接池键单独稳定）。
 //   - 无显式会话 + per-api-key：WS 返回 ""、HTTP 走 IsolateCodexSessionID（恢复旧的按 Key 共享）。
 //
-// 注意：账号粘性键(affinityKey)在 handler 中由独立的 sessionID(ResolveSessionID) 派生，
-// 不经过本函数，因此隔离上游身份不会影响账号选择 / token 刷新行为。
-func resolveUpstreamSessionID(apiKeyID int64, sessionID, explicitSessionID string, useWebsocket bool) string {
+// 注意：账号粘性键由 requestSessionIdentity.affinityID 派生；本函数只接收
+// upstreamSeed，因此本地 affinity header 不会影响上游身份。
+func resolveUpstreamSessionID(apiKeyID int64, upstreamSeed, explicitSessionID string, useWebsocket bool) string {
 	if useWebsocket && explicitSessionID == "" {
 		return ""
 	}
 	if explicitSessionID == "" && CurrentRuntimeSettings().IsolateRequestsByDefault() {
 		return uuid.NewString()
 	}
-	return IsolateCodexSessionID(apiKeyID, sessionID)
+	return IsolateCodexSessionID(apiKeyID, upstreamSeed)
 }
 
 // ExecuteRequest 向 Codex 上游发送请求
@@ -849,41 +849,80 @@ func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account
 	applyAccountCustomHeaders(req, account)
 }
 
+const downstreamAffinityHeader = "X-Codex2API-Affinity-Key"
+
+// requestSessionIdentity keeps the local account-routing identity separate
+// from the seed used to derive an upstream Session_id/prompt_cache_key. The
+// dedicated downstream affinity header may only replace affinityID; it must
+// never change upstreamSeed or become an explicit upstream session.
+type requestSessionIdentity struct {
+	affinityID         string
+	upstreamSeed       string
+	explicitUpstreamID string
+}
+
 // ResolveSessionID 从下游请求提取或生成 session ID
 // 优先级：
-//  1. Header: Session_id
-//  2. Header: Conversation_id
-//  3. Header: Idempotency-Key
-//  4. Body:   prompt_cache_key
-//  5. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
+//  1. Header: X-Codex2API-Affinity-Key（仅本地使用，先哈希再参与绑定）
+//  2. Header: Session_id
+//  3. Header: Conversation_id
+//  4. Header: Idempotency-Key
+//  5. Body:   prompt_cache_key
+//  6. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
 //     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
-//  6. 基于 Bearer API Key 的确定性 UUID
+//  7. 基于 Bearer API Key 的确定性 UUID
 //
-// 第 5 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
+// 第 6 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
 // 用户共用时，粘性粒度从"整个 Key 挤一个账号"细化为"每段对话独立粘定"。
-// 该值只参与本地路由（affinityKey），默认隔离模式下不发往上游。
+// 专用 affinity header 永不参与上游 session ID / prompt_cache_key，也不会被转发；
+// 下游网关可用它传稳定的最终用户/对话标识，在共享 Bearer Key 时仍实现一人一号式绑定。
 func ResolveSessionID(headers http.Header, body []byte) string {
-	if explicit := ResolveExplicitSessionID(headers, body); explicit != "" {
-		return explicit
+	return resolveRequestSessionIdentity(headers, body).affinityID
+}
+
+func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSessionIdentity {
+	explicitID := ResolveExplicitSessionID(headers, body)
+	upstreamSeed := explicitID
+	if upstreamSeed == "" {
+		upstreamSeed = deriveContentSessionSeed(body)
+	}
+	if upstreamSeed == "" {
+		// 基于下游用户的 API Key 生成确定性 cache key（参考 CLIProxyAPI codex_executor.go:621）
+		authHeader := ""
+		if headers != nil {
+			authHeader = headers.Get("Authorization")
+		}
+		apiKey := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+		if apiKey != "" {
+			upstreamSeed = uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:"+apiKey)).String()
+		}
+	}
+	if upstreamSeed == "" {
+		// 最后兜底：本地路由和上游 seed 共享同一个随机 UUID。
+		upstreamSeed = uuid.New().String()
 	}
 
-	if seed := deriveContentSessionSeed(body); seed != "" {
-		return seed
+	affinityID := upstreamSeed
+	if localAffinityID := resolveDownstreamAffinityID(headers); localAffinityID != "" {
+		affinityID = localAffinityID
 	}
+	return requestSessionIdentity{
+		affinityID:         affinityID,
+		upstreamSeed:       upstreamSeed,
+		explicitUpstreamID: explicitID,
+	}
+}
 
-	// 基于下游用户的 API Key 生成确定性 cache key（参考 CLIProxyAPI codex_executor.go:621）
-	authHeader := ""
-	if headers != nil {
-		authHeader = headers.Get("Authorization")
+func resolveDownstreamAffinityID(headers http.Header) string {
+	if headers == nil {
+		return ""
 	}
-	apiKey := strings.TrimPrefix(authHeader, "Bearer ")
-	apiKey = strings.TrimSpace(apiKey)
-	if apiKey != "" {
-		return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:"+apiKey)).String()
+	raw := strings.TrimSpace(headers.Get(downstreamAffinityHeader))
+	if raw == "" {
+		return ""
 	}
-
-	// 最后兜底：生成随机 UUID
-	return uuid.New().String()
+	sum := sha256.Sum256([]byte("codex2api:downstream-affinity:" + raw))
+	return "affinity-" + hex.EncodeToString(sum[:16])
 }
 
 func ResolveExplicitSessionID(headers http.Header, body []byte) string {

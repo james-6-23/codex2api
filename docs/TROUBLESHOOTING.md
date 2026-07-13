@@ -11,6 +11,7 @@
 - [性能问题](#性能问题)
 - [网络/代理问题](#网络代理问题)
 - [日志分析](#日志分析)
+- [WS 1009 与首事件延迟](#ws-1009-与首事件延迟)
 
 ---
 
@@ -431,6 +432,28 @@ docker compose logs codex2api | awk '{for(i=1;i<=NF;i++){if($i ~ /@/){gsub(/[\[\
 │                 │                └── HTTP 方法
 │                 └── 源码文件和行号
 ```
+
+### WS 1009 与首事件延迟
+
+上游 WebSocket 可能在等待较长时间后才返回 close 1009。若此时尚未向客户端输出内容，Codex2API 会保留同一账号和代理并降级一次 HTTP；已经输出内容后不会降级。
+
+搜索包含 `WebSocket 1009 HTTP 降级尝试结束` 的日志，并按以下字段拆分耗时：
+
+```text
+fallback_id
+source=peer_close|local_read_limit
+attempt
+account
+endpoint
+status
+ws_elapsed_ms
+http_elapsed_ms
+http_first_event_ms
+total_first_event_ms
+total_elapsed_ms
+```
+
+`ws_elapsed_ms` 是降级前不可避免的 WS 等待，`http_first_event_ms` 是 HTTP 真正开始后的首事件时间；同一 `fallback_id` 可关联后续 HTTP 重试。当前没有可靠证据表明 1009 与 token 数或最终请求体字节数存在统一阈值，因此排障时不要据此猜测或提前切换协议。
 
 ### 诊断脚本
 

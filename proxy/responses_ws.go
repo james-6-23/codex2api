@@ -181,10 +181,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 
-	sessionID := ResolveSessionID(c.Request.Header, rawBody)
-	explicitSessionID := ResolveExplicitSessionID(c.Request.Header, rawBody)
+	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionID, apiKeyID)
+	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	respCacheOwner := responseCacheOwner(apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
@@ -240,7 +239,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	var lastRetryableUpstreamErr *api.APIError
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
-	forceHTTPAfterWSMessageTooBig := false
+	var wsHTTPFallback websocketHTTPFallbackState
 	var lastUpstreamCancel context.CancelFunc
 	defer func() {
 		if lastUpstreamCancel != nil {
@@ -249,7 +248,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}()
 
 	for attempt := 0; ; attempt++ {
-		account, stickyProxyURL := h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
+		if !retainedHTTPFallback {
+			account, stickyProxyURL = h.nextRetryAccountForSession(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter)
+		}
 		if account == nil {
 			if lastRetryableUpstreamErr != nil {
 				apiErr = responsesWSClientUpstreamAPIError(lastRetryableUpstreamErr, hideUpstreamErrors)
@@ -264,7 +266,12 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		if !retainedHTTPFallback {
+			h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		}
+		if wsHTTPFallback.ForceHTTP() {
+			log.Printf("Responses WebSocket upstream HTTP fallback attempt started (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
+		}
 
 		apiKey := strings.TrimSpace(strings.TrimPrefix(c.GetHeader("Authorization"), "Bearer "))
 		deviceCfg := h.deviceCfg
@@ -279,7 +286,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
-		useWebsocket := !forceHTTPAfterWSMessageTooBig
+		useWebsocket := !wsHTTPFallback.ForceHTTP()
 		// 生图请求改走 HTTP 上游（客户端仍是 WS）：WebSocket 上游传输大体积
 		// 图片数据会卡死（issue #220）；自然语言生图意图也需保留图片工具（issue #288）。
 		if useWebsocket && rawResponsesBodyShouldForceHTTPForImageGeneration(rawBody) {
@@ -293,7 +300,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		// 在 useWebsocket 最终确定后再派生上游身份键：与 handler.go 的
 		// Responses/ChatCompletions 路径一致——无显式会话默认每请求隔离上游身份，
 		// WS 路径交给 ExecuteRequest 的 stateless 槽位池处理。
-		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionID, explicitSessionID, useWebsocket)
+		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, useWebsocket)
 		resp, reqErr := ExecuteRequest(upstreamCtx, account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -304,11 +311,13 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				reqErr = firstTokenTimeoutError(currentFirstTokenTimeout())
 			}
 			kind := classifyTransportFailure(reqErr)
+			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
+				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, logStatusUpstreamStreamBreak)
+			}
 			if useWebsocket && kind == upstreamErrorKindMessageTooBig {
-				log.Printf("Responses WebSocket upstream request frame too large; falling back to HTTP (attempt %d, account %d): %v", attempt+1, account.ID(), reqErr)
-				forceHTTPAfterWSMessageTooBig = true
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				wsElapsed := time.Since(start)
+				wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(reqErr.Error()))
+				log.Printf("Responses WebSocket upstream close 1009; retaining account lease and falling back to HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d): %v", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), reqErr)
 				continue
 			}
 			retryable := IsRetryableError(reqErr) || kind != ""
@@ -359,6 +368,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 
 		if resp.StatusCode != http.StatusOK {
 			ttftGuard.Stop()
+			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
+				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
+			}
 			errBody, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
 
@@ -436,13 +448,18 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 		}
 
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, expandedInputRaw, start, ttftGuard, silentRetryEnabled, hideUpstreamErrors, useWebsocket); err != nil {
+		var fallbackLog *websocketHTTPFallbackState
+		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
+			fallbackLog = &wsHTTPFallback
+		}
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, expandedInputRaw, start, ttftGuard, silentRetryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1); err != nil {
 			var retryErr *responsesWSRetryableStreamError
 			if errors.As(err, &retryErr) {
 				lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
 				if useWebsocket && isWebsocketMessageTooBigOutcome(retryErr.outcome) {
-					log.Printf("Responses WebSocket upstream message too large before first token; falling back to HTTP (attempt %d, account %d): %s", attempt+1, account.ID(), retryErr.outcome.failureMessage)
-					forceHTTPAfterWSMessageTooBig = true
+					wsElapsed := time.Since(start)
+					wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(retryErr.outcome.failureMessage))
+					log.Printf("Responses WebSocket upstream close 1009 before first event; retaining account lease and falling back to HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d): %s", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), retryErr.outcome.failureMessage)
 					continue
 				}
 				if silentRetryEnabled && attempt < maxRetries {
@@ -494,6 +511,8 @@ func (h *Handler) streamResponsesWSUpstream(
 	silentRetryEnabled bool,
 	hideUpstreamErrors bool,
 	viaWebsocket bool,
+	fallbackLog *websocketHTTPFallbackState,
+	fallbackAttempt int,
 ) error {
 	SyncCodexUsageState(h.store, account, resp)
 
@@ -628,10 +647,11 @@ func (h *Handler) streamResponsesWSUpstream(
 		// 否则只有非 2xx 错误体才会被记入提示词过滤日志。
 		h.logUpstreamCyberPolicy(c, "/v1/responses", model, responseFailedErrorBody(terminalFailurePayload))
 	}
+	if fallbackLog != nil {
+		fallbackLog.LogHTTPAttemptCompletion("/v1/responses", account.ID(), fallbackAttempt, totalDuration, firstTokenMs, outcome.logStatusCode)
+	}
 	if shouldFallbackWebsocketMessageTooBigToHTTP(outcome, viaWebsocket, wroteAnyBody, c.Request.Context().Err(), writeErr) {
 		resp.Body.Close()
-		h.store.Release(account)
-		h.store.UnbindSessionAffinity(affinityKey, account.ID())
 		return &responsesWSRetryableStreamError{outcome: outcome}
 	}
 	if silentRetryEnabled && outcome.penalize && !wroteAnyBody && c.Request.Context().Err() == nil && writeErr == nil {

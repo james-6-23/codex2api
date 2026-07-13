@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +34,10 @@ const (
 type WsConnection struct {
 	// WebSocket 连接
 	conn *websocket.Conn
+
+	// 创建/复用该连接的账号。仅用于读取当前动态并发上限，让 response_id
+	// 续链复用路径也能在账号上限下调后收敛空闲连接数。
+	account *auth.Account
 
 	// 会话
 	session *Session
@@ -235,6 +240,11 @@ type Manager struct {
 
 	// pool key 级别串行化，避免同一逻辑 session 在 acquire 阶段竞争同一条连接
 	keyLocks sync.Map
+	// 账号级串行化连接获取，确保跨 session/pool key 创建连接时仍能严格执行
+	// 每账号连接上限，避免大量短会话各留一条空闲连接。
+	accountLocks   sync.Map
+	capacityMu     sync.Mutex
+	pendingCreates map[int64]int
 
 	// response_id -> 连接 绑定（续链亲和）。上游 chatgpt backend 无服务端存储时，
 	// previous_response_id 的上下文只存活在产生该响应的那条 WS 连接里；带续链 ID
@@ -248,6 +258,9 @@ type Manager struct {
 
 	// 可选的保活 Ping 函数（用于测试替换），nil 时使用默认 SendHeartbeat
 	keepalivePingFunc func(wc *WsConnection) error
+
+	// 测试钩子：连接写入池后、首个 pending/read lease 建立前触发。
+	afterConnectionStored func(wc *WsConnection)
 }
 
 // responseConnBinding 记录某个 response_id 由哪条连接产出。
@@ -398,6 +411,150 @@ func (m *Manager) keyLock(key string) *sync.Mutex {
 	return mu
 }
 
+func (m *Manager) accountLock(accountID int64) *sync.Mutex {
+	if v, ok := m.accountLocks.Load(accountID); ok {
+		return v.(*sync.Mutex)
+	}
+	mu := &sync.Mutex{}
+	if actual, loaded := m.accountLocks.LoadOrStore(accountID, mu); loaded {
+		return actual.(*sync.Mutex)
+	}
+	return mu
+}
+
+func accountConnectionLimit(account *auth.Account) int {
+	if account != nil {
+		if limit := account.GetDynamicConcurrencyLimit(); limit > 0 {
+			return int(limit)
+		}
+	}
+	// 尚未完成调度快照初始化的账号保留原有槽位上限，生产请求进入账号池后
+	// DynamicConcurrencyLimit 会始终为正数。
+	return StatelessConnectionSlots
+}
+
+type idleAccountConnection struct {
+	wc       *WsConnection
+	lastUsed int64
+}
+
+// ensureAccountConnectionCapacity 为即将创建的新连接腾出一个账号级槽位。
+// 只淘汰没有在途请求的最久未使用连接，绝不打断活跃响应。调用方必须持有该账号的
+// accountLock，因此不同 session 同时建连也不会越过动态并发上限。
+func (m *Manager) ensureAccountConnectionCapacity(accountID int64, limit int, protectedKey string, pendingCreates int) bool {
+	if limit < 1 {
+		limit = 1
+	}
+	count := 0
+	stale := make([]*WsConnection, 0)
+	idle := make([]idleAccountConnection, 0)
+	m.connections.Range(func(_, value any) bool {
+		wc, ok := value.(*WsConnection)
+		if !ok || wc == nil || wc.session == nil || wc.session.AccountID != accountID {
+			return true
+		}
+		if !wc.IsConnected() || wc.IsExpired() || isRotatableOverAge(wc) {
+			stale = append(stale, wc)
+			return true
+		}
+		count++
+		if wc.PoolKey != protectedKey && wc.session.PendingCount() == 0 {
+			idle = append(idle, idleAccountConnection{wc: wc, lastUsed: wc.lastUsed.Load()})
+		}
+		return true
+	})
+	for _, wc := range stale {
+		m.DiscardConnection(wc)
+	}
+	if count+pendingCreates < limit {
+		return true
+	}
+	sort.Slice(idle, func(i, j int) bool { return idle[i].lastUsed < idle[j].lastUsed })
+	for _, candidate := range idle {
+		if count+pendingCreates < limit {
+			break
+		}
+		wc := candidate.wc
+		if wc == nil || wc.session == nil || wc.session.PendingCount() != 0 || !wc.IsConnected() {
+			continue
+		}
+		if current, ok := m.connections.Load(wc.PoolKey); !ok || current != wc {
+			continue
+		}
+		m.DiscardConnection(wc)
+		count--
+	}
+	return count+pendingCreates < limit
+}
+
+// trimIdleAccountConnections 在复用现有连接时把账号连接数收敛到当前动态并发上限。
+// 当前要复用的连接始终受保护；其它仍有在途请求的连接也不会被打断。若活跃连接数
+// 本身已经超过上限，本次只清理能够安全回收的空闲连接，后续 acquire 再继续收敛。
+// 调用方必须持有该账号的 accountLock。
+func (m *Manager) trimIdleAccountConnections(accountID int64, limit int, protected *WsConnection) {
+	if limit < 1 {
+		limit = 1
+	}
+	count := 0
+	idle := make([]idleAccountConnection, 0)
+	m.connections.Range(func(_, value any) bool {
+		wc, ok := value.(*WsConnection)
+		if !ok || wc == nil || wc.session == nil || wc.session.AccountID != accountID {
+			return true
+		}
+		count++
+		if wc != protected && wc.session.PendingCount() == 0 {
+			idle = append(idle, idleAccountConnection{wc: wc, lastUsed: wc.lastUsed.Load()})
+		}
+		return true
+	})
+	if count <= limit {
+		return
+	}
+
+	sort.Slice(idle, func(i, j int) bool { return idle[i].lastUsed < idle[j].lastUsed })
+	for _, candidate := range idle {
+		if count <= limit {
+			break
+		}
+		wc := candidate.wc
+		if wc == nil || wc == protected || wc.session == nil || wc.session.PendingCount() != 0 {
+			continue
+		}
+		if current, ok := m.connections.Load(wc.PoolKey); !ok || current != wc {
+			continue
+		}
+		m.DiscardConnection(wc)
+		count--
+	}
+}
+
+func (m *Manager) reserveAccountConnectionCapacity(accountID int64, limit int, protectedKey string) bool {
+	m.capacityMu.Lock()
+	pending := m.pendingCreates[accountID]
+	m.capacityMu.Unlock()
+	if !m.ensureAccountConnectionCapacity(accountID, limit, protectedKey, pending) {
+		return false
+	}
+	m.capacityMu.Lock()
+	if m.pendingCreates == nil {
+		m.pendingCreates = make(map[int64]int)
+	}
+	m.pendingCreates[accountID]++
+	m.capacityMu.Unlock()
+	return true
+}
+
+func (m *Manager) releaseAccountConnectionCapacity(accountID int64) {
+	m.capacityMu.Lock()
+	if pending := m.pendingCreates[accountID]; pending <= 1 {
+		delete(m.pendingCreates, accountID)
+	} else {
+		m.pendingCreates[accountID] = pending - 1
+	}
+	m.capacityMu.Unlock()
+}
+
 // AcquireConnection 获取或创建连接
 // 仅在同一逻辑 session 且连接空闲时复用，避免不同会话共用一条已握手连接。
 func (m *Manager) AcquireConnection(
@@ -410,6 +567,7 @@ func (m *Manager) AcquireConnection(
 ) (*WsConnection, *PendingRequest, error) {
 	key := m.poolKey(account.ID(), wsURL, sessionKey, effectiveProxyURL(account, proxyOverride))
 	lock := m.keyLock(key)
+	accountLock := m.accountLock(account.ID())
 	wait := AcquireInitialBackoff
 	var waited time.Duration
 	var createLeaseFailures int
@@ -421,13 +579,26 @@ func (m *Manager) AcquireConnection(
 			if canReuseConnection(wc) {
 				// 发送 Ping 探活，确认连接真正存活
 				if m.probe(wc) {
+					// 网络 probe 不持有账号锁。同账号其它 pool key 可以并行探活；
+					// probe 期间连接可能被账号容量裁剪，因此拿锁后必须复验。
+					accountLock.Lock()
+					current, exists := m.connections.Load(key)
+					if !exists || current != wc || !canReuseConnection(wc) {
+						accountLock.Unlock()
+						lock.Unlock()
+						continue
+					}
 					pr, leaseErr := m.addPendingAndBeginReadLease(wc, sessionKey)
 					if leaseErr == nil {
+						wc.account = account
 						wc.Touch()
+						m.trimIdleAccountConnections(account.ID(), accountConnectionLimit(account), wc)
+						accountLock.Unlock()
 						lock.Unlock()
 						return wc, pr, nil
 					}
 					m.DiscardConnection(wc)
+					accountLock.Unlock()
 					lock.Unlock()
 					continue
 				}
@@ -460,15 +631,43 @@ func (m *Manager) AcquireConnection(
 			}
 			m.DiscardConnection(wc)
 		}
+		accountLock.Lock()
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountConnectionLimit(account), key) {
+			accountLock.Unlock()
+			lock.Unlock()
+			if waited >= AcquireMaxWait {
+				return nil, nil, fmt.Errorf("acquire websocket connection timed out after %s waiting for account connection capacity", AcquireMaxWait)
+			}
+			select {
+			case <-ctx.Done():
+				return nil, nil, ctx.Err()
+			case <-time.After(wait):
+			}
+			waited += wait
+			if wait < AcquireMaxBackoff {
+				wait *= 2
+				if wait > AcquireMaxBackoff {
+					wait = AcquireMaxBackoff
+				}
+			}
+			continue
+		}
+		// 容量已预留，拨号期间不再持有账号锁；其他 session 可以复用已有连接，
+		// 但会把本次 pending create 计入上限，避免并发握手越界。
+		accountLock.Unlock()
 
 		wc, err := m.createConnection(ctx, account, wsURL, sessionKey, headers, proxyOverride)
 		if err != nil {
+			m.releaseAccountConnectionCapacity(account.ID())
 			lock.Unlock()
 			return nil, nil, err
 		}
 
 		// 存储新连接并立即占位 pending request，避免返回后才记账产生竞态
 		m.connections.Store(key, wc)
+		if m.afterConnectionStored != nil {
+			m.afterConnectionStored(wc)
+		}
 		pr, leaseErr := m.addPendingAndBeginReadLease(wc, sessionKey)
 		if leaseErr == nil {
 			if earlyErr := wc.waitForEarlyReadFailure(ctx, newConnectionReadFailureGrace); earlyErr != nil {
@@ -476,6 +675,7 @@ func (m *Manager) AcquireConnection(
 				leaseErr = earlyErr
 			}
 		}
+		m.releaseAccountConnectionCapacity(account.ID())
 		if leaseErr != nil {
 			m.DiscardConnection(wc)
 			lock.Unlock()
@@ -519,7 +719,7 @@ const newConnectionReadFailureGrace = 5 * time.Millisecond
 
 // AcquireReusableConnection 在固定槽位内复用或创建连接，返回实际使用的 session key。
 // 第一遍只复用已存在且空闲的连接；第二遍在空槽位新建持久连接；槽位全忙时回退到
-// fallbackKey 的一次性连接，保持与原 stateless 行为一致的并发上限（无上限）。
+// fallbackKey 的临时连接。所有路径仍受账号动态并发对应的连接总数上限约束。
 func (m *Manager) AcquireReusableConnection(
 	ctx context.Context,
 	account *auth.Account,
@@ -531,6 +731,11 @@ func (m *Manager) AcquireReusableConnection(
 	proxyOverride string,
 ) (*WsConnection, *PendingRequest, string, error) {
 	proxyURL := effectiveProxyURL(account, proxyOverride)
+	accountLimit := accountConnectionLimit(account)
+	if slots < 1 || slots > accountLimit {
+		slots = accountLimit
+	}
+	accountLock := m.accountLock(account.ID())
 	// 第一遍：复用空闲连接（探活失败或已断开的顺手清理，让第二遍可以补位）
 	for i := 0; i < slots; i++ {
 		slotSession := fmt.Sprintf("%s#%d", baseKey, i)
@@ -541,13 +746,24 @@ func (m *Manager) AcquireReusableConnection(
 			wc := v.(*WsConnection)
 			if canReuseConnection(wc) {
 				if m.probe(wc) {
+					accountLock.Lock()
+					current, exists := m.connections.Load(key)
+					if !exists || current != wc || !canReuseConnection(wc) {
+						accountLock.Unlock()
+						lock.Unlock()
+						continue
+					}
 					pr, leaseErr := m.addPendingAndBeginReadLease(wc, slotSession)
 					if leaseErr == nil {
+						wc.account = account
 						wc.Touch()
+						m.trimIdleAccountConnections(account.ID(), accountLimit, wc)
+						accountLock.Unlock()
 						lock.Unlock()
 						return wc, pr, slotSession, nil
 					}
 					m.DiscardConnection(wc)
+					accountLock.Unlock()
 					lock.Unlock()
 					continue
 				}
@@ -568,12 +784,28 @@ func (m *Manager) AcquireReusableConnection(
 			lock.Unlock()
 			continue
 		}
+		accountLock.Lock()
+		if _, ok := m.connections.Load(key); ok {
+			accountLock.Unlock()
+			lock.Unlock()
+			continue
+		}
+		if !m.reserveAccountConnectionCapacity(account.ID(), accountLimit, key) {
+			accountLock.Unlock()
+			lock.Unlock()
+			continue
+		}
+		accountLock.Unlock()
 		wc, err := m.createConnection(ctx, account, wsURL, slotSession, headers, proxyOverride)
 		if err != nil {
+			m.releaseAccountConnectionCapacity(account.ID())
 			lock.Unlock()
 			return nil, nil, "", err
 		}
 		m.connections.Store(key, wc)
+		if m.afterConnectionStored != nil {
+			m.afterConnectionStored(wc)
+		}
 		pr, leaseErr := m.addPendingAndBeginReadLease(wc, slotSession)
 		if leaseErr == nil {
 			if earlyErr := wc.waitForEarlyReadFailure(ctx, newConnectionReadFailureGrace); earlyErr != nil {
@@ -581,6 +813,7 @@ func (m *Manager) AcquireReusableConnection(
 				leaseErr = earlyErr
 			}
 		}
+		m.releaseAccountConnectionCapacity(account.ID())
 		if leaseErr != nil {
 			m.DiscardConnection(wc)
 			lock.Unlock()
@@ -715,6 +948,7 @@ func (m *Manager) createConnection(
 
 	// 创建连接包装
 	wc := NewWsConnection(conn, session, wsURL)
+	wc.account = account
 	wc.PoolKey = poolKey
 	wc.httpResp = resp
 	wc.onDisconnected = m.getOnDisconnected()
@@ -839,10 +1073,11 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 	if wc == nil {
 		return nil, nil, ""
 	}
+	accountLock := m.accountLock(accountID)
 	lock := m.keyLock(wc.PoolKey)
 	lock.Lock()
 	defer lock.Unlock()
-	// 加锁后复验：期间可能被其他请求占用或销毁。
+	// pool-key 加锁后复验：期间可能被其他请求占用或销毁。
 	if v, exists := m.connections.Load(wc.PoolKey); !exists || v != wc {
 		return nil, nil, ""
 	}
@@ -856,12 +1091,22 @@ func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64,
 		m.DiscardConnection(wc)
 		return nil, nil, ""
 	}
+	// probe 可能等待网络，不能占用账号锁。拿到账号锁后再次复验，防止
+	// probe 期间连接被其它 pool key 的容量裁剪安全回收。
+	accountLock.Lock()
+	defer accountLock.Unlock()
+	if v, exists := m.connections.Load(wc.PoolKey); !exists || v != wc || !canReuseConnection(wc) {
+		return nil, nil, ""
+	}
 	pr, err := m.addPendingAndBeginReadLease(wc, sessionKey)
 	if err != nil {
 		m.DiscardConnection(wc)
 		return nil, nil, ""
 	}
 	wc.Touch()
+	if wc.account != nil {
+		m.trimIdleAccountConnections(accountID, accountConnectionLimit(wc.account), wc)
+	}
 	return wc, pr, sessionKey
 }
 

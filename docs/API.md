@@ -56,6 +56,14 @@ Anthropic `/v1/messages` 仅将官方 `speed:"fast"` 映射为上游 Codex `serv
 Authorization: Bearer sk-xxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
+多个最终用户共享同一个 API Key 时，可选传入稳定的本地亲和标识：
+
+```http
+X-Codex2API-Affinity-Key: tenant-user-or-conversation-id
+```
+
+该请求头优先于其他会话亲和信号。Codex2API 会先对原始值做 SHA-256 派生，只保留本地路由标识；原始值不会保存，也不会转发给上游。
+
 **配置方式:**
 
 1. 通过管理后台 `/admin/settings` 页面配置
@@ -521,12 +529,25 @@ data: [DONE]
   "ids": [1, 2, 3],
   "enabled": false,
   "locked": true,
+  "score_bias_override": 25,
+  "base_concurrency_override": 4,
+  "scheduler_priority": 10,
   "tags": ["ops", "paid"],
   "group_ids": [1],
   "auto_pause_5h_threshold": 0.8,
   "auto_pause_7d_disabled": true
 }
 ```
+
+常用批量调度字段：
+
+| 字段 | 类型 | 范围/语义 |
+|------|------|-----------|
+| `score_bias_override` | integer/null | `-200..200`；`null` 恢复套餐默认分数偏置 |
+| `base_concurrency_override` | integer/null | `1..50`；`null` 恢复分组或全局继承值 |
+| `scheduler_priority` | integer/null | `-100..100`；`null` 恢复默认优先级 `0` |
+| `tags` | string[] | 替换账号标签；空数组清空 |
+| `group_ids` | integer[] | 替换账号分组；空数组清空 |
 
 **响应:**
 
@@ -1240,6 +1261,8 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "fast_scheduler_enabled": false,
   "max_retries": 3,
   "max_rate_limit_retries": 2,
+  "retry_interval_ms": 0,
+  "transport_retry_policy": "rotate",
   "scheduler_mode": "round_robin",
   "allow_remote_migration": false,
   "database_driver": "postgres",
@@ -1269,7 +1292,9 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "auto_clean_rate_limited": false,
   "fast_scheduler_enabled": true,
   "scheduler_mode": "remaining_quota",
-  "max_rate_limit_retries": 2
+  "max_rate_limit_retries": 2,
+  "retry_interval_ms": 500,
+  "transport_retry_policy": "sticky"
 }
 ```
 

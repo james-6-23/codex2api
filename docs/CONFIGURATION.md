@@ -137,6 +137,8 @@ Codex2API 采用三层配置架构：
 | `GlobalRPM` | int | 0 | 0-∞ | 全局每分钟请求限制，0 表示不限 |
 | `MaxRetries` | int | 3 | 0-10 | 请求失败最大重试次数 |
 | `MaxRateLimitRetries` | int | 2 | 0-10 | 遇到 429 限流时的最大额外重试次数 |
+| `RetryIntervalMS` | int | 0 | 0-30000 | 普通重试前等待的毫秒数；`0` 保持立即重试 |
+| `TransportRetryPolicy` | string | `rotate` | `rotate` / `sticky` | 传输错误重试时换号，或保留同一账号重试 |
 | `FastSchedulerEnabled` | bool | false | - | 启用快速调度器 |
 | `CodexForceWebsocket` | bool | false | - | 强制 Codex 上游走 WebSocket 长连接（复用连接池），更接近官方 CLI 体验；关闭时走原有 HTTP 请求 |
 | `CodexWSKeepaliveEnabled` | bool | false | - | 启用上游 WS 空闲连接保活（后台仅发 Ping，不发起新请求、不消耗账号额度） |
@@ -145,6 +147,9 @@ Codex2API 采用三层配置架构：
 | `CodexWSSilentRetryEnabled` | bool | true | - | WS 首包前遇到限流、额度耗尽、5xx、读取错误或超时时，静默换账号并重建上游 WS |
 | `CodexWSSilentMaxRetries` | int | 2 | 0-10 | WS 静默换号最大重试次数 |
 | `SchedulerMode` | string | `round_robin` | - | 调度模式：`round_robin`（轮询，按调度分权重排序）或 `remaining_quota`（优先使用用量少的账号） |
+| `AffinityMode` | string | `bounded` | - | 会话亲和：`bounded`（50 次、5 分钟或账号不健康时重新挑号）、`off`（每次重选）、`strict`（长期粘连） |
+
+调度优先级先决定账号层级，同一优先级内再比较健康档位、调度分和当前负载；会话亲和只负责复用已绑定账号。多个最终用户共享同一个 API Key 时，下游可传 `X-Codex2API-Affinity-Key`，值会先哈希且仅用于本地账号绑定，不会转发给上游。
 
 ### 测试配置
 
@@ -171,11 +176,21 @@ Codex2API 采用三层配置架构：
 | `credit_skip_usage_window` | bool | false | 跳过 7 天/5 小时用量窗口惩罚（适用于信用账号） |
 | `score_bias_override` | int/null | null | 手工覆盖调度权重分，`null` 跟随套餐默认 |
 | `base_concurrency_override` | int/null | null | 手工覆盖基础并发值，`null` 时先继承所属分组的最小有效值，再回退到全局默认 |
+| `scheduler_priority` | int/null | null | 严格调度优先级（`-100..100`）；`null` 恢复默认值 `0` |
 | `skip_warm_tier` | bool | false | 跳过 warm 层级；仅把 warm 提升为 healthy，不覆盖 risky/banned |
+
+账号列表的批量编辑支持分数偏置、基础并发、调度优先级、标签和分组。勾选某个数值字段但保持输入为空时，会发送 `null`，将该字段重置为继承值或默认值；未勾选的字段保持不变。
 
 ### 分组级基础并发
 
 账号分组可设置 `base_concurrency_override`（`1..50`，`null` 表示不覆盖）。基础并发按“账号显式覆盖 > 所属分组中最小的有效值 > 全局 `max_concurrency`”解析；最终动态并发仍会受健康档位、用量保护和智能配速限制。
+
+### WebSocket 连接池与 1009 降级
+
+- 每个账号的上游物理 WebSocket 连接数受其当前 `DynamicConcurrencyLimit` 限制。
+- 新建或复用连接时如果超过新上限，只淘汰最老的空闲连接；当前请求使用的连接和其他活跃连接不会被中断。
+- 上游在尚未向下游输出内容时返回 close 1009，或本地读取触发等价的 read-limit 错误，网关会保留同一账号租约和已解析代理，最多降级一次 HTTP。
+- 1009 属于传输限制，不降低账号健康度，也不触发鉴权探针；一旦已向下游输出内容，就不会再发起 HTTP 降级，避免重复请求和重复计费。
 
 ### 连接池配置
 

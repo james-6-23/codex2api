@@ -17,8 +17,8 @@
 
 ### 前置要求
 
-- Go 1.21 或更高版本
-- Node.js 18 或更高版本
+- Go 1.26.5 或更高版本
+- Node.js 22.12 或更高版本
 - Docker 和 Docker Compose
 - Git
 
@@ -124,11 +124,13 @@ func getaccount(id int64) *Account {
 
 ### 前端代码规范
 
-1. **ESLint 配置**
+1. **运行前端验证**
 
 ```bash
 cd frontend
-npm run lint
+npm test
+npm run typecheck
+npm run build
 ```
 
 2. **代码风格**
