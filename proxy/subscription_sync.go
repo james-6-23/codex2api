@@ -96,14 +96,17 @@ func QueryChatGPTSubscription(ctx context.Context, account *auth.Account, proxyU
 
 	endpoint := ChatGPTSubscriptionsURL
 	// 网页端点必须用 uTLS Chrome 指纹，与网关的 transport 模式配置无关。
-	transport := NewUTLSTransport(proxyURL)
+	transport := http.RoundTripper(NewUTLSTransport(proxyURL))
 	if subscriptionsURLForTest != "" {
 		endpoint = subscriptionsURLForTest
 		// 测试用 httptest（明文 HTTP），uTLS 拨号无法使用，回退标准 transport。
 		transport = newCodexStandardTransport(proxyURL)
 	}
+	// Resin 启用时经反代访问（指纹由 Resin 侧承担），与其他账号维护请求一致，
+	// 避免全部账号共享本机出口 IP 直连（issue #372）。
+	finalURL, resinClient, viaResin := resinMaintenanceTarget(account, endpoint)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint+"?account_id="+url.QueryEscape(accountID), nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, finalURL+"?account_id="+url.QueryEscape(accountID), nil)
 	if err != nil {
 		return nil, fmt.Errorf("build subscriptions request: %w", err)
 	}
@@ -112,8 +115,14 @@ func QueryChatGPTSubscription(ctx context.Context, account *auth.Account, proxyU
 	req.Header.Set("Origin", "https://chatgpt.com")
 	req.Header.Set("Referer", "https://chatgpt.com/")
 	req.Header.Set("User-Agent", subscriptionsBrowserUserAgent)
+	if viaResin {
+		req.Header.Set("X-Resin-Account", ResinAccountID(account))
+	}
 
-	client := &http.Client{Transport: transport}
+	client := resinClient
+	if client == nil {
+		client = &http.Client{Transport: transport}
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("subscriptions request: %w", err)

@@ -193,3 +193,33 @@ func TestMaybeSyncSubscriptionExpiry_SkipsPastActiveUntil(t *testing.T) {
 		t.Fatalf("SubscriptionExpiresAt = %v, want zero", account.SubscriptionExpiresAt)
 	}
 }
+
+// Resin 启用时订阅到期查询也必须经反代（issue #372），指纹由 Resin 侧承担。
+func TestQueryChatGPTSubscriptionRoutesThroughResin(t *testing.T) {
+	var gotPath, gotResinAccount, gotAccountIDQuery string
+	fakeResin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotResinAccount = r.Header.Get("X-Resin-Account")
+		gotAccountIDQuery = r.URL.Query().Get("account_id")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer fakeResin.Close()
+
+	SetResinConfig(&ResinConfig{BaseURL: fakeResin.URL, PlatformName: "test"})
+	t.Cleanup(func() { SetResinConfig(nil) })
+
+	account := &auth.Account{DBID: 11, AccessToken: "at-11", AccountID: testWorkspaceUUID}
+	if _, err := QueryChatGPTSubscription(context.Background(), account, ""); err != nil {
+		t.Fatalf("QueryChatGPTSubscription error: %v", err)
+	}
+	if want := "/test/https/chatgpt.com/backend-api/subscriptions"; gotPath != want {
+		t.Fatalf("resin path = %q, want %q", gotPath, want)
+	}
+	if gotResinAccount != "11" {
+		t.Fatalf("X-Resin-Account = %q, want %q", gotResinAccount, "11")
+	}
+	if gotAccountIDQuery != testWorkspaceUUID {
+		t.Fatalf("account_id query = %q, want workspace uuid", gotAccountIDQuery)
+	}
+}

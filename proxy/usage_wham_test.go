@@ -1061,3 +1061,61 @@ func TestConsumeResetCreditParsed_NonOKReturnsRespForCaller(t *testing.T) {
 		t.Error("expected error body to remain readable for caller")
 	}
 }
+
+// Resin 启用时，wham 用量查询必须经 Resin 反代并携带 X-Resin-Account，
+// 而不是直连 chatgpt.com（issue #372：账号维护请求漏接 Resin，
+// 大量账号会共享本机出口 IP）。
+func TestQueryWhamUsageRoutesThroughResin(t *testing.T) {
+	var gotPath, gotResinAccount string
+	fakeResin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotResinAccount = r.Header.Get("X-Resin-Account")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"plan_type":"plus"}`))
+	}))
+	defer fakeResin.Close()
+
+	SetResinConfig(&ResinConfig{BaseURL: fakeResin.URL, PlatformName: "test"})
+	t.Cleanup(func() { SetResinConfig(nil) })
+
+	account := &auth.Account{DBID: 7, AccessToken: "at-7"}
+	usage, _, err := QueryWhamUsage(context.Background(), account, "")
+	if err != nil {
+		t.Fatalf("QueryWhamUsage error: %v", err)
+	}
+	if usage == nil || usage.PlanType != "plus" {
+		t.Fatalf("unexpected usage result: %+v", usage)
+	}
+	if want := "/test/https/chatgpt.com/backend-api/wham/usage"; gotPath != want {
+		t.Fatalf("resin path = %q, want %q", gotPath, want)
+	}
+	if gotResinAccount != "7" {
+		t.Fatalf("X-Resin-Account = %q, want %q", gotResinAccount, "7")
+	}
+}
+
+// 重置券列表/消费与 wham 查询同一套请求形态，同样必须走 Resin。
+func TestConsumeResetCreditRoutesThroughResin(t *testing.T) {
+	var gotPath, gotResinAccount string
+	fakeResin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotResinAccount = r.Header.Get("X-Resin-Account")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer fakeResin.Close()
+
+	SetResinConfig(&ResinConfig{BaseURL: fakeResin.URL, PlatformName: "test"})
+	t.Cleanup(func() { SetResinConfig(nil) })
+
+	account := &auth.Account{DBID: 9, AccessToken: "at-9"}
+	if _, _, err := ConsumeResetCreditParsed(context.Background(), account, "", "req-1"); err != nil {
+		t.Fatalf("ConsumeResetCreditParsed error: %v", err)
+	}
+	if want := "/test/https/chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume"; gotPath != want {
+		t.Fatalf("resin path = %q, want %q", gotPath, want)
+	}
+	if gotResinAccount != "9" {
+		t.Fatalf("X-Resin-Account = %q, want %q", gotResinAccount, "9")
+	}
+}

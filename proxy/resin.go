@@ -45,6 +45,19 @@ func IsResinEnabled() bool {
 	return GetResinConfig() != nil
 }
 
+// resinMaintenanceTarget 为账号维护类旁路请求（wham 用量/重置券/订阅到期查询）
+// 决定最终 URL 与客户端。这类请求与 /responses 一样携带账号身份打 chatgpt.com，
+// Resin 启用时必须同样经反代访问并复用 Resin 连接池，否则全部账号共享本机
+// 出口 IP 直连（issue #372）。返回 viaResin=true 时调用方需在请求头设置
+// X-Resin-Account；未启用时返回原 URL 与 nil 客户端，由调用方按既有直连
+// transport 兜底。
+func resinMaintenanceTarget(account *auth.Account, targetURL string) (finalURL string, client *http.Client, viaResin bool) {
+	if !IsResinEnabled() || account == nil {
+		return targetURL, nil, false
+	}
+	return BuildReverseProxyURL(targetURL), getResinHTTPClient(account), true
+}
+
 // ==================== 反向代理 URL 构建 ====================
 
 // BuildReverseProxyURL 将目标 URL 转换为 Resin 反向代理 URL
