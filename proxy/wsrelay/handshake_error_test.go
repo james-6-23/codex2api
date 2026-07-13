@@ -1,6 +1,7 @@
 package wsrelay
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -117,4 +118,80 @@ func TestReadHTTPErrorBodyPreservesJSON(t *testing.T) {
 	if !strings.Contains(got, `"code":"token_expired"`) || !strings.Contains(got, `"message":"expired"`) {
 		t.Fatalf("unexpected body: %q", got)
 	}
+}
+
+func TestFormatDialHandshakeErrorReturnsTypedError(t *testing.T) {
+	body := `{"error":{"message":"Provided authentication token is expired.","type":"invalid_request_error","code":"token_expired"}}`
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		Header:     http.Header{"Cf-Ray": []string{"ray-1"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+	}
+	err := formatDialHandshakeError(websocket.ErrBadHandshake, resp)
+
+	var hs *HandshakeHTTPError
+	if !errors.As(err, &hs) {
+		t.Fatalf("expected *HandshakeHTTPError, got %T", err)
+	}
+	if hs.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StatusCode = %d, want 401", hs.StatusCode)
+	}
+	if !strings.Contains(hs.Body, `"code":"token_expired"`) {
+		t.Fatalf("Body missing raw json: %q", hs.Body)
+	}
+	if hs.Header.Get("Cf-Ray") != "ray-1" {
+		t.Fatalf("Header not preserved: %v", hs.Header)
+	}
+}
+
+func TestHandshakeUnauthorizedHTTPResponse(t *testing.T) {
+	makeErr := func(status int, body string) error {
+		resp := &http.Response{
+			StatusCode: status,
+			Header:     http.Header{"X-Request-Id": []string{"req-1"}},
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}
+		return formatDialHandshakeError(websocket.ErrBadHandshake, resp)
+	}
+
+	t.Run("401 converts to real-status response with raw body", func(t *testing.T) {
+		body := `{"error":{"message":"token expired","code":"token_expired"}}`
+		resp, ok := handshakeUnauthorizedHTTPResponse(makeErr(http.StatusUnauthorized, body))
+		if !ok {
+			t.Fatal("expected conversion for 401")
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("StatusCode = %d, want 401", resp.StatusCode)
+		}
+		got, _ := io.ReadAll(resp.Body)
+		// body 必须是可直接 gjson 解析的上游原始错误体（供 missing_scope 特判
+		// 与 usage log 错误消息提取），不能带 "websocket handshake failed" 前缀。
+		// readHTTPErrorBody 会重排 JSON 键序，故按字段断言而非整串比对。
+		if !json.Valid(got) {
+			t.Fatalf("body is not valid json: %q", got)
+		}
+		if !strings.Contains(string(got), `"code":"token_expired"`) || !strings.Contains(string(got), `"message":"token expired"`) {
+			t.Fatalf("body missing upstream error fields: %q", got)
+		}
+		if resp.Header.Get("X-Request-Id") != "req-1" {
+			t.Fatalf("header not preserved: %v", resp.Header)
+		}
+	})
+
+	t.Run("non-401 handshake statuses keep transport error semantics", func(t *testing.T) {
+		for _, status := range []int{http.StatusForbidden, http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+			if _, ok := handshakeUnauthorizedHTTPResponse(makeErr(status, `{"error":{"message":"x"}}`)); ok {
+				t.Fatalf("status %d should not convert", status)
+			}
+		}
+	})
+
+	t.Run("plain errors pass through", func(t *testing.T) {
+		if _, ok := handshakeUnauthorizedHTTPResponse(errors.New("dial tcp timeout")); ok {
+			t.Fatal("plain error should not convert")
+		}
+		if _, ok := handshakeUnauthorizedHTTPResponse(formatDialHandshakeError(errors.New("dial tcp timeout"), nil)); ok {
+			t.Fatal("no-response handshake error should not convert")
+		}
+	})
 }

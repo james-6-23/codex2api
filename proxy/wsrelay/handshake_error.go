@@ -3,6 +3,7 @@ package wsrelay
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,6 +12,42 @@ import (
 )
 
 const handshakeErrorBodyLimit = 4 << 10 // 4 KiB
+
+// HandshakeHTTPError 是握手阶段收到上游 HTTP 错误响应时的结构化错误：
+// 除人类可读的错误文本外，保留原始状态码、响应头与规范化后的 JSON body，
+// 供上层把鉴权失败（401）还原成真实状态码处理，而不是笼统的 transport 错误。
+type HandshakeHTTPError struct {
+	StatusCode int
+	Header     http.Header
+	// Body 是上游错误 body 的规范化文本（JSON 紧凑化、非 JSON 空白折叠），
+	// 可直接用 gjson 解析 error.code / error.message。
+	Body string
+	msg  string
+}
+
+func (e *HandshakeHTTPError) Error() string { return e.msg }
+
+// handshakeUnauthorizedHTTPResponse 把握手阶段的 401 转换成携带真实状态码与
+// 上游原始错误体的 HTTP 响应，让调用方复用既有非 2xx 分支：usage log 记 401、
+// applyCooldownForModel 的 unauthorized 冷却与 missing_scope 特判、换号重试。
+// 其他状态码保持原有 transport 错误语义（如 503 握手限流仍走粘滞重试），
+// 不在此转换。
+func handshakeUnauthorizedHTTPResponse(err error) (*http.Response, bool) {
+	var hs *HandshakeHTTPError
+	if !errors.As(err, &hs) || hs.StatusCode != http.StatusUnauthorized {
+		return nil, false
+	}
+	header := http.Header{}
+	if hs.Header != nil {
+		header = hs.Header.Clone()
+	}
+	return &http.Response{
+		StatusCode: hs.StatusCode,
+		Status:     fmt.Sprintf("%d %s", hs.StatusCode, http.StatusText(hs.StatusCode)),
+		Header:     header,
+		Body:       io.NopCloser(strings.NewReader(hs.Body)),
+	}, true
+}
 
 // formatDialHandshakeError 把 Dial 失败包装成可诊断的错误。
 // gorilla/websocket 在 bad handshake 时仍返回 *http.Response，并已预读最多 1KB body；
@@ -48,7 +85,12 @@ func formatDialHandshakeError(err error, resp *http.Response) error {
 		b.WriteString(":\n")
 		b.WriteString(body)
 	}
-	return fmt.Errorf("%s", b.String())
+	return &HandshakeHTTPError{
+		StatusCode: status,
+		Header:     resp.Header.Clone(),
+		Body:       body,
+		msg:        b.String(),
+	}
 }
 
 // formatFailedHandshakeHTTPBody 用于握手 HTTP 响应状态非 2xx/101 时构造 body 文本。

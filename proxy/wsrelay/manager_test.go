@@ -2,8 +2,12 @@ package wsrelay
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -450,5 +454,51 @@ func TestLookupResponseConnIsolatesAPIKeys(t *testing.T) {
 	}
 	if got, _ := manager.lookupResponseConn("resp_owned", 7, "key-A"); got != wc {
 		t.Fatal("owner api key must hit")
+	}
+}
+
+// 上游对 WS upgrade 回 401 时，结构化握手错误必须原样穿透 AcquireConnection
+// 的传播链（不被二次包装），执行器才能把它还原成真实状态码的 HTTP 响应；
+// 否则 401 在使用日志里只会以 transport/598 出现且账号不触发 unauthorized 冷却。
+func TestAcquireConnectionDial401ReturnsTypedHandshakeError(t *testing.T) {
+	upstreamBody := `{"error":{"message":"Provided authentication token is expired.","type":"invalid_request_error","code":"token_expired"}}`
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+
+	account := &auth.Account{DBID: 42}
+	wsURL := strings.Replace(upstream.URL, "http://", "ws://", 1)
+
+	_, _, err := manager.AcquireConnection(context.Background(), account, wsURL, "session-1", http.Header{}, "")
+	if err == nil {
+		t.Fatal("expected handshake error")
+	}
+
+	var hs *HandshakeHTTPError
+	if !errors.As(err, &hs) {
+		t.Fatalf("expected *HandshakeHTTPError to survive propagation, got %T: %v", err, err)
+	}
+	if hs.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("StatusCode = %d, want 401", hs.StatusCode)
+	}
+
+	resp, ok := handshakeUnauthorizedHTTPResponse(err)
+	if !ok {
+		t.Fatal("expected 401 handshake error to convert to HTTP response")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("converted StatusCode = %d, want 401", resp.StatusCode)
+	}
+	got, _ := io.ReadAll(resp.Body)
+	// readHTTPErrorBody 会重排 JSON 键序，按字段断言。
+	if !strings.Contains(string(got), `"code":"token_expired"`) || strings.Contains(string(got), "websocket handshake failed") {
+		t.Fatalf("converted body should be raw upstream json, got %q", got)
 	}
 }

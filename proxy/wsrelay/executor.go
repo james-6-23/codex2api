@@ -644,6 +644,13 @@ func ExecuteRequestWebsocket(ctx context.Context, account *auth.Account, request
 	exec := GetExecutor()
 	wsResp, err := exec.ExecuteRequestViaWebsocket(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
 	if err != nil {
+		// 握手阶段的上游 401（token 失效/撤销）还原成真实状态码的 HTTP 响应返回，
+		// 而不是 transport 错误：否则 401 在使用日志里只会以 598/transport 出现，
+		// 且账号既不触发 unauthorized 冷却也不触发鉴权探针，失效账号会一直留在
+		// 调度池里被反复拨号（对比 HTTP 路径的 401 直接可见并立即冷却）。
+		if resp, ok := handshakeUnauthorizedHTTPResponse(err); ok {
+			return resp, nil
+		}
 		return nil, err
 	}
 
