@@ -2,8 +2,12 @@ package auth
 
 import (
 	"context"
+	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/codex2api/database"
 )
 
 func newPremium5hTestAccount(plan string, resetAt time.Time) *Account {
@@ -78,6 +82,166 @@ func TestPremium5hRateLimitedSkipsResponsesProbeButRefreshesResetCredits(t *test
 	acc.MarkResetCreditsProbed(time.Now())
 	if acc.NeedsUsageProbe(10 * time.Minute) {
 		t.Fatal("NeedsUsageProbe() = true, want false before premium 5h reset once reset credits are fresh")
+	}
+}
+
+func TestClearAbsentUsageSnapshot5hPreservesUnrelatedAccountState(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	tests := []struct {
+		name     string
+		status   AccountStatus
+		reason   string
+		errorMsg string
+		disabled int32
+		health   AccountHealthTier
+	}{
+		{name: "unauthorized", status: StatusCooldown, reason: "unauthorized", disabled: 1, health: HealthTierBanned},
+		{name: "generic 429", status: StatusCooldown, reason: "rate_limited", health: HealthTierRisky},
+		{name: "error", status: StatusError, errorMsg: "workspace disabled", health: HealthTierRisky},
+		{name: "disabled ready account", status: StatusReady, disabled: 1, health: HealthTierWarm},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			observedAt := time.Now()
+			acc := &Account{
+				DBID:           1,
+				AccessToken:    "token",
+				PlanType:       "plus",
+				Status:         tt.status,
+				CooldownReason: tt.reason,
+				CooldownUtil:   observedAt.Add(time.Hour),
+				ErrorMsg:       tt.errorMsg,
+				Disabled:       tt.disabled,
+				HealthTier:     tt.health,
+			}
+			acc.SetUsageSnapshot5hAt(88, observedAt.Add(2*time.Hour), observedAt.Add(-time.Minute))
+
+			if !store.ClearAbsentUsageSnapshot5hAt(acc, observedAt) {
+				t.Fatal("ClearAbsentUsageSnapshot5hAt() = false, want stale snapshot cleared")
+			}
+			if _, ok := acc.GetUsagePercent5h(); ok {
+				t.Fatal("5h snapshot remained valid")
+			}
+			if acc.Status != tt.status || acc.GetCooldownReason() != tt.reason || acc.ErrorMsg != tt.errorMsg {
+				t.Fatalf("state = (%v, %q, %q), want (%v, %q, %q)", acc.Status, acc.GetCooldownReason(), acc.ErrorMsg, tt.status, tt.reason, tt.errorMsg)
+			}
+			if got := atomic.LoadInt32(&acc.Disabled); got != tt.disabled {
+				t.Fatalf("Disabled = %d, want %d", got, tt.disabled)
+			}
+			if tt.health == HealthTierBanned && acc.HealthTier != tt.health {
+				t.Fatalf("HealthTier = %q, want %q", acc.HealthTier, tt.health)
+			}
+		})
+	}
+}
+
+func TestClearUsageLimitCooldownSincePreservesNewerUnrelatedState(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	observedAt := time.Now()
+
+	generic := &Account{DBID: 2, Status: StatusCooldown, CooldownReason: "rate_limited", CooldownUtil: observedAt.Add(time.Hour), HealthTier: HealthTierRisky}
+	generic.LastRateLimitedAt = observedAt.Add(-time.Minute)
+	if !store.ClearUsageLimitCooldownSince(generic, observedAt) {
+		t.Fatal("generic usage cooldown should be cleared by a fresh successful probe")
+	}
+	if generic.Status != StatusReady || generic.GetCooldownReason() != "" || !generic.LastRateLimitedAt.IsZero() {
+		t.Fatalf("generic cooldown state = (%v, %q, %v), want ready/empty/zero", generic.Status, generic.GetCooldownReason(), generic.LastRateLimitedAt)
+	}
+
+	unauthorized := &Account{DBID: 3, Status: StatusCooldown, CooldownReason: "unauthorized", CooldownUtil: observedAt.Add(time.Hour), HealthTier: HealthTierBanned}
+	if store.ClearUsageLimitCooldownSince(unauthorized, observedAt) {
+		t.Fatal("unauthorized cooldown must not be cleared by a usage probe")
+	}
+	if unauthorized.GetCooldownReason() != "unauthorized" {
+		t.Fatal("unauthorized cooldown reason was changed")
+	}
+
+	newer := &Account{DBID: 4, Status: StatusCooldown, CooldownReason: "rate_limited", CooldownUtil: observedAt.Add(time.Hour), HealthTier: HealthTierRisky}
+	newer.LastRateLimitedAt = observedAt.Add(time.Second)
+	if store.ClearUsageLimitCooldownSince(newer, observedAt) {
+		t.Fatal("newer rate-limit evidence must survive a delayed probe")
+	}
+}
+
+func TestClearAbsentUsageSnapshot5hRejectsStaleObservation(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	acc := &Account{DBID: 1, AccessToken: "token", PlanType: "plus", Status: StatusReady}
+	freshAt := time.Now()
+	acc.SetUsageSnapshot5hAt(42, freshAt.Add(2*time.Hour), freshAt)
+
+	if store.ClearAbsentUsageSnapshot5hAt(acc, freshAt.Add(-time.Minute)) {
+		t.Fatal("stale absence observation cleared a newer 5h snapshot")
+	}
+	if pct, _, ok := acc.GetUsageSnapshot5h(); !ok || pct != 42 {
+		t.Fatalf("5h snapshot = (%v, %v), want fresh 42%% snapshot", pct, ok)
+	}
+}
+
+func TestClearAbsentUsageSnapshot5hClearsPersistedPremiumCooldown(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+	id, err := db.InsertAccountWithCredentials(ctx, "premium-5h", map[string]interface{}{
+		"access_token": "token",
+		"plan_type":    "plus",
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	acc := &Account{DBID: id, AccessToken: "token", PlanType: "plus", Status: StatusReady}
+	store.MarkPremium5hRateLimited(acc, time.Now().Add(2*time.Hour))
+	if got := acc.GetCooldownReason(); got != premium5hCooldownReason {
+		t.Fatalf("CooldownReason = %q, want %q", got, premium5hCooldownReason)
+	}
+
+	if !store.ClearAbsentUsageSnapshot5h(acc) {
+		t.Fatal("ClearAbsentUsageSnapshot5h() = false, want premium state cleared")
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if row.CooldownReason != "" || row.CooldownUntil.Valid {
+		t.Fatalf("persisted cooldown = (%q, %v), want cleared", row.CooldownReason, row.CooldownUntil)
+	}
+	if got := row.GetCredential("codex_5h_used_percent"); got != "" {
+		t.Fatalf("codex_5h_used_percent = %q, want cleared", got)
+	}
+}
+
+func TestClearAbsentUsageSnapshot5hSkipsPersistenceWithoutLocalState(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+	id, err := db.InsertAccountWithCredentials(ctx, "db-only-5h", map[string]interface{}{
+		"access_token":              "token",
+		"codex_5h_used_percent":     77,
+		"codex_5h_usage_updated_at": time.Now().Format(time.RFC3339),
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	acc := &Account{DBID: id, AccessToken: "token", PlanType: "plus", Status: StatusReady}
+	if store.ClearAbsentUsageSnapshot5hAt(acc, time.Now()) {
+		t.Fatal("ClearAbsentUsageSnapshot5hAt() = true without an in-memory snapshot or 5h cooldown")
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := row.GetCredential("codex_5h_used_percent"); got != "77" {
+		t.Fatalf("codex_5h_used_percent = %q, want unchanged 77", got)
 	}
 }
 

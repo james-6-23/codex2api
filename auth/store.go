@@ -87,6 +87,8 @@ func NormalizeTestContent(content string) string {
 // Account 运行时账号状态
 type Account struct {
 	mu                      sync.RWMutex
+	usageSyncMu             sync.Mutex
+	usageObservedAt         time.Time
 	DBID                    int64 // 数据库 ID
 	RefreshToken            string
 	SessionToken            string
@@ -105,7 +107,7 @@ type Account struct {
 	CodexClientMetadataMode string
 	Status                  AccountStatus
 	CooldownUtil            time.Time
-	CooldownReason          string // rate_limited / unauthorized / 空
+	CooldownReason          string // rate_limited / rate_limited_5h / unauthorized / 空
 	ErrorMsg                string
 
 	// 用量进度（从 Codex 响应头被动解析）
@@ -1017,6 +1019,9 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
 	if a.premium5hRateLimitedLocked(now) && tier != HealthTierBanned {
 		tier = HealthTierRisky
 	}
+	if a.Status == StatusCooldown && a.CooldownReason == premium5hCooldownReason && tier != HealthTierBanned {
+		tier = HealthTierRisky
+	}
 	if a.SkipWarmTier && tier == HealthTierWarm {
 		tier = HealthTierHealthy
 	}
@@ -1476,7 +1481,11 @@ func (a *Account) SetCooldownUntil(until time.Time, reason string) {
 	switch reason {
 	case "unauthorized":
 		a.HealthTier = HealthTierBanned
-	case "rate_limited":
+	case "rate_limited_5h":
+		if a.HealthTier != HealthTierBanned {
+			a.HealthTier = HealthTierRisky
+		}
+	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
 		if a.healthTierLocked() == HealthTierHealthy {
 			a.HealthTier = HealthTierWarm
 		} else {
@@ -1634,10 +1643,39 @@ func (a *Account) SetUsageSnapshot5h(pct float64, resetAt time.Time) {
 func (a *Account) SetUsageSnapshot5hAt(pct float64, resetAt time.Time, updatedAt time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
+	if updatedAt.After(a.usageObservedAt) {
+		a.usageObservedAt = updatedAt
+	}
 	a.UsagePercent5h = pct
 	a.UsagePercent5hValid = true
 	a.Reset5hAt = resetAt
 	a.UsageUpdatedAt5h = updatedAt
+}
+
+// ApplyUsageObservation serializes one authoritative upstream usage observation,
+// including its database writes. The timestamp check prevents an older observer
+// that waited on the lock from overwriting a newer 5h presence/absence decision.
+func (a *Account) ApplyUsageObservation(observedAt time.Time, apply func()) bool {
+	if a == nil || apply == nil {
+		return false
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+
+	a.usageSyncMu.Lock()
+	defer a.usageSyncMu.Unlock()
+
+	a.mu.Lock()
+	if observedAt.Before(a.usageObservedAt) {
+		a.mu.Unlock()
+		return false
+	}
+	a.usageObservedAt = observedAt
+	a.mu.Unlock()
+
+	apply()
+	return true
 }
 
 // GetUsagePercent5h 获取 5h 用量百分比
@@ -2092,7 +2130,7 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 		// premium 5h 限流期间不发 /responses 探活，但 wham 零成本，仍允许其刷新重置次数。
 		return resetCreditsStale
 	}
-	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" && (a.CooldownUtil.IsZero() || now.Before(a.CooldownUtil)) {
+	if a.Status == StatusCooldown && isUsageLimitCooldownReason(a.CooldownReason) && (a.CooldownUtil.IsZero() || now.Before(a.CooldownUtil)) {
 		// 429 冷却期间不发 /responses 探活（避免加重限流），但允许 wham-only 探针刷新重置次数——
 		// 这正是用户最需要看到"还剩几次主动重置"的时刻。
 		return resetCreditsStale
@@ -2114,10 +2152,10 @@ func (a *Account) NeedsUsageProbe(maxAge time.Duration) bool {
 	if a.UsagePercent7dValid && !a.Reset7dAt.IsZero() && !a.Reset7dAt.After(now) && a.UsageUpdatedAt.Before(a.Reset7dAt) {
 		return true
 	}
-	if a.effectiveAutoPause5h > 0 && !a.AutoPause5hDisabled {
-		if !a.UsagePercent5hValid || a.UsageUpdatedAt5h.IsZero() {
-			return true
-		}
+	// 5h 是上游可选窗口：仅当本地仍持有有效 5h 快照时才按 maxAge 刷新。
+	// 上游已取消 5h（issue #382）时，缺失快照不应因 auto-pause 5h 配置而永久探测。
+	if a.effectiveAutoPause5h > 0 && !a.AutoPause5hDisabled &&
+		a.UsagePercent5hValid && !a.UsageUpdatedAt5h.IsZero() {
 		if a.Reset5hAt.IsZero() || a.Reset5hAt.After(now) {
 			return now.Sub(a.UsageUpdatedAt5h) > maxAge
 		}
@@ -2182,7 +2220,7 @@ func (a *Account) InLimitedState() bool {
 	if a.premium5hRateLimitedLocked(now) {
 		return true
 	}
-	if a.Status == StatusCooldown && a.CooldownReason == "rate_limited" && (a.CooldownUtil.IsZero() || now.Before(a.CooldownUtil)) {
+	if a.Status == StatusCooldown && isUsageLimitCooldownReason(a.CooldownReason) && (a.CooldownUtil.IsZero() || now.Before(a.CooldownUtil)) {
 		return true
 	}
 	return false
@@ -2542,7 +2580,13 @@ func (s *Store) applyCachedAccountCooldown(acc *Account, record runtimeCooldownR
 		acc.LastUnauthorizedAt = now
 		acc.LastFailureAt = now
 		acc.HealthTier = HealthTierBanned
-	case "rate_limited", "usage_limited", "usage_limit":
+	case "rate_limited_5h":
+		acc.LastRateLimitedAt = now
+		acc.LastFailureAt = now
+		if acc.HealthTier != HealthTierBanned {
+			acc.HealthTier = HealthTierRisky
+		}
+	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
 		acc.LastRateLimitedAt = now
 		acc.LastFailureAt = now
 		if acc.healthTierLocked() == HealthTierHealthy {
@@ -3809,7 +3853,7 @@ func (s *Store) CleanRateLimitedManual(ctx context.Context) int {
 			continue
 		}
 		status := acc.RuntimeStatus()
-		if status != "rate_limited" && status != "usage_exhausted" {
+		if status != "rate_limited" && status != "rate_limited_5h" && status != "rate_limited_7d" && status != "usage_exhausted" {
 			continue
 		}
 
@@ -5561,7 +5605,12 @@ func (s *Store) markCooldownUntil(acc *Account, until time.Time, reason string, 
 		acc.LastUnauthorizedAt = now
 		acc.LastFailureAt = now
 		acc.HealthTier = HealthTierBanned
-	case "rate_limited", "usage_limited", "usage_limit":
+	case "rate_limited_5h":
+		acc.LastRateLimitedAt = now
+		if acc.HealthTier != HealthTierBanned {
+			acc.HealthTier = HealthTierRisky
+		}
+	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
 		acc.LastRateLimitedAt = now
 		if acc.healthTierLocked() == HealthTierHealthy {
 			acc.HealthTier = HealthTierWarm
@@ -5607,7 +5656,15 @@ func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string
 		acc.FailureStreak++
 		acc.SuccessStreak = 0
 		acc.HealthTier = HealthTierBanned
-	case "rate_limited":
+	case "rate_limited_5h":
+		acc.LastRateLimitedAt = now
+		acc.LastFailureAt = now
+		acc.FailureStreak++
+		acc.SuccessStreak = 0
+		if acc.HealthTier != HealthTierBanned {
+			acc.HealthTier = HealthTierRisky
+		}
+	case "rate_limited", "rate_limited_7d", "usage_limited", "usage_limit":
 		acc.LastRateLimitedAt = now
 		acc.LastFailureAt = now
 		acc.FailureStreak++
@@ -5811,9 +5868,61 @@ func (s *Store) ClearCooldown(acc *Account) {
 	}
 }
 
+// ClearUsageLimitCooldownSince clears only a usage/rate-limit cooldown that
+// was already present when observedAt was captured. Authentication failures,
+// generic errors, disabled states, and newer cooldowns are left untouched.
+func (s *Store) ClearUsageLimitCooldownSince(acc *Account, observedAt time.Time) bool {
+	if s == nil || acc == nil {
+		return false
+	}
+	if observedAt.IsZero() {
+		observedAt = time.Now()
+	}
+
+	acc.mu.Lock()
+	if acc.Status != StatusCooldown || !isUsageLimitCooldownReason(acc.CooldownReason) ||
+		(!acc.LastRateLimitedAt.IsZero() && acc.LastRateLimitedAt.After(observedAt)) {
+		acc.mu.Unlock()
+		return false
+	}
+	reason := acc.CooldownReason
+	until := acc.CooldownUtil
+	acc.Status = StatusReady
+	acc.CooldownUtil = time.Time{}
+	acc.CooldownReason = ""
+	acc.ErrorMsg = ""
+	acc.LastRateLimitedAt = time.Time{}
+	if acc.HealthTier != HealthTierBanned {
+		acc.HealthTier = HealthTierWarm
+	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+	acc.mu.Unlock()
+
+	s.fastSchedulerUpdate(acc)
+	s.deleteCachedAccountCooldown(acc.DBID)
+	acc.mu.RLock()
+	status := acc.Status
+	currentReason := acc.CooldownReason
+	currentUntil := acc.CooldownUtil
+	acc.mu.RUnlock()
+	if status == StatusCooldown && currentReason != "" {
+		s.setCachedAccountCooldown(acc.DBID, currentReason, currentUntil)
+	}
+	if s.db == nil {
+		return true
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if _, err := s.db.ClearCooldownIfReasonAndUntil(ctx, acc.DBID, reason, until); err != nil {
+		log.Printf("[账号 %d] 清理过期用量冷却状态失败: %v", acc.DBID, err)
+	}
+	return true
+}
+
 func isUsageLimitCooldownReason(reason string) bool {
 	switch strings.ToLower(strings.TrimSpace(reason)) {
-	case "rate_limited", "rate_limited_5h", "rate_limited_7d", "usage_limit":
+	case "rate_limited", "rate_limited_5h", "rate_limited_7d", "usage_limited", "usage_limit":
 		return true
 	default:
 		return false

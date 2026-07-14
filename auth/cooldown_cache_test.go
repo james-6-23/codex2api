@@ -65,6 +65,22 @@ func TestFastSchedulerSkipsCachedAccountCooldown(t *testing.T) {
 	}
 }
 
+func TestCachedPremium5hCooldownHydratesRiskyTier(t *testing.T) {
+	tokenCache := cache.NewMemory(4)
+	defer tokenCache.Close()
+
+	account := newFastSchedulerTestAccount(9, HealthTierHealthy, 100, 1)
+	store := &Store{accounts: []*Account{account}, maxConcurrency: 1, tokenCache: tokenCache}
+	store.setCachedAccountCooldown(account.DBID, "rate_limited_5h", time.Now().Add(time.Hour))
+
+	if !store.accountHasCachedCooldown(account) {
+		t.Fatal("accountHasCachedCooldown() = false, want true")
+	}
+	if got := account.GetSchedulerDebugSnapshot(1).HealthTier; got != string(HealthTierRisky) {
+		t.Fatalf("hydrated health tier = %q, want %q", got, HealthTierRisky)
+	}
+}
+
 func TestStoreSkipsCachedModelCooldown(t *testing.T) {
 	tokenCache := cache.NewMemory(4)
 	defer tokenCache.Close()

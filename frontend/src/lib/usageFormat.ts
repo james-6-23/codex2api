@@ -48,3 +48,17 @@ export function formatUsageNumber(
 
   return `${compact}${unit.suffix}`
 }
+
+export function needsUsageReload(account: {
+  status?: string
+  usage_percent_5h?: number | null
+  usage_percent_7d?: number | null
+}): boolean {
+  if (account.status !== 'active' && account.status !== 'ready') return false
+
+  const has5h =
+    account.usage_percent_5h !== null && account.usage_percent_5h !== undefined
+  const has7d =
+    account.usage_percent_7d !== null && account.usage_percent_7d !== undefined
+  return !has5h && !has7d
+}

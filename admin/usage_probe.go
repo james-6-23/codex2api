@@ -75,6 +75,7 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 // 「主动重置次数」与用量快照，不上报成功、也不清除冷却（冷却解除交给恢复探针/到期判断），
 // 避免把一次额度查询误判为账号已恢复。
 func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, limited bool) error {
+	probeStartedAt := time.Now()
 	usage, resp, err := proxy.QueryWhamUsage(ctx, account, h.store.ResolveProxyForAccount(account))
 	if resp != nil {
 		// QueryWhamUsage 在非 200 时不会读 body；这里读取一小段用于账号错误详情。
@@ -106,12 +107,18 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 			// not clear a cooldown established by a real Responses failure.
 			return nil
 		}
+		if !state.HasUsage5h && !state.HasUsage7d && !state.Cleared5h {
+			// An empty/malformed WHAM payload is not evidence that a cooldown
+			// ended. Preserve the existing source state and let the next probe
+			// retry with a complete response.
+			return nil
+		}
 		// 限流/冷却态下，用 wham 返回的权威用量窗口重新判定：
 		// 若上游已重置窗口、不再限流（例如官方提前重置了 5h/7d 用量），
 		// 则主动解除限流冷却，无需等待冷却到期或用户手动测试连接。
 		// 仍不调用 ReportRequestSuccess，避免把一次零成本额度查询计入健康成功样本。
 		if !applyUsageLimitedAccountState(h.store, account, state) {
-			h.store.ClearCooldown(account)
+			h.store.ClearUsageLimitCooldownSince(account, probeStartedAt)
 			log.Printf("[账号 %d] wham 显示限流窗口已重置，自动解除限流冷却", account.DBID)
 		}
 		return nil
@@ -119,7 +126,9 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 	h.store.ReportRequestSuccess(account, 0)
 	// 用量未耗尽时重置冷却
 	if !applyUsageLimitedAccountState(h.store, account, state) {
-		h.store.ClearCooldown(account)
+		if state.HasUsage5h || state.HasUsage7d || state.Cleared5h {
+			h.store.ClearUsageLimitCooldownSince(account, probeStartedAt)
+		}
 	}
 	return nil
 }
@@ -127,6 +136,7 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 // probeUsageViaResponses 原有探针：发送最小 /responses 请求，
 // 通过响应头同步 Codex 用量状态。会真实消耗少量 token。
 func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Account) error {
+	probeStartedAt := time.Now()
 	payload := buildConnectionTestPayload(h.store, h.store.GetTestModel())
 	resp, err := proxy.ExecuteRequest(ctx, account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
 	if err != nil {
@@ -143,7 +153,7 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 		h.store.ReportRequestSuccess(account, 0)
 		// 只有用量未耗尽时才重置状态
 		if !applyUsageLimitedAccountState(h.store, account, usageState) {
-			h.store.ClearCooldown(account)
+			h.store.ClearUsageLimitCooldownSince(account, probeStartedAt)
 		}
 		return nil
 	case http.StatusUnauthorized:

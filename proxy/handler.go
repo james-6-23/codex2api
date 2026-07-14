@@ -145,6 +145,8 @@ type CodexUsageSyncResult struct {
 	Persisted5hOnly          bool
 	Premium5hRateLimited     bool
 	UsageWindowLimitsIgnored bool
+	// Cleared5h 表示本次同步因上游未返回 5h 窗口而清除了本地陈旧 5h 快照（issue #382）。
+	Cleared5h bool
 }
 
 type codexRateLimitWindow string
@@ -4115,13 +4117,25 @@ type codexWindowUsage struct {
 }
 
 func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage {
-	if usedStr == "" {
+	if strings.TrimSpace(usedStr) == "" || strings.TrimSpace(windowStr) == "" {
 		return codexWindowUsage{}
 	}
+	var usedPct, windowMin, resetSec float64
+	if _, err := fmt.Sscanf(usedStr, "%f", &usedPct); err != nil {
+		return codexWindowUsage{}
+	}
+	if _, err := fmt.Sscanf(windowStr, "%f", &windowMin); err != nil || windowMin <= 0 {
+		return codexWindowUsage{}
+	}
+	if strings.TrimSpace(resetStr) != "" {
+		if _, err := fmt.Sscanf(resetStr, "%f", &resetSec); err != nil {
+			resetSec = 0
+		}
+	}
 	return codexWindowUsage{
-		usedPct:   parseFloat(usedStr),
-		windowMin: parseFloat(windowStr),
-		resetSec:  parseFloat(resetStr),
+		usedPct:   usedPct,
+		windowMin: windowMin,
+		resetSec:  resetSec,
 		valid:     true,
 	}
 }
@@ -4440,6 +4454,7 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	if account == nil || resp == nil {
 		return result
 	}
+	observedAt := time.Now()
 	if store != nil {
 		planHeader := resp.Header.Get("x-codex-plan-type")
 		store.UpdateAccountPlanType(account, planHeader)
@@ -4450,39 +4465,82 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	}
 	result.UsageWindowLimitsIgnored = account.SkipsUsageWindowLimits()
 
-	result.Used5hHeaders = responseHasCodex5hHeaders(resp)
-	result.UsagePct7d, result.HasUsage7d = parseCodexUsageHeaders(resp, account)
-	if store != nil {
-		if result.HasUsage7d {
-			store.PersistUsageSnapshot(account, result.UsagePct7d)
-			if result.UsagePct7d >= 100 {
-				result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
+	observation := parseCodexUsageHeaderObservation(resp)
+	result.Used5hHeaders = observation.w5h.valid
+	usageApplied := false
+	if observation.authoritative {
+		usageApplied = account.ApplyUsageObservation(observedAt, func() {
+			parsed := applyCodexUsageHeaderObservation(store, account, observation, observedAt)
+			result.UsagePct7d = parsed.usagePct7d
+			result.HasUsage7d = parsed.hasUsage7d
+			result.Cleared5h = parsed.cleared5h
+			if store == nil {
+				return
 			}
-		} else if result.Used5hHeaders {
-			store.PersistUsageSnapshot5hOnly(account)
-			result.Persisted5hOnly = true
-		}
+			if result.HasUsage7d {
+				store.PersistUsageSnapshot(account, result.UsagePct7d)
+				if result.UsagePct7d >= 100 {
+					result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
+				}
+			} else if result.Used5hHeaders {
+				store.PersistUsageSnapshot5hOnly(account)
+				result.Persisted5hOnly = true
+			}
+		})
 	}
 
 	result.UsagePct5h, result.Reset5hAt, result.HasUsage5h = account.GetUsageSnapshot5h()
-	if store != nil && result.HasUsage5h {
+	if usageApplied && store != nil && result.HasUsage5h {
 		// 被动 /responses 头刷新了 5h 窗口重置时刻：武装「到点即探」，窗口翻新即刷新进度条。
 		store.WakeBoundaryProbe(result.Reset5hAt)
 	}
-	if result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
+	if usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
 		if store != nil {
-			store.MarkPremium5hRateLimited(account, result.Reset5hAt)
+			result.Premium5hRateLimited = store.MarkPremium5hRateLimitedAt(account, result.Reset5hAt, observedAt)
+		} else {
+			result.Premium5hRateLimited = true
 		}
-		result.Premium5hRateLimited = true
 	}
 
 	return result
 }
 
+type codexUsageHeaderParseResult struct {
+	usagePct7d float64
+	hasUsage7d bool
+	cleared5h  bool
+}
+
+type codexUsageHeaderObservation struct {
+	w5h           codexWindowUsage
+	w7d           codexWindowUsage
+	authoritative bool
+}
+
 // parseCodexUsageHeaders 从 Codex 响应头解析 5h/7d 用量百分比
 func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64, bool) {
-	if resp == nil {
+	if resp == nil || account == nil {
 		return 0, false
+	}
+	observedAt := time.Now()
+	observation := parseCodexUsageHeaderObservation(resp)
+	if !observation.authoritative {
+		return 0, false
+	}
+	parsed := codexUsageHeaderParseResult{}
+	account.ApplyUsageObservation(observedAt, func() {
+		parsed = applyCodexUsageHeaderObservation(nil, account, observation, observedAt)
+	})
+	return parsed.usagePct7d, parsed.hasUsage7d
+}
+
+// parseCodexUsageHeaderObservation classifies only windows with a positive,
+// recognizable duration. Used-percent-only partial headers are not authoritative
+// evidence that the optional 5h window disappeared.
+func parseCodexUsageHeaderObservation(resp *http.Response) codexUsageHeaderObservation {
+	out := codexUsageHeaderObservation{}
+	if resp == nil {
+		return out
 	}
 
 	// 解析 primary 和 secondary 窗口
@@ -4496,46 +4554,43 @@ func parseCodexUsageHeaders(resp *http.Response, account *auth.Account) (float64
 	primary := parseCodexWindowUsage(primaryUsedStr, primaryWindowStr, primaryResetStr)
 	secondary := parseCodexWindowUsage(secondaryUsedStr, secondaryWindowStr, secondaryResetStr)
 
-	// 归一化：小窗口 (≤360min) → 5h，大窗口 (>360min) → 7d
-	var w5h, w7d codexWindowUsage
-	now := time.Now()
-
-	if primary.valid && secondary.valid {
-		if primary.windowMin >= secondary.windowMin {
-			w7d, w5h = primary, secondary
-		} else {
-			w7d, w5h = secondary, primary
+	for _, window := range []codexWindowUsage{primary, secondary} {
+		if !window.valid {
+			continue
 		}
-	} else if primary.valid {
-		if primary.windowMin <= 360 && primary.windowMin > 0 {
-			w5h = primary
-		} else {
-			w7d = primary
-		}
-	} else if secondary.valid {
-		if secondary.windowMin <= 360 && secondary.windowMin > 0 {
-			w5h = secondary
-		} else {
-			w7d = secondary
+		switch codexWindowType(window.windowMin) {
+		case codexRateLimitWindow5h:
+			if !out.w5h.valid {
+				out.w5h = window
+			}
+		case codexRateLimitWindow7d:
+			if !out.w7d.valid {
+				out.w7d = window
+			}
 		}
 	}
+	out.authoritative = out.w5h.valid || out.w7d.valid
+	return out
+}
 
-	// 写入 5h
-	if w5h.valid {
-		resetAt := now.Add(time.Duration(w5h.resetSec) * time.Second)
-		account.SetUsageSnapshot5hAt(w5h.usedPct, resetAt, now)
+func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, observation codexUsageHeaderObservation, observedAt time.Time) codexUsageHeaderParseResult {
+	out := codexUsageHeaderParseResult{}
+	if observation.w5h.valid {
+		resetAt := observedAt.Add(time.Duration(observation.w5h.resetSec) * time.Second)
+		account.SetUsageSnapshot5hAt(observation.w5h.usedPct, resetAt, observedAt)
+	} else if observation.authoritative {
+		out.cleared5h = store.ClearAbsentUsageSnapshot5hAt(account, observedAt)
 	}
 
-	// 写入 7d
-	if w7d.valid {
-		resetAt := now.Add(time.Duration(w7d.resetSec) * time.Second)
+	if observation.w7d.valid {
+		resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
 		account.SetReset7dAt(resetAt)
-		account.SetWindow7dSeconds(int64(w7d.windowMin * 60))
-		account.SetUsagePercent7d(w7d.usedPct)
-		return w7d.usedPct, true
+		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
+		account.SetUsagePercent7d(observation.w7d.usedPct)
+		out.usagePct7d = observation.w7d.usedPct
+		out.hasUsage7d = true
 	}
-
-	return 0, false
+	return out
 }
 
 // ParseCodexUsageHeaders 从响应头提取并更新账号用量信息

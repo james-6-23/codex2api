@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strconv"
 	"strings"
@@ -428,6 +429,7 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 	if account == nil || usage == nil {
 		return result
 	}
+	observedAt := time.Now()
 	result.UsageWindowLimitsIgnored = account.SkipsUsageWindowLimits()
 
 	if store != nil && usage.PlanType != "" {
@@ -458,52 +460,69 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		account.SetRateLimitResetCredits(usage.RateLimitResetCredits.AvailableCount)
 	}
 
-	now := time.Now()
-
-	// 记录本次成功的 wham 探针时间。「主动重置次数」只能由 wham 刷新，
-	// 用它独立判断重置次数是否过期（见 auth.Account.NeedsUsageProbe）。
-	account.MarkResetCreditsProbed(now)
-
-	w5h, w7d := pickClassifiedWhamWindows(usage.RateLimit.PrimaryWindow, usage.RateLimit.SecondaryWindow, usage.PlanType, now)
-
-	if w5h != nil {
-		resetAt := whamWindowResetAt(w5h, now)
-		account.SetUsageSnapshot5hAt(w5h.UsedPercent, resetAt, now)
-		result.UsagePct5h = w5h.UsedPercent
-		result.Reset5hAt = resetAt
-		result.HasUsage5h = true
-		result.Used5hHeaders = true
-		if store != nil {
-			// 5h 窗口重置时刻武装「到点即探」，窗口翻新即刷新进度条。
-			store.WakeBoundaryProbe(resetAt)
-		}
+	w5h, w7d := pickClassifiedWhamWindows(usage.RateLimit.PrimaryWindow, usage.RateLimit.SecondaryWindow, usage.PlanType, observedAt)
+	// A present-but-empty window object is not evidence that the upstream
+	// removed a window. Normalize those placeholders away so malformed/partial
+	// payloads preserve the last known 5h snapshot.
+	if !usableWhamWindow(w5h) {
+		w5h = nil
 	}
-
-	if w7d != nil {
-		resetAt := whamWindowResetAt(w7d, now)
-		account.SetReset7dAt(resetAt)
-		account.SetWindow7dSeconds(w7d.LimitWindowSeconds)
-		result.UsagePct7d = w7d.UsedPercent
-		result.HasUsage7d = true
-		if store != nil {
-			store.WakeBoundaryProbe(resetAt)
-			store.PersistUsageSnapshot(account, w7d.UsedPercent)
-			if result.UsagePct7d >= 100 {
-				result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
+	if !usableWhamWindow(w7d) {
+		w7d = nil
+	}
+	hasAuthoritativeWindow := w5h != nil || w7d != nil
+	if hasAuthoritativeWindow {
+		// Only a structurally valid window response is a successful usage probe;
+		// malformed/empty payloads must not suppress the next retry.
+		account.MarkResetCreditsProbed(observedAt)
+	}
+	usageApplied := false
+	if hasAuthoritativeWindow {
+		usageApplied = account.ApplyUsageObservation(observedAt, func() {
+			if w5h != nil {
+				resetAt := whamWindowResetAt(w5h, observedAt)
+				account.SetUsageSnapshot5hAt(w5h.UsedPercent, resetAt, observedAt)
+				result.UsagePct5h = w5h.UsedPercent
+				result.Reset5hAt = resetAt
+				result.HasUsage5h = true
+				result.Used5hHeaders = true
+				if store != nil {
+					// 5h 窗口重置时刻武装「到点即探」，窗口翻新即刷新进度条。
+					store.WakeBoundaryProbe(resetAt)
+				}
+			} else if hasAuthoritativeWindow {
+				// WHAM 是完整权威探测：payload 无 5h 窗口则清除本地陈旧 5h 快照（issue #382）。
+				result.Cleared5h = store.ClearAbsentUsageSnapshot5hAt(account, observedAt)
 			}
-		}
-	} else if result.Used5hHeaders && store != nil {
-		// 只有 5h 数据时，单独持久化 5h 快照
-		store.PersistUsageSnapshot5hOnly(account)
-		result.Persisted5hOnly = true
+
+			if w7d != nil {
+				resetAt := whamWindowResetAt(w7d, observedAt)
+				account.SetReset7dAt(resetAt)
+				account.SetWindow7dSeconds(w7d.LimitWindowSeconds)
+				result.UsagePct7d = w7d.UsedPercent
+				result.HasUsage7d = true
+				if store != nil {
+					store.WakeBoundaryProbe(resetAt)
+					store.PersistUsageSnapshot(account, w7d.UsedPercent)
+					if result.UsagePct7d >= 100 {
+						result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
+					}
+				}
+			} else if result.Used5hHeaders && store != nil {
+				// 只有 5h 数据时，单独持久化 5h 快照
+				store.PersistUsageSnapshot5hOnly(account)
+				result.Persisted5hOnly = true
+			}
+		})
 	}
 
 	// premium 5h 限流标记
-	if result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
+	if usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
 		if store != nil {
-			store.MarkPremium5hRateLimited(account, result.Reset5hAt)
+			result.Premium5hRateLimited = store.MarkPremium5hRateLimitedAt(account, result.Reset5hAt, observedAt)
+		} else {
+			result.Premium5hRateLimited = true
 		}
-		result.Premium5hRateLimited = true
 	}
 
 	return result
@@ -562,6 +581,22 @@ func pickClassifiedWhamWindows(primary, secondary *WhamUsageWindow, planType str
 		}
 	}
 	return w5h, w7d
+}
+
+// usableWhamWindow reports whether a decoded window contains enough positive
+// information to be authoritative. JSON may contain an empty placeholder for
+// an omitted optional window; treating that as a real 5h window would erase a
+// valid snapshot on the next probe.
+func usableWhamWindow(w *WhamUsageWindow) bool {
+	if w == nil || math.IsNaN(w.UsedPercent) || math.IsInf(w.UsedPercent, 0) || w.UsedPercent < 0 || w.UsedPercent > 100 {
+		return false
+	}
+	if w.LimitWindowSeconds > 0 || w.ResetAfterSeconds > 0 || w.ResetAt > 0 {
+		return true
+	}
+	// used_percent without a window duration/reset is a partial payload, not
+	// authoritative evidence about which optional window is present.
+	return false
 }
 
 func shouldTreatUnknownWhamWindowAs7d(w *WhamUsageWindow, planType string, now time.Time) bool {

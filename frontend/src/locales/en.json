@@ -1000,6 +1000,8 @@
     "ready": "Ready",
     "cooldown": "Cooling Down",
     "rate_limited": "Rate Limited",
+    "rate_limited_5h": "5h Rate Limited",
+    "rate_limited_7d": "7d Rate Limited",
     "usage_exhausted": "Rate Limited",
     "quota_paused": "Auto-Paused",
     "unauthorized": "Banned",

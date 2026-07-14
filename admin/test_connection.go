@@ -230,10 +230,6 @@ func (h *Handler) TestConnection(c *gin.Context) {
 					}
 				}
 			}
-			// 如果上游未返回用量头，清除旧的用量缓存，避免显示过期数据
-			if !isOpenAIResponsesAccount && !usageState.HasUsage7d && !usageState.HasUsage5h {
-				account.ClearUsageCache()
-			}
 			duration := time.Since(start).Milliseconds()
 			sendTestEvent(c, testEvent{
 				Type: "content",
@@ -942,13 +938,6 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		status, msg := h.readBatchTestStreamResult(testCtx, acc, resp, testModel)
 		if status != "success" {
 			return status, msg
-		}
-		if !acc.IsOpenAIResponsesAPI() {
-			if _, hasUsage7d := acc.GetUsagePercent7d(); !hasUsage7d {
-				if _, _, hasUsage5h := acc.GetUsageSnapshot5h(); !hasUsage5h {
-					acc.ClearUsageCache()
-				}
-			}
 		}
 		// 测试成功即重置失败/冷却状态，用量限制由调度器自行判断
 		h.store.RecordManualTestSuccess(acc, time.Since(start))

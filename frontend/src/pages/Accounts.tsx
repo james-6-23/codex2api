@@ -34,7 +34,10 @@ import type {
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
 import { buildBatchMetadataUpdate } from "../lib/accountBatchUpdate";
-import { formatLongUsageWindowLabel } from "../lib/usageFormat";
+import {
+  formatLongUsageWindowLabel,
+  needsUsageReload,
+} from "../lib/usageFormat";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -1510,29 +1513,6 @@ export default function Accounts() {
   }, [allGroups]);
 
   useEffect(() => {
-    const needsUsageReload = (account: AccountRow) => {
-      if (account.status !== "active" && account.status !== "ready") {
-        return false;
-      }
-
-      const plan = normalizePlanType(account.plan_type);
-      const has7d =
-        account.usage_percent_7d !== null &&
-        account.usage_percent_7d !== undefined;
-      const has5h =
-        account.usage_percent_5h !== null &&
-        account.usage_percent_5h !== undefined;
-      // 与 UsageCell 的显示判定保持一致:plan_type 可能滞后于真实订阅状态,
-      // 看到 5h 重置时间就当订阅账号处理,触发拉取 5h 数据。
-      const looksLikeSubscription =
-        isPremiumUsagePlan(plan) || !!account.reset_5h_at;
-
-      if (looksLikeSubscription) {
-        return !has5h || !has7d;
-      }
-      return !has7d;
-    };
-
     const missingUsageIds = accounts
       .filter(needsUsageReload)
       .map((account) => account.id);
@@ -11812,8 +11792,7 @@ function UsageWindowStat({
 // 显示策略不再单独依赖 plan_type:
 // 当 plan_type 还停留在按 RT 刷新出来的旧值(例如 "free")、但账号实际已订阅、
 // 后端已经返回 5h 窗口数据时,只看 plan_type 会把 5h 吞掉。
-// 因此这里以"是否真的存在 5h / 7d 数据(含 reset 时间)"作为主判据,
-// plan_type 仅作为 5h 数据缺位时的辅助提示。
+// 因此这里以"是否真的存在 5h / 7d 数据(含 reset 时间)"作为主判据。
 function UsageCell({
   account,
   wide = false,
@@ -11856,26 +11835,23 @@ function UsageCell({
     </button>
   );
 
-  const plan = normalizePlanType(account.plan_type);
   const has7d =
     account.usage_percent_7d !== null && account.usage_percent_7d !== undefined;
   const has5h =
     account.usage_percent_5h !== null && account.usage_percent_5h !== undefined;
   const has7dDetail = hasUsageWindowDetail(account.usage_7d_detail);
-  const has5hDetail = hasUsageWindowDetail(account.usage_5h_detail);
   const has5hReset = !!account.reset_5h_at;
   const has7dReset = !!account.reset_7d_at;
 
-  const fiveHourPresent = has5h || has5hDetail || has5hReset;
+  const fiveHourPresent = has5h || has5hReset;
   const sevenDayPresent = has7d || has7dDetail || has7dReset;
   // 长窗口标签:free/team plan 实为月窗(约 30 天),按真实周期显示 30d 而非误标 7d (issue #324)
   const longWindowLabel = formatLongUsageWindowLabel(account);
-  // plan 表明是订阅型时,即使数据暂未拉到也按订阅布局占位,避免抖动
-  const planSuggestsPremium = isPremiumUsagePlan(plan);
-  const showFiveHour = fiveHourPresent || planSuggestsPremium;
+  // 5h 是上游可选窗口：仅数据存在时展示，不再因 premium plan 强制占位（issue #382）
+  const showFiveHour = fiveHourPresent;
 
   if (showFiveHour) {
-    if (!has5h && !has7d && !has5hDetail && !has7dDetail && !has5hReset && !has7dReset)
+    if (!has5h && !has7d && !has7dDetail && !has5hReset && !has7dReset)
       return <span className="text-[12px] text-muted-foreground">-</span>;
     return (
       <div className={`${wide ? "w-full" : "w-52"} flex items-start gap-1`}>
@@ -11932,12 +11908,16 @@ function UsageCell({
 function BilledCell({ account }: { account: AccountRow }) {
   const h5 = typeof account.billed_5h === "number" ? account.billed_5h.toFixed(2) : null;
   const d7 = typeof account.billed_7d === "number" ? account.billed_7d.toFixed(2) : null;
-  if (h5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
+  const has5hWindow =
+    (account.usage_percent_5h !== null && account.usage_percent_5h !== undefined) ||
+    !!account.reset_5h_at;
+  const visibleH5 = has5hWindow ? h5 : null;
+  if (visibleH5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
   const longLabel = formatLongUsageWindowLabel(account);
   return (
     <span className="text-[12px] text-muted-foreground">
-      {h5 !== null ? `5h: $${h5}` : "5h: -"}
-      {" / "}
+      {visibleH5 !== null && `5h: $${visibleH5}`}
+      {visibleH5 !== null && " / "}
       {d7 !== null ? `${longLabel}: $${d7}` : `${longLabel}: -`}
     </span>
   );
@@ -11949,7 +11929,11 @@ function getAccountStatusCountdownUntil(
   const status = account.status;
   if (
     account.cooldown_until &&
-    (status === "rate_limited" || status === "error" || status === "cooldown")
+    (status === "rate_limited" ||
+      status === "rate_limited_5h" ||
+      status === "rate_limited_7d" ||
+      status === "error" ||
+      status === "cooldown")
   ) {
     return account.cooldown_until;
   }

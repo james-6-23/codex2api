@@ -2983,6 +2983,186 @@ func TestSyncCodexUsageStateCreditAccountSkips7dUsageLimit(t *testing.T) {
 	}
 }
 
+// issue #382：响应头仅有 7d 时清除陈旧 5h；完全无用量头时保留 5h。
+func TestSyncCodexUsageState_Clears5hWhenOnly7dHeaders(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "header-clear-5h", map[string]interface{}{
+		"access_token":          "at",
+		"plan_type":             "plus",
+		"codex_5h_used_percent": 90,
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: id, AccessToken: "at", PlanType: "plus"}
+	account.SetUsageSnapshot5h(90, time.Now().Add(time.Hour))
+
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "15")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "500000")
+
+	result := SyncCodexUsageState(store, account, resp)
+	if result.HasUsage5h {
+		t.Fatalf("result = %+v, want no 5h", result)
+	}
+	if !result.Cleared5h {
+		t.Fatal("Cleared5h = false, want true")
+	}
+	if !result.HasUsage7d || result.UsagePct7d != 15 {
+		t.Fatalf("result = %+v, want 7d=15", result)
+	}
+	if _, ok := account.GetUsagePercent5h(); ok {
+		t.Fatal("in-memory 5h should be cleared")
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := row.GetCredential("codex_5h_used_percent"); got != "" {
+		t.Errorf("persisted codex_5h_used_percent = %q, want cleared", got)
+	}
+
+	reloadedStore := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	if err := reloadedStore.LoadAccountByID(ctx, id); err != nil {
+		t.Fatalf("LoadAccountByID: %v", err)
+	}
+	reloaded := reloadedStore.FindByID(id)
+	if reloaded == nil {
+		t.Fatal("reloaded account is nil")
+	}
+	if _, ok := reloaded.GetUsagePercent5h(); ok {
+		t.Fatal("cleared 5h snapshot was hydrated again after reload")
+	}
+}
+
+func TestSyncCodexUsageState_Preserves5hWhenNoUsageHeaders(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 200, PlanType: "plus"}
+	resetAt := time.Now().Add(2 * time.Hour)
+	account.SetUsageSnapshot5h(55, resetAt)
+
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-plan-type", "plus")
+	// 无 primary/secondary 用量头：可能是中间件剥头，不能误清 5h
+
+	result := SyncCodexUsageState(store, account, resp)
+	if result.Cleared5h {
+		t.Fatal("Cleared5h = true, want false when response has no usage windows")
+	}
+	pct, ok := account.GetUsagePercent5h()
+	if !ok || pct != 55 {
+		t.Fatalf("usage_percent_5h = (%v, %v), want (55, true)", pct, ok)
+	}
+}
+
+func TestSyncCodexUsageState_PartialUsedPercentHeaderDoesNotClear5h(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 201, PlanType: "plus"}
+	account.SetUsageSnapshot5h(63, time.Now().Add(2*time.Hour))
+
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "12")
+	result := SyncCodexUsageState(store, account, resp)
+
+	if result.Cleared5h || result.HasUsage7d {
+		t.Fatalf("result = %+v, want partial headers ignored", result)
+	}
+	if pct, ok := account.GetUsagePercent5h(); !ok || pct != 63 {
+		t.Fatalf("usage_percent_5h = (%v, %v), want (63, true)", pct, ok)
+	}
+}
+
+func TestParseCodexUsageHeaders_7dOnlyClearsMemoryWithoutStore(t *testing.T) {
+	account := &auth.Account{DBID: 202, PlanType: "plus"}
+	account.SetUsageSnapshot5h(63, time.Now().Add(2*time.Hour))
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "12")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "500000")
+
+	pct7d, ok := ParseCodexUsageHeaders(resp, account)
+	if !ok || pct7d != 12 {
+		t.Fatalf("ParseCodexUsageHeaders() = (%v, %v), want (12, true)", pct7d, ok)
+	}
+	if _, ok := account.GetUsagePercent5h(); ok {
+		t.Fatal("public parse-only path should clear stale in-memory 5h without a store")
+	}
+}
+
+func TestSyncCodexUsageState_NilStorePreservesPremiumCooldown(t *testing.T) {
+	account := &auth.Account{DBID: 203, PlanType: "plus", Status: auth.StatusReady}
+	account.SetUsageSnapshot5h(100, time.Now().Add(2*time.Hour))
+	account.SetCooldownUntil(time.Now().Add(2*time.Hour), "rate_limited_5h")
+
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "12")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "500000")
+
+	result := SyncCodexUsageState(nil, account, resp)
+	if !result.Cleared5h {
+		t.Fatal("7d-only parse should clear the stale in-memory snapshot")
+	}
+	if account.Status != auth.StatusCooldown || account.GetCooldownReason() != "rate_limited_5h" {
+		t.Fatalf("nil-store parse changed cooldown state: status=%v reason=%q", account.Status, account.GetCooldownReason())
+	}
+}
+
+func TestSyncCodexUsageState_7dOnlyPreservesNewerUnauthorizedCooldown(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+	id, err := db.InsertAccountWithCredentials(ctx, "header-preserve-401", map[string]interface{}{
+		"access_token":              "at",
+		"plan_type":                 "plus",
+		"codex_5h_used_percent":     100,
+		"codex_5h_reset_at":         time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		"codex_5h_usage_updated_at": time.Now().Format(time.RFC3339),
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: id, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy}
+	store.MarkPremium5hRateLimited(account, time.Now().Add(2*time.Hour))
+	atomic.StoreInt32(&account.Disabled, 1)
+	store.MarkCooldown(account, time.Hour, "unauthorized")
+
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "15")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "500000")
+	result := SyncCodexUsageState(store, account, resp)
+
+	if !result.Cleared5h {
+		t.Fatal("Cleared5h = false, want stale snapshot cleared")
+	}
+	if account.GetCooldownReason() != "unauthorized" || atomic.LoadInt32(&account.Disabled) != 1 {
+		t.Fatalf("runtime state = (%q, disabled=%d), want unauthorized and disabled", account.GetCooldownReason(), atomic.LoadInt32(&account.Disabled))
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if row.CooldownReason != "unauthorized" || !row.CooldownUntil.Valid {
+		t.Fatalf("persisted cooldown = (%q, %v), want unauthorized", row.CooldownReason, row.CooldownUntil)
+	}
+}
+
 func TestAuthMiddlewareSetsAPIKeyContext(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

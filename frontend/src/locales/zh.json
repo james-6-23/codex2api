@@ -1000,6 +1000,8 @@
     "ready": "就绪",
     "cooldown": "冷却中",
     "rate_limited": "限流",
+    "rate_limited_5h": "5 小时限流",
+    "rate_limited_7d": "7 天限流",
     "usage_exhausted": "限流中",
     "quota_paused": "自动暂停",
     "unauthorized": "封禁",

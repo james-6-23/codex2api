@@ -43,6 +43,11 @@ function isFutureTime(value?: string): boolean {
 
 function getRateLimitWindow(account: AccountRow): "5h" | "7d" | null {
   const status = (account.status || "").toLowerCase();
+  const reason = (account.cooldown_reason || "").toLowerCase();
+  if (status === "rate_limited_5h") return "5h";
+  if (status === "rate_limited_7d") return "7d";
+  if (reason === "rate_limited_5h") return "5h";
+  if (reason === "rate_limited_7d") return "7d";
   if (status === "rate_limited" || status === "quota_paused" || status === "usage_exhausted") {
     if (account.reset_5h_at && isFutureTime(account.reset_5h_at)) return "5h";
     if (account.reset_7d_at && isFutureTime(account.reset_7d_at)) return "7d";

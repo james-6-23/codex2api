@@ -469,6 +469,130 @@ func TestApplyWhamUsage_FreeAccountPrimaryIs7d(t *testing.T) {
 	}
 }
 
+// issue #382：上游 WHAM 不再返回 5h 时，必须清除本地陈旧 5h 快照与 premium 5h 限流。
+func TestApplyWhamUsage_ClearsStale5hWhenUpstreamOmitsWindow(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+
+	id, err := db.InsertAccountWithCredentials(ctx, "wham-no-5h", map[string]interface{}{
+		"plan_type":                 "plus",
+		"codex_5h_used_percent":     80,
+		"codex_5h_reset_at":         time.Now().Add(2 * time.Hour).Format(time.RFC3339),
+		"codex_5h_usage_updated_at": time.Now().Format(time.RFC3339),
+	}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: id, AccessToken: "at", PlanType: "plus", AccountID: "acc"}
+	account.SetUsageSnapshot5h(80, time.Now().Add(2*time.Hour))
+
+	reset7d := time.Now().Add(7 * 24 * time.Hour).Unix()
+	usage := &WhamUsage{PlanType: "plus"}
+	// 仅 weekly：模拟 OpenAI 临时取消 5h 窗口后的 WHAM 响应
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 22, LimitWindowSeconds: 604800, ResetAfterSeconds: 604800, ResetAt: reset7d}
+	usage.RateLimit.SecondaryWindow = nil
+
+	result := ApplyWhamUsage(store, account, usage)
+
+	if result.HasUsage5h || result.Used5hHeaders {
+		t.Fatalf("result = %+v, want no 5h window", result)
+	}
+	if !result.Cleared5h {
+		t.Fatal("Cleared5h = false, want true when stale 5h was present")
+	}
+	if !result.HasUsage7d || result.UsagePct7d != 22 {
+		t.Fatalf("7d result = %+v, want UsagePct7d=22", result)
+	}
+	if _, ok := account.GetUsagePercent5h(); ok {
+		t.Fatal("in-memory 5h snapshot should be cleared")
+	}
+	if account.IsPremium5hRateLimited() {
+		t.Fatal("account should not remain premium 5h rate limited")
+	}
+
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := row.GetCredential("codex_5h_used_percent"); got != "" {
+		t.Errorf("persisted codex_5h_used_percent = %q, want empty/cleared", got)
+	}
+	if got := row.GetCredential("codex_7d_used_percent"); got != "22" {
+		t.Errorf("persisted codex_7d_used_percent = %q, want 22", got)
+	}
+}
+
+func TestApplyWhamUsage_ClearsPremium5hCooldownWhenWindowGone(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 42, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+	resetAt := time.Now().Add(3 * time.Hour)
+	store.MarkPremium5hRateLimited(account, resetAt)
+	if !account.IsPremium5hRateLimited() {
+		t.Fatal("precondition: account should be premium 5h rate limited")
+	}
+
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{
+		UsedPercent:        10,
+		LimitWindowSeconds: 604800,
+		ResetAfterSeconds:  604800,
+		ResetAt:            time.Now().Add(7 * 24 * time.Hour).Unix(),
+	}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if !result.Cleared5h {
+		t.Fatal("Cleared5h = false, want true")
+	}
+	if account.IsPremium5hRateLimited() {
+		t.Fatal("premium 5h limit should be cleared when upstream omits 5h")
+	}
+	if got := account.RuntimeStatus(); got == "rate_limited" {
+		t.Fatalf("RuntimeStatus() = %q, want not rate_limited after clearing absent 5h", got)
+	}
+}
+
+func TestApplyWhamUsage_EmptyWindowPayloadPreserves5h(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 43, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+	resetAt := time.Now().Add(3 * time.Hour)
+	account.SetUsageSnapshot5h(88, resetAt)
+
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Cleared5h || result.HasUsage5h || result.HasUsage7d {
+		t.Fatalf("result = %+v, want malformed payload to be non-authoritative", result)
+	}
+	if pct, gotReset, ok := account.GetUsageSnapshot5h(); !ok || pct != 88 || !gotReset.Equal(resetAt) {
+		t.Fatalf("5h snapshot = (%v, %v, %v), want preserved 88%% and reset %v", pct, gotReset, ok, resetAt)
+	}
+}
+
+func TestApplyWhamUsage_UsedPercentOnlyPayloadPreserves5h(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 44, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+	account.SetUsageSnapshot5h(77, time.Now().Add(2*time.Hour))
+
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 12}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Cleared5h || result.HasUsage5h || result.HasUsage7d {
+		t.Fatalf("result = %+v, want used-percent-only payload to be non-authoritative", result)
+	}
+	if _, _, ok := account.GetUsageSnapshot5h(); !ok {
+		t.Fatal("5h snapshot should remain valid for a used-percent-only payload")
+	}
+}
+
 // 防御性测试：即使后端把 5h/7d 字段顺序对调，分类也必须按 limit_window_seconds 走。
 func TestApplyWhamUsage_ClassifiesByWindowSeconds(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
