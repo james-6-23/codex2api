@@ -12,7 +12,8 @@
     "proxies": "代理管理",
     "images": "生图工作台",
     "promptFilter": "Prompt 检查",
-    "modelPricing": "模型定价"
+    "modelPricing": "模型定价",
+    "payloadRules": "请求体重写"
   },
   "common": {
     "online": "在线",
@@ -2752,5 +2753,10 @@
     "galleryImagesAdded": "已从图库添加 {{count}} 张参考图",
     "canvasTitle": "预览画布",
     "canvasHint": "生成结果会显示在此区域，点击可全屏查看"
+  },
+  "payloadRules": {
+    "editorTitle": "规则配置",
+    "unsaved": "未保存",
+    "saved": "规则已保存并即时生效"
   }
 }

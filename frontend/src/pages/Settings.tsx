@@ -7,7 +7,8 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { HealthResponse, ModelInfo, ObservedInstructionsSample, SiteBranding, SystemSettings } from '../types'
+import type { HealthResponse, ModelInfo, SiteBranding, SystemSettings } from '../types'
+import { countPayloadRules } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
 import { DEFAULT_SITE_LOGO, isBrandingVideo, sanitizeBrandingImage, sanitizeBrandingLogo, useBranding } from '../branding'
@@ -65,9 +66,9 @@ import {
   Wrench,
   X,
 } from 'lucide-react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 
-type ModelPanelKey = 'registry' | 'anthropic' | 'codex' | 'reasoning' | 'payload'
+type ModelPanelKey = 'registry' | 'anthropic' | 'codex' | 'reasoning'
 
 type ModelMappingEntry = [string, string]
 const EMPTY_MODEL_MAPPING_ENTRIES: ModelMappingEntry[] = []
@@ -306,117 +307,6 @@ const buildCodexUserAgentPreview = (config: CodexUserAgentConfig, minVersion: st
 }
 
 // 模型映射编辑器组件
-const PAYLOAD_RULE_GROUPS = ['default', 'default_raw', 'override', 'override_raw', 'append', 'filter'] as const
-
-function countPayloadRules(raw: string): number {
-  try {
-    const parsed = JSON.parse(raw || '{}') as Record<string, unknown>
-    return PAYLOAD_RULE_GROUPS.reduce((sum, group) => {
-      const rules = parsed[group]
-      return sum + (Array.isArray(rules) ? rules.length : 0)
-    }, 0)
-  } catch {
-    return 0
-  }
-}
-
-function PayloadRulesEditor({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  const { t } = useTranslation()
-  const [samples, setSamples] = useState<ObservedInstructionsSample[]>([])
-  const [samplesLoaded, setSamplesLoaded] = useState(false)
-  const [loadingSamples, setLoadingSamples] = useState(false)
-  const [expandedSample, setExpandedSample] = useState<number | null>(null)
-
-  const jsonError = useMemo(() => {
-    const trimmed = value.trim()
-    if (!trimmed) return null
-    try {
-      JSON.parse(trimmed)
-      return null
-    } catch (e) {
-      return e instanceof Error ? e.message : String(e)
-    }
-  }, [value])
-
-  const loadSamples = useCallback(async () => {
-    setLoadingSamples(true)
-    try {
-      const resp = await api.getObservedInstructions()
-      setSamples(resp.samples || [])
-      setSamplesLoaded(true)
-    } catch {
-      setSamples([])
-      setSamplesLoaded(true)
-    } finally {
-      setLoadingSamples(false)
-    }
-  }, [])
-
-  return (
-    <div className="space-y-4">
-      <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs leading-relaxed text-amber-700 dark:text-amber-300">
-        {t('settings2.payloadRulesWarning')}
-      </div>
-      <div className="space-y-1.5">
-        <textarea
-          rows={14}
-          value={value}
-          spellCheck={false}
-          placeholder={PAYLOAD_RULES_PLACEHOLDER}
-          onChange={(e: ChangeEvent<HTMLTextAreaElement>) => onChange(e.target.value)}
-          className="flex w-full resize-y rounded-md border border-input bg-background px-3 py-2 font-mono text-xs text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50"
-        />
-        {jsonError ? (
-          <p className="text-xs text-destructive">{t('settings2.payloadRulesJsonError')}: {jsonError}</p>
-        ) : (
-          <p className="text-xs text-muted-foreground">{t('settings2.payloadRulesHint')}</p>
-        )}
-      </div>
-      <div className="space-y-2 rounded-lg border border-border bg-muted/20 p-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="text-xs font-semibold text-foreground">{t('settings2.payloadRulesObserved')}</div>
-          <Button size="sm" variant="outline" onClick={() => void loadSamples()} disabled={loadingSamples}>
-            {loadingSamples ? t('common.loading') : t('settings2.payloadRulesObservedLoad')}
-          </Button>
-        </div>
-        <p className="text-xs text-muted-foreground">{t('settings2.payloadRulesObservedDesc')}</p>
-        {samplesLoaded && samples.length === 0 ? (
-          <p className="text-xs text-muted-foreground">{t('settings2.payloadRulesObservedEmpty')}</p>
-        ) : null}
-        {samples.map((sample, i) => (
-          <div key={i} className="rounded-md border border-border bg-background p-2.5">
-            <button
-              type="button"
-              className="flex w-full items-center justify-between gap-2 text-left"
-              onClick={() => setExpandedSample(expandedSample === i ? null : i)}
-            >
-              <span className="min-w-0 truncate font-mono text-xs font-semibold text-foreground">
-                {sample.model || '-'}
-                <span className="ml-2 font-normal text-muted-foreground">{sample.originator}</span>
-              </span>
-              <span className="shrink-0 text-[11px] text-muted-foreground">
-                {sample.length.toLocaleString()} chars{sample.truncated ? ' (truncated)' : ''}
-              </span>
-            </button>
-            {expandedSample === i ? (
-              <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap break-words rounded bg-muted/40 p-2 text-[11px] leading-relaxed text-foreground">
-                {sample.instructions}
-              </pre>
-            ) : null}
-          </div>
-        ))}
-      </div>
-    </div>
-  )
-}
-
-const PAYLOAD_RULES_PLACEHOLDER = `{
-  "append":   [{"params": {"instructions": "追加到系统提示词末尾的文本"}}],
-  "override": [{"models": ["gpt-*"], "params": {"service_tier": "priority"}},
-               {"match": {"reasoning.effort": "medium"}, "params": {"reasoning.effort": "high"}}],
-  "filter":   [{"params": ["metadata.debug"]}]
-}`
-
 function ModelMappingEditor({
   value,
   onChange,
@@ -1162,6 +1052,7 @@ async function compressSiteLogoFile(file: File, mimeType: string) {
 
 export default function Settings() {
   const { t } = useTranslation()
+  const navigate = useNavigate()
   const { applyBranding } = useBranding()
   const defaultClaudeModelMappingEntries = useMemo(() => getDefaultModelMappingEntries(), [])
   const schedulerModeOptions = [
@@ -3193,7 +3084,7 @@ export default function Settings() {
                 description={t('settings2.payloadRulesDesc')}
                 meta={t('settings.nav.mappingCount', { count: payloadRuleCount })}
                 openLabel={t('settings.nav.manage')}
-                onOpen={() => setModelPanel('payload')}
+                onOpen={() => navigate('/payload-rules')}
               />
             </div>
 
@@ -3210,9 +3101,7 @@ export default function Settings() {
                         ? t('settings2.anthropicModelMapping')
                         : modelPanel === 'codex'
                           ? t('settings2.codexModelMapping')
-                          : modelPanel === 'payload'
-                            ? t('settings2.payloadRules')
-                            : t('settings2.reasoningEffortModels')}
+                          : t('settings2.reasoningEffortModels')}
                   </SheetTitle>
                   <SheetDescription>
                     {modelPanel === 'registry'
@@ -3221,9 +3110,7 @@ export default function Settings() {
                         ? t('settings2.anthropicModelMappingDesc')
                         : modelPanel === 'codex'
                           ? t('settings2.codexModelMappingDesc')
-                          : modelPanel === 'payload'
-                            ? t('settings2.payloadRulesDesc')
-                            : t('settings2.reasoningEffortModelsDesc')}
+                          : t('settings2.reasoningEffortModelsDesc')}
                   </SheetDescription>
                 </SheetHeader>
                 <SheetBody className="space-y-4">
@@ -3291,12 +3178,6 @@ export default function Settings() {
                       value={settingsForm.reasoning_effort_models}
                       onChange={(v) => setSettingsForm((f) => ({ ...f, reasoning_effort_models: v }))}
                       baseModelOptions={textModelOptions}
-                    />
-                  ) : null}
-                  {modelPanel === 'payload' ? (
-                    <PayloadRulesEditor
-                      value={settingsForm.payload_rules}
-                      onChange={(v) => setSettingsForm((f) => ({ ...f, payload_rules: v }))}
                     />
                   ) : null}
                 </SheetBody>

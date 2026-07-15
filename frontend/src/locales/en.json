@@ -12,7 +12,8 @@
     "proxies": "Proxies",
     "images": "Images",
     "promptFilter": "Prompt Filter",
-    "modelPricing": "Model Pricing"
+    "modelPricing": "Model Pricing",
+    "payloadRules": "Payload Rules"
   },
   "common": {
     "online": "Online",
@@ -2752,5 +2753,10 @@
     "galleryImagesAdded": "Added {{count}} image(s) from gallery",
     "canvasTitle": "Preview canvas",
     "canvasHint": "Results appear here — click to view full screen"
+  },
+  "payloadRules": {
+    "editorTitle": "Rule Configuration",
+    "unsaved": "Unsaved",
+    "saved": "Rules saved and applied immediately"
   }
 }
