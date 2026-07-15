@@ -1166,6 +1166,8 @@ export default function Settings() {
     prompt_filter_mode: 'monitor',
     prompt_filter_threshold: 50,
     prompt_filter_strict_threshold: 90,
+    prompt_filter_strict_terminal_enabled: false,
+    prompt_filter_advanced_config: '{}',
     prompt_filter_log_matches: true,
     prompt_filter_max_text_length: 81920,
     prompt_filter_sensitive_words: '',

@@ -644,6 +644,8 @@ export interface SystemSettings {
   prompt_filter_mode: 'monitor' | 'warn' | 'block' | string
   prompt_filter_threshold: number
   prompt_filter_strict_threshold: number
+  prompt_filter_strict_terminal_enabled: boolean
+  prompt_filter_advanced_config: string
   prompt_filter_log_matches: boolean
   prompt_filter_max_text_length: number
   prompt_filter_sensitive_words: string
@@ -795,6 +797,33 @@ export interface PromptFilterRulesResponse {
   builtin_patterns: PromptFilterRule[]
   custom_patterns: PromptFilterRule[]
   disabled_patterns: string[]
+}
+
+export interface PromptIntelligenceCandidate {
+  name: string
+  pattern: string
+  weight: number
+  category: string
+  strict: boolean
+  rationale?: string
+  source_url?: string
+  status?: 'new' | 'update' | string
+}
+
+export interface PromptIntelligenceHistoryResponse {
+  runs: PromptIntelligenceRun[]
+  total: number
+}
+
+export interface PromptIntelligenceRun {
+  started_at: string
+  finished_at: string
+  queries: string[]
+  sources: Array<{ provider: string; title: string; url: string; description: string; updated_at: string }>
+  candidates: PromptIntelligenceCandidate[]
+  model_calls: number
+  added: number
+  errors: string[]
 }
 
 export interface ModelInfo {

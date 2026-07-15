@@ -526,6 +526,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	c.Set("x-reasoning-effort", reasoningEffort)
 
 	var firstTokenMs int
+	outputBuffer := newWSPromptOutputBuffer(h.store.GetPromptFilterConfig())
 	var usage *UsageInfo
 	var actualServiceTier string
 	ttftRecorded := false
@@ -546,10 +547,18 @@ func (h *Handler) streamResponsesWSUpstream(
 
 	flushPendingFirstTokenMessages := func() bool {
 		for _, pending := range pendingFirstTokenMessages {
-			if err := writeResponsesWSMessage(conn, pending); err != nil {
-				writeErr = err
+			release, filterErr := outputBuffer.Push(pending)
+			if filterErr != nil {
+				writeErr = filterErr
 				clientGone = true
 				return false
+			}
+			for _, filtered := range release {
+				if err := writeResponsesWSMessage(conn, filtered); err != nil {
+					writeErr = err
+					clientGone = true
+					return false
+				}
 			}
 			wroteAnyBody = true
 		}
@@ -621,16 +630,37 @@ func (h *Handler) streamResponsesWSUpstream(
 				if len(pendingFirstTokenMessages) > 0 && !flushPendingFirstTokenMessages() {
 					return false
 				}
-				if err := writeResponsesWSMessage(conn, data); err != nil {
-					writeErr = err
+				release, filterErr := outputBuffer.Push(data)
+				if filterErr != nil {
+					writeErr = filterErr
 					clientGone = true
-				} else {
-					wroteAnyBody = true
+					return false
+				}
+				for _, filtered := range release {
+					if err := writeResponsesWSMessage(conn, filtered); err != nil {
+						writeErr = err
+						clientGone = true
+					} else {
+						wroteAnyBody = true
+					}
 				}
 			}
 		}
 		return eventType != "response.completed" && eventType != "response.failed"
 	})
+	if writeErr == nil && outputBuffer != nil {
+		remaining, err := outputBuffer.Flush()
+		if err != nil {
+			writeErr = err
+		} else {
+			for _, message := range remaining {
+				if err := writeResponsesWSMessage(conn, message); err != nil {
+					writeErr = err
+					break
+				}
+			}
+		}
+	}
 
 	totalDuration := int(time.Since(start).Milliseconds())
 	outcome := classifyStreamOutcome(c.Request.Context().Err(), readErr, writeErr, gotTerminal)
@@ -809,11 +839,15 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	if verdict.Action != promptfilter.ActionBlock {
 		return false
 	}
-	_ = writeResponsesWSError(conn, api.NewAPIError(
-		api.ErrorCode("prompt_blocked"),
-		"Request contains content blocked by prompt filter",
-		api.ErrorTypeInvalidRequest,
-	))
+	errorCode := api.ErrorCode("prompt_blocked")
+	errorMessage := "Request contains content blocked by prompt filter"
+	if identity, verified := verifyNewAPIIdentity(c, cfg.Advanced.NewAPI); verified {
+		strike, ban := h.recordNewAPIOffense(c, cfg, identity)
+		h.writeNewAPIPolicyHeaders(c, strike, ban)
+		errorCode = api.ErrorCode("request_policy_violation")
+		errorMessage = "请求违规"
+	}
+	_ = writeResponsesWSError(conn, api.NewAPIError(errorCode, errorMessage, api.ErrorTypeInvalidRequest))
 	return true
 }
 

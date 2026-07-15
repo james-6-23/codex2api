@@ -5,6 +5,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/codex2api/security/promptfilter"
 )
 
 const pendingFirstTokenFlushBytes = 1024 * 1024
@@ -15,12 +17,28 @@ var (
 )
 
 type streamFlushWriter struct {
-	writer    io.Writer
-	flusher   http.Flusher
-	policy    string
-	interval  time.Duration
-	lastFlush time.Time
-	buffer    bytes.Buffer
+	writer        io.Writer
+	flusher       http.Flusher
+	policy        string
+	interval      time.Duration
+	lastFlush     time.Time
+	buffer        bytes.Buffer
+	outputScanner *promptfilter.OutputScanner
+}
+
+func (h *Handler) newStreamFlushWriter(writer io.Writer, flusher http.Flusher) *streamFlushWriter {
+	w := newStreamFlushWriter(writer, flusher)
+	if h != nil && h.store != nil {
+		w.outputScanner = promptfilter.NewOutputScanner(h.store.GetPromptFilterConfig())
+	}
+	return w
+}
+
+func (w *streamFlushWriter) scanOutput(data []byte) ([]byte, error) {
+	if w == nil || w.outputScanner == nil {
+		return data, nil
+	}
+	return w.outputScanner.Push(data)
 }
 
 func newStreamFlushWriter(writer io.Writer, flusher http.Flusher) *streamFlushWriter {
@@ -75,6 +93,11 @@ func (w *streamFlushWriter) WriteString(data string) error {
 	if w == nil || w.writer == nil {
 		return nil
 	}
+	filtered, err := w.scanOutput([]byte(data))
+	if err != nil || len(filtered) == 0 {
+		return err
+	}
+	data = string(filtered)
 	if w.policy != StreamFlushPolicyCoalesce {
 		if _, err := io.WriteString(w.writer, data); err != nil {
 			return err
@@ -94,6 +117,11 @@ func (w *streamFlushWriter) WriteString(data string) error {
 func (w *streamFlushWriter) WriteBytes(data []byte) error {
 	if w == nil || w.writer == nil || len(data) == 0 {
 		return nil
+	}
+	var err error
+	data, err = w.scanOutput(data)
+	if err != nil || len(data) == 0 {
+		return err
 	}
 	if w.policy != StreamFlushPolicyCoalesce {
 		if _, err := w.writer.Write(data); err != nil {
@@ -115,20 +143,23 @@ func (w *streamFlushWriter) WriteSSEData(data []byte) error {
 	if w == nil || w.writer == nil {
 		return nil
 	}
+	framed := make([]byte, 0, len(sseDataPrefix)+len(data)+len(sseDataSuffix))
+	framed = append(framed, sseDataPrefix...)
+	framed = append(framed, data...)
+	framed = append(framed, sseDataSuffix...)
+	var err error
+	framed, err = w.scanOutput(framed)
+	if err != nil || len(framed) == 0 {
+		return err
+	}
 	if w.policy != StreamFlushPolicyCoalesce {
-		if _, err := w.writer.Write(sseDataPrefix); err != nil {
-			return err
-		}
-		if _, err := w.writer.Write(data); err != nil {
-			return err
-		}
-		if _, err := w.writer.Write(sseDataSuffix); err != nil {
+		if _, err := w.writer.Write(framed); err != nil {
 			return err
 		}
 		w.flushTransport()
 		return nil
 	}
-	appendSSEData(&w.buffer, data)
+	w.buffer.Write(framed)
 	if w.lastFlush.IsZero() || time.Since(w.lastFlush) >= w.interval {
 		return w.Flush()
 	}
@@ -144,6 +175,17 @@ func (w *streamFlushWriter) Flush() error {
 			return err
 		}
 		w.buffer.Reset()
+	}
+	if w.outputScanner != nil {
+		pending, err := w.outputScanner.Flush()
+		if err != nil {
+			return err
+		}
+		if len(pending) > 0 {
+			if _, err := w.writer.Write(pending); err != nil {
+				return err
+			}
+		}
 	}
 	w.flushTransport()
 	return nil

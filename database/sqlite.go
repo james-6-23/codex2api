@@ -350,6 +350,11 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			review_error TEXT DEFAULT '',
 			full_text TEXT DEFAULT ''
 		);`,
+		`CREATE TABLE IF NOT EXISTS prompt_filter_secrets (
+			id INTEGER PRIMARY KEY,
+			newapi_secret TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+		);`,
 	}
 	for _, stmt := range statements {
 		if _, err := db.conn.ExecContext(ctx, stmt); err != nil {
@@ -464,6 +469,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "prompt_filter_mode", "TEXT DEFAULT 'monitor'"},
 		{"system_settings", "prompt_filter_threshold", "INTEGER DEFAULT 50"},
 		{"system_settings", "prompt_filter_strict_threshold", "INTEGER DEFAULT 90"},
+		{"system_settings", "prompt_filter_strict_terminal_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "prompt_filter_advanced_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "prompt_filter_log_matches", "INTEGER DEFAULT 1"},
 		{"system_settings", "prompt_filter_max_text_length", "INTEGER DEFAULT 81920"},
 		{"system_settings", "prompt_filter_sensitive_words", "TEXT DEFAULT ''"},

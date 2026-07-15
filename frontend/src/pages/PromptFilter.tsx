@@ -2,7 +2,7 @@ import type { Dispatch, ReactNode, SetStateAction, TextareaHTMLAttributes } from
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { AlertTriangle, CheckCircle2, ChevronDown, HelpCircle, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, ShieldAlert, Trash2, Wand2, X } from 'lucide-react'
+import { AlertTriangle, CheckCircle2, ChevronDown, Copy, HelpCircle, KeyRound, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, ShieldAlert, Trash2, Wand2, X } from 'lucide-react'
 import { api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
@@ -12,7 +12,7 @@ import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
 import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
-import type { PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterVerdict, SystemSettings } from '../types'
+import type { PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterVerdict, PromptIntelligenceCandidate, PromptIntelligenceRun, SystemSettings } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -35,9 +35,10 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-const PROMPT_FILTER_VIEWS = ['overview', 'logs', 'rules'] as const
+const PROMPT_FILTER_VIEWS = ['overview', 'logs', 'rules', 'intelligence'] as const
 const HIT_START_MARKER = '⟦PF_HIT⟧'
 const HIT_END_MARKER = '⟦/PF_HIT⟧'
 type PromptFilterView = typeof PROMPT_FILTER_VIEWS[number]
@@ -48,6 +49,8 @@ type PromptFilterForm = Pick<
   | 'prompt_filter_mode'
   | 'prompt_filter_threshold'
   | 'prompt_filter_strict_threshold'
+  | 'prompt_filter_strict_terminal_enabled'
+  | 'prompt_filter_advanced_config'
   | 'prompt_filter_log_matches'
   | 'prompt_filter_max_text_length'
   | 'prompt_filter_sensitive_words'
@@ -87,11 +90,48 @@ type CustomRuleDraft = {
   strict: boolean
 }
 
+type AdvancedProtectionConfig = {
+  enforcement: { terminal_categories: string[] }
+  normalization: { enabled: boolean; decode_url: boolean; decode_html: boolean; decode_base64: boolean; max_decode_runs: number }
+  risk: { enabled: boolean; window_seconds: number; block_threshold: number; review_threshold: number; user_weight_percent: number; ip_weight_percent: number; session_weight_percent: number }
+  sidecar: { enabled: boolean; base_url: string; timeout_seconds: number; fail_closed: boolean; min_score: number }
+  output: { enabled: boolean; buffer_bytes: number; overlap_bytes: number; strict_only: boolean }
+  intelligence: { enabled: boolean; interval_hours: number; queries: string[]; max_search_results: number; model_enabled: boolean; model: string; max_model_calls: number; auto_add: boolean }
+  newapi: { enabled: boolean; max_clock_skew_seconds: number; offense_window_seconds: number; ban_after: number }
+}
+
+const defaultAdvancedProtection: AdvancedProtectionConfig = {
+  enforcement: { terminal_categories: [] },
+  normalization: { enabled: false, decode_url: false, decode_html: false, decode_base64: false, max_decode_runs: 1 },
+  risk: { enabled: false, window_seconds: 600, block_threshold: 100, review_threshold: 60, user_weight_percent: 50, ip_weight_percent: 30, session_weight_percent: 20 },
+  sidecar: { enabled: false, base_url: '', timeout_seconds: 3, fail_closed: true, min_score: 30 },
+  output: { enabled: false, buffer_bytes: 4096, overlap_bytes: 512, strict_only: true },
+  intelligence: { enabled: false, interval_hours: 24, queries: ['LLM jailbreak prompt injection', 'ChatGPT jailbreak prompt', 'Codex prompt injection jailbreak', '大模型 破限 提示词', 'GPT 破甲 提示词', 'AI 越狱 提示词', '中文 prompt injection 绕过'], max_search_results: 20, model_enabled: false, model: 'gpt-5.4', max_model_calls: 1, auto_add: false },
+  newapi: { enabled: false, max_clock_skew_seconds: 120, offense_window_seconds: 86400, ban_after: 2 },
+}
+
+function parseAdvancedProtection(raw: string): AdvancedProtectionConfig {
+  try {
+    const value = JSON.parse(raw || '{}')
+    return {
+      enforcement: { ...defaultAdvancedProtection.enforcement, ...(value.enforcement || {}) },
+      normalization: { ...defaultAdvancedProtection.normalization, ...(value.normalization || {}) },
+      risk: { ...defaultAdvancedProtection.risk, ...(value.risk || {}) },
+      sidecar: { ...defaultAdvancedProtection.sidecar, ...(value.sidecar || {}) },
+      output: { ...defaultAdvancedProtection.output, ...(value.output || {}) },
+      intelligence: { ...defaultAdvancedProtection.intelligence, ...(value.intelligence || {}) },
+      newapi: { ...defaultAdvancedProtection.newapi, ...(value.newapi || {}) },
+    }
+  } catch { return defaultAdvancedProtection }
+}
+
 const defaultForm: PromptFilterForm = {
   prompt_filter_enabled: false,
   prompt_filter_mode: 'monitor',
   prompt_filter_threshold: 50,
   prompt_filter_strict_threshold: 90,
+  prompt_filter_strict_terminal_enabled: false,
+  prompt_filter_advanced_config: '{}',
   prompt_filter_log_matches: true,
   prompt_filter_max_text_length: 81920,
   prompt_filter_sensitive_words: '',
@@ -154,6 +194,8 @@ const normalizePromptFilterForm = (settings?: SystemSettings | null): PromptFilt
   prompt_filter_mode: settings?.prompt_filter_mode || 'monitor',
   prompt_filter_threshold: settings?.prompt_filter_threshold || 50,
   prompt_filter_strict_threshold: settings?.prompt_filter_strict_threshold || 90,
+  prompt_filter_strict_terminal_enabled: Boolean(settings?.prompt_filter_strict_terminal_enabled),
+  prompt_filter_advanced_config: settings?.prompt_filter_advanced_config || '{}',
   prompt_filter_log_matches: settings?.prompt_filter_log_matches ?? true,
   prompt_filter_max_text_length: settings?.prompt_filter_max_text_length || 81920,
   prompt_filter_sensitive_words: settings?.prompt_filter_sensitive_words || '',
@@ -394,6 +436,8 @@ export default function PromptFilter() {
           />
         ) : null}
 
+        {activeView === 'intelligence' ? <IntelligenceView /> : null}
+
       </>
     </StateShell>
   )
@@ -405,14 +449,15 @@ function PromptFilterTabs({ activeView }: { activeView: PromptFilterView }) {
     { view: 'overview' as const, label: t('promptFilter.views.overview'), to: '/prompt-filter/overview' },
     { view: 'logs' as const, label: t('promptFilter.views.logs'), to: '/prompt-filter/logs' },
     { view: 'rules' as const, label: t('promptFilter.views.rules'), to: '/prompt-filter/rules' },
+    { view: 'intelligence' as const, label: t('promptFilter.views.intelligence'), to: '/prompt-filter/intelligence' },
   ]
   const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.view === activeView))
   return (
     <div className="mb-5 flex justify-center">
-      <div className="relative grid w-full max-w-[560px] grid-cols-3 rounded-2xl border border-border bg-background/80 p-1 shadow-sm backdrop-blur-lg" role="tablist">
+      <div className="relative grid w-full max-w-[720px] grid-cols-4 rounded-2xl border border-border bg-background/80 p-1 shadow-sm backdrop-blur-lg" role="tablist">
         <div
           className="pointer-events-none absolute left-1 top-1 h-[calc(100%-0.5rem)] rounded-xl border border-primary/15 bg-primary/8 transition-transform duration-300 ease-out"
-          style={{ width: 'calc((100% - 0.5rem) / 3)', transform: `translateX(${activeIndex * 100}%)` }}
+          style={{ width: 'calc((100% - 0.5rem) / 4)', transform: `translateX(${activeIndex * 100}%)` }}
         />
         {tabs.map((tab) => (
           <NavLink
@@ -428,6 +473,247 @@ function PromptFilterTabs({ activeView }: { activeView: PromptFilterView }) {
           </NavLink>
         ))}
       </div>
+    </div>
+  )
+}
+
+function AdvancedProtectionEditor({ value, onChange, booleanOptions }: { value: string; onChange: (value: string) => void; booleanOptions: { label: string; value: string }[] }) {
+  const { t } = useTranslation()
+  const [generatedNewAPISecret, setGeneratedNewAPISecret] = useState('')
+  const [secretCopied, setSecretCopied] = useState(false)
+  const [secretStatus, setSecretStatus] = useState<{ configured: boolean; source: string; masked: string }>({ configured: false, source: 'none', masked: '' })
+  const [secretSaving, setSecretSaving] = useState(false)
+  const [secretError, setSecretError] = useState('')
+  const [secretRevealOpen, setSecretRevealOpen] = useState(false)
+  const [secretCloseConfirmOpen, setSecretCloseConfirmOpen] = useState(false)
+  const config = useMemo(() => parseAdvancedProtection(value), [value])
+  const update = <K extends keyof AdvancedProtectionConfig>(section: K, patch: Partial<AdvancedProtectionConfig[K]>) => {
+    onChange(JSON.stringify({ ...config, [section]: { ...config[section], ...patch } }))
+  }
+  const bool = (section: keyof AdvancedProtectionConfig, key: string, current: boolean) => (
+    <Select value={current ? 'true' : 'false'} onValueChange={(next) => update(section, { [key]: next === 'true' } as never)} options={booleanOptions} />
+  )
+  useEffect(() => { void api.getPromptFilterNewAPISecret().then(setSecretStatus).catch(() => undefined) }, [])
+  const generateNewAPISecret = async () => {
+    setSecretSaving(true); setSecretError('')
+    try {
+      const result = await api.generatePromptFilterNewAPISecret()
+      setGeneratedNewAPISecret(result.secret); setSecretStatus(result); setSecretCopied(false); setSecretRevealOpen(true)
+    } catch (error) { setSecretError(getErrorMessage(error)) } finally { setSecretSaving(false) }
+  }
+  const copyNewAPISecret = async () => {
+    if (!generatedNewAPISecret) return
+    await navigator.clipboard.writeText(generatedNewAPISecret)
+    setSecretCopied(true)
+  }
+  const requestCloseSecretReveal = () => {
+    if (!generatedNewAPISecret) { setSecretRevealOpen(false); return }
+    setSecretCloseConfirmOpen(true)
+  }
+  const confirmCloseSecretReveal = () => {
+    setSecretCloseConfirmOpen(false)
+    setSecretRevealOpen(false)
+    setGeneratedNewAPISecret('')
+    setSecretCopied(false)
+  }
+  return (
+    <div className="space-y-4 rounded-xl border border-border bg-muted/15 p-4">
+      <SectionTitle title={t('promptFilter.advancedVisualTitle')} />
+      <div className="grid gap-4 xl:grid-cols-2">
+        <div className="space-y-3 rounded-lg border bg-background/70 p-4">
+          <h3 className="font-semibold">{t('promptFilter.normalizationTitle')}</h3>
+          <div className="grid gap-3 sm:grid-cols-2"><Field label={t('promptFilter.enabled')} hint={t('promptFilter.help.normalizationEnabled')}>{bool('normalization', 'enabled', config.normalization.enabled)}</Field><Field label={t('promptFilter.decodeRuns')} hint={t('promptFilter.help.decodeRuns')}><DraftNumberInput min={1} max={2} value={config.normalization.max_decode_runs} onValueChange={(v) => update('normalization', { max_decode_runs: v })} /></Field><Field label="URL Decode" hint={t('promptFilter.help.decodeUrl')}>{bool('normalization', 'decode_url', config.normalization.decode_url)}</Field><Field label="HTML Decode" hint={t('promptFilter.help.decodeHtml')}>{bool('normalization', 'decode_html', config.normalization.decode_html)}</Field><Field label="Base64 Decode" hint={t('promptFilter.help.decodeBase64')}>{bool('normalization', 'decode_base64', config.normalization.decode_base64)}</Field></div>
+        </div>
+        <div className="space-y-3 rounded-lg border bg-background/70 p-4">
+          <h3 className="font-semibold">{t('promptFilter.terminalCategories')}</h3>
+          <Field label={t('promptFilter.terminalCategories')} hint={t('promptFilter.help.terminalCategories')}><Input value={config.enforcement.terminal_categories.join(', ')} placeholder="reverse_engineering, malware" onChange={(e) => update('enforcement', { terminal_categories: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) })} /></Field>
+          <p className="text-xs text-muted-foreground">{t('promptFilter.terminalCategoriesHint')}</p>
+        </div>
+        <div className="space-y-3 rounded-lg border bg-background/70 p-4">
+          <h3 className="font-semibold">{t('promptFilter.riskTitle')}</h3>
+          <div className="grid gap-3 sm:grid-cols-2"><Field label={t('promptFilter.enabled')} hint={t('promptFilter.help.riskEnabled')}>{bool('risk', 'enabled', config.risk.enabled)}</Field><Field label={t('promptFilter.riskWindow')} hint={t('promptFilter.help.riskWindow')}><DraftNumberInput min={60} max={86400} value={config.risk.window_seconds} onValueChange={(v) => update('risk', { window_seconds: v })} /></Field><Field label={t('promptFilter.blockThreshold')} hint={t('promptFilter.help.blockThreshold')}><DraftNumberInput min={1} max={1000} value={config.risk.block_threshold} onValueChange={(v) => update('risk', { block_threshold: v })} /></Field><Field label={t('promptFilter.reviewThreshold')} hint={t('promptFilter.help.reviewThreshold')}><DraftNumberInput min={1} max={1000} value={config.risk.review_threshold} onValueChange={(v) => update('risk', { review_threshold: v })} /></Field></div>
+        </div>
+        <div className="space-y-3 rounded-lg border bg-background/70 p-4">
+          <h3 className="font-semibold">{t('promptFilter.outputScanTitle')}</h3>
+          <div className="grid gap-3 sm:grid-cols-2"><Field label={t('promptFilter.enabled')} hint={t('promptFilter.help.outputEnabled')}>{bool('output', 'enabled', config.output.enabled)}</Field><Field label={t('promptFilter.strictOnly')} hint={t('promptFilter.help.strictOnly')}>{bool('output', 'strict_only', config.output.strict_only)}</Field><Field label={t('promptFilter.bufferBytes')} hint={t('promptFilter.help.bufferBytes')}><DraftNumberInput min={512} max={65536} value={config.output.buffer_bytes} onValueChange={(v) => update('output', { buffer_bytes: v })} /></Field><Field label={t('promptFilter.overlapBytes')} hint={t('promptFilter.help.overlapBytes')}><DraftNumberInput min={64} max={16384} value={config.output.overlap_bytes} onValueChange={(v) => update('output', { overlap_bytes: v })} /></Field></div>
+        </div>
+        <div className="space-y-3 rounded-lg border bg-background/70 p-4 xl:col-span-2">
+          <div>
+            <h3 className="font-semibold">NewAPI 审计身份透传</h3>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">开启后，Codex2API 会验证 NewAPI 透传的用户 ID、用户 IP、请求 ID 与 HMAC 签名，并在提示词违规时向 NewAPI 返回可审计的 503 响应和封禁指令。这里使用的是双方共享的 HMAC 密钥，不是会在网络中传输的明文密钥对。</p>
+          </div>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+            <Field label="开启审计身份透传校验" hint="这是 Codex2API 端总开关。关闭时仍执行提示词过滤，但不会信任 NewAPI 身份头、累计用户/IP违规次数或返回联动封禁指令。">{bool('newapi', 'enabled', config.newapi.enabled)}</Field>
+            <Field label="时钟容差（秒）" hint="超过该时间范围的签名请求会被视为无效，可降低重放请求风险。"><DraftNumberInput min={30} max={600} value={config.newapi.max_clock_skew_seconds} onValueChange={(v) => update('newapi', { max_clock_skew_seconds: v })} /></Field>
+            <Field label="违规累计窗口（秒）" hint="同一用户和 IP 在该时间窗口内的违规次数会累计。"><DraftNumberInput min={60} max={2592000} value={config.newapi.offense_window_seconds} onValueChange={(v) => update('newapi', { offense_window_seconds: v })} /></Field>
+            <Field label="第几次触发封禁" hint="达到该次数时向 NewAPI 返回封禁指令；建议保持为 2。"><DraftNumberInput min={2} max={10} value={config.newapi.ban_after} onValueChange={(v) => update('newapi', { ban_after: v })} /></Field>
+          </div>
+          <details className="rounded-lg border bg-muted/20 p-3">
+            <summary className="cursor-pointer text-sm font-semibold">查看配置方式与 NewAPI 二开协议</summary>
+            <div className="mt-3 grid gap-4 lg:grid-cols-2">
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-muted-foreground">Codex2API 环境变量</div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{'PROMPT_FILTER_NEWAPI_SECRET=请替换为至少32字节随机密钥'}</code></pre>
+                <p className="text-xs leading-relaxed text-muted-foreground">随机生成的密钥会通过管理接口保存到 Codex2API 数据库，页面之后仅显示掩码。也可以用环境变量覆盖数据库密钥，环境变量始终优先。</p>
+                <div className="rounded-md border bg-background p-3">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 text-sm font-medium"><KeyRound className="size-4" />随机密钥生成器</div>
+                    <Button type="button" size="sm" variant="outline" disabled={secretSaving} onClick={() => void generateNewAPISecret()}><RefreshCw className={`size-3.5 ${secretSaving ? 'animate-spin' : ''}`} />{secretStatus.configured ? '替换密钥' : '生成并保存'}</Button>
+                  </div>
+                  {secretError && <p className="text-xs text-destructive">{secretError}</p>}
+                  <p className="text-xs text-muted-foreground">{secretStatus.configured ? `已配置：${secretStatus.masked}（来源：${secretStatus.source === 'environment' ? '环境变量' : '数据库'}）。点击可生成新密钥并替换数据库中的值。` : '点击后由 Codex2API 服务端生成 32 字节（256 位）随机密钥并保存到数据库。'}</p>
+                </div>
+              </div>
+              <div className="space-y-2">
+                <div className="text-xs font-semibold text-muted-foreground">NewAPI 环境变量</div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{`CODEX2API_POLICY_ENABLED=true
+CODEX2API_POLICY_TARGETS=http://127.0.0.1:18095
+CODEX2API_POLICY_SECRET=与Codex2API完全相同的密钥
+CODEX2API_POLICY_BAN_AFTER=2
+CODEX2API_POLICY_WINDOW_SECONDS=86400`}</code></pre>
+              </div>
+              <div className="space-y-2 lg:col-span-2">
+                <div className="text-xs font-semibold text-muted-foreground">NewAPI 需要发送的请求头</div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{`X-NewAPI-User-ID: <用户ID>
+X-NewAPI-Client-IP: <真实用户IP>
+X-NewAPI-Request-ID: <唯一请求ID>
+X-NewAPI-Timestamp: <Unix秒>
+X-NewAPI-Signature: <HMAC-SHA256十六进制>`}</code></pre>
+                <p className="text-xs leading-relaxed text-muted-foreground">签名原文固定为 <code className="rounded bg-muted px-1">v1\n时间戳\n请求ID\n用户ID\n用户IP</code>。NewAPI 应只向允许列表内的 Codex2API 主机添加这些头，禁止向其他模型供应商泄露用户身份。</p>
+              </div>
+            </div>
+          </details>
+          <Dialog open={secretRevealOpen} onOpenChange={(open) => { if (!open) requestCloseSecretReveal() }}>
+            <DialogContent className="sm:max-w-2xl" onEscapeKeyDown={(event) => { event.preventDefault(); requestCloseSecretReveal() }} onPointerDownOutside={(event) => { event.preventDefault(); requestCloseSecretReveal() }}>
+              <DialogHeader>
+                <DialogTitle>请立即保存 NewAPI 审计密钥</DialogTitle>
+                <DialogDescription>密钥已写入 Codex2API 数据库。为了安全，明文只在本弹窗中展示一次。</DialogDescription>
+              </DialogHeader>
+              <div className="space-y-3">
+                <div className="flex gap-2"><Input readOnly value={generatedNewAPISecret} className="font-mono text-xs" /><Button type="button" variant="outline" onClick={() => void copyNewAPISecret()}><Copy className="size-4" />{secretCopied ? '已复制' : '复制密钥'}</Button></div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{`CODEX2API_POLICY_SECRET=${generatedNewAPISecret}`}</code></pre>
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">请先将密钥同步到 NewAPI。关闭弹窗后将不再展示明文；如果遗失，只能重新生成密钥，届时旧密钥会失效。</div>
+              </div>
+              <DialogFooter><Button type="button" variant="outline" onClick={requestCloseSecretReveal}>关闭</Button><Button type="button" onClick={() => void copyNewAPISecret()}><Copy className="size-4" />{secretCopied ? '已复制' : '复制后配置 NewAPI'}</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
+          <Dialog open={secretCloseConfirmOpen} onOpenChange={setSecretCloseConfirmOpen}>
+            <DialogContent className="sm:max-w-md">
+              <DialogHeader><DialogTitle>确认关闭密钥弹窗？</DialogTitle><DialogDescription>关闭后不会再次显示这份密钥的明文。若尚未保存，你需要重新生成并再次更新 NewAPI。</DialogDescription></DialogHeader>
+              <DialogFooter><Button type="button" variant="outline" onClick={() => setSecretCloseConfirmOpen(false)}>返回复制</Button><Button type="button" variant="destructive" onClick={confirmCloseSecretReveal}>确认关闭，不再展示</Button></DialogFooter>
+            </DialogContent>
+          </Dialog>
+        </div>
+        <div className="space-y-3 rounded-lg border bg-background/70 p-4 xl:col-span-2">
+          <h3 className="font-semibold">{t('promptFilter.intelligence.configTitle')}</h3>
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4"><Field label={t('promptFilter.intelligence.scheduleEnabled')} hint={t('promptFilter.help.scheduleEnabled')}>{bool('intelligence', 'enabled', config.intelligence.enabled)}</Field><Field label={t('promptFilter.intelligence.intervalHours')} hint={t('promptFilter.help.intervalHours')}><DraftNumberInput min={1} max={720} value={config.intelligence.interval_hours} onValueChange={(v) => update('intelligence', { interval_hours: v })} /></Field><Field label={t('promptFilter.intelligence.maxResults')} hint={t('promptFilter.help.maxResults')}><DraftNumberInput min={1} max={100} value={config.intelligence.max_search_results} onValueChange={(v) => update('intelligence', { max_search_results: v })} /></Field><Field label={t('promptFilter.intelligence.modelEnabled')} hint={t('promptFilter.help.modelEnabled')}>{bool('intelligence', 'model_enabled', config.intelligence.model_enabled)}</Field><Field label={t('promptFilter.intelligence.model')} hint={t('promptFilter.help.model')}><Input value={config.intelligence.model} onChange={(e) => update('intelligence', { model: e.target.value })} /></Field><Field label={t('promptFilter.intelligence.maxModelCalls')} hint={t('promptFilter.help.maxModelCalls')}><DraftNumberInput min={0} max={3} value={config.intelligence.max_model_calls} onValueChange={(v) => update('intelligence', { max_model_calls: v })} /></Field><Field label={t('promptFilter.intelligence.autoAdd')} hint={t('promptFilter.help.autoAdd')}>{bool('intelligence', 'auto_add', config.intelligence.auto_add)}</Field></div>
+          <Field label={t('promptFilter.intelligence.queries')} hint={t('promptFilter.help.queries')}><Textarea rows={4} value={config.intelligence.queries.join('\n')} placeholder="LLM jailbreak prompt injection" onChange={(e) => update('intelligence', { queries: e.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })} /></Field>
+          <div className="rounded-md bg-muted/50 p-3"><div className="mb-2 text-xs font-semibold text-muted-foreground">{t('promptFilter.intelligence.builtinQueries')}</div><div className="flex flex-wrap gap-2">{['LLM jailbreak prompt injection', 'ChatGPT jailbreak prompt', 'Codex prompt injection jailbreak', '大模型 破限 提示词', 'GPT 破甲 提示词', 'AI 越狱 提示词', '中文 prompt injection 绕过'].map((query) => <Badge key={query} variant="outline">{query}</Badge>)}</div></div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function IntelligenceView() {
+  const { t } = useTranslation()
+  const { showToast } = useToast()
+  const [running, setRunning] = useState(false)
+  const [adding, setAdding] = useState('')
+  const [result, setResult] = useState<PromptIntelligenceRun | null>(null)
+  const [history, setHistory] = useState<PromptIntelligenceRun[]>([])
+  const [historyLoading, setHistoryLoading] = useState(false)
+
+  const loadHistory = useCallback(async () => {
+    setHistoryLoading(true)
+    try { setHistory((await api.getPromptIntelligenceHistory(1, 20)).runs) } catch { setHistory([]) } finally { setHistoryLoading(false) }
+  }, [])
+
+  useEffect(() => { void loadHistory() }, [loadHistory])
+
+  const run = async () => {
+    setRunning(true)
+    try {
+      const value = await api.runPromptIntelligence()
+      setResult(value)
+      await loadHistory()
+      showToast(t('promptFilter.intelligence.runSuccess', { count: value.candidates.length }))
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  const add = async (candidate: PromptIntelligenceCandidate) => {
+    setAdding(candidate.name)
+    try {
+      const value = await api.addPromptIntelligenceRule(candidate)
+      showToast(value.updated ? t('promptFilter.intelligence.updateSuccess') : value.added ? t('promptFilter.intelligence.addSuccess') : t('promptFilter.intelligence.alreadyExists'))
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setAdding('')
+    }
+  }
+
+  return (
+    <div className="space-y-5">
+      <Card>
+        <CardContent className="p-5">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h2 className="text-base font-semibold">{t('promptFilter.intelligence.title')}</h2>
+              <p className="mt-1 max-w-3xl text-sm text-muted-foreground">{t('promptFilter.intelligence.description')}</p>
+            </div>
+            <Button onClick={() => void run()} disabled={running}>
+              <Search className="size-4" />
+              {running ? t('promptFilter.intelligence.running') : t('promptFilter.intelligence.run')}
+            </Button>
+          </div>
+          <div className="mt-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-sm text-muted-foreground">
+            {t('promptFilter.intelligence.auditHint')}
+          </div>
+        </CardContent>
+      </Card>
+
+      {result ? (
+        <Card>
+          <CardContent className="p-5">
+            <div className="mb-4 flex flex-wrap gap-3 text-sm text-muted-foreground">
+              <span>{t('promptFilter.intelligence.sources')}: {result.sources.length}</span>
+              <span>{t('promptFilter.intelligence.modelCalls')}: {result.model_calls}</span>
+              <span>{t('promptFilter.intelligence.candidates')}: {result.candidates.length}</span>
+              <span>{t('promptFilter.intelligence.autoAdded')}: {result.added}</span>
+            </div>
+            {result.errors.length ? <div className="mb-4 rounded-lg border border-destructive/30 p-3 text-sm text-destructive">{result.errors.join('；')}</div> : null}
+            <Table>
+              <TableHeader><TableRow><TableHead>{t('promptFilter.intelligence.rule')}</TableHead><TableHead>{t('promptFilter.intelligence.category')}</TableHead><TableHead>{t('promptFilter.intelligence.weight')}</TableHead><TableHead>{t('promptFilter.intelligence.reason')}</TableHead><TableHead className="text-right">{t('common.actions')}</TableHead></TableRow></TableHeader>
+              <TableBody>
+                {result.candidates.map((candidate) => (
+                  <TableRow key={`${candidate.name}-${candidate.pattern}`}>
+                    <TableCell><div className="flex items-center gap-2 font-medium">{candidate.name}<Badge variant="outline" className={candidate.status === 'update' ? 'border-amber-500/40 text-amber-600' : 'border-emerald-500/40 text-emerald-600'}>{candidate.status === 'update' ? t('promptFilter.intelligence.update') : t('promptFilter.intelligence.new')}</Badge></div><code className="mt-1 block max-w-md break-all text-xs text-muted-foreground">{candidate.pattern}</code></TableCell>
+                    <TableCell>{candidate.category}</TableCell><TableCell>{candidate.weight}{candidate.strict ? ' / strict' : ''}</TableCell>
+                    <TableCell className="max-w-sm text-sm text-muted-foreground">{candidate.rationale || '-'}</TableCell>
+                    <TableCell className="text-right"><Button size="sm" variant="outline" disabled={adding === candidate.name} onClick={() => void add(candidate)}>{candidate.status === 'update' ? t('promptFilter.intelligence.updateRule') : t('promptFilter.intelligence.addRule')}</Button></TableCell>
+                  </TableRow>
+                ))}
+                {!result.candidates.length ? <TableRow><TableCell colSpan={5} className="py-8 text-center text-muted-foreground">{t('promptFilter.intelligence.noCandidates')}</TableCell></TableRow> : null}
+              </TableBody>
+            </Table>
+          </CardContent>
+        </Card>
+      ) : null}
+
+      <Card>
+        <CardContent className="p-5">
+          <div className="mb-4 flex items-center justify-between"><div><h2 className="text-base font-semibold">{t('promptFilter.intelligence.historyTitle')}</h2><p className="mt-1 text-sm text-muted-foreground">{t('promptFilter.intelligence.historyDesc')}</p></div><Button variant="outline" size="sm" onClick={() => void loadHistory()} disabled={historyLoading}><RefreshCw className="size-4" />{t('common.refresh')}</Button></div>
+          <div className="space-y-3">
+            {history.map((run, index) => <div key={`${run.started_at}-${index}`} className="rounded-lg border p-4"><div className="flex flex-wrap items-center justify-between gap-2"><div className="font-medium">{formatBeijingTime(run.started_at)}</div><div className="flex gap-2"><Badge variant="outline">{t('promptFilter.intelligence.sources')} {run.sources.length}</Badge><Badge variant="outline">{t('promptFilter.intelligence.candidates')} {run.candidates.length}</Badge><Badge variant="outline">{t('promptFilter.intelligence.modelCalls')} {run.model_calls}</Badge></div></div><div className="mt-3 grid gap-2 md:grid-cols-2">{run.sources.map((source) => <a key={source.url} href={source.url} target="_blank" rel="noreferrer" className="rounded-md bg-muted/40 p-2 text-sm hover:text-primary"><div className="font-medium">{source.title}</div><div className="truncate text-xs text-muted-foreground">{source.url}</div></a>)}</div>{run.errors.length ? <div className="mt-3 text-sm text-destructive">{run.errors.join('；')}</div> : null}</div>)}
+            {!historyLoading && !history.length ? <div className="py-8 text-center text-muted-foreground">{t('promptFilter.intelligence.noHistory')}</div> : null}
+          </div>
+        </CardContent>
+      </Card>
     </div>
   )
 }
@@ -525,6 +811,10 @@ function OverviewView({
               <Field label={t('promptFilter.strictThreshold')}>
                 <DraftNumberInput min={1} max={100} value={form.prompt_filter_strict_threshold} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_strict_threshold: value }))} />
               </Field>
+              <Field label={t('promptFilter.strictTerminal')}>
+                <Select value={form.prompt_filter_strict_terminal_enabled ? 'true' : 'false'} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_strict_terminal_enabled: value === 'true' }))} options={booleanOptions} />
+                <span className="block text-xs leading-5 text-muted-foreground">{t('promptFilter.strictTerminalHint')}</span>
+              </Field>
               <Field label={t('promptFilter.logMatches')}>
                 <Select value={form.prompt_filter_log_matches ? 'true' : 'false'} onValueChange={(value) => setForm((current) => ({ ...current, prompt_filter_log_matches: value === 'true' }))} options={booleanOptions} />
               </Field>
@@ -535,6 +825,7 @@ function OverviewView({
             <Field label={t('promptFilter.sensitiveWords')}>
               <Textarea rows={5} value={form.prompt_filter_sensitive_words} placeholder={t('promptFilter.sensitiveWordsPlaceholder')} onChange={(event) => setForm((current) => ({ ...current, prompt_filter_sensitive_words: event.target.value }))} />
             </Field>
+            <AdvancedProtectionEditor value={form.prompt_filter_advanced_config} onChange={(value) => setForm((current) => ({ ...current, prompt_filter_advanced_config: value }))} booleanOptions={booleanOptions} />
 
             <div className="space-y-4 rounded-lg border border-border bg-muted/20 p-4">
               <div>
@@ -1323,10 +1614,13 @@ function SectionTitle({ title }: { title: string }) {
   return <h3 className="text-base font-semibold leading-tight text-foreground">{title}</h3>
 }
 
-function Field({ label, children }: { label: string; children: ReactNode }) {
+function Field({ label, hint, children }: { label: string; hint?: string; children: ReactNode }) {
   return (
     <label className="block min-w-0 space-y-2">
-      <span className="block text-sm font-semibold leading-none text-foreground">{label}</span>
+      <span className="flex items-center gap-1.5 text-sm font-semibold leading-none text-foreground">
+        {label}
+        {hint ? <TooltipProvider delayDuration={150}><Tooltip><TooltipTrigger asChild><button type="button" className="text-muted-foreground hover:text-primary" onClick={(event) => event.preventDefault()}><HelpCircle className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-[320px] whitespace-normal leading-relaxed">{hint}</TooltipContent></Tooltip></TooltipProvider> : null}
+      </span>
       {children}
     </label>
   )

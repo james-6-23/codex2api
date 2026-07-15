@@ -1656,7 +1656,7 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		imageLogInfo   imageUsageLogInfo
 		readErr        error
 	)
-	streamWriter := newStreamFlushWriter(c.Writer, flusher)
+	streamWriter := h.newStreamFlushWriter(c.Writer, flusher)
 	var (
 		writeMu   sync.Mutex
 		closeOnce sync.Once

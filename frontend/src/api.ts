@@ -404,6 +404,9 @@ export const api = {
   updateAccountCredit: (id: number, data: { credit_enabled: boolean; credit_skip_usage_window: boolean }) =>
     request<MessageResponse>(`/accounts/${id}/credit`, { method: 'PATCH', body: JSON.stringify(data) }),
   getHealth: () => request<HealthResponse>('/health'),
+  getPromptFilterNewAPISecret: () => request<{ configured: boolean; source: 'none' | 'database' | 'environment'; masked: string; secret?: string }>('/prompt-filter/newapi-secret'),
+  generatePromptFilterNewAPISecret: () => request<{ configured: boolean; source: string; masked: string; secret: string }>('/prompt-filter/newapi-secret/generate', { method: 'POST' }),
+  replacePromptFilterNewAPISecret: (secret: string) => request<{ configured: boolean; source: string; masked: string; secret: string }>('/prompt-filter/newapi-secret', { method: 'PUT', body: JSON.stringify({ secret }) }),
   getOpsOverview: () => request<OpsOverviewResponse>('/ops/overview'),
   getRuntimeStatus: () => request<RuntimeStatusResponse>('/runtime-status'),
   getSystemUpdate: () => request<SystemUpdateInfo>('/system/update', { timeoutMs: 20_000 }),
@@ -627,6 +630,12 @@ export const api = {
     request<PromptFilterRulePatternTestResponse>('/prompt-filter/rules/test', { method: 'POST', body: JSON.stringify(data) }),
   getPromptFilterRules: () =>
     request<PromptFilterRulesResponse>('/prompt-filter/rules'),
+  runPromptIntelligence: () =>
+    request<import('./types').PromptIntelligenceRun>('/prompt-filter/intelligence/run', { method: 'POST' }),
+  getPromptIntelligenceHistory: (page = 1, pageSize = 20) =>
+    request<import('./types').PromptIntelligenceHistoryResponse>(`/prompt-filter/intelligence/history?page=${page}&page_size=${pageSize}`),
+  addPromptIntelligenceRule: (candidate: import('./types').PromptIntelligenceCandidate) =>
+    request<{ added: number; updated: number }>('/prompt-filter/intelligence/rules', { method: 'POST', body: JSON.stringify(candidate) }),
   getModels: () => request<ModelsResponse>('/models'),
   syncModels: () => request<ModelSyncResponse>('/models/sync', { method: 'POST' }),
   syncCodexCLIVersion: () =>

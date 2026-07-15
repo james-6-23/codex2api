@@ -2847,7 +2847,13 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	if settings.ReasoningEffortModels != "" {
 		s.reasoningEffortModels.Store(settings.ReasoningEffortModels)
 	}
-	s.SetPromptFilterConfig(promptFilterConfigFromSettings(settings))
+	promptFilterCfg := promptFilterConfigFromSettings(settings)
+	if s.db != nil {
+		if secret, err := s.db.GetPromptFilterNewAPISecret(context.Background()); err == nil {
+			promptFilterCfg.Advanced.NewAPI.Secret = secret
+		}
+	}
+	s.SetPromptFilterConfig(promptFilterCfg)
 	// 环境变量优先，否则读数据库设置
 	fastEnabled := fastSchedulerEnabledFromEnv() || settings.FastSchedulerEnabled
 	s.fastSchedulerEnabled.Store(fastEnabled)
@@ -4789,6 +4795,10 @@ func promptFilterConfigFromSettings(settings *database.SystemSettings) promptfil
 	cfg.Mode = settings.PromptFilterMode
 	cfg.Threshold = settings.PromptFilterThreshold
 	cfg.StrictThreshold = settings.PromptFilterStrictThreshold
+	cfg.StrictTerminalEnabled = settings.PromptFilterStrictTerminalEnabled
+	if advanced, err := promptfilter.ParseAdvancedConfig(settings.PromptFilterAdvancedConfig); err == nil {
+		cfg.Advanced = advanced
+	}
 	cfg.LogMatches = settings.PromptFilterLogMatches
 	cfg.MaxTextLength = settings.PromptFilterMaxTextLength
 	cfg.SensitiveWords = settings.PromptFilterSensitiveWords

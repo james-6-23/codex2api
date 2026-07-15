@@ -788,6 +788,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_mode VARCHAR(20) DEFAULT 'monitor';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_threshold INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_strict_threshold INT DEFAULT 90;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_strict_terminal_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_advanced_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_log_matches BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_max_text_length INT DEFAULT 81920;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_sensitive_words TEXT DEFAULT '';
@@ -871,6 +873,11 @@ func (db *DB) migrate(ctx context.Context) error {
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS full_text TEXT DEFAULT '';
 			CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_created_at ON prompt_filter_logs(created_at);
 			CREATE INDEX IF NOT EXISTS idx_prompt_filter_logs_action_created_at ON prompt_filter_logs(action, created_at);
+			CREATE TABLE IF NOT EXISTS prompt_filter_secrets (
+				id INT PRIMARY KEY,
+				newapi_secret TEXT NOT NULL DEFAULT '',
+				updated_at TIMESTAMPTZ DEFAULT NOW()
+			);
 
 			CREATE TABLE IF NOT EXISTS model_registry (
 				id                     VARCHAR(100) PRIMARY KEY,
@@ -1422,6 +1429,8 @@ type SystemSettings struct {
 	PromptFilterMode                   string
 	PromptFilterThreshold              int
 	PromptFilterStrictThreshold        int
+	PromptFilterStrictTerminalEnabled  bool
+	PromptFilterAdvancedConfig         string
 	PromptFilterLogMatches             bool
 	PromptFilterMaxTextLength          int
 	PromptFilterSensitiveWords         string
@@ -1581,6 +1590,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_mode, 'monitor'),
 		       COALESCE(prompt_filter_threshold, 50),
 		       COALESCE(prompt_filter_strict_threshold, 90),
+		       COALESCE(prompt_filter_strict_terminal_enabled, false),
+		       COALESCE(prompt_filter_advanced_config, '{}'),
 		       COALESCE(prompt_filter_log_matches, true),
 		       COALESCE(prompt_filter_max_text_length, 81920),
 		       COALESCE(prompt_filter_sensitive_words, ''),
@@ -1645,7 +1656,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.SchedulerMode,
 		&s.AffinityMode,
 		&s.ResinURL, &s.ResinPlatformName,
-		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold,
+		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold, &s.PromptFilterStrictTerminalEnabled, &s.PromptFilterAdvancedConfig,
 		&s.PromptFilterLogMatches, &s.PromptFilterMaxTextLength, &s.PromptFilterSensitiveWords,
 		&s.PromptFilterCustomPatterns, &s.PromptFilterDisabledPatterns,
 		&s.PromptFilterReviewEnabled, &s.PromptFilterReviewAPIKey, &s.PromptFilterReviewBaseURL,
@@ -1778,9 +1789,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					model_pricing_sync_url,
 					ignore_usage_limit_status,
 					auto_reset_credits_enabled,
-					auto_reset_credits_before_expiry_min
+					auto_reset_credits_before_expiry_min,
+					prompt_filter_strict_terminal_enabled,
+					prompt_filter_advanced_config
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1868,7 +1881,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_cli_version_sync_interval_hours = EXCLUDED.codex_cli_version_sync_interval_hours,
 					ignore_usage_limit_status = EXCLUDED.ignore_usage_limit_status,
 					auto_reset_credits_enabled = EXCLUDED.auto_reset_credits_enabled,
-					auto_reset_credits_before_expiry_min = EXCLUDED.auto_reset_credits_before_expiry_min
+					auto_reset_credits_before_expiry_min = EXCLUDED.auto_reset_credits_before_expiry_min,
+					prompt_filter_strict_terminal_enabled = EXCLUDED.prompt_filter_strict_terminal_enabled,
+					prompt_filter_advanced_config = EXCLUDED.prompt_filter_advanced_config
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1893,7 +1908,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexCLIVersionSyncEnabled, NormalizeCodexCLIVersionSyncIntervalHours(s.CodexCLIVersionSyncIntervalHours),
 		normalizeModelPricingOverridesJSON(s.ModelPricingOverrides), strings.TrimSpace(s.ModelPricingSyncURL),
 		s.IgnoreUsageLimitStatus, s.AutoResetCreditsEnabled,
-		NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin))
+		NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin), s.PromptFilterStrictTerminalEnabled, s.PromptFilterAdvancedConfig)
 	return err
 }
 

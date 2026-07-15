@@ -388,7 +388,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			translator := newAnthropicStreamTranslator(originalModel)
-			streamWriter := newStreamFlushWriter(c.Writer, flusher)
+			streamWriter := h.newStreamFlushWriter(c.Writer, flusher)
 			var pendingFirstTokenEvents bytes.Buffer
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
