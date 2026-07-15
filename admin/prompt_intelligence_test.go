@@ -37,6 +37,16 @@ func TestValidateIntelligenceCandidate(t *testing.T) {
 	if err := validateIntelligenceCandidate(valid); err == nil {
 		t.Fatal("invalid regexp accepted")
 	}
+	valid.Pattern = `(?s).*`
+	if err := validateIntelligenceCandidate(valid); err == nil {
+		t.Fatal("match-all regexp accepted")
+	}
+	if !intelligencePatternHasRiskSignal(`(?i)reverse\s+shell`) {
+		t.Fatal("known high-risk signal was not recognized")
+	}
+	if intelligencePatternHasRiskSignal(`(?i)quarterly\s+report`) {
+		t.Fatal("benign-only candidate passed the risk corpus")
+	}
 }
 
 func TestMergeIntelligenceQueriesIncludesChineseBuiltins(t *testing.T) {

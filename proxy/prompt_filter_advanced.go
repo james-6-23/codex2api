@@ -12,11 +12,44 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/cache"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 const promptRiskNamespace = "prompt-filter-risk"
+
+func acquirePromptRuntimeLease(ctx context.Context, runtimeCache cache.TokenCache, namespace, key string) (func(), bool) {
+	if runtimeCache == nil {
+		return func() {}, false
+	}
+	owner := uuid.NewString()
+	deadline := time.NewTimer(500 * time.Millisecond)
+	defer deadline.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		acquired, err := runtimeCache.AcquireLease(ctx, namespace, key, owner, 5*time.Second)
+		if err != nil {
+			return func() {}, false
+		}
+		if acquired {
+			return func() {
+				releaseCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+				defer cancel()
+				_ = runtimeCache.ReleaseLease(releaseCtx, namespace, key, owner)
+			}, true
+		}
+		select {
+		case <-ctx.Done():
+			return func() {}, false
+		case <-deadline.C:
+			return func() {}, false
+		case <-ticker.C:
+		}
+	}
+}
 
 type promptRiskRecord struct {
 	Score     int       `json:"score"`
@@ -68,12 +101,14 @@ func (h *Handler) applyPromptRisk(c *gin.Context, verdict promptfilter.Verdict, 
 		{"ip:" + hashRiskIdentity(c.ClientIP()), risk.IPWeightPercent},
 		{"session:" + hashRiskIdentity(promptSessionID(c)), risk.SessionWeightPercent},
 	}
-	h.promptRiskMu.Lock()
-	defer h.promptRiskMu.Unlock()
 	effective := verdict.Score
 	now := time.Now()
 	for _, item := range keys {
 		if item.weight <= 0 || strings.HasSuffix(item.key, ":") || strings.HasSuffix(item.key, ":0") {
+			continue
+		}
+		unlock, acquired := acquirePromptRuntimeLease(c.Request.Context(), h.cache, promptRiskNamespace, item.key)
+		if !acquired {
 			continue
 		}
 		var record promptRiskRecord
@@ -92,6 +127,7 @@ func (h *Handler) applyPromptRisk(c *gin.Context, verdict promptfilter.Verdict, 
 		if raw, err := json.Marshal(record); err == nil {
 			_ = h.cache.SetRuntime(c.Request.Context(), promptRiskNamespace, item.key, raw, ttl)
 		}
+		unlock()
 	}
 	if effective > verdict.Score {
 		verdict.Score = effective
@@ -122,10 +158,11 @@ func hashRiskIdentity(value string) string {
 
 func applyPromptSidecar(ctx context.Context, text string, verdict promptfilter.Verdict, cfg promptfilter.Config) promptfilter.Verdict {
 	sc := cfg.Advanced.Sidecar
-	endpoint := strings.TrimRight(strings.TrimSpace(sc.BaseURL), "/") + "/v1/guard/check"
-	if endpoint == "/v1/guard/check" {
-		return verdict
+	baseURL := strings.TrimSpace(sc.BaseURL)
+	if baseURL == "" {
+		return sidecarFailure(verdict, sc.FailClosed, fmt.Errorf("sidecar base URL is empty"))
 	}
+	endpoint := strings.TrimRight(baseURL, "/") + "/v1/guard/check"
 	payload, _ := json.Marshal(sidecarRequest{Direction: "input", Text: text, LocalScore: verdict.Score, MatchedRules: verdict.Matched})
 	requestCtx, cancel := context.WithTimeout(ctx, time.Duration(sc.TimeoutSeconds)*time.Second)
 	defer cancel()

@@ -215,7 +215,7 @@ func scanViews(text string, cfg NormalizationConfig) []string {
 		return []string{base}
 	}
 	views := []string{base}
-	add := func(value string) {
+	addOne := func(value string) {
 		value = normalizeForScan(value)
 		if value == "" || len(value) > DefaultMaxTextLength*4 {
 			return
@@ -226,6 +226,11 @@ func scanViews(text string, cfg NormalizationConfig) []string {
 			}
 		}
 		views = append(views, value)
+	}
+	add := func(value string) {
+		canonical := norm.NFKC.String(stripInvisible(value))
+		addOne(canonical)
+		addOne(compactForScan(canonical))
 	}
 	normalized := norm.NFKC.String(stripInvisible(text))
 	add(normalized)

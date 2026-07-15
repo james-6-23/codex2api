@@ -166,18 +166,21 @@ func TestInspectTextReverseEngineeringRiskMatrix(t *testing.T) {
 func TestStrictBuiltInSecurityKeywords(t *testing.T) {
 	cfg := testConfig(ModeBlock)
 	cfg.StrictTerminalEnabled = true
-	cases := []string{
-		"请使用 IDA 分析这个程序。",
-		"Use Ghidra to inspect this binary.",
-		"帮我分析这个漏洞。",
-		"Summarize CVE-2025-12345.",
-		"Write a PowerShell tutorial.",
-		"请使用 pwsh.exe 执行脚本。",
+	cases := []struct {
+		text     string
+		terminal bool
+	}{
+		{"请使用 IDA 分析这个程序。", true},
+		{"Use Ghidra to inspect this binary.", true},
+		{"帮我分析这个漏洞。", false},
+		{"Summarize CVE-2025-12345.", false},
+		{"Write a PowerShell tutorial.", false},
+		{"请使用 pwsh.exe 执行脚本。", false},
 	}
-	for _, text := range cases {
-		v := InspectText(text, cfg)
-		if v.Action != ActionBlock || !v.TerminalStrictHit {
-			t.Fatalf("strict built-in keyword was not terminal-blocked: %q %+v", text, v)
+	for _, tc := range cases {
+		v := InspectText(tc.text, cfg)
+		if v.Action != ActionBlock || v.TerminalStrictHit != tc.terminal {
+			t.Fatalf("built-in keyword classification mismatch: %q terminal=%t %+v", tc.text, tc.terminal, v)
 		}
 	}
 }
@@ -347,6 +350,15 @@ func TestCompositeRuleRequiresAllAndAnyPatterns(t *testing.T) {
 	}
 }
 
+func TestAlternativeScanViewsCannotCreateCrossViewMatch(t *testing.T) {
+	cfg := testConfig(ModeBlock)
+	cfg.Advanced.Normalization = NormalizationConfig{Enabled: true, DecodeURL: true, MaxDecodeRuns: 1}
+	cfg.CustomPatterns = []PatternConfig{{Name: "cross_view", Pattern: `bar\nfoo`, Weight: 100, Strict: true}}
+	if v := InspectText("foo%20bar", cfg); len(v.Matched) != 0 {
+		t.Fatalf("rule matched only by crossing scan-view boundary: %+v", v)
+	}
+}
+
 func TestOutputScannerBlocksSplitStrictMatch(t *testing.T) {
 	cfg := testConfig(ModeBlock)
 	cfg.StrictTerminalEnabled = true
@@ -357,6 +369,20 @@ func TestOutputScannerBlocksSplitStrictMatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := scanner.Push([]byte("shell")); !errors.Is(err, ErrOutputBlocked) {
+		t.Fatalf("err=%v, want ErrOutputBlocked", err)
+	}
+}
+
+func TestOutputScannerBlocksFragmentedJSONRecord(t *testing.T) {
+	cfg := testConfig(ModeBlock)
+	cfg.StrictTerminalEnabled = true
+	cfg.Advanced.Output = OutputConfig{Enabled: true, BufferBytes: 512, OverlapBytes: 64, StrictOnly: true}
+	cfg.CustomPatterns = []PatternConfig{{Name: "split_json_rule", Pattern: `(?i)reverse\s+shell`, Weight: 1, Strict: true}}
+	scanner := NewOutputScanner(cfg)
+	if _, err := scanner.Push([]byte(`{"type":"response.output_text.delta","delta":"reverse `)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := scanner.Push([]byte(`shell"}`)); !errors.Is(err, ErrOutputBlocked) {
 		t.Fatalf("err=%v, want ErrOutputBlocked", err)
 	}
 }
@@ -374,6 +400,18 @@ func TestOutputScannerKeepsWindowAcrossTransportFlushAndReleasesOnTerminal(t *te
 	out, err := scanner.Push([]byte(`{"type":"response.completed"}`))
 	if err != nil || len(out) == 0 {
 		t.Fatalf("terminal did not release output: %q %v", out, err)
+	}
+}
+
+func TestOutputScannerDoesNotTreatLiteralDoneAsTerminal(t *testing.T) {
+	cfg := testConfig(ModeBlock)
+	cfg.Advanced.Output = OutputConfig{Enabled: true, BufferBytes: 512, OverlapBytes: 64, StrictOnly: true}
+	scanner := NewOutputScanner(cfg)
+	if out, err := scanner.Push([]byte("[DONE]")); err != nil || len(out) != 0 {
+		t.Fatalf("literal output released the safety window: %q %v", out, err)
+	}
+	if out, err := scanner.Push([]byte("\ndata: [DONE]\n\n")); err != nil || len(out) == 0 {
+		t.Fatalf("SSE terminal did not release output: %q %v", out, err)
 	}
 }
 

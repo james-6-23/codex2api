@@ -495,6 +495,7 @@ function AdvancedProtectionEditor({ value, onChange, booleanOptions }: { value: 
   )
   useEffect(() => { void api.getPromptFilterNewAPISecret().then(setSecretStatus).catch(() => undefined) }, [])
   const generateNewAPISecret = async () => {
+	if (secretStatus.source === 'environment') return
     setSecretSaving(true); setSecretError('')
     try {
       const result = await api.generatePromptFilterNewAPISecret()
@@ -539,68 +540,60 @@ function AdvancedProtectionEditor({ value, onChange, booleanOptions }: { value: 
         </div>
         <div className="space-y-3 rounded-lg border bg-background/70 p-4 xl:col-span-2">
           <div>
-            <h3 className="font-semibold">NewAPI 审计身份透传</h3>
-            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">开启后，Codex2API 会验证 NewAPI 透传的用户 ID、用户 IP、请求 ID 与 HMAC 签名，并在提示词违规时向 NewAPI 返回可审计的 503 响应和封禁指令。这里使用的是双方共享的 HMAC 密钥，不是会在网络中传输的明文密钥对。</p>
+            <h3 className="font-semibold">{t('promptFilter.newapi.title')}</h3>
+            <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t('promptFilter.newapi.description')}</p>
           </div>
           <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-            <Field label="开启审计身份透传校验" hint="这是 Codex2API 端总开关。关闭时仍执行提示词过滤，但不会信任 NewAPI 身份头、累计用户/IP违规次数或返回联动封禁指令。">{bool('newapi', 'enabled', config.newapi.enabled)}</Field>
-            <Field label="时钟容差（秒）" hint="超过该时间范围的签名请求会被视为无效，可降低重放请求风险。"><DraftNumberInput min={30} max={600} value={config.newapi.max_clock_skew_seconds} onValueChange={(v) => update('newapi', { max_clock_skew_seconds: v })} /></Field>
-            <Field label="违规累计窗口（秒）" hint="同一用户和 IP 在该时间窗口内的违规次数会累计。"><DraftNumberInput min={60} max={2592000} value={config.newapi.offense_window_seconds} onValueChange={(v) => update('newapi', { offense_window_seconds: v })} /></Field>
-            <Field label="第几次触发封禁" hint="达到该次数时向 NewAPI 返回封禁指令；建议保持为 2。"><DraftNumberInput min={2} max={10} value={config.newapi.ban_after} onValueChange={(v) => update('newapi', { ban_after: v })} /></Field>
+            <Field label={t('promptFilter.newapi.enabled')} hint={t('promptFilter.newapi.enabledHint')}>{bool('newapi', 'enabled', config.newapi.enabled)}</Field>
+            <Field label={t('promptFilter.newapi.clockSkew')} hint={t('promptFilter.newapi.clockSkewHint')}><DraftNumberInput min={30} max={600} value={config.newapi.max_clock_skew_seconds} onValueChange={(v) => update('newapi', { max_clock_skew_seconds: v })} /></Field>
+            <Field label={t('promptFilter.newapi.offenseWindow')} hint={t('promptFilter.newapi.offenseWindowHint')}><DraftNumberInput min={60} max={2592000} value={config.newapi.offense_window_seconds} onValueChange={(v) => update('newapi', { offense_window_seconds: v })} /></Field>
+            <Field label={t('promptFilter.newapi.banAfter')} hint={t('promptFilter.newapi.banAfterHint')}><DraftNumberInput min={2} max={10} value={config.newapi.ban_after} onValueChange={(v) => update('newapi', { ban_after: v })} /></Field>
           </div>
           <details className="rounded-lg border bg-muted/20 p-3">
-            <summary className="cursor-pointer text-sm font-semibold">查看配置方式与 NewAPI 二开协议</summary>
+            <summary className="cursor-pointer text-sm font-semibold">{t('promptFilter.newapi.protocolTitle')}</summary>
             <div className="mt-3 grid gap-4 lg:grid-cols-2">
               <div className="space-y-2">
-                <div className="text-xs font-semibold text-muted-foreground">Codex2API 环境变量</div>
-                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{'PROMPT_FILTER_NEWAPI_SECRET=请替换为至少32字节随机密钥'}</code></pre>
-                <p className="text-xs leading-relaxed text-muted-foreground">随机生成的密钥会通过管理接口保存到 Codex2API 数据库，页面之后仅显示掩码。也可以用环境变量覆盖数据库密钥，环境变量始终优先。</p>
+                <div className="text-xs font-semibold text-muted-foreground">{t('promptFilter.newapi.codexEnv')}</div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{t('promptFilter.newapi.codexSecretExample')}</code></pre>
+                <p className="text-xs leading-relaxed text-muted-foreground">{t('promptFilter.newapi.secretStorageHint')}</p>
                 <div className="rounded-md border bg-background p-3">
                   <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 text-sm font-medium"><KeyRound className="size-4" />随机密钥生成器</div>
-                    <Button type="button" size="sm" variant="outline" disabled={secretSaving} onClick={() => void generateNewAPISecret()}><RefreshCw className={`size-3.5 ${secretSaving ? 'animate-spin' : ''}`} />{secretStatus.configured ? '替换密钥' : '生成并保存'}</Button>
+                    <div className="flex items-center gap-2 text-sm font-medium"><KeyRound className="size-4" />{t('promptFilter.newapi.generator')}</div>
+                    <Button type="button" size="sm" variant="outline" disabled={secretSaving || secretStatus.source === 'environment'} onClick={() => void generateNewAPISecret()}><RefreshCw className={`size-3.5 ${secretSaving ? 'animate-spin' : ''}`} />{secretStatus.configured ? t('promptFilter.newapi.replaceSecret') : t('promptFilter.newapi.generateSecret')}</Button>
                   </div>
                   {secretError && <p className="text-xs text-destructive">{secretError}</p>}
-                  <p className="text-xs text-muted-foreground">{secretStatus.configured ? `已配置：${secretStatus.masked}（来源：${secretStatus.source === 'environment' ? '环境变量' : '数据库'}）。点击可生成新密钥并替换数据库中的值。` : '点击后由 Codex2API 服务端生成 32 字节（256 位）随机密钥并保存到数据库。'}</p>
+                  <p className="text-xs text-muted-foreground">{secretStatus.configured ? t('promptFilter.newapi.secretConfigured', { masked: secretStatus.masked, source: secretStatus.source === 'environment' ? t('promptFilter.newapi.environment') : t('promptFilter.newapi.database') }) : t('promptFilter.newapi.secretUnconfigured')}</p>
                 </div>
               </div>
               <div className="space-y-2">
-                <div className="text-xs font-semibold text-muted-foreground">NewAPI 环境变量</div>
-                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{`CODEX2API_POLICY_ENABLED=true
-CODEX2API_POLICY_TARGETS=http://127.0.0.1:18095
-CODEX2API_POLICY_SECRET=与Codex2API完全相同的密钥
-CODEX2API_POLICY_BAN_AFTER=2
-CODEX2API_POLICY_WINDOW_SECONDS=86400`}</code></pre>
+                <div className="text-xs font-semibold text-muted-foreground">{t('promptFilter.newapi.newapiEnv')}</div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{t('promptFilter.newapi.newapiEnvExample')}</code></pre>
               </div>
               <div className="space-y-2 lg:col-span-2">
-                <div className="text-xs font-semibold text-muted-foreground">NewAPI 需要发送的请求头</div>
-                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{`X-NewAPI-User-ID: <用户ID>
-X-NewAPI-Client-IP: <真实用户IP>
-X-NewAPI-Request-ID: <唯一请求ID>
-X-NewAPI-Timestamp: <Unix秒>
-X-NewAPI-Signature: <HMAC-SHA256十六进制>`}</code></pre>
-                <p className="text-xs leading-relaxed text-muted-foreground">签名原文固定为 <code className="rounded bg-muted px-1">v1\n时间戳\n请求ID\n用户ID\n用户IP</code>。NewAPI 应只向允许列表内的 Codex2API 主机添加这些头，禁止向其他模型供应商泄露用户身份。</p>
+                <div className="text-xs font-semibold text-muted-foreground">{t('promptFilter.newapi.headersTitle')}</div>
+                <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{t('promptFilter.newapi.headersExample')}</code></pre>
+                <p className="text-xs leading-relaxed text-muted-foreground">{t('promptFilter.newapi.signatureHint')}</p>
               </div>
             </div>
           </details>
           <Dialog open={secretRevealOpen} onOpenChange={(open) => { if (!open) requestCloseSecretReveal() }}>
             <DialogContent className="sm:max-w-2xl" onEscapeKeyDown={(event) => { event.preventDefault(); requestCloseSecretReveal() }} onPointerDownOutside={(event) => { event.preventDefault(); requestCloseSecretReveal() }}>
               <DialogHeader>
-                <DialogTitle>请立即保存 NewAPI 审计密钥</DialogTitle>
-                <DialogDescription>密钥已写入 Codex2API 数据库。为了安全，明文只在本弹窗中展示一次。</DialogDescription>
+                <DialogTitle>{t('promptFilter.newapi.revealTitle')}</DialogTitle>
+                <DialogDescription>{t('promptFilter.newapi.revealDescription')}</DialogDescription>
               </DialogHeader>
               <div className="space-y-3">
-                <div className="flex gap-2"><Input readOnly value={generatedNewAPISecret} className="font-mono text-xs" /><Button type="button" variant="outline" onClick={() => void copyNewAPISecret()}><Copy className="size-4" />{secretCopied ? '已复制' : '复制密钥'}</Button></div>
+                <div className="flex gap-2"><Input readOnly value={generatedNewAPISecret} className="font-mono text-xs" /><Button type="button" variant="outline" onClick={() => void copyNewAPISecret()}><Copy className="size-4" />{secretCopied ? t('promptFilter.newapi.copied') : t('promptFilter.newapi.copySecret')}</Button></div>
                 <pre className="overflow-x-auto rounded-md bg-slate-950 p-3 text-xs text-slate-100"><code>{`CODEX2API_POLICY_SECRET=${generatedNewAPISecret}`}</code></pre>
-                <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">请先将密钥同步到 NewAPI。关闭弹窗后将不再展示明文；如果遗失，只能重新生成密钥，届时旧密钥会失效。</div>
+                <div className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-950/40 dark:text-amber-200">{t('promptFilter.newapi.revealWarning')}</div>
               </div>
-              <DialogFooter><Button type="button" variant="outline" onClick={requestCloseSecretReveal}>关闭</Button><Button type="button" onClick={() => void copyNewAPISecret()}><Copy className="size-4" />{secretCopied ? '已复制' : '复制后配置 NewAPI'}</Button></DialogFooter>
+              <DialogFooter><Button type="button" variant="outline" onClick={requestCloseSecretReveal}>{t('promptFilter.newapi.close')}</Button><Button type="button" onClick={() => void copyNewAPISecret()}><Copy className="size-4" />{secretCopied ? t('promptFilter.newapi.copied') : t('promptFilter.newapi.copyAndConfigure')}</Button></DialogFooter>
             </DialogContent>
           </Dialog>
           <Dialog open={secretCloseConfirmOpen} onOpenChange={setSecretCloseConfirmOpen}>
             <DialogContent className="sm:max-w-md">
-              <DialogHeader><DialogTitle>确认关闭密钥弹窗？</DialogTitle><DialogDescription>关闭后不会再次显示这份密钥的明文。若尚未保存，你需要重新生成并再次更新 NewAPI。</DialogDescription></DialogHeader>
-              <DialogFooter><Button type="button" variant="outline" onClick={() => setSecretCloseConfirmOpen(false)}>返回复制</Button><Button type="button" variant="destructive" onClick={confirmCloseSecretReveal}>确认关闭，不再展示</Button></DialogFooter>
+              <DialogHeader><DialogTitle>{t('promptFilter.newapi.closeConfirmTitle')}</DialogTitle><DialogDescription>{t('promptFilter.newapi.closeConfirmDescription')}</DialogDescription></DialogHeader>
+              <DialogFooter><Button type="button" variant="outline" onClick={() => setSecretCloseConfirmOpen(false)}>{t('promptFilter.newapi.backToCopy')}</Button><Button type="button" variant="destructive" onClick={confirmCloseSecretReveal}>{t('promptFilter.newapi.confirmClose')}</Button></DialogFooter>
             </DialogContent>
           </Dialog>
         </div>
@@ -626,8 +619,8 @@ function IntelligenceView() {
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true)
-    try { setHistory((await api.getPromptIntelligenceHistory(1, 20)).runs) } catch { setHistory([]) } finally { setHistoryLoading(false) }
-  }, [])
+    try { setHistory((await api.getPromptIntelligenceHistory(1, 20)).runs) } catch (error) { showToast(getErrorMessage(error), 'error') } finally { setHistoryLoading(false) }
+  }, [showToast])
 
   useEffect(() => { void loadHistory() }, [loadHistory])
 
@@ -1619,7 +1612,7 @@ function Field({ label, hint, children }: { label: string; hint?: string; childr
     <label className="block min-w-0 space-y-2">
       <span className="flex items-center gap-1.5 text-sm font-semibold leading-none text-foreground">
         {label}
-        {hint ? <TooltipProvider delayDuration={150}><Tooltip><TooltipTrigger asChild><button type="button" className="text-muted-foreground hover:text-primary" onClick={(event) => event.preventDefault()}><HelpCircle className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-[320px] whitespace-normal leading-relaxed">{hint}</TooltipContent></Tooltip></TooltipProvider> : null}
+        {hint ? <TooltipProvider delayDuration={150}><Tooltip><TooltipTrigger asChild><button type="button" aria-label={`${label} help`} className="text-muted-foreground hover:text-primary" onClick={(event) => event.preventDefault()}><HelpCircle className="size-3.5" /></button></TooltipTrigger><TooltipContent className="max-w-[320px] whitespace-normal leading-relaxed">{hint}</TooltipContent></Tooltip></TooltipProvider> : null}
       </span>
       {children}
     </label>

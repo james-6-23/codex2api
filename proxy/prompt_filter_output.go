@@ -31,7 +31,7 @@ func (b *wsPromptOutputBuffer) Push(message []byte) ([][]byte, error) {
 		return nil, promptfilter.ErrOutputBlocked
 	}
 	var release [][]byte
-	for len(b.messages) > 1 && b.size > b.cfg.Advanced.Output.BufferBytes {
+	for len(b.messages) > 1 && b.size-len(b.messages[0]) >= b.cfg.Advanced.Output.BufferBytes {
 		release = append(release, b.messages[0])
 		b.size -= len(b.messages[0])
 		b.messages = b.messages[1:]

@@ -1798,6 +1798,11 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		return true
 	})
 	stopKeepalive()
+	writeMu.Lock()
+	if finalizeErr := streamWriter.Finalize(); finalizeErr != nil && readErr == nil {
+		readErr = finalizeErr
+	}
+	writeMu.Unlock()
 	if err != nil {
 		if streamErr := getReadErr(); streamErr != nil {
 			return usage, imageCount, firstTokenMs, imageLogInfo, streamErr
@@ -1821,6 +1826,11 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		writeEvent("error", buildImagesStreamErrorPayload(err.Error()))
 		setReadErr(err)
 	}
+	writeMu.Lock()
+	if finalizeErr := streamWriter.Finalize(); finalizeErr != nil && readErr == nil {
+		readErr = finalizeErr
+	}
+	writeMu.Unlock()
 	return usage, imageCount, firstTokenMs, imageLogInfo, getReadErr()
 }
 

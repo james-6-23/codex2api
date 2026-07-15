@@ -7565,8 +7565,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, "Prompt 检查规则无效: "+err.Error())
 			return
 		}
-		h.store.SetPromptFilterConfig(promptFilterCfg)
-		log.Printf("设置已更新: prompt_filter enabled=%t mode=%s threshold=%d", promptFilterCfg.Enabled, promptFilterCfg.Mode, promptFilterCfg.Threshold)
 	}
 
 	// Resin 粘性代理池配置
@@ -7746,17 +7744,27 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	})
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if promptFilterChanged {
+			writeError(c, http.StatusInternalServerError, "保存 Prompt 检查设置失败，设置未生效")
+			return
+		}
 		if autoResetCreditsChanged {
 			runtimeCfg = effectiveRuntimeCfg
 			writeError(c, http.StatusInternalServerError, "保存自动消耗设置失败，设置未生效")
 			return
 		}
-	} else if autoResetCreditsChanged {
-		runtimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
-			runtimeCfg.CodexSyncedCLIVersion = current.CodexSyncedCLIVersion
-			return runtimeCfg
-		})
-		h.triggerAutoResetCreditsScan()
+	} else {
+		if promptFilterChanged {
+			h.store.SetPromptFilterConfig(promptFilterCfg)
+			log.Printf("设置已更新: prompt_filter enabled=%t mode=%s threshold=%d", promptFilterCfg.Enabled, promptFilterCfg.Mode, promptFilterCfg.Threshold)
+		}
+		if autoResetCreditsChanged {
+			runtimeCfg = proxy.UpdateRuntimeSettings(func(current proxy.RuntimeSettings) proxy.RuntimeSettings {
+				runtimeCfg.CodexSyncedCLIVersion = current.CodexSyncedCLIVersion
+				return runtimeCfg
+			})
+			h.triggerAutoResetCreditsScan()
+		}
 	}
 
 	if h.store.GetAutoCleanUnauthorized() || h.store.GetAutoCleanRateLimited() || h.store.GetAutoCleanError() {

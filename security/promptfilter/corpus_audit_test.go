@@ -35,7 +35,7 @@ func TestOptionalLocalCorpusAudit(t *testing.T) {
 		if entry.IsDir() || !extensions[strings.ToLower(filepath.Ext(path))] {
 			return nil
 		}
-		data, readErr := readCorpusText(path)
+		data, readErr := readCorpusText(path, 16<<20)
 		if readErr != nil {
 			errors++
 			return nil
@@ -67,9 +67,31 @@ func TestOptionalLocalCorpusAudit(t *testing.T) {
 	t.Logf("corpus audit: files=%d blocked=%d terminal=%d injection_candidates=%d injection_misses=%d read_errors=%d", files, blocked, terminal, injectionCandidates, injectionMisses, errors)
 }
 
-func readCorpusText(path string) ([]byte, error) {
+func TestReadCorpusTextRejectsOversizedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "large.txt")
+	if err := os.WriteFile(path, []byte("0123456789"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readCorpusText(path, 5); err == nil {
+		t.Fatal("oversized corpus file was accepted")
+	}
+}
+
+func readCorpusText(path string, maxCorpusBytes int64) ([]byte, error) {
+	if maxCorpusBytes <= 0 {
+		return nil, io.ErrShortBuffer
+	}
 	if !strings.EqualFold(filepath.Ext(path), ".docx") {
-		return os.ReadFile(path)
+		stream, err := os.Open(path)
+		if err != nil {
+			return nil, err
+		}
+		defer stream.Close()
+		data, err := io.ReadAll(io.LimitReader(stream, maxCorpusBytes+1))
+		if err == nil && int64(len(data)) > maxCorpusBytes {
+			return nil, io.ErrShortBuffer
+		}
+		return data, err
 	}
 	reader, err := zip.OpenReader(path)
 	if err != nil {
@@ -80,14 +102,20 @@ func readCorpusText(path string) ([]byte, error) {
 		if file.Name != "word/document.xml" {
 			continue
 		}
+		if file.UncompressedSize64 > uint64(maxCorpusBytes) {
+			return nil, io.ErrShortBuffer
+		}
 		stream, err := file.Open()
 		if err != nil {
 			return nil, err
 		}
-		data, err := io.ReadAll(stream)
+		data, err := io.ReadAll(io.LimitReader(stream, maxCorpusBytes+1))
 		_ = stream.Close()
 		if err != nil {
 			return nil, err
+		}
+		if int64(len(data)) > maxCorpusBytes {
+			return nil, io.ErrShortBuffer
 		}
 		text := regexp.MustCompile(`<[^>]+>`).ReplaceAllString(string(data), " ")
 		return []byte(html.UnescapeString(text)), nil

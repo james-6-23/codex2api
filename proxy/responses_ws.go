@@ -550,17 +550,18 @@ func (h *Handler) streamResponsesWSUpstream(
 			release, filterErr := outputBuffer.Push(pending)
 			if filterErr != nil {
 				writeErr = filterErr
-				clientGone = true
 				return false
 			}
+			wrotePending := false
 			for _, filtered := range release {
 				if err := writeResponsesWSMessage(conn, filtered); err != nil {
 					writeErr = err
 					clientGone = true
 					return false
 				}
+				wrotePending = true
 			}
-			wroteAnyBody = true
+			wroteAnyBody = wroteAnyBody || wrotePending
 		}
 		pendingFirstTokenMessages = pendingFirstTokenMessages[:0]
 		pendingFirstTokenBytes = 0
@@ -633,7 +634,6 @@ func (h *Handler) streamResponsesWSUpstream(
 				release, filterErr := outputBuffer.Push(data)
 				if filterErr != nil {
 					writeErr = filterErr
-					clientGone = true
 					return false
 				}
 				for _, filtered := range release {
@@ -658,6 +658,7 @@ func (h *Handler) streamResponsesWSUpstream(
 					writeErr = err
 					break
 				}
+				wroteAnyBody = true
 			}
 		}
 	}
@@ -758,6 +759,11 @@ func (h *Handler) streamResponsesWSUpstream(
 	}
 	h.store.Release(account)
 
+	if errors.Is(writeErr, promptfilter.ErrOutputBlocked) {
+		apiErr := api.NewAPIError(api.ErrorCode("response_policy_violation"), "模型输出违反安全策略", api.ErrorTypeInvalidRequest)
+		_ = writeResponsesWSError(conn, apiErr)
+		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
+	}
 	if writeErr != nil {
 		return errResponsesWSClientGone
 	}
@@ -841,11 +847,15 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	}
 	errorCode := api.ErrorCode("prompt_blocked")
 	errorMessage := "Request contains content blocked by prompt filter"
-	if identity, verified := verifyNewAPIIdentity(c, cfg.Advanced.NewAPI); verified {
+	if identity, verified := h.verifyNewAPIIdentity(c, cfg.Advanced.NewAPI, nil); verified {
 		strike, ban := h.recordNewAPIOffense(c, cfg, identity)
 		h.writeNewAPIPolicyHeaders(c, strike, ban)
 		errorCode = api.ErrorCode("request_policy_violation")
 		errorMessage = "请求违规"
+		apiErr := api.NewAPIError(errorCode, errorMessage, api.ErrorTypeInvalidRequest)
+		apiErr.Details = gin.H{"strike": strike, "ban": ban}
+		_ = writeResponsesWSError(conn, apiErr)
+		return true
 	}
 	_ = writeResponsesWSError(conn, api.NewAPIError(errorCode, errorMessage, api.ErrorTypeInvalidRequest))
 	return true

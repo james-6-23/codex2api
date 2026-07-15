@@ -37,7 +37,7 @@ func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endp
 	if verdict.Action != promptfilter.ActionBlock {
 		return false
 	}
-	if h.sendNewAPIPolicyBlock(c, cfg, verdict.Reason) {
+	if h.sendNewAPIPolicyBlock(c, cfg, verdict.Reason, rawBody) {
 		return true
 	}
 	api.SendErrorWithStatus(c, api.NewAPIError(
@@ -65,7 +65,7 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if verdict.Action != promptfilter.ActionBlock {
 		return false
 	}
-	if h.sendNewAPIPolicyBlock(c, cfg, verdict.Reason) {
+	if h.sendNewAPIPolicyBlock(c, cfg, verdict.Reason, []byte(text)) {
 		return true
 	}
 	api.SendErrorWithStatus(c, api.NewAPIError(
@@ -92,7 +92,7 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		c.Header("X-Prompt-Filter-Warning", verdict.Reason)
 	}
 	if verdict.Action == promptfilter.ActionBlock {
-		if h.sendNewAPIPolicyBlock(c, cfg, verdict.Reason) {
+		if h.sendNewAPIPolicyBlock(c, cfg, verdict.Reason, rawBody) {
 			return true
 		}
 		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request contains content blocked by prompt filter")
@@ -205,7 +205,7 @@ func populatePromptFilterAPIKeyMeta(c *gin.Context, input *database.PromptFilter
 }
 
 func shouldReviewPromptFilterVerdict(verdict promptfilter.Verdict, cfg promptfilter.Config) bool {
-	if cfg.StrictTerminalEnabled && verdict.TerminalStrictHit {
+	if verdict.TerminalStrictHit {
 		return false
 	}
 	if verdict.Action != promptfilter.ActionWarn && verdict.Action != promptfilter.ActionBlock {

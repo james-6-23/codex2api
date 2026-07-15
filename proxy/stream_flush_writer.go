@@ -191,6 +191,33 @@ func (w *streamFlushWriter) Flush() error {
 	return nil
 }
 
+// Finalize releases the retained safety window at a real semantic end-of-stream.
+// A transport Flush must not call this because an unsafe phrase may span chunks.
+func (w *streamFlushWriter) Finalize() error {
+	if w == nil {
+		return nil
+	}
+	if w.buffer.Len() > 0 {
+		if _, err := w.writer.Write(w.buffer.Bytes()); err != nil {
+			return err
+		}
+		w.buffer.Reset()
+	}
+	if w.outputScanner != nil {
+		pending, err := w.outputScanner.Finalize()
+		if err != nil {
+			return err
+		}
+		if len(pending) > 0 {
+			if _, err := w.writer.Write(pending); err != nil {
+				return err
+			}
+		}
+	}
+	w.flushTransport()
+	return nil
+}
+
 func (w *streamFlushWriter) flushTransport() {
 	if w == nil || w.flusher == nil {
 		return

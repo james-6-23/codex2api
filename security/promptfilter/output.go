@@ -11,9 +11,10 @@ import (
 var ErrOutputBlocked = errors.New("stream output blocked by prompt filter")
 
 type OutputScanner struct {
-	cfg      Config
-	pending  []byte
-	semantic strings.Builder
+	cfg          Config
+	pending      []byte
+	recordBuffer []byte
+	semantic     []byte
 }
 
 func NewOutputScanner(cfg Config) *OutputScanner {
@@ -29,28 +30,24 @@ func (s *OutputScanner) Push(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	s.pending = append(s.pending, data...)
-	semantic := ExtractOutputText(data)
-	if semantic == "" && !bytes.Contains(data, []byte("data:")) && !gjson.ValidBytes(bytes.TrimSpace(data)) {
-		semantic = string(data)
-	}
-	if semantic != "" {
-		s.semantic.WriteString(semantic)
-	}
-	verdict := InspectText(s.semantic.String(), s.cfg)
+	semantic, terminal := s.consumeRecords(data)
+	s.appendSemantic(semantic)
+	verdict := InspectText(string(s.semantic), s.cfg)
 	blocked := verdict.TerminalStrictHit
 	if !s.cfg.Advanced.Output.StrictOnly {
 		blocked = verdict.Action == ActionBlock
 	}
 	if blocked {
 		s.pending = nil
-		s.semantic.Reset()
+		s.semantic = nil
+		s.recordBuffer = nil
 		return nil, ErrOutputBlocked
 	}
-	terminal := bytes.Contains(data, []byte("[DONE]")) || bytes.Contains(data, []byte(`"response.completed"`)) || bytes.Contains(data, []byte(`"message_stop"`))
 	if terminal {
 		release := append([]byte(nil), s.pending...)
 		s.pending = nil
-		s.semantic.Reset()
+		s.semantic = nil
+		s.recordBuffer = nil
 		return release, nil
 	}
 	keep := s.cfg.Advanced.Output.BufferBytes
@@ -67,14 +64,15 @@ func (s *OutputScanner) Flush() ([]byte, error) {
 	if s == nil {
 		return nil, nil
 	}
-	verdict := InspectText(s.semantic.String(), s.cfg)
+	verdict := InspectText(string(s.semantic), s.cfg)
 	blocked := verdict.TerminalStrictHit
 	if !s.cfg.Advanced.Output.StrictOnly {
 		blocked = verdict.Action == ActionBlock
 	}
 	if blocked {
 		s.pending = nil
-		s.semantic.Reset()
+		s.semantic = nil
+		s.recordBuffer = nil
 		return nil, ErrOutputBlocked
 	}
 	// Transport Flush is not a semantic end-of-stream. Keep the safety window
@@ -86,20 +84,90 @@ func (s *OutputScanner) Finalize() ([]byte, error) {
 	if s == nil {
 		return nil, nil
 	}
-	verdict := InspectText(s.semantic.String(), s.cfg)
+	if len(s.recordBuffer) > 0 {
+		semantic, _ := extractOutputRecord(s.recordBuffer, false)
+		s.appendSemantic(semantic)
+		s.recordBuffer = nil
+	}
+	verdict := InspectText(string(s.semantic), s.cfg)
 	blocked := verdict.TerminalStrictHit
 	if !s.cfg.Advanced.Output.StrictOnly {
 		blocked = verdict.Action == ActionBlock
 	}
 	if blocked {
 		s.pending = nil
-		s.semantic.Reset()
+		s.semantic = nil
 		return nil, ErrOutputBlocked
 	}
 	out := append([]byte(nil), s.pending...)
 	s.pending = nil
-	s.semantic.Reset()
+	s.semantic = nil
 	return out, nil
+}
+
+func (s *OutputScanner) appendSemantic(data []byte) {
+	if len(data) == 0 {
+		return
+	}
+	s.semantic = append(s.semantic, data...)
+	window := s.cfg.Advanced.Output.BufferBytes + s.cfg.Advanced.Output.OverlapBytes
+	if window < 1024 {
+		window = 1024
+	}
+	if len(s.semantic) > window {
+		s.semantic = append(s.semantic[:0], s.semantic[len(s.semantic)-window:]...)
+	}
+}
+
+func (s *OutputScanner) consumeRecords(data []byte) ([]byte, bool) {
+	trimmed := bytes.TrimSpace(data)
+	if len(s.recordBuffer) == 0 && gjson.ValidBytes(trimmed) {
+		return extractOutputRecord(trimmed, false)
+	}
+	if len(s.recordBuffer) == 0 && !bytes.Contains(data, []byte("data:")) && len(trimmed) > 0 && trimmed[0] != '{' && trimmed[0] != '[' {
+		return append([]byte(nil), data...), false
+	}
+	s.recordBuffer = append(s.recordBuffer, data...)
+	if complete := bytes.TrimSpace(s.recordBuffer); gjson.ValidBytes(complete) {
+		semantic, terminal := extractOutputRecord(complete, false)
+		s.recordBuffer = nil
+		return semantic, terminal
+	}
+	var semantic []byte
+	terminal := false
+	for {
+		index := bytes.IndexByte(s.recordBuffer, '\n')
+		if index < 0 {
+			break
+		}
+		line := append([]byte(nil), bytes.TrimSpace(s.recordBuffer[:index])...)
+		s.recordBuffer = append(s.recordBuffer[:0], s.recordBuffer[index+1:]...)
+		isDataRecord := bytes.HasPrefix(line, []byte("data:"))
+		if isDataRecord {
+			line = bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+		}
+		text, done := extractOutputRecord(line, isDataRecord)
+		semantic = append(semantic, text...)
+		terminal = terminal || done
+	}
+	return semantic, terminal
+}
+
+func extractOutputRecord(record []byte, allowDone bool) ([]byte, bool) {
+	record = bytes.TrimSpace(record)
+	if len(record) == 0 {
+		return nil, false
+	}
+	if allowDone && bytes.Equal(record, []byte("[DONE]")) {
+		return nil, true
+	}
+	if !gjson.ValidBytes(record) {
+		return append([]byte(nil), record...), false
+	}
+	parsed := gjson.ParseBytes(record)
+	eventType := parsed.Get("type").String()
+	terminal := eventType == "response.completed" || eventType == "response.failed" || eventType == "message_stop"
+	return []byte(ExtractOutputText(record)), terminal
 }
 
 func ExtractOutputText(data []byte) string {

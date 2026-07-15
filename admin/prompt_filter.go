@@ -70,6 +70,8 @@ func (h *Handler) savePromptFilterNewAPISecret(c *gin.Context, secret string) {
 		writeError(c, http.StatusBadRequest, "共享密钥至少需要 32 个字符")
 		return
 	}
+	h.settingsUpdateMu.Lock()
+	defer h.settingsUpdateMu.Unlock()
 	if err := h.db.SetPromptFilterNewAPISecret(c.Request.Context(), secret); err != nil {
 		writeError(c, http.StatusInternalServerError, "保存共享密钥失败")
 		return
@@ -353,7 +355,7 @@ func positiveQueryInt(c *gin.Context, key string, fallback int) int {
 }
 
 func shouldReviewPromptFilterVerdict(verdict promptfilter.Verdict, cfg promptfilter.Config) bool {
-	if cfg.StrictTerminalEnabled && verdict.TerminalStrictHit {
+	if verdict.TerminalStrictHit {
 		return false
 	}
 	if verdict.Action != promptfilter.ActionWarn && verdict.Action != promptfilter.ActionBlock {

@@ -273,7 +273,6 @@ func main() {
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
 	defer cancelBackground()
 	adminHandler.StartAutoResetCredits(backgroundCtx)
-	adminHandler.StartPromptIntelligence(backgroundCtx)
 
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，
@@ -327,6 +326,7 @@ func main() {
 
 	handler.RegisterRoutes(r)
 	adminHandler.RegisterExternalImageRoutes(r, handler)
+	adminHandler.StartPromptIntelligence(backgroundCtx)
 	adminHandler.RegisterRoutes(r)
 
 	// 管理后台前端静态文件

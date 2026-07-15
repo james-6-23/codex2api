@@ -310,6 +310,9 @@ func NewEngine(cfg Config) (*Engine, error) {
 		compileList := func(items []string) ([]*regexp.Regexp, error) {
 			out := make([]*regexp.Regexp, 0, len(items))
 			for _, item := range items {
+				if strings.TrimSpace(item) == "" {
+					return nil, fmt.Errorf("empty regex")
+				}
 				x, e := regexp.Compile(item)
 				if e != nil {
 					return nil, e
@@ -540,8 +543,8 @@ func (e *Engine) InspectText(text string) Verdict {
 	}
 
 	limitedText := limitScanText(text, cfg.MaxTextLength)
-	scanText := strings.Join(scanViews(limitedText, cfg.Advanced.Normalization), "\n")
-	if utf8.RuneCountInString(scanText) < 3 {
+	scanTexts := scanViews(limitedText, cfg.Advanced.Normalization)
+	if len(scanTexts) == 0 {
 		return verdict
 	}
 
@@ -567,32 +570,32 @@ func (e *Engine) InspectText(text string) Verdict {
 	for _, category := range cfg.Advanced.Enforcement.TerminalCategories {
 		terminalCategories[strings.ToLower(category)] = true
 	}
-	literalHits := e.literalIndex.match(scanText)
-	for _, word := range e.sensitiveWords {
-		if word == "" {
+	for _, scanText := range scanTexts {
+		if utf8.RuneCountInString(scanText) < 3 {
 			continue
 		}
-		if literalMatched(scanText, literalHits, word) {
-			match := Match{Name: "sensitive_word", Weight: 100, Category: "sensitive_word", Strict: true}
-			_, context := matchContextFromLiteral(scanText, word)
-			recordContext(context)
-			matchesByName[match.Name+":"+word] = match
-		}
-	}
-	for _, pattern := range e.patterns {
-		if !patternShouldRun(scanText, pattern, literalHits) {
-			continue
-		}
-		if loc := compiledPatternMatchIndex(scanText, pattern); loc != nil {
-			match := Match{
-				Name:     pattern.cfg.Name,
-				Weight:   pattern.cfg.Weight,
-				Category: pattern.cfg.Category,
-				Strict:   pattern.cfg.Strict,
+		literalHits := e.literalIndex.match(scanText)
+		for _, word := range e.sensitiveWords {
+			if word == "" {
+				continue
 			}
-			_, context := regexMatchContext(scanText, loc)
-			recordContext(context)
-			matchesByName[match.Name] = match
+			if literalMatched(scanText, literalHits, word) {
+				match := Match{Name: "sensitive_word", Weight: 100, Category: "sensitive_word", Strict: true}
+				_, context := matchContextFromLiteral(scanText, word)
+				recordContext(context)
+				matchesByName[match.Name+":"+word] = match
+			}
+		}
+		for _, pattern := range e.patterns {
+			if !patternShouldRun(scanText, pattern, literalHits) {
+				continue
+			}
+			if loc := compiledPatternMatchIndex(scanText, pattern); loc != nil {
+				match := Match{Name: pattern.cfg.Name, Weight: pattern.cfg.Weight, Category: pattern.cfg.Category, Strict: pattern.cfg.Strict}
+				_, context := regexMatchContext(scanText, loc)
+				recordContext(context)
+				matchesByName[match.Name] = match
+			}
 		}
 	}
 
@@ -620,7 +623,7 @@ func (e *Engine) InspectText(text string) Verdict {
 	terminalCategoryHit := terminalCategoryMatched
 	terminalStrictHit := (cfg.StrictTerminalEnabled && strictMatched) || terminalCategoryHit
 	if rawScore > 0 && !terminalStrictHit {
-		contextDiscount = defensiveContextDiscount(scanText)
+		contextDiscount = defensiveContextDiscount(limitedText)
 		score -= contextDiscount
 		if score < 0 {
 			score = 0

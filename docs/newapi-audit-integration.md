@@ -27,7 +27,7 @@ CODEX2API_POLICY_WINDOW_SECONDS=86400
 NewAPI 生成唯一请求 ID 和 Unix 秒时间戳，构造签名原文：
 
 ```text
-v1\n<timestamp>\n<request_id>\n<user_id>\n<client_ip>
+v1\n<timestamp>\n<request_id>\n<user_id>\n<client_ip>\n<http_method>\n<request_path>\n<body_sha256>
 ```
 
 使用共享密钥计算 HMAC-SHA256，并以小写十六进制写入以下请求头：
@@ -37,6 +37,9 @@ X-NewAPI-User-ID
 X-NewAPI-Client-IP
 X-NewAPI-Request-ID
 X-NewAPI-Timestamp
+X-NewAPI-Method
+X-NewAPI-Path
+X-NewAPI-Body-SHA256
 X-NewAPI-Signature
 ```
 
