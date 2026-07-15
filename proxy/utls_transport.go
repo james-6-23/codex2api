@@ -268,7 +268,13 @@ func (t *utlsRoundTripper) createConnection(host, addr string) (*http2.ClientCon
 	}
 
 	// 4. 创建 HTTP/2 连接
-	tr := &http2.Transport{}
+	// 启用保活 PING（ReadIdleTimeout/PingTimeout）：uTLS 自管连接池，池化连接
+	// 被代理/NAT 静默掐断后无法被感知，请求会挂到 TCP 重传超时。开启后空闲连接
+	// 主动发 PING，探测失败即在读循环里报错，触发上层从池中剔除并重建。
+	tr := &http2.Transport{
+		ReadIdleTimeout: codexHTTP2ReadIdleTimeout,
+		PingTimeout:     codexHTTP2PingTimeout,
+	}
 	h2Conn, err := tr.NewClientConn(tlsConn)
 	if err != nil {
 		tlsConn.Close()
