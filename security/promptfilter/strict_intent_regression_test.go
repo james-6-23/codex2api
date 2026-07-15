@@ -17,6 +17,8 @@ func TestStrictModeUsesIntentInsteadOfSecurityKeywordAlone(t *testing.T) {
 		"解释 C2 server 网络流量的检测方法。",
 		"说明安全日志被清除时应如何进行事件响应。",
 		"总结勒索软件和 botnet 的常见检测指标。",
+		"请用一句话说明如何识别 CVE、PowerShell、DDoS 和钓鱼风险，不提供攻击步骤。",
+		"汇总 IDA、Ghidra、漏洞、CVE、PowerShell、DDoS、钓鱼、C2、LSASS 和勒索软件的检测告警，不提供利用代码或执行步骤。",
 	}
 	for _, prompt := range benign {
 		t.Run("benign/"+prompt, func(t *testing.T) {

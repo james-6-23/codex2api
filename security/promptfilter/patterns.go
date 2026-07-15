@@ -130,6 +130,7 @@ var sensitiveRedactionPatterns = []struct {
 var defensiveContextPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(defensive|defense|prevent|prevention|mitigation|detect|detection|hardening|patch|remediation|incident\s+response)\b`),
 	regexp.MustCompile(`(?i)\b(do\s+not\s+provide|without\s+code|no\s+commands|high\s+level|non[-\s]?operational|refusal|unsafe)\b`),
-	regexp.MustCompile(`防御|修复|检测|加固|缓解|研判`),
-	regexp.MustCompile(`不要提供|不提供(代码|命令|绕过|操作步骤)|仅分析.{0,20}(特征|原理|风险)`),
+	regexp.MustCompile(`防御|防护|修复|检测|识别|排查|加固|缓解|研判|监控|告警|事件响应`),
+	regexp.MustCompile(`不要提供|不提供(代码|命令|绕过|操作步骤)|不提供.{0,8}(攻击|利用|执行|操作).{0,4}(步骤|代码|命令)|仅分析.{0,20}(特征|原理|风险)`),
+	regexp.MustCompile(`(?:汇总|总结|说明|介绍).{0,80}(?:检测|防御|防护|风险|告警|修复|缓解|响应|特征)`),
 }
