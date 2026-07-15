@@ -1111,6 +1111,7 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 		BackgroundConfig:                 "{}",
 		ShowFullUsageNumbers:             true,
 		PublicKeyUsagePageEnabled:        true,
+		PublicImageStudioPageEnabled:     true,
 		CodexWSHideUpstreamErrors:        true,
 		CodexWSSilentRetryEnabled:        true,
 		CodexWSSilentMaxRetries:          4,
@@ -1151,6 +1152,9 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if !settings.PublicKeyUsagePageEnabled {
 		t.Fatal("PublicKeyUsagePageEnabled = false, want true")
+	}
+	if !settings.PublicImageStudioPageEnabled {
+		t.Fatal("PublicImageStudioPageEnabled = false, want true")
 	}
 	if settings.BillingTierPolicy != "requested" {
 		t.Fatalf("BillingTierPolicy = %q, want requested", settings.BillingTierPolicy)
@@ -1202,6 +1206,18 @@ func TestSQLiteSystemSettingsPersistsFirstTokenTimeoutSeconds(t *testing.T) {
 	}
 	if settings.PublicKeyUsagePageEnabled {
 		t.Fatal("PublicKeyUsagePageEnabled = true, want false")
+	}
+
+	settings.PublicImageStudioPageEnabled = false
+	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+		t.Fatalf("UpdateSystemSettings false PublicImageStudioPageEnabled 返回错误: %v", err)
+	}
+	settings, err = db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings after false PublicImageStudioPageEnabled 返回错误: %v", err)
+	}
+	if settings.PublicImageStudioPageEnabled {
+		t.Fatal("PublicImageStudioPageEnabled = true, want false")
 	}
 }
 

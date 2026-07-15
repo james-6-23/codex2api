@@ -102,6 +102,7 @@ func main() {
 			BillingTierPolicy:                proxy.NormalizeBillingTierPolicy(os.Getenv("CODEX_BILLING_TIER_POLICY")),
 			ImageStorageConfig:               "{}",
 			PublicKeyUsagePageEnabled:        true,
+			PublicImageStudioPageEnabled:     true,
 			CodexWSHideUpstreamErrors:        true,
 			CodexWSSilentRetryEnabled:        true,
 			CodexWSSilentMaxRetries:          2,
@@ -149,6 +150,7 @@ func main() {
 			BillingTierPolicy:                proxy.NormalizeBillingTierPolicy(os.Getenv("CODEX_BILLING_TIER_POLICY")),
 			ImageStorageConfig:               "{}",
 			PublicKeyUsagePageEnabled:        true,
+			PublicImageStudioPageEnabled:     true,
 			CodexWSHideUpstreamErrors:        true,
 			CodexWSSilentRetryEnabled:        true,
 			CodexWSSilentMaxRetries:          2,
@@ -367,6 +369,22 @@ func main() {
 			}
 			serveFrontend(c)
 		}
+		serveImageStudioFrontend := func(c *gin.Context) {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+			defer cancel()
+
+			enabled, err := adminHandler.PublicImageStudioPageEnabled(ctx)
+			if err != nil {
+				log.Printf("读取生图门户开关失败: %v", err)
+				c.Status(http.StatusInternalServerError)
+				return
+			}
+			if !enabled {
+				c.Status(http.StatusNotFound)
+				return
+			}
+			serveFrontend(c)
+		}
 
 		// 同时处理 /admin 和 /admin/*，避免依赖自动补斜杠重定向。
 		r.GET("/admin", serveFrontend)
@@ -377,6 +395,10 @@ func main() {
 		r.GET("/key-usage/*filepath", serveKeyUsageFrontend)
 		r.HEAD("/key-usage", serveKeyUsageFrontend)
 		r.HEAD("/key-usage/*filepath", serveKeyUsageFrontend)
+		r.GET("/image-studio", serveImageStudioFrontend)
+		r.GET("/image-studio/*filepath", serveImageStudioFrontend)
+		r.HEAD("/image-studio", serveImageStudioFrontend)
+		r.HEAD("/image-studio/*filepath", serveImageStudioFrontend)
 	}
 
 	// 根路径重定向到管理后台（使用 302 避免浏览器永久缓存）
@@ -407,6 +429,7 @@ func main() {
 	log.Printf("  HTTP:   http://%s:%d", displayHost, cfg.Port)
 	log.Printf("  管理台: http://%s:%d/admin/", displayHost, cfg.Port)
 	log.Printf("  Key用量: http://%s:%d/key-usage", displayHost, cfg.Port)
+	log.Printf("  生图门户: http://%s:%d/image-studio", displayHost, cfg.Port)
 	log.Printf("  API:    POST /v1/chat/completions")
 	log.Printf("  API:    POST /v1/responses")
 	log.Printf("  API:    POST /v1/images/generations")

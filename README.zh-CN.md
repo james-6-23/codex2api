@@ -461,6 +461,7 @@ curl -X POST http://localhost:8080/api/admin/oauth/exchange-code \
 | API 密钥 | `/admin/api-keys` | API Key 创建、查看、删除与调用凭据管理 |
 | 代理管理 | `/admin/proxies` | 代理池维护、账号代理分配与连通性管理 |
 | 生图工作台 | `/admin/images/studio` | 文生图、图生图、提示词模板、任务历史和服务器图库 |
+| 生图门户（非管理） | `/image-studio` | 用 API Key 登录的独立生图页，不进入管理后台；可在 API 密钥页开关 |
 | Prompt 检查 | `/admin/prompt-filter/overview` | Prompt 规则、触发日志、测试和处理模式配置 |
 | 使用统计 | `/admin/usage` | 请求日志、统计卡片、图表、日志清空 |
 | 运维概览 | `/admin/ops` | 运行态监控与系统概览 |

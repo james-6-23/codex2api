@@ -19,6 +19,7 @@ const Settings = lazy(() => import('./pages/Settings'))
 const Docs = lazy(() => import('./pages/Docs'))
 const APIKeys = lazy(() => import('./pages/APIKeys'))
 const APIKeyUsagePortal = lazy(() => import('./pages/APIKeyUsagePortal'))
+const ImageStudioPortal = lazy(() => import('./pages/ImageStudioPortal'))
 const Usage = lazy(() => import('./pages/Usage'))
 const ImageStudio = lazy(() => import('./pages/ImageStudio'))
 const PromptFilter = lazy(() => import('./pages/PromptFilter'))
@@ -35,6 +36,8 @@ export default function App() {
               <Routes>
                 <Route path="/key-usage" element={<Navigate to="/key-usage/overview" replace />} />
                 <Route path="/key-usage/:view" element={<APIKeyUsagePortal />} />
+                <Route path="/image-studio" element={<Navigate to="/image-studio/studio" replace />} />
+                <Route path="/image-studio/:view" element={<ImageStudioPortal />} />
                 <Route path="/*" element={<AdminApp />} />
               </Routes>
             </Suspense>

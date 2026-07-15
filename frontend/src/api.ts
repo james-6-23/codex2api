@@ -190,6 +190,52 @@ async function requestAPIKeyUsage<T>(path: string, apiKey: string, options: Requ
   return (await res.json()) as T
 }
 
+async function requestImageStudioPortal<T>(path: string, apiKey: string, options: RequestInit = {}): Promise<T> {
+  const headers = new Headers(options.headers)
+  headers.set('Authorization', `Bearer ${apiKey}`)
+  if (options.body && !(options.body instanceof FormData) && !headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json')
+  }
+
+  const res = await fetch('/api/image-studio' + path, {
+    ...options,
+    cache: options.cache ?? 'no-store',
+    headers,
+  })
+
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(extractAdminErrorMessage(body, res.status))
+  }
+
+  if (res.status === 204) {
+    return undefined as T
+  }
+  const text = await res.text()
+  if (!text) {
+    return undefined as T
+  }
+  return JSON.parse(text) as T
+}
+
+async function requestImageStudioPortalBlob(path: string, apiKey: string, options: RequestInit = {}): Promise<Blob> {
+  const headers = new Headers(options.headers)
+  headers.set('Authorization', `Bearer ${apiKey}`)
+
+  const res = await fetch('/api/image-studio' + path, {
+    ...options,
+    cache: options.cache ?? 'no-store',
+    headers,
+  })
+
+  if (!res.ok) {
+    const body = await res.text()
+    throw new Error(extractAdminErrorMessage(body, res.status))
+  }
+
+  return res.blob()
+}
+
 async function requestBlob(path: string, options: RequestInit = {}): Promise<Blob> {
   const headers = new Headers(options.headers)
 
@@ -252,6 +298,39 @@ export const api = {
     if (params.pageSize) search.set('page_size', String(params.pageSize))
     return requestAPIKeyUsage<PublicAPIKeyUsageResponse>(`/summary?${search.toString()}`, apiKey)
   },
+  createPortalImageJob: (apiKey: string, data: CreateImageJobPayload) =>
+    requestImageStudioPortal<ImageJobResponse>('/jobs', apiKey, { method: 'POST', body: JSON.stringify(data) }),
+  createPortalImageEditJob: (apiKey: string, data: CreateImageJobPayload) =>
+    requestImageStudioPortal<ImageJobResponse>('/edit-jobs', apiKey, { method: 'POST', body: JSON.stringify(data) }),
+  getPortalImageJobs: (apiKey: string, params: { page?: number; pageSize?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.page) sp.set('page', String(params.page))
+    if (params.pageSize) sp.set('page_size', String(params.pageSize))
+    return requestImageStudioPortal<ImageJobsResponse>(`/jobs?${sp.toString()}`, apiKey)
+  },
+  getPortalImageJob: (apiKey: string, id: number, params: { includeCache?: boolean } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.includeCache) sp.set('include_cache', '1')
+    const query = sp.toString()
+    return requestImageStudioPortal<ImageJobResponse>(`/jobs/${id}${query ? `?${query}` : ''}`, apiKey)
+  },
+  deletePortalImageJob: (apiKey: string, id: number) =>
+    requestImageStudioPortal<MessageResponse>(`/jobs/${id}`, apiKey, { method: 'DELETE' }),
+  getPortalImageAssets: (apiKey: string, params: { page?: number; pageSize?: number } = {}) => {
+    const sp = new URLSearchParams()
+    if (params.page) sp.set('page', String(params.page))
+    if (params.pageSize) sp.set('page_size', String(params.pageSize))
+    return requestImageStudioPortal<ImageAssetsResponse>(`/assets?${sp.toString()}`, apiKey)
+  },
+  getPortalImageAssetFile: (apiKey: string, id: number, download = false, thumbKB = 0) => {
+    const sp = new URLSearchParams()
+    if (download) sp.set('download', '1')
+    if (thumbKB > 0) sp.set('thumb_kb', String(thumbKB))
+    const query = sp.toString()
+    return requestImageStudioPortalBlob(`/assets/${id}/file${query ? `?${query}` : ''}`, apiKey)
+  },
+  deletePortalImageAsset: (apiKey: string, id: number) =>
+    requestImageStudioPortal<MessageResponse>(`/assets/${id}`, apiKey, { method: 'DELETE' }),
   getStats: () => request<StatsResponse>('/stats'),
   getAccounts: () => request<AccountsResponse>('/accounts'),
   addAccount: (data: AddAccountRequest) =>

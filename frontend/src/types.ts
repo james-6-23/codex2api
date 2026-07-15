@@ -673,6 +673,7 @@ export interface SystemSettings {
   billing_tier_policy: 'actual' | 'requested' | string
   show_full_usage_numbers: boolean
   public_key_usage_page_enabled: boolean
+  public_image_studio_page_enabled: boolean
   image_storage_backend: 'local' | 's3' | string
   image_s3_endpoint: string
   image_s3_region: string

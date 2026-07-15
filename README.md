@@ -410,6 +410,7 @@ Open `/admin/` in a browser.
 | API Keys | `/admin/api-keys` | API key creation, inspection, deletion, and credential management |
 | Proxies | `/admin/proxies` | Proxy pool management, account proxy assignment, connectivity checks |
 | Image Studio | `/admin/images/studio` | Text-to-image, image-to-image, prompt templates, task history, server-side image library |
+| Image Studio portal (non-admin) | `/image-studio` | Standalone studio for teammates using their own API key; toggle on the API Keys page |
 | Prompt Filter | `/admin/prompt-filter/overview` | Rules, hit logs, testing, and handling mode configuration |
 | Usage | `/admin/usage` | Request logs, metric cards, charts, log cleanup |
 | Operations | `/admin/ops` | Runtime monitoring and system overview |

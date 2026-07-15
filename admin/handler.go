@@ -383,6 +383,17 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	keyUsage.GET("/summary", h.GetPublicAPIKeyUsageSummary)
 	keyUsage.GET("/me", h.GetPublicAPIKeyUsageSummary)
 
+	imageStudioPortal := r.Group("/api/image-studio")
+	imageStudioPortal.Use(h.imageStudioPortalAuthMiddleware())
+	imageStudioPortal.POST("/jobs", h.CreatePortalImageJob)
+	imageStudioPortal.POST("/edit-jobs", h.CreatePortalImageEditJob)
+	imageStudioPortal.GET("/jobs", h.ListPortalImageJobs)
+	imageStudioPortal.GET("/jobs/:id", h.GetPortalImageJob)
+	imageStudioPortal.DELETE("/jobs/:id", h.DeletePortalImageJob)
+	imageStudioPortal.GET("/assets", h.ListPortalImageAssets)
+	imageStudioPortal.GET("/assets/:id/file", h.GetPortalImageAssetFile)
+	imageStudioPortal.DELETE("/assets/:id", h.DeletePortalImageAsset)
+
 	// 首次初始化端点（无需鉴权，仅在系统未配置 ADMIN_SECRET 时可用）
 	// 这两个端点必须注册在 adminAuthMiddleware 之外，否则会被 fail-closed 拦截。
 	r.GET("/api/admin/bootstrap-status", h.GetBootstrapStatus)
@@ -6100,6 +6111,7 @@ type settingsResponse struct {
 	BillingTierPolicy                  string  `json:"billing_tier_policy"`
 	ShowFullUsageNumbers               bool    `json:"show_full_usage_numbers"`
 	PublicKeyUsagePageEnabled          bool    `json:"public_key_usage_page_enabled"`
+	PublicImageStudioPageEnabled       bool    `json:"public_image_studio_page_enabled"`
 	ImageStorageBackend                string  `json:"image_storage_backend"`
 	ImageS3Endpoint                    string  `json:"image_s3_endpoint"`
 	ImageS3Region                      string  `json:"image_s3_region"`
@@ -6200,6 +6212,7 @@ type updateSettingsReq struct {
 	BillingTierPolicy                  *string  `json:"billing_tier_policy"`
 	ShowFullUsageNumbers               *bool    `json:"show_full_usage_numbers"`
 	PublicKeyUsagePageEnabled          *bool    `json:"public_key_usage_page_enabled"`
+	PublicImageStudioPageEnabled       *bool    `json:"public_image_studio_page_enabled"`
 	ImageStorageBackend                *string  `json:"image_storage_backend"`
 	ImageS3Endpoint                    *string  `json:"image_s3_endpoint"`
 	ImageS3Region                      *string  `json:"image_s3_region"`
@@ -6699,6 +6712,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	branding := brandingFromSettings(dbSettings)
 	showFullUsageNumbers := false
 	publicKeyUsagePageEnabled := true
+	publicImageStudioPageEnabled := true
 	if dbSettings != nil && adminAuthSource != "env" {
 		adminSecret = dbSettings.AdminSecret
 	}
@@ -6707,6 +6721,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		resinPlatformName = dbSettings.ResinPlatformName
 		showFullUsageNumbers = dbSettings.ShowFullUsageNumbers
 		publicKeyUsagePageEnabled = dbSettings.PublicKeyUsagePageEnabled
+		publicImageStudioPageEnabled = dbSettings.PublicImageStudioPageEnabled
 	}
 	promptFilterCfg := h.store.GetPromptFilterConfig()
 	runtimeCfg := proxy.CurrentRuntimeSettings()
@@ -6811,6 +6826,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		BillingTierPolicy:                  runtimeCfg.BillingTierPolicy,
 		ShowFullUsageNumbers:               showFullUsageNumbers,
 		PublicKeyUsagePageEnabled:          publicKeyUsagePageEnabled,
+		PublicImageStudioPageEnabled:       publicImageStudioPageEnabled,
 		ImageStorageBackend:                imgCfg.Backend,
 		ImageS3Endpoint:                    imgCfg.Endpoint,
 		ImageS3Region:                      imgCfg.Region,
@@ -6891,6 +6907,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	bgCfg := defaultBackgroundConfig()
 	showFullUsageNumbers := false
 	publicKeyUsagePageEnabled := true
+	publicImageStudioPageEnabled := true
 	modelPricingOverrides := "{}"
 	modelPricingSyncURL := ""
 	persistedAutoResetCreditsEnabled := false
@@ -6907,6 +6924,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		bgCfg = decodeBackgroundConfig(existingSettings.BackgroundConfig)
 		showFullUsageNumbers = existingSettings.ShowFullUsageNumbers
 		publicKeyUsagePageEnabled = existingSettings.PublicKeyUsagePageEnabled
+		publicImageStudioPageEnabled = existingSettings.PublicImageStudioPageEnabled
 		modelPricingOverrides = existingSettings.ModelPricingOverrides
 		modelPricingSyncURL = existingSettings.ModelPricingSyncURL
 		persistedAutoResetCreditsEnabled = existingSettings.AutoResetCreditsEnabled
@@ -7348,6 +7366,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		publicKeyUsagePageEnabled = *req.PublicKeyUsagePageEnabled
 		log.Printf("设置已更新: public_key_usage_page_enabled = %t", publicKeyUsagePageEnabled)
 	}
+	if req.PublicImageStudioPageEnabled != nil {
+		publicImageStudioPageEnabled = *req.PublicImageStudioPageEnabled
+		log.Printf("设置已更新: public_image_studio_page_enabled = %t", publicImageStudioPageEnabled)
+	}
 	if req.AutoPause5hThreshold != nil || req.AutoPause7dThreshold != nil {
 		t5h := h.store.GetGlobalAutoPause5hThreshold()
 		t7d := h.store.GetGlobalAutoPause7dThreshold()
@@ -7681,6 +7703,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		BillingTierPolicy:                  runtimeCfg.BillingTierPolicy,
 		ShowFullUsageNumbers:               showFullUsageNumbers,
 		PublicKeyUsagePageEnabled:          publicKeyUsagePageEnabled,
+		PublicImageStudioPageEnabled:       publicImageStudioPageEnabled,
 		ImageStorageConfig:                 imgConfigJSON,
 		BackgroundConfig:                   encodeBackgroundConfig(bgCfg),
 		AutoPause5hThreshold:               h.store.GetGlobalAutoPause5hThreshold(),

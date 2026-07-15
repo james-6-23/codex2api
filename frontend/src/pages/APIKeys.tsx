@@ -187,6 +187,8 @@ export default function APIKeys() {
   const [editDirty, setEditDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [savingPublicUsagePage, setSavingPublicUsagePage] = useState(false);
+  const [savingPublicImageStudioPage, setSavingPublicImageStudioPage] =
+    useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
@@ -230,6 +232,8 @@ export default function APIKeys() {
   const groups = data.groups;
   const modelOptions = data.modelOptions;
   const publicUsagePageEnabled = data.settings?.public_key_usage_page_enabled ?? true;
+  const publicImageStudioPageEnabled =
+    data.settings?.public_image_studio_page_enabled ?? true;
   const showInitialSkeleton = loading && keys.length === 0;
 
   const handleRefresh = useCallback(async () => {
@@ -244,6 +248,11 @@ export default function APIKeys() {
   const keyUsageUrl = useMemo(() => {
     if (typeof window === "undefined") return "/key-usage";
     return `${window.location.origin}/key-usage`;
+  }, []);
+
+  const imageStudioUrl = useMemo(() => {
+    if (typeof window === "undefined") return "/image-studio";
+    return `${window.location.origin}/image-studio`;
   }, []);
 
   const statusCounts = useMemo(() => {
@@ -395,6 +404,36 @@ export default function APIKeys() {
       showToast(getErrorMessage(err), "error");
     } finally {
       setSavingPublicUsagePage(false);
+    }
+  };
+
+  const handleTogglePublicImageStudioPage = async () => {
+    const nextEnabled = !publicImageStudioPageEnabled;
+    setSavingPublicImageStudioPage(true);
+    try {
+      await api.updateSettings({
+        public_image_studio_page_enabled: nextEnabled,
+      });
+      showToast(
+        nextEnabled
+          ? t("apiKeys.publicImageStudioEnabledToast")
+          : t("apiKeys.publicImageStudioDisabledToast"),
+        "success",
+      );
+      setData((current) => ({
+        ...current,
+        settings: current.settings
+          ? {
+              ...current.settings,
+              public_image_studio_page_enabled: nextEnabled,
+            }
+          : current.settings,
+      }));
+      await reloadSilently();
+    } catch (err) {
+      showToast(getErrorMessage(err), "error");
+    } finally {
+      setSavingPublicImageStudioPage(false);
     }
   };
 
@@ -1481,6 +1520,63 @@ export default function APIKeys() {
                           : publicUsagePageEnabled
                             ? t("apiKeys.disablePublicUsage")
                             : t("apiKeys.enablePublicUsage")}
+                      </Button>
+                    </div>
+                    <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("apiKeys.publicImageStudioTitle")}
+                        </div>
+                        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
+                          {t("apiKeys.publicImageStudioDesc")}
+                        </p>
+                        {publicImageStudioPageEnabled ? (
+                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                            <code
+                              className="min-w-0 max-w-full truncate rounded-md bg-muted px-2 py-1 font-mono text-[12px] text-foreground"
+                              title={imageStudioUrl}
+                            >
+                              {imageStudioUrl}
+                            </code>
+                            <Button
+                              variant="ghost"
+                              size="icon-xs"
+                              onClick={() => void handleCopy(imageStudioUrl)}
+                              title={t("apiKeys.publicUsageCopyUrl")}
+                            >
+                              <Copy className="size-3.5" />
+                            </Button>
+                            <a
+                              href={imageStudioUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                            >
+                              <ExternalLink className="size-3.5" />
+                              {t("apiKeys.publicUsageOpen")}
+                            </a>
+                          </div>
+                        ) : null}
+                      </div>
+                      <Button
+                        variant={
+                          publicImageStudioPageEnabled ? "outline" : "default"
+                        }
+                        size="sm"
+                        className="shrink-0"
+                        onClick={() => void handleTogglePublicImageStudioPage()}
+                        disabled={savingPublicImageStudioPage}
+                      >
+                        {publicImageStudioPageEnabled ? (
+                          <EyeOff className="size-3.5" />
+                        ) : (
+                          <Eye className="size-3.5" />
+                        )}
+                        {savingPublicImageStudioPage
+                          ? t("common.saving")
+                          : publicImageStudioPageEnabled
+                            ? t("apiKeys.disablePublicImageStudio")
+                            : t("apiKeys.enablePublicImageStudio")}
                       </Button>
                     </div>
                   </div>

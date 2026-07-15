@@ -415,7 +415,7 @@ func (h *Handler) ListImageGenerationJobs(c *gin.Context) {
 	page, pageSize := paginationParams(c, 20)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	result, err := h.db.ListImageGenerationJobs(ctx, page, pageSize)
+	result, err := h.db.ListImageGenerationJobs(ctx, page, pageSize, 0)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -525,7 +525,7 @@ func (h *Handler) ListImageAssets(c *gin.Context) {
 	page, pageSize := paginationParams(c, 24)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	result, err := h.db.ListImageAssets(ctx, page, pageSize)
+	result, err := h.db.ListImageAssets(ctx, page, pageSize, 0)
 	if err != nil {
 		writeInternalError(c, err)
 		return

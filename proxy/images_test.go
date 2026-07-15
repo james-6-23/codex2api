@@ -113,7 +113,7 @@ func TestImageGalleryPersisterRecordsAssetAndJob(t *testing.T) {
 	p.finalize(ctx)
 
 	// 应登记一条 asset，且 storage_path 为 s3:// ref。
-	assets, err := db.ListImageAssets(ctx, 1, 10)
+	assets, err := db.ListImageAssets(ctx, 1, 10, 0)
 	if err != nil {
 		t.Fatalf("ListImageAssets: %v", err)
 	}

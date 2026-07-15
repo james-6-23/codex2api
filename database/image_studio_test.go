@@ -161,20 +161,61 @@ func TestSQLiteImageStudioTablesAndPersistence(t *testing.T) {
 		t.Fatalf("job asset = %#v", job.Assets[0])
 	}
 
-	page, err := db.ListImageAssets(ctx, 1, 10)
+	page, err := db.ListImageAssets(ctx, 1, 10, 0)
 	if err != nil {
 		t.Fatalf("ListImageAssets 返回错误: %v", err)
 	}
 	if page.Total != 1 || len(page.Assets) != 1 {
 		t.Fatalf("asset page = %#v", page)
 	}
-	jobs, err := db.ListImageGenerationJobs(ctx, 1, 10)
+	jobs, err := db.ListImageGenerationJobs(ctx, 1, 10, 0)
 	if err != nil {
 		t.Fatalf("ListImageGenerationJobs 返回错误: %v", err)
 	}
 	if jobs.Total != 1 || len(jobs.Jobs) != 1 || len(jobs.Jobs[0].Assets) != 1 {
 		t.Fatalf("job page = %#v", jobs)
 	}
+
+	// Portal isolation: filter by api_key_id
+	otherJobID, err := db.InsertImageGenerationJob(ctx, ImageGenerationJobInput{
+		Prompt:       "other key job",
+		ParamsJSON:   `{"model":"gpt-image-2"}`,
+		APIKeyID:     99,
+		APIKeyName:   "Other",
+		APIKeyMasked: "sk-other",
+	})
+	if err != nil {
+		t.Fatalf("InsertImageGenerationJob other 返回错误: %v", err)
+	}
+	filteredJobs, err := db.ListImageGenerationJobs(ctx, 1, 10, 7)
+	if err != nil {
+		t.Fatalf("ListImageGenerationJobs by api_key 返回错误: %v", err)
+	}
+	if filteredJobs.Total != 1 || len(filteredJobs.Jobs) != 1 || filteredJobs.Jobs[0].APIKeyID != 7 {
+		t.Fatalf("filtered jobs = %#v", filteredJobs)
+	}
+	filteredAssets, err := db.ListImageAssets(ctx, 1, 10, 7)
+	if err != nil {
+		t.Fatalf("ListImageAssets by api_key 返回错误: %v", err)
+	}
+	if filteredAssets.Total != 1 || len(filteredAssets.Assets) != 1 {
+		t.Fatalf("filtered assets = %#v", filteredAssets)
+	}
+	emptyAssets, err := db.ListImageAssets(ctx, 1, 10, 99)
+	if err != nil {
+		t.Fatalf("ListImageAssets empty key 返回错误: %v", err)
+	}
+	if emptyAssets.Total != 0 {
+		t.Fatalf("empty key assets total = %d, want 0", emptyAssets.Total)
+	}
+	ownerKeyID, err := db.GetImageAssetJobAPIKeyID(ctx, assetID)
+	if err != nil {
+		t.Fatalf("GetImageAssetJobAPIKeyID 返回错误: %v", err)
+	}
+	if ownerKeyID != 7 {
+		t.Fatalf("ownerKeyID = %d, want 7", ownerKeyID)
+	}
+	_ = otherJobID
 
 	if err := db.DeleteImageAsset(ctx, assetID); err != nil {
 		t.Fatalf("DeleteImageAsset 返回错误: %v", err)

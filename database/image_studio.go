@@ -365,19 +365,38 @@ func (db *DB) GetImageGenerationJob(ctx context.Context, id int64) (*ImageGenera
 	return job, nil
 }
 
-func (db *DB) ListImageGenerationJobs(ctx context.Context, page, pageSize int) (*ImageJobPage, error) {
+// ListImageGenerationJobs returns image jobs newest-first.
+// When apiKeyID > 0, only jobs for that API key are returned (portal isolation).
+// When apiKeyID == 0, all jobs are returned (admin global list).
+func (db *DB) ListImageGenerationJobs(ctx context.Context, page, pageSize int, apiKeyID int64) (*ImageJobPage, error) {
 	page, pageSize = normalizePage(page, pageSize)
 	var total int64
-	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM image_generation_jobs`).Scan(&total); err != nil {
-		return nil, err
+	var rows *sql.Rows
+	var err error
+	if apiKeyID > 0 {
+		if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM image_generation_jobs WHERE api_key_id=$1`, apiKeyID).Scan(&total); err != nil {
+			return nil, err
+		}
+		rows, err = db.conn.QueryContext(ctx, `
+			SELECT id, status, prompt, params_json, api_key_id, api_key_name, api_key_masked, error_message,
+				duration_ms, created_at, started_at, completed_at
+			FROM image_generation_jobs
+			WHERE api_key_id=$1
+			ORDER BY created_at DESC, id DESC
+			LIMIT $2 OFFSET $3
+		`, apiKeyID, pageSize, (page-1)*pageSize)
+	} else {
+		if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM image_generation_jobs`).Scan(&total); err != nil {
+			return nil, err
+		}
+		rows, err = db.conn.QueryContext(ctx, `
+			SELECT id, status, prompt, params_json, api_key_id, api_key_name, api_key_masked, error_message,
+				duration_ms, created_at, started_at, completed_at
+			FROM image_generation_jobs
+			ORDER BY created_at DESC, id DESC
+			LIMIT $1 OFFSET $2
+		`, pageSize, (page-1)*pageSize)
 	}
-	rows, err := db.conn.QueryContext(ctx, `
-		SELECT id, status, prompt, params_json, api_key_id, api_key_name, api_key_masked, error_message,
-			duration_ms, created_at, started_at, completed_at
-		FROM image_generation_jobs
-		ORDER BY created_at DESC, id DESC
-		LIMIT $1 OFFSET $2
-	`, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -482,7 +501,7 @@ func (db *DB) InsertImageAsset(ctx context.Context, input ImageAssetInput) (int6
 }
 
 func (db *DB) GetImageAsset(ctx context.Context, id int64) (*ImageAsset, error) {
-	rows, err := db.conn.QueryContext(ctx, imageAssetSelectSQL()+` WHERE id=$1`, id)
+	rows, err := db.conn.QueryContext(ctx, imageAssetSelectSQL("")+` WHERE id=$1`, id)
 	if err != nil {
 		return nil, err
 	}
@@ -493,16 +512,37 @@ func (db *DB) GetImageAsset(ctx context.Context, id int64) (*ImageAsset, error) 
 	return scanImageAsset(rows)
 }
 
-func (db *DB) ListImageAssets(ctx context.Context, page, pageSize int) (*ImageAssetPage, error) {
+// ListImageAssets returns assets newest-first.
+// When apiKeyID > 0, only assets belonging to jobs of that API key are returned.
+// When apiKeyID == 0, all assets are returned (admin global list).
+func (db *DB) ListImageAssets(ctx context.Context, page, pageSize int, apiKeyID int64) (*ImageAssetPage, error) {
 	page, pageSize = normalizePage(page, pageSize)
 	var total int64
-	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM image_assets`).Scan(&total); err != nil {
-		return nil, err
+	var rows *sql.Rows
+	var err error
+	if apiKeyID > 0 {
+		if err := db.conn.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM image_assets a
+			INNER JOIN image_generation_jobs j ON j.id = a.job_id
+			WHERE j.api_key_id=$1
+		`, apiKeyID).Scan(&total); err != nil {
+			return nil, err
+		}
+		rows, err = db.conn.QueryContext(ctx, imageAssetSelectSQL("a")+`
+			INNER JOIN image_generation_jobs j ON j.id = a.job_id
+			WHERE j.api_key_id=$1
+			ORDER BY a.created_at DESC, a.id DESC
+			LIMIT $2 OFFSET $3
+		`, apiKeyID, pageSize, (page-1)*pageSize)
+	} else {
+		if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM image_assets`).Scan(&total); err != nil {
+			return nil, err
+		}
+		rows, err = db.conn.QueryContext(ctx, imageAssetSelectSQL("")+`
+			ORDER BY created_at DESC, id DESC
+			LIMIT $1 OFFSET $2
+		`, pageSize, (page-1)*pageSize)
 	}
-	rows, err := db.conn.QueryContext(ctx, imageAssetSelectSQL()+`
-		ORDER BY created_at DESC, id DESC
-		LIMIT $1 OFFSET $2
-	`, pageSize, (page-1)*pageSize)
 	if err != nil {
 		return nil, err
 	}
@@ -515,7 +555,7 @@ func (db *DB) ListImageAssets(ctx context.Context, page, pageSize int) (*ImageAs
 }
 
 func (db *DB) ListImageAssetsByJobID(ctx context.Context, jobID int64) ([]ImageAsset, error) {
-	rows, err := db.conn.QueryContext(ctx, imageAssetSelectSQL()+`
+	rows, err := db.conn.QueryContext(ctx, imageAssetSelectSQL("")+`
 		WHERE job_id=$1
 		ORDER BY id ASC
 	`, jobID)
@@ -526,15 +566,40 @@ func (db *DB) ListImageAssetsByJobID(ctx context.Context, jobID int64) ([]ImageA
 	return scanImageAssets(rows)
 }
 
+// GetImageAssetJobAPIKeyID returns the owning API key id for an asset via its job.
+// Returns 0 when the asset has no job linkage.
+func (db *DB) GetImageAssetJobAPIKeyID(ctx context.Context, assetID int64) (int64, error) {
+	var apiKeyID int64
+	err := db.conn.QueryRowContext(ctx, `
+		SELECT COALESCE(j.api_key_id, 0)
+		FROM image_assets a
+		LEFT JOIN image_generation_jobs j ON j.id = a.job_id
+		WHERE a.id=$1
+	`, assetID).Scan(&apiKeyID)
+	if err != nil {
+		return 0, err
+	}
+	return apiKeyID, nil
+}
+
 func (db *DB) DeleteImageAsset(ctx context.Context, id int64) error {
 	_, err := db.conn.ExecContext(ctx, `DELETE FROM image_assets WHERE id=$1`, id)
 	return err
 }
 
-func imageAssetSelectSQL() string {
-	return `SELECT id, job_id, template_id, filename, storage_path, mime_type, bytes, width, height,
-		model, requested_size, actual_size, quality, output_format, revised_prompt, created_at
-		FROM image_assets`
+// imageAssetSelectSQL builds the asset SELECT. When tableAlias is non-empty (e.g. "a"),
+// columns are qualified and FROM uses that alias.
+func imageAssetSelectSQL(tableAlias string) string {
+	alias := strings.TrimSpace(tableAlias)
+	prefix := ""
+	from := "image_assets"
+	if alias != "" {
+		prefix = alias + "."
+		from = "image_assets " + alias
+	}
+	return `SELECT ` + prefix + `id, ` + prefix + `job_id, ` + prefix + `template_id, ` + prefix + `filename, ` + prefix + `storage_path, ` + prefix + `mime_type, ` + prefix + `bytes, ` + prefix + `width, ` + prefix + `height,
+		` + prefix + `model, ` + prefix + `requested_size, ` + prefix + `actual_size, ` + prefix + `quality, ` + prefix + `output_format, ` + prefix + `revised_prompt, ` + prefix + `created_at
+		FROM ` + from
 }
 
 func scanImageAssets(rows *sql.Rows) ([]ImageAsset, error) {
