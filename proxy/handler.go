@@ -1874,7 +1874,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			lastUpstreamCancel = upstreamCancel
 			ttftGuard := (*firstTokenTimeoutGuard)(nil)
 			if isStream {
-				ttftGuard = newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+				ttftGuard = newFirstTokenTimeoutGuard(firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact), upstreamCancel)
 			}
 			stopTTFTGuard := func() {
 				if ttftGuard != nil {
@@ -2272,7 +2272,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
-		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+		ttftGuard := newFirstTokenTimeoutGuard(firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact), upstreamCancel)
 		// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图产生大体积
 		// 数据卡死 WS 流（issue #220）。显式生图请求已在上面强制走 HTTP。
 		upstreamBody := codexBody

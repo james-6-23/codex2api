@@ -91,3 +91,16 @@ func firstTokenTimeoutOutcome(timeout time.Duration) streamOutcome {
 func firstTokenTimeoutError(timeout time.Duration) error {
 	return ErrUpstreamTimeout(fmt.Errorf("first token timeout after %s", timeout.Round(time.Millisecond)))
 }
+
+// firstTokenTimeoutForRequest 返回本轮请求应使用的首字超时。上下文压缩轮
+// （请求体含 compaction_trigger）豁免看门狗：压缩需要先读入整段历史上下文
+// 才吐出首个 compaction 输出项，首帧天然可能超过用户配置的较短阈值（如 30s），
+// 而这一轮的 encrypted_content 绑定原账号，超时换号重试大概率继续失败并耗尽
+// attempt，导致会话彻底废掉（issue #381）。故对压缩轮返回 0（关闭看门狗），
+// 让其思考时间不受限；异常挂死仍由客户端自身超时兜底。
+func firstTokenTimeoutForRequest(base time.Duration, isCompactionTrigger bool) time.Duration {
+	if isCompactionTrigger {
+		return 0
+	}
+	return base
+}

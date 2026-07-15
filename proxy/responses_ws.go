@@ -185,6 +185,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	respCacheOwner := responseCacheOwner(apiKeyID)
+	// 上下文压缩轮豁免首字超时看门狗（issue #381）：压缩首帧天然慢，超时换号无益。
+	bodySignalCompact := requestBodyHasCompactionTrigger(rawBody)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -285,7 +287,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
 		lastUpstreamCancel = upstreamCancel
-		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
+		ttftGuard := newFirstTokenTimeoutGuard(firstTokenTimeoutForRequest(currentFirstTokenTimeout(), bodySignalCompact), upstreamCancel)
 		useWebsocket := !wsHTTPFallback.ForceHTTP()
 		// 生图请求改走 HTTP 上游（客户端仍是 WS）：WebSocket 上游传输大体积
 		// 图片数据会卡死（issue #220）；自然语言生图意图也需保留图片工具（issue #288）。
