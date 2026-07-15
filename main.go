@@ -294,6 +294,7 @@ func main() {
 	r.Use(api.VersionMiddleware())
 	security.MaxRequestBodySize = cfg.MaxRequestBodySize
 	r.Use(security.RequestSizeLimiter(int64(security.MaxRequestBodySize)))
+	r.Use(security.RequestBodyDecompressor(int64(security.MaxRequestBodySize)))
 	r.Use(api.BodyCacheMiddleware())
 	r.Use(api.CORSMiddleware())
 	r.Use(api.SecurityHeadersMiddleware())
