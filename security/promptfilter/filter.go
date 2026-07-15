@@ -721,6 +721,13 @@ func ExtractText(body []byte, endpoint string, maxLen int) string {
 	case "messages", "anthropic", "/v1/messages":
 		addResultText(gjson.GetBytes(body, "system"))
 		addResultText(gjson.GetBytes(body, "messages"))
+	case "response", "responses", "/v1/responses":
+		// Top-level instructions are application-owned context for the Responses
+		// API. Scanning them causes platform safety and tool instructions to be
+		// attributed to the end user. User-controlled content remains in input.
+		addResultText(gjson.GetBytes(body, "input"))
+		addResultText(gjson.GetBytes(body, "prompt"))
+		addResultText(gjson.GetBytes(body, "messages"))
 	case "image", "images", "images_generations", "images_edits", "/v1/images/generations", "/v1/images/edits":
 		addResultText(gjson.GetBytes(body, "prompt"))
 		addResultText(gjson.GetBytes(body, "style"))
