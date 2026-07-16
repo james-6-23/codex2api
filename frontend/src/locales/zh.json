@@ -186,7 +186,7 @@
     "poolRunwayLabel": "账号池预计可支撑",
     "poolRunwayHours": "{{hours}} 小时",
     "poolRunwayDayPlus": "1 天+",
-    "poolRunwayUnknown": "暂难判断",
+    "poolRunwayUnknown": "等待数据",
     "poolRunwayDispatchable": "可调度"
   },
   "accounts": {
