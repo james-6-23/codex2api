@@ -4,7 +4,7 @@ import { TIME_RANGE_OPTIONS, type TimeRangeKey } from '../lib/timeRange'
 interface Props {
   timeRange: TimeRangeKey
   onTimeRangeChange: (range: TimeRangeKey) => void
-  // showLiveBadge 为 true 且当前为 1h（实时）时，前面显示「实时中」脉冲徽章。
+  // showLiveBadge 为 true 且当前为 1h（实时）时，前面显示自动刷新状态。
   showLiveBadge?: boolean
 }
 
@@ -22,7 +22,7 @@ export default function TimeRangeSelector({
     <div className="flex items-center gap-2">
       {showLiveBadge && isLive && (
         <div className="mr-1 inline-flex items-center gap-2 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-600 dark:text-emerald-300">
-          <span className="size-2 rounded-full bg-current animate-pulse" />
+          <span className="size-2 rounded-full bg-current" />
           <span>{t('dashboard.liveBadge')}</span>
         </div>
       )}
