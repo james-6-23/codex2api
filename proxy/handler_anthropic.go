@@ -346,6 +346,12 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", "账号池暂无可用账号（上游账号鉴权失效），请稍后重试")
 				return
 			}
+			// 上游账号 403 也是账号侧问题（额度/套餐/工作区受限）：换号重试耗尽后仍 403，
+			// 原样透传会让 Claude Code 误判自身无权限而停工（issue #396），改写为 503 池级错误。
+			if resp.StatusCode == http.StatusForbidden {
+				sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", "账号池暂无可用账号（上游账号被拒绝访问：额度/套餐或工作区受限），请稍后重试")
+				return
+			}
 			errType := mapHTTPStatusToAnthropicError(resp.StatusCode)
 			msg := gjson.GetBytes(errBody, "error.message").String()
 			if msg == "" {

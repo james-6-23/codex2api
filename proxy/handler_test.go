@@ -2542,6 +2542,66 @@ func TestSendFinalUpstreamError_MissingScope401Passthrough(t *testing.T) {
 	}
 }
 
+// TestShouldRetryHTTPStatus403 验证上游 403 现在参与换号重试（issue #396），
+// 受 general-retry 预算限制。
+func TestShouldRetryHTTPStatus403(t *testing.T) {
+	if !isRetryableStatus(http.StatusForbidden) {
+		t.Fatal("403 应被视为可重试状态")
+	}
+	generalRetries := 0
+	rateLimitRetries := 0
+	if !shouldRetryHTTPStatus(http.StatusForbidden, &generalRetries, &rateLimitRetries, 2, 1) {
+		t.Fatal("首个 403（未达上限）应可重试")
+	}
+	if !shouldRetryHTTPStatus(http.StatusForbidden, &generalRetries, &rateLimitRetries, 2, 1) {
+		t.Fatal("第二个 403（仍未达上限）应可重试")
+	}
+	if shouldRetryHTTPStatus(http.StatusForbidden, &generalRetries, &rateLimitRetries, 2, 1) {
+		t.Fatal("达到 general 重试上限后 403 不应再重试")
+	}
+	if generalRetries != 2 {
+		t.Fatalf("generalRetries = %d, want 2", generalRetries)
+	}
+	if rateLimitRetries != 0 {
+		t.Fatalf("403 不应消耗限流预算，rateLimitRetries = %d, want 0", rateLimitRetries)
+	}
+}
+
+// TestSendFinalUpstreamError_Forbidden403RemappedTo503 验证上游账号 403（额度/套餐/
+// 工作区受限）重试耗尽后改写为 503 池级错误，不原样以 403 透传（issue #396），
+// 避免 Claude Code 误判自身无权限而停工。
+func TestSendFinalUpstreamError_Forbidden403RemappedTo503(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	for _, body := range [][]byte{
+		[]byte(`{"error":{"message":"You have hit your usage limit.","code":"insufficient_quota"},"status":403}`),
+		[]byte(`{"detail":{"code":"deactivated_workspace"}}`),
+		[]byte(`{"error":{"code":"codex_access_restricted"}}`),
+	} {
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		handler := &Handler{}
+
+		handler.sendFinalUpstreamError(ctx, http.StatusForbidden, body)
+
+		if recorder.Code != http.StatusServiceUnavailable {
+			t.Fatalf("body=%s status = %d, want %d (上游 403 不应以客户端 403 透传)", body, recorder.Code, http.StatusServiceUnavailable)
+		}
+		var payload struct {
+			Error struct {
+				Code string `json:"code"`
+				Type string `json:"type"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
+			t.Fatalf("decode response: %v", err)
+		}
+		if payload.Error.Code != "account_pool_forbidden" {
+			t.Fatalf("body=%s code = %q, want account_pool_forbidden", body, payload.Error.Code)
+		}
+	}
+}
+
 func TestCompute429CooldownPlusUsesWindowHeaders(t *testing.T) {
 	handler := &Handler{}
 	account := &auth.Account{PlanType: "plus"}

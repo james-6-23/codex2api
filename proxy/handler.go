@@ -1496,9 +1496,15 @@ const (
 	logStatusUpstreamStreamBreak = 598
 )
 
-// isRetryableStatus 检查是否可重试的上游状态码
+// isRetryableStatus 检查是否可重试的上游状态码。
+// 403 也视为可重试：Codex 上游 403 全是账号侧问题（payment_required /
+// deactivated_workspace / codex_access_restricted 等 OAuth/套餐/工作区维度），
+// 非请求内容问题，换到号池里其他健康账号即可继续（issue #396）。
 func isRetryableStatus(code int) bool {
-	return code == http.StatusServiceUnavailable || code == http.StatusUnauthorized || code == http.StatusInternalServerError
+	return code == http.StatusServiceUnavailable ||
+		code == http.StatusUnauthorized ||
+		code == http.StatusInternalServerError ||
+		code == http.StatusForbidden
 }
 
 func shouldRetryHTTPStatus(statusCode int, generalRetries *int, rateLimitRetries *int, maxGeneralRetries, maxRateLimitRetries int) bool {
@@ -4674,6 +4680,20 @@ func (h *Handler) sendFinalUpstreamError(c *gin.Context, statusCode int, body []
 				"message": "账号池暂无可用账号（上游账号鉴权失效），请稍后重试",
 				"type":    "server_error",
 				"code":    "account_pool_unauthorized",
+			},
+		})
+		return
+	}
+
+	// 上游账号 403（payment_required / deactivated_workspace / codex_access_restricted）
+	// 同样是账号侧问题：重试已换过号仍拿到 403 说明池内暂无可用账号。原样透传 403 会让
+	// 客户端（如 Claude Code）误判为自身无权限而直接停工（issue #396），改写为 503 池级错误。
+	if statusCode == http.StatusForbidden {
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": gin.H{
+				"message": "账号池暂无可用账号（上游账号被拒绝访问：额度/套餐或工作区受限），请稍后重试",
+				"type":    "server_error",
+				"code":    "account_pool_forbidden",
 			},
 		})
 		return
