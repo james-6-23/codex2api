@@ -156,6 +156,9 @@ func TestPrepareWebsocketHeadersCanOptOutOfUserAgent(t *testing.T) {
 	if got := headers.Get("User-Agent"); got != "" {
 		t.Fatalf("User-Agent = %q, want empty", got)
 	}
+	if values, ok := headers["User-Agent"]; !ok || len(values) != 1 || values[0] != "" {
+		t.Fatalf("User-Agent header entry = %#v, want explicit empty value to suppress Go default", values)
+	}
 	if got := headers.Get("Version"); got != "" {
 		t.Fatalf("Version = %q, want empty", got)
 	}

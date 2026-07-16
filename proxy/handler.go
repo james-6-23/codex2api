@@ -636,6 +636,7 @@ func populateAPIKeyMetaFromContext(c *gin.Context, input *database.UsageLogInput
 func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInput) {
 	populateAPIKeyMetaFromContext(c, input)
 	populateClientIPFromRequest(c, input)
+	populateUserAgentMetaFromRequest(c, input)
 	populateCompactUsageMetaFromRequest(c, input)
 	markCyberPolicyUsageKind(input)
 	h.logUsage(input)
@@ -1394,6 +1395,7 @@ func (h *Handler) APIKeyAuthMiddleware() gin.HandlerFunc {
 func (h *Handler) authMiddleware() gin.HandlerFunc {
 	allowAnonymous := h.cfg != nil && h.cfg.AllowAnonymousV1
 	return func(c *gin.Context) {
+		attachUserAgentAudit(c)
 		// 如果没有配置任何密钥
 		if !h.hasAnyKeys() {
 			if allowAnonymous {

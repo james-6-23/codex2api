@@ -35,6 +35,11 @@ type WsConnection struct {
 	// WebSocket 连接
 	conn *websocket.Conn
 
+	// 握手时实际发送给上游的 User-Agent。连接复用时每个请求沿用该值，
+	// 不能用当前配置重新推导，否则设置变更后会记录并未发送的 UA。
+	upstreamUserAgent      string
+	upstreamUserAgentKnown bool
+
 	// 创建/复用该连接的账号。仅用于读取当前动态并发上限，让 response_id
 	// 续链复用路径也能在账号上限下调后收敛空闲连接数。
 	account *auth.Account
@@ -950,6 +955,8 @@ func (m *Manager) createConnection(
 	wc := NewWsConnection(conn, session, wsURL)
 	wc.account = account
 	wc.PoolKey = poolKey
+	wc.upstreamUserAgent = strings.TrimSpace(headers.Get("User-Agent"))
+	wc.upstreamUserAgentKnown = true
 	wc.httpResp = resp
 	wc.onDisconnected = m.getOnDisconnected()
 	wc.onReadFailure = m.DiscardConnection

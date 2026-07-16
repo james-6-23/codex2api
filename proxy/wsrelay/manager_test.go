@@ -362,6 +362,67 @@ func TestAcquireConnectionCapsIdleConnectionsAtAccountConcurrency(t *testing.T) 
 	}
 }
 
+func TestAcquireConnectionKeepsActualHandshakeUserAgentWhenReused(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	manager := NewManager()
+	t.Cleanup(manager.Stop)
+	account := &auth.Account{DBID: 42, DynamicConcurrencyLimit: 1}
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+
+	first, pending, err := manager.AcquireConnection(
+		context.Background(), account, wsURL, "session-ua", http.Header{"User-Agent": []string{"codex-first/1.0"}}, "",
+	)
+	if err != nil {
+		t.Fatalf("first AcquireConnection error = %v", err)
+	}
+	first.session.RemovePendingRequest(pending.RequestID)
+	// AcquireConnection reserves the read lease before the executor writes. This
+	// test does not send a frame, so return that synthetic lease to idle manually.
+	readState := first.ensureReadState()
+	readState.mu.Lock()
+	readState.activeLease = ""
+	readState.leasePhase = readLeaseIdle
+	readState.leaseWrite = nil
+	readState.leaseTerminalQueued = false
+	readState.mu.Unlock()
+	manager.ReleaseConnection(first)
+
+	reused, pending, err := manager.AcquireConnection(
+		context.Background(), account, wsURL, "session-ua", http.Header{"User-Agent": []string{"codex-new-setting/2.0"}}, "",
+	)
+	if err != nil {
+		t.Fatalf("second AcquireConnection error = %v", err)
+	}
+	defer func() {
+		reused.session.RemovePendingRequest(pending.RequestID)
+		manager.DiscardConnection(reused)
+	}()
+
+	if reused != first {
+		t.Fatal("second acquisition did not reuse the existing WebSocket connection")
+	}
+	if !reused.upstreamUserAgentKnown {
+		t.Fatal("reused connection is missing its handshake User-Agent audit")
+	}
+	if got := reused.upstreamUserAgent; got != "codex-first/1.0" {
+		t.Fatalf("reused connection User-Agent = %q, want original handshake value", got)
+	}
+}
+
 func TestAcquireConnectionTrimsIdleConnectionsAfterDynamicLimitDecrease(t *testing.T) {
 	manager := NewManager()
 	t.Cleanup(manager.Stop)

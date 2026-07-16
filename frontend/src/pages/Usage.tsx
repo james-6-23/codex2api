@@ -891,6 +891,74 @@ function StatusCodeBadge({ log }: { log: UsageLog }) {
   )
 }
 
+function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolean }) {
+  const { t } = useTranslation()
+  const clientUserAgent = log.client_user_agent?.trim() || ''
+  const upstreamUserAgent = log.upstream_user_agent?.trim() || ''
+  const hasAudit = Boolean(clientUserAgent || upstreamUserAgent || log.user_agent_overridden)
+  const upstreamLabel = upstreamUserAgent || (hasAudit ? t('usage.userAgentNotSent') : '-')
+  const statusLabel = !hasAudit
+    ? t('usage.userAgentNotRecorded')
+    : log.user_agent_overridden
+      ? t('usage.userAgentOverridden')
+      : t('usage.userAgentPreserved')
+
+  const content = (
+    <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} space-y-1 font-mono text-[11px] leading-relaxed`}>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">C</span>
+        <span className="min-w-0 truncate text-foreground/80">{clientUserAgent || '-'}</span>
+      </div>
+      <div className="flex min-w-0 items-center gap-1.5">
+        <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">U</span>
+        <span className="min-w-0 truncate text-foreground/80">{upstreamLabel}</span>
+        {hasAudit ? (
+          <Badge
+            variant="outline"
+            className={`ml-auto shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
+              log.user_agent_overridden
+                ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
+                : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+            }`}
+          >
+            {statusLabel}
+          </Badge>
+        ) : null}
+      </div>
+    </div>
+  )
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <div
+          tabIndex={0}
+          aria-label={`${t('usage.clientUserAgent')}: ${clientUserAgent || '-'}; ${t('usage.upstreamUserAgent')}: ${upstreamLabel}; ${statusLabel}`}
+          className="cursor-help focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          {content}
+        </div>
+      </TooltipTrigger>
+      <TooltipContent side="top" sideOffset={6} className="max-w-[440px] p-3">
+        <div className="space-y-2 text-xs">
+          <div>
+            <div className="font-semibold text-background/70">{t('usage.clientUserAgent')}</div>
+            <div className="mt-0.5 break-all font-mono leading-relaxed">{clientUserAgent || '-'}</div>
+          </div>
+          <div>
+            <div className="font-semibold text-background/70">{t('usage.upstreamUserAgent')}</div>
+            <div className="mt-0.5 break-all font-mono leading-relaxed">{upstreamLabel}</div>
+          </div>
+          <div className="font-semibold">{statusLabel}</div>
+          {log.via_websocket ? (
+            <div className="leading-relaxed text-background/70">{t('usage.userAgentWebSocketHint')}</div>
+          ) : null}
+        </div>
+      </TooltipContent>
+    </Tooltip>
+  )
+}
+
 // CyberPolicyDetailButton: 对 cyber_policy 报错的请求，点击关联到提示词过滤日志，
 // 展示触发拦截的完整请求内容（为什么 & 是什么）。
 function CyberPolicyDetailButton({ log }: { log: UsageLog }) {
@@ -1140,7 +1208,7 @@ function EmptyPanel({ accent, icon, text }: { accent: PanelAccentKey; icon: Reac
   )
 }
 
-type UsageTableColumn = 'status' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'firstToken' | 'tokensPerSec' | 'duration' | 'time'
+type UsageTableColumn = 'status' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'userAgent' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'firstToken' | 'tokensPerSec' | 'duration' | 'time'
 
 const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string }> = [
   { key: 'status', labelKey: 'usage.tableStatus' },
@@ -1148,6 +1216,7 @@ const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string 
   { key: 'account', labelKey: 'usage.tableAccount' },
   { key: 'apiKey', labelKey: 'usage.tableApiKey' },
   { key: 'clientIp', labelKey: 'usage.tableClientIP' },
+  { key: 'userAgent', labelKey: 'usage.tableUserAgent' },
   { key: 'endpoint', labelKey: 'usage.tableEndpoint' },
   { key: 'type', labelKey: 'usage.tableType' },
   { key: 'token', labelKey: 'usage.tableToken' },
@@ -1166,6 +1235,7 @@ const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   account: true,
   apiKey: true,
   clientIp: true,
+  userAgent: true,
   endpoint: true,
   type: true,
   token: true,
@@ -1920,6 +1990,9 @@ export default function Usage() {
                           <span className="font-sans font-semibold text-foreground/80">{t('usage.tableEndpoint')}: </span>
                           {log.inbound_endpoint || log.endpoint || '-'}
                         </div>
+                        <div className="border-t border-border/60 pt-2">
+                          <UserAgentCell log={log} mobile />
+                        </div>
                       </div>
 
                       <div className="mt-3 grid grid-cols-2 gap-2 text-xs sm:grid-cols-4">
@@ -1992,6 +2065,7 @@ export default function Usage() {
                       {visibleColumns.account && <TableHead className={usageTableHeadClass}>{t('usage.tableAccount')}</TableHead>}
                       {visibleColumns.apiKey && <TableHead className={usageTableHeadClass}>{t('usage.tableApiKey')}</TableHead>}
                       {visibleColumns.clientIp && <TableHead className={usageTableHeadClass}>{t('usage.tableClientIP')}</TableHead>}
+                      {visibleColumns.userAgent && <TableHead className={usageTableHeadClass}>{t('usage.tableUserAgent')}</TableHead>}
                       {visibleColumns.endpoint && <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>}
                       {visibleColumns.type && <TableHead className={usageTableHeadClass}>{t('usage.tableType')}</TableHead>}
                       {visibleColumns.token && <TableHead className={usageTableHeadClass}>{t('usage.tableToken')}</TableHead>}
@@ -2073,6 +2147,9 @@ export default function Usage() {
                           <span title={log.client_ip || '-'}>
                             {log.client_ip || '-'}
                           </span>
+                        </TableCell>}
+                        {visibleColumns.userAgent && <TableCell>
+                          <UserAgentCell log={log} />
                         </TableCell>}
                         {visibleColumns.endpoint && <TableCell>
                           <div className={`${usageTableMonoClass} leading-relaxed`}>

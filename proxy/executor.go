@@ -330,6 +330,11 @@ func resolveUpstreamSessionID(apiKeyID int64, upstreamSeed, explicitSessionID st
 // useWebsocket 可选：未传时遵循全局强制 WS；传 true/false 时由调用方显式控制。
 // headers 下游请求头，用于设备指纹学习
 func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	resetUpstreamUserAgentAudit(ctx)
+
 	// Payload 规则改写：在 WS/HTTP 分叉前统一应用，两条上游路径共享改写结果。
 	// 生图请求跳过——其 instructions/工具由网关自行构造，改写会破坏桥接协议。
 	if !responsesBodyRequestsImageGeneration(requestBody) {
@@ -376,10 +381,6 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// 请求/配置要求走 WebSocket，但 WS 执行器未注册（如嵌入式调用或初始化顺序问题）。
 		// 静默落回 HTTP 会让“以为开了 WS 实际走 HTTP”难以排查，这里显式告警。
 		log.Printf("[WS] 警告: 期望走 WebSocket 上游，但 WebsocketExecuteFunc 未注册，已回退到 HTTP (account %d)", account.ID())
-	}
-
-	if ctx == nil {
-		ctx = context.Background()
 	}
 
 	account.Mu().RLock()
@@ -460,6 +461,7 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	resetUpstreamUserAgentAudit(ctx)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
 	account.Mu().RLock()
@@ -596,6 +598,7 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	resetUpstreamUserAgentAudit(ctx)
 
 	baseURL, apiKey := account.OpenAIResponsesCredentials()
 	account.Mu().RLock()
@@ -630,6 +633,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	resetUpstreamUserAgentAudit(ctx)
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken
@@ -868,6 +872,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 		req.Header.Del("Conversation_id")
 	}
 	applyAccountCustomHeaders(req, account)
+	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }
 
 func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account, apiKey string, headers http.Header) {
@@ -890,6 +895,7 @@ func applyOpenAIResponsesRequestHeaders(req *http.Request, account *auth.Account
 		}
 	}
 	applyAccountCustomHeaders(req, account)
+	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }
 
 const downstreamAffinityHeader = "X-Codex2API-Affinity-Key"

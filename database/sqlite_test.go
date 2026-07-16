@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -736,7 +737,7 @@ func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 		t.Fatalf("sqliteTableColumns 返回错误: %v", err)
 	}
 
-	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "client_ip", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size", "effective_model", "compact", "account_billed", "user_billed", "is_retry_attempt", "attempt_index", "upstream_error_kind", "error_message"} {
+	for _, name := range []string{"api_key_id", "api_key_name", "api_key_masked", "client_ip", "client_user_agent", "upstream_user_agent", "user_agent_overridden", "image_count", "image_width", "image_height", "image_bytes", "image_format", "image_size", "effective_model", "compact", "account_billed", "user_billed", "is_retry_attempt", "attempt_index", "upstream_error_kind", "error_message"} {
 		if _, ok := columns[name]; !ok {
 			t.Fatalf("usage_logs 缺少列 %q", name)
 		}
@@ -1503,6 +1504,47 @@ func TestUsageLogsPersistEffectiveModel(t *testing.T) {
 	}
 	if logs[0].ReasoningEffort != "high" {
 		t.Fatalf("ReasoningEffort = %q, want high", logs[0].ReasoningEffort)
+	}
+}
+
+func TestUsageLogsPersistUserAgentAudit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:           1,
+		Endpoint:            "/v1/responses",
+		Model:               "gpt-5.4",
+		StatusCode:          200,
+		ClientUserAgent:     "curl/8.7.1",
+		UpstreamUserAgent:   "codex-tui/0.151.0 (Mac OS 15.5.0; arm64) xterm-256color (codex-tui; 0.151.0)",
+		UserAgentOverridden: true,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+	db.flushLogs()
+
+	logs, err := db.ListRecentUsageLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListRecentUsageLogs 返回错误: %v", err)
+	}
+	if len(logs) != 1 {
+		t.Fatalf("len(logs) = %d, want 1", len(logs))
+	}
+	if got := logs[0].ClientUserAgent; got != "curl/8.7.1" {
+		t.Fatalf("ClientUserAgent = %q, want curl/8.7.1", got)
+	}
+	if got := logs[0].UpstreamUserAgent; !strings.HasPrefix(got, "codex-tui/0.151.0 ") {
+		t.Fatalf("UpstreamUserAgent = %q, want generated codex-tui UA", got)
+	}
+	if !logs[0].UserAgentOverridden {
+		t.Fatal("UserAgentOverridden = false, want true")
 	}
 }
 

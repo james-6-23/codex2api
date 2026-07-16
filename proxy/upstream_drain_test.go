@@ -61,3 +61,15 @@ func TestDrainableUpstreamContextStaysAliveWhileClientAlive(t *testing.T) {
 	case <-time.After(30 * time.Millisecond):
 	}
 }
+
+func TestDrainableUpstreamContextPreservesRequestValues(t *testing.T) {
+	type contextKey struct{}
+	clientCtx := context.WithValue(context.Background(), contextKey{}, "audit-value")
+
+	upstreamCtx, cancelUpstream := newDrainableUpstreamContext(clientCtx, time.Second)
+	defer cancelUpstream()
+
+	if got := upstreamCtx.Value(contextKey{}); got != "audit-value" {
+		t.Fatalf("upstream context value = %v, want audit-value", got)
+	}
+}

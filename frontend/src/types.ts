@@ -963,6 +963,9 @@ export interface UsageLog {
   id: number
   account_id: number
   client_ip: string
+  client_user_agent: string
+  upstream_user_agent: string
+  user_agent_overridden: boolean
   endpoint: string
   model: string
   effective_model: string
