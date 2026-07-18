@@ -23,7 +23,6 @@ const newAPIPolicyMetaContextKey = "prompt_filter_verified_newapi_policy_meta"
 
 const (
 	newAPISignatureVersionV1               = "1"
-	newAPISignatureVersionV2               = "2"
 	newAPIPolicyDecisionSignatureVersionV1 = "v1"
 	newAPIPolicyEventSignatureVersionV1    = "v1"
 )
@@ -35,11 +34,9 @@ type newAPIIdentity struct {
 }
 
 type verifiedNewAPIIdentityContext struct {
-	Identity          newAPIIdentity
-	BodySHA256        string
-	SignatureVersion  string
-	Audit             newAPIOriginalAuditMeta
-	AuditMetaVerified bool
+	Identity         newAPIIdentity
+	BodySHA256       string
+	SignatureVersion string
 }
 
 type newAPIOriginalAuditMeta struct {
@@ -53,6 +50,8 @@ type newAPIPolicyMeta struct {
 	Mode               string `json:"mode"`
 	Provider           string `json:"provider"`
 	Protocol           string `json:"protocol"`
+	OriginalEndpoint   string `json:"original_endpoint,omitempty"`
+	OriginalProtocol   string `json:"original_protocol,omitempty"`
 	RequestedModel     string `json:"requested_model,omitempty"`
 	UpstreamModel      string `json:"upstream_model,omitempty"`
 	ChannelID          int    `json:"channel_id,omitempty"`
@@ -113,22 +112,10 @@ func (h *Handler) verifyNewAPIIdentity(c *gin.Context, cfg promptfilter.NewAPICo
 	switch signatureVersion {
 	case "", newAPISignatureVersionV1:
 		signatureVersion = newAPISignatureVersionV1
-	case newAPISignatureVersionV2:
 	default:
 		return newAPIIdentity{}, false
 	}
-	audit := newAPIOriginalAuditMeta{}
-	canonicalParts := []string{"v1", timestampRaw, identity.RequestID, identity.UserID, identity.ClientIP, method, path, bodyDigest}
-	if signatureVersion == newAPISignatureVersionV2 {
-		audit = newAPIOriginalAuditMeta{
-			Endpoint: strings.TrimSpace(c.GetHeader("X-NewAPI-Original-Endpoint")),
-			Protocol: strings.TrimSpace(c.GetHeader("X-NewAPI-Original-Protocol")),
-			Provider: strings.TrimSpace(c.GetHeader("X-NewAPI-Provider")),
-		}
-		canonicalParts[0] = "v2"
-		canonicalParts = append(canonicalParts, audit.Endpoint, audit.Protocol, audit.Provider)
-	}
-	canonical := strings.Join(canonicalParts, "\n")
+	canonical := strings.Join([]string{"v1", timestampRaw, identity.RequestID, identity.UserID, identity.ClientIP, method, path, bodyDigest}, "\n")
 	mac := hmac.New(sha256.New, []byte(secret))
 	_, _ = mac.Write([]byte(canonical))
 	expected := hex.EncodeToString(mac.Sum(nil))
@@ -151,13 +138,8 @@ func (h *Handler) verifyNewAPIIdentity(c *gin.Context, cfg promptfilter.NewAPICo
 	if err := h.cache.SetRuntime(c.Request.Context(), newAPIReplayNamespace, replayKey, []byte("1"), ttl); err != nil {
 		return newAPIIdentity{}, false
 	}
-	auditMetaVerified := false
-	if signatureVersion == newAPISignatureVersionV2 {
-		audit, auditMetaVerified = normalizeVerifiedNewAPIOriginalAuditMeta(audit)
-	}
 	c.Set(newAPIIdentityContextKey, verifiedNewAPIIdentityContext{
 		Identity: identity, BodySHA256: actualBodyDigest, SignatureVersion: signatureVersion,
-		Audit: audit, AuditMetaVerified: auditMetaVerified,
 	})
 	return identity, true
 }
@@ -178,12 +160,6 @@ func (h *Handler) verifyNewAPIPolicyContext(c *gin.Context, cfg promptfilter.New
 		return verifiedNewAPIPolicyContext{}, false
 	}
 	policyContext := verifiedNewAPIPolicyContext{Identity: identity, BodySHA256: actualBodyDigest}
-	if cached, exists := c.Get(newAPIIdentityContextKey); exists {
-		if identityContext, ok := cached.(verifiedNewAPIIdentityContext); ok && identityContext.BodySHA256 == actualBodyDigest {
-			policyContext.Audit = identityContext.Audit
-			policyContext.AuditMetaVerified = identityContext.AuditMetaVerified
-		}
-	}
 	encoded := strings.TrimSpace(c.GetHeader("X-NewAPI-Policy-Meta"))
 	signature := strings.TrimSpace(c.GetHeader("X-NewAPI-Policy-Meta-Signature"))
 	if encoded == "" && signature == "" {
@@ -215,6 +191,15 @@ func (h *Handler) verifyNewAPIPolicyContext(c *gin.Context, cfg promptfilter.New
 		return policyContext, true
 	}
 	policyContext.MetaVerified = true
+	auditProtocol := policyContext.Meta.OriginalProtocol
+	if auditProtocol == "" {
+		auditProtocol = policyContext.Meta.Protocol
+	}
+	policyContext.Audit, policyContext.AuditMetaVerified = normalizeVerifiedNewAPIOriginalAuditMeta(newAPIOriginalAuditMeta{
+		Endpoint: policyContext.Meta.OriginalEndpoint,
+		Protocol: auditProtocol,
+		Provider: policyContext.Meta.Provider,
+	})
 	c.Set(newAPIPolicyMetaContextKey, policyContext)
 	return policyContext, true
 }

@@ -33,7 +33,7 @@
 
 ## 中文破限教程语料回归
 
-对 `/Users/thesong/Downloads/codex破甲甲` 进行只读检查，没有把教程原文写入仓库或测试日志。
+对本地只读安全回归语料目录进行检查，没有把教程原文、原始路径或个人文件信息写入仓库和测试日志。
 
 - 文件总数：460。
 - 可读取并参与扫描的教程或源码文件：442，其中包含 2 个 DOCX。
@@ -124,31 +124,28 @@
 ```bash
 PROMPT_FILTER_CORPUS=/path/to/corpus go test ./security/promptfilter -run TestOptionalLocalCorpusAudit -count=1 -v
 ```
-# NewAPI 与 Codex2API 身份审计串联回归（2026-07-15）
+# NewAPI 与 Codex2API 身份审计串联说明（2026-07-18）
 
 ## 测试环境
 
 - Codex2API：`http://127.0.0.1:18095`
 - NewAPI：`http://127.0.0.1:3000`
-- NewAPI 临时数据库：`/tmp/new-api-policy-review.db`
-- 测试渠道：`本地 Codex2API 严格审计测试`
-- 测试普通用户：`sanxiu_test`（仅操作临时数据库副本）
+- 身份签名：V1 canonical，不改变既有 `/v1` 请求协议。
+- 扩展审核档案：独立 `policy-meta-v1` 签名。
+- WebSocket / Realtime：使用同一身份与审核档案，并按逻辑轮次关联证据。
 
 ## 真实请求结果
 
 | 场景 | 结果 |
 | --- | --- |
-| 正常 Prompt“你好，请只回复测试正常” | HTTP 200，模型回复“测试正常” |
-| 第一次违规 Prompt（含“逆向”） | HTTP 503，`request_policy_violation`，审计记录为 `warned`、strike=1 |
-| 第二次违规 Prompt | HTTP 503，审计记录为 `banned`、strike=2 |
-| 封禁后再次发送正常 Prompt | HTTP 403，`User has been banned` |
+| 正常 Prompt | 正常进入上游，不产生处罚记录 |
+| Codex2API 确认拦截 | 返回签名 HTTP 400 策略决策，NewAPI 校验后按自身执行模式处理 |
+| NewAPI 策略关闭或影子模式 | 不累计违规、不封禁账号、不限制 IP |
+| 仅开启审计 | 保存结构化证据，但不会自动处罚 |
+| 显式开启累计与处罚子开关 | 达到阈值后才会执行对应账号或 IP 动作 |
 
-第二次违规后确认：
-
-- NewAPI 用户状态从 enabled 更新为 disabled。
-- `127.0.0.1` 写入测试数据库 IP 黑名单。
-- 两次审计均保存用户 ID、用户名、IP、模型、接口、时间、原因和 Prompt 快照。
+首次生产部署要求策略总开关、违规累计、账号封禁和 IP 限制全部关闭。管理员之后可分别开启审计、累计和处罚，父开关关闭时子处罚开关会自动关闭。
 
 ## 测试中发现并修复的问题
 
-NewAPI 原先只在适配器 `DoResponse` 中处理 Codex2API 策略响应，但非 200 响应会在统一 relay 错误分支提前返回，导致用户能收到 503、审计却不落库。现已把策略响应处理前移到 `compatible_handler.go` 和 `responses_handler.go` 的非 200 分支，并完成上述真实回归。
+NewAPI 会在统一错误返回前校验 Codex2API 的策略决策和事件签名。只有来源目标、请求身份、正文摘要、策略档案与响应事件都通过校验后，才允许进入审计或处罚流程；普通上游错误不能伪造策略命中。

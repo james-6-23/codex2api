@@ -76,38 +76,15 @@ func TestVerifyNewAPIIdentity(t *testing.T) {
 	}
 }
 
-func TestVerifyNewAPIV2IdentityAuthenticatesOriginalAuditMetadata(t *testing.T) {
+func TestVerifyNewAPIIdentityRejectsUnsupportedSignatureVersion(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("PROMPT_FILTER_NEWAPI_SECRET", "integration-secret")
-	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`)
-	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
-	c, _ := signedNewAPIPolicyContextV2(t, http.MethodPost, "req-v2-audit", identity, "/v1/chat/completions", body, newAPIOriginalAuditMeta{
-		Endpoint: "/v1/messages",
-		Protocol: "messages",
-		Provider: "anthropic",
-	})
+	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
+	c, _ := signedNewAPIPolicyContext(t, "req-unsupported-version", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/responses", body)
+	c.Request.Header.Set("X-NewAPI-Signature-Version", "unsupported")
 	h := &Handler{cache: cache.NewMemory(1)}
-	policyContext, ok := h.verifyNewAPIPolicyContext(c, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, body)
-	if !ok {
-		t.Fatal("v2 identity was rejected")
-	}
-	if !policyContext.AuditMetaVerified {
-		t.Fatal("signed v2 audit metadata was not marked verified")
-	}
-	if policyContext.Audit.Endpoint != "/v1/messages" || policyContext.Audit.Protocol != "messages" || policyContext.Audit.Provider != "anthropic" {
-		t.Fatalf("verified audit metadata = %#v", policyContext.Audit)
-	}
-
-	// The original endpoint is part of the v2 canonical string and cannot be
-	// replaced after signing.
-	tampered, _ := signedNewAPIPolicyContextV2(t, http.MethodPost, "req-v2-audit-tampered", identity, "/v1/chat/completions", body, newAPIOriginalAuditMeta{
-		Endpoint: "/v1/messages",
-		Protocol: "messages",
-		Provider: "anthropic",
-	})
-	tampered.Request.Header.Set("X-NewAPI-Original-Endpoint", "/v1/responses")
-	if _, ok := h.verifyNewAPIPolicyContext(tampered, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, body); ok {
-		t.Fatal("tampered v2 original endpoint was accepted")
+	if _, ok := h.verifyNewAPIIdentity(c, promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 120}, body); ok {
+		t.Fatal("unsupported identity signature version was accepted")
 	}
 }
 
@@ -129,13 +106,15 @@ func TestVerifyNewAPIV1IdentityDoesNotTrustUnsignedAuditMetadata(t *testing.T) {
 	}
 }
 
-func TestPromptFilterAuditLogUsesVerifiedV2OriginalMetadata(t *testing.T) {
+func TestPromptFilterAuditLogUsesVerifiedPolicyMetaOriginalMetadata(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("PROMPT_FILTER_NEWAPI_SECRET", "integration-secret")
 	body := []byte(`{"model":"gpt-5.5","messages":[{"role":"user","content":"hello"}]}`)
-	c, _ := signedNewAPIPolicyContextV2(t, http.MethodPost, "req-v2-log", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/chat/completions", body, newAPIOriginalAuditMeta{
-		Endpoint: "/v1/messages", Protocol: "claude", Provider: "anthropic",
-	})
+	c, _ := signedNewAPIPolicyContext(t, "req-v1-meta-log", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/chat/completions", body)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		Profile: "balanced", Mode: "enforce", Provider: "anthropic", Protocol: "openai",
+		OriginalEndpoint: "/v1/messages", OriginalProtocol: "claude",
+	}, true)
 	setIngressRequestBodyIfAbsent(c, body)
 	cfg := promptGuardTestConfig()
 	cfg.Advanced.NewAPI.Enabled = true
@@ -412,33 +391,6 @@ func signedNewAPIPolicyContext(t *testing.T, requestID string, identity newAPIId
 	req.Header.Set("X-NewAPI-Path", path)
 	req.Header.Set("X-NewAPI-Body-SHA256", bodyDigestHex)
 	canonical := strings.Join([]string{"v1", timestamp, requestID, identity.UserID, identity.ClientIP, http.MethodPost, path, bodyDigestHex}, "\n")
-	mac := hmac.New(sha256.New, []byte("integration-secret"))
-	_, _ = mac.Write([]byte(canonical))
-	req.Header.Set("X-NewAPI-Signature", hex.EncodeToString(mac.Sum(nil)))
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Request = req
-	return c, recorder
-}
-
-func signedNewAPIPolicyContextV2(t *testing.T, method, requestID string, identity newAPIIdentity, path string, body []byte, audit newAPIOriginalAuditMeta) (*gin.Context, *httptest.ResponseRecorder) {
-	t.Helper()
-	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
-	req := httptest.NewRequest(method, path, strings.NewReader(string(body)))
-	req.Header.Set("X-NewAPI-User-ID", identity.UserID)
-	req.Header.Set("X-NewAPI-Client-IP", identity.ClientIP)
-	req.Header.Set("X-NewAPI-Request-ID", requestID)
-	req.Header.Set("X-NewAPI-Timestamp", timestamp)
-	bodyDigest := sha256.Sum256(body)
-	bodyDigestHex := hex.EncodeToString(bodyDigest[:])
-	req.Header.Set("X-NewAPI-Method", method)
-	req.Header.Set("X-NewAPI-Path", path)
-	req.Header.Set("X-NewAPI-Body-SHA256", bodyDigestHex)
-	req.Header.Set("X-NewAPI-Signature-Version", "2")
-	req.Header.Set("X-NewAPI-Original-Endpoint", audit.Endpoint)
-	req.Header.Set("X-NewAPI-Original-Protocol", audit.Protocol)
-	req.Header.Set("X-NewAPI-Provider", audit.Provider)
-	canonical := strings.Join([]string{"v2", timestamp, requestID, identity.UserID, identity.ClientIP, method, path, bodyDigestHex, audit.Endpoint, audit.Protocol, audit.Provider}, "\n")
 	mac := hmac.New(sha256.New, []byte("integration-secret"))
 	_, _ = mac.Write([]byte(canonical))
 	req.Header.Set("X-NewAPI-Signature", hex.EncodeToString(mac.Sum(nil)))
