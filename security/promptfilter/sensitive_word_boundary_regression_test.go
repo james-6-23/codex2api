@@ -87,8 +87,8 @@ func TestSensitiveASCIIWordUsesFirstValidOccurrence(t *testing.T) {
 	if verdict.Action != ActionAllow {
 		t.Fatalf("standalone occurrence after identifier became an enforcement decision: %+v", verdict)
 	}
-	if !strings.Contains(verdict.TextPreview, HitStartMarker+"ida"+HitEndMarker) {
-		t.Fatalf("preview did not highlight the valid standalone occurrence: %q", verdict.TextPreview)
+	if !strings.Contains(verdict.MatchContext, HitStartMarker+"ida"+HitEndMarker) {
+		t.Fatalf("match context did not highlight the valid standalone occurrence: %q", verdict.MatchContext)
 	}
 }
 

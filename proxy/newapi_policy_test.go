@@ -109,6 +109,31 @@ func TestPromptFilterAuditLogUsesVerifiedPolicyMetaOriginalMetadata(t *testing.T
 	}
 }
 
+func TestPromptFilterAuditLogKeepsEnvelopeMetadataWhenSignedMetaIsUnknown(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("PROMPT_FILTER_NEWAPI_SECRET", "integration-secret")
+	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
+	c, _ := signedNewAPIPolicyContext(t, "req-v1-meta-unknown", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		Profile: promptfilter.GuardProfileBalanced,
+		Mode:    promptfilter.GuardModeEnforce,
+	}, true)
+	setIngressRequestBodyIfAbsent(c, body)
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 120
+	h := newPromptGuardTestHandler(cfg)
+	input := &database.PromptFilterLogInput{
+		Endpoint: "/v1/responses",
+		Protocol: string(promptfilter.ProtocolResponses),
+		Provider: string(promptfilter.ModelFamilyOpenAI),
+	}
+	h.populateVerifiedNewAPIAuditMeta(c, input)
+	if input.Protocol != string(promptfilter.ProtocolResponses) || input.Provider != string(promptfilter.ModelFamilyOpenAI) {
+		t.Fatalf("unknown signed metadata replaced envelope metadata: %+v", input)
+	}
+}
+
 func TestTrustedPolicyMetaOverrideRequiresAdminOptIn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	t.Setenv("PROMPT_FILTER_NEWAPI_SECRET", "integration-secret")

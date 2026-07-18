@@ -121,18 +121,23 @@ func (h *Handler) evaluatePromptGuardEnvelope(c *gin.Context, cfg promptfilter.C
 	}
 	verdict := decision.LegacyVerdict()
 	verdict.Mode = legacyModeForPromptGuard(decision.Mode)
-	text := strings.TrimSpace(verdict.FullText)
-	if text == "" {
-		text = envelopeCurrentUserText(envelope)
-		verdict.FullText = text
-		verdict.TextPreview = text
-		verdict.ExtractedChars = len([]rune(text))
-	}
-	if decision.Action != promptfilter.ActionAllow || cfg.Advanced.Sidecar.ScanCleanEnabled {
+	// The detector selected for audit can come from history, tool output, or
+	// session context. Semantic review, persisted request evidence, and the UI
+	// preview must nevertheless describe only the direct current-user prompt.
+	text := envelopeCurrentUserText(envelope)
+	verdict.FullText = text
+	verdict.TextPreview = promptfilter.RedactedPreview(text, 500)
+	verdict.ExtractedChars = len([]rune(text))
+	// Semantic review must examine the text that produced the enforcement
+	// decision. The persisted preview intentionally contains only the current
+	// user prompt, so a history/tool/session enforcement signal cannot safely be
+	// reviewed against that different text: a benign current prompt could clear
+	// an administrator-enabled auxiliary-layer block. Clean-prompt sampling is
+	// still allowed when the pipeline itself made no enforcement decision.
+	inspectCurrentPrompt := promptGuardHasCurrentUserEnforcement(decision) ||
+		(decision.Action == promptfilter.ActionAllow && cfg.Advanced.Sidecar.ScanCleanEnabled)
+	if inspectCurrentPrompt {
 		advancedCfg := cfg
-		if !promptGuardHasCurrentUserEnforcement(decision) {
-			advancedCfg.Advanced.Risk.Enabled = false
-		}
 		verdict = h.applyPromptSemanticProtection(c, text, verdict, advancedCfg)
 		if shouldReviewPromptGuardDecision(decision, verdict, cfg) {
 			verdict = h.reviewPromptFilterVerdict(ctx, text, verdict, cfg)

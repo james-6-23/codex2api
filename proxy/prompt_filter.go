@@ -93,14 +93,14 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 }
 
 func (h *Handler) logPromptFilterVerdict(c *gin.Context, endpoint string, model string, source string, errorCode string, verdict promptfilter.Verdict) {
-	h.logPromptFilterVerdictWithDecision(c, endpoint, model, source, errorCode, verdict, nil)
+	h.logPromptFilterVerdictWithDecision(c, endpoint, model, source, errorCode, verdict, nil, nil)
 }
 
 func (h *Handler) logPromptGuardEvaluation(c *gin.Context, endpoint string, model string, source string, errorCode string, evaluation promptGuardEvaluation) {
-	h.logPromptFilterVerdictWithDecision(c, endpoint, model, source, errorCode, evaluation.Verdict, &evaluation.Decision)
+	h.logPromptFilterVerdictWithDecision(c, endpoint, model, source, errorCode, evaluation.Verdict, &evaluation.Decision, &evaluation.Envelope)
 }
 
-func (h *Handler) logPromptFilterVerdictWithDecision(c *gin.Context, endpoint string, model string, source string, errorCode string, verdict promptfilter.Verdict, decision *promptfilter.Decision) {
+func (h *Handler) logPromptFilterVerdictWithDecision(c *gin.Context, endpoint string, model string, source string, errorCode string, verdict promptfilter.Verdict, decision *promptfilter.Decision, envelope *promptfilter.RequestEnvelope) {
 	if h == nil || h.db == nil || !verdict.Enabled {
 		return
 	}
@@ -128,6 +128,14 @@ func (h *Handler) logPromptFilterVerdictWithDecision(c *gin.Context, endpoint st
 		ReviewModel:     verdict.ReviewModel,
 		ReviewFlagged:   verdict.ReviewFlagged,
 		ReviewError:     verdict.ReviewError,
+	}
+	if envelope != nil {
+		if envelope.Protocol != promptfilter.ProtocolUnknown {
+			input.Protocol = string(envelope.Protocol)
+		}
+		if envelope.ModelFamily != promptfilter.ModelFamilyUnknown {
+			input.Provider = string(envelope.ModelFamily)
+		}
 	}
 	h.populateVerifiedNewAPIAuditMeta(c, input)
 	if decision != nil {
@@ -160,8 +168,12 @@ func (h *Handler) populateVerifiedNewAPIAuditMeta(c *gin.Context, input *databas
 	if policyContext.Audit.Endpoint != "" {
 		input.Endpoint = policyContext.Audit.Endpoint
 	}
-	input.Protocol = policyContext.Audit.Protocol
-	input.Provider = policyContext.Audit.Provider
+	if protocol := strings.TrimSpace(policyContext.Audit.Protocol); protocol != "" && !strings.EqualFold(protocol, string(promptfilter.ProtocolUnknown)) {
+		input.Protocol = protocol
+	}
+	if provider := strings.TrimSpace(policyContext.Audit.Provider); provider != "" && !strings.EqualFold(provider, string(promptfilter.ModelFamilyUnknown)) {
+		input.Provider = provider
+	}
 }
 
 func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model string, body []byte) {

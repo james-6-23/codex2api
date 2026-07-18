@@ -129,7 +129,11 @@ var sensitiveRedactionPatterns = []struct {
 	{regexp.MustCompile(`(?i)(["']?\b(?:password|passwd|pwd|token|api[_-]?key|secret|client[_-]?secret|access[_-]?token|refresh[_-]?token|session[_-]?id)\b["']?\s*[:=]\s*["']?)[^"',\s}]+`), `${1}[REDACTED]`},
 	{regexp.MustCompile(`(?i)\b(cookie\s*[:=]\s*)[^\n]+`), `${1}[REDACTED]`},
 	{regexp.MustCompile(`\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b`), `[REDACTED_API_KEY]`},
+	{regexp.MustCompile(`\b(?:AKIA|ASIA|AIDA|AROA|AIPA|ANPA|ANVA|ASCA)[A-Z0-9]{16}\b`), `[REDACTED_AWS_KEY]`},
+	{regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{20,255}|github_pat_[A-Za-z0-9_]{20,255})\b`), `[REDACTED_GITHUB_TOKEN]`},
+	{regexp.MustCompile(`\bxox[baprs]-[A-Za-z0-9-]{10,}\b`), `[REDACTED_SLACK_TOKEN]`},
 	{regexp.MustCompile(`\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b`), `[REDACTED_JWT]`},
+	{regexp.MustCompile(`(?s)-----BEGIN(?: [A-Z0-9]+)? PRIVATE KEY-----.*?-----END(?: [A-Z0-9]+)? PRIVATE KEY-----`), `[REDACTED_PRIVATE_KEY]`},
 	{regexp.MustCompile(`\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b`), `[REDACTED_EMAIL]`},
 }
 

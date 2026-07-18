@@ -10,8 +10,6 @@ import (
 	"sync"
 	"unicode"
 	"unicode/utf8"
-
-	"github.com/tidwall/gjson"
 )
 
 const (
@@ -94,6 +92,7 @@ type Verdict struct {
 	Matched             []Match `json:"matched"`
 	Reason              string  `json:"reason,omitempty"`
 	TextPreview         string  `json:"text_preview,omitempty"`
+	MatchContext        string  `json:"match_context,omitempty"`
 	FullText            string  `json:"full_text,omitempty"`
 	ExtractedChars      int     `json:"extracted_chars"`
 	Reviewed            bool    `json:"reviewed,omitempty"`
@@ -522,7 +521,7 @@ func Inspect(body []byte, endpoint string, cfg Config) Verdict {
 
 func InspectText(text string, cfg Config) Verdict {
 	cfg = NormalizeConfig(cfg)
-	preview := Preview(text, 500)
+	preview := RedactedPreview(text, 500)
 	verdict := Verdict{
 		Enabled:        cfg.Enabled,
 		Mode:           cfg.Mode,
@@ -545,7 +544,7 @@ func InspectText(text string, cfg Config) Verdict {
 
 func (e *Engine) InspectText(text string) Verdict {
 	cfg := e.cfg
-	preview := Preview(text, 500)
+	preview := RedactedPreview(text, 500)
 	verdict := Verdict{
 		Enabled:        cfg.Enabled,
 		Mode:           cfg.Mode,
@@ -712,7 +711,7 @@ func (e *Engine) InspectText(text string) Verdict {
 		verdict.Reason = reasonForVerdict(action, score, cfg.Threshold, matches)
 	}
 	if len(matchContexts) > 0 {
-		verdict.TextPreview = strings.Join(matchContexts, "\n---\n")
+		verdict.MatchContext = strings.Join(matchContexts, "\n---\n")
 	}
 	return verdict
 }
@@ -853,92 +852,20 @@ func compiledPatternMatchIndex(text string, pattern compiledPattern) []int {
 }
 
 func ExtractText(body []byte, endpoint string, maxLen int) string {
-	if len(body) == 0 || !gjson.ValidBytes(body) {
-		return ""
-	}
-	var parts []string
-	endpoint = strings.ToLower(strings.TrimSpace(endpoint))
-
-	addResultText := func(result gjson.Result) {
-		if result.Exists() {
-			collectGJSONText(result, &parts)
+	envelope := BuildEnvelope(body, endpoint, "", TransportHTTP, maxLen)
+	parts := make([]string, 0, 2)
+	for _, segment := range envelope.Segments {
+		if segment.Origin != OriginCurrentUser && !(segment.Origin == OriginHistory && segment.Linked) {
+			continue
 		}
-	}
-
-	switch endpoint {
-	case "chat", "chat_completions", "/v1/chat/completions":
-		collectCurrentUserMessageText(gjson.GetBytes(body, "messages"), &parts)
-	case "messages", "anthropic", "/v1/messages":
-		collectCurrentUserMessageText(gjson.GetBytes(body, "messages"), &parts)
-	case "response", "responses", "responses_compact", "/v1/responses", "/v1/responses/compact":
-		// Top-level instructions and non-user roles are application-owned
-		// context. Scanning them attributes platform safety and tool instructions
-		// to the end user, so only the current user prompt participates.
-		collectCurrentUserMessageText(gjson.GetBytes(body, "input"), &parts)
-		addResultText(gjson.GetBytes(body, "prompt"))
-		if len(parts) == 0 {
-			collectCurrentUserMessageText(gjson.GetBytes(body, "messages"), &parts)
+		if text := strings.TrimSpace(segment.Text); text != "" {
+			parts = append(parts, text)
 		}
-	case "image", "images", "images_generations", "images_edits", "/v1/images/generations", "/v1/images/edits":
-		addResultText(gjson.GetBytes(body, "prompt"))
-		addResultText(gjson.GetBytes(body, "style"))
-	default:
-		addResultText(gjson.GetBytes(body, "instructions"))
-		addResultText(gjson.GetBytes(body, "input"))
-		addResultText(gjson.GetBytes(body, "prompt"))
-		addResultText(gjson.GetBytes(body, "messages"))
 	}
 	return limitScanText(strings.Join(parts, "\n"), maxLen)
 }
 
 var continuationOnlyPattern = regexp.MustCompile(`(?i)^(?:继续(?:吧|做|处理|执行|完成|生成|写)?(?:它|这个|上面(?:的)?内容|之前(?:的)?内容)?|接着(?:做|处理|执行)?|照做|按(?:上面|之前|刚才)(?:的)?(?:要求|内容|方案)?(?:继续)?(?:做|执行|处理)?|就这样做|continue(?:\s+(?:please|with\s+(?:that|it)))?|go\s+ahead|do\s+it|proceed(?:\s+with\s+it)?|carry\s+on|same\s+as\s+above)[。.!！\s]*$`)
-
-func collectCurrentUserMessageText(result gjson.Result, parts *[]string) {
-	if !result.Exists() || result.Type == gjson.Null {
-		return
-	}
-	if !result.IsArray() {
-		if result.IsObject() {
-			role := strings.ToLower(strings.TrimSpace(result.Get("role").String()))
-			if role != "" && role != "user" {
-				return
-			}
-		}
-		collectGJSONText(result, parts)
-		return
-	}
-	items := result.Array()
-	userIndexes := make([]int, 0, len(items))
-	hasExplicitRoles := false
-	for i, item := range items {
-		if item.IsObject() {
-			roleResult := item.Get("role")
-			if roleResult.Exists() {
-				hasExplicitRoles = true
-				if strings.EqualFold(strings.TrimSpace(roleResult.String()), "user") {
-					userIndexes = append(userIndexes, i)
-				}
-			}
-		}
-	}
-	if !hasExplicitRoles {
-		for _, item := range items {
-			collectGJSONText(item, parts)
-		}
-		return
-	}
-	if len(userIndexes) == 0 {
-		return
-	}
-
-	currentParts := make([]string, 0, 2)
-	currentIndex := userIndexes[len(userIndexes)-1]
-	collectGJSONText(items[currentIndex], &currentParts)
-	if isContinuationOnly(strings.Join(currentParts, "\n")) && len(userIndexes) > 1 {
-		collectGJSONText(items[userIndexes[len(userIndexes)-2]], parts)
-	}
-	*parts = append(*parts, currentParts...)
-}
 
 func isContinuationOnly(text string) bool {
 	text = strings.ToLower(strings.Join(strings.Fields(strings.TrimSpace(text)), " "))
@@ -1110,45 +1037,6 @@ func MatchesJSON(matches []Match) string {
 		return "[]"
 	}
 	return string(data)
-}
-
-func collectGJSONText(result gjson.Result, parts *[]string) {
-	if !result.Exists() || result.Type == gjson.Null {
-		return
-	}
-	switch {
-	case result.IsArray():
-		for _, item := range result.Array() {
-			collectGJSONText(item, parts)
-		}
-	case result.IsObject():
-		if textValue := result.Get("text"); textValue.Type == gjson.String {
-			if t := strings.TrimSpace(textValue.String()); t != "" {
-				*parts = append(*parts, t)
-			}
-		}
-		if contentValue := result.Get("content"); contentValue.Exists() {
-			if contentValue.Type == gjson.String {
-				if t := strings.TrimSpace(contentValue.String()); t != "" {
-					*parts = append(*parts, t)
-				}
-			} else {
-				collectGJSONText(contentValue, parts)
-			}
-		}
-		result.ForEach(func(key, value gjson.Result) bool {
-			switch strings.ToLower(key.String()) {
-			case "text", "content", "image_url", "url", "file_id", "result", "data", "b64_json", "source", "file", "type", "role":
-				return true
-			}
-			collectGJSONText(value, parts)
-			return true
-		})
-	case result.Type == gjson.String:
-		if t := strings.TrimSpace(result.String()); t != "" {
-			*parts = append(*parts, t)
-		}
-	}
 }
 
 func parseSensitiveWords(raw string) []string {

@@ -250,47 +250,173 @@ func (b *envelopeBuilder) appendMessages(result gjson.Result) {
 	}
 
 	items := result.Array()
-	lastUser := -1
-	previousUser := -1
-	hasRoles := false
-	for index, item := range items {
-		if !item.IsObject() {
-			continue
-		}
-		if roleResult := item.Get("role"); roleResult.Exists() {
-			hasRoles = true
-			if strings.EqualFold(strings.TrimSpace(roleResult.String()), "user") {
-				previousUser = lastUser
-				lastUser = index
-			}
-		}
-	}
+	currentItems := selectCurrentInputItems(items)
 	segmentStarts := make([]int, len(items))
 	segmentEnds := make([]int, len(items))
 	for index, item := range items {
 		segmentStarts[index] = len(b.envelope.Segments)
-		if hasRoles && item.IsObject() && item.Get("role").Exists() {
-			role := strings.ToLower(strings.TrimSpace(item.Get("role").String()))
-			b.appendMessage(item, role, role == "user" && index == lastUser)
+		if role := inputItemRole(item); role != "" {
+			b.appendMessage(item, role, currentItems[index])
 		} else {
-			b.appendTypedInputItem(item, true)
+			b.appendTypedInputItem(item, currentItems[index])
 		}
 		segmentEnds[index] = len(b.envelope.Segments)
 	}
-	if hasRoles && previousUser >= 0 && lastUser >= 0 {
-		currentText := make([]string, 0, segmentEnds[lastUser]-segmentStarts[lastUser])
-		for _, segment := range b.envelope.Segments[segmentStarts[lastUser]:segmentEnds[lastUser]] {
+
+	firstCurrent := -1
+	currentText := make([]string, 0, 2)
+	for index, selected := range currentItems {
+		if !selected {
+			continue
+		}
+		if firstCurrent < 0 {
+			firstCurrent = index
+		}
+		for _, segment := range b.envelope.Segments[segmentStarts[index]:segmentEnds[index]] {
 			if segment.Origin == OriginCurrentUser {
 				currentText = append(currentText, segment.Text)
 			}
 		}
-		if isContinuationOnly(strings.Join(currentText, "\n")) {
-			for index := segmentStarts[previousUser]; index < segmentEnds[previousUser]; index++ {
-				if b.envelope.Segments[index].Origin == OriginHistory {
-					b.envelope.Segments[index].Linked = true
-				}
-			}
+	}
+	if firstCurrent < 0 || !isContinuationOnly(strings.Join(currentText, "\n")) {
+		return
+	}
+	previousUser := previousUserCandidate(items, firstCurrent)
+	if previousUser < 0 {
+		return
+	}
+	for index := segmentStarts[previousUser]; index < segmentEnds[previousUser]; index++ {
+		if b.envelope.Segments[index].Origin == OriginHistory {
+			b.envelope.Segments[index].Linked = true
 		}
+	}
+}
+
+type currentInputKind uint8
+
+const (
+	currentInputNone currentInputKind = iota
+	currentInputExplicitMessage
+	currentInputTextBlock
+	currentInputImplicitMessage
+	currentInputScalar
+)
+
+func inputItemRole(item gjson.Result) string {
+	if !item.IsObject() {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(item.Get("role").String()))
+}
+
+func currentInputKindForItem(item gjson.Result) currentInputKind {
+	if !item.IsObject() {
+		if item.Type == gjson.String {
+			return currentInputScalar
+		}
+		return currentInputNone
+	}
+	if role := inputItemRole(item); role != "" {
+		if role == "user" {
+			return currentInputExplicitMessage
+		}
+		return currentInputNone
+	}
+	switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
+	case "input_text":
+		return currentInputTextBlock
+	case "", "message":
+		return currentInputImplicitMessage
+	default:
+		return currentInputNone
+	}
+}
+
+func selectCurrentInputItems(items []gjson.Result) []bool {
+	selected := make([]bool, len(items))
+	lastIndex := -1
+	lastKind := currentInputNone
+	for index, item := range items {
+		if kind := currentInputKindForItem(item); kind != currentInputNone {
+			lastIndex = index
+			lastKind = kind
+		}
+	}
+	if lastIndex < 0 {
+		return selected
+	}
+	// A request that ends with assistant/tool interaction data is a tool
+	// continuation, not a new direct user turn. Do not resurrect an older user
+	// message as current evidence merely because it is the last user candidate
+	// somewhere in the replayed conversation. Session metadata and agent replay
+	// items intentionally do not close the direct prompt because Codex can append
+	// those transport records after a newly entered user message.
+	for index := lastIndex + 1; index < len(items); index++ {
+		if inputItemClosesDirectPrompt(items[index]) {
+			return selected
+		}
+	}
+	selected[lastIndex] = true
+	// Adjacent input_text items are content blocks of one direct Responses
+	// prompt. Message objects and scalar forms are complete messages, so only
+	// their final candidate is current.
+	if lastKind == currentInputTextBlock {
+		for index := lastIndex - 1; index >= 0; index-- {
+			kind := currentInputKindForItem(items[index])
+			if kind == currentInputTextBlock {
+				selected[index] = true
+				continue
+			}
+			if typedInputItemIsAttachment(items[index]) {
+				continue
+			}
+			break
+		}
+	}
+	return selected
+}
+
+func inputItemClosesDirectPrompt(item gjson.Result) bool {
+	if !item.IsObject() {
+		return false
+	}
+	switch inputItemRole(item) {
+	case "assistant", "tool", "function":
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
+	case "output_text", "refusal",
+		"function_call_output", "tool_call_output", "local_shell_call_output", "shell_call_output",
+		"apply_patch_call_output", "tool_search_output", "tool_search_call_output", "custom_tool_call_output",
+		"mcp_tool_call_output", "computer_call_output", "mcp_call_output", "tool_result",
+		"function_call", "tool_call", "local_shell_call", "shell_call", "apply_patch_call",
+		"tool_search_call", "custom_tool_call", "mcp_tool_call", "mcp_call", "mcp_list_tools",
+		"mcp_approval_request", "mcp_approval_response", "additional_tools", "code_interpreter_call",
+		"computer_call", "file_search_call", "image_generation_call", "web_search_call", "tool_use":
+		return true
+	default:
+		return false
+	}
+}
+
+func previousUserCandidate(items []gjson.Result, before int) int {
+	for index := before - 1; index >= 0; index-- {
+		if currentInputKindForItem(items[index]) != currentInputNone {
+			return index
+		}
+	}
+	return -1
+}
+
+func typedInputItemIsAttachment(item gjson.Result) bool {
+	if !item.IsObject() || inputItemRole(item) != "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(item.Get("type").String())) {
+	case "input_file", "input_image", "image_url", "file", "image", "attachment", "computer_screenshot":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -322,24 +448,114 @@ func (b *envelopeBuilder) appendTypedInputItem(item gjson.Result, currentUser bo
 		return
 	}
 	if !item.IsObject() {
-		b.appendResult(OriginCurrentUser, "user", item)
-		return
-	}
-	itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
-	switch itemType {
-	case "function_call_output", "computer_call_output", "mcp_call_output", "tool_result":
-		b.appendResult(OriginToolOutput, "tool", firstExistingResult(item, "output", "content", "text"))
-	case "function_call", "computer_call", "mcp_call", "tool_use":
-		b.appendToolArguments(item, "assistant")
-	case "input_file", "input_image", "image_url", "file", "attachment":
-		b.appendAttachmentReferences(item, "user")
-	default:
 		origin := OriginHistory
 		if currentUser {
 			origin = OriginCurrentUser
 		}
 		b.appendResult(origin, "user", item)
+		return
 	}
+	itemType := strings.ToLower(strings.TrimSpace(item.Get("type").String()))
+	switch itemType {
+	case "function_call_output", "tool_call_output", "local_shell_call_output", "shell_call_output",
+		"apply_patch_call_output", "tool_search_output", "tool_search_call_output", "custom_tool_call_output",
+		"mcp_tool_call_output", "computer_call_output", "mcp_call_output", "tool_result":
+		b.appendResult(OriginToolOutput, "tool", firstExistingResult(item, "output", "content", "text"))
+	case "function_call", "tool_call", "local_shell_call", "shell_call", "apply_patch_call",
+		"tool_search_call", "custom_tool_call", "mcp_tool_call", "mcp_call", "mcp_list_tools",
+		"mcp_approval_request", "mcp_approval_response", "additional_tools", "code_interpreter_call",
+		"computer_call", "file_search_call", "image_generation_call", "web_search_call", "tool_use":
+		b.appendToolArguments(item, "assistant")
+	case "agent_message":
+		// These are assistant/agent replay items from an existing Codex session.
+		// Treating their content as the current user prompt makes fixed transport
+		// labels such as "Payload:" look like user intent and creates false hits.
+		b.appendAgentMessage(item)
+	case "output_text", "refusal":
+		b.appendResult(OriginHistory, "assistant", firstExistingResult(item, "content", "text", "output"))
+	case "reasoning":
+		b.appendResult(OriginSessionContext, "assistant", firstExistingResult(item, "summary", "content", "text"))
+	case "summary_text", "compaction", "context_compaction":
+		b.appendResult(OriginSessionContext, "context", firstExistingResult(item, "summary", "content", "text"))
+	case "compaction_trigger", "item_reference":
+		// Control/reference items carry no end-user prompt text.
+		b.appendAttachmentReferences(item, "context")
+	case "input_text", "message":
+		origin := OriginHistory
+		if currentUser {
+			origin = OriginCurrentUser
+		}
+		b.appendResult(origin, "user", firstExistingResult(item, "content", "text"))
+	case "input_file", "input_image", "image_url", "file", "image", "attachment", "computer_screenshot":
+		b.appendAttachmentReferences(item, "user")
+	default:
+		// An untyped object is the legacy direct-input shape. Unknown typed
+		// objects are session context so future replay item types cannot silently
+		// become current-user evidence or qualify for strikes.
+		if itemType == "" {
+			origin := OriginHistory
+			if currentUser {
+				origin = OriginCurrentUser
+			}
+			b.appendResult(origin, "user", item)
+			return
+		}
+		b.appendResult(OriginSessionContext, "context", item)
+	}
+}
+
+func (b *envelopeBuilder) appendAgentMessage(item gjson.Result) {
+	start := len(b.envelope.Segments)
+	b.appendResult(OriginHistory, "assistant", firstExistingResult(item, "content", "text", "output"))
+	write := start
+	for index := start; index < len(b.envelope.Segments); index++ {
+		segment := b.envelope.Segments[index]
+		segment.Text = stripAgentMessageEnvelope(segment.Text)
+		if segment.Text == "" {
+			continue
+		}
+		b.envelope.Segments[write] = segment
+		write++
+	}
+	b.envelope.Segments = b.envelope.Segments[:write]
+	b.appendAttachmentReferences(item, "assistant")
+}
+
+func stripAgentMessageEnvelope(text string) string {
+	text = strings.TrimSpace(strings.ReplaceAll(text, "\r\n", "\n"))
+	if text == "" {
+		return ""
+	}
+	lines := strings.Split(text, "\n")
+	hasCollaborationHeader := false
+	payloadIndex := -1
+	for index, line := range lines {
+		lower := strings.ToLower(strings.TrimSpace(line))
+		switch {
+		case strings.HasPrefix(lower, "message type:"), strings.HasPrefix(lower, "task name:"), strings.HasPrefix(lower, "sender:"), strings.HasPrefix(lower, "recipient:"):
+			hasCollaborationHeader = true
+		case strings.HasPrefix(lower, "payload:"):
+			payloadIndex = index
+		}
+		if payloadIndex >= 0 {
+			break
+		}
+	}
+	if !hasCollaborationHeader || payloadIndex < 0 {
+		return text
+	}
+	firstLine := strings.TrimSpace(lines[payloadIndex])
+	firstPayload := strings.TrimSpace(firstLine[len("Payload:"):])
+	parts := make([]string, 0, len(lines)-payloadIndex)
+	if firstPayload != "" {
+		parts = append(parts, firstPayload)
+	}
+	for _, line := range lines[payloadIndex+1:] {
+		if line = strings.TrimSpace(line); line != "" {
+			parts = append(parts, line)
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
 }
 
 func (b *envelopeBuilder) appendToolArguments(result gjson.Result, role string) {
@@ -358,9 +574,9 @@ func (b *envelopeBuilder) appendToolArguments(result gjson.Result, role string) 
 	}
 	appendArgument(result.Get("arguments"))
 	appendArgument(result.Get("function.arguments"))
-	if strings.EqualFold(strings.TrimSpace(result.Get("type").String()), "tool_use") {
-		appendArgument(result.Get("input"))
-	}
+	appendArgument(result.Get("input"))
+	appendArgument(result.Get("action"))
+	appendArgument(result.Get("query"))
 	if calls := result.Get("tool_calls"); calls.IsArray() {
 		for _, call := range calls.Array() {
 			appendArgument(call.Get("function.arguments"))
