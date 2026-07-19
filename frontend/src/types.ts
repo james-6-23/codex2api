@@ -767,6 +767,7 @@ export interface PromptFilterLog {
   primary_origin?: string
   strike_eligible?: boolean
   matched_patterns: string
+  match_context?: string
   text_preview: string
   full_text: string
   api_key_id: number

@@ -3357,7 +3357,19 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
   const [expanded, setExpanded] = useState(false)
   const fullText = (log.full_text || '').trim()
   const hasFull = fullText.length > 0
-  const hitTerms = extractHitTerms(log.text_preview || '')
+  const matchContext = (log.match_context || '').trim()
+  const userPrompt = (log.text_preview || '').trim()
+  const primaryOriginLabel = log.primary_origin
+    ? t(`promptFilter.origins.${log.primary_origin}`, { defaultValue: log.primary_origin })
+    : t('promptFilter.origins.unknown')
+  const hitTerms = extractHitTerms(matchContext || userPrompt)
+  const fallbackPreview = log.error_code || log.review_error || ''
+  const auxiliaryOrigin = Boolean(log.primary_origin && log.primary_origin !== 'current_user')
+  const userPromptLabel = !matchContext && auxiliaryOrigin
+    ? t('promptFilter.legacyRequestPreviewLabel')
+    : t('promptFilter.userPromptLabel')
+  const legacyMissingMatchContext = !matchContext && !userPrompt && !fullText &&
+    auxiliaryOrigin
   return (
     <>
     <TableRow>
@@ -3369,7 +3381,15 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
         <div className="flex flex-col items-start gap-1">
           <ActionBadge action={log.action} />
           {log.policy_profile ? <Badge variant="outline" className="text-[11px]">{log.policy_profile}</Badge> : null}
-          {log.primary_origin ? <Badge variant="secondary" className="text-[11px]">{log.primary_origin}</Badge> : null}
+          {log.primary_origin ? (
+            <Badge
+              variant="secondary"
+              className="text-[11px]"
+              title={`${t('promptFilter.triggerOrigin')}: ${primaryOriginLabel}`}
+            >
+              {primaryOriginLabel}
+            </Badge>
+          ) : null}
           {log.strike_eligible ? <Badge variant="destructive" className="text-[11px]">strike</Badge> : null}
           {log.source === 'upstream_cyber_policy' ? <Badge variant="outline" className="text-[11px]">upstream</Badge> : null}
           {log.review_model ? <Badge variant="outline" className="text-[11px]">{log.review_flagged ? 'review flagged' : 'review cleared'}</Badge> : null}
@@ -3407,7 +3427,40 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
         {!compact && log.client_ip ? <div className="text-xs text-muted-foreground">{log.client_ip}</div> : null}
       </TableCell>
       <TableCell className="min-w-0">
-        <div className="truncate text-muted-foreground" title={stripHitMarkers(log.text_preview || log.error_code || log.review_error || '')}>{log.text_preview ? <HighlightedPromptPreview text={log.text_preview} /> : (log.error_code || log.review_error || '-')}</div>
+        <div className="space-y-1.5">
+          {matchContext ? (
+            <div className="min-w-0 rounded-md border border-amber-500/20 bg-amber-500/[0.06] px-2 py-1.5">
+              <div className="mb-0.5 flex min-w-0 items-center gap-1 text-[10px] font-semibold text-amber-700 dark:text-amber-300">
+                <span className="shrink-0">{t('promptFilter.matchContextLabel')}</span>
+                <span aria-hidden="true" className="text-amber-600/60 dark:text-amber-300/60">·</span>
+                <span className="truncate" title={`${t('promptFilter.triggerOrigin')}: ${primaryOriginLabel}`}>{primaryOriginLabel}</span>
+              </div>
+              <div
+                className={cn('break-words text-xs leading-5 text-foreground', compact ? 'line-clamp-2' : 'line-clamp-3')}
+                title={stripHitMarkers(matchContext)}
+              >
+                <HighlightedPromptPreview text={matchContext} />
+              </div>
+            </div>
+          ) : null}
+          {userPrompt ? (
+            <div className="min-w-0 px-0.5">
+              <div className="mb-0.5 text-[10px] font-semibold text-muted-foreground">{userPromptLabel}</div>
+              <div className="truncate text-xs leading-5 text-muted-foreground" title={stripHitMarkers(userPrompt)}>
+                <HighlightedPromptPreview text={userPrompt} />
+              </div>
+            </div>
+          ) : null}
+          {!matchContext && !userPrompt ? (
+            legacyMissingMatchContext ? (
+              <div className="rounded-md border border-dashed border-border bg-muted/30 px-2 py-1.5 text-xs leading-5 text-muted-foreground">
+                {t('promptFilter.legacyMissingMatchContext')}
+              </div>
+            ) : (
+              <div className="truncate text-muted-foreground" title={fallbackPreview}>{fallbackPreview || '-'}</div>
+            )
+          ) : null}
+        </div>
         {hasFull ? (
           <button
             type="button"

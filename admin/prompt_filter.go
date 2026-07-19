@@ -16,6 +16,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const promptFilterAuditContextMaxRunes = 2000
+
 type promptFilterSecretRequest struct {
 	Secret string `json:"secret"`
 }
@@ -159,6 +161,7 @@ func (h *Handler) inspectImagePromptFilter(c *gin.Context, text string, model st
 		Threshold:       verdict.Threshold,
 		MatchedPatterns: promptfilter.MatchesJSON(verdict.Matched),
 		TextPreview:     textPreview,
+		MatchContext:    promptfilter.RedactedPreview(verdict.MatchContext, promptFilterAuditContextMaxRunes),
 		APIKeyID:        keyID,
 		APIKeyName:      keyName,
 		APIKeyMasked:    keyMasked,

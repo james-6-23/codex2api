@@ -2932,6 +2932,7 @@ func TestPromptFilterLogsPersistReviewMetadata(t *testing.T) {
 		StrikeEligible:  true,
 		MatchedPatterns: `[{"name":"credential_theft","weight":100}]`,
 		TextPreview:     "preview",
+		MatchContext:    "actual trigger excerpt",
 		ReviewModel:     "omni-moderation-latest",
 		ReviewFlagged:   false,
 		ReviewError:     "temporary failure",
@@ -2955,6 +2956,72 @@ func TestPromptFilterLogsPersistReviewMetadata(t *testing.T) {
 	}
 	if got.Endpoint != "/v1/messages" || got.Protocol != "claude" || got.Provider != "anthropic" {
 		t.Fatalf("original request metadata = %+v", got)
+	}
+	if got.MatchContext != "actual trigger excerpt" {
+		t.Fatalf("match context = %q, want persisted trigger excerpt", got.MatchContext)
+	}
+
+	matched, matchTotal, err := db.ListPromptFilterLogsPage(ctx, PromptFilterLogQuery{Page: 1, PageSize: 10, Query: "trigger excerpt"})
+	if err != nil {
+		t.Fatalf("ListPromptFilterLogsPage(match context) 返回错误: %v", err)
+	}
+	if matchTotal != 1 || len(matched) != 1 || matched[0].MatchContext != "actual trigger excerpt" {
+		t.Fatalf("match context search total=%d logs=%+v", matchTotal, matched)
+	}
+
+	nearest, err := db.FindNearestPromptFilterLog(ctx, got.CreatedAt, "local_filter", "/v1/messages", 0, 5)
+	if err != nil {
+		t.Fatalf("FindNearestPromptFilterLog 返回错误: %v", err)
+	}
+	if nearest == nil || nearest.MatchContext != "actual trigger excerpt" {
+		t.Fatalf("nearest prompt filter log = %+v", nearest)
+	}
+}
+
+func TestSQLiteMigratesPromptFilterMatchContextColumn(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close sqlite 返回错误: %v", err)
+	}
+
+	legacy, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open legacy sqlite 返回错误: %v", err)
+	}
+	if _, err := legacy.Exec(`ALTER TABLE prompt_filter_logs DROP COLUMN match_context`); err != nil {
+		legacy.Close()
+		t.Fatalf("remove match_context to simulate legacy schema: %v", err)
+	}
+	if err := legacy.Close(); err != nil {
+		t.Fatalf("close legacy sqlite 返回错误: %v", err)
+	}
+
+	db, err = New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite legacy) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	if err := db.InsertPromptFilterLog(ctx, &PromptFilterLogInput{
+		Source:       "local_filter",
+		Endpoint:     "/v1/responses",
+		Action:       "allow",
+		Mode:         "monitor",
+		MatchContext: "migrated trigger excerpt",
+	}); err != nil {
+		t.Fatalf("InsertPromptFilterLog after migration 返回错误: %v", err)
+	}
+	logs, err := db.ListPromptFilterLogs(ctx, 10)
+	if err != nil {
+		t.Fatalf("ListPromptFilterLogs after migration 返回错误: %v", err)
+	}
+	if len(logs) != 1 || logs[0].MatchContext != "migrated trigger excerpt" {
+		t.Fatalf("migrated prompt filter logs = %+v", logs)
 	}
 }
 

@@ -16,6 +16,10 @@ import (
 // promptFilterFullTextMaxRunes limits the persisted redacted blocked-request text preview.
 const promptFilterFullTextMaxRunes = 32000
 
+// promptFilterMatchContextMaxRunes keeps audit evidence useful without storing
+// an entire tool result, session transcript, or attachment in the log table.
+const promptFilterMatchContextMaxRunes = 2000
+
 func (h *Handler) inspectPromptFilterOpenAI(c *gin.Context, rawBody []byte, endpoint string, model string) bool {
 	if c != nil && c.GetBool("prompt_intelligence_internal") {
 		return false
@@ -123,6 +127,7 @@ func (h *Handler) logPromptFilterVerdictWithDecision(c *gin.Context, endpoint st
 		Threshold:       verdict.Threshold,
 		MatchedPatterns: promptfilter.MatchesJSON(verdict.Matched),
 		TextPreview:     promptfilter.RedactedPreview(verdict.TextPreview, 500),
+		MatchContext:    promptfilter.RedactedPreview(verdict.MatchContext, promptFilterMatchContextMaxRunes),
 		ClientIP:        c.ClientIP(),
 		ErrorCode:       errorCode,
 		ReviewModel:     verdict.ReviewModel,

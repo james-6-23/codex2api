@@ -875,6 +875,7 @@ func (db *DB) migrate(ctx context.Context) error {
 				strike_eligible  BOOLEAN DEFAULT FALSE,
 				matched_patterns TEXT DEFAULT '[]',
 				text_preview     TEXT DEFAULT '',
+				match_context    TEXT DEFAULT '',
 				api_key_id       INT DEFAULT 0,
 				api_key_name     VARCHAR(255) DEFAULT '',
 				api_key_masked   VARCHAR(64) DEFAULT '',
@@ -889,6 +890,7 @@ func (db *DB) migrate(ctx context.Context) error {
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS review_flagged BOOLEAN DEFAULT FALSE;
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS review_error TEXT DEFAULT '';
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS full_text TEXT DEFAULT '';
+			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS match_context TEXT DEFAULT '';
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS audit_score INT DEFAULT 0;
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS policy_profile VARCHAR(32) DEFAULT '';
 			ALTER TABLE prompt_filter_logs ADD COLUMN IF NOT EXISTS reason_code VARCHAR(100) DEFAULT '';

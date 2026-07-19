@@ -26,6 +26,7 @@ type PromptFilterLog struct {
 	StrikeEligible  bool      `json:"strike_eligible"`
 	MatchedPatterns string    `json:"matched_patterns"`
 	TextPreview     string    `json:"text_preview"`
+	MatchContext    string    `json:"match_context"`
 	FullText        string    `json:"full_text"`
 	APIKeyID        int64     `json:"api_key_id"`
 	APIKeyName      string    `json:"api_key_name"`
@@ -54,6 +55,7 @@ type PromptFilterLogInput struct {
 	StrikeEligible  bool
 	MatchedPatterns string
 	TextPreview     string
+	MatchContext    string
 	FullText        string
 	APIKeyID        int64
 	APIKeyName      string
@@ -84,11 +86,11 @@ func (db *DB) InsertPromptFilterLog(ctx context.Context, input *PromptFilterLogI
 	_, err := db.conn.ExecContext(ctx, `
 		INSERT INTO prompt_filter_logs (
 			source, endpoint, request_protocol, request_provider, model, action, mode, score, audit_score, threshold_value, policy_profile, reason_code, primary_origin, strike_eligible, matched_patterns, text_preview,
-			api_key_id, api_key_name, api_key_masked, client_ip, error_code, review_model, review_flagged, review_error, full_text
+			match_context, api_key_id, api_key_name, api_key_masked, client_ip, error_code, review_model, review_flagged, review_error, full_text
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26)
 	`, input.Source, input.Endpoint, input.Protocol, input.Provider, input.Model, input.Action, input.Mode, input.Score, input.AuditScore, input.Threshold,
-		input.PolicyProfile, input.ReasonCode, input.PrimaryOrigin, input.StrikeEligible, input.MatchedPatterns, input.TextPreview,
+		input.PolicyProfile, input.ReasonCode, input.PrimaryOrigin, input.StrikeEligible, input.MatchedPatterns, input.TextPreview, input.MatchContext,
 		input.APIKeyID, input.APIKeyName, input.APIKeyMasked, input.ClientIP, input.ErrorCode, input.ReviewModel, input.ReviewFlagged, input.ReviewError, input.FullText)
 	return err
 }
@@ -126,7 +128,7 @@ func (db *DB) ListPromptFilterLogsPage(ctx context.Context, query PromptFilterLo
 		SELECT id, created_at, COALESCE(source, ''), COALESCE(endpoint, ''), COALESCE(request_protocol, ''), COALESCE(request_provider, ''), COALESCE(model, ''),
 		       COALESCE(action, ''), COALESCE(mode, ''), COALESCE(score, 0), COALESCE(audit_score, 0), COALESCE(threshold_value, 0),
 		       COALESCE(policy_profile, ''), COALESCE(reason_code, ''), COALESCE(primary_origin, ''), COALESCE(strike_eligible, false),
-		       COALESCE(matched_patterns, '[]'), COALESCE(text_preview, ''), COALESCE(api_key_id, 0),
+		       COALESCE(matched_patterns, '[]'), COALESCE(text_preview, ''), COALESCE(match_context, ''), COALESCE(api_key_id, 0),
 		       COALESCE(api_key_name, ''), COALESCE(api_key_masked, ''), COALESCE(client_ip, ''), COALESCE(error_code, ''),
 		       COALESCE(review_model, ''), COALESCE(review_flagged, false), COALESCE(review_error, ''), COALESCE(full_text, '')
 		FROM prompt_filter_logs
@@ -145,7 +147,7 @@ func (db *DB) ListPromptFilterLogsPage(ctx context.Context, query PromptFilterLo
 		var createdAtRaw interface{}
 		if err := rows.Scan(&item.ID, &createdAtRaw, &item.Source, &item.Endpoint, &item.Protocol, &item.Provider, &item.Model, &item.Action, &item.Mode,
 			&item.Score, &item.AuditScore, &item.Threshold, &item.PolicyProfile, &item.ReasonCode, &item.PrimaryOrigin, &item.StrikeEligible,
-			&item.MatchedPatterns, &item.TextPreview, &item.APIKeyID, &item.APIKeyName,
+			&item.MatchedPatterns, &item.TextPreview, &item.MatchContext, &item.APIKeyID, &item.APIKeyName,
 			&item.APIKeyMasked, &item.ClientIP, &item.ErrorCode, &item.ReviewModel, &item.ReviewFlagged, &item.ReviewError, &item.FullText); err != nil {
 			return nil, 0, err
 		}
@@ -183,13 +185,14 @@ func promptFilterLogWhere(query PromptFilterLogQuery) (string, []any) {
 		idx := len(args)
 		clauses = append(clauses, fmt.Sprintf(`(
 			LOWER(COALESCE(text_preview, '')) LIKE $%d OR
+			LOWER(COALESCE(match_context, '')) LIKE $%d OR
 			LOWER(COALESCE(full_text, '')) LIKE $%d OR
 			LOWER(COALESCE(matched_patterns, '')) LIKE $%d OR
 			LOWER(COALESCE(error_code, '')) LIKE $%d OR
 			LOWER(COALESCE(review_error, '')) LIKE $%d OR
 			LOWER(COALESCE(api_key_name, '')) LIKE $%d OR
 			LOWER(COALESCE(api_key_masked, '')) LIKE $%d
-		)`, idx, idx, idx, idx, idx, idx, idx))
+		)`, idx, idx, idx, idx, idx, idx, idx, idx))
 	}
 	if len(clauses) == 0 {
 		return "", args
@@ -223,7 +226,7 @@ func (db *DB) FindNearestPromptFilterLog(ctx context.Context, at time.Time, sour
 		SELECT id, created_at, COALESCE(source, ''), COALESCE(endpoint, ''), COALESCE(request_protocol, ''), COALESCE(request_provider, ''), COALESCE(model, ''),
 		       COALESCE(action, ''), COALESCE(mode, ''), COALESCE(score, 0), COALESCE(audit_score, 0), COALESCE(threshold_value, 0),
 		       COALESCE(policy_profile, ''), COALESCE(reason_code, ''), COALESCE(primary_origin, ''), COALESCE(strike_eligible, false),
-		       COALESCE(matched_patterns, '[]'), COALESCE(text_preview, ''), COALESCE(api_key_id, 0),
+		       COALESCE(matched_patterns, '[]'), COALESCE(text_preview, ''), COALESCE(match_context, ''), COALESCE(api_key_id, 0),
 		       COALESCE(api_key_name, ''), COALESCE(api_key_masked, ''), COALESCE(client_ip, ''), COALESCE(error_code, ''),
 		       COALESCE(review_model, ''), COALESCE(review_flagged, false), COALESCE(review_error, ''), COALESCE(full_text, '')
 		FROM prompt_filter_logs
@@ -243,7 +246,7 @@ func (db *DB) FindNearestPromptFilterLog(ctx context.Context, at time.Time, sour
 		var createdAtRaw interface{}
 		if err := rows.Scan(&item.ID, &createdAtRaw, &item.Source, &item.Endpoint, &item.Protocol, &item.Provider, &item.Model, &item.Action, &item.Mode,
 			&item.Score, &item.AuditScore, &item.Threshold, &item.PolicyProfile, &item.ReasonCode, &item.PrimaryOrigin, &item.StrikeEligible,
-			&item.MatchedPatterns, &item.TextPreview, &item.APIKeyID, &item.APIKeyName,
+			&item.MatchedPatterns, &item.TextPreview, &item.MatchContext, &item.APIKeyID, &item.APIKeyName,
 			&item.APIKeyMasked, &item.ClientIP, &item.ErrorCode, &item.ReviewModel, &item.ReviewFlagged, &item.ReviewError, &item.FullText); err != nil {
 			return nil, err
 		}
