@@ -2460,6 +2460,7 @@ type Store struct {
 	codexWSBusyMaxWaitSec       atomic.Int64 // busy session 等待上限（秒），默认 30（issue #413）
 	codexWSBusyOverflowEnabled  atomic.Bool  // busy session 溢出到同账号兄弟连接，默认关闭
 	codexWSBusyPatienceSec      atomic.Int64 // 触发溢出前的短等待（秒），默认 2
+	overflowAutoCompactEnabled  atomic.Bool  // 上下文超窗自动摘要重试（实验性，默认关闭，issue #415）
 
 	// Codex 思考截断自动续想（默认关闭，不影响现有路径）
 	codexContinueThinkingEnabled atomic.Bool  // 检测到上游截断思考时自动续想并折叠成单响应
@@ -2976,6 +2977,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSBusyMaxWaitSec.Store(int64(database.NormalizeCodexWSBusyAcquireMaxWaitSec(settings.CodexWSBusyAcquireMaxWaitSec)))
 	s.codexWSBusyOverflowEnabled.Store(settings.CodexWSBusyOverflowEnabled)
 	s.codexWSBusyPatienceSec.Store(int64(database.NormalizeCodexWSBusyPatienceSec(settings.CodexWSBusyPatienceSec)))
+	s.overflowAutoCompactEnabled.Store(settings.OverflowAutoCompactEnabled)
 	s.codexContinueThinkingEnabled.Store(settings.CodexContinueThinkingEnabled)
 	s.codexContinueMaxRounds.Store(int64(database.NormalizeCodexContinueMaxRounds(settings.CodexContinueMaxRounds)))
 	s.codexCLIVersionSyncEnabled.Store(settings.CodexCLIVersionSyncEnabled)
@@ -3259,6 +3261,22 @@ func (s *Store) CodexWSBusyOverflowEnabled() bool {
 		return false
 	}
 	return s.codexWSBusyOverflowEnabled.Load()
+}
+
+// SetOverflowAutoCompactEnabled 设置是否开启上下文超窗自动摘要重试（实验性）。
+func (s *Store) SetOverflowAutoCompactEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.overflowAutoCompactEnabled.Store(enabled)
+}
+
+// OverflowAutoCompactEnabled 返回是否开启上下文超窗自动摘要重试（实验性）。
+func (s *Store) OverflowAutoCompactEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.overflowAutoCompactEnabled.Load()
 }
 
 // SetCodexWSBusyPatienceSec 设置触发溢出前的短等待（秒）。

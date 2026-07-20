@@ -74,6 +74,9 @@ type RuntimeSettings struct {
 	CodexWSBusyMaxWaitSec int  // busy session/容量等待的累计上限秒数（默认 30，issue #413）
 	CodexWSBusyOverflow   bool // busy session 溢出到同账号兄弟连接（默认 false）
 	CodexWSBusyPatienceSec int // 触发溢出前的短等待秒数（默认 2）
+	// OverflowAutoCompact 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）。
+	// 全局开关与 per-key limits.auto_compact_overflow 为「或」关系。
+	OverflowAutoCompact bool
 	// CodexContinueThinking 检测到上游按 518n-2 指纹截断思考时自动续想并折叠成单响应（默认 false）。
 	CodexContinueThinking  bool
 	CodexContinueMaxRounds int // 单次请求最大续想轮数，含首轮（默认 8，范围 1-32）
@@ -273,6 +276,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSBusyMaxWaitSec = settings.CodexWSBusyAcquireMaxWaitSec
 		next.CodexWSBusyOverflow = settings.CodexWSBusyOverflowEnabled
 		next.CodexWSBusyPatienceSec = settings.CodexWSBusyPatienceSec
+		next.OverflowAutoCompact = settings.OverflowAutoCompactEnabled
 		next.CodexContinueThinking = settings.CodexContinueThinkingEnabled
 		next.CodexContinueMaxRounds = settings.CodexContinueMaxRounds
 		next.CodexSyncedCLIVersion = settings.CodexSyncedCLIVersion

@@ -837,6 +837,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_acquire_max_wait_sec INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_overflow_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_patience_sec INT DEFAULT 2;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS overflow_auto_compact_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_silent_max_retries INT DEFAULT 2;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_continue_thinking_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_continue_max_rounds INT DEFAULT 8;
@@ -1078,6 +1079,10 @@ type APIKeyLimits struct {
 	//   - strip:    剥离图片工具声明后作为普通文本请求继续转发上游(不返回 403)
 	//   - block:    命中生图能力一律 403(等价旧 DisableImageGeneration=true)
 	ImageGenerationPolicy string `json:"image_generation_policy,omitempty"`
+	// AutoCompactOnOverflow 为 true 时，该 Key 的请求收到上游上下文超窗错误
+	// (context_length_exceeded)后，网关把 input 旧轮次摘要压缩并重试一次，
+	// 而不是直接把 400 透传给下游。默认关闭。
+	AutoCompactOnOverflow bool `json:"auto_compact_overflow,omitempty"`
 }
 
 // 图片工具策略取值。
@@ -1112,6 +1117,7 @@ func (l APIKeyLimits) IsZero() bool {
 		l.CostLimit5h == 0 && l.CostLimit7d == 0 && l.CostLimit30d == 0 &&
 		l.TokenLimit5h == 0 && l.TokenLimit7d == 0 && l.TokenLimit30d == 0 &&
 		!l.DisableImageGeneration &&
+		!l.AutoCompactOnOverflow &&
 		l.ResolveImageGenerationPolicy() == ImageGenerationPolicyAllow
 }
 
@@ -1518,6 +1524,7 @@ type SystemSettings struct {
 	CodexWSBusyAcquireMaxWaitSec       int  // busy session/容量等待的累计上限（秒），默认 30（issue #413）
 	CodexWSBusyOverflowEnabled         bool // busy session 溢出到同账号兄弟连接，默认 false（issue #413）
 	CodexWSBusyPatienceSec             int  // 触发溢出前的短等待（秒），默认 2（issue #413）
+	OverflowAutoCompactEnabled         bool // 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）
 	CodexContinueThinkingEnabled       bool // 检测到上游截断思考时自动续想并折叠成单响应，默认 false
 	CodexContinueMaxRounds             int  // 单次请求最大续想轮数（含首轮），默认 8
 	AutoPause5hThreshold               float64
@@ -1705,7 +1712,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(codex_ws_size_router_enabled, true),
 			       COALESCE(codex_ws_busy_acquire_max_wait_sec, 30),
 			       COALESCE(codex_ws_busy_overflow_enabled, false),
-			       COALESCE(codex_ws_busy_patience_sec, 2)
+			       COALESCE(codex_ws_busy_patience_sec, 2),
+			       COALESCE(overflow_auto_compact_enabled, false)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1764,6 +1772,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexWSBusyAcquireMaxWaitSec,
 		&s.CodexWSBusyOverflowEnabled,
 		&s.CodexWSBusyPatienceSec,
+		&s.OverflowAutoCompactEnabled,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1871,9 +1880,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_ws_size_router_enabled,
 					codex_ws_busy_acquire_max_wait_sec,
 					codex_ws_busy_overflow_enabled,
-					codex_ws_busy_patience_sec
+					codex_ws_busy_patience_sec,
+					overflow_auto_compact_enabled
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1969,7 +1979,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_ws_size_router_enabled = EXCLUDED.codex_ws_size_router_enabled,
 					codex_ws_busy_acquire_max_wait_sec = EXCLUDED.codex_ws_busy_acquire_max_wait_sec,
 					codex_ws_busy_overflow_enabled = EXCLUDED.codex_ws_busy_overflow_enabled,
-					codex_ws_busy_patience_sec = EXCLUDED.codex_ws_busy_patience_sec
+					codex_ws_busy_patience_sec = EXCLUDED.codex_ws_busy_patience_sec,
+					overflow_auto_compact_enabled = EXCLUDED.overflow_auto_compact_enabled
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -1999,7 +2010,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.CodexWSSizeRouterEnabled,
 		NormalizeCodexWSBusyAcquireMaxWaitSec(s.CodexWSBusyAcquireMaxWaitSec),
 		s.CodexWSBusyOverflowEnabled,
-		NormalizeCodexWSBusyPatienceSec(s.CodexWSBusyPatienceSec))
+		NormalizeCodexWSBusyPatienceSec(s.CodexWSBusyPatienceSec),
+		s.OverflowAutoCompactEnabled)
 	return err
 }
 
