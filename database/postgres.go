@@ -257,6 +257,7 @@ func NormalizeUsageLogFlushIntervalSeconds(n int) int {
 
 // usageLogEntry 日志缓冲条目
 type usageLogEntry struct {
+	StoreUsageLog        bool
 	AccountID            int64
 	ClientIP             string
 	ClientUserAgent      string
@@ -2428,11 +2429,12 @@ type UsageLog struct {
 	ErrorMessage         string    `json:"error_message"`
 }
 
-// InsertUsageLog 将日志追加到内存缓冲（非阻塞）
+// InsertUsageLog 将用量事件追加到内存缓冲（非阻塞）。
 func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
-	if db == nil || log == nil || !db.shouldStoreUsageLog(log) {
+	if db == nil || log == nil {
 		return nil
 	}
+	storeUsageLog := db.shouldStoreUsageLog(log)
 
 	// 计算计费金额（基于 input/output tokens 和模型）
 	// 使用 EffectiveModel 作为计费模型（如果有映射则使用映射后的模型）
@@ -2462,9 +2464,13 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 	// 用户计费金额与账号计费金额相同（简化版，未来可支持倍率）
 	userBilled := accountBilled
+	if !storeUsageLog && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
+		return nil
+	}
 
 	db.logMu.Lock()
 	db.logBuf = append(db.logBuf, usageLogEntry{
+		StoreUsageLog:        storeUsageLog,
 		AccountID:            log.AccountID,
 		ClientIP:             log.ClientIP,
 		ClientUserAgent:      log.ClientUserAgent,
@@ -2663,9 +2669,33 @@ func (db *DB) flushLogs() {
 		return
 	}
 
-	if len(batch) > 10 {
-		log.Printf("批量写入 %d 条使用日志", len(batch))
+	if storedLogCount := countStoredUsageLogs(batch); storedLogCount > 10 {
+		log.Printf("批量写入 %d 条使用日志", storedLogCount)
 	}
+}
+
+func countStoredUsageLogs(batch []usageLogEntry) int {
+	count := 0
+	for _, entry := range batch {
+		if entry.StoreUsageLog {
+			count++
+		}
+	}
+	return count
+}
+
+func storedUsageLogs(batch []usageLogEntry) []usageLogEntry {
+	storedCount := countStoredUsageLogs(batch)
+	if storedCount == len(batch) {
+		return batch
+	}
+	stored := make([]usageLogEntry, 0, storedCount)
+	for _, entry := range batch {
+		if entry.StoreUsageLog {
+			stored = append(stored, entry)
+		}
+	}
+	return stored
 }
 
 func (db *DB) requeueUsageLogBatch(batch []usageLogEntry) {
@@ -2700,27 +2730,30 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO usage_logs (account_id, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
-			  input_tokens, output_tokens, reasoning_tokens, first_token_ms, ws_acquire_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, compact, cached_tokens, service_tier,
-			  requested_service_tier, actual_service_tier, billing_service_tier,
-			  api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size, account_billed, user_billed,
-			  is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket,
-			  client_user_agent, upstream_user_agent, user_agent_overridden)
-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)`)
-	if err != nil {
-		return fmt.Errorf("准备语句: %w", err)
-	}
-	defer stmt.Close()
+	logsToStore := storedUsageLogs(batch)
+	if len(logsToStore) > 0 {
+		stmt, err := tx.PrepareContext(ctx,
+			`INSERT INTO usage_logs (account_id, client_ip, endpoint, model, effective_model, prompt_tokens, completion_tokens, total_tokens, status_code, duration_ms,
+				  input_tokens, output_tokens, reasoning_tokens, first_token_ms, ws_acquire_ms, reasoning_effort, inbound_endpoint, upstream_endpoint, stream, compact, cached_tokens, service_tier,
+				  requested_service_tier, actual_service_tier, billing_service_tier,
+				  api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size, account_billed, user_billed,
+				  is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket,
+				  client_user_agent, upstream_user_agent, user_agent_overridden)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44)`)
+		if err != nil {
+			return fmt.Errorf("准备语句: %w", err)
+		}
+		defer stmt.Close()
 
-	for _, e := range batch {
-		if _, err := stmt.ExecContext(ctx, e.AccountID, e.ClientIP, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
-			e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.WsAcquireMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.Compact, e.CachedTokens, e.ServiceTier,
-			e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
-			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
-			e.IsRetryAttempt, e.AttemptIndex, e.UpstreamErrorKind, e.ErrorMessage, e.ViaWebsocket,
-			e.ClientUserAgent, e.UpstreamUserAgent, e.UserAgentOverridden); err != nil {
-			return fmt.Errorf("执行插入: %w", err)
+		for _, e := range logsToStore {
+			if _, err := stmt.ExecContext(ctx, e.AccountID, e.ClientIP, e.Endpoint, e.Model, e.EffectiveModel, e.PromptTokens, e.CompletionTokens, e.TotalTokens, e.StatusCode, e.DurationMs,
+				e.InputTokens, e.OutputTokens, e.ReasoningTokens, e.FirstTokenMs, e.WsAcquireMs, e.ReasoningEffort, e.InboundEndpoint, e.UpstreamEndpoint, e.Stream, e.Compact, e.CachedTokens, e.ServiceTier,
+				e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
+				e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
+				e.IsRetryAttempt, e.AttemptIndex, e.UpstreamErrorKind, e.ErrorMessage, e.ViaWebsocket,
+				e.ClientUserAgent, e.UpstreamUserAgent, e.UserAgentOverridden); err != nil {
+				return fmt.Errorf("执行插入: %w", err)
+			}
 		}
 	}
 
@@ -2746,15 +2779,16 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 	}
 	defer tx.Rollback()
 
+	logsToStore := storedUsageLogs(batch)
 	const maxRowsPerBatch = 1500
 
 	// 分批处理
-	for start := 0; start < len(batch); start += maxRowsPerBatch {
+	for start := 0; start < len(logsToStore); start += maxRowsPerBatch {
 		end := start + maxRowsPerBatch
-		if end > len(batch) {
-			end = len(batch)
+		if end > len(logsToStore) {
+			end = len(logsToStore)
 		}
-		subBatch := batch[start:end]
+		subBatch := logsToStore[start:end]
 
 		if err := db.batchInsertLogsChunk(ctx, tx, subBatch); err != nil {
 			return err
