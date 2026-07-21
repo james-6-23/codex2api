@@ -765,7 +765,7 @@ func TestSQLiteUsageLogsHasAPIKeyColumns(t *testing.T) {
 	}
 }
 
-func TestUsageLogModeErrorsSkipsSuccessfulLogs(t *testing.T) {
+func TestUsageLogModeErrorsSkipsSuccessfulLogsButChargesQuota(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
 	db, err := New("sqlite", dbPath)
@@ -776,11 +776,17 @@ func TestUsageLogModeErrorsSkipsSuccessfulLogs(t *testing.T) {
 	db.SetUsageLogConfig(UsageLogModeErrors, 10, 5)
 
 	ctx := context.Background()
+	apiKeyID, err := db.InsertAPIKey(ctx, "mode-errors", "sk-mode-errors-1234567890")
+	if err != nil {
+		t.Fatalf("InsertAPIKey 返回错误: %v", err)
+	}
 	if err := db.InsertUsageLog(ctx, &UsageLogInput{
-		AccountID:  1,
-		Endpoint:   "/v1/responses",
-		Model:      "gpt-5.4",
-		StatusCode: 200,
+		AccountID:   1,
+		APIKeyID:    apiKeyID,
+		Endpoint:    "/v1/responses",
+		Model:       "gpt-5.4",
+		StatusCode:  200,
+		InputTokens: 1000,
 	}); err != nil {
 		t.Fatalf("InsertUsageLog success 返回错误: %v", err)
 	}
@@ -804,6 +810,15 @@ func TestUsageLogModeErrorsSkipsSuccessfulLogs(t *testing.T) {
 	}
 	if logs[0].StatusCode != 500 {
 		t.Fatalf("StatusCode = %d, want 500", logs[0].StatusCode)
+	}
+
+	want := calculateCost(1000, 0, 0, "gpt-5.4", "")
+	var quotaUsed, totalUsed float64
+	if err := db.conn.QueryRowContext(ctx, `SELECT quota_used, total_used FROM api_keys WHERE id = $1`, apiKeyID).Scan(&quotaUsed, &totalUsed); err != nil {
+		t.Fatalf("查询 API Key 用量返回错误: %v", err)
+	}
+	if math.Abs(quotaUsed-want) > 1e-12 || math.Abs(totalUsed-want) > 1e-12 {
+		t.Fatalf("API Key usage = quota %.12f total %.12f, want %.12f", quotaUsed, totalUsed, want)
 	}
 }
 
@@ -930,7 +945,7 @@ func TestUsageErrorSummaryAndFilters(t *testing.T) {
 	}
 }
 
-func TestUsageLogModeOffSkipsAllLogs(t *testing.T) {
+func TestUsageLogModeOffSkipsAllLogsButChargesQuota(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
 	db, err := New("sqlite", dbPath)
@@ -941,11 +956,17 @@ func TestUsageLogModeOffSkipsAllLogs(t *testing.T) {
 	db.SetUsageLogConfig(UsageLogModeOff, 10, 5)
 
 	ctx := context.Background()
+	apiKeyID, err := db.InsertAPIKey(ctx, "mode-off", "sk-mode-off-1234567890")
+	if err != nil {
+		t.Fatalf("InsertAPIKey 返回错误: %v", err)
+	}
 	if err := db.InsertUsageLog(ctx, &UsageLogInput{
-		AccountID:  1,
-		Endpoint:   "/v1/responses",
-		Model:      "gpt-5.4",
-		StatusCode: 500,
+		AccountID:   1,
+		APIKeyID:    apiKeyID,
+		Endpoint:    "/v1/responses",
+		Model:       "gpt-5.4",
+		StatusCode:  200,
+		InputTokens: 1000,
 	}); err != nil {
 		t.Fatalf("InsertUsageLog 返回错误: %v", err)
 	}
@@ -957,6 +978,53 @@ func TestUsageLogModeOffSkipsAllLogs(t *testing.T) {
 	}
 	if len(logs) != 0 {
 		t.Fatalf("len(logs) = %d, want 0", len(logs))
+	}
+
+	want := calculateCost(1000, 0, 0, "gpt-5.4", "")
+	var quotaUsed, totalUsed float64
+	if err := db.conn.QueryRowContext(ctx, `SELECT quota_used, total_used FROM api_keys WHERE id = $1`, apiKeyID).Scan(&quotaUsed, &totalUsed); err != nil {
+		t.Fatalf("查询 API Key 用量返回错误: %v", err)
+	}
+	if math.Abs(quotaUsed-want) > 1e-12 || math.Abs(totalUsed-want) > 1e-12 {
+		t.Fatalf("API Key usage = quota %.12f total %.12f, want %.12f", quotaUsed, totalUsed, want)
+	}
+}
+
+func TestUsageLogModesPreserveCanceledQuotaExemption(t *testing.T) {
+	for _, mode := range []string{UsageLogModeErrors, UsageLogModeOff} {
+		t.Run(mode, func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+			db, err := New("sqlite", dbPath)
+			if err != nil {
+				t.Fatalf("New(sqlite) 返回错误: %v", err)
+			}
+			defer db.Close()
+			db.SetUsageLogConfig(mode, 10, 5)
+
+			ctx := context.Background()
+			apiKeyID, err := db.InsertAPIKey(ctx, "mode-499-"+mode, "sk-mode-499-"+mode+"-1234567890")
+			if err != nil {
+				t.Fatalf("InsertAPIKey 返回错误: %v", err)
+			}
+			if err := db.InsertUsageLog(ctx, &UsageLogInput{
+				APIKeyID:    apiKeyID,
+				Endpoint:    "/v1/responses",
+				Model:       "gpt-5.4",
+				StatusCode:  499,
+				InputTokens: 1000,
+			}); err != nil {
+				t.Fatalf("InsertUsageLog 返回错误: %v", err)
+			}
+			db.flushLogs()
+
+			var quotaUsed, totalUsed float64
+			if err := db.conn.QueryRowContext(ctx, `SELECT quota_used, total_used FROM api_keys WHERE id = $1`, apiKeyID).Scan(&quotaUsed, &totalUsed); err != nil {
+				t.Fatalf("查询 API Key 用量返回错误: %v", err)
+			}
+			if quotaUsed != 0 || totalUsed != 0 {
+				t.Fatalf("API Key usage = quota %.12f total %.12f, want 0", quotaUsed, totalUsed)
+			}
+		})
 	}
 }
 
@@ -2879,6 +2947,72 @@ func TestFlushLogsRollsBackAndRequeuesWhenQuotaUpdateFails(t *testing.T) {
 	}
 	if count != 0 {
 		t.Fatalf("usage_logs count = %d, want 0 after rolled-back flush", count)
+	}
+}
+
+func TestFlushLogsRetriesQuotaOnlyBatchWithoutDoubleCharge(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	close(db.logStop)
+	db.logWg.Wait()
+	defer db.conn.Close()
+	db.SetUsageLogConfig(UsageLogModeOff, 10, 5)
+
+	ctx := context.Background()
+	apiKeyID, err := db.InsertAPIKey(ctx, "quota-only-retry", "sk-quota-only-retry-1234567890")
+	if err != nil {
+		t.Fatalf("InsertAPIKey 返回错误: %v", err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `ALTER TABLE api_keys RENAME TO api_keys_broken`); err != nil {
+		t.Fatalf("rename api_keys 返回错误: %v", err)
+	}
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		APIKeyID:    apiKeyID,
+		Endpoint:    "/v1/responses",
+		Model:       "gpt-5.4",
+		StatusCode:  200,
+		InputTokens: 1000,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog 返回错误: %v", err)
+	}
+
+	db.flushLogs()
+	db.logMu.Lock()
+	if len(db.logBuf) != 1 {
+		db.logMu.Unlock()
+		t.Fatalf("len(logBuf) = %d, want 1", len(db.logBuf))
+	}
+	if db.logBuf[0].StoreUsageLog {
+		db.logMu.Unlock()
+		t.Fatal("quota-only event unexpectedly marked for usage log storage")
+	}
+	db.logMu.Unlock()
+
+	if _, err := db.conn.ExecContext(ctx, `ALTER TABLE api_keys_broken RENAME TO api_keys`); err != nil {
+		t.Fatalf("restore api_keys 返回错误: %v", err)
+	}
+	db.flushLogs()
+	db.flushLogs()
+
+	want := calculateCost(1000, 0, 0, "gpt-5.4", "")
+	var quotaUsed, totalUsed float64
+	if err := db.conn.QueryRowContext(ctx, `SELECT quota_used, total_used FROM api_keys WHERE id = $1`, apiKeyID).Scan(&quotaUsed, &totalUsed); err != nil {
+		t.Fatalf("查询 API Key 用量返回错误: %v", err)
+	}
+	if math.Abs(quotaUsed-want) > 1e-12 || math.Abs(totalUsed-want) > 1e-12 {
+		t.Fatalf("API Key usage = quota %.12f total %.12f, want exactly one charge %.12f", quotaUsed, totalUsed, want)
+	}
+
+	var count int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_logs`).Scan(&count); err != nil {
+		t.Fatalf("count usage_logs 返回错误: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("usage_logs count = %d, want 0", count)
 	}
 }
 
