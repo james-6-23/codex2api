@@ -16,6 +16,7 @@
 - **Tool call / output `call_id` pairing repaired on the input path (#414).** Clients that trim conversation history (e.g. Copilot) could drop a `function_call` while keeping its output, producing an unpaired `call_id` that the upstream rejected with 400. A bidirectional, stateless repair reconciles the pairing before dispatch.
 - **`/v1/messages` alias-injected `reasoning_effort` stripped, and pre-token upstream failures no longer masked (#412).** `applyMessagesModelMapping` now removes the top-level `reasoning_effort` field the alias injection wrote (it 400s on the Responses upstream), and a failure before the first token is surfaced with its real status code instead of being swallowed by the retry path.
 - **Large-body input validation no longer O(N²) (#417).** The prompt filter early-exits when disabled and function-name validation is now lazy; input validation on large request bodies is ~5× faster on the benchmark.
+- **Bump `golang.org/x/text` to v0.39.0 (GO-2026-5970).** Fixes a reachable "infinite loop on invalid input" advisory in the previously-pinned v0.38.0, called via the uTLS HTTP/2 transport and the prompt-filter text normalization.
 
 ## v2.5.8 - 2026-07-19
 
