@@ -83,4 +83,11 @@ func populateWsAcquireFromRequest(c *gin.Context, input *database.UsageLogInput)
 		return
 	}
 	input.WsAcquireMs = wsAcquireAuditMs(c.Request.Context())
+	// 可选口径（默认关）：first_token_ms 扣除取连耗时，只保留"上游生成首内容"部分，
+	// 与 HTTP 路径及取连恒为 0 的部署可比；原始值 = first_token_ms + ws_acquire_ms。
+	// 已打点的行扣除后下限钳 1ms，避免归零后被前端当作"未记录"显示为 -。
+	if CurrentRuntimeSettings().FirstTokenExcludesWsAcquire &&
+		input.FirstTokenMs > 0 && input.WsAcquireMs > 0 {
+		input.FirstTokenMs = max(input.FirstTokenMs-input.WsAcquireMs, 1)
+	}
 }

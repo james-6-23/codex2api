@@ -2491,6 +2491,7 @@ type Store struct {
 	codexWSBusyOverflowEnabled  atomic.Bool  // busy session 溢出到同账号兄弟连接，默认关闭
 	codexWSBusyPatienceSec      atomic.Int64 // 触发溢出前的短等待（秒），默认 2
 	overflowAutoCompactEnabled  atomic.Bool  // 上下文超窗自动摘要重试（实验性，默认关闭，issue #415）
+	firstTokenExcludesWsAcquire atomic.Bool  // 落库 first_token_ms 扣除 WS 取连耗时，默认关闭
 
 	// Codex 思考截断自动续想（默认关闭，不影响现有路径）
 	codexContinueThinkingEnabled atomic.Bool  // 检测到上游截断思考时自动续想并折叠成单响应
@@ -3008,6 +3009,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.codexWSBusyOverflowEnabled.Store(settings.CodexWSBusyOverflowEnabled)
 	s.codexWSBusyPatienceSec.Store(int64(database.NormalizeCodexWSBusyPatienceSec(settings.CodexWSBusyPatienceSec)))
 	s.overflowAutoCompactEnabled.Store(settings.OverflowAutoCompactEnabled)
+	s.firstTokenExcludesWsAcquire.Store(settings.FirstTokenExcludesWsAcquire)
 	s.codexContinueThinkingEnabled.Store(settings.CodexContinueThinkingEnabled)
 	s.codexContinueMaxRounds.Store(int64(database.NormalizeCodexContinueMaxRounds(settings.CodexContinueMaxRounds)))
 	s.codexCLIVersionSyncEnabled.Store(settings.CodexCLIVersionSyncEnabled)
@@ -3307,6 +3309,22 @@ func (s *Store) OverflowAutoCompactEnabled() bool {
 		return false
 	}
 	return s.overflowAutoCompactEnabled.Load()
+}
+
+// SetFirstTokenExcludesWsAcquire 设置落库 first_token_ms 是否扣除 WS 取连耗时。
+func (s *Store) SetFirstTokenExcludesWsAcquire(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.firstTokenExcludesWsAcquire.Store(enabled)
+}
+
+// FirstTokenExcludesWsAcquire 返回落库 first_token_ms 是否扣除 WS 取连耗时。
+func (s *Store) FirstTokenExcludesWsAcquire() bool {
+	if s == nil {
+		return false
+	}
+	return s.firstTokenExcludesWsAcquire.Load()
 }
 
 // SetCodexWSBusyPatienceSec 设置触发溢出前的短等待（秒）。

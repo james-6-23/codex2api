@@ -1200,6 +1200,7 @@ export default function Settings() {
     stream_flush_interval_ms: 20,
     first_token_mode: 'strict',
     first_token_timeout_seconds: 0,
+    first_token_excludes_ws_acquire: false,
     billing_tier_policy: 'actual',
     show_full_usage_numbers: false,
     public_key_usage_page_enabled: true,
@@ -2628,6 +2629,14 @@ export default function Settings() {
                     value={settingsForm.first_token_timeout_seconds}
                     emptyValue={0}
                     onValueChange={(value) => setSettingsForm(f => ({ ...f, first_token_timeout_seconds: value }))}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.firstTokenExcludesWsAcquire')} description={t('settings.firstTokenExcludesWsAcquireDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.first_token_excludes_ws_acquire}
+                    onCheckedChange={(checked) => autoSaveBooleanField('first_token_excludes_ws_acquire', checked)}
                   />
                 </SettingField>
               </div>

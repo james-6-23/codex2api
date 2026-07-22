@@ -77,6 +77,9 @@ type RuntimeSettings struct {
 	// OverflowAutoCompact 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）。
 	// 全局开关与 per-key limits.auto_compact_overflow 为「或」关系。
 	OverflowAutoCompact bool
+	// FirstTokenExcludesWsAcquire 落库的 first_token_ms 是否扣除本次 attempt 的
+	// WS 取连耗时（默认 false，保持含取连的原口径；原始值 = first_token_ms + ws_acquire_ms）。
+	FirstTokenExcludesWsAcquire bool
 	// CodexContinueThinking 检测到上游按 518n-2 指纹截断思考时自动续想并折叠成单响应（默认 false）。
 	CodexContinueThinking  bool
 	CodexContinueMaxRounds int // 单次请求最大续想轮数，含首轮（默认 8，范围 1-32）
@@ -277,6 +280,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSBusyOverflow = settings.CodexWSBusyOverflowEnabled
 		next.CodexWSBusyPatienceSec = settings.CodexWSBusyPatienceSec
 		next.OverflowAutoCompact = settings.OverflowAutoCompactEnabled
+		next.FirstTokenExcludesWsAcquire = settings.FirstTokenExcludesWsAcquire
 		next.CodexContinueThinking = settings.CodexContinueThinkingEnabled
 		next.CodexContinueMaxRounds = settings.CodexContinueMaxRounds
 		next.CodexSyncedCLIVersion = settings.CodexSyncedCLIVersion

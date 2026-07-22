@@ -6432,6 +6432,7 @@ type settingsResponse struct {
 	CodexWSBusyOverflowEnabled         bool    `json:"codex_ws_busy_overflow_enabled"`
 	CodexWSBusyPatienceSec             int     `json:"codex_ws_busy_patience_sec"`
 	OverflowAutoCompactEnabled         bool    `json:"overflow_auto_compact_enabled"`
+	FirstTokenExcludesWsAcquire        bool    `json:"first_token_excludes_ws_acquire"`
 	CodexContinueThinkingEnabled       bool    `json:"codex_continue_thinking_enabled"`
 	CodexContinueMaxRounds             int     `json:"codex_continue_max_rounds"`
 	CodexCLIVersionSyncEnabled         bool    `json:"codex_cli_version_sync_enabled"`
@@ -6549,6 +6550,7 @@ type updateSettingsReq struct {
 	CodexWSBusyOverflowEnabled         *bool    `json:"codex_ws_busy_overflow_enabled"`
 	CodexWSBusyPatienceSec             *int     `json:"codex_ws_busy_patience_sec"`
 	OverflowAutoCompactEnabled         *bool    `json:"overflow_auto_compact_enabled"`
+	FirstTokenExcludesWsAcquire        *bool    `json:"first_token_excludes_ws_acquire"`
 	CodexContinueThinkingEnabled       *bool    `json:"codex_continue_thinking_enabled"`
 	CodexContinueMaxRounds             *int     `json:"codex_continue_max_rounds"`
 	CodexCLIVersionSyncEnabled         *bool    `json:"codex_cli_version_sync_enabled"`
@@ -7174,6 +7176,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexWSBusyOverflowEnabled:         h.store.CodexWSBusyOverflowEnabled(),
 		CodexWSBusyPatienceSec:             h.store.CodexWSBusyPatienceSec(),
 		OverflowAutoCompactEnabled:         h.store.OverflowAutoCompactEnabled(),
+		FirstTokenExcludesWsAcquire:        h.store.FirstTokenExcludesWsAcquire(),
 		CodexContinueThinkingEnabled:       h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:             h.store.CodexContinueMaxRounds(),
 		CodexCLIVersionSyncEnabled:         h.store.CodexCLIVersionSyncEnabled(),
@@ -7648,6 +7651,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetOverflowAutoCompactEnabled(*req.OverflowAutoCompactEnabled)
 		runtimeCfg.OverflowAutoCompact = *req.OverflowAutoCompactEnabled
 		log.Printf("设置已更新: overflow_auto_compact_enabled = %t", *req.OverflowAutoCompactEnabled)
+	}
+
+	if req.FirstTokenExcludesWsAcquire != nil {
+		h.store.SetFirstTokenExcludesWsAcquire(*req.FirstTokenExcludesWsAcquire)
+		runtimeCfg.FirstTokenExcludesWsAcquire = *req.FirstTokenExcludesWsAcquire
+		log.Printf("设置已更新: first_token_excludes_ws_acquire = %t", *req.FirstTokenExcludesWsAcquire)
 	}
 
 	if req.CodexContinueThinkingEnabled != nil {
@@ -8127,6 +8136,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSBusyOverflowEnabled:         h.store.CodexWSBusyOverflowEnabled(),
 		CodexWSBusyPatienceSec:             h.store.CodexWSBusyPatienceSec(),
 		OverflowAutoCompactEnabled:         h.store.OverflowAutoCompactEnabled(),
+		FirstTokenExcludesWsAcquire:        h.store.FirstTokenExcludesWsAcquire(),
 		CodexContinueThinkingEnabled:       h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:             h.store.CodexContinueMaxRounds(),
 		CodexCLIVersionSyncEnabled:         h.store.CodexCLIVersionSyncEnabled(),
@@ -8272,6 +8282,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexWSBusyOverflowEnabled:         h.store.CodexWSBusyOverflowEnabled(),
 		CodexWSBusyPatienceSec:             h.store.CodexWSBusyPatienceSec(),
 		OverflowAutoCompactEnabled:         h.store.OverflowAutoCompactEnabled(),
+		FirstTokenExcludesWsAcquire:        h.store.FirstTokenExcludesWsAcquire(),
 		CodexContinueThinkingEnabled:       h.store.CodexContinueThinkingEnabled(),
 		CodexContinueMaxRounds:             h.store.CodexContinueMaxRounds(),
 		CodexCLIVersionSyncEnabled:         h.store.CodexCLIVersionSyncEnabled(),

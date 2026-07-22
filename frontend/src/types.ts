@@ -857,6 +857,7 @@ export interface SystemSettings {
   stream_flush_interval_ms: number
   first_token_mode: 'strict' | 'loose' | string
   first_token_timeout_seconds: number
+  first_token_excludes_ws_acquire: boolean
   billing_tier_policy: 'actual' | 'requested' | string
   show_full_usage_numbers: boolean
   public_key_usage_page_enabled: boolean

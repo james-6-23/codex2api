@@ -842,6 +842,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_overflow_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_busy_patience_sec INT DEFAULT 2;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS overflow_auto_compact_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS first_token_excludes_ws_acquire BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_silent_max_retries INT DEFAULT 2;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_continue_thinking_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_continue_max_rounds INT DEFAULT 8;
@@ -1553,6 +1554,7 @@ type SystemSettings struct {
 	CodexWSBusyOverflowEnabled         bool // busy session 溢出到同账号兄弟连接，默认 false（issue #413）
 	CodexWSBusyPatienceSec             int  // 触发溢出前的短等待（秒），默认 2（issue #413）
 	OverflowAutoCompactEnabled         bool // 上下文超窗时自动摘要旧轮次并重试一次（实验性，默认 false，issue #415）
+	FirstTokenExcludesWsAcquire        bool // 落库 first_token_ms 扣除 WS 取连耗时，默认 false（原始值 = first_token_ms + ws_acquire_ms）
 	CodexContinueThinkingEnabled       bool // 检测到上游截断思考时自动续想并折叠成单响应，默认 false
 	CodexContinueMaxRounds             int  // 单次请求最大续想轮数（含首轮），默认 8
 	AutoPause5hThreshold               float64
@@ -1741,7 +1743,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(codex_ws_busy_acquire_max_wait_sec, 30),
 			       COALESCE(codex_ws_busy_overflow_enabled, false),
 			       COALESCE(codex_ws_busy_patience_sec, 2),
-			       COALESCE(overflow_auto_compact_enabled, false)
+			       COALESCE(overflow_auto_compact_enabled, false),
+			       COALESCE(first_token_excludes_ws_acquire, false)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -1801,6 +1804,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexWSBusyOverflowEnabled,
 		&s.CodexWSBusyPatienceSec,
 		&s.OverflowAutoCompactEnabled,
+		&s.FirstTokenExcludesWsAcquire,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1909,9 +1913,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_ws_busy_acquire_max_wait_sec,
 					codex_ws_busy_overflow_enabled,
 					codex_ws_busy_patience_sec,
-					overflow_auto_compact_enabled
+					overflow_auto_compact_enabled,
+					first_token_excludes_ws_acquire
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2008,7 +2013,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_ws_busy_acquire_max_wait_sec = EXCLUDED.codex_ws_busy_acquire_max_wait_sec,
 					codex_ws_busy_overflow_enabled = EXCLUDED.codex_ws_busy_overflow_enabled,
 					codex_ws_busy_patience_sec = EXCLUDED.codex_ws_busy_patience_sec,
-					overflow_auto_compact_enabled = EXCLUDED.overflow_auto_compact_enabled
+					overflow_auto_compact_enabled = EXCLUDED.overflow_auto_compact_enabled,
+					first_token_excludes_ws_acquire = EXCLUDED.first_token_excludes_ws_acquire
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -2039,7 +2045,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		NormalizeCodexWSBusyAcquireMaxWaitSec(s.CodexWSBusyAcquireMaxWaitSec),
 		s.CodexWSBusyOverflowEnabled,
 		NormalizeCodexWSBusyPatienceSec(s.CodexWSBusyPatienceSec),
-		s.OverflowAutoCompactEnabled)
+		s.OverflowAutoCompactEnabled,
+		s.FirstTokenExcludesWsAcquire)
 	return err
 }
 
