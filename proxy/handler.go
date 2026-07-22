@@ -2626,6 +2626,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		var responseJSON []byte
 		var imageLogInfo imageUsageLogInfo
 		var terminalFailurePayload []byte
+		var streamedOutputItems []json.RawMessage
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -2675,6 +2676,12 @@ func (h *Handler) Responses(c *gin.Context) {
 				if image, ok := extractImageFromOutputItemDone(data, logModel); ok {
 					imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
 				}
+				if eventType == "response.output_item.done" {
+					item := parsed.Get("item")
+					if isCodexToolCallContextType(item.Get("type").String()) {
+						streamedOutputItems = append(streamedOutputItems, json.RawMessage(item.Raw))
+					}
+				}
 
 				// 提取 usage + service_tier
 				if eventType == "response.completed" {
@@ -2683,7 +2690,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						actualServiceTier = tier
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
-					cacheCompletedResponse(respCacheOwner, []byte(expandedInputRaw), data)
+					cacheCompletedResponseWithOutputItems(respCacheOwner, []byte(expandedInputRaw), data, streamedOutputItems)
 					gotTerminal = true
 				}
 				if eventType == "response.failed" {
@@ -2821,7 +2828,7 @@ func (h *Handler) Responses(c *gin.Context) {
 						actualServiceTier = tier
 					}
 					// 缓存响应上下文，供后续 previous_response_id 展开使用
-					cacheCompletedResponse(respCacheOwner, []byte(expandedInputRaw), data)
+					cacheCompletedResponseWithOutputItems(respCacheOwner, []byte(expandedInputRaw), data, outputItems)
 					gotTerminal = true
 					lastResponseData = data
 					return false
