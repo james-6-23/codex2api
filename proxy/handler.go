@@ -4661,7 +4661,7 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 			atomic.StoreInt32(&account.Disabled, 1)
 			errorMsg := upstreamAccountErrorMessage(statusCode, body)
 			log.Printf("账号 %d 的 Agent runtime 已删除，标记为封禁", account.ID())
-			h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errorMsg)
+			h.store.MarkCooldownWithErrorExactDuration(account, 24*time.Hour, "unauthorized", errorMsg)
 			return codex429Decision{}
 		}
 		if IsDeactivatedWorkspaceError(body) {

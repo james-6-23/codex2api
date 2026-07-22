@@ -5984,12 +5984,18 @@ func normalizeAccountErrorMessage(errorMsg string, fallback string) string {
 
 // MarkCooldown 标记账号进入冷却，并持久化到数据库
 func (s *Store) MarkCooldown(acc *Account, duration time.Duration, reason string) {
-	s.markCooldown(acc, duration, reason, "")
+	s.markCooldown(acc, duration, reason, "", false)
 }
 
 // MarkCooldownWithError 标记账号进入冷却，并同时记录本次上游错误详情。
 func (s *Store) MarkCooldownWithError(acc *Account, duration time.Duration, reason string, errorMsg string) {
-	s.markCooldown(acc, duration, reason, errorMsg)
+	s.markCooldown(acc, duration, reason, errorMsg, false)
+}
+
+// MarkCooldownWithErrorExactDuration 标记账号进入指定时长的冷却，并记录上游错误详情。
+// 与 MarkCooldownWithError 不同，该方法不会应用 unauthorized 的自适应 6/24 小时策略。
+func (s *Store) MarkCooldownWithErrorExactDuration(acc *Account, duration time.Duration, reason string, errorMsg string) {
+	s.markCooldown(acc, duration, reason, errorMsg, true)
 }
 
 func (s *Store) markDispatchCountLimitCooldown(acc *Account, resetAt time.Time, updateScheduler bool) {
@@ -6053,7 +6059,7 @@ func (s *Store) markCooldownUntil(acc *Account, until time.Time, reason string, 
 	}
 }
 
-func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string, errorMsg string) {
+func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string, errorMsg string, exactDuration bool) {
 	if acc == nil {
 		return
 	}
@@ -6063,10 +6069,12 @@ func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string
 	acc.mu.Lock()
 	switch reason {
 	case "unauthorized":
-		if !acc.LastUnauthorizedAt.IsZero() && now.Sub(acc.LastUnauthorizedAt) < 24*time.Hour {
-			duration = 24 * time.Hour
-		} else {
-			duration = 6 * time.Hour
+		if !exactDuration {
+			if !acc.LastUnauthorizedAt.IsZero() && now.Sub(acc.LastUnauthorizedAt) < 24*time.Hour {
+				duration = 24 * time.Hour
+			} else {
+				duration = 6 * time.Hour
+			}
 		}
 		acc.LastUnauthorizedAt = now
 		acc.LastFailureAt = now

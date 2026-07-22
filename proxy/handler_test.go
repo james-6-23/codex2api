@@ -2553,6 +2553,10 @@ func TestAgentRuntimeDeleted403MarksAccountBanned(t *testing.T) {
 	if !account.IsBanned() {
 		t.Fatal("account should be in banned health tier")
 	}
+	_, cooldownUntil := account.GetCooldownSnapshot()
+	if remaining := time.Until(cooldownUntil); remaining < 23*time.Hour+59*time.Minute || remaining > 24*time.Hour {
+		t.Fatalf("cooldown remaining = %s, want approximately 24h", remaining)
+	}
 	account.Mu().RLock()
 	errorMsg := account.ErrorMsg
 	account.Mu().RUnlock()

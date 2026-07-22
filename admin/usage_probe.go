@@ -226,7 +226,7 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 		if shouldMarkUsageProbeAccountError(resp.StatusCode, body) {
 			errorMsg := fmt.Sprintf("用量探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300))
 			if resp.StatusCode == http.StatusForbidden && proxy.IsAgentRuntimeDeletedError(body) {
-				h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errorMsg)
+				h.store.MarkCooldownWithErrorExactDuration(account, 24*time.Hour, "unauthorized", errorMsg)
 			} else {
 				h.store.MarkError(account, errorMsg)
 			}
