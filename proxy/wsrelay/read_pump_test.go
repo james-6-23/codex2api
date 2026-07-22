@@ -902,6 +902,44 @@ func TestReadPumpRejectsIdleBusinessFrame(t *testing.T) {
 	}
 }
 
+func TestReadPumpDropsIdleMetadataFrame(t *testing.T) {
+	tests := []struct {
+		name    string
+		payload string
+	}{
+		{name: "codex rate limits", payload: `{"type":"codex.rate_limits","rate_limits":{"primary":{}}}`},
+		{name: "codex response metadata", payload: `{"type":"codex.response.metadata","metadata":{}}`},
+		{name: "bare response metadata", payload: `{"type":"response.metadata","metadata":{}}`},
+		{name: "responsesapi websocket timing", payload: `{"type":"responsesapi.websocket_timing","timing":{}}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			holdOpen := make(chan struct{})
+			t.Cleanup(func() { close(holdOpen) })
+			manager, wc := newReadPumpTestConnection(t, func(conn *websocket.Conn) {
+				if err := conn.WriteMessage(websocket.TextMessage, []byte(tt.payload)); err != nil {
+					t.Errorf("write idle metadata frame: %v", err)
+					return
+				}
+				<-holdOpen
+			})
+
+			// 丢弃路径以 touchInbound 收尾：入站时间戳置位即代表帧已消费完毕
+			waitForReadPumpCondition(t, func() bool { return wc.lastInbound.Load() != 0 }, "idle metadata frame was not consumed")
+			if !wc.IsConnected() {
+				t.Fatal("idle metadata frame must not poison the connection")
+			}
+			if _, ok := manager.connections.Load(wc.PoolKey); !ok {
+				t.Fatal("connection dropped from manager after idle metadata frame")
+			}
+			if err := wc.BeginReadLease("after-metadata"); err != nil {
+				t.Fatalf("BeginReadLease after idle metadata frame: %v", err)
+			}
+		})
+	}
+}
+
 func TestReadPumpReusesConnectionAcrossLeases(t *testing.T) {
 	holdOpen := make(chan struct{})
 	t.Cleanup(func() { close(holdOpen) })

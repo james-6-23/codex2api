@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -48,6 +50,9 @@ type readPumpItem struct {
 type capturedReadLease struct {
 	leaseID string
 	write   *readLeaseWriteResult
+	// idleSniff 空闲期（无活跃租约）收到业务帧：先读完 payload 看帧类型再定去向——
+	// 元数据帧丢弃续命，内容帧维持销毁语义。见 runReadPump 与 isIdleDroppableMetadataFrame。
+	idleSniff bool
 }
 
 type readLeaseWriteResult struct {
@@ -69,6 +74,9 @@ type wsReadState struct {
 	pumpStarted         bool
 	readerErr           error
 	readerStopped       bool
+	// idleSniffing 空闲期业务帧正在读取/裁决中：期间拒绝新租约，保证该帧
+	// 永远不会被归属给后来的请求（无论最终判定丢弃还是销毁连接）。
+	idleSniffing bool
 
 	notify     chan struct{}
 	readerDone chan struct{}
@@ -182,6 +190,19 @@ func (wc *WsConnection) runReadPump() {
 			wc.finishReadPumpForLease(err, captured.leaseID)
 			return
 		}
+		if captured.idleSniff {
+			// 空闲期帧从不投递给任何后续租约（帧在无租约时刻开始，归属已定），
+			// 只在"丢弃续命"与"销毁连接"之间裁决。
+			eventType := strings.TrimSpace(gjson.GetBytes(payload, "type").String())
+			if isIdleDroppableMetadataFrame(eventType) {
+				wc.endIdleSniff()
+				wc.Touch()
+				wc.touchInbound()
+				continue
+			}
+			wc.finishReadPump(fmt.Errorf("%w: type=%q", errReadPumpIdleFrame, eventType), true)
+			return
+		}
 		// Never wait for the request writer in the sole raw reader. A response can
 		// arrive just before WriteMessage returns; queue it with the captured
 		// commit result so Ping/Pong/Close frames behind it are still processed.
@@ -194,15 +215,45 @@ func (wc *WsConnection) runReadPump() {
 	}
 }
 
+// isIdleDroppableMetadataFrame 判断空闲期（无活跃租约）收到的业务帧是否可以
+// 安全丢弃：codex.* / responsesapi.* 是上游 WS 通道的元数据/遥测事件
+// （rate_limits、response.metadata、websocket_timing 等），不属于任何请求的
+// 响应内容；实测上游在 response.completed 后 1~2s 仍会补发
+// responsesapi.websocket_timing，若据此销毁连接，每条连接每轮响应后必死。
+// response.* 内容帧不在此列：空闲期出现意味着上一响应被截断后上游仍在推送，
+// 投喂给下一个请求会串会话，必须维持销毁连接的语义 (issue #308)。
+func isIdleDroppableMetadataFrame(eventType string) bool {
+	if eventType == "" {
+		return false
+	}
+	if strings.HasPrefix(eventType, "codex.") || strings.HasPrefix(eventType, "responsesapi.") {
+		return true
+	}
+	return eventType == "response.metadata"
+}
+
+// endIdleSniff 结束空闲帧裁决（丢弃路径）：恢复接受新租约。
+// 销毁路径无需调用：finishReadPump 置 readerStopped 后租约本就无法建立。
+func (wc *WsConnection) endIdleSniff() {
+	state := wc.ensureReadState()
+	state.mu.Lock()
+	state.idleSniffing = false
+	state.mu.Unlock()
+}
+
 func (wc *WsConnection) captureReadLease() (capturedReadLease, error) {
 	state := wc.ensureReadState()
 	state.mu.Lock()
 	leaseID := state.activeLease
 	if state.activeLease == "" {
-		wc.recordReadPumpFailureLocked(state, errReadPumpIdleFrame, "")
+		// 空闲期业务帧不再立即判死：上游在 response.completed 后 ~1-2s 会在同一
+		// 连接上补发元数据帧（codex.rate_limits 等），若在此处直接销毁，每条连接
+		// 每轮响应后必死，零散流量的下一请求永远付整段 TLS+WS 冷握手。
+		// 先放行给调用方读出帧类型再裁决（元数据丢弃 / 内容帧销毁，防 issue #308 串会话）；
+		// 裁决期间挂起嗅探标记，拒绝新租约介入。
+		state.idleSniffing = true
 		state.mu.Unlock()
-		wc.finalizeReadPumpFailure(state)
-		return capturedReadLease{}, errReadPumpIdleFrame
+		return capturedReadLease{idleSniff: true}, nil
 	}
 	if state.leaseTerminalQueued {
 		err := fmt.Errorf("websocket read pump received a business frame after the terminal frame for request %q", leaseID)
@@ -381,6 +432,27 @@ func isNormalPeerClose(readErr error) bool {
 
 func (wc *WsConnection) finalizeReadPumpFailure(state *wsReadState) {
 	wc.readFailureOnce.Do(func() {
+		// 连接死亡归因日志：close code/错误 + 年龄/空闲时长 + 是否有在途请求。
+		// 空闲期的对端正常关闭(close 1000/1001)是取连冷握手成本的直接来源，
+		// 这里是唯一能看到"谁、何时、为何"关掉连接的地方。
+		state.mu.Lock()
+		readerErr := state.readerErr
+		state.mu.Unlock()
+		idle := time.Duration(0)
+		if ts := wc.lastUsed.Load(); ts > 0 {
+			idle = time.Since(time.Unix(0, ts)).Round(time.Millisecond)
+		}
+		age := time.Duration(0)
+		if wc.createdAt > 0 {
+			age = time.Since(time.Unix(0, wc.createdAt)).Round(time.Millisecond)
+		}
+		pending, accountID := 0, int64(0)
+		if wc.session != nil {
+			pending = wc.session.PendingCount()
+			accountID = wc.session.AccountID
+		}
+		log.Printf("[WS] 连接读结束 account=%d age=%s idle=%s pending=%d err=%v", accountID, age, idle, pending, readerErr)
+
 		// Make the connection non-reusable only after the real read error has
 		// been queued for an active consumer.
 		wc.state.Store(int32(StateClosing))
@@ -413,6 +485,9 @@ func (wc *WsConnection) BeginReadLease(requestID string) error {
 	}
 	if state.readerStopped {
 		return fmt.Errorf("begin websocket read lease: reader stopped: %w", state.readerErr)
+	}
+	if state.idleSniffing {
+		return fmt.Errorf("begin websocket read lease: an idle upstream frame is being arbitrated")
 	}
 	if state.activeLease != "" {
 		return fmt.Errorf("begin websocket read lease: request %q is already active", state.activeLease)
