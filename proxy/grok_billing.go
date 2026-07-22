@@ -295,15 +295,21 @@ func ApplyGrokBilling(store *auth.Store, account *auth.Account, summary *GrokBil
 	return credentials
 }
 
+// resolveGrokPlan 从月度包含额度推断套餐名。仅在 billing 月度配置成功返回时被调用
+// （见 FetchGrokBilling 里的 monthly.Config != nil 分支），因此月度额度为 0 或字段缺失
+// 即代表"没有付费月度额度" = 免费档；付费档按已知额度精确匹配，未知非零额度不臆断
+// （返回空，交由上层保留占位，避免把未识别的付费档误标成 free）。
 func resolveGrokPlan(monthlyLimitCents *float64) string {
 	if monthlyLimitCents == nil {
-		return ""
+		return "free"
 	}
 	switch math.Round(*monthlyLimitCents) {
 	case grokSuperGrokCents:
 		return "SuperGrok"
 	case grokSuperGrokHeavyCents:
 		return "SuperGrok Heavy"
+	case 0:
+		return "free"
 	default:
 		return ""
 	}

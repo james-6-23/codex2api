@@ -1610,6 +1610,18 @@ func (h *Handler) getMaxRateLimitRetries() int {
 	return h.store.GetMaxRateLimitRetries()
 }
 
+// effectiveMaxRateLimitRetries 返回当前账号适用的限流(429)换号重试上限：Grok 账号可在
+// grok 系统设置里配置专属次数(free 号限流频繁，换号重试更易成功)；未配置(0)或非 Grok
+// 账号回落到全局 max_rate_limit_retries。按当前 attempt 的账号动态取值。
+func (h *Handler) effectiveMaxRateLimitRetries(account *auth.Account, fallback int) int {
+	if account != nil && account.IsGrokAPI() && h.store != nil {
+		if n := h.store.GrokMaxRateLimitRetries(); n > 0 {
+			return n
+		}
+	}
+	return fallback
+}
+
 const (
 	logStatusClientClosed        = 499
 	logStatusUpstreamStreamBreak = 598
@@ -2153,7 +2165,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				logUpstreamError("/v1/responses", resp.StatusCode, logModel, account.ID(), errBody)
 				h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, errBody)
 				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
-				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries))
 				usageTiers := resolveUsageServiceTiers("", serviceTier)
 				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID:            account.ID(),
@@ -2561,7 +2573,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			logUpstreamError("/v1/responses", resp.StatusCode, logModel, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, errBody)
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
-			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries))
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:            account.ID(),
@@ -3216,7 +3228,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				logUpstreamError("/v1/responses/compact", resp.StatusCode, logModel, account.ID(), errBody)
 				h.logUpstreamCyberPolicy(c, "/v1/responses/compact", logModel, errBody)
 				decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
-				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+				shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries))
 				usageTiers := resolveUsageServiceTiers("", serviceTier)
 				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID:            account.ID(),
@@ -3406,7 +3418,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			logUpstreamError("/v1/responses/compact", resp.StatusCode, logModel, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/responses/compact", logModel, errBody)
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
-			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries))
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:            account.ID(),
@@ -3827,7 +3839,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			logUpstreamError("/v1/chat/completions", resp.StatusCode, logModel, account.ID(), errBody)
 			h.logUpstreamCyberPolicy(c, "/v1/chat/completions", logModel, errBody)
 			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
-			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, h.effectiveMaxRateLimitRetries(account, maxRateLimitRetries))
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:            account.ID(),
@@ -4561,6 +4573,12 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
 
 // Apply429Cooldown 统一处理 429 对账号状态的影响。
 func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, resp *http.Response, model string) codex429Decision {
+	// Grok 上游的 429 语义（免费额度耗尽/超支限制/Retry-After）与 Codex 不同，且需要落
+	// grok_free_quota 权威快照——批量测试/连通性测试也走这里，必须同样路由到 Grok 专用映射，
+	// 否则免费额度耗尽会被误标 rate_limited 且丢失用量快照。
+	if account != nil && account.IsGrokAPI() {
+		return applyGrokCooldown(store, account, http.StatusTooManyRequests, body, resp, model)
+	}
 	decision := classify429RateLimit(account, body, resp, time.Now(), model)
 	if store == nil || account == nil {
 		return decision
@@ -5016,7 +5034,13 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 	}
 	if h != nil && h.store != nil {
 		for _, account := range h.store.Accounts() {
-			for _, model := range account.OpenAIResponsesModels() {
+			declared := account.OpenAIResponsesModels()
+			// 未声明 models 白名单的 Grok 账号：补默认 Grok 模型集，让 grok-4.5 等
+			// 出现在 /v1/models（否则下游客户端拉不到可用的 Grok 模型名）。
+			if len(declared) == 0 && account.IsGrokAPI() {
+				declared = DefaultGrokModelIDs()
+			}
+			for _, model := range declared {
 				key := strings.ToLower(strings.TrimSpace(model))
 				if key == "" {
 					continue

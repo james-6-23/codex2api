@@ -118,7 +118,9 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			case http.StatusUnauthorized:
 				h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errMsg)
 			case http.StatusTooManyRequests:
-				if isOpenAIResponsesAccount {
+				// Grok 虽是 relay 风格，但有自己的免费额度语义（free-usage-exhausted → 24h），
+				// 不能并入"relay 一律 1 分钟 rate_limited"，否则耗尽会被标成短冷却、1 分钟即恢复。
+				if isOpenAIResponsesAccount && !account.IsGrokAPI() {
 					h.store.MarkCooldown(account, time.Minute, "rate_limited")
 				} else {
 					proxy.Apply429Cooldown(h.store, account, errBody, resp, testModel)
@@ -501,9 +503,9 @@ func (h *Handler) connectionTestModel(ctx context.Context) string {
 }
 
 // defaultGrokConnectionTestModels：账号未声明 models 时的 Grok 连通性测试回落列表
-// （与 Grok CLI / 常见上游目录对齐，仅文本模型）。
+// （与 /v1/models 的默认 Grok 模型集共用同一真相，仅文本模型）。
 func defaultGrokConnectionTestModels() []string {
-	return []string{"grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
+	return proxy.DefaultGrokModelIDs()
 }
 
 func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *auth.Account, requested string) (string, error) {
@@ -968,10 +970,14 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		if readErr != nil {
 			return h.handleBatchTestReadError(testCtx, acc, readErr)
 		}
-		if acc.IsRelayStyle() {
+		// Grok 走 relay 但有 free-usage-exhausted 语义，须交给 Apply429Cooldown 识别耗尽
+		// （→ 24h usage_limited + 落权威用量快照），不能并入 relay 的 1 分钟 rate_limited。
+		if acc.IsRelayStyle() && !acc.IsGrokAPI() {
 			h.store.MarkCooldown(acc, time.Minute, "rate_limited")
 		} else {
-			proxy.SyncCodexUsageState(h.store, acc, resp)
+			if !acc.IsRelayStyle() {
+				proxy.SyncCodexUsageState(h.store, acc, resp)
+			}
 			proxy.Apply429Cooldown(h.store, acc, body, resp, testModel)
 		}
 		return "rate_limited", "账号触发 429 限流"

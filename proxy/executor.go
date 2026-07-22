@@ -1133,14 +1133,13 @@ func resolveDownstreamAffinityID(headers http.Header) string {
 
 func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 	if headers != nil {
-		if v := strings.TrimSpace(headers.Get("Session_id")); v != "" {
-			return v
-		}
-		if v := strings.TrimSpace(headers.Get("Conversation_id")); v != "" {
-			return v
-		}
-		if v := strings.TrimSpace(headers.Get("Idempotency-Key")); v != "" {
-			return v
+		// 注意：Codex CLI 发的是连字符头 session-id / conversation-id（HTTP/2 全小写，
+		// 服务端规范化成 Session-Id / Conversation-Id），与旧的下划线写法 Session_id 不同，
+		// 两种都要认，否则取不到显式会话 id、affinity 只能退回内容种子。
+		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id", "Idempotency-Key"} {
+			if v := strings.TrimSpace(headers.Get(key)); v != "" {
+				return v
+			}
 		}
 	}
 	// 优先从 body 的 prompt_cache_key 提取

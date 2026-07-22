@@ -120,6 +120,8 @@ type Account struct {
 	GrokPrincipalID   string
 	// grokRateLimit 是上游逐请求返回的配额余量快照（x-ratelimit-* 头），仅运行时。
 	grokRateLimit *GrokRateLimitSnapshot
+	// grokFreeQuota 是免费额度耗尽 429 解析出的权威用量快照，随 credentials 落库。
+	grokFreeQuota *GrokFreeQuotaSnapshot
 	Status                  AccountStatus
 	CooldownUtil            time.Time
 	CooldownReason          string // rate_limited / rate_limited_5h / unauthorized / 空
@@ -2514,6 +2516,10 @@ type Store struct {
 	reasoningEffortModels atomic.Value // 带思考强度的模型别名 JSON 数组
 	schedulerMode         atomic.Value // string: "round_robin" or "remaining_quota"
 	affinityMode          atomic.Value // string: "bounded" / "off" / "strict"
+	grokAffinityMode      atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
+	grokProbeEnabled      atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
+	grokProbeIntervalMin  atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
+	grokMaxRateLimitRetry atomic.Int64 // Grok 请求限流(429)专属换号重试上限（0=跟随全局）
 	promptFilterConfig    atomic.Value // promptfilter.Config
 	sessionMu             sync.RWMutex
 	sessionBindings       map[string]sessionAffinity
@@ -2968,6 +2974,9 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.allowRemoteMigration.Store(settings.AllowRemoteMigration)
 	s.schedulerMode.Store(settings.SchedulerMode)
 	s.SetAffinityMode(settings.AffinityMode)
+	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
+	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
+	s.SetGrokMaxRateLimitRetries(grokMaxRateLimitRetriesFromConfig(settings.GrokConfig))
 	if settings.ModelMapping != "" {
 		s.modelMapping.Store(settings.ModelMapping)
 	}
@@ -3844,6 +3853,13 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 				account.SetReset7dAt(end)
 			}
 		}
+		// 免费额度耗尽快照（429 错误体解析的权威用量）重启后恢复
+		if raw := strings.TrimSpace(row.GetCredential("grok_free_quota")); raw != "" {
+			var snap GrokFreeQuotaSnapshot
+			if err := json.Unmarshal([]byte(raw), &snap); err == nil && snap.LimitTokens > 0 {
+				account.SetGrokFreeQuotaSnapshot(snap)
+			}
+		}
 	}
 	account.ScoreBiasOverride = reflectOptionalInt64Field(row, "ScoreBiasOverride")
 	account.BaseConcurrencyOverride = reflectOptionalInt64Field(row, "BaseConcurrencyOverride")
@@ -4581,15 +4597,21 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
 	}
 
-	mode := s.GetAffinityMode()
-	if mode == AffinityModeOff {
-		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
-	}
-
 	now := time.Now()
 	s.sessionMu.RLock()
 	binding, ok := s.sessionBindings[key]
 	s.sessionMu.RUnlock()
+
+	// 绑定账号是 Grok 时，用 Grok 专属粘性模式覆盖全局（默认 strict，减少中途换号致缓存失效）。
+	mode := s.GetAffinityMode()
+	if ok {
+		if override := s.resolveGrokAffinityOverride(binding.accountID); override != "" {
+			mode = override
+		}
+	}
+	if mode == AffinityModeOff {
+		return s.NextExcludingWithFilter(apiKeyID, exclude, filter), ""
+	}
 
 	if ok {
 		expired := !binding.expiresAt.After(now)
@@ -4623,8 +4645,12 @@ func (s *Store) NextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 	}
 	if binding, ok := s.getCachedSessionAffinity(key); ok {
-		// 跨进程缓存的 binding 也按 bounded 逻辑校验账号健康
-		if mode == AffinityModeBounded && !s.affinityAccountStillHealthy(binding.accountID) {
+		// 跨进程缓存的 binding 也按 bounded 逻辑校验账号健康；Grok 账号套用 Grok 专属模式。
+		cacheMode := mode
+		if override := s.resolveGrokAffinityOverride(binding.accountID); override != "" {
+			cacheMode = override
+		}
+		if cacheMode == AffinityModeBounded && !s.affinityAccountStillHealthy(binding.accountID) {
 			// 不复用,落到完整挑号
 		} else if acc := s.takeByIDExcluding(binding.accountID, apiKeyID, exclude, filter); acc != nil {
 			s.sessionMu.Lock()
@@ -5089,6 +5115,166 @@ func (s *Store) SetAffinityMode(mode string) {
 		mode = AffinityModeBounded
 	}
 	s.affinityMode.Store(mode)
+}
+
+// AffinityModeFollow 表示 Grok 会话粘性跟随全局 affinity_mode（不做 Grok 专属覆盖）。
+const AffinityModeFollow = "follow"
+
+// GetGrokAffinityMode 返回 Grok 专属会话粘性模式（follow/bounded/off/strict）。
+// Grok 的 prompt cache 按账号+前缀,粘性越强缓存复用越好；默认 strict 以减少中途换号导致的缓存失效。
+func (s *Store) GetGrokAffinityMode() string {
+	if v, ok := s.grokAffinityMode.Load().(string); ok && v != "" {
+		return v
+	}
+	return AffinityModeStrict
+}
+
+// grokAffinityModeFromConfig 从 grok_config JSON 解析出 affinity_mode，空/非法回落到 strict。
+func grokAffinityModeFromConfig(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return AffinityModeStrict
+	}
+	var cfg struct {
+		AffinityMode string `json:"affinity_mode"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return AffinityModeStrict
+	}
+	mode := strings.TrimSpace(cfg.AffinityMode)
+	if mode == "" {
+		return AffinityModeStrict
+	}
+	return mode
+}
+
+// 定期探测 Grok 账号状态的默认/边界。间隔太短会持续消耗 free 额度并压上游，故设下限。
+const (
+	GrokProbeDefaultIntervalMinutes = 30
+	GrokProbeMinIntervalMinutes     = 5
+)
+
+// grokProbeConfigFromConfig 从 grok_config JSON 解析出定期探测开关与间隔（分钟）。
+// 缺省/非法回落到 关闭 + 30 分钟。
+func grokProbeConfigFromConfig(raw string) (enabled bool, intervalMin int) {
+	intervalMin = GrokProbeDefaultIntervalMinutes
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return false, intervalMin
+	}
+	var cfg struct {
+		ProbeEnabled         bool `json:"probe_enabled"`
+		ProbeIntervalMinutes int  `json:"probe_interval_minutes"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return false, intervalMin
+	}
+	if cfg.ProbeIntervalMinutes > 0 {
+		intervalMin = cfg.ProbeIntervalMinutes
+	}
+	if intervalMin < GrokProbeMinIntervalMinutes {
+		intervalMin = GrokProbeMinIntervalMinutes
+	}
+	return cfg.ProbeEnabled, intervalMin
+}
+
+// GrokMaxRateLimitRetriesUnset 表示 Grok 未配置专属限流重试次数，跟随全局。
+const GrokMaxRateLimitRetriesUnset = 0
+
+// grokMaxRateLimitRetriesFromConfig 从 grok_config JSON 解析 Grok 专属限流重试上限。
+// 缺省/非法/<0 回落到 0（=跟随全局 max_rate_limit_retries）。
+func grokMaxRateLimitRetriesFromConfig(raw string) int {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return GrokMaxRateLimitRetriesUnset
+	}
+	var cfg struct {
+		MaxRateLimitRetries int `json:"max_rate_limit_retries"`
+	}
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil || cfg.MaxRateLimitRetries < 0 {
+		return GrokMaxRateLimitRetriesUnset
+	}
+	return cfg.MaxRateLimitRetries
+}
+
+// SetGrokMaxRateLimitRetries 热更新 Grok 专属限流重试上限（<0 视为 0=跟随全局）。
+func (s *Store) SetGrokMaxRateLimitRetries(n int) {
+	if n < 0 {
+		n = GrokMaxRateLimitRetriesUnset
+	}
+	s.grokMaxRateLimitRetry.Store(int64(n))
+}
+
+// GrokMaxRateLimitRetries 返回 Grok 专属限流重试上限（0=跟随全局）。
+func (s *Store) GrokMaxRateLimitRetries() int {
+	return int(s.grokMaxRateLimitRetry.Load())
+}
+
+// SetGrokProbeConfig 热更新定期探测开关与间隔（分钟，钳到下限）。
+func (s *Store) SetGrokProbeConfig(enabled bool, intervalMin int) {
+	if intervalMin <= 0 {
+		intervalMin = GrokProbeDefaultIntervalMinutes
+	}
+	if intervalMin < GrokProbeMinIntervalMinutes {
+		intervalMin = GrokProbeMinIntervalMinutes
+	}
+	s.grokProbeEnabled.Store(enabled)
+	s.grokProbeIntervalMin.Store(int64(intervalMin))
+}
+
+// GrokProbeEnabled 返回定期探测是否开启。
+func (s *Store) GrokProbeEnabled() bool {
+	return s.grokProbeEnabled.Load()
+}
+
+// GrokProbeIntervalMinutes 返回定期探测间隔（分钟，最少 GrokProbeMinIntervalMinutes）。
+func (s *Store) GrokProbeIntervalMinutes() int {
+	v := int(s.grokProbeIntervalMin.Load())
+	if v < GrokProbeMinIntervalMinutes {
+		return GrokProbeDefaultIntervalMinutes
+	}
+	return v
+}
+
+// EnabledGrokAccounts 返回参与调度（未被手动停用）的 Grok 账号，供定期探测遍历。
+func (s *Store) EnabledGrokAccounts() []*Account {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]*Account, 0, len(s.accounts))
+	for _, a := range s.accounts {
+		if a == nil || !a.IsGrokAPI() {
+			continue
+		}
+		if atomic.LoadInt32(&a.DispatchPaused) != 0 {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// SetGrokAffinityMode 设置 Grok 专属会话粘性模式。
+func (s *Store) SetGrokAffinityMode(mode string) {
+	switch mode {
+	case AffinityModeFollow, AffinityModeBounded, AffinityModeOff, AffinityModeStrict:
+		// ok
+	default:
+		mode = AffinityModeStrict
+	}
+	s.grokAffinityMode.Store(mode)
+}
+
+// resolveGrokAffinityOverride 若绑定账号是 Grok 且配置了非 follow 的 Grok 粘性模式，
+// 返回该模式；否则返回空字符串（表示不覆盖、沿用全局）。
+func (s *Store) resolveGrokAffinityOverride(accountID int64) string {
+	mode := s.GetGrokAffinityMode()
+	if mode == "" || mode == AffinityModeFollow {
+		return ""
+	}
+	if acc := s.FindByID(accountID); acc != nil && acc.IsGrokAPI() {
+		return mode
+	}
+	return ""
 }
 
 func promptFilterConfigFromSettings(settings *database.SystemSettings) promptfilter.Config {
@@ -6188,6 +6374,38 @@ func (s *Store) MarkModelCooldown(acc *Account, model string, duration time.Dura
 	return cooldown
 }
 
+// MarkModelCooldownUntil 按显式重置时间设置模型冷却（不做 30 分钟上限钳制），
+// 用于上游明确告知恢复窗口的场景（如免费额度耗尽的滚动 24h 窗口）。
+func (s *Store) MarkModelCooldownUntil(acc *Account, model, reason string, resetAt time.Time) ModelCooldown {
+	if acc == nil || resetAt.IsZero() || !resetAt.After(time.Now()) {
+		return ModelCooldown{}
+	}
+	cooldown := acc.SetModelCooldownUntil(model, reason, resetAt)
+	if cooldown.Model == "" {
+		return cooldown
+	}
+	acc.mu.Lock()
+	now := time.Now()
+	acc.LastRateLimitedAt = now
+	acc.LastFailureAt = now
+	if acc.healthTierLocked() == HealthTierHealthy {
+		acc.HealthTier = HealthTierWarm
+	}
+	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
+	acc.mu.Unlock()
+	s.fastSchedulerUpdate(acc)
+	s.setCachedModelCooldown(acc.DBID, cooldown)
+
+	if s.db != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		if err := s.db.SetModelCooldown(ctx, acc.DBID, cooldown.Model, cooldown.Reason, cooldown.ResetAt); err != nil {
+			log.Printf("[账号 %d] 持久化模型冷却失败 model=%s: %v", acc.DBID, cooldown.Model, err)
+		}
+	}
+	return cooldown
+}
+
 func (s *Store) ClearModelCooldown(acc *Account, model string) {
 	if acc == nil {
 		return
@@ -6664,6 +6882,27 @@ func (s *Store) UpdateAccountPlanType(acc *Account, planType string) bool {
 		log.Printf("[账号 %d] 持久化 plan_type 失败: %v", acc.DBID, err)
 	}
 	return changed
+}
+
+// SaveGrokFreeQuotaSnapshot 写入免费额度耗尽快照并落库（grok_free_quota 凭据），
+// 429 错误体里的 tokens (actual/limit) 是该窗口的权威用量观测。
+func (s *Store) SaveGrokFreeQuotaSnapshot(acc *Account, snap GrokFreeQuotaSnapshot) {
+	if s == nil || acc == nil || snap.LimitTokens <= 0 {
+		return
+	}
+	acc.SetGrokFreeQuotaSnapshot(snap)
+	if s.db == nil {
+		return
+	}
+	raw, err := json.Marshal(snap)
+	if err != nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := s.db.UpdateCredentials(ctx, acc.DBID, map[string]interface{}{"grok_free_quota": string(raw)}); err != nil {
+		log.Printf("[账号 %d] 持久化 grok_free_quota 失败: %v", acc.DBID, err)
+	}
 }
 
 // UpdateAccountIdentity persists account identity observed from upstream usage APIs.

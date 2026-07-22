@@ -741,11 +741,11 @@ func isDashboardAbnormalAccount(status string) bool {
 
 func isDashboardRateLimitedAccount(status string, cooldownReason string) bool {
 	switch status {
-	case "rate_limited", "usage_exhausted", "quota_paused", "rate_limited_5h", "rate_limited_7d":
+	case "rate_limited", "usage_exhausted", "usage_limited", "quota_paused", "rate_limited_5h", "rate_limited_7d":
 		return true
 	}
 	switch cooldownReason {
-	case "rate_limited", "rate_limited_5h", "rate_limited_7d":
+	case "rate_limited", "rate_limited_5h", "rate_limited_7d", "usage_limited":
 		return true
 	}
 	return false
@@ -775,6 +775,7 @@ type accountResponse struct {
 	GrokAuthKind               string                      `json:"grok_auth_kind,omitempty"`
 	GrokBilling                json.RawMessage             `json:"grok_billing,omitempty"`
 	GrokRateLimit              *auth.GrokRateLimitSnapshot `json:"grok_rate_limit,omitempty"`
+	GrokFreeQuota              *auth.GrokFreeQuotaSnapshot `json:"grok_free_quota,omitempty"`
 	BaseURL                    string                      `json:"base_url,omitempty"`
 	Models                     []string                    `json:"models,omitempty"`
 	ModelMapping               string                      `json:"model_mapping,omitempty"`
@@ -1017,6 +1018,9 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 			if isGrokAccount {
 				if snap, hasSnap := acc.GetGrokRateLimitSnapshot(); hasSnap {
 					resp.GrokRateLimit = &snap
+				}
+				if snap, hasSnap := acc.GetGrokFreeQuotaSnapshot(); hasSnap {
+					resp.GrokFreeQuota = &snap
 				}
 			}
 			acc.Mu().RLock()
@@ -6440,6 +6444,10 @@ type settingsResponse struct {
 	CodexSyncedCLIVersion              string  `json:"codex_synced_cli_version"`
 	SchedulerMode                      string  `json:"scheduler_mode"`
 	AffinityMode                       string  `json:"affinity_mode"`
+	GrokAffinityMode                   string  `json:"grok_affinity_mode"`
+	GrokProbeEnabled                   bool    `json:"grok_probe_enabled"`
+	GrokProbeIntervalMinutes           int     `json:"grok_probe_interval_minutes"`
+	GrokMaxRateLimitRetries            int     `json:"grok_max_rate_limit_retries"`
 	MaxRetries                         int     `json:"max_retries"`
 	MaxRateLimitRetries                int     `json:"max_rate_limit_retries"`
 	RetryIntervalMS                    int     `json:"retry_interval_ms"`
@@ -6557,6 +6565,10 @@ type updateSettingsReq struct {
 	CodexCLIVersionSyncIntervalHours   *int     `json:"codex_cli_version_sync_interval_hours"`
 	SchedulerMode                      *string  `json:"scheduler_mode"`
 	AffinityMode                       *string  `json:"affinity_mode"`
+	GrokAffinityMode                   *string  `json:"grok_affinity_mode"`
+	GrokProbeEnabled                   *bool    `json:"grok_probe_enabled"`
+	GrokProbeIntervalMinutes           *int     `json:"grok_probe_interval_minutes"`
+	GrokMaxRateLimitRetries            *int     `json:"grok_max_rate_limit_retries"`
 	MaxRetries                         *int     `json:"max_retries"`
 	MaxRateLimitRetries                *int     `json:"max_rate_limit_retries"`
 	RetryIntervalMS                    *int     `json:"retry_interval_ms"`
@@ -7046,6 +7058,35 @@ func decodeBackgroundConfig(raw string) brandingBackgroundConfig {
 	return normalizeBackgroundConfig(cfg)
 }
 
+// encodeGrokConfig 把 Grok 会话粘性模式 + 定期探测 + 限流重试配置编码成 grok_config JSON 落库。
+func encodeGrokConfig(affinityMode string, probeEnabled bool, probeIntervalMinutes int, maxRateLimitRetries int) string {
+	mode := strings.TrimSpace(affinityMode)
+	switch mode {
+	case auth.AffinityModeFollow, auth.AffinityModeBounded, auth.AffinityModeOff, auth.AffinityModeStrict:
+	default:
+		mode = auth.AffinityModeStrict
+	}
+	if probeIntervalMinutes <= 0 {
+		probeIntervalMinutes = auth.GrokProbeDefaultIntervalMinutes
+	}
+	if probeIntervalMinutes < auth.GrokProbeMinIntervalMinutes {
+		probeIntervalMinutes = auth.GrokProbeMinIntervalMinutes
+	}
+	if maxRateLimitRetries < 0 {
+		maxRateLimitRetries = 0
+	}
+	b, err := json.Marshal(map[string]any{
+		"affinity_mode":          mode,
+		"probe_enabled":          probeEnabled,
+		"probe_interval_minutes": probeIntervalMinutes,
+		"max_rate_limit_retries": maxRateLimitRetries,
+	})
+	if err != nil {
+		return `{"affinity_mode":"strict"}`
+	}
+	return string(b)
+}
+
 func encodeBackgroundConfig(cfg brandingBackgroundConfig) string {
 	cfg = normalizeBackgroundConfig(cfg)
 	data, err := json.Marshal(cfg)
@@ -7184,6 +7225,10 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexSyncedCLIVersion:              proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                      h.store.GetSchedulerMode(),
 		AffinityMode:                       h.store.GetAffinityMode(),
+		GrokAffinityMode:                   h.store.GetGrokAffinityMode(),
+		GrokProbeEnabled:                   h.store.GrokProbeEnabled(),
+		GrokProbeIntervalMinutes:           h.store.GrokProbeIntervalMinutes(),
+		GrokMaxRateLimitRetries:            h.store.GrokMaxRateLimitRetries(),
 		MaxRetries:                         h.store.GetMaxRetries(),
 		MaxRateLimitRetries:                h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                    h.store.GetRetryIntervalMS(),
@@ -7695,6 +7740,30 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: affinity_mode = %s", *req.AffinityMode)
 	}
 
+	if req.GrokAffinityMode != nil {
+		h.store.SetGrokAffinityMode(*req.GrokAffinityMode)
+		log.Printf("设置已更新: grok_affinity_mode = %s", *req.GrokAffinityMode)
+	}
+
+	// 定期探测:开关与间隔任一变更都重设运行时配置(SetGrokProbeConfig 会钳间隔下限)。
+	if req.GrokProbeEnabled != nil || req.GrokProbeIntervalMinutes != nil {
+		enabled := h.store.GrokProbeEnabled()
+		if req.GrokProbeEnabled != nil {
+			enabled = *req.GrokProbeEnabled
+		}
+		interval := h.store.GrokProbeIntervalMinutes()
+		if req.GrokProbeIntervalMinutes != nil {
+			interval = *req.GrokProbeIntervalMinutes
+		}
+		h.store.SetGrokProbeConfig(enabled, interval)
+		log.Printf("设置已更新: grok_probe_enabled=%v grok_probe_interval_minutes=%d", enabled, h.store.GrokProbeIntervalMinutes())
+	}
+
+	if req.GrokMaxRateLimitRetries != nil {
+		h.store.SetGrokMaxRateLimitRetries(*req.GrokMaxRateLimitRetries)
+		log.Printf("设置已更新: grok_max_rate_limit_retries = %d", h.store.GrokMaxRateLimitRetries())
+	}
+
 	if req.MaxRetries != nil {
 		v := *req.MaxRetries
 		if v < 0 {
@@ -8189,6 +8258,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		PublicAccountPortalPageEnabled:     publicAccountPortalPageEnabled,
 		ImageStorageConfig:                 imgConfigJSON,
 		BackgroundConfig:                   encodeBackgroundConfig(bgCfg),
+		GrokConfig:                         encodeGrokConfig(h.store.GetGrokAffinityMode(), h.store.GrokProbeEnabled(), h.store.GrokProbeIntervalMinutes(), h.store.GrokMaxRateLimitRetries()),
 		AutoPause5hThreshold:               h.store.GetGlobalAutoPause5hThreshold(),
 		AutoPause7dThreshold:               h.store.GetGlobalAutoPause7dThreshold(),
 		AutoPause5hGuardBandPercent:        h.store.GetAutoPause5hGuardBandPercent(),
@@ -8290,6 +8360,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexSyncedCLIVersion:              proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
 		SchedulerMode:                      h.store.GetSchedulerMode(),
 		AffinityMode:                       h.store.GetAffinityMode(),
+		GrokAffinityMode:                   h.store.GetGrokAffinityMode(),
+		GrokProbeEnabled:                   h.store.GrokProbeEnabled(),
+		GrokProbeIntervalMinutes:           h.store.GrokProbeIntervalMinutes(),
+		GrokMaxRateLimitRetries:            h.store.GrokMaxRateLimitRetries(),
 		MaxRetries:                         h.store.GetMaxRetries(),
 		MaxRateLimitRetries:                h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                    h.store.GetRetryIntervalMS(),

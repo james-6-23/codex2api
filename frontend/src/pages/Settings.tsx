@@ -1068,6 +1068,12 @@ export default function Settings() {
     { label: t('settings.affinityModeOff'), value: 'off' },
     { label: t('settings.affinityModeStrict'), value: 'strict' },
   ]
+  const grokAffinityModeOptions = [
+    { label: t('settings.grokAffinityModeStrict'), value: 'strict' },
+    { label: t('settings.grokAffinityModeFollow'), value: 'follow' },
+    { label: t('settings.affinityModeBounded'), value: 'bounded' },
+    { label: t('settings.affinityModeOff'), value: 'off' },
+  ]
   const clientCompatOptions = [
     { label: t('settings.clientCompatPreserve'), value: 'preserve' },
     { label: t('settings.clientCompatAuto'), value: 'auto' },
@@ -1155,6 +1161,10 @@ export default function Settings() {
     codex_continue_max_rounds: 8,
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
+    grok_affinity_mode: 'strict',
+    grok_probe_enabled: false,
+    grok_probe_interval_minutes: 30,
+    grok_max_rate_limit_retries: 0,
     max_retries: 2,
     max_rate_limit_retries: 1,
     retry_interval_ms: 0,
@@ -2121,6 +2131,65 @@ export default function Settings() {
                   <Switch
                     checked={settingsForm.fast_scheduler_enabled}
                     onCheckedChange={(checked) => autoSaveBooleanField('fast_scheduler_enabled', checked)}
+                  />
+                </SettingField>
+              </div>
+            </div>
+          </SettingsCard>
+
+          <SettingsCard title={t('settings.grokSettingsTitle')} description={t('settings.grokSettingsDesc')} icon={<Layers className="size-4" />}>
+            <div className="space-y-4">
+              <div className={SETTINGS_FIELD_GRID_3}>
+                <SettingField label={t('settings.grokAffinityMode')} description={t('settings.grokAffinityModeDesc')}>
+                  <Select
+                    value={settingsForm.grok_affinity_mode || 'strict'}
+                    onValueChange={(value) => autoSaveStringField('grok_affinity_mode', value)}
+                    options={grokAffinityModeOptions}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_SWITCH_GRID}>
+                <SettingField label={t('settings.grokProbeEnabled')} description={t('settings.grokProbeEnabledDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.grok_probe_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('grok_probe_enabled', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.grokProbeInterval')} description={t('settings.grokProbeIntervalDesc')}>
+                  <DraftNumberInput
+                    min={5}
+                    max={1440}
+                    step={5}
+                    integer
+                    emptyValue={30}
+                    disabled={!settingsForm.grok_probe_enabled}
+                    value={settingsForm.grok_probe_interval_minutes ?? 30}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, grok_probe_interval_minutes: value }))
+                    }}
+                    onValueCommit={(value) => {
+                      const v = value < 5 ? 5 : value
+                      void autoSaveSettingsPatch({ grok_probe_interval_minutes: v })
+                    }}
+                  />
+                </SettingField>
+              </div>
+              <div className={SETTINGS_FIELD_GRID_3}>
+                <SettingField label={t('settings.grokMaxRateLimitRetries')} description={t('settings.grokMaxRateLimitRetriesDesc')}>
+                  <DraftNumberInput
+                    min={0}
+                    max={20}
+                    step={1}
+                    integer
+                    emptyValue={0}
+                    value={settingsForm.grok_max_rate_limit_retries ?? 0}
+                    onValueChange={(value) => {
+                      setSettingsForm(f => ({ ...f, grok_max_rate_limit_retries: value }))
+                    }}
+                    onValueCommit={(value) => {
+                      const v = value < 0 ? 0 : value
+                      void autoSaveSettingsPatch({ grok_max_rate_limit_retries: v })
+                    }}
                   />
                 </SettingField>
               </div>

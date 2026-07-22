@@ -254,16 +254,10 @@ func (f *grokSSOFlow) pollToken(ctx context.Context, deviceCode string, interval
 	if interval < time.Second {
 		interval = time.Second
 	}
-	// 已批准，token 端点应很快返回；总时长上限取 device 过期与 60s 的较小值。
+	// 已批准，token 端点通常首次请求即返回；先立即试一次，pending 再退避轮询，
+	// 省掉一整个 interval 的空等。总时长上限取 device 过期与 60s 的较小值。
 	deadline := time.Now().Add(min(expiresIn, 60*time.Second))
-	for time.Now().Before(deadline) {
-		timer := time.NewTimer(interval)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, ctx.Err()
-		case <-timer.C:
-		}
+	for {
 		status, _, body, err := f.do(ctx, http.MethodPost, GrokDefaultTokenURL, url.Values{
 			"grant_type":  {GrokDeviceCodeGrantType},
 			"client_id":   {GrokDefaultOAuthClientID},
@@ -303,10 +297,9 @@ func (f *grokSSOFlow) pollToken(ctx context.Context, deviceCode string, interval
 		}
 		switch payload.Error {
 		case "authorization_pending":
-			continue
+			// 继续退避轮询
 		case "slow_down":
 			interval += 5 * time.Second
-			continue
 		case "access_denied", "expired_token":
 			return nil, fmt.Errorf("device 授权被拒绝或已过期")
 		default:
@@ -317,6 +310,18 @@ func (f *grokSSOFlow) pollToken(ctx context.Context, deviceCode string, interval
 				}
 				return nil, fmt.Errorf("兑换 token 失败: %s", desc)
 			}
+		}
+
+		// 剩余时间不足一个 interval 就不再等待，直接判超时。
+		if time.Now().Add(interval).After(deadline) {
+			break
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, ctx.Err()
+		case <-timer.C:
 		}
 	}
 	return nil, fmt.Errorf("device flow 轮询超时")

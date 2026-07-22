@@ -64,6 +64,14 @@ export interface GrokRateLimitSnapshot {
   updated_at?: string
 }
 
+// 免费额度耗尽时从上游 429 错误体解析的权威用量(滚动 24h 窗口)。
+export interface GrokFreeQuotaSnapshot {
+  used_tokens: number
+  limit_tokens: number
+  model?: string
+  exhausted_at: string
+}
+
 export interface AccountRow {
   id: number
   name: string
@@ -84,6 +92,7 @@ export interface AccountRow {
   grok_billing?: GrokBillingDetail
   // 上游逐请求返回的配额余量(x-ratelimit-* 头),运行时快照
   grok_rate_limit?: GrokRateLimitSnapshot
+  grok_free_quota?: GrokFreeQuotaSnapshot
   base_url?: string
   models?: string[]
   model_mapping?: string
@@ -809,6 +818,10 @@ export interface SystemSettings {
   codex_continue_max_rounds: number
   scheduler_mode: string
   affinity_mode?: string
+  grok_affinity_mode?: string
+  grok_probe_enabled?: boolean
+  grok_probe_interval_minutes?: number
+  grok_max_rate_limit_retries?: number
   max_retries: number
   max_rate_limit_retries: number
   retry_interval_ms: number

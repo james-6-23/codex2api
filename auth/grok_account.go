@@ -160,6 +160,42 @@ func (a *Account) GetGrokRateLimitSnapshot() (GrokRateLimitSnapshot, bool) {
 	return *a.grokRateLimit, true
 }
 
+// GrokFreeQuotaSnapshot 是免费额度耗尽时从上游 429 错误体解析出的权威用量
+// （tokens (actual/limit)，滚动 24h 窗口）。随 credentials 落库，重启后恢复。
+type GrokFreeQuotaSnapshot struct {
+	UsedTokens  int64     `json:"used_tokens"`
+	LimitTokens int64     `json:"limit_tokens"`
+	Model       string    `json:"model,omitempty"`
+	ExhaustedAt time.Time `json:"exhausted_at"`
+}
+
+// SetGrokFreeQuotaSnapshot 更新免费额度耗尽快照（时间倒流的旧观测被忽略）。
+func (a *Account) SetGrokFreeQuotaSnapshot(snap GrokFreeQuotaSnapshot) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.grokFreeQuota != nil && snap.ExhaustedAt.Before(a.grokFreeQuota.ExhaustedAt) {
+		return
+	}
+	copied := snap
+	a.grokFreeQuota = &copied
+}
+
+// GetGrokFreeQuotaSnapshot 返回免费额度耗尽快照；无观测时 ok=false。
+func (a *Account) GetGrokFreeQuotaSnapshot() (GrokFreeQuotaSnapshot, bool) {
+	if a == nil {
+		return GrokFreeQuotaSnapshot{}, false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.grokFreeQuota == nil {
+		return GrokFreeQuotaSnapshot{}, false
+	}
+	return *a.grokFreeQuota, true
+}
+
 // GrokChannelSupportsModel 判断 Grok 账号能否服务指定模型（grok 渠道 Key 专用）：
 // Models 未声明 = 放行全部模型（请求模型直接透传上游），声明了则按白名单精确匹配。
 func (a *Account) GrokChannelSupportsModel(model string) bool {

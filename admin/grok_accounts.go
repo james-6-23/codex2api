@@ -40,7 +40,9 @@ func grokCredentialsFromRequest(req *addGrokAccountReq) (map[string]interface{},
 	}
 	credentials := map[string]interface{}{
 		"upstream_type": auth.UpstreamGrok,
-		"plan_type":     "api",
+		// 默认按 OAuth 订阅账号的免费档展示；API Key 账号无订阅档位，下方分支改回 "api"。
+		// billing 探针成功后 OAuth 账号会被纠正为真实套餐（free/SuperGrok/Heavy）。
+		"plan_type": "free",
 	}
 	if baseURL != "" {
 		credentials["base_url"] = baseURL
@@ -55,6 +57,7 @@ func grokCredentialsFromRequest(req *addGrokAccountReq) (map[string]interface{},
 			return nil, "", fmt.Errorf("API Key 是必填字段")
 		}
 		credentials["api_key"] = apiKey
+		credentials["plan_type"] = "api"
 		email = "xai-api-key"
 	case auth.GrokAuthKindOAuth, "":
 		creds, err := auth.ParseGrokAuthJSON([]byte(req.AuthJSON))
@@ -65,6 +68,7 @@ func grokCredentialsFromRequest(req *addGrokAccountReq) (map[string]interface{},
 		cred := creds[0]
 		if cred.AuthKind() == auth.GrokAuthKindAPIKey {
 			credentials["api_key"] = cred.APIKey
+			credentials["plan_type"] = "api"
 			email = "xai-api-key"
 			break
 		}
@@ -342,6 +346,15 @@ func credentialStringValue(credentials map[string]interface{}, key string) strin
 	return ""
 }
 
+// grokPlanTypeOrDefault 取 credentials 里的 plan_type，缺失时回落到免费档
+// （现有写入路径都会显式设置，这里仅作防御性兜底）。
+func grokPlanTypeOrDefault(credentials map[string]interface{}) string {
+	if plan := strings.TrimSpace(credentialStringValue(credentials, "plan_type")); plan != "" {
+		return plan
+	}
+	return "free"
+}
+
 // grokAccountFromCredentials 从入库用的 credentials map 构造内存态 Account，
 // 供单条添加与批量文件导入共用。models/model_mapping/base_url/email 由调用方按需覆写。
 func grokAccountFromCredentials(id int64, credentials map[string]interface{}, proxyURL string) *auth.Account {
@@ -353,7 +366,8 @@ func grokAccountFromCredentials(id int64, credentials map[string]interface{}, pr
 		BaseURL:           strings.TrimRight(credentialStringValue(credentials, "base_url"), "/"),
 		ModelMapping:      credentialStringValue(credentials, "model_mapping"),
 		Email:             credentialStringValue(credentials, "email"),
-		PlanType:          "api",
+		// 与 credentials 保持一致（OAuth 默认 free、API Key 为 api）；不再写死 "api"。
+		PlanType: grokPlanTypeOrDefault(credentials),
 		GrokClientID:      credentialStringValue(credentials, "grok_client_id"),
 		GrokTokenEndpoint: credentialStringValue(credentials, "grok_token_endpoint"),
 		GrokOIDCIssuer:    credentialStringValue(credentials, "grok_oidc_issuer"),

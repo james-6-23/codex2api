@@ -32,8 +32,9 @@ type grokSSOImportItem struct {
 }
 
 const (
-	grokSSOImportMaxTokens  = 50
-	grokSSOImportConcurrent = 4
+	grokSSOImportMaxTokens = 50
+	// SSO 每条要跑完整个 device flow（多次往返），并发略高于 refresh 以缩短总墙钟。
+	grokSSOImportConcurrent = 6
 	grokSSOImportPerToken   = 75 * time.Second
 )
 
@@ -77,6 +78,18 @@ func (h *Handler) ImportGrokSSO(c *gin.Context) {
 	items := make([]grokSSOImportItem, len(seeds))
 	sem := make(chan struct{}, grokSSOImportConcurrent)
 	var wg sync.WaitGroup
+	// 按 subject 去重：预载已有 Grok 账号，锁保护并发读写，避免重复导入同一账号。
+	var mu sync.Mutex
+	seenSubjects := make(map[string]struct{})
+	if h.store != nil {
+		for _, acc := range h.store.Accounts() {
+			if acc.IsGrokAPI() {
+				if sub := strings.TrimSpace(acc.GrokUserID()); sub != "" {
+					seenSubjects[sub] = struct{}{}
+				}
+			}
+		}
+	}
 	for i, seed := range seeds {
 		wg.Add(1)
 		go func(idx int, s auth.GrokSSOSeed) {
@@ -94,6 +107,19 @@ func (h *Handler) ImportGrokSSO(c *gin.Context) {
 				items[idx] = item
 				return
 			}
+
+			mu.Lock()
+			if result.Subject != "" {
+				if _, dup := seenSubjects[result.Subject]; dup {
+					mu.Unlock()
+					item.Error = "账号已存在，已跳过"
+					items[idx] = item
+					return
+				}
+				seenSubjects[result.Subject] = struct{}{}
+			}
+			mu.Unlock()
+
 			name := strings.TrimSpace(s.Name)
 			if utf8.RuneCountInString(name) > 100 {
 				name = string([]rune(name)[:100])

@@ -381,6 +381,7 @@ func defaultBootstrapSettings() *database.SystemSettings {
 		FirstTokenTimeoutSeconds:         0,
 		BillingTierPolicy:                proxy.BillingTierPolicyActual,
 		AffinityMode:                     "bounded",
+		GrokConfig:                       `{"affinity_mode":"strict","probe_enabled":false,"probe_interval_minutes":30,"max_rate_limit_retries":0}`,
 		PublicKeyUsagePageEnabled:        true,
 		PublicImageStudioPageEnabled:     true,
 		CodexWSHideUpstreamErrors:        true,

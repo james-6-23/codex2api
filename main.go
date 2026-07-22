@@ -273,6 +273,8 @@ func main() {
 	backgroundCtx, cancelBackground := context.WithCancel(context.Background())
 	defer cancelBackground()
 	adminHandler.StartAutoResetCredits(backgroundCtx)
+	// Grok 账号状态定期探测（默认关，由 grok 系统设置开关/间隔控制）
+	adminHandler.StartGrokStatusProbe(backgroundCtx)
 
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，

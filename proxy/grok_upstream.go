@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -137,27 +138,71 @@ func ExecuteGrokRequest(ctx context.Context, account *auth.Account, requestBody 
 		proxyURL = proxyOverride
 	}
 
+	// Grok 上游不接受 Codex 的 namespace 分组工具与 web_search 控制字段，投递前归一化：
+	// namespace 展平成子 function 并记录别名（响应流里再反解回 {name, namespace}），
+	// web_search 降级为最小形态。
+	requestBody, nsAliases := normalizeGrokUpstreamTools(requestBody)
 	// Grok 上游不认识 Codex 专属字段，投递前剥离。
 	requestBody = sanitizeGrokRequestBody(requestBody)
 
 	endpoint := grokResponsesEndpoint(baseURL)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
-	if err != nil {
-		return nil, ErrInternalError("创建请求失败", err)
-	}
-	applyGrokRequestHeaders(req, account, bearer, headers)
-	if model := gjson.GetBytes(requestBody, "model").String(); model != "" {
-		req.Header.Set("x-grok-model-override", model)
+	turnIdx := grokTurnIndex(requestBody)
+	model := gjson.GetBytes(requestBody, "model").String()
+
+	send := func(body []byte) (*http.Response, error) {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+		if err != nil {
+			return nil, ErrInternalError("创建请求失败", err)
+		}
+		applyGrokRequestHeaders(req, account, bearer, headers)
+		// 与官方 CLI 对齐的指纹头：会话内轮次序号 + 完整 Accept-Encoding。
+		req.Header.Set("x-grok-turn-idx", strconv.Itoa(turnIdx))
+		req.Header.Set("Accept-Encoding", "gzip, br, deflate")
+		if model != "" {
+			req.Header.Set("x-grok-model-override", model)
+		}
+		resp, err := getPooledClient(account, proxyURL).Do(req)
+		if err != nil {
+			if shouldRecyclePooledClient(err) {
+				recyclePooledClient(account, proxyURL)
+			}
+			return nil, ErrUpstream(0, "请求 Grok 上游失败", err)
+		}
+		// 手动声明了 Accept-Encoding，需自行解压非流式的压缩响应。
+		decodeGrokResponseEncoding(resp)
+		return resp, nil
 	}
 
-	resp, err := getPooledClient(account, proxyURL).Do(req)
+	// 先带密文投递：同账号/同会话里 Grok 能解自己的 reasoning encrypted_content，保留完整推理上下文
+	// （对齐官方 CLI include reasoning.encrypted_content 的往返）。仅当上游 400 且确为密文解码失败时，
+	// 剥离外来密文重试一次（跨账号/外来 provider 的兜底降级）。
+	resp, err := send(requestBody)
 	if err != nil {
-		if shouldRecyclePooledClient(err) {
-			recyclePooledClient(account, proxyURL)
+		return nil, err
+	}
+	if resp.StatusCode == http.StatusBadRequest && grokBodyHasBlobs(requestBody) {
+		errBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		_ = resp.Body.Close()
+		if grokIsBlobDecodeFailure(errBody) {
+			resp, err = send(stripGrokUndecodableBlobs(requestBody))
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			// 不是密文问题：把读出的错误体放回去，交由上层按原状处理。
+			resp.Body = io.NopCloser(bytes.NewReader(errBody))
 		}
-		return nil, ErrUpstream(0, "请求 Grok 上游失败", err)
 	}
 	recordGrokRateLimitHeaders(account, resp.Header)
+	// 请求侧展平过 namespace 工具时，把上游响应里的扁平函数名反解回 {name, namespace}。
+	if len(nsAliases) > 0 && resp.Body != nil {
+		streaming := strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "event-stream")
+		resp.Body = newGrokNamespaceReverser(resp.Body, streaming, nsAliases)
+		if !streaming {
+			resp.Header.Del("Content-Length")
+			resp.ContentLength = -1
+		}
+	}
 	return resp, nil
 }
 
@@ -204,6 +249,39 @@ func sanitizeGrokRequestBody(body []byte) []byte {
 			if updated, err := sjson.DeleteBytes(body, path); err == nil {
 				body = updated
 			}
+		}
+	}
+	body = clampGrokReasoningEffort(body)
+	return body
+}
+
+// mapGrokReasoningEffort 把思考强度映射到 Grok build 支持的档位（只有 low/medium/high）：
+// Codex 侧更高的 xhigh/max → high、更低的 minimal → low；low/medium/high 原样；其它未知不动。
+func mapGrokReasoningEffort(effort string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(effort)) {
+	case "xhigh", "max":
+		return "high", true
+	case "minimal":
+		return "low", true
+	default:
+		return effort, false
+	}
+}
+
+// clampGrokReasoningEffort 规范化发给 Grok 上游的思考强度：同时覆盖 Responses
+// （reasoning.effort）与 Chat（reasoning_effort）两种形态，避免 Grok 不认的档位报错。
+func clampGrokReasoningEffort(body []byte) []byte {
+	for _, path := range []string{"reasoning.effort", "reasoning_effort"} {
+		v := gjson.GetBytes(body, path)
+		if !v.Exists() {
+			continue
+		}
+		mapped, changed := mapGrokReasoningEffort(v.String())
+		if !changed {
+			continue
+		}
+		if updated, err := sjson.SetBytes(body, path, mapped); err == nil {
+			body = updated
 		}
 	}
 	return body
@@ -309,10 +387,51 @@ func FetchGrokModelIDs(ctx context.Context, account *auth.Account) ([]string, er
 
 // ==================== 错误分类与冷却映射 ====================
 
-// IsGrokFreeQuotaExhaustedError 识别免费额度耗尽（模型级，Grok 上游 24h 重置）。
-func IsGrokFreeQuotaExhaustedError(body []byte) bool {
-	return bytes.Contains(bytes.ToLower(body), []byte("used all the included free usage"))
+// DefaultGrokModelIDs 是 Grok 账号未声明 models 白名单时的默认可用文本模型集，
+// 用于把 grok-4.5 等注册进 /v1/models（与 Grok CLI 常见目录对齐）。账号显式声明
+// models 后以其白名单为准，不再补默认集。
+func DefaultGrokModelIDs() []string {
+	return []string{"grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
 }
+
+// IsGrokFreeQuotaExhaustedError 识别免费额度耗尽（模型级，Grok 上游滚动 24h 窗口）。
+func IsGrokFreeQuotaExhaustedError(body []byte) bool {
+	lower := bytes.ToLower(body)
+	return bytes.Contains(lower, []byte("used all the included free usage")) ||
+		bytes.Contains(lower, []byte("subscription:free-usage-exhausted"))
+}
+
+// grokFreeQuotaUsagePattern 匹配免费额度耗尽错误体里的权威用量：
+// "tokens (actual/limit): 1003617/1000000"。
+var grokFreeQuotaUsagePattern = regexp.MustCompile(`(?i)tokens\s*\(actual/limit\)\s*:\s*([0-9]+)\s*/\s*([0-9]+)`)
+
+// parseGrokFreeQuotaUsage 从免费额度耗尽错误体解析 used/limit token 数；解析不出返回 ok=false。
+func parseGrokFreeQuotaUsage(body []byte) (used, limit int64, ok bool) {
+	matches := grokFreeQuotaUsagePattern.FindSubmatch(body)
+	if len(matches) != 3 {
+		return 0, 0, false
+	}
+	used, usedErr := strconv.ParseInt(string(matches[1]), 10, 64)
+	limit, limitErr := strconv.ParseInt(string(matches[2]), 10, 64)
+	if usedErr != nil || limitErr != nil || limit <= 0 {
+		return 0, 0, false
+	}
+	return used, limit, true
+}
+
+// parseGrokFreeQuotaModel 从错误体提取耗尽的模型名（"for model grok-4.5-build-free" 或 model 字段）。
+func parseGrokFreeQuotaModel(body []byte) string {
+	if m := strings.TrimSpace(gjson.GetBytes(body, "model").String()); m != "" {
+		return m
+	}
+	matches := grokFreeQuotaModelPattern.FindSubmatch(body)
+	if len(matches) == 2 {
+		return string(matches[1])
+	}
+	return ""
+}
+
+var grokFreeQuotaModelPattern = regexp.MustCompile(`(?i)for\s+model\s+([a-z0-9._-]+)`)
 
 // IsGrokSpendingLimitError 识别账号级超支限制。
 func IsGrokSpendingLimitError(body []byte) bool {
@@ -327,31 +446,53 @@ func IsGrokPermanentDenialError(body []byte) bool {
 
 // applyGrokCooldownForModel 是 Grok 账号的上游错误 → 调度状态映射
 // （对应 applyCooldownForModel 的 Codex 语义）：
-//   - 免费额度耗尽 → 模型冷却 24h；
+//   - 免费额度耗尽 → free 账号整号冷却 24h（滚动窗口），付费账号模型级冷却 24h；
+//     错误体里的 tokens (actual/limit) 作为权威用量快照落库供前端展示；
 //   - 超支限制 → 账号冷却 24h；
 //   - 429 → Retry-After 或 1 分钟，上限 15 分钟；
 //   - 401 → 短冷却 + 异步强刷 AT（RT 失效时刷新路径会自行标 error）；
 //   - 403 权限拒绝 → 账号标错误。
 func (h *Handler) applyGrokCooldownForModel(account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) codex429Decision {
-	if h == nil || h.store == nil || account == nil {
+	if h == nil {
+		return codex429Decision{}
+	}
+	return applyGrokCooldown(h.store, account, statusCode, body, resp, model)
+}
+
+// applyGrokCooldown 把 Grok 上游错误映射到调度状态，并在免费额度耗尽时落权威用量快照。
+// 抽成包级函数供代理主路径与 Apply429Cooldown（批量测试/连通性测试）共用——两条路径都必须
+// 走这里才能识别 free-usage-exhausted、保存 grok_free_quota 快照并标 usage_limited。
+func applyGrokCooldown(store *auth.Store, account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) codex429Decision {
+	if store == nil || account == nil {
 		return codex429Decision{}
 	}
 	if IsGrokFreeQuotaExhaustedError(body) {
 		cooldownModel := model
 		if cooldownModel == "" {
-			cooldownModel = strings.TrimSpace(gjson.GetBytes(body, "model").String())
+			cooldownModel = parseGrokFreeQuotaModel(body)
 		}
-		if cooldownModel != "" {
-			cooldown := h.store.MarkModelCooldown(account, cooldownModel, 24*time.Hour, "usage_limited")
-			log.Printf("Grok 账号 %d 模型 %s 免费额度耗尽，冷却到 %s", account.ID(), cooldownModel, cooldown.ResetAt.Format(time.RFC3339))
-			return codex429Decision{Scope: rateLimitScopeModel, Reason: "usage_limited", Model: cooldownModel, ResetAt: cooldown.ResetAt, Cooldown: time.Until(cooldown.ResetAt)}
+		if used, limit, ok := parseGrokFreeQuotaUsage(body); ok {
+			store.SaveGrokFreeQuotaSnapshot(account, auth.GrokFreeQuotaSnapshot{
+				UsedTokens:  used,
+				LimitTokens: limit,
+				Model:       cooldownModel,
+				ExhaustedAt: time.Now(),
+			})
 		}
-		h.store.MarkCooldown(account, 24*time.Hour, "usage_limited")
-		log.Printf("Grok 账号 %d 免费额度耗尽，账号冷却 24h", account.ID())
-		return codex429Decision{Reason: "usage_limited", Cooldown: 24 * time.Hour}
+		resetAt := time.Now().Add(24 * time.Hour)
+		// free 账号只有免费额度这一种资源，模型级隔离没有意义且不影响账号状态展示，
+		// 直接整号冷却让列表显示"限流"。付费账号保留模型级隔离（其它模型仍可用）。
+		if strings.EqualFold(strings.TrimSpace(account.GetPlanType()), "free") || cooldownModel == "" {
+			store.MarkCooldown(account, 24*time.Hour, "usage_limited")
+			log.Printf("Grok 账号 %d 免费额度耗尽 (model=%s)，账号冷却 24h", account.ID(), cooldownModel)
+			return codex429Decision{Reason: "usage_limited", ResetAt: resetAt, Cooldown: 24 * time.Hour}
+		}
+		cooldown := store.MarkModelCooldownUntil(account, cooldownModel, "usage_limited", resetAt)
+		log.Printf("Grok 账号 %d 模型 %s 免费额度耗尽，冷却到 %s", account.ID(), cooldownModel, cooldown.ResetAt.Format(time.RFC3339))
+		return codex429Decision{Scope: rateLimitScopeModel, Reason: "usage_limited", Model: cooldownModel, ResetAt: cooldown.ResetAt, Cooldown: time.Until(cooldown.ResetAt)}
 	}
 	if IsGrokSpendingLimitError(body) {
-		h.store.MarkCooldown(account, 24*time.Hour, "usage_limited")
+		store.MarkCooldown(account, 24*time.Hour, "usage_limited")
 		log.Printf("Grok 账号 %d 触发超支限制，账号冷却 24h", account.ID())
 		return codex429Decision{Reason: "usage_limited", Cooldown: 24 * time.Hour}
 	}
@@ -367,22 +508,22 @@ func (h *Handler) applyGrokCooldownForModel(account *auth.Account, statusCode in
 		if cooldown > 15*time.Minute {
 			cooldown = 15 * time.Minute
 		}
-		h.store.MarkCooldown(account, cooldown, "rate_limited")
+		store.MarkCooldown(account, cooldown, "rate_limited")
 		log.Printf("Grok 账号 %d 被限速，冷却 %s", account.ID(), cooldown)
 		return codex429Decision{Reason: "rate_limited", Cooldown: cooldown}
 	case http.StatusUnauthorized, http.StatusForbidden:
 		if IsGrokPermanentDenialError(body) {
 			log.Printf("Grok 账号 %d 权限被永久拒绝，标记为错误", account.ID())
-			h.store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
+			store.MarkError(account, upstreamAccountErrorMessage(statusCode, body))
 			return codex429Decision{}
 		}
 		// OAuth AT 可能过期/被吊销：短冷却挡住并发，异步强刷；RT 失效由刷新路径转 error。
-		h.store.MarkCooldown(account, time.Minute, "unauthorized")
+		store.MarkCooldown(account, time.Minute, "unauthorized")
 		if account.GrokAuthKind() == auth.GrokAuthKindOAuth {
 			go func(dbID int64) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
-				if err := h.store.RefreshSingle(ctx, dbID); err != nil {
+				if err := store.RefreshSingle(ctx, dbID); err != nil {
 					log.Printf("Grok 账号 %d 401 后强刷失败: %v", dbID, err)
 				}
 			}(account.ID())

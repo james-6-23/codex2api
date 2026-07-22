@@ -513,6 +513,10 @@ export const api = {
     request<InviteResponse>(`/accounts/${id}/invite`, { method: 'POST', body: JSON.stringify(data) }),
   batchResetStatus: (ids: number[]) =>
     request<{ message: string; success: number; failed: number }>('/accounts/batch-reset-status', { method: 'POST', body: JSON.stringify({ ids }) }),
+  batchDeleteAccounts: (ids: number[]) =>
+    request<{ message: string; deleted: number; success: number; failed: number }>('/accounts/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
+  batchRefreshAccounts: (ids: number[]) =>
+    request<{ message: string; success: number; failed: number }>('/accounts/batch-refresh', { method: 'POST', body: JSON.stringify({ ids }) }),
   getAccountUsage: (id: number, days?: number) => {
     const search = new URLSearchParams()
     if (typeof days === 'number') search.set('days', String(days))

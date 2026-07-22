@@ -742,6 +742,7 @@ func (db *DB) migrate(ctx context.Context) error {
 				site_name          TEXT DEFAULT 'CodexProxy',
 				site_logo          TEXT DEFAULT '',
 				background_config  TEXT DEFAULT '{}',
+				grok_config        TEXT DEFAULT '{}',
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
@@ -771,6 +772,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS site_name TEXT DEFAULT 'CodexProxy';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS site_logo TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS grok_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
@@ -1477,6 +1479,7 @@ type SystemSettings struct {
 	SiteName                           string
 	SiteLogo                           string
 	BackgroundConfig                   string // JSON: {"image":"...","opacity":18,"blur":0}
+	GrokConfig                         string // JSON: {"affinity_mode":"strict"}
 	MaxConcurrency                     int
 	GlobalRPM                          int
 	TestModel                          string
@@ -1708,6 +1711,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 			       COALESCE(NULLIF(TRIM(billing_tier_policy), ''), 'actual'),
 			       COALESCE(image_storage_config, '{}'),
 		       COALESCE(background_config, '{}'),
+		       COALESCE(grok_config, '{}'),
 		       COALESCE(show_full_usage_numbers, false),
 		       COALESCE(public_key_usage_page_enabled, true),
 		       COALESCE(public_image_studio_page_enabled, true),
@@ -1768,6 +1772,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.BillingTierPolicy,
 		&s.ImageStorageConfig,
 		&s.BackgroundConfig,
+		&s.GrokConfig,
 		&s.ShowFullUsageNumbers,
 		&s.PublicKeyUsagePageEnabled,
 		&s.PublicImageStudioPageEnabled,
@@ -1876,6 +1881,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				scheduler_mode,
 				affinity_mode,
 				background_config,
+				grok_config,
 				show_full_usage_numbers,
 				public_key_usage_page_enabled,
 				public_image_studio_page_enabled,
@@ -1916,7 +1922,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					overflow_auto_compact_enabled,
 					first_token_excludes_ws_acquire
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -1979,6 +1985,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				scheduler_mode = EXCLUDED.scheduler_mode,
 				affinity_mode = EXCLUDED.affinity_mode,
 				background_config = EXCLUDED.background_config,
+				grok_config = EXCLUDED.grok_config,
 				show_full_usage_numbers = EXCLUDED.show_full_usage_numbers,
 				public_key_usage_page_enabled = EXCLUDED.public_key_usage_page_enabled,
 				public_image_studio_page_enabled = EXCLUDED.public_image_studio_page_enabled,
@@ -2028,7 +2035,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		s.PromptFilterReviewModel, s.PromptFilterReviewTimeoutSeconds, s.PromptFilterReviewFailClosed,
 		s.ClientCompatMode, s.CodexMinCLIVersion, codexUserAgentConfig, s.UsageLogMode, s.UsageLogBatchSize,
 		s.UsageLogFlushIntervalSeconds, s.StreamFlushPolicy, s.StreamFlushIntervalMS,
-		s.FirstTokenTimeoutSeconds, firstTokenMode, billingTierPolicy, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, s.ShowFullUsageNumbers, s.PublicKeyUsagePageEnabled, s.PublicImageStudioPageEnabled, reasoningEffortModels,
+		s.FirstTokenTimeoutSeconds, firstTokenMode, billingTierPolicy, s.ImageStorageConfig, s.SchedulerMode, normalizeAffinityMode(s.AffinityMode), s.BackgroundConfig, normalizeGrokConfig(s.GrokConfig), s.ShowFullUsageNumbers, s.PublicKeyUsagePageEnabled, s.PublicImageStudioPageEnabled, reasoningEffortModels,
 		s.CodexForceWebsocket, s.CodexWSKeepaliveEnabled, normalizeCodexWSKeepaliveInterval(s.CodexWSKeepaliveIntervalSec),
 		s.CodexWSHideUpstreamErrors, s.CodexWSSilentRetryEnabled, normalizeCodexWSSilentMaxRetries(s.CodexWSSilentMaxRetries),
 		s.AutoPause5hThreshold, s.AutoPause7dThreshold, s.AutoPause5hGuardBandPercent, s.AutoPause5hGuardConcurrency,
@@ -2178,6 +2185,18 @@ func normalizeAffinityMode(mode string) string {
 	default:
 		return "bounded"
 	}
+}
+
+// normalizeGrokConfig 校验 grok_config JSON,非法或空则回落到默认 {}。
+func normalizeGrokConfig(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "{}"
+	}
+	if !json.Valid([]byte(raw)) {
+		return "{}"
+	}
+	return raw
 }
 
 // DeleteAPIKey 删除 API 密钥
