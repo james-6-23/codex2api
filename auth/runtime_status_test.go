@@ -79,6 +79,57 @@ func TestMarkCooldownWithErrorKeepsUnauthorizedStatusAndMessage(t *testing.T) {
 	}
 }
 
+func TestUnauthorizedCooldownDurationPolicies(t *testing.T) {
+	tests := []struct {
+		name     string
+		method   string
+		recent   bool
+		duration time.Duration
+		want     time.Duration
+	}{
+		{name: "MarkCooldown fresh uses 6h", method: "cooldown", duration: time.Hour, want: 6 * time.Hour},
+		{name: "MarkCooldown recent uses 24h", method: "cooldown", recent: true, duration: time.Hour, want: 24 * time.Hour},
+		{name: "MarkCooldownWithError fresh uses 6h", method: "with_error", duration: time.Hour, want: 6 * time.Hour},
+		{name: "MarkCooldownWithError recent uses 24h", method: "with_error", recent: true, duration: time.Hour, want: 24 * time.Hour},
+		{name: "exact method preserves arbitrary duration", method: "exact", duration: 90 * time.Minute, want: 90 * time.Minute},
+		{name: "exact method preserves 24h", method: "exact", duration: 24 * time.Hour, want: 24 * time.Hour},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewStore(nil, nil, nil)
+			acc := &Account{
+				DBID:        1,
+				AccessToken: "at-test",
+				Status:      StatusReady,
+				HealthTier:  HealthTierHealthy,
+			}
+			if tt.recent {
+				acc.LastUnauthorizedAt = time.Now().Add(-time.Hour)
+			}
+
+			switch tt.method {
+			case "cooldown":
+				store.MarkCooldown(acc, tt.duration, "unauthorized")
+			case "with_error":
+				store.MarkCooldownWithError(acc, tt.duration, "unauthorized", "unauthorized")
+			case "exact":
+				store.MarkCooldownWithErrorExactDuration(acc, tt.duration, "unauthorized", "deleted runtime")
+			default:
+				t.Fatalf("unknown method %q", tt.method)
+			}
+
+			reason, until := acc.GetCooldownSnapshot()
+			if reason != "unauthorized" {
+				t.Fatalf("cooldown reason = %q, want unauthorized", reason)
+			}
+			if remaining := time.Until(until); remaining < tt.want-time.Minute || remaining > tt.want {
+				t.Fatalf("cooldown remaining = %s, want approximately %s", remaining, tt.want)
+			}
+		})
+	}
+}
+
 func TestMarkUsage7dRateLimitedUsesActiveResetWindow(t *testing.T) {
 	store := NewStore(nil, nil, nil)
 	acc := &Account{
