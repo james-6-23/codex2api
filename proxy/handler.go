@@ -1704,6 +1704,7 @@ func IsDeactivatedWorkspaceError(body []byte) bool {
 	return strings.Contains(strings.ToLower(string(body)), "deactivated_workspace")
 }
 
+// IsAgentRuntimeDeletedError 判断响应体是否表示 Agent runtime 已删除。
 func IsAgentRuntimeDeletedError(body []byte) bool {
 	code := strings.ToLower(firstGJSONString(body, "error.code", "detail.code", "code"))
 	if code != "biscuit_baker_service_agent_error_status" {
