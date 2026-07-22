@@ -224,7 +224,12 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 			return nil
 		}
 		if shouldMarkUsageProbeAccountError(resp.StatusCode, body) {
-			h.store.MarkError(account, fmt.Sprintf("用量探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300)))
+			errorMsg := fmt.Sprintf("用量探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300))
+			if resp.StatusCode == http.StatusForbidden && proxy.IsAgentRuntimeDeletedError(body) {
+				h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errorMsg)
+			} else {
+				h.store.MarkError(account, errorMsg)
+			}
 			return nil
 		}
 		if resp.StatusCode >= 500 {
@@ -239,7 +244,8 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 func shouldMarkUsageProbeAccountError(statusCode int, body []byte) bool {
 	switch statusCode {
 	case http.StatusPaymentRequired, http.StatusForbidden:
-		return proxy.IsDeactivatedWorkspaceError(body)
+		return proxy.IsDeactivatedWorkspaceError(body) ||
+			(statusCode == http.StatusForbidden && proxy.IsAgentRuntimeDeletedError(body))
 	default:
 		return false
 	}

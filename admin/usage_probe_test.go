@@ -33,6 +33,12 @@ func TestShouldMarkUsageProbeAccountError(t *testing.T) {
 			want:       true,
 		},
 		{
+			name:       "forbidden deleted agent runtime",
+			statusCode: http.StatusForbidden,
+			body:       []byte(`{"error":{"message":"Agent runtime has been deleted.","code":"biscuit_baker_service_agent_error_status"},"status":403}`),
+			want:       true,
+		},
+		{
 			name:       "generic payment required is not account error",
 			statusCode: http.StatusPaymentRequired,
 			body:       []byte(`{"error":{"code":"billing_hard_limit_reached"}}`),

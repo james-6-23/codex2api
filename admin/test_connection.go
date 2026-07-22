@@ -117,6 +117,10 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			switch resp.StatusCode {
 			case http.StatusUnauthorized:
 				h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errMsg)
+			case http.StatusForbidden:
+				if proxy.IsAgentRuntimeDeletedError(errBody) {
+					h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errMsg)
+				}
 			case http.StatusTooManyRequests:
 				if isOpenAIResponsesAccount {
 					h.store.MarkCooldown(account, time.Minute, "rate_limited")
@@ -981,6 +985,10 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 			return h.handleBatchTestReadError(testCtx, acc, readErr)
 		}
 		msg := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300))
+		if resp.StatusCode == http.StatusForbidden && proxy.IsAgentRuntimeDeletedError(body) {
+			h.store.MarkCooldownWithError(acc, 24*time.Hour, "unauthorized", msg)
+			return "banned", msg
+		}
 		if shouldMarkBatchTestAccountError(resp.StatusCode, body) {
 			h.store.MarkError(acc, "批量测试"+msg)
 		}
