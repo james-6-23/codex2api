@@ -37,6 +37,39 @@ func TestCacheCompletedResponseCachesCodexNativeToolCalls(t *testing.T) {
 	}
 }
 
+func TestCacheCompletedResponseUsesOutputItemDoneFallback(t *testing.T) {
+	resetResponseCacheForTest()
+
+	expandedInput := []byte(`[{"type":"message","role":"user","content":"inspect workspace"}]`)
+	completed := []byte(`{"type":"response.completed","response":{"id":"resp_stream"}}`)
+	outputItems := []json.RawMessage{
+		json.RawMessage(`{"type":"function_call","id":"fc_stream","call_id":"call_stream","name":"manage_todo_list","arguments":"{}"}`),
+	}
+	cacheCompletedResponseWithOutputItems("key:1", expandedInput, completed, outputItems)
+
+	next := []byte(`{"model":"gpt-5.6-sol","previous_response_id":"resp_stream","input":[{"type":"function_call_output","call_id":"call_stream","output":"ok"}]}`)
+	got, _ := PrepareResponsesBodyForOwner(next, "key:1")
+	items := gjson.GetBytes(got, "input").Array()
+	if len(items) != 3 {
+		t.Fatalf("expanded input count = %d, want 3; body=%s", len(items), got)
+	}
+	if typ := items[0].Get("type").String(); typ != "message" {
+		t.Fatalf("input[0].type = %q, want message", typ)
+	}
+	if typ := items[1].Get("type").String(); typ != "function_call" {
+		t.Fatalf("input[1].type = %q, want function_call", typ)
+	}
+	if id := items[1].Get("id"); id.Exists() {
+		t.Fatalf("cached function_call id should be stripped, got %s", id.Raw)
+	}
+	if typ := items[2].Get("type").String(); typ != "function_call_output" {
+		t.Fatalf("input[2].type = %q, want function_call_output", typ)
+	}
+	if gjson.GetBytes(got, "previous_response_id").Exists() {
+		t.Fatalf("previous_response_id should be removed after expansion: %s", got)
+	}
+}
+
 func TestExpandPreviousResponseUsesCachedCodexNativeToolContext(t *testing.T) {
 	resetResponseCacheForTest()
 
