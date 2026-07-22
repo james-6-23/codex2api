@@ -61,6 +61,7 @@ func TestShouldMarkUsageProbeAccountError(t *testing.T) {
 	}
 }
 
+// TestDeletedAgentRuntimeCooldownPersistsFor24Hours 验证用量探针会持久化 24 小时封禁冷却。
 func TestDeletedAgentRuntimeCooldownPersistsFor24Hours(t *testing.T) {
 	db := newTestAdminDB(t)
 	accountID := insertTestAccount(t, db)

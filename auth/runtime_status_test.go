@@ -79,6 +79,7 @@ func TestMarkCooldownWithErrorKeepsUnauthorizedStatusAndMessage(t *testing.T) {
 	}
 }
 
+// TestUnauthorizedCooldownDurationPolicies 验证 unauthorized 的自适应和精确时长冷却策略。
 func TestUnauthorizedCooldownDurationPolicies(t *testing.T) {
 	tests := []struct {
 		name     string

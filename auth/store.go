@@ -6059,6 +6059,7 @@ func (s *Store) markCooldownUntil(acc *Account, until time.Time, reason string, 
 	}
 }
 
+// markCooldown 根据 exactDuration 选择自适应或精确时长并应用账号冷却。
 func (s *Store) markCooldown(acc *Account, duration time.Duration, reason string, errorMsg string, exactDuration bool) {
 	if acc == nil {
 		return

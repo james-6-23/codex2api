@@ -142,6 +142,7 @@ func TestConnectionUnauthorizedRecordsErrorMessage(t *testing.T) {
 	}
 }
 
+// TestConnectionDeletedAgentRuntimeMarksBanned 验证连接测试会将 runtime 已删除的账号标记为封禁。
 func TestConnectionDeletedAgentRuntimeMarksBanned(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstreamBody := `{"error":{"message":"Agent runtime has been deleted.","type":null,"code":"biscuit_baker_service_agent_error_status","param":null},"status":403}`

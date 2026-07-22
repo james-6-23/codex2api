@@ -2529,6 +2529,7 @@ func TestDeactivatedWorkspace402MarksAccountError(t *testing.T) {
 	}
 }
 
+// TestAgentRuntimeDeleted403MarksAccountBanned 验证代理请求会将 runtime 已删除的账号标记为封禁。
 func TestAgentRuntimeDeleted403MarksAccountBanned(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 42, AccessToken: "at", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy}

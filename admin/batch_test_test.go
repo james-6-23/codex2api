@@ -400,6 +400,7 @@ func TestRunSingleBatchTestUnauthorizedRecordsErrorMessage(t *testing.T) {
 	}
 }
 
+// TestRunSingleBatchTestDeletedAgentRuntimeMarksBanned 验证批量测试会将 runtime 已删除的账号标记为封禁。
 func TestRunSingleBatchTestDeletedAgentRuntimeMarksBanned(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
