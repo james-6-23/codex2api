@@ -3,11 +3,14 @@ package database
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/codex2api/internal/openaiidentity"
 )
 
 const (
@@ -18,8 +21,9 @@ const (
 	dataMigrationOAuthIdentityDedupeV2 = "20260702_oauth_identity_dedupe_v2"
 	// usage_logs.channel 回填：按 accounts.platform 推导渠道（xai→grok，其余→codex）；
 	// 账号已删的历史行默认 codex（Grok 上线前的流量全部是 codex）。
-	dataMigrationUsageLogChannelV1 = "20260721_usage_log_channel_backfill_v1"
-	dataMigrationTimeout           = 5 * time.Minute
+	dataMigrationUsageLogChannelV1   = "20260721_usage_log_channel_backfill_v1"
+	dataMigrationWorkspaceIdentityV3 = "20260722_workspace_identity_v3"
+	dataMigrationTimeout             = 5 * time.Minute
 )
 
 type oauthIdentityDedupeAccount struct {
@@ -41,7 +45,10 @@ func (db *DB) runDataMigrations(ctx context.Context) error {
 	if err := db.runDataMigrationOnce(ctx, dataMigrationOAuthIdentityDedupeV2, db.dedupeOAuthIdentityAccounts); err != nil {
 		return err
 	}
-	return db.runDataMigrationOnce(ctx, dataMigrationUsageLogChannelV1, db.backfillUsageLogChannel)
+	if err := db.runDataMigrationOnce(ctx, dataMigrationUsageLogChannelV1, db.backfillUsageLogChannel); err != nil {
+		return err
+	}
+	return db.runDataMigrationOnce(ctx, dataMigrationWorkspaceIdentityV3, db.migrateWorkspaceIdentityV3)
 }
 
 // backfillUsageLogChannel 给存量 usage_logs 回填 channel：先按现存账号的 platform
@@ -127,7 +134,126 @@ func (db *DB) dedupeOAuthIdentityAccounts(ctx context.Context, tx *sql.Tx) error
 	if err != nil {
 		return err
 	}
+	return db.dedupeIdentityAccounts(
+		ctx,
+		tx,
+		accounts,
+		oauthIdentityDedupeAliases,
+		"oauth_identity_dedupe_v1",
+		dataMigrationOAuthIdentityDedupeV1,
+	)
+}
 
+func (db *DB) migrateWorkspaceIdentityV3(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, credentials
+		FROM accounts
+		WHERE type = 'oauth'
+		  AND status <> 'deleted'
+		  AND COALESCE(error_message, '') <> 'deleted'
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type update struct {
+		id          int64
+		credentials map[string]interface{}
+	}
+	var updates []update
+	for rows.Next() {
+		var id int64
+		var raw interface{}
+		if err := rows.Scan(&id, &raw); err != nil {
+			return err
+		}
+		credentials := decodeCredentials(raw)
+		workspaceID := ""
+		email := ""
+		for _, tokenKey := range []string{"id_token", "access_token"} {
+			if token := credentialStringFromMap(credentials, tokenKey); token != "" {
+				if claims, parseErr := openaiidentity.ParseJWT(token); parseErr == nil {
+					if workspaceID == "" {
+						workspaceID = claims.WorkspaceID()
+					}
+					if email == "" {
+						email = strings.TrimSpace(claims.Email)
+						if email == "" && claims.OpenAIProfile != nil {
+							email = strings.TrimSpace(claims.OpenAIProfile.Email)
+						}
+					}
+					if workspaceID != "" && email != "" {
+						break
+					}
+				}
+			}
+		}
+		storedWorkspaceID := openaiidentity.NormalizeWorkspaceID(credentialStringFromMap(credentials, "workspace_id"))
+		storedEmail := strings.TrimSpace(credentialStringFromMap(credentials, "email"))
+		// 迁移只补充 JWT 能确认的 workspace_id；解析不到时保留历史值，
+		// 包括 user-* 等旧字段，避免扩大迁移的修改范围。
+		workspaceNeedsUpdate := workspaceID != "" && workspaceID != storedWorkspaceID
+		if !workspaceNeedsUpdate && (email == "" || storedEmail != "") {
+			continue
+		}
+		if workspaceNeedsUpdate {
+			credentials["workspace_id"] = workspaceID
+		}
+		if storedEmail == "" && email != "" {
+			credentials["email"] = email
+		}
+		updates = append(updates, update{id: id, credentials: credentials})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range updates {
+		encoded, err := json.Marshal(item.credentials)
+		if err != nil {
+			return fmt.Errorf("序列化账号 %d credentials 失败: %w", item.id, err)
+		}
+		// 回填不刷新 updated_at，避免迁移改变重复账号的胜出顺序。
+		query := `UPDATE accounts SET credentials = $1 WHERE id = $2`
+		if !db.isSQLite() {
+			query = `UPDATE accounts SET credentials = $1::jsonb WHERE id = $2`
+		}
+		if _, err := tx.ExecContext(ctx, query, encoded, item.id); err != nil {
+			return fmt.Errorf("回填账号 %d workspace_id 失败: %w", item.id, err)
+		}
+	}
+	if err := db.dedupeWorkspaceIdentityAccounts(ctx, tx); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, oauthIdentityUniqueIndexSQL(db.isSQLite())); err != nil {
+		return fmt.Errorf("创建 OAuth 身份唯一索引失败: %w", err)
+	}
+	return nil
+}
+
+func (db *DB) dedupeWorkspaceIdentityAccounts(ctx context.Context, tx *sql.Tx) error {
+	accounts, err := db.listWorkspaceIdentityDedupeAccounts(ctx, tx)
+	if err != nil {
+		return err
+	}
+	return db.dedupeIdentityAccounts(
+		ctx,
+		tx,
+		accounts,
+		workspaceIdentityDedupeAliases,
+		"workspace_identity_v3",
+		dataMigrationWorkspaceIdentityV3,
+	)
+}
+
+func (db *DB) dedupeIdentityAccounts(
+	ctx context.Context,
+	tx *sql.Tx,
+	accounts []oauthIdentityDedupeAccount,
+	aliasesFor func(map[string]interface{}) []string,
+	eventSource string,
+	migrationVersion string,
+) error {
 	parent := make([]int, len(accounts))
 	eligible := make([]bool, len(accounts))
 	for i := range parent {
@@ -150,7 +276,7 @@ func (db *DB) dedupeOAuthIdentityAccounts(ctx context.Context, tx *sql.Tx) error
 
 	aliasOwner := make(map[string]int)
 	for i, account := range accounts {
-		aliases := oauthIdentityDedupeAliases(account.credentials)
+		aliases := aliasesFor(account.credentials)
 		if len(aliases) == 0 {
 			continue
 		}
@@ -194,19 +320,31 @@ func (db *DB) dedupeOAuthIdentityAccounts(ctx context.Context, tx *sql.Tx) error
 	if err := softDeleteAccountsTx(ctx, tx, loserIDs); err != nil {
 		return err
 	}
-	if err := insertAccountEventsTx(ctx, tx, loserIDs, "deleted", "oauth_identity_dedupe_v1"); err != nil {
+	if err := insertAccountEventsTx(ctx, tx, loserIDs, "deleted", eventSource); err != nil {
 		return err
 	}
-	log.Printf("[data_migration] %s: 发现 %d 组重复 OAuth 身份，已软删除 %d 个重复账号", dataMigrationOAuthIdentityDedupeV1, duplicateGroups, len(loserIDs))
+	log.Printf("[data_migration] %s: 发现 %d 组重复 OAuth 身份，已软删除 %d 个重复账号", migrationVersion, duplicateGroups, len(loserIDs))
 	return nil
 }
 
 func (db *DB) listOAuthIdentityDedupeAccounts(ctx context.Context, tx *sql.Tx) ([]oauthIdentityDedupeAccount, error) {
-	rows, err := tx.QueryContext(ctx, `
+	return db.listOAuthIdentityDedupeAccountsFiltered(ctx, tx, false)
+}
+
+func (db *DB) listWorkspaceIdentityDedupeAccounts(ctx context.Context, tx *sql.Tx) ([]oauthIdentityDedupeAccount, error) {
+	return db.listOAuthIdentityDedupeAccountsFiltered(ctx, tx, true)
+}
+
+func (db *DB) listOAuthIdentityDedupeAccountsFiltered(ctx context.Context, tx *sql.Tx, onlyOAuth bool) ([]oauthIdentityDedupeAccount, error) {
+	query := `
 		SELECT id, credentials, COALESCE(enabled, true), COALESCE(locked, false), created_at, updated_at
 		FROM accounts
 		WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'
-	`)
+	`
+	if onlyOAuth {
+		query += ` AND type = 'oauth'`
+	}
+	rows, err := tx.QueryContext(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -271,6 +409,18 @@ func oauthIdentityDedupeAliases(credentials map[string]interface{}) []string {
 	}
 	sort.Strings(aliases)
 	return aliases
+}
+
+func workspaceIdentityDedupeAliases(credentials map[string]interface{}) []string {
+	email := strings.ToLower(strings.TrimSpace(credentialStringFromMap(credentials, "email")))
+	if email == "" {
+		return nil
+	}
+	workspaceID := openaiidentity.NormalizeWorkspaceID(credentialStringFromMap(credentials, "workspace_id"))
+	if workspaceID == "" {
+		return nil
+	}
+	return []string{email + "\x00" + workspaceID}
 }
 
 func credentialStringFromMap(credentials map[string]interface{}, key string) string {

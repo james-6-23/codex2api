@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"regexp"
@@ -9,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
@@ -243,7 +245,9 @@ func (h *Handler) SubmitAccountPortalCode(c *gin.Context) {
 // 不加入运行时调度池（管理员批准后再启用）。重复账号返回 errDuplicateOAuthIdentity。
 func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, contactEmail string) (int64, error) {
 	seed = normalizeTokenCredentialSeed(seed)
-	if seed.email != "" && (seed.accountID != "" || seed.userID != "") {
+	if seed.email != "" && seed.workspaceID != "" {
+		h.oauthIdentityMu.Lock()
+		defer h.oauthIdentityMu.Unlock()
 		if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, 0); err != nil {
 			return 0, err
 		} else if duplicateID > 0 {
@@ -253,6 +257,9 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 
 	id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), proxyURL)
 	if err != nil {
+		if errors.Is(err, database.ErrDuplicateOAuthIdentity) {
+			return 0, errDuplicateOAuthIdentity
+		}
 		return 0, err
 	}
 	// 待审核：禁用 + 备注 + 打标；不调用 Store.AddAccount，故不进调度池。

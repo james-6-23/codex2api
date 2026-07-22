@@ -382,7 +382,7 @@
     "importFile": "导入",
     "importing": "导入中…",
     "importTitle": "选择导入方式",
-    "allowDuplicate": "允许重复添加（跳过去重，强制新建）",
+    "allowDuplicate": "允许未识别工作区重复（已识别工作区仍唯一）",
     "importProxyLabel": "导入账号的代理（可选）",
     "importProxyHint": "将统一应用到本次导入的所有账号；留空则不设置代理。",
     "importTxt": "TXT 文件",

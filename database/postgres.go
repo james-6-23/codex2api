@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/codex2api/internal/openaiidentity"
 	"github.com/lib/pq"
 	_ "modernc.org/sqlite"
 )
@@ -2559,7 +2560,7 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 // UsageLogInput 日志写入参数
 type UsageLogInput struct {
-	AccountID            int64
+	AccountID int64
 	// Channel 是处理该请求的上游渠道（codex/grok），写入时固化，空值表示未知。
 	Channel              string
 	ClientIP             string
@@ -5164,7 +5165,7 @@ func (db *DB) updateCredentialsReadMerge(ctx context.Context, id int64, credenti
 		updateQuery = `UPDATE accounts SET credentials = $1::jsonb, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
 	}
 	if _, err := tx.ExecContext(ctx, updateQuery, credJSON, id); err != nil {
-		return err
+		return wrapOAuthIdentityConstraintError(err)
 	}
 	return tx.Commit()
 }
@@ -5198,7 +5199,7 @@ func (db *DB) updateCredentialsSQLite(ctx context.Context, id int64, credentials
 		)
 		res, err := db.conn.ExecContext(ctx, query, args...)
 		if err != nil {
-			return err
+			return wrapOAuthIdentityConstraintError(err)
 		}
 		affected, err := res.RowsAffected()
 		if err != nil {
@@ -5229,7 +5230,7 @@ func (db *DB) updateCredentialsReadMergeSQLite(ctx context.Context, id int64, cr
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `UPDATE accounts SET credentials = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`, credJSON, id); err != nil {
-		return err
+		return wrapOAuthIdentityConstraintError(err)
 	}
 	return tx.Commit()
 }
@@ -5317,7 +5318,7 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	}
 	res, err := tx.ExecContext(ctx, updateQuery, credJSON, proxyURL, id)
 	if err != nil {
-		return err
+		return wrapOAuthIdentityConstraintError(err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
@@ -5510,7 +5511,7 @@ func (db *DB) RestoreAccount(ctx context.Context, id int64) error {
 	`
 	res, err := db.conn.ExecContext(ctx, query, id)
 	if err != nil {
-		return err
+		return wrapOAuthIdentityConstraintError(err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
@@ -5625,6 +5626,36 @@ func (db *DB) ClearError(ctx context.Context, id int64) error {
 		_, err := db.conn.ExecContext(ctx, query, id)
 		return err
 	})
+}
+
+// ClearErrorIfErrorOrUnauthorized clears only an account that is currently in
+// an error state without another cooldown, or in an unauthorized cooldown.
+// A newer rate-limited or unrelated cooldown is left untouched.
+func (db *DB) ClearErrorIfErrorOrUnauthorized(ctx context.Context, id int64) (bool, error) {
+	var cleared bool
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		result, err := db.conn.ExecContext(ctx, `
+			UPDATE accounts
+			SET status = 'active', error_message = '', cooldown_reason = '', cooldown_until = NULL, updated_at = CURRENT_TIMESTAMP
+			WHERE id = $1
+			  AND status <> 'deleted'
+			  AND COALESCE(error_message, '') <> 'deleted'
+			  AND (
+					(lower(trim(COALESCE(status, ''))) = 'error' AND trim(COALESCE(cooldown_reason, '')) = '')
+					OR lower(trim(COALESCE(cooldown_reason, ''))) = 'unauthorized'
+				  )
+		`, id)
+		if err != nil {
+			return err
+		}
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		cleared = affected > 0
+		return nil
+	})
+	return cleared, err
 }
 
 // SetCooldown 持久化账号冷却状态
@@ -5812,8 +5843,7 @@ func (db *DB) GetAllAccessTokens(ctx context.Context) (map[string]bool, error) {
 	return result, rows.Err()
 }
 
-// GetAllChatGPTAccountIDs 获取所有已存在的 chatgpt_account_id（用于导入去重，排除已删除账号）。
-// 兼容历史字段名：account_id / chatgpt_account_id。
+// GetAllChatGPTAccountIDs 获取所有已存在的 workspace_id（用于导入去重，排除已删除账号）。
 func (db *DB) GetAllChatGPTAccountIDs(ctx context.Context) (map[string]bool, error) {
 	rows, err := db.conn.QueryContext(ctx, `SELECT credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
 	if err != nil {
@@ -5827,11 +5857,7 @@ func (db *DB) GetAllChatGPTAccountIDs(ctx context.Context) (map[string]bool, err
 		if err := rows.Scan(&raw); err != nil {
 			return nil, err
 		}
-		if id := strings.TrimSpace(credentialString(raw, "chatgpt_account_id")); id != "" {
-			result[id] = true
-			continue
-		}
-		if id := strings.TrimSpace(credentialString(raw, "account_id")); id != "" {
+		if id := openaiidentity.NormalizeWorkspaceID(credentialString(raw, "workspace_id")); id != "" {
 			result[id] = true
 		}
 	}
@@ -5839,59 +5865,45 @@ func (db *DB) GetAllChatGPTAccountIDs(ctx context.Context) (map[string]bool, err
 }
 
 // FindActiveAccountByOAuthIdentity returns the first non-deleted account with
-// the same email and OAuth identity. The identity matches when either the
-// ChatGPT workspace id (credential keys account_id / chatgpt_account_id) or
-// the OpenAI user id (credential key user_id, "user-...") equals accountID —
-// personal-plan JWTs may lack a workspace id, and legacy rows may have had
-// account_id polluted with a user_id by the old wham backfill, so matching
-// user_id against account_id keys (and vice versa) keeps dedup working for
-// both shapes.
-func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, accountID string, excludeIDs ...int64) (int64, error) {
+// the same normalized email and non-empty workspace_id. A missing workspace
+// id is intentionally not an OAuth identity and must not match another row.
+func (db *DB) FindActiveAccountByOAuthIdentity(ctx context.Context, email, workspaceID string, excludeIDs ...int64) (int64, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	accountID = strings.TrimSpace(accountID)
-	if email == "" || accountID == "" {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if email == "" || workspaceID == "" || strings.HasPrefix(strings.ToLower(workspaceID), "user-") {
 		return 0, sql.ErrNoRows
 	}
-	excluded := make(map[int64]struct{}, len(excludeIDs))
+	emailExpr := oauthIdentityEmailExpr(db.isSQLite())
+	workspaceExpr := oauthIdentityWorkspaceExpr(db.isSQLite())
+	clauses := []string{
+		"type = 'oauth'",
+		"status <> 'deleted'",
+		"COALESCE(error_message, '') <> 'deleted'",
+		emailExpr + " <> ''",
+		workspaceExpr + " <> ''",
+		"lower(" + workspaceExpr + ") NOT LIKE 'user-%'",
+		fmt.Sprintf("%s = $1", emailExpr),
+		fmt.Sprintf("%s = $2", workspaceExpr),
+	}
+	args := []interface{}{email, workspaceID}
+	var excluded []string
 	for _, id := range excludeIDs {
-		if id > 0 {
-			excluded[id] = struct{}{}
+		if id <= 0 {
+			continue
 		}
+		args = append(args, id)
+		excluded = append(excluded, fmt.Sprintf("$%d", len(args)))
+	}
+	if len(excluded) > 0 {
+		clauses = append(clauses, "id NOT IN ("+strings.Join(excluded, ",")+")")
 	}
 
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, credentials FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`)
-	if err != nil {
+	query := `SELECT id FROM accounts WHERE ` + strings.Join(clauses, " AND ") + ` ORDER BY id LIMIT 1`
+	var id int64
+	if err := db.conn.QueryRowContext(ctx, query, args...).Scan(&id); err != nil {
 		return 0, err
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id int64
-		var raw interface{}
-		if err := rows.Scan(&id, &raw); err != nil {
-			return 0, err
-		}
-		if _, ok := excluded[id]; ok {
-			continue
-		}
-		// 勾选"允许重复添加"强制导入的副本不作为判重锚点：后续正常导入
-		// 应命中/更新主账号，而不是把凭证写进用户故意保留的副本。
-		if strings.EqualFold(strings.TrimSpace(credentialString(raw, "allow_duplicate")), "true") {
-			continue
-		}
-		if strings.ToLower(strings.TrimSpace(credentialString(raw, "email"))) != email {
-			continue
-		}
-		if strings.TrimSpace(credentialString(raw, "account_id")) == accountID ||
-			strings.TrimSpace(credentialString(raw, "chatgpt_account_id")) == accountID ||
-			strings.TrimSpace(credentialString(raw, "user_id")) == accountID {
-			return id, nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return 0, err
-	}
-	return 0, sql.ErrNoRows
+	return id, nil
 }
 
 func (db *DB) GetAllOpenAIAPIKeys(ctx context.Context) (map[string]bool, error) {

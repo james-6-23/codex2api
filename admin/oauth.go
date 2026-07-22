@@ -315,16 +315,10 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 		return 0, nil
 	}
 	seed = normalizeTokenCredentialSeed(seed)
-	// 身份键优先用工作区 ID；个人账号 JWT 可能只有 user_id，此时用它兜底，
-	// 否则 AT 轮换后按原文去重永远失配，同一账号会被重复导入。
-	identity := seed.accountID
-	if identity == "" {
-		identity = seed.userID
-	}
-	if seed.email == "" || identity == "" {
+	if seed.email == "" || seed.workspaceID == "" {
 		return 0, nil
 	}
-	id, err := h.db.FindActiveAccountByOAuthIdentity(ctx, seed.email, identity, excludeID)
+	id, err := h.db.FindActiveAccountByOAuthIdentity(ctx, seed.email, seed.workspaceID, excludeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -334,9 +328,33 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 	return id, nil
 }
 
+func (h *Handler) updateExistingOAuthIdentityAccount(ctx context.Context, duplicateID int64, proxyURL string, seed tokenCredentialSeed, source string) (int64, bool, error) {
+	row, err := h.db.GetAccountByID(ctx, duplicateID)
+	if err != nil {
+		return 0, false, err
+	}
+	effectiveProxyURL := strings.TrimSpace(proxyURL)
+	if effectiveProxyURL == "" {
+		effectiveProxyURL = strings.TrimSpace(row.ProxyURL)
+	}
+	if err := h.db.UpdateOAuthAccountCredentials(ctx, duplicateID, tokenCredentialMap(seed), effectiveProxyURL); err != nil {
+		return 0, false, err
+	}
+	// 条件更新只清除数据库当前仍为 error / unauthorized 的状态，避免旧快照
+	// 覆盖并发 probe 刚写入的 rate_limited 或其他冷却。
+	if _, err := h.db.ClearErrorIfErrorOrUnauthorized(ctx, duplicateID); err != nil {
+		log.Printf("重新导入清除账号 %d 错误状态失败: %v", duplicateID, err)
+	}
+	if err := h.reloadTokenAccount(ctx, duplicateID, source); err != nil {
+		return 0, false, err
+	}
+	h.db.InsertAccountEventAsync(duplicateID, "updated", source)
+	return duplicateID, true, nil
+}
+
 func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string) (int64, bool, error) {
 	seed = normalizeTokenCredentialSeed(seed)
-	if seed.email == "" || (seed.accountID == "" && seed.userID == "") {
+	if seed.email == "" || seed.workspaceID == "" {
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), proxyURL)
 		if err != nil {
 			return 0, false, err
@@ -345,56 +363,29 @@ func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL
 		h.loadInsertedTokenAccount(id, proxyURL, seed, source)
 		return id, false, nil
 	}
+	h.oauthIdentityMu.Lock()
+	defer h.oauthIdentityMu.Unlock()
 
 	if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, 0); err != nil {
 		return 0, false, err
 	} else if duplicateID > 0 {
-		row, err := h.db.GetAccountByID(ctx, duplicateID)
-		if err != nil {
-			return 0, false, err
-		}
-		effectiveProxyURL := strings.TrimSpace(proxyURL)
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = strings.TrimSpace(row.ProxyURL)
-		}
-		if err := h.db.UpdateOAuthAccountCredentials(ctx, duplicateID, tokenCredentialMap(seed), effectiveProxyURL); err != nil {
-			return 0, false, err
-		}
-		// 重新导入有效凭证时，若该账号此前处于错误/封禁（401）态，清除错误状态，
-		// 让重新加载后的运行时账号脱离 banned，并交由后续 probe 重新判定。
-		// 仅针对 error / unauthorized，避免误清合法的限速冷却（rate_limited）。
-		if accountErrorStateNeedsReset(row) {
-			if err := h.db.ClearError(ctx, duplicateID); err != nil {
-				log.Printf("重新导入清除账号 %d 错误状态失败: %v", duplicateID, err)
-			}
-		}
-		if err := h.reloadTokenAccount(ctx, duplicateID, source); err != nil {
-			return 0, false, err
-		}
-		h.db.InsertAccountEventAsync(duplicateID, "updated", source)
-		return duplicateID, true, nil
+		return h.updateExistingOAuthIdentityAccount(ctx, duplicateID, proxyURL, seed, source)
 	}
 
 	id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), proxyURL)
 	if err != nil {
+		if errors.Is(err, database.ErrDuplicateOAuthIdentity) {
+			if duplicateID, lookupErr := h.findOAuthIdentityDuplicate(ctx, seed, 0); lookupErr != nil {
+				return 0, false, lookupErr
+			} else if duplicateID > 0 {
+				return h.updateExistingOAuthIdentityAccount(ctx, duplicateID, proxyURL, seed, source)
+			}
+		}
 		return 0, false, err
 	}
 	h.db.InsertAccountEventAsync(id, "added", source)
 	h.loadInsertedTokenAccount(id, proxyURL, seed, source)
 	return id, false, nil
-}
-
-// accountErrorStateNeedsReset 判断一个已存在账号是否处于"重新导入有效凭证后应清除"的
-// 错误/封禁态：status='error'（RT 失效、鉴权失败等）或 401 unauthorized 冷却。
-// 限速冷却（rate_limited*）不在此列，避免重新导入误清合法的限速窗口。
-func accountErrorStateNeedsReset(row *database.AccountRow) bool {
-	if row == nil {
-		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(row.Status), "error") {
-		return true
-	}
-	return strings.EqualFold(strings.TrimSpace(row.CooldownReason), "unauthorized")
 }
 
 func (h *Handler) loadInsertedTokenAccount(id int64, proxyURL string, seed tokenCredentialSeed, source string) {
@@ -515,6 +506,10 @@ func (h *Handler) UpdateOAuthAccountCode(c *gin.Context) {
 		idToken:      tokenResp.IDToken,
 		expiresIn:    tokenResp.ExpiresIn,
 	})
+	if seed.email != "" && seed.workspaceID != "" {
+		h.oauthIdentityMu.Lock()
+		defer h.oauthIdentityMu.Unlock()
+	}
 	if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, id); err != nil {
 		writeInternalError(c, err)
 		return
@@ -526,6 +521,12 @@ func (h *Handler) UpdateOAuthAccountCode(c *gin.Context) {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "账号不存在")
 			return
+		}
+		if errors.Is(err, database.ErrDuplicateOAuthIdentity) {
+			if duplicateID, lookupErr := h.findOAuthIdentityDuplicate(ctx, seed, id); lookupErr == nil && duplicateID > 0 {
+				writeError(c, http.StatusConflict, oauthIdentityDuplicateMessage(duplicateID))
+				return
+			}
 		}
 		writeError(c, http.StatusInternalServerError, "Token 写入数据库失败: "+err.Error())
 		return

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/openaiidentity"
 	"github.com/google/uuid"
 )
 
@@ -439,12 +440,11 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		store.UpdateAccountPlanType(account, usage.PlanType)
 	}
 	if store != nil {
-		// 只回填真正的工作区 ID。此前 account_id 缺失时用 user_id 兜底写入
-		// account_id 字段，会污染 OAuth 身份去重键（JWT 解出的工作区 ID 与
-		// 库里存的 user-... 永远对不上），导致同一账号重复导入(串号池)。
+		// 只回填真正的工作区 ID。user-* 值会被 NormalizeWorkspaceID 丢弃，
+		// 避免再次污染 workspace_id 身份键并导致同一账号重复导入。
 		// 自定义头覆盖了工作区 ID 时,wham 返回的是覆盖后空间的 ID,
 		// 不能回写进 OAuth 身份字段(会覆盖真实身份并与覆盖值反复打架)。
-		identityAccountID := strings.TrimSpace(usage.AccountID)
+		identityAccountID := openaiidentity.NormalizeWorkspaceID(usage.AccountID)
 		if account.AccountIDOverridden() {
 			identityAccountID = ""
 		}

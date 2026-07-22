@@ -349,7 +349,7 @@ func (db *DB) insertRowID(ctx context.Context, postgresQuery string, sqliteQuery
 	if db.isSQLite() {
 		res, err := db.conn.ExecContext(ctx, sqliteQuery, args...)
 		if err != nil {
-			return 0, err
+			return 0, wrapOAuthIdentityConstraintError(err)
 		}
 		affected, err := res.RowsAffected()
 		if err == nil && affected == 0 {
@@ -360,7 +360,7 @@ func (db *DB) insertRowID(ctx context.Context, postgresQuery string, sqliteQuery
 
 	var id int64
 	err := db.conn.QueryRowContext(ctx, postgresQuery, args...).Scan(&id)
-	return id, err
+	return id, wrapOAuthIdentityConstraintError(err)
 }
 
 // decodeInt64SliceValue parses a JSON array of integers from a JSONB or TEXT column.

@@ -62,6 +62,42 @@ func TestParseImportJSONTokensSupportsFlatArray(t *testing.T) {
 	}
 }
 
+func TestParseImportJSONTokensReadsCodexAuthJSONAndDerivesWorkspaceFromJWT(t *testing.T) {
+	idToken := makeAdminTestJWT(t, map[string]interface{}{
+		"email": "auth@example.com",
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": "workspace-from-token",
+		},
+	})
+	data, err := json.Marshal(map[string]interface{}{
+		"auth_mode": "chatgpt",
+		"tokens": map[string]interface{}{
+			"id_token":      idToken,
+			"access_token":  "opaque-at",
+			"refresh_token": "rt-auth-json",
+			"account_id":    "user-legacy-value",
+		},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("tokens len = %d, want 1", len(tokens))
+	}
+	seed := importTokenSeed(tokens[0])
+	if seed.workspaceID != "workspace-from-token" {
+		t.Fatalf("workspaceID = %q, want workspace-from-token", seed.workspaceID)
+	}
+	if got := importTokenOAuthIdentityKey(tokens[0]); got != "auth@example.com\x00workspace-from-token" {
+		t.Fatalf("identity key = %q, want JWT-derived workspace identity", got)
+	}
+}
+
 func TestParseImportJSONTokensSupportsSub2API(t *testing.T) {
 	data := []byte(`{
 		"exported_at": "2026-04-03T14:49:53Z",
@@ -152,26 +188,20 @@ func TestParseImportJSONTokensSupportsSub2APINumericExpiresAt(t *testing.T) {
 	}
 }
 
-func TestConflictingImportChatGPTIDs(t *testing.T) {
-	tokens := []importToken{
-		{chatgptAccountID: "shared", refreshToken: "rt-1"},
-		{chatgptAccountID: "shared", refreshToken: "rt-2"},
-		{chatgptAccountID: "stable", refreshToken: "rt-3"},
-		{chatgptAccountID: "stable", refreshToken: "rt-3"},
+func TestImportTokenOAuthIdentityUsesJWTWorkspaceOnly(t *testing.T) {
+	token := makeAdminTestJWT(t, map[string]interface{}{
+		"https://api.openai.com/profile": map[string]interface{}{"email": "workspace@example.com"},
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": "workspace-1",
+		},
+	})
+	parsed := importToken{accessToken: token}
+	if got := importTokenOAuthIdentityKey(parsed); got != "workspace@example.com\x00workspace-1" {
+		t.Fatalf("identity key = %q, want email + workspace_id", got)
 	}
-
-	conflicts := conflictingImportChatGPTIDs(tokens)
-	if !conflicts["shared"] {
-		t.Fatal("shared chatgpt_account_id should be marked conflicting")
-	}
-	if conflicts["stable"] {
-		t.Fatal("stable chatgpt_account_id should not be marked conflicting")
-	}
-	if got := reliableImportChatGPTID(tokens[0], conflicts); got != "" {
-		t.Fatalf("reliableImportChatGPTID(shared) = %q, want empty", got)
-	}
-	if got := reliableImportChatGPTID(tokens[2], conflicts); got != "stable" {
-		t.Fatalf("reliableImportChatGPTID(stable) = %q, want stable", got)
+	withoutWorkspace := importToken{email: "workspace@example.com", accessToken: makeAdminTestJWT(t, map[string]interface{}{"email": "workspace@example.com"})}
+	if got := importTokenOAuthIdentityKey(withoutWorkspace); got != "" {
+		t.Fatalf("identity key without workspace = %q, want empty", got)
 	}
 }
 
@@ -231,7 +261,7 @@ func TestParseImportJSONTokensPreservesCPAFields(t *testing.T) {
 	if token.codexUsageUpdatedAt != "2026-05-11T11:39:07+08:00" {
 		t.Fatalf("usageUpdatedAt = %q, want timestamp", token.codexUsageUpdatedAt)
 	}
-	if token.idToken != "id-cpa" || token.accountID != "acc-cpa" || token.expiresAt != "2026-04-25T12:00:00Z" {
+	if token.idToken != "id-cpa" || token.expiresAt != "2026-04-25T12:00:00Z" {
 		t.Fatalf("metadata = %+v, want CPA token metadata preserved", token)
 	}
 }
@@ -412,7 +442,7 @@ func TestImportAccountsJSONRejectsInvalidJSONFile(t *testing.T) {
 	}
 }
 
-func TestImportAccountsCommonDoesNotCollapseConflictingChatGPTAccountID(t *testing.T) {
+func TestImportAccountsCommonDoesNotCollapseOpaqueCredentialsWithoutWorkspaceID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -430,8 +460,8 @@ func TestImportAccountsCommonDoesNotCollapseConflictingChatGPTAccountID(t *testi
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{name: "sub2api-1", refreshToken: "rt-shared-id-1", accessToken: "at-shared-id-1", chatgptAccountID: "same-exported-id"},
-		{name: "sub2api-2", refreshToken: "rt-shared-id-2", accessToken: "at-shared-id-2", chatgptAccountID: "same-exported-id"},
+		{name: "sub2api-1", refreshToken: "rt-shared-id-1", accessToken: "at-shared-id-1"},
+		{name: "sub2api-2", refreshToken: "rt-shared-id-2", accessToken: "at-shared-id-2"},
 	}, "", false)
 
 	rows, err := db.ListActive(context.Background())
@@ -442,9 +472,49 @@ func TestImportAccountsCommonDoesNotCollapseConflictingChatGPTAccountID(t *testi
 		t.Fatalf("active rows = %d, want 2", len(rows))
 	}
 	for _, row := range rows {
-		if got := row.GetCredential("account_id"); got != "" {
-			t.Fatalf("account_id = %q, want empty for conflicting chatgpt_account_id", got)
+		if got := row.GetCredential("workspace_id"); got != "" {
+			t.Fatalf("workspace_id = %q, want empty when JWT cannot be parsed", got)
 		}
+	}
+}
+
+func TestImportAccountsCommonAllowsSameEmailWithoutWorkspaceID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	handler := &Handler{
+		db:    db,
+		store: store,
+		probeUsage: func(context.Context, *auth.Account) error {
+			return nil
+		},
+	}
+	makeAT := func(userID string, exp int64) string {
+		return makeAdminTestJWT(t, map[string]interface{}{
+			"exp": exp,
+			"https://api.openai.com/profile": map[string]interface{}{
+				"email": "same@example.com",
+			},
+			"https://api.openai.com/auth": map[string]interface{}{
+				"user_id": userID,
+			},
+		})
+	}
+
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
+	handler.importAccountsCommon(ctx, []importToken{
+		{accessToken: makeAT("user-1", time.Now().Add(time.Hour).Unix())},
+		{accessToken: makeAT("user-2", time.Now().Add(2*time.Hour).Unix())},
+	}, "", false)
+
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("active rows = %d, want 2 for empty workspace_id", len(rows))
 	}
 }
 
@@ -466,7 +536,7 @@ func TestImportAccountsCommonUpdatesExistingOAuthIdentity(t *testing.T) {
 	existingID, err := db.InsertAccountWithCredentials(context.Background(), "existing", map[string]interface{}{
 		"refresh_token": "rt-old",
 		"email":         "import@example.com",
-		"account_id":    "acc-import",
+		"workspace_id":  "acc-import",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -480,7 +550,7 @@ func TestImportAccountsCommonUpdatesExistingOAuthIdentity(t *testing.T) {
 		refreshToken: "rt-new",
 		accessToken:  "at-new",
 		email:        "Import@Example.com",
-		accountID:    "acc-import",
+		workspaceID:  "acc-import",
 		planType:     "team",
 	}}, "", false)
 
@@ -537,7 +607,7 @@ func TestImportAccountsCommonSkipsExistingOAuthIdentityWithSameCredentials(t *te
 		"session_token": "st-same",
 		"access_token":  "at-same",
 		"email":         "same@example.com",
-		"account_id":    "acc-same",
+		"workspace_id":  "acc-same",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -552,7 +622,7 @@ func TestImportAccountsCommonSkipsExistingOAuthIdentityWithSameCredentials(t *te
 		sessionToken: "st-same",
 		accessToken:  "at-same",
 		email:        "Same@Example.com",
-		accountID:    "acc-same",
+		workspaceID:  "acc-same",
 	}}, "", false)
 
 	var payload map[string]interface{}
@@ -594,7 +664,7 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithExistingAccount(t *t
 	existingID, err := db.InsertAccountWithCredentials(context.Background(), "existing", map[string]interface{}{
 		"refresh_token": "rt-old",
 		"email":         "ambiguous@example.com",
-		"account_id":    "acc-ambiguous",
+		"workspace_id":  "acc-ambiguous",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -605,8 +675,8 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithExistingAccount(t *t
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{refreshToken: "rt-new-1", email: "ambiguous@example.com", accountID: "acc-ambiguous"},
-		{refreshToken: "rt-new-2", email: "Ambiguous@Example.com", accountID: "acc-ambiguous"},
+		{refreshToken: "rt-new-1", email: "ambiguous@example.com", workspaceID: "acc-ambiguous"},
+		{refreshToken: "rt-new-2", email: "Ambiguous@Example.com", workspaceID: "acc-ambiguous"},
 	}, "", false)
 
 	var payload map[string]interface{}
@@ -650,8 +720,8 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithoutExistingAccount(t
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{refreshToken: "rt-new-1", email: "new-ambiguous@example.com", accountID: "acc-new-ambiguous"},
-		{refreshToken: "rt-new-2", email: "New-Ambiguous@Example.com", accountID: "acc-new-ambiguous"},
+		{refreshToken: "rt-new-1", email: "new-ambiguous@example.com", workspaceID: "acc-new-ambiguous"},
+		{refreshToken: "rt-new-2", email: "New-Ambiguous@Example.com", workspaceID: "acc-new-ambiguous"},
 	}, "", false)
 
 	var payload map[string]interface{}
@@ -695,8 +765,8 @@ func TestImportAccountsCommonCollapsesIdenticalOAuthIdentityInFile(t *testing.T)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "same-file@example.com", accountID: "acc-same-file"},
-		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "Same-File@Example.com", accountID: "acc-same-file"},
+		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "same-file@example.com", workspaceID: "acc-same-file"},
+		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "Same-File@Example.com", workspaceID: "acc-same-file"},
 	}, "", false)
 
 	if !strings.Contains(recorder.Body.String(), `"type":"complete"`) ||
@@ -874,7 +944,7 @@ func TestImportAccountsCommonRefreshesOAuthIdentityRTOnlyImport(t *testing.T) {
 	handler.importAccountsCommon(ctx, []importToken{{
 		refreshToken: "rt-oauth-identity-refresh-probe",
 		email:        "identity-refresh@example.com",
-		accountID:    "acc-identity-refresh",
+		workspaceID:  "acc-identity-refresh",
 	}}, "", false)
 
 	select {
@@ -985,9 +1055,8 @@ func newMultipartRequest(t *testing.T, files map[string]string) *http.Request {
 	return req
 }
 
-// TestImportAccountsCommonAllowDuplicateBypassesDedup 验证：勾选"允许重复添加"后，
-// 同一 OAuth 身份会被作为独立账号新建，而不是更新已有账号。
-func TestImportAccountsCommonAllowDuplicateBypassesDedup(t *testing.T) {
+// 已识别 workspace_id 时，即使勾选“允许重复添加”也必须更新已有账号。
+func TestImportAccountsCommonAllowDuplicateDoesNotBypassWorkspaceDedup(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -1003,7 +1072,7 @@ func TestImportAccountsCommonAllowDuplicateBypassesDedup(t *testing.T) {
 	if _, err := db.InsertAccountWithCredentials(context.Background(), "existing", map[string]interface{}{
 		"refresh_token": "rt-dup",
 		"email":         "dup@example.com",
-		"account_id":    "acc-dup",
+		"workspace_id":  "acc-dup",
 	}, ""); err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
 	}
@@ -1015,15 +1084,15 @@ func TestImportAccountsCommonAllowDuplicateBypassesDedup(t *testing.T) {
 	handler.importAccountsCommon(ctx, []importToken{{
 		refreshToken: "rt-dup-2",
 		email:        "dup@example.com",
-		accountID:    "acc-dup",
+		workspaceID:  "acc-dup",
 	}}, "", true)
 
 	rows, err := db.ListActive(context.Background())
 	if err != nil {
 		t.Fatalf("ListActive: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("active rows = %d, want 2 (duplicate allowed)", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1 for a known workspace identity", len(rows))
 	}
 }
 
@@ -1148,7 +1217,8 @@ func TestAddATAccountCountsUpdateNotNew(t *testing.T) {
 	}
 }
 
-// 先导入 AT（个人账号，只有 user_id 身份），后导入裸 RT——RT 刷新后身份可知，// 应把新凭证合并进已有 AT 账号（RT 升级）、软删新账号，且旧账号的用量快照保留。
+// 先导入 AT，后导入裸 RT——两者 workspace_id 相同，应把新凭证合并进已有
+// AT 账号（RT 升级）、软删新账号，且旧账号的用量快照保留。
 func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1160,7 +1230,7 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	oldID, err := db.InsertAccountWithCredentials(context.Background(), "at-first", map[string]interface{}{
 		"access_token":          "at-rotation-1",
 		"email":                 "solo@example.com",
-		"user_id":               "user-merge1",
+		"workspace_id":          "workspace-merge1",
 		"codex_7d_used_percent": "42.5",
 	}, "")
 	if err != nil {
@@ -1171,13 +1241,19 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	newID, err := db.InsertAccountWithCredentials(context.Background(), "rt-later", map[string]interface{}{
 		"refresh_token": "rt-fresh",
 		"access_token":  "at-rotation-2",
-		"email":         "solo@example.com",
-		"user_id":       "user-merge1",
+		"custom_headers": map[string]string{
+			"X-Import-Source": "rt-later",
+		},
 	}, "")
 	if err != nil {
 		t.Fatalf("Insert new: %v", err)
 	}
-	store.AddAccount(&auth.Account{DBID: newID, RefreshToken: "rt-fresh"})
+	store.AddAccount(&auth.Account{
+		DBID:         newID,
+		RefreshToken: "rt-fresh",
+		Email:        "solo@example.com",
+		AccountID:    "workspace-merge1",
+	})
 
 	if merged := handler.mergeRefreshedDuplicateIntoExisting(newID, "test"); !merged {
 		t.Fatal("expected duplicate to be merged into existing account")
@@ -1195,6 +1271,9 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	}
 	if got := oldRow.GetCredential("codex_7d_used_percent"); got != "42.5" {
 		t.Fatalf("codex_7d_used_percent = %q, want 42.5 (用量统计必须保留)", got)
+	}
+	if got := oldRow.GetCredentialStringMap("custom_headers"); len(got) != 1 || got["X-Import-Source"] != "rt-later" {
+		t.Fatalf("custom_headers = %#v, want imported headers", got)
 	}
 
 	rows, err := db.ListActive(context.Background())
@@ -1220,7 +1299,7 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	oldID, err := db.InsertAccountWithCredentials(context.Background(), "at-first", map[string]interface{}{
 		"access_token":          "at-old",
 		"email":                 "solo@example.com",
-		"account_id":            "user-probe1",
+		"workspace_id":          "workspace-probe1",
 		"codex_7d_used_percent": "37.0",
 	}, "")
 	if err != nil {
@@ -1236,9 +1315,9 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	}
 	store.AddAccount(&auth.Account{DBID: newID, AccessToken: "at-new", Status: auth.StatusReady})
 
-	// 模拟 wham 探针：补齐 email + account_id（与旧账号同一身份）并落库。
+	// 模拟 wham 探针：补齐 email + workspace_id 并落库。
 	handler.probeUsage = func(ctx context.Context, acc *auth.Account) error {
-		store.UpdateAccountIdentity(acc, "solo@example.com", "user-probe1")
+		store.UpdateAccountIdentity(acc, "solo@example.com", "workspace-probe1")
 		return nil
 	}
 
@@ -1264,8 +1343,9 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	}
 }
 
-// 勾选"允许重复添加"导入的 RT 账号刷新后不得被合并。
-func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {	gin.SetMode(gin.TestMode)
+// 同邮箱、同 user_id 但缺少 workspace_id 的账号允许同时存在。
+func TestMergeRefreshedDuplicateAllowsMissingWorkspaceID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
 	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
@@ -1289,14 +1369,14 @@ func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {	gin.SetMode(
 	}
 
 	if merged := handler.mergeRefreshedDuplicateIntoExisting(forcedID, "test"); merged {
-		t.Fatal("allow_duplicate copy must not be merged")
+		t.Fatal("account without workspace_id must not be merged")
 	}
 	rows, err := db.ListActive(context.Background())
 	if err != nil {
 		t.Fatalf("ListActive: %v", err)
 	}
 	if len(rows) != 2 {
-		t.Fatalf("active rows = %d, want 2 (forced copy preserved)", len(rows))
+		t.Fatalf("active rows = %d, want 2 (empty workspace identities may repeat)", len(rows))
 	}
 }
 

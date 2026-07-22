@@ -382,7 +382,7 @@
     "importFile": "Import",
     "importing": "Importing…",
     "importTitle": "Select Import Method",
-    "allowDuplicate": "Allow duplicates (skip dedup, force new)",
+    "allowDuplicate": "Allow duplicates for unknown workspaces (known ones stay unique)",
     "importProxyLabel": "Proxy for Imported Accounts (optional)",
     "importProxyHint": "Applied to every account in this import. Leave blank to import without a proxy.",
     "importTxt": "TXT File",

@@ -19,7 +19,7 @@ func TestRefreshAccountByIDTriggersUsageProbe(t *testing.T) {
 		"refresh_token": "rt-renew",
 		"access_token":  "at-renew",
 		"email":         "renew@example.com",
-		"account_id":    "acc-renew",
+		"workspace_id":  "acc-renew",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)

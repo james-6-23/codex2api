@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -204,7 +206,7 @@ func TestExchangeOAuthCodeUpdatesDuplicateOAuthIdentity(t *testing.T) {
 	existingID, err := db.InsertAccountWithCredentials(context.Background(), "existing", map[string]interface{}{
 		"refresh_token": "existing-refresh",
 		"email":         "duplicate@example.com",
-		"account_id":    "acc-duplicate",
+		"workspace_id":  "acc-duplicate",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -263,6 +265,97 @@ func TestExchangeOAuthCodeUpdatesDuplicateOAuthIdentity(t *testing.T) {
 	}
 	if account := store.FindByID(existingID); account == nil {
 		t.Fatalf("runtime account %d not found after update", existingID)
+	}
+}
+
+func TestUpsertOAuthIdentitySerializesConcurrentWorkspaceImports(t *testing.T) {
+	db := newTestAdminDB(t)
+	handler := &Handler{db: db}
+	const workers = 20
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _, err := handler.upsertOAuthIdentityAccount(context.Background(), fmt.Sprintf("account-%d", i), "", tokenCredentialSeed{
+				accessToken: fmt.Sprintf("at-%d", i),
+				email:       "same@example.com",
+				workspaceID: "workspace-concurrent",
+			}, "test")
+			errs <- err
+		}(i)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("upsertOAuthIdentityAccount: %v", err)
+		}
+	}
+	rows, err := db.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1", len(rows))
+	}
+}
+
+func TestUpsertOAuthIdentityAcrossHandlersUsesDatabaseConstraint(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "oauth-concurrent.sqlite")
+	db1, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New db1: %v", err)
+	}
+	defer db1.Close()
+	db2, err := database.New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("database.New db2: %v", err)
+	}
+	defer db2.Close()
+
+	type result struct {
+		id      int64
+		updated bool
+		err     error
+	}
+	start := make(chan struct{})
+	results := make(chan result, 2)
+	upsert := func(handler *Handler, token string) {
+		<-start
+		id, updated, err := handler.upsertOAuthIdentityAccount(context.Background(), "concurrent", "", tokenCredentialSeed{
+			accessToken: token,
+			email:       "multi-handler@example.com",
+			workspaceID: "workspace-multi-handler",
+		}, "test")
+		results <- result{id: id, updated: updated, err: err}
+	}
+
+	go upsert(&Handler{db: db1}, "at-handler-1")
+	go upsert(&Handler{db: db2}, "at-handler-2")
+	close(start)
+
+	first := <-results
+	second := <-results
+	for _, got := range []result{first, second} {
+		if got.err != nil {
+			t.Fatalf("upsertOAuthIdentityAccount: %v", got.err)
+		}
+	}
+	if first.id <= 0 || first.id != second.id {
+		t.Fatalf("upsert ids = %d/%d, want same positive id", first.id, second.id)
+	}
+	if first.updated == second.updated {
+		t.Fatalf("updated flags = %v/%v, want one insert and one update", first.updated, second.updated)
+	}
+
+	rows, err := db1.ListActive(context.Background())
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != first.id {
+		t.Fatalf("active rows = %#v, want one row id %d", rows, first.id)
 	}
 }
 
@@ -525,7 +618,7 @@ func TestUpdateOAuthAccountCodeRejectsDuplicateOAuthIdentity(t *testing.T) {
 	targetID, err := db.InsertAccountWithCredentials(context.Background(), "target", map[string]interface{}{
 		"refresh_token": "target-refresh",
 		"email":         "target@example.com",
-		"account_id":    "acc-target",
+		"workspace_id":  "acc-target",
 	}, "")
 	if err != nil {
 		t.Fatalf("Insert target: %v", err)
@@ -533,7 +626,7 @@ func TestUpdateOAuthAccountCodeRejectsDuplicateOAuthIdentity(t *testing.T) {
 	duplicateID, err := db.InsertAccountWithCredentials(context.Background(), "duplicate", map[string]interface{}{
 		"refresh_token": "duplicate-refresh",
 		"email":         "duplicate@example.com",
-		"account_id":    "acc-duplicate",
+		"workspace_id":  "acc-duplicate",
 	}, "")
 	if err != nil {
 		t.Fatalf("Insert duplicate: %v", err)
@@ -688,7 +781,7 @@ func TestUpsertOAuthIdentityAccountClearsBanOnReimport(t *testing.T) {
 		"refresh_token": "old-refresh",
 		"access_token":  "old-access",
 		"email":         "banned@example.com",
-		"account_id":    "acc-banned",
+		"workspace_id":  "acc-banned",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -714,7 +807,7 @@ func TestUpsertOAuthIdentityAccountClearsBanOnReimport(t *testing.T) {
 	seed := tokenCredentialSeed{
 		accessToken: "fresh-access",
 		email:       "banned@example.com",
-		accountID:   "acc-banned",
+		workspaceID: "acc-banned",
 	}
 	newID, updated, err := handler.upsertOAuthIdentityAccount(ctx, "banned", "", seed, "manual_at")
 	if err != nil {

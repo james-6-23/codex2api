@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/codex2api/internal/openaiidentity"
 )
 
 // OpenAI OAuth 常量（与 CLIProxyAPI / sub2api 一致）
@@ -139,7 +140,7 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	info := parseIDToken(tokenResp.IDToken)
 
 	// 回退：如果 id_token 中缺少字段，尝试从 access_token 提取
-	if tokenResp.AccessToken != "" && (info.PlanType == "" || info.SubscriptionExpiresAt.IsZero()) {
+	if tokenResp.AccessToken != "" && (info.Email == "" || info.ChatGPTAccountID == "" || info.UserID == "" || info.PlanType == "" || info.SubscriptionExpiresAt.IsZero()) {
 		if atInfo := ParseAccessToken(tokenResp.AccessToken); atInfo != nil {
 			if info.PlanType == "" && atInfo.PlanType != "" {
 				log.Printf("[token] id_token 缺少 plan_type，从 access_token 回退获取: %s", atInfo.PlanType)
@@ -151,6 +152,9 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 			}
 			if info.ChatGPTAccountID == "" && atInfo.ChatGPTAccountID != "" {
 				info.ChatGPTAccountID = atInfo.ChatGPTAccountID
+			}
+			if info.UserID == "" && atInfo.UserID != "" {
+				info.UserID = atInfo.UserID
 			}
 			if info.SubscriptionExpiresAt.IsZero() && !atInfo.SubscriptionExpiresAt.IsZero() {
 				info.SubscriptionExpiresAt = atInfo.SubscriptionExpiresAt
@@ -331,48 +335,18 @@ func isNonRetryable(err error) bool {
 
 // parseIDToken 解析 JWT id_token 的 payload（不验签）
 func parseIDToken(idToken string) *AccountInfo {
-	if idToken == "" {
-		return &AccountInfo{}
-	}
-
-	parts := strings.Split(idToken, ".")
-	if len(parts) != 3 {
-		return &AccountInfo{}
-	}
-
-	payload := parts[1]
-	switch len(payload) % 4 {
-	case 2:
-		payload += "=="
-	case 3:
-		payload += "="
-	}
-
-	decoded, err := base64.URLEncoding.DecodeString(payload)
+	claims, err := openaiidentity.ParseJWT(idToken)
 	if err != nil {
-		decoded, err = base64.StdEncoding.DecodeString(payload)
-		if err != nil {
-			return &AccountInfo{}
-		}
-	}
-
-	var claims struct {
-		Email      string `json:"email"`
-		OpenAIAuth *struct {
-			ChatGPTAccountID               string `json:"chatgpt_account_id"`
-			UserID                         string `json:"user_id"`
-			ChatGPTUserID                  string `json:"chatgpt_user_id"`
-			PlanType                       string `json:"chatgpt_plan_type"`
-			ChatGPTSubscriptionActiveUntil string `json:"chatgpt_subscription_active_until"`
-		} `json:"https://api.openai.com/auth"`
-	}
-	if err := json.Unmarshal(decoded, &claims); err != nil {
 		return &AccountInfo{}
 	}
 
-	info := &AccountInfo{Email: claims.Email}
+	profileEmail := ""
+	if claims.OpenAIProfile != nil {
+		profileEmail = claims.OpenAIProfile.Email
+	}
+	info := &AccountInfo{Email: firstNonEmptyTrimmed(claims.Email, profileEmail)}
 	if claims.OpenAIAuth != nil {
-		info.ChatGPTAccountID = claims.OpenAIAuth.ChatGPTAccountID
+		info.ChatGPTAccountID = claims.WorkspaceID()
 		info.UserID = firstNonEmptyTrimmed(claims.OpenAIAuth.UserID, claims.OpenAIAuth.ChatGPTUserID)
 		info.PlanType = claims.OpenAIAuth.PlanType
 		if s := claims.OpenAIAuth.ChatGPTSubscriptionActiveUntil; s != "" {
@@ -406,45 +380,8 @@ func firstNonEmptyTrimmed(values ...string) string {
 // ParseAccessToken 解析 Access Token 的 JWT payload（不验签）
 // AT 的 email 在 https://api.openai.com/profile 下，与 id_token 不同
 func ParseAccessToken(accessToken string) *AccessTokenInfo {
-	if accessToken == "" {
-		return nil
-	}
-
-	parts := strings.Split(accessToken, ".")
-	if len(parts) != 3 {
-		return nil
-	}
-
-	payload := parts[1]
-	switch len(payload) % 4 {
-	case 2:
-		payload += "=="
-	case 3:
-		payload += "="
-	}
-
-	decoded, err := base64.URLEncoding.DecodeString(payload)
+	claims, err := openaiidentity.ParseJWT(accessToken)
 	if err != nil {
-		decoded, err = base64.StdEncoding.DecodeString(payload)
-		if err != nil {
-			return nil
-		}
-	}
-
-	var claims struct {
-		Exp        int64 `json:"exp"`
-		OpenAIAuth *struct {
-			ChatGPTAccountID               string `json:"chatgpt_account_id"`
-			UserID                         string `json:"user_id"`
-			ChatGPTUserID                  string `json:"chatgpt_user_id"`
-			PlanType                       string `json:"chatgpt_plan_type"`
-			ChatGPTSubscriptionActiveUntil string `json:"chatgpt_subscription_active_until"`
-		} `json:"https://api.openai.com/auth"`
-		OpenAIProfile *struct {
-			Email string `json:"email"`
-		} `json:"https://api.openai.com/profile"`
-	}
-	if err := json.Unmarshal(decoded, &claims); err != nil {
 		return nil
 	}
 
@@ -453,7 +390,7 @@ func ParseAccessToken(accessToken string) *AccessTokenInfo {
 		info.Email = claims.OpenAIProfile.Email
 	}
 	if claims.OpenAIAuth != nil {
-		info.ChatGPTAccountID = claims.OpenAIAuth.ChatGPTAccountID
+		info.ChatGPTAccountID = claims.WorkspaceID()
 		info.UserID = firstNonEmptyTrimmed(claims.OpenAIAuth.UserID, claims.OpenAIAuth.ChatGPTUserID)
 		info.PlanType = claims.OpenAIAuth.PlanType
 		if s := claims.OpenAIAuth.ChatGPTSubscriptionActiveUntil; s != "" {
@@ -462,8 +399,8 @@ func ParseAccessToken(accessToken string) *AccessTokenInfo {
 			}
 		}
 	}
-	if claims.Exp > 0 {
-		info.ExpiresAt = time.Unix(claims.Exp, 0)
+	if claims.ExpiresAt > 0 {
+		info.ExpiresAt = time.Unix(claims.ExpiresAt, 0)
 	}
 	return info
 }

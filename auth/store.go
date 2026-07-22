@@ -19,6 +19,7 @@ import (
 
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/security/promptfilter"
 )
 
@@ -493,6 +494,16 @@ func (a *Account) EffectiveAccountID() string {
 		return v
 	}
 	return strings.TrimSpace(a.AccountID)
+}
+
+// OAuthIdentity 返回运行时缓存中的 email 和 workspace_id。
+func (a *Account) OAuthIdentity() (email, workspaceID string) {
+	if a == nil {
+		return "", ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return strings.TrimSpace(a.Email), strings.TrimSpace(a.AccountID)
 }
 
 // AccountIDOverridden 判断自定义请求头是否把流量导向了与 OAuth 身份不同的空间。
@@ -3885,8 +3896,19 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 
 	// 尝试从 credentials 恢复已有的 AT
 	if at != "" {
+		workspaceID := openaiidentity.NormalizeWorkspaceID(row.GetCredential("workspace_id"))
+		if workspaceID == "" {
+			if info := ParseIDToken(row.GetCredential("id_token")); info != nil {
+				workspaceID = openaiidentity.NormalizeWorkspaceID(info.ChatGPTAccountID)
+			}
+			if workspaceID == "" {
+				if info := ParseAccessToken(at); info != nil {
+					workspaceID = openaiidentity.NormalizeWorkspaceID(info.ChatGPTAccountID)
+				}
+			}
+		}
 		account.AccessToken = at
-		account.AccountID = row.GetCredential("account_id")
+		account.AccountID = workspaceID
 		account.Email = row.GetCredential("email")
 		account.PlanType = row.GetCredential("plan_type")
 		if account.Status != StatusError {
@@ -6666,14 +6688,14 @@ func (s *Store) UpdateAccountPlanType(acc *Account, planType string) bool {
 	return changed
 }
 
-// UpdateAccountIdentity persists account identity observed from upstream usage APIs.
-func (s *Store) UpdateAccountIdentity(acc *Account, email, accountID string) bool {
+// UpdateAccountIdentity persists the workspace identity observed from upstream usage APIs.
+func (s *Store) UpdateAccountIdentity(acc *Account, email, workspaceID string) bool {
 	if s == nil || acc == nil {
 		return false
 	}
 	email = strings.TrimSpace(email)
-	accountID = strings.TrimSpace(accountID)
-	if email == "" && accountID == "" {
+	workspaceID = openaiidentity.NormalizeWorkspaceID(workspaceID)
+	if email == "" && workspaceID == "" {
 		return false
 	}
 
@@ -6685,9 +6707,9 @@ func (s *Store) UpdateAccountIdentity(acc *Account, email, accountID string) boo
 		fields["email"] = email
 		changed = true
 	}
-	if accountID != "" && acc.AccountID != accountID {
-		acc.AccountID = accountID
-		fields["account_id"] = accountID
+	if workspaceID != "" && acc.AccountID != workspaceID {
+		acc.AccountID = workspaceID
+		fields["workspace_id"] = workspaceID
 		changed = true
 	}
 	acc.mu.Unlock()
@@ -7555,7 +7577,7 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	}
 	if info != nil {
 		if info.ChatGPTAccountID != "" {
-			credentials["account_id"] = info.ChatGPTAccountID
+			credentials["workspace_id"] = info.ChatGPTAccountID
 		}
 		if info.Email != "" {
 			credentials["email"] = info.Email

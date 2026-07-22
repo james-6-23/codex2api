@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,25 @@ func TestParseIDTokenMissingAuthClaim(t *testing.T) {
 	info := parseIDToken(jwt)
 	if info.PlanType != "" {
 		t.Fatalf("PlanType = %q, want empty", info.PlanType)
+	}
+}
+
+func TestParseIDTokenUsesProfileEmailFallback(t *testing.T) {
+	jwt := makeTestJWT(map[string]interface{}{
+		"https://api.openai.com/profile": map[string]interface{}{
+			"email": "profile@example.com",
+		},
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": "workspace-profile-email",
+		},
+	})
+
+	info := parseIDToken(jwt)
+	if info.Email != "profile@example.com" {
+		t.Fatalf("Email = %q, want profile@example.com", info.Email)
+	}
+	if info.ChatGPTAccountID != "workspace-profile-email" {
+		t.Fatalf("ChatGPTAccountID = %q, want workspace-profile-email", info.ChatGPTAccountID)
 	}
 }
 
@@ -103,6 +123,41 @@ func TestRefreshAccessTokenRejectsEmptyAccessToken(t *testing.T) {
 	}
 }
 
+func TestRefreshAccessTokenSupplementsWorkspaceFromAccessToken(t *testing.T) {
+	idToken := makeTestJWT(map[string]interface{}{
+		"email": "id@example.com",
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_plan_type":                 "pro",
+			"chatgpt_subscription_active_until": time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339),
+		},
+	})
+	accessToken := makeTestJWT(map[string]interface{}{
+		"exp":                            time.Now().Add(time.Hour).Unix(),
+		"https://api.openai.com/profile": map[string]interface{}{"email": "id@example.com"},
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": "workspace-from-at",
+			"chatgpt_plan_type":  "pro",
+		},
+	})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"access_token":%q,"refresh_token":"rt-new","id_token":%q,"expires_in":3600}`, accessToken, idToken)
+	}))
+	defer server.Close()
+
+	oldDecorator := ResinRequestDecorator
+	ResinRequestDecorator = func(targetURL, accountID string) string { return server.URL }
+	defer func() { ResinRequestDecorator = oldDecorator }()
+
+	_, info, err := RefreshAccessToken(context.Background(), "rt-old", "", "account-1")
+	if err != nil {
+		t.Fatalf("RefreshAccessToken returned error: %v", err)
+	}
+	if info.ChatGPTAccountID != "workspace-from-at" {
+		t.Fatalf("ChatGPTAccountID = %q, want workspace-from-at", info.ChatGPTAccountID)
+	}
+}
+
 func TestRefreshTokenReusedIsNonRetryable(t *testing.T) {
 	reusedErr := errors.New(`刷新失败 (status 401): {"error":{"code":"refresh_token_reused"}}`)
 	if !isNonRetryable(reusedErr) {
@@ -154,7 +209,7 @@ func TestRefreshWithSessionToken(t *testing.T) {
 }
 
 // 个人账号 JWT 可能没有 chatgpt_account_id，只有 user_id；解析必须带出它，
-// 供 AT 导入按 email+user_id 做身份去重（重复导入问题）。
+// 供 AT 导入保存用户元数据；user_id 不再作为身份去重键。
 func TestParseAccessTokenExtractsUserID(t *testing.T) {
 	jwt := makeTestJWT(map[string]interface{}{
 		"exp": 9999999999,

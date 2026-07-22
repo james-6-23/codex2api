@@ -53,8 +53,8 @@ func TestNormalizeTokenCredentialSeedTreatsCodexATAsOpaque(t *testing.T) {
 	if seed.accessTokenType != accessTokenTypeCodexAT {
 		t.Fatalf("accessTokenType = %q, want %q", seed.accessTokenType, accessTokenTypeCodexAT)
 	}
-	if seed.email != "" || seed.accountID != "" || seed.planType != "" {
-		t.Fatalf("codex_at parsed JWT fields: email=%q accountID=%q planType=%q", seed.email, seed.accountID, seed.planType)
+	if seed.email != "" || seed.workspaceID != "" || seed.planType != "" {
+		t.Fatalf("codex_at parsed JWT fields: email=%q workspaceID=%q planType=%q", seed.email, seed.workspaceID, seed.planType)
 	}
 	if seed.expiresAt.Before(before.Add(50*time.Minute)) || seed.expiresAt.After(before.Add(70*time.Minute)) {
 		t.Fatalf("expiresAt = %s, want fallback around 1h from now", seed.expiresAt)
@@ -67,7 +67,7 @@ func TestNormalizeTokenCredentialSeedTreatsCodexATAsOpaque(t *testing.T) {
 	if _, ok := credentials["email"]; ok {
 		t.Fatalf("credentials should not include email for opaque codex_at: %#v", credentials)
 	}
-	if _, ok := credentials["account_id"]; ok {
-		t.Fatalf("credentials should not include account_id for opaque codex_at: %#v", credentials)
+	if _, ok := credentials["workspace_id"]; ok {
+		t.Fatalf("credentials should not include workspace_id for opaque codex_at: %#v", credentials)
 	}
 }

@@ -123,7 +123,7 @@ func (h *Handler) PreviewSub2APIAccounts(c *gin.Context) {
 }
 
 // ImportFromSub2API 从 sub2api 拉取账号并按 scope 导入到本系统。
-// 复用 importAccountsCommon 的 SSE 进度推送、chatgpt_account_id 去重等逻辑。
+// 复用 importAccountsCommon 的 SSE 进度推送、JWT workspace_id 去重等逻辑。
 func (h *Handler) ImportFromSub2API(c *gin.Context) {
 	var req sub2apiImportRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -226,7 +226,7 @@ func fetchSub2APISummaries(ctx context.Context, baseURL, apiKey string) ([]sub2a
 			Credentials: dataAcc.Credentials,
 		}
 		if dataAcc.Credentials != nil {
-			merged.ChatGPTAccountID = stringFromMap(dataAcc.Credentials, "chatgpt_account_id", "account_id")
+			merged.ChatGPTAccountID = sub2apiWorkspaceID(dataAcc.Credentials)
 			merged.Email = stringFromMap(dataAcc.Credentials, "email")
 			merged.PlanType = stringFromMap(dataAcc.Credentials, "plan_type")
 		}
@@ -241,6 +241,17 @@ func fetchSub2APISummaries(ctx context.Context, baseURL, apiKey string) ([]sub2a
 		out = append(out, merged)
 	}
 	return out, nil
+}
+
+func sub2apiWorkspaceID(credentials map[string]interface{}) string {
+	if credentials == nil {
+		return ""
+	}
+	seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
+		idToken:     stringFromMap(credentials, "id_token", "idToken"),
+		accessToken: stringFromMap(credentials, "access_token", "accessToken"),
+	})
+	return seed.workspaceID
 }
 
 // summarizeSub2API 从聚合数据生成给前端的预览统计 + 列表。
@@ -313,9 +324,7 @@ func sub2apiAccountToImportToken(a sub2apiAccountInternal) (importToken, bool) {
 		accessToken:           at,
 		name:                  a.Name,
 		email:                 a.Email,
-		idToken:               stringFromMap(c, "id_token"),
-		accountID:             stringFromMap(c, "account_id"),
-		chatgptAccountID:      a.ChatGPTAccountID,
+		idToken:               stringFromMap(c, "id_token", "idToken"),
 		planType:              a.PlanType,
 		expiresAt:             stringFromMap(c, "expires_at"),
 		codex7DUsedPercent:    stringFromMap(c, "codex_7d_used_percent"),

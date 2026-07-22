@@ -228,8 +228,35 @@ func TestApplyWhamUsage_PersistsIdentity(t *testing.T) {
 	if got := row.GetCredential("email"); got != "wham@example.com" {
 		t.Fatalf("credentials.email = %q, want wham@example.com", got)
 	}
-	if got := row.GetCredential("account_id"); got != "account-from-wham" {
-		t.Fatalf("credentials.account_id = %q, want account-from-wham", got)
+	if got := row.GetCredential("workspace_id"); got != "account-from-wham" {
+		t.Fatalf("credentials.workspace_id = %q, want account-from-wham", got)
+	}
+}
+
+func TestApplyWhamUsage_DoesNotPersistUserIDAsWorkspace(t *testing.T) {
+	ctx := context.Background()
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+	id, err := db.InsertAccountWithCredentials(ctx, "at-only", map[string]interface{}{"access_token": "at"}, "")
+	if err != nil {
+		t.Fatalf("InsertAccountWithCredentials: %v", err)
+	}
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: id, AccessToken: "at"}
+
+	ApplyWhamUsage(store, account, &WhamUsage{AccountID: "user-not-workspace", Email: "user@example.com"})
+	if account.AccountID != "" {
+		t.Fatalf("account.AccountID = %q, want empty", account.AccountID)
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if got := row.GetCredential("workspace_id"); got != "" {
+		t.Fatalf("credentials.workspace_id = %q, want empty", got)
 	}
 }
 
