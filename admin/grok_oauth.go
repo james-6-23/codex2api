@@ -253,17 +253,7 @@ func (h *Handler) PollGrokDeviceAuth(c *gin.Context) {
 		return
 	}
 
-	if h.probeUsage != nil {
-		go func(accountID int64) {
-			acc := h.store.FindByID(accountID)
-			if acc == nil {
-				return
-			}
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 25*time.Second)
-			defer probeCancel()
-			_ = h.probeUsage(probeCtx, acc)
-		}(id)
-	}
+	h.triggerGrokUsageProbe(id)
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":  "authorized",

@@ -109,13 +109,13 @@ func (s *Store) ScheduleAccountRefresh(acc *Account) {
 	}
 
 	// 回退到传统方式：立即刷新
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	s.startDBBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		defer cancel()
 		if err := s.refreshAccount(ctx, acc); err != nil {
 			log.Printf("[账号 %d] 异步刷新失败: %v", acc.DBID, err)
 		}
-	}()
+	})
 }
 
 // ScheduleImmediateRefresh 立即调度账号刷新

@@ -502,8 +502,12 @@ func main() {
 	}
 	adminHandler.WaitAutoResetCredits()
 	wsKeepalive.Stop()
-	store.Stop()
 	wsrelay.ShutdownExecutor()
+	store.Stop()
+	// 所有请求入口和后台生产者停止后，再排空仍可能访问 Store、缓存或数据库的短任务。
+	if !db.DrainBackgroundTasks(2 * time.Second) {
+		log.Printf("部分后台任务未在关闭窗口内退出")
+	}
 	proxy.CloseErrorLogger()
 	log.Println("已关闭")
 }

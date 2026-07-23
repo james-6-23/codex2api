@@ -241,17 +241,6 @@ func normalizeExternalImageJobInputs(ctx context.Context, req *imageGenerationJo
 	return nil
 }
 
-func normalizeExternalImageJobPayload(ctx context.Context, req *imageGenerationJobPayload) (bool, error) {
-	editMode, err := normalizeExternalImageJobFields(req)
-	if err != nil {
-		return false, err
-	}
-	if err := normalizeExternalImageJobInputs(ctx, req); err != nil {
-		return false, err
-	}
-	return editMode, nil
-}
-
 const (
 	externalInputImageFetchTimeout  = 20 * time.Second
 	externalInputImageMaxBytes      = 20 << 20

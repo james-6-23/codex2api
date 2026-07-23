@@ -25,7 +25,7 @@ func (h *Handler) StartGrokStatusProbe(ctx context.Context) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	go func() {
+	h.startDBBackgroundTaskWithParent(ctx, func(ctx context.Context) {
 		ticker := time.NewTicker(time.Minute)
 		defer ticker.Stop()
 		var lastRun time.Time
@@ -45,7 +45,24 @@ func (h *Handler) StartGrokStatusProbe(ctx context.Context) {
 			lastRun = time.Now()
 			h.runGrokStatusProbe(ctx)
 		}
-	}()
+	})
+}
+
+// triggerGrokUsageProbe schedules the short post-import billing probe under
+// the database lifecycle so it cannot outlive account persistence on shutdown.
+func (h *Handler) triggerGrokUsageProbe(accountID int64) {
+	if h == nil || h.store == nil || h.probeUsage == nil {
+		return
+	}
+	h.startDBBackgroundTask(func(parent context.Context) {
+		account := h.store.FindByID(accountID)
+		if account == nil {
+			return
+		}
+		probeCtx, cancel := context.WithTimeout(parent, 25*time.Second)
+		defer cancel()
+		_ = h.probeUsage(probeCtx, account)
+	})
 }
 
 // runGrokStatusProbe 对所有未停用的 Grok 账号跑一轮写状态的连通性测试。

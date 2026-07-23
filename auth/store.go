@@ -2470,6 +2470,8 @@ type Store struct {
 	lazyRefreshInFlight sync.Map
 	stopCh              chan struct{}
 	stopOnce            sync.Once
+	backgroundCtx       context.Context
+	backgroundCancel    context.CancelFunc
 	wg                  sync.WaitGroup
 
 	// 代理池
@@ -2939,6 +2941,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 			SmartPacingWindows:                 "5h,7d",
 		}
 	}
+	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	s := &Store{
 		globalProxy:             settings.ProxyURL,
 		maxConcurrency:          int64(settings.MaxConcurrency),
@@ -2948,6 +2951,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		backgroundRefreshWakeCh: make(chan struct{}, 1),
 		boundaryProbeWakeCh:     make(chan struct{}, 1),
 		stopCh:                  make(chan struct{}),
+		backgroundCtx:           backgroundCtx,
+		backgroundCancel:        backgroundCancel,
 		proxyPoolEnabled:        settings.ProxyPoolEnabled,
 		sessionBindings:         make(map[string]sessionAffinity),
 	}
@@ -4053,6 +4058,10 @@ func (s *Store) LoadAccountByID(ctx context.Context, dbID int64) error {
 
 // StartBackgroundRefresh 启动后台定期刷新
 func (s *Store) StartBackgroundRefresh() {
+	backgroundCtx := s.backgroundCtx
+	if backgroundCtx == nil {
+		backgroundCtx = context.Background()
+	}
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
@@ -4093,7 +4102,7 @@ func (s *Store) StartBackgroundRefresh() {
 				if s.GetLazyMode() {
 					s.TriggerUsageProbeAsync()
 				} else {
-					s.parallelRefreshAll(context.Background())
+					s.parallelRefreshAll(backgroundCtx)
 					s.TriggerUsageProbeAsync()
 					s.TriggerRecoveryProbeAsync()
 				}
@@ -4114,12 +4123,16 @@ func (s *Store) StartBackgroundRefresh() {
 				s.TriggerAutoCleanupAsync()
 			case <-fullUsageCleanupTicker.C:
 				if s.GetAutoCleanFullUsage() && !s.GetLazyMode() {
-					go s.CleanFullUsageAccounts(context.Background())
+					s.startDBBackgroundTask(func(ctx context.Context) {
+						s.CleanFullUsageAccounts(ctx)
+					})
 				}
 			case <-expiredCleanupTicker.C:
 				// 每 15 分钟清理加入超过 30 分钟的账号（需开启开关）
 				if s.GetAutoCleanExpired() {
-					go s.CleanExpiredAccounts(context.Background(), 30*time.Minute)
+					s.startDBBackgroundTask(func(ctx context.Context) {
+						s.CleanExpiredAccounts(ctx, 30*time.Minute)
+					})
 				}
 			case <-rebuildSchedulerTicker.C:
 				// 定期重建调度器以优化内存和性能
@@ -4127,6 +4140,8 @@ func (s *Store) StartBackgroundRefresh() {
 					s.rebuildFastScheduler()
 				}
 			case <-s.stopCh:
+				return
+			case <-backgroundCtx.Done():
 				return
 			}
 		}
@@ -4136,9 +4151,26 @@ func (s *Store) StartBackgroundRefresh() {
 // Stop 停止后台刷新
 func (s *Store) Stop() {
 	s.stopOnce.Do(func() {
-		close(s.stopCh)
+		if s.backgroundCancel != nil {
+			s.backgroundCancel()
+		}
+		if s.stopCh != nil {
+			close(s.stopCh)
+		}
+		s.DisableRefreshScheduler()
 	})
 	s.wg.Wait()
+}
+
+func (s *Store) startDBBackgroundTask(task func(context.Context)) bool {
+	if s == nil || task == nil {
+		return false
+	}
+	if s.db != nil {
+		return s.db.RunBackgroundTask(task)
+	}
+	go task(context.Background())
+	return true
 }
 
 // CleanByRuntimeStatus 按运行时状态清理账号（用于自动清理流程）
@@ -4184,7 +4216,9 @@ func (s *Store) cleanByRuntimeStatusMatch(ctx context.Context, targetStatus stri
 		s.RemoveAccount(acc.DBID)
 		cleaned++
 		if s.db != nil {
-			s.db.InsertAccountEventAsync(acc.DBID, "deleted", "auto_clean")
+			if err := s.db.InsertAccountEvent(ctx, acc.DBID, "deleted", "auto_clean"); err != nil {
+				log.Printf("[账号 %d] 记录自动清理事件失败: %v", acc.DBID, err)
+			}
 		}
 	}
 
@@ -4223,7 +4257,9 @@ func (s *Store) CleanRateLimitedManual(ctx context.Context) int {
 		s.RemoveAccount(acc.DBID)
 		cleaned++
 		if s.db != nil {
-			s.db.InsertAccountEventAsync(acc.DBID, "deleted", "manual_clean")
+			if err := s.db.InsertAccountEvent(ctx, acc.DBID, "deleted", "manual_clean"); err != nil {
+				log.Printf("[账号 %d] 记录手动清理事件失败: %v", acc.DBID, err)
+			}
 		}
 	}
 
@@ -4418,14 +4454,16 @@ func (s *Store) triggerLazyRefreshAsync(acc *Account) {
 	if _, loaded := s.lazyRefreshInFlight.LoadOrStore(dbID, struct{}{}); loaded {
 		return
 	}
-	go func() {
+	if !s.startDBBackgroundTask(func(parent context.Context) {
 		defer s.lazyRefreshInFlight.Delete(dbID)
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 		defer cancel()
 		if err := s.refreshAccount(ctx, acc); err != nil {
 			log.Printf("[账号 %d] lazy mode 预热刷新失败: %v", dbID, err)
 		}
-	}()
+	}) {
+		s.lazyRefreshInFlight.Delete(dbID)
+	}
 }
 
 func (s *Store) lazyCanRefreshForMetadata(acc *Account) bool {
@@ -7126,14 +7164,16 @@ func (s *Store) VerifyAccountAuthAsync(account *Account) {
 	if !account.TryBeginUsageProbe() {
 		return
 	}
-	go func() {
+	if !s.startDBBackgroundTask(func(parent context.Context) {
 		defer account.FinishUsageProbe()
-		ctx, cancel := context.WithTimeout(context.Background(), 25*time.Second)
+		ctx, cancel := context.WithTimeout(parent, 25*time.Second)
 		defer cancel()
 		if err := probeFn(ctx, account); err != nil {
 			log.Printf("[账号 %d] WS 上游异常关闭后鉴权验证探针失败: %v", account.DBID, err)
 		}
-	}()
+	}) {
+		account.FinishUsageProbe()
+	}
 }
 
 // TriggerUsageProbeAsync 异步触发一次批量用量探针
@@ -7142,10 +7182,12 @@ func (s *Store) TriggerUsageProbeAsync() {
 		return
 	}
 
-	go func() {
+	if !s.startDBBackgroundTask(func(ctx context.Context) {
 		defer s.usageProbeBatch.Store(false)
-		s.parallelProbeUsage(context.Background())
-	}()
+		s.parallelProbeUsage(ctx)
+	}) {
+		s.usageProbeBatch.Store(false)
+	}
 }
 
 // WakeBoundaryProbe 提示「到点即探」调度器：某账号的限流冷却 / 窗口重置边界发生了变化，
@@ -7217,10 +7259,12 @@ func (s *Store) TriggerRecoveryProbeAsync() {
 		return
 	}
 
-	go func() {
+	if !s.startDBBackgroundTask(func(ctx context.Context) {
 		defer s.recoveryProbeBatch.Store(false)
-		s.parallelRecoveryProbe(context.Background())
-	}()
+		s.parallelRecoveryProbe(ctx)
+	}) {
+		s.recoveryProbeBatch.Store(false)
+	}
 }
 
 // TriggerAutoCleanupAsync 异步触发一次自动清理巡检
@@ -7229,10 +7273,12 @@ func (s *Store) TriggerAutoCleanupAsync() {
 		return
 	}
 
-	go func() {
+	if !s.startDBBackgroundTask(func(ctx context.Context) {
 		defer s.autoCleanupBatch.Store(false)
-		s.runAutoCleanupSweep(context.Background())
-	}()
+		s.runAutoCleanupSweep(ctx)
+	}) {
+		s.autoCleanupBatch.Store(false)
+	}
 }
 
 func (s *Store) runAutoCleanupSweep(ctx context.Context) {
@@ -7304,7 +7350,9 @@ func (s *Store) CleanFullUsageAccounts(ctx context.Context) int {
 		s.RemoveAccount(acc.DBID)
 		log.Printf("[账号 %d] 用量 %.1f%% 已满，已自动清理 (email=%s)", acc.DBID, pct, acc.Email)
 		if s.db != nil {
-			s.db.InsertAccountEventAsync(acc.DBID, "deleted", "clean_full_usage")
+			if err := s.db.InsertAccountEvent(ctx, acc.DBID, "deleted", "clean_full_usage"); err != nil {
+				log.Printf("[账号 %d] 记录满用量清理事件失败: %v", acc.DBID, err)
+			}
 		}
 		cleaned++
 	}
@@ -7374,9 +7422,11 @@ func (s *Store) CleanExpiredAccounts(ctx context.Context, maxAge time.Duration) 
 	// 3. 批量从内存池移除
 	s.RemoveAccounts(expiredIDs)
 
-	// 4. 批量写入事件日志（异步）
+	// 4. 批量写入事件日志；清理本身已在后台任务中运行，保持同一生命周期。
 	if s.db != nil {
-		s.db.BatchInsertAccountEventsAsync(expiredIDs, "deleted", "clean_expired")
+		if err := s.db.BatchInsertAccountEvents(ctx, expiredIDs, "deleted", "clean_expired"); err != nil {
+			log.Printf("过期清理: 记录批量事件失败: %v", err)
+		}
 	}
 
 	log.Printf("过期清理完成: 共清理 %d 个超时账号", len(expiredIDs))
@@ -7392,7 +7442,9 @@ func (s *Store) cleanExpiredFallback(ctx context.Context, ids []int64) int {
 			continue
 		}
 		s.RemoveAccount(id)
-		s.db.InsertAccountEventAsync(id, "deleted", "clean_expired")
+		if err := s.db.InsertAccountEvent(ctx, id, "deleted", "clean_expired"); err != nil {
+			log.Printf("[账号 %d] 记录过期清理事件失败: %v", id, err)
+		}
 		cleaned++
 	}
 	if cleaned > 0 {
@@ -7484,10 +7536,12 @@ func (s *Store) TriggerUsageProbeForceAsync() {
 		return
 	}
 
-	go func() {
+	if !s.startDBBackgroundTask(func(ctx context.Context) {
 		defer s.usageProbeBatch.Store(false)
-		s.parallelProbeUsageWith(context.Background(), 0)
-	}()
+		s.parallelProbeUsageWith(ctx, 0)
+	}) {
+		s.usageProbeBatch.Store(false)
+	}
 }
 
 func (s *Store) parallelRecoveryProbe(ctx context.Context) {
@@ -7561,7 +7615,9 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 					// 清理数据库冷却状态
 					s.deleteCachedAccountCooldown(account.DBID)
 					if s.db != nil {
-						_ = s.db.ClearCooldown(context.Background(), account.DBID)
+						clearCtx, clearCancel := context.WithTimeout(ctx, 2*time.Second)
+						_ = s.db.ClearCooldown(clearCtx, account.DBID)
+						clearCancel()
 					}
 				}
 			}
@@ -7587,6 +7643,21 @@ func (s *Store) RefreshSingle(ctx context.Context, dbID int64) error {
 		return fmt.Errorf("账号 %d 不存在", dbID)
 	}
 	return s.refreshAccountForced(ctx, target)
+}
+
+// RefreshSingleAsync performs a forced refresh under the database lifecycle.
+// It is intended for detached recovery paths such as an upstream 401 handler.
+func (s *Store) RefreshSingleAsync(dbID int64) {
+	if s == nil || dbID <= 0 {
+		return
+	}
+	s.startDBBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+		defer cancel()
+		if err := s.RefreshSingle(ctx, dbID); err != nil {
+			log.Printf("[账号 %d] 异步强制刷新失败: %v", dbID, err)
+		}
+	})
 }
 
 // AccountCount 返回账号数量

@@ -67,7 +67,10 @@ type promptIntelligenceHistoryResponse struct {
 var promptIntelligenceRunMu sync.Mutex
 
 func (h *Handler) StartPromptIntelligence(ctx context.Context) {
-	go func() {
+	if h == nil || h.store == nil {
+		return
+	}
+	h.startDBBackgroundTaskWithParent(ctx, func(ctx context.Context) {
 		ticker := time.NewTicker(time.Hour)
 		defer ticker.Stop()
 		var lastRun time.Time
@@ -83,7 +86,7 @@ func (h *Handler) StartPromptIntelligence(ctx context.Context) {
 			case <-ticker.C:
 			}
 		}
-	}()
+	})
 }
 
 func (h *Handler) RunPromptIntelligence(c *gin.Context) {
