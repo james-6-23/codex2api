@@ -66,6 +66,47 @@ func TestCodexAlphaSearchHandler_PassesThroughRequestAndResponse(t *testing.T) {
 	}
 }
 
+// 客户端塞进来的 prompt_cache_key 在转发前被剥离，避免上游 400（issue #433）；其余字段保持原样。
+func TestCodexAlphaSearchHandler_StripsPromptCacheKey(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	const searchBody = `{"id":"srch_9","model":"gpt-5.6-sol","prompt_cache_key":"abc-123","commands":{"search_query":[{"q":"golang generics"}]}}`
+
+	var seenBody []byte
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"output":[]}`))
+	}))
+	defer upstream.Close()
+
+	codexAlphaSearchURLForTest = upstream.URL
+	defer func() { codexAlphaSearchURLForTest = "" }()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-search", AccountID: "acc-s", PlanType: "plus"})
+	handler := NewHandler(store, nil, nil, nil)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/alpha/search", strings.NewReader(searchBody))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	ctx.Request = req
+
+	handler.CodexAlphaSearchHandler(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(string(seenBody), "prompt_cache_key") {
+		t.Errorf("upstream body = %s, want prompt_cache_key stripped", seenBody)
+	}
+	if !strings.Contains(string(seenBody), `"model":"gpt-5.6-sol"`) ||
+		!strings.Contains(string(seenBody), `"search_query"`) {
+		t.Errorf("upstream body = %s, want other fields preserved", seenBody)
+	}
+}
+
 // 上游 4xx 原样透传（保留 CLI 能理解的真实错误语义），不包装成 502。
 func TestCodexAlphaSearchHandler_PassesThroughUpstreamError(t *testing.T) {
 	gin.SetMode(gin.TestMode)

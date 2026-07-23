@@ -13,6 +13,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // codexAlphaSearchURL 是 ChatGPT 后端的 Codex standalone 联网搜索端点。
@@ -26,6 +27,28 @@ var codexAlphaSearchURLForTest = ""
 
 // 搜索请求与结果均为结构化 JSON，正常远小于该值，仅作读取护栏。
 const codexAlphaSearchBodyLimit int64 = 4 << 20
+
+// codexAlphaSearchUnsupportedFields 是 standalone 搜索端点不接受、转发前需剥离的字段。
+// 新版 codex 客户端会把 Responses 风格的会话/缓存字段也塞进搜索体，而上游
+// /alpha/search 的 schema 更窄，会以 400 "Unknown parameter" 拒绝（issue #433）：
+// 同批 /responses 请求接受 prompt_cache_key，唯独搜索端点拒绝。这些字段对一次检索
+// 调用无意义，剥离不改变搜索语义。
+var codexAlphaSearchUnsupportedFields = []string{"prompt_cache_key"}
+
+// sanitizeCodexAlphaSearchBody 在转发前移除搜索端点不支持的字段，避免上游 400。
+// 只删已知不兼容字段，其余请求体保持原样透传。
+func sanitizeCodexAlphaSearchBody(rawBody []byte) []byte {
+	sanitized := rawBody
+	for _, field := range codexAlphaSearchUnsupportedFields {
+		if !gjson.GetBytes(sanitized, field).Exists() {
+			continue
+		}
+		if next, err := sjson.DeleteBytes(sanitized, field); err == nil {
+			sanitized = next
+		}
+	}
+	return sanitized
+}
 
 // CodexAlphaSearchHandler 透传 Codex CLI 的 standalone 联网搜索（issue #359）。
 //
@@ -99,6 +122,9 @@ func ForwardCodexAlphaSearch(ctx context.Context, account *auth.Account, proxyUR
 	if accessToken == "" {
 		return nil, fmt.Errorf("account has no access token")
 	}
+
+	// 剥离搜索端点不支持的字段（如客户端塞进来的 prompt_cache_key），否则上游 400（issue #433）。
+	rawBody = sanitizeCodexAlphaSearchBody(rawBody)
 
 	endpoint := codexAlphaSearchURL
 	if codexAlphaSearchURLForTest != "" {
