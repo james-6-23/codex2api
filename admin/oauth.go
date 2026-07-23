@@ -315,16 +315,10 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 		return 0, nil
 	}
 	seed = normalizeTokenCredentialSeed(seed)
-	// 身份键优先用工作区 ID；个人账号 JWT 可能只有 user_id，此时用它兜底，
-	// 否则 AT 轮换后按原文去重永远失配，同一账号会被重复导入。
-	identity := seed.accountID
-	if identity == "" {
-		identity = seed.userID
-	}
-	if seed.email == "" || identity == "" {
+	if seed.email == "" || seed.workspaceID == "" {
 		return 0, nil
 	}
-	id, err := h.db.FindActiveAccountByOAuthIdentity(ctx, seed.email, identity, excludeID)
+	id, err := h.db.FindActiveAccountByOAuthIdentity(ctx, seed.email, seed.workspaceID, excludeID)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -336,7 +330,7 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 
 func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string) (int64, bool, error) {
 	seed = normalizeTokenCredentialSeed(seed)
-	if seed.email == "" || (seed.accountID == "" && seed.userID == "") {
+	if seed.email == "" || seed.workspaceID == "" {
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, tokenCredentialMap(seed), proxyURL)
 		if err != nil {
 			return 0, false, err
@@ -345,6 +339,8 @@ func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL
 		h.loadInsertedTokenAccount(id, proxyURL, seed, source)
 		return id, false, nil
 	}
+	h.mergeDuplicateMu.Lock()
+	defer h.mergeDuplicateMu.Unlock()
 
 	if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, 0); err != nil {
 		return 0, false, err
@@ -515,6 +511,10 @@ func (h *Handler) UpdateOAuthAccountCode(c *gin.Context) {
 		idToken:      tokenResp.IDToken,
 		expiresIn:    tokenResp.ExpiresIn,
 	})
+	if seed.email != "" && seed.workspaceID != "" {
+		h.mergeDuplicateMu.Lock()
+		defer h.mergeDuplicateMu.Unlock()
+	}
 	if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, id); err != nil {
 		writeInternalError(c, err)
 		return

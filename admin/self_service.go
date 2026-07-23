@@ -243,7 +243,9 @@ func (h *Handler) SubmitAccountPortalCode(c *gin.Context) {
 // 不加入运行时调度池（管理员批准后再启用）。重复账号返回 errDuplicateOAuthIdentity。
 func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, contactEmail string) (int64, error) {
 	seed = normalizeTokenCredentialSeed(seed)
-	if seed.email != "" && (seed.accountID != "" || seed.userID != "") {
+	if seed.email != "" && seed.workspaceID != "" {
+		h.mergeDuplicateMu.Lock()
+		defer h.mergeDuplicateMu.Unlock()
 		if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, 0); err != nil {
 			return 0, err
 		} else if duplicateID > 0 {

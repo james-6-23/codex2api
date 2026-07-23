@@ -215,15 +215,16 @@ func TestFindActiveAccountByOAuthIdentity(t *testing.T) {
 
 	ctx := context.Background()
 	id, err := db.InsertAccountWithCredentials(ctx, "identity", map[string]interface{}{
-		"refresh_token":      "rt-identity",
-		"email":              "User@Example.COM",
-		"chatgpt_account_id": "acc-identity",
+		"refresh_token":   "rt-identity",
+		"email":           "User@Example.COM",
+		"workspace_id":    "workspace-identity",
+		"allow_duplicate": "true",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials 返回错误: %v", err)
 	}
 
-	got, err := db.FindActiveAccountByOAuthIdentity(ctx, " user@example.com ", "acc-identity")
+	got, err := db.FindActiveAccountByOAuthIdentity(ctx, " user@example.com ", "workspace-identity")
 	if err != nil {
 		t.Fatalf("FindActiveAccountByOAuthIdentity 返回错误: %v", err)
 	}
@@ -234,12 +235,12 @@ func TestFindActiveAccountByOAuthIdentity(t *testing.T) {
 	otherID, err := db.InsertAccountWithCredentials(ctx, "identity-other", map[string]interface{}{
 		"refresh_token": "rt-identity-other",
 		"email":         "user@example.com",
-		"account_id":    "acc-identity",
+		"workspace_id":  "workspace-identity",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials other 返回错误: %v", err)
 	}
-	got, err = db.FindActiveAccountByOAuthIdentity(ctx, "user@example.com", "acc-identity", id)
+	got, err = db.FindActiveAccountByOAuthIdentity(ctx, "user@example.com", "workspace-identity", id)
 	if err != nil {
 		t.Fatalf("FindActiveAccountByOAuthIdentity with exclude 返回错误: %v", err)
 	}
@@ -253,17 +254,14 @@ func TestFindActiveAccountByOAuthIdentity(t *testing.T) {
 	if err := db.SoftDeleteAccount(ctx, otherID); err != nil {
 		t.Fatalf("SoftDeleteAccount other 返回错误: %v", err)
 	}
-	if _, err := db.FindActiveAccountByOAuthIdentity(ctx, "user@example.com", "acc-identity"); err == nil {
+	if _, err := db.FindActiveAccountByOAuthIdentity(ctx, "user@example.com", "workspace-identity"); err == nil {
 		t.Fatal("FindActiveAccountByOAuthIdentity 应该排除已删除账号")
 	} else if err != sql.ErrNoRows {
 		t.Fatalf("FindActiveAccountByOAuthIdentity err = %v, want sql.ErrNoRows", err)
 	}
 }
 
-// 个人账号 JWT 可能没有工作区 account_id，只有 user_id（user-...）；此外旧版
-// wham 回填曾把 user_id 写进 account_id 字段。身份匹配必须两个键都认，
-// 否则 AT 轮换后同一账号会被重复导入。
-func TestFindActiveAccountByOAuthIdentityMatchesUserID(t *testing.T) {
+func TestFindActiveAccountByOAuthIdentityIgnoresLegacyIDs(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 
 	db, err := New("sqlite", dbPath)
@@ -275,7 +273,7 @@ func TestFindActiveAccountByOAuthIdentityMatchesUserID(t *testing.T) {
 	ctx := context.Background()
 
 	// 账号 A：credentials 里存的是 user_id 键
-	idA, err := db.InsertAccountWithCredentials(ctx, "uid-key", map[string]interface{}{
+	_, err = db.InsertAccountWithCredentials(ctx, "uid-key", map[string]interface{}{
 		"access_token": "at-uid-key",
 		"email":        "solo@example.com",
 		"user_id":      "user-abc123",
@@ -283,16 +281,12 @@ func TestFindActiveAccountByOAuthIdentityMatchesUserID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials A 返回错误: %v", err)
 	}
-	got, err := db.FindActiveAccountByOAuthIdentity(ctx, "solo@example.com", "user-abc123")
-	if err != nil {
-		t.Fatalf("match by user_id key 返回错误: %v", err)
-	}
-	if got != idA {
-		t.Fatalf("matched id = %d, want %d", got, idA)
+	if _, err := db.FindActiveAccountByOAuthIdentity(ctx, "solo@example.com", "user-abc123"); err != sql.ErrNoRows {
+		t.Fatalf("user_id lookup err = %v, want sql.ErrNoRows", err)
 	}
 
 	// 账号 B：旧版 wham 回填把 user_id 污染进了 account_id 字段
-	idB, err := db.InsertAccountWithCredentials(ctx, "polluted", map[string]interface{}{
+	_, err = db.InsertAccountWithCredentials(ctx, "polluted", map[string]interface{}{
 		"access_token": "at-polluted",
 		"email":        "legacy@example.com",
 		"account_id":   "user-def456", // 实为 user_id
@@ -300,12 +294,8 @@ func TestFindActiveAccountByOAuthIdentityMatchesUserID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials B 返回错误: %v", err)
 	}
-	got, err = db.FindActiveAccountByOAuthIdentity(ctx, "legacy@example.com", "user-def456")
-	if err != nil {
-		t.Fatalf("match polluted account_id 返回错误: %v", err)
-	}
-	if got != idB {
-		t.Fatalf("matched id = %d, want %d", got, idB)
+	if _, err := db.FindActiveAccountByOAuthIdentity(ctx, "legacy@example.com", "user-def456"); err != sql.ErrNoRows {
+		t.Fatalf("legacy account_id lookup err = %v, want sql.ErrNoRows", err)
 	}
 }
 
@@ -375,11 +365,9 @@ func TestSQLiteDataMigrationV2DedupesByUserID(t *testing.T) {
 		t.Fatal("allow_duplicate 副本被迁移误删，应保留")
 	}
 
-	// 强制副本也不作为身份判重锚点：按身份查找应命中主账号而非副本
-	if got, err := db.FindActiveAccountByOAuthIdentity(ctx, "solo@example.com", "user-dup999"); err != nil {
-		t.Fatalf("FindActiveAccountByOAuthIdentity 返回错误: %v", err)
-	} else if got == forcedID {
-		t.Fatal("身份判重不应命中 allow_duplicate 副本")
+	// v3 动态判重不再把历史 user_id/account_id 当作 workspace_id。
+	if _, err := db.FindActiveAccountByOAuthIdentity(ctx, "solo@example.com", "user-dup999"); err != sql.ErrNoRows {
+		t.Fatalf("FindActiveAccountByOAuthIdentity err = %v, want sql.ErrNoRows", err)
 	}
 }
 

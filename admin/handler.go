@@ -33,6 +33,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/security"
 	"github.com/codex2api/security/promptfilter"
@@ -187,11 +188,7 @@ func (h *Handler) probeImportedAccountUsage(ctx context.Context, accountID int64
 	if account.IsCodexAgentIdentity() {
 		return
 	}
-	// AT / codex_at 账号的 OAuth 身份（email + account_id）在插入时无法从
-	// JWT 解出，由上面的 wham 探针补齐并落库。身份既已可知，此刻回查是否与
-	// 已有账号同一身份：若重复则把凭证合并进旧账号并软删本账号——与 RT 路径
-	// refreshImportedAccountAndProbe 对称，补上 AT 导入/添加事后无法去重的缺口
-	// （codex_at 原文轮换 + 存量 account_id 被 user_id 污染都会导致插入期判重失配）。
+	// 若账号已经获得 workspace_id，探针后再合并一次并发导入产生的重复项。
 	h.mergeRefreshedDuplicateIntoExisting(accountID, source)
 }
 
@@ -245,28 +242,18 @@ func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string
 	if err != nil || newRow == nil {
 		return false
 	}
-	// 勾选"允许重复添加"导入的副本是用户故意保留的，不合并。
-	if strings.EqualFold(strings.TrimSpace(newRow.GetCredential("allow_duplicate")), "true") {
-		return false
-	}
 	email := strings.TrimSpace(newRow.GetCredential("email"))
-	identity := strings.TrimSpace(newRow.GetCredential("account_id"))
-	if identity == "" {
-		identity = strings.TrimSpace(newRow.GetCredential("chatgpt_account_id"))
-	}
-	if identity == "" {
-		identity = strings.TrimSpace(newRow.GetCredential("user_id"))
-	}
-	if email == "" || identity == "" {
+	workspaceID := openaiidentity.NormalizeWorkspaceID(newRow.GetCredential("workspace_id"))
+	if email == "" || workspaceID == "" {
 		return false
 	}
-	oldID, err := h.db.FindActiveAccountByOAuthIdentity(ctx, email, identity, newID)
+	oldID, err := h.db.FindActiveAccountByOAuthIdentity(ctx, email, workspaceID, newID)
 	if err != nil || oldID <= 0 {
 		return false
 	}
 
 	updates := make(map[string]interface{})
-	for _, key := range []string{"refresh_token", "session_token", "access_token", "access_token_type", "id_token", "expires_at", "email", "account_id", "user_id", "plan_type", "subscription_expires_at"} {
+	for _, key := range []string{"refresh_token", "session_token", "access_token", "access_token_type", "id_token", "expires_at", "email", "account_id", "workspace_id", "user_id", "plan_type", "subscription_expires_at"} {
 		if v := strings.TrimSpace(newRow.GetCredential(key)); v != "" {
 			updates[key] = v
 		}
@@ -2443,10 +2430,9 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	updatedCount := 0
 	duplicateCount := 0
 
-	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email + 工作区/用户 ID，如 codex_at）
+	// AT 去重：非身份型 AT-only（无法从 JWT 解出 email + workspace_id，如 codex_at）
 	// 按 access_token 原文去重；身份型 AT 由 upsertOAuthIdentityAccount 按 OAuth 身份
-	//（email + account_id/user_id）去重/更新——AT 会轮换，仅按原文去重会重复导入同一账号。
-	// 勾选"允许重复添加"时跳过全部去重，强制新建。
+	//（email + workspace_id）去重/更新。允许重复仅对 workspace_id 为空的账号生效。
 	existingATs := make(map[string]bool)
 	seenAT := make(map[string]bool)
 	if !req.AllowDuplicate {
@@ -2470,7 +2456,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			allowDuplicate: req.AllowDuplicate,
 			customHeaders:  customHeaders,
 		})
-		if !req.AllowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
+		if seed.email != "" && seed.workspaceID != "" {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -2589,7 +2575,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 		}
 
 		seed := normalizeTokenCredentialSeed(tokenCredentialSeed{accessToken: at, allowDuplicate: req.AllowDuplicate, customHeaders: req.CustomHeaders})
-		if !req.AllowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
+		if seed.email != "" && seed.workspaceID != "" {
 			id, updated, err := h.upsertOAuthIdentityAccount(ctx, name, req.ProxyURL, seed, "manual_at")
 			if err != nil {
 				log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
@@ -3567,19 +3553,11 @@ func importTokenSeed(t importToken, conflicts map[string]bool) tokenCredentialSe
 func importTokenOAuthIdentityKey(t importToken, conflicts map[string]bool) string {
 	seed := importTokenSeed(t, conflicts)
 	email := strings.ToLower(strings.TrimSpace(seed.email))
-	accountID := strings.TrimSpace(seed.accountID)
-	if accountID == "" && strings.TrimSpace(t.accountID) == "" {
-		accountID = strings.TrimSpace(t.chatgptAccountID)
-	}
-	// 个人账号可能只有 user_id（无工作区 account_id），用它兜底做身份键，
-	// 否则文件导入会退化为凭证原文比对，AT 轮换后重复导入。
-	if accountID == "" {
-		accountID = strings.TrimSpace(seed.userID)
-	}
-	if email == "" || accountID == "" {
+	workspaceID := strings.TrimSpace(seed.workspaceID)
+	if email == "" || workspaceID == "" {
 		return ""
 	}
-	return email + "\x00" + accountID
+	return email + "\x00" + workspaceID
 }
 
 // ImportAccounts 批量导入账号（支持 TXT / JSON）
@@ -3875,7 +3853,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	}
 	tokens = regularTokens
 	// 文件内去重：
-	// 1) 当条目可解析出 email + account_id 时，以它作为 OAuth 身份键；
+	// 1) 当 JWT 可解析出 email + workspace_id 时，以它作为 OAuth 身份键；
 	//    同身份同 RT/ST/AT 折叠，同身份不同 RT/ST/AT 整组跳过，避免任选一个覆盖。
 	// 2) 没有 OAuth 身份时，退回到 RT / ST / AT 顺序去重（兼容旧导出格式）。
 	// 3) 同一份文件内若出现"同一个 RT 对应多个不同 chatgpt_account_id"，
@@ -3974,9 +3952,34 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 	duplicateCount := ambiguousOAuthIdentityCount
 
 	if allowDuplicate {
-		// 允许重复添加：跳过数据库去重，所有解析出的 token 均作为新账号导入。
-		newTokens = tokens
-		duplicateCount = 0
+		knownCount := 0
+		for _, t := range tokens {
+			if importTokenOAuthIdentityKey(t, conflictingChatGPTIDs) == "" {
+				newTokens = append(newTokens, t)
+			} else {
+				knownCount++
+			}
+		}
+		knownUniqueCount := 0
+		for _, t := range unique {
+			if importTokenOAuthIdentityKey(t, conflictingChatGPTIDs) != "" {
+				knownUniqueCount++
+				seed := importTokenSeed(t, conflictingChatGPTIDs)
+				if duplicateID, err := h.findOAuthIdentityDuplicate(dedupeCtx, seed, 0); err != nil {
+					log.Printf("查询已有 OAuth 身份失败: %v", err)
+				} else if duplicateID > 0 {
+					row, err := h.db.GetAccountByID(dedupeCtx, duplicateID)
+					if err != nil {
+						log.Printf("查询已有 OAuth 账号 %d 失败: %v", duplicateID, err)
+					} else if importAccountCredentialFingerprint(row) == importTokenCredentialFingerprint(t, conflictingChatGPTIDs) {
+						duplicateCount++
+						continue
+					}
+				}
+				newTokens = append(newTokens, t)
+			}
+		}
+		duplicateCount += knownCount - knownUniqueCount - ambiguousOAuthIdentityCount
 	} else {
 		existingRTs, err := h.db.GetAllRefreshTokens(dedupeCtx)
 		if err != nil {
@@ -4119,7 +4122,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 			if tok.accessToken != "" && tok.refreshToken == "" {
 				importSource = "import_at"
 			}
-			if !allowDuplicate && seed.email != "" && (seed.accountID != "" || seed.userID != "") {
+			if seed.email != "" && seed.workspaceID != "" {
 				if name == "" {
 					if importSource == "import_at" {
 						name = fmt.Sprintf("at-import-%d", idx+1)
@@ -4483,10 +4486,19 @@ func (h *Handler) restoreAccountByID(ctx context.Context, id int64) error {
 		return err
 	}
 	seed := tokenCredentialSeedFromAccountRow(row)
-	if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, id); err != nil {
-		return err
-	} else if duplicateID > 0 {
-		return fmt.Errorf("%w: 已存在相同 OAuth 账号 (id=%d)，请先删除正常账号或清理回收站账号", errDuplicateOAuthIdentity, duplicateID)
+	if seed.email != "" && seed.workspaceID != "" {
+		h.mergeDuplicateMu.Lock()
+		defer h.mergeDuplicateMu.Unlock()
+		if duplicateID, err := h.findOAuthIdentityDuplicate(ctx, seed, id); err != nil {
+			return err
+		} else if duplicateID > 0 {
+			return fmt.Errorf("%w: 已存在相同 OAuth 账号 (id=%d)，请先删除正常账号或清理回收站账号", errDuplicateOAuthIdentity, duplicateID)
+		}
+		if row.GetCredential("workspace_id") != seed.workspaceID {
+			if err := h.db.UpdateCredentials(ctx, id, map[string]interface{}{"workspace_id": seed.workspaceID}); err != nil {
+				return err
+			}
+		}
 	}
 
 	if err := h.db.RestoreAccount(ctx, id); err != nil {
@@ -4510,8 +4522,10 @@ func tokenCredentialSeedFromAccountRow(row *database.AccountRow) tokenCredential
 		refreshToken:          row.GetCredential("refresh_token"),
 		sessionToken:          row.GetCredential("session_token"),
 		accessToken:           row.GetCredential("access_token"),
+		accessTokenType:       row.GetCredential("access_token_type"),
 		idToken:               row.GetCredential("id_token"),
 		accountID:             firstNonEmpty(row.GetCredential("account_id"), row.GetCredential("chatgpt_account_id")),
+		workspaceID:           row.GetCredential("workspace_id"),
 		email:                 row.GetCredential("email"),
 		planType:              row.GetCredential("plan_type"),
 		expiresAtRaw:          row.GetCredential("expires_at"),

@@ -140,6 +140,7 @@ func TestUpsertSelfServiceAccountPendingAndNotScheduled(t *testing.T) {
 		accessToken:  "at-abc",
 		email:        "provider@example.com",
 		accountID:    "acct-1",
+		workspaceID:  "workspace-1",
 	}
 	id, err := handler.upsertSelfServiceAccount(ctx, "provider@example.com", "", seed, "contact@x.com")
 	if err != nil {
@@ -186,7 +187,7 @@ func TestApproveSelfServiceAccountLoadsIntoPool(t *testing.T) {
 	handler.RegisterRoutes(router)
 	ctx := context.Background()
 
-	seed := tokenCredentialSeed{refreshToken: "rt-x", accessToken: "at-x", email: "p2@example.com", accountID: "acct-2"}
+	seed := tokenCredentialSeed{refreshToken: "rt-x", accessToken: "at-x", email: "p2@example.com", accountID: "acct-2", workspaceID: "workspace-2"}
 	id, err := handler.upsertSelfServiceAccount(ctx, "p2@example.com", "", seed, "c@x.com")
 	if err != nil {
 		t.Fatalf("upsertSelfServiceAccount: %v", err)
