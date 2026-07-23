@@ -160,12 +160,15 @@ func SyncCodexCLIVersion(ctx context.Context, db *database.DB, proxyURL string) 
 }
 
 // StartCodexCLIVersionSync 在后台按系统设置的间隔周期同步 Codex CLI 版本，并在启动时先同步一次。
-// 开关(CodexCLIVersionSyncEnabled)与间隔(CodexCLIVersionSyncIntervalHours)在每个周期实时读取，
-// 改设置即时生效、无需重启。环境变量 CODEX_DISABLE_CLI_VERSION_SYNC 为硬开关，优先级最高。
+// 开关(CodexCLIVersionSyncEnabled)与间隔(CodexCLIVersionSyncIntervalHours)在每个周期读取；
+// 新间隔从下一轮计时生效，无需重启。环境变量 CODEX_DISABLE_CLI_VERSION_SYNC 为硬开关，优先级最高。
 // proxyResolver 允许调用方注入出站代理（可为 nil）。
 func StartCodexCLIVersionSync(ctx context.Context, db *database.DB, proxyResolver func() string) {
 	if db == nil || CodexCLIVersionSyncDisabled() {
 		return
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 	resolveProxy := func() string {
 		if proxyResolver == nil {
@@ -174,8 +177,8 @@ func StartCodexCLIVersionSync(ctx context.Context, db *database.DB, proxyResolve
 		return proxyResolver()
 	}
 
-	runOnce := func() {
-		syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	runOnce := func(runCtx context.Context) {
+		syncCtx, cancel := context.WithTimeout(runCtx, 30*time.Second)
 		defer cancel()
 		if res, err := SyncCodexCLIVersion(syncCtx, db, resolveProxy()); err != nil {
 			fmt.Printf("[codex-cli-version-sync] 同步失败（不影响服务）: %v\n", err)
@@ -196,19 +199,25 @@ func StartCodexCLIVersionSync(ctx context.Context, db *database.DB, proxyResolve
 		return time.Duration(hours) * time.Hour
 	}
 
-	go func() {
+	db.RunBackgroundTask(func(lifecycle context.Context) {
+		taskCtx, taskCancel := context.WithCancel(lifecycle)
+		stopParent := context.AfterFunc(ctx, taskCancel)
+		defer func() {
+			stopParent()
+			taskCancel()
+		}()
 		if CurrentRuntimeSettings().CodexCLIVersionSyncEnabled {
-			runOnce()
+			runOnce(taskCtx)
 		}
 		for {
 			select {
-			case <-ctx.Done():
+			case <-taskCtx.Done():
 				return
 			case <-time.After(currentInterval()):
 				if CurrentRuntimeSettings().CodexCLIVersionSyncEnabled {
-					runOnce()
+					runOnce(taskCtx)
 				}
 			}
 		}
-	}()
+	})
 }

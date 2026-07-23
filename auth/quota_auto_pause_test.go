@@ -245,15 +245,16 @@ func TestQuotaAutoPause5hGuardIgnoresDisabledOrExpiredWindow(t *testing.T) {
 }
 
 func TestQuotaAutoPause5hGuardReducesDispatchScoreNearThreshold(t *testing.T) {
+	resetAt := time.Now().Add(premium5hUrgencyWindow + time.Hour)
 	guarded := newQuotaAutoPauseTestAccount()
 	guarded.AutoPause5hThreshold = 0.9
-	guarded.SetUsageSnapshot5h(87, time.Now().Add(time.Hour)) // remaining 3pp inside a 5pp band => 40% of max penalty
+	guarded.SetUsageSnapshot5h(87, resetAt) // remaining 3pp inside a 5pp band => 40% of max penalty
 	setAutoPauseThresholdsWithGuard(guarded, 5)
 	recomputeTestAccount(guarded, 4)
 
 	baseline := newQuotaAutoPauseTestAccount()
 	baseline.AutoPause5hThreshold = 0.9
-	baseline.SetUsageSnapshot5h(87, time.Now().Add(time.Hour))
+	baseline.SetUsageSnapshot5h(87, resetAt)
 	setAutoPauseThresholdsWithGuard(baseline, 0)
 	recomputeTestAccount(baseline, 4)
 
@@ -265,15 +266,16 @@ func TestQuotaAutoPause5hGuardReducesDispatchScoreNearThreshold(t *testing.T) {
 
 func TestQuotaAutoPause5hGuardDoesNotReduceDispatchScoreOutsideBandOrDisabled(t *testing.T) {
 	t.Run("outside band", func(t *testing.T) {
+		resetAt := time.Now().Add(premium5hUrgencyWindow + time.Hour)
 		guarded := newQuotaAutoPauseTestAccount()
 		guarded.AutoPause5hThreshold = 0.9
-		guarded.SetUsageSnapshot5h(84.9, time.Now().Add(time.Hour))
+		guarded.SetUsageSnapshot5h(84.9, resetAt)
 		setAutoPauseThresholdsWithGuard(guarded, 5)
 		recomputeTestAccount(guarded, 4)
 
 		baseline := newQuotaAutoPauseTestAccount()
 		baseline.AutoPause5hThreshold = 0.9
-		baseline.SetUsageSnapshot5h(84.9, time.Now().Add(time.Hour))
+		baseline.SetUsageSnapshot5h(84.9, resetAt)
 		setAutoPauseThresholdsWithGuard(baseline, 0)
 		recomputeTestAccount(baseline, 4)
 
@@ -283,15 +285,16 @@ func TestQuotaAutoPause5hGuardDoesNotReduceDispatchScoreOutsideBandOrDisabled(t 
 	})
 
 	t.Run("guard concurrency disabled", func(t *testing.T) {
+		resetAt := time.Now().Add(premium5hUrgencyWindow + time.Hour)
 		acc := newQuotaAutoPauseTestAccount()
 		acc.AutoPause5hThreshold = 0.9
-		acc.SetUsageSnapshot5h(87, time.Now().Add(time.Hour))
+		acc.SetUsageSnapshot5h(87, resetAt)
 		setAutoPauseThresholdsWithGuardConcurrency(acc, 5, 0)
 		recomputeTestAccount(acc, 4)
 
 		baseline := newQuotaAutoPauseTestAccount()
 		baseline.AutoPause5hThreshold = 0.9
-		baseline.SetUsageSnapshot5h(87, time.Now().Add(time.Hour))
+		baseline.SetUsageSnapshot5h(87, resetAt)
 		setAutoPauseThresholdsWithGuard(baseline, 0)
 		recomputeTestAccount(baseline, 4)
 

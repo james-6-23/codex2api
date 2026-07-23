@@ -184,17 +184,7 @@ func (h *Handler) AddGrokAccount(c *gin.Context) {
 	h.store.AddAccount(acc)
 
 	// 异步 billing 探针：拉取套餐/周月额度，避免被 ChatGPT wham 误封
-	if h.probeUsage != nil {
-		go func(accountID int64) {
-			a := h.store.FindByID(accountID)
-			if a == nil {
-				return
-			}
-			probeCtx, probeCancel := context.WithTimeout(context.Background(), 25*time.Second)
-			defer probeCancel()
-			_ = h.probeUsage(probeCtx, a)
-		}(id)
-	}
+	h.triggerGrokUsageProbe(id)
 
 	security.SecurityAuditLog("GROK_ACCOUNT_ADDED", fmt.Sprintf("account_id=%d auth_kind=%s models=%d ip=%s", id, acc.GrokAuthKind(), len(models), c.ClientIP()))
 	c.JSON(http.StatusOK, gin.H{"message": "成功添加 Grok 账号", "id": id})
@@ -366,15 +356,15 @@ func grokPlanTypeOrDefault(credentials map[string]interface{}) string {
 // 供单条添加与批量文件导入共用。models/model_mapping/base_url/email 由调用方按需覆写。
 func grokAccountFromCredentials(id int64, credentials map[string]interface{}, proxyURL string) *auth.Account {
 	acc := &auth.Account{
-		DBID:              id,
-		ProxyURL:          proxyURL,
-		HealthTier:        auth.HealthTierHealthy,
-		UpstreamType:      auth.UpstreamGrok,
-		BaseURL:           strings.TrimRight(credentialStringValue(credentials, "base_url"), "/"),
-		ModelMapping:      credentialStringValue(credentials, "model_mapping"),
-		Email:             credentialStringValue(credentials, "email"),
+		DBID:         id,
+		ProxyURL:     proxyURL,
+		HealthTier:   auth.HealthTierHealthy,
+		UpstreamType: auth.UpstreamGrok,
+		BaseURL:      strings.TrimRight(credentialStringValue(credentials, "base_url"), "/"),
+		ModelMapping: credentialStringValue(credentials, "model_mapping"),
+		Email:        credentialStringValue(credentials, "email"),
 		// 与 credentials 保持一致（OAuth 默认 free、API Key 为 api）；不再写死 "api"。
-		PlanType: grokPlanTypeOrDefault(credentials),
+		PlanType:          grokPlanTypeOrDefault(credentials),
 		GrokClientID:      credentialStringValue(credentials, "grok_client_id"),
 		GrokTokenEndpoint: credentialStringValue(credentials, "grok_token_endpoint"),
 		GrokOIDCIssuer:    credentialStringValue(credentials, "grok_oidc_issuer"),
@@ -518,17 +508,7 @@ func (h *Handler) BatchImportGrokAccounts(c *gin.Context) {
 		items = append(items, item)
 		imported++
 
-		if h.probeUsage != nil {
-			go func(accountID int64) {
-				a := h.store.FindByID(accountID)
-				if a == nil {
-					return
-				}
-				probeCtx, probeCancel := context.WithTimeout(context.Background(), 25*time.Second)
-				defer probeCancel()
-				_ = h.probeUsage(probeCtx, a)
-			}(id)
-		}
+		h.triggerGrokUsageProbe(id)
 	}
 
 	security.SecurityAuditLog("GROK_FILE_IMPORTED", fmt.Sprintf("total=%d imported=%d ip=%s", len(req.Files), imported, c.ClientIP()))

@@ -313,6 +313,21 @@ func TestExternalImageJobRoutesCreateAndQueryOwnJob(t *testing.T) {
 	if getRecorder.Code != http.StatusOK {
 		t.Fatalf("get status = %d, want 200 body=%s", getRecorder.Code, getRecorder.Body.String())
 	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		job, err := db.GetImageGenerationJob(context.Background(), created.Job.ID)
+		if err != nil {
+			t.Fatalf("GetImageGenerationJob: %v", err)
+		}
+		if job.Status != database.ImageJobQueued && job.Status != database.ImageJobRunning {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("image job status = %q, want terminal state before cleanup", job.Status)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestExternalImageJobPromptGuardBlocksBeforeExternalWork(t *testing.T) {

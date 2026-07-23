@@ -152,17 +152,7 @@ func (h *Handler) ImportGrokSSO(c *gin.Context) {
 			items[idx] = item
 
 			// 异步 billing 探针，与其它添加路径一致
-			if h.probeUsage != nil {
-				go func(accountID int64) {
-					acc := h.store.FindByID(accountID)
-					if acc == nil {
-						return
-					}
-					probeCtx, probeCancel := context.WithTimeout(context.Background(), 25*time.Second)
-					defer probeCancel()
-					_ = h.probeUsage(probeCtx, acc)
-				}(id)
-			}
+			h.triggerGrokUsageProbe(id)
 		}(i, seed)
 	}
 	wg.Wait()
@@ -326,17 +316,7 @@ func (h *Handler) ImportGrokRefreshTokens(c *gin.Context) {
 			}
 			items[idx] = item
 
-			if h.probeUsage != nil {
-				go func(accountID int64) {
-					a := h.store.FindByID(accountID)
-					if a == nil {
-						return
-					}
-					probeCtx, probeCancel := context.WithTimeout(context.Background(), 25*time.Second)
-					defer probeCancel()
-					_ = h.probeUsage(probeCtx, a)
-				}(id)
-			}
+			h.triggerGrokUsageProbe(id)
 		}(i, rt)
 	}
 	wg.Wait()

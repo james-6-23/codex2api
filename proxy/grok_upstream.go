@@ -520,13 +520,7 @@ func applyGrokCooldown(store *auth.Store, account *auth.Account, statusCode int,
 		// OAuth AT 可能过期/被吊销：短冷却挡住并发，异步强刷；RT 失效由刷新路径转 error。
 		store.MarkCooldown(account, time.Minute, "unauthorized")
 		if account.GrokAuthKind() == auth.GrokAuthKindOAuth {
-			go func(dbID int64) {
-				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-				defer cancel()
-				if err := store.RefreshSingle(ctx, dbID); err != nil {
-					log.Printf("Grok 账号 %d 401 后强刷失败: %v", dbID, err)
-				}
-			}(account.ID())
+			store.RefreshSingleAsync(account.ID())
 		}
 		return codex429Decision{Reason: "unauthorized", Cooldown: time.Minute}
 	}

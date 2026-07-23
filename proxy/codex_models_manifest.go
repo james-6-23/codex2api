@@ -99,8 +99,8 @@ func (h *Handler) learnManifestModelsAsync(manifestBody []byte) {
 	}
 
 	body := append([]byte(nil), manifestBody...)
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	h.db.RunBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 		defer cancel()
 		added, err := LearnModelsFromManifest(ctx, h.db, body, time.Now().UTC())
 		if err != nil {
@@ -116,7 +116,7 @@ func (h *Handler) learnManifestModelsAsync(manifestBody []byte) {
 		if len(added) > 0 {
 			log.Printf("已从上游模型清单学习 %d 个新模型进注册表: %s", len(added), strings.Join(added, ", "))
 		}
-	}()
+	})
 }
 
 // CodexModelsManifestURL 是 ChatGPT 后端的 Codex 模型清单端点。

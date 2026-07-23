@@ -426,7 +426,9 @@ func (h *Handler) triggerTokenAccountProbe(id int64, source string) {
 	if account := h.store.FindByID(id); account != nil && account.GetAccessToken() != "" {
 		h.triggerImportedAccountUsageProbe(id, source)
 	} else if !h.store.GetLazyMode() && !strings.HasPrefix(source, "import") {
-		go h.refreshImportedAccountAndProbe(id, source+"_refresh")
+		h.startDBBackgroundTask(func(ctx context.Context) {
+			h.refreshImportedAccountAndProbe(ctx, id, source+"_refresh")
+		})
 	}
 }
 
