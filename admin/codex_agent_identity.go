@@ -65,6 +65,29 @@ func agentIdentityBool(node map[string]any, keys ...string) bool {
 	return false
 }
 
+// resolveAgentIdentityNode 从一个 JSON 对象里定位 Agent Identity 字段所在的节点：
+//   - 有 agent_identity / agentIdentity 子对象 → 取子对象；
+//   - 根上 auth_mode=agentIdentity 或直接带 agent_runtime_id → 取该对象本身。
+//
+// 命中返回节点与 true，否则 false。
+func resolveAgentIdentityNode(m map[string]any) (map[string]any, bool) {
+	if m == nil {
+		return nil, false
+	}
+	if sub, ok := m["agent_identity"].(map[string]any); ok {
+		return sub, true
+	}
+	if subCamel, ok := m["agentIdentity"].(map[string]any); ok {
+		return subCamel, true
+	}
+	mode := agentIdentityString(m, "auth_mode", "authMode")
+	if strings.EqualFold(mode, auth.CodexAuthModeAgentIdentity) ||
+		agentIdentityString(m, "agent_runtime_id", "agentRuntimeId") != "" {
+		return m, true
+	}
+	return nil, false
+}
+
 // parseAgentIdentityAuthJSON 解析 Agent Identity auth.json。
 func parseAgentIdentityAuthJSON(raw string) (*agentIdentityFields, error) {
 	trimmed := strings.TrimSpace(raw)
@@ -75,18 +98,16 @@ func parseAgentIdentityAuthJSON(raw string) (*agentIdentityFields, error) {
 	if err := json.Unmarshal([]byte(trimmed), &root); err != nil {
 		return nil, fmt.Errorf("auth.json 不是合法的 JSON: %w", err)
 	}
-	// 优先取 agent_identity 子对象；否则要求根上 auth_mode=agentIdentity。
-	node := root
-	if sub, ok := root["agent_identity"].(map[string]any); ok {
-		node = sub
-	} else if subCamel, ok := root["agentIdentity"].(map[string]any); ok {
-		node = subCamel
-	} else {
-		mode := agentIdentityString(root, "auth_mode", "authMode")
-		if !strings.EqualFold(mode, auth.CodexAuthModeAgentIdentity) &&
-			agentIdentityString(root, "agent_runtime_id", "agentRuntimeId") == "" {
-			return nil, fmt.Errorf("auth.json 不是 Agent Identity 格式（缺少 agent_identity 或 auth_mode=agentIdentity）")
+	// 先按根级识别；识别不到再穿透 credentials 包装（sub2api / codex2api
+	// 导出的账号 JSON 把 Agent Identity 字段包在 credentials 对象里）。
+	node, ok := resolveAgentIdentityNode(root)
+	if !ok {
+		if wrapped, wok := root["credentials"].(map[string]any); wok {
+			node, ok = resolveAgentIdentityNode(wrapped)
 		}
+	}
+	if !ok {
+		return nil, fmt.Errorf("auth.json 不是 Agent Identity 格式（缺少 agent_identity 或 auth_mode=agentIdentity）")
 	}
 
 	fields := &agentIdentityFields{

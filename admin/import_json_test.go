@@ -1265,7 +1265,8 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 }
 
 // 勾选"允许重复添加"导入的 RT 账号刷新后不得被合并。
-func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {	gin.SetMode(gin.TestMode)
+func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
 	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
@@ -1360,5 +1361,44 @@ func TestParseImportJSONTokensHandlesSessionJSONWithoutAccessToken(t *testing.T)
 	}
 	if len(tokens) != 0 {
 		t.Fatalf("tokens len = %d, want 0 (no access_token or refresh_token)", len(tokens))
+	}
+}
+
+// 平铺在 credentials 里的 Agent Identity 条目（sub2api 导出形态）应被通用 JSON
+// 导入识别，而不是当作"无凭据"静默丢弃（issue #424 同根因）。
+func TestParseImportJSONTokensAgentIdentityFlatCredentials(t *testing.T) {
+	pk := newTestAgentPrivateKey(t)
+	data := []byte(`{
+		"accounts": [
+			{
+				"name": "AI Account",
+				"credentials": {
+					"auth_mode": "agentIdentity",
+					"agent_runtime_id": "rt-flat",
+					"agent_private_key": "` + pk + `",
+					"account_id": "acc-flat",
+					"chatgpt_user_id": "user-flat",
+					"email": "flat@example.com"
+				}
+			}
+		]
+	}`)
+
+	tokens, err := parseImportJSONTokens(data)
+	if err != nil {
+		t.Fatalf("parseImportJSONTokens returned error: %v", err)
+	}
+	if len(tokens) != 1 {
+		t.Fatalf("tokens len = %d, want 1", len(tokens))
+	}
+	tok := tokens[0]
+	if !tok.isAgentIdentity() {
+		t.Fatalf("token should be agent identity: %+v", tok)
+	}
+	if tok.agentRuntimeID != "rt-flat" || tok.accountID != "acc-flat" || tok.chatgptUserID != "user-flat" {
+		t.Fatalf("agent identity fields mismatch: %+v", tok)
+	}
+	if tok.agentPrivateKey != pk {
+		t.Fatal("private key not carried through")
 	}
 }

@@ -3156,6 +3156,31 @@ type jsonAgentIdentityNode struct {
 	FedRAMP         bool   `json:"chatgpt_account_is_fedramp"`
 }
 
+// agentIdentityNodeFromFlatCredentials 从平铺在 credentials 里的 Agent Identity 字段
+// 合成 agent_identity 节点：sub2api / codex2api 的账号导出把这些字段直接摊在
+// credentials 对象上（auth_mode=agentIdentity + agent_runtime_id…），不套
+// agent_identity 子对象。既有子对象则不必调用本函数。
+func agentIdentityNodeFromFlatCredentials(authMode, runtimeID, privateKey, taskID, accountID, userID, email, planType string, fedramp bool) *jsonAgentIdentityNode {
+	runtimeID = strings.TrimSpace(runtimeID)
+	// 仅当 auth_mode 声明或带 runtime_id 时才认为是 Agent Identity 平铺形态。
+	if !strings.EqualFold(strings.TrimSpace(authMode), auth.CodexAuthModeAgentIdentity) && runtimeID == "" {
+		return nil
+	}
+	if runtimeID == "" || strings.TrimSpace(privateKey) == "" {
+		return nil
+	}
+	return &jsonAgentIdentityNode{
+		AgentRuntimeID:  runtimeID,
+		AgentPrivateKey: strings.TrimSpace(privateKey),
+		TaskID:          strings.TrimSpace(taskID),
+		AccountID:       strings.TrimSpace(accountID),
+		ChatGPTUserID:   strings.TrimSpace(userID),
+		Email:           strings.TrimSpace(email),
+		PlanType:        strings.TrimSpace(planType),
+		FedRAMP:         fedramp,
+	}
+}
+
 // agentIdentityImportTokenFromNode 把 agent_identity 子对象转成 importToken（无有效字段时返回 ok=false）。
 func agentIdentityImportTokenFromNode(node *jsonAgentIdentityNode, fallbackName string) (importToken, bool) {
 	if node == nil {
@@ -3185,6 +3210,11 @@ func agentIdentityImportTokenFromNode(node *jsonAgentIdentityNode, fallbackName 
 type jsonAccountEntry struct {
 	AuthMode              string                 `json:"auth_mode"`
 	AgentIdentity         *jsonAgentIdentityNode `json:"agent_identity"`
+	AgentRuntimeID        string                 `json:"agent_runtime_id"`
+	AgentPrivateKey       string                 `json:"agent_private_key"`
+	AgentTaskID           string                 `json:"task_id"`
+	ChatGPTUserID         string                 `json:"chatgpt_user_id"`
+	AgentFedRAMP          bool                   `json:"chatgpt_account_is_fedramp"`
 	RefreshToken          string                 `json:"refresh_token"`
 	SessionToken          string                 `json:"session_token"`
 	SessionTokenCamel     string                 `json:"sessionToken"`
@@ -3235,6 +3265,11 @@ type sub2apiAccountEntry struct {
 type sub2apiAccountCredentials struct {
 	AuthMode              string                 `json:"auth_mode"`
 	AgentIdentity         *jsonAgentIdentityNode `json:"agent_identity"`
+	AgentRuntimeID        string                 `json:"agent_runtime_id"`
+	AgentPrivateKey       string                 `json:"agent_private_key"`
+	AgentTaskID           string                 `json:"task_id"`
+	ChatGPTUserID         string                 `json:"chatgpt_user_id"`
+	AgentFedRAMP          bool                   `json:"chatgpt_account_is_fedramp"`
 	RefreshToken          string                 `json:"refresh_token"`
 	SessionToken          string                 `json:"session_token"`
 	SessionTokenCamel     string                 `json:"sessionToken"`
@@ -3340,8 +3375,13 @@ func jsonAccountEntriesToTokens(entries []jsonAccountEntry) []importToken {
 		accID := firstNonEmpty(entry.AccountID, entry.User.ID, entry.Account.ID)
 		expiresAt := firstNonEmpty(entry.ExpiresAt.String(), entry.Expired.String(), entry.Expires.String())
 
-		// Agent Identity 条目：无 RT/ST/AT，单独识别。
-		if tok, ok := agentIdentityImportTokenFromNode(entry.AgentIdentity, name); ok {
+		// Agent Identity 条目：无 RT/ST/AT，单独识别。子对象缺失时回退到
+		// 平铺在条目根上的 Agent Identity 字段（sub2api / codex2api 导出形态）。
+		agentNode := entry.AgentIdentity
+		if agentNode == nil {
+			agentNode = agentIdentityNodeFromFlatCredentials(entry.AuthMode, entry.AgentRuntimeID, entry.AgentPrivateKey, entry.AgentTaskID, accID, entry.ChatGPTUserID, email, planType, entry.AgentFedRAMP)
+		}
+		if tok, ok := agentIdentityImportTokenFromNode(agentNode, name); ok {
 			tokens = append(tokens, tok)
 			continue
 		}
@@ -3393,8 +3433,13 @@ func parseSub2APIJSONImportTokens(data []byte) []importToken {
 		accID := firstNonEmpty(c.AccountID, c.User.ID, c.Account.ID)
 		expiresAt := firstNonEmpty(c.ExpiresAt.String(), c.Expired.String(), c.Expires.String())
 
-		// Agent Identity 条目：无 RT/ST/AT，单独识别。
-		if tok, ok := agentIdentityImportTokenFromNode(c.AgentIdentity, name); ok {
+		// Agent Identity 条目：无 RT/ST/AT，单独识别。子对象缺失时回退到
+		// 平铺在 credentials 里的 Agent Identity 字段（sub2api 导出形态）。
+		agentNode := c.AgentIdentity
+		if agentNode == nil {
+			agentNode = agentIdentityNodeFromFlatCredentials(c.AuthMode, c.AgentRuntimeID, c.AgentPrivateKey, c.AgentTaskID, accID, c.ChatGPTUserID, email, planType, c.AgentFedRAMP)
+		}
+		if tok, ok := agentIdentityImportTokenFromNode(agentNode, name); ok {
 			tokens = append(tokens, tok)
 			continue
 		}
