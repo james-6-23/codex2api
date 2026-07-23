@@ -19,6 +19,7 @@ import (
 
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
+	"github.com/codex2api/internal/openaiidentity"
 	"github.com/codex2api/security/promptfilter"
 )
 
@@ -7888,6 +7889,11 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	skippedPlanType := ""
 	subExpCredential := ""
 	subExpCredentialSet := false
+	workspaceEmail, workspaceID := openaiidentity.TokenIdentity(td.IDToken, td.AccessToken)
+	if workspaceID != "" && info != nil {
+		info.Email = workspaceEmail
+		info.ChatGPTAccountID = workspaceID
+	}
 	acc.mu.Lock()
 	acc.AccessToken = td.AccessToken
 	if td.RefreshToken != "" {
@@ -7972,6 +7978,10 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 		if subExpCredentialSet {
 			credentials["subscription_expires_at"] = subExpCredential
 		}
+	}
+	if workspaceID != "" {
+		credentials["email"] = workspaceEmail
+		credentials["workspace_id"] = workspaceID
 	}
 	if err := s.db.UpdateCredentials(ctx, dbID, credentials); err != nil {
 		log.Printf("[账号 %d] 更新数据库失败: %v", dbID, err)

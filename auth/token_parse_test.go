@@ -153,8 +153,8 @@ func TestRefreshWithSessionToken(t *testing.T) {
 	}
 }
 
-// 个人账号 JWT 可能没有 chatgpt_account_id，只有 user_id；解析必须带出它，
-// 供 AT 导入按 email+user_id 做身份去重（重复导入问题）。
+// 个人账号 JWT 可能没有 chatgpt_account_id，只有 user_id；解析仍需保留元数据，
+// 但 user_id 不参与 workspace 身份去重。
 func TestParseAccessTokenExtractsUserID(t *testing.T) {
 	jwt := makeTestJWT(map[string]interface{}{
 		"exp": 9999999999,

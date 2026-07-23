@@ -71,3 +71,58 @@ func TestNormalizeTokenCredentialSeedTreatsCodexATAsOpaque(t *testing.T) {
 		t.Fatalf("credentials should not include account_id for opaque codex_at: %#v", credentials)
 	}
 }
+
+func TestTokenCredentialMapStoresJWTWorkspaceSeparately(t *testing.T) {
+	idToken := makeAdminTestJWT(t, map[string]interface{}{
+		"email": "user@example.com",
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": "workspace-from-jwt",
+		},
+	})
+	credentials := tokenCredentialMap(tokenCredentialSeed{
+		idToken:        idToken,
+		email:          "USER@example.com",
+		accountID:      "legacy-account-id",
+		allowDuplicate: true,
+	})
+
+	if got := credentials["workspace_id"]; got != "workspace-from-jwt" {
+		t.Fatalf("workspace_id = %q, want workspace-from-jwt", got)
+	}
+	if got := credentials["account_id"]; got != "legacy-account-id" {
+		t.Fatalf("account_id = %q, want legacy-account-id", got)
+	}
+	if _, ok := credentials["allow_duplicate"]; ok {
+		t.Fatalf("known workspace retained allow_duplicate: %#v", credentials)
+	}
+}
+
+func TestTokenCredentialMapDoesNotUseLegacyIDAsWorkspace(t *testing.T) {
+	credentials := tokenCredentialMap(tokenCredentialSeed{
+		email:          "user@example.com",
+		accountID:      "legacy-account-id",
+		allowDuplicate: true,
+	})
+	if _, ok := credentials["workspace_id"]; ok {
+		t.Fatalf("legacy account_id became workspace_id: %#v", credentials)
+	}
+	if got := credentials["allow_duplicate"]; got != "true" {
+		t.Fatalf("allow_duplicate = %q, want true", got)
+	}
+}
+
+func TestTokenCredentialMapRejectsWorkspaceFromDifferentEmail(t *testing.T) {
+	idToken := makeAdminTestJWT(t, map[string]interface{}{
+		"email": "jwt@example.com",
+		"https://api.openai.com/auth": map[string]interface{}{
+			"chatgpt_account_id": "workspace-from-jwt",
+		},
+	})
+	credentials := tokenCredentialMap(tokenCredentialSeed{
+		idToken: idToken,
+		email:   "import@example.com",
+	})
+	if _, ok := credentials["workspace_id"]; ok {
+		t.Fatalf("mismatched JWT email supplied workspace_id: %#v", credentials)
+	}
+}

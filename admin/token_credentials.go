@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/internal/openaiidentity"
 )
 
 type tokenCredentialSeed struct {
@@ -15,12 +16,10 @@ type tokenCredentialSeed struct {
 	accessTokenType string
 	idToken         string
 	accountID       string
-	// userID 是 OpenAI 用户 ID（user-...），个人账号的 JWT 可能没有工作区
-	// account_id，此时以 email+userID 作为 OAuth 身份去重键 (重复导入问题)。
+	workspaceID     string
+	// userID 是 OpenAI 用户 ID（user-...），仅作为账号元数据保存。
 	userID string
-	// allowDuplicate 标记该账号是用户勾选"允许重复添加"强制导入的副本。
-	// 持久化为 credentials.allow_duplicate，身份判重与启动时的 dedupe 迁移
-	// 都会跳过带标记的账号，避免把用户故意保留的重复当垃圾合并。
+	// allowDuplicate 仅允许 workspace_id 为空的账号重复。
 	allowDuplicate        bool
 	email                 string
 	planType              string
@@ -44,6 +43,7 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 	seed.accessTokenType = strings.TrimSpace(seed.accessTokenType)
 	seed.idToken = strings.TrimSpace(seed.idToken)
 	seed.accountID = strings.TrimSpace(seed.accountID)
+	seed.workspaceID = openaiidentity.NormalizeWorkspaceID(seed.workspaceID)
 	seed.userID = strings.TrimSpace(seed.userID)
 	seed.email = strings.TrimSpace(seed.email)
 	seed.planType = strings.TrimSpace(seed.planType)
@@ -62,7 +62,22 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 	if seed.accessTokenType == accessTokenTypeCodexAT {
 		accessTokenForJWT = ""
 	}
+	tokenEmail, tokenWorkspaceID := openaiidentity.TokenIdentity(seed.idToken, accessTokenForJWT)
+	if seed.workspaceID == "" {
+		if tokenWorkspaceID != "" {
+			if seed.email == "" {
+				seed.email = tokenEmail
+				seed.workspaceID = tokenWorkspaceID
+			} else if strings.EqualFold(seed.email, tokenEmail) {
+				seed.workspaceID = tokenWorkspaceID
+			}
+		}
+	}
 	if info := accountInfoFromTokens(seed.idToken, accessTokenForJWT); info != nil {
+		if tokenWorkspaceID != "" {
+			info.Email = tokenEmail
+			info.ChatGPTAccountID = tokenWorkspaceID
+		}
 		if seed.accountID == "" {
 			seed.accountID = info.ChatGPTAccountID
 		}
@@ -160,10 +175,13 @@ func tokenCredentialMap(seed tokenCredentialSeed) map[string]interface{} {
 	if seed.accountID != "" {
 		credentials["account_id"] = seed.accountID
 	}
+	if seed.workspaceID != "" {
+		credentials["workspace_id"] = seed.workspaceID
+	}
 	if seed.userID != "" {
 		credentials["user_id"] = seed.userID
 	}
-	if seed.allowDuplicate {
+	if seed.allowDuplicate && seed.workspaceID == "" {
 		credentials["allow_duplicate"] = "true"
 	}
 	if seed.email != "" {

@@ -448,7 +448,7 @@ func TestImportAccountsCommonDoesNotCollapseConflictingChatGPTAccountID(t *testi
 	}
 }
 
-func TestImportAccountsCommonUpdatesExistingOAuthIdentity(t *testing.T) {
+func TestImportAccountsCommonUpdatesKnownWorkspaceWhenDuplicatesAllowed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -467,6 +467,7 @@ func TestImportAccountsCommonUpdatesExistingOAuthIdentity(t *testing.T) {
 		"refresh_token": "rt-old",
 		"email":         "import@example.com",
 		"account_id":    "acc-import",
+		"workspace_id":  "acc-import",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -479,10 +480,11 @@ func TestImportAccountsCommonUpdatesExistingOAuthIdentity(t *testing.T) {
 	handler.importAccountsCommon(ctx, []importToken{{
 		refreshToken: "rt-new",
 		accessToken:  "at-new",
+		idToken:      makeOAuthTestIDToken("Import@Example.com", "acc-import", "team"),
 		email:        "Import@Example.com",
 		accountID:    "acc-import",
 		planType:     "team",
-	}}, "", false)
+	}}, "", true)
 
 	select {
 	case id := <-probed:
@@ -538,6 +540,7 @@ func TestImportAccountsCommonSkipsExistingOAuthIdentityWithSameCredentials(t *te
 		"access_token":  "at-same",
 		"email":         "same@example.com",
 		"account_id":    "acc-same",
+		"workspace_id":  "acc-same",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -551,6 +554,7 @@ func TestImportAccountsCommonSkipsExistingOAuthIdentityWithSameCredentials(t *te
 		refreshToken: "rt-same",
 		sessionToken: "st-same",
 		accessToken:  "at-same",
+		idToken:      makeOAuthTestIDToken("Same@Example.com", "acc-same", ""),
 		email:        "Same@Example.com",
 		accountID:    "acc-same",
 	}}, "", false)
@@ -595,6 +599,7 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithExistingAccount(t *t
 		"refresh_token": "rt-old",
 		"email":         "ambiguous@example.com",
 		"account_id":    "acc-ambiguous",
+		"workspace_id":  "acc-ambiguous",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -605,8 +610,8 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithExistingAccount(t *t
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{refreshToken: "rt-new-1", email: "ambiguous@example.com", accountID: "acc-ambiguous"},
-		{refreshToken: "rt-new-2", email: "Ambiguous@Example.com", accountID: "acc-ambiguous"},
+		{refreshToken: "rt-new-1", idToken: makeOAuthTestIDToken("ambiguous@example.com", "acc-ambiguous", ""), email: "ambiguous@example.com", accountID: "acc-ambiguous"},
+		{refreshToken: "rt-new-2", idToken: makeOAuthTestIDToken("Ambiguous@Example.com", "acc-ambiguous", ""), email: "Ambiguous@Example.com", accountID: "acc-ambiguous"},
 	}, "", false)
 
 	var payload map[string]interface{}
@@ -632,7 +637,7 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithExistingAccount(t *t
 	}
 }
 
-func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithoutExistingAccount(t *testing.T) {
+func TestImportAccountsCommonSkipsAmbiguousKnownWorkspaceWhenDuplicatesAllowed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -650,9 +655,9 @@ func TestImportAccountsCommonSkipsAmbiguousOAuthIdentityWithoutExistingAccount(t
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{refreshToken: "rt-new-1", email: "new-ambiguous@example.com", accountID: "acc-new-ambiguous"},
-		{refreshToken: "rt-new-2", email: "New-Ambiguous@Example.com", accountID: "acc-new-ambiguous"},
-	}, "", false)
+		{refreshToken: "rt-new-1", idToken: makeOAuthTestIDToken("new-ambiguous@example.com", "acc-new-ambiguous", ""), email: "new-ambiguous@example.com", accountID: "acc-new-ambiguous"},
+		{refreshToken: "rt-new-2", idToken: makeOAuthTestIDToken("New-Ambiguous@Example.com", "acc-new-ambiguous", ""), email: "New-Ambiguous@Example.com", accountID: "acc-new-ambiguous"},
+	}, "", true)
 
 	var payload map[string]interface{}
 	if err := json.Unmarshal(recorder.Body.Bytes(), &payload); err != nil {
@@ -695,8 +700,8 @@ func TestImportAccountsCommonCollapsesIdenticalOAuthIdentityInFile(t *testing.T)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/import", nil)
 
 	handler.importAccountsCommon(ctx, []importToken{
-		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "same-file@example.com", accountID: "acc-same-file"},
-		{refreshToken: "rt-same-file", accessToken: "at-same-file", email: "Same-File@Example.com", accountID: "acc-same-file"},
+		{refreshToken: "rt-same-file", accessToken: "at-same-file", idToken: makeOAuthTestIDToken("same-file@example.com", "acc-same-file", ""), email: "same-file@example.com", accountID: "acc-same-file"},
+		{refreshToken: "rt-same-file", accessToken: "at-same-file", idToken: makeOAuthTestIDToken("Same-File@Example.com", "acc-same-file", ""), email: "Same-File@Example.com", accountID: "acc-same-file"},
 	}, "", false)
 
 	if !strings.Contains(recorder.Body.String(), `"type":"complete"`) ||
@@ -985,9 +990,8 @@ func newMultipartRequest(t *testing.T, files map[string]string) *http.Request {
 	return req
 }
 
-// TestImportAccountsCommonAllowDuplicateBypassesDedup 验证：勾选"允许重复添加"后，
-// 同一 OAuth 身份会被作为独立账号新建，而不是更新已有账号。
-func TestImportAccountsCommonAllowDuplicateBypassesDedup(t *testing.T) {
+// workspace_id 无法从 JWT 识别时，允许重复添加可保留相同邮箱的多个账号。
+func TestImportAccountsCommonAllowsDuplicateWithoutWorkspace(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -1148,7 +1152,7 @@ func TestAddATAccountCountsUpdateNotNew(t *testing.T) {
 	}
 }
 
-// 先导入 AT（个人账号，只有 user_id 身份），后导入裸 RT——RT 刷新后身份可知，// 应把新凭证合并进已有 AT 账号（RT 升级）、软删新账号，且旧账号的用量快照保留。
+// RT 刷新后 workspace 身份可知时，应把新凭证合并进已有账号。
 func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1160,7 +1164,7 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	oldID, err := db.InsertAccountWithCredentials(context.Background(), "at-first", map[string]interface{}{
 		"access_token":          "at-rotation-1",
 		"email":                 "solo@example.com",
-		"user_id":               "user-merge1",
+		"workspace_id":          "workspace-merge1",
 		"codex_7d_used_percent": "42.5",
 	}, "")
 	if err != nil {
@@ -1172,7 +1176,7 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 		"refresh_token": "rt-fresh",
 		"access_token":  "at-rotation-2",
 		"email":         "solo@example.com",
-		"user_id":       "user-merge1",
+		"workspace_id":  "workspace-merge1",
 	}, "")
 	if err != nil {
 		t.Fatalf("Insert new: %v", err)
@@ -1206,10 +1210,8 @@ func TestMergeRefreshedDuplicateIntoExisting(t *testing.T) {
 	}
 }
 
-// codex_at 手动添加：插入时身份未知，wham 探针补齐身份后应回查并把凭证
-// 合并进同身份的已有账号、软删新账号，且旧账号的用量统计保留。
-// 覆盖 AT 导入/添加事后无法去重的缺口（与 RT 路径对称）。
-func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
+// wham 返回的 account_id 不作为 JWT workspace_id；无法解析 workspace 的账号可并存。
+func TestProbeImportedAccountUsageKeepsUnknownWorkspaceDuplicate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -1220,7 +1222,8 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	oldID, err := db.InsertAccountWithCredentials(context.Background(), "at-first", map[string]interface{}{
 		"access_token":          "at-old",
 		"email":                 "solo@example.com",
-		"account_id":            "user-probe1",
+		"account_id":            "workspace-probe1",
+		"workspace_id":          "workspace-probe1",
 		"codex_7d_used_percent": "37.0",
 	}, "")
 	if err != nil {
@@ -1236,9 +1239,9 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	}
 	store.AddAccount(&auth.Account{DBID: newID, AccessToken: "at-new", Status: auth.StatusReady})
 
-	// 模拟 wham 探针：补齐 email + account_id（与旧账号同一身份）并落库。
+	// 模拟 wham 探针：只补齐旧 account_id，不产生 workspace_id。
 	handler.probeUsage = func(ctx context.Context, acc *auth.Account) error {
-		store.UpdateAccountIdentity(acc, "solo@example.com", "user-probe1")
+		store.UpdateAccountIdentity(acc, "solo@example.com", "workspace-probe1")
 		return nil
 	}
 
@@ -1248,24 +1251,31 @@ func TestProbeImportedAccountUsageMergesAfterIdentityLearned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListActive: %v", err)
 	}
-	if len(rows) != 1 || rows[0].ID != oldID {
-		t.Fatalf("active rows = %d, want 1 row id %d (新账号应被合并软删)", len(rows), oldID)
+	if len(rows) != 2 {
+		t.Fatalf("active rows = %d, want 2", len(rows))
 	}
 
 	oldRow, err := db.GetAccountByID(context.Background(), oldID)
 	if err != nil {
 		t.Fatalf("GetAccountByID: %v", err)
 	}
-	if got := oldRow.GetCredential("access_token"); got != "at-new" {
-		t.Fatalf("access_token = %q, want at-new (新 AT 应升级进旧账号)", got)
+	if got := oldRow.GetCredential("access_token"); got != "at-old" {
+		t.Fatalf("access_token = %q, want at-old", got)
 	}
 	if got := oldRow.GetCredential("codex_7d_used_percent"); got != "37.0" {
 		t.Fatalf("codex_7d_used_percent = %q, want 37.0 (用量统计必须保留)", got)
 	}
+	newRow, err := db.GetAccountByID(context.Background(), newID)
+	if err != nil {
+		t.Fatalf("GetAccountByID new: %v", err)
+	}
+	if got := newRow.GetCredential("workspace_id"); got != "" {
+		t.Fatalf("workspace_id = %q, want empty", got)
+	}
 }
 
-// 勾选"允许重复添加"导入的 RT 账号刷新后不得被合并。
-func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
+// workspace 已知时，历史 allow_duplicate 标记不能绕过去重。
+func TestMergeRefreshedDuplicateIgnoresAllowDuplicate(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)
@@ -1275,29 +1285,29 @@ func TestMergeRefreshedDuplicateSkipsAllowDuplicate(t *testing.T) {
 	if _, err := db.InsertAccountWithCredentials(context.Background(), "primary", map[string]interface{}{
 		"access_token": "at-primary",
 		"email":        "solo@example.com",
-		"user_id":      "user-keep1",
+		"workspace_id": "workspace-keep1",
 	}, ""); err != nil {
 		t.Fatalf("Insert primary: %v", err)
 	}
 	forcedID, err := db.InsertAccountWithCredentials(context.Background(), "forced", map[string]interface{}{
 		"refresh_token":   "rt-forced",
 		"email":           "solo@example.com",
-		"user_id":         "user-keep1",
+		"workspace_id":    "workspace-keep1",
 		"allow_duplicate": "true",
 	}, "")
 	if err != nil {
 		t.Fatalf("Insert forced: %v", err)
 	}
 
-	if merged := handler.mergeRefreshedDuplicateIntoExisting(forcedID, "test"); merged {
-		t.Fatal("allow_duplicate copy must not be merged")
+	if merged := handler.mergeRefreshedDuplicateIntoExisting(forcedID, "test"); !merged {
+		t.Fatal("known workspace duplicate should be merged")
 	}
 	rows, err := db.ListActive(context.Background())
 	if err != nil {
 		t.Fatalf("ListActive: %v", err)
 	}
-	if len(rows) != 2 {
-		t.Fatalf("active rows = %d, want 2 (forced copy preserved)", len(rows))
+	if len(rows) != 1 {
+		t.Fatalf("active rows = %d, want 1", len(rows))
 	}
 }
 
