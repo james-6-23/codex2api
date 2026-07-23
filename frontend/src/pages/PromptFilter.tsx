@@ -3387,14 +3387,17 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
         <div className="font-medium text-foreground">{formatRelativeTime(log.created_at, { variant: 'compact' })}</div>
         {!compact ? <div className="text-xs text-muted-foreground">{formatBeijingTime(log.created_at)}</div> : null}
       </TableCell>
-      <TableCell>
-        <div className="flex flex-col items-start gap-1">
+      <TableCell className="min-w-0 align-top">
+        {/* table-fixed 下动作列较窄；徽章默认 whitespace-nowrap 会按内容自然宽度
+            横向溢出盖住相邻端点列（如"当前用户 Prompt"这类长 origin 标签）。
+            允许列内换行，把内容约束在单元格宽度内。 */}
+        <div className="flex min-w-0 flex-col items-start gap-1">
           <ActionBadge action={log.action} />
-          {log.policy_profile ? <Badge variant="outline" className="text-[11px]">{policyProfileLabel}</Badge> : null}
+          {log.policy_profile ? <Badge variant="outline" className="h-auto max-w-full whitespace-normal break-words text-left leading-tight text-[11px]">{policyProfileLabel}</Badge> : null}
           {log.primary_origin ? (
             <Badge
               variant="secondary"
-              className="text-[11px]"
+              className="h-auto max-w-full whitespace-normal break-words text-left leading-tight text-[11px]"
               title={`${t('promptFilter.triggerOrigin')}: ${primaryOriginLabel}`}
             >
               {primaryOriginLabel}
@@ -3402,7 +3405,7 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
           ) : null}
           {log.strike_eligible ? <Badge variant="destructive" className="text-[11px]">strike</Badge> : null}
           {log.source === 'upstream_cyber_policy' ? <Badge variant="outline" className="text-[11px]">upstream</Badge> : null}
-          {log.review_model ? <Badge variant="outline" className="text-[11px]">{log.review_flagged ? 'review flagged' : 'review cleared'}</Badge> : null}
+          {log.review_model ? <Badge variant="outline" className="h-auto max-w-full whitespace-normal break-words text-left leading-tight text-[11px]">{log.review_flagged ? 'review flagged' : 'review cleared'}</Badge> : null}
         </div>
       </TableCell>
       <TableCell>
