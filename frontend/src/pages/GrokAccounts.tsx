@@ -26,6 +26,7 @@ import {
   FileText,
   RotateCcw,
   Pencil,
+  BarChart3,
 } from "lucide-react";
 import { api, getAdminKey } from "../api";
 import type { ProxyRow } from "../api";
@@ -36,7 +37,9 @@ import type {
   AddGrokAccountRequest,
   GrokSSOImportItem,
 } from "../types";
+import AccountDetailSheet from "../components/AccountDetailSheet";
 import AccountHealthBar from "../components/AccountHealthBar";
+import AccountUsageModal from "../components/AccountUsageModal";
 import Modal from "../components/Modal";
 import ModelLogo from "../components/ModelLogo";
 import PageHeader from "../components/PageHeader";
@@ -95,7 +98,13 @@ function getInitialGrokViewMode(): GrokViewMode {
 
 // addMethod：Device 授权 / 粘贴 auth.json / xAI API Key / SSO 批量导入
 type AddMethod = "oauth_link" | "oauth" | "api_key" | "sso";
-type StatusFilter = "all" | "active" | "disabled" | "banned" | "error";
+type StatusFilter =
+  | "all"
+  | "active"
+  | "rate_limited"
+  | "disabled"
+  | "banned"
+  | "error";
 // 套餐筛选：free / 付费档（SuperGrok 等）/ api / 其它。
 type PlanFilter = "all" | "free" | "premium" | "api" | "other";
 type AuthFilter = "all" | "oauth" | "api_key";
@@ -207,8 +216,21 @@ function isAccountBanned(account: AccountRow): boolean {
   return account.status === "unauthorized";
 }
 
+// 限流：status 或 cooldown_reason 命中限流类状态（与 StatusBadge / 用量条一致）。
+function isAccountRateLimited(account: AccountRow): boolean {
+  if (isAccountBanned(account) || account.status === "error") return false;
+  const status = (account.status ?? "").toLowerCase();
+  const reason = (account.cooldown_reason ?? "").toLowerCase();
+  return GROK_LIMITED_STATUSES.has(status) || GROK_LIMITED_STATUSES.has(reason);
+}
+
+// 「正常」：已启用、非封禁/错误、非限流。
 function isAccountActive(account: AccountRow): boolean {
-  return account.enabled !== false && !isAccountError(account);
+  return (
+    account.enabled !== false &&
+    !isAccountError(account) &&
+    !isAccountRateLimited(account)
+  );
 }
 
 // 套餐归类：free / 付费档（SuperGrok 等）/ api / 其它（空、unknown）。
@@ -302,6 +324,9 @@ export default function GrokAccounts({
   const devicePollTimer = useRef<number | null>(null);
 
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
+  const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
+  // 与 Codex 账号页一致：右侧详情 Sheet，按过滤后的列表顺序可左右切换。
+  const [detailAccountId, setDetailAccountId] = useState<number | null>(null);
   const [batchTesting, setBatchTesting] = useState(false);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [batchBusy, setBatchBusy] = useState(false);
@@ -358,18 +383,30 @@ export default function GrokAccounts({
   const stats = useMemo(() => {
     const total = accounts.length;
     const active = accounts.filter(isAccountActive).length;
+    const rateLimited = accounts.filter(isAccountRateLimited).length;
     const disabled = accounts.filter((a) => a.enabled === false).length;
     const banned = accounts.filter(isAccountBanned).length;
     const errorOnly = accounts.filter((a) => a.status === "error").length;
     const oauth = accounts.filter((a) => a.grok_auth_kind === "oauth").length;
     const apiKey = accounts.filter((a) => a.grok_auth_kind === "api_key").length;
-    return { total, active, disabled, banned, errorOnly, oauth, apiKey };
+    return {
+      total,
+      active,
+      rateLimited,
+      disabled,
+      banned,
+      errorOnly,
+      oauth,
+      apiKey,
+    };
   }, [accounts]);
 
   const filteredAccounts = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return accounts.filter((account) => {
       if (statusFilter === "active" && !isAccountActive(account)) return false;
+      if (statusFilter === "rate_limited" && !isAccountRateLimited(account))
+        return false;
       if (statusFilter === "disabled" && account.enabled !== false) return false;
       if (statusFilter === "banned" && !isAccountBanned(account)) return false;
       if (statusFilter === "error" && account.status !== "error") return false;
@@ -398,6 +435,39 @@ export default function GrokAccounts({
     () => filteredAccounts.map((a) => a.id),
     [filteredAccounts],
   );
+  const detailAccount = useMemo(
+    () =>
+      detailAccountId == null
+        ? null
+        : (accounts.find((a) => a.id === detailAccountId) ?? null),
+    [accounts, detailAccountId],
+  );
+  const detailNavIndex = useMemo(() => {
+    if (detailAccountId == null) return -1;
+    return filteredAccounts.findIndex((a) => a.id === detailAccountId);
+  }, [detailAccountId, filteredAccounts]);
+  const openAccountDetail = useCallback((account: AccountRow) => {
+    setDetailAccountId(account.id);
+  }, []);
+  const closeAccountDetail = useCallback(() => {
+    setDetailAccountId(null);
+  }, []);
+  const goDetailPrev = useCallback(() => {
+    if (detailNavIndex <= 0) return;
+    setDetailAccountId(filteredAccounts[detailNavIndex - 1]?.id ?? null);
+  }, [detailNavIndex, filteredAccounts]);
+  const goDetailNext = useCallback(() => {
+    if (detailNavIndex < 0 || detailNavIndex >= filteredAccounts.length - 1) return;
+    setDetailAccountId(filteredAccounts[detailNavIndex + 1]?.id ?? null);
+  }, [detailNavIndex, filteredAccounts]);
+
+  useEffect(() => {
+    if (detailAccountId == null) return;
+    if (!accounts.some((a) => a.id === detailAccountId)) {
+      setDetailAccountId(null);
+    }
+  }, [accounts, detailAccountId]);
+
   const filteredSelectedCount = useMemo(
     () => filteredIds.reduce((n, id) => n + (selected.has(id) ? 1 : 0), 0),
     [filteredIds, selected],
@@ -823,9 +893,43 @@ export default function GrokAccounts({
     setBusyId(account.id);
     try {
       await api.deleteAccount(account.id);
+      if (detailAccountId === account.id) setDetailAccountId(null);
       await reload();
     } catch (err) {
       showToast(getErrorMessage(err), "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleToggleLock = async (account: AccountRow) => {
+    setBusyId(account.id);
+    const next = !account.locked;
+    try {
+      await api.toggleAccountLock(account.id, next);
+      showToast(next ? t("accounts.lockSuccess") : t("accounts.unlockSuccess"));
+      await reload();
+    } catch (err) {
+      showToast(
+        t("accounts.lockFailed", { error: getErrorMessage(err) }),
+        "error",
+      );
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleResetStatus = async (account: AccountRow) => {
+    setBusyId(account.id);
+    try {
+      await api.resetAccountStatus(account.id);
+      showToast(t("accounts.resetStatusSuccess"));
+      await reload();
+    } catch (err) {
+      showToast(
+        t("accounts.resetStatusFailed", { error: getErrorMessage(err) }),
+        "error",
+      );
     } finally {
       setBusyId(null);
     }
@@ -1134,6 +1238,11 @@ export default function GrokAccounts({
               [
                 ["all", t("accounts.filterAll"), stats.total],
                 ["active", t("accounts.filterNormal"), stats.active],
+                [
+                  "rate_limited",
+                  t("accounts.filterRateLimited"),
+                  stats.rateLimited,
+                ],
                 ["disabled", t("accounts.filterDisabled"), stats.disabled],
                 ["banned", t("accounts.filterBanned"), stats.banned],
                 ["error", t("accounts.filterError"), stats.errorOnly],
@@ -1436,9 +1545,12 @@ export default function GrokAccounts({
                       busy={busyId === account.id}
                       batchTesting={batchTesting}
                       selected={selected.has(account.id)}
+                      detailOpen={detailAccountId === account.id}
                       onToggleSelect={() => toggleSelect(account.id)}
+                      onOpenDetail={() => openAccountDetail(account)}
                       healthBuckets={healthBars[String(account.id)]}
                       onTest={() => setTestingAccount(account)}
+                      onUsage={() => setUsageAccount(account)}
                       onRefresh={() => void handleRefresh(account)}
                       onToggleEnabled={() => void handleToggleEnabled(account)}
                       onEdit={() => openEdit(account)}
@@ -1464,8 +1576,11 @@ export default function GrokAccounts({
                 busy={busyId === account.id}
                 batchTesting={batchTesting}
                 selected={selected.has(account.id)}
+                detailOpen={detailAccountId === account.id}
                 onToggleSelect={() => toggleSelect(account.id)}
+                onOpenDetail={() => openAccountDetail(account)}
                 onTest={() => setTestingAccount(account)}
+                onUsage={() => setUsageAccount(account)}
                 onRefresh={() => void handleRefresh(account)}
                 onToggleEnabled={() => void handleToggleEnabled(account)}
                 onEdit={() => openEdit(account)}
@@ -1970,6 +2085,78 @@ export default function GrokAccounts({
         />
       ) : null}
 
+      {usageAccount ? (
+        <AccountUsageModal
+          account={usageAccount}
+          onClose={() => setUsageAccount(null)}
+          showCreditSettings={false}
+        />
+      ) : null}
+
+      <AccountDetailSheet
+        account={detailAccount}
+        groups={[]}
+        healthBuckets={
+          detailAccount ? healthBars[String(detailAccount.id)] : undefined
+        }
+        sequence={detailNavIndex >= 0 ? detailNavIndex + 1 : undefined}
+        usageSlot={
+          detailAccount ? (
+            <GrokUsageCell
+              account={detailAccount}
+              detailed
+              onRefreshed={() => void reload()}
+            />
+          ) : null
+        }
+        canGoPrev={detailNavIndex > 0}
+        canGoNext={
+          detailNavIndex >= 0 && detailNavIndex < filteredAccounts.length - 1
+        }
+        refreshing={detailAccount ? busyId === detailAccount.id : false}
+        onClose={closeAccountDetail}
+        onPrev={goDetailPrev}
+        onNext={goDetailNext}
+        onEdit={() => {
+          if (!detailAccount) return;
+          openEdit(detailAccount);
+        }}
+        onUsage={() => {
+          if (!detailAccount) return;
+          setUsageAccount(detailAccount);
+        }}
+        onTest={() => {
+          if (!detailAccount) return;
+          setTestingAccount(detailAccount);
+        }}
+        onRefresh={() => {
+          if (!detailAccount) return;
+          void handleRefresh(detailAccount);
+        }}
+        onGenerateAuthJson={() => {
+          // Grok 不支持导出 auth.json；Sheet 内已对 grok 账号隐藏该按钮。
+        }}
+        onToggleEnabled={() => {
+          if (!detailAccount) return;
+          void handleToggleEnabled(detailAccount);
+        }}
+        onToggleLock={() => {
+          if (!detailAccount) return;
+          void handleToggleLock(detailAccount);
+        }}
+        onResetStatus={() => {
+          if (!detailAccount) return;
+          void handleResetStatus(detailAccount);
+        }}
+        onResetCredits={() => {
+          // Grok 无额度券；Sheet 内已隐藏。
+        }}
+        onDelete={() => {
+          if (!detailAccount) return;
+          void handleDelete(detailAccount);
+        }}
+      />
+
       {/* 导入来源选择弹窗（点「导入文件」先弹提示，风格对齐 Codex 导入） */}
       <Modal
         show={showImportPicker}
@@ -2234,8 +2421,11 @@ function GrokAccountCard({
   busy,
   batchTesting,
   selected,
+  detailOpen,
   onToggleSelect,
+  onOpenDetail,
   onTest,
+  onUsage,
   onRefresh,
   onToggleEnabled,
   onEdit,
@@ -2247,8 +2437,11 @@ function GrokAccountCard({
   busy: boolean;
   batchTesting: boolean;
   selected: boolean;
+  detailOpen: boolean;
   onToggleSelect: () => void;
+  onOpenDetail: () => void;
   onTest: () => void;
+  onUsage: () => void;
   onRefresh: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
@@ -2265,13 +2458,26 @@ function GrokAccountCard({
   return (
     <article
       className={cn(
-        "group relative flex min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-sm transition-[border-color,box-shadow,background-color] duration-200",
-        selected
+        "group relative flex min-w-0 cursor-pointer flex-col overflow-hidden rounded-xl border bg-card shadow-sm transition-[border-color,box-shadow,background-color] duration-200",
+        detailOpen
           ? "border-primary/60 ring-1 ring-primary/30"
-          : disabled
-            ? "border-border/70 opacity-80"
-            : "border-border hover:border-border hover:shadow-md",
+          : selected
+            ? "border-primary/40 ring-1 ring-primary/20"
+            : disabled
+              ? "border-border/70 opacity-80"
+              : "border-border hover:border-border hover:shadow-md",
       )}
+      onClick={(event) => {
+        const target = event.target as HTMLElement | null;
+        if (
+          target?.closest(
+            'button, a, input, label, [role="menuitem"], [role="menu"], [data-slot="button"]',
+          )
+        ) {
+          return;
+        }
+        onOpenDetail();
+      }}
     >
       <div className="flex flex-1 flex-col gap-3.5 p-4 sm:p-5">
         {/* Header: identity + status + actions */}
@@ -2282,6 +2488,7 @@ function GrokAccountCard({
             aria-label={t("accounts.selectAll")}
             checked={selected}
             onChange={onToggleSelect}
+            onClick={(event) => event.stopPropagation()}
           />
           <ModelLogo
             model="grok"
@@ -2305,7 +2512,7 @@ function GrokAccountCard({
               />
             </div>
             <h3
-              className="mt-1.5 break-all text-[15px] font-semibold leading-snug tracking-tight text-foreground sm:text-base"
+              className="mt-1.5 break-all text-[15px] font-semibold leading-snug tracking-tight text-foreground transition-colors hover:text-primary sm:text-base"
               title={label}
             >
               {label}
@@ -2326,6 +2533,7 @@ function GrokAccountCard({
               busy={busy}
               batchTesting={batchTesting}
               onTest={onTest}
+              onUsage={onUsage}
               onRefresh={onRefresh}
               onToggleEnabled={onToggleEnabled}
               onEdit={onEdit}
@@ -2431,6 +2639,7 @@ function GrokAccountActions({
   busy,
   batchTesting,
   onTest,
+  onUsage,
   onRefresh,
   onToggleEnabled,
   onEdit,
@@ -2440,6 +2649,7 @@ function GrokAccountActions({
   busy: boolean;
   batchTesting: boolean;
   onTest: () => void;
+  onUsage: () => void;
   onRefresh: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
@@ -2460,6 +2670,15 @@ function GrokAccountActions({
         onClick={onTest}
       >
         <Zap className="size-3.5" />
+      </Button>
+      <Button
+        variant="ghost"
+        size="icon-sm"
+        className="size-8"
+        title={t("accounts.usageDetail")}
+        onClick={onUsage}
+      >
+        <BarChart3 className="size-3.5" />
       </Button>
       {isOAuth ? (
         <Button
@@ -2518,9 +2737,12 @@ function GrokAccountTableRow({
   busy,
   batchTesting,
   selected,
+  detailOpen,
   onToggleSelect,
+  onOpenDetail,
   healthBuckets,
   onTest,
+  onUsage,
   onRefresh,
   onToggleEnabled,
   onEdit,
@@ -2532,9 +2754,12 @@ function GrokAccountTableRow({
   busy: boolean;
   batchTesting: boolean;
   selected: boolean;
+  detailOpen: boolean;
   onToggleSelect: () => void;
+  onOpenDetail: () => void;
   healthBuckets?: AccountHealthBucket[];
   onTest: () => void;
+  onUsage: () => void;
   onRefresh: () => void;
   onToggleEnabled: () => void;
   onEdit: () => void;
@@ -2550,7 +2775,22 @@ function GrokAccountTableRow({
 
   return (
     <TableRow
-      className={cn(disabled && "opacity-70", selected && "bg-primary/5")}
+      className={cn(
+        "cursor-pointer",
+        disabled && "opacity-70",
+        detailOpen ? "bg-primary/8" : selected && "bg-primary/5",
+      )}
+      onClick={(event) => {
+        const target = event.target as HTMLElement | null;
+        if (
+          target?.closest(
+            'button, a, input, label, [role="menuitem"], [role="menu"], [data-slot="button"]',
+          )
+        ) {
+          return;
+        }
+        onOpenDetail();
+      }}
     >
       <TableCell className="w-9">
         <input
@@ -2559,6 +2799,7 @@ function GrokAccountTableRow({
           aria-label={t("accounts.selectAll")}
           checked={selected}
           onChange={onToggleSelect}
+          onClick={(event) => event.stopPropagation()}
         />
       </TableCell>
       <TableCell className="font-mono text-[12px] text-muted-foreground">
@@ -2575,12 +2816,17 @@ function GrokAccountTableRow({
           />
           <div className="min-w-0">
             <div className="flex min-w-0 items-center gap-1.5">
-              <span
-                className="max-w-[200px] truncate text-[13px] font-semibold text-foreground"
-                title={label}
+              <button
+                type="button"
+                className="max-w-[200px] truncate text-left text-[13px] font-semibold text-foreground transition-colors hover:text-primary"
+                title={t("accounts.openDetail")}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onOpenDetail();
+                }}
               >
                 {label}
-              </span>
+              </button>
               <span
                 className={cn(
                   "inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
@@ -2694,6 +2940,7 @@ function GrokAccountTableRow({
             busy={busy}
             batchTesting={batchTesting}
             onTest={onTest}
+            onUsage={onUsage}
             onRefresh={onRefresh}
             onToggleEnabled={onToggleEnabled}
             onEdit={onEdit}

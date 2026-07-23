@@ -25,6 +25,7 @@ import type {
   AdminErrorResponse,
   APIKeysResponse,
   APIKeyTokenStat,
+  APIKeyAccountStat,
   AccountsResponse,
   ChartAggregation,
   CreateAccountResponse,
@@ -599,6 +600,15 @@ export const api = {
     const qs = searchParams.toString()
     return request<{ items: APIKeyTokenStat[] }>(
       qs ? `/usage/api-keys?${qs}` : '/usage/api-keys',
+    )
+  },
+  getAPIKeyAccountStats: (id: number, params: { start?: string; end?: string } = {}) => {
+    const searchParams = new URLSearchParams()
+    if (params.start) searchParams.set('start', params.start)
+    if (params.end) searchParams.set('end', params.end)
+    const qs = searchParams.toString()
+    return request<{ items: APIKeyAccountStat[] }>(
+      qs ? `/usage/api-keys/${id}/accounts?${qs}` : `/usage/api-keys/${id}/accounts`,
     )
   },
   getUsageLogs: (params: { start?: string; end?: string; limit?: number } = {}) => {

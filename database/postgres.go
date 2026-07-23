@@ -3654,6 +3654,17 @@ type AccountUsageDayStat struct {
 	UserBilled    float64 `json:"user_billed"`
 }
 
+// AccountKeyStat 单账号内按下游 Key 拆分的用量：某个 Key 调用了这个账号多少。
+type AccountKeyStat struct {
+	APIKeyID      int64   `json:"api_key_id"`
+	APIKeyName    string  `json:"api_key_name"`
+	APIKeyMasked  string  `json:"api_key_masked"`
+	Requests      int64   `json:"requests"`
+	Tokens        int64   `json:"tokens"`
+	AccountBilled float64 `json:"account_billed"`
+	UserBilled    float64 `json:"user_billed"`
+}
+
 // AccountUsageDetail 单账号用量详情
 type AccountUsageDetail struct {
 	PeriodDays            int                   `json:"period_days"`
@@ -3687,6 +3698,7 @@ type AccountUsageDetail struct {
 	HighestRequestDay     *AccountUsageDayStat  `json:"highest_request_day,omitempty"`
 	History               []AccountUsageDayStat `json:"history"`
 	Models                []AccountModelStat    `json:"models"`
+	ByAPIKey              []AccountKeyStat      `json:"by_api_key"`
 }
 
 // GetChartAggregation 在数据库层完成图表数据的分桶聚合（无需传输原始行）
@@ -4020,8 +4032,52 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 	if result.Models == nil {
 		result.Models = []AccountModelStat{}
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
-	return result, rows.Err()
+	// 按下游 Key 拆分：这个账号被哪些 Key 各调用了多少（成本核算用）。
+	keyQuery := `
+	SELECT
+		COALESCE(api_key_id, 0),
+		COALESCE(NULLIF(api_key_name, ''), ''),
+		COALESCE(api_key_masked, ''),
+		COUNT(*) AS requests,
+		COALESCE(SUM(total_tokens), 0) AS tokens,
+		COALESCE(SUM(account_billed), 0) AS account_billed,
+		COALESCE(SUM(user_billed), 0) AS user_billed
+	FROM usage_logs
+	WHERE account_id = $1
+	  AND ` + timeWhere + `
+	  AND status_code <> 499
+	GROUP BY 1, 2, 3
+	ORDER BY 4 DESC`
+
+	keyRows, err := db.conn.QueryContext(ctx, keyQuery, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer keyRows.Close()
+	for keyRows.Next() {
+		var k AccountKeyStat
+		if err := keyRows.Scan(
+			&k.APIKeyID,
+			&k.APIKeyName,
+			&k.APIKeyMasked,
+			&k.Requests,
+			&k.Tokens,
+			&k.AccountBilled,
+			&k.UserBilled,
+		); err != nil {
+			return nil, err
+		}
+		result.ByAPIKey = append(result.ByAPIKey, k)
+	}
+	if result.ByAPIKey == nil {
+		result.ByAPIKey = []AccountKeyStat{}
+	}
+
+	return result, keyRows.Err()
 }
 
 // ListUsageLogsByTimeRange 按时间范围查询请求日志

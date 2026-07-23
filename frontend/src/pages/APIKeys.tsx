@@ -1730,7 +1730,11 @@ export default function APIKeys() {
           {activeTab === "token-usage" && (
             <Card>
               <CardContent className="p-3 sm:p-4">
-                <APIKeyTokenUsagePanel />
+                <APIKeyTokenUsagePanel
+                  showFullUsageNumbers={
+                    data.settings?.show_full_usage_numbers ?? false
+                  }
+                />
               </CardContent>
             </Card>
           )}

@@ -173,10 +173,18 @@ export default function AccountDetailSheet({
       : account.email || account.name || `#${account.id}`
     : "";
   const rateWindow = account ? getRateLimitWindow(account) : null;
+  const isGrok = Boolean(account?.grok_api);
+  // Grok API Key 无 refresh_token；Codex AT-only / Responses 也不走 AT 刷新。
   const refreshDisabled = Boolean(
     account &&
-      (refreshing || account.at_only || account.openai_responses_api),
+      (refreshing ||
+        account.at_only ||
+        account.openai_responses_api ||
+        (isGrok && account.grok_auth_kind !== "oauth")),
   );
+  // auth.json / 额度券是 Codex 订阅路径专属，Grok 不展示。
+  const showAuthJson = Boolean(account && !isGrok);
+  const showResetCredits = Boolean(account && !isGrok);
   const authJsonDisabled = Boolean(
     account &&
       (authJsonExporting || account.at_only || account.openai_responses_api),
@@ -254,6 +262,10 @@ export default function AccountDetailSheet({
                 {account.chatgpt_account_id ? (
                   <SheetDescription className="mt-1 break-all font-mono text-[11px]">
                     {account.chatgpt_account_id}
+                  </SheetDescription>
+                ) : isGrok && account.email && account.name && account.email !== account.name ? (
+                  <SheetDescription className="mt-1 break-all text-[12px]">
+                    {account.email}
                   </SheetDescription>
                 ) : (
                   <SheetDescription className="mt-1">
@@ -475,6 +487,7 @@ export default function AccountDetailSheet({
             {(account.proxy_url ||
               account.at_only ||
               account.openai_responses_api ||
+              account.grok_api ||
               account.base_url ||
               (!account.openai_responses_api &&
                 (account.models?.length ?? 0) > 0)) && (
@@ -500,6 +513,18 @@ export default function AccountDetailSheet({
                       </span>
                     </div>
                   )}
+                  {isGrok && (
+                    <div className="flex justify-between gap-3">
+                      <span className="text-muted-foreground">
+                        {t("accounts.detailAuthType")}
+                      </span>
+                      <span className="font-medium text-foreground">
+                        {account.grok_auth_kind === "oauth"
+                          ? t("grok.authKindOAuthShort")
+                          : t("grok.authKindApiKey")}
+                      </span>
+                    </div>
+                  )}
                   {account.base_url && (
                     <div className="flex justify-between gap-3">
                       <span className="shrink-0 text-muted-foreground">
@@ -520,7 +545,7 @@ export default function AccountDetailSheet({
                       </span>
                     </div>
                   )}
-                  {resetCredits > 0 && (
+                  {showResetCredits && resetCredits > 0 && (
                     <div className="flex justify-between gap-3">
                       <span className="text-muted-foreground">
                         {t("accounts.resetCreditsButton")}
@@ -530,8 +555,7 @@ export default function AccountDetailSheet({
                       </span>
                     </div>
                   )}
-                  {!account.openai_responses_api &&
-                    (account.models?.length ?? 0) > 0 && (
+                  {(account.models?.length ?? 0) > 0 && (
                       <div className="flex justify-between gap-3">
                         <span className="shrink-0 text-muted-foreground">
                           {t("accounts.supportedModelsAction")}
@@ -572,18 +596,22 @@ export default function AccountDetailSheet({
                 <RefreshCw
                   className={`size-3.5 ${refreshing ? "animate-spin" : ""}`}
                 />
-                {t("accounts.actionRefreshAT")}
+                {isGrok
+                  ? t("grok.actionRefresh")
+                  : t("accounts.actionRefreshAT")}
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={authJsonDisabled}
-                onClick={onGenerateAuthJson}
-              >
-                <FileJson className="size-3.5" />
-                {t("accounts.actionAuthJson")}
-              </Button>
+              {showAuthJson && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={authJsonDisabled}
+                  onClick={onGenerateAuthJson}
+                >
+                  <FileJson className="size-3.5" />
+                  {t("accounts.actionAuthJson")}
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="outline"
@@ -623,16 +651,18 @@ export default function AccountDetailSheet({
                 <RotateCcw className="size-3.5" />
                 {t("accounts.resetStatus")}
               </Button>
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={resetCredits <= 0}
-                onClick={onResetCredits}
-              >
-                <Timer className="size-3.5" />
-                {t("accounts.resetCreditsButton")}
-              </Button>
+              {showResetCredits && (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={resetCredits <= 0}
+                  onClick={onResetCredits}
+                >
+                  <Timer className="size-3.5" />
+                  {t("accounts.resetCreditsButton")}
+                </Button>
+              )}
               <Button
                 type="button"
                 variant="destructive"

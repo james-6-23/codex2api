@@ -8,6 +8,7 @@ import {
   BarChart3,
   Clock3,
   Gauge,
+  KeyRound,
   Package,
   RotateCcw,
   Search,
@@ -15,7 +16,7 @@ import {
 } from 'lucide-react'
 import Modal from './Modal'
 import { api } from '../api'
-import type { AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem } from '../types'
+import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem } from '../types'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
 
@@ -54,9 +55,11 @@ interface Props {
   account: AccountRow
   onClose: () => void
   onCreditsReset?: () => void
+  // Codex 专属的额度券/credit 设置区块;Grok 等非 Codex 账号传 false 隐藏。
+  showCreditSettings?: boolean
 }
 
-export default function AccountUsageModal({ account, onClose, onCreditsReset }: Props) {
+export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true }: Props) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [data, setData] = useState<AccountUsageDetail | null>(null)
@@ -164,15 +167,19 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset }: 
         />
       )}
 
-      <CreditSettings
-        creditEnabled={creditEnabled}
-        creditSkipWindow={creditSkipWindow}
-        savingCredit={savingCredit}
-        creditError={creditError}
-        onToggle={handleCreditToggle}
-      />
+      {showCreditSettings && (
+        <>
+          <CreditSettings
+            creditEnabled={creditEnabled}
+            creditSkipWindow={creditSkipWindow}
+            savingCredit={savingCredit}
+            creditError={creditError}
+            onToggle={handleCreditToggle}
+          />
 
-      <ResetCreditsSection account={account} onResetDone={onCreditsReset} />
+          <ResetCreditsSection account={account} onResetDone={onCreditsReset} />
+        </>
+      )}
     </Modal>
   )
 }
@@ -543,7 +550,8 @@ function DetailPage({
                     cy="50%"
                     innerRadius={62}
                     outerRadius={92}
-                    paddingAngle={1}
+                    // 与 Usage / Key Usage 门户一致：无扇区间隙，避免环形图出现白缝
+                    paddingAngle={0}
                     strokeWidth={0}
                   >
                     {chartModels.map((_, i) => (
@@ -587,11 +595,138 @@ function DetailPage({
         </section>
       </div>
 
+      <KeyDistribution data={data} />
+
       <div className="mt-4 grid gap-3 md:grid-cols-4">
         <DetailKpi label={t('accounts.usageActiveDays')} value={activeDaysText} />
         <DetailKpi label={t('accounts.usageDailyAvgTokens')} value={formatTokens(Math.round(data.avg_daily_tokens))} />
         <DetailKpi label={t('accounts.usageCacheHitRate')} value={formatPercent(data.cache_hit_rate)} />
         <DetailKpi label={t('accounts.usageAvgResponse')} value={formatDuration(data.avg_duration_ms)} />
+      </div>
+    </div>
+  )
+}
+
+function KeyDistribution({ data }: { data: AccountUsageDetail }) {
+  const { t } = useTranslation()
+  const [metric, setMetric] = useState<ModelMetricKey>('requests')
+  const sortedKeys = useMemo(() => {
+    return [...(data.by_api_key || [])].sort((a, b) => {
+      const diff = keyMetricValue(b, metric) - keyMetricValue(a, metric)
+      if (diff !== 0) return diff
+      return b.requests - a.requests
+    })
+  }, [data.by_api_key, metric])
+  const metricTotal = useMemo(
+    () => sortedKeys.reduce((sum, item) => sum + keyMetricValue(item, metric), 0),
+    [sortedKeys, metric],
+  )
+  const topKey = sortedKeys[0]
+
+  return (
+    <section className="mt-4 rounded-2xl border bg-background p-4">
+      <div className="mb-3 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="flex items-start gap-2.5">
+          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary">
+            <KeyRound className="size-4" />
+          </span>
+          <div>
+            <h4 className="text-base font-semibold">{t('accounts.usageKeyDistribution')}</h4>
+            <p className="text-sm text-muted-foreground">
+              {topKey
+                ? t('accounts.usageTopKeyByMetric', { key: keyDisplayName(topKey, t) })
+                : t('accounts.usageKeyDistributionDesc')}
+            </p>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="rounded-full bg-muted px-3 py-1 text-xs font-semibold tabular-nums text-muted-foreground">
+            {formatModelMetricValue(metricTotal, metric)} {t(modelMetricLabelKey(metric))}
+          </span>
+          {sortedKeys.length > 0 && (
+            <span className="rounded-full bg-muted/70 px-3 py-1 text-xs font-medium text-muted-foreground">
+              {t('accounts.usageKeyCount', { count: sortedKeys.length })}
+            </span>
+          )}
+          <div className="flex rounded-lg border bg-muted/40 p-1">
+            {MODEL_METRIC_OPTIONS.map((option) => (
+              <ModelMetricButton
+                key={option.key}
+                active={metric === option.key}
+                label={t(option.labelKey)}
+                onClick={() => setMetric(option.key)}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+      {sortedKeys.length === 0 ? (
+        <div className="flex h-20 flex-col items-center justify-center gap-1.5 rounded-xl border border-dashed bg-muted/20 text-sm text-muted-foreground">
+          <KeyRound className="size-4 opacity-60" />
+          {t('accounts.usageKeyEmpty')}
+        </div>
+      ) : (
+        <div className="grid gap-2 sm:grid-cols-2">
+          {sortedKeys.map((k, i) => (
+            <KeyRow
+              key={`${k.api_key_id}-${k.api_key_masked}-${i}`}
+              color={COLORS[i % COLORS.length]}
+              stat={k}
+              metric={metric}
+              total={metricTotal}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+function KeyRow({
+  color,
+  stat,
+  metric,
+  total,
+}: {
+  color: string
+  stat: AccountKeyStat
+  metric: ModelMetricKey
+  total: number
+}) {
+  const { t } = useTranslation()
+  const value = keyMetricValue(stat, metric)
+  const percent = total > 0 ? Math.min(100, Math.max(0, (value / total) * 100)) : 0
+  const detail = keyMetricDetail(stat, metric, t)
+  return (
+    <div className="rounded-xl border border-border/80 bg-muted/15 px-3 py-2.5 transition-colors hover:border-border hover:bg-muted/25">
+      <div className="mb-2 grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-2 text-sm">
+        <span
+          className="size-2.5 shrink-0 rounded-full ring-2 ring-background"
+          style={{ background: color }}
+        />
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="truncate font-medium text-foreground">{keyDisplayName(stat, t)}</span>
+          {stat.api_key_masked && (
+            <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 font-mono text-[10px] tracking-wide text-muted-foreground">
+              {stat.api_key_masked}
+            </span>
+          )}
+        </span>
+        <span className="tabular-nums text-xs font-semibold text-muted-foreground">
+          {formatPercent(percent)}
+        </span>
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className="h-full rounded-full transition-[width] duration-300"
+          style={{ width: `${percent}%`, background: color }}
+        />
+      </div>
+      <div className="mt-2 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+        <span className="font-semibold tabular-nums text-foreground">
+          {formatModelMetricValue(value, metric)}
+        </span>
+        <span className="truncate text-right">{detail}</span>
       </div>
     </div>
   )
@@ -1239,6 +1374,35 @@ function modelMetricDetail(model: AccountModelStat, metric: ModelMetricKey, t: (
   const requests = `${formatNumber(model.requests)} ${t('accounts.usageReqUnit')}`
   const tokens = `${formatTokens(model.tokens)} ${t('accounts.usageTokUnit')}`
   const cost = `$${formatCost(model.account_billed)}`
+  switch (metric) {
+    case 'tokens':
+      return `${requests} · ${cost}`
+    case 'cost':
+      return `${requests} · ${tokens}`
+    default:
+      return `${tokens} · ${cost}`
+  }
+}
+
+function keyDisplayName(stat: AccountKeyStat, t: (key: string) => string): string {
+  return stat.api_key_name?.trim() || t('accounts.usageKeyUnnamed')
+}
+
+function keyMetricValue(stat: AccountKeyStat, metric: ModelMetricKey): number {
+  switch (metric) {
+    case 'tokens':
+      return Number(stat.tokens || 0)
+    case 'cost':
+      return Number(stat.account_billed || 0)
+    default:
+      return Number(stat.requests || 0)
+  }
+}
+
+function keyMetricDetail(stat: AccountKeyStat, metric: ModelMetricKey, t: (key: string) => string): string {
+  const requests = `${formatNumber(stat.requests)} ${t('accounts.usageReqUnit')}`
+  const tokens = `${formatTokens(stat.tokens)} ${t('accounts.usageTokUnit')}`
+  const cost = `$${formatCost(stat.account_billed)}`
   switch (metric) {
     case 'tokens':
       return `${requests} · ${cost}`
