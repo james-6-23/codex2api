@@ -7860,6 +7860,10 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 			subExpCredentialSet = true
 		}
 	}
+	if workspaceID != "" {
+		acc.AccountID = workspaceID
+		acc.Email = workspaceEmail
+	}
 	if activeCooldown {
 		acc.Status = StatusCooldown
 		acc.CooldownUtil = cooldownUntil

@@ -63,20 +63,20 @@ func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed 
 		accessTokenForJWT = ""
 	}
 	tokenEmail, tokenWorkspaceID := openaiidentity.TokenIdentity(seed.idToken, accessTokenForJWT)
-	if seed.workspaceID == "" {
-		if tokenWorkspaceID != "" {
-			if seed.email == "" {
-				seed.email = tokenEmail
-				seed.workspaceID = tokenWorkspaceID
-			} else if strings.EqualFold(seed.email, tokenEmail) {
-				seed.workspaceID = tokenWorkspaceID
-			}
+	tokenWorkspaceMatchesSeedEmail := tokenWorkspaceID != "" && (seed.email == "" || strings.EqualFold(seed.email, tokenEmail))
+	if seed.workspaceID == "" && tokenWorkspaceMatchesSeedEmail {
+		if seed.email == "" {
+			seed.email = tokenEmail
 		}
+		seed.workspaceID = tokenWorkspaceID
 	}
 	if info := accountInfoFromTokens(seed.idToken, accessTokenForJWT); info != nil {
-		if tokenWorkspaceID != "" {
+		if tokenWorkspaceMatchesSeedEmail {
 			info.Email = tokenEmail
 			info.ChatGPTAccountID = tokenWorkspaceID
+		} else if tokenWorkspaceID != "" {
+			info.Email = ""
+			info.ChatGPTAccountID = ""
 		}
 		if seed.accountID == "" {
 			seed.accountID = info.ChatGPTAccountID

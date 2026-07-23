@@ -990,8 +990,8 @@ func newMultipartRequest(t *testing.T, files map[string]string) *http.Request {
 	return req
 }
 
-// workspace_id 无法从 JWT 识别时，允许重复添加可保留相同邮箱的多个账号。
-func TestImportAccountsCommonAllowsDuplicateWithoutWorkspace(t *testing.T) {
+// 未提供 idToken 时无法识别 workspace_id，允许重复添加可保留相同邮箱的多个账号。
+func TestImportAccountsCommonAllowsDuplicateWithoutIDToken(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	db := newTestAdminDB(t)

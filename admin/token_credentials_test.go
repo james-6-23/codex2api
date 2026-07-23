@@ -125,4 +125,7 @@ func TestTokenCredentialMapRejectsWorkspaceFromDifferentEmail(t *testing.T) {
 	if _, ok := credentials["workspace_id"]; ok {
 		t.Fatalf("mismatched JWT email supplied workspace_id: %#v", credentials)
 	}
+	if _, ok := credentials["account_id"]; ok {
+		t.Fatalf("mismatched JWT email supplied account_id: %#v", credentials)
+	}
 }
