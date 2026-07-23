@@ -194,6 +194,14 @@ type DB struct {
 
 	promptFilterAudit *promptFilterAuditQueue
 
+	backgroundTaskMu      sync.Mutex
+	backgroundTaskWg      sync.WaitGroup
+	backgroundTaskDrain   sync.Once
+	backgroundTaskDrainOK bool
+	backgroundTaskClosing bool
+	backgroundTaskCtx     context.Context
+	backgroundTaskCancel  context.CancelFunc
+
 	// 使用日志批量写入缓冲
 	logBuf  []usageLogEntry
 	logMu   sync.Mutex
@@ -352,12 +360,15 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 		return nil, fmt.Errorf("数据库连接测试失败: %w", err)
 	}
 
+	backgroundTaskCtx, backgroundTaskCancel := context.WithCancel(context.Background())
 	db := &DB{
-		conn:             conn,
-		driver:           driver,
-		logStop:          make(chan struct{}),
-		logFlushNotify:   make(chan struct{}, 1),
-		sqliteSingleConn: sqliteSingleConn,
+		conn:                 conn,
+		driver:               driver,
+		logStop:              make(chan struct{}),
+		logFlushNotify:       make(chan struct{}, 1),
+		sqliteSingleConn:     sqliteSingleConn,
+		backgroundTaskCtx:    backgroundTaskCtx,
+		backgroundTaskCancel: backgroundTaskCancel,
 	}
 	if db.isSQLite() {
 		db.sqliteWriteSem = make(chan struct{}, 1)
@@ -470,6 +481,9 @@ func (db *DB) ensureUsageStatsBaselineBillingColumns(ctx context.Context) error 
 
 // Close 关闭数据库连接
 func (db *DB) Close() error {
+	if !db.DrainBackgroundTasks(2 * time.Second) {
+		log.Printf("数据库后台任务超过优雅关闭窗口，已取消并等待退出")
+	}
 	// 停止批量写入并刷完缓冲
 	close(db.logStop)
 	db.logWg.Wait()
@@ -478,6 +492,82 @@ func (db *DB) Close() error {
 		db.promptFilterAudit.close(2 * time.Second)
 	}
 	return db.conn.Close()
+}
+
+// RunBackgroundTask starts a best-effort task whose lifetime is tied to the
+// database. Close first drains these tasks, then cancels and waits for any task
+// that exceeds the grace period, so no background writer can outlive the SQL
+// connection.
+func (db *DB) RunBackgroundTask(task func(context.Context)) bool {
+	if db == nil || task == nil {
+		return false
+	}
+
+	db.backgroundTaskMu.Lock()
+	if db.backgroundTaskClosing {
+		db.backgroundTaskMu.Unlock()
+		return false
+	}
+	if db.backgroundTaskCtx == nil {
+		db.backgroundTaskCtx, db.backgroundTaskCancel = context.WithCancel(context.Background())
+	}
+	db.backgroundTaskWg.Add(1)
+	ctx := db.backgroundTaskCtx
+	db.backgroundTaskMu.Unlock()
+
+	go func() {
+		defer db.backgroundTaskWg.Done()
+		task(ctx)
+	}()
+	return true
+}
+
+// DrainBackgroundTasks stops accepting detached database work, waits for the
+// current tasks to finish, and cancels them after the grace period. After
+// cancellation it still waits for every tracked task to exit, preserving the
+// invariant that no task can access SQL after Close returns. It is safe to call
+// before dependent services are torn down; Close calls it again as a final
+// safeguard. The return value reports whether cancellation was unnecessary.
+func (db *DB) DrainBackgroundTasks(timeout time.Duration) bool {
+	if db == nil {
+		return true
+	}
+	db.backgroundTaskDrain.Do(func() {
+		db.backgroundTaskDrainOK = db.drainBackgroundTasks(timeout)
+	})
+	return db.backgroundTaskDrainOK
+}
+
+func (db *DB) drainBackgroundTasks(timeout time.Duration) bool {
+	db.backgroundTaskMu.Lock()
+	db.backgroundTaskClosing = true
+	db.backgroundTaskMu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		db.backgroundTaskWg.Wait()
+		close(done)
+	}()
+
+	if timeout <= 0 {
+		timeout = 2 * time.Second
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		if db.backgroundTaskCancel != nil {
+			db.backgroundTaskCancel()
+		}
+		return true
+	case <-timer.C:
+		if db.backgroundTaskCancel != nil {
+			db.backgroundTaskCancel()
+		}
+	}
+
+	<-done
+	return false
 }
 
 func (db *DB) SetUsageLogConfig(mode string, batchSize int, flushIntervalSeconds int) {
@@ -5669,39 +5759,53 @@ func (db *DB) BatchSoftDeleteAccounts(ctx context.Context, ids []int64) error {
 	return nil
 }
 
-// BatchInsertAccountEventsAsync 批量异步插入账号事件
-func (db *DB) BatchInsertAccountEventsAsync(ids []int64, eventType string, source string) {
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		const batchSize = 500
-		for i := 0; i < len(ids); i += batchSize {
-			end := i + batchSize
-			if end > len(ids) {
-				end = len(ids)
-			}
-			batch := ids[i:end]
-
-			// 构建 VALUES ($1,$2,$3), ($4,$2,$3), ...
-			placeholders := make([]string, len(batch))
-			args := make([]interface{}, 0, len(batch)+2)
-			args = append(args, eventType, source) // $1=eventType, $2=source
-			for j, id := range batch {
-				paramIdx := j + 3 // $3, $4, ...
-				placeholders[j] = fmt.Sprintf("($%d, $1, $2)", paramIdx)
-				args = append(args, id)
-			}
-
-			query := fmt.Sprintf(
-				`INSERT INTO account_events (account_id, event_type, source) VALUES %s`,
-				strings.Join(placeholders, ","),
-			)
-			if _, err := db.conn.ExecContext(ctx, query, args...); err != nil {
-				log.Printf("[账号事件] 批量插入失败 (%d 条): %v", len(batch), err)
-			}
+// BatchInsertAccountEvents 批量插入账号事件。
+func (db *DB) BatchInsertAccountEvents(ctx context.Context, ids []int64, eventType string, source string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	const batchSize = 500
+	for i := 0; i < len(ids); i += batchSize {
+		end := i + batchSize
+		if end > len(ids) {
+			end = len(ids)
 		}
-	}()
+		batch := ids[i:end]
+
+		// 构建 VALUES ($1,$2,$3), ($4,$2,$3), ...
+		placeholders := make([]string, len(batch))
+		args := make([]interface{}, 0, len(batch)+2)
+		args = append(args, eventType, source) // $1=eventType, $2=source
+		for j, id := range batch {
+			paramIdx := j + 3 // $3, $4, ...
+			placeholders[j] = fmt.Sprintf("($%d, $1, $2)", paramIdx)
+			args = append(args, id)
+		}
+
+		query := fmt.Sprintf(
+			`INSERT INTO account_events (account_id, event_type, source) VALUES %s`,
+			strings.Join(placeholders, ","),
+		)
+		if _, err := db.conn.ExecContext(ctx, query, args...); err != nil {
+			return fmt.Errorf("批量插入账号事件 (%d 条): %w", len(batch), err)
+		}
+	}
+	return nil
+}
+
+// BatchInsertAccountEventsAsync 批量异步插入账号事件。
+func (db *DB) BatchInsertAccountEventsAsync(ids []int64, eventType string, source string) {
+	if len(ids) == 0 {
+		return
+	}
+	ids = append([]int64(nil), ids...)
+	db.RunBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+		defer cancel()
+		if err := db.BatchInsertAccountEvents(ctx, ids, eventType, source); err != nil {
+			log.Printf("[账号事件] %v", err)
+		}
+	})
 }
 
 // ClearError 清除账号错误状态
@@ -6024,21 +6128,25 @@ func (db *DB) InsertAccountEvent(ctx context.Context, accountID int64, eventType
 
 // InsertAccountEventAsync 异步插入账号事件（不阻塞调用方，SQLite 下带重试）
 func (db *DB) InsertAccountEventAsync(accountID int64, eventType string, source string) {
-	go func() {
+	db.RunBackgroundTask(func(ctx context.Context) {
 		var err error
 		for attempt := 0; attempt < 3; attempt++ {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			err = db.InsertAccountEvent(ctx, accountID, eventType, source)
+			attemptCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err = db.InsertAccountEvent(attemptCtx, accountID, eventType, source)
 			cancel()
 			if err == nil {
 				return
 			}
-			time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Duration(attempt+1) * 500 * time.Millisecond):
+			}
 		}
 		if err != nil {
 			log.Printf("[账号事件] 记录失败（已重试3次）: account=%d type=%s source=%s err=%v", accountID, eventType, source, err)
 		}
-	}()
+	})
 }
 
 // GetAccountEventTrend 按时间桶聚合账号增删事件

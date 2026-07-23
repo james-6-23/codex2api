@@ -189,11 +189,45 @@ func (h *Handler) probeImportedAccountUsage(ctx context.Context, accountID int64
 		return
 	}
 	// 若账号已经获得 workspace_id，探针后再合并一次并发导入产生的重复项。
-	h.mergeRefreshedDuplicateIntoExisting(accountID, source)
+	h.mergeRefreshedDuplicateIntoExistingContext(ctx, accountID, source)
+}
+
+func (h *Handler) startDBBackgroundTask(task func(context.Context)) bool {
+	if h == nil || task == nil {
+		return false
+	}
+	if h.db != nil {
+		return h.db.RunBackgroundTask(task)
+	}
+	go task(context.Background())
+	return true
+}
+
+// startDBBackgroundTaskWithParent ties a task to both a caller-owned service
+// context and the database lifecycle. Cancellation of either context stops the
+// task, while the database tracker guarantees shutdown waits for its exit.
+func (h *Handler) startDBBackgroundTaskWithParent(parent context.Context, task func(context.Context)) bool {
+	if task == nil {
+		return false
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	return h.startDBBackgroundTask(func(lifecycle context.Context) {
+		ctx, cancel := context.WithCancel(lifecycle)
+		stopParent := context.AfterFunc(parent, cancel)
+		defer func() {
+			stopParent()
+			cancel()
+		}()
+		task(ctx)
+	})
 }
 
 func (h *Handler) triggerImportedAccountUsageProbe(accountID int64, source string) {
-	go h.probeImportedAccountUsage(context.Background(), accountID, source)
+	h.startDBBackgroundTask(func(ctx context.Context) {
+		h.probeImportedAccountUsage(ctx, accountID, source)
+	})
 }
 
 func (h *Handler) applyImportedAccountUsageState(account *auth.Account, source string) {
@@ -205,8 +239,11 @@ func (h *Handler) applyImportedAccountUsageState(account *auth.Account, source s
 	}
 }
 
-func (h *Handler) refreshImportedAccountAndProbe(accountID int64, source string) {
-	refreshCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+func (h *Handler) refreshImportedAccountAndProbe(ctx context.Context, accountID int64, source string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	refreshCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	err := h.refreshAccountByID(refreshCtx, accountID)
 	cancel()
 	if err != nil {
@@ -216,10 +253,10 @@ func (h *Handler) refreshImportedAccountAndProbe(accountID int64, source string)
 	log.Printf("导入账号 %d 刷新成功", accountID)
 	// 裸 RT 导入时身份要等首次刷新后才可知：此刻回查身份重复，
 	// 若与已有账号同一身份则合并凭证并移除本账号（保留旧账号的用量统计）。
-	if h.mergeRefreshedDuplicateIntoExisting(accountID, source) {
+	if h.mergeRefreshedDuplicateIntoExistingContext(ctx, accountID, source) {
 		return
 	}
-	h.probeImportedAccountUsage(context.Background(), accountID, source)
+	h.probeImportedAccountUsage(ctx, accountID, source)
 }
 
 // mergeRefreshedDuplicateIntoExisting 检查刚刷新完的新导入账号是否与已有账号
@@ -227,15 +264,22 @@ func (h *Handler) refreshImportedAccountAndProbe(accountID int64, source string)
 // 合并进已有账号——codex_* 用量快照键不在更新集里，旧账号的用量统计与按
 // 账号 ID 关联的请求历史全部保留——然后软删新插入的账号。返回 true 表示已合并。
 func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string) bool {
+	return h.mergeRefreshedDuplicateIntoExistingContext(context.Background(), newID, source)
+}
+
+func (h *Handler) mergeRefreshedDuplicateIntoExistingContext(parent context.Context, newID int64, source string) bool {
 	if h == nil || h.db == nil || h.store == nil {
 		return false
+	}
+	if parent == nil {
+		parent = context.Background()
 	}
 	// 串行化合并：并发导入同一身份的多个账号时，两个合并流程若交错执行，
 	// 可能互相把对方选为“已有账号”，导致双方都被软删（账号丢失）。
 	h.mergeDuplicateMu.Lock()
 	defer h.mergeDuplicateMu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 10*time.Second)
 	defer cancel()
 
 	newRow, err := h.db.GetAccountByID(ctx, newID)
@@ -281,8 +325,12 @@ func (h *Handler) mergeRefreshedDuplicateIntoExisting(newID int64, source string
 	if err := h.reloadTokenAccount(ctx, oldID, source); err != nil {
 		log.Printf("合并后重载账号 %d 失败: %v", oldID, err)
 	}
-	h.db.InsertAccountEventAsync(newID, "deleted", fmt.Sprintf("merged_into_%d", oldID))
-	h.db.InsertAccountEventAsync(oldID, "updated", "rt_upgrade_merge")
+	if err := h.db.InsertAccountEvent(ctx, newID, "deleted", fmt.Sprintf("merged_into_%d", oldID)); err != nil {
+		log.Printf("记录合并账号 %d 删除事件失败: %v", newID, err)
+	}
+	if err := h.db.InsertAccountEvent(ctx, oldID, "updated", "rt_upgrade_merge"); err != nil {
+		log.Printf("记录合并账号 %d 更新事件失败: %v", oldID, err)
+	}
 	log.Printf("导入账号 %d 与已有账号 %d 同一 OAuth 身份，已合并凭证（RT 升级）并保留用量统计 (source=%s)", newID, oldID, source)
 	return true
 }
@@ -2255,7 +2303,9 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			h.triggerImportedAccountUsageProbe(id, "manual_add")
 		} else if !h.store.GetLazyMode() {
 			// 异步刷新 AT，刷新成功后立即做 wham 用量采样。
-			go h.refreshImportedAccountAndProbe(id, "manual_add_refresh")
+			h.startDBBackgroundTask(func(ctx context.Context) {
+				h.refreshImportedAccountAndProbe(ctx, id, "manual_add_refresh")
+			})
 		}
 	}
 
@@ -2335,7 +2385,9 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 		if newAcc.GetAccessToken() != "" {
 			h.triggerImportedAccountUsageProbe(id, "manual_add")
 		} else if !h.store.GetLazyMode() {
-			go h.refreshImportedAccountAndProbe(id, "manual_add_refresh")
+			h.startDBBackgroundTask(func(ctx context.Context) {
+				h.refreshImportedAccountAndProbe(ctx, id, "manual_add_refresh")
+			})
 		}
 
 		sendImportEvent(c, importEvent{
@@ -4152,7 +4204,9 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					if acc := h.store.FindByID(id); acc != nil {
 						h.applyImportedAccountUsageState(acc, importSource)
 						if acc.GetAccessToken() == "" && !h.store.GetLazyMode() {
-							go h.refreshImportedAccountAndProbe(id, importSource+"_refresh")
+							h.startDBBackgroundTask(func(ctx context.Context) {
+								h.refreshImportedAccountAndProbe(ctx, id, importSource+"_refresh")
+							})
 						}
 					}
 				}
@@ -4233,7 +4287,9 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, pro
 					h.triggerImportedAccountUsageProbe(id, "import")
 				} else if !h.store.GetLazyMode() {
 					// 后台异步刷新，不阻塞导入流程；刷新成功后立即做 wham 用量采样。
-					go h.refreshImportedAccountAndProbe(id, "import_refresh")
+					h.startDBBackgroundTask(func(ctx context.Context) {
+						h.refreshImportedAccountAndProbe(ctx, id, "import_refresh")
+					})
 				}
 			}
 		}(i, t)
@@ -5166,13 +5222,13 @@ func (h *Handler) syncAccountPlanAfterReset(_ context.Context, acc *auth.Account
 	if h == nil || h.syncAccountPlanOnReset == nil || acc == nil {
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	h.startDBBackgroundTask(func(parent context.Context) {
+		ctx, cancel := context.WithTimeout(parent, 15*time.Second)
 		defer cancel()
 		if err := h.syncAccountPlanOnReset(ctx, acc); err != nil {
 			log.Printf("[账号 %d] 重置后同步 Codex plan type 失败: %v", acc.DBID, err)
 		}
-	}()
+	})
 }
 
 func (h *Handler) syncSingleAccountPlanOnReset(ctx context.Context, acc *auth.Account) error {

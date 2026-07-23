@@ -96,3 +96,16 @@ func TestRefreshSchedulerIntegrationCancel(t *testing.T) {
 		t.Fatal("CancelRefreshTask should return false for already cancelled task")
 	}
 }
+
+func TestStoreStopDisablesRefreshScheduler(t *testing.T) {
+	store := &Store{stopCh: make(chan struct{})}
+	store.EnableRefreshScheduler(DefaultRefreshConfig())
+	if store.GetRefreshScheduler() == nil {
+		t.Fatal("GetRefreshScheduler() = nil after EnableRefreshScheduler")
+	}
+
+	store.Stop()
+	if store.GetRefreshScheduler() != nil {
+		t.Fatal("GetRefreshScheduler() != nil after Store.Stop")
+	}
+}
