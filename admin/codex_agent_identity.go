@@ -120,13 +120,30 @@ func parseAgentIdentityAuthJSON(raw string) (*agentIdentityFields, error) {
 		PlanType:   agentIdentityString(node, "plan_type", "planType"),
 		FedRAMP:    agentIdentityBool(node, "chatgpt_account_is_fedramp", "chatgptAccountIsFedramp"),
 	}
-	if fields.RuntimeID == "" || fields.PrivateKey == "" || fields.AccountID == "" || fields.UserID == "" {
-		return nil, fmt.Errorf("agent identity 缺少必要字段（agent_runtime_id / agent_private_key / account_id / chatgpt_user_id）")
-	}
-	if err := auth.ValidateCodexAgentIdentityPrivateKey(fields.PrivateKey); err != nil {
-		return nil, fmt.Errorf("agent identity 私钥无效: %w", err)
+	if err := validateAgentIdentityFields(fields); err != nil {
+		return nil, err
 	}
 	return fields, nil
+}
+
+func validateAgentIdentityFields(fields *agentIdentityFields) error {
+	if fields == nil {
+		return fmt.Errorf("agent identity 字段为空")
+	}
+	runtimeID := strings.TrimSpace(fields.RuntimeID)
+	privateKey := strings.TrimSpace(fields.PrivateKey)
+	accountID := strings.TrimSpace(fields.AccountID)
+	userID := strings.TrimSpace(fields.UserID)
+	if runtimeID == "" || privateKey == "" || accountID == "" || userID == "" {
+		return fmt.Errorf("agent identity 缺少必要字段（agent_runtime_id / agent_private_key / account_id / chatgpt_user_id）")
+	}
+	if !strings.HasPrefix(runtimeID, "agent-") {
+		return fmt.Errorf("agent_runtime_id 必须以 agent- 开头")
+	}
+	if err := auth.ValidateCodexAgentIdentityPrivateKey(privateKey); err != nil {
+		return fmt.Errorf("agent identity 私钥无效: %w", err)
+	}
+	return nil
 }
 
 // ImportCodexAgentIdentity 导入 Codex Agent Identity auth.json 并创建账号。
@@ -159,17 +176,15 @@ func (h *Handler) ImportCodexAgentIdentity(c *gin.Context) {
 		return
 	}
 
-	// 按 agent_runtime_id 去重：同一 runtime 已存在则拒绝。
-	if h.agentIdentityRuntimeExists(fields.RuntimeID) {
-		writeError(c, http.StatusConflict, "该 Agent Identity 账号已存在")
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	id, err := h.createAgentIdentityAccount(ctx, fields, req.Name, req.ProxyURL, "agent_identity_import")
+	id, duplicate, err := h.createAgentIdentityAccountIfAbsent(ctx, fields, req.Name, req.ProxyURL, "agent_identity_import")
 	if err != nil {
 		writeInternalError(c, err)
+		return
+	}
+	if duplicate {
+		writeError(c, http.StatusConflict, "该 Agent Identity 账号已存在")
 		return
 	}
 
@@ -181,22 +196,82 @@ func (h *Handler) ImportCodexAgentIdentity(c *gin.Context) {
 	})
 }
 
-// agentIdentityRuntimeExists 判断池中是否已有相同 agent_runtime_id 的账号。
-func (h *Handler) agentIdentityRuntimeExists(runtimeID string) bool {
-	runtimeID = strings.TrimSpace(runtimeID)
-	if runtimeID == "" || h.store == nil {
-		return false
-	}
-	for _, acc := range h.store.Accounts() {
-		if acc.IsCodexAgentIdentity() && strings.EqualFold(strings.TrimSpace(acc.AgentRuntimeID), runtimeID) {
-			return true
+func agentIdentityRuntimeKey(runtimeID string) string {
+	return strings.ToLower(strings.TrimSpace(runtimeID))
+}
+
+func (h *Handler) existingAgentIdentityRuntimeIDs(ctx context.Context) (map[string]struct{}, error) {
+	runtimeIDs := make(map[string]struct{})
+	if h.store != nil {
+		for _, account := range h.store.Accounts() {
+			if account.IsCodexAgentIdentity() {
+				runtimeIDs[agentIdentityRuntimeKey(account.AgentRuntimeID)] = struct{}{}
+			}
 		}
 	}
-	return false
+	if h.db == nil {
+		return runtimeIDs, nil
+	}
+	rows, err := h.db.ListActive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("查询已有 Agent Identity 账号失败: %w", err)
+	}
+	for _, row := range rows {
+		if isAgentIdentityCredentialRow(row) {
+			runtimeIDs[agentIdentityRuntimeKey(row.GetCredential("agent_runtime_id"))] = struct{}{}
+		}
+	}
+	return runtimeIDs, nil
+}
+
+func (h *Handler) beginAgentIdentityImport(ctx context.Context, allowDuplicate bool) (map[string]struct{}, func(), error) {
+	h.agentIdentityImportMu.Lock()
+	unlock := h.agentIdentityImportMu.Unlock
+	if allowDuplicate {
+		return nil, unlock, nil
+	}
+	runtimeIDs, err := h.existingAgentIdentityRuntimeIDs(ctx)
+	if err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	return runtimeIDs, unlock, nil
+}
+
+func (h *Handler) createAgentIdentityAccountChecked(ctx context.Context, fields *agentIdentityFields, name, proxyURL, source string, runtimeIDs map[string]struct{}, allowDuplicate bool) (int64, bool, error) {
+	if err := validateAgentIdentityFields(fields); err != nil {
+		return 0, false, err
+	}
+	runtimeKey := agentIdentityRuntimeKey(fields.RuntimeID)
+	if !allowDuplicate {
+		if _, exists := runtimeIDs[runtimeKey]; exists {
+			return 0, true, nil
+		}
+	}
+	id, err := h.createAgentIdentityAccount(ctx, fields, name, proxyURL, source)
+	if err != nil {
+		return 0, false, err
+	}
+	if !allowDuplicate {
+		runtimeIDs[runtimeKey] = struct{}{}
+	}
+	return id, false, nil
+}
+
+func (h *Handler) createAgentIdentityAccountIfAbsent(ctx context.Context, fields *agentIdentityFields, name, proxyURL, source string) (int64, bool, error) {
+	runtimeIDs, unlock, err := h.beginAgentIdentityImport(ctx, false)
+	if err != nil {
+		return 0, false, err
+	}
+	defer unlock()
+	return h.createAgentIdentityAccountChecked(ctx, fields, name, proxyURL, source, runtimeIDs, false)
 }
 
 // createAgentIdentityAccount 用解析出的字段建号并加载进池，返回账号 ID。
 func (h *Handler) createAgentIdentityAccount(ctx context.Context, fields *agentIdentityFields, name, proxyURL, source string) (int64, error) {
+	if err := validateAgentIdentityFields(fields); err != nil {
+		return 0, err
+	}
 	planType := fields.PlanType
 	if planType == "" {
 		planType = "free"
@@ -244,7 +319,11 @@ func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []import
 	if len(tokens) == 0 {
 		return 0, 0, 0
 	}
-	seen := make(map[string]struct{})
+	runtimeIDs, unlock, err := h.beginAgentIdentityImport(ctx, allowDuplicate)
+	if err != nil {
+		return 0, 0, len(tokens)
+	}
+	defer unlock()
 	for _, t := range tokens {
 		fields := &agentIdentityFields{
 			RuntimeID:  strings.TrimSpace(t.agentRuntimeID),
@@ -256,22 +335,15 @@ func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []import
 			PlanType:   strings.TrimSpace(t.planType),
 			FedRAMP:    t.agentFedRAMP,
 		}
-		if err := auth.ValidateCodexAgentIdentityPrivateKey(fields.PrivateKey); err != nil {
+		_, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, t.name, proxyURL, "import_agent_identity", runtimeIDs, allowDuplicate)
+		if err != nil {
 			failed++
 			continue
 		}
-		runtimeKey := strings.ToLower(fields.RuntimeID)
-		if !allowDuplicate {
-			if _, dup := seen[runtimeKey]; dup || h.agentIdentityRuntimeExists(fields.RuntimeID) {
-				duplicate++
-				continue
-			}
-		}
-		if _, err := h.createAgentIdentityAccount(ctx, fields, t.name, proxyURL, "import_agent_identity"); err != nil {
-			failed++
+		if duplicated {
+			duplicate++
 			continue
 		}
-		seen[runtimeKey] = struct{}{}
 		success++
 	}
 	return success, duplicate, failed
@@ -317,8 +389,13 @@ func (h *Handler) BatchImportCodexAgentIdentity(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
+	runtimeIDs, unlock, err := h.beginAgentIdentityImport(ctx, false)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	defer unlock()
 
-	seenRuntimes := make(map[string]struct{})
 	items := make([]agentIdentityImportItem, 0, len(req.Files))
 	imported := 0
 	for _, content := range req.Files {
@@ -330,19 +407,17 @@ func (h *Handler) BatchImportCodexAgentIdentity(c *gin.Context) {
 			continue
 		}
 		item.Email = fields.Email
-		runtimeKey := strings.ToLower(strings.TrimSpace(fields.RuntimeID))
-		if _, dup := seenRuntimes[runtimeKey]; dup || h.agentIdentityRuntimeExists(fields.RuntimeID) {
+		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, "", req.ProxyURL, "agent_identity_file_import", runtimeIDs, false)
+		if duplicated {
 			item.Error = "账号已存在，已跳过"
 			items = append(items, item)
 			continue
 		}
-		id, err := h.createAgentIdentityAccount(ctx, fields, "", req.ProxyURL, "agent_identity_file_import")
 		if err != nil {
 			item.Error = err.Error()
 			items = append(items, item)
 			continue
 		}
-		seenRuntimes[runtimeKey] = struct{}{}
 		item.OK = true
 		item.ID = id
 		items = append(items, item)

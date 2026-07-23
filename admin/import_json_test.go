@@ -1384,7 +1384,7 @@ func TestParseImportJSONTokensAgentIdentityFlatCredentials(t *testing.T) {
 				"name": "AI Account",
 				"credentials": {
 					"auth_mode": "agentIdentity",
-					"agent_runtime_id": "rt-flat",
+					"agent_runtime_id": "agent-flat",
 					"agent_private_key": "` + pk + `",
 					"account_id": "acc-flat",
 					"chatgpt_user_id": "user-flat",
@@ -1405,7 +1405,7 @@ func TestParseImportJSONTokensAgentIdentityFlatCredentials(t *testing.T) {
 	if !tok.isAgentIdentity() {
 		t.Fatalf("token should be agent identity: %+v", tok)
 	}
-	if tok.agentRuntimeID != "rt-flat" || tok.accountID != "acc-flat" || tok.chatgptUserID != "user-flat" {
+	if tok.agentRuntimeID != "agent-flat" || tok.accountID != "acc-flat" || tok.chatgptUserID != "user-flat" {
 		t.Fatalf("agent identity fields mismatch: %+v", tok)
 	}
 	if tok.agentPrivateKey != pk {

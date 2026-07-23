@@ -93,6 +93,10 @@ type Handler struct {
 	// 重复账号合并互斥锁：串行化 mergeRefreshedDuplicateIntoExisting，
 	// 防止并发导入同一身份的多个账号时互相合并、把双方都软删（账号丢失）。
 	mergeDuplicateMu sync.Mutex
+
+	// Agent Identity 导入互斥锁：串行化 runtime_id 的数据库查重与插入，
+	// 防止并发请求在“检查不存在”后同时建号。
+	agentIdentityImportMu sync.Mutex
 }
 
 type chartCacheEntry struct {
