@@ -14,12 +14,19 @@ import {
   EyeOff,
   AlertTriangle,
   Pencil,
+  Link2,
+  Unlink,
+  Search,
+  Users,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { api, type ProxyRow, type ProxyTestResult } from "../api";
+import { api, type ProxyRow } from "../api";
+import type { AccountRow } from "../types";
+import ChannelLogo from "../components/ChannelLogo";
 import Modal from "../components/Modal";
+import StatusBadge from "../components/StatusBadge";
 import { useToast } from "../hooks/useToast";
 import { getErrorMessage } from "../utils/error";
 
@@ -27,6 +34,45 @@ const PAGE_SIZE = 10;
 const TEST_ALL_CONCURRENCY = 4;
 
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
+
+type BindFilter = "all" | "unbound" | "this" | "other";
+// 账号池大类：Codex 池（含 AT / Agent / OpenAI Responses）与 Grok 池
+type BindKindFilter = "all" | "codex" | "grok";
+
+function accountDisplayName(account: AccountRow): string {
+  if (account.openai_responses_api) {
+    return account.name || account.email || `#${account.id}`;
+  }
+  return account.email || account.name || `#${account.id}`;
+}
+
+function accountKindKey(account: AccountRow): string {
+  if (account.grok_api) return "grok";
+  if (account.openai_responses_api) return "openai";
+  if (account.agent_identity) return "agent";
+  if (account.at_only) return "at";
+  return "codex";
+}
+
+function matchesBindKind(account: AccountRow, kind: BindKindFilter): boolean {
+  if (kind === "all") return true;
+  if (kind === "grok") return Boolean(account.grok_api);
+  // Codex 池：非 Grok 的账号（OAuth / AT / Agent / OpenAI Responses）
+  return !account.grok_api;
+}
+
+function normalizeProxyUrl(url: string | null | undefined): string {
+  return (url ?? "").trim();
+}
+
+function isAccountBoundToProxy(
+  account: AccountRow,
+  proxyUrl: string,
+): boolean {
+  const bound = normalizeProxyUrl(account.proxy_url);
+  const target = normalizeProxyUrl(proxyUrl);
+  return Boolean(bound) && bound === target;
+}
 
 function validateProxyInput(url: string): boolean {
   const trimmed = url.trim();
@@ -82,7 +128,7 @@ function maskUrl(url: string): string {
 
 export default function Proxies() {
   const { t, i18n } = useTranslation();
-  const { toast, showToast } = useToast();
+  const { showToast } = useToast();
   const [proxies, setProxies] = useState<ProxyRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [poolEnabled, setPoolEnabled] = useState(false);
@@ -103,16 +149,47 @@ export default function Proxies() {
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
 
+  // 代理 → 账号池绑定
+  const [accounts, setAccounts] = useState<AccountRow[]>([]);
+  const [accountsLoading, setAccountsLoading] = useState(false);
+  const [bindingProxy, setBindingProxy] = useState<ProxyRow | null>(null);
+  const [bindSelected, setBindSelected] = useState<Set<number>>(new Set());
+  const [bindFilter, setBindFilter] = useState<BindFilter>("all");
+  const [bindKindFilter, setBindKindFilter] = useState<BindKindFilter>("all");
+  const [bindQuery, setBindQuery] = useState("");
+  const [bindSubmitting, setBindSubmitting] = useState(false);
+
   const ipApiLang = i18n.language?.startsWith("zh") ? "zh-CN" : "en";
+
+  const reloadAccounts = useCallback(async () => {
+    setAccountsLoading(true);
+    try {
+      const res = await api.getAccounts();
+      setAccounts(res.accounts ?? []);
+    } catch (error) {
+      showToast(
+        t("proxies.bindLoadAccountsFailed", {
+          error: getErrorMessage(error),
+        }),
+        "error",
+      );
+    } finally {
+      setAccountsLoading(false);
+    }
+  }, [showToast, t]);
 
   const reload = useCallback(async () => {
     try {
-      const [proxyRes, settingsRes] = await Promise.all([
+      const [proxyRes, settingsRes, accountsRes] = await Promise.all([
         api.listProxies(),
         api.getSettings(),
+        api.getAccounts().catch(() => null),
       ]);
       setProxies(proxyRes.proxies);
       setPoolEnabled(settingsRes.proxy_pool_enabled);
+      if (accountsRes) {
+        setAccounts(accountsRes.accounts ?? []);
+      }
     } catch (error) {
       showToast(
         t("proxies.loadFailed", { error: getErrorMessage(error) }),
@@ -128,6 +205,132 @@ export default function Proxies() {
 
   const totalPages = Math.max(1, Math.ceil(proxies.length / PAGE_SIZE));
   const pagedProxies = proxies.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE);
+
+  // proxy_url → 绑定账号数
+  const boundCountByProxyUrl = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const account of accounts) {
+      const url = normalizeProxyUrl(account.proxy_url);
+      if (!url) continue;
+      map.set(url, (map.get(url) ?? 0) + 1);
+    }
+    return map;
+  }, [accounts]);
+
+  const totalBoundAccounts = useMemo(
+    () => accounts.filter((a) => normalizeProxyUrl(a.proxy_url)).length,
+    [accounts],
+  );
+
+  const bindFilteredAccounts = useMemo(() => {
+    if (!bindingProxy) return [];
+    const q = bindQuery.trim().toLowerCase();
+    const proxyUrl = bindingProxy.url;
+    return accounts.filter((account) => {
+      if (!matchesBindKind(account, bindKindFilter)) return false;
+      const bound = normalizeProxyUrl(account.proxy_url);
+      const isThis = isAccountBoundToProxy(account, proxyUrl);
+      if (bindFilter === "unbound" && bound) return false;
+      if (bindFilter === "this" && !isThis) return false;
+      if (bindFilter === "other" && (!bound || isThis)) return false;
+      if (!q) return true;
+      const haystack = [
+        String(account.id),
+        account.email,
+        account.name,
+        account.status,
+        account.plan_type,
+        account.proxy_url,
+        accountKindKey(account),
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [accounts, bindingProxy, bindFilter, bindKindFilter, bindQuery]);
+
+  const bindVisibleAllSelected =
+    bindFilteredAccounts.length > 0 &&
+    bindFilteredAccounts.every((a) => bindSelected.has(a.id));
+
+  const openBindModal = (proxy: ProxyRow) => {
+    setBindingProxy(proxy);
+    setBindFilter("all");
+    setBindKindFilter("all");
+    setBindQuery("");
+    // 预选已绑定到该代理的账号，方便查看/解绑
+    const pre = new Set<number>();
+    for (const account of accounts) {
+      if (isAccountBoundToProxy(account, proxy.url)) {
+        pre.add(account.id);
+      }
+    }
+    setBindSelected(pre);
+    if (accounts.length === 0) {
+      void reloadAccounts();
+    }
+  };
+
+  const closeBindModal = () => {
+    if (bindSubmitting) return;
+    setBindingProxy(null);
+    setBindSelected(new Set());
+    setBindQuery("");
+    setBindFilter("all");
+    setBindKindFilter("all");
+  };
+
+  const toggleBindSelectAll = () => {
+    if (bindVisibleAllSelected) {
+      setBindSelected((prev) => {
+        const next = new Set(prev);
+        bindFilteredAccounts.forEach((a) => next.delete(a.id));
+        return next;
+      });
+    } else {
+      setBindSelected((prev) => {
+        const next = new Set(prev);
+        bindFilteredAccounts.forEach((a) => next.add(a.id));
+        return next;
+      });
+    }
+  };
+
+  const handleBindAccounts = async (mode: "bind" | "unbind") => {
+    if (!bindingProxy || bindSelected.size === 0) return;
+    const ids = Array.from(bindSelected);
+    setBindSubmitting(true);
+    try {
+      const result = await api.batchUpdateAccounts({
+        ids,
+        proxy_url: mode === "bind" ? bindingProxy.url : "",
+      });
+      showToast(
+        mode === "bind"
+          ? t("proxies.bindDone", {
+              success: result.success,
+              fail: result.failed,
+            })
+          : t("proxies.unbindDone", {
+              success: result.success,
+              fail: result.failed,
+            }),
+      );
+      await reloadAccounts();
+      // 绑定成功后同步本地选中：绑定时保持选中，解绑后清空
+      if (mode === "unbind") {
+        setBindSelected(new Set());
+      }
+    } catch (error) {
+      showToast(
+        t("proxies.bindFailed", { error: getErrorMessage(error) }),
+        "error",
+      );
+    } finally {
+      setBindSubmitting(false);
+    }
+  };
 
   useEffect(() => {
     if (page > totalPages) setPage(totalPages);
@@ -502,7 +705,7 @@ export default function Proxies() {
       )}
 
       {/* Stats */}
-      <div className="grid grid-cols-1 gap-3 min-[420px]:grid-cols-3 sm:gap-4">
+      <div className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-4 sm:gap-4">
         <Card className="py-0">
           <CardContent className="p-4 text-center">
             <div className="text-2xl font-bold tabular-nums text-foreground">
@@ -520,6 +723,16 @@ export default function Proxies() {
             </div>
             <div className="text-xs text-muted-foreground mt-1">
               {t("proxies.enabledCount")}
+            </div>
+          </CardContent>
+        </Card>
+        <Card className="py-0">
+          <CardContent className="p-4 text-center">
+            <div className="text-2xl font-bold tabular-nums text-primary">
+              {totalBoundAccounts}
+            </div>
+            <div className="text-xs text-muted-foreground mt-1">
+              {t("proxies.boundAccounts")}
             </div>
           </CardContent>
         </Card>
@@ -618,6 +831,12 @@ export default function Proxies() {
                                 ? t("proxies.enabled")
                                 : t("proxies.disabled")}
                             </button>
+                            <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-xs font-medium text-muted-foreground">
+                              <Users className="size-3" />
+                              {t("proxies.boundCount", {
+                                count: boundCountByProxyUrl.get(p.url) ?? 0,
+                              })}
+                            </span>
                             {p.test_latency_ms > 0 ? (
                               <span
                                 className={`inline-flex rounded-full px-2 py-0.5 text-xs font-bold ${latencyColor(p.test_latency_ms)} ${latencyBg(p.test_latency_ms)}`}
@@ -637,6 +856,13 @@ export default function Proxies() {
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-1.5">
+                            <button
+                              onClick={() => openBindModal(p)}
+                              className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-primary/25 bg-primary/5 px-2.5 text-xs font-medium text-primary hover:bg-primary/10"
+                            >
+                              <Link2 className="size-3.5" />
+                              {t("proxies.bindAccounts")}
+                            </button>
                             <button
                               onClick={() => startEdit(p)}
                               className="inline-flex min-h-9 flex-1 items-center justify-center gap-1.5 rounded-lg border border-border px-2.5 text-xs font-medium text-foreground hover:bg-muted/50"
@@ -689,6 +915,9 @@ export default function Proxies() {
                       </th>
                       <th className="p-3 font-semibold">
                         {t("proxies.colStatus")}
+                      </th>
+                      <th className="p-3 font-semibold">
+                        {t("proxies.colBound")}
                       </th>
                       <th className="p-3 font-semibold">
                         {t("proxies.colLocation")}
@@ -771,6 +1000,20 @@ export default function Proxies() {
                                 : t("proxies.disabled")}
                             </button>
                           </td>
+                          {/* Bound accounts */}
+                          <td className="p-3">
+                            <button
+                              type="button"
+                              onClick={() => openBindModal(p)}
+                              className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/30 px-2.5 py-1 text-xs font-semibold text-foreground transition-colors hover:border-primary/30 hover:bg-primary/5 hover:text-primary"
+                              title={t("proxies.bindAccounts")}
+                            >
+                              <Users className="size-3" />
+                              <span className="tabular-nums">
+                                {boundCountByProxyUrl.get(p.url) ?? 0}
+                              </span>
+                            </button>
+                          </td>
                           {/* Location */}
                           <td className="p-3">
                             {isTesting ? (
@@ -814,6 +1057,14 @@ export default function Proxies() {
                           </td>
                           <td className="p-3">
                             <div className="flex items-center gap-1.5 justify-end">
+                              <button
+                                onClick={() => openBindModal(p)}
+                                className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium border border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 transition-all"
+                                title={t("proxies.bindAccounts")}
+                              >
+                                <Link2 className="size-3.5" />
+                                {t("proxies.bind")}
+                              </button>
                               <button
                                 onClick={() => startEdit(p)}
                                 className="flex items-center justify-center size-7 rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-all"
@@ -961,6 +1212,260 @@ export default function Proxies() {
         </div>
       </Modal>
 
+      {/* 绑定账号到代理 */}
+      <Modal
+        show={Boolean(bindingProxy)}
+        title={t("proxies.bindModalTitle")}
+        onClose={closeBindModal}
+        contentClassName="sm:max-w-[720px]"
+        bodyClassName="!p-0"
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              onClick={closeBindModal}
+              disabled={bindSubmitting}
+            >
+              {t("common.cancel")}
+            </Button>
+            <Button
+              type="button"
+              variant="outline"
+              className="gap-1.5 text-destructive hover:bg-destructive/10 hover:text-destructive"
+              disabled={bindSubmitting || bindSelected.size === 0}
+              onClick={() => void handleBindAccounts("unbind")}
+            >
+              {bindSubmitting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Unlink className="size-3.5" />
+              )}
+              {t("proxies.unbindSelected", { count: bindSelected.size })}
+            </Button>
+            <Button
+              type="button"
+              className="gap-1.5"
+              disabled={bindSubmitting || bindSelected.size === 0}
+              onClick={() => void handleBindAccounts("bind")}
+            >
+              {bindSubmitting ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <Link2 className="size-3.5" />
+              )}
+              {t("proxies.bindSelected", { count: bindSelected.size })}
+            </Button>
+          </>
+        }
+      >
+        {bindingProxy ? (
+          <div className="flex flex-col">
+            {/* 目标代理摘要 */}
+            <div className="border-b border-border bg-muted/20 px-5 py-3.5 sm:px-6">
+              <div className="text-xs font-semibold text-muted-foreground">
+                {t("proxies.bindTargetProxy")}
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                {bindingProxy.label ? (
+                  <span className="inline-flex rounded-md bg-primary/10 px-2 py-0.5 text-xs font-semibold text-primary">
+                    {bindingProxy.label}
+                  </span>
+                ) : null}
+                <span className="min-w-0 break-all font-mono text-[13px] font-medium text-foreground">
+                  {maskUrl(bindingProxy.url)}
+                </span>
+                <span className="inline-flex items-center gap-1 rounded-full border border-border px-2 py-0.5 text-xs text-muted-foreground">
+                  <Users className="size-3" />
+                  {t("proxies.boundCount", {
+                    count: boundCountByProxyUrl.get(bindingProxy.url) ?? 0,
+                  })}
+                </span>
+              </div>
+              <p className="mt-2 text-xs text-muted-foreground">
+                {t("proxies.bindHint")}
+              </p>
+            </div>
+
+            {/* 搜索 + 筛选 */}
+            <div className="space-y-3 border-b border-border px-5 py-3 sm:px-6">
+              <div className="relative">
+                <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                <Input
+                  value={bindQuery}
+                  onChange={(e) => setBindQuery(e.target.value)}
+                  placeholder={t("proxies.bindSearchPlaceholder")}
+                  className="pl-9"
+                />
+              </div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-1.5">
+                  {(
+                    [
+                      ["all", t("proxies.bindFilterAll")],
+                      ["unbound", t("proxies.bindFilterUnbound")],
+                      ["this", t("proxies.bindFilterThis")],
+                      ["other", t("proxies.bindFilterOther")],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setBindFilter(key)}
+                      className={`rounded-full border px-2.5 py-1 text-xs font-semibold transition-colors ${
+                        bindFilter === key
+                          ? "border-primary/30 bg-primary/10 text-primary"
+                          : "border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                      }`}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div
+                  className="inline-flex items-center rounded-full border border-border bg-muted/30 p-0.5"
+                  role="group"
+                  aria-label={t("proxies.bindKindGroupLabel")}
+                >
+                  {(
+                    [
+                      ["all", t("proxies.bindKindAll")],
+                      ["codex", t("proxies.bindKindCodex")],
+                      ["grok", t("proxies.bindKindGrok")],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      type="button"
+                      onClick={() => setBindKindFilter(key)}
+                      className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold transition-colors ${
+                        bindKindFilter === key
+                          ? "bg-background text-foreground shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      {key === "codex" || key === "grok" ? (
+                        <ChannelLogo channel={key} size={14} />
+                      ) : null}
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                <label className="inline-flex cursor-pointer items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={bindVisibleAllSelected}
+                    onChange={toggleBindSelectAll}
+                    disabled={bindFilteredAccounts.length === 0}
+                    className="size-3.5 rounded"
+                  />
+                  {t("proxies.bindSelectVisible")}
+                </label>
+                <span>
+                  {t("proxies.bindSelectionSummary", {
+                    selected: bindSelected.size,
+                    shown: bindFilteredAccounts.length,
+                    total: accounts.length,
+                  })}
+                </span>
+              </div>
+            </div>
+
+            {/* 账号列表 */}
+            <div className="max-h-[min(420px,50dvh)] overflow-y-auto">
+              {accountsLoading ? (
+                <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
+                  <Loader2 className="size-4 animate-spin" />
+                  {t("proxies.bindLoadingAccounts")}
+                </div>
+              ) : bindFilteredAccounts.length === 0 ? (
+                <div className="px-5 py-14 text-center text-sm text-muted-foreground sm:px-6">
+                  {accounts.length === 0
+                    ? t("proxies.bindNoAccounts")
+                    : t("proxies.bindNoMatch")}
+                </div>
+              ) : (
+                <ul className="divide-y divide-border/60">
+                  {bindFilteredAccounts.map((account) => {
+                    const checked = bindSelected.has(account.id);
+                    const boundUrl = normalizeProxyUrl(account.proxy_url);
+                    const isThis = isAccountBoundToProxy(
+                      account,
+                      bindingProxy.url,
+                    );
+                    const kind = accountKindKey(account);
+                    return (
+                      <li key={account.id}>
+                        <label
+                          className={`flex cursor-pointer items-start gap-3 px-5 py-3 transition-colors sm:px-6 ${
+                            checked ? "bg-primary/5" : "hover:bg-muted/30"
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={() => {
+                              setBindSelected((prev) => {
+                                const next = new Set(prev);
+                                if (next.has(account.id)) next.delete(account.id);
+                                else next.add(account.id);
+                                return next;
+                              });
+                            }}
+                            className="mt-1 size-4 shrink-0 rounded"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="truncate text-sm font-semibold text-foreground">
+                                {accountDisplayName(account)}
+                              </span>
+                              <span className="rounded-md border border-border bg-muted/40 px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
+                                {t(`proxies.accountKind.${kind}`, {
+                                  defaultValue: kind,
+                                })}
+                              </span>
+                              <StatusBadge status={account.status} />
+                            </div>
+                            <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+                              <span className="tabular-nums">#{account.id}</span>
+                              {account.name && account.email ? (
+                                <span className="truncate">{account.name}</span>
+                              ) : null}
+                              {boundUrl ? (
+                                <span
+                                  className={`inline-flex max-w-full items-center gap-1 truncate ${
+                                    isThis
+                                      ? "font-medium text-primary"
+                                      : "text-amber-600 dark:text-amber-400"
+                                  }`}
+                                  title={boundUrl}
+                                >
+                                  <Link2 className="size-3 shrink-0" />
+                                  {isThis
+                                    ? t("proxies.bindStatusThis")
+                                    : t("proxies.bindStatusOther", {
+                                        proxy: maskUrl(boundUrl),
+                                      })}
+                                </span>
+                              ) : (
+                                <span className="text-muted-foreground/80">
+                                  {t("proxies.bindStatusNone")}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }
