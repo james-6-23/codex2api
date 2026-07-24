@@ -31,8 +31,11 @@ func sendAnthropicError(c *gin.Context, statusCode int, errType, message string)
 	})
 }
 
-// sendAnthropicStreamError 在流式模式中发送错误事件
-func sendAnthropicStreamError(c *gin.Context, errType, message string) {
+// writeAnthropicStreamErrorEvent 通过流写入器发送 Anthropic 协议的流内 error 事件。
+// 用于正文已下发、无法整段静默重试的上游失败：下游网关/客户端（Claude Code 等）
+// 能识别 error 事件并自行重试；伪造 stop_reason=end_turn 的干净收尾会让下游把
+// 截断/失败响应当成功，既无从感知也无从重试（issue #435）。
+func writeAnthropicStreamErrorEvent(w *streamFlushWriter, errType, message string) error {
 	payload, err := json.Marshal(gin.H{
 		"type": "error",
 		"error": gin.H{
@@ -43,10 +46,19 @@ func sendAnthropicStreamError(c *gin.Context, errType, message string) {
 	if err != nil {
 		payload = []byte(`{"type":"error","error":{"type":"api_error","message":"failed to encode stream error"}}`)
 	}
-	fmt.Fprintf(c.Writer, "event: error\ndata: %s\n\n", payload)
-	if flusher, ok := c.Writer.(http.Flusher); ok {
-		flusher.Flush()
+	if err := w.WriteString(fmt.Sprintf("event: error\ndata: %s\n\n", payload)); err != nil {
+		return err
 	}
+	return w.Flush()
+}
+
+// rejectAnthropicMessagesRequest 入口校验拒绝：回 Anthropic 错误 JSON 并打一行控制台日志。
+// 这一阶段尚未选号，不产生 usage log；没有这行日志，"请求发不进来"在网关侧完全不可见
+// （issue #435：下游客户端请求被静默拒绝却无从排查）。
+func rejectAnthropicMessagesRequest(c *gin.Context, statusCode int, errType, message string) {
+	log.Printf("/v1/messages 入口拒绝 (status %d, %s): %s (ip=%s, ua=%q)",
+		statusCode, errType, message, c.ClientIP(), c.Request.UserAgent())
+	sendAnthropicError(c, statusCode, errType, message)
 }
 
 // mapHTTPStatusToAnthropicError 将 HTTP 状态码映射为 Anthropic 错误类型
@@ -88,36 +100,36 @@ func (h *Handler) Messages(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
+		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "Failed to read request body")
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
 
 	if len(rawBody) == 0 {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
+		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "Request body is empty")
 		return
 	}
 
 	// 验证 JSON
 	if !gjson.ValidBytes(rawBody) {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "Invalid JSON in request body")
+		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "Invalid JSON in request body")
 		return
 	}
 
 	// 检查请求体大小
 	if len(rawBody) > security.MaxRequestBodySize {
-		sendAnthropicError(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "Request body too large")
+		rejectAnthropicMessagesRequest(c, http.StatusRequestEntityTooLarge, "invalid_request_error", "Request body too large")
 		return
 	}
 
 	// 基本验证
 	model := gjson.GetBytes(rawBody, "model").String()
 	if model == "" {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "model is required")
+		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "model is required")
 		return
 	}
 	if !gjson.GetBytes(rawBody, "messages").Exists() {
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
+		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
 	if h.inspectPromptFilterAnthropic(c, rawBody, "/v1/messages", model) {
@@ -413,6 +425,12 @@ func (h *Handler) Messages(c *gin.Context) {
 			translator := newAnthropicStreamTranslator(originalModel)
 			streamWriter := h.newStreamFlushWriter(c, c.Writer, flusher)
 			var pendingFirstTokenEvents bytes.Buffer
+			// contentStarted 用严格口径（isFirstTokenResult）跟踪"首个真实内容帧"，
+			// 专供流提交决策（缓冲/重试窗口/failed 抑制）使用；ttftRecorded 按
+			// first_token_mode 可能是 loose 口径，只用于首字统计。loose 模式会把
+			// output_item.added 等纯结构帧当"首字"，若拿它做流提交门，结构帧一到
+			// 就落盘 200，首包前静默重试窗口被过早关闭（issue #435）。
+			contentStarted := false
 
 			readErr = ReadSSEStream(resp.Body, func(data []byte) bool {
 				parsed := gjson.ParseBytes(data)
@@ -424,6 +442,9 @@ func (h *Handler) Messages(c *gin.Context) {
 				if !ttftRecorded && isFirstToken {
 					firstTokenMs = int(time.Since(start).Milliseconds())
 					ttftRecorded = true
+				}
+				if !contentStarted && isFirstTokenResult(parsed) {
+					contentStarted = true
 				}
 
 				// 累计 delta 字符数
@@ -449,12 +470,22 @@ func (h *Handler) Messages(c *gin.Context) {
 				// 不可重试或重试耗尽时中止转发，循环外按真实错误码返回 JSON。
 				// 否则 handleFailed 会把失败翻译成 stop_reason=end_turn 的"正常空结束"，
 				// 下游网关会把它当成功计一条 0 token 请求且无从重试。
-				if shouldSuppressRetryableResponseFailedBeforeFirstToken(eventType, terminalFailurePayload, ttftRecorded, wroteAnyBody, attempt, maxRetries, c.Request.Context().Err(), writeErr) {
+				if shouldSuppressRetryableResponseFailedBeforeFirstToken(eventType, terminalFailurePayload, contentStarted, wroteAnyBody, attempt, maxRetries, c.Request.Context().Err(), writeErr) {
 					pendingFirstTokenEvents.Reset()
 					return false
 				}
-				if shouldReturnHTTPErrorForResponseFailed(eventType, ttftRecorded, wroteAnyBody, writeErr != nil) {
+				if shouldReturnHTTPErrorForResponseFailed(eventType, contentStarted, wroteAnyBody, writeErr != nil) {
 					pendingFirstTokenEvents.Reset()
+					return false
+				}
+				// 正文已下发后收到 response.failed：无法整段重试，且 handleFailed 会把失败
+				// 翻译成 stop_reason=end_turn 的干净收尾，下游把截断响应当成功、无从感知
+				// 与重试（issue #435）。按 Anthropic 协议改发流内 error 事件后中止转发。
+				if eventType == "response.failed" && wroteAnyBody && writeErr == nil {
+					failedOutcome := classifyResponseFailedOutcome(terminalFailurePayload)
+					if err := writeAnthropicStreamErrorEvent(streamWriter, mapHTTPStatusToAnthropicError(failedOutcome.logStatusCode), failedOutcome.failureMessage); err != nil {
+						writeErr = err
+					}
 					return false
 				}
 
@@ -466,7 +497,12 @@ func (h *Handler) Messages(c *gin.Context) {
 						payload.WriteString(anthropicEventToSSE(evt))
 					}
 					payloadString := payload.String()
-					shouldDefer := !ttftRecorded && !gotTerminal && isPreContentLifecycleEvent(eventType)
+					// 首个真实内容帧之前的所有帧（结构帧 output_item.added /
+					// content_part.added 也算）一律先缓冲：一旦写出任何字节，首包前
+					// 静默换号重试窗口就永久关闭（issue #435）。内容帧到达（含思考
+					// delta，几乎紧跟结构帧，不违反 issue #207 的思考及时性）即整段
+					// flush，之后不再缓冲。
+					shouldDefer := !contentStarted && !gotTerminal
 					if shouldDefer {
 						pendingFirstTokenEvents.WriteString(payloadString)
 						if pendingFirstTokenEvents.Len() <= 1024*1024 {
@@ -493,18 +529,14 @@ func (h *Handler) Messages(c *gin.Context) {
 				writeErr = streamWriter.Flush()
 			}
 
-			// 流结束后补齐事件
-			if writeErr == nil && !gotTerminal && ttftRecorded {
-				finalEvents := translator.finalize()
-				for _, evt := range finalEvents {
-					sse := anthropicEventToSSE(evt)
-					if err := streamWriter.WriteString(sse); err != nil {
-						writeErr = err
-						break
-					}
-				}
-				if writeErr == nil {
-					writeErr = streamWriter.Flush()
+			// 流结束但未收到终止事件（上游断流）：已写过 body 时无法整段重试，
+			// 也不能像旧逻辑那样伪造 stop_reason=end_turn 的干净收尾——下游会把
+			// 截断响应当成功，既无从感知也无从重试（issue #435）。按 Anthropic
+			// 协议发流内 error 事件，下游网关/客户端可识别并自行重试。
+			// 未写过 body 的断流不走这里：循环外静默换号重试或按真实错误码返回 JSON。
+			if writeErr == nil && !gotTerminal && wroteAnyBody && c.Request.Context().Err() == nil {
+				if err := writeAnthropicStreamErrorEvent(streamWriter, "overloaded_error", "Upstream stream interrupted before completion"); err != nil {
+					log.Printf("写入流内 error 事件失败 (/v1/messages): %v", err)
 				}
 			}
 		} else {

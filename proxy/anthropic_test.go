@@ -15,7 +15,10 @@ func TestSendAnthropicStreamErrorEscapesJSON(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 
-	sendAnthropicStreamError(c, "api_error", "bad \"quote\"\\slash\nand control \x01")
+	writer := newStreamFlushWriter(c.Writer, nil)
+	if err := writeAnthropicStreamErrorEvent(writer, "api_error", "bad \"quote\"\\slash\nand control \x01"); err != nil {
+		t.Fatalf("writeAnthropicStreamErrorEvent: %v", err)
+	}
 
 	body := recorder.Body.String()
 	if !strings.HasPrefix(body, "event: error\ndata: ") || !strings.HasSuffix(body, "\n\n") {

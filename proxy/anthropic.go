@@ -970,28 +970,6 @@ func (t *anthropicStreamTranslator) closeCurrentBlock() []anthropicStreamEvent {
 	return events
 }
 
-// finalize 在流结束时补齐缺失的事件
-func (t *anthropicStreamTranslator) finalize() []anthropicStreamEvent {
-	var events []anthropicStreamEvent
-	if !t.messageStartSent {
-		events = append(events, t.handleCreated()...)
-	}
-	events = append(events, t.closeCurrentBlock()...)
-	events = append(events, anthropicStreamEvent{
-		Type: "message_delta",
-		Delta: &anthropicDelta{
-			Type:       "message_delta",
-			StopReason: "end_turn",
-		},
-		Usage: &anthropicUsage{
-			InputTokens:  t.inputTokens,
-			OutputTokens: t.outputTokens,
-		},
-	})
-	events = append(events, anthropicStreamEvent{Type: "message_stop"})
-	return events
-}
-
 // anthropicEventToSSE 将 Anthropic 事件序列化为 SSE 格式
 func anthropicEventToSSE(evt anthropicStreamEvent) string {
 	data, _ := json.Marshal(evt)
