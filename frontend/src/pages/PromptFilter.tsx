@@ -16,7 +16,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -441,6 +441,18 @@ const defaultForm: PromptFilterForm = {
   prompt_filter_review_fail_closed: true,
 }
 
+function parsePromptReviewAPIKeyInput(raw: string): string[] {
+  const seen = new Set<string>()
+  return raw
+    .split(/[\s,;]+/)
+    .map((key) => key.trim())
+    .filter((key) => {
+      if (!key || seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+}
+
 const emptyFilters: LogFilters = {
   action: '',
   source: '',
@@ -543,6 +555,7 @@ export default function PromptFilter() {
   const { toast, showToast } = useToast()
   const [form, setForm] = useState<PromptFilterForm>(defaultForm)
   const [saving, setSaving] = useState(false)
+  const [settingsSaveRevision, setSettingsSaveRevision] = useState(0)
   const advancedConfigError = useMemo(
     () => parseAdvancedConfigDocument(form.prompt_filter_advanced_config).error,
     [form.prompt_filter_advanced_config],
@@ -622,6 +635,7 @@ export default function PromptFilter() {
 
     setForm(normalizePromptFilterForm(updated))
     setData((current) => ({ ...current, settings: updated }))
+    setSettingsSaveRevision((revision) => revision + 1)
     setSaving(false)
     const quarantines = updated.prompt_filter_pattern_quarantines ?? []
     if (quarantines.length > 0) {
@@ -745,6 +759,7 @@ export default function PromptFilter() {
             testResult={testResult}
             runTest={runTest}
             advancedConfigError={advancedConfigError}
+            settingsSaveRevision={settingsSaveRevision}
             onSave={() => void saveSettings()}
           />
         ) : null}
@@ -2707,6 +2722,7 @@ function OverviewView({
   testResult,
   runTest,
   advancedConfigError,
+  settingsSaveRevision,
   onSave,
 }: {
   form: PromptFilterForm
@@ -2727,6 +2743,7 @@ function OverviewView({
   testResult: PromptFilterTestResponse | null
   runTest: () => void
   advancedConfigError: string | null
+  settingsSaveRevision: number
   onSave: () => void
 }) {
   const { t } = useTranslation()
@@ -2767,10 +2784,11 @@ function OverviewView({
   const reviewStrategy = !form.prompt_filter_review_enabled
     ? 'off'
     : form.prompt_filter_review_fail_closed ? 'fail_closed' : 'fail_open'
-  const draftReviewKeyCount = (form.prompt_filter_review_api_key ?? '')
-    .split(/[\s,]+/)
-    .filter(Boolean).length
-  const reviewKeyCount = draftReviewKeyCount || form.prompt_filter_review_api_key_count
+  const draftReviewKeys = useMemo(
+    () => parsePromptReviewAPIKeyInput(form.prompt_filter_review_api_key ?? ''),
+    [form.prompt_filter_review_api_key],
+  )
+  const reviewKeyCount = draftReviewKeys.length || form.prompt_filter_review_api_key_count
   const enabledAdvancedFeatures = [
     advancedProtection.normalization.enabled ? t('promptFilter.enabledFeatures.normalization') : null,
     advancedProtection.context_discount.enabled ? t('promptFilter.enabledFeatures.contextDiscount') : null,
@@ -2883,7 +2901,7 @@ function OverviewView({
         if (!cancelled) setReviewKeysLoading(false)
       })
     return () => { cancelled = true }
-  }, [reviewSettingsOpen, showToast])
+  }, [reviewSettingsOpen, settingsSaveRevision, showToast])
   const deleteReviewKey = async (keyID: string, masked: string) => {
     const approved = await confirm({
       title: t('promptFilter.reviewKeyDeleteTitle'),
@@ -2912,6 +2930,26 @@ function OverviewView({
       showToast(getErrorMessage(err), 'error')
     } finally {
       setDeletingReviewKeyID(null)
+    }
+  }
+  const removeFailedReviewTestKey = async (item: PromptReviewKeyTestResult) => {
+    if (!item.key_id) return
+    const masked = item.key_masked || `Key #${item.key_index}`
+    if (draftReviewKeys.length > 0) {
+      const draftIndex = item.key_index - 1
+      if (draftIndex < 0 || draftIndex >= draftReviewKeys.length) return
+      const remaining = draftReviewKeys.filter((_, index) => index !== draftIndex)
+      setForm((current) => ({ ...current, prompt_filter_review_api_key: remaining.join('\n') }))
+      setReviewTestResult((current) => current ? {
+        ...current,
+        key_count: remaining.length,
+        results: current.results?.filter((result) => result.key_id !== item.key_id),
+      } : null)
+      showToast(t('promptFilter.reviewKeyRemovedFromDraft', { key: masked }))
+      return
+    }
+    if (configuredReviewKeys.some((key) => key.id === item.key_id)) {
+      await deleteReviewKey(item.key_id, masked)
     }
   }
   const applyRecommendedProtection = () => {
@@ -3244,7 +3282,41 @@ function OverviewView({
                         <div>{t('promptFilter.reviewModel')}: <span className="font-mono">{reviewTestResult.model}</span></div>
                         {reviewTestResult.highest_category ? <div>{t('promptFilter.reviewTestHighestCategory')}: <span className="font-mono">{reviewTestResult.highest_category}</span></div> : null}
                         {reviewTestResult.reason ? <div className="sm:col-span-2">{t('promptFilter.reviewTestReason')}: {reviewTestResult.reason}</div> : null}
-                        {reviewTestResult.results?.length ? <div className="sm:col-span-2 mt-1 grid gap-2 md:grid-cols-3">{reviewTestResult.results.map((item) => <div key={item.key_id || item.key_index} className="rounded border bg-background p-2"><div className="flex items-center justify-between gap-2"><span className="font-medium">{item.key_masked || `Key #${item.key_index}`}</span><Badge variant={item.ok ? 'default' : 'destructive'}>{item.ok ? t('common.success') : t('common.failed')}</Badge></div><div className="mt-1 text-muted-foreground">{item.latency_ms} ms · {item.ok ? item.confidence.toFixed(2) : item.error || '-'}</div></div>)}</div> : null}
+                        {reviewTestResult.results?.length ? (
+                          <div className="sm:col-span-2 mt-1 grid gap-2 md:grid-cols-3">
+                            {reviewTestResult.results.map((item) => {
+                              const canRemoveFailedKey = !item.ok && Boolean(item.key_id) && (
+                                draftReviewKeys.length > 0 || configuredReviewKeys.some((key) => key.id === item.key_id)
+                              )
+                              const masked = item.key_masked || `Key #${item.key_index}`
+                              return (
+                                <div key={item.key_id || item.key_index} className="rounded border bg-background p-2">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-medium">{masked}</span>
+                                    <div className="flex items-center gap-1">
+                                      <Badge variant={item.ok ? 'default' : 'destructive'}>{item.ok ? t('common.success') : t('common.failed')}</Badge>
+                                      {canRemoveFailedKey ? (
+                                        <Button
+                                          type="button"
+                                          size="icon"
+                                          variant="ghost"
+                                          className="size-7 text-destructive hover:text-destructive"
+                                          disabled={deletingReviewKeyID !== null}
+                                          onClick={() => void removeFailedReviewTestKey(item)}
+                                          aria-label={t(draftReviewKeys.length > 0 ? 'promptFilter.reviewKeyRemoveDraftAria' : 'promptFilter.reviewKeyDeleteAria', { key: masked })}
+                                          title={t(draftReviewKeys.length > 0 ? 'promptFilter.reviewKeyRemoveDraftAria' : 'promptFilter.reviewKeyDeleteAria', { key: masked })}
+                                        >
+                                          {deletingReviewKeyID === item.key_id ? <RefreshCw className="size-4 animate-spin" /> : <Trash2 className="size-4" />}
+                                        </Button>
+                                      ) : null}
+                                    </div>
+                                  </div>
+                                  <div className="mt-1 text-muted-foreground">{item.latency_ms} ms · {item.ok ? item.confidence.toFixed(2) : item.error || '-'}</div>
+                                </div>
+                              )
+                            })}
+                          </div>
+                        ) : null}
                       </div>
                     ) : null}
                   </div>
