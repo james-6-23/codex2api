@@ -512,13 +512,15 @@ func (h *Handler) getUsageStatsSummaryCached(ctx context.Context, rangeStart, ra
 	return stats, nil
 }
 
-// parseUsageChannel 解析 query 里的渠道过滤参数（codex/grok，其余视为不限）。
+// parseUsageChannel 解析 query 里的渠道过滤参数（codex/grok/claude，其余视为不限）。
 func parseUsageChannel(c *gin.Context) string {
 	switch strings.ToLower(strings.TrimSpace(c.Query("channel"))) {
 	case database.UpstreamChannelCodex:
 		return database.UpstreamChannelCodex
 	case database.UpstreamChannelGrok:
 		return database.UpstreamChannelGrok
+	case database.UpstreamChannelClaude:
+		return database.UpstreamChannelClaude
 	}
 	return ""
 }
@@ -628,6 +630,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/grok/sso/import", h.ImportGrokSSO)
 	api.POST("/accounts/grok/refresh/import", h.ImportGrokRefreshTokens)
 	api.POST("/accounts/grok/import", h.BatchImportGrokAccounts)
+	// Claude Code：Anthropic 只有托管回调页，没有本机回调/device flow，
+	// 因此是「生成授权链接 → 用户粘回 code」两步。
+	api.POST("/accounts/claude/oauth/auth-url", h.GenerateClaudeAuthURL)
+	api.POST("/accounts/claude/oauth/exchange-code", h.ExchangeClaudeOAuthCode)
+	api.POST("/accounts/claude/import", h.ImportClaudeAccounts)
+	api.PATCH("/accounts/:id/claude", h.UpdateClaudeAccount)
 	api.POST("/accounts/grok/oauth/auth-url", h.GenerateGrokAuthURL)        // 兼容旧客户端
 	api.POST("/accounts/grok/oauth/exchange-code", h.ExchangeGrokOAuthCode) // 兼容旧客户端
 	api.PATCH("/accounts/:id/grok", h.UpdateGrokAccount)
@@ -909,8 +917,8 @@ type dashboardAccountCounts struct {
 	disabled    int
 }
 
-// summarizeDashboardAccounts 汇总账号健康计数，并按上游渠道（codex/grok）拆分。
-// 渠道判定优先用运行时账号（IsGrokAPI），不在池中的行回退 upstream_type 凭据。
+// summarizeDashboardAccounts 汇总账号健康计数，并按上游渠道（codex/grok/claude）拆分。
+// 渠道判定优先用运行时账号（IsGrokAPI / IsClaudeAPI），不在池中的行回退 upstream_type 凭据。
 func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*auth.Account) (dashboardAccountCounts, map[string]dashboardAccountCounts) {
 	runtimeByID := make(map[int64]*auth.Account, len(runtimeAccounts))
 	for _, acc := range runtimeAccounts {
@@ -921,8 +929,9 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 
 	var counts dashboardAccountCounts
 	channelCounts := map[string]dashboardAccountCounts{
-		database.UpstreamChannelCodex: {},
-		database.UpstreamChannelGrok:  {},
+		database.UpstreamChannelCodex:  {},
+		database.UpstreamChannelGrok:   {},
+		database.UpstreamChannelClaude: {},
 	}
 	counts.total = len(rows)
 	for _, row := range rows {
@@ -932,8 +941,11 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		status := strings.ToLower(strings.TrimSpace(row.Status))
 		cooldownReason := strings.ToLower(strings.TrimSpace(row.CooldownReason))
 		channel := database.UpstreamChannelCodex
-		if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamGrok) {
+		switch {
+		case strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamGrok):
 			channel = database.UpstreamChannelGrok
+		case strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude):
+			channel = database.UpstreamChannelClaude
 		}
 		usingCredits := false
 		if acc, ok := runtimeByID[row.ID]; ok {
@@ -941,8 +953,11 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 			cooldownReason = ""
 			// 积分顶替限流：状态仍报限流（窗口客观打满），但账号照常参与调度，按可用计。
 			usingCredits = acc.UsingCredits()
-			if acc.IsGrokAPI() {
+			switch {
+			case acc.IsGrokAPI():
 				channel = database.UpstreamChannelGrok
+			case acc.IsClaudeAPI():
+				channel = database.UpstreamChannelClaude
 			}
 		}
 		perChannel := channelCounts[channel]
@@ -1017,6 +1032,10 @@ type accountResponse struct {
 	GrokBilling                   json.RawMessage             `json:"grok_billing,omitempty"`
 	GrokRateLimit                 *auth.GrokRateLimitSnapshot `json:"grok_rate_limit,omitempty"`
 	GrokFreeQuota                 *auth.GrokFreeQuotaSnapshot `json:"grok_free_quota,omitempty"`
+	// Claude Code 账号标记与 bootstrap 身份（组织名 / 限额档位），供前端 Claude 视图展示。
+	ClaudeAPI                     bool                        `json:"claude_api,omitempty"`
+	ClaudeOrganizationName        string                      `json:"claude_organization_name,omitempty"`
+	ClaudeRateLimitTier           string                      `json:"claude_rate_limit_tier,omitempty"`
 	BaseURL                       string                      `json:"base_url,omitempty"`
 	Models                        []string                    `json:"models,omitempty"`
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
@@ -1375,6 +1394,7 @@ type accountLiteResponse struct {
 	ATOnly             bool   `json:"at_only"`
 	OpenAIResponsesAPI bool   `json:"openai_responses_api"`
 	GrokAPI            bool   `json:"grok_api"`
+	ClaudeAPI          bool   `json:"claude_api"`
 	AgentIdentity      bool   `json:"agent_identity"`
 	GrokAuthKind       string `json:"grok_auth_kind,omitempty"`
 }
@@ -1398,6 +1418,7 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 		isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
+		isClaudeAccount := strings.EqualFold(upstreamType, auth.UpstreamClaude)
 		grokAuthKind := ""
 		if isGrokAccount {
 			if strings.TrimSpace(row.GetCredential("api_key")) != "" {
@@ -1426,9 +1447,10 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 			Status:             status,
 			Enabled:            row.Enabled,
 			ProxyURL:           row.ProxyURL,
-			ATOnly:             !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			ATOnly:             !isOpenAIResponsesAccount && !isGrokAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 			OpenAIResponsesAPI: isOpenAIResponsesAccount,
 			GrokAPI:            isGrokAccount,
+			ClaudeAPI:          isClaudeAccount,
 			AgentIdentity:      isAgentIdentityCredentialRow(row),
 			GrokAuthKind:       grokAuthKind,
 		})
@@ -4831,7 +4853,7 @@ type batchUpdateAccountsReq struct {
 
 func (h *Handler) accountOperationIdentity(id int64) (string, string) {
 	h.accountListCacheMu.RLock()
-	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok} {
+	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok, database.UpstreamChannelClaude} {
 		snapshot := h.accountListCache[channel]
 		if snapshot == nil {
 			continue

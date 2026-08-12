@@ -126,13 +126,15 @@ func (a *Account) IsGrokAPI() bool {
 	return a.isGrokAPILocked()
 }
 
-// isRelayStyleLocked：openai_responses 中转或 Grok —— 一切「非 Codex OAuth 官方上游」
-// 的账号。这类账号不参与 Codex 专属行为（wham 探针、WS 上游、manifest、alpha search）。
+// isRelayStyleLocked：openai_responses 中转、Grok 或 Claude —— 一切「非 Codex OAuth
+// 官方上游」的账号。这类账号不参与 Codex 专属行为（wham 探针、WS 上游、manifest、
+// alpha search）。它只表达「不是 Codex」，不表达计费形态：Claude 与 Grok OAuth 同样是
+// 订阅账号，429 语义各自在 Apply429Cooldown 里单独分支处理。
 func (a *Account) isRelayStyleLocked() bool {
-	return a.isOpenAIResponsesAPILocked() || a.isGrokAPILocked()
+	return a.isOpenAIResponsesAPILocked() || a.isGrokAPILocked() || a.isClaudeAPILocked()
 }
 
-// IsRelayStyle 判断账号是否为「非 Codex 官方」的外部上游账号（中转或 Grok）。
+// IsRelayStyle 判断账号是否为「非 Codex 官方」的外部上游账号（中转 / Grok / Claude）。
 func (a *Account) IsRelayStyle() bool {
 	if a == nil {
 		return false

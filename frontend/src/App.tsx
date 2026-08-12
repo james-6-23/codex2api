@@ -60,6 +60,7 @@ function AdminApp() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/accounts" element={<Accounts />} />
           <Route path="/accounts/grok" element={<Accounts />} />
+          <Route path="/accounts/claude" element={<Accounts />} />
           <Route path="/accounts/invite" element={<Accounts />} />
           <Route path="/api-keys" element={<APIKeys />} />
           <Route path="/proxies" element={<Proxies />} />

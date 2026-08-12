@@ -11,6 +11,7 @@ import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
 import GrokAccounts from "./GrokAccounts";
+import ClaudeAccounts from "./ClaudeAccounts";
 import PageHeader from "../components/PageHeader";
 import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
@@ -1341,12 +1342,17 @@ const AccountCardItem = memo(function AccountCardItem({
   );
 });
 
+// 顶部渠道段控的显示顺序，同时决定滑块的 translateX 档位。
+type ProviderView = "codex" | "claude" | "grok";
+const PROVIDER_VIEW_ORDER: ProviderView[] = ["codex", "claude", "grok"];
+
 export default function Accounts() {
   const { t, i18n } = useTranslation();
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [showAdd, setShowAdd] = useState(false);
-  // providerView 决定账号管理页顶部展示哪一套上游：codex(现有页) 或 grok(独立黑白视图)。
-  // 由路由驱动（/accounts vs /accounts/grok），刷新浏览器后停留在当前视图。
+  // providerView 决定账号管理页顶部展示哪一套上游：codex(现有页)、claude 或 grok
+  // (各自独立视图)。由路由驱动（/accounts vs /accounts/claude vs /accounts/grok），
+  // 刷新浏览器后停留在当前视图。
   const location = useLocation();
   const navigate = useNavigate();
   // ?groupManager=1 深链直接打开分组管理器(Grok 页的「管理分组」跳转入口,issue #487)。
@@ -1364,12 +1370,14 @@ export default function Accounts() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
   const normalizedPath = location.pathname.replace(/\/+$/, "");
-  const providerView: "codex" | "grok" = normalizedPath.endsWith("/accounts/grok")
+  const providerView: ProviderView = normalizedPath.endsWith("/accounts/grok")
     ? "grok"
-    : "codex";
+    : normalizedPath.endsWith("/accounts/claude")
+      ? "claude"
+      : "codex";
   const setProviderView = useCallback(
-    (view: "codex" | "grok") => {
-      navigate(view === "grok" ? "/accounts/grok" : "/accounts");
+    (view: ProviderView) => {
+      navigate(view === "codex" ? "/accounts" : `/accounts/${view}`);
     },
     [navigate],
   );
@@ -5178,20 +5186,23 @@ export default function Accounts() {
     [],
   );
 
-  // Codex/Grok 顶部段控切换：两套账号视图共用同一切换器（Grok 通过 headerSlot 注入）。
-  // 滑块动画 + 品牌 logo，与仪表盘渠道过滤器视觉一致。
-  // 不复用 Codex 侧的导入/导出/邀请/回收站等入口，Grok 页只保留账号本身的增删启停。
-  // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿 GrokAccounts 的 memo 边界。
+  // Codex/Claude/Grok 顶部段控切换：三套账号视图共用同一切换器
+  // （Claude / Grok 通过 headerSlot 注入）。滑块动画 + 品牌 logo，与仪表盘渠道过滤器视觉一致。
+  // 不复用 Codex 侧的导入/导出/邀请/回收站等入口，另两页只保留账号本身的增删启停。
+  // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿子页的 memo 边界。
   const providerSwitcher = useMemo(() => (
-    <div className="relative grid grid-cols-2 items-center rounded-lg border border-border bg-muted/40 p-0.5">
+    <div className="relative grid grid-cols-3 items-center rounded-lg border border-border bg-muted/40 p-0.5">
       <span
         aria-hidden
-        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/2)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{ transform: `translateX(${providerView === "grok" ? 100 : 0}%)` }}
+        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/3)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
+        style={{
+          transform: `translateX(${PROVIDER_VIEW_ORDER.indexOf(providerView) * 100}%)`,
+        }}
       />
       {(
         [
           ["codex", t("accounts.providerViewCodex")],
+          ["claude", t("accounts.providerViewClaude")],
           ["grok", t("accounts.providerViewGrok")],
         ] as const
       ).map(([key, label]) => (
@@ -5225,6 +5236,14 @@ export default function Accounts() {
             handleOperationResultsVisibilityChange
           }
         />
+      </div>
+    );
+  }
+
+  if (providerView === "claude") {
+    return (
+      <div key="provider-claude" className="animate-channel-switch-in">
+        <ClaudeAccounts headerSlot={providerSwitcher} />
       </div>
     );
   }

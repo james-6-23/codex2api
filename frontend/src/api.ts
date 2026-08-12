@@ -22,6 +22,13 @@ import type {
   GrokSSOImportResponse,
   GrokBatchImportRequest,
   GrokBatchImportResponse,
+  ClaudeAuthURLRequest,
+  ClaudeAuthURLResponse,
+  ClaudeExchangeCodeRequest,
+  ClaudeExchangeCodeResponse,
+  ClaudeImportRequest,
+  ClaudeImportResponse,
+  UpdateClaudeAccountRequest,
   AdminErrorResponse,
   APIKeysResponse,
   APIKeyTokenStat,
@@ -526,9 +533,9 @@ export const api = {
   deletePortalImageAsset: (apiKey: string, id: number) =>
     requestImageStudioPortal<MessageResponse>(`/assets/${id}`, apiKey, { method: 'DELETE' }),
   getStats: () => request<StatsResponse>('/stats'),
-  // channel: 'codex' | 'grok' — server-side filter; omit for all accounts.
+  // channel: 'codex' | 'grok' | 'claude' — server-side filter; omit for all accounts.
   // view: 'lite' — 只返回身份/绑定字段,跳过用量富化(代理绑定弹窗等场景)。
-  getAccounts: (params: { channel?: 'codex' | 'grok'; view?: 'lite' } = {}) => {
+  getAccounts: (params: { channel?: 'codex' | 'grok' | 'claude'; view?: 'lite' } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.channel) searchParams.set('channel', params.channel)
     if (params.view) searchParams.set('view', params.view)
@@ -609,6 +616,24 @@ export const api = {
     }),
   updateGrokAccount: (id: number, data: UpdateGrokAccountRequest) =>
     request<MessageResponse>(`/accounts/${id}/grok`, { method: 'PATCH', body: JSON.stringify(data) }),
+  // Claude Code 授权两步走：auth-url 生成链接并留存 code_verifier，exchange-code 兑换建号。
+  generateClaudeAuthURL: (data: ClaudeAuthURLRequest = {}) =>
+    request<ClaudeAuthURLResponse>('/accounts/claude/oauth/auth-url', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  exchangeClaudeOAuthCode: (data: ClaudeExchangeCodeRequest) =>
+    request<ClaudeExchangeCodeResponse>('/accounts/claude/oauth/exchange-code', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  importClaudeAccounts: (data: ClaudeImportRequest) =>
+    request<ClaudeImportResponse>('/accounts/claude/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  updateClaudeAccount: (id: number, data: UpdateClaudeAccountRequest) =>
+    request<MessageResponse>(`/accounts/${id}/claude`, { method: 'PATCH', body: JSON.stringify(data) }),
   deleteAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}`, { method: 'DELETE' }),
   updateAccountNote: (id: number, note: string) =>

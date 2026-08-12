@@ -1544,9 +1544,10 @@ const (
 
 // 上游渠道限定取值。
 const (
-	UpstreamChannelAuto  = ""
-	UpstreamChannelCodex = "codex"
-	UpstreamChannelGrok  = "grok"
+	UpstreamChannelAuto   = ""
+	UpstreamChannelCodex  = "codex"
+	UpstreamChannelGrok   = "grok"
+	UpstreamChannelClaude = "claude"
 )
 
 // ResolveUpstreamChannel 归一 Key 的上游渠道限定；未知值一律视为不限（auto）。
@@ -1556,6 +1557,8 @@ func (l APIKeyLimits) ResolveUpstreamChannel() string {
 		return UpstreamChannelCodex
 	case UpstreamChannelGrok:
 		return UpstreamChannelGrok
+	case UpstreamChannelClaude:
+		return UpstreamChannelClaude
 	}
 	return UpstreamChannelAuto
 }
@@ -5601,12 +5604,18 @@ func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*Accou
 		} else {
 			where += ` AND LOWER(COALESCE(credentials->>'upstream_type', '')) = 'grok'`
 		}
-	case UpstreamChannelCodex:
-		// 非 grok 一律归入 codex 视图（缺省 upstream_type 的历史号也算 codex 侧）。
+	case UpstreamChannelClaude:
 		if db.isSQLite() {
-			where += ` AND LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), '')) <> 'grok'`
+			where += ` AND LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), '')) = 'claude'`
 		} else {
-			where += ` AND LOWER(COALESCE(credentials->>'upstream_type', '')) <> 'grok'`
+			where += ` AND LOWER(COALESCE(credentials->>'upstream_type', '')) = 'claude'`
+		}
+	case UpstreamChannelCodex:
+		// 非 grok / 非 claude 一律归入 codex 视图（缺省 upstream_type 的历史号也算 codex 侧）。
+		if db.isSQLite() {
+			where += ` AND LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), '')) NOT IN ('grok', 'claude')`
+		} else {
+			where += ` AND LOWER(COALESCE(credentials->>'upstream_type', '')) NOT IN ('grok', 'claude')`
 		}
 	}
 

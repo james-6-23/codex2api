@@ -315,9 +315,14 @@ func (h *Handler) applyUpstreamChannelFilter(c *gin.Context, effectiveModel stri
 	switch requestUpstreamChannel(c) {
 	case database.UpstreamChannelGrok:
 		return grokChannelAccountFilter(effectiveModel)
+	case database.UpstreamChannelClaude:
+		// Claude 渠道 Key 只在 /v1/messages 的原生透传路径上有账号可选；其余端点
+		// （Responses / Chat 形态）没有能承接的 Claude 账号，返回恒假让调度器如实报 503，
+		// 而不是把请求悄悄漏给 Codex 账号。
+		return func(*auth.Account) bool { return false }
 	case database.UpstreamChannelCodex:
 		return func(account *auth.Account) bool {
-			if account == nil || account.IsGrokAPI() {
+			if account == nil || account.IsGrokAPI() || account.IsClaudeAPI() {
 				return false
 			}
 			return filter(account)
@@ -401,6 +406,12 @@ func accountFilterForResponsesModelResolver(effectiveModel string, allowCodexAcc
 // 声明了白名单的 Grok 账号仍以白名单为准。
 func relayAccountSupportsModel(account *auth.Account, model string) bool {
 	if account == nil {
+		return false
+	}
+	// Claude 账号虽然也被 IsRelayStyle 归为「非 Codex 上游」，但它只吃原生 Anthropic
+	// Messages 体。进到这里的请求体一律是 Responses 形态，路由过去必然 400，
+	// 因此在唯一的 relay 收口处直接排除；Claude 的调度走 claudeChannelAccountFilter。
+	if account.IsClaudeAPI() {
 		return false
 	}
 	if account.SupportsOpenAIResponsesModel(model) {
@@ -749,8 +760,13 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 	if input.Channel == "" && h.store != nil {
 		input.Channel = database.UpstreamChannelCodex
 		if input.AccountID > 0 {
-			if acc := h.store.FindByID(input.AccountID); acc != nil && acc.IsGrokAPI() {
-				input.Channel = database.UpstreamChannelGrok
+			if acc := h.store.FindByID(input.AccountID); acc != nil {
+				switch {
+				case acc.IsGrokAPI():
+					input.Channel = database.UpstreamChannelGrok
+				case acc.IsClaudeAPI():
+					input.Channel = database.UpstreamChannelClaude
+				}
 			}
 		}
 	}
@@ -5369,6 +5385,12 @@ func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, res
 	if account != nil && account.IsGrokAPI() {
 		return applyGrokCooldown(store, account, http.StatusTooManyRequests, body, resp, model)
 	}
+	// Claude 的 429 重置时刻来自 retry-after / anthropic-ratelimit-unified-reset，
+	// 且它是订阅账号而非直连中转——落到下面的 relay 分支只会做模型级短冷却，
+	// 同一个号会一直撞在 5 小时窗口上。
+	if account != nil && account.IsClaudeAPI() {
+		return applyClaudeCooldown(store, account, http.StatusTooManyRequests, body, resp, model)
+	}
 	// OpenAI Responses/API relay 是直连上游，不是 OAuth 订阅账号。裸 429 通常只是
 	// 瞬时负载抑制，默认不应写入 Redis/DB 并把整个模型摘掉 5~30 分钟。
 	if account != nil && account.IsRelayStyle() {
@@ -5443,6 +5465,10 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 	// Grok 上游的错误语义与 Codex 不同（免费额度耗尽/超支限制/Retry-After），单独映射。
 	if account.IsGrokAPI() {
 		return h.applyGrokCooldownForModel(account, statusCode, body, resp, model)
+	}
+	// Claude 的 429/529 语义与 Codex 不同（滚动 5h 窗口 + 上游容量 529），单独映射。
+	if account.IsClaudeAPI() {
+		return applyClaudeCooldown(h.store, account, statusCode, body, resp, model)
 	}
 	if IsUsageLimitReachedError(body) {
 		decision := Apply429Cooldown(h.store, account, body, resp, model)

@@ -1,17 +1,19 @@
 import { cn } from "@/lib/utils";
 
 /**
- * 渠道品牌图标（Codex / Grok）。
+ * 渠道品牌图标（Codex / Claude / Grok）。
  *
  * 使用 `@lobehub/icons-static-svg`，对齐 `@lobehub/icons` 的 Codex.Avatar 彩色方案，
  * 但不引入 antd / @lobehub/ui peer deps。
  *
  * - Codex：`codex-color.svg`（白底圆角 + 紫蓝渐变 mark，即 Codex.Avatar）
+ * - Claude：`claude-color.svg`（Anthropic 官方橙色 mark）
  * - Grok：仅有 mono `grok.svg`（fill=currentColor，跟随文字色适配深浅主题）
  */
 const ICON_URLS = import.meta.glob(
   [
     "../../node_modules/@lobehub/icons-static-svg/icons/codex-color.svg",
+    "../../node_modules/@lobehub/icons-static-svg/icons/claude-color.svg",
     "../../node_modules/@lobehub/icons-static-svg/icons/grok.svg",
   ],
   { eager: true, query: "?url", import: "default" },
@@ -68,18 +70,20 @@ export default function ChannelLogo({
   className,
   title,
 }: {
-  channel: "codex" | "grok";
+  channel: "codex" | "grok" | "claude";
   size?: number;
   className?: string;
   title?: string;
 }) {
-  if (channel === "codex") {
-    const src = URL_BY_FILE.get("codex-color");
+  if (channel === "codex" || channel === "claude") {
+    const src = URL_BY_FILE.get(
+      channel === "claude" ? "claude-color" : "codex-color",
+    );
     if (!src) return null;
     return (
       <img
         src={src}
-        alt={title ?? "Codex"}
+        alt={title ?? (channel === "claude" ? "Claude" : "Codex")}
         title={title}
         width={size}
         height={size}

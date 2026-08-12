@@ -25,6 +25,7 @@ func (h *Handler) buildAccountResponse(
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
+	isClaudeAccount := strings.EqualFold(upstreamType, auth.UpstreamClaude)
 	grokAuthKind := ""
 	var grokBilling json.RawMessage
 	if isGrokAccount {
@@ -48,6 +49,11 @@ func (h *Handler) buildAccountResponse(
 	if isOpenAIResponsesAccount && planType == "" {
 		planType = "api"
 	}
+	// Claude 的套餐键来自 bootstrap 的限额档位；建号时探针失败会留空，这里补映射一次，
+	// 免得用户看到空白套餐直到下一次探针成功。
+	if isClaudeAccount && planType == "" {
+		planType = auth.ClaudePlanFromRateLimitTier(row.GetCredential("organization_rate_limit_tier"))
+	}
 	if isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey {
 		planType = "api"
 	}
@@ -61,6 +67,14 @@ func (h *Handler) buildAccountResponse(
 		if resolved, ok := auth.ResolveGrokPlan(planType); ok {
 			grokPlan = &resolved
 		}
+	}
+	claudeOrganizationName := ""
+	claudeRateLimitTier := ""
+	if isClaudeAccount {
+		// bootstrap 身份只在建号时写一次，凭据行即权威值；运行时账号上的同名字段
+		// 受 Account.mu 保护，这里不做无锁读取。
+		claudeOrganizationName = strings.TrimSpace(row.GetCredential("organization_name"))
+		claudeRateLimitTier = strings.TrimSpace(row.GetCredential("organization_rate_limit_tier"))
 	}
 	codexClientMetadataMode := ""
 	if isOpenAIResponsesAccount && includeDetails {
@@ -100,7 +114,7 @@ func (h *Handler) buildAccountResponse(
 		SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
 		Status:                   row.Status,
 		ErrorMessage:             row.ErrorMessage,
-		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 		CreditEnabled:            row.CreditEnabled,
 		CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
 		SkipWarmTier:             row.SkipWarmTier,
@@ -112,6 +126,9 @@ func (h *Handler) buildAccountResponse(
 		GrokAuthKind:             grokAuthKind,
 		GrokPlan:                 grokPlan,
 		GrokBilling:              grokBilling,
+		ClaudeAPI:                isClaudeAccount,
+		ClaudeOrganizationName:   claudeOrganizationName,
+		ClaudeRateLimitTier:      claudeRateLimitTier,
 		BaseURL:                  baseURL,
 		Models:                   row.GetCredentialStringSlice("models"),
 		ModelMapping:             modelMapping,

@@ -142,6 +142,17 @@ func (h *Handler) Messages(c *gin.Context) {
 
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 
+	// 1.5 Claude Code 账号走原生透传：下游请求体与上游 Anthropic Messages API 形态
+	// 一致，翻译成 Responses 再翻回来只会丢字段（thinking 签名、cache_control、
+	// tool_use 分片 JSON）。下游 Key 限定 claude 渠道时强制走这条路；未限定时仅当池里
+	// 确有可承接该模型的 Claude 账号才启用，否则维持既有 Codex 翻译路径。
+	if channel := requestUpstreamChannel(c); channel == database.UpstreamChannelClaude ||
+		(channel == database.UpstreamChannelAuto && h.hasClaudeCandidate(model)) {
+		if h.messagesViaClaudeUpstream(c, rawBody, model, isStream) {
+			return
+		}
+	}
+
 	// 2. 翻译请求: Anthropic → Codex
 	modelMappingJSON := h.store.GetModelMapping()
 	codexBody, originalModel, err := TranslateAnthropicToCodexWithModels(rawBody, modelMappingJSON, h.supportedModelIDs(c.Request.Context()))

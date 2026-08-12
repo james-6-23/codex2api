@@ -121,6 +121,15 @@ type Account struct {
 	GrokOIDCIssuer    string
 	GrokPrincipalType string
 	GrokPrincipalID   string
+	// Claude Code OAuth 元数据（upstream_type=claude 时有效）。
+	// ClaudeCLIUserID 在建号时生成一次并跨刷新保持不变——上游按它识别「同一台机器」。
+	ClaudeClientID         string
+	ClaudeTokenURL         string
+	ClaudeCLIUserID        string
+	ClaudeAccountUUID      string
+	ClaudeOrganizationUUID string
+	ClaudeOrganizationName string
+	ClaudeRateLimitTier    string
 	// grokRateLimit 是上游逐请求返回的配额余量快照（x-ratelimit-* 头）。
 	// 内存实时更新;dirty 位驱动 store 后台循环按分钟批量落库(grok_rate_limit 凭据)。
 	grokRateLimit      *GrokRateLimitSnapshot
@@ -4290,11 +4299,13 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	codexClientMetadataMode := NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
 	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
+	// Claude Code：只有 OAuth 一种凭据形态，RT 或 AT 任一存在即可建号。
+	isClaudeAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamClaude) && (rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
 	isAgentIdentityAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("auth_mode")), CodexAuthModeAgentIdentity) &&
 		strings.TrimSpace(row.GetCredential("agent_runtime_id")) != "" &&
 		strings.TrimSpace(row.GetCredential("agent_private_key")) != ""
-	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAgentIdentityAccount {
+	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isClaudeAccount && !isAgentIdentityAccount {
 		log.Printf("[账号 %d] 缺少 refresh_token、session_token 和 access_token，跳过", row.ID)
 		return nil
 	}
@@ -4373,6 +4384,23 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 			if err := json.Unmarshal([]byte(raw), &snap); err == nil && !snap.UpdatedAt.IsZero() {
 				account.setGrokRateLimitSnapshot(snap, false)
 			}
+		}
+	}
+	if isClaudeAccount {
+		account.ClaudeClientID = row.GetCredential("claude_client_id")
+		account.ClaudeTokenURL = row.GetCredential("claude_token_url")
+		account.ClaudeCLIUserID = row.GetCredential("cli_user_id")
+		account.ClaudeAccountUUID = row.GetCredential("account_uuid")
+		account.ClaudeOrganizationUUID = row.GetCredential("organization_uuid")
+		account.ClaudeOrganizationName = row.GetCredential("organization_name")
+		account.ClaudeRateLimitTier = row.GetCredential("organization_rate_limit_tier")
+		account.AccountID = firstNonEmptyTrimmed(row.GetCredential("account_id"), account.ClaudeAccountUUID)
+		account.Email = row.GetCredential("email")
+		if account.PlanType == "" {
+			account.PlanType = ClaudePlanFromRateLimitTier(account.ClaudeRateLimitTier)
+		}
+		if at != "" {
+			account.HealthTier = HealthTierHealthy
 		}
 	}
 	account.ScoreBiasOverride = reflectOptionalInt64Field(row, "ScoreBiasOverride")
@@ -8848,6 +8876,10 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	// Grok 账号走 auth.x.ai 的 OAuth 刷新流程，与 ChatGPT 的 RT 刷新完全不同。
 	if acc.IsGrokAPI() {
 		return s.refreshGrokAccount(ctx, acc, forceRefresh)
+	}
+	// Claude Code 账号走 Anthropic 的 OAuth 刷新（JSON body，非 form）。
+	if acc.IsClaudeAPI() {
+		return s.refreshClaudeAccount(ctx, acc, forceRefresh)
 	}
 	acc.mu.RLock()
 	rt := acc.RefreshToken

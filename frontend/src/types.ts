@@ -106,6 +106,11 @@ export interface AccountRow {
   // 上游逐请求返回的配额余量(x-ratelimit-* 头),运行时快照
   grok_rate_limit?: GrokRateLimitSnapshot
   grok_free_quota?: GrokFreeQuotaSnapshot
+  /** Claude Code（Anthropic OAuth）账号标记 */
+  claude_api?: boolean
+  /** bootstrap 探针拿到的组织名与限额档位（可能为空：探针失败不阻断建号） */
+  claude_organization_name?: string
+  claude_rate_limit_tier?: string
   base_url?: string
   models?: string[]
   model_mapping?: string
@@ -271,7 +276,7 @@ export interface AccountPageStatsResponse {
 }
 
 export interface AccountsPageParams {
-  channel?: 'codex' | 'grok'
+  channel?: 'codex' | 'grok' | 'claude'
   page: number
   pageSize: number
   search?: string
@@ -359,7 +364,7 @@ export interface AccountAnalysisResponse {
 }
 
 export interface AccountOperationSelector {
-  channel: 'codex' | 'grok'
+  channel: 'codex' | 'grok' | 'claude'
   search?: string
   status?: string
   plan?: string
@@ -630,6 +635,75 @@ export interface AddGrokAccountRequest {
 }
 
 export type UpdateGrokAccountRequest = AddGrokAccountRequest
+
+// Claude Code（Anthropic OAuth + PKCE）。Anthropic 只注册了托管回调页，没有本机回调，
+// 也没有 device flow，所以流程固定两步：拿授权链接 → 把回调页显示的 code 粘回来兑换。
+export interface ClaudeAuthURLRequest {
+  name?: string
+  base_url?: string
+  models?: string[]
+  proxy_url?: string
+}
+
+export interface ClaudeAuthURLResponse {
+  session_id: string
+  auth_url: string
+  state: string
+  /** 授权会话有效期（秒）；过期后要重新生成链接，code_verifier 已被清理 */
+  expires_in: number
+}
+
+export interface ClaudeExchangeCodeRequest {
+  session_id: string
+  /** 裸 code、回调页给的 "code#state" 复合串或完整回调 URL 都接受 */
+  code: string
+  name?: string
+  proxy_url?: string
+}
+
+export interface ClaudeExchangeCodeResponse {
+  status: string
+  message: string
+  id: number
+  email: string
+}
+
+// 从 Claude Code 凭据文件导入（~/.claude/.credentials.json 及各类导出产物）。
+// content 是单份粘贴内容，files 是多份文件内容；两者可同时给，后端合并处理。
+export interface ClaudeImportRequest {
+  content?: string
+  files?: string[]
+  base_url?: string
+  models?: string[]
+  proxy_url?: string
+  group_ids?: number[]
+}
+
+export interface ClaudeImportItem {
+  email?: string
+  id?: number
+  ok: boolean
+  error?: string
+  /** 导入成功但很可能用不了：scope 缺少推理权限，或 refresh_token 刷新失败 */
+  warning?: string
+}
+
+export interface ClaudeImportResponse {
+  total: number
+  imported: number
+  failed: number
+  items: ClaudeImportItem[]
+  group_ids?: number[]
+  group_bind_error?: string
+}
+
+export interface UpdateClaudeAccountRequest {
+  name?: string
+  base_url?: string
+  models?: string[]
+  model_mapping?: string
+  proxy_url?: string
+}
 
 export interface FetchGrokModelsResponse {
   models: string[]
