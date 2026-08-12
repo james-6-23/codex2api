@@ -35,6 +35,8 @@ Codex2API 提供兼容 OpenAI 风格的 API 接口，同时包含完整的管理
 
 Anthropic `/v1/messages` 仅将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
 
+**Claude 渠道说明**：账号池支持 Claude Code（Anthropic OAuth）账号。这类账号只承接 `/v1/messages` 的原生透传路径——请求体不做任何协议翻译，直接携带池内账号的 OAuth 令牌投递到 Anthropic 官方 `/v1/messages`。Responses / Chat Completions 形态没有可用的 Claude 账号，调度器会如实返回 503。绑定到 Claude 渠道的 API Key 因此只在 `/v1/messages` 上可用。
+
 **Service Tier 语义说明**：请求侧 `fast` / `priority` 会统一以 `priority` 转发上游，其余取值（`auto`/`default`/`flex`/`scale` 等）不转发。用量日志区分三个字段：`requested_service_tier`（客户端请求意图）、`actual_service_tier`（上游回传 Tier，原样取自 `response.completed.response.service_tier`）、`billing_service_tier`（计费采用值，由 Tier 计费策略 `BillingTierPolicy` 决定，默认 `actual`，上游未回传时回退按请求意图计）。注意：在 ChatGPT OAuth / Codex backend 路径上，Fast 由上游服务端路由处理，`service_tier` 不是端到端可校验字段——上游回传 `default` 并不代表 Fast 未生效（openai/codex#14204 官方说明；#494 的交错 A/B 实测在回传 `default` 时仍有约 1.5× 生成吞吐提升）。因此"上游回传 Tier"仅反映上游申报值，不能单独用于判断加速是否生效；`BillingTierPolicy=actual` 下此类请求按标准价计费。
 
 **Base URL:** `http://localhost:8080` (默认端口)

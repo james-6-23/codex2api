@@ -24,6 +24,7 @@
 <table>
 <tr><td width="210"><b>统一兼容入口</b></td><td>同时覆盖 OpenAI 风格 Chat Completions / Responses / Images、Anthropic Messages、无前缀兼容路由和 Codex 原生 Responses 转发，客户端侧少改配置即可接入。</td></tr>
 <tr><td><b>账号池调度核心</b></td><td>围绕账号状态、健康层级、调度分、动态并发、冷却恢复和近期用量做选择，自动避开不可用账号，减少单账号打满和反复失败。支持 <code>round_robin</code> 和 <code>remaining_quota</code> 两种调度模式，以及单账号信用计费标记。</td></tr>
+<tr><td><b>三种账号平台</b></td><td>Codex、Grok 和 Claude Code（Anthropic OAuth）订阅共用同一个账号池与调度器。Claude 账号可从管理后台走 OAuth 授权添加，也可直接导入 <code>~/.claude/.credentials.json</code>，请求走原生 <code>/v1/messages</code> 透传。</td></tr>
 <tr><td><b>可视化管理后台</b></td><td>内置 React / Vite 管理台，提供账号导入测试、API Key、代理池、生图（文生图 + 图生图）、Prompt 检查、用量统计、运维概览、调度看板和系统设置。</td></tr>
 <tr><td><b>两种部署形态</b></td><td>生产环境用 PostgreSQL + Redis，单机测试用 SQLite + Memory；Docker 镜像、源码构建、本地开发和一键交互部署脚本都已准备好。SQLite 模式默认绑定 <code>127.0.0.1</code> 以提升安全性。</td></tr>
 <tr><td><b>计费与可观测性</b></td><td>单账号 5h/7d 窗口化 USD 费用追踪、信用配额支持、API Key 用量追踪、OAuth PKCE 获取 Token、Prompt 过滤，以及含请求日志与趋势图表的用量仪表盘。</td></tr>

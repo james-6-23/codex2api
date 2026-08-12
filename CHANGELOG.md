@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **Claude Code subscriptions join the pool as a third account platform.** Anthropic OAuth accounts now share the same scheduler, health tiers, cooldown machinery and usage tracking as Codex and Grok, served through the existing `/v1/messages` route with no protocol translation — the native Anthropic request body is forwarded verbatim, carrying the pool account's OAuth bearer and the Claude Code identity prompt that upstream requires before it will honor an OAuth credential. Credentials arrive three ways: interactive PKCE authorization from the admin console (Anthropic only offers a hosted callback page, so the flow is two-step — open the link, paste the returned code), a pasted `~/.claude/.credentials.json` blob, or a batch of exported files; the parser accepts the wrapped `claudeAiOauth` shape, the flat shape, JSON arrays and one-object-per-line, with `expiresAt` as millisecond epoch, second epoch or RFC3339. Every imported credential is refreshed once before admission, so a revoked refresh token is rejected at the door with a named error instead of landing in the pool as a permanent error row, and a credential with no refresh token is refused outright rather than becoming an account that dies within the hour.
+- **Claude token refresh is safe across replicas, and a dead refresh token stops burning retries.** Anthropic rotates the refresh token on every exchange, so two processes consuming the same token kick each other out — refresh reuses the cross-process token-cache lock already shared with Codex and Grok, and a replica that loses the race waits for the winner's access token instead of spending the credential a second time. `invalid_grant` and `invalid_client` are classified as permanent failures: the account moves to error state with the upstream code attached, rather than retrying against a token that will never come back. The token endpoint is pinned to Anthropic's own domains so a misconfigured `token_url` cannot carry credentials to a third-party host. Claude's 429/529 semantics (rolling 5h window, upstream capacity shedding) map to their own cooldown path rather than reusing Codex's, and the account list, filters and plan badges understand Max 20x/Max 5x/Pro/Team/Enterprise tiers.
+
 ## v2.7.5 - 2026-08-12
 
 ### Features
