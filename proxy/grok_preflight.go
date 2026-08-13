@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"reflect"
 	"slices"
 	"strings"
 
@@ -213,7 +214,7 @@ func grokBodyHasNamedTool(request map[string]any, want string) bool {
 }
 
 func liftGrokAdditionalTools(body []byte) ([]byte, bool) {
-	if !bytes.Contains(body, []byte(`"additional_tools"`)) {
+	if !bytes.Contains(body, []byte(`"additional_tools"`)) && !bytes.Contains(body, []byte(`"tool_search_output"`)) && !bytes.Contains(body, []byte(`"tool_search_call_output"`)) {
 		return body, false
 	}
 	var request map[string]any
@@ -229,17 +230,27 @@ func liftGrokAdditionalTools(body []byte) ([]byte, bool) {
 	changed := false
 	for _, raw := range input {
 		item, itemOK := raw.(map[string]any)
-		if !itemOK || strings.TrimSpace(grokNsStringField(item, "type")) != "additional_tools" {
+		if !itemOK {
 			filtered = append(filtered, raw)
 			continue
 		}
+		itemType := strings.TrimSpace(grokNsStringField(item, "type"))
 		additional, toolsOK := item["tools"].([]any)
-		if !toolsOK {
+		if !toolsOK || (itemType != "additional_tools" && itemType != "tool_search_output" && itemType != "tool_search_call_output") {
 			filtered = append(filtered, raw)
 			continue
 		}
 		tools = append(tools, additional...)
 		changed = true
+		if itemType != "additional_tools" {
+			output := item["output"]
+			if output == nil {
+				output = additional
+			}
+			item["output"] = output
+			delete(item, "tools")
+			filtered = append(filtered, raw)
+		}
 	}
 	if !changed {
 		return body, false
@@ -286,6 +297,7 @@ func grokNormalizeToolsRaw(tools gjson.Result, register grokAliasRegister) (raw 
 	buf.WriteByte('[')
 	first := true
 	kept := 0
+	emittedFunctions := make(map[string]bool)
 
 	writeRaw := func(value string) {
 		if !first {
@@ -296,6 +308,16 @@ func grokNormalizeToolsRaw(tools gjson.Result, register grokAliasRegister) (raw 
 		kept++
 	}
 	writeObject := func(value map[string]any) bool {
+		if grokNsStringField(value, "type") == "function" {
+			name := strings.TrimSpace(grokNsStringField(value, "name"))
+			if name != "" && emittedFunctions[name] {
+				changed = true
+				return true
+			}
+			if name != "" {
+				emittedFunctions[name] = true
+			}
+		}
 		encoded, err := json.Marshal(value)
 		if err != nil {
 			return false
@@ -323,18 +345,16 @@ func grokNormalizeToolsRaw(tools gjson.Result, register grokAliasRegister) (raw 
 		if kind == "function" {
 			name := strings.TrimSpace(tool.Get("name").String())
 			registered := register("", name, false, false)
-			if registered == name {
-				writeRaw(tool.Raw)
-				return true
-			}
 			decoded, ok := grokDecodeObject(tool.Raw)
 			if !ok {
 				writeRaw(tool.Raw)
 				return true
 			}
-			decoded["name"] = registered
-			writeObject(decoded)
-			changed = true
+			normalized := normalizeGrokFunctionTool(decoded, registered)
+			writeObject(normalized)
+			if registered != name || !reflect.DeepEqual(decoded, normalized) {
+				changed = true
+			}
 			return true
 		}
 		if kind == "custom" {
@@ -385,9 +405,7 @@ func grokNormalizeToolsRaw(tools gjson.Result, register grokAliasRegister) (raw 
 			if childType == "custom" {
 				writeObject(grokFunctionToolForCustom(decoded, alias))
 			} else {
-				decoded["name"] = alias
-				delete(decoded, "defer_loading")
-				writeObject(decoded)
+				writeObject(normalizeGrokFunctionTool(decoded, alias))
 			}
 			return true
 		})

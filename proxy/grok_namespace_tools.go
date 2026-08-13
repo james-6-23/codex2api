@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 )
@@ -82,6 +83,30 @@ func grokFunctionToolForCustom(tool map[string]any, name string) map[string]any 
 	}
 	if description, ok := tool["description"].(string); ok {
 		converted["description"] = description
+	}
+	return converted
+}
+
+func normalizeGrokFunctionTool(tool map[string]any, name string) map[string]any {
+	converted := make(map[string]any, len(tool))
+	for key, value := range tool {
+		converted[key] = value
+	}
+	converted["type"] = "function"
+	converted["name"] = name
+	if _, ok := converted["parameters"]; !ok {
+		if schema, exists := converted["inputSchema"]; exists {
+			converted["parameters"] = schema
+		} else if schema, exists := converted["input_schema"]; exists {
+			converted["parameters"] = schema
+		}
+	}
+	for _, key := range []string{
+		"inputSchema", "input_schema", "deferLoading", "defer_loading",
+		"allowedCallers", "allowed_callers", "outputSchema", "output_schema",
+		"metadata", "x_provider",
+	} {
+		delete(converted, key)
 	}
 	return converted
 }
@@ -274,16 +299,30 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 	// 1) tools[]：展平 namespace，归一 web_search。
 	if rawTools, ok := payload["tools"].([]any); ok {
 		newTools := make([]any, 0, len(rawTools))
+		emittedFunctions := make(map[string]bool)
+		appendTool := func(tool any) {
+			if object, ok := tool.(map[string]any); ok && grokNsStringField(object, "type") == "function" {
+				name := strings.TrimSpace(grokNsStringField(object, "name"))
+				if name != "" && emittedFunctions[name] {
+					changed = true
+					return
+				}
+				if name != "" {
+					emittedFunctions[name] = true
+				}
+			}
+			newTools = append(newTools, tool)
+		}
 		for _, rt := range rawTools {
 			tool, ok := rt.(map[string]any)
 			if !ok {
-				newTools = append(newTools, rt)
+				appendTool(rt)
 				continue
 			}
 			kind := grokNsStringField(tool, "type")
 			if kind == "tool_search" {
 				alias := register("", grokToolSearchProxyName, false, true)
-				newTools = append(newTools, grokFunctionToolForToolSearch(alias))
+				appendTool(grokFunctionToolForToolSearch(alias))
 				changed = true
 				continue
 			}
@@ -294,13 +333,17 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 					tool["name"] = registered
 					changed = true
 				}
-				newTools = append(newTools, tool)
+				normalized := normalizeGrokFunctionTool(tool, registered)
+				if !reflect.DeepEqual(tool, normalized) {
+					changed = true
+				}
+				appendTool(normalized)
 				continue
 			}
 			if kind == "custom" {
 				name := strings.TrimSpace(grokNsStringField(tool, "name"))
 				alias := register("", name, true, false)
-				newTools = append(newTools, grokFunctionToolForCustom(tool, alias))
+				appendTool(grokFunctionToolForCustom(tool, alias))
 				changed = true
 				continue
 			}
@@ -310,14 +353,14 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 					changed = true
 				}
 				if keep {
-					newTools = append(newTools, converted)
+					appendTool(converted)
 				} else {
 					webSearchDropped = true
 				}
 				continue
 			}
 			if kind != "namespace" {
-				newTools = append(newTools, tool)
+				appendTool(tool)
 				continue
 			}
 			namespace := strings.TrimSpace(grokNsStringField(tool, "name"))
@@ -336,10 +379,9 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 				if childType == "custom" {
 					child = grokFunctionToolForCustom(child, alias)
 				} else {
-					child["name"] = alias
+					child = normalizeGrokFunctionTool(child, alias)
 				}
-				delete(child, "defer_loading")
-				newTools = append(newTools, child)
+				appendTool(child)
 			}
 			changed = true
 		}

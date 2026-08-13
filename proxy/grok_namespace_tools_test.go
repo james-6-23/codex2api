@@ -153,6 +153,60 @@ func TestGrokAdditionalToolsAndToolSearchMatrix(t *testing.T) {
 	}
 }
 
+func TestGrokToolSearchOutputInjectsDynamicTools(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.6",
+		"tools":[
+			{"type":"tool_search"},
+			{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"load_workspace_dependencies","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"deferLoading":true}]}
+		],
+		"input":[
+			{"type":"tool_search_call","call_id":"ts_1","execution":"client","arguments":{"query":"workspace dependencies"}},
+			{"type":"tool_search_output","call_id":"ts_1","tools":[
+				{"type":"namespace","name":"codex_app","tools":[
+					{"type":"function","name":"load_workspace_dependencies","inputSchema":{"type":"object","properties":{},"additionalProperties":false},"deferLoading":true},
+					{"type":"custom","name":"dynamic_patch","description":"dynamic custom tool","defer_loading":true}
+				]}
+			]},
+			{"type":"additional_tools","tools":[{"type":"namespace","name":"codex_app","tools":[{"type":"function","name":"load_workspace_dependencies","input_schema":{"type":"object","properties":{}}}]}]},
+			{"type":"message","role":"user","content":"use the loaded tool"}
+		]
+	}`)
+	result := prepareGrokUpstreamBody(body)
+	if gjson.GetBytes(result.Body, `input.#(type=="additional_tools")`).Exists() {
+		t.Fatalf("additional_tools leaked upstream: %s", result.Body)
+	}
+	if got := gjson.GetBytes(result.Body, "input.1.type").String(); got != "function_call_output" {
+		t.Fatalf("tool_search output history type = %q; body=%s", got, result.Body)
+	}
+	loadedCount := 0
+	customCount := 0
+	for _, raw := range gjson.GetBytes(result.Body, "tools").Array() {
+		name := raw.Get("name").String()
+		identity := result.Aliases[name]
+		if identity.Namespace == "codex_app" && identity.Name == "load_workspace_dependencies" {
+			loadedCount++
+			if raw.Get("parameters.type").String() != "object" {
+				t.Fatalf("dynamic function inputSchema was not normalized: %s", raw.Raw)
+			}
+			for _, field := range []string{"inputSchema", "input_schema", "deferLoading", "defer_loading"} {
+				if raw.Get(field).Exists() {
+					t.Fatalf("dynamic function leaked %s: %s", field, raw.Raw)
+				}
+			}
+		}
+		if identity.Namespace == "codex_app" && identity.Name == "dynamic_patch" && identity.Custom {
+			customCount++
+		}
+	}
+	if loadedCount != 1 {
+		t.Fatalf("loaded dynamic function count = %d, want 1; aliases=%#v body=%s", loadedCount, result.Aliases, result.Body)
+	}
+	if customCount != 1 {
+		t.Fatalf("loaded dynamic custom count = %d, want 1; aliases=%#v body=%s", customCount, result.Aliases, result.Body)
+	}
+}
+
 func TestGrokGiantCustomToolGuard(t *testing.T) {
 	body := []byte(`{"model":"grok-4.6","tools":[{"type":"custom","name":"apply_patch"}],"input":"patch"}`)
 	result := prepareGrokUpstreamBody(body)
