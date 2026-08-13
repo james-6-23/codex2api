@@ -506,8 +506,50 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 			log.Printf("回填提示词风险画像失败，将在下次启动继续: %v", err)
 		}
 	})
+	if !db.isSQLite() {
+		db.RunBackgroundTask(func(taskCtx context.Context) {
+			if err := db.ensureUsageLogsGenerationIndex(taskCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("在线创建 usage_logs 代际索引失败（仅影响查询性能，将在下次启动重试）: %v", err)
+			}
+		})
+	}
 
 	return db, nil
+}
+
+// ensureUsageLogsGenerationIndex 在启动后台在线构建 usage_logs 的代际聚合索引。
+// usage_logs 是有真实流量部署的最大表，普通 CREATE INDEX 会持 SHARE 锁阻塞全部
+// 日志写入，放进 10 秒启动事务还会超时回滚形成崩溃循环，因此这里独立于启动
+// 路径、用 CONCURRENTLY 构建（不阻塞写入），失败只降级查询性能，不影响服务。
+// CONCURRENTLY 构建被中断会留下 INVALID 索引且使 IF NOT EXISTS 误判存在，
+// 所以先探测有效性，无效则先删再建。
+func (db *DB) ensureUsageLogsGenerationIndex(parent context.Context) error {
+	const indexName = "idx_usage_logs_account_generation_created_at"
+	ctx, cancel := context.WithTimeout(parent, 60*time.Minute)
+	defer cancel()
+
+	var exists, valid bool
+	err := db.conn.QueryRowContext(ctx, `
+		SELECT to_regclass($1) IS NOT NULL,
+		       COALESCE((SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass($1)), FALSE)
+	`, indexName).Scan(&exists, &valid)
+	if err != nil {
+		return fmt.Errorf("探测索引 %s 状态失败: %w", indexName, err)
+	}
+	if exists && valid {
+		return nil
+	}
+	if exists && !valid {
+		if _, err := db.conn.ExecContext(ctx, `DROP INDEX `+pq.QuoteIdentifier(indexName)); err != nil {
+			return fmt.Errorf("清理无效索引 %s 失败: %w", indexName, err)
+		}
+	}
+	// CONCURRENTLY 不能在事务块内执行；单条 ExecContext 走 autocommit，满足要求。
+	if _, err := db.conn.ExecContext(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS `+pq.QuoteIdentifier(indexName)+` ON usage_logs(account_id, credential_generation, created_at)`); err != nil {
+		return fmt.Errorf("在线创建索引 %s 失败: %w", indexName, err)
+	}
+	log.Printf("usage_logs 代际索引 %s 已就绪", indexName)
+	return nil
 }
 
 func (db *DB) ensureUsageStatsBaselineBillingColumns(ctx context.Context) error {
@@ -1092,7 +1134,10 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_error_kind VARCHAR(64) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS error_message TEXT DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS credential_generation BIGINT NOT NULL DEFAULT 0;
-	CREATE INDEX IF NOT EXISTS idx_usage_logs_account_generation_created_at ON usage_logs(account_id, credential_generation, created_at);
+	-- idx_usage_logs_account_generation_created_at 不在此批次内创建：usage_logs 是
+	-- 生产最大表，非 CONCURRENTLY 建索引会持锁阻塞写入，且本批次运行在 10 秒启动
+	-- 超时的单个隐式事务里，大表下会超时回滚导致启动崩溃循环。改由
+	-- ensureUsageLogsGenerationIndex 在启动后用 CREATE INDEX CONCURRENTLY 在线构建。
 	-- 上游渠道（codex/grok），写入时按调度账号固化，供仪表盘/用量分渠道聚合
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS channel VARCHAR(16) DEFAULT '';
 	ALTER TABLE usage_logs ALTER COLUMN reasoning_effort TYPE VARCHAR(100);

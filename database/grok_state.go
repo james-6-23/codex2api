@@ -755,6 +755,24 @@ func (db *DB) UpdateAccountCredentialsCAS(ctx context.Context, accountID, expect
 		if n == 0 {
 			return nil
 		}
+		// 例行 AT/RT 刷新(本 CAS 的唯一调用方,受 family lease 串行化)不更换
+		// 上游身份:目录/能力/控制面事实描述的是上游账号而非某一枚 token。若让
+		// 它们随代作废,每个 token 刷新周期都会触发"全账号 × 全模型 × 3 协议"
+		// 的真实推理能力重探(不受探测开关控制),形成成本放大器。在同一事务内
+		// 把上一代观测盖章到新代;身份替换(重新导入)不走本函数,其失效 fence
+		// 依旧生效。各观测自身的 expires_at 不变,新鲜度语义不受影响。
+		for _, table := range []string{
+			"grok_account_fact_snapshots",
+			"grok_model_catalog_snapshots",
+			"grok_model_catalog_items",
+			"grok_model_capabilities",
+		} {
+			if _, carryErr := tx.ExecContext(ctx,
+				`UPDATE `+table+` SET credential_generation=$1 WHERE account_id=$2 AND credential_generation=$3`,
+				expectedGeneration+1, accountID, expectedGeneration); carryErr != nil {
+				return carryErr
+			}
+		}
 		applied = true
 		newGeneration = expectedGeneration + 1
 		return tx.Commit()

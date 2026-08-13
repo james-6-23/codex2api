@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -2806,6 +2807,7 @@ func sanitizeSchemaForUpstream(schema map[string]interface{}) {
 func sanitizeStructuredOutputSchemaForUpstream(schema map[string]interface{}) {
 	sanitizeSchemaForUpstream(schema)
 	ensureObjectAdditionalPropertiesFalse(schema)
+	alignRequiredWithProperties(schema)
 }
 
 func normalizeResponsesStructuredOutputFormat(body map[string]any) bool {
@@ -3205,6 +3207,72 @@ func ensureObjectAdditionalPropertiesFalse(schema map[string]interface{}) {
 		for _, v := range defs {
 			if sub, ok := v.(map[string]interface{}); ok {
 				ensureObjectAdditionalPropertiesFalse(sub)
+			}
+		}
+	}
+}
+
+// alignRequiredWithProperties 让每个带 properties 的对象节点满足上游严格模式的
+// 校验：required 必须恰好等于 properties 的全部 key。多出来的 required 项直接
+// 剔除（strict 模式下 additionalProperties=false，声明一个不存在的必填字段只会
+// 被上游 400 拒收），缺失的 key 按字典序补齐。
+func alignRequiredWithProperties(schema map[string]interface{}) {
+	if props, ok := schema["properties"].(map[string]interface{}); ok {
+		required := make([]interface{}, 0, len(props))
+		seen := make(map[string]bool, len(props))
+		if existing, ok := schema["required"].([]interface{}); ok {
+			for _, item := range existing {
+				name, ok := item.(string)
+				if !ok || seen[name] {
+					continue
+				}
+				if _, exists := props[name]; !exists {
+					continue
+				}
+				seen[name] = true
+				required = append(required, name)
+			}
+		}
+		missing := make([]string, 0, len(props))
+		for name := range props {
+			if !seen[name] {
+				missing = append(missing, name)
+			}
+		}
+		sort.Strings(missing)
+		for _, name := range missing {
+			required = append(required, name)
+		}
+		if len(required) == 0 {
+			delete(schema, "required")
+		} else {
+			schema["required"] = required
+		}
+		for _, v := range props {
+			if sub, ok := v.(map[string]interface{}); ok {
+				alignRequiredWithProperties(sub)
+			}
+		}
+	}
+	if items, ok := schema["items"].(map[string]interface{}); ok {
+		alignRequiredWithProperties(items)
+	}
+	for _, key := range []string{"allOf", "anyOf", "oneOf"} {
+		if arr, ok := schema[key].([]interface{}); ok {
+			for _, item := range arr {
+				if sub, ok := item.(map[string]interface{}); ok {
+					alignRequiredWithProperties(sub)
+				}
+			}
+		}
+	}
+	if addProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
+		alignRequiredWithProperties(addProps)
+	}
+	if defs, ok := schema["$defs"].(map[string]interface{}); ok {
+		for _, v := range defs {
+			if sub, ok := v.(map[string]interface{}); ok {
+				alignRequiredWithProperties(sub)
 			}
 		}
 	}

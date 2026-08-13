@@ -692,6 +692,11 @@ type chatToResponsesReader struct {
 	messageID   string
 	text        strings.Builder
 	reasoning   strings.Builder
+	// pendingStatus 记录已收到 finish_reason 但尚未发出的终态:include_usage 流
+	// 会在 finish chunk 之后、[DONE] 之前追加一个 choices 为空的 usage-only chunk,
+	// 终态必须等到拿到 usage(或流结束)再发,否则用量统计恒为 0。
+	pendingStatus string
+	usage         map[string]any
 }
 
 type chatResponseOutputKind uint8
@@ -804,8 +809,17 @@ func (r *chatToResponsesReader) translate(data []byte) {
 		r.terminal = true
 		return
 	}
+	chunkUsage := chatUsagePayload(chunk)
+	if chunkUsage != nil {
+		r.usage = chunkUsage
+	}
 	choices := chunk.Get("choices")
 	if !choices.IsArray() || len(choices.Array()) == 0 {
+		// include_usage 的独立 usage chunk(choices: [])在 finish chunk 之后到达;
+		// 拿到 usage 后补发之前挂起的终态。
+		if r.pendingStatus != "" && r.usage != nil {
+			r.emitChatTerminal(r.pendingStatus)
+		}
 		return
 	}
 	choice := choices.Get("0")
@@ -844,16 +858,40 @@ func (r *chatToResponsesReader) translate(data []byte) {
 		return
 	}
 	status := chatFinishReasonStatus(finish)
-	usage := map[string]any{
-		"input_tokens":  chunk.Get("usage.prompt_tokens").Int(),
-		"output_tokens": chunk.Get("usage.completion_tokens").Int(),
-		"total_tokens":  chunk.Get("usage.total_tokens").Int(),
+	// finish chunk 自带 usage(或属失败终态)时立即发出;否则挂起,等 usage-only
+	// chunk([DONE]/EOF 时兜底)再发,避免把 include_usage 的用量丢成 0。
+	if status == "failed" || chunkUsage != nil {
+		r.emitChatTerminal(status)
+		return
 	}
-	if cached := chunk.Get("usage.prompt_tokens_details.cached_tokens"); cached.Exists() {
-		usage["input_tokens_details"] = map[string]any{"cached_tokens": cached.Int()}
+	r.pendingStatus = status
+}
+
+// chatUsagePayload 把 Chat chunk 的 usage 对象转成 Responses usage 形状;
+// usage 缺失或为 null 时返回 nil。
+func chatUsagePayload(chunk gjson.Result) map[string]any {
+	usage := chunk.Get("usage")
+	if !usage.Exists() || !usage.IsObject() {
+		return nil
 	}
-	if reasoning := chunk.Get("usage.completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
-		usage["output_tokens_details"] = map[string]any{"reasoning_tokens": reasoning.Int()}
+	payload := map[string]any{
+		"input_tokens":  usage.Get("prompt_tokens").Int(),
+		"output_tokens": usage.Get("completion_tokens").Int(),
+		"total_tokens":  usage.Get("total_tokens").Int(),
+	}
+	if cached := usage.Get("prompt_tokens_details.cached_tokens"); cached.Exists() {
+		payload["input_tokens_details"] = map[string]any{"cached_tokens": cached.Int()}
+	}
+	if reasoning := usage.Get("completion_tokens_details.reasoning_tokens"); reasoning.Exists() {
+		payload["output_tokens_details"] = map[string]any{"reasoning_tokens": reasoning.Int()}
+	}
+	return payload
+}
+
+func (r *chatToResponsesReader) emitChatTerminal(status string) {
+	usage := r.usage
+	if usage == nil {
+		usage = map[string]any{"input_tokens": int64(0), "output_tokens": int64(0), "total_tokens": int64(0)}
 	}
 	output := make([]any, 0, len(r.output))
 	for _, item := range r.output {
@@ -888,6 +926,7 @@ func (r *chatToResponsesReader) translate(data []byte) {
 		r.queue.Write(responseEvent("response.failed", map[string]any{"response": response}))
 	}
 	r.terminal = true
+	r.pendingStatus = ""
 }
 
 func readSSEDataLine(reader *bufio.Reader) ([]byte, error) {
@@ -921,6 +960,12 @@ func (r *chatToResponsesReader) Read(p []byte) (int, error) {
 		data, err := readSSEDataLine(r.reader)
 		if err != nil {
 			if err == io.EOF && !r.terminal {
+				// 已收到 finish_reason 只是没等到 usage chunk:按挂起状态正常收尾,
+				// 不能把它当成断流。
+				if r.pendingStatus != "" {
+					r.emitChatTerminal(r.pendingStatus)
+					break
+				}
 				r.enqueueCreated()
 				r.queue.Write(responseEvent("response.failed", map[string]any{"response": map[string]any{"id": r.responseID, "status": "failed", "model": r.model, "error": map[string]any{"code": ErrorCodeUpstreamStreamBreak, "message": "upstream stream interrupted before completion"}}}))
 				r.terminal = true
@@ -929,6 +974,10 @@ func (r *chatToResponsesReader) Read(p []byte) (int, error) {
 			return 0, err
 		}
 		if bytes.Equal(data, []byte("[DONE]")) {
+			if r.pendingStatus != "" {
+				r.emitChatTerminal(r.pendingStatus)
+				continue
+			}
 			if r.terminal {
 				return 0, io.EOF
 			}
@@ -1284,12 +1333,35 @@ func prepareRoutedGrokProtocolBody(route GrokUpstreamRoute, inbound GrokProtocol
 	inbound = auth.NormalizeGrokProtocol(string(inbound))
 	// A same-protocol route receives the original downstream object even when
 	// it was selected from catalog apiBackend rather than a fresh capability
-	// probe. This preserves unknown standard fields, stream=false and provider
-	// extensions. Only the already-resolved account mapping may change model;
-	// auth/session headers and the protocol-specific Grok preflight remain owned
-	// by ExecuteGrokProtocolRequest.
+	// probe. This preserves unknown standard fields and provider extensions.
+	// Only the already-resolved account mapping may change model; auth/session
+	// headers and the protocol-specific Grok preflight remain owned by
+	// ExecuteGrokProtocolRequest.
 	if route.Protocol == inbound && inbound != "" && len(inboundBody) > 0 {
-		return rewriteGrokProtocolModel(inboundBody, route.Model)
+		body, err := rewriteGrokProtocolModel(inboundBody, route.Model)
+		if err != nil || route.Native {
+			// 仅 native 路由按线格式直通返回(forwardGrokNativeResponse),
+			// 可以完整保留 stream=false。
+			return body, err
+		}
+		// 非 native 的同协议路由不会直通:响应必须经 adaptGrokProtocolResponse
+		// 投影成规范 Responses SSE 再交给下游翻译器,而该投影只处理 SSE。
+		// 客户端 stream=false 时必须强制上游流式,否则非流式 JSON 进入 SSE
+		// 消费管线,请求确定性失败且账号被误判惩罚。非流式聚合由 handler 完成。
+		if !grokProtocolBodyStream(body) {
+			forced, forceErr := sjson.SetBytes(body, "stream", true)
+			if forceErr != nil {
+				return nil, forceErr
+			}
+			if route.Protocol == GrokProtocolChatCompletions {
+				// Chat 的 usage 只随 include_usage 的独立 chunk 下发。
+				if withUsage, usageErr := sjson.SetBytes(forced, "stream_options.include_usage", true); usageErr == nil {
+					forced = withUsage
+				}
+			}
+			body = forced
+		}
+		return body, nil
 	}
 	return prepareGrokProtocolBody(route.Protocol, inbound, inboundBody, responsesBody)
 }

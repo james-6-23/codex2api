@@ -131,9 +131,12 @@ func TestForwardGrokNativeMessagesPreservesEventAndMultilineData(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
-	raw := "event: message_start\nid: a\ndata: {\"type\":\"message_start\",\ndata: \"message\":{\"id\":\"m1\"}}\n\n" +
+	// 真实 Anthropic 流形状：input_tokens 在 message_start 的 message.usage 下，
+	// output_tokens 在 message_delta 的顶层 usage 下，message_stop 不带 usage。
+	raw := "event: message_start\nid: a\ndata: {\"type\":\"message_start\",\ndata: \"message\":{\"id\":\"m1\",\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n" +
 		"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"ok\"}}\n\n" +
-		"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1}}\n\n"
+		"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+		"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
 	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(raw))}
 
 	usage, outcome, wrote, _ := forwardGrokNativeResponse(ctx, resp, GrokProtocolMessages, true, time.Now(), nil)
@@ -155,9 +158,13 @@ func TestForwardGrokNativeFirstVisibleStopsTTFTGuard(t *testing.T) {
 			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"x\"}\n\n" +
 			"data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))}
 	callbacks := 0
-	_, outcome, wrote, _ := forwardGrokNativeResponse(ctx, resp, GrokProtocolResponses, true, time.Now(), func() { callbacks++ })
+	usage, outcome, wrote, _ := forwardGrokNativeResponse(ctx, resp, GrokProtocolResponses, true, time.Now(), func() { callbacks++ })
 	if !wrote || outcome.logStatusCode != http.StatusOK || callbacks != 1 {
 		t.Fatalf("wrote/outcome/callbacks = %v %#v %d", wrote, outcome, callbacks)
+	}
+	// Responses 流式 usage 位于 response.completed 的 response.usage 下,必须被提取。
+	if usage == nil || usage.TotalTokens != 2 {
+		t.Fatalf("streaming Responses usage lost: %#v", usage)
 	}
 }
 

@@ -9097,7 +9097,7 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 		if changed {
 			lease.Release()
 			if !forceRefresh && usable {
-				s.finishReloadedOAuthRefresh(ctx, acc, activeCooldown, expiredCooldown, cooldownUntil, cooldownReason)
+				s.finishReloadedOAuthRefresh(ctx, acc)
 				return nil
 			}
 			continue

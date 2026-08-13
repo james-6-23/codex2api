@@ -1152,6 +1152,53 @@ func TestPrepareResponsesBody_SanitizesTextFormatJSONSchema(t *testing.T) {
 	}
 }
 
+func TestPrepareResponsesBody_AlignsRequiredWithProperties(t *testing.T) {
+	// 复现上游报错：In context=('properties','candidates','items'),
+	// required 里出现了 properties 中不存在的 'title'，同时漏掉了已声明的 key。
+	raw := []byte(`{
+		"model":"gpt-5.4",
+		"input":"test",
+		"text":{
+			"format":{
+				"type":"json_schema",
+				"name":"codex_output_schema",
+				"strict":true,
+				"schema":{
+					"type":"object",
+					"properties":{
+						"candidates":{
+							"type":"array",
+							"items":{
+								"type":"object",
+								"properties":{
+									"name":{"type":"string"},
+									"score":{"type":"number"}
+								},
+								"required":["name","title"]
+							}
+						}
+					}
+				}
+			}
+		}
+	}`)
+
+	got, _ := PrepareResponsesBody(raw)
+
+	itemsRequired := gjson.GetBytes(got, "text.format.schema.properties.candidates.items.required")
+	var names []string
+	for _, v := range itemsRequired.Array() {
+		names = append(names, v.String())
+	}
+	if len(names) != 2 || names[0] != "name" || names[1] != "score" {
+		t.Fatalf("items.required should drop extra 'title' and backfill 'score', got %v; body=%s", names, got)
+	}
+	rootRequired := gjson.GetBytes(got, "text.format.schema.required")
+	if len(rootRequired.Array()) != 1 || rootRequired.Array()[0].String() != "candidates" {
+		t.Fatalf("root required should be backfilled to all property keys, got %s; body=%s", rootRequired.Raw, got)
+	}
+}
+
 func TestPrepareResponsesBody_JSONSchemaDoesNotInjectImageBridge(t *testing.T) {
 	raw := []byte(`{
 		"model":"gpt-5.5",

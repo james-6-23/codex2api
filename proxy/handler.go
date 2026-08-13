@@ -617,15 +617,27 @@ func grokNativeUsage(protocol GrokProtocol, payload []byte) *UsageInfo {
 		}
 		return newUsageInfo(input, output, reasoning, cached)
 	case GrokProtocolMessages:
-		input := int(root.Get("usage.input_tokens").Int())
-		output := int(root.Get("usage.output_tokens").Int())
-		cached := int(root.Get("usage.cache_read_input_tokens").Int())
-		if !root.Get("usage").Exists() {
+		// 非流式 body 与 message_delta 事件的 usage 在顶层；流式 message_start
+		// 事件的 input_tokens 在 message.usage 下。两处都认，交给 max 合并。
+		usage := root.Get("usage")
+		if !usage.Exists() {
+			usage = root.Get("message.usage")
+		}
+		if !usage.Exists() {
 			return nil
 		}
+		input := int(usage.Get("input_tokens").Int())
+		output := int(usage.Get("output_tokens").Int())
+		cached := int(usage.Get("cache_read_input_tokens").Int())
 		return newUsageInfo(input, output, 0, cached)
 	default:
-		return extractUsageFromResult(root.Get("usage"))
+		// Responses 协议：非流式 body 的 usage 在顶层；流式 response.completed /
+		// response.incomplete 事件的 usage 在 response.usage 下。
+		usage := root.Get("usage")
+		if !usage.Exists() {
+			usage = root.Get("response.usage")
+		}
+		return extractUsageFromResult(usage)
 	}
 }
 

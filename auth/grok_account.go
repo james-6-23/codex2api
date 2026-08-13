@@ -347,8 +347,12 @@ func (a *Account) GrokChannelSupportsModel(model string) bool {
 		return false
 	}
 	model = strings.TrimSpace(model)
-	candidates := a.Models
-	if len(candidates) == 0 && a.grokRouting != nil && a.grokRouting.CatalogKnown {
+	// 不复用 a.Models 的底层数组做 append:len==0 但 cap>0 时,两个并发请求会
+	// 在共享 RLock 下向同一空闲容量写入,构成写-写竞态。目录分支从 nil 开始。
+	var candidates []string
+	if len(a.Models) > 0 {
+		candidates = a.Models
+	} else if a.grokRouting != nil && a.grokRouting.CatalogKnown {
 		for _, route := range a.grokRouting.Models {
 			if route.Hidden || (a.GrokAuthKindLocked() == GrokAuthKindAPIKey && route.SupportedInAPI != nil && !*route.SupportedInAPI) {
 				continue
@@ -360,9 +364,9 @@ func (a *Account) GrokChannelSupportsModel(model string) bool {
 	// confused with "catalog has never been fetched" and reopen defaults.
 	if len(candidates) == 0 && (a.grokRouting == nil || !a.grokRouting.CatalogKnown) {
 		if a.GrokAuthKindLocked() == GrokAuthKindAPIKey {
-			candidates = []string{"grok-4.6", "grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
+			candidates = GrokAPIKeyDefaultModelIDs()
 		} else {
-			candidates = []string{"grok-4.6", "grok-4.5"}
+			candidates = GrokOAuthDefaultModelIDs()
 		}
 	}
 	for _, candidate := range candidates {
@@ -1253,9 +1257,6 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	oidcIssuer := acc.GrokOIDCIssuer
 	principalType := acc.GrokPrincipalType
 	principalID := acc.GrokPrincipalID
-	cooldownUntil := acc.CooldownUtil
-	cooldownReason := acc.CooldownReason
-	activeCooldown := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	generation := acc.CredentialGeneration
 	familyID := acc.CredentialFamilyID
 	acc.mu.RUnlock()
@@ -1302,7 +1303,7 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 			// A forced caller that waited for an already-completed rotation belongs
 			// to the same refresh batch. Reusing the freshly committed AT prevents a
 			// second forced call from immediately consuming the newly rotated RT.
-			s.finishReloadedOAuthRefresh(ctx, acc, activeCooldown, false, cooldownUntil, cooldownReason)
+			s.finishReloadedOAuthRefresh(ctx, acc)
 			return nil
 		}
 		acc.mu.RLock()
@@ -1341,7 +1342,8 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 				} else {
 					acc.ExpiresAt = time.Now().Add(30 * time.Minute)
 				}
-				if !activeCooldown {
+				// 以当前状态判定冷却,不用入口快照:等待期间可能新设了冷却。
+				if !(acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)) {
 					acc.Status = StatusReady
 				}
 				acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
@@ -1358,6 +1360,13 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 		}
 	}
 
+	// 从这里起进入 RT 消费临界区:上游一旦完成 RT 轮换,调用方取消(浏览器断开、
+	// 管理端短超时)会让新 RT 在"响应未读完/CAS 未提交"窗口内永久丢失,账号被
+	// 错误打成 error 且只能人工重导。切换到不随调用方取消、仅受 lease hold
+	// 期限约束的 ctx,保证交换与落库原子完成。
+	if refreshLocks != nil {
+		ctx = refreshLocks.CriticalContext()
+	}
 	td, err := RefreshGrokAccessToken(ctx, GrokRefreshParams{
 		RefreshToken:  rt,
 		ClientID:      clientID,
@@ -1426,11 +1435,9 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	}
 	acc.ExpiresAt = td.ExpiresAt
 	acc.ErrorMsg = ""
-	if activeCooldown {
-		acc.Status = StatusCooldown
-		acc.CooldownUtil = cooldownUntil
-		acc.CooldownReason = cooldownReason
-	} else {
+	// 冷却判定基于当前内存状态:入口快照到这里可能隔了近 10 分钟(等 lease +
+	// HTTP 刷新),期间设置/延长的冷却是更新的事实,AT 续期成功不代表限流解除。
+	if !(acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)) {
 		acc.Status = StatusReady
 		acc.CooldownUtil = time.Time{}
 		acc.CooldownReason = ""
@@ -1441,6 +1448,13 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
+	if s.db != nil {
+		// CAS 已把上一代目录/能力/事实随代盖章,重新投影回内存,避免刷新后
+		// 路由退化为保守默认集并等 30 秒扫描兜底。失败不致命。
+		if reloadErr := s.ReloadGrokPersistentState(ctx, dbID); reloadErr != nil {
+			log.Printf("[账号 %d] 刷新后重载 Grok 持久状态失败: %v", dbID, reloadErr)
+		}
+	}
 	if s.tokenCache != nil {
 		if ttl := time.Until(td.ExpiresAt) - 5*time.Minute; ttl > 0 {
 			_ = s.tokenCache.SetAccessToken(ctx, dbID, td.AccessToken, ttl)

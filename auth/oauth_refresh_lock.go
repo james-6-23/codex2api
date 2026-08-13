@@ -38,7 +38,18 @@ type oauthRefreshLease struct {
 	distributed bool
 	ctx         context.Context
 	cancel      context.CancelFunc
-	released    atomic.Bool
+	// criticalCtx 与 ctx 共享 lease hold 期限,但不随调用方取消/超时:
+	// RT 消费临界区(交换+CAS 落库)一旦开始,调用方(如管理端 10s 请求)中途
+	// 取消会让上游已轮换的新 RT 永久丢失,账号只能人工重导。
+	criticalCtx    context.Context
+	criticalCancel context.CancelFunc
+	released       atomic.Bool
+}
+
+// arm 同时创建等待用 ctx(随调用方取消)与临界区 ctx(仅受 hold 期限约束)。
+func (lease *oauthRefreshLease) arm(parent context.Context) {
+	lease.ctx, lease.cancel = context.WithTimeout(parent, oauthRefreshLeaseHold)
+	lease.criticalCtx, lease.criticalCancel = context.WithTimeout(context.WithoutCancel(parent), oauthRefreshLeaseHold)
 }
 
 // grokLegacyRefreshBridgeLock is the rolling-upgrade bridge to Grok versions
@@ -88,7 +99,7 @@ func (s *Store) acquireOAuthRefreshLease(ctx context.Context, refreshToken strin
 		owner:       fmt.Sprintf("%p-%d-%d", s, time.Now().UnixNano(), oauthRefreshLeaseOwnerSequence.Add(1)),
 	}
 	if s.tokenCache == nil {
-		lease.ctx, lease.cancel = context.WithTimeout(ctx, oauthRefreshLeaseHold)
+		lease.arm(ctx)
 		return lease, nil
 	}
 
@@ -113,12 +124,12 @@ func (s *Store) acquireOAuthRefreshLease(ctx context.Context, refreshToken strin
 				return nil, fmt.Errorf("获取 OAuth 跨实例刷新 lease 失败: %w", err)
 			}
 			log.Printf("获取 OAuth 本地刷新 lease 失败，保留进程内锁: %v", err)
-			lease.ctx, lease.cancel = context.WithTimeout(ctx, oauthRefreshLeaseHold)
+			lease.arm(ctx)
 			return lease, nil
 		}
 		if acquired {
 			lease.distributed = true
-			lease.ctx, lease.cancel = context.WithTimeout(ctx, oauthRefreshLeaseHold)
+			lease.arm(ctx)
 			return lease, nil
 		}
 		if time.Now().After(deadline) {
@@ -275,6 +286,22 @@ func (lease *oauthRefreshLease) Context() context.Context {
 	return lease.ctx
 }
 
+// CriticalContext 返回 RT 消费临界区专用 ctx:不随调用方取消,仅受 lease hold
+// 期限与 Release 约束。持有 family lease 后进入交换/落库段时必须切换到它。
+func (lease *oauthRefreshLease) CriticalContext() context.Context {
+	if lease == nil || lease.criticalCtx == nil {
+		return context.Background()
+	}
+	return lease.criticalCtx
+}
+
+func (locks *grokOAuthRefreshLocks) CriticalContext() context.Context {
+	if locks == nil || locks.family == nil {
+		return context.Background()
+	}
+	return locks.family.CriticalContext()
+}
+
 func (lease *oauthRefreshLease) Release() {
 	if lease == nil || lease.store == nil || lease.local == nil || lease.released.Swap(true) {
 		return
@@ -293,6 +320,9 @@ func (lease *oauthRefreshLease) Release() {
 	}
 	if lease.cancel != nil {
 		lease.cancel()
+	}
+	if lease.criticalCancel != nil {
+		lease.criticalCancel()
 	}
 
 	<-lease.local.ch
@@ -364,20 +394,16 @@ func parseOAuthCredentialExpiry(value string) time.Time {
 	return time.Time{}
 }
 
-func (s *Store) finishReloadedOAuthRefresh(
-	ctx context.Context,
-	acc *Account,
-	activeCooldown bool,
-	expiredCooldown bool,
-	cooldownUntil time.Time,
-	cooldownReason string,
-) {
+// finishReloadedOAuthRefresh 在复用他处已完成的刷新结果后发布账号状态。
+// 冷却判定基于当前内存状态而非调用方入口快照:等 lease 可达分钟级,期间其它
+// goroutine 可能已把账号置入/延长冷却(如上游 429),那份事实更新,不能被
+// 过期快照清零或回退。
+func (s *Store) finishReloadedOAuthRefresh(ctx context.Context, acc *Account) {
 	acc.mu.Lock()
-	if activeCooldown {
-		acc.Status = StatusCooldown
-		acc.CooldownUtil = cooldownUntil
-		acc.CooldownReason = cooldownReason
-	} else {
+	now := time.Now()
+	activeCooldown := acc.Status == StatusCooldown && now.Before(acc.CooldownUtil)
+	expiredCooldown := acc.Status == StatusCooldown && !now.Before(acc.CooldownUtil)
+	if !activeCooldown {
 		acc.Status = StatusReady
 		acc.CooldownUtil = time.Time{}
 		acc.CooldownReason = ""

@@ -455,22 +455,15 @@ func FetchGrokModelIDs(ctx context.Context, account *auth.Account, proxyURL stri
 
 // ==================== 错误分类与冷却映射 ====================
 
-// Grok 账号未声明 models 白名单时的默认可用文本模型集，用于注册进 /v1/models
-// 与放行调度。账号显式声明 models 后以其白名单为准，不再补默认集。
-//
-// 两条通道的目录并不相同，必须分开取：
-//   - OAuth 走 cli-chat-proxy，目录由 CLI 通道决定。实测 supergrok_heavy 与 free
-//     两种套餐原先只返回 grok-4.5；grok-4.6 作为当前旗舰一并列入兜底，不含 grok-3 / grok-2。
-//   - API Key 走 xAI 公开 API，目录更宽。
-//
-// 默认集只是探测不到时的兜底：账号导入或连通性测试跑过 FetchGrokModelIDs 后，
-// 应以探到的真实目录为准。
+// 默认模型集的权威定义在 auth 包(auth.GrokOAuthDefaultModelIDs /
+// auth.GrokAPIKeyDefaultModelIDs),授权门与注册/调度面共用同一来源,
+// 这里只做包内转发。详见 auth/grok_default_models.go 的注释。
 func grokOAuthDefaultModelIDs() []string {
-	return []string{"grok-4.6", "grok-4.5"}
+	return auth.GrokOAuthDefaultModelIDs()
 }
 
 func grokAPIKeyDefaultModelIDs() []string {
-	return []string{"grok-4.6", "grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
+	return auth.GrokAPIKeyDefaultModelIDs()
 }
 
 // DefaultGrokModelIDsForAccount 按账号的凭据类型返回默认可用文本模型集。

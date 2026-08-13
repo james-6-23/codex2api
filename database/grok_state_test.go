@@ -319,6 +319,67 @@ func TestGrokCatalogSuccessfulReplacementOnlyInvalidatesCapabilityOnChange(t *te
 	}
 }
 
+// 例行 token 刷新的 CAS 必须把上一代目录/能力/事实盖章到新代:上游身份未变,
+// 观测事实理应延续,否则每个刷新周期都会触发全模型 × 3 协议的真实推理重探。
+func TestUpdateAccountCredentialsCASCarriesForwardObservations(t *testing.T) {
+	db := newGrokStateTestDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithUpstream(ctx, "grok", "xai", "grok", map[string]any{"upstream_type": "grok", "refresh_token": "rt"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	origin := "https://api.x.ai/v1"
+	capExpiry := now.Add(time.Hour)
+	if applied, err := db.UpsertGrokAccountFact(ctx, GrokAccountFact{
+		AccountID: id, Kind: GrokFactBilling, CredentialGeneration: 1, Status: "ok", HTTPStatus: 200,
+		Payload: map[string]any{"balance": float64(5)}, ObservedAt: now, ExpiresAt: now.Add(5 * time.Minute),
+	}); err != nil || !applied {
+		t.Fatalf("seed fact = %v, %v", applied, err)
+	}
+	if applied, err := db.ReplaceGrokModelCatalog(ctx, GrokModelCatalogSnapshot{
+		AccountID: id, Origin: origin, CredentialGeneration: 1, AuthKind: "api_key", Status: "ok",
+		ObservedAt: now, ExpiresAt: now.Add(10 * time.Minute),
+	}, []GrokModelCatalogItem{{ModelID: "grok-4.5", APIBackend: "responses"}}); err != nil || !applied {
+		t.Fatalf("seed catalog = %v, %v", applied, err)
+	}
+	if applied, err := db.UpsertGrokModelCapability(ctx, GrokModelCapability{
+		AccountID: id, ModelID: "grok-4.5", Origin: origin, Protocol: GrokProtocolResponses,
+		CredentialGeneration: 1, Status: "ok", HTTPStatus: 200, ObservedAt: now, ExpiresAt: capExpiry,
+	}); err != nil || !applied {
+		t.Fatalf("seed capability = %v, %v", applied, err)
+	}
+
+	newGen, applied, err := db.UpdateAccountCredentialsCAS(ctx, id, 1, map[string]any{"access_token": "at-new", "refresh_token": "rt-new"})
+	if err != nil || !applied || newGen != 2 {
+		t.Fatalf("CAS = generation %d applied %v err %v", newGen, applied, err)
+	}
+
+	state, err := db.GetGrokAccountState(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.CredentialGeneration != 2 {
+		t.Fatalf("state generation = %d, want 2", state.CredentialGeneration)
+	}
+	fact, ok := state.Facts[GrokFactBilling]
+	if !ok || fact.CredentialGeneration != 2 {
+		t.Fatalf("fact was not carried forward: %+v", state.Facts)
+	}
+	if len(state.Catalogs) != 1 || state.Catalogs[0].Snapshot.CredentialGeneration != 2 {
+		t.Fatalf("catalog snapshot was not carried forward: %+v", state.Catalogs)
+	}
+	if len(state.Catalogs[0].Items) != 1 || state.Catalogs[0].Items[0].CredentialGeneration != 2 {
+		t.Fatalf("catalog items were not carried forward: %+v", state.Catalogs[0].Items)
+	}
+	if len(state.Capabilities) != 1 || state.Capabilities[0].CredentialGeneration != 2 {
+		t.Fatalf("capability was not carried forward: %+v", state.Capabilities)
+	}
+	if !state.Capabilities[0].ExpiresAt.Equal(capExpiry) {
+		t.Fatalf("carry-forward must not extend freshness: %v, want %v", state.Capabilities[0].ExpiresAt, capExpiry)
+	}
+}
+
 func TestGrokCapabilityGenerationFenced(t *testing.T) {
 	db := newGrokStateTestDB(t)
 	ctx := context.Background()
