@@ -227,6 +227,49 @@ func TestGrokGiantCustomToolGuard(t *testing.T) {
 	}
 }
 
+func TestGrokGiantToolGuardIsCaseInsensitiveAndPreservesNumbers(t *testing.T) {
+	body := []byte(`{"seed":9007199254740993,"tools":[{"type":"custom","name":"APPLY_PATCH"}],"input":"patch"}`)
+	guarded, changed := addGrokGiantToolInstructions(body)
+	if !changed {
+		t.Fatal("case-insensitive apply_patch name did not enable guard")
+	}
+	if !strings.Contains(string(guarded), `"seed":9007199254740993`) {
+		t.Fatalf("large integer changed during guard injection: %s", guarded)
+	}
+}
+
+func TestGrokAdditionalToolsPreservesNumbers(t *testing.T) {
+	body := []byte(`{"seed":9007199254740993,"input":[{"type":"additional_tools","tools":[{"type":"function","name":"lookup","parameters":{"type":"object"}}]}]}`)
+	lifted, changed := liftGrokAdditionalTools(body)
+	if !changed {
+		t.Fatal("additional_tools carrier was not lifted")
+	}
+	if !strings.Contains(string(lifted), `"seed":9007199254740993`) {
+		t.Fatalf("large integer changed while lifting tools: %s", lifted)
+	}
+}
+
+func TestGrokPlainFunctionDoneBypassesBridgedSizeLimit(t *testing.T) {
+	r := &grokStreamReverser{aliases: map[string]grokNsIdentity{}, customItems: map[string]bool{}, toolSearchItems: map[string]bool{}, inputBytes: map[string]int{}}
+	arguments := strings.Repeat("x", grokToolCallHardLimitBytes+1)
+	line := []byte("data: " + string(mustJSON(t, map[string]any{"type": "response.function_call_arguments.done", "item_id": "plain", "arguments": arguments})) + "\n")
+	got := r.rewriteLine(line)
+	if string(got) != string(line) {
+		t.Fatalf("plain function call was rewritten or rejected: %s", got)
+	}
+}
+
+func TestGrokStreamFastPathIncludesFunctionArgumentsEvents(t *testing.T) {
+	r := &grokStreamReverser{aliases: map[string]grokNsIdentity{}, customItems: map[string]bool{"custom": true}, toolSearchItems: map[string]bool{}, inputBytes: map[string]int{}}
+	line := []byte("data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"custom\",\"delta\":\"{}\"}\n")
+	if got := r.rewriteLine(line); got != nil {
+		t.Fatalf("bridged arguments delta bypassed stream handling: %s", got)
+	}
+	if r.inputBytes["custom"] != 2 {
+		t.Fatalf("bridged arguments delta was not accounted: %d", r.inputBytes["custom"])
+	}
+}
+
 func mustJSON(t *testing.T, value any) []byte {
 	t.Helper()
 	out, err := json.Marshal(value)

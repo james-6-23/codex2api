@@ -62,20 +62,7 @@ func prepareGrokUpstreamBody(body []byte) grokPreflightResult {
 		result.Model = model.String()
 	}
 
-	aliases := make(map[string]grokNsIdentity)
-	registered := make(map[string]grokNsIdentity)
-	register := func(namespace, name string, custom, toolSearch bool) string {
-		alias := grokNamespaceAliasName(namespace, name)
-		if existing, ok := registered[alias]; ok && (existing.Namespace != namespace || existing.Name != name || existing.Custom != custom || existing.ToolSearch != toolSearch) {
-			alias = grokDisambiguatedAlias(alias, namespace, name)
-		}
-		identity := grokNsIdentity{Namespace: namespace, Name: name, Custom: custom, ToolSearch: toolSearch}
-		registered[alias] = identity
-		if custom || toolSearch || namespace != "" || alias != name {
-			aliases[alias] = identity
-		}
-		return alias
-	}
+	register, aliases := newGrokAliasRegister()
 
 	// tools 先处理：input 与 tool_choice 的 namespace 引用要改写成同一份别名，
 	// 处理顺序必须与逐步改写实现一致，否则别名撞名时的消歧结果会不同。
@@ -175,13 +162,15 @@ func prepareGrokUpstreamBody(body []byte) grokPreflightResult {
 const grokGiantToolInstructionMarker = "[codex2api giant-tool-call guard]"
 
 func addGrokGiantToolInstructions(body []byte) ([]byte, bool) {
-	if !bytes.Contains(body, []byte(`"apply_patch"`)) || bytes.Contains(body, []byte(grokGiantToolInstructionMarker)) {
+	if !bytes.Contains(bytes.ToLower(body), []byte(`"apply_patch"`)) || bytes.Contains(body, []byte(grokGiantToolInstructionMarker)) {
 		return body, false
 	}
 	var request map[string]any
-	if json.Unmarshal(body, &request) != nil || !grokBodyHasNamedTool(request, "apply_patch") {
+	if decodeGrokJSONPreservingNumbers(body, &request) != nil || !grokBodyHasNamedTool(request, "apply_patch") {
 		return body, false
 	}
+	// The 96 KiB guidance leaves deliberate headroom below the 128 KiB hard stop
+	// for wrapper JSON and escaping overhead.
 	guidance := grokGiantToolInstructionMarker + "\nWhen using apply_patch or another code-writing tool, modify at most 2 files per call and keep each tool input below 96 KiB. Split larger work into verified batches."
 	existing := strings.TrimSpace(grokNsStringField(request, "instructions"))
 	if existing != "" {
@@ -218,7 +207,7 @@ func liftGrokAdditionalTools(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	var request map[string]any
-	if json.Unmarshal(body, &request) != nil {
+	if decodeGrokJSONPreservingNumbers(body, &request) != nil {
 		return body, false
 	}
 	input, ok := request["input"].([]any)
@@ -262,6 +251,12 @@ func liftGrokAdditionalTools(body []byte) ([]byte, bool) {
 		return body, false
 	}
 	return out, true
+}
+
+func decodeGrokJSONPreservingNumbers(body []byte, target any) error {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	decoder.UseNumber()
+	return decoder.Decode(target)
 }
 
 // grokWriteObjectKey 写出 JSON 对象里的 `"key":`，必要时补上分隔逗号。

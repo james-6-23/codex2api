@@ -27,6 +27,24 @@ type grokNsIdentity struct {
 
 type grokAliasRegister func(namespace, name string, custom, toolSearch bool) string
 
+func newGrokAliasRegister() (grokAliasRegister, map[string]grokNsIdentity) {
+	aliases := make(map[string]grokNsIdentity)
+	registered := make(map[string]grokNsIdentity)
+	register := func(namespace, name string, custom, toolSearch bool) string {
+		alias := grokNamespaceAliasName(namespace, name)
+		if existing, ok := registered[alias]; ok && (existing.Namespace != namespace || existing.Name != name || existing.Custom != custom || existing.ToolSearch != toolSearch) {
+			alias = grokDisambiguatedAlias(alias, namespace, name)
+		}
+		identity := grokNsIdentity{Namespace: namespace, Name: name, Custom: custom, ToolSearch: toolSearch}
+		registered[alias] = identity
+		if custom || toolSearch || namespace != "" || alias != name {
+			aliases[alias] = identity
+		}
+		return alias
+	}
+	return register, aliases
+}
+
 const grokToolSearchProxyName = "tool_search"
 const grokToolCallHardLimitBytes = 128 * 1024
 
@@ -278,23 +296,9 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 		return body, nil
 	}
 
-	aliases := make(map[string]grokNsIdentity)
-	registered := make(map[string]grokNsIdentity)
+	register, aliases := newGrokAliasRegister()
 	changed := false
 	webSearchDropped := false
-
-	register := func(namespace, name string, custom, toolSearch bool) string {
-		alias := grokNamespaceAliasName(namespace, name)
-		if existing, ok := registered[alias]; ok && (existing.Namespace != namespace || existing.Name != name || existing.Custom != custom || existing.ToolSearch != toolSearch) {
-			alias = grokDisambiguatedAlias(alias, namespace, name)
-		}
-		identity := grokNsIdentity{Namespace: namespace, Name: name, Custom: custom, ToolSearch: toolSearch}
-		registered[alias] = identity
-		if custom || toolSearch || namespace != "" || alias != name {
-			aliases[alias] = identity
-		}
-		return alias
-	}
 
 	// 1) tools[]：展平 namespace，归一 web_search。
 	if rawTools, ok := payload["tools"].([]any); ok {
@@ -700,6 +704,11 @@ type grokStreamReverser struct {
 }
 
 func (r *grokStreamReverser) rewriteLine(line []byte) []byte {
+	if !bytes.Contains(line, []byte(`"function_call"`)) &&
+		!bytes.Contains(line, []byte(`"response.function_call_arguments.`)) &&
+		!bytes.Contains(line, []byte(`"response.completed"`)) {
+		return line
+	}
 	trimmed := bytes.TrimRight(line, "\r\n")
 	suffix := line[len(trimmed):]
 	idx := bytes.Index(trimmed, []byte("data:"))
@@ -760,11 +769,13 @@ func (r *grokStreamReverser) rewriteLine(line []byte) []byte {
 		if itemID == "" {
 			itemID = grokNsStringField(event, "call_id")
 		}
-		if n := len(grokNsStringField(event, "arguments")); n > r.inputBytes[itemID] {
-			r.inputBytes[itemID] = n
-		}
-		if r.inputBytes[itemID] > grokToolCallHardLimitBytes {
-			return r.failureLine(head, gap, suffix, event, itemID)
+		if r.customItems[itemID] || r.toolSearchItems[itemID] {
+			if n := len(grokNsStringField(event, "arguments")); n > r.inputBytes[itemID] {
+				r.inputBytes[itemID] = n
+			}
+			if r.inputBytes[itemID] > grokToolCallHardLimitBytes {
+				return r.failureLine(head, gap, suffix, event, itemID)
+			}
 		}
 		if r.toolSearchItems[itemID] {
 			return nil
