@@ -360,9 +360,9 @@ func (a *Account) GrokChannelSupportsModel(model string) bool {
 	// confused with "catalog has never been fetched" and reopen defaults.
 	if len(candidates) == 0 && (a.grokRouting == nil || !a.grokRouting.CatalogKnown) {
 		if a.GrokAuthKindLocked() == GrokAuthKindAPIKey {
-			candidates = []string{"grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
+			candidates = []string{"grok-4.6", "grok-4.5", "grok-4", "grok-3-fast", "grok-3", "grok-2"}
 		} else {
-			candidates = []string{"grok-4.5"}
+			candidates = []string{"grok-4.6", "grok-4.5"}
 		}
 	}
 	for _, candidate := range candidates {

@@ -244,7 +244,7 @@ func TestGrokPreflightPreservesUntouchedBody(t *testing.T) {
 // TestGrokPrepareHistoryItemMatchesMapRebuild 逐项守护 raw 拼接重建与 map 版
 // rebuildGrokHistoryItem 的等价性：改写与否的判定必须一致，改写结果必须语义相同。
 func TestGrokPrepareHistoryItemMatchesMapRebuild(t *testing.T) {
-	register := func(ns, name string) string { return ns + "__" + name }
+	register := func(ns, name string, _, _ bool) string { return ns + "__" + name }
 	for _, tc := range grokDiffCorpus() {
 		input := gjson.Get(tc.body, "input")
 		if !input.IsArray() {

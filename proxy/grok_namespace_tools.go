@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"io"
+	"strconv"
 	"strings"
 )
 
@@ -17,8 +18,90 @@ import (
 // 逻辑对齐参考实现：请求侧展平 + 响应侧恢复的完整往返。
 
 type grokNsIdentity struct {
-	Namespace string
-	Name      string
+	Namespace  string
+	Name       string
+	Custom     bool
+	ToolSearch bool
+}
+
+type grokAliasRegister func(namespace, name string, custom, toolSearch bool) string
+
+const grokToolSearchProxyName = "tool_search"
+const grokToolCallHardLimitBytes = 128 * 1024
+
+func grokFunctionToolForToolSearch(name string) map[string]any {
+	return map[string]any{
+		"type": "function", "name": name,
+		"description": "Search and load Codex tools, plugins, connectors, and MCP namespaces for the current task.",
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer"},
+			},
+			"required": []string{"query"},
+		},
+	}
+}
+
+func grokJSONString(value any) string {
+	if text, ok := value.(string); ok {
+		return text
+	}
+	if value == nil {
+		return "{}"
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return "{}"
+	}
+	return string(encoded)
+}
+
+func grokToolSearchArguments(value any) any {
+	text := strings.TrimSpace(grokJSONString(value))
+	var decoded any
+	if text != "" && json.Unmarshal([]byte(text), &decoded) == nil {
+		return decoded
+	}
+	return text
+}
+
+func grokFunctionToolForCustom(tool map[string]any, name string) map[string]any {
+	converted := map[string]any{
+		"type": "function",
+		"name": name,
+		"parameters": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"input": map[string]any{"type": "string"},
+			},
+			"required":             []string{"input"},
+			"additionalProperties": false,
+		},
+	}
+	if description, ok := tool["description"].(string); ok {
+		converted["description"] = description
+	}
+	return converted
+}
+
+func marshalGrokCustomToolArguments(input string) string {
+	encoded, err := json.Marshal(map[string]string{"input": input})
+	if err != nil {
+		return `{"input":""}`
+	}
+	return string(encoded)
+}
+
+func unwrapGrokCustomToolArguments(arguments string) string {
+	var decoded struct {
+		Input string `json:"input"`
+	}
+	if json.Unmarshal([]byte(arguments), &decoded) == nil {
+		return decoded.Input
+	}
+	return arguments
 }
 
 // grokNamespaceAliasName 生成扁平化后的函数名：namespace + name（命名空间已以 "__" 结尾时不再补分隔符）。
@@ -74,7 +157,7 @@ var grokNativeHistoryFields = map[string][]string{
 // rebuildGrokHistoryItem 把单个 input[] 历史项重建为 Grok 原生字段集：只保留白名单字段、丢弃 null，
 // function_call 携带 namespace 的改写成扁平名，外来 compaction 项换成边界消息。
 // 返回 (重建后的项, 是否发生改写)；未知类型原样返回不改。
-func rebuildGrokHistoryItem(item map[string]any, register func(namespace, name string) string) (map[string]any, bool) {
+func rebuildGrokHistoryItem(item map[string]any, register grokAliasRegister) (map[string]any, bool) {
 	itemType := grokNsStringField(item, "type")
 	if itemType == "" && grokNsStringField(item, "role") != "" {
 		itemType = "message" // Codex 可能省略带 role 消息的 type
@@ -83,6 +166,45 @@ func rebuildGrokHistoryItem(item map[string]any, register func(namespace, name s
 		// 外来 compaction 密文 Grok 解不了，直接换成边界消息。
 		return grokBoundaryMessage(), true
 	}
+	if itemType == "custom_tool_call" {
+		name := strings.TrimSpace(grokNsStringField(item, "name"))
+		namespace := strings.TrimSpace(grokNsStringField(item, "namespace"))
+		alias := register(namespace, name, true, false)
+		return map[string]any{
+			"type":      "function_call",
+			"call_id":   grokNsStringField(item, "call_id"),
+			"name":      alias,
+			"arguments": marshalGrokCustomToolArguments(grokNsStringField(item, "input")),
+		}, true
+	}
+	if itemType == "custom_tool_call_output" {
+		output := item["output"]
+		if output == nil {
+			output = ""
+		}
+		return map[string]any{
+			"type":    "function_call_output",
+			"call_id": grokNsStringField(item, "call_id"),
+			"output":  output,
+		}, true
+	}
+	if itemType == "tool_search_call" {
+		alias := register("", grokToolSearchProxyName, false, true)
+		return map[string]any{
+			"type": "function_call", "call_id": grokNsStringField(item, "call_id"),
+			"name": alias, "arguments": grokJSONString(item["arguments"]),
+		}, true
+	}
+	if itemType == "tool_search_output" || itemType == "tool_search_call_output" {
+		output := item["output"]
+		if output == nil {
+			output = item["tools"]
+		}
+		return map[string]any{
+			"type": "function_call_output", "call_id": grokNsStringField(item, "call_id"),
+			"output": grokJSONString(output),
+		}, true
+	}
 	fields, known := grokNativeHistoryFields[itemType]
 	if !known {
 		return item, false
@@ -90,7 +212,7 @@ func rebuildGrokHistoryItem(item map[string]any, register func(namespace, name s
 	// function_call 的 namespace 引用改写成扁平名，匹配已展平的工具声明。
 	if itemType == "function_call" {
 		if ns := strings.TrimSpace(grokNsStringField(item, "namespace")); ns != "" {
-			item["name"] = register(ns, strings.TrimSpace(grokNsStringField(item, "name")))
+			item["name"] = register(ns, strings.TrimSpace(grokNsStringField(item, "name")), false, false)
 		}
 	}
 	allowed := make(map[string]struct{}, len(fields))
@@ -132,15 +254,20 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 	}
 
 	aliases := make(map[string]grokNsIdentity)
+	registered := make(map[string]grokNsIdentity)
 	changed := false
 	webSearchDropped := false
 
-	register := func(namespace, name string) string {
+	register := func(namespace, name string, custom, toolSearch bool) string {
 		alias := grokNamespaceAliasName(namespace, name)
-		if existing, ok := aliases[alias]; ok && (existing.Namespace != namespace || existing.Name != name) {
+		if existing, ok := registered[alias]; ok && (existing.Namespace != namespace || existing.Name != name || existing.Custom != custom || existing.ToolSearch != toolSearch) {
 			alias = grokDisambiguatedAlias(alias, namespace, name)
 		}
-		aliases[alias] = grokNsIdentity{Namespace: namespace, Name: name}
+		identity := grokNsIdentity{Namespace: namespace, Name: name, Custom: custom, ToolSearch: toolSearch}
+		registered[alias] = identity
+		if custom || toolSearch || namespace != "" || alias != name {
+			aliases[alias] = identity
+		}
 		return alias
 	}
 
@@ -154,6 +281,29 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 				continue
 			}
 			kind := grokNsStringField(tool, "type")
+			if kind == "tool_search" {
+				alias := register("", grokToolSearchProxyName, false, true)
+				newTools = append(newTools, grokFunctionToolForToolSearch(alias))
+				changed = true
+				continue
+			}
+			if kind == "function" {
+				name := strings.TrimSpace(grokNsStringField(tool, "name"))
+				registered := register("", name, false, false)
+				if registered != name {
+					tool["name"] = registered
+					changed = true
+				}
+				newTools = append(newTools, tool)
+				continue
+			}
+			if kind == "custom" {
+				name := strings.TrimSpace(grokNsStringField(tool, "name"))
+				alias := register("", name, true, false)
+				newTools = append(newTools, grokFunctionToolForCustom(tool, alias))
+				changed = true
+				continue
+			}
 			if _, isWebSearch := grokWebSearchTypes[kind]; isWebSearch {
 				converted, keep, toolChanged := normalizeGrokWebSearchTool(tool)
 				if toolChanged {
@@ -174,11 +324,20 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 			children, _ := tool["tools"].([]any)
 			for _, rc := range children {
 				child, ok := rc.(map[string]any)
-				if !ok || grokNsStringField(child, "type") != "function" {
+				if !ok {
+					continue
+				}
+				childType := grokNsStringField(child, "type")
+				if childType != "function" && childType != "custom" {
 					continue
 				}
 				name := strings.TrimSpace(grokNsStringField(child, "name"))
-				child["name"] = register(namespace, name)
+				alias := register(namespace, name, childType == "custom", false)
+				if childType == "custom" {
+					child = grokFunctionToolForCustom(child, alias)
+				} else {
+					child["name"] = alias
+				}
 				delete(child, "defer_loading")
 				newTools = append(newTools, child)
 			}
@@ -200,10 +359,21 @@ func normalizeGrokUpstreamTools(body []byte) ([]byte, map[string]grokNsIdentity)
 
 	// 2) tool_choice：{type:function,name,namespace} → {type:function,name:alias}。
 	if tc, ok := payload["tool_choice"].(map[string]any); ok {
-		if grokNsStringField(tc, "type") == "function" {
+		kind := grokNsStringField(tc, "type")
+		if kind == "custom" {
+			name := strings.TrimSpace(grokNsStringField(tc, "name"))
+			tc["type"] = "function"
+			tc["name"] = register(strings.TrimSpace(grokNsStringField(tc, "namespace")), name, true, false)
+			delete(tc, "namespace")
+			changed = true
+		} else if kind == "tool_search" {
+			tc["type"] = "function"
+			tc["name"] = register("", grokToolSearchProxyName, false, true)
+			changed = true
+		} else if kind == "function" {
 			if namespace := strings.TrimSpace(grokNsStringField(tc, "namespace")); namespace != "" {
 				name := strings.TrimSpace(grokNsStringField(tc, "name"))
-				tc["name"] = register(namespace, name)
+				tc["name"] = register(namespace, name, false, false)
 				delete(tc, "namespace")
 				changed = true
 			}
@@ -271,6 +441,7 @@ func grokWebSearchAllowedDomains(tool map[string]any) []any {
 // "Could not decode the compaction blob"。密文有两种载体：
 //   - reasoning 项的 encrypted_content（最常见）；
 //   - remote_compaction_v2 的 type:"compaction" 压缩项（内含 encrypted_content）。
+//
 // 处理：删掉 reasoning 等历史项的 encrypted_content（密文非回放前置条件，保留明文
 // summary/content 即可续接）；去密文后无可回放内容的 reasoning 项、以及整条 compaction 项，
 // 替换成一条纯文本边界消息。优雅降级，对齐参考实现对外来密文的处理。
@@ -372,6 +543,17 @@ func reverseGrokNamespaceValue(value any, aliases map[string]grokNsIdentity) boo
 				} else {
 					delete(typed, "namespace")
 				}
+				if identity.ToolSearch {
+					typed["type"] = "tool_search_call"
+					typed["execution"] = "client"
+					typed["arguments"] = grokToolSearchArguments(typed["arguments"])
+					delete(typed, "name")
+					delete(typed, "namespace")
+				} else if identity.Custom {
+					typed["type"] = "custom_tool_call"
+					typed["input"] = unwrapGrokCustomToolArguments(grokNsStringField(typed, "arguments"))
+					delete(typed, "arguments")
+				}
 				changed = true
 			}
 		}
@@ -442,12 +624,16 @@ func newGrokNamespaceReverser(body io.ReadCloser, streaming bool, aliases map[st
 			_ = pw.Close()
 			return
 		}
+		reverser := &grokStreamReverser{aliases: aliases, customItems: make(map[string]bool), toolSearchItems: make(map[string]bool), inputBytes: make(map[string]int)}
 		reader := bufio.NewReader(body)
 		for {
 			line, err := reader.ReadBytes('\n')
 			if len(line) > 0 {
-				if _, werr := pw.Write(reverseGrokNamespaceSSELine(line, aliases)); werr != nil {
-					return
+				rewritten := reverser.rewriteLine(line)
+				if len(rewritten) > 0 {
+					if _, werr := pw.Write(rewritten); werr != nil {
+						return
+					}
 				}
 			}
 			if err != nil {
@@ -461,4 +647,125 @@ func newGrokNamespaceReverser(body io.ReadCloser, streaming bool, aliases map[st
 		_ = pw.Close()
 	}()
 	return pr
+}
+
+type grokStreamReverser struct {
+	aliases         map[string]grokNsIdentity
+	customItems     map[string]bool
+	toolSearchItems map[string]bool
+	inputBytes      map[string]int
+	failed          bool
+}
+
+func (r *grokStreamReverser) rewriteLine(line []byte) []byte {
+	trimmed := bytes.TrimRight(line, "\r\n")
+	suffix := line[len(trimmed):]
+	idx := bytes.Index(trimmed, []byte("data:"))
+	if idx < 0 {
+		return line
+	}
+	head := trimmed[:idx+len("data:")]
+	payload := bytes.TrimLeft(trimmed[idx+len("data:"):], " ")
+	gap := trimmed[idx+len("data:") : len(trimmed)-len(payload)]
+	if len(payload) == 0 || payload[0] != '{' {
+		return line
+	}
+	var event map[string]any
+	if json.Unmarshal(payload, &event) != nil {
+		return line
+	}
+	eventType := grokNsStringField(event, "type")
+	if r.failed {
+		return nil
+	}
+	switch eventType {
+	case "response.output_item.added", "response.output_item.done":
+		if item, ok := event["item"].(map[string]any); ok {
+			name := grokNsStringField(item, "name")
+			identity, bridged := r.aliases[name]
+			if bridged && identity.Custom {
+				if id := grokNsStringField(item, "id"); id != "" {
+					r.customItems[id] = true
+				}
+				if callID := grokNsStringField(item, "call_id"); callID != "" {
+					r.customItems[callID] = true
+				}
+			}
+			if bridged && identity.ToolSearch {
+				if id := grokNsStringField(item, "id"); id != "" {
+					r.toolSearchItems[id] = true
+				}
+				if callID := grokNsStringField(item, "call_id"); callID != "" {
+					r.toolSearchItems[callID] = true
+				}
+			}
+			reverseGrokNamespaceValue(item, r.aliases)
+		}
+	case "response.function_call_arguments.delta":
+		itemID := grokNsStringField(event, "item_id")
+		if itemID == "" {
+			itemID = grokNsStringField(event, "call_id")
+		}
+		if r.customItems[itemID] || r.toolSearchItems[itemID] {
+			r.inputBytes[itemID] += len(grokNsStringField(event, "delta"))
+			if r.inputBytes[itemID] > grokToolCallHardLimitBytes {
+				return r.failureLine(head, gap, suffix, event, itemID)
+			}
+			return nil
+		}
+	case "response.function_call_arguments.done":
+		itemID := grokNsStringField(event, "item_id")
+		if itemID == "" {
+			itemID = grokNsStringField(event, "call_id")
+		}
+		if n := len(grokNsStringField(event, "arguments")); n > r.inputBytes[itemID] {
+			r.inputBytes[itemID] = n
+		}
+		if r.inputBytes[itemID] > grokToolCallHardLimitBytes {
+			return r.failureLine(head, gap, suffix, event, itemID)
+		}
+		if r.toolSearchItems[itemID] {
+			return nil
+		}
+		if r.customItems[itemID] {
+			event["type"] = "response.custom_tool_call_input.done"
+			event["input"] = unwrapGrokCustomToolArguments(grokNsStringField(event, "arguments"))
+			delete(event, "arguments")
+		}
+	case "response.completed":
+		if response, ok := event["response"].(map[string]any); ok {
+			reverseGrokNamespaceValue(response, r.aliases)
+		}
+	}
+	rewritten, err := json.Marshal(event)
+	if err != nil {
+		return line
+	}
+	out := make([]byte, 0, len(head)+len(gap)+len(rewritten)+len(suffix))
+	out = append(out, head...)
+	out = append(out, gap...)
+	out = append(out, rewritten...)
+	out = append(out, suffix...)
+	return out
+}
+
+func (r *grokStreamReverser) failureLine(head, gap, suffix []byte, source map[string]any, itemID string) []byte {
+	r.failed = true
+	failure := map[string]any{
+		"type": "response.failed",
+		"response": map[string]any{
+			"object": "response", "status": "failed", "status_code": 400,
+			"output": []any{},
+			"error": map[string]any{
+				"type": "invalid_request_error", "code": "invalid_prompt", "param": "tools", "status_code": 400,
+				"message": "tool_input_too_large: codex2api stopped an oversized tool call after " + strconv.Itoa(r.inputBytes[itemID]) + " bytes (limit " + strconv.Itoa(grokToolCallHardLimitBytes) + "). Split the work into smaller batches.",
+			},
+		},
+	}
+	if sequence, ok := source["sequence_number"]; ok {
+		failure["sequence_number"] = sequence
+	}
+	encoded, _ := json.Marshal(failure)
+	out := append(append(append(append([]byte{}, head...), gap...), encoded...), suffix...)
+	return out
 }

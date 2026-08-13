@@ -2,10 +2,212 @@ package proxy
 
 import (
 	"encoding/json"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/tidwall/gjson"
 )
+
+func TestGrokCustomToolCompatibilityMatrix(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.6",
+		"tools":[
+			{"type":"custom","name":"apply_patch","description":"patch files","format":{"type":"grammar","syntax":"lark","definition":"start: /.+/"}},
+			{"type":"namespace","name":"computer","tools":[{"type":"custom","name":"operate","description":"use computer"}]}
+		],
+		"tool_choice":{"type":"custom","name":"operate","namespace":"computer"},
+		"input":[
+			{"type":"custom_tool_call","call_id":"call_1","name":"apply_patch","input":"*** Begin Patch"},
+			{"type":"custom_tool_call_output","call_id":"call_1","output":null}
+		]
+	}`)
+
+	result := prepareGrokUpstreamBody(body)
+	if strings.Contains(string(result.Body), `"type":"custom"`) || strings.Contains(string(result.Body), `"type":"namespace"`) {
+		t.Fatalf("Codex-only tool variants leaked upstream: %s", result.Body)
+	}
+	if got := gjson.GetBytes(result.Body, "tools.0.type").String(); got != "function" {
+		t.Fatalf("top-level custom type = %q", got)
+	}
+	if got := gjson.GetBytes(result.Body, "tools.0.parameters.required.0").String(); got != "input" {
+		t.Fatalf("custom wrapper schema did not require input: %s", result.Body)
+	}
+	if got := gjson.GetBytes(result.Body, "tool_choice.type").String(); got != "function" {
+		t.Fatalf("custom tool_choice type = %q", got)
+	}
+	choiceName := gjson.GetBytes(result.Body, "tool_choice.name").String()
+	identity, ok := result.Aliases[choiceName]
+	if !ok || !identity.Custom || identity.Namespace != "computer" || identity.Name != "operate" {
+		t.Fatalf("custom tool_choice alias = %q %#v", choiceName, identity)
+	}
+	if got := gjson.GetBytes(result.Body, "input.0.type").String(); got != "function_call" {
+		t.Fatalf("custom history call type = %q", got)
+	}
+	if got := gjson.GetBytes(result.Body, "input.0.arguments").String(); got != `{"input":"*** Begin Patch"}` {
+		t.Fatalf("custom history arguments = %q", got)
+	}
+	if got := gjson.GetBytes(result.Body, "input.1.output").String(); got != "" {
+		t.Fatalf("nil custom output = %q", got)
+	}
+}
+
+func TestGrokCustomAndFunctionNameCollision(t *testing.T) {
+	body := []byte(`{"tools":[{"type":"function","name":"same","parameters":{"type":"object"}},{"type":"custom","name":"same"}],"input":"x"}`)
+	result := prepareGrokUpstreamBody(body)
+	first := gjson.GetBytes(result.Body, "tools.0.name").String()
+	second := gjson.GetBytes(result.Body, "tools.1.name").String()
+	if first == second {
+		t.Fatalf("function/custom collision reused alias %q: %s", first, result.Body)
+	}
+	if result.Aliases[first].Custom || !result.Aliases[second].Custom {
+		t.Fatalf("alias identities lost function/custom distinction: %#v", result.Aliases)
+	}
+}
+
+func TestGrokCustomResponseRestoration(t *testing.T) {
+	aliases := map[string]grokNsIdentity{"apply_patch": {Name: "apply_patch", Custom: true}}
+	nonStream := reverseGrokNamespaceJSON([]byte(`{"output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"apply_patch","arguments":"{\"input\":\"patch text\"}"}]}`), aliases)
+	if got := gjson.GetBytes(nonStream, "output.0.type").String(); got != "custom_tool_call" {
+		t.Fatalf("non-stream type = %q; body=%s", got, nonStream)
+	}
+	if got := gjson.GetBytes(nonStream, "output.0.input").String(); got != "patch text" {
+		t.Fatalf("non-stream input = %q; body=%s", got, nonStream)
+	}
+
+	r := &grokStreamReverser{aliases: aliases, customItems: map[string]bool{}, toolSearchItems: map[string]bool{}, inputBytes: map[string]int{}}
+	added := r.rewriteLine([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"apply_patch\",\"arguments\":\"\"}}\n"))
+	if got := gjson.GetBytes(bytesAfterSSEData(added), "item.type").String(); got != "custom_tool_call" {
+		t.Fatalf("stream added type = %q; line=%s", got, added)
+	}
+	delta := r.rewriteLine([]byte("data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"delta\":\"{\"}\n"))
+	if delta != nil {
+		t.Fatalf("custom function delta leaked: %s", delta)
+	}
+	done := r.rewriteLine([]byte("data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\",\"arguments\":\"{\\\"input\\\":\\\"patch text\\\"}\"}\n"))
+	if got := gjson.GetBytes(bytesAfterSSEData(done), "type").String(); got != "response.custom_tool_call_input.done" {
+		t.Fatalf("stream done type = %q; line=%s", got, done)
+	}
+	if got := gjson.GetBytes(bytesAfterSSEData(done), "input").String(); got != "patch text" {
+		t.Fatalf("stream done input = %q; line=%s", got, done)
+	}
+}
+
+func TestGrokAdditionalToolsAndToolSearchMatrix(t *testing.T) {
+	body := []byte(`{
+		"model":"grok-4.6",
+		"input":[
+			{"type":"additional_tools","tools":[{"type":"tool_search"},{"type":"namespace","name":"deferred","tools":[{"type":"custom","name":"run"}]}]},
+			{"type":"message","role":"user","content":"find and run a tool"},
+			{"type":"tool_search_call","call_id":"ts_1","execution":"client","arguments":{"query":"github","limit":3}},
+			{"type":"tool_search_output","call_id":"ts_1","tools":[{"name":"github"}]}
+		],
+		"tool_choice":{"type":"tool_search"}
+	}`)
+	result := prepareGrokUpstreamBody(body)
+	if gjson.GetBytes(result.Body, `input.#(type=="additional_tools")`).Exists() {
+		t.Fatalf("additional_tools carrier leaked upstream: %s", result.Body)
+	}
+	if strings.Contains(string(result.Body), `"type":"tool_search"`) || strings.Contains(string(result.Body), `"type":"namespace"`) {
+		t.Fatalf("Codex-only tool declaration leaked upstream: %s", result.Body)
+	}
+	proxyName := ""
+	for alias, metadata := range result.Aliases {
+		if metadata.ToolSearch {
+			proxyName = alias
+			break
+		}
+	}
+	identity, ok := result.Aliases[proxyName]
+	if !ok || !identity.ToolSearch {
+		t.Fatalf("tool_search proxy identity missing: name=%q aliases=%#v body=%s", proxyName, result.Aliases, result.Body)
+	}
+	if got := gjson.GetBytes(result.Body, "input.1.type").String(); got != "function_call" {
+		t.Fatalf("tool_search history call type = %q; body=%s", got, result.Body)
+	}
+	if got := gjson.GetBytes(result.Body, "input.2.type").String(); got != "function_call_output" {
+		t.Fatalf("tool_search output type = %q; body=%s", got, result.Body)
+	}
+	if got := gjson.GetBytes(result.Body, "tool_choice.name").String(); got != proxyName {
+		t.Fatalf("tool_search choice name = %q, want %q", got, proxyName)
+	}
+
+	nonStream := reverseGrokNamespaceJSON([]byte(`{"output":[{"type":"function_call","id":"fc_ts","call_id":"ts_2","name":"`+proxyName+`","arguments":"{\"query\":\"github\"}"}]}`), result.Aliases)
+	if got := gjson.GetBytes(nonStream, "output.0.type").String(); got != "tool_search_call" {
+		t.Fatalf("restored tool_search type = %q; body=%s", got, nonStream)
+	}
+	if got := gjson.GetBytes(nonStream, "output.0.arguments.query").String(); got != "github" {
+		t.Fatalf("restored tool_search query = %q; body=%s", got, nonStream)
+	}
+
+	r := &grokStreamReverser{aliases: result.Aliases, customItems: map[string]bool{}, toolSearchItems: map[string]bool{}, inputBytes: map[string]int{}}
+	added := r.rewriteLine([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_ts\",\"call_id\":\"ts_2\",\"name\":\"" + proxyName + "\",\"arguments\":\"\"}}\n"))
+	if got := gjson.GetBytes(bytesAfterSSEData(added), "item.type").String(); got != "tool_search_call" {
+		t.Fatalf("stream tool_search added type = %q; line=%s", got, added)
+	}
+	if leaked := r.rewriteLine([]byte("data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_ts\",\"delta\":\"{}\"}\n")); leaked != nil {
+		t.Fatalf("tool_search argument delta leaked: %s", leaked)
+	}
+	if leaked := r.rewriteLine([]byte("data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_ts\",\"arguments\":\"{}\"}\n")); leaked != nil {
+		t.Fatalf("tool_search argument done leaked: %s", leaked)
+	}
+}
+
+func TestGrokGiantCustomToolGuard(t *testing.T) {
+	body := []byte(`{"model":"grok-4.6","tools":[{"type":"custom","name":"apply_patch"}],"input":"patch"}`)
+	result := prepareGrokUpstreamBody(body)
+	if !strings.Contains(gjson.GetBytes(result.Body, "instructions").String(), grokGiantToolInstructionMarker) {
+		t.Fatalf("apply_patch guard instructions missing: %s", result.Body)
+	}
+	aliases := result.Aliases
+	r := &grokStreamReverser{aliases: aliases, customItems: map[string]bool{}, toolSearchItems: map[string]bool{}, inputBytes: map[string]int{}}
+	_ = r.rewriteLine([]byte("data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_big\",\"name\":\"apply_patch\"}}\n"))
+	large := strings.Repeat("x", grokToolCallHardLimitBytes+1)
+	line := []byte("data: " + string(mustJSON(t, map[string]any{"type": "response.function_call_arguments.delta", "item_id": "fc_big", "delta": large})) + "\n")
+	failure := r.rewriteLine(line)
+	if got := gjson.GetBytes(bytesAfterSSEData(failure), "type").String(); got != "response.failed" {
+		t.Fatalf("oversized custom call did not fail: type=%q line=%s", got, failure)
+	}
+	if got := gjson.GetBytes(bytesAfterSSEData(failure), "response.error.code").String(); got != "invalid_prompt" {
+		t.Fatalf("oversized custom error code = %q", got)
+	}
+}
+
+func mustJSON(t *testing.T, value any) []byte {
+	t.Helper()
+	out, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func TestGrokToolMappingsAreRequestLocal(t *testing.T) {
+	const workers = 32
+	errCh := make(chan string, workers)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			name := "custom_" + strconv.Itoa(i)
+			body := []byte(`{"tools":[{"type":"custom","name":"` + name + `"}],"input":"x"}`)
+			result := prepareGrokUpstreamBody(body)
+			if len(result.Aliases) != 1 || !result.Aliases[name].Custom {
+				errCh <- name
+				return
+			}
+			errCh <- ""
+		}(i)
+	}
+	for i := 0; i < workers; i++ {
+		if name := <-errCh; name != "" {
+			t.Fatalf("request-local mapping lost for %s", name)
+		}
+	}
+}
+
+func bytesAfterSSEData(line []byte) []byte {
+	trimmed := strings.TrimSpace(string(line))
+	return []byte(strings.TrimSpace(strings.TrimPrefix(trimmed, "data:")))
+}
 
 func TestFlattenGrokNamespaceTools(t *testing.T) {
 	body := []byte(`{
@@ -204,7 +406,7 @@ func TestReverseGrokNamespaceSSELine(t *testing.T) {
 }
 
 func TestRebuildGrokHistoryToNativeContract(t *testing.T) {
-	reg := func(ns, name string) string { return ns + "__" + name }
+	reg := func(ns, name string, _, _ bool) string { return ns + "__" + name }
 	// Codex 发的历史项带扩展字段/null；重建后应只剩 Grok 原生字段。
 	cases := []struct {
 		name   string
