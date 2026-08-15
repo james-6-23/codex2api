@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"strings"
 	"unicode"
 )
@@ -123,6 +124,25 @@ func effectiveLatestCodexCLIVersion() string {
 
 func MinimalCodexCLIUserAgentForHeaders() string {
 	return replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, effectiveLatestCodexCLIVersion())
+}
+
+// ApplyCodexModelDiscoveryHeaders applies the identity headers used by Codex
+// when it discovers models. Some Responses gateways apply their official
+// client policy to GET /v1/models before any request body exists, so the
+// installation ID cannot rely on client_metadata from /v1/responses.
+func ApplyCodexModelDiscoveryHeaders(headers http.Header, seed string) {
+	if headers == nil {
+		return
+	}
+	version := effectiveLatestCodexCLIVersion()
+	headers.Set("User-Agent", replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, version))
+	headers.Set("Version", version)
+	headers.Set("Originator", Originator)
+	seed = strings.TrimSpace(seed)
+	if seed == "" {
+		seed = "default"
+	}
+	headers.Set(codexInstallationIDHeader, deriveStableCodexUUID("codex2api:model-discovery-installation:v1:"+seed))
 }
 
 func DefaultCodexUserAgentConfigJSON() string {

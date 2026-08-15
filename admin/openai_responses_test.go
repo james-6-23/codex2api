@@ -20,18 +20,54 @@ func TestFetchOpenAIResponsesModelIDsSupportsV1BaseURL(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer sk-test" {
 			t.Fatalf("Authorization = %q, want Bearer sk-test", got)
 		}
+		if got := r.Header.Get("User-Agent"); !strings.HasPrefix(got, "codex-tui/") {
+			t.Fatalf("User-Agent = %q, want codex-tui prefix", got)
+		}
+		if got := r.Header.Get("Originator"); got != "codex-tui" {
+			t.Fatalf("Originator = %q, want codex-tui", got)
+		}
+		if got := r.Header.Get("Version"); got == "" {
+			t.Fatal("Version must be set")
+		}
+		if got := r.Header.Get("X-Codex-Installation-Id"); got == "" {
+			t.Fatal("X-Codex-Installation-Id must be set")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-4.1"},{"id":"gpt-4.1"},{"id":"gpt-4.1-mini"}]}`))
 	}))
 	defer server.Close()
 
-	models, err := fetchOpenAIResponsesModelIDs(context.Background(), server.URL+"/v1", "sk-test", "")
+	models, err := fetchOpenAIResponsesModelIDs(context.Background(), server.URL+"/v1", "sk-test", "", nil)
 	if err != nil {
 		t.Fatalf("fetchOpenAIResponsesModelIDs returned error: %v", err)
 	}
 	want := []string{"gpt-4.1", "gpt-4.1-mini"}
 	if !reflect.DeepEqual(models, want) {
 		t.Fatalf("models = %#v, want %#v", models, want)
+	}
+}
+
+func TestFetchOpenAIResponsesModelIDsAppliesCustomHeadersLast(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("User-Agent"); got != "codex-tui/custom" {
+			t.Fatalf("User-Agent = %q, want custom override", got)
+		}
+		if got := r.Header.Get("X-Codex-Installation-Id"); got != "custom-installation" {
+			t.Fatalf("installation ID = %q, want custom override", got)
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"gpt-5.6"}]}`))
+	}))
+	defer server.Close()
+
+	models, err := fetchOpenAIResponsesModelIDs(context.Background(), server.URL, "sk-test", "", map[string]string{
+		"User-Agent":              "codex-tui/custom",
+		"X-Codex-Installation-Id": "custom-installation",
+	})
+	if err != nil {
+		t.Fatalf("fetchOpenAIResponsesModelIDs returned error: %v", err)
+	}
+	if !reflect.DeepEqual(models, []string{"gpt-5.6"}) {
+		t.Fatalf("models = %#v", models)
 	}
 }
 
