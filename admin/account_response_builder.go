@@ -25,6 +25,8 @@ func (h *Handler) buildAccountResponse(
 ) accountResponse {
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
+	isOrcaRouterAccount := strings.EqualFold(upstreamType, auth.UpstreamOrcaRouter)
+	isRelayResponsesAccount := isOpenAIResponsesAccount || isOrcaRouterAccount
 	isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
 	grokAuthKind := ""
 	var grokBilling json.RawMessage
@@ -43,11 +45,11 @@ func (h *Handler) buildAccountResponse(
 	}
 	email := row.GetCredential("email")
 	baseURL := row.GetCredential("base_url")
-	if isOpenAIResponsesAccount && email == "" {
+	if isRelayResponsesAccount && email == "" {
 		email = baseURL
 	}
 	planType := row.GetCredential("plan_type")
-	if isOpenAIResponsesAccount && planType == "" {
+	if isRelayResponsesAccount && planType == "" {
 		planType = "api"
 	}
 	if isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey {
@@ -65,12 +67,12 @@ func (h *Handler) buildAccountResponse(
 		}
 	}
 	codexClientMetadataMode := ""
-	if isOpenAIResponsesAccount && includeDetails {
+	if isRelayResponsesAccount && includeDetails {
 		codexClientMetadataMode = auth.NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
 	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
-	if !isOpenAIResponsesAccount && !isGrokAccount {
+	if !isRelayResponsesAccount && !isGrokAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
 	}
 	ignoreUsageLimitStatusOverride := row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
@@ -107,13 +109,14 @@ func (h *Handler) buildAccountResponse(
 		SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
 		Status:                   row.Status,
 		ErrorMessage:             row.ErrorMessage,
-		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		ATOnly:                   !isRelayResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 		CreditEnabled:            row.CreditEnabled,
 		CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
 		SkipWarmTier:             row.SkipWarmTier,
 		AccountType:              row.Type,
 		AccessTokenType:          accountAccessTokenType(row),
 		OpenAIResponsesAPI:       isOpenAIResponsesAccount,
+		OrcaRouterAPI:            isOrcaRouterAccount,
 		GrokAPI:                  isGrokAccount,
 		AgentIdentity:            isAgentIdentityCredentialRow(row),
 		GrokAuthKind:             grokAuthKind,

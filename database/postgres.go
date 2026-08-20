@@ -6990,8 +6990,9 @@ func grokIdentityCredentialChanged(before, after map[string]interface{}) bool {
 	return false
 }
 
-func openAIResponsesIdentityCredentialChanged(before, after map[string]interface{}) bool {
-	if !strings.EqualFold(strings.TrimSpace(credentialStringFromMap(after, "upstream_type")), "openai_responses") {
+func responsesIdentityCredentialChanged(before, after map[string]interface{}) bool {
+	upstream := strings.TrimSpace(credentialStringFromMap(after, "upstream_type"))
+	if !strings.EqualFold(upstream, "openai_responses") && !strings.EqualFold(upstream, "orcarouter") {
 		return false
 	}
 	return strings.TrimRight(strings.TrimSpace(credentialStringFromMap(before, "base_url")), "/") !=
@@ -7014,6 +7015,16 @@ func sqliteJSONSetKeySupported(key string) bool {
 }
 
 func (db *DB) UpdateOpenAIResponsesAccount(ctx context.Context, id int64, name string, credentials map[string]interface{}, proxyURL string) error {
+	return db.updateResponsesAccount(ctx, id, name, credentials, proxyURL, "openai")
+}
+
+// UpdateOrcaRouterAccount 更新一个 OrcaRouter 网关账号；运行时与 openai_responses
+// 完全一致，仅平台列标为 orcarouter。
+func (db *DB) UpdateOrcaRouterAccount(ctx context.Context, id int64, name string, credentials map[string]interface{}, proxyURL string) error {
+	return db.updateResponsesAccount(ctx, id, name, credentials, proxyURL, "orcarouter")
+}
+
+func (db *DB) updateResponsesAccount(ctx context.Context, id int64, name string, credentials map[string]interface{}, proxyURL, platform string) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -7032,7 +7043,7 @@ func (db *DB) UpdateOpenAIResponsesAccount(ctx context.Context, id int64, name s
 
 	current := decodeCredentials(currentRaw)
 	merged := mergeCredentialMaps(cloneCredentialUpdates(current), credentials)
-	identityChanged := openAIResponsesIdentityCredentialChanged(current, merged)
+	identityChanged := responsesIdentityCredentialChanged(current, merged)
 	credJSON, err := json.Marshal(merged)
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
@@ -7042,9 +7053,9 @@ func (db *DB) UpdateOpenAIResponsesAccount(ctx context.Context, id int64, name s
 	if identityChanged {
 		identityUpdate = ", credential_generation = credential_generation + 1, status = 'active', error_message = '', cooldown_reason = '', cooldown_until = NULL"
 	}
-	updateQuery := `UPDATE accounts SET name = $1, credentials = $2, proxy_url = $3, platform = 'openai', type = 'responses_api'` + identityUpdate + `, updated_at = CURRENT_TIMESTAMP WHERE id = $4`
+	updateQuery := `UPDATE accounts SET name = $1, credentials = $2, proxy_url = $3, platform = '` + platform + `', type = 'responses_api'` + identityUpdate + `, updated_at = CURRENT_TIMESTAMP WHERE id = $4`
 	if !db.isSQLite() {
-		updateQuery = `UPDATE accounts SET name = $1, credentials = $2::jsonb, proxy_url = $3, platform = 'openai', type = 'responses_api'` + identityUpdate + `, updated_at = CURRENT_TIMESTAMP WHERE id = $4`
+		updateQuery = `UPDATE accounts SET name = $1, credentials = $2::jsonb, proxy_url = $3, platform = '` + platform + `', type = 'responses_api'` + identityUpdate + `, updated_at = CURRENT_TIMESTAMP WHERE id = $4`
 	}
 	res, err := tx.ExecContext(ctx, updateQuery, name, credJSON, proxyURL, id)
 	if err != nil {
@@ -7585,6 +7596,26 @@ func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, cre
 	)
 }
 
+// InsertOrcaRouterAccount 插入一个 OrcaRouter 网关账号（upstream_type=orcarouter）。
+// OrcaRouter 是 OpenAI-Responses 兼容网关，运行时与 openai_responses 走同一套派发，
+// 这里用独立的 platform='orcarouter' 便于管理端识别命名 provider。
+func (db *DB) InsertOrcaRouterAccount(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
+	if credentials == nil {
+		credentials = map[string]interface{}{}
+	}
+	credJSON, err := json.Marshal(credentials)
+	if err != nil {
+		return 0, err
+	}
+
+	return db.insertAccountRowWithFamily(ctx,
+		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, 'orcarouter', 'responses_api', $2, $3) RETURNING id`,
+		`INSERT INTO accounts (name, platform, type, credentials, proxy_url) VALUES ($1, 'orcarouter', 'responses_api', $2, $3)`,
+		credentials,
+		name, credJSON, proxyURL,
+	)
+}
+
 // InsertAccountWithUpstream 插入一个指定 platform / type 的账号（用于 Grok 等
 // 非 Codex 上游），credentials 全量入库。
 func (db *DB) InsertAccountWithUpstream(ctx context.Context, name, platform, accountType string, credentials map[string]interface{}, proxyURL string) (int64, error) {
@@ -7841,7 +7872,7 @@ func (db *DB) GetAllOpenAIAPIKeys(ctx context.Context) (map[string]bool, error) 
 		}
 		apiKey := strings.TrimSpace(credentialString(raw, "api_key"))
 		upstreamType := strings.TrimSpace(credentialString(raw, "upstream_type"))
-		if apiKey != "" && upstreamType == "openai_responses" {
+		if apiKey != "" && (upstreamType == "openai_responses" || upstreamType == "orcarouter") {
 			result[apiKey] = true
 		}
 	}

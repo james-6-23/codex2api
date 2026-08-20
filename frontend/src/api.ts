@@ -590,6 +590,12 @@ export const api = {
     request<FetchOpenAIResponsesModelsResponse>('/accounts/openai-responses/models', { method: 'POST', body: JSON.stringify(data) }),
   updateOpenAIResponsesAccount: (id: number, data: UpdateOpenAIResponsesAccountRequest) =>
     request<MessageResponse>(`/accounts/${id}/openai-responses`, { method: 'PATCH', body: JSON.stringify(data) }),
+  addOrcaRouterAccount: (data: AddOpenAIResponsesAccountRequest) =>
+    request<CreateAccountResponse>('/accounts/orcarouter', { method: 'POST', body: JSON.stringify(data) }),
+  fetchOrcaRouterModels: (data: FetchOpenAIResponsesModelsRequest) =>
+    request<FetchOpenAIResponsesModelsResponse>('/accounts/orcarouter/models', { method: 'POST', body: JSON.stringify(data) }),
+  updateOrcaRouterAccount: (id: number, data: UpdateOpenAIResponsesAccountRequest) =>
+    request<MessageResponse>(`/accounts/${id}/orcarouter`, { method: 'PATCH', body: JSON.stringify(data) }),
   addGrokAccount: (data: AddGrokAccountRequest) =>
     request<CreateAccountResponse>('/accounts/grok', { method: 'POST', body: JSON.stringify(data) }),
   fetchGrokModels: (data: AddGrokAccountRequest) =>

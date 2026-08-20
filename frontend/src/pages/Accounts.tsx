@@ -27,6 +27,7 @@ import {
   usePersistedPageSize,
 } from "../hooks/usePersistedPageSize";
 import { useToast } from "../hooks/useToast";
+import orcaRouterLogo from "../assets/providers/orcarouter.png";
 import type {
   AccountRow,
   AccountHealthBucket,
@@ -466,9 +467,9 @@ function parseModelTokens(value: string): string[] {
     });
 }
 
-/** Codex 官方 OAuth/AT 账号（非 OpenAI Responses 中转、非 Grok），即走 Codex 出站路径的账号。 */
+/** Codex 官方 OAuth/AT 账号（非 OpenAI Responses 中转、非 OrcaRouter、非 Grok），即走 Codex 出站路径的账号。 */
 function isCodexOfficialAccount(account: AccountRow): boolean {
-  return !account.openai_responses_api && !account.grok_api;
+  return !account.openai_responses_api && !account.orcarouter_api && !account.grok_api;
 }
 
 function codexFingerprintModeOptions(
@@ -647,7 +648,7 @@ function mergeModelLists(current: string[], incoming: string[]): string[] {
 }
 
 function formatAccountName(account: AccountRow): string {
-  if (account.openai_responses_api || account.grok_api) {
+  if (account.openai_responses_api || account.orcarouter_api || account.grok_api) {
     return account.name?.trim() || `ID ${account.id}`;
   }
   return account.email || account.name || `ID ${account.id}`;
@@ -1059,6 +1060,13 @@ const AccountTableRow = memo(function AccountTableRow({
                                 <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-card ring-1 ring-border shadow-sm">
                                   {account.openai_responses_api ? (
                                     <ModelLogo model="openai" variant="plain" size={17} />
+                                  ) : account.orcarouter_api ? (
+                                    <img
+                                      src={orcaRouterLogo}
+                                      alt="OrcaRouter"
+                                      className="size-5 object-contain"
+                                      draggable={false}
+                                    />
                                   ) : (
                                     <ChannelLogo channel="codex" size={32} className="rounded-lg" />
                                   )}
@@ -1073,7 +1081,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                       actions.openDetail(account);
                                     }}
                                   >
-                                    {account.openai_responses_api || account.grok_api
+                                    {account.openai_responses_api || account.orcarouter_api || account.grok_api
                                       ? formatAccountName(account)
                                       : formatAccountListEmail(account)}
                                   </button>
@@ -1106,6 +1114,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                   )}
                                   {(account.at_only ||
                                     account.openai_responses_api ||
+                                    account.orcarouter_api ||
                                     account.grok_api ||
                                     account.agent_identity ||
                                     account.locked ||
@@ -1128,6 +1137,11 @@ const AccountTableRow = memo(function AccountTableRow({
                                       {account.openai_responses_api && (
                                         <span className="inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-400 dark:ring-emerald-400/20">
                                           Responses API
+                                        </span>
+                                      )}
+                                      {account.orcarouter_api && (
+                                        <span className="inline-flex items-center gap-0.5 rounded-md bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 ring-1 ring-inset ring-teal-600/20 dark:bg-teal-950 dark:text-teal-400 dark:ring-teal-400/20">
+                                          OrcaRouter
                                         </span>
                                       )}
                                       {account.grok_api && (
@@ -1770,7 +1784,7 @@ export default function Accounts() {
     done: false,
   });
   const [addMethod, setAddMethod] = useState<
-    "rt" | "st" | "at" | "session" | "openai" | "oauth" | "agentIdentity"
+    "rt" | "st" | "at" | "session" | "openai" | "orcarouter" | "oauth" | "agentIdentity"
   >("oauth");
   const [agentIdentityJson, setAgentIdentityJson] = useState("");
   const [agentIdentityProxyUrl, setAgentIdentityProxyUrl] = useState("");
@@ -3232,7 +3246,11 @@ export default function Accounts() {
     if (!openAIForm.api_key.trim()) return;
     setOpenAIModelsLoading(true);
     try {
-      const result = await api.fetchOpenAIResponsesModels({
+      const fetchModels =
+        addMethod === "orcarouter"
+          ? api.fetchOrcaRouterModels
+          : api.fetchOpenAIResponsesModels;
+      const result = await fetchModels({
         base_url: openAIForm.base_url,
         api_key: openAIForm.api_key,
         proxy_url: openAIForm.proxy_url,
@@ -3373,16 +3391,24 @@ export default function Accounts() {
     }
     setSubmitting(true);
     try {
-      await api.addOpenAIResponsesAccount({
+      const payload = {
         ...openAIForm,
         models,
         model_mapping: parsedModelMapping.value,
         custom_headers: parsedCustomHeaders.value,
-      });
+      };
+      if (addMethod === "orcarouter") {
+        await api.addOrcaRouterAccount(payload);
+      } else {
+        await api.addOpenAIResponsesAccount(payload);
+      }
       showToast(t("accounts.addSuccess"));
       setShowAdd(false);
       setOpenAIForm({
-        base_url: "https://api.openai.com",
+        base_url:
+          addMethod === "orcarouter"
+            ? "https://api.orcarouter.ai/v1"
+            : "https://api.openai.com",
         api_key: "",
         models: [],
         codex_client_metadata_mode: "auto",
@@ -3405,10 +3431,13 @@ export default function Accounts() {
   };
 
   const handleFetchEditOpenAIModels = async () => {
-    if (!editingAccount?.openai_responses_api) return;
+    if (!editingAccount?.openai_responses_api && !editingAccount?.orcarouter_api) return;
     setEditOpenAIModelsLoading(true);
     try {
-      const result = await api.fetchOpenAIResponsesModels({
+      const fetchModels = editingAccount?.orcarouter_api
+        ? api.fetchOrcaRouterModels
+        : api.fetchOpenAIResponsesModels;
+      const result = await fetchModels({
         account_id: editingAccount.id,
         base_url: editOpenAIForm.base_url,
         api_key: editOpenAIForm.api_key ?? "",
@@ -3436,7 +3465,7 @@ export default function Accounts() {
   };
 
   const handleSaveOpenAIAccountSettings = async () => {
-    if (!editingAccount?.openai_responses_api) return;
+    if (!editingAccount?.openai_responses_api && !editingAccount?.orcarouter_api) return;
     if (!editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0) {
       showToast(t("accounts.openaiAccountInvalid"), "error");
       return;
@@ -3457,7 +3486,10 @@ export default function Accounts() {
     }
     setEditSubmitting(true);
     try {
-      await api.updateOpenAIResponsesAccount(editingAccount.id, {
+      const updateAccount = editingAccount?.orcarouter_api
+        ? api.updateOrcaRouterAccount
+        : api.updateOpenAIResponsesAccount;
+      await updateAccount(editingAccount.id, {
         ...editOpenAIForm,
         api_key: editOpenAIForm.api_key?.trim() || undefined,
         model_mapping: parsedModelMapping.value,
@@ -5313,7 +5345,7 @@ export default function Accounts() {
     batchAutoPause7dThresholdInput,
   );
   const openAIAccountInputInvalid = Boolean(
-    editingAccount?.openai_responses_api &&
+    (editingAccount?.openai_responses_api || editingAccount?.orcarouter_api) &&
     editTab === "account" &&
     (!editOpenAIForm.base_url.trim() || editOpenAIForm.models.length === 0),
   );
@@ -5426,7 +5458,7 @@ export default function Accounts() {
   };
 
   const handleSaveAccountEditor = async () => {
-    if (editingAccount?.openai_responses_api && editTab === "account") {
+    if ((editingAccount?.openai_responses_api || editingAccount?.orcarouter_api) && editTab === "account") {
       await handleSaveOpenAIAccountSettings();
       return;
     }
@@ -7193,7 +7225,7 @@ export default function Accounts() {
                   >
                     {submitting ? t("accounts.adding") : t("accounts.submit")}
                   </Button>
-                ) : addMethod === "openai" ? (
+                ) : addMethod === "openai" || addMethod === "orcarouter" ? (
                   <Button
                     onClick={() => void handleAddOpenAIResponses()}
                     disabled={
@@ -7307,6 +7339,23 @@ export default function Accounts() {
               >
                 <KeyRound className="size-3.5" />
                 {t("accounts.addMethodOpenAI")}
+              </button>
+              <button
+                onClick={() => {
+                  setAddMethod("orcarouter");
+                  setOpenAIForm((form) => ({
+                    ...form,
+                    base_url: "https://api.orcarouter.ai/v1",
+                  }));
+                }}
+                className={`min-w-0 flex-1 flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-sm font-semibold whitespace-nowrap transition-all ${
+                  addMethod === "orcarouter"
+                    ? "bg-background shadow-sm text-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                <KeyRound className="size-3.5" />
+                {t("accounts.addMethodOrcaRouter")}
               </button>
               <button
                 onClick={() => setAddMethod("agentIdentity")}
@@ -7457,13 +7506,19 @@ export default function Accounts() {
                   onChange: setAddCustomHeadersText,
                 })}
               </div>
-            ) : addMethod === "openai" ? (
+            ) : addMethod === "openai" || addMethod === "orcarouter" ? (
               <div className="space-y-4">
                 <div className="rounded-xl border border-border bg-muted/30 px-4 py-3 text-sm text-muted-foreground">
                   <p className="font-semibold text-foreground mb-1">
-                    {t("accounts.openaiResponsesTitle")}
+                    {addMethod === "orcarouter"
+                      ? t("accounts.orcaRouterResponsesTitle")
+                      : t("accounts.openaiResponsesTitle")}
                   </p>
-                  <p>{t("accounts.openaiResponsesDesc")}</p>
+                  <p>
+                    {addMethod === "orcarouter"
+                      ? t("accounts.orcaRouterResponsesDesc")
+                      : t("accounts.openaiResponsesDesc")}
+                  </p>
                 </div>
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
@@ -8508,6 +8563,7 @@ export default function Accounts() {
 
                 {/* 选项卡切换 */}
                 {(editingAccount.openai_responses_api ||
+                  editingAccount.orcarouter_api ||
                   isOAuthAccount(editingAccount)) && (
                   <div className="flex gap-1.5 rounded-xl border border-border/60 bg-muted/40 p-1.5 shadow-2xs">
                     <button
@@ -8538,12 +8594,16 @@ export default function Accounts() {
                 )}
 
                 {editTab === "account" &&
-                editingAccount.openai_responses_api ? (
+                (editingAccount.openai_responses_api || editingAccount.orcarouter_api) ? (
                   <div className="space-y-4">
                     <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
                       <div className="flex items-center gap-2 font-semibold text-foreground text-sm border-b border-border/50 pb-3">
                         <Settings2 className="size-4 text-primary" />
-                        <span>OpenAI Responses API 参数</span>
+                        <span>
+                          {editingAccount.orcarouter_api
+                            ? "OrcaRouter 网关参数"
+                            : "OpenAI Responses API 参数"}
+                        </span>
                       </div>
                       <div>
                         <label className="block mb-2 text-xs font-semibold text-muted-foreground">
@@ -10488,7 +10548,7 @@ function RecycleBinView({
   }, [load]);
 
   const stats = useMemo(() => {
-    const relay = rows.filter((row) => row.openai_responses_api).length;
+    const relay = rows.filter((row) => row.openai_responses_api || row.orcarouter_api).length;
     const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
     const recent24h = rows.filter((row) => {
       if (!row.deleted_at) return false;
@@ -11087,11 +11147,13 @@ function RecycleBinView({
                             <span className="font-medium">
                               {row.email || row.name || `ID ${row.id}`}
                             </span>
-                            {row.openai_responses_api && row.base_url ? (
-                              <span className="text-xs text-muted-foreground">
-                                {row.base_url}
-                              </span>
-                            ) : null}
+                            {row.openai_responses_api || row.orcarouter_api
+                              ? (row.base_url && (
+                                <span className="text-xs text-muted-foreground">
+                                  {row.base_url}
+                                </span>
+                              ))
+                              : null}
                           </div>
                         </TableCell>
                         <TableCell>
@@ -11102,7 +11164,7 @@ function RecycleBinView({
                         </TableCell>
                         <TableCell>
                           <Badge variant="secondary">
-                            {row.openai_responses_api
+                            {row.openai_responses_api || row.orcarouter_api
                               ? t("accounts.recycleBinTypeRelay")
                               : t("accounts.recycleBinTypeOauth")}
                           </Badge>
@@ -11299,6 +11361,7 @@ function recycleBinRowToAccountRow(row: RecycleBinAccountRow): AccountRow {
     plan_type: row.plan_type,
     status: "deleted",
     openai_responses_api: row.openai_responses_api,
+    orcarouter_api: row.orcarouter_api,
     base_url: row.base_url,
     models: row.models,
     proxy_url: "",
@@ -12676,11 +12739,12 @@ function AccountRowActionsMenu({
   onDelete: () => void;
 }) {
   const refreshDisabled =
-    refreshing || account.at_only || account.openai_responses_api;
+    refreshing || account.at_only || account.openai_responses_api || account.orcarouter_api;
   const authJsonDisabled =
     authJsonExporting ||
     account.at_only ||
     account.openai_responses_api ||
+    account.orcarouter_api ||
     account.grok_api ||
     account.agent_identity;
   const resetCredits = account.rate_limit_reset_credits ?? 0;
@@ -12706,7 +12770,7 @@ function AccountRowActionsMenu({
       ),
       disabled: refreshDisabled,
       title:
-        account.at_only || account.openai_responses_api
+        account.at_only || account.openai_responses_api || account.orcarouter_api
           ? t("accounts.atRefreshDisabled")
           : undefined,
       onSelect: onRefresh,
@@ -12719,6 +12783,7 @@ function AccountRowActionsMenu({
       title:
         account.at_only ||
         account.openai_responses_api ||
+        account.orcarouter_api ||
         account.grok_api ||
         account.agent_identity
           ? t("accounts.authJsonDisabled")
@@ -12768,7 +12833,7 @@ function AccountRowActionsMenu({
       onSelect: onResetCredits,
     },
     // 支持模型白名单仅适用于 OAuth(ChatGPT)账号,relay/Grok 账号不显示。
-    ...(onEditModels && !account.openai_responses_api && !account.grok_api
+    ...(onEditModels && !account.openai_responses_api && !account.orcarouter_api && !account.grok_api
       ? [
           {
             key: "edit-models",
@@ -13092,7 +13157,7 @@ function AccountMobileCard({
   // 成本列的官方胶囊点击后跳到用量弹窗的官方统计 tab。
   onOpenOfficialUsage?: () => void;
 }) {
-  const displayName = account.openai_responses_api
+  const displayName = account.openai_responses_api || account.orcarouter_api
     ? formatAccountName(account)
     : formatAccountListEmail(account);
   const fullName = formatAccountName(account);
@@ -13105,6 +13170,7 @@ function AccountMobileCard({
   const hasStateBadges =
     account.at_only ||
     account.openai_responses_api ||
+    account.orcarouter_api ||
     account.grok_api ||
     account.locked;
   const modelCooldownCount = account.model_cooldowns?.length ?? 0;
@@ -13266,6 +13332,11 @@ function AccountMobileCard({
                 {account.openai_responses_api && (
                   <span className="inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-400 dark:ring-emerald-400/20">
                     Responses API
+                  </span>
+                )}
+                {account.orcarouter_api && (
+                  <span className="inline-flex items-center gap-0.5 rounded-md bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 ring-1 ring-inset ring-teal-600/20 dark:bg-teal-950 dark:text-teal-400 dark:ring-teal-400/20">
+                    OrcaRouter
                   </span>
                 )}
                 {account.grok_api && (
@@ -13548,6 +13619,11 @@ function AccountMobileCard({
             {account.openai_responses_api && (
               <span className="inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 ring-1 ring-inset ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-400 dark:ring-emerald-400/20">
                 Responses API
+              </span>
+            )}
+            {account.orcarouter_api && (
+              <span className="inline-flex items-center gap-0.5 rounded-md bg-teal-50 px-1.5 py-0.5 text-[10px] font-medium text-teal-700 ring-1 ring-inset ring-teal-600/20 dark:bg-teal-950 dark:text-teal-400 dark:ring-teal-400/20">
+                OrcaRouter
               </span>
             )}
             {account.grok_api && (
@@ -13988,10 +14064,10 @@ function TestConnectionModal({
     onSettledRef.current();
   }, []);
 
-  // Grok 与 openai_responses 同属"账号自带模型清单"的 relay 风格账号，
+  // Grok 与 openai_responses/orcarouter 同属"账号自带模型清单"的 relay 风格账号，
   // 测试模型选择逻辑一致（用 account.models 而非上游 /v1/models 全量）。
   const isOpenAIResponsesAccount = Boolean(
-    account.openai_responses_api || account.grok_api,
+    account.openai_responses_api || account.orcarouter_api || account.grok_api,
   );
 
   const modelSelectOptions = useMemo(

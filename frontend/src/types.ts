@@ -102,6 +102,7 @@ export interface AccountRow {
   access_token_type?: string
   account_type?: string
   openai_responses_api?: boolean
+  orcarouter_api?: boolean
   grok_api?: boolean
   agent_identity?: boolean
   grok_auth_kind?: string
@@ -538,6 +539,7 @@ export interface RecycleBinAccountRow {
   at_only?: boolean
   access_token_type?: string
   openai_responses_api?: boolean
+  orcarouter_api?: boolean
   base_url?: string
   models?: string[]
   created_at: ISODateString

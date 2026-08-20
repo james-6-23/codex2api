@@ -1020,6 +1020,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/openai-responses", h.AddOpenAIResponsesAccount)
 	api.POST("/accounts/openai-responses/models", h.FetchOpenAIResponsesModels)
 	api.PATCH("/accounts/:id/openai-responses", h.UpdateOpenAIResponsesAccount)
+	api.POST("/accounts/orcarouter", h.AddOrcaRouterAccount)
+	api.POST("/accounts/orcarouter/models", h.FetchOrcaRouterModels)
+	api.PATCH("/accounts/:id/orcarouter", h.UpdateOrcaRouterAccount)
 	api.POST("/accounts/grok", h.AddGrokAccount)
 	api.POST("/accounts/grok/models", h.FetchGrokModels)
 	api.POST("/accounts/grok/batch-models", h.BatchUpdateGrokModels)
@@ -1404,7 +1407,7 @@ func isDashboardUnsampledAccount(row *database.AccountRow, acc *auth.Account) bo
 		return false
 	}
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
-	if strings.EqualFold(upstreamType, auth.UpstreamGrok) || strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses) {
+	if strings.EqualFold(upstreamType, auth.UpstreamGrok) || strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses) || strings.EqualFold(upstreamType, auth.UpstreamOrcaRouter) {
 		return false
 	}
 	status := strings.ToLower(strings.TrimSpace(row.Status))
@@ -1452,6 +1455,7 @@ type accountResponse struct {
 	AccountType                   string                      `json:"account_type,omitempty"`
 	AccessTokenType               string                      `json:"access_token_type,omitempty"`
 	OpenAIResponsesAPI            bool                        `json:"openai_responses_api,omitempty"`
+	OrcaRouterAPI                 bool                        `json:"orcarouter_api,omitempty"`
 	GrokAPI                       bool                        `json:"grok_api,omitempty"`
 	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
 	GrokAuthKind                  string                      `json:"grok_auth_kind,omitempty"`
@@ -1824,6 +1828,7 @@ type accountLiteResponse struct {
 	ProxyURL           string `json:"proxy_url"`
 	ATOnly             bool   `json:"at_only"`
 	OpenAIResponsesAPI bool   `json:"openai_responses_api"`
+	OrcaRouterAPI      bool   `json:"orcarouter_api"`
 	GrokAPI            bool   `json:"grok_api"`
 	AgentIdentity      bool   `json:"agent_identity"`
 	GrokAuthKind       string `json:"grok_auth_kind,omitempty"`
@@ -1847,6 +1852,8 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 	for _, row := range rows {
 		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
+		isOrcaRouterAccount := strings.EqualFold(upstreamType, auth.UpstreamOrcaRouter)
+		isRelayResponsesAccount := isOpenAIResponsesAccount || isOrcaRouterAccount
 		isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
 		grokAuthKind := ""
 		if isGrokAccount {
@@ -1857,11 +1864,11 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 			}
 		}
 		email := row.GetCredential("email")
-		if isOpenAIResponsesAccount && email == "" {
+		if isRelayResponsesAccount && email == "" {
 			email = row.GetCredential("base_url")
 		}
 		planType := row.GetCredential("plan_type")
-		if (isOpenAIResponsesAccount || (isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey)) && planType == "" {
+		if (isRelayResponsesAccount || (isGrokAccount && grokAuthKind == auth.GrokAuthKindAPIKey)) && planType == "" {
 			planType = "api"
 		}
 		status := row.Status
@@ -1876,8 +1883,9 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 			Status:             status,
 			Enabled:            row.Enabled,
 			ProxyURL:           row.ProxyURL,
-			ATOnly:             !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			ATOnly:             !isRelayResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 			OpenAIResponsesAPI: isOpenAIResponsesAccount,
+			OrcaRouterAPI:      isOrcaRouterAccount,
 			GrokAPI:            isGrokAccount,
 			AgentIdentity:      isAgentIdentityCredentialRow(row),
 			GrokAuthKind:       grokAuthKind,
@@ -3584,6 +3592,16 @@ type fetchOpenAIResponsesModelsReq struct {
 }
 
 func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
+	h.addResponsesAccount(c, auth.UpstreamOpenAIResponses, "openai-responses", "manual_openai_responses", "OPENAI_RESPONSES_ACCOUNT_ADDED", "成功添加 OpenAI Responses API 账号")
+}
+
+func (h *Handler) AddOrcaRouterAccount(c *gin.Context) {
+	h.addResponsesAccount(c, auth.UpstreamOrcaRouter, "orcarouter", "manual_orcarouter", "ORCAROUTER_ACCOUNT_ADDED", "成功添加 OrcaRouter 网关账号")
+}
+
+// addResponsesAccount 添加一个 OpenAI-Responses 兼容上游账号。openai_responses 与
+// orcarouter 共用同一套校验与存储逻辑，仅 upstream_type / 命名 / 审计日志不同。
+func (h *Handler) addResponsesAccount(c *gin.Context, upstreamType, defaultName, eventAction, auditEvent, successMsg string) {
 	var req addOpenAIResponsesAccountReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
@@ -3660,10 +3678,10 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 
 	name := req.Name
 	if name == "" {
-		name = "openai-responses"
+		name = defaultName
 	}
 	credentials := map[string]interface{}{
-		"upstream_type":              auth.UpstreamOpenAIResponses,
+		"upstream_type":              upstreamType,
 		"base_url":                   baseURL,
 		"api_key":                    req.APIKey,
 		"models":                     models,
@@ -3675,18 +3693,23 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 	if len(customHeaders) > 0 {
 		credentials["custom_headers"] = cloneCustomHeaders(customHeaders)
 	}
-	id, err := h.db.InsertOpenAIResponsesAccount(ctx, name, credentials, req.ProxyURL)
+	var id int64
+	if upstreamType == auth.UpstreamOrcaRouter {
+		id, err = h.db.InsertOrcaRouterAccount(ctx, name, credentials, req.ProxyURL)
+	} else {
+		id, err = h.db.InsertOpenAIResponsesAccount(ctx, name, credentials, req.ProxyURL)
+	}
 	if err != nil {
 		writeInternalError(c, err)
 		return
 	}
-	h.db.InsertAccountEventAsync(id, "added", "manual_openai_responses")
+	h.db.InsertAccountEventAsync(id, "added", eventAction)
 
 	h.store.AddAccount(&auth.Account{
 		DBID:                    id,
 		ProxyURL:                req.ProxyURL,
 		HealthTier:              auth.HealthTierHealthy,
-		UpstreamType:            auth.UpstreamOpenAIResponses,
+		UpstreamType:            upstreamType,
 		BaseURL:                 baseURL,
 		APIKey:                  req.APIKey,
 		Models:                  models,
@@ -3697,14 +3720,22 @@ func (h *Handler) AddOpenAIResponsesAccount(c *gin.Context) {
 		PlanType:                "api",
 	})
 
-	security.SecurityAuditLog("OPENAI_RESPONSES_ACCOUNT_ADDED", fmt.Sprintf("account_id=%d models=%d ip=%s", id, len(models), c.ClientIP()))
+	security.SecurityAuditLog(auditEvent, fmt.Sprintf("account_id=%d models=%d ip=%s", id, len(models), c.ClientIP()))
 	c.JSON(http.StatusOK, gin.H{
-		"message": "成功添加 OpenAI Responses API 账号",
+		"message": successMsg,
 		"id":      id,
 	})
 }
 
 func (h *Handler) FetchOpenAIResponsesModels(c *gin.Context) {
+	h.fetchResponsesModels(c, auth.UpstreamOpenAIResponses)
+}
+
+func (h *Handler) FetchOrcaRouterModels(c *gin.Context) {
+	h.fetchResponsesModels(c, auth.UpstreamOrcaRouter)
+}
+
+func (h *Handler) fetchResponsesModels(c *gin.Context, upstreamType string) {
 	var req fetchOpenAIResponsesModelsReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
@@ -3723,8 +3754,8 @@ func (h *Handler) FetchOpenAIResponsesModels(c *gin.Context) {
 			writeInternalError(c, err)
 			return
 		}
-		if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses) {
-			writeError(c, http.StatusBadRequest, "仅 OpenAI Responses API 账号支持使用已保存的 API Key 获取模型")
+		if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), upstreamType) {
+			writeError(c, http.StatusBadRequest, "该上游账号不支持使用已保存的 API Key 获取模型")
 			return
 		}
 		req.APIKey = row.GetCredential("api_key")
@@ -3771,6 +3802,14 @@ func (h *Handler) FetchOpenAIResponsesModels(c *gin.Context) {
 }
 
 func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
+	h.updateResponsesAccount(c, auth.UpstreamOpenAIResponses, "openai-responses", "manual_openai_responses", "OpenAI Responses API 账号设置已更新")
+}
+
+func (h *Handler) UpdateOrcaRouterAccount(c *gin.Context) {
+	h.updateResponsesAccount(c, auth.UpstreamOrcaRouter, "orcarouter", "manual_orcarouter", "OrcaRouter 网关账号设置已更新")
+}
+
+func (h *Handler) updateResponsesAccount(c *gin.Context, upstreamType, defaultName, eventAction, successMsg string) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
 		writeError(c, http.StatusBadRequest, "无效的账号 ID")
@@ -3797,8 +3836,8 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
-	if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses) {
-		writeError(c, http.StatusBadRequest, "仅 OpenAI Responses API 账号支持账号设置")
+	if !strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), upstreamType) {
+		writeError(c, http.StatusBadRequest, "仅匹配的上游账号支持账号设置")
 		return
 	}
 
@@ -3854,11 +3893,11 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		name = row.Name
 	}
 	if name == "" {
-		name = "openai-responses"
+		name = defaultName
 	}
 
 	credentials := map[string]interface{}{
-		"upstream_type":              auth.UpstreamOpenAIResponses,
+		"upstream_type":              upstreamType,
 		"base_url":                   baseURL,
 		"models":                     models,
 		"model_mapping":              modelMapping,
@@ -3875,7 +3914,12 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		return
 	}
 
-	if err := h.db.UpdateOpenAIResponsesAccount(ctx, id, name, credentials, req.ProxyURL); err != nil {
+	if upstreamType == auth.UpstreamOrcaRouter {
+		err = h.db.UpdateOrcaRouterAccount(ctx, id, name, credentials, req.ProxyURL)
+	} else {
+		err = h.db.UpdateOpenAIResponsesAccount(ctx, id, name, credentials, req.ProxyURL)
+	}
+	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "账号不存在")
 			return
@@ -3887,9 +3931,9 @@ func (h *Handler) UpdateOpenAIResponsesAccount(c *gin.Context) {
 		h.store.ApplyOpenAIResponsesConfig(id, baseURL, req.APIKey, models, modelMapping, codexClientMetadataMode, req.ProxyURL)
 		h.store.ApplyAccountCustomHeaders(id, customHeaders)
 	}
-	h.db.InsertAccountEventAsync(id, "updated", "manual_openai_responses")
+	h.db.InsertAccountEventAsync(id, "updated", eventAction)
 
-	writeMessage(c, http.StatusOK, "OpenAI Responses API 账号设置已更新")
+	writeMessage(c, http.StatusOK, successMsg)
 }
 
 func fetchOpenAIResponsesModelIDs(ctx context.Context, baseURL, apiKey, proxyURL string, customHeaders map[string]string) ([]string, error) {
@@ -5532,6 +5576,7 @@ type recycleBinAccountResponse struct {
 	ATOnly             bool     `json:"at_only"`
 	AccessTokenType    string   `json:"access_token_type,omitempty"`
 	OpenAIResponsesAPI bool     `json:"openai_responses_api"`
+	OrcaRouterAPI      bool     `json:"orcarouter_api"`
 	BaseURL            string   `json:"base_url,omitempty"`
 	Models             []string `json:"models,omitempty"`
 	CreatedAt          string   `json:"created_at"`
@@ -5554,14 +5599,17 @@ func (h *Handler) ListRecycleBinAccounts(c *gin.Context) {
 
 	accounts := make([]recycleBinAccountResponse, 0, len(rows))
 	for _, row := range rows {
-		isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamOpenAIResponses)
+		upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
+		isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
+		isOrcaRouterAccount := strings.EqualFold(upstreamType, auth.UpstreamOrcaRouter)
+		isRelayResponsesAccount := isOpenAIResponsesAccount || isOrcaRouterAccount
 		email := row.GetCredential("email")
 		baseURL := row.GetCredential("base_url")
-		if isOpenAIResponsesAccount && email == "" {
+		if isRelayResponsesAccount && email == "" {
 			email = baseURL
 		}
 		planType := row.GetCredential("plan_type")
-		if isOpenAIResponsesAccount && planType == "" {
+		if isRelayResponsesAccount && planType == "" {
 			planType = "api"
 		}
 		resp := recycleBinAccountResponse{
@@ -5569,9 +5617,10 @@ func (h *Handler) ListRecycleBinAccounts(c *gin.Context) {
 			Name:               row.Name,
 			Email:              email,
 			PlanType:           planType,
-			ATOnly:             !isOpenAIResponsesAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+			ATOnly:             !isRelayResponsesAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 			AccessTokenType:    accountAccessTokenType(row),
 			OpenAIResponsesAPI: isOpenAIResponsesAccount,
+			OrcaRouterAPI:      isOrcaRouterAccount,
 			BaseURL:            baseURL,
 			Models:             row.GetCredentialStringSlice("models"),
 			CreatedAt:          row.CreatedAt.Format(time.RFC3339),

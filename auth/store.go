@@ -47,6 +47,12 @@ const (
 
 const UpstreamOpenAIResponses = "openai_responses"
 
+// UpstreamOrcaRouter marks OrcaRouter gateway accounts (upstream_type credential
+// value). It behaves exactly like openai_responses at dispatch time — OrcaRouter
+// is an OpenAI-Responses compatible gateway — but is surfaced as its own named
+// provider in the admin UI so operators can recognize OrcaRouter-pooled accounts.
+const UpstreamOrcaRouter = "orcarouter"
+
 const (
 	CodexClientMetadataModeAuto   = "auto"
 	CodexClientMetadataModeAlways = "always"
@@ -418,9 +424,37 @@ func (a *Account) isOpenAIResponsesAPILocked() bool {
 	if a == nil {
 		return false
 	}
-	return strings.EqualFold(strings.TrimSpace(a.UpstreamType), UpstreamOpenAIResponses) &&
+	return a.isRelayOpenAIResponsesUpstream() &&
 		strings.TrimSpace(a.BaseURL) != "" &&
 		strings.TrimSpace(a.APIKey) != ""
+}
+
+// isRelayOpenAIResponsesUpstream 判断上游类型是否走 OpenAI Responses 派发路径：
+// openai_responses（BYO OpenAI 兼容端点）与 orcarouter（OrcaRouter 网关）共用同一套
+// Responses executor / scoped-model / compact 逻辑，仅命名与展示不同。
+func (a *Account) isRelayOpenAIResponsesUpstream() bool {
+	if a == nil {
+		return false
+	}
+	upstream := strings.TrimSpace(a.UpstreamType)
+	return strings.EqualFold(upstream, UpstreamOpenAIResponses) || strings.EqualFold(upstream, UpstreamOrcaRouter)
+}
+
+// isOrcaRouterUpstream 判断该上游类型是否为 OrcaRouter。OrcaRouter 走与
+// openai_responses 完全相同的 Responses 派发路径（见 isRelayOpenAIResponsesUpstream）。
+func (a *Account) isOrcaRouterUpstream() bool {
+	return a != nil && strings.EqualFold(strings.TrimSpace(a.UpstreamType), UpstreamOrcaRouter)
+}
+
+// IsOrcaRouterAPI 报告该账号是否为命名 OrcaRouter 上游（upstream_type=orcarouter）。
+// 用于管理端展示命名 badge 与专用编辑表单；运行时派发与 openai_responses 完全一致。
+func (a *Account) IsOrcaRouterAPI() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.isOrcaRouterUpstream() && strings.TrimSpace(a.BaseURL) != "" && strings.TrimSpace(a.APIKey) != ""
 }
 
 func (a *Account) hasDispatchCredentialLocked() bool {
@@ -4697,7 +4731,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	modelMapping := strings.TrimSpace(row.GetCredential("model_mapping"))
 	codexClientMetadataMode := NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
 	codexFingerprintMode := NormalizeCodexFingerprintMode(row.GetCredential(CodexFingerprintModeCredentialKey))
-	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
+	isOpenAIResponsesAccount := (strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) || strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOrcaRouter)) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
 	isAgentIdentityAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("auth_mode")), CodexAuthModeAgentIdentity) &&
@@ -5007,15 +5041,22 @@ const (
 	dispatchStateReconcileTimeout = 30 * time.Second
 )
 
+// isRelayOpenAIResponsesUpstreamString 报告一个 upstream_type 字符串是否走 OpenAI
+// Responses 派发路径：openai_responses 与 orcarouter 共用同一套 Responses 执行器。
+func isRelayOpenAIResponsesUpstreamString(upstream string) bool {
+	return strings.EqualFold(strings.TrimSpace(upstream), UpstreamOpenAIResponses) ||
+		strings.EqualFold(strings.TrimSpace(upstream), UpstreamOrcaRouter)
+}
+
 func openAIResponsesRuntimeConfigDiffers(acc *Account, row *database.AccountRow) bool {
 	if acc == nil || row == nil ||
-		!strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), UpstreamOpenAIResponses) {
+		!isRelayOpenAIResponsesUpstreamString(strings.TrimSpace(row.GetCredential("upstream_type"))) {
 		return false
 	}
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
 	return acc.CredentialGeneration != row.CredentialGeneration ||
-		!strings.EqualFold(strings.TrimSpace(acc.UpstreamType), UpstreamOpenAIResponses) ||
+		!isRelayOpenAIResponsesUpstreamString(strings.TrimSpace(acc.UpstreamType)) ||
 		strings.TrimRight(strings.TrimSpace(acc.BaseURL), "/") != strings.TrimRight(strings.TrimSpace(row.GetCredential("base_url")), "/") ||
 		strings.TrimSpace(acc.APIKey) != strings.TrimSpace(row.GetCredential("api_key")) ||
 		!stringSliceEqual(acc.Models, normalizeModelList(row.GetCredentialStringSlice("models"))) ||
@@ -8031,7 +8072,7 @@ func (s *Store) ApplyOpenAIResponsesConfig(dbID int64, baseURL, apiKey string, m
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		if row, err := s.db.GetAccountByID(ctx, dbID); err == nil &&
-			strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), UpstreamOpenAIResponses) {
+			isRelayOpenAIResponsesUpstreamString(strings.TrimSpace(row.GetCredential("upstream_type"))) {
 			return s.applyOpenAIResponsesConfig(ctx, row, dbID, baseURL, apiKey, models, modelMapping, codexClientMetadataMode, proxyURL)
 		}
 	}
@@ -8047,9 +8088,11 @@ func (s *Store) applyOpenAIResponsesConfig(ctx context.Context, row *database.Ac
 	normalizedBaseURL := strings.TrimRight(strings.TrimSpace(baseURL), "/")
 	effectiveAPIKey := strings.TrimSpace(apiKey)
 	credentialGeneration := int64(0)
+	upstreamType := UpstreamOpenAIResponses
 	loadedPersistedConfig := row != nil &&
-		strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), UpstreamOpenAIResponses)
+		isRelayOpenAIResponsesUpstreamString(strings.TrimSpace(row.GetCredential("upstream_type")))
 	if loadedPersistedConfig {
+		upstreamType = strings.TrimSpace(row.GetCredential("upstream_type"))
 		normalizedBaseURL = strings.TrimRight(strings.TrimSpace(row.GetCredential("base_url")), "/")
 		effectiveAPIKey = strings.TrimSpace(row.GetCredential("api_key"))
 		models = row.GetCredentialStringSlice("models")
@@ -8057,13 +8100,15 @@ func (s *Store) applyOpenAIResponsesConfig(ctx context.Context, row *database.Ac
 		codexClientMetadataMode = row.GetCredential("codex_client_metadata_mode")
 		proxyURL = row.ProxyURL
 		credentialGeneration = row.CredentialGeneration
+	} else if acc.isOrcaRouterUpstream() {
+		upstreamType = UpstreamOrcaRouter
 	}
 
 	acc.mu.Lock()
 	identityChanged := normalizedBaseURL != strings.TrimRight(strings.TrimSpace(acc.BaseURL), "/") ||
 		((loadedPersistedConfig || effectiveAPIKey != "") && effectiveAPIKey != strings.TrimSpace(acc.APIKey)) ||
 		(credentialGeneration > 0 && credentialGeneration != acc.CredentialGeneration)
-	acc.UpstreamType = UpstreamOpenAIResponses
+	acc.UpstreamType = upstreamType
 	acc.BaseURL = normalizedBaseURL
 	if loadedPersistedConfig || effectiveAPIKey != "" {
 		acc.APIKey = effectiveAPIKey
