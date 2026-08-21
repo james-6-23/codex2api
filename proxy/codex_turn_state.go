@@ -52,6 +52,47 @@ func relayCodexTurnStateResponseHeader(c *gin.Context, affinityKey string, accou
 	noteCodexTurnStateProvenance(affinityKey, account)
 }
 
+// commitResponsesStreamAttempt publishes the winning account's turn-state only
+// when a retry heartbeat has not already committed the HTTP headers. The token
+// must not be exposed before the attempt reaches a successful terminal because
+// a later failover may use another account. If a heartbeat already committed
+// the response, no documented Responses event is equivalent to this header, so
+// the token is intentionally omitted instead of leaking stale account state.
+func (h *Handler) commitResponsesStreamAttempt(c *gin.Context, attempt *continuousRetryStreamAttempt, affinityKey string, account *auth.Account, headers http.Header) error {
+	if attempt == nil {
+		return h.commitStreamAttempt(c, attempt)
+	}
+
+	token := ""
+	stagedHeader := false
+	if headers != nil {
+		token = strings.TrimSpace(headers.Get(codexTurnStateHeader))
+	}
+	if c != nil && c.Writer != nil && !c.Writer.Written() {
+		stagedHeader = true
+		if token == "" {
+			c.Writer.Header().Del(codexTurnStateHeader)
+		} else {
+			c.Header(codexTurnStateHeader, token)
+		}
+	}
+
+	if err := h.commitStreamAttempt(c, attempt); err != nil {
+		// Headers are staged before replay/filter commit; remove the token on
+		// failure so local replay errors cannot expose turn state or provenance.
+		// Header 会先于回放/过滤提交暂存；失败时移除 token，避免本地回放错误
+		// 暴露账号绑定的续链状态或出处数据。
+		if stagedHeader && c != nil && c.Writer != nil && !c.Writer.Written() {
+			c.Writer.Header().Del(codexTurnStateHeader)
+		}
+		return err
+	}
+	if stagedHeader && token != "" {
+		noteCodexTurnStateProvenance(affinityKey, account)
+	}
+	return nil
+}
+
 // guardCodexTurnStateEcho 出站守卫:客户端回带的 turn-state 若已知由其他账号
 // 铸造则从下游头剥离(HTTP 直传与 WS 握手都从这份头取值),同账号或无溯源
 // 记录时保持原样。按 attempt 调用:failover 换号后同一请求的下一次尝试必须

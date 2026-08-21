@@ -199,6 +199,69 @@ func TestMessagesStreamPreContentBreakRetriesTransparently(t *testing.T) {
 	}
 }
 
+func TestMessagesCatchAllDiscardsOutputFromFailedAttempt(t *testing.T) {
+	enableCatchAllContinuousRetry(t)
+	handler, calls := newAnthropicStreamFailureTestHandler(t, func(call int32, w http.ResponseWriter) {
+		if call == 1 {
+			writeCodexSSE(w,
+				`{"type":"response.created","response":{"id":"resp_failed"}}`,
+				`{"type":"response.output_item.added","item":{"type":"message"}}`,
+				`{"type":"response.output_text.delta","delta":"failed-message-partial"}`,
+				`{"type":"response.failed","response":{"status":"failed","status_code":503,"error":{"code":"server_error","message":"must stay upstream"}}}`,
+			)
+			return
+		}
+		writeCodexSSE(w,
+			`{"type":"response.created","response":{"id":"resp_success"}}`,
+			`{"type":"response.output_item.added","item":{"type":"message"}}`,
+			`{"type":"response.output_text.delta","delta":"successful-message"}`,
+			`{"type":"response.completed","response":{"id":"resp_success","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		)
+	})
+
+	recorder := invokeAnthropicMessagesStream(t, handler)
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, "successful-message") || !strings.Contains(body, "message_stop") {
+		t.Fatalf("successful Messages replay missing: %q", body)
+	}
+	if strings.Contains(body, "failed-message-partial") || strings.Contains(body, "must stay upstream") || strings.Contains(body, "event: error") {
+		t.Fatalf("failed Messages attempt leaked downstream: %q", body)
+	}
+}
+
+func TestMessagesCatchAllDiscardsExplicitErrorEventAfterPartialOutput(t *testing.T) {
+	enableCatchAllContinuousRetry(t)
+	handler, calls := newAnthropicStreamFailureTestHandler(t, func(call int32, w http.ResponseWriter) {
+		if call == 1 {
+			_, _ = io.WriteString(w,
+				"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n"+
+					"data: {\"type\":\"response.output_text.delta\",\"delta\":\"failed-message-error-partial\"}\n\n"+
+					"event: error\ndata: {\"error\":{\"code\":\"future_error\",\"message\":\"must stay upstream\"}}\n\n")
+			return
+		}
+		writeCodexSSE(w,
+			`{"type":"response.output_item.added","item":{"type":"message"}}`,
+			`{"type":"response.output_text.delta","delta":"successful-message-after-error"}`,
+			`{"type":"response.completed","response":{"id":"resp_success","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		)
+	})
+
+	recorder := invokeAnthropicMessagesStream(t, handler)
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, "successful-message-after-error") || !strings.Contains(body, "message_stop") {
+		t.Fatalf("successful Messages replay missing: %q", body)
+	}
+	if strings.Contains(body, "failed-message-error-partial") || strings.Contains(body, "must stay upstream") || strings.Contains(body, "future_error") || strings.Contains(body, "event: error") {
+		t.Fatalf("explicit Messages error event attempt leaked downstream: %q", body)
+	}
+}
+
 // TestMessagesEntryRejectionLogsToConsole 验证 issue #435 修复：
 // 入口校验拒绝（缺 model 等）必须打控制台日志，否则"请求发不进来"在网关侧不可见。
 func TestMessagesEntryRejectionLogsToConsole(t *testing.T) {

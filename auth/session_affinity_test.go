@@ -479,6 +479,40 @@ func TestWaitForSessionAvailableKeepsWaitingWhenCandidateIsBusy(t *testing.T) {
 	}
 }
 
+func TestWaitForSessionAvailableVariantsRespectContextCancellation(t *testing.T) {
+	account := &Account{DBID: 1, AccessToken: "tok-1"}
+	store := &Store{accounts: []*Account{account}, maxConcurrency: 1}
+	atomic.StoreInt64(&account.ActiveRequests, 1)
+	tests := []struct {
+		name string
+		wait func(context.Context) (*Account, string)
+	}{
+		{name: "base", wait: func(ctx context.Context) (*Account, string) {
+			return store.WaitForSessionAvailable(ctx, "", time.Hour, 0, nil)
+		}},
+		{name: "filter", wait: func(ctx context.Context) (*Account, string) {
+			return store.WaitForSessionAvailableWithFilter(ctx, "", time.Hour, 0, nil, nil)
+		}},
+		{name: "dispatch", wait: func(ctx context.Context) (*Account, string) {
+			return store.WaitForSessionAvailableWithDispatch(ctx, "", time.Hour, 0, nil, nil, DispatchPolicy(0))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			selected, _ := tc.wait(ctx)
+			if selected != nil {
+				t.Fatalf("selected busy account %+v", selected)
+			}
+			if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+				t.Fatalf("wait ignored context cancellation for %s", elapsed)
+			}
+		})
+	}
+}
+
 func TestUnbindSessionAffinityRemovesMatchingBinding(t *testing.T) {
 	boundAccount := &Account{DBID: 2, AccessToken: "tok-2", ProxyURL: "http://proxy-2", Disabled: 1}
 	store := &Store{

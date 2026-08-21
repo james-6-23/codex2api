@@ -178,12 +178,15 @@ func TestStreamImagesResponseUpscalesCompletedEvent(t *testing.T) {
 	handler := &Handler{}
 	plan := imageUpscalePlan{Scale: "2k", RequestedSize: "2048x2048"}
 
-	_, imageCount, _, imageLogInfo, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2-2k", time.Now(), plan)
+	_, imageCount, _, imageLogInfo, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2-2k", time.Now(), plan)
 	if err != nil {
 		t.Fatalf("streamImagesResponse returned error: %v", err)
 	}
 	if imageCount != 1 {
 		t.Fatalf("imageCount = %d, want 1", imageCount)
+	}
+	if !wroteImageOutput {
+		t.Fatal("wroteImageOutput = false, want true after completed image event")
 	}
 	if imageLogInfo.Width != 2048 || imageLogInfo.Height != 2048 {
 		t.Fatalf("imageLogInfo size = %dx%d, want 2048x2048", imageLogInfo.Width, imageLogInfo.Height)

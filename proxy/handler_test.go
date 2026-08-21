@@ -844,8 +844,10 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 	completedSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_new\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
 
 	cases := []struct {
-		name     string
-		rejected func() *http.Response
+		name            string
+		preflight       bool
+		continuousRetry bool
+		rejected        func() *http.Response
 	}{
 		{
 			name: "http status rejection",
@@ -854,6 +856,18 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 					StatusCode: http.StatusBadRequest,
 					Header:     make(http.Header),
 					Body:       io.NopCloser(strings.NewReader(previousResponseNotFoundBody)),
+				}
+			},
+		},
+		{
+			name:            "in-stream error with catch-all replay",
+			continuousRetry: true,
+			rejected: func() *http.Response {
+				sse := "event: error\ndata: {\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"message\":\"Previous response with id 'resp_stale' not found.\"}\n\n"
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(sse)),
 				}
 			},
 		},
@@ -873,7 +887,8 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 		{
 			// 真实 ChatGPT WS 几乎总会先推 rate_limits / metadata。本机 2004 还开了
 			// loose + preflight passthrough，这两帧会先落到客户端。降级不能被它们挡住。
-			name: "in-stream response.failed after preflight",
+			name:      "in-stream response.failed after preflight",
+			preflight: true,
 			rejected: func() *http.Response {
 				sse := "data: {\"type\":\"codex.rate_limits\",\"plan_type\":\"plus\"}\n\n" +
 					"data: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-codex-turn-state\":\"turn\"}}\n\n" +
@@ -890,11 +905,18 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
-			if tc.name == "in-stream response.failed after preflight" {
+			if tc.preflight || tc.continuousRetry {
 				prev := CurrentRuntimeSettings()
 				next := prev
-				next.FirstTokenMode = FirstTokenModeLoose
-				next.CodexPreflightSSEPassthrough = true
+				if tc.preflight {
+					next.FirstTokenMode = FirstTokenModeLoose
+					next.CodexPreflightSSEPassthrough = true
+				}
+				if tc.continuousRetry {
+					next.CodexWSSilentRetry = false
+					next.CodexWSSilentRetries = 0
+					next.ContinuousRetryPolicy = database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+				}
 				ApplyRuntimeSettings(next)
 				t.Cleanup(func() { ApplyRuntimeSettings(prev) })
 			}
@@ -2503,6 +2525,84 @@ func TestResponsesCompactOpenAIReadErrorRetryReturnsBadGateway(t *testing.T) {
 	}
 	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.message").String(); !strings.Contains(got, "Failed to read upstream response") {
 		t.Fatalf("error.message = %q, want read failure; body=%s", got, recorder.Body.String())
+	}
+}
+
+func TestResponsesCompactReadCancellationDoesNotPenalizeAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	t.Cleanup(func() {
+		UpdateRuntimeSettings(func(RuntimeSettings) RuntimeSettings { return previousRuntime })
+	})
+	UpdateRuntimeSettings(func(current RuntimeSettings) RuntimeSettings {
+		current.ContinuousRetryPolicy = database.ContinuousRetryPolicy{
+			Enabled:    true,
+			Categories: []string{database.ContinuousRetryCategoryTransport},
+		}
+		return current
+	})
+
+	responseStarted := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"partial"`))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		responseStarted <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      1,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	defer store.Stop()
+	account := &auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "test-direct-key",
+		Models:       []string{"gpt-4.1-direct"},
+		PlanType:     "api",
+		Status:       auth.StatusReady,
+	}
+	store.AddAccount(account)
+	handler := NewHandler(store, nil, nil, nil)
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewBufferString(`{"model":"gpt-4.1-direct","input":"hello"}`)).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = req
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ResponsesCompact(ginContext)
+	}()
+	select {
+	case <-responseStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("timed out waiting for compact response body")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compact handler did not stop after downstream cancellation")
+	}
+
+	if account.FailureStreak != 0 || account.LastFailureKind != "" {
+		t.Fatalf("downstream cancellation penalized account: streak=%d kind=%q", account.FailureStreak, account.LastFailureKind)
+	}
+	if got := atomic.LoadInt64(&account.ActiveRequests); got != 0 {
+		t.Fatalf("ActiveRequests after cancellation = %d, want 0", got)
 	}
 }
 

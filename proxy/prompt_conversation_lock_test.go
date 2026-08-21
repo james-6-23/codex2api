@@ -126,6 +126,43 @@ func TestExplicitUpstreamCYBLocksOnlyTheSignedConversation(t *testing.T) {
 	}
 }
 
+func TestContinuousRetryCatchAllRetainsCYBLockAndUserCooldown(t *testing.T) {
+	previousRuntime := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+	ApplyRuntimeSettings(nextRuntime)
+
+	handler, db := newPromptConversationLockTestHandler(t)
+	body := []byte(`{"model":"gpt-5.5","input":"ordinary request"}`)
+	fingerprint := "0123456789abcdef0123456789abcdef"
+	c := signedBoundNewAPIPolicyContext(t, "catch-all-cyb-no-lock", newAPIIdentity{
+		UserID: "42", ClientIP: "203.0.113.8",
+	}, body, 101, "gateway-a", "gateway-a-secret", fingerprint)
+	setIngressRequestBodyIfAbsent(c, body)
+
+	_, accepted := handler.logUpstreamCyberPolicy(c, "/v1/responses", "gpt-5.5", []byte(`{"error":{"code":"cyber_policy"}}`))
+	metadata, delegated := newAPIUpstreamCyberPolicyDecision(c)
+	if !delegated || !metadata.ConversationLocked {
+		t.Fatalf("catch-all CYB decision = %+v delegated=%t", metadata, delegated)
+	}
+	if !accepted {
+		t.Fatal("catch-all CYB was not retained in the local audit queue")
+	}
+	policyContext, verified := handler.verifyNewAPIPolicyContext(c, handler.promptFilterConfigForRequest(c).Advanced.NewAPI, body)
+	lockIdentity, ok := verifiedPromptConversationLockIdentity(c, policyContext)
+	if !verified || !ok {
+		t.Fatal("signed session identity was not available")
+	}
+	if lock, err := db.GetActivePromptConversationLock(t.Context(), lockIdentity.LockKey); err != nil || lock.NewAPIUserID != "42" {
+		t.Fatalf("catch-all CYB conversation lock = %#v err=%v", lock, err)
+	}
+	cooldown, exact, err := db.GetActivePromptConversationRestriction(t.Context(), "", "gateway-a", "42", 24*time.Hour, 30*time.Minute)
+	if err != nil || exact || cooldown.NewAPIUserID != "42" {
+		t.Fatalf("catch-all CYB user cooldown = %#v exact=%t err=%v", cooldown, exact, err)
+	}
+}
+
 func TestPromptCyberRestrictionDerivesAuditReferenceForLegacyLocalLock(t *testing.T) {
 	requestID := "298ee1bb-ad0f-4e96-8924-d34066def71e"
 	restriction := promptCyberRestrictionDecision(&database.PromptConversationLock{

@@ -498,6 +498,10 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 	// storage failure must not turn a verified upstream CYB into an untracked one.
 	metadata, delegated := h.emitNewAPIUpstreamCyberPolicyDecision(c, endpoint, model, body)
 	if delegated {
+		// 明确的上游 CYB 始终保留会话锁与用户冷却；catch-all 不能把安全终态
+		// 降级成可透明轮换的中间失败。
+		// Explicit upstream CYB always retains the conversation lock and user
+		// cooldown; catch-all cannot downgrade this safety terminal.
 		metadata.ConversationLocked = h.lockPromptConversationAfterUpstreamCYB(c, endpoint, model, incidentID, metadata)
 		c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
 	}

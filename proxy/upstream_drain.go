@@ -32,6 +32,10 @@ func newDrainableUpstreamContext(clientCtx context.Context, drainTimeout time.Du
 	go func() {
 		select {
 		case <-clientCtx.Done():
+			if continuousRetryDeadlineExceeded(clientCtx) {
+				cancelUpstream()
+				return
+			}
 			timer := time.NewTimer(drainTimeout)
 			defer timer.Stop()
 			select {

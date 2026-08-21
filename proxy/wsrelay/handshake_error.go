@@ -15,7 +15,7 @@ const handshakeErrorBodyLimit = 4 << 10 // 4 KiB
 
 // HandshakeHTTPError 是握手阶段收到上游 HTTP 错误响应时的结构化错误：
 // 除人类可读的错误文本外，保留原始状态码、响应头与规范化后的 JSON body，
-// 供上层把鉴权失败（401）还原成真实状态码处理，而不是笼统的 transport 错误。
+// 供上层把鉴权/限流失败还原成真实状态码处理，而不是笼统的 transport 错误。
 type HandshakeHTTPError struct {
 	StatusCode int
 	Header     http.Header
@@ -27,22 +27,43 @@ type HandshakeHTTPError struct {
 
 func (e *HandshakeHTTPError) Error() string { return e.msg }
 
-// handshakeAccountErrorHTTPResponse 把握手阶段的账号维度错误转换成携带真实状态码
-// 与上游原始错误体的 HTTP 响应，让调用方复用既有非 2xx 分支：usage log 记真实
-// 状态码、applyCooldownForModel 的 unauthorized 冷却 / missing_scope 特判 /
-// deactivated_workspace 标错、换号重试。覆盖：
+// UpstreamStatusCode and UpstreamErrorBody let the proxy's continuous retry
+// selector inspect a handshake failure without importing this package (which
+// would create an import cycle). The regular finite retry path still treats
+// the error as a transport failure unless its legacy conversion list applies.
+func (e *HandshakeHTTPError) UpstreamStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
+func (e *HandshakeHTTPError) UpstreamErrorBody() []byte {
+	if e == nil || strings.TrimSpace(e.Body) == "" {
+		return nil
+	}
+	return []byte(e.Body)
+}
+
+// handshakeAccountErrorHTTPResponse 把握手阶段需要独立分类的错误转换成携带真实
+// 状态码与上游原始错误体的 HTTP 响应，让调用方复用既有非 2xx 分支：usage log
+// 记真实状态码、applyCooldownForModel 的 unauthorized 冷却 / missing_scope 特判 /
+// deactivated_workspace 标错，以及 429 的独立限流重试预算。覆盖：
 //   - 401：token 失效/撤销；
 //   - 402：工作区被停用（deactivated_workspace）等账号计费维度拒绝——若停留在
 //     transport 错误层，被封 team 空间的账号会一直以"可用"留在池里被反复拨号。
+//   - 429：必须消费限流预算并保留 Retry-After；不能误耗普通传输预算。
 //
 // 403 不转换：握手 403 可能来自 Cloudflare 拦截（出口 IP 维度），按账号错误分类
-// 会误伤；连同 5xx/503 一起保持 transport 错误语义（握手限流仍走粘滞重试）。
+// 会误伤；连同 5xx/503 一起保持 transport 错误语义。
 func handshakeAccountErrorHTTPResponse(err error) (*http.Response, bool) {
 	var hs *HandshakeHTTPError
 	if !errors.As(err, &hs) {
 		return nil, false
 	}
-	if hs.StatusCode != http.StatusUnauthorized && hs.StatusCode != http.StatusPaymentRequired {
+	if hs.StatusCode != http.StatusUnauthorized &&
+		hs.StatusCode != http.StatusPaymentRequired &&
+		hs.StatusCode != http.StatusTooManyRequests {
 		return nil, false
 	}
 	header := http.Header{}

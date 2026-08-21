@@ -115,6 +115,48 @@ func (h *Handler) newStreamFlushWriter(c *gin.Context, writer io.Writer, flusher
 	return w
 }
 
+// newAttemptStreamFlushWriter keeps a continuously retried attempt free of
+// local output-policy side effects until the upstream terminal is known. The
+// winning attempt is scanned exactly once by commitStreamAttempt below.
+func (h *Handler) newAttemptStreamFlushWriter(c *gin.Context, attempt *continuousRetryStreamAttempt, writer io.Writer, flusher http.Flusher) *streamFlushWriter {
+	if attempt != nil {
+		return newStreamFlushWriter(attempt.writerOr(writer), attempt.flusherOr(flusher))
+	}
+	return h.newStreamFlushWriter(c, writer, flusher)
+}
+
+type streamFlushWriterAdapter struct {
+	writer *streamFlushWriter
+}
+
+func (a streamFlushWriterAdapter) Write(data []byte) (int, error) {
+	if a.writer == nil {
+		return 0, io.ErrClosedPipe
+	}
+	if err := a.writer.WriteBytes(data); err != nil {
+		return 0, err
+	}
+	return len(data), nil
+}
+
+// commitStreamAttempt applies the request's output policy only after the
+// attempt has reached a successful protocol terminal. A filter or downstream
+// write failure is local and must never trigger another upstream request.
+func (h *Handler) commitStreamAttempt(c *gin.Context, attempt *continuousRetryStreamAttempt) error {
+	if attempt == nil {
+		return nil
+	}
+	if attempt.closed || attempt.replay == nil {
+		return errContinuousRetryReplayClosed
+	}
+	flusher, _ := c.Writer.(http.Flusher)
+	filtered := h.newStreamFlushWriter(c, c.Writer, flusher)
+	if err := attempt.replay.CommitTo(streamFlushWriterAdapter{writer: filtered}, nil); err != nil {
+		return err
+	}
+	return filtered.Finalize()
+}
+
 func (w *streamFlushWriter) scanOutput(data []byte) ([]byte, error) {
 	if w == nil || w.outputScanner == nil {
 		return data, nil

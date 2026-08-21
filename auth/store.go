@@ -3127,10 +3127,11 @@ type Store struct {
 	ignoreUsageLimitStatus       atomic.Bool  // 用量窗口只记录，不作为账号不可用证据
 
 	// 重试间隔与传输错误重试策略（issue #331）
-	retryIntervalMS      atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
-	transportRetryPolicy atomic.Value // 传输错误重试策略: rotate / sticky
-	githubToken          atomic.Value // GitHub API token，仅发给 api.github.com（issue #522）
-	githubProxyURL       atomic.Value // GitHub 域名专用出站代理，空回落全局/环境代理（issue #522）
+	retryIntervalMS       atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
+	transportRetryPolicy  atomic.Value // 传输错误重试策略: rotate / sticky
+	continuousRetryPolicy atomic.Value // database.ContinuousRetryPolicy（默认关闭）
+	githubToken           atomic.Value // GitHub API token，仅发给 api.github.com（issue #522）
+	githubProxyURL        atomic.Value // GitHub 域名专用出站代理，空回落全局/环境代理（issue #522）
 
 	// 新导入/新建 Codex 账号默认盖上的指纹收敛档位: off / device / session / full
 	codexFingerprintDefaultMode atomic.Value
@@ -3675,6 +3676,11 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.ignoreUsageLimitStatus.Store(settings.IgnoreUsageLimitStatus)
 	s.retryIntervalMS.Store(int64(normalizeRetryIntervalMS(settings.RetryIntervalMS)))
 	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(settings.TransportRetryPolicy))
+	continuousPolicy := database.ParseContinuousRetryPolicy(settings.ContinuousRetryPolicy)
+	if strings.TrimSpace(settings.ContinuousRetryPolicy) == "" {
+		continuousPolicy = database.DefaultContinuousRetryPolicy()
+	}
+	s.continuousRetryPolicy.Store(continuousPolicy)
 	s.codexFingerprintDefaultMode.Store(NormalizeCodexFingerprintMode(settings.CodexFingerprintDefaultMode))
 	s.githubToken.Store(strings.TrimSpace(settings.GithubToken))
 	s.githubProxyURL.Store(strings.TrimSpace(settings.GithubProxyURL))
@@ -5941,7 +5947,8 @@ func (s *Store) NextForContinuationWithDispatch(key string, apiKeyID int64, excl
 //   - 绑定账号当前取不到（超并发/冷却/被本次请求排除）时返回 nil 而不是回退到
 //     别的账号。调用方据此决定是等它空出来，还是剥离续链 id 降级换号。
 //
-// 绑定本身不存在（新会话/绑定已 TTL 过期）时仍走完整挑号，与普通请求一致。
+// 绑定本身不存在时仍走完整挑号，与普通请求一致；TTL 过期只影响普通请求，
+// preserveBinding=true 的续链请求仍保留原账号。
 func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool, policy DispatchPolicy) (*Account, string) {
 	if s == nil {
 		return nil, ""
@@ -6643,6 +6650,25 @@ func (s *Store) GetTransportRetryPolicy() string {
 		return v
 	}
 	return "rotate"
+}
+
+// SetContinuousRetryPolicy 热更新上游错误持续重试策略。
+func (s *Store) SetContinuousRetryPolicy(policy database.ContinuousRetryPolicy) {
+	if s == nil {
+		return
+	}
+	s.continuousRetryPolicy.Store(database.NormalizeContinuousRetryPolicy(policy))
+}
+
+// GetContinuousRetryPolicy 返回当前上游错误持续重试策略的值快照。
+func (s *Store) GetContinuousRetryPolicy() database.ContinuousRetryPolicy {
+	if s == nil {
+		return database.DefaultContinuousRetryPolicy()
+	}
+	if value, ok := s.continuousRetryPolicy.Load().(database.ContinuousRetryPolicy); ok {
+		return database.NormalizeContinuousRetryPolicy(value)
+	}
+	return database.DefaultContinuousRetryPolicy()
 }
 
 // SetCodexFingerprintDefaultMode 动态更新新导入账号的默认指纹收敛档位。

@@ -1527,6 +1527,9 @@ func TestUpdateSettingsPersistsAutoResetCreditsAcrossPartialUpdates(t *testing.T
 func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
 	db := newTestAdminDB(t)
 	tc := cache.NewMemory(4)
 	t.Cleanup(func() { _ = tc.Close() })
@@ -1543,7 +1546,7 @@ func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	ctx.Request = httptest.NewRequest(
 		http.MethodPut,
 		"/api/admin/settings",
-		strings.NewReader(`{"retry_interval_ms":2500,"transport_retry_policy":"sticky"}`),
+		strings.NewReader(`{"retry_interval_ms":2500,"transport_retry_policy":"sticky","continuous_retry_enabled":true,"continuous_retry_catch_all":true,"continuous_retry_categories":["http_4xx","server","unknown"],"continuous_retry_status_codes":[404,403,404,99,600],"continuous_retry_error_codes":["Forbidden","forbidden","bad code!"],"continuous_retry_max_duration_seconds":75}`),
 	)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 
@@ -1561,6 +1564,127 @@ func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	}
 	if response.TransportRetryPolicy != "sticky" {
 		t.Fatalf("transport_retry_policy = %q, want sticky", response.TransportRetryPolicy)
+	}
+	if !response.ContinuousRetryEnabled {
+		t.Fatal("continuous_retry_enabled = false, want true")
+	}
+	if !response.ContinuousRetryCatchAll {
+		t.Fatal("continuous_retry_catch_all = false, want true")
+	}
+	if got := strings.Join(response.ContinuousRetryCategories, ","); got != "http_4xx,http_5xx" {
+		t.Fatalf("continuous_retry_categories = %q, want http_4xx,http_5xx", got)
+	}
+	if got := fmt.Sprint(response.ContinuousRetryStatusCodes); got != "[403 404]" {
+		t.Fatalf("continuous_retry_status_codes = %s, want [403 404]", got)
+	}
+	if got := strings.Join(response.ContinuousRetryErrorCodes, ","); got != "forbidden" {
+		t.Fatalf("continuous_retry_error_codes = %q, want forbidden", got)
+	}
+	if response.ContinuousRetryMaxDurationSeconds != 75 {
+		t.Fatalf("continuous_retry_max_duration_seconds = %d, want 75", response.ContinuousRetryMaxDurationSeconds)
+	}
+
+	for label, policy := range map[string]database.ContinuousRetryPolicy{
+		"store":   store.GetContinuousRetryPolicy(),
+		"runtime": proxy.CurrentRuntimeSettings().ContinuousRetryPolicy,
+	} {
+		if !policy.Enabled || !policy.CatchAll || strings.Join(policy.Categories, ",") != "http_4xx,http_5xx" ||
+			fmt.Sprint(policy.StatusCodes) != "[403 404]" || strings.Join(policy.ErrorCodes, ",") != "forbidden" || policy.MaxDurationSeconds != 75 {
+			t.Fatalf("%s continuous retry policy = %#v", label, policy)
+		}
+	}
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if policy := database.ParseContinuousRetryPolicy(persisted.ContinuousRetryPolicy); !policy.Enabled || !policy.CatchAll ||
+		strings.Join(policy.Categories, ",") != "http_4xx,http_5xx" || fmt.Sprint(policy.StatusCodes) != "[403 404]" ||
+		strings.Join(policy.ErrorCodes, ",") != "forbidden" || policy.MaxDurationSeconds != 75 {
+		t.Fatalf("persisted continuous retry policy = %#v", policy)
+	}
+}
+
+func TestUpdateSettingsConcurrentContinuousRetryPartialUpdatesDoNotLoseFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	settings := defaultBootstrapSettings()
+	initialPolicy := database.ContinuousRetryPolicy{
+		Enabled:     true,
+		CatchAll:    true,
+		Categories:  []string{database.ContinuousRetryCategoryTransport},
+		StatusCodes: []int{},
+		ErrorCodes:  []string{},
+	}
+	settings.ContinuousRetryPolicy = database.EncodeContinuousRetryPolicy(initialPolicy)
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	if _, err := db.UpdateContinuousRetryPolicy(context.Background(), database.ContinuousRetryPolicyUpdate{
+		Enabled:     &initialPolicy.Enabled,
+		CatchAll:    &initialPolicy.CatchAll,
+		Categories:  &initialPolicy.Categories,
+		StatusCodes: &initialPolicy.StatusCodes,
+		ErrorCodes:  &initialPolicy.ErrorCodes,
+	}); err != nil {
+		t.Fatalf("seed continuous retry policy: %v", err)
+	}
+
+	cache1 := cache.NewMemory(4)
+	cache2 := cache.NewMemory(4)
+	t.Cleanup(func() { _ = cache1.Close() })
+	t.Cleanup(func() { _ = cache2.Close() })
+	store1 := auth.NewStore(db, cache1, settings)
+	store2 := auth.NewStore(db, cache2, settings)
+	t.Cleanup(store1.Stop)
+	t.Cleanup(store2.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handlers := []*Handler{
+		NewHandler(store1, db, cache1, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret"),
+		NewHandler(store2, db, cache2, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret"),
+	}
+	bodies := []string{
+		`{"continuous_retry_catch_all":false}`,
+		`{"continuous_retry_status_codes":[403]}`,
+	}
+
+	type updateResult struct {
+		code int
+		body string
+	}
+	start := make(chan struct{})
+	results := make(chan updateResult, len(handlers))
+	for index := range handlers {
+		handler := handlers[index]
+		body := bodies[index]
+		go func() {
+			<-start
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			handler.UpdateSettings(ctx)
+			results <- updateResult{code: recorder.Code, body: recorder.Body.String()}
+		}()
+	}
+	close(start)
+	for range handlers {
+		result := <-results
+		if result.code != http.StatusOK {
+			t.Fatalf("concurrent update status=%d body=%s", result.code, result.body)
+		}
+	}
+
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	policy := database.ParseContinuousRetryPolicy(persisted.ContinuousRetryPolicy)
+	if !policy.Enabled || policy.CatchAll || len(policy.StatusCodes) != 1 || policy.StatusCodes[0] != 403 || len(policy.Categories) != 1 || policy.Categories[0] != database.ContinuousRetryCategoryTransport {
+		t.Fatalf("concurrent admin updates lost a policy field: %#v", policy)
 	}
 }
 
@@ -1872,6 +1996,41 @@ func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *test
 	}
 	if current := proxy.CurrentRuntimeSettings(); current.AutoResetCreditsEnabled {
 		t.Fatal("AutoResetCreditsEnabled became true after persistence failure")
+	}
+}
+
+func TestUpdateSettingsDoesNotPublishContinuousRetryWhenPersistenceFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"continuous_retry_enabled":true,"continuous_retry_status_codes":[403]}`))
+	ctx.Request = request.WithContext(requestCtx)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateSettings(ctx)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+	if policy := store.GetContinuousRetryPolicy(); policy.Enabled {
+		t.Fatalf("store continuous retry policy became enabled after persistence failure: %#v", policy)
+	}
+	if policy := proxy.CurrentRuntimeSettings().ContinuousRetryPolicy; policy.Enabled {
+		t.Fatalf("runtime continuous retry policy became enabled after persistence failure: %#v", policy)
 	}
 }
 

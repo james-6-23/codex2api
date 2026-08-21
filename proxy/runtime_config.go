@@ -73,13 +73,14 @@ type RuntimeSettings struct {
 	// CodexWSWeakNetworkMode 对 VPN/住宅代理等不稳定链路采用保守复用：
 	// 缩短空闲/最大寿命、每次复用都做真实 Ping/Pong，并暂停空闲保活（默认 false）。
 	CodexWSWeakNetworkMode bool
-	CodexWSHideErrors      bool // 隐藏 Codex WS 上游原始错误（默认 true）
-	CodexWSSilentRetry     bool // 首包前 Codex WS 上游错误静默换号重试（默认 true）
-	CodexWSSilentRetries   int  // Codex WS 静默换号最大重试次数（默认 2）
-	CodexWSSizeRouter      bool // 1009 自学习体积路由：超大请求直接首发 HTTP（默认 true）
-	CodexWSBusyMaxWaitSec  int  // busy session/容量等待的累计上限秒数（默认 30，issue #413）
-	CodexWSBusyOverflow    bool // busy session 溢出到同账号兄弟连接（默认 false）
-	CodexWSBusyPatienceSec int  // 触发溢出前的短等待秒数（默认 2）
+	CodexWSHideErrors      bool                           // 隐藏 Codex WS 上游原始错误（默认 true）
+	CodexWSSilentRetry     bool                           // 首包前 Codex WS 上游错误静默换号重试（默认 true）
+	CodexWSSilentRetries   int                            // Codex WS 静默换号最大重试次数（默认 2）
+	ContinuousRetryPolicy  database.ContinuousRetryPolicy // 上游错误持续重试选择器（默认关闭）
+	CodexWSSizeRouter      bool                           // 1009 自学习体积路由：超大请求直接首发 HTTP（默认 true）
+	CodexWSBusyMaxWaitSec  int                            // busy session/容量等待的累计上限秒数（默认 30，issue #413）
+	CodexWSBusyOverflow    bool                           // busy session 溢出到同账号兄弟连接（默认 false）
+	CodexWSBusyPatienceSec int                            // 触发溢出前的短等待秒数（默认 2）
 	// CodexWSStatelessSlots 无状态请求每 (账号, cacheKey) 维度的持久连接槽位数
 	// （默认 8，范围 1-32，issue #522）。调大→单账号挂更多空闲连接；调小→握手更频繁，
 	// 高 RPM 下可能触发上游握手限流。实际生效值仍受账号动态并发上限钳制。
@@ -166,6 +167,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		CodexWSHideErrors:                defaultCodexWSHideErrors,
 		CodexWSSilentRetry:               defaultCodexWSSilentRetry,
 		CodexWSSilentRetries:             defaultCodexWSSilentRetries,
+		ContinuousRetryPolicy:            database.DefaultContinuousRetryPolicy(),
 		CodexWSSizeRouter:                defaultCodexWSSizeRouter,
 		CodexWSBusyMaxWaitSec:            defaultCodexWSBusyMaxWaitSec,
 		CodexWSBusyPatienceSec:           defaultCodexWSBusyPatienceSec,
@@ -309,6 +311,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	}
 	settings.AutoResetCreditsBeforeExpiryMin = database.NormalizeAutoResetCreditsBeforeExpiryMinutes(settings.AutoResetCreditsBeforeExpiryMin)
 	settings.UTLSShutdownTimeoutMin = database.NormalizeUTLSShutdownTimeoutMinutes(settings.UTLSShutdownTimeoutMin)
+	settings.ContinuousRetryPolicy = database.NormalizeContinuousRetryPolicy(settings.ContinuousRetryPolicy)
 	return settings
 }
 
@@ -331,6 +334,10 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexWSHideErrors = settings.CodexWSHideUpstreamErrors
 		next.CodexWSSilentRetry = settings.CodexWSSilentRetryEnabled
 		next.CodexWSSilentRetries = settings.CodexWSSilentMaxRetries
+		next.ContinuousRetryPolicy = database.ParseContinuousRetryPolicy(settings.ContinuousRetryPolicy)
+		if strings.TrimSpace(settings.ContinuousRetryPolicy) == "" {
+			next.ContinuousRetryPolicy = database.DefaultContinuousRetryPolicy()
+		}
 		next.CodexWSSizeRouter = settings.CodexWSSizeRouterEnabled
 		next.CodexWSBusyMaxWaitSec = settings.CodexWSBusyAcquireMaxWaitSec
 		next.CodexWSBusyOverflow = settings.CodexWSBusyOverflowEnabled

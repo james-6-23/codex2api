@@ -1320,6 +1320,14 @@ func deterministicPromptCacheKey(apiKey string, account *auth.Account) string {
 // ReadSSEStream 从上游 SSE 响应读取事件流
 // callback 返回 true 表示继续读取，false 表示停止
 func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
+	return ReadSSEStreamWithEvent(body, func(_ string, data []byte) bool {
+		return callback(data)
+	})
+}
+
+// ReadSSEStreamWithEvent preserves the optional SSE event field while keeping
+// ReadSSEStream's data-only API compatible for existing callers.
+func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []byte) bool) error {
 	// 使用 sync.Pool 复用缓冲区，减少 GC 压力
 	buf := sseBufferPool.Get().([]byte)
 	defer sseBufferPool.Put(buf)
@@ -1335,8 +1343,11 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 	}()
 
 	var dataLines [][]byte
+	var eventName string
 
 	emitEvent := func() bool {
+		event := eventName
+		eventName = ""
 		if len(dataLines) == 0 {
 			return true
 		}
@@ -1348,7 +1359,7 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 			data = bytes.Join(dataLines, []byte("\n"))
 		}
 		isDone := bytes.Equal(data, []byte("[DONE]"))
-		keepReading := !isDone && callback(data)
+		keepReading := !isDone && callback(event, data)
 		// 清掉 backing array 中的切片引用，避免最后一个大事件一直被
 		// dataLines 的容量槽位持有到整条流结束。
 		for i := range dataLines {
@@ -1356,6 +1367,23 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 		}
 		dataLines = dataLines[:0]
 		return keepReading
+	}
+
+	consumeField := func(line []byte) {
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimPrefix(line, []byte("data:"))
+			data = bytes.TrimPrefix(data, []byte(" "))
+			// 使用 copy 避免底层数组共享导致的内存泄漏
+			dataCopy := make([]byte, len(data))
+			copy(dataCopy, data)
+			dataLines = append(dataLines, dataCopy)
+			return
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			event := bytes.TrimPrefix(line, []byte("event:"))
+			event = bytes.TrimPrefix(event, []byte(" "))
+			eventName = string(event)
+		}
 	}
 
 	for {
@@ -1388,15 +1416,8 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 					continue
 				}
 
-				// 解析 SSE data: 前缀，支持标准多行 data 聚合
-				if bytes.HasPrefix(line, []byte("data:")) {
-					data := bytes.TrimPrefix(line, []byte("data:"))
-					data = bytes.TrimPrefix(data, []byte(" "))
-					// 使用 copy 避免底层数组共享导致的内存泄漏
-					dataCopy := make([]byte, len(data))
-					copy(dataCopy, data)
-					dataLines = append(dataLines, dataCopy)
-				}
+				// 解析 SSE event/data 字段，支持标准多行 data 聚合。
+				consumeField(line)
 			}
 
 			if consumed > 0 {
@@ -1409,13 +1430,7 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 			if err == io.EOF {
 				if len(lineBuf) > 0 {
 					line := bytes.TrimRight(lineBuf, "\r")
-					if bytes.HasPrefix(line, []byte("data:")) {
-						data := bytes.TrimPrefix(line, []byte("data:"))
-						data = bytes.TrimPrefix(data, []byte(" "))
-						dataCopy := make([]byte, len(data))
-						copy(dataCopy, data)
-						dataLines = append(dataLines, dataCopy)
-					}
+					consumeField(line)
 				}
 				if !emitEvent() {
 					return nil

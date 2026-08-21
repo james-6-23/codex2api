@@ -2,12 +2,18 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/cache"
@@ -146,18 +152,18 @@ func TestBuildGrokVideoBodyProfileFieldNaming(t *testing.T) {
 
 func TestIsTrustedGrokVideoAssetURL(t *testing.T) {
 	for raw, want := range map[string]bool{
-		"https://vidgen.x.ai/video/abc.mp4":        true,
-		"https://cdn.vidgen.x.ai/video/abc.mp4":    true,
-		"https://assets.grok.com/video.mp4":        true,
-		"http://vidgen.x.ai/video.mp4":             false,
-		"https://vidgen.x.ai:8443/video.mp4":       false,
-		"https://user@vidgen.x.ai/video.mp4":       false,
-		"https://evilvidgen.x.ai.example.com/a":    false,
-		"https://example.com/vidgen.x.ai/a.mp4":    false,
-		"":                                         false,
-		"https://notvidgen.x.ai.evil.com/a.mp4":    false,
-		"https://vidgen.x.ai.evil.com/a.mp4":       false,
-		"https://sub.assets.grok.com/video.mp4":    true,
+		"https://vidgen.x.ai/video/abc.mp4":     true,
+		"https://cdn.vidgen.x.ai/video/abc.mp4": true,
+		"https://assets.grok.com/video.mp4":     true,
+		"http://vidgen.x.ai/video.mp4":          false,
+		"https://vidgen.x.ai:8443/video.mp4":    false,
+		"https://user@vidgen.x.ai/video.mp4":    false,
+		"https://evilvidgen.x.ai.example.com/a": false,
+		"https://example.com/vidgen.x.ai/a.mp4": false,
+		"":                                      false,
+		"https://notvidgen.x.ai.evil.com/a.mp4": false,
+		"https://vidgen.x.ai.evil.com/a.mp4":    false,
+		"https://sub.assets.grok.com/video.mp4": true,
 	} {
 		if got := isTrustedGrokVideoAssetURL(raw); got != want {
 			t.Errorf("isTrustedGrokVideoAssetURL(%q) = %v, want %v", raw, got, want)
@@ -167,13 +173,13 @@ func TestIsTrustedGrokVideoAssetURL(t *testing.T) {
 
 func TestValidGrokVideoRequestID(t *testing.T) {
 	for id, want := range map[string]bool{
-		"video_abc-123": true,
-		"":              false,
-		".":             false,
-		"..":            false,
-		"a/b":           false,
-		"a\\b":          false,
-		"a b":           false,
+		"video_abc-123":          true,
+		"":                       false,
+		".":                      false,
+		"..":                     false,
+		"a/b":                    false,
+		"a\\b":                   false,
+		"a b":                    false,
 		strings.Repeat("x", 201): false,
 	} {
 		if got := validGrokVideoRequestID(id); got != want {
@@ -257,6 +263,261 @@ func TestGrokImagesGenerationsPassthrough(t *testing.T) {
 	}
 	if got := gjson.Get(rec.Body.String(), "data.0.url").String(); got != "https://imgen.x.ai/a.png" {
 		t.Errorf("response not passthrough: %s", rec.Body.String())
+	}
+}
+
+func TestGrokMediaCatchAllRetriesBeyondOrdinaryAttemptCap(t *testing.T) {
+	previousRuntime := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+	ApplyRuntimeSettings(nextRuntime)
+
+	tests := []struct {
+		name        string
+		path        string
+		requestBody string
+		successBody string
+		invoke      func(*Handler, *gin.Context)
+	}{
+		{
+			name:        "image creation",
+			path:        "/v1/images/generations",
+			requestBody: `{"model":"grok-imagine-image","prompt":"a test image"}`,
+			successBody: `{"data":[{"url":"https://imgen.x.ai/test.png"}]}`,
+			invoke:      (*Handler).ImagesGenerations,
+		},
+		{
+			name:        "video creation",
+			path:        "/v1/videos/generations",
+			requestBody: `{"model":"grok-imagine-video-1.5","prompt":"a test video"}`,
+			successBody: `{"request_id":"video_retry_success"}`,
+			invoke:      (*Handler).VideosGenerations,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				if calls.Add(1) <= maxGrokMediaAttempts {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusTeapot)
+					_, _ = io.WriteString(w, `{"error":{"code":"future_media_failure","message":"must stay upstream"}}`)
+					return
+				}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, tc.successBody)
+			}))
+			t.Cleanup(upstream.Close)
+
+			account := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamGrok, APIKey: "xai-test", BaseURL: upstream.URL}
+			handler := newGrokMediaTestHandler(t, account)
+			t.Cleanup(handler.store.Stop)
+			ctx, rec := newGrokMediaTestContext(t, http.MethodPost, tc.path, []byte(tc.requestBody))
+			requestCtx, cancel := context.WithTimeout(ctx.Request.Context(), 8*time.Second)
+			defer cancel()
+			ctx.Request = ctx.Request.WithContext(requestCtx)
+
+			tc.invoke(handler, ctx)
+
+			if got := calls.Load(); got != maxGrokMediaAttempts+1 {
+				t.Fatalf("upstream calls = %d, want %d failures followed by success", got, maxGrokMediaAttempts+1)
+			}
+			if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "must stay upstream") {
+				t.Fatalf("retry was not transparent: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestGrokMediaContinuousRetrySendsHTTP102DuringUpstreamWait(t *testing.T) {
+	previousRuntime := CurrentRuntimeSettings()
+	previousKeepaliveInterval := continuousRetryKeepaliveInterval
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		continuousRetryKeepaliveInterval = previousKeepaliveInterval
+	})
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{
+		Enabled:            true,
+		CatchAll:           true,
+		MaxDurationSeconds: 2,
+	}
+	ApplyRuntimeSettings(nextRuntime)
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
+
+	var calls atomic.Int32
+	secondStarted := make(chan struct{})
+	var secondOnce sync.Once
+	releaseSecond := make(chan struct{})
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		switch calls.Add(1) {
+		case 1:
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":{"code":"retry_me"}}`)
+		case 2:
+			secondOnce.Do(func() { close(secondStarted) })
+			<-releaseSecond
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"data":[{"url":"https://imgen.x.ai/recovered.png"}]}`)
+		default:
+			w.WriteHeader(http.StatusInternalServerError)
+		}
+	}))
+	t.Cleanup(upstream.Close)
+
+	account := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamGrok, APIKey: "xai-test", BaseURL: upstream.URL}
+	handler := newGrokMediaTestHandler(t, account)
+	t.Cleanup(handler.store.Stop)
+	gateway := gin.New()
+	gateway.Use(func(c *gin.Context) {
+		c.Set(contextAPIKeyID, int64(11))
+		c.Next()
+	})
+	gateway.POST("/v1/images/generations", handler.ImagesGenerations)
+	server := httptest.NewServer(gateway)
+	t.Cleanup(server.Close)
+
+	informational := make(chan struct{}, 128)
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+		if code == http.StatusProcessing {
+			select {
+			case informational <- struct{}{}:
+			default:
+			}
+		}
+		return nil
+	}}
+	requestContext, cancel := context.WithTimeout(httptrace.WithClientTrace(context.Background(), trace), 2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, server.URL+"/v1/images/generations", strings.NewReader(`{"model":"grok-imagine-image","prompt":"keep this request alive"}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	result := make(chan struct {
+		response *http.Response
+		err      error
+	}, 1)
+	go func() {
+		response, requestErr := server.Client().Do(request)
+		result <- struct {
+			response *http.Response
+			err      error
+		}{response: response, err: requestErr}
+	}()
+
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		close(releaseSecond)
+		t.Fatal("second Grok media attempt did not start")
+	}
+	for {
+		select {
+		case <-informational:
+			continue
+		default:
+			break
+		}
+		break
+	}
+	select {
+	case <-informational:
+		close(releaseSecond)
+	case <-time.After(time.Second):
+		close(releaseSecond)
+		t.Fatal("Grok media upstream wait emitted no HTTP 102 heartbeat")
+	}
+	callResult := <-result
+	if callResult.err != nil {
+		t.Fatalf("gateway request: %v", callResult.err)
+	}
+	defer callResult.response.Body.Close()
+	if callResult.response.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(callResult.response.Body)
+		t.Fatalf("gateway status = %d, body = %s", callResult.response.StatusCode, body)
+	}
+	body, err := io.ReadAll(callResult.response.Body)
+	if err != nil {
+		t.Fatalf("read gateway response: %v", err)
+	}
+	if !strings.Contains(string(body), "recovered.png") {
+		t.Fatalf("gateway response = %s", body)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2", got)
+	}
+}
+
+func TestGrokMediaRetriesFailuresHiddenInsideHTTP200(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      database.ContinuousRetryPolicy
+		path        string
+		requestBody string
+		failureBody string
+		successBody string
+		invoke      func(*Handler, *gin.Context)
+	}{
+		{
+			name:        "catch-all image malformed success",
+			policy:      database.ContinuousRetryPolicy{Enabled: true, CatchAll: true},
+			path:        "/v1/images/generations",
+			requestBody: `{"model":"grok-imagine-image","prompt":"a test image"}`,
+			failureBody: `{"unexpected":"shape"}`,
+			successBody: `{"data":[{"url":"https://imgen.x.ai/test.png"}]}`,
+			invoke:      (*Handler).ImagesGenerations,
+		},
+		{
+			name:        "selective video error code",
+			policy:      database.ContinuousRetryPolicy{Enabled: true, ErrorCodes: []string{"future_media_failure"}},
+			path:        "/v1/videos/generations",
+			requestBody: `{"model":"grok-imagine-video-1.5","prompt":"a test video"}`,
+			failureBody: `{"error":{"code":"future_media_failure","message":"must stay upstream"}}`,
+			successBody: `{"request_id":"video_retry_success"}`,
+			invoke:      (*Handler).VideosGenerations,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			previousRuntime := CurrentRuntimeSettings()
+			t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+			nextRuntime := previousRuntime
+			nextRuntime.ContinuousRetryPolicy = tc.policy
+			ApplyRuntimeSettings(nextRuntime)
+
+			var calls atomic.Int32
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				if calls.Add(1) == 1 {
+					_, _ = io.WriteString(w, tc.failureBody)
+					return
+				}
+				_, _ = io.WriteString(w, tc.successBody)
+			}))
+			t.Cleanup(upstream.Close)
+
+			account := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamGrok, APIKey: "xai-test", BaseURL: upstream.URL}
+			handler := newGrokMediaTestHandler(t, account)
+			t.Cleanup(handler.store.Stop)
+			ctx, rec := newGrokMediaTestContext(t, http.MethodPost, tc.path, []byte(tc.requestBody))
+			requestCtx, cancel := context.WithTimeout(ctx.Request.Context(), 5*time.Second)
+			defer cancel()
+			ctx.Request = ctx.Request.WithContext(requestCtx)
+
+			tc.invoke(handler, ctx)
+
+			if got := calls.Load(); got != 2 {
+				t.Fatalf("upstream calls = %d, want 2", got)
+			}
+			if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "must stay upstream") {
+				t.Fatalf("retry was not transparent: status=%d body=%s", rec.Code, rec.Body.String())
+			}
+		})
 	}
 }
 
@@ -433,6 +694,21 @@ func TestGrokVideoCreateValidation(t *testing.T) {
 	handler.VideosGenerations(ctx)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("text model on videos endpoint status = %d, want 400", rec.Code)
+	}
+}
+
+func TestGrokVideoCreateRejectsStream(t *testing.T) {
+	account := &auth.Account{DBID: 1, UpstreamType: auth.UpstreamGrok, APIKey: "xai-test"}
+	handler := newGrokMediaTestHandler(t, account)
+	t.Cleanup(handler.store.Stop)
+
+	ctx, rec := newGrokMediaTestContext(t, http.MethodPost, "/v1/videos/generations", []byte(`{"model":"grok-imagine-video-1.5","prompt":"x","stream":true}`))
+	handler.VideosGenerations(ctx)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("stream video status = %d, want 400", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "stream is not supported") {
+		t.Fatalf("stream video error = %s", rec.Body.String())
 	}
 }
 

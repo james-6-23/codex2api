@@ -50,6 +50,28 @@ func TestReadSSEStream_MergesMultilineData(t *testing.T) {
 	}
 }
 
+func TestReadSSEStreamWithEventPreservesEventName(t *testing.T) {
+	input := strings.NewReader("event: error\n" +
+		"data: {\"error\":{\"status_code\":403,\"code\":\"forbidden\"}}\n\n")
+
+	var gotEvent string
+	var gotData string
+	err := ReadSSEStreamWithEvent(input, func(event string, data []byte) bool {
+		gotEvent = event
+		gotData = string(data)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("ReadSSEStreamWithEvent returned error: %v", err)
+	}
+	if gotEvent != "error" {
+		t.Fatalf("event = %q, want error", gotEvent)
+	}
+	if gotData != `{"error":{"status_code":403,"code":"forbidden"}}` {
+		t.Fatalf("data = %q", gotData)
+	}
+}
+
 func TestReadSSEStreamPreservesEventsAcrossReadBoundaries(t *testing.T) {
 	const eventCount = 2048
 

@@ -1349,6 +1349,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_windows TEXT DEFAULT '5h,7d';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS retry_interval_ms INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS transport_retry_policy VARCHAR(20) DEFAULT 'rotate';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS continuous_retry_policy TEXT DEFAULT '{"enabled":false,"catch_all":false,"categories":["transport","http_429","http_5xx","stream_error"],"status_codes":[],"error_codes":[],"max_duration_seconds":600}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS ignore_usage_limit_status BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
@@ -2098,6 +2099,7 @@ type SystemSettings struct {
 	FastSchedulerEnabled               bool
 	MaxRetries                         int
 	MaxRateLimitRetries                int
+	ContinuousRetryPolicy              string // JSON: database.ContinuousRetryPolicy
 	AllowRemoteMigration               bool
 	ModelMapping                       string // JSON: {"anthropic_model": "codex_model", ...}
 	CodexModelMapping                  string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
@@ -2493,11 +2495,107 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	if strings.TrimSpace(s.PayloadRules) == "" {
 		s.PayloadRules = "{}"
 	}
+	var continuousRetryRaw sql.NullString
+	if policyErr := db.conn.QueryRowContext(ctx, `SELECT COALESCE(continuous_retry_policy, '') FROM system_settings WHERE id = 1`).Scan(&continuousRetryRaw); policyErr == nil {
+		s.ContinuousRetryPolicy = continuousRetryRaw.String
+	} else if !errors.Is(policyErr, sql.ErrNoRows) {
+		return nil, policyErr
+	}
+	if strings.TrimSpace(s.ContinuousRetryPolicy) == "" {
+		s.ContinuousRetryPolicy = EncodeContinuousRetryPolicy(DefaultContinuousRetryPolicy())
+	}
 	s.FirstTokenMode = normalizeFirstTokenMode(s.FirstTokenMode)
 	s.BillingTierPolicy = normalizeBillingTierPolicy(s.BillingTierPolicy)
 	s.AutoResetCreditsBeforeExpiryMin = NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin)
 	s.CodexFingerprintDefaultMode = NormalizeCodexFingerprintDefaultMode(s.CodexFingerprintDefaultMode)
 	return s, err
+}
+
+// UpdateContinuousRetryPolicy atomically merges one admin partial update into
+// the latest persisted policy. The row lock prevents concurrent tabs or
+// replicas from replacing fields they did not edit with a stale JSON snapshot.
+func (db *DB) UpdateContinuousRetryPolicy(ctx context.Context, update ContinuousRetryPolicyUpdate) (ContinuousRetryPolicy, error) {
+	if db == nil || db.conn == nil {
+		return DefaultContinuousRetryPolicy(), nil
+	}
+
+	var committed ContinuousRetryPolicy
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		defaultRaw := EncodeContinuousRetryPolicy(DefaultContinuousRetryPolicy())
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO system_settings (id, continuous_retry_policy)
+			VALUES (1, $1)
+			ON CONFLICT (id) DO NOTHING
+		`, defaultRaw); err != nil {
+			return err
+		}
+
+		var currentRaw string
+		if err := tx.QueryRowContext(ctx, continuousRetryPolicySelectQuery(!db.isSQLite())).Scan(&currentRaw); err != nil {
+			return err
+		}
+		current := DefaultContinuousRetryPolicy()
+		if strings.TrimSpace(currentRaw) != "" {
+			current = ParseContinuousRetryPolicy(currentRaw)
+		}
+		next := current
+		if update.Enabled != nil {
+			next.Enabled = *update.Enabled
+		}
+		if update.CatchAll != nil {
+			next.CatchAll = *update.CatchAll
+		}
+		if update.Categories != nil {
+			next.Categories = append([]string(nil), (*update.Categories)...)
+		}
+		if update.StatusCodes != nil {
+			next.StatusCodes = append([]int(nil), (*update.StatusCodes)...)
+		}
+		if update.ErrorCodes != nil {
+			next.ErrorCodes = append([]string(nil), (*update.ErrorCodes)...)
+		}
+		if update.MaxDurationSeconds != nil {
+			next.MaxDurationSeconds = *update.MaxDurationSeconds
+		}
+		next = NormalizeContinuousRetryPolicy(next)
+		nextRaw := EncodeContinuousRetryPolicy(next)
+		if nextRaw != strings.TrimSpace(currentRaw) {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE system_settings
+				SET continuous_retry_policy = $1
+				WHERE id = 1
+			`, nextRaw); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = next
+		return nil
+	})
+	if err != nil {
+		return ContinuousRetryPolicy{}, err
+	}
+	return committed, nil
+}
+
+func continuousRetryPolicySelectQuery(forUpdate bool) string {
+	query := `
+		SELECT COALESCE(continuous_retry_policy, '')
+		FROM system_settings
+		WHERE id = 1
+	`
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	return query
 }
 
 // NormalizeCodexFingerprintDefaultMode 把新账号默认指纹收敛档位归一到四个已知

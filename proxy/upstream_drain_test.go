@@ -73,3 +73,16 @@ func TestDrainableUpstreamContextPreservesRequestValues(t *testing.T) {
 		t.Fatalf("upstream context value = %v, want audit-value", got)
 	}
 }
+
+func TestDrainableUpstreamContextCancelsImmediatelyForContinuousRetryDeadline(t *testing.T) {
+	clientCtx, cancelClient := context.WithCancelCause(context.Background())
+	upstreamCtx, cancelUpstream := newDrainableUpstreamContext(clientCtx, time.Hour)
+	defer cancelUpstream()
+
+	cancelClient(errContinuousRetryDeadlineExceeded)
+	select {
+	case <-upstreamCtx.Done():
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("continuous retry deadline inherited the client drain delay")
+	}
+}
