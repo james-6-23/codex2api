@@ -165,6 +165,7 @@ export function CountBreakdownTooltip({
     count: number;
     percent: number;
     successRate?: number;
+    avgFirstTokenMs?: number;
   }>;
   barClassName: string;
   showModelIcon?: boolean;
@@ -244,6 +245,11 @@ export function CountBreakdownTooltip({
                       </span>
                     ) : null}
                   </div>
+                  {row.avgFirstTokenMs != null && row.avgFirstTokenMs > 0 ? (
+                    <div className={cn("text-right text-[10px] tabular-nums", isToday ? "text-amber-200/85" : "text-zinc-400")}>
+                      {t("accounts.todayModelAvgFirstToken")}: {formatAverageFirstTokenMs(row.avgFirstTokenMs)}
+                    </div>
+                  ) : null}
                   <div className={cn("h-1 overflow-hidden rounded-full", isToday ? "bg-white/12" : "bg-white/8")}>
                     <div
                       className={cn("h-full rounded-full", barClassName)}
@@ -258,6 +264,12 @@ export function CountBreakdownTooltip({
       </Tooltip>
     </TooltipProvider>
   );
+}
+
+function formatAverageFirstTokenMs(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return "-";
+  if (value < 1000) return `${Math.round(value)}ms`;
+  return `${(value / 1000).toFixed(value >= 10_000 ? 0 : 1)}s`;
 }
 
 function ModelNameIcon({ model }: { model: string }) {

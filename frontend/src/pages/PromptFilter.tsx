@@ -2867,6 +2867,14 @@ function OverviewView({
           prompt_filter_review_fail_closed: value === 'fail_closed',
         })
   }
+  const updateEnforcementSetting = (key: 'conversation_lock_enabled' | 'user_cyber_cooldown_minutes', value: boolean | number) => {
+    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['enforcement', key], value }])
+    if (!patched.ok) {
+      showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
+      return
+    }
+    setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
+  }
   const updateReviewAdapter = <K extends keyof ReviewAdapterFormConfig>(key: K, value: ReviewAdapterFormConfig[K]) => {
     const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['review_adapter', key], value }])
     if (!patched.ok) {
@@ -3237,7 +3245,7 @@ function OverviewView({
                 <h3 className="text-sm font-semibold">{t('promptFilter.dailyPolicyTitle')}</h3>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.dailyPolicyDesc')}</p>
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <Field label={t('promptFilter.protectionStrategy')}>
                   <Select
                     value={protectionStrategy}
@@ -3257,6 +3265,22 @@ function OverviewView({
                       { label: t('promptFilter.reviewStrategyFailOpen'), value: 'fail_open' },
                       { label: t('promptFilter.reviewStrategyFailClosed'), value: 'fail_closed' },
                     ]}
+                  />
+                </Field>
+                <Field label={t('promptFilter.conversationLockEnabled')} hint={t('promptFilter.help.conversationLockEnabled')}>
+                  <Select
+                    value={advancedProtection.enforcement.conversation_lock_enabled ? 'true' : 'false'}
+                    onValueChange={(value) => updateEnforcementSetting('conversation_lock_enabled', value === 'true')}
+                    options={booleanOptions}
+                  />
+                </Field>
+                <Field label={t('promptFilter.userCyberCooldownMinutes')} hint={t('promptFilter.help.userCyberCooldownMinutes')}>
+                  <DraftNumberInput
+                    min={1}
+                    max={1440}
+                    disabled={!advancedProtection.enforcement.conversation_lock_enabled}
+                    value={advancedProtection.enforcement.user_cyber_cooldown_minutes}
+                    onValueChange={(value) => updateEnforcementSetting('user_cyber_cooldown_minutes', value)}
                   />
                 </Field>
               </div>

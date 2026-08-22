@@ -116,9 +116,16 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 			if models := todayModels[id]; len(models) > 0 {
 				todayWindow.ModelCounts = make(map[string]int64, len(models))
 				todayWindow.ModelSuccessCounts = make(map[string]int64, len(models))
+				todayWindow.ModelAvgFirstTokenMs = make(map[string]float64, len(models))
 				for model, count := range models {
 					todayWindow.ModelCounts[model] = count.Requests
 					todayWindow.ModelSuccessCounts[model] = count.Success
+					if count.AvgFirstTokenMs > 0 {
+						todayWindow.ModelAvgFirstTokenMs[model] = count.AvgFirstTokenMs
+					}
+				}
+				if len(todayWindow.ModelAvgFirstTokenMs) == 0 {
+					todayWindow.ModelAvgFirstTokenMs = nil
 				}
 			}
 			item.UsageTodayDetail = todayWindow

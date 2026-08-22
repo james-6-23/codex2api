@@ -47,6 +47,7 @@ import type {
   AccountOperationSelector,
   AccountPageStatsItem,
   AccountLiveStateResponse,
+  OpenAIResponsesBalanceResponse,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
@@ -202,6 +203,66 @@ const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
 // multipart 边界与其它表单字段),避免单个请求体触发后端上限。
 const IMPORT_MAX_FILE_BYTES = 200 * 1024 * 1024;
 const IMPORT_BATCH_MAX_BYTES = 150 * 1024 * 1024;
+const API_BALANCE_CACHE_TTL_MS = 60_000;
+const API_BALANCE_ERROR_CACHE_TTL_MS = 15_000;
+
+type APIBalanceLoadState = {
+  loading: boolean;
+  data?: OpenAIResponsesBalanceResponse;
+  error?: string;
+};
+
+const apiBalanceCache = new Map<
+  number,
+  { expiresAt: number; state: APIBalanceLoadState }
+>();
+const apiBalanceInflight = new Map<number, Promise<APIBalanceLoadState>>();
+
+function invalidateAPIAccountBalance(accountId: number) {
+  apiBalanceCache.delete(accountId);
+}
+
+function loadAPIAccountBalance(
+  accountId: number,
+  force = false,
+): Promise<APIBalanceLoadState> {
+  if (force) invalidateAPIAccountBalance(accountId);
+  const cached = apiBalanceCache.get(accountId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return Promise.resolve(cached.state);
+  }
+  if (!force) {
+    const inflight = apiBalanceInflight.get(accountId);
+    if (inflight) return inflight;
+  }
+
+  let promise: Promise<APIBalanceLoadState>;
+  promise = api
+    .getOpenAIResponsesBalance(accountId, undefined, force)
+    .then<APIBalanceLoadState>((data) => ({ loading: false, data }))
+    .catch<APIBalanceLoadState>((error) => ({
+      loading: false,
+      error: getErrorMessage(error),
+    }))
+    .then((state) => {
+      if (apiBalanceInflight.get(accountId) === promise) {
+        apiBalanceCache.set(accountId, {
+          expiresAt:
+            Date.now() +
+            (state.data ? API_BALANCE_CACHE_TTL_MS : API_BALANCE_ERROR_CACHE_TTL_MS),
+          state,
+        });
+      }
+      return state;
+    })
+    .finally(() => {
+      if (apiBalanceInflight.get(accountId) === promise) {
+        apiBalanceInflight.delete(accountId);
+      }
+    });
+  apiBalanceInflight.set(accountId, promise);
+  return promise;
+}
 
 const formatMB = (bytes: number): string =>
   `${Math.round(bytes / (1024 * 1024))}MB`;
@@ -1709,6 +1770,7 @@ export default function Accounts() {
       name: "",
       base_url: "https://api.openai.com",
       api_key: "",
+      balance_query_url: "",
       models: [],
       codex_client_metadata_mode: "auto",
       proxy_url: "",
@@ -1795,6 +1857,7 @@ export default function Accounts() {
     useState<AddOpenAIResponsesAccountRequest>({
       base_url: "https://api.openai.com",
       api_key: "",
+      balance_query_url: "",
       models: [],
       codex_client_metadata_mode: "auto",
       proxy_url: "",
@@ -3384,6 +3447,7 @@ export default function Accounts() {
       setOpenAIForm({
         base_url: "https://api.openai.com",
         api_key: "",
+        balance_query_url: "",
         models: [],
         codex_client_metadata_mode: "auto",
         proxy_url: "",
@@ -3463,6 +3527,7 @@ export default function Accounts() {
         model_mapping: parsedModelMapping.value,
         custom_headers: parsedCustomHeaders.value,
       });
+      invalidateAPIAccountBalance(editingAccount.id);
       showToast(t("accounts.openaiAccountSaveSuccess"));
       await reload();
       closeSchedulerEditor(true);
@@ -5204,6 +5269,7 @@ export default function Accounts() {
       name: account.name ?? "",
       base_url: account.base_url || "https://api.openai.com",
       api_key: "",
+      balance_query_url: account.balance_query_url ?? "",
       models: account.models ?? [],
       codex_client_metadata_mode:
         account.codex_client_metadata_mode ?? "auto",
@@ -5258,6 +5324,7 @@ export default function Accounts() {
       name: "",
       base_url: "https://api.openai.com",
       api_key: "",
+      balance_query_url: "",
       models: [],
       codex_client_metadata_mode: "auto",
       proxy_url: "",
@@ -7513,6 +7580,24 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.apiBalanceQueryUrl")}
+                  </label>
+                  <Input
+                    placeholder="/v1/usage"
+                    value={openAIForm.balance_query_url ?? ""}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setOpenAIForm((form) => ({
+                        ...form,
+                        balance_query_url: event.target.value,
+                      }))
+                    }
+                  />
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {t("accounts.apiBalanceQueryUrlHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
                     {t("accounts.codexClientMetadataMode")}
                   </label>
                   <Select
@@ -8590,6 +8675,24 @@ export default function Accounts() {
                             }))
                           }
                         />
+                      </div>
+                      <div>
+                        <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                          {t("accounts.apiBalanceQueryUrl")}
+                        </label>
+                        <Input
+                          placeholder="/v1/usage"
+                          value={editOpenAIForm.balance_query_url ?? ""}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              balance_query_url: event.target.value,
+                            }))
+                          }
+                        />
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          {t("accounts.apiBalanceQueryUrlHint")}
+                        </p>
                       </div>
                       <div>
                         <label className="block mb-2 text-xs font-semibold text-muted-foreground">
@@ -14457,9 +14560,11 @@ function UsageBar({
 function UsageWindowStat({
   label,
   detail,
+  apiAccount = false,
 }: {
   label: string;
   detail?: AccountRow["usage_5h_detail"];
+  apiAccount?: boolean;
 }) {
   const { t } = useTranslation();
   if (!detail || !hasUsageWindowDetail(detail)) return null;
@@ -14483,14 +14588,30 @@ function UsageWindowStat({
         </span>
       </div>
       {(accountBilledText || userBilledText) && (
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-[46px]">
+        <div
+          className={cn(
+            "pl-[46px] text-[10px]",
+            apiAccount
+              ? "flex flex-col items-start gap-0.5 font-medium"
+              : "flex items-center gap-1.5 text-muted-foreground/80",
+          )}
+        >
           {accountBilledText && (
-            <span>
+            <span
+              className={cn(
+                apiAccount &&
+                  "text-emerald-700 dark:text-emerald-400",
+              )}
+            >
               {t("accounts.accountBilledLabel")}: ${accountBilledText}
             </span>
           )}
           {userBilledText && (
-            <span>
+            <span
+              className={cn(
+                apiAccount && "text-sky-700 dark:text-sky-400",
+              )}
+            >
               {t("accounts.userBilledLabel")}: ${userBilledText}
             </span>
           )}
@@ -14628,6 +14749,7 @@ function TodayStatsCell({ account }: { account: AccountRow }) {
           label: row.key === "unknown" ? t("accounts.unknownModel") : row.key,
           count: row.count,
           percent: row.percent,
+          avgFirstTokenMs: detail.model_avg_first_token_ms?.[row.key],
           successRate:
             typeof success === "number" && row.count > 0
               ? (success / row.count) * 100
@@ -14685,7 +14807,10 @@ function UsageCell({
       disabled={refreshing}
       title={t("accounts.refreshUsage")}
       aria-label={t("accounts.refreshUsage")}
-      className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+      className={cn(
+        "shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50",
+        account.openai_responses_api && "mr-6",
+      )}
     >
       <RefreshCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
     </button>
@@ -14740,7 +14865,11 @@ function UsageCell({
               detail={account.usage_5h_detail}
             />
           ) : (
-            <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
+            <UsageWindowStat
+              label="5h"
+              detail={account.usage_5h_detail}
+              apiAccount={account.openai_responses_api}
+            />
           )}
           {sparkBar}
           {has7d ? (
@@ -14772,7 +14901,11 @@ function UsageCell({
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
+            <UsageWindowStat
+              label={longWindowLabel}
+              detail={account.usage_7d_detail}
+              apiAccount={account.openai_responses_api}
+            />
           )}
         </div>
         {refreshButton}
@@ -14792,7 +14925,11 @@ function UsageCell({
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
+            <UsageWindowStat
+              label={longWindowLabel}
+              detail={account.usage_7d_detail}
+              apiAccount={account.openai_responses_api}
+            />
           )}
         </div>
         {refreshButton}
@@ -14807,6 +14944,101 @@ function UsageCell({
 // 超过这个时间还没有数据说明上游拉不到(鉴权失败/官方统计滞后),
 // 再转下去只会让用户以为一直在加载。
 const OFFICIAL_PENDING_SPIN_TIMEOUT_MS = 100_000;
+
+function formatAPIAccountBalance(data: OpenAIResponsesBalanceResponse): string {
+  if (data.unlimited) return "∞";
+  const unit = data.unit.trim().toUpperCase();
+  if (unit === "USD" || unit === "$") return formatOfficialUSD(data.balance);
+  if (unit === "CNY" || unit === "RMB" || unit === "¥") {
+    return `¥${data.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  }
+  const value = data.balance.toLocaleString(undefined, {
+    maximumFractionDigits: 4,
+  });
+  return unit && unit !== "QUOTA" ? `${value} ${data.unit}` : `${value} quota`;
+}
+
+function APIAccountBalanceBadge({ accountId }: { accountId: number }) {
+  const { t } = useTranslation();
+  const cached = apiBalanceCache.get(accountId);
+  const [state, setState] = useState<APIBalanceLoadState>(() =>
+    cached && cached.expiresAt > Date.now()
+      ? cached.state
+      : { loading: false },
+  );
+  const [visible, setVisible] = useState(false);
+  const badgeRef = useRef<HTMLButtonElement>(null);
+
+  const refresh = useCallback((force = false) => {
+    setState({ loading: true });
+    void loadAPIAccountBalance(accountId, force).then(setState);
+  }, [accountId]);
+
+  useEffect(() => {
+    const element = badgeRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "120px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    let active = true;
+    setState((current) => (current.data || current.error ? current : { loading: true }));
+    void loadAPIAccountBalance(accountId).then((next) => {
+      if (active) setState(next);
+    });
+    return () => {
+      active = false;
+    };
+  }, [accountId, visible]);
+
+  const title = state.data
+    ? t("accounts.apiBalanceTooltip", {
+        source: state.data.source,
+        time: formatRelativeTime(state.data.queried_at),
+      })
+    : state.error
+      ? t("accounts.apiBalanceFailed", { error: state.error })
+      : t("accounts.apiBalanceLoading");
+
+  return (
+    <button
+      type="button"
+      ref={badgeRef}
+      onClick={(event) => {
+        event.stopPropagation();
+        refresh(true);
+      }}
+      className={cn(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 font-mono text-[11px] tabular-nums ring-1 ring-inset transition-colors",
+        state.error
+          ? "bg-red-500/10 text-red-700/70 ring-red-500/20 hover:bg-red-500/20 dark:text-red-400/70"
+          : "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
+      )}
+      title={title}
+    >
+      {state.loading ? (
+        <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
+      ) : (
+        <Wallet className="size-3 shrink-0" aria-hidden />
+      )}
+      {t("accounts.apiBalanceLabel")}: {state.data ? formatAPIAccountBalance(state.data) : "—"}
+    </button>
+  );
+}
 
 // 成本列并排两套账,颜色区分口径:
 // 上行(石板色)是网关自己的日志算出来的,只含经由本网关转发的请求;
@@ -14825,6 +15057,7 @@ function BilledCell({
     typeof account.official_usd_7d === "number" ? account.official_usd_7d : null;
   const showOfficial =
     isCodexOfficialAccount(account) && !isOfficialCostHiddenAccount(account);
+  const showAPIBalance = account.openai_responses_api === true;
   // synced 表示后端已成功同步过但上游没有数据(官方统计有滞后):
   // 这是确定的"暂无数据",不是"还在加载",不该转圈。
   // 导入未满一天、封禁/错误号也不转圈：官方结算要到次日才出数。
@@ -14851,7 +15084,7 @@ function BilledCell({
     (account.usage_percent_5h !== null && account.usage_percent_5h !== undefined) ||
     !!account.reset_5h_at;
   const visibleH5 = has5hWindow ? h5 : null;
-  if (visibleH5 === null && d7 === null && !showOfficial) {
+  if (visibleH5 === null && d7 === null && !showOfficial && !showAPIBalance) {
     return <span className="text-[12px] text-muted-foreground">-</span>;
   }
   const longLabel = formatLongUsageWindowLabel(account);
@@ -14868,6 +15101,7 @@ function BilledCell({
     : `${t("accounts.billedOfficialHint")}\n${t("accounts.billedOfficialOpen")}`;
   return (
     <div className="flex flex-col items-start gap-1">
+      {showAPIBalance && <APIAccountBalanceBadge accountId={account.id} />}
       {(visibleH5 !== null || d7 !== null) && (
         <span
           className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-slate-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-slate-700 ring-1 ring-inset ring-slate-500/20 dark:text-slate-300"

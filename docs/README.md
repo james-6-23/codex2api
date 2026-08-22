@@ -52,6 +52,10 @@
 - 测试要求
 - 文档更新
 
+### 7. NewAPI 审计与生产验收
+- [NewAPI 身份与执行适配器](newapi-audit-integration.md)
+- [BuyCodeKey 到 Codex2API 生产透传修复与验收](buycodekey-production-passthrough-verification.md)
+
 ## 快速开始
 
 1. **新用户**: 先阅读主 README.md，然后参考 [DEPLOYMENT.md](DEPLOYMENT.md) 进行部署

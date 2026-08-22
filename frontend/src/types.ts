@@ -37,6 +37,7 @@ export interface AccountUsageWindow {
   user_billed?: number
   model_counts?: Record<string, number>
   model_success_counts?: Record<string, number>
+  model_avg_first_token_ms?: Record<string, number>
 }
 
 export interface GrokProductUsage {
@@ -111,6 +112,7 @@ export interface AccountRow {
   grok_rate_limit?: GrokRateLimitSnapshot
   grok_free_quota?: GrokFreeQuotaSnapshot
   base_url?: string
+  balance_query_url?: string
   models?: string[]
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
@@ -606,6 +608,7 @@ export interface AddOpenAIResponsesAccountRequest {
   name?: string
   base_url: string
   api_key: string
+  balance_query_url?: string
   models: string[]
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
@@ -617,6 +620,7 @@ export interface UpdateOpenAIResponsesAccountRequest {
   name?: string
   base_url: string
   api_key?: string
+  balance_query_url?: string
   models: string[]
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
@@ -634,6 +638,14 @@ export interface FetchOpenAIResponsesModelsRequest {
 export interface FetchOpenAIResponsesModelsResponse {
   base_url: string
   models: string[]
+}
+
+export interface OpenAIResponsesBalanceResponse {
+  balance: number
+  unit: string
+  source: string
+  unlimited?: boolean
+  queried_at: ISODateString
 }
 
 export type GrokAuthKind = 'oauth' | 'api_key'

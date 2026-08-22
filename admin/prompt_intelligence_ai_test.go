@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -106,6 +107,55 @@ func TestPromptIntelligenceLearnableEvidenceSelectionRejectsInsufficientAndDedup
 	}
 	if direct := countPromptIntelligenceDirectEvidence(selected); direct != 1 {
 		t.Fatalf("direct evidence count=%d want=1", direct)
+	}
+}
+
+func TestPromptIntelligenceContextOnlyEvidenceIsNotAnalysisReady(t *testing.T) {
+	evidence := []*database.PromptRuleCandidateEvidence{{
+		SourceRefHash: "context-only",
+		MetadataJSON:  `{"evidence_quality":"context_only","learning_evidence":{"version":1,"quality":"context_only","context":[{"origin":"history","text":"linked context"}]}}`,
+	}}
+	selected := selectPromptIntelligenceLearnableEvidence(evidence, 20)
+	if len(selected) != 1 {
+		t.Fatalf("context-only evidence should remain available for context inspection, got %d", len(selected))
+	}
+	if promptIntelligenceHasDirectEvidence(selected) {
+		t.Fatal("context-only evidence must not be treated as a complete prompt for AI attribution")
+	}
+}
+
+func TestPromptIntelligenceModerationOnlyModelRequiresChat(t *testing.T) {
+	for _, model := range []string{"omni-moderation-latest", "text-moderation-007", "provider/moderation-v1"} {
+		if !promptIntelligenceModerationOnlyModel(model) {
+			t.Fatalf("model %q was not recognized as moderation-only", model)
+		}
+	}
+	for _, model := range []string{"deepseek-v4-flash", "gpt-5.5", "custom-safe-review"} {
+		if promptIntelligenceModerationOnlyModel(model) {
+			t.Fatalf("chat model %q was incorrectly rejected", model)
+		}
+	}
+}
+
+func TestPromptIntelligenceDoesNotSendModerationModelToChatEndpoint(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		calls.Add(1)
+	}))
+	defer server.Close()
+
+	handler := &Handler{}
+	_, _, err := handler.callPromptIntelligenceAI(context.Background(), promptIntelligenceAIAnalysisRequest{
+		Provider: promptIntelligenceAIProviderReview,
+	}, promptfilter.ReviewConfig{
+		Enabled: true, APIKey: "review-key", BaseURL: server.URL, Model: "omni-moderation-latest",
+		Adapter: promptfilter.ReviewAdapterConfig{RequestMode: promptfilter.ReviewRequestModeModerations},
+	}, "system", "input")
+	if !errors.Is(err, errPromptIntelligenceRequiresChatModel) {
+		t.Fatalf("error=%v, want chat-model compatibility error", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("moderation-only model caused %d chat requests", calls.Load())
 	}
 }
 

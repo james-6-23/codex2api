@@ -17,7 +17,13 @@
     "modelCooldownPolicySaveFailed": "儲存模型冷卻策略失敗：{{error}}",
     "modelCooldownCleared": "已清除 {{model}} 的模型冷卻",
     "allModelCooldownsCleared": "已清除 {{count}} 條模型冷卻",
-    "planWorkspaceId": "空間 ID：{{id}}"
+    "planWorkspaceId": "空間 ID：{{id}}",
+    "apiBalanceLabel": "餘額",
+    "apiBalanceLoading": "正在查詢 API 平台餘額",
+    "apiBalanceFailed": "餘額查詢失敗：{{error}}。點擊重試，或在帳號設定中配置查詢介面。",
+    "apiBalanceTooltip": "來源：{{source}} · 更新於 {{time}}。點擊刷新。",
+    "apiBalanceQueryUrl": "餘額查詢介面（可選）",
+    "apiBalanceQueryUrlHint": "留空會自動嘗試 sub2api /v1/usage 與 New API 計費介面；也可填寫以 / 開頭的路徑或完整 http/https URL，查詢時會攜帶 API Key。"
   },
   "settings": {
     "modelCooldownTitle": "模型 429 冷卻策略",

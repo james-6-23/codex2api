@@ -35,6 +35,8 @@ const (
 	promptIntelligenceAIAnalysisWorkers   = 3
 )
 
+var errPromptIntelligenceRequiresChatModel = errors.New("CY 归因需要支持 Chat Completions 的分析模型")
+
 type promptIntelligenceAIAnalysisRequest struct {
 	Provider           string `json:"provider"`
 	Model              string `json:"model"`
@@ -300,6 +302,10 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 		writeError(c, http.StatusConflict, "该候选只有证据不足的 CY 记录，尚未提取到可学习的 Prompt 或关联上下文；已停止调用外部模型")
 		return
 	}
+	if !promptIntelligenceHasDirectEvidence(learnableEvidence) {
+		writeError(c, http.StatusConflict, "该候选只有 context_only 上下文证据，没有完整用户 Prompt；已停止调用外部模型")
+		return
+	}
 	learnableEvidenceCount := countPromptIntelligenceLearnableEvidence(upstreamEvidence)
 
 	cfg := h.store.GetPromptFilterConfig()
@@ -309,7 +315,11 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 	analysisInput := buildPromptIntelligenceAIEvidenceInput(candidate, learnableEvidence)
 	rawOutput, attribution, err := h.callPromptIntelligenceAI(c.Request.Context(), request, reviewCfg, analysisSystemPrompt, analysisInput)
 	if err != nil {
-		writeError(c, http.StatusBadGateway, err.Error())
+		status := http.StatusBadGateway
+		if errors.Is(err, errPromptIntelligenceRequiresChatModel) {
+			status = http.StatusConflict
+		}
+		writeError(c, status, err.Error())
 		return
 	}
 	decision, err := parsePromptIntelligenceAIDecision(rawOutput)
@@ -706,6 +716,9 @@ func (h *Handler) callPromptIntelligenceAI(ctx context.Context, request promptIn
 		if model == "" {
 			model = reviewCfg.Model
 		}
+		if promptIntelligenceModerationOnlyModel(model) {
+			return "", promptIntelligenceAICallAttribution{}, fmt.Errorf("%w：当前模型 %q 仅支持 Moderations，请切换到 DeepSeek 或其他 Chat 模型", errPromptIntelligenceRequiresChatModel, model)
+		}
 		output, err := callPromptIntelligenceReviewProvider(ctx, reviewCfg, model, systemPrompt, input)
 		return output, promptIntelligenceAICallAttribution{Provider: promptIntelligenceAIProviderReview, Model: model}, err
 	}
@@ -715,6 +728,9 @@ func (h *Handler) callPromptIntelligenceAI(ctx context.Context, request promptIn
 	}
 	if model == "" {
 		return "", promptIntelligenceAICallAttribution{}, errors.New("号池分析模型不能为空")
+	}
+	if promptIntelligenceModerationOnlyModel(model) {
+		return "", promptIntelligenceAICallAttribution{}, fmt.Errorf("%w：当前模型 %q 仅支持 Moderations，请切换到可生成 JSON 的 Chat 模型", errPromptIntelligenceRequiresChatModel, model)
 	}
 	var row *database.APIKeyRow
 	var err error
@@ -746,6 +762,15 @@ func (h *Handler) callPromptIntelligenceAI(ctx context.Context, request promptIn
 		attribution.APIKeyID, attribution.APIKeyName = row.ID, row.Name
 	}
 	return output, attribution, nil
+}
+
+func promptIntelligenceModerationOnlyModel(model string) bool {
+	lower := strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(lower, "moderation")
+}
+
+func promptIntelligenceHasDirectEvidence(evidence []*database.PromptRuleCandidateEvidence) bool {
+	return countPromptIntelligenceDirectEvidence(evidence) > 0
 }
 
 func callPromptIntelligenceReviewProvider(ctx context.Context, cfg promptfilter.ReviewConfig, model, systemPrompt, input string) (string, error) {

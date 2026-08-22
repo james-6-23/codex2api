@@ -373,19 +373,21 @@ func TestGetAccountPageStatsIncludesTodayModelCounts(t *testing.T) {
 		t.Fatalf("insert account: %v", err)
 	}
 	for _, item := range []struct {
-		model      string
-		statusCode int
+		model        string
+		statusCode   int
+		firstTokenMs int
 	}{
-		{model: "gpt-5.4", statusCode: http.StatusOK},
-		{model: "gpt-5.4", statusCode: http.StatusTooManyRequests},
-		{model: "gpt-5.2", statusCode: http.StatusOK},
+		{model: "gpt-5.4", statusCode: http.StatusOK, firstTokenMs: 1200},
+		{model: "gpt-5.4", statusCode: http.StatusTooManyRequests, firstTokenMs: 1800},
+		{model: "gpt-5.2", statusCode: http.StatusOK, firstTokenMs: 500},
 	} {
 		if err := db.InsertUsageLog(ctx, &database.UsageLogInput{
-			AccountID:   id,
-			Endpoint:    "/v1/responses",
-			Model:       item.model,
-			StatusCode:  item.statusCode,
-			TotalTokens: 40,
+			AccountID:    id,
+			Endpoint:     "/v1/responses",
+			Model:        item.model,
+			StatusCode:   item.statusCode,
+			TotalTokens:  40,
+			FirstTokenMs: item.firstTokenMs,
 		}); err != nil {
 			t.Fatalf("InsertUsageLog(%s): %v", item.model, err)
 		}
@@ -411,5 +413,8 @@ func TestGetAccountPageStatsIncludesTodayModelCounts(t *testing.T) {
 	}
 	if today.ModelSuccessCounts["gpt-5.4"] != 1 || today.ModelSuccessCounts["gpt-5.2"] != 1 {
 		t.Fatalf("today model success = %#v, want gpt-5.4=1 gpt-5.2=1", today.ModelSuccessCounts)
+	}
+	if today.ModelAvgFirstTokenMs["gpt-5.4"] != 1500 || today.ModelAvgFirstTokenMs["gpt-5.2"] != 500 {
+		t.Fatalf("today model first-token averages = %#v, want gpt-5.4=1500 gpt-5.2=500", today.ModelAvgFirstTokenMs)
 	}
 }

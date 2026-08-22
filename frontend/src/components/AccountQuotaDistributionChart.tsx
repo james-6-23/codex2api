@@ -294,7 +294,7 @@ export default function AccountQuotaDistributionChart({
             <QuotaMetric label={t('accounts.quotaDistributionExhausted')} value={distribution.exhausted} tone={distribution.exhausted > 0 ? 'danger' : 'neutral'} compact={compact} />
             <QuotaMetric
               label={t('accounts.quotaDistributionAverageUsed')}
-              value={distribution.averageUsed === null ? '-' : `${distribution.averageUsed.toFixed(1)}%`}
+              value={distribution.averageUsed == null ? '-' : `${distribution.averageUsed.toFixed(1)}%`}
               tone={getAverageUsedTone(distribution.averageUsed)}
               compact={compact}
             />
@@ -348,8 +348,8 @@ function QuotaMetric({ label, value, tone = 'neutral', compact = false }: { labe
   )
 }
 
-function getAverageUsedTone(value: number | null): 'neutral' | 'warning' | 'danger' | 'success' {
-  if (value === null) return 'neutral'
+function getAverageUsedTone(value: number | null | undefined): 'neutral' | 'warning' | 'danger' | 'success' {
+  if (value == null) return 'neutral'
   if (value >= 90) return 'danger'
   if (value >= 70) return 'warning'
   if (value < 30) return 'success'

@@ -254,7 +254,7 @@ func (db *DB) GetAccountUsageSinceByIDs(ctx context.Context, ids []int64, since 
 	return result, rows.Err()
 }
 
-// GetAccountModelCountsSinceByIDs 按模型拆分指定账号在 since 之后的请求数与成功数。
+// GetAccountModelCountsSinceByIDs 按模型拆分指定账号在 since 之后的请求数、成功数与平均首字时长。
 // 过滤口径与 GetAccountUsageSinceByIDs 一致，保证浮层合计对得上今日统计数字。
 func (db *DB) GetAccountModelCountsSinceByIDs(ctx context.Context, ids []int64, since time.Time) (map[int64]map[string]AccountModelCount, error) {
 	result := make(map[int64]map[string]AccountModelCount, len(ids))
@@ -267,7 +267,8 @@ func (db *DB) GetAccountModelCountsSinceByIDs(ctx context.Context, ids []int64, 
 	query := fmt.Sprintf(`SELECT account_id,
 		COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown'),
 		COUNT(*),
-		COALESCE(SUM(CASE WHEN status_code < 400 THEN 1 ELSE 0 END), 0)
+		COALESCE(SUM(CASE WHEN status_code < 400 THEN 1 ELSE 0 END), 0),
+		COALESCE(AVG(NULLIF(first_token_ms, 0)), 0)
 		FROM usage_logs
 		WHERE created_at >= $1 AND status_code <> 499 AND %s AND %s AND %s
 		GROUP BY account_id, COALESCE(NULLIF(effective_model, ''), NULLIF(model, ''), 'unknown')`,
@@ -281,7 +282,7 @@ func (db *DB) GetAccountModelCountsSinceByIDs(ctx context.Context, ids []int64, 
 		var accountID int64
 		var model string
 		var count AccountModelCount
-		if err := rows.Scan(&accountID, &model, &count.Requests, &count.Success); err != nil {
+		if err := rows.Scan(&accountID, &model, &count.Requests, &count.Success, &count.AvgFirstTokenMs); err != nil {
 			return nil, err
 		}
 		if result[accountID] == nil {

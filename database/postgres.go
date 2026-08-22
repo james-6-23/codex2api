@@ -5811,10 +5811,11 @@ type AccountTimeRangeUsage struct {
 	UserBilled    float64
 }
 
-// AccountModelCount 某个模型在指定窗口内的请求数与成功数。
+// AccountModelCount 某个模型在指定窗口内的请求数、成功数与平均首字时长。
 type AccountModelCount struct {
-	Requests int64
-	Success  int64
+	Requests        int64
+	Success         int64
+	AvgFirstTokenMs float64
 }
 
 // nonRetryUsageLogPredicate keeps transport retry attempts out of end-user

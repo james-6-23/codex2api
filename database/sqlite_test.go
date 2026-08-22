@@ -3606,21 +3606,21 @@ func TestGetAccountModelCountsSinceByIDsMatchesTodayUsage(t *testing.T) {
 
 	ctx := context.Background()
 	now := time.Now().UTC().Truncate(time.Second)
-	insert := func(accountID int64, createdAt time.Time, model, effective string, retry any, statusCode int) {
+	insert := func(accountID int64, createdAt time.Time, model, effective string, retry any, statusCode, firstTokenMs int) {
 		t.Helper()
 		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs
-			(account_id, status_code, total_tokens, is_retry_attempt, model, effective_model, created_at)
-			VALUES ($1, $2, 10, $3, $4, $5, $6)`, accountID, statusCode, retry, model, effective, sqliteTimeParam(createdAt)); err != nil {
+			(account_id, status_code, total_tokens, is_retry_attempt, model, effective_model, first_token_ms, created_at)
+			VALUES ($1, $2, 10, $3, $4, $5, $6, $7)`, accountID, statusCode, retry, model, effective, firstTokenMs, sqliteTimeParam(createdAt)); err != nil {
 			t.Fatalf("insert usage log: %v", err)
 		}
 	}
-	insert(1, now.Add(-time.Hour), "gpt-5.4", "", 0, 200)
-	insert(1, now.Add(-50*time.Minute), "gpt-5.4", "", 0, 429)
-	insert(1, now.Add(-2*time.Hour), "gpt-5.2", "gpt-5.2-codex", 0, 200)
-	insert(1, now.Add(-30*time.Minute), "gpt-5.4", "", 1, 200)
-	insert(1, now.Add(-20*time.Minute), "gpt-5.4", "", 0, 499)
-	insert(1, now.Add(-26*time.Hour), "gpt-5.3", "", 0, 200)
-	insert(2, now.Add(-time.Hour), "grok-4", "", 0, 200)
+	insert(1, now.Add(-time.Hour), "gpt-5.4", "", 0, 200, 1200)
+	insert(1, now.Add(-50*time.Minute), "gpt-5.4", "", 0, 429, 1800)
+	insert(1, now.Add(-2*time.Hour), "gpt-5.2", "gpt-5.2-codex", 0, 200, 500)
+	insert(1, now.Add(-30*time.Minute), "gpt-5.4", "", 1, 200, 2400)
+	insert(1, now.Add(-20*time.Minute), "gpt-5.4", "", 0, 499, 3000)
+	insert(1, now.Add(-26*time.Hour), "gpt-5.3", "", 0, 200, 700)
+	insert(2, now.Add(-time.Hour), "grok-4", "", 0, 200, 900)
 
 	usage, err := db.GetAccountUsageSinceByIDs(ctx, []int64{1, 2}, now.Add(-5*time.Hour))
 	if err != nil {
@@ -3635,6 +3635,9 @@ func TestGetAccountModelCountsSinceByIDsMatchesTodayUsage(t *testing.T) {
 	}
 	if models[1]["gpt-5.4"].Requests != 2 || models[1]["gpt-5.4"].Success != 1 || models[1]["gpt-5.2-codex"].Requests != 1 || models[1]["gpt-5.2-codex"].Success != 1 || models[1]["gpt-5.3"].Requests != 0 {
 		t.Fatalf("today models account 1 = %#v, want gpt-5.4=2/1 gpt-5.2-codex=1/1", models[1])
+	}
+	if models[1]["gpt-5.4"].AvgFirstTokenMs != 1500 || models[1]["gpt-5.2-codex"].AvgFirstTokenMs != 500 {
+		t.Fatalf("today model first-token averages = %#v, want gpt-5.4=1500 gpt-5.2-codex=500", models[1])
 	}
 	if models[2]["grok-4"].Requests != 1 || models[2]["grok-4"].Success != 1 {
 		t.Fatalf("today models account 2 = %#v, want grok-4=1/1", models[2])
