@@ -7641,7 +7641,18 @@ func (h *Handler) ClearUsageLogs(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
 	defer cancel()
 
-	if err := h.db.ClearUsageLogs(ctx); err != nil {
+	accountIDs := make([]int64, 0)
+	if h.store != nil {
+		accounts := h.store.Accounts()
+		accountIDs = make([]int64, 0, len(accounts))
+		for _, account := range accounts {
+			if account != nil {
+				accountIDs = append(accountIDs, account.ID())
+			}
+		}
+	}
+	billing5hWindows, billing7dWindows := h.accountBillingWindows(accountIDs)
+	if err := h.db.ClearUsageLogs(ctx, billing5hWindows, billing7dWindows); err != nil {
 		writeInternalError(c, err)
 		return
 	}

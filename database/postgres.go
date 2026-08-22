@@ -466,6 +466,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	if err := db.ensureUsageAccountHourlyRollupsTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建用量归档汇总表失败: %w", err)
 	}
+	if err := db.ensureUsageAccountBillingWindowRollupsTable(ctx); err != nil {
+		return nil, fmt.Errorf("创建账号成本窗口归档表失败: %w", err)
+	}
 
 	// 启动批量写入后台协程
 	db.startLogFlusher()
@@ -5893,8 +5896,10 @@ func (db *DB) ListUsageLogsByFilter(ctx context.Context, f UsageLogFilter) ([]*U
 	return logs, rows.Err()
 }
 
-// ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）
-func (db *DB) ClearUsageLogs(ctx context.Context) error {
+// ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）。billingWindowSets
+// 是可选的账号精确额度窗口；管理端传入 5h/7d 窗口后，本地成本胶囊可在
+// 清理后保留，并在上游窗口起点变化时自然从新窗口重新计算。
+func (db *DB) ClearUsageLogs(ctx context.Context, billingWindowSets ...map[int64]time.Time) error {
 	// 先校验增量汇总是否与明细日志同步。这也兼容测试、手工 SQL 等绕过正常写入队列的场景。
 	if _, err := db.loadUsageStatsRollup(ctx, ""); err != nil {
 		return fmt.Errorf("读取清理前完整累计失败: %w", err)
@@ -5928,6 +5933,9 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 	}
 	if err := db.archiveUsageLogsWithExec(ctx, tx); err != nil {
 		return fmt.Errorf("归档账号用量统计失败: %w", err)
+	}
+	if err := db.archiveAccountBillingWindowsWithExec(ctx, tx, billingWindowSets); err != nil {
+		return fmt.Errorf("归档账号额度窗口成本失败: %w", err)
 	}
 	if db.isSQLite() {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
@@ -6141,12 +6149,11 @@ func (db *DB) GetAccountUsageWindows(ctx context.Context, shortSince, longSince 
 
 // GetAccountBilledSince 返回指定时间戳以来 account_billed 的总和
 func (db *DB) GetAccountBilledSince(ctx context.Context, accountID int64, since time.Time) (float64, error) {
-	var billed float64
-	err := db.conn.QueryRowContext(ctx,
-		`SELECT COALESCE(SUM(account_billed), 0) FROM usage_logs WHERE account_id = $1 AND created_at >= $2
-		 AND status_code <> 499 AND TRIM(COALESCE(internal_reason, '')) = ''`,
-		accountID, db.timeArg(since)).Scan(&billed)
-	return billed, err
+	result, err := db.GetAccountsBilledSince(ctx, map[int64]time.Time{accountID: since})
+	if err != nil {
+		return 0, err
+	}
+	return result[accountID], nil
 }
 
 // GetAccountsBilledSince 批量返回每个账号在各自 since 之后的 account_billed 总和。
@@ -6188,30 +6195,39 @@ func (db *DB) getAccountsBilledSinceChunk(ctx context.Context, ids []int64, wind
 	}
 
 	values := make([]string, 0, len(ids))
-	args := make([]interface{}, 0, len(ids)*2)
+	args := make([]interface{}, 0, len(ids)*3)
 	argIdx := 1
 	for _, accountID := range ids {
+		since := windows[accountID].UTC()
 		if db.isSQLite() {
-			values = append(values, fmt.Sprintf("($%d, $%d)", argIdx, argIdx+1))
+			values = append(values, fmt.Sprintf("($%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2))
 		} else {
-			values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::TIMESTAMPTZ)", argIdx, argIdx+1))
+			values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::TIMESTAMPTZ, $%d::BIGINT)", argIdx, argIdx+1, argIdx+2))
 		}
-		args = append(args, accountID, db.timeArg(windows[accountID]))
-		argIdx += 2
+		args = append(args, accountID, db.timeArg(since), since.UnixNano())
+		argIdx += 3
 	}
 
 	query := fmt.Sprintf(`
-	WITH billing_windows(account_id, since_at) AS (
+	WITH billing_windows(account_id, since_at, window_start) AS (
 		VALUES %s
+	), live_costs AS (
+		SELECT billing_windows.account_id, COALESCE(SUM(usage_logs.account_billed), 0) AS account_billed
+		FROM billing_windows
+		LEFT JOIN usage_logs
+			ON usage_logs.account_id = billing_windows.account_id
+			AND usage_logs.created_at >= billing_windows.since_at
+			AND usage_logs.status_code <> 499
+			AND TRIM(COALESCE(usage_logs.internal_reason, '')) = ''
+		GROUP BY billing_windows.account_id
 	)
-	SELECT billing_windows.account_id, COALESCE(SUM(usage_logs.account_billed), 0) AS account_billed
+	SELECT billing_windows.account_id,
+		COALESCE(live_costs.account_billed, 0) + COALESCE(archived.account_billed, 0) AS account_billed
 	FROM billing_windows
-	LEFT JOIN usage_logs
-		ON usage_logs.account_id = billing_windows.account_id
-		AND usage_logs.created_at >= billing_windows.since_at
-		AND usage_logs.status_code <> 499
-		AND TRIM(COALESCE(usage_logs.internal_reason, '')) = ''
-	GROUP BY billing_windows.account_id
+	LEFT JOIN live_costs ON live_costs.account_id = billing_windows.account_id
+	LEFT JOIN usage_account_billing_window_rollups archived
+		ON archived.account_id = billing_windows.account_id
+		AND archived.window_start = billing_windows.window_start
 	`, strings.Join(values, ","))
 
 	rows, err := db.conn.QueryContext(ctx, query, args...)

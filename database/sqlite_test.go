@@ -2709,6 +2709,67 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	}
 }
 
+func TestAccountBilledWindowSurvivesClearAndResetsOnExactNewWindow(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite) 返回错误: %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	base := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Second)
+	currentStart := base.Add(30*time.Minute + 17*time.Second)
+	insertCost := func(createdAt time.Time, billed float64) {
+		t.Helper()
+		_, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs
+			(account_id, status_code, account_billed, created_at)
+			VALUES (1, 200, $1, $2)`, billed, sqliteTimeParam(createdAt))
+		if err != nil {
+			t.Fatalf("insert cost %.2f: %v", billed, err)
+		}
+	}
+
+	// The first row belongs to the previous upstream quota window even though
+	// it shares the same UTC hour as currentStart.
+	insertCost(currentStart.Add(-10*time.Minute), 100)
+	insertCost(currentStart.Add(10*time.Minute), 12)
+	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: currentStart}); err != nil {
+		t.Fatalf("ClearUsageLogs(current window): %v", err)
+	}
+	billed, err := db.GetAccountBilledSince(ctx, 1, currentStart)
+	if err != nil || billed != 12 {
+		t.Fatalf("current window after clear = %.2f, err=%v, want 12", billed, err)
+	}
+
+	insertCost(currentStart.Add(20*time.Minute), 3)
+	billed, err = db.GetAccountBilledSince(ctx, 1, currentStart)
+	if err != nil || billed != 15 {
+		t.Fatalf("archived + live window = %.2f, err=%v, want 15", billed, err)
+	}
+
+	// Advancing the upstream reset within the same hour must not reuse the old
+	// exact-window snapshot. Only the live request after the new start remains.
+	newStart := currentStart.Add(15 * time.Minute)
+	billed, err = db.GetAccountBilledSince(ctx, 1, newStart)
+	if err != nil || billed != 3 {
+		t.Fatalf("new reset window before second clear = %.2f, err=%v, want 3", billed, err)
+	}
+	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: newStart}); err != nil {
+		t.Fatalf("ClearUsageLogs(new window): %v", err)
+	}
+	billed, err = db.GetAccountBilledSince(ctx, 1, newStart)
+	if err != nil || billed != 3 {
+		t.Fatalf("new reset window after second clear = %.2f, err=%v, want 3", billed, err)
+	}
+
+	insertCost(newStart.Add(10*time.Minute), 4)
+	billedByID, err := db.GetAccountsBilledSince(ctx, map[int64]time.Time{1: newStart})
+	if err != nil || billedByID[1] != 7 {
+		t.Fatalf("new archived + live window = %#v, err=%v, want 7", billedByID, err)
+	}
+}
+
 func TestUsageStatsRollupPreservesFullTotalsAndChannelSemantics(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	db, err := New("sqlite", dbPath)

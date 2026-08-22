@@ -62,6 +62,102 @@ func (db *DB) ensureUsageAccountHourlyRollupsTable(ctx context.Context) error {
 	return err
 }
 
+// ensureUsageAccountBillingWindowRollupsTable creates the exact-window billing
+// snapshots used by the account list's local 5h/7d cost badges. The general
+// usage archive is intentionally hourly, which is too coarse for an upstream
+// quota reset that can happen at an arbitrary second. Keying the compact cost
+// snapshot by the exact window start preserves both behaviours: clearing raw
+// logs keeps the current badge value, while a new upstream reset start no
+// longer matches the previous window and therefore starts again from zero.
+func (db *DB) ensureUsageAccountBillingWindowRollupsTable(ctx context.Context) error {
+	if db == nil || db.conn == nil {
+		return fmt.Errorf("database is not initialized")
+	}
+	_, err := db.conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS usage_account_billing_window_rollups (
+		account_id BIGINT NOT NULL,
+		window_start BIGINT NOT NULL,
+		account_billed DOUBLE PRECISION NOT NULL DEFAULT 0,
+		PRIMARY KEY (account_id, window_start)
+	)`)
+	if err != nil {
+		return err
+	}
+	_, err = db.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_usage_account_billing_window_start ON usage_account_billing_window_rollups(window_start)`)
+	return err
+}
+
+type accountBillingWindow struct {
+	AccountID int64
+	Since     time.Time
+}
+
+func collectAccountBillingWindows(windowSets []map[int64]time.Time) []accountBillingWindow {
+	seen := make(map[string]struct{})
+	windows := make([]accountBillingWindow, 0)
+	for _, windowSet := range windowSets {
+		for accountID, since := range windowSet {
+			if accountID <= 0 || since.IsZero() {
+				continue
+			}
+			since = since.UTC()
+			key := fmt.Sprintf("%d:%d", accountID, since.UnixNano())
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			windows = append(windows, accountBillingWindow{AccountID: accountID, Since: since})
+		}
+	}
+	return windows
+}
+
+// archiveAccountBillingWindowsWithExec snapshots only the exact active quota
+// windows supplied by the runtime account store. Repeated clears add just the
+// newly-created detail rows to the same window. Old window rows are retained
+// but become unreachable as soon as the upstream reset advances the start.
+func (db *DB) archiveAccountBillingWindowsWithExec(ctx context.Context, tx *sql.Tx, windowSets []map[int64]time.Time) error {
+	windows := collectAccountBillingWindows(windowSets)
+	if len(windows) == 0 {
+		return nil
+	}
+
+	const maxWindowsPerBatch = 500
+	for start := 0; start < len(windows); start += maxWindowsPerBatch {
+		end := start + maxWindowsPerBatch
+		if end > len(windows) {
+			end = len(windows)
+		}
+		values := make([]string, 0, end-start)
+		args := make([]interface{}, 0, (end-start)*3)
+		argIdx := 1
+		for _, window := range windows[start:end] {
+			if db.isSQLite() {
+				values = append(values, fmt.Sprintf("($%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2))
+			} else {
+				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::BIGINT, $%d::TIMESTAMPTZ)", argIdx, argIdx+1, argIdx+2))
+			}
+			args = append(args, window.AccountID, window.Since.UnixNano(), db.timeArg(window.Since))
+			argIdx += 3
+		}
+		query := fmt.Sprintf(`WITH billing_windows(account_id, window_start, since_at) AS (VALUES %s)
+			INSERT INTO usage_account_billing_window_rollups(account_id, window_start, account_billed)
+			SELECT billing_windows.account_id, billing_windows.window_start,
+				COALESCE(SUM(usage_logs.account_billed), 0)
+			FROM billing_windows
+			JOIN usage_logs ON usage_logs.account_id = billing_windows.account_id
+				AND usage_logs.created_at >= billing_windows.since_at
+				AND usage_logs.status_code <> 499
+				AND TRIM(COALESCE(usage_logs.internal_reason, '')) = ''
+			GROUP BY billing_windows.account_id, billing_windows.window_start
+			ON CONFLICT (account_id, window_start) DO UPDATE SET
+				account_billed = usage_account_billing_window_rollups.account_billed + excluded.account_billed`, strings.Join(values, ","))
+		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (db *DB) archiveUsageLogsWithExec(ctx context.Context, tx *sql.Tx) error {
 	if db == nil || tx == nil {
 		return fmt.Errorf("archive usage logs: database transaction is nil")
