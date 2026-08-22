@@ -116,6 +116,11 @@ type Account struct {
 	// CodexFingerprintMode 见 codex_fingerprint_mode.go：Codex 官方出站请求的
 	// 设备指纹收敛档位（off / device / session / full），默认 off。
 	CodexFingerprintMode string
+	// SessionCapacity* limits how many distinct downstream conversations may
+	// remain bound to this official Codex account. It is disabled by default.
+	SessionCapacityEnabled        bool
+	SessionCapacityMax            int64
+	SessionCapacityIdleTTLSeconds int64
 	// Codex Agent Identity（auth_mode=agentIdentity）：不存 AT/RT，每次上游请求用
 	// agent_private_key(Ed25519, PKCS#8 base64) 动态签名。AgentTaskID 由 task 注册获得，
 	// 运行时缓存并落库(credentials.task_id)。
@@ -3170,6 +3175,8 @@ type Store struct {
 	sessionSlotBufferNS      atomic.Int64
 	sessionSlotSequence      uint64
 	sessionSlotReservations  map[int64]map[string][]uint64
+	accountSessionMu         sync.Mutex
+	accountSessions          map[int64]map[string]*accountSessionState
 
 	globalAutoPause5hThreshold    float64  // protected by mu
 	globalAutoPause7dThreshold    float64  // protected by mu
@@ -3602,6 +3609,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		proxyPoolEnabled:           settings.ProxyPoolEnabled,
 		sessionBindings:            make(map[string]sessionAffinity),
 		sessionSlotReservations:    make(map[int64]map[string][]uint64),
+		accountSessions:            make(map[int64]map[string]*accountSessionState),
 		promptFilterNewAPIBindings: make(map[int64]database.PromptFilterNewAPIBinding),
 		oauthRefreshLocks:          make(map[string]*oauthRefreshLocalLock),
 	}
@@ -4717,6 +4725,8 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	modelMapping := strings.TrimSpace(row.GetCredential("model_mapping"))
 	codexClientMetadataMode := NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
 	codexFingerprintMode := NormalizeCodexFingerprintMode(row.GetCredential(CodexFingerprintModeCredentialKey))
+	sessionCapacityMax, _ := row.GetCredentialInt64(SessionCapacityMaxCredentialKey)
+	sessionCapacityIdleTTLSeconds, _ := row.GetCredentialInt64(SessionCapacityIdleTTLSecondsKey)
 	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
@@ -4729,22 +4739,25 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	}
 
 	account := &Account{
-		DBID:                    row.ID,
-		CredentialGeneration:    row.CredentialGeneration,
-		CredentialFamilyID:      row.CredentialFamilyID,
-		RefreshToken:            rt,
-		SessionToken:            st,
-		ProxyURL:                strings.TrimSpace(row.ProxyURL),
-		CustomHeaders:           row.GetCredentialStringMap("custom_headers"),
-		HealthTier:              HealthTierWarm,
-		AddedAt:                 row.CreatedAt.UnixNano(),
-		UpstreamType:            upstreamType,
-		BaseURL:                 strings.TrimRight(strings.TrimSpace(baseURL), "/"),
-		APIKey:                  strings.TrimSpace(apiKey),
-		Models:                  models,
-		ModelMapping:            modelMapping,
-		CodexClientMetadataMode: codexClientMetadataMode,
-		CodexFingerprintMode:    codexFingerprintMode,
+		DBID:                          row.ID,
+		CredentialGeneration:          row.CredentialGeneration,
+		CredentialFamilyID:            row.CredentialFamilyID,
+		RefreshToken:                  rt,
+		SessionToken:                  st,
+		ProxyURL:                      strings.TrimSpace(row.ProxyURL),
+		CustomHeaders:                 row.GetCredentialStringMap("custom_headers"),
+		HealthTier:                    HealthTierWarm,
+		AddedAt:                       row.CreatedAt.UnixNano(),
+		UpstreamType:                  upstreamType,
+		BaseURL:                       strings.TrimRight(strings.TrimSpace(baseURL), "/"),
+		APIKey:                        strings.TrimSpace(apiKey),
+		Models:                        models,
+		ModelMapping:                  modelMapping,
+		CodexClientMetadataMode:       codexClientMetadataMode,
+		CodexFingerprintMode:          codexFingerprintMode,
+		SessionCapacityEnabled:        row.GetCredentialBool(SessionCapacityEnabledCredentialKey),
+		SessionCapacityMax:            normalizeSessionCapacityMax(sessionCapacityMax),
+		SessionCapacityIdleTTLSeconds: normalizeSessionCapacityIdleTTLSeconds(sessionCapacityIdleTTLSeconds),
 	}
 	if account.CredentialGeneration <= 0 {
 		account.CredentialGeneration = 1
@@ -5891,6 +5904,11 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	if !s.affinityProxyStillValid(account.DBID, proxyURL) {
 		return
 	}
+	// Admission normally happens during selection. Keep this guard for direct
+	// bind callers and for capacity settings enabled between selection and bind.
+	if !s.AdmitAccountSession(account, key, time.Now()) {
+		return
+	}
 	ttl := sessionAffinityTTL()
 	now := time.Now()
 	binding := sessionAffinity{
@@ -5982,6 +6000,44 @@ func (s *Store) UnbindSessionAffinity(key string, accountID int64) {
 			log.Printf("删除缓存会话粘性失败: account=%d err=%v", accountID, err)
 		}
 	}
+	s.RemoveAccountSession(accountID, key)
+}
+
+func cloneAccountExclusions(exclude map[int64]bool) map[int64]bool {
+	cloned := make(map[int64]bool, len(exclude)+1)
+	for id, excluded := range exclude {
+		if excluded {
+			cloned[id] = true
+		}
+	}
+	return cloned
+}
+
+// admitSelectedAccountSession converts a scheduler acquisition into a session
+// slot. On denial it releases the just-acquired request slot.
+func (s *Store) admitSelectedAccountSession(account *Account, key string, now time.Time) bool {
+	if account == nil {
+		return false
+	}
+	if s.AdmitAccountSession(account, key, now) {
+		return true
+	}
+	s.Release(account)
+	return false
+}
+
+func (s *Store) nextCapacityAdmittedFreshAccount(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy, now time.Time) *Account {
+	localExclude := cloneAccountExclusions(exclude)
+	for {
+		account := s.nextAccountForFreshAffinityWithDispatch(key, apiKeyID, localExclude, filter, policy)
+		if account == nil {
+			return nil
+		}
+		if s.admitSelectedAccountSession(account, key, now) {
+			return account
+		}
+		localExclude[account.DBID] = true
+	}
 }
 
 // NextForSession 优先复用已绑定的账号和代理，失败时回退到普通选号。
@@ -6042,6 +6098,21 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	}
 
 	now := time.Now()
+	// Account session capacity acts as a strong binding even if general account
+	// affinity is bounded or disabled. An active admitted conversation must not
+	// migrate to another upstream account.
+	if accountID, exists := s.AccountSessionAccountID(key, now); exists {
+		if exclude != nil && exclude[accountID] {
+			s.RemoveAccountSession(accountID, key)
+		} else {
+			if acc := s.takeByIDMode(accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+				if s.admitSelectedAccountSession(acc, key, now) {
+					return acc, acc.GetProxyURL()
+				}
+			}
+			return nil, ""
+		}
+	}
 	s.sessionMu.RLock()
 	binding, ok := s.sessionBindings[key]
 	s.sessionMu.RUnlock()
@@ -6054,7 +6125,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 	}
 	if mode == AffinityModeOff && !preserveBinding {
-		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy), ""
+		return s.nextCapacityAdmittedFreshAccount(key, apiKeyID, exclude, filter, policy, now), ""
 	}
 
 	if ok {
@@ -6082,7 +6153,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 
 		if expired || escape {
 			s.UnbindSessionAffinity(key, binding.accountID)
-		} else if acc := s.takeByIDMode(binding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+		} else if acc := s.takeByIDMode(binding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil && s.admitSelectedAccountSession(acc, key, now) {
 			// 命中粘性,记一次复用
 			s.sessionMu.Lock()
 			if current, exists := s.sessionBindings[key]; exists && current.accountID == binding.accountID {
@@ -6110,7 +6181,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 		if cacheMode == AffinityModeBounded && !preserveBinding && !s.affinityAccountStillHealthy(binding.accountID) {
 			// 不复用,落到完整挑号
-		} else if acc := s.takeByIDMode(binding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+		} else if acc := s.takeByIDMode(binding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil && s.admitSelectedAccountSession(acc, key, now) {
 			s.sessionMu.Lock()
 			if s.sessionBindings == nil {
 				s.sessionBindings = make(map[string]sessionAffinity)
@@ -6123,7 +6194,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 	}
 
-	return s.nextAccountForFreshAffinityWithDispatch(key, apiKeyID, exclude, filter, policy), ""
+	return s.nextCapacityAdmittedFreshAccount(key, apiKeyID, exclude, filter, policy, now), ""
 }
 
 // nextAccountForFreshAffinity 为"新亲和键首次绑定"选号(issue #484)。
@@ -6588,7 +6659,13 @@ func (s *Store) waitForSessionAvailableWithFilter(ctx context.Context, key strin
 		if preserveBinding {
 			return s.hasContinuationCandidateWithDispatch(key, apiKeyID, exclude, filter, policy)
 		}
-		return s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, filter, policy)
+		capacityFilter := func(account *Account) bool {
+			if filter != nil && !filter(account) {
+				return false
+			}
+			return s.CanAdmitAccountSession(account, key, time.Now())
+		}
+		return s.hasDispatchCandidateWithDispatch(apiKeyID, exclude, capacityFilter, policy)
 	}
 	if !hasCandidate() {
 		return nil, ""

@@ -250,7 +250,7 @@ const (
 	maxUsageLogFlushIntervalSeconds     = 300
 
 	postgresMaxBindParams       = 65535
-	usageLogInsertColumnCount   = 50
+	usageLogInsertColumnCount   = 51
 	maxUsageLogInsertRowsPerSQL = 1000
 
 	// usageLogBufferHardLimit 内存缓冲的硬上限。PG 长时间不可用时（维护、主从切换、
@@ -296,57 +296,63 @@ func NormalizeUsageLogFlushIntervalSeconds(n int) int {
 
 // usageLogEntry 日志缓冲条目
 type usageLogEntry struct {
-	StoreUsageLog          bool
-	AccountID              int64
-	CredentialGeneration   int64
-	Channel                string
-	ClientIP               string
-	ClientUserAgent        string
-	UpstreamUserAgent      string
-	UserAgentOverridden    bool
-	InternalReason         string
-	ParentRequestID        string
-	Endpoint               string
-	Model                  string
-	EffectiveModel         string
-	PromptTokens           int
-	CompletionTokens       int
-	TotalTokens            int
-	StatusCode             int
-	DurationMs             int
-	InputTokens            int
-	OutputTokens           int
-	ReasoningTokens        int
-	FirstTokenMs           int
-	WsAcquireMs            int
-	ReasoningEffort        string
-	InboundEndpoint        string
-	UpstreamEndpoint       string
-	Stream                 bool
-	Compact                bool
-	HasCompactionHistory   bool
-	ViaWebsocket           bool
-	CachedTokens           int
-	ServiceTier            string
-	RequestedServiceTier   string
-	ActualServiceTier      string
-	BillingServiceTier     string
-	APIKeyID               int64
-	APIKeyName             string
-	APIKeyMasked           string
-	ImageCount             int
-	ImageWidth             int
-	ImageHeight            int
-	ImageBytes             int
-	ImageFormat            string
-	ImageSize              string
-	AccountBilled          float64
-	UserBilled             float64
-	IsRetryAttempt         bool
-	AttemptIndex           int
-	UpstreamErrorKind      string
-	ErrorMessage           string
-	PromptPolicyIncidentID string
+	StoreUsageLog            bool
+	AccountID                int64
+	CredentialGeneration     int64
+	Channel                  string
+	ClientIP                 string
+	ClientUserAgent          string
+	UpstreamUserAgent        string
+	UserAgentOverridden      bool
+	InternalReason           string
+	ParentRequestID          string
+	Endpoint                 string
+	Model                    string
+	EffectiveModel           string
+	PromptTokens             int
+	CompletionTokens         int
+	TotalTokens              int
+	StatusCode               int
+	DurationMs               int
+	InputTokens              int
+	OutputTokens             int
+	ReasoningTokens          int
+	FirstTokenMs             int
+	WsAcquireMs              int
+	ReasoningEffort          string
+	InboundEndpoint          string
+	UpstreamEndpoint         string
+	Stream                   bool
+	Compact                  bool
+	HasCompactionHistory     bool
+	ViaWebsocket             bool
+	CachedTokens             int
+	ServiceTier              string
+	RequestedServiceTier     string
+	ActualServiceTier        string
+	BillingServiceTier       string
+	APIKeyID                 int64
+	APIKeyName               string
+	APIKeyMasked             string
+	ImageCount               int
+	ImageWidth               int
+	ImageHeight              int
+	ImageBytes               int
+	ImageFormat              string
+	ImageSize                string
+	AccountBilled            float64
+	UserBilled               float64
+	IsRetryAttempt           bool
+	AttemptIndex             int
+	UpstreamErrorKind        string
+	ErrorMessage             string
+	PromptPolicyIncidentID   string
+	NewAPIUserName           string
+	SessionHash              string
+	NewAPIPlatform           string
+	NewAPIUserID             string
+	RecordSessionObservation bool
+	ObservedAt               time.Time
 }
 
 // New 创建数据库连接并自动建表。
@@ -453,6 +459,12 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	}
 	if err := db.ensurePromptConversationLocksTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建提示词会话锁表失败: %w", err)
+	}
+	if err := db.ensureAccountSessionObservationsTable(ctx); err != nil {
+		return nil, fmt.Errorf("创建账号会话观测表失败: %w", err)
+	}
+	if err := db.ensureUsageAccountHourlyRollupsTable(ctx); err != nil {
+		return nil, fmt.Errorf("创建用量归档汇总表失败: %w", err)
 	}
 
 	// 启动批量写入后台协程
@@ -1149,6 +1161,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS attempt_index INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_error_kind VARCHAR(64) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS error_message TEXT DEFAULT '';
+	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS newapi_user_name VARCHAR(255) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS credential_generation BIGINT NOT NULL DEFAULT 0;
 	-- idx_usage_logs_account_generation_created_at 不在此批次内创建：usage_logs 是
 	-- 生产最大表，非 CONCURRENTLY 建索引会持锁阻塞写入，且本批次运行在 10 秒启动
@@ -3763,6 +3776,7 @@ type UsageLog struct {
 	UpstreamErrorKind      string    `json:"upstream_error_kind"`
 	ErrorMessage           string    `json:"error_message"`
 	PromptPolicyIncidentID string    `json:"prompt_policy_incident_id,omitempty"`
+	NewAPIUserName         string    `json:"newapi_user_name,omitempty"`
 }
 
 // usage_logs 中受 varchar 长度约束的列宽。这些字段大多直接来自下游请求体或上游响应
@@ -3836,63 +3850,69 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 	// 用户计费金额与账号计费金额相同（简化版，未来可支持倍率）
 	userBilled := accountBilled
-	if !storeUsageLog && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
+	if !storeUsageLog && !log.RecordSessionObservation && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
 		return nil
 	}
 
 	db.logMu.Lock()
 	db.logBuf = append(db.logBuf, usageLogEntry{
-		StoreUsageLog:          storeUsageLog,
-		AccountID:              log.AccountID,
-		CredentialGeneration:   log.CredentialGeneration,
-		Channel:                clampUsageLogText(log.Channel, usageLogChannelMaxLen),
-		ClientIP:               clampUsageLogText(log.ClientIP, usageLogShortTextMaxLen),
-		ClientUserAgent:        log.ClientUserAgent,
-		UpstreamUserAgent:      log.UpstreamUserAgent,
-		UserAgentOverridden:    log.UserAgentOverridden,
-		InternalReason:         clampUsageLogText(log.InternalReason, usageLogShortTextMaxLen),
-		ParentRequestID:        clampUsageLogText(log.ParentRequestID, usageLogRequestIDMaxLen),
-		Endpoint:               clampUsageLogText(log.Endpoint, usageLogTextMaxLen),
-		Model:                  clampUsageLogText(log.Model, usageLogTextMaxLen),
-		EffectiveModel:         clampUsageLogText(log.EffectiveModel, usageLogTextMaxLen),
-		PromptTokens:           log.PromptTokens,
-		CompletionTokens:       log.CompletionTokens,
-		TotalTokens:            log.TotalTokens,
-		StatusCode:             log.StatusCode,
-		DurationMs:             log.DurationMs,
-		InputTokens:            log.InputTokens,
-		OutputTokens:           log.OutputTokens,
-		ReasoningTokens:        log.ReasoningTokens,
-		FirstTokenMs:           log.FirstTokenMs,
-		WsAcquireMs:            log.WsAcquireMs,
-		ReasoningEffort:        clampUsageLogText(log.ReasoningEffort, usageLogTextMaxLen),
-		InboundEndpoint:        clampUsageLogText(log.InboundEndpoint, usageLogTextMaxLen),
-		UpstreamEndpoint:       clampUsageLogText(log.UpstreamEndpoint, usageLogTextMaxLen),
-		Stream:                 log.Stream,
-		Compact:                log.Compact,
-		HasCompactionHistory:   log.HasCompactionHistory,
-		ViaWebsocket:           log.ViaWebsocket,
-		CachedTokens:           log.CachedTokens,
-		ServiceTier:            clampUsageLogText(serviceTier, usageLogTextMaxLen),
-		RequestedServiceTier:   clampUsageLogText(log.RequestedServiceTier, usageLogTextMaxLen),
-		ActualServiceTier:      clampUsageLogText(log.ActualServiceTier, usageLogTextMaxLen),
-		BillingServiceTier:     clampUsageLogText(billingServiceTier, usageLogTextMaxLen),
-		APIKeyID:               log.APIKeyID,
-		APIKeyName:             clampUsageLogText(log.APIKeyName, usageLogAPIKeyNameMaxLen),
-		APIKeyMasked:           clampUsageLogText(log.APIKeyMasked, usageLogShortTextMaxLen),
-		ImageCount:             log.ImageCount,
-		ImageWidth:             log.ImageWidth,
-		ImageHeight:            log.ImageHeight,
-		ImageBytes:             log.ImageBytes,
-		ImageFormat:            clampUsageLogText(log.ImageFormat, usageLogTextMaxLen),
-		ImageSize:              clampUsageLogText(log.ImageSize, usageLogImageSizeMaxLen),
-		AccountBilled:          accountBilled,
-		UserBilled:             userBilled,
-		IsRetryAttempt:         log.IsRetryAttempt,
-		AttemptIndex:           log.AttemptIndex,
-		UpstreamErrorKind:      clampUsageLogText(log.UpstreamErrorKind, usageLogShortTextMaxLen),
-		ErrorMessage:           log.ErrorMessage,
-		PromptPolicyIncidentID: clampUsageLogText(log.PromptPolicyIncidentID, usageLogShortTextMaxLen),
+		StoreUsageLog:            storeUsageLog,
+		AccountID:                log.AccountID,
+		CredentialGeneration:     log.CredentialGeneration,
+		Channel:                  clampUsageLogText(log.Channel, usageLogChannelMaxLen),
+		ClientIP:                 clampUsageLogText(log.ClientIP, usageLogShortTextMaxLen),
+		ClientUserAgent:          log.ClientUserAgent,
+		UpstreamUserAgent:        log.UpstreamUserAgent,
+		UserAgentOverridden:      log.UserAgentOverridden,
+		InternalReason:           clampUsageLogText(log.InternalReason, usageLogShortTextMaxLen),
+		ParentRequestID:          clampUsageLogText(log.ParentRequestID, usageLogRequestIDMaxLen),
+		Endpoint:                 clampUsageLogText(log.Endpoint, usageLogTextMaxLen),
+		Model:                    clampUsageLogText(log.Model, usageLogTextMaxLen),
+		EffectiveModel:           clampUsageLogText(log.EffectiveModel, usageLogTextMaxLen),
+		PromptTokens:             log.PromptTokens,
+		CompletionTokens:         log.CompletionTokens,
+		TotalTokens:              log.TotalTokens,
+		StatusCode:               log.StatusCode,
+		DurationMs:               log.DurationMs,
+		InputTokens:              log.InputTokens,
+		OutputTokens:             log.OutputTokens,
+		ReasoningTokens:          log.ReasoningTokens,
+		FirstTokenMs:             log.FirstTokenMs,
+		WsAcquireMs:              log.WsAcquireMs,
+		ReasoningEffort:          clampUsageLogText(log.ReasoningEffort, usageLogTextMaxLen),
+		InboundEndpoint:          clampUsageLogText(log.InboundEndpoint, usageLogTextMaxLen),
+		UpstreamEndpoint:         clampUsageLogText(log.UpstreamEndpoint, usageLogTextMaxLen),
+		Stream:                   log.Stream,
+		Compact:                  log.Compact,
+		HasCompactionHistory:     log.HasCompactionHistory,
+		ViaWebsocket:             log.ViaWebsocket,
+		CachedTokens:             log.CachedTokens,
+		ServiceTier:              clampUsageLogText(serviceTier, usageLogTextMaxLen),
+		RequestedServiceTier:     clampUsageLogText(log.RequestedServiceTier, usageLogTextMaxLen),
+		ActualServiceTier:        clampUsageLogText(log.ActualServiceTier, usageLogTextMaxLen),
+		BillingServiceTier:       clampUsageLogText(billingServiceTier, usageLogTextMaxLen),
+		APIKeyID:                 log.APIKeyID,
+		APIKeyName:               clampUsageLogText(log.APIKeyName, usageLogAPIKeyNameMaxLen),
+		APIKeyMasked:             clampUsageLogText(log.APIKeyMasked, usageLogShortTextMaxLen),
+		ImageCount:               log.ImageCount,
+		ImageWidth:               log.ImageWidth,
+		ImageHeight:              log.ImageHeight,
+		ImageBytes:               log.ImageBytes,
+		ImageFormat:              clampUsageLogText(log.ImageFormat, usageLogTextMaxLen),
+		ImageSize:                clampUsageLogText(log.ImageSize, usageLogImageSizeMaxLen),
+		AccountBilled:            accountBilled,
+		UserBilled:               userBilled,
+		IsRetryAttempt:           log.IsRetryAttempt,
+		AttemptIndex:             log.AttemptIndex,
+		UpstreamErrorKind:        clampUsageLogText(log.UpstreamErrorKind, usageLogShortTextMaxLen),
+		ErrorMessage:             log.ErrorMessage,
+		PromptPolicyIncidentID:   clampUsageLogText(log.PromptPolicyIncidentID, usageLogShortTextMaxLen),
+		NewAPIUserName:           clampUsageLogText(log.NewAPIUserName, usageLogAPIKeyNameMaxLen),
+		SessionHash:              clampUsageLogText(log.SessionHash, usageLogShortTextMaxLen),
+		NewAPIPlatform:           clampUsageLogText(log.NewAPIPlatform, usageLogTextMaxLen),
+		NewAPIUserID:             clampUsageLogText(log.NewAPIUserID, usageLogAPIKeyNameMaxLen),
+		RecordSessionObservation: log.RecordSessionObservation,
+		ObservedAt:               log.ObservedAt,
 	})
 	db.trimUsageLogBufferLocked()
 	bufLen := len(db.logBuf)
@@ -3912,52 +3932,58 @@ type UsageLogInput struct {
 	// credential snapshot that issued it. Zero is legacy/unscoped traffic.
 	CredentialGeneration int64
 	// Channel 是处理该请求的上游渠道（codex/grok），写入时固化，空值表示未知。
-	Channel                string
-	ClientIP               string
-	ClientUserAgent        string
-	UpstreamUserAgent      string
-	UserAgentOverridden    bool
-	InternalReason         string
-	ParentRequestID        string
-	Endpoint               string
-	Model                  string
-	EffectiveModel         string
-	PromptTokens           int
-	CompletionTokens       int
-	TotalTokens            int
-	StatusCode             int
-	DurationMs             int
-	InputTokens            int
-	OutputTokens           int
-	ReasoningTokens        int
-	FirstTokenMs           int
-	WsAcquireMs            int
-	ReasoningEffort        string
-	InboundEndpoint        string
-	UpstreamEndpoint       string
-	Stream                 bool
-	Compact                bool
-	HasCompactionHistory   bool
-	ViaWebsocket           bool
-	CachedTokens           int
-	ServiceTier            string
-	RequestedServiceTier   string
-	ActualServiceTier      string
-	BillingServiceTier     string
-	APIKeyID               int64
-	APIKeyName             string
-	APIKeyMasked           string
-	ImageCount             int
-	ImageWidth             int
-	ImageHeight            int
-	ImageBytes             int
-	ImageFormat            string
-	ImageSize              string
-	IsRetryAttempt         bool
-	AttemptIndex           int
-	UpstreamErrorKind      string
-	ErrorMessage           string
-	PromptPolicyIncidentID string
+	Channel                  string
+	ClientIP                 string
+	ClientUserAgent          string
+	UpstreamUserAgent        string
+	UserAgentOverridden      bool
+	InternalReason           string
+	ParentRequestID          string
+	Endpoint                 string
+	Model                    string
+	EffectiveModel           string
+	PromptTokens             int
+	CompletionTokens         int
+	TotalTokens              int
+	StatusCode               int
+	DurationMs               int
+	InputTokens              int
+	OutputTokens             int
+	ReasoningTokens          int
+	FirstTokenMs             int
+	WsAcquireMs              int
+	ReasoningEffort          string
+	InboundEndpoint          string
+	UpstreamEndpoint         string
+	Stream                   bool
+	Compact                  bool
+	HasCompactionHistory     bool
+	ViaWebsocket             bool
+	CachedTokens             int
+	ServiceTier              string
+	RequestedServiceTier     string
+	ActualServiceTier        string
+	BillingServiceTier       string
+	APIKeyID                 int64
+	APIKeyName               string
+	APIKeyMasked             string
+	ImageCount               int
+	ImageWidth               int
+	ImageHeight              int
+	ImageBytes               int
+	ImageFormat              string
+	ImageSize                string
+	IsRetryAttempt           bool
+	AttemptIndex             int
+	UpstreamErrorKind        string
+	ErrorMessage             string
+	PromptPolicyIncidentID   string
+	NewAPIUserName           string
+	SessionHash              string
+	NewAPIPlatform           string
+	NewAPIUserID             string
+	RecordSessionObservation bool
+	ObservedAt               time.Time
 }
 
 func (l *UsageLog) populateBillingBreakdown() {
@@ -4255,8 +4281,8 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 				  requested_service_tier, actual_service_tier, billing_service_tier,
 				  api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size, account_billed, user_billed,
 				  is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket,
-				  client_user_agent, upstream_user_agent, user_agent_overridden, internal_reason, parent_request_id, prompt_policy_incident_id)
-				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50)`)
+				  client_user_agent, upstream_user_agent, user_agent_overridden, internal_reason, parent_request_id, prompt_policy_incident_id, newapi_user_name)
+				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51)`)
 		if err != nil {
 			return fmt.Errorf("准备语句: %w", err)
 		}
@@ -4268,7 +4294,7 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 				e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
 				e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
 				e.IsRetryAttempt, e.AttemptIndex, e.UpstreamErrorKind, e.ErrorMessage, e.ViaWebsocket,
-				e.ClientUserAgent, e.UpstreamUserAgent, e.UserAgentOverridden, e.InternalReason, e.ParentRequestID, nullablePromptPolicyIncidentID(e.PromptPolicyIncidentID)); err != nil {
+				e.ClientUserAgent, e.UpstreamUserAgent, e.UserAgentOverridden, e.InternalReason, e.ParentRequestID, nullablePromptPolicyIncidentID(e.PromptPolicyIncidentID), e.NewAPIUserName); err != nil {
 				return fmt.Errorf("执行插入: %w", err)
 			}
 		}
@@ -4283,6 +4309,9 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 	if err := applyUsageStatsRollupWithExec(ctx, tx, logsToStore); err != nil {
 		return fmt.Errorf("更新用量累计汇总: %w", err)
 	}
+	if err := applyAccountSessionObservationsWithExec(ctx, tx, batch); err != nil {
+		return fmt.Errorf("更新账号会话观测: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务: %w", err)
 	}
@@ -4290,8 +4319,8 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 }
 
 // batchInsertLogs 使用 PostgreSQL 的批量插入优化。
-// PostgreSQL 单条语句最多 65535 个 bind 参数；usage_logs 当前每行 47 个参数，
-// 因此单条 INSERT 的行数必须稳定低于 floor(65535/47)=1394。
+// PostgreSQL 单条语句最多 65535 个 bind 参数；列数由
+// usageLogInsertColumnCount 统一约束，避免新增日志字段后突破参数上限。
 func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error {
 	if len(batch) == 0 {
 		return nil
@@ -4330,6 +4359,9 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 	if err := applyUsageStatsRollupWithExec(ctx, tx, logsToStore); err != nil {
 		return fmt.Errorf("更新用量累计汇总: %w", err)
 	}
+	if err := applyAccountSessionObservationsWithExec(ctx, tx, batch); err != nil {
+		return fmt.Errorf("更新账号会话观测: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("提交事务: %w", err)
 	}
@@ -4358,7 +4390,7 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, execer sqlExecer, batch 
 			e.RequestedServiceTier, e.ActualServiceTier, e.BillingServiceTier,
 			e.APIKeyID, e.APIKeyName, e.APIKeyMasked, e.ImageCount, e.ImageWidth, e.ImageHeight, e.ImageBytes, e.ImageFormat, e.ImageSize, e.AccountBilled, e.UserBilled,
 			e.IsRetryAttempt, e.AttemptIndex, e.UpstreamErrorKind, e.ErrorMessage, e.ViaWebsocket,
-			e.ClientUserAgent, e.UpstreamUserAgent, e.UserAgentOverridden, e.InternalReason, e.ParentRequestID, nullablePromptPolicyIncidentID(e.PromptPolicyIncidentID))
+			e.ClientUserAgent, e.UpstreamUserAgent, e.UserAgentOverridden, e.InternalReason, e.ParentRequestID, nullablePromptPolicyIncidentID(e.PromptPolicyIncidentID), e.NewAPIUserName)
 		argIdx += usageLogInsertColumnCount
 	}
 
@@ -4367,7 +4399,7 @@ func (db *DB) batchInsertLogsChunk(ctx context.Context, execer sqlExecer, batch 
 		requested_service_tier, actual_service_tier, billing_service_tier,
 		api_key_id, api_key_name, api_key_masked, image_count, image_width, image_height, image_bytes, image_format, image_size, account_billed, user_billed,
 		is_retry_attempt, attempt_index, upstream_error_kind, error_message, via_websocket,
-		client_user_agent, upstream_user_agent, user_agent_overridden, internal_reason, parent_request_id, prompt_policy_incident_id)
+		client_user_agent, upstream_user_agent, user_agent_overridden, internal_reason, parent_request_id, prompt_policy_incident_id, newapi_user_name)
 		VALUES %s`, strings.Join(valueStrings, ","))
 
 	_, err := execer.ExecContext(ctx, query, valueArgs...)
@@ -4574,6 +4606,22 @@ func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	if err != nil {
 		return nil, err
 	}
+	archived, err := db.archivedUsageSummaryForRange(ctx, rangeStart, rangeEnd, channel)
+	if err != nil {
+		return nil, fmt.Errorf("读取已清理用量汇总: %w", err)
+	}
+	stats.TodayRequests += archived.Requests
+	stats.TodayTokens += archived.Tokens
+	stats.TodayPrompt += archived.Prompt
+	stats.TodayCompletion += archived.Completion
+	stats.TodayCachedTokens = todayCached + archived.Cached
+	stats.TodayAccountBilled += archived.AccountBilled
+	stats.TodayUserBilled += archived.UserBilled
+	todayCacheHitRequests += archived.CacheHits
+	todayErrors += archived.Errors
+	if explicitRange && archived.FirstTokenSamples > 0 {
+		stats.AvgFirstTokenMs = archived.FirstTokenSum / float64(archived.FirstTokenSamples)
+	}
 
 	rollup, err := db.loadUsageStatsRollup(ctx, channel)
 	if err != nil {
@@ -4584,7 +4632,6 @@ func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	stats.TotalPrompt = rollup.PromptTokens
 	stats.TotalCompletion = rollup.CompletionTokens
 	stats.TotalCachedTokens = rollup.CachedTokens
-	stats.TodayCachedTokens = todayCached
 	stats.TotalAccountBilled = rollup.TotalAccountBilled
 	stats.TotalUserBilled = rollup.TotalUserBilled
 	if stats.TodayRequests > 0 {
@@ -5310,6 +5357,101 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	archiveWhere := "account_id = $1 AND bucket_start < $2 AND status_code <> 499"
+	archiveArgs := []interface{}{accountID, periodEnd.UTC().Unix()}
+	if !allTime {
+		archiveWhere += " AND bucket_start >= $3"
+		archiveArgs = append(archiveArgs, periodStart.UTC().Unix()/3600*3600)
+	}
+	archiveRows, err := db.conn.QueryContext(ctx, `SELECT bucket_start, model, api_key_id, api_key_name, api_key_masked,
+		requests, total_tokens, input_tokens, output_tokens, reasoning_tokens, cached_tokens,
+		cache_hit_requests, error_requests, retry_requests, duration_ms_sum, duration_samples,
+		first_token_ms_sum, first_token_samples, stream_requests, compact_requests,
+		account_billed, user_billed
+		FROM usage_account_hourly_rollups WHERE `+archiveWhere, archiveArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer archiveRows.Close()
+	for archiveRows.Next() {
+		var bucketStart, requests, totalTokens, inputTokens, outputTokens, reasoningTokens, cachedTokens int64
+		var cacheHits, errors, retries, archivedDurationSamples, archivedFirstTokenSamples int64
+		var streamRequests, compactRequests int64
+		var model, apiKeyName, apiKeyMasked string
+		var apiKeyID int64
+		var archivedDurationSum, archivedFirstTokenSum, accountBilled, userBilled float64
+		if err := archiveRows.Scan(&bucketStart, &model, &apiKeyID, &apiKeyName, &apiKeyMasked,
+			&requests, &totalTokens, &inputTokens, &outputTokens, &reasoningTokens, &cachedTokens,
+			&cacheHits, &errors, &retries, &archivedDurationSum, &archivedDurationSamples,
+			&archivedFirstTokenSum, &archivedFirstTokenSamples, &streamRequests, &compactRequests,
+			&accountBilled, &userBilled); err != nil {
+			return nil, err
+		}
+		createdAt := time.Unix(bucketStart, 0)
+		localCreatedAt := createdAt.In(now.Location())
+		dayKey := localCreatedAt.Format("2006-01-02")
+		day := dayStats[dayKey]
+		if day == nil {
+			day = &AccountUsageDayStat{Date: dayKey, Label: localCreatedAt.Format("01/02")}
+			dayStats[dayKey] = day
+		}
+		day.Requests += requests
+		day.Tokens += totalTokens
+		day.AccountBilled += accountBilled
+		day.UserBilled += userBilled
+		result.TotalRequests += requests
+		result.TotalTokens += totalTokens
+		result.InputTokens += inputTokens
+		result.OutputTokens += outputTokens
+		result.ReasoningTokens += reasoningTokens
+		result.CachedTokens += cachedTokens
+		result.TotalAccountBilled += accountBilled
+		result.TotalUserBilled += userBilled
+		cacheHitRequests += cacheHits
+		result.ErrorRequests += errors
+		result.RetryRequests += retries
+		durationMsSum += archivedDurationSum
+		durationSamples += archivedDurationSamples
+		firstTokenMsSum += archivedFirstTokenSum
+		result.FirstTokenSamples += archivedFirstTokenSamples
+		result.StreamRequests += streamRequests
+		result.CompactRequests += compactRequests
+		if !createdAt.Before(todayStart) && createdAt.Before(periodEnd) {
+			result.Today.Requests += requests
+			result.Today.Tokens += totalTokens
+			result.Today.AccountBilled += accountBilled
+			result.Today.UserBilled += userBilled
+		}
+		modelStat := modelStats[model]
+		if modelStat == nil {
+			modelStat = &AccountModelStat{Model: model}
+			modelStats[model] = modelStat
+		}
+		modelStat.Requests += requests
+		modelStat.Tokens += totalTokens
+		modelStat.InputTokens += inputTokens
+		modelStat.OutputTokens += outputTokens
+		modelStat.ReasoningTokens += reasoningTokens
+		modelStat.CachedTokens += cachedTokens
+		modelStat.AccountBilled += accountBilled
+		modelStat.UserBilled += userBilled
+		key := accountUsageKey{ID: apiKeyID, Name: apiKeyName, Masked: apiKeyMasked}
+		keyStat := keyStats[key]
+		if keyStat == nil {
+			keyStat = &AccountKeyStat{APIKeyID: apiKeyID, APIKeyName: apiKeyName, APIKeyMasked: apiKeyMasked}
+			keyStats[key] = keyStat
+		}
+		keyStat.Requests += requests
+		keyStat.Tokens += totalTokens
+		keyStat.AccountBilled += accountBilled
+		keyStat.UserBilled += userBilled
+	}
+	if err := archiveRows.Err(); err != nil {
+		return nil, err
+	}
 
 	result.ActiveDays = len(dayStats)
 	for _, day := range dayStats {
@@ -5656,7 +5798,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 			            COALESCE(u.account_billed, 0), COALESCE(u.user_billed, 0),
 			            COALESCE(u.is_retry_attempt, false), COALESCE(u.attempt_index, 0), COALESCE(u.upstream_error_kind, ''), COALESCE(u.error_message, ''),
 			            COALESCE(u.client_user_agent, ''), COALESCE(u.upstream_user_agent, ''), COALESCE(u.user_agent_overridden, false), COALESCE(u.channel, ''),
-			            COALESCE(u.internal_reason, ''), COALESCE(u.parent_request_id, ''), COALESCE(u.prompt_policy_incident_id, ''),
+			            COALESCE(u.internal_reason, ''), COALESCE(u.parent_request_id, ''), COALESCE(u.prompt_policy_incident_id, ''), COALESCE(u.newapi_user_name, ''),
 			            COALESCE(CAST(a.credentials AS TEXT), '{}'), COALESCE(a.name, ''), u.created_at,
 	            COUNT(*) OVER() AS total_count
 	           FROM usage_logs u
@@ -5678,7 +5820,7 @@ func (db *DB) ListUsageLogsByTimeRangePaged(ctx context.Context, f UsageLogFilte
 			&l.InputTokens, &l.OutputTokens, &l.ReasoningTokens, &l.FirstTokenMs, &l.WsAcquireMs, &l.ReasoningEffort, &l.InboundEndpoint, &l.UpstreamEndpoint, &l.Stream, &l.Compact, &l.HasCompactionHistory, &l.ViaWebsocket, &l.CachedTokens,
 			&l.ServiceTier, &l.RequestedServiceTier, &l.ActualServiceTier, &l.BillingServiceTier, &l.APIKeyID, &l.APIKeyName, &l.APIKeyMasked, &l.ImageCount, &l.ImageWidth, &l.ImageHeight, &l.ImageBytes, &l.ImageFormat, &l.ImageSize,
 			&l.AccountBilled, &l.UserBilled, &l.IsRetryAttempt, &l.AttemptIndex, &l.UpstreamErrorKind, &l.ErrorMessage,
-			&l.ClientUserAgent, &l.UpstreamUserAgent, &l.UserAgentOverridden, &l.Channel, &l.InternalReason, &l.ParentRequestID, &l.PromptPolicyIncidentID,
+			&l.ClientUserAgent, &l.UpstreamUserAgent, &l.UserAgentOverridden, &l.Channel, &l.InternalReason, &l.ParentRequestID, &l.PromptPolicyIncidentID, &l.NewAPIUserName,
 			&credentialRaw, &l.AccountName, &createdAtRaw, &result.Total); err != nil {
 			return nil, err
 		}
@@ -5783,6 +5925,9 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 		rollup.PromptTokens, rollup.CompletionTokens, rollup.CachedTokens, rollup.CacheHitRequests,
 		rollup.FirstTokenMsSum, rollup.FirstTokenSamples, rollup.TotalAccountBilled, rollup.TotalUserBilled); err != nil {
 		return fmt.Errorf("快照统计基线失败: %w", err)
+	}
+	if err := db.archiveUsageLogsWithExec(ctx, tx); err != nil {
+		return fmt.Errorf("归档账号用量统计失败: %w", err)
 	}
 	if db.isSQLite() {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {
@@ -5907,10 +6052,20 @@ func (db *DB) GetAccountRequestCounts(ctx context.Context) (map[int64]*AccountRe
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	archivedCounts, err := db.archivedAccountRequestCounts(ctx, since, nil)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range archivedCounts {
+		mergeAccountRequestCount(result, item)
+	}
 	if err := db.attachErrorStatusCounts(ctx, result, nil); err != nil {
 		return nil, err
 	}
 	if err := db.attachSuccessModelCounts(ctx, result, nil); err != nil {
+		return nil, err
+	}
+	if err := db.attachArchivedAccountRequestBreakdowns(ctx, result, nil); err != nil {
 		return nil, err
 	}
 	return result, nil

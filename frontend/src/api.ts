@@ -39,6 +39,7 @@ import type {
   AccountsPageResponse,
   AccountPageStatsResponse,
   AccountLiveStateResponse,
+  AccountSessionsResponse,
   ChartAggregation,
   CreateAccountResponse,
   CreateAPIKeyResponse,
@@ -671,6 +672,10 @@ export const api = {
     }>(`/accounts/${id}/usage/refresh`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getAccountSessions: (id: number, signal?: AbortSignal) =>
+    request<AccountSessionsResponse>(`/accounts/${id}/sessions`, { signal }),
+  releaseAccountSession: (id: number, sessionId?: string) =>
+    request<MessageResponse>(`/accounts/${id}/sessions${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`, { method: 'DELETE' }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),

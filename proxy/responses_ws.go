@@ -287,9 +287,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
 	turnContinuation := codexWSTurnContinuationToken(rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
@@ -414,6 +414,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 			if attempt == 0 && compactionAffinity.Known && !continuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
+					h.store.Release(account)
+					account = nil
+				}
 			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
@@ -435,6 +439,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, msg, api.ErrorTypeRateLimit)
 			} else if h.store.HasUsageLimitedCandidateWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
 				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, "Codex 账号用量窗口已达上限", api.ErrorTypeRateLimit)
+			} else if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, "上游账号的活跃会话容量已满，请稍后重试", api.ErrorTypeRateLimit)
 			} else {
 				apiErr = api.NewAPIError(api.ErrCodeServiceUnavailable, noAvailableAccountMessage(effectiveModel), api.ErrorTypeServer)
 			}
@@ -446,7 +452,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !retainedHTTPFallback {
-			h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+			h.bindAccountSession(c, affinityKey, account, proxyURL)
 		}
 		if wsHTTPFallback.ForceHTTP() {
 			log.Printf("Responses WebSocket upstream HTTP fallback attempt started (fallback_id=%s, source=%s, attempt=%d, account=%d, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
@@ -1192,6 +1198,14 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 			return true, true
 		}
 		_ = writeResponsesWSError(conn, promptCyberRestrictionAPIError(restriction, nil))
+		return true, false
+	}
+	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, rawBody); exceeded {
+		_ = writeResponsesWSError(conn, api.NewAPIError(
+			api.ErrCodeRateLimitReached,
+			fmt.Sprintf("当前时间窗口内最多可创建 %d 个会话，请复用已有会话或稍后再试", status.Limit),
+			api.ErrorTypeRateLimit,
+		))
 		return true, false
 	}
 	// Keep disabled filters off the WebSocket request-body hot path too.

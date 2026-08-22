@@ -13,12 +13,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -1194,6 +1196,7 @@ type requestSessionIdentity struct {
 	affinityID            string
 	upstreamSeed          string
 	explicitUpstreamID    string
+	stableIdentity        bool
 	hasDownstreamAffinity bool
 	hasRequestFingerprint bool
 }
@@ -1220,6 +1223,7 @@ func ResolveSessionID(headers http.Header, body []byte) string {
 func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSessionIdentity {
 	hasEngineFingerprint := EvaluateEngineFingerprint(headers, body, nil)
 	explicitID := ResolveExplicitSessionID(headers, body)
+	stableIdentity := ResolveStableExplicitSessionID(headers, body) != ""
 	upstreamSeed := explicitID
 	if upstreamSeed == "" {
 		upstreamSeed = deriveContentSessionSeed(body)
@@ -1247,6 +1251,7 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 			affinityID:            affinityID,
 			upstreamSeed:          upstreamSeed,
 			explicitUpstreamID:    explicitID,
+			stableIdentity:        true,
 			hasDownstreamAffinity: true,
 			hasRequestFingerprint: true,
 		}
@@ -1255,8 +1260,26 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 		affinityID:            affinityID,
 		upstreamSeed:          upstreamSeed,
 		explicitUpstreamID:    explicitID,
+		stableIdentity:        stableIdentity,
 		hasRequestFingerprint: hasEngineFingerprint,
 	}
+}
+
+// resolveRequestSessionIdentityForContext upgrades the normal client identity
+// with a signed NewAPI session fingerprint when one was verified by the prompt
+// policy ingress stage. Untrusted X-NewAPI-* headers are never accepted here.
+func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body []byte) requestSessionIdentity {
+	identity := resolveRequestSessionIdentity(c.Request.Header, body)
+	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
+	if (status == "verified" || status == "signed_response") && policyContext.MetaVerified {
+		if fingerprint := strings.TrimSpace(policyContext.Meta.SessionFingerprint); fingerprint != "" {
+			identity.affinityID = "newapi-session:" + fingerprint
+			identity.stableIdentity = true
+			identity.hasDownstreamAffinity = true
+			identity.hasRequestFingerprint = true
+		}
+	}
+	return identity
 }
 
 func resolveDownstreamAffinityID(headers http.Header) string {
@@ -1273,6 +1296,9 @@ func resolveDownstreamAffinityID(headers http.Header) string {
 
 func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 	if headers != nil {
+		if root, ok := resolveNativeCodexSessionGraph(headers); ok {
+			return root
+		}
 		// 注意：Codex CLI 发的是连字符头 session-id / conversation-id（HTTP/2 全小写，
 		// 服务端规范化成 Session-Id / Conversation-Id），与旧的下划线写法 Session_id 不同，
 		// 两种都要认，否则取不到显式会话 id、affinity 只能退回内容种子。
@@ -1288,6 +1314,62 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 	}
 
 	return ""
+}
+
+// ResolveStableExplicitSessionID returns only identifiers that are expected to
+// remain constant for the lifetime of a conversation. Idempotency-Key is
+// intentionally excluded: many SDKs generate a new value for every HTTP
+// request, so treating it as a conversation ID would create one session slot
+// per turn.
+func ResolveStableExplicitSessionID(headers http.Header, body []byte) string {
+	if headers != nil {
+		if root, ok := resolveNativeCodexSessionGraph(headers); ok {
+			return root
+		}
+		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id"} {
+			if v := strings.TrimSpace(headers.Get(key)); v != "" {
+				return v
+			}
+		}
+	}
+	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
+		return v
+	}
+	return ""
+}
+
+// resolveNativeCodexSessionGraph validates the stable headers emitted by the
+// official Codex client. Sub-agent threads keep Session-Id as their root while
+// Thread-Id/X-Client-Request-Id/X-Codex-Window-Id identify the child thread;
+// therefore every child of one window resolves to the root Session-Id.
+func resolveNativeCodexSessionGraph(headers http.Header) (string, bool) {
+	if headers == nil {
+		return "", false
+	}
+	root := strings.TrimSpace(headers.Get("Session-Id"))
+	thread := strings.TrimSpace(headers.Get("Thread-Id"))
+	clientRequest := strings.TrimSpace(headers.Get("X-Client-Request-Id"))
+	window := strings.TrimSpace(headers.Get("X-Codex-Window-Id"))
+	if root == "" || thread == "" || clientRequest == "" || window == "" {
+		return "", false
+	}
+	if _, err := uuid.Parse(root); err != nil {
+		return "", false
+	}
+	if _, err := uuid.Parse(thread); err != nil || !strings.EqualFold(thread, clientRequest) {
+		return "", false
+	}
+	windowParts := strings.Split(window, ":")
+	if len(windowParts) != 2 || !strings.EqualFold(strings.TrimSpace(windowParts[0]), thread) {
+		return "", false
+	}
+	if _, err := strconv.ParseUint(strings.TrimSpace(windowParts[1]), 10, 64); err != nil {
+		return "", false
+	}
+	if parent := strings.TrimSpace(headers.Get("X-Codex-Parent-Thread-Id")); parent != "" && !strings.EqualFold(parent, root) {
+		return "", false
+	}
+	return strings.ToLower(root), true
 }
 
 const statelessWebsocketSessionPrefix = "stateless-"

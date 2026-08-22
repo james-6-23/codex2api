@@ -70,8 +70,28 @@ func (h *Handler) buildAccountResponse(
 	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
+	sessionCapacityEnabled := false
+	sessionCapacityMax := int64(0)
+	sessionCapacityIdleTTLSeconds := int64(0)
+	sessionCapacityCurrent := int64(0)
 	if !isOpenAIResponsesAccount && !isGrokAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
+		sessionCapacityEnabled = row.GetCredentialBool(auth.SessionCapacityEnabledCredentialKey)
+		if configured, ok := row.GetCredentialInt64(auth.SessionCapacityMaxCredentialKey); ok {
+			sessionCapacityMax = configured
+		}
+		if sessionCapacityMax <= 0 {
+			sessionCapacityMax = auth.DefaultSessionCapacityMax
+		}
+		if configured, ok := row.GetCredentialInt64(auth.SessionCapacityIdleTTLSecondsKey); ok {
+			sessionCapacityIdleTTLSeconds = configured
+		}
+		if sessionCapacityIdleTTLSeconds <= 0 {
+			sessionCapacityIdleTTLSeconds = auth.DefaultSessionCapacityIdleTTLSeconds
+		}
+		if sessionCapacityEnabled && runtimeAccount != nil {
+			sessionCapacityCurrent = h.store.AccountSessionCount(row.ID, time.Now())
+		}
 	}
 	ignoreUsageLimitStatusOverride := row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
 	ignoreUsageLimitStatusEffective := h.store.IgnoreUsageLimitStatus()
@@ -94,53 +114,57 @@ func (h *Handler) buildAccountResponse(
 		allowedAPIKeyIDs = row.GetCredentialInt64Slice("allowed_api_key_ids")
 	}
 	resp := accountResponse{
-		DetailLoaded:             includeDetails,
-		ID:                       row.ID,
-		Name:                     row.Name,
-		Email:                    email,
-		EmailDomain:              accountEmailDomain(email),
-		ChatGPTAccountID:         row.GetCredential("account_id"),
-		TokenWorkspaceID:         tokenWorkspaceID,
-		WorkspaceIDOverride:      workspaceIDOverride,
-		EffectiveWorkspaceID:     effectiveWorkspaceID,
-		PlanType:                 planType,
-		SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
-		Status:                   row.Status,
-		ErrorMessage:             row.ErrorMessage,
-		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
-		CreditEnabled:            row.CreditEnabled,
-		CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
-		SkipWarmTier:             row.SkipWarmTier,
-		AccountType:              row.Type,
-		AccessTokenType:          accountAccessTokenType(row),
-		OpenAIResponsesAPI:       isOpenAIResponsesAccount,
-		GrokAPI:                  isGrokAccount,
-		AgentIdentity:            isAgentIdentityCredentialRow(row),
-		GrokAuthKind:             grokAuthKind,
-		GrokPlan:                 grokPlan,
-		GrokBilling:              grokBilling,
-		BaseURL:                  baseURL,
-		Models:                   row.GetCredentialStringSlice("models"),
-		ModelMapping:             modelMapping,
-		CodexClientMetadataMode:  codexClientMetadataMode,
-		CodexFingerprintMode:     codexFingerprintMode,
-		CustomHeaders:            customHeaders,
-		ProxyURL:                 row.ProxyURL,
-		Enabled:                  row.Enabled,
-		Locked:                   row.Locked,
-		AllowedAPIKeyIDs:         allowedAPIKeyIDs,
-		Tags:                     append([]string(nil), row.Tags...),
-		Note:                     row.Note,
-		ScoreBiasOverride:        nullableInt64Pointer(row.ScoreBiasOverride),
-		ScoreBiasEffective:       effectiveScoreBias(planType, row.ScoreBiasOverride),
-		BaseConcurrencyOverride:  nullableInt64Pointer(row.BaseConcurrencyOverride),
-		BaseConcurrencyEffective: effectiveBaseConcurrency(row.BaseConcurrencyOverride, int64(h.store.GetMaxConcurrency())),
-		CreatedAt:                row.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:                row.UpdatedAt.Format(time.RFC3339),
-		CodexUsageUpdatedAt:      row.GetCredential("codex_usage_updated_at"),
-		Codex5HUsageUpdatedAt:    row.GetCredential("codex_5h_usage_updated_at"),
-		UsageLimitOverride:       ignoreUsageLimitStatusOverride,
-		UsageLimitEffective:      ignoreUsageLimitStatusEffective,
+		DetailLoaded:                  includeDetails,
+		ID:                            row.ID,
+		Name:                          row.Name,
+		Email:                         email,
+		EmailDomain:                   accountEmailDomain(email),
+		ChatGPTAccountID:              row.GetCredential("account_id"),
+		TokenWorkspaceID:              tokenWorkspaceID,
+		WorkspaceIDOverride:           workspaceIDOverride,
+		EffectiveWorkspaceID:          effectiveWorkspaceID,
+		PlanType:                      planType,
+		SubscriptionExpiresAt:         row.GetCredential("subscription_expires_at"),
+		Status:                        row.Status,
+		ErrorMessage:                  row.ErrorMessage,
+		ATOnly:                        !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		CreditEnabled:                 row.CreditEnabled,
+		CreditSkipUsageWindow:         row.CreditSkipUsageWindow,
+		SkipWarmTier:                  row.SkipWarmTier,
+		AccountType:                   row.Type,
+		AccessTokenType:               accountAccessTokenType(row),
+		OpenAIResponsesAPI:            isOpenAIResponsesAccount,
+		GrokAPI:                       isGrokAccount,
+		AgentIdentity:                 isAgentIdentityCredentialRow(row),
+		GrokAuthKind:                  grokAuthKind,
+		GrokPlan:                      grokPlan,
+		GrokBilling:                   grokBilling,
+		BaseURL:                       baseURL,
+		Models:                        row.GetCredentialStringSlice("models"),
+		ModelMapping:                  modelMapping,
+		CodexClientMetadataMode:       codexClientMetadataMode,
+		CodexFingerprintMode:          codexFingerprintMode,
+		SessionCapacityEnabled:        sessionCapacityEnabled,
+		SessionCapacityMax:            sessionCapacityMax,
+		SessionCapacityIdleTTLSeconds: sessionCapacityIdleTTLSeconds,
+		SessionCapacityCurrent:        sessionCapacityCurrent,
+		CustomHeaders:                 customHeaders,
+		ProxyURL:                      row.ProxyURL,
+		Enabled:                       row.Enabled,
+		Locked:                        row.Locked,
+		AllowedAPIKeyIDs:              allowedAPIKeyIDs,
+		Tags:                          append([]string(nil), row.Tags...),
+		Note:                          row.Note,
+		ScoreBiasOverride:             nullableInt64Pointer(row.ScoreBiasOverride),
+		ScoreBiasEffective:            effectiveScoreBias(planType, row.ScoreBiasOverride),
+		BaseConcurrencyOverride:       nullableInt64Pointer(row.BaseConcurrencyOverride),
+		BaseConcurrencyEffective:      effectiveBaseConcurrency(row.BaseConcurrencyOverride, int64(h.store.GetMaxConcurrency())),
+		CreatedAt:                     row.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:                     row.UpdatedAt.Format(time.RFC3339),
+		CodexUsageUpdatedAt:           row.GetCredential("codex_usage_updated_at"),
+		Codex5HUsageUpdatedAt:         row.GetCredential("codex_5h_usage_updated_at"),
+		UsageLimitOverride:            ignoreUsageLimitStatusOverride,
+		UsageLimitEffective:           ignoreUsageLimitStatusEffective,
 	}
 	resp.AutoPause5hThreshold = accountQuotaAutoPauseThreshold(row, "auto_pause_5h_threshold")
 	resp.AutoPause7dThreshold = accountQuotaAutoPauseThreshold(row, "auto_pause_7d_threshold")

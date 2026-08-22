@@ -1394,13 +1394,14 @@ function EmptyPanel({ accent, icon, text }: { accent: PanelAccentKey; icon: Reac
   )
 }
 
-type UsageTableColumn = 'status' | 'error' | 'model' | 'account' | 'apiKey' | 'clientIp' | 'userAgent' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'wsAcquire' | 'tokensPerSec' | 'timing' | 'time'
+type UsageTableColumn = 'status' | 'error' | 'model' | 'account' | 'apiKey' | 'newapiUser' | 'clientIp' | 'userAgent' | 'endpoint' | 'type' | 'token' | 'cost' | 'cached' | 'wsAcquire' | 'tokensPerSec' | 'timing' | 'time'
 
 const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string }> = [
   { key: 'status', labelKey: 'usage.tableStatus' },
   { key: 'model', labelKey: 'usage.tableModel' },
   { key: 'account', labelKey: 'usage.tableAccount' },
   { key: 'apiKey', labelKey: 'usage.tableApiKey' },
+  { key: 'newapiUser', labelKey: 'usage.tableNewAPIUser' },
   { key: 'clientIp', labelKey: 'usage.tableClientIP' },
   { key: 'userAgent', labelKey: 'usage.tableUserAgent' },
   { key: 'endpoint', labelKey: 'usage.tableEndpoint' },
@@ -1423,6 +1424,8 @@ const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   model: true,
   account: true,
   apiKey: true,
+  // 仅联动了身份元数据的 NewAPI 部署有值，因此默认关闭。
+  newapiUser: false,
   clientIp: true,
   userAgent: true,
   endpoint: true,
@@ -2498,7 +2501,7 @@ export default function Usage() {
               <TooltipProvider>
               <div className="grid gap-3 lg:hidden">
                 {logs.map((log: UsageLog) => {
-                  const hasDetails = visibleColumns.account || visibleColumns.apiKey || visibleColumns.clientIp || visibleColumns.endpoint || visibleColumns.userAgent
+                  const hasDetails = visibleColumns.account || visibleColumns.apiKey || visibleColumns.newapiUser || visibleColumns.clientIp || visibleColumns.endpoint || visibleColumns.userAgent
                   const hasMetrics = visibleColumns.token || visibleColumns.timing || visibleColumns.tokensPerSec || visibleColumns.cost
                   return (
                     <div
@@ -2572,6 +2575,12 @@ export default function Usage() {
                             <div className="truncate font-mono" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
                               <span className="font-sans font-semibold text-foreground/80">{t('usage.tableApiKey')}: </span>
                               {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}
+                            </div>
+                          )}
+                          {visibleColumns.newapiUser && (
+                            <div className="truncate" title={log.newapi_user_name || '-'}>
+                              <span className="font-semibold text-foreground/80">{t('usage.tableNewAPIUser')}: </span>
+                              {log.newapi_user_name || '-'}
                             </div>
                           )}
                           {visibleColumns.clientIp && (
@@ -2664,6 +2673,7 @@ export default function Usage() {
                       {visibleColumns.model && <TableHead className={usageTableHeadClass}>{t('usage.tableModel')}</TableHead>}
                       {visibleColumns.account && <TableHead className={usageTableHeadClass}>{t('usage.tableAccount')}</TableHead>}
                       {visibleColumns.apiKey && <TableHead className={usageTableHeadClass}>{t('usage.tableApiKey')}</TableHead>}
+                      {visibleColumns.newapiUser && <TableHead className={usageTableHeadClass}>{t('usage.tableNewAPIUser')}</TableHead>}
                       {visibleColumns.clientIp && <TableHead className={usageTableHeadClass}>{t('usage.tableClientIP')}</TableHead>}
                       {visibleColumns.userAgent && <TableHead className={usageTableHeadClass}>{t('usage.tableUserAgent')}</TableHead>}
                       {visibleColumns.endpoint && <TableHead className={usageTableHeadClass}>{t('usage.tableEndpoint')}</TableHead>}
@@ -2766,6 +2776,11 @@ export default function Usage() {
                         {visibleColumns.apiKey && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[180px] truncate whitespace-nowrap font-mono text-[12px]" title={formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}>
                             {formatUsageAPIKeyLabel(log.api_key_name, log.api_key_masked) || t('usage.unknownApiKey')}
+                          </span>
+                        </TableCell>}
+                        {visibleColumns.newapiUser && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
+                          <span className="block max-w-[180px] truncate whitespace-nowrap" title={log.newapi_user_name || '-'}>
+                            {log.newapi_user_name || '-'}
                           </span>
                         </TableCell>}
                         {visibleColumns.clientIp && <TableCell className={`${usageTableMonoClass} text-muted-foreground whitespace-nowrap`}>

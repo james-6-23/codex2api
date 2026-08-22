@@ -15,6 +15,7 @@ import (
 )
 
 const promptRiskHistoryGuardrail = "画像只统计本地 warn/block 与上游 CY；影子审计和普通命中不再抬高风险。画像不会单独封禁当前请求，只控制可自动失效的模型复核豁免；达到阈值或再次出现 CY 时立即恢复同步审核。"
+const promptAccountStatusGuardrail = "账号状态仅记录会话窗口与已验证的 NewAPI 用户关联，不计算风险分、不参与审核、锁定或封号。"
 
 const promptRiskProfileListTimeout = 20 * time.Second
 
@@ -95,11 +96,17 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 	if profiles == nil {
 		profiles = []*database.PromptRiskProfile{}
 	}
-	h.attachPromptRiskTrustPolicies(ctx, profiles)
-	h.attachPromptConversationLocks(ctx, profiles)
+	accountStatus := strings.TrimSpace(c.Query("subject_type")) == database.PromptRiskSubjectAccountStatus
+	guardrail := promptRiskHistoryGuardrail
+	if accountStatus {
+		guardrail = promptAccountStatusGuardrail
+	} else {
+		h.attachPromptRiskTrustPolicies(ctx, profiles)
+		h.attachPromptConversationLocks(ctx, profiles)
+	}
 	c.JSON(http.StatusOK, promptRiskProfilesResponse{
 		Profiles: profiles, Total: total, Page: page, PageSize: pageSize,
-		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: promptRiskHistoryGuardrail,
+		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: guardrail,
 	})
 }
 

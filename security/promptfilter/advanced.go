@@ -194,13 +194,16 @@ type ContextDiscountConfig struct {
 }
 
 type RiskConfig struct {
-	Enabled              bool `json:"enabled"`
-	WindowSeconds        int  `json:"window_seconds"`
-	BlockThreshold       int  `json:"block_threshold"`
-	ReviewThreshold      int  `json:"review_threshold"`
-	UserWeightPercent    int  `json:"user_weight_percent"`
-	IPWeightPercent      int  `json:"ip_weight_percent"`
-	SessionWeightPercent int  `json:"session_weight_percent"`
+	Enabled                           bool `json:"enabled"`
+	WindowSeconds                     int  `json:"window_seconds"`
+	BlockThreshold                    int  `json:"block_threshold"`
+	ReviewThreshold                   int  `json:"review_threshold"`
+	UserWeightPercent                 int  `json:"user_weight_percent"`
+	IPWeightPercent                   int  `json:"ip_weight_percent"`
+	SessionWeightPercent              int  `json:"session_weight_percent"`
+	SessionCreationLimitEnabled       bool `json:"session_creation_limit_enabled"`
+	SessionCreationLimit              int  `json:"session_creation_limit"`
+	SessionCreationLimitWindowSeconds int  `json:"session_creation_limit_window_seconds"`
 }
 
 // AdaptiveReviewConfig reduces synchronous model-review latency only after a
@@ -294,7 +297,7 @@ func DefaultAdvancedConfig() AdvancedConfig {
 	return AdvancedConfig{
 		Normalization:   NormalizationConfig{MaxDecodeRuns: 1, MaxDecodedBytes: 32768, MaxEncodedBlocks: 16},
 		ContextDiscount: ContextDiscountConfig{Enabled: true, IntentAware: true, MaxDiscount: 90, OperationalMaxDiscount: 0},
-		Risk:            RiskConfig{WindowSeconds: 600, BlockThreshold: 100, ReviewThreshold: 60, UserWeightPercent: 50, IPWeightPercent: 30, SessionWeightPercent: 20},
+		Risk:            RiskConfig{WindowSeconds: 600, BlockThreshold: 100, ReviewThreshold: 60, UserWeightPercent: 50, IPWeightPercent: 30, SessionWeightPercent: 20, SessionCreationLimit: 5, SessionCreationLimitWindowSeconds: 3600},
 		AdaptiveReview:  AdaptiveReviewConfig{MinCleanReviews: 10, MinObservationHours: 24, SamplePercent: 5, ForceReviewIntervalMinutes: 360, TrustDurationHours: 168, ReactivationCleanReviews: 5, ReactivationCooldownHours: 24},
 		Sidecar:         SidecarConfig{TimeoutSeconds: 1, FailClosed: false, MinScore: 30, SamplePercent: 5, Mode: GuardModeShadow, MaxTextLength: 8192, CacheTTLSeconds: 60, MaxConcurrent: 16, CircuitBreakerFailures: 3, CircuitBreakerSeconds: 30},
 		Session:         SessionConfig{WindowSeconds: 300, MaxFragments: 3, MaxTextLength: 4096, ShortFragmentMaxChars: 24, RequireSignedIdentity: true},
@@ -832,6 +835,21 @@ func NormalizeAdvancedConfig(cfg AdvancedConfig) AdvancedConfig {
 	}
 	if cfg.Risk.ReviewThreshold <= 0 {
 		cfg.Risk.ReviewThreshold = d.Risk.ReviewThreshold
+	}
+	if cfg.Risk.SessionCreationLimit <= 0 {
+		cfg.Risk.SessionCreationLimit = d.Risk.SessionCreationLimit
+	}
+	if cfg.Risk.SessionCreationLimit > 100000 {
+		cfg.Risk.SessionCreationLimit = 100000
+	}
+	if cfg.Risk.SessionCreationLimitWindowSeconds <= 0 {
+		cfg.Risk.SessionCreationLimitWindowSeconds = d.Risk.SessionCreationLimitWindowSeconds
+	}
+	if cfg.Risk.SessionCreationLimitWindowSeconds < 60 {
+		cfg.Risk.SessionCreationLimitWindowSeconds = 60
+	}
+	if cfg.Risk.SessionCreationLimitWindowSeconds > 30*24*60*60 {
+		cfg.Risk.SessionCreationLimitWindowSeconds = 30 * 24 * 60 * 60
 	}
 	if cfg.AdaptiveReview.MinCleanReviews <= 0 {
 		cfg.AdaptiveReview.MinCleanReviews = d.AdaptiveReview.MinCleanReviews

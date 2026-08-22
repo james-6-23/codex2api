@@ -49,18 +49,23 @@ func upstreamErrorConsoleBody(body []byte) string {
 
 // Handler API 路由处理器
 type Handler struct {
-	store        *auth.Store
-	configKeys   map[string]bool // 配置文件中的静态 key
-	db           *database.DB
-	cfg          *config.Config       // 全局配置
-	deviceCfg    *DeviceProfileConfig // 设备指纹配置
-	cache        cache.TokenCache     // Redis/Memory 运行态缓存
-	apiKeyGateMu sync.Mutex
-	promptRiskMu sync.Mutex
-	apiKeyGate   *apiKeyConcurrencyLimiter
-	scopeUsageMu sync.Mutex
-	scopeUsage   *apiKeyScopeUsageTracker
-	liveStore    *liveCallStore
+	store                       *auth.Store
+	configKeys                  map[string]bool // 配置文件中的静态 key
+	db                          *database.DB
+	cfg                         *config.Config       // 全局配置
+	deviceCfg                   *DeviceProfileConfig // 设备指纹配置
+	cache                       cache.TokenCache     // Redis/Memory 运行态缓存
+	apiKeyGateMu                sync.Mutex
+	promptRiskMu                sync.Mutex
+	promptSessionLimitMu        sync.Mutex
+	promptSessionLimits         map[string]map[string]time.Time
+	promptSessionLastCleanup    time.Time
+	accountSessionObservationMu sync.Mutex
+	accountSessionObservations  map[string]accountSessionObservationCacheEntry
+	apiKeyGate                  *apiKeyConcurrencyLimiter
+	scopeUsageMu                sync.Mutex
+	scopeUsage                  *apiKeyScopeUsageTracker
+	liveStore                   *liveCallStore
 }
 
 const (
@@ -221,6 +226,30 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 		return sessionID
 	}
 	return fmt.Sprintf("%s::api-key:%d", sessionID, apiKeyID)
+}
+
+func capacityAwareSessionAffinityKey(identity requestSessionIdentity, apiKeyID int64) string {
+	key := sessionAffinityKey(identity.affinityID, apiKeyID)
+	if key != "" && !identity.stableIdentity {
+		return auth.UnstableSessionCapacityPrefix + key
+	}
+	return key
+}
+
+func (h *Handler) bindAccountSession(c *gin.Context, affinityKey string, account *auth.Account, proxyURL string) {
+	if h == nil || h.store == nil || account == nil {
+		return
+	}
+	h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+	audit := h.capturePromptFilterAuditContext(c)
+	h.store.SetAccountSessionOwner(account.ID(), affinityKey, auth.AccountSessionOwner{
+		Platform:   audit.NewAPIPlatform,
+		UserID:     audit.NewAPIUserID,
+		UserName:   audit.NewAPIUserName,
+		UserEmail:  audit.NewAPIUserEmail,
+		APIKeyID:   audit.APIKeyID,
+		APIKeyName: audit.APIKeyName,
+	})
 }
 
 const codexTurnStateHeader = "X-Codex-Turn-State"
@@ -1254,6 +1283,7 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	populateUserAgentMetaFromRequest(c, input)
 	populateWsAcquireFromRequest(c, input)
 	populateCompactUsageMetaFromRequest(c, input)
+	h.populateAccountSessionObservation(c, input)
 	markCyberPolicyUsageKind(input)
 	h.logUsage(input)
 }
@@ -2899,9 +2929,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	turnContinuationPinned := turnContinuation && turnHasBinding
@@ -3007,6 +3037,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		if !retainedHTTPFallback {
 			if attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
+					h.store.Release(account)
+					account = nil
+				}
 			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
@@ -3036,6 +3070,10 @@ func (h *Handler) Responses(c *gin.Context) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "Codex 账号用量窗口已达上限")
 				return
 			}
+			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "上游账号的活跃会话容量已满，请稍后重试")
+				return
+			}
 			if continuationUnavailable && !relayContinuationAttempted {
 				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
 				return
@@ -3051,7 +3089,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !retainedHTTPFallback {
-			h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+			h.bindAccountSession(c, affinityKey, account, proxyURL)
 		}
 		if wsHTTPFallback.ForceHTTP() {
 			log.Printf("上游 WebSocket 1009 后启动 HTTP 降级尝试 (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/responses, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
@@ -4179,7 +4217,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			continue
 		}
 
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		h.bindAccountSession(c, affinityKey, account, proxyURL)
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/responses, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -4380,9 +4418,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, err.Error(), api.ErrorTypeInvalidRequest))
 		return
 	}
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -4456,6 +4494,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var stickyProxyURL string
 		if attempt == 0 && compactionAffinity.Known {
 			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, excludeAccounts, accountFilter, dispatchPolicy)
+			if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
+				h.store.Release(account)
+				account = nil
+			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			}
@@ -4490,6 +4532,10 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 					sendCompactionUpstreamUnavailable(c)
 					return
 				}
+				if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, excludeAccounts, accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+					SendAPIKeyLimitError(c, http.StatusTooManyRequests, "上游账号的活跃会话容量已满，请稍后重试")
+					return
+				}
 				c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
 				return
 			}
@@ -4498,7 +4544,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		h.AcquireAPIKeyScopeConcurrency(c, account)
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		h.bindAccountSession(c, affinityKey, account, proxyURL)
 		attemptEffectiveModel := effectiveModel
 		attemptLogEffectiveModel := logEffectiveModel
 
@@ -5094,10 +5140,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, codexBody)
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, codexBody)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -5135,6 +5181,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, msg)
 				return
 			}
+			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "上游账号的活跃会话容量已满，请稍后重试")
+				return
+			}
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
 			return
 		}
@@ -5143,7 +5193,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !retainedHTTPFallback {
-			h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+			h.bindAccountSession(c, affinityKey, account, proxyURL)
 		}
 		if wsHTTPFallback.ForceHTTP() {
 			log.Printf("上游 WebSocket 1009 后启动 HTTP 降级尝试 (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/chat/completions, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
@@ -5674,7 +5724,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			continue
 		}
 
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		h.bindAccountSession(c, affinityKey, account, proxyURL)
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {
 			log.Printf("流异常结束 (account %d, /v1/chat/completions, status %d): %s，已转发约 %d 字符", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
@@ -238,11 +239,11 @@ func (h *Handler) Messages(c *gin.Context) {
 	reasoningEffort := extractReasoningEffort(routingBody)
 	serviceTier := extractServiceTier(routingBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	var codexTranslation anthropicCodexTranslation
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -262,6 +263,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	}()
 
 	capacityShedRetries := map[int64]int{}
+	dispatchPolicy := auth.DispatchPolicyStandard
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
@@ -277,6 +279,10 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", msg)
 				return
 			}
+			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+				sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "上游账号的活跃会话容量已满，请稍后重试")
+				return
+			}
 			sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel))
 			return
 		}
@@ -285,7 +291,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !retainedHTTPFallback {
-			h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+			h.bindAccountSession(c, affinityKey, account, proxyURL)
 		}
 		if wsHTTPFallback.ForceHTTP() {
 			log.Printf("上游 WebSocket 1009 后启动 HTTP 降级尝试 (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/messages, ws_elapsed_ms=%d)", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsHTTPFallback.WSElapsed().Milliseconds())
@@ -830,7 +836,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 		}
 
-		h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+		h.bindAccountSession(c, affinityKey, account, proxyURL)
 
 		logStatusCode := outcome.logStatusCode
 		if outcome.logStatusCode != http.StatusOK {

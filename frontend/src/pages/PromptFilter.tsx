@@ -223,7 +223,7 @@ type AdvancedProtectionConfig = {
     max_encoded_blocks: number
   }
   context_discount: { enabled: boolean; intent_aware: boolean; max_discount: number; operational_max_discount: number }
-  risk: { enabled: boolean; window_seconds: number; block_threshold: number; review_threshold: number; user_weight_percent: number; ip_weight_percent: number; session_weight_percent: number }
+  risk: { enabled: boolean; window_seconds: number; block_threshold: number; review_threshold: number; user_weight_percent: number; ip_weight_percent: number; session_weight_percent: number; session_creation_limit_enabled: boolean; session_creation_limit: number; session_creation_limit_window_seconds: number }
   sidecar: {
     enabled: boolean
     base_url: string
@@ -314,7 +314,7 @@ const defaultAdvancedProtection: AdvancedProtectionConfig = {
     max_encoded_blocks: 16,
   },
   context_discount: { enabled: true, intent_aware: true, max_discount: 90, operational_max_discount: 0 },
-  risk: { enabled: false, window_seconds: 600, block_threshold: 100, review_threshold: 60, user_weight_percent: 60, ip_weight_percent: 20, session_weight_percent: 20 },
+  risk: { enabled: false, window_seconds: 600, block_threshold: 100, review_threshold: 60, user_weight_percent: 60, ip_weight_percent: 20, session_weight_percent: 20, session_creation_limit_enabled: false, session_creation_limit: 5, session_creation_limit_window_seconds: 3600 },
   sidecar: {
     enabled: false,
     base_url: '',
@@ -1227,6 +1227,24 @@ function AdvancedProtectionEditor({
               <CompactField label={t('promptFilter.reviewThreshold')} hint={t('promptFilter.help.reviewThreshold')}><DraftNumberInput min={1} max={1000} value={config.risk.review_threshold} onValueChange={(v) => update('risk', { review_threshold: v })} /></CompactField>
             </div>
           </details>
+          <div className="mt-4 border-t pt-4">
+            <SwitchField
+              label={t('promptFilter.sessionCreationLimitTitle')}
+              hint={t('promptFilter.sessionCreationLimitHint')}
+              checked={config.risk.session_creation_limit_enabled}
+              onCheckedChange={(next) => update('risk', { session_creation_limit_enabled: next })}
+            />
+            {config.risk.session_creation_limit_enabled ? (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <CompactField label={t('promptFilter.sessionCreationLimitCount')}>
+                  <DraftNumberInput min={1} max={100000} value={config.risk.session_creation_limit} onValueChange={(v) => update('risk', { session_creation_limit: v })} />
+                </CompactField>
+                <CompactField label={t('promptFilter.sessionCreationLimitWindow')} hint={t('promptFilter.sessionCreationLimitWindowHint')}>
+                  <DraftNumberInput min={60} max={2592000} value={config.risk.session_creation_limit_window_seconds} onValueChange={(v) => update('risk', { session_creation_limit_window_seconds: v })} />
+                </CompactField>
+              </div>
+            ) : null}
+          </div>
         </AdvancedPanel>
 
         <AdvancedPanel title={t('promptFilter.outputScanTitle')}>
@@ -4137,6 +4155,7 @@ function RiskProfilesView() {
     setPage(1)
   }
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const accountStatusView = filters.subjectType === 'account_status'
 
   return (
     <Card>
@@ -4154,7 +4173,7 @@ function RiskProfilesView() {
 
         <div className="mb-4 rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm text-[hsl(var(--warning))]">
           <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><span>{guardrail || t('promptFilter.risk.guardrail')}</span></div>
-          {scoringVersion ? <div className="mt-1 pl-6 font-mono text-xs opacity-75">{scoringVersion}</div> : null}
+          {!accountStatusView && scoringVersion ? <div className="mt-1 pl-6 font-mono text-xs opacity-75">{scoringVersion}</div> : null}
         </div>
 
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-3">
@@ -4164,29 +4183,32 @@ function RiskProfilesView() {
           <Button size="sm" variant={!draftFilters.lockedOnly && draftFilters.subjectType === '' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: false })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: false })); setPage(1) }}>
             <Network className="size-4" />{t('promptFilter.risk.allObjects')}
           </Button>
+          <Button size="sm" variant={!draftFilters.lockedOnly && draftFilters.subjectType === 'account_status' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setPage(1) }}>
+            <Activity className="size-4" />{t('promptFilter.risk.accountStatus')}
+          </Button>
           <Button size="sm" variant={draftFilters.lockedOnly ? 'destructive' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: true })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: true })); setPage(1) }}>
             <ShieldAlert className="size-4" />{t('promptFilter.risk.lockedProfiles')}
           </Button>
-          <span className="text-xs leading-5 text-muted-foreground">{draftFilters.lockedOnly ? t('promptFilter.risk.lockedProfilesHint') : draftFilters.subjectType === 'newapi_user' ? t('promptFilter.risk.peopleProfilesHint') : t('promptFilter.risk.nonPersonHint')}</span>
+          <span className="text-xs leading-5 text-muted-foreground">{draftFilters.lockedOnly ? t('promptFilter.risk.lockedProfilesHint') : draftFilters.subjectType === 'account_status' ? t('promptFilter.risk.accountStatusHint') : draftFilters.subjectType === 'newapi_user' ? t('promptFilter.risk.peopleProfilesHint') : t('promptFilter.risk.nonPersonHint')}</span>
         </div>
 
         <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(155px,1fr))] gap-3">
           <Field label={t('promptFilter.risk.subjectType')}>
             <Select value={draftFilters.subjectType} onValueChange={(value) => setDraftFilters((current) => ({ ...current, subjectType: value }))} options={[
               { label: t('common.all'), value: '' },
-              ...['newapi_user', 'session', 'api_key', 'client_ip', 'upstream_account'].map((value) => ({ label: t(`promptFilter.risk.subjects.${value}`), value })),
+              ...['newapi_user', 'session', 'api_key', 'client_ip', 'upstream_account', 'account_status'].map((value) => ({ label: t(`promptFilter.risk.subjects.${value}`), value })),
             ]} />
           </Field>
-          <Field label={t('promptFilter.risk.level')}>
+          {!accountStatusView ? <Field label={t('promptFilter.risk.level')}>
             <Select value={draftFilters.riskLevel} onValueChange={(value) => setDraftFilters((current) => ({ ...current, riskLevel: value }))} options={[
               { label: t('common.all'), value: '' },
               ...['low', 'observed', 'elevated', 'high', 'critical'].map((value) => ({ label: t(`promptFilter.risk.levels.${value}`), value })),
             ]} />
-          </Field>
-          <Field label={t('promptFilter.risk.platform')}><Input value={draftFilters.platform} onChange={(event) => setDraftFilters((current) => ({ ...current, platform: event.target.value }))} placeholder="newapi" /></Field>
-          <Field label={t('promptFilter.apiKeyId')}><Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" /></Field>
+          </Field> : null}
+          {!accountStatusView ? <Field label={t('promptFilter.risk.platform')}><Input value={draftFilters.platform} onChange={(event) => setDraftFilters((current) => ({ ...current, platform: event.target.value }))} placeholder="newapi" /></Field> : null}
+          {!accountStatusView ? <Field label={t('promptFilter.apiKeyId')}><Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" /></Field> : null}
           <Field label={t('promptFilter.risk.accountId')}><Input value={draftFilters.accountId} onChange={(event) => setDraftFilters((current) => ({ ...current, accountId: event.target.value }))} placeholder="ID" /></Field>
-          <Field label={t('promptFilter.risk.minScore')}><Input type="number" min={0} max={100} value={draftFilters.minScore} onChange={(event) => setDraftFilters((current) => ({ ...current, minScore: event.target.value }))} placeholder="0" /></Field>
+          {!accountStatusView ? <Field label={t('promptFilter.risk.minScore')}><Input type="number" min={0} max={100} value={draftFilters.minScore} onChange={(event) => setDraftFilters((current) => ({ ...current, minScore: event.target.value }))} placeholder="0" /></Field> : null}
           <Field label={t('promptFilter.keyword')}><Input value={draftFilters.q} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} placeholder={t('promptFilter.risk.keywordPlaceholder')} /></Field>
         </div>
         <div className="mb-4 flex flex-wrap gap-2">
@@ -4196,7 +4218,7 @@ function RiskProfilesView() {
         </div>
 
         <StateShell loading={loading} error={error} isEmpty={!loading && profiles.length === 0} onRetry={() => void loadProfiles()} emptyTitle={t('promptFilter.risk.empty')}>
-          <RiskProfilesTable profiles={profiles} />
+          <RiskProfilesTable profiles={profiles} accountStatus={accountStatusView} />
           <Pagination page={page} totalPages={totalPages} totalItems={total} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={(next) => { setPage(1); setPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
         </StateShell>
       </CardContent>
@@ -4218,8 +4240,35 @@ function formatPromptRestrictionRemaining(seconds?: number) {
   return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`
 }
 
-function RiskProfilesTable({ profiles }: { profiles: PromptRiskProfile[] }) {
+function RiskProfilesTable({ profiles, accountStatus = false }: { profiles: PromptRiskProfile[]; accountStatus?: boolean }) {
   const { t } = useTranslation()
+  if (accountStatus) {
+    return (
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <Table>
+          <TableHeader><TableRow>
+            <TableHead>{t('promptFilter.risk.account')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.windows24h')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.linkedUsers')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.totalWindows')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.lastWindowActivity')}</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>{profiles.map((profile) => (
+            <TableRow key={`account-status:${profile.account_id ?? profile.subject_key}`}>
+              <TableCell>
+                <div className="font-medium">{profile.account_name || profile.subject_display || `Account #${profile.account_id}`}</div>
+                <div className="mt-1 text-xs text-muted-foreground">#{profile.account_id}{profile.account_email ? ` · ${profile.account_email}` : ''}</div>
+              </TableCell>
+              <TableCell className="text-right font-mono font-semibold">{profile.session_windows_24h ?? 0}</TableCell>
+              <TableCell className="text-right font-mono font-semibold">{profile.session_unique_users ?? 0}</TableCell>
+              <TableCell className="text-right font-mono font-semibold">{profile.session_windows_total ?? 0}</TableCell>
+              <TableCell className="text-right text-xs text-muted-foreground">{profile.has_activity ? formatBeijingTime(profile.latest_at) : '-'}</TableCell>
+            </TableRow>
+          ))}</TableBody>
+        </Table>
+      </div>
+    )
+  }
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>

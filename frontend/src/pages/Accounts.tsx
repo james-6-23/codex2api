@@ -47,6 +47,7 @@ import type {
   AccountOperationSelector,
   AccountPageStatsItem,
   AccountLiveStateResponse,
+  AccountSessionSnapshot,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
@@ -229,6 +230,61 @@ function AccountConcurrencyBadge({ account }: { account: AccountRow }) {
       />
       {showOccupied ? `${active}/${occupied}` : active}
     </span>
+  );
+}
+
+function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
+  const [sessions, setSessions] = useState<AccountSessionSnapshot[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const current = Math.max(0, account.session_capacity_current ?? 0);
+  const maximum = Math.max(1, account.session_capacity_max ?? 5);
+  useEffect(() => {
+    // The badge is polled continuously, while its details are loaded lazily.
+    // Invalidate the lazy snapshot when the visible count changes so the next
+    // hover never keeps showing sessions that have already expired or moved.
+    setSessions(null);
+  }, [current, maximum]);
+  if (!account.session_capacity_enabled) return null;
+  const load = () => {
+    if (loading || sessions !== null) return;
+    setLoading(true);
+    void api.getAccountSessions(account.id)
+      .then((response) => setSessions(response.sessions ?? []))
+      .catch(() => setSessions([]))
+      .finally(() => setLoading(false));
+  };
+  return (
+    <TooltipProvider delayDuration={150}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            type="button"
+            onMouseEnter={load}
+            onFocus={load}
+            onClick={load}
+            className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-violet-700 ring-1 ring-inset ring-violet-500/20 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-400/20"
+          >
+            <Layers className="size-3" />
+            {t("accounts.sessionCapacityBadge", { current, maximum })}
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="top" className="max-w-[420px] whitespace-normal text-left">
+          <div className="font-medium">{t("accounts.sessionCapacityTooltipTitle", { current, maximum })}</div>
+          {loading ? <div className="mt-1 text-xs text-muted-foreground">{t("common.loading")}</div> : null}
+          {!loading && sessions?.length === 0 ? <div className="mt-1 text-xs text-muted-foreground">{t("accounts.sessionCapacityEmpty")}</div> : null}
+          {sessions?.map((session) => (
+            <div key={session.session_id} className="mt-2 border-t border-border/50 pt-2 text-xs">
+              <div className="break-all font-mono">{session.session_id}</div>
+              <div className="text-muted-foreground">
+                {session.owner?.user_name || session.owner?.user_email || (session.owner?.user_id ? `#${session.owner.user_id}` : session.owner?.api_key_name || "-")}
+                {` · ${t("accounts.sessionCapacityRemaining", { seconds: session.remaining_seconds })}`}
+              </div>
+            </div>
+          ))}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
   );
 }
 
@@ -1314,6 +1370,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                         <AccountStatusCountdown account={account} />
                                       )}
                                       <AccountConcurrencyBadge account={account} />
+                                      <AccountSessionCapacityBadge account={account} />
                                     </div>
                                     <AccountHealthBar
                                       buckets={healthBuckets}
@@ -1698,6 +1755,9 @@ export default function Accounts() {
   const [editCustomHeadersText, setEditCustomHeadersText] = useState("");
   const [editCodexFingerprintMode, setEditCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
+  const [editSessionCapacityEnabled, setEditSessionCapacityEnabled] = useState(false);
+  const [editSessionCapacityMax, setEditSessionCapacityMax] = useState("5");
+  const [editSessionCapacityIdleMinutes, setEditSessionCapacityIdleMinutes] = useState("60");
   const [testingProxyKey, setTestingProxyKey] = useState<string | null>(null);
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
   // （选择器为空时自动隐藏，不影响手动填代理）。
@@ -5211,6 +5271,9 @@ export default function Accounts() {
     setEditProxyUrl(account.proxy_url ?? "");
     setEditCustomHeadersText(formatCustomHeadersText(account.custom_headers));
     setEditCodexFingerprintMode(account.codex_fingerprint_mode ?? "off");
+    setEditSessionCapacityEnabled(account.session_capacity_enabled ?? false);
+    setEditSessionCapacityMax(String(account.session_capacity_max ?? 5));
+    setEditSessionCapacityIdleMinutes(String(Math.max(1, Math.round((account.session_capacity_idle_ttl_seconds ?? 3600) / 60))));
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
     setEditOpenAIForm({
@@ -5265,6 +5328,9 @@ export default function Accounts() {
     setEditProxyUrl("");
     setEditCustomHeadersText("");
     setEditCodexFingerprintMode("off");
+    setEditSessionCapacityEnabled(false);
+    setEditSessionCapacityMax("5");
+    setEditSessionCapacityIdleMinutes("60");
     setEditTags([]);
     setEditGroupIds([]);
     setEditOpenAIForm({
@@ -5372,13 +5438,16 @@ export default function Accounts() {
 
   const handleSaveScheduler = async () => {
     if (!editingAccount) return;
+    const parsedSessionCapacityMax = Number.parseInt(editSessionCapacityMax, 10);
+    const parsedSessionCapacityIdleMinutes = Number.parseInt(editSessionCapacityIdleMinutes, 10);
     if (
       scoreInputInvalid ||
       concurrencyInputInvalid ||
       editAutoPause5hThresholdInvalid ||
       editAutoPause7dThresholdInvalid ||
       editDispatchCountLimitInvalid ||
-      editSchedulerPriorityInvalid
+      editSchedulerPriorityInvalid ||
+      (editSessionCapacityEnabled && (!Number.isFinite(parsedSessionCapacityMax) || parsedSessionCapacityMax < 1 || parsedSessionCapacityMax > 100000 || !Number.isFinite(parsedSessionCapacityIdleMinutes) || parsedSessionCapacityIdleMinutes < 1 || parsedSessionCapacityIdleMinutes > 43200))
     ) {
       showToast(t("accounts.schedulerInvalidInput"), "error");
       return;
@@ -5421,7 +5490,12 @@ export default function Accounts() {
         custom_headers: parsedCustomHeaders.value,
         // 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不下发该字段。
         ...(isCodexOfficialAccount(editingAccount)
-          ? { codex_fingerprint_mode: editCodexFingerprintMode }
+          ? {
+              codex_fingerprint_mode: editCodexFingerprintMode,
+              session_capacity_enabled: editSessionCapacityEnabled,
+              session_capacity_max: Number.isFinite(parsedSessionCapacityMax) ? parsedSessionCapacityMax : 5,
+              session_capacity_idle_ttl_seconds: (Number.isFinite(parsedSessionCapacityIdleMinutes) ? parsedSessionCapacityIdleMinutes : 60) * 60,
+            }
           : {}),
       };
       await api.updateAccountScheduler(editingAccount.id, payload);
@@ -9226,6 +9300,52 @@ export default function Accounts() {
                                 t,
                                 editCodexFingerprintMode,
                               )}
+                            </div>
+                          </div>
+                        ) : null}
+
+                        {/* 账号活跃会话容量 */}
+                        {isCodexOfficialAccount(editingAccount) ? (
+                          <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                            <div className="flex items-start justify-between gap-4">
+                              <div>
+                                <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                                  <Layers className="size-4 text-violet-500" />
+                                  <span>{t("accounts.sessionCapacityTitle")}</span>
+                                </div>
+                                <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                                  {t("accounts.sessionCapacityHint")}
+                                </p>
+                              </div>
+                              <Switch
+                                checked={editSessionCapacityEnabled}
+                                onCheckedChange={setEditSessionCapacityEnabled}
+                                aria-label={t("accounts.sessionCapacityTitle")}
+                              />
+                            </div>
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <label className="space-y-1.5 text-xs text-muted-foreground">
+                                <span>{t("accounts.sessionCapacityMaxLabel")}</span>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  max={100000}
+                                  disabled={!editSessionCapacityEnabled}
+                                  value={editSessionCapacityMax}
+                                  onChange={(event) => setEditSessionCapacityMax(event.target.value)}
+                                />
+                              </label>
+                              <label className="space-y-1.5 text-xs text-muted-foreground">
+                                <span>{t("accounts.sessionCapacityIdleLabel")}</span>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  max={43200}
+                                  disabled={!editSessionCapacityEnabled}
+                                  value={editSessionCapacityIdleMinutes}
+                                  onChange={(event) => setEditSessionCapacityIdleMinutes(event.target.value)}
+                                />
+                              </label>
                             </div>
                           </div>
                         ) : null}
@@ -13252,6 +13372,7 @@ function AccountMobileCard({
                     errorMessage={account.error_message}
                   />
                   <AccountConcurrencyBadge account={account} />
+                  <AccountSessionCapacityBadge account={account} />
                 </div>
               </div>
             </div>
@@ -13596,6 +13717,7 @@ function AccountMobileCard({
           {Math.max(account.active_requests ?? 0, account.occupied_requests ?? 0) > 0 && (
             <div className="mt-1">
               <AccountConcurrencyBadge account={account} />
+              <AccountSessionCapacityBadge account={account} />
             </div>
           )}
         </div>

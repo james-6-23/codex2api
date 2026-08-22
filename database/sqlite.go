@@ -517,6 +517,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "attempt_index", "INTEGER DEFAULT 0"},
 		{"usage_logs", "upstream_error_kind", "TEXT DEFAULT ''"},
 		{"usage_logs", "error_message", "TEXT DEFAULT ''"},
+		{"usage_logs", "newapi_user_name", "TEXT DEFAULT ''"},
 		{"usage_logs", "credential_generation", "INTEGER NOT NULL DEFAULT 0"},
 		{"api_keys", "quota_limit", "REAL DEFAULT 0"},
 		{"api_keys", "quota_used", "REAL DEFAULT 0"},
@@ -1067,6 +1068,21 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	); err != nil {
 		return nil, err
 	}
+	archived, err := db.archivedUsageSummaryForRange(ctx, rangeStart, rangeEnd, channel)
+	if err != nil {
+		return nil, fmt.Errorf("读取已清理用量汇总: %w", err)
+	}
+	stats.TodayRequests += archived.Requests
+	stats.TodayTokens += archived.Tokens
+	stats.TodayPrompt += archived.Prompt
+	stats.TodayCompletion += archived.Completion
+	stats.TodayCachedTokens += archived.Cached
+	stats.TodayAccountBilled += archived.AccountBilled
+	stats.TodayUserBilled += archived.UserBilled
+	todayCacheHitRequests += archived.CacheHits
+	todayErrors += archived.Errors
+	totalFirstTokenMs += archived.FirstTokenSum
+	totalFirstTokenSamples += archived.FirstTokenSamples
 
 	if stats.TodayRequests > 0 {
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100

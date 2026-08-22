@@ -1013,6 +1013,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/page-stats", h.GetAccountPageStats)
 	api.GET("/accounts/live", h.GetAccountLiveState)
 	api.GET("/accounts/:id", h.GetAccount)
+	api.GET("/accounts/:id/sessions", h.GetAccountSessions)
+	api.DELETE("/accounts/:id/sessions", h.DeleteAccountSessions)
 	api.POST("/accounts", h.AddAccount)
 	api.POST("/accounts/at", h.AddATAccount)
 	api.POST("/accounts/codex/agent-identity", h.ImportCodexAgentIdentity)
@@ -1464,6 +1466,10 @@ type accountResponse struct {
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
 	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
 	CodexFingerprintMode          string                      `json:"codex_fingerprint_mode,omitempty"`
+	SessionCapacityEnabled        bool                        `json:"session_capacity_enabled,omitempty"`
+	SessionCapacityMax            int64                       `json:"session_capacity_max,omitempty"`
+	SessionCapacityIdleTTLSeconds int64                       `json:"session_capacity_idle_ttl_seconds,omitempty"`
+	SessionCapacityCurrent        int64                       `json:"session_capacity_current,omitempty"`
 	CustomHeaders                 map[string]string           `json:"custom_headers,omitempty"`
 	HealthTier                    string                      `json:"health_tier"`
 	SchedulerScore                float64                     `json:"scheduler_score"`
@@ -1905,6 +1911,9 @@ type updateAccountSchedulerReq struct {
 	ProxyURL                json.RawMessage `json:"proxy_url"`
 	CustomHeaders           json.RawMessage `json:"custom_headers"`
 	CodexFingerprintMode    json.RawMessage `json:"codex_fingerprint_mode"`
+	SessionCapacityEnabled  json.RawMessage `json:"session_capacity_enabled"`
+	SessionCapacityMax      json.RawMessage `json:"session_capacity_max"`
+	SessionCapacityIdleTTL  json.RawMessage `json:"session_capacity_idle_ttl_seconds"`
 }
 
 type accountSchedulerUpdate struct {
@@ -1924,6 +1933,9 @@ type accountSchedulerUpdate struct {
 	ProxyURL                database.OptionalString
 	CustomHeaders           optionalCustomHeaders
 	CodexFingerprintMode    database.OptionalString
+	SessionCapacityEnabled  database.OptionalBool
+	SessionCapacityMax      database.OptionalNullInt64
+	SessionCapacityIdleTTL  database.OptionalNullInt64
 	CredentialUpdates       map[string]interface{}
 }
 
@@ -1998,12 +2010,41 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
+	sessionCapacityEnabled, err := parseOptionalBoolField(req.SessionCapacityEnabled, "session_capacity_enabled")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	sessionCapacityMax, err := parseOptionalIntegerField(req.SessionCapacityMax, "session_capacity_max", 1, 100000)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	sessionCapacityIdleTTL, err := parseOptionalIntegerField(req.SessionCapacityIdleTTL, "session_capacity_idle_ttl_seconds", auth.MinSessionCapacityIdleTTLSeconds, auth.MaxSessionCapacityIdleTTLSeconds)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	credentialUpdates := make(map[string]interface{})
 	if customHeaders.Set {
 		credentialUpdates["custom_headers"] = cloneCustomHeaders(customHeaders.Values)
 	}
 	if codexFingerprintMode.Set {
 		credentialUpdates[auth.CodexFingerprintModeCredentialKey] = codexFingerprintMode.Value
+	}
+	if sessionCapacityEnabled.Set {
+		credentialUpdates[auth.SessionCapacityEnabledCredentialKey] = sessionCapacityEnabled.Value
+	}
+	if sessionCapacityMax.Set {
+		if sessionCapacityMax.Value.Valid {
+			credentialUpdates[auth.SessionCapacityMaxCredentialKey] = sessionCapacityMax.Value.Int64
+		} else {
+			credentialUpdates[auth.SessionCapacityMaxCredentialKey] = auth.DefaultSessionCapacityMax
+		}
+	}
+	if sessionCapacityIdleTTL.Set {
+		if sessionCapacityIdleTTL.Value.Valid {
+			credentialUpdates[auth.SessionCapacityIdleTTLSecondsKey] = sessionCapacityIdleTTL.Value.Int64
+		} else {
+			credentialUpdates[auth.SessionCapacityIdleTTLSecondsKey] = auth.DefaultSessionCapacityIdleTTLSeconds
+		}
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2059,6 +2100,9 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		ProxyURL:                proxyURL,
 		CustomHeaders:           customHeaders,
 		CodexFingerprintMode:    codexFingerprintMode,
+		SessionCapacityEnabled:  sessionCapacityEnabled,
+		SessionCapacityMax:      sessionCapacityMax,
+		SessionCapacityIdleTTL:  sessionCapacityIdleTTL,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -2087,7 +2131,10 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 		u.SchedulerPriority.Set ||
 		u.ProxyURL.Set ||
 		u.CustomHeaders.Set ||
-		u.CodexFingerprintMode.Set
+		u.CodexFingerprintMode.Set ||
+		u.SessionCapacityEnabled.Set ||
+		u.SessionCapacityMax.Set ||
+		u.SessionCapacityIdleTTL.Set
 }
 
 func optionalBoolFromPtr(value *bool) database.OptionalBool {
@@ -2321,6 +2368,30 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.CodexFingerprintMode.Set {
 		h.store.ApplyAccountCodexFingerprintMode(id, update.CodexFingerprintMode.Value)
+	}
+	if update.SessionCapacityEnabled.Set || update.SessionCapacityMax.Set || update.SessionCapacityIdleTTL.Set {
+		account := h.store.FindByID(id)
+		if account != nil {
+			enabled, limit, idleTTL := account.SessionCapacityConfig()
+			if update.SessionCapacityEnabled.Set {
+				enabled = update.SessionCapacityEnabled.Value
+			}
+			if update.SessionCapacityMax.Set {
+				if update.SessionCapacityMax.Value.Valid {
+					limit = update.SessionCapacityMax.Value.Int64
+				} else {
+					limit = auth.DefaultSessionCapacityMax
+				}
+			}
+			if update.SessionCapacityIdleTTL.Set {
+				if update.SessionCapacityIdleTTL.Value.Valid {
+					idleTTL = time.Duration(update.SessionCapacityIdleTTL.Value.Int64) * time.Second
+				} else {
+					idleTTL = time.Duration(auth.DefaultSessionCapacityIdleTTLSeconds) * time.Second
+				}
+			}
+			h.store.ApplyAccountSessionCapacity(id, enabled, limit, int64(idleTTL/time.Second))
+		}
 	}
 }
 
@@ -7566,7 +7637,8 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 
 // ClearUsageLogs 清空所有使用日志
 func (h *Handler) ClearUsageLogs(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	// 清理前会把统计压缩进小时汇总表；大日志表上允许事务完整完成。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
 	defer cancel()
 
 	if err := h.db.ClearUsageLogs(ctx); err != nil {

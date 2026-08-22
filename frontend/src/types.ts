@@ -115,6 +115,10 @@ export interface AccountRow {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_fingerprint_mode?: CodexFingerprintMode
+  session_capacity_enabled?: boolean
+  session_capacity_max?: number
+  session_capacity_idle_ttl_seconds?: number
+  session_capacity_current?: number
   custom_headers?: Record<string, string> | null
   health_tier?: string
   scheduler_score?: number
@@ -291,8 +295,34 @@ export interface AccountPageStatsResponse {
 }
 
 export interface AccountLiveStateResponse {
-  accounts: Record<string, { active_requests: number; occupied_requests: number }>
+  accounts: Record<string, {
+    active_requests: number
+    occupied_requests: number
+    session_capacity_current: number
+    session_capacity_max: number
+  }>
   session_slot_buffer_enabled: boolean
+}
+
+export interface AccountSessionOwner {
+  platform?: string
+  user_id?: string
+  user_name?: string
+  user_email?: string
+  api_key_id?: number
+  api_key_name?: string
+}
+
+export interface AccountSessionSnapshot {
+  session_id: string
+  last_seen: ISODateString
+  expires_at: ISODateString
+  remaining_seconds: number
+  owner?: AccountSessionOwner
+}
+
+export interface AccountSessionsResponse {
+  sessions: AccountSessionSnapshot[]
 }
 
 export interface AccountsPageParams {
@@ -881,6 +911,9 @@ export interface UpdateAccountSchedulerRequest {
   scheduler_priority?: number | null
   custom_headers?: Record<string, string> | null
   codex_fingerprint_mode?: CodexFingerprintMode | null
+  session_capacity_enabled?: boolean
+  session_capacity_max?: number
+  session_capacity_idle_ttl_seconds?: number
 }
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
@@ -1702,7 +1735,7 @@ export interface PromptPolicyIncidentDetailResponse {
 	}
 }
 
-export type PromptRiskSubjectType = 'newapi_user' | 'session' | 'api_key' | 'client_ip' | 'upstream_account'
+export type PromptRiskSubjectType = 'newapi_user' | 'session' | 'api_key' | 'client_ip' | 'upstream_account' | 'account_status'
 export type PromptRiskLevel = 'low' | 'observed' | 'elevated' | 'high' | 'critical'
 
 export interface PromptRiskScoreBreakdown {
@@ -1802,6 +1835,10 @@ export interface PromptRiskProfile {
   api_key_masked?: string
   account_id?: number
   account_name?: string
+  account_email?: string
+  session_windows_24h?: number
+  session_unique_users?: number
+  session_windows_total?: number
   trust_policy?: PromptRiskTrustPolicy
   conversation_lock?: PromptConversationLock
 }
@@ -2581,6 +2618,7 @@ export interface UsageLog {
   upstream_error_kind: string
 	error_message: string
 	prompt_policy_incident_id?: string
+	newapi_user_name?: string
 }
 
 export type UsageLogsResponse = ApiListResponse<'logs', UsageLog>

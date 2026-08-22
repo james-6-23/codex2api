@@ -18,7 +18,15 @@
     "modelCooldownCleared": "已清除 {{model}} 的模型冷卻",
     "allModelCooldownsCleared": "已清除 {{count}} 條模型冷卻",
     "planWorkspaceId": "空間 ID：{{id}}",
-    "occupiedRequestsTooltip": "目前真實在途 {{active}}，佔用槽位 {{occupied}}（含 {{buffered}} 個會話緩衝槽）"
+    "occupiedRequestsTooltip": "目前真實在途 {{active}}，佔用槽位 {{occupied}}（含 {{buffered}} 個會話緩衝槽）",
+    "sessionCapacityTitle": "帳號活躍會話容量",
+    "sessionCapacityHint": "預設關閉。限制此帳號同時保留的不同會話數；已有會話會刷新空閒時間，逾時自動釋放。",
+    "sessionCapacityMaxLabel": "最大活躍會話數",
+    "sessionCapacityIdleLabel": "空閒釋放時間（分鐘）",
+    "sessionCapacityBadge": "會話 {{current}}/{{maximum}}",
+    "sessionCapacityTooltipTitle": "目前活躍會話 {{current}}/{{maximum}}",
+    "sessionCapacityEmpty": "暫無活躍會話",
+    "sessionCapacityRemaining": "約 {{seconds}} 秒後釋放"
   },
   "settings": {
     "modelCooldownTitle": "模型 429 冷卻策略",
@@ -288,6 +296,13 @@
       "newapiIdentity": "NewAPI 可信身份",
       "peopleProfiles": "人物畫像",
       "allObjects": "全部畫像對象",
+      "accountStatus": "帳號狀態",
+      "accountStatusHint": "僅統計目前存在帳號的會話視窗與已驗證使用者，不參與風險評分或封號。",
+      "account": "帳號",
+      "windows24h": "24h 新視窗",
+      "linkedUsers": "關聯使用者數",
+      "totalWindows": "總視窗數",
+      "lastWindowActivity": "最近視窗活動",
       "peopleProfilesHint": "預設只顯示可追溯至 NewAPI 使用者 ID 的人員畫像。",
       "nonPersonHint": "工作階段、Key、網路與上游帳號是環境對象，用於定位鏈路，不代表特定人員。",
       "conversationLock": {
@@ -319,7 +334,7 @@
         "status":{"active":"臨時信任中","suspended":"已自動暫停","revoked":"已撤銷","expired":"已到期"},
         "events":{"granted":"已啟用","auto_granted":"畫像自動啟用","reactivated":"重新啟用","suspended":"已暫停","auto_suspended":"風險觸發自動暫停","revoked":"管理員撤銷","expired":"到期失效","bypass_used":"乾淨請求略過同步複核","model_reviewed":"週期模型複核通過","evaluated":"週期評判"}
       },
-      "subjects": {"newapi_user":"NewAPI 使用者","session":"工作階段","api_key":"API Key","client_ip":"客戶端網路","upstream_account":"上游帳號"},
+      "subjects": {"newapi_user":"NewAPI 使用者","session":"工作階段","api_key":"API Key","client_ip":"客戶端網路","upstream_account":"上游帳號","account_status":"帳號狀態"},
       "levels": {"low":"低","observed":"觀察","elevated":"升高","high":"高","critical":"嚴重"},
       "actions": {"observe":"保持觀察","monitor":"持續監控","enhanced_review":"加強審核","rate_limit":"評估限速","require_signed_identity":"要求可信簽名身份","temporary_restriction_review":"評估臨時限制","account_rotation_review":"評估帳號輪換","account_routing_review":"檢查帳號路由"},
       "events": {"review_cleared":"複核通過","review_flagged_monitor":"模型命中（監控模式）","local_block_strike":"本地終局攔截","local_block":"歷史未確認攔截","local_block_unverified":"本地攔截（待確認）","local_block_cleared":"本地攔截（已修正）","local_warn":"本地警告","local_audit_hit":"本地審計命中","local_security_context_observed":"安全測試上下文觀察","upstream_cy_confirmed_miss":"上游 CY：確認漏檢","upstream_cy_local_detected":"上游 CY：本地已識別","upstream_cy_upstream_only":"上游 CY：僅上游證據","upstream_cy_evidence_unavailable":"上游 CY：證據不可用","upstream_cy_not_comparable":"上游 CY：不可比較","upstream_cy_legacy_unknown":"上游 CY：歷史未知"}
@@ -642,6 +657,11 @@
     "authorizedPentestAllowed": "放行聲明已授權的滲透測試",
     "localSevereStrikeEnabled": "本地嚴重違規累計 CYB 封號",
     "riskSimplifiedDesc": "依使用者、IP 與會話累計週期風險；預設關閉。",
+    "sessionCreationLimitTitle": "限制使用者新建會話數量",
+    "sessionCreationLimitHint": "預設關閉。同一使用者或 API Key 在滾動視窗內只能建立指定數量的不同會話。",
+    "sessionCreationLimitCount": "最多新建會話數",
+    "sessionCreationLimitWindow": "滾動視窗（秒）",
+    "sessionCreationLimitWindowHint": "60 秒至 30 天；3600 表示 60 分鐘。",
     "outputSimplifiedDesc": "掃描串流輸出中的嚴格高風險訊號；預設關閉。",
     "extensions": {
       "title": "深度防護擴充",

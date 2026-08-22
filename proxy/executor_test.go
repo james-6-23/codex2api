@@ -1349,6 +1349,17 @@ func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 	}
 }
 
+func TestResolveStableExplicitSessionIDExcludesIdempotencyKey(t *testing.T) {
+	headers := http.Header{"Idempotency-Key": []string{"per-request-key"}}
+	if got := ResolveStableExplicitSessionID(headers, nil); got != "" {
+		t.Fatalf("stable explicit session id = %q, want empty", got)
+	}
+	identity := resolveRequestSessionIdentity(headers, nil)
+	if identity.stableIdentity {
+		t.Fatal("per-request idempotency key was marked as a stable conversation")
+	}
+}
+
 func TestResolveSessionIDUsesLocalAffinityHeader(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"same prompt"}]}`)
 	baseHeaders := http.Header{"Authorization": []string{"Bearer shared-key"}}
@@ -1480,6 +1491,43 @@ func TestResolveExplicitSessionIDDoesNotUseAPIKeyFallback(t *testing.T) {
 	}
 	if got := ResolveSessionID(headers, []byte(`{}`)); got == "" {
 		t.Fatal("ResolveSessionID() should still generate API-key fallback")
+	}
+}
+
+func TestResolveNativeCodexSessionGraphCollapsesSubagentsToRoot(t *testing.T) {
+	root := "7c0a82a4-1f90-41a0-8c52-50982eef3111"
+	child := "91bdd7ab-faaa-4b54-99cc-acde06704ed2"
+	rootHeaders := http.Header{
+		"Session-Id":          []string{root},
+		"Thread-Id":           []string{root},
+		"X-Client-Request-Id": []string{root},
+		"X-Codex-Window-Id":   []string{root + ":0"},
+	}
+	childHeaders := http.Header{
+		"Session-Id":               []string{root},
+		"Thread-Id":                []string{child},
+		"X-Client-Request-Id":      []string{child},
+		"X-Codex-Window-Id":        []string{child + ":18"},
+		"X-Codex-Parent-Thread-Id": []string{root},
+	}
+	if got := ResolveExplicitSessionID(rootHeaders, nil); got != root {
+		t.Fatalf("root graph = %q, want %q", got, root)
+	}
+	if got := ResolveExplicitSessionID(childHeaders, nil); got != root {
+		t.Fatalf("child graph = %q, want root %q", got, root)
+	}
+}
+
+func TestResolveNativeCodexSessionGraphRejectsMismatchedWindow(t *testing.T) {
+	root := "7c0a82a4-1f90-41a0-8c52-50982eef3111"
+	headers := http.Header{
+		"Session-Id":          []string{root},
+		"Thread-Id":           []string{root},
+		"X-Client-Request-Id": []string{root},
+		"X-Codex-Window-Id":   []string{"different:0"},
+	}
+	if _, ok := resolveNativeCodexSessionGraph(headers); ok {
+		t.Fatal("mismatched window graph was accepted")
 	}
 }
 

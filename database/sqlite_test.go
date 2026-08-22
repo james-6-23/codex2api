@@ -2666,6 +2666,47 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	if stats.AvgFirstTokenMs < 449.9 || stats.AvgFirstTokenMs > 450.1 {
 		t.Fatalf("AvgFirstTokenMs = %.4f, want about 450.00", stats.AvgFirstTokenMs)
 	}
+	if stats.TodayRequests != 2 || stats.TodayTokens != 250 {
+		t.Fatalf("today stats after clear = requests %d tokens %d, want 2/250", stats.TodayRequests, stats.TodayTokens)
+	}
+	account, err := db.GetAccountUsageStats(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("GetAccountUsageStats after clear: %v", err)
+	}
+	if account.TotalRequests != 2 || account.TotalTokens != 250 || account.Today.Requests != 2 || account.Today.Tokens != 250 {
+		t.Fatalf("account stats after clear = %+v, want totals and today preserved", account)
+	}
+	counts, err := db.GetAccountRequestCountsByIDs(ctx, []int64{1})
+	if err != nil {
+		t.Fatalf("GetAccountRequestCountsByIDs after clear: %v", err)
+	}
+	if counts[1] == nil || counts[1].SuccessCount != 2 {
+		t.Fatalf("account request counts after clear = %+v, want two successes", counts[1])
+	}
+	today, err := db.GetAccountUsageSinceByIDs(ctx, []int64{1}, StartOfDay(time.Now()))
+	if err != nil {
+		t.Fatalf("GetAccountUsageSinceByIDs after clear: %v", err)
+	}
+	if today[1] == nil || today[1].Requests != 2 || today[1].Tokens != 250 {
+		t.Fatalf("account today after clear = %+v, want 2/250", today[1])
+	}
+	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID: 1, Endpoint: "/v1/responses", Model: "gpt-5.5", StatusCode: 200,
+		InputTokens: 30, OutputTokens: 20, TotalTokens: 50,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog after first clear: %v", err)
+	}
+	db.FlushUsageLogs()
+	if err := db.ClearUsageLogs(ctx); err != nil {
+		t.Fatalf("second ClearUsageLogs: %v", err)
+	}
+	account, err = db.GetAccountUsageStats(ctx, 1, 0)
+	if err != nil {
+		t.Fatalf("GetAccountUsageStats after second clear: %v", err)
+	}
+	if account.TotalRequests != 3 || account.TotalTokens != 300 || account.Today.Requests != 3 || account.Today.Tokens != 300 {
+		t.Fatalf("account stats after repeated clear = %+v, want 3/300 without double counting", account)
+	}
 }
 
 func TestUsageStatsRollupPreservesFullTotalsAndChannelSemantics(t *testing.T) {
