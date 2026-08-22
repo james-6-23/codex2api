@@ -1042,6 +1042,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/sub2api/preview", h.PreviewSub2APIAccounts)
 	api.POST("/accounts/sub2api/import", h.ImportFromSub2API)
 	api.PATCH("/accounts/:id/models", h.UpdateAccountModels)
+	api.POST("/accounts/batch-models", h.BatchUpdateAccountModels)
 	api.POST("/accounts/:id/models/sync-upstream", h.SyncAccountUpstreamModels)
 	api.POST("/accounts/:id/models/probe", h.ProbeAccountModels)
 	api.PATCH("/accounts/:id/scheduler", h.UpdateAccountScheduler)
@@ -1130,6 +1131,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-policy/incidents/:incident_id", h.GetPromptPolicyIncident)
 	api.GET("/prompt-policy/risk-profiles", h.ListPromptRiskProfiles)
 	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
+	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/session-limit", h.UpdatePromptRiskProfileSessionLimit)
 	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.UpsertPromptRiskTrustPolicy)
 	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
 	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)
@@ -4077,6 +4079,72 @@ func (h *Handler) UpdateAccountModels(c *gin.Context) {
 	h.store.ApplyAccountModels(id, models)
 	h.db.InsertAccountEventAsync(id, "updated", "account_models")
 	c.JSON(http.StatusOK, gin.H{"models": models})
+}
+
+type batchUpdateAccountModelsRequest struct {
+	IDs    []int64  `json:"ids"`
+	Models []string `json:"models"`
+}
+
+// BatchUpdateAccountModels replaces the model allowlist for Codex OAuth
+// accounts. Empty models clear the declaration and restore unrestricted model
+// scheduling. Relay-style accounts are reported as failed so a mixed selection
+// cannot silently rewrite a different upstream type's configuration.
+func (h *Handler) BatchUpdateAccountModels(c *gin.Context) {
+	var req batchUpdateAccountModelsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	ids := uniqueAccountIDs(req.IDs)
+	if len(ids) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供要更新的账号 ID 列表")
+		return
+	}
+	models := auth.NormalizeAccountModels(req.Models)
+	if len(models) > 200 {
+		writeError(c, http.StatusBadRequest, "模型数量不能超过 200")
+		return
+	}
+	for _, model := range models {
+		if err := security.ValidateModelName(model); err != nil {
+			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
+			return
+		}
+	}
+
+	timeout := 15*time.Second + time.Duration(len(ids))*50*time.Millisecond
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+
+	var success, failed int64
+	for _, id := range ids {
+		var account *auth.Account
+		if h.store != nil {
+			account = h.store.FindByID(id)
+		}
+		if account == nil || account.IsRelayStyle() {
+			failed++
+			continue
+		}
+		if err := h.db.UpdateCredentials(ctx, id, map[string]interface{}{"models": models}); err != nil {
+			failed++
+			continue
+		}
+		h.store.ApplyAccountModels(id, models)
+		h.db.InsertAccountEventAsync(id, "updated", "batch_account_models")
+		success++
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("已更新 %d 个账号，失败 %d 个", success, failed),
+		"success": success,
+		"failed":  failed,
+		"models":  models,
+	})
 }
 
 // SyncAccountUpstreamModels 用账号自身凭据实时拉取上游模型清单，

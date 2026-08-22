@@ -3064,6 +3064,8 @@ type Store struct {
 	promptFilterNewAPIBindings         map[int64]database.PromptFilterNewAPIBinding
 	promptRiskTrustMu                  sync.RWMutex
 	promptRiskTrustPolicies            map[string]database.PromptRiskTrustPolicy
+	promptSessionLimitOverridesMu      sync.RWMutex
+	promptSessionLimitOverrides        map[string]database.PromptSessionLimitOverride
 	usageProbeMu                       sync.RWMutex
 	usageProbe                         func(context.Context, *Account) error
 	usageProbeCompletion               func()
@@ -3596,22 +3598,32 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	}
 	backgroundCtx, backgroundCancel := context.WithCancel(context.Background())
 	s := &Store{
-		globalProxy:                settings.ProxyURL,
-		maxConcurrency:             int64(settings.MaxConcurrency),
-		testConcurrency:            int64(settings.TestConcurrency),
-		db:                         db,
-		tokenCache:                 tc,
-		backgroundRefreshWakeCh:    make(chan struct{}, 1),
-		boundaryProbeWakeCh:        make(chan struct{}, 1),
-		stopCh:                     make(chan struct{}),
-		backgroundCtx:              backgroundCtx,
-		backgroundCancel:           backgroundCancel,
-		proxyPoolEnabled:           settings.ProxyPoolEnabled,
-		sessionBindings:            make(map[string]sessionAffinity),
-		sessionSlotReservations:    make(map[int64]map[string][]uint64),
-		accountSessions:            make(map[int64]map[string]*accountSessionState),
-		promptFilterNewAPIBindings: make(map[int64]database.PromptFilterNewAPIBinding),
-		oauthRefreshLocks:          make(map[string]*oauthRefreshLocalLock),
+		globalProxy:                 settings.ProxyURL,
+		maxConcurrency:              int64(settings.MaxConcurrency),
+		testConcurrency:             int64(settings.TestConcurrency),
+		db:                          db,
+		tokenCache:                  tc,
+		backgroundRefreshWakeCh:     make(chan struct{}, 1),
+		boundaryProbeWakeCh:         make(chan struct{}, 1),
+		stopCh:                      make(chan struct{}),
+		backgroundCtx:               backgroundCtx,
+		backgroundCancel:            backgroundCancel,
+		proxyPoolEnabled:            settings.ProxyPoolEnabled,
+		sessionBindings:             make(map[string]sessionAffinity),
+		sessionSlotReservations:     make(map[int64]map[string][]uint64),
+		accountSessions:             make(map[int64]map[string]*accountSessionState),
+		promptFilterNewAPIBindings:  make(map[int64]database.PromptFilterNewAPIBinding),
+		promptSessionLimitOverrides: make(map[string]database.PromptSessionLimitOverride),
+		oauthRefreshLocks:           make(map[string]*oauthRefreshLocalLock),
+	}
+	if db != nil {
+		loadCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if items, err := db.ListPromptSessionLimitOverrides(loadCtx); err != nil {
+			log.Printf("[PromptSessionLimit] load user overrides failed: %v", err)
+		} else {
+			s.ReplacePromptSessionLimitOverrides(items)
+		}
+		cancel()
 	}
 	s.sessionSlotBufferEnabled.Store(settings.SessionSlotBufferEnabled)
 	s.SetSessionSlotBuffer(time.Duration(database.NormalizeSessionSlotBufferSeconds(settings.SessionSlotBufferSeconds)) * time.Second)

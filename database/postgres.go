@@ -460,6 +460,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	if err := db.ensurePromptConversationLocksTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建提示词会话锁表失败: %w", err)
 	}
+	if err := db.ensurePromptSessionLimitOverridesTable(ctx); err != nil {
+		return nil, fmt.Errorf("创建用户会话限制覆盖表失败: %w", err)
+	}
 	if err := db.ensureAccountSessionObservationsTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建账号会话观测表失败: %w", err)
 	}
@@ -5709,9 +5712,10 @@ func (db *DB) buildUsageLogWhere(f UsageLogFilter) (string, []interface{}) {
 			OR LOWER(COALESCE(u.effective_model, '')) LIKE LOWER(%[1]s)
 			OR LOWER(COALESCE(u.inbound_endpoint, '')) LIKE LOWER(%[1]s)
 				OR LOWER(COALESCE(u.upstream_endpoint, '')) LIKE LOWER(%[1]s)
-				OR LOWER(COALESCE(u.api_key_name, '')) LIKE LOWER(%[1]s)
-				OR LOWER(COALESCE(u.api_key_masked, '')) LIKE LOWER(%[1]s)
-				OR LOWER(COALESCE(u.client_ip, '')) LIKE LOWER(%[1]s)
+			OR LOWER(COALESCE(u.api_key_name, '')) LIKE LOWER(%[1]s)
+			OR LOWER(COALESCE(u.api_key_masked, '')) LIKE LOWER(%[1]s)
+			OR LOWER(COALESCE(u.newapi_user_name, '')) LIKE LOWER(%[1]s)
+			OR LOWER(COALESCE(u.client_ip, '')) LIKE LOWER(%[1]s)
 				OR u.account_id IN (
 					SELECT search_accounts.id
 					FROM accounts search_accounts

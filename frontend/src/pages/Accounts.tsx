@@ -235,56 +235,122 @@ function AccountConcurrencyBadge({ account }: { account: AccountRow }) {
 
 function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
   const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<AccountSessionSnapshot[] | null>(null);
   const [loading, setLoading] = useState(false);
   const current = Math.max(0, account.session_capacity_current ?? 0);
   const maximum = Math.max(1, account.session_capacity_max ?? 5);
-  useEffect(() => {
-    // The badge is polled continuously, while its details are loaded lazily.
-    // Invalidate the lazy snapshot when the visible count changes so the next
-    // hover never keeps showing sessions that have already expired or moved.
-    setSessions(null);
-  }, [current, maximum]);
   if (!account.session_capacity_enabled) return null;
   const load = () => {
-    if (loading || sessions !== null) return;
+    if (loading) return;
     setLoading(true);
     void api.getAccountSessions(account.id)
       .then((response) => setSessions(response.sessions ?? []))
       .catch(() => setSessions([]))
       .finally(() => setLoading(false));
   };
+  const openDetails = () => {
+    setOpen(true);
+    load();
+  };
   return (
-    <TooltipProvider delayDuration={150}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <button
-            type="button"
-            onMouseEnter={load}
-            onFocus={load}
-            onClick={load}
-            className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-violet-700 ring-1 ring-inset ring-violet-500/20 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-400/20"
-          >
-            <Layers className="size-3" />
-            {t("accounts.sessionCapacityBadge", { current, maximum })}
-          </button>
-        </TooltipTrigger>
-        <TooltipContent side="top" className="max-w-[420px] whitespace-normal text-left">
-          <div className="font-medium">{t("accounts.sessionCapacityTooltipTitle", { current, maximum })}</div>
-          {loading ? <div className="mt-1 text-xs text-muted-foreground">{t("common.loading")}</div> : null}
-          {!loading && sessions?.length === 0 ? <div className="mt-1 text-xs text-muted-foreground">{t("accounts.sessionCapacityEmpty")}</div> : null}
-          {sessions?.map((session) => (
-            <div key={session.session_id} className="mt-2 border-t border-border/50 pt-2 text-xs">
-              <div className="break-all font-mono">{session.session_id}</div>
-              <div className="text-muted-foreground">
-                {session.owner?.user_name || session.owner?.user_email || (session.owner?.user_id ? `#${session.owner.user_id}` : session.owner?.api_key_name || "-")}
-                {` · ${t("accounts.sessionCapacityRemaining", { seconds: session.remaining_seconds })}`}
-              </div>
+    <>
+      <button
+        type="button"
+        onClick={openDetails}
+        className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-violet-700 ring-1 ring-inset ring-violet-500/20 transition-colors hover:bg-violet-100 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-400/20 dark:hover:bg-violet-900"
+      >
+        <Layers className="size-3" />
+        {t("accounts.sessionCapacityBadge", { current, maximum })}
+      </button>
+      <Modal
+        show={open}
+        title={t("accounts.sessionCapacityTooltipTitle", {
+          current,
+          maximum,
+        })}
+        contentClassName="sm:max-w-[780px]"
+        bodyClassName="sm:px-7 sm:py-6"
+        onClose={() => setOpen(false)}
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={loading}
+              onClick={load}
+            >
+              <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+              {t("common.refresh")}
+            </Button>
+            <Button type="button" onClick={() => setOpen(false)}>
+              {t("common.close")}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-muted/30 px-4 py-3">
+            <div className="text-xs font-medium text-muted-foreground">
+              {t("accounts.sessionCapacityAccount")}
             </div>
-          ))}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
+            <div className="mt-1 break-all text-base font-semibold text-foreground">
+              {formatAccountName(account)}
+            </div>
+          </div>
+
+          {loading && sessions === null ? (
+            <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {t("common.loading")}
+            </div>
+          ) : null}
+
+          {!loading && sessions?.length === 0 ? (
+            <div className="flex min-h-32 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground">
+              {t("accounts.sessionCapacityEmpty")}
+            </div>
+          ) : null}
+
+          {sessions?.map((session, index) => {
+            const ownerName =
+              session.owner?.user_name ||
+              session.owner?.user_email ||
+              (session.owner?.user_id
+                ? `#${session.owner.user_id}`
+                : session.owner?.api_key_name || "-");
+            return (
+              <div
+                key={session.session_id}
+                className="rounded-xl border border-border bg-card p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-violet-500/12 text-xs font-bold tabular-nums text-violet-700 dark:bg-violet-400/15 dark:text-violet-300">
+                      {index + 1}
+                    </span>
+                    <span className="truncate text-sm font-bold text-violet-700 dark:text-violet-300">
+                      {ownerName}
+                    </span>
+                  </div>
+                  <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground">
+                    {t("accounts.sessionCapacityRemaining", {
+                      seconds: session.remaining_seconds,
+                    })}
+                  </span>
+                </div>
+                <div className="mt-3 text-xs font-medium text-muted-foreground">
+                  {t("accounts.sessionCapacitySessionId")}
+                </div>
+                <div className="mt-1.5 overflow-x-auto rounded-lg bg-muted/45 px-3 py-2.5 font-mono text-[13px] leading-5 text-foreground">
+                  <span className="whitespace-nowrap">{session.session_id}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </Modal>
+    </>
   );
 }
 
@@ -1330,7 +1396,7 @@ const AccountTableRow = memo(function AccountTableRow({
                               <TableCell data-account-state-cell="status">
                                 {tableOverlay ?? (
                                   <div
-                                    className="min-w-[168px] max-w-[240px] space-y-1.5"
+                                    className="min-w-[220px] max-w-[280px] space-y-1.5"
                                     title={[
                                       t("accounts.healthSummary", {
                                         health: formatHealthTier(
@@ -1354,7 +1420,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                       .filter(Boolean)
                                       .join("\n")}
                                   >
-                                    <div className="flex min-h-6 flex-wrap items-center gap-1.5">
+                                    <div className="flex min-h-6 flex-nowrap items-center gap-1.5">
                                       <StatusBadge
                                         status={getAccountStatusBadgeStatus(account)}
                                         detail={
@@ -1916,6 +1982,14 @@ export default function Accounts() {
   const [modelsSyncing, setModelsSyncing] = useState(false);
   const [modelsProbing, setModelsProbing] = useState(false);
   const [modelsSaving, setModelsSaving] = useState(false);
+  // 批量模型编辑：候选模型可从所选 OAuth 账号中随机取一个实时拉取，
+  // 也可由管理员手动补充；保存时统一覆盖全部所选 OAuth 账号。
+  const [showBatchModelsEditor, setShowBatchModelsEditor] = useState(false);
+  const [batchModelsDraft, setBatchModelsDraft] = useState<string[]>([]);
+  const [batchModelsInputDraft, setBatchModelsInputDraft] = useState("");
+  const [batchModelsSyncing, setBatchModelsSyncing] = useState(false);
+  const [batchModelsSaving, setBatchModelsSaving] = useState(false);
+  const [batchModelsSource, setBatchModelsSource] = useState("");
   // 探测看板：逐模型的实时测试状态（pending→testing→结果）。
   const [probeBoard, setProbeBoard] = useState<ModelProbeItem[]>([]);
   const [tagFilter, setTagFilter] = useState<string>("");
@@ -1963,6 +2037,9 @@ export default function Accounts() {
     useState(false);
   const [batchBaseConcurrencyInput, setBatchBaseConcurrencyInput] =
     useState("");
+  const [batchUpdateSkipWarmTier, setBatchUpdateSkipWarmTier] =
+    useState(false);
+  const [batchSkipWarmTier, setBatchSkipWarmTier] = useState(false);
   const [batchUpdateSchedulerPriority, setBatchUpdateSchedulerPriority] =
     useState(false);
   const [batchSchedulerPriorityInput, setBatchSchedulerPriorityInput] =
@@ -1973,6 +2050,16 @@ export default function Accounts() {
   ] = useState(false);
   const [batchCodexFingerprintMode, setBatchCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
+  const [batchUpdateSessionCapacity, setBatchUpdateSessionCapacity] =
+    useState(false);
+  const [batchSessionCapacityEnabled, setBatchSessionCapacityEnabled] =
+    useState(false);
+  const [batchSessionCapacityMaxInput, setBatchSessionCapacityMaxInput] =
+    useState("5");
+  const [
+    batchSessionCapacityIdleMinutesInput,
+    setBatchSessionCapacityIdleMinutesInput,
+  ] = useState("60");
   const [batchMetaSubmitting, setBatchMetaSubmitting] = useState(false);
   const [showBatchQuotaAutoPauseEditor, setShowBatchQuotaAutoPauseEditor] =
     useState(false);
@@ -4739,10 +4826,16 @@ export default function Accounts() {
     setBatchScoreBiasInput("");
     setBatchUpdateBaseConcurrency(false);
     setBatchBaseConcurrencyInput("");
+    setBatchUpdateSkipWarmTier(false);
+    setBatchSkipWarmTier(false);
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
     setBatchUpdateCodexFingerprintMode(false);
     setBatchCodexFingerprintMode("off");
+    setBatchUpdateSessionCapacity(false);
+    setBatchSessionCapacityEnabled(false);
+    setBatchSessionCapacityMaxInput("5");
+    setBatchSessionCapacityIdleMinutesInput("60");
     setShowBatchMetaEditor(true);
   };
 
@@ -4756,10 +4849,16 @@ export default function Accounts() {
     setBatchScoreBiasInput("");
     setBatchUpdateBaseConcurrency(false);
     setBatchBaseConcurrencyInput("");
+    setBatchUpdateSkipWarmTier(false);
+    setBatchSkipWarmTier(false);
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
     setBatchUpdateCodexFingerprintMode(false);
     setBatchCodexFingerprintMode("off");
+    setBatchUpdateSessionCapacity(false);
+    setBatchSessionCapacityEnabled(false);
+    setBatchSessionCapacityMaxInput("5");
+    setBatchSessionCapacityIdleMinutesInput("60");
     setShowBatchMetaEditor(true);
   };
 
@@ -4966,6 +5065,121 @@ export default function Accounts() {
     }
   };
 
+  const openBatchModelsEditor = () => {
+    setBatchModelsDraft([]);
+    setBatchModelsInputDraft("");
+    setBatchModelsSource("");
+    setShowBatchModelsEditor(true);
+  };
+
+  const closeBatchModelsEditor = () => {
+    if (batchModelsSyncing || batchModelsSaving) return;
+    setShowBatchModelsEditor(false);
+    setBatchModelsDraft([]);
+    setBatchModelsInputDraft("");
+    setBatchModelsSource("");
+  };
+
+  const addBatchModelsDraftValues = (raw: string) => {
+    const next = parseModelTokens(raw);
+    if (next.length === 0) return;
+    setBatchModelsDraft((current) => mergeModelLists(current, next));
+    setBatchModelsInputDraft("");
+  };
+
+  const removeBatchModelsDraftValue = (model: string) => {
+    setBatchModelsDraft((current) =>
+      current.filter((item) => item !== model),
+    );
+  };
+
+  const handleBatchSyncModelsUpstream = async () => {
+    const candidateIDs = Array.from(selected);
+    if (candidateIDs.length === 0) {
+      showToast(t("accounts.batchModelsNoEligibleAccount"), "error");
+      return;
+    }
+
+    // Fisher-Yates 打乱后逐个尝试：首个账号是随机的，若它暂时失效则
+    // 自动尝试另一个所选账号，避免一次偶发上游错误让批量编辑无法使用。
+    const shuffled = [...candidateIDs];
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const randomIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[randomIndex]] = [
+        shuffled[randomIndex],
+        shuffled[index],
+      ];
+    }
+
+    setBatchModelsSyncing(true);
+    setBatchModelsSource("");
+    let lastError: unknown = null;
+    try {
+      for (const accountID of shuffled) {
+        try {
+          const result = await api.syncAccountModelsUpstream(accountID);
+          const fetched = result.models ?? [];
+          if (fetched.length === 0) continue;
+          setBatchModelsDraft((current) =>
+            mergeModelLists(current, fetched),
+          );
+          const sourceAccount = accounts.find(
+            (account) => account.id === accountID,
+          );
+          setBatchModelsSource(
+            sourceAccount ? formatAccountName(sourceAccount) : `#${accountID}`,
+          );
+          showToast(
+            t("accounts.batchModelsFetched", { count: fetched.length }),
+          );
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      showToast(
+        t("accounts.batchModelsFetchFailed", {
+          error: lastError ? getErrorMessage(lastError) : "empty model list",
+        }),
+        "error",
+      );
+    } finally {
+      setBatchModelsSyncing(false);
+    }
+  };
+
+  const handleBatchSaveModels = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    setBatchModelsSaving(true);
+    try {
+      const result = await api.batchUpdateAccountModels({
+        ids,
+        models: batchModelsDraft,
+      });
+      showToast(
+        t("accounts.batchModelsSaveDone", {
+          success: result.success,
+          fail: result.failed,
+        }),
+      );
+      setShowBatchModelsEditor(false);
+      setBatchModelsDraft([]);
+      setBatchModelsInputDraft("");
+      setBatchModelsSource("");
+      await reload();
+    } catch (error) {
+      showToast(
+        t("accounts.batchModelsSaveFailed", {
+          error: getErrorMessage(error),
+        }),
+        "error",
+      );
+    } finally {
+      setBatchModelsSaving(false);
+    }
+  };
+
   const batchScoreBiasTrimmed = batchScoreBiasInput.trim();
   const batchScoreBiasValue = batchScoreBiasTrimmed
     ? parseIntegerInput(batchScoreBiasTrimmed)
@@ -4987,17 +5201,39 @@ export default function Accounts() {
   const batchSchedulerPriorityInvalid =
     batchUpdateSchedulerPriority &&
     isSchedulerPriorityInputInvalid(batchSchedulerPriorityInput);
+  const batchSessionCapacityMaxValue = parseIntegerInput(
+    batchSessionCapacityMaxInput.trim(),
+  );
+  const batchSessionCapacityIdleMinutesValue = parseIntegerInput(
+    batchSessionCapacityIdleMinutesInput.trim(),
+  );
+  const batchSessionCapacityMaxInvalid =
+    batchUpdateSessionCapacity &&
+    batchSessionCapacityEnabled &&
+    (batchSessionCapacityMaxValue === null ||
+      batchSessionCapacityMaxValue < 1 ||
+      batchSessionCapacityMaxValue > 100000);
+  const batchSessionCapacityIdleInvalid =
+    batchUpdateSessionCapacity &&
+    batchSessionCapacityEnabled &&
+    (batchSessionCapacityIdleMinutesValue === null ||
+      batchSessionCapacityIdleMinutesValue < 1 ||
+      batchSessionCapacityIdleMinutesValue > 43200);
   const batchMetaHasUpdates =
     batchUpdateTags ||
     batchUpdateGroups ||
     batchUpdateScoreBias ||
     batchUpdateBaseConcurrency ||
+    batchUpdateSkipWarmTier ||
     batchUpdateSchedulerPriority ||
-    batchUpdateCodexFingerprintMode;
+    batchUpdateCodexFingerprintMode ||
+    batchUpdateSessionCapacity;
   const batchMetaInvalid =
     batchScoreBiasInvalid ||
     batchBaseConcurrencyInvalid ||
-    batchSchedulerPriorityInvalid;
+    batchSchedulerPriorityInvalid ||
+    batchSessionCapacityMaxInvalid ||
+    batchSessionCapacityIdleInvalid;
 
   const handleBatchSaveMeta = async () => {
     const ids = Array.from(selected);
@@ -5019,12 +5255,19 @@ export default function Accounts() {
           scoreBias: batchScoreBiasValue,
           updateBaseConcurrency: batchUpdateBaseConcurrency,
           baseConcurrency: batchBaseConcurrencyValue,
+          updateSkipWarmTier: batchUpdateSkipWarmTier,
+          skipWarmTier: batchSkipWarmTier,
           updateSchedulerPriority: batchUpdateSchedulerPriority,
           schedulerPriority: schedulerPriorityInputToValue(
             batchSchedulerPriorityInput,
           ),
           updateCodexFingerprintMode: batchUpdateCodexFingerprintMode,
           codexFingerprintMode: batchCodexFingerprintMode,
+          updateSessionCapacity: batchUpdateSessionCapacity,
+          sessionCapacityEnabled: batchSessionCapacityEnabled,
+          sessionCapacityMax: batchSessionCapacityMaxValue ?? 5,
+          sessionCapacityIdleTTLSeconds:
+            (batchSessionCapacityIdleMinutesValue ?? 60) * 60,
         }),
       );
       showToast(
@@ -6837,6 +7080,13 @@ export default function Accounts() {
                       icon: <FolderOpen className="size-3.5" />,
                       disabled: batchLoading || batchTesting,
                       onSelect: openBatchMetaEditor,
+                    },
+                    {
+                      key: "models",
+                      label: t("accounts.batchModelsEdit"),
+                      icon: <Layers className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: openBatchModelsEditor,
                     },
                     {
                       key: "auto-pause",
@@ -9688,6 +9938,143 @@ export default function Accounts() {
           </Modal>
 
           <Modal
+            show={showBatchModelsEditor}
+            title={t("accounts.batchModelsTitle")}
+            contentClassName="sm:max-w-[620px]"
+            onClose={closeBatchModelsEditor}
+            footer={
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={batchModelsSaving || batchModelsSyncing}
+                  onClick={closeBatchModelsEditor}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  type="button"
+                  disabled={batchModelsSaving || batchModelsSyncing}
+                  onClick={() => void handleBatchSaveModels()}
+                >
+                  {batchModelsSaving
+                    ? t("common.saving")
+                    : batchModelsDraft.length === 0
+                      ? t("accounts.batchModelsClearSave")
+                      : t("common.save")}
+                </Button>
+              </>
+            }
+          >
+            <div className="space-y-4">
+              <div className="rounded-lg border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
+                {t("accounts.batchModelsDesc", { count: selected.size })}
+              </div>
+
+              <div className="rounded-lg border border-border bg-muted/10 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={batchModelsSyncing || batchModelsSaving}
+                    onClick={() => void handleBatchSyncModelsUpstream()}
+                  >
+                    <RefreshCw
+                      className={`size-3.5 ${batchModelsSyncing ? "animate-spin" : ""}`}
+                    />
+                    {batchModelsSyncing
+                      ? t("accounts.batchModelsFetching")
+                      : t("accounts.batchModelsFetch")}
+                  </Button>
+                  {batchModelsSource ? (
+                    <span className="text-xs text-muted-foreground">
+                      {t("accounts.batchModelsSource", {
+                        account: batchModelsSource,
+                      })}
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {t("accounts.batchModelsFetchHint")}
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <Input
+                  placeholder={t("accounts.openaiModelsPlaceholder")}
+                  value={batchModelsInputDraft}
+                  disabled={batchModelsSaving || batchModelsSyncing}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setBatchModelsInputDraft(event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addBatchModelsDraftValues(batchModelsInputDraft);
+                    }
+                  }}
+                  onPaste={(event) => {
+                    const pasted = event.clipboardData.getData("text");
+                    if (parseModelTokens(pasted).length > 1) {
+                      event.preventDefault();
+                      addBatchModelsDraftValues(pasted);
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={
+                    !batchModelsInputDraft.trim() ||
+                    batchModelsSaving ||
+                    batchModelsSyncing
+                  }
+                  onClick={() =>
+                    addBatchModelsDraftValues(batchModelsInputDraft)
+                  }
+                >
+                  <Plus className="size-3.5" />
+                  {t("accounts.openaiModelsAdd")}
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {batchModelsDraft.length === 0
+                      ? t("accounts.supportedModelsHintAll")
+                      : t("accounts.supportedModelsHintCount", {
+                          count: batchModelsDraft.length,
+                        })}
+                  </span>
+                  {batchModelsDraft.length > 0 ? (
+                    <button
+                      type="button"
+                      className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                      disabled={batchModelsSaving || batchModelsSyncing}
+                      onClick={() => setBatchModelsDraft([])}
+                    >
+                      {t("accounts.supportedModelsClearAll")}
+                    </button>
+                  ) : null}
+                </div>
+                <ModelChipGrid
+                  variant="pills"
+                  models={batchModelsDraft}
+                  onRemove={removeBatchModelsDraftValue}
+                  emptyLabel={t("accounts.supportedModelsEmpty")}
+                />
+                {batchModelsDraft.length === 0 ? (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    {t("accounts.batchModelsEmptyWarning")}
+                  </p>
+                ) : null}
+              </div>
+            </div>
+          </Modal>
+
+          <Modal
             show={showBatchMetaEditor}
             title={t(
               batchMetaMode === "groups"
@@ -9889,6 +10276,34 @@ export default function Accounts() {
                     </div>
                   </div>
 
+                  <div className="rounded-xl border border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                          <Flame className="size-4 text-orange-500" />
+                          <span>{t("accounts.schedulerSkipWarmLabel")}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.schedulerSkipWarmHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateSkipWarmTier}
+                        onCheckedChange={setBatchUpdateSkipWarmTier}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.schedulerSkipWarmLabel")}`}
+                      />
+                    </div>
+                    <label className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 p-3 text-sm font-medium text-foreground">
+                      <span>{t("accounts.batchSkipWarmEnabled")}</span>
+                      <Switch
+                        checked={batchSkipWarmTier}
+                        onCheckedChange={setBatchSkipWarmTier}
+                        disabled={!batchUpdateSkipWarmTier}
+                        aria-label={t("accounts.batchSkipWarmEnabled")}
+                      />
+                    </label>
+                  </div>
+
                   <div className="rounded-xl border border-border p-4 md:col-span-2">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -9918,6 +10333,79 @@ export default function Accounts() {
                     />
                     <div className="mt-1.5 text-xs text-muted-foreground">
                       {codexFingerprintModeDetail(t, batchCodexFingerprintMode)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4 md:col-span-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.sessionCapacityTitle")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.batchSessionCapacityHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateSessionCapacity}
+                        onCheckedChange={setBatchUpdateSessionCapacity}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.sessionCapacityTitle")}`}
+                      />
+                    </div>
+                    <div className="mt-3 rounded-lg border border-border/70 bg-muted/20 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-foreground">
+                          {t("accounts.batchSessionCapacityEnabled")}
+                        </span>
+                        <Switch
+                          checked={batchSessionCapacityEnabled}
+                          onCheckedChange={setBatchSessionCapacityEnabled}
+                          disabled={!batchUpdateSessionCapacity}
+                          aria-label={t("accounts.batchSessionCapacityEnabled")}
+                        />
+                      </div>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <label className="space-y-1.5 text-xs text-muted-foreground">
+                          <span>{t("accounts.sessionCapacityMaxLabel")}</span>
+                          <Input
+                            inputMode="numeric"
+                            value={batchSessionCapacityMaxInput}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              setBatchSessionCapacityMaxInput(event.target.value)
+                            }
+                            disabled={
+                              !batchUpdateSessionCapacity ||
+                              !batchSessionCapacityEnabled
+                            }
+                          />
+                          {batchSessionCapacityMaxInvalid ? (
+                            <span className="block text-red-500">
+                              {t("accounts.sessionCapacityMaxRange")}
+                            </span>
+                          ) : null}
+                        </label>
+                        <label className="space-y-1.5 text-xs text-muted-foreground">
+                          <span>{t("accounts.sessionCapacityIdleLabel")}</span>
+                          <Input
+                            inputMode="numeric"
+                            value={batchSessionCapacityIdleMinutesInput}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              setBatchSessionCapacityIdleMinutesInput(
+                                event.target.value,
+                              )
+                            }
+                            disabled={
+                              !batchUpdateSessionCapacity ||
+                              !batchSessionCapacityEnabled
+                            }
+                          />
+                          {batchSessionCapacityIdleInvalid ? (
+                            <span className="block text-red-500">
+                              {t("accounts.sessionCapacityIdleRange")}
+                            </span>
+                          ) : null}
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -13714,8 +14202,9 @@ function AccountMobileCard({
               <AccountHealthBar buckets={healthBuckets} />
             </div>
           )}
-          {Math.max(account.active_requests ?? 0, account.occupied_requests ?? 0) > 0 && (
-            <div className="mt-1">
+          {(Math.max(account.active_requests ?? 0, account.occupied_requests ?? 0) > 0 ||
+            account.session_capacity_enabled) && (
+            <div className="mt-1 flex min-h-6 flex-wrap items-center gap-1.5">
               <AccountConcurrencyBadge account={account} />
               <AccountSessionCapacityBadge account={account} />
             </div>

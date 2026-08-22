@@ -916,6 +916,13 @@ export interface UpdateAccountSchedulerRequest {
   session_capacity_idle_ttl_seconds?: number
 }
 
+export interface BatchUpdateAccountModelsRequest {
+  ids: number[]
+  models: string[]
+}
+
+export type BatchUpdateAccountModelsResponse = BatchUpdateGrokModelsResponse
+
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
   ids?: number[]
   selector?: AccountOperationSelector
@@ -1916,6 +1923,7 @@ export interface PromptRiskProfilesResponse {
 
 export interface PromptRiskProfileDetailResponse {
   profile: PromptRiskProfile
+  session_limit?: PromptRiskSessionLimitPolicy
   events: PromptRiskEvent[]
   trust_events: PromptRiskTrustEvent[]
   adaptive_review_basis: PromptRiskAdaptiveReviewBasis
@@ -1927,6 +1935,21 @@ export interface PromptRiskProfileDetailResponse {
   trust_event_page_size: number
   scoring_version: string
   guardrail: string
+}
+
+export type PromptRiskSessionLimitMode = 'inherit' | 'custom' | 'off'
+
+export interface PromptRiskSessionLimitPolicy {
+  mode: PromptRiskSessionLimitMode
+  limit: number
+  window_seconds: number
+  effective_enabled: boolean
+  effective_limit: number
+  effective_window_seconds: number
+  global_enabled: boolean
+  global_limit: number
+  global_window_seconds: number
+  source: 'global' | 'user' | string
 }
 
 export interface PromptFilterTestResponse {

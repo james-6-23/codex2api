@@ -108,6 +108,8 @@ import type {
   AccountOperationSelector,
   AccountHealthBarsResponse,
   BatchUpdateAccountsRequest,
+  BatchUpdateAccountModelsRequest,
+  BatchUpdateAccountModelsResponse,
   BackgroundUploadResponse,
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
@@ -679,6 +681,11 @@ export const api = {
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),
+  batchUpdateAccountModels: (data: BatchUpdateAccountModelsRequest) =>
+    request<BatchUpdateAccountModelsResponse>('/accounts/batch-models', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
   // 拉取该账号真实的上游模型清单(slug 列表,不落库),供白名单编辑器合并使用。
   syncAccountModelsUpstream: (id: number) =>
     request<{ models: string[] }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
@@ -1115,6 +1122,8 @@ export const api = {
 	},
 	getPromptRiskProfile: (subjectType: string, subjectKey: string, eventPage = 1, eventPageSize = 20, trustEventPage = 1, trustEventPageSize = 20) =>
 		request<import('./types').PromptRiskProfileDetailResponse>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}?event_page=${eventPage}&event_page_size=${eventPageSize}&trust_event_page=${trustEventPage}&trust_event_page_size=${trustEventPageSize}`),
+	updatePromptRiskProfileSessionLimit: (subjectType: string, subjectKey: string, data: { mode: import('./types').PromptRiskSessionLimitMode; limit: number; window_seconds: number }) =>
+		request<{ session_limit: import('./types').PromptRiskSessionLimitPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/session-limit`, { method: 'PUT', body: JSON.stringify(data) }),
 	upsertPromptRiskTrust: (subjectType: string, subjectKey: string, data: { duration_hours: number; risk_threshold: number; reason: string }) =>
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'PUT', body: JSON.stringify(data) }),
 	revokePromptRiskTrust: (subjectType: string, subjectKey: string) =>

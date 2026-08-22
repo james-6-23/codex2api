@@ -4308,6 +4308,8 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   const [open, setOpen] = useState(false)
   const [trustOpen, setTrustOpen] = useState(false)
   const [trustSaving, setTrustSaving] = useState(false)
+  const [sessionLimitSaving, setSessionLimitSaving] = useState(false)
+  const [sessionLimitDraft, setSessionLimitDraft] = useState<{ mode: 'inherit' | 'custom' | 'off'; limit: number; windowSeconds: number }>({ mode: 'inherit', limit: 5, windowSeconds: 3600 })
   const [unlockingConversation, setUnlockingConversation] = useState(false)
   const [trustDraft, setTrustDraft] = useState({ durationHours: 24, riskThreshold: 35, reason: '' })
   const [detail, setDetail] = useState<PromptRiskProfileDetailResponse | null>(null)
@@ -4332,6 +4334,15 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   }, [eventPage, eventPageSize, open, profile.subject_key, profile.subject_type, trustEventPage, trustEventPageSize])
 
   useEffect(() => { void loadDetail() }, [loadDetail])
+  useEffect(() => {
+    const policy = detail?.session_limit
+    if (!policy) return
+    setSessionLimitDraft({
+      mode: policy.mode,
+      limit: policy.mode === 'custom' ? policy.limit : Math.max(1, policy.global_limit || 5),
+      windowSeconds: policy.mode === 'custom' ? policy.window_seconds : Math.max(60, policy.global_window_seconds || 3600),
+    })
+  }, [detail?.session_limit])
   const item = detail?.profile ?? profile
   const totalPages = Math.max(1, Math.ceil((detail?.event_total ?? 0) / eventPageSize))
   const trustEventTotalPages = Math.max(1, Math.ceil((detail?.trust_event_total ?? 0) / trustEventPageSize))
@@ -4362,6 +4373,22 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
       showToast(getErrorMessage(err), 'error')
     } finally {
       setTrustSaving(false)
+    }
+  }
+  const saveSessionLimit = async () => {
+    setSessionLimitSaving(true)
+    try {
+      await api.updatePromptRiskProfileSessionLimit(item.subject_type, item.subject_key, {
+        mode: sessionLimitDraft.mode,
+        limit: sessionLimitDraft.limit,
+        window_seconds: sessionLimitDraft.windowSeconds,
+      })
+      showToast(t('promptFilter.risk.sessionLimit.saved'))
+      await loadDetail()
+    } catch (err) {
+      showToast(getErrorMessage(err), 'error')
+    } finally {
+      setSessionLimitSaving(false)
     }
   }
   const unlockConversation = async () => {
@@ -4398,6 +4425,37 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.lockedAt')} value={formatBeijingTime(item.conversation_lock.locked_at)} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.expiresAt')} value={item.conversation_lock.expires_at ? formatBeijingTime(item.conversation_lock.expires_at) : '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.remaining')} value={formatPromptRestrictionRemaining(item.conversation_lock.remaining_seconds)} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.reason')} value={isUserCooldown ? 'user_cyber_cooldown' : item.conversation_lock.reason_code || 'conversation_cyber_locked'} /><PromptPolicyDetailField label={t('promptFilter.colEndpoint')} value={item.conversation_lock.endpoint || '-'} /><PromptPolicyDetailField label={t('promptFilter.reviewModel')} value={item.conversation_lock.model || '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.auditReference')} value={auditReference || '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.decisionId')} value={item.conversation_lock.decision_id || '-'} /></div>
             {auditReference ? <div className="mt-3 flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" asChild><NavLink to={`/prompt-filter/logs?audit=${encodeURIComponent(auditReference)}`}><Search className="size-3.5" />{t('promptFilter.risk.conversationLock.openAudit')}</NavLink></Button><span className="font-mono text-xs text-muted-foreground">{auditReference}</span></div> : null}
+          </div> : null}
+          {item.subject_type === 'newapi_user' && detail?.session_limit ? <div className="rounded-lg border border-violet-500/25 bg-violet-500/5 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 font-semibold"><Layers className="size-4 text-violet-600 dark:text-violet-300" />{t('promptFilter.risk.sessionLimit.title')}<Badge variant="outline">{t(`promptFilter.risk.sessionLimit.modes.${detail.session_limit.mode}`)}</Badge></div>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.sessionLimit.description')}</p>
+              </div>
+              <div className="text-right text-xs text-muted-foreground">
+                <div>{t('promptFilter.risk.sessionLimit.effective')}</div>
+                <div className="mt-1 font-mono text-sm font-semibold text-foreground">{detail.session_limit.effective_enabled ? `${detail.session_limit.effective_limit} / ${detail.session_limit.effective_window_seconds}s` : t('promptFilter.risk.sessionLimit.unlimited')}</div>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <Field label={t('promptFilter.risk.sessionLimit.mode')}>
+                <Select value={sessionLimitDraft.mode} onValueChange={(value) => setSessionLimitDraft((current) => ({ ...current, mode: value as 'inherit' | 'custom' | 'off' }))} options={[
+                  { value: 'inherit', label: t('promptFilter.risk.sessionLimit.modes.inherit') },
+                  { value: 'custom', label: t('promptFilter.risk.sessionLimit.modes.custom') },
+                  { value: 'off', label: t('promptFilter.risk.sessionLimit.modes.off') },
+                ]} />
+              </Field>
+              <Field label={t('promptFilter.risk.sessionLimit.limit')} hint={t('promptFilter.risk.sessionLimit.limitHint')}>
+                <DraftNumberInput min={1} max={100000} disabled={sessionLimitDraft.mode !== 'custom'} value={sessionLimitDraft.limit} onValueChange={(value) => setSessionLimitDraft((current) => ({ ...current, limit: value }))} />
+              </Field>
+              <Field label={t('promptFilter.risk.sessionLimit.window')} hint={t('promptFilter.risk.sessionLimit.windowHint')}>
+                <DraftNumberInput min={60} max={2592000} disabled={sessionLimitDraft.mode !== 'custom'} value={sessionLimitDraft.windowSeconds} onValueChange={(value) => setSessionLimitDraft((current) => ({ ...current, windowSeconds: value }))} />
+              </Field>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background/70 px-3 py-2">
+              <span className="text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.sessionLimit.priorityHint', { limit: detail.session_limit.global_limit, seconds: detail.session_limit.global_window_seconds })}</span>
+              <Button size="sm" disabled={sessionLimitSaving || (sessionLimitDraft.mode === 'custom' && (sessionLimitDraft.limit < 1 || sessionLimitDraft.windowSeconds < 60))} onClick={() => void saveSessionLimit()}>{sessionLimitSaving ? t('common.saving') : t('common.save')}</Button>
+            </div>
           </div> : null}
           <div className="rounded-lg border bg-muted/20 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">

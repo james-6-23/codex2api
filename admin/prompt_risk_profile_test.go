@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
@@ -93,6 +95,79 @@ func TestPromptRiskProfileDetailRejectsUnknownSubjectType(t *testing.T) {
 	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/prompt-policy/risk-profiles/person/raw-user-id", nil))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestPromptRiskProfileSessionLimitOverrideAPI(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db, err := database.New("sqlite", filepath.Join(t.TempDir(), "admin-risk-profile-session-limit.db"))
+	if err != nil {
+		t.Fatalf("database.New: %v", err)
+	}
+	defer db.Close()
+	if err := db.InsertPromptFilterLog(t.Context(), &database.PromptFilterLogInput{
+		Source: "local_filter", Action: "allow", ReviewModel: "review-model", ReviewFlagged: false,
+		NewAPIPolicyStatus: "verified",
+		NewAPIPlatform:     "newapi", NewAPIUserID: "session-limit-user",
+	}); err != nil {
+		t.Fatalf("InsertPromptFilterLog: %v", err)
+	}
+	profiles, total, err := db.ListPromptRiskProfiles(t.Context(), database.PromptRiskProfileQuery{
+		Page: 1, PageSize: 10, SubjectType: database.PromptRiskSubjectNewAPIUser,
+	})
+	if err != nil || total != 1 || len(profiles) != 1 {
+		t.Fatalf("profiles=%#v total=%d err=%v", profiles, total, err)
+	}
+	profile := profiles[0]
+	store := auth.NewStore(db, nil, nil)
+	defer store.Stop()
+	h := &Handler{db: db, store: store}
+	router := gin.New()
+	router.GET("/api/admin/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
+	router.PUT("/api/admin/prompt-policy/risk-profiles/:subject_type/:subject_key/session-limit", h.UpdatePromptRiskProfileSessionLimit)
+	path := "/api/admin/prompt-policy/risk-profiles/newapi_user/" + profile.SubjectKey
+
+	customBody := []byte(`{"mode":"custom","limit":3,"window_seconds":4800}`)
+	customRecorder := httptest.NewRecorder()
+	customRequest := httptest.NewRequest(http.MethodPut, path+"/session-limit", bytes.NewReader(customBody))
+	customRequest.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(customRecorder, customRequest)
+	if customRecorder.Code != http.StatusOK {
+		t.Fatalf("custom status=%d body=%s", customRecorder.Code, customRecorder.Body.String())
+	}
+	stored, err := db.GetPromptSessionLimitOverride(t.Context(), "newapi", "session-limit-user")
+	if err != nil || stored.Mode != database.PromptSessionLimitModeCustom || stored.Limit != 3 || stored.WindowSeconds != 4800 {
+		t.Fatalf("stored override=%#v err=%v", stored, err)
+	}
+	cached, ok := store.GetPromptSessionLimitOverride("newapi", "session-limit-user")
+	if !ok || cached.Mode != database.PromptSessionLimitModeCustom || cached.Limit != 3 || cached.WindowSeconds != 4800 {
+		t.Fatalf("cached override=%#v ok=%v", cached, ok)
+	}
+
+	detailRecorder := httptest.NewRecorder()
+	router.ServeHTTP(detailRecorder, httptest.NewRequest(http.MethodGet, path, nil))
+	if detailRecorder.Code != http.StatusOK {
+		t.Fatalf("detail status=%d body=%s", detailRecorder.Code, detailRecorder.Body.String())
+	}
+	var detail struct {
+		SessionLimit promptRiskSessionLimitResponse `json:"session_limit"`
+	}
+	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detail); err != nil || detail.SessionLimit.Mode != database.PromptSessionLimitModeCustom || !detail.SessionLimit.EffectiveEnabled || detail.SessionLimit.EffectiveLimit != 3 || detail.SessionLimit.EffectiveWindow != 4800 {
+		t.Fatalf("detail response=%s err=%v", detailRecorder.Body.String(), err)
+	}
+
+	inheritRecorder := httptest.NewRecorder()
+	inheritRequest := httptest.NewRequest(http.MethodPut, path+"/session-limit", bytes.NewReader([]byte(`{"mode":"inherit"}`)))
+	inheritRequest.Header.Set("Content-Type", "application/json")
+	router.ServeHTTP(inheritRecorder, inheritRequest)
+	if inheritRecorder.Code != http.StatusOK {
+		t.Fatalf("inherit status=%d body=%s", inheritRecorder.Code, inheritRecorder.Body.String())
+	}
+	if _, ok := store.GetPromptSessionLimitOverride("newapi", "session-limit-user"); ok {
+		t.Fatal("inherit must remove the runtime override")
+	}
+	if _, err := db.GetPromptSessionLimitOverride(t.Context(), "newapi", "session-limit-user"); err == nil {
+		t.Fatal("inherit must delete the persisted override")
 	}
 }
 

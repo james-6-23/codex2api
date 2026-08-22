@@ -2716,7 +2716,7 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 	store.AddAccount(runtimeAccount2)
 	handler := &Handler{db: db, store: store}
 
-	body := fmt.Sprintf(`{"ids":[%d,%d,%d,%d],"enabled":false,"locked":true,"tags":["Ops","ops","blue"],"group_ids":[%d],"score_bias_override":33,"base_concurrency_override":5,"scheduler_priority":7,"auto_pause_5h_threshold":0.8,"auto_pause_7d_disabled":true}`,
+	body := fmt.Sprintf(`{"ids":[%d,%d,%d,%d],"enabled":false,"locked":true,"tags":["Ops","ops","blue"],"group_ids":[%d],"score_bias_override":33,"base_concurrency_override":5,"scheduler_priority":7,"auto_pause_5h_threshold":0.8,"auto_pause_7d_disabled":true,"session_capacity_enabled":true,"session_capacity_max":8,"session_capacity_idle_ttl_seconds":7200}`,
 		accountID1, accountID2, accountID1, accountID2+1000, groupID)
 	recorder := httptest.NewRecorder()
 	ginCtx, _ := gin.CreateTestContext(recorder)
@@ -2771,6 +2771,15 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 		if !row.GetCredentialBool("auto_pause_7d_disabled") {
 			t.Fatalf("account %d auto_pause_7d_disabled = false, want true", id)
 		}
+		if !row.GetCredentialBool(auth.SessionCapacityEnabledCredentialKey) {
+			t.Fatalf("account %d session capacity enabled = false, want true", id)
+		}
+		if limit, ok := row.GetCredentialInt64(auth.SessionCapacityMaxCredentialKey); !ok || limit != 8 {
+			t.Fatalf("account %d session capacity max = (%d, %t), want (8, true)", id, limit, ok)
+		}
+		if ttl, ok := row.GetCredentialInt64(auth.SessionCapacityIdleTTLSecondsKey); !ok || ttl != 7200 {
+			t.Fatalf("account %d session capacity ttl = (%d, %t), want (7200, true)", id, ttl, ok)
+		}
 		groupIDs, err := db.GetAccountGroupIDs(ctx, id)
 		if err != nil {
 			t.Fatalf("GetAccountGroupIDs(%d): %v", id, err)
@@ -2800,6 +2809,10 @@ func TestBatchUpdateAccountsPersistsMetadataAndSyncsRuntime(t *testing.T) {
 		}
 		if priority := account.GetSchedulerPriority(); priority != 7 {
 			t.Fatalf("runtime account %d scheduler priority = %d, want 7", account.ID(), priority)
+		}
+		enabled, limit, idleTTL := account.SessionCapacityConfig()
+		if !enabled || limit != 8 || idleTTL != 2*time.Hour {
+			t.Fatalf("runtime account %d session capacity = enabled=%v limit=%d ttl=%v, want true/8/2h", account.ID(), enabled, limit, idleTTL)
 		}
 	}
 

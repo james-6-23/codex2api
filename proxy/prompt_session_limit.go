@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/codex2api/api"
+	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 )
@@ -32,15 +33,35 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 		Limit:         risk.SessionCreationLimit,
 		WindowSeconds: risk.SessionCreationLimitWindowSeconds,
 	}
-	if h == nil || c == nil || !status.Enabled || status.Limit <= 0 || status.WindowSeconds <= 0 {
+	if h == nil || c == nil {
 		return status, false
 	}
 
 	policyStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
+	verifiedPerson := (policyStatus == "verified" || policyStatus == "signed_response") &&
+		policyContext.MetaVerified && strings.TrimSpace(policyContext.Identity.UserID) != ""
+	if verifiedPerson && h.store != nil {
+		if override, ok := h.store.GetPromptSessionLimitOverride(policyContext.Platform, policyContext.Identity.UserID); ok {
+			switch override.Mode {
+			case database.PromptSessionLimitModeOff:
+				status.Enabled = false
+				status.Limit = 0
+				status.WindowSeconds = 0
+			case database.PromptSessionLimitModeCustom:
+				status.Enabled = true
+				status.Limit = override.Limit
+				status.WindowSeconds = override.WindowSeconds
+			}
+		}
+	}
+	if !status.Enabled || status.Limit <= 0 || status.WindowSeconds <= 0 {
+		return status, false
+	}
+
 	sessionID := ""
-	if (policyStatus == "verified" || policyStatus == "signed_response") && policyContext.MetaVerified {
+	if verifiedPerson {
 		sessionID = strings.TrimSpace(policyContext.Meta.SessionFingerprint)
-		if sessionID != "" && strings.TrimSpace(policyContext.Identity.UserID) != "" {
+		if sessionID != "" {
 			status.Subject = "newapi:" + strings.TrimSpace(policyContext.Platform) + ":" + strings.TrimSpace(policyContext.Identity.UserID)
 		}
 	}
