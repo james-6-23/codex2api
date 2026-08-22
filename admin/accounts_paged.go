@@ -677,7 +677,7 @@ func (h *Handler) installAccountListSnapshot(channel string, snapshot *accountLi
 func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, requestCounts map[int64]*database.AccountRequestCount, todayUsage map[int64]*database.AccountTimeRangeUsage, groupNames, groupSort map[int64]string) *accountListSnapshotItem {
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	isGrok := strings.EqualFold(upstreamType, auth.UpstreamGrok)
-	isOpenAIResponses := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
+	isOpenAIResponses := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses) || strings.EqualFold(upstreamType, auth.UpstreamOrcaRouter)
 	email := row.GetCredential("email")
 	if isOpenAIResponses && email == "" {
 		email = row.GetCredential("base_url")
