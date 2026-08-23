@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -8,7 +9,26 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
+
+func TestSendPromptSessionCreationLimitErrorIsNonRetryableAndChinese(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	status := promptSessionCreationLimitStatus{Limit: 3}
+
+	sendPromptSessionCreationLimitError(c, status)
+
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+	}
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.code").String(); got != "session_creation_limit_exceeded" {
+		t.Fatalf("error.code = %q", got)
+	}
+	if got := gjson.GetBytes(recorder.Body.Bytes(), "error.message").String(); got != promptSessionCreationLimitMessage(status) {
+		t.Fatalf("error.message = %q, want %q", got, promptSessionCreationLimitMessage(status))
+	}
+}
 
 func promptSessionLimitTestContext(sessionID string) *gin.Context {
 	recorder := httptest.NewRecorder()

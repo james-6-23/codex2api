@@ -286,6 +286,20 @@ func SendAPIKeyLimitError(c *gin.Context, status int, msg string) {
 	api.SendErrorWithStatus(c, api.NewAPIError(errCode, msg, errType), status)
 }
 
+const accountSessionCapacityExceededMessage = "上游账号的活跃会话容量已满，请复用已有会话或稍后再试"
+
+// SendAccountSessionCapacityError reports deterministic account-session
+// exhaustion as a non-retryable request error. Codex clients retry HTTP 429
+// themselves and otherwise replace this useful message with a generic retry
+// limit error.
+func SendAccountSessionCapacityError(c *gin.Context) {
+	api.SendError(c, api.NewAPIError(
+		api.ErrCodeAccountSessionCapacity,
+		accountSessionCapacityExceededMessage,
+		api.ErrorTypeInvalidRequest,
+	))
+}
+
 // enforceAPIKeyLimitsAndReply 在请求转发前调用,命中限制时已向客户端写入响应并返回 true。
 // handler 应在 true 时立即 return,无需再处理。
 func (h *Handler) enforceAPIKeyLimitsAndReply(c *gin.Context, model string) bool {

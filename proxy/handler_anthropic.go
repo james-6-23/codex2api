@@ -280,7 +280,7 @@ func (h *Handler) Messages(c *gin.Context) {
 				return
 			}
 			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
-				sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "上游账号的活跃会话容量已满，请稍后重试")
+				sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", accountSessionCapacityExceededMessage)
 				return
 			}
 			sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel))

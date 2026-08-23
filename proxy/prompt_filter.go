@@ -163,7 +163,7 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	}
 	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, signedBody); exceeded {
 		writePromptSessionLimitHeaders(c, status)
-		sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", "当前时间窗口内会话创建数量已达上限，请复用已有会话或稍后再试")
+		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", promptSessionCreationLimitMessage(status))
 		return true
 	}
 	if !promptfilter.RequiresRequestText(cfg) {

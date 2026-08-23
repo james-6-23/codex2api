@@ -440,7 +440,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			} else if h.store.HasUsageLimitedCandidateWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
 				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, "Codex 账号用量窗口已达上限", api.ErrorTypeRateLimit)
 			} else if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
-				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, "上游账号的活跃会话容量已满，请稍后重试", api.ErrorTypeRateLimit)
+				apiErr = api.NewAPIError(api.ErrCodeAccountSessionCapacity, accountSessionCapacityExceededMessage, api.ErrorTypeInvalidRequest)
 			} else {
 				apiErr = api.NewAPIError(api.ErrCodeServiceUnavailable, noAvailableAccountMessage(effectiveModel), api.ErrorTypeServer)
 			}
@@ -1202,9 +1202,9 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	}
 	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, rawBody); exceeded {
 		_ = writeResponsesWSError(conn, api.NewAPIError(
-			api.ErrCodeRateLimitReached,
-			fmt.Sprintf("当前时间窗口内最多可创建 %d 个会话，请复用已有会话或稍后再试", status.Limit),
-			api.ErrorTypeRateLimit,
+			api.ErrorCode("session_creation_limit_exceeded"),
+			promptSessionCreationLimitMessage(status),
+			api.ErrorTypeInvalidRequest,
 		))
 		return true, false
 	}

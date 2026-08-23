@@ -156,10 +156,14 @@ func writePromptSessionLimitHeaders(c *gin.Context, status promptSessionCreation
 }
 
 func sendPromptSessionCreationLimitError(c *gin.Context, status promptSessionCreationLimitStatus) {
-	message := fmt.Sprintf("当前时间窗口内最多可创建 %d 个会话，请复用已有会话或稍后再试", status.Limit)
+	message := promptSessionCreationLimitMessage(status)
 	api.SendErrorWithStatus(c, api.NewAPIError(
 		api.ErrorCode("session_creation_limit_exceeded"),
 		message,
 		api.ErrorTypeInvalidRequest,
-	), http.StatusTooManyRequests)
+	), http.StatusBadRequest)
+}
+
+func promptSessionCreationLimitMessage(status promptSessionCreationLimitStatus) string {
+	return fmt.Sprintf("当前时间窗口内最多可创建 %d 个会话，请复用已有会话或稍后再试", status.Limit)
 }

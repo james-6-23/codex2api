@@ -3071,7 +3071,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				return
 			}
 			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
-				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "上游账号的活跃会话容量已满，请稍后重试")
+				SendAccountSessionCapacityError(c)
 				return
 			}
 			if continuationUnavailable && !relayContinuationAttempted {
@@ -4533,7 +4533,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 					return
 				}
 				if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, excludeAccounts, accountFilter, dispatchPolicy, affinityKey, time.Now()) {
-					SendAPIKeyLimitError(c, http.StatusTooManyRequests, "上游账号的活跃会话容量已满，请稍后重试")
+					SendAccountSessionCapacityError(c)
 					return
 				}
 				c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
@@ -5182,7 +5182,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				return
 			}
 			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
-				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "上游账号的活跃会话容量已满，请稍后重试")
+				SendAccountSessionCapacityError(c)
 				return
 			}
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
