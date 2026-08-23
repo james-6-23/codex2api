@@ -165,5 +165,5 @@ func sendPromptSessionCreationLimitError(c *gin.Context, status promptSessionCre
 }
 
 func promptSessionCreationLimitMessage(status promptSessionCreationLimitStatus) string {
-	return fmt.Sprintf("当前时间窗口内最多可创建 %d 个会话，请复用已有会话或稍后再试", status.Limit)
+	return "当前时间内创建窗口已达到上限，请复用已有会话或稍后再试"
 }
