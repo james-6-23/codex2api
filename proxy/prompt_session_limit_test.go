@@ -139,3 +139,70 @@ func TestPromptSessionCreationLimitUserOffOverrideBeatsEnabledGlobal(t *testing.
 		t.Fatalf("off override status=%#v exceeded=%v", status, exceeded)
 	}
 }
+
+func TestPromptSessionCreationLimitIgnoresSelectedAccountWithoutWindowControl(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	store.SetPromptFilterConfig(cfg)
+	handler := &Handler{store: store}
+	account := &auth.Account{DBID: 91, SessionCapacityEnabled: false}
+
+	for _, sessionID := range []string{"passive-luna-a", "passive-luna-b"} {
+		status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext(sessionID), nil, account)
+		if exceeded || status.Enabled || status.Used != 0 {
+			t.Fatalf("disabled account counted %q: status=%#v exceeded=%v", sessionID, status, exceeded)
+		}
+	}
+	if len(handler.promptSessionLimits) != 0 {
+		t.Fatalf("disabled account populated user windows: %#v", handler.promptSessionLimits)
+	}
+}
+
+func TestPromptSessionCreationLimitCountsOnlyAfterWindowControlledAccountSelected(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	store.SetPromptFilterConfig(cfg)
+	handler := &Handler{store: store}
+	disabled := &auth.Account{DBID: 91, SessionCapacityEnabled: false}
+	enabled := &auth.Account{
+		DBID: 92, SessionCapacityEnabled: true, SessionCapacityMax: 5,
+		SessionCapacityIdleTTLSeconds: 3600,
+	}
+
+	if status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("audit-window"), nil, disabled); exceeded || status.Used != 0 {
+		t.Fatalf("passive API request was counted: status=%#v exceeded=%v", status, exceeded)
+	}
+	if status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("main-window"), nil, enabled); exceeded || status.Used != 1 {
+		t.Fatalf("window-controlled account did not count first session: status=%#v exceeded=%v", status, exceeded)
+	}
+	if status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("second-main-window"), nil, enabled); !exceeded || status.Used != 1 {
+		t.Fatalf("window-controlled account did not enforce limit: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitIgnoresInternalReviewRequest(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	store.SetPromptFilterConfig(cfg)
+	handler := &Handler{store: store}
+	account := &auth.Account{
+		DBID: 92, SessionCapacityEnabled: true, SessionCapacityMax: 5,
+		SessionCapacityIdleTTLSeconds: 3600,
+	}
+	c := promptSessionLimitTestContext("internal-review-window")
+	c.Set("prompt_intelligence_internal", true)
+
+	status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(c, nil, account)
+	if exceeded || status.Enabled || status.Used != 0 || len(handler.promptSessionLimits) != 0 {
+		t.Fatalf("internal review request was counted: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+	}
+}

@@ -3164,6 +3164,7 @@ type Store struct {
 	schedulerMode            atomic.Value // string: "round_robin" / "remaining_quota" / "fill_first"
 	affinityMode             atomic.Value // string: "bounded" / "off" / "strict"
 	affinitySpreadEnabled    atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
+	sessionWindowBalance     atomic.Bool  // 新会话在同优先级/健康层内优先落到低窗口账号
 	grokAffinityMode         atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
 	grokProbeEnabled         atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
 	grokProbeIntervalMin     atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
@@ -3658,6 +3659,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.schedulerMode.Store(settings.SchedulerMode)
 	s.SetAffinityMode(settings.AffinityMode)
 	s.SetSessionAffinitySpread(settings.SessionAffinitySpread)
+	s.SetSessionWindowBalanceEnabled(settings.SessionWindowBalanceEnabled)
 	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
 	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
 	s.SetGrokMaxRateLimitRetries(grokMaxRateLimitRetriesFromConfig(settings.GrokConfig))
@@ -6226,7 +6228,9 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 	if s == nil {
 		return nil
 	}
-	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" {
+	balanceWindows := s.SessionWindowBalanceEnabled()
+	spreadAffinity := s.GetSessionAffinitySpread()
+	if (!balanceWindows && !spreadAffinity) || strings.TrimSpace(key) == "" {
 		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy)
 	}
 	filter = s.withUsableEgressFilter(filter)
@@ -6235,18 +6239,31 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 		acc               *Account
 		schedulerPriority int64
 		tierPriority      int
+		dispatchScore     float64
+		load              int64
+		windowCount       int64
 		limit             int64
 		weight            uint64
 	}
 	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
 
 	accounts := s.Accounts()
+	windowCounts := map[int64]int64(nil)
+	if balanceWindows {
+		windowCounts = s.accountWindowCountsForScheduling(accounts, time.Now())
+	}
 	candidates := make([]affinityCandidate, 0, len(accounts))
 	for _, acc := range accounts {
+		if acc == nil {
+			continue
+		}
 		if exclude != nil && exclude[acc.DBID] {
 			continue
 		}
 		if !acc.dispatchableForPolicy(policy) {
+			continue
+		}
+		if policy == DispatchPolicyStandard && s.GetLazyMode() && !s.accountLazySelectable(acc) {
 			continue
 		}
 		if !s.accountAllowedForAPIKey(acc, apiKeyID) {
@@ -6256,7 +6273,7 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 			continue
 		}
 		load := accountOccupiedRequests(acc)
-		tier, _, _, limit := acc.schedulerSnapshotForPolicy(maxConcurrency, policy)
+		tier, _, dispatchScore, limit := acc.schedulerSnapshotForPolicy(maxConcurrency, policy)
 		if limit <= 0 || load >= limit {
 			continue
 		}
@@ -6268,6 +6285,9 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 			acc:               acc,
 			schedulerPriority: acc.schedulerPriority(),
 			tierPriority:      tierPriority(tier),
+			dispatchScore:     dispatchScore,
+			load:              load,
+			windowCount:       windowCounts[acc.DBID],
 			limit:             limit,
 			weight:            hasher.Sum64(),
 		})
@@ -6291,7 +6311,23 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 			layer = append(layer, c)
 		}
 	}
-	sort.Slice(layer, func(i, j int) bool { return layer[i].weight > layer[j].weight })
+	sort.Slice(layer, func(i, j int) bool {
+		if balanceWindows {
+			if layer[i].windowCount != layer[j].windowCount {
+				return layer[i].windowCount < layer[j].windowCount
+			}
+			if layer[i].dispatchScore != layer[j].dispatchScore {
+				return layer[i].dispatchScore > layer[j].dispatchScore
+			}
+			if layer[i].load != layer[j].load {
+				return layer[i].load < layer[j].load
+			}
+		}
+		if spreadAffinity || balanceWindows {
+			return layer[i].weight > layer[j].weight
+		}
+		return layer[i].acc.DBID < layer[j].acc.DBID
+	})
 
 	for _, c := range layer {
 		if s.accountHasBlockingCachedCooldown(c.acc, policy) {
@@ -7185,6 +7221,24 @@ func (s *Store) SetSessionAffinitySpread(enabled bool) {
 		return
 	}
 	s.affinitySpreadEnabled.Store(enabled)
+}
+
+// SessionWindowBalanceEnabled reports whether fresh sessions should prefer
+// accounts with fewer active conversation windows. Existing bindings never
+// enter this selection path.
+func (s *Store) SessionWindowBalanceEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.sessionWindowBalance.Load()
+}
+
+// SetSessionWindowBalanceEnabled hot-reloads fresh-session balancing.
+func (s *Store) SetSessionWindowBalanceEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.sessionWindowBalance.Store(enabled)
 }
 
 // AffinityModeFollow 表示 Grok 会话粘性跟随全局 affinity_mode（不做 Grok 专属覆盖）。

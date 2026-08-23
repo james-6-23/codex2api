@@ -73,10 +73,6 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
 	}
-	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, signedBody); exceeded {
-		sendPromptSessionCreationLimitError(c, status)
-		return true
-	}
 	// Skip envelope construction and body traversal when neither the local
 	// filter nor a body-dependent extension is enabled (issue #417).
 	if !promptfilter.RequiresRequestText(cfg) {
@@ -120,10 +116,6 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 	if h.rejectLockedPromptConversation(c, cfg, ingressRequestBody(c, nil), []byte(text), endpoint, model) {
 		return true
 	}
-	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, ingressRequestBody(c, nil)); exceeded {
-		sendPromptSessionCreationLimitError(c, status)
-		return true
-	}
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false
 	}
@@ -159,11 +151,6 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		return true
 	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
-		return true
-	}
-	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, signedBody); exceeded {
-		writePromptSessionLimitHeaders(c, status)
-		sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", promptSessionCreationLimitMessage(status))
 		return true
 	}
 	if !promptfilter.RequiresRequestText(cfg) {

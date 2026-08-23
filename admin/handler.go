@@ -8465,6 +8465,7 @@ type settingsResponse struct {
 	SchedulerMode                       string `json:"scheduler_mode"`
 	AffinityMode                        string `json:"affinity_mode"`
 	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
+	SessionWindowBalanceEnabled         bool   `json:"session_window_balance_enabled"`
 	SessionSlotBufferEnabled            bool   `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            int    `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    string `json:"grok_affinity_mode"`
@@ -8622,6 +8623,7 @@ type updateSettingsReq struct {
 	SchedulerMode                       *string  `json:"scheduler_mode"`
 	AffinityMode                        *string  `json:"affinity_mode"`
 	SessionAffinitySpread               *bool    `json:"session_affinity_spread"`
+	SessionWindowBalanceEnabled         *bool    `json:"session_window_balance_enabled"`
 	SessionSlotBufferEnabled            *bool    `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            *int     `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    *string  `json:"grok_affinity_mode"`
@@ -9362,6 +9364,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
+		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),
@@ -10169,6 +10172,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetSessionAffinitySpread(*req.SessionAffinitySpread)
 		log.Printf("设置已更新: session_affinity_spread = %t", *req.SessionAffinitySpread)
 	}
+	if req.SessionWindowBalanceEnabled != nil {
+		h.store.SetSessionWindowBalanceEnabled(*req.SessionWindowBalanceEnabled)
+		log.Printf("设置已更新: session_window_balance_enabled = %t", *req.SessionWindowBalanceEnabled)
+	}
 	if req.GrokAffinityMode != nil {
 		h.store.SetGrokAffinityMode(*req.GrokAffinityMode)
 		log.Printf("设置已更新: grok_affinity_mode = %s", *req.GrokAffinityMode)
@@ -10704,6 +10711,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
+		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
 		MaxRetries:                          h.store.GetMaxRetries(),
@@ -10963,6 +10971,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
+		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),

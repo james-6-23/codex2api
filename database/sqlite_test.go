@@ -83,6 +83,9 @@ func TestSQLitePromptFilterColumnDefaultsRemainUpgradeCompatible(t *testing.T) {
 	if settings.SessionSlotBufferEnabled || settings.SessionSlotBufferSeconds != 10 {
 		t.Fatalf("session slot buffer defaults = enabled:%t seconds:%d, want false/10", settings.SessionSlotBufferEnabled, settings.SessionSlotBufferSeconds)
 	}
+	if settings.SessionWindowBalanceEnabled {
+		t.Fatal("session window balance should default to disabled")
+	}
 }
 
 func TestSQLiteSessionSlotBufferSettingsRoundtrip(t *testing.T) {
@@ -94,11 +97,12 @@ func TestSQLiteSessionSlotBufferSettingsRoundtrip(t *testing.T) {
 
 	ctx := context.Background()
 	settings := &SystemSettings{
-		MaxConcurrency:           2,
-		TestConcurrency:          1,
-		TestModel:                "gpt-5.4",
-		SessionSlotBufferEnabled: true,
-		SessionSlotBufferSeconds: 17,
+		MaxConcurrency:              2,
+		TestConcurrency:             1,
+		TestModel:                   "gpt-5.4",
+		SessionWindowBalanceEnabled: true,
+		SessionSlotBufferEnabled:    true,
+		SessionSlotBufferSeconds:    17,
 	}
 	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
 		t.Fatalf("UpdateSystemSettings: %v", err)
@@ -109,6 +113,9 @@ func TestSQLiteSessionSlotBufferSettingsRoundtrip(t *testing.T) {
 	}
 	if got == nil || !got.SessionSlotBufferEnabled || got.SessionSlotBufferSeconds != 17 {
 		t.Fatalf("session slot buffer = %#v, want enabled with 17 seconds", got)
+	}
+	if !got.SessionWindowBalanceEnabled {
+		t.Fatal("session window balance was not persisted")
 	}
 
 	for _, tc := range []struct {

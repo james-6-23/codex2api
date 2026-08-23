@@ -1333,6 +1333,7 @@ export default function Settings() {
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
     session_affinity_spread: false,
+    session_window_balance_enabled: false,
     session_slot_buffer_enabled: false,
     session_slot_buffer_seconds: 10,
     grok_affinity_mode: 'strict',
@@ -2419,6 +2420,12 @@ export default function Settings() {
                     value={settingsForm.scheduler_mode}
                     onChange={(value) => autoSaveStringField('scheduler_mode', value)}
                     options={schedulerModeOptions}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.sessionWindowBalance')} description={t('settings.sessionWindowBalanceDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.session_window_balance_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('session_window_balance_enabled', checked)}
                   />
                 </SettingField>
               </div>

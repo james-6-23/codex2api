@@ -244,6 +244,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -284,6 +285,12 @@ func (h *Handler) Messages(c *gin.Context) {
 				return
 			}
 			sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel))
+			return
+		}
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
+			writePromptSessionLimitHeaders(c, status)
+			sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", promptSessionCreationLimitMessage(status))
 			return
 		}
 

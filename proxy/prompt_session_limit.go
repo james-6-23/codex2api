@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/codex2api/api"
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
@@ -24,6 +25,36 @@ type promptSessionCreationLimitStatus struct {
 	WindowSeconds int
 	RetryAfter    int
 	Existing      bool
+}
+
+// checkPromptSessionCreationLimitForSelectedAccount deliberately runs only
+// after scheduling has selected the concrete upstream account. The user-level
+// creation limit is an extension of account session-window control: relay/API
+// accounts that have not enabled session capacity must not make a passive
+// review/naming request consume one of the user's windows merely because the
+// downstream Codex client carried its normal Session-Id.
+func (h *Handler) checkPromptSessionCreationLimitForSelectedAccount(c *gin.Context, body []byte, account *auth.Account) (promptSessionCreationLimitStatus, bool) {
+	if account == nil || (c != nil && c.GetBool("prompt_intelligence_internal")) {
+		return promptSessionCreationLimitStatus{}, false
+	}
+	enabled, _, _ := account.SessionCapacityConfig()
+	if !enabled {
+		return promptSessionCreationLimitStatus{}, false
+	}
+	return h.checkPromptSessionCreationLimit(c, h.promptFilterConfigForRequest(c), body)
+}
+
+// releaseSelectedAccountAfterPromptSessionRejection undoes only the capacity
+// admission made by the current selection. An already-active session may have
+// existed before this request and must remain available for its other turns.
+func (h *Handler) releaseSelectedAccountAfterPromptSessionRejection(account *auth.Account, affinityKey string, priorSessionAccountID int64) {
+	if h == nil || h.store == nil || account == nil {
+		return
+	}
+	if priorSessionAccountID != account.ID() {
+		h.store.RemoveAccountSession(account.ID(), affinityKey)
+	}
+	h.store.Release(account)
 }
 
 func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilter.Config, body []byte) (promptSessionCreationLimitStatus, bool) {

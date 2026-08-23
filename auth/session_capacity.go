@@ -314,6 +314,53 @@ func (s *Store) AccountSessionCount(accountID int64, now time.Time) int64 {
 	return int64(len(s.AccountSessionSnapshots(accountID, now)))
 }
 
+// accountWindowCountsForScheduling returns one local active-window count per
+// candidate account. Accounts with the explicit capacity feature enabled use
+// its idle-expiring records (the same source shown by the account badge).
+// Other accounts fall back to active affinity bindings so window balancing is
+// still meaningful without forcing every account to enable a hard limit.
+func (s *Store) accountWindowCountsForScheduling(accounts []*Account, now time.Time) map[int64]int64 {
+	counts := make(map[int64]int64, len(accounts))
+	if s == nil {
+		return counts
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	capacityEnabled := make(map[int64]time.Duration, len(accounts))
+	for _, account := range accounts {
+		if account == nil {
+			continue
+		}
+		if enabled, _, idleTTL := account.SessionCapacityConfig(); enabled {
+			capacityEnabled[account.DBID] = idleTTL
+		}
+	}
+
+	// Do not hold sessionMu and accountSessionMu at the same time. Keeping the
+	// snapshots separate preserves the Store lock order used by bind/unbind.
+	s.sessionMu.Lock()
+	for key, binding := range s.sessionBindings {
+		if !binding.expiresAt.After(now) {
+			delete(s.sessionBindings, key)
+			continue
+		}
+		if _, explicit := capacityEnabled[binding.accountID]; !explicit {
+			counts[binding.accountID]++
+		}
+	}
+	s.sessionMu.Unlock()
+
+	s.accountSessionMu.Lock()
+	for accountID, idleTTL := range capacityEnabled {
+		s.purgeExpiredAccountSessionsLocked(accountID, idleTTL, now)
+		counts[accountID] = int64(len(s.accountSessions[accountID]))
+	}
+	s.accountSessionMu.Unlock()
+	return counts
+}
+
 func (s *Store) ApplyAccountSessionCapacity(dbID int64, enabled bool, limit, idleTTLSeconds int64) bool {
 	if s == nil || dbID <= 0 {
 		return false

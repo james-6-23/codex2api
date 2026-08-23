@@ -3415,6 +3415,8 @@
     "schedulerModeRoundRobin": "Round Robin",
     "schedulerModeRemainingQuota": "Remaining Quota",
     "schedulerModeFillFirst": "Fill First",
+    "sessionWindowBalance": "Balance New Sessions",
+    "sessionWindowBalanceDesc": "Applies only when creating a new session: scheduling priority and health tier are respected first, then accounts with fewer active windows are preferred. Dispatch score and current concurrency break ties. Existing sessions stay on their bound account. Disabled by default.",
     "affinityMode": "Session Affinity",
     "affinityModeDesc": "Affinity is separate from scheduling priority. With a shared API key, send X-Codex2API-Affinity-Key to distinguish end users; it is hashed and used locally only. Bounded rotates after 50 requests, 5 minutes, or unhealthy status; Off re-picks; Strict stays long-term.",
     "sessionAffinitySpread": "Affinity hash spread",

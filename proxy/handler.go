@@ -2932,6 +2932,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	turnContinuationPinned := turnContinuation && turnHasBinding
@@ -3079,6 +3080,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				return
 			}
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
+			return
+		}
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
+			sendPromptSessionCreationLimitError(c, status)
 			return
 		}
 
@@ -4421,6 +4427,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -4539,6 +4546,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
 				return
 			}
+		}
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
+			sendPromptSessionCreationLimitError(c, status)
+			return
 		}
 
 		h.AcquireAPIKeyScopeConcurrency(c, account)
@@ -5144,6 +5156,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -5186,6 +5199,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				return
 			}
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
+			return
+		}
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
+			sendPromptSessionCreationLimitError(c, status)
 			return
 		}
 

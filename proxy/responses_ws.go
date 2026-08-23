@@ -290,6 +290,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
 	turnContinuation := codexWSTurnContinuationToken(rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
@@ -446,6 +447,16 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 			_ = writeResponsesWSError(conn, apiErr)
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
+		}
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
+			apiErr = api.NewAPIError(
+				api.ErrorCode("session_creation_limit_exceeded"),
+				promptSessionCreationLimitMessage(status),
+				api.ErrorTypeInvalidRequest,
+			)
+			_ = writeResponsesWSError(conn, apiErr)
+			return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 		}
 
 		h.AcquireAPIKeyScopeConcurrency(c, account)
@@ -1198,14 +1209,6 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 			return true, true
 		}
 		_ = writeResponsesWSError(conn, promptCyberRestrictionAPIError(restriction, nil))
-		return true, false
-	}
-	if status, exceeded := h.checkPromptSessionCreationLimit(c, cfg, rawBody); exceeded {
-		_ = writeResponsesWSError(conn, api.NewAPIError(
-			api.ErrorCode("session_creation_limit_exceeded"),
-			promptSessionCreationLimitMessage(status),
-			api.ErrorTypeInvalidRequest,
-		))
 		return true, false
 	}
 	// Keep disabled filters off the WebSocket request-body hot path too.

@@ -3415,6 +3415,8 @@
     "schedulerModeRoundRobin": "轮询",
     "schedulerModeRemainingQuota": "剩余配额",
     "schedulerModeFillFirst": "顺序耗尽",
+    "sessionWindowBalance": "新窗口均衡",
+    "sessionWindowBalanceDesc": "仅在创建新会话时生效：先遵守账号调度优先级和健康档位，再优先选择当前活跃窗口更少的账号；窗口数相同时按调度分和当前并发择优。已有会话仍复用原账号。默认关闭。",
     "affinityMode": "会话粘性",
     "affinityModeDesc": "亲和与调度优先级相互独立。共享 API Key 时，下游可传 X-Codex2API-Affinity-Key 稳定区分最终用户（仅本地哈希使用）。Bounded 默认在 50 次、5 分钟或账号不健康时换号；Off 每次重选；Strict 长期粘连。",
     "sessionAffinitySpread": "亲和散列绑定",
