@@ -5511,11 +5511,14 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 	}
 	if durationSamples > 0 {
 		result.AvgDurationMs = durationMsSum / float64(durationSamples)
+	}
+	// Hourly rollups preserve the duration sum and sample count for the average,
+	// but they do not retain individual duration values. After usage logs are
+	// cleared, durations can therefore be empty even when durationSamples is
+	// positive. Only calculate the percentile when detailed samples remain.
+	if len(durations) > 0 {
 		sort.Slice(durations, func(i, j int) bool { return durations[i] < durations[j] })
 		index := int(math.Ceil(float64(len(durations))*0.95)) - 1
-		if index < 0 {
-			index = 0
-		}
 		result.P95DurationMs = float64(durations[index])
 	}
 	if result.FirstTokenSamples > 0 {

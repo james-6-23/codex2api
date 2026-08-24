@@ -2636,6 +2636,7 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 			InputTokens:  100,
 			OutputTokens: 50,
 			TotalTokens:  150,
+			DurationMs:   1000,
 			CachedTokens: 32,
 			FirstTokenMs: 600,
 		},
@@ -2647,6 +2648,7 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 			InputTokens:  80,
 			OutputTokens: 20,
 			TotalTokens:  100,
+			DurationMs:   3000,
 			FirstTokenMs: 300,
 		},
 	} {
@@ -2682,6 +2684,12 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	}
 	if account.TotalRequests != 2 || account.TotalTokens != 250 || account.Today.Requests != 2 || account.Today.Tokens != 250 {
 		t.Fatalf("account stats after clear = %+v, want totals and today preserved", account)
+	}
+	if math.Abs(account.AvgDurationMs-2000) > 0.001 {
+		t.Fatalf("AvgDurationMs after clear = %.2f, want 2000", account.AvgDurationMs)
+	}
+	if account.P95DurationMs != 0 {
+		t.Fatalf("P95DurationMs after clear = %.2f, want 0 without detailed samples", account.P95DurationMs)
 	}
 	counts, err := db.GetAccountRequestCountsByIDs(ctx, []int64{1})
 	if err != nil {
