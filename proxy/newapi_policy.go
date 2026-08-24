@@ -70,6 +70,12 @@ type newAPIPolicyMeta struct {
 	UpstreamModel      string `json:"upstream_model,omitempty"`
 	ChannelID          int    `json:"channel_id,omitempty"`
 	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	RootSessionVersion int    `json:"root_session_version,omitempty"`
+	RootSessionState   string `json:"root_session_state,omitempty"`
+	// RootSessionFingerprint groups Guardian/sub-agent leaves under the
+	// user-visible Codex task. SessionFingerprint intentionally remains the
+	// exact leaf identity used by CYB conversation locking.
+	RootSessionFingerprint string `json:"root_session_fingerprint,omitempty"`
 }
 
 type verifiedNewAPIPolicyContext struct {
@@ -448,6 +454,35 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	meta.SessionFingerprint = strings.ToLower(strings.TrimSpace(meta.SessionFingerprint))
 	if meta.SessionFingerprint != "" {
 		decoded, err := hex.DecodeString(meta.SessionFingerprint)
+		if err != nil || len(decoded) != 16 {
+			return false
+		}
+	}
+	meta.RootSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.RootSessionFingerprint))
+	meta.RootSessionState = strings.ToLower(strings.TrimSpace(meta.RootSessionState))
+	if meta.RootSessionVersion < 0 || meta.RootSessionVersion > 1 {
+		return false
+	}
+	if meta.RootSessionVersion == 0 {
+		if meta.RootSessionState != "" || meta.RootSessionFingerprint != "" {
+			return false
+		}
+	} else {
+		switch meta.RootSessionState {
+		case newAPIPolicyRootSessionResolved:
+			if meta.RootSessionFingerprint == "" {
+				return false
+			}
+		case newAPIPolicyRootSessionConflict, newAPIPolicyRootSessionUnavailable:
+			if meta.RootSessionFingerprint != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	if meta.RootSessionFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.RootSessionFingerprint)
 		if err != nil || len(decoded) != 16 {
 			return false
 		}

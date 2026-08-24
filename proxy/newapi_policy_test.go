@@ -8,6 +8,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -262,6 +263,328 @@ func TestSignedPolicyMetaAcceptsSessionFingerprintAndRejectsMalformedValue(t *te
 	policyContext, verified = handler.verifyNewAPIPolicyContext(invalidContext, config, body)
 	if verified || policyContext.MetaVerified || policyContext.Meta.SessionFingerprint != "" {
 		t.Fatalf("malformed bound session fingerprint was accepted: verified=%v meta_verified=%v fingerprint=%q", verified, policyContext.MetaVerified, policyContext.Meta.SessionFingerprint)
+	}
+}
+
+func TestSignedPolicyMetaAcceptsRootSessionFingerprint(t *testing.T) {
+	config := promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 300}
+	body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
+	leafFingerprint := promptSessionTestFingerprint("guardian-leaf")
+	rootFingerprint := promptSessionTestFingerprint("main-task-root")
+	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
+
+	validContext, _ := signedNewAPIPolicyContext(t, "root-session-meta-valid", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, validContext, newAPIPolicyMeta{
+		Profile:                promptfilter.GuardProfileBalanced,
+		Mode:                   promptfilter.GuardModeEnforce,
+		Provider:               string(promptfilter.ModelFamilyOpenAI),
+		Protocol:               string(promptfilter.ProtocolResponses),
+		SessionFingerprint:     leafFingerprint,
+		RootSessionVersion:     1,
+		RootSessionState:       newAPIPolicyRootSessionResolved,
+		RootSessionFingerprint: rootFingerprint,
+	}, true)
+	handlerCfg := promptGuardTestConfig()
+	handlerCfg.Advanced.NewAPI.Enabled = true
+	handlerCfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(handlerCfg)
+	policyContext, verified := handler.verifyNewAPIPolicyContext(validContext, config, body)
+	if !verified || !policyContext.MetaVerified || policyContext.Meta.SessionFingerprint != leafFingerprint || policyContext.Meta.RootSessionFingerprint != rootFingerprint {
+		t.Fatalf("valid signed root fingerprint was rejected: verified=%v context=%+v", verified, policyContext)
+	}
+	if audit := handler.capturePromptFilterAuditContext(validContext); audit.SessionHash != hashRiskIdentity(leafFingerprint) || audit.RootSessionHash != hashRiskIdentity(rootFingerprint) {
+		t.Fatalf("audit session hashes = leaf %q root %q, want leaf %q root %q", audit.SessionHash, audit.RootSessionHash, hashRiskIdentity(leafFingerprint), hashRiskIdentity(rootFingerprint))
+	}
+
+	// Exact CYB locking must remain attached to the Guardian/sub-agent leaf,
+	// even though user-window accounting uses the root fingerprint.
+	lockIdentity, ok := verifiedPromptConversationLockIdentity(validContext, policyContext)
+	if !ok || lockIdentity.SessionFingerprint != leafFingerprint || lockIdentity.SessionHash != hashRiskIdentity(leafFingerprint) {
+		t.Fatalf("root fingerprint changed exact conversation lock: ok=%v identity=%+v", ok, lockIdentity)
+	}
+
+	invalidContext, _ := signedNewAPIPolicyContext(t, "root-session-meta-invalid", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, invalidContext, newAPIPolicyMeta{
+		Profile:                promptfilter.GuardProfileBalanced,
+		Mode:                   promptfilter.GuardModeEnforce,
+		Provider:               string(promptfilter.ModelFamilyOpenAI),
+		Protocol:               string(promptfilter.ProtocolResponses),
+		SessionFingerprint:     leafFingerprint,
+		RootSessionVersion:     1,
+		RootSessionState:       newAPIPolicyRootSessionResolved,
+		RootSessionFingerprint: "not-a-fingerprint",
+	}, true)
+	policyContext, verified = handler.verifyNewAPIPolicyContext(invalidContext, config, body)
+	if verified || policyContext.MetaVerified || policyContext.Meta.RootSessionFingerprint != "" {
+		t.Fatalf("malformed signed root fingerprint was accepted: verified=%v context=%+v", verified, policyContext)
+	}
+
+	missingVersionContext, _ := signedNewAPIPolicyContext(t, "root-session-meta-missing-version", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, missingVersionContext, newAPIPolicyMeta{
+		Profile:                promptfilter.GuardProfileBalanced,
+		Mode:                   promptfilter.GuardModeEnforce,
+		Provider:               string(promptfilter.ModelFamilyOpenAI),
+		Protocol:               string(promptfilter.ProtocolResponses),
+		SessionFingerprint:     leafFingerprint,
+		RootSessionFingerprint: rootFingerprint,
+	}, true)
+	policyContext, verified = handler.verifyNewAPIPolicyContext(missingVersionContext, config, body)
+	if verified || policyContext.MetaVerified {
+		t.Fatalf("root fingerprint without capability version was accepted: verified=%v context=%+v", verified, policyContext)
+	}
+}
+
+func TestRequestRootSessionIdentityPolicyMetaPriority(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
+	leafFingerprint := promptSessionTestFingerprint("guardian-leaf-priority")
+	rootFingerprint := promptSessionTestFingerprint("main-root-priority")
+
+	resolve := func(requestID string, meta newAPIPolicyMeta, localMode string) requestRootSessionIdentity {
+		t.Helper()
+		body := []byte(`{"model":"gpt-5.5","input":"hello"}`)
+		c, _ := signedNewAPIPolicyContext(t, requestID, identity, "/v1/responses", body)
+		addSignedNewAPIPolicyMeta(t, c, meta, true)
+		if localMode == "native" {
+			for name, values := range nativeSessionHeaders(testRootSessionA, testLeafSessionA, 12) {
+				c.Request.Header[name] = append([]string(nil), values...)
+			}
+		} else if localMode == "weak" {
+			c.Request.Header.Set("Session-Id", testRootSessionB)
+		}
+		if _, verified := handler.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, body); !verified {
+			t.Fatalf("signed policy context %q did not verify", requestID)
+		}
+		return handler.resolveRequestRootSessionIdentityForContext(c, body)
+	}
+
+	baseMeta := newAPIPolicyMeta{
+		Profile:            promptfilter.GuardProfileBalanced,
+		Mode:               promptfilter.GuardModeEnforce,
+		Provider:           string(promptfilter.ModelFamilyOpenAI),
+		Protocol:           string(promptfilter.ProtocolResponses),
+		SessionFingerprint: leafFingerprint,
+	}
+	withRoot := baseMeta
+	withRoot.RootSessionVersion = 1
+	withRoot.RootSessionState = newAPIPolicyRootSessionResolved
+	withRoot.RootSessionFingerprint = rootFingerprint
+	if got := resolve("root-priority-signed", withRoot, ""); !got.stable || got.conflict || got.sessionID != rootFingerprint || got.fingerprint != rootFingerprint {
+		t.Fatalf("signed root did not win: %+v", got)
+	}
+	if got := resolve("root-priority-signed-mismatch", withRoot, "native"); got.stable || !got.conflict || !got.authoritative {
+		t.Fatalf("signed root mismatch was not rejected: %+v", got)
+	}
+	wantRollingFingerprint := newAPIRootSessionFingerprint("test-platform", "42", testRootSessionA)
+	if got := resolve("root-priority-local", baseMeta, "native"); !got.stable || got.conflict || got.sessionID != wantRollingFingerprint || got.fingerprint != wantRollingFingerprint {
+		t.Fatalf("local root did not beat legacy leaf fingerprint: %+v", got)
+	}
+	if got := resolve("root-priority-legacy", baseMeta, ""); !got.stable || got.conflict || got.sessionID != leafFingerprint || got.fingerprint != leafFingerprint {
+		t.Fatalf("legacy leaf fingerprint fallback changed: %+v", got)
+	}
+	if got := resolve("root-priority-weak-local", baseMeta, "weak"); !got.stable || got.conflict || got.sessionID != leafFingerprint || got.fingerprint != leafFingerprint {
+		t.Fatalf("weak local identity overrode legacy signed leaf: %+v", got)
+	}
+
+	capableLeafOnly := baseMeta
+	capableLeafOnly.RootSessionVersion = 1
+	capableLeafOnly.RootSessionState = newAPIPolicyRootSessionConflict
+	if got := resolve("root-priority-capable-leaf", capableLeafOnly, "native"); got.stable || !got.conflict || !got.authoritative || got.sessionID != "" {
+		t.Fatalf("capable sender conflict was not authoritative: %+v", got)
+	}
+
+	capableNoIdentity := capableLeafOnly
+	capableNoIdentity.SessionFingerprint = ""
+	if got := resolve("root-priority-capable-empty", capableNoIdentity, "native"); got.stable || !got.conflict || !got.authoritative || got.sessionID != "" {
+		t.Fatalf("capable sender conflict without leaf was not authoritative: %+v", got)
+	}
+
+	capableUnavailable := baseMeta
+	capableUnavailable.RootSessionVersion = 1
+	capableUnavailable.RootSessionState = newAPIPolicyRootSessionUnavailable
+	if got := resolve("root-priority-capable-unavailable", capableUnavailable, "native"); got.stable || got.conflict || !got.authoritative || got.sessionID != "" {
+		t.Fatalf("unavailable HTTP request reinterpreted local graph: %+v", got)
+	}
+}
+
+func TestRequestRootSessionIdentityWebSocketRootBinding(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
+	frame := func(root, leaf string, sequence int) []byte {
+		return []byte(fmt.Sprintf(`{"type":"response.create","model":"gpt-5.5","client_metadata":{"session_id":%q,"thread_id":%q,"x-codex-window-id":%q,"x-codex-parent-thread-id":%q}}`, root, leaf, fmt.Sprintf("%s:%d", leaf, sequence), root))
+	}
+	newConnection := func(requestID string, meta newAPIPolicyMeta) *gin.Context {
+		t.Helper()
+		c, _ := signedNewAPIPolicyContext(t, requestID, identity, "/v1/responses", nil)
+		addSignedNewAPIPolicyMeta(t, c, meta, true)
+		if _, verified := handler.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil); !verified {
+			t.Fatalf("signed websocket policy context %q did not verify", requestID)
+		}
+		c.Request.Method = http.MethodGet
+		c.Request.Header.Set("Connection", "Upgrade")
+		c.Request.Header.Set("Upgrade", "websocket")
+		return c
+	}
+
+	rootAFingerprint := newAPIRootSessionFingerprint("test-platform", "42", testRootSessionA)
+	baseMeta := newAPIPolicyMeta{
+		PlatformID:         "test-platform",
+		Profile:            promptfilter.GuardProfileBalanced,
+		Mode:               promptfilter.GuardModeEnforce,
+		Provider:           string(promptfilter.ModelFamilyOpenAI),
+		Protocol:           string(promptfilter.ProtocolResponses),
+		SessionFingerprint: promptSessionTestFingerprint("ws-leaf"),
+		RootSessionVersion: 1,
+	}
+
+	t.Run("resolved handshake validates every explicit frame root", func(t *testing.T) {
+		meta := baseMeta
+		meta.RootSessionState = newAPIPolicyRootSessionResolved
+		meta.RootSessionFingerprint = rootAFingerprint
+		c := newConnection("ws-root-resolved", meta)
+
+		got := handler.resolveRequestRootSessionIdentityForContext(c, frame(testRootSessionA, testLeafSessionA, 1))
+		if !got.stable || got.conflict || !got.authoritative || got.sessionID != rootAFingerprint {
+			t.Fatalf("matching frame root = %+v", got)
+		}
+		got = handler.resolveRequestRootSessionIdentityForContext(c, frame(testRootSessionB, testLeafSessionB, 2))
+		if got.stable || !got.conflict || !got.authoritative {
+			t.Fatalf("mismatched frame root was accepted: %+v", got)
+		}
+	})
+
+	t.Run("unavailable handshake binds first strong frame once", func(t *testing.T) {
+		meta := baseMeta
+		meta.RootSessionState = newAPIPolicyRootSessionUnavailable
+		c := newConnection("ws-root-unavailable", meta)
+
+		got := handler.resolveRequestRootSessionIdentityForContext(c, []byte(`{"type":"response.create","model":"gpt-5.5","input":"before metadata"}`))
+		if got.stable || got.conflict || !got.authoritative || got.sessionID != "" {
+			t.Fatalf("metadata-free first frame consumed a leaf window: %+v", got)
+		}
+		got = handler.resolveRequestRootSessionIdentityForContext(c, frame(testRootSessionA, testLeafSessionA, 3))
+		if !got.stable || got.conflict || !got.authoritative || got.sessionID != rootAFingerprint {
+			t.Fatalf("first frame did not bind root: %+v", got)
+		}
+		got = handler.resolveRequestRootSessionIdentityForContext(c, []byte(`{"type":"response.create","model":"gpt-5.5","input":"continue"}`))
+		if !got.stable || got.conflict || got.sessionID != rootAFingerprint {
+			t.Fatalf("frame without metadata did not reuse bound root: %+v", got)
+		}
+		got = handler.resolveRequestRootSessionIdentityForContext(c, frame(testRootSessionB, testLeafSessionB, 4))
+		if got.stable || !got.conflict || !got.authoritative {
+			t.Fatalf("connection switched roots after binding: %+v", got)
+		}
+	})
+}
+
+func TestRequestRootSessionIdentityLegacyNewAPIWebSocketUsesCurrentFrameGraph(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
+	leafFingerprint := promptSessionTestFingerprint("legacy-ws-guardian-leaf")
+
+	c, _ := signedNewAPIPolicyContext(t, "legacy-ws-frame-root", identity, "/v1/responses", nil)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		PlatformID:         "test-platform",
+		Profile:            promptfilter.GuardProfileBalanced,
+		Mode:               promptfilter.GuardModeEnforce,
+		Provider:           string(promptfilter.ModelFamilyOpenAI),
+		Protocol:           string(promptfilter.ProtocolResponses),
+		SessionFingerprint: leafFingerprint,
+	}, true)
+	// Simulate a v0 rolling deployment: the upgrade headers describe an older
+	// leaf while the current response.create frame carries the complete main
+	// task -> Guardian graph.
+	for name, values := range nativeSessionHeaders(testRootSessionB, testLeafSessionB, 1) {
+		c.Request.Header[name] = append([]string(nil), values...)
+	}
+	if _, verified := handler.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil); !verified {
+		t.Fatal("legacy signed WebSocket policy context did not verify")
+	}
+	c.Request.Method = http.MethodGet
+	c.Request.Header.Set("Connection", "Upgrade")
+	c.Request.Header.Set("Upgrade", "websocket")
+	frame := func(root, leaf string, sequence int) []byte {
+		return []byte(fmt.Sprintf(`{"type":"response.create","client_metadata":{"session_id":%q,"thread_id":%q,"x-codex-window-id":%q,"x-codex-parent-thread-id":%q}}`,
+			root, leaf, fmt.Sprintf("%s:%d", leaf, sequence), root))
+	}
+
+	got := handler.resolveRequestRootSessionIdentityForContext(c, frame(testRootSessionA, testLeafSessionA, 7))
+	want := newAPIRootSessionFingerprint("test-platform", "42", testRootSessionA)
+	if !got.stable || got.conflict || !got.authoritative || got.sessionID != want || got.fingerprint != want {
+		t.Fatalf("legacy WebSocket frame identity = %+v, want root fingerprint %q", got, want)
+	}
+
+	withoutMetadata := handler.resolveRequestRootSessionIdentityForContext(c, []byte(`{"type":"response.create","input":"continue"}`))
+	if !withoutMetadata.stable || withoutMetadata.conflict || withoutMetadata.sessionID != want {
+		t.Fatalf("legacy metadata-free continuation did not reuse root: %+v", withoutMetadata)
+	}
+
+	switched := handler.resolveRequestRootSessionIdentityForContext(c, frame(testRootSessionB, testLeafSessionB, 8))
+	if switched.stable || !switched.conflict || !switched.authoritative {
+		t.Fatalf("legacy WebSocket connection switched roots: %+v", switched)
+	}
+}
+
+func TestRequestRootSessionIdentityLegacyNewAPIWebSocketWaitsForStrongRoot(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	c, _ := signedNewAPIPolicyContext(t, "legacy-ws-wait-root", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/responses", nil)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		PlatformID:         "test-platform",
+		Profile:            promptfilter.GuardProfileBalanced,
+		Mode:               promptfilter.GuardModeEnforce,
+		Provider:           string(promptfilter.ModelFamilyOpenAI),
+		Protocol:           string(promptfilter.ProtocolResponses),
+		SessionFingerprint: promptSessionTestFingerprint("legacy-weak-handshake-leaf"),
+	}, true)
+	c.Request.Header.Set("Session-Id", testLeafSessionA)
+	if _, verified := handler.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil); !verified {
+		t.Fatal("legacy weak WebSocket policy context did not verify")
+	}
+	c.Request.Method = http.MethodGet
+	c.Request.Header.Set("Connection", "Upgrade")
+	c.Request.Header.Set("Upgrade", "websocket")
+
+	got := handler.resolveRequestRootSessionIdentityForContext(c, []byte(`{"type":"response.create","input":"metadata pending"}`))
+	if got.stable || got.conflict || !got.authoritative || got.sessionID != "" {
+		t.Fatalf("legacy metadata-free frame consumed handshake leaf: %+v", got)
+	}
+}
+
+func TestRequestRootSessionIdentityHTTPResponseCreateDoesNotEnterWebSocketMode(t *testing.T) {
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	leafFingerprint := promptSessionTestFingerprint("legacy-http-leaf")
+	body := []byte(`{"type":"response.create","input":"ordinary HTTP"}`)
+	c, _ := signedNewAPIPolicyContext(t, "legacy-http-response-create", newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		PlatformID:         "test-platform",
+		Profile:            promptfilter.GuardProfileBalanced,
+		Mode:               promptfilter.GuardModeEnforce,
+		Provider:           string(promptfilter.ModelFamilyOpenAI),
+		Protocol:           string(promptfilter.ProtocolResponses),
+		SessionFingerprint: leafFingerprint,
+	}, true)
+	if _, verified := handler.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, body); !verified {
+		t.Fatal("legacy signed HTTP policy context did not verify")
+	}
+
+	got := handler.resolveRequestRootSessionIdentityForContext(c, body)
+	if !got.stable || got.conflict || got.authoritative || got.sessionID != leafFingerprint {
+		t.Fatalf("ordinary HTTP response.create entered WebSocket mode: %+v", got)
 	}
 }
 

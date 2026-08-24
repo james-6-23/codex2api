@@ -264,6 +264,7 @@ type promptFilterAuditContext struct {
 	NewAPIRequestID      string
 	NewAPIDecisionID     string
 	SessionHash          string
+	RootSessionHash      string
 	ClientIPHash         string
 }
 
@@ -279,6 +280,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 	populatePromptFilterAPIKeyMeta(c, input)
 	newAPIStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	sessionHash := ""
+	rootSessionHash := ""
 	newAPIUserName, newAPIUserEmail, newAPIUserGroup := "", "", ""
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && policyContext.MetaVerified {
 		sessionHash = hashRiskIdentity(policyContext.Meta.SessionFingerprint)
@@ -289,6 +291,33 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		identity := resolveRequestSessionIdentity(c.Request.Header, ingressRequestBody(c, nil))
 		if identity.stableIdentity {
 			sessionHash = hashRiskIdentity(identity.affinityID)
+		}
+	}
+	// RootSessionHash is deliberately operational-only. Prompt risk profiles
+	// and CYB evidence keep the exact leaf SessionHash, while account/session
+	// observations collapse hidden Guardian and sub-agent leaves to the main
+	// user-visible task.
+	if newAPIStatus == "verified" || newAPIStatus == "signed_response" || newAPIStatus == "unbound" {
+		rootBody := ingressRequestBody(c, nil)
+		if len(rootBody) == 0 && isResponsesWebSocketUpgradeRequest(c.Request) {
+			// WebSocket request headers belong to the connection, while the root
+			// session graph normally lives in the current response.create frame.
+			// The immutable HTTP ingress body is intentionally absent for WS, so
+			// use only this frame's already-cached body for operational grouping.
+			if frameBody, ok := rawRequestBodyFromContext(c); ok {
+				rootBody = frameBody
+			}
+		}
+		rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, rootBody)
+		if rootIdentity.stable && !rootIdentity.conflict && rootIdentity.sessionID != "" {
+			rootSessionHash = hashRiskIdentity(rootIdentity.sessionID)
+		} else if !rootIdentity.authoritative {
+			// Unbound/legacy traffic keeps exact-session compatibility. A
+			// root-capable signed sender can instead report that the current WS
+			// frame has no usable root yet; in that case leave the operational
+			// identity empty so its leaf is not temporarily counted as a second
+			// account window before a later frame binds the real root.
+			rootSessionHash = sessionHash
 		}
 	}
 	clientIP := input.ClientIP
@@ -312,6 +341,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		NewAPIUserGroup:      newAPIUserGroup,
 		NewAPIRequestID:      policyContext.Identity.RequestID,
 		SessionHash:          sessionHash,
+		RootSessionHash:      rootSessionHash,
 		ClientIPHash:         hashRiskIdentity(clientIP),
 	}
 }

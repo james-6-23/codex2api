@@ -226,6 +226,21 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		_ = writeResponsesWSError(conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
+	if h != nil && h.store != nil {
+		cfg := h.promptFilterConfigForRequest(c)
+		if cfg.Advanced.NewAPI.Enabled && strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) != "" {
+			// Optional signed bindings may not have been verified during upgrade.
+			// Verify the connection-scoped empty-body signature once, then bind the
+			// first frame-local native root before audit/session observation runs.
+			_, _ = h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, nil)
+		}
+		rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, rawBody)
+		if rootIdentity.authoritative && rootIdentity.conflict {
+			apiErr = promptSessionCreationLimitAPIError(promptSessionCreationLimitStatus{IdentityConflict: true})
+			_ = writeResponsesWSError(conn, apiErr)
+			return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
+		}
+	}
 	// WebSocket turn metadata is frame-local. Cache a complete zero-or-set
 	// snapshot before any body rewrite so a later frame can never inherit the
 	// prior frame's compaction badges.
@@ -450,11 +465,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
-			apiErr = api.NewAPIError(
-				api.ErrorCode("session_creation_limit_exceeded"),
-				promptSessionCreationLimitMessage(status),
-				api.ErrorTypeInvalidRequest,
-			)
+			apiErr = promptSessionCreationLimitAPIError(status)
 			_ = writeResponsesWSError(conn, apiErr)
 			return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 		}

@@ -1,10 +1,16 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
@@ -48,13 +54,33 @@ func promptSessionLimitVerifiedUserContext(sessionFingerprint string) *gin.Conte
 	return c
 }
 
-func promptSessionLimitOverrideTestHandler(item database.PromptSessionLimitOverride) *Handler {
+func promptSessionLimitVerifiedRootUserContext(sessionFingerprint, rootSessionFingerprint string) *gin.Context {
+	c := promptSessionLimitTestContext("")
+	c.Set(newAPIPolicyMetaContextKey, verifiedNewAPIPolicyContext{
+		Identity: newAPIIdentity{UserID: "42"}, APIKeyID: 7, Platform: "newapi", MetaVerified: true,
+		Meta: newAPIPolicyMeta{
+			SessionFingerprint:     sessionFingerprint,
+			RootSessionVersion:     1,
+			RootSessionState:       newAPIPolicyRootSessionResolved,
+			RootSessionFingerprint: rootSessionFingerprint,
+		},
+	})
+	return c
+}
+
+func promptSessionLimitVerifiedTestHandler() *Handler {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
 	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{
 		APIKeyID: 7, PlatformCode: "newapi", Enabled: true, RequireSignedIdentity: true,
 	}})
-	store.ApplyPromptSessionLimitOverride(item)
 	return &Handler{store: store}
+}
+
+func promptSessionLimitOverrideTestHandler(item database.PromptSessionLimitOverride) *Handler {
+	handler := promptSessionLimitVerifiedTestHandler()
+	store := handler.store
+	store.ApplyPromptSessionLimitOverride(item)
+	return handler
 }
 
 func TestPromptSessionCreationLimitCountsDistinctSessionsOnly(t *testing.T) {
@@ -81,6 +107,334 @@ func TestPromptSessionCreationLimitCountsDistinctSessionsOnly(t *testing.T) {
 	third := promptSessionLimitTestContext("session-c")
 	if status, exceeded = handler.checkPromptSessionCreationLimit(third, cfg, nil); !exceeded || status.Used != 2 || status.RetryAfter <= 0 {
 		t.Fatalf("third session: exceeded=%v used=%d retry=%d", exceeded, status.Used, status.RetryAfter)
+	}
+}
+
+func TestPromptSessionCreationLimitCountsAlternateExplicitSessionHeaders(t *testing.T) {
+	for _, header := range []string{"X-Session-ID", "OpenAI-Session-ID"} {
+		t.Run(header, func(t *testing.T) {
+			handler := &Handler{}
+			cfg := promptfilter.Config{}
+			cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+			cfg.Advanced.Risk.SessionCreationLimit = 1
+			cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+			request := func(value string) *gin.Context {
+				c := promptSessionLimitTestContext("")
+				c.Request.Header.Set(header, value)
+				return c
+			}
+			if status, exceeded := handler.checkPromptSessionCreationLimit(request("session-a"), cfg, nil); exceeded || status.Used != 1 {
+				t.Fatalf("first alternate session: status=%#v exceeded=%v", status, exceeded)
+			}
+			if status, exceeded := handler.checkPromptSessionCreationLimit(request("session-b"), cfg, nil); !exceeded || status.Used != 1 {
+				t.Fatalf("second alternate session: status=%#v exceeded=%v", status, exceeded)
+			}
+		})
+	}
+}
+
+func TestPromptSessionCreationLimitSameRootGuardianDoesNotDuplicate(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	root := promptSessionTestFingerprint("visible-root-session")
+
+	mainRequest := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("main-leaf"), root)
+	status, exceeded := handler.checkPromptSessionCreationLimit(mainRequest, cfg, nil)
+	if exceeded || status.Used != 1 || status.Existing {
+		t.Fatalf("main request: status=%#v exceeded=%v", status, exceeded)
+	}
+
+	guardianRequest := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("guardian-leaf"), root)
+	status, exceeded = handler.checkPromptSessionCreationLimit(guardianRequest, cfg, nil)
+	if exceeded || status.Used != 1 || !status.Existing {
+		t.Fatalf("same-root guardian consumed a second window: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitRejectsSignedWebSocketRootConflict(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 3
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	signedRoot := newAPIRootSessionFingerprint("newapi", "42", testRootSessionA)
+	c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("ws-leaf"), signedRoot)
+	body := []byte(`{"type":"response.create","model":"gpt-5.5","client_metadata":{"session_id":"` + testRootSessionB + `","thread_id":"` + testLeafSessionB + `","x-codex-window-id":"` + testLeafSessionB + `:1","x-codex-parent-thread-id":"` + testRootSessionB + `"}}`)
+
+	status, rejected := handler.checkPromptSessionCreationLimit(c, cfg, body)
+	if !rejected || !status.IdentityConflict || status.Used != 0 {
+		t.Fatalf("root conflict status=%#v rejected=%v", status, rejected)
+	}
+	apiErr := promptSessionCreationLimitAPIError(status)
+	if apiErr.Code != api.ErrorCode("session_identity_conflict") || !strings.Contains(apiErr.Message, "会话标识发生冲突") {
+		t.Fatalf("root conflict error=%#v", apiErr)
+	}
+	if len(handler.promptSessionLimits) != 0 {
+		t.Fatalf("root conflict changed counters: %#v", handler.promptSessionLimits)
+	}
+}
+
+func TestPromptSessionCreationLimitHonorsAuthoritativeRootStates(t *testing.T) {
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	t.Run("conflict rejects without counting leaf", func(t *testing.T) {
+		handler := promptSessionLimitVerifiedTestHandler()
+		c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("conflicting-leaf"))
+		policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+		policyContext.Meta.RootSessionVersion = 1
+		policyContext.Meta.RootSessionState = newAPIPolicyRootSessionConflict
+		c.Set(newAPIPolicyMetaContextKey, policyContext)
+
+		status, rejected := handler.checkPromptSessionCreationLimit(c, cfg, nil)
+		if !rejected || !status.IdentityConflict || status.Used != 0 || len(handler.promptSessionLimits) != 0 {
+			t.Fatalf("signed conflict status=%#v rejected=%v sessions=%#v", status, rejected, handler.promptSessionLimits)
+		}
+	})
+
+	t.Run("unavailable skips leaf accounting", func(t *testing.T) {
+		handler := promptSessionLimitVerifiedTestHandler()
+		c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("unavailable-leaf"))
+		policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+		policyContext.Meta.RootSessionVersion = 1
+		policyContext.Meta.RootSessionState = newAPIPolicyRootSessionUnavailable
+		c.Set(newAPIPolicyMetaContextKey, policyContext)
+
+		status, rejected := handler.checkPromptSessionCreationLimit(c, cfg, nil)
+		if rejected || status.Used != 0 || status.SessionHash != "" || len(handler.promptSessionLimits) != 0 {
+			t.Fatalf("signed unavailable status=%#v rejected=%v sessions=%#v", status, rejected, handler.promptSessionLimits)
+		}
+	})
+}
+
+func TestPromptSessionCreationLimitNestedGuardianLocalGraphDoesNotDuplicate(t *testing.T) {
+	handler := &Handler{}
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	mainRequest := promptSessionLimitTestContext(testRootSessionA)
+	for name, values := range nativeSessionHeaders(testRootSessionA, testRootSessionA, 0) {
+		mainRequest.Request.Header[name] = append([]string(nil), values...)
+	}
+	status, exceeded := handler.checkPromptSessionCreationLimit(mainRequest, cfg, nil)
+	if exceeded || status.Used != 1 || status.Existing {
+		t.Fatalf("main request: status=%#v exceeded=%v", status, exceeded)
+	}
+
+	guardianRequest := promptSessionLimitTestContext(testLeafSessionA)
+	for name, values := range nativeSessionHeaders(testLeafSessionA, testLeafSessionA, 18) {
+		guardianRequest.Request.Header[name] = append([]string(nil), values...)
+	}
+	guardianRequest.Request.Header.Set("X-Codex-Parent-Thread-Id", testIntermediate)
+	guardianRequest.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testLeafSessionA+`","window_id":"`+testLeafSessionA+`:18","parent_thread_id":"`+testIntermediate+`"}`)
+	status, exceeded = handler.checkPromptSessionCreationLimit(guardianRequest, cfg, nil)
+	if exceeded || status.Used != 1 || !status.Existing {
+		t.Fatalf("nested Guardian consumed a second local window: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitDifferentRootsCountSeparately(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	first := promptSessionLimitVerifiedRootUserContext(
+		promptSessionTestFingerprint("first-leaf"),
+		promptSessionTestFingerprint("first-root"),
+	)
+	status, exceeded := handler.checkPromptSessionCreationLimit(first, cfg, nil)
+	if exceeded || status.Used != 1 {
+		t.Fatalf("first root: status=%#v exceeded=%v", status, exceeded)
+	}
+
+	second := promptSessionLimitVerifiedRootUserContext(
+		promptSessionTestFingerprint("second-leaf"),
+		promptSessionTestFingerprint("second-root"),
+	)
+	status, exceeded = handler.checkPromptSessionCreationLimit(second, cfg, nil)
+	if !exceeded || status.Used != 1 || status.Existing {
+		t.Fatalf("different root was not counted separately: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitConflictingGraphFallsBackToExactLeaf(t *testing.T) {
+	handler := &Handler{}
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	request := func(leaf, claimedRoot string) *gin.Context {
+		c := promptSessionLimitTestContext(leaf)
+		c.Request.Header.Set("Thread-Id", leaf)
+		c.Request.Header.Set("X-Client-Request-Id", leaf)
+		c.Request.Header.Set("X-Codex-Window-Id", leaf+":0")
+		c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+claimedRoot+`","thread_id":"`+leaf+`","window_id":"`+leaf+`:0"}`)
+		return c
+	}
+
+	first := request(testLeafSessionA, testRootSessionA)
+	status, exceeded := handler.checkPromptSessionCreationLimit(first, cfg, nil)
+	if exceeded || status.Used != 1 {
+		t.Fatalf("first conflicting leaf: status=%#v exceeded=%v", status, exceeded)
+	}
+
+	second := request(testLeafSessionB, testRootSessionB)
+	status, exceeded = handler.checkPromptSessionCreationLimit(second, cfg, nil)
+	if !exceeded || status.Used != 1 || status.Existing {
+		t.Fatalf("conflicting graph bypassed exact-leaf limit: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitDifferentTTLsDoNotInterfere(t *testing.T) {
+	handler := &Handler{}
+	longWindow := promptfilter.Config{}
+	longWindow.Advanced.Risk.SessionCreationLimitEnabled = true
+	longWindow.Advanced.Risk.SessionCreationLimit = 2
+	longWindow.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	shortWindow := longWindow
+	shortWindow.Advanced.Risk.SessionCreationLimitWindowSeconds = 1
+
+	longSession := promptSessionLimitTestContext("long-lived-session")
+	status, exceeded := handler.checkPromptSessionCreationLimit(longSession, longWindow, nil)
+	if exceeded || status.Used != 1 {
+		t.Fatalf("long session: status=%#v exceeded=%v", status, exceeded)
+	}
+
+	// Advance only the stored record enough that the former implementation,
+	// which interpreted every timestamp using the current request's TTL, would
+	// incorrectly remove it during a one-second user's global cleanup. With an
+	// expiry timestamp the record still has almost an hour remaining.
+	handler.promptSessionLimitMu.Lock()
+	for key, expiresAt := range handler.promptSessionLimits["api-key:7"] {
+		handler.promptSessionLimits["api-key:7"][key] = expiresAt.Add(-2 * time.Second)
+	}
+	handler.promptSessionLastCleanup = time.Time{}
+	handler.promptSessionLimitMu.Unlock()
+
+	shortSession := promptSessionLimitTestContext("short-lived-session")
+	shortSession.Set(contextAPIKeyID, int64(8))
+	if status, exceeded = handler.checkPromptSessionCreationLimit(shortSession, shortWindow, nil); exceeded || status.Used != 1 {
+		t.Fatalf("short session: status=%#v exceeded=%v", status, exceeded)
+	}
+
+	repeatLong := promptSessionLimitTestContext("long-lived-session")
+	status, exceeded = handler.checkPromptSessionCreationLimit(repeatLong, longWindow, nil)
+	if exceeded || !status.Existing || status.Used != 1 {
+		t.Fatalf("short TTL removed long session: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitConcurrentAdmissionIsSafe(t *testing.T) {
+	const (
+		limit    = 8
+		attempts = 64
+	)
+	handler := &Handler{}
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = limit
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	var admitted atomic.Int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			<-start
+			c := promptSessionLimitTestContext(fmt.Sprintf("concurrent-session-%d", index))
+			if _, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, nil); !exceeded {
+				admitted.Add(1)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	if got := admitted.Load(); got != limit {
+		t.Fatalf("admitted = %d, want %d", got, limit)
+	}
+	handler.promptSessionLimitMu.Lock()
+	used := len(handler.promptSessionLimits["api-key:7"])
+	handler.promptSessionLimitMu.Unlock()
+	if used != limit {
+		t.Fatalf("stored sessions = %d, want %d", used, limit)
+	}
+}
+
+func TestPromptSessionCreationLimitSameRootConcurrentAdmissionUsesOneSlot(t *testing.T) {
+	const attempts = 64
+	handler := &Handler{}
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	var exceededCount atomic.Int64
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			if _, exceeded := handler.checkPromptSessionCreationLimit(promptSessionLimitTestContext("same-concurrent-root"), cfg, nil); exceeded {
+				exceededCount.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if got := exceededCount.Load(); got != 0 {
+		t.Fatalf("same root exceeded %d times, want 0", got)
+	}
+	handler.promptSessionLimitMu.Lock()
+	used := len(handler.promptSessionLimits["api-key:7"])
+	handler.promptSessionLimitMu.Unlock()
+	if used != 1 {
+		t.Fatalf("stored same-root sessions = %d, want 1", used)
+	}
+}
+
+func TestPromptSessionCreationLimitExistingSessionDoesNotRefreshExpiry(t *testing.T) {
+	handler := &Handler{}
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	c := promptSessionLimitTestContext("fixed-expiry-session")
+	status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, nil)
+	if exceeded || status.Used != 1 {
+		t.Fatalf("first request: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	before := handler.promptSessionLimits[status.Subject][status.SessionHash]
+	handler.promptSessionLimitMu.Unlock()
+
+	status, exceeded = handler.checkPromptSessionCreationLimit(promptSessionLimitTestContext("fixed-expiry-session"), cfg, nil)
+	if exceeded || !status.Existing {
+		t.Fatalf("repeat request: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	after := handler.promptSessionLimits[status.Subject][status.SessionHash]
+	handler.promptSessionLimitMu.Unlock()
+	if !after.Equal(before) {
+		t.Fatalf("existing session expiry refreshed from %v to %v", before, after)
 	}
 }
 

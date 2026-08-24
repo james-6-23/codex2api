@@ -25,6 +25,10 @@ type promptSessionCreationLimitStatus struct {
 	WindowSeconds int
 	RetryAfter    int
 	Existing      bool
+	// IdentityConflict means signed NewAPI root metadata and the current
+	// response.create frame describe different conversations. It is not a
+	// capacity exhaustion and must be surfaced with its own error code.
+	IdentityConflict bool
 }
 
 // checkPromptSessionCreationLimitForSelectedAccount deliberately runs only
@@ -89,15 +93,23 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 		return status, false
 	}
 
-	sessionID := ""
-	if verifiedPerson {
-		sessionID = strings.TrimSpace(policyContext.Meta.SessionFingerprint)
-		if sessionID != "" {
-			status.Subject = "newapi:" + strings.TrimSpace(policyContext.Platform) + ":" + strings.TrimSpace(policyContext.Identity.UserID)
-		}
+	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
+	if rootIdentity.authoritative && rootIdentity.conflict {
+		status.IdentityConflict = true
+		return status, true
 	}
-	if sessionID == "" {
+	sessionID := ""
+	if rootIdentity.stable && !rootIdentity.conflict {
+		sessionID = strings.TrimSpace(rootIdentity.sessionID)
+	}
+	// A conflicting native graph must not be collapsed, but it also must not
+	// turn the existing exact-session limit into a bypass. Fall back to the
+	// legacy stable leaf identity when no trustworthy root was resolved.
+	if sessionID == "" && !rootIdentity.authoritative {
 		sessionID = ResolveStableExplicitSessionID(c.Request.Header, body)
+	}
+	if verifiedPerson && sessionID != "" {
+		status.Subject = "newapi:" + strings.TrimSpace(policyContext.Platform) + ":" + strings.TrimSpace(policyContext.Identity.UserID)
 	}
 	if status.Subject == "" {
 		if keyID := requestAPIKeyID(c); keyID > 0 {
@@ -111,7 +123,7 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 	status.SessionHash = hashRiskIdentity(sessionID)
 	now := time.Now()
-	cutoff := now.Add(-time.Duration(status.WindowSeconds) * time.Second)
+	expiresAt := now.Add(time.Duration(status.WindowSeconds) * time.Second)
 
 	h.promptSessionLimitMu.Lock()
 	if h.promptSessionLimits == nil {
@@ -119,8 +131,8 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 	if h.promptSessionLastCleanup.IsZero() || now.Sub(h.promptSessionLastCleanup) >= promptSessionLimitCleanupInterval {
 		for subject, subjectSessions := range h.promptSessionLimits {
-			for key, createdAt := range subjectSessions {
-				if createdAt.Before(cutoff) {
+			for key, sessionExpiresAt := range subjectSessions {
+				if !sessionExpiresAt.After(now) {
 					delete(subjectSessions, key)
 				}
 			}
@@ -135,14 +147,14 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 		sessions = make(map[string]time.Time)
 		h.promptSessionLimits[status.Subject] = sessions
 	}
-	oldest := now
-	for key, createdAt := range sessions {
-		if createdAt.Before(cutoff) {
+	earliestExpiry := time.Time{}
+	for key, sessionExpiresAt := range sessions {
+		if !sessionExpiresAt.After(now) {
 			delete(sessions, key)
 			continue
 		}
-		if createdAt.Before(oldest) {
-			oldest = createdAt
+		if earliestExpiry.IsZero() || sessionExpiresAt.Before(earliestExpiry) {
+			earliestExpiry = sessionExpiresAt
 		}
 	}
 	if len(sessions) == 0 {
@@ -159,7 +171,7 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 	if len(sessions) >= status.Limit {
 		status.Used = len(sessions)
-		status.RetryAfter = int(oldest.Add(time.Duration(status.WindowSeconds) * time.Second).Sub(now).Seconds())
+		status.RetryAfter = int(earliestExpiry.Sub(now).Seconds())
 		if status.RetryAfter < 1 {
 			status.RetryAfter = 1
 		}
@@ -167,7 +179,10 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 		writePromptSessionLimitHeaders(c, status)
 		return status, true
 	}
-	sessions[status.SessionHash] = now
+	// Store each session's own expiry instead of its creation time. Different
+	// users may have different window durations, so a later request must never
+	// clean another user's sessions using the later request's TTL.
+	sessions[status.SessionHash] = expiresAt
 	status.Used = len(sessions)
 	h.promptSessionLimitMu.Unlock()
 	writePromptSessionLimitHeaders(c, status)
@@ -187,14 +202,20 @@ func writePromptSessionLimitHeaders(c *gin.Context, status promptSessionCreation
 }
 
 func sendPromptSessionCreationLimitError(c *gin.Context, status promptSessionCreationLimitStatus) {
-	message := promptSessionCreationLimitMessage(status)
-	api.SendErrorWithStatus(c, api.NewAPIError(
-		api.ErrorCode("session_creation_limit_exceeded"),
-		message,
-		api.ErrorTypeInvalidRequest,
-	), http.StatusBadRequest)
+	api.SendErrorWithStatus(c, promptSessionCreationLimitAPIError(status), http.StatusBadRequest)
 }
 
 func promptSessionCreationLimitMessage(status promptSessionCreationLimitStatus) string {
+	if status.IdentityConflict {
+		return "会话标识发生冲突，请新建连接后重试"
+	}
 	return "当前时间内创建窗口已达到上限，请复用已有会话或稍后再试"
+}
+
+func promptSessionCreationLimitAPIError(status promptSessionCreationLimitStatus) *api.APIError {
+	code := api.ErrorCode("session_creation_limit_exceeded")
+	if status.IdentityConflict {
+		code = api.ErrorCode("session_identity_conflict")
+	}
+	return api.NewAPIError(code, promptSessionCreationLimitMessage(status), api.ErrorTypeInvalidRequest)
 }
