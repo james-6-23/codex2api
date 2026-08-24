@@ -4225,6 +4225,34 @@ func TestSyncCodexUsageStateUpdatesPlanTypeFromHeader(t *testing.T) {
 	}
 }
 
+func TestSyncCodexUsageStateIgnoresRelayForwardedCodexHeaders(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{
+		DBID:         101,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://relay.example.test",
+		APIKey:       "sk-relay",
+		PlanType:     "api",
+	}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-plan-type", "pro")
+	resp.Header.Set("x-codex-primary-used-percent", "6")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "500000")
+
+	result := SyncCodexUsageState(store, account, resp)
+
+	if result.HasUsage7d || result.HasUsage5h || result.Used5hHeaders {
+		t.Fatalf("relay usage sync result = %#v, want no Codex quota state", result)
+	}
+	if _, ok := account.GetUsagePercent7d(); ok {
+		t.Fatal("relay account accepted a forwarded Codex 7d snapshot")
+	}
+	if got := account.GetPlanType(); got != "api" {
+		t.Fatalf("relay plan type = %q, want api", got)
+	}
+}
+
 func TestApply429CooldownUnknown429UsesModelCooldown(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 102, PlanType: "pro"}
@@ -4492,6 +4520,12 @@ func TestSyncCodexUsageState_Clears5hWhenOnly7dHeaders(t *testing.T) {
 	if got := row.GetCredential("codex_5h_used_percent"); got != "" {
 		t.Errorf("persisted codex_5h_used_percent = %q, want cleared", got)
 	}
+	if got := row.GetCredential("codex_7d_reset_at"); got == "" {
+		t.Error("persisted codex_7d_reset_at is empty for 7d-only snapshot")
+	}
+	if got := row.GetCredential("codex_7d_window_seconds"); got != "604800" {
+		t.Errorf("persisted codex_7d_window_seconds = %q, want 604800", got)
+	}
 
 	reloadedStore := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	if err := reloadedStore.LoadAccountByID(ctx, id); err != nil {
@@ -4503,6 +4537,12 @@ func TestSyncCodexUsageState_Clears5hWhenOnly7dHeaders(t *testing.T) {
 	}
 	if _, ok := reloaded.GetUsagePercent5h(); ok {
 		t.Fatal("cleared 5h snapshot was hydrated again after reload")
+	}
+	if reloaded.GetReset7dAt().IsZero() {
+		t.Fatal("7d-only reset time was not restored after reload")
+	}
+	if got := reloaded.GetWindow7dSeconds(); got != 604800 {
+		t.Fatalf("reloaded Window7dSeconds = %d, want 604800", got)
 	}
 }
 

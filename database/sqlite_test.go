@@ -2724,7 +2724,7 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	}
 }
 
-func TestAccountBilledWindowSurvivesClearAndResetsOnExactNewWindow(t *testing.T) {
+func TestAccountBilledWindowSurvivesClearWithStartDriftAndResetsOnNewWindow(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	db, err := New("sqlite", dbPath)
 	if err != nil {
@@ -2733,7 +2733,7 @@ func TestAccountBilledWindowSurvivesClearAndResetsOnExactNewWindow(t *testing.T)
 	defer db.Close()
 
 	ctx := context.Background()
-	base := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Second)
+	base := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Minute)
 	currentStart := base.Add(30*time.Minute + 17*time.Second)
 	insertCost := func(createdAt time.Time, billed float64) {
 		t.Helper()
@@ -2752,36 +2752,92 @@ func TestAccountBilledWindowSurvivesClearAndResetsOnExactNewWindow(t *testing.T)
 	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: currentStart}); err != nil {
 		t.Fatalf("ClearUsageLogs(current window): %v", err)
 	}
-	billed, err := db.GetAccountBilledSince(ctx, 1, currentStart)
+	// reset-after is observed relatively, so the same upstream window can be
+	// reconstructed a few seconds later (and with different nanoseconds).
+	driftedStart := currentStart.Add(3*time.Second + 456*time.Millisecond)
+	billed, err := db.GetAccountBilledSince(ctx, 1, driftedStart)
 	if err != nil || billed != 12 {
-		t.Fatalf("current window after clear = %.2f, err=%v, want 12", billed, err)
+		t.Fatalf("drifted current window after clear = %.2f, err=%v, want 12", billed, err)
 	}
 
-	insertCost(currentStart.Add(20*time.Minute), 3)
-	billed, err = db.GetAccountBilledSince(ctx, 1, currentStart)
+	insertCost(currentStart.Add(12*time.Minute), 3)
+	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: driftedStart}); err != nil {
+		t.Fatalf("ClearUsageLogs(drifted current window): %v", err)
+	}
+	billed, err = db.GetAccountBilledSince(ctx, 1, currentStart.Add(900*time.Millisecond))
 	if err != nil || billed != 15 {
-		t.Fatalf("archived + live window = %.2f, err=%v, want 15", billed, err)
+		t.Fatalf("repeated archived current window = %.2f, err=%v, want 15", billed, err)
 	}
 
-	// Advancing the upstream reset within the same hour must not reuse the old
-	// exact-window snapshot. Only the live request after the new start remains.
+	// Advancing the upstream reset to another minute must not reuse the old
+	// window snapshot.
 	newStart := currentStart.Add(15 * time.Minute)
 	billed, err = db.GetAccountBilledSince(ctx, 1, newStart)
-	if err != nil || billed != 3 {
-		t.Fatalf("new reset window before second clear = %.2f, err=%v, want 3", billed, err)
+	if err != nil || billed != 0 {
+		t.Fatalf("new reset window before live use = %.2f, err=%v, want 0", billed, err)
 	}
+	insertCost(newStart.Add(5*time.Minute), 4)
 	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: newStart}); err != nil {
 		t.Fatalf("ClearUsageLogs(new window): %v", err)
 	}
 	billed, err = db.GetAccountBilledSince(ctx, 1, newStart)
-	if err != nil || billed != 3 {
-		t.Fatalf("new reset window after second clear = %.2f, err=%v, want 3", billed, err)
+	if err != nil || billed != 4 {
+		t.Fatalf("new reset window after clear = %.2f, err=%v, want 4", billed, err)
 	}
 
 	insertCost(newStart.Add(10*time.Minute), 4)
 	billedByID, err := db.GetAccountsBilledSince(ctx, map[int64]time.Time{1: newStart})
-	if err != nil || billedByID[1] != 7 {
-		t.Fatalf("new archived + live window = %#v, err=%v, want 7", billedByID, err)
+	if err != nil || billedByID[1] != 8 {
+		t.Fatalf("new archived + live window = %#v, err=%v, want 8", billedByID, err)
+	}
+}
+
+func TestAccountBillingWindowRollupMigratesLegacyNanosecondKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	ctx := context.Background()
+	windowStart := time.Date(2026, time.August, 24, 10, 15, 21, 123456789, time.UTC)
+	for index, billed := range []float64{12, 3} {
+		legacyKey := windowStart.Add(time.Duration(index) * 4 * time.Second).UnixNano()
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_account_billing_window_rollups
+			(account_id, window_start, account_billed) VALUES (1, $1, $2)`, legacyKey, billed); err != nil {
+			t.Fatalf("insert legacy rollup: %v", err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close before migration: %v", err)
+	}
+
+	db, err = New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen for migration: %v", err)
+	}
+	defer db.Close()
+
+	var key, count int64
+	var total float64
+	if err := db.conn.QueryRowContext(ctx, `SELECT MIN(window_start), COUNT(*), SUM(account_billed)
+		FROM usage_account_billing_window_rollups WHERE account_id=1`).Scan(&key, &count, &total); err != nil {
+		t.Fatalf("read migrated rollup: %v", err)
+	}
+	if want := accountBillingWindowRollupKey(windowStart); key != want || count != 1 || total != 15 {
+		t.Fatalf("migrated rollup = key:%d count:%d total:%.2f, want key:%d count:1 total:15", key, count, total, want)
+	}
+	billed, err := db.GetAccountBilledSince(ctx, 1, windowStart.Add(2*time.Second))
+	if err != nil || billed != 15 {
+		t.Fatalf("migrated billed lookup = %.2f, err=%v, want 15", billed, err)
+	}
+
+	// Running startup migration again must not re-add an already migrated row.
+	if err := db.migrateUsageAccountBillingWindowRollupKeys(ctx); err != nil {
+		t.Fatalf("repeat migration: %v", err)
+	}
+	billed, err = db.GetAccountBilledSince(ctx, 1, windowStart)
+	if err != nil || billed != 15 {
+		t.Fatalf("billed after repeated migration = %.2f, err=%v, want 15", billed, err)
 	}
 }
 

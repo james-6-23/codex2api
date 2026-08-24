@@ -157,6 +157,9 @@ func (h *Handler) accountBillingWindows(ids []int64) (map[int64]time.Time, map[i
 		if account == nil {
 			continue
 		}
+		if account.IsRelayStyle() {
+			continue
+		}
 		if resetAt := account.GetReset5hAt(); !resetAt.IsZero() {
 			shortWindows[id] = resetAt.Add(-5 * time.Hour)
 		}

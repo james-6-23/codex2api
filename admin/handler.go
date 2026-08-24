@@ -1711,7 +1711,7 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 		billing7dWindows := make(map[int64]time.Time)
 		for i := range accounts {
 			acc, ok := accountMap[accounts[i].ID]
-			if !ok {
+			if !ok || acc.IsRelayStyle() {
 				continue
 			}
 			if t := acc.GetReset5hAt(); !t.IsZero() {
@@ -1799,7 +1799,7 @@ func (h *Handler) GetAccount(c *gin.Context) {
 
 	runtimeAccount := h.store.FindByID(id)
 	resp := h.buildAccountResponse(row, runtimeAccount, requestCounts[id], usage5h[id], usage7d[id], true)
-	if runtimeAccount != nil {
+	if runtimeAccount != nil && !runtimeAccount.IsRelayStyle() {
 		if resetAt := runtimeAccount.GetReset5hAt(); !resetAt.IsZero() {
 			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-5*time.Hour)); billedErr == nil {
 				resp.Billed5h = &billed

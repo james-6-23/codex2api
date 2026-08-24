@@ -4917,64 +4917,73 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 			}
 		}
 	}
-	if usagePct := row.GetCredential("codex_7d_used_percent"); usagePct != "" {
-		if parsed, err := strconv.ParseFloat(usagePct, 64); err == nil {
-			updatedAt := time.Time{}
-			if usageUpdatedAt := row.GetCredential("codex_usage_updated_at"); usageUpdatedAt != "" {
-				if parsedTime, err := time.Parse(time.RFC3339, usageUpdatedAt); err == nil {
-					updatedAt = parsedTime
-				} else {
-					log.Printf("[账号 %d] 解析 codex_usage_updated_at 失败: %v", row.ID, err)
+	// Relay-style accounts can forward another Codex2API instance's x-codex-*
+	// headers. Those headers describe an unknown downstream OAuth account, not
+	// this aggregate API credential, so historical snapshots must not hydrate
+	// into scheduler state or admin quota bars.
+	if !isOpenAIResponsesAccount && !isGrokAccount {
+		if usagePct := row.GetCredential("codex_7d_used_percent"); usagePct != "" {
+			if parsed, err := strconv.ParseFloat(usagePct, 64); err == nil {
+				updatedAt := time.Time{}
+				if usageUpdatedAt := row.GetCredential("codex_usage_updated_at"); usageUpdatedAt != "" {
+					if parsedTime, err := time.Parse(time.RFC3339, usageUpdatedAt); err == nil {
+						updatedAt = parsedTime
+					} else {
+						log.Printf("[账号 %d] 解析 codex_usage_updated_at 失败: %v", row.ID, err)
+					}
 				}
-			}
-			account.SetUsageSnapshot(parsed, updatedAt)
-			// 恢复 7d 重置时间
-			if resetAt := row.GetCredential("codex_7d_reset_at"); resetAt != "" {
-				if t, err := time.Parse(time.RFC3339, resetAt); err == nil {
-					account.SetReset7dAt(t)
+				account.SetUsageSnapshot(parsed, updatedAt)
+				// 恢复 7d 重置时间
+				if resetAt := row.GetCredential("codex_7d_reset_at"); resetAt != "" {
+					if t, err := time.Parse(time.RFC3339, resetAt); err == nil {
+						account.SetReset7dAt(t)
+					}
 				}
+				if seconds, ok := row.GetCredentialInt64("codex_7d_window_seconds"); ok {
+					account.SetWindow7dSeconds(seconds)
+				}
+			} else {
+				log.Printf("[账号 %d] 解析 codex_7d_used_percent 失败: %v", row.ID, err)
 			}
-		} else {
-			log.Printf("[账号 %d] 解析 codex_7d_used_percent 失败: %v", row.ID, err)
 		}
-	}
-	// 恢复 5h 用量快照
-	if usagePct5h := row.GetCredential("codex_5h_used_percent"); usagePct5h != "" {
-		if parsed, err := strconv.ParseFloat(usagePct5h, 64); err == nil {
-			resetAt := time.Time{}
-			if r := row.GetCredential("codex_5h_reset_at"); r != "" {
-				if t, err := time.Parse(time.RFC3339, r); err == nil {
-					resetAt = t
+		// 恢复 5h 用量快照
+		if usagePct5h := row.GetCredential("codex_5h_used_percent"); usagePct5h != "" {
+			if parsed, err := strconv.ParseFloat(usagePct5h, 64); err == nil {
+				resetAt := time.Time{}
+				if r := row.GetCredential("codex_5h_reset_at"); r != "" {
+					if t, err := time.Parse(time.RFC3339, r); err == nil {
+						resetAt = t
+					}
 				}
-			}
-			updatedAt := time.Time{}
-			if usageUpdatedAt5h := row.GetCredential("codex_5h_usage_updated_at"); usageUpdatedAt5h != "" {
-				if parsedTime, err := time.Parse(time.RFC3339, usageUpdatedAt5h); err == nil {
-					updatedAt = parsedTime
-				} else {
-					log.Printf("[账号 %d] 解析 codex_5h_usage_updated_at 失败: %v", row.ID, err)
+				updatedAt := time.Time{}
+				if usageUpdatedAt5h := row.GetCredential("codex_5h_usage_updated_at"); usageUpdatedAt5h != "" {
+					if parsedTime, err := time.Parse(time.RFC3339, usageUpdatedAt5h); err == nil {
+						updatedAt = parsedTime
+					} else {
+						log.Printf("[账号 %d] 解析 codex_5h_usage_updated_at 失败: %v", row.ID, err)
+					}
 				}
+				account.SetUsageSnapshot5hAt(parsed, resetAt, updatedAt)
 			}
-			account.SetUsageSnapshot5hAt(parsed, resetAt, updatedAt)
 		}
-	}
-	if usagePctSpark := row.GetCredential("codex_spark_used_percent"); usagePctSpark != "" {
-		if parsed, err := strconv.ParseFloat(usagePctSpark, 64); err == nil {
-			resetAt := time.Time{}
-			if r := row.GetCredential("codex_spark_reset_at"); r != "" {
-				if t, err := time.Parse(time.RFC3339, r); err == nil {
-					resetAt = t
+		if usagePctSpark := row.GetCredential("codex_spark_used_percent"); usagePctSpark != "" {
+			if parsed, err := strconv.ParseFloat(usagePctSpark, 64); err == nil {
+				resetAt := time.Time{}
+				if r := row.GetCredential("codex_spark_reset_at"); r != "" {
+					if t, err := time.Parse(time.RFC3339, r); err == nil {
+						resetAt = t
+					}
 				}
-			}
-			updatedAt := time.Time{}
-			if usageUpdatedAtSpark := row.GetCredential("codex_spark_usage_updated_at"); usageUpdatedAtSpark != "" {
-				if parsedTime, err := time.Parse(time.RFC3339, usageUpdatedAtSpark); err == nil {
-					updatedAt = parsedTime
-				} else {
-					log.Printf("[账号 %d] 解析 codex_spark_usage_updated_at 失败: %v", row.ID, err)
+				updatedAt := time.Time{}
+				if usageUpdatedAtSpark := row.GetCredential("codex_spark_usage_updated_at"); usageUpdatedAtSpark != "" {
+					if parsedTime, err := time.Parse(time.RFC3339, usageUpdatedAtSpark); err == nil {
+						updatedAt = parsedTime
+					} else {
+						log.Printf("[账号 %d] 解析 codex_spark_usage_updated_at 失败: %v", row.ID, err)
+					}
 				}
+				account.SetUsageSnapshotSparkAt(parsed, resetAt, updatedAt)
 			}
-			account.SetUsageSnapshotSparkAt(parsed, resetAt, updatedAt)
 		}
 	}
 	// 恢复积分余额快照：积分只有 wham 探针能刷，不恢复的话重启后账号会被判成
@@ -9429,9 +9438,10 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 	if pct5h, ok := acc.GetUsagePercent5h(); ok {
 		reset5hAt := acc.GetReset5hAt()
 		reset7dAt := acc.GetReset7dAt()
+		window7dSeconds := acc.GetWindow7dSeconds()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, pct5h, reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
+		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, window7dSeconds, pct5h, reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 		}
 		return
@@ -9439,7 +9449,7 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, now); err != nil {
+	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, acc.GetReset7dAt(), acc.GetWindow7dSeconds(), now); err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 	}
 }

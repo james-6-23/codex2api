@@ -6218,7 +6218,7 @@ func (db *DB) getAccountsBilledSinceChunk(ctx context.Context, ids []int64, wind
 		} else {
 			values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::TIMESTAMPTZ, $%d::BIGINT)", argIdx, argIdx+1, argIdx+2))
 		}
-		args = append(args, accountID, db.timeArg(since), since.UnixNano())
+		args = append(args, accountID, db.timeArg(since), accountBillingWindowRollupKey(since))
 		argIdx += 3
 	}
 
@@ -7318,23 +7318,37 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	return tx.Commit()
 }
 
-// UpdateUsageSnapshot 持久化账号用量快照（7d + 5h）
-func (db *DB) UpdateUsageSnapshot(ctx context.Context, id int64, pct7d float64, updatedAt time.Time) error {
-	return db.UpdateCredentials(ctx, id, map[string]interface{}{
+// UpdateUsageSnapshot 持久化仅有 7d 数据的账号用量快照。
+func (db *DB) UpdateUsageSnapshot(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, window7dSeconds int64, updatedAt time.Time) error {
+	fields := map[string]interface{}{
 		"codex_7d_used_percent":  pct7d,
 		"codex_usage_updated_at": updatedAt.Format(time.RFC3339),
-	})
+	}
+	if !reset7dAt.IsZero() {
+		fields["codex_7d_reset_at"] = reset7dAt.Format(time.RFC3339)
+	}
+	if window7dSeconds > 0 {
+		fields["codex_7d_window_seconds"] = window7dSeconds
+	}
+	return db.UpdateCredentials(ctx, id, fields)
 }
 
 // UpdateUsageSnapshotFull 持久化完整用量快照（5h + 7d + 重置时间）
-func (db *DB) UpdateUsageSnapshotFull(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, pct5h float64, reset5hAt time.Time, updatedAt7d time.Time, updatedAt5h time.Time) error {
+func (db *DB) UpdateUsageSnapshotFull(ctx context.Context, id int64, pct7d float64, reset7dAt time.Time, window7dSeconds int64, pct5h float64, reset5hAt time.Time, updatedAt7d time.Time, updatedAt5h time.Time) error {
 	fields := map[string]interface{}{
 		"codex_7d_used_percent":     pct7d,
-		"codex_7d_reset_at":         reset7dAt.Format(time.RFC3339),
 		"codex_5h_used_percent":     pct5h,
-		"codex_5h_reset_at":         reset5hAt.Format(time.RFC3339),
 		"codex_usage_updated_at":    updatedAt7d.Format(time.RFC3339),
 		"codex_5h_usage_updated_at": updatedAt5h.Format(time.RFC3339),
+	}
+	if !reset7dAt.IsZero() {
+		fields["codex_7d_reset_at"] = reset7dAt.Format(time.RFC3339)
+	}
+	if window7dSeconds > 0 {
+		fields["codex_7d_window_seconds"] = window7dSeconds
+	}
+	if !reset5hAt.IsZero() {
+		fields["codex_5h_reset_at"] = reset5hAt.Format(time.RFC3339)
 	}
 	return db.UpdateCredentials(ctx, id, fields)
 }

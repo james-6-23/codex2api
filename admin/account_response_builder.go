@@ -230,26 +230,28 @@ func (h *Handler) buildAccountResponse(
 				SuccessRatePenalty:  debug.Breakdown.SuccessRatePenalty,
 			}
 		}
-		if usagePct, ok := runtimeAccount.GetUsagePercent7d(); ok {
-			resp.UsagePercent7d = &usagePct
-		}
-		if usagePct5h, ok := runtimeAccount.GetUsagePercent5h(); ok {
-			resp.UsagePercent5h = &usagePct5h
-		}
-		if usagePctSpark, ok := runtimeAccount.GetUsagePercentSpark(); ok {
-			resp.UsagePercentSpark = &usagePctSpark
-		}
-		if credits, ok := runtimeAccount.GetRateLimitResetCredits(); ok {
-			resp.RateLimitResetCredits = &credits
-		}
-		if applicable, ok := runtimeAccount.GetApplicableResetCredits(); ok {
-			resp.ApplicableResetCredits = &applicable
-		}
-		if balance, hasCredits, unlimited, overage, ok := runtimeAccount.GetCreditBalance(); ok {
-			resp.CreditsBalance = &balance
-			resp.CreditsHasCredits = &hasCredits
-			resp.CreditsUnlimited = &unlimited
-			resp.CreditsOverageLimitReached = &overage
+		if !isOpenAIResponsesAccount && !isGrokAccount {
+			if usagePct, ok := runtimeAccount.GetUsagePercent7d(); ok {
+				resp.UsagePercent7d = &usagePct
+			}
+			if usagePct5h, ok := runtimeAccount.GetUsagePercent5h(); ok {
+				resp.UsagePercent5h = &usagePct5h
+			}
+			if usagePctSpark, ok := runtimeAccount.GetUsagePercentSpark(); ok {
+				resp.UsagePercentSpark = &usagePctSpark
+			}
+			if credits, ok := runtimeAccount.GetRateLimitResetCredits(); ok {
+				resp.RateLimitResetCredits = &credits
+			}
+			if applicable, ok := runtimeAccount.GetApplicableResetCredits(); ok {
+				resp.ApplicableResetCredits = &applicable
+			}
+			if balance, hasCredits, unlimited, overage, ok := runtimeAccount.GetCreditBalance(); ok {
+				resp.CreditsBalance = &balance
+				resp.CreditsHasCredits = &hasCredits
+				resp.CreditsUnlimited = &unlimited
+				resp.CreditsOverageLimitReached = &overage
+			}
 		}
 		if includeDetails {
 			if snapshot := runtimeAccount.GetDispatchCountSnapshot(); snapshot.Limit > 0 {
@@ -262,18 +264,20 @@ func (h *Handler) buildAccountResponse(
 				}
 			}
 		}
-		if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
-			resp.Reset5hAt = t.Format(time.RFC3339)
-		}
-		if t := runtimeAccount.GetReset7dAt(); !t.IsZero() {
-			resp.Reset7dAt = t.Format(time.RFC3339)
-		}
-		if t := runtimeAccount.GetResetSparkAt(); !t.IsZero() {
-			resp.ResetSparkAt = t.Format(time.RFC3339)
-		}
-		if sec := runtimeAccount.GetWindow7dSeconds(); sec > 0 {
-			resp.Window7dSeconds = &sec
-			resp.Window7dKind = runtimeAccount.Window7dKind()
+		if !isOpenAIResponsesAccount && !isGrokAccount {
+			if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
+				resp.Reset5hAt = t.Format(time.RFC3339)
+			}
+			if t := runtimeAccount.GetReset7dAt(); !t.IsZero() {
+				resp.Reset7dAt = t.Format(time.RFC3339)
+			}
+			if t := runtimeAccount.GetResetSparkAt(); !t.IsZero() {
+				resp.ResetSparkAt = t.Format(time.RFC3339)
+			}
+			if sec := runtimeAccount.GetWindow7dSeconds(); sec > 0 {
+				resp.Window7dSeconds = &sec
+				resp.Window7dKind = runtimeAccount.Window7dKind()
+			}
 		}
 		if t := runtimeAccount.GetLastUsedAt(); !t.IsZero() {
 			resp.LastUsedAt = t.Format(time.RFC3339)

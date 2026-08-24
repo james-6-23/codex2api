@@ -6483,6 +6483,13 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 	if account == nil || resp == nil {
 		return result
 	}
+	// Responses API / Grok are aggregate relay credentials. A relay may pass
+	// through x-codex-* headers from one of its own upstream accounts; applying
+	// them here would assign that leaf account's quota to the whole relay and can
+	// incorrectly affect bars, scheduling and automatic pause state.
+	if account.IsRelayStyle() {
+		return result
+	}
 	observedAt := time.Now()
 	if store != nil {
 		planHeader := resp.Header.Get("x-codex-plan-type")
