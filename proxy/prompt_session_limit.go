@@ -73,6 +73,12 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 
 	policyStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
+	if (policyStatus == "verified" || policyStatus == "signed_response") && policyContext.MetaVerified &&
+		policyContext.Meta.SessionAccounting == newAPISessionAccountingBypass &&
+		(policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSuggestions ||
+			policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSafety) {
+		return status, false
+	}
 	verifiedPerson := (policyStatus == "verified" || policyStatus == "signed_response") &&
 		policyContext.MetaVerified && strings.TrimSpace(policyContext.Identity.UserID) != ""
 	if verifiedPerson && h.store != nil {

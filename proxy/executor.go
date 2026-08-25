@@ -1193,15 +1193,16 @@ const downstreamAffinityHeader = "X-Codex2API-Affinity-Key"
 // dedicated downstream affinity header may only replace affinityID; it must
 // never change upstreamSeed or become an explicit upstream session.
 type requestSessionIdentity struct {
-	affinityID            string
-	upstreamSeed          string
-	explicitUpstreamID    string
-	stableIdentity        bool
-	hasDownstreamAffinity bool
-	hasRequestFingerprint bool
-	relatedToRoot         bool
-	relatedSource         auth.AccountSessionRelatedSource
-	relatedRequestID      string
+	affinityID             string
+	upstreamSeed           string
+	explicitUpstreamID     string
+	stableIdentity         bool
+	hasDownstreamAffinity  bool
+	hasRequestFingerprint  bool
+	relatedToRoot          bool
+	relatedSource          auth.AccountSessionRelatedSource
+	relatedRequestID       string
+	bypassWindowAccounting bool
 }
 
 const relatedSessionObservationContextKey = "related_session_observation_v1"
@@ -1283,6 +1284,10 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 	identity := resolveRequestSessionIdentity(c.Request.Header, body)
 	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
+	identity.bypassWindowAccounting = verifiedPolicy &&
+		policyContext.Meta.SessionAccounting == newAPISessionAccountingBypass &&
+		(policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSuggestions ||
+			policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSafety)
 	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
 	if rootIdentity.stable && !rootIdentity.conflict {
 		if fingerprint := strings.TrimSpace(rootIdentity.fingerprint); verifiedPolicy && fingerprint != "" {

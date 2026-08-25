@@ -29,6 +29,11 @@ func (h *Handler) populateAccountSessionObservation(c *gin.Context, input *datab
 	input.NewAPIUserName = strings.TrimSpace(audit.NewAPIUserName)
 	input.NewAPIPlatform = strings.TrimSpace(audit.NewAPIPlatform)
 	input.NewAPIUserID = strings.TrimSpace(audit.NewAPIUserID)
+	if verifiedNewAPISessionAccountingBypass(c) {
+		input.SessionHash = ""
+		input.RecordSessionObservation = false
+		return
+	}
 	input.SessionHash = strings.TrimSpace(audit.RootSessionHash)
 	if input.AccountID <= 0 || input.SessionHash == "" {
 		return

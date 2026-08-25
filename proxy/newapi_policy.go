@@ -33,6 +33,9 @@ const (
 	newAPIPolicyDecisionSignatureVersionV1 = "v1"
 	newAPIPolicyEventSignatureVersionV1    = "v1"
 	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
+	newAPISessionAccountingBypass          = "bypass"
+	newAPIPassiveFeatureAmbientSuggestions = "ambient_suggestions"
+	newAPIPassiveFeatureAmbientSafety      = "ambient_suggestion_safety"
 )
 
 type newAPIIdentity struct {
@@ -76,6 +79,8 @@ type newAPIPolicyMeta struct {
 	ThreadSource        string `json:"thread_source,omitempty"`
 	RequestKind         string `json:"request_kind,omitempty"`
 	SubagentKind        string `json:"subagent_kind,omitempty"`
+	SessionAccounting   string `json:"session_accounting,omitempty"`
+	PassiveFeature      string `json:"passive_feature,omitempty"`
 	// RootSessionFingerprint groups Guardian/sub-agent leaves under the
 	// user-visible Codex task. SessionFingerprint intentionally remains the
 	// exact leaf identity used by CYB conversation locking.
@@ -504,7 +509,37 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	if meta.SubagentKind, ok = normalizedVerifiedNewAPIIdentityText(meta.SubagentKind, 64); !ok {
 		return false
 	}
+	meta.SessionAccounting = strings.ToLower(strings.TrimSpace(meta.SessionAccounting))
+	meta.PassiveFeature = strings.ToLower(strings.TrimSpace(meta.PassiveFeature))
+	switch meta.SessionAccounting {
+	case "":
+		if meta.PassiveFeature != "" {
+			return false
+		}
+	case newAPISessionAccountingBypass:
+		if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot || !strings.EqualFold(meta.ThreadSource, "system") {
+			return false
+		}
+		if meta.PassiveFeature != newAPIPassiveFeatureAmbientSuggestions && meta.PassiveFeature != newAPIPassiveFeatureAmbientSafety {
+			return false
+		}
+	default:
+		return false
+	}
 	return true
+}
+
+func verifiedNewAPISessionAccountingBypass(c *gin.Context) bool {
+	if c == nil {
+		return false
+	}
+	raw, exists := c.Get(newAPIPolicyMetaContextKey)
+	policyContext, ok := raw.(verifiedNewAPIPolicyContext)
+	return exists && ok && policyContext.MetaVerified &&
+		policyContext.Meta.SessionAccounting == newAPISessionAccountingBypass &&
+		(policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSuggestions ||
+			policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSafety)
 }
 
 func normalizedVerifiedNewAPIIdentityText(value string, maxRunes int) (string, bool) {

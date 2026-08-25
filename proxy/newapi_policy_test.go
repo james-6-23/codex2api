@@ -338,6 +338,54 @@ func TestSignedPolicyMetaAcceptsRootSessionFingerprint(t *testing.T) {
 	}
 }
 
+func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testing.T) {
+	config := promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 300}
+	body := []byte(`{"model":"gpt-5.4","input":"ambient"}`)
+	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
+	rootFingerprint := promptSessionTestFingerprint("ambient-background-root")
+	baseMeta := newAPIPolicyMeta{
+		Profile:                promptfilter.GuardProfileBalanced,
+		Mode:                   promptfilter.GuardModeEnforce,
+		Provider:               string(promptfilter.ModelFamilyOpenAI),
+		Protocol:               string(promptfilter.ProtocolResponses),
+		SessionFingerprint:     promptSessionTestFingerprint("ambient-background-leaf"),
+		RootSessionVersion:     1,
+		RootSessionState:       newAPIPolicyRootSessionResolved,
+		RootSessionRelation:    newAPIPolicyRootSessionRelationRoot,
+		RootSessionFingerprint: rootFingerprint,
+		ThreadSource:           "system",
+		SessionAccounting:      newAPISessionAccountingBypass,
+		PassiveFeature:         newAPIPassiveFeatureAmbientSuggestions,
+	}
+	handlerCfg := promptGuardTestConfig()
+	handlerCfg.Advanced.NewAPI.Enabled = true
+	handlerCfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(handlerCfg)
+
+	validContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-valid", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, validContext, baseMeta, true)
+	policyContext, verified := handler.verifyNewAPIPolicyContext(validContext, config, body)
+	if !verified || !policyContext.MetaVerified || !verifiedNewAPISessionAccountingBypass(validContext) {
+		t.Fatalf("valid ambient accounting bypass was rejected: verified=%v context=%+v", verified, policyContext)
+	}
+
+	unknownFeature := baseMeta
+	unknownFeature.PassiveFeature = "client_claimed_background"
+	unknownContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-unknown", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, unknownContext, unknownFeature, true)
+	policyContext, verified = handler.verifyNewAPIPolicyContext(unknownContext, config, body)
+	if verified || policyContext.MetaVerified || verifiedNewAPISessionAccountingBypass(unknownContext) {
+		t.Fatalf("unknown accounting feature was accepted: verified=%v context=%+v", verified, policyContext)
+	}
+
+	forgedContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-forged", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, forgedContext, baseMeta, false)
+	policyContext, verified = handler.verifyNewAPIPolicyContext(forgedContext, config, body)
+	if verified || policyContext.MetaVerified || verifiedNewAPISessionAccountingBypass(forgedContext) {
+		t.Fatalf("unsigned ambient accounting bypass was accepted: verified=%v context=%+v", verified, policyContext)
+	}
+}
+
 func TestRequestRootSessionIdentityPolicyMetaPriority(t *testing.T) {
 	cfg := promptGuardTestConfig()
 	cfg.Advanced.NewAPI.Enabled = true

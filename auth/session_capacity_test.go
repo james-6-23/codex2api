@@ -92,6 +92,49 @@ func TestUnstableIdentityDoesNotConsumeAccountSessionCapacity(t *testing.T) {
 	}
 }
 
+func TestAuthenticatedSessionAccountingBypassKeepsAffinityWithoutConsumingWindow(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	if !store.AdmitAccountSession(account, "visible-window", time.Now()) {
+		t.Fatal("failed to fill visible account window")
+	}
+	bypassKey := SessionAccountingBypassAffinityKey("ambient-session::api-key:7")
+	selected, _ := store.NextForSession(bypassKey, 0, nil)
+	if selected != account {
+		t.Fatal("background request was blocked by visible session capacity")
+	}
+	store.BindSessionAffinity(bypassKey, selected, "")
+	store.Release(selected)
+	if got := store.AccountSessionCount(account.DBID, time.Now()); got != 1 {
+		t.Fatalf("background request changed visible account windows to %d", got)
+	}
+	if _, found := store.SessionAffinityAccountID(bypassKey); !found {
+		t.Fatal("background request lost normal affinity binding")
+	}
+	if store.HasSessionCapacityExhaustionWithDispatch(0, nil, nil, DispatchPolicyStandard, bypassKey, time.Now()) {
+		t.Fatal("background request was reported as account session exhaustion")
+	}
+}
+
+func TestAuthenticatedSessionAccountingBypassIsExcludedFromWindowBalance(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	account.SessionCapacityEnabled = false
+	bypassKey := SessionAccountingBypassAffinityKey("ambient-session::api-key:7")
+	store.BindSessionAffinity(bypassKey, account, "")
+	if counts := store.accountWindowCountsForScheduling([]*Account{account}, time.Now()); counts[account.DBID] != 0 {
+		t.Fatalf("background affinity entered window balancing: %#v", counts)
+	}
+}
+
+func TestClientCannotForgeSessionAccountingBypassPrefix(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	if !store.AdmitAccountSession(account, "visible-window", time.Now()) {
+		t.Fatal("failed to fill visible account window")
+	}
+	if store.AdmitAccountSession(account, "non-accounting-affinity:client-forged", time.Now()) {
+		t.Fatal("client-controlled session id forged the private accounting bypass")
+	}
+}
+
 func TestRelatedRequestBorrowsRootAccountWithoutRefreshingOrCreatingWindow(t *testing.T) {
 	store, account := newSessionCapacityTestStore(1)
 	now := time.Now()

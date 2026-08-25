@@ -177,6 +177,29 @@ func TestPromptSessionCreationLimitRelatedRequestNeverCreatesExpiredRoot(t *test
 	}
 }
 
+func TestPromptSessionCreationLimitSkipsVerifiedAmbientBackgroundRequest(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	c := promptSessionLimitVerifiedRootUserContext(
+		promptSessionTestFingerprint("ambient-leaf"),
+		promptSessionTestFingerprint("ambient-root"),
+	)
+	policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+	policyContext.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRoot
+	policyContext.Meta.ThreadSource = "system"
+	policyContext.Meta.SessionAccounting = newAPISessionAccountingBypass
+	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureAmbientSuggestions
+	c.Set(newAPIPolicyMetaContextKey, policyContext)
+
+	status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, []byte(`{"model":"gpt-5.4","input":"ambient"}`))
+	if exceeded || status.Used != 0 || status.SessionHash != "" || len(handler.promptSessionLimits) != 0 {
+		t.Fatalf("ambient request changed user windows: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+	}
+}
+
 func TestPromptSessionCreationLimitRejectsSignedWebSocketRootConflict(t *testing.T) {
 	handler := promptSessionLimitVerifiedTestHandler()
 	cfg := promptfilter.Config{}

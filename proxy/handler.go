@@ -230,6 +230,9 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 
 func capacityAwareSessionAffinityKey(identity requestSessionIdentity, apiKeyID int64) string {
 	key := sessionAffinityKey(identity.affinityID, apiKeyID)
+	if key != "" && identity.bypassWindowAccounting {
+		return auth.SessionAccountingBypassAffinityKey(key)
+	}
 	if key != "" && identity.relatedToRoot {
 		return auth.RelatedSessionAffinityKey(key)
 	}

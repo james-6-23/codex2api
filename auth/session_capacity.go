@@ -28,6 +28,11 @@ const UnstableSessionCapacityPrefix = "unstable-affinity:"
 // borrow an account/window.
 var relatedSessionCapacityPrefix = "related-affinity:" + uuid.NewString() + ":"
 
+// sessionAccountingBypassCapacityPrefix is process-private so a downstream
+// Session-Id cannot impersonate a verified gateway decision. The key remains
+// a normal affinity identity, but it never enters account-window accounting.
+var sessionAccountingBypassCapacityPrefix = "non-accounting-affinity:" + uuid.NewString() + ":"
+
 const maxRelatedRequestDedupeEntries = 512
 
 func RelatedSessionRootKey(sessionKey string) (string, bool) {
@@ -47,6 +52,20 @@ func RelatedSessionAffinityKey(rootKey string) string {
 		return ""
 	}
 	return relatedSessionCapacityPrefix + rootKey
+}
+
+// SessionAccountingBypassAffinityKey marks a gateway-authenticated background
+// request as affinity-capable but excluded from account session capacity.
+func SessionAccountingBypassAffinityKey(key string) string {
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return ""
+	}
+	return sessionAccountingBypassCapacityPrefix + key
+}
+
+func isSessionAccountingBypassKey(key string) bool {
+	return strings.HasPrefix(strings.TrimSpace(key), sessionAccountingBypassCapacityPrefix)
 }
 
 // AccountSessionOwner is optional, verified downstream identity shown only to
@@ -141,7 +160,7 @@ func (s *Store) AdmitAccountSession(account *Account, sessionKey string, now tim
 		return false
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
-	if strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) {
+	if strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionKey) {
 		return true
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -183,7 +202,7 @@ func (s *Store) CanAdmitAccountSession(account *Account, sessionKey string, now 
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
 	enabled, limit, idleTTL := account.SessionCapacityConfig()
-	if !enabled || sessionKey == "" || strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) {
+	if !enabled || sessionKey == "" || strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionKey) {
 		return true
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -207,7 +226,7 @@ func (s *Store) CanAdmitAccountSession(account *Account, sessionKey string, now 
 // the new session. This prevents an unrelated full account from turning a
 // model/channel availability failure into a misleading session-capacity 429.
 func (s *Store) HasSessionCapacityExhaustionWithDispatch(apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy, sessionKey string, now time.Time) bool {
-	if s == nil || strings.TrimSpace(sessionKey) == "" || strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) {
+	if s == nil || strings.TrimSpace(sessionKey) == "" || strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionKey) {
 		return false
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -245,7 +264,7 @@ func (s *Store) HasSessionCapacityExhaustionWithDispatch(apiKeyID int64, exclude
 }
 
 func (s *Store) TouchAccountSession(accountID int64, sessionKey string, now time.Time) {
-	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" {
+	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" || isSessionAccountingBypassKey(sessionKey) {
 		return
 	}
 	if now.IsZero() {
@@ -264,6 +283,9 @@ func (s *Store) TouchAccountSession(accountID int64, sessionKey string, now time
 // AccountSessionAccountID returns the account that currently owns sessionKey.
 // Expired entries are removed before matching.
 func (s *Store) AccountSessionAccountID(sessionKey string, now time.Time) (int64, bool) {
+	if isSessionAccountingBypassKey(sessionKey) {
+		return 0, false
+	}
 	if rootKey, related := RelatedSessionRootKey(sessionKey); related {
 		sessionKey = rootKey
 	}
@@ -295,7 +317,7 @@ func (s *Store) AccountSessionAccountID(sessionKey string, now time.Time) (int64
 }
 
 func (s *Store) SetAccountSessionOwner(accountID int64, sessionKey string, owner AccountSessionOwner) {
-	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" {
+	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" || isSessionAccountingBypassKey(sessionKey) {
 		return
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -378,7 +400,7 @@ func normalizeRelatedSessionLabel(value string, maxRunes int) string {
 }
 
 func (s *Store) RemoveAccountSession(accountID int64, sessionKey string) bool {
-	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" {
+	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" || isSessionAccountingBypassKey(sessionKey) {
 		return false
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -494,6 +516,9 @@ func (s *Store) accountWindowCountsForScheduling(accounts []*Account, now time.T
 			continue
 		}
 		if _, related := RelatedSessionRootKey(key); related {
+			continue
+		}
+		if isSessionAccountingBypassKey(key) {
 			continue
 		}
 		if _, explicit := capacityEnabled[binding.accountID]; !explicit {

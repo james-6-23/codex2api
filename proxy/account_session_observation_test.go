@@ -70,6 +70,32 @@ func TestPopulateAccountSessionObservationUsesRootButKeepsLeafForAudit(t *testin
 	}
 }
 
+func TestPopulateAccountSessionObservationSkipsVerifiedAmbientBackgroundRequest(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	c := promptSessionLimitVerifiedRootUserContext(
+		promptSessionTestFingerprint("ambient-leaf-observation"),
+		promptSessionTestFingerprint("ambient-root-observation"),
+	)
+	policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+	policyContext.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRoot
+	policyContext.Meta.ThreadSource = "system"
+	policyContext.Meta.SessionAccounting = newAPISessionAccountingBypass
+	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureAmbientSuggestions
+	c.Set(newAPIPolicyMetaContextKey, policyContext)
+	if audit := handler.capturePromptFilterAuditContext(c); audit.SessionHash == "" || audit.RootSessionHash == "" {
+		t.Fatalf("ambient request lost normal audit identity: %+v", audit)
+	}
+
+	input := &database.UsageLogInput{AccountID: 9}
+	handler.populateAccountSessionObservation(c, input)
+	if input.RecordSessionObservation || input.SessionHash != "" {
+		t.Fatalf("ambient request created an operational account window: %+v", input)
+	}
+	if input.NewAPIUserID != "42" || input.NewAPIPlatform != "newapi" {
+		t.Fatalf("ambient usage log lost verified NewAPI attribution: %+v", input)
+	}
+}
+
 func TestPopulateAccountSessionObservationUsesCurrentWebSocketFrameRoot(t *testing.T) {
 	handler := &Handler{}
 	frame := func(leaf string, sequence int) *gin.Context {
