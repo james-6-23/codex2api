@@ -412,6 +412,31 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
   -d '{"access_token": "eyJtoken1...\neyJtoken2...\neyJtoken3..."}'
 ```
 
+#### 添加 OrcaRouter 网关账号
+
+Codex2API 也可以把 **OrcaRouter** 网关凭据作为一等上游类型加入账号池。[OrcaRouter](https://www.orcarouter.ai) 是 OpenAI-Responses 兼容网关：填入 `sk-orca-` API Key 与 Base URL，拉取它暴露的模型清单，账号池就会用与 Codex OAuth 账号相同的调度、健康评分与用量追踪来路由 `/v1/responses` 流量。它在同一端点还运行网关级、零信任的 AI Agent 安全能力——默认拒绝地审查每一条 prompt/response 并治理每一次工具调用，无需改动应用代码。
+
+```bash
+# 添加一个 OrcaRouter 网关账号
+curl -X POST http://localhost:8080/api/admin/accounts/orcarouter \
+  -H "X-Admin-Key: your-admin-secret" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "orcarouter-pool",
+    "base_url": "https://api.orcarouter.ai/v1",
+    "api_key": "sk-orca-xxxxxxxxxxxx",
+    "models": ["orcarouter/auto"]
+  }'
+
+# 拉取 Base URL + key 暴露的模型目录
+curl -X POST http://localhost:8080/api/admin/accounts/orcarouter/models \
+  -H "X-Admin-Key: your-admin-secret" \
+  -H "Content-Type: application/json" \
+  -d '{"base_url": "https://api.orcarouter.ai/v1", "api_key": "sk-orca-xxxxxxxxxxxx"}'
+```
+
+OrcaRouter 账号可以在 Accounts 页像其他上游一样管理：通过 **OrcaRouter** 标签添加、编辑 Base URL / 模型白名单、测试连通性并查看用量。`platform` 列标记为 `orcarouter`，便于在管理后台识别。
+
 #### 文件批量导入
 
 ```bash
