@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -8,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/codex2api/auth"
+	"github.com/gin-gonic/gin"
 )
 
 const (
@@ -17,6 +19,10 @@ const (
 	testLeafSessionB = "01a031a4-c842-7061-bf7b-4a9aabc6e7a4"
 	testIntermediate = "01a031b0-8317-7b21-9297-85bbd886eb9e"
 )
+
+func standaloneAmbientSuggestionsBody(model string) []byte {
+	return []byte(`{"model":"` + model + `","input":"# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for what this user can do with Codex in this local project.","text":{"format":{"type":"json_schema","schema":{"type":"object","properties":{"suggestions":{"type":"array"}}}}}}`)
+}
 
 func nativeSessionHeaders(root, leaf string, sequence int) http.Header {
 	headers := http.Header{}
@@ -98,6 +104,56 @@ func TestSignedRelatedRequestUsesRootAffinityWithNonCountingMarker(t *testing.T)
 	}
 }
 
+func TestSignedGuardianReviewedRootOverridesIndependentLeafGraph(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	rootFingerprint := newAPIRootSessionFingerprint("newapi", "42", testRootSessionA)
+	c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("guardian-leaf"), rootFingerprint)
+	policy := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+	policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policy.Meta.ThreadSource = "subagent"
+	policy.Meta.RequestKind = "turn"
+	policy.Meta.SubagentKind = "guardian"
+	policy.Meta.PassiveFeature = newAPIPassiveFeatureGuardianApproval
+	policy.Meta.RequestedModel = "gpt-5.6-luna"
+	c.Set(newAPIPolicyMetaContextKey, policy)
+	// The Guardian transport can carry its own coherent native task graph while
+	// NewAPI has authenticated the exact reviewed parent root from the prompt.
+	c.Request.Header = nativeSessionHeaders(testRootSessionB, testRootSessionB, 0)
+
+	body := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-luna")
+	body = []byte(strings.Replace(string(body), "00000000-0000-0000-0000-000000000001", testRootSessionA, 1))
+	identity := handler.resolveRequestRootSessionIdentityForContext(c, body)
+	if identity.conflict || !identity.stable || !identity.related || identity.sessionID != rootFingerprint {
+		t.Fatalf("signed Guardian reviewed root was rejected: %+v", identity)
+	}
+}
+
+func TestSignedProjectTitleRootOverrideAcceptsIndependentTitleGraph(t *testing.T) {
+	for name, body := range map[string][]byte{
+		"single user message":  projectTitleRoutingTestBody(),
+		"NewAPI direct string": projectTitleRoutingStringInputTestBody(),
+	} {
+		t.Run(name, func(t *testing.T) {
+			handler := promptSessionLimitVerifiedTestHandler()
+			rootFingerprint := promptSessionTestFingerprint("project-title-parent-root-" + name)
+			c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("project-title-leaf-"+name), rootFingerprint)
+			policy := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+			policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+			policy.Meta.ThreadSource = "system"
+			policy.Meta.RequestKind = "turn"
+			policy.Meta.PassiveFeature = "system_passive"
+			policy.Meta.RequestedModel = "gpt-5.6-luna"
+			c.Set(newAPIPolicyMetaContextKey, policy)
+			c.Request.Header = nativeSessionHeaders(testRootSessionB, testRootSessionB, 0)
+
+			identity := handler.resolveRequestRootSessionIdentityForContext(c, body)
+			if identity.conflict || !identity.stable || !identity.related || identity.sessionID != rootFingerprint || identity.threadSource != "system" {
+				t.Fatalf("signed project title parent root was rejected: %+v", identity)
+			}
+		})
+	}
+}
+
 func TestSignedUserCompactionOwnsAndRecoversRootAffinity(t *testing.T) {
 	handler := promptSessionLimitVerifiedTestHandler()
 	rootFingerprint := promptSessionTestFingerprint("user-compaction-root")
@@ -132,6 +188,82 @@ func TestStandaloneNativeUserCompactionOwnsRootAffinity(t *testing.T) {
 	want := testRootSessionA + "::api-key:7"
 	if got := capacityAwareSessionAffinityKey(identity, 7); got != want {
 		t.Fatalf("standalone user compaction affinity = %q, want root %q", got, want)
+	}
+}
+
+func TestStandaloneNativeAmbientSystemTurnBypassesWindowAccounting(t *testing.T) {
+	c := promptSessionLimitTestContext("")
+	c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
+	c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"system","request_kind":"turn"}`)
+	body := standaloneAmbientSuggestionsBody("gpt-5.6-terra")
+	setRawRequestBody(c, body)
+	handler := &Handler{}
+
+	identity := handler.resolveRequestSessionIdentityForContext(c, body)
+	if !identity.bypassWindowAccounting || identity.relatedToRoot {
+		t.Fatalf("direct ambient identity = %+v", identity)
+	}
+	key := capacityAwareSessionAffinityKey(identity, 7)
+	if key == testRootSessionA+"::api-key:7" {
+		t.Fatalf("ambient request used normal accounting key %q", key)
+	}
+	if !requestSessionAccountingBypass(c) {
+		t.Fatal("local ambient classification was not retained for later accounting stages")
+	}
+}
+
+func TestStandaloneAmbientBypassRequiresNativeCodexRoot(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(*gin.Context)
+	}{
+		{name: "source label without native graph", prepare: func(c *gin.Context) {
+			c.Request.Header.Set(codexTurnMetadataHeader, `{"thread_source":"system","request_kind":"turn"}`)
+			c.Request.Header.Set("Session-Id", testRootSessionA)
+		}},
+		{name: "native user turn", prepare: func(c *gin.Context) {
+			c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
+			c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"user","request_kind":"turn"}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := promptSessionLimitTestContext("")
+			tc.prepare(c)
+			body := standaloneAmbientSuggestionsBody("gpt-5.6-terra")
+			identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
+			if identity.bypassWindowAccounting || requestSessionAccountingBypass(c) {
+				t.Fatalf("untrusted ambient shape bypassed accounting: %+v", identity)
+			}
+		})
+	}
+}
+
+func TestStandaloneAmbientBypassRejectsForgedSystemMetadataWithoutApplicationTemplate(t *testing.T) {
+	c := promptSessionLimitTestContext("")
+	c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
+	c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"system","request_kind":"turn"}`)
+	body := []byte(`{"model":"gpt-5.6-terra","input":"ordinary request pretending to be a system job"}`)
+	identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
+	if identity.bypassWindowAccounting || requestSessionAccountingBypass(c) {
+		t.Fatalf("forged ambient request bypassed accounting: %+v", identity)
+	}
+}
+
+func TestStandaloneAmbientBypassRejectsTemplateWithExpandedConversationSurface(t *testing.T) {
+	base := standaloneAmbientSuggestionsBody("gpt-5.6-terra")
+	for name, body := range map[string][]byte{
+		"conversation":       bytes.Replace(base, []byte(`"model":"gpt-5.6-terra",`), []byte(`"model":"gpt-5.6-terra","conversation":"conv_other",`), 1),
+		"context management": bytes.Replace(base, []byte(`"model":"gpt-5.6-terra",`), []byte(`"model":"gpt-5.6-terra","context_management":{"type":"compaction"},`), 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := promptSessionLimitTestContext("")
+			c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
+			c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"system","request_kind":"turn"}`)
+			identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
+			if identity.bypassWindowAccounting || requestSessionAccountingBypass(c) {
+				t.Fatalf("expanded ambient request bypassed accounting: %+v", identity)
+			}
+		})
 	}
 }
 

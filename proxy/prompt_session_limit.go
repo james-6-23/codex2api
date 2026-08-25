@@ -38,7 +38,7 @@ type promptSessionCreationLimitStatus struct {
 // review/naming request consume one of the user's windows merely because the
 // downstream Codex client carried its normal Session-Id.
 func (h *Handler) checkPromptSessionCreationLimitForSelectedAccount(c *gin.Context, body []byte, account *auth.Account) (promptSessionCreationLimitStatus, bool) {
-	if account == nil || (c != nil && c.GetBool("prompt_intelligence_internal")) {
+	if account == nil || isProjectTitleRequest(c) || (c != nil && c.GetBool("prompt_intelligence_internal")) {
 		return promptSessionCreationLimitStatus{}, false
 	}
 	enabled, _, _ := account.SessionCapacityConfig()
@@ -71,14 +71,11 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	if h == nil || c == nil {
 		return status, false
 	}
-
-	policyStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
-	if (policyStatus == "verified" || policyStatus == "signed_response") && policyContext.MetaVerified &&
-		policyContext.Meta.SessionAccounting == newAPISessionAccountingBypass &&
-		(policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSuggestions ||
-			policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSafety) {
+	if isProjectTitleRequest(c) {
 		return status, false
 	}
+
+	policyStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	verifiedPerson := (policyStatus == "verified" || policyStatus == "signed_response") &&
 		policyContext.MetaVerified && strings.TrimSpace(policyContext.Identity.UserID) != ""
 	if verifiedPerson && h.store != nil {
@@ -100,6 +97,17 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 
 	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
+	if feature, bypass := h.classifyVerifiedNewAPIAmbientSessionAccounting(c, body); bypass {
+		setLocalSessionAccountingBypass(c, feature, true)
+		return status, false
+	}
+	if requestSessionAccountingBypass(c) {
+		return status, false
+	}
+	if feature, bypass := classifyLocalCodexAmbientSessionAccounting(c, body, rootIdentity); bypass {
+		setLocalSessionAccountingBypass(c, feature, true)
+		return status, false
+	}
 	if rootIdentity.authoritative && rootIdentity.conflict {
 		status.IdentityConflict = true
 		return status, true

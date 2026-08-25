@@ -1285,11 +1285,18 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 	identity := resolveRequestSessionIdentity(c.Request.Header, body)
 	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
-	identity.bypassWindowAccounting = verifiedPolicy &&
-		policyContext.Meta.SessionAccounting == newAPISessionAccountingBypass &&
-		(policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSuggestions ||
-			policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSafety)
+	signedFeature, signedAccountingBypass := h.classifyVerifiedNewAPIAmbientSessionAccounting(c, body)
 	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
+	localFeature, localAccountingBypass := "", false
+	if !verifiedPolicy {
+		localFeature, localAccountingBypass = classifyLocalCodexAmbientSessionAccounting(c, body, rootIdentity)
+	}
+	if signedAccountingBypass {
+		setLocalSessionAccountingBypass(c, signedFeature, true)
+	} else {
+		setLocalSessionAccountingBypass(c, localFeature, localAccountingBypass)
+	}
+	identity.bypassWindowAccounting = signedAccountingBypass || localAccountingBypass
 	if rootIdentity.stable && !rootIdentity.conflict {
 		if fingerprint := strings.TrimSpace(rootIdentity.fingerprint); verifiedPolicy && fingerprint != "" {
 			identity.affinityID = "newapi-root-session:" + fingerprint

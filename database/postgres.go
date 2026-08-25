@@ -1640,17 +1640,20 @@ type APIKeyLimits struct {
 	// NoAffinityGroupIDs 指定未携带 Codex 引擎指纹或 X-Codex2API-Affinity-Key 的请求使用的账号分组。
 	// 空表示不启用分流，继续沿用 AllowedGroupIDs 的现有行为。
 	NoAffinityGroupIDs []int64 `json:"no_affinity_group_ids,omitempty"`
-	RPM                int     `json:"rpm,omitempty"`
-	RPD                int     `json:"rpd,omitempty"`
-	MaxConcurrency     int     `json:"max_concurrency,omitempty"`
-	CostLimit5h        float64 `json:"cost_limit_5h,omitempty"`
-	CostLimit7d        float64 `json:"cost_limit_7d,omitempty"`
-	CostLimit30d       float64 `json:"cost_limit_30d,omitempty"`
-	CostLimitDaily     float64 `json:"cost_limit_daily,omitempty"`
-	TokenLimit5h       int64   `json:"token_limit_5h,omitempty"`
-	TokenLimit7d       int64   `json:"token_limit_7d,omitempty"`
-	TokenLimit30d      int64   `json:"token_limit_30d,omitempty"`
-	TokenLimitDaily    int64   `json:"token_limit_daily,omitempty"`
+	// ProjectTitleGroupID 指定 Codex 项目命名请求使用的账号分组。0 表示关闭。
+	// 命名请求只在该组内正常调度，不再借用主窗口的账号绑定。
+	ProjectTitleGroupID int64   `json:"project_title_group_id,omitempty"`
+	RPM                 int     `json:"rpm,omitempty"`
+	RPD                 int     `json:"rpd,omitempty"`
+	MaxConcurrency      int     `json:"max_concurrency,omitempty"`
+	CostLimit5h         float64 `json:"cost_limit_5h,omitempty"`
+	CostLimit7d         float64 `json:"cost_limit_7d,omitempty"`
+	CostLimit30d        float64 `json:"cost_limit_30d,omitempty"`
+	CostLimitDaily      float64 `json:"cost_limit_daily,omitempty"`
+	TokenLimit5h        int64   `json:"token_limit_5h,omitempty"`
+	TokenLimit7d        int64   `json:"token_limit_7d,omitempty"`
+	TokenLimit30d       int64   `json:"token_limit_30d,omitempty"`
+	TokenLimitDaily     int64   `json:"token_limit_daily,omitempty"`
 	// DisableImageGeneration 为 true 时，该 Key 禁止访问生图模型(gpt-image-*)与
 	// 生图工具链路(image_generation 工具 / /v1/images 端点)，命中一律 403。
 	// 保留为向后兼容字段：新配置改用 ImageGenerationPolicy；未设 policy 时该 bool=true
@@ -1725,7 +1728,7 @@ func (l APIKeyLimits) ResolveImageGenerationPolicy() string {
 // IsZero 判断是否为空 limits(全部字段都未配置)
 func (l APIKeyLimits) IsZero() bool {
 	return len(l.ModelAllow) == 0 && len(l.ModelDeny) == 0 && len(l.PlanAllow) == 0 &&
-		len(l.NoAffinityGroupIDs) == 0 &&
+		len(l.NoAffinityGroupIDs) == 0 && l.ProjectTitleGroupID == 0 &&
 		l.RPM == 0 && l.RPD == 0 && l.MaxConcurrency == 0 &&
 		l.CostLimit5h == 0 && l.CostLimit7d == 0 && l.CostLimit30d == 0 && l.CostLimitDaily == 0 &&
 		l.TokenLimit5h == 0 && l.TokenLimit7d == 0 && l.TokenLimit30d == 0 && l.TokenLimitDaily == 0 &&

@@ -188,6 +188,37 @@ func TestAccountGroupBaseConcurrencyOverrideAPIThreeState(t *testing.T) {
 	}
 }
 
+func TestRefreshAPIKeyGroupsClearsDeletedProjectTitleRoute(t *testing.T) {
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	groupID, err := db.CreateAccountGroup(ctx, "title-only", "", "", 0, 0, sql.NullInt64{})
+	if err != nil {
+		t.Fatalf("CreateAccountGroup: %v", err)
+	}
+	keyID, err := db.InsertAPIKeyWithOptions(ctx, database.APIKeyInput{
+		Name: "title key", Key: "sk-title-group-delete-1234567890",
+		Limits: database.APIKeyLimits{ProjectTitleGroupID: groupID},
+	})
+	if err != nil {
+		t.Fatalf("InsertAPIKeyWithOptions: %v", err)
+	}
+	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2})
+	t.Cleanup(store.Stop)
+	store.SetAPIKeyProjectTitleGroup(keyID, groupID)
+	titleAccount := &auth.Account{DBID: 9, GroupIDs: []int64{groupID}, Status: auth.StatusReady}
+	if !store.APIKeyAllowsAccount(-keyID, titleAccount) {
+		t.Fatal("test setup did not authorize project-title group")
+	}
+	if err := db.DeleteAccountGroup(ctx, groupID); err != nil {
+		t.Fatalf("DeleteAccountGroup: %v", err)
+	}
+	handler := &Handler{db: db, store: store}
+	handler.refreshAPIKeyAllowedGroupsAfterGroupDelete(ctx, groupID)
+	if store.APIKeyAllowsAccount(-keyID, titleAccount) {
+		t.Fatal("deleted account group remained in project-title routing cache")
+	}
+}
+
 func TestCreateAccountGroupRejectsInvalidBaseConcurrencyOverride(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := &Handler{db: newTestAdminDB(t)}

@@ -126,6 +126,13 @@ func TestAPIKeyLimitsIsZeroCoversNoAffinityGroups(t *testing.T) {
 	}
 }
 
+func TestAPIKeyLimitsIsZeroCoversProjectTitleGroup(t *testing.T) {
+	limits := APIKeyLimits{ProjectTitleGroupID: 20}
+	if limits.IsZero() {
+		t.Fatal("project-title group configuration was treated as empty limits")
+	}
+}
+
 func TestAPIKeyScopeExhaustionDescribeKeepsTinyBudgetsReadable(t *testing.T) {
 	hit := APIKeyScopeExhaustion{Window: "1d", Metric: "cost", Used: 0.0003875, Limit: 0.00005}
 	msg := hit.Describe(`group "111"`)

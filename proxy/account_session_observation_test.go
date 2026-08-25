@@ -79,9 +79,15 @@ func TestPopulateAccountSessionObservationSkipsVerifiedAmbientBackgroundRequest(
 	policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
 	policyContext.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRoot
 	policyContext.Meta.ThreadSource = "system"
+	policyContext.Meta.RequestedModel = "gpt-5.4"
 	policyContext.Meta.SessionAccounting = newAPISessionAccountingBypass
 	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureAmbientSuggestions
 	c.Set(newAPIPolicyMetaContextKey, policyContext)
+	body := standaloneAmbientSuggestionsBody("gpt-5.4")
+	setRawRequestBody(c, body)
+	if identity := handler.resolveRequestSessionIdentityForContext(c, body); !identity.bypassWindowAccounting {
+		t.Fatalf("verified ambient request was not body-validated: %+v", identity)
+	}
 	if audit := handler.capturePromptFilterAuditContext(c); audit.SessionHash == "" || audit.RootSessionHash == "" {
 		t.Fatalf("ambient request lost normal audit identity: %+v", audit)
 	}
@@ -93,6 +99,25 @@ func TestPopulateAccountSessionObservationSkipsVerifiedAmbientBackgroundRequest(
 	}
 	if input.NewAPIUserID != "42" || input.NewAPIPlatform != "newapi" {
 		t.Fatalf("ambient usage log lost verified NewAPI attribution: %+v", input)
+	}
+}
+
+func TestPopulateAccountSessionObservationSkipsStandaloneNativeAmbientBackgroundRequest(t *testing.T) {
+	handler := &Handler{}
+	c := promptSessionLimitTestContext("")
+	c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
+	c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"system","request_kind":"turn"}`)
+	body := standaloneAmbientSuggestionsBody("gpt-5.4")
+	setRawRequestBody(c, body)
+	identity := handler.resolveRequestSessionIdentityForContext(c, body)
+	if !identity.bypassWindowAccounting {
+		t.Fatalf("standalone ambient request was not classified: %+v", identity)
+	}
+
+	input := &database.UsageLogInput{AccountID: 9}
+	handler.populateAccountSessionObservation(c, input)
+	if input.RecordSessionObservation || input.SessionHash != "" {
+		t.Fatalf("standalone ambient request created an operational account window: %+v", input)
 	}
 }
 

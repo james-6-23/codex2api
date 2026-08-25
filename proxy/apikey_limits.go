@@ -137,7 +137,7 @@ func (h *Handler) enforceAPIKeyLimits(c *gin.Context, model string) (int, string
 	}
 
 	// 1. 模型白/黑名单 (O(1) 本机校验,无 I/O)
-	if model != "" {
+	if model != "" && !isProjectTitleRequest(c) {
 		if msg := checkAPIKeyModel(model, limits); msg != "" {
 			return http.StatusForbidden, msg
 		}

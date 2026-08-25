@@ -298,8 +298,14 @@ func codexWSTurnContinuationToken(body []byte) string {
 // 否则分流组既服务无指纹请求、又照常接真 Codex 流量，隔离等于没做——而不限分组恰恰是
 // 绝大多数 Key 的默认配置。
 func applyAffinityGroupRouting(c *gin.Context, identity requestSessionIdentity, filter auth.AccountFilter) auth.AccountFilter {
+	if isProjectTitleRequest(c) {
+		return filter
+	}
 	row := apiKeyRowFromContext(c)
-	if row == nil || len(row.Limits.NoAffinityGroupIDs) == 0 {
+	if row == nil {
+		return filter
+	}
+	if len(row.Limits.NoAffinityGroupIDs) == 0 {
 		return filter
 	}
 
@@ -411,7 +417,10 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 // remains pinned to the root session's exact account; a missing, disabled,
 // busy, cooled-down, or excluded root account never falls back to another one.
 func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, fallbackRequestedModel, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
-	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !identity.relatedToRoot || identity.ownsRootBinding {
+	if isProjectTitleRequest(c) {
+		return filter
+	}
+	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !passiveInternalRequestAuthorized(c) || !identity.relatedToRoot || identity.ownsRootBinding {
 		return filter
 	}
 	requestedModel := strings.TrimSpace(fallbackRequestedModel)
@@ -1227,6 +1236,7 @@ func (h *Handler) syncAPIKeyAllowedGroups(row *database.APIKeyRow) {
 	}
 	h.store.SetAPIKeyAllowedGroups(row.ID, row.AllowedGroupIDs)
 	h.store.SetAPIKeyNoAffinityGroups(row.ID, row.Limits.NoAffinityGroupIDs)
+	h.store.SetAPIKeyProjectTitleGroup(row.ID, row.Limits.ProjectTitleGroupID)
 	h.store.SetAPIKeyAllowedPlans(row.ID, row.Limits.PlanAllow)
 	h.store.SetAPIKeyUpstreamChannel(row.ID, row.Limits.ResolveUpstreamChannel())
 }
@@ -2955,6 +2965,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	} else {
 		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
 	}
+	cacheTrustedRequestedModel(c, requestModel)
 	rawBody, _ = normalizePortableResponsesCompactionHistory(rawBody)
 	setRawRequestBody(c, rawBody)
 
@@ -2997,6 +3008,9 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendMissingFieldError(c, "model")
 		return
 	}
+	h.primeNewAPIPolicyContext(c, ingressRequestBody(c, rawBody))
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
+	classifyProjectTitleRequest(c, logModel, rawBody, &sessionIdentity)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses", model) {
 		return
 	}
@@ -3007,8 +3021,8 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
-	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
+	schedulingAPIKeyID := projectTitleSchedulingAPIKeyID(c, apiKeyID)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
@@ -3067,6 +3081,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		accountFilter = accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
 	}
 	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
+	accountFilter = applyProjectTitleModelRouting(c, effectiveModel, true, accountFilter)
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
@@ -3116,7 +3131,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			if attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
-				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 					h.store.Release(account)
 					account = nil
@@ -3125,11 +3140,11 @@ func (h *Handler) Responses(c *gin.Context) {
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			} else if continuationUnavailable && !relayContinuationAttempted {
-				account, stickyProxyURL = h.nextAccountForSessionWithDispatch(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account, stickyProxyURL = h.nextAccountForSessionWithDispatch(affinityKey, schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			} else if turnContinuationPinned {
-				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, schedulingAPIKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			} else {
-				account, stickyProxyURL = h.nextRetryAccountForSessionWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL = h.nextRetryAccountForSessionWithDispatch(c.Request.Context(), affinityKey, schedulingAPIKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			}
 		}
 		if account == nil {
@@ -3146,11 +3161,11 @@ func (h *Handler) Responses(c *gin.Context) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, msg)
 				return
 			}
-			if h.store.HasUsageLimitedCandidateWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
+			if h.store.HasUsageLimitedCandidateWithDispatch(schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "Codex 账号用量窗口已达上限")
 				return
 			}
-			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+			if h.store.HasSessionCapacityExhaustionWithDispatch(schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
 				SendAccountSessionCapacityError(c)
 				return
 			}
@@ -4445,6 +4460,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 先让全局/渠道映射看到客户端原始模型（包括 -openai-compact 别名）；
 	// 没有命中映射时，再按兼容规则剥离后缀。
 	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredCompactModelMappingToBody(rawBody, supportedModels)
+	cacheTrustedRequestedModel(c, requestModel)
 	rawBody, _ = normalizePortableResponsesCompactionHistory(rawBody)
 	setRawRequestBody(c, rawBody)
 
@@ -5145,6 +5161,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())
 	rawBody, requestModel, mappedModel, mappingApplied := h.applyConfiguredModelMappingToBody(rawBody, supportedModels)
+	cacheTrustedRequestedModel(c, requestModel)
 
 	// Validate request
 	validator := api.NewValidator(rawBody)

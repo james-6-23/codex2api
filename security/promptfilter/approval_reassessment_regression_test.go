@@ -27,6 +27,9 @@ func autoReviewEnvelope(text string) RequestEnvelope {
 	envelope := applicationPromptEnvelope(text)
 	envelope.RequestedModel = "codex-auto-review"
 	envelope.EffectiveModel = "codex-auto-review"
+	// These parser-unit fixtures model a request whose body-level single-user
+	// contract was already closed by the Responses adapter.
+	envelope.closedApprovalReassessment = true
 	return envelope
 }
 

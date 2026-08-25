@@ -338,9 +338,107 @@ func TestSignedPolicyMetaAcceptsRootSessionFingerprint(t *testing.T) {
 	}
 }
 
+func TestPrimeNewAPIPolicyContextMakesSignedProjectTitleRootAvailableBeforeSessionResolution(t *testing.T) {
+	// Use the direct-string payload emitted by NewAPI's Codex relay. Keeping
+	// this protocol vector here prevents the gateway and Codex2API classifiers
+	// from drifting into two individually valid but incompatible title shapes.
+	body := projectTitleRoutingStringInputTestBody()
+	rootFingerprint := promptSessionTestFingerprint("prime-project-title-root")
+	leafFingerprint := promptSessionTestFingerprint("prime-project-title-leaf")
+	c, _ := signedNewAPIPolicyContext(t, "prime-project-title-order", newAPIIdentity{
+		UserID: "42", ClientIP: "203.0.113.8",
+	}, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		PlatformID:             "test-platform",
+		Profile:                promptfilter.GuardProfileBalanced,
+		Mode:                   promptfilter.GuardModeEnforce,
+		Provider:               string(promptfilter.ModelFamilyOpenAI),
+		Protocol:               string(promptfilter.ProtocolResponses),
+		RequestedModel:         "gpt-5.6-luna",
+		UpstreamModel:          "gpt-5.6-luna",
+		SessionFingerprint:     leafFingerprint,
+		RootSessionVersion:     1,
+		RootSessionState:       newAPIPolicyRootSessionResolved,
+		RootSessionRelation:    newAPIPolicyRootSessionRelationRelated,
+		RootSessionFingerprint: rootFingerprint,
+		ThreadSource:           "system",
+		RequestKind:            "turn",
+		PassiveFeature:         "system_passive",
+	}, true)
+	// The title transport may carry its own independent native graph. The signed
+	// parent root must be available before the early session resolver runs.
+	c.Request.Header = cloneHeaderWithNewAPIIdentity(c.Request.Header, nativeSessionHeaders(testRootSessionB, testRootSessionB, 0))
+
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	handler.primeNewAPIPolicyContext(c, body)
+
+	identity := handler.resolveRequestSessionIdentityForContext(c, body)
+	if !identity.relatedToRoot || identity.affinityID != "newapi-root-session:"+rootFingerprint {
+		t.Fatalf("early session resolution missed the verified signed root: %+v", identity)
+	}
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{ProjectTitleGroupID: 20}})
+	if !classifyProjectTitleRequest(c, "gpt-5.6-luna", body, &identity) || !identity.bypassWindowAccounting {
+		t.Fatalf("NewAPI string title did not enter the same configured route as direct traffic: %+v", identity)
+	}
+}
+
+func TestPrimeNewAPIPolicyContextAcceptsSignedGuardianFeatureAndKeepsReviewedRoot(t *testing.T) {
+	body := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-luna")
+	body = []byte(strings.Replace(string(body), "00000000-0000-0000-0000-000000000001", testRootSessionA, 1))
+	rootFingerprint := newAPIRootSessionFingerprint("test-platform", "42", testRootSessionA)
+	leafFingerprint := promptSessionTestFingerprint("prime-guardian-leaf")
+	c, _ := signedNewAPIPolicyContext(t, "prime-guardian-order", newAPIIdentity{
+		UserID: "42", ClientIP: "203.0.113.8",
+	}, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		PlatformID:             "test-platform",
+		Profile:                promptfilter.GuardProfileBalanced,
+		Mode:                   promptfilter.GuardModeEnforce,
+		Provider:               string(promptfilter.ModelFamilyOpenAI),
+		Protocol:               string(promptfilter.ProtocolResponses),
+		RequestedModel:         "gpt-5.6-luna",
+		UpstreamModel:          "gpt-5.6-luna",
+		SessionFingerprint:     leafFingerprint,
+		RootSessionVersion:     1,
+		RootSessionState:       newAPIPolicyRootSessionResolved,
+		RootSessionRelation:    newAPIPolicyRootSessionRelationRelated,
+		RootSessionFingerprint: rootFingerprint,
+		ThreadSource:           "subagent",
+		RequestKind:            "turn",
+		SubagentKind:           "guardian",
+		PassiveFeature:         newAPIPassiveFeatureGuardianApproval,
+	}, true)
+	c.Request.Header = cloneHeaderWithNewAPIIdentity(c.Request.Header, nativeSessionHeaders(testRootSessionB, testRootSessionB, 0))
+
+	cfg := promptGuardTestConfig()
+	cfg.Advanced.NewAPI.Enabled = true
+	cfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(cfg)
+	handler.primeNewAPIPolicyContext(c, body)
+
+	identity := handler.resolveRequestSessionIdentityForContext(c, body)
+	if !identity.relatedToRoot || identity.affinityID != "newapi-root-session:"+rootFingerprint ||
+		identity.relatedSource.SubagentKind != "guardian" {
+		t.Fatalf("signed Guardian did not retain its reviewed root: %+v", identity)
+	}
+}
+
+func cloneHeaderWithNewAPIIdentity(signed http.Header, native http.Header) http.Header {
+	result := native.Clone()
+	for name, values := range signed {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "X-Newapi-") {
+			result[name] = append([]string(nil), values...)
+		}
+	}
+	return result
+}
+
 func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testing.T) {
 	config := promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 300}
-	body := []byte(`{"model":"gpt-5.4","input":"ambient"}`)
+	body := standaloneAmbientSuggestionsBody("gpt-5.4")
 	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
 	rootFingerprint := promptSessionTestFingerprint("ambient-background-root")
 	baseMeta := newAPIPolicyMeta{
@@ -354,6 +452,7 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 		RootSessionRelation:    newAPIPolicyRootSessionRelationRoot,
 		RootSessionFingerprint: rootFingerprint,
 		ThreadSource:           "system",
+		RequestedModel:         "gpt-5.4",
 		SessionAccounting:      newAPISessionAccountingBypass,
 		PassiveFeature:         newAPIPassiveFeatureAmbientSuggestions,
 	}
@@ -365,8 +464,18 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 	validContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-valid", identity, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, validContext, baseMeta, true)
 	policyContext, verified := handler.verifyNewAPIPolicyContext(validContext, config, body)
-	if !verified || !policyContext.MetaVerified || !verifiedNewAPISessionAccountingBypass(validContext) {
+	_, accountingBypass := handler.classifyVerifiedNewAPIAmbientSessionAccounting(validContext, body)
+	if !verified || !policyContext.MetaVerified || !accountingBypass {
 		t.Fatalf("valid ambient accounting bypass was rejected: verified=%v context=%+v", verified, policyContext)
+	}
+
+	expandedBody := bytes.Replace(body, []byte(`"model":"gpt-5.4",`), []byte(`"model":"gpt-5.4","tools":[{"type":"function","name":"shell"}],`), 1)
+	expandedContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-expanded", identity, "/v1/responses", expandedBody)
+	addSignedNewAPIPolicyMeta(t, expandedContext, baseMeta, true)
+	policyContext, verified = handler.verifyNewAPIPolicyContext(expandedContext, config, expandedBody)
+	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(expandedContext, expandedBody)
+	if !verified || !policyContext.MetaVerified || accountingBypass {
+		t.Fatalf("signed ambient wrapper with tools bypassed body validation: verified=%v context=%+v", verified, policyContext)
 	}
 
 	unknownFeature := baseMeta
@@ -374,14 +483,16 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 	unknownContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-unknown", identity, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, unknownContext, unknownFeature, true)
 	policyContext, verified = handler.verifyNewAPIPolicyContext(unknownContext, config, body)
-	if verified || policyContext.MetaVerified || verifiedNewAPISessionAccountingBypass(unknownContext) {
+	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(unknownContext, body)
+	if verified || policyContext.MetaVerified || accountingBypass {
 		t.Fatalf("unknown accounting feature was accepted: verified=%v context=%+v", verified, policyContext)
 	}
 
 	forgedContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-forged", identity, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, forgedContext, baseMeta, false)
 	policyContext, verified = handler.verifyNewAPIPolicyContext(forgedContext, config, body)
-	if verified || policyContext.MetaVerified || verifiedNewAPISessionAccountingBypass(forgedContext) {
+	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(forgedContext, body)
+	if verified || policyContext.MetaVerified || accountingBypass {
 		t.Fatalf("unsigned ambient accounting bypass was accepted: verified=%v context=%+v", verified, policyContext)
 	}
 }

@@ -74,24 +74,30 @@ type Segment struct {
 }
 
 type RequestEnvelope struct {
-	Endpoint             string      `json:"endpoint"`
-	Protocol             Protocol    `json:"protocol"`
-	Transport            Transport   `json:"transport"`
-	RequestedModel       string      `json:"requested_model,omitempty"`
-	EffectiveModel       string      `json:"effective_model,omitempty"`
-	ModelFamily          ModelFamily `json:"model_family"`
-	Segments             []Segment   `json:"segments"`
-	AdapterUnclassified  bool        `json:"adapter_unclassified,omitempty"`
+	Endpoint            string      `json:"endpoint"`
+	Protocol            Protocol    `json:"protocol"`
+	Transport           Transport   `json:"transport"`
+	RequestedModel      string      `json:"requested_model,omitempty"`
+	EffectiveModel      string      `json:"effective_model,omitempty"`
+	ModelFamily         ModelFamily `json:"model_family"`
+	Segments            []Segment   `json:"segments"`
+	AdapterUnclassified bool        `json:"adapter_unclassified,omitempty"`
 	// AdapterUnclassifiedTypes records the offending typed-payload names (bounded,
 	// deduped) so the non-punitive adapter audit can surface which future block or
 	// item type went unrecognized, instead of only flagging that one did.
 	AdapterUnclassifiedTypes []string `json:"adapter_unclassified_types,omitempty"`
-	Truncated            bool        `json:"truncated,omitempty"`
-	CurrentUserTruncated bool        `json:"current_user_truncated,omitempty"`
-	AuxiliaryTruncated   bool        `json:"auxiliary_truncated,omitempty"`
-	currentUserExactText string
-	currentUserPrecheck  *currentUserPrecheck
-	precheckIncomplete   bool
+	Truncated                bool     `json:"truncated,omitempty"`
+	CurrentUserTruncated     bool     `json:"current_user_truncated,omitempty"`
+	AuxiliaryTruncated       bool     `json:"auxiliary_truncated,omitempty"`
+	currentUserExactText     string
+	currentUserPrecheck      *currentUserPrecheck
+	precheckIncomplete       bool
+	// closedApplicationKind/candidate are populated only by body-level closed
+	// protocol parsers. Prompt text alone must never grant an application-task
+	// downgrade because the public wrapper can be copied by an ordinary client.
+	closedApplicationKind      string
+	closedApplicationCandidate string
+	closedApprovalReassessment bool
 }
 
 func BuildEnvelope(body []byte, endpoint string, requestedModel string, transport Transport, maxLen int) RequestEnvelope {
@@ -271,6 +277,14 @@ func buildEnvelopeWithBudget(body []byte, endpoint string, requestedModel string
 		builder.appendResult(OriginCurrentUser, "user", gjson.GetBytes(body, "commands.search_query.#.q"))
 	}
 	builder.finalize()
+	if candidate, ok := ClosedProjectTitleCandidate(body, requestedModel); ok {
+		envelope.closedApplicationKind = "project_title"
+		envelope.closedApplicationCandidate = candidate
+	}
+	if text, ok := ClosedApprovalReassessmentText(body); ok && approvalReassessmentRequestedModel(requestedModel) {
+		envelope.closedApprovalReassessment = true
+		collapseClosedApprovalCurrentUser(&envelope, text)
+	}
 	return envelope
 }
 

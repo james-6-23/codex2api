@@ -287,9 +287,8 @@ func pruneDeletedGroupFromAPIKeyScopes(ctx context.Context, tx *sql.Tx, sqlite b
 	return nil
 }
 
-// pruneDeletedScopeFromAPIKeyLimits 清理指向已删除分组 / 账号的 scope 维度限额
-// (api_keys.limits.scope_limits)。与 allowed_group_ids 的处理不同,这里即使清空也无副作用:
-// 少一条限额只会让该 Key 恢复不限,不会把它变成能访问更多账号。
+// pruneDeletedScopeFromAPIKeyLimits 清理指向已删除分组 / 账号的 scope 维度限额，
+// 并在删除分组时关闭指向该组的项目命名路由。
 func pruneDeletedScopeFromAPIKeyLimits(ctx context.Context, tx *sql.Tx, sqlite bool, scopeType string, scopeID int64) error {
 	if scopeID <= 0 {
 		return nil
@@ -312,14 +311,19 @@ func pruneDeletedScopeFromAPIKeyLimits(ctx context.Context, tx *sql.Tx, sqlite b
 			return err
 		}
 		limits := decodeAPIKeyLimits(raw)
-		if len(limits.ScopeLimits) == 0 {
-			continue
+		changed := false
+		if scopeType == APIKeyScopeTypeGroup && limits.ProjectTitleGroupID == scopeID {
+			limits.ProjectTitleGroupID = 0
+			changed = true
 		}
-		pruned, changed := PruneAPIKeyScopeLimitsForScope(limits.ScopeLimits, scopeType, scopeID)
+		pruned, scopeChanged := PruneAPIKeyScopeLimitsForScope(limits.ScopeLimits, scopeType, scopeID)
+		if scopeChanged {
+			limits.ScopeLimits = pruned
+			changed = true
+		}
 		if !changed {
 			continue
 		}
-		limits.ScopeLimits = pruned
 		updates = append(updates, update{id: id, limits: limits})
 	}
 	if err := rows.Err(); err != nil {

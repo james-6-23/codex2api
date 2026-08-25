@@ -34,6 +34,7 @@ const (
 	newAPIPolicyEventSignatureVersionV1    = "v1"
 	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
 	newAPISessionAccountingBypass          = "bypass"
+	newAPIPassiveFeatureGuardianApproval   = "guardian_approval"
 	newAPIPassiveFeatureAmbientSuggestions = "ambient_suggestions"
 	newAPIPassiveFeatureAmbientSafety      = "ambient_suggestion_safety"
 )
@@ -118,6 +119,22 @@ func (h *Handler) resolvePromptFilterNewAPIBinding(c *gin.Context) (database.Pro
 	binding, bound := h.store.GetPromptFilterNewAPIBinding(apiKeyID)
 	c.Set(newAPIBindingContextKey, resolvedPromptFilterNewAPIBinding{APIKeyID: apiKeyID, Binding: binding, Bound: bound})
 	return binding, bound
+}
+
+// primeNewAPIPolicyContext verifies optional signed NewAPI metadata before an
+// early routing/session decision. The normal prompt-filter ingress still owns
+// rejection and user-facing errors; this helper only makes an already-valid
+// identity available to code that must classify trusted application requests
+// before Prompt Guard runs.
+func (h *Handler) primeNewAPIPolicyContext(c *gin.Context, body []byte) {
+	if h == nil || h.store == nil || c == nil || strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) == "" {
+		return
+	}
+	cfg := h.promptFilterConfigForRequest(c)
+	if !cfg.Advanced.NewAPI.Enabled {
+		return
+	}
+	_, _ = h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, body)
 }
 
 // refreshNewAPIWebSocketBinding enforces binding revocation at every logical
@@ -513,7 +530,22 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	meta.PassiveFeature = strings.ToLower(strings.TrimSpace(meta.PassiveFeature))
 	switch meta.SessionAccounting {
 	case "":
-		if meta.PassiveFeature != "" {
+		model := normalizeCodexInternalRequestedModel(meta.RequestedModel)
+		switch meta.PassiveFeature {
+		case "":
+		case newAPIPassiveFeatureGuardianApproval:
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				(model != "gpt-5.6-luna" && model != "codex-auto-review") {
+				return false
+			}
+		case "system_passive":
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				!strings.EqualFold(meta.ThreadSource, "system") || model != "gpt-5.6-luna" {
+				return false
+			}
+		default:
 			return false
 		}
 	case newAPISessionAccountingBypass:
@@ -528,18 +560,6 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		return false
 	}
 	return true
-}
-
-func verifiedNewAPISessionAccountingBypass(c *gin.Context) bool {
-	if c == nil {
-		return false
-	}
-	raw, exists := c.Get(newAPIPolicyMetaContextKey)
-	policyContext, ok := raw.(verifiedNewAPIPolicyContext)
-	return exists && ok && policyContext.MetaVerified &&
-		policyContext.Meta.SessionAccounting == newAPISessionAccountingBypass &&
-		(policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSuggestions ||
-			policyContext.Meta.PassiveFeature == newAPIPassiveFeatureAmbientSafety)
 }
 
 func normalizedVerifiedNewAPIIdentityText(value string, maxRunes int) (string, bool) {

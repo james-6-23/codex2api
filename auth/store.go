@@ -3057,6 +3057,7 @@ type Store struct {
 	apiKeyAllowedGroupSets             map[int64]map[int64]struct{}
 	apiKeyNoAffinityGroups             map[int64][]int64
 	apiKeyNoAffinityGroupSets          map[int64]map[int64]struct{}
+	apiKeyProjectTitleGroups           map[int64]int64
 	apiKeyAllowedPlans                 map[int64][]string
 	apiKeyAllowedPlanSets              map[int64]map[string]struct{}
 	apiKeyUpstreamChannels             map[int64]string
@@ -8239,6 +8240,33 @@ func (s *Store) SetAPIKeyNoAffinityGroups(apiKeyID int64, groupIDs []int64) {
 	s.rebuildFastScheduler()
 }
 
+// SetAPIKeyProjectTitleGroup adds one supplemental group that is available to
+// the API key only when the proxy has classified a native Codex project-title
+// request. Request-level routing applies the exact group gate.
+func (s *Store) SetAPIKeyProjectTitleGroup(apiKeyID, groupID int64) {
+	if apiKeyID <= 0 {
+		return
+	}
+	if groupID < 0 {
+		groupID = 0
+	}
+	s.apiKeyGroupsMu.Lock()
+	if s.apiKeyProjectTitleGroups == nil {
+		s.apiKeyProjectTitleGroups = make(map[int64]int64)
+	}
+	if s.apiKeyProjectTitleGroups[apiKeyID] == groupID {
+		s.apiKeyGroupsMu.Unlock()
+		return
+	}
+	if groupID == 0 {
+		delete(s.apiKeyProjectTitleGroups, apiKeyID)
+	} else {
+		s.apiKeyProjectTitleGroups[apiKeyID] = groupID
+	}
+	s.apiKeyGroupsMu.Unlock()
+	s.rebuildFastScheduler()
+}
+
 // SetAPIKeyAllowedPlans 设置某 API Key 的账号套餐白名单。plans 归一(小写、去空白、去重)
 // 后落入内存集合;为空表示不限套餐。仅当集合真正变化时才重建调度器,以免鉴权热路径
 // 每次请求都触发重建。
@@ -8328,6 +8356,7 @@ func (s *Store) LoadAPIKeyAllowedGroups(ctx context.Context) error {
 	s.apiKeyAllowedGroupSets = make(map[int64]map[int64]struct{}, len(keys))
 	s.apiKeyNoAffinityGroups = make(map[int64][]int64, len(keys))
 	s.apiKeyNoAffinityGroupSets = make(map[int64]map[int64]struct{}, len(keys))
+	s.apiKeyProjectTitleGroups = make(map[int64]int64, len(keys))
 	s.apiKeyAllowedPlans = make(map[int64][]string, len(keys))
 	s.apiKeyAllowedPlanSets = make(map[int64]map[string]struct{}, len(keys))
 	s.apiKeyUpstreamChannels = make(map[int64]string, len(keys))
@@ -8341,6 +8370,9 @@ func (s *Store) LoadAPIKeyAllowedGroups(ctx context.Context) error {
 		if len(noAffinityGroups) > 0 {
 			s.apiKeyNoAffinityGroups[key.ID] = cloneInt64Slice(noAffinityGroups)
 			s.apiKeyNoAffinityGroupSets[key.ID] = int64Set(noAffinityGroups)
+		}
+		if key.Limits.ProjectTitleGroupID > 0 {
+			s.apiKeyProjectTitleGroups[key.ID] = key.Limits.ProjectTitleGroupID
 		}
 		plans := normalizeAllowedPlans(key.Limits.PlanAllow)
 		if len(plans) > 0 {
@@ -8359,12 +8391,17 @@ func (s *Store) LoadAPIKeyAllowedGroups(ctx context.Context) error {
 // APIKeyAllowsAccount 判断某 API Key 是否允许调度到该账号。分组白名单与套餐白名单
 // 各自非空时都必须命中(AND 语义);任一为空表示该维度不限。
 func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
-	if s == nil || apiKeyID <= 0 || acc == nil {
+	if s == nil || apiKeyID == 0 || acc == nil {
 		return true
+	}
+	projectTitleRequest := apiKeyID < 0
+	if projectTitleRequest {
+		apiKeyID = -apiKeyID
 	}
 	s.apiKeyGroupsMu.RLock()
 	allowedGroups := s.apiKeyAllowedGroupSets[apiKeyID]
 	noAffinityGroups := s.apiKeyNoAffinityGroupSets[apiKeyID]
+	projectTitleGroup := s.apiKeyProjectTitleGroups[apiKeyID]
 	allowedPlans := s.apiKeyAllowedPlanSets[apiKeyID]
 	channel := s.apiKeyUpstreamChannels[apiKeyID]
 	s.apiKeyGroupsMu.RUnlock()
@@ -8379,7 +8416,10 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 			return false
 		}
 	}
-	if len(allowedGroups) == 0 && len(allowedPlans) == 0 {
+	if projectTitleRequest && projectTitleGroup == 0 {
+		return false
+	}
+	if !projectTitleRequest && len(allowedGroups) == 0 && len(allowedPlans) == 0 {
 		return true
 	}
 	acc.mu.RLock()
@@ -8401,6 +8441,14 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 		if _, ok := allowedPlans[plan]; !ok {
 			return false
 		}
+	}
+	if projectTitleRequest {
+		for _, id := range acc.GroupIDs {
+			if id == projectTitleGroup {
+				return true
+			}
+		}
+		return false
 	}
 	if len(allowedGroups) == 0 {
 		return true
@@ -8503,7 +8551,11 @@ func (s *Store) accountAllowedForAPIKey(acc *Account, apiKeyID int64) bool {
 	if acc == nil {
 		return false
 	}
-	return acc.AllowsAPIKey(apiKeyID) && s.APIKeyAllowsAccount(apiKeyID, acc)
+	authorizationKeyID := apiKeyID
+	if authorizationKeyID < 0 {
+		authorizationKeyID = -authorizationKeyID
+	}
+	return acc.AllowsAPIKey(authorizationKeyID) && s.APIKeyAllowsAccount(apiKeyID, acc)
 }
 
 func (s *Store) ApplyOpenAIResponsesConfig(dbID int64, baseURL, apiKey string, models []string, modelMapping, codexClientMetadataMode, proxyURL string) bool {
