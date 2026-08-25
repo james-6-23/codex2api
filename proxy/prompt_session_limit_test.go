@@ -177,6 +177,29 @@ func TestPromptSessionCreationLimitRelatedRequestNeverCreatesExpiredRoot(t *test
 	}
 }
 
+func TestPromptSessionCreationLimitUserCompactionRestoresRootWindow(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	c := promptSessionLimitVerifiedRootUserContext(
+		promptSessionTestFingerprint("user-compaction-leaf"),
+		promptSessionTestFingerprint("user-compaction-root"),
+	)
+	value, _ := c.Get(newAPIPolicyMetaContextKey)
+	policyContext := value.(verifiedNewAPIPolicyContext)
+	policyContext.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policyContext.Meta.ThreadSource = "user"
+	policyContext.Meta.RequestKind = "compaction"
+	c.Set(newAPIPolicyMetaContextKey, policyContext)
+
+	status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, []byte(`{"model":"gpt-5.6-sol","input":"continue"}`))
+	if exceeded || status.Used != 1 || status.SessionHash == "" || len(handler.promptSessionLimits) != 1 {
+		t.Fatalf("user compaction did not restore root window: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+	}
+}
+
 func TestPromptSessionCreationLimitSkipsVerifiedAmbientBackgroundRequest(t *testing.T) {
 	handler := promptSessionLimitVerifiedTestHandler()
 	cfg := promptfilter.Config{}

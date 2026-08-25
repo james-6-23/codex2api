@@ -233,7 +233,11 @@ func capacityAwareSessionAffinityKey(identity requestSessionIdentity, apiKeyID i
 	if key != "" && identity.bypassWindowAccounting {
 		return auth.SessionAccountingBypassAffinityKey(key)
 	}
-	if key != "" && identity.relatedToRoot {
+	// A user-authored main-thread compaction can have a coherent parent/leaf
+	// graph and therefore be structurally related while still owning the root
+	// conversation. Keep it on the normal root key so it can recover a binding
+	// after a restart/TTL expiry and refresh exactly one account window.
+	if key != "" && identity.relatedToRoot && !identity.ownsRootBinding {
 		return auth.RelatedSessionAffinityKey(key)
 	}
 	if key != "" && !identity.stableIdentity {
@@ -407,7 +411,7 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 // remains pinned to the root session's exact account; a missing, disabled,
 // busy, cooled-down, or excluded root account never falls back to another one.
 func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, fallbackRequestedModel, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
-	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !identity.relatedToRoot {
+	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !identity.relatedToRoot || identity.ownsRootBinding {
 		return filter
 	}
 	requestedModel := strings.TrimSpace(fallbackRequestedModel)

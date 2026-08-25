@@ -1,12 +1,27 @@
 package proxy
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
 )
+
+func standaloneNativeSessionContext(root, leaf string, sequence int, threadSource, requestKind, subagentKind string) *gin.Context {
+	c := promptSessionLimitTestContext("")
+	c.Request.Header = nativeSessionHeaders(root, leaf, sequence)
+	metadata := fmt.Sprintf(`{"session_id":%q,"thread_id":%q,"window_id":%q,"parent_thread_id":%q,"thread_source":%q,"request_kind":%q`, root, leaf, fmt.Sprintf("%s:%d", leaf, sequence), root, threadSource, requestKind)
+	if subagentKind != "" {
+		metadata += fmt.Sprintf(`,"subagent_kind":%q`, subagentKind)
+		c.Request.Header.Set("X-OpenAI-Subagent", subagentKind)
+	}
+	metadata += "}"
+	c.Request.Header.Set(codexTurnMetadataHeader, metadata)
+	return c
+}
 
 func passiveInternalModelTestHandler(enabled bool) (*Handler, *auth.Account, *auth.Account, string) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
@@ -89,6 +104,94 @@ func TestPassiveInternalModelRoutingPinsTrustedRequestToRootAccount(t *testing.T
 				t.Fatal("trusted passive model escaped to another account")
 			}
 		})
+	}
+}
+
+func TestStandaloneNativeCompactionRecoversRootAndPinsPassiveModel(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 2, TestConcurrency: 1, PassiveInternalModelsEnabled: true,
+	})
+	first := &auth.Account{
+		DBID: 101, AccessToken: "first", Models: []string{"gpt-5.6-sol"}, Status: auth.StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 3, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	second := &auth.Account{
+		DBID: 202, AccessToken: "second", Models: []string{"gpt-5.6-sol"}, Status: auth.StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 3, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	store.AddAccounts([]*auth.Account{first, second})
+	handler := &Handler{store: store}
+
+	mainContext := standaloneNativeSessionContext(testRootSessionA, testLeafSessionA, 21, "user", "compaction", "")
+	mainBody := []byte(`{"model":"gpt-5.6-sol","input":"continue"}`)
+	mainIdentity := handler.resolveRequestSessionIdentityForContext(mainContext, mainBody)
+	if !mainIdentity.relatedToRoot || !mainIdentity.ownsRootBinding {
+		t.Fatalf("main compaction identity = %+v", mainIdentity)
+	}
+	rootKey := capacityAwareSessionAffinityKey(mainIdentity, 7)
+	if rootKey != testRootSessionA+"::api-key:7" {
+		t.Fatalf("main compaction key = %q", rootKey)
+	}
+
+	mainFilter := accountFilterForModel("gpt-5.6-sol")
+	selected, proxyURL := store.NextForSessionWithFilter(rootKey, 7, nil, mainFilter)
+	if selected == nil {
+		t.Fatal("standalone main compaction could not recover a root account")
+	}
+	handler.bindAccountSession(mainContext, rootKey, selected, proxyURL)
+	store.Release(selected)
+	if got := store.AccountSessionCount(selected.DBID, time.Now()); got != 1 {
+		t.Fatalf("root recovery created %d account windows, want 1", got)
+	}
+
+	// Reusing another compaction leaf for the same user-visible task must stay
+	// on the recovered account and keep a single root window.
+	continuedContext := standaloneNativeSessionContext(testRootSessionA, testLeafSessionB, 22, "user", "compaction", "")
+	continuedIdentity := handler.resolveRequestSessionIdentityForContext(continuedContext, mainBody)
+	continuedKey := capacityAwareSessionAffinityKey(continuedIdentity, 7)
+	continued, continuedProxy := store.NextForSessionWithFilter(continuedKey, 7, nil, mainFilter)
+	if continued != selected {
+		if continued != nil {
+			store.Release(continued)
+		}
+		t.Fatalf("continued compaction moved from account %d", selected.DBID)
+	}
+	handler.bindAccountSession(continuedContext, continuedKey, continued, continuedProxy)
+	store.Release(continued)
+	if got := store.AccountSessionCount(selected.DBID, time.Now()); got != 1 {
+		t.Fatalf("continued compaction changed account windows to %d", got)
+	}
+
+	// A user-authored Luna request is still an ordinary direct model request;
+	// it must not use the passive bypass merely because compaction has a child
+	// graph shape.
+	directLunaFilter := handler.applyPassiveInternalModelRouting(mainContext, "gpt-5.6-luna", "gpt-5.6-luna", mainIdentity, rootKey, true, accountFilterForModel("gpt-5.6-luna"))
+	if directLunaFilter(first) || directLunaFilter(second) {
+		t.Fatal("user-authored standalone Luna request bypassed account model settings")
+	}
+
+	guardianContext := standaloneNativeSessionContext(testRootSessionA, testIntermediate, 23, "subagent", "turn", "guardian")
+	guardianBody := []byte(`{"model":"gpt-5.6-luna","input":"review"}`)
+	guardianIdentity := handler.resolveRequestSessionIdentityForContext(guardianContext, guardianBody)
+	if !guardianIdentity.relatedToRoot || guardianIdentity.ownsRootBinding {
+		t.Fatalf("standalone Guardian identity = %+v", guardianIdentity)
+	}
+	guardianKey := capacityAwareSessionAffinityKey(guardianIdentity, 7)
+	if relatedRoot, ok := auth.RelatedSessionRootKey(guardianKey); !ok || relatedRoot != rootKey {
+		t.Fatalf("Guardian key = %q, want related root %q", guardianKey, rootKey)
+	}
+	guardianFilter := handler.applyPassiveInternalModelRouting(guardianContext, "gpt-5.6-luna", "gpt-5.6-luna", guardianIdentity, guardianKey, true, accountFilterForModel("gpt-5.6-luna"))
+	guardian, guardianProxy := store.NextForSessionWithFilter(guardianKey, 7, nil, guardianFilter)
+	if guardian != selected {
+		if guardian != nil {
+			store.Release(guardian)
+		}
+		t.Fatalf("standalone Guardian did not reuse root account %d", selected.DBID)
+	}
+	handler.bindAccountSession(guardianContext, guardianKey, guardian, guardianProxy)
+	store.Release(guardian)
+	if got := store.AccountSessionCount(selected.DBID, time.Now()); got != 1 {
+		t.Fatalf("Guardian changed account windows to %d", got)
 	}
 }
 

@@ -49,6 +49,22 @@ type requestRootSessionIdentity struct {
 	subagentKind string
 }
 
+// ownsUserRootBinding distinguishes a user-visible main-thread continuation
+// from a hidden child request without weakening the structural graph result.
+//
+// NewAPI v1 may authoritatively sign this classification. Standalone
+// Codex2API callers receive the same behavior only when the complete native
+// Codex graph was validated locally; a lone source label is never sufficient.
+func (identity requestRootSessionIdentity) ownsUserRootBinding() bool {
+	if !identity.related || (!identity.authoritative && !identity.nativeRoot) {
+		return false
+	}
+	if !strings.EqualFold(strings.TrimSpace(identity.threadSource), "user") {
+		return false
+	}
+	return strings.TrimSpace(identity.subagentKind) == ""
+}
+
 type sessionGraphLabelEvidence struct {
 	value    string
 	conflict bool

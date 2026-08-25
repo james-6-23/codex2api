@@ -3420,7 +3420,7 @@
     "sessionWindowBalance": "新窗口均衡",
     "sessionWindowBalanceDesc": "仅在创建新会话时生效：先遵守账号调度优先级和健康档位，再优先选择当前活跃窗口更少的账号；窗口数相同时按调度分和当前并发择优。已有会话仍复用原账号。默认关闭。",
     "passiveInternalModels": "允许被动内部模型",
-    "passiveInternalModelsDesc": "开启后，已验证为当前窗口派生的 Luna、命名和自动审查请求可复用原渠道、渠道 Key 和账号；NewAPI 渠道及 Codex2API 账号的公开模型列表均无需加入 gpt-5.6-luna 或 codex-auto-review。用户直接请求仍按模型权限拒绝；原渠道、Key 或账号不可用时不会切换。默认关闭。",
+    "passiveInternalModelsDesc": "开启后，已验证为当前窗口派生的 Luna、命名和自动审查请求可复用原账号；通过 NewAPI 时同时复用原渠道和渠道 Key，直接调用 Codex2API 时只要携带完整且可验证的原生 Codex 会话图也可正常生效。公开模型列表无需加入 gpt-5.6-luna 或 codex-auto-review。用户主动请求这些模型仍按普通模型权限拒绝；原账号或原渠道不可用时不会切换。默认关闭。",
     "affinityMode": "会话粘性",
     "affinityModeDesc": "亲和与调度优先级相互独立。共享 API Key 时，下游可传 X-Codex2API-Affinity-Key 稳定区分最终用户（仅本地哈希使用）。Bounded 默认在 50 次、5 分钟或账号不健康时换号；Off 每次重选；Strict 长期粘连。",
     "sessionAffinitySpread": "亲和散列绑定",

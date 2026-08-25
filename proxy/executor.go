@@ -1200,6 +1200,7 @@ type requestSessionIdentity struct {
 	hasDownstreamAffinity  bool
 	hasRequestFingerprint  bool
 	relatedToRoot          bool
+	ownsRootBinding        bool
 	relatedSource          auth.AccountSessionRelatedSource
 	relatedRequestID       string
 	bypassWindowAccounting bool
@@ -1299,6 +1300,7 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 		identity.hasDownstreamAffinity = true
 		identity.hasRequestFingerprint = true
 		identity.relatedToRoot = rootIdentity.related
+		identity.ownsRootBinding = rootIdentity.ownsUserRootBinding()
 		identity.relatedSource = auth.AccountSessionRelatedSource{
 			ThreadSource: rootIdentity.threadSource,
 			RequestKind:  rootIdentity.requestKind,

@@ -98,6 +98,52 @@ func TestSignedRelatedRequestUsesRootAffinityWithNonCountingMarker(t *testing.T)
 	}
 }
 
+func TestSignedUserCompactionOwnsAndRecoversRootAffinity(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	rootFingerprint := promptSessionTestFingerprint("user-compaction-root")
+	ctx := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("user-compaction-leaf"), rootFingerprint)
+	raw, _ := ctx.Get(newAPIPolicyMetaContextKey)
+	policy := raw.(verifiedNewAPIPolicyContext)
+	policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policy.Meta.ThreadSource = "user"
+	policy.Meta.RequestKind = "compaction"
+	ctx.Set(newAPIPolicyMetaContextKey, policy)
+
+	identity := handler.resolveRequestSessionIdentityForContext(ctx, []byte(`{"model":"gpt-5.6-sol","input":"continue"}`))
+	if !identity.relatedToRoot || !identity.ownsRootBinding {
+		t.Fatalf("signed user compaction identity = %+v", identity)
+	}
+	want := "newapi-root-session:" + rootFingerprint + "::api-key:7"
+	if got := capacityAwareSessionAffinityKey(identity, 7); got != want {
+		t.Fatalf("signed user compaction affinity = %q, want root %q", got, want)
+	}
+}
+
+func TestStandaloneNativeUserCompactionOwnsRootAffinity(t *testing.T) {
+	ctx := promptSessionLimitTestContext("")
+	ctx.Request.Header = nativeSessionHeaders(testRootSessionA, testLeafSessionA, 21)
+	ctx.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testLeafSessionA+`","window_id":"`+testLeafSessionA+`:21","parent_thread_id":"`+testRootSessionA+`","thread_source":"user","request_kind":"compaction"}`)
+	handler := &Handler{}
+
+	identity := handler.resolveRequestSessionIdentityForContext(ctx, []byte(`{"model":"gpt-5.6-sol","input":"continue"}`))
+	if !identity.relatedToRoot || !identity.ownsRootBinding {
+		t.Fatalf("standalone user compaction identity = %+v", identity)
+	}
+	want := testRootSessionA + "::api-key:7"
+	if got := capacityAwareSessionAffinityKey(identity, 7); got != want {
+		t.Fatalf("standalone user compaction affinity = %q, want root %q", got, want)
+	}
+}
+
+func TestUserSourceLabelAloneCannotOwnRootAffinity(t *testing.T) {
+	identity := requestRootSessionIdentity{
+		sessionID: testRootSessionA, stable: true, related: true, threadSource: "user", requestKind: "compaction",
+	}
+	if identity.ownsUserRootBinding() {
+		t.Fatal("unverified user source label owned the root binding")
+	}
+}
+
 func TestResolveRequestRootSessionIdentityCollapsesNestedGuardianToMainTask(t *testing.T) {
 	// This mirrors a real Codex main -> subagent -> Guardian shape: the stable
 	// session remains the main task, while parent_thread_id names only the

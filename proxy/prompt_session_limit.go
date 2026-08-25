@@ -106,9 +106,10 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 	// A related Guardian/title/summary request borrows the root conversation.
 	// It must never create a user window if the root entry has already expired,
-	// nor refresh any existing window. The coherent graph (or signed relation),
-	// not thread_source text, is what authorizes this exemption.
-	relatedRequest := rootIdentity.related && rootIdentity.stable && !rootIdentity.conflict
+	// nor refresh any existing window. A verified user-authored main-thread
+	// compaction is different: although its graph has a child leaf, it owns the
+	// root binding and must be able to restore the user's root window.
+	relatedRequest := rootIdentity.related && !rootIdentity.ownsUserRootBinding() && rootIdentity.stable && !rootIdentity.conflict
 	sessionID := ""
 	if rootIdentity.stable && !rootIdentity.conflict {
 		sessionID = strings.TrimSpace(rootIdentity.sessionID)
