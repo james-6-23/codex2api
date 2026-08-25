@@ -1425,6 +1425,7 @@ export interface SystemSettings {
   affinity_mode?: string
   session_affinity_spread?: boolean
   session_window_balance_enabled?: boolean
+  passive_internal_models_enabled?: boolean
   session_slot_buffer_enabled: boolean
   session_slot_buffer_seconds: number
   grok_affinity_mode?: string

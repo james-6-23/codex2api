@@ -86,6 +86,9 @@ func TestSQLitePromptFilterColumnDefaultsRemainUpgradeCompatible(t *testing.T) {
 	if settings.SessionWindowBalanceEnabled {
 		t.Fatal("session window balance should default to disabled")
 	}
+	if settings.PassiveInternalModelsEnabled {
+		t.Fatal("passive internal models should default to disabled")
+	}
 }
 
 func TestSQLiteSessionSlotBufferSettingsRoundtrip(t *testing.T) {
@@ -97,12 +100,13 @@ func TestSQLiteSessionSlotBufferSettingsRoundtrip(t *testing.T) {
 
 	ctx := context.Background()
 	settings := &SystemSettings{
-		MaxConcurrency:              2,
-		TestConcurrency:             1,
-		TestModel:                   "gpt-5.4",
-		SessionWindowBalanceEnabled: true,
-		SessionSlotBufferEnabled:    true,
-		SessionSlotBufferSeconds:    17,
+		MaxConcurrency:               2,
+		TestConcurrency:              1,
+		TestModel:                    "gpt-5.4",
+		SessionWindowBalanceEnabled:  true,
+		PassiveInternalModelsEnabled: true,
+		SessionSlotBufferEnabled:     true,
+		SessionSlotBufferSeconds:     17,
 	}
 	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
 		t.Fatalf("UpdateSystemSettings: %v", err)
@@ -116,6 +120,9 @@ func TestSQLiteSessionSlotBufferSettingsRoundtrip(t *testing.T) {
 	}
 	if !got.SessionWindowBalanceEnabled {
 		t.Fatal("session window balance was not persisted")
+	}
+	if !got.PassiveInternalModelsEnabled {
+		t.Fatal("passive internal models setting was not persisted")
 	}
 
 	for _, tc := range []struct {

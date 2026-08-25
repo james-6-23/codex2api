@@ -229,7 +229,12 @@ func (h *Handler) Messages(c *gin.Context) {
 	// /v1/messages 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 翻译后的请求体本身就是 Responses 形态，中转账号直接以 HTTP 转发，
 	// 使仅接入中转的用户也能使用 Claude Code（issue #181）。
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
+	apiKeyID := requestAPIKeyID(c)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter = h.applyPassiveInternalModelRouting(c, originalModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
@@ -239,12 +244,8 @@ func (h *Handler) Messages(c *gin.Context) {
 	reasoningEffort := extractReasoningEffort(routingBody)
 	serviceTier := extractServiceTier(routingBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
-	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	var codexTranslation anthropicCodexTranslation
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
-	apiKeyID := requestAPIKeyID(c)
-	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
-	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()

@@ -1334,6 +1334,7 @@ export default function Settings() {
     affinity_mode: 'bounded',
     session_affinity_spread: false,
     session_window_balance_enabled: false,
+    passive_internal_models_enabled: false,
     session_slot_buffer_enabled: false,
     session_slot_buffer_seconds: 10,
     grok_affinity_mode: 'strict',
@@ -2426,6 +2427,12 @@ export default function Settings() {
                   <Switch
                     checked={settingsForm.session_window_balance_enabled}
                     onCheckedChange={(checked) => autoSaveBooleanField('session_window_balance_enabled', checked)}
+                  />
+                </SettingField>
+                <SettingField label={t('settings.passiveInternalModels')} description={t('settings.passiveInternalModelsDesc')} layout="switch">
+                  <Switch
+                    checked={settingsForm.passive_internal_models_enabled}
+                    onCheckedChange={(checked) => autoSaveBooleanField('passive_internal_models_enabled', checked)}
                   />
                 </SettingField>
               </div>

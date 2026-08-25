@@ -8466,6 +8466,7 @@ type settingsResponse struct {
 	AffinityMode                        string `json:"affinity_mode"`
 	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
 	SessionWindowBalanceEnabled         bool   `json:"session_window_balance_enabled"`
+	PassiveInternalModelsEnabled        bool   `json:"passive_internal_models_enabled"`
 	SessionSlotBufferEnabled            bool   `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            int    `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    string `json:"grok_affinity_mode"`
@@ -8624,6 +8625,7 @@ type updateSettingsReq struct {
 	AffinityMode                        *string  `json:"affinity_mode"`
 	SessionAffinitySpread               *bool    `json:"session_affinity_spread"`
 	SessionWindowBalanceEnabled         *bool    `json:"session_window_balance_enabled"`
+	PassiveInternalModelsEnabled        *bool    `json:"passive_internal_models_enabled"`
 	SessionSlotBufferEnabled            *bool    `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            *int     `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    *string  `json:"grok_affinity_mode"`
@@ -9365,6 +9367,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
+		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),
@@ -10176,6 +10179,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetSessionWindowBalanceEnabled(*req.SessionWindowBalanceEnabled)
 		log.Printf("设置已更新: session_window_balance_enabled = %t", *req.SessionWindowBalanceEnabled)
 	}
+	if req.PassiveInternalModelsEnabled != nil {
+		h.store.SetPassiveInternalModelsEnabled(*req.PassiveInternalModelsEnabled)
+		log.Printf("设置已更新: passive_internal_models_enabled = %t", *req.PassiveInternalModelsEnabled)
+	}
 	if req.GrokAffinityMode != nil {
 		h.store.SetGrokAffinityMode(*req.GrokAffinityMode)
 		log.Printf("设置已更新: grok_affinity_mode = %s", *req.GrokAffinityMode)
@@ -10712,6 +10719,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
+		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
 		MaxRetries:                          h.store.GetMaxRetries(),
@@ -10972,6 +10980,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
+		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),

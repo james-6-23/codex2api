@@ -374,6 +374,67 @@ func accountFilterForModel(model string) auth.AccountFilter {
 	}
 }
 
+func isPassiveInternalRequestedModel(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if base, stripped := stripCompactModelSuffix(model); stripped {
+		model = strings.ToLower(strings.TrimSpace(base))
+	}
+	return model == "gpt-5.6-luna" || model == "codex-auto-review"
+}
+
+func passiveInternalAccountEligible(account *auth.Account, effectiveModel string, allowRelay bool) bool {
+	if account == nil {
+		return false
+	}
+	effectiveModel = strings.TrimSpace(effectiveModel)
+	if account.IsRelayStyle() {
+		return allowRelay && account.IsOpenAIResponsesAPI() && (effectiveModel == "" || !account.IsModelRateLimited(effectiveModel))
+	}
+	if effectiveModel != "" && account.IsModelRateLimited(effectiveModel) {
+		return false
+	}
+	if isProOnlyModel(effectiveModel) {
+		return isSparkPlanCandidate(account.GetPlanType())
+	}
+	return true
+}
+
+// applyPassiveInternalModelRouting permits only a verified derived Luna or
+// codex-auto-review request to bypass the configured Models list. The request
+// remains pinned to the root session's exact account; a missing, disabled,
+// busy, cooled-down, or excluded root account never falls back to another one.
+func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, fallbackRequestedModel, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
+	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !identity.relatedToRoot {
+		return filter
+	}
+	requestedModel := strings.TrimSpace(fallbackRequestedModel)
+	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
+	if (status == "verified" || status == "signed_response") && policyContext.MetaVerified && strings.TrimSpace(policyContext.Meta.RequestedModel) != "" {
+		requestedModel = strings.TrimSpace(policyContext.Meta.RequestedModel)
+	}
+	if !isPassiveInternalRequestedModel(requestedModel) {
+		return filter
+	}
+
+	rootKey, related := auth.RelatedSessionRootKey(affinityKey)
+	if !related || rootKey == "" {
+		return func(*auth.Account) bool { return false }
+	}
+	rootAccountID, found := h.store.AccountSessionAccountID(rootKey, time.Now())
+	if !found {
+		rootAccountID, found = h.store.SessionAffinityAccountID(rootKey)
+	}
+	return func(account *auth.Account) bool {
+		if !found || account == nil || account.DBID != rootAccountID {
+			return false
+		}
+		if filter == nil || filter(account) {
+			return true
+		}
+		return passiveInternalAccountEligible(account, effectiveModel, allowRelay)
+	}
+}
+
 // requestUpstreamChannel 返回当前请求下游 Key 的上游渠道限定（空=不限）。
 func requestUpstreamChannel(c *gin.Context) string {
 	row := apiKeyRowFromContext(c)
@@ -2998,6 +3059,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	} else {
 		accountFilter = accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
 	}
+	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
@@ -4472,6 +4534,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// compact 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter = h.applyPassiveInternalModelRouting(c, routingModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
@@ -5155,18 +5218,19 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	}
 	// /v1/chat/completions 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 翻译后的请求体本身就是 Responses 形态，中转账号直接以 HTTP 转发（issue #181）。
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, codexBody)
+	apiKeyID := requestAPIKeyID(c)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 
-	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, codexBody)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
-	apiKeyID := requestAPIKeyID(c)
-	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
-	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()

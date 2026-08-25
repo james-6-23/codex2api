@@ -3165,6 +3165,7 @@ type Store struct {
 	affinityMode             atomic.Value // string: "bounded" / "off" / "strict"
 	affinitySpreadEnabled    atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	sessionWindowBalance     atomic.Bool  // 新会话在同优先级/健康层内优先落到低窗口账号
+	passiveInternalModels    atomic.Bool  // 可信派生内部模型仅复用原根会话账号
 	grokAffinityMode         atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
 	grokProbeEnabled         atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
 	grokProbeIntervalMin     atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
@@ -3660,6 +3661,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.SetAffinityMode(settings.AffinityMode)
 	s.SetSessionAffinitySpread(settings.SessionAffinitySpread)
 	s.SetSessionWindowBalanceEnabled(settings.SessionWindowBalanceEnabled)
+	s.SetPassiveInternalModelsEnabled(settings.PassiveInternalModelsEnabled)
 	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
 	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
 	s.SetGrokMaxRateLimitRetries(grokMaxRateLimitRetriesFromConfig(settings.GrokConfig))
@@ -7293,6 +7295,23 @@ func (s *Store) SetSessionWindowBalanceEnabled(enabled bool) {
 		return
 	}
 	s.sessionWindowBalance.Store(enabled)
+}
+
+// PassiveInternalModelsEnabled reports whether a verified derived request may
+// use Luna or codex-auto-review on the root conversation's original account
+// without publishing those models in that account's configured model list.
+func (s *Store) PassiveInternalModelsEnabled() bool {
+	if s == nil {
+		return false
+	}
+	return s.passiveInternalModels.Load()
+}
+
+func (s *Store) SetPassiveInternalModelsEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.passiveInternalModels.Store(enabled)
 }
 
 // AffinityModeFollow 表示 Grok 会话粘性跟随全局 affinity_mode（不做 Grok 专属覆盖）。
