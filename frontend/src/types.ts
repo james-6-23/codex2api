@@ -319,6 +319,15 @@ export interface AccountSessionSnapshot {
   expires_at: ISODateString
   remaining_seconds: number
   owner?: AccountSessionOwner
+  related_request_count?: number
+  related_sources?: AccountSessionRelatedSource[]
+}
+
+export interface AccountSessionRelatedSource {
+  thread_source?: string
+  request_kind?: string
+  subagent_kind?: string
+  count: number
 }
 
 export interface AccountSessionsResponse {

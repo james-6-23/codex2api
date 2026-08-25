@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/codex2api/auth"
 )
 
 const (
@@ -43,7 +45,56 @@ func TestResolveRequestRootSessionIdentityCollapsesNativeGuardianAndSubagents(t 
 			if !identity.stable || identity.conflict || identity.sessionID != testRootSessionA {
 				t.Fatalf("identity = %+v, want stable root %q", identity, testRootSessionA)
 			}
+			if identity.related != (test.leaf != testRootSessionA) {
+				t.Fatalf("identity related=%t for leaf %q", identity.related, test.leaf)
+			}
 		})
+	}
+}
+
+func TestResolveRequestRootSessionIdentityPreservesUnknownRelatedSource(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testLeafSessionA+`","window_id":"`+testLeafSessionA+`:3","forked_from_thread_id":"`+testRootSessionA+`","thread_source":"future_new_source","request_kind":"future_task","subagent_kind":"reviewer"}`)
+
+	identity := resolveRequestRootSessionIdentity(headers, nil)
+	if !identity.stable || identity.conflict || !identity.related || identity.sessionID != testRootSessionA {
+		t.Fatalf("related identity = %+v", identity)
+	}
+	if identity.threadSource != "future_new_source" || identity.requestKind != "future_task" || identity.subagentKind != "reviewer" {
+		t.Fatalf("source classification was not preserved: %+v", identity)
+	}
+}
+
+func TestSignedRelatedRequestUsesRootAffinityWithNonCountingMarker(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	rootFingerprint := promptSessionTestFingerprint("shared-root-affinity")
+	mainContext := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("main-leaf-affinity"), rootFingerprint)
+	mainValue, _ := mainContext.Get(newAPIPolicyMetaContextKey)
+	mainPolicy := mainValue.(verifiedNewAPIPolicyContext)
+	mainPolicy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRoot
+	mainContext.Set(newAPIPolicyMetaContextKey, mainPolicy)
+
+	relatedContext := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("guardian-leaf-affinity"), rootFingerprint)
+	relatedValue, _ := relatedContext.Get(newAPIPolicyMetaContextKey)
+	relatedPolicy := relatedValue.(verifiedNewAPIPolicyContext)
+	relatedPolicy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	relatedPolicy.Meta.ThreadSource = "subagent"
+	relatedPolicy.Meta.SubagentKind = "guardian"
+	relatedContext.Set(newAPIPolicyMetaContextKey, relatedPolicy)
+
+	body := []byte(`{"model":"gpt-5.6-luna","input":"review"}`)
+	mainIdentity := handler.resolveRequestSessionIdentityForContext(mainContext, body)
+	relatedIdentity := handler.resolveRequestSessionIdentityForContext(relatedContext, body)
+	mainKey := capacityAwareSessionAffinityKey(mainIdentity, 7)
+	relatedKey := capacityAwareSessionAffinityKey(relatedIdentity, 7)
+	if mainKey != "newapi-root-session:"+rootFingerprint+"::api-key:7" {
+		t.Fatalf("main affinity key = %q", mainKey)
+	}
+	if relatedRoot, ok := auth.RelatedSessionRootKey(relatedKey); !ok || relatedRoot != mainKey {
+		t.Fatalf("related affinity key = %q, want authenticated marker for %q", relatedKey, mainKey)
+	}
+	if !relatedIdentity.relatedToRoot || relatedIdentity.relatedSource.ThreadSource != "subagent" || relatedIdentity.relatedSource.SubagentKind != "guardian" || relatedIdentity.relatedRequestID == "" {
+		t.Fatalf("related routing identity = %+v", relatedIdentity)
 	}
 }
 

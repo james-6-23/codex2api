@@ -1193,6 +1193,8 @@
     "sessionCapacitySessionId": "Session ID",
     "sessionCapacityEmpty": "No active sessions",
     "sessionCapacityRemaining": "releases in about {{seconds}}s",
+    "sessionCapacityRelatedCount": "Related {{count}}",
+    "sessionCapacityRelatedSources": "Related request sources",
     "quickConfigLoadingDesc": "Loading the full account configuration. Save stays disabled until this finishes, so empty list defaults cannot wipe headers or other detail fields.",
     "openaiModels": "Models",
     "openaiModelsAdd": "Add",

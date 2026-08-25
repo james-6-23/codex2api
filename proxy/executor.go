@@ -1199,6 +1199,16 @@ type requestSessionIdentity struct {
 	stableIdentity        bool
 	hasDownstreamAffinity bool
 	hasRequestFingerprint bool
+	relatedToRoot         bool
+	relatedSource         auth.AccountSessionRelatedSource
+	relatedRequestID      string
+}
+
+const relatedSessionObservationContextKey = "related_session_observation_v1"
+
+type relatedSessionObservation struct {
+	Source    auth.AccountSessionRelatedSource
+	RequestID string
 }
 
 // ResolveSessionID 从下游请求提取或生成 session ID
@@ -1269,17 +1279,67 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 // with a signed NewAPI session fingerprint when one was verified by the prompt
 // policy ingress stage. Untrusted X-NewAPI-* headers are never accepted here.
 func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body []byte) requestSessionIdentity {
+	c.Set(relatedSessionObservationContextKey, nil)
 	identity := resolveRequestSessionIdentity(c.Request.Header, body)
 	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
-	if (status == "verified" || status == "signed_response") && policyContext.MetaVerified {
-		if fingerprint := strings.TrimSpace(policyContext.Meta.SessionFingerprint); fingerprint != "" {
-			identity.affinityID = "newapi-session:" + fingerprint
-			identity.stableIdentity = true
-			identity.hasDownstreamAffinity = true
-			identity.hasRequestFingerprint = true
+	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
+	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
+	if rootIdentity.stable && !rootIdentity.conflict {
+		if fingerprint := strings.TrimSpace(rootIdentity.fingerprint); verifiedPolicy && fingerprint != "" {
+			identity.affinityID = "newapi-root-session:" + fingerprint
+		} else if rootIdentity.nativeRoot && strings.TrimSpace(rootIdentity.sessionID) != "" {
+			identity.affinityID = strings.TrimSpace(rootIdentity.sessionID)
+		}
+		identity.stableIdentity = true
+		identity.hasDownstreamAffinity = true
+		identity.hasRequestFingerprint = true
+		identity.relatedToRoot = rootIdentity.related
+		identity.relatedSource = auth.AccountSessionRelatedSource{
+			ThreadSource: rootIdentity.threadSource,
+			RequestKind:  rootIdentity.requestKind,
+			SubagentKind: rootIdentity.subagentKind,
+		}
+		if rootIdentity.related {
+			identity.relatedRequestID = relatedSessionLogicalRequestID(c, body, policyContext, verifiedPolicy)
+			c.Set(relatedSessionObservationContextKey, relatedSessionObservation{
+				Source: identity.relatedSource, RequestID: identity.relatedRequestID,
+			})
+		}
+	} else if verifiedPolicy {
+		// Root-capable senders deliberately omit an affinity override when their
+		// signed root is unavailable/conflicting. Older leaf-only senders retain
+		// the compatibility path below.
+		if policyContext.Meta.RootSessionVersion == 0 {
+			if fingerprint := strings.TrimSpace(policyContext.Meta.SessionFingerprint); fingerprint != "" {
+				identity.affinityID = "newapi-session:" + fingerprint
+				identity.stableIdentity = true
+				identity.hasDownstreamAffinity = true
+				identity.hasRequestFingerprint = true
+			}
 		}
 	}
 	return identity
+}
+
+func relatedSessionLogicalRequestID(c *gin.Context, body []byte, policyContext verifiedNewAPIPolicyContext, verifiedPolicy bool) string {
+	base := ""
+	if verifiedPolicy {
+		base = strings.TrimSpace(policyContext.Identity.RequestID)
+	}
+	if base == "" && c != nil && c.Request != nil {
+		base = firstNonEmptyHeader(c.Request.Header, "Idempotency-Key", "X-Client-Request-Id")
+	}
+	if eventID := promptGuardPolicyEventID(c); eventID != "" {
+		if base == "" {
+			base = "websocket"
+		}
+		return base + ":" + eventID
+	}
+	digest := sha256.Sum256(body)
+	if base == "" {
+		base = "standalone"
+	}
+	return base + ":" + hex.EncodeToString(digest[:8])
 }
 
 func resolveDownstreamAffinityID(headers http.Header) string {

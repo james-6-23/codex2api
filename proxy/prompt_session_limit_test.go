@@ -155,6 +155,28 @@ func TestPromptSessionCreationLimitSameRootGuardianDoesNotDuplicate(t *testing.T
 	}
 }
 
+func TestPromptSessionCreationLimitRelatedRequestNeverCreatesExpiredRoot(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 1
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	c := promptSessionLimitVerifiedRootUserContext(
+		promptSessionTestFingerprint("related-leaf"),
+		promptSessionTestFingerprint("expired-root"),
+	)
+	value, _ := c.Get(newAPIPolicyMetaContextKey)
+	policyContext := value.(verifiedNewAPIPolicyContext)
+	policyContext.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policyContext.Meta.ThreadSource = "future_new_source"
+	c.Set(newAPIPolicyMetaContextKey, policyContext)
+
+	status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, []byte(`{"model":"gpt-5.6-luna","input":"review"}`))
+	if exceeded || status.Used != 0 || len(handler.promptSessionLimits) != 0 {
+		t.Fatalf("related request created a user window: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+	}
+}
+
 func TestPromptSessionCreationLimitRejectsSignedWebSocketRootConflict(t *testing.T) {
 	handler := promptSessionLimitVerifiedTestHandler()
 	cfg := promptfilter.Config{}

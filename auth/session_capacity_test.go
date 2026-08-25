@@ -92,6 +92,123 @@ func TestUnstableIdentityDoesNotConsumeAccountSessionCapacity(t *testing.T) {
 	}
 }
 
+func TestRelatedRequestBorrowsRootAccountWithoutRefreshingOrCreatingWindow(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	now := time.Now()
+	rootKey := "root-window::api-key:7"
+	if !store.AdmitAccountSession(account, rootKey, now) {
+		t.Fatal("root session admission failed")
+	}
+	store.BindSessionAffinity(rootKey, account, "")
+	store.accountSessionMu.Lock()
+	originalLastSeen := now.Add(-30 * time.Second)
+	store.accountSessions[account.DBID][rootKey].lastSeen = originalLastSeen
+	store.accountSessionMu.Unlock()
+
+	relatedKey := RelatedSessionAffinityKey(rootKey)
+	selected, _ := store.NextForSession(relatedKey, 0, nil)
+	if selected != account {
+		t.Fatal("related request did not borrow the root account")
+	}
+	store.BindSessionAffinity(relatedKey, selected, "")
+	store.Release(selected)
+
+	snapshots := store.AccountSessionSnapshots(account.DBID, now)
+	if len(snapshots) != 1 || snapshots[0].SessionID != rootKey {
+		t.Fatalf("related request changed window set: %#v", snapshots)
+	}
+	if !snapshots[0].LastSeen.Equal(originalLastSeen) {
+		t.Fatalf("related request refreshed root last_seen: got %s want %s", snapshots[0].LastSeen, originalLastSeen)
+	}
+}
+
+func TestRelatedRequestBorrowsOrdinaryRootAffinityWhenCapacityDisabled(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	account.SessionCapacityEnabled = false
+	rootKey := "root-without-capacity::api-key:7"
+	store.BindSessionAffinity(rootKey, account, "")
+
+	relatedKey := RelatedSessionAffinityKey(rootKey)
+	selected, _ := store.NextForSession(relatedKey, 0, nil)
+	if selected != account {
+		t.Fatal("related request did not borrow ordinary root affinity")
+	}
+	store.BindSessionAffinity(relatedKey, selected, "")
+	store.Release(selected)
+	if got := store.AccountSessionCount(account.DBID, time.Now()); got != 0 {
+		t.Fatalf("related request created %d windows with capacity disabled", got)
+	}
+	if counts := store.accountWindowCountsForScheduling([]*Account{account}, time.Now()); counts[account.DBID] != 1 {
+		t.Fatalf("window balancing counted related affinity: %#v", counts)
+	}
+}
+
+func TestRelatedRequestNeverFallsBackFromKnownRootAccount(t *testing.T) {
+	t.Run("ordinary affinity", func(t *testing.T) {
+		store, rootAccount := newSessionCapacityTestStore(1)
+		rootAccount.SessionCapacityEnabled = false
+		fallbackAccount := &Account{DBID: 2, AccessToken: "fallback"}
+		store.accounts = append(store.accounts, fallbackAccount)
+		rootKey := "pinned-root::api-key:7"
+		store.BindSessionAffinity(rootKey, rootAccount, "")
+
+		relatedKey := RelatedSessionAffinityKey(rootKey)
+		selected, _ := store.NextForSession(relatedKey, 0, map[int64]bool{rootAccount.DBID: true})
+		if selected != nil {
+			store.Release(selected)
+			t.Fatalf("related retry escaped root account to %d", selected.DBID)
+		}
+
+		// A busy root is also a wait condition, not permission to use a different
+		// account for the hidden turn.
+		atomic.StoreInt64(&rootAccount.ActiveRequests, 1)
+		store.maxConcurrency = 1
+		selected, _ = store.NextForSession(relatedKey, 0, nil)
+		if selected != nil {
+			store.Release(selected)
+			t.Fatalf("busy related request escaped root account to %d", selected.DBID)
+		}
+	})
+
+	t.Run("hard window owner", func(t *testing.T) {
+		store, rootAccount := newSessionCapacityTestStore(1)
+		store.accounts = append(store.accounts, &Account{DBID: 2, AccessToken: "fallback"})
+		rootKey := "capacity-root::api-key:7"
+		if !store.AdmitAccountSession(rootAccount, rootKey, time.Now()) {
+			t.Fatal("root session admission failed")
+		}
+		selected, _ := store.NextForSession(RelatedSessionAffinityKey(rootKey), 0, map[int64]bool{rootAccount.DBID: true})
+		if selected != nil {
+			store.Release(selected)
+			t.Fatalf("related retry escaped hard-window owner to %d", selected.DBID)
+		}
+	})
+}
+
+func TestRelatedRequestStatsDeduplicateRetriesAndPreserveUnknownSources(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	rootKey := "root-window::api-key:7"
+	if !store.AdmitAccountSession(account, rootKey, time.Now()) {
+		t.Fatal("root session admission failed")
+	}
+	relatedKey := RelatedSessionAffinityKey(rootKey)
+	source := AccountSessionRelatedSource{ThreadSource: "future_new_source", RequestKind: "future_task", SubagentKind: "reviewer"}
+	store.RecordRelatedAccountSession(account.DBID, relatedKey, source, "logical-request-1")
+	store.RecordRelatedAccountSession(account.DBID, relatedKey, source, "logical-request-1")
+
+	snapshots := store.AccountSessionSnapshots(account.DBID, time.Now())
+	if len(snapshots) != 1 {
+		t.Fatalf("snapshots = %#v", snapshots)
+	}
+	if snapshots[0].RelatedRequestCount != 1 || len(snapshots[0].RelatedSources) != 1 {
+		t.Fatalf("related stats = %#v", snapshots[0])
+	}
+	got := snapshots[0].RelatedSources[0]
+	if got.Count != 1 || got.ThreadSource != source.ThreadSource || got.RequestKind != source.RequestKind || got.SubagentKind != source.SubagentKind {
+		t.Fatalf("source stats = %#v, want %#v", got, source)
+	}
+}
+
 func TestSessionCapacityExhaustionIsScopedToEligibleAccounts(t *testing.T) {
 	store, fullAccount := newSessionCapacityTestStore(1)
 	if !store.AdmitAccountSession(fullAccount, "occupied", time.Now()) {

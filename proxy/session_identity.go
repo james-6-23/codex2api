@@ -14,9 +14,11 @@ import (
 )
 
 const (
-	newAPIPolicyRootSessionResolved    = "resolved"
-	newAPIPolicyRootSessionConflict    = "conflict"
-	newAPIPolicyRootSessionUnavailable = "unavailable"
+	newAPIPolicyRootSessionResolved        = "resolved"
+	newAPIPolicyRootSessionConflict        = "conflict"
+	newAPIPolicyRootSessionUnavailable     = "unavailable"
+	newAPIPolicyRootSessionRelationRoot    = "root"
+	newAPIPolicyRootSessionRelationRelated = "related"
 )
 
 // requestRootSessionIdentity is deliberately separate from
@@ -38,6 +40,62 @@ type requestRootSessionIdentity struct {
 	// the resolution decision. Callers must not reinterpret raw client fields
 	// when that sender deliberately omitted a root identity.
 	authoritative bool
+	// related is proven by a coherent native root/leaf graph, never by a source
+	// label alone. The labels are observational and preserve unknown future
+	// values for the account-session detail view.
+	related      bool
+	threadSource string
+	requestKind  string
+	subagentKind string
+}
+
+type sessionGraphLabelEvidence struct {
+	value    string
+	conflict bool
+	primary  bool
+}
+
+func (e *sessionGraphLabelEvidence) addSubagent(value string, primary bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if len(value) > 64 || strings.ContainsAny(value, "\r\n\x00") {
+		e.conflict = true
+		return
+	}
+	if e.value == "" || (primary && !e.primary) {
+		e.value = value
+		e.primary = primary
+		e.conflict = false
+		return
+	}
+	if primary && e.primary && e.value != value {
+		e.conflict = true
+	}
+}
+
+func (e *sessionGraphLabelEvidence) add(value string, maxLen int) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return
+	}
+	if len(value) > maxLen || strings.ContainsAny(value, "\r\n\x00") {
+		e.conflict = true
+		return
+	}
+	if e.value == "" {
+		e.value = value
+	} else if e.value != value {
+		e.conflict = true
+	}
+}
+
+func (e sessionGraphLabelEvidence) resolved() string {
+	if e.conflict {
+		return ""
+	}
+	return e.value
 }
 
 type codexSessionGraphSignals struct {
@@ -47,7 +105,11 @@ type codexSessionGraphSignals struct {
 	clientRequests []string
 	windows        []string
 	parents        []string
+	forkedFrom     []string
 	subagent       bool
+	threadSources  sessionGraphLabelEvidence
+	requestKinds   sessionGraphLabelEvidence
+	subagentKinds  sessionGraphLabelEvidence
 	structured     bool
 	malformed      bool
 }
@@ -70,9 +132,10 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 	thread, threadConflict := oneSessionGraphValue(signals.threads)
 	clientRequest, clientConflict := oneSessionGraphValue(signals.clientRequests)
 	parent, parentConflict := oneSessionGraphValue(signals.parents)
+	forkedFrom, forkedFromConflict := oneSessionGraphValue(signals.forkedFrom)
 	windowThread, windowConflict := resolveSessionGraphWindow(signals.windows)
 
-	conflict := signals.malformed || headerSessionConflict || rootConflict || threadConflict || clientConflict || parentConflict || windowConflict
+	conflict := signals.malformed || headerSessionConflict || rootConflict || threadConflict || clientConflict || parentConflict || forkedFromConflict || windowConflict
 	leaf := ""
 	for _, candidate := range []string{thread, clientRequest, windowThread} {
 		if candidate == "" {
@@ -96,7 +159,7 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 		// only when the parent corroborates the root and the complete leaf graph
 		// corroborates the header session. Other cross-carrier disagreements are
 		// conflicts rather than a reason to merge.
-		if leaf == "" || !validSessionGraphUUID(metadataRoot) || !validSessionGraphUUID(leaf) || (parent != "" && !validSessionGraphUUID(parent)) {
+		if leaf == "" || !validSessionGraphUUID(metadataRoot) || !validSessionGraphUUID(leaf) || (parent != "" && !validSessionGraphUUID(parent)) || (forkedFrom != "" && !validSessionGraphUUID(forkedFrom)) {
 			return requestRootSessionIdentity{conflict: true}
 		}
 		// parent_thread_id is the immediate parent, not necessarily the root.
@@ -104,15 +167,18 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 		// carry the main task while parent points at the intermediate subagent.
 		// Its presence corroborates a child lineage; equality with the root must
 		// not be required.
-		if leaf != metadataRoot && parent == "" && !signals.subagent {
+		if leaf != metadataRoot && parent == "" && forkedFrom == "" && !signals.subagent {
 			return requestRootSessionIdentity{conflict: true}
 		}
 		if headerSession != "" && headerSession != metadataRoot {
-			if (parent == "" && !signals.subagent) || headerSession != leaf || !validSessionGraphUUID(headerSession) {
+			if (parent == "" && forkedFrom == "" && !signals.subagent) || headerSession != leaf || !validSessionGraphUUID(headerSession) {
 				return requestRootSessionIdentity{conflict: true}
 			}
 		}
-		return requestRootSessionIdentity{sessionID: strings.ToLower(metadataRoot), stable: true, nativeRoot: true}
+		return withSessionGraphClassification(requestRootSessionIdentity{
+			sessionID: strings.ToLower(metadataRoot), stable: true, nativeRoot: true,
+			related: leaf != metadataRoot || parent != "" || forkedFrom != "" || signals.subagent,
+		}, signals)
 	}
 
 	if headerSession != "" {
@@ -121,13 +187,13 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 		// native UUID shape before collapsing a child leaf into its root.
 		nativeRoot := false
 		if signals.structured {
-			if !validSessionGraphUUID(headerSession) || (leaf != "" && !validSessionGraphUUID(leaf)) || (parent != "" && !validSessionGraphUUID(parent)) {
+			if !validSessionGraphUUID(headerSession) || (leaf != "" && !validSessionGraphUUID(leaf)) || (parent != "" && !validSessionGraphUUID(parent)) || (forkedFrom != "" && !validSessionGraphUUID(forkedFrom)) {
 				return requestRootSessionIdentity{conflict: true}
 			}
 			if leaf != "" {
 				if headerSession == leaf {
 					nativeRoot = true
-				} else if parent != "" || signals.subagent {
+				} else if parent != "" || forkedFrom != "" || signals.subagent {
 					nativeRoot = true
 				} else {
 					return requestRootSessionIdentity{conflict: true}
@@ -137,7 +203,10 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 			// Session-Id + leaf graph identifies the root independently.
 			headerSession = strings.ToLower(headerSession)
 		}
-		return requestRootSessionIdentity{sessionID: headerSession, stable: true, nativeRoot: nativeRoot}
+		return withSessionGraphClassification(requestRootSessionIdentity{
+			sessionID: headerSession, stable: true, nativeRoot: nativeRoot,
+			related: nativeRoot && (leaf != headerSession || parent != "" || forkedFrom != "" || signals.subagent),
+		}, signals)
 	}
 
 	// A graph without Session-Id cannot prove the main task root. Do not infer
@@ -145,7 +214,7 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 	// leaf is still a stable exact-session fallback; a parent-bearing child is
 	// deliberately left unenforced rather than incorrectly merged.
 	if leaf != "" {
-		if parent != "" {
+		if parent != "" || forkedFrom != "" {
 			return requestRootSessionIdentity{}
 		}
 		if signals.structured {
@@ -154,7 +223,7 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 			}
 			leaf = strings.ToLower(leaf)
 		}
-		return requestRootSessionIdentity{sessionID: leaf, stable: true}
+		return withSessionGraphClassification(requestRootSessionIdentity{sessionID: leaf, stable: true}, signals)
 	}
 
 	// Preserve the existing non-Codex compatibility order for clients that do
@@ -177,6 +246,13 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 		return requestRootSessionIdentity{sessionID: promptCacheKey, stable: true}
 	}
 	return requestRootSessionIdentity{}
+}
+
+func withSessionGraphClassification(identity requestRootSessionIdentity, signals codexSessionGraphSignals) requestRootSessionIdentity {
+	identity.threadSource = signals.threadSources.resolved()
+	identity.requestKind = signals.requestKinds.resolved()
+	identity.subagentKind = signals.subagentKinds.resolved()
+	return identity
 }
 
 // resolveRequestRootSessionIdentityForContext upgrades the locally resolved
@@ -216,12 +292,12 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 				}
 			}
 			c.Set(requestRootSessionBindingContextKey, requestRootSessionBinding{fingerprint: fingerprint})
-			return requestRootSessionIdentity{
+			return applySignedRootSessionClassification(requestRootSessionIdentity{
 				sessionID:     fingerprint,
 				fingerprint:   fingerprint,
 				stable:        fingerprint != "",
 				authoritative: true,
-			}
+			}, policyContext.Meta, frameIdentity)
 		case newAPIPolicyRootSessionConflict:
 			// A root-capable signed gateway explicitly found contradictory graph
 			// carriers. Never turn its leaf fingerprint into an operational root;
@@ -241,7 +317,7 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 						return requestRootSessionIdentity{conflict: true, authoritative: true}
 					}
 				}
-				return requestRootSessionIdentity{sessionID: bound.fingerprint, fingerprint: bound.fingerprint, stable: true, authoritative: true}
+				return applySignedRootSessionClassification(requestRootSessionIdentity{sessionID: bound.fingerprint, fingerprint: bound.fingerprint, stable: true, authoritative: true}, policyContext.Meta, frameIdentity)
 			}
 			if webSocketFrame {
 				if frameIdentity.conflict {
@@ -251,12 +327,12 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 					fingerprint := newAPIRootSessionFingerprint(policyContext.Platform, policyContext.Identity.UserID, frameIdentity.sessionID)
 					if fingerprint != "" {
 						c.Set(requestRootSessionBindingContextKey, requestRootSessionBinding{fingerprint: fingerprint})
-						return requestRootSessionIdentity{
+						return applySignedRootSessionClassification(requestRootSessionIdentity{
 							sessionID:     fingerprint,
 							fingerprint:   fingerprint,
 							stable:        true,
 							authoritative: true,
-						}
+						}, policyContext.Meta, frameIdentity)
 					}
 				}
 				// Do not count a connection-scoped signed leaf before a frame proves
@@ -286,7 +362,7 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 					return requestRootSessionIdentity{conflict: true, authoritative: true}
 				}
 			}
-			return requestRootSessionIdentity{sessionID: bound.fingerprint, fingerprint: bound.fingerprint, stable: true, authoritative: true}
+			return applySignedRootSessionClassification(requestRootSessionIdentity{sessionID: bound.fingerprint, fingerprint: bound.fingerprint, stable: true, authoritative: true}, policyContext.Meta, frameIdentity)
 		}
 		if frameIdentity.conflict {
 			return requestRootSessionIdentity{conflict: true, authoritative: true}
@@ -297,7 +373,7 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 			fingerprint := newAPIRootSessionFingerprint(policyContext.Platform, policyContext.Identity.UserID, frameIdentity.sessionID)
 			if fingerprint != "" {
 				c.Set(requestRootSessionBindingContextKey, requestRootSessionBinding{fingerprint: fingerprint})
-				return requestRootSessionIdentity{sessionID: fingerprint, fingerprint: fingerprint, stable: true, authoritative: true}
+				return applySignedRootSessionClassification(requestRootSessionIdentity{sessionID: fingerprint, fingerprint: fingerprint, stable: true, authoritative: true}, policyContext.Meta, frameIdentity)
 			}
 		}
 		// Do not count the v0 handshake leaf while waiting for a frame that can
@@ -321,6 +397,30 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 			fingerprint: fingerprint,
 			stable:      true,
 		}
+	}
+	return identity
+}
+
+func applySignedRootSessionClassification(identity requestRootSessionIdentity, meta newAPIPolicyMeta, fallback requestRootSessionIdentity) requestRootSessionIdentity {
+	switch meta.RootSessionRelation {
+	case newAPIPolicyRootSessionRelationRelated:
+		identity.related = true
+	case newAPIPolicyRootSessionRelationRoot:
+		identity.related = false
+	default:
+		identity.related = fallback.related
+	}
+	identity.threadSource = strings.TrimSpace(meta.ThreadSource)
+	if identity.threadSource == "" {
+		identity.threadSource = fallback.threadSource
+	}
+	identity.requestKind = strings.TrimSpace(meta.RequestKind)
+	if identity.requestKind == "" {
+		identity.requestKind = fallback.requestKind
+	}
+	identity.subagentKind = strings.TrimSpace(meta.SubagentKind)
+	if identity.subagentKind == "" {
+		identity.subagentKind = fallback.subagentKind
 	}
 	return identity
 }
@@ -359,8 +459,9 @@ func collectCodexSessionGraphSignals(headers http.Header, body []byte) codexSess
 		appendHeaderSessionGraphValues(&signals.clientRequests, headers, "X-Client-Request-Id")
 		appendHeaderSessionGraphValues(&signals.windows, headers, "X-Codex-Window-Id")
 		appendHeaderSessionGraphValues(&signals.parents, headers, "X-Codex-Parent-Thread-Id")
+		appendHeaderSessionGraphValues(&signals.forkedFrom, headers, "X-Codex-Forked-From-Thread-Id")
 		appendSessionGraphSubagentHeader(&signals, headers, "X-OpenAI-Subagent")
-		if len(signals.threads)+len(signals.clientRequests)+len(signals.windows)+len(signals.parents) > 0 {
+		if len(signals.threads)+len(signals.clientRequests)+len(signals.windows)+len(signals.parents)+len(signals.forkedFrom) > 0 {
 			signals.structured = true
 		}
 		for _, raw := range headers.Values(codexTurnMetadataHeader) {
@@ -416,13 +517,16 @@ func collectCodexClientMetadataAtDepth(signals *codexSessionGraphSignals, metada
 		signals.malformed = true
 		return
 	}
-	before := len(signals.metadataRoots) + len(signals.threads) + len(signals.clientRequests) + len(signals.windows) + len(signals.parents)
+	before := len(signals.metadataRoots) + len(signals.threads) + len(signals.clientRequests) + len(signals.windows) + len(signals.parents) + len(signals.forkedFrom)
 	appendSessionGraphJSONField(signals, &signals.metadataRoots, metadata, "session_id")
 	appendSessionGraphJSONField(signals, &signals.threads, metadata, "thread_id")
 	appendSessionGraphJSONField(signals, &signals.clientRequests, metadata, "client_request_id", "x-client-request-id", "x_client_request_id")
 	appendSessionGraphJSONField(signals, &signals.windows, metadata, "window_id", "x-codex-window-id", "x_codex_window_id")
 	appendSessionGraphJSONField(signals, &signals.parents, metadata, "parent_thread_id", "x-codex-parent-thread-id", "x_codex_parent_thread_id")
+	appendSessionGraphJSONField(signals, &signals.forkedFrom, metadata, "forked_from_thread_id", "x-codex-forked-from-thread-id", "x_codex_forked_from_thread_id")
 	appendSessionGraphJSONSubagent(signals, metadata, "subagent_kind", "x-openai-subagent", "x_openai_subagent")
+	appendSessionGraphJSONLabel(signals, &signals.threadSources, metadata, 128, "thread_source")
+	appendSessionGraphJSONLabel(signals, &signals.requestKinds, metadata, 128, "request_kind")
 
 	for _, key := range []string{"x-codex-turn-metadata", "x_codex_turn_metadata"} {
 		embedded := metadata.Get(key)
@@ -448,7 +552,7 @@ func collectCodexClientMetadataAtDepth(signals *codexSessionGraphSignals, metada
 		signals.structured = true
 		collectCodexClientMetadataAtDepth(signals, nested, depth+1)
 	}
-	after := len(signals.metadataRoots) + len(signals.threads) + len(signals.clientRequests) + len(signals.windows) + len(signals.parents)
+	after := len(signals.metadataRoots) + len(signals.threads) + len(signals.clientRequests) + len(signals.windows) + len(signals.parents) + len(signals.forkedFrom)
 	if after > before {
 		signals.structured = true
 	}
@@ -490,7 +594,10 @@ func collectCodexSessionGraphJSON(signals *codexSessionGraphSignals, metadata gj
 	appendSessionGraphJSONField(signals, &signals.clientRequests, metadata, "x_client_request_id")
 	appendSessionGraphJSONField(signals, &signals.windows, metadata, "window_id", "x-codex-window-id", "x_codex_window_id")
 	appendSessionGraphJSONField(signals, &signals.parents, metadata, "parent_thread_id", "x-codex-parent-thread-id", "x_codex_parent_thread_id")
+	appendSessionGraphJSONField(signals, &signals.forkedFrom, metadata, "forked_from_thread_id", "x-codex-forked-from-thread-id", "x_codex_forked_from_thread_id")
 	appendSessionGraphJSONSubagent(signals, metadata, "subagent_kind", "x-openai-subagent", "x_openai_subagent")
+	appendSessionGraphJSONLabel(signals, &signals.threadSources, metadata, 128, "thread_source")
+	appendSessionGraphJSONLabel(signals, &signals.requestKinds, metadata, 128, "request_kind")
 }
 
 func appendSessionGraphSubagentHeader(signals *codexSessionGraphSignals, headers http.Header, names ...string) {
@@ -508,12 +615,13 @@ func appendSessionGraphSubagentHeader(signals *codexSessionGraphSignals, headers
 				continue
 			}
 			signals.subagent = true
+			signals.subagentKinds.addSubagent(value, false)
 		}
 	}
 }
 
 func appendSessionGraphJSONSubagent(signals *codexSessionGraphSignals, object gjson.Result, paths ...string) {
-	for _, path := range paths {
+	for index, path := range paths {
 		value := object.Get(path)
 		if !value.Exists() {
 			continue
@@ -534,6 +642,24 @@ func appendSessionGraphJSONSubagent(signals *codexSessionGraphSignals, object gj
 			continue
 		}
 		signals.subagent = true
+		signals.subagentKinds.addSubagent(text, index == 0)
+	}
+}
+
+func appendSessionGraphJSONLabel(signals *codexSessionGraphSignals, target *sessionGraphLabelEvidence, object gjson.Result, maxLen int, paths ...string) {
+	if signals == nil || target == nil {
+		return
+	}
+	for _, path := range paths {
+		value := object.Get(path)
+		if !value.Exists() || value.Type == gjson.Null {
+			continue
+		}
+		if value.Type != gjson.String {
+			signals.malformed = true
+			continue
+		}
+		target.add(value.String(), maxLen)
 	}
 }
 

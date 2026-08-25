@@ -98,6 +98,11 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 		status.IdentityConflict = true
 		return status, true
 	}
+	// A related Guardian/title/summary request borrows the root conversation.
+	// It must never create a user window if the root entry has already expired,
+	// nor refresh any existing window. The coherent graph (or signed relation),
+	// not thread_source text, is what authorizes this exemption.
+	relatedRequest := rootIdentity.related && rootIdentity.stable && !rootIdentity.conflict
 	sessionID := ""
 	if rootIdentity.stable && !rootIdentity.conflict {
 		sessionID = strings.TrimSpace(rootIdentity.sessionID)
@@ -165,6 +170,15 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	if _, exists := sessions[status.SessionHash]; exists {
 		status.Existing = true
 		status.Used = len(sessions)
+		h.promptSessionLimitMu.Unlock()
+		writePromptSessionLimitHeaders(c, status)
+		return status, false
+	}
+	if relatedRequest {
+		status.Used = len(sessions)
+		if len(sessions) == 0 {
+			delete(h.promptSessionLimits, status.Subject)
+		}
 		h.promptSessionLimitMu.Unlock()
 		writePromptSessionLimitHeaders(c, status)
 		return status, false

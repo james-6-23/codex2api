@@ -1193,6 +1193,8 @@
     "sessionCapacitySessionId": "会话 ID",
     "sessionCapacityEmpty": "暂无活跃会话",
     "sessionCapacityRemaining": "约 {{seconds}} 秒后释放",
+    "sessionCapacityRelatedCount": "关联 {{count}}",
+    "sessionCapacityRelatedSources": "关联请求来源",
     "quickConfigLoadingDesc": "正在读取完整账号配置。加载完成前不能保存，以免用空值覆盖请求头等详情字段。",
     "openaiModels": "模型列表",
     "openaiModelsAdd": "添加",

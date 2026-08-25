@@ -56,22 +56,26 @@ type newAPIOriginalAuditMeta struct {
 }
 
 type newAPIPolicyMeta struct {
-	PlatformID         string `json:"platform_id,omitempty"`
-	UserName           string `json:"user_name,omitempty"`
-	UserEmail          string `json:"user_email,omitempty"`
-	UserGroup          string `json:"user_group,omitempty"`
-	Profile            string `json:"profile"`
-	Mode               string `json:"mode"`
-	Provider           string `json:"provider"`
-	Protocol           string `json:"protocol"`
-	OriginalEndpoint   string `json:"original_endpoint,omitempty"`
-	OriginalProtocol   string `json:"original_protocol,omitempty"`
-	RequestedModel     string `json:"requested_model,omitempty"`
-	UpstreamModel      string `json:"upstream_model,omitempty"`
-	ChannelID          int    `json:"channel_id,omitempty"`
-	SessionFingerprint string `json:"session_fingerprint,omitempty"`
-	RootSessionVersion int    `json:"root_session_version,omitempty"`
-	RootSessionState   string `json:"root_session_state,omitempty"`
+	PlatformID          string `json:"platform_id,omitempty"`
+	UserName            string `json:"user_name,omitempty"`
+	UserEmail           string `json:"user_email,omitempty"`
+	UserGroup           string `json:"user_group,omitempty"`
+	Profile             string `json:"profile"`
+	Mode                string `json:"mode"`
+	Provider            string `json:"provider"`
+	Protocol            string `json:"protocol"`
+	OriginalEndpoint    string `json:"original_endpoint,omitempty"`
+	OriginalProtocol    string `json:"original_protocol,omitempty"`
+	RequestedModel      string `json:"requested_model,omitempty"`
+	UpstreamModel       string `json:"upstream_model,omitempty"`
+	ChannelID           int    `json:"channel_id,omitempty"`
+	SessionFingerprint  string `json:"session_fingerprint,omitempty"`
+	RootSessionVersion  int    `json:"root_session_version,omitempty"`
+	RootSessionState    string `json:"root_session_state,omitempty"`
+	RootSessionRelation string `json:"root_session_relation,omitempty"`
+	ThreadSource        string `json:"thread_source,omitempty"`
+	RequestKind         string `json:"request_kind,omitempty"`
+	SubagentKind        string `json:"subagent_kind,omitempty"`
 	// RootSessionFingerprint groups Guardian/sub-agent leaves under the
 	// user-visible Codex task. SessionFingerprint intentionally remains the
 	// exact leaf identity used by CYB conversation locking.
@@ -460,11 +464,12 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	}
 	meta.RootSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.RootSessionFingerprint))
 	meta.RootSessionState = strings.ToLower(strings.TrimSpace(meta.RootSessionState))
+	meta.RootSessionRelation = strings.ToLower(strings.TrimSpace(meta.RootSessionRelation))
 	if meta.RootSessionVersion < 0 || meta.RootSessionVersion > 1 {
 		return false
 	}
 	if meta.RootSessionVersion == 0 {
-		if meta.RootSessionState != "" || meta.RootSessionFingerprint != "" {
+		if meta.RootSessionState != "" || meta.RootSessionFingerprint != "" || meta.RootSessionRelation != "" {
 			return false
 		}
 	} else {
@@ -473,8 +478,11 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 			if meta.RootSessionFingerprint == "" {
 				return false
 			}
+			if meta.RootSessionRelation != "" && meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot && meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated {
+				return false
+			}
 		case newAPIPolicyRootSessionConflict, newAPIPolicyRootSessionUnavailable:
-			if meta.RootSessionFingerprint != "" {
+			if meta.RootSessionFingerprint != "" || meta.RootSessionRelation != "" {
 				return false
 			}
 		default:
@@ -486,6 +494,15 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		if err != nil || len(decoded) != 16 {
 			return false
 		}
+	}
+	if meta.ThreadSource, ok = normalizedVerifiedNewAPIIdentityText(meta.ThreadSource, 128); !ok {
+		return false
+	}
+	if meta.RequestKind, ok = normalizedVerifiedNewAPIIdentityText(meta.RequestKind, 128); !ok {
+		return false
+	}
+	if meta.SubagentKind, ok = normalizedVerifiedNewAPIIdentityText(meta.SubagentKind, 64); !ok {
+		return false
 	}
 	return true
 }

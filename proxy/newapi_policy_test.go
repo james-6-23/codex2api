@@ -282,14 +282,18 @@ func TestSignedPolicyMetaAcceptsRootSessionFingerprint(t *testing.T) {
 		SessionFingerprint:     leafFingerprint,
 		RootSessionVersion:     1,
 		RootSessionState:       newAPIPolicyRootSessionResolved,
+		RootSessionRelation:    newAPIPolicyRootSessionRelationRelated,
 		RootSessionFingerprint: rootFingerprint,
+		ThreadSource:           "future_new_source",
+		RequestKind:            "future_task",
+		SubagentKind:           "reviewer",
 	}, true)
 	handlerCfg := promptGuardTestConfig()
 	handlerCfg.Advanced.NewAPI.Enabled = true
 	handlerCfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
 	handler := newPromptGuardTestHandler(handlerCfg)
 	policyContext, verified := handler.verifyNewAPIPolicyContext(validContext, config, body)
-	if !verified || !policyContext.MetaVerified || policyContext.Meta.SessionFingerprint != leafFingerprint || policyContext.Meta.RootSessionFingerprint != rootFingerprint {
+	if !verified || !policyContext.MetaVerified || policyContext.Meta.SessionFingerprint != leafFingerprint || policyContext.Meta.RootSessionFingerprint != rootFingerprint || policyContext.Meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated || policyContext.Meta.ThreadSource != "future_new_source" || policyContext.Meta.RequestKind != "future_task" || policyContext.Meta.SubagentKind != "reviewer" {
 		t.Fatalf("valid signed root fingerprint was rejected: verified=%v context=%+v", verified, policyContext)
 	}
 	if audit := handler.capturePromptFilterAuditContext(validContext); audit.SessionHash != hashRiskIdentity(leafFingerprint) || audit.RootSessionHash != hashRiskIdentity(rootFingerprint) {

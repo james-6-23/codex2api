@@ -332,6 +332,13 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
                     <span className="truncate text-sm font-bold text-violet-700 dark:text-violet-300">
                       {ownerName}
                     </span>
+                    {(session.related_request_count ?? 0) > 0 ? (
+                      <span className="shrink-0 rounded-md bg-cyan-500/12 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-cyan-700 ring-1 ring-inset ring-cyan-500/20 dark:bg-cyan-400/15 dark:text-cyan-300 dark:ring-cyan-400/20">
+                        {t("accounts.sessionCapacityRelatedCount", {
+                          count: session.related_request_count,
+                        })}
+                      </span>
+                    ) : null}
                   </div>
                   <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground">
                     {t("accounts.sessionCapacityRemaining", {
@@ -345,6 +352,43 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
                 <div className="mt-1.5 overflow-x-auto rounded-lg bg-muted/45 px-3 py-2.5 font-mono text-[13px] leading-5 text-foreground">
                   <span className="whitespace-nowrap">{session.session_id}</span>
                 </div>
+                {(session.related_sources?.length ?? 0) > 0 ? (
+                  <div className="mt-3">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      {t("accounts.sessionCapacityRelatedSources")}
+                    </div>
+                    <div className="mt-1.5 space-y-1.5">
+                      {session.related_sources?.map((source, sourceIndex) => (
+                        <div
+                          key={`${source.thread_source ?? ""}:${source.request_kind ?? ""}:${source.subagent_kind ?? ""}:${sourceIndex}`}
+                          className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-xs"
+                        >
+                          <span className="font-semibold tabular-nums text-cyan-700 dark:text-cyan-300">
+                            ×{source.count}
+                          </span>
+                          {source.thread_source ? (
+                            <span className="break-all text-foreground">
+                              <span className="text-muted-foreground">thread_source:</span>{" "}
+                              {source.thread_source}
+                            </span>
+                          ) : null}
+                          {source.request_kind ? (
+                            <span className="break-all text-foreground">
+                              <span className="text-muted-foreground">request_kind:</span>{" "}
+                              {source.request_kind}
+                            </span>
+                          ) : null}
+                          {source.subagent_kind ? (
+                            <span className="break-all text-foreground">
+                              <span className="text-muted-foreground">subagent_kind:</span>{" "}
+                              {source.subagent_kind}
+                            </span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             );
           })}

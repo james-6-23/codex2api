@@ -230,6 +230,9 @@ func sessionAffinityKey(sessionID string, apiKeyID int64) string {
 
 func capacityAwareSessionAffinityKey(identity requestSessionIdentity, apiKeyID int64) string {
 	key := sessionAffinityKey(identity.affinityID, apiKeyID)
+	if key != "" && identity.relatedToRoot {
+		return auth.RelatedSessionAffinityKey(key)
+	}
 	if key != "" && !identity.stableIdentity {
 		return auth.UnstableSessionCapacityPrefix + key
 	}
@@ -241,6 +244,13 @@ func (h *Handler) bindAccountSession(c *gin.Context, affinityKey string, account
 		return
 	}
 	h.store.BindSessionAffinity(affinityKey, account, proxyURL)
+	if c != nil {
+		if related, ok := c.Get(relatedSessionObservationContextKey); ok {
+			if observation, valid := related.(relatedSessionObservation); valid {
+				h.store.RecordRelatedAccountSession(account.ID(), affinityKey, observation.Source, observation.RequestID)
+			}
+		}
+	}
 	audit := h.capturePromptFilterAuditContext(c)
 	h.store.SetAccountSessionOwner(account.ID(), affinityKey, auth.AccountSessionOwner{
 		Platform:   audit.NewAPIPlatform,

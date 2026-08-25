@@ -6121,11 +6121,19 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	}
 
 	now := time.Now()
+	rootKey, relatedRequest := RelatedSessionRootKey(key)
 	// Account session capacity acts as a strong binding even if general account
 	// affinity is bounded or disabled. An active admitted conversation must not
 	// migrate to another upstream account.
 	if accountID, exists := s.AccountSessionAccountID(key, now); exists {
 		if exclude != nil && exclude[accountID] {
+			// A related Guardian/title/summary turn belongs to the root account.
+			// Retrying it on another account would manufacture the cross-account
+			// window drift this marker is meant to prevent. Keep the root window
+			// intact and let the caller surface/wait on the original failure.
+			if relatedRequest {
+				return nil, ""
+			}
 			s.RemoveAccountSession(accountID, key)
 		} else {
 			if acc := s.takeByIDMode(accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
@@ -6134,6 +6142,43 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				}
 			}
 			return nil, ""
+		}
+	}
+	// Accounts without the hard window feature still have ordinary session
+	// affinity. A related Codex task may borrow that root binding, but it must
+	// not increment requestCount, extend expiresAt, or admit a capacity slot.
+	if relatedRequest {
+		s.sessionMu.RLock()
+		rootBinding, rootBound := s.sessionBindings[rootKey]
+		s.sessionMu.RUnlock()
+		if rootBound && !rootBinding.expiresAt.After(now) {
+			s.UnbindSessionAffinity(rootKey, rootBinding.accountID)
+			rootBound = false
+		}
+		if rootBound {
+			if acc := s.takeByIDMode(rootBinding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+				proxyURL := rootBinding.proxyURL
+				if !s.affinityProxyStillValid(rootBinding.accountID, proxyURL) {
+					// The account is still the root owner even if its proxy setting was
+					// edited. An empty sticky proxy lets the request resolve the account's
+					// current proxy without migrating to another account.
+					proxyURL = ""
+				}
+				return acc, proxyURL
+			}
+			return nil, ""
+		}
+		if !rootBound {
+			if cachedRoot, cached := s.getCachedSessionAffinity(rootKey); cached {
+				if acc := s.takeByIDMode(cachedRoot.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+					proxyURL := cachedRoot.proxyURL
+					if !s.affinityProxyStillValid(cachedRoot.accountID, proxyURL) {
+						proxyURL = ""
+					}
+					return acc, proxyURL
+				}
+				return nil, ""
+			}
 		}
 	}
 	s.sessionMu.RLock()

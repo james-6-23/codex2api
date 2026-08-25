@@ -47,7 +47,9 @@
     "sessionCapacityAccount": "上游帳號",
     "sessionCapacitySessionId": "會話 ID",
     "sessionCapacityEmpty": "暫無活躍會話",
-    "sessionCapacityRemaining": "約 {{seconds}} 秒後釋放"
+    "sessionCapacityRemaining": "約 {{seconds}} 秒後釋放",
+    "sessionCapacityRelatedCount": "關聯 {{count}}",
+    "sessionCapacityRelatedSources": "關聯請求來源"
   },
   "settings": {
     "modelCooldownTitle": "模型 429 冷卻策略",
