@@ -24,18 +24,12 @@ func classifyNativeRelatedInternal(identity requestRootSessionIdentity) bool {
 // classifyLocalCodexIndependentSessionAccounting recognizes a coherent
 // standalone Codex-owned background root from its native session fields.
 // Payload wording, model names and client fingerprints deliberately do not
-// participate: thread_source is the protocol classification. When an API key
-// configures project-title routing, the system source is left for that route;
-// every other non-user source remains an independent, non-window request.
+// participate: thread_source is the protocol classification. Every non-user
+// source remains an independent, non-window request.
 func classifyLocalCodexIndependentSessionAccounting(c *gin.Context, root requestRootSessionIdentity) bool {
 	if c == nil || !root.stable || root.conflict || !root.nativeRoot || root.related ||
 		strings.TrimSpace(root.threadSource) == "" || strings.EqualFold(strings.TrimSpace(root.threadSource), "user") {
 		return false
-	}
-	if strings.EqualFold(strings.TrimSpace(root.threadSource), "system") {
-		if row := apiKeyRowFromContext(c); row != nil && row.Limits.ProjectTitleGroupID > 0 {
-			return false
-		}
 	}
 	return true
 }
@@ -61,7 +55,6 @@ func resetCodexInternalRequestClassificationFrame(c *gin.Context) {
 		return
 	}
 	setLocalSessionAccountingBypass(c, false)
-	c.Set(projectTitleRequestContextKey, nil)
 	c.Set(relatedSessionObservationContextKey, nil)
 	c.Set(passiveInternalAuthorizationContextKey, nil)
 	cacheTrustedRequestedModel(c, "")

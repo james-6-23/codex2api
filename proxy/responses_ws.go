@@ -281,7 +281,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
-	classifyProjectTitleRequest(c, &sessionIdentity)
 	auditEndpoint := "/v1/responses"
 	if options != nil {
 		if configured := strings.TrimSpace(options.auditEndpoint); configured != "" {
@@ -307,7 +306,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	apiKeyID := requestAPIKeyID(c)
-	schedulingAPIKeyID := projectTitleSchedulingAPIKeyID(c, apiKeyID)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
@@ -357,7 +355,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 
 	accountFilter := accountFilterForModel(effectiveModel)
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, false, accountFilter)
-	accountFilter = applyProjectTitleModelRouting(c, effectiveModel, false, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
@@ -435,7 +432,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				}
 			}
 			if attempt == 0 && compactionAffinity.Known && !continuationPinned {
-				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 					h.store.Release(account)
 					account = nil
@@ -444,9 +441,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			} else if continuationPinned {
-				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, schedulingAPIKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			} else {
-				account, stickyProxyURL = h.nextRetryAccountForSessionWithDispatch(c.Request.Context(), affinityKey, schedulingAPIKeyID, retryExclusions, accountFilter, dispatchPolicy)
+				account, stickyProxyURL = h.nextRetryAccountForSessionWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			}
 		}
 		if account == nil {
@@ -459,9 +456,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			} else if msg := scopeBudgetExhaustedMessage(c); msg != "" {
 				// 候选被 scope 预算剔空（issue #439）：按限流语义回帧，而不是「无可用账号」。
 				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, msg, api.ErrorTypeRateLimit)
-			} else if h.store.HasUsageLimitedCandidateWithDispatch(schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
+			} else if h.store.HasUsageLimitedCandidateWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
 				apiErr = api.NewAPIError(api.ErrCodeRateLimitReached, "Codex 账号用量窗口已达上限", api.ErrorTypeRateLimit)
-			} else if h.store.HasSessionCapacityExhaustionWithDispatch(schedulingAPIKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+			} else if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
 				apiErr = api.NewAPIError(api.ErrCodeAccountSessionCapacity, accountSessionCapacityExceededMessage, api.ErrorTypeInvalidRequest)
 			} else {
 				apiErr = api.NewAPIError(api.ErrCodeServiceUnavailable, noAvailableAccountMessage(effectiveModel), api.ErrorTypeServer)
@@ -1207,7 +1204,7 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	if h == nil || h.store == nil {
 		return false, false
 	}
-	if passiveInternalRequestAuthorized(c) || isProjectTitleRequest(c) {
+	if passiveInternalRequestAuthorized(c) {
 		return false, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)

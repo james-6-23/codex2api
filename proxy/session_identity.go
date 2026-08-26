@@ -305,7 +305,7 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 		case newAPIPolicyRootSessionResolved:
 			fingerprint := strings.TrimSpace(policyContext.Meta.RootSessionFingerprint)
 			internalOverride := signedRelatedInternalRootOverride(policyContext.Meta)
-			passiveOverride := internalOverride || signedProjectTitleRootOverride(policyContext.Meta)
+			passiveOverride := internalOverride || signedSystemPassiveRootOverride(policyContext.Meta)
 			signedThreadSource := strings.TrimSpace(policyContext.Meta.ThreadSource)
 			signedRelatedInternal := policyContext.Meta.RootSessionRelation == newAPIPolicyRootSessionRelationRelated &&
 				signedThreadSource != "" && !strings.EqualFold(signedThreadSource, "user")
@@ -439,7 +439,7 @@ func signedRelatedInternalRootOverride(meta newAPIPolicyMeta) bool {
 	return strings.TrimSpace(meta.RootSessionFingerprint) != ""
 }
 
-func signedProjectTitleRootOverride(meta newAPIPolicyMeta) bool {
+func signedSystemPassiveRootOverride(meta newAPIPolicyMeta) bool {
 	if meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
 		meta.PassiveFeature != newAPIPassiveFeatureSystemPassive ||
 		!strings.EqualFold(strings.TrimSpace(meta.ThreadSource), "system") ||

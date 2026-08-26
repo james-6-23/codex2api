@@ -65,8 +65,8 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h == nil || h.store == nil {
 		return false
 	}
-	if passiveInternalRequestAuthorized(c) || isProjectTitleRequest(c) {
-		// Field-classified internal/title turns contain transcript or original
+	if passiveInternalRequestAuthorized(c) {
+		// Field-classified internal turns contain transcript or original
 		// user text by design. Do not recursively filter it as a fresh user prompt.
 		return false
 	}

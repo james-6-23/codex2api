@@ -128,15 +128,15 @@ func TestSignedGuardianReviewedRootOverridesIndependentLeafGraph(t *testing.T) {
 	}
 }
 
-func TestSignedProjectTitleRootOverrideAcceptsIndependentTitleGraph(t *testing.T) {
+func TestSignedSystemPassiveRootOverrideAcceptsIndependentGraph(t *testing.T) {
 	for name, body := range map[string][]byte{
-		"single user message":  projectTitleRoutingTestBody(),
-		"NewAPI direct string": projectTitleRoutingStringInputTestBody(),
+		"structured input": []byte(`{"model":"gpt-5.6-luna","input":[{"role":"user","content":[{"type":"input_text","text":"generate metadata"}]}]}`),
+		"direct string":    []byte(`{"model":"gpt-5.6-luna","input":"generate metadata"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
 			handler := promptSessionLimitVerifiedTestHandler()
-			rootFingerprint := promptSessionTestFingerprint("project-title-parent-root-" + name)
-			c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("project-title-leaf-"+name), rootFingerprint)
+			rootFingerprint := promptSessionTestFingerprint("system-passive-parent-root-" + name)
+			c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("system-passive-leaf-"+name), rootFingerprint)
 			policy := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
 			policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
 			policy.Meta.ThreadSource = "system"
@@ -148,7 +148,7 @@ func TestSignedProjectTitleRootOverrideAcceptsIndependentTitleGraph(t *testing.T
 
 			identity := handler.resolveRequestRootSessionIdentityForContext(c, body)
 			if identity.conflict || !identity.stable || !identity.related || identity.sessionID != rootFingerprint || identity.threadSource != "system" {
-				t.Fatalf("signed project title parent root was rejected: %+v", identity)
+				t.Fatalf("signed system-passive parent root was rejected: %+v", identity)
 			}
 		})
 	}

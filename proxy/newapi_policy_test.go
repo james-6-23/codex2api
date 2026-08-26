@@ -338,14 +338,11 @@ func TestSignedPolicyMetaAcceptsRootSessionFingerprint(t *testing.T) {
 	}
 }
 
-func TestPrimeNewAPIPolicyContextMakesSignedProjectTitleRootAvailableBeforeSessionResolution(t *testing.T) {
-	// Use the direct-string payload emitted by NewAPI's Codex relay. Keeping
-	// this protocol vector here prevents the gateway and Codex2API classifiers
-	// from drifting into two individually valid but incompatible title shapes.
-	body := projectTitleRoutingStringInputTestBody()
-	rootFingerprint := promptSessionTestFingerprint("prime-project-title-root")
-	leafFingerprint := promptSessionTestFingerprint("prime-project-title-leaf")
-	c, _ := signedNewAPIPolicyContext(t, "prime-project-title-order", newAPIIdentity{
+func TestPrimeNewAPIPolicyContextMakesSignedSystemPassiveRootAvailableBeforeSessionResolution(t *testing.T) {
+	body := []byte(`{"model":"gpt-5.6-luna","input":"generate background metadata"}`)
+	rootFingerprint := promptSessionTestFingerprint("prime-system-passive-root")
+	leafFingerprint := promptSessionTestFingerprint("prime-system-passive-leaf")
+	c, _ := signedNewAPIPolicyContext(t, "prime-system-passive-order", newAPIIdentity{
 		UserID: "42", ClientIP: "203.0.113.8",
 	}, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
@@ -365,8 +362,8 @@ func TestPrimeNewAPIPolicyContextMakesSignedProjectTitleRootAvailableBeforeSessi
 		RequestKind:            "turn",
 		PassiveFeature:         "system_passive",
 	}, true)
-	// The title transport may carry its own independent native graph. The signed
-	// parent root must be available before the early session resolver runs.
+	// A system-passive transport may carry its own independent native graph. The
+	// signed parent root must be available before the early session resolver runs.
 	c.Request.Header = cloneHeaderWithNewAPIIdentity(c.Request.Header, nativeSessionHeaders(testRootSessionB, testRootSessionB, 0))
 
 	cfg := promptGuardTestConfig()
@@ -379,9 +376,8 @@ func TestPrimeNewAPIPolicyContextMakesSignedProjectTitleRootAvailableBeforeSessi
 	if !identity.relatedToRoot || identity.affinityID != "newapi-root-session:"+rootFingerprint {
 		t.Fatalf("early session resolution missed the verified signed root: %+v", identity)
 	}
-	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{ProjectTitleGroupID: 20}})
-	if !classifyProjectTitleRequest(c, &identity) || !identity.bypassWindowAccounting {
-		t.Fatalf("NewAPI string title did not enter the same configured route as direct traffic: %+v", identity)
+	if !passiveInternalRequestAuthorized(c) {
+		t.Fatalf("signed system-passive request was not authorized: %+v", identity)
 	}
 }
 

@@ -792,43 +792,6 @@ func TestCreateAPIKeyPersistsQuotaAndExpiration(t *testing.T) {
 	}
 }
 
-func TestDeleteAPIKeyClearsProjectTitleRoutingAuthorization(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
-	db, err := database.New("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("database.New: %v", err)
-	}
-	defer db.Close()
-	id, err := db.InsertAPIKeyWithOptions(context.Background(), database.APIKeyInput{
-		Name: "title route", Key: "sk-title-route-delete-1234567890",
-		Limits: database.APIKeyLimits{ProjectTitleGroupID: 20},
-	})
-	if err != nil {
-		t.Fatalf("InsertAPIKeyWithOptions: %v", err)
-	}
-	store := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2})
-	store.SetAPIKeyProjectTitleGroup(id, 20)
-	titleAccount := &auth.Account{DBID: 9, GroupIDs: []int64{20}, Status: auth.StatusReady}
-	if !store.APIKeyAllowsAccount(-id, titleAccount) {
-		t.Fatal("test setup did not authorize the project-title group")
-	}
-	handler := &Handler{db: db, store: store}
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	c.Params = gin.Params{{Key: "id", Value: fmt.Sprintf("%d", id)}}
-	c.Request = httptest.NewRequest(http.MethodDelete, "/api/admin/keys/delete", nil)
-
-	handler.DeleteAPIKey(c)
-
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
-	}
-	if store.APIKeyAllowsAccount(-id, titleAccount) {
-		t.Fatal("deleted API key retained project-title routing authorization")
-	}
-}
-
 func TestUpdateAPIKeyPreservesOmittedFieldsAndUpdatesLimits(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

@@ -201,7 +201,6 @@ func TestDeleteAccountGroupPrunesScopeLimits(t *testing.T) {
 		Key:             "sk-scope-prune-1234567890",
 		AllowedGroupIDs: []int64{keptID, doomedID},
 		Limits: APIKeyLimits{
-			ProjectTitleGroupID: doomedID,
 			ScopeLimits: []APIKeyScopeLimit{
 				{ScopeType: APIKeyScopeTypeGroup, ScopeID: keptID, Cost1d: 5},
 				{ScopeType: APIKeyScopeTypeGroup, ScopeID: doomedID, Cost1d: 3},
@@ -238,9 +237,6 @@ func TestDeleteAccountGroupPrunesScopeLimits(t *testing.T) {
 	}
 	if !foundAccountScope {
 		t.Fatalf("account scope with the same ID was pruned: %+v", row.Limits.ScopeLimits)
-	}
-	if row.Limits.ProjectTitleGroupID != 0 {
-		t.Fatalf("deleted project-title group survived: %d", row.Limits.ProjectTitleGroupID)
 	}
 }
 

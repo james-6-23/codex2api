@@ -669,32 +669,3 @@ func TestPromptSessionCreationLimitIgnoresInternalReviewRequest(t *testing.T) {
 		t.Fatalf("internal review request was counted: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
 	}
 }
-
-func TestPromptSessionCreationLimitIgnoresClassifiedProjectTitleRequest(t *testing.T) {
-	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
-	cfg := promptfilter.Config{}
-	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
-	cfg.Advanced.Risk.SessionCreationLimit = 1
-	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
-	store.SetPromptFilterConfig(cfg)
-	handler := &Handler{store: store}
-	account := &auth.Account{
-		DBID: 92, SessionCapacityEnabled: true, SessionCapacityMax: 5,
-		SessionCapacityIdleTTLSeconds: 3600,
-	}
-	c := projectTitleRoutingTestContext(20)
-	identity := requestSessionIdentity{relatedSource: auth.AccountSessionRelatedSource{ThreadSource: "system"}}
-	body := projectTitleRoutingTestBody()
-	if !classifyProjectTitleRequest(c, &identity) {
-		t.Fatal("project-title request was not classified")
-	}
-
-	status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(c, body, account)
-	if exceeded || status.Enabled || status.Used != 0 || len(handler.promptSessionLimits) != 0 {
-		t.Fatalf("project-title request was counted: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
-	}
-	status, exceeded = handler.checkPromptSessionCreationLimit(c, cfg, body)
-	if exceeded || status.Used != 0 || status.SessionHash != "" || len(handler.promptSessionLimits) != 0 {
-		t.Fatalf("global project-title limit path counted the request: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
-	}
-}

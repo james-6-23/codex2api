@@ -144,10 +144,10 @@ type promptSessionCreationLimitStatus struct {
 // after scheduling has selected the concrete upstream account. The user-level
 // creation limit is an extension of account session-window control: relay/API
 // accounts that have not enabled session capacity must not make a passive
-// review/naming request consume one of the user's windows merely because the
+// internal request consume one of the user's windows merely because the
 // downstream Codex client carried its normal Session-Id.
 func (h *Handler) checkPromptSessionCreationLimitForSelectedAccount(c *gin.Context, body []byte, account *auth.Account) (promptSessionCreationLimitStatus, bool) {
-	if account == nil || isProjectTitleRequest(c) || (c != nil && c.GetBool("prompt_intelligence_internal")) {
+	if account == nil || (c != nil && c.GetBool("prompt_intelligence_internal")) {
 		return promptSessionCreationLimitStatus{}, false
 	}
 	enabled, _, _ := account.SessionCapacityConfig()
@@ -180,10 +180,6 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	if h == nil || c == nil {
 		return status, false
 	}
-	if isProjectTitleRequest(c) {
-		return status, false
-	}
-
 	policyStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	verifiedPerson := (policyStatus == "verified" || policyStatus == "signed_response") &&
 		policyContext.MetaVerified && strings.TrimSpace(policyContext.Identity.UserID) != ""

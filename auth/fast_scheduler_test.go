@@ -5,8 +5,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/codex2api/database"
 )
 
 func newFastSchedulerTestAccount(id int64, tier AccountHealthTier, score float64, limit int64) *Account {
@@ -1352,34 +1350,5 @@ func TestStoreAPIKeyAllowsConfiguredNoAffinityGroups(t *testing.T) {
 	}
 	if store.APIKeyAllowsAccount(1, other) {
 		t.Fatal("unconfigured group should remain unauthorized")
-	}
-}
-
-func TestStoreProjectTitleGroupAuthorizationIsRequestScoped(t *testing.T) {
-	ordinary := newFastSchedulerTestAccount(1, HealthTierHealthy, 120, 1)
-	ordinary.GroupIDs = []int64{10}
-	title := newFastSchedulerTestAccount(2, HealthTierHealthy, 110, 1)
-	title.GroupIDs = []int64{20}
-	other := newFastSchedulerTestAccount(3, HealthTierHealthy, 100, 1)
-	other.GroupIDs = []int64{30}
-
-	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
-	store.SetAPIKeyAllowedGroups(7, []int64{10})
-	store.SetAPIKeyProjectTitleGroup(7, 20)
-
-	if !store.APIKeyAllowsAccount(7, ordinary) || store.APIKeyAllowsAccount(7, title) {
-		t.Fatal("project-title group leaked into ordinary API-key authorization")
-	}
-	if store.APIKeyAllowsAccount(-7, ordinary) || !store.APIKeyAllowsAccount(-7, title) || store.APIKeyAllowsAccount(-7, other) {
-		t.Fatal("project-title request did not isolate authorization to its configured group")
-	}
-
-	title.SetAllowedAPIKeyIDs([]int64{8})
-	if store.accountAllowedForAPIKey(title, -7) {
-		t.Fatal("project-title request bypassed the account's reverse API-key whitelist")
-	}
-	title.SetAllowedAPIKeyIDs([]int64{7})
-	if !store.accountAllowedForAPIKey(title, -7) {
-		t.Fatal("project-title request failed the matching reverse API-key whitelist")
 	}
 }

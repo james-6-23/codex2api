@@ -108,7 +108,6 @@ interface LimitsFormState {
   modelDeny: string[];
   planAllow: string[];
   noAffinityGroupIds: number[];
-  projectTitleGroupId: number;
   rpm: string;
   rpd: string;
   maxConcurrency: string;
@@ -198,7 +197,6 @@ const emptyLimitsForm: LimitsFormState = {
   modelDeny: [],
   planAllow: [],
   noAffinityGroupIds: [],
-  projectTitleGroupId: 0,
   rpm: "",
   rpd: "",
   maxConcurrency: "",
@@ -2080,27 +2078,6 @@ export default function APIKeys() {
               </p>
             </FormField>
 
-            {createForm.limits.upstreamChannel !== "grok" ? (
-              <FormField
-                label={t("apiKeys.projectTitleGroupLabel")}
-                icon={<Pencil className="size-3.5" />}
-                as="div"
-              >
-                <ProjectTitleGroupSelect
-                  groups={groups}
-                  value={createForm.limits.projectTitleGroupId}
-                  onChange={(projectTitleGroupId) =>
-                    updateCreateForm({
-                      limits: { ...createForm.limits, projectTitleGroupId },
-                    })
-                  }
-                />
-                <p className="mt-1.5 text-xs text-muted-foreground">
-                  {t("apiKeys.projectTitleGroupHint")}
-                </p>
-              </FormField>
-            ) : null}
-
             <LimitsEditor
               value={createForm.limits}
               onChange={(limits) => updateCreateForm({ limits })}
@@ -2308,29 +2285,6 @@ export default function APIKeys() {
                     </p>
                   </FormField>
 
-                  {editForm.limits.upstreamChannel !== "grok" ? (
-                    <FormField
-                      label={t("apiKeys.projectTitleGroupLabel")}
-                      icon={<Pencil className="size-3.5" />}
-                      as="div"
-                    >
-                      <ProjectTitleGroupSelect
-                        groups={groups}
-                        value={editForm.limits.projectTitleGroupId}
-                        onChange={(projectTitleGroupId) =>
-                          updateEditForm({
-                            limits: {
-                              ...editForm.limits,
-                              projectTitleGroupId,
-                            },
-                          })
-                        }
-                      />
-                      <p className="mt-1.5 text-xs text-muted-foreground">
-                        {t("apiKeys.projectTitleGroupHint")}
-                      </p>
-                    </FormField>
-                  ) : null}
                 </>
               ) : (
                 <LimitsEditor
@@ -2484,10 +2438,6 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
     noAffinityGroupIds: Array.isArray(limits.no_affinity_group_ids)
       ? limits.no_affinity_group_ids
       : [],
-    projectTitleGroupId:
-      limits.project_title_group_id && limits.project_title_group_id > 0
-        ? limits.project_title_group_id
-        : 0,
     rpm: limits.rpm && limits.rpm > 0 ? String(limits.rpm) : "",
     rpd: limits.rpd && limits.rpd > 0 ? String(limits.rpd) : "",
     maxConcurrency:
@@ -2643,8 +2593,6 @@ function applyUpstreamChannel(
     ...limits,
     upstreamChannel,
     allowLive: upstreamChannel === "codex" ? limits.allowLive : false,
-    projectTitleGroupId:
-      upstreamChannel === "grok" ? 0 : limits.projectTitleGroupId,
     planAllow: prunePlanAllow(limits.planAllow, upstreamChannel),
   };
 }
@@ -2735,7 +2683,6 @@ function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
       form.upstreamChannel,
     ),
     no_affinity_group_ids: form.noAffinityGroupIds,
-    project_title_group_id: form.projectTitleGroupId || undefined,
     rpm: intNum(form.rpm),
     rpd: intNum(form.rpd),
     max_concurrency: intNum(form.maxConcurrency),
@@ -3109,37 +3056,6 @@ function AllowedGroupsDisplay({
 function resolveGroups(ids: number[], groups: AccountGroup[]): AccountGroup[] {
   const byID = new Map(groups.map((group) => [group.id, group]));
   return ids.map((id) => byID.get(id)).filter(Boolean) as AccountGroup[];
-}
-
-function ProjectTitleGroupSelect({
-  groups,
-  value,
-  onChange,
-}: {
-  groups: AccountGroup[];
-  value: number;
-  onChange: (value: number) => void;
-}) {
-  const { t } = useTranslation();
-  const options: SelectOption[] = [
-    { label: t("apiKeys.projectTitleGroupDisabled"), value: "0" },
-    ...groups
-      .filter((group) => group.channel === "codex")
-      .map((group) => ({ label: group.name, value: String(group.id) })),
-  ];
-  if (value > 0 && !options.some((option) => option.value === String(value))) {
-    options.push({
-      label: t("apiKeys.projectTitleGroupMissing", { id: value }),
-      value: String(value),
-    });
-  }
-  return (
-    <Select
-      value={String(value)}
-      onValueChange={(next) => onChange(Number(next) || 0)}
-      options={options}
-    />
-  );
 }
 
 function GroupMultiSelect({

@@ -7918,10 +7918,6 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := h.validateAPIKeyProjectTitleGroup(ctx, limits); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error())
-			return
-		}
 		if err := h.validateAPIKeyScopeLimits(ctx, limits.ScopeLimits); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
@@ -7948,7 +7944,6 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	}
 	if h.store != nil {
 		h.store.SetAPIKeyNoAffinityGroups(id, limits.NoAffinityGroupIDs)
-		h.store.SetAPIKeyProjectTitleGroup(id, limits.ProjectTitleGroupID)
 		h.store.SetAPIKeyAllowedPlans(id, limits.PlanAllow)
 	}
 	// 新配的累计额度要立刻开始记账，不等落库侧的 60s 缓存过期。
@@ -8082,10 +8077,6 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
 		}
-		if err := h.validateAPIKeyProjectTitleGroup(ctx, update.Limits); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error())
-			return
-		}
 		if err := h.validateAPIKeyScopeLimits(ctx, update.Limits.ScopeLimits); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
@@ -8101,7 +8092,6 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 	}
 	if update.LimitsSet && h.store != nil {
 		h.store.SetAPIKeyNoAffinityGroups(id, update.Limits.NoAffinityGroupIDs)
-		h.store.SetAPIKeyProjectTitleGroup(id, update.Limits.ProjectTitleGroupID)
 		h.store.SetAPIKeyAllowedPlans(id, update.Limits.PlanAllow)
 	}
 	if update.LimitsSet {
@@ -8139,7 +8129,6 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		ModelDeny:              clean(in.ModelDeny),
 		PlanAllow:              cleanPlanAllow(in.PlanAllow),
 		NoAffinityGroupIDs:     dedupeInt64(in.NoAffinityGroupIDs),
-		ProjectTitleGroupID:    maxInt64(in.ProjectTitleGroupID, 0),
 		RPM:                    maxInt(in.RPM, 0),
 		RPD:                    maxInt(in.RPD, 0),
 		MaxConcurrency:         maxInt(in.MaxConcurrency, 0),
@@ -8178,29 +8167,6 @@ func (h *Handler) validateAPIKeyGroupIDs(ctx context.Context, groupIDs []int64, 
 		return fmt.Errorf("%s 包含不存在的分组 ID: %s", field, joinInt64s(missing))
 	}
 	return nil
-}
-
-func (h *Handler) validateAPIKeyProjectTitleGroup(ctx context.Context, limits database.APIKeyLimits) error {
-	if limits.ProjectTitleGroupID <= 0 {
-		return nil
-	}
-	if limits.ResolveUpstreamChannel() == database.UpstreamChannelGrok {
-		return errors.New("limits.project_title_group_id 不能用于 Grok 上游渠道")
-	}
-	groups, err := h.db.ListAccountGroups(ctx)
-	if err != nil {
-		return err
-	}
-	for _, group := range groups {
-		if group.ID != limits.ProjectTitleGroupID {
-			continue
-		}
-		if database.NormalizeAccountGroupChannel(group.Channel) != database.AccountGroupChannelCodex {
-			return errors.New("limits.project_title_group_id 必须选择 Codex 分组")
-		}
-		return nil
-	}
-	return fmt.Errorf("limits.project_title_group_id 包含不存在的分组 ID: %d", limits.ProjectTitleGroupID)
 }
 
 // validateAPIKeyScopeLimits 校验分组 / 账号维度限额指向的 scope 真实存在（issue #439）。
@@ -8426,7 +8392,6 @@ func (h *Handler) DeleteAPIKey(c *gin.Context) {
 	if h.store != nil {
 		h.store.SetAPIKeyAllowedGroups(id, nil)
 		h.store.SetAPIKeyNoAffinityGroups(id, nil)
-		h.store.SetAPIKeyProjectTitleGroup(id, 0)
 		h.store.SetAPIKeyAllowedPlans(id, nil)
 		h.store.RemovePromptFilterNewAPIBinding(id)
 	}
