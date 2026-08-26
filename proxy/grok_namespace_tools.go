@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"io"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -105,6 +106,157 @@ func grokFunctionToolForCustom(tool map[string]any, name string) map[string]any 
 	return converted
 }
 
+// grokPermissiveObjectSchema 是无法保真转换时的降级形态:宽松 object,仅保留
+// 原 schema 的 description。宁可让模型自由发挥、由客户端做最终参数校验,也不能
+// 让整段对话因 schema 形态被上游 400 掐死。
+func grokPermissiveObjectSchema(root map[string]any) map[string]any {
+	out := map[string]any{"type": "object", "additionalProperties": true}
+	if description, ok := root["description"].(string); ok && strings.TrimSpace(description) != "" {
+		out["description"] = description
+	}
+	return out
+}
+
+// grokObjectishSchemaBranch 判断联合分支是否可并入 object 根:显式 object,或
+// 未声明 type 但带 properties。
+func grokObjectishSchemaBranch(branch map[string]any) bool {
+	if kind, ok := branch["type"].(string); ok {
+		return kind == "object"
+	}
+	if _, ok := branch["type"]; ok {
+		return false
+	}
+	_, hasProperties := branch["properties"]
+	return hasProperties
+}
+
+// mergeGrokUnionRootSchema 把 anyOf/oneOf/allOf 根合并成单一 object:
+// properties 取各 object 分支的并集(先到先得),required 按语义收敛——
+// 联合(任一分支成立)取交集,allOf(全部成立)取并集;非 object 分支丢弃。
+// 没有任何 object 分支时整体降级为宽松 object。
+func mergeGrokUnionRootSchema(root map[string]any, branches []any, requireAll bool) map[string]any {
+	merged := map[string]any{"type": "object"}
+	if description, ok := root["description"].(string); ok && strings.TrimSpace(description) != "" {
+		merged["description"] = description
+	}
+	properties := map[string]any{}
+	var required map[string]bool
+	objectBranches := 0
+	for _, rawBranch := range branches {
+		branch, ok := rawBranch.(map[string]any)
+		if !ok || !grokObjectishSchemaBranch(branch) {
+			continue
+		}
+		objectBranches++
+		if _, has := merged["description"]; !has {
+			if description, ok := branch["description"].(string); ok && strings.TrimSpace(description) != "" {
+				merged["description"] = description
+			}
+		}
+		if props, ok := branch["properties"].(map[string]any); ok {
+			for key, value := range props {
+				if _, exists := properties[key]; !exists {
+					properties[key] = value
+				}
+			}
+		}
+		branchRequired := map[string]bool{}
+		if list, ok := branch["required"].([]any); ok {
+			for _, item := range list {
+				if key, ok := item.(string); ok {
+					branchRequired[key] = true
+				}
+			}
+		}
+		if required == nil {
+			required = branchRequired
+		} else if requireAll {
+			for key := range branchRequired {
+				required[key] = true
+			}
+		} else {
+			for key := range required {
+				if !branchRequired[key] {
+					delete(required, key)
+				}
+			}
+		}
+	}
+	if objectBranches == 0 {
+		return grokPermissiveObjectSchema(root)
+	}
+	if len(properties) > 0 {
+		merged["properties"] = properties
+	}
+	if len(required) > 0 {
+		keys := make([]string, 0, len(required))
+		for key := range required {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		values := make([]any, len(keys))
+		for index, key := range keys {
+			values[index] = key
+		}
+		merged["required"] = values
+	}
+	return merged
+}
+
+// normalizeGrokToolParameterSchema 把函数工具参数 schema 归一成 Grok 上游接受
+// 的形态:根节点必须是单一 object(上游对联合/非 object 根返回 400
+// "tool parameter root must be an object type")。返回 (归一后 schema, 是否改写)。
+// 合规的 object 根保持原样,嵌套结构一律不动,避免扰动上游缓存前缀。
+func normalizeGrokToolParameterSchema(schema map[string]any) (map[string]any, bool) {
+	if schema == nil {
+		return schema, false
+	}
+	if typeList, ok := schema["type"].([]any); ok {
+		hasObject := false
+		for _, item := range typeList {
+			if kind, ok := item.(string); ok && kind == "object" {
+				hasObject = true
+				break
+			}
+		}
+		if !hasObject {
+			return grokPermissiveObjectSchema(schema), true
+		}
+		out := make(map[string]any, len(schema))
+		for key, value := range schema {
+			out[key] = value
+		}
+		out["type"] = "object"
+		return out, true
+	}
+	if kind, ok := schema["type"].(string); ok {
+		if kind == "object" {
+			return schema, false
+		}
+		return grokPermissiveObjectSchema(schema), true
+	}
+	for _, key := range []string{"anyOf", "oneOf"} {
+		if branches, ok := schema[key].([]any); ok && len(branches) > 0 {
+			return mergeGrokUnionRootSchema(schema, branches, false), true
+		}
+	}
+	if branches, ok := schema["allOf"].([]any); ok && len(branches) > 0 {
+		return mergeGrokUnionRootSchema(schema, branches, true), true
+	}
+	if _, ok := schema["properties"]; ok {
+		out := make(map[string]any, len(schema)+1)
+		for key, value := range schema {
+			out[key] = value
+		}
+		out["type"] = "object"
+		return out, true
+	}
+	if len(schema) == 0 {
+		return map[string]any{"type": "object"}, true
+	}
+	return grokPermissiveObjectSchema(schema), true
+}
+
 func normalizeGrokFunctionTool(tool map[string]any, name string) map[string]any {
 	converted := make(map[string]any, len(tool))
 	for key, value := range tool {
@@ -125,6 +277,11 @@ func normalizeGrokFunctionTool(tool map[string]any, name string) map[string]any 
 		"metadata", "x_provider", "cache_control", "cacheControl",
 	} {
 		delete(converted, key)
+	}
+	if params, ok := converted["parameters"].(map[string]any); ok {
+		if normalized, changed := normalizeGrokToolParameterSchema(params); changed {
+			converted["parameters"] = normalized
+		}
 	}
 	return converted
 }
