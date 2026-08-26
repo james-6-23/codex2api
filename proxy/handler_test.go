@@ -5814,3 +5814,24 @@ func TestResponsesCompactSuffixOnlyRequestLogsBaseModel(t *testing.T) {
 		t.Fatalf("x-model = %q, want base gpt-5.6-sol (suffix stripped for display)", got)
 	}
 }
+
+// Grok/xAI 的错误体用顶层字符串 error 字段({"code":"...","error":"文本"})。
+// 解析器此前只认 error.message 对象形态,导致这类 400 对用户只显示裸的
+// "Upstream returned status 400",根因全靠翻容器日志。
+func TestUsageLogErrorMessageGrokStringErrorField(t *testing.T) {
+	got := usageLogErrorMessage(400, []byte(`{"code":"invalid-argument","error":"The function name tool_search is reserved for the tool_search tool"}`))
+	want := "invalid-argument · The function name tool_search is reserved for the tool_search tool"
+	if got != want {
+		t.Fatalf("grok string error not extracted: got %q want %q", got, want)
+	}
+
+	// 对象形态不受影响。
+	if got := usageLogErrorMessage(400, []byte(`{"error":{"message":"object form","code":"bad"}}`)); got != "bad · object form" {
+		t.Fatalf("object error form regressed: %q", got)
+	}
+
+	// error 为对象但无 message 时不得把整个 JSON 打进 message。
+	if got := usageLogErrorMessage(400, []byte(`{"error":{"foo":"bar"}}`)); got != "HTTP 400" {
+		t.Fatalf("object error without message must fall back: %q", got)
+	}
+}

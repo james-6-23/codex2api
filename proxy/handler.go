@@ -571,6 +571,14 @@ func usageLogErrorMessageImpl(statusCode int, body []byte, trustedText bool) str
 			break
 		}
 	}
+	if message == "" {
+		// Grok/xAI 风格错误体把说明放在顶层字符串 error 字段:
+		// {"code":"invalid-argument","error":"..."}。仅在 error 是字符串时采用,
+		// 避免把对象形态的整段 JSON 打进 message。
+		if errField := gjson.GetBytes(body, "error"); errField.Type == gjson.String {
+			message = strings.TrimSpace(errField.String())
+		}
+	}
 
 	codeCandidates := []string{
 		gjson.GetBytes(body, "error.code").String(),
