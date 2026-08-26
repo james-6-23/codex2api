@@ -800,6 +800,7 @@
     }
   },
   "usage": {
+	"searchLogs": "搜尋錯誤、模型、端點、帳號、NewAPI 使用者、IP、用戶端 UA 或 API Key…",
 	"cyberPolicyViewContent": "查看 cyber_policy 事件詳細資料",
 	"cyberPolicyDetailTitle": "cyber_policy 觸發詳細資料",
 	"cyberPolicyRequestContent": "關聯 Prompt",
