@@ -137,6 +137,10 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 		"X-Codex-Turn-State":                    []string{"turn-state"},
 		"X-Codex-Turn-Metadata":                 []string{"turn-metadata"},
 		"X-Client-Request-Id":                   []string{"req-123"},
+		"X-Codex-Parent-Thread-Id":              []string{"parent-thread"},
+		"X-Codex-Forked-From-Thread-Id":         []string{"fork-thread"},
+		"X-OpenAI-Subagent":                     []string{"review"},
+		"X-OpenAI-Memgen-Request":               []string{"true"},
 		"X-Responsesapi-Include-Timing-Metrics": []string{"true"},
 	}
 
@@ -151,10 +155,13 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 	if got := headers.Get("OpenAI-Beta"); got != responsesWebsocketBetaHeader {
 		t.Fatalf("OpenAI-Beta = %q", got)
 	}
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics"} {
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Parent-Thread-Id", "X-OpenAI-Subagent", "X-OpenAI-Memgen-Request", "X-Responsesapi-Include-Timing-Metrics"} {
 		if got := headers.Get(name); got != ginHeaders.Get(name) {
 			t.Fatalf("%s = %q, want %q", name, got, ginHeaders.Get(name))
 		}
+	}
+	if got := headers.Get("X-Codex-Forked-From-Thread-Id"); got != "" {
+		t.Fatalf("unofficial fork header = %q, want empty", got)
 	}
 	if got := headers.Get("Session_id"); got != "session-123" {
 		t.Fatalf("Session_id = %q", got)
@@ -250,6 +257,123 @@ func TestPrepareWebsocketBodyStatelessSessionWithoutCacheKey(t *testing.T) {
 
 	if cacheKey := gjson.GetBytes(got, "prompt_cache_key").String(); cacheKey != "" {
 		t.Fatalf("prompt_cache_key = %q, want empty (stateless sessionID must not be injected); body=%s", cacheKey, got)
+	}
+}
+
+func TestApplyCodexFrameMetadataUsesCanonicalPerRequestCarrier(t *testing.T) {
+	const turnMetadata = `{"session_id":"root-thread","thread_id":"child-thread","forked_from_thread_id":"fork-thread","thread_source":"subagent","request_kind":"turn","subagent_kind":"review"}`
+	headers := http.Header{}
+	headers.Set("X-Codex-Turn-Metadata", turnMetadata)
+	headers.Set("X-Codex-Turn-State", "turn-state")
+	headers.Set("X-Client-Request-Id", "child-thread")
+	headers.Set("X-Codex-Parent-Thread-Id", "parent-thread")
+	headers.Set("X-OpenAI-Subagent", "review")
+
+	got := applyCodexFrameMetadata([]byte(`{"type":"response.create","model":"gpt-5.6-sol","client_metadata":{"existing":"kept"}}`), headers)
+	if value := gjson.GetBytes(got, "client_metadata.existing").String(); value != "kept" {
+		t.Fatalf("existing metadata = %q, want kept; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-turn-state").String(); value != "turn-state" {
+		t.Fatalf("turn state = %q, want turn-state; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-client-request-id").String(); value != "child-thread" {
+		t.Fatalf("client request id = %q, want child-thread; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-parent-thread-id").String(); value != "parent-thread" {
+		t.Fatalf("flat parent = %q, want parent-thread; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-forked-from-thread-id").String(); value != "" {
+		t.Fatalf("unofficial flat fork = %q, want empty; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-openai-subagent").String(); value != "review" {
+		t.Fatalf("flat subagent = %q, want review; body=%s", value, got)
+	}
+	canonical := gjson.GetBytes(got, codexTurnMetadataClientPath).String()
+	if value := gjson.Get(canonical, "session_id").String(); value != "root-thread" {
+		t.Fatalf("canonical session = %q, want root-thread; metadata=%s", value, canonical)
+	}
+	if value := gjson.Get(canonical, "parent_thread_id").String(); value != "parent-thread" {
+		t.Fatalf("canonical parent = %q, want parent-thread; metadata=%s", value, canonical)
+	}
+	if value := gjson.Get(canonical, "forked_from_thread_id").String(); value != "fork-thread" {
+		t.Fatalf("canonical fork = %q, want fork-thread; metadata=%s", value, canonical)
+	}
+	if value := gjson.Get(canonical, "request_kind").String(); value != "turn" {
+		t.Fatalf("canonical request kind = %q, want turn; metadata=%s", value, canonical)
+	}
+}
+
+func TestApplyCodexFrameMetadataPreservesNewerFrameValues(t *testing.T) {
+	const frameTurnMetadata = `{"parent_thread_id":"frame-parent","forked_from_thread_id":"frame-fork","request_kind":"turn"}`
+	body := []byte(`{"type":"response.create","client_metadata":{"x-codex-turn-metadata":"` + strings.ReplaceAll(frameTurnMetadata, `"`, `\"`) + `","x-codex-parent-thread-id":"frame-parent","x-openai-subagent":"frame-agent"}}`)
+	headers := http.Header{}
+	headers.Set("X-Codex-Turn-Metadata", `{"parent_thread_id":"header-parent"}`)
+	headers.Set("X-Codex-Parent-Thread-Id", "header-parent")
+	headers.Set("X-OpenAI-Subagent", "header-agent")
+
+	got := applyCodexFrameMetadata(body, headers)
+	if value := gjson.GetBytes(got, "client_metadata.x-codex-parent-thread-id").String(); value != "frame-parent" {
+		t.Fatalf("flat parent = %q, want frame-parent; body=%s", value, got)
+	}
+	if value := gjson.GetBytes(got, "client_metadata.x-openai-subagent").String(); value != "frame-agent" {
+		t.Fatalf("flat subagent = %q, want frame-agent; body=%s", value, got)
+	}
+	canonical := gjson.GetBytes(got, codexTurnMetadataClientPath).String()
+	if value := gjson.Get(canonical, "parent_thread_id").String(); value != "frame-parent" {
+		t.Fatalf("canonical parent = %q, want frame-parent; metadata=%s", value, canonical)
+	}
+	if value := gjson.Get(canonical, "forked_from_thread_id").String(); value != "frame-fork" {
+		t.Fatalf("canonical fork = %q, want frame-fork; metadata=%s", value, canonical)
+	}
+}
+
+func TestApplyCodexFrameMetadataBuildsMemoryKindWithoutUnofficialForkHeader(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("X-Codex-Forked-From-Thread-Id", "fork-thread")
+	headers.Set("X-OpenAI-Memgen-Request", "true")
+
+	got := applyCodexFrameMetadata([]byte(`{"type":"response.create","model":"gpt-5.6-sol"}`), headers)
+	if value := gjson.GetBytes(got, "client_metadata.x-openai-memgen-request").String(); value != "true" {
+		t.Fatalf("flat memgen = %q, want true; body=%s", value, got)
+	}
+	canonical := gjson.GetBytes(got, codexTurnMetadataClientPath).String()
+	if value := gjson.Get(canonical, "forked_from_thread_id").String(); value != "" {
+		t.Fatalf("canonical fork = %q, want empty for unofficial header; metadata=%s", value, canonical)
+	}
+	if value := gjson.Get(canonical, "request_kind").String(); value != "memory" {
+		t.Fatalf("canonical request kind = %q, want memory; metadata=%s", value, canonical)
+	}
+}
+
+func TestStripCodexFrameScopedHandshakeHeaders(t *testing.T) {
+	headers := http.Header{}
+	headers.Set("Authorization", "Bearer token")
+	for _, name := range []string{
+		"X-Codex-Turn-State",
+		"X-Codex-Turn-Metadata",
+		"X-Client-Request-Id",
+		"X-Codex-Parent-Thread-Id",
+		"X-OpenAI-Subagent",
+		"X-OpenAI-Memgen-Request",
+	} {
+		headers.Set(name, "request-scoped")
+	}
+
+	stripCodexFrameScopedHandshakeHeaders(headers)
+	if got := headers.Get("Authorization"); got != "Bearer token" {
+		t.Fatalf("Authorization = %q, want stable header preserved", got)
+	}
+	for _, name := range []string{
+		"X-Codex-Turn-State",
+		"X-Codex-Turn-Metadata",
+		"X-Client-Request-Id",
+		"X-Codex-Parent-Thread-Id",
+		"X-OpenAI-Subagent",
+		"X-OpenAI-Memgen-Request",
+	} {
+		if got := headers.Get(name); got != "" {
+			t.Fatalf("%s = %q, want stripped from reusable handshake", name, got)
+		}
 	}
 }
 

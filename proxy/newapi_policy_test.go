@@ -338,6 +338,38 @@ func TestSignedPolicyMetaAcceptsRootSessionFingerprint(t *testing.T) {
 	}
 }
 
+func TestSignedPolicyMetaAcceptsUserForkSourceFingerprint(t *testing.T) {
+	config := promptfilter.NewAPIConfig{Enabled: true, MaxClockSkewSeconds: 300}
+	body := []byte(`{"model":"gpt-5.6-sol","input":"fork"}`)
+	identity := newAPIIdentity{UserID: "42", ClientIP: "203.0.113.8"}
+	currentFingerprint := newAPIRootSessionFingerprint("newapi", "42", testLeafSessionA)
+	sourceFingerprint := newAPIRootSessionFingerprint("newapi", "42", testRootSessionA)
+
+	c, _ := signedNewAPIPolicyContext(t, "fork-session-meta-valid", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, c, newAPIPolicyMeta{
+		Profile:                      promptfilter.GuardProfileBalanced,
+		Mode:                         promptfilter.GuardModeEnforce,
+		Provider:                     string(promptfilter.ModelFamilyOpenAI),
+		Protocol:                     string(promptfilter.ProtocolResponses),
+		RootSessionVersion:           1,
+		RootSessionState:             newAPIPolicyRootSessionResolved,
+		RootSessionRelation:          newAPIPolicyRootSessionRelationRelated,
+		RootSessionFingerprint:       currentFingerprint,
+		ForkedFromSessionFingerprint: sourceFingerprint,
+		ThreadSource:                 "user",
+		RequestKind:                  "turn",
+	}, true)
+	handlerCfg := promptGuardTestConfig()
+	handlerCfg.Advanced.NewAPI.Enabled = true
+	handlerCfg.Advanced.NewAPI.MaxClockSkewSeconds = 300
+	handler := newPromptGuardTestHandler(handlerCfg)
+
+	policyContext, verified := handler.verifyNewAPIPolicyContext(c, config, body)
+	if !verified || !policyContext.MetaVerified || policyContext.Meta.ForkedFromSessionFingerprint != sourceFingerprint {
+		t.Fatalf("valid fork source fingerprint was rejected: verified=%v context=%+v", verified, policyContext)
+	}
+}
+
 func TestPrimeNewAPIPolicyContextMakesSignedSystemPassiveRootAvailableBeforeSessionResolution(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.6-luna","input":"generate background metadata"}`)
 	rootFingerprint := promptSessionTestFingerprint("prime-system-passive-root")

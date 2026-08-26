@@ -259,6 +259,42 @@ func capacityAwareSessionAffinityKey(identity requestSessionIdentity, apiKeyID i
 	return key
 }
 
+// takeForkSourceAccount gives a new user-created fork one chance to inherit
+// the account currently bound to its source session. The target affinity key
+// remains independent, so the fork keeps its own accounting window and can
+// fall back to normal scheduling when the source account is unavailable.
+func (h *Handler) takeForkSourceAccount(identity requestSessionIdentity, targetKey string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, policy auth.DispatchPolicy) (*auth.Account, string) {
+	if h == nil || h.store == nil || strings.TrimSpace(targetKey) == "" || strings.TrimSpace(identity.forkSourceAffinityID) == "" {
+		return nil, ""
+	}
+	sourceKey := sessionAffinityKey(identity.forkSourceAffinityID, apiKeyID)
+	if sourceKey == "" || sourceKey == targetKey {
+		return nil, ""
+	}
+	if _, bound := h.store.SessionAffinityAccountID(targetKey); bound {
+		return nil, ""
+	}
+
+	now := time.Now()
+	accountID, bound := h.store.AccountSessionAccountID(sourceKey, now)
+	if !bound {
+		accountID, bound = h.store.SessionAffinityAccountID(sourceKey)
+	}
+	if !bound || accountID == 0 {
+		return nil, ""
+	}
+
+	account := h.store.TakePreferredAccountWithDispatch(accountID, apiKeyID, exclude, filter, policy)
+	if account == nil {
+		return nil, ""
+	}
+	if !h.store.AdmitAccountSession(account, targetKey, now) {
+		h.store.Release(account)
+		return nil, ""
+	}
+	return account, account.GetProxyURL()
+}
+
 func (h *Handler) bindAccountSession(c *gin.Context, affinityKey string, account *auth.Account, proxyURL string) {
 	if h == nil || h.store == nil || account == nil {
 		return
@@ -3119,6 +3155,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					h.store.Release(account)
 					account = nil
 				}
+			}
+			if account == nil && attempt == 0 && !turnContinuationPinned {
+				account, stickyProxyURL = h.takeForkSourceAccount(sessionIdentity, affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()

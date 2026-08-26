@@ -438,6 +438,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					account = nil
 				}
 			}
+			if account == nil && attempt == 0 && !continuationPinned {
+				account, stickyProxyURL = h.takeForkSourceAccount(sessionIdentity, affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			} else if continuationPinned {

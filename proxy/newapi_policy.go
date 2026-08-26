@@ -86,6 +86,9 @@ type newAPIPolicyMeta struct {
 	// user-visible Codex task. SessionFingerprint intentionally remains the
 	// exact leaf identity used by CYB conversation locking.
 	RootSessionFingerprint string `json:"root_session_fingerprint,omitempty"`
+	// ForkedFromSessionFingerprint is a signed affinity hint for a user-created
+	// fork. It identifies the source session without merging the fork's root.
+	ForkedFromSessionFingerprint string `json:"forked_from_session_fingerprint,omitempty"`
 }
 
 type verifiedNewAPIPolicyContext struct {
@@ -485,6 +488,7 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		}
 	}
 	meta.RootSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.RootSessionFingerprint))
+	meta.ForkedFromSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.ForkedFromSessionFingerprint))
 	meta.RootSessionState = strings.ToLower(strings.TrimSpace(meta.RootSessionState))
 	meta.RootSessionRelation = strings.ToLower(strings.TrimSpace(meta.RootSessionRelation))
 	if meta.RootSessionVersion < 0 || meta.RootSessionVersion > 1 {
@@ -514,6 +518,16 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	if meta.RootSessionFingerprint != "" {
 		decoded, err := hex.DecodeString(meta.RootSessionFingerprint)
 		if err != nil || len(decoded) != 16 {
+			return false
+		}
+	}
+	if meta.ForkedFromSessionFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.ForkedFromSessionFingerprint)
+		if err != nil || len(decoded) != 16 || meta.RootSessionVersion != 1 ||
+			meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+			!strings.EqualFold(strings.TrimSpace(meta.ThreadSource), "user") ||
+			strings.TrimSpace(meta.SubagentKind) != "" {
 			return false
 		}
 	}

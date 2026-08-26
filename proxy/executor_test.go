@@ -427,6 +427,40 @@ func TestApplyCodexRequestHeadersForwardsAttestationOnlyWhenPresent(t *testing.T
 	}
 }
 
+func TestApplyCodexRequestHeadersForwardsOfficialCodexConversationGraph(t *testing.T) {
+	downstream := http.Header{}
+	downstream.Set("X-Codex-Parent-Thread-Id", "parent-thread")
+	downstream.Set("X-Codex-Forked-From-Thread-Id", "fork-thread")
+	downstream.Set("X-Codex-Turn-Metadata", `{"forked_from_thread_id":"fork-thread"}`)
+	downstream.Set("X-OpenAI-Subagent", "review")
+	downstream.Set("X-OpenAI-Memgen-Request", "true")
+
+	for _, mode := range []string{auth.CodexFingerprintModeOff, auth.CodexFingerprintModeDevice} {
+		t.Run(mode, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequest: %v", err)
+			}
+			account := &auth.Account{DBID: 42, AccountID: "acct-42", CodexFingerprintMode: mode}
+			applyCodexRequestHeaders(req, account, "token-123", "cache-key-1", "api-key-1", nil, downstream)
+
+			for _, name := range []string{
+				"X-Codex-Parent-Thread-Id",
+				"X-Codex-Turn-Metadata",
+				"X-OpenAI-Subagent",
+				"X-OpenAI-Memgen-Request",
+			} {
+				if got, want := req.Header.Get(name), downstream.Get(name); got != want {
+					t.Fatalf("%s = %q, want %q", name, got, want)
+				}
+			}
+			if got := req.Header.Get("X-Codex-Forked-From-Thread-Id"); got != "" {
+				t.Fatalf("unofficial fork header = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestApplyCodexRequestHeadersForwardsResponsesLiteOnlyWhenPresent(t *testing.T) {
 	const headerName = codexResponsesLiteHeader
 	acc := &auth.Account{DBID: 42, AccountID: "acct-42"}

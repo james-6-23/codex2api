@@ -47,6 +47,9 @@ type requestRootSessionIdentity struct {
 	threadSource string
 	requestKind  string
 	subagentKind string
+	// forkedFromSessionID is lineage only. It may seed the fork's first account
+	// choice, but never replaces sessionID or merges accounting windows.
+	forkedFromSessionID string
 }
 
 // ownsUserRootBinding distinguishes a user-visible main-thread continuation
@@ -193,7 +196,8 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 		}
 		return withSessionGraphClassification(requestRootSessionIdentity{
 			sessionID: strings.ToLower(metadataRoot), stable: true, nativeRoot: true,
-			related: leaf != metadataRoot || parent != "" || forkedFrom != "" || signals.subagent,
+			related:             leaf != metadataRoot || parent != "" || forkedFrom != "" || signals.subagent,
+			forkedFromSessionID: strings.ToLower(forkedFrom),
 		}, signals)
 	}
 
@@ -221,7 +225,8 @@ func resolveRequestRootSessionIdentity(headers http.Header, body []byte) request
 		}
 		return withSessionGraphClassification(requestRootSessionIdentity{
 			sessionID: headerSession, stable: true, nativeRoot: nativeRoot,
-			related: nativeRoot && (leaf != headerSession || parent != "" || forkedFrom != "" || signals.subagent),
+			related:             nativeRoot && (leaf != headerSession || parent != "" || forkedFrom != "" || signals.subagent),
+			forkedFromSessionID: strings.ToLower(forkedFrom),
 		}, signals)
 	}
 
@@ -469,6 +474,9 @@ func applySignedRootSessionClassification(identity requestRootSessionIdentity, m
 	identity.subagentKind = strings.TrimSpace(meta.SubagentKind)
 	if identity.subagentKind == "" {
 		identity.subagentKind = fallback.subagentKind
+	}
+	if identity.forkedFromSessionID == "" {
+		identity.forkedFromSessionID = fallback.forkedFromSessionID
 	}
 	return identity
 }

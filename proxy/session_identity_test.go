@@ -71,6 +71,44 @@ func TestResolveRequestRootSessionIdentityPreservesUnknownRelatedSource(t *testi
 	}
 }
 
+func TestResolveRequestRootSessionIdentityKeepsUserForkAsIndependentRoot(t *testing.T) {
+	headers := http.Header{}
+	headers.Set(codexTurnMetadataHeader, `{"session_id":"`+testLeafSessionA+`","thread_id":"`+testLeafSessionA+`","window_id":"`+testLeafSessionA+`:0","forked_from_thread_id":"`+testRootSessionA+`","thread_source":"user","request_kind":"turn"}`)
+
+	identity := resolveRequestRootSessionIdentity(headers, nil)
+	if !identity.stable || identity.conflict || !identity.nativeRoot || !identity.related || identity.sessionID != testLeafSessionA {
+		t.Fatalf("fork identity = %+v, want independent fork root %q", identity, testLeafSessionA)
+	}
+	if identity.forkedFromSessionID != testRootSessionA || !identity.ownsUserRootBinding() {
+		t.Fatalf("fork lineage/classification = %+v", identity)
+	}
+}
+
+func TestResolveRequestSessionIdentityUsesSignedForkSourceAffinity(t *testing.T) {
+	currentFingerprint := newAPIRootSessionFingerprint("newapi", "42", testLeafSessionA)
+	sourceFingerprint := newAPIRootSessionFingerprint("newapi", "42", testRootSessionA)
+	c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("fork-leaf"), currentFingerprint)
+	c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testLeafSessionA+`","thread_id":"`+testLeafSessionA+`","forked_from_thread_id":"`+testRootSessionA+`","thread_source":"user","request_kind":"turn"}`)
+	raw, _ := c.Get(newAPIPolicyMetaContextKey)
+	policy := raw.(verifiedNewAPIPolicyContext)
+	policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policy.Meta.ThreadSource = "user"
+	policy.Meta.ForkedFromSessionFingerprint = sourceFingerprint
+	c.Set(newAPIPolicyMetaContextKey, policy)
+
+	handler := promptSessionLimitVerifiedTestHandler()
+	identity := handler.resolveRequestSessionIdentityForContext(c, []byte(`{"model":"gpt-5.6-sol","input":"fork"}`))
+	if identity.affinityID != "newapi-root-session:"+currentFingerprint {
+		t.Fatalf("fork affinity = %q, want independent current root", identity.affinityID)
+	}
+	if identity.forkSourceAffinityID != "newapi-root-session:"+sourceFingerprint {
+		t.Fatalf("fork source affinity = %q", identity.forkSourceAffinityID)
+	}
+	if !identity.ownsRootBinding || !identity.relatedToRoot {
+		t.Fatalf("fork classification = %+v", identity)
+	}
+}
+
 func TestSignedRelatedRequestUsesRootAffinityWithNonCountingMarker(t *testing.T) {
 	handler := promptSessionLimitVerifiedTestHandler()
 	rootFingerprint := promptSessionTestFingerprint("shared-root-affinity")

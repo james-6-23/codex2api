@@ -370,6 +370,9 @@ var codexAllowedForwardHeaders = []string{
 	"X-Codex-Turn-State",
 	"X-Codex-Turn-Metadata",
 	"X-Client-Request-Id",
+	"X-Codex-Parent-Thread-Id",
+	"X-OpenAI-Subagent",
+	"X-OpenAI-Memgen-Request",
 	"X-Codex-Beta-Features",
 	codexResponsesLiteHeader,
 	// DeviceCheck 设备认证头（上游 openai/codex#20619）。仅在下游真实 Codex
@@ -1203,6 +1206,7 @@ type requestSessionIdentity struct {
 	ownsRootBinding        bool
 	relatedSource          auth.AccountSessionRelatedSource
 	relatedRequestID       string
+	forkSourceAffinityID   string
 	bypassWindowAccounting bool
 	protectedRelatedLease  bool
 }
@@ -1308,6 +1312,17 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 			ThreadSource: rootIdentity.threadSource,
 			RequestKind:  rootIdentity.requestKind,
 			SubagentKind: rootIdentity.subagentKind,
+		}
+		if verifiedPolicy {
+			if fingerprint := strings.TrimSpace(policyContext.Meta.ForkedFromSessionFingerprint); fingerprint != "" {
+				identity.forkSourceAffinityID = "newapi-root-session:" + fingerprint
+			} else if forkedFrom := strings.TrimSpace(rootIdentity.forkedFromSessionID); forkedFrom != "" {
+				if fingerprint := newAPIRootSessionFingerprint(policyContext.Platform, policyContext.Identity.UserID, forkedFrom); fingerprint != "" {
+					identity.forkSourceAffinityID = "newapi-root-session:" + fingerprint
+				}
+			}
+		} else if forkedFrom := strings.TrimSpace(rootIdentity.forkedFromSessionID); forkedFrom != "" {
+			identity.forkSourceAffinityID = forkedFrom
 		}
 		if rootIdentity.related {
 			identity.relatedRequestID = relatedSessionLogicalRequestID(c, body, policyContext, verifiedPolicy)
