@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +18,112 @@ import (
 )
 
 const promptSessionLimitCleanupInterval = time.Minute
+
+const (
+	promptSessionLimitRuntimeNamespace = "prompt-session-limit-v1"
+	promptSessionLimitCacheTimeout     = 500 * time.Millisecond
+)
+
+type persistedPromptSessionLimits struct {
+	Version  int                  `json:"version"`
+	Sessions map[string]time.Time `json:"sessions"`
+}
+
+func (h *Handler) ensurePromptSessionLimitsLoaded(subject string, now time.Time) {
+	if h == nil || h.cache == nil || strings.TrimSpace(subject) == "" {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	h.promptSessionLimitLoadMu.Lock()
+	defer h.promptSessionLimitLoadMu.Unlock()
+	h.promptSessionLimitMu.Lock()
+	if h.promptSessionLimitsLoaded[subject] {
+		h.promptSessionLimitMu.Unlock()
+		return
+	}
+	h.promptSessionLimitMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), promptSessionLimitCacheTimeout)
+	raw, found, err := h.cache.GetRuntime(ctx, promptSessionLimitRuntimeNamespace, subject)
+	cancel()
+	if err != nil {
+		log.Printf("读取用户窗口限制缓存失败: subject=%s err=%v", subject, err)
+		return
+	}
+	persisted := persistedPromptSessionLimits{}
+	if found {
+		if err := json.Unmarshal(raw, &persisted); err != nil {
+			log.Printf("解析用户窗口限制缓存失败: subject=%s err=%v", subject, err)
+			found = false
+		}
+	}
+
+	h.promptSessionLimitMu.Lock()
+	if h.promptSessionLimits == nil {
+		h.promptSessionLimits = make(map[string]map[string]time.Time)
+	}
+	if h.promptSessionLimitsLoaded == nil {
+		h.promptSessionLimitsLoaded = make(map[string]bool)
+	}
+	if found {
+		sessions := h.promptSessionLimits[subject]
+		if sessions == nil {
+			sessions = make(map[string]time.Time)
+			h.promptSessionLimits[subject] = sessions
+		}
+		for sessionHash, expiresAt := range persisted.Sessions {
+			sessionHash = strings.TrimSpace(sessionHash)
+			if sessionHash == "" || !expiresAt.After(now) {
+				continue
+			}
+			if current, exists := sessions[sessionHash]; !exists || expiresAt.After(current) {
+				sessions[sessionHash] = expiresAt
+			}
+		}
+	}
+	h.promptSessionLimitsLoaded[subject] = true
+	h.promptSessionLimitMu.Unlock()
+}
+
+func (h *Handler) persistPromptSessionLimits(subject string, now time.Time) {
+	if h == nil || h.cache == nil || strings.TrimSpace(subject) == "" {
+		return
+	}
+	h.promptSessionLimitPersistMu.Lock()
+	defer h.promptSessionLimitPersistMu.Unlock()
+	if now.IsZero() {
+		now = time.Now()
+	}
+	h.promptSessionLimitMu.Lock()
+	sessions := h.promptSessionLimits[subject]
+	persisted := persistedPromptSessionLimits{Version: 1, Sessions: make(map[string]time.Time, len(sessions))}
+	maxRemaining := time.Duration(0)
+	for sessionHash, expiresAt := range sessions {
+		if strings.TrimSpace(sessionHash) == "" || !expiresAt.After(now) {
+			continue
+		}
+		persisted.Sessions[sessionHash] = expiresAt
+		if remaining := expiresAt.Sub(now); remaining > maxRemaining {
+			maxRemaining = remaining
+		}
+	}
+	h.promptSessionLimitMu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), promptSessionLimitCacheTimeout)
+	defer cancel()
+	if len(persisted.Sessions) == 0 || maxRemaining <= 0 {
+		_ = h.cache.DeleteRuntime(ctx, promptSessionLimitRuntimeNamespace, subject)
+		return
+	}
+	payload, err := json.Marshal(persisted)
+	if err != nil {
+		return
+	}
+	if err := h.cache.SetRuntime(ctx, promptSessionLimitRuntimeNamespace, subject, payload, maxRemaining); err != nil {
+		log.Printf("写入用户窗口限制缓存失败: subject=%s err=%v", subject, err)
+	}
+}
 
 type promptSessionCreationLimitStatus struct {
 	Enabled       bool
@@ -144,6 +253,7 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	status.SessionHash = hashRiskIdentity(sessionID)
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(status.WindowSeconds) * time.Second)
+	h.ensurePromptSessionLimitsLoaded(status.Subject, now)
 
 	h.promptSessionLimitMu.Lock()
 	if h.promptSessionLimits == nil {
@@ -158,6 +268,7 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 			}
 			if len(subjectSessions) == 0 {
 				delete(h.promptSessionLimits, subject)
+				delete(h.promptSessionLimitsLoaded, subject)
 			}
 		}
 		h.promptSessionLastCleanup = now
@@ -214,6 +325,7 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	sessions[status.SessionHash] = expiresAt
 	status.Used = len(sessions)
 	h.promptSessionLimitMu.Unlock()
+	h.persistPromptSessionLimits(status.Subject, now)
 	writePromptSessionLimitHeaders(c, status)
 	return status, false
 }

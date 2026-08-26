@@ -58,7 +58,10 @@ type Handler struct {
 	apiKeyGateMu                sync.Mutex
 	promptRiskMu                sync.Mutex
 	promptSessionLimitMu        sync.Mutex
+	promptSessionLimitLoadMu    sync.Mutex
+	promptSessionLimitPersistMu sync.Mutex
 	promptSessionLimits         map[string]map[string]time.Time
+	promptSessionLimitsLoaded   map[string]bool
 	promptSessionLastCleanup    time.Time
 	accountSessionObservationMu sync.Mutex
 	accountSessionObservations  map[string]accountSessionObservationCacheEntry

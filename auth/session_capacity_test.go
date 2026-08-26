@@ -1,12 +1,30 @@
 package auth
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/codex2api/cache"
+	"github.com/codex2api/database"
 )
+
+type failOnceAccountSessionRuntimeCache struct {
+	cache.TokenCache
+	failed atomic.Bool
+}
+
+func (c *failOnceAccountSessionRuntimeCache) SetRuntime(ctx context.Context, namespace, key string, value json.RawMessage, ttl time.Duration) error {
+	if namespace == accountSessionRuntimeNamespace && !c.failed.Swap(true) {
+		return errors.New("forced account session cache failure")
+	}
+	return c.TokenCache.SetRuntime(ctx, namespace, key, value, ttl)
+}
 
 func newSessionCapacityTestStore(limit int64) (*Store, *Account) {
 	account := &Account{
@@ -162,6 +180,224 @@ func TestRelatedRequestBorrowsRootAccountWithoutRefreshingOrCreatingWindow(t *te
 	}
 	if !snapshots[0].LastSeen.Equal(originalLastSeen) {
 		t.Fatalf("related request refreshed root last_seen: got %s want %s", snapshots[0].LastSeen, originalLastSeen)
+	}
+}
+
+func TestAccountSessionStateRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
+	firstStore := NewStore(nil, runtimeCache, settings)
+	firstAccount := &Account{
+		DBID: 11, AccessToken: "first", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	firstStore.AddAccount(firstAccount)
+	rootKey := "persisted-root::api-key:7"
+	if !firstStore.AdmitAccountSession(firstAccount, rootKey, time.Now()) {
+		t.Fatal("initial root admission failed")
+	}
+	firstStore.SetAccountSessionOwner(firstAccount.DBID, rootKey, AccountSessionOwner{
+		Platform: "newapi", UserID: "42", UserName: "Arun", APIKeyID: 7, APIKeyName: "pro",
+	})
+	firstStore.RecordRelatedAccountSession(firstAccount.DBID, RelatedSessionAffinityKey(rootKey), AccountSessionRelatedSource{
+		ThreadSource: "subagent", RequestKind: "turn", SubagentKind: "guardian",
+	}, "guardian-request-1")
+	before := firstStore.AccountSessionSnapshots(firstAccount.DBID, time.Now())
+	if len(before) != 1 {
+		t.Fatalf("initial snapshots = %#v", before)
+	}
+
+	secondStore := NewStore(nil, runtimeCache, settings)
+	secondAccount := &Account{
+		DBID: 11, AccessToken: "second", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	secondStore.AddAccount(secondAccount)
+	if secondStore.AdmitAccountSession(secondAccount, "new-root::api-key:7", time.Now()) {
+		t.Fatal("restart bypassed the restored account-session capacity")
+	}
+	after := secondStore.AccountSessionSnapshots(secondAccount.DBID, time.Now())
+	if len(after) != 1 || after[0].SessionID != rootKey || after[0].Owner.UserName != "Arun" ||
+		after[0].RelatedRequestCount != 1 || len(after[0].RelatedSources) != 1 {
+		t.Fatalf("restored snapshots = %#v", after)
+	}
+	if !after[0].LastSeen.Equal(before[0].LastSeen) {
+		t.Fatalf("restored last_seen = %s, want %s", after[0].LastSeen, before[0].LastSeen)
+	}
+}
+
+func TestRelatedRequestRestoresPersistedRootWithoutRefreshingAfterRestart(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
+	firstStore := NewStore(nil, runtimeCache, settings)
+	firstAccount := &Account{
+		DBID: 12, AccessToken: "first", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	firstStore.AddAccount(firstAccount)
+	rootKey := "persisted-related-root::api-key:7"
+	if !firstStore.AdmitAccountSession(firstAccount, rootKey, time.Now().Add(-time.Minute)) {
+		t.Fatal("initial root admission failed")
+	}
+	firstStore.SetAccountSessionOwner(firstAccount.DBID, rootKey, AccountSessionOwner{})
+	before := firstStore.AccountSessionSnapshots(firstAccount.DBID, time.Now())
+	if len(before) != 1 {
+		t.Fatalf("initial snapshots = %#v", before)
+	}
+
+	secondStore := NewStore(nil, runtimeCache, settings)
+	secondAccount := &Account{
+		DBID: 12, AccessToken: "second", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	secondStore.AddAccount(secondAccount)
+	relatedKey := RelatedSessionAffinityKey(rootKey)
+	selected, _ := secondStore.NextForSession(relatedKey, 0, nil)
+	if selected != secondAccount {
+		t.Fatalf("related request selected %#v, want restored account", selected)
+	}
+	secondStore.Release(selected)
+	after := secondStore.AccountSessionSnapshots(secondAccount.DBID, time.Now())
+	if len(after) != 1 || !after[0].LastSeen.Equal(before[0].LastSeen) {
+		t.Fatalf("related request refreshed or lost root: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestRestoredNearExpiryRootPersistsItsFirstReuse(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
+	firstStore := NewStore(nil, runtimeCache, settings)
+	firstAccount := &Account{
+		DBID: 15, AccessToken: "first", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 60,
+	}
+	firstStore.AddAccount(firstAccount)
+	const rootKey = "near-expiry-restored-root"
+	oldLastSeen := time.Now().Add(-45 * time.Second)
+	if !firstStore.AdmitAccountSession(firstAccount, rootKey, oldLastSeen) {
+		t.Fatal("initial root admission failed")
+	}
+	firstStore.SetAccountSessionOwner(firstAccount.DBID, rootKey, AccountSessionOwner{UserName: "Arun"})
+
+	secondStore := NewStore(nil, runtimeCache, settings)
+	secondAccount := &Account{
+		DBID: 15, AccessToken: "second", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 60,
+	}
+	secondStore.AddAccount(secondAccount)
+	reusedAt := time.Now()
+	if !secondStore.AdmitAccountSession(secondAccount, rootKey, reusedAt) {
+		t.Fatal("restored root reuse was rejected")
+	}
+	secondStore.SetAccountSessionOwner(secondAccount.DBID, rootKey, AccountSessionOwner{UserName: "Arun"})
+
+	raw, found, err := runtimeCache.GetRuntime(context.Background(), accountSessionRuntimeNamespace, accountSessionRuntimeKey(secondAccount.DBID))
+	if err != nil || !found {
+		t.Fatalf("reused root cache missing: found=%v err=%v", found, err)
+	}
+	collection := persistedAccountSessionCollection{}
+	if err := json.Unmarshal(raw, &collection); err != nil || len(collection.Sessions) != 1 {
+		t.Fatalf("reused root cache invalid: sessions=%#v err=%v", collection.Sessions, err)
+	}
+	if collection.Sessions[0].LastSeen.Before(reusedAt) {
+		t.Fatalf("restored first reuse was not persisted: got=%s want >=%s", collection.Sessions[0].LastSeen, reusedAt)
+	}
+}
+
+func TestAccountSessionPersistenceRetriesImmediatelyAfterCacheFailure(t *testing.T) {
+	baseCache := cache.NewMemory(1)
+	defer baseCache.Close()
+	runtimeCache := &failOnceAccountSessionRuntimeCache{TokenCache: baseCache}
+	store := NewStore(nil, runtimeCache, &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1})
+	account := &Account{
+		DBID: 16, AccessToken: "token", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	store.AddAccount(account)
+	const rootKey = "retry-after-cache-failure-root"
+	if !store.AdmitAccountSession(account, rootKey, time.Now()) {
+		t.Fatal("initial root admission failed")
+	}
+	owner := AccountSessionOwner{UserName: "Arun"}
+	store.SetAccountSessionOwner(account.DBID, rootKey, owner)
+	store.SetAccountSessionOwner(account.DBID, rootKey, owner)
+
+	if _, found, err := baseCache.GetRuntime(context.Background(), accountSessionRuntimeNamespace, accountSessionRuntimeKey(account.DBID)); err != nil || !found {
+		t.Fatalf("failed cache write was not retried immediately: found=%v err=%v", found, err)
+	}
+}
+
+func TestClearAccountSessionsRemovesPersistedRootAfterRestart(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
+	firstStore := NewStore(nil, runtimeCache, settings)
+	firstAccount := &Account{
+		DBID: 13, AccessToken: "first", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	firstStore.AddAccount(firstAccount)
+	if !firstStore.AdmitAccountSession(firstAccount, "cleared-root", time.Now()) {
+		t.Fatal("initial root admission failed")
+	}
+	firstStore.SetAccountSessionOwner(firstAccount.DBID, "cleared-root", AccountSessionOwner{UserName: "Arun"})
+	firstStore.ClearAccountSessions(firstAccount.DBID)
+
+	secondStore := NewStore(nil, runtimeCache, settings)
+	secondAccount := &Account{
+		DBID: 13, AccessToken: "second", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	secondStore.AddAccount(secondAccount)
+	if !secondStore.AdmitAccountSession(secondAccount, "replacement-root", time.Now()) {
+		t.Fatal("cleared persisted root still consumed capacity after restart")
+	}
+	items := secondStore.AccountSessionSnapshots(secondAccount.DBID, time.Now())
+	if len(items) != 1 || items[0].SessionID != "replacement-root" {
+		t.Fatalf("snapshots after clear = %#v", items)
+	}
+}
+
+func TestDisableAccountSessionCapacityAfterRestartClearsPersistedOwner(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
+	firstStore := NewStore(nil, runtimeCache, settings)
+	firstAccount := &Account{
+		DBID: 14, AccessToken: "first", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	firstStore.AddAccount(firstAccount)
+	const rootKey = "disabled-after-restart-root"
+	if !firstStore.AdmitAccountSession(firstAccount, rootKey, time.Now()) {
+		t.Fatal("initial root admission failed")
+	}
+	firstStore.SetAccountSessionOwner(firstAccount.DBID, rootKey, AccountSessionOwner{UserName: "Arun"})
+
+	secondStore := NewStore(nil, runtimeCache, settings)
+	secondAccount := &Account{
+		DBID: 14, AccessToken: "second", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	secondStore.AddAccount(secondAccount)
+	if !secondStore.ApplyAccountSessionCapacity(secondAccount.DBID, false, 1, 3600) {
+		t.Fatal("failed to disable account session capacity")
+	}
+
+	thirdStore := NewStore(nil, runtimeCache, settings)
+	thirdAccount := &Account{
+		DBID: 14, AccessToken: "third", Status: StatusReady,
+		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+	}
+	thirdStore.AddAccount(thirdAccount)
+	if _, found := thirdStore.AccountSessionAccountID(rootKey, time.Now()); found {
+		t.Fatal("disabled account left a persisted reverse owner after restart")
+	}
+	if !thirdStore.AdmitAccountSession(thirdAccount, "replacement-after-disable", time.Now()) {
+		t.Fatal("disabled account left persisted capacity occupied after restart")
 	}
 }
 

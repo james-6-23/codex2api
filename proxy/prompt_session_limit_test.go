@@ -12,6 +12,7 @@ import (
 
 	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
@@ -107,6 +108,28 @@ func TestPromptSessionCreationLimitCountsDistinctSessionsOnly(t *testing.T) {
 	third := promptSessionLimitTestContext("session-c")
 	if status, exceeded = handler.checkPromptSessionCreationLimit(third, cfg, nil); !exceeded || status.Used != 2 || status.RetryAfter <= 0 {
 		t.Fatalf("third session: exceeded=%v used=%d retry=%d", exceeded, status.Used, status.RetryAfter)
+	}
+}
+
+func TestPromptSessionCreationLimitRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 2
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+
+	firstHandler := &Handler{cache: runtimeCache}
+	if status, exceeded := firstHandler.checkPromptSessionCreationLimit(promptSessionLimitTestContext("restart-session-a"), cfg, nil); exceeded || status.Used != 1 {
+		t.Fatalf("first process status=%#v exceeded=%v", status, exceeded)
+	}
+
+	secondHandler := &Handler{cache: runtimeCache}
+	if status, exceeded := secondHandler.checkPromptSessionCreationLimit(promptSessionLimitTestContext("restart-session-b"), cfg, nil); exceeded || status.Used != 2 {
+		t.Fatalf("restored second session status=%#v exceeded=%v", status, exceeded)
+	}
+	if status, exceeded := secondHandler.checkPromptSessionCreationLimit(promptSessionLimitTestContext("restart-session-c"), cfg, nil); !exceeded || status.Used != 2 {
+		t.Fatalf("restored limit status=%#v exceeded=%v", status, exceeded)
 	}
 }
 

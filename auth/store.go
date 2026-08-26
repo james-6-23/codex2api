@@ -3181,7 +3181,10 @@ type Store struct {
 	sessionSlotSequence      uint64
 	sessionSlotReservations  map[int64]map[string][]uint64
 	accountSessionMu         sync.Mutex
+	accountSessionLoadMu     [accountSessionLockStripes]sync.Mutex
+	accountSessionPersistMu  [accountSessionLockStripes]sync.Mutex
 	accountSessions          map[int64]map[string]*accountSessionState
+	accountSessionsHydrated  map[int64]bool
 
 	globalAutoPause5hThreshold    float64  // protected by mu
 	globalAutoPause7dThreshold    float64  // protected by mu
@@ -3615,6 +3618,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 		sessionBindings:             make(map[string]sessionAffinity),
 		sessionSlotReservations:     make(map[int64]map[string][]uint64),
 		accountSessions:             make(map[int64]map[string]*accountSessionState),
+		accountSessionsHydrated:     make(map[int64]bool),
 		promptFilterNewAPIBindings:  make(map[int64]database.PromptFilterNewAPIBinding),
 		promptSessionLimitOverrides: make(map[string]database.PromptSessionLimitOverride),
 		oauthRefreshLocks:           make(map[string]*oauthRefreshLocalLock),
@@ -7996,6 +8000,7 @@ func (s *Store) AddAccounts(accounts []*Account) {
 func (s *Store) RemoveAccount(dbID int64) {
 	s.accountMutationMu.Lock()
 	defer s.accountMutationMu.Unlock()
+	s.ClearAccountSessions(dbID)
 
 	removed := false
 	s.mu.Lock()
@@ -10223,6 +10228,9 @@ func (s *Store) RemoveAccounts(dbIDs []int64) {
 
 	s.accountMutationMu.Lock()
 	defer s.accountMutationMu.Unlock()
+	for _, dbID := range dbIDs {
+		s.ClearAccountSessions(dbID)
+	}
 
 	removeSet := make(map[int64]struct{}, len(dbIDs))
 	for _, id := range dbIDs {
