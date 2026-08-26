@@ -285,23 +285,6 @@ func (s *Store) HasSessionCapacityExhaustionWithDispatch(apiKeyID int64, exclude
 	return foundCandidate
 }
 
-func (s *Store) TouchAccountSession(accountID int64, sessionKey string, now time.Time) {
-	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" || isSessionAccountingBypassKey(sessionKey) {
-		return
-	}
-	if now.IsZero() {
-		now = time.Now()
-	}
-	if _, related := RelatedSessionRootKey(sessionKey); related {
-		return
-	}
-	s.accountSessionMu.Lock()
-	if state := s.accountSessions[accountID][sessionKey]; state != nil {
-		state.lastSeen = now
-	}
-	s.accountSessionMu.Unlock()
-}
-
 // AccountSessionAccountID returns the account that currently owns sessionKey.
 // Expired entries are removed before matching.
 func (s *Store) AccountSessionAccountID(sessionKey string, now time.Time) (int64, bool) {

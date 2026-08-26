@@ -143,6 +143,42 @@ func TestRelatedSessionUsesOneProtectedConcurrencyLeaseOnRootAccount(t *testing.
 	store.Release(main)
 }
 
+func TestProtectedRelatedSessionPreservesRootBuffer(t *testing.T) {
+	account := &Account{DBID: 1, AccessToken: "tok-1"}
+	store := newSessionSlotBufferTestStore(1, account)
+	rootKey := "root-session::api-key:7"
+	relatedKey := ProtectedRelatedSessionAffinityKey(rootKey)
+	store.BindSessionAffinity(rootKey, account, "")
+
+	main, _ := store.NextForSession(rootKey, 7, nil)
+	if main != account {
+		t.Fatalf("main account = %p, want %p", main, account)
+	}
+	store.ReleaseForSession(main, rootKey)
+
+	guardian, _ := store.NextForSession(relatedKey, 7, nil)
+	if guardian != account {
+		t.Fatalf("protected related account = %p, want root %p", guardian, account)
+	}
+	if got := account.GetOccupiedRequests(); got != 2 {
+		t.Fatalf("occupied with root buffer and protected lease = %d, want 2", got)
+	}
+	store.ReleaseForSession(guardian, relatedKey)
+	if got := account.GetOccupiedRequests(); got != 1 {
+		t.Fatalf("protected release consumed root buffer: occupied=%d, want 1", got)
+	}
+	if fresh, _ := store.NextForSession("fresh", 7, nil); fresh != nil {
+		store.Release(fresh)
+		t.Fatal("fresh session entered before the root buffer was reclaimed")
+	}
+
+	continued, _ := store.NextForSession(rootKey, 7, nil)
+	if continued != account {
+		t.Fatalf("root could not reclaim preserved reservation: %p", continued)
+	}
+	store.Release(continued)
+}
+
 func TestRelatedSessionReturnsReclaimedBufferToRootKey(t *testing.T) {
 	account := &Account{DBID: 1, AccessToken: "tok-1"}
 	store := newSessionSlotBufferTestStore(1, account)

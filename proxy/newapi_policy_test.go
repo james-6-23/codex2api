@@ -380,14 +380,13 @@ func TestPrimeNewAPIPolicyContextMakesSignedProjectTitleRootAvailableBeforeSessi
 		t.Fatalf("early session resolution missed the verified signed root: %+v", identity)
 	}
 	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{ProjectTitleGroupID: 20}})
-	if !classifyProjectTitleRequest(c, "gpt-5.6-luna", body, &identity) || !identity.bypassWindowAccounting {
+	if !classifyProjectTitleRequest(c, &identity) || !identity.bypassWindowAccounting {
 		t.Fatalf("NewAPI string title did not enter the same configured route as direct traffic: %+v", identity)
 	}
 }
 
-func TestPrimeNewAPIPolicyContextAcceptsSignedGuardianFeatureAndKeepsReviewedRoot(t *testing.T) {
-	body := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-luna")
-	body = []byte(strings.Replace(string(body), "00000000-0000-0000-0000-000000000001", testRootSessionA, 1))
+func TestPrimeNewAPIPolicyContextAcceptsSignedRelatedInternalRoot(t *testing.T) {
+	body := []byte(`{"model":"future-internal-model","input":"changed"}`)
 	rootFingerprint := newAPIRootSessionFingerprint("test-platform", "42", testRootSessionA)
 	leafFingerprint := promptSessionTestFingerprint("prime-guardian-leaf")
 	c, _ := signedNewAPIPolicyContext(t, "prime-guardian-order", newAPIIdentity{
@@ -399,8 +398,8 @@ func TestPrimeNewAPIPolicyContextAcceptsSignedGuardianFeatureAndKeepsReviewedRoo
 		Mode:                   promptfilter.GuardModeEnforce,
 		Provider:               string(promptfilter.ModelFamilyOpenAI),
 		Protocol:               string(promptfilter.ProtocolResponses),
-		RequestedModel:         "gpt-5.6-luna",
-		UpstreamModel:          "gpt-5.6-luna",
+		RequestedModel:         "future-internal-model",
+		UpstreamModel:          "future-internal-model",
 		SessionFingerprint:     leafFingerprint,
 		RootSessionVersion:     1,
 		RootSessionState:       newAPIPolicyRootSessionResolved,
@@ -409,7 +408,7 @@ func TestPrimeNewAPIPolicyContextAcceptsSignedGuardianFeatureAndKeepsReviewedRoo
 		ThreadSource:           "subagent",
 		RequestKind:            "turn",
 		SubagentKind:           "guardian",
-		PassiveFeature:         newAPIPassiveFeatureGuardianApproval,
+		PassiveFeature:         newAPIPassiveFeatureRelatedInternal,
 	}, true)
 	c.Request.Header = cloneHeaderWithNewAPIIdentity(c.Request.Header, nativeSessionHeaders(testRootSessionB, testRootSessionB, 0))
 
@@ -454,7 +453,7 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 		ThreadSource:           "system",
 		RequestedModel:         "gpt-5.4",
 		SessionAccounting:      newAPISessionAccountingBypass,
-		PassiveFeature:         newAPIPassiveFeatureAmbientSuggestions,
+		PassiveFeature:         newAPIPassiveFeatureSystemPassive,
 	}
 	handlerCfg := promptGuardTestConfig()
 	handlerCfg.Advanced.NewAPI.Enabled = true
@@ -464,16 +463,27 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 	validContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-valid", identity, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, validContext, baseMeta, true)
 	policyContext, verified := handler.verifyNewAPIPolicyContext(validContext, config, body)
-	_, accountingBypass := handler.classifyVerifiedNewAPIAmbientSessionAccounting(validContext, body)
+	accountingBypass := handler.verifiedNewAPISessionAccountingBypass(validContext)
 	if !verified || !policyContext.MetaVerified || !accountingBypass {
 		t.Fatalf("valid ambient accounting bypass was rejected: verified=%v context=%+v", verified, policyContext)
+	}
+
+	independentMeta := baseMeta
+	independentMeta.ThreadSource = "agent_created_thread"
+	independentMeta.PassiveFeature = newAPIPassiveFeatureIndependent
+	independentContext, _ := signedNewAPIPolicyContext(t, "independent-accounting-valid", identity, "/v1/responses", body)
+	addSignedNewAPIPolicyMeta(t, independentContext, independentMeta, true)
+	policyContext, verified = handler.verifyNewAPIPolicyContext(independentContext, config, body)
+	accountingBypass = handler.verifiedNewAPISessionAccountingBypass(independentContext)
+	if !verified || !policyContext.MetaVerified || !accountingBypass {
+		t.Fatalf("valid independent accounting bypass was rejected: verified=%v context=%+v", verified, policyContext)
 	}
 
 	expandedBody := bytes.Replace(body, []byte(`"model":"gpt-5.4",`), []byte(`"model":"gpt-5.4","tools":[{"type":"function","name":"shell"}],`), 1)
 	expandedContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-expanded", identity, "/v1/responses", expandedBody)
 	addSignedNewAPIPolicyMeta(t, expandedContext, baseMeta, true)
 	policyContext, verified = handler.verifyNewAPIPolicyContext(expandedContext, config, expandedBody)
-	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(expandedContext, expandedBody)
+	accountingBypass = handler.verifiedNewAPISessionAccountingBypass(expandedContext)
 	if !verified || !policyContext.MetaVerified || !accountingBypass {
 		t.Fatalf("signed field classification changed after payload drift: verified=%v context=%+v", verified, policyContext)
 	}
@@ -483,7 +493,7 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 	unknownContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-unknown", identity, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, unknownContext, unknownFeature, true)
 	policyContext, verified = handler.verifyNewAPIPolicyContext(unknownContext, config, body)
-	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(unknownContext, body)
+	accountingBypass = handler.verifiedNewAPISessionAccountingBypass(unknownContext)
 	if verified || policyContext.MetaVerified || accountingBypass {
 		t.Fatalf("unknown accounting feature was accepted: verified=%v context=%+v", verified, policyContext)
 	}
@@ -491,7 +501,7 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 	forgedContext, _ := signedNewAPIPolicyContext(t, "ambient-accounting-forged", identity, "/v1/responses", body)
 	addSignedNewAPIPolicyMeta(t, forgedContext, baseMeta, false)
 	policyContext, verified = handler.verifyNewAPIPolicyContext(forgedContext, config, body)
-	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(forgedContext, body)
+	accountingBypass = handler.verifiedNewAPISessionAccountingBypass(forgedContext)
 	if verified || policyContext.MetaVerified || accountingBypass {
 		t.Fatalf("unsigned ambient accounting bypass was accepted: verified=%v context=%+v", verified, policyContext)
 	}

@@ -420,7 +420,7 @@ func TestVerifiedPassiveGuardianGetsExactlyOneProtectedScopeSlot(t *testing.T) {
 	guardianGate := newScopeBudgetGate(apiKeyID, []database.APIKeyScopeLimit{scope})
 	guardian, _ := gin.CreateTestContext(httptest.NewRecorder())
 	guardian.Set(contextScopeBudgetGate, guardianGate)
-	setPassiveInternalAuthorization(guardian, newAPIPassiveFeatureGuardianApproval, true)
+	setPassiveInternalAuthorization(guardian, true)
 	filter := handler.applyScopeBudgetFilter(guardian, nil)
 	if filter != nil && !filter(account) {
 		t.Fatal("verified Guardian was blocked by its parent's occupied scope slot")
@@ -434,7 +434,7 @@ func TestVerifiedPassiveGuardianGetsExactlyOneProtectedScopeSlot(t *testing.T) {
 	secondGate := newScopeBudgetGate(apiKeyID, []database.APIKeyScopeLimit{scope})
 	second, _ := gin.CreateTestContext(httptest.NewRecorder())
 	second.Set(contextScopeBudgetGate, secondGate)
-	setPassiveInternalAuthorization(second, newAPIPassiveFeatureGuardianApproval, true)
+	setPassiveInternalAuthorization(second, true)
 	secondFilter := handler.applyScopeBudgetFilter(second, nil)
 	if secondFilter == nil || secondFilter(account) {
 		t.Fatal("second Guardian exceeded the single protected scope slot")

@@ -16,7 +16,7 @@ type projectTitleRequestRoute struct {
 // classifyProjectTitleRequest recognizes the native system field or NewAPI's
 // signed system_passive field. Model names and prompt wording are deliberately
 // not part of this Codex2API routing decision.
-func classifyProjectTitleRequest(c *gin.Context, _ string, _ []byte, identity *requestSessionIdentity) bool {
+func classifyProjectTitleRequest(c *gin.Context, identity *requestSessionIdentity) bool {
 	if c == nil || identity == nil {
 		return false
 	}

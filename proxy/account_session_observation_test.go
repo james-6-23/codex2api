@@ -81,7 +81,7 @@ func TestPopulateAccountSessionObservationSkipsVerifiedAmbientBackgroundRequest(
 	policyContext.Meta.ThreadSource = "system"
 	policyContext.Meta.RequestedModel = "gpt-5.4"
 	policyContext.Meta.SessionAccounting = newAPISessionAccountingBypass
-	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureAmbientSuggestions
+	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureSystemPassive
 	c.Set(newAPIPolicyMetaContextKey, policyContext)
 	body := standaloneAmbientSuggestionsBody("gpt-5.4")
 	setRawRequestBody(c, body)

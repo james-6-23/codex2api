@@ -281,7 +281,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, err)
 	}
 	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
-	classifyProjectTitleRequest(c, logModel, rawBody, &sessionIdentity)
+	classifyProjectTitleRequest(c, &sessionIdentity)
 	auditEndpoint := "/v1/responses"
 	if options != nil {
 		if configured := strings.TrimSpace(options.auditEndpoint); configured != "" {
@@ -356,7 +356,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	accountFilter := accountFilterForModel(effectiveModel)
-	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, false, accountFilter)
+	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, false, accountFilter)
 	accountFilter = applyProjectTitleModelRouting(c, effectiveModel, false, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
@@ -1207,7 +1207,7 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	if h == nil || h.store == nil {
 		return false, false
 	}
-	if passiveInternalRequestAuthorized(c) {
+	if passiveInternalRequestAuthorized(c) || isProjectTitleRequest(c) {
 		return false, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)

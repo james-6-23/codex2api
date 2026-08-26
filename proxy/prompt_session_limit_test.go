@@ -215,7 +215,7 @@ func TestPromptSessionCreationLimitSkipsVerifiedAmbientBackgroundRequest(t *test
 	policyContext.Meta.ThreadSource = "system"
 	policyContext.Meta.RequestedModel = "gpt-5.4"
 	policyContext.Meta.SessionAccounting = newAPISessionAccountingBypass
-	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureAmbientSuggestions
+	policyContext.Meta.PassiveFeature = newAPIPassiveFeatureSystemPassive
 	c.Set(newAPIPolicyMetaContextKey, policyContext)
 
 	status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, standaloneAmbientSuggestionsBody("gpt-5.4"))
@@ -662,7 +662,7 @@ func TestPromptSessionCreationLimitIgnoresClassifiedProjectTitleRequest(t *testi
 	c := projectTitleRoutingTestContext(20)
 	identity := requestSessionIdentity{relatedSource: auth.AccountSessionRelatedSource{ThreadSource: "system"}}
 	body := projectTitleRoutingTestBody()
-	if !classifyProjectTitleRequest(c, "gpt-5.6-luna", body, &identity) {
+	if !classifyProjectTitleRequest(c, &identity) {
 		t.Fatal("project-title request was not classified")
 	}
 

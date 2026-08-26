@@ -113,7 +113,7 @@ func TestSignedGuardianReviewedRootOverridesIndependentLeafGraph(t *testing.T) {
 	policy.Meta.ThreadSource = "subagent"
 	policy.Meta.RequestKind = "turn"
 	policy.Meta.SubagentKind = "guardian"
-	policy.Meta.PassiveFeature = newAPIPassiveFeatureGuardianApproval
+	policy.Meta.PassiveFeature = newAPIPassiveFeatureRelatedInternal
 	policy.Meta.RequestedModel = "gpt-5.6-luna"
 	c.Set(newAPIPolicyMetaContextKey, policy)
 	// The Guardian transport can carry its own coherent native task graph while
@@ -209,6 +209,25 @@ func TestStandaloneNativeAmbientSystemTurnBypassesWindowAccounting(t *testing.T)
 	}
 	if !requestSessionAccountingBypass(c) {
 		t.Fatal("local ambient classification was not retained for later accounting stages")
+	}
+}
+
+func TestStandaloneNativeIndependentInternalSourcesBypassWindowAccounting(t *testing.T) {
+	for _, source := range []string{"ambient_suggestions", "agent_created_thread", "future_internal_source"} {
+		t.Run(source, func(t *testing.T) {
+			c := promptSessionLimitTestContext("")
+			c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
+			c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"`+source+`","request_kind":"turn"}`)
+			body := []byte(`{"model":"gpt-5.6-sol","input":"independent internal task"}`)
+
+			identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
+			if !identity.bypassWindowAccounting || identity.relatedToRoot || !requestSessionAccountingBypass(c) {
+				t.Fatalf("direct independent identity = %+v", identity)
+			}
+			if key := capacityAwareSessionAffinityKey(identity, 7); key == testRootSessionA+"::api-key:7" {
+				t.Fatalf("independent request used normal accounting key %q", key)
+			}
+		})
 	}
 }
 

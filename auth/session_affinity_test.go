@@ -138,6 +138,40 @@ func TestNextForSessionRejectsRemovedCachedProxyAffinity(t *testing.T) {
 	}
 }
 
+func TestRemovedCachedProxyFallbackStillEnforcesSessionCapacity(t *testing.T) {
+	const removedProxy = "http://removed.example:8080"
+	tokenCache := cache.NewMemory(1)
+	defer tokenCache.Close()
+	if err := tokenCache.SetSessionAffinity(context.Background(), "new-session", cache.SessionAffinityBinding{
+		AccountID: 1,
+		ProxyURL:  removedProxy,
+	}, time.Hour); err != nil {
+		t.Fatalf("SetSessionAffinity: %v", err)
+	}
+	account := &Account{
+		DBID:                          1,
+		AccessToken:                   "tok-1",
+		SessionCapacityEnabled:        true,
+		SessionCapacityMax:            1,
+		SessionCapacityIdleTTLSeconds: 3600,
+	}
+	store := &Store{
+		accounts:         []*Account{account},
+		maxConcurrency:   2,
+		tokenCache:       tokenCache,
+		proxyPoolEnabled: true,
+		proxyPool:        []string{"http://replacement.example:8080"},
+	}
+	if !store.AdmitAccountSession(account, "existing-session", time.Now()) {
+		t.Fatal("failed to fill the account session capacity")
+	}
+
+	if selected, _ := store.NextForSession("new-session", 0, nil); selected != nil {
+		store.Release(selected)
+		t.Fatal("removed cached proxy fallback bypassed the full account session capacity")
+	}
+}
+
 func TestBindSessionAffinityRejectsProxyRemovedBeforeLateBind(t *testing.T) {
 	const removedProxy = "http://removed.example:8080"
 	tokenCache := cache.NewMemory(1)

@@ -65,10 +65,9 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h == nil || h.store == nil {
 		return false
 	}
-	if passiveInternalRequestAuthorized(c) {
-		// A related internal turn contains transcript text by design. Its session
-		// fields already classified it; do not recursively filter that transcript
-		// as a new end-user prompt.
+	if passiveInternalRequestAuthorized(c) || isProjectTitleRequest(c) {
+		// Field-classified internal/title turns contain transcript or original
+		// user text by design. Do not recursively filter it as a fresh user prompt.
 		return false
 	}
 	cfg := h.promptFilterConfigForRequest(c)
@@ -148,6 +147,9 @@ func (h *Handler) inspectPromptFilterTextOpenAI(c *gin.Context, text string, end
 
 func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, endpoint string, model string) bool {
 	if h == nil || h.store == nil {
+		return false
+	}
+	if passiveInternalRequestAuthorized(c) {
 		return false
 	}
 	cfg := h.promptFilterConfigForRequest(c)

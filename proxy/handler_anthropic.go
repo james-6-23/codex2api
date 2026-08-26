@@ -199,6 +199,11 @@ func (h *Handler) Messages(c *gin.Context) {
 		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
+	// Resolve the session before prompt and API-key policy checks, matching the
+	// native Responses path while retaining the Messages handler's raw-body
+	// affinity identity.
+	h.primeNewAPIPolicyContext(c, ingressRequestBody(c, rawBody))
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	if h.inspectPromptFilterAnthropic(c, rawBody, "/v1/messages", model) {
 		return
 	}
@@ -229,12 +234,11 @@ func (h *Handler) Messages(c *gin.Context) {
 	// /v1/messages 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 翻译后的请求体本身就是 Responses 形态，中转账号直接以 HTTP 转发，
 	// 使仅接入中转的用户也能使用 Claude Code（issue #181）。
-	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.applyPassiveInternalModelRouting(c, originalModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
+	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)

@@ -6126,6 +6126,13 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	now := time.Now()
 	rootKey, relatedRequest := RelatedSessionRootKey(key)
 	protectedRelatedRequest := relatedRequest && isProtectedRelatedSessionKey(key)
+	relatedSlotKey := rootKey
+	if protectedRelatedRequest {
+		// Protected internal requests use their dedicated +1 lease. Reclaiming the
+		// root reservation here would make their immediate release consume the
+		// root turn's buffer and let an unrelated session enter early.
+		relatedSlotKey = key
+	}
 	// Account session capacity acts as a strong binding even if general account
 	// affinity is bounded or disabled. An active admitted conversation must not
 	// migrate to another upstream account.
@@ -6143,7 +6150,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			slotKey := key
 			concurrencyAllowance := int64(0)
 			if relatedRequest {
-				slotKey = rootKey
+				slotKey = relatedSlotKey
 			}
 			if protectedRelatedRequest {
 				concurrencyAllowance = 1
@@ -6172,7 +6179,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			if protectedRelatedRequest {
 				concurrencyAllowance = 1
 			}
-			if acc := s.takeByIDModeWithConcurrencyAllowance(rootBinding.accountID, apiKeyID, exclude, filter, preserveBinding, rootKey, policy, concurrencyAllowance); acc != nil {
+			if acc := s.takeByIDModeWithConcurrencyAllowance(rootBinding.accountID, apiKeyID, exclude, filter, preserveBinding, relatedSlotKey, policy, concurrencyAllowance); acc != nil {
 				proxyURL := rootBinding.proxyURL
 				if !s.affinityProxyStillValid(rootBinding.accountID, proxyURL) {
 					// The account is still the root owner even if its proxy setting was
@@ -6190,7 +6197,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				if protectedRelatedRequest {
 					concurrencyAllowance = 1
 				}
-				if acc := s.takeByIDModeWithConcurrencyAllowance(cachedRoot.accountID, apiKeyID, exclude, filter, preserveBinding, rootKey, policy, concurrencyAllowance); acc != nil {
+				if acc := s.takeByIDModeWithConcurrencyAllowance(cachedRoot.accountID, apiKeyID, exclude, filter, preserveBinding, relatedSlotKey, policy, concurrencyAllowance); acc != nil {
 					proxyURL := cachedRoot.proxyURL
 					if !s.affinityProxyStillValid(cachedRoot.accountID, proxyURL) {
 						proxyURL = ""
@@ -6260,7 +6267,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				return s.takeByIDForContinuation(binding.accountID, apiKeyID, exclude, filter, key, policy), ""
 			}
 			s.UnbindSessionAffinity(key, binding.accountID)
-			return s.nextAccountForFreshAffinityWithDispatch(key, apiKeyID, exclude, filter, policy), ""
+			return s.nextCapacityAdmittedFreshAccount(key, apiKeyID, exclude, filter, policy, now), ""
 		}
 		// 跨进程缓存的 binding 也按 bounded 逻辑校验账号健康；Grok 账号套用 Grok 专属模式。
 		cacheMode := mode

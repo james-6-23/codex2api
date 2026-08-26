@@ -97,15 +97,15 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 	}
 
 	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
-	if feature, bypass := h.classifyVerifiedNewAPIAmbientSessionAccounting(c, body); bypass {
-		setLocalSessionAccountingBypass(c, feature, true)
+	if h.verifiedNewAPISessionAccountingBypass(c) {
+		setLocalSessionAccountingBypass(c, true)
 		return status, false
 	}
 	if requestSessionAccountingBypass(c) {
 		return status, false
 	}
-	if feature, bypass := classifyLocalCodexAmbientSessionAccounting(c, body, rootIdentity); bypass {
-		setLocalSessionAccountingBypass(c, feature, true)
+	if classifyLocalCodexIndependentSessionAccounting(c, rootIdentity) {
+		setLocalSessionAccountingBypass(c, true)
 		return status, false
 	}
 	if rootIdentity.authoritative && rootIdentity.conflict {

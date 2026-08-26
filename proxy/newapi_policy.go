@@ -34,11 +34,9 @@ const (
 	newAPIPolicyEventSignatureVersionV1    = "v1"
 	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
 	newAPISessionAccountingBypass          = "bypass"
-	newAPIPassiveFeatureGuardianApproval   = "guardian_approval"
 	newAPIPassiveFeatureRelatedInternal    = "related_internal"
 	newAPIPassiveFeatureSystemPassive      = "system_passive"
-	newAPIPassiveFeatureAmbientSuggestions = "ambient_suggestions"
-	newAPIPassiveFeatureAmbientSafety      = "ambient_suggestion_safety"
+	newAPIPassiveFeatureIndependent        = "independent_internal"
 )
 
 type newAPIIdentity struct {
@@ -534,11 +532,6 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	case "":
 		switch meta.PassiveFeature {
 		case "":
-		case newAPIPassiveFeatureGuardianApproval:
-			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
-				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated {
-				return false
-			}
 		case newAPIPassiveFeatureRelatedInternal:
 			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
 				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
@@ -556,11 +549,19 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		}
 	case newAPISessionAccountingBypass:
 		if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
-			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot || !strings.EqualFold(meta.ThreadSource, "system") {
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot {
 			return false
 		}
-		if meta.PassiveFeature != newAPIPassiveFeatureSystemPassive &&
-			meta.PassiveFeature != newAPIPassiveFeatureAmbientSuggestions && meta.PassiveFeature != newAPIPassiveFeatureAmbientSafety {
+		switch meta.PassiveFeature {
+		case newAPIPassiveFeatureSystemPassive:
+			if !strings.EqualFold(meta.ThreadSource, "system") {
+				return false
+			}
+		case newAPIPassiveFeatureIndependent:
+			if strings.TrimSpace(meta.ThreadSource) == "" || strings.EqualFold(meta.ThreadSource, "user") {
+				return false
+			}
+		default:
 			return false
 		}
 	default:

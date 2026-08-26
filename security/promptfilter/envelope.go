@@ -92,12 +92,7 @@ type RequestEnvelope struct {
 	currentUserExactText     string
 	currentUserPrecheck      *currentUserPrecheck
 	precheckIncomplete       bool
-	// closedApplicationKind/candidate are populated only by body-level closed
-	// protocol parsers. Prompt text alone must never grant an application-task
-	// downgrade because the public wrapper can be copied by an ordinary client.
-	closedApplicationKind      string
-	closedApplicationCandidate string
-	closedApprovalReassessment bool
+	approvalSurfaceOK        bool
 }
 
 func BuildEnvelope(body []byte, endpoint string, requestedModel string, transport Transport, maxLen int) RequestEnvelope {
@@ -277,13 +272,9 @@ func buildEnvelopeWithBudget(body []byte, endpoint string, requestedModel string
 		builder.appendResult(OriginCurrentUser, "user", gjson.GetBytes(body, "commands.search_query.#.q"))
 	}
 	builder.finalize()
-	if candidate, ok := ClosedProjectTitleCandidate(body, requestedModel); ok {
-		envelope.closedApplicationKind = "project_title"
-		envelope.closedApplicationCandidate = candidate
-	}
-	if text, ok := ClosedApprovalReassessmentText(body); ok && approvalReassessmentRequestedModel(requestedModel) {
-		envelope.closedApprovalReassessment = true
-		collapseClosedApprovalCurrentUser(&envelope, text)
+	if text, ok := closedApprovalReassessmentSurface(body, requestedModel); ok {
+		envelope.approvalSurfaceOK = true
+		collapseApprovalCurrentUser(&envelope, text)
 	}
 	return envelope
 }

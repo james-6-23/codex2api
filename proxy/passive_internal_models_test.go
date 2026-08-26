@@ -65,7 +65,7 @@ func TestPassiveInternalModelRoutingRequiresTrustedRelatedRequest(t *testing.T) 
 		t.Fatal("thread_source alone was trusted as a derived request")
 	}
 	key := capacityAwareSessionAffinityKey(identity, 7)
-	filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
+	filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
 	if filter(root) || filter(other) {
 		t.Fatal("direct Luna request bypassed the configured account model list")
 	}
@@ -93,12 +93,12 @@ func TestPassiveInternalModelRoutingPinsTrustedRequestToRootAccount(t *testing.T
 
 			body := []byte(`{"model":"` + tc.effectiveModel + `","input":"review"}`)
 			identity := handler.resolveRequestSessionIdentityForContext(ctx, body)
-			setPassiveInternalAuthorization(ctx, newAPIPassiveFeatureGuardianApproval, true)
+			setPassiveInternalAuthorization(ctx, true)
 			if !identity.relatedToRoot {
 				t.Fatal("signed related request was not recognized")
 			}
 			key := capacityAwareSessionAffinityKey(identity, 7)
-			filter := handler.applyPassiveInternalModelRouting(ctx, tc.effectiveModel, tc.effectiveModel, identity, key, true, accountFilterForModel(tc.effectiveModel))
+			filter := handler.applyPassiveInternalModelRouting(ctx, tc.effectiveModel, identity, key, true, accountFilterForModel(tc.effectiveModel))
 			if !filter(root) {
 				t.Fatal("root account was not authorized for trusted passive model")
 			}
@@ -167,7 +167,7 @@ func TestStandaloneNativeCompactionRecoversRootAndPinsPassiveModel(t *testing.T)
 	// A user-authored Luna request is still an ordinary direct model request;
 	// it must not use the passive bypass merely because compaction has a child
 	// graph shape.
-	directLunaFilter := handler.applyPassiveInternalModelRouting(mainContext, "gpt-5.6-luna", "gpt-5.6-luna", mainIdentity, rootKey, true, accountFilterForModel("gpt-5.6-luna"))
+	directLunaFilter := handler.applyPassiveInternalModelRouting(mainContext, "gpt-5.6-luna", mainIdentity, rootKey, true, accountFilterForModel("gpt-5.6-luna"))
 	if directLunaFilter(first) || directLunaFilter(second) {
 		t.Fatal("user-authored standalone Luna request bypassed account model settings")
 	}
@@ -183,7 +183,7 @@ func TestStandaloneNativeCompactionRecoversRootAndPinsPassiveModel(t *testing.T)
 	if relatedRoot, ok := auth.RelatedSessionRootKey(guardianKey); !ok || relatedRoot != rootKey {
 		t.Fatalf("Guardian key = %q, want related root %q", guardianKey, rootKey)
 	}
-	guardianFilter := handler.applyPassiveInternalModelRouting(guardianContext, "gpt-5.6-luna", "gpt-5.6-luna", guardianIdentity, guardianKey, true, accountFilterForModel("gpt-5.6-luna"))
+	guardianFilter := handler.applyPassiveInternalModelRouting(guardianContext, "gpt-5.6-luna", guardianIdentity, guardianKey, true, accountFilterForModel("gpt-5.6-luna"))
 	guardian, guardianProxy := store.NextForSessionWithFilter(guardianKey, 7, nil, guardianFilter)
 	if guardian != selected {
 		if guardian != nil {
@@ -228,7 +228,7 @@ func TestStandaloneNativeRelatedRequestUsesFieldsAcrossModelAndPromptDrift(t *te
 		t.Fatal("current desktop Guardian graph was not authorized as a passive internal request")
 	}
 	key := capacityAwareSessionAffinityKey(identity, 7)
-	filter := handler.applyPassiveInternalModelRouting(c, "future-review-model", "future-review-model", identity, key, true, accountFilterForModel("future-review-model"))
+	filter := handler.applyPassiveInternalModelRouting(c, "future-review-model", identity, key, true, accountFilterForModel("future-review-model"))
 	selected, _ := store.NextForSessionWithFilter(key, 7, nil, filter)
 	if selected != root {
 		if selected != nil {
@@ -303,7 +303,7 @@ func TestVerifiedNewAPIRelatedFieldsWorkWithoutPassiveFeatureOrPayloadContract(t
 		t.Fatalf("verified NewAPI Guardian classification failed: identity=%+v authorized=%v", identity, passiveInternalRequestAuthorized(c))
 	}
 	key := capacityAwareSessionAffinityKey(identity, 7)
-	filter := handler.applyPassiveInternalModelRouting(c, "future-review-model", "future-review-model", identity, key, true, accountFilterForModel("future-review-model"))
+	filter := handler.applyPassiveInternalModelRouting(c, "future-review-model", identity, key, true, accountFilterForModel("future-review-model"))
 	selected, _ := store.NextForSessionWithFilter(key, 7, nil, filter)
 	if selected != root {
 		if selected != nil {
@@ -343,7 +343,7 @@ func TestPassiveInternalModelRoutingDoesNotFallbackWhenDisabledOrRootUnavailable
 			ctx.Set(newAPIPolicyMetaContextKey, policy)
 			body := []byte(`{"model":"gpt-5.6-luna","input":"review"}`)
 			identity := handler.resolveRequestSessionIdentityForContext(ctx, body)
-			setPassiveInternalAuthorization(ctx, newAPIPassiveFeatureGuardianApproval, true)
+			setPassiveInternalAuthorization(ctx, true)
 			key := capacityAwareSessionAffinityKey(identity, 7)
 			if tc.unbind {
 				rootKey, related := auth.RelatedSessionRootKey(key)
@@ -353,7 +353,7 @@ func TestPassiveInternalModelRoutingDoesNotFallbackWhenDisabledOrRootUnavailable
 				handler.store.UnbindSessionAffinity(rootKey, root.DBID)
 				handler.store.RemoveAccountSession(root.DBID, rootKey)
 			}
-			filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
+			filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
 			if filter(root) || filter(other) {
 				t.Fatal("passive request was allowed without both the switch and root binding")
 			}
@@ -371,9 +371,9 @@ func TestFieldClassifiedInternalRequestIgnoresModelCooldownAndNeverEscapesRoot(t
 	ctx.Set(newAPIPolicyMetaContextKey, policy)
 	body := []byte(`{"model":"gpt-5.6-luna","input":"review"}`)
 	identity := handler.resolveRequestSessionIdentityForContext(ctx, body)
-	setPassiveInternalAuthorization(ctx, newAPIPassiveFeatureGuardianApproval, true)
+	setPassiveInternalAuthorization(ctx, true)
 	key := capacityAwareSessionAffinityKey(identity, 7)
-	filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
+	filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
 
 	root.SetModelCooldownUntil("gpt-5.6-luna", "test", time.Now().Add(time.Minute))
 	filter = handler.withRequestModelCooldownFilter(ctx, "gpt-5.6-luna", filter)

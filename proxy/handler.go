@@ -415,7 +415,7 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 // bypass the configured Models list. It remains pinned to the root session's
 // exact account; a missing, disabled, busy, cooled-down, or excluded root
 // account never falls back to another one.
-func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, _ string, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
+func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
 	if isProjectTitleRequest(c) {
 		return filter
 	}
@@ -3000,7 +3000,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	h.primeNewAPIPolicyContext(c, ingressRequestBody(c, rawBody))
 	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
-	classifyProjectTitleRequest(c, logModel, rawBody, &sessionIdentity)
+	classifyProjectTitleRequest(c, &sessionIdentity)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses", model) {
 		return
 	}
@@ -3070,7 +3070,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	} else {
 		accountFilter = accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
 	}
-	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
+	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = applyProjectTitleModelRouting(c, effectiveModel, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
@@ -4547,7 +4547,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// compact 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.applyPassiveInternalModelRouting(c, routingModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
+	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
@@ -5200,6 +5200,19 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		})
 		return
 	}
+	// Resolve the signed/native session graph before prompt and API-key policy
+	// checks so Chat and Responses apply the same internal-request contract.
+	// Translation remains before resolution to preserve Chat's existing affinity
+	// seed and prompt-cache behavior.
+	codexBody, err := TranslateRequest(rawBody)
+	if err != nil {
+		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Request translation failed: "+err.Error(), api.ErrorTypeInvalidRequest))
+		return
+	}
+	effectiveModel := effectiveRequestModel(codexBody, model)
+	logEffectiveModel := usageEffectiveModelForMapping(logModel, effectiveModel, mappingApplied)
+	h.primeNewAPIPolicyContext(c, ingressRequestBody(c, rawBody))
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, codexBody)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/chat/completions", model) {
 		return
 	}
@@ -5212,14 +5225,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		c.Set("x-service-tier", resolveServiceTier("", serviceTier))
 	}
 
-	// 2. 翻译请求：OpenAI Chat → Codex Responses
-	codexBody, err := TranslateRequest(rawBody)
-	if err != nil {
-		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Request translation failed: "+err.Error(), api.ErrorTypeInvalidRequest))
-		return
-	}
-	effectiveModel := effectiveRequestModel(codexBody, model)
-	logEffectiveModel := usageEffectiveModelForMapping(logModel, effectiveModel, mappingApplied)
 	if h.enforceAPIKeyLimitsAndReply(c, effectiveModel) {
 		return
 	}
@@ -5232,12 +5237,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	}
 	// /v1/chat/completions 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 翻译后的请求体本身就是 Responses 形态，中转账号直接以 HTTP 转发（issue #181）。
-	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, codexBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
+	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)

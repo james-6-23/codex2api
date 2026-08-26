@@ -280,7 +280,7 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 	if c == nil {
 		return requestRootSessionIdentity{}
 	}
-	setPassiveInternalAuthorization(c, "", false)
+	setPassiveInternalAuthorization(c, false)
 	webSocketFrame := isResponsesWebSocketUpgradeRequest(c.Request) && isRootSessionWebSocketFrame(body)
 	identity := resolveRequestRootSessionIdentity(c.Request.Header, body)
 	frameIdentity := identity
@@ -294,7 +294,7 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
 	if !verifiedPolicy {
 		if classifyNativeRelatedInternal(frameIdentity) {
-			setPassiveInternalAuthorization(c, newAPIPassiveFeatureRelatedInternal, true)
+			setPassiveInternalAuthorization(c, true)
 			return frameIdentity
 		}
 		return identity
@@ -304,13 +304,13 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 		switch policyContext.Meta.RootSessionState {
 		case newAPIPolicyRootSessionResolved:
 			fingerprint := strings.TrimSpace(policyContext.Meta.RootSessionFingerprint)
-			guardianOverride := signedGuardianRootOverride(body, policyContext)
-			passiveOverride := guardianOverride || signedProjectTitleRootOverride(body, policyContext.Meta)
+			internalOverride := signedRelatedInternalRootOverride(policyContext.Meta)
+			passiveOverride := internalOverride || signedProjectTitleRootOverride(policyContext.Meta)
 			signedThreadSource := strings.TrimSpace(policyContext.Meta.ThreadSource)
 			signedRelatedInternal := policyContext.Meta.RootSessionRelation == newAPIPolicyRootSessionRelationRelated &&
 				signedThreadSource != "" && !strings.EqualFold(signedThreadSource, "user")
-			if guardianOverride || signedRelatedInternal {
-				setPassiveInternalAuthorization(c, newAPIPassiveFeatureRelatedInternal, true)
+			if internalOverride || signedRelatedInternal {
+				setPassiveInternalAuthorization(c, true)
 			}
 			if frameIdentity.conflict {
 				return requestRootSessionIdentity{conflict: true, authoritative: true}
@@ -431,16 +431,15 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 	return identity
 }
 
-func signedGuardianRootOverride(_ []byte, policyContext verifiedNewAPIPolicyContext) bool {
-	meta := policyContext.Meta
+func signedRelatedInternalRootOverride(meta newAPIPolicyMeta) bool {
 	if meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
-		(meta.PassiveFeature != newAPIPassiveFeatureGuardianApproval && meta.PassiveFeature != newAPIPassiveFeatureRelatedInternal) {
+		meta.PassiveFeature != newAPIPassiveFeatureRelatedInternal {
 		return false
 	}
 	return strings.TrimSpace(meta.RootSessionFingerprint) != ""
 }
 
-func signedProjectTitleRootOverride(_ []byte, meta newAPIPolicyMeta) bool {
+func signedProjectTitleRootOverride(meta newAPIPolicyMeta) bool {
 	if meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
 		meta.PassiveFeature != newAPIPassiveFeatureSystemPassive ||
 		!strings.EqualFold(strings.TrimSpace(meta.ThreadSource), "system") ||
