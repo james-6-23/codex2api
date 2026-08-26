@@ -65,6 +65,12 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h == nil || h.store == nil {
 		return false
 	}
+	if passiveInternalRequestAuthorized(c) {
+		// A related internal turn contains transcript text by design. Its session
+		// fields already classified it; do not recursively filter that transcript
+		// as a new end-user prompt.
+		return false
+	}
 	cfg := h.promptFilterConfigForRequest(c)
 	signedBody := ingressRequestBody(c, rawBody)
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, signedBody) {

@@ -474,8 +474,8 @@ func TestSignedPolicyMetaAcceptsOnlyValidAmbientSessionAccountingBypass(t *testi
 	addSignedNewAPIPolicyMeta(t, expandedContext, baseMeta, true)
 	policyContext, verified = handler.verifyNewAPIPolicyContext(expandedContext, config, expandedBody)
 	_, accountingBypass = handler.classifyVerifiedNewAPIAmbientSessionAccounting(expandedContext, expandedBody)
-	if !verified || !policyContext.MetaVerified || accountingBypass {
-		t.Fatalf("signed ambient wrapper with tools bypassed body validation: verified=%v context=%+v", verified, policyContext)
+	if !verified || !policyContext.MetaVerified || !accountingBypass {
+		t.Fatalf("signed field classification changed after payload drift: verified=%v context=%+v", verified, policyContext)
 	}
 
 	unknownFeature := baseMeta

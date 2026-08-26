@@ -4,7 +4,6 @@ import (
 	"strings"
 
 	"github.com/codex2api/auth"
-	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 )
 
@@ -14,36 +13,30 @@ type projectTitleRequestRoute struct {
 	GroupID int64
 }
 
-// classifyProjectTitleRequest recognizes the native Codex project-title turn
-// from its original transport metadata and Responses payload. The decision is
-// local to Codex2API, so direct Codex clients and NewAPI relays use one path.
-func classifyProjectTitleRequest(c *gin.Context, requestedModel string, body []byte, identity *requestSessionIdentity) bool {
+// classifyProjectTitleRequest recognizes the native system field or NewAPI's
+// signed system_passive field. Model names and prompt wording are deliberately
+// not part of this Codex2API routing decision.
+func classifyProjectTitleRequest(c *gin.Context, _ string, _ []byte, identity *requestSessionIdentity) bool {
 	if c == nil || identity == nil {
 		return false
 	}
 	c.Set(projectTitleRequestContextKey, nil)
 	row := apiKeyRowFromContext(c)
-	if row == nil || row.Limits.ProjectTitleGroupID <= 0 || !isProjectTitleModel(requestedModel) {
+	if row == nil || row.Limits.ProjectTitleGroupID <= 0 {
 		return false
 	}
-	if !strings.EqualFold(strings.TrimSpace(identity.relatedSource.ThreadSource), "system") {
-		return false
+	fieldMatched := !identity.bypassWindowAccounting && strings.EqualFold(strings.TrimSpace(identity.relatedSource.ThreadSource), "system")
+	if raw, exists := c.Get(newAPIPolicyMetaContextKey); exists {
+		policy, ok := raw.(verifiedNewAPIPolicyContext)
+		fieldMatched = ok && policy.MetaVerified && policy.Meta.PassiveFeature == newAPIPassiveFeatureSystemPassive
 	}
-	if _, ok := promptfilter.ClosedProjectTitleCandidate(body, normalizeCodexInternalRequestedModel(requestedModel)); !ok {
+	if !fieldMatched {
 		return false
 	}
 	c.Set(projectTitleRequestContextKey, projectTitleRequestRoute{GroupID: row.Limits.ProjectTitleGroupID})
 	c.Set(relatedSessionObservationContextKey, nil)
 	identity.bypassWindowAccounting = true
 	return true
-}
-
-func isProjectTitleModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if base, stripped := stripCompactModelSuffix(model); stripped {
-		model = strings.ToLower(strings.TrimSpace(base))
-	}
-	return model == "gpt-5.6-luna"
 }
 
 func projectTitleRequestRouteFromContext(c *gin.Context) (projectTitleRequestRoute, bool) {

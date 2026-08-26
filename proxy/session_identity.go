@@ -8,7 +8,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -294,16 +293,9 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
 	if !verifiedPolicy {
-		if reviewedRoot, reviewed := classifyLocalGuardianApprovalRoot(c, body); reviewed {
-			candidate := frameIdentity
-			if candidate.nativeRoot && candidate.stable && candidate.sessionID != "" && !strings.EqualFold(candidate.sessionID, reviewedRoot) {
-				return requestRootSessionIdentity{conflict: true}
-			}
-			setPassiveInternalAuthorization(c, newAPIPassiveFeatureGuardianApproval, true)
-			return requestRootSessionIdentity{
-				sessionID: reviewedRoot, stable: true, nativeRoot: true, related: true,
-				threadSource: "subagent", requestKind: "turn", subagentKind: "guardian",
-			}
+		if classifyNativeRelatedInternal(frameIdentity) {
+			setPassiveInternalAuthorization(c, newAPIPassiveFeatureRelatedInternal, true)
+			return frameIdentity
 		}
 		return identity
 	}
@@ -314,8 +306,11 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 			fingerprint := strings.TrimSpace(policyContext.Meta.RootSessionFingerprint)
 			guardianOverride := signedGuardianRootOverride(body, policyContext)
 			passiveOverride := guardianOverride || signedProjectTitleRootOverride(body, policyContext.Meta)
-			if guardianOverride {
-				setPassiveInternalAuthorization(c, newAPIPassiveFeatureGuardianApproval, true)
+			signedThreadSource := strings.TrimSpace(policyContext.Meta.ThreadSource)
+			signedRelatedInternal := policyContext.Meta.RootSessionRelation == newAPIPolicyRootSessionRelationRelated &&
+				signedThreadSource != "" && !strings.EqualFold(signedThreadSource, "user")
+			if guardianOverride || signedRelatedInternal {
+				setPassiveInternalAuthorization(c, newAPIPassiveFeatureRelatedInternal, true)
 			}
 			if frameIdentity.conflict {
 				return requestRootSessionIdentity{conflict: true, authoritative: true}
@@ -436,38 +431,23 @@ func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, bo
 	return identity
 }
 
-func signedGuardianRootOverride(body []byte, policyContext verifiedNewAPIPolicyContext) bool {
+func signedGuardianRootOverride(_ []byte, policyContext verifiedNewAPIPolicyContext) bool {
 	meta := policyContext.Meta
-	if meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated || meta.PassiveFeature != newAPIPassiveFeatureGuardianApproval {
+	if meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+		(meta.PassiveFeature != newAPIPassiveFeatureGuardianApproval && meta.PassiveFeature != newAPIPassiveFeatureRelatedInternal) {
 		return false
 	}
-	model := normalizeCodexInternalRequestedModel(meta.RequestedModel)
-	if model != "gpt-5.6-luna" && model != "codex-auto-review" {
-		return false
-	}
-	if _, ok := promptfilter.ClosedApprovalReassessmentText(body); !ok {
-		return false
-	}
-	envelope := promptfilter.BuildEnvelopeWithModelsAndConfig(
-		body, "/v1/responses", model, model, promptfilter.TransportHTTP, promptfilter.Config{},
-	)
-	reviewedRoot, ok := promptfilter.ApprovalReassessmentReviewedSession(envelope)
-	if !ok {
-		return false
-	}
-	expected := newAPIRootSessionFingerprint(policyContext.Platform, policyContext.Identity.UserID, reviewedRoot)
-	return equalRootSessionFingerprint(meta.RootSessionFingerprint, expected)
+	return strings.TrimSpace(meta.RootSessionFingerprint) != ""
 }
 
-func signedProjectTitleRootOverride(body []byte, meta newAPIPolicyMeta) bool {
+func signedProjectTitleRootOverride(_ []byte, meta newAPIPolicyMeta) bool {
 	if meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
-		meta.PassiveFeature != "system_passive" ||
+		meta.PassiveFeature != newAPIPassiveFeatureSystemPassive ||
 		!strings.EqualFold(strings.TrimSpace(meta.ThreadSource), "system") ||
-		normalizeCodexInternalRequestedModel(meta.RequestedModel) != "gpt-5.6-luna" {
+		strings.TrimSpace(meta.RootSessionFingerprint) == "" {
 		return false
 	}
-	_, ok := promptfilter.ClosedProjectTitleCandidate(body, normalizeCodexInternalRequestedModel(meta.RequestedModel))
-	return ok
+	return true
 }
 
 func applySignedRootSessionClassification(identity requestRootSessionIdentity, meta newAPIPolicyMeta, fallback requestRootSessionIdentity) requestRootSessionIdentity {

@@ -28,6 +28,12 @@ const UnstableSessionCapacityPrefix = "unstable-affinity:"
 // borrow an account/window.
 var relatedSessionCapacityPrefix = "related-affinity:" + uuid.NewString() + ":"
 
+// protectedRelatedSessionCapacityPrefix is reserved for a locally resolved or
+// gateway-signed internal child request. It may borrow one extra concurrency
+// lease from its exact root account so an internal turn cannot deadlock behind
+// the main turn that is waiting for it.
+var protectedRelatedSessionCapacityPrefix = "protected-related-affinity:" + uuid.NewString() + ":"
+
 // sessionAccountingBypassCapacityPrefix is process-private so a downstream
 // Session-Id cannot impersonate a verified gateway decision. The key remains
 // a normal affinity identity, but it never enters account-window accounting.
@@ -37,11 +43,13 @@ const maxRelatedRequestDedupeEntries = 512
 
 func RelatedSessionRootKey(sessionKey string) (string, bool) {
 	sessionKey = strings.TrimSpace(sessionKey)
-	if !strings.HasPrefix(sessionKey, relatedSessionCapacityPrefix) {
-		return sessionKey, false
+	for _, prefix := range []string{protectedRelatedSessionCapacityPrefix, relatedSessionCapacityPrefix} {
+		if strings.HasPrefix(sessionKey, prefix) {
+			rootKey := strings.TrimSpace(strings.TrimPrefix(sessionKey, prefix))
+			return rootKey, rootKey != ""
+		}
 	}
-	rootKey := strings.TrimSpace(strings.TrimPrefix(sessionKey, relatedSessionCapacityPrefix))
-	return rootKey, rootKey != ""
+	return sessionKey, false
 }
 
 // RelatedSessionAffinityKey creates an authenticated in-process marker for a
@@ -52,6 +60,20 @@ func RelatedSessionAffinityKey(rootKey string) string {
 		return ""
 	}
 	return relatedSessionCapacityPrefix + rootKey
+}
+
+// ProtectedRelatedSessionAffinityKey creates the process-private marker used
+// only after the proxy has classified a related internal session field.
+func ProtectedRelatedSessionAffinityKey(rootKey string) string {
+	rootKey = strings.TrimSpace(rootKey)
+	if rootKey == "" {
+		return ""
+	}
+	return protectedRelatedSessionCapacityPrefix + rootKey
+}
+
+func isProtectedRelatedSessionKey(key string) bool {
+	return strings.HasPrefix(strings.TrimSpace(key), protectedRelatedSessionCapacityPrefix)
 }
 
 // SessionAccountingBypassAffinityKey marks a gateway-authenticated background

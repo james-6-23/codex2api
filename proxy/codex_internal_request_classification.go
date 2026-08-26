@@ -3,9 +3,7 @@ package proxy
 import (
 	"strings"
 
-	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
-	"github.com/tidwall/gjson"
 )
 
 const localSessionAccountingBypassContextKey = "local_session_accounting_bypass_v1"
@@ -19,71 +17,40 @@ type passiveInternalAuthorization struct {
 	Feature string
 }
 
-func normalizeCodexInternalRequestedModel(model string) string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if base, stripped := stripCompactModelSuffix(model); stripped {
-		model = strings.ToLower(strings.TrimSpace(base))
+// classifyNativeRelatedInternal accepts a coherent standalone Codex child
+// graph. Prompt wording, model aliases and client-fingerprint policy belong at
+// the edge gateway; Codex2API consumes only the resolved session fields.
+func classifyNativeRelatedInternal(identity requestRootSessionIdentity) bool {
+	if !identity.nativeRoot || !identity.stable || identity.conflict ||
+		!identity.related || strings.TrimSpace(identity.sessionID) == "" {
+		return false
 	}
-	return model
+	threadSource := strings.TrimSpace(identity.threadSource)
+	return threadSource != "" && !strings.EqualFold(threadSource, "user")
 }
 
-// classifyLocalGuardianApprovalRoot recovers the exact user-visible task from
-// the reviewed-session marker emitted by Codex's approval reassessment turn.
-// It is used only when no authenticated NewAPI policy supplied a root.
-func classifyLocalGuardianApprovalRoot(c *gin.Context, body []byte) (string, bool) {
-	model := trustedRequestedModel(c, gjson.GetBytes(body, "model").String())
-	model = normalizeCodexInternalRequestedModel(model)
-	if model != "gpt-5.6-luna" && model != "codex-auto-review" {
+// classifyLocalCodexAmbientSessionAccounting recognizes a coherent standalone
+// Codex system task from its native session fields. Payload wording, model
+// names and client fingerprints deliberately do not participate: those values
+// are release details, while thread_source is the protocol classification.
+// When the API key configured a project-title group, the same system field is
+// routed by classifyProjectTitleRequest instead of being treated as ambient.
+func classifyLocalCodexAmbientSessionAccounting(c *gin.Context, _ []byte, root requestRootSessionIdentity) (string, bool) {
+	if c == nil || !root.stable || root.conflict || !root.nativeRoot || root.related ||
+		!strings.EqualFold(strings.TrimSpace(root.threadSource), "system") {
 		return "", false
 	}
-	if _, ok := promptfilter.ClosedApprovalReassessmentText(body); !ok {
+	if row := apiKeyRowFromContext(c); row != nil && row.Limits.ProjectTitleGroupID > 0 {
 		return "", false
 	}
-	envelope := promptfilter.BuildEnvelopeWithModelsAndConfig(
-		body, "/v1/responses", model, model, promptfilter.TransportHTTP, promptfilter.Config{},
-	)
-	rootID, ok := promptfilter.ApprovalReassessmentReviewedSession(envelope)
-	rootID = strings.ToLower(strings.TrimSpace(rootID))
-	return rootID, ok && validSessionGraphUUID(rootID)
+	return newAPIPassiveFeatureSystemPassive, true
 }
 
-// classifyLocalCodexAmbientSessionAccounting recognizes only a coherent native
-// Codex root task marked as a system turn and using one of the known ambient
-// models. It keeps direct Codex2API traffic equivalent to signed NewAPI traffic
-// without granting the bypass to an arbitrary Session-Id or source label.
-func classifyLocalCodexAmbientSessionAccounting(c *gin.Context, body []byte, root requestRootSessionIdentity) (string, bool) {
-	if c == nil || c.Request == nil || !root.stable || root.conflict || !root.nativeRoot || root.related ||
-		!strings.EqualFold(strings.TrimSpace(root.threadSource), "system") ||
-		!EvaluateEngineFingerprint(c.Request.Header, body, nil) {
-		return "", false
-	}
-	model := normalizeCodexInternalRequestedModel(trustedRequestedModel(c, gjson.GetBytes(body, "model").String()))
-	switch model {
-	case "gpt-5.4-mini":
-		if !localAmbientSafetyBodyContract(body) {
-			return "", false
-		}
-		envelope := promptfilter.BuildEnvelopeWithModelsAndConfig(
-			body, "/v1/responses", model, model, promptfilter.TransportHTTP, promptfilter.Config{},
-		)
-		kind := promptfilter.ClassifyKnownApplicationPromptKind(envelope)
-		if kind == "ambient_safety" || kind == "ambient_safety_drift" {
-			return newAPIPassiveFeatureAmbientSafety, true
-		}
-	case "gpt-5.6-terra", "gpt-5.4":
-		if !codexInternalBodyHasExecutionSurface(body) && localAmbientSuggestionsPrompt(body) {
-			return newAPIPassiveFeatureAmbientSuggestions, true
-		}
-	}
-	return "", false
-}
-
-// classifyVerifiedNewAPIAmbientSessionAccounting revalidates the signed
-// gateway classification against the actual body seen by Codex2API. A valid
-// signature authenticates who supplied the metadata; it does not make a
-// client-controlled thread_source label or prompt wrapper sufficient by
-// itself to bypass account/user window accounting.
-func (h *Handler) classifyVerifiedNewAPIAmbientSessionAccounting(c *gin.Context, body []byte) (string, bool) {
+// classifyVerifiedNewAPIAmbientSessionAccounting consumes NewAPI's signed
+// field classification without reparsing the request body. Signature and
+// metadata normalization are the trust boundary; Codex2API must not become
+// coupled to model aliases or prompt templates owned by a client release.
+func (h *Handler) classifyVerifiedNewAPIAmbientSessionAccounting(c *gin.Context, _ []byte) (string, bool) {
 	if h == nil || c == nil {
 		return "", false
 	}
@@ -92,85 +59,11 @@ func (h *Handler) classifyVerifiedNewAPIAmbientSessionAccounting(c *gin.Context,
 		policyContext.Meta.SessionAccounting != newAPISessionAccountingBypass {
 		return "", false
 	}
-	model := normalizeCodexInternalRequestedModel(policyContext.Meta.RequestedModel)
-	switch policyContext.Meta.PassiveFeature {
-	case newAPIPassiveFeatureAmbientSuggestions:
-		if (model == "gpt-5.6-terra" || model == "gpt-5.4") &&
-			!codexInternalBodyHasExecutionSurface(body) && localAmbientSuggestionsPrompt(body) {
-			return newAPIPassiveFeatureAmbientSuggestions, true
-		}
-	case newAPIPassiveFeatureAmbientSafety:
-		if model == "gpt-5.4-mini" && localAmbientSafetyBodyContract(body) {
-			envelope := promptfilter.BuildEnvelopeWithModelsAndConfig(
-				body, "/v1/responses", model, model, promptfilter.TransportHTTP, promptfilter.Config{},
-			)
-			kind := promptfilter.ClassifyKnownApplicationPromptKind(envelope)
-			if kind == "ambient_safety" || kind == "ambient_safety_drift" {
-				return newAPIPassiveFeatureAmbientSafety, true
-			}
-		}
+	feature := strings.TrimSpace(policyContext.Meta.PassiveFeature)
+	if feature == "" {
+		return "", false
 	}
-	return "", false
-}
-
-func localAmbientSuggestionsPrompt(body []byte) bool {
-	if !gjson.ValidBytes(body) {
-		return false
-	}
-	root := gjson.ParseBytes(body)
-	if instruction := root.Get("instructions"); instruction.Exists() && strings.TrimSpace(instruction.String()) != "" {
-		return false
-	}
-	inputResult := root.Get("input")
-	if inputResult.Type != gjson.String {
-		return false
-	}
-	input := strings.ToLower(strings.TrimSpace(inputResult.String()))
-	if !strings.Contains(input, "generate 0 to 3 hyperpersonalized suggestions") ||
-		!strings.Contains(input, "what this user can do with codex in this local project") {
-		return false
-	}
-	if !strings.EqualFold(strings.TrimSpace(root.Get("text.format.type").String()), "json_schema") {
-		return false
-	}
-	schema := root.Get("text.format.schema")
-	properties := schema.Get("properties")
-	suggestions := properties.Get("suggestions")
-	return schema.IsObject() && strings.EqualFold(strings.TrimSpace(schema.Get("type").String()), "object") &&
-		properties.IsObject() && len(properties.Map()) == 1 && suggestions.IsObject() &&
-		strings.EqualFold(strings.TrimSpace(suggestions.Get("type").String()), "array")
-}
-
-func localAmbientSafetyBodyContract(body []byte) bool {
-	if codexInternalBodyHasExecutionSurface(body) || !gjson.ValidBytes(body) {
-		return false
-	}
-	const instruction = "Classify Codex ambient suggestion candidates for policy safety."
-	return strings.TrimSpace(gjson.GetBytes(body, "instructions").String()) == instruction
-}
-
-func codexInternalBodyHasExecutionSurface(body []byte) bool {
-	if !gjson.ValidBytes(body) {
-		return true
-	}
-	root := gjson.ParseBytes(body)
-	for _, path := range []string{"tools", "tool_choice", "previous_response_id", "messages", "prompt", "conversation", "context_management"} {
-		value := root.Get(path)
-		if !value.Exists() || value.Type == gjson.Null {
-			continue
-		}
-		switch {
-		case value.Type == gjson.String && strings.TrimSpace(value.String()) == "":
-			continue
-		case value.IsArray() && len(value.Array()) == 0:
-			continue
-		case value.IsObject() && len(value.Map()) == 0:
-			continue
-		default:
-			return true
-		}
-	}
-	return false
+	return feature, true
 }
 
 func resetCodexInternalRequestClassificationFrame(c *gin.Context) {

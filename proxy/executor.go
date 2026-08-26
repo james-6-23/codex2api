@@ -1204,6 +1204,7 @@ type requestSessionIdentity struct {
 	relatedSource          auth.AccountSessionRelatedSource
 	relatedRequestID       string
 	bypassWindowAccounting bool
+	protectedRelatedLease  bool
 }
 
 const relatedSessionObservationContextKey = "related_session_observation_v1"
@@ -1332,6 +1333,7 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 			}
 		}
 	}
+	identity.protectedRelatedLease = identity.relatedToRoot && passiveInternalRequestAuthorized(c)
 	return identity
 }
 

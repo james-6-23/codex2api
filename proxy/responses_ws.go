@@ -358,7 +358,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	accountFilter := accountFilterForModel(effectiveModel)
 	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, false, accountFilter)
 	accountFilter = applyProjectTitleModelRouting(c, effectiveModel, false, accountFilter)
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// resolveCompactionAffinity 只在已知来源相互冲突时报错；缓存故障按未知
@@ -1205,6 +1205,9 @@ func normalizeResponsesWebSocketClientPayload(raw []byte) ([]byte, string, *api.
 
 func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *websocket.Conn, rawBody []byte, endpoint string, model string, policyEventID string) (blocked bool, delegatedToNewAPI bool) {
 	if h == nil || h.store == nil {
+		return false, false
+	}
+	if passiveInternalRequestAuthorized(c) {
 		return false, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)

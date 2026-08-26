@@ -71,10 +71,8 @@ func closedProjectTitleInputText(input gjson.Result) (string, bool) {
 }
 
 // ClosedApprovalReassessmentText validates the non-text execution surface of
-// a Codex Guardian/auto-review request. The approval parser separately checks
-// the complete static prompt and planned-action structure; this layer prevents
-// that public prompt from authorizing extra instructions, tools, continuation
-// state, history, or parallel user inputs.
+// a Codex Guardian/auto-review request. Live Guardian routing does not depend
+// on this prompt contract; it remains only for prompt-filter classification.
 func ClosedApprovalReassessmentText(body []byte) (string, bool) {
 	if !gjson.ValidBytes(body) {
 		return "", false

@@ -585,7 +585,7 @@ func (g *scopeBudgetGate) noteConcurrencyBlock(message string) {
 }
 
 // concurrencyFullFor 判断账号是否因某条 scope 的并发位已满而不可用。
-func (g *scopeBudgetGate) concurrencyFullFor(account *auth.Account) bool {
+func (g *scopeBudgetGate) concurrencyFullFor(account *auth.Account, allowance int) bool {
 	if g == nil || account == nil || len(g.concurrencyScopes) == 0 {
 		return false
 	}
@@ -593,7 +593,7 @@ func (g *scopeBudgetGate) concurrencyFullFor(account *auth.Account) bool {
 		if !scopeMatchesAccount(scope, account) {
 			continue
 		}
-		if scopeConcurrencyFull(g.apiKeyID, scope) {
+		if scopeConcurrencyFull(g.apiKeyID, scope, allowance) {
 			g.noteConcurrencyBlock(scopeConcurrencyMessage(scopeLabelForMessage(scope), scope.MaxConcurrency))
 			return true
 		}
@@ -619,6 +619,10 @@ func (g *scopeBudgetGate) blocks(account *auth.Account) bool {
 // 这样「无可用账号」时才敢把 503 换成 scope 预算耗尽的 429——否则模型不匹配之类的
 // 拒绝也会被归因到预算上。
 func (g *scopeBudgetGate) filter(inner auth.AccountFilter) auth.AccountFilter {
+	return g.filterWithConcurrencyAllowance(inner, 0)
+}
+
+func (g *scopeBudgetGate) filterWithConcurrencyAllowance(inner auth.AccountFilter, concurrencyAllowance int) auth.AccountFilter {
 	if g == nil {
 		return inner
 	}
@@ -630,7 +634,7 @@ func (g *scopeBudgetGate) filter(inner auth.AccountFilter) auth.AccountFilter {
 			g.blocked.Add(1)
 			return false
 		}
-		if g.concurrencyFullFor(account) {
+		if g.concurrencyFullFor(account, concurrencyAllowance) {
 			g.blocked.Add(1)
 			return false
 		}
@@ -659,7 +663,11 @@ func (h *Handler) applyScopeBudgetFilter(c *gin.Context, filter auth.AccountFilt
 	if gate == nil {
 		return filter
 	}
-	return gate.filter(filter)
+	allowance := 0
+	if passiveInternalRequestAuthorized(c) {
+		allowance = 1
+	}
+	return gate.filterWithConcurrencyAllowance(filter, allowance)
 }
 
 // scopeBudgetExhaustedMessage 返回本次请求因 scope 预算耗尽而剔除候选的说明,

@@ -238,18 +238,18 @@ func TestStandaloneAmbientBypassRequiresNativeCodexRoot(t *testing.T) {
 	}
 }
 
-func TestStandaloneAmbientBypassRejectsForgedSystemMetadataWithoutApplicationTemplate(t *testing.T) {
+func TestStandaloneSystemFieldBypassDoesNotDependOnApplicationTemplate(t *testing.T) {
 	c := promptSessionLimitTestContext("")
 	c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
 	c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"system","request_kind":"turn"}`)
 	body := []byte(`{"model":"gpt-5.6-terra","input":"ordinary request pretending to be a system job"}`)
 	identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
-	if identity.bypassWindowAccounting || requestSessionAccountingBypass(c) {
-		t.Fatalf("forged ambient request bypassed accounting: %+v", identity)
+	if !identity.bypassWindowAccounting || !requestSessionAccountingBypass(c) {
+		t.Fatalf("native system field stopped bypassing after payload drift: %+v", identity)
 	}
 }
 
-func TestStandaloneAmbientBypassRejectsTemplateWithExpandedConversationSurface(t *testing.T) {
+func TestStandaloneSystemFieldBypassIgnoresConversationSurface(t *testing.T) {
 	base := standaloneAmbientSuggestionsBody("gpt-5.6-terra")
 	for name, body := range map[string][]byte{
 		"conversation":       bytes.Replace(base, []byte(`"model":"gpt-5.6-terra",`), []byte(`"model":"gpt-5.6-terra","conversation":"conv_other",`), 1),
@@ -260,8 +260,8 @@ func TestStandaloneAmbientBypassRejectsTemplateWithExpandedConversationSurface(t
 			c.Request.Header = nativeSessionHeaders(testRootSessionA, testRootSessionA, 0)
 			c.Request.Header.Set(codexTurnMetadataHeader, `{"session_id":"`+testRootSessionA+`","thread_id":"`+testRootSessionA+`","window_id":"`+testRootSessionA+`:0","thread_source":"system","request_kind":"turn"}`)
 			identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
-			if identity.bypassWindowAccounting || requestSessionAccountingBypass(c) {
-				t.Fatalf("expanded ambient request bypassed accounting: %+v", identity)
+			if !identity.bypassWindowAccounting || !requestSessionAccountingBypass(c) {
+				t.Fatalf("system field stopped bypassing after request shape changed: %+v", identity)
 			}
 		})
 	}

@@ -82,7 +82,7 @@ func TestDirectCodexProjectTitleRequestResolvesAndRoutesWithoutNewAPI(t *testing
 	}
 }
 
-func TestProjectTitleRoutingDoesNotClassifyDisabledOrUserRequests(t *testing.T) {
+func TestProjectTitleRoutingDoesNotClassifyDisabledOrOrdinaryUserFields(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		groupID   int64
@@ -90,8 +90,7 @@ func TestProjectTitleRoutingDoesNotClassifyDisabledOrUserRequests(t *testing.T) 
 		requested string
 	}{
 		{name: "disabled", source: "system", requested: "gpt-5.6-luna"},
-		{name: "user request", groupID: 20, source: "user", requested: "gpt-5.6-luna"},
-		{name: "ordinary model", groupID: 20, source: "system", requested: "gpt-5.6-sol"},
+		{name: "ordinary user", groupID: 20, source: "user", requested: "gpt-5.6-luna"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := projectTitleRoutingTestContext(tc.groupID)
@@ -103,7 +102,40 @@ func TestProjectTitleRoutingDoesNotClassifyDisabledOrUserRequests(t *testing.T) 
 	}
 }
 
-func TestProjectTitleRoutingRejectsPromptWrapperWithExpandedExecutionSurface(t *testing.T) {
+func TestProjectTitleRoutingTrustsSignedNewAPIPassiveFeature(t *testing.T) {
+	c := projectTitleRoutingTestContext(20)
+	c.Set(newAPIPolicyMetaContextKey, verifiedNewAPIPolicyContext{
+		MetaVerified: true,
+		Meta:         newAPIPolicyMeta{PassiveFeature: "system_passive"},
+	})
+	identity := requestSessionIdentity{}
+	if !classifyProjectTitleRequest(c, "future-title-model", []byte(`{"input":"changed"}`), &identity) {
+		t.Fatal("signed project-title feature was rejected after model/prompt drift")
+	}
+}
+
+func TestProjectTitleRoutingDoesNotSwallowOtherSystemJobs(t *testing.T) {
+	direct := projectTitleRoutingTestContext(20)
+	directIdentity := requestSessionIdentity{
+		bypassWindowAccounting: true,
+		relatedSource:          auth.AccountSessionRelatedSource{ThreadSource: "system"},
+	}
+	if classifyProjectTitleRequest(direct, "gpt-5.6-terra", []byte(`{"input":"ambient"}`), &directIdentity) {
+		t.Fatal("direct ambient system job entered the project-title group")
+	}
+
+	signed := projectTitleRoutingTestContext(20)
+	signed.Set(newAPIPolicyMetaContextKey, verifiedNewAPIPolicyContext{
+		MetaVerified: true,
+		Meta:         newAPIPolicyMeta{PassiveFeature: newAPIPassiveFeatureAmbientSuggestions},
+	})
+	signedIdentity := requestSessionIdentity{relatedSource: auth.AccountSessionRelatedSource{ThreadSource: "system"}}
+	if classifyProjectTitleRequest(signed, "gpt-5.6-terra", []byte(`{"input":"ambient"}`), &signedIdentity) {
+		t.Fatal("signed ambient system job entered the project-title group")
+	}
+}
+
+func TestProjectTitleRoutingUsesSystemFieldIndependentOfPayloadShape(t *testing.T) {
 	base := projectTitleRoutingTestBody()
 	mutations := map[string][]byte{
 		"instructions":          bytes.Replace(base, []byte(`"model":"gpt-5.6-luna",`), []byte(`"model":"gpt-5.6-luna","instructions":"do another task",`), 1),
@@ -119,8 +151,8 @@ func TestProjectTitleRoutingRejectsPromptWrapperWithExpandedExecutionSurface(t *
 			c := projectTitleRoutingTestContext(20)
 			cacheTrustedRequestedModel(c, "gpt-5.6-luna")
 			identity := requestSessionIdentity{relatedSource: auth.AccountSessionRelatedSource{ThreadSource: "system"}}
-			if classifyProjectTitleRequest(c, "gpt-5.6-luna", body, &identity) || isProjectTitleRequest(c) || identity.bypassWindowAccounting {
-				t.Fatalf("expanded request entered project-title routing: identity=%+v", identity)
+			if !classifyProjectTitleRequest(c, "gpt-5.6-luna", body, &identity) || !isProjectTitleRequest(c) || !identity.bypassWindowAccounting {
+				t.Fatalf("system field stopped routing after payload drift: identity=%+v", identity)
 			}
 			handler := newPromptGuardTestHandler(promptGuardTestConfig())
 			if decision := handler.evaluatePromptGuard(c, body, body, "/v1/responses", "gpt-5.6-luna", promptfilter.TransportHTTP).Decision; decision.ApplicationPromptKind == "project_title" {

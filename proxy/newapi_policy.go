@@ -35,6 +35,8 @@ const (
 	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
 	newAPISessionAccountingBypass          = "bypass"
 	newAPIPassiveFeatureGuardianApproval   = "guardian_approval"
+	newAPIPassiveFeatureRelatedInternal    = "related_internal"
+	newAPIPassiveFeatureSystemPassive      = "system_passive"
 	newAPIPassiveFeatureAmbientSuggestions = "ambient_suggestions"
 	newAPIPassiveFeatureAmbientSafety      = "ambient_suggestion_safety"
 )
@@ -530,19 +532,23 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	meta.PassiveFeature = strings.ToLower(strings.TrimSpace(meta.PassiveFeature))
 	switch meta.SessionAccounting {
 	case "":
-		model := normalizeCodexInternalRequestedModel(meta.RequestedModel)
 		switch meta.PassiveFeature {
 		case "":
 		case newAPIPassiveFeatureGuardianApproval:
 			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
-				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
-				(model != "gpt-5.6-luna" && model != "codex-auto-review") {
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated {
 				return false
 			}
-		case "system_passive":
+		case newAPIPassiveFeatureRelatedInternal:
 			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
 				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
-				!strings.EqualFold(meta.ThreadSource, "system") || model != "gpt-5.6-luna" {
+				strings.TrimSpace(meta.ThreadSource) == "" || strings.EqualFold(meta.ThreadSource, "user") {
+				return false
+			}
+		case newAPIPassiveFeatureSystemPassive:
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				!strings.EqualFold(meta.ThreadSource, "system") {
 				return false
 			}
 		default:
@@ -553,7 +559,8 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot || !strings.EqualFold(meta.ThreadSource, "system") {
 			return false
 		}
-		if meta.PassiveFeature != newAPIPassiveFeatureAmbientSuggestions && meta.PassiveFeature != newAPIPassiveFeatureAmbientSafety {
+		if meta.PassiveFeature != newAPIPassiveFeatureSystemPassive &&
+			meta.PassiveFeature != newAPIPassiveFeatureAmbientSuggestions && meta.PassiveFeature != newAPIPassiveFeatureAmbientSafety {
 			return false
 		}
 	default:

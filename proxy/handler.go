@@ -114,6 +114,13 @@ func (h *Handler) withModelCooldownFilter(model string, filter auth.AccountFilte
 	return h.store.WithModelCooldownFilter(model, filter)
 }
 
+func (h *Handler) withRequestModelCooldownFilter(c *gin.Context, model string, filter auth.AccountFilter) auth.AccountFilter {
+	if passiveInternalRequestAuthorized(c) || isProjectTitleRequest(c) {
+		return filter
+	}
+	return h.withModelCooldownFilter(model, filter)
+}
+
 func (h *Handler) shouldUseWebsocketForHTTP() bool {
 	if h == nil {
 		return false
@@ -238,6 +245,9 @@ func capacityAwareSessionAffinityKey(identity requestSessionIdentity, apiKeyID i
 	// conversation. Keep it on the normal root key so it can recover a binding
 	// after a restart/TTL expiry and refresh exactly one account window.
 	if key != "" && identity.relatedToRoot && !identity.ownsRootBinding {
+		if identity.protectedRelatedLease {
+			return auth.ProtectedRelatedSessionAffinityKey(key)
+		}
 		return auth.RelatedSessionAffinityKey(key)
 	}
 	if key != "" && !identity.stableIdentity {
@@ -387,24 +397,13 @@ func accountFilterForModel(model string) auth.AccountFilter {
 	}
 }
 
-func isPassiveInternalRequestedModel(model string) bool {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if base, stripped := stripCompactModelSuffix(model); stripped {
-		model = strings.ToLower(strings.TrimSpace(base))
-	}
-	return model == "gpt-5.6-luna" || model == "codex-auto-review"
-}
-
 func passiveInternalAccountEligible(account *auth.Account, effectiveModel string, allowRelay bool) bool {
 	if account == nil {
 		return false
 	}
 	effectiveModel = strings.TrimSpace(effectiveModel)
 	if account.IsRelayStyle() {
-		return allowRelay && account.IsOpenAIResponsesAPI() && (effectiveModel == "" || !account.IsModelRateLimited(effectiveModel))
-	}
-	if effectiveModel != "" && account.IsModelRateLimited(effectiveModel) {
-		return false
+		return allowRelay && account.IsOpenAIResponsesAPI()
 	}
 	if isProOnlyModel(effectiveModel) {
 		return isSparkPlanCandidate(account.GetPlanType())
@@ -412,26 +411,17 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 	return true
 }
 
-// applyPassiveInternalModelRouting permits only a verified derived Luna or
-// codex-auto-review request to bypass the configured Models list. The request
-// remains pinned to the root session's exact account; a missing, disabled,
-// busy, cooled-down, or excluded root account never falls back to another one.
-func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, fallbackRequestedModel, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
+// applyPassiveInternalModelRouting lets a field-classified internal child
+// bypass the configured Models list. It remains pinned to the root session's
+// exact account; a missing, disabled, busy, cooled-down, or excluded root
+// account never falls back to another one.
+func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, _ string, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
 	if isProjectTitleRequest(c) {
 		return filter
 	}
 	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !passiveInternalRequestAuthorized(c) || !identity.relatedToRoot || identity.ownsRootBinding {
 		return filter
 	}
-	requestedModel := strings.TrimSpace(fallbackRequestedModel)
-	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
-	if (status == "verified" || status == "signed_response") && policyContext.MetaVerified && strings.TrimSpace(policyContext.Meta.RequestedModel) != "" {
-		requestedModel = strings.TrimSpace(policyContext.Meta.RequestedModel)
-	}
-	if !isPassiveInternalRequestedModel(requestedModel) {
-		return filter
-	}
-
 	rootKey, related := auth.RelatedSessionRootKey(affinityKey)
 	if !related || rootKey == "" {
 		return func(*auth.Account) bool { return false }
@@ -3082,7 +3072,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	}
 	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = applyProjectTitleModelRouting(c, effectiveModel, true, accountFilter)
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
 	}
@@ -4558,7 +4548,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.applyPassiveInternalModelRouting(c, routingModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
 		accountFilter = relayOnlyAccountFilter(accountFilter)
 	}
@@ -5248,7 +5238,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
 	accountFilter = h.applyPassiveInternalModelRouting(c, logModel, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。

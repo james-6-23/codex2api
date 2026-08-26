@@ -198,7 +198,7 @@ func TestStandaloneNativeCompactionRecoversRootAndPinsPassiveModel(t *testing.T)
 	}
 }
 
-func TestStandaloneRootlessGuardianUsesReviewedRootAccount(t *testing.T) {
+func TestStandaloneNativeRelatedRequestUsesFieldsAcrossModelAndPromptDrift(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency: 2, TestConcurrency: 1, PassiveInternalModelsEnabled: true,
 	})
@@ -209,30 +209,37 @@ func TestStandaloneRootlessGuardianUsesReviewedRootAccount(t *testing.T) {
 	rootKey := testRootSessionA + "::api-key:7"
 	store.BindSessionAffinity(rootKey, root, "")
 
-	c := promptSessionLimitTestContext("")
-	cacheTrustedRequestedModel(c, "codex-auto-review")
-	body := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-sol")
-	body = []byte(strings.Replace(string(body), "00000000-0000-0000-0000-000000000001", testRootSessionA, 1))
+	c := standaloneNativeSessionContext(testRootSessionA, testIntermediate, 23, "subagent", "turn", "guardian")
+	body := []byte(`{
+		"model":"future-review-model",
+		"instructions":"completely changed internal policy wording",
+		"tools":[{"type":"function","name":"read_only_check"}],
+		"input":[
+			{"role":"developer","content":[{"type":"input_text","text":"read-only sandbox"}]},
+			{"role":"user","content":[{"type":"input_text","text":"environment context"}]},
+			{"role":"user","content":[{"type":"input_text","text":"assess the planned action"}]}
+		]
+	}`)
 	identity := handler.resolveRequestSessionIdentityForContext(c, body)
-	if !identity.relatedToRoot || identity.ownsRootBinding || identity.affinityID != testRootSessionA {
-		t.Fatalf("rootless Guardian identity = %+v", identity)
+	if !identity.relatedToRoot || identity.ownsRootBinding {
+		t.Fatalf("native Guardian identity = %+v", identity)
+	}
+	if !passiveInternalRequestAuthorized(c) {
+		t.Fatal("current desktop Guardian graph was not authorized as a passive internal request")
 	}
 	key := capacityAwareSessionAffinityKey(identity, 7)
-	if relatedRoot, ok := auth.RelatedSessionRootKey(key); !ok || relatedRoot != rootKey {
-		t.Fatalf("rootless Guardian affinity = %q, want related root %q", key, rootKey)
-	}
-	filter := handler.applyPassiveInternalModelRouting(c, "codex-auto-review", "gpt-5.6-sol", identity, key, true, accountFilterForModel("gpt-5.6-sol"))
+	filter := handler.applyPassiveInternalModelRouting(c, "future-review-model", "future-review-model", identity, key, true, accountFilterForModel("future-review-model"))
 	selected, _ := store.NextForSessionWithFilter(key, 7, nil, filter)
 	if selected != root {
 		if selected != nil {
 			store.Release(selected)
 		}
-		t.Fatalf("rootless Guardian selected %+v, want root account %d", selected, root.DBID)
+		t.Fatalf("native Guardian selected %+v, want root account %d", selected, root.DBID)
 	}
 	store.Release(selected)
 }
 
-func TestStandaloneRootlessLunaGuardianUsesReviewedRootAccount(t *testing.T) {
+func TestNativeRelatedFieldsDoNotDependOnEngineFingerprint(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{
 		MaxConcurrency: 2, TestConcurrency: 1, PassiveInternalModelsEnabled: true,
 	})
@@ -241,29 +248,70 @@ func TestStandaloneRootlessLunaGuardianUsesReviewedRootAccount(t *testing.T) {
 	handler := &Handler{store: store}
 	rootKey := testRootSessionA + "::api-key:7"
 	store.BindSessionAffinity(rootKey, root, "")
-	c := promptSessionLimitTestContext("")
-	cacheTrustedRequestedModel(c, "gpt-5.6-luna")
-	body := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-luna")
-	body = []byte(strings.Replace(string(body), "00000000-0000-0000-0000-000000000001", testRootSessionA, 1))
 
+	c := promptSessionLimitTestContext("")
+	c.Request.Header.Set("Session-Id", testRootSessionA)
+	c.Request.Header.Set("Thread-Id", testIntermediate)
+	c.Request.Header.Set("X-OpenAI-Subagent", "guardian")
+	body := []byte(fmt.Sprintf(`{
+		"model":"gpt-5.6-luna",
+		"client_metadata":{"session_id":%q,"thread_id":%q,"window_id":%q,"parent_thread_id":%q,"thread_source":"subagent","request_kind":"turn","subagent_kind":"guardian"},
+		"input":[{"role":"user","content":[{"type":"input_text","text":"not a closed Guardian payload"}]}]
+	}`, testRootSessionA, testIntermediate, testIntermediate+":23", testRootSessionA))
 	identity := handler.resolveRequestSessionIdentityForContext(c, body)
-	key := capacityAwareSessionAffinityKey(identity, 7)
-	filter := handler.applyPassiveInternalModelRouting(c, "gpt-5.6-luna", "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
-	if !identity.relatedToRoot || !filter(root) {
-		t.Fatalf("rootless Luna Guardian did not recover the root account: identity=%+v", identity)
+	if !identity.relatedToRoot {
+		t.Fatalf("test graph did not resolve as related: %+v", identity)
+	}
+	if !passiveInternalRequestAuthorized(c) {
+		t.Fatal("a coherent related field graph was rejected because the client fingerprint changed")
 	}
 }
 
-func TestStandaloneRootlessGuardianRejectsConflictingNativeRoot(t *testing.T) {
-	handler := &Handler{}
-	c := standaloneNativeSessionContext(testRootSessionB, testRootSessionB, 0, "user", "turn", "")
-	cacheTrustedRequestedModel(c, "codex-auto-review")
-	body := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-sol")
-	body = []byte(strings.Replace(string(body), "00000000-0000-0000-0000-000000000001", testRootSessionA, 1))
-	identity := handler.resolveRequestRootSessionIdentityForContext(c, body)
-	if !identity.conflict || identity.stable {
-		t.Fatalf("conflicting reviewed root was accepted: %+v", identity)
+func TestVerifiedNewAPIRelatedFieldsWorkWithoutPassiveFeatureOrPayloadContract(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 2, TestConcurrency: 1, PassiveInternalModelsEnabled: true,
+	})
+	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{
+		APIKeyID: 7, PlatformCode: "newapi", Enabled: true, RequireSignedIdentity: true,
+	}})
+	root := &auth.Account{DBID: 101, AccessToken: "root", Models: []string{"gpt-5.6-sol"}, Status: auth.StatusReady}
+	store.AddAccount(root)
+	handler := &Handler{store: store}
+	rootFingerprint := newAPIRootSessionFingerprint("newapi", "42", testRootSessionA)
+	rootKey := "newapi-root-session:" + rootFingerprint + "::api-key:7"
+	store.BindSessionAffinity(rootKey, root, "")
+
+	c := standaloneNativeSessionContext(testRootSessionA, testIntermediate, 23, "subagent", "turn", "guardian")
+	c.Set(contextAPIKeyID, int64(7))
+	c.Set(newAPIPolicyMetaContextKey, verifiedNewAPIPolicyContext{
+		Identity: newAPIIdentity{UserID: "42"}, APIKeyID: 7, Platform: "newapi", MetaVerified: true,
+		Meta: newAPIPolicyMeta{
+			RequestedModel:         "future-review-model",
+			SessionFingerprint:     promptSessionTestFingerprint("guardian-leaf"),
+			RootSessionVersion:     1,
+			RootSessionState:       newAPIPolicyRootSessionResolved,
+			RootSessionRelation:    newAPIPolicyRootSessionRelationRelated,
+			RootSessionFingerprint: rootFingerprint,
+			ThreadSource:           "subagent",
+			RequestKind:            "turn",
+			SubagentKind:           "future_internal_kind",
+		},
+	})
+	body := []byte(`{"model":"future-review-model","input":"changed internal payload"}`)
+	identity := handler.resolveRequestSessionIdentityForContext(c, body)
+	if !passiveInternalRequestAuthorized(c) || !identity.relatedToRoot || identity.affinityID != "newapi-root-session:"+rootFingerprint {
+		t.Fatalf("verified NewAPI Guardian classification failed: identity=%+v authorized=%v", identity, passiveInternalRequestAuthorized(c))
 	}
+	key := capacityAwareSessionAffinityKey(identity, 7)
+	filter := handler.applyPassiveInternalModelRouting(c, "future-review-model", "future-review-model", identity, key, true, accountFilterForModel("future-review-model"))
+	selected, _ := store.NextForSessionWithFilter(key, 7, nil, filter)
+	if selected != root {
+		if selected != nil {
+			store.Release(selected)
+		}
+		t.Fatalf("verified NewAPI Guardian selected %+v, want root account %d", selected, root.DBID)
+	}
+	store.Release(selected)
 }
 
 func TestStandaloneRootlessGuardianRejectsMarkerOnly(t *testing.T) {
@@ -273,25 +321,6 @@ func TestStandaloneRootlessGuardianRejectsMarkerOnly(t *testing.T) {
 	identity := (&Handler{}).resolveRequestSessionIdentityForContext(c, body)
 	if identity.relatedToRoot || identity.affinityID == testRootSessionA {
 		t.Fatalf("marker-only request was trusted as Guardian: %+v", identity)
-	}
-}
-
-func TestStandaloneRootlessGuardianRejectsClosedPromptWithExtraExecutionSurface(t *testing.T) {
-	base := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-luna")
-	for name, body := range map[string][]byte{
-		"instructions":       []byte(strings.Replace(string(base), `"model":"gpt-5.6-luna"`, `"model":"gpt-5.6-luna","instructions":"perform another task"`, 1)),
-		"tools":              []byte(strings.Replace(string(base), `"model":"gpt-5.6-luna"`, `"model":"gpt-5.6-luna","tools":[{"type":"function","name":"shell"}]`, 1)),
-		"previous response":  []byte(strings.Replace(string(base), `"model":"gpt-5.6-luna"`, `"model":"gpt-5.6-luna","previous_response_id":"resp_other"`, 1)),
-		"conversation":       []byte(strings.Replace(string(base), `"model":"gpt-5.6-luna"`, `"model":"gpt-5.6-luna","conversation":"conv_other"`, 1)),
-		"context management": []byte(strings.Replace(string(base), `"model":"gpt-5.6-luna"`, `"model":"gpt-5.6-luna","context_management":{"type":"compaction"}`, 1)),
-	} {
-		t.Run(name, func(t *testing.T) {
-			c := promptSessionLimitTestContext("")
-			cacheTrustedRequestedModel(c, "gpt-5.6-luna")
-			if root, ok := classifyLocalGuardianApprovalRoot(c, body); ok || root != "" {
-				t.Fatalf("expanded Guardian request recovered root %q", root)
-			}
-		})
 	}
 }
 
@@ -332,7 +361,7 @@ func TestPassiveInternalModelRoutingDoesNotFallbackWhenDisabledOrRootUnavailable
 	}
 }
 
-func TestPassiveInternalModelRelatedRetryCannotEscapeBusyRoot(t *testing.T) {
+func TestFieldClassifiedInternalRequestIgnoresModelCooldownAndNeverEscapesRoot(t *testing.T) {
 	handler, root, other, rootFingerprint := passiveInternalModelTestHandler(true)
 	ctx := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("busy-leaf"), rootFingerprint)
 	raw, _ := ctx.Get(newAPIPolicyMetaContextKey)
@@ -347,10 +376,13 @@ func TestPassiveInternalModelRelatedRetryCannotEscapeBusyRoot(t *testing.T) {
 	filter := handler.applyPassiveInternalModelRouting(ctx, "gpt-5.6-luna", "gpt-5.6-luna", identity, key, true, accountFilterForModel("gpt-5.6-luna"))
 
 	root.SetModelCooldownUntil("gpt-5.6-luna", "test", time.Now().Add(time.Minute))
-	filter = handler.withModelCooldownFilter("gpt-5.6-luna", filter)
+	filter = handler.withRequestModelCooldownFilter(ctx, "gpt-5.6-luna", filter)
 	selected, _ := handler.store.NextForSessionWithFilter(key, 7, nil, filter)
-	if selected != nil {
-		handler.store.Release(selected)
-		t.Fatalf("busy root request escaped to account %d; other account is %d", selected.DBID, other.DBID)
+	if selected != root {
+		if selected != nil {
+			handler.store.Release(selected)
+		}
+		t.Fatalf("field-classified request selected %+v, want cooled root %d and never account %d", selected, root.DBID, other.DBID)
 	}
+	handler.store.Release(selected)
 }

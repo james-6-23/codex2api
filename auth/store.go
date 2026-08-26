@@ -6125,6 +6125,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 
 	now := time.Now()
 	rootKey, relatedRequest := RelatedSessionRootKey(key)
+	protectedRelatedRequest := relatedRequest && isProtectedRelatedSessionKey(key)
 	// Account session capacity acts as a strong binding even if general account
 	// affinity is bounded or disabled. An active admitted conversation must not
 	// migrate to another upstream account.
@@ -6139,7 +6140,15 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			}
 			s.RemoveAccountSession(accountID, key)
 		} else {
-			if acc := s.takeByIDMode(accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+			slotKey := key
+			concurrencyAllowance := int64(0)
+			if relatedRequest {
+				slotKey = rootKey
+			}
+			if protectedRelatedRequest {
+				concurrencyAllowance = 1
+			}
+			if acc := s.takeByIDModeWithConcurrencyAllowance(accountID, apiKeyID, exclude, filter, preserveBinding, slotKey, policy, concurrencyAllowance); acc != nil {
 				if s.admitSelectedAccountSession(acc, key, now) {
 					return acc, acc.GetProxyURL()
 				}
@@ -6159,7 +6168,11 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			rootBound = false
 		}
 		if rootBound {
-			if acc := s.takeByIDMode(rootBinding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+			concurrencyAllowance := int64(0)
+			if protectedRelatedRequest {
+				concurrencyAllowance = 1
+			}
+			if acc := s.takeByIDModeWithConcurrencyAllowance(rootBinding.accountID, apiKeyID, exclude, filter, preserveBinding, rootKey, policy, concurrencyAllowance); acc != nil {
 				proxyURL := rootBinding.proxyURL
 				if !s.affinityProxyStillValid(rootBinding.accountID, proxyURL) {
 					// The account is still the root owner even if its proxy setting was
@@ -6173,7 +6186,11 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		}
 		if !rootBound {
 			if cachedRoot, cached := s.getCachedSessionAffinity(rootKey); cached {
-				if acc := s.takeByIDMode(cachedRoot.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy); acc != nil {
+				concurrencyAllowance := int64(0)
+				if protectedRelatedRequest {
+					concurrencyAllowance = 1
+				}
+				if acc := s.takeByIDModeWithConcurrencyAllowance(cachedRoot.accountID, apiKeyID, exclude, filter, preserveBinding, rootKey, policy, concurrencyAllowance); acc != nil {
 					proxyURL := cachedRoot.proxyURL
 					if !s.affinityProxyStillValid(cachedRoot.accountID, proxyURL) {
 						proxyURL = ""
@@ -6527,6 +6544,16 @@ func (s *Store) takeByIDForContinuation(id int64, apiKeyID int64, exclude map[in
 }
 
 func (s *Store) takeByIDMode(id int64, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, continuation bool, sessionKey string, policy DispatchPolicy) *Account {
+	return s.takeByIDModeWithConcurrencyAllowance(id, apiKeyID, exclude, filter, continuation, sessionKey, policy, 0)
+}
+
+// takeByIDModeWithConcurrencyAllowance is used only for an authenticated
+// related-session marker that has already resolved an exact root account. A
+// single extra lease prevents the main Codex turn and its internal child from
+// deadlocking while the main turn waits for approval. Ordinary scheduling
+// still sees the normal limit and cannot consume this allowance; all related
+// requests for the account share the same one-slot ceiling.
+func (s *Store) takeByIDModeWithConcurrencyAllowance(id int64, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, continuation bool, sessionKey string, policy DispatchPolicy, concurrencyAllowance int64) *Account {
 	if s == nil || id == 0 {
 		return nil
 	}
@@ -6566,7 +6593,7 @@ func (s *Store) takeByIDMode(id int64, apiKeyID int64, exclude map[int64]bool, f
 
 	maxConcurrency := atomic.LoadInt64(&s.maxConcurrency)
 	now := time.Now()
-	if s.GetLazyMode() && !continuationEligible {
+	if s.GetLazyMode() && !continuationEligible && concurrencyAllowance <= 0 {
 		if s.tryReclaimSessionSlot(target, sessionKey, true) {
 			return target
 		}
@@ -6585,6 +6612,9 @@ func (s *Store) takeByIDMode(id int64, apiKeyID int64, exclude map[int64]bool, f
 	}
 	if !available || limit <= 0 {
 		return nil
+	}
+	if concurrencyAllowance > 0 && limit <= math.MaxInt64-concurrencyAllowance {
+		limit += concurrencyAllowance
 	}
 	if s.tryReclaimSessionSlot(target, sessionKey, true) {
 		return target
@@ -6890,6 +6920,16 @@ func (s *Store) ReleaseForSession(acc *Account, sessionKey string) {
 		return
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
+	if isSessionAccountingBypassKey(sessionKey) {
+		s.Release(acc)
+		return
+	}
+	if _, related := RelatedSessionRootKey(sessionKey); related {
+		// A Guardian/subagent borrows its root account; it must not create a
+		// child-owned buffer reservation that the next root turn cannot reclaim.
+		s.Release(acc)
+		return
+	}
 	buffer := s.GetSessionSlotBuffer()
 	if sessionKey == "" || !s.SessionSlotBufferEnabled() || buffer <= 0 || s.GetAffinityMode() == AffinityModeOff {
 		s.Release(acc)
