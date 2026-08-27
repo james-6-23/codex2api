@@ -360,7 +360,14 @@
         "effective": "目前實際生效",
         "unlimited": "不限制",
         "priorityHint": "全域基準：{{limit}} 個 / {{seconds}} 秒。單獨設定與不限制都優先於此基準。",
-        "saved": "使用者會話窗口限制已儲存"
+        "saved": "使用者會話窗口限制已儲存",
+        "activeWindows": "目前活躍窗口",
+        "noActiveWindows": "目前沒有仍在倒數的使用者窗口",
+        "createdAt": "建立時間",
+        "expiresAt": "到期時間",
+        "account": "目前綁定帳號",
+        "model": "建立時模型",
+        "prompt": "建立窗口的提示詞（脫敏預覽）"
       },
       "trust": {
         "title": "臨時自適應信任",

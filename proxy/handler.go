@@ -61,6 +61,7 @@ type Handler struct {
 	promptSessionLimitLoadMu    sync.Mutex
 	promptSessionLimitPersistMu sync.Mutex
 	promptSessionLimits         map[string]map[string]time.Time
+	promptSessionWindowDetails  map[string]map[string]cache.PromptSessionWindowDetail
 	promptSessionLimitsLoaded   map[string]bool
 	promptSessionLastCleanup    time.Time
 	accountSessionObservationMu sync.Mutex

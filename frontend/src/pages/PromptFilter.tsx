@@ -17,7 +17,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, PromptRiskSessionWindow, SystemSettings } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -4240,6 +4240,57 @@ function formatPromptRestrictionRemaining(seconds?: number) {
   return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`
 }
 
+function formatPromptSessionWindowCountdown(expiresAt: string, now: number) {
+  const total = Math.max(0, Math.ceil((Date.parse(expiresAt) - now) / 1000))
+  const days = Math.floor(total / 86400)
+  const hours = Math.floor((total % 86400) / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  const clock = [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':')
+  return days > 0 ? `${days}d ${clock}` : clock
+}
+
+function PromptRiskSessionWindows({ windows }: { windows: PromptRiskSessionWindow[] }) {
+  const { t } = useTranslation()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const active = useMemo(
+    () => windows.filter((item) => Number.isFinite(Date.parse(item.expires_at)) && Date.parse(item.expires_at) > now),
+    [now, windows],
+  )
+  return <div className="mt-4 rounded-lg border border-violet-500/20 bg-background/75 p-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="text-sm font-semibold">{t('promptFilter.risk.sessionLimit.activeWindows')}</div>
+      <Badge variant="outline">{active.length}</Badge>
+    </div>
+    {!active.length ? <div className="mt-3 rounded-md border border-dashed px-3 py-5 text-center text-xs text-muted-foreground">{t('promptFilter.risk.sessionLimit.noActiveWindows')}</div> : <div className="mt-3 space-y-2">
+      {active.map((session, index) => {
+        const account = session.account_name || (session.account_id ? `Account #${session.account_id}` : '-')
+        return <div key={session.session_hash} className="rounded-lg border bg-card p-3 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0 text-xs font-semibold text-violet-700 dark:text-violet-300">#{index + 1} · <span className="font-mono" title={session.session_hash}>{session.session_hash.slice(0, 16)}</span></div>
+            <div className="rounded-full bg-violet-500/10 px-2.5 py-1 font-mono text-xs font-semibold tabular-nums text-violet-700 dark:text-violet-300">{formatPromptSessionWindowCountdown(session.expires_at, now)}</div>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.createdAt')} value={session.created_at ? formatBeijingTime(session.created_at) : '-'} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.expiresAt')} value={formatBeijingTime(session.expires_at)} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.account')} value={account} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.model')} value={session.model || '-'} />
+          </div>
+          <div className="mt-2 rounded-md bg-muted/45 px-3 py-2">
+            <div className="text-[11px] font-medium text-muted-foreground">{t('promptFilter.risk.sessionLimit.prompt')}</div>
+            <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" title={session.prompt_preview}>{session.prompt_preview || '-'}</div>
+          </div>
+        </div>
+      })}
+    </div>}
+  </div>
+}
+
 function RiskProfilesTable({ profiles, accountStatus = false }: { profiles: PromptRiskProfile[]; accountStatus?: boolean }) {
   const { t } = useTranslation()
   if (accountStatus) {
@@ -4456,6 +4507,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
               <span className="text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.sessionLimit.priorityHint', { limit: detail.session_limit.global_limit, seconds: detail.session_limit.global_window_seconds })}</span>
               <Button size="sm" disabled={sessionLimitSaving || (sessionLimitDraft.mode === 'custom' && (sessionLimitDraft.limit < 1 || sessionLimitDraft.windowSeconds < 60))} onClick={() => void saveSessionLimit()}>{sessionLimitSaving ? t('common.saving') : t('common.save')}</Button>
             </div>
+            <PromptRiskSessionWindows windows={detail.session_windows ?? []} />
           </div> : null}
           <div className="rounded-lg border bg-muted/20 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">

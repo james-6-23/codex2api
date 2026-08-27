@@ -3,12 +3,15 @@ package admin
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
@@ -31,6 +34,7 @@ type promptRiskProfilesResponse struct {
 type promptRiskProfileDetailResponse struct {
 	Profile             *database.PromptRiskProfile           `json:"profile"`
 	SessionLimit        *promptRiskSessionLimitResponse       `json:"session_limit,omitempty"`
+	SessionWindows      []promptRiskSessionWindowResponse     `json:"session_windows"`
 	Events              []*database.PromptRiskEvent           `json:"events"`
 	TrustEvents         []*database.PromptRiskTrustEvent      `json:"trust_events"`
 	AdaptiveReviewBasis promptRiskAdaptiveReviewBasisResponse `json:"adaptive_review_basis"`
@@ -61,6 +65,17 @@ type promptRiskSessionLimitUpdateRequest struct {
 	Mode          string `json:"mode"`
 	Limit         int    `json:"limit"`
 	WindowSeconds int    `json:"window_seconds"`
+}
+
+type promptRiskSessionWindowResponse struct {
+	SessionHash      string     `json:"session_hash"`
+	CreatedAt        *time.Time `json:"created_at,omitempty"`
+	ExpiresAt        time.Time  `json:"expires_at"`
+	RemainingSeconds int64      `json:"remaining_seconds"`
+	AccountID        int64      `json:"account_id,omitempty"`
+	AccountName      string     `json:"account_name,omitempty"`
+	Model            string     `json:"model,omitempty"`
+	PromptPreview    string     `json:"prompt_preview,omitempty"`
 }
 
 type promptRiskAdaptiveReviewBasisResponse struct {
@@ -185,12 +200,64 @@ func (h *Handler) GetPromptRiskProfile(c *gin.Context) {
 	}
 	adaptiveBasis := buildPromptRiskAdaptiveReviewBasis(profile, basis, adaptive, reviewEnabled, now)
 	sessionLimit := h.promptRiskSessionLimitResponse(profile)
+	sessionWindows := h.promptRiskSessionWindows(ctx, profile, now)
 	c.JSON(http.StatusOK, promptRiskProfileDetailResponse{
-		Profile: profile, SessionLimit: sessionLimit, Events: events, TrustEvents: trustEvents, AdaptiveReviewBasis: adaptiveBasis,
+		Profile: profile, SessionLimit: sessionLimit, SessionWindows: sessionWindows, Events: events, TrustEvents: trustEvents, AdaptiveReviewBasis: adaptiveBasis,
 		EventTotal: total, EventPage: eventPage, EventPageSize: eventPageSize,
 		TrustEventTotal: trustEventTotal, TrustEventPage: trustEventPage, TrustEventPageSize: trustEventPageSize,
 		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: promptRiskHistoryGuardrail,
 	})
+}
+
+func (h *Handler) promptRiskSessionWindows(ctx context.Context, profile *database.PromptRiskProfile, now time.Time) []promptRiskSessionWindowResponse {
+	items := make([]promptRiskSessionWindowResponse, 0)
+	if h == nil || h.cache == nil || profile == nil || profile.SubjectType != database.PromptRiskSubjectNewAPIUser {
+		return items
+	}
+	subject := cache.PromptSessionLimitSubject(profile.Platform, profile.NewAPIUserID)
+	if subject == "" {
+		return items
+	}
+	raw, found, err := h.cache.GetRuntime(ctx, cache.PromptSessionLimitRuntimeNamespace, subject)
+	if err != nil || !found {
+		return items
+	}
+	state := cache.PromptSessionLimitState{}
+	if json.Unmarshal(raw, &state) != nil {
+		return items
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	for sessionHash, expiresAt := range state.Sessions {
+		sessionHash = strings.TrimSpace(sessionHash)
+		if sessionHash == "" || !expiresAt.After(now) {
+			continue
+		}
+		detail := state.Details[sessionHash]
+		remaining := int64((expiresAt.Sub(now) + time.Second - 1) / time.Second)
+		item := promptRiskSessionWindowResponse{
+			SessionHash: sessionHash, ExpiresAt: expiresAt.UTC(), RemainingSeconds: remaining,
+			AccountID: detail.AccountID, Model: strings.TrimSpace(detail.Model), PromptPreview: strings.TrimSpace(detail.PromptPreview),
+		}
+		if !detail.CreatedAt.IsZero() {
+			createdAt := detail.CreatedAt.UTC()
+			item.CreatedAt = &createdAt
+		}
+		if detail.AccountID > 0 && h.store != nil {
+			if account := h.store.FindByID(detail.AccountID); account != nil {
+				item.AccountName = strings.TrimSpace(account.Email)
+			}
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt != nil && items[j].CreatedAt != nil && !items[i].CreatedAt.Equal(*items[j].CreatedAt) {
+			return items[i].CreatedAt.After(*items[j].CreatedAt)
+		}
+		return items[i].ExpiresAt.Before(items[j].ExpiresAt)
+	})
+	return items
 }
 
 func (h *Handler) promptRiskSessionLimitResponse(profile *database.PromptRiskProfile) *promptRiskSessionLimitResponse {

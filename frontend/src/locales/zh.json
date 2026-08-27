@@ -2100,7 +2100,14 @@
         "effective": "当前实际生效",
         "unlimited": "不限制",
         "priorityHint": "全局基准：{{limit}} 个 / {{seconds}} 秒。单独设置和不限制都优先于该基准。",
-        "saved": "用户会话窗口限制已保存"
+        "saved": "用户会话窗口限制已保存",
+        "activeWindows": "当前活跃窗口",
+        "noActiveWindows": "当前没有仍在倒计时的用户窗口",
+        "createdAt": "创建时间",
+        "expiresAt": "到期时间",
+        "account": "当前绑定账号",
+        "model": "创建时模型",
+        "prompt": "创建窗口的提示词（脱敏预览）"
       },
       "trust": {
         "title": "临时自适应信任",

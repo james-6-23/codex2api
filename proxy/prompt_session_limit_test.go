@@ -649,6 +649,49 @@ func TestPromptSessionCreationLimitCountsOnlyAfterWindowControlledAccountSelecte
 	}
 }
 
+func TestPromptSessionCreationLimitStoresCurrentWindowDetailWithoutRefreshingExpiry(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	cfg := promptfilter.Config{MaxTextLength: promptfilter.DefaultMaxTextLength}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 2
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	store.SetPromptFilterConfig(cfg)
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	handler := &Handler{store: store, cache: runtimeCache}
+	firstAccount := &auth.Account{DBID: 92, SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600}
+	secondAccount := &auth.Account{DBID: 93, SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600}
+	body := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":[{"type":"input_text","text":"hello active window"}]}]}`)
+
+	status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("window-detail"), body, firstAccount)
+	if exceeded || status.Used != 1 {
+		t.Fatalf("first request: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	beforeExpiry := handler.promptSessionLimits[status.Subject][status.SessionHash]
+	before := handler.promptSessionWindowDetails[status.Subject][status.SessionHash]
+	handler.promptSessionLimitMu.Unlock()
+	if before.CreatedAt.IsZero() || !before.ExpiresAt.Equal(beforeExpiry) || before.AccountID != 92 || before.Model != "gpt-5.6-sol" || !strings.Contains(before.PromptPreview, "hello active window") {
+		t.Fatalf("first detail = %#v expiry=%v", before, beforeExpiry)
+	}
+
+	repeatBody := []byte(`{"model":"gpt-5.4","input":"later prompt must not replace the creation prompt"}`)
+	status, exceeded = handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("window-detail"), repeatBody, secondAccount)
+	if exceeded || !status.Existing {
+		t.Fatalf("repeat request: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	afterExpiry := handler.promptSessionLimits[status.Subject][status.SessionHash]
+	after := handler.promptSessionWindowDetails[status.Subject][status.SessionHash]
+	handler.promptSessionLimitMu.Unlock()
+	if !afterExpiry.Equal(beforeExpiry) || !after.CreatedAt.Equal(before.CreatedAt) {
+		t.Fatalf("existing window timing changed: before=%#v after=%#v", before, after)
+	}
+	if after.AccountID != 93 || after.Model != before.Model || after.PromptPreview != before.PromptPreview {
+		t.Fatalf("existing window detail = %#v, want account update with creation metadata preserved", after)
+	}
+}
+
 func TestPromptSessionCreationLimitIgnoresInternalReviewRequest(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
 	cfg := promptfilter.Config{}

@@ -2100,7 +2100,14 @@
         "effective": "Effective policy",
         "unlimited": "Unlimited",
         "priorityHint": "Global baseline: {{limit}} sessions / {{seconds}} seconds. Custom and unlimited user policies take priority.",
-        "saved": "User session window limit saved"
+        "saved": "User session window limit saved",
+        "activeWindows": "Active user windows",
+        "noActiveWindows": "No user windows are currently counting down",
+        "createdAt": "Created at",
+        "expiresAt": "Expires at",
+        "account": "Currently bound account",
+        "model": "Model at creation",
+        "prompt": "Prompt that created the window (redacted preview)"
       },
       "trust": {
         "title": "Temporary adaptive trust",

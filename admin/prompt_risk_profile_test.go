@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
@@ -17,6 +18,46 @@ import (
 func TestPromptRiskProfileListTimeoutAllowsProductionAggregation(t *testing.T) {
 	if promptRiskProfileListTimeout < 10*time.Second {
 		t.Fatalf("prompt risk profile list timeout = %s, want at least 10s for production aggregation", promptRiskProfileListTimeout)
+	}
+}
+
+func TestPromptRiskSessionWindowsReturnsOnlyCurrentlyActiveUserWindows(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	createdAt := now.Add(-10 * time.Minute)
+	state := cache.PromptSessionLimitState{
+		Version: 2,
+		Sessions: map[string]time.Time{
+			"active-hash":  now.Add(20 * time.Minute),
+			"expired-hash": now.Add(-time.Second),
+		},
+		Details: map[string]cache.PromptSessionWindowDetail{
+			"active-hash":  {CreatedAt: createdAt, AccountID: 73, Model: "gpt-5.6-sol", PromptPreview: "hello active window"},
+			"expired-hash": {CreatedAt: now.Add(-time.Hour), AccountID: 74},
+		},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	subject := cache.PromptSessionLimitSubject("NEWAPI", "user-42")
+	if err := runtimeCache.SetRuntime(t.Context(), cache.PromptSessionLimitRuntimeNamespace, subject, raw, time.Hour); err != nil {
+		t.Fatalf("SetRuntime: %v", err)
+	}
+	h := &Handler{cache: runtimeCache}
+	items := h.promptRiskSessionWindows(t.Context(), &database.PromptRiskProfile{
+		SubjectType: database.PromptRiskSubjectNewAPIUser, Platform: "newapi", NewAPIUserID: "user-42",
+	}, now)
+	if len(items) != 1 {
+		t.Fatalf("active windows = %#v, want one item", items)
+	}
+	item := items[0]
+	if item.SessionHash != "active-hash" || item.CreatedAt == nil || !item.CreatedAt.Equal(createdAt) || item.AccountID != 73 || item.Model != "gpt-5.6-sol" || item.PromptPreview != "hello active window" {
+		t.Fatalf("active item = %#v", item)
+	}
+	if item.RemainingSeconds < 1199 || item.RemainingSeconds > 1200 {
+		t.Fatalf("remaining seconds = %d, want about 1200", item.RemainingSeconds)
 	}
 }
 

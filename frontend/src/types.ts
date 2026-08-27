@@ -1935,6 +1935,7 @@ export interface PromptRiskProfilesResponse {
 export interface PromptRiskProfileDetailResponse {
   profile: PromptRiskProfile
   session_limit?: PromptRiskSessionLimitPolicy
+  session_windows?: PromptRiskSessionWindow[]
   events: PromptRiskEvent[]
   trust_events: PromptRiskTrustEvent[]
   adaptive_review_basis: PromptRiskAdaptiveReviewBasis
@@ -1946,6 +1947,17 @@ export interface PromptRiskProfileDetailResponse {
   trust_event_page_size: number
   scoring_version: string
   guardrail: string
+}
+
+export interface PromptRiskSessionWindow {
+  session_hash: string
+  created_at?: ISODateString
+  expires_at: ISODateString
+  remaining_seconds: number
+  account_id?: number
+  account_name?: string
+  model?: string
+  prompt_preview?: string
 }
 
 export type PromptRiskSessionLimitMode = 'inherit' | 'custom' | 'off'
