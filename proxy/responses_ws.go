@@ -469,7 +469,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			_ = writeResponsesWSError(conn, apiErr)
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
 		}
-		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
 			apiErr = promptSessionCreationLimitAPIError(status)
 			_ = writeResponsesWSError(conn, apiErr)

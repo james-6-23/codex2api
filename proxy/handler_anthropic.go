@@ -292,7 +292,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel))
 			return
 		}
-		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
 			writePromptSessionLimitHeaders(c, status)
 			sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", promptSessionCreationLimitMessage(status))

@@ -75,6 +75,8 @@ type promptRiskSessionWindowResponse struct {
 	AccountID        int64      `json:"account_id,omitempty"`
 	AccountName      string     `json:"account_name,omitempty"`
 	Model            string     `json:"model,omitempty"`
+	ReasoningEffort  string     `json:"reasoning_effort,omitempty"`
+	ClientUserAgent  string     `json:"client_user_agent,omitempty"`
 	PromptPreview    string     `json:"prompt_preview,omitempty"`
 }
 
@@ -238,7 +240,8 @@ func (h *Handler) promptRiskSessionWindows(ctx context.Context, profile *databas
 		remaining := int64((expiresAt.Sub(now) + time.Second - 1) / time.Second)
 		item := promptRiskSessionWindowResponse{
 			SessionHash: sessionHash, ExpiresAt: expiresAt.UTC(), RemainingSeconds: remaining,
-			AccountID: detail.AccountID, Model: strings.TrimSpace(detail.Model), PromptPreview: strings.TrimSpace(detail.PromptPreview),
+			AccountID: detail.AccountID, Model: strings.TrimSpace(detail.Model), ReasoningEffort: strings.TrimSpace(detail.ReasoningEffort),
+			ClientUserAgent: strings.TrimSpace(detail.ClientUserAgent), PromptPreview: strings.TrimSpace(detail.PromptPreview),
 		}
 		if !detail.CreatedAt.IsZero() {
 			createdAt := detail.CreatedAt.UTC()

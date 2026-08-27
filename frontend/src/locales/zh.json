@@ -2107,6 +2107,8 @@
         "expiresAt": "到期时间",
         "account": "当前绑定账号",
         "model": "创建时模型",
+        "reasoningEffort": "创建时思考强度",
+        "clientUserAgent": "创建时客户端 UA",
         "prompt": "创建窗口的提示词（脱敏预览）"
       },
       "trust": {

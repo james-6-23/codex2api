@@ -367,6 +367,8 @@
         "expiresAt": "到期時間",
         "account": "目前綁定帳號",
         "model": "建立時模型",
+        "reasoningEffort": "建立時思考強度",
+        "clientUserAgent": "建立時用戶端 UA",
         "prompt": "建立窗口的提示詞（脫敏預覽）"
       },
       "trust": {

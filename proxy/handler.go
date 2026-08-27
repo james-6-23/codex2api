@@ -3199,7 +3199,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
 			return
 		}
-		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
 			sendPromptSessionCreationLimitError(c, status)
 			return
@@ -4666,7 +4666,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 		}
-		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
 			sendPromptSessionCreationLimitError(c, status)
 			return
@@ -5326,7 +5326,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
 			return
 		}
-		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccount(c, rawBody, account); exceeded {
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
 			sendPromptSessionCreationLimitError(c, status)
 			return

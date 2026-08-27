@@ -33,7 +33,7 @@ func TestPromptRiskSessionWindowsReturnsOnlyCurrentlyActiveUserWindows(t *testin
 			"expired-hash": now.Add(-time.Second),
 		},
 		Details: map[string]cache.PromptSessionWindowDetail{
-			"active-hash":  {CreatedAt: createdAt, AccountID: 73, Model: "gpt-5.6-sol", PromptPreview: "hello active window"},
+			"active-hash":  {CreatedAt: createdAt, AccountID: 73, Model: "gpt-5.6-sol", ReasoningEffort: "high", ClientUserAgent: "codex_cli_rs/0.128.0", PromptPreview: "hello active window"},
 			"expired-hash": {CreatedAt: now.Add(-time.Hour), AccountID: 74},
 		},
 	}
@@ -53,7 +53,7 @@ func TestPromptRiskSessionWindowsReturnsOnlyCurrentlyActiveUserWindows(t *testin
 		t.Fatalf("active windows = %#v, want one item", items)
 	}
 	item := items[0]
-	if item.SessionHash != "active-hash" || item.CreatedAt == nil || !item.CreatedAt.Equal(createdAt) || item.AccountID != 73 || item.Model != "gpt-5.6-sol" || item.PromptPreview != "hello active window" {
+	if item.SessionHash != "active-hash" || item.CreatedAt == nil || !item.CreatedAt.Equal(createdAt) || item.AccountID != 73 || item.Model != "gpt-5.6-sol" || item.ReasoningEffort != "high" || item.ClientUserAgent != "codex_cli_rs/0.128.0" || item.PromptPreview != "hello active window" {
 		t.Fatalf("active item = %#v", item)
 	}
 	if item.RemainingSeconds < 1199 || item.RemainingSeconds > 1200 {

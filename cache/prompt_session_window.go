@@ -15,11 +15,13 @@ const PromptSessionLimitRuntimeNamespace = "prompt-session-limit-v1"
 // The authoritative expiry remains in PromptSessionLimitState.Sessions for
 // backward compatibility with the original v1 payload.
 type PromptSessionWindowDetail struct {
-	CreatedAt     time.Time `json:"created_at,omitempty"`
-	ExpiresAt     time.Time `json:"expires_at,omitempty"`
-	AccountID     int64     `json:"account_id,omitempty"`
-	Model         string    `json:"model,omitempty"`
-	PromptPreview string    `json:"prompt_preview,omitempty"`
+	CreatedAt       time.Time `json:"created_at,omitempty"`
+	ExpiresAt       time.Time `json:"expires_at,omitempty"`
+	AccountID       int64     `json:"account_id,omitempty"`
+	Model           string    `json:"model,omitempty"`
+	ReasoningEffort string    `json:"reasoning_effort,omitempty"`
+	ClientUserAgent string    `json:"client_user_agent,omitempty"`
+	PromptPreview   string    `json:"prompt_preview,omitempty"`
 }
 
 // PromptSessionLimitState is the shared runtime-cache payload for one user.

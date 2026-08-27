@@ -4275,11 +4275,13 @@ function PromptRiskSessionWindows({ windows }: { windows: PromptRiskSessionWindo
             <div className="min-w-0 text-xs font-semibold text-violet-700 dark:text-violet-300">#{index + 1} · <span className="font-mono" title={session.session_hash}>{session.session_hash.slice(0, 16)}</span></div>
             <div className="rounded-full bg-violet-500/10 px-2.5 py-1 font-mono text-xs font-semibold tabular-nums text-violet-700 dark:text-violet-300">{formatPromptSessionWindowCountdown(session.expires_at, now)}</div>
           </div>
-          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.createdAt')} value={session.created_at ? formatBeijingTime(session.created_at) : '-'} />
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.expiresAt')} value={formatBeijingTime(session.expires_at)} />
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.account')} value={account} />
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.model')} value={session.model || '-'} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.reasoningEffort')} value={session.reasoning_effort || '-'} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.clientUserAgent')} value={session.client_user_agent || '-'} />
           </div>
           <div className="mt-2 rounded-md bg-muted/45 px-3 py-2">
             <div className="text-[11px] font-medium text-muted-foreground">{t('promptFilter.risk.sessionLimit.prompt')}</div>

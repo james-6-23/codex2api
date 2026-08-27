@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -200,7 +202,7 @@ func TestPromptSessionCreationLimitRelatedRequestNeverCreatesExpiredRoot(t *test
 	}
 }
 
-func TestPromptSessionCreationLimitUserCompactionRestoresRootWindow(t *testing.T) {
+func TestPromptSessionCreationLimitUserCompactionDoesNotRestoreMissingRootWindow(t *testing.T) {
 	handler := promptSessionLimitVerifiedTestHandler()
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
@@ -218,8 +220,153 @@ func TestPromptSessionCreationLimitUserCompactionRestoresRootWindow(t *testing.T
 	c.Set(newAPIPolicyMetaContextKey, policyContext)
 
 	status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, []byte(`{"model":"gpt-5.6-sol","input":"continue"}`))
-	if exceeded || status.Used != 1 || status.SessionHash == "" || len(handler.promptSessionLimits) != 1 {
-		t.Fatalf("user compaction did not restore root window: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+	if exceeded || status.Used != 0 || status.SessionHash == "" || len(handler.promptSessionLimits) != 0 {
+		t.Fatalf("user compaction created a missing root window: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+	}
+}
+
+func TestPromptSessionCreationLimitProtocolCompactionDoesNotCreateWindow(t *testing.T) {
+	for _, testCase := range []struct {
+		name string
+		path string
+		body []byte
+	}{
+		{name: "response create trigger", path: "/v1/responses", body: []byte(`{"model":"gpt-5.6-sol","input":[{"type":"compaction_trigger"}]}`)},
+		{name: "compact endpoint", path: "/v1/responses/compact", body: []byte(`{"model":"gpt-5.6-sol","input":"context"}`)},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			handler := promptSessionLimitVerifiedTestHandler()
+			cfg := promptfilter.Config{}
+			cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+			cfg.Advanced.Risk.SessionCreationLimit = 1
+			cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+			c := promptSessionLimitVerifiedRootUserContext(
+				promptSessionTestFingerprint("protocol-compaction-leaf-"+testCase.name),
+				promptSessionTestFingerprint("protocol-compaction-root-"+testCase.name),
+			)
+			c.Request.URL.Path = testCase.path
+
+			status, exceeded := handler.checkPromptSessionCreationLimit(c, cfg, testCase.body)
+			if exceeded || status.Used != 0 || status.SessionHash == "" || len(handler.promptSessionLimits) != 0 {
+				t.Fatalf("protocol compaction created a user window: status=%#v exceeded=%v sessions=%#v", status, exceeded, handler.promptSessionLimits)
+			}
+		})
+	}
+}
+
+func TestPromptSessionCreationLimitUserCompactionReusesExistingRootWithoutChangingCreation(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{MaxTextLength: promptfilter.DefaultMaxTextLength}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 2
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	root := promptSessionTestFingerprint("user-compaction-existing-root")
+
+	mainRequest := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("user-main-leaf"), root)
+	status, exceeded := handler.checkPromptSessionCreationLimit(mainRequest, cfg, []byte(`{"model":"gpt-5.6-sol","input":"original user prompt"}`))
+	if exceeded || status.Used != 1 || status.Existing {
+		t.Fatalf("main request: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	beforeExpiry := handler.promptSessionLimits[status.Subject][status.SessionHash]
+	before := handler.promptSessionWindowDetails[status.Subject][status.SessionHash]
+	handler.promptSessionLimitMu.Unlock()
+
+	compaction := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("user-compaction-leaf"), root)
+	policy := compaction.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+	policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policy.Meta.ThreadSource = "user"
+	policy.Meta.RequestKind = "compaction"
+	compaction.Set(newAPIPolicyMetaContextKey, policy)
+	status, exceeded = handler.checkPromptSessionCreationLimit(compaction, cfg, []byte(`{"model":"gpt-5.4","input":"CONTEXT CHECKPOINT COMPACTION"}`))
+	if exceeded || status.Used != 1 || !status.Existing {
+		t.Fatalf("compaction reuse: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	afterExpiry := handler.promptSessionLimits[status.Subject][status.SessionHash]
+	after := handler.promptSessionWindowDetails[status.Subject][status.SessionHash]
+	handler.promptSessionLimitMu.Unlock()
+	if !afterExpiry.Equal(beforeExpiry) || !after.CreatedAt.Equal(before.CreatedAt) || after.Model != before.Model || after.PromptPreview != before.PromptPreview {
+		t.Fatalf("compaction changed root creation detail: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestPromptSessionCreationLimitUserForkStillCreatesIndependentWindow(t *testing.T) {
+	handler := promptSessionLimitVerifiedTestHandler()
+	cfg := promptfilter.Config{}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 2
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	sourceRoot := promptSessionTestFingerprint("fork-source-root")
+	forkRoot := promptSessionTestFingerprint("fork-current-root")
+
+	if status, exceeded := handler.checkPromptSessionCreationLimit(promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("source-leaf"), sourceRoot), cfg, nil); exceeded || status.Used != 1 {
+		t.Fatalf("source request: status=%#v exceeded=%v", status, exceeded)
+	}
+	fork := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("fork-leaf"), forkRoot)
+	policy := fork.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+	policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policy.Meta.ThreadSource = "user"
+	policy.Meta.RequestKind = "turn"
+	policy.Meta.ForkedFromSessionFingerprint = sourceRoot
+	fork.Set(newAPIPolicyMetaContextKey, policy)
+
+	status, exceeded := handler.checkPromptSessionCreationLimit(fork, cfg, nil)
+	if exceeded || status.Used != 2 || status.Existing {
+		t.Fatalf("fork did not create an independent window: status=%#v exceeded=%v", status, exceeded)
+	}
+}
+
+func TestPromptSessionCreationLimitLegacyWindowIsNotBackfilledFromCompaction(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	store := auth.NewStore(nil, runtimeCache, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{
+		APIKeyID: 7, PlatformCode: "newapi", Enabled: true, RequireSignedIdentity: true,
+	}})
+	cfg := promptfilter.Config{MaxTextLength: promptfilter.DefaultMaxTextLength}
+	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
+	cfg.Advanced.Risk.SessionCreationLimit = 2
+	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	store.SetPromptFilterConfig(cfg)
+	handler := &Handler{store: store, cache: runtimeCache}
+	account := &auth.Account{DBID: 92, SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600}
+	root := promptSessionTestFingerprint("legacy-compaction-root")
+	sessionHash := hashRiskIdentity(root)
+	subject := cache.PromptSessionLimitSubject("newapi", "42")
+	expiresAt := time.Now().Add(time.Hour)
+	payload, err := json.Marshal(cache.PromptSessionLimitState{
+		Version:  1,
+		Sessions: map[string]time.Time{sessionHash: expiresAt},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runtimeCache.SetRuntime(context.Background(), cache.PromptSessionLimitRuntimeNamespace, subject, payload, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+
+	compaction := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("legacy-compaction-leaf"), root)
+	policy := compaction.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
+	policy.Meta.RootSessionRelation = newAPIPolicyRootSessionRelationRelated
+	policy.Meta.ThreadSource = "user"
+	policy.Meta.RequestKind = "compaction"
+	compaction.Set(newAPIPolicyMetaContextKey, policy)
+	status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccountAdmission(
+		compaction,
+		[]byte(`{"model":"gpt-5.6-sol","input":"CONTEXT CHECKPOINT COMPACTION"}`),
+		account,
+		"newapi-root-session:"+root+"::api-key:7",
+		account.ID(),
+	)
+	if exceeded || !status.Existing || status.Used != 1 {
+		t.Fatalf("legacy compaction reuse: status=%#v exceeded=%v", status, exceeded)
+	}
+	handler.promptSessionLimitMu.Lock()
+	detail := handler.promptSessionWindowDetails[subject][sessionHash]
+	handler.promptSessionLimitMu.Unlock()
+	if !detail.CreatedAt.IsZero() || detail.Model != "" || detail.ReasoningEffort != "" || detail.ClientUserAgent != "" || detail.PromptPreview != "" || detail.AccountID != account.ID() {
+		t.Fatalf("legacy creation metadata was fabricated from compaction: %#v", detail)
 	}
 }
 
@@ -661,9 +808,11 @@ func TestPromptSessionCreationLimitStoresCurrentWindowDetailWithoutRefreshingExp
 	handler := &Handler{store: store, cache: runtimeCache}
 	firstAccount := &auth.Account{DBID: 92, SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600}
 	secondAccount := &auth.Account{DBID: 93, SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600}
-	body := []byte(`{"model":"gpt-5.6-sol","input":[{"role":"user","content":[{"type":"input_text","text":"hello active window"}]}]}`)
+	body := []byte(`{"model":"gpt-5.6-sol","reasoning":{"effort":"high"},"input":[{"role":"user","content":[{"type":"input_text","text":"hello active window"}]}]}`)
+	firstContext := promptSessionLimitTestContext("window-detail")
+	firstContext.Request.Header.Set("User-Agent", "codex_cli_rs/0.128.0")
 
-	status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("window-detail"), body, firstAccount)
+	status, exceeded := handler.checkPromptSessionCreationLimitForSelectedAccount(firstContext, body, firstAccount)
 	if exceeded || status.Used != 1 {
 		t.Fatalf("first request: status=%#v exceeded=%v", status, exceeded)
 	}
@@ -671,12 +820,14 @@ func TestPromptSessionCreationLimitStoresCurrentWindowDetailWithoutRefreshingExp
 	beforeExpiry := handler.promptSessionLimits[status.Subject][status.SessionHash]
 	before := handler.promptSessionWindowDetails[status.Subject][status.SessionHash]
 	handler.promptSessionLimitMu.Unlock()
-	if before.CreatedAt.IsZero() || !before.ExpiresAt.Equal(beforeExpiry) || before.AccountID != 92 || before.Model != "gpt-5.6-sol" || !strings.Contains(before.PromptPreview, "hello active window") {
+	if before.CreatedAt.IsZero() || !before.ExpiresAt.Equal(beforeExpiry) || before.AccountID != 92 || before.Model != "gpt-5.6-sol" || before.ReasoningEffort != "high" || before.ClientUserAgent != "codex_cli_rs/0.128.0" || !strings.Contains(before.PromptPreview, "hello active window") {
 		t.Fatalf("first detail = %#v expiry=%v", before, beforeExpiry)
 	}
 
-	repeatBody := []byte(`{"model":"gpt-5.4","input":"later prompt must not replace the creation prompt"}`)
-	status, exceeded = handler.checkPromptSessionCreationLimitForSelectedAccount(promptSessionLimitTestContext("window-detail"), repeatBody, secondAccount)
+	repeatBody := []byte(`{"model":"gpt-5.4","reasoning":{"effort":"low"},"input":"later prompt must not replace the creation prompt"}`)
+	repeatContext := promptSessionLimitTestContext("window-detail")
+	repeatContext.Request.Header.Set("User-Agent", "later-client/9.9")
+	status, exceeded = handler.checkPromptSessionCreationLimitForSelectedAccount(repeatContext, repeatBody, secondAccount)
 	if exceeded || !status.Existing {
 		t.Fatalf("repeat request: status=%#v exceeded=%v", status, exceeded)
 	}
@@ -687,7 +838,7 @@ func TestPromptSessionCreationLimitStoresCurrentWindowDetailWithoutRefreshingExp
 	if !afterExpiry.Equal(beforeExpiry) || !after.CreatedAt.Equal(before.CreatedAt) {
 		t.Fatalf("existing window timing changed: before=%#v after=%#v", before, after)
 	}
-	if after.AccountID != 93 || after.Model != before.Model || after.PromptPreview != before.PromptPreview {
+	if after.AccountID != 93 || after.Model != before.Model || after.ReasoningEffort != before.ReasoningEffort || after.ClientUserAgent != before.ClientUserAgent || after.PromptPreview != before.PromptPreview {
 		t.Fatalf("existing window detail = %#v, want account update with creation metadata preserved", after)
 	}
 }

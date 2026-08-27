@@ -1957,6 +1957,8 @@ export interface PromptRiskSessionWindow {
   account_id?: number
   account_name?: string
   model?: string
+  reasoning_effort?: string
+  client_user_agent?: string
   prompt_preview?: string
 }
 

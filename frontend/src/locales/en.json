@@ -2107,6 +2107,8 @@
         "expiresAt": "Expires at",
         "account": "Currently bound account",
         "model": "Model at creation",
+        "reasoningEffort": "Reasoning effort at creation",
+        "clientUserAgent": "Client UA at creation",
         "prompt": "Prompt that created the window (redacted preview)"
       },
       "trust": {

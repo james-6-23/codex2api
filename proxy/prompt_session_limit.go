@@ -157,10 +157,17 @@ func promptSessionWindowRequestDetail(c *gin.Context, body []byte, account *auth
 	if account != nil {
 		detail.AccountID = account.ID()
 	}
+	if c != nil {
+		detail.ClientUserAgent = normalizeUsageLogUserAgent(c.GetHeader("User-Agent"))
+	}
 	if len(body) == 0 {
 		return detail
 	}
 	detail.Model = strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	detail.ReasoningEffort = strings.TrimSpace(extractReasoningEffort(body))
+	if detail.ReasoningEffort == "" {
+		detail.ReasoningEffort = strings.TrimSpace(gjson.GetBytes(body, "output_config.effort").String())
+	}
 	endpoint := ""
 	if c != nil && c.Request != nil && c.Request.URL != nil {
 		endpoint = c.Request.URL.Path
@@ -187,6 +194,13 @@ func promptSessionWindowRequestDetail(c *gin.Context, body []byte, account *auth
 // internal request consume one of the user's windows merely because the
 // downstream Codex client carried its normal Session-Id.
 func (h *Handler) checkPromptSessionCreationLimitForSelectedAccount(c *gin.Context, body []byte, account *auth.Account) (promptSessionCreationLimitStatus, bool) {
+	return h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, body, account, "", 0)
+}
+
+// checkPromptSessionCreationLimitForSelectedAccountAdmission keeps account
+// affinity admission separate from user-window creation. priorSessionAccountID
+// describes the account-session state before scheduling selected account.
+func (h *Handler) checkPromptSessionCreationLimitForSelectedAccountAdmission(c *gin.Context, body []byte, account *auth.Account, affinityKey string, priorSessionAccountID int64) (promptSessionCreationLimitStatus, bool) {
 	if account == nil || (c != nil && c.GetBool("prompt_intelligence_internal")) {
 		return promptSessionCreationLimitStatus{}, false
 	}
@@ -194,7 +208,7 @@ func (h *Handler) checkPromptSessionCreationLimitForSelectedAccount(c *gin.Conte
 	if !enabled {
 		return promptSessionCreationLimitStatus{}, false
 	}
-	return h.checkPromptSessionCreationLimitWithAccount(c, h.promptFilterConfigForRequest(c), body, account)
+	return h.checkPromptSessionCreationLimitWithAccountAdmission(c, h.promptFilterConfigForRequest(c), body, account, affinityKey, priorSessionAccountID)
 }
 
 // releaseSelectedAccountAfterPromptSessionRejection undoes only the capacity
@@ -215,6 +229,10 @@ func (h *Handler) checkPromptSessionCreationLimit(c *gin.Context, cfg promptfilt
 }
 
 func (h *Handler) checkPromptSessionCreationLimitWithAccount(c *gin.Context, cfg promptfilter.Config, body []byte, account *auth.Account) (promptSessionCreationLimitStatus, bool) {
+	return h.checkPromptSessionCreationLimitWithAccountAdmission(c, cfg, body, account, "", 0)
+}
+
+func (h *Handler) checkPromptSessionCreationLimitWithAccountAdmission(c *gin.Context, cfg promptfilter.Config, body []byte, account *auth.Account, affinityKey string, priorSessionAccountID int64) (promptSessionCreationLimitStatus, bool) {
 	risk := cfg.Advanced.Risk
 	status := promptSessionCreationLimitStatus{
 		Enabled:       risk.SessionCreationLimitEnabled,
@@ -261,12 +279,17 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccount(c *gin.Context, cfg
 		status.IdentityConflict = true
 		return status, true
 	}
-	// A related Guardian/title/summary request borrows the root conversation.
-	// It must never create a user window if the root entry has already expired,
-	// nor refresh any existing window. A verified user-authored main-thread
-	// compaction is different: although its graph has a child leaf, it owns the
-	// root binding and must be able to restore the user's root window.
-	relatedRequest := rootIdentity.related && !rootIdentity.ownsUserRootBinding() && rootIdentity.stable && !rootIdentity.conflict
+	// Hidden related requests borrow the root conversation. Compaction also
+	// borrows it even when Codex labels the turn as user-authored: it may recover
+	// account affinity, but it is not a user window creation event. Forks remain
+	// independent because their request_kind is a normal turn and their current
+	// root differs from forked_from_thread_id.
+	reuseOnlyRequest := rootIdentity.related && !rootIdentity.ownsUserRootBinding() && rootIdentity.stable && !rootIdentity.conflict
+	if strings.EqualFold(strings.TrimSpace(rootIdentity.requestKind), "compaction") ||
+		requestBodyCompactionMeta(body).ProtocolTriggered ||
+		(c.Request != nil && c.Request.URL != nil && isCompactUsageEndpoint(c.Request.URL.Path)) {
+		reuseOnlyRequest = true
+	}
 	sessionID := ""
 	if rootIdentity.stable && !rootIdentity.conflict {
 		sessionID = strings.TrimSpace(rootIdentity.sessionID)
@@ -294,7 +317,7 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccount(c *gin.Context, cfg
 	now := time.Now()
 	expiresAt := now.Add(time.Duration(status.WindowSeconds) * time.Second)
 	requestDetail := cache.PromptSessionWindowDetail{}
-	if !relatedRequest {
+	if !reuseOnlyRequest {
 		requestDetail = promptSessionWindowRequestDetail(c, body, account, cfg)
 	}
 	h.ensurePromptSessionLimitsLoaded(status.Subject, now)
@@ -347,31 +370,25 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccount(c *gin.Context, cfg
 		status.Existing = true
 		status.Used = len(sessions)
 		detailChanged := false
-		if !relatedRequest {
-			details := h.promptSessionWindowDetails[status.Subject]
-			if details == nil {
-				details = make(map[string]cache.PromptSessionWindowDetail)
-				h.promptSessionWindowDetails[status.Subject] = details
-			}
-			current, found := details[status.SessionHash]
-			if !found {
-				current.ExpiresAt = sessions[status.SessionHash]
-			}
-			if requestDetail.AccountID > 0 && current.AccountID != requestDetail.AccountID {
-				current.AccountID = requestDetail.AccountID
-				detailChanged = true
-			}
-			if current.Model == "" && requestDetail.Model != "" {
-				current.Model = requestDetail.Model
-				detailChanged = true
-			}
-			if current.PromptPreview == "" && requestDetail.PromptPreview != "" {
-				current.PromptPreview = requestDetail.PromptPreview
-				detailChanged = true
-			}
-			if !found || detailChanged {
-				details[status.SessionHash] = current
-			}
+		details := h.promptSessionWindowDetails[status.Subject]
+		if details == nil {
+			details = make(map[string]cache.PromptSessionWindowDetail)
+			h.promptSessionWindowDetails[status.Subject] = details
+		}
+		current, found := details[status.SessionHash]
+		if !found {
+			current.ExpiresAt = sessions[status.SessionHash]
+		}
+		// AccountID represents the current binding, so it may be refreshed by a
+		// reuse-only request. Model, effort, client UA, and prompt describe
+		// creation and must never be backfilled from a later request or a legacy
+		// v1 cache entry.
+		if account != nil && account.ID() > 0 && current.AccountID != account.ID() {
+			current.AccountID = account.ID()
+			detailChanged = true
+		}
+		if !found || detailChanged {
+			details[status.SessionHash] = current
 		}
 		h.promptSessionLimitMu.Unlock()
 		if detailChanged {
@@ -380,12 +397,15 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccount(c *gin.Context, cfg
 		writePromptSessionLimitHeaders(c, status)
 		return status, false
 	}
-	if relatedRequest {
+	if reuseOnlyRequest {
 		status.Used = len(sessions)
 		if len(sessions) == 0 {
 			delete(h.promptSessionLimits, status.Subject)
 		}
 		h.promptSessionLimitMu.Unlock()
+		if account != nil && priorSessionAccountID == account.ID() {
+			log.Printf("event=window_state_drift 账号会话已复用但用户窗口不存在 subject=%s session_hash=%s account=%d affinity_key_present=%t", status.Subject, status.SessionHash, account.ID(), strings.TrimSpace(affinityKey) != "")
+		}
 		writePromptSessionLimitHeaders(c, status)
 		return status, false
 	}
