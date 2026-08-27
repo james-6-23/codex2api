@@ -4250,6 +4250,14 @@ function formatPromptSessionWindowCountdown(expiresAt: string, now: number) {
   return days > 0 ? `${days}d ${clock}` : clock
 }
 
+function formatPromptSessionClientUserAgent(userAgent?: string) {
+  const normalized = userAgent?.trim() || ''
+  if (!normalized) return '-'
+  const firstProduct = normalized.split(/\s+/, 1)[0]
+  const versionSeparator = firstProduct.indexOf('/')
+  return versionSeparator > 0 ? firstProduct.slice(0, versionSeparator) : firstProduct
+}
+
 function PromptRiskSessionWindows({ windows }: { windows: PromptRiskSessionWindow[] }) {
   const { t } = useTranslation()
   const [now, setNow] = useState(() => Date.now())
@@ -4281,7 +4289,11 @@ function PromptRiskSessionWindows({ windows }: { windows: PromptRiskSessionWindo
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.account')} value={account} />
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.model')} value={session.model || '-'} />
             <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.reasoningEffort')} value={session.reasoning_effort || '-'} />
-            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.clientUserAgent')} value={session.client_user_agent || '-'} />
+            <PromptPolicyDetailField
+              label={t('promptFilter.risk.sessionLimit.clientUserAgent')}
+              value={formatPromptSessionClientUserAgent(session.client_user_agent)}
+              title={session.client_user_agent}
+            />
           </div>
           <div className="mt-2 rounded-md bg-muted/45 px-3 py-2">
             <div className="text-[11px] font-medium text-muted-foreground">{t('promptFilter.risk.sessionLimit.prompt')}</div>
@@ -5366,8 +5378,8 @@ function PromptPolicyIncidentDetailButton({ incident }: { incident: PromptPolicy
   )
 }
 
-function PromptPolicyDetailField({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-md border border-border bg-muted/20 p-2.5"><div className="text-xs font-semibold text-muted-foreground">{label}</div><div className="mt-1 break-words">{value}</div></div>
+function PromptPolicyDetailField({ label, value, title }: { label: string; value: string; title?: string }) {
+  return <div className="rounded-md border border-border bg-muted/20 p-2.5"><div className="text-xs font-semibold text-muted-foreground">{label}</div><div className="mt-1 break-words" title={title}>{value}</div></div>
 }
 
 function formatPromptPolicyScore(value: number | null | undefined, unscored: string) {
