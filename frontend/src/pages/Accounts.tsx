@@ -238,21 +238,39 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<AccountSessionSnapshot[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [sessionNow, setSessionNow] = useState(() => Date.now());
+  const sessionLoadPending = useRef(false);
   const current = Math.max(0, account.session_capacity_current ?? 0);
   const maximum = Math.max(1, account.session_capacity_max ?? 5);
-  if (!account.session_capacity_enabled) return null;
-  const load = () => {
-    if (loading) return;
-    setLoading(true);
+  const load = useCallback((showLoading = true) => {
+    if (sessionLoadPending.current) return;
+    sessionLoadPending.current = true;
+    if (showLoading) setLoading(true);
     void api.getAccountSessions(account.id)
       .then((response) => setSessions(response.sessions ?? []))
-      .catch(() => setSessions([]))
-      .finally(() => setLoading(false));
-  };
+      .catch(() => {
+        if (showLoading) setSessions([]);
+      })
+      .finally(() => {
+        sessionLoadPending.current = false;
+        if (showLoading) setLoading(false);
+      });
+  }, [account.id]);
+  useEffect(() => {
+    if (!open || !account.session_capacity_enabled) return;
+    setSessionNow(Date.now());
+    const countdownID = window.setInterval(() => setSessionNow(Date.now()), 1000);
+    const refreshID = window.setInterval(() => load(false), 5000);
+    return () => {
+      window.clearInterval(countdownID);
+      window.clearInterval(refreshID);
+    };
+  }, [account.session_capacity_enabled, load, open]);
   const openDetails = () => {
     setOpen(true);
     load();
   };
+  if (!account.session_capacity_enabled) return null;
   return (
     <>
       <button
@@ -278,7 +296,7 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
               type="button"
               variant="outline"
               disabled={loading}
-              onClick={load}
+              onClick={() => load()}
             >
               <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
               {t("common.refresh")}
@@ -319,6 +337,10 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
               (session.owner?.user_id
                 ? `#${session.owner.user_id}`
                 : session.owner?.api_key_name || "-");
+            const expiresAt = Date.parse(session.expires_at);
+            const remainingSeconds = Number.isFinite(expiresAt)
+              ? Math.max(0, Math.ceil((expiresAt - sessionNow) / 1000))
+              : Math.max(0, session.remaining_seconds ?? 0);
             return (
               <div
                 key={session.session_id}
@@ -342,7 +364,7 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
                   </div>
                   <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground">
                     {t("accounts.sessionCapacityRemaining", {
-                      seconds: session.remaining_seconds,
+                      seconds: remainingSeconds,
                     })}
                   </span>
                 </div>

@@ -153,7 +153,7 @@ func TestClientCannotForgeSessionAccountingBypassPrefix(t *testing.T) {
 	}
 }
 
-func TestRelatedRequestBorrowsRootAccountWithoutRefreshingOrCreatingWindow(t *testing.T) {
+func TestRelatedRequestRefreshesRootOnlyAfterDispatchWithoutCreatingWindow(t *testing.T) {
 	store, account := newSessionCapacityTestStore(1)
 	now := time.Now()
 	rootKey := "root-window::api-key:7"
@@ -179,7 +179,18 @@ func TestRelatedRequestBorrowsRootAccountWithoutRefreshingOrCreatingWindow(t *te
 		t.Fatalf("related request changed window set: %#v", snapshots)
 	}
 	if !snapshots[0].LastSeen.Equal(originalLastSeen) {
-		t.Fatalf("related request refreshed root last_seen: got %s want %s", snapshots[0].LastSeen, originalLastSeen)
+		t.Fatalf("related selection refreshed root before dispatch: got %s want %s", snapshots[0].LastSeen, originalLastSeen)
+	}
+
+	store.RecordRelatedAccountSession(account.DBID, relatedKey, AccountSessionRelatedSource{
+		ThreadSource: "subagent", RequestKind: "turn", SubagentKind: "thread_spawn",
+	}, "related-request-1")
+	refreshed := store.AccountSessionSnapshots(account.DBID, time.Now())
+	if len(refreshed) != 1 || refreshed[0].SessionID != rootKey {
+		t.Fatalf("related dispatch changed window set: %#v", refreshed)
+	}
+	if !refreshed[0].LastSeen.After(originalLastSeen) {
+		t.Fatalf("related dispatch did not refresh root last_seen: got %s want after %s", refreshed[0].LastSeen, originalLastSeen)
 	}
 }
 
@@ -227,7 +238,7 @@ func TestAccountSessionStateRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
 	}
 }
 
-func TestRelatedRequestRestoresPersistedRootWithoutRefreshingAfterRestart(t *testing.T) {
+func TestRelatedRequestRestoresAndRefreshesPersistedRootAfterRestart(t *testing.T) {
 	runtimeCache := cache.NewMemory(1)
 	defer runtimeCache.Close()
 	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
@@ -259,9 +270,27 @@ func TestRelatedRequestRestoresPersistedRootWithoutRefreshingAfterRestart(t *tes
 		t.Fatalf("related request selected %#v, want restored account", selected)
 	}
 	secondStore.Release(selected)
+	secondStore.RecordRelatedAccountSession(secondAccount.DBID, relatedKey, AccountSessionRelatedSource{
+		ThreadSource: "subagent", RequestKind: "turn", SubagentKind: "thread_spawn",
+	}, "restored-related-request-1")
 	after := secondStore.AccountSessionSnapshots(secondAccount.DBID, time.Now())
-	if len(after) != 1 || !after[0].LastSeen.Equal(before[0].LastSeen) {
-		t.Fatalf("related request refreshed or lost root: before=%#v after=%#v", before, after)
+	if len(after) != 1 || !after[0].LastSeen.After(before[0].LastSeen) {
+		t.Fatalf("related request did not refresh restored root: before=%#v after=%#v", before, after)
+	}
+}
+
+func TestRelatedRequestDoesNotReviveExpiredRootWindow(t *testing.T) {
+	store, account := newSessionCapacityTestStore(1)
+	rootKey := "expired-root::api-key:7"
+	if !store.AdmitAccountSession(account, rootKey, time.Now().Add(-2*time.Hour)) {
+		t.Fatal("root session admission failed")
+	}
+
+	store.RecordRelatedAccountSession(account.DBID, RelatedSessionAffinityKey(rootKey), AccountSessionRelatedSource{
+		ThreadSource: "subagent", RequestKind: "turn", SubagentKind: "thread_spawn",
+	}, "late-related-request")
+	if snapshots := store.AccountSessionSnapshots(account.DBID, time.Now()); len(snapshots) != 0 {
+		t.Fatalf("expired root was revived by related request: %#v", snapshots)
 	}
 }
 
@@ -473,6 +502,10 @@ func TestRelatedRequestStatsDeduplicateRetriesAndPreserveUnknownSources(t *testi
 	relatedKey := RelatedSessionAffinityKey(rootKey)
 	source := AccountSessionRelatedSource{ThreadSource: "future_new_source", RequestKind: "future_task", SubagentKind: "reviewer"}
 	store.RecordRelatedAccountSession(account.DBID, relatedKey, source, "logical-request-1")
+	store.accountSessionMu.Lock()
+	beforeRetry := time.Now().Add(-30 * time.Second)
+	store.accountSessions[account.DBID][rootKey].lastSeen = beforeRetry
+	store.accountSessionMu.Unlock()
 	store.RecordRelatedAccountSession(account.DBID, relatedKey, source, "logical-request-1")
 
 	snapshots := store.AccountSessionSnapshots(account.DBID, time.Now())
@@ -481,6 +514,9 @@ func TestRelatedRequestStatsDeduplicateRetriesAndPreserveUnknownSources(t *testi
 	}
 	if snapshots[0].RelatedRequestCount != 1 || len(snapshots[0].RelatedSources) != 1 {
 		t.Fatalf("related stats = %#v", snapshots[0])
+	}
+	if !snapshots[0].LastSeen.After(beforeRetry) {
+		t.Fatalf("deduplicated retry did not refresh root last_seen: got=%s want after %s", snapshots[0].LastSeen, beforeRetry)
 	}
 	got := snapshots[0].RelatedSources[0]
 	if got.Count != 1 || got.ThreadSource != source.ThreadSource || got.RequestKind != source.RequestKind || got.SubagentKind != source.SubagentKind {

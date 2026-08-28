@@ -644,9 +644,11 @@ func (s *Store) SetAccountSessionOwner(accountID int64, sessionKey string, owner
 }
 
 // RecordRelatedAccountSession attributes one actually dispatched internal
-// request to its active root window. requestID is a logical request identity;
-// retries with the same value are counted once. Missing/expired roots are
-// deliberately ignored rather than manufacturing a new account window.
+// request to its active root window and refreshes that root's idle lease.
+// requestID is a logical request identity; retries with the same value are
+// counted once, but they still represent activity and refresh the existing
+// lease. Missing/expired roots are deliberately ignored rather than
+// manufacturing or reviving an account window.
 func (s *Store) RecordRelatedAccountSession(accountID int64, sessionKey string, source AccountSessionRelatedSource, requestID string) {
 	rootKey, related := RelatedSessionRootKey(sessionKey)
 	if s == nil || accountID <= 0 || !related {
@@ -657,22 +659,39 @@ func (s *Store) RecordRelatedAccountSession(accountID int64, sessionKey string, 
 	source.SubagentKind = normalizeRelatedSessionLabel(source.SubagentKind, 64)
 	requestID = normalizeRelatedSessionLabel(requestID, 256)
 
+	now := time.Now()
 	account := s.FindByID(accountID)
-	if account != nil {
-		s.ensureAccountSessionsLoaded(account, time.Now())
+	if account == nil {
+		return
 	}
+	enabled, _, idleTTL := account.SessionCapacityConfig()
+	if !enabled {
+		return
+	}
+	s.ensureAccountSessionsLoaded(account, now)
 	s.accountSessionMu.Lock()
 	state := s.accountSessions[accountID][rootKey]
 	if state == nil {
 		s.accountSessionMu.Unlock()
 		return
 	}
+	if !state.lastSeen.Add(idleTTL).After(now) {
+		delete(s.accountSessions[accountID], rootKey)
+		if len(s.accountSessions[accountID]) == 0 {
+			delete(s.accountSessions, accountID)
+		}
+		s.accountSessionMu.Unlock()
+		s.persistAccountSessions(accountID, now, rootKey)
+		return
+	}
+	state.lastSeen = now
 	if requestID != "" {
 		if state.relatedRequestIDs == nil {
 			state.relatedRequestIDs = make(map[string]struct{})
 		}
 		if _, exists := state.relatedRequestIDs[requestID]; exists {
 			s.accountSessionMu.Unlock()
+			s.persistAccountSessions(accountID, now, rootKey)
 			return
 		}
 		state.relatedRequestIDs[requestID] = struct{}{}
@@ -699,7 +718,9 @@ func (s *Store) RecordRelatedAccountSession(accountID int64, sessionKey string, 
 	}
 	item.Count++
 	s.accountSessionMu.Unlock()
-	s.persistAccountSessions(accountID, time.Now())
+	// Reconcile the root reverse index as well as the account collection so a
+	// restart observes the same extended idle lease.
+	s.persistAccountSessions(accountID, now, rootKey)
 }
 
 func normalizeRelatedSessionLabel(value string, maxRunes int) string {
