@@ -1960,6 +1960,13 @@ func classifyHTTPFailure(statusCode int) string {
 	}
 }
 
+func shouldRecoverCodexOAuthWithSessionToken(account *auth.Account, statusCode int, retried map[int64]bool) bool {
+	if account == nil || statusCode != http.StatusUnauthorized || account.IsRelayStyle() || !account.HasSessionToken() {
+		return false
+	}
+	return !retried[account.ID()]
+}
+
 type streamOutcome struct {
 	logStatusCode  int
 	failureKind    string
@@ -3749,6 +3756,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	var wsHTTPFallback websocketHTTPFallbackState
 	invalidEncryptedContentRetried := false
 	antigravityRefreshRetried := map[int64]bool{}
+	sessionTokenRefreshRetried := map[int64]bool{}
 	relayContinuationAttempted := false
 	overflowCompactRetried := false
 	overflowCompactEnabled := autoCompactOverflowEnabled(c)
@@ -4028,6 +4036,22 @@ func (h *Handler) Responses(c *gin.Context) {
 					return
 				}
 				antigravityRefreshFailed := false
+				// A manual ChatGPT subscription change may revoke the OAuth AT/RT
+				// family while leaving an independently stored Web Session valid.
+				// Recover once, before penalizing the account or rotating away from
+				// it. This is deliberately limited to official Codex OAuth accounts;
+				// relay/Grok/Antigravity credentials have different semantics.
+				if shouldRecoverCodexOAuthWithSessionToken(account, resp.StatusCode, sessionTokenRefreshRetried) {
+					sessionTokenRefreshRetried[account.ID()] = true
+					if refreshErr := h.store.RefreshSingle(c.Request.Context(), account.ID()); refreshErr == nil {
+						h.store.Release(account)
+						h.store.UnbindSessionAffinity(affinityKey, account.ID())
+						log.Printf("Codex OAuth token refreshed from independent Web Session after upstream 401 (account=%d)", account.ID())
+						continue
+					} else {
+						log.Printf("Codex Web Session recovery failed after upstream 401 (account=%d): %v", account.ID(), refreshErr)
+					}
+				}
 				if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
 					antigravityRefreshRetried[account.ID()] = true
 					if refreshErr := h.store.RefreshAntigravityAccount(c.Request.Context(), account); refreshErr == nil {
