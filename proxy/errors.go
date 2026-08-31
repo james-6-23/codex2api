@@ -24,25 +24,25 @@ const (
 
 const (
 	// Authentication errors
-	ErrorCodeMissingAPIKey     = "missing_api_key"
-	ErrorCodeInvalidAPIKey     = "invalid_api_key"
+	ErrorCodeMissingAPIKey = "missing_api_key"
+	ErrorCodeInvalidAPIKey = "invalid_api_key"
 
 	// Rate limiting errors
-	ErrorCodeRateLimited              = "rate_limited"
-	ErrorCodeAccountPoolUsageLimit   = "account_pool_usage_limit_reached"
+	ErrorCodeRateLimited           = "rate_limited"
+	ErrorCodeAccountPoolUsageLimit = "account_pool_usage_limit_reached"
 
 	// Upstream errors
-	ErrorCodeUpstreamError     = "upstream_error"
-	ErrorCodeUpstreamTimeout   = "upstream_timeout"
+	ErrorCodeUpstreamError       = "upstream_error"
+	ErrorCodeUpstreamTimeout     = "upstream_timeout"
 	ErrorCodeUpstreamStreamBreak = "upstream_stream_break"
 
 	// Server errors
 	ErrorCodeNoAvailableAccount = "no_available_account"
-	ErrorCodeInternalError     = "internal_error"
+	ErrorCodeInternalError      = "internal_error"
 
 	// Request errors
-	ErrorCodeBadRequest       = "bad_request"
-	ErrorCodeMissingModel     = "missing_model"
+	ErrorCodeBadRequest   = "bad_request"
+	ErrorCodeMissingModel = "missing_model"
 )
 
 // ==================== Error Struct ====================
@@ -158,6 +158,9 @@ func ErrAccountPoolUsageLimit(message string, planType string, resetsAt int64, r
 
 // ErrUpstream creates an upstream error with cause
 func ErrUpstream(statusCode int, message string, cause error) *Error {
+	if statusCode < 400 || statusCode > 599 {
+		statusCode = http.StatusBadGateway
+	}
 	if message == "" {
 		message = fmt.Sprintf("Upstream request failed (status %d)", statusCode)
 	}

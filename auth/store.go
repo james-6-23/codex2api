@@ -3144,9 +3144,9 @@ type Store struct {
 	codexCLIVersionSyncInterval  atomic.Int64 // 定时同步间隔（小时），默认 12
 	ignoreUsageLimitStatus       atomic.Bool  // 用量窗口只记录，不作为账号不可用证据
 
-	// 重试间隔与传输错误重试策略（issue #331）
+	// 重试间隔与临时故障重试策略（issue #331）
 	retryIntervalMS      atomic.Int64 // 重试间隔毫秒，0 = 立即重试（旧行为）
-	transportRetryPolicy atomic.Value // 传输错误重试策略: rotate / sticky
+	transportRetryPolicy atomic.Value // 临时故障重试策略: rotate / sticky
 	githubToken          atomic.Value // GitHub API token，仅发给 api.github.com（issue #522）
 	githubProxyURL       atomic.Value // GitHub 域名专用出站代理，空回落全局/环境代理（issue #522）
 
@@ -3212,6 +3212,12 @@ type sessionAffinity struct {
 	boundAt      time.Time
 	requestCount int64
 	expiresAt    time.Time
+	// failurePinned protects an existing conversation after a transient upstream
+	// failure. The retry policy may return the error without retrying (or exhaust
+	// its retry budget), but that must not turn the next client retry into a fresh
+	// account selection. A successful request clears the pin; explicit unbind,
+	// expiry, account removal, and permanent account failures remove the binding.
+	failurePinned bool
 }
 
 const defaultSessionAffinityTTL = time.Hour
@@ -3651,8 +3657,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.autoCleanExpired.Store(settings.AutoCleanExpired)
 	s.lazyMode.Store(settings.LazyMode)
 	retries := int64(settings.MaxRetries)
-	if retries <= 0 {
-		retries = 2 // 默认重试 2 次
+	if retries < 0 {
+		retries = 0
 	}
 	atomic.StoreInt64(&s.maxRetries, retries)
 	rateLimitRetries := int64(settings.MaxRateLimitRetries)
@@ -5967,6 +5973,7 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	if existing, ok := s.sessionBindings[key]; ok && existing.accountID == account.DBID {
 		binding.boundAt = existing.boundAt
 		binding.requestCount = existing.requestCount
+		binding.failurePinned = existing.failurePinned
 	}
 	s.sessionBindings[key] = binding
 	s.sessionMu.Unlock()
@@ -6004,6 +6011,43 @@ func (s *Store) SessionAffinityAccountID(key string) (int64, bool) {
 		return cached.accountID, true
 	}
 	return 0, false
+}
+
+// PinSessionAffinityAfterTransientFailure keeps a live conversation on the
+// account that owns its upstream state after a temporary network/server error.
+// It deliberately does not extend the affinity TTL.
+func (s *Store) PinSessionAffinityAfterTransientFailure(key string, accountID int64) {
+	if s == nil || accountID == 0 {
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	s.sessionMu.Lock()
+	if binding, ok := s.sessionBindings[key]; ok && binding.accountID == accountID {
+		binding.failurePinned = true
+		s.sessionBindings[key] = binding
+	}
+	s.sessionMu.Unlock()
+}
+
+// ClearSessionAffinityFailurePin removes the temporary failure protection after
+// the same account completes a request successfully.
+func (s *Store) ClearSessionAffinityFailurePin(key string, accountID int64) {
+	if s == nil || accountID == 0 {
+		return
+	}
+	key = strings.TrimSpace(key)
+	if key == "" {
+		return
+	}
+	s.sessionMu.Lock()
+	if binding, ok := s.sessionBindings[key]; ok && binding.accountID == accountID && binding.failurePinned {
+		binding.failurePinned = false
+		s.sessionBindings[key] = binding
+	}
+	s.sessionMu.Unlock()
 }
 
 // UnbindSessionAffinity removes a session binding when it still points to the failed account.
@@ -6218,6 +6262,11 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	// 绑定账号是 Grok 时，用 Grok 专属粘性模式覆盖全局（默认 strict，减少中途换号致缓存失效）。
 	mode := s.GetAffinityMode()
 	if ok {
+		// A transient failure pin is stronger than bounded-affinity escape rules.
+		// It also prevents an unavailable/cooling account from silently falling
+		// through to a different account: the caller receives no candidate and can
+		// return the original error while preserving conversation ownership.
+		preserveBinding = preserveBinding || binding.failurePinned
 		if override := s.resolveGrokAffinityOverride(binding.accountID); override != "" {
 			mode = override
 		}
@@ -6930,6 +6979,7 @@ func (s *Store) ReleaseForSession(acc *Account, sessionKey string) {
 		return
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
+	s.ClearSessionAffinityFailurePin(sessionKey, acc.ID())
 	if isSessionAccountingBypassKey(sessionKey) {
 		s.Release(acc)
 		return
@@ -7122,7 +7172,7 @@ func (s *Store) GetRetryIntervalMS() int {
 	return int(s.retryIntervalMS.Load())
 }
 
-// SetTransportRetryPolicy 动态更新传输错误重试策略（rotate / sticky）。
+// SetTransportRetryPolicy 动态更新临时故障重试策略（rotate / sticky）。
 func (s *Store) SetTransportRetryPolicy(policy string) {
 	if s == nil {
 		return
@@ -7130,7 +7180,7 @@ func (s *Store) SetTransportRetryPolicy(policy string) {
 	s.transportRetryPolicy.Store(database.NormalizeTransportRetryPolicy(policy))
 }
 
-// GetTransportRetryPolicy 获取传输错误重试策略，缺省 rotate（换号，旧行为）。
+// GetTransportRetryPolicy 获取临时故障重试策略，缺省 rotate（换号，旧行为）。
 func (s *Store) GetTransportRetryPolicy() string {
 	if s == nil {
 		return "rotate"

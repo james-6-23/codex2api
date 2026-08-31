@@ -398,17 +398,17 @@ func (h *Handler) Messages(c *gin.Context) {
 			if retryable {
 				shouldRetry = shouldRetryRequestError(reqErr, &generalRetries, maxRetries)
 			}
-			if shouldPenalizeTransportKind(kind) && !(timedOut && shouldRetry) {
+			disposition := h.transportSessionFailureDisposition(shouldRetry, kind != upstreamErrorKindWsBusyAcquire)
+			if disposition.reportAccount && shouldPenalizeTransportKind(kind) && !(timedOut && shouldRetry) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			if timedOut && shouldRetry {
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
+			if timedOut && shouldRetry && !disposition.retrySameAccount {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 				log.Printf("上游首字超时，断开并重试 (attempt %d/%d, account %d, /v1/messages): %v", attempt+1, maxRetries+1, account.ID(), reqErr)
-				continue
 			}
-			if !timedOut {
+			if !timedOut && !disposition.retrySameAccount && !disposition.retainAffinity {
 				retryExclusions.MarkHard(account.ID())
 			}
 
@@ -424,6 +424,9 @@ func (h *Handler) Messages(c *gin.Context) {
 
 			log.Printf("上游请求失败 (attempt %d, /v1/messages): %v", attempt+1, reqErr)
 			if shouldRetry {
+				if disposition.retrySameAccount {
+					log.Printf("临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, /v1/messages)", account.ID(), attempt+1, maxRetries+1)
+				}
 				continue
 			}
 			sendAnthropicError(c, http.StatusBadGateway, "api_error", "Upstream request failed")
@@ -435,27 +438,32 @@ func (h *Handler) Messages(c *gin.Context) {
 			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/messages", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
-			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
-				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
-			}
 			SyncCodexUsageState(h.store, account, resp)
 			errBody, readErr := readAllLimited(resp.Body, upstreamErrorBodyReadMaxBytes)
 			if readErr != nil {
 				errBody = []byte(`{"error":{"message":"Upstream error response exceeded the safe read limit","type":"api_error"}}`)
 			}
 			resp.Body.Close()
-			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			retryExclusions.MarkHard(account.ID())
-
 			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, upstreamErrorConsoleBody(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
 			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody, upstreamCyberPolicyAttempt{
 				Transport: upstreamPromptPolicyTransport(isStream, useWebsocket), StatusCode: resp.StatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
 			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+			disposition := h.httpSessionFailureDisposition(resp.StatusCode, errBody, shouldRetry)
+			decision := codex429Decision{}
+			if disposition.reportAccount {
+				if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+				}
+				decision = h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
+			}
+			h.store.Release(account)
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
+			if !disposition.retrySameAccount && !disposition.retainAffinity {
+				retryExclusions.MarkHard(account.ID())
+			}
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:              account.ID(),
@@ -481,6 +489,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			})
 
 			if shouldRetry {
+				if disposition.retrySameAccount {
+					log.Printf("HTTP %d 临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, /v1/messages)", resp.StatusCode, account.ID(), attempt+1, maxRetries+1)
+				}
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
 				continue
@@ -517,10 +528,15 @@ func (h *Handler) Messages(c *gin.Context) {
 			ttftGuard.Stop()
 			resp.Body.Close()
 			if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), nil) {
-				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+				disposition := h.streamSessionFailureDisposition(outcome, nil, true)
+				if disposition.reportAccount {
+					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+				}
 				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				retryExclusions.MarkHard(account.ID())
+				h.applySessionFailureAffinity(affinityKey, account, disposition)
+				if !disposition.retrySameAccount && !disposition.retainAffinity {
+					retryExclusions.MarkHard(account.ID())
+				}
 				continue
 			}
 			nativeHTTPError := !wroteAnyBody && outcome.logStatusCode != http.StatusOK && c.Request.Context().Err() == nil
@@ -545,8 +561,11 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 			h.logUsageForRequest(c, logInput)
 			if outcome.penalize {
-				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				disposition := h.streamSessionFailureDisposition(outcome, nil, false)
+				if disposition.reportAccount {
+					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+				}
+				h.applySessionFailureAffinity(affinityKey, account, disposition)
 			} else if outcome.logStatusCode == http.StatusOK {
 				h.store.ClearModelCooldown(account, attemptEffectiveModel)
 				h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
@@ -788,12 +807,6 @@ func (h *Handler) Messages(c *gin.Context) {
 			if isExplicitUpstreamCyberPolicy(terminalFailurePayload) {
 				outcome.failureMessage = upstreamCyberPolicyResponseMessage(c)
 			}
-			// 流式 response.failed 也要把额度耗尽/限流账号冷却下来，
-			// 否则该账号会保持高分继续被调度（与 /v1/responses 路径保持一致）。
-			responseFailedDecision := h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)
-			if responseFailedDecision.Reason != "" {
-				outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
-			}
 		}
 		if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 			wsHTTPFallback.LogHTTPAttemptCompletion("/v1/messages", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
@@ -807,6 +820,13 @@ func (h *Handler) Messages(c *gin.Context) {
 			continue
 		}
 		if shouldTransparentRetryStream(outcome, attempt, maxRetries, wroteAnyBody, c.Request.Context().Err(), writeErr) {
+			disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, true)
+			if len(terminalFailurePayload) > 0 && disposition.reportAccount {
+				responseFailedDecision := h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)
+				if responseFailedDecision.Reason != "" {
+					outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
+				}
+			}
 			h.logPromptPolicyRetryUsage(c, database.UsageLogInput{
 				AccountID: account.ID(), Endpoint: "/v1/messages", Model: model, EffectiveModel: attemptEffectiveModel,
 				StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
@@ -818,15 +838,29 @@ func (h *Handler) Messages(c *gin.Context) {
 				attempt+1, maxRetries+1, account.ID(), outcome.failureMessage)
 			recyclePooledClient(account, proxyURL)
 			SyncCodexUsageState(h.store, account, resp)
-			if isFirstTokenTimeoutOutcome(outcome) {
+			if isFirstTokenTimeoutOutcome(outcome) && !disposition.retrySameAccount {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
-			} else {
+			} else if disposition.reportAccount {
 				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			}
 			resp.Body.Close()
 			h.store.Release(account)
-			h.unbindOrRetainAffinityForCapacityShed(retryExclusions, affinityKey, account, outcome, capacityShedRetries)
+			if disposition.retrySameAccount {
+				h.applySessionFailureAffinity(affinityKey, account, disposition)
+				log.Printf("流式临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, /v1/messages)", account.ID(), attempt+1, maxRetries+1)
+			} else {
+				h.unbindOrRetainAffinityForCapacityShed(retryExclusions, affinityKey, account, outcome, capacityShedRetries)
+			}
 			continue
+		}
+		if len(terminalFailurePayload) > 0 {
+			disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, false)
+			if disposition.reportAccount {
+				responseFailedDecision := h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, attemptEffectiveModel)
+				if responseFailedDecision.Reason != "" {
+					outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
+				}
+			}
 		}
 
 		if isStream && !wroteAnyBody && writeErr == nil && c.Request.Context().Err() == nil && outcome.logStatusCode != http.StatusOK {
@@ -908,9 +942,12 @@ func (h *Handler) Messages(c *gin.Context) {
 		resp.Body.Close()
 		SyncCodexUsageState(h.store, account, resp)
 		if outcome.penalize {
+			disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, false)
 			recyclePooledClient(account, proxyURL)
-			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			if disposition.reportAccount {
+				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+			}
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, attemptEffectiveModel)
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)

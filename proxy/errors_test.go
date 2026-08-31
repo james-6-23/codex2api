@@ -162,3 +162,10 @@ func TestErrorErrorMethod(t *testing.T) {
 		t.Errorf("expected %s, got %s", expected, errStr)
 	}
 }
+
+func TestErrUpstreamNormalizesMissingHTTPStatus(t *testing.T) {
+	err := ErrUpstream(0, "transport failed", errors.New("EOF"))
+	if err.HTTPStatus != http.StatusBadGateway {
+		t.Fatalf("HTTPStatus = %d, want %d", err.HTTPStatus, http.StatusBadGateway)
+	}
+}

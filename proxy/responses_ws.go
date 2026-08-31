@@ -564,21 +564,20 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if silentRetryEnabled && retryable && attempt < maxRetries {
 				shouldRetry = shouldRetryRequestError(reqErr, &generalRetries, maxRetries)
 			}
-			// 传输类失败粘滞同号重试:不记账号失败、不解绑亲和、不硬排除(issue #331)
-			stickyRetry := shouldRetry && !timedOut && kind != "" && h.stickyTransportRetryEnabled()
-			if kind != "" && !(timedOut && shouldRetry) && !stickyRetry {
+			disposition := h.transportSessionFailureDisposition(shouldRetry, kind != upstreamErrorKindWsBusyAcquire)
+			if preserveContinuationBinding() {
+				disposition.retainAffinity = true
+			}
+			if disposition.reportAccount && kind != "" && !(timedOut && shouldRetry) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			h.store.Release(account)
-			if !stickyRetry && !preserveContinuationBinding() {
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			}
-			if timedOut && shouldRetry {
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
+			if timedOut && shouldRetry && !disposition.retrySameAccount {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 				log.Printf("Responses WebSocket upstream first token timeout, retrying with another account (attempt %d/%d, account %d): %v", attempt+1, maxRetries+1, account.ID(), reqErr)
-				continue
 			}
-			if !timedOut && !stickyRetry {
+			if !timedOut && !disposition.retrySameAccount {
 				retryExclusions.MarkHard(account.ID())
 			}
 
@@ -591,8 +590,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			log.Printf("Responses WebSocket upstream request failed (attempt %d): %v", attempt+1, reqErr)
 			lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, reqErr.Error(), api.ErrorTypeUpstream)
 			if shouldRetry {
-				if stickyRetry {
-					log.Printf("传输错误粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, ws)", account.ID(), attempt+1, maxRetries+1)
+				if disposition.retrySameAccount {
+					log.Printf("临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, ws)", account.ID(), attempt+1, maxRetries+1)
 				}
 				if !h.waitBeforeRetry(c.Request.Context()) {
 					return errResponsesWSClientGone
@@ -627,9 +626,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					}
 					log.Printf("Responses WebSocket upstream rejected encrypted_content, stripped encrypted reasoning context and retried once (attempt %d)", attempt+1)
 					h.store.Release(account)
-					if !preserveContinuationBinding() {
-						h.store.UnbindSessionAffinity(affinityKey, account.ID())
-					}
 					continue
 				}
 			}
@@ -643,26 +639,32 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				continue
 			}
 
-			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
-				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
-			}
-			SyncCodexUsageState(h.store, account, resp)
-			h.store.Release(account)
-			if !preserveContinuationBinding() {
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			}
-			retryExclusions.MarkHard(account.ID())
-
 			log.Printf("Responses WebSocket upstream returned error (attempt %d, status %d): %s", attempt+1, resp.StatusCode, upstreamErrorConsoleBody(errBody))
 			logUpstreamError("/v1/responses", resp.StatusCode, logModel, account.ID(), errBody)
 			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses", logModel, errBody, upstreamCyberPolicyAttempt{
 				Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: resp.StatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
 			shouldRetry := false
 			if silentRetryEnabled && attempt < maxRetries {
 				shouldRetry = shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, maxRateLimitRetries)
+			}
+			disposition := h.httpSessionFailureDisposition(resp.StatusCode, errBody, shouldRetry)
+			if preserveContinuationBinding() {
+				disposition.retainAffinity = true
+			}
+			decision := codex429Decision{}
+			if disposition.reportAccount {
+				if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+				}
+				decision = h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, effectiveModel)
+			}
+			SyncCodexUsageState(h.store, account, resp)
+			h.store.Release(account)
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
+			if !disposition.retrySameAccount {
+				retryExclusions.MarkHard(account.ID())
 			}
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
@@ -692,6 +694,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
 				lastRetryableUpstreamErr = responsesWSUpstreamAPIError(resp.StatusCode, errBody)
+				if disposition.retrySameAccount {
+					log.Printf("HTTP %d 临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d, ws)", resp.StatusCode, account.ID(), attempt+1, maxRetries+1)
+				}
 				if !h.waitBeforeRetry(c.Request.Context()) {
 					return errResponsesWSClientGone
 				}
@@ -725,6 +730,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			var retryErr *responsesWSRetryableStreamError
 			if errors.As(err, &retryErr) {
 				lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
+				disposition := h.streamSessionFailureDisposition(retryErr.outcome, nil, true)
+				if preserveContinuationBinding() {
+					disposition.retainAffinity = true
+				}
 				if useWebsocket && isWebsocketMessageTooBigOutcome(retryErr.outcome) {
 					wsElapsed := time.Since(start)
 					globalWSSizeRouter.RecordMessageTooBig(len(codexBody))
@@ -733,7 +742,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					continue
 				}
 				if silentRetryEnabled && attempt < maxRetries {
-					if isFirstTokenTimeoutOutcome(retryErr.outcome) {
+					if disposition.retrySameAccount {
+						log.Printf("Responses WebSocket 临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %d/%d)", account.ID(), attempt+1, maxRetries+1)
+					} else if isFirstTokenTimeoutOutcome(retryErr.outcome) {
 						retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
 					} else {
 						retryExclusions.MarkHard(account.ID())
@@ -753,7 +764,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if errors.Is(err, errResponsesWSClientGone) {
 				return err
 			}
-			if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater && !preserveContinuationBinding() {
+			if shouldRetryErr, ok := err.(*responsesWSCloseError); ok && shouldRetryErr.code == websocket.CloseTryAgainLater && !preserveContinuationBinding() && !h.stickyTransportRetryEnabled() {
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
 			return err
@@ -998,10 +1009,6 @@ func (h *Handler) streamResponsesWSUpstream(
 	promptPolicyIncidentID := ""
 	if len(terminalFailurePayload) > 0 {
 		outcome = classifyResponseFailedOutcome(terminalFailurePayload)
-		responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, effectiveModel)
-		if responseFailedDecision.Reason != "" {
-			outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
-		}
 		// 流式 response.failed（HTTP 200）里的 cyber_policy 处罚也要记录，
 		// 否则只有非 2xx 错误体才会被记入提示词过滤日志。
 		promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/responses", model, responseFailedErrorBody(terminalFailurePayload), upstreamCyberPolicyAttempt{
@@ -1027,6 +1034,16 @@ func (h *Handler) streamResponsesWSUpstream(
 		return &responsesWSRetryableStreamError{outcome: outcome}
 	}
 	if silentRetryEnabled && outcome.penalize && !wroteAnyBody && c.Request.Context().Err() == nil && writeErr == nil {
+		disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, true)
+		if preserveAffinity {
+			disposition.retainAffinity = true
+		}
+		if len(terminalFailurePayload) > 0 && disposition.reportAccount {
+			responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, effectiveModel)
+			if responseFailedDecision.Reason != "" {
+				outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
+			}
+		}
 		h.logPromptPolicyRetryUsage(c, database.UsageLogInput{
 			AccountID: account.ID(), Endpoint: "/v1/responses", Model: model, EffectiveModel: logEffectiveModel,
 			StatusCode: outcome.logStatusCode, DurationMs: totalDuration, FirstTokenMs: firstTokenMs, ReasoningEffort: reasoningEffort,
@@ -1035,14 +1052,24 @@ func (h *Handler) streamResponsesWSUpstream(
 			ErrorMessage: usageLogFailureMessage(outcome.logStatusCode, outcome.failureMessage),
 		}, promptPolicyIncidentID)
 		resp.Body.Close()
-		if !isFirstTokenTimeoutOutcome(outcome) {
+		if disposition.reportAccount && !isFirstTokenTimeoutOutcome(outcome) {
 			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 		}
 		h.store.Release(account)
-		if !preserveAffinity {
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-		}
+		h.applySessionFailureAffinity(affinityKey, account, disposition)
 		return &responsesWSRetryableStreamError{outcome: outcome}
+	}
+	if len(terminalFailurePayload) > 0 {
+		disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, false)
+		if preserveAffinity {
+			disposition.retainAffinity = true
+		}
+		if disposition.reportAccount {
+			responseFailedDecision = h.applyResponseFailedCooldown(account, terminalFailurePayload, resp, effectiveModel)
+			if responseFailedDecision.Reason != "" {
+				outcome.failureKind = upstreamErrorKind(outcome.logStatusCode, responseFailedErrorBody(terminalFailurePayload), responseFailedDecision)
+			}
+		}
 	}
 	if outcome.logStatusCode != http.StatusOK {
 		log.Printf("Responses WebSocket stream ended abnormally (account %d, status %d): %s, relayed about %d chars", account.ID(), outcome.logStatusCode, outcome.failureMessage, deltaCharCount)
@@ -1099,11 +1126,15 @@ func (h *Handler) streamResponsesWSUpstream(
 
 	resp.Body.Close()
 	if outcome.penalize {
-		recyclePooledClient(account, proxyURL)
-		h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-		if !preserveAffinity {
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+		disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, false)
+		if preserveAffinity {
+			disposition.retainAffinity = true
 		}
+		recyclePooledClient(account, proxyURL)
+		if disposition.reportAccount {
+			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+		}
+		h.applySessionFailureAffinity(affinityKey, account, disposition)
 	} else if outcome.logStatusCode == http.StatusOK {
 		h.store.ClearModelCooldown(account, effectiveModel)
 		h.store.ConfirmResponsesAvailableSince(account, start)
