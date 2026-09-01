@@ -859,9 +859,13 @@ func TestApplyCodexRequestHeadersConvergesForwardedClientRequestID(t *testing.T)
 	if got := req.Header.Get("X-Client-Request-Id"); got != ids.threadID {
 		t.Fatalf("X-Client-Request-Id = %q, want converged thread id %q", got, ids.threadID)
 	}
-	// Session_id 仍归 resolveUpstreamSessionID 管，收敛不得介入。
-	if got := req.Header.Get("Session_id"); got != "upstream-cache-key" {
-		t.Fatalf("Session_id = %q, want the cache key untouched", got)
+	// Session-Id remains controlled by resolveUpstreamSessionID; convergence
+	// must not replace it unless explicitly enabled.
+	if got := req.Header.Get("Session-Id"); got != "upstream-cache-key" {
+		t.Fatalf("Session-Id = %q, want the cache key untouched", got)
+	}
+	if got := req.Header.Get("Thread-Id"); got != ids.threadID {
+		t.Fatalf("Thread-Id = %q, want converged thread id %q", got, ids.threadID)
 	}
 	// 下游没发 installation 头，出站也不该有。
 	if got := req.Header.Get("X-Codex-Installation-Id"); got != "" {

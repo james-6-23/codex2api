@@ -61,11 +61,17 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	if got := headers.Get("Chatgpt-Account-Id"); got != "42" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "session-123" {
-		t.Fatalf("Conversation_id = %q", got)
+	if got := headers.Get("Session-Id"); got != "session-123" {
+		t.Fatalf("Session-Id = %q", got)
 	}
-	if got := headers.Get("Session_id"); got != "session-123" {
-		t.Fatalf("Session_id = %q", got)
+	if got := headers.Get("Thread-Id"); got != "session-123" {
+		t.Fatalf("Thread-Id = %q", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
+	}
+	if got := headers.Get("Session_id"); got != "" {
+		t.Fatalf("Session_id = %q, want empty", got)
 	}
 }
 
@@ -163,11 +169,14 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 	if got := headers.Get("X-Codex-Forked-From-Thread-Id"); got != "" {
 		t.Fatalf("unofficial fork header = %q, want empty", got)
 	}
-	if got := headers.Get("Session_id"); got != "session-123" {
-		t.Fatalf("Session_id = %q", got)
+	if got := headers.Get("Session-Id"); got != "session-123" {
+		t.Fatalf("Session-Id = %q", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "session-123" {
-		t.Fatalf("Conversation_id = %q", got)
+	if got := headers.Get("Thread-Id"); got != "session-123" {
+		t.Fatalf("Thread-Id = %q", got)
+	}
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
 }
 
@@ -710,12 +719,16 @@ func TestPrepareWebsocketHeadersConvergesForwardedClientRequestID(t *testing.T) 
 	} else if got == "" {
 		t.Fatal("X-Client-Request-Id was dropped, want a converged value")
 	}
-	// 握手的 Session_id / Conversation_id 归调用方决定，收敛不得介入。
-	if got := headers.Get("Session_id"); got != "upstream-session-id" {
-		t.Fatalf("Session_id = %q, want the caller value untouched", got)
+	// Session-Id remains controlled by the caller unless converged alignment
+	// is explicitly enabled.
+	if got := headers.Get("Session-Id"); got != "upstream-session-id" {
+		t.Fatalf("Session-Id = %q, want the caller value untouched", got)
 	}
-	if got := headers.Get("Conversation_id"); got != "upstream-session-id" {
-		t.Fatalf("Conversation_id = %q, want the caller value untouched", got)
+	if got, want := headers.Get("Thread-Id"), headers.Get("X-Client-Request-Id"); got != want {
+		t.Fatalf("Thread-Id = %q, want X-Client-Request-Id %q", got, want)
+	}
+	if got := headers.Get("Conversation_id"); got != "" {
+		t.Fatalf("Conversation_id = %q, want empty", got)
 	}
 	// 下游没发 installation 头，出站也不该凭空多出一个。
 	if got := headers.Get("X-Codex-Installation-Id"); got != "" {

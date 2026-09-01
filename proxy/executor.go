@@ -1158,10 +1158,10 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
-	if cacheKey != "" {
-		req.Header.Set("Session_id", cacheKey)
-		req.Header.Del("Conversation_id")
-	}
+	// Preserve the native Session-Id/Thread-Id relationship. The session key
+	// remains controlled by resolveUpstreamSessionID, while off/device modes
+	// retain the client's raw parent/subagent Thread-Id.
+	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }

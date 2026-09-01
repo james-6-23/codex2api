@@ -350,8 +350,17 @@ func TestApplyCodexRequestHeadersUsesSessionIDWithoutConversationID(t *testing.T
 	if got := req.Header.Get("Authorization"); got != "Bearer token-123" {
 		t.Fatalf("Authorization = %q", got)
 	}
-	if got := req.Header.Get("Session_id"); got != "cache-key-1" {
-		t.Fatalf("Session_id = %q", got)
+	if got := req.Header.Get("Session-Id"); got != "cache-key-1" {
+		t.Fatalf("Session-Id = %q", got)
+	}
+	if got := req.Header.Get("Thread-Id"); got != "cache-key-1" {
+		t.Fatalf("Thread-Id = %q", got)
+	}
+	if got := req.Header.Get("X-Client-Request-Id"); got != "cache-key-1" {
+		t.Fatalf("X-Client-Request-Id = %q", got)
+	}
+	if got := req.Header.Get("Session_id"); got != "" {
+		t.Fatalf("Session_id = %q, want empty", got)
 	}
 	if got := req.Header.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)

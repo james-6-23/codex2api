@@ -184,7 +184,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 续链亲和：上游无服务端存储时，previous_response_id 的上下文只存活在产出
 	// 该响应的那条 WS 连接里。带续链 ID 的请求优先取回原连接（独占成功才用），
 	// 否则落到随机槽位会触发上游 "previous response not found"。
-	poolSessionID := sessionID
+	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKey(sessionID, ginHeaders)
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
@@ -198,7 +198,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
 			wc, pr, poolSessionID, err2 = e.manager.AcquireReusableConnection(ctx, account, wsURL, baseKey, sessionID, statelessConnectionSlots(), headers, proxyOverride)
 		} else {
-			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, sessionID, headers, proxyOverride)
+			wc, pr, err2 = e.manager.AcquireConnection(ctx, account, wsURL, poolSessionID, headers, proxyOverride)
 		}
 	}
 	// 取连耗时（busy 排队 + 探活 + 握手）计入本 attempt 的 ws_acquire_ms（issue #413）
@@ -206,6 +206,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if err2 != nil {
 		return nil, err2
 	}
+	// Busy overflow can return <lane>#ovf-N. Continuation bindings and retry
+	// reconnects must use the actual acquired slot rather than the base lane.
+	poolSessionID = actualWebsocketPoolSessionID(wc, poolSessionID)
 	if wc.upstreamUserAgentKnown {
 		proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
 	}
@@ -253,6 +256,16 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		apiKey:      apiKey,
 		readErrChan: make(chan error, 1),
 	}, nil
+}
+
+func actualWebsocketPoolSessionID(wc *WsConnection, fallback string) string {
+	if wc == nil || wc.session == nil {
+		return fallback
+	}
+	if actual := strings.TrimSpace(wc.session.ID); actual != "" {
+		return actual
+	}
+	return fallback
 }
 
 func shouldRetryWebsocketSendError(err error) bool {
@@ -496,8 +509,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
-		headers.Set("Session_id", sessionID)
-		headers.Set("Conversation_id", sessionID)
+		proxy.ApplyCodexSessionHeaders(headers, account, sessionID, ginHeaders, true)
 	}
 	for name, value := range account.GetCustomHeaders() {
 		name = strings.TrimSpace(name)

@@ -1491,7 +1491,7 @@ func TestResponsesHTTPIngressFallsBackToHTTPWhenForcedWebsocketMessageTooBig(t *
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpCalls++
 		httpAccountIDs <- r.Header.Get("X-Resin-Account")
-		httpSessionIDs <- r.Header.Get("Session_id")
+		httpSessionIDs <- r.Header.Get("Session-Id")
 		httpLiteHeaders <- r.Header.Get("X-OpenAI-Internal-Codex-Responses-Lite")
 		requestBody, _ := io.ReadAll(r.Body)
 		httpCacheKeys <- gjson.GetBytes(requestBody, "prompt_cache_key").String()

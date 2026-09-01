@@ -59,6 +59,8 @@ Codex2API 采用三层配置架构：
 | `USE_WEBSOCKET` | 否 | `false` | 旧版开关；未设置 `CODEX_UPSTREAM_TRANSPORT` 时，`true` 等价于 `CODEX_UPSTREAM_TRANSPORT=ws` |
 | `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为 |
 | `CODEX_WS_SEND_USER_AGENT` | 否 | `true` | WS 握手是否发送 Codex `User-Agent`/`Version`；设为 `false` 可关闭 |
+| `CODEX_SESSION_HEADER_MODE` | 否 | `native` | 出站会话头形态。`native` 发送真实客户端的 `Session-Id` / `Thread-Id` / `X-Client-Request-Id`；`legacy` 回退到旧的 `Session_id`（WS 另带 `Conversation_id`） |
+| `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `Session-Id` 使用指纹收敛后的会话身份；默认保持独立的上游会话/缓存键，仅让 `Thread-Id` 遵循对应指纹策略 |
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
 | `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
