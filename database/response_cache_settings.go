@@ -20,6 +20,13 @@ const (
 	MaxResponseCacheLocalMaxEntryBytes  = int64(256 << 20)
 	MinResponseCacheReconstructMaxBytes = int64(8 << 20)
 	MaxResponseCacheReconstructMaxBytes = int64(512 << 20)
+
+	// ResponseCacheWritePolicyAlways 对每个含工具调用的响应都写缓存（历史行为）。
+	// ResponseCacheWritePolicyOnDemand 仅当下游 Key 近期发过 previous_response_id
+	// 续链请求时才写：客户端全量发上下文的部署里写放大直接归零。
+	ResponseCacheWritePolicyAlways   = "always"
+	ResponseCacheWritePolicyOnDemand = "on_demand"
+	DefaultResponseCacheWritePolicy  = ResponseCacheWritePolicyAlways
 )
 
 var (
@@ -31,6 +38,7 @@ type ResponseCacheSettings struct {
 	LocalMaxBytes       int64
 	LocalMaxEntryBytes  int64
 	ReconstructMaxBytes int64
+	WritePolicy         string
 	Generation          int64
 }
 
@@ -38,6 +46,7 @@ type ResponseCacheSettingsUpdate struct {
 	LocalMaxBytes       *int64
 	LocalMaxEntryBytes  *int64
 	ReconstructMaxBytes *int64
+	WritePolicy         *string
 }
 
 func DefaultResponseCacheSettings() ResponseCacheSettings {
@@ -45,8 +54,21 @@ func DefaultResponseCacheSettings() ResponseCacheSettings {
 		LocalMaxBytes:       DefaultResponseCacheLocalMaxBytes,
 		LocalMaxEntryBytes:  DefaultResponseCacheLocalMaxEntryBytes,
 		ReconstructMaxBytes: DefaultResponseCacheReconstructMaxBytes,
+		WritePolicy:         DefaultResponseCacheWritePolicy,
 		Generation:          DefaultResponseCacheConfigGeneration,
 	}
+}
+
+func ValidResponseCacheWritePolicy(policy string) bool {
+	return policy == ResponseCacheWritePolicyAlways || policy == ResponseCacheWritePolicyOnDemand
+}
+
+// NormalizeResponseCacheWritePolicy 把零值（历史调用方未设置该字段）归一为默认策略。
+func NormalizeResponseCacheWritePolicy(policy string) string {
+	if policy == "" {
+		return DefaultResponseCacheWritePolicy
+	}
+	return policy
 }
 
 func ValidateResponseCacheSettings(settings ResponseCacheSettings) error {
@@ -79,6 +101,13 @@ func ValidateResponseCacheSettings(settings ResponseCacheSettings) error {
 		return fmt.Errorf(
 			"%w: response_cache_local_max_entry_bytes must not exceed response_cache_local_max_bytes",
 			ErrInvalidResponseCacheSettings,
+		)
+	case !ValidResponseCacheWritePolicy(NormalizeResponseCacheWritePolicy(settings.WritePolicy)):
+		return fmt.Errorf(
+			"%w: response_cache_write_policy must be %q or %q",
+			ErrInvalidResponseCacheSettings,
+			ResponseCacheWritePolicyAlways,
+			ResponseCacheWritePolicyOnDemand,
 		)
 	case settings.Generation <= 0:
 		return fmt.Errorf(
@@ -138,13 +167,18 @@ func (db *DB) UpdateResponseCacheSettings(ctx context.Context, update ResponseCa
 		if update.ReconstructMaxBytes != nil {
 			next.ReconstructMaxBytes = *update.ReconstructMaxBytes
 		}
+		if update.WritePolicy != nil {
+			next.WritePolicy = *update.WritePolicy
+		}
+		next.WritePolicy = NormalizeResponseCacheWritePolicy(next.WritePolicy)
 		if err := ValidateResponseCacheSettings(next); err != nil {
 			return err
 		}
 
 		changed := next.LocalMaxBytes != current.LocalMaxBytes ||
 			next.LocalMaxEntryBytes != current.LocalMaxEntryBytes ||
-			next.ReconstructMaxBytes != current.ReconstructMaxBytes
+			next.ReconstructMaxBytes != current.ReconstructMaxBytes ||
+			next.WritePolicy != current.WritePolicy
 		if changed {
 			if current.Generation == math.MaxInt64 {
 				return ErrResponseCacheGenerationOverflow
@@ -155,9 +189,10 @@ func (db *DB) UpdateResponseCacheSettings(ctx context.Context, update ResponseCa
 				SET response_cache_local_max_bytes = $1,
 				    response_cache_local_max_entry_bytes = $2,
 				    response_cache_reconstruct_max_bytes = $3,
-				    response_cache_config_generation = $4
+				    response_cache_write_policy = $4,
+				    response_cache_config_generation = $5
 				WHERE id = 1
-			`, next.LocalMaxBytes, next.LocalMaxEntryBytes, next.ReconstructMaxBytes, next.Generation); err != nil {
+			`, next.LocalMaxBytes, next.LocalMaxEntryBytes, next.ReconstructMaxBytes, next.WritePolicy, next.Generation); err != nil {
 				return err
 			}
 		}
@@ -178,6 +213,7 @@ func responseCacheSettingsSelectQuery(forUpdate bool) string {
 		SELECT COALESCE(response_cache_local_max_bytes, 67108864),
 		       COALESCE(response_cache_local_max_entry_bytes, 8388608),
 		       COALESCE(response_cache_reconstruct_max_bytes, 67108864),
+		       COALESCE(response_cache_write_policy, 'always'),
 		       COALESCE(response_cache_config_generation, 1)
 		FROM system_settings
 		WHERE id = 1
@@ -197,6 +233,7 @@ func scanResponseCacheSettings(row responseCacheSettingsScanner, settings *Respo
 		&settings.LocalMaxBytes,
 		&settings.LocalMaxEntryBytes,
 		&settings.ReconstructMaxBytes,
+		&settings.WritePolicy,
 		&settings.Generation,
 	)
 }

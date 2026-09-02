@@ -108,7 +108,7 @@ func (h *Handler) enrichPromptGuardSession(c *gin.Context, cfg promptfilter.Conf
 		identityKey = policyContext.Identity.UserID
 		sessionFingerprint = policyContext.Meta.SessionFingerprint
 		requestID = policyContext.Identity.RequestID
-		runtimeScope = newAPIRuntimeScope(policyContext.APIKeyID, policyContext.Platform)
+		runtimeScope = newAPIRuntimeScopeForPolicyContext(policyContext)
 		trust = promptfilter.SegmentTrustGatewaySigned
 	}
 	if identityKey == "" && !sessionCfg.RequireSignedIdentity {

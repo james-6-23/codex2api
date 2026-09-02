@@ -61,11 +61,13 @@ func TestPrepareWebsocketHeadersUsesConfiguredDefaultsAndBetaFeatures(t *testing
 	if got := headers.Get("Chatgpt-Account-Id"); got != "42" {
 		t.Fatalf("Chatgpt-Account-Id = %q", got)
 	}
+	// 握手会话头已改为真实客户端形态：build_websocket_headers 发 session-id /
+	// thread-id / x-client-request-id，不发下划线写法，也没有 Conversation_id。
 	if got := headers.Get("Session-Id"); got != "session-123" {
 		t.Fatalf("Session-Id = %q", got)
 	}
 	if got := headers.Get("Thread-Id"); got != "session-123" {
-		t.Fatalf("Thread-Id = %q", got)
+		t.Fatalf("Thread-Id = %q, want 与 session 同值", got)
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)
@@ -173,10 +175,10 @@ func TestPrepareWebsocketHeadersSendsUserAgentByDefault(t *testing.T) {
 		t.Fatalf("Session-Id = %q", got)
 	}
 	if got := headers.Get("Thread-Id"); got != "session-123" {
-		t.Fatalf("Thread-Id = %q", got)
+		t.Fatalf("Thread-Id = %q, want 与 session 同值", got)
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
-		t.Fatalf("Conversation_id = %q, want empty", got)
+		t.Fatalf("Conversation_id = %q, want empty（真实握手头里没有这个头）", got)
 	}
 }
 
@@ -719,13 +721,14 @@ func TestPrepareWebsocketHeadersConvergesForwardedClientRequestID(t *testing.T) 
 	} else if got == "" {
 		t.Fatal("X-Client-Request-Id was dropped, want a converged value")
 	}
-	// Session-Id remains controlled by the caller unless converged alignment
-	// is explicitly enabled.
+	// 握手的会话键归调用方决定，收敛默认不得介入（对齐需显式开
+	// CODEX_SESSION_HEADER_ALIGN_CONVERGED）。头名换成真实形态，取值语义不变。
 	if got := headers.Get("Session-Id"); got != "upstream-session-id" {
 		t.Fatalf("Session-Id = %q, want the caller value untouched", got)
 	}
+	// thread-id 必须与已收敛的 x-client-request-id 同值，否则两个头各说各话。
 	if got, want := headers.Get("Thread-Id"), headers.Get("X-Client-Request-Id"); got != want {
-		t.Fatalf("Thread-Id = %q, want X-Client-Request-Id %q", got, want)
+		t.Fatalf("Thread-Id = %q, want 等于 X-Client-Request-Id %q", got, want)
 	}
 	if got := headers.Get("Conversation_id"); got != "" {
 		t.Fatalf("Conversation_id = %q, want empty", got)

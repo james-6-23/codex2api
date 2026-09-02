@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -166,6 +167,129 @@ func TestConversationLockIdentityFallsBackWithoutNewAPISignature(t *testing.T) {
 	setIngressRequestBodyIfAbsent(fresh, cleanBody)
 	if handler.inspectPromptFilterOpenAI(fresh, cleanBody, "/v1/responses", "gpt-5.5") {
 		t.Fatal("不同会话标识的正常请求被误锁")
+	}
+}
+
+func TestCodexLocalFallbackSessionHashMatchesAuditAndLockLookup(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, db := newPromptConversationLockTestHandler(t)
+	body := promptRequestBody(t, blatantIntentBlockedByLocalRegex)
+
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request.Header.Set("Session-ID", "codex-local-session-hash")
+	c.Set(contextAPIKeyID, int64(999)) // 未绑定 NewAPI，走 codex-local 降级身份。
+	setIngressRequestBodyIfAbsent(c, body)
+
+	if blocked := handler.inspectPromptFilterOpenAI(c, body, "/v1/responses", "gpt-5.5"); !blocked {
+		t.Fatal("本地规则未拦截测试输入")
+	}
+	identity, ok := promptConversationLockFallbackIdentity(c)
+	if !ok {
+		t.Fatal("无法解析 codex-local 降级身份")
+	}
+	audit := handler.capturePromptFilterAuditContext(c)
+	if audit.NewAPIPolicyStatus != "unbound" {
+		t.Fatalf("audit policy status = %q, want unbound", audit.NewAPIPolicyStatus)
+	}
+	if identity.SessionHash == "" || audit.SessionHash == "" || identity.SessionHash != audit.SessionHash {
+		t.Fatalf("codex-local session hash mismatch: lock=%q audit=%q", identity.SessionHash, audit.SessionHash)
+	}
+	lock, err := db.GetActivePromptConversationLockBySessionHash(t.Context(), audit.SessionHash)
+	if err != nil {
+		t.Fatalf("后台按审计 session_hash 查询不到本地锁: %v", err)
+	}
+	if lock.Platform != promptConversationLockFallbackPlatform || lock.SessionHash != audit.SessionHash {
+		t.Fatalf("stored codex-local lock = %#v", lock)
+	}
+
+	windowOnly, _ := gin.CreateTestContext(httptest.NewRecorder())
+	windowOnly.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	windowOnly.Request.Header.Set("X-Codex-Window-Id", "codex-local-window-only")
+	windowOnly.Set(contextAPIKeyID, int64(999))
+	windowIdentity, ok := promptConversationLockFallbackIdentity(windowOnly)
+	if !ok {
+		t.Fatal("仅有 X-Codex-Window-Id 时无法解析 codex-local 降级身份")
+	}
+	windowAudit := handler.capturePromptFilterAuditContext(windowOnly)
+	if windowIdentity.SessionHash == "" || windowIdentity.SessionHash != windowAudit.SessionHash {
+		t.Fatalf("window-only codex-local session hash mismatch: lock=%q audit=%q", windowIdentity.SessionHash, windowAudit.SessionHash)
+	}
+}
+
+func TestCodexLocalFallbackSessionHashCoversUnverifiedBindingStates(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newPromptFilterBindingTestHandler(t, promptGuardTestConfig(), []database.PromptFilterNewAPIBinding{
+		{APIKeyID: 101, PlatformCode: "optional", Secret: "optional-secret", Enabled: true},
+		{APIKeyID: 102, PlatformCode: "disabled", Secret: "disabled-secret", Enabled: false},
+	})
+	for _, test := range []struct {
+		name      string
+		apiKeyID  int64
+		signature string
+		wantState string
+	}{
+		{name: "optional unsigned binding", apiKeyID: 101, wantState: "unsigned_request"},
+		{name: "optional invalid signature", apiKeyID: 101, signature: "invalid", wantState: "verification_failed"},
+		{name: "disabled binding", apiKeyID: 102, wantState: "binding_disabled"},
+		{name: "unbound key", apiKeyID: 999, wantState: "unbound"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			c, _ := gin.CreateTestContext(httptest.NewRecorder())
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			c.Request.Header.Set("Session-ID", "fallback-state-session")
+			if test.signature != "" {
+				c.Request.Header.Set("X-NewAPI-Signature", test.signature)
+			}
+			c.Set(contextAPIKeyID, test.apiKeyID)
+
+			identity, ok := handler.resolvePromptConversationLockIdentity(c, handler.promptFilterConfigForRequest(c), nil)
+			if !ok {
+				t.Fatal("无法解析 Codex-local 降级锁身份")
+			}
+			audit := handler.capturePromptFilterAuditContext(c)
+			if audit.NewAPIPolicyStatus != test.wantState {
+				t.Fatalf("audit state = %q, want %q", audit.NewAPIPolicyStatus, test.wantState)
+			}
+			if audit.SessionHash == "" || audit.SessionHash != identity.SessionHash {
+				t.Fatalf("fallback hash mismatch: audit=%q lock=%q", audit.SessionHash, identity.SessionHash)
+			}
+		})
+	}
+}
+
+func TestCodexLocalFallbackSessionHashUsesBodyMetadataAtRealIngress(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, db := newPromptConversationLockTestHandler(t)
+	body, err := json.Marshal(map[string]any{
+		"model": "gpt-5.5",
+		"input": blatantIntentBlockedByLocalRegex,
+		"client_metadata": map[string]string{
+			"x-codex-window-id": "codex-body-window-only",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Set(contextAPIKeyID, int64(999))
+
+	// Do not seed ingressRequestBodyContextKey here: this exercises the same
+	// capture path used by a real HTTP request.
+	if blocked := handler.InspectPromptFilterOpenAI(c, body, "/v1/responses", "gpt-5.5", nil); !blocked {
+		t.Fatal("body-only 会话的本地规则未拦截测试输入")
+	}
+	identity, ok := promptConversationLockFallbackIdentity(c)
+	if !ok {
+		t.Fatal("body-only client_metadata 无法解析降级锁身份")
+	}
+	audit := handler.capturePromptFilterAuditContext(c)
+	if audit.SessionHash == "" || audit.SessionHash != identity.SessionHash {
+		t.Fatalf("body-only hash mismatch: audit=%q lock=%q", audit.SessionHash, identity.SessionHash)
+	}
+	if _, err := db.GetActivePromptConversationLockBySessionHash(t.Context(), audit.SessionHash); err != nil {
+		t.Fatalf("body-only session hash 无法定位活动锁: %v", err)
 	}
 }
 

@@ -6,8 +6,10 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -1263,5 +1265,132 @@ func TestResolveMessagesRoutingBodySkipsFullTranslation(t *testing.T) {
 	}
 	if !gjson.GetBytes(got, "service_tier").Exists() {
 		t.Fatalf("speed=fast should set service_tier: %s", got)
+	}
+}
+
+func TestNativeClaudeRoutingRespectsAvailabilityAndAPIKeyChannel(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	defer store.Stop()
+	account := &auth.Account{
+		DBID:         91,
+		UpstreamType: auth.UpstreamClaude,
+		AccessToken:  "claude-token",
+		Status:       auth.StatusReady,
+		Models:       []string{"claude-sonnet-4-5"},
+	}
+	store.AddAccount(account)
+	h := &Handler{store: store}
+
+	if !h.hasNativeClaudeAccountForModel("claude-sonnet-4-5") {
+		t.Fatal("available Claude account should enable native routing")
+	}
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelCodex}})
+	c.Set(contextAPIKeyID, int64(7))
+	if h.hasNativeClaudeAccountForRequest(c, "claude-sonnet-4-5") {
+		t.Fatal("a Codex-only API key must not force native Claude routing")
+	}
+
+	c.Set(contextAPIKeyRow, &database.APIKeyRow{ID: 8, Limits: database.APIKeyLimits{UpstreamChannel: database.UpstreamChannelClaude}})
+	c.Set(contextAPIKeyID, int64(8))
+	if !h.hasNativeClaudeAccountForRequest(c, "claude-sonnet-4-5") {
+		t.Fatal("a Claude API key should allow native Claude routing")
+	}
+
+	store.MarkCooldown(account, time.Minute, "rate_limited")
+	if h.hasNativeClaudeAccountForModel("claude-sonnet-4-5") {
+		t.Fatal("a cooled-down Claude account must not force native routing")
+	}
+}
+
+func TestClaudeAccountMappingDoesNotValidateOpenAIProtocolModels(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	defer store.Stop()
+	store.AddAccount(&auth.Account{
+		DBID:         92,
+		UpstreamType: auth.UpstreamClaude,
+		AccessToken:  "claude-token",
+		Status:       auth.StatusReady,
+		Models:       []string{"claude-sonnet-4-5"},
+		ModelMapping: `{"claude-alias":"claude-sonnet-4-5"}`,
+	})
+	h := &Handler{store: store}
+	if h.modelSupportedByAccountMapping("claude-alias") {
+		t.Fatal("Claude native aliases must not validate Responses/Chat/Compact models")
+	}
+}
+
+func TestModelValidatorRejectsNativeClaudeIDsOnOpenAIProtocols(t *testing.T) {
+	h := &Handler{}
+	rule := h.modelValidator([]string{"gpt-5.4", "claude-sonnet-4-5"})
+	if err := rule(gjson.Parse(`"claude-sonnet-4-5"`), "model"); err == nil {
+		t.Fatal("native Claude IDs must not pass Responses/Chat model validation")
+	}
+	if err := rule(gjson.Parse(`"gpt-5.4"`), "model"); err != nil {
+		t.Fatalf("Codex model unexpectedly rejected: %v", err)
+	}
+}
+
+func TestSupportedModelIDsDoesNotExposeClaudeAccountAliases(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	defer store.Stop()
+	store.AddAccount(&auth.Account{
+		DBID:         93,
+		UpstreamType: auth.UpstreamClaude,
+		AccessToken:  "claude-token",
+		Status:       auth.StatusReady,
+		Models:       []string{"claude-sonnet-4-5"},
+		ModelMapping: `{"client-alias":"claude-sonnet-4-5"}`,
+	})
+	h := &Handler{store: store}
+	models := h.supportedModelIDs(nil)
+	seen := make(map[string]bool, len(models))
+	for _, model := range models {
+		seen[strings.ToLower(strings.TrimSpace(model))] = true
+	}
+	if !seen["claude-sonnet-4-5"] {
+		t.Fatal("native Claude model should remain discoverable")
+	}
+	if seen["client-alias"] {
+		t.Fatal("Claude account mapping aliases must not enter the shared OpenAI catalog")
+	}
+}
+
+func TestNativeClaudeRoutingDoesNotReapplyCodexModelMapping(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	defer store.Stop()
+	store.SetModelMapping(`{"claude-sonnet-4-5":"gpt-5.4"}`)
+	store.AddAccount(&auth.Account{
+		DBID:         94,
+		UpstreamType: auth.UpstreamClaude,
+		AccessToken:  "claude-token",
+		Status:       auth.StatusReady,
+		Models:       []string{"claude-sonnet-4-5"},
+	})
+	h := &Handler{store: store}
+	body := h.resolveMessagesRoutingBodyForRequest(nil, []byte(`{"model":"claude-sonnet-4-5","messages":[]}`), "claude-sonnet-4-5", []string{"claude-sonnet-4-5", "gpt-5.4"})
+	if got := gjson.GetBytes(body, "model").String(); got != "claude-sonnet-4-5" {
+		t.Fatalf("native Claude routing model = %q, want native ID", got)
+	}
+}
+
+func TestNativeClaudeRoutingResolvesClaudeAliasBeforePassthrough(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	defer store.Stop()
+	store.SetModelMapping(`{"client-alias":"claude-sonnet-4-5"}`)
+	store.AddAccount(&auth.Account{
+		DBID: 95, UpstreamType: auth.UpstreamClaude, AccessToken: "claude-token", Status: auth.StatusReady,
+		Models: []string{"claude-sonnet-4-5"},
+	})
+	h := &Handler{store: store}
+	if !h.hasNativeClaudeAccountForRequest(nil, "client-alias") {
+		t.Fatal("Claude alias should resolve to a native Claude account")
+	}
+	body := h.resolveMessagesRoutingBodyForRequest(nil, []byte(`{"model":"client-alias","messages":[]}`), "client-alias", []string{"client-alias", "claude-sonnet-4-5"})
+	if got := gjson.GetBytes(body, "model").String(); got != "claude-sonnet-4-5" {
+		t.Fatalf("Claude alias routing model = %q, want native target", got)
 	}
 }

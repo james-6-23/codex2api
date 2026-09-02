@@ -360,7 +360,7 @@ func newContinuationRelayStore(upstreamURL string) *auth.Store {
 func newContinuationRelayUpstream(t *testing.T, compact bool, seenBody *[]byte) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		*seenBody, _ = io.ReadAll(r.Body)
+		*seenBody = readUpstreamRequestBody(r)
 		if compact {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":"resp_compact","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}`)

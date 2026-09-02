@@ -1723,6 +1723,7 @@ export default function Usage() {
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([])
   const [modelOptions, setModelOptions] = useState<string[]>([])
   const [grokModelOptions, setGrokModelOptions] = useState<string[]>([])
+  const [claudeModelOptions, setClaudeModelOptions] = useState<string[]>([])
   const [apiKeyLoadFailed, setAPIKeyLoadFailed] = useState(false)
   const showFastFilter = true
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
@@ -1854,10 +1855,12 @@ export default function Usage() {
           : response.models ?? []
         setModelOptions(models)
         setGrokModelOptions(response.grok_models ?? [])
+        setClaudeModelOptions(response.claude_models ?? [])
       } catch {
         if (active) {
           setModelOptions([])
           setGrokModelOptions([])
+          setClaudeModelOptions([])
         }
       }
     }
@@ -1913,7 +1916,9 @@ export default function Usage() {
       ? grokModelOptions
       : channel === 'codex'
         ? modelOptions
-        : [...modelOptions, ...grokModelOptions]
+        : channel === 'claude'
+          ? claudeModelOptions
+          : [...modelOptions, ...grokModelOptions, ...claudeModelOptions]
     for (const m of catalog) {
       const key = m.trim()
       if (key && !seen.has(key)) { seen.add(key); merged.push(key) }
@@ -1923,7 +1928,7 @@ export default function Usage() {
       if (key && key !== 'unknown' && !seen.has(key)) { seen.add(key); merged.push(key) }
     }
     return merged
-  }, [modelOptions, grokModelOptions, modelStats, channel])
+  }, [modelOptions, grokModelOptions, claudeModelOptions, modelStats, channel])
   const featureStats = stats?.feature_stats
   const endpointStats = stats?.endpoint_stats ?? []
   const apiKeyStats = stats?.api_key_stats ?? []
@@ -2532,6 +2537,14 @@ export default function Usage() {
                           ) : null}
                           {visibleColumns.model && (
                             <Badge variant="outline" className={usageTableBadgeClass}>
+                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
+                                <ChannelLogo
+                                  channel={log.channel}
+                                  size={13}
+                                  className="mr-1"
+                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : 'Codex'}
+                                />
+                              )}
                               {log.model || '-'}
                             </Badge>
                           )}
@@ -2735,12 +2748,12 @@ export default function Usage() {
                               </Badge>
                             )}
                             <Badge variant="outline" className={usageTableBadgeClass}>
-                              {(log.channel === 'codex' || log.channel === 'grok') && (
+                              {(log.channel === 'codex' || log.channel === 'grok' || log.channel === 'antigravity' || log.channel === 'claude') && (
                                 <ChannelLogo
                                   channel={log.channel}
                                   size={13}
                                   className="mr-1"
-                                  title={log.channel === 'grok' ? 'Grok' : 'Codex'}
+                                  title={log.channel === 'grok' ? 'Grok' : log.channel === 'antigravity' ? 'Antigravity' : log.channel === 'claude' ? 'Claude' : 'Codex'}
                                 />
                               )}
                               {log.model || '-'}

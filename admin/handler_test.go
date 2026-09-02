@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -129,6 +130,71 @@ func TestSummarizeDashboardAccountsMatchesAccountPageBuckets(t *testing.T) {
 	}
 }
 
+func TestSummarizeDashboardAccountsIncludesClaudeChannel(t *testing.T) {
+	row := &database.AccountRow{ID: 99, Status: "active", Enabled: true, Credentials: map[string]interface{}{"upstream_type": auth.UpstreamClaude}}
+	acc := &auth.Account{DBID: 99, UpstreamType: auth.UpstreamClaude, AccessToken: "claude", Status: auth.StatusReady, UsagePercent7dValid: true}
+	_, channels := summarizeDashboardAccounts([]*database.AccountRow{row}, []*auth.Account{acc})
+	got, ok := channels[database.UpstreamChannelClaude]
+	if !ok {
+		t.Fatalf("dashboard channels missing Claude: %#v", channels)
+	}
+	if got.total != 1 || got.normal != 1 {
+		t.Fatalf("Claude dashboard counts = %+v, want total=1 normal=1", got)
+	}
+}
+
+func TestSummarizeDashboardAccountsTreatsSuccessfulClaudeProbeWithoutQuotaHeadersAsSampled(t *testing.T) {
+	row := &database.AccountRow{ID: 100, Status: "active", Enabled: true, Credentials: map[string]interface{}{
+		"upstream_type":                      auth.UpstreamClaude,
+		auth.ClaudeUsageProbeAtCredentialKey: "2026-08-29T05:00:00Z",
+	}}
+	acc := &auth.Account{DBID: 100, UpstreamType: auth.UpstreamClaude, AccessToken: "claude", Status: auth.StatusReady}
+	got, channels := summarizeDashboardAccounts([]*database.AccountRow{row}, []*auth.Account{acc})
+	if got.normal != 1 || got.rateLimited != 0 || got.abnormal != 0 {
+		t.Fatalf("dashboard counts = %+v, want successful Claude probe counted as normal", got)
+	}
+	if channels[database.UpstreamChannelClaude].normal != 1 {
+		t.Fatalf("Claude channel counts = %+v", channels[database.UpstreamChannelClaude])
+	}
+}
+
+func TestClaudeChannelModelsReturnsAccountCatalog(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	defer store.Stop()
+	store.AddAccount(&auth.Account{DBID: 100, UpstreamType: auth.UpstreamClaude, AccessToken: "claude", Models: []string{"claude-sonnet-4-5", "claude-opus-4-5"}})
+	h := &Handler{store: store}
+	models := h.claudeChannelModels()
+	if len(models) != 2 || !slices.Contains(models, "claude-sonnet-4-5") || !slices.Contains(models, "claude-opus-4-5") {
+		t.Fatalf("Claude model catalog = %v, want account models", models)
+	}
+}
+
+func TestClaudeAvailableChannelModelsFiltersDisabledAndModelCooldown(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	defer store.Stop()
+	enabled := &auth.Account{
+		DBID:         101,
+		UpstreamType: auth.UpstreamClaude,
+		AccessToken:  "claude-enabled",
+		Models:       []string{"claude-fable-5", "claude-sonnet-5"},
+	}
+	enabled.SetModelCooldownUntil("claude-fable-5", "credits_required", time.Now().Add(time.Hour))
+	disabled := &auth.Account{
+		DBID:         102,
+		UpstreamType: auth.UpstreamClaude,
+		AccessToken:  "claude-disabled",
+		Models:       []string{"claude-fable-5"},
+	}
+	atomic.StoreInt32(&disabled.DispatchPaused, 1)
+	store.AddAccount(enabled)
+	store.AddAccount(disabled)
+	h := &Handler{store: store}
+	models := h.claudeAvailableChannelModels()
+	if len(models) != 1 || models[0] != "claude-sonnet-5" {
+		t.Fatalf("request-facing Claude models = %v, want only enabled cooldown-free model", models)
+	}
+}
+
 // 积分顶着限流的账号 RuntimeStatus 仍是 rate_limited（用量窗口客观上打满了），
 // 但它照常参与调度，仪表盘该把它算进「可用」而不是「限流」。
 func TestSummarizeDashboardAccountsCountsCreditBackedAsNormal(t *testing.T) {
@@ -185,6 +251,32 @@ func TestSummarizeDashboardAccountsExcludesUnsampledFromAvailable(t *testing.T) 
 	}
 	if channels[database.UpstreamChannelCodex].normal != 2 || channels[database.UpstreamChannelGrok].normal != 1 {
 		t.Fatalf("channel counts = %+v", channels)
+	}
+}
+
+func TestSummarizeDashboardAccountsUsesAntigravityControlPlaneStatus(t *testing.T) {
+	rows := []*database.AccountRow{
+		{ID: 1, Status: "active", Enabled: true, Credentials: map[string]interface{}{
+			"upstream_type": auth.UpstreamAntigravity,
+			"refresh_token": "refresh-1",
+		}},
+		{ID: 2, Status: "active", Enabled: true, Credentials: map[string]interface{}{
+			"upstream_type":          auth.UpstreamAntigravity,
+			"refresh_token":          "refresh-2",
+			"antigravity_sync_error": "quota sync failed",
+		}},
+	}
+	runtimeAccounts := []*auth.Account{
+		{DBID: 1, Status: auth.StatusReady, AccessToken: "access-1", UpstreamType: auth.UpstreamAntigravity},
+		{DBID: 2, Status: auth.StatusReady, AccessToken: "access-2", UpstreamType: auth.UpstreamAntigravity},
+	}
+	got, channels := summarizeDashboardAccounts(rows, runtimeAccounts)
+	if got.total != 2 || got.normal != 1 || got.abnormal != 1 {
+		t.Fatalf("counts = %+v, want total=2 normal=1 abnormal=1", got)
+	}
+	channel := channels[database.UpstreamChannelAntigravity]
+	if channel.total != 2 || channel.normal != 1 || channel.abnormal != 1 {
+		t.Fatalf("Antigravity channel counts = %+v", channel)
 	}
 }
 
@@ -1431,6 +1523,41 @@ func TestRuntimeStatusRouteReturnsDependencySnapshot(t *testing.T) {
 	}
 }
 
+func TestSubscriptionUpgradeRoutesAreNotRegistered(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	store := auth.NewStore(db, tc, nil)
+	handler := NewHandler(store, db, tc, nil, "admin-secret")
+	router := gin.New()
+	handler.RegisterRoutes(router)
+
+	routes := []struct {
+		method string
+		path   string
+	}{
+		{http.MethodGet, "/api/admin/accounts/1/subscription"},
+		{http.MethodPost, "/api/admin/accounts/1/subscription/upgrade-quotes"},
+		{http.MethodPost, "/api/admin/accounts/1/subscription/upgrades"},
+		{http.MethodGet, "/api/admin/subscription-upgrades/operation-id"},
+		{http.MethodPost, "/api/admin/subscription-upgrades/operation-id/verify"},
+	}
+
+	for _, route := range routes {
+		t.Run(route.method+" "+route.path, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(route.method, route.path, nil)
+			request.Header.Set("X-Admin-Key", "admin-secret")
+			router.ServeHTTP(recorder, request)
+			if recorder.Code != http.StatusNotFound {
+				t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusNotFound, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestUpdateSettingsPersistsAutoResetCreditsAcrossPartialUpdates(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -1524,8 +1651,69 @@ func TestUpdateSettingsPersistsAutoResetCreditsAcrossPartialUpdates(t *testing.T
 	}
 }
 
+func TestUpdateSettingsPersistsAutoActivate5hWindow(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	update := func(body string) {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		ctx, _ := gin.CreateTestContext(recorder)
+		ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(body))
+		ctx.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(ctx)
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d body=%s", recorder.Code, http.StatusOK, recorder.Body.String())
+		}
+	}
+
+	if proxy.CurrentRuntimeSettings().AutoActivate5hWindowEnabled {
+		t.Fatal("AutoActivate5hWindowEnabled = true before explicit enable")
+	}
+	update(`{"auto_activate_5h_window_enabled":true}`)
+	select {
+	case <-handler.autoActivate5hWake:
+	default:
+		t.Fatal("enable change did not queue an immediate scan")
+	}
+	if !proxy.CurrentRuntimeSettings().AutoActivate5hWindowEnabled {
+		t.Fatal("runtime AutoActivate5hWindowEnabled = false, want true")
+	}
+	update(`{"site_name":"Codex2API Test"}`)
+	select {
+	case <-handler.autoActivate5hWake:
+		t.Fatal("unrelated partial update queued another 5h activation scan")
+	default:
+	}
+
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if persisted == nil || !persisted.AutoActivate5hWindowEnabled {
+		t.Fatal("AutoActivate5hWindowEnabled was not preserved across partial update")
+	}
+}
+
 func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
 
 	db := newTestAdminDB(t)
 	tc := cache.NewMemory(4)
@@ -1543,7 +1731,7 @@ func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	ctx.Request = httptest.NewRequest(
 		http.MethodPut,
 		"/api/admin/settings",
-		strings.NewReader(`{"retry_interval_ms":2500,"transport_retry_policy":"sticky"}`),
+		strings.NewReader(`{"retry_interval_ms":2500,"transport_retry_policy":"sticky","continuous_retry_enabled":true,"continuous_retry_catch_all":true,"continuous_retry_categories":["http_4xx","server","unknown"],"continuous_retry_status_codes":[404,403,404,99,600],"continuous_retry_error_codes":["Forbidden","forbidden","bad code!"],"continuous_retry_max_duration_seconds":75}`),
 	)
 	ctx.Request.Header.Set("Content-Type", "application/json")
 
@@ -1561,6 +1749,127 @@ func TestUpdateSettingsResponseIncludesRetrySettings(t *testing.T) {
 	}
 	if response.TransportRetryPolicy != "sticky" {
 		t.Fatalf("transport_retry_policy = %q, want sticky", response.TransportRetryPolicy)
+	}
+	if !response.ContinuousRetryEnabled {
+		t.Fatal("continuous_retry_enabled = false, want true")
+	}
+	if !response.ContinuousRetryCatchAll {
+		t.Fatal("continuous_retry_catch_all = false, want true")
+	}
+	if got := strings.Join(response.ContinuousRetryCategories, ","); got != "http_4xx,http_5xx" {
+		t.Fatalf("continuous_retry_categories = %q, want http_4xx,http_5xx", got)
+	}
+	if got := fmt.Sprint(response.ContinuousRetryStatusCodes); got != "[403 404]" {
+		t.Fatalf("continuous_retry_status_codes = %s, want [403 404]", got)
+	}
+	if got := strings.Join(response.ContinuousRetryErrorCodes, ","); got != "forbidden" {
+		t.Fatalf("continuous_retry_error_codes = %q, want forbidden", got)
+	}
+	if response.ContinuousRetryMaxDurationSeconds != 75 {
+		t.Fatalf("continuous_retry_max_duration_seconds = %d, want 75", response.ContinuousRetryMaxDurationSeconds)
+	}
+
+	for label, policy := range map[string]database.ContinuousRetryPolicy{
+		"store":   store.GetContinuousRetryPolicy(),
+		"runtime": proxy.CurrentRuntimeSettings().ContinuousRetryPolicy,
+	} {
+		if !policy.Enabled || !policy.CatchAll || strings.Join(policy.Categories, ",") != "http_4xx,http_5xx" ||
+			fmt.Sprint(policy.StatusCodes) != "[403 404]" || strings.Join(policy.ErrorCodes, ",") != "forbidden" || policy.MaxDurationSeconds != 75 {
+			t.Fatalf("%s continuous retry policy = %#v", label, policy)
+		}
+	}
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	if policy := database.ParseContinuousRetryPolicy(persisted.ContinuousRetryPolicy); !policy.Enabled || !policy.CatchAll ||
+		strings.Join(policy.Categories, ",") != "http_4xx,http_5xx" || fmt.Sprint(policy.StatusCodes) != "[403 404]" ||
+		strings.Join(policy.ErrorCodes, ",") != "forbidden" || policy.MaxDurationSeconds != 75 {
+		t.Fatalf("persisted continuous retry policy = %#v", policy)
+	}
+}
+
+func TestUpdateSettingsConcurrentContinuousRetryPartialUpdatesDoNotLoseFields(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	settings := defaultBootstrapSettings()
+	initialPolicy := database.ContinuousRetryPolicy{
+		Enabled:     true,
+		CatchAll:    true,
+		Categories:  []string{database.ContinuousRetryCategoryTransport},
+		StatusCodes: []int{},
+		ErrorCodes:  []string{},
+	}
+	settings.ContinuousRetryPolicy = database.EncodeContinuousRetryPolicy(initialPolicy)
+	if err := db.UpdateSystemSettings(context.Background(), settings); err != nil {
+		t.Fatalf("seed settings: %v", err)
+	}
+	if _, err := db.UpdateContinuousRetryPolicy(context.Background(), database.ContinuousRetryPolicyUpdate{
+		Enabled:     &initialPolicy.Enabled,
+		CatchAll:    &initialPolicy.CatchAll,
+		Categories:  &initialPolicy.Categories,
+		StatusCodes: &initialPolicy.StatusCodes,
+		ErrorCodes:  &initialPolicy.ErrorCodes,
+	}); err != nil {
+		t.Fatalf("seed continuous retry policy: %v", err)
+	}
+
+	cache1 := cache.NewMemory(4)
+	cache2 := cache.NewMemory(4)
+	t.Cleanup(func() { _ = cache1.Close() })
+	t.Cleanup(func() { _ = cache2.Close() })
+	store1 := auth.NewStore(db, cache1, settings)
+	store2 := auth.NewStore(db, cache2, settings)
+	t.Cleanup(store1.Stop)
+	t.Cleanup(store2.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handlers := []*Handler{
+		NewHandler(store1, db, cache1, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret"),
+		NewHandler(store2, db, cache2, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret"),
+	}
+	bodies := []string{
+		`{"continuous_retry_catch_all":false}`,
+		`{"continuous_retry_status_codes":[403]}`,
+	}
+
+	type updateResult struct {
+		code int
+		body string
+	}
+	start := make(chan struct{})
+	results := make(chan updateResult, len(handlers))
+	for index := range handlers {
+		handler := handlers[index]
+		body := bodies[index]
+		go func() {
+			<-start
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			handler.UpdateSettings(ctx)
+			results <- updateResult{code: recorder.Code, body: recorder.Body.String()}
+		}()
+	}
+	close(start)
+	for range handlers {
+		result := <-results
+		if result.code != http.StatusOK {
+			t.Fatalf("concurrent update status=%d body=%s", result.code, result.body)
+		}
+	}
+
+	persisted, err := db.GetSystemSettings(context.Background())
+	if err != nil {
+		t.Fatalf("GetSystemSettings: %v", err)
+	}
+	policy := database.ParseContinuousRetryPolicy(persisted.ContinuousRetryPolicy)
+	if !policy.Enabled || policy.CatchAll || len(policy.StatusCodes) != 1 || policy.StatusCodes[0] != 403 || len(policy.Categories) != 1 || policy.Categories[0] != database.ContinuousRetryCategoryTransport {
+		t.Fatalf("concurrent admin updates lost a policy field: %#v", policy)
 	}
 }
 
@@ -1872,6 +2181,41 @@ func TestUpdateSettingsDoesNotEnableAutoResetCreditsWhenPersistenceFails(t *test
 	}
 	if current := proxy.CurrentRuntimeSettings(); current.AutoResetCreditsEnabled {
 		t.Fatal("AutoResetCreditsEnabled became true after persistence failure")
+	}
+}
+
+func TestUpdateSettingsDoesNotPublishContinuousRetryWhenPersistenceFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousRuntime := proxy.CurrentRuntimeSettings()
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previousRuntime) })
+
+	db := newTestAdminDB(t)
+	tc := cache.NewMemory(4)
+	t.Cleanup(func() { _ = tc.Close() })
+	settings := defaultBootstrapSettings()
+	store := auth.NewStore(db, tc, settings)
+	t.Cleanup(store.Stop)
+	proxy.ApplyRuntimeSettingsFromSystem(settings)
+	handler := NewHandler(store, db, tc, proxy.NewRateLimiter(settings.GlobalRPM), "admin-secret")
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"continuous_retry_enabled":true,"continuous_retry_status_codes":[403]}`))
+	ctx.Request = request.WithContext(requestCtx)
+	ctx.Request.Header.Set("Content-Type", "application/json")
+
+	handler.UpdateSettings(ctx)
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status=%d, want %d body=%s", recorder.Code, http.StatusInternalServerError, recorder.Body.String())
+	}
+	if policy := store.GetContinuousRetryPolicy(); policy.Enabled {
+		t.Fatalf("store continuous retry policy became enabled after persistence failure: %#v", policy)
+	}
+	if policy := proxy.CurrentRuntimeSettings().ContinuousRetryPolicy; policy.Enabled {
+		t.Fatalf("runtime continuous retry policy became enabled after persistence failure: %#v", policy)
 	}
 }
 

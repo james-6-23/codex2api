@@ -20,6 +20,7 @@ type OfficialPricingSyncConfig struct {
 	IntervalMinutes int          `json:"interval_minutes"`
 	IncludeOpenAI   bool         `json:"include_openai"`
 	IncludeGrok     bool         `json:"include_grok"`
+	IncludeClaude   bool         `json:"include_claude"`
 	LastAttemptAt   sql.NullTime `json:"-"`
 	LastSuccessAt   sql.NullTime `json:"-"`
 	LastError       string       `json:"last_error,omitempty"`
@@ -53,6 +54,7 @@ func (db *DB) ensureOfficialPricingSyncConfig(ctx context.Context) error {
 		interval_minutes INTEGER NOT NULL DEFAULT 1440,
 		include_openai BOOLEAN NOT NULL DEFAULT TRUE,
 		include_grok BOOLEAN NOT NULL DEFAULT TRUE,
+		include_claude BOOLEAN NOT NULL DEFAULT TRUE,
 		last_attempt_at TIMESTAMP NULL,
 		last_success_at TIMESTAMP NULL,
 		last_error TEXT NOT NULL DEFAULT '',
@@ -60,9 +62,11 @@ func (db *DB) ensureOfficialPricingSyncConfig(ctx context.Context) error {
 	)`); err != nil {
 		return err
 	}
+	// 存量表补列(幂等):列已存在时忽略错误。
+	_, _ = db.conn.ExecContext(ctx, `ALTER TABLE official_pricing_sync_config ADD COLUMN include_claude BOOLEAN NOT NULL DEFAULT TRUE`)
 	_, err := db.conn.ExecContext(ctx, `INSERT INTO official_pricing_sync_config (
-		singleton_id, enabled, interval_minutes, include_openai, include_grok
-	) VALUES (1, FALSE, 1440, TRUE, TRUE) ON CONFLICT (singleton_id) DO NOTHING`)
+		singleton_id, enabled, interval_minutes, include_openai, include_grok, include_claude
+	) VALUES (1, FALSE, 1440, TRUE, TRUE, TRUE) ON CONFLICT (singleton_id) DO NOTHING`)
 	if err == nil {
 		officialPricingConfigReady[db] = true
 	}
@@ -74,10 +78,10 @@ func (db *DB) GetOfficialPricingSyncConfig(ctx context.Context) (*OfficialPricin
 		return nil, err
 	}
 	var cfg OfficialPricingSyncConfig
-	err := db.conn.QueryRowContext(ctx, `SELECT enabled, interval_minutes, include_openai, include_grok,
+	err := db.conn.QueryRowContext(ctx, `SELECT enabled, interval_minutes, include_openai, include_grok, include_claude,
 		last_attempt_at, last_success_at, COALESCE(last_error, ''), COALESCE(last_warning, '')
 		FROM official_pricing_sync_config WHERE singleton_id = 1`).Scan(
-		&cfg.Enabled, &cfg.IntervalMinutes, &cfg.IncludeOpenAI, &cfg.IncludeGrok,
+		&cfg.Enabled, &cfg.IntervalMinutes, &cfg.IncludeOpenAI, &cfg.IncludeGrok, &cfg.IncludeClaude,
 		&cfg.LastAttemptAt, &cfg.LastSuccessAt, &cfg.LastError, &cfg.LastWarning,
 	)
 	if err != nil {
@@ -92,12 +96,12 @@ func (db *DB) UpdateOfficialPricingSyncConfig(ctx context.Context, cfg OfficialP
 		return nil, err
 	}
 	cfg.IntervalMinutes = NormalizeOfficialPricingSyncInterval(cfg.IntervalMinutes)
-	if !cfg.IncludeOpenAI && !cfg.IncludeGrok {
+	if !cfg.IncludeOpenAI && !cfg.IncludeGrok && !cfg.IncludeClaude {
 		return nil, fmt.Errorf("至少选择一个官方价格来源")
 	}
 	_, err := db.conn.ExecContext(ctx, `UPDATE official_pricing_sync_config
-		SET enabled = $1, interval_minutes = $2, include_openai = $3, include_grok = $4
-		WHERE singleton_id = 1`, cfg.Enabled, cfg.IntervalMinutes, cfg.IncludeOpenAI, cfg.IncludeGrok)
+		SET enabled = $1, interval_minutes = $2, include_openai = $3, include_grok = $4, include_claude = $5
+		WHERE singleton_id = 1`, cfg.Enabled, cfg.IntervalMinutes, cfg.IncludeOpenAI, cfg.IncludeGrok, cfg.IncludeClaude)
 	if err != nil {
 		return nil, err
 	}

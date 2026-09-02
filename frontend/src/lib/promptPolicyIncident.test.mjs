@@ -17,6 +17,8 @@ test('new CY usage rows resolve the immutable incident ID before legacy inferenc
   assert.ok(legacyRequest > exactRequest, 'timestamp inference must remain a legacy-only fallback')
   assert.ok(apiSource.includes('`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`'))
   assert.ok(apiSource.includes('`/prompt-policy/incidents?${search.toString()}`'))
+  assert.ok(apiSource.includes("deletePromptPolicyIncident"))
+  assert.ok(apiSource.includes("method: 'DELETE'"))
 })
 
 test('CY detail keeps null distinct from a real zero score', () => {

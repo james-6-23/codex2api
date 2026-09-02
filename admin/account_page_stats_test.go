@@ -71,7 +71,7 @@ func TestGetAccountPageStatsBackfillsMissingOfficialUsage(t *testing.T) {
 	ctx := context.Background()
 	codexID, err := db.InsertAccountWithCredentials(ctx, "codex", map[string]interface{}{
 		"refresh_token": "rt-codex",
-		"access_token":  "at-codex",
+		"access_token":  "oauth-codex",
 		"email":         "codex@example.com",
 	}, "")
 	if err != nil {
@@ -128,9 +128,12 @@ func TestGetAccountPageStatsBackfillsMissingOfficialUsage(t *testing.T) {
 	waitAccountDailyUsage(t, db, codexID)
 
 	second := invokeAccountPageStats(t, handler, []int64{codexID, grokID})
-	got := second[codexKey].OfficialUSD7d
+	got := second[codexKey].OfficialUSD
 	if got == nil || *got != 2 {
-		t.Fatalf("official_usd_7d = %v, want 2 (50 credits / 25)", got)
+		t.Fatalf("official_usd = %v, want 2 (50 credits / 25)", got)
+	}
+	if second[codexKey].OfficialUSD7d == nil || *second[codexKey].OfficialUSD7d != 2 {
+		t.Fatalf("official_usd_7d alias = %v, want 2", second[codexKey].OfficialUSD7d)
 	}
 
 	mu.Lock()
@@ -295,7 +298,7 @@ func TestGetAccountPageStatsSkipsOfficialBackfillForNewAccounts(t *testing.T) {
 	ctx := context.Background()
 	id, err := db.InsertAccountWithCredentials(ctx, "codex", map[string]interface{}{
 		"refresh_token": "rt-new",
-		"access_token":  "at-new",
+		"access_token":  "oauth-new",
 		"email":         "new@example.com",
 	}, "")
 	if err != nil {
@@ -317,6 +320,45 @@ func TestGetAccountPageStatsSkipsOfficialBackfillForNewAccounts(t *testing.T) {
 
 	invokeAccountPageStats(t, handler, []int64{id})
 	time.Sleep(80 * time.Millisecond)
+}
+
+func TestGetAccountPageStatsSkipsOfficialBackfillForCodexAT(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "codex-at", map[string]interface{}{
+		"access_token":      "at-opaque",
+		"access_token_type": accessTokenTypeCodexAT,
+	}, "")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+
+	store := auth.NewStore(db, nil, nil)
+	store.SetLazyMode(true)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("store.Init: %v", err)
+	}
+	tokenCache := cache.NewMemory(1)
+	t.Cleanup(func() { _ = tokenCache.Close() })
+	handler := NewHandler(store, db, tokenCache, nil, "")
+	ageAccountForOfficialUsage(t, store, id)
+	handler.queryWhamDailyUsage = func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error) {
+		t.Fatal("codex_at account must not hit official usage upstream")
+		return nil, nil, nil
+	}
+
+	stats := invokeAccountPageStats(t, handler, []int64{id})
+	item := stats[strconv.FormatInt(id, 10)]
+	if item.OfficialUSD7d != nil || item.OfficialUsageSynced {
+		t.Fatalf("codex_at page-stats = %+v, want no official usage fields", item)
+	}
+	handler.whamDailyBackfillMu.Lock()
+	_, scheduled := handler.whamDailyBackfillLast[id]
+	handler.whamDailyBackfillMu.Unlock()
+	if scheduled {
+		t.Fatal("codex_at account was scheduled for official usage backfill")
+	}
 }
 
 func TestGetAccountPageStatsSkipsOfficialBackfillWhenSnapshotExists(t *testing.T) {
@@ -354,9 +396,51 @@ func TestGetAccountPageStatsSkipsOfficialBackfillWhenSnapshotExists(t *testing.T
 	}
 
 	stats := invokeAccountPageStats(t, handler, []int64{id})
-	got := stats[strconv.FormatInt(id, 10)].OfficialUSD7d
+	got := stats[strconv.FormatInt(id, 10)].OfficialUSD
 	if got == nil || *got != 1 {
-		t.Fatalf("official_usd_7d = %v, want 1", got)
+		t.Fatalf("official_usd = %v, want 1", got)
+	}
+}
+
+func TestGetAccountPageStatsOfficialUSDIncludesOlderSnapshots(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "codex", map[string]interface{}{
+		"refresh_token": "rt",
+		"access_token":  "at",
+		"email":         "codex-history@example.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	now := time.Now().UTC()
+	for _, item := range []database.AccountDailyUsageInput{
+		{AccountID: id, Day: now.Format("2006-01-02"), Credits: 25, Settled: true},
+		{AccountID: id, Day: now.AddDate(0, 0, -20).Format("2006-01-02"), Credits: 50, Settled: true},
+	} {
+		if err := db.UpsertAccountDailyUsage(ctx, item); err != nil {
+			t.Fatalf("upsert %s: %v", item.Day, err)
+		}
+	}
+
+	store := auth.NewStore(db, nil, nil)
+	store.SetLazyMode(true)
+	if err := store.Init(ctx); err != nil {
+		t.Fatalf("store.Init: %v", err)
+	}
+	tokenCache := cache.NewMemory(1)
+	t.Cleanup(func() { _ = tokenCache.Close() })
+	handler := NewHandler(store, db, tokenCache, nil, "")
+	handler.queryWhamDailyUsage = func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error) {
+		t.Fatal("existing snapshot must not hit upstream")
+		return nil, nil, nil
+	}
+
+	stats := invokeAccountPageStats(t, handler, []int64{id})
+	got := stats[strconv.FormatInt(id, 10)].OfficialUSD
+	if got == nil || *got != 3 {
+		t.Fatalf("official_usd = %v, want 3 (75 credits / 25, including day -20)", got)
 	}
 }
 
@@ -366,26 +450,28 @@ func TestGetAccountPageStatsIncludesTodayModelCounts(t *testing.T) {
 	ctx := context.Background()
 	id, err := db.InsertAccountWithCredentials(ctx, "codex", map[string]interface{}{
 		"refresh_token": "rt-today-models",
-		"access_token":  "at-today-models",
+		"access_token":  "oauth-today-models",
 		"email":         "today-models@example.com",
 	}, "")
 	if err != nil {
 		t.Fatalf("insert account: %v", err)
 	}
 	for _, item := range []struct {
-		model      string
-		statusCode int
+		model        string
+		statusCode   int
+		firstTokenMs int
 	}{
-		{model: "gpt-5.4", statusCode: http.StatusOK},
-		{model: "gpt-5.4", statusCode: http.StatusTooManyRequests},
-		{model: "gpt-5.2", statusCode: http.StatusOK},
+		{model: "gpt-5.4", statusCode: http.StatusOK, firstTokenMs: 1200},
+		{model: "gpt-5.4", statusCode: http.StatusTooManyRequests, firstTokenMs: 1800},
+		{model: "gpt-5.2", statusCode: http.StatusOK, firstTokenMs: 500},
 	} {
 		if err := db.InsertUsageLog(ctx, &database.UsageLogInput{
-			AccountID:   id,
-			Endpoint:    "/v1/responses",
-			Model:       item.model,
-			StatusCode:  item.statusCode,
-			TotalTokens: 40,
+			AccountID:    id,
+			Endpoint:     "/v1/responses",
+			Model:        item.model,
+			StatusCode:   item.statusCode,
+			TotalTokens:  40,
+			FirstTokenMs: item.firstTokenMs,
 		}); err != nil {
 			t.Fatalf("InsertUsageLog(%s): %v", item.model, err)
 		}
@@ -411,5 +497,8 @@ func TestGetAccountPageStatsIncludesTodayModelCounts(t *testing.T) {
 	}
 	if today.ModelSuccessCounts["gpt-5.4"] != 1 || today.ModelSuccessCounts["gpt-5.2"] != 1 {
 		t.Fatalf("today model success = %#v, want gpt-5.4=1 gpt-5.2=1", today.ModelSuccessCounts)
+	}
+	if today.ModelAvgFirstTokenMs["gpt-5.4"] != 1500 || today.ModelAvgFirstTokenMs["gpt-5.2"] != 500 {
+		t.Fatalf("today model first-token averages = %#v, want gpt-5.4=1500 gpt-5.2=500", today.ModelAvgFirstTokenMs)
 	}
 }

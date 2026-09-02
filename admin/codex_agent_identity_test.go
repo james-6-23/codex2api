@@ -107,7 +107,7 @@ func TestImportAgentIdentityTokensRejectsMissingRequiredFields(t *testing.T) {
 	success, duplicate, failed, createdIDs := handler.importAgentIdentityTokens(context.Background(), []importToken{{
 		agentRuntimeID:  "agent-runtime-1",
 		agentPrivateKey: newTestAgentPrivateKey(t),
-	}}, "", false)
+	}}, importSettings{})
 	if success != 0 || duplicate != 0 || failed != 1 {
 		t.Fatalf("counts = success:%d duplicate:%d failed:%d, want 0/0/1", success, duplicate, failed)
 	}

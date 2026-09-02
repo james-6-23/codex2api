@@ -265,6 +265,7 @@ type promptFilterAuditContext struct {
 	RequestCorrelationID string
 	NewAPIPolicyStatus   string
 	NewAPIPlatform       string
+	NewAPIChannelID      int
 	NewAPIUserID         string
 	NewAPIUserName       string
 	NewAPIUserEmail      string
@@ -289,18 +290,26 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 	newAPIStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	sessionHash := ""
 	rootSessionHash := ""
+	newAPIChannelID := 0
 	newAPIUserName, newAPIUserEmail, newAPIUserGroup := "", "", ""
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && policyContext.MetaVerified {
+		newAPIChannelID = policyContext.Meta.ChannelID
 		sessionHash = hashRiskIdentity(policyContext.Meta.SessionFingerprint)
 		newAPIUserName = policyContext.Meta.UserName
 		newAPIUserEmail = policyContext.Meta.UserEmail
 		newAPIUserGroup = policyContext.Meta.UserGroup
-	} else if newAPIStatus == "unbound" {
-		identity := resolveRequestSessionIdentity(c.Request.Header, ingressRequestBody(c, nil))
-		if identity.stableIdentity {
-			sessionHash = hashRiskIdentity(identity.affinityID)
-		}
+	} else {
+		// Conversation locking falls back to the Codex-local identity whenever a
+		// verified platform/session identity is unavailable. Audit correlation must
+		// make the same choice for optional unsigned bindings, disabled bindings,
+		// and failed optional verification—not only for completely unbound keys.
+		sessionHash = promptConversationLockFallbackSessionHash(c)
 	}
+	// Preserve exact-session accounting only when root resolution is not
+	// authoritative. A signed root-capable sender may explicitly report that
+	// the root is unavailable; that state must not fall back to the leaf and
+	// temporarily consume an operational account window.
+	rootSessionHash = ""
 	// RootSessionHash is deliberately operational-only. Prompt risk profiles
 	// and CYB evidence keep the exact leaf SessionHash, while account/session
 	// observations collapse hidden Guardian and sub-agent leaves to the main
@@ -343,6 +352,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		RequestCorrelationID: ensurePromptPolicyRequestCorrelationID(c),
 		NewAPIPolicyStatus:   newAPIStatus,
 		NewAPIPlatform:       policyContext.Platform,
+		NewAPIChannelID:      newAPIChannelID,
 		NewAPIUserID:         policyContext.Identity.UserID,
 		NewAPIUserName:       newAPIUserName,
 		NewAPIUserEmail:      newAPIUserEmail,
@@ -539,8 +549,17 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 	// storage failure must not turn a verified upstream CYB into an untracked one.
 	metadata, delegated := h.emitNewAPIUpstreamCyberPolicyDecision(c, endpoint, model, body)
 	if delegated {
+		// 明确的上游 CYB 始终保留会话锁与用户冷却；catch-all 不能把安全终态
+		// 降级成可透明轮换的中间失败。
+		// Explicit upstream CYB always retains the conversation lock and user
+		// cooldown; catch-all cannot downgrade this safety terminal.
 		metadata.ConversationLocked = h.lockPromptConversationAfterUpstreamCYB(c, endpoint, model, incidentID, metadata)
 		c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
+	} else {
+		// Without a verified NewAPI identity, do not apply a Key-wide strike or
+		// cooldown. Keep the replay guard scoped to a stable Codex session or to
+		// the exact prompt fingerprint plus API Key and client IP.
+		h.lockPromptConversationAfterUnsignedUpstreamCYB(c, endpoint, model, incidentID)
 	}
 	return incidentID, accepted
 }

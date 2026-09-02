@@ -208,6 +208,82 @@ func readProcessMemoryWithFallback(mem *runtime.MemStats) uint64 {
 	return mem.Sys
 }
 
+// 容器(cgroup)内存:优先 v2 再回退 v1;用量对齐 docker stats 口径,
+// 扣掉 inactive_file 页缓存。limit 为 "max"/v1 未设限哨兵时返回 0。
+var readContainerMemoryFn = readContainerMemory
+
+func readContainerMemory() (usedBytes uint64, limitBytes uint64, ok bool) {
+	if runtime.GOOS != "linux" {
+		return 0, 0, false
+	}
+	type cgroupPaths struct {
+		current     string
+		limit       string
+		stat        string
+		inactiveKey string
+	}
+	for _, paths := range []cgroupPaths{
+		{"/sys/fs/cgroup/memory.current", "/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory.stat", "inactive_file"},
+		{"/sys/fs/cgroup/memory/memory.usage_in_bytes", "/sys/fs/cgroup/memory/memory.limit_in_bytes", "/sys/fs/cgroup/memory/memory.stat", "total_inactive_file"},
+	} {
+		raw, err := os.ReadFile(paths.current)
+		if err != nil {
+			continue
+		}
+		current, parsed := parseCgroupUint(string(raw))
+		if !parsed {
+			continue
+		}
+		if statFile, err := os.Open(paths.stat); err == nil {
+			inactive := parseCgroupStatValue(statFile, paths.inactiveKey)
+			statFile.Close()
+			if inactive < current {
+				current -= inactive
+			}
+		}
+		var limit uint64
+		if rawLimit, err := os.ReadFile(paths.limit); err == nil {
+			limit = parseCgroupLimit(string(rawLimit))
+		}
+		return current, limit, true
+	}
+	return 0, 0, false
+}
+
+func parseCgroupUint(raw string) (uint64, bool) {
+	v, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
+}
+
+// cgroup v1 未设限时是按页对齐的 MaxInt64 哨兵值;统一把过大的值当未设限。
+func parseCgroupLimit(raw string) uint64 {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "max" {
+		return 0
+	}
+	v, err := strconv.ParseUint(trimmed, 10, 64)
+	if err != nil || v >= uint64(1)<<62 {
+		return 0
+	}
+	return v
+}
+
+func parseCgroupStatValue(r io.Reader, key string) uint64 {
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) == 2 && fields[0] == key {
+			if v, err := strconv.ParseUint(fields[1], 10, 64); err == nil {
+				return v
+			}
+		}
+	}
+	return 0
+}
+
 func collectOpsMemory(readMemStats memStatsReader) opsMemoryResponse {
 	if readMemStats == nil {
 		readMemStats = runtime.ReadMemStats
@@ -215,15 +291,37 @@ func collectOpsMemory(readMemStats memStatsReader) opsMemoryResponse {
 	var mem runtime.MemStats
 	readMemStats(&mem)
 	usedBytes, totalBytes, percent := readSystemMemoryWithFallback(&mem)
+	processBytes := readProcessMemoryWithFallback(&mem)
+
+	containerUsed, containerLimit, containerOK := readContainerMemoryFn()
+	containerSource := "cgroup"
+	if !containerOK {
+		// 拿不到 cgroup(非容器/非 Linux)时退回进程 RSS,进度条仍有意义。
+		containerUsed = processBytes
+		containerSource = "process"
+	}
+	containerDenom := containerLimit
+	if containerDenom == 0 {
+		containerDenom = totalBytes
+	}
+	var containerPercent float64
+	if containerDenom > 0 {
+		containerPercent = float64(containerUsed) / float64(containerDenom) * 100
+	}
+
 	return opsMemoryResponse{
-		Percent:           percent,
-		UsedBytes:         usedBytes,
-		TotalBytes:        totalBytes,
-		ProcessBytes:      readProcessMemoryWithFallback(&mem),
-		HeapAllocBytes:    mem.HeapAlloc,
-		HeapInuseBytes:    mem.HeapInuse,
-		HeapReleasedBytes: mem.HeapReleased,
-		NumGC:             mem.NumGC,
+		Percent:             percent,
+		UsedBytes:           usedBytes,
+		TotalBytes:          totalBytes,
+		ProcessBytes:        processBytes,
+		ContainerUsedBytes:  containerUsed,
+		ContainerLimitBytes: containerLimit,
+		ContainerPercent:    containerPercent,
+		ContainerSource:     containerSource,
+		HeapAllocBytes:      mem.HeapAlloc,
+		HeapInuseBytes:      mem.HeapInuse,
+		HeapReleasedBytes:   mem.HeapReleased,
+		NumGC:               mem.NumGC,
 	}
 }
 
@@ -233,6 +331,7 @@ func responseCacheConfigOpsResponse(config proxy.ResponseCacheAppliedConfig) ops
 		LocalMaxBytes:       config.LocalMaxBytes,
 		LocalMaxEntryBytes:  config.LocalMaxEntryBytes,
 		ReconstructMaxBytes: config.ReconstructMaxBytes,
+		WritePolicy:         config.WritePolicy,
 	}
 }
 
@@ -260,6 +359,8 @@ func responseCacheOpsResponseFromSnapshot(snapshot proxy.ResponseCacheOpsSnapsho
 		OversizeBypasses:       snapshot.Stats.OversizeBypasses,
 		OversizeRejections:     snapshot.Stats.OversizeRejections,
 		KnownUnavailableErrors: snapshot.Stats.KnownUnavailableErrors,
+		SkippedWrites:          snapshot.Stats.SkippedWrites,
+		ChainOwners:            snapshot.Stats.ChainOwners,
 		LastConfigSyncAt:       lastSyncAt,
 		LastConfigSyncError:    snapshot.LastConfigSyncError,
 	}
@@ -315,12 +416,7 @@ func (h *Handler) GetOpsOverview(c *gin.Context) {
 	cpuPercent := h.cpuSampler.Sample()
 	responseCacheSnapshot := proxy.GetResponseCacheOpsSnapshot()
 
-	var activeRequests int64
-	var totalRuntimeRequests int64
-	for _, acc := range h.store.Accounts() {
-		activeRequests += acc.GetActiveRequests()
-		totalRuntimeRequests += acc.GetTotalRequests()
-	}
+	activeRequests, totalRuntimeRequests := h.store.RuntimeRequestCounts()
 
 	c.JSON(200, opsOverviewResponse{
 		UpdatedAt:      time.Now().Format(time.RFC3339),
@@ -374,5 +470,6 @@ func (h *Handler) GetOpsOverview(c *gin.Context) {
 			AvgDurationMs: usageStats.AvgDurationMs,
 		},
 		ResponseCache: responseCacheOpsResponseFromSnapshot(responseCacheSnapshot),
+		Scheduler:     h.store.GetSchedulerMetrics(),
 	})
 }

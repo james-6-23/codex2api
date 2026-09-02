@@ -295,7 +295,8 @@ func (h *Handler) enqueueUpstreamCyberPolicyEvidence(c *gin.Context, endpoint, m
 		"local_matches": captured.Matches, "platform": platform, "prompt_available": available, "local_comparison": localComparison,
 		"account_id": attempt.AccountID, "account_groups": routing.AccountGroupNames,
 		"newapi_policy_status": audit.NewAPIPolicyStatus, "newapi_platform": audit.NewAPIPlatform,
-		"evidence_quality": evidenceQuality, "learning_evidence": learningBundle,
+		"newapi_channel_id": audit.NewAPIChannelID,
+		"evidence_quality":  evidenceQuality, "learning_evidence": learningBundle,
 	}
 	metadata := marshalPromptPolicyEvidenceMetadata(metadataFields, learningBundle, len(captured.Matches))
 	rationale := "上游返回 cyber_policy，等待归因和候选规则审核"

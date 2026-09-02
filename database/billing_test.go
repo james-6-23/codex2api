@@ -420,6 +420,26 @@ func TestGrokPricingUsesXAIRates(t *testing.T) {
 }
 
 // grok-4.6 / grok-4.5 更专用的规则必须压过 grok-4，否则 $2/$6 会被当成 $3/$15。
+func TestAntigravityGeminiEstimatedPricing(t *testing.T) {
+	tests := []struct {
+		model      string
+		wantInput  float64
+		wantOutput float64
+		wantCache  float64
+	}{
+		{model: "gemini-3-pro-preview", wantInput: 2.0, wantOutput: 12.0, wantCache: 0.2},
+		{model: "gemini-2.5-pro", wantInput: 1.25, wantOutput: 10.0, wantCache: 0.125},
+		{model: "gemini-2.5-flash", wantInput: 0.3, wantOutput: 2.5, wantCache: 0.03},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			got := GetModelPricing(tt.model)
+			assertPricing(t, got, tt.wantInput, tt.wantOutput)
+			assertFloatEqual(t, got.CacheReadPricePerMToken, tt.wantCache)
+		})
+	}
+}
+
 func TestGrokMoreSpecificRuleWinsOverShorterPrefix(t *testing.T) {
 	assertPricing(t, GetModelPricing("grok-4.6"), 2.0, 6.0)
 	assertFloatEqual(t, GetModelPricing("grok-4.6").CacheReadPricePerMToken, 0.5)

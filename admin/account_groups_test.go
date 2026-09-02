@@ -15,6 +15,16 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+func TestAccountRowGroupChannelSupportsAntigravity(t *testing.T) {
+	row := &database.AccountRow{Credentials: map[string]interface{}{"upstream_type": auth.UpstreamAntigravity}}
+	if got := accountRowGroupChannel(row); got != database.AccountGroupChannelAntigravity {
+		t.Fatalf("accountRowGroupChannel() = %q, want %q", got, database.AccountGroupChannelAntigravity)
+	}
+	if got := groupChannelDisplayName(database.AccountGroupChannelAntigravity); got != "Antigravity" {
+		t.Fatalf("groupChannelDisplayName() = %q, want Antigravity", got)
+	}
+}
+
 func TestAccountGroupBaseConcurrencyOverrideAPIThreeState(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)

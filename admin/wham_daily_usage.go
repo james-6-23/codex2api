@@ -66,6 +66,8 @@ func (h *Handler) GetAccountWhamDailyUsage(c *gin.Context) {
 		case account == nil:
 			writeError(c, http.StatusNotFound, "账号不存在")
 			return
+		case isCodexATAccount(account):
+			refreshError = errWhamDailyUsageUnsupported.Error()
 		case account.GetAccessToken() == "":
 			refreshError = "账号没有可用的 access token，请先刷新账号"
 		default:
@@ -158,6 +160,9 @@ func rawJSONArray(raw string) []any {
 func (h *Handler) syncWhamDailyUsage(ctx context.Context, account *auth.Account) (int, error) {
 	if h == nil || h.db == nil || account == nil {
 		return 0, errWhamDailyUsageUnavailable
+	}
+	if isCodexATAccount(account) {
+		return 0, errWhamDailyUsageUnsupported
 	}
 	startDate, endDate := proxy.WhamDailyUsageWindow(time.Now())
 	result, resp, err := h.queryWhamDailyUsageUpstream(ctx, account, h.store.ResolveProxyForAccount(account), startDate, endDate)

@@ -314,7 +314,7 @@ func buildAccountQuotaAnalysis(items []*accountListSnapshotItem, window string) 
 	}
 	totalUsed := 0.0
 	for _, item := range items {
-		if item.Status == "unauthorized" || item.Status == "error" || item.OpenAIResponses || (window == "5h" && !accountListSubscriptionPlan(item.PlanType)) {
+		if item.Status == "unauthorized" || item.Status == "error" || item.OpenAIResponses || (window == "5h" && !accountList5hQuotaEligible(item)) {
 			continue
 		}
 		result.Total++
@@ -431,7 +431,7 @@ func buildAccountResetAnalysis(items []*accountListSnapshotItem, now time.Time) 
 
 func accountRecoveryAt(item *accountListSnapshotItem, window string, now time.Time) (time.Time, bool) {
 	if window == "5h" {
-		if accountListSubscriptionPlan(item.PlanType) && item.UsagePercent5hOK && item.UsagePercent5h >= 100 && item.Reset5hAt.After(now) {
+		if accountList5hQuotaEligible(item) && item.UsagePercent5hOK && item.UsagePercent5h >= 100 && item.Reset5hAt.After(now) {
 			return item.Reset5hAt, false
 		}
 		if item.CooldownUntil.After(now) && accountAnalysisShortRateLimited(item) {
@@ -463,7 +463,7 @@ func accountAnalysisShortRateLimited(item *accountListSnapshotItem) bool {
 
 func accountAnalysisWindowRateLimited(item *accountListSnapshotItem, window string) bool {
 	if window == "5h" {
-		return (accountListSubscriptionPlan(item.PlanType) && item.UsagePercent5hOK && item.UsagePercent5h >= 100) || accountAnalysisShortRateLimited(item)
+		return (accountList5hQuotaEligible(item) && item.UsagePercent5hOK && item.UsagePercent5h >= 100) || accountAnalysisShortRateLimited(item)
 	}
 	status := strings.ToLower(item.Status)
 	reason := strings.ToLower(item.CooldownReason)
@@ -476,7 +476,7 @@ func accountAnalysisHasBurnPrediction(item *accountListSnapshotItem, window stri
 		return false
 	}
 	if window == "5h" {
-		return accountListSubscriptionPlan(item.PlanType) && item.UsagePercent5hOK
+		return accountList5hQuotaEligible(item) && item.UsagePercent5hOK
 	}
 	return true
 }

@@ -38,6 +38,42 @@ func TestDeriveContentSessionSeedStableAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestDeriveContentSessionSeedIgnoresDynamicSystemMessagesAfterConversationStarts(t *testing.T) {
+	turn1 := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"role":"developer","content":"stable policy"},
+			{"role":"user","content":"build a server"},
+			{"role":"assistant","content":"working"},
+			{"role":"developer","content":"current time: 10:00"},
+			{"role":"user","content":"continue"}
+		]
+	}`)
+	turn2 := []byte(`{
+		"model":"gpt-5.4",
+		"input":[
+			{"role":"developer","content":"stable policy"},
+			{"role":"user","content":"build a server"},
+			{"role":"assistant","content":"working"},
+			{"role":"developer","content":"current time: 10:05 and cwd changed"},
+			{"role":"user","content":"continue again"}
+		]
+	}`)
+
+	if first, second := deriveContentSessionSeed(turn1), deriveContentSessionSeed(turn2); first == "" || first != second {
+		t.Fatalf("dynamic post-prefix system messages must not move affinity: %q vs %q", first, second)
+	}
+}
+
+func TestDeriveContentSessionSeedIncludesLeadingSystemPrefix(t *testing.T) {
+	left := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"tenant A"},{"role":"user","content":"same question"}]}`)
+	right := []byte(`{"model":"gpt-5.4","messages":[{"role":"system","content":"tenant B"},{"role":"user","content":"same question"}]}`)
+
+	if leftSeed, rightSeed := deriveContentSessionSeed(left), deriveContentSessionSeed(right); leftSeed == "" || leftSeed == rightSeed {
+		t.Fatalf("different leading system prefixes must remain isolated: %q vs %q", leftSeed, rightSeed)
+	}
+}
+
 func TestDeriveContentSessionSeedDistinguishesConversations(t *testing.T) {
 	convA := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"你好"}]}`)
 	convB := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"help me debug"}]}`)

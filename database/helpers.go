@@ -146,6 +146,8 @@ func decodeCredentials(raw interface{}) map[string]interface{} {
 	if out == nil {
 		return map[string]interface{}{}
 	}
+	// 统一读扼要点:解密敏感字段,使所有 Go 读取端见明文(密钥未设时为 no-op)。
+	decryptSensitiveCredentialsInPlace(out)
 	return out
 }
 

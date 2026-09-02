@@ -32,14 +32,14 @@ import {
 } from "./docs/docsContent";
 import { DEFAULT_CLAUDE_MODEL_MAP } from "../lib/modelMapping";
 import { getLobeIconFileUrl } from "../components/ModelLogo";
-import type { SystemSettings } from "../types";
+import type { ModelsResponse, SystemSettings } from "../types";
 
 const FALLBACK_MODELS = [
   "gpt-5.5",
   "gpt-5.4",
   "gpt-5.4-mini",
   "gpt-5.3-codex",
-  "claude-sonnet-4-5-20250514",
+  "claude-sonnet-4-5",
 ];
 type CCSwitchApp = "claude" | "codex" | "gemini";
 type QuickToolTab = "codex-cli" | "claude-code" | "cc-switch" | "cherry-studio";
@@ -632,6 +632,7 @@ export default function Docs() {
   >("responses");
   const [curlModel, setCurlModel] = useState("gpt-5.4");
   const [models, setModels] = useState(FALLBACK_MODELS);
+  const [claudeModels, setClaudeModels] = useState<string[]>([]);
 
   useEffect(() => {
     api
@@ -652,7 +653,12 @@ export default function Docs() {
 
   useEffect(() => {
     Promise.all([
-      api.getModels().catch(() => ({ models: [], items: [] })),
+      api.getModels().catch((): ModelsResponse => ({
+        models: [],
+        items: [],
+        claude_models: [],
+        source_url: "",
+      })),
       api.getSettings().catch(() => null),
     ])
       .then(([res, nextSettings]) => {
@@ -660,8 +666,11 @@ export default function Docs() {
         const next = [
           ...(res.models ?? []),
           ...(res.items ?? []).map((item) => item.id),
-        ].filter(Boolean);
+        ].filter((model): model is string => Boolean(model) && !model.toLowerCase().startsWith("claude-"));
         const unique = Array.from(new Set(next));
+        setClaudeModels(
+          Array.from(new Set((res.claude_models ?? []).filter((model: string): model is string => Boolean(model)))),
+        );
         if (unique.length === 0) return;
         setModels(unique);
         const configuredModel = nextSettings?.test_model;
@@ -700,15 +709,25 @@ export default function Docs() {
     [models],
   );
   const claudeModelOptions = useMemo(() => {
+    const catalogModels = [
+      ...claudeModels,
+      ...models.filter((model) => model.startsWith("claude-")),
+    ];
     const merged = Array.from(
       new Set([
+        ...(catalogModels.length > 0 ? catalogModels : ["claude-sonnet-4-5"]),
         ...mappedClaudeModels,
-        ...models.filter((model) => model.startsWith("claude-")),
-        "claude-sonnet-4-5-20250514",
       ]),
     );
     return merged.map((model) => ({ label: model, value: model }));
-  }, [mappedClaudeModels, models]);
+  }, [claudeModels, mappedClaudeModels, models]);
+  const curlModelOptions = activeCurl === "messages"
+    ? claudeModelOptions
+    : modelOptions;
+  useEffect(() => {
+    if (curlModelOptions.some((option) => option.value === curlModel)) return;
+    if (curlModelOptions[0]) setCurlModel(curlModelOptions[0].value);
+  }, [curlModel, curlModelOptions]);
   const ccSwitchModelOptions =
     ccSwitchApp === "claude" ? claudeModelOptions : modelOptions;
   const quickTools = useMemo(() => buildQuickTools(docsLocale), [docsLocale]);
@@ -735,7 +754,7 @@ export default function Docs() {
       const preferredClaude = preferredMappedClaudeModel(
         mappedClaudeModels,
         "sonnet",
-        "claude-sonnet-4-5-20250514",
+        "claude-sonnet-4-5",
       );
       const preferredCodex = models.includes(quickStartModel)
         ? quickStartModel
@@ -956,7 +975,7 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
   -H "Content-Type: application/json" \\
   -H "anthropic-version: 2023-06-01" \\
   -d '{
-    "model": "${curlModel.startsWith("claude-") ? curlModel : "claude-sonnet-4-5-20250514"}",
+    "model": "${curlModel.startsWith("claude-") ? curlModel : "claude-sonnet-4-5"}",
     "max_tokens": 1024,
     "messages": [{"role": "user", "content": "Hello"}]
   }'`;
@@ -1360,12 +1379,7 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
                   className="w-52"
                   value={curlModel}
                   onValueChange={setCurlModel}
-                  options={[
-                    ...modelOptions,
-                    ...claudeModelOptions.filter(
-                      (option) => !models.includes(option.value),
-                    ),
-                  ]}
+                  options={curlModelOptions}
                 />
               </div>
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2">

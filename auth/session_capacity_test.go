@@ -542,6 +542,7 @@ func TestSessionCapacityExhaustionIsScopedToEligibleAccounts(t *testing.T) {
 
 	unlimited := &Account{DBID: 2, AccessToken: "token-2"}
 	store.accounts = append(store.accounts, unlimited)
+	store.publishAccountSnapshot(store.accounts)
 	if store.HasSessionCapacityExhaustionWithDispatch(0, nil, nil, DispatchPolicyStandard, "fresh", time.Now()) {
 		t.Fatal("an eligible account with capacity disabled should keep the pool available")
 	}

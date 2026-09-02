@@ -481,13 +481,20 @@ var WebsocketExecuteFunc func(ctx context.Context, account *auth.Account, reques
 // nil 时跳过（如嵌入式调用或初始化顺序问题）。
 var EnsureCodexAgentIdentityTaskFunc func(ctx context.Context, account *auth.Account, forceRefresh bool) error
 
+// IsolateCodexSessionID 把下游会话种子确定性映射到一个按 API Key 隔离的上游会话身份。
+//
+// 产出取 UUIDv7 形态：真实 Codex 客户端的 session_id 就是 v7，而这里原本产出的是
+// 16 位裸十六进制，连 UUID 都不是——它同时出现在出站 session 头和请求体
+// prompt_cache_key 上，是比任何 metadata 字段都显眼的形状差异。
+//
+// 换格式会让既有部署的确定性 cache key 整体换代，升级后首轮请求上游 prompt cache
+// 必然 miss 一次，随后按新键重新聚合。这是一次性成本，换的是每个请求的形状正确。
 func IsolateCodexSessionID(apiKeyID int64, raw string) string {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || apiKeyID <= 0 {
 		return raw
 	}
-	sum := sha256.Sum256([]byte(fmt.Sprintf("api-key:%d:%s", apiKeyID, raw)))
-	return hex.EncodeToString(sum[:8])
+	return DeriveStableSessionUUIDv7(fmt.Sprintf("api-key:%d:%s", apiKeyID, raw))
 }
 
 // resolveUpstreamSessionID 决定传给上游的会话/缓存身份键。
@@ -504,7 +511,8 @@ func resolveUpstreamSessionID(apiKeyID int64, upstreamSeed, explicitSessionID st
 		return ""
 	}
 	if explicitSessionID == "" && CurrentRuntimeSettings().IsolateRequestsByDefault() {
-		return uuid.NewString()
+		// v7 而非 v4：这是默认路径，绝大多数出站请求的会话键都由这里产出。
+		return NewUpstreamSessionUUID()
 	}
 	return IsolateCodexSessionID(apiKeyID, upstreamSeed)
 }
@@ -514,6 +522,12 @@ func resolveUpstreamSessionID(apiKeyID int64, upstreamSeed, explicitSessionID st
 // useWebsocket 可选：未传时遵循全局强制 WS；传 true/false 时由调用方显式控制。
 // headers 下游请求头，用于设备指纹学习
 func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, useWebsocket ...bool) (*http.Response, error) {
+	// Defense in depth: this executor sends account.AccessToken to ChatGPT.
+	// Relay/Grok/Antigravity credentials must never cross that provider boundary,
+	// even if a future routing regression selects the wrong account type.
+	if account == nil || account.IsRelayStyle() {
+		return nil, ErrNoAvailableAccount()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -560,7 +574,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 					// 身份隔离（互不串味）；连接池 baseKey 用稳定的确定性键单独传，保住 8 槽复用与
 					// 抗握手限流(503)。注意：上游会话隔离靠帧体 prompt_cache_key，而非握手头
 					// Session_id/Conversation_id（后者对复用连接是逐连接、非逐请求）。
-					requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", uuid.NewString())
+					requestBody, _ = sjson.SetBytes(requestBody, "prompt_cache_key", NewUpstreamSessionUUID())
 					poolRouteKey = det
 					if poolRouteKey == "" {
 						// det 仅在既无 API Key 又无账号 ID 时为空（生产路径不可达）；用固定哨兵兜底，
@@ -649,6 +663,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 
 	endpoint := CodexBaseURL + "/responses"
 
+	// 出站字节在选客户端之前定稿：send() 会因 Agent Identity 401 重注册而重放，
+	// 两次重放必须发同一份字节。routing hint 等需要读字段的改写点继续用明文
+	// requestBody——它们解析 JSON，拿到压缩帧只会静默失配。
+	outboundBody, contentEncoding := CompressCodexRequestBody(requestBody)
+
 	// Resin 反向代理模式：改写 URL，使用标准 HTTP 客户端
 	var client *http.Client
 	if IsResinEnabled() {
@@ -659,13 +678,19 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	}
 
 	send := func() (*http.Response, error) {
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(requestBody))
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(outboundBody))
 		if err != nil {
 			return nil, ErrInternalError("创建请求失败", err)
 		}
 
 		// ==================== 请求头（伪装 Codex CLI） ====================
 		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
+		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
+		// 不该有能力声明一个与实际字节不符的编码。
+		if contentEncoding != "" {
+			req.Header.Set("Content-Encoding", contentEncoding)
+		}
 		// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 		ApplyCodexRoutingHint(req.Header, account, requestBody)
 
@@ -886,6 +911,9 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 
 // ExecuteCompactRequest 向 Codex 上游发送 /responses/compact 请求（非流式压缩接口）
 func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header) (*http.Response, error) {
+	if account == nil || account.IsRelayStyle() {
+		return nil, ErrNoAvailableAccount()
+	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1130,7 +1158,9 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
-	req.Header.Set("Connection", "Keep-Alive")
+	// 不发 Connection：这是 HTTP/2 明令禁止的 connection-specific 头（RFC 9113 §8.2.2），
+	// 而 Codex 官方上游走的就是 h2——Go 的 http2 transport 会把它剥掉，剥不掉的代理
+	// 链路上它则是个真实客户端不会有的多余头。真实 Codex 用 reqwest，同样不发。
 	if version != "" {
 		req.Header.Set("Version", version)
 	}
@@ -1158,9 +1188,9 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
-	// Preserve the native Session-Id/Thread-Id relationship. The session key
-	// remains controlled by resolveUpstreamSessionID, while off/device modes
-	// retain the client's raw parent/subagent Thread-Id.
+	// 会话标识头按真实客户端形态写出（session-id / thread-id / x-client-request-id）；
+	// 收敛开启时与 turn metadata 报同一组身份。CODEX_SESSION_HEADER_MODE=legacy
+	// 可整体退回旧的 Session_id 形态。
 	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
@@ -1253,12 +1283,15 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 		}
 		apiKey := strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
 		if apiKey != "" {
-			upstreamSeed = uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:"+apiKey)).String()
+			// 必须与 deterministicPromptCacheKey 用同一条派生：两处共享种子字符串，
+			// 产出不同就会让 HTTP 与 WS 路径对同一个 API Key 算出两个上游身份。
+			upstreamSeed = DeriveStableSessionUUIDv7("codex2api:prompt-cache:" + apiKey)
 		}
 	}
 	if upstreamSeed == "" {
-		// 最后兜底：本地路由和上游 seed 共享同一个随机 UUID。
-		upstreamSeed = uuid.New().String()
+		// 最后兜底：本地路由和上游 seed 共享同一个随机 UUID。取 v7——apiKeyID<=0 时
+		// IsolateCodexSessionID 会原样返回这个种子，它就直接成了出站会话身份。
+		upstreamSeed = NewUpstreamSessionUUID()
 	}
 
 	affinityID := upstreamSeed
@@ -1472,14 +1505,18 @@ func IsStatelessWebsocketSessionID(sessionID string) bool {
 
 // deterministicPromptCacheKey 生成与 ResolveSessionID 兜底逻辑同源的确定性
 // prompt cache key：优先按下游 API Key 派生，无 API Key 时按账号派生。
+//
+// 产出取 UUIDv7 形态而非 uuid.NewSHA1 的 v5：v5 的版本 nibble 是 5，真实客户端
+// 的 session_id / prompt_cache_key 恒为 v7，这个差异对任何解析 UUID 版本位的
+// 一侧都是直接可见的。同 IsolateCodexSessionID，换格式的代价是一次性 cache miss。
 func deterministicPromptCacheKey(apiKey string, account *auth.Account) string {
 	apiKey = strings.TrimSpace(apiKey)
 	if apiKey != "" {
-		return uuid.NewSHA1(uuid.NameSpaceOID, []byte("codex2api:prompt-cache:"+apiKey)).String()
+		return DeriveStableSessionUUIDv7("codex2api:prompt-cache:" + apiKey)
 	}
 	if account != nil {
 		if id := account.ID(); id > 0 {
-			return uuid.NewSHA1(uuid.NameSpaceOID, []byte(fmt.Sprintf("codex2api:prompt-cache:auth:%d", id))).String()
+			return DeriveStableSessionUUIDv7(fmt.Sprintf("codex2api:prompt-cache:auth:%d", id))
 		}
 	}
 	return ""
@@ -1488,6 +1525,14 @@ func deterministicPromptCacheKey(apiKey string, account *auth.Account) string {
 // ReadSSEStream 从上游 SSE 响应读取事件流
 // callback 返回 true 表示继续读取，false 表示停止
 func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
+	return ReadSSEStreamWithEvent(body, func(_ string, data []byte) bool {
+		return callback(data)
+	})
+}
+
+// ReadSSEStreamWithEvent preserves the optional SSE event field while keeping
+// ReadSSEStream's data-only API compatible for existing callers.
+func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []byte) bool) error {
 	// 使用 sync.Pool 复用缓冲区，减少 GC 压力
 	buf := sseBufferPool.Get().([]byte)
 	defer sseBufferPool.Put(buf)
@@ -1503,8 +1548,11 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 	}()
 
 	var dataLines [][]byte
+	var eventName string
 
 	emitEvent := func() bool {
+		event := eventName
+		eventName = ""
 		if len(dataLines) == 0 {
 			return true
 		}
@@ -1516,7 +1564,7 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 			data = bytes.Join(dataLines, []byte("\n"))
 		}
 		isDone := bytes.Equal(data, []byte("[DONE]"))
-		keepReading := !isDone && callback(data)
+		keepReading := !isDone && callback(event, data)
 		// 清掉 backing array 中的切片引用，避免最后一个大事件一直被
 		// dataLines 的容量槽位持有到整条流结束。
 		for i := range dataLines {
@@ -1524,6 +1572,23 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 		}
 		dataLines = dataLines[:0]
 		return keepReading
+	}
+
+	consumeField := func(line []byte) {
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimPrefix(line, []byte("data:"))
+			data = bytes.TrimPrefix(data, []byte(" "))
+			// 使用 copy 避免底层数组共享导致的内存泄漏
+			dataCopy := make([]byte, len(data))
+			copy(dataCopy, data)
+			dataLines = append(dataLines, dataCopy)
+			return
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			event := bytes.TrimPrefix(line, []byte("event:"))
+			event = bytes.TrimPrefix(event, []byte(" "))
+			eventName = string(event)
+		}
 	}
 
 	for {
@@ -1556,15 +1621,8 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 					continue
 				}
 
-				// 解析 SSE data: 前缀，支持标准多行 data 聚合
-				if bytes.HasPrefix(line, []byte("data:")) {
-					data := bytes.TrimPrefix(line, []byte("data:"))
-					data = bytes.TrimPrefix(data, []byte(" "))
-					// 使用 copy 避免底层数组共享导致的内存泄漏
-					dataCopy := make([]byte, len(data))
-					copy(dataCopy, data)
-					dataLines = append(dataLines, dataCopy)
-				}
+				// 解析 SSE event/data 字段，支持标准多行 data 聚合。
+				consumeField(line)
 			}
 
 			if consumed > 0 {
@@ -1577,13 +1635,7 @@ func ReadSSEStream(body io.Reader, callback func(data []byte) bool) error {
 			if err == io.EOF {
 				if len(lineBuf) > 0 {
 					line := bytes.TrimRight(lineBuf, "\r")
-					if bytes.HasPrefix(line, []byte("data:")) {
-						data := bytes.TrimPrefix(line, []byte("data:"))
-						data = bytes.TrimPrefix(data, []byte(" "))
-						dataCopy := make([]byte, len(data))
-						copy(dataCopy, data)
-						dataLines = append(dataLines, dataCopy)
-					}
+					consumeField(line)
 				}
 				if !emitEvent() {
 					return nil

@@ -315,7 +315,7 @@ func TestCleanRateLimitedSkipsAccountsUsingCredits(t *testing.T) {
 		t.Fatal("drained UsingCredits() = true, want false")
 	}
 
-	store.accounts = []*Account{covered, drained}
+	store.AddAccounts([]*Account{covered, drained})
 
 	// 无 db 时清理不会真正删除，但计数反映了哪些账号被选中。
 	cleaned := store.CleanRateLimitedManual(context.Background())

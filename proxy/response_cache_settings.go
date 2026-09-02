@@ -17,6 +17,7 @@ type ResponseCacheAppliedConfig struct {
 	LocalMaxBytes       int64
 	LocalMaxEntryBytes  int64
 	ReconstructMaxBytes int64
+	WritePolicy         string
 	Generation          int64
 	MaxEntries          int
 	TTL                 time.Duration
@@ -53,6 +54,7 @@ func ApplyResponseCacheSettings(settings database.ResponseCacheSettings) bool {
 	respCache.config.maxBytes = settings.LocalMaxBytes
 	respCache.config.maxEntryBytes = settings.LocalMaxEntryBytes
 	respCache.config.reconstructMaxBytes = settings.ReconstructMaxBytes
+	respCache.config.writePolicy = database.NormalizeResponseCacheWritePolicy(settings.WritePolicy)
 	respCache.generation = settings.Generation
 	respCache.enforceConfigLocked()
 	return true
@@ -70,6 +72,7 @@ func responseCacheAppliedConfigLocked() ResponseCacheAppliedConfig {
 		LocalMaxBytes:       respCache.config.maxBytes,
 		LocalMaxEntryBytes:  respCache.config.maxEntryBytes,
 		ReconstructMaxBytes: respCache.config.reconstructMaxBytes,
+		WritePolicy:         respCache.config.writePolicy,
 		Generation:          respCache.generation,
 		MaxEntries:          respCache.config.maxEntries,
 		TTL:                 respCache.config.ttl,

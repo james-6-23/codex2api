@@ -110,6 +110,11 @@ func TestNormalizeRuntimeSettingsCodexWSSilentRetries(t *testing.T) {
 		t.Fatalf("negative CodexWSSilentRetries normalized to %d, want 0", settings.CodexWSSilentRetries)
 	}
 
+	settings = NormalizeRuntimeSettings(RuntimeSettings{CodexWSSilentRetries: -2})
+	if settings.CodexWSSilentRetries != 0 {
+		t.Fatalf("below-range CodexWSSilentRetries normalized to %d, want 0", settings.CodexWSSilentRetries)
+	}
+
 	settings = NormalizeRuntimeSettings(RuntimeSettings{CodexWSSilentRetries: 99})
 	if settings.CodexWSSilentRetries != 10 {
 		t.Fatalf("oversized CodexWSSilentRetries normalized to %d, want 10", settings.CodexWSSilentRetries)

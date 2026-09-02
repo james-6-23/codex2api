@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
 )
 
 func TestFetchOpenAIResponsesModelIDsSupportsV1BaseURL(t *testing.T) {
@@ -68,6 +70,24 @@ func TestFetchOpenAIResponsesModelIDsAppliesCustomHeadersLast(t *testing.T) {
 	}
 	if !reflect.DeepEqual(models, []string{"gpt-5.6"}) {
 		t.Fatalf("models = %#v", models)
+	}
+}
+
+func TestFetchOpenAIResponsesModelIDsRejectsConfiguredOversizeBody(t *testing.T) {
+	previous := proxy.CurrentRuntimeSettings()
+	next := previous
+	next.ModelsListReadMaxBytes = database.MinModelsListReadMaxBytes
+	proxy.ApplyRuntimeSettings(next)
+	t.Cleanup(func() { proxy.ApplyRuntimeSettings(previous) })
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(strings.Repeat("x", int(database.MinModelsListReadMaxBytes)+1)))
+	}))
+	defer server.Close()
+
+	_, err := fetchOpenAIResponsesModelIDs(context.Background(), server.URL, "sk-test", "", nil)
+	if !errors.Is(err, proxy.ErrModelsListResponseTooLarge) {
+		t.Fatalf("error = %v, want ErrModelsListResponseTooLarge", err)
 	}
 }
 

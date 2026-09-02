@@ -102,7 +102,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: admin
+          - name: admin-a-l
+          - name: admin-m-z
           - name: database
           - name: proxy
           - name: promptfilter
@@ -120,9 +121,11 @@ jobs:
         run: mkdir -p frontend/dist && touch frontend/dist/placeholder
 
       # 重包各占一台 2 核 runner,避免 admin/database/proxy/promptfilter 互相抢核。
+      # admin 按测试名首字母再拆两片:整包 -race 在 2 核 runner 上要 ~12min,
+      # 会撞 go test 的 12m 超时(2026-08-26 main 上连续两次超时失败)。
       - name: Run Go tests with race detector
         run: |
           set -euo pipefail
-          packages="$(bash .github/scripts/go-race-packages.sh '${{ matrix.name }}')"
+          args="$(bash .github/scripts/go-race-packages.sh '${{ matrix.name }}')"
           # shellcheck disable=SC2086
-          go test -race -count=1 -timeout 12m $packages
+          go test -race -count=1 -timeout 12m $args

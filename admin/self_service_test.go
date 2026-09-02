@@ -214,3 +214,47 @@ func TestApproveSelfServiceAccountLoadsIntoPool(t *testing.T) {
 		t.Fatal("批准后 enabled 应为 true")
 	}
 }
+
+func TestUpsertSelfServiceInvalidatesAccountListSnapshot(t *testing.T) {
+	handler, _ := newSelfServiceHandler(t, true)
+	ctx := context.Background()
+	if _, err := handler.rebuildAccountListSnapshot(ctx, database.UpstreamChannelCodex); err != nil {
+		t.Fatalf("warm snapshot: %v", err)
+	}
+
+	seed := tokenCredentialSeed{
+		refreshToken: "rt-snap",
+		accessToken:  "at-snap",
+		email:        "snap@example.com",
+		accountID:    "acct-snap",
+		workspaceID:  "workspace-snap",
+	}
+	id, err := handler.upsertSelfServiceAccount(ctx, "snap@example.com", "", seed, "review@x.com")
+	if err != nil {
+		t.Fatalf("upsertSelfServiceAccount: %v", err)
+	}
+
+	snapshot, err := handler.getAccountListSnapshot(ctx, database.UpstreamChannelCodex)
+	if err != nil {
+		t.Fatalf("getAccountListSnapshot: %v", err)
+	}
+	found := false
+	for _, item := range snapshot.Items {
+		if item.ID == id {
+			found = true
+			if item.Enabled {
+				t.Fatal("待审核账号在快照里应为禁用")
+			}
+			if !containsString(item.Tags, selfServiceTag) {
+				t.Fatalf("快照 tags=%v, want self-service", item.Tags)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatal("提交后列表快照应立刻包含待审核账号")
+	}
+	if snapshot.Summary.SelfServicePending != 1 {
+		t.Fatalf("SelfServicePending=%d, want 1", snapshot.Summary.SelfServicePending)
+	}
+}

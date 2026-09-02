@@ -6,6 +6,7 @@ import {
   estimatePressureForecast,
   getAccountWindowMs,
   hasBurnPrediction,
+  isClaudeUsagePlan,
   selectPoolRunway,
   selectPoolRunwayFromAnalysis,
 } from "./poolRunway.ts";
@@ -32,6 +33,28 @@ test("hasBurnPrediction skips premium 5h when snapshot is missing (#382)", () =>
   const account = baseAccount({ plan_type: "plus", usage_percent_5h: null, reset_5h_at: undefined });
   assert.equal(hasBurnPrediction(account, "5h"), false);
   assert.equal(hasBurnPrediction({ ...account, usage_percent_5h: 40 }, "5h"), true);
+});
+
+test("Claude Max plans participate in native 5h burn prediction", () => {
+  assert.equal(isClaudeUsagePlan("max-5x"), true);
+  assert.equal(isClaudeUsagePlan("max-20x"), true);
+  assert.equal(isClaudeUsagePlan("claude-max-5x"), true);
+  assert.equal(isClaudeUsagePlan("enterprise"), true);
+  assert.equal(
+    hasBurnPrediction(
+      baseAccount({
+        claude_api: true,
+        plan_type: "max-5x",
+        usage_percent_5h: 42,
+      }),
+      "5h",
+    ),
+    true,
+  );
+});
+
+test("Claude free tier does not claim a premium 5h window", () => {
+  assert.equal(isClaudeUsagePlan("free"), false);
 });
 
 test("getAccountWindowMs uses monthly seconds for team long window", () => {

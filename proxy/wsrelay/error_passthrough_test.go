@@ -21,6 +21,9 @@ func TestBuildErrorEvent_UpstreamErrorBecomesFailedEvent(t *testing.T) {
 	if gjson.GetBytes(event, "type").String() != "response.failed" {
 		t.Fatalf("event type = %q, want response.failed", gjson.GetBytes(event, "type").String())
 	}
+	if createdAt := gjson.GetBytes(event, "response.created_at").Int(); createdAt <= 0 {
+		t.Fatalf("response.created_at = %d, want a positive Unix timestamp", createdAt)
+	}
 	// 原始错误内容应保留
 	if msg := gjson.GetBytes(event, "response.error.message").String(); msg != "Unsupported parameter: prompt_cache_retention" {
 		t.Fatalf("error message not preserved: %q", msg)

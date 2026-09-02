@@ -180,6 +180,21 @@ export default function Operations() {
                     icon={<HardDrive className="size-5" />}
                     tone={getPercentTone(overview.memory.percent, 75, 90)}
                     progressPercent={overview.memory.percent}
+                    secondaryProgress={
+                      typeof overview.memory.container_percent === 'number'
+                        ? {
+                            label:
+                              overview.memory.container_source === 'cgroup'
+                                ? t('ops.memoryContainer')
+                                : t('ops.memoryProcess'),
+                            value: `${formatIECBytes(overview.memory.container_used_bytes ?? 0)} / ${formatIECBytes(
+                              overview.memory.container_limit_bytes || overview.memory.total_bytes,
+                            )} (${overview.memory.container_percent.toFixed(1)}%)`,
+                            percent: overview.memory.container_percent,
+                            tone: getPercentTone(overview.memory.container_percent, 75, 90),
+                          }
+                        : undefined
+                    }
                     t={t}
                   />
                   <OpsMetricCard
@@ -270,6 +285,52 @@ export default function Operations() {
                     t={t}
                   />
                 </div>
+                {overview.scheduler ? (
+                  <div className="grid grid-cols-1 gap-4 min-[420px]:grid-cols-2 lg:grid-cols-5">
+                    <OpsMetricCard
+                      label={t('ops.schedulerEngine')}
+                      value={formatSchedulerEngine(overview.scheduler.engine, t)}
+                      sub={overview.scheduler.engine === 'shadow'
+                        ? t('ops.schedulerShadowChecks', { checks: formatNumber(overview.scheduler.shadow_checks), mismatches: formatNumber(overview.scheduler.shadow_mismatches) })
+                        : t('ops.schedulerSelections', { count: formatNumber(overview.scheduler.selection_total) })}
+                      icon={<Gauge className="size-5" />}
+                      tone={overview.scheduler.engine === 'indexed' ? 'normal' : overview.scheduler.engine === 'shadow' ? 'info' : 'warning'}
+                      t={t}
+                    />
+                    <OpsMetricCard
+                      label={t('ops.schedulerFastHit')}
+                      value={`${schedulerFastHitRate(overview.scheduler).toFixed(1)}%`}
+                      sub={t('ops.schedulerSlowScans', { count: formatNumber(overview.scheduler.slow_scanned_accounts) })}
+                      icon={<Zap className="size-5" />}
+                      tone={overview.scheduler.slow_scanned_accounts > 0 && overview.scheduler.engine === 'indexed' ? 'warning' : 'normal'}
+                      t={t}
+                    />
+                    <OpsMetricCard
+                      label={t('ops.schedulerWaiters')}
+                      value={formatNumber(overview.scheduler.waiters)}
+                      sub={t('ops.schedulerWakeups', { count: formatNumber(overview.scheduler.wait_wakeups) })}
+                      icon={<Clock3 className="size-5" />}
+                      tone={overview.scheduler.waiters > Math.max(100, overview.runtime.total_accounts) ? 'warning' : 'normal'}
+                      t={t}
+                    />
+                    <OpsMetricCard
+                      label={t('ops.schedulerRoutingCache')}
+                      value={formatNumber(overview.scheduler.routing_cache_entries)}
+                      sub={t('ops.schedulerRoutingCacheStats', { hits: formatNumber(overview.scheduler.routing_cache_hits), accounts: formatNumber(overview.scheduler.routing_cache_accounts) })}
+                      icon={<Layers className="size-5" />}
+                      tone={overview.scheduler.routing_cache_evictions > 0 ? 'info' : 'normal'}
+                      t={t}
+                    />
+                    <OpsMetricCard
+                      label={t('ops.schedulerOutbox')}
+                      value={formatNumber(overview.scheduler.outbox_backlog)}
+                      sub={t('ops.schedulerOutboxLag', { ms: formatNumber(overview.scheduler.outbox_lag_ms), errors: formatNumber(overview.scheduler.outbox_errors) })}
+                      icon={<Database className="size-5" />}
+                      tone={overview.scheduler.outbox_errors > 0 ? 'danger' : overview.scheduler.outbox_backlog > 1000 || overview.scheduler.outbox_lag_ms > 5000 ? 'warning' : 'normal'}
+                      t={t}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -279,6 +340,11 @@ export default function Operations() {
       </>
     </StateShell>
   )
+}
+
+function schedulerFastHitRate(scheduler: NonNullable<OpsOverviewResponse['scheduler']>) {
+  const decided = scheduler.selection_fast_hit + scheduler.selection_slow_hit
+  return decided > 0 ? (scheduler.selection_fast_hit / decided) * 100 : 0
 }
 
 type ResponseCacheOverview = NonNullable<OpsOverviewResponse['response_cache']>
@@ -488,6 +554,13 @@ function MemoryDetail({ label, value }: { label: string; value: string }) {
   )
 }
 
+const METRIC_TONE_DOT: Record<MetricTone, string> = {
+  normal: 'bg-emerald-500',
+  warning: 'bg-amber-500',
+  danger: 'bg-destructive',
+  info: 'bg-primary',
+}
+
 function OpsMetricCard({
   label,
   value,
@@ -495,6 +568,7 @@ function OpsMetricCard({
   icon,
   tone,
   progressPercent,
+  secondaryProgress,
   t,
 }: {
   label: string
@@ -503,6 +577,7 @@ function OpsMetricCard({
   icon: React.ReactNode
   tone: MetricTone
   progressPercent?: number
+  secondaryProgress?: { label: string; value: string; percent: number; tone: MetricTone }
   t: (key: string) => string
 }) {
   const toneStyle = {
@@ -565,6 +640,21 @@ function OpsMetricCard({
             </div>
           ) : null}
 
+          {secondaryProgress ? (
+            <div className="mt-2.5">
+              <div className="flex items-center justify-between gap-2 text-[11px] text-muted-foreground">
+                <span className="truncate">{secondaryProgress.label}</span>
+                <span className="shrink-0 tabular-nums">{secondaryProgress.value}</span>
+              </div>
+              <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-muted/60">
+                <div
+                  className={cn('h-full rounded-full transition-all duration-500', METRIC_TONE_DOT[secondaryProgress.tone])}
+                  style={{ width: `${Math.min(100, Math.max(0, secondaryProgress.percent))}%` }}
+                />
+              </div>
+            </div>
+          ) : null}
+
           <div className="mt-3 min-w-0 text-[12px] leading-relaxed text-muted-foreground">{sub}</div>
         </div>
       </CardContent>
@@ -598,6 +688,19 @@ function calculateHitRatePercent(hits: number, misses: number): string | null {
 
 function formatNumber(value: number): string {
   return value.toLocaleString()
+}
+
+function formatSchedulerEngine(engine: string, t: (key: string) => string): string {
+  switch (engine) {
+    case 'legacy':
+      return t('settings.schedulerEngineLegacy')
+    case 'shadow':
+      return t('settings.schedulerEngineShadow')
+    case 'indexed':
+      return t('settings.schedulerEngineIndexed')
+    default:
+      return engine
+  }
 }
 
 function formatDateTimeLabel(iso: string): string {

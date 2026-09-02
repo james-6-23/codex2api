@@ -1,8 +1,16 @@
 package admin
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/codex2api/auth"
+	"github.com/gin-gonic/gin"
 )
 
 // TestGrokBatchImportTimeoutScalesWithFiles 批量导入的整体超时必须跟文件数一起涨：
@@ -45,5 +53,87 @@ func TestGrokBatchImportTimeoutCoversMaxFiles(t *testing.T) {
 	}
 	if perFile := got / time.Duration(grokBatchImportMaxFiles); perFile < grokBatchImportPerFileTimeout {
 		t.Fatalf("满额时每个文件只剩 %v，低于 %v", perFile, grokBatchImportPerFileTimeout)
+	}
+}
+
+type grokBatchImportTestResponse struct {
+	Total    int                   `json:"total"`
+	Imported int                   `json:"imported"`
+	Failed   int                   `json:"failed"`
+	Items    []grokBatchImportItem `json:"items"`
+}
+
+func doGrokBatchImport(t *testing.T, handler *Handler, authJSON string) grokBatchImportTestResponse {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{"files": []string{authJSON}})
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+	recorder := httptest.NewRecorder()
+	requestContext, _ := gin.CreateTestContext(recorder)
+	requestContext.Request = httptest.NewRequest(http.MethodPost, "/api/admin/accounts/grok/import", strings.NewReader(string(body)))
+	requestContext.Request.Header.Set("Content-Type", "application/json")
+	handler.BatchImportGrokAccounts(requestContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("BatchImportGrokAccounts status = %d, body=%s", recorder.Code, recorder.Body.String())
+	}
+	var resp grokBatchImportTestResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v, body=%s", err, recorder.Body.String())
+	}
+	return resp
+}
+
+// TestGrokBatchImportRevivesRecycledIdentity 覆盖 issue #602:删除过的 Grok 账号
+// 仍占着凭据身份键,重新导入同一 refresh_token 不能报"已存在"死胡同,
+// 必须把凭据合并回原账号并将其从回收站复活。
+func TestGrokBatchImportRevivesRecycledIdentity(t *testing.T) {
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, nil)
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+	ctx := context.Background()
+
+	authJSON := `{"refresh_token":"rt-issue-602","client_id":"cli-602","user_id":"user-602","email":"u602@example.com"}`
+
+	first := doGrokBatchImport(t, handler, authJSON)
+	if first.Imported != 1 || len(first.Items) != 1 || !first.Items[0].OK {
+		t.Fatalf("first import = %+v, want 1 new account", first)
+	}
+	accountID := first.Items[0].ID
+	if accountID <= 0 {
+		t.Fatalf("first import returned invalid account id: %+v", first.Items[0])
+	}
+
+	// 模拟 UI 删除:软删进回收站并移出运行时池。身份键仍归该账号持有。
+	if err := db.SoftDeleteAccount(ctx, accountID); err != nil {
+		t.Fatalf("SoftDeleteAccount: %v", err)
+	}
+	store.RemoveAccount(accountID)
+
+	second := doGrokBatchImport(t, handler, authJSON)
+	if second.Imported != 1 || len(second.Items) != 1 {
+		t.Fatalf("re-import after delete = %+v, want revive success", second)
+	}
+	item := second.Items[0]
+	if !item.OK || item.Error != "" {
+		t.Fatalf("re-import item = %+v, want ok without error", item)
+	}
+	if item.ID != accountID {
+		t.Fatalf("re-import merged into account %d, want original %d", item.ID, accountID)
+	}
+	if !item.Updated || !item.Revived {
+		t.Fatalf("re-import item = %+v, want updated+revived flags", item)
+	}
+
+	row, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatalf("GetAccountByID: %v", err)
+	}
+	if !strings.EqualFold(row.Status, "active") || !row.Enabled {
+		t.Fatalf("revived account status=%q enabled=%t, want active+enabled", row.Status, row.Enabled)
+	}
+	if store.FindByID(accountID) == nil {
+		t.Fatal("revived account missing from runtime pool")
 	}
 }

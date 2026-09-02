@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
@@ -23,7 +24,7 @@ type statsResponse struct {
 	RateLimited   int   `json:"rate_limited"`
 	Error         int   `json:"error"`
 	TodayRequests int64 `json:"today_requests"`
-	// Channels 按上游渠道（codex/grok）拆分的账号与今日请求计数，
+	// Channels 按上游渠道（codex/grok/antigravity/claude）拆分的账号与今日请求计数，
 	// 供仪表盘在「全部」视图并列展示、渠道视图切换主数字。
 	Channels map[string]statsChannelCounts `json:"channels,omitempty"`
 }
@@ -74,6 +75,7 @@ type MaskedAPIKeyRow struct {
 	AllowedGroupIDs []int64                  `json:"allowed_group_ids"`
 	Limits          database.APIKeyLimits    `json:"limits"`
 	WindowUsage     *APIKeyWindowUsageDetail `json:"window_usage,omitempty"`
+	Enabled         bool                     `json:"enabled"`
 	Status          string                   `json:"status"`
 	LastUsedAt      *string                  `json:"last_used_at,omitempty"`
 	CreatedAt       string                   `json:"created_at"`
@@ -100,7 +102,9 @@ func NewMaskedAPIKeyRow(row *database.APIKeyRow) *MaskedAPIKeyRow {
 		lastResetAt = &formatted
 	}
 	status := "active"
-	if row.IsExpired(time.Now()) {
+	if !row.Enabled {
+		status = "disabled"
+	} else if row.IsExpired(time.Now()) {
 		status = "expired"
 	} else if row.IsQuotaExhausted() {
 		status = "quota_exhausted"
@@ -118,6 +122,7 @@ func NewMaskedAPIKeyRow(row *database.APIKeyRow) *MaskedAPIKeyRow {
 		ExpiresAt:       expiresAt,
 		AllowedGroupIDs: append([]int64(nil), row.AllowedGroupIDs...),
 		Limits:          row.Limits,
+		Enabled:         row.Enabled,
 		Status:          status,
 		CreatedAt:       row.CreatedAt.Format(time.RFC3339),
 	}
@@ -134,20 +139,21 @@ type createAPIKeyResponse struct {
 }
 
 type opsOverviewResponse struct {
-	UpdatedAt      string              `json:"updated_at"`
-	UptimeSeconds  int64               `json:"uptime_seconds"`
-	DatabaseDriver string              `json:"database_driver"`
-	DatabaseLabel  string              `json:"database_label"`
-	CacheDriver    string              `json:"cache_driver"`
-	CacheLabel     string              `json:"cache_label"`
-	CPU            opsCPUResponse      `json:"cpu"`
-	Memory         opsMemoryResponse   `json:"memory"`
-	Runtime        opsRuntimeResponse  `json:"runtime"`
-	Requests       opsRequestsResponse `json:"requests"`
-	Postgres       opsDatabaseResponse `json:"postgres"`
-	Redis          opsRedisResponse    `json:"redis"`
-	Traffic        opsTrafficResponse  `json:"traffic"`
-	ResponseCache  opsResponseCache    `json:"response_cache"`
+	UpdatedAt      string                        `json:"updated_at"`
+	UptimeSeconds  int64                         `json:"uptime_seconds"`
+	DatabaseDriver string                        `json:"database_driver"`
+	DatabaseLabel  string                        `json:"database_label"`
+	CacheDriver    string                        `json:"cache_driver"`
+	CacheLabel     string                        `json:"cache_label"`
+	CPU            opsCPUResponse                `json:"cpu"`
+	Memory         opsMemoryResponse             `json:"memory"`
+	Runtime        opsRuntimeResponse            `json:"runtime"`
+	Requests       opsRequestsResponse           `json:"requests"`
+	Postgres       opsDatabaseResponse           `json:"postgres"`
+	Redis          opsRedisResponse              `json:"redis"`
+	Traffic        opsTrafficResponse            `json:"traffic"`
+	ResponseCache  opsResponseCache              `json:"response_cache"`
+	Scheduler      auth.SchedulerMetricsSnapshot `json:"scheduler"`
 }
 
 type opsCPUResponse struct {
@@ -156,21 +162,28 @@ type opsCPUResponse struct {
 }
 
 type opsMemoryResponse struct {
-	Percent           float64 `json:"percent"`
-	UsedBytes         uint64  `json:"used_bytes"`
-	TotalBytes        uint64  `json:"total_bytes"`
-	ProcessBytes      uint64  `json:"process_bytes"`
-	HeapAllocBytes    uint64  `json:"heap_alloc_bytes"`
-	HeapInuseBytes    uint64  `json:"heap_inuse_bytes"`
-	HeapReleasedBytes uint64  `json:"heap_released_bytes"`
-	NumGC             uint32  `json:"num_gc"`
+	Percent    float64 `json:"percent"`
+	UsedBytes  uint64  `json:"used_bytes"`
+	TotalBytes uint64  `json:"total_bytes"`
+	// ProcessBytes 是进程 RSS;Container* 是 cgroup 口径(含少量非堆开销),
+	// limit 为 0 表示容器未设内存上限,百分比按宿主总内存计算。
+	ProcessBytes        uint64  `json:"process_bytes"`
+	ContainerUsedBytes  uint64  `json:"container_used_bytes"`
+	ContainerLimitBytes uint64  `json:"container_limit_bytes"`
+	ContainerPercent    float64 `json:"container_percent"`
+	ContainerSource     string  `json:"container_source"`
+	HeapAllocBytes      uint64  `json:"heap_alloc_bytes"`
+	HeapInuseBytes      uint64  `json:"heap_inuse_bytes"`
+	HeapReleasedBytes   uint64  `json:"heap_released_bytes"`
+	NumGC               uint32  `json:"num_gc"`
 }
 
 type opsResponseCacheConfig struct {
-	Generation          int64 `json:"generation"`
-	LocalMaxBytes       int64 `json:"local_max_bytes"`
-	LocalMaxEntryBytes  int64 `json:"local_max_entry_bytes"`
-	ReconstructMaxBytes int64 `json:"reconstruct_max_bytes"`
+	Generation          int64  `json:"generation"`
+	LocalMaxBytes       int64  `json:"local_max_bytes"`
+	LocalMaxEntryBytes  int64  `json:"local_max_entry_bytes"`
+	ReconstructMaxBytes int64  `json:"reconstruct_max_bytes"`
+	WritePolicy         string `json:"write_policy"`
 }
 
 type opsResponseCache struct {
@@ -192,6 +205,8 @@ type opsResponseCache struct {
 	OversizeBypasses       uint64                 `json:"oversize_bypasses"`
 	OversizeRejections     uint64                 `json:"oversize_rejections"`
 	KnownUnavailableErrors uint64                 `json:"known_unavailable_errors"`
+	SkippedWrites          uint64                 `json:"skipped_writes"`
+	ChainOwners            int                    `json:"chain_owners"`
 	LastConfigSyncAt       string                 `json:"last_config_sync_at"`
 	LastConfigSyncError    string                 `json:"last_config_sync_error"`
 }

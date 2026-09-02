@@ -39,6 +39,60 @@ func TestForwardGrokNativeNonStreamPreservesJSONAndFiltersHeaders(t *testing.T) 
 	}
 }
 
+func TestCopyClaudeNativeResponseHeadersPreservesUsageMetadata(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	header := http.Header{
+		"anthropic-ratelimit-unified-5h-utilization": []string{"0.42"},
+		"anthropic-ratelimit-unified-5h-reset":       []string{"4102444800"},
+		"anthropic-ratelimit-unified-status":         []string{"allowed"},
+		"anthropic-version":                          []string{"2023-06-01"},
+		"Authorization":                              []string{"Bearer secret"},
+		"Set-Cookie":                                 []string{"secret=1"},
+		"X-Leak":                                     []string{"nope"},
+	}
+	copyClaudeNativeResponseHeaders(ctx, header)
+	if recorder.Header().Get("anthropic-ratelimit-unified-5h-utilization") != "0.42" || recorder.Header().Get("anthropic-version") != "2023-06-01" {
+		t.Fatalf("Claude usage headers were not forwarded: %#v", recorder.Header())
+	}
+	if recorder.Header().Get("Authorization") != "" || recorder.Header().Get("Set-Cookie") != "" || recorder.Header().Get("X-Leak") != "" {
+		t.Fatalf("sensitive/unallowlisted headers leaked: %#v", recorder.Header())
+	}
+}
+
+func TestProtocolNonStreamFailureRejectsPseudoSuccessPayloads(t *testing.T) {
+	tests := []struct {
+		name     string
+		protocol GrokProtocol
+		payload  string
+		failed   bool
+	}{
+		{name: "responses success", protocol: GrokProtocolResponses, payload: `{"id":"resp_ok","status":"completed"}`},
+		{name: "responses missing terminal status", protocol: GrokProtocolResponses, payload: `{"id":"resp_unknown"}`, failed: true},
+		{name: "responses error object", protocol: GrokProtocolResponses, payload: `{"error":{"code":"rate_limited"}}`, failed: true},
+		{name: "responses failed status", protocol: GrokProtocolResponses, payload: `{"id":"resp_bad","status":"failed"}`, failed: true},
+		{name: "responses failed event", protocol: GrokProtocolResponses, payload: `{"type":"response.failed","response":{"status":"failed"}}`, failed: true},
+		{name: "chat error", protocol: GrokProtocolChatCompletions, payload: `{"type":"error","error":{"message":"busy"}}`, failed: true},
+		{name: "chat missing choices", protocol: GrokProtocolChatCompletions, payload: `{"id":"chat_unknown"}`, failed: true},
+		{name: "messages missing message type", protocol: GrokProtocolMessages, payload: `{"id":"message_unknown"}`, failed: true},
+		{name: "invalid JSON", protocol: GrokProtocolResponses, payload: `not-json`, failed: true},
+		{name: "empty", protocol: GrokProtocolResponses, payload: ``, failed: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			outcome, failed := protocolNonStreamFailure(tc.protocol, []byte(tc.payload))
+			if failed != tc.failed {
+				t.Fatalf("failed = %v, want %v; outcome=%#v", failed, tc.failed, outcome)
+			}
+			if failed && (outcome.logStatusCode == http.StatusOK || strings.TrimSpace(outcome.failureMessage) == "") {
+				t.Fatalf("pseudo-success failure was not classified: %#v", outcome)
+			}
+		})
+	}
+}
+
 func TestForwardGrokNativeStreamRequiresTerminalAndEmitsProtocolError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -73,6 +127,80 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputWritesNothing(t *testing.T) 
 	}
 }
 
+func TestForwardGrokNativePrivateAttemptDoesNotPublishFailedHeaders(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header: http.Header{
+			"Content-Type": []string{"text/event-stream"},
+			"X-Request-Id": []string{"failed-attempt-request"},
+			"Retry-After":  []string{"60"},
+		},
+		Body: io.NopCloser(strings.NewReader(
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"private\"}\n\n" +
+				"event: error\ndata: {\"error\":{\"code\":\"future_failure\"}}\n\n",
+		)),
+	}
+	attempt := newContinuousRetryStreamAttempt(true, recorder, recorder)
+	t.Cleanup(func() { _ = attempt.Close() })
+
+	_, outcome, _, _ := forwardGrokNativeResponseTo(
+		ctx, resp, GrokProtocolResponses, true, time.Now(), nil,
+		attempt.writerOr(recorder), attempt.flusherOr(recorder),
+	)
+	if outcome.logStatusCode == http.StatusOK {
+		t.Fatalf("failed attempt outcome = %#v", outcome)
+	}
+	if got := recorder.Header().Get("X-Request-Id"); got != "" {
+		t.Fatalf("failed attempt request id leaked downstream: %q", got)
+	}
+	if got := recorder.Header().Get("Retry-After"); got != "" {
+		t.Fatalf("failed attempt retry header leaked downstream: %q", got)
+	}
+	if recorder.Body.Len() != 0 {
+		t.Fatalf("failed private attempt body leaked downstream: %q", recorder.Body.String())
+	}
+}
+
+func TestForwardGrokNativeTypelessEventErrorStaysPrivateAcrossProtocols(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name     string
+		protocol GrokProtocol
+		path     string
+	}{
+		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses"},
+		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions"},
+		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+				Body: io.NopCloser(strings.NewReader(
+					"event: error\n" +
+						"data: {\"status_code\":503,\"error\":{\"code\":\"server_error\",\"message\":\"busy\"}}\n\n")),
+			}
+
+			_, outcome, wrote, _ := forwardGrokNativeResponse(ctx, resp, tc.protocol, true, time.Now(), nil)
+
+			if wrote || recorder.Body.Len() != 0 {
+				t.Fatalf("typeless event:error leaked downstream: outcome=%#v body=%q", outcome, recorder.Body.String())
+			}
+			if outcome.logStatusCode != http.StatusServiceUnavailable || outcome.failureKind == "" || len(outcome.failurePayload) == 0 {
+				t.Fatalf("typeless event:error was not classified as an upstream failure: %#v", outcome)
+			}
+		})
+	}
+}
+
 func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
@@ -99,6 +227,45 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *
 			(&Handler{}).sendGrokNativeHTTPError(ctx, tc.protocol, outcome)
 			if recorder.Code != safeGrokNativeHTTPStatus(outcome.logStatusCode) || !strings.Contains(recorder.Body.String(), tc.wantType) {
 				t.Fatalf("status/body = %d %s; outcome=%#v", recorder.Code, recorder.Body.String(), outcome)
+			}
+		})
+	}
+}
+
+func TestSendGrokNativeHTTPErrorAfterKeepaliveUsesProtocolEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	tests := []struct {
+		name       string
+		protocol   GrokProtocol
+		path       string
+		wantMarker string
+	}{
+		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses", wantMarker: `"type":"response.failed"`},
+		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions", wantMarker: `"type":"upstream_error"`},
+		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages", wantMarker: "event: error\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
+			stop := installContinuousRetrySSEKeepalive(ctx, true, "text/event-stream")
+			defer stop()
+
+			keepalive := continuousRetryKeepaliveForContext(ctx.Request.Context())
+			keepalive.Activate()
+			requestKeepalive := keepalive.(*requestContinuousRetryKeepalive)
+			requestKeepalive.last = time.Time{}
+			if err := keepalive.Keepalive(); err != nil {
+				t.Fatalf("write keepalive: %v", err)
+			}
+			(&Handler{}).sendGrokNativeHTTPError(ctx, tc.protocol, streamOutcome{
+				logStatusCode:  http.StatusServiceUnavailable,
+				failureMessage: "upstream busy",
+			})
+
+			if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), tc.wantMarker) {
+				t.Fatalf("committed protocol error = status %d body %q", recorder.Code, recorder.Body.String())
 			}
 		})
 	}
@@ -197,13 +364,13 @@ func TestReadRawGrokSSEFramesPreservesBoundariesAndCommentOnlyFrame(t *testing.T
 	reader := &oneByteReader{data: raw}
 	var frames []rawGrokSSEFrame
 	if err := readRawGrokSSEFrames(reader, func(frame rawGrokSSEFrame) bool {
-		copy := rawGrokSSEFrame{Raw: bytes.Clone(frame.Raw), Data: bytes.Clone(frame.Data), HasData: frame.HasData, Done: frame.Done}
+		copy := rawGrokSSEFrame{Raw: bytes.Clone(frame.Raw), Data: bytes.Clone(frame.Data), Event: frame.Event, HasData: frame.HasData, Done: frame.Done}
 		frames = append(frames, copy)
 		return true
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if len(frames) != 3 || frames[0].HasData || string(frames[1].Data) != "first\nsecond" || !frames[2].Done {
+	if len(frames) != 3 || frames[0].HasData || frames[1].Event != "x" || string(frames[1].Data) != "first\nsecond" || !frames[2].Done {
 		t.Fatalf("frames = %#v", frames)
 	}
 	var joined []byte

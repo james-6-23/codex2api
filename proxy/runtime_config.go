@@ -34,26 +34,29 @@ const (
 	RequestIsolationModeIsolated  = "isolated"
 	RequestIsolationModePerAPIKey = "per-api-key"
 
-	defaultClientCompatMode       = ClientCompatModePreserve
-	defaultCodexMinCLIVersion     = "0.144.1"
-	defaultStreamFlushPolicy      = StreamFlushPolicyImmediate
-	defaultStreamFlushIntervalMS  = 20
-	minStreamFlushIntervalMS      = 1
-	maxStreamFlushIntervalMS      = 1000
-	defaultFirstTokenMode         = FirstTokenModeStrict
-	defaultFirstTokenTimeoutSec   = 0
-	maxFirstTokenTimeoutSec       = 600
-	defaultBillingTierPolicy      = BillingTierPolicyActual
-	defaultCodexWSHideErrors      = true
-	defaultCodexWSSilentRetry     = true
-	defaultCodexWSSilentRetries   = 2
-	defaultCodexWSSizeRouter      = true
-	maxCodexWSSilentRetries       = 10
-	defaultCodexWSBusyMaxWaitSec  = 30
-	defaultCodexWSBusyPatienceSec = 2
-	maxCodexWSBusyWaitSec         = 300
-	defaultCodexWSStatelessSlots  = 8
-	maxCodexWSStatelessSlots      = 32
+	defaultClientCompatMode      = ClientCompatModePreserve
+	defaultCodexMinCLIVersion    = "0.144.1"
+	defaultStreamFlushPolicy     = StreamFlushPolicyImmediate
+	defaultStreamFlushIntervalMS = 20
+	minStreamFlushIntervalMS     = 1
+	maxStreamFlushIntervalMS     = 1000
+	defaultFirstTokenMode        = FirstTokenModeStrict
+	defaultFirstTokenTimeoutSec  = 0
+	maxFirstTokenTimeoutSec      = 600
+	defaultBillingTierPolicy     = BillingTierPolicyActual
+	// defaultCodexRequestCompression 对齐真实 Codex CLI：它对 ChatGPT 后端的
+	// HTTP /responses 请求体默认 zstd 压缩，所以网关默认也压。
+	defaultCodexRequestCompression = true
+	defaultCodexWSHideErrors       = true
+	defaultCodexWSSilentRetry      = true
+	defaultCodexWSSilentRetries    = 2
+	defaultCodexWSSizeRouter       = true
+	maxCodexWSSilentRetries        = 10
+	defaultCodexWSBusyMaxWaitSec   = 30
+	defaultCodexWSBusyPatienceSec  = 2
+	maxCodexWSBusyWaitSec          = 300
+	defaultCodexWSStatelessSlots   = 8
+	maxCodexWSStatelessSlots       = 32
 
 	defaultCodexContinueMaxRounds = 8
 	minCodexContinueMaxRounds     = 1
@@ -69,17 +72,24 @@ type RuntimeSettings struct {
 	FirstTokenMode        string
 	FirstTokenTimeoutSec  int
 	BillingTierPolicy     string
-	CodexForceWebsocket   bool // 强制 Codex 上游走 WebSocket（默认 false）
+	// ModelsListReadMaxBytes 是上游 /v1/models 与 Codex 模型清单成功响应的读取上限。
+	ModelsListReadMaxBytes int64
+	CodexForceWebsocket    bool // 强制 Codex 上游走 WebSocket（默认 false）
+	// CodexRequestCompression 对 HTTP /responses 请求体做 zstd 压缩（默认 true，
+	// 与真实 Codex CLI 一致）。与 CodexForceWebsocket 正交：WS 路径走
+	// permessage-deflate（拨号器已开启），本项只作用于 HTTP 路径，两者可同时生效。
+	CodexRequestCompression bool
 	// CodexWSWeakNetworkMode 对 VPN/住宅代理等不稳定链路采用保守复用：
 	// 缩短空闲/最大寿命、每次复用都做真实 Ping/Pong，并暂停空闲保活（默认 false）。
 	CodexWSWeakNetworkMode bool
-	CodexWSHideErrors      bool // 隐藏 Codex WS 上游原始错误（默认 true）
-	CodexWSSilentRetry     bool // 首包前 Codex WS 上游错误静默换号重试（默认 true）
-	CodexWSSilentRetries   int  // Codex WS 静默换号最大重试次数（默认 2）
-	CodexWSSizeRouter      bool // 1009 自学习体积路由：超大请求直接首发 HTTP（默认 true）
-	CodexWSBusyMaxWaitSec  int  // busy session/容量等待的累计上限秒数（默认 30，issue #413）
-	CodexWSBusyOverflow    bool // busy session 溢出到同账号兄弟连接（默认 false）
-	CodexWSBusyPatienceSec int  // 触发溢出前的短等待秒数（默认 2）
+	CodexWSHideErrors      bool                           // 隐藏 Codex WS 上游原始错误（默认 true）
+	CodexWSSilentRetry     bool                           // 首包前 Codex WS 上游错误静默换号重试（默认 true）
+	CodexWSSilentRetries   int                            // Codex WS 静默换号最大重试次数（默认 2）
+	ContinuousRetryPolicy  database.ContinuousRetryPolicy // 上游错误持续重试选择器（默认关闭）
+	CodexWSSizeRouter      bool                           // 1009 自学习体积路由：超大请求直接首发 HTTP（默认 true）
+	CodexWSBusyMaxWaitSec  int                            // busy session/容量等待的累计上限秒数（默认 30，issue #413）
+	CodexWSBusyOverflow    bool                           // busy session 溢出到同账号兄弟连接（默认 false）
+	CodexWSBusyPatienceSec int                            // 触发溢出前的短等待秒数（默认 2）
 	// CodexWSStatelessSlots 无状态请求每 (账号, cacheKey) 维度的持久连接槽位数
 	// （默认 8，范围 1-32，issue #522）。调大→单账号挂更多空闲连接；调小→握手更频繁，
 	// 高 RPM 下可能触发上游握手限流。实际生效值仍受账号动态并发上限钳制。
@@ -127,6 +137,8 @@ type RuntimeSettings struct {
 	AutoResetCreditsEnabled bool
 	// AutoResetCreditsBeforeExpiryMin 是进入自动消费窗口的提前分钟数（默认 60）。
 	AutoResetCreditsBeforeExpiryMin int
+	// AutoActivate5hWindowEnabled 控制 5h 窗口重置后是否发送一次最小真实 /responses 启动下一轮窗口（默认 false，issue #581）。
+	AutoActivate5hWindowEnabled bool
 	// UTLSShutdownTimeoutMin 是 uTLS（CODEX_TRANSPORT_MODE=utls_chrome）连接被摘出
 	// 连接池后，等待其上在途 stream 收尾的上限（分钟，默认 30，范围 1-240）。
 	// 超时则强制关闭，保证异常挂死的 stream 不会把连接永久留住（issue #446）。
@@ -163,9 +175,12 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		FirstTokenMode:                   defaultFirstTokenMode,
 		FirstTokenTimeoutSec:             defaultFirstTokenTimeoutSec,
 		BillingTierPolicy:                defaultBillingTierPolicy,
+		ModelsListReadMaxBytes:           database.DefaultModelsListReadMaxBytes,
+		CodexRequestCompression:          defaultCodexRequestCompression,
 		CodexWSHideErrors:                defaultCodexWSHideErrors,
 		CodexWSSilentRetry:               defaultCodexWSSilentRetry,
 		CodexWSSilentRetries:             defaultCodexWSSilentRetries,
+		ContinuousRetryPolicy:            database.DefaultContinuousRetryPolicy(),
 		CodexWSSizeRouter:                defaultCodexWSSizeRouter,
 		CodexWSBusyMaxWaitSec:            defaultCodexWSBusyMaxWaitSec,
 		CodexWSBusyPatienceSec:           defaultCodexWSBusyPatienceSec,
@@ -251,6 +266,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	settings.StreamFlushPolicy = NormalizeStreamFlushPolicy(settings.StreamFlushPolicy)
 	settings.FirstTokenMode = NormalizeFirstTokenMode(settings.FirstTokenMode)
 	settings.BillingTierPolicy = NormalizeBillingTierPolicy(settings.BillingTierPolicy)
+	settings.ModelsListReadMaxBytes = database.NormalizeModelsListReadMaxBytes(settings.ModelsListReadMaxBytes)
 	settings.RequestIsolationMode = NormalizeRequestIsolationMode(settings.RequestIsolationMode)
 	if strings.TrimSpace(settings.CodexMinCLIVersion) == "" {
 		settings.CodexMinCLIVersion = defaults.CodexMinCLIVersion
@@ -309,6 +325,7 @@ func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
 	}
 	settings.AutoResetCreditsBeforeExpiryMin = database.NormalizeAutoResetCreditsBeforeExpiryMinutes(settings.AutoResetCreditsBeforeExpiryMin)
 	settings.UTLSShutdownTimeoutMin = database.NormalizeUTLSShutdownTimeoutMinutes(settings.UTLSShutdownTimeoutMin)
+	settings.ContinuousRetryPolicy = database.NormalizeContinuousRetryPolicy(settings.ContinuousRetryPolicy)
 	return settings
 }
 
@@ -326,11 +343,17 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.FirstTokenMode = settings.FirstTokenMode
 		next.FirstTokenTimeoutSec = settings.FirstTokenTimeoutSeconds
 		next.BillingTierPolicy = settings.BillingTierPolicy
+		next.ModelsListReadMaxBytes = settings.ModelsListReadMaxBytes
 		next.CodexForceWebsocket = settings.CodexForceWebsocket
+		next.CodexRequestCompression = settings.CodexRequestCompression
 		next.CodexWSWeakNetworkMode = settings.CodexWSWeakNetworkMode
 		next.CodexWSHideErrors = settings.CodexWSHideUpstreamErrors
 		next.CodexWSSilentRetry = settings.CodexWSSilentRetryEnabled
 		next.CodexWSSilentRetries = settings.CodexWSSilentMaxRetries
+		next.ContinuousRetryPolicy = database.ParseContinuousRetryPolicy(settings.ContinuousRetryPolicy)
+		if strings.TrimSpace(settings.ContinuousRetryPolicy) == "" {
+			next.ContinuousRetryPolicy = database.DefaultContinuousRetryPolicy()
+		}
 		next.CodexWSSizeRouter = settings.CodexWSSizeRouterEnabled
 		next.CodexWSBusyMaxWaitSec = settings.CodexWSBusyAcquireMaxWaitSec
 		next.CodexWSBusyOverflow = settings.CodexWSBusyOverflowEnabled
@@ -353,6 +376,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.CodexCLIVersionSyncIntervalHours = settings.CodexCLIVersionSyncIntervalHours
 		next.AutoResetCreditsEnabled = settings.AutoResetCreditsEnabled
 		next.AutoResetCreditsBeforeExpiryMin = settings.AutoResetCreditsBeforeExpiryMin
+		next.AutoActivate5hWindowEnabled = settings.AutoActivate5hWindowEnabled
 		next.UTLSShutdownTimeoutMin = settings.UTLSShutdownTimeoutMinutes
 		// Payload 重写规则不进 RuntimeSettings（编译后独立存放），此处顺带完成启动种子。
 		if err := SetPayloadRulesJSON(settings.PayloadRules); err != nil {

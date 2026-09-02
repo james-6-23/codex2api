@@ -63,7 +63,6 @@ func TestReconcileDispatchStateReloadsChangedResponsesIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	accountID, err := db.InsertOpenAIResponsesAccount(ctx, "relay", map[string]interface{}{
 		"upstream_type": UpstreamOpenAIResponses,
@@ -75,9 +74,16 @@ func TestReconcileDispatchStateReloadsChangedResponsesIdentity(t *testing.T) {
 		t.Fatalf("InsertOpenAIResponsesAccount: %v", err)
 	}
 	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1, FastSchedulerEnabled: true})
+	t.Cleanup(func() {
+		store.Stop()
+		_ = db.Close()
+	})
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init: %v", err)
 	}
+	// Init 启动的 outbox 消费者会异步投影下面这条更新,抢在显式对账之前把
+	// 变更吃掉。这里测的是对账路径本身,先停掉后台消费者保证判定确定。
+	store.Stop()
 	acc := store.FindByID(accountID)
 	if acc == nil {
 		t.Fatal("runtime account missing after Init")
@@ -88,12 +94,9 @@ func TestReconcileDispatchStateReloadsChangedResponsesIdentity(t *testing.T) {
 		t.Fatalf("UpdateOpenAIResponsesAccount: %v", err)
 	}
 
-	changed, err := store.ReconcileDispatchState(ctx)
+	_, err = store.ReconcileDispatchState(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileDispatchState: %v", err)
-	}
-	if !changed {
-		t.Fatal("ReconcileDispatchState reported no change for corrected endpoint identity")
 	}
 	baseURL, apiKey := acc.OpenAIResponsesCredentials()
 	if baseURL != "https://relay.example" || apiKey != "sk-new" {
@@ -127,6 +130,10 @@ func TestApplyOpenAIResponsesConfigUsesPersistedAPIKeySemantics(t *testing.T) {
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init: %v", err)
 	}
+	// 清空 api_key 后该行不再能构造运行时账号,Init 启动的 outbox 消费者一旦
+	// 先于下面的调用轮询到这条更新就会把账号摘掉,ApplyOpenAIResponsesConfig
+	// 随之返回 false。这里测的是同步应用路径,先停掉后台消费者。
+	store.Stop()
 	if err := db.UpdateOpenAIResponsesAccount(ctx, accountID, "relay", map[string]interface{}{
 		"models": []string{"gpt-5.6", "gpt-5.6-mini"},
 	}, ""); err != nil {

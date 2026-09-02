@@ -48,6 +48,10 @@ type grokExportEntry struct {
 	TokenType     string `json:"token_type,omitempty"`
 	RedirectURI   string `json:"redirect_uri,omitempty"`
 	Disabled      bool   `json:"disabled"`
+	// 代理三件套只在 include_proxy=1 时写出，语义与 CPA 导出一致。
+	ProxyURL     string `json:"proxy_url,omitempty"`
+	ProxyLabel   string `json:"proxy_label,omitempty"`
+	ProxyEnabled *bool  `json:"proxy_enabled,omitempty"`
 
 	// exportFileName 是该条目在 ZIP 里的文件名，未导出字段本就不参与序列化。
 	exportFileName string
@@ -69,8 +73,8 @@ func marshalGrokExportEntry(entry grokExportEntry) ([]byte, error) {
 }
 
 // grokAccountRowToExportEntry 把账号行转成导出条目。凭据两者皆空时返回 ok=false
-// （没有可迁移的东西）。
-func grokAccountRowToExportEntry(row *database.AccountRow) (grokExportEntry, bool) {
+// （没有可迁移的东西）。proxies 决定是否连同账号绑定的代理一起导出。
+func grokAccountRowToExportEntry(row *database.AccountRow, proxies exportProxyResolver) (grokExportEntry, bool) {
 	if row == nil {
 		return grokExportEntry{}, false
 	}
@@ -81,14 +85,18 @@ func grokAccountRowToExportEntry(row *database.AccountRow) (grokExportEntry, boo
 		return grokExportEntry{}, false
 	}
 
+	proxyURL, proxyLabel, proxyEnabled := proxies.resolve(row.ProxyURL)
 	entry := grokExportEntry{
-		Type:        "xai",
-		Email:       row.GetCredential("email"),
-		Sub:         row.GetCredential("account_id"),
-		PlanType:    row.GetCredential("plan_type"),
-		BaseURL:     row.GetCredential("base_url"),
-		LastRefresh: row.UpdatedAt.UTC().Format(time.RFC3339),
-		Disabled:    !row.Enabled,
+		Type:         "xai",
+		Email:        row.GetCredential("email"),
+		Sub:          row.GetCredential("account_id"),
+		PlanType:     row.GetCredential("plan_type"),
+		BaseURL:      row.GetCredential("base_url"),
+		LastRefresh:  row.UpdatedAt.UTC().Format(time.RFC3339),
+		Disabled:     !row.Enabled,
+		ProxyURL:     proxyURL,
+		ProxyLabel:   proxyLabel,
+		ProxyEnabled: proxyEnabled,
 	}
 
 	// API Key 凭据：ParseGrokAuthJSON 认的是 auth_mode=api_key + access_token 位置放 key，
@@ -203,6 +211,7 @@ func (h *Handler) ExportGrokAccounts(c *gin.Context) {
 		return
 	}
 
+	proxies := h.newExportProxyResolver(ctx, exportIncludeProxy(c, false))
 	idSet := parseExportIDSet(idsParam)
 	runtimeMap := make(map[int64]*auth.Account)
 	if filter == "healthy" && h.store != nil {
@@ -225,7 +234,7 @@ func (h *Handler) ExportGrokAccounts(c *gin.Context) {
 				continue
 			}
 		}
-		entry, ok := grokAccountRowToExportEntry(row)
+		entry, ok := grokAccountRowToExportEntry(row, proxies)
 		if !ok {
 			continue
 		}
@@ -244,7 +253,7 @@ func (h *Handler) ExportGrokAccounts(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "序列化导出文件失败: "+err.Error())
 			return
 		}
-		c.Header("Content-Disposition", `attachment; filename="`+grokExportDownloadName(1, "json")+`"`)
+		writeSecretDownloadHeaders(c, grokExportDownloadName(1, "json"))
 		c.Data(http.StatusOK, "application/json; charset=utf-8", encoded)
 		return
 	}
@@ -254,7 +263,7 @@ func (h *Handler) ExportGrokAccounts(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "打包导出文件失败: "+err.Error())
 		return
 	}
-	c.Header("Content-Disposition", `attachment; filename="`+grokExportDownloadName(len(entries), "zip")+`"`)
+	writeSecretDownloadHeaders(c, grokExportDownloadName(len(entries), "zip"))
 	c.Data(http.StatusOK, "application/zip", archive)
 }
 
@@ -267,20 +276,25 @@ func grokExportDownloadName(count int, ext string) string {
 }
 
 // accountRowToExportEntry 按平台分派导出形态：Grok/xAI 账号走 Grok CLI 超集形态，
-// 其余走 CPA(codex) 形态。
+// 传统 Codex 账号走 CPA 形态。Claude OAuth 不进入这个通用导出端点：其 token
+// 不是 Codex auth.json，误导出为 type:"codex" 会导致回灌协议错误并扩大凭据暴露面。
 //
 // 通用导出端点原先对所有账号硬编码 type:"codex"，Grok 账号既被标错类型、又丢掉
 // client_id / token_endpoint / oidc_issuer / principal_* —— 导出的文件回灌必然失败
 // （导入侧对 client_id 是硬要求）。这里按平台分派修掉该问题。
-func accountRowToExportEntry(row *database.AccountRow) (any, bool) {
+func accountRowToExportEntry(row *database.AccountRow, proxies exportProxyResolver) (any, bool) {
+	if row != nil && (strings.EqualFold(strings.TrimSpace(row.Platform), "anthropic") ||
+		strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude)) {
+		return nil, false
+	}
 	if isGrokAccountRow(row) {
-		entry, ok := grokAccountRowToExportEntry(row)
+		entry, ok := grokAccountRowToExportEntry(row, proxies)
 		if !ok {
 			return nil, false
 		}
 		return entry, true
 	}
-	entry, ok := accountRowToCPAExportEntry(row)
+	entry, ok := accountRowToCPAExportEntry(row, proxies)
 	if !ok {
 		return nil, false
 	}

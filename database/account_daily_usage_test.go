@@ -67,6 +67,19 @@ func TestAccountDailyUsageSumAndPrune(t *testing.T) {
 	if got := totals[1]; got.Credits != 75 || got.TotalTokens != 30 || got.Turns != 5 {
 		t.Fatalf("account 1 totals = %#v", got)
 	}
+	older := now.AddDate(0, 0, -20).Format("2006-01-02")
+	if err := db.UpsertAccountDailyUsage(ctx, AccountDailyUsageInput{
+		AccountID: 1, Day: older, Credits: 10, TotalTokens: 4, Turns: 1, Settled: true,
+	}); err != nil {
+		t.Fatalf("upsert older snapshot: %v", err)
+	}
+	all, err := db.SumAccountDailyUsage(ctx, []int64{1}, 365)
+	if err != nil {
+		t.Fatalf("SumAccountDailyUsage 365: %v", err)
+	}
+	if got := all[1]; got.Credits != 85 || got.TotalTokens != 34 || got.Turns != 6 {
+		t.Fatalf("account 1 365d totals = %#v, want credits=85", got)
+	}
 	if got := totals[2]; got.Credits != 75 || got.TotalTokens != 30 || got.Turns != 4 {
 		t.Fatalf("account 2 totals = %#v", got)
 	}

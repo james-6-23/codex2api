@@ -41,7 +41,7 @@ func grokOAuthRow() *database.AccountRow {
 }
 
 func TestGrokAccountRowToExportEntryOAuth(t *testing.T) {
-	entry, ok := grokAccountRowToExportEntry(grokOAuthRow())
+	entry, ok := grokAccountRowToExportEntry(grokOAuthRow(), exportProxyResolver{})
 	if !ok {
 		t.Fatalf("OAuth 账号应可导出")
 	}
@@ -91,12 +91,26 @@ func TestGrokAccountRowToExportEntryOAuth(t *testing.T) {
 	}
 }
 
+func TestAccountRowToExportEntrySkipsClaudeOAuth(t *testing.T) {
+	row := &database.AccountRow{
+		Platform: "anthropic",
+		Credentials: map[string]interface{}{
+			"upstream_type": auth.UpstreamClaude,
+			"access_token":  "claude-access",
+			"refresh_token": "claude-refresh",
+		},
+	}
+	if entry, ok := accountRowToExportEntry(row, exportProxyResolver{}); ok || entry != nil {
+		t.Fatalf("generic Codex export must skip Claude OAuth, entry=%#v ok=%v", entry, ok)
+	}
+}
+
 // TestGrokExportRoundTripsThroughImporter 是补字段这个决策的验证点：
 // 导出的文件必须能被 ParseGrokAuthJSON 解回来，且 client_id 不依赖 access_token
 // 的 JWT claims —— AT 过期或缺失时也要能凭 refresh_token 继续刷新。
 func TestGrokExportRoundTripsThroughImporter(t *testing.T) {
 	row := grokOAuthRow()
-	entry, ok := grokAccountRowToExportEntry(row)
+	entry, ok := grokAccountRowToExportEntry(row, exportProxyResolver{})
 	if !ok {
 		t.Fatalf("导出失败")
 	}
@@ -155,7 +169,7 @@ func TestGrokExportAPIKeyRoundTrip(t *testing.T) {
 		},
 		UpdatedAt: time.Now(),
 	}
-	entry, ok := grokAccountRowToExportEntry(row)
+	entry, ok := grokAccountRowToExportEntry(row, exportProxyResolver{})
 	if !ok {
 		t.Fatalf("API Key 账号应可导出")
 	}
@@ -202,7 +216,7 @@ func TestGrokExportFillsMissingOIDCDefaults(t *testing.T) {
 		},
 		UpdatedAt: time.Now(),
 	}
-	entry, ok := grokAccountRowToExportEntry(row)
+	entry, ok := grokAccountRowToExportEntry(row, exportProxyResolver{})
 	if !ok {
 		t.Fatalf("导出失败")
 	}
@@ -230,7 +244,7 @@ func TestGrokAccountRowToExportEntrySkipsCredentialless(t *testing.T) {
 		Platform:    "xai",
 		Credentials: map[string]interface{}{"upstream_type": auth.UpstreamGrok, "email": "x@y.z"},
 	}
-	if _, ok := grokAccountRowToExportEntry(row); ok {
+	if _, ok := grokAccountRowToExportEntry(row, exportProxyResolver{}); ok {
 		t.Fatalf("无任何凭据的账号不应被导出")
 	}
 }
@@ -238,7 +252,7 @@ func TestGrokAccountRowToExportEntrySkipsCredentialless(t *testing.T) {
 func TestGrokExportEntryDisabledReflectsEnabled(t *testing.T) {
 	row := grokOAuthRow()
 	row.Enabled = false
-	entry, _ := grokAccountRowToExportEntry(row)
+	entry, _ := grokAccountRowToExportEntry(row, exportProxyResolver{})
 	if !entry.Disabled {
 		t.Fatalf("enabled=false 应导出 disabled=true")
 	}
@@ -294,7 +308,7 @@ func TestGrokExportDownloadName(t *testing.T) {
 // TestBuildGrokExportZIPMembersUseEmailNames ZIP 内部成员按 <邮箱>.json 命名，
 // 下载物改名不影响成员命名——成员名承载账号身份，也是解开后逐个导入的依据。
 func TestBuildGrokExportZIPMembersUseEmailNames(t *testing.T) {
-	entry, ok := grokAccountRowToExportEntry(grokOAuthRow())
+	entry, ok := grokAccountRowToExportEntry(grokOAuthRow(), exportProxyResolver{})
 	if !ok {
 		t.Fatalf("导出失败")
 	}
@@ -325,7 +339,7 @@ func TestBuildGrokExportZIPDedupesSharedEmail(t *testing.T) {
 	}
 	entries := make([]grokExportEntry, 0, len(rows))
 	for _, row := range rows {
-		entry, ok := grokAccountRowToExportEntry(row)
+		entry, ok := grokAccountRowToExportEntry(row, exportProxyResolver{})
 		if !ok {
 			t.Fatalf("账号 %d 导出失败", row.ID)
 		}
@@ -403,7 +417,7 @@ func TestBuildGrokExportZIP(t *testing.T) {
 // TestAccountRowToExportEntryDispatchesByPlatform 通用导出端点原先把 Grok 账号
 // 也标成 type:"codex" 且丢掉 Grok 字段，导出的文件回灌必然失败。
 func TestAccountRowToExportEntryDispatchesByPlatform(t *testing.T) {
-	grokEntry, ok := accountRowToExportEntry(grokOAuthRow())
+	grokEntry, ok := accountRowToExportEntry(grokOAuthRow(), exportProxyResolver{})
 	if !ok {
 		t.Fatalf("Grok 行应可导出")
 	}
@@ -426,7 +440,7 @@ func TestAccountRowToExportEntryDispatchesByPlatform(t *testing.T) {
 		},
 		UpdatedAt: time.Now(),
 	}
-	codexEntry, ok := accountRowToExportEntry(codexRow)
+	codexEntry, ok := accountRowToExportEntry(codexRow, exportProxyResolver{})
 	if !ok {
 		t.Fatalf("Codex 行应可导出")
 	}

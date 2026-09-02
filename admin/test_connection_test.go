@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +14,15 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
+
+func TestRunSingleBatchTestRejectsAntigravity(t *testing.T) {
+	handler := &Handler{}
+	account := &auth.Account{UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token"}
+	status, message := handler.runSingleBatchTest(context.Background(), account)
+	if status != "failed" || !strings.Contains(message, "Antigravity") {
+		t.Fatalf("runSingleBatchTest() = (%q, %q), want explicit Antigravity rejection", status, message)
+	}
+}
 
 func TestConnectionTestModelValidation(t *testing.T) {
 	if !isSupportedConnectionTestModel("gpt-5.5") {

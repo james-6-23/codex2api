@@ -31,12 +31,15 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 			OversizeBypasses:       47,
 			OversizeRejections:     53,
 			KnownUnavailableErrors: 59,
+			SkippedWrites:          61,
+			ChainOwners:            2,
 		},
 		EffectiveConfig: proxy.ResponseCacheAppliedConfig{
 			Generation:          61,
 			LocalMaxBytes:       64 << 20,
 			LocalMaxEntryBytes:  8 << 20,
 			ReconstructMaxBytes: 32 << 20,
+			WritePolicy:         "always",
 			MaxEntries:          2000,
 		},
 		AppliedConfig: proxy.ResponseCacheAppliedConfig{
@@ -44,6 +47,7 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 			LocalMaxBytes:       64 << 20,
 			LocalMaxEntryBytes:  8 << 20,
 			ReconstructMaxBytes: 32 << 20,
+			WritePolicy:         "always",
 			MaxEntries:          2000,
 		},
 		LastConfigSyncAt:    lastSync,
@@ -97,6 +101,8 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 		"oversize_bypasses",
 		"oversize_rejections",
 		"known_unavailable_errors",
+		"skipped_writes",
+		"chain_owners",
 		"last_config_sync_at",
 		"last_config_sync_error",
 	}
@@ -113,14 +119,15 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 		if err := json.Unmarshal(responseCache[field], &config); err != nil {
 			t.Fatalf("decode %s: %v", field, err)
 		}
-		if len(config) != 4 {
-			t.Fatalf("%s field count = %d, want 4; body=%s", field, len(config), responseCache[field])
+		if len(config) != 5 {
+			t.Fatalf("%s field count = %d, want 5; body=%s", field, len(config), responseCache[field])
 		}
 		for _, configField := range []string{
 			"generation",
 			"local_max_bytes",
 			"local_max_entry_bytes",
 			"reconstruct_max_bytes",
+			"write_policy",
 		} {
 			if _, ok := config[configField]; !ok {
 				t.Fatalf("%s missing %q; body=%s", field, configField, responseCache[field])

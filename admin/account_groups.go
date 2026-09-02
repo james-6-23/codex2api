@@ -13,6 +13,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
@@ -471,8 +472,14 @@ func dedupeInt64(ids []int64) []int64 {
 	return out
 }
 
-// accountRowGroupChannel 返回账号所属的分组渠道:Grok/xAI 账号归 grok,其余归 codex。
+// accountRowGroupChannel 返回账号所属的分组渠道。
 func accountRowGroupChannel(row *database.AccountRow) string {
+	if row != nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamAntigravity) {
+		return database.AccountGroupChannelAntigravity
+	}
+	if row != nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) {
+		return database.AccountGroupChannelClaude
+	}
 	if isGrokAccountRow(row) {
 		return database.AccountGroupChannelGrok
 	}
@@ -515,8 +522,14 @@ func (h *Handler) validateGroupChannelForRows(ctx context.Context, rows []*datab
 }
 
 func groupChannelDisplayName(channel string) string {
-	if channel == database.AccountGroupChannelGrok {
+	switch channel {
+	case database.AccountGroupChannelGrok:
 		return "Grok"
+	case database.AccountGroupChannelAntigravity:
+		return "Antigravity"
+	case database.AccountGroupChannelClaude:
+		return "Claude"
+	default:
+		return "Codex"
 	}
-	return "Codex"
 }

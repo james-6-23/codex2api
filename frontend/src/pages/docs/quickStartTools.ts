@@ -152,7 +152,7 @@ export function resolveTemplate(
     params.set("name", "Codex2API Claude");
     params.set("endpoint", address);
     params.set("apiKey", key);
-    params.set("model", "claude-sonnet-4-5-20250514");
+    params.set("model", "claude-sonnet-4-5");
     params.set("homepage", address);
     params.set("enabled", "true");
     return `ccswitch://v1/import?${params.toString()}`;

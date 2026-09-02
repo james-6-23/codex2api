@@ -225,7 +225,8 @@ const TEMPLATES: Array<{ key: TemplateKey; icon: typeof Wand2; titleKey: string;
   { key: 'custom', icon: Braces, titleKey: 'payloadRules.tplCustomTitle', descKey: 'payloadRules.tplCustomDesc' },
 ]
 
-const EFFORT_LEVELS = ['minimal', 'low', 'medium', 'high', 'xhigh'].map((v) => ({ label: v, value: v }))
+// 与系统设置思考强度别名、后端 normalizeReasoningEffort 对齐；max 仅 gpt-5.6+ 上游接受，旧模型会被钳到 xhigh。
+const EFFORT_LEVELS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'ultra', 'max'].map((v) => ({ label: v, value: v }))
 
 // 上游实际只接受 priority（fast 会映射为 priority），其余值会在发往上游前被剔除
 const SERVICE_TIER_OPTIONS = ['priority', 'fast', 'auto', 'default', 'flex', 'scale'].map((v) => ({ label: v, value: v }))

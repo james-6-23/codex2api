@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -86,6 +87,31 @@ func (e *Error) StatusCode() int {
 	return e.HTTPStatus
 }
 
+// UpstreamStatusCode/UpstreamErrorBody expose the upstream dimensions needed
+// by opt-in retry selectors when an upstream failure arrives as an error
+// rather than a normal HTTP response (for example a WebSocket handshake).
+// They intentionally use distinct names so the existing StatusCode API stays
+// unchanged.
+func (e *Error) UpstreamStatusCode() int {
+	if e == nil || e.Type != ErrorTypeUpstreamError || e.HTTPStatus < 100 || e.HTTPStatus > 999 {
+		return 0
+	}
+	return e.HTTPStatus
+}
+
+func (e *Error) UpstreamErrorBody() []byte {
+	if e == nil || e.Type != ErrorTypeUpstreamError {
+		return nil
+	}
+	body, err := json.Marshal(map[string]any{
+		"error": map[string]string{"code": e.Code, "type": e.Type, "message": e.Message},
+	})
+	if err != nil {
+		return nil
+	}
+	return body
+}
+
 // ToGinH converts the error to a gin.H map for JSON response
 // Format matches OpenAI API error response format
 func (e *Error) ToGinH() gin.H {
@@ -158,17 +184,16 @@ func ErrAccountPoolUsageLimit(message string, planType string, resetsAt int64, r
 
 // ErrUpstream creates an upstream error with cause
 func ErrUpstream(statusCode int, message string, cause error) *Error {
-	if statusCode < 400 || statusCode > 599 {
-		statusCode = http.StatusBadGateway
-	}
 	if message == "" {
 		message = fmt.Sprintf("Upstream request failed (status %d)", statusCode)
 	}
 	return &Error{
-		Code:       ErrorCodeUpstreamError,
-		Message:    message,
-		Type:       ErrorTypeUpstreamError,
-		Retryable:  statusCode == http.StatusTooManyRequests || statusCode == http.StatusServiceUnavailable || statusCode == http.StatusInternalServerError,
+		Code:    ErrorCodeUpstreamError,
+		Message: message,
+		Type:    ErrorTypeUpstreamError,
+		Retryable: statusCode == http.StatusTooManyRequests ||
+			statusCode == http.StatusInternalServerError ||
+			statusCode == http.StatusServiceUnavailable,
 		HTTPStatus: statusCode,
 		Cause:      cause,
 	}
@@ -291,6 +316,9 @@ func StatusCodeFromError(err error) int {
 // ErrorToGinResponse writes the error as a JSON response to the gin context
 func ErrorToGinResponse(c *gin.Context, err error) {
 	if err == nil {
+		return
+	}
+	if !claimContinuousRetryTerminal(c, continuousRetryProtocolOpenAI) {
 		return
 	}
 

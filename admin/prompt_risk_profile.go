@@ -109,20 +109,20 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 	if minScore > 100 {
 		minScore = 100
 	}
+	activityState := strings.ToLower(strings.TrimSpace(c.Query("activity_state")))
+	if activityState != "" && activityState != "all" && activityState != "active" && activityState != "identity_only" {
+		writeError(c, http.StatusBadRequest, "activity_state 必须为 all、active 或 identity_only")
+		return
+	}
 	// 生产画像列表需要聚合近 30 天事件。高流量实例可能包含数十万条记录，
 	// 5 秒会在 SQLite 正常计算完成前主动取消，表现为稳定的 500。
 	ctx, cancel := context.WithTimeout(c.Request.Context(), promptRiskProfileListTimeout)
 	defer cancel()
-	lockTTL := time.Duration(promptfilter.DefaultAdvancedConfig().Enforcement.ConversationLockTTLHours) * time.Hour
-	userCooldownTTL := time.Duration(promptfilter.DefaultAdvancedConfig().Enforcement.UserCyberCooldownMinutes) * time.Minute
-	if h.store != nil {
-		normalized := promptfilter.NormalizeAdvancedConfig(h.store.GetPromptFilterConfig().Advanced)
-		lockTTL = time.Duration(normalized.Enforcement.ConversationLockTTLHours) * time.Hour
-		userCooldownTTL = time.Duration(normalized.Enforcement.UserCyberCooldownMinutes) * time.Minute
-	}
+	lockTTL, userCooldownTTL := h.promptConversationRestrictionTTLs()
 	profiles, total, err := h.db.ListPromptRiskProfiles(ctx, database.PromptRiskProfileQuery{
 		Page: page, PageSize: pageSize, SubjectType: c.Query("subject_type"), Platform: c.Query("platform"),
 		RiskLevel: c.Query("risk_level"), APIKeyID: apiKeyID, AccountID: accountID, MinScore: minScore, Query: c.Query("q"),
+		UpstreamCYOnly: c.Query("cy_only") == "true", ActivityState: activityState,
 		PrioritizeActiveLocks: true, ActiveLocksOnly: c.Query("locked_only") == "true",
 		ConversationLockTTL: lockTTL, UserCyberCooldownTTL: userCooldownTTL,
 	})
@@ -160,15 +160,20 @@ func (h *Handler) GetPromptRiskProfile(c *gin.Context) {
 	trustEventPageSize := positiveQueryInt(c, "trust_event_page_size", 20)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
-	profile, err := h.db.GetPromptRiskProfile(ctx, subjectType, subjectKey)
-	if errors.Is(err, sql.ErrNoRows) {
-		writeError(c, http.StatusNotFound, "风险画像不存在")
-		return
-	}
+	lockTTL, userCooldownTTL := h.promptConversationRestrictionTTLs()
+	profiles, _, err := h.db.ListPromptRiskProfiles(ctx, database.PromptRiskProfileQuery{
+		Page: 1, PageSize: 1, SubjectType: subjectType, SubjectKey: subjectKey,
+		PrioritizeActiveLocks: true, ConversationLockTTL: lockTTL, UserCyberCooldownTTL: userCooldownTTL,
+	})
 	if err != nil {
 		writeInternalError(c, err)
 		return
 	}
+	if len(profiles) == 0 {
+		writeError(c, http.StatusNotFound, "风险画像不存在")
+		return
+	}
+	profile := profiles[0]
 	events, total, err := h.db.ListPromptRiskEvents(ctx, subjectType, subjectKey, database.PromptRiskEventQuery{Page: eventPage, PageSize: eventPageSize})
 	if err != nil {
 		writeInternalError(c, err)
@@ -435,14 +440,7 @@ func (h *Handler) attachPromptConversationLocks(ctx context.Context, profiles []
 	if h == nil || h.db == nil {
 		return
 	}
-	lockTTL := time.Duration(promptfilter.DefaultAdvancedConfig().Enforcement.ConversationLockTTLHours) * time.Hour
-	userCooldownTTL := time.Duration(promptfilter.DefaultAdvancedConfig().Enforcement.UserCyberCooldownMinutes) * time.Minute
-	if h.store != nil {
-		cfg := h.store.GetPromptFilterConfig()
-		normalized := promptfilter.NormalizeAdvancedConfig(cfg.Advanced)
-		lockTTL = time.Duration(normalized.Enforcement.ConversationLockTTLHours) * time.Hour
-		userCooldownTTL = time.Duration(normalized.Enforcement.UserCyberCooldownMinutes) * time.Minute
-	}
+	lockTTL, userCooldownTTL := h.promptConversationRestrictionTTLs()
 	for _, profile := range profiles {
 		if profile == nil {
 			continue
@@ -452,9 +450,20 @@ func (h *Handler) attachPromptConversationLocks(ctx context.Context, profiles []
 			if strings.TrimSpace(profile.SubjectKey) == "" {
 				continue
 			}
-			item, err := h.db.GetActivePromptConversationLockBySessionHashWithTTL(ctx, profile.SubjectKey, lockTTL)
+			item, err := h.db.GetActivePromptConversationLockBySessionHash(ctx, profile.SubjectKey)
 			if err == nil {
-				decoratePromptConversationRestriction(item, database.PromptConversationRestrictionScopeConversation, lockTTL)
+				effectiveTTL := lockTTL
+				if item != nil && item.IdentityKind == database.PromptConversationLockIdentityFingerprintReplay {
+					effectiveTTL = userCooldownTTL
+				}
+				if effectiveTTL > 0 && (item == nil || !item.LockedAt.After(time.Now().UTC().Add(-effectiveTTL))) {
+					item = nil
+				}
+				scope := database.PromptConversationRestrictionScopeConversation
+				if item != nil && item.IdentityKind == database.PromptConversationLockIdentityFingerprintReplay {
+					scope = database.PromptConversationRestrictionScopeFingerprintReplay
+				}
+				decoratePromptConversationRestriction(item, scope, effectiveTTL)
 				profile.ConversationLock = item
 			}
 		case database.PromptRiskSubjectNewAPIUser:
@@ -470,6 +479,15 @@ func (h *Handler) attachPromptConversationLocks(ctx context.Context, profiles []
 			}
 		}
 	}
+}
+
+func (h *Handler) promptConversationRestrictionTTLs() (time.Duration, time.Duration) {
+	advanced := promptfilter.DefaultAdvancedConfig()
+	if h != nil && h.store != nil {
+		advanced = promptfilter.NormalizeAdvancedConfig(h.store.GetPromptFilterConfig().Advanced)
+	}
+	return time.Duration(advanced.Enforcement.ConversationLockTTLHours) * time.Hour,
+		time.Duration(advanced.Enforcement.UserCyberCooldownMinutes) * time.Minute
 }
 
 func decoratePromptConversationRestriction(item *database.PromptConversationLock, scope string, ttl time.Duration) {

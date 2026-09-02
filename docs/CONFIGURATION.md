@@ -47,7 +47,8 @@ Codex2API 采用三层配置架构：
 | `CODEX_MAX_REQUEST_BODY_SIZE_MB` | 否 | 48 | HTTP 请求体上限。后台 MP4 动态壁纸上传最大 40MB，默认值为 multipart 上传预留余量 |
 | `ADMIN_SECRET` | 否 | - | 管理后台登录密钥 |
 | `CODEX_ALLOW_ANONYMOUS` | 否 | `false` | 设为 `true` 时，未配置任何对外 API Key 也允许 `/v1/*` 直接调用（仅限内网测试场景） |
-| `FAST_SCHEDULER_ENABLED` | 否 | `false` | 通过环境变量启用快速调度器（也可在管理后台运行时开启） |
+| `CODEX_SCHEDULER_ENGINE` | 否 | 空 | 调度引擎强制值：`legacy` / `shadow` / `indexed`。设置后优先于数据库配置，适合容器级灰度或紧急回退 |
+| `FAST_SCHEDULER_ENABLED` | 否 | `false` | 旧版兼容开关；未设置 `CODEX_SCHEDULER_ENGINE` 且数据库没有 `SchedulerEngine` 时，`true` 映射为 `indexed` |
 | `TZ` | 否 | UTC | 时区，如 `Asia/Shanghai` |
 
 ### Codex 上游稳定性配置
@@ -64,6 +65,9 @@ Codex2API 采用三层配置架构：
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
 | `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
+| `CODEX_REQUEST_COMPRESSION` | 否 | 跟随系统设置 | 覆盖系统设置「Codex HTTP 请求体压缩」。`zstd`/`on`/`true`/`1` 强制开启，`off`/`false`/`0` 强制关闭，未设置或取值无法识别时以系统设置为准。作为部署级逃生阀存在：DB 不可达或后台打不开时仍可整机切换 |
+| `CODEX_SESSION_HEADER_MODE` | 否 | `native` | 出站会话头形态。`native` 发真实客户端的 `session-id` / `thread-id` / `x-client-request-id`；`legacy` 回退到旧的 `Session_id`（WS 另带 `Conversation_id`） |
+| `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `session-id` 头改用指纹收敛后的会话身份，与 turn metadata 的 `session_id` 对齐。默认关：请求体 `prompt_cache_key` 始终独立隔离，但上游是否也拿该头参与缓存分组无法从客户端源码确认 |
 
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
 
@@ -136,6 +140,10 @@ Codex2API 采用三层配置架构：
 
 系统设置存储在数据库的 `SystemSettings` 表中，可通过管理后台 `/admin/settings` 实时修改。
 
+### 模型列表读取上限
+
+`models_list_read_max_bytes` 限制上游 OpenAI 兼容 `/v1/models` 与 Codex OAuth 模型清单成功响应的最大读取大小。默认 `8,388,608` bytes（8 MiB），管理后台以整数 MiB 展示，允许范围为 1-256 MiB。响应超过上限时请求会明确失败，不会把截断的 JSON 当成完整模型列表解析。
+
 ### Responses 上下文缓存
 
 Responses 连续请求会按 `previous_response_id` 重建上下文。每个 Codex2API 进程都有一层有界 L1 缓存，三个字节预算保存在数据库中；管理台用整数 MiB 展示和修改，管理 API 使用原始字节数。
@@ -163,21 +171,56 @@ Redis 模式会把 response context 保存到共享后端。后端值在重建�
 |------|------|--------|------|------|
 | `MaxConcurrency` | int | 2 | ≥1（无上限） | 单账号最大并发请求数 |
 | `GlobalRPM` | int | 0 | 0-∞ | 全局每分钟请求限制，0 表示不限 |
-| `MaxRetries` | int | 3 | 0-10 | 请求失败最大重试次数 |
-| `MaxRateLimitRetries` | int | 2 | 0-10 | 遇到 429 限流时的最大额外重试次数 |
+| `MaxRetries` | int | 2 | 0-10 | 原有有限重试预算，覆盖传输错误及既有可重试的 5xx（含 500/502/503/504）；`0` 禁用该预算 |
+| `MaxRateLimitRetries` | int | 1 | 0-10 | 原有有限的 429 独立重试预算；`0` 禁用该预算 |
 | `RetryIntervalMS` | int | 0 | 0-30000 | 普通重试前等待的毫秒数；`0` 保持立即重试 |
 | `TransportRetryPolicy` | string | `rotate` | `rotate` / `sticky` | 传输错误重试时换号，或保留同一账号重试 |
-| `FastSchedulerEnabled` | bool | false | - | 启用快速调度器 |
+| `SchedulerEngine` | string | `legacy` | `legacy` / `shadow` / `indexed` | 调度执行引擎；设置页可热切换，跨实例通过数据库 outbox 增量同步 |
+| `FastSchedulerEnabled` | bool | false | - | 旧版兼容字段；新部署应使用 `SchedulerEngine` |
 | `CodexForceWebsocket` | bool | false | - | 强制 Codex 上游走 WebSocket 长连接（复用连接池），更接近官方 CLI 体验；关闭时走原有 HTTP 请求 |
 | `CodexWSKeepaliveEnabled` | bool | false | - | 启用上游 WS 空闲连接保活（后台仅发 Ping，不发起新请求、不消耗账号额度） |
 | `CodexWSKeepaliveIntervalSec` | int | 60 | 10-600 | WS 保活 Ping 间隔（秒），仅在 `CodexWSKeepaliveEnabled` 开启时生效 |
 | `CodexWSHideUpstreamErrors` | bool | true | - | WS 上游最终失败时向客户端隐藏原始错误，返回统一友好提示；原始错误仍记录在后台日志/用量记录 |
 | `CodexWSSilentRetryEnabled` | bool | true | - | WS 首包前遇到限流、额度耗尽、5xx、读取错误或超时时，静默换账号并重建上游 WS |
-| `CodexWSSilentMaxRetries` | int | 2 | 0-10 | WS 静默换号最大重试次数 |
+| `CodexWSSilentMaxRetries` | int | 2 | 0-10 | WS 首包前静默重试上限；`0` 禁用该预算 |
 | `SchedulerMode` | string | `round_robin` | - | 调度模式：`round_robin`（轮询，按调度分权重排序）、`remaining_quota`（优先使用用量少的账号）或 `fill_first`（顺序耗尽：集中使用剩余额度最少的账号，耗尽/限流后切下一个） |
-| `AffinityMode` | string | `bounded` | - | 会话亲和：`bounded`（50 次、5 分钟或账号不健康时重新挑号）、`off`（每次重选）、`strict`（长期粘连） |
+| `AffinityMode` | string | `bounded` | - | 会话亲和：`bounded`（账号不健康或绑定空闲超过 10 分钟时重新挑号，活跃会话不轮换以保住上游 prompt cache）、`off`（每次重选）、`strict`（长期粘连） |
 
 调度优先级先决定账号层级，同一优先级内再比较健康档位、调度分和当前负载；会话亲和只负责复用已绑定账号。多个最终用户共享同一个 API Key 时，下游可传 `X-Codex2API-Affinity-Key`，值会先哈希且仅用于本地账号绑定，不会转发给上游。
+
+调度引擎的推荐上线顺序是 `legacy → shadow → indexed`：
+
+- `legacy` 保留原有全池扫描，作为无停机回退路径。
+- `shadow` 仍由 legacy 选号，每 64 次请求抽样一次索引可用性并在运维页展示一致/差异计数；它用于短时灰度，不建议长期承载全量流量。
+- `indexed` 使用分层内存索引、稀疏 API Key 路由子池和事件驱动等待。账号数增长时，稳态选号不再复制或扫描完整账号切片。
+
+启动会自动创建 `scheduler_outbox` 和 `maintenance_jobs` 及相应索引/触发器，PostgreSQL 与 SQLite 均无需手工迁移。多实例对账号、API Key、分组、代理和调度设置的变化按 outbox 水位增量重放；高频用量计数不会产生调度事件。环境变量 `CODEX_SCHEDULER_ENGINE` 一旦设置，会固定本实例引擎并覆盖管理后台值。
+
+`ContinuousRetryPolicy` 是默认关闭的独立持续重试策略，持久化为 JSON：
+
+```json
+{
+  "enabled": false,
+  "catch_all": false,
+  "categories": ["transport", "http_429", "http_5xx", "stream_error"],
+  "status_codes": [],
+  "error_codes": []
+}
+```
+
+启用后，类别、精确 HTTP 状态码或精确上游错误代码任一命中即可持续重试；`http_4xx`、403、404、上下文错误以及“全部 `response.failed`”等宽泛或确定性故障需要管理员显式选择，501 则已由默认的 `http_5xx` 类别覆盖。普通自选模式不会把未选中的 `invalid_request` 或结构化安全策略拒绝自动升级为无限重试。
+
+`catch_all` 是默认关闭的超级模式。开启后不再依赖已知类别或错误码清单；除明确的上游 `cyber_policy` 外，任何真实上游 HTTP、传输、流读取、`error`、`response.failed` 或未知失败都会进入持续重试，包括永久额度、余额、鉴权、无效请求和其他结构化安全策略错误。明确的上游 `cyber_policy` 始终终止当前请求，不换号、不重放。文本推理只接受上游 HTTP `200` 及协议正常终态；其他状态、失败终态及无终态 EOF 都会丢弃整次尝试并继续。管理界面的超级开关会在一次保存中同时设置 `enabled=true` 和 `catch_all=true`；关闭总开关会同步清除 `catch_all`，避免隐藏启用。
+
+持续重试会把每次流式上游尝试完整暂存；失败整次丢弃，正常终态才一次性回放。因此客户端等待时由 SSE 注释或 Responses WebSocket Ping 保活，但不再实时逐 token 收到生成结果。非流式 JSON（包括 Grok media）在进入无限重试后，会在退避、等待账号、等待响应头和读取响应体时发送标准 HTTP `102 Processing` 信息响应；它不会提交最终 JSON 状态，但中间代理可能丢弃 1xx，仍需依赖墙钟上限和客户端超时。`max_duration_seconds` 设置无限预算的墙钟时间上限（默认 600 秒，范围 1 到 900 秒），从请求第一次进入无限重试时开始，后续尝试不会重置。期限到达会立即取消上游并返回最近一次真实上游失败；仅在尚无失败可返回时使用 `504 upstream_timeout`。普通自选模式不会无限重试未选中的结构化安全策略拒绝；`catch_all` 可覆盖其他拒绝，但不能覆盖明确的上游 `cyber_policy` 或本地重试期限。
+
+单次流式尝试的暂存上限为 64 MiB，前 8 MiB 使用内存，之后写入立即 unlink 的 mode-0600 临时文件；暂存超限或存储失败会作为本地错误立即停止。当前没有跨请求的进程级暂存总预算，高并发环境需要另行限制并发并监控内存与临时磁盘。Responses HTTP 等待期间若 SSE 心跳已提交响应头，最终成功账号的 `X-Codex-Turn-State` 无法再补发，因此实现会省略该头而不会转发失败账号的状态；无法安全展开为自包含请求的账号绑定 continuation 也不会强行换号。
+
+客户端取消、下游写失败、WebSocket 断开、入口校验、账号池/并发调度、本地提示词或输出策略拒绝、暂存资源失败和成功回放失败都立即结束，绝不作为上游错误继续轮换。普通图片请求仍以 5 次为上限，普通 Grok 图片/视频创建仍以 3 次为上限；一旦错误被持续策略选中（含 `catch_all`），就会越过普通上限，直到成功或客户端取消。图片/视频创建可能重复生成和重复扣费，因为上游未必支持可靠幂等键。超级模式还可能持续消耗 token、请求次数、余额、账号配额、暂存内存与磁盘，并长期占用 API Key 与 scope 并发槽位、阻塞较新的请求，必须显式承担风险后开启。
+
+明确的上游 `cyber_policy` 是不可覆盖的安全终态：普通自选与超级模式都会立即停止当前请求，保留本地审计与 signed decision，并按现有策略写入 conversation lock 和已验证用户冷却。它不会作为中间失败被透明吞掉，也不会轮换其他账号重放同一请求。
+
+持续重试等待取 `retry_interval_ms`、带抖动的指数退避（250ms 起步，30 秒封顶）以及有效 `Retry-After`（最多 5 分钟）中的较大值。即使上游持续返回很小的 `Retry-After`，本地退避仍会增长，避免无限模式形成高频请求循环。
 
 ### 测试配置
 
@@ -235,6 +278,12 @@ Redis 模式会把 response context 保存到共享后端。后端值在重建�
 | `AutoCleanRateLimited` | bool | false | 自动清理 429 账号 |
 | `AutoCleanFullUsage` | bool | false | 自动清理满用量账号 |
 | `AutoCleanError` | bool | false | 自动清理错误状态账号 |
+
+### 5h 窗口自动激活
+
+| 字段 | 类型 | 默认值 | 说明 |
+|------|------|--------|------|
+| `AutoActivate5hWindowEnabled` | bool | false | 5h 窗口重置后自动发送一次最小真实 `/responses`，用于启动下一轮 5h 计时（issue #581）。默认关闭，开启会消耗少量真实额度。只对上游明确返回 5h 窗口和重置时间的账号生效；每个窗口最多一次。账号不可用、被自动暂停或没有 5h 窗口时跳过。不调用 `rate-limit-reset-credits/consume`，也不同于零成本 `wham/usage` 到点探针。 |
 
 ### 安全设置
 

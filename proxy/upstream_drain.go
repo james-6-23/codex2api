@@ -32,6 +32,13 @@ func newDrainableUpstreamContext(clientCtx context.Context, drainTimeout time.Du
 	go func() {
 		select {
 		case <-clientCtx.Done():
+			// A newer ingress request has already taken ownership of this exact
+			// session. Draining the obsolete upstream for five more seconds would
+			// retain its account/concurrency lease and defeat the handoff.
+			if continuousRetryDeadlineExceeded(clientCtx) || isResponsesWSSessionPreempted(clientCtx) {
+				cancelUpstream()
+				return
+			}
 			timer := time.NewTimer(drainTimeout)
 			defer timer.Stop()
 			select {

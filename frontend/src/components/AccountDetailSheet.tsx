@@ -290,6 +290,7 @@ export default function AccountDetailSheet({
   );
   const rateWindow = account ? getRateLimitWindow(account) : null;
   const isGrok = Boolean(account?.grok_api);
+  const isClaude = Boolean(account?.claude_api);
   // Grok API Key 无 refresh_token；Codex AT-only / Responses 也不走 AT 刷新。
   const refreshDisabled = Boolean(
     account &&
@@ -298,12 +299,13 @@ export default function AccountDetailSheet({
         account.openai_responses_api ||
         (isGrok && account.grok_auth_kind !== "oauth")),
   );
-  // auth.json / 额度券是 Codex 订阅路径专属，Grok 不展示。
+  // 凭据导出由各 provider 自己决定格式；Claude 使用专用安全导出端点，
+  // Grok 仍由其专用页面处理。旧的 Codex auth.json 行为保持不变。
   const showAuthJson = Boolean(account && !isGrok);
-  const showResetCredits = Boolean(account && !isGrok);
+  const showResetCredits = Boolean(account && !isGrok && !isClaude);
   const authJsonDisabled = Boolean(
     account &&
-      (authJsonExporting || account.at_only || account.openai_responses_api),
+      (authJsonExporting || (!isClaude && (account.at_only || account.openai_responses_api))),
   );
   const resetCredits = account?.rate_limit_reset_credits ?? 0;
   const healthLabel = (() => {
@@ -348,7 +350,9 @@ export default function AccountDetailSheet({
             <div className="flex items-start justify-between gap-3 pr-2">
               <div className="flex min-w-0 flex-1 items-start gap-3">
                 <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-card ring-1 ring-border shadow-sm">
-                  {account.grok_api ? (
+                  {account.claude_api ? (
+                    <ChannelLogo channel="claude" size={22} />
+                  ) : account.grok_api ? (
                     <ChannelLogo channel="grok" size={22} />
                   ) : account.openai_responses_api ? (
                     <ModelLogo model="openai" variant="plain" size={22} />
@@ -757,6 +761,7 @@ export default function AccountDetailSheet({
               account.at_only ||
               account.openai_responses_api ||
               account.grok_api ||
+              account.claude_api ||
               account.base_url ||
               (!account.openai_responses_api &&
                 (account.models?.length ?? 0) > 0)) && (
@@ -780,6 +785,14 @@ export default function AccountDetailSheet({
                       <span className="font-medium text-foreground">
                         {t("accounts.detailApiResponses")}
                       </span>
+                    </div>
+                  )}
+                  {isClaude && (
+                    <div className="flex justify-between gap-3">
+                      <span className="text-muted-foreground">
+                        {t("accounts.detailAuthType")}
+                      </span>
+                      <span className="font-medium text-foreground">{t("claude.authOAuth")}</span>
                     </div>
                   )}
                   {isGrok && (
@@ -877,7 +890,9 @@ export default function AccountDetailSheet({
                 <RefreshCw
                   className={`size-3.5 ${refreshing ? "animate-spin" : ""}`}
                 />
-                {isGrok
+                {isClaude
+                  ? t("claude.actionRefresh")
+                  : isGrok
                   ? t("grok.actionRefresh")
                   : t("accounts.actionRefreshAT")}
               </Button>
@@ -890,7 +905,7 @@ export default function AccountDetailSheet({
                   onClick={onGenerateAuthJson}
                 >
                   <FileJson className="size-3.5" />
-                  {t("accounts.actionAuthJson")}
+                  {isClaude ? t("claude.exportCredential") : t("accounts.actionAuthJson")}
                 </Button>
               )}
               <Button

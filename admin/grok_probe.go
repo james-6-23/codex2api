@@ -2,54 +2,75 @@ package admin
 
 import (
 	"context"
+	"database/sql"
+	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy"
+	"github.com/google/uuid"
 )
 
 const (
-	// The shortest persisted fact TTL is 30 seconds (hot/exhausted billing), so
-	// the read-only scanner must wake at least this often. It does no inference
-	// generation and is intentionally independent from the operator probe switch.
-	grokFreshnessScanInterval = 30 * time.Second
 	// grokProbeRunGuard 单轮探测的整体超时兜底,避免异常账号把整轮卡死。
-	grokProbeRunGuard = 15 * time.Minute
+	grokProbeRunGuard           = 15 * time.Minute
+	grokMaintenancePollInterval = time.Second
+	grokMaintenanceLease        = 20 * time.Minute
+	// 批量与探测信号量(4)对齐:领 100 个但一次只能跑 4 个,队尾任务会在
+	// 20 分钟租约内跑不到而被其它副本重复领取。
+	grokMaintenanceBatchSize = 8
 )
 
+var errGrokMaintenanceProjectionIncomplete = errors.New("grok maintenance projection remains incomplete")
+
+func grokRowUpstreamType(row *database.AccountRow) string {
+	if row == nil {
+		return ""
+	}
+	if value, ok := row.Credentials["upstream_type"].(string); ok {
+		return value
+	}
+	return ""
+}
+
 // StartGrokStatusProbe starts two independent maintenance loops:
-//   - an always-on, read-only 30-second freshness scan for control-plane facts
-//     and model catalogs, followed by a one-time native capability rebuild when
-//     the current credential generation has no fresh capability facts;
+//   - an always-on due_at queue for control-plane facts, model catalogs, and
+//     native capabilities. The queue is leased across replicas and therefore
+//     does not rescan every Grok account every 30 seconds;
 //   - the historical inference connectivity probe, still governed by the
 //     operator's GrokProbeEnabled switch and configured interval.
 //
 // This separation is security-relevant: disabling generation probes must not
 // let a live plan, allow_access gate, balance, or catalog remain stale forever.
 func (h *Handler) StartGrokStatusProbe(ctx context.Context) {
-	if h == nil || h.store == nil {
+	if h == nil || h.store == nil || h.db == nil {
 		return
 	}
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// Refresh once at startup, then at the shortest fact freshness. The worker
-	// only selects expired observations, so a hot billing row does not cause
-	// user/settings/catalog requests every 30 seconds.
+	// One startup seed repairs rows created by older versions. New/changed Grok
+	// accounts are enqueued by database triggers thereafter.
 	h.startDBBackgroundTaskWithParent(ctx, func(ctx context.Context) {
-		h.runGrokFreshnessScan(ctx)
-		ticker := time.NewTicker(grokFreshnessScanInterval)
+		if err := h.db.SeedGrokMaintenanceJobs(ctx, time.Now()); err != nil {
+			log.Printf("[grok-maintenance] 初始化到期任务失败: %v", err)
+		}
+		owner := "grok-" + uuid.NewString()
+		h.runDueGrokMaintenanceJobs(ctx, owner)
+		ticker := time.NewTicker(grokMaintenancePollInterval)
 		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				h.runGrokFreshnessScan(ctx)
+				h.runDueGrokMaintenanceJobs(ctx, owner)
 			}
 		}
 	})
@@ -78,6 +99,185 @@ func (h *Handler) StartGrokStatusProbe(ctx context.Context) {
 			h.runGrokStatusProbe(ctx)
 		}
 	})
+}
+
+func (h *Handler) runDueGrokMaintenanceJobs(ctx context.Context, owner string) {
+	if h == nil || h.db == nil || h.store == nil || ctx.Err() != nil {
+		return
+	}
+	jobs, err := h.db.ClaimMaintenanceJobs(ctx, database.MaintenanceJobGrokFreshness, owner, time.Now(), grokMaintenanceLease, grokMaintenanceBatchSize)
+	if err != nil {
+		if !errors.Is(err, context.Canceled) {
+			log.Printf("[grok-maintenance] 领取到期任务失败: %v", err)
+		}
+		return
+	}
+	if len(jobs) == 0 {
+		return
+	}
+	started := time.Now()
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	completed, failed := 0, 0
+	for _, job := range jobs {
+		job := job
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := h.runOneGrokMaintenanceJob(ctx, owner, job); err != nil {
+				retryDelay := time.Minute
+				if job.Attempts > 1 {
+					retryDelay = time.Duration(min(job.Attempts, 5)) * time.Minute
+				}
+				failCtx, failCancel := context.WithTimeout(context.Background(), 10*time.Second)
+				if failErr := h.db.FailMaintenanceJob(failCtx, job.EntityID, job.JobKind, owner, time.Now().Add(retryDelay), err); failErr != nil {
+					log.Printf("[grok-maintenance] 记录任务失败状态出错 (账号 %d): %v", job.EntityID, failErr)
+				}
+				failCancel()
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				return
+			}
+			mu.Lock()
+			completed++
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if completed > 0 || failed > 0 {
+		log.Printf("[grok-maintenance] 到期任务完成: claimed=%d completed=%d failed=%d 耗时=%s", len(jobs), completed, failed, time.Since(started).Round(time.Millisecond))
+	}
+}
+
+func (h *Handler) runOneGrokMaintenanceJob(ctx context.Context, owner string, job database.MaintenanceJob) error {
+	account := h.store.FindByID(job.EntityID)
+	if account == nil {
+		// 本地投影可能落后于触发器入队(账号由其它副本刚创建)。只有数据库
+		// 确认账号已删/非 Grok 才删任务,否则报错走退避重试等投影跟上。
+		row, err := h.db.GetAccountByID(ctx, job.EntityID)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if row == nil || err != nil || !strings.EqualFold(strings.TrimSpace(grokRowUpstreamType(row)), "grok") || !row.Enabled {
+			return h.db.DeleteMaintenanceJob(ctx, job.EntityID, job.JobKind)
+		}
+		return fmt.Errorf("账号 %d 尚未投影到本地调度池,稍后重试", job.EntityID)
+	}
+	if !account.IsGrokAPI() {
+		return h.db.DeleteMaintenanceJob(ctx, job.EntityID, job.JobKind)
+	}
+	if atomic.LoadInt32(&account.DispatchPaused) != 0 {
+		// 运行时暂停≠删号:改期重试。数据库层 enabled=0 的任务删除由触发器
+		// 负责;触发器已删行时 CompleteMaintenanceJob 返回 ErrNoRows,忽略。
+		if err := h.db.CompleteMaintenanceJob(ctx, job.EntityID, job.JobKind, owner, time.Now().Add(30*time.Minute)); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		return nil
+	}
+	select {
+	case grokImportProbeSlots <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-grokImportProbeSlots }()
+
+	jobCtx, cancel := context.WithTimeout(ctx, grokProbeRunGuard)
+	defer cancel()
+	state, err := h.db.GetGrokAccountState(jobCtx, job.EntityID)
+	if err != nil {
+		return err
+	}
+	selection := grokPersistedStateRefreshSelection(account, state, time.Now())
+	if !selection.empty() {
+		result, syncErr := h.syncGrokAccountStateSelected(jobCtx, job.EntityID, selection)
+		if syncErr != nil {
+			return syncErr
+		}
+		state = result.State
+	}
+	generation := account.GetCredentialGeneration()
+	if generation <= 0 {
+		generation = 1
+	}
+	if grokGenerationNeedsCapabilityProbe(account, state, generation, time.Now()) {
+		result, probeErr := h.runGrokCapabilityProbe(jobCtx, job.EntityID, false)
+		if probeErr != nil {
+			return probeErr
+		}
+		state = result.State
+	}
+	nextDue, err := grokNextMaintenanceDue(account, state, time.Now())
+	if err != nil {
+		// Persisted upstream failures deliberately expire immediately. Treating
+		// that state as a successful one-second reschedule would create a tight
+		// retry loop during an outage. Returning an error keeps the generic job's
+		// attempt count and activates the bounded 1..5 minute backoff above.
+		return err
+	}
+	return h.db.CompleteMaintenanceJob(jobCtx, job.EntityID, job.JobKind, owner, nextDue)
+}
+
+func grokNextMaintenanceDue(account *auth.Account, state *database.GrokAccountState, now time.Time) (time.Time, error) {
+	if account == nil || state == nil {
+		return time.Time{}, errGrokMaintenanceProjectionIncomplete
+	}
+	generation := account.GetCredentialGeneration()
+	if generation <= 0 {
+		generation = 1
+	}
+	if state.CredentialGeneration != generation {
+		return time.Time{}, errGrokMaintenanceProjectionIncomplete
+	}
+	next := now.Add(24 * time.Hour)
+	consider := func(value time.Time) bool {
+		if value.IsZero() || !value.After(now) {
+			return false
+		}
+		if value.Before(next) {
+			next = value
+		}
+		return true
+	}
+	if account.GrokAuthKind() == auth.GrokAuthKindOAuth {
+		for _, kind := range []string{database.GrokFactUser, database.GrokFactSettings, database.GrokFactBilling, database.GrokFactAutoTopup} {
+			fact, ok := state.Facts[kind]
+			if !ok || fact.CredentialGeneration != generation || !consider(fact.ExpiresAt) {
+				return time.Time{}, errGrokMaintenanceProjectionIncomplete
+			}
+		}
+	}
+	origin, _ := account.GrokCredentials()
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	catalogFound := false
+	for _, catalog := range state.Catalogs {
+		if catalog.Snapshot.CredentialGeneration == generation && strings.EqualFold(strings.TrimRight(strings.TrimSpace(catalog.Snapshot.Origin), "/"), origin) && catalog.Snapshot.Status == "ok" {
+			catalogFound = true
+			if !consider(catalog.Snapshot.ExpiresAt) {
+				return time.Time{}, errGrokMaintenanceProjectionIncomplete
+			}
+			break
+		}
+	}
+	if !catalogFound {
+		return time.Time{}, errGrokMaintenanceProjectionIncomplete
+	}
+	targets, _ := grokCapabilityProbeTargets(account, state, generation)
+	capabilities := make(map[string]database.GrokModelCapability, len(state.Capabilities))
+	for _, capability := range state.Capabilities {
+		if capability.CredentialGeneration == generation {
+			capabilities[grokCapabilityProbeKey(capability.ModelID, capability.Origin, capability.Protocol)] = capability
+		}
+	}
+	for _, target := range targets {
+		for _, protocol := range []proxy.GrokProtocol{proxy.GrokProtocolResponses, proxy.GrokProtocolChatCompletions, proxy.GrokProtocolMessages} {
+			capability, ok := capabilities[grokCapabilityProbeKey(target.model, target.origin, string(protocol))]
+			if !ok || !consider(capability.ExpiresAt) {
+				return time.Time{}, errGrokMaintenanceProjectionIncomplete
+			}
+		}
+	}
+	return next, nil
 }
 
 // grokImportProbeSlots bounds read-only post-import control-plane/catalog
@@ -204,67 +404,6 @@ func (h *Handler) refreshStaleGrokControlPlane(ctx context.Context, accounts []*
 	}
 	wg.Wait()
 	return refreshed, failed
-}
-
-func (h *Handler) runGrokFreshnessScan(ctx context.Context) {
-	accounts := h.store.EnabledGrokAccounts()
-	if len(accounts) == 0 {
-		return
-	}
-	probeCtx, cancel := context.WithTimeout(ctx, grokProbeRunGuard)
-	defer cancel()
-	start := time.Now()
-	refreshed, refreshFailed := h.refreshStaleGrokControlPlane(probeCtx, accounts)
-	capabilityRebuilt, capabilityFailed := h.rebuildMissingGrokCapabilities(probeCtx, accounts)
-	if refreshed > 0 || refreshFailed > 0 {
-		log.Printf("[grok-freshness] 只读状态刷新完成: refreshed=%d failed=%d 耗时=%s",
-			refreshed, refreshFailed, time.Since(start).Round(time.Millisecond))
-	}
-	if capabilityRebuilt > 0 || capabilityFailed > 0 {
-		log.Printf("[grok-capabilities] generation 能力重建完成: rebuilt=%d failed=%d 耗时=%s",
-			capabilityRebuilt, capabilityFailed, time.Since(start).Round(time.Millisecond))
-	}
-}
-
-// rebuildMissingGrokCapabilities is independent from GrokProbeEnabled. The
-// operator switch controls recurring connectivity tests, not the one-time
-// three-protocol facts required to route a newly imported/rotated generation.
-// runGrokCapabilityProbe supplies global concurrency 4, per-account
-// serialization and per-(generation,model,origin,protocol) deduplication.
-func (h *Handler) rebuildMissingGrokCapabilities(ctx context.Context, accounts []*auth.Account) (rebuilt, failed int) {
-	if h == nil || h.db == nil {
-		return 0, 0
-	}
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	for _, account := range accounts {
-		if account == nil || account.ID() <= 0 {
-			continue
-		}
-		generation := account.GetCredentialGeneration()
-		if generation <= 0 {
-			generation = 1
-		}
-		state, err := h.db.GetGrokAccountState(ctx, account.ID())
-		if err == nil && !grokGenerationNeedsCapabilityProbe(account, state, generation, time.Now()) {
-			continue
-		}
-		accountID := account.ID()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			_, probeErr := h.runGrokCapabilityProbe(ctx, accountID, false)
-			mu.Lock()
-			if probeErr != nil {
-				failed++
-			} else {
-				rebuilt++
-			}
-			mu.Unlock()
-		}()
-	}
-	wg.Wait()
-	return rebuilt, failed
 }
 
 // runGrokStatusProbe performs only the optional generation connectivity check.

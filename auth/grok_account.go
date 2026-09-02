@@ -136,10 +136,10 @@ func (a *Account) IsGrokAPI() bool {
 // isRelayStyleLocked：openai_responses 中转或 Grok —— 一切「非 Codex OAuth 官方上游」
 // 的账号。这类账号不参与 Codex 专属行为（wham 探针、WS 上游、manifest、alpha search）。
 func (a *Account) isRelayStyleLocked() bool {
-	return a.isOpenAIResponsesAPILocked() || a.isGrokAPILocked()
+	return a.isOpenAIResponsesAPILocked() || a.isGrokAPILocked() || a.isAntigravityAPILocked() || a.isClaudeOAuthLocked()
 }
 
-// IsRelayStyle 判断账号是否为「非 Codex 官方」的外部上游账号（中转或 Grok）。
+// IsRelayStyle 判断账号是否为「非 Codex 官方」的外部上游账号。
 func (a *Account) IsRelayStyle() bool {
 	if a == nil {
 		return false
@@ -1348,6 +1348,7 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 				}
 				acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 				acc.mu.Unlock()
+				s.invalidateRoutingSchedulers()
 				s.fastSchedulerUpdate(acc)
 				return nil
 			}
@@ -1451,6 +1452,7 @@ func (s *Store) refreshGrokAccount(ctx context.Context, acc *Account, forceRefre
 	}
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
+	s.invalidateRoutingSchedulers()
 	s.fastSchedulerUpdate(acc)
 	if s.db != nil {
 		// CAS 已把上一代目录/能力/事实随代盖章,重新投影回内存,避免刷新后
@@ -1562,6 +1564,9 @@ func (s *Store) reloadGrokCredentialsAfterFamilyLease(ctx context.Context, acc *
 		!previousExpiresAt.Equal(acc.ExpiresAt)
 	usable = acc.AccessToken != "" && (acc.ExpiresAt.IsZero() || time.Until(acc.ExpiresAt) > 5*time.Minute)
 	acc.mu.Unlock()
+	if changed {
+		s.invalidateRoutingSchedulers()
+	}
 	_ = expectedGeneration // retained for call-site compatibility and audit logs.
 	return changed, usable, nil
 }
@@ -1663,6 +1668,7 @@ func (s *Store) ApplyGrokConfig(dbID int64, baseURL, apiKey string, models []str
 	}
 	acc.recomputeSchedulerLocked(atomic.LoadInt64(&s.maxConcurrency))
 	acc.mu.Unlock()
+	s.invalidateRoutingSchedulers()
 	s.fastSchedulerUpdate(acc)
 	return true
 }

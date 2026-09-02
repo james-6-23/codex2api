@@ -9,7 +9,7 @@ const api = readFileSync(new URL('../api.ts', import.meta.url), 'utf8')
 test('CY incidents and local logs use independent pagination state', () => {
   assert.match(source, /usePersistedPageSize\('prompt_policy_incidents'/)
   assert.match(source, /page: incidentPage,\s+pageSize: incidentPageSize/)
-  assert.match(source, /page: logPage,/)
+  assert.match(source, /page: pageOverride \?\? logPage,/)
   assert.match(source, /page=\{incidentPage\}[\s\S]*totalItems=\{incidentTotal\}/)
   assert.match(source, /page=\{logPage\}[\s\S]*totalItems=\{total\}/)
   assert.doesNotMatch(source, /Math\.max\(total, incidentTotal\)/)

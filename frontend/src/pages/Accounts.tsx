@@ -5,12 +5,20 @@ import { useLocation, useNavigate } from "react-router-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import type { ProxyRow } from "../api";
 import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
+import AccountProxyBadge from "../components/AccountProxyBadge";
+import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
+import {
+  buildProxyBindingContext,
+  type ProxyBindingContext,
+} from "../lib/accountProxyBinding";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
 import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
 import GrokAccounts from "./GrokAccounts";
+import AntigravityAccounts from "./AntigravityAccounts";
+import ClaudeAccounts from "./ClaudeAccounts";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
 import { CompactStat } from "../components/CompactStat";
@@ -48,6 +56,8 @@ import type {
   AccountPageStatsItem,
   AccountLiveStateResponse,
   AccountSessionSnapshot,
+  UpstreamChannel,
+  OpenAIResponsesBalanceResponse,
 } from "../types";
 import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
@@ -74,6 +84,8 @@ import {
   isOfficialCostTooNew,
   needsOfficialCostReload,
   needsUsageReload,
+  officialUsdValue,
+  supportsOfficialUsage,
 } from "../lib/usageFormat";
 import {
   applyOptionalWorkspaceRouteHeader,
@@ -181,6 +193,7 @@ import {
   resolveAccountOverlayKind,
 } from "../components/AccountStateOverlay";
 import CodexInviteView from "../components/CodexInviteView";
+import InviteGuideModal from "../components/InviteGuideModal";
 import Sub2APIImportModal from "../components/Sub2APIImportModal";
 import AccountQuotaDistributionChart from "../components/AccountQuotaDistributionChart";
 import AccountRateLimitRecoveryChart from "../components/AccountRateLimitRecoveryChart";
@@ -203,6 +216,66 @@ const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
 // multipart 边界与其它表单字段),避免单个请求体触发后端上限。
 const IMPORT_MAX_FILE_BYTES = 200 * 1024 * 1024;
 const IMPORT_BATCH_MAX_BYTES = 150 * 1024 * 1024;
+const API_BALANCE_CACHE_TTL_MS = 60_000;
+const API_BALANCE_ERROR_CACHE_TTL_MS = 15_000;
+
+type APIBalanceLoadState = {
+  loading: boolean;
+  data?: OpenAIResponsesBalanceResponse;
+  error?: string;
+};
+
+const apiBalanceCache = new Map<
+  number,
+  { expiresAt: number; state: APIBalanceLoadState }
+>();
+const apiBalanceInflight = new Map<number, Promise<APIBalanceLoadState>>();
+
+function invalidateAPIAccountBalance(accountId: number) {
+  apiBalanceCache.delete(accountId);
+}
+
+function loadAPIAccountBalance(
+  accountId: number,
+  force = false,
+): Promise<APIBalanceLoadState> {
+  if (force) invalidateAPIAccountBalance(accountId);
+  const cached = apiBalanceCache.get(accountId);
+  if (cached && cached.expiresAt > Date.now()) {
+    return Promise.resolve(cached.state);
+  }
+  if (!force) {
+    const inflight = apiBalanceInflight.get(accountId);
+    if (inflight) return inflight;
+  }
+
+  let promise: Promise<APIBalanceLoadState>;
+  promise = api
+    .getOpenAIResponsesBalance(accountId, undefined, force)
+    .then<APIBalanceLoadState>((data) => ({ loading: false, data }))
+    .catch<APIBalanceLoadState>((error) => ({
+      loading: false,
+      error: getErrorMessage(error),
+    }))
+    .then((state) => {
+      if (apiBalanceInflight.get(accountId) === promise) {
+        apiBalanceCache.set(accountId, {
+          expiresAt:
+            Date.now() +
+            (state.data ? API_BALANCE_CACHE_TTL_MS : API_BALANCE_ERROR_CACHE_TTL_MS),
+          state,
+        });
+      }
+      return state;
+    })
+    .finally(() => {
+      if (apiBalanceInflight.get(accountId) === promise) {
+        apiBalanceInflight.delete(accountId);
+      }
+    });
+  apiBalanceInflight.set(accountId, promise);
+  return promise;
+}
 
 const formatMB = (bytes: number): string =>
   `${Math.round(bytes / (1024 * 1024))}MB`;
@@ -448,6 +521,7 @@ const ACCOUNT_TABLE_COLUMNS = [
   "email",
   "tags",
   "groups",
+  "proxy",
   "priority",
   "plan",
   "status",
@@ -500,7 +574,7 @@ type AccountGroupDraft = {
   auto_pause_5h_threshold: number;
   auto_pause_7d_threshold: number;
   proxyURLsInput: string;
-  channel: "codex" | "grok";
+  channel: UpstreamChannel;
 };
 
 function getDefaultAccountVisibleColumns(): Record<
@@ -1114,6 +1188,7 @@ interface AccountRowActions {
   openSchedulerEditor: (account: AccountRow) => void;
   openQuickConfig: (account: AccountRow) => void;
   openQuickGroupEditor: (account: AccountRow) => void;
+  openQuickProxyEditor: (account: AccountRow) => void;
   openUsage: (account: AccountRow) => void;
   // 直接打开用量弹窗的官方统计 tab（成本列的官方胶囊）。
   openOfficialUsage: (account: AccountRow) => void;
@@ -1174,6 +1249,7 @@ const AccountTableRow = memo(function AccountTableRow({
   visibleColumns,
   showEmailDomainTags,
   allGroups,
+  proxyCtx,
   healthBuckets,
   lazyMode,
   refreshing,
@@ -1188,6 +1264,7 @@ const AccountTableRow = memo(function AccountTableRow({
   visibleColumns: Record<AccountTableColumn, boolean>;
   showEmailDomainTags: boolean;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   healthBuckets: AccountHealthBucket[] | undefined;
   lazyMode: boolean;
   refreshing: boolean;
@@ -1439,6 +1516,17 @@ const AccountTableRow = memo(function AccountTableRow({
                                 />
                               </TableCell>
                             )}
+                            {visibleColumns.proxy && (
+                              <TableCell className="min-w-[120px] max-w-[180px]">
+                                <AccountProxyBadge
+                                  account={account}
+                                  ctx={proxyCtx}
+                                  onClick={() =>
+                                    actions.openQuickProxyEditor(account)
+                                  }
+                                />
+                              </TableCell>
+                            )}
                             {visibleColumns.priority && (
                               <TableCell>
                                 <SchedulerPriorityBadge account={account} />
@@ -1655,6 +1743,7 @@ const AccountCardItem = memo(function AccountCardItem({
   selected,
   detailOpen,
   allGroups,
+  proxyCtx,
   lazyMode,
   showEmailDomainTags,
   healthBuckets,
@@ -1670,6 +1759,7 @@ const AccountCardItem = memo(function AccountCardItem({
   selected: boolean;
   detailOpen: boolean;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   lazyMode: boolean;
   showEmailDomainTags: boolean;
   healthBuckets: AccountHealthBucket[] | undefined;
@@ -1687,6 +1777,7 @@ const AccountCardItem = memo(function AccountCardItem({
       selected={selected}
       detailOpen={detailOpen}
       allGroups={allGroups}
+      proxyCtx={proxyCtx}
       lazyMode={lazyMode}
       showEmailDomainTags={showEmailDomainTags}
       healthBuckets={healthBuckets}
@@ -1699,6 +1790,7 @@ const AccountCardItem = memo(function AccountCardItem({
       onOpenDetail={() => actions.openDetail(account)}
       onEdit={() => actions.openSchedulerEditor(account)}
       onEditGroups={() => actions.openQuickGroupEditor(account)}
+      onEditProxy={() => actions.openQuickProxyEditor(account)}
       onUsage={() => actions.openUsage(account)}
       onOpenOfficialUsage={() => actions.openOfficialUsage(account)}
       onTest={() => actions.openTesting(account)}
@@ -1719,8 +1811,7 @@ export default function Accounts() {
   const { t, i18n } = useTranslation();
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [showAdd, setShowAdd] = useState(false);
-  // providerView 决定账号管理页顶部展示哪一套上游：codex(现有页) 或 grok(独立黑白视图)。
-  // 由路由驱动（/accounts vs /accounts/grok），刷新浏览器后停留在当前视图。
+  // providerView 由路由驱动，刷新浏览器后停留在当前上游视图。
   const location = useLocation();
   const navigate = useNavigate();
   // ?groupManager=1 深链直接打开分组管理器(Grok 页的「管理分组」跳转入口,issue #487)。
@@ -1737,13 +1828,39 @@ export default function Accounts() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [location.search]);
+  // ?pending=1 落到 Codex 账号页审核区（API Keys 门户卡片 / Grok 横幅共用）。
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (params.get("pending") !== "1") return;
+    const path = location.pathname.replace(/\/+$/, "");
+    if (path.endsWith("/accounts/grok") || path.endsWith("/accounts/invite")) {
+      navigate({ pathname: "/accounts", search: "?pending=1" }, { replace: true });
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      document.getElementById("pending-review")?.scrollIntoView({ behavior: "smooth", block: "start" });
+    }, 120);
+    return () => window.clearTimeout(timer);
+  }, [location.pathname, location.search, navigate]);
   const normalizedPath = location.pathname.replace(/\/+$/, "");
-  const providerView: "codex" | "grok" = normalizedPath.endsWith("/accounts/grok")
+  const providerView: UpstreamChannel = normalizedPath.endsWith("/accounts/grok")
     ? "grok"
-    : "codex";
+    : normalizedPath.endsWith("/accounts/antigravity")
+      ? "antigravity"
+      : normalizedPath.endsWith("/accounts/claude")
+        ? "claude"
+        : "codex";
   const setProviderView = useCallback(
-    (view: "codex" | "grok") => {
-      navigate(view === "grok" ? "/accounts/grok" : "/accounts");
+    (view: UpstreamChannel) => {
+      navigate(
+        view === "grok"
+          ? "/accounts/grok"
+          : view === "antigravity"
+            ? "/accounts/antigravity"
+            : view === "claude"
+              ? "/accounts/claude"
+              : "/accounts",
+      );
     },
     [navigate],
   );
@@ -1848,7 +1965,7 @@ export default function Accounts() {
   const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
   const [quickConfigAccount, setQuickConfigAccount] = useState<AccountRow | null>(null);
   const [usageAccount, setUsageAccount] = useState<AccountRow | null>(null);
-  // 用量弹窗打开时停在哪个 tab。列表里点「官方 7d」成本直接落到官方统计,
+  // 用量弹窗打开时停在哪个 tab。列表里点「官方结算」成本直接落到官方统计,
   // 其余入口保持默认的概览。
   const [usageInitialPage, setUsageInitialPage] = useState<
     "overview" | "official"
@@ -1914,6 +2031,7 @@ export default function Accounts() {
       name: "",
       base_url: "https://api.openai.com",
       api_key: "",
+      balance_query_url: "",
       models: [],
       codex_client_metadata_mode: "auto",
       proxy_url: "",
@@ -1938,6 +2056,9 @@ export default function Accounts() {
   const [dragging, setDragging] = useState(false);
   const dragCounter = useRef(0);
   const [showExportPicker, setShowExportPicker] = useState(false);
+  // 导出时是否带上账号绑定的代理。默认关闭：代理 URL 常含明文用户名密码，
+  // 只有在确实要迁移「号池 + 代理绑定关系」时才该打开。
+  const [exportIncludeProxy, setExportIncludeProxy] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [showMigrate, setShowMigrate] = useState(false);
   const [showAnalysisCharts, setShowAnalysisCharts] = useState(
@@ -1974,6 +2095,11 @@ export default function Accounts() {
     failed: 0,
     done: false,
   });
+  // 导入后的邀请积分引导。ids 是本次导入新建的账号,后端会过滤出能发邀请的。
+  const [inviteGuide, setInviteGuide] = useState<{ show: boolean; ids: number[] }>({
+    show: false,
+    ids: [],
+  });
   const [addMethod, setAddMethod] = useState<
     "rt" | "st" | "at" | "session" | "openai" | "oauth" | "agentIdentity"
   >("oauth");
@@ -1996,10 +2122,14 @@ export default function Accounts() {
   const [sessionProxyUrl, setSessionProxyUrl] = useState("");
   // 允许重复添加：勾选后本次添加/导入跳过去重，强制新建（添加弹窗与导入弹窗共用）。
   const [allowDuplicate, setAllowDuplicate] = useState(false);
+  // 采用文件内代理：勾选后 JSON 文件里带的 proxy_url 生效，并自动注册进代理池。
+  // 只对 JSON 系格式有意义，TXT 一行一个 token 物理上带不了代理。
+  const [importFileProxies, setImportFileProxies] = useState(false);
   const [openAIForm, setOpenAIForm] =
     useState<AddOpenAIResponsesAccountRequest>({
       base_url: "https://api.openai.com",
       api_key: "",
+      balance_query_url: "",
       models: [],
       codex_client_metadata_mode: "auto",
       proxy_url: "",
@@ -2041,6 +2171,10 @@ export default function Accounts() {
   );
   const [quickGroupIds, setQuickGroupIds] = useState<number[]>([]);
   const [quickGroupSubmitting, setQuickGroupSubmitting] = useState(false);
+  // 代理徽章点开的快速绑定弹窗：只改 proxy_url 一个字段。
+  const [quickProxyAccount, setQuickProxyAccount] = useState<AccountRow | null>(
+    null,
+  );
   // OAuth 账号“支持模型”白名单编辑器状态;空白名单表示该账号可调度所有模型。
   const [modelsAccount, setModelsAccount] = useState<AccountRow | null>(null);
   const [modelsDraft, setModelsDraft] = useState<string[]>([]);
@@ -2067,11 +2201,32 @@ export default function Accounts() {
   // 分组按渠道隔离(issue #487):Codex 页的所有分组选择器只出 codex 渠道分组;
   // 管理器仍显示全部渠道(带徽标),徽标解析也用全量以兼容迁移前的跨渠道成员。
   const codexGroups = useMemo(
-    () => allGroups.filter((group) => group.channel !== "grok"),
+    () => allGroups.filter((group) => group.channel === "codex"),
     [allGroups],
   );
   const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([]);
+  // 代理徽章的判定上下文。fail-closed(钉住的托管代理已不在启用池)只在代理池
+  // 开启时成立,所以开关与全局代理都得跟着代理池一起进来。
+  const [proxyPoolEnabled, setProxyPoolEnabled] = useState(false);
+  const [globalProxyURL, setGlobalProxyURL] = useState("");
+  // 单个对象且引用稳定:memo 行组件的 props 里不能出现每轮新建的数组/对象,
+  // 否则整表 memo 失效(账号页性能优化的既有教训)。
+  // 分组用全量而非 codexGroups:后端解析组代理时不看渠道,迁移前挂在别的渠道组里
+  // 的存量成员照样吃那条组代理,按渠道过滤会把它误报成"无组代理"。
+  const proxyBindingCtx = useMemo<ProxyBindingContext>(
+    () =>
+      buildProxyBindingContext({
+        proxies: proxyPool,
+        groups: allGroups,
+        poolEnabled: proxyPoolEnabled,
+        globalProxy: globalProxyURL,
+      }),
+    [proxyPool, allGroups, proxyPoolEnabled, globalProxyURL],
+  );
   const [lazyMode, setLazyMode] = useState(false);
+  const [accountPortalEnabled, setAccountPortalEnabled] = useState(false);
+  const [panelPendingCount, setPanelPendingCount] = useState(0);
+  const [grokSelfServicePending, setGrokSelfServicePending] = useState(0);
   // 导入/添加账号时直接绑定的分组（记住上次选择，添加弹窗与导入弹窗共用，与 allowDuplicate 同风格）。
   const {
     groupIds: importGroupIds,
@@ -2733,7 +2888,30 @@ export default function Accounts() {
       .then((response) => { if (!cancelled) setAllGroups(response.groups ?? []); })
       .catch(() => undefined);
     void api.getSettings()
-      .then((settings) => { if (!cancelled) setLazyMode(settings.lazy_mode); })
+      .then((settings) => {
+        if (cancelled) return;
+        setLazyMode(settings.lazy_mode);
+        setAccountPortalEnabled(Boolean(settings.public_account_portal_page_enabled));
+        setProxyPoolEnabled(Boolean(settings.proxy_pool_enabled));
+        setGlobalProxyURL((settings.proxy_url ?? "").trim());
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [providerView]);
+
+  useEffect(() => {
+    if (providerView !== "grok") return;
+    let cancelled = false;
+    void api.getAccountsPage({
+      channel: "codex",
+      page: 1,
+      pageSize: 1,
+      status: "disabled",
+      tag: "self-service",
+    })
+      .then((response) => {
+        if (!cancelled) setGrokSelfServicePending(response.total ?? 0);
+      })
       .catch(() => undefined);
     return () => { cancelled = true; };
   }, [providerView]);
@@ -2859,7 +3037,20 @@ export default function Accounts() {
   // 否则官方成本胶囊要等翻页/改筛选才出现,看起来像刷新没生效。
   const [pageStatsReloadToken, setPageStatsReloadToken] = useState(0);
   const handleOfficialUsageRefreshed = useCallback(
-    () => setPageStatsReloadToken((token) => token + 1),
+    (patch?: { accountId: number; officialUsd: number | null }) => {
+      if (patch) {
+        setAccountPageStats((current) => ({
+          ...current,
+          [String(patch.accountId)]: {
+            ...current[String(patch.accountId)],
+            official_usd: patch.officialUsd ?? undefined,
+            official_usd_7d: patch.officialUsd ?? undefined,
+            official_usage_synced: true,
+          },
+        }));
+      }
+      setPageStatsReloadToken((token) => token + 1);
+    },
     [],
   );
   // Codex 视图的统计卡/额度分布/列表/批量操作一律排除 Grok 账号
@@ -2871,11 +3062,22 @@ export default function Accounts() {
         if (!stats) return account;
         // 行自身已带的字段优先(如 refreshAccountRow 拉回的完整详情比
         // 本页 stats 快照更新),page-stats 只补基础行缺失的部分。
+        // 官方结算例外：点进官方统计刷新后必须以最新快照为准，
+        // 否则行上的旧额度会挡住这次同步时间点。
         const merged = { ...account };
         if (merged.billed_5h == null && stats.billed_5h != null) merged.billed_5h = stats.billed_5h;
         if (merged.billed_7d == null && stats.billed_7d != null) merged.billed_7d = stats.billed_7d;
-        if (merged.official_usd_7d == null && stats.official_usd_7d != null) merged.official_usd_7d = stats.official_usd_7d;
-        if (merged.official_usage_synced == null && stats.official_usage_synced != null) merged.official_usage_synced = stats.official_usage_synced;
+        const officialUsd = stats.official_usd ?? stats.official_usd_7d;
+        if (officialUsd != null) {
+          merged.official_usd = officialUsd;
+          merged.official_usd_7d = officialUsd;
+        } else if (stats.official_usage_synced) {
+          merged.official_usd = undefined;
+          merged.official_usd_7d = undefined;
+        }
+        if (stats.official_usage_synced != null) {
+          merged.official_usage_synced = stats.official_usage_synced;
+        }
         if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
         if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
         if (!merged.usage_today_detail && stats.usage_today_detail) merged.usage_today_detail = stats.usage_today_detail;
@@ -2942,7 +3144,7 @@ export default function Accounts() {
   useEffect(() => {
     officialCostReloadAttemptsRef.current = 0;
   }, [accountPageIDsKey]);
-  // 官方 7d 只存在于 page-stats 的快照字段。后台探针有启动延迟，列表打开时
+  // 官方结算只存在于 page-stats 的快照字段。后台探针有启动延迟，列表打开时
   // 经常还是空的；后端会给当前页做即时回补，这里按缺字段重拉，直到胶囊出现。
   useEffect(() => {
     if (providerView !== "codex") return undefined;
@@ -3118,6 +3320,7 @@ export default function Accounts() {
     riskyAccounts: data.summary?.risky ?? 0,
     oauthAccounts: data.summary?.oauth ?? 0,
     apiKeyAccounts: data.summary?.api_key ?? 0,
+    selfServicePendingAccounts: data.summary?.self_service_pending ?? 0,
   };
   const {
     totalAccounts,
@@ -3138,7 +3341,17 @@ export default function Accounts() {
     riskyAccounts,
     oauthAccounts,
     apiKeyAccounts,
+    selfServicePendingAccounts,
   } = accountSummary;
+  const selfServicePendingCount = Math.max(selfServicePendingAccounts, panelPendingCount);
+  const pendingReviewRequested = new URLSearchParams(location.search).get("pending") === "1";
+  const showPendingReviewPanel = accountPortalEnabled || selfServicePendingCount > 0 || pendingReviewRequested;
+  const scrollToPendingReview = useCallback(() => {
+    document.getElementById("pending-review")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+  const handlePendingCountChange = useCallback((count: number) => {
+    setPanelPendingCount(count);
+  }, []);
 
   const allTags = data.facets.tags;
   const emailDomainStats = data.facets.email_domains;
@@ -3610,6 +3823,7 @@ export default function Accounts() {
       setOpenAIForm({
         base_url: "https://api.openai.com",
         api_key: "",
+        balance_query_url: "",
         models: [],
         codex_client_metadata_mode: "auto",
         proxy_url: "",
@@ -3689,6 +3903,7 @@ export default function Accounts() {
         model_mapping: parsedModelMapping.value,
         custom_headers: parsedCustomHeaders.value,
       });
+      invalidateAPIAccountBalance(editingAccount.id);
       showToast(t("accounts.openaiAccountSaveSuccess"));
       await reload();
       closeSchedulerEditor(true);
@@ -3882,6 +4097,18 @@ export default function Accounts() {
     }
   };
 
+  // maybeOpenInviteGuide 在导入结束后按设置决定是否弹出邀请积分引导。
+  // 开关读失败时不弹:宁可少一次引导,也不要在设置不可用时打扰用户。
+  const maybeOpenInviteGuide = useCallback(async (ids: number[]) => {
+    try {
+      const settings = await api.getInviteGuideSettings();
+      if (!settings.enabled) return;
+    } catch {
+      return;
+    }
+    setInviteGuide({ show: true, ids });
+  }, []);
+
   // readImportSSE 读取单批导入的 SSE 进度流。baseline 是此前已完成批次的累计值,
   // 本批实时进度叠加其上;markDoneOnComplete=false 时(还有后续批次)不置 done,
   // 让进度条跨批保持运行态。本批结束后把本批终值累加进 baseline(原地修改)。
@@ -3896,6 +4123,12 @@ export default function Accounts() {
       failed: number;
     },
     markDoneOnComplete = true,
+    // createdIDs 原地收集本次导入新建的账号 ID(complete 事件下发),跨批累加,
+    // 供导入结束后拉取邀请收益方案。
+    createdIDs?: number[],
+    // proxySummary 原地累加代理注册结果(complete 事件下发),跨批累加,
+    // 供导入结束后在 toast 里汇报。
+    proxySummary?: { imported: number; skipped: number; warnings: string[] },
   ) => {
     const base = baseline ?? {
       current: 0,
@@ -3948,7 +4181,22 @@ export default function Accounts() {
             updated: number;
             duplicate: number;
             failed: number;
+            created_ids?: number[];
+            proxies_imported?: number;
+            proxies_skipped?: number;
+            warning?: string;
           };
+          if (event.type === "complete" && createdIDs && event.created_ids?.length) {
+            createdIDs.push(...event.created_ids);
+          }
+          if (event.type === "complete" && proxySummary) {
+            proxySummary.imported += event.proxies_imported ?? 0;
+            proxySummary.skipped += event.proxies_skipped ?? 0;
+            // 同一条告警在多批之间会重复出现，去重后再展示。
+            if (event.warning && !proxySummary.warnings.includes(event.warning)) {
+              proxySummary.warnings.push(event.warning);
+            }
+          }
           last = {
             current: event.current ?? 0,
             total: event.total ?? 0,
@@ -4036,6 +4284,13 @@ export default function Accounts() {
       duplicate: 0,
       failed: 0,
     };
+    // 本次导入(含所有批次)新建的账号 ID,用于导入完成后的邀请收益引导。
+    const importedAccountIDs: number[] = [];
+    // 本次导入注册进代理池的代理统计,跨批累加后在结束 toast 里汇报。
+    const proxySummary = { imported: 0, skipped: 0, warnings: [] as string[] };
+    // 只有 JSON 系格式的文件才可能携带代理,后端也只对这两种格式认这个开关。
+    const carriesFileProxies =
+      importFileProxies && (format === "json" || format === "json_at");
 
     try {
       for (let i = 0; i < batches.length; i++) {
@@ -4044,6 +4299,7 @@ export default function Accounts() {
         if (format !== "txt") formData.append("format", format);
         const trimmedImportProxy = (proxyOverride ?? importProxyUrl).trim();
         if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
+        if (carriesFileProxies) formData.append("import_proxy", "true");
         const routedHeaders = applyOptionalWorkspaceRouteHeader(
           parsedCustomHeaders.value,
           workspaceOverride,
@@ -4066,7 +4322,13 @@ export default function Accounts() {
         // 只有最后一批完成后才标记 done,让进度条在多批之间保持运行态。
         const isLastBatch = i === batches.length - 1;
         if (res.headers.get("content-type")?.includes("text/event-stream")) {
-          await readImportSSE(res, totals, isLastBatch);
+          await readImportSSE(
+            res,
+            totals,
+            isLastBatch,
+            importedAccountIDs,
+            proxySummary,
+          );
         } else {
           const data = await res.json();
           if (!res.ok) {
@@ -4085,11 +4347,38 @@ export default function Accounts() {
           totals.updated += data.updated ?? 0;
           totals.duplicate += data.duplicate ?? 0;
           totals.failed += data.failed ?? 0;
+          // 纯 Agent Identity 文件走的是这条非流式分支,代理统计同样在这里下发。
+          proxySummary.imported += data.proxies_imported ?? 0;
+          proxySummary.skipped += data.proxies_skipped ?? 0;
+          if (data.warning && !proxySummary.warnings.includes(data.warning)) {
+            proxySummary.warnings.push(data.warning);
+          }
           setImportProgress({ show: true, ...totals, done: isLastBatch });
           if (isLastBatch) void reload();
         }
       }
-      showToast(t("accounts.importCompleted"));
+      // Toast 只有一个槽位,连续调用会互相顶掉——代理结果和告警必须拼进同一条。
+      if (carriesFileProxies) {
+        const parts = [
+          t("accounts.importCompleted"),
+          t("accounts.importProxySummary", {
+            imported: proxySummary.imported,
+            skipped: proxySummary.skipped,
+          }),
+          ...proxySummary.warnings,
+        ];
+        showToast(
+          parts.join(" "),
+          proxySummary.warnings.length > 0 ? "error" : "success",
+        );
+      } else {
+        showToast(t("accounts.importCompleted"));
+      }
+      // 引导只在有新建账号时触发;开关状态由后端判定,前端拿到 enabled=false
+      // 就不展示,避免把开关语义复制两份。
+      if (importedAccountIDs.length > 0) {
+        void maybeOpenInviteGuide(importedAccountIDs);
+      }
     } catch (error) {
       setImportProgress({
         show: true,
@@ -4387,9 +4676,12 @@ export default function Accounts() {
         filter: "healthy" | "all";
         ids?: number[];
         channel: "codex";
+        includeProxy?: boolean;
       } = {
         filter: scope === "healthy" ? "healthy" : "all",
         channel: "codex",
+        // TXT 只导出 refresh_token,带上代理也写不进去,徒然让响应多带一份明文口令。
+        includeProxy: format === "json" && exportIncludeProxy,
       };
       if (scope === "selected") {
         params.ids = Array.from(selected);
@@ -5589,6 +5881,7 @@ export default function Accounts() {
       name: account.name ?? "",
       base_url: account.base_url || "https://api.openai.com",
       api_key: "",
+      balance_query_url: account.balance_query_url ?? "",
       models: account.models ?? [],
       codex_client_metadata_mode:
         account.codex_client_metadata_mode ?? "auto",
@@ -5646,6 +5939,7 @@ export default function Accounts() {
       name: "",
       base_url: "https://api.openai.com",
       api_key: "",
+      balance_query_url: "",
       models: [],
       codex_client_metadata_mode: "auto",
       proxy_url: "",
@@ -5896,7 +6190,7 @@ export default function Accounts() {
       auto_pause_5h_threshold: group.auto_pause_5h_threshold ?? 0,
       auto_pause_7d_threshold: group.auto_pause_7d_threshold ?? 0,
       proxyURLsInput: (group.proxy_urls ?? []).join("\n"),
-      channel: group.channel === "grok" ? "grok" : "codex",
+      channel: group.channel,
     });
   };
 
@@ -5986,6 +6280,7 @@ export default function Accounts() {
     openSchedulerEditor,
     openQuickConfig: (account) => setQuickConfigAccount(account),
     openQuickGroupEditor,
+    openQuickProxyEditor: (account) => setQuickProxyAccount(account),
     openUsage: (account) => {
       setUsageInitialPage("overview");
       setUsageAccount(account);
@@ -6012,6 +6307,7 @@ export default function Accounts() {
       openSchedulerEditor: (a) => rowActionsImplRef.current?.openSchedulerEditor(a),
       openQuickConfig: (a) => rowActionsImplRef.current?.openQuickConfig(a),
       openQuickGroupEditor: (a) => rowActionsImplRef.current?.openQuickGroupEditor(a),
+      openQuickProxyEditor: (a) => rowActionsImplRef.current?.openQuickProxyEditor(a),
       openUsage: (a) => rowActionsImplRef.current?.openUsage(a),
       openOfficialUsage: (a) => rowActionsImplRef.current?.openOfficialUsage(a),
       openTesting: (a) => rowActionsImplRef.current?.openTesting(a),
@@ -6028,21 +6324,24 @@ export default function Accounts() {
     [],
   );
 
-  // Codex/Grok 顶部段控切换：两套账号视图共用同一切换器（Grok 通过 headerSlot 注入）。
+  // 四个账号视图共用同一切换器（独立页面通过 headerSlot 注入）。
   // 滑块动画 + 品牌 logo，与仪表盘渠道过滤器视觉一致。
-  // 不复用 Codex 侧的导入/导出/邀请/回收站等入口，Grok 页只保留账号本身的增删启停。
-  // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿 GrokAccounts 的 memo 边界。
+  // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿独立账号页的 memo 边界。
   const providerSwitcher = useMemo(() => (
-    <div className="relative grid grid-cols-2 items-center rounded-lg border border-border bg-muted/40 p-0.5">
+    <div className="relative grid w-full max-w-[560px] grid-cols-4 items-center rounded-lg border border-border bg-muted/40 p-0.5">
       <span
         aria-hidden
-        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/2)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{ transform: `translateX(${providerView === "grok" ? 100 : 0}%)` }}
+        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/4)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
+        style={{
+          transform: `translateX(${providerView === "grok" ? 100 : providerView === "antigravity" ? 200 : providerView === "claude" ? 300 : 0}%)`,
+        }}
       />
       {(
         [
           ["codex", t("accounts.providerViewCodex")],
           ["grok", t("accounts.providerViewGrok")],
+          ["antigravity", t("accounts.providerViewAntigravity")],
+          ["claude", t("accounts.providerViewClaude")],
         ] as const
       ).map(([key, label]) => (
         <button
@@ -6051,14 +6350,14 @@ export default function Accounts() {
           onClick={() => setProviderView(key)}
           aria-pressed={providerView === key}
           className={cn(
-            "relative z-10 inline-flex items-center justify-center gap-2 rounded-md px-5 py-2 text-base font-semibold transition-all duration-200 active:scale-[0.97]",
+            "relative z-10 inline-flex min-w-0 items-center justify-center gap-1 rounded-md px-1.5 py-2 text-xs font-semibold transition-all duration-200 active:scale-[0.97] sm:gap-2 sm:px-3 sm:text-sm",
             providerView === key
               ? "text-foreground"
               : "text-muted-foreground opacity-75 grayscale hover:opacity-100 hover:grayscale-0 hover:text-foreground",
           )}
         >
-          <ChannelLogo channel={key} size={20} />
-          {label}
+          <ChannelLogo channel={key} size={18} />
+          <span className="min-w-0 truncate">{label}</span>
         </button>
       ))}
     </div>
@@ -6068,6 +6367,25 @@ export default function Accounts() {
     // key 触发渠道切换时整块内容淡入过渡，切换器由 headerSlot 常驻不闪。
     return (
       <div key="provider-grok" className="animate-channel-switch-in">
+        {grokSelfServicePending > 0 ? (
+          <button
+            type="button"
+            onClick={() => navigate("/accounts?pending=1")}
+            className="mb-3 flex w-full items-center gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/[0.06] px-3 py-2.5 text-left shadow-sm transition-colors hover:bg-amber-500/[0.1]"
+          >
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-300">
+              <Hourglass className="size-4" />
+            </span>
+            <span className="min-w-0">
+              <span className="block text-sm font-semibold tracking-tight text-foreground">
+                {t("accounts.pendingReview.grokBanner", { count: grokSelfServicePending })}
+              </span>
+              <span className="block text-[11px] text-muted-foreground">
+                {t("accounts.pendingReview.jumpHint")}
+              </span>
+            </span>
+          </button>
+        ) : null}
         <GrokAccounts
           headerSlot={providerSwitcher}
           showOperationResults={showOperationResults}
@@ -6075,6 +6393,22 @@ export default function Accounts() {
             handleOperationResultsVisibilityChange
           }
         />
+      </div>
+    );
+  }
+
+  if (providerView === "antigravity") {
+    return (
+      <div key="provider-antigravity" className="animate-channel-switch-in">
+        <AntigravityAccounts headerSlot={providerSwitcher} />
+      </div>
+    );
+  }
+
+  if (providerView === "claude") {
+    return (
+      <div key="provider-claude" className="animate-channel-switch-in">
+        <ClaudeAccounts headerSlot={providerSwitcher} />
       </div>
     );
   }
@@ -6550,6 +6884,15 @@ export default function Accounts() {
               <span className="shrink-0 whitespace-nowrap text-[12px] font-semibold text-foreground">
                 {t("accounts.filter")}
               </span>
+              {showPendingReviewPanel ? (
+                <button
+                  type="button"
+                  onClick={scrollToPendingReview}
+                  className="shrink-0 whitespace-nowrap rounded-lg bg-amber-500/15 px-2.5 py-1.5 text-[12px] font-semibold text-amber-800 transition-colors hover:bg-amber-500/20 dark:text-amber-200"
+                >
+                  {t("accounts.pendingReview.chip", { count: selfServicePendingCount })}
+                </button>
+              ) : null}
               {(
                 [
                   ["all", t("accounts.filterAll"), totalAccounts],
@@ -6923,6 +7266,7 @@ export default function Accounts() {
                       plan: t("accounts.plan"),
                       tags: t("accounts.tagsLabel"),
                       groups: t("accounts.groupsLabel"),
+                      proxy: t("accounts.proxyColumn"),
                       priority: t("accounts.schedulerPriorityColumn"),
                       status: t("accounts.status"),
                       today: t("accounts.todayStats"),
@@ -7189,11 +7533,14 @@ export default function Accounts() {
             </div>
           )}
 
-          <PendingSelfServiceReviewPanel
-            onApprove={handleApprovePending}
-            onReject={handleRejectPending}
-            onSaveNote={handleSaveNote}
-          />
+          {showPendingReviewPanel ? (
+            <PendingSelfServiceReviewPanel
+              onApprove={handleApprovePending}
+              onReject={handleRejectPending}
+              onSaveNote={handleSaveNote}
+              onCountChange={handlePendingCountChange}
+            />
+          ) : null}
 
           <Card>
             <CardContent className="p-3 sm:p-4">
@@ -7226,6 +7573,7 @@ export default function Accounts() {
                         selected={selected.has(account.id)}
                         detailOpen={detailAccountId === account.id}
                         allGroups={allGroups}
+                        proxyCtx={proxyBindingCtx}
                         lazyMode={lazyMode}
                         showEmailDomainTags={showEmailDomainTags}
                         healthBuckets={healthBars[String(account.id)]}
@@ -7294,6 +7642,11 @@ export default function Accounts() {
                                 ? "↓"
                                 : "↑"
                               : ""}
+                          </TableHead>
+                        )}
+                        {visibleColumns.proxy && (
+                          <TableHead className="text-[13px] font-semibold">
+                            {t("accounts.proxyColumn")}
                           </TableHead>
                         )}
                         {visibleColumns.priority && (
@@ -7469,6 +7822,7 @@ export default function Accounts() {
                           visibleColumns={visibleColumns}
                           showEmailDomainTags={showEmailDomainTags}
                           allGroups={allGroups}
+                          proxyCtx={proxyBindingCtx}
                           healthBuckets={healthBars[String(account.id)]}
                           lazyMode={lazyMode}
                           refreshing={refreshingIds.has(account.id)}
@@ -7916,6 +8270,24 @@ export default function Accounts() {
                 </div>
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
+                    {t("accounts.apiBalanceQueryUrl")}
+                  </label>
+                  <Input
+                    placeholder="/v1/usage"
+                    value={openAIForm.balance_query_url ?? ""}
+                    onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                      setOpenAIForm((form) => ({
+                        ...form,
+                        balance_query_url: event.target.value,
+                      }))
+                    }
+                  />
+                  <p className="mt-1.5 text-xs text-muted-foreground">
+                    {t("accounts.apiBalanceQueryUrlHint")}
+                  </p>
+                </div>
+                <div>
+                  <label className="block mb-2 text-sm font-semibold text-muted-foreground">
                     {t("accounts.codexClientMetadataMode")}
                   </label>
                   <Select
@@ -8312,6 +8684,18 @@ export default function Accounts() {
                 />
                 {t("accounts.allowDuplicate")}
               </label>
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+                <input
+                  type="checkbox"
+                  className="size-3.5"
+                  checked={importFileProxies}
+                  onChange={(e) => setImportFileProxies(e.target.checked)}
+                />
+                {t("accounts.importFileProxies")}
+              </label>
+              <p className="text-[11px] text-muted-foreground">
+                {t("accounts.importFileProxiesHint")}
+              </p>
               <div className="space-y-1.5 pt-1">
                 <label className="text-xs font-medium text-foreground">
                   {t("accounts.importGroupsLabel")}
@@ -8558,6 +8942,30 @@ export default function Accounts() {
                     </div>
                   </button>
                 </div>
+              </div>
+              {/* 代理配置只对 JSON 导出生效，TXT 只有 refresh_token 一列。 */}
+              <div className="border-t border-border pt-3">
+                <label className="flex cursor-pointer items-start gap-2 text-xs text-muted-foreground">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-3.5 shrink-0"
+                    checked={exportIncludeProxy}
+                    onChange={(e) => setExportIncludeProxy(e.target.checked)}
+                  />
+                  <span className="min-w-0">
+                    <span className="font-medium text-foreground">
+                      {t("accounts.exportIncludeProxy")}
+                    </span>
+                    <span className="mt-0.5 block text-[11px] text-muted-foreground">
+                      {t("accounts.exportIncludeProxyHint")}
+                    </span>
+                  </span>
+                </label>
+                {exportIncludeProxy && (
+                  <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-600 dark:text-amber-400">
+                    {t("accounts.exportIncludeProxyWarning")}
+                  </p>
+                )}
               </div>
             </div>
           </Modal>
@@ -8993,6 +9401,24 @@ export default function Accounts() {
                             }))
                           }
                         />
+                      </div>
+                      <div>
+                        <label className="block mb-2 text-xs font-semibold text-muted-foreground">
+                          {t("accounts.apiBalanceQueryUrl")}
+                        </label>
+                        <Input
+                          placeholder="/v1/usage"
+                          value={editOpenAIForm.balance_query_url ?? ""}
+                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                            setEditOpenAIForm((form) => ({
+                              ...form,
+                              balance_query_url: event.target.value,
+                            }))
+                          }
+                        />
+                        <p className="mt-1.5 text-xs text-muted-foreground">
+                          {t("accounts.apiBalanceQueryUrlHint")}
+                        </p>
                       </div>
                       <div>
                         <label className="block mb-2 text-xs font-semibold text-muted-foreground">
@@ -9780,6 +10206,19 @@ export default function Accounts() {
               </div>
             ) : null}
           </Modal>
+
+          <AccountProxyQuickEditor
+            account={quickProxyAccount}
+            accountLabel={
+              quickProxyAccount ? formatAccountName(quickProxyAccount) : ""
+            }
+            proxies={proxyPool}
+            ctx={proxyBindingCtx}
+            onClose={() => setQuickProxyAccount(null)}
+            onSaved={async () => {
+              await reload();
+            }}
+          />
 
           <Modal
             show={Boolean(quickGroupAccount)}
@@ -10729,13 +11168,24 @@ export default function Accounts() {
                                 {group.name}
                               </span>
                               <span
-                                className={`shrink-0 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
+                                className={`inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-semibold ${
                                   group.channel === "grok"
                                     ? "bg-violet-50 text-violet-700 dark:bg-violet-950 dark:text-violet-300"
-                                    : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                                    : group.channel === "antigravity"
+                                      ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
+                                      : group.channel === "claude"
+                                        ? "bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
+                                        : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
                                 }`}
                               >
-                                {group.channel === "grok" ? "Grok" : "Codex"}
+                                <ChannelLogo channel={group.channel} size={11} />
+                                {group.channel === "grok"
+                                  ? t("accounts.providerViewGrok")
+                                  : group.channel === "antigravity"
+                                    ? t("accounts.providerViewAntigravity")
+                                    : group.channel === "claude"
+                                      ? t("accounts.providerViewClaude")
+                                      : t("accounts.providerViewCodex")}
                               </span>
                               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
                                 {t("accounts.groupMembers")}{" "}
@@ -10829,12 +11279,12 @@ export default function Accounts() {
                       return (
                         <>
                           <div className="flex gap-2">
-                            {(["codex", "grok"] as const).map((channel) => (
+                            {(["codex", "grok", "antigravity", "claude"] as const).map((channel) => (
                               <button
                                 key={channel}
                                 type="button"
                                 disabled={channelLocked}
-                                className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                                className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                                   groupDraft.channel === channel
                                     ? "border-primary bg-primary/10 text-primary"
                                     : "border-border text-muted-foreground hover:bg-muted/50"
@@ -10846,7 +11296,14 @@ export default function Accounts() {
                                   }))
                                 }
                               >
-                                {channel === "grok" ? "Grok" : "Codex"}
+                                <ChannelLogo channel={channel} size={14} />
+                                {channel === "grok"
+                                  ? t("accounts.providerViewGrok")
+                                  : channel === "antigravity"
+                                    ? t("accounts.providerViewAntigravity")
+                                    : channel === "claude"
+                                      ? t("accounts.providerViewClaude")
+                                      : t("accounts.providerViewCodex")}
                               </button>
                             ))}
                           </div>
@@ -11002,6 +11459,20 @@ export default function Accounts() {
               </div>
             </div>
           </Modal>
+
+          <InviteGuideModal
+            show={inviteGuide.show}
+            accountIds={inviteGuide.ids}
+            onClose={() => setInviteGuide((p) => ({ ...p, show: false }))}
+            onGoInvite={(accountEmail) => {
+              setInviteGuide((p) => ({ ...p, show: false }));
+              navigate(
+                accountEmail
+                  ? `/accounts/invite?account=${encodeURIComponent(accountEmail)}`
+                  : "/accounts/invite",
+              );
+            }}
+          />
 
           <Modal
             show={importProgress.show}
@@ -11423,6 +11894,9 @@ function RecycleBinView({
     }
     setExporting(true);
     try {
+      // 回收站导出不带代理:这里是"恢复误删账号"的入口,不是迁移入口,没有
+      // 承载勾选项的弹窗,默认不外泄代理里的明文口令。需要迁移代理绑定关系
+      // 请用账号页的导出。
       const data = await api.exportRecycleBinAccounts(ids);
       if (data.length === 0) {
         showToast(t("accounts.exportNoAccounts"), "error");
@@ -11789,9 +12263,11 @@ function RecycleBinView({
                         </TableCell>
                         <TableCell>
                           <Badge variant="secondary">
-                            {row.openai_responses_api
-                              ? t("accounts.recycleBinTypeRelay")
-                              : t("accounts.recycleBinTypeOauth")}
+                            {row.claude_api
+                              ? t("accounts.providerViewClaude")
+                              : row.openai_responses_api
+                                ? t("accounts.recycleBinTypeRelay")
+                                : t("accounts.recycleBinTypeOauth")}
                           </Badge>
                         </TableCell>
                         <TableCell>
@@ -11986,6 +12462,7 @@ function recycleBinRowToAccountRow(row: RecycleBinAccountRow): AccountRow {
     plan_type: row.plan_type,
     status: "deleted",
     openai_responses_api: row.openai_responses_api,
+    claude_api: row.claude_api,
     base_url: row.base_url,
     models: row.models,
     proxy_url: "",
@@ -13723,6 +14200,7 @@ function AccountMobileCard({
   selected,
   detailOpen = false,
   allGroups,
+  proxyCtx,
   lazyMode,
   showEmailDomainTags,
   healthBuckets,
@@ -13735,6 +14213,7 @@ function AccountMobileCard({
   onOpenDetail,
   onEdit,
   onEditGroups,
+  onEditProxy,
   onUsage,
   onTest,
   onRefresh,
@@ -13753,6 +14232,7 @@ function AccountMobileCard({
   selected: boolean;
   detailOpen?: boolean;
   allGroups: AccountGroup[];
+  proxyCtx: ProxyBindingContext;
   lazyMode: boolean;
   showEmailDomainTags: boolean;
   healthBuckets: AccountHealthBucket[] | undefined;
@@ -13765,6 +14245,7 @@ function AccountMobileCard({
   onOpenDetail: () => void;
   onEdit: () => void;
   onEditGroups: () => void;
+  onEditProxy: () => void;
   onUsage: () => void;
   onTest: () => void;
   onRefresh: () => void;
@@ -14081,6 +14562,13 @@ function AccountMobileCard({
             onClick={onEditGroups}
             emptyLabel={t("accounts.groupQuickEdit")}
           />
+          <div className="mt-1.5 flex">
+            <AccountProxyBadge
+              account={account}
+              ctx={proxyCtx}
+              onClick={onEditProxy}
+            />
+          </div>
         </div>
 
         <div className="mt-auto border-t border-border/70 bg-muted/15 p-4">
@@ -14348,6 +14836,15 @@ function AccountMobileCard({
             onClick={onEditGroups}
             emptyLabel={t("accounts.groupQuickEdit")}
           />
+        )}
+        {(!visibleColumns || visibleColumns.proxy) && (
+          <div className="mt-1.5 flex">
+            <AccountProxyBadge
+              account={account}
+              ctx={proxyCtx}
+              onClick={onEditProxy}
+            />
+          </div>
         )}
       </div>
 
@@ -14654,8 +15151,9 @@ function TestConnectionModal({
     onSettledRef.current();
   }, []);
 
+  const isClaudeAccount = Boolean(account.claude_api);
   // Grok 与 openai_responses 同属"账号自带模型清单"的 relay 风格账号，
-  // 测试模型选择逻辑一致（用 account.models 而非上游 /v1/models 全量）。
+  // Claude 也使用账号级原生 Messages 模型清单，但走独立分支。
   const isOpenAIResponsesAccount = Boolean(
     account.openai_responses_api || account.grok_api,
   );
@@ -14665,9 +15163,9 @@ function TestConnectionModal({
       uniqueTestModels(
         modelOptions,
         selectedModel,
-        !isOpenAIResponsesAccount,
+        !isOpenAIResponsesAccount && !isClaudeAccount,
       ).map((item) => ({ label: item, value: item })),
-    [isOpenAIResponsesAccount, modelOptions, selectedModel],
+    [isClaudeAccount, isOpenAIResponsesAccount, modelOptions, selectedModel],
   );
 
   useEffect(() => {
@@ -14677,6 +15175,20 @@ function TestConnectionModal({
       try {
         const settings = await api.getSettings();
         if (!active) return;
+
+        if (isClaudeAccount) {
+          const accountModels = (account.models ?? []).filter(
+            (model) => isConnectionTestModel(model) && model.toLowerCase().startsWith("claude-"),
+          );
+          const fallbackModels = uniqueTestModels(
+            accountModels.length > 0 ? accountModels : ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"],
+            undefined,
+            false,
+          );
+          setModelOptions(fallbackModels);
+          setSelectedModel((current) => current || fallbackModels[0] || "");
+          return;
+        }
 
         if (isOpenAIResponsesAccount) {
           const accountModels = (account.models ?? []).filter(
@@ -14721,7 +15233,18 @@ function TestConnectionModal({
         );
       } catch {
         if (!active) return;
-        if (isOpenAIResponsesAccount) {
+        if (isClaudeAccount) {
+          const accountModels = (account.models ?? []).filter(
+            (model) => isConnectionTestModel(model) && model.toLowerCase().startsWith("claude-"),
+          );
+          const fallbackModels = uniqueTestModels(
+            accountModels.length > 0 ? accountModels : ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"],
+            undefined,
+            false,
+          );
+          setModelOptions(fallbackModels);
+          setSelectedModel((current) => current || fallbackModels[0] || "");
+        } else if (isOpenAIResponsesAccount) {
           const accountModels = (account.models ?? []).filter(
             isConnectionTestModel,
           );
@@ -14753,7 +15276,7 @@ function TestConnectionModal({
     return () => {
       active = false;
     };
-  }, [account.model_mapping, account.models, isOpenAIResponsesAccount]);
+  }, [account.claude_api, account.model_mapping, account.models, isClaudeAccount, isOpenAIResponsesAccount]);
 
   useEffect(() => {
     if (!modelOptionsReady || !selectedModel) return;
@@ -15123,9 +15646,11 @@ function UsageBar({
 function UsageWindowStat({
   label,
   detail,
+  apiAccount = false,
 }: {
   label: string;
   detail?: AccountRow["usage_5h_detail"];
+  apiAccount?: boolean;
 }) {
   const { t } = useTranslation();
   if (!detail || !hasUsageWindowDetail(detail)) return null;
@@ -15149,14 +15674,30 @@ function UsageWindowStat({
         </span>
       </div>
       {(accountBilledText || userBilledText) && (
-        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground/80 pl-[46px]">
+        <div
+          className={cn(
+            "pl-[46px] text-[10px]",
+            apiAccount
+              ? "flex flex-col items-start gap-0.5 font-medium"
+              : "flex items-center gap-1.5 text-muted-foreground/80",
+          )}
+        >
           {accountBilledText && (
-            <span>
+            <span
+              className={cn(
+                apiAccount &&
+                  "text-emerald-700 dark:text-emerald-400",
+              )}
+            >
               {t("accounts.accountBilledLabel")}: ${accountBilledText}
             </span>
           )}
           {userBilledText && (
-            <span>
+            <span
+              className={cn(
+                apiAccount && "text-sky-700 dark:text-sky-400",
+              )}
+            >
               {t("accounts.userBilledLabel")}: ${userBilledText}
             </span>
           )}
@@ -15294,6 +15835,7 @@ function TodayStatsCell({ account }: { account: AccountRow }) {
           label: row.key === "unknown" ? t("accounts.unknownModel") : row.key,
           count: row.count,
           percent: row.percent,
+          avgFirstTokenMs: detail.model_avg_first_token_ms?.[row.key],
           successRate:
             typeof success === "number" && row.count > 0
               ? (success / row.count) * 100
@@ -15351,7 +15893,10 @@ function UsageCell({
       disabled={refreshing}
       title={t("accounts.refreshUsage")}
       aria-label={t("accounts.refreshUsage")}
-      className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+      className={cn(
+        "shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50",
+        account.openai_responses_api && "mr-6",
+      )}
     >
       <RefreshCw className={`size-3 ${refreshing ? "animate-spin" : ""}`} />
     </button>
@@ -15406,7 +15951,11 @@ function UsageCell({
               detail={account.usage_5h_detail}
             />
           ) : (
-            <UsageWindowStat label="5h" detail={account.usage_5h_detail} />
+            <UsageWindowStat
+              label="5h"
+              detail={account.usage_5h_detail}
+              apiAccount={account.openai_responses_api}
+            />
           )}
           {sparkBar}
           {has7d ? (
@@ -15438,7 +15987,11 @@ function UsageCell({
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
+            <UsageWindowStat
+              label={longWindowLabel}
+              detail={account.usage_7d_detail}
+              apiAccount={account.openai_responses_api}
+            />
           )}
         </div>
         {refreshButton}
@@ -15458,7 +16011,11 @@ function UsageCell({
               detail={account.usage_7d_detail}
             />
           ) : (
-            <UsageWindowStat label={longWindowLabel} detail={account.usage_7d_detail} />
+            <UsageWindowStat
+              label={longWindowLabel}
+              detail={account.usage_7d_detail}
+              apiAccount={account.openai_responses_api}
+            />
           )}
         </div>
         {refreshButton}
@@ -15474,6 +16031,101 @@ function UsageCell({
 // 再转下去只会让用户以为一直在加载。
 const OFFICIAL_PENDING_SPIN_TIMEOUT_MS = 100_000;
 
+function formatAPIAccountBalance(data: OpenAIResponsesBalanceResponse): string {
+  if (data.unlimited) return "∞";
+  const unit = data.unit.trim().toUpperCase();
+  if (unit === "USD" || unit === "$") return formatOfficialUSD(data.balance);
+  if (unit === "CNY" || unit === "RMB" || unit === "¥") {
+    return `¥${data.balance.toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+  }
+  const value = data.balance.toLocaleString(undefined, {
+    maximumFractionDigits: 4,
+  });
+  return unit && unit !== "QUOTA" ? `${value} ${data.unit}` : `${value} quota`;
+}
+
+function APIAccountBalanceBadge({ accountId }: { accountId: number }) {
+  const { t } = useTranslation();
+  const cached = apiBalanceCache.get(accountId);
+  const [state, setState] = useState<APIBalanceLoadState>(() =>
+    cached && cached.expiresAt > Date.now()
+      ? cached.state
+      : { loading: false },
+  );
+  const [visible, setVisible] = useState(false);
+  const badgeRef = useRef<HTMLButtonElement>(null);
+
+  const refresh = useCallback((force = false) => {
+    setState({ loading: true });
+    void loadAPIAccountBalance(accountId, force).then(setState);
+  }, [accountId]);
+
+  useEffect(() => {
+    const element = badgeRef.current;
+    if (!element || typeof IntersectionObserver === "undefined") {
+      setVisible(true);
+      return;
+    }
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setVisible(true);
+          observer.disconnect();
+        }
+      },
+      { rootMargin: "120px" },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    let active = true;
+    setState((current) => (current.data || current.error ? current : { loading: true }));
+    void loadAPIAccountBalance(accountId).then((next) => {
+      if (active) setState(next);
+    });
+    return () => {
+      active = false;
+    };
+  }, [accountId, visible]);
+
+  const title = state.data
+    ? t("accounts.apiBalanceTooltip", {
+        source: state.data.source,
+        time: formatRelativeTime(state.data.queried_at),
+      })
+    : state.error
+      ? t("accounts.apiBalanceFailed", { error: state.error })
+      : t("accounts.apiBalanceLoading");
+
+  return (
+    <button
+      type="button"
+      ref={badgeRef}
+      onClick={(event) => {
+        event.stopPropagation();
+        refresh(true);
+      }}
+      className={cn(
+        "inline-flex items-center gap-1 whitespace-nowrap rounded-md px-1.5 py-0.5 font-mono text-[11px] tabular-nums ring-1 ring-inset transition-colors",
+        state.error
+          ? "bg-red-500/10 text-red-700/70 ring-red-500/20 hover:bg-red-500/20 dark:text-red-400/70"
+          : "bg-emerald-500/10 text-emerald-700 ring-emerald-500/20 hover:bg-emerald-500/20 dark:text-emerald-400",
+      )}
+      title={title}
+    >
+      {state.loading ? (
+        <Loader2 className="size-3 shrink-0 animate-spin" aria-hidden />
+      ) : (
+        <Wallet className="size-3 shrink-0" aria-hidden />
+      )}
+      {t("accounts.apiBalanceLabel")}: {state.data ? formatAPIAccountBalance(state.data) : "—"}
+    </button>
+  );
+}
+
 // 成本列并排两套账,颜色区分口径:
 // 上行(石板色)是网关自己的日志算出来的,只含经由本网关转发的请求;
 // 下行(琥珀色)是 OpenAI 官方结算数,还包含用户直接用官方客户端的消耗。
@@ -15487,10 +16139,10 @@ function BilledCell({
   onOpenOfficial?: (account: AccountRow) => void;
 }) {
   const { t } = useTranslation();
-  const official =
-    typeof account.official_usd_7d === "number" ? account.official_usd_7d : null;
+  const official = officialUsdValue(account);
   const showOfficial =
-    isCodexOfficialAccount(account) && !isOfficialCostHiddenAccount(account);
+    supportsOfficialUsage(account) && !isOfficialCostHiddenAccount(account);
+  const showAPIBalance = account.openai_responses_api === true;
   // synced 表示后端已成功同步过但上游没有数据(官方统计有滞后):
   // 这是确定的"暂无数据",不是"还在加载",不该转圈。
   // 导入未满一天、封禁/错误号也不转圈：官方结算要到次日才出数。
@@ -15517,7 +16169,7 @@ function BilledCell({
     (account.usage_percent_5h !== null && account.usage_percent_5h !== undefined) ||
     !!account.reset_5h_at;
   const visibleH5 = has5hWindow ? h5 : null;
-  if (visibleH5 === null && d7 === null && !showOfficial) {
+  if (visibleH5 === null && d7 === null && !showOfficial && !showAPIBalance) {
     return <span className="text-[12px] text-muted-foreground">-</span>;
   }
   const longLabel = formatLongUsageWindowLabel(account);
@@ -15534,6 +16186,7 @@ function BilledCell({
     : `${t("accounts.billedOfficialHint")}\n${t("accounts.billedOfficialOpen")}`;
   return (
     <div className="flex flex-col items-start gap-1">
+      {showAPIBalance && <APIAccountBalanceBadge accountId={account.id} />}
       {(visibleH5 !== null || d7 !== null) && (
         <span
           className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-slate-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-slate-700 ring-1 ring-inset ring-slate-500/20 dark:text-slate-300"
@@ -15655,15 +16308,19 @@ function PendingSelfServiceReviewPanel({
   onApprove,
   onReject,
   onSaveNote,
+  onCountChange,
 }: {
   onApprove: (account: AccountRow) => Promise<void>;
   onReject: (account: AccountRow) => Promise<void>;
   onSaveNote: (account: AccountRow, note: string) => Promise<void>;
+  onCountChange?: (count: number) => void;
 }) {
   const { t } = useTranslation();
   const [pending, setPending] = useState<AccountRow[]>([]);
   const [pendingPage, setPendingPage] = useState(1);
   const [pendingTotal, setPendingTotal] = useState(0);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadingPending, setLoadingPending] = useState(true);
   const pendingPageSize = 20;
   const loadPending = useCallback(async () => {
     try {
@@ -15676,19 +16333,33 @@ function PendingSelfServiceReviewPanel({
         sort: "created_at",
         order: "asc",
       });
+      const total = response.total ?? 0;
       setPending(response.accounts ?? []);
-      setPendingTotal(response.total ?? 0);
+      setPendingTotal(total);
+      setLoadError(null);
+      onCountChange?.(total);
       if (response.page !== pendingPage) setPendingPage(response.page);
-    } catch {
-      // This auxiliary panel must never block the account list.
+    } catch (error) {
+      setLoadError(getErrorMessage(error));
+    } finally {
+      setLoadingPending(false);
     }
-  }, [pendingPage]);
+  }, [onCountChange, pendingPage]);
   useEffect(() => { void loadPending(); }, [loadPending]);
+  useEffect(() => {
+    const refresh = () => {
+      if (!document.hidden) void loadPending();
+    };
+    window.addEventListener("focus", refresh);
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      window.removeEventListener("focus", refresh);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [loadPending]);
   const [editingId, setEditingId] = useState<number | null>(null);
   const [draftNote, setDraftNote] = useState("");
   const [savingId, setSavingId] = useState<number | null>(null);
-
-  if (pending.length === 0) return null;
 
   const startEdit = (account: AccountRow) => {
     setEditingId(account.id);
@@ -15713,7 +16384,7 @@ function PendingSelfServiceReviewPanel({
   };
 
   return (
-    <Card className="border-amber-500/40 bg-amber-500/[0.04] shadow-sm">
+    <Card id="pending-review" className="border-amber-500/40 bg-amber-500/[0.04] shadow-sm scroll-mt-4">
       <CardContent className="p-3 sm:p-4">
         <div className="mb-3 flex items-center gap-2.5">
           <div className="flex size-9 items-center justify-center rounded-xl bg-amber-500/15 text-amber-600 dark:text-amber-300">
@@ -15730,6 +16401,19 @@ function PendingSelfServiceReviewPanel({
           </div>
         </div>
 
+        {loadingPending && pending.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t("common.loading")}</p>
+        ) : loadError ? (
+          <div className="flex flex-wrap items-center justify-between gap-2 text-sm text-destructive">
+            <span>{t("accounts.pendingReview.loadFailed", { error: loadError })}</span>
+            <Button size="sm" variant="outline" onClick={() => void loadPending()}>
+              {t("common.retry")}
+            </Button>
+          </div>
+        ) : pending.length === 0 ? (
+          <p className="text-sm text-muted-foreground">{t("accounts.pendingReview.empty")}</p>
+        ) : (
+        <>
         <div className="space-y-2">
           {pending.map((account) => {
             const editing = editingId === account.id;
@@ -15837,6 +16521,8 @@ function PendingSelfServiceReviewPanel({
             />
           </div>
         ) : null}
+        </>
+        )}
       </CardContent>
     </Card>
   );

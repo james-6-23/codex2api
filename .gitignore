@@ -51,3 +51,7 @@ grok-build-main/
 CLAUDE.md
 .cursor
 diagrams/
+# local run artifacts
+/data/
+/codex2api_local
+/server.log

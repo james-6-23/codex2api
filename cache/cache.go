@@ -45,6 +45,16 @@ type BoundedResponseContextReader interface {
 	GetResponseContextBounded(ctx context.Context, responseID string, maxWireBytes int64) (ResponseContextReadResult, error)
 }
 
+// RuntimeOwnerStore is an optional atomic ownership capability used by
+// cross-instance coordinators. Claim replaces the current owner and returns
+// the previous value; refresh and delete are compare-and-act operations so a
+// stale cleanup can never remove a newer owner.
+type RuntimeOwnerStore interface {
+	ClaimRuntimeOwner(ctx context.Context, namespace, key string, owner []byte, ttl time.Duration) ([]byte, error)
+	CompareAndRefreshRuntimeOwner(ctx context.Context, namespace, key string, expected []byte, ttl time.Duration) (bool, error)
+	CompareAndDeleteRuntimeOwner(ctx context.Context, namespace, key string, expected []byte) (bool, error)
+}
+
 // TokenCache 统一的 token 缓存、刷新锁与短期运行态缓存接口。
 type TokenCache interface {
 	Driver() string

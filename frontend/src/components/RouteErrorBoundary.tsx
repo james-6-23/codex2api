@@ -14,6 +14,29 @@ interface State {
 }
 
 const CHUNK_RELOAD_FLAG = 'codex2api:chunk-reloaded'
+const CHUNK_RELOAD_COOLDOWN_MS = 10_000
+
+function reloadWithCacheBust() {
+  const url = new URL(window.location.href)
+  url.searchParams.set('_reload', Date.now().toString())
+  window.location.replace(url.toString())
+}
+
+async function clearRuntimeCachesAndReload() {
+  try {
+    if ('caches' in window) {
+      const cacheNames = await window.caches.keys()
+      await Promise.all(cacheNames.map((cacheName) => window.caches.delete(cacheName)))
+    }
+    if ('serviceWorker' in navigator) {
+      const registrations = await navigator.serviceWorker.getRegistrations()
+      await Promise.all(registrations.map((registration) => registration.unregister()))
+    }
+  } catch {
+    // Cache APIs may be unavailable; the cache-busted navigation is still useful.
+  }
+  reloadWithCacheBust()
+}
 
 function isChunkLoadError(error: unknown): boolean {
   if (!error) return false
@@ -33,10 +56,10 @@ export default class RouteErrorBoundary extends Component<Props, State> {
   componentDidCatch(error: Error, info: ErrorInfo) {
     if (isChunkLoadError(error)) {
       try {
-        const reloaded = sessionStorage.getItem(CHUNK_RELOAD_FLAG)
-        if (!reloaded) {
-          sessionStorage.setItem(CHUNK_RELOAD_FLAG, '1')
-          window.location.reload()
+        const lastReload = Number(sessionStorage.getItem(CHUNK_RELOAD_FLAG) || 0)
+        if (!lastReload || Date.now() - lastReload > CHUNK_RELOAD_COOLDOWN_MS) {
+          sessionStorage.setItem(CHUNK_RELOAD_FLAG, String(Date.now()))
+          void clearRuntimeCachesAndReload()
           return
         }
       } catch {
@@ -50,7 +73,10 @@ export default class RouteErrorBoundary extends Component<Props, State> {
 
   componentDidMount() {
     try {
-      sessionStorage.removeItem(CHUNK_RELOAD_FLAG)
+      const lastReload = Number(sessionStorage.getItem(CHUNK_RELOAD_FLAG) || 0)
+      if (lastReload && Date.now() - lastReload > CHUNK_RELOAD_COOLDOWN_MS) {
+        sessionStorage.removeItem(CHUNK_RELOAD_FLAG)
+      }
     } catch {
       // ignore
     }
@@ -62,7 +88,7 @@ export default class RouteErrorBoundary extends Component<Props, State> {
     } catch {
       // ignore
     }
-    window.location.reload()
+    void clearRuntimeCachesAndReload()
   }
 
   render() {

@@ -315,10 +315,11 @@ func (h *Handler) createAgentIdentityAccount(ctx context.Context, fields *agentI
 // importAgentIdentityTokens 处理通用导入(JSON 文件/文件夹扫描)里识别出的 Agent Identity
 // 条目：校验私钥、按 runtime_id 去重(批内 + 现有；allowDuplicate 时跳过去重)、建号入池。
 // 返回新增/重复跳过/失败计数，以及新建账号的 ID（供导入方统一绑定分组）。
-func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []importToken, proxyURL string, allowDuplicate bool) (success, duplicate, failed int, createdIDs []int64) {
+func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []importToken, settings importSettings) (success, duplicate, failed int, createdIDs []int64) {
 	if len(tokens) == 0 {
 		return 0, 0, 0, nil
 	}
+	allowDuplicate := settings.allowDuplicate
 	runtimeIDs, unlock, err := h.beginAgentIdentityImport(ctx, allowDuplicate)
 	if err != nil {
 		return 0, 0, len(tokens), nil
@@ -335,7 +336,7 @@ func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []import
 			PlanType:   strings.TrimSpace(t.planType),
 			FedRAMP:    t.agentFedRAMP,
 		}
-		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, t.name, proxyURL, "import_agent_identity", runtimeIDs, allowDuplicate)
+		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, t.name, settings.proxyForToken(t), "import_agent_identity", runtimeIDs, allowDuplicate)
 		if err != nil {
 			failed++
 			continue

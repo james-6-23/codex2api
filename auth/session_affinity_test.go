@@ -254,8 +254,7 @@ func TestNextForContinuationPreservesBoundedAffinity(t *testing.T) {
 
 	store.sessionMu.Lock()
 	binding := store.sessionBindings["conversation-1"]
-	binding.boundAt = time.Now().Add(-defaultMaxAffinityDuration - time.Minute)
-	binding.requestCount = defaultMaxAffinityRequests
+	binding.lastUsedAt = time.Now().Add(-defaultAffinityIdleEscape - time.Minute)
 	store.sessionBindings["conversation-1"] = binding
 	store.sessionMu.Unlock()
 
@@ -271,11 +270,83 @@ func TestNextForContinuationPreservesBoundedAffinity(t *testing.T) {
 		t.Fatalf("continuation fell through to account %d when bound account was excluded", acc.DBID)
 	}
 
+	// 续链命中会刷新空闲时钟,重新置为空闲后普通请求才会逃逸换号。
+	store.sessionMu.Lock()
+	binding = store.sessionBindings["conversation-1"]
+	binding.lastUsedAt = time.Now().Add(-defaultAffinityIdleEscape - time.Minute)
+	store.sessionBindings["conversation-1"] = binding
+	store.sessionMu.Unlock()
+
 	acc, _ = store.NextForSessionWithFilter("conversation-1", 0, nil, nil)
 	if acc == nil || acc.DBID != fallback.DBID {
 		t.Fatalf("ordinary bounded request account = %#v, want fallback account %d", acc, fallback.DBID)
 	}
 	store.Release(acc)
+}
+
+func TestBoundedAffinityKeepsActiveBindingRegardlessOfAgeAndCount(t *testing.T) {
+	bound := &Account{DBID: 1, AccessToken: "tok-1"}
+	other := &Account{DBID: 2, AccessToken: "tok-2"}
+	other.SetSchedulerPriority(20)
+	store := &Store{
+		accounts:       []*Account{bound, other},
+		maxConcurrency: 2,
+	}
+	store.bindSessionAffinity("conversation-active", bound, "")
+
+	// 旧实现会在 50 次请求或绑定满 5 分钟后换号;活跃会话现在必须继续粘住。
+	store.sessionMu.Lock()
+	binding := store.sessionBindings["conversation-active"]
+	binding.boundAt = time.Now().Add(-time.Hour)
+	binding.requestCount = 10_000
+	binding.lastUsedAt = time.Now().Add(-30 * time.Second)
+	store.sessionBindings["conversation-active"] = binding
+	store.sessionMu.Unlock()
+
+	acc, _ := store.NextForSessionWithFilter("conversation-active", 0, nil, nil)
+	if acc == nil || acc.DBID != bound.DBID {
+		t.Fatalf("active bounded session account = %#v, want bound account %d", acc, bound.DBID)
+	}
+	store.Release(acc)
+
+	store.sessionMu.RLock()
+	updated := store.sessionBindings["conversation-active"]
+	store.sessionMu.RUnlock()
+	if !updated.lastUsedAt.After(binding.lastUsedAt) {
+		t.Fatal("sticky hit did not refresh lastUsedAt")
+	}
+}
+
+func TestBoundedAffinityEscapesAfterIdleGap(t *testing.T) {
+	bound := &Account{DBID: 1, AccessToken: "tok-1"}
+	other := &Account{DBID: 2, AccessToken: "tok-2"}
+	other.SetSchedulerPriority(20)
+	store := &Store{
+		accounts:       []*Account{bound, other},
+		maxConcurrency: 2,
+	}
+	store.bindSessionAffinity("conversation-idle", bound, "")
+
+	store.sessionMu.Lock()
+	binding := store.sessionBindings["conversation-idle"]
+	binding.lastUsedAt = time.Now().Add(-defaultAffinityIdleEscape - time.Minute)
+	store.sessionBindings["conversation-idle"] = binding
+	store.sessionMu.Unlock()
+
+	acc, _ := store.NextForSessionWithFilter("conversation-idle", 0, nil, nil)
+	if acc == nil {
+		t.Fatal("expected an account after idle escape")
+	}
+	defer store.Release(acc)
+	if acc.DBID != other.DBID {
+		t.Fatalf("idle escape account = %d, want re-picked account %d", acc.DBID, other.DBID)
+	}
+	store.sessionMu.RLock()
+	_, stillBound := store.sessionBindings["conversation-idle"]
+	store.sessionMu.RUnlock()
+	if stillBound {
+		t.Fatal("idle escape left the stale binding in place")
+	}
 }
 
 func TestNextForSessionFallsBackWhenBoundAccountExcluded(t *testing.T) {
@@ -324,6 +395,76 @@ func TestNextForSessionWithFilterFallsBackWhenBoundAccountRejected(t *testing.T)
 	if proxyURL != "" {
 		t.Fatalf("proxyURL = %q, want empty fallback proxy", proxyURL)
 	}
+}
+
+func TestSessionCapacitySpilloverKeepsDurableBinding(t *testing.T) {
+	bound := &Account{DBID: 1, AccessToken: "tok-1"}
+	fallback := &Account{DBID: 2, AccessToken: "tok-2"}
+	tokenCache := cache.NewMemory(1)
+	defer tokenCache.Close()
+	store := &Store{
+		accounts:       []*Account{bound, fallback},
+		maxConcurrency: 1,
+		tokenCache:     tokenCache,
+	}
+	store.SetSessionSlotBuffer(50 * time.Millisecond)
+	store.SetSessionSlotBufferEnabled(true)
+	store.bindSessionAffinity("capacity-spillover", bound, "")
+
+	held := store.TakePreferredAccountWithDispatch(bound.DBID, 0, nil, nil, DispatchPolicyStandard)
+	if held != bound {
+		t.Fatalf("held account = %p, want bound account %p", held, bound)
+	}
+	defer store.Release(held)
+
+	selected, proxyURL, guard := store.NextForSessionWithDispatchGuard("capacity-spillover", 0, nil, nil, DispatchPolicyStandard)
+	if selected != fallback {
+		if selected != nil {
+			store.Release(selected)
+		}
+		t.Fatalf("capacity spillover account = %p, want fallback %p", selected, fallback)
+	}
+	if !guard.PreservesExisting() {
+		t.Fatal("capacity spillover did not preserve the existing binding")
+	}
+
+	store.BindSessionAffinityWithGuard("capacity-spillover", selected, proxyURL, guard)
+	requireSessionBinding(t, store, "capacity-spillover", bound.DBID)
+	cached, ok, err := tokenCache.GetSessionAffinity(context.Background(), "capacity-spillover")
+	if err != nil || !ok || cached.AccountID != bound.DBID {
+		t.Fatalf("cached binding = (%#v, %v, %v), want account %d", cached, ok, err, bound.DBID)
+	}
+	store.ReleaseForSessionWithGuard(selected, "capacity-spillover", guard)
+	if got := accountOccupiedRequests(fallback); got != 0 {
+		t.Fatalf("fallback occupied slots after guarded release = %d, want 0", got)
+	}
+}
+
+func TestSessionFilterFallbackStillMigratesBinding(t *testing.T) {
+	bound := &Account{DBID: 1, AccessToken: "tok-1"}
+	fallback := &Account{DBID: 2, AccessToken: "tok-2"}
+	store := &Store{
+		accounts:       []*Account{bound, fallback},
+		maxConcurrency: 1,
+	}
+	store.bindSessionAffinity("filter-migration", bound, "")
+
+	selected, proxyURL, guard := store.NextForSessionWithDispatchGuard("filter-migration", 0, nil, func(account *Account) bool {
+		return account.DBID == fallback.DBID
+	}, DispatchPolicyStandard)
+	if selected != fallback {
+		if selected != nil {
+			store.Release(selected)
+		}
+		t.Fatalf("filtered fallback account = %p, want %p", selected, fallback)
+	}
+	defer store.Release(selected)
+	if guard.PreservesExisting() {
+		t.Fatal("filter rejection was misclassified as a capacity spillover")
+	}
+
+	store.BindSessionAffinityWithGuard("filter-migration", selected, proxyURL, guard)
+	requireSessionBinding(t, store, "filter-migration", fallback.DBID)
 }
 
 func TestNoAffinitySplitGroupKeepsSessionStickyWithinTargetGroup(t *testing.T) {
@@ -510,6 +651,40 @@ func TestWaitForSessionAvailableKeepsWaitingWhenCandidateIsBusy(t *testing.T) {
 	}
 	if proxyURL != "" {
 		t.Fatalf("proxyURL = %q, want empty", proxyURL)
+	}
+}
+
+func TestWaitForSessionAvailableVariantsRespectContextCancellation(t *testing.T) {
+	account := &Account{DBID: 1, AccessToken: "tok-1"}
+	store := &Store{accounts: []*Account{account}, maxConcurrency: 1}
+	atomic.StoreInt64(&account.ActiveRequests, 1)
+	tests := []struct {
+		name string
+		wait func(context.Context) (*Account, string)
+	}{
+		{name: "base", wait: func(ctx context.Context) (*Account, string) {
+			return store.WaitForSessionAvailable(ctx, "", time.Hour, 0, nil)
+		}},
+		{name: "filter", wait: func(ctx context.Context) (*Account, string) {
+			return store.WaitForSessionAvailableWithFilter(ctx, "", time.Hour, 0, nil, nil)
+		}},
+		{name: "dispatch", wait: func(ctx context.Context) (*Account, string) {
+			return store.WaitForSessionAvailableWithDispatch(ctx, "", time.Hour, 0, nil, nil, DispatchPolicy(0))
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+			selected, _ := tc.wait(ctx)
+			if selected != nil {
+				t.Fatalf("selected busy account %+v", selected)
+			}
+			if elapsed := time.Since(started); elapsed > 250*time.Millisecond {
+				t.Fatalf("wait ignored context cancellation for %s", elapsed)
+			}
+		})
 	}
 }
 

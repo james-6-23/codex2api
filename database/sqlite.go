@@ -129,6 +129,26 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 			updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS scheduler_outbox (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			entity_type TEXT NOT NULL,
+			entity_id INTEGER NOT NULL DEFAULT 0,
+			event_type TEXT NOT NULL,
+			created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_scheduler_outbox_created ON scheduler_outbox(created_at, id);`,
+		`CREATE TABLE IF NOT EXISTS maintenance_jobs (
+			entity_id INTEGER NOT NULL,
+			job_kind TEXT NOT NULL,
+			due_at TIMESTAMP NOT NULL,
+			lease_owner TEXT NOT NULL DEFAULT '',
+			lease_until TIMESTAMP NULL,
+			attempts INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+			PRIMARY KEY(entity_id, job_kind)
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_due ON maintenance_jobs(job_kind, due_at, entity_id);`,
 		`CREATE TABLE IF NOT EXISTS usage_logs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			account_id INTEGER DEFAULT 0,
@@ -187,6 +207,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			last_reset_at TIMESTAMP NULL,
 			allowed_group_ids TEXT DEFAULT '[]',
 			expires_at TIMESTAMP NULL,
+			enabled INTEGER NOT NULL DEFAULT 1,
 			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 		);`,
 		`CREATE TABLE IF NOT EXISTS api_key_scope_counters (
@@ -232,6 +253,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					site_logo TEXT DEFAULT '',
 					background_config TEXT DEFAULT '{}',
 					grok_config TEXT DEFAULT '{}',
+					claude_config TEXT DEFAULT '{}',
+					antigravity_oauth_config TEXT DEFAULT '{}',
+					invite_guide_config TEXT DEFAULT '{}',
 					max_concurrency INTEGER DEFAULT 2,
 				global_rpm INTEGER DEFAULT 0,
 				test_model TEXT DEFAULT 'gpt-5.4',
@@ -254,6 +278,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				lazy_mode INTEGER DEFAULT 0,
 				proxy_pool_enabled INTEGER DEFAULT 0,
 				fast_scheduler_enabled INTEGER DEFAULT 0,
+				scheduler_engine TEXT DEFAULT '',
 				max_retries INTEGER DEFAULT 2,
 				max_rate_limit_retries INTEGER DEFAULT 1,
 				reasoning_effort_models TEXT DEFAULT '[]',
@@ -280,7 +305,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				passive_internal_models_enabled INTEGER DEFAULT 0,
 				session_slot_buffer_enabled INTEGER DEFAULT 0,
 				session_slot_buffer_seconds INTEGER DEFAULT 10,
+				models_list_read_max_bytes INTEGER NOT NULL DEFAULT 8388608,
 					codex_force_websocket INTEGER DEFAULT 0,
+					codex_request_compression INTEGER DEFAULT 1,
 					codex_ws_weak_network_mode INTEGER DEFAULT 0,
 					codex_ws_keepalive_enabled INTEGER DEFAULT 0,
 					codex_ws_keepalive_interval_sec INTEGER DEFAULT 60,
@@ -306,6 +333,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					codex_continue_max_rounds INTEGER DEFAULT 8,
 					retry_interval_ms INTEGER DEFAULT 0,
 					transport_retry_policy TEXT DEFAULT 'rotate',
+					continuous_retry_policy TEXT DEFAULT '{"enabled":false,"catch_all":false,"categories":["transport","http_429","http_5xx","stream_error"],"status_codes":[],"error_codes":[],"max_duration_seconds":600}',
 					codex_synced_cli_version TEXT DEFAULT '',
 					codex_cli_version_sync_enabled INTEGER DEFAULT 1,
 					codex_cli_version_sync_interval_hours INTEGER DEFAULT 12,
@@ -314,11 +342,13 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 					ignore_usage_limit_status INTEGER DEFAULT 0,
 					auto_reset_credits_enabled INTEGER DEFAULT 0,
 					auto_reset_credits_before_expiry_min INTEGER DEFAULT 60,
+					auto_activate_5h_window_enabled INTEGER DEFAULT 0,
 					utls_shutdown_timeout_minutes INTEGER DEFAULT 30,
 					codex_fingerprint_default_mode TEXT DEFAULT 'off',
 					response_cache_local_max_bytes INTEGER NOT NULL DEFAULT 67108864,
 					response_cache_local_max_entry_bytes INTEGER NOT NULL DEFAULT 8388608,
 					response_cache_reconstruct_max_bytes INTEGER NOT NULL DEFAULT 67108864,
+					response_cache_write_policy TEXT NOT NULL DEFAULT 'always',
 					response_cache_config_generation INTEGER NOT NULL DEFAULT 1,
 					relay_model_cooldown_mode TEXT NOT NULL DEFAULT 'off',
 					relay_model_cooldown_seconds INTEGER NOT NULL DEFAULT 2,
@@ -479,6 +509,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"accounts", "tags", "TEXT DEFAULT '[]'"},
 		{"accounts", "note", "TEXT DEFAULT ''"},
 		{"accounts", "deleted_at", "TIMESTAMP NULL"},
+		{"accounts", "credential_generation", "INTEGER NOT NULL DEFAULT 1"},
 		{"usage_logs", "channel", "TEXT DEFAULT ''"},
 		{"usage_logs", "input_tokens", "INTEGER DEFAULT 0"},
 		{"usage_logs", "output_tokens", "INTEGER DEFAULT 0"},
@@ -521,6 +552,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "error_message", "TEXT DEFAULT ''"},
 		{"usage_logs", "newapi_user_name", "TEXT DEFAULT ''"},
 		{"usage_logs", "credential_generation", "INTEGER NOT NULL DEFAULT 0"},
+		{"system_settings", "continuous_retry_policy", "TEXT DEFAULT '{\"enabled\":false,\"catch_all\":false,\"categories\":[\"transport\",\"http_429\",\"http_5xx\",\"stream_error\"],\"status_codes\":[],\"error_codes\":[]}'"},
 		{"api_keys", "quota_limit", "REAL DEFAULT 0"},
 		{"api_keys", "quota_used", "REAL DEFAULT 0"},
 		{"api_keys", "total_used", "REAL DEFAULT 0"},
@@ -529,6 +561,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"api_keys", "allowed_group_ids", "TEXT DEFAULT '[]'"},
 		{"api_keys", "limits", "TEXT DEFAULT '{}'"},
 		{"api_keys", "expires_at", "TIMESTAMP NULL"},
+		{"api_keys", "enabled", "INTEGER NOT NULL DEFAULT 1"},
 		{"account_groups", "description", "TEXT DEFAULT ''"},
 		{"account_groups", "color", "TEXT DEFAULT ''"},
 		{"account_groups", "sort_order", "INTEGER DEFAULT 0"},
@@ -541,6 +574,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "site_logo", "TEXT DEFAULT ''"},
 		{"system_settings", "background_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "grok_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "claude_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "antigravity_oauth_config", "TEXT DEFAULT '{}'"},
+		{"system_settings", "invite_guide_config", "TEXT DEFAULT '{}'"},
 		{"system_settings", "test_content", "TEXT DEFAULT 'hi'"},
 		{"system_settings", "pg_max_conns", "INTEGER DEFAULT 50"},
 		{"system_settings", "redis_pool_size", "INTEGER DEFAULT 30"},
@@ -558,7 +594,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "lazy_mode", "INTEGER DEFAULT 0"},
 		{"system_settings", "proxy_pool_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "fast_scheduler_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "scheduler_engine", "TEXT DEFAULT ''"},
 		{"system_settings", "codex_force_websocket", "INTEGER DEFAULT 0"},
+		{"system_settings", "codex_request_compression", "INTEGER DEFAULT 1"},
 		{"system_settings", "codex_ws_weak_network_mode", "INTEGER DEFAULT 0"},
 		{"system_settings", "codex_ws_keepalive_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "codex_ws_keepalive_interval_sec", "INTEGER DEFAULT 60"},
@@ -592,11 +630,13 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "ignore_usage_limit_status", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_reset_credits_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_reset_credits_before_expiry_min", "INTEGER DEFAULT 60"},
+		{"system_settings", "auto_activate_5h_window_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "utls_shutdown_timeout_minutes", "INTEGER DEFAULT 30"},
 		{"system_settings", "codex_fingerprint_default_mode", "TEXT DEFAULT 'off'"},
 		{"system_settings", "response_cache_local_max_bytes", "INTEGER NOT NULL DEFAULT 67108864"},
 		{"system_settings", "response_cache_local_max_entry_bytes", "INTEGER NOT NULL DEFAULT 8388608"},
 		{"system_settings", "response_cache_reconstruct_max_bytes", "INTEGER NOT NULL DEFAULT 67108864"},
+		{"system_settings", "response_cache_write_policy", "TEXT NOT NULL DEFAULT 'always'"},
 		{"system_settings", "response_cache_config_generation", "INTEGER NOT NULL DEFAULT 1"},
 		{"system_settings", "relay_model_cooldown_mode", "TEXT NOT NULL DEFAULT 'off'"},
 		{"system_settings", "relay_model_cooldown_seconds", "INTEGER NOT NULL DEFAULT 2"},
@@ -672,6 +712,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "passive_internal_models_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "session_slot_buffer_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "session_slot_buffer_seconds", "INTEGER DEFAULT 10"},
+		{"system_settings", "models_list_read_max_bytes", "INTEGER NOT NULL DEFAULT 8388608"},
 		{"system_settings", "auto_pause_5h_threshold", "REAL DEFAULT 0"},
 		{"system_settings", "auto_pause_7d_threshold", "REAL DEFAULT 0"},
 		{"system_settings", "auto_pause_5h_guard_band_percent", "REAL DEFAULT 5"},
@@ -772,6 +813,9 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		WHERE status <> 'deleted' AND COALESCE(error_message, '') = 'deleted'
 	`); err != nil {
 		return err
+	}
+	if err := db.installSchedulerOutboxTriggers(ctx); err != nil {
+		return fmt.Errorf("install scheduler outbox triggers: %w", err)
 	}
 
 	return db.runDataMigrationsWithTimeout()

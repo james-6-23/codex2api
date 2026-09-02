@@ -1541,6 +1541,40 @@ func TestConfiguredLocalBlockMessageDoesNotReplaceRestrictionMessages(t *testing
 	}
 }
 
+func TestClearNewAPIUpstreamCyberPolicyDecisionBeforeTransparentRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	first := newAPIPolicyDecisionMetadata{
+		RequestID: "request-1", DecisionID: "decision-1", Action: "block",
+		ReasonCode: newAPIUpstreamCyberPolicyReasonCode, Signature: "signature-1",
+	}
+	c.Set(newAPIUpstreamCyberDecisionContextKey, first)
+	writeNewAPIPolicyDecisionHeaders(c, first)
+
+	clearNewAPIUpstreamCyberPolicyDecision(c)
+
+	if _, ok := newAPIUpstreamCyberPolicyDecision(c); ok {
+		t.Fatal("transparent retry retained the previous attempt's policy decision")
+	}
+	for name := range recorder.Header() {
+		if strings.HasPrefix(http.CanonicalHeaderKey(name), "X-Codex2api-Policy-") {
+			t.Fatalf("transparent retry retained policy response header %q", name)
+		}
+	}
+
+	second := first
+	second.DecisionID = "decision-2"
+	second.Signature = "signature-2"
+	c.Set(newAPIUpstreamCyberDecisionContextKey, second)
+	writeNewAPIPolicyDecisionHeaders(c, second)
+	got, ok := newAPIUpstreamCyberPolicyDecision(c)
+	if !ok || got.DecisionID != second.DecisionID || recorder.Header().Get("X-Codex2API-Policy-Response-Signature") != second.Signature {
+		t.Fatalf("final policy decision was not preserved: metadata=%+v headers=%v", got, recorder.Header())
+	}
+}
+
 func TestBindingCannotChangeRequestPolicySnapshot(t *testing.T) {
 	base := promptGuardTestConfig()
 	base.Mode = promptfilter.ModeBlock
@@ -1872,4 +1906,16 @@ func addSignedNewAPIPolicyMetaWithSecret(t *testing.T, c *gin.Context, meta newA
 	}
 	c.Request.Header.Set("X-NewAPI-Policy-Meta", encoded)
 	c.Request.Header.Set("X-NewAPI-Policy-Meta-Signature", signature)
+}
+
+func TestNewAPIRuntimeScopeSeparatesSignedChannels(t *testing.T) {
+	first := newAPIRuntimeScopeWithChannel(101, "fanren", 1001)
+	second := newAPIRuntimeScopeWithChannel(101, "fanren", 1002)
+	legacy := newAPIRuntimeScopeWithChannel(101, "fanren", 0)
+	if first == second || first == legacy || second == legacy {
+		t.Fatalf("channel-aware runtime scopes collided: first=%q second=%q legacy=%q", first, second, legacy)
+	}
+	if !strings.Contains(first, ":channel:1001") || !strings.Contains(second, ":channel:1002") {
+		t.Fatalf("runtime scope does not retain channel boundary: %q / %q", first, second)
+	}
 }

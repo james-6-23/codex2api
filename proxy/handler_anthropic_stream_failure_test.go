@@ -66,6 +66,28 @@ func writeCodexSSE(w http.ResponseWriter, events ...string) {
 	}
 }
 
+func TestSyncAnthropicUsageStateDispatchesByProvider(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	claude := &auth.Account{DBID: 101, UpstreamType: auth.UpstreamClaude, AccessToken: "claude-token"}
+	claudeResp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	claudeResp.Header.Set("anthropic-ratelimit-unified-5h-utilization", "0.42")
+	claudeResp.Header.Set("anthropic-ratelimit-unified-5h-reset", "4102444800")
+	syncAnthropicUsageStateForAccount(store, claude, claudeResp)
+	if got := claude.UsagePercent5h; got != 42 {
+		t.Fatalf("Claude usage = %v, want 42", got)
+	}
+
+	codex := &auth.Account{DBID: 102, UpstreamType: auth.UpstreamOpenAIResponses, AccessToken: "codex-token"}
+	codexResp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	codexResp.Header.Set("x-codex-primary-used-percent", "37")
+	codexResp.Header.Set("x-codex-primary-window-minutes", "300")
+	codexResp.Header.Set("x-codex-primary-reset-after-seconds", "3600")
+	syncAnthropicUsageStateForAccount(store, codex, codexResp)
+	if got := codex.UsagePercent5h; got != 37 {
+		t.Fatalf("Codex usage = %v, want 37", got)
+	}
+}
+
 // TestMessagesStreamMidBreakEmitsErrorEventNotCleanStop 验证 issue #435 修复：
 // 正文已开始后上游断流（未收到终止事件），下游必须收到 Anthropic 流内 error 事件，
 // 而不是伪造 stop_reason=end_turn + message_stop 的"干净空收尾"（下游会把截断
@@ -94,6 +116,14 @@ func TestMessagesStreamMidBreakEmitsErrorEventNotCleanStop(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("upstream calls = %d, want 1 (post-content break is not retryable)", got)
+	}
+}
+
+func TestClaudeNativeFailureUsesProviderSpecificFallbackMessage(t *testing.T) {
+	account := &auth.Account{UpstreamType: auth.UpstreamClaude}
+	outcome := normalizeNativeFailureMessageForAccount(account, streamOutcome{failureMessage: "Grok upstream stream failed"})
+	if outcome.failureMessage != "Claude upstream stream failed" {
+		t.Fatalf("Claude native fallback message = %q", outcome.failureMessage)
 	}
 }
 
@@ -196,6 +226,69 @@ func TestMessagesStreamPreContentBreakRetriesTransparently(t *testing.T) {
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (break + transparent retry)", got)
+	}
+}
+
+func TestMessagesCatchAllDiscardsOutputFromFailedAttempt(t *testing.T) {
+	enableCatchAllContinuousRetry(t)
+	handler, calls := newAnthropicStreamFailureTestHandler(t, func(call int32, w http.ResponseWriter) {
+		if call == 1 {
+			writeCodexSSE(w,
+				`{"type":"response.created","response":{"id":"resp_failed"}}`,
+				`{"type":"response.output_item.added","item":{"type":"message"}}`,
+				`{"type":"response.output_text.delta","delta":"failed-message-partial"}`,
+				`{"type":"response.failed","response":{"status":"failed","status_code":503,"error":{"code":"server_error","message":"must stay upstream"}}}`,
+			)
+			return
+		}
+		writeCodexSSE(w,
+			`{"type":"response.created","response":{"id":"resp_success"}}`,
+			`{"type":"response.output_item.added","item":{"type":"message"}}`,
+			`{"type":"response.output_text.delta","delta":"successful-message"}`,
+			`{"type":"response.completed","response":{"id":"resp_success","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		)
+	})
+
+	recorder := invokeAnthropicMessagesStream(t, handler)
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, "successful-message") || !strings.Contains(body, "message_stop") {
+		t.Fatalf("successful Messages replay missing: %q", body)
+	}
+	if strings.Contains(body, "failed-message-partial") || strings.Contains(body, "must stay upstream") || strings.Contains(body, "event: error") {
+		t.Fatalf("failed Messages attempt leaked downstream: %q", body)
+	}
+}
+
+func TestMessagesCatchAllDiscardsExplicitErrorEventAfterPartialOutput(t *testing.T) {
+	enableCatchAllContinuousRetry(t)
+	handler, calls := newAnthropicStreamFailureTestHandler(t, func(call int32, w http.ResponseWriter) {
+		if call == 1 {
+			_, _ = io.WriteString(w,
+				"data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"message\"}}\n\n"+
+					"data: {\"type\":\"response.output_text.delta\",\"delta\":\"failed-message-error-partial\"}\n\n"+
+					"event: error\ndata: {\"error\":{\"code\":\"future_error\",\"message\":\"must stay upstream\"}}\n\n")
+			return
+		}
+		writeCodexSSE(w,
+			`{"type":"response.output_item.added","item":{"type":"message"}}`,
+			`{"type":"response.output_text.delta","delta":"successful-message-after-error"}`,
+			`{"type":"response.completed","response":{"id":"resp_success","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		)
+	})
+
+	recorder := invokeAnthropicMessagesStream(t, handler)
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, "successful-message-after-error") || !strings.Contains(body, "message_stop") {
+		t.Fatalf("successful Messages replay missing: %q", body)
+	}
+	if strings.Contains(body, "failed-message-error-partial") || strings.Contains(body, "must stay upstream") || strings.Contains(body, "future_error") || strings.Contains(body, "event: error") {
+		t.Fatalf("explicit Messages error event attempt leaked downstream: %q", body)
 	}
 }
 

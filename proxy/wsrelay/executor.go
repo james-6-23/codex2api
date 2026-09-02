@@ -206,8 +206,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	if err2 != nil {
 		return nil, err2
 	}
-	// Busy overflow can return <lane>#ovf-N. Continuation bindings and retry
-	// reconnects must use the actual acquired slot rather than the base lane.
+	// AcquireConnection 可能按 busy overflow 策略落到 <lane>#ovf-N；
+	// response_id 续链绑定和发送失败后的重拨都必须使用实际槽位，不能继续
+	// 记录调用前的 base lane。普通、stateless slot 与 preferred 路径在这里
+	// 做同一轮幂等校正。
 	poolSessionID = actualWebsocketPoolSessionID(wc, poolSessionID)
 	if wc.upstreamUserAgentKnown {
 		proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
@@ -508,6 +510,10 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	if accountID != "" {
 		headers.Set("Chatgpt-Account-Id", accountID)
 	}
+	// 会话标识头与 HTTP 路径共用同一条装配：真实客户端的 WS 握手头
+	// （codex-rs/core/src/client.rs build_websocket_headers）与 HTTP /responses 同形，
+	// 都是 session-id / thread-id / x-client-request-id，也都不发 Conversation_id。
+	// legacy 档下该函数恢复旧的 Session_id + 清 Conversation_id 行为。
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
 		proxy.ApplyCodexSessionHeaders(headers, account, sessionID, ginHeaders, true)
 	}
@@ -692,9 +698,10 @@ func (r *WsResponse) buildErrorEvent(payload []byte) ([]byte, bool) {
 	if errObj == "" {
 		errObj = fmt.Sprintf(`{"message":%q,"code":%d}`, errMsg, status)
 	}
-	event := fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","error":%s}}`, errObj)
+	createdAt := time.Now().Unix()
+	event := fmt.Sprintf(`{"type":"response.failed","response":{"created_at":%d,"status":"failed","error":%s}}`, createdAt, errObj)
 	if status > 0 {
-		event = fmt.Sprintf(`{"type":"response.failed","response":{"status":"failed","status_code":%d,"error":%s}}`, status, errObj)
+		event = fmt.Sprintf(`{"type":"response.failed","response":{"created_at":%d,"status":"failed","status_code":%d,"error":%s}}`, createdAt, status, errObj)
 	}
 	return []byte(event), true
 }

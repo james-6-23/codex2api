@@ -57,7 +57,7 @@ func TestAsyncShadowAuxiliaryRealHandlerUpstreamMatrix(t *testing.T) {
 	var upstreamCalls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamCalls.Add(1)
-		body, _ := io.ReadAll(r.Body)
+		body := readUpstreamRequestBody(r)
 		if strings.Contains(r.URL.Path, "/responses/compact") {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{"id":"resp_compact_matrix","object":"response.compaction","created_at":1710000000,"output":[{"type":"compaction_summary","summary":"normal summary"}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)

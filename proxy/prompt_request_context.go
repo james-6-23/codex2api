@@ -95,8 +95,10 @@ func (h *Handler) promptFilterConfigForRequest(c *gin.Context) promptfilter.Conf
 }
 
 // capturePromptRequestIngress retains the already-owned request buffer by
-// reference only when signed NewAPI verification can need the pre-mapping body.
-// Callers must treat the buffer as immutable; body rewrites use a new slice.
+// reference when signed NewAPI verification or a Codex-local conversation lock
+// can need the pre-mapping body. The latter is required for clients whose only
+// stable session signal lives in client_metadata. Callers must treat the buffer
+// as immutable; body rewrites use a new slice.
 func (h *Handler) capturePromptRequestIngress(c *gin.Context, body []byte) {
 	if c == nil {
 		return
@@ -106,7 +108,9 @@ func (h *Handler) capturePromptRequestIngress(c *gin.Context, body []byte) {
 		return
 	}
 	cfg := h.promptFilterConfigForRequest(c)
-	if !cfg.Advanced.NewAPI.Enabled || strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) == "" {
+	needsSignedBody := cfg.Advanced.NewAPI.Enabled && strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) != ""
+	needsFallbackSessionBody := cfg.Enabled && cfg.Advanced.Enforcement.ConversationLockEnabled
+	if !needsSignedBody && !needsFallbackSessionBody {
 		return
 	}
 	setIngressRequestBodyIfAbsent(c, body)

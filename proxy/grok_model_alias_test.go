@@ -118,11 +118,7 @@ func TestGrokGPTAliasHonorsChannelAndTransportBoundaries(t *testing.T) {
 func TestMappedGrokAliasExecutesAcrossHTTPProtocols(t *testing.T) {
 	var capturedModels []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		if err != nil {
-			t.Errorf("read upstream request: %v", err)
-			return
-		}
+		body := readUpstreamRequestBody(r)
 		if r.URL.Path != "/v1/responses" {
 			t.Errorf("upstream path = %q, want /v1/responses", r.URL.Path)
 		}

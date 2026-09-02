@@ -88,6 +88,8 @@ export default function Dashboard() {
   const [chartError, setChartError] = useState<string | null>(null)
   const chartAbort = useRef<AbortController | null>(null)
   const statsAbort = useRef<AbortController | null>(null)
+  const poolAbort = useRef<AbortController | null>(null)
+  const poolRequestGenerationRef = useRef(0)
   const timeRangeRef = useRef<TimeRangeKey>(timeRange)
   const usageStatsRangeInitialized = useRef(false)
   const showPoolRunwayRef = useRef(showPoolRunway)
@@ -134,34 +136,49 @@ export default function Dashboard() {
   })
 
   const loadPoolRunwayData = useCallback(async () => {
-    if (!showPoolRunwayRef.current) return
-    const accountAnalysis = await api.getAccountAnalysis('codex').catch(
-      (): AccountAnalysisResponse | null => null,
-    )
-    if (!showPoolRunwayRef.current) return
+    const requestedChannel = channel
+    if (!showPoolRunwayRef.current || !requestedChannel) return
+    poolAbort.current?.abort()
+    const controller = new AbortController()
+    poolAbort.current = controller
+    const generation = poolRequestGenerationRef.current + 1
+    poolRequestGenerationRef.current = generation
+    let accountAnalysis: AccountAnalysisResponse | null = null
+    try {
+      accountAnalysis = await api.getAccountAnalysis(requestedChannel, controller.signal)
+    } catch {
+      if (controller.signal.aborted) return
+    }
+    if (
+      controller.signal.aborted ||
+      generation !== poolRequestGenerationRef.current ||
+      channelRef.current !== requestedChannel ||
+      !showPoolRunwayRef.current
+    ) return
     poolDataRef.current = accountAnalysis
     setData((prev) => ({ ...prev, accountAnalysis }))
-  }, [setData])
+  }, [channel, setData])
 
   // 偏好持久化 + 号池独立加载。号池失败只影响号池卡片，不拖死核心统计。
   useEffect(() => {
+    channelRef.current = channel
     showPoolRunwayRef.current = showPoolRunway
     persistPoolRunwayVisibility(showPoolRunway)
-    if (!showPoolRunway) {
-      poolDataRef.current = null
-      setData((prev) => ({ ...prev, accountAnalysis: null }))
-      return
-    }
+    poolAbort.current?.abort()
+    poolRequestGenerationRef.current += 1
+    poolDataRef.current = null
+    setData((prev) => ({ ...prev, accountAnalysis: null }))
+    if (!showPoolRunway || !channel) return
     void loadPoolRunwayData()
-  }, [showPoolRunway, loadPoolRunwayData, setData])
+  }, [channel, showPoolRunway, loadPoolRunwayData, setData])
 
   useEffect(() => {
-    if (!showPoolRunway) return
+    if (!showPoolRunway || !channel) return
     const timer = window.setInterval(() => {
       if (document.visibilityState === 'visible') void loadPoolRunwayData()
     }, DASHBOARD_POOL_REFRESH_INTERVAL_MS)
     return () => window.clearInterval(timer)
-  }, [loadPoolRunwayData, showPoolRunway])
+  }, [channel, loadPoolRunwayData, showPoolRunway])
 
   useEffect(() => {
     timeRangeRef.current = timeRange
@@ -208,7 +225,19 @@ export default function Dashboard() {
   useEffect(() => () => {
     chartAbort.current?.abort()
     statsAbort.current?.abort()
+    poolAbort.current?.abort()
+    poolRequestGenerationRef.current += 1
   }, [])
+
+  const handleChannelChange = useCallback((nextChannel: UsageChannel) => {
+    if (nextChannel === channel) return
+    channelRef.current = nextChannel
+    poolAbort.current?.abort()
+    poolRequestGenerationRef.current += 1
+    poolDataRef.current = null
+    setData((prev) => ({ ...prev, accountAnalysis: null }))
+    setChannel(nextChannel)
+  }, [channel, setChannel, setData])
 
   // 首次加载 + timeRange 变更时重新拉取图表数据
   useEffect(() => {
@@ -244,9 +273,9 @@ export default function Dashboard() {
   const errorCount = effectiveCounts?.error ?? 0
   const todayRequests = effectiveCounts?.today_requests ?? 0
   const channelBreakdown = !channel && stats?.channels
-    ? (['codex', 'grok'] as const)
+    ? (['codex', 'grok', 'antigravity', 'claude'] as const)
         .map((key) => ({ key, counts: stats.channels?.[key] }))
-        .filter((item): item is { key: 'codex' | 'grok'; counts: StatsChannelCounts } =>
+        .filter((item): item is { key: 'codex' | 'grok' | 'antigravity' | 'claude'; counts: StatsChannelCounts } =>
           Boolean(item.counts && item.counts.total > 0))
     : []
 
@@ -273,29 +302,35 @@ export default function Dashboard() {
           title={t('dashboard.title')}
           description={t('dashboard.description')}
           onRefresh={() => { void reload(); void loadChartData() }}
-          titleAdornment={<ChannelFilter value={channel} onChange={setChannel} />}
+          titleAdornment={<ChannelFilter value={channel} onChange={handleChannelChange} />}
           actions={
             <div className="flex flex-wrap items-center gap-2">
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                className="shrink-0"
-                aria-pressed={showPoolRunway}
-                onClick={() => setShowPoolRunway((visible) => !visible)}
-                title={
-                  showPoolRunway
-                    ? t('dashboard.hidePoolRunway')
-                    : t('dashboard.showPoolRunway')
-                }
-              >
-                <BarChart3 className="size-3.5" />
-                <span className="hidden sm:inline">
-                  {showPoolRunway
-                    ? t('dashboard.hidePoolRunway')
-                    : t('dashboard.showPoolRunway')}
+              {channel ? (
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="shrink-0"
+                  aria-pressed={showPoolRunway}
+                  onClick={() => setShowPoolRunway((visible) => !visible)}
+                  title={
+                    showPoolRunway
+                      ? t('dashboard.hidePoolRunway')
+                      : t('dashboard.showPoolRunway')
+                  }
+                >
+                  <BarChart3 className="size-3.5" />
+                  <span className="hidden sm:inline">
+                    {showPoolRunway
+                      ? t('dashboard.hidePoolRunway')
+                      : t('dashboard.showPoolRunway')}
+                  </span>
+                </Button>
+              ) : (
+                <span className="max-w-44 text-center text-xs font-medium leading-tight text-muted-foreground">
+                  {t('dashboard.poolRunwaySingleChannelOnly')}
                 </span>
-              </Button>
+              )}
               <TimeRangeSelector
                 timeRange={timeRange}
                 onTimeRangeChange={setTimeRange}
@@ -344,7 +379,8 @@ export default function Dashboard() {
                     key={key}
                     className="inline-flex items-center gap-1.5 rounded-full bg-muted/80 px-3 py-1 font-semibold text-foreground ring-1 ring-border/50"
                     title={t('dashboard.heroChannelTitle', {
-                      channel: key === 'grok' ? 'Grok' : 'Codex',
+                      // Preserve the provider identity in the tooltip for every channel.
+                      channel: key === 'claude' ? 'Claude' : key === 'grok' ? 'Grok' : key === 'antigravity' ? 'Antigravity' : 'Codex',
                       available: counts.available,
                       total: counts.total,
                       requests: counts.today_requests,

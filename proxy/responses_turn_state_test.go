@@ -92,6 +92,61 @@ func TestResponsesTurnStateAllowsOnlyBoundTurnPastWHAMLimit(t *testing.T) {
 	}
 }
 
+func TestResponsesTurnStateExpiredBindingUsesBaselineSchedulerWhenContinuousRetryDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("CODEX_SESSION_AFFINITY_TTL", "1ns")
+	previousRuntime := CurrentRuntimeSettings()
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
+	ApplyRuntimeSettings(nextRuntime)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+
+	newUpstream := func(hits *atomic.Int64) *httptest.Server {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = io.WriteString(w, "data: "+`{"type":"response.completed","response":{"id":"resp_done","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`+"\n\n")
+		}))
+		t.Cleanup(server.Close)
+		return server
+	}
+
+	var boundHits, fallbackHits atomic.Int64
+	boundUpstream := newUpstream(&boundHits)
+	fallbackUpstream := newUpstream(&fallbackHits)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, MaxRetries: 0, MaxRateLimitRetries: 0})
+	t.Cleanup(store.Stop)
+	bound := &auth.Account{
+		DBID: 1, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: boundUpstream.URL,
+		APIKey: "bound-token", Models: []string{"gpt-5.4"}, PlanType: "api",
+	}
+	fallback := &auth.Account{
+		DBID: 2, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: fallbackUpstream.URL,
+		APIKey: "fallback-token", Models: []string{"gpt-5.4"}, PlanType: "api",
+	}
+	fallback.SetSchedulerPriority(20)
+	store.AddAccount(bound)
+	store.AddAccount(fallback)
+	store.BindSessionAffinity("expired-http-turn", bound, "")
+	time.Sleep(time.Millisecond)
+
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := invokeResponsesHandlerWithContext(t, func(c *gin.Context) {
+		c.Request.Header.Set("Session-Id", "expired-http-turn")
+		c.Request.Header.Set(codexTurnStateHeader, "turn-state")
+	}, handler.Responses, []byte(`{"model":"gpt-5.4","input":"continue","stream":true}`))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := boundHits.Load(); got != 0 {
+		t.Fatalf("expired bound account received %d request(s), want 0", got)
+	}
+	if got := fallbackHits.Load(); got != 1 {
+		t.Fatalf("baseline scheduler fallback requests = %d, want 1", got)
+	}
+}
+
 func TestResponsesTurnStateDoesNotRerouteAfterAuthoritativeLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var upstreamHits atomic.Int64
@@ -288,6 +343,74 @@ func TestResponsesWebSocketTurnStateRetainsLimitedAccountOnlyWithinTurn(t *testi
 	}
 	if second := <-served; second != healthy.ID() {
 		t.Fatalf("new-turn account = %d, want healthy account %d", second, healthy.ID())
+	}
+}
+
+func TestResponsesWebSocketTurnStateExpiredBindingUsesBaselineSchedulerWhenContinuousRetryDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("CODEX_SESSION_AFFINITY_TTL", "1ns")
+	previousRuntime := CurrentRuntimeSettings()
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
+	nextRuntime.CodexWSSilentRetry = false
+	nextRuntime.CodexWSSilentRetries = 0
+	ApplyRuntimeSettings(nextRuntime)
+	t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
+	served := make(chan int64, 1)
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
+		served <- account.ID()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body: io.NopCloser(strings.NewReader(
+				`data: {"type":"response.completed","response":{"id":"resp_done","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n",
+			)),
+		}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, MaxRetries: 0, MaxRateLimitRetries: 0})
+	t.Cleanup(store.Stop)
+	bound := &auth.Account{DBID: 1, AccessToken: "bound-token", PlanType: "plus", AccountID: "bound"}
+	fallback := &auth.Account{DBID: 2, AccessToken: "fallback-token", PlanType: "plus", AccountID: "fallback"}
+	fallback.SetSchedulerPriority(20)
+	store.AddAccount(bound)
+	store.AddAccount(fallback)
+	store.BindSessionAffinity("expired-ws-turn", bound, "")
+	time.Sleep(time.Millisecond)
+
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	t.Cleanup(server.Close)
+	conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		if response != nil {
+			t.Fatalf("dial websocket failed: %v status=%d", err, response.StatusCode)
+		}
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+
+	request := `{"type":"response.create","model":"gpt-5.4","prompt_cache_key":"expired-ws-turn","input":"continue","client_metadata":{"x-codex-turn-state":"turn-state"}}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(request)); err != nil {
+		t.Fatalf("write websocket request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(time.Second))
+	event := readResponsesWSTerminalEvent(t, conn)
+	if eventType := gjson.GetBytes(event, "type").String(); eventType != "response.completed" {
+		t.Fatalf("event type = %q, want response.completed; body=%s", eventType, event)
+	}
+	select {
+	case accountID := <-served:
+		if accountID != fallback.ID() {
+			t.Fatalf("selected account = %d, want baseline fallback account %d", accountID, fallback.ID())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for upstream account selection")
 	}
 }
 

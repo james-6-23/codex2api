@@ -16,6 +16,7 @@
 - [管理 API](#管理-api)
   - [统计接口](#统计接口)
   - [账号管理](#账号管理) — 添加 RT / AT 账号、批量导入、导出、迁移
+  - [Claude OAuth 与原生 Messages](#claude-oauth-与原生-messages) — 导入、采样、模型与指纹配置
   - [用量统计](#用量统计)
   - [API Key 管理](#api-key-管理)
   - [系统设置](#系统设置)
@@ -34,9 +35,9 @@
 
 Codex2API 提供兼容 OpenAI 风格的 API 接口，同时包含完整的管理后台 API。
 
-Anthropic `/v1/messages` 仅将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
+Anthropic `/v1/messages` 在没有可用 Claude OAuth 账号时，才将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Claude OAuth 账号优先走原生 Anthropic Messages 透传，不经过该转换。Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
 
-**Service Tier 语义说明**：请求侧 `fast` / `priority` 会统一以 `priority` 转发上游，其余取值（`auto`/`default`/`flex`/`scale` 等）不转发。用量日志区分三个字段：`requested_service_tier`（客户端请求意图）、`actual_service_tier`（上游回传 Tier，原样取自 `response.completed.response.service_tier`）、`billing_service_tier`（计费采用值，由 Tier 计费策略 `BillingTierPolicy` 决定，默认 `actual`，上游未回传时回退按请求意图计）。注意：在 ChatGPT OAuth / Codex backend 路径上，Fast 由上游服务端路由处理，`service_tier` 不是端到端可校验字段——上游回传 `default` 并不代表 Fast 未生效（openai/codex#14204 官方说明；#494 的交错 A/B 实测在回传 `default` 时仍有约 1.5× 生成吞吐提升）。因此"上游回传 Tier"仅反映上游申报值，不能单独用于判断加速是否生效；`BillingTierPolicy=actual` 下此类请求按标准价计费。
+**Service Tier 语义说明**：请求侧 `fast` / `priority` 会统一以 `priority` 转发上游，其余取值（`auto`/`default`/`flex`/`scale` 等）不转发。用量日志区分三个字段：`requested_service_tier`（客户端请求意图）、`actual_service_tier`（上游回传 Tier，原样取自 `response.completed.response.service_tier`）、`billing_service_tier`（计费采用值，由 Tier 计费策略 `BillingTierPolicy` 决定）。默认 `actual` 以请求 Tier 为上限：上游只可用更便宜档位降低计费，不能把未请求 Fast 的调用抬升为 Fast，也不能用未知档位改变计费；`requested` 始终按请求意图计费。注意：在 ChatGPT OAuth / Codex backend 路径上，Fast 由上游服务端路由处理，`service_tier` 不是端到端可校验字段——上游回传 `default` 并不代表 Fast 未生效（openai/codex#14204 官方说明；#494 的交错 A/B 实测在回传 `default` 时仍有约 1.5× 生成吞吐提升）。因此"上游回传 Tier"仅反映上游申报值，不能单独用于判断加速是否生效。
 
 **Base URL:** `http://localhost:8080` (默认端口)
 
@@ -207,6 +208,8 @@ data: [DONE]
 | previous_response_id | string       | 否   | 上一响应 ID，用于上下文连续                                                                        |
 
 `previous_response_id` 的上下文先查当前进程的有界 L1。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口不执行这次本地查找，会保留 `previous_response_id` 交给上游。
+
+原生 WebSocket 入口为 `GET /v1/responses`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 是抢占键的一部分，因此多路复用的不同流互不影响；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
 **响应示例:**
 
@@ -753,6 +756,156 @@ Grok 账号编辑页支持账号级模型映射，可让只请求 GPT 模型名�
 }
 ```
 
+### Claude OAuth 与原生 Messages
+
+Claude Code OAuth 账号使用原生 Anthropic Messages 上游，不会进入 Codex WHAM
+或 Responses 探针。以下端点均受现有 `X-Admin-Key` 管理鉴权保护；请求示例中的
+Token、授权码和账号 ID 仅为占位符，服务端不会在响应或日志中回显 access/refresh
+token。
+
+#### POST /api/admin/accounts/claude/oauth/auth-url
+
+创建一次性 PKCE 登录会话，返回授权地址与 `state`。`state` 默认 15 分钟有效且只能
+兑换一次。
+
+#### POST /api/admin/accounts/claude/oauth/exchange-code
+
+使用 `state` 与回调 `code` 换取 Claude OAuth 凭据并入库。可选 `proxy_url`、
+`use_proxy_pool`、`timezone` 和 `name`；入库后会异步执行一次受控原生 Messages
+用量采样。
+
+#### POST /api/admin/accounts/claude/import
+
+直接导入 `cmd/claude_login -out` 生成的 JSON，或下面导出端点生成的 version 1
+Claude 凭据。`access_token` 与 `refresh_token` 必填；同时接受单对象、对象数组和
+`{"accounts":[...]}`。单对象保持历史 `{message,id,email}` 响应，批量导入返回
+`total`、`imported`、`failed` 与逐账号 `items/warnings`。`auth_kind` 仅允许
+`oauth`，模型列表仅允许 `claude-*`。
+
+导入文件可恢复账号名称、代理、时区、标签、启用状态、账号级指纹模式和受限身份头。
+分组使用 `group_refs: [{"name":"...","channel":"claude"}]` 按名称映射；不会复用
+另一实例的数字分组 ID，不存在的组会作为 warning 返回且不会自动创建。锁定、冷却和
+历史用量属于目标实例运行状态，不随凭据迁移。
+
+#### GET /api/admin/accounts/claude/export
+
+导出管理员专用的完整 Claude OAuth 凭据。`ids=1,2` 可精确选择账号，省略时导出全部；
+`filter=all|healthy` 控制是否只包含当前健康账号；`format=auto|json|zip` 控制输出格式
+（默认 auto：单条 JSON、多条 ZIP；`format=json` 可得到可直接再次导入的对象数组）。响应设置 `Content-Disposition`、实际数量
+`X-Export-Count`、`Cache-Control: no-store, max-age=0`、`Pragma: no-cache` 和
+`X-Content-Type-Options: nosniff`。
+
+version 1 文档包含 `type=claude`、`auth_kind=oauth`、access/refresh token、账号 ID、
+过期时间、套餐、模型、代理、时区、`claude_fingerprint_mode`、标签、启用状态及
+`group_refs`。`fingerprint_headers` 只允许 `User-Agent`、`X-App` 和
+`X-Stainless-*` 身份头；任意 `Authorization`、Cookie、API Key 或其它自定义头均不会
+进入导出文件。下载内容为明文高敏凭据，下载后应立即加密保存或在迁移完成后删除。
+
+#### POST /api/admin/accounts/:id/claude/models
+
+刷新单个 Claude 账号的上游模型目录并保存到账号凭据。该操作只接受 Claude OAuth
+账号，返回 `models` 与 `count`。
+
+#### POST /api/admin/accounts/claude/models/refresh
+
+批量刷新启用的 Claude 账号模型目录，返回 `refreshed`、`failed` 和去重后的
+`model_count`。单账号失败不会回滚其他成功结果。
+
+#### POST /api/admin/accounts/:id/models/sync-upstream
+
+只读拉取指定 Claude 账号的上游模型目录，不覆盖账号白名单。确认后可用下面的
+PATCH 端点保存。
+
+#### PATCH /api/admin/accounts/:id/models
+
+设置账号级 Claude 模型白名单。非空数组只能包含 `claude-*` 模型；传空数组清除
+覆盖，恢复按账号目录/默认目录准入。服务端会拒绝跨 provider 的模型名。
+
+```json
+{
+  "models": ["claude-haiku-4-5", "claude-sonnet-4-5"]
+}
+```
+
+#### POST /api/admin/accounts/:id/usage/refresh
+
+执行一次有界的原生 Messages 用量探针，返回 5 小时/7 天窗口、重置时间和
+`claude_usage_probe_at` / `claude_usage_probe_error`。缺少上游用量头时仍记录采样
+时间；失败不会把未知用量伪造成 `0%`。
+
+Claude 账号详情还会返回脱敏的 `claude_user_agent` 指纹摘要；不会返回 OAuth token，
+也不会把任意自定义请求头暴露给管理页面。
+
+#### POST /api/admin/accounts/:id/models/probe
+
+只读并发探测账号可见的 `claude-*` 文本模型，返回 `available` 与逐模型
+`outcome`（`available`、`unsupported`、`throttled`、`error`）。模型探测不会写入
+账号冷却、错误或调度状态；追加 `?stream=true` 可接收 SSE 进度。
+
+#### GET /api/admin/accounts/:id/test
+
+执行一次手动原生 Messages 测连并以 SSE 返回 `test_start`、`content`、`error`、
+`test_complete`。与只读模型探测不同，手动测连会同步真实账号的用量/限流与错误
+状态；上游明确 rejected/耗尽时不会被“成功”结果清除。
+
+#### GET/PUT /api/admin/settings/claude-config
+
+读取或更新 Claude 全局默认配置：`fingerprint_mode`（`preserve`/`force`）、
+`default_timezone` 与 `session_window_limit`。账号级调度设置可覆盖这些默认值；
+更新会热应用到运行时且不会改变 OAuth token。`force` 会把最终 User-Agent 与
+X-Stainless 身份头收敛为账号绑定指纹；显式修改账号时区会轮换该账号的身份指纹，
+最终上游 User-Agent 会写入 UsageLog 审计字段。
+
+### Antigravity credential and state administration
+
+Every endpoint in this section is registered under the existing `/api/admin` authentication middleware and requires the configured admin secret.
+
+#### GET /api/admin/accounts/antigravity/export
+
+Downloads active Antigravity credentials. Optional `ids=1,2` selects accounts; omitting it exports all active Antigravity accounts. A single match returns `application/json; charset=utf-8`; multiple matches return `application/zip`, one sanitized-name JSON member per account. Responses set `Content-Disposition: attachment`, `X-Export-Count` to the actual number of exported credentials, `Cache-Control: no-store, max-age=0`, `Pragma: no-cache`, and `X-Content-Type-Options: nosniff`. No match (including a wrong-channel-only selection) returns `404`.
+
+The response is intentionally secret-bearing and is accepted by the Antigravity batch importer for backup restoration. OAuth JSON includes usable access/refresh/ID tokens and OAuth client metadata. API-key JSON explicitly includes `auth_kind: "api_key"`, `api_key`, declared models, model mapping, and the exported enabled state. Never log, cache, or expose this download to non-admin callers.
+
+Unlike the other export endpoints, `include_proxy` defaults to **enabled** here: this channel has always emitted the account's bound `proxy_url`, and dropping it would silently break the round-trip of existing backups. Pass `include_proxy=0` to exclude it. When enabled, entries also carry `proxy_label` and `proxy_enabled`; proxy URLs frequently embed credentials, so treat the download accordingly. The importer registers those proxies into the proxy table only when its own `import_proxy` flag is set — see [proxy_pool.md](proxy_pool.md#随账号导出导入迁移代理绑定).
+
+#### GET /api/admin/accounts/:id/antigravity/state
+
+Returns persisted sanitized state without an upstream call:
+
+```json
+{
+  "account_id": 42,
+  "credential_generation": 3,
+  "credential_kind": "api_key",
+  "catalog": {
+    "models": ["gemini-2.5-flash"],
+    "source": "declared",
+    "verified": false,
+    "synchronized": true
+  },
+  "identity": {
+    "status": "not_applicable",
+    "email_verified": false,
+    "subject_known": false,
+    "project_status": "not_applicable"
+  },
+  "capabilities": [],
+  "warnings": ["API-key catalog is local and unverified; run an explicit capability probe before claiming Interactions compatibility"]
+}
+```
+
+OAuth state can additionally include sanitized `permissions`, `quota`, project status/ID, synchronization timestamps, and explicit capability observations. Tokens, client secrets, and API keys are never returned.
+
+#### POST /api/admin/accounts/:id/antigravity/sync
+
+OAuth accounts refresh/synchronize the read-only Google identity, project, entitlement, quota, and model control plane. API-key accounts perform no remote catalog/control-plane verification; the response uses `remote: false`, `verified: false`, and `catalog_source: "declared"` or `"default"`.
+
+#### POST /api/admin/accounts/:id/antigravity/capabilities/probe
+
+Explicitly performs one bounded non-stream generation request against the first configured/default model and persists the result under the current credential generation. This action consumes minimal generation quota and never runs during ordinary state reads or sync. API-key Interactions compatibility is `verified: true` only after a successful HTTP response with a valid JSON content type/envelope. Error responses return a sanitized observation/warning without tokens or keys.
+
+Wrong-channel accounts return `400`; missing accounts return `404`; a concurrent credential generation change returns `409`.
+
 #### POST /api/admin/accounts
 
 添加 Refresh Token 账号（支持批量）。
@@ -948,11 +1101,50 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 **Form 字段:**
 
-| 字段      | 类型   | 必填 | 说明                                      |
-| --------- | ------ | ---- | ----------------------------------------- |
-| file      | file   | 是   | 上传文件（最大 20MB，JSON 格式支持多文件） |
-| format    | string | 否   | 文件格式：`txt`（默认）、`json`、`at_txt` |
-| proxy_url | string | 否   | 代理 URL                                  |
+| 字段         | 类型   | 必填 | 说明                                       |
+| ------------ | ------ | ---- | ------------------------------------------ |
+| file         | file   | 是   | 上传文件（最大 20MB，JSON 格式支持多文件） |
+| format       | string | 否   | 文件格式：`txt`（默认）、`json`、`at_txt`  |
+| proxy_url    | string | 否   | 代理 URL                                   |
+| import_proxy | bool   | 否   | 采用文件内携带的代理，并注册进代理池       |
+
+**import_proxy 说明:**
+
+传 `true` 时，JSON 文件里每个账号携带的 `proxy_url` 生效（优先于表单的 `proxy_url`），
+这些代理会先写进代理表、同步进内存代理池，然后才写账号——顺序不能颠倒，账号先绑上
+一个尚未入池的托管代理会被判定为无可用出口而不可调度。TXT 格式一行一个 Token，
+物理上带不了代理，该开关对其无效。
+
+行为细节：
+
+- 单次最多注册 500 条代理，超限则一条都不注册、全部账号退回表单代理；
+- 格式非法的代理条目被跳过，对应账号退回表单代理，不会绑上未入池的 URL；
+- 已存在的同 URL 代理按 `ON CONFLICT DO NOTHING` 跳过，**不会**被复活或改标签，
+  若它在本机是禁用/测试失败状态，绑定它的账号不会被调度，响应里会给出告警；
+- 源端标记为禁用的代理一律以启用态导入，并在响应里告警；
+- 新注册的代理打上 `imported-<YYYYMMDD-HHmm>` 标签，便于事后按批筛选清理；
+- 命中已有账号时，文件带来的代理**不覆盖**该账号已有的绑定（只填补空绑定）；
+  表单填写的 `proxy_url` 维持既有的覆盖语义。
+
+SSE 的 `complete` 事件会带上 `proxies_imported` / `proxies_skipped` / `warning`。
+
+**其它渠道:**
+
+Grok 与 Antigravity 的批量导入支持同名开关，但走 JSON 请求体而非 form 字段，
+响应里的告警字段叫 `proxy_warning`（与 `proxies_imported` / `proxies_skipped` 一起，
+仅在开关打开时出现）：
+
+| 端点                                   | 字段                    | 生效范围                                                       |
+| -------------------------------------- | ----------------------- | -------------------------------------------------------------- |
+| `POST /api/admin/accounts/grok/import` | `import_proxy` (bool)   | 只对 JSON 凭据文件生效；`sso.txt` / `refreshtoken.txt` 一行一个 Token，物理上带不了代理 |
+| `POST /api/admin/accounts/antigravity/import` | `import_proxy` (bool) | 只控制「是否入代理表」，见下                                     |
+
+Antigravity 的导入**一直**会采用文件里的 `proxy_url`，只是从不入表：账号绑的是一个
+代理池不认识的 URL，管理页看不见、也进不了轮转。该开关只补上入表这一步，关闭时维持
+既有行为，不改变代理的取用优先级。
+
+上述规则（写入顺序、500 条上限、非法条目回退、不复活既有代理、不覆盖已有绑定）三个
+渠道完全一致，详见 [proxy_pool.md](proxy_pool.md#随账号导出导入迁移代理绑定)。
 
 **format 格式说明:**
 
@@ -1082,6 +1274,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 - `filter`: healthy (只导出健康账号)
 - `ids`: 1,2,3 (指定 ID 列表)
 - `remote`: true (远程迁移模式)
+- `include_proxy`: 1 (连同账号绑定的代理一起导出，默认关闭)
 
 **响应:**
 
@@ -1099,6 +1292,25 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
   }
 ]
 ```
+
+**include_proxy 说明:**
+
+开启后每个条目追加 `proxy_url` / `proxy_label` / `proxy_enabled` 三项，配合导入端的
+`import_proxy` 即可把「号池 + 代理绑定关系」整体迁走。三项都只在账号确实绑了代理时
+出现，未绑定的账号不会多出空字段。
+
+> ⚠️ 代理 URL 常常内嵌用户名密码，导出文件本就含明文 `refresh_token`，开启后敏感度
+> 更高，请按机密文件处理。
+
+`/accounts/grok/export`、`/accounts/antigravity/export`、`/accounts/recycle-bin/export`
+同样支持该参数。其中 Antigravity 的导出**一直**会写出 `proxy_url`（历史行为，默认即为
+开启），去掉它反而会让既有的迁移流程静默丢配置；要排除代理需显式传 `include_proxy=0`。
+
+`remote=true` 的远程迁移模式默认同样不带代理：目标机未必连得上源机的代理网段，静默
+继承会让整批账号绑上不可达出口。
+
+只绑到分组、由分组下发的代理不属于账号自身的绑定，不会被账号导出携带——目标端需要
+先建好同名分组。
 
 #### POST /api/admin/accounts/migrate
 
@@ -1465,12 +1677,19 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "auto_clean_rate_limited": false,
   "auto_clean_full_usage": false,
   "auto_clean_error": false,
+  "auto_activate_5h_window_enabled": false,
   "proxy_pool_enabled": false,
   "fast_scheduler_enabled": false,
-  "max_retries": 3,
-  "max_rate_limit_retries": 2,
+  "max_retries": 2,
+  "max_rate_limit_retries": 1,
   "retry_interval_ms": 0,
   "transport_retry_policy": "rotate",
+  "continuous_retry_enabled": false,
+  "continuous_retry_catch_all": false,
+  "continuous_retry_categories": ["transport", "http_429", "http_5xx", "stream_error"],
+  "continuous_retry_status_codes": [],
+  "continuous_retry_error_codes": [],
+  "continuous_retry_max_duration_seconds": 600,
   "codex_fingerprint_default_mode": "off",
   "scheduler_mode": "round_robin",
   "allow_remote_migration": false,
@@ -1518,6 +1737,20 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 **响应:** 更新后的完整设置对象
 
 `codex_fingerprint_default_mode`（`off`/`device`/`session`/`full`，默认 `off`）是新导入或新建 Codex 账号默认盖上的设备指纹收敛档位，只影响之后新加入的账号；已有账号档位不变，入库后仍可在账号级单独调整。非法取值返回 HTTP 400。
+
+`max_retries`、`max_rate_limit_retries` 与 `codex_ws_silent_max_retries` 是原有的有限重试预算，管理界面和 API 范围均为 `0` 到 `10`（`0` 禁用对应预算）。需要持续重试时使用独立的 `continuous_retry_enabled` 开关；它不会改变这些有限预算的含义。开关打开后，可在 `continuous_retry_categories` 选择 `transport`、`http_429`、`http_4xx`、`http_5xx`、`stream_error`、`response_failed`、`context_error`，并用 `continuous_retry_status_codes`（例如 `[403,404,501]`）或 `continuous_retry_error_codes`（例如 `["rate_limited","context_length_exceeded"]`）精确追加匹配。类别、状态码、错误代码任一命中即可进入持续重试；403、404、上下文错误及“全部 `response.failed`”默认不选中（501 已由默认的 `http_5xx` 类别覆盖）。普通自选模式不会把结构化安全策略拒绝升级为无限重试。永久额度/余额错误（如 `insufficient_quota`、`quota_exceeded`、`billing_hard_limit`、`billing_limit_reached`、`spend_limit`、`credit_balance`、`insufficient_balance`、`usage_limited`）不会因为通用类别进入无限循环；只有管理员明确选择对应额度错误代码，或明确启用下述超级开关时，才会进入持续重试。
+
+`continuous_retry_catch_all` 是默认关闭的超级开关。请求同时提交 `continuous_retry_enabled=true` 与 `continuous_retry_catch_all=true` 后，除明确的上游 `cyber_policy` 外，所有被代理识别为真实上游失败的 HTTP 状态、传输/读取失败、`error` 帧、`response.failed` 以及以后出现的未知失败都会进入持续重试，不依赖当前已知错误码清单；永久额度、余额、鉴权、无效请求和其他结构化安全策略错误也包含在内。明确的上游 `cyber_policy` 始终终止当前请求，不换号、不重放。文本推理请求只把上游 HTTP `200` 及协议正常终态视为可提交结果；201、202、204、重定向、`response.failed`、独立 `error` 帧及无终态 EOF 都会丢弃整次尝试并继续重试。无状态请求会轮换可用账号；持有账号绑定加密状态的请求只有在能够安全展开为自包含请求时才换号，否则沿用相应协议的绑定语义。`continuous_retry_enabled=false` 会规范化为 `continuous_retry_catch_all=false`。
+
+开启持续重试后，流式上游尝试会先完整暂存，只有正常终态才一次性回放给客户端。因此失败尝试的半截文本、工具调用和错误帧不会泄漏，但客户端也不再实时逐 token 收到该次结果。SSE 路径在退避、等待账号、等待响应头和读取暂存流时写注释心跳并 flush；Responses WebSocket 使用 Ping。非流式 JSON（包括 Grok 图片/视频创建）在已进入无限重试后，会在退避、等待账号、等待响应头和读取响应体时发送标准 HTTP `102 Processing` 信息响应；它不会提交最终 JSON 的状态码或响应体，但中间代理可能丢弃 1xx，因此仍需依赖墙钟上限和客户端超时。`retry_interval_ms` 是本地等待下限；实际等待取该值、带抖动的指数退避（250ms 起步、30 秒封顶）和有效 `Retry-After`（最多 5 分钟）中的较大值。
+
+`continuous_retry_max_duration_seconds`（默认 600，范围 1-900）是无限预算的墙钟上限，从请求第一次进入 `retryLimit=-1` 时开始，后续尝试不会重置。到期会取消正在进行的上游请求，并返回最近一次真实上游失败；已提交的 SSE 将该失败转换为协议错误事件，Responses WebSocket 使用错误帧并以 1013 关闭。若尚无上游失败可返回，才回退到 504 `upstream_timeout`。Grok 图片/视频创建保持非流式 JSON；无限重试期间使用 HTTP `102 Processing` 保活，不把 SSE 注释混入最终 JSON。该信息响应是 best-effort 的，中间代理仍可能过滤它。
+
+每次流式尝试最多暂存 64 MiB：前 8 MiB 保存在内存，超过后写入立即 unlink 的 mode-0600 临时文件。达到单次上限或本地存储失败会立即结束请求，不会再次调用上游；当前没有跨请求的进程级暂存总预算，高并发部署仍需自行限制并发并监控内存和临时磁盘。Responses HTTP 的 `X-Codex-Turn-State` 只能在心跳尚未提交响应头时从最终成功账号转发；若等待期间已经发出 SSE 心跳，该响应头会被省略，不能用失败账号的值替代。账号绑定的 continuation 在无法安全展开为自包含请求时也会保留原账号语义。
+
+只有真实上游失败能够触发持续重试。客户端取消、持续重试期限到达、下游写入失败、入口校验、账号池/并发调度、本地提示词或输出策略拒绝、暂存资源失败以及成功结果回放失败都会立即结束，不会伪装成上游错误继续消耗账号。期限会保证等待中的 API Key 与 scope 并发槽位最终释放。
+
+普通图片请求仍受 5 次总尝试上限约束，普通 Grok 图片/视频创建请求仍受 3 次总尝试上限约束；错误被持续重试策略选中后（含超级模式）会越过普通上限，直到成功、客户端取消或期限到达。由于上游未必提供可靠幂等键，图片/视频创建可能重复生成和重复扣费。Grok 视频状态/内容查询沿用绑定账号与各自的请求语义。任何入口收到明确的上游 `cyber_policy` 都会立即停止，并保留本地审计、signed decision、conversation lock 与已验证用户冷却；超级模式不能覆盖此安全终态。初始账号池为空、模型无任何合格账号、scope/并发预算拒绝等本地调度失败不是“上游返回错误”，仍会返回明确的本地错误。
 
 Responses 上下文缓存字段使用原始字节数：
 

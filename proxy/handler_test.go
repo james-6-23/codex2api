@@ -554,7 +554,7 @@ func TestResponsesWebSocket1009FallbackStripsEnvelopeType(t *testing.T) {
 
 	httpBodyCh := make(chan []byte, 2)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body := readUpstreamRequestBody(r)
 		httpBodyCh <- body
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(
@@ -672,7 +672,7 @@ func TestResponsesWebSocket1009FallbackExpandsPreviousResponseFromCache(t *testi
 
 	httpBodyCh := make(chan []byte, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
+		body := readUpstreamRequestBody(r)
 		httpBodyCh <- body
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = w.Write([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
@@ -844,8 +844,10 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 	completedSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_new\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
 
 	cases := []struct {
-		name     string
-		rejected func() *http.Response
+		name            string
+		preflight       bool
+		continuousRetry bool
+		rejected        func() *http.Response
 	}{
 		{
 			name: "http status rejection",
@@ -854,6 +856,18 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 					StatusCode: http.StatusBadRequest,
 					Header:     make(http.Header),
 					Body:       io.NopCloser(strings.NewReader(previousResponseNotFoundBody)),
+				}
+			},
+		},
+		{
+			name:            "in-stream error with catch-all replay",
+			continuousRetry: true,
+			rejected: func() *http.Response {
+				sse := "event: error\ndata: {\"type\":\"invalid_request_error\",\"code\":\"previous_response_not_found\",\"message\":\"Previous response with id 'resp_stale' not found.\"}\n\n"
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Header:     make(http.Header),
+					Body:       io.NopCloser(strings.NewReader(sse)),
 				}
 			},
 		},
@@ -873,7 +887,8 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 		{
 			// 真实 ChatGPT WS 几乎总会先推 rate_limits / metadata。本机 2004 还开了
 			// loose + preflight passthrough，这两帧会先落到客户端。降级不能被它们挡住。
-			name: "in-stream response.failed after preflight",
+			name:      "in-stream response.failed after preflight",
+			preflight: true,
 			rejected: func() *http.Response {
 				sse := "data: {\"type\":\"codex.rate_limits\",\"plan_type\":\"plus\"}\n\n" +
 					"data: {\"type\":\"codex.response.metadata\",\"headers\":{\"x-codex-turn-state\":\"turn\"}}\n\n" +
@@ -890,11 +905,18 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
-			if tc.name == "in-stream response.failed after preflight" {
+			if tc.preflight || tc.continuousRetry {
 				prev := CurrentRuntimeSettings()
 				next := prev
-				next.FirstTokenMode = FirstTokenModeLoose
-				next.CodexPreflightSSEPassthrough = true
+				if tc.preflight {
+					next.FirstTokenMode = FirstTokenModeLoose
+					next.CodexPreflightSSEPassthrough = true
+				}
+				if tc.continuousRetry {
+					next.CodexWSSilentRetry = false
+					next.CodexWSSilentRetries = 0
+					next.ContinuousRetryPolicy = database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+				}
 				ApplyRuntimeSettings(next)
 				t.Cleanup(func() { ApplyRuntimeSettings(prev) })
 			}
@@ -1355,7 +1377,7 @@ func TestResponsesWebSocketFallsBackToHTTPWhenUpstreamMessageTooBig(t *testing.T
 		httpCalls++
 		httpAccountIDs <- r.Header.Get("X-Resin-Account")
 		httpLiteHeaders <- r.Header.Get("X-OpenAI-Internal-Codex-Responses-Lite")
-		requestBody, _ := io.ReadAll(r.Body)
+		requestBody := readUpstreamRequestBody(r)
 		httpNamespaces <- gjson.GetBytes(requestBody, "input.0.namespace").String()
 		if !strings.HasSuffix(r.URL.Path, "/backend-api/codex/responses") {
 			t.Fatalf("upstream path = %q, want Resin path ending /backend-api/codex/responses", r.URL.Path)
@@ -1491,9 +1513,10 @@ func TestResponsesHTTPIngressFallsBackToHTTPWhenForcedWebsocketMessageTooBig(t *
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		httpCalls++
 		httpAccountIDs <- r.Header.Get("X-Resin-Account")
+		// 出站会话头已改为真实客户端形态（连字符 session-id），见 ApplyCodexSessionHeaders。
 		httpSessionIDs <- r.Header.Get("Session-Id")
 		httpLiteHeaders <- r.Header.Get("X-OpenAI-Internal-Codex-Responses-Lite")
-		requestBody, _ := io.ReadAll(r.Body)
+		requestBody := readUpstreamRequestBody(r)
 		httpCacheKeys <- gjson.GetBytes(requestBody, "prompt_cache_key").String()
 		if !strings.HasSuffix(r.URL.Path, "/backend-api/codex/responses") {
 			t.Fatalf("upstream path = %q, want Resin path ending /backend-api/codex/responses", r.URL.Path)
@@ -1567,6 +1590,59 @@ func TestResponsesHTTPIngressFallsBackToHTTPWhenForcedWebsocketMessageTooBig(t *
 	}
 	if got := atomic.LoadInt64(&secondary.TotalRequests); got != 0 {
 		t.Fatalf("secondary TotalRequests = %d, want no fallback redispatch", got)
+	}
+}
+
+func TestResponsesHTTPIngressKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	previousExec := WebsocketExecuteFunc
+	previousSettings := CurrentRuntimeSettings()
+	previousInterval := downstreamSSEKeepaliveInterval
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+		ApplyRuntimeSettings(previousSettings)
+		downstreamSSEKeepaliveInterval = previousInterval
+	})
+
+	nextSettings := previousSettings
+	nextSettings.CodexForceWebsocket = true
+	nextSettings.CodexContinueThinking = false
+	ApplyRuntimeSettings(nextSettings)
+	downstreamSSEKeepaliveInterval = 5 * time.Millisecond
+
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
+		pr, pw := io.Pipe()
+		go func() {
+			_, _ = pw.Write([]byte(`data: {"type":"response.output_text.delta","delta":"started"}` + "\n\n"))
+			time.Sleep(30 * time.Millisecond)
+			_, _ = pw.Write([]byte(`data: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}` + "\n\n"))
+			_ = pw.Close()
+		}()
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: pr}, nil
+	}
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.6-sol"})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "pro", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	body := []byte(`{"model":"gpt-5.6-sol","input":"hello","stream":true}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = req
+
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%s", recorder.Code, recorder.Body.String())
+	}
+	got := recorder.Body.String()
+	for _, want := range []string{`"delta":"started"`, downstreamSSEKeepaliveComment, `"type":"response.completed"`} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("stream missing %q; body=%q", want, got)
+		}
 	}
 }
 
@@ -2287,7 +2363,7 @@ func TestResponsesCompactUsesOpenAIResponsesAPIAccount(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
 		seenAuth = r.Header.Get("Authorization")
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -2360,7 +2436,7 @@ func TestResponsesCompactAppliesAccountMappingBeforeSuffixFallback(t *testing.T)
 
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"id":"resp_compact_mapped",
@@ -2453,6 +2529,84 @@ func TestResponsesCompactOpenAIReadErrorRetryReturnsBadGateway(t *testing.T) {
 	}
 }
 
+func TestResponsesCompactReadCancellationDoesNotPenalizeAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	t.Cleanup(func() {
+		UpdateRuntimeSettings(func(RuntimeSettings) RuntimeSettings { return previousRuntime })
+	})
+	UpdateRuntimeSettings(func(current RuntimeSettings) RuntimeSettings {
+		current.ContinuousRetryPolicy = database.ContinuousRetryPolicy{
+			Enabled:    true,
+			Categories: []string{database.ContinuousRetryCategoryTransport},
+		}
+		return current
+	})
+
+	responseStarted := make(chan struct{}, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(`{"id":"partial"`))
+		if flusher, ok := w.(http.Flusher); ok {
+			flusher.Flush()
+		}
+		responseStarted <- struct{}{}
+		<-r.Context().Done()
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency:      1,
+		MaxRetries:          0,
+		MaxRateLimitRetries: 0,
+	})
+	defer store.Stop()
+	account := &auth.Account{
+		DBID:         1,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      upstream.URL,
+		APIKey:       "test-direct-key",
+		Models:       []string{"gpt-4.1-direct"},
+		PlanType:     "api",
+		Status:       auth.StatusReady,
+	}
+	store.AddAccount(account)
+	handler := NewHandler(store, nil, nil, nil)
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses/compact", bytes.NewBufferString(`{"model":"gpt-4.1-direct","input":"hello"}`)).WithContext(requestCtx)
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = req
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handler.ResponsesCompact(ginContext)
+	}()
+	select {
+	case <-responseStarted:
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("timed out waiting for compact response body")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("compact handler did not stop after downstream cancellation")
+	}
+
+	if account.FailureStreak != 0 || account.LastFailureKind != "" {
+		t.Fatalf("downstream cancellation penalized account: streak=%d kind=%q", account.FailureStreak, account.LastFailureKind)
+	}
+	if got := atomic.LoadInt64(&account.ActiveRequests); got != 0 {
+		t.Fatalf("ActiveRequests after cancellation = %d, want 0", got)
+	}
+}
+
 func TestResponsesCompactCodexReadErrorRetryReturnsBadGatewayAndSyncsUsage(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -2532,7 +2686,7 @@ func newOpenAIResponsesSSEUpstream(seenPath *string, seenAuth *string, seenBody 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		*seenPath = r.URL.Path
 		*seenAuth = r.Header.Get("Authorization")
-		*seenBody, _ = io.ReadAll(r.Body)
+		*seenBody = readUpstreamRequestBody(r)
 
 		w.Header().Set("Content-Type", "text/event-stream")
 		events := []string{
@@ -3315,6 +3469,52 @@ func TestRestoreMissingResponseOutputsPreservesCompletedOutput(t *testing.T) {
 	}
 }
 
+func TestRestoreMissingResponseOutputsReplacesPartialTerminalOutput(t *testing.T) {
+	response := []byte(`{"id":"resp_1","object":"response","output":[{"id":"rs_1","type":"reasoning","summary":[]}]}`)
+	outputItems := []json.RawMessage{
+		json.RawMessage(`{"id":"rs_1","type":"reasoning","summary":[]}`),
+		json.RawMessage(`{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"complete"}]}`),
+	}
+
+	got := restoreMissingResponseOutputs(response, outputItems)
+	output := gjson.GetBytes(got, "output").Array()
+	if len(output) != 2 || output[1].Get("content.0.text").String() != "complete" {
+		t.Fatalf("partial terminal output was not rebuilt: %s", got)
+	}
+}
+
+func TestResponseOutputCollectorOrdersByOutputIndexAndDedupes(t *testing.T) {
+	collector := newResponseOutputCollector()
+	collector.Add([]byte(`{"type":"response.output_item.done","output_index":2,"item":{"id":"msg_2","type":"message","content":[]}}`))
+	collector.Add([]byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"rs_0","type":"reasoning","summary":[]}}`))
+	collector.Add([]byte(`{"type":"response.output_item.done","output_index":2,"item":{"id":"msg_2","type":"message","content":[]}}`))
+
+	items := collector.Items()
+	if len(items) != 2 {
+		t.Fatalf("collector item count = %d, want 2", len(items))
+	}
+	if first := gjson.GetBytes(items[0], "id").String(); first != "rs_0" {
+		t.Fatalf("first collected id = %q, want rs_0", first)
+	}
+	if second := gjson.GetBytes(items[1], "id").String(); second != "msg_2" {
+		t.Fatalf("second collected id = %q, want msg_2", second)
+	}
+}
+
+func TestRestoreMissingResponseOutputsInStreamTerminal(t *testing.T) {
+	collector := newResponseOutputCollector()
+	collector.Add([]byte(`{"type":"response.output_item.done","output_index":0,"item":{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"done"}]}}`))
+	event := []byte(`{"type":"response.completed","response":{"id":"resp_1","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`)
+
+	got := restoreMissingResponseOutputsInEvent(event, collector.Items())
+	if text := gjson.GetBytes(got, "response.output.0.content.0.text").String(); text != "done" {
+		t.Fatalf("stream terminal output was not rebuilt: %s", got)
+	}
+	if usage := gjson.GetBytes(got, "response.usage.input_tokens").Int(); usage != 1 {
+		t.Fatalf("terminal fields were not preserved: %s", got)
+	}
+}
+
 func TestAppendMissingResponseImageOutputsAddsOutputItemDone(t *testing.T) {
 	response := []byte(`{"id":"resp_1"}`)
 	imageOutputs := []json.RawMessage{
@@ -3663,6 +3863,35 @@ func TestAgentRuntimeDeleted403MarksAccountBanned(t *testing.T) {
 	}
 }
 
+func TestApplyCooldownForModelUnauthorizedUsesPreviousFailureWindowAndDetail(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	defer store.Stop()
+
+	account := &auth.Account{
+		DBID:        42,
+		AccessToken: "at",
+		Status:      auth.StatusReady,
+		HealthTier:  auth.HealthTierHealthy,
+	}
+	handler := &Handler{store: store}
+	body := []byte(`{"error":{"type":"authentication_error","message":"OAuth access token has been revoked."}}`)
+
+	// HTTP handlers record failure metrics before applying the account
+	// cooldown. The cooldown policy must still see this as the first offense.
+	store.ReportRequestFailure(account, "unauthorized", 10*time.Millisecond)
+	handler.applyCooldownForModel(account, http.StatusUnauthorized, body, &http.Response{Header: make(http.Header)}, "claude-opus-4-8")
+
+	if _, until := account.GetCooldownSnapshot(); time.Until(until) < 5*time.Hour+59*time.Minute || time.Until(until) > 6*time.Hour {
+		t.Fatalf("first unauthorized cooldown should use the 6h window, remaining=%s", time.Until(until))
+	}
+	account.Mu().RLock()
+	errorMessage := account.ErrorMsg
+	account.Mu().RUnlock()
+	if !strings.Contains(errorMessage, "OAuth access token has been revoked") {
+		t.Fatalf("ErrorMsg = %q, want upstream authentication detail", errorMessage)
+	}
+}
+
 func TestSendFinalUpstreamError_UsageLimitRewrites429(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
@@ -4000,8 +4229,8 @@ func TestApply429CooldownSparkUsageLimitDoesNotMarkAccount(t *testing.T) {
 		&http.Response{Header: make(http.Header)},
 		"gpt-5.3-codex-spark",
 	)
-	if decision.Scope != rateLimitScopeAccount {
-		t.Fatalf("decision.Scope = %q, want account", decision.Scope)
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "spark_usage_limit" || decision.Model != "gpt-5.3-codex-spark" {
+		t.Fatalf("decision = %#v, want Spark model-scoped usage limit", decision)
 	}
 	pct, resetAt, ok := account.GetUsageSnapshotSpark()
 	if !ok || pct != 100 {
@@ -4019,6 +4248,200 @@ func TestApply429CooldownSparkUsageLimitDoesNotMarkAccount(t *testing.T) {
 	if pct5h, ok := account.GetUsagePercent5h(); !ok || pct5h != 40 {
 		t.Fatalf("main 5h snapshot = (%v, %v), want unchanged 40", pct5h, ok)
 	}
+}
+
+func TestApply429CooldownSparkUsageLimitDoesNotApplyFreePlanMetadata(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 203, AccessToken: "token", PlanType: "pro", Status: auth.StatusReady}
+
+	decision := Apply429Cooldown(
+		store,
+		account,
+		[]byte(`{"error":{"type":"usage_limit_reached","plan_type":"free","resets_in_seconds":1800}}`),
+		nil,
+		"gpt-5.3-codex-spark",
+	)
+
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "spark_usage_limit" {
+		t.Fatalf("decision = %#v, want Spark model-scoped usage limit", decision)
+	}
+	if got := account.GetPlanType(); got != "pro" {
+		t.Fatalf("plan_type = %q, want unchanged pro", got)
+	}
+	if _, ok := account.GetUsagePercent7d(); ok {
+		t.Fatal("Spark usage metadata must not create a main 7d usage snapshot")
+	}
+	if pct, _, ok := account.GetUsageSnapshotSpark(); !ok || pct != 100 {
+		t.Fatalf("Spark snapshot = (%v, %v), want 100", pct, ok)
+	}
+}
+
+func TestApplyResponseFailedSemantic429IgnoresOuterHeadersForOrdinaryModel(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 204, AccessToken: "token", PlanType: "plus", Status: auth.StatusReady}
+	account.SetUsageSnapshot5h(40, time.Now().Add(2*time.Hour))
+	handler := &Handler{store: store}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "7200")
+	payload := []byte(`{"type":"response.failed","response":{"error":{"type":"rate_limit_exceeded","message":"slow down"}}}`)
+
+	decision := handler.applyResponseFailedCooldown(account, payload, resp, "gpt-5.4")
+
+	if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited" {
+		t.Fatalf("decision = %#v, want ordinary semantic 429 account fallback", decision)
+	}
+	if !account.HasActiveCooldown() || account.GetCooldownReason() != auth.ResponsesRateLimitedCooldownReason {
+		t.Fatal("ordinary semantic 429 should retain the existing short account cooldown")
+	}
+	if account.IsPremium5hRateLimited() {
+		t.Fatal("outer HTTP 200 headers must not create a premium 5h cooldown")
+	}
+	if pct5h, ok := account.GetUsagePercent5h(); !ok || pct5h != 40 {
+		t.Fatalf("main 5h snapshot = (%v, %v), want unchanged 40", pct5h, ok)
+	}
+	if account.IsModelRateLimited("gpt-5.4") {
+		t.Fatal("ordinary semantic 429 should not be rewritten as a model cooldown")
+	}
+}
+
+func TestApplyResponseFailedSemantic429KeepsExplicitModelCapacityScoped(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 209, AccessToken: "token", PlanType: "plus", Status: auth.StatusReady}
+	handler := &Handler{store: store}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "7200")
+	payload := []byte(`{"type":"response.failed","response":{"error":{"type":"rate_limit_exceeded","message":"Selected model is at capacity"}}}`)
+
+	decision := handler.applyResponseFailedCooldown(account, payload, resp, "gpt-5.4")
+
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "model_capacity" || decision.Model != "gpt-5.4" {
+		t.Fatalf("decision = %#v, want model-scoped capacity cooldown", decision)
+	}
+	if !account.IsModelRateLimited("gpt-5.4") {
+		t.Fatal("explicit model capacity should cool only the requested model")
+	}
+	if account.HasActiveCooldown() || account.IsPremium5hRateLimited() {
+		t.Fatal("explicit model capacity must not cool the whole account")
+	}
+}
+
+func TestApplyResponseFailedSemantic429SparkUsesTransientModelCooldown(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 205, AccessToken: "token", PlanType: "pro", Status: auth.StatusReady}
+	account.SetUsageSnapshot5h(40, time.Now().Add(2*time.Hour))
+	handler := &Handler{store: store}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "40")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "7200")
+	payload := []byte(`{"type":"response.failed","response":{"error":{"type":"rate_limit_exceeded","message":"slow down"}}}`)
+
+	decision := handler.applyResponseFailedCooldown(account, payload, resp, "gpt-5.3-codex-spark")
+
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "rate_limited_model" {
+		t.Fatalf("decision = %#v, want transient Spark model cooldown", decision)
+	}
+	if !account.IsModelRateLimited("gpt-5.3-codex-spark") {
+		t.Fatal("transient Spark 429 should apply the configured model cooldown policy")
+	}
+	if decision.Cooldown < 4*time.Minute || decision.Cooldown > 6*time.Minute {
+		t.Fatalf("transient Spark cooldown = %v, want default OAuth model policy around 5m", decision.Cooldown)
+	}
+	if account.HasActiveCooldown() || account.IsPremium5hRateLimited() {
+		t.Fatal("transient Spark 429 must not create an account-level cooldown")
+	}
+	if pct5h, ok := account.GetUsagePercent5h(); !ok || pct5h != 40 {
+		t.Fatalf("main 5h snapshot = (%v, %v), want unchanged 40", pct5h, ok)
+	}
+	if _, ok := account.GetUsagePercent7d(); ok {
+		t.Fatal("transient Spark 429 must not create a main 7d snapshot")
+	}
+}
+
+func TestApplyResponseFailedSemantic429SparkUsesExplicitExhaustedWindow(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 208, AccessToken: "token", PlanType: "pro", Status: auth.StatusReady}
+	account.SetUsageSnapshot5h(40, time.Now().Add(2*time.Hour))
+	handler := &Handler{store: store}
+	resp := &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "100")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "900")
+	payload := []byte(`{"type":"response.failed","response":{"error":{"type":"rate_limit_exceeded","message":"quota exhausted"}}}`)
+
+	decision := handler.applyResponseFailedCooldown(account, payload, resp, "gpt-5.3-codex-spark")
+
+	if decision.Scope != rateLimitScopeModel || decision.Reason != "spark_usage_limit" {
+		t.Fatalf("decision = %#v, want explicit Spark window", decision)
+	}
+	pct, resetAt, ok := account.GetUsageSnapshotSpark()
+	if !ok || pct != 100 {
+		t.Fatalf("Spark snapshot = (%v, %v), want 100", pct, ok)
+	}
+	if got := time.Until(resetAt); got < 14*time.Minute || got > 16*time.Minute {
+		t.Fatalf("Spark reset delta = %v, want about 15m", got)
+	}
+	if account.HasActiveCooldown() || account.IsPremium5hRateLimited() {
+		t.Fatal("explicit Spark window must remain model-scoped")
+	}
+	if pct5h, ok := account.GetUsagePercent5h(); !ok || pct5h != 40 {
+		t.Fatalf("main 5h snapshot = (%v, %v), want unchanged 40", pct5h, ok)
+	}
+}
+
+func TestApply429CooldownTransport429KeepsHeadersForOrdinaryAndSpark(t *testing.T) {
+	t.Run("ordinary account window", func(t *testing.T) {
+		store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+		account := &auth.Account{DBID: 206, AccessToken: "token", PlanType: "plus", Status: auth.StatusReady}
+		handler := &Handler{store: store}
+		resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)}
+		resp.Header.Set("x-codex-primary-used-percent", "100")
+		resp.Header.Set("x-codex-primary-window-minutes", "300")
+		resp.Header.Set("x-codex-primary-reset-after-seconds", "900")
+
+		decision := handler.applyCooldownForModel(account, http.StatusTooManyRequests, []byte(`{"error":{"type":"rate_limit_exceeded"}}`), resp, "gpt-5.4")
+
+		if decision.Scope != rateLimitScopeAccount || decision.Reason != "rate_limited_5h" {
+			t.Fatalf("decision = %#v, want transport header account window", decision)
+		}
+		if !account.IsPremium5hRateLimited() {
+			t.Fatal("real transport 429 should still apply the ordinary account window")
+		}
+	})
+
+	t.Run("Spark independent window", func(t *testing.T) {
+		store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+		account := &auth.Account{DBID: 207, AccessToken: "token", PlanType: "pro", Status: auth.StatusReady}
+		account.SetUsageSnapshot5h(40, time.Now().Add(2*time.Hour))
+		handler := &Handler{store: store}
+		resp := &http.Response{StatusCode: http.StatusTooManyRequests, Header: make(http.Header)}
+		resp.Header.Set("x-codex-primary-used-percent", "100")
+		resp.Header.Set("x-codex-primary-window-minutes", "300")
+		resp.Header.Set("x-codex-primary-reset-after-seconds", "900")
+
+		decision := handler.applyCooldownForModel(account, http.StatusTooManyRequests, []byte(`{"error":{"type":"rate_limit_exceeded"}}`), resp, "gpt-5.3-codex-spark")
+
+		if decision.Scope != rateLimitScopeModel || decision.Reason != "spark_usage_limit" {
+			t.Fatalf("decision = %#v, want transport header Spark window", decision)
+		}
+		pct, resetAt, ok := account.GetUsageSnapshotSpark()
+		if !ok || pct != 100 {
+			t.Fatalf("Spark snapshot = (%v, %v), want 100", pct, ok)
+		}
+		if got := time.Until(resetAt); got < 14*time.Minute || got > 16*time.Minute {
+			t.Fatalf("Spark reset delta = %v, want about 15m", got)
+		}
+		if account.HasActiveCooldown() || account.IsPremium5hRateLimited() {
+			t.Fatal("Spark transport 429 must not create an account-level cooldown")
+		}
+		if pct5h, ok := account.GetUsagePercent5h(); !ok || pct5h != 40 {
+			t.Fatalf("main 5h snapshot = (%v, %v), want unchanged 40", pct5h, ok)
+		}
+	})
 }
 
 func TestApply429CooldownUsageLimitUpdatesFreePlanMetadata(t *testing.T) {
@@ -5123,7 +5546,7 @@ func TestResponses_BodySignalCompactStaysStreamingOnRelayOnlyPool(t *testing.T) 
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		if r.URL.Path == "/v1/responses/compact" {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{
@@ -5208,7 +5631,7 @@ func TestResponses_BodySignalCompactStreamingUsesAccountCompactMapping(t *testin
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_account_mapping","status":"completed","output":[{"type":"compaction_summary","summary":"mapped"}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
 	}))
@@ -5263,7 +5686,7 @@ func TestResponses_NonStreamingBodySignalCompactStillUsesCompactEndpoint(t *test
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"id":"resp_non_stream_compaction",
@@ -5446,7 +5869,7 @@ func TestResponses_PlainRequestNotPromotedOnRelayOnlyPool(t *testing.T) {
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"id":"resp_plain_test",
@@ -5557,7 +5980,7 @@ func TestResponses_NativeRemoteCompactionV2UsesRelayOnlyPool(t *testing.T) {
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		seenPath = r.URL.Path
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, `data: {"type":"response.completed","response":{"id":"resp_issue_540","status":"completed","output":[{"type":"compaction_summary","summary":"compacted"}],"usage":{"input_tokens":3,"output_tokens":2,"total_tokens":5}}}`+"\n\n")
 	}))
@@ -5704,7 +6127,7 @@ func TestResponsesCompactStaleSuffixIdentityRuleKeepsBaseModelUpstream(t *testin
 
 	var seenBody []byte
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		seenBody, _ = io.ReadAll(r.Body)
+		seenBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"id":"resp_compact_identity",
@@ -5799,5 +6222,26 @@ func TestResponsesCompactSuffixOnlyRequestLogsBaseModel(t *testing.T) {
 	}
 	if got := ctx.GetString("x-model"); got != "gpt-5.6-sol" {
 		t.Fatalf("x-model = %q, want base gpt-5.6-sol (suffix stripped for display)", got)
+	}
+}
+
+// Grok/xAI 的错误体用顶层字符串 error 字段({"code":"...","error":"文本"})。
+// 解析器此前只认 error.message 对象形态,导致这类 400 对用户只显示裸的
+// "Upstream returned status 400",根因全靠翻容器日志。
+func TestUsageLogErrorMessageGrokStringErrorField(t *testing.T) {
+	got := usageLogErrorMessage(400, []byte(`{"code":"invalid-argument","error":"The function name tool_search is reserved for the tool_search tool"}`))
+	want := "invalid-argument · The function name tool_search is reserved for the tool_search tool"
+	if got != want {
+		t.Fatalf("grok string error not extracted: got %q want %q", got, want)
+	}
+
+	// 对象形态不受影响。
+	if got := usageLogErrorMessage(400, []byte(`{"error":{"message":"object form","code":"bad"}}`)); got != "bad · object form" {
+		t.Fatalf("object error form regressed: %q", got)
+	}
+
+	// error 为对象但无 message 时不得把整个 JSON 打进 message。
+	if got := usageLogErrorMessage(400, []byte(`{"error":{"foo":"bar"}}`)); got != "HTTP 400" {
+		t.Fatalf("object error without message must fall back: %q", got)
 	}
 }

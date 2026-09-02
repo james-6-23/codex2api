@@ -35,6 +35,8 @@ type redisTokenCache struct {
 	client *redis.Client
 }
 
+var _ RuntimeOwnerStore = (*redisTokenCache)(nil)
+
 type redisResponseContextRecord struct {
 	Items []json.RawMessage `json:"items"`
 }
@@ -592,6 +594,94 @@ func (tc *redisTokenCache) DeleteRuntime(ctx context.Context, namespace string, 
 		return nil
 	}
 	return tc.client.Del(ctx, runtimeValueKey(namespace, key)).Err()
+}
+
+var claimRuntimeOwnerScript = redis.NewScript(`
+local previous = redis.call("GET", KEYS[1])
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+return previous
+`)
+
+var compareAndRefreshRuntimeOwnerScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  redis.call("PEXPIRE", KEYS[1], ARGV[2])
+  return 1
+end
+return 0
+`)
+
+var compareAndDeleteRuntimeOwnerScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+`)
+
+func runtimeOwnerTTLMillis(ttl time.Duration) int64 {
+	if ttl <= 0 {
+		ttl = time.Minute
+	}
+	millis := ttl.Milliseconds()
+	if millis < 1 {
+		return 1
+	}
+	return millis
+}
+
+func (tc *redisTokenCache) ClaimRuntimeOwner(ctx context.Context, namespace, key string, owner []byte, ttl time.Duration) ([]byte, error) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(owner) == 0 {
+		return nil, nil
+	}
+	result, err := claimRuntimeOwnerScript.Run(
+		ctx,
+		tc.client,
+		[]string{runtimeValueKey(namespace, key)},
+		owner,
+		runtimeOwnerTTLMillis(ttl),
+	).Result()
+	if err != nil && err != redis.Nil {
+		return nil, err
+	}
+	switch value := result.(type) {
+	case nil:
+		return nil, nil
+	case string:
+		return []byte(value), nil
+	case []byte:
+		return append([]byte(nil), value...), nil
+	default:
+		return nil, fmt.Errorf("unexpected runtime owner claim result %T", result)
+	}
+}
+
+func (tc *redisTokenCache) CompareAndRefreshRuntimeOwner(ctx context.Context, namespace, key string, expected []byte, ttl time.Duration) (bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(expected) == 0 {
+		return false, nil
+	}
+	result, err := compareAndRefreshRuntimeOwnerScript.Run(
+		ctx,
+		tc.client,
+		[]string{runtimeValueKey(namespace, key)},
+		expected,
+		runtimeOwnerTTLMillis(ttl),
+	).Int64()
+	return result == 1, err
+}
+
+func (tc *redisTokenCache) CompareAndDeleteRuntimeOwner(ctx context.Context, namespace, key string, expected []byte) (bool, error) {
+	key = strings.TrimSpace(key)
+	if key == "" || len(expected) == 0 {
+		return false, nil
+	}
+	result, err := compareAndDeleteRuntimeOwnerScript.Run(
+		ctx,
+		tc.client,
+		[]string{runtimeValueKey(namespace, key)},
+		expected,
+	).Int64()
+	return result == 1, err
 }
 
 func (tc *redisTokenCache) IncrRuntimeCounters(ctx context.Context, namespace string, key string, deltas map[string]float64, ttl time.Duration) error {

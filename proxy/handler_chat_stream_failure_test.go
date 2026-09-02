@@ -86,3 +86,80 @@ func TestChatCompletionsSuccessfulStreamStillAppendsDoneSentinel(t *testing.T) {
 		t.Fatalf("successful stream [DONE] count = %d, want 1; body=%q", got, body)
 	}
 }
+
+func TestChatCompletionsCatchAllDiscardsOutputFromFailedAttempt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableCatchAllContinuousRetry(t)
+
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+	upstream, calls := newAttemptSequenceSSEServer(t, [][]string{
+		{
+			`{"type":"response.created","response":{"id":"resp_failed"}}`,
+			`{"type":"response.output_text.delta","delta":"failed-chat-partial"}`,
+			`{"type":"response.failed","response":{"status":"failed","status_code":503,"error":{"code":"server_error","message":"must stay upstream"}}}`,
+		},
+		{
+			`{"type":"response.output_text.delta","delta":"successful-chat"}`,
+			`{"type":"response.completed","response":{"id":"resp_success","status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		},
+	})
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "pro", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := invokeChatCompletionsStream(t, handler)
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, "successful-chat") || strings.Count(body, "data: [DONE]\n\n") != 1 {
+		t.Fatalf("successful chat replay missing: %q", body)
+	}
+	if strings.Contains(body, "failed-chat-partial") || strings.Contains(body, "must stay upstream") {
+		t.Fatalf("failed chat attempt leaked downstream: %q", body)
+	}
+}
+
+func TestChatCompletionsCatchAllDiscardsExplicitErrorEventAfterPartialOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	enableCatchAllContinuousRetry(t)
+
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+	upstream, calls := newAttemptSequenceRawSSEServer(t, [][]string{
+		{
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"failed-chat-error-partial\"}\n\n",
+			"event: error\ndata: {\"error\":{\"code\":\"future_error\",\"message\":\"must stay upstream\"}}\n\n",
+		},
+		{
+			"data: {\"type\":\"response.output_text.delta\",\"delta\":\"successful-chat-after-error\"}\n\n",
+			"data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_success\",\"status\":\"completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n",
+		},
+	})
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "pro", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := invokeChatCompletionsStream(t, handler)
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, "successful-chat-after-error") || strings.Count(body, "data: [DONE]\n\n") != 1 {
+		t.Fatalf("successful Chat replay missing: %q", body)
+	}
+	if strings.Contains(body, "failed-chat-error-partial") || strings.Contains(body, "must stay upstream") || strings.Contains(body, "future_error") {
+		t.Fatalf("explicit Chat error event attempt leaked downstream: %q", body)
+	}
+}

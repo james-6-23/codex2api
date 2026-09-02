@@ -24,6 +24,16 @@ type OfficialPricingSyncOptions struct {
 	Models        []string
 	IncludeOpenAI bool
 	IncludeGrok   bool
+	IncludeClaude bool
+}
+
+// OfficialAnthropicPricingURL 是 Anthropic 官方价格参考页(仅用于前端展示链接)。
+const OfficialAnthropicPricingURL = "https://www.anthropic.com/pricing"
+
+// isClaudeBillingModel 判断某规范计费键是否为 Claude 模型。
+func isClaudeBillingModel(model string) bool {
+	return strings.Contains(model, "claude") || strings.Contains(model, "opus") ||
+		strings.Contains(model, "sonnet") || strings.Contains(model, "haiku")
 }
 
 type OfficialPricingSyncResult struct {
@@ -102,16 +112,43 @@ func SyncOfficialModelPricing(ctx context.Context, db *database.DB, proxyURL str
 		}
 	}
 
+	// Claude:Anthropic 无可解析的官方价目文档,且账号真实模型是动态发现的(可能含
+	// opus-5 / sonnet-5 等新版)。因此对账号当前的每个 claude 模型,用内置家族定价规则
+	// (database.GetModelPricing,已含 opus/sonnet/haiku 现代档)算出权威价并落为 synced,
+	// 动态覆盖全部模型、不写死具体清单。用户仍可在定价页覆盖。
+	if options.IncludeClaude {
+		result.Sources = append(result.Sources, OfficialAnthropicPricingURL)
+		for model := range allowed {
+			if !isClaudeBillingModel(model) {
+				continue
+			}
+			base := database.GetModelPricing(model)
+			if base == nil {
+				continue
+			}
+			pricing[model] = database.ModelPricingOverrideFromPricing(base, "")
+		}
+	}
+
 	result.Fetched = len(pricing)
 	if len(pricing) == 0 {
 		return result, fmt.Errorf("官方页面未解析到当前模型的价格，已保留现有价格")
 	}
+	// 未命中判定按 provider 归类:仅对"已启用来源"的模型报缺失。
 	for model := range allowed {
-		if strings.HasPrefix(model, "grok-") && !options.IncludeGrok {
-			continue
-		}
-		if !strings.HasPrefix(model, "grok-") && !options.IncludeOpenAI {
-			continue
+		switch {
+		case strings.HasPrefix(model, "grok-"):
+			if !options.IncludeGrok {
+				continue
+			}
+		case isClaudeBillingModel(model):
+			if !options.IncludeClaude {
+				continue
+			}
+		default:
+			if !options.IncludeOpenAI {
+				continue
+			}
 		}
 		if _, ok := pricing[model]; !ok {
 			result.Missing = append(result.Missing, model)

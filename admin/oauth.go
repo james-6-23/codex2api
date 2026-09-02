@@ -331,7 +331,7 @@ func (h *Handler) findOAuthIdentityDuplicate(ctx context.Context, seed tokenCred
 }
 
 func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string) (int64, bool, error) {
-	id, updated, _, err := h.upsertOAuthIdentityAccountWithRuntime(ctx, name, proxyURL, seed, source, true)
+	id, updated, _, err := h.upsertOAuthIdentityAccountWithRuntime(ctx, name, proxyURL, seed, source, true, overwriteAccountProxy)
 	return id, updated, err
 }
 
@@ -339,11 +339,11 @@ func (h *Handler) upsertOAuthIdentityAccount(ctx context.Context, name, proxyURL
 // runtime pool until the caller can commit the whole import batch atomically.
 // Existing-account updates still reload immediately so rotated credentials are
 // visible without waiting for the rest of the import.
-func (h *Handler) upsertOAuthIdentityAccountDeferred(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string) (int64, bool, *auth.Account, error) {
-	return h.upsertOAuthIdentityAccountWithRuntime(ctx, name, proxyURL, seed, source, false)
+func (h *Handler) upsertOAuthIdentityAccountDeferred(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string, proxyPolicy proxyOverwritePolicy) (int64, bool, *auth.Account, error) {
+	return h.upsertOAuthIdentityAccountWithRuntime(ctx, name, proxyURL, seed, source, false, proxyPolicy)
 }
 
-func (h *Handler) upsertOAuthIdentityAccountWithRuntime(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string, loadRuntime bool) (int64, bool, *auth.Account, error) {
+func (h *Handler) upsertOAuthIdentityAccountWithRuntime(ctx context.Context, name, proxyURL string, seed tokenCredentialSeed, source string, loadRuntime bool, proxyPolicy proxyOverwritePolicy) (int64, bool, *auth.Account, error) {
 	seed = normalizeTokenCredentialSeed(seed)
 	if seed.email == "" || effectiveWorkspaceIDFromSeed(seed) == "" {
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), proxyURL)
@@ -367,9 +367,13 @@ func (h *Handler) upsertOAuthIdentityAccountWithRuntime(ctx context.Context, nam
 		if err != nil {
 			return 0, false, nil, err
 		}
+		// 空值一律保留原绑定。preserveAccountProxy 再进一步：已经绑了代理的账号
+		// 不被覆盖——导入文件带来的代理是被动数据，而目标端可能已经做过精细的
+		// 代理分配（自动均衡等），静默冲掉属于数据损坏。
 		effectiveProxyURL := strings.TrimSpace(proxyURL)
-		if effectiveProxyURL == "" {
-			effectiveProxyURL = strings.TrimSpace(row.ProxyURL)
+		existingProxyURL := strings.TrimSpace(row.ProxyURL)
+		if effectiveProxyURL == "" || (proxyPolicy == preserveAccountProxy && existingProxyURL != "") {
+			effectiveProxyURL = existingProxyURL
 		}
 		if err := h.db.UpdateOAuthAccountCredentials(ctx, duplicateID, tokenCredentialMap(seed), effectiveProxyURL); err != nil {
 			return 0, false, nil, err

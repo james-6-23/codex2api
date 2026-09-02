@@ -89,8 +89,10 @@ type RiskProfileFilters = {
   apiKeyId: string
   accountId: string
   minScore: string
-  q: string
-  lockedOnly: boolean
+	q: string
+	lockedOnly: boolean
+	cyOnly: boolean
+	activityState: '' | 'active' | 'identity_only'
 }
 
 type RulePatternTestState = {
@@ -482,6 +484,11 @@ const emptyFilters: LogFilters = {
   apiKeyId: '',
   q: '',
   reviewResult: '',
+}
+
+const defaultLocalLogFilters: LogFilters = {
+  ...emptyFilters,
+  source: 'local_filter',
 }
 
 const defaultCustomRuleDraft: CustomRuleDraft = {
@@ -2885,6 +2892,14 @@ function OverviewView({
           prompt_filter_review_fail_closed: value === 'fail_closed',
         })
   }
+  const updateEnforcementSetting = (key: 'conversation_lock_enabled' | 'user_cyber_cooldown_minutes', value: boolean | number) => {
+    const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['enforcement', key], value }])
+    if (!patched.ok) {
+      showToast(t('promptFilter.advancedConfigInvalidSave'), 'error')
+      return
+    }
+    setForm((current) => ({ ...current, prompt_filter_advanced_config: patched.serialized }))
+  }
   const updateReviewAdapter = <K extends keyof ReviewAdapterFormConfig>(key: K, value: ReviewAdapterFormConfig[K]) => {
     const patched = patchAdvancedConfigDocument(form.prompt_filter_advanced_config, [{ path: ['review_adapter', key], value }])
     if (!patched.ok) {
@@ -3255,7 +3270,7 @@ function OverviewView({
                 <h3 className="text-sm font-semibold">{t('promptFilter.dailyPolicyTitle')}</h3>
                 <p className="mt-1 text-xs leading-5 text-muted-foreground">{t('promptFilter.dailyPolicyDesc')}</p>
               </div>
-              <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
                 <Field label={t('promptFilter.protectionStrategy')}>
                   <Select
                     value={protectionStrategy}
@@ -3275,6 +3290,22 @@ function OverviewView({
                       { label: t('promptFilter.reviewStrategyFailOpen'), value: 'fail_open' },
                       { label: t('promptFilter.reviewStrategyFailClosed'), value: 'fail_closed' },
                     ]}
+                  />
+                </Field>
+                <Field label={t('promptFilter.conversationLockEnabled')} hint={t('promptFilter.help.conversationLockEnabled')}>
+                  <Select
+                    value={advancedProtection.enforcement.conversation_lock_enabled ? 'true' : 'false'}
+                    onValueChange={(value) => updateEnforcementSetting('conversation_lock_enabled', value === 'true')}
+                    options={booleanOptions}
+                  />
+                </Field>
+                <Field label={t('promptFilter.userCyberCooldownMinutes')} hint={t('promptFilter.help.userCyberCooldownMinutes')}>
+                  <DraftNumberInput
+                    min={1}
+                    max={1440}
+                    disabled={!advancedProtection.enforcement.conversation_lock_enabled}
+                    value={advancedProtection.enforcement.user_cyber_cooldown_minutes}
+                    onValueChange={(value) => updateEnforcementSetting('user_cyber_cooldown_minutes', value)}
                   />
                 </Field>
               </div>
@@ -3725,12 +3756,13 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
   const [searchParams] = useSearchParams()
   const auditReference = searchParams.get('audit')?.trim() || ''
   const initialLogFilters = () => ({ ...emptyFilters, q: auditReference })
+  const initialLocalLogFilters = () => ({ ...defaultLocalLogFilters, q: auditReference })
   const [incidentDraftFilters, setIncidentDraftFilters] = useState<LogFilters>(initialLogFilters)
   const [incidentFilters, setIncidentFilters] = useState<LogFilters>(initialLogFilters)
   const [reviewDraftFilters, setReviewDraftFilters] = useState<LogFilters>(initialLogFilters)
   const [reviewFilters, setReviewFilters] = useState<LogFilters>(initialLogFilters)
-  const [localDraftFilters, setLocalDraftFilters] = useState<LogFilters>(initialLogFilters)
-  const [localFilters, setLocalFilters] = useState<LogFilters>(initialLogFilters)
+  const [localDraftFilters, setLocalDraftFilters] = useState<LogFilters>(initialLocalLogFilters)
+  const [localFilters, setLocalFilters] = useState<LogFilters>(initialLocalLogFilters)
   const [logPage, setLogPage] = useState(1)
   const [logPageSize, setLogPageSize] = usePersistedPageSize('prompt_filter_logs', 20, DEFAULT_PAGE_SIZE_OPTIONS)
   const [reviewPage, setReviewPage] = useState(1)
@@ -3755,12 +3787,12 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
   const [auditHealthLoading, setAuditHealthLoading] = useState(false)
   const [auditHealthError, setAuditHealthError] = useState<string | null>(null)
 
-  const loadLocalLogs = useCallback(async () => {
+  const loadLocalLogs = useCallback(async (pageOverride?: number) => {
     setLocalLoading(true)
     setLocalError(null)
     try {
       const result = await api.getPromptFilterLogs({
-        page: logPage,
+        page: pageOverride ?? logPage,
         pageSize: logPageSize,
         action: localFilters.action,
         source: localFilters.source,
@@ -3768,7 +3800,6 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
         model: localFilters.model,
         apiKeyId: localFilters.apiKeyId,
         q: localFilters.q,
-        reviewed: false,
       })
       setLogs(result.logs ?? [])
       setTotal(result.total ?? 0)
@@ -3779,12 +3810,12 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
     }
   }, [localFilters, logPage, logPageSize])
 
-  const loadReviewLogs = useCallback(async () => {
+  const loadReviewLogs = useCallback(async (pageOverride?: number) => {
     setReviewLoading(true)
     setReviewError(null)
     try {
       const result = await api.getPromptFilterLogs({
-        page: reviewPage,
+        page: pageOverride ?? reviewPage,
         pageSize: reviewPageSize,
         action: reviewFilters.action,
         endpoint: reviewFilters.endpoint,
@@ -3865,16 +3896,16 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
         return
       }
 
-      await api.clearPromptFilterLogs({ reviewed: section === 'review' })
+      await api.clearPromptFilterLogs(section === 'review' ? { reviewed: true } : { source: 'local_filter' })
+      // The two panels are projections of the same persisted rows. A reviewed
+      // local-filter row appears in both, so either cleanup must refresh both
+      // projections instead of leaving the other panel with stale records.
+      setLogPage(1)
+      setReviewPage(1)
+      await Promise.all([loadReviewLogs(1), loadLocalLogs(1)])
       if (section === 'review') {
-        setReviewLogs([])
-        setReviewTotal(0)
-        setReviewPage(1)
         showToast(t('promptFilter.reviewLogsCleared'))
       } else {
-        setLogs([])
-        setTotal(0)
-        setLogPage(1)
         showToast(t('promptFilter.localLogsCleared'))
       }
 
@@ -3941,7 +3972,7 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
               loading={incidentLoading}
             />
             <StateShell loading={incidentLoading} error={incidentError} isEmpty={!incidentLoading && incidents.length === 0} onRetry={() => void loadIncidents()} emptyTitle={t('promptFilter.noCyberIncidents')}>
-              <PromptPolicyIncidentsTable incidents={incidents} />
+              <PromptPolicyIncidentsTable incidents={incidents} onDeleted={async () => { await loadIncidents(); setIncidentPage((current) => Math.min(current, Math.max(1, Math.ceil(Math.max(0, incidentTotal - 1) / incidentPageSize)))) }} />
               <Pagination page={incidentPage} totalPages={incidentTotalPages} totalItems={incidentTotal} pageSize={incidentPageSize} onPageChange={setIncidentPage} onPageSizeChange={(next) => { setIncidentPage(1); setIncidentPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
             </StateShell>
           </section>
@@ -3999,7 +4030,7 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
               draftFilters={localDraftFilters}
               setDraftFilters={setLocalDraftFilters}
               onApply={() => { setLogPage(1); setLocalFilters(localDraftFilters) }}
-              onReset={() => { setLocalDraftFilters(emptyFilters); setLocalFilters(emptyFilters); setLogPage(1) }}
+              onReset={() => { setLocalDraftFilters(defaultLocalLogFilters); setLocalFilters(defaultLocalLogFilters); setLogPage(1) }}
               loading={localLoading}
               showAction
               showSource
@@ -4097,8 +4128,10 @@ const emptyRiskProfileFilters: RiskProfileFilters = {
   apiKeyId: '',
   accountId: '',
   minScore: '',
-  q: '',
-  lockedOnly: false,
+	q: '',
+	lockedOnly: false,
+	cyOnly: false,
+	activityState: '',
 }
 
 function RiskProfilesView() {
@@ -4129,6 +4162,8 @@ function RiskProfilesView() {
         minScore: filters.minScore,
         q: filters.q,
         lockedOnly: filters.lockedOnly,
+		cyOnly: filters.cyOnly,
+		activityState: filters.activityState,
       })
       setProfiles(result.profiles ?? [])
       setTotal(result.total ?? 0)
@@ -4156,6 +4191,16 @@ function RiskProfilesView() {
   }
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
   const accountStatusView = filters.subjectType === 'account_status'
+  const pageSummary = useMemo(() => {
+    const summary = { frozen: 0, cy: 0, critical: 0, high: 0 }
+    for (const profile of profiles) {
+      if (promptRiskFreezeClass(profile) !== 'none') summary.frozen += 1
+      if (profile.upstream_cy_count > 0) summary.cy += 1
+      if (profile.risk_level === 'critical') summary.critical += 1
+      if (profile.risk_level === 'high') summary.high += 1
+    }
+    return summary
+  }, [profiles])
 
   return (
     <Card>
@@ -4176,20 +4221,38 @@ function RiskProfilesView() {
           {!accountStatusView && scoringVersion ? <div className="mt-1 pl-6 font-mono text-xs opacity-75">{scoringVersion}</div> : null}
         </div>
 
+        <div className="mb-4 grid gap-2 sm:grid-cols-4">
+          {[
+            [t('promptFilter.risk.summary.total'), total],
+            [t('promptFilter.risk.summary.frozen'), pageSummary.frozen],
+            [t('promptFilter.risk.summary.cy'), pageSummary.cy],
+            [t('promptFilter.risk.summary.highCritical'), pageSummary.high + pageSummary.critical],
+          ].map(([label, value]) => <div key={String(label)} className="rounded-lg border bg-muted/20 px-3 py-2"><div className="text-xs text-muted-foreground">{label}</div><div className="mt-1 font-mono text-lg font-semibold">{value}</div></div>)}
+        </div>
+
         <div className="mb-4 flex flex-wrap items-center gap-2 rounded-lg border bg-muted/20 p-3">
-          <Button size="sm" variant={!draftFilters.lockedOnly && draftFilters.subjectType === 'newapi_user' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'newapi_user', lockedOnly: false })); setFilters((current) => ({ ...current, subjectType: 'newapi_user', lockedOnly: false })); setPage(1) }}>
+          <Button size="sm" variant={!draftFilters.lockedOnly && !draftFilters.cyOnly && draftFilters.subjectType === 'newapi_user' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'newapi_user', lockedOnly: false, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: 'newapi_user', lockedOnly: false, cyOnly: false })); setPage(1) }}>
             <Users className="size-4" />{t('promptFilter.risk.peopleProfiles')}
           </Button>
-          <Button size="sm" variant={!draftFilters.lockedOnly && draftFilters.subjectType === '' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: false })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: false })); setPage(1) }}>
+          <Button size="sm" variant={!draftFilters.lockedOnly && !draftFilters.cyOnly && draftFilters.subjectType === '' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: false, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: false, cyOnly: false })); setPage(1) }}>
             <Network className="size-4" />{t('promptFilter.risk.allObjects')}
           </Button>
-          <Button size="sm" variant={!draftFilters.lockedOnly && draftFilters.subjectType === 'account_status' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setPage(1) }}>
+          <Button size="sm" variant={!draftFilters.lockedOnly && !draftFilters.cyOnly && draftFilters.subjectType === 'account_status' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, cyOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, cyOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setPage(1) }}>
             <Activity className="size-4" />{t('promptFilter.risk.accountStatus')}
           </Button>
-          <Button size="sm" variant={draftFilters.lockedOnly ? 'destructive' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: true })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: true })); setPage(1) }}>
+          <Button size="sm" variant={draftFilters.lockedOnly ? 'destructive' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: true, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: true, cyOnly: false })); setPage(1) }}>
             <ShieldAlert className="size-4" />{t('promptFilter.risk.lockedProfiles')}
           </Button>
-          <span className="text-xs leading-5 text-muted-foreground">{draftFilters.lockedOnly ? t('promptFilter.risk.lockedProfilesHint') : draftFilters.subjectType === 'account_status' ? t('promptFilter.risk.accountStatusHint') : draftFilters.subjectType === 'newapi_user' ? t('promptFilter.risk.peopleProfilesHint') : t('promptFilter.risk.nonPersonHint')}</span>
+          <Button size="sm" variant={draftFilters.cyOnly ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: false, cyOnly: true })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: false, cyOnly: true })); setPage(1) }}>
+            <ShieldAlert className="size-4" />{t('promptFilter.risk.upstreamCYProfiles')}
+          </Button>
+          <Button size="sm" variant={!draftFilters.cyOnly && draftFilters.subjectType === 'api_key' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'api_key', lockedOnly: false, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: 'api_key', lockedOnly: false, cyOnly: false })); setPage(1) }}>
+            {t('promptFilter.risk.apiKeyProfiles')}
+          </Button>
+          <Button size="sm" variant={!draftFilters.cyOnly && draftFilters.subjectType === 'upstream_account' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'upstream_account', lockedOnly: false, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: 'upstream_account', lockedOnly: false, cyOnly: false })); setPage(1) }}>
+            {t('promptFilter.risk.upstreamAccountProfiles')}
+          </Button>
+          <span className="text-xs leading-5 text-muted-foreground">{draftFilters.lockedOnly ? t('promptFilter.risk.lockedProfilesHint') : draftFilters.cyOnly ? t('promptFilter.risk.upstreamCYProfilesHint') : draftFilters.subjectType === 'account_status' ? t('promptFilter.risk.accountStatusHint') : draftFilters.subjectType === 'newapi_user' ? t('promptFilter.risk.peopleProfilesHint') : t('promptFilter.risk.nonPersonHint')}</span>
         </div>
 
         <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(155px,1fr))] gap-3">
@@ -4209,6 +4272,11 @@ function RiskProfilesView() {
           {!accountStatusView ? <Field label={t('promptFilter.apiKeyId')}><Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" /></Field> : null}
           <Field label={t('promptFilter.risk.accountId')}><Input value={draftFilters.accountId} onChange={(event) => setDraftFilters((current) => ({ ...current, accountId: event.target.value }))} placeholder="ID" /></Field>
           {!accountStatusView ? <Field label={t('promptFilter.risk.minScore')}><Input type="number" min={0} max={100} value={draftFilters.minScore} onChange={(event) => setDraftFilters((current) => ({ ...current, minScore: event.target.value }))} placeholder="0" /></Field> : null}
+          <Field label={t('promptFilter.risk.activityState')}><Select value={draftFilters.activityState} onValueChange={(value) => setDraftFilters((current) => ({ ...current, activityState: value as RiskProfileFilters['activityState'] }))} options={[
+            { label: t('common.all'), value: '' },
+            { label: t('promptFilter.risk.activityStates.active'), value: 'active' },
+            { label: t('promptFilter.risk.activityStates.identityOnly'), value: 'identity_only' },
+          ]} /></Field>
           <Field label={t('promptFilter.keyword')}><Input value={draftFilters.q} onChange={(event) => setDraftFilters((current) => ({ ...current, q: event.target.value }))} placeholder={t('promptFilter.risk.keywordPlaceholder')} /></Field>
         </div>
         <div className="mb-4 flex flex-wrap gap-2">
@@ -4228,6 +4296,21 @@ function RiskProfilesView() {
 
 function promptRiskIdentityPrimary(profile: Pick<PromptRiskProfile, 'subject_display' | 'newapi_user_name' | 'newapi_user_email'>) {
   return profile.newapi_user_name || profile.newapi_user_email || profile.subject_display || '-'
+}
+
+type PromptRiskFreezeClass = 'none' | 'conversation' | 'user_cooldown' | 'fingerprint_replay'
+
+function promptRiskFreezeClass(profile: PromptRiskProfile): PromptRiskFreezeClass {
+  const lock = profile.conversation_lock
+  if (!lock || lock.status !== 'active') return 'none'
+  if (lock.restriction_scope === 'user_cooldown') return 'user_cooldown'
+  if (lock.restriction_scope === 'fingerprint_replay' || lock.identity_kind === 'fingerprint_replay') return 'fingerprint_replay'
+  return 'conversation'
+}
+
+function promptRiskIdentityKind(profile: PromptRiskProfile) {
+  if (profile.subject_type === 'newapi_user') return profile.is_person ? 'newapi_user' : 'unverified_user'
+  return profile.subject_type
 }
 
 function formatPromptRestrictionRemaining(seconds?: number) {
@@ -4339,6 +4422,7 @@ function RiskProfilesTable({ profiles, accountStatus = false }: { profiles: Prom
       <Table>
         <TableHeader><TableRow>
           <TableHead>{t('promptFilter.risk.identity')}</TableHead>
+          <TableHead>{t('promptFilter.risk.freezeStatus')}</TableHead>
           <TableHead>{t('promptFilter.risk.score')}</TableHead>
           <TableHead>{t('promptFilter.risk.recent')}</TableHead>
           <TableHead>{t('promptFilter.risk.evidence')}</TableHead>
@@ -4351,8 +4435,12 @@ function RiskProfilesTable({ profiles, accountStatus = false }: { profiles: Prom
             <TableCell>
               <div className="flex items-center gap-2"><Users className="size-4 text-muted-foreground" /><span className="font-medium">{promptRiskIdentityPrimary(profile)}</span></div>
               {profile.newapi_user_id || profile.newapi_user_email ? <div className="mt-1 text-xs text-muted-foreground">{profile.newapi_user_id ? `${t('promptFilter.risk.userId')} #${profile.newapi_user_id}` : ''}{profile.newapi_user_id && profile.newapi_user_email ? ' · ' : ''}{profile.newapi_user_email || ''}</div> : null}
-              <div className="mt-1 flex flex-wrap gap-1"><Badge variant={profile.is_person ? 'default' : 'outline'}>{profile.is_person ? t('promptFilter.risk.person') : t('promptFilter.risk.nonPerson')}</Badge><Badge variant={profile.has_activity ? 'secondary' : 'outline'}>{t(profile.has_activity ? 'promptFilter.risk.activeProfile' : 'promptFilter.risk.identityOnly')}</Badge><Badge variant="outline">{t(`promptFilter.risk.subjects.${profile.subject_type}`)}</Badge>{profile.platform ? <Badge variant="secondary">{profile.platform}</Badge> : null}{profile.newapi_user_group ? <Badge variant="secondary">{t('promptFilter.risk.userGroup')}: {profile.newapi_user_group}</Badge> : null}{profile.trust_policy ? <Badge variant={profile.trust_policy.status === 'active' ? 'default' : 'outline'}>{t(`promptFilter.risk.trust.status.${profile.trust_policy.status}`, { defaultValue: profile.trust_policy.status })}</Badge> : null}{profile.conversation_lock?.status === 'active' ? <Badge variant="destructive">{t(profile.conversation_lock.restriction_scope === 'user_cooldown' ? 'promptFilter.risk.conversationLock.userCooldownActive' : 'promptFilter.risk.conversationLock.active')}</Badge> : null}</div>
-              <div className="mt-1 font-mono text-[11px] text-muted-foreground">{profile.subject_key.slice(0, 18)}</div>
+              <div className="mt-1 flex flex-wrap gap-1"><Badge variant={profile.is_person ? 'default' : 'outline'}>{profile.is_person ? t('promptFilter.risk.person') : t('promptFilter.risk.nonPerson')}</Badge><Badge variant="outline">{t(`promptFilter.risk.subjects.${profile.subject_type}`)}</Badge><Badge variant="outline">{t('promptFilter.risk.identitySource')}: {t(`promptFilter.risk.identityKinds.${promptRiskIdentityKind(profile)}`)}</Badge></div>
+              <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-muted-foreground">{profile.platform ? <span>{profile.platform}</span> : null}{profile.newapi_user_group ? <span>{t('promptFilter.risk.userGroup')}: {profile.newapi_user_group}</span> : null}<span className="font-mono">{profile.subject_key.slice(0, 18)}</span></div>
+            </TableCell>
+            <TableCell>
+              <div className="flex flex-wrap items-center gap-1.5"><Badge variant={promptRiskFreezeClass(profile) === 'none' ? 'outline' : 'destructive'}>{t(`promptFilter.risk.freezeStates.${promptRiskFreezeClass(profile)}`)}</Badge>{profile.conversation_lock?.status === 'active' ? <span className="font-mono text-xs text-muted-foreground">{formatPromptRestrictionRemaining(profile.conversation_lock.remaining_seconds)}</span> : null}</div>
+              {profile.conversation_lock?.status === 'active' ? <div className="mt-1 max-w-[180px] truncate text-xs text-muted-foreground" title={profile.conversation_lock.reason_code}>{profile.conversation_lock.reason_code}</div> : <div className="mt-1 text-xs text-muted-foreground">{t('promptFilter.risk.freezeHint')}</div>}
             </TableCell>
             <TableCell><div className="flex items-center gap-2"><span className="font-mono text-lg font-semibold">{profile.risk_score}</span><Badge className={promptRiskBadgeClass(profile.risk_level)}>{t(`promptFilter.risk.levels.${profile.risk_level}`)}</Badge></div><div className="text-xs text-muted-foreground">{t('promptFilter.risk.identityConfidence')} {profile.identity_confidence}%</div></TableCell>
             <TableCell className="font-mono text-xs">{profile.has_activity ? <><div>10m {profile.events_10m} · 24h {profile.events_24h}</div><div className="mt-1 text-muted-foreground">7d {profile.events_7d} · 30d {profile.events_30d}</div></> : <><div className="font-sans text-muted-foreground">{t('promptFilter.risk.noAttributedRequests')}</div>{profile.identity_updated_at ? <div className="mt-1 text-muted-foreground">{formatBeijingTime(profile.identity_updated_at)}</div> : null}</>}</TableCell>
@@ -4461,9 +4549,11 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
     const userCooldown = lock?.restriction_scope === 'user_cooldown' || item.subject_type === 'newapi_user'
     const scope = userCooldown ? 'user_cooldown' : 'conversation'
     if (!lock || !window.confirm(t(userCooldown ? 'promptFilter.risk.conversationLock.confirmUserCooldown' : 'promptFilter.risk.conversationLock.confirm'))) return
+    const reason = window.prompt(t('promptFilter.risk.conversationLock.unlockReasonPrompt'), t(isFingerprintReplay ? 'promptFilter.risk.conversationLock.fingerprintReplayUnlockReason' : userCooldown ? 'promptFilter.risk.conversationLock.userCooldownUnlockReason' : 'promptFilter.risk.conversationLock.conversationUnlockReason'))
+    if (reason === null || !reason.trim()) return
     setUnlockingConversation(true)
     try {
-      const result = await api.unlockPromptConversation(lock.lock_key, userCooldown ? t('promptFilter.risk.conversationLock.userCooldownUnlockReason') : t('promptFilter.risk.conversationLock.conversationUnlockReason'), scope)
+      const result = await api.unlockPromptConversation(lock.lock_key, reason.trim(), scope)
       showToast(t(userCooldown ? 'promptFilter.risk.conversationLock.userCooldownUnlocked' : 'promptFilter.risk.conversationLock.unlocked', { count: result.unlocked_count }))
       await loadDetail()
     } catch (err) {
@@ -4474,19 +4564,21 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   }
   const activeRestriction = item.conversation_lock
   const isUserCooldown = activeRestriction?.restriction_scope === 'user_cooldown' || item.subject_type === 'newapi_user'
-  const isLocalRestriction = !isUserCooldown && activeRestriction?.reason_code !== 'upstream_cyber_policy'
+  const isFingerprintReplay = activeRestriction?.restriction_scope === 'fingerprint_replay'
+  const isLocalRestriction = !isUserCooldown && !isFingerprintReplay && activeRestriction?.reason_code !== 'upstream_cyber_policy'
   const auditReference = activeRestriction?.incident_id || activeRestriction?.request_id || activeRestriction?.decision_id?.replace(/^local-block:/, '') || ''
   return <>
     <Button size="sm" variant="outline" onClick={() => { setEventPage(1); setTrustEventPage(1); setOpen(true) }}>{t('promptFilter.cyberDetail')}</Button>
     <Dialog open={open} onOpenChange={setOpen}>
-      <DialogContent className="max-h-[90vh] sm:max-w-6xl overflow-y-auto">
-        <DialogHeader><DialogTitle>{t('promptFilter.risk.detailTitle')}</DialogTitle><DialogDescription>{promptRiskIdentityPrimary(item)} · {t(`promptFilter.risk.subjects.${item.subject_type}`)}</DialogDescription></DialogHeader>
+      <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-6xl">
+        <DialogHeader className="shrink-0 pr-8"><DialogTitle>{t('promptFilter.risk.detailTitle')}</DialogTitle><DialogDescription>{promptRiskIdentityPrimary(item)} · {t(`promptFilter.risk.subjects.${item.subject_type}`)}</DialogDescription></DialogHeader>
+        <div className="min-h-0 flex-1 overflow-y-auto pr-1">
         {loading && !detail ? <div className="py-8 text-center text-sm text-muted-foreground">{t('common.loading')}</div> : error ? <div className="text-sm text-destructive">{error}</div> : <div className="space-y-4">
           <div className="rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm text-[hsl(var(--warning))]">{detail?.guardrail || t('promptFilter.risk.guardrail')}</div>
           {item.conversation_lock?.status === 'active' ? <div className="rounded-lg border border-destructive/35 bg-destructive/5 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
-              <div><div className="flex items-center gap-2 font-semibold text-destructive"><ShieldAlert className="size-4" />{t(isUserCooldown ? 'promptFilter.risk.conversationLock.userCooldownTitle' : 'promptFilter.risk.conversationLock.title')}<Badge variant="destructive">{t(isUserCooldown ? 'promptFilter.risk.conversationLock.userCooldownActive' : 'promptFilter.risk.conversationLock.active')}</Badge></div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t(isUserCooldown ? 'promptFilter.risk.conversationLock.userCooldownDescription' : isLocalRestriction ? 'promptFilter.risk.conversationLock.localDescription' : 'promptFilter.risk.conversationLock.description')}</p></div>
-              <Button size="sm" variant="destructive" disabled={unlockingConversation} onClick={() => void unlockConversation()}>{t(isUserCooldown ? 'promptFilter.risk.conversationLock.unlockUserCooldown' : 'promptFilter.risk.conversationLock.unlock')}</Button>
+              <div><div className="flex items-center gap-2 font-semibold text-destructive"><ShieldAlert className="size-4" />{t(isUserCooldown ? 'promptFilter.risk.conversationLock.userCooldownTitle' : isFingerprintReplay ? 'promptFilter.risk.conversationLock.fingerprintReplayTitle' : 'promptFilter.risk.conversationLock.title')}<Badge variant="destructive">{t(isUserCooldown ? 'promptFilter.risk.conversationLock.userCooldownActive' : isFingerprintReplay ? 'promptFilter.risk.conversationLock.fingerprintReplayActive' : 'promptFilter.risk.conversationLock.active')}</Badge></div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t(isUserCooldown ? 'promptFilter.risk.conversationLock.userCooldownDescription' : isFingerprintReplay ? 'promptFilter.risk.conversationLock.fingerprintReplayDescription' : isLocalRestriction ? 'promptFilter.risk.conversationLock.localDescription' : 'promptFilter.risk.conversationLock.description')}</p></div>
+              <Button size="sm" variant="destructive" disabled={unlockingConversation} onClick={() => void unlockConversation()}>{t(isUserCooldown ? 'promptFilter.risk.conversationLock.unlockUserCooldown' : isFingerprintReplay ? 'promptFilter.risk.conversationLock.fingerprintReplayUnlock' : 'promptFilter.risk.conversationLock.unlock')}</Button>
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.lockedAt')} value={formatBeijingTime(item.conversation_lock.locked_at)} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.expiresAt')} value={item.conversation_lock.expires_at ? formatBeijingTime(item.conversation_lock.expires_at) : '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.remaining')} value={formatPromptRestrictionRemaining(item.conversation_lock.remaining_seconds)} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.reason')} value={isUserCooldown ? 'user_cyber_cooldown' : item.conversation_lock.reason_code || 'conversation_cyber_locked'} /><PromptPolicyDetailField label={t('promptFilter.colEndpoint')} value={item.conversation_lock.endpoint || '-'} /><PromptPolicyDetailField label={t('promptFilter.reviewModel')} value={item.conversation_lock.model || '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.auditReference')} value={auditReference || '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.decisionId')} value={item.conversation_lock.decision_id || '-'} /></div>
             {auditReference ? <div className="mt-3 flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" asChild><NavLink to={`/prompt-filter/logs?audit=${encodeURIComponent(auditReference)}`}><Search className="size-3.5" />{t('promptFilter.risk.conversationLock.openAudit')}</NavLink></Button><span className="font-mono text-xs text-muted-foreground">{auditReference}</span></div> : null}
@@ -4576,6 +4668,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
           </div>
           <div><div className="mb-2 text-sm font-semibold">{t('promptFilter.risk.trust.history')} · {detail?.trust_event_total ?? 0}</div><div className="overflow-x-auto rounded-lg border"><Table><TableHeader><TableRow><TableHead>{t('promptFilter.colTime')}</TableHead><TableHead>{t('promptFilter.risk.trust.operation')}</TableHead><TableHead>{t('promptFilter.risk.score')}</TableHead><TableHead>{t('promptFilter.risk.trust.requestAudit')}</TableHead><TableHead>{t('promptFilter.risk.trust.reason')}</TableHead></TableRow></TableHeader><TableBody>{detail?.trust_events.map((event) => <TableRow key={event.id}><TableCell className="whitespace-nowrap text-xs">{formatBeijingTime(event.created_at)}</TableCell><TableCell><Badge variant="outline">{t(`promptFilter.risk.trust.events.${event.event_type}`, { defaultValue: event.event_type })}</Badge></TableCell><TableCell className="font-mono text-xs">{event.risk_score}{event.risk_level ? ` · ${t(`promptFilter.risk.levels.${event.risk_level}`, { defaultValue: event.risk_level })}` : ''}</TableCell><TableCell className="font-mono text-[10px] text-muted-foreground" title={event.request_id_hash}>{event.request_id_hash ? event.request_id_hash.slice(0, 20) : '-'}</TableCell><TableCell className="text-xs">{event.reason || '-'}</TableCell></TableRow>)}{!detail?.trust_events.length ? <TableRow><TableCell colSpan={5} className="py-6 text-center text-muted-foreground">{t('promptFilter.risk.trust.noHistory')}</TableCell></TableRow> : null}</TableBody></Table></div><Pagination page={trustEventPage} totalPages={trustEventTotalPages} totalItems={detail?.trust_event_total ?? 0} pageSize={trustEventPageSize} onPageChange={setTrustEventPage} onPageSizeChange={(next) => { setTrustEventPage(1); setTrustEventPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} /></div>
         </div>}
+        </div>
       </DialogContent>
     </Dialog>
     <Dialog open={trustOpen} onOpenChange={(value) => { if (!trustSaving) setTrustOpen(value) }}>
@@ -5263,7 +5356,7 @@ function RuleRow({
   )
 }
 
-function PromptPolicyIncidentsTable({ incidents }: { incidents: PromptPolicyIncident[] }) {
+function PromptPolicyIncidentsTable({ incidents, onDeleted }: { incidents: PromptPolicyIncident[]; onDeleted: () => Promise<void> }) {
   const { t } = useTranslation()
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
@@ -5307,7 +5400,7 @@ function PromptPolicyIncidentsTable({ incidents }: { incidents: PromptPolicyInci
               <TableCell className="font-mono text-xs">{formatPromptPolicyScore(incident.local_score, t('promptFilter.cyberUnscored'))} / {formatPromptPolicyScore(incident.local_audit_score, t('promptFilter.cyberUnscored'))}</TableCell>
               <TableCell><div className="font-mono text-xs">{incident.endpoint || '-'}</div><div className="text-xs text-muted-foreground">{incident.model || '-'}</div></TableCell>
               <TableCell className="font-mono text-xs">{incident.transport || '-'} · #{incident.attempt_index || '-'}</TableCell>
-              <TableCell className="text-right"><PromptPolicyIncidentDetailButton incident={incident} /></TableCell>
+              <TableCell className="text-right"><PromptPolicyIncidentDetailButton incident={incident} onDeleted={onDeleted} /></TableCell>
             </TableRow>
           ))}
         </TableBody>
@@ -5316,12 +5409,14 @@ function PromptPolicyIncidentsTable({ incidents }: { incidents: PromptPolicyInci
   )
 }
 
-function PromptPolicyIncidentDetailButton({ incident }: { incident: PromptPolicyIncident }) {
+function PromptPolicyIncidentDetailButton({ incident, onDeleted }: { incident: PromptPolicyIncident; onDeleted: () => Promise<void> }) {
   const { t } = useTranslation()
+  const { showToast } = useToast()
   const [open, setOpen] = useState(false)
   const [loading, setLoading] = useState(false)
   const [detail, setDetail] = useState<PromptPolicyIncidentDetailResponse | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [deleting, setDeleting] = useState(false)
   const show = async () => {
     setOpen(true)
     if (detail || loading) return
@@ -5337,15 +5432,30 @@ function PromptPolicyIncidentDetailButton({ incident }: { incident: PromptPolicy
   }
   const item = detail?.incident ?? incident
   const content = (item.prompt_text || item.prompt_preview || '').trim()
+  const deleteIncident = async () => {
+    if (!window.confirm(t('promptFilter.deleteCyberIncidentConfirm'))) return
+    setDeleting(true)
+    try {
+      await api.deletePromptPolicyIncident(item.incident_id)
+      setOpen(false)
+      showToast(t('promptFilter.cyberIncidentDeleted'))
+      await onDeleted()
+    } catch (err) {
+      showToast(`${t('promptFilter.clearFailed')}: ${getErrorMessage(err)}`, 'error')
+    } finally {
+      setDeleting(false)
+    }
+  }
   return (
     <>
       <Button size="sm" variant="outline" onClick={() => void show()}>{t('promptFilter.cyberDetail')}</Button>
       <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[90vh] sm:max-w-4xl overflow-y-auto">
-          <DialogHeader>
+        <DialogContent className="flex max-h-[90vh] flex-col overflow-hidden sm:max-w-4xl">
+          <DialogHeader className="shrink-0 pr-8">
             <DialogTitle>{t('promptFilter.cyberDetailTitle')}</DialogTitle>
             <DialogDescription className="break-all font-mono">{item.incident_id}</DialogDescription>
           </DialogHeader>
+          <div className="min-h-0 flex-1 overflow-y-auto pr-1">
           {loading ? <div className="py-8 text-center text-sm text-muted-foreground">{t('common.loading')}</div> : error ? <div className="text-sm text-destructive">{error}</div> : (
             <div className="space-y-4 text-sm">
               {item.local_evaluation_state === 'legacy_unknown' ? <div className="rounded-md border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-[hsl(var(--warning))]">{t('promptFilter.cyberLegacyUnknown')}</div> : null}
@@ -5370,8 +5480,10 @@ function PromptPolicyIncidentDetailButton({ incident }: { incident: PromptPolicy
               {(item.local_reason || item.local_reason_code) ? <PromptPolicyDetailField label={t('promptFilter.cyberReason')} value={item.local_reason || item.local_reason_code} /> : null}
               {detail && detail.matches.length > 0 ? <div><div className="mb-2 font-semibold">{t('promptFilter.testResultMatches')}</div><div className="flex flex-wrap gap-1.5">{detail.matches.map((match, index) => <Badge key={`${match.name}-${index}`} variant="secondary">{match.name} · {match.weight}</Badge>)}</div></div> : null}
               {content ? <div><div className="mb-2 font-semibold">{t('promptFilter.userPromptLabel')}</div><pre className="max-h-[45vh] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/30 p-3 text-xs">{content}</pre></div> : null}
+              <div className="flex justify-end border-t pt-3"><Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => void deleteIncident()} disabled={deleting}>{deleting ? t('promptFilter.clearing') : t('promptFilter.deleteCyberIncident')}</Button></div>
             </div>
           )}
+          </div>
         </DialogContent>
       </Dialog>
     </>
@@ -5456,6 +5568,7 @@ function PromptReviewLogsTable({ logs }: { logs: PromptFilterLog[] }) {
                 </TableCell>
                 <TableCell className="align-top text-xs">
                   <div>{log.api_key_name || log.api_key_masked || (log.api_key_id ? `#${log.api_key_id}` : '-')}</div>
+                  {log.newapi_policy_status === 'unbound' ? <div className="mt-1 text-[11px] text-amber-700 dark:text-amber-300">{t('apiKeys.promptFilterIdentityUnbound')}</div> : null}
                   {log.newapi_user_id ? <div className="mt-1 truncate text-muted-foreground" title={log.newapi_user_id}>{t('promptFilter.newapiUser')} {log.newapi_user_id}</div> : null}
                   {log.request_correlation_id ? <div className="mt-1 truncate font-mono text-[11px] text-muted-foreground" title={log.request_correlation_id}>{log.request_correlation_id}</div> : null}
                 </TableCell>
@@ -5789,6 +5902,11 @@ function PromptFilterLogRow({ log, compact }: { log: PromptFilterLog; compact?: 
               <span className="min-w-0 truncate text-[11px] font-semibold text-muted-foreground" title={policyProfileLabel}>
                 {policyProfileLabel}
               </span>
+            ) : null}
+            {log.newapi_policy_status === 'unbound' ? (
+              <Badge variant="secondary" className="w-fit max-w-full truncate text-[10px]">
+                {t('apiKeys.promptFilterScopeGlobal')}
+              </Badge>
             ) : null}
           </div>
           <div className="mt-2 space-y-1 text-[11px] leading-4 text-muted-foreground">

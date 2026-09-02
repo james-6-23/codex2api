@@ -65,6 +65,7 @@ func TestPromptPolicyIncidentListAndDetailAPI(t *testing.T) {
 	router := gin.New()
 	router.GET("/api/admin/prompt-policy/incidents", h.ListPromptPolicyIncidents)
 	router.GET("/api/admin/prompt-policy/incidents/:incident_id", h.GetPromptPolicyIncident)
+	router.DELETE("/api/admin/prompt-policy/incidents/:incident_id", h.DeletePromptPolicyIncident)
 
 	listRecorder := httptest.NewRecorder()
 	router.ServeHTTP(listRecorder, httptest.NewRequest(http.MethodGet, "/api/admin/prompt-policy/incidents?local_miss=true&outcome=no_hit&account_id=73&page=2&page_size=1", nil))
@@ -92,6 +93,16 @@ func TestPromptPolicyIncidentListAndDetailAPI(t *testing.T) {
 	}
 	if err := json.Unmarshal(detailRecorder.Body.Bytes(), &detail); err != nil || detail.Incident.IncidentID != "incident-admin" || len(detail.Matches) != 1 || detail.Candidate == nil || detail.Evidence == nil {
 		t.Fatalf("detail response=%s err=%v", detailRecorder.Body.String(), err)
+	}
+	deleteRecorder := httptest.NewRecorder()
+	router.ServeHTTP(deleteRecorder, httptest.NewRequest(http.MethodDelete, "/api/admin/prompt-policy/incidents/incident-admin", nil))
+	if deleteRecorder.Code != http.StatusOK {
+		t.Fatalf("delete status=%d body=%s", deleteRecorder.Code, deleteRecorder.Body.String())
+	}
+	missingRecorder := httptest.NewRecorder()
+	router.ServeHTTP(missingRecorder, httptest.NewRequest(http.MethodGet, "/api/admin/prompt-policy/incidents/incident-admin", nil))
+	if missingRecorder.Code != http.StatusNotFound {
+		t.Fatalf("deleted incident status=%d body=%s", missingRecorder.Code, missingRecorder.Body.String())
 	}
 }
 

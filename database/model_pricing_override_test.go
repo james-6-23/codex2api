@@ -52,6 +52,91 @@ func TestModelPricingOverride_MergeAndPrecedence(t *testing.T) {
 	}
 }
 
+func TestModelPricingOverride_ExactCodexAliasPrecedesCanonicalOverride(t *testing.T) {
+	t.Cleanup(func() { SetModelPricingOverrides(nil) })
+
+	// codex-auto-review is an internal alias whose intended billing is the
+	// public gpt-5.4 standard price. Keep a deliberately bad canonical override
+	// here to prove the alias-specific entry cannot be shadowed by it.
+	SetModelPricingOverrides(map[string]ModelPricingOverride{
+		"codex-auto-review": {Source: ModelPricingSourceSynced, Input: 2.5, CachedInput: 0.25, Output: 15},
+		"gpt-5.4":           {Source: ModelPricingSourceSynced, Input: 15, Output: 120},
+	})
+
+	for _, model := range []string{"codex-auto-review", "CODEX_AUTO_REVIEW", "codex auto review"} {
+		pricing := GetModelPricing(model)
+		if pricing.InputPricePerMToken != 2.5 ||
+			pricing.CacheReadPricePerMToken != 0.25 ||
+			pricing.OutputPricePerMToken != 15 {
+			t.Fatalf("%s alias pricing = %.2f/%.2f/%.2f, want 2.5/0.25/15", model,
+				pricing.InputPricePerMToken,
+				pricing.CacheReadPricePerMToken,
+				pricing.OutputPricePerMToken)
+		}
+	}
+}
+
+func TestModelPricingOverride_SyncedAliasNeverShadowsCustomCanonical(t *testing.T) {
+	t.Cleanup(func() { SetModelPricingOverrides(nil) })
+
+	// 管理员手填(custom)的 canonical 价必须压过同步(synced)进来的别名价,
+	// 否则一次定价同步就能静默替换运营者的手工定价决策(custom > synced)。
+	SetModelPricingOverrides(map[string]ModelPricingOverride{
+		"codex-auto-review": {Source: ModelPricingSourceSynced, Input: 2.5, Output: 15},
+		"gpt-5.4":           {Source: ModelPricingSourceCustom, Input: 9, Output: 90},
+	})
+	if pricing := GetModelPricing("codex-auto-review"); pricing.InputPricePerMToken != 9 || pricing.OutputPricePerMToken != 90 {
+		t.Fatalf("synced alias shadowed custom canonical: %.2f/%.2f, want 9/90",
+			pricing.InputPricePerMToken, pricing.OutputPricePerMToken)
+	}
+
+	// custom 别名仍然压过 custom canonical(同源之下更精确的键生效)。
+	SetModelPricingOverrides(map[string]ModelPricingOverride{
+		"codex-auto-review": {Source: ModelPricingSourceCustom, Input: 2.5, Output: 15},
+		"gpt-5.4":           {Source: ModelPricingSourceCustom, Input: 9, Output: 90},
+	})
+	if pricing := GetModelPricing("codex-auto-review"); pricing.InputPricePerMToken != 2.5 || pricing.OutputPricePerMToken != 15 {
+		t.Fatalf("custom alias lost to custom canonical: %.2f/%.2f, want 2.5/15",
+			pricing.InputPricePerMToken, pricing.OutputPricePerMToken)
+	}
+}
+
+func TestModelPricingOverride_PartialAliasFallsBackToCanonicalOverride(t *testing.T) {
+	t.Cleanup(func() { SetModelPricingOverrides(nil) })
+
+	// 别名条目只填了 input 时,其余字段应回退 canonical 生效价(90),
+	// 而不是无视管理员的 canonical 配置直接掉回代码默认价。
+	SetModelPricingOverrides(map[string]ModelPricingOverride{
+		"codex-auto-review": {Source: ModelPricingSourceCustom, Input: 2.5},
+		"gpt-5.4":           {Source: ModelPricingSourceCustom, Input: 9, Output: 90},
+	})
+	pricing := GetModelPricing("codex-auto-review")
+	if pricing.InputPricePerMToken != 2.5 || pricing.OutputPricePerMToken != 90 {
+		t.Fatalf("partial alias merge = %.2f/%.2f, want 2.5/90",
+			pricing.InputPricePerMToken, pricing.OutputPricePerMToken)
+	}
+}
+
+func TestPricingManagementModelKeyPreservesIndependentAlias(t *testing.T) {
+	tests := []struct {
+		model string
+		want  string
+	}{
+		{model: "codex-auto-review", want: "codex-auto-review"},
+		{model: "CODEX_AUTO_REVIEW", want: "codex-auto-review"},
+		{model: "codex auto review", want: "codex-auto-review"},
+		{model: "gpt-5.4", want: "gpt-5.4"},
+		{model: "gpt-5.4-openai-compact", want: "gpt-5.4"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.model, func(t *testing.T) {
+			if got := PricingManagementModelKey(tt.model); got != tt.want {
+				t.Fatalf("PricingManagementModelKey(%q) = %q, want %q", tt.model, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestParseModelPricingOverridesJSON(t *testing.T) {
 	m, err := ParseModelPricingOverridesJSON(`{"gpt-5.4":{"source":"custom","input":3,"output":20},"gpt-x":{}}`)
 	if err != nil {

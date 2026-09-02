@@ -102,6 +102,61 @@ func TestRelayCodexTurnStateClearsStaleHeaderOnFailover(t *testing.T) {
 	}
 }
 
+func TestCommitResponsesStreamAttemptStagesWinningTurnStateBeforeHeadersCommit(t *testing.T) {
+	affinityKey := "turn-guard-winning-header::api-key:9"
+	t.Cleanup(func() { codexTurnStateOrigins.Delete(affinityKey) })
+	c, recorder := newTurnStateTestContext(t)
+	flusher, _ := c.Writer.(http.Flusher)
+	attempt := newContinuousRetryStreamAttempt(true, c.Writer, flusher)
+	t.Cleanup(func() { _ = attempt.Close() })
+	if _, err := attempt.replay.Write([]byte("data: {\"type\":\"response.completed\"}\n\n")); err != nil {
+		t.Fatalf("buffer attempt: %v", err)
+	}
+	upstream := http.Header{}
+	upstream.Set(codexTurnStateHeader, "winning-turn-state")
+	account := &auth.Account{DBID: 303}
+
+	if err := (&Handler{}).commitResponsesStreamAttempt(c, attempt, affinityKey, account, upstream); err != nil {
+		t.Fatalf("commit response attempt: %v", err)
+	}
+	result := recorder.Result()
+	if got := result.Header.Get(codexTurnStateHeader); got != "winning-turn-state" {
+		t.Fatalf("committed response header = %q, want winning-turn-state", got)
+	}
+	raw, ok := codexTurnStateOrigins.Load(affinityKey)
+	origin, valid := raw.(codexTurnStateOrigin)
+	if !ok || !valid || origin.accountID != account.ID() {
+		t.Fatalf("winning turn-state provenance = %#v, present=%v", raw, ok)
+	}
+}
+
+func TestCommitResponsesStreamAttemptDoesNotForgeTurnStateAfterHeartbeat(t *testing.T) {
+	affinityKey := "turn-guard-heartbeat-committed::api-key:9"
+	t.Cleanup(func() { codexTurnStateOrigins.Delete(affinityKey) })
+	c, recorder := newTurnStateTestContext(t)
+	_, _ = c.Writer.WriteString(continuousRetryKeepaliveComment)
+	c.Writer.Flush()
+	flusher, _ := c.Writer.(http.Flusher)
+	attempt := newContinuousRetryStreamAttempt(true, c.Writer, flusher)
+	t.Cleanup(func() { _ = attempt.Close() })
+	if _, err := attempt.replay.Write([]byte("data: {\"type\":\"response.completed\"}\n\n")); err != nil {
+		t.Fatalf("buffer attempt: %v", err)
+	}
+	upstream := http.Header{}
+	upstream.Set(codexTurnStateHeader, "late-turn-state")
+
+	if err := (&Handler{}).commitResponsesStreamAttempt(c, attempt, affinityKey, &auth.Account{DBID: 404}, upstream); err != nil {
+		t.Fatalf("commit response attempt: %v", err)
+	}
+	result := recorder.Result()
+	if got := result.Header.Get(codexTurnStateHeader); got != "" {
+		t.Fatalf("late turn-state was forged into committed headers: %q", got)
+	}
+	if _, ok := codexTurnStateOrigins.Load(affinityKey); ok {
+		t.Fatal("undelivered turn-state recorded provenance")
+	}
+}
+
 // 会话级 beta-features:未声明时补默认(deviceCfg 优先于内置默认),
 // 客户端显式声明的原样保留(即使不含 remote_compaction_v2)。
 func TestApplyCodexRequestHeadersSessionLevelBetaFeatures(t *testing.T) {

@@ -47,10 +47,12 @@ type ModelCatalog struct {
 	Items  []ModelInfo `json:"items"`
 	// GrokModels 是全部 Grok 账号声明模型的并集（由 admin 层填充），
 	// 供前端在渠道选 grok 时切换模型下拉选项；注册表本身仍只管 Codex 模型。
-	GrokModels   []string   `json:"grok_models,omitempty"`
-	LastSyncedAt *time.Time `json:"last_synced_at,omitempty"`
-	SourceURL    string     `json:"source_url"`
-	Warning      string     `json:"warning,omitempty"`
+	GrokModels        []string   `json:"grok_models,omitempty"`
+	AntigravityModels []string   `json:"antigravity_models,omitempty"`
+	ClaudeModels      []string   `json:"claude_models,omitempty"`
+	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
+	SourceURL         string     `json:"source_url"`
+	Warning           string     `json:"warning,omitempty"`
 }
 
 // ModelSyncResult is returned after a manual upstream sync.
@@ -82,6 +84,9 @@ var builtinModelInfos = []ModelInfo{
 	// Pricing: gpt-5.4 standard ($2.50/$15.00), priority ($5.00/$30.00).
 	// Ref: codex_client_models.json via CLIProxyAPI model registry.
 	modelInfoForID("codex-auto-review", ModelSourceBuiltin),
+	// gpt-reserve — non-versioned model ID; keep as builtin fallback only.
+	// Note: it is not discoverable via upstream sync/manifest learning, which expects gpt-<major>.<minor> IDs.
+	modelInfoForID("gpt-reserve", ModelSourceBuiltin),
 	modelInfoForID("gpt-image-2", ModelSourceBuiltin),
 	modelInfoForID("gpt-image-2-2k", ModelSourceBuiltin),
 	modelInfoForID("gpt-image-2-4k", ModelSourceBuiltin),

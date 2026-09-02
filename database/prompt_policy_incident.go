@@ -741,6 +741,42 @@ func (db *DB) GetPromptPolicyIncident(ctx context.Context, incidentID string) (*
 	return scanPromptPolicyIncident(row)
 }
 
+// DeletePromptPolicyIncident removes one CY incident from the operational
+// history while retaining the candidate/evidence material used for learning.
+// References in usage logs and candidate evidence are detached instead of
+// leaving links to a deleted incident. Risk profiles are intentionally kept,
+// matching the bulk-clear semantics used by the admin UI.
+func (db *DB) DeletePromptPolicyIncident(ctx context.Context, incidentID string) error {
+	if db == nil {
+		return errors.New("database is nil")
+	}
+	incidentID = strings.TrimSpace(incidentID)
+	if incidentID == "" {
+		return errors.New("incident id is empty")
+	}
+	return db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		var exists int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM prompt_policy_incidents WHERE incident_id=$1`, incidentID).Scan(&exists); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE usage_logs SET prompt_policy_incident_id=NULL WHERE prompt_policy_incident_id=$1`, incidentID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE prompt_rule_candidate_evidence SET prompt_policy_incident_id=NULL WHERE prompt_policy_incident_id=$1`, incidentID); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM prompt_policy_incidents WHERE incident_id=$1`, incidentID); err != nil {
+			return err
+		}
+		return tx.Commit()
+	})
+}
+
 func (db *DB) ListPromptPolicyIncidentsPage(ctx context.Context, query PromptPolicyIncidentQuery) ([]*PromptPolicyIncident, int, error) {
 	if query.Page <= 0 {
 		query.Page = 1

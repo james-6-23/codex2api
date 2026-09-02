@@ -488,6 +488,44 @@ func TestNeedsUsageProbeAllowsReadyAccount(t *testing.T) {
 	}
 }
 
+func TestNeedsUsageProbeAllowsClaudeAndRefreshesStaleSnapshot(t *testing.T) {
+	acc := &Account{UpstreamType: UpstreamClaude, AccessToken: "claude-token", Status: StatusReady}
+	if !acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("Claude account should be eligible for an initial usage probe")
+	}
+	acc.SetUsageSnapshot5hAt(12, time.Now(), time.Now())
+	acc.SetReset7dAt(time.Now().Add(24 * time.Hour))
+	acc.UsagePercent7dValid = true
+	acc.UsageUpdatedAt = time.Now()
+	if acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("Claude account with fresh snapshots should not be probed again")
+	}
+}
+
+func TestNeedsUsageProbeClaudeUsesNativeObservationFreshnessWithoutQuotaHeaders(t *testing.T) {
+	acc := &Account{UpstreamType: UpstreamClaude, AccessToken: "claude-token", Status: StatusReady}
+	acc.MarkClaudeUsageObservation(time.Now())
+	if acc.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("a recent native Claude observation without quota headers should suppress a duplicate probe")
+	}
+
+	stale := &Account{UpstreamType: UpstreamClaude, AccessToken: "claude-token", Status: StatusReady,
+		usageObservedAt: time.Now().Add(-11 * time.Minute)}
+	if !stale.NeedsUsageProbe(10 * time.Minute) {
+		t.Fatal("a stale native Claude observation should trigger a refresh probe")
+	}
+}
+
+func TestSetAPIKeyUpstreamChannelAcceptsClaude(t *testing.T) {
+	store := NewStore(nil, nil, nil)
+	defer store.Stop()
+
+	store.SetAPIKeyUpstreamChannel(42, " Claude ")
+	if got := store.APIKeyUpstreamChannel(42); got != database.UpstreamChannelClaude {
+		t.Fatalf("API key upstream channel = %q, want %q", got, database.UpstreamChannelClaude)
+	}
+}
+
 func TestNeedsUsageProbeRefreshesStaleResetCreditsDespiteFreshUsage(t *testing.T) {
 	now := time.Now()
 	// 核心修复：账号用量快照很新鲜（活跃账号被业务流量持续刷新），

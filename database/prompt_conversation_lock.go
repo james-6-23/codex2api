@@ -11,11 +11,12 @@ import (
 )
 
 const (
-	PromptConversationLockStatusActive             = "active"
-	PromptConversationLockStatusUnlocked           = "unlocked"
-	PromptConversationLockCacheNamespace           = "prompt-conversation-lock"
-	PromptConversationRestrictionScopeConversation = "conversation"
-	PromptConversationRestrictionScopeUserCooldown = "user_cooldown"
+	PromptConversationLockStatusActive                  = "active"
+	PromptConversationLockStatusUnlocked                = "unlocked"
+	PromptConversationLockCacheNamespace                = "prompt-conversation-lock"
+	PromptConversationRestrictionScopeConversation      = "conversation"
+	PromptConversationRestrictionScopeUserCooldown      = "user_cooldown"
+	PromptConversationRestrictionScopeFingerprintReplay = "fingerprint_replay"
 	// PromptUserCyberCooldownTTL is retained for source compatibility with
 	// integrations that referenced the old default. Runtime enforcement reads
 	// the configurable prompt-filter setting instead.
@@ -27,8 +28,11 @@ const (
 	//
 	// 当 identity_kind 为 codex_session 时,newapi_user_id 列存放降级主体
 	// (形如 apikey:<id>),platform 列存放固定标识 codex-local。
-	PromptConversationLockIdentityNewAPI       = "newapi"
-	PromptConversationLockIdentityCodexSession = "codex_session"
+	// fingerprint_replay 使用同一张锁表,但只绑定 API Key、客户端 IP 哈希
+	// 和精确 Prompt 指纹,不能解释为人员身份。
+	PromptConversationLockIdentityNewAPI            = "newapi"
+	PromptConversationLockIdentityCodexSession      = "codex_session"
+	PromptConversationLockIdentityFingerprintReplay = "fingerprint_replay"
 )
 
 func normalizePromptConversationLockIdentityKind(kind string) (string, bool) {
@@ -37,6 +41,8 @@ func normalizePromptConversationLockIdentityKind(kind string) (string, bool) {
 		return PromptConversationLockIdentityNewAPI, true
 	case PromptConversationLockIdentityCodexSession:
 		return PromptConversationLockIdentityCodexSession, true
+	case PromptConversationLockIdentityFingerprintReplay:
+		return PromptConversationLockIdentityFingerprintReplay, true
 	default:
 		return "", false
 	}
@@ -196,7 +202,7 @@ func normalizePromptConversationLockInput(input PromptConversationLockInput) (Pr
 		input.SessionFingerprint != "" && len(input.SessionFingerprint) != 32
 	// 降级的 Codex 会话身份必须携带 32 位指纹，防止空标识锁住共享 API Key。
 	// 已验证的 NewAPI 用户级冷却锁有意不绑定会话，因此允许指纹与会话哈希同时为空。
-	if input.IdentityKind == PromptConversationLockIdentityCodexSession {
+	if input.IdentityKind == PromptConversationLockIdentityCodexSession || input.IdentityKind == PromptConversationLockIdentityFingerprintReplay {
 		invalidSessionIdentity = len(input.SessionFingerprint) != 32
 	}
 	if len(input.LockKey) != 64 || input.Platform == "" || input.NewAPIUserID == "" || input.DecisionID == "" || invalidSessionIdentity {
@@ -321,6 +327,28 @@ func (db *DB) GetActivePromptConversationLockBySessionHash(ctx context.Context, 
 		return nil, err
 	}
 	return scanPromptConversationLock(db.conn.QueryRowContext(ctx, promptConversationLockSelect+` WHERE session_hash=$1 AND status='active' ORDER BY updated_at DESC LIMIT 1`, strings.ToLower(strings.TrimSpace(sessionHash))))
+}
+
+// HasActivePromptFingerprintReplayLocks reports whether any fingerprint replay
+// cooldown row is still live within ttl. The relay hot path uses it as a cheap
+// existence gate: deriving a replay fingerprint requires a full request
+// envelope build, which is wasted work while no cooldown exists anywhere.
+func (db *DB) HasActivePromptFingerprintReplayLocks(ctx context.Context, ttl time.Duration) (bool, error) {
+	if err := db.ensurePromptConversationLocksTable(ctx); err != nil {
+		return false, err
+	}
+	args := []any{PromptConversationLockIdentityFingerprintReplay}
+	query := `SELECT 1 FROM prompt_conversation_locks WHERE status='active' AND identity_kind=$1`
+	if ttl > 0 {
+		args = append(args, time.Now().UTC().Add(-ttl))
+		query += ` AND locked_at>$2`
+	}
+	var one int
+	err := db.conn.QueryRowContext(ctx, query+` LIMIT 1`, args...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 func (db *DB) GetActivePromptConversationLockBySessionHashWithTTL(ctx context.Context, sessionHash string, ttl time.Duration) (*PromptConversationLock, error) {

@@ -296,7 +296,8 @@ type createGrokOAuthAccountInput struct {
 	Source        string
 	// ReauthorizeExisting 开启"重授权即更新"语义:凭据身份命中既有账号时,
 	// 更新该账号的凭据(回收站账号顺带复活),而不是报"已存在"。
-	// 仅交互式授权路径打开;批量导入保持"重复即跳过"。
+	// 关闭时命中既有身份直接报错;身份栅栏含回收站账号,报错会让"删过的号
+	// 重新导入"走进死胡同,所以交互式授权与批量导入路径都应打开。
 	ReauthorizeExisting bool
 }
 
@@ -417,6 +418,11 @@ func (h *Handler) reauthorizeGrokOAuthAccount(ctx context.Context, accountID int
 	}
 	if len(in.Models) == 0 {
 		delete(overlay, "models")
+	}
+	// token 不带 email claim 时 credentials["email"] 只是 subject 兜底,
+	// 不能拿它覆盖既有账号的真实 email。
+	if strings.TrimSpace(in.Email) == "" {
+		delete(overlay, "email")
 	}
 
 	reauth, err := h.db.ReauthGrokAccount(ctx, accountID, overlay, strings.TrimSpace(in.Name), strings.TrimSpace(in.ProxyURL))

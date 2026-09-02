@@ -269,6 +269,9 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 		return 0, err
 	}
 	h.db.InsertAccountEventAsync(id, "added", selfServiceSource)
+	// 公开提交不走 /api/admin/accounts* 失效中间件；不主动丢快照的话，
+	// 账号页 SWR 会继续吐旧列表，待审核面板第一次查询就是 0。
+	h.invalidateAccountSnapshotCaches()
 	log.Printf("自助门户新增待审核账号 %d (%s, 联系人 %s)", id, name, contactEmail)
 	return id, nil
 }

@@ -691,15 +691,22 @@ func applyGrokCooldown(store *auth.Store, account *auth.Account, statusCode int,
 
 // parseRetryAfterHeader 解析 Retry-After 头（秒数或 HTTP 日期）。
 func parseRetryAfterHeader(value string) time.Duration {
+	return parseRetryAfterHeaderAt(value, time.Now())
+}
+
+func parseRetryAfterHeaderAt(value string, now time.Time) time.Duration {
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return 0
 	}
-	if seconds, err := time.ParseDuration(value + "s"); err == nil && seconds > 0 {
-		return seconds
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 || seconds > int64((1<<63-1)/int64(time.Second)) {
+			return 0
+		}
+		return time.Duration(seconds) * time.Second
 	}
 	if at, err := http.ParseTime(value); err == nil {
-		if d := time.Until(at); d > 0 {
+		if d := at.Sub(now); d > 0 {
 			return d
 		}
 	}

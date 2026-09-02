@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -74,6 +75,31 @@ func TestGrokCapabilityFailureTTLPreventsRecurringAutomaticProbe(t *testing.T) {
 	}
 	if !grokGenerationNeedsCapabilityProbe(account, state, 1, now.Add(25*time.Hour)) {
 		t.Fatal("expired capability observations should become probe candidates")
+	}
+}
+
+func TestGrokNextMaintenanceDueUsesExpiryAndRejectsIncompleteState(t *testing.T) {
+	now := time.Now()
+	origin := normalizeGrokProbeOrigin(auth.GrokDefaultAPIBaseURL)
+	account := &auth.Account{UpstreamType: auth.UpstreamGrok, APIKey: "xai-test", CredentialGeneration: 1, BaseURL: origin}
+	state := &database.GrokAccountState{
+		CredentialGeneration: 1,
+		Catalogs: []database.GrokModelCatalog{{Snapshot: database.GrokModelCatalogSnapshot{
+			Origin: origin, CredentialGeneration: 1, Status: "ok", ExpiresAt: now.Add(5 * time.Minute),
+		}}},
+	}
+
+	due, err := grokNextMaintenanceDue(account, state, now)
+	if err != nil || !due.Equal(now.Add(5*time.Minute)) {
+		t.Fatalf("fresh empty-catalog due = %v, err=%v, want catalog expiry", due, err)
+	}
+	state.Catalogs[0].Snapshot.ExpiresAt = now
+	if _, err := grokNextMaintenanceDue(account, state, now); !errors.Is(err, errGrokMaintenanceProjectionIncomplete) {
+		t.Fatalf("expired catalog error = %v, want incomplete projection", err)
+	}
+	state.Catalogs = nil
+	if _, err := grokNextMaintenanceDue(account, state, now); !errors.Is(err, errGrokMaintenanceProjectionIncomplete) {
+		t.Fatalf("missing catalog error = %v, want incomplete projection", err)
 	}
 }
 

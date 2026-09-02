@@ -164,6 +164,7 @@ func TestArmNextBoundaryProbeArmsTimer(t *testing.T) {
 			CooldownUtil:   now.Add(10 * time.Minute),
 		},
 	}
+	s.publishAccountSnapshot(s.accounts)
 
 	timer := time.NewTimer(time.Hour)
 	if !timer.Stop() {
@@ -185,6 +186,7 @@ func TestArmNextBoundaryProbeArmsTimer(t *testing.T) {
 
 	// 无任何待处理边界 → 停表并清零 armedBoundaryAt。
 	s.accounts = []*Account{{AccessToken: "tok"}}
+	s.publishAccountSnapshot(s.accounts)
 	timer2 := time.NewTimer(time.Hour)
 	s.armNextBoundaryProbe(timer2)
 	if s.armedBoundaryAt != 0 {

@@ -204,7 +204,28 @@ func normalizedNewAPIPlatform(value string) string {
 }
 
 func newAPIRuntimeScope(apiKeyID int64, platform string) string {
-	return fmt.Sprintf("api-key:%d:platform:%s", apiKeyID, hashRiskIdentity(normalizedNewAPIPlatform(platform)))
+	return newAPIRuntimeScopeWithChannel(apiKeyID, platform, 0)
+}
+
+// newAPIRuntimeScopeWithChannel isolates ephemeral risk/session state by the
+// signed NewAPI channel when available. Persisted person identity remains
+// platform+user scoped so the same person is still discoverable across
+// channels, while a risky channel cannot poison another channel's short-term
+// adaptive trust or conversation context.
+func newAPIRuntimeScopeWithChannel(apiKeyID int64, platform string, channelID int) string {
+	scope := fmt.Sprintf("api-key:%d:platform:%s", apiKeyID, hashRiskIdentity(normalizedNewAPIPlatform(platform)))
+	if channelID > 0 {
+		scope += fmt.Sprintf(":channel:%d", channelID)
+	}
+	return scope
+}
+
+func newAPIRuntimeScopeForPolicyContext(policyContext verifiedNewAPIPolicyContext) string {
+	channelID := 0
+	if policyContext.MetaVerified {
+		channelID = policyContext.Meta.ChannelID
+	}
+	return newAPIRuntimeScopeWithChannel(policyContext.APIKeyID, policyContext.Platform, channelID)
 }
 
 type newAPISecretCandidate struct {
@@ -1086,4 +1107,40 @@ func writeNewAPIPolicyDecisionHeaders(c *gin.Context, metadata newAPIPolicyDecis
 	// prevent old clients from mistaking absence of metadata for a transport error.
 	c.Header("X-Codex2API-Policy-Strike", "0")
 	c.Header("X-Codex2API-Policy-Ban", "false")
+}
+
+// clearNewAPIUpstreamCyberPolicyDecision removes only the client-facing state
+// produced by a failed upstream attempt. The audit incident has already been
+// recorded and is intentionally retained. Call this only when another
+// upstream attempt is actually about to start, so a final failure still
+// exposes the last decision to NewAPI.
+func clearNewAPIUpstreamCyberPolicyDecision(c *gin.Context) {
+	if c == nil {
+		return
+	}
+	c.Set(newAPIUpstreamCyberDecisionContextKey, nil)
+	if c.Writer == nil || c.Writer.Written() {
+		return
+	}
+	for _, name := range []string{
+		"X-Codex2API-Policy-Violation",
+		"X-Codex2API-Policy-Request-ID",
+		"X-Codex2API-Policy-Reason",
+		"X-Codex2API-Policy-Action",
+		"X-Codex2API-Policy-Decision-ID",
+		"X-Codex2API-Policy-Event-ID",
+		"X-Codex2API-Policy-Event-Signature-Version",
+		"X-Codex2API-Policy-Event-Signature",
+		"X-Codex2API-Policy-Profile",
+		"X-Codex2API-Policy-Rule-Version",
+		"X-Codex2API-Policy-Strike-Eligible",
+		"X-Codex2API-Policy-Evidence-SHA256",
+		"X-Codex2API-Policy-Severity",
+		"X-Codex2API-Policy-Signature-Version",
+		"X-Codex2API-Policy-Response-Signature",
+		"X-Codex2API-Policy-Strike",
+		"X-Codex2API-Policy-Ban",
+	} {
+		c.Writer.Header().Del(name)
+	}
 }

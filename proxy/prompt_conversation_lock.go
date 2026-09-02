@@ -23,6 +23,7 @@ import (
 
 const (
 	promptConversationLockedReasonCode = "conversation_cyber_locked"
+	promptFingerprintReplayReasonCode  = "fingerprint_replay_cooldown"
 	promptConversationLockedMessage    = "当前对话因上游 CYB 已被锁定。本次锁定拦截不会重复累计处罚；可等待自动到期，或由管理员在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。解除后再次触发 CYB 可能会停用账号。"
 	promptUserCyberCooldownReasonCode  = "user_cyber_cooldown"
 	promptUserCyberCooldownMessage     = "该用户因上游 CYB 现处于安全冷却期。冷却期间的新请求不会继续转发，也不会重复累计处罚；可等待自动到期，或由管理员在「Prompt 检查 → 风险画像 → 用户详情」手动解除冷却。"
@@ -106,6 +107,13 @@ func promptConversationSessionSignal(c *gin.Context) string {
 	return ""
 }
 
+// promptConversationLockFallbackSessionHash 统一 codex-local 降级身份的 session
+// hash 派生。锁表和审计日志必须使用同一条信号提取与指纹链路，后台才能用审计
+// 记录里的 session_hash 定位并解锁对应会话。
+func promptConversationLockFallbackSessionHash(c *gin.Context) string {
+	return hashRiskIdentity(promptSessionFingerprint32(promptConversationSessionSignal(c)))
+}
+
 func verifiedPromptConversationLockIdentity(c *gin.Context, policyContext verifiedNewAPIPolicyContext) (promptConversationLockIdentity, bool) {
 	if c == nil || !policyContext.MetaVerified {
 		return promptConversationLockIdentity{}, false
@@ -116,7 +124,11 @@ func verifiedPromptConversationLockIdentity(c *gin.Context, policyContext verifi
 	if platform == "" || userID == "" || len(fingerprint) != 32 {
 		return promptConversationLockIdentity{}, false
 	}
-	digest := sha256.Sum256([]byte("prompt-conversation-lock-v1\x00" + platform + "\x00" + userID + "\x00" + fingerprint))
+	lockMaterial := "prompt-conversation-lock-v1\x00" + platform + "\x00" + userID + "\x00" + fingerprint
+	if policyContext.Meta.ChannelID > 0 {
+		lockMaterial = "prompt-conversation-lock-v2\x00" + platform + "\x00" + userID + "\x00" + strconv.Itoa(policyContext.Meta.ChannelID) + "\x00" + fingerprint
+	}
+	digest := sha256.Sum256([]byte(lockMaterial))
 	return promptConversationLockIdentity{
 		Kind:    database.PromptConversationLockIdentityNewAPI,
 		LockKey: hex.EncodeToString(digest[:]), Platform: platform, NewAPIUserID: userID,
@@ -165,6 +177,10 @@ func promptCyberRestrictionDecision(item *database.PromptConversationLock, cfg p
 			result.ReasonCode = promptUserCyberCooldownReasonCode
 			result.Scope = database.PromptConversationRestrictionScopeUserCooldown
 			ttl = promptUserCyberCooldownTTL(cfg)
+		} else if item.IdentityKind == database.PromptConversationLockIdentityFingerprintReplay || item.ReasonCode == promptFingerprintReplayReasonCode {
+			result.ReasonCode = promptFingerprintReplayReasonCode
+			result.Scope = database.PromptConversationRestrictionScopeFingerprintReplay
+			ttl = promptUserCyberCooldownTTL(cfg)
 		}
 	}
 	if !result.LockedAt.IsZero() && ttl > 0 {
@@ -181,6 +197,8 @@ func promptCyberRestrictionDecision(item *database.PromptConversationLock, cfg p
 	}
 	if result.Scope == database.PromptConversationRestrictionScopeUserCooldown {
 		result.Message = fmt.Sprintf("该用户因上游 CYB 进入安全冷却，剩余约 %s；冷却期间所有新请求均不会转发，也不会重复累计处罚。%s管理员可在「Prompt 检查 → 风险画像 → 用户详情」解除冷却。错误码：%s。", remainingText, auditText, result.ReasonCode)
+	} else if result.Scope == database.PromptConversationRestrictionScopeFingerprintReplay {
+		result.Message = fmt.Sprintf("相同 Prompt 指纹近期已收到上游 CYB，当前请求进入精确重放冷却，剩余约 %s；不会封禁整个 API Key。%s管理员可在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。错误码：%s。", remainingText, auditText, result.ReasonCode)
 	} else if result.TriggerReasonCode != "" && result.TriggerReasonCode != newAPIUpstreamCyberPolicyReasonCode {
 		result.Message = fmt.Sprintf("当前对话因本地高风险规则已锁定，剩余约 %s；后续请求不会转发或重复累计处罚。触发原因：%s；%s管理员可在「Prompt 检查 → 风险画像 → 会话详情」审核并手动解锁。错误码：%s。", remainingText, result.TriggerReasonCode, auditText, result.ReasonCode)
 	} else {
@@ -283,7 +301,11 @@ func promptCyberRestrictionLock(item *database.PromptConversationLock, exactConv
 	}
 	copy := *item
 	if exactConversation {
-		copy.ReasonCode = promptConversationLockedReasonCode
+		if item.IdentityKind == database.PromptConversationLockIdentityFingerprintReplay {
+			copy.ReasonCode = promptFingerprintReplayReasonCode
+		} else {
+			copy.ReasonCode = promptConversationLockedReasonCode
+		}
 	} else {
 		copy.ReasonCode = promptUserCyberCooldownReasonCode
 	}
@@ -311,8 +333,89 @@ func promptConversationLockFallbackIdentity(c *gin.Context) (promptConversationL
 		Platform:           promptConversationLockFallbackPlatform,
 		NewAPIUserID:       subject,
 		SessionFingerprint: fingerprint,
-		SessionHash:        hashRiskIdentity(fingerprint),
+		SessionHash:        promptConversationLockFallbackSessionHash(c),
 	}, true
+}
+
+// promptConversationFingerprintReplayIdentity is the last-resort identity for
+// unsigned requests that have neither a verified NewAPI user nor a stable
+// Codex session signal. It requires the client IP hash and scopes the lock to
+// the API key, so a shared key cannot be globally blocked.
+func (h *Handler) promptConversationFingerprintReplayIdentity(c *gin.Context, signedBody []byte, endpoint, model string) (promptConversationLockIdentity, bool) {
+	if h == nil || c == nil {
+		return promptConversationLockIdentity{}, false
+	}
+	apiKeyID := requestAPIKeyID(c)
+	if apiKeyID == 0 {
+		return promptConversationLockIdentity{}, false
+	}
+	audit := h.capturePromptFilterAuditContext(c)
+	clientIPHash := strings.TrimSpace(audit.ClientIPHash)
+	if clientIPHash == "" {
+		return promptConversationLockIdentity{}, false
+	}
+	fingerprint := h.promptConversationReplayFingerprint(c, signedBody, endpoint, model)
+	if len(fingerprint) != sha256.Size*2 {
+		return promptConversationLockIdentity{}, false
+	}
+	subject := fmt.Sprintf("apikey:%d:ip:%s", apiKeyID, clientIPHash)
+	scope := strings.Join([]string{subject, fingerprint}, "\x00")
+	return promptConversationLockIdentity{
+		Kind:               database.PromptConversationLockIdentityFingerprintReplay,
+		LockKey:            promptfilter.StableEvidenceFingerprint("prompt-fingerprint-replay-lock", scope),
+		Platform:           "codex-fingerprint",
+		NewAPIUserID:       subject,
+		SessionFingerprint: fingerprint[:32],
+		SessionHash:        fingerprint,
+	}, true
+}
+
+func (h *Handler) promptConversationReplayFingerprint(c *gin.Context, signedBody []byte, endpoint, model string) string {
+	if c == nil || h == nil {
+		return ""
+	}
+	if _, exists := c.Get("raw_body"); !exists {
+		if body := ingressRequestBody(c, signedBody); len(body) > 0 {
+			setRawRequestBody(c, body)
+		}
+	}
+	body := ingressRequestBody(c, signedBody)
+	if len(body) == 0 {
+		if raw, exists := c.Get("raw_body"); exists {
+			body, _ = raw.([]byte)
+		}
+	}
+	if strings.TrimSpace(endpoint) == "" {
+		endpoint = "/v1/responses"
+	}
+	if strings.TrimSpace(model) == "" {
+		model = strings.TrimSpace(gjson.GetBytes(body, "model").String())
+	}
+	captured, ok := h.promptRuleLearningEvidenceForUpstreamFailure(c, endpoint, model)
+	if !ok {
+		return ""
+	}
+	learningSourceText := strings.TrimSpace(envelopeDirectCurrentUserText(captured.Envelope))
+	if learningSourceText == "" && captured.PrimaryOrigin == string(promptfilter.OriginApplicationCandidate) {
+		learningSourceText = strings.TrimSpace(captured.Text)
+	}
+	if learningSourceText == "" && len(captured.Envelope.Segments) == 0 {
+		learningSourceText = strings.TrimSpace(captured.Text)
+	}
+	if learningSourceText == "" {
+		_, learningSourceText = promptPolicyLearningContext(captured.Envelope)
+	}
+	return promptfilter.PromptEvidenceFingerprint(learningSourceText)
+}
+
+func (h *Handler) unsignedUpstreamCyberLockIdentity(c *gin.Context, signedBody []byte, endpoint, model string) (promptConversationLockIdentity, string, bool) {
+	if identity, ok := promptConversationLockFallbackIdentity(c); ok {
+		return identity, newAPIUpstreamCyberPolicyReasonCode, true
+	}
+	if identity, ok := h.promptConversationFingerprintReplayIdentity(c, signedBody, endpoint, model); ok {
+		return identity, promptFingerprintReplayReasonCode, true
+	}
+	return promptConversationLockIdentity{}, "", false
 }
 
 // resolvePromptConversationLockIdentity 优先使用已验证的 NewAPI 身份,缺失时
@@ -329,7 +432,50 @@ func (h *Handler) resolvePromptConversationLockIdentity(c *gin.Context, cfg prom
 	return promptConversationLockFallbackIdentity(c)
 }
 
-func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.Config, signedBody []byte) (*database.PromptConversationLock, bool) {
+// 指纹重放冷却的存在性闸门:回退身份需要构建完整请求 envelope(全量 body
+// 遍历与脱敏),而绝大多数时间全局根本没有活动的指纹冷却。以短 TTL 缓存
+// "是否存在活动指纹锁"的结论,把每请求的 envelope 构建换成至多每 10 秒一次
+// 的轻量存在性查询。本实例新建指纹锁时立即置位;跨实例的新锁最多延迟一个
+// 闸门 TTL 才可见,对 best-effort 冷却可接受。
+const promptFingerprintReplayGateTTL = 10 * time.Second
+
+func (h *Handler) hasActiveFingerprintReplayLocks(ctx context.Context, cooldownTTL time.Duration) bool {
+	if h == nil || h.db == nil {
+		return false
+	}
+	now := time.Now()
+	h.fpReplayGateMu.Lock()
+	if !h.fpReplayGateAt.IsZero() && now.Sub(h.fpReplayGateAt) < promptFingerprintReplayGateTTL {
+		active := h.fpReplayGateActive
+		h.fpReplayGateMu.Unlock()
+		return active
+	}
+	h.fpReplayGateMu.Unlock()
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	active, err := h.db.HasActivePromptFingerprintReplayLocks(checkCtx, cooldownTTL)
+	if err != nil {
+		// 查询失败不缓存结论,并按"可能有锁"放行后续检查:冷却语义优先于省 CPU。
+		return true
+	}
+	h.fpReplayGateMu.Lock()
+	h.fpReplayGateAt = now
+	h.fpReplayGateActive = active
+	h.fpReplayGateMu.Unlock()
+	return active
+}
+
+func (h *Handler) markFingerprintReplayLockCreated() {
+	if h == nil {
+		return
+	}
+	h.fpReplayGateMu.Lock()
+	h.fpReplayGateAt = time.Now()
+	h.fpReplayGateActive = true
+	h.fpReplayGateMu.Unlock()
+}
+
+func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.Config, signedBody []byte, endpoint, model string) (*database.PromptConversationLock, bool) {
 	if h == nil || h.db == nil || c == nil || !cfg.Advanced.Enforcement.ConversationLockEnabled {
 		return nil, false
 	}
@@ -376,13 +522,20 @@ func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.
 	// 未接入签名 NewAPI 的部署只按 API Key + Codex 会话锁定当前会话；不应用
 	// 用户级冷却，避免共享 Key 下不同用户相互影响。
 	identity, ok := promptConversationLockFallbackIdentity(c)
+	if !ok && h.hasActiveFingerprintReplayLocks(c.Request.Context(), promptUserCyberCooldownTTL(cfg)) {
+		identity, ok = h.promptConversationFingerprintReplayIdentity(c, signedBody, endpoint, model)
+	}
 	if !ok {
 		return nil, false
+	}
+	effectiveTTL := lockTTL
+	if identity.Kind == database.PromptConversationLockIdentityFingerprintReplay {
+		effectiveTTL = promptUserCyberCooldownTTL(cfg)
 	}
 	if h.cache != nil {
 		if raw, found, err := h.cache.GetRuntime(c.Request.Context(), database.PromptConversationLockCacheNamespace, identity.LockKey); err == nil && found {
 			var item database.PromptConversationLock
-			if json.Unmarshal(raw, &item) == nil && item.Status == database.PromptConversationLockStatusActive && !promptConversationLockExpired(&item, lockTTL) {
+			if json.Unmarshal(raw, &item) == nil && item.Status == database.PromptConversationLockStatusActive && !promptConversationLockExpired(&item, effectiveTTL) {
 				return promptCyberRestrictionLock(&item, true), true
 			}
 			_ = h.cache.DeleteRuntime(c.Request.Context(), database.PromptConversationLockCacheNamespace, identity.LockKey)
@@ -390,7 +543,7 @@ func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
-	item, err := h.db.GetActivePromptConversationLockWithTTL(ctx, identity.LockKey, lockTTL)
+	item, err := h.db.GetActivePromptConversationLockWithTTL(ctx, identity.LockKey, effectiveTTL)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, false
 	}
@@ -398,7 +551,7 @@ func (h *Handler) activePromptConversationLock(c *gin.Context, cfg promptfilter.
 		log.Printf("check fallback prompt conversation lock failed identity=%s: %v", identity.LockKey[:12], err)
 		return nil, false
 	}
-	h.cachePromptConversationLock(c.Request.Context(), item, lockTTL)
+	h.cachePromptConversationLock(c.Request.Context(), item, effectiveTTL)
 	return promptCyberRestrictionLock(item, true), true
 }
 
@@ -471,6 +624,46 @@ func (h *Handler) lockPromptConversationAfterUpstreamCYB(c *gin.Context, endpoin
 	return item != nil && item.Status == database.PromptConversationLockStatusActive
 }
 
+// lockPromptConversationAfterUnsignedUpstreamCYB applies only a scoped
+// session/fingerprint replay lock. It never emits a NewAPI strike because the
+// request has no verified identity. A stable Codex session gets conversation
+// scope; otherwise the exact prompt fingerprint is paired with API key + IP.
+func (h *Handler) lockPromptConversationAfterUnsignedUpstreamCYB(c *gin.Context, endpoint, model, incidentID string) bool {
+	if h == nil || h.db == nil || c == nil {
+		return false
+	}
+	cfg := h.promptFilterConfigForRequest(c)
+	if !cfg.Advanced.Enforcement.ConversationLockEnabled {
+		return false
+	}
+	signedBody := ingressRequestBody(c, nil)
+	identity, reasonCode, ok := h.unsignedUpstreamCyberLockIdentity(c, signedBody, endpoint, model)
+	if !ok {
+		return false
+	}
+	requestID := ensurePromptPolicyRequestCorrelationID(c)
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
+	defer cancel()
+	item, _, err := h.db.LockPromptConversation(ctx, database.PromptConversationLockInput{
+		LockKey: identity.LockKey, IdentityKind: identity.Kind,
+		Platform: identity.Platform, NewAPIUserID: identity.NewAPIUserID,
+		SessionFingerprint: identity.SessionFingerprint, SessionHash: identity.SessionHash,
+		IncidentID: incidentID, DecisionID: "upstream-cy:" + requestID, RequestID: requestID,
+		ReasonCode: reasonCode, Endpoint: endpoint, Model: model, LockedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		log.Printf("persist unsigned upstream CY replay lock failed request=%s: %v", requestID, err)
+		return false
+	}
+	lockTTL := promptConversationLockTTL(cfg)
+	if identity.Kind == database.PromptConversationLockIdentityFingerprintReplay {
+		lockTTL = promptUserCyberCooldownTTL(cfg)
+		h.markFingerprintReplayLockCreated()
+	}
+	h.cachePromptConversationLock(c.Request.Context(), item, lockTTL)
+	return item != nil && item.Status == database.PromptConversationLockStatusActive
+}
+
 // promptGuardBlockHasLocalEvidence 判断最终 block 是否有本地检测证据(规则命中/
 // 终局类别/分类器信号)支撑。仅由外部审核层产生的 block——审核模型对本地放行的
 // 请求打了 flag,或 fail-closed 下审核调用本身失败——只拒绝当次请求,不触发会话
@@ -532,7 +725,7 @@ func (h *Handler) lockPromptConversationOnLocalBlock(c *gin.Context, cfg promptf
 }
 
 func (h *Handler) rejectLockedPromptConversation(c *gin.Context, cfg promptfilter.Config, signedBody, responseBody []byte, endpoint, model string) bool {
-	item, locked := h.activePromptConversationLock(c, cfg, signedBody)
+	item, locked := h.activePromptConversationLock(c, cfg, signedBody, endpoint, model)
 	if !locked {
 		return false
 	}

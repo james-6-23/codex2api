@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { useTranslation } from "react-i18next";
+import { Link } from "react-router-dom";
 import { api } from "../api";
 import APIKeyTokenUsagePanel from "../components/APIKeyTokenUsagePanel";
 import ChipInput from "../components/ChipInput";
@@ -29,6 +30,7 @@ import type {
   APIKeyScopeSummaryItem,
   APIKeyRow,
   APIKeyWindowUsage,
+  PromptFilterNewAPIBinding,
   SystemSettings,
 } from "../types";
 import { canStartAPIKeyBulkReset } from "../lib/apiKeyOperationState";
@@ -51,6 +53,7 @@ import {
 import { cn } from "@/lib/utils";
 import {
   Check,
+  ClipboardCheck,
   Copy,
   CalendarClock,
   CircleDollarSign,
@@ -65,6 +68,7 @@ import {
   LockKeyhole,
   Pencil,
   Plus,
+  Power,
   RotateCcw,
   Search,
   ShieldAlert,
@@ -77,8 +81,8 @@ import {
 
 type ExpireMode = "never" | "7" | "30" | "90" | "custom";
 type TokenLimitUnit = "token" | "k" | "m" | "b";
-type StatusFilter = "all" | "active" | "expired" | "quota_exhausted" | "expiring_soon";
-type APIKeyStatus = "active" | "expired" | "quota_exhausted";
+type StatusFilter = "all" | "active" | "expired" | "quota_exhausted" | "expiring_soon" | "disabled";
+type APIKeyStatus = "active" | "expired" | "quota_exhausted" | "disabled";
 type SortMode = "created_desc" | "last_used_desc" | "quota_usage_desc" | "name_asc";
 
 const KEY_REVEAL_MS = 30_000;
@@ -131,7 +135,7 @@ interface LimitsFormState {
 }
 
 type ImageGenerationPolicy = "allow" | "strip" | "block";
-type UpstreamChannel = "auto" | "codex" | "grok";
+type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity" | "claude";
 
 // ScopeLimitFormState 是「该 Key × 某分组/账号」预算的一行表单（issue #439）。
 // 数值统一按字符串保存,空串表示不限,与其它限额字段一致。
@@ -182,6 +186,41 @@ const DEFAULT_GROK_MODEL_OPTIONS = [
   "grok-3",
   "grok-2",
 ];
+
+const DEFAULT_ANTIGRAVITY_MODEL_OPTIONS = [
+  "gemini-3-pro-preview",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+];
+// Keep this fallback in lockstep with proxy.defaultClaudeModelIDs. The
+// server catalog normally wins; these aliases are only used when no
+// Claude account has populated a catalog yet.
+const DEFAULT_CLAUDE_MODEL_OPTIONS = [
+  "claude-opus-4-5",
+  "claude-sonnet-4-5",
+  "claude-haiku-4-5",
+];
+
+function accountGroupsForUpstreamChannel(
+  groups: AccountGroup[],
+  channel: UpstreamChannel,
+): AccountGroup[] {
+  return channel === "auto"
+    ? groups
+    : groups.filter((group) => group.channel === channel);
+}
+
+function compatibleGroupIdsForUpstreamChannel(
+  ids: number[],
+  groups: AccountGroup[],
+  channel: UpstreamChannel,
+): number[] {
+  if (channel === "auto") return ids;
+  const compatibleIds = new Set(
+    accountGroupsForUpstreamChannel(groups, channel).map((group) => group.id),
+  );
+  return ids.filter((id) => compatibleIds.has(id));
+}
 
 const TOKEN_LIMIT_UNIT_MULTIPLIERS: Record<TokenLimitUnit, number> = {
   token: 1,
@@ -287,7 +326,7 @@ export default function APIKeys() {
   }, []);
 
   const loadKeys = useCallback(async () => {
-    const [keysResponse, groupsResponse, modelsResponse, settingsResponse] = await Promise.all([
+    const [keysResponse, groupsResponse, modelsResponse, settingsResponse, promptBindingsResponse] = await Promise.all([
       api.getAPIKeys(),
       api.listAccountGroups().catch(() => ({ groups: [] })),
       api
@@ -295,15 +334,21 @@ export default function APIKeys() {
         .catch(() => ({ models: [] as string[] })) as Promise<{
         models?: string[];
         grok_models?: string[];
+        antigravity_models?: string[];
+        claude_models?: string[];
       }>,
       api.getSettings().catch((): SystemSettings | null => null),
+      api.getPromptFilterNewAPIBindings().catch(() => ({ bindings: [] as PromptFilterNewAPIBinding[] })),
     ]);
     return {
       keys: keysResponse.keys ?? [],
       groups: groupsResponse.groups ?? [],
       modelOptions: modelsResponse.models ?? [],
       grokModelOptions: modelsResponse.grok_models ?? [],
+      antigravityModelOptions: modelsResponse.antigravity_models ?? [],
+      claudeModelOptions: modelsResponse.claude_models ?? [],
       settings: settingsResponse,
+      promptBindings: promptBindingsResponse.bindings ?? [],
     };
   }, []);
 
@@ -312,20 +357,30 @@ export default function APIKeys() {
     groups: AccountGroup[];
     modelOptions: string[];
     grokModelOptions: string[];
+    antigravityModelOptions: string[];
+    claudeModelOptions: string[];
     settings: SystemSettings | null;
+    promptBindings: PromptFilterNewAPIBinding[];
   }>({
     initialData: {
       keys: [],
       groups: [],
       modelOptions: [],
       grokModelOptions: [],
+      antigravityModelOptions: [],
+      claudeModelOptions: [],
       settings: null,
+      promptBindings: [],
     },
     load: loadKeys,
   });
   const keys = data.keys;
   const groups = data.groups;
   const modelOptions = data.modelOptions;
+  const promptBindingsByKey = useMemo(
+    () => new Map(data.promptBindings.map((binding) => [binding.api_key_id, binding])),
+    [data.promptBindings],
+  );
 
   // scope 预算概览单独拉：它需要跨 Key 的用量聚合，不该拖慢 Key 列表本身。
   const anyScopeBudget = keys.some(
@@ -355,17 +410,47 @@ export default function APIKeys() {
     data.grokModelOptions.length > 0
       ? data.grokModelOptions
       : DEFAULT_GROK_MODEL_OPTIONS;
+  const antigravityModelOptions =
+    data.antigravityModelOptions.length > 0
+      ? data.antigravityModelOptions
+      : DEFAULT_ANTIGRAVITY_MODEL_OPTIONS;
+  const claudeModelOptions =
+    data.claudeModelOptions.length > 0
+      ? data.claudeModelOptions
+      : DEFAULT_CLAUDE_MODEL_OPTIONS;
   const modelOptionsForChannel = useCallback(
     (channel: UpstreamChannel): string[] => {
       if (channel === "grok") return grokModelOptions;
+      if (channel === "antigravity") return antigravityModelOptions;
       if (channel === "codex") return modelOptions;
+      if (channel === "claude") return claudeModelOptions;
       const seen = new Set(modelOptions.map((m) => m.toLowerCase()));
-      return [
-        ...modelOptions,
-        ...grokModelOptions.filter((m) => !seen.has(m.toLowerCase())),
-      ];
+      const merged = [...modelOptions];
+      for (const candidate of [...grokModelOptions, ...antigravityModelOptions, ...claudeModelOptions]) {
+        if (!seen.has(candidate.toLowerCase())) {
+          seen.add(candidate.toLowerCase());
+          merged.push(candidate);
+        }
+      }
+      return merged;
     },
-    [modelOptions, grokModelOptions],
+    [modelOptions, grokModelOptions, antigravityModelOptions, claudeModelOptions],
+  );
+  const createSelectableGroups = useMemo(
+    () =>
+      accountGroupsForUpstreamChannel(
+        groups,
+        createForm.limits.upstreamChannel,
+      ),
+    [createForm.limits.upstreamChannel, groups],
+  );
+  const editSelectableGroups = useMemo(
+    () =>
+      accountGroupsForUpstreamChannel(
+        groups,
+        editForm.limits.upstreamChannel,
+      ),
+    [editForm.limits.upstreamChannel, groups],
   );
   const publicUsagePageEnabled = data.settings?.public_key_usage_page_enabled ?? true;
   const publicImageStudioPageEnabled =
@@ -405,12 +490,14 @@ export default function APIKeys() {
       expired: 0,
       quota_exhausted: 0,
       expiring_soon: 0,
+      disabled: 0,
     };
     const now = Date.now();
     for (const keyRow of keys) {
       const status = getAPIKeyStatus(keyRow);
       if (status === "active") counts.active += 1;
       else if (status === "expired") counts.expired += 1;
+      else if (status === "disabled") counts.disabled += 1;
       else counts.quota_exhausted += 1;
 
       if (
@@ -434,6 +521,7 @@ export default function APIKeys() {
       if (statusFilter === "expired" && status !== "expired") return false;
       if (statusFilter === "quota_exhausted" && status !== "quota_exhausted")
         return false;
+      if (statusFilter === "disabled" && status !== "disabled") return false;
       if (statusFilter === "expiring_soon") {
         if (status !== "active" || !keyRow.expires_at) return false;
         const expiresAt = new Date(keyRow.expires_at).getTime();
@@ -515,6 +603,25 @@ export default function APIKeys() {
 
   const updateCreateForm = (patch: Partial<CreateKeyFormState>) => {
     setCreateForm((current) => ({ ...current, ...patch }));
+  };
+
+  const updateCreateUpstreamChannel = (upstreamChannel: UpstreamChannel) => {
+    setCreateForm((current) => ({
+      ...current,
+      allowedGroupIds: compatibleGroupIdsForUpstreamChannel(
+        current.allowedGroupIds,
+        groups,
+        upstreamChannel,
+      ),
+      limits: {
+		...applyUpstreamChannel(current.limits, upstreamChannel),
+        noAffinityGroupIds: compatibleGroupIdsForUpstreamChannel(
+          current.limits.noAffinityGroupIds,
+          groups,
+          upstreamChannel,
+        ),
+      },
+    }));
   };
 
   const closeCreateDialog = () => {
@@ -704,6 +811,55 @@ export default function APIKeys() {
   };
 
   const [resettingIds, setResettingIds] = useState<Set<number>>(new Set());
+  const [togglingIds, setTogglingIds] = useState<Set<number>>(new Set());
+
+  const handleToggleEnabled = async (keyRow: APIKeyRow) => {
+    const nextEnabled = getAPIKeyStatus(keyRow) === "disabled";
+    if (!nextEnabled) {
+      const confirmed = await confirm({
+        title: t("apiKeys.disableTitle"),
+        description: t("apiKeys.disableDesc"),
+        confirmText: t("apiKeys.disableConfirm"),
+        tone: "destructive",
+        confirmVariant: "destructive",
+      });
+      if (!confirmed) return;
+    }
+
+    setTogglingIds((prev) => new Set(prev).add(keyRow.id));
+    try {
+      await api.updateAPIKey(keyRow.id, { enabled: nextEnabled });
+      setData((current) => ({
+        ...current,
+        keys: current.keys.map((item) =>
+          item.id === keyRow.id
+            ? {
+                ...item,
+                enabled: nextEnabled,
+                status: nextEnabled ? undefined : "disabled",
+              }
+            : item,
+        ),
+      }));
+      showToast(
+        nextEnabled
+          ? t("apiKeys.enableSuccess")
+          : t("apiKeys.disableSuccess"),
+      );
+      void reloadSilently();
+    } catch (error) {
+      showToast(
+        `${t("apiKeys.toggleFailed")}: ${getErrorMessage(error)}`,
+        "error",
+      );
+    } finally {
+      setTogglingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(keyRow.id);
+        return next;
+      });
+    }
+  };
   const canResetAllQuotas = canStartAPIKeyBulkReset({
     keyCount: keys.length,
     resettingAll,
@@ -858,6 +1014,7 @@ export default function APIKeys() {
   };
 
   const startEditing = (keyRow: APIKeyRow) => {
+    const limits = limitsFromAPIKey(keyRow.limits);
     setEditingKey(keyRow);
     setScopeUsage([]);
     if ((keyRow.limits?.scope_limits?.length ?? 0) > 0) {
@@ -871,8 +1028,19 @@ export default function APIKeys() {
       quotaLimit: keyRow.quota_limit > 0 ? String(keyRow.quota_limit) : "",
       expireMode: keyRow.expires_at ? "custom" : "never",
       expiresAt: toDateTimeLocalValue(keyRow.expires_at),
-      allowedGroupIds: keyRow.allowed_group_ids ?? [],
-      limits: limitsFromAPIKey(keyRow.limits),
+      allowedGroupIds: compatibleGroupIdsForUpstreamChannel(
+        keyRow.allowed_group_ids ?? [],
+        groups,
+        limits.upstreamChannel,
+      ),
+      limits: {
+        ...limits,
+        noAffinityGroupIds: compatibleGroupIdsForUpstreamChannel(
+          limits.noAffinityGroupIds,
+          groups,
+          limits.upstreamChannel,
+        ),
+      },
     });
     setEditDirty(false);
     setEditTab("basic");
@@ -924,6 +1092,26 @@ export default function APIKeys() {
 
   const updateEditForm = (patch: Partial<EditKeyFormState>) => {
     setEditForm((current) => ({ ...current, ...patch }));
+    setEditDirty(true);
+  };
+
+  const updateEditUpstreamChannel = (upstreamChannel: UpstreamChannel) => {
+    setEditForm((current) => ({
+      ...current,
+      allowedGroupIds: compatibleGroupIdsForUpstreamChannel(
+        current.allowedGroupIds,
+        groups,
+        upstreamChannel,
+      ),
+      limits: {
+		...applyUpstreamChannel(current.limits, upstreamChannel),
+        noAffinityGroupIds: compatibleGroupIdsForUpstreamChannel(
+          current.limits.noAffinityGroupIds,
+          groups,
+          upstreamChannel,
+        ),
+      },
+    }));
     setEditDirty(true);
   };
 
@@ -1196,6 +1384,11 @@ export default function APIKeys() {
                         t("apiKeys.status.quota_exhausted"),
                         statusCounts.quota_exhausted,
                       ],
+                      [
+                        "disabled",
+                        t("apiKeys.status.disabled"),
+                        statusCounts.disabled,
+                      ],
                     ] as const
                   ).map(([key, label, count]) => (
                     <button
@@ -1299,7 +1492,8 @@ export default function APIKeys() {
                         const isBusy =
                           resettingAll ||
                           deletingIds.has(keyRow.id) ||
-                          resettingIds.has(keyRow.id);
+                          resettingIds.has(keyRow.id) ||
+                          togglingIds.has(keyRow.id);
                         const displayKey = isVisible
                           ? keyRow.raw_key || keyRow.key
                           : keyRow.key;
@@ -1333,6 +1527,7 @@ export default function APIKeys() {
                                     t={t}
                                   />
                                   <KeyChannelBadge keyRow={keyRow} t={t} />
+                                  <APIKeyPromptPolicyBadge binding={promptBindingsByKey.get(keyRow.id)} />
                                   <KeyScopeBudgetBadge
                                     items={scopeSummary[String(keyRow.id)]}
                                     t={t}
@@ -1438,6 +1633,22 @@ export default function APIKeys() {
                                 variant="outline"
                                 size="sm"
                                 disabled={isBusy}
+                                onClick={() => void handleToggleEnabled(keyRow)}
+                                className="min-w-[6rem] flex-1"
+                              >
+                                {togglingIds.has(keyRow.id) ? (
+                                  <Loader2 className="size-3.5 animate-spin" />
+                                ) : (
+                                  <Power className="size-3.5" />
+                                )}
+                                {getAPIKeyStatus(keyRow) === "disabled"
+                                  ? t("apiKeys.enable")
+                                  : t("apiKeys.disable")}
+                              </Button>
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                disabled={isBusy}
                                 onClick={() => startEditing(keyRow)}
                                 className="min-w-[6rem] flex-1"
                               >
@@ -1487,7 +1698,8 @@ export default function APIKeys() {
                             const isBusy =
                               resettingAll ||
                               deletingIds.has(keyRow.id) ||
-                              resettingIds.has(keyRow.id);
+                              resettingIds.has(keyRow.id) ||
+                              togglingIds.has(keyRow.id);
                             const displayKey = isVisible
                               ? keyRow.raw_key || keyRow.key
                               : keyRow.key;
@@ -1524,6 +1736,7 @@ export default function APIKeys() {
                                         t={t}
                                       />
                                       <KeyChannelBadge keyRow={keyRow} t={t} />
+                                      <APIKeyPromptPolicyBadge binding={promptBindingsByKey.get(keyRow.id)} />
                                       <KeyScopeBudgetBadge
                                         items={scopeSummary[String(keyRow.id)]}
                                         t={t}
@@ -1646,6 +1859,28 @@ export default function APIKeys() {
                                         <RotateCcw className="size-3.5" />
                                       )}
                                       {t("apiKeys.resetQuota")}
+                                    </Button>
+                                    <Button
+                                      variant="outline"
+                                      size="sm"
+                                      disabled={isBusy}
+                                      onClick={() =>
+                                        void handleToggleEnabled(keyRow)
+                                      }
+                                      title={
+                                        getAPIKeyStatus(keyRow) === "disabled"
+                                          ? t("apiKeys.enable")
+                                          : t("apiKeys.disable")
+                                      }
+                                    >
+                                      {togglingIds.has(keyRow.id) ? (
+                                        <Loader2 className="size-3.5 animate-spin" />
+                                      ) : (
+                                        <Power className="size-3.5" />
+                                      )}
+                                      {getAPIKeyStatus(keyRow) === "disabled"
+                                        ? t("apiKeys.enable")
+                                        : t("apiKeys.disable")}
                                     </Button>
                                     <Button
                                       variant="outline"
@@ -1857,8 +2092,9 @@ export default function APIKeys() {
                         <p className="mt-1 text-xs leading-relaxed text-muted-foreground">
                           {t("apiKeys.publicAccountPortalDesc")}
                         </p>
-                        {publicAccountPortalPageEnabled ? (
-                          <div className="mt-2 flex flex-wrap items-center gap-2">
+                        <div className="mt-2 flex flex-wrap items-center gap-2">
+                          {publicAccountPortalPageEnabled ? (
+                            <>
                             <code
                               className="min-w-0 max-w-full truncate rounded-md bg-muted px-2 py-1 font-mono text-[12px] text-foreground"
                               title={accountPortalUrl}
@@ -1882,8 +2118,16 @@ export default function APIKeys() {
                               <ExternalLink className="size-3.5" />
                               {t("apiKeys.publicUsageOpen")}
                             </a>
-                          </div>
-                        ) : null}
+                            </>
+                          ) : null}
+                          <Link
+                            to="/accounts?pending=1"
+                            className="inline-flex items-center gap-1 text-xs font-semibold text-primary hover:underline"
+                          >
+                            <ClipboardCheck className="size-3.5" />
+                            {t("apiKeys.publicAccountPortalReview")}
+                          </Link>
+                        </div>
                       </div>
                       <Button
                         variant={
@@ -1993,14 +2237,7 @@ export default function APIKeys() {
             >
               <UpstreamChannelPicker
                 value={createForm.limits.upstreamChannel}
-                onChange={(upstreamChannel) =>
-                  updateCreateForm({
-                    limits: applyUpstreamChannel(
-                      createForm.limits,
-                      upstreamChannel,
-                    ),
-                  })
-                }
+                onChange={updateCreateUpstreamChannel}
               />
             </FormField>
             {createForm.limits.upstreamChannel === "codex" ? (
@@ -2064,7 +2301,7 @@ export default function APIKeys() {
               as="div"
             >
               <GroupMultiSelect
-                groups={groups}
+                groups={createSelectableGroups}
                 value={createForm.allowedGroupIds}
                 onChange={(allowedGroupIds) =>
                   updateCreateForm({ allowedGroupIds })
@@ -2185,14 +2422,7 @@ export default function APIKeys() {
                   >
                     <UpstreamChannelPicker
                       value={editForm.limits.upstreamChannel}
-                      onChange={(upstreamChannel) =>
-                        updateEditForm({
-                          limits: applyUpstreamChannel(
-                            editForm.limits,
-                            upstreamChannel,
-                          ),
-                        })
-                      }
+                      onChange={updateEditUpstreamChannel}
                     />
                   </FormField>
                   {editForm.limits.upstreamChannel === "codex" ? (
@@ -2249,7 +2479,7 @@ export default function APIKeys() {
                     as="div"
                   >
                     <GroupMultiSelect
-                      groups={groups}
+                      groups={editSelectableGroups}
                       value={editForm.allowedGroupIds}
                       onChange={(allowedGroupIds) =>
                         updateEditForm({ allowedGroupIds })
@@ -2269,7 +2499,7 @@ export default function APIKeys() {
                     as="div"
                   >
                     <GroupMultiSelect
-                      groups={groups}
+                      groups={editSelectableGroups}
                       value={editForm.limits.noAffinityGroupIds}
                       onChange={(noAffinityGroupIds) =>
                         updateEditForm({
@@ -2471,7 +2701,10 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
     imageGenerationPolicy: resolveImageGenerationPolicy(limits),
     allowLive: Boolean(limits.allow_live),
     upstreamChannel:
-      limits.upstream_channel === "codex" || limits.upstream_channel === "grok"
+      limits.upstream_channel === "codex" ||
+      limits.upstream_channel === "grok" ||
+      limits.upstream_channel === "antigravity"
+      || limits.upstream_channel === "claude"
         ? limits.upstream_channel
         : "auto",
     scopeLimits: scopeLimitsFromAPIKey(limits.scope_limits),
@@ -2526,7 +2759,7 @@ function scopeLimitRowHasLimit(row: ScopeLimitFormState): boolean {
   ].some((value) => Number(value.trim()) > 0);
 }
 
-// UpstreamChannelPicker 是创建/编辑 Key 时的上游渠道三段选择（自动/Codex/Grok）。
+// UpstreamChannelPicker 是创建/编辑 Key 时的上游渠道选择。
 // 渠道决定 Key 的调度账号池，作为一级表单字段展示（不藏在高级限制里）。
 function UpstreamChannelPicker({
   value,
@@ -2556,10 +2789,20 @@ function UpstreamChannelPicker({
       label: t("apiKeys.limits.upstreamChannelGrok"),
       icon: <ChannelLogo channel="grok" size={18} />,
     },
+    {
+      key: "antigravity",
+      label: t("apiKeys.limits.upstreamChannelAntigravity"),
+      icon: <ChannelLogo channel="antigravity" size={18} />,
+    },
+    {
+      key: "claude",
+      label: t("apiKeys.limits.upstreamChannelClaude"),
+      icon: <ChannelLogo channel="claude" size={18} />,
+    },
   ];
   return (
     <div>
-      <div className="grid grid-cols-3 gap-1 rounded-xl border border-border bg-muted/30 p-1">
+      <div className="grid grid-cols-5 gap-1 rounded-xl border border-border bg-muted/30 p-1">
         {options.map(({ key, label, icon }) => (
           <button
             key={key}
@@ -2737,6 +2980,9 @@ function toDateTimeLocalValue(value?: string | null) {
 }
 
 function getAPIKeyStatus(keyRow: APIKeyRow): APIKeyStatus {
+  if (keyRow.enabled === false || keyRow.status === "disabled") {
+    return "disabled";
+  }
   if (keyRow.status === "expired" || keyRow.status === "quota_exhausted") {
     return keyRow.status;
   }
@@ -2826,6 +3072,11 @@ function KeyStatusBadge({
       dot: "bg-rose-500 animate-pulse",
       className: "border-rose-500/20 bg-rose-500/10 text-rose-600 dark:text-rose-400",
     },
+    disabled: {
+      dot: "bg-amber-500",
+      className:
+        "border-amber-500/20 bg-amber-500/10 text-amber-700 dark:text-amber-300",
+    },
   }[status];
 
   return (
@@ -2903,6 +3154,18 @@ function KeyChannelBadge({
       </Badge>
     );
   }
+  if (channel === "antigravity") {
+    return (
+      <Badge
+        variant="outline"
+        title={t("apiKeys.limits.upstreamChannelAntigravity")}
+        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
+      >
+        <ChannelLogo channel="antigravity" size={12} />
+        Antigravity
+      </Badge>
+    );
+  }
   if (channel === "codex") {
     return (
       <Badge
@@ -2912,6 +3175,18 @@ function KeyChannelBadge({
       >
         <ChannelLogo channel="codex" size={12} />
         Codex
+      </Badge>
+    );
+  }
+  if (channel === "claude") {
+    return (
+      <Badge
+        variant="outline"
+        title={t("apiKeys.limits.upstreamChannelClaude")}
+        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
+      >
+        <ChannelLogo channel="claude" size={12} />
+        Claude
       </Badge>
     );
   }
@@ -2925,6 +3200,54 @@ function KeyChannelBadge({
       <Waypoints className="size-3" />
       {t("apiKeys.limits.upstreamChannelAutoTab")}
     </Badge>
+  );
+}
+
+// APIKeyPromptPolicyBadge separates the effective Prompt policy from the
+// optional NewAPI identity binding. An unbound key still follows the global
+// Prompt Filter; the badge makes that explicit instead of implying bypass.
+function APIKeyPromptPolicyBadge({
+  binding,
+}: {
+  binding?: PromptFilterNewAPIBinding;
+}) {
+  const { t } = useTranslation();
+  const scope = binding?.prompt_filter_scope ?? "inherit";
+  const scopeLabel =
+    scope === "off"
+      ? t("apiKeys.promptFilterScopeOff")
+      : scope === "local_only"
+        ? t("apiKeys.promptFilterScopeLocal")
+        : t("apiKeys.promptFilterScopeGlobal");
+  const identityLabel = binding
+    ? binding.require_signed_identity
+      ? t("apiKeys.promptFilterIdentityRequired")
+      : t("apiKeys.promptFilterIdentityBound")
+    : t("apiKeys.promptFilterIdentityUnbound");
+  return (
+    <span className="inline-flex max-w-full flex-wrap items-center gap-1">
+      <Badge
+        variant="outline"
+        className={cn(
+          "max-w-full truncate border-transparent bg-sky-500/10 px-1.5 py-0 text-[10px] font-semibold text-sky-700 dark:text-sky-300",
+          scope === "off" && "bg-rose-500/10 text-rose-700 dark:text-rose-300",
+          scope === "local_only" && "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        )}
+        title={scopeLabel}
+      >
+        {scopeLabel}
+      </Badge>
+      <Badge
+        variant="outline"
+        className={cn(
+          "max-w-full truncate border-transparent bg-muted/70 px-1.5 py-0 text-[10px] font-medium text-muted-foreground",
+          !binding && "bg-amber-500/10 text-amber-700 dark:text-amber-300",
+        )}
+        title={identityLabel}
+      >
+        {identityLabel}
+      </Badge>
+    </span>
   );
 }
 
@@ -3556,16 +3879,37 @@ const GROK_PLAN_FILTER_OPTIONS = [
   "supergrok_plus",
 ] as const;
 
+// Claude OAuth profiles expose these normalized plan keys. Keep them
+// separate from the Codex/Grok plan allowlist so a Claude-bound API key
+// cannot accidentally be configured with an unrelated plan.
+const CLAUDE_PLAN_FILTER_OPTIONS = [
+  "claude",
+  "free",
+  "pro",
+  "max",
+  "max-5x",
+  "max-20x",
+  "team",
+  "enterprise",
+  "business",
+] as const;
+
 const PLAN_FILTER_OPTIONS = [
   ...CODEX_PLAN_FILTER_OPTIONS,
   ...GROK_PLAN_FILTER_OPTIONS.filter(
     (plan) => !(CODEX_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan),
+  ),
+  ...CLAUDE_PLAN_FILTER_OPTIONS.filter(
+    (plan) =>
+      !(CODEX_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan) &&
+      !(GROK_PLAN_FILTER_OPTIONS as readonly string[]).includes(plan),
   ),
 ];
 
 function planOptionsForChannel(channel: UpstreamChannel): readonly string[] {
   if (channel === "codex") return CODEX_PLAN_FILTER_OPTIONS;
   if (channel === "grok") return GROK_PLAN_FILTER_OPTIONS;
+  if (channel === "claude") return CLAUDE_PLAN_FILTER_OPTIONS;
   return PLAN_FILTER_OPTIONS;
 }
 

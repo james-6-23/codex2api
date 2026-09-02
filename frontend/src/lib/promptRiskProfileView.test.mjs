@@ -37,6 +37,31 @@ test('risk profile API supports filters and exact subject detail', () => {
   assert.match(api, /encodeURIComponent\(subjectKey\)/)
 })
 
+test('risk profiles offer quick CY and activity filters', () => {
+  assert.match(api, /cy_only/)
+  assert.match(api, /activity_state/)
+  assert.match(source, /cyOnly/)
+  assert.match(source, /activityState/)
+  assert.match(source, /upstreamCYProfiles/)
+  assert.equal(typeof zh.promptFilter.risk.upstreamCYProfiles, 'string')
+})
+
+test('risk profile rows expose an explicit freeze class and identity summary', () => {
+  assert.match(source, /promptRiskFreezeClass/)
+  assert.match(source, /promptRiskIdentityKind/)
+  assert.match(source, /risk\.freezeStatus/)
+  assert.match(source, /risk\.identitySource/)
+  assert.match(zh.promptFilter.risk.freezeStates.none, /未冻结/)
+  assert.match(source, /pageSummary/)
+  assert.equal(typeof zh.promptFilter.risk.summary.highCritical, 'string')
+})
+
+test('detail dialogs keep the close control fixed while the body scrolls', () => {
+  assert.match(source, /flex max-h-\[90vh\] flex-col overflow-hidden/)
+  assert.match(source, /min-h-0 flex-1 overflow-y-auto/)
+  assert.match(source, /shrink-0 pr-8/)
+})
+
 test('person profiles expose auditable temporary adaptive trust without a permanent allowlist', () => {
   assert.match(source, /subjectType: 'newapi_user'/)
   assert.match(source, /upsertPromptRiskTrust/)
@@ -81,9 +106,12 @@ test('active CYB conversation locks and user cooldowns are visible and manually 
   assert.match(source, /user_cooldown/)
   assert.match(source, /confirmUserCooldown/)
   assert.match(source, /remaining_seconds/)
-  assert.match(types, /restriction_scope\?: 'conversation' \| 'user_cooldown'/)
+  assert.match(types, /restriction_scope\?: 'conversation' \| 'user_cooldown' \| 'fingerprint_replay'/)
   assert.match(zh.promptFilter.risk.conversationLock.description, /不会再次累计处罚/)
   assert.match(zh.promptFilter.risk.conversationLock.userCooldownDescription, /所有会话/)
+  assert.match(source, /fingerprint_replay/)
+  assert.match(zh.promptFilter.risk.conversationLock.fingerprintReplayDescription, /相同 Prompt 指纹/)
+  assert.match(source, /unlockReasonPrompt/)
 })
 
 test('live restrictions are prioritized, filterable, and link to the original audit', () => {

@@ -36,15 +36,25 @@ func TestResolveCodexWebsocketTransportSessionKeyMetadataAndFallbacks(t *testing
 		t.Fatal("metadata child thread did not get a separate lane")
 	}
 	if got := ResolveCodexWebsocketTransportSessionKey(upstream, http.Header{}); got != upstream {
-		t.Fatalf("missing identity lane = %q", got)
+		t.Fatalf("missing identity lane = %q, want legacy upstream session", got)
 	}
 	if got := ResolveCodexWebsocketTransportSessionKey("stateless-request", metadata); got != "stateless-request" {
-		t.Fatalf("stateless lane = %q", got)
+		t.Fatalf("stateless lane = %q, want existing stateless routing", got)
 	}
 
-	equal := http.Header{}
-	equal.Set("X-Codex-Turn-Metadata", `{"session_id":"same","thread_id":"same"}`)
-	if got := ResolveCodexWebsocketTransportSessionKey(upstream, equal); got != upstream {
-		t.Fatalf("equal identity lane = %q", got)
+	equalMetadata := http.Header{}
+	equalMetadata.Set("X-Codex-Turn-Metadata", `{"session_id":"same","thread_id":"same"}`)
+	if got := ResolveCodexWebsocketTransportSessionKey(upstream, equalMetadata); got != upstream {
+		t.Fatalf("equal metadata identity lane = %q, want legacy upstream session", got)
+	}
+	malformed := http.Header{}
+	malformed.Set("X-Codex-Turn-Metadata", `{not-json`)
+	if got := ResolveCodexWebsocketTransportSessionKey(upstream, malformed); got != upstream {
+		t.Fatalf("malformed metadata lane = %q, want legacy upstream session", got)
+	}
+	explicitWins := metadata.Clone()
+	explicitWins.Set("Thread-Id", "explicit-child")
+	if got := ResolveCodexWebsocketTransportSessionKey(upstream, explicitWins); got == ResolveCodexWebsocketTransportSessionKey(upstream, metadata) {
+		t.Fatal("explicit Thread-Id did not take precedence over metadata thread_id")
 	}
 }

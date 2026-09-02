@@ -23,7 +23,7 @@ import {
 import Modal from './Modal'
 import { api } from '../api'
 import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem, WhamDailyUsageItem, WhamDailyUsageResponse, WhamDailyUsageSplit } from '../types'
-import { formatUsageNumber } from '../lib/usageFormat'
+import { formatUsageNumber, officialUsdFromDailyItems, supportsOfficialUsage } from '../lib/usageFormat'
 import { useShowFullUsageNumbers } from '../hooks/useShowFullUsageNumbers'
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
@@ -63,21 +63,29 @@ const MODEL_METRIC_OPTIONS: Array<{ key: ModelMetricKey; labelKey: string }> = [
   { key: 'cost', labelKey: 'accounts.usageModelMetricCost' },
 ]
 
+export interface OfficialUsageRefreshPatch {
+  accountId: number
+  officialUsd: number | null
+}
+
 interface Props {
   account: AccountRow
   onClose: () => void
   onCreditsReset?: () => void
   // Codex 专属的额度券/credit 设置区块;Grok 等非 Codex 账号传 false 隐藏。
   showCreditSettings?: boolean
-  // 打开时直接停在指定 tab（列表里点「官方 7d」成本就该落在官方统计上，
+  // 打开时直接停在指定 tab（列表里点「官方结算」成本就该落在官方统计上，
   // 而不是让用户开完概览再自己切一次）。
   initialPage?: UsagePage
-  // 官方统计手动刷新成功后回调:列表页借此重拉 page-stats,
-  // 让「官方 7d」成本胶囊立即同步,不用等下一次翻页或静默刷新。
-  onOfficialUsageRefreshed?: () => void
+  // 官方统计同步成功后回调:列表页立刻用这次 7d 额度改徽章,
+  // 并重拉 page-stats 对齐快照,不用等下一次翻页。
+  onOfficialUsageRefreshed?: (patch: OfficialUsageRefreshPatch) => void
+  // 官方统计 tab 强制开关:Claude 等无 ChatGPT 官方结算链路的渠道传 false 隐藏;
+  // 缺省时按 supportsOfficialUsage(account) 自动判定。
+  officialUsage?: boolean
 }
 
-export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true, initialPage, onOfficialUsageRefreshed }: Props) {
+export default function AccountUsageModal({ account, onClose, onCreditsReset, showCreditSettings = true, initialPage, onOfficialUsageRefreshed, officialUsage }: Props) {
   const { t } = useTranslation()
   const navigate = useNavigate()
   const [data, setData] = useState<AccountUsageDetail | null>(null)
@@ -89,8 +97,8 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
   const requestSeq = useRef(0)
 
   // 官方结算统计只有 ChatGPT OAuth 账号能查（wham 端点属于 ChatGPT 后端）。
-  // 中转账号（Responses API / Grok）没有这条链路，不显示这个 tab。
-  const supportsOfficialUsage = !account.openai_responses_api && !account.grok_api
+  // codex_at、Responses API 中转和 Grok 没有这条链路，不显示这个 tab。
+  const showOfficialUsage = officialUsage ?? supportsOfficialUsage(account)
 
   const [creditEnabled, setCreditEnabled] = useState(account.credit_enabled ?? false)
   const [creditSkipWindow, setCreditSkipWindow] = useState(account.credit_skip_usage_window ?? false)
@@ -163,6 +171,11 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
     }
   }
 
+  // 从列表点「官方结算」进来时，官方统计不依赖本地 usage_logs。
+  // 先把官方页亮出来并立刻打上游，徽章才能对齐这次同步时间点，
+  // 不用卡在网关用量接口后面。
+  const officialReady = page === 'official' && showOfficialUsage
+
   return (
     <Modal
       show
@@ -171,13 +184,13 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
       contentClassName="sm:max-w-[960px]"
       bodyClassName="px-5 py-5 sm:px-6"
     >
-      {loading && !data ? (
+      {loading && !data && !officialReady ? (
         <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
           {t('common.loading')}
         </div>
-      ) : error && !data ? (
+      ) : error && !data && !officialReady ? (
         <div className="py-8 text-center text-sm text-red-500">{error}</div>
-      ) : !data ? (
+      ) : !data && !officialReady ? (
         <div className="py-12 text-center text-sm text-muted-foreground">
           {t('accounts.noUsageData')}
         </div>
@@ -185,9 +198,9 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
         <UsageStatsContent
           account={account}
           accountLabel={accountLabel}
-          data={data}
+          data={data ?? emptyUsageDetail()}
           // 中转账号没有官方统计 tab，深链进来时退回概览而不是停在空白页。
-          page={page === 'official' && !supportsOfficialUsage ? 'overview' : page}
+          page={page === 'official' && !showOfficialUsage ? 'overview' : page}
           range={range}
           dataRange={dataRange || range}
           refreshing={loading}
@@ -195,7 +208,7 @@ export default function AccountUsageModal({ account, onClose, onCreditsReset, sh
           onPageChange={setPage}
           onRangeChange={setRange}
           onViewLogs={handleViewLogs}
-          showOfficialUsage={supportsOfficialUsage}
+          showOfficialUsage={showOfficialUsage}
           onOfficialUsageRefreshed={onOfficialUsageRefreshed}
         />
       )}
@@ -245,7 +258,10 @@ function UsageStatsContent({
   onRangeChange: (range: UsageRangeKey) => void
   onViewLogs: () => void
   showOfficialUsage: boolean
-  onOfficialUsageRefreshed?: () => void
+  onOfficialUsageRefreshed?: (patch: OfficialUsageRefreshPatch) => void
+  // 官方统计 tab 强制开关:Claude 等无 ChatGPT 官方结算链路的渠道传 false 隐藏;
+  // 缺省时按 supportsOfficialUsage(account) 自动判定。
+  officialUsage?: boolean
 }) {
   const { t } = useTranslation()
   const activeDays = Math.max(0, data.active_days || 0)
@@ -377,7 +393,13 @@ function UsageStatsContent({
             periodDays={periodDays}
           />
         ) : page === 'official' ? (
-          <OfficialUsagePage accountId={account.id} range={range} onRefreshed={onOfficialUsageRefreshed} />
+          <OfficialUsagePage
+            accountId={account.id}
+            range={range}
+            // 点进官方统计就打一次上游：列表「官方结算」徽章跟这次同步时间对齐。
+            autoRefresh
+            onRefreshed={onOfficialUsageRefreshed}
+          />
         ) : (
           <QualityPage data={data} />
         )}
@@ -489,7 +511,18 @@ function QualityPage({ data }: { data: AccountUsageDetail }) {
 // OfficialUsagePage 展示 OpenAI 侧的结算口径用量，与其他 tab 的本地 usage_logs
 // 聚合是两套数据：这里的 credits 与 token 是官方账单数，且能按客户端入口拆分，
 // 能看出某个号有多少消耗来自本网关、多少来自官方客户端。
-function OfficialUsagePage({ accountId, range, onRefreshed }: { accountId: number; range: UsageRangeKey; onRefreshed?: () => void }) {
+function OfficialUsagePage({
+  accountId,
+  range,
+  autoRefresh = false,
+  onRefreshed,
+}: {
+  accountId: number
+  range: UsageRangeKey
+  // 点进这个界面时先打上游，再让列表徽章跟上这次同步；换日期范围只读本地快照。
+  autoRefresh?: boolean
+  onRefreshed?: (patch: OfficialUsageRefreshPatch) => void
+}) {
   const fullNumbers = useShowFullUsageNumbers()
   const { t } = useTranslation()
   const [data, setData] = useState<WhamDailyUsageResponse | null>(null)
@@ -497,6 +530,7 @@ function OfficialUsagePage({ accountId, range, onRefreshed }: { accountId: numbe
   const [refreshing, setRefreshing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const requestSeq = useRef(0)
+  const autoRefreshedAccountRef = useRef<number | null>(null)
   // 'all' 在这里没有意义（本地快照最多留一年），按上限天数取。
   const days = range === 'all' ? 365 : usageRangeToDays(range)
 
@@ -511,7 +545,12 @@ function OfficialUsagePage({ accountId, range, onRefreshed }: { accountId: numbe
       if (requestSeq.current !== seq) return
       setData(result)
       // 只有真刷成功了才通知列表(refresh_error 时快照没变,重拉没意义)。
-      if (refresh && !result.refresh_error) onRefreshed?.()
+      if (refresh && !result.refresh_error) {
+        onRefreshed?.({
+          accountId,
+          officialUsd: officialUsdFromDailyItems(result.items ?? []),
+        })
+      }
     } catch (err) {
       if (requestSeq.current !== seq) return
       setError(getErrorMessage(err))
@@ -523,7 +562,11 @@ function OfficialUsagePage({ accountId, range, onRefreshed }: { accountId: numbe
     }
   }, [accountId, days, onRefreshed])
 
-  useEffect(() => { void load(false) }, [load])
+  useEffect(() => {
+    const shouldRefresh = autoRefresh && autoRefreshedAccountRef.current !== accountId
+    if (shouldRefresh) autoRefreshedAccountRef.current = accountId
+    void load(shouldRefresh)
+  }, [load, accountId, autoRefresh])
 
   const items = data?.items ?? []
   const maxCredits = useMemo(
@@ -1725,6 +1768,41 @@ function emptyDayStat(): AccountUsageDayStat {
     tokens: 0,
     account_billed: 0,
     user_billed: 0,
+  }
+}
+
+function emptyUsageDetail(): AccountUsageDetail {
+  return {
+    period_days: 30,
+    active_days: 0,
+    total_requests: 0,
+    total_tokens: 0,
+    input_tokens: 0,
+    output_tokens: 0,
+    reasoning_tokens: 0,
+    cached_tokens: 0,
+    cache_hit_rate: 0,
+    total_account_billed: 0,
+    total_user_billed: 0,
+    avg_daily_account_billed: 0,
+    avg_daily_user_billed: 0,
+    avg_daily_requests: 0,
+    avg_daily_tokens: 0,
+    avg_duration_ms: 0,
+    avg_first_token_ms: 0,
+    p95_duration_ms: 0,
+    error_requests: 0,
+    error_rate: 0,
+    retry_requests: 0,
+    first_token_samples: 0,
+    stream_requests: 0,
+    stream_rate: 0,
+    compact_requests: 0,
+    compact_rate: 0,
+    today: emptyDayStat(),
+    history: [],
+    models: [],
+    by_api_key: [],
   }
 }
 

@@ -1045,6 +1045,27 @@ func (db *DB) migrate(ctx context.Context) error {
 		updated_at    TIMESTAMPTZ DEFAULT NOW()
 	);
 
+	CREATE TABLE IF NOT EXISTS scheduler_outbox (
+		id          BIGSERIAL PRIMARY KEY,
+		entity_type VARCHAR(32) NOT NULL,
+		entity_id   BIGINT NOT NULL DEFAULT 0,
+		event_type  VARCHAR(32) NOT NULL,
+		created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+	);
+	CREATE INDEX IF NOT EXISTS idx_scheduler_outbox_created ON scheduler_outbox(created_at, id);
+	CREATE TABLE IF NOT EXISTS maintenance_jobs (
+		entity_id BIGINT NOT NULL,
+		job_kind VARCHAR(64) NOT NULL,
+		due_at TIMESTAMPTZ NOT NULL,
+		lease_owner TEXT NOT NULL DEFAULT '',
+		lease_until TIMESTAMPTZ NULL,
+		attempts INT NOT NULL DEFAULT 0,
+		last_error TEXT NOT NULL DEFAULT '',
+		updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+		PRIMARY KEY(entity_id, job_kind)
+	);
+	CREATE INDEX IF NOT EXISTS idx_maintenance_jobs_due ON maintenance_jobs(job_kind, due_at, entity_id);
+
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_reason VARCHAR(50) DEFAULT '';
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS cooldown_until TIMESTAMPTZ NULL;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS enabled BOOLEAN DEFAULT TRUE;
@@ -1061,6 +1082,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS credit_skip_usage_window BOOLEAN DEFAULT FALSE;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS skip_warm_tier BOOLEAN DEFAULT FALSE;
 	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS note TEXT DEFAULT '';
+	ALTER TABLE accounts ADD COLUMN IF NOT EXISTS credential_generation BIGINT NOT NULL DEFAULT 1;
 
 	CREATE TABLE IF NOT EXISTS account_groups (
 		id                        SERIAL PRIMARY KEY,
@@ -1205,6 +1227,7 @@ func (db *DB) migrate(ctx context.Context) error {
 
 	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS allowed_group_ids JSONB DEFAULT '[]'::jsonb;
 	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS limits JSONB DEFAULT '{}'::jsonb;
+	ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS enabled BOOLEAN NOT NULL DEFAULT TRUE;
 
 			CREATE TABLE IF NOT EXISTS system_settings (
 				id                 INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
@@ -1212,6 +1235,9 @@ func (db *DB) migrate(ctx context.Context) error {
 				site_logo          TEXT DEFAULT '',
 				background_config  TEXT DEFAULT '{}',
 				grok_config        TEXT DEFAULT '{}',
+				claude_config      TEXT DEFAULT '{}',
+				antigravity_oauth_config TEXT DEFAULT '{}',
+				invite_guide_config TEXT DEFAULT '{}',
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
@@ -1231,7 +1257,9 @@ func (db *DB) migrate(ctx context.Context) error {
 			response_cache_local_max_bytes BIGINT NOT NULL DEFAULT 67108864,
 			response_cache_local_max_entry_bytes BIGINT NOT NULL DEFAULT 8388608,
 			response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864,
-			response_cache_config_generation BIGINT NOT NULL DEFAULT 1
+			response_cache_write_policy VARCHAR(20) NOT NULL DEFAULT 'always',
+			response_cache_config_generation BIGINT NOT NULL DEFAULT 1,
+			models_list_read_max_bytes BIGINT NOT NULL DEFAULT 8388608
 		);
 	CREATE TABLE IF NOT EXISTS api_key_scope_counters (
 		api_key_id BIGINT NOT NULL,
@@ -1258,6 +1286,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS site_logo TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS grok_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS claude_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_oauth_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS invite_guide_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
@@ -1267,6 +1298,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_clean_full_usage BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS proxy_pool_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS fast_scheduler_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS scheduler_engine VARCHAR(20) DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS max_retries INT DEFAULT 2;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS allow_remote_migration BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS max_rate_limit_retries INT DEFAULT 1;
@@ -1289,6 +1321,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS passive_internal_models_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_slot_buffer_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_slot_buffer_seconds INT DEFAULT 10;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS models_list_read_max_bytes BIGINT NOT NULL DEFAULT 8388608;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_url TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS resin_platform_name TEXT DEFAULT '';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS prompt_filter_enabled BOOLEAN DEFAULT FALSE;
@@ -1335,6 +1368,7 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_image_studio_page_enabled BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS public_account_portal_page_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_force_websocket BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_request_compression BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_weak_network_mode BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_keepalive_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_keepalive_interval_sec INT DEFAULT 60;
@@ -1372,14 +1406,17 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS smart_pacing_windows TEXT DEFAULT '5h,7d';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS retry_interval_ms INT DEFAULT 0;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS transport_retry_policy VARCHAR(20) DEFAULT 'rotate';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS continuous_retry_policy TEXT DEFAULT '{"enabled":false,"catch_all":false,"categories":["transport","http_429","http_5xx","stream_error"],"status_codes":[],"error_codes":[],"max_duration_seconds":600}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS ignore_usage_limit_status BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_activate_5h_window_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS utls_shutdown_timeout_minutes INT DEFAULT 30;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_fingerprint_default_mode VARCHAR(20) DEFAULT 'off';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_bytes BIGINT NOT NULL DEFAULT 67108864;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_local_max_entry_bytes BIGINT NOT NULL DEFAULT 8388608;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_write_policy VARCHAR(20) NOT NULL DEFAULT 'always';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS response_cache_config_generation BIGINT NOT NULL DEFAULT 1;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS relay_model_cooldown_mode VARCHAR(20) NOT NULL DEFAULT 'off';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS relay_model_cooldown_seconds INT NOT NULL DEFAULT 2;
@@ -1571,6 +1608,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := db.installSchedulerOutboxTriggers(ctx); err != nil {
+		return fmt.Errorf("install scheduler outbox triggers: %w", err)
+	}
 
 	// 独立长超时：将已有 TIMESTAMP 列迁移为 TIMESTAMPTZ（大表 ALTER COLUMN TYPE 可能较慢）
 	migrateQuery := `
@@ -1617,6 +1657,7 @@ type APIKeyRow struct {
 	ExpiresAt       sql.NullTime `json:"expires_at"`
 	AllowedGroupIDs []int64      `json:"allowed_group_ids"`
 	Limits          APIKeyLimits `json:"limits"`
+	Enabled         bool         `json:"enabled"`
 	CreatedAt       time.Time    `json:"created_at"`
 }
 
@@ -1670,8 +1711,10 @@ type APIKeyLimits struct {
 	AllowLive bool `json:"allow_live,omitempty"`
 	// UpstreamChannel 限定该 Key 的请求只调度到指定上游渠道的账号：
 	//   - ""/auto: 不限（默认，按模型路由）
-	//   - codex:   仅非 Grok 账号（Codex OAuth / OpenAI Responses 中转）
+	//   - codex:   仅 Codex OAuth / OpenAI Responses 中转账号
 	//   - grok:    仅 Grok 账号（此时不再要求账号声明模型，直接透传请求模型）
+	//   - antigravity: Antigravity 管理渠道
+	//   - claude:      仅 Claude OAuth / Anthropic Messages 账号
 	UpstreamChannel string `json:"upstream_channel,omitempty"`
 	// ScopeLimits 是「该 Key × 某账号分组 / 某账号」维度的用量上限（issue #439）。
 	// 与上面的 Cost/Token 限额不同，它只统计该 Key 打到对应 scope 的用量，超额后默认
@@ -1688,9 +1731,11 @@ const (
 
 // 上游渠道限定取值。
 const (
-	UpstreamChannelAuto  = ""
-	UpstreamChannelCodex = "codex"
-	UpstreamChannelGrok  = "grok"
+	UpstreamChannelAuto        = ""
+	UpstreamChannelCodex       = "codex"
+	UpstreamChannelGrok        = "grok"
+	UpstreamChannelAntigravity = "antigravity"
+	UpstreamChannelClaude      = "claude"
 )
 
 // ResolveUpstreamChannel 归一 Key 的上游渠道限定；未知值一律视为不限（auto）。
@@ -1700,8 +1745,30 @@ func (l APIKeyLimits) ResolveUpstreamChannel() string {
 		return UpstreamChannelCodex
 	case UpstreamChannelGrok:
 		return UpstreamChannelGrok
+	case UpstreamChannelAntigravity:
+		return UpstreamChannelAntigravity
+	case UpstreamChannelClaude:
+		return UpstreamChannelClaude
 	}
 	return UpstreamChannelAuto
+}
+
+// accountChannelFilterSQL returns the shared account-provider predicate used by
+// both full account reads and the sanitized admin-list projection.
+func accountChannelFilterSQL(channel, upstreamTypeExpr string) string {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case UpstreamChannelGrok:
+		return ` AND ` + upstreamTypeExpr + ` = 'grok'`
+	case UpstreamChannelAntigravity:
+		return ` AND ` + upstreamTypeExpr + ` = 'antigravity'`
+	case UpstreamChannelClaude:
+		return ` AND ` + upstreamTypeExpr + ` = 'claude'`
+	case UpstreamChannelCodex:
+		// Blank legacy rows and OpenAI Responses relays remain in the Codex view.
+		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity', 'claude')`
+	default:
+		return ""
+	}
 }
 
 // ResolveImageGenerationPolicy 归一 Key 的图片工具策略，统一新旧两种配置来源：
@@ -1759,9 +1826,11 @@ type APIKeyUpdate struct {
 	AllowedGroupIDsSet bool
 	Limits             APIKeyLimits
 	LimitsSet          bool
+	Enabled            bool
+	EnabledSet         bool
 }
 
-const apiKeySelectColumns = `id, name, key, created_at, COALESCE(quota_limit, 0), COALESCE(quota_used, 0), COALESCE(total_used, 0), COALESCE(reset_count, 0), last_reset_at, expires_at, COALESCE(allowed_group_ids, '[]'), COALESCE(limits, '{}')`
+const apiKeySelectColumns = `id, name, key, created_at, COALESCE(quota_limit, 0), COALESCE(quota_used, 0), COALESCE(total_used, 0), COALESCE(reset_count, 0), last_reset_at, expires_at, COALESCE(allowed_group_ids, '[]'), COALESCE(limits, '{}'), COALESCE(enabled, TRUE)`
 
 // ListAPIKeys 获取所有 API 密钥
 func (db *DB) ListAPIKeys(ctx context.Context) ([]*APIKeyRow, error) {
@@ -1839,7 +1908,7 @@ func (row *APIKeyRow) IsQuotaExhausted() bool {
 }
 
 func (row *APIKeyRow) HasAccessConstraints() bool {
-	return row != nil && (row.QuotaLimit > 0 || row.ExpiresAt.Valid || len(row.AllowedGroupIDs) > 0 || !row.Limits.IsZero())
+	return row != nil && (row.QuotaLimit > 0 || row.ExpiresAt.Valid || len(row.AllowedGroupIDs) > 0 || !row.Limits.IsZero() || !row.Enabled)
 }
 
 // UpdateAPIKeyName updates the display name of an API key without changing the key value.
@@ -2006,6 +2075,9 @@ func (db *DB) UpdateAPIKey(ctx context.Context, id int64, update APIKeyUpdate) e
 			sets = append(sets, "limits = "+ph+"::jsonb")
 		}
 	}
+	if update.EnabledSet {
+		sets = append(sets, "enabled = "+setArg(update.Enabled))
+	}
 	if len(sets) == 0 {
 		return nil
 	}
@@ -2096,12 +2168,41 @@ func NormalizeSiteName(value string) string {
 	return value
 }
 
+const (
+	DefaultModelsListReadMaxBytes int64 = 8 << 20
+	MinModelsListReadMaxBytes     int64 = 1 << 20
+	MaxModelsListReadMaxBytes     int64 = 256 << 20
+)
+
+// ValidateModelsListReadMaxBytes 校验模型列表响应的最大读取字节数。
+func ValidateModelsListReadMaxBytes(value int64) error {
+	if value < MinModelsListReadMaxBytes || value > MaxModelsListReadMaxBytes {
+		return fmt.Errorf("models_list_read_max_bytes 必须在 %d 到 %d 字节之间", MinModelsListReadMaxBytes, MaxModelsListReadMaxBytes)
+	}
+	return nil
+}
+
+// NormalizeModelsListReadMaxBytes 把缺失或越界旧值收敛到安全范围。
+func NormalizeModelsListReadMaxBytes(value int64) int64 {
+	if value <= 0 {
+		return DefaultModelsListReadMaxBytes
+	}
+	if value < MinModelsListReadMaxBytes {
+		return MinModelsListReadMaxBytes
+	}
+	if value > MaxModelsListReadMaxBytes {
+		return MaxModelsListReadMaxBytes
+	}
+	return value
+}
+
 // SystemSettings 运行时设置项
 type SystemSettings struct {
 	SiteName                           string
 	SiteLogo                           string
 	BackgroundConfig                   string // JSON: {"image":"...","opacity":18,"blur":0}
 	GrokConfig                         string // JSON: {"affinity_mode":"strict"}
+	ClaudeConfig                       string // JSON: {"fingerprint_mode":"preserve","default_timezone":"","session_window_limit":0}
 	MaxConcurrency                     int
 	GlobalRPM                          int
 	TestModel                          string
@@ -2119,8 +2220,10 @@ type SystemSettings struct {
 	LazyMode                           bool
 	ProxyPoolEnabled                   bool
 	FastSchedulerEnabled               bool
+	SchedulerEngine                    string
 	MaxRetries                         int
 	MaxRateLimitRetries                int
+	ContinuousRetryPolicy              string // JSON: database.ContinuousRetryPolicy
 	AllowRemoteMigration               bool
 	ModelMapping                       string // JSON: {"anthropic_model": "codex_model", ...}
 	CodexModelMapping                  string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
@@ -2138,6 +2241,7 @@ type SystemSettings struct {
 	PassiveInternalModelsEnabled       bool   // 可信派生请求允许复用原账号的内部模型
 	SessionSlotBufferEnabled           bool   // 成功请求结束后为原会话短暂保留并发槽
 	SessionSlotBufferSeconds           int    // 会话并发槽缓冲时间，默认 10 秒，范围 1..60
+	ModelsListReadMaxBytes             int64  // 上游 /models 与 Codex 模型清单的最大读取字节数，默认 8 MiB
 	ResinURL                           string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
 	ResinPlatformName                  string // Resin 平台标识，例如 codex2api
 	PromptFilterEnabled                bool
@@ -2174,6 +2278,7 @@ type SystemSettings struct {
 	PublicImageStudioPageEnabled       bool
 	PublicAccountPortalPageEnabled     bool // 账号自助添加公开门户开关，默认 false
 	CodexForceWebsocket                bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
+	CodexRequestCompression            bool // HTTP /responses 请求体 zstd 压缩（对齐真实客户端），默认 true
 	CodexWSWeakNetworkMode             bool // WS 弱网保守复用模式，默认 false
 	CodexWSKeepaliveEnabled            bool // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
 	CodexWSKeepaliveIntervalSec        int  // WS 保活 Ping 间隔（秒），默认 60
@@ -2228,6 +2333,8 @@ type SystemSettings struct {
 	AutoResetCreditsEnabled bool
 	// AutoResetCreditsBeforeExpiryMin 是进入临期窗口的提前分钟数（默认 60，范围 10-10080）。
 	AutoResetCreditsBeforeExpiryMin int
+	// AutoActivate5hWindowEnabled 控制 5h 窗口重置后是否发送一次最小真实 /responses 以启动下一轮窗口（默认关闭，issue #581）。
+	AutoActivate5hWindowEnabled bool
 	// ModelPricingOverrides 是模型定价覆盖 JSON（model → ModelPricingOverride），
 	// custom/synced 覆盖代码默认；空为 "{}"。
 	ModelPricingOverrides string
@@ -2329,6 +2436,20 @@ func NormalizeSessionSlotBufferSeconds(seconds int) int {
 	return seconds
 }
 
+// NormalizeSchedulerEngine preserves the old fast_scheduler_enabled setting
+// for upgraded databases whose new scheduler_engine column is still blank.
+func NormalizeSchedulerEngine(value string, legacyFastEnabled bool) string {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "legacy", "shadow", "indexed":
+		return strings.ToLower(strings.TrimSpace(value))
+	default:
+		if legacyFastEnabled {
+			return "indexed"
+		}
+		return "legacy"
+	}
+}
+
 // GetSystemSettings 加载全局设置
 func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	s := &SystemSettings{}
@@ -2338,6 +2459,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       auto_clean_unauthorized, auto_clean_rate_limited, COALESCE(admin_secret, ''), COALESCE(auto_clean_full_usage, false),
 		       COALESCE(proxy_pool_enabled, false),
 		       COALESCE(fast_scheduler_enabled, false),
+		       COALESCE(scheduler_engine, ''),
 		       COALESCE(max_retries, 2),
 		       COALESCE(max_rate_limit_retries, 1),
 		       COALESCE(allow_remote_migration, false),
@@ -2395,6 +2517,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(public_account_portal_page_enabled, false),
 			       COALESCE(reasoning_effort_models, '[]'),
 			       COALESCE(codex_force_websocket, false),
+			       COALESCE(codex_request_compression, true),
 			       COALESCE(codex_ws_keepalive_enabled, false),
 			       COALESCE(codex_ws_keepalive_interval_sec, 60),
 			       COALESCE(codex_ws_hide_upstream_errors, true),
@@ -2439,13 +2562,16 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(codex_overload_pause_minutes, 30),
 		       COALESCE(codex_overload_window_minutes, 5),
 		       COALESCE(session_slot_buffer_enabled, false),
-		       COALESCE(session_slot_buffer_seconds, 10)
+		       COALESCE(session_slot_buffer_seconds, 10),
+		       COALESCE(models_list_read_max_bytes, 8388608),
+		       COALESCE(auto_activate_5h_window_enabled, false),
+		       COALESCE(claude_config, '{}')
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
 		&s.MaxConcurrency, &s.GlobalRPM, &s.TestModel, &s.TestContent, &s.TestConcurrency, &s.ProxyURL, &s.PgMaxConns, &s.RedisPoolSize,
 		&s.AutoCleanUnauthorized, &s.AutoCleanRateLimited, &s.AdminSecret, &s.AutoCleanFullUsage,
-		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.MaxRetries, &s.MaxRateLimitRetries, &s.AllowRemoteMigration,
+		&s.ProxyPoolEnabled, &s.FastSchedulerEnabled, &s.SchedulerEngine, &s.MaxRetries, &s.MaxRateLimitRetries, &s.AllowRemoteMigration,
 		&s.AutoCleanError, &s.AutoCleanExpired, &s.LazyMode, &s.ModelMapping, &s.CodexModelMapping,
 		&s.BackgroundRefreshIntervalMinutes, &s.UsageProbeMaxAgeMinutes, &s.UsageProbeConcurrency, &s.UsageProbeResponsesFallbackEnabled, &s.RecoveryProbeIntervalMinutes,
 		&s.SchedulerMode,
@@ -2473,6 +2599,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.PublicAccountPortalPageEnabled,
 		&s.ReasoningEffortModels,
 		&s.CodexForceWebsocket,
+		&s.CodexRequestCompression,
 		&s.CodexWSKeepaliveEnabled,
 		&s.CodexWSKeepaliveIntervalSec,
 		&s.CodexWSHideUpstreamErrors,
@@ -2518,6 +2645,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexOverloadWindowMinutes,
 		&s.SessionSlotBufferEnabled,
 		&s.SessionSlotBufferSeconds,
+		&s.ModelsListReadMaxBytes,
+		&s.AutoActivate5hWindowEnabled,
+		&s.ClaudeConfig,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -2540,12 +2670,111 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 	if strings.TrimSpace(s.PayloadRules) == "" {
 		s.PayloadRules = "{}"
 	}
+	var continuousRetryRaw sql.NullString
+	if policyErr := db.conn.QueryRowContext(ctx, `SELECT COALESCE(continuous_retry_policy, '') FROM system_settings WHERE id = 1`).Scan(&continuousRetryRaw); policyErr == nil {
+		s.ContinuousRetryPolicy = continuousRetryRaw.String
+	} else if !errors.Is(policyErr, sql.ErrNoRows) {
+		return nil, policyErr
+	}
+	if strings.TrimSpace(s.ContinuousRetryPolicy) == "" {
+		s.ContinuousRetryPolicy = EncodeContinuousRetryPolicy(DefaultContinuousRetryPolicy())
+	}
 	s.FirstTokenMode = normalizeFirstTokenMode(s.FirstTokenMode)
 	s.BillingTierPolicy = normalizeBillingTierPolicy(s.BillingTierPolicy)
 	s.AutoResetCreditsBeforeExpiryMin = NormalizeAutoResetCreditsBeforeExpiryMinutes(s.AutoResetCreditsBeforeExpiryMin)
 	s.CodexFingerprintDefaultMode = NormalizeCodexFingerprintDefaultMode(s.CodexFingerprintDefaultMode)
 	s.SessionSlotBufferSeconds = NormalizeSessionSlotBufferSeconds(s.SessionSlotBufferSeconds)
+	s.ModelsListReadMaxBytes = NormalizeModelsListReadMaxBytes(s.ModelsListReadMaxBytes)
+	s.SchedulerEngine = NormalizeSchedulerEngine(s.SchedulerEngine, s.FastSchedulerEnabled)
+	s.FastSchedulerEnabled = s.SchedulerEngine != "legacy"
 	return s, err
+}
+
+// UpdateContinuousRetryPolicy atomically merges one admin partial update into
+// the latest persisted policy. The row lock prevents concurrent tabs or
+// replicas from replacing fields they did not edit with a stale JSON snapshot.
+func (db *DB) UpdateContinuousRetryPolicy(ctx context.Context, update ContinuousRetryPolicyUpdate) (ContinuousRetryPolicy, error) {
+	if db == nil || db.conn == nil {
+		return DefaultContinuousRetryPolicy(), nil
+	}
+
+	var committed ContinuousRetryPolicy
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		defaultRaw := EncodeContinuousRetryPolicy(DefaultContinuousRetryPolicy())
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO system_settings (id, continuous_retry_policy)
+			VALUES (1, $1)
+			ON CONFLICT (id) DO NOTHING
+		`, defaultRaw); err != nil {
+			return err
+		}
+
+		var currentRaw string
+		if err := tx.QueryRowContext(ctx, continuousRetryPolicySelectQuery(!db.isSQLite())).Scan(&currentRaw); err != nil {
+			return err
+		}
+		current := DefaultContinuousRetryPolicy()
+		if strings.TrimSpace(currentRaw) != "" {
+			current = ParseContinuousRetryPolicy(currentRaw)
+		}
+		next := current
+		if update.Enabled != nil {
+			next.Enabled = *update.Enabled
+		}
+		if update.CatchAll != nil {
+			next.CatchAll = *update.CatchAll
+		}
+		if update.Categories != nil {
+			next.Categories = append([]string(nil), (*update.Categories)...)
+		}
+		if update.StatusCodes != nil {
+			next.StatusCodes = append([]int(nil), (*update.StatusCodes)...)
+		}
+		if update.ErrorCodes != nil {
+			next.ErrorCodes = append([]string(nil), (*update.ErrorCodes)...)
+		}
+		if update.MaxDurationSeconds != nil {
+			next.MaxDurationSeconds = *update.MaxDurationSeconds
+		}
+		next = NormalizeContinuousRetryPolicy(next)
+		nextRaw := EncodeContinuousRetryPolicy(next)
+		if nextRaw != strings.TrimSpace(currentRaw) {
+			if _, err := tx.ExecContext(ctx, `
+				UPDATE system_settings
+				SET continuous_retry_policy = $1
+				WHERE id = 1
+			`, nextRaw); err != nil {
+				return err
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = next
+		return nil
+	})
+	if err != nil {
+		return ContinuousRetryPolicy{}, err
+	}
+	return committed, nil
+}
+
+func continuousRetryPolicySelectQuery(forUpdate bool) string {
+	query := `
+		SELECT COALESCE(continuous_retry_policy, '')
+		FROM system_settings
+		WHERE id = 1
+	`
+	if forUpdate {
+		query += " FOR UPDATE"
+	}
+	return query
 }
 
 // NormalizeCodexFingerprintDefaultMode 把新账号默认指纹收敛档位归一到四个已知
@@ -2660,12 +2889,15 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_overload_threshold_percent,
 					codex_overload_pause_minutes,
 					codex_overload_window_minutes,
-					session_slot_buffer_enabled,
-					session_slot_buffer_seconds,
-					session_window_balance_enabled,
-					passive_internal_models_enabled
+				session_slot_buffer_enabled,
+				session_slot_buffer_seconds,
+				session_window_balance_enabled,
+				passive_internal_models_enabled,
+				scheduler_engine,
+					codex_request_compression,
+					auto_activate_5h_window_enabled
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2705,10 +2937,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $119 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $122 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $120 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $123 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -2735,6 +2967,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				public_image_studio_page_enabled = EXCLUDED.public_image_studio_page_enabled,
 					reasoning_effort_models = EXCLUDED.reasoning_effort_models,
 					codex_force_websocket = EXCLUDED.codex_force_websocket,
+					codex_request_compression = EXCLUDED.codex_request_compression,
 					codex_ws_keepalive_enabled = EXCLUDED.codex_ws_keepalive_enabled,
 					codex_ws_keepalive_interval_sec = EXCLUDED.codex_ws_keepalive_interval_sec,
 					codex_ws_hide_upstream_errors = EXCLUDED.codex_ws_hide_upstream_errors,
@@ -2781,7 +3014,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					session_slot_buffer_enabled = EXCLUDED.session_slot_buffer_enabled,
 					session_slot_buffer_seconds = EXCLUDED.session_slot_buffer_seconds,
 					session_window_balance_enabled = EXCLUDED.session_window_balance_enabled,
-					passive_internal_models_enabled = EXCLUDED.passive_internal_models_enabled
+					passive_internal_models_enabled = EXCLUDED.passive_internal_models_enabled,
+					scheduler_engine = EXCLUDED.scheduler_engine,
+					auto_activate_5h_window_enabled = EXCLUDED.auto_activate_5h_window_enabled
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -2830,6 +3065,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		NormalizeSessionSlotBufferSeconds(s.SessionSlotBufferSeconds),
 		s.SessionWindowBalanceEnabled,
 		s.PassiveInternalModelsEnabled,
+		NormalizeSchedulerEngine(s.SchedulerEngine, s.FastSchedulerEnabled),
+		s.CodexRequestCompression,
+		s.AutoActivate5hWindowEnabled,
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey)
 	return err
@@ -2844,6 +3082,20 @@ func (db *DB) UpdateCodexSyncedCLIVersion(ctx context.Context, version string) e
 		ON CONFLICT (id) DO UPDATE SET
 			codex_synced_cli_version = EXCLUDED.codex_synced_cli_version
 	`, strings.TrimSpace(version))
+	return err
+}
+
+// UpdateModelsListReadMaxBytes 原子更新模型列表读取上限，不回写整行设置。
+func (db *DB) UpdateModelsListReadMaxBytes(ctx context.Context, value int64) error {
+	if err := ValidateModelsListReadMaxBytes(value); err != nil {
+		return err
+	}
+	_, err := db.conn.ExecContext(ctx, `
+		INSERT INTO system_settings (id, models_list_read_max_bytes)
+		VALUES (1, $1)
+		ON CONFLICT (id) DO UPDATE SET
+			models_list_read_max_bytes = EXCLUDED.models_list_read_max_bytes
+	`, value)
 	return err
 }
 
@@ -3029,6 +3281,26 @@ func normalizeAffinityMode(mode string) string {
 	default:
 		return "bounded"
 	}
+}
+
+// normalizeClaudeConfig 校验 claude_config JSON,非法或空则回落到默认 {}。
+func normalizeClaudeConfig(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !json.Valid([]byte(raw)) {
+		return "{}"
+	}
+	return raw
+}
+
+// UpdateClaudeConfig 定向更新 claude_config 单列(不回写整行设置,避免触碰大 UPSERT)。
+func (db *DB) UpdateClaudeConfig(ctx context.Context, raw string) error {
+	value := normalizeClaudeConfig(raw)
+	return db.withSQLiteWriteLock(ctx, func() error {
+		_, err := db.conn.ExecContext(ctx, `
+			INSERT INTO system_settings (id, claude_config) VALUES (1, $1)
+			ON CONFLICT (id) DO UPDATE SET claude_config = EXCLUDED.claude_config`, value)
+		return err
+	})
 }
 
 // normalizeGrokConfig 校验 grok_config JSON,非法或空则回落到默认 {}。
@@ -4553,7 +4825,7 @@ type TrafficSnapshot struct {
 // 当 rangeStart 为零值时回落到"今日"(本地 0 点起),与历史行为一致;
 // 当传入显式区间时,today_* 字段语义变为"该区间内的统计",total_* 字段始终是全量累计。
 // rangeEnd 为零值表示"至今"。
-// GetUsageStats 聚合用量统计。channel 非空（codex/grok）时按渠道过滤；
+// GetUsageStats 聚合用量统计。channel 非空（codex/grok/antigravity/claude）时按渠道过滤；
 // 渠道视图下的「累计」只覆盖现存 usage_logs（清空日志前的 baseline 无渠道维度，不计入）。
 func (db *DB) GetUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*UsageStats, error) {
 	return db.getUsageStats(ctx, rangeStart, rangeEnd, channel, true)
@@ -6013,10 +6285,11 @@ type AccountTimeRangeUsage struct {
 	UserBilled    float64
 }
 
-// AccountModelCount 某个模型在指定窗口内的请求数与成功数。
+// AccountModelCount 某个模型在指定窗口内的请求数、成功数与平均首字时长。
 type AccountModelCount struct {
-	Requests int64
-	Success  int64
+	Requests        int64
+	Success         int64
+	AvgFirstTokenMs float64
 }
 
 // nonRetryUsageLogPredicate keeps transport retry attempts out of end-user
@@ -6276,27 +6549,15 @@ func (db *DB) ListActive(ctx context.Context) ([]*AccountRow, error) {
 	return db.ListActiveByChannel(ctx, "")
 }
 
-// ListActiveByChannel 返回未删除账号；channel 为空返回全部，
-// "grok" 仅 Grok 上游，"codex" 为非 Grok（含默认 Codex / OpenAI Responses 等）。
-// 过滤依据 credentials.upstream_type，与管理后台列表的 grok_api 判定一致。
+// ListActiveByChannel 返回未删除账号；channel 为空返回全部，其他已知渠道
+// 按 credentials.upstream_type 显式隔离。缺省 upstream_type 的历史账号归 Codex。
 func (db *DB) ListActiveByChannel(ctx context.Context, channel string) ([]*AccountRow, error) {
-	channel = strings.ToLower(strings.TrimSpace(channel))
 	where := `status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
-	switch channel {
-	case UpstreamChannelGrok:
-		if db.isSQLite() {
-			where += ` AND LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), '')) = 'grok'`
-		} else {
-			where += ` AND LOWER(COALESCE(credentials->>'upstream_type', '')) = 'grok'`
-		}
-	case UpstreamChannelCodex:
-		// 非 grok 一律归入 codex 视图（缺省 upstream_type 的历史号也算 codex 侧）。
-		if db.isSQLite() {
-			where += ` AND LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), '')) <> 'grok'`
-		} else {
-			where += ` AND LOWER(COALESCE(credentials->>'upstream_type', '')) <> 'grok'`
-		}
+	upstreamTypeExpr := `LOWER(COALESCE(credentials->>'upstream_type', ''))`
+	if db.isSQLite() {
+		upstreamTypeExpr = `LOWER(COALESCE(json_extract(credentials, '$.upstream_type'), ''))`
 	}
+	where += accountChannelFilterSQL(channel, upstreamTypeExpr)
 
 	query := `
 		SELECT id, name, platform, type, credentials, proxy_url, status, cooldown_reason, cooldown_until, error_message, COALESCE(enabled, true), COALESCE(locked, false), COALESCE(credit_enabled, false), COALESCE(credit_skip_usage_window, false), COALESCE(skip_warm_tier, false), score_bias_override, base_concurrency_override, COALESCE(tags, '[]'), COALESCE(note, ''), created_at, updated_at, COALESCE(credential_generation, 1), COALESCE(credential_family_id, '')
@@ -6392,6 +6653,69 @@ func (db *DB) ListActiveModelCooldowns(ctx context.Context) ([]*AccountModelCool
 		row.UpdatedAt, parseErr = parseDBTimeValue(updatedRaw)
 		if parseErr != nil {
 			return nil, fmt.Errorf("解析模型冷却 updated_at 失败: %w", parseErr)
+		}
+		result = append(result, row)
+	}
+	return result, rows.Err()
+}
+
+// ListActiveModelCooldownsForAccount is the indexed, single-account variant
+// used outside batched scheduler projection refreshes.
+func (db *DB) ListActiveModelCooldownsForAccount(ctx context.Context, accountID int64) ([]*AccountModelCooldownRow, error) {
+	if accountID <= 0 {
+		return nil, nil
+	}
+	return db.ListActiveModelCooldownsForAccounts(ctx, []int64{accountID})
+}
+
+// ListActiveModelCooldownsForAccounts loads only the cooldown rows touched by
+// one scheduler-outbox batch. The consumer caps that batch at 500 account IDs,
+// so both PostgreSQL and SQLite stay comfortably within bind limits.
+func (db *DB) ListActiveModelCooldownsForAccounts(ctx context.Context, accountIDs []int64) ([]*AccountModelCooldownRow, error) {
+	accountIDs = positiveUniqueIDs(accountIDs)
+	if len(accountIDs) == 0 {
+		return nil, nil
+	}
+	args := make([]interface{}, 0, len(accountIDs)+1)
+	placeholders := make([]string, 0, len(accountIDs))
+	for _, accountID := range accountIDs {
+		args = append(args, accountID)
+		if db.isSQLite() {
+			placeholders = append(placeholders, "?")
+		} else {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", len(args)))
+		}
+	}
+	args = append(args, db.timeArg(time.Now()))
+	resetPlaceholder := "?"
+	if !db.isSQLite() {
+		resetPlaceholder = fmt.Sprintf("$%d", len(args))
+	}
+	rows, err := db.conn.QueryContext(ctx, `
+		SELECT account_id, model, COALESCE(reason, ''), reset_at, updated_at
+		FROM account_model_cooldowns
+		WHERE account_id IN (`+strings.Join(placeholders, ",")+`) AND reset_at > `+resetPlaceholder+`
+		ORDER BY account_id, model
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("批量查询账号模型冷却失败: %w", err)
+	}
+	defer rows.Close()
+
+	var result []*AccountModelCooldownRow
+	for rows.Next() {
+		row := &AccountModelCooldownRow{}
+		var resetRaw, updatedRaw interface{}
+		if err := rows.Scan(&row.AccountID, &row.Model, &row.Reason, &resetRaw, &updatedRaw); err != nil {
+			return nil, err
+		}
+		row.ResetAt, err = parseDBTimeValue(resetRaw)
+		if err != nil {
+			return nil, fmt.Errorf("解析模型冷却 reset_at 失败: %w", err)
+		}
+		row.UpdatedAt, err = parseDBTimeValue(updatedRaw)
+		if err != nil {
+			return nil, fmt.Errorf("解析模型冷却 updated_at 失败: %w", err)
 		}
 		result = append(result, row)
 	}
@@ -6599,7 +6923,7 @@ func (db *DB) UpdateAccountSchedulerConfig(ctx context.Context, id int64, scoreB
 		merged := mergeCredentialMaps(decodeCredentials(currentRaw), map[string]interface{}{
 			"allowed_api_key_ids": normalizePositiveInt64Slice(allowedAPIKeyIDs.Values),
 		})
-		credJSON, err := json.Marshal(merged)
+		credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 		if err != nil {
 			return fmt.Errorf("序列化 credentials 失败: %w", err)
 		}
@@ -6680,7 +7004,7 @@ func (db *DB) UpdateAccountSchedulerMetadata(ctx context.Context, id int64, scor
 			current := decodeCredentials(currentRaw)
 			merged := mergeCredentialMaps(cloneCredentialUpdates(current), credentialUpdates)
 			identityChanged := grokIdentityCredentialChanged(current, merged)
-			credJSON, err := json.Marshal(merged)
+			credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 			if err != nil {
 				return fmt.Errorf("序列化 credentials 失败: %w", err)
 			}
@@ -6899,7 +7223,7 @@ func (db *DB) batchUpdateAccountCredentials(ctx context.Context, tx *sql.Tx, cur
 		// generation bump.
 		merged := mergeCredentialMaps(cloneCredentialUpdates(credentials), updates)
 		identityChanged := grokIdentityCredentialChanged(credentials, merged)
-		credJSON, err := json.Marshal(merged)
+		credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 		if err != nil {
 			return fmt.Errorf("序列化 credentials 失败: %w", err)
 		}
@@ -7083,7 +7407,7 @@ func (db *DB) updateCredentialsReadMerge(ctx context.Context, id int64, credenti
 
 	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
 	identityChanged := grokIdentityCredentialChanged(decodeCredentials(currentRaw), merged)
-	credJSON, err := json.Marshal(merged)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
@@ -7117,6 +7441,12 @@ func (db *DB) updateCredentialsSQLite(ctx context.Context, id int64, credentials
 		for key, value := range credentials {
 			if !sqliteJSONSetKeySupported(key) {
 				return db.updateCredentialsReadMergeSQLiteUnlocked(ctx, id, credentials)
+			}
+			// SQLite 逐键写:敏感字段在此处按键加密(密钥未设时 no-op)。
+			if _, sensitive := sensitiveCredentialKeys[key]; sensitive {
+				if s, isStr := value.(string); isStr {
+					value = encryptCredentialValue(key, s)
+				}
 			}
 			valueJSON, err := json.Marshal(value)
 			if err != nil {
@@ -7168,7 +7498,7 @@ func (db *DB) updateCredentialsReadMergeSQLiteUnlocked(ctx context.Context, id i
 	current := decodeCredentials(currentRaw)
 	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
 	identityChanged := grokIdentityCredentialChanged(current, merged)
-	credJSON, err := json.Marshal(merged)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
@@ -7253,7 +7583,7 @@ func (db *DB) UpdateOpenAIResponsesAccount(ctx context.Context, id int64, name s
 	current := decodeCredentials(currentRaw)
 	merged := mergeCredentialMaps(cloneCredentialUpdates(current), credentials)
 	identityChanged := openAIResponsesIdentityCredentialChanged(current, merged)
-	credJSON, err := json.Marshal(merged)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
@@ -7303,7 +7633,7 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	}
 
 	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
-	credJSON, err := json.Marshal(merged)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
@@ -7726,7 +8056,7 @@ func (db *DB) InsertAccount(ctx context.Context, name string, refreshToken strin
 	credentials := map[string]interface{}{
 		"refresh_token": refreshToken,
 	}
-	credJSON, err := json.Marshal(credentials)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
 	}
@@ -7772,7 +8102,7 @@ func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken stri
 	credentials := map[string]interface{}{
 		"access_token": accessToken,
 	}
-	credJSON, err := json.Marshal(credentials)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
 	}
@@ -7789,7 +8119,7 @@ func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, cre
 	if credentials == nil {
 		credentials = map[string]interface{}{}
 	}
-	credJSON, err := json.Marshal(credentials)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
 	}
@@ -7806,7 +8136,7 @@ func (db *DB) InsertOpenAIResponsesAccount(ctx context.Context, name string, cre
 	if credentials == nil {
 		credentials = map[string]interface{}{}
 	}
-	credJSON, err := json.Marshal(credentials)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
 	}
@@ -7831,7 +8161,7 @@ func (db *DB) InsertAccountWithUpstream(ctx context.Context, name, platform, acc
 	if strings.TrimSpace(accountType) == "" {
 		accountType = "api"
 	}
-	credJSON, err := json.Marshal(credentials)
+	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
 	}

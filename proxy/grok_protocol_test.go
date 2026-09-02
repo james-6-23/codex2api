@@ -20,7 +20,7 @@ func TestExecuteGrokProtocolRequestUsesCatalogBackend(t *testing.T) {
 	var gotBody []byte
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotPath = r.URL.Path
-		gotBody, _ = io.ReadAll(r.Body)
+		gotBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{\"content\":\"hi\"},\"finish_reason\":null}]}\n\n")
 		_, _ = io.WriteString(w, "data: {\"id\":\"c1\",\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n")
@@ -60,7 +60,7 @@ func TestExecuteGrokProtocolRequestBridgesResponsesToolsThroughChat(t *testing.T
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		captured, _ = io.ReadAll(r.Body)
+		captured = readUpstreamRequestBody(r)
 		aliases := make(map[string]string)
 		for _, tool := range gjson.GetBytes(captured, "tools").Array() {
 			if tool.Get("type").String() != "function" || tool.Get("function.name").String() == "" {
@@ -224,7 +224,7 @@ func TestExecuteGrokProtocolRequestBridgesCustomToolThroughMessages(t *testing.T
 		if r.URL.Path != "/v1/messages" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		captured, _ = io.ReadAll(r.Body)
+		captured = readUpstreamRequestBody(r)
 		alias := gjson.GetBytes(captured, "tools.0.name").String()
 		if alias == "" || gjson.GetBytes(captured, "tools.0.input_schema.required.0").String() != "input" {
 			t.Errorf("custom tool was not converted for Messages: %s", captured)
@@ -446,7 +446,7 @@ func TestExecuteGrokProtocolRequestNativePreservesInboundBody(t *testing.T) {
 		if r.URL.Path != "/v1/chat/completions" {
 			t.Fatalf("path = %q", r.URL.Path)
 		}
-		gotBody, _ = io.ReadAll(r.Body)
+		gotBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"id":"chatcmpl-1","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
 	}))
@@ -722,6 +722,7 @@ func TestMessagesAdapterRequiresMessageStopAndKeepsSparseTools(t *testing.T) {
 		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"grok\",\"usage\":{\"input_tokens\":1}}}\n\n" +
 			"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call_partial\",\"name\":\"lookup\"}}\n\n" +
 			"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"query\\\":\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":0}\n\n" +
 			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":1}}\n\n" +
 			"data: {\"type\":\"message_stop\"}\n\n"))
 	data, err = io.ReadAll(newMessagesToResponsesReader(truncated, "grok"))
@@ -730,6 +731,9 @@ func TestMessagesAdapterRequiresMessageStopAndKeepsSparseTools(t *testing.T) {
 	}
 	if bytes.Contains(data, []byte(`"type":"response.function_call_arguments.done"`)) || bytes.Contains(data, []byte(`"type":"response.output_item.done"`)) {
 		t.Fatalf("truncated Messages tool input was marked complete: %s", data)
+	}
+	if !bytes.Contains(data, []byte(`"type":"response.incomplete"`)) || bytes.Contains(data, []byte(`"type":"response.completed"`)) {
+		t.Fatalf("max_tokens did not use the incomplete terminal event: %s", data)
 	}
 	completed := completedGrokResponseEvent(t, data)
 	if got := gjson.GetBytes(completed, "response.output.0.status").String(); got != "incomplete" {
@@ -751,6 +755,278 @@ func TestMessagesAdapterKeepsReasoningSignatureInFinalOutput(t *testing.T) {
 	}
 	if !bytes.Contains(data, []byte(`"encrypted_content":"ENC"`)) || !bytes.Contains(data, []byte(`"text":"why"`)) {
 		t.Fatalf("reasoning final output lost signature or summary: %s", data)
+	}
+}
+
+func TestMessagesAdapterEmitsCompleteTextAndThinkingLifecycle(t *testing.T) {
+	source := io.NopCloser(bytes.NewBufferString(
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m-life\",\"model\":\"grok\",\"usage\":{\"input_tokens\":1}}}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":7,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":7,\"delta\":{\"type\":\"text_delta\",\"text\":\"A\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":7}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":2,\"delta\":{\"type\":\"text_delta\",\"text\":\"B\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":2}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":9,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":9,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"why\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":9,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"ENC\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":9}\n\n" +
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"))
+	stream, err := io.ReadAll(newMessagesToResponsesReader(source, "grok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := grokResponseSSEEvents(stream)
+	wantTypes := []string{
+		"response.created",
+		"response.output_item.added", "response.content_part.added", "response.output_text.delta",
+		"response.output_text.done", "response.content_part.done",
+		"response.content_part.added", "response.output_text.delta",
+		"response.output_text.done", "response.content_part.done", "response.output_item.done",
+		"response.output_item.added", "response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta", "response.reasoning.encrypted_content.delta",
+		"response.reasoning_summary_text.done", "response.reasoning_summary_part.done",
+		"response.reasoning.encrypted_content.done", "response.output_item.done",
+		"response.completed",
+	}
+	if len(events) != len(wantTypes) {
+		t.Fatalf("event count = %d, want %d; stream=%s", len(events), len(wantTypes), stream)
+	}
+	for i, want := range wantTypes {
+		if got := events[i].Get("type").String(); got != want {
+			t.Fatalf("event[%d].type = %q, want %q; stream=%s", i, got, want, stream)
+		}
+	}
+
+	messageID := events[1].Get("item.id").String()
+	if messageID == "" || events[2].Get("item_id").String() != messageID || events[6].Get("item_id").String() != messageID || events[10].Get("item.id").String() != messageID {
+		t.Fatalf("message item identity changed across lifecycle: %s", stream)
+	}
+	if got := events[2].Get("content_index").Int(); got != 0 {
+		t.Fatalf("first text content_index = %d, want 0", got)
+	}
+	if got := events[6].Get("content_index").Int(); got != 1 {
+		t.Fatalf("second text content_index = %d, want 1", got)
+	}
+	for _, index := range []int{2, 3, 4, 5} {
+		if got := events[index].Get("content_index").Int(); got != 0 {
+			t.Fatalf("event[%d] first part content_index = %d, want 0", index, got)
+		}
+	}
+	for _, index := range []int{6, 7, 8, 9} {
+		if got := events[index].Get("content_index").Int(); got != 1 {
+			t.Fatalf("event[%d] second part content_index = %d, want 1", index, got)
+		}
+	}
+	for _, index := range []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10} {
+		if got := events[index].Get("output_index").Int(); got != 0 {
+			t.Fatalf("event[%d] message output_index = %d, want 0", index, got)
+		}
+	}
+
+	reasoningID := events[11].Get("item.id").String()
+	if reasoningID == "" || events[12].Get("item_id").String() != reasoningID || events[14].Get("item_id").String() != reasoningID || events[18].Get("item.id").String() != reasoningID {
+		t.Fatalf("reasoning item identity changed across lifecycle: %s", stream)
+	}
+	for _, index := range []int{11, 12, 13, 14, 15, 16, 17, 18} {
+		if got := events[index].Get("output_index").Int(); got != 1 {
+			t.Fatalf("event[%d] reasoning output_index = %d, want 1", index, got)
+		}
+	}
+	completed := completedGrokResponseEvent(t, stream)
+	if got := gjson.GetBytes(completed, "response.output.0.id").String(); got != messageID {
+		t.Fatalf("terminal message id = %q, want %q", got, messageID)
+	}
+	if got := gjson.GetBytes(completed, "response.output.0.content.0.text").String(); got != "A" {
+		t.Fatalf("terminal first text = %q, want A", got)
+	}
+	if got := gjson.GetBytes(completed, "response.output.0.content.1.text").String(); got != "B" {
+		t.Fatalf("terminal second text = %q, want B", got)
+	}
+	if got := gjson.GetBytes(completed, "response.output.1.id").String(); got != reasoningID {
+		t.Fatalf("terminal reasoning id = %q, want %q", got, reasoningID)
+	}
+	if got := gjson.GetBytes(completed, "response.output.1.encrypted_content").String(); got != "ENC" {
+		t.Fatalf("terminal encrypted_content = %q, want ENC", got)
+	}
+}
+
+func TestMessagesAdapterPreservesToolStartInputAndEmptyObjectPlaceholder(t *testing.T) {
+	source := io.NopCloser(bytes.NewBufferString(
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m-tools\",\"model\":\"grok\",\"usage\":{\"input_tokens\":1}}}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":9,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call9\",\"name\":\"nine\",\"input\":{}}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":9,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"x\\\":\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":9,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"1}\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":9}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":2,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call2\",\"name\":\"two\",\"input\":{\"ready\":true}}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":2}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":4,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call4\",\"name\":\"four\",\"input\":{\"stale\":true}}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":4,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"fresh\\\":true}\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":4}\n\n" +
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":2}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"))
+	stream, err := io.ReadAll(newMessagesToResponsesReader(source, "grok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []gjson.Result
+	for _, event := range grokResponseSSEEvents(stream) {
+		if event.Get("type").String() == "response.function_call_arguments.delta" {
+			deltas = append(deltas, event)
+		}
+	}
+	if len(deltas) != 4 {
+		t.Fatalf("argument delta count = %d, want 4; stream=%s", len(deltas), stream)
+	}
+	if got := deltas[0].Get("delta").String() + deltas[1].Get("delta").String(); got != `{"x":1}` {
+		t.Fatalf("placeholder tool arguments = %q, want exact JSON; stream=%s", got, stream)
+	}
+	if got := deltas[2].Get("delta").String(); got != `{"ready":true}` {
+		t.Fatalf("start-only tool arguments delta = %q, want exact JSON", got)
+	}
+	if got := deltas[3].Get("delta").String(); got != `{"fresh":true}` {
+		t.Fatalf("delta did not replace provisional start input: %q", got)
+	}
+	if bytes.Contains(stream, []byte(`{}{"x":1}`)) {
+		t.Fatalf("empty input placeholder was prefixed to streamed arguments: %s", stream)
+	}
+	completed := completedGrokResponseEvent(t, stream)
+	output := gjson.GetBytes(completed, "response.output").Array()
+	if len(output) != 3 || output[0].Get("call_id").String() != "call9" || output[1].Get("call_id").String() != "call2" || output[2].Get("call_id").String() != "call4" {
+		t.Fatalf("sparse tool output order changed: %s", completed)
+	}
+	if got := output[0].Get("arguments").String(); got != `{"x":1}` {
+		t.Fatalf("streamed tool arguments = %q, want exact JSON", got)
+	}
+	if got := output[1].Get("arguments").String(); got != `{"ready":true}` {
+		t.Fatalf("start-only tool arguments = %q, want exact JSON", got)
+	}
+	if got := output[2].Get("arguments").String(); got != `{"fresh":true}` {
+		t.Fatalf("delta-replaced tool arguments = %q, want exact JSON", got)
+	}
+}
+
+func TestMessagesAdapterPreservesRedactedThinkingLifecycle(t *testing.T) {
+	source := io.NopCloser(bytes.NewBufferString(
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m-redacted\",\"model\":\"grok\"}}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":5,\"content_block\":{\"type\":\"redacted_thinking\",\"data\":\"REDACTED\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":5}\n\n" +
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"))
+	stream, err := io.ReadAll(newMessagesToResponsesReader(source, "grok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	events := grokResponseSSEEvents(stream)
+	if len(events) != 6 {
+		t.Fatalf("redacted event count = %d, want 6; stream=%s", len(events), stream)
+	}
+	wantTypes := []string{
+		"response.created", "response.output_item.added", "response.reasoning.encrypted_content.delta",
+		"response.reasoning.encrypted_content.done", "response.output_item.done", "response.completed",
+	}
+	for i, want := range wantTypes {
+		if got := events[i].Get("type").String(); got != want {
+			t.Fatalf("event[%d].type = %q, want %q; stream=%s", i, got, want, stream)
+		}
+	}
+	itemID := events[1].Get("item.id").String()
+	if itemID == "" || events[2].Get("item_id").String() != itemID || events[4].Get("item.id").String() != itemID {
+		t.Fatalf("redacted reasoning identity changed: %s", stream)
+	}
+	completed := completedGrokResponseEvent(t, stream)
+	if got := gjson.GetBytes(completed, "response.output.0.encrypted_content").String(); got != "REDACTED" {
+		t.Fatalf("redacted encrypted_content = %q, want REDACTED", got)
+	}
+}
+
+func TestMessagesAdapterDoesNotFabricateDoneEventsOnFailure(t *testing.T) {
+	tests := []struct {
+		name   string
+		suffix string
+	}{
+		{
+			name:   "explicit error",
+			suffix: "data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n",
+		},
+		{name: "unexpected eof"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			source := io.NopCloser(bytes.NewBufferString(
+				"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m-failed\",\"model\":\"grok\"}}\n\n" +
+					"data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+					"data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"partial\"}}\n\n" +
+					test.suffix))
+			stream, err := io.ReadAll(newMessagesToResponsesReader(source, "grok"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(stream, []byte(`"type":"response.failed"`)) {
+				t.Fatalf("failure terminal missing: %s", stream)
+			}
+			for _, eventType := range []string{
+				"response.output_text.done", "response.content_part.done", "response.output_item.done",
+			} {
+				if bytes.Contains(stream, []byte(`"type":"`+eventType+`"`)) {
+					t.Fatalf("%s was fabricated on failure: %s", eventType, stream)
+				}
+			}
+		})
+	}
+}
+
+func TestMessagesAdapterBalancesInterleavedOutputItemLifecycles(t *testing.T) {
+	source := io.NopCloser(bytes.NewBufferString(
+		"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m-interleaved\",\"model\":\"grok\"}}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":8,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":8,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"R\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":8}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":4,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":4,\"delta\":{\"type\":\"text_delta\",\"text\":\"T\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":4}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":9,\"content_block\":{\"type\":\"tool_use\",\"id\":\"call9\",\"name\":\"nine\",\"input\":{\"q\":1}}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":9}\n\n" +
+			"data: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n" +
+			"data: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"U\"}}\n\n" +
+			"data: {\"type\":\"content_block_stop\",\"index\":1}\n\n" +
+			"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n" +
+			"data: {\"type\":\"message_stop\"}\n\n"))
+	stream, err := io.ReadAll(newMessagesToResponsesReader(source, "grok"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var added, done []string
+	for _, event := range grokResponseSSEEvents(stream) {
+		switch event.Get("type").String() {
+		case "response.output_item.added":
+			added = append(added, event.Get("item.id").String())
+		case "response.output_item.done":
+			done = append(done, event.Get("item.id").String())
+		}
+	}
+	if len(added) != 4 || len(done) != 4 {
+		t.Fatalf("output lifecycle counts added=%d done=%d, want 4/4; stream=%s", len(added), len(done), stream)
+	}
+	for i := range added {
+		if added[i] == "" || done[i] != added[i] {
+			t.Fatalf("output lifecycle[%d] added=%q done=%q; stream=%s", i, added[i], done[i], stream)
+		}
+	}
+	completed := completedGrokResponseEvent(t, stream)
+	output := gjson.GetBytes(completed, "response.output").Array()
+	if len(output) != len(added) {
+		t.Fatalf("terminal output count = %d, want %d; event=%s", len(output), len(added), completed)
+	}
+	wantTypes := []string{"reasoning", "message", "function_call", "message"}
+	for i := range output {
+		if got := output[i].Get("id").String(); got != added[i] {
+			t.Fatalf("terminal output[%d].id = %q, want announced %q", i, got, added[i])
+		}
+		if got := output[i].Get("type").String(); got != wantTypes[i] {
+			t.Fatalf("terminal output[%d].type = %q, want %q", i, got, wantTypes[i])
+		}
 	}
 }
 
@@ -839,11 +1115,12 @@ func TestChatAdapterDoesNotCompleteTruncatedToolInput(t *testing.T) {
 func completedGrokResponseEvent(t *testing.T, stream []byte) []byte {
 	t.Helper()
 	for _, event := range grokResponseSSEEvents(stream) {
-		if event.Get("type").String() == "response.completed" {
+		eventType := event.Get("type").String()
+		if eventType == "response.completed" || eventType == "response.incomplete" {
 			return []byte(event.Raw)
 		}
 	}
-	t.Fatalf("response.completed missing from stream: %s", stream)
+	t.Fatalf("response terminal missing from stream: %s", stream)
 	return nil
 }
 
@@ -858,6 +1135,95 @@ func grokResponseSSEEvents(stream []byte) []gjson.Result {
 		events = append(events, gjson.ParseBytes(append([]byte(nil), payload...)))
 	}
 	return events
+}
+
+func TestGrokSyntheticResponsesUseConsistentUnixCreatedAt(t *testing.T) {
+	tests := []struct {
+		name          string
+		terminalEvent string
+		reader        func() io.ReadCloser
+	}{
+		{
+			name:          "chat completed",
+			terminalEvent: "response.completed",
+			reader: func() io.ReadCloser {
+				return newChatToResponsesReader(io.NopCloser(strings.NewReader(
+					"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":null}]}\n\n"+
+						"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1,\"total_tokens\":2}}\n\n")), "grok")
+			},
+		},
+		{
+			name:          "chat failed",
+			terminalEvent: "response.failed",
+			reader: func() io.ReadCloser {
+				return newChatToResponsesReader(io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n")), "grok")
+			},
+		},
+		{
+			name:          "messages completed",
+			terminalEvent: "response.completed",
+			reader: func() io.ReadCloser {
+				return newMessagesToResponsesReader(io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"grok\",\"usage\":{\"input_tokens\":1}}}\n\n"+
+						"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\n"+
+						"data: {\"type\":\"message_stop\"}\n\n")), "grok")
+			},
+		},
+		{
+			name:          "messages failed",
+			terminalEvent: "response.failed",
+			reader: func() io.ReadCloser {
+				return newMessagesToResponsesReader(io.NopCloser(strings.NewReader(
+					"data: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\",\"model\":\"grok\",\"usage\":{\"input_tokens\":1}}}\n\n"+
+						"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"busy\"}}\n\n")), "grok")
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			stream, err := io.ReadAll(test.reader())
+			if err != nil {
+				t.Fatal(err)
+			}
+			assertSyntheticResponseCreatedAt(t, stream, test.terminalEvent)
+		})
+	}
+}
+
+func assertSyntheticResponseCreatedAt(t *testing.T, stream []byte, terminalEvent string) {
+	t.Helper()
+	var createdAt, terminalAt gjson.Result
+	for _, frame := range bytes.Split(stream, []byte("\n\n")) {
+		for _, line := range bytes.Split(frame, []byte("\n")) {
+			line = bytes.TrimSpace(line)
+			if !bytes.HasPrefix(line, []byte("data:")) {
+				continue
+			}
+			payload := bytes.TrimSpace(bytes.TrimPrefix(line, []byte("data:")))
+			if !gjson.ValidBytes(payload) {
+				continue
+			}
+			event := gjson.ParseBytes(payload)
+			switch event.Get("type").String() {
+			case "response.created":
+				createdAt = event.Get("response.created_at")
+			case terminalEvent:
+				terminalAt = event.Get("response.created_at")
+			}
+		}
+	}
+	if createdAt.Type != gjson.Number || terminalAt.Type != gjson.Number {
+		t.Fatalf("created_at missing from created/terminal events: %s", stream)
+	}
+	now := time.Now().Unix()
+	if createdAt.Int() <= 0 || createdAt.Int() > now || createdAt.Float() != float64(createdAt.Int()) {
+		t.Fatalf("created_at = %s, want Unix seconds", createdAt.Raw)
+	}
+	if terminalAt.Int() != createdAt.Int() {
+		t.Fatalf("created_at changed within one response: created=%s terminal=%s", createdAt.Raw, terminalAt.Raw)
+	}
 }
 
 func TestChatAdapterFinalOutputPreservesFirstEventOrderAndToolIdentity(t *testing.T) {

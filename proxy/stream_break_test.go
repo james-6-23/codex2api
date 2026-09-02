@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"bytes"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
@@ -37,8 +41,73 @@ func TestWriteResponsesStreamBreakEvent(t *testing.T) {
 	if got := gjson.Get(data, "response.status").String(); got != "failed" {
 		t.Fatalf("response.status = %q, want failed", got)
 	}
+	if got := gjson.Get(data, "response.created_at").Int(); got <= 0 {
+		t.Fatalf("response.created_at = %d, want a positive Unix timestamp", got)
+	}
 	if got := gjson.Get(data, "response.error.code").String(); got != ErrorCodeUpstreamStreamBreak {
 		t.Fatalf("response.error.code = %q, want %q", got, ErrorCodeUpstreamStreamBreak)
+	}
+}
+
+func TestWriteGrokNativeResponsesStreamBreakCarriesCreatedAt(t *testing.T) {
+	var out bytes.Buffer
+	before := time.Now().Unix()
+	if err := writeGrokNativeStreamBreakTo(&out, GrokProtocolResponses, 0); err != nil {
+		t.Fatalf("writeGrokNativeStreamBreakTo: %v", err)
+	}
+	after := time.Now().Unix()
+	payload := strings.TrimSpace(strings.TrimPrefix(out.String(), "data: "))
+	if got := gjson.Get(payload, "type").String(); got != "response.failed" {
+		t.Fatalf("type = %q, want response.failed; payload=%s", got, payload)
+	}
+	if got := gjson.Get(payload, "response.created_at").Int(); got < before || got > after {
+		t.Fatalf("response.created_at = %d, want helper fallback in [%d, %d]", got, before, after)
+	}
+}
+
+func TestForwardGrokNativeResponsesStreamBreakReusesCreatedAt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	const createdAt int64 = 1712345678
+	upstream := strings.Join([]string{
+		`event: response.created`,
+		`data: {"type":"response.created","response":{"id":"resp_fixed","object":"response","created_at":1712345678,"status":"in_progress","model":"grok"}}`,
+		``,
+		`event: response.output_text.delta`,
+		`data: {"type":"response.output_text.delta","delta":"visible"}`,
+		``,
+		``,
+	}, "\n")
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		Body:       io.NopCloser(strings.NewReader(upstream)),
+	}
+
+	_, outcome, wrote, _ := forwardGrokNativeResponse(ctx, resp, GrokProtocolResponses, true, time.Now(), nil)
+
+	if !wrote || outcome.logStatusCode != logStatusUpstreamStreamBreak {
+		t.Fatalf("outcome/wrote = %#v %v, want visible stream break", outcome, wrote)
+	}
+	if !strings.Contains(recorder.Body.String(), `"delta":"visible"`) {
+		t.Fatalf("visible frame was not forwarded: %s", recorder.Body.String())
+	}
+	var createdEventAt, failedEventAt int64
+	if err := ReadSSEStream(strings.NewReader(recorder.Body.String()), func(data []byte) bool {
+		switch gjson.GetBytes(data, "type").String() {
+		case "response.created":
+			createdEventAt = gjson.GetBytes(data, "response.created_at").Int()
+		case "response.failed":
+			failedEventAt = gjson.GetBytes(data, "response.created_at").Int()
+		}
+		return true
+	}); err != nil {
+		t.Fatalf("ReadSSEStream: %v", err)
+	}
+	if createdEventAt != createdAt || failedEventAt != createdAt {
+		t.Fatalf("created_at = created:%d failed:%d, want both %d; stream=%s", createdEventAt, failedEventAt, createdAt, recorder.Body.String())
 	}
 }
 

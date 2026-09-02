@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/codex2api/proxy"
 	"github.com/gin-gonic/gin"
 )
 
@@ -169,5 +170,39 @@ func TestLoggerMiddlewareRedactsSensitiveContext(t *testing.T) {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("log output missing %q: %s", expected, got)
 		}
+	}
+}
+
+func TestLoggerMiddlewareUsesStreamingOutcomeOverride(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	var logs bytes.Buffer
+	previousOutput := log.Writer()
+	previousFlags := log.Flags()
+	log.SetOutput(&logs)
+	log.SetFlags(0)
+	t.Cleanup(func() {
+		log.SetOutput(previousOutput)
+		log.SetFlags(previousFlags)
+	})
+
+	r := gin.New()
+	r.Use(loggerMiddleware())
+	r.POST("/v1/responses", func(c *gin.Context) {
+		// 模拟 SSE 已提交 200 后才发现下游断开；真实 HTTP 状态无法回写，
+		// 但访问日志必须记录最终内部结果 499。
+		c.Status(http.StatusOK)
+		c.Set(proxy.AccessLogStatusContextKey, 499)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	r.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("wire status = %d, want %d", w.Code, http.StatusOK)
+	}
+	if got := logs.String(); !strings.Contains(got, "POST /v1/responses 499") {
+		t.Fatalf("access log must use stream outcome override: %s", got)
 	}
 }

@@ -331,7 +331,7 @@ func TestResponsesPortableCompactionReturnsToNormalPoolScheduling(t *testing.T) 
 	var receivedBody []byte
 	otherUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		otherCalls.Add(1)
-		receivedBody, _ = io.ReadAll(r.Body)
+		receivedBody = readUpstreamRequestBody(r)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_portable\",\"status\":\"completed\",\"output\":[],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n")
 	}))

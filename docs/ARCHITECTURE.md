@@ -142,11 +142,12 @@ type Handler struct {
 
 ```go
 type Store struct {
-    accounts      []*Account        // 账号列表
-    idx           uint64            // 轮询索引
-    maxConcurrency int              // 最大并发
-    globalRPM     int               // 全局 RPM
-    // ... 其他配置
+    accounts          []*Account                    // 写侧账号列表
+    accountSnapshot   atomic.Pointer[accountListSnapshot] // 请求只读快照
+    fastScheduler     atomic.Pointer[FastScheduler] // 分优先级/健康层索引
+    schedulerEngine   atomic.Value                  // legacy/shadow/indexed
+    availability      atomic.Pointer[availabilityHub]
+    maxConcurrency    int64
 }
 
 type Account struct {
@@ -197,7 +198,7 @@ type Account struct {
 │     • 排除已达并发上限的账号                                 │
 │     • 先按调度优先级排序                                     │
 │     • 同优先级按健康层级和调度分数排序                       │
-│     • 15% 概率随机打散                                       │
+│     • Indexed 在最高优先级/健康层内使用游标或亲和哈希         │
 └─────────────────────────────────────────────────────────────┘
                             │
                             ▼
@@ -209,6 +210,18 @@ type Account struct {
 │     • 报告成功/失败                                          │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+**大号池执行模型：**
+
+1. 账号集合在写侧变更后发布不可变指针快照；请求读快照不再复制 `[]*Account`。
+2. `indexed` 按调度优先级和健康层分桶，稳态通常只检查一个候选；稀疏 API Key/分组规则按需建立有界子池缓存，密集规则直接复用全局索引。
+3. 账号并发释放、冷却恢复、outbox 变更通过 generation channel 广播。等待账号的请求订阅事件并重试，不使用固定间隔轮询全池。
+4. 数据库触发器把会改变路由的账号、API Key、分组、代理和设置写入 `scheduler_outbox`。每个实例按水位批量合并并增量更新内存投影，选号 miss 不再触发请求级全库 reconcile。
+5. Grok 事实/目录维护使用 `maintenance_jobs(job_kind, due_at, lease_until)`；工作进程只 claim 到期行。PostgreSQL 使用 `SKIP LOCKED`，SQLite 使用事务写门，替代每 30 秒扫描全账号并解析多份 JSON。
+
+`legacy` 保留旧扫描实现；`shadow` 由旧路径实际选号并对索引做 1/64 可用性抽样；`indexed` 才让索引结果成为权威。三个模式可在运行时切换，不改变 `/v1/*` 协议。
+
+运维接口 `/api/admin/ops/overview` 的 `scheduler` 对象暴露选号耗时累计值、旧路径扫描账号数、等待/唤醒、路由子池缓存、shadow 差异，以及 outbox 水位、积压、延迟和错误数。
 
 ### 3. 请求执行器 (proxy.Executor)
 
@@ -242,7 +255,7 @@ func TranslateStreamChunk(data []byte, model, chunkID string) ([]byte, bool)
 - `messages` → `input`
 - `max_tokens/temperature` → 删除（Codex 不支持）
 - `reasoning_effort` → `reasoning.effort`
-- Anthropic `/v1/messages` 的 `speed:"fast"` → Codex `service_tier:"priority"`（Anthropic 入参 `service_tier` 为 Priority Tier，不参与 fast mode 映射）
+- Anthropic `/v1/messages` 在无可用 Claude OAuth 账号时的 `speed:"fast"` → Codex `service_tier:"priority"`（Anthropic 入参 `service_tier` 为 Priority Tier，不参与 fast mode 映射）；Claude OAuth 账号优先走原生 Anthropic Messages 透传，不进入 Codex 转换链
 - SSE 事件类型转换
 
 ---

@@ -1333,7 +1333,8 @@
 }
 
 .account-state-overlay__scrim,
-.account-state-table-row > [data-slot="table-cell"] {
+.account-state-table-row > [data-slot="table-cell"],
+.account-state-table-row > td {
   background-color: var(--account-state-background);
   background-image:
     linear-gradient(
@@ -1352,16 +1353,19 @@
   transition: opacity 180ms ease;
 }
 
-.account-state-table-row > [data-slot="table-cell"] > :not(.account-state-overlay--marker-only) {
+.account-state-table-row > [data-slot="table-cell"] > :not(.account-state-overlay--marker-only),
+.account-state-table-row > td > :not(.account-state-overlay--marker-only) {
   opacity: 0.64;
   transition: opacity 180ms ease;
 }
 
-.account-state-table-row:hover > [data-slot="table-cell"] > :not(.account-state-overlay--marker-only) {
+.account-state-table-row:hover > [data-slot="table-cell"] > :not(.account-state-overlay--marker-only),
+.account-state-table-row:hover > td > :not(.account-state-overlay--marker-only) {
   opacity: 0.88;
 }
 
-.account-state-table-row > [data-slot="table-cell"] > .account-state-overlay--marker-only {
+.account-state-table-row > [data-slot="table-cell"] > .account-state-overlay--marker-only,
+.account-state-table-row > td > .account-state-overlay--marker-only {
   opacity: 1;
 }
 

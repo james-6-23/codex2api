@@ -26,7 +26,10 @@ const (
 	// account_groups.channel 归类:成员全为 Grok 账号的存量分组标记为 grok 渠道,
 	// 其余(含空组/混合组)保持 codex。此后分组按渠道隔离,写入路径强校验。
 	dataMigrationGroupChannelV1 = "20260807_account_group_channel_v1"
-	dataMigrationTimeout        = 5 * time.Minute
+	// Claude 原生渠道上线后的存量回填：只修复能从当前账号、端点或模型可靠
+	// 识别的记录；不把混合分组或历史不明请求强行改写成 Claude。
+	dataMigrationClaudeProviderV1 = "20260829_claude_provider_backfill_v1"
+	dataMigrationTimeout          = 5 * time.Minute
 )
 
 type oauthIdentityDedupeAccount struct {
@@ -54,7 +57,10 @@ func (db *DB) runDataMigrations(ctx context.Context) error {
 	if err := db.runDataMigrationOnce(ctx, dataMigrationWorkspaceIdentityV3, db.migrateWorkspaceIdentityV3); err != nil {
 		return err
 	}
-	return db.runDataMigrationOnce(ctx, dataMigrationGroupChannelV1, db.classifyAccountGroupChannels)
+	if err := db.runDataMigrationOnce(ctx, dataMigrationGroupChannelV1, db.classifyAccountGroupChannels); err != nil {
+		return err
+	}
+	return db.runDataMigrationOnce(ctx, dataMigrationClaudeProviderV1, db.backfillClaudeProviderData)
 }
 
 // classifyAccountGroupChannels 把成员清一色是 Grok 账号的存量分组归到 grok 渠道。
@@ -107,6 +113,131 @@ func (db *DB) backfillUsageLogChannel(ctx context.Context, tx *sql.Tx) error {
 		UPDATE usage_logs SET channel = 'codex'
 		WHERE COALESCE(channel, '') = ''`); err != nil {
 		return fmt.Errorf("回填 codex 渠道: %w", err)
+	}
+	return nil
+}
+
+// backfillClaudeProviderData repairs two conservative pieces of provider
+// metadata for databases that predate the native Claude channel. Usage rows are
+// updated only when their endpoint/model clearly identifies Anthropic Messages
+// traffic and the credential generation still matches the account (or is a
+// legacy zero). Pure/mixed groups are left untouched; only groups whose active
+// members are all Claude accounts are promoted from the legacy Codex channel.
+func (db *DB) backfillClaudeProviderData(ctx context.Context, tx *sql.Tx) error {
+	upstreamTypeExpr := `LOWER(COALESCE(a.credentials->>'upstream_type', ''))`
+	if db.isSQLite() {
+		upstreamTypeExpr = `LOWER(COALESCE(json_extract(a.credentials, '$.upstream_type'), ''))`
+	}
+	// Do not update usage_logs with a correlated account subquery. On a large
+	// history that shape forces a full usage_logs scan (and a repeated accounts
+	// scan) while the migration holds the startup write transaction. Resolve the
+	// small set of Claude account generations once, then update by the existing
+	// account_id/credential_generation indexes in bounded batches.
+	accountRows, err := tx.QueryContext(ctx, `
+		SELECT id, COALESCE(credential_generation, 0)
+		FROM accounts a
+		WHERE `+upstreamTypeExpr+` = 'claude'
+		ORDER BY id`)
+	if err != nil {
+		return fmt.Errorf("读取 Claude 账号代际: %w", err)
+	}
+	const batchSize = 500
+	zeroGenerationIDs := make([]int64, 0)
+	idsByGeneration := make(map[int64][]int64)
+	for accountRows.Next() {
+		var id, generation int64
+		if err := accountRows.Scan(&id, &generation); err != nil {
+			accountRows.Close()
+			return fmt.Errorf("读取 Claude 账号代际: %w", err)
+		}
+		if generation <= 0 {
+			zeroGenerationIDs = append(zeroGenerationIDs, id)
+			continue
+		}
+		idsByGeneration[generation] = append(idsByGeneration[generation], id)
+	}
+	if err := accountRows.Err(); err != nil {
+		accountRows.Close()
+		return fmt.Errorf("读取 Claude 账号代际: %w", err)
+	}
+	if err := accountRows.Close(); err != nil {
+		return fmt.Errorf("关闭 Claude 账号代际游标: %w", err)
+	}
+
+	updateUsageBatch := func(ids []int64, generation *int64) (int64, error) {
+		var affectedTotal int64
+		for start := 0; start < len(ids); start += batchSize {
+			end := start + batchSize
+			if end > len(ids) {
+				end = len(ids)
+			}
+			batch := ids[start:end]
+			placeholders := dbPlaceholders(db.isSQLite(), 1, len(batch))
+			args := argsFromInt64s(batch)
+			generationPredicate := "COALESCE(credential_generation, 0) = 0"
+			if generation != nil {
+				args = append(args, *generation)
+				generationPlaceholder := "?"
+				if !db.isSQLite() {
+					generationPlaceholder = fmt.Sprintf("$%d", len(args))
+				}
+				generationPredicate = "credential_generation = " + generationPlaceholder
+			}
+			usageQuery := fmt.Sprintf(`
+				UPDATE usage_logs
+				SET channel = 'claude'
+				WHERE COALESCE(channel, '') IN ('', 'codex')
+				  AND account_id IN (%s)
+				  AND (LOWER(COALESCE(endpoint, '')) LIKE '/v1/messages%%'
+				       OR LOWER(COALESCE(model, '')) LIKE 'claude-%%')
+				  AND %s`, strings.Join(placeholders, ","), generationPredicate)
+			res, err := tx.ExecContext(ctx, usageQuery, args...)
+			if err != nil {
+				return affectedTotal, fmt.Errorf("回填 Claude usage_logs 渠道: %w", err)
+			}
+			if affected, err := res.RowsAffected(); err == nil {
+				affectedTotal += affected
+			}
+		}
+		return affectedTotal, nil
+	}
+
+	var usageAffected int64
+	if affected, err := updateUsageBatch(zeroGenerationIDs, nil); err != nil {
+		return err
+	} else {
+		usageAffected += affected
+	}
+	generations := make([]int64, 0, len(idsByGeneration))
+	for generation := range idsByGeneration {
+		generations = append(generations, generation)
+	}
+	sort.Slice(generations, func(i, j int) bool { return generations[i] < generations[j] })
+	for _, generation := range generations {
+		if affected, err := updateUsageBatch(idsByGeneration[generation], &generation); err != nil {
+			return err
+		} else {
+			usageAffected += affected
+		}
+	}
+	if usageAffected > 0 {
+		log.Printf("[data_migration] %s: %d 条 usage_logs 回填为 Claude", dataMigrationClaudeProviderV1, usageAffected)
+	}
+
+	groupQuery := `
+		UPDATE account_groups SET channel = 'claude'
+		WHERE COALESCE(channel, 'codex') = 'codex' AND id IN (
+			SELECT m.group_id
+			FROM account_group_members m
+			JOIN accounts a ON a.id = m.account_id
+			WHERE a.status <> 'deleted' AND COALESCE(a.error_message, '') <> 'deleted'
+			GROUP BY m.group_id
+			HAVING COUNT(*) > 0 AND COUNT(*) = SUM(CASE WHEN ` + upstreamTypeExpr + ` = 'claude' THEN 1 ELSE 0 END)
+		)`
+	if res, err := tx.ExecContext(ctx, groupQuery); err != nil {
+		return fmt.Errorf("归类 Claude 分组: %w", err)
+	} else if affected, err := res.RowsAffected(); err == nil && affected > 0 {
+		log.Printf("[data_migration] %s: %d 个存量分组归类为 Claude 渠道", dataMigrationClaudeProviderV1, affected)
 	}
 	return nil
 }
@@ -267,7 +398,7 @@ func (db *DB) migrateWorkspaceIdentityV3(ctx context.Context, tx *sql.Tx) error 
 			)
 			if workspaceID != "" && strings.EqualFold(tokenEmail, email) {
 				account.credentials["workspace_id"] = workspaceID
-				encoded, err := json.Marshal(account.credentials)
+				encoded, err := json.Marshal(encryptSensitiveCredentials(account.credentials))
 				if err != nil {
 					return err
 				}

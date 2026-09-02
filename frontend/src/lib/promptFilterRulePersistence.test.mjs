@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
+import { extractBalancedBody } from './sourceBoundary.mjs'
 
 const promptFilterSource = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url), 'utf8')
 const settingsSource = readFileSync(new URL('../pages/Settings.tsx', import.meta.url), 'utf8')
@@ -8,11 +9,11 @@ const apiSource = readFileSync(new URL('../api.ts', import.meta.url), 'utf8')
 const typesSource = readFileSync(new URL('../types.ts', import.meta.url), 'utf8')
 
 test('ordinary settings saves never submit a stale custom rule snapshot', () => {
-  const promptFilterPayloadStart = promptFilterSource.indexOf('function promptFilterSavePayload')
-  const promptFilterPayloadEnd = promptFilterSource.indexOf('\n}\n\nexport default function PromptFilter', promptFilterPayloadStart)
-  assert.ok(promptFilterPayloadStart >= 0, 'missing Prompt Filter save payload builder')
-  assert.ok(promptFilterPayloadEnd > promptFilterPayloadStart, 'missing Prompt Filter save payload boundary')
-  const promptFilterPayload = promptFilterSource.slice(promptFilterPayloadStart, promptFilterPayloadEnd)
+  const promptFilterPayload = extractBalancedBody(
+    promptFilterSource,
+    'function promptFilterSavePayload',
+    'Prompt Filter save payload builder',
+  )
   assert.equal(promptFilterPayload.includes('delete payload.prompt_filter_custom_patterns'), true)
 
   const settingsSaveStart = settingsSource.indexOf('const handleSaveSettings = async () =>')

@@ -25,6 +25,11 @@ interface AccountQuotaDistributionChartProps {
   onRefreshAnalysis?: () => Promise<void> | void
   onProbeStarted?: () => void
   onProbeError?: (message: string) => void
+  /** 描述/空态文案的 i18n key 覆写(带 {{sampled}}/{{total}} 插值);默认 Codex 文案。 */
+  descKey?: string
+  emptyKey?: string
+  /** 是否显示「立即采样」探针按钮(探针是 Codex 用量链路,其他渠道应隐藏)。 */
+  showProbe?: boolean
 }
 
 interface DistributionBucket {
@@ -71,6 +76,9 @@ export default function AccountQuotaDistributionChart({
   onRefreshAnalysis,
   onProbeStarted,
   onProbeError,
+  descKey = 'accounts.quotaDistributionDesc',
+  emptyKey = 'accounts.quotaDistributionEmpty',
+  showProbe = true,
 }: AccountQuotaDistributionChartProps) {
   const { t } = useTranslation()
   const [probing, setProbing] = useState(false)
@@ -182,24 +190,26 @@ export default function AccountQuotaDistributionChart({
               <h3 className="text-base font-semibold text-foreground">{t('accounts.quotaDistributionTitle')}</h3>
             </div>
             <p className="mt-1 text-sm text-muted-foreground">
-              {t('accounts.quotaDistributionDesc', {
+              {t(descKey, {
                 sampled: distribution.sampled,
                 total: distribution.total,
               })}
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={handleProbe}
-              disabled={probing}
-              title={t('accounts.quotaDistributionRefreshTitle')}
-              className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-all hover:text-foreground disabled:opacity-50"
-            >
-              <RefreshCw className={`size-3.5 ${probing ? 'animate-spin' : ''}`} />
-              <span>{probing ? t('accounts.quotaDistributionRefreshing') : t('accounts.quotaDistributionRefresh')}</span>
-            </button>
-          </div>
+          {showProbe ? (
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={handleProbe}
+                disabled={probing}
+                title={t('accounts.quotaDistributionRefreshTitle')}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2.5 py-1.5 text-xs font-medium text-muted-foreground transition-all hover:text-foreground disabled:opacity-50"
+              >
+                <RefreshCw className={`size-3.5 ${probing ? 'animate-spin' : ''}`} />
+                <span>{probing ? t('accounts.quotaDistributionRefreshing') : t('accounts.quotaDistributionRefresh')}</span>
+              </button>
+            </div>
+          ) : null}
         </div>
 
         <div className={compact ? 'flex min-h-0 flex-1 flex-col gap-3' : 'grid gap-4 xl:grid-cols-[minmax(0,1fr)_320px]'}>
@@ -222,6 +232,8 @@ export default function AccountQuotaDistributionChart({
                     axisLine={{ stroke: gridColor }}
                     tickLine={{ stroke: gridColor }}
                     allowDecimals={false}
+                    // 账号数轴上限贴合实际账号数(采样总数),不再固定放大到 4。
+                    domain={[0, Math.max(1, distribution.total)]}
                     width={44}
                   />
                   <YAxis
@@ -281,7 +293,7 @@ export default function AccountQuotaDistributionChart({
               <div className="flex h-full items-center justify-center rounded-lg border border-dashed border-border bg-muted/20 px-4 text-center text-sm text-muted-foreground">
                 {distribution.total > 0
                   ? t('accounts.quotaDistributionNoSample')
-                  : t('accounts.quotaDistributionEmpty')}
+                  : t(emptyKey)}
               </div>
             )}
           </div>
@@ -294,7 +306,7 @@ export default function AccountQuotaDistributionChart({
             <QuotaMetric label={t('accounts.quotaDistributionExhausted')} value={distribution.exhausted} tone={distribution.exhausted > 0 ? 'danger' : 'neutral'} compact={compact} />
             <QuotaMetric
               label={t('accounts.quotaDistributionAverageUsed')}
-              value={distribution.averageUsed === null ? '-' : `${distribution.averageUsed.toFixed(1)}%`}
+              value={distribution.averageUsed == null ? '-' : `${distribution.averageUsed.toFixed(1)}%`}
               tone={getAverageUsedTone(distribution.averageUsed)}
               compact={compact}
             />
@@ -348,8 +360,8 @@ function QuotaMetric({ label, value, tone = 'neutral', compact = false }: { labe
   )
 }
 
-function getAverageUsedTone(value: number | null): 'neutral' | 'warning' | 'danger' | 'success' {
-  if (value === null) return 'neutral'
+function getAverageUsedTone(value: number | null | undefined): 'neutral' | 'warning' | 'danger' | 'success' {
+  if (value == null) return 'neutral'
   if (value >= 90) return 'danger'
   if (value >= 70) return 'warning'
   if (value < 30) return 'success'

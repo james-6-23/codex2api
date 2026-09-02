@@ -9,10 +9,12 @@ const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url
 
 test('model review history has independent filtering and pagination from local audit rows', () => {
   assert.match(source, /usePersistedPageSize\('prompt_review_logs'/)
-  assert.match(source, /page: reviewPage,[\s\S]*reviewed: true/)
-  assert.match(source, /page: logPage,[\s\S]*reviewed: false/)
+  assert.match(source, /page: pageOverride \?\? reviewPage,[\s\S]*reviewed: true/)
+  assert.doesNotMatch(source, /const loadLocalLogs = useCallback[\s\S]*reviewed: false/)
   assert.match(source, /const loadReviewLogs = useCallback/)
   assert.match(source, /const loadLocalLogs = useCallback/)
+  assert.match(source, /const defaultLocalLogFilters:[\s\S]*source: 'local_filter'/)
+  assert.match(source, /useState<LogFilters>\(initialLocalLogFilters\)/)
   assert.match(source, /reviewResult: reviewFilters\.reviewResult/)
   assert.match(source, /showReviewResult/)
   assert.match(source, /<PromptReviewLogsTable logs=\{reviewLogs\}/)
@@ -44,14 +46,16 @@ test('model review history exposes parsed request and response metadata without 
   assert.match(zh.promptFilter.reviewHistoryDesc, /不保存审核 Key、Authorization 或原始 Payload/)
 })
 
-test('each audit section clears independently and explains that risk profiles are retained', () => {
+test('audit cleanup refreshes overlapping log projections and retains risk profiles', () => {
   assert.match(source, /clearLogSection\('incidents'\)/)
   assert.match(source, /clearLogSection\('review'\)/)
   assert.match(source, /clearLogSection\('local'\)/)
-  assert.match(source, /clearPromptFilterLogs\(\{ reviewed: section === 'review' \}\)/)
   assert.match(source, /clearPromptPolicyIncidents\(\)/)
   assert.doesNotMatch(source, /clearLogs\(\)\.then\(refreshAll\)/)
-  assert.match(api, /clearPromptFilterLogs: \(params: \{ reviewed\?: boolean \} = \{\}\)/)
+  assert.match(api, /clearPromptFilterLogs: \(params: \{ reviewed\?: boolean; source\?: 'local_filter' \} = \{\}\)/)
+  assert.match(source, /clearPromptFilterLogs\(section === 'review' \? \{ reviewed: true \} : \{ source: 'local_filter' \}\)/)
+  assert.match(source, /Promise\.all\(\[loadReviewLogs\(1\), loadLocalLogs\(1\)\]\)/)
+  assert.doesNotMatch(source, /section === 'review'[\s\S]*setReviewLogs\(\[\]\)[\s\S]*else[\s\S]*setLogs\(\[\]\)/)
   assert.match(api, /clearPromptPolicyIncidents: \(\)/)
   assert.match(zh.promptFilter.cyberIncidentsCleared, /风险画像已保留/)
   assert.match(zh.promptFilter.reviewLogsCleared, /风险画像已保留/)

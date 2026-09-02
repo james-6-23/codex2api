@@ -31,6 +31,24 @@ func TestNormalizeRuntimeSettingsAutoResetCreditsWindow(t *testing.T) {
 	}
 }
 
+func TestDefaultRuntimeSettingsAutoActivate5hDisabled(t *testing.T) {
+	if DefaultRuntimeSettings().AutoActivate5hWindowEnabled {
+		t.Fatal("AutoActivate5hWindowEnabled = true, want false")
+	}
+}
+
+func TestApplyRuntimeSettingsFromSystemAutoActivate5h(t *testing.T) {
+	previous := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
+
+	settings := ApplyRuntimeSettingsFromSystem(&database.SystemSettings{
+		AutoActivate5hWindowEnabled: true,
+	})
+	if !settings.AutoActivate5hWindowEnabled {
+		t.Fatal("AutoActivate5hWindowEnabled = false, want true")
+	}
+}
+
 func TestApplyRuntimeSettingsFromSystemAutoResetCredits(t *testing.T) {
 	previous := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(previous) })

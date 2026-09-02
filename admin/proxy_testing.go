@@ -26,6 +26,14 @@ const (
 	proxyBatchTestMaxIDs      = 100
 	proxyBatchTestMaxBody     = 64 << 10
 	proxyProbeMaxBody         = 1 << 20
+	proxyProbeIPAPIFields     = "status,message,country,regionName,city,isp,query"
+)
+
+var (
+	proxyProbeIPv4URLFn      = defaultProxyProbeIPv4URL
+	proxyProbeIPv6EchoURLsFn = defaultProxyProbeIPv6EchoURLs
+	proxyProbeLookupGeoFn    = lookupProxyExitGeo
+	proxyProbeGeoHTTPClient  = &http.Client{Timeout: 5 * time.Second}
 )
 
 type proxyProbeResult struct {
@@ -115,11 +123,88 @@ func probeProxyWithTimeout(
 	if lang == "" {
 		lang = "en"
 	}
-	probeURL := fmt.Sprintf(
-		"http://ip-api.com/json/?lang=%s&fields=status,message,country,regionName,city,isp,query",
-		url.QueryEscape(lang),
-	)
+
+	client := &http.Client{Transport: transport, Timeout: clientTimeout}
 	var gotTransportConnection atomic.Bool
+	connectionState := func() proxyProbeConnectionState {
+		return proxyProbeConnectionState{
+			ConnectedToProxyEndpoint:  connectedToProxyEndpoint.Load(),
+			StartedSOCKSTargetConnect: startedSOCKSTargetConnect.Load(),
+			GotTransportConnection:    gotTransportConnection.Load(),
+		}
+	}
+	primary := doProxyProbeRequest(
+		ctx,
+		client,
+		&gotTransportConnection,
+		proxyScheme,
+		connectionState,
+		proxyProbeIPv4URLFn(lang),
+		parseIPAPIProbeBody,
+	)
+	if primary.Success || ctx.Err() != nil || !shouldFallbackToIPv6Probe(primary) {
+		return primary
+	}
+
+	var ipv6Result proxyProbeResult
+	for _, echoURL := range proxyProbeIPv6EchoURLsFn() {
+		if ctx.Err() != nil {
+			return primary
+		}
+		ipv6Result = doProxyProbeRequest(
+			ctx,
+			client,
+			&gotTransportConnection,
+			proxyScheme,
+			connectionState,
+			echoURL,
+			parseProxyProbeEchoBody,
+		)
+		if ipv6Result.Success {
+			break
+		}
+	}
+	if !ipv6Result.Success {
+		if primary.Error != "" {
+			primary.Error += "；IPv4/IPv6 检测目标都不可达"
+		}
+		return primary
+	}
+
+	country, region, city, isp := proxyProbeLookupGeoFn(ctx, ipv6Result.IP, lang)
+	ipv6Result.Country = country
+	ipv6Result.Region = region
+	ipv6Result.City = city
+	ipv6Result.ISP = isp
+	ipv6Result.Location = joinProxyProbeLocation(country, region, city)
+	return ipv6Result
+}
+
+func defaultProxyProbeIPv4URL(lang string) string {
+	return fmt.Sprintf(
+		"http://ip-api.com/json/?lang=%s&fields=%s",
+		url.QueryEscape(lang),
+		proxyProbeIPAPIFields,
+	)
+}
+
+func defaultProxyProbeIPv6EchoURLs() []string {
+	return []string{
+		"https://api6.ipify.org?format=json",
+		"https://ipv6.icanhazip.com",
+	}
+}
+
+func doProxyProbeRequest(
+	ctx context.Context,
+	client *http.Client,
+	gotTransportConnection *atomic.Bool,
+	proxyScheme string,
+	connectionState func() proxyProbeConnectionState,
+	probeURL string,
+	parseBody func([]byte, int) proxyProbeResult,
+) proxyProbeResult {
+	gotTransportConnection.Store(false)
 	trace := &httptrace.ClientTrace{
 		GotConn: func(httptrace.GotConnInfo) {
 			gotTransportConnection.Store(true)
@@ -135,24 +220,14 @@ func probeProxyWithTimeout(
 		return proxyProbeResult{Error: fmt.Sprintf("创建代理检测请求失败: %v", err)}
 	}
 
-	client := &http.Client{Transport: transport, Timeout: clientTimeout}
 	start := time.Now()
 	resp, err := client.Do(req)
 	latencyMs := int(time.Since(start).Milliseconds())
 	if err != nil {
 		return proxyProbeResult{
-			Conclusive: proxyProbeErrorIsConclusive(
-				ctx,
-				err,
-				proxyProbeConnectionState{
-					ConnectedToProxyEndpoint:  connectedToProxyEndpoint.Load(),
-					StartedSOCKSTargetConnect: startedSOCKSTargetConnect.Load(),
-					GotTransportConnection:    gotTransportConnection.Load(),
-				},
-				proxyScheme,
-			),
-			LatencyMs: latencyMs,
-			Error:     fmt.Sprintf("连接失败: %v", err),
+			Conclusive: proxyProbeErrorIsConclusive(ctx, err, connectionState(), proxyScheme),
+			LatencyMs:  latencyMs,
+			Error:      fmt.Sprintf("连接失败: %v", err),
 		}
 	}
 	defer resp.Body.Close()
@@ -183,13 +258,16 @@ func probeProxyWithTimeout(
 			Error:     "代理检测服务响应过大",
 		}
 	}
+	return parseBody(body, latencyMs)
+}
+
+func parseIPAPIProbeBody(body []byte, latencyMs int) proxyProbeResult {
 	if !gjson.ValidBytes(body) {
 		return proxyProbeResult{
 			LatencyMs: latencyMs,
 			Error:     "代理检测服务返回了无效响应",
 		}
 	}
-
 	result := gjson.ParseBytes(body)
 	if result.Get("status").String() != "success" {
 		message := boundedProxyProbeField(result.Get("message").String(), 256)
@@ -200,7 +278,6 @@ func probeProxyWithTimeout(
 		}
 		return proxyProbeResult{LatencyMs: latencyMs, Error: message}
 	}
-
 	ip := strings.TrimSpace(result.Get("query").String())
 	if net.ParseIP(ip) == nil {
 		return proxyProbeResult{
@@ -208,9 +285,7 @@ func probeProxyWithTimeout(
 			Error:     "代理检测服务响应缺少有效的出口 IP",
 		}
 	}
-	country := boundedProxyProbeField(result.Get("country").String(), 80)
-	region := boundedProxyProbeField(result.Get("regionName").String(), 80)
-	city := boundedProxyProbeField(result.Get("city").String(), 80)
+	country, region, city, isp := parseIPAPIGeoFields(result)
 	return proxyProbeResult{
 		Success:    true,
 		Conclusive: true,
@@ -218,10 +293,161 @@ func probeProxyWithTimeout(
 		Country:    country,
 		Region:     region,
 		City:       city,
-		ISP:        boundedProxyProbeField(result.Get("isp").String(), 160),
+		ISP:        isp,
 		LatencyMs:  latencyMs,
-		Location:   country + "·" + region + "·" + city,
+		Location:   joinProxyProbeLocation(country, region, city),
 	}
+}
+
+func parseProxyProbeEchoBody(body []byte, latencyMs int) proxyProbeResult {
+	ip, err := parseProxyProbeExitIP(body)
+	if err != nil {
+		return proxyProbeResult{
+			LatencyMs: latencyMs,
+			Error:     "代理检测服务响应缺少有效的出口 IP",
+		}
+	}
+	return proxyProbeResult{
+		Success:    true,
+		Conclusive: true,
+		IP:         ip,
+		LatencyMs:  latencyMs,
+	}
+}
+
+func parseProxyProbeExitIP(body []byte) (string, error) {
+	if gjson.ValidBytes(body) {
+		parsed := gjson.ParseBytes(body)
+		for _, key := range []string{"ip", "query"} {
+			ip := strings.TrimSpace(parsed.Get(key).String())
+			if net.ParseIP(ip) != nil {
+				return ip, nil
+			}
+		}
+	}
+	text := strings.TrimSpace(string(body))
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if after, ok := strings.CutPrefix(line, "ip="); ok {
+			ip := strings.TrimSpace(after)
+			if net.ParseIP(ip) != nil {
+				return ip, nil
+			}
+		}
+	}
+	if ip := net.ParseIP(text); ip != nil {
+		return ip.String(), nil
+	}
+	return "", errors.New("missing exit ip")
+}
+
+func parseIPAPIGeoFields(result gjson.Result) (country, region, city, isp string) {
+	return boundedProxyProbeField(result.Get("country").String(), 80),
+		boundedProxyProbeField(result.Get("regionName").String(), 80),
+		boundedProxyProbeField(result.Get("city").String(), 80),
+		boundedProxyProbeField(result.Get("isp").String(), 160)
+}
+
+func parseIPWhoisGeoFields(result gjson.Result) (country, region, city, isp string) {
+	return boundedProxyProbeField(result.Get("country").String(), 80),
+		boundedProxyProbeField(result.Get("region").String(), 80),
+		boundedProxyProbeField(result.Get("city").String(), 80),
+		boundedProxyProbeField(result.Get("connection.isp").String(), 160)
+}
+
+func joinProxyProbeLocation(country, region, city string) string {
+	if country == "" && region == "" && city == "" {
+		return ""
+	}
+	return country + "·" + region + "·" + city
+}
+
+func shouldFallbackToIPv6Probe(result proxyProbeResult) bool {
+	if result.Success || result.Conclusive {
+		return false
+	}
+	return proxyProbeErrorLooksLikeTargetUnreachable(result.Error)
+}
+
+func proxyProbeErrorLooksLikeTargetUnreachable(message string) bool {
+	message = strings.ToLower(message)
+	for _, fragment := range []string{
+		"unknown error network unreachable",
+		"unknown error host unreachable",
+		"connect: network is unreachable",
+		"connect: host unreachable",
+		"no route to host",
+	} {
+		if strings.Contains(message, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
+func lookupProxyExitGeo(ctx context.Context, ip, lang string) (country, region, city, isp string) {
+	if net.ParseIP(ip) == nil {
+		return "", "", "", ""
+	}
+	if country, region, city, isp, ok := fetchIPAPIGeo(ctx, ip, lang); ok {
+		return country, region, city, isp
+	}
+	return fetchIPWhoisGeo(ctx, ip)
+}
+
+func fetchIPAPIGeo(ctx context.Context, ip, lang string) (country, region, city, isp string, ok bool) {
+	probeURL := fmt.Sprintf(
+		"http://ip-api.com/json/%s?lang=%s&fields=%s",
+		url.PathEscape(ip),
+		url.QueryEscape(lang),
+		proxyProbeIPAPIFields,
+	)
+	body, err := fetchProxyProbeGeoBody(ctx, probeURL)
+	if err != nil || !gjson.ValidBytes(body) {
+		return "", "", "", "", false
+	}
+	result := gjson.ParseBytes(body)
+	if result.Get("status").String() != "success" {
+		return "", "", "", "", false
+	}
+	country, region, city, isp = parseIPAPIGeoFields(result)
+	return country, region, city, isp, true
+}
+
+func fetchIPWhoisGeo(ctx context.Context, ip string) (country, region, city, isp string) {
+	probeURL := "https://ipwho.is/" + url.PathEscape(ip)
+	body, err := fetchProxyProbeGeoBody(ctx, probeURL)
+	if err != nil || !gjson.ValidBytes(body) {
+		return "", "", "", ""
+	}
+	result := gjson.ParseBytes(body)
+	if !result.Get("success").Bool() {
+		return "", "", "", ""
+	}
+	return parseIPWhoisGeoFields(result)
+}
+
+func fetchProxyProbeGeoBody(ctx context.Context, probeURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := proxyProbeGeoHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, fmt.Errorf("geo lookup HTTP %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, proxyProbeMaxBody+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(body) > proxyProbeMaxBody {
+		return nil, errors.New("geo lookup response too large")
+	}
+	return body, nil
 }
 
 func boundedProxyProbeField(value string, maxRunes int) string {

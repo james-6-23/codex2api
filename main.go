@@ -208,6 +208,19 @@ func main() {
 		log.Fatalf("加载响应缓存设置失败: %v", err)
 	}
 	responseCacheCancel()
+	antigravityOAuthCtx, antigravityOAuthCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if raw, err := db.LoadAntigravityOAuthConfig(antigravityOAuthCtx); err != nil {
+		log.Printf("加载 Antigravity OAuth client 设置失败(继续以环境变量为准): %v", err)
+	} else if parsed, parseErr := auth.ParseAntigravityOAuthSettings(raw); parseErr != nil {
+		log.Printf("Antigravity OAuth client 设置解析失败(继续以环境变量为准,请在管理页重新保存): %v", parseErr)
+	} else {
+		auth.SetConfiguredAntigravityOAuth(parsed)
+		if len(parsed.Clients) > 0 {
+			log.Printf("Antigravity OAuth client 设置已加载: %d 个 client", len(parsed.Clients))
+		}
+	}
+	antigravityOAuthCancel()
+
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
 		"响应缓存设置已加载: generation=%d total=%d entry=%d reconstruct=%d",
@@ -324,6 +337,7 @@ func main() {
 		log.Fatalf("启动响应缓存设置同步失败")
 	}
 	adminHandler.StartAutoResetCredits(backgroundCtx)
+	adminHandler.StartAutoActivate5hWindow(backgroundCtx)
 	// Grok 账号状态定期探测（默认关，由 grok 系统设置开关/间隔控制）
 	adminHandler.StartGrokStatusProbe(backgroundCtx)
 	// 官方结算用量按天快照：上游只保留 7 天，不落库就永久丢失，长期历史全靠这个任务。
@@ -417,12 +431,30 @@ func main() {
 					fi, statErr := f.Stat()
 					f.Close()
 					if statErr == nil && !fi.IsDir() {
+						if strings.HasPrefix(trimmed, "assets/") {
+							c.Header("Cache-Control", "public, max-age=31536000, immutable")
+						} else {
+							c.Header("Cache-Control", "no-cache")
+						}
 						c.FileFromFS(fp, httpFS)
 						return
 					}
 				}
+				// 带 hash 的静态资源不存在时必须返回 404。若回退到 index.html，
+				// 浏览器会把 HTML 当成 JS/CSS 解析并反复触发 chunk load error。
+				if strings.HasPrefix(trimmed, "assets/") {
+					c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+					c.Status(http.StatusNotFound)
+					return
+				}
 			}
 			// 文件不存在或者是目录 → 直接返回 index.html 字节（让 React Router 处理）
+			c.Header("Cache-Control", "no-store, no-cache, must-revalidate")
+			c.Header("Pragma", "no-cache")
+			if c.Query("refresh-assets") == "1" {
+				// 仅清理 HTTP cache，不影响登录态、localStorage 或站点配置。
+				c.Header("Clear-Site-Data", `"cache"`)
+			}
 			c.Data(http.StatusOK, "text/html; charset=utf-8", indexHTML)
 		}
 		serveKeyUsageFrontend := func(c *gin.Context) {
@@ -577,6 +609,7 @@ func main() {
 		log.Printf("HTTP 服务优雅关闭超时: %v", err)
 	}
 	adminHandler.WaitAutoResetCredits()
+	adminHandler.WaitAutoActivate5hWindow()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
 	store.Stop()
@@ -602,7 +635,13 @@ func loggerMiddleware() gin.HandlerFunc {
 		start := time.Now()
 		c.Next()
 		latency := time.Since(start)
-		if shouldSkipAccessLog(c.Request.Method, c.Request.URL.Path, c.Writer.Status()) {
+		statusCode := c.Writer.Status()
+		if override, ok := c.Get(proxy.AccessLogStatusContextKey); ok {
+			if status, valid := override.(int); valid && status >= 100 && status <= 599 {
+				statusCode = status
+			}
+		}
+		if shouldSkipAccessLog(c.Request.Method, c.Request.URL.Path, statusCode) {
 			return
 		}
 
@@ -639,9 +678,9 @@ func loggerMiddleware() gin.HandlerFunc {
 		}
 
 		if emailStr != "" {
-			log.Printf("%s %s %d %v%s [%s] [%s]", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency, tagStr, emailStr, proxyStr)
+			log.Printf("%s %s %d %v%s [%s] [%s]", c.Request.Method, c.Request.URL.Path, statusCode, latency, tagStr, emailStr, proxyStr)
 		} else {
-			log.Printf("%s %s %d %v%s", c.Request.Method, c.Request.URL.Path, c.Writer.Status(), latency, tagStr)
+			log.Printf("%s %s %d %v%s", c.Request.Method, c.Request.URL.Path, statusCode, latency, tagStr)
 		}
 	}
 }

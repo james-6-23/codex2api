@@ -18,3 +18,11 @@ func TestCleanPlanAllowAcceptsGrokLiveTiersAndAPI(t *testing.T) {
 		t.Fatalf("cleanPlanAllow() = %#v, want %#v", got, want)
 	}
 }
+
+func TestCleanPlanAllowAcceptsClaudePlans(t *testing.T) {
+	input := []string{"Claude", "max-5x", "max-20x", "enterprise", "team", "free", "unknown", "MAX-5X"}
+	want := []string{"claude", "max-5x", "max-20x", "enterprise", "team", "free"}
+	if got := cleanPlanAllow(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanPlanAllow() = %#v, want %#v", got, want)
+	}
+}

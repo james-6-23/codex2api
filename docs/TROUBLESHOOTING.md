@@ -348,14 +348,84 @@ PgMaxConns: 100
 RedisPoolSize: 50
 ```
 
-2. **启用快速调度器**
+2. **切换索引调度器**
 ```bash
-FAST_SCHEDULER_ENABLED=true
+CODEX_SCHEDULER_ENGINE=indexed
 ```
 
 3. **优化代理配置**
 - 使用更近的代理节点
 - 启用代理池
+
+### 症状: RPM 不变，但账号越多 CPU 越高或直接满核
+
+先查看调度热路径，而不是只看总 RPM：
+
+```bash
+curl -s -H "X-Admin-Key: your-secret" \
+  http://localhost:8080/api/admin/ops/overview |
+  jq '.scheduler | {
+    engine,
+    selection_total,
+    selection_fast_hit,
+    selection_slow_hit,
+    slow_scanned_accounts,
+    waiters,
+    wait_wakeups,
+    routing_cache_entries,
+    routing_cache_accounts,
+    shadow_checks,
+    shadow_mismatches,
+    outbox_backlog,
+    outbox_lag_ms,
+    outbox_errors
+  }'
+```
+
+判断方法：
+
+- `engine=legacy` 且 `slow_scanned_accounts` 随请求快速增长，说明 CPU 主要消耗在每次选号的 O(N) 全池过滤/评分。
+- `engine=indexed` 时 `selection_slow_hit` 或 `slow_scanned_accounts` 仍增长，检查是否启用了 lazy fallback，或是否存在尚未迁移的调用路径。
+- `routing_cache_entries=0` 不一定异常；只有候选比例不超过全池约 1/4 的稀疏 API Key 才建立子池，密集规则复用全局索引。
+- `outbox_backlog` 持续增长、`outbox_lag_ms > 5000` 或错误数增加，说明跨实例内存投影落后，应先检查数据库连接、触发器和实例日志。
+- `waiters` 高但 `wait_wakeups` 不增长，检查是否所有账号都被永久禁用；正常的并发释放或冷却恢复应产生事件唤醒。
+
+生产切换建议先在管理后台设为 `shadow`，观察一段真实流量下 `shadow_mismatches` 是否保持为 0 或能由瞬时并发竞争解释，再切到 `indexed`。如出现选号异常，可立即切回 `legacy`；数据库 outbox 和维护任务表可以保留，不需要回滚 schema。环境变量 `CODEX_SCHEDULER_ENGINE` 的优先级高于管理后台，若页面切换不生效，请先检查容器环境。
+
+### 调度 outbox 的版本要求与回滚
+
+- **PostgreSQL 最低版本为 11**：outbox 触发器使用 `CREATE TRIGGER ... EXECUTE FUNCTION` 语法（PG 10 及更早只认 `EXECUTE PROCEDURE`），且 `accounts` 表新增的 `credential_generation NOT NULL DEFAULT` 列在 PG 11+ 才是元数据级变更。自管 PG ≤ 10 的部署升级前需先升级数据库。官方 compose 使用的 PostgreSQL 版本不受影响。
+- **回滚到旧版本二进制**：触发器会留在数据库里继续向 `scheduler_outbox` 写事件，而旧版本没有消费者和清理任务，表会持续增长。短期回滚可以不处理（重新升级后自动消费并清理，也可直接 `TRUNCATE scheduler_outbox`）；长期回滚请执行以下清理（PostgreSQL）：
+
+```sql
+DROP TRIGGER IF EXISTS scheduler_outbox_accounts_insert ON accounts;
+DROP TRIGGER IF EXISTS scheduler_outbox_accounts_update ON accounts;
+DROP TRIGGER IF EXISTS scheduler_outbox_accounts_delete ON accounts;
+DROP TRIGGER IF EXISTS scheduler_outbox_api_keys_insert ON api_keys;
+DROP TRIGGER IF EXISTS scheduler_outbox_api_keys_update ON api_keys;
+DROP TRIGGER IF EXISTS scheduler_outbox_api_keys_delete ON api_keys;
+DROP TRIGGER IF EXISTS scheduler_outbox_groups_insert ON account_groups;
+DROP TRIGGER IF EXISTS scheduler_outbox_groups_update ON account_groups;
+DROP TRIGGER IF EXISTS scheduler_outbox_groups_delete ON account_groups;
+DROP TRIGGER IF EXISTS scheduler_outbox_members_insert ON account_group_members;
+DROP TRIGGER IF EXISTS scheduler_outbox_members_delete ON account_group_members;
+DROP TRIGGER IF EXISTS scheduler_outbox_cooldowns_insert ON account_model_cooldowns;
+DROP TRIGGER IF EXISTS scheduler_outbox_cooldowns_update ON account_model_cooldowns;
+DROP TRIGGER IF EXISTS scheduler_outbox_cooldowns_delete ON account_model_cooldowns;
+DROP TRIGGER IF EXISTS scheduler_outbox_proxies_insert ON proxies;
+DROP TRIGGER IF EXISTS scheduler_outbox_proxies_update ON proxies;
+DROP TRIGGER IF EXISTS scheduler_outbox_proxies_delete ON proxies;
+DROP TRIGGER IF EXISTS scheduler_outbox_settings_update ON system_settings;
+DROP TRIGGER IF EXISTS grok_maintenance_accounts_insert ON accounts;
+DROP TRIGGER IF EXISTS grok_maintenance_accounts_update ON accounts;
+DROP TRIGGER IF EXISTS grok_maintenance_accounts_delete ON accounts;
+DROP FUNCTION IF EXISTS codex2api_scheduler_outbox_row();
+DROP FUNCTION IF EXISTS codex2api_grok_maintenance_account();
+DROP TABLE IF EXISTS scheduler_outbox;
+DROP TABLE IF EXISTS maintenance_jobs;
+```
+
+SQLite 部署执行对应的 `DROP TRIGGER IF EXISTS <同名触发器>;` 与 `DROP TABLE IF EXISTS scheduler_outbox; DROP TABLE IF EXISTS maintenance_jobs;` 即可。
 
 ### 症状: 内存占用高
 

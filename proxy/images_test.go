@@ -3,12 +3,14 @@ package proxy
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -637,6 +639,564 @@ func TestCollectImagesResponseUsesUpstreamFailureMessage(t *testing.T) {
 	}
 }
 
+func TestCollectImagesResponseClassifiesNoOutputOutcomes(t *testing.T) {
+	tests := []struct {
+		name       string
+		upstream   string
+		kind       imageNoOutputKind
+		statusCode int
+		retry      bool
+		code       string
+	}{
+		{
+			name:       "explicit safety refusal text",
+			upstream:   `data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"I cannot generate this because it violates the safety policy"}]}]}}` + "\n\n",
+			kind:       imageNoOutputSafety,
+			statusCode: http.StatusBadRequest,
+			code:       "content_policy_violation",
+		},
+		{
+			name:       "plain text capability fallback",
+			upstream:   `data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Try describing the scene in more detail."}]}]}}` + "\n\n",
+			kind:       imageNoOutputUnavailable,
+			statusCode: http.StatusBadGateway,
+			retry:      true,
+			code:       "image_generation_unavailable",
+		},
+		{
+			name:       "empty completed response",
+			upstream:   `data: {"type":"response.completed","response":{"output":[]}}` + "\n\n",
+			kind:       imageNoOutputEmpty,
+			statusCode: http.StatusBadGateway,
+			retry:      true,
+			code:       "image_generation_empty_output",
+		},
+		{
+			name:       "incomplete generation",
+			upstream:   `data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"max_output_tokens"}}}` + "\n\n",
+			kind:       imageNoOutputIncomplete,
+			statusCode: http.StatusBadGateway,
+			retry:      true,
+			code:       "response_incomplete",
+		},
+		{
+			name:       "incomplete content filter",
+			upstream:   `data: {"type":"response.incomplete","response":{"incomplete_details":{"reason":"content_filter"}}}` + "\n\n",
+			kind:       imageNoOutputSafety,
+			statusCode: http.StatusBadRequest,
+			code:       "content_policy_violation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, _, _, err := collectImagesResponse(context.Background(), strings.NewReader(tt.upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{})
+			outcome := imageNoOutputDetails(err)
+			if outcome == nil || outcome.kind != tt.kind {
+				t.Fatalf("outcome = %#v err=%v, want kind %s", outcome, err, tt.kind)
+			}
+			statusCode, payload := imageErrorResponse(err)
+			if statusCode != tt.statusCode || payload["error"].(gin.H)["code"] != tt.code {
+				t.Fatalf("response = (%d, %#v), want status=%d code=%s", statusCode, payload, tt.statusCode, tt.code)
+			}
+			generalRetries := 0
+			if got := shouldRetryImageStreamError(err, &generalRetries, 0, 0, maxImageAttempts); got != tt.retry {
+				t.Fatalf("retry = %t, want %t", got, tt.retry)
+			}
+		})
+	}
+}
+
+func TestStreamImagesNoOutputFailureStaysPrivateBeforeImageOutput(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := `data: {"type":"response.output_text.delta","delta":"Image generation is temporarily unavailable"}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"output":[]}}` + "\n\n"
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	handler := &Handler{}
+
+	_, imageCount, _, _, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
+	if outcome := imageNoOutputDetails(err); outcome == nil || outcome.kind != imageNoOutputUnavailable {
+		t.Fatalf("stream outcome = %#v err=%v", outcome, err)
+	}
+	if imageCount != 0 || wroteImageOutput {
+		t.Fatalf("image output = (count=%d wrote=%t), want none", imageCount, wroteImageOutput)
+	}
+	if body := recorder.Body.String(); strings.Contains(body, "temporarily unavailable") || strings.Contains(body, "event: error") {
+		t.Fatalf("retryable pre-output failure leaked downstream: %q", body)
+	}
+}
+
+func TestImageReadersHonorExplicitSSEErrorEvent(t *testing.T) {
+	upstream := "event: error\n" +
+		`data: {"type":"invalid_request_error","error":{"message":"explicit image failure"}}` + "\n\n"
+
+	_, _, _, _, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{})
+	if err == nil || !strings.Contains(err.Error(), "explicit image failure") {
+		t.Fatalf("collectImagesResponse error = %v, want explicit SSE error", err)
+	}
+
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	handler := &Handler{}
+
+	_, imageCount, _, _, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
+	if err == nil || !strings.Contains(err.Error(), "explicit image failure") {
+		t.Fatalf("streamImagesResponse error = %v, want explicit SSE error", err)
+	}
+	if imageCount != 0 || wroteImageOutput {
+		t.Fatalf("image output = (count=%d, wrote=%t), want no committed output", imageCount, wroteImageOutput)
+	}
+	if body := recorder.Body.String(); strings.Contains(body, "explicit image failure") || strings.Contains(body, "event: error") {
+		t.Fatalf("pre-output explicit SSE error leaked downstream: %q", body)
+	}
+}
+
+func TestForwardImagesSelectiveRetryBuffersWholeExplicitErrorAttempt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		resinCfg.Store(previousResin)
+	})
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{
+		Enabled:    true,
+		ErrorCodes: []string{"future_image_failure"},
+	}
+	ApplyRuntimeSettings(nextRuntime)
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			_, _ = fmt.Fprint(w, `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"ZmFpbGVkLXBhcnRpYWw=","partial_image_index":0}`+"\n\n")
+			_, _ = fmt.Fprint(w, `event: error`+"\n"+`data: {"type":"future_image_failure","error":{"message":"must stay upstream"}}`+"\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"created_at":1710000000,"output":[{"type":"image_generation_call","result":"`+tinyPNGBase64+`","output_format":"png"}]}}`+"\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-selective-replay-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "image-test-token", PlanType: "plus", AccountID: "image-test-account"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, tinyPNGBase64) || !strings.Contains(body, "image_generation.completed") {
+		t.Fatalf("successful image replay missing: %q", body)
+	}
+	if strings.Contains(body, "ZmFpbGVkLXBhcnRpYWw=") || strings.Contains(body, "must stay upstream") {
+		t.Fatalf("selected failed image attempt leaked downstream: %q", body)
+	}
+}
+
+func TestForwardImagesTextFallbackFailsOverWithoutCoolingAccount(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		resinCfg.Store(previousResin)
+	})
+	// The no-output fallback owns one bounded failover even when generic
+	// transport retries are disabled; it must not persist account/model state.
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
+	ApplyRuntimeSettings(nextRuntime)
+
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var tokens []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		tokens = append(tokens, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"Please try a different image prompt."}]}]}}`+"\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"created_at":1710000000,"output":[{"type":"image_generation_call","result":"`+tinyPNGBase64+`","output_format":"png"}]}}`+"\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-no-output-failover-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	first := &auth.Account{DBID: 1, AccessToken: "image-token-1", PlanType: "plus", AccountID: "image-account-1"}
+	second := &auth.Account{DBID: 2, AccessToken: "image-token-2", PlanType: "plus", AccountID: "image-account-2"}
+	store.AddAccount(first)
+	store.AddAccount(second)
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; status=%d body=%s", got, recorder.Code, recorder.Body.String())
+	}
+	mu.Lock()
+	gotTokens := append([]string(nil), tokens...)
+	mu.Unlock()
+	if len(gotTokens) != 2 || gotTokens[0] == gotTokens[1] {
+		t.Fatalf("expected account failover, authorization sequence=%v", gotTokens)
+	}
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), tinyPNGBase64) {
+		t.Fatalf("failover result: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	cooled := first.ModelCooldownRemaining("gpt-image-2") > 0 || second.ModelCooldownRemaining("gpt-image-2") > 0
+	if cooled {
+		t.Fatal("plain-text image fallback must not cool either account/model pair")
+	}
+}
+
+func TestImageCapabilityCooldownRequiresExplicitUpstreamEvidence(t *testing.T) {
+	plainTextErr := classifyImageNoOutput("Try describing the scene in more detail.")
+	if imageErrorNeedsModelCooldown(plainTextErr) {
+		t.Fatal("plain-text fallback must not request a persistent model cooldown")
+	}
+	safetyErr := classifyImageNoOutput("Blocked by the content policy.")
+	if imageErrorNeedsModelCooldown(safetyErr) {
+		t.Fatal("content-policy refusal must not request a model cooldown")
+	}
+
+	structuredErr := newImageResponseFailedError([]byte(`{"type":"response.failed","response":{"error":{"code":"image_generation_unavailable","message":"image generation is unavailable"}}}`))
+	if !imageErrorNeedsModelCooldown(structuredErr) {
+		t.Fatal("structured image_generation_unavailable must request a model cooldown")
+	}
+
+	toolMissing := []byte(`{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter.","param":"tool_choice","type":"invalid_request_error"}}`)
+	if !isExplicitImageGenerationCapabilityLoss(toolMissing) {
+		t.Fatal("explicit image_generation tool-missing error must be classified as capability loss")
+	}
+	if isExplicitImageGenerationCapabilityLoss([]byte(`{"error":{"message":"Invalid type for input[0].arguments"}}`)) {
+		t.Fatal("generic invalid_request_error must not be classified as image capability loss")
+	}
+}
+
+func TestForwardImagesExplicitToolMissingCoolsModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = fmt.Fprint(w, `{"error":{"message":"Tool choice 'image_generation' not found in 'tools' parameter.","param":"tool_choice","type":"invalid_request_error"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-capability-loss-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	account := &auth.Account{DBID: 1, AccessToken: "image-token", PlanType: "plus", AccountID: "image-account"}
+	store.AddAccount(account)
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+
+	if account.ModelCooldownRemaining("gpt-image-2") <= 0 {
+		t.Fatal("explicit image_generation tool-missing error should cool the account/model pair")
+	}
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want %d; body=%s", recorder.Code, http.StatusBadRequest, recorder.Body.String())
+	}
+}
+
+func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		resinCfg.Store(previousResin)
+	})
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{}
+	ApplyRuntimeSettings(nextRuntime)
+
+	var calls atomic.Int32
+	var mu sync.Mutex
+	var tokens []string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		tokens = append(tokens, r.Header.Get("Authorization"))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"output":[]}}`+"\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"output":[{"type":"image_generation_call","result":"`+tinyPNGBase64+`","output_format":"png"}]}}`+"\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-empty-retry-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0})
+	t.Cleanup(store.Stop)
+	account := &auth.Account{DBID: 1, AccessToken: "same-image-token", PlanType: "plus", AccountID: "same-image-account"}
+	store.AddAccount(account)
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw","tools":[{"type":"image_generation","model":"gpt-image-2"}]}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+
+	if calls.Load() != 2 || recorder.Code != http.StatusOK {
+		t.Fatalf("same-account retry failed: calls=%d status=%d body=%s", calls.Load(), recorder.Code, recorder.Body.String())
+	}
+	mu.Lock()
+	gotTokens := append([]string(nil), tokens...)
+	mu.Unlock()
+	if len(gotTokens) != 2 || gotTokens[0] != gotTokens[1] {
+		t.Fatalf("empty terminal should retry the same account once: %v", gotTokens)
+	}
+	if account.ModelCooldownRemaining("gpt-image-2") > 0 {
+		t.Fatal("empty terminal must not cool a healthy account")
+	}
+}
+
+func TestForwardImagesCommittedKeepaliveEndsWithSSEFailure(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	previousResin := resinCfg.Load()
+	previousKeepaliveInterval := continuousRetryKeepaliveInterval
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		resinCfg.Store(previousResin)
+		continuousRetryKeepaliveInterval = previousKeepaliveInterval
+	})
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{
+		Enabled:    true,
+		ErrorCodes: []string{"selected_elsewhere"},
+	}
+	ApplyRuntimeSettings(nextRuntime)
+	continuousRetryKeepaliveInterval = time.Millisecond
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(20 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = fmt.Fprint(w, `{"error":{"code":"future_unselected","message":"stop now"}}`)
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-committed-error-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "image-test-token", PlanType: "plus", AccountID: "image-test-account"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK || !strings.HasPrefix(body, continuousRetryKeepaliveComment) {
+		t.Fatalf("heartbeat did not commit SSE response: status=%d body=%q", recorder.Code, body)
+	}
+	if !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
+		t.Fatalf("committed stream missing terminal response.failed: %q", body)
+	}
+}
+
+func TestImageCollectorsRequireSuccessfulTerminalWhenRetryBuffering(t *testing.T) {
+	upstream := `data: {"type":"response.output_item.done","item":{"type":"image_generation_call","result":"` + tinyPNGBase64 + `","output_format":"png"}}` + "\n\n"
+
+	out, _, imageCount, _, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{})
+	if err != nil || imageCount != 1 || !strings.Contains(string(out), tinyPNGBase64) {
+		t.Fatalf("legacy collector fallback changed: count=%d err=%v out=%s", imageCount, err, out)
+	}
+
+	out, _, imageCount, _, err = collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{}, true)
+	if err == nil || imageCount != 0 || len(out) != 0 || !strings.Contains(err.Error(), "disconnected") {
+		t.Fatalf("buffered collector accepted non-terminal attempt: count=%d err=%v out=%s", imageCount, err, out)
+	}
+}
+
+func TestStreamImagesReplayLimitIsLocalTerminal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"` + strings.Repeat("A", 256) + `","partial_image_index":0}` + "\n\n"
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
+	flusher, _ := c.Writer.(http.Flusher)
+	attempt := &continuousRetryStreamAttempt{
+		replay:     newContinuousRetryReplayWithLimits(32, 128),
+		downstream: c.Writer,
+		flusher:    flusher,
+	}
+	t.Cleanup(func() { _ = attempt.Close() })
+
+	handler := &Handler{}
+	_, imageCount, _, _, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{}, attempt)
+	if !errors.Is(err, errContinuousRetryReplayLimitExceeded) || !isImageStreamReplayError(err) {
+		t.Fatalf("stream replay error = %v, want local replay limit error", err)
+	}
+	if imageCount != 0 || wroteImageOutput {
+		t.Fatalf("image output = (count=%d, wrote=%t), want none", imageCount, wroteImageOutput)
+	}
+	generalRetries := 0
+	catchAll := database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+	if shouldRetryImageStreamError(err, &generalRetries, 0, 0, maxImageAttempts, catchAll) {
+		t.Fatal("local replay limit error must not trigger another upstream attempt")
+	}
+	if strings.Contains(recorder.Body.String(), strings.Repeat("A", 64)) {
+		t.Fatalf("oversized private attempt leaked downstream: %q", recorder.Body.String())
+	}
+}
+
+func TestShouldRetryImageStreamErrorDoesNotRetryOutputPolicyFailure(t *testing.T) {
+	generalRetries := 0
+	policy := database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+	if shouldRetryImageStreamError(promptfilter.ErrOutputBlocked, &generalRetries, 0, 0, maxImageAttempts, policy) {
+		t.Fatal("output policy failure must terminate locally, not rotate accounts")
+	}
+	if generalRetries != 0 {
+		t.Fatalf("generalRetries = %d, want 0", generalRetries)
+	}
+}
+
+func TestForwardImagesCatchAllRetriesBeyondOrdinaryAttemptCap(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		resinCfg.Store(previousResin)
+	})
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+	ApplyRuntimeSettings(nextRuntime)
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		attempt := calls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		if attempt <= maxImageAttempts {
+			_, _ = fmt.Fprint(w, `event: error`+"\n"+`data: {"type":"future_image_failure","error":{"message":"must stay upstream"}}`+"\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"created_at":1710000000,"output":[{"type":"image_generation_call","result":"`+tinyPNGBase64+`","output_format":"png"}]}}`+"\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-catch-all-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0, MaxRateLimitRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "image-test-token", PlanType: "plus", AccountID: "image-test-account"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", false)
+
+	if got := calls.Load(); got != maxImageAttempts+1 {
+		t.Fatalf("upstream calls = %d, want %d failures followed by success", got, maxImageAttempts+1)
+	}
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), tinyPNGBase64) {
+		t.Fatalf("successful image response missing: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if strings.Contains(recorder.Body.String(), "must stay upstream") {
+		t.Fatalf("intermediate image failure leaked downstream: %s", recorder.Body.String())
+	}
+}
+
+func TestForwardImagesCatchAllDiscardsPartialImageFromFailedAttempt(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousRuntime := CurrentRuntimeSettings()
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() {
+		ApplyRuntimeSettings(previousRuntime)
+		resinCfg.Store(previousResin)
+	})
+	nextRuntime := previousRuntime
+	nextRuntime.ContinuousRetryPolicy = database.ContinuousRetryPolicy{Enabled: true, CatchAll: true}
+	ApplyRuntimeSettings(nextRuntime)
+
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		if calls.Add(1) == 1 {
+			_, _ = fmt.Fprint(w, `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"ZmFpbGVkLXBhcnRpYWw=","partial_image_index":0}`+"\n\n")
+			_, _ = fmt.Fprint(w, `data: {"type":"response.failed","response":{"status":"failed","status_code":503,"error":{"code":"server_error","message":"must stay upstream"}}}`+"\n\n")
+			return
+		}
+		_, _ = fmt.Fprint(w, `data: {"type":"response.completed","response":{"created_at":1710000000,"output":[{"type":"image_generation_call","result":"`+tinyPNGBase64+`","output_format":"png"}]}}`+"\n\n")
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "image-replay-test"})
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{
+		MaxConcurrency: 1, TestConcurrency: 1, TestModel: "gpt-5.4", MaxRetries: 0,
+	})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "image-test-token", PlanType: "plus", AccountID: "image-test-account"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	requestCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil).WithContext(requestCtx)
+	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
+	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
+
+	body := recorder.Body.String()
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2; body=%q", got, body)
+	}
+	if !strings.Contains(body, tinyPNGBase64) || !strings.Contains(body, "image_generation.completed") {
+		t.Fatalf("successful image replay missing: %q", body)
+	}
+	if strings.Contains(body, "ZmFpbGVkLXBhcnRpYWw=") || strings.Contains(body, "must stay upstream") {
+		t.Fatalf("failed image attempt leaked downstream: %q", body)
+	}
+}
+
 func TestForwardImagesResponseFailedCyberPolicyEntersUnifiedAuditAndCandidateQueue(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousResin := resinCfg.Load()
@@ -751,6 +1311,39 @@ func TestStartImageStreamKeepaliveStopsWhenWriterFails(t *testing.T) {
 	}
 }
 
+func TestStartImageStreamKeepaliveStopWaitsForWriter(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var enteredOnce sync.Once
+	stop := startImageStreamKeepalive(context.Background(), time.Millisecond, func() bool {
+		enteredOnce.Do(func() { close(entered) })
+		<-release
+		return false
+	})
+
+	select {
+	case <-entered:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("keepalive writer did not start")
+	}
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-stopped:
+		t.Fatal("stop returned while keepalive writer was still running")
+	case <-time.After(10 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("stop did not join keepalive goroutine")
+	}
+}
+
 func TestStreamImagesResponseSendsConnectedComment(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	upstream := `data: {"type":"response.completed","response":{"created_at":1710000000,"usage":{"input_tokens":5,"output_tokens":9},"tool_usage":{"image_gen":{"images":1,"input_tokens":34,"output_tokens":1756}},"tools":[{"type":"image_generation","model":"gpt-image-2","output_format":"png","quality":"high","size":"1024x1024"}],"output":[{"type":"image_generation_call","result":"` + tinyPNGBase64 + `","revised_prompt":"draw a cat","output_format":"png"}]}}` + "\n\n"
@@ -759,13 +1352,16 @@ func TestStreamImagesResponseSendsConnectedComment(t *testing.T) {
 	c.Request = httptest.NewRequest("POST", "/v1/images/generations", nil)
 	handler := &Handler{}
 
-	usage, imageCount, _, imageLogInfo, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
+	usage, imageCount, _, imageLogInfo, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
 
 	if err != nil {
 		t.Fatalf("streamImagesResponse returned error: %v", err)
 	}
 	if imageCount != 1 {
 		t.Fatalf("imageCount = %d, want 1", imageCount)
+	}
+	if !wroteImageOutput {
+		t.Fatal("wroteImageOutput = false, want true after completed image event")
 	}
 	if usage == nil || usage.InputTokens != 34 || usage.OutputTokens != 1756 {
 		t.Fatalf("usage = %#v, want image usage input=34 output=1756", usage)
@@ -782,6 +1378,59 @@ func TestStreamImagesResponseSendsConnectedComment(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: image_generation.completed\n") {
 		t.Fatalf("stream body missing completed event: %q", body)
+	}
+}
+
+func TestStreamImagesResponseKeepsPreOutputFailurePrivateForRetry(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := `data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"try another account"}}}` + "\n\n"
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest("POST", "/v1/images/generations", nil)
+	handler := &Handler{}
+
+	_, imageCount, _, _, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
+
+	if err == nil {
+		t.Fatal("streamImagesResponse returned nil error, want response.failed")
+	}
+	if imageCount != 0 || wroteImageOutput {
+		t.Fatalf("image output = (count=%d, wrote=%t), want no committed image output", imageCount, wroteImageOutput)
+	}
+	body := recorder.Body.String()
+	if !strings.HasPrefix(body, imageStreamConnectedComment) {
+		t.Fatalf("stream body should retain its keepalive prefix, got %q", body)
+	}
+	if strings.Contains(body, "event: error\n") || strings.Contains(body, "try another account") {
+		t.Fatalf("pre-output upstream failure leaked before retry decision: %q", body)
+	}
+
+	writeImageStreamErrorEvent(c, err)
+	if !strings.Contains(recorder.Body.String(), "event: error\n") {
+		t.Fatalf("final stream error was not deliverable after keepalive: %q", recorder.Body.String())
+	}
+}
+
+func TestStreamImagesResponseDoesNotReplayAfterPartialImage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	upstream := `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"` + tinyPNGBase64 + `","partial_image_index":0}` + "\n\n" +
+		`data: {"type":"response.failed","response":{"error":{"code":"server_error","message":"failed after partial output"}}}` + "\n\n"
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest("POST", "/v1/images/generations", nil)
+	handler := &Handler{}
+
+	_, _, _, _, wroteImageOutput, err := handler.streamImagesResponse(c, strings.NewReader(upstream), "b64_json", "image_generation", "gpt-image-2", time.Now(), imageUpscalePlan{})
+
+	if err == nil {
+		t.Fatal("streamImagesResponse returned nil error, want response.failed")
+	}
+	if !wroteImageOutput {
+		t.Fatal("wroteImageOutput = false, want true after partial image event")
+	}
+	body := recorder.Body.String()
+	if !strings.Contains(body, "event: image_generation.partial_image\n") || !strings.Contains(body, "event: error\n") {
+		t.Fatalf("partial output must be followed by an explicit terminal error, got %q", body)
 	}
 }
 

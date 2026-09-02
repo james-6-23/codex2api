@@ -15,6 +15,7 @@ import (
 
 var (
 	errWhamDailyUsageUnavailable  = errors.New("官方用量统计不可用")
+	errWhamDailyUsageUnsupported  = errors.New("codex_at 类型账号不支持官方用量统计")
 	errWhamDailyUsageUnauthorized = errors.New("上游鉴权失败（401），请先刷新账号后重试")
 	errWhamDailyUsageRateLimited  = errors.New("上游限流（429），请稍后重试")
 )
@@ -194,7 +195,7 @@ func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[in
 
 // enqueueWhamDailyUsageBackfill 给当前页缺少官方结算快照的账号补一次上游拉取。
 // 后台小时级探针会覆盖全池，但列表打开时快照往往还是空的：page-stats 只读本地表，
-// 不在这里即时回补的话，「官方 7d」胶囊要等用户手动刷新或下一次探针才会出现。
+// 不在这里即时回补的话，「官方结算」胶囊要等用户手动刷新或下一次探针才会出现。
 func (h *Handler) enqueueWhamDailyUsageBackfill(ids []int64) {
 	if h == nil || h.store == nil || len(ids) == 0 {
 		return
@@ -240,10 +241,26 @@ func whamDailyUsageBackfillEligible(account *auth.Account) bool {
 	if account == nil || account.DBID <= 0 {
 		return false
 	}
-	if account.IsOpenAIResponsesAPI() || account.IsGrokAPI() {
+	// WHAM is a ChatGPT-only control-plane endpoint. Claude OAuth credentials
+	// belong to Anthropic Messages and must never be sent to WHAM (even though
+	// they carry an access token and are relay-style accounts).
+	if account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() {
+		return false
+	}
+	if isCodexATAccount(account) {
 		return false
 	}
 	return account.GetAccessToken() != ""
+}
+
+// isCodexATAccount 识别 at-... 形态的纯 AT 凭据。这类凭据能调用
+// Codex Responses，但不具备 ChatGPT WHAM analytics 稳定需要的工作区鉴权，
+// 不能把「Responses 可用」等同于「官方结算统计可用」。(issue #564)
+func isCodexATAccount(account *auth.Account) bool {
+	if account == nil {
+		return false
+	}
+	return accessTokenTypeForToken(account.GetAccessToken()) == accessTokenTypeCodexAT
 }
 
 func whamDailyUsageAutoRefreshEligible(account *auth.Account, now time.Time) bool {
@@ -332,25 +349,16 @@ func (h *Handler) runWhamDailyUsageBackfill(accounts []*auth.Account) {
 }
 
 // whamDailyUsageProbeTargets 挑出该拉统计的账号：只有 OAuth 登录的 Codex 账号
-// 才有 wham 端点权限，中转/Grok 账号没有。
+// 才有 wham analytics 端点权限，codex_at、中转和 Grok 账号没有。
 func (h *Handler) whamDailyUsageProbeTargets() []*auth.Account {
 	if h == nil || h.store == nil {
 		return nil
 	}
 	accounts := h.store.Accounts()
 	out := make([]*auth.Account, 0, len(accounts))
+	now := time.Now()
 	for _, account := range accounts {
-		if account == nil || account.DBID <= 0 {
-			continue
-		}
-		// 中转账号(Responses API / Grok)走的不是 ChatGPT 后端，没有 wham 端点。
-		if account.IsOpenAIResponsesAPI() || account.IsGrokAPI() {
-			continue
-		}
-		if account.GetAccessToken() == "" {
-			continue
-		}
-		if !whamDailyUsageAutoRefreshEligible(account, time.Now()) {
+		if !whamDailyUsageAutoRefreshEligible(account, now) {
 			continue
 		}
 		out = append(out, account)

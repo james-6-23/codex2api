@@ -118,7 +118,7 @@ func (h *Handler) applyPromptRisk(c *gin.Context, verdict promptfilter.Verdict, 
 	keys := make([]weightedRiskKey, 0, 3)
 	policyContext, verified := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, ingressRequestBody(c, nil))
 	if verified {
-		runtimeScope := newAPIRuntimeScope(policyContext.APIKeyID, policyContext.Platform)
+		runtimeScope := newAPIRuntimeScopeForPolicyContext(policyContext)
 		keys = append(keys,
 			weightedRiskKey{runtimeScope + ":newapi-user:" + hashRiskIdentity(policyContext.Identity.UserID), risk.UserWeightPercent},
 			weightedRiskKey{runtimeScope + ":newapi-ip:" + hashRiskIdentity(policyContext.Identity.ClientIP), risk.IPWeightPercent},

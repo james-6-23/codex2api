@@ -19,6 +19,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 func newAdminProxyTestDB(t *testing.T) *database.DB {
@@ -40,6 +41,118 @@ func newAdminProxyTestStore(t *testing.T, db *database.DB) *auth.Store {
 	}
 	t.Cleanup(store.Stop)
 	return store
+}
+
+func startSOCKS5Listener(t *testing.T) net.Listener {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	return listener
+}
+
+func acceptSOCKS5Forever(listener net.Listener, handle func(net.Conn) error) {
+	for {
+		conn, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		go func(c net.Conn) {
+			defer c.Close()
+			_ = handle(c)
+		}(conn)
+	}
+}
+
+func completeSOCKS5Greeting(conn net.Conn) error {
+	greetingHeader := make([]byte, 2)
+	if _, err := io.ReadFull(conn, greetingHeader); err != nil {
+		return err
+	}
+	if _, err := io.CopyN(io.Discard, conn, int64(greetingHeader[1])); err != nil {
+		return err
+	}
+	_, err := conn.Write([]byte{0x05, 0x00})
+	return err
+}
+
+func readSOCKS5RequestAddress(conn net.Conn) (string, error) {
+	requestHeader := make([]byte, 4)
+	if _, err := io.ReadFull(conn, requestHeader); err != nil {
+		return "", err
+	}
+	var host string
+	switch requestHeader[3] {
+	case 0x01:
+		ip := make([]byte, net.IPv4len)
+		if _, err := io.ReadFull(conn, ip); err != nil {
+			return "", err
+		}
+		host = net.IP(ip).String()
+	case 0x03:
+		length := make([]byte, 1)
+		if _, err := io.ReadFull(conn, length); err != nil {
+			return "", err
+		}
+		name := make([]byte, length[0])
+		if _, err := io.ReadFull(conn, name); err != nil {
+			return "", err
+		}
+		host = string(name)
+	case 0x04:
+		ip := make([]byte, net.IPv6len)
+		if _, err := io.ReadFull(conn, ip); err != nil {
+			return "", err
+		}
+		host = net.IP(ip).String()
+	default:
+		return "", fmt.Errorf("unexpected SOCKS address type %d", requestHeader[3])
+	}
+	port := make([]byte, 2)
+	if _, err := io.ReadFull(conn, port); err != nil {
+		return "", err
+	}
+	return net.JoinHostPort(host, fmt.Sprintf("%d", int(port[0])<<8|int(port[1]))), nil
+}
+
+func replySOCKS5HostUnreachable(conn net.Conn) error {
+	if err := completeSOCKS5Greeting(conn); err != nil {
+		return err
+	}
+	if _, err := readSOCKS5RequestAddress(conn); err != nil {
+		return err
+	}
+	_, err := conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	return err
+}
+
+func replySOCKS5ConnectOK(conn net.Conn) error {
+	_, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+	return err
+}
+
+func tunnelSOCKS5To(conn net.Conn, address string) error {
+	target, err := net.DialTimeout("tcp", address, 2*time.Second)
+	if err != nil {
+		_, _ = conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+		return err
+	}
+	defer target.Close()
+	if err := replySOCKS5ConnectOK(conn); err != nil {
+		return err
+	}
+	errCh := make(chan error, 2)
+	go func() {
+		_, copyErr := io.Copy(target, conn)
+		errCh <- copyErr
+	}()
+	go func() {
+		_, copyErr := io.Copy(conn, target)
+		errCh <- copyErr
+	}()
+	return <-errCh
 }
 
 func TestPersistProxyTestResultRefreshesRuntimePool(t *testing.T) {
@@ -352,70 +465,134 @@ func TestProbeProxyAuthenticationFailureIsConclusive(t *testing.T) {
 }
 
 func TestProbeProxySOCKSTargetUnreachableIsInconclusive(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	defer listener.Close()
-	serverErr := make(chan error, 1)
-	go func() {
-		conn, err := listener.Accept()
-		if err != nil {
-			serverErr <- err
-			return
-		}
-		defer conn.Close()
-
-		greetingHeader := make([]byte, 2)
-		if _, err := io.ReadFull(conn, greetingHeader); err != nil {
-			serverErr <- err
-			return
-		}
-		if _, err := io.CopyN(io.Discard, conn, int64(greetingHeader[1])); err != nil {
-			serverErr <- err
-			return
-		}
-		if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
-			serverErr <- err
-			return
-		}
-
-		requestHeader := make([]byte, 4)
-		if _, err := io.ReadFull(conn, requestHeader); err != nil {
-			serverErr <- err
-			return
-		}
-		var addressBytes int64
-		switch requestHeader[3] {
-		case 0x01:
-			addressBytes = net.IPv4len
-		case 0x03:
-			length := make([]byte, 1)
-			if _, err := io.ReadFull(conn, length); err != nil {
-				serverErr <- err
-				return
-			}
-			addressBytes = int64(length[0])
-		case 0x04:
-			addressBytes = net.IPv6len
-		default:
-			serverErr <- fmt.Errorf("unexpected SOCKS address type %d", requestHeader[3])
-			return
-		}
-		if _, err := io.CopyN(io.Discard, conn, addressBytes+2); err != nil {
-			serverErr <- err
-			return
-		}
-		_, err = conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
-		serverErr <- err
-	}()
+	listener := startSOCKS5Listener(t)
+	go acceptSOCKS5Forever(listener, replySOCKS5HostUnreachable)
 
 	result := probeProxy(context.Background(), "socks5://"+listener.Addr().String(), "en")
-	if err := <-serverErr; err != nil {
-		t.Fatalf("SOCKS test server: %v", err)
-	}
 	if result.Success || result.Conclusive || !strings.Contains(strings.ToLower(result.Error), "host unreachable") {
 		t.Fatalf("probe result = %#v, want inconclusive SOCKS target failure", result)
+	}
+	if !strings.Contains(result.Error, "IPv4/IPv6 检测目标都不可达") {
+		t.Fatalf("probe result = %#v, want both-family fallback note", result)
+	}
+}
+
+func TestProbeProxyIPv4SuccessDoesNotFallback(t *testing.T) {
+	var otherHits atomic.Int32
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		target := req.URL.String()
+		if !strings.Contains(target, "ip-api.com") {
+			otherHits.Add(1)
+			http.Error(w, "unexpected fallback", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","query":"1.2.3.4","country":"US","regionName":"CA","city":"LA","isp":"Example"}`))
+	}))
+	t.Cleanup(proxyServer.Close)
+
+	result := probeProxy(context.Background(), proxyServer.URL, "en")
+	if !result.Success || result.IP != "1.2.3.4" || result.Location != "US·CA·LA" {
+		t.Fatalf("probe result = %#v, want IPv4 success", result)
+	}
+	if otherHits.Load() != 0 {
+		t.Fatalf("fallback hits = %d, want 0", otherHits.Load())
+	}
+}
+
+func TestProbeProxyFallsBackToIPv6Echo(t *testing.T) {
+	echo := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"ip":"2605:1234:5678::1"}`))
+	}))
+	t.Cleanup(echo.Close)
+	echoURL := echo.URL
+
+	oldEcho := proxyProbeIPv6EchoURLsFn
+	oldGeo := proxyProbeLookupGeoFn
+	proxyProbeIPv6EchoURLsFn = func() []string { return []string{echoURL} }
+	proxyProbeLookupGeoFn = func(_ context.Context, ip, lang string) (string, string, string, string) {
+		if ip != "2605:1234:5678::1" || lang != "zh-CN" {
+			t.Fatalf("geo lookup ip=%q lang=%q", ip, lang)
+		}
+		return "美国", "新泽西", "纽瓦克", "Example ISP"
+	}
+	t.Cleanup(func() {
+		proxyProbeIPv6EchoURLsFn = oldEcho
+		proxyProbeLookupGeoFn = oldGeo
+	})
+
+	listener := startSOCKS5Listener(t)
+	go acceptSOCKS5Forever(listener, func(conn net.Conn) error {
+		if err := completeSOCKS5Greeting(conn); err != nil {
+			return err
+		}
+		address, err := readSOCKS5RequestAddress(conn)
+		if err != nil {
+			return err
+		}
+		host, _, _ := net.SplitHostPort(address)
+		if strings.Contains(host, "ip-api.com") {
+			_, err := conn.Write([]byte{0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0})
+			return err
+		}
+		return tunnelSOCKS5To(conn, address)
+	})
+
+	result := probeProxy(context.Background(), "socks5://"+listener.Addr().String(), "zh-CN")
+	if !result.Success || !result.Conclusive || result.IP != "2605:1234:5678::1" {
+		t.Fatalf("probe result = %#v, want IPv6 fallback success", result)
+	}
+	if result.Location != "美国·新泽西·纽瓦克" || result.ISP != "Example ISP" {
+		t.Fatalf("probe result = %#v, want gateway geo fields", result)
+	}
+}
+
+func TestShouldFallbackToIPv6Probe(t *testing.T) {
+	if shouldFallbackToIPv6Probe(proxyProbeResult{Success: true, Conclusive: true}) {
+		t.Fatal("successful probe must not fallback")
+	}
+	if shouldFallbackToIPv6Probe(proxyProbeResult{Conclusive: true, Error: "代理认证失败 (HTTP 407)"}) {
+		t.Fatal("conclusive proxy failure must not fallback")
+	}
+	if shouldFallbackToIPv6Probe(proxyProbeResult{Error: "代理检测服务暂时不可用 (HTTP 429)"}) {
+		t.Fatal("probe service failure must not fallback")
+	}
+	if !shouldFallbackToIPv6Probe(proxyProbeResult{
+		Error: "连接失败: socks connect tcp proxy->ip-api.com:80: unknown error host unreachable",
+	}) {
+		t.Fatal("SOCKS IPv4 target unreachable must fallback")
+	}
+}
+
+func TestParseProxyProbeExitIP(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "ipify json", body: `{"ip":"2605:1234::1"}`, want: "2605:1234::1"},
+		{name: "plain ip", body: "2001:db8::1\n", want: "2001:db8::1"},
+		{name: "cloudflare trace", body: "fl=123\nip=2001:db8:1::2\nloc=US\n", want: "2001:db8:1::2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseProxyProbeExitIP([]byte(tt.body))
+			if err != nil || got != tt.want {
+				t.Fatalf("parseProxyProbeExitIP(%q) = %q, %v; want %q", tt.body, got, err, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseProxyProbeGeoFields(t *testing.T) {
+	country, region, city, isp := parseIPAPIGeoFields(gjson.Parse(`{"country":"美国","regionName":"加州","city":"洛杉矶","isp":"Example"}`))
+	if country != "美国" || region != "加州" || city != "洛杉矶" || isp != "Example" {
+		t.Fatalf("ip-api geo = %q %q %q %q", country, region, city, isp)
+	}
+	country, region, city, isp = parseIPWhoisGeoFields(gjson.Parse(`{"country":"United States","region":"New Jersey","city":"Newark","connection":{"isp":"Example ISP"}}`))
+	if country != "United States" || region != "New Jersey" || city != "Newark" || isp != "Example ISP" {
+		t.Fatalf("ipwhois geo = %q %q %q %q", country, region, city, isp)
 	}
 }
 

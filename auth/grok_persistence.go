@@ -190,6 +190,8 @@ func (s *Store) ReloadGrokPersistentState(ctx context.Context, accountID int64) 
 		applyGrokPersistentState(account, state)
 	}
 	account.mu.Unlock()
+	s.invalidateRoutingSchedulers()
+	s.fastSchedulerUpdate(account)
 	return nil
 }
 
@@ -204,15 +206,18 @@ func (s *Store) ApplyPersistedGrokState(accountID int64, state *database.GrokAcc
 		return false
 	}
 	account.mu.Lock()
-	defer account.mu.Unlock()
 	if account.CredentialGeneration <= 0 {
 		account.CredentialGeneration = state.CredentialGeneration
 		account.CredentialFamilyID = state.Identity.CredentialFamilyID
 	}
 	if account.CredentialGeneration != state.CredentialGeneration {
+		account.mu.Unlock()
 		return false
 	}
 	applyGrokPersistentState(account, state)
+	account.mu.Unlock()
+	s.invalidateRoutingSchedulers()
+	s.fastSchedulerUpdate(account)
 	return true
 }
 

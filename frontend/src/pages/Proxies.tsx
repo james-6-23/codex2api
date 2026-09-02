@@ -60,7 +60,7 @@ import { cn } from "@/lib/utils";
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 
 type BindFilter = "all" | "unbound" | "this" | "other";
-type BindKindFilter = "all" | "codex" | "grok";
+type BindKindFilter = "all" | "codex" | "grok" | "claude";
 type StatusFilter = "all" | "enabled" | "disabled" | "error" | "untested";
 
 function accountDisplayName(account: AccountRow): string {
@@ -71,6 +71,7 @@ function accountDisplayName(account: AccountRow): string {
 }
 
 function accountKindKey(account: AccountRow): string {
+  if (account.claude_api) return "claude";
   if (account.grok_api) return "grok";
   if (account.openai_responses_api) return "openai";
   if (account.agent_identity) return "agent";
@@ -325,7 +326,7 @@ export default function Proxies() {
   const [bindSubmitting, setBindSubmitting] = useState(false);
 
   const [showBalance, setShowBalance] = useState(false);
-  const [balanceChannel, setBalanceChannel] = useState<"" | "codex" | "grok">("grok");
+  const [balanceChannel, setBalanceChannel] = useState<"" | "codex" | "grok" | "claude">("grok");
   const [balanceMode, setBalanceMode] = useState<"unbound" | "all">("unbound");
   const [balanceMaxPerProxy, setBalanceMaxPerProxy] = useState("");
   const [balanceSubmitting, setBalanceSubmitting] = useState(false);
@@ -1659,6 +1660,7 @@ export default function Proxies() {
                 [
                   ["grok", t("proxies.bindKindGrok")],
                   ["codex", t("proxies.bindKindCodex")],
+                  ["claude", t("proxies.bindKindClaude")],
                   ["", t("proxies.bindKindAll")],
                 ] as const
               ).map(([key, label]) => (
@@ -1841,6 +1843,7 @@ export default function Proxies() {
                       ["all", t("proxies.bindKindAll")],
                       ["codex", t("proxies.bindKindCodex")],
                       ["grok", t("proxies.bindKindGrok")],
+                      ["claude", t("proxies.bindKindClaude")],
                     ] as const
                   ).map(([key, label]) => (
                     <button
@@ -1853,7 +1856,7 @@ export default function Proxies() {
                           : "text-muted-foreground hover:text-foreground"
                       }`}
                     >
-                      {key === "codex" || key === "grok" ? (
+                      {key === "codex" || key === "grok" || key === "claude" ? (
                         <ChannelLogo channel={key} size={14} />
                       ) : null}
                       {label}

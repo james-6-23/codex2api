@@ -215,6 +215,30 @@ func CanonicalBillingModelKey(model string) string {
 	return strings.ToLower(normalized)
 }
 
+// PricingManagementModelKey returns the key exposed by pricing management.
+// Most model variants share their canonical model's price, but selected
+// internal aliases have an independent override and therefore need their own
+// editable row instead of being deduplicated into the canonical model.
+func PricingManagementModelKey(model string) string {
+	normalized := normalizeBillingModelName(model)
+	compact := strings.NewReplacer(" ", "-", "_", "-").Replace(normalized)
+	if compact == "codex-auto-review" {
+		return compact
+	}
+	return CanonicalBillingModelKey(normalized)
+}
+
+// PricingAliasTarget reports the canonical fallback for an independently
+// managed alias. An empty string means the model is already canonical.
+func PricingAliasTarget(model string) string {
+	managed := PricingManagementModelKey(model)
+	canonical := CanonicalBillingModelKey(model)
+	if managed != canonical {
+		return canonical
+	}
+	return ""
+}
+
 // ModelPricingSourceFor 返回某规范键当前定价来源：custom / synced / default。
 func ModelPricingSourceFor(canonical string) string {
 	if ov, ok := lookupModelPricingOverride(canonical); ok {

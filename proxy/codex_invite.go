@@ -212,6 +212,30 @@ func normalizeInviteProgram(programID, entrypoint string) (string, string) {
 	return programID, entrypoint
 }
 
+// NormalizeInviteProgram 是 normalizeInviteProgram 的导出版本，供调用方在发起
+// 请求前先算出实际生效的计划标识——缓存键必须按归一化后的值拼，否则「空参数」
+// 与「显式传默认值」会各存一份内容相同的条目。
+func NormalizeInviteProgram(programID, entrypoint string) (string, string) {
+	return normalizeInviteProgram(programID, entrypoint)
+}
+
+// normalizeInviteTracking 补齐跟踪查询的窗口与条数为官方客户端默认值。
+func normalizeInviteTracking(period string, limit int) (string, int) {
+	if strings.TrimSpace(period) == "" {
+		period = defaultTrackingPeriod
+	}
+	if limit <= 0 || limit > defaultTrackingLimit {
+		limit = defaultTrackingLimit
+	}
+	return period, limit
+}
+
+// NormalizeInviteTracking 是 normalizeInviteTracking 的导出版本。理由同
+// NormalizeInviteProgram：limit=0 与 limit=100 取回的是同一份数据，缓存键要一致。
+func NormalizeInviteTracking(period string, limit int) (string, int) {
+	return normalizeInviteTracking(period, limit)
+}
+
 // newInviteRequest 构造带邀请专用 header 的请求。body 为 nil 时发 GET。
 func newInviteRequest(ctx context.Context, account *auth.Account, method, endpoint string, body []byte) (*http.Request, error) {
 	var reader io.Reader
@@ -493,12 +517,7 @@ func QueryCodexInviteTracking(ctx context.Context, account *auth.Account, proxyU
 		return nil, err
 	}
 	programID, _ = normalizeInviteProgram(programID, "")
-	if strings.TrimSpace(period) == "" {
-		period = defaultTrackingPeriod
-	}
-	if limit <= 0 || limit > defaultTrackingLimit {
-		limit = defaultTrackingLimit
-	}
+	period, limit = normalizeInviteTracking(period, limit)
 
 	endpoint := CodexInviteTrackingURL
 	useTestTransport := codexInviteTrackingURLForTest != ""

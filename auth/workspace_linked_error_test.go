@@ -234,6 +234,15 @@ func TestMarkDeactivatedWorkspaceSkipsGrokAndResponsesTriggers(t *testing.T) {
 	if sibling.RuntimeStatus() == "error" {
 		t.Fatal("openai responses trigger must not fan out")
 	}
+
+	store.workspaceLinkedRecent = nil
+	claude := newWorkspaceLinkedAccount(4, "team-A")
+	claude.UpstreamType = UpstreamClaude
+	store.AddAccount(claude)
+	store.MarkDeactivatedWorkspace(claude, "upstream Claude workspace error")
+	if sibling.RuntimeStatus() == "error" {
+		t.Fatal("Claude trigger must not fan out into Codex workspace accounts")
+	}
 }
 
 func accountErrorMsg(acc *Account) string {

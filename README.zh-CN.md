@@ -239,11 +239,16 @@ docker compose -f docker-compose.sqlite.local.yml logs -f codex2api
 
 ---
 
+## Antigravity 渠道（API Key 路径为实验性）
+
+Antigravity 作为独立 Google 渠道管理，支持浏览器/导入 OAuth 凭据以及 Google API Key 账号。管理端提供含密钥的 JSON/ZIP 凭据导出、脱敏状态读取、显式控制面同步与有界能力探测。OAuth 请求使用 Cloud Code `v1internal` 适配器。API Key 请求指向 Generative Language `v1beta/interactions`，但普通调度默认关闭，只有显式设置 `ANTIGRAVITY_ENABLE_EXPERIMENTAL_INTERACTIONS=true` 才会放行。当前环境尚未成功运行真实上游集成测试，因此 API Key 路径仍为实验性，不能宣称已具备生产可用性。运行方法、安全风险与认证清单见 [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md)。
+
 ## 完整文档
 
 | 文档 | 说明 | 路径 |
 |------|------|------|
 | [API 文档](docs/API.md) | 所有 API 端点、请求/响应示例、错误码说明 | `docs/API.md` |
+| [Antigravity 接入](docs/ANTIGRAVITY.md) | Google OAuth、实验性 API Key 渠道、模型、风险与协议验证状态 | `docs/ANTIGRAVITY.md` |
 | [部署文档](docs/DEPLOYMENT.md) | 各种部署模式、升级指南、备份恢复 | `docs/DEPLOYMENT.md` |
 | [配置文档](docs/CONFIGURATION.md) | 环境变量、系统设置、配置优先级 | `docs/CONFIGURATION.md` |
 | [架构文档](docs/ARCHITECTURE.md) | 系统架构、调度算法、存储设计 | `docs/ARCHITECTURE.md` |

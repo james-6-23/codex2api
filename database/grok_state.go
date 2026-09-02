@@ -551,7 +551,7 @@ func (db *DB) InsertGrokAccountIfAbsent(ctx context.Context, name string, creden
 	if len(identityKeys) == 0 {
 		return 0, 0, errors.New("grok credential has no stable identity")
 	}
-	encoded, err := json.Marshal(credentialCopy)
+	encoded, err := json.Marshal(encryptSensitiveCredentials(credentialCopy))
 	if err != nil {
 		return 0, 0, err
 	}
@@ -665,7 +665,7 @@ func (db *DB) ReauthGrokAccount(ctx context.Context, accountID int64, credential
 			}
 		}
 
-		encoded, marshalErr := json.Marshal(merged)
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(merged))
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -823,28 +823,40 @@ func (db *DB) UpdateAccountCredentialsCAS(ctx context.Context, accountID, expect
 			return beginErr
 		}
 		defer tx.Rollback()
-		query := `SELECT credentials, credential_generation FROM accounts WHERE id=$1 AND status <> 'deleted'`
+		query := `SELECT credentials, credential_generation, credential_family_id FROM accounts WHERE id=$1 AND status <> 'deleted'`
 		if !db.isSQLite() {
 			query += ` FOR UPDATE`
 		}
 		var raw any
 		var current int64
-		if scanErr := tx.QueryRowContext(ctx, query, accountID).Scan(&raw, &current); scanErr != nil {
+		var familyID string
+		if scanErr := tx.QueryRowContext(ctx, query, accountID).Scan(&raw, &current, &familyID); scanErr != nil {
 			return scanErr
 		}
 		if current != expectedGeneration {
 			newGeneration = current
 			return nil
 		}
-		encoded, marshalErr := json.Marshal(mergeCredentialMaps(decodeCredentials(raw), updates))
+		merged := mergeCredentialMaps(decodeCredentials(raw), updates)
+		familyID = strings.TrimSpace(familyID)
+		if familyID == "" {
+			familyID = credentialFamilyCandidate(merged)
+		}
+		if familyID == "" {
+			familyID = "cf_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		}
+		// Keep the compatibility JSON field synchronized with the canonical
+		// column in the same write that publishes the rotated credential.
+		merged["credential_family_id"] = familyID
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(merged))
 		if marshalErr != nil {
 			return marshalErr
 		}
-		updateQuery := `UPDATE accounts SET credentials=$1, credential_generation=credential_generation+1, updated_at=CURRENT_TIMESTAMP WHERE id=$2 AND credential_generation=$3`
+		updateQuery := `UPDATE accounts SET credentials=$1, credential_family_id=$2, credential_generation=credential_generation+1, updated_at=CURRENT_TIMESTAMP WHERE id=$3 AND credential_generation=$4`
 		if !db.isSQLite() {
-			updateQuery = `UPDATE accounts SET credentials=$1::jsonb, credential_generation=credential_generation+1, updated_at=NOW() WHERE id=$2 AND credential_generation=$3`
+			updateQuery = `UPDATE accounts SET credentials=$1::jsonb, credential_family_id=$2, credential_generation=credential_generation+1, updated_at=NOW() WHERE id=$3 AND credential_generation=$4`
 		}
-		res, execErr := tx.ExecContext(ctx, updateQuery, encoded, accountID, expectedGeneration)
+		res, execErr := tx.ExecContext(ctx, updateQuery, encoded, familyID, accountID, expectedGeneration)
 		if execErr != nil {
 			return execErr
 		}
@@ -880,6 +892,68 @@ func (db *DB) UpdateAccountCredentialsCAS(ctx context.Context, accountID, expect
 	return
 }
 
+// ReplaceAccountCredentialsCAS atomically replaces an account identity. Unlike
+// routine token refresh, it updates the canonical family column and does not
+// carry generation-fenced provider observations forward.
+func (db *DB) ReplaceAccountCredentialsCAS(ctx context.Context, accountID, expectedGeneration int64, familyID string, updates map[string]any) (newGeneration int64, applied bool, err error) {
+	if db == nil || db.conn == nil || accountID <= 0 || expectedGeneration <= 0 || len(updates) == 0 {
+		return 0, false, nil
+	}
+	err = db.withSQLiteWriteLock(ctx, func() error {
+		tx, beginErr := db.conn.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return beginErr
+		}
+		defer tx.Rollback()
+
+		query := `SELECT credentials, credential_generation FROM accounts WHERE id=$1 AND status <> 'deleted'`
+		if !db.isSQLite() {
+			query += ` FOR UPDATE`
+		}
+		var raw any
+		var current int64
+		if scanErr := tx.QueryRowContext(ctx, query, accountID).Scan(&raw, &current); scanErr != nil {
+			return scanErr
+		}
+		if current != expectedGeneration {
+			newGeneration = current
+			return nil
+		}
+		merged := mergeCredentialMaps(decodeCredentials(raw), updates)
+		familyID = strings.TrimSpace(familyID)
+		if familyID == "" {
+			familyID = credentialFamilyCandidate(merged)
+		}
+		if familyID == "" {
+			familyID = "cf_" + strings.ReplaceAll(uuid.NewString(), "-", "")
+		}
+		merged["credential_family_id"] = familyID
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(merged))
+		if marshalErr != nil {
+			return marshalErr
+		}
+		updateQuery := `UPDATE accounts SET credentials=$1, credential_family_id=$2, credential_generation=credential_generation+1, updated_at=CURRENT_TIMESTAMP WHERE id=$3 AND credential_generation=$4`
+		if !db.isSQLite() {
+			updateQuery = `UPDATE accounts SET credentials=$1::jsonb, credential_family_id=$2, credential_generation=credential_generation+1, updated_at=NOW() WHERE id=$3 AND credential_generation=$4`
+		}
+		res, execErr := tx.ExecContext(ctx, updateQuery, encoded, familyID, accountID, expectedGeneration)
+		if execErr != nil {
+			return execErr
+		}
+		rows, rowsErr := res.RowsAffected()
+		if rowsErr != nil {
+			return rowsErr
+		}
+		if rows == 0 {
+			return nil
+		}
+		applied = true
+		newGeneration = expectedGeneration + 1
+		return tx.Commit()
+	})
+	return
+}
+
 // MergeAccountCredentialsForGeneration merges non-identity compatibility
 // fields only while the account still belongs to expectedGeneration. Unlike
 // UpdateAccountCredentialsCAS it deliberately does not advance the generation:
@@ -898,7 +972,11 @@ func (db *DB) MergeAccountCredentialsForGeneration(ctx context.Context, accountI
 		"grok_weekly_usage_percent": {}, "grok_weekly_period_end": {},
 		"grok_monthly_usage_percent": {}, "grok_monthly_limit_cents": {},
 		"grok_monthly_used_cents": {}, "grok_monthly_period_end": {},
-		"grok_usage_updated_at": {},
+		"grok_usage_updated_at":  {},
+		"antigravity_sync_error": {}, "antigravity_sync_warning": {}, "antigravity_last_sync_attempt_at": {},
+		"antigravity_permanent_refresh_error": {},
+		"antigravity_catalog_source":          {}, "antigravity_catalog_verified": {},
+		"antigravity_capabilities": {}, "antigravity_capability_last_probe_at": {},
 	}
 	filtered := make(map[string]any, len(updates))
 	for key, value := range updates {
@@ -928,7 +1006,7 @@ func (db *DB) MergeAccountCredentialsForGeneration(ctx context.Context, accountI
 		if current != expectedGeneration {
 			return nil
 		}
-		encoded, marshalErr := json.Marshal(mergeCredentialMaps(decodeCredentials(raw), filtered))
+		encoded, marshalErr := json.Marshal(encryptSensitiveCredentials(mergeCredentialMaps(decodeCredentials(raw), filtered)))
 		if marshalErr != nil {
 			return marshalErr
 		}

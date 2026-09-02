@@ -6,7 +6,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -15,6 +14,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/codex2api/security"
 	"github.com/gorilla/websocket"
 )
 
@@ -112,6 +112,24 @@ func effectiveProxyURL(account *auth.Account, proxyOverride string) string {
 		proxyURL = proxyOverride
 	}
 	return strings.TrimSpace(proxyURL)
+}
+
+// configureWebsocketDialerProxy applies the configured proxy to a Gorilla
+// WebSocket dialer. Gorilla accepts "socks5" but not the curl-style
+// "socks5h" alias. Its SOCKS5 implementation already sends domain names to
+// the proxy, so normalizing the alias preserves remote DNS resolution.
+func configureWebsocketDialerProxy(dialer *websocket.Dialer, rawProxyURL string) error {
+	parsed, err := security.ParseProxyURL(rawProxyURL)
+	if err != nil {
+		return fmt.Errorf("parse proxy URL failed: %w", err)
+	}
+
+	parsed.Scheme = strings.ToLower(strings.TrimSpace(parsed.Scheme))
+	if parsed.Scheme == "socks5h" {
+		parsed.Scheme = "socks5"
+	}
+	dialer.Proxy = http.ProxyURL(parsed)
+	return nil
 }
 
 // NewWsConnection 创建 WebSocket 连接
@@ -1058,6 +1076,38 @@ func (m *Manager) probe(wc *WsConnection) bool {
 	return probeConnection(wc)
 }
 
+// wsCompressionSeen 记录本进程已上报过的 permessage-deflate 协商结果
+// (bit0=已见协商成功,bit1=已见未协商)。拨号器一直在 offer 压缩,但协商是否
+// 成功此前没有任何可见信号;结果由上游部署与出站链路(直连/Resin)决定,按
+// 结果去重、每种只报一次,混合链路下也不会逐连接刷日志。
+var wsCompressionSeen atomic.Int32
+
+// logCompressionNegotiation 上报本次握手的 permessage-deflate 协商结果。
+func logCompressionNegotiation(resp *http.Response, accountID int64) {
+	if resp == nil {
+		return
+	}
+	extensions := resp.Header.Get("Sec-Websocket-Extensions")
+	bit := int32(2)
+	if strings.Contains(strings.ToLower(extensions), "permessage-deflate") {
+		bit = 1
+	}
+	for {
+		seen := wsCompressionSeen.Load()
+		if seen&bit != 0 {
+			return
+		}
+		if wsCompressionSeen.CompareAndSwap(seen, seen|bit) {
+			break
+		}
+	}
+	if bit == 1 {
+		log.Printf("[WS] 上游已协商 permessage-deflate,帧压缩生效 (account=%d, extensions=%q)", accountID, extensions)
+	} else {
+		log.Printf("[WS] 上游未协商 permessage-deflate,帧走明文 (account=%d)", accountID)
+	}
+}
+
 // createConnection 创建新 WebSocket 连接
 func (m *Manager) createConnection(
 	ctx context.Context,
@@ -1076,12 +1126,8 @@ func (m *Manager) createConnection(
 	proxyURL := effectiveProxyURL(account, proxyOverride)
 
 	if !proxy.IsResinEnabled() && proxyURL != "" {
-		proxyURLParsed, err := url.Parse(proxyURL)
-		if err != nil {
-			return nil, fmt.Errorf("parse proxy URL failed: %w", err)
-		}
-		dialer.Proxy = func(req *http.Request) (*url.URL, error) {
-			return proxyURLParsed, nil
+		if err := configureWebsocketDialerProxy(dialer, proxyURL); err != nil {
+			return nil, err
 		}
 	}
 
@@ -1105,6 +1151,8 @@ func (m *Manager) createConnection(
 		// bad handshake 时 resp 常非空：附带上游 HTTP 状态/ body，便于测试连接定位。
 		return nil, formatDialHandshakeError(err, resp)
 	}
+
+	logCompressionNegotiation(resp, account.ID())
 
 	// 创建连接包装
 	wc := NewWsConnection(conn, session, wsURL)

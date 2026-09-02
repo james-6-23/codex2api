@@ -1242,24 +1242,6 @@ func inspectGrokProbeResponse(ctx context.Context, protocol proxy.GrokProtocol, 
 	return observation
 }
 
-// triggerGrokCapabilityProbe runs the fenced catalog sync and low-cost native
-// endpoint probes after add/import flows. Addressing the account by ID keeps
-// disabled fixtures testable without placing them in normal scheduling.
-func (h *Handler) triggerGrokCapabilityProbe(accountID int64) {
-	if h == nil || h.db == nil || accountID <= 0 {
-		return
-	}
-	h.startDBBackgroundTask(func(parent context.Context) {
-		syncCtx, cancel := context.WithTimeout(parent, 2*time.Minute)
-		_, syncErr := h.syncGrokAccountState(syncCtx, accountID)
-		cancel()
-		if syncErr != nil {
-			return
-		}
-		_, _ = h.runGrokCapabilityProbe(parent, accountID, false)
-	})
-}
-
 func (h *Handler) triggerGrokCapabilityProbeForGeneration(accountID, generation int64) {
 	if h == nil || h.db == nil || accountID <= 0 || generation <= 0 {
 		return

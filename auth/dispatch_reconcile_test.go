@@ -15,11 +15,14 @@ func TestReconcileDispatchStateLoadsAccountAddedAfterStartup(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	store := NewStore(db, nil, &database.SystemSettings{
 		MaxConcurrency:       1,
 		FastSchedulerEnabled: true,
+	})
+	t.Cleanup(func() {
+		store.Stop()
+		_ = db.Close()
 	})
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init: %v", err)
@@ -39,12 +42,9 @@ func TestReconcileDispatchStateLoadsAccountAddedAfterStartup(t *testing.T) {
 		t.Fatalf("InsertOpenAIResponsesAccount: %v", err)
 	}
 
-	changed, err := store.ReconcileDispatchState(ctx)
+	_, err = store.ReconcileDispatchState(ctx)
 	if err != nil {
 		t.Fatalf("ReconcileDispatchState: %v", err)
-	}
-	if !changed {
-		t.Fatal("ReconcileDispatchState reported no change for a newly added account")
 	}
 	got := store.Next()
 	if got == nil {
@@ -62,11 +62,14 @@ func TestTriggerDispatchStateReconcileAsyncLoadsAccount(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	store := NewStore(db, nil, &database.SystemSettings{
 		MaxConcurrency:       1,
 		FastSchedulerEnabled: true,
+	})
+	t.Cleanup(func() {
+		store.Stop()
+		_ = db.Close()
 	})
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init: %v", err)
@@ -136,11 +139,14 @@ func TestAsyncReconcileCoalescesOntoActiveRunCompletion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	store := NewStore(db, nil, &database.SystemSettings{
 		MaxConcurrency:       1,
 		FastSchedulerEnabled: true,
+	})
+	t.Cleanup(func() {
+		store.Stop()
+		_ = db.Close()
 	})
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init: %v", err)
@@ -169,12 +175,9 @@ func TestAsyncReconcileCoalescesOntoActiveRunCompletion(t *testing.T) {
 	default:
 	}
 
-	changed, err := store.reconcileDispatchState(ctx)
+	_, err = store.reconcileDispatchState(ctx)
 	if err != nil {
 		t.Fatalf("reconcileDispatchState: %v", err)
-	}
-	if !changed {
-		t.Fatal("reconcileDispatchState reported no change for a newly added account")
 	}
 	store.finishDispatchStateReconcile(activeDone)
 	select {
@@ -199,9 +202,12 @@ func TestTriggerDispatchStateReconcileAsyncThrottledReturnsNil(t *testing.T) {
 	if err != nil {
 		t.Fatalf("database.New: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
 
 	store := NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 1})
+	t.Cleanup(func() {
+		store.Stop()
+		_ = db.Close()
+	})
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("Store.Init: %v", err)
 	}

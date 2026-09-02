@@ -529,6 +529,15 @@ func grokWriteHistoryItem(out *bytes.Buffer, item gjson.Result, register grokAli
 	if itemType == "function_call" {
 		if namespace := strings.TrimSpace(grokRawStringField(item, "namespace")); namespace != "" {
 			aliasName = register(namespace, strings.TrimSpace(grokRawStringField(item, "name")), false, false)
+		} else if name := strings.TrimSpace(grokRawStringField(item, "name")); name != "" {
+			if _, reserved := grokReservedUpstreamFunctionNames[name]; reserved {
+				// 声明侧把保留名挪到 _fn 别名,历史调用必须同步改名,否则声明
+				// 与历史引用分叉被上游拒绝。桥接工具的历史是 tool_search_call
+				// 类型,走不到这个分支。
+				if alias := register("", name, false, false); alias != name {
+					aliasName = alias
+				}
+			}
 		}
 	}
 	if aliasName == "" && grokHistoryItemFieldsAreNative(item, fields) {

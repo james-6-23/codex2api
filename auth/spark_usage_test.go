@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -139,5 +140,34 @@ func TestSparkSnapshotHydratesFromCredentials(t *testing.T) {
 	}
 	if !gotReset.Equal(resetAt) {
 		t.Fatalf("spark reset = %s, want %s", gotReset.Format(time.RFC3339), resetAt.Format(time.RFC3339))
+	}
+}
+
+// DispatchPaused 是锁外原子标志:标准路径在 fastSchedulerSnapshotWithUsageOverride
+// 里显式拦截,spark 路径此前只走 sparkDispatchEligibleLocked(与 isAvailableLocked
+// 一样不读原子标志),导致运维手动停调度或过载熔断置位的账号仍被 spark 选中。
+func TestSparkDispatchRespectsDispatchPaused(t *testing.T) {
+	acc := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 2)
+	acc.PlanType = "pro"
+
+	scheduler := NewFastScheduler(2, "round_robin")
+	scheduler.Rebuild([]*Account{acc})
+
+	got := scheduler.AcquireExcludingWithDispatch(0, nil, nil, DispatchPolicySpark)
+	if got == nil {
+		t.Fatal("spark acquire should succeed before the account is paused")
+	}
+	scheduler.Release(got)
+
+	atomic.StoreInt32(&acc.DispatchPaused, 1)
+	scheduler.Update(acc)
+
+	if got := scheduler.AcquireExcludingWithDispatch(0, nil, nil, DispatchPolicySpark); got != nil {
+		scheduler.Release(got)
+		t.Fatal("spark acquire must skip a dispatch-paused account")
+	}
+	if got := scheduler.AcquireExcludingWithDispatch(0, nil, nil, DispatchPolicyStandard); got != nil {
+		scheduler.Release(got)
+		t.Fatal("standard acquire must skip a dispatch-paused account")
 	}
 }

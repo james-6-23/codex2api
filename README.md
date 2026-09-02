@@ -186,12 +186,17 @@ Notes:
 
 ---
 
+## Antigravity channel (experimental API Key path)
+
+Antigravity accounts are managed as a dedicated Google channel with browser/imported OAuth credentials and an optional Google API Key credential shape. Admin tooling includes secret-bearing JSON/ZIP credential export plus sanitized state, explicit control-plane sync, and bounded capability probing. OAuth requests use the Cloud Code `v1internal` adapter. API Key requests target the Generative Language `v1beta/interactions` endpoint, but ordinary API-key dispatch is fail-closed by default and requires `ANTIGRAVITY_ENABLE_EXPERIMENTAL_INTERACTIONS=true`. The opt-in real-upstream integration test has not succeeded in this environment, so this path remains experimental rather than production-certified. See [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md) for endpoints, test instructions, models, channel restrictions, plaintext credential-storage risk, and the certification checklist.
+
 ## Documentation
 
 | Document | Description | Path |
 | --- | --- | --- |
 | [Chinese README](README.zh-CN.md) | Main Chinese project overview | `README.zh-CN.md` |
 | [API Documentation](docs/API.md) | API endpoints, request and response examples, error codes | `docs/API.md` |
+| [Antigravity Integration](docs/ANTIGRAVITY.md) | Google OAuth and experimental API Key channel, models, risks, and protocol status | `docs/ANTIGRAVITY.md` |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Deployment modes, upgrade guide, backup and restore | `docs/DEPLOYMENT.md` |
 | [Configuration Guide](docs/CONFIGURATION.md) | Environment variables, system settings, configuration priority | `docs/CONFIGURATION.md` |
 | [Architecture](docs/ARCHITECTURE.md) | System architecture, scheduling algorithm, storage design | `docs/ARCHITECTURE.md` |
@@ -477,7 +482,7 @@ Selection strategy:
 2. Recompute health tier, scheduler score, and dynamic concurrency.
 3. Exclude accounts that have reached their concurrency limit.
 4. Prefer higher `SchedulerPriority`, then `healthy > warm > risky > banned`; within the same priority and tier, prefer higher score and lower concurrency.
-5. Apply a 15% random shuffle to reduce hotspots and starvation.
+5. In indexed mode, use a per-tier cursor or deterministic affinity offset inside the highest valid priority/health segment.
 
 When multiple end users share one downstream API key, send `X-Codex2API-Affinity-Key` with a stable user or conversation identifier. Codex2API hashes it for local account affinity only and never forwards it upstream.
 
@@ -495,8 +500,18 @@ The persistent upstream WebSocket pool is also capped by each account's current 
 Observability:
 
 - `GET /api/admin/accounts` shows health tier, scheduler score, and penalty details.
-- `GET /api/admin/ops/overview` shows runtime and connection pool state.
+- `GET /api/admin/ops/overview` shows scheduler engine, indexed/legacy selections, scan volume, event waiters, sparse routing-cache state, shadow parity, and outbox lag in addition to runtime and connection-pool state.
 - `/admin/ops/scheduler` provides the scheduler board.
+
+**Scheduler engine** (`scheduler_engine`, via Admin Settings, or `CODEX_SCHEDULER_ENGINE`):
+
+| Engine | Behavior |
+| --- | --- |
+| `legacy` | Compatibility path that scans the immutable account snapshot |
+| `shadow` | Legacy remains authoritative while 1 in 64 requests compares indexed candidate availability |
+| `indexed` | Priority/health buckets, sparse API-key sub-pools, and event-driven availability waits are authoritative |
+
+For a production rollout, use `legacy → shadow → indexed`. `CODEX_SCHEDULER_ENGINE` overrides the database setting and can pin an instance for a canary or emergency rollback. The old `FAST_SCHEDULER_ENABLED=true` switch remains a compatibility alias for `indexed` when no engine is configured.
 
 **Scheduler mode** (`scheduler_mode`, via Admin Settings):
 

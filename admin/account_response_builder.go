@@ -11,6 +11,41 @@ import (
 	"github.com/codex2api/internal/openaiidentity"
 )
 
+func antigravityPersistedStatus(row *database.AccountRow) (string, string) {
+	if row == nil {
+		return "error", "账号不存在"
+	}
+	if syncErr := strings.TrimSpace(row.GetCredential("antigravity_sync_error")); syncErr != "" {
+		return "error", syncErr
+	}
+	if raw := strings.TrimSpace(row.GetCredential("antigravity_quota")); raw != "" {
+		var quota auth.AntigravityQuotaSnapshot
+		if json.Unmarshal([]byte(raw), &quota) == nil && quota.Forbidden {
+			return "error", "Google quota API denied access"
+		}
+	}
+	rawPermissions := strings.TrimSpace(row.GetCredential("antigravity_permissions"))
+	if rawPermissions == "" {
+		rawPermissions = strings.TrimSpace(row.GetCredential("antigravity_entitlements"))
+	}
+	if raw := rawPermissions; raw != "" {
+		var permissions auth.AntigravityEntitlements
+		if json.Unmarshal([]byte(raw), &permissions) == nil && !permissions.Allowed &&
+			(permissions.Reason != "" || !permissions.UpdatedAt.IsZero()) {
+			reason := strings.TrimSpace(permissions.Reason)
+			if reason == "" {
+				reason = "Google account is not allowed to use Antigravity"
+			}
+			return "error", reason
+		}
+	}
+	status := strings.TrimSpace(row.Status)
+	if status == "" {
+		status = "active"
+	}
+	return status, row.ErrorMessage
+}
+
 // buildAccountResponse enriches one database row with its in-memory scheduler
 // state and the already-scoped request/usage aggregates. Keeping this logic in
 // one place ensures the paged list and the on-demand detail endpoint expose the
@@ -26,8 +61,20 @@ func (h *Handler) buildAccountResponse(
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	isOpenAIResponsesAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
+	isAntigravityAccount := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
+	isClaudeAccount := strings.EqualFold(upstreamType, auth.UpstreamClaude)
+	antigravityAuthKind := ""
+	if isAntigravityAccount {
+		if strings.TrimSpace(row.GetCredential("api_key")) != "" {
+			antigravityAuthKind = auth.AntigravityAuthKindAPIKey
+		} else {
+			antigravityAuthKind = auth.AntigravityAuthKindOAuth
+		}
+	}
 	grokAuthKind := ""
 	var grokBilling json.RawMessage
+	var antigravityQuota json.RawMessage
+	var antigravityPermissions json.RawMessage
 	if isGrokAccount {
 		if strings.TrimSpace(row.GetCredential("api_key")) != "" {
 			grokAuthKind = auth.GrokAuthKindAPIKey
@@ -39,6 +86,14 @@ func (h *Handler) buildAccountResponse(
 		// control-plane / cooldown / mapping payload gated by includeDetails.
 		if detail := strings.TrimSpace(row.GetCredential("grok_billing_detail")); detail != "" && json.Valid([]byte(detail)) {
 			grokBilling = json.RawMessage(detail)
+		}
+	}
+	if isAntigravityAccount {
+		antigravityQuota = antigravityPublishedQuotaJSON(row.GetCredential("antigravity_quota"))
+		if raw := strings.TrimSpace(row.GetCredential("antigravity_permissions")); raw != "" && json.Valid([]byte(raw)) {
+			antigravityPermissions = json.RawMessage(raw)
+		} else if raw := strings.TrimSpace(row.GetCredential("antigravity_entitlements")); raw != "" && json.Valid([]byte(raw)) {
+			antigravityPermissions = json.RawMessage(raw)
 		}
 	}
 	email := row.GetCredential("email")
@@ -68,13 +123,17 @@ func (h *Handler) buildAccountResponse(
 	if isOpenAIResponsesAccount && includeDetails {
 		codexClientMetadataMode = auth.NormalizeCodexClientMetadataMode(row.GetCredential("codex_client_metadata_mode"))
 	}
+	balanceQueryURL := ""
+	if isOpenAIResponsesAccount && includeDetails {
+		balanceQueryURL = row.GetCredential(openAIResponsesBalanceQueryURLCredential)
+	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
 	sessionCapacityEnabled := false
 	sessionCapacityMax := int64(0)
 	sessionCapacityIdleTTLSeconds := int64(0)
 	sessionCapacityCurrent := int64(0)
-	if !isOpenAIResponsesAccount && !isGrokAccount {
+	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
 		sessionCapacityEnabled = row.GetCredentialBool(auth.SessionCapacityEnabledCredentialKey)
 		if configured, ok := row.GetCredentialInt64(auth.SessionCapacityMaxCredentialKey); ok {
@@ -93,6 +152,13 @@ func (h *Handler) buildAccountResponse(
 			sessionCapacityCurrent = h.store.AccountSessionCount(row.ID, time.Now())
 		}
 	}
+	// Claude Code 指纹收敛模式 + 绑定时区,仅 Claude OAuth 账号暴露。
+	claudeFingerprintMode := ""
+	accountTimezone := ""
+	if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) {
+		claudeFingerprintMode = auth.NormalizeClaudeFingerprintMode(row.GetCredential(auth.ClaudeFingerprintModeCredentialKey))
+		accountTimezone = strings.TrimSpace(row.GetCredential("timezone"))
+	}
 	ignoreUsageLimitStatusOverride := row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
 	ignoreUsageLimitStatusEffective := h.store.IgnoreUsageLimitStatus()
 	if ignoreUsageLimitStatusOverride != nil {
@@ -101,6 +167,7 @@ func (h *Handler) buildAccountResponse(
 	modelMapping := ""
 	var customHeaders map[string]string
 	var allowedAPIKeyIDs []int64
+	claudeUserAgent := ""
 	// 工作区 ID 不是密钥:Team/K12 徽章悬停要显示空间 ID。当前页
 	// ListActiveByIDs 已带完整凭据;custom_headers 只用来算生效空间,
 	// 摘要响应仍会剥掉原文。
@@ -110,7 +177,21 @@ func (h *Handler) buildAccountResponse(
 	effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(tokenWorkspaceID, headers)
 	if includeDetails {
 		modelMapping = row.GetCredential("model_mapping")
-		customHeaders = headers
+		if isClaudeAccount {
+			// Claude detail responses may be consumed by admin tooling, but must
+			// never expose arbitrary historical custom headers such as
+			// Authorization/Cookie/x-api-key. Keep only the provider identity
+			// headers needed to inspect the stable fingerprint.
+			customHeaders = claudeExportFingerprintHeaders(headers)
+			for name, value := range customHeaders {
+				if strings.EqualFold(strings.TrimSpace(name), "user-agent") {
+					claudeUserAgent = strings.TrimSpace(value)
+					break
+				}
+			}
+		} else {
+			customHeaders = headers
+		}
 		allowedAPIKeyIDs = row.GetCredentialInt64Slice("allowed_api_key_ids")
 	}
 	resp := accountResponse{
@@ -127,7 +208,7 @@ func (h *Handler) buildAccountResponse(
 		SubscriptionExpiresAt:         row.GetCredential("subscription_expires_at"),
 		Status:                        row.Status,
 		ErrorMessage:                  row.ErrorMessage,
-		ATOnly:                        !isOpenAIResponsesAccount && !isGrokAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		ATOnly:                        !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 		CreditEnabled:                 row.CreditEnabled,
 		CreditSkipUsageWindow:         row.CreditSkipUsageWindow,
 		SkipWarmTier:                  row.SkipWarmTier,
@@ -135,11 +216,21 @@ func (h *Handler) buildAccountResponse(
 		AccessTokenType:               accountAccessTokenType(row),
 		OpenAIResponsesAPI:            isOpenAIResponsesAccount,
 		GrokAPI:                       isGrokAccount,
+		AntigravityAPI:                isAntigravityAccount,
+		ClaudeAPI:                     isClaudeAccount,
+		AntigravityAuthKind:           antigravityAuthKind,
 		AgentIdentity:                 isAgentIdentityCredentialRow(row),
 		GrokAuthKind:                  grokAuthKind,
 		GrokPlan:                      grokPlan,
 		GrokBilling:                   grokBilling,
+		AvatarURL:                     row.GetCredential("avatar_url"),
+		VerifiedEmail:                 row.GetCredentialBool("verified_email"),
+		ProjectID:                     row.GetCredential("project_id"),
+		AntigravityQuota:              antigravityQuota,
+		AntigravityPermissions:        antigravityPermissions,
+		AntigravitySyncWarning:        row.GetCredential("antigravity_sync_warning"),
 		BaseURL:                       baseURL,
+		BalanceQueryURL:               balanceQueryURL,
 		Models:                        row.GetCredentialStringSlice("models"),
 		ModelMapping:                  modelMapping,
 		CodexClientMetadataMode:       codexClientMetadataMode,
@@ -148,6 +239,9 @@ func (h *Handler) buildAccountResponse(
 		SessionCapacityMax:            sessionCapacityMax,
 		SessionCapacityIdleTTLSeconds: sessionCapacityIdleTTLSeconds,
 		SessionCapacityCurrent:        sessionCapacityCurrent,
+		ClaudeFingerprintMode:         claudeFingerprintMode,
+		ClaudeUserAgent:               claudeUserAgent,
+		Timezone:                      accountTimezone,
 		CustomHeaders:                 customHeaders,
 		ProxyURL:                      row.ProxyURL,
 		Enabled:                       row.Enabled,
@@ -163,8 +257,13 @@ func (h *Handler) buildAccountResponse(
 		UpdatedAt:                     row.UpdatedAt.Format(time.RFC3339),
 		CodexUsageUpdatedAt:           row.GetCredential("codex_usage_updated_at"),
 		Codex5HUsageUpdatedAt:         row.GetCredential("codex_5h_usage_updated_at"),
+		ClaudeUsageProbeAt:            row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
+		ClaudeUsageProbeError:         row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
 		UsageLimitOverride:            ignoreUsageLimitStatusOverride,
 		UsageLimitEffective:           ignoreUsageLimitStatusEffective,
+	}
+	if isAntigravityAccount {
+		resp.Models = antigravityPublishedModelsOrDefault(row.GetCredentialStringSlice("models"))
 	}
 	resp.AutoPause5hThreshold = accountQuotaAutoPauseThreshold(row, "auto_pause_5h_threshold")
 	resp.AutoPause7dThreshold = accountQuotaAutoPauseThreshold(row, "auto_pause_7d_threshold")
@@ -230,7 +329,7 @@ func (h *Handler) buildAccountResponse(
 				SuccessRatePenalty:  debug.Breakdown.SuccessRatePenalty,
 			}
 		}
-		if !isOpenAIResponsesAccount && !isGrokAccount {
+		if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
 			if usagePct, ok := runtimeAccount.GetUsagePercent7d(); ok {
 				resp.UsagePercent7d = &usagePct
 			}
@@ -264,7 +363,7 @@ func (h *Handler) buildAccountResponse(
 				}
 			}
 		}
-		if !isOpenAIResponsesAccount && !isGrokAccount {
+		if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
 			if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
 				resp.Reset5hAt = t.Format(time.RFC3339)
 			}
@@ -308,14 +407,19 @@ func (h *Handler) buildAccountResponse(
 				})
 			}
 		}
-		resp.Status = runtimeAccount.RuntimeStatus()
-		resp.UsingCredits = runtimeAccount.UsingCredits()
-		runtimeAccount.Mu().RLock()
-		resp.ErrorMessage = runtimeAccount.ErrorMsg
-		runtimeAccount.Mu().RUnlock()
+		if !isAntigravityAccount {
+			resp.Status = runtimeAccount.RuntimeStatus()
+			resp.UsingCredits = runtimeAccount.UsingCredits()
+			runtimeAccount.Mu().RLock()
+			resp.ErrorMessage = runtimeAccount.ErrorMsg
+			runtimeAccount.Mu().RUnlock()
+		}
 	} else if row.CooldownUntil.Valid && row.CooldownUntil.Time.After(now) {
 		resp.CooldownReason = row.CooldownReason
 		resp.CooldownUntil = row.CooldownUntil.Time.Format(time.RFC3339)
+	}
+	if isAntigravityAccount {
+		resp.Status, resp.ErrorMessage = antigravityPersistedStatus(row)
 	}
 	if resp.DispatchScore == 0 {
 		resp.DispatchScore = dispatchScoreFallback(resp.SchedulerScore, resp.ScoreBiasEffective, resp.HealthTier, resp.Status)

@@ -9,7 +9,9 @@ import (
 
 // deriveContentSessionSeed 从请求体派生稳定的会话种子（参考 sub2api 的
 // deriveOpenAIContentSessionSeed）。仅取对话全程不变的字段：model、instructions、
-// system/developer 消息、tools 定义、首条 user 消息。
+// 对话开头的 system/developer 前缀、tools 定义、首条 user 消息。首个非
+// system/developer 项之后的动态系统消息不参与哈希，避免客户端逐轮注入时间、
+// 环境或状态提示时把同一会话错误地漂移到另一个账号。
 //
 // 用途：客户端未携带任何显式会话标识（Session_id/Conversation_id/Idempotency-Key/
 // prompt_cache_key）时，让"同一段对话的多轮请求"收敛到同一个本地账号粘性键，
@@ -48,15 +50,22 @@ func deriveContentSessionSeed(body []byte) string {
 
 	firstUserCaptured := false
 	scanItems := func(items gjson.Result) {
+		systemPrefixOpen := true
 		items.ForEach(func(_, item gjson.Result) bool {
-			switch item.Get("role").String() {
+			role := item.Get("role").String()
+			switch role {
 			case "system", "developer":
-				writeField("system", item.Get("content").Raw)
+				if systemPrefixOpen {
+					writeField("system", item.Get("content").Raw)
+				}
 			case "user":
+				systemPrefixOpen = false
 				if !firstUserCaptured {
 					writeField("first_user", item.Get("content").Raw)
 					firstUserCaptured = true
 				}
+			default:
+				systemPrefixOpen = false
 			}
 			return true
 		})

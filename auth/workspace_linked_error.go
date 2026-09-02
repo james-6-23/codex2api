@@ -48,7 +48,7 @@ func deactivatedWorkspaceLinkedMessage(triggerID int64) string {
 }
 
 func (s *Store) workspaceLinkedTargets(trigger *Account) []*Account {
-	if trigger.IsGrokAPI() || trigger.IsOpenAIResponsesAPI() {
+	if trigger.IsGrokAPI() || trigger.IsOpenAIResponsesAPI() || trigger.IsClaudeOAuth() {
 		return nil
 	}
 	workspaceID := strings.TrimSpace(trigger.EffectiveAccountID())
@@ -72,7 +72,7 @@ func shouldLinkDeactivatedWorkspace(trigger, sibling *Account, workspaceID strin
 	if sibling == nil || trigger == nil || sibling.DBID == trigger.DBID {
 		return false
 	}
-	if sibling.IsGrokAPI() || sibling.IsOpenAIResponsesAPI() {
+	if sibling.IsGrokAPI() || sibling.IsOpenAIResponsesAPI() || sibling.IsClaudeOAuth() {
 		return false
 	}
 	if siblingErrorStatus(sibling) {
@@ -118,7 +118,7 @@ func siblingErrorStatus(acc *Account) bool {
 // LinkedDeactivatedWorkspaceResult 供批量测试在打 WHAM 前短路：
 // 该账号已因同空间停用被标错，或所属工作区刚被停用。
 func (s *Store) LinkedDeactivatedWorkspaceResult(acc *Account) (string, bool) {
-	if s == nil || acc == nil || acc.IsGrokAPI() || acc.IsOpenAIResponsesAPI() {
+	if s == nil || acc == nil || acc.IsGrokAPI() || acc.IsOpenAIResponsesAPI() || acc.IsClaudeOAuth() {
 		return "", false
 	}
 	acc.mu.RLock()

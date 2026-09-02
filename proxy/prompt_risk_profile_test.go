@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +11,7 @@ import (
 	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
+	"github.com/gin-gonic/gin"
 )
 
 func TestSignedCYCreatesSeparatedPersonKeyNetworkSessionAndAccountProfiles(t *testing.T) {
@@ -87,5 +90,26 @@ func TestPromptPolicyRoutingSnapshotNormalizesDefaultCodexAccount(t *testing.T) 
 	snapshot := handler.capturePromptPolicyRoutingSnapshot(account.DBID, 9)
 	if snapshot.AccountName != account.Email || snapshot.AccountPlatform != database.UpstreamChannelCodex || len(snapshot.AccountGroupNames) != 1 || len(snapshot.APIKeyAllowedGroupNames) != 1 {
 		t.Fatalf("routing snapshot = %#v", snapshot)
+	}
+}
+
+func TestCapturePromptFilterAuditContextIncludesSignedChannelID(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{})
+	defer store.Stop()
+	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{
+		APIKeyID: 101, PlatformCode: "gateway-a", Secret: "gateway-a-secret", Enabled: true,
+	}})
+	handler := NewHandler(store, nil, nil, nil)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	c.Set(contextAPIKeyID, int64(101))
+	c.Set(newAPIPolicyMetaContextKey, verifiedNewAPIPolicyContext{
+		APIKeyID: 101, Platform: "gateway-a", Identity: newAPIIdentity{UserID: "user-42", ClientIP: "203.0.113.8", RequestID: "req-42"},
+		MetaVerified: true, Meta: newAPIPolicyMeta{ChannelID: 2002, SessionFingerprint: "0123456789abcdef0123456789abcdef"},
+	})
+	audit := handler.capturePromptFilterAuditContext(c)
+	if audit.NewAPIChannelID != 2002 {
+		t.Fatalf("signed NewAPI channel id = %d, want 2002", audit.NewAPIChannelID)
 	}
 }

@@ -26,6 +26,8 @@ const (
 	modelBackingCodex modelBacking = 1 << iota
 	modelBackingGrok
 	modelBackingRelay
+	modelBackingAntigravity
+	modelBackingClaude
 )
 
 type scopedModelRecord struct {
@@ -73,6 +75,10 @@ func scopedModelOwner(record *scopedModelRecord) string {
 		return "xai"
 	case modelBackingCodex:
 		return "openai"
+	case modelBackingAntigravity:
+		return "google"
+	case modelBackingClaude:
+		return "anthropic"
 	default:
 		return "codex2api"
 	}
@@ -206,6 +212,27 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 				addTarget(alias)
 			}
 
+		case account.IsAntigravityAPI():
+			if !account.AntigravityDispatchEnabled() {
+				continue
+			}
+			// The synchronized account catalog contains Google wire IDs. Publish
+			// only the stable native surface understood by the Responses adapter;
+			// raw backing names and per-account aliases must not leak into Codex.
+			models := antigravityPublicModelsForAccount(account)
+			for _, id := range models {
+				addScopedModel(records, id, modelBackingAntigravity, time.Time{}, false)
+				addTarget(id)
+			}
+
+		case account.IsClaudeOAuth():
+			// Claude Code OAuth 账号:账号维度暴露 claude 模型(owner=anthropic),
+			// 供下游客户端发现;调度/透传由 claude 原生路径处理。
+			for _, id := range DefaultClaudeModelIDsForAccount(account) {
+				addScopedModel(records, id, modelBackingClaude, time.Time{}, false)
+				addTarget(id)
+			}
+
 		default:
 			for _, item := range catalog.Items {
 				if !item.Enabled || !account.SupportsCodexModel(item.ID) {
@@ -220,21 +247,27 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 		}
 	}
 
-	// Global exact aliases are visible only when their concrete target is
-	// routeable in this key's account snapshot. Wildcards are patterns, not
-	// model IDs, and therefore never appear in /v1/models.
-	for _, mapping := range []string{h.store.GetCodexModelMapping(), h.store.GetModelMapping()} {
-		for _, alias := range exactModelAliases(mapping, targetExists) {
-			addScopedModel(records, alias, 0, time.Time{}, true)
-		}
-	}
-	if entries, _ := parseReasoningEffortModelEntries(h.store.GetReasoningEffortModels(), nil, false); len(entries) > 0 {
-		for _, entry := range entries {
-			if !targetExists(entry.Model) {
-				continue
-			}
-			if alias := ReasoningEffortModelAlias(entry.Model, entry.Effort); alias != "" {
+	// Antigravity-only keys intentionally expose exactly the native logical
+	// surface. Global/OpenAI aliases and synthesized effort aliases belong to
+	// other providers and would make Cockpit's catalog diverge again.
+	channel := row.Limits.ResolveUpstreamChannel()
+	if channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude {
+		// Global exact aliases are visible only when their concrete target is
+		// routeable in this key's account snapshot. Wildcards are patterns, not
+		// model IDs, and therefore never appear in /v1/models.
+		for _, mapping := range []string{h.store.GetCodexModelMapping(), h.store.GetModelMapping()} {
+			for _, alias := range exactModelAliases(mapping, targetExists) {
 				addScopedModel(records, alias, 0, time.Time{}, true)
+			}
+		}
+		if entries, _ := parseReasoningEffortModelEntries(h.store.GetReasoningEffortModels(), nil, false); len(entries) > 0 {
+			for _, entry := range entries {
+				if !targetExists(entry.Model) {
+					continue
+				}
+				if alias := ReasoningEffortModelAlias(entry.Model, entry.Effort); alias != "" {
+					addScopedModel(records, alias, 0, time.Time{}, true)
+				}
 			}
 		}
 	}

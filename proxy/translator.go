@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -79,6 +80,11 @@ type openAIContentPart struct {
 	ImageURL *struct {
 		URL string `json:"url"`
 	} `json:"image_url,omitempty"`
+	File *struct {
+		Filename string `json:"filename,omitempty"`
+		FileData string `json:"file_data,omitempty"`
+		FileID   string `json:"file_id,omitempty"`
+	} `json:"file,omitempty"`
 }
 
 // ==================== 输出结构体（OpenAI 流式/非流式响应格式） ====================
@@ -959,6 +965,110 @@ func normalizeResponsesToolCallArgumentTypes(body map[string]any) bool {
 	return modified
 }
 
+// normalizeOrdinaryFunctionCallArguments validates the JSON string required by
+// an ordinary Responses function_call. Empty arguments are a widely emitted
+// shorthand for an empty object; all other malformed values are rejected so a
+// truncated call cannot be persisted and replayed into later turns.
+func normalizeOrdinaryFunctionCallArguments(arguments string) (string, bool) {
+	if strings.TrimSpace(arguments) == "" {
+		return "{}", true
+	}
+	if !json.Valid([]byte(arguments)) {
+		return "", false
+	}
+	return arguments, true
+}
+
+// sanitizeMalformedResponsesFunctionCalls removes malformed ordinary
+// function_call history and its matching function_call_output. Provider-native
+// and custom tool items deliberately remain untouched: their arguments/input
+// may be free-form text or another provider-specific shape rather than JSON.
+func sanitizeMalformedResponsesFunctionCalls(body map[string]any) bool {
+	inputItems, ok := body["input"].([]any)
+	if !ok || len(inputItems) == 0 {
+		return false
+	}
+
+	invalidCallIDs := make(map[string]struct{})
+	validCallIDs := make(map[string]struct{})
+	invalidEmptyCalls := 0
+	modified := false
+	withoutInvalidCalls := make([]any, 0, len(inputItems))
+
+	for _, raw := range inputItems {
+		item, ok := raw.(map[string]any)
+		if !ok || strings.TrimSpace(firstNonEmptyAnyString(item["type"])) != "function_call" {
+			withoutInvalidCalls = append(withoutInvalidCalls, raw)
+			continue
+		}
+
+		arguments, isString := item["arguments"].(string)
+		if !isString {
+			// normalizeResponsesToolCallArgumentTypes runs immediately before this
+			// sanitizer. If marshaling failed there, fail closed here.
+			callID := strings.TrimSpace(firstNonEmptyAnyString(item["call_id"]))
+			if callID == "" {
+				invalidEmptyCalls++
+			} else {
+				invalidCallIDs[callID] = struct{}{}
+			}
+			modified = true
+			continue
+		}
+		normalized, valid := normalizeOrdinaryFunctionCallArguments(arguments)
+		callID := strings.TrimSpace(firstNonEmptyAnyString(item["call_id"]))
+		if !valid {
+			if callID == "" {
+				invalidEmptyCalls++
+			} else {
+				invalidCallIDs[callID] = struct{}{}
+			}
+			modified = true
+			continue
+		}
+		if normalized != arguments {
+			item["arguments"] = normalized
+			modified = true
+		}
+		if callID != "" {
+			validCallIDs[callID] = struct{}{}
+		}
+		withoutInvalidCalls = append(withoutInvalidCalls, raw)
+	}
+
+	for callID := range validCallIDs {
+		delete(invalidCallIDs, callID)
+	}
+	if len(invalidCallIDs) == 0 && invalidEmptyCalls == 0 {
+		if modified {
+			body["input"] = withoutInvalidCalls
+		}
+		return modified
+	}
+
+	filtered := make([]any, 0, len(withoutInvalidCalls))
+	for _, raw := range withoutInvalidCalls {
+		item, ok := raw.(map[string]any)
+		if !ok || strings.TrimSpace(firstNonEmptyAnyString(item["type"])) != "function_call_output" {
+			filtered = append(filtered, raw)
+			continue
+		}
+		callID := strings.TrimSpace(firstNonEmptyAnyString(item["call_id"]))
+		if callID == "" && invalidEmptyCalls > 0 {
+			invalidEmptyCalls--
+			modified = true
+			continue
+		}
+		if _, invalid := invalidCallIDs[callID]; invalid {
+			modified = true
+			continue
+		}
+		filtered = append(filtered, raw)
+	}
+	body["input"] = filtered
+	return modified
+}
+
 // repairResponsesToolCallPairing 修复 input[] 中工具调用项与输出项的 call_id 配对。
 // 部分客户端（如 VSCode Copilot 的 Responses 直连）在长会话做上下文裁剪/摘要时，
 // 会丢掉配对中的一半：只剩 *_call_output 时上游 400 "No tool call found for
@@ -1405,6 +1515,11 @@ func dropBareReasoningInputItems(body map[string]any) bool {
 	return true
 }
 
+// codexEncryptedContentPrefix 是 Codex 上游 reasoning.encrypted_content 的
+// Fernet 令牌前缀：版本字节 0x80 使 base64 编码恒以 "gAAAA" 开头。其他渠道
+// （如 Grok）的密文是裸 base64，不含此前缀，可据此区分血统。
+const codexEncryptedContentPrefix = "gAAAA"
+
 func dropBareReasoningInputValue(value any) (any, bool, bool) {
 	switch v := value.(type) {
 	case []any:
@@ -1423,9 +1538,22 @@ func dropBareReasoningInputValue(value any) (any, bool, bool) {
 		}
 		return out, changed, true
 	case map[string]any:
-		if strings.TrimSpace(firstNonEmptyAnyString(v["type"])) == "reasoning" &&
-			firstNonEmptyAnyString(v["encrypted_content"]) == "" {
-			return nil, true, false
+		if strings.TrimSpace(firstNonEmptyAnyString(v["type"])) == "reasoning" {
+			// 无密文、或外渠道血统密文（非 Fernet 前缀）的 reasoning 项整项
+			// 丢弃：Codex 上游要求 reasoning 必带自家可解的 encrypted_content，
+			// 缺失报 missing_required_parameter，外来密文报
+			// invalid_encrypted_content（issue #565）。
+			ec := firstNonEmptyAnyString(v["encrypted_content"])
+			if ec == "" || !strings.HasPrefix(ec, codexEncryptedContentPrefix) {
+				return nil, true, false
+			}
+			// Codex reasoning schema 不认 status 字段（400 unknown_parameter），
+			// 自家输出也从不携带；跨渠道会话中客户端可能裸回灌带 status 的
+			// 外渠道 reasoning 输出（issue #565）。
+			if _, has := v["status"]; has {
+				delete(v, "status")
+				return v, true, true
+			}
 		}
 		return v, false, true
 	default:
@@ -1564,7 +1692,7 @@ func cachedOrParse(rawJSON []byte) openAIRequest {
 // TranslateRequest 将 OpenAI Chat Completions 请求转换为 Codex Responses 格式
 // 采用 Unmarshal→构造 map→Marshal 模式，只做一次 JSON 序列化
 func TranslateRequest(rawJSON []byte) ([]byte, error) {
-	req := cachedOrParse(rawJSON)
+	req := sanitizeChatCompletionToolHistory(cachedOrParse(rawJSON))
 	if err := validateChatCompletionFunctionNames(req); err != nil {
 		return nil, err
 	}
@@ -1579,7 +1707,7 @@ func TranslateRequest(rawJSON []byte) ([]byte, error) {
 // tool selection). Keeping the two entry points separate prevents those fields
 // from reaching the Codex backend, where they are unsupported.
 func TranslateChatToResponsesForGrok(rawJSON []byte) ([]byte, error) {
-	req := cachedOrParse(rawJSON)
+	req := sanitizeChatCompletionToolHistory(cachedOrParse(rawJSON))
 	if err := validateChatCompletionFunctionNames(req); err != nil {
 		return nil, err
 	}
@@ -1597,6 +1725,88 @@ func TranslateChatToResponsesForGrok(rawJSON []byte) ([]byte, error) {
 		return nil, err
 	}
 	return json.Marshal(out)
+}
+
+// sanitizeChatCompletionToolHistory removes truncated ordinary function calls
+// together with their matching tool outputs before converting historical Chat
+// messages to Responses input. Empty arguments are the common provider shorthand
+// for an empty object and are normalized to {}. Custom/provider tool shapes are
+// left untouched because their input is not required to be JSON.
+func sanitizeChatCompletionToolHistory(req openAIRequest) openAIRequest {
+	if len(req.Messages) == 0 {
+		return req
+	}
+
+	invalidCallIDs := make(map[string]struct{})
+	validCallIDs := make(map[string]struct{})
+	invalidEmptyCalls := 0
+	filtered := make([]openAIMessage, 0, len(req.Messages))
+	modified := false
+
+	for _, message := range req.Messages {
+		if message.Role != "assistant" || len(message.ToolCalls) == 0 {
+			filtered = append(filtered, message)
+			continue
+		}
+		calls := make([]openAIToolCall, 0, len(message.ToolCalls))
+		for _, toolCall := range message.ToolCalls {
+			if toolCall.Type != "" && toolCall.Type != "function" {
+				calls = append(calls, toolCall)
+				continue
+			}
+			arguments := strings.TrimSpace(toolCall.Function.Arguments)
+			if arguments == "" {
+				toolCall.Function.Arguments = "{}"
+				arguments = "{}"
+				modified = true
+			}
+			if !json.Valid([]byte(arguments)) {
+				modified = true
+				if callID := strings.TrimSpace(toolCall.ID); callID != "" {
+					invalidCallIDs[callID] = struct{}{}
+				} else {
+					invalidEmptyCalls++
+				}
+				continue
+			}
+			if callID := strings.TrimSpace(toolCall.ID); callID != "" {
+				validCallIDs[callID] = struct{}{}
+			}
+			calls = append(calls, toolCall)
+		}
+		for callID := range validCallIDs {
+			delete(invalidCallIDs, callID)
+		}
+		message.ToolCalls = calls
+		if len(calls) == 0 && strings.TrimSpace(rawMessageToString(message.Content)) == "" {
+			continue
+		}
+		filtered = append(filtered, message)
+	}
+
+	if len(invalidCallIDs) > 0 || invalidEmptyCalls > 0 {
+		withoutOutputs := filtered[:0]
+		for _, message := range filtered {
+			if message.Role == "tool" {
+				callID := strings.TrimSpace(message.ToolCallID)
+				if callID == "" && invalidEmptyCalls > 0 {
+					invalidEmptyCalls--
+					modified = true
+					continue
+				}
+				if _, invalid := invalidCallIDs[callID]; invalid {
+					modified = true
+					continue
+				}
+			}
+			withoutOutputs = append(withoutOutputs, message)
+		}
+		filtered = withoutOutputs
+	}
+	if modified {
+		req.Messages = filtered
+	}
+	return req
 }
 
 func buildChatResponsesRequest(req openAIRequest) map[string]any {
@@ -2181,6 +2391,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	normalizeResponsesContentPartTypes(body)
 	normalizeResponsesInputMessageContent(body)
 	normalizeResponsesToolCallArgumentTypes(body)
+	sanitizeMalformedResponsesFunctionCalls(body)
 	normalizeResponsesInputItemIDs(body)
 	dropBareReasoningInputItems(body)
 	// 6c. 修复工具调用/输出的 call_id 配对（issue #414）。
@@ -2507,6 +2718,20 @@ func buildContentPartsSlice(role string, raw json.RawMessage) []any {
 				if item.ImageURL != nil && item.ImageURL.URL != "" {
 					parts = append(parts, map[string]any{"type": "input_image", "image_url": item.ImageURL.URL})
 				}
+			case "file":
+				if item.File != nil && (strings.TrimSpace(item.File.FileID) != "" || strings.TrimSpace(item.File.FileData) != "") {
+					part := map[string]any{"type": "input_file"}
+					if filename := strings.TrimSpace(item.File.Filename); filename != "" {
+						part["filename"] = filename
+					}
+					if fileData := strings.TrimSpace(item.File.FileData); fileData != "" {
+						part["file_data"] = fileData
+					}
+					if fileID := strings.TrimSpace(item.File.FileID); fileID != "" {
+						part["file_id"] = fileID
+					}
+					parts = append(parts, part)
+				}
 			}
 		}
 		return parts
@@ -2731,8 +2956,9 @@ func resolveUsageServiceTiers(actualTier, requestedTier string) usageServiceTier
 }
 
 // resolveBillingServiceTier selects the tier used for money. The default policy
-// follows upstream actual service_tier; requested policy preserves the old
-// "client asked for fast/priority, bill priority" behavior.
+// treats the requested tier as a ceiling: an upstream observation may lower the
+// bill, but it must never raise it. requested policy ignores observations and
+// preserves the explicit client intent.
 func resolveBillingServiceTier(actualTier, requestedTier string) string {
 	return resolveBillingServiceTierForPolicy(actualTier, requestedTier, CurrentRuntimeSettings().BillingTierPolicy)
 }
@@ -2742,16 +2968,35 @@ func resolveBillingServiceTierForPolicy(actualTier, requestedTier, policy string
 	requestedTier = normalizeBillingServiceTier(requestedTier)
 
 	if NormalizeBillingTierPolicy(policy) == BillingTierPolicyRequested {
-		if requestedTier != "" {
-			return requestedTier
-		}
-		return actualTier
+		return requestedTier
 	}
 
-	if actualTier != "" {
-		return actualTier
+	if actualTier == "" || actualTier == requestedTier {
+		return requestedTier
 	}
-	return requestedTier
+	actualRank, actualKnown := billingServiceTierCostRank(actualTier)
+	requestedRank, requestedKnown := billingServiceTierCostRank(requestedTier)
+	if !actualKnown || !requestedKnown || actualRank >= requestedRank {
+		return requestedTier
+	}
+	return actualTier
+}
+
+// billingServiceTierCostRank orders known tiers by relative price. Empty is the
+// ordinary base tier: an unsolicited priority observation therefore cannot turn
+// an untiered request into a Fast charge. Unknown tiers are never trusted to
+// change billing in either direction.
+func billingServiceTierCostRank(tier string) (int, bool) {
+	switch normalizeBillingServiceTier(tier) {
+	case "flex":
+		return 0, true
+	case "", "default", "standard", "auto", "scale":
+		return 1, true
+	case "priority":
+		return 2, true
+	default:
+		return 1, false
+	}
 }
 
 // 上游不支持的 JSON Schema 验证约束关键字
@@ -3515,21 +3760,32 @@ type ToolCallResult struct {
 
 // StreamTranslator 有状态的流式响应翻译器，跟踪 function_call 索引映射
 type StreamTranslator struct {
-	Model        string
-	ChunkID      string
-	Created      int64
-	HasToolCalls bool
-	toolCallMap  map[string]int // Codex item.id → OpenAI tool_calls index
-	nextIdx      int
+	Model                 string
+	ChunkID               string
+	Created               int64
+	HasToolCalls          bool
+	toolCallMap           map[string]int // Codex item.id/call_id → OpenAI tool_calls index
+	toolCallOutputIndexes map[int]int    // Responses output_index → OpenAI tool_calls index
+	toolCallTypes         map[int]string
+	toolCallNames         map[int]string
+	toolCallArguments     map[int]string
+	toolCallFinalized     map[int]bool
+	invalidToolArguments  error
+	nextIdx               int
 }
 
 // NewStreamTranslator 创建流式翻译器实例
 func NewStreamTranslator(chunkID, model string, created int64) *StreamTranslator {
 	return &StreamTranslator{
-		Model:       model,
-		ChunkID:     chunkID,
-		Created:     created,
-		toolCallMap: make(map[string]int),
+		Model:                 model,
+		ChunkID:               chunkID,
+		Created:               created,
+		toolCallMap:           make(map[string]int),
+		toolCallOutputIndexes: make(map[int]int),
+		toolCallTypes:         make(map[int]string),
+		toolCallNames:         make(map[int]string),
+		toolCallArguments:     make(map[int]string),
+		toolCallFinalized:     make(map[int]bool),
 	}
 }
 
@@ -3543,7 +3799,116 @@ func (st *StreamTranslator) Translate(eventData []byte) ([]byte, bool) {
 // failed stream without appending the success-only [DONE] sentinel.
 func (st *StreamTranslator) TranslateParsedResult(parsed gjson.Result) ChatStreamTranslation {
 	chunk, terminal := st.TranslateParsed(parsed)
-	return newChatStreamTranslation(parsed.Get("type").String(), chunk, terminal)
+	result := newChatStreamTranslation(parsed.Get("type").String(), chunk, terminal)
+	if terminal && st.invalidToolArguments != nil {
+		result.Failed = true
+	}
+	return result
+}
+
+// ToolArgumentsError reports an upstream protocol failure detected while
+// rebuilding a streamed ordinary function call. The handler uses this to make
+// the failure retryable before any private buffered attempt is committed.
+func (st *StreamTranslator) ToolArgumentsError() error {
+	if st == nil {
+		return nil
+	}
+	return st.invalidToolArguments
+}
+
+func (st *StreamTranslator) toolCallIndex(parsed gjson.Result) (int, bool) {
+	itemID := parsed.Get("item_id").String()
+	if itemID == "" {
+		itemID = parsed.Get("call_id").String()
+	}
+	if itemID == "" {
+		itemID = parsed.Get("item.id").String()
+	}
+	if itemID == "" {
+		itemID = parsed.Get("item.call_id").String()
+	}
+	if itemID != "" {
+		if idx, ok := st.toolCallMap[itemID]; ok {
+			return idx, true
+		}
+	}
+	if outputIndex := parsed.Get("output_index"); outputIndex.Exists() {
+		idx, ok := st.toolCallOutputIndexes[int(outputIndex.Int())]
+		return idx, ok
+	}
+	return 0, false
+}
+
+func (st *StreamTranslator) failToolArguments(idx int, reason string) ([]byte, bool) {
+	if st.invalidToolArguments == nil {
+		name := strings.TrimSpace(st.toolCallNames[idx])
+		if name == "" {
+			name = "unknown"
+		}
+		st.invalidToolArguments = fmt.Errorf("upstream function call %q arguments %s", name, reason)
+	}
+	return newErrorResponse(st.invalidToolArguments.Error()), true
+}
+
+// finalizeOrdinaryToolArguments reconciles streamed deltas with the canonical
+// arguments carried by the done item. A canonical suffix may be emitted when a
+// provider omitted the final delta; divergent or invalid JSON fails the attempt
+// instead of producing a completed poisoned tool call.
+func (st *StreamTranslator) finalizeOrdinaryToolArguments(idx int, finalArguments string) ([]byte, bool) {
+	current := st.toolCallArguments[idx]
+	candidate := finalArguments
+	if strings.TrimSpace(candidate) == "" && current != "" {
+		candidate = current
+	}
+	normalized, valid := normalizeOrdinaryFunctionCallArguments(candidate)
+	if !valid {
+		return st.failToolArguments(idx, "contain invalid JSON")
+	}
+	if current == normalized {
+		st.toolCallFinalized[idx] = true
+		return nil, false
+	}
+	if !strings.HasPrefix(normalized, current) {
+		return st.failToolArguments(idx, "do not match the streamed deltas")
+	}
+	st.toolCallArguments[idx] = normalized
+	st.toolCallFinalized[idx] = true
+	return newToolCallDeltaChunk(st.ChunkID, st.Model, st.Created, idx, normalized[len(current):]), false
+}
+
+func (st *StreamTranslator) validateTerminalFunctionCalls(parsed gjson.Result) {
+	if st.invalidToolArguments != nil {
+		return
+	}
+	output := parsed.Get("response.output")
+	if output.IsArray() {
+		output.ForEach(func(_, item gjson.Result) bool {
+			if item.Get("type").String() != "function_call" {
+				return true
+			}
+			if _, valid := normalizeOrdinaryFunctionCallArguments(item.Get("arguments").String()); !valid {
+				name := strings.TrimSpace(item.Get("name").String())
+				if name == "" {
+					name = "unknown"
+				}
+				st.invalidToolArguments = fmt.Errorf("upstream function call %q arguments contain invalid JSON", name)
+				return false
+			}
+			return true
+		})
+	}
+	if st.invalidToolArguments != nil {
+		return
+	}
+	for idx, itemType := range st.toolCallTypes {
+		if itemType != "function_call" || st.toolCallFinalized[idx] {
+			continue
+		}
+		if _, valid := normalizeOrdinaryFunctionCallArguments(st.toolCallArguments[idx]); !valid {
+			_, _ = st.failToolArguments(idx, "contain invalid JSON")
+			return
+		}
+	}
 }
 
 // TranslateParsed 将已解析的 Codex SSE 事件翻译为 OpenAI Chat Completions 流式格式。
@@ -3579,27 +3944,55 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 		if callID != "" && callID != itemID {
 			st.toolCallMap[callID] = tcIdx
 		}
+		if outputIndex := parsed.Get("output_index"); outputIndex.Exists() {
+			st.toolCallOutputIndexes[int(outputIndex.Int())] = tcIdx
+		}
 		st.nextIdx++
 		st.HasToolCalls = true
+		st.toolCallTypes[tcIdx] = itemType
+		st.toolCallNames[tcIdx] = name
 
 		return newToolCallAnnouncementChunk(st.ChunkID, st.Model, st.Created, tcIdx, callID, name), false
 
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
-		itemID := parsed.Get("item_id").String()
-		if itemID == "" {
-			itemID = parsed.Get("call_id").String()
-		}
-		tcIdx, ok := st.toolCallMap[itemID]
+		tcIdx, ok := st.toolCallIndex(parsed)
 		if !ok {
 			return nil, false
 		}
 		delta := parsed.Get("delta").String()
+		if eventType == "response.function_call_arguments.delta" && st.toolCallTypes[tcIdx] == "function_call" {
+			if st.toolCallFinalized[tcIdx] {
+				return st.failToolArguments(tcIdx, "continued after the done event")
+			}
+			st.toolCallArguments[tcIdx] += delta
+		}
 		return newToolCallDeltaChunk(st.ChunkID, st.Model, st.Created, tcIdx, delta), false
 
-	case "response.function_call_arguments.done", "response.custom_tool_call_input.done":
+	case "response.function_call_arguments.done":
+		tcIdx, ok := st.toolCallIndex(parsed)
+		if !ok || st.toolCallTypes[tcIdx] != "function_call" {
+			return nil, false
+		}
+		return st.finalizeOrdinaryToolArguments(tcIdx, parsed.Get("arguments").String())
+
+	case "response.custom_tool_call_input.done":
 		return nil, false
 
+	case "response.output_item.done":
+		if parsed.Get("item.type").String() != "function_call" {
+			return nil, false
+		}
+		tcIdx, ok := st.toolCallIndex(parsed)
+		if !ok {
+			return nil, false
+		}
+		return st.finalizeOrdinaryToolArguments(tcIdx, parsed.Get("item.arguments").String())
+
 	case "response.completed", "response.incomplete":
+		st.validateTerminalFunctionCalls(parsed)
+		if st.invalidToolArguments != nil {
+			return newErrorResponse(st.invalidToolArguments.Error()), true
+		}
 		usage := extractUsageFromResult(parsed.Get("response.usage"))
 		finishReason := "stop"
 		if st.HasToolCalls {
@@ -3622,7 +4015,7 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 		}
 		return newErrorResponse(errMsg, details), true
 
-	case "response.content_part.done", "response.output_item.done",
+	case "response.content_part.done",
 		"response.created", "response.in_progress",
 		"response.content_part.added",
 		"response.reasoning_summary_text.done",
@@ -3782,13 +4175,15 @@ func extractUsageFromResult(usage gjson.Result) *UsageInfo {
 	return newUsageInfo(inputTokens, outputTokens, reasoningTokens, cachedTokens)
 }
 
-// ExtractToolCallsFromOutput 从 response.completed 事件的 output 数组中提取 function_call 项
-func ExtractToolCallsFromOutput(eventData []byte) []ToolCallResult {
+// ExtractToolCallsFromOutputValidated extracts completed tool calls and rejects
+// malformed ordinary function arguments. Custom tool input remains free-form.
+func ExtractToolCallsFromOutputValidated(eventData []byte) ([]ToolCallResult, error) {
 	var toolCalls []ToolCallResult
 	output := gjson.GetBytes(eventData, "response.output")
 	if !output.IsArray() {
-		return nil
+		return nil, nil
 	}
+	var validationErr error
 	output.ForEach(func(_, item gjson.Result) bool {
 		itemType := item.Get("type").String()
 		if isCodexToolCallItemType(itemType) {
@@ -3799,6 +4194,17 @@ func ExtractToolCallsFromOutput(eventData []byte) []ToolCallResult {
 			arguments := item.Get("arguments").String()
 			if itemType == "custom_tool_call" {
 				arguments = item.Get("input").String()
+			} else {
+				normalized, valid := normalizeOrdinaryFunctionCallArguments(arguments)
+				if !valid {
+					name := strings.TrimSpace(item.Get("name").String())
+					if name == "" {
+						name = "unknown"
+					}
+					validationErr = fmt.Errorf("upstream function call %q arguments contain invalid JSON", name)
+					return false
+				}
+				arguments = normalized
 			}
 			toolCalls = append(toolCalls, ToolCallResult{
 				ID:        callID,
@@ -3808,5 +4214,38 @@ func ExtractToolCallsFromOutput(eventData []byte) []ToolCallResult {
 		}
 		return true
 	})
+	if validationErr != nil {
+		return nil, validationErr
+	}
+	return toolCalls, nil
+}
+
+// ExtractToolCallsFromOutput preserves the historical convenience API. New
+// response paths should use ExtractToolCallsFromOutputValidated so malformed
+// upstream output becomes an explicit failed attempt rather than disappearing.
+func ExtractToolCallsFromOutput(eventData []byte) []ToolCallResult {
+	toolCalls, _ := ExtractToolCallsFromOutputValidated(eventData)
 	return toolCalls
+}
+
+func malformedToolArgumentsFailurePayload(err error) []byte {
+	message := "upstream function call arguments contain invalid JSON"
+	if err != nil && strings.TrimSpace(err.Error()) != "" {
+		message = err.Error()
+	}
+	payload := map[string]any{
+		"type": "response.failed",
+		"response": map[string]any{
+			"created_at": time.Now().Unix(),
+			"status":     "failed",
+			"error": map[string]any{
+				"code":        "bad_gateway",
+				"type":        "upstream_protocol_error",
+				"status_code": http.StatusBadGateway,
+				"message":     message,
+			},
+		},
+	}
+	encoded, _ := json.Marshal(payload)
+	return encoded
 }

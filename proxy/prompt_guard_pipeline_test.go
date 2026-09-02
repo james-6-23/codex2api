@@ -3,7 +3,6 @@ package proxy
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -943,8 +942,7 @@ func TestCompositeToolOutputCompatibilityBlockReviewsEvidenceAndCannotBeCleared(
 	var reviewPayload string
 	var reviewReadErr error
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
-		reviewReadErr = err
+		body := readUpstreamRequestBody(r)
 		reviewPayload = string(body)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"model":"review-test","results":[{"flagged":false}]}`))

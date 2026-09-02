@@ -50,6 +50,9 @@ func newPagedAccountsHandler(t *testing.T) (*Handler, []int64, []int64) {
 	if err := store.Init(ctx); err != nil {
 		t.Fatalf("store.Init: %v", err)
 	}
+	// Store.Init starts the scheduler outbox consumer. Stop it before the
+	// database cleanup so a late poll cannot outlive the test database.
+	t.Cleanup(func() { store.Stop() })
 	tokenCache := cache.NewMemory(1)
 	t.Cleanup(func() { _ = tokenCache.Close() })
 	return NewHandler(store, db, tokenCache, nil, ""), codexIDs, grokIDs
@@ -557,6 +560,26 @@ func TestBuildAccountQuotaAnalysisExcludesErrorFromUnsampled(t *testing.T) {
 	}
 }
 
+func TestBuildAccountQuotaAnalysisTreatsClaudePlanAsFiveHourEligible(t *testing.T) {
+	item := &accountListSnapshotItem{PlanType: "claude-max-5x", UsagePercent5h: 42, UsagePercent5hOK: true,
+		UsagePercent7d: 61, UsagePercent7dOK: true, Row: &database.AccountRow{Credentials: map[string]interface{}{"upstream_type": auth.UpstreamClaude}}}
+	got := buildAccountQuotaAnalysis([]*accountListSnapshotItem{item}, "5h")
+	if got.Total != 1 || got.Sampled != 1 || got.AverageUsed == nil || *got.AverageUsed != 42 {
+		t.Fatalf("Claude 5h quota = %+v, want sampled Claude account", got)
+	}
+}
+
+func TestBuildAccountQuotaAnalysisDoesNotTreatClaudeFreeOrUnknownAsFiveHourEligible(t *testing.T) {
+	for _, plan := range []string{"free", "", "mystery-tier", "claude-free", "claude-unknown"} {
+		item := &accountListSnapshotItem{PlanType: plan, UsagePercent5h: 42, UsagePercent5hOK: true,
+			Row: &database.AccountRow{Credentials: map[string]interface{}{"upstream_type": auth.UpstreamClaude}}}
+		got := buildAccountQuotaAnalysis([]*accountListSnapshotItem{item}, "5h")
+		if got.Total != 0 || got.Sampled != 0 {
+			t.Fatalf("Claude plan %q incorrectly entered 5h analysis: %+v", plan, got)
+		}
+	}
+}
+
 func TestCombineAccountStatsState(t *testing.T) {
 	if got := combineAccountStatsState("ready", "stale"); got != "stale" {
 		t.Fatalf("ready+stale=%q", got)
@@ -581,6 +604,140 @@ func TestAccountOperationSelectorNeverCrossesChannel(t *testing.T) {
 			if id == codexID {
 				t.Fatalf("selector leaked codex account %d", id)
 			}
+		}
+	}
+}
+
+func TestAccountListSubscriptionUnlockedIsProviderAware(t *testing.T) {
+	claudeRow := &database.AccountRow{Credentials: map[string]interface{}{"upstream_type": auth.UpstreamClaude}}
+	cases := []struct {
+		name    string
+		item    *accountListSnapshotItem
+		channel string
+		want    bool
+	}{
+		{
+			name:    "codex paid plan",
+			item:    &accountListSnapshotItem{PlanType: "plus"},
+			channel: database.UpstreamChannelCodex,
+			want:    true,
+		},
+		{
+			name:    "claude max plan",
+			item:    &accountListSnapshotItem{Claude: true, PlanType: "max", Row: claudeRow},
+			channel: database.UpstreamChannelClaude,
+			want:    true,
+		},
+		{
+			name:    "claude free plan",
+			item:    &accountListSnapshotItem{Claude: true, PlanType: "free", Row: claudeRow},
+			channel: database.UpstreamChannelClaude,
+			want:    false,
+		},
+		{
+			name:    "claude locked plan",
+			item:    &accountListSnapshotItem{Claude: true, PlanType: "max", Locked: true, Row: claudeRow},
+			channel: database.UpstreamChannelClaude,
+			want:    false,
+		},
+		{
+			name:    "grok plan is not claude subscription",
+			item:    &accountListSnapshotItem{PlanType: "supergrok", GrokAuthKind: auth.GrokAuthKindOAuth},
+			channel: database.UpstreamChannelGrok,
+			want:    false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := accountListSubscriptionUnlocked(tc.item, tc.channel); got != tc.want {
+				t.Fatalf("accountListSubscriptionUnlocked() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAccountOperationSelectorIncludesUnlockedClaudePlans(t *testing.T) {
+	handler, _, _ := newPagedAccountsHandler(t)
+	ctx := context.Background()
+	maxID, err := handler.db.InsertAccountWithUpstream(ctx, "claude-max", "anthropic", "oauth", map[string]interface{}{
+		"upstream_type": "claude",
+		"refresh_token": "claude-max-refresh",
+		"plan_type":     "max",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert Claude max account: %v", err)
+	}
+	lockedID, err := handler.db.InsertAccountWithUpstream(ctx, "claude-locked", "anthropic", "oauth", map[string]interface{}{
+		"upstream_type": "claude",
+		"refresh_token": "claude-locked-refresh",
+		"plan_type":     "max-5x",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert locked Claude account: %v", err)
+	}
+	if err := handler.db.SetAccountLocked(ctx, lockedID, true); err != nil {
+		t.Fatalf("lock Claude account: %v", err)
+	}
+	freeID, err := handler.db.InsertAccountWithUpstream(ctx, "claude-free", "anthropic", "oauth", map[string]interface{}{
+		"upstream_type": "claude",
+		"refresh_token": "claude-free-refresh",
+		"plan_type":     "free",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert Claude free account: %v", err)
+	}
+
+	selected, err := handler.resolveAccountOperationSelector(ctx, &accountOperationSelector{
+		Channel:              database.UpstreamChannelClaude,
+		SubscriptionUnlocked: true,
+	})
+	if err != nil {
+		t.Fatalf("resolve Claude selector: %v", err)
+	}
+	if len(selected) != 1 || selected[0] != maxID {
+		t.Fatalf("Claude subscription selector ids = %v, want [%d] (locked=%d free=%d)", selected, maxID, lockedID, freeID)
+	}
+}
+
+func TestClaudeAccountSnapshotExpiryDoesNotInvalidateOtherChannelGeneration(t *testing.T) {
+	h := &Handler{accountListCache: make(map[string]*accountListSnapshot)}
+	globalBefore := h.accountCachesGen.Load()
+	claudeBefore := h.claudeAccountCachesGen.Load()
+	h.expireAccountListSnapshot(database.UpstreamChannelClaude)
+	if h.accountCachesGen.Load() != globalBefore {
+		t.Fatal("Claude snapshot expiry should not bump the global account cache generation")
+	}
+	if h.claudeAccountCachesGen.Load() != claudeBefore+1 {
+		t.Fatal("Claude snapshot expiry should bump its channel generation")
+	}
+	h.expireAccountListSnapshot(database.UpstreamChannelCodex)
+	if h.accountCachesGen.Load() != globalBefore+1 {
+		t.Fatal("non-Claude snapshot expiry should retain the global invalidation behavior")
+	}
+}
+
+func TestAccountOperationSelectorSupportsAntigravity(t *testing.T) {
+	handler, codexIDs, grokIDs := newPagedAccountsHandler(t)
+	ctx := context.Background()
+	antigravityID, err := handler.db.InsertAccountWithUpstream(ctx, "antigravity-1", "google", auth.UpstreamAntigravity, map[string]interface{}{
+		"upstream_type": auth.UpstreamAntigravity,
+		"refresh_token": "secret-antigravity-1",
+		"email":         "antigravity@example.org",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert antigravity account: %v", err)
+	}
+
+	selected, err := handler.resolveAccountOperationSelector(ctx, &accountOperationSelector{Channel: database.UpstreamChannelAntigravity})
+	if err != nil {
+		t.Fatalf("resolve antigravity selector: %v", err)
+	}
+	if len(selected) != 1 || selected[0] != antigravityID {
+		t.Fatalf("antigravity selector ids = %v, want [%d]", selected, antigravityID)
+	}
+	for _, leakedID := range append(codexIDs, grokIDs...) {
+		if selected[0] == leakedID {
+			t.Fatalf("antigravity selector leaked account %d", leakedID)
 		}
 	}
 }
@@ -984,6 +1141,16 @@ func TestCodexNormalIncludesDisabledButSchedulingExcludesIt(t *testing.T) {
 	}
 }
 
+func TestSummarizeAccountListCountsSelfServicePending(t *testing.T) {
+	pending := &accountListSnapshotItem{Enabled: false, Tags: []string{selfServiceTag}}
+	otherDisabled := &accountListSnapshotItem{Enabled: false, Tags: []string{"manual"}}
+	approved := &accountListSnapshotItem{Enabled: true, Tags: []string{selfServiceTag}}
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{pending, otherDisabled, approved}, database.UpstreamChannelCodex)
+	if summary.SelfServicePending != 1 || summary.Disabled != 2 {
+		t.Fatalf("summary = %+v, want SelfServicePending=1 Disabled=2", summary)
+	}
+}
+
 func TestOverloadPausedCountsAsNormalNotRateLimitedOrScheduling(t *testing.T) {
 	item := &accountListSnapshotItem{
 		Status:           "overload_paused",
@@ -1025,5 +1192,55 @@ func TestCodexAuthKindFilterSplitsOAuthAndResponsesAPI(t *testing.T) {
 	summary, _ := summarizeAccountList([]*accountListSnapshotItem{oauthItem, apiItem}, codex)
 	if summary.OAuth != 1 || summary.APIKey != 1 {
 		t.Fatalf("summary = %+v, want OAuth=1 APIKey=1", summary)
+	}
+}
+
+func TestClaudeAccountListPreservesProviderSearchAndOAuthSummary(t *testing.T) {
+	row := &database.AccountRow{
+		ID:      901,
+		Name:    "claude-account",
+		Status:  "active",
+		Enabled: true,
+		Tags:    []string{"claude"},
+		Credentials: map[string]interface{}{
+			"upstream_type":            auth.UpstreamClaude,
+			"email":                    "claude@example.com",
+			"plan_type":                "claude-max-5x",
+			"models":                   []string{"claude-sonnet-4-5"},
+			"claude_usage_probe_error": "temporary upstream failure",
+		},
+	}
+	store := auth.NewStore(nil, nil, nil)
+	defer store.Stop()
+	store.AddAccount(&auth.Account{DBID: 901, UpstreamType: auth.UpstreamClaude, GroupIDs: []int64{7}})
+	item := (&Handler{store: store}).buildAccountListSnapshotItem(row, nil, nil, map[int64]string{7: "Claude Team"}, map[int64]string{7: "0007"})
+	if !item.Claude {
+		t.Fatal("Claude list item must retain provider marker")
+	}
+	for _, needle := range []string{"claude-sonnet-4-5", "claude-max-5x", "temporary upstream failure", "claude team"} {
+		if !strings.Contains(item.SearchText, needle) {
+			t.Fatalf("SearchText %q does not contain %q", item.SearchText, needle)
+		}
+	}
+	if !accountListItemMatches(item, accountPageQuery{AuthKind: "oauth", Search: "claude-sonnet-4-5"}, database.UpstreamChannelClaude) {
+		t.Fatal("Claude OAuth filter/search should match")
+	}
+	if accountListItemMatches(item, accountPageQuery{AuthKind: "api_key"}, database.UpstreamChannelClaude) {
+		t.Fatal("Claude OAuth account must not match api_key filter")
+	}
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{item}, database.UpstreamChannelClaude)
+	if summary.OAuth != 1 || summary.APIKey != 0 {
+		t.Fatalf("Claude summary = %+v, want oauth=1 api_key=0", summary)
+	}
+}
+
+func TestClaudeAccountListSuccessfulProbeCountsAsSampledWithoutQuotaHeaders(t *testing.T) {
+	row := &database.AccountRow{ID: 902, Status: "active", Enabled: true, Credentials: map[string]interface{}{
+		"upstream_type":                      auth.UpstreamClaude,
+		auth.ClaudeUsageProbeAtCredentialKey: "2026-08-29T05:00:00Z",
+	}}
+	item := (&Handler{}).buildAccountListSnapshotItem(row, nil, nil, nil, nil)
+	if !item.Claude || accountListUnsampled(item) {
+		t.Fatalf("Claude successful probe should be sampled: item=%+v", item)
 	}
 }

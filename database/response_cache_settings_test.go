@@ -27,6 +27,7 @@ func TestResponseCacheSettingsFreshSQLiteDefaults(t *testing.T) {
 		LocalMaxBytes:       testResponseCacheDefaultTotal,
 		LocalMaxEntryBytes:  testResponseCacheDefaultEntry,
 		ReconstructMaxBytes: testResponseCacheDefaultReconstruct,
+		WritePolicy:         DefaultResponseCacheWritePolicy,
 		Generation:          1,
 	})
 	var rows int
@@ -115,6 +116,7 @@ func TestSQLiteResponseCacheSettingsMigrationFromLegacySchema(t *testing.T) {
 		LocalMaxBytes:       testResponseCacheDefaultTotal,
 		LocalMaxEntryBytes:  testResponseCacheDefaultEntry,
 		ReconstructMaxBytes: testResponseCacheDefaultReconstruct,
+		WritePolicy:         DefaultResponseCacheWritePolicy,
 		Generation:          1,
 	})
 }
@@ -138,6 +140,7 @@ func TestResponseCacheSettingsRoundTripPartialAndGeneration(t *testing.T) {
 		LocalMaxBytes:       total,
 		LocalMaxEntryBytes:  entry,
 		ReconstructMaxBytes: reconstruct,
+		WritePolicy:         DefaultResponseCacheWritePolicy,
 		Generation:          2,
 	})
 
@@ -152,6 +155,7 @@ func TestResponseCacheSettingsRoundTripPartialAndGeneration(t *testing.T) {
 		LocalMaxBytes:       total,
 		LocalMaxEntryBytes:  entry,
 		ReconstructMaxBytes: newReconstruct,
+		WritePolicy:         DefaultResponseCacheWritePolicy,
 		Generation:          3,
 	})
 
@@ -177,6 +181,7 @@ func TestResponseCacheSettingsValidationBoundaries(t *testing.T) {
 	valid := []ResponseCacheSettings{
 		{LocalMaxBytes: 8 << 20, LocalMaxEntryBytes: 1 << 20, ReconstructMaxBytes: 8 << 20, Generation: 1},
 		{LocalMaxBytes: 4 << 30, LocalMaxEntryBytes: 256 << 20, ReconstructMaxBytes: 512 << 20, Generation: 1},
+		{LocalMaxBytes: 8 << 20, LocalMaxEntryBytes: 1 << 20, ReconstructMaxBytes: 8 << 20, WritePolicy: ResponseCacheWritePolicyOnDemand, Generation: 1},
 	}
 	for _, settings := range valid {
 		if err := ValidateResponseCacheSettings(settings); err != nil {
@@ -193,6 +198,7 @@ func TestResponseCacheSettingsValidationBoundaries(t *testing.T) {
 		{LocalMaxBytes: 8 << 20, LocalMaxEntryBytes: 1 << 20, ReconstructMaxBytes: (512 << 20) + 1, Generation: 1},
 		{LocalMaxBytes: 8 << 20, LocalMaxEntryBytes: (8 << 20) + 1, ReconstructMaxBytes: 8 << 20, Generation: 1},
 		{LocalMaxBytes: 8 << 20, LocalMaxEntryBytes: 1 << 20, ReconstructMaxBytes: 8 << 20, Generation: 0},
+		{LocalMaxBytes: 8 << 20, LocalMaxEntryBytes: 1 << 20, ReconstructMaxBytes: 8 << 20, WritePolicy: "banana", Generation: 1},
 	}
 	for _, settings := range invalid {
 		if err := ValidateResponseCacheSettings(settings); !errors.Is(err, ErrInvalidResponseCacheSettings) {
@@ -272,6 +278,7 @@ func TestResponseCacheSettingsConcurrentDisjointSQLiteUpdatesDoNotLoseChanges(t 
 		LocalMaxBytes:       total,
 		LocalMaxEntryBytes:  testResponseCacheDefaultEntry,
 		ReconstructMaxBytes: reconstruct,
+		WritePolicy:         DefaultResponseCacheWritePolicy,
 		Generation:          3,
 	})
 }

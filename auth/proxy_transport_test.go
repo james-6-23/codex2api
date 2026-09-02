@@ -24,6 +24,12 @@ func TestConfigureTransportProxyHTTPProxy(t *testing.T) {
 	}
 }
 
+func TestBuildHTTPClientCheckedRejectsInvalidProxy(t *testing.T) {
+	if _, err := BuildHTTPClientChecked("not-a-proxy"); err == nil {
+		t.Fatal("BuildHTTPClientChecked accepted malformed proxy and may bypass it")
+	}
+}
+
 func TestConfigureTransportProxySOCKS5Proxy(t *testing.T) {
 	transport := &http.Transport{}
 	baseDialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}

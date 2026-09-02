@@ -292,6 +292,14 @@ func TestPaidWorkspacePlansAreTreatedAsPremium5hPlans(t *testing.T) {
 	}
 }
 
+func TestClaudePlansAreTreatedAsPremium5hPlans(t *testing.T) {
+	for _, plan := range []string{"claude", "claude-pro", "max", "max-5x", "max-20x", "enterprise", "business"} {
+		if !isPremium5hPlan(plan) {
+			t.Errorf("isPremium5hPlan(%q) = false, want true for Claude usage windows", plan)
+		}
+	}
+}
+
 func TestK12RateLimitedAccountIsFencedFromScheduling(t *testing.T) {
 	acc := newPremium5hTestAccount("k12", time.Now().Add(45*time.Minute))
 

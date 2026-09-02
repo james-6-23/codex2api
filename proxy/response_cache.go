@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/codex2api/cache"
+	"github.com/codex2api/database"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -33,6 +34,13 @@ const (
 	responseCacheMaxPerItem = 200  // 单条缓存最大 raw items 数
 	responseCacheMaxMarkers = 2000
 	responseCleanupInterval = 2 * time.Minute
+
+	// on_demand 写入策略下，owner 发过 previous_response_id 后保持写入资格的
+	// 滑动窗口。续链客户端逐轮续链（间隔秒级），1 小时足以覆盖会话间隙；
+	// 窗口过后闸门重新关闭，该 owner 的下一次续链会先未命中一次（与缓存
+	// TTL 过期后的行为一致），随后恢复写入。
+	responseCacheChainOwnerTTL  = time.Hour
+	responseCacheMaxChainOwners = 4096
 )
 
 // responseCacheOwner 生成响应上下文缓存的归属命名空间。
@@ -67,6 +75,7 @@ type responseCacheConfig struct {
 	maxEntries          int
 	ttl                 time.Duration
 	maxItems            int
+	writePolicy         string
 }
 
 func defaultResponseCacheConfig() responseCacheConfig {
@@ -77,6 +86,7 @@ func defaultResponseCacheConfig() responseCacheConfig {
 		maxEntries:          responseCacheMaxItems,
 		ttl:                 responseCacheTTL,
 		maxItems:            responseCacheMaxPerItem,
+		writePolicy:         database.DefaultResponseCacheWritePolicy,
 	}
 }
 
@@ -103,6 +113,10 @@ type ResponseCacheStats struct {
 	OversizeBypasses       uint64
 	OversizeRejections     uint64
 	KnownUnavailableErrors uint64
+	// SkippedWrites 是 on_demand 写入策略下因 owner 未续链而跳过的写入次数
+	// （本地与 Redis 一并跳过）；ChainOwners 是当前处于写入资格窗口内的 owner 数。
+	SkippedWrites uint64
+	ChainOwners   int
 }
 
 type responseCacheState struct {
@@ -111,12 +125,22 @@ type responseCacheState struct {
 	lru          *list.List
 	markers      map[string]*responseCacheMarker
 	markerLRU    *list.List
+	chainOwners  map[string]*responseCacheChainOwner
+	chainLRU     *list.List
 	config       responseCacheConfig
 	generation   int64
 	stats        ResponseCacheStats
 	runtimeCache cache.TokenCache
 	lastSyncAt   time.Time
 	lastSyncErr  string
+}
+
+// responseCacheChainOwner 记录某 owner 最近一次发起 previous_response_id 续链
+// 的到期时间，是 on_demand 写入策略的准入依据。
+type responseCacheChainOwner struct {
+	owner     string
+	expiresAt time.Time
+	element   *list.Element
 }
 
 type responseCacheLookupKind uint8
@@ -166,6 +190,8 @@ func init() {
 	respCache.lru = list.New()
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
+	respCache.chainOwners = make(map[string]*responseCacheChainOwner)
+	respCache.chainLRU = list.New()
 	respCache.config = defaultResponseCacheConfig()
 	go respCacheCleanupLoop()
 }
@@ -195,6 +221,8 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	respCache.lru = list.New()
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
+	respCache.chainOwners = make(map[string]*responseCacheChainOwner)
+	respCache.chainLRU = list.New()
 	respCache.config = config
 	respCache.generation = 0
 	respCache.stats = ResponseCacheStats{}
@@ -213,8 +241,68 @@ func configureResponseCacheForTest(config responseCacheConfig) {
 	respCache.mu.Unlock()
 }
 
-// setResponseCache 存储响应上下文（按 owner 命名空间隔离）
+// markResponseCacheChainOwnerLocked 把 owner 标记为"近期续链者"，续期滑动窗口。
+// 容量满时按 LRU 逐出最久未续链的 owner。
+func markResponseCacheChainOwnerLocked(owner string) {
+	if owner == "" {
+		owner = "anon"
+	}
+	expiresAt := time.Now().Add(responseCacheChainOwnerTTL)
+	if existing := respCache.chainOwners[owner]; existing != nil {
+		existing.expiresAt = expiresAt
+		respCache.chainLRU.MoveToFront(existing.element)
+		return
+	}
+	record := &responseCacheChainOwner{owner: owner, expiresAt: expiresAt}
+	record.element = respCache.chainLRU.PushFront(record)
+	respCache.chainOwners[owner] = record
+	for len(respCache.chainOwners) > responseCacheMaxChainOwners {
+		element := respCache.chainLRU.Back()
+		if element == nil {
+			break
+		}
+		oldest, _ := element.Value.(*responseCacheChainOwner)
+		removeResponseCacheChainOwnerLocked(oldest.owner)
+	}
+	respCache.stats.ChainOwners = len(respCache.chainOwners)
+}
+
+func removeResponseCacheChainOwnerLocked(owner string) {
+	record := respCache.chainOwners[owner]
+	if record == nil {
+		return
+	}
+	delete(respCache.chainOwners, owner)
+	if record.element != nil {
+		respCache.chainLRU.Remove(record.element)
+	}
+	respCache.stats.ChainOwners = len(respCache.chainOwners)
+}
+
+// responseCacheWriteAllowed 判断当前写入策略下 owner 是否有写入资格。
+// on_demand 下过期记录按不合格处理（惰性删除交给清理循环）。
+func responseCacheWriteAllowed(owner string) bool {
+	if owner == "" {
+		owner = "anon"
+	}
+	respCache.mu.RLock()
+	defer respCache.mu.RUnlock()
+	if respCache.config.writePolicy != database.ResponseCacheWritePolicyOnDemand {
+		return true
+	}
+	record := respCache.chainOwners[owner]
+	return record != nil && time.Now().Before(record.expiresAt)
+}
+
+// setResponseCache 存储响应上下文（按 owner 命名空间隔离）。
+// on_demand 写入策略下，未续链过的 owner 直接跳过（本地与 Redis 一并跳过）。
 func setResponseCache(owner, responseID string, items []json.RawMessage) {
+	if !responseCacheWriteAllowed(owner) {
+		respCache.mu.Lock()
+		respCache.stats.SkippedWrites++
+		respCache.mu.Unlock()
+		return
+	}
 	storeKey := responseCacheStoreKey(owner, responseID)
 	runtimeItems, _, _ := admitResponseCache(storeKey, items)
 
@@ -522,6 +610,9 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 func getResponseCacheResult(owner, responseID string) responseCacheLookupResult {
 	result := lookupResponseCacheResult(owner, responseID)
 	respCache.mu.Lock()
+	// 任何续链查询（无论命中与否）都赋予 owner 写入资格：这是 on_demand
+	// 写入策略的准入信号，命中率与之无关。
+	markResponseCacheChainOwnerLocked(owner)
 	if result.Kind == responseCacheLookupHit {
 		respCache.stats.Hits++
 		if result.Source == responseCacheSourceBackend {
@@ -692,6 +783,11 @@ func cleanupResponseCacheExpired(now time.Time) {
 			respCache.removeMarkerLocked(key)
 		}
 	}
+	for owner, record := range respCache.chainOwners {
+		if !now.Before(record.expiresAt) {
+			removeResponseCacheChainOwnerLocked(owner)
+		}
+	}
 	respCache.mu.Unlock()
 }
 
@@ -808,37 +904,36 @@ func cacheCompletedResponseWithOutputItems(owner string, expandedInputRaw []byte
 		return
 	}
 
-	// 仅在响应包含 Codex 工具调用时才缓存（普通对话无需 previous_response_id 展开）。
-	// image_generation_call / web_search_call 虽然也是 *_call 结尾，但不属于 call_id 工具续链体系。
+	// 仅在响应包含可安全回放的 Codex 工具调用时才缓存（普通对话无需
+	// previous_response_id 展开）。image_generation_call / web_search_call
+	// 虽然也是 *_call 结尾，但不属于 call_id 工具续链体系。
 	output := gjson.GetBytes(completedData, "response.output")
 	if !output.IsArray() && len(outputItems) == 0 {
 		return
 	}
-	completedHasToolCallContext := false
+	var replayableOutput []json.RawMessage
 	output.ForEach(func(_, item gjson.Result) bool {
-		if isCodexToolCallContextType(item.Get("type").String()) {
-			completedHasToolCallContext = true
-			return false
+		if replayable, ok := replayableCachedOutputItem(item); ok {
+			replayableOutput = append(replayableOutput, replayable)
 		}
 		return true
 	})
-	if !completedHasToolCallContext {
-		hasToolCallContext := false
+	if len(replayableOutput) == 0 {
 		for _, raw := range outputItems {
-			if isCodexToolCallContextType(gjson.GetBytes(raw, "type").String()) {
-				hasToolCallContext = true
-				break
+			if replayable, ok := replayableCachedOutputItem(gjson.ParseBytes(raw)); ok {
+				replayableOutput = append(replayableOutput, replayable)
 			}
 		}
-		if !hasToolCallContext {
-			return
-		}
+	}
+	if len(replayableOutput) == 0 {
+		return
 	}
 
 	var items []json.RawMessage
 
-	// 添加展开后的请求 input items
-	inputItems := gjson.ParseBytes(expandedInputRaw)
+	// 添加展开后的请求 input items。先成对移除参数被截断的普通
+	// function_call/function_call_output，避免缓存把毒历史延长到下一轮。
+	inputItems := gjson.ParseBytes(sanitizeResponseCacheInput(expandedInputRaw))
 	if inputItems.IsArray() {
 		inputItems.ForEach(func(_, v gjson.Result) bool {
 			if item, ok := replayableCachedInputItem(v); ok {
@@ -848,39 +943,79 @@ func cacheCompletedResponseWithOutputItems(owner string, expandedInputRaw []byte
 		})
 	}
 
-	// 添加响应 output 中真正需要续链的工具上下文；reasoning/message 等
-	// 服务端输出 item 带有 rs_/msg_ id，store=false 时回灌会触发 item not found。
-	output.ForEach(func(_, v gjson.Result) bool {
-		if item, ok := replayableCachedOutputItem(v); ok {
-			items = append(items, item)
-		}
-		return true
-	})
-	if !completedHasToolCallContext {
-		for _, raw := range outputItems {
-			if item, ok := replayableCachedOutputItem(gjson.ParseBytes(raw)); ok {
-				items = append(items, item)
-			}
-		}
-	}
+	// 添加响应 output 中真正需要续链且已验证的工具上下文；reasoning/message
+	// 等服务端输出 item 带有 rs_/msg_ id，store=false 时回灌会触发 item not found。
+	items = append(items, replayableOutput...)
 
 	if len(items) > 0 {
 		setResponseCache(owner, respID, items)
 	}
 }
 
+func sanitizeResponseCacheInput(raw []byte) []byte {
+	var input []any
+	if err := json.Unmarshal(raw, &input); err != nil {
+		return raw
+	}
+	body := map[string]any{"input": input}
+	normalizeResponsesToolCallArgumentTypes(body)
+	if !sanitizeMalformedResponsesFunctionCalls(body) {
+		return raw
+	}
+	sanitized, err := json.Marshal(body["input"])
+	if err != nil {
+		return raw
+	}
+	return sanitized
+}
+
 func replayableCachedInputItem(item gjson.Result) (json.RawMessage, bool) {
 	if item.Get("type").String() == "reasoning" && item.Get("encrypted_content").Exists() {
 		return nil, false
 	}
-	return stripResponseItemID(json.RawMessage(item.Raw))
+	raw, ok := normalizeReplayableCachedFunctionCall(json.RawMessage(item.Raw))
+	if !ok {
+		return nil, false
+	}
+	return stripResponseItemID(raw)
 }
 
 func replayableCachedOutputItem(item gjson.Result) (json.RawMessage, bool) {
 	if !isCodexToolCallContextType(item.Get("type").String()) {
 		return nil, false
 	}
-	return stripResponseItemID(json.RawMessage(item.Raw))
+	raw, ok := normalizeReplayableCachedFunctionCall(json.RawMessage(item.Raw))
+	if !ok {
+		return nil, false
+	}
+	return stripResponseItemID(raw)
+}
+
+func normalizeReplayableCachedFunctionCall(raw json.RawMessage) (json.RawMessage, bool) {
+	if gjson.GetBytes(raw, "type").String() != "function_call" {
+		return raw, true
+	}
+	argumentValue := gjson.GetBytes(raw, "arguments")
+	arguments := ""
+	if argumentValue.Exists() && argumentValue.Type != gjson.Null {
+		if argumentValue.Type == gjson.String {
+			arguments = argumentValue.String()
+		} else {
+			arguments = argumentValue.Raw
+		}
+	}
+	normalized, valid := normalizeOrdinaryFunctionCallArguments(arguments)
+	if !valid {
+		return nil, false
+	}
+	if argumentValue.Type == gjson.String && normalized == arguments {
+		return raw, true
+	}
+	updated, err := sjson.SetBytes(raw, "arguments", normalized)
+	if err != nil {
+		return nil, false
+	}
+	return json.RawMessage(updated), true
 }
 
 func stripResponseItemID(raw json.RawMessage) (json.RawMessage, bool) {

@@ -7,6 +7,7 @@ import (
 	"database/sql/driver"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -311,6 +312,33 @@ func TestClearPromptFilterLogsKeepsIncidentsAndCandidateEvidence(t *testing.T) {
 	}
 }
 
+func TestDeletePromptPolicyIncidentRemovesHistoryButRetainsLearningEvidence(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	incident, candidate, evidence := promptPolicyTestInputs("incident-delete")
+	if err := db.PersistPromptPolicyIncident(ctx, incident, candidate, evidence); err != nil {
+		t.Fatalf("PersistPromptPolicyIncident: %v", err)
+	}
+	stored, err := db.GetPromptPolicyIncident(ctx, incident.IncidentID)
+	if err != nil {
+		t.Fatalf("GetPromptPolicyIncident: %v", err)
+	}
+	if err := db.DeletePromptPolicyIncident(ctx, incident.IncidentID); err != nil {
+		t.Fatalf("DeletePromptPolicyIncident: %v", err)
+	}
+	if _, err := db.GetPromptPolicyIncident(ctx, incident.IncidentID); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("deleted incident still readable: %v", err)
+	}
+	items, err := db.ListPromptRuleCandidateEvidence(ctx, stored.CandidateID, 10)
+	if err != nil || len(items) != 1 || items[0].PromptPolicyIncidentID != "" {
+		t.Fatalf("learning evidence was removed or retained a stale incident link: items=%#v err=%v", items, err)
+	}
+	var riskEvents int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_risk_events WHERE source_id=$1`, incident.IncidentID).Scan(&riskEvents); err != nil || riskEvents == 0 {
+		t.Fatalf("risk profile history was not retained after incident deletion: count=%d err=%v", riskEvents, err)
+	}
+}
+
 func TestClearPromptFilterLogsByReviewStatusKeepsOtherLogSection(t *testing.T) {
 	db := newPromptPolicySQLiteTestDB(t)
 	ctx := context.Background()
@@ -340,6 +368,33 @@ func TestClearPromptFilterLogsByReviewStatusKeepsOtherLogSection(t *testing.T) {
 	}
 	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_filter_logs`).Scan(&localCount); err != nil || localCount != 0 {
 		t.Fatalf("local logs not cleared count=%d err=%v", localCount, err)
+	}
+}
+
+func TestClearPromptFilterLogsBySourceKeepsOtherSources(t *testing.T) {
+	db := newPromptPolicySQLiteTestDB(t)
+	ctx := context.Background()
+	for _, input := range []*PromptFilterLogInput{
+		{Source: "local_filter", Action: "block"},
+		{Source: "local_filter", Action: "allow", Reviewed: true, ReviewModel: "review-model"},
+		{Source: "upstream_cyber_policy", Action: "block"},
+	} {
+		if err := db.InsertPromptFilterLog(ctx, input); err != nil {
+			t.Fatalf("InsertPromptFilterLog: %v", err)
+		}
+	}
+	if err := db.ClearPromptFilterLogsBySource(ctx, "local_filter"); err != nil {
+		t.Fatalf("clear local source logs: %v", err)
+	}
+	var localCount, upstreamCount int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_filter_logs WHERE source = 'local_filter'`).Scan(&localCount); err != nil {
+		t.Fatalf("count local source logs: %v", err)
+	}
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_filter_logs WHERE source = 'upstream_cyber_policy'`).Scan(&upstreamCount); err != nil {
+		t.Fatalf("count upstream source logs: %v", err)
+	}
+	if localCount != 0 || upstreamCount != 1 {
+		t.Fatalf("source clear crossed boundaries: local=%d upstream=%d", localCount, upstreamCount)
 	}
 }
 

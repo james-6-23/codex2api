@@ -208,6 +208,11 @@ var (
 		{model: "grok-3", pricing: ModelPricing{InputPricePerMToken: 3.0, OutputPricePerMToken: 15.0, CacheReadPricePerMToken: 0.75}},
 		{model: "grok-2", pricing: ModelPricing{InputPricePerMToken: 2.0, OutputPricePerMToken: 10.0}},
 
+		// ===== Google Gemini public API estimates (USD / 1M token) =====
+		{model: "gemini-3-pro-preview", pricing: ModelPricing{InputPricePerMToken: 2.0, OutputPricePerMToken: 12.0, CacheReadPricePerMToken: 0.2}},
+		{model: "gemini-2.5-pro", pricing: ModelPricing{InputPricePerMToken: 1.25, OutputPricePerMToken: 10.0, CacheReadPricePerMToken: 0.125}},
+		{model: "gemini-2.5-flash", pricing: ModelPricing{InputPricePerMToken: 0.3, OutputPricePerMToken: 2.5, CacheReadPricePerMToken: 0.03}},
+
 		{model: "gpt-4o-mini", pricing: ModelPricing{InputPricePerMToken: 0.15, OutputPricePerMToken: 0.6}},
 		{model: "gpt-4o", pricing: ModelPricing{InputPricePerMToken: 2.5, OutputPricePerMToken: 10.0}},
 		{model: "gpt-4-turbo", pricing: ModelPricing{InputPricePerMToken: 10.0, OutputPricePerMToken: 30.0}},
@@ -226,12 +231,37 @@ func GetModelPricing(model string) *ModelPricing {
 
 	// custom / synced 覆盖：以代码默认为底，合并非 0 字段（部分覆盖）。
 	// 覆盖表拷贝到本地副本再改，绝不改动共享的默认 pricing 指针。
-	if ov, ok := lookupModelPricingOverride(canonical); ok {
-		merged := *base
-		ov.applyNonZero(&merged)
-		return &merged
+	//
+	// An explicit alias entry is more specific than the canonical model entry.
+	// This matters for internal aliases such as codex-auto-review: it maps to
+	// gpt-5.4 for fallback pricing, but its own price must not be shadowed by a
+	// stale gpt-5.4 override. 两条护栏维持文档化的 custom > synced > 默认次序:
+	//   - synced 别名条目不得压过 custom canonical 条目,否则同步价会在升级后
+	//     静默替换管理员手填价;
+	//   - 别名条目未填的字段回退 canonical 生效价而不是代码默认价,部分覆盖
+	//     不会悄悄丢掉管理员在 canonical 上配好的其余字段。
+	canonicalOv, hasCanonical := lookupModelPricingOverride(canonical)
+	var aliasOv ModelPricingOverride
+	hasAlias := false
+	aliasKey := PricingManagementModelKey(normalized)
+	if aliasKey != "" && aliasKey != canonical {
+		if ov, ok := lookupModelPricingOverride(aliasKey); ok {
+			if ov.Source == ModelPricingSourceCustom || !hasCanonical || canonicalOv.Source != ModelPricingSourceCustom {
+				aliasOv, hasAlias = ov, true
+			}
+		}
 	}
-	return base
+	if !hasCanonical && !hasAlias {
+		return base
+	}
+	merged := *base
+	if hasCanonical {
+		canonicalOv.applyNonZero(&merged)
+	}
+	if hasAlias {
+		aliasOv.applyNonZero(&merged)
+	}
+	return &merged
 }
 
 // baseModelPricing 返回代码内置的模型定价（不含覆盖）。normalized 为归一化后的模型名，
@@ -460,16 +490,23 @@ func modelMatchesRule(model string, rule string) bool {
 func claudeFamilyPricing(model string) *ModelPricing {
 	switch {
 	case strings.Contains(model, "opus"):
-		if strings.Contains(model, "4.7") || strings.Contains(model, "4-7") ||
-			strings.Contains(model, "4.6") || strings.Contains(model, "4-6") ||
-			strings.Contains(model, "4.5") || strings.Contains(model, "4-5") {
-			return &ModelPricing{InputPricePerMToken: 5.0, OutputPricePerMToken: 25.0}
+		// 传统 Opus(3 / 4 / 4.1)为 $15/$75;自 4.5 起 Opus 降至 $5/$25,更新的版本
+		// (4.6/4.7/4.8/5…)默认沿用现代档,避免新模型误套旧高价。
+		legacyOpus := strings.Contains(model, "opus-3") || strings.Contains(model, "3-opus") ||
+			strings.Contains(model, "opus-4-1") || strings.Contains(model, "opus-4.1") ||
+			strings.Contains(model, "opus-4-0") || strings.Contains(model, "opus-4-2025")
+		if legacyOpus {
+			return &ModelPricing{InputPricePerMToken: 15.0, OutputPricePerMToken: 75.0}
 		}
-		return &ModelPricing{InputPricePerMToken: 15.0, OutputPricePerMToken: 75.0}
+		return &ModelPricing{InputPricePerMToken: 5.0, OutputPricePerMToken: 25.0}
 	case strings.Contains(model, "sonnet"):
 		return &ModelPricing{InputPricePerMToken: 3.0, OutputPricePerMToken: 15.0}
 	case strings.Contains(model, "haiku"):
-		if strings.Contains(model, "3-5") || strings.Contains(model, "3.5") {
+		// 3.5 与 4.x Haiku 均为 $1/$5;仅初代 claude-3-haiku 为 $0.25/$1.25。
+		if strings.Contains(model, "3-5") || strings.Contains(model, "3.5") ||
+			strings.Contains(model, "4-5") || strings.Contains(model, "4.5") ||
+			strings.Contains(model, "4-6") || strings.Contains(model, "4.6") ||
+			strings.Contains(model, "4-7") || strings.Contains(model, "4.7") {
 			return &ModelPricing{InputPricePerMToken: 1.0, OutputPricePerMToken: 5.0}
 		}
 		return &ModelPricing{InputPricePerMToken: 0.25, OutputPricePerMToken: 1.25}
@@ -481,6 +518,9 @@ func claudeFamilyPricing(model string) *ModelPricing {
 }
 
 func geminiFamilyPricing(model string) *ModelPricing {
+	if pricing := modelRulePricing(model); pricing != nil && strings.HasPrefix(model, "gemini-") {
+		return pricing
+	}
 	if strings.Contains(model, "gemini-3.1-pro") || strings.Contains(model, "gemini-3-1-pro") {
 		return &ModelPricing{InputPricePerMToken: 2.0, OutputPricePerMToken: 12.0}
 	}

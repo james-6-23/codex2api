@@ -21,7 +21,7 @@ type AccountGroup struct {
 	// ProxyURLs 是组级代理列表(issue #479):组内账号未配置自身代理时按
 	// 账号 ID 粘性使用其中一条;空列表表示不设置,回退到全局代理链。
 	ProxyURLs []string
-	// Channel 是分组渠道(codex/grok,issue #487):分组按渠道隔离,
+	// Channel 是分组渠道(codex/grok/antigravity,issue #487):分组按渠道隔离,
 	// 成员写入路径会校验账号平台与组渠道一致。
 	Channel   string
 	CreatedAt time.Time
@@ -29,14 +29,21 @@ type AccountGroup struct {
 }
 
 const (
-	AccountGroupChannelCodex = "codex"
-	AccountGroupChannelGrok  = "grok"
+	AccountGroupChannelCodex       = "codex"
+	AccountGroupChannelGrok        = "grok"
+	AccountGroupChannelAntigravity = "antigravity"
+	AccountGroupChannelClaude      = "claude"
 )
 
 // NormalizeAccountGroupChannel 归一分组渠道,空/非法一律按 codex。
 func NormalizeAccountGroupChannel(channel string) string {
-	if strings.EqualFold(strings.TrimSpace(channel), AccountGroupChannelGrok) {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case AccountGroupChannelGrok:
 		return AccountGroupChannelGrok
+	case AccountGroupChannelAntigravity:
+		return AccountGroupChannelAntigravity
+	case AccountGroupChannelClaude:
+		return AccountGroupChannelClaude
 	}
 	return AccountGroupChannelCodex
 }
@@ -466,6 +473,46 @@ func (db *DB) ListAccountGroupMemberships(ctx context.Context) (map[int64][]int6
 	}
 	defer rows.Close()
 	out := make(map[int64][]int64)
+	for rows.Next() {
+		var accountID, groupID int64
+		if err := rows.Scan(&accountID, &groupID); err != nil {
+			return nil, err
+		}
+		out[accountID] = append(out[accountID], groupID)
+	}
+	return out, rows.Err()
+}
+
+// ListAccountGroupMembershipsByAccountIDs returns the routing memberships for
+// one scheduler-outbox batch. Keeping this projection bounded avoids turning a
+// single remote account mutation into a scan of every membership in a large
+// pool.
+func (db *DB) ListAccountGroupMembershipsByAccountIDs(ctx context.Context, accountIDs []int64) (map[int64][]int64, error) {
+	accountIDs = normalizeIDSlice(accountIDs)
+	if len(accountIDs) == 0 {
+		return map[int64][]int64{}, nil
+	}
+	placeholders := make([]string, len(accountIDs))
+	args := make([]interface{}, len(accountIDs))
+	for i, id := range accountIDs {
+		if db.isSQLite() {
+			placeholders[i] = "?"
+		} else {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+		}
+		args[i] = id
+	}
+	query := fmt.Sprintf(`SELECT account_id, group_id
+		FROM account_group_members
+		WHERE account_id IN (%s)
+		ORDER BY account_id, group_id`, strings.Join(placeholders, ","))
+	rows, err := db.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make(map[int64][]int64, len(accountIDs))
 	for rows.Next() {
 		var accountID, groupID int64
 		if err := rows.Scan(&accountID, &groupID); err != nil {

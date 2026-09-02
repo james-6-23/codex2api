@@ -16,6 +16,7 @@ import (
 type rawGrokSSEFrame struct {
 	Raw     []byte
 	Data    []byte
+	Event   string
 	HasData bool
 	Done    bool
 }
@@ -39,6 +40,18 @@ func parseRawGrokSSEFrame(raw []byte) rawGrokSSEFrame {
 			line, remaining = remaining[:lineEnd], remaining[lineEnd+1:]
 		}
 		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if bytes.Equal(line, []byte("event")) {
+			frame.Event = ""
+			continue
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			value := line[len("event:"):]
+			if len(value) > 0 && value[0] == ' ' {
+				value = value[1:]
+			}
+			frame.Event = string(value)
+			continue
+		}
 		if bytes.Equal(line, []byte("data")) {
 			dataLines = append(dataLines, nil)
 			continue

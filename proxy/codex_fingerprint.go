@@ -40,6 +40,7 @@ const (
 	codexWindowIDHeader        = "X-Codex-Window-Id"
 	codexClientRequestIDHeader = "X-Client-Request-Id"
 	codexThreadIDHeader        = "Thread-Id"
+	codexParentThreadIDHeader  = "X-Codex-Parent-Thread-Id"
 )
 
 // codexFingerprintIDs 是一次请求的收敛目标值。全部字段都由「账号 + 下游请求头」
@@ -117,6 +118,44 @@ func codexIdentityUnixMilli(account *auth.Account, seed string) int64 {
 	sum := sha256.Sum256([]byte("codex2api:codex-identity-ts:v1:" + seed))
 	offset := int64(binary.BigEndian.Uint64(sum[:8]) % uint64(codexIdentitySpreadMilli))
 	return base + offset
+}
+
+// DeriveStableSessionUUIDv7 从种子确定性派生 UUIDv7 格式的会话身份，供没有账号
+// 上下文的调用点使用（上游 Session_id / prompt_cache_key 的派生只拿得到 API Key
+// 或 API Key ID）。时间戳位取固定基准加种子派生的有界偏移，因此同种子恒定返回
+// 同值、跨进程重启不变，且不同种子的时间戳互不相同。
+//
+// 存在的理由是格式保真：真实 Codex 客户端的 session_id 是 UUIDv7。本网关此前两处
+// 派生都不是——IsolateCodexSessionID 产出 16 位裸十六进制（连 UUID 都不是），
+// deterministicPromptCacheKey 用 uuid.NewSHA1 产出 v5（版本 nibble 与真实不符）。
+// 后者正是 deriveStableCodexUUID 注释里已经点名过的坑，当时只修了指纹模块这一侧。
+func DeriveStableSessionUUIDv7(seed string) string {
+	return deriveStableCodexUUIDv7(seed, seededIdentityUnixMilli(seed))
+}
+
+// NewUpstreamSessionUUID 生成一个每次都不同的 UUIDv7，供"每请求隔离"的上游会话
+// 身份使用（默认隔离模式下的 prompt_cache_key 与 session-id 头）。
+//
+// 必须是 v7 而不是 uuid.NewString() 的 v4：真实 Codex 客户端的 session_id 恒为 v7，
+// 而默认隔离是本网关最常走的路径——绝大多数出站请求的会话键都由这里产出，
+// 版本位错了等于每个请求都带着一个与真实客户端不符的标记。v4 还没有时间序，
+// 上游若按 UUID 排序（主键索引 / 日志），它会因伪随机的"时间戳位"落到与真实
+// 会话完全无关的位置（与 deriveStableCodexUUIDv7 注释里记的是同一个问题）。
+//
+// NewV7 只在系统熵源不可用时报错，那种情况下回落到 v4 也比让请求失败强。
+func NewUpstreamSessionUUID() string {
+	if generated, err := uuid.NewV7(); err == nil {
+		return generated.String()
+	}
+	return uuid.NewString()
+}
+
+// seededIdentityUnixMilli 是 codexIdentityUnixMilli 的无账号版本：拿不到账号加入
+// 时间时以固定基准代替，其余散布逻辑一致。
+func seededIdentityUnixMilli(seed string) int64 {
+	sum := sha256.Sum256([]byte("codex2api:session-identity-ts:v1:" + seed))
+	offset := int64(binary.BigEndian.Uint64(sum[:8]) % uint64(codexIdentitySpreadMilli))
+	return codexIdentityFallbackEpochMilli + offset
 }
 
 // resolveCodexFingerprintIDs 按账号配置推导收敛目标值，off 档或账号缺失时返回 nil。
@@ -253,6 +292,16 @@ func ApplyCodexFingerprintHeaders(outbound http.Header, account *auth.Account, d
 	// 无条件补发等于给请求添一个真实客户端不会有的头，与收敛目标相反。
 	overrideExistingHeader(outbound, downstreamHeaders, codexInstallationIDHeader, ids.installationID)
 	overrideExistingHeader(outbound, downstreamHeaders, codexWindowIDHeader, ids.windowID)
+	// x-codex-parent-thread-id 与 metadata 里的 parent_thread_id 必须报同一个值：
+	// 真实客户端这两处是同一份快照的两个投影（responses_metadata.rs
+	// compatibility_headers），一处收敛一处不收敛就成了可直接比对的破绽。
+	// device 档不做会话级收敛，与该档位其余字段保持一致。
+	if ids.mode != auth.CodexFingerprintModeDevice && downstreamHeaders != nil {
+		if original := strings.TrimSpace(downstreamHeaders.Get(codexParentThreadIDHeader)); original != "" {
+			overrideExistingHeader(outbound, downstreamHeaders, codexParentThreadIDHeader,
+				convergeCodexLineageValue(ids.accountID, "parent_thread_id", original))
+		}
+	}
 }
 
 // overrideExistingHeader 仅在下游确实发过该头时，用收敛值覆盖出站取值。
@@ -376,11 +425,78 @@ func rewriteCodexTurnMetadataJSON(raw string, ids *codexFingerprintIDs) (string,
 		raw = updated
 		changed = true
 	}
+	if ids.mode != auth.CodexFingerprintModeDevice {
+		if rewritten, ok := convergeCodexLineageMetadata(raw, ids.accountID); ok {
+			raw = rewritten
+			changed = true
+		}
+	}
 	if scrubbed, ok := scrubCodexWorkspaces(raw, ids.accountID); ok {
 		raw = scrubbed
 		changed = true
 	}
 	return raw, changed
+}
+
+// codexLineageMetadataPaths 是 turn metadata 里剩下的、会跨请求稳定地标识下游
+// 会话/线程的字段（字段定义见 codex-rs/core/src/responses_metadata.rs
+// CodexTurnMetadataPayload）。前面那批收敛只覆盖了 installation/session/thread/window
+// 四个键，这些原样透传出去，等于换个字段泄漏同样的东西：
+//
+//   - context_window_id：Uuid::now_v7，会话内恒定、随 auto-compact 递增
+//     （core/src/session/mod.rs current_window）。它跨请求稳定，单独一个字段
+//     就能把同一个下游用户的多次请求串成一串，前面几项收敛随之失去意义。
+//   - parent_thread_id / forked_from_thread_id：下游真实 ThreadId，语义与 thread_id
+//     同级，泄漏面也相同。
+//
+// 刻意不含 parent_turn_id / root_turn_id：它们是轮次级标识，与本文件顶部对
+// turn_id 的判断同理——逐轮变化、不标识设备或会话，重算反而会与同轮的
+// turn_id / turn_started_at_unix_ms 失去一致性，那种不一致本身就是特征。
+var codexLineageMetadataPaths = []string{
+	"context_window_id",
+	"parent_thread_id",
+	"forked_from_thread_id",
+}
+
+// convergeCodexLineageMetadata 把谱系字段替换成按账号 + 原值派生的收敛值。
+//
+// 按原值派生（而非全部塌缩成一个常量）保住了形态：不同下游窗口/父线程在上游
+// 看来仍是不同的值，这正是真实客户端的样子；变的只是它们不再等于下游的真实标识。
+// 种子带 accountID，与本文件其它收敛值的惯例一致——否则同一个下游用户的同一
+// 窗口在不同账号下会派生出相同占位值，上游据此就能把两个账号关联到同一个人。
+//
+// 只改写已存在且非空的字符串键，不新增、不改变 metadata 形状。
+func convergeCodexLineageMetadata(raw string, accountID int64) (string, bool) {
+	changed := false
+	for _, path := range codexLineageMetadataPaths {
+		existing := gjson.Get(raw, path)
+		if existing.Type != gjson.String {
+			continue
+		}
+		original := strings.TrimSpace(existing.String())
+		if original == "" {
+			continue
+		}
+		converged := convergeCodexLineageValue(accountID, path, original)
+		if converged == original {
+			continue
+		}
+		updated, err := sjson.Set(raw, path, converged)
+		if err != nil {
+			continue
+		}
+		raw = updated
+		changed = true
+	}
+	return raw, changed
+}
+
+// convergeCodexLineageValue 为单个谱系标识派生收敛值。key 参与种子，因此同一个
+// 原始 UUID 出现在不同字段上会得到不同结果——上游据此无法把"某人的父线程"和
+// "某人的上下文窗口"认作同一个对象。
+func convergeCodexLineageValue(accountID int64, key, original string) string {
+	seed := fmt.Sprintf("codex2api:codex-lineage:v1:%s:%d:%s", key, accountID, original)
+	return deriveStableCodexUUIDv7(seed, seededIdentityUnixMilli(seed))
 }
 
 // scrubCodexWorkspaces 抹掉 turn metadata 里的工作区身份。
