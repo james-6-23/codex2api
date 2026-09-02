@@ -15,6 +15,9 @@ interface PageHeaderProps {
   titleAdornment?: ReactNode
   // hideTitle 时标题文字视觉隐藏（保留在无障碍树），由 titleAdornment 占位。
   hideTitle?: boolean
+  // actionsBelow 时操作区独立成行渲染在标题行下方,
+  // 避免宽工具栏与 titleAdornment(如渠道切换器)争抢同一行宽度导致截断。
+  actionsBelow?: boolean
   className?: string
 }
 
@@ -27,6 +30,7 @@ export default function PageHeader({
   actionMeta,
   titleAdornment,
   hideTitle,
+  actionsBelow,
   className,
 }: PageHeaderProps) {
   const { t } = useTranslation()
@@ -37,11 +41,12 @@ export default function PageHeader({
     <div
       data-slot="page-header"
       className={cn(
-        'mb-4 flex flex-col gap-3 sm:mb-6 sm:flex-row sm:items-end sm:justify-between sm:gap-5',
+        'mb-4 flex flex-col gap-3 sm:mb-6',
+        !actionsBelow && 'sm:flex-row sm:items-end sm:justify-between sm:gap-5',
         className,
       )}
     >
-      <div className="min-w-0 max-w-[760px]">
+      <div className={cn('min-w-0', !actionsBelow && 'max-w-[760px]')}>
         <div className="flex flex-wrap items-center gap-2 sm:gap-3">
           <h2
             className={cn(

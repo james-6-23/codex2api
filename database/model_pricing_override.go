@@ -23,7 +23,12 @@ type ModelPricingOverride struct {
 	// 标准档（短上下文）
 	Input       float64 `json:"input,omitempty"`
 	CachedInput float64 `json:"cached_input,omitempty"`
-	Output      float64 `json:"output,omitempty"`
+	// Anthropic prompt-cache creation prices are informational today; actual
+	// billing still uses CachedInput (cache read) because usage logs expose
+	// cache reads separately from cache creation only in provider payloads.
+	CacheWrite5m float64 `json:"cache_write_5m,omitempty"`
+	CacheWrite1h float64 `json:"cache_write_1h,omitempty"`
+	Output       float64 `json:"output,omitempty"`
 
 	// priority(fast) 档
 	InputPriority       float64 `json:"input_priority,omitempty"`
@@ -48,7 +53,7 @@ type ModelPricingOverride struct {
 
 // IsEmpty 判断覆盖是否不含任何价格（全 0）。
 func (o ModelPricingOverride) IsEmpty() bool {
-	return o.Input == 0 && o.CachedInput == 0 && o.Output == 0 &&
+	return o.Input == 0 && o.CachedInput == 0 && o.CacheWrite5m == 0 && o.CacheWrite1h == 0 && o.Output == 0 &&
 		o.InputPriority == 0 && o.CachedInputPriority == 0 && o.OutputPriority == 0 &&
 		o.InputLong == 0 && o.CachedInputLong == 0 && o.OutputLong == 0 &&
 		o.InputLongPriority == 0 && o.CachedInputLongPriority == 0 && o.OutputLongPriority == 0 &&
@@ -62,6 +67,12 @@ func (o ModelPricingOverride) applyNonZero(p *ModelPricing) {
 	}
 	if o.CachedInput > 0 {
 		p.CacheReadPricePerMToken = o.CachedInput
+	}
+	if o.CacheWrite5m > 0 {
+		p.CacheWrite5mPricePerMToken = o.CacheWrite5m
+	}
+	if o.CacheWrite1h > 0 {
+		p.CacheWrite1hPricePerMToken = o.CacheWrite1h
 	}
 	if o.Output > 0 {
 		p.OutputPricePerMToken = o.Output
@@ -108,6 +119,8 @@ func ModelPricingOverrideFromPricing(p *ModelPricing, source string) ModelPricin
 		Source:                     source,
 		Input:                      p.InputPricePerMToken,
 		CachedInput:                p.CacheReadPricePerMToken,
+		CacheWrite5m:               p.CacheWrite5mPricePerMToken,
+		CacheWrite1h:               p.CacheWrite1hPricePerMToken,
 		Output:                     p.OutputPricePerMToken,
 		InputPriority:              p.InputPricePerMTokenPriority,
 		CachedInputPriority:        p.CacheReadPricePerMTokenPriority,

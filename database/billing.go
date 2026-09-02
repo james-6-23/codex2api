@@ -11,6 +11,11 @@ type ModelPricing struct {
 	OutputPricePerMTokenPriority    float64
 	CacheReadPricePerMToken         float64
 	CacheReadPricePerMTokenPriority float64
+	// CacheWrite* are Anthropic prompt-cache creation prices (USD / 1M tokens).
+	// They are surfaced for transparent pricing, while cost calculation continues
+	// to use CacheReadPricePerMToken for cached input tokens.
+	CacheWrite5mPricePerMToken float64
+	CacheWrite1hPricePerMToken float64
 
 	LongInputPricePerMToken             float64
 	LongInputPricePerMTokenPriority     float64
@@ -489,25 +494,34 @@ func modelMatchesRule(model string, rule string) bool {
 
 func claudeFamilyPricing(model string) *ModelPricing {
 	switch {
+	case (strings.Contains(model, "fable-5.1") || strings.Contains(model, "fable-5-1") || strings.Contains(model, "mythos-5.1") || strings.Contains(model, "mythos-5-1")):
+		return &ModelPricing{InputPricePerMToken: 10.0, CacheReadPricePerMToken: 0.25, CacheWrite5mPricePerMToken: 12.5, CacheWrite1hPricePerMToken: 20.0, OutputPricePerMToken: 50.0}
+	case strings.Contains(model, "fable-5") || strings.Contains(model, "mythos-5"):
+		return &ModelPricing{InputPricePerMToken: 10.0, CacheReadPricePerMToken: 1.0, CacheWrite5mPricePerMToken: 12.5, CacheWrite1hPricePerMToken: 20.0, OutputPricePerMToken: 50.0}
 	case strings.Contains(model, "opus"):
 		// 传统 Opus(3 / 4 / 4.1)为 $15/$75;自 4.5 起 Opus 降至 $5/$25,更新的版本
 		// (4.6/4.7/4.8/5…)默认沿用现代档,避免新模型误套旧高价。
 		legacyOpus := strings.Contains(model, "opus-3") || strings.Contains(model, "3-opus") ||
 			strings.Contains(model, "opus-4-1") || strings.Contains(model, "opus-4.1") ||
-			strings.Contains(model, "opus-4-0") || strings.Contains(model, "opus-4-2025")
+			strings.Contains(model, "opus-4-0") || strings.Contains(model, "opus-4-2025") ||
+			strings.HasSuffix(model, "opus-4")
 		if legacyOpus {
-			return &ModelPricing{InputPricePerMToken: 15.0, OutputPricePerMToken: 75.0}
+			return &ModelPricing{InputPricePerMToken: 15.0, CacheReadPricePerMToken: 1.5, CacheWrite5mPricePerMToken: 18.75, CacheWrite1hPricePerMToken: 30.0, OutputPricePerMToken: 75.0}
 		}
-		return &ModelPricing{InputPricePerMToken: 5.0, OutputPricePerMToken: 25.0}
+		return &ModelPricing{InputPricePerMToken: 5.0, CacheReadPricePerMToken: 0.5, CacheWrite5mPricePerMToken: 6.25, CacheWrite1hPricePerMToken: 10.0, OutputPricePerMToken: 25.0}
 	case strings.Contains(model, "sonnet"):
-		return &ModelPricing{InputPricePerMToken: 3.0, OutputPricePerMToken: 15.0}
+		if strings.Contains(model, "sonnet-5") {
+			return &ModelPricing{InputPricePerMToken: 2.0, CacheReadPricePerMToken: 0.2, CacheWrite5mPricePerMToken: 2.5, CacheWrite1hPricePerMToken: 4.0, OutputPricePerMToken: 10.0}
+		}
+		return &ModelPricing{InputPricePerMToken: 3.0, CacheReadPricePerMToken: 0.3, CacheWrite5mPricePerMToken: 3.75, CacheWrite1hPricePerMToken: 6.0, OutputPricePerMToken: 15.0}
 	case strings.Contains(model, "haiku"):
-		// 3.5 与 4.x Haiku 均为 $1/$5;仅初代 claude-3-haiku 为 $0.25/$1.25。
-		if strings.Contains(model, "3-5") || strings.Contains(model, "3.5") ||
-			strings.Contains(model, "4-5") || strings.Contains(model, "4.5") ||
+		if strings.Contains(model, "3-5") || strings.Contains(model, "3.5") {
+			return &ModelPricing{InputPricePerMToken: 0.8, CacheReadPricePerMToken: 0.08, CacheWrite5mPricePerMToken: 1.0, CacheWrite1hPricePerMToken: 1.6, OutputPricePerMToken: 4.0}
+		}
+		if strings.Contains(model, "4-5") || strings.Contains(model, "4.5") ||
 			strings.Contains(model, "4-6") || strings.Contains(model, "4.6") ||
 			strings.Contains(model, "4-7") || strings.Contains(model, "4.7") {
-			return &ModelPricing{InputPricePerMToken: 1.0, OutputPricePerMToken: 5.0}
+			return &ModelPricing{InputPricePerMToken: 1.0, CacheReadPricePerMToken: 0.1, CacheWrite5mPricePerMToken: 1.25, CacheWrite1hPricePerMToken: 2.0, OutputPricePerMToken: 5.0}
 		}
 		return &ModelPricing{InputPricePerMToken: 0.25, OutputPricePerMToken: 1.25}
 	case strings.Contains(model, "claude"):

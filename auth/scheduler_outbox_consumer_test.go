@@ -3,14 +3,39 @@ package auth
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 )
+
+type recordingRuntimeTTLCache struct {
+	cache.TokenCache
+	mu   sync.Mutex
+	ttls map[string]time.Duration
+}
+
+func (c *recordingRuntimeTTLCache) SetRuntime(ctx context.Context, namespace, key string, value json.RawMessage, ttl time.Duration) error {
+	c.mu.Lock()
+	if c.ttls == nil {
+		c.ttls = make(map[string]time.Duration)
+	}
+	c.ttls[namespace+"\x00"+key] = ttl
+	c.mu.Unlock()
+	return c.TokenCache.SetRuntime(ctx, namespace, key, value, ttl)
+}
+
+func (c *recordingRuntimeTTLCache) runtimeTTL(namespace, key string) time.Duration {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ttls[namespace+"\x00"+key]
+}
 
 func waitForSchedulerProjection(t *testing.T, predicate func() bool) {
 	t.Helper()
@@ -226,6 +251,195 @@ func TestApplyPersistentAccountSnapshotPreservesRuntimeState(t *testing.T) {
 	if dst.SuccessStreak != 0 {
 		t.Fatalf("identity change should reset streaks, got %d", dst.SuccessStreak)
 	}
+}
+
+func TestApplyPersistentAccountSnapshotCopiesProviderPersistentState(t *testing.T) {
+	dst := newFastSchedulerTestAccount(1, HealthTierWarm, 100, 1)
+	dst.CredentialGeneration = 7
+	dst.AntigravityProjectID = "old-project"
+	dst.PermanentRefreshFailures = 2
+	dst.ClaudeClientPlatformOverride = string(ClaudeClientPlatformAny)
+	dst.ClaudeVersionPolicyOverride = string(ClaudeVersionPolicyPassthrough)
+	store := newIndexedRoutingTestStore([]*Account{dst})
+
+	src := newFastSchedulerTestAccount(1, HealthTierRisky, 100, 1)
+	src.CredentialGeneration = dst.CredentialGeneration
+	src.AntigravityProjectID = "new-project"
+	src.AntigravityHardBlocked = true
+	src.AntigravityHardBlockReason = "permanent refresh failure"
+	src.PermanentRefreshFailures = permanentRefreshFailureTerminalLimit
+	src.ClaudeClientPlatformOverride = string(ClaudeClientPlatformCLIOnly)
+	src.ClaudeVersionPolicyOverride = string(ClaudeVersionPolicyMinimum)
+	src.ClaudeClientVersionOverride = "1.2.3"
+	store.applyPersistentAccountSnapshot(dst, src, true)
+
+	dst.mu.RLock()
+	if dst.AntigravityProjectID != src.AntigravityProjectID ||
+		dst.AntigravityHardBlocked != src.AntigravityHardBlocked ||
+		dst.AntigravityHardBlockReason != src.AntigravityHardBlockReason {
+		t.Fatalf("Antigravity state = project %q hard=%t reason=%q, want project %q hard=%t reason=%q",
+			dst.AntigravityProjectID, dst.AntigravityHardBlocked, dst.AntigravityHardBlockReason,
+			src.AntigravityProjectID, src.AntigravityHardBlocked, src.AntigravityHardBlockReason)
+	}
+	if dst.ClaudeClientPlatformOverride != src.ClaudeClientPlatformOverride ||
+		dst.ClaudeVersionPolicyOverride != src.ClaudeVersionPolicyOverride ||
+		dst.ClaudeClientVersionOverride != src.ClaudeClientVersionOverride {
+		t.Fatalf("Claude overrides = %q/%q/%q, want %q/%q/%q",
+			dst.ClaudeClientPlatformOverride, dst.ClaudeVersionPolicyOverride, dst.ClaudeClientVersionOverride,
+			src.ClaudeClientPlatformOverride, src.ClaudeVersionPolicyOverride, src.ClaudeClientVersionOverride)
+	}
+	if dst.PermanentRefreshFailures != permanentRefreshFailureTerminalLimit {
+		t.Fatalf("persistent permanent failures = %d, want %d", dst.PermanentRefreshFailures, permanentRefreshFailureTerminalLimit)
+	}
+	dst.mu.RUnlock()
+
+	// A routine snapshot of the same hard-fence state must not erase newer
+	// process-local refresh failure history.
+	dst.mu.Lock()
+	dst.PermanentRefreshFailures = 3
+	dst.mu.Unlock()
+	stable := newFastSchedulerTestAccount(1, HealthTierRisky, 100, 1)
+	stable.CredentialGeneration = src.CredentialGeneration
+	stable.AntigravityHardBlocked = src.AntigravityHardBlocked
+	stable.AntigravityHardBlockReason = src.AntigravityHardBlockReason
+	store.applyPersistentAccountSnapshot(dst, stable, true)
+	dst.mu.RLock()
+	if dst.PermanentRefreshFailures != 3 {
+		t.Fatalf("routine snapshot clobbered runtime permanent failures: got %d want 3", dst.PermanentRefreshFailures)
+	}
+	dst.mu.RUnlock()
+	durable := newFastSchedulerTestAccount(1, HealthTierRisky, 100, 1)
+	durable.CredentialGeneration = stable.CredentialGeneration
+	durable.AntigravityHardBlocked = stable.AntigravityHardBlocked
+	durable.AntigravityHardBlockReason = stable.AntigravityHardBlockReason
+	durable.PermanentRefreshFailures = permanentRefreshFailureTerminalLimit
+	store.applyPersistentAccountSnapshot(dst, durable, true)
+	dst.mu.RLock()
+	if dst.PermanentRefreshFailures != permanentRefreshFailureTerminalLimit {
+		t.Fatalf("durable hard fence did not repair runtime failures: got %d want %d", dst.PermanentRefreshFailures, permanentRefreshFailureTerminalLimit)
+	}
+	dst.mu.RUnlock()
+
+	cleared := newFastSchedulerTestAccount(1, HealthTierHealthy, 100, 1)
+	cleared.CredentialGeneration = durable.CredentialGeneration
+	store.applyPersistentAccountSnapshot(dst, cleared, true)
+	dst.mu.RLock()
+	if dst.AntigravityHardBlocked || dst.AntigravityHardBlockReason != "" || dst.PermanentRefreshFailures != 0 {
+		t.Fatalf("cleared hard fence = hard=%t reason=%q failures=%d",
+			dst.AntigravityHardBlocked, dst.AntigravityHardBlockReason, dst.PermanentRefreshFailures)
+	}
+	dst.mu.RUnlock()
+
+	rotated := newFastSchedulerTestAccount(1, HealthTierRisky, 100, 1)
+	rotated.CredentialGeneration = cleared.CredentialGeneration + 1
+	rotated.AntigravityHardBlocked = true
+	rotated.AntigravityHardBlockReason = "rotated permanent refresh failure"
+	rotated.PermanentRefreshFailures = permanentRefreshFailureTerminalLimit
+	store.applyPersistentAccountSnapshot(dst, rotated, true)
+	dst.mu.RLock()
+	if dst.PermanentRefreshFailures != permanentRefreshFailureTerminalLimit {
+		t.Fatalf("identity refresh discarded persistent permanent failures: got %d want %d", dst.PermanentRefreshFailures, permanentRefreshFailureTerminalLimit)
+	}
+	dst.mu.RUnlock()
+}
+
+func TestApplyPersistentAccountSnapshotReconcilesSessionCapacity(t *testing.T) {
+	t.Run("unregistered account falls back to field copy", func(t *testing.T) {
+		store := newIndexedRoutingTestStore(nil)
+		dst := newFastSchedulerTestAccount(91, HealthTierHealthy, 100, 1)
+		src := newFastSchedulerTestAccount(91, HealthTierHealthy, 100, 1)
+		src.SessionCapacityEnabled = true
+		src.SessionCapacityMax = 9
+		src.SessionCapacityIdleTTLSeconds = 7200
+
+		store.applyPersistentAccountSnapshot(dst, src, true)
+		dst.mu.RLock()
+		enabled := dst.SessionCapacityEnabled
+		limit := dst.SessionCapacityMax
+		idleTTLSeconds := dst.SessionCapacityIdleTTLSeconds
+		dst.mu.RUnlock()
+		if !enabled || limit != 9 || idleTTLSeconds != 7200 {
+			t.Fatalf("fallback capacity = enabled=%t limit=%d ttl=%d", enabled, limit, idleTTLSeconds)
+		}
+	})
+
+	t.Run("disable hydrates and clears persisted windows before provider change", func(t *testing.T) {
+		runtimeCache := cache.NewMemory(1)
+		t.Cleanup(func() { _ = runtimeCache.Close() })
+		settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
+		firstStore := NewStore(nil, runtimeCache, settings)
+		firstAccount := &Account{
+			DBID: 92, AccessToken: "first", Status: StatusReady,
+			SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+		}
+		firstStore.AddAccount(firstAccount)
+		const sessionID = "persisted-before-disable"
+		if !firstStore.AdmitAccountSession(firstAccount, sessionID, time.Now()) {
+			t.Fatal("failed to admit persisted session")
+		}
+		firstStore.SetAccountSessionOwner(firstAccount.DBID, sessionID, AccountSessionOwner{UserName: "owner"})
+
+		secondStore := NewStore(nil, runtimeCache, settings)
+		dst := &Account{
+			DBID: 92, AccessToken: "second", Status: StatusReady,
+			SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
+		}
+		secondStore.AddAccount(dst)
+		src := &Account{
+			DBID: 92, UpstreamType: UpstreamOpenAIResponses, BaseURL: "https://relay.example", APIKey: "sk-relay",
+			// A stale persisted true value must not retain windows after this
+			// account changes to a relay provider, where capacity is inapplicable.
+			SessionCapacityEnabled: true, SessionCapacityMax: 2, SessionCapacityIdleTTLSeconds: 600,
+		}
+		secondStore.applyPersistentAccountSnapshot(dst, src, true)
+
+		ctx := context.Background()
+		if _, found, err := runtimeCache.GetRuntime(ctx, accountSessionRuntimeNamespace, accountSessionRuntimeKey(dst.DBID)); err != nil || found {
+			t.Fatalf("persisted account sessions after disable: found=%t err=%v", found, err)
+		}
+		if _, found, err := runtimeCache.GetRuntime(ctx, accountSessionOwnerRuntimeNamespace, sessionID); err != nil || found {
+			t.Fatalf("persisted reverse owner after disable: found=%t err=%v", found, err)
+		}
+		secondStore.accountSessionMu.Lock()
+		remaining := len(secondStore.accountSessions[dst.DBID])
+		secondStore.accountSessionMu.Unlock()
+		if remaining != 0 {
+			t.Fatalf("in-memory sessions after disable = %d, want 0", remaining)
+		}
+	})
+
+	t.Run("longer ttl refreshes persisted account and owner leases", func(t *testing.T) {
+		runtimeCache := &recordingRuntimeTTLCache{TokenCache: cache.NewMemory(1)}
+		t.Cleanup(func() { _ = runtimeCache.Close() })
+		store := NewStore(nil, runtimeCache, &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1})
+		dst := &Account{
+			DBID: 93, AccessToken: "token", Status: StatusReady,
+			SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 60,
+		}
+		store.AddAccount(dst)
+		const sessionID = "ttl-refresh-session"
+		if !store.AdmitAccountSession(dst, sessionID, time.Now()) {
+			t.Fatal("failed to admit ttl refresh session")
+		}
+		store.SetAccountSessionOwner(dst.DBID, sessionID, AccountSessionOwner{UserName: "owner"})
+		initialTTL := runtimeCache.runtimeTTL(accountSessionRuntimeNamespace, accountSessionRuntimeKey(dst.DBID))
+
+		src := &Account{
+			DBID: 93, AccessToken: "token", Status: StatusReady,
+			SessionCapacityEnabled: true, SessionCapacityMax: 3, SessionCapacityIdleTTLSeconds: 3600,
+		}
+		store.applyPersistentAccountSnapshot(dst, src, true)
+
+		accountTTL := runtimeCache.runtimeTTL(accountSessionRuntimeNamespace, accountSessionRuntimeKey(dst.DBID))
+		ownerTTL := runtimeCache.runtimeTTL(accountSessionOwnerRuntimeNamespace, sessionID)
+		if initialTTL <= 0 || accountTTL < 30*time.Minute || ownerTTL < 30*time.Minute {
+			t.Fatalf("session TTLs = initial %s account %s owner %s, want refreshed leases", initialTTL, accountTTL, ownerTTL)
+		}
+		enabled, limit, idleTTL := dst.SessionCapacityConfig()
+		if !enabled || limit != 3 || idleTTL != time.Hour {
+			t.Fatalf("capacity after ttl refresh = enabled=%t limit=%d ttl=%s", enabled, limit, idleTTL)
+		}
+	})
 }
 
 func TestReloadDispatchAccountsByIDsAppliesBatchProjection(t *testing.T) {

@@ -109,6 +109,16 @@ export interface AccountUsageWindow {
   model_avg_first_token_ms?: Record<string, number>
 }
 
+/** Claude OAuth zero-spend quota bucket; model-scoped buckets include Fable. */
+export interface ClaudeUsageWindow {
+  name: string
+  label?: string
+  utilization: number
+  reset_at?: ISODateString
+  model_scoped?: boolean
+  model_family?: string
+}
+
 export interface GrokProductUsage {
   product: string
   usage_percent?: number | null
@@ -205,8 +215,17 @@ export interface AccountRow {
   session_capacity_idle_ttl_seconds?: number
   session_capacity_current?: number
   claude_fingerprint_mode?: 'preserve' | 'force' | ''
+  claude_client_platform?: 'any' | 'claude_code_cli_only'
+  claude_version_policy?: 'passthrough' | 'fixed' | 'minimum'
+  claude_client_version?: string
+  claude_client_platform_override?: 'any' | 'claude_code_cli_only' | ''
+  claude_version_policy_override?: 'passthrough' | 'fixed' | 'minimum' | ''
+  claude_client_version_override?: string
   claude_usage_probe_at?: ISODateString
   claude_usage_probe_error?: string
+  claude_usage_windows?: ClaudeUsageWindow[]
+  /** True once the OAuth usage probe has run for this row (even with no windows). */
+  claude_usage_windows_probed?: boolean
   timezone?: string
   custom_headers?: Record<string, string> | null
   health_tier?: string
@@ -1328,6 +1347,9 @@ export interface UpdateAccountSchedulerRequest {
   session_capacity_max?: number
   session_capacity_idle_ttl_seconds?: number
   claude_fingerprint_mode?: 'preserve' | 'force' | '' | null
+  claude_client_platform?: 'any' | 'claude_code_cli_only' | null
+  claude_version_policy?: 'passthrough' | 'fixed' | 'minimum' | null
+  claude_client_version?: string | null
   timezone?: string | null
 }
 
@@ -3216,6 +3238,8 @@ export interface ModelPricingOverride {
   source?: string
   input?: number
   cached_input?: number
+  cache_write_5m?: number
+  cache_write_1h?: number
   output?: number
   input_priority?: number
   cached_input_priority?: number
@@ -3725,6 +3749,9 @@ export interface ObservedInstructionsResponse {
 // ClaudeGlobalConfig 是系统设置里的 ClaudeCode 全局配置(全体 Claude 账号默认遵守)。
 export interface ClaudeGlobalConfig {
   fingerprint_mode: 'preserve' | 'force' | ''
+  client_platform: 'any' | 'claude_code_cli_only'
+  version_policy: 'passthrough' | 'fixed' | 'minimum'
+  client_version: string
   default_timezone: string
   session_window_limit: number
   allow_service_tier: boolean

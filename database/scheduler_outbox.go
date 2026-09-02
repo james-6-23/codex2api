@@ -215,6 +215,18 @@ func (db *DB) installSQLiteSchedulerOutboxTriggers(ctx context.Context) error {
 		  OR COALESCE(json_extract(OLD.credentials,'$.task_id'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.task_id'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.grok_principal_id'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.grok_principal_id'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.grok_oidc_issuer'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.grok_oidc_issuer'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.claude_client_platform'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.claude_client_platform'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.claude_version_policy'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.claude_version_policy'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.claude_client_version'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.claude_client_version'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.session_capacity_enabled'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.session_capacity_enabled'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.session_capacity_max'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.session_capacity_max'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.session_capacity_idle_ttl_seconds'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.session_capacity_idle_ttl_seconds'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.project_id'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.project_id'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.antigravity_quota'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.antigravity_quota'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.antigravity_permissions'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.antigravity_permissions'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.antigravity_entitlements'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.antigravity_entitlements'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.antigravity_sync_error'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.antigravity_sync_error'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.antigravity_permanent_refresh_error'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.antigravity_permanent_refresh_error'),'')
 		BEGIN
 			INSERT INTO scheduler_outbox(entity_type,entity_id,event_type) VALUES('account',NEW.id,'updated');
 		END;
@@ -358,7 +370,19 @@ func (db *DB) installPostgresSchedulerOutboxTriggers(ctx context.Context) error 
 			COALESCE(OLD.credentials->>'agent_private_key','') IS DISTINCT FROM COALESCE(NEW.credentials->>'agent_private_key','') OR
 			COALESCE(OLD.credentials->>'task_id','') IS DISTINCT FROM COALESCE(NEW.credentials->>'task_id','') OR
 			COALESCE(OLD.credentials->>'grok_principal_id','') IS DISTINCT FROM COALESCE(NEW.credentials->>'grok_principal_id','') OR
-			COALESCE(OLD.credentials->>'grok_oidc_issuer','') IS DISTINCT FROM COALESCE(NEW.credentials->>'grok_oidc_issuer','')
+			COALESCE(OLD.credentials->>'grok_oidc_issuer','') IS DISTINCT FROM COALESCE(NEW.credentials->>'grok_oidc_issuer','') OR
+			COALESCE(OLD.credentials->>'claude_client_platform','') IS DISTINCT FROM COALESCE(NEW.credentials->>'claude_client_platform','') OR
+			COALESCE(OLD.credentials->>'claude_version_policy','') IS DISTINCT FROM COALESCE(NEW.credentials->>'claude_version_policy','') OR
+			COALESCE(OLD.credentials->>'claude_client_version','') IS DISTINCT FROM COALESCE(NEW.credentials->>'claude_client_version','') OR
+			COALESCE(OLD.credentials->>'session_capacity_enabled','') IS DISTINCT FROM COALESCE(NEW.credentials->>'session_capacity_enabled','') OR
+			COALESCE(OLD.credentials->>'session_capacity_max','') IS DISTINCT FROM COALESCE(NEW.credentials->>'session_capacity_max','') OR
+			COALESCE(OLD.credentials->>'session_capacity_idle_ttl_seconds','') IS DISTINCT FROM COALESCE(NEW.credentials->>'session_capacity_idle_ttl_seconds','') OR
+			COALESCE(OLD.credentials->>'project_id','') IS DISTINCT FROM COALESCE(NEW.credentials->>'project_id','') OR
+			COALESCE(OLD.credentials->>'antigravity_quota','') IS DISTINCT FROM COALESCE(NEW.credentials->>'antigravity_quota','') OR
+			COALESCE(OLD.credentials->>'antigravity_permissions','') IS DISTINCT FROM COALESCE(NEW.credentials->>'antigravity_permissions','') OR
+			COALESCE(OLD.credentials->>'antigravity_entitlements','') IS DISTINCT FROM COALESCE(NEW.credentials->>'antigravity_entitlements','') OR
+			COALESCE(OLD.credentials->>'antigravity_sync_error','') IS DISTINCT FROM COALESCE(NEW.credentials->>'antigravity_sync_error','') OR
+			COALESCE(OLD.credentials->>'antigravity_permanent_refresh_error','') IS DISTINCT FROM COALESCE(NEW.credentials->>'antigravity_permanent_refresh_error','')
 		) EXECUTE FUNCTION codex2api_scheduler_outbox_row('account','id');
 		CREATE TRIGGER scheduler_outbox_accounts_delete AFTER DELETE ON accounts FOR EACH ROW EXECUTE FUNCTION codex2api_scheduler_outbox_row('account','id');
 

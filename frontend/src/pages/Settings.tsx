@@ -704,6 +704,9 @@ function ClaudeCodeSettingsCard() {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const [fingerprintMode, setFingerprintMode] = useState<'preserve' | 'force' | ''>('')
+  const [clientPlatform, setClientPlatform] = useState<'any' | 'claude_code_cli_only'>('any')
+  const [versionPolicy, setVersionPolicy] = useState<'passthrough' | 'fixed' | 'minimum'>('passthrough')
+  const [clientVersion, setClientVersion] = useState('')
   const [timezone, setTimezone] = useState('')
   const [timezoneCustom, setTimezoneCustom] = useState(false)
   const [sessionWindow, setSessionWindow] = useState('')
@@ -725,6 +728,9 @@ function ClaudeCodeSettingsCard() {
       .then((cfg) => {
         if (cancelled) return
         setFingerprintMode((cfg.fingerprint_mode as 'preserve' | 'force' | '') ?? '')
+        setClientPlatform(cfg.client_platform ?? 'any')
+        setVersionPolicy(cfg.version_policy ?? 'passthrough')
+        setClientVersion(cfg.client_version ?? '')
         setTimezone(cfg.default_timezone ?? '')
         setTimezoneCustom(Boolean(cfg.default_timezone && !findClaudeTimezoneOption(cfg.default_timezone)))
         setSessionWindow(cfg.session_window_limit ? String(cfg.session_window_limit) : '')
@@ -757,6 +763,9 @@ function ClaudeCodeSettingsCard() {
       const maxToolSchemaValue = Number(maxToolSchemaBytes.trim())
       await api.updateClaudeConfig({
         fingerprint_mode: fingerprintMode,
+        client_platform: clientPlatform,
+        version_policy: versionPolicy,
+        client_version: versionPolicy === 'passthrough' ? '' : clientVersion.trim(),
         default_timezone: timezone.trim(),
         session_window_limit: Number.isFinite(n) && n > 0 ? Math.floor(n) : 0,
         allow_service_tier: allowServiceTier,
@@ -774,7 +783,7 @@ function ClaudeCodeSettingsCard() {
     } finally {
       setSaving(false)
     }
-  }, [allowInferenceGeo, allowSafetyIdentifier, allowServiceTier, allowSpeed, allowedBetaHeaders, fingerprintMode, maxOutputTokens, maxToolCount, maxToolSchemaBytes, sessionWindow, showToast, t, timezone])
+  }, [allowInferenceGeo, allowSafetyIdentifier, allowServiceTier, allowSpeed, allowedBetaHeaders, clientPlatform, clientVersion, fingerprintMode, maxOutputTokens, maxToolCount, maxToolSchemaBytes, sessionWindow, showToast, t, timezone, versionPolicy])
 
   const selectCls =
     'h-9 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:border-ring'
@@ -807,6 +816,22 @@ function ClaudeCodeSettingsCard() {
             <option value="preserve">{t('settings.claudeFpPreserveExplicit')}</option>
             <option value="force">{t('settings.claudeFpForce')}</option>
           </select>
+        </SettingField>
+        <SettingField label={t('settings.claudeClientPlatform')} description={t('settings.claudeClientPlatformDesc')}>
+          <select className={selectCls} value={clientPlatform} onChange={(e) => setClientPlatform(e.target.value as 'any' | 'claude_code_cli_only')}>
+            <option value="any">{t('settings.claudeClientPlatformAny')}</option>
+            <option value="claude_code_cli_only">{t('settings.claudeClientPlatformCLIOnly')}</option>
+          </select>
+        </SettingField>
+        <SettingField label={t('settings.claudeVersionPolicy')} description={t('settings.claudeVersionPolicyDesc')}>
+          <div className="space-y-1.5">
+            <select className={selectCls} value={versionPolicy} onChange={(e) => setVersionPolicy(e.target.value as 'passthrough' | 'fixed' | 'minimum')}>
+              <option value="passthrough">{t('settings.claudeVersionPolicyPassthrough')}</option>
+              <option value="fixed">{t('settings.claudeVersionPolicyFixed')}</option>
+              <option value="minimum">{t('settings.claudeVersionPolicyMinimum')}</option>
+            </select>
+            {versionPolicy !== 'passthrough' ? <Input value={clientVersion} onChange={(e) => setClientVersion(e.target.value)} placeholder="2.1.251" /> : null}
+          </div>
         </SettingField>
         <SettingField label={t('settings.claudeDefaultTimezone')} description={t('settings.claudeDefaultTimezoneDesc')}>
           <div className="space-y-1.5">

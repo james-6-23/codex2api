@@ -29,6 +29,7 @@ import {
 import { api } from "../api";
 import type { ProxyRow } from "../api";
 import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
+import { ProxyUrlInput } from "../components/ProxyField";
 import type {
   AccountGroup,
   AccountListSummary,
@@ -509,9 +510,9 @@ function AccountMetadataFields({
         <span className="text-xs font-semibold text-muted-foreground">
           {t("antigravity.proxyUrl")}
         </span>
-        <Input
+        <ProxyUrlInput
           value={proxyUrl}
-          onChange={(event) => onProxyUrlChange(event.target.value)}
+          onChange={onProxyUrlChange}
           placeholder={t("antigravity.proxyUrlPlaceholder")}
         />
         {/* 从代理池选择：展示每条代理已绑定账号数/空闲，选中写入上面的输入框。 */}
@@ -1892,6 +1893,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
         title={t("antigravity.pageTitle")}
         description={t("antigravity.pageSubtitle")}
         hideTitle
+        actionsBelow
         titleAdornment={headerSlot}
         onRefresh={() => void reload()}
         actions={
@@ -1985,6 +1987,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
         error={accounts.length === 0 ? error : null}
         onRetry={() => void reload()}
         isEmpty={!loading && !error && accounts.length === 0}
+        emptyIcon={<ChannelLogo channel="antigravity" size={30} />}
         loadingTitle={t("antigravity.loadingTitle")}
         loadingDescription={t("antigravity.loadingDescription")}
         errorTitle={t("antigravity.errorTitle")}

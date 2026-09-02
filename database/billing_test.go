@@ -53,7 +53,7 @@ func TestGetModelPricingUsesSub2APIClaudeFamilies(t *testing.T) {
 		{model: "claude-opus-4-7-20260401", wantInput: 5.0, wantOutput: 25.0},
 		{model: "claude-opus-4-20250514", wantInput: 15.0, wantOutput: 75.0},
 		{model: "claude-sonnet-4-5-20250929", wantInput: 3.0, wantOutput: 15.0},
-		{model: "claude-3-5-haiku-20241022", wantInput: 1.0, wantOutput: 5.0},
+		{model: "claude-3-5-haiku-20241022", wantInput: 0.8, wantOutput: 4.0},
 		{model: "claude-unknown-model", wantInput: 3.0, wantOutput: 15.0},
 	}
 
@@ -510,5 +510,20 @@ func TestGrok46OfficialPricingAndLongContextThreshold(t *testing.T) {
 	breakdown := CalculateCostBreakdown(200001, 1000000, 0, "grok-4.6", "")
 	if !breakdown.LongContext || breakdown.LongContextThreshold != 200000 {
 		t.Fatalf("grok-4.6 should enter long pricing above 200K: %+v", breakdown)
+	}
+}
+
+func TestClaudeFablePricingUsesOfficialCacheReadRates(t *testing.T) {
+	fable51 := GetModelPricing("claude-fable-5.1")
+	assertPricing(t, fable51, 10, 50)
+	assertFloatEqual(t, fable51.CacheReadPricePerMToken, 0.25)
+	if fable51.CacheWrite5mPricePerMToken != 12.5 || fable51.CacheWrite1hPricePerMToken != 20 {
+		t.Fatalf("Fable 5.1 cache-write pricing = %+v", fable51)
+	}
+	fable5 := GetModelPricing("claude-fable-5")
+	assertPricing(t, fable5, 10, 50)
+	assertFloatEqual(t, fable5.CacheReadPricePerMToken, 1)
+	if fable5.CacheWrite5mPricePerMToken != 12.5 || fable5.CacheWrite1hPricePerMToken != 20 {
+		t.Fatalf("Fable 5 cache-write pricing = %+v", fable5)
 	}
 }

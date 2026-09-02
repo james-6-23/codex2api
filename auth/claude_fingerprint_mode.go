@@ -211,7 +211,90 @@ type ClaudeConfig struct {
 	FingerprintMode    string `json:"fingerprint_mode"`     // preserve / force(空=preserve)
 	DefaultTimezone    string `json:"default_timezone"`     // 导入账号默认 IANA 时区
 	SessionWindowLimit int64  `json:"session_window_limit"` // 默认并发会话窗口数(0=跟随全局 maxConcurrency)
+	ClaudeClientPolicy
 	ClaudeSecurityConfig
+}
+
+// SetClaudeClientPolicy publishes the global Claude Code platform/version
+// policy as one snapshot so readers never observe a half-updated policy.
+// Invalid values fall back to any/passthrough so malformed legacy settings
+// cannot break startup; the admin endpoint performs strict validation first.
+func (s *Store) SetClaudeClientPolicy(policy ClaudeClientPolicy) {
+	if s == nil {
+		return
+	}
+	normalized, err := NormalizeClaudeClientPolicy(policy)
+	if err != nil {
+		normalized = DefaultClaudeClientPolicy()
+	}
+	s.claudeClientPolicy.Store(normalized)
+}
+
+// ClaudeClientPolicy returns the normalized global policy.
+func (s *Store) ClaudeClientPolicy() ClaudeClientPolicy {
+	if s != nil {
+		if value, ok := s.claudeClientPolicy.Load().(ClaudeClientPolicy); ok {
+			if normalized, err := NormalizeClaudeClientPolicy(value); err == nil {
+				return normalized
+			}
+		}
+	}
+	return DefaultClaudeClientPolicy()
+}
+
+func (s *Store) ClaudeClientPlatform() ClaudeClientPlatform {
+	return s.ClaudeClientPolicy().Platform
+}
+
+func (s *Store) ClaudeVersionPolicy() ClaudeVersionPolicy {
+	return s.ClaudeClientPolicy().VersionPolicy
+}
+
+func (s *Store) ClaudeClientVersion() string {
+	return s.ClaudeClientPolicy().ClientVersion
+}
+
+// ClaudeClientPolicyForAccount merges an account override over the global
+// policy. Empty account fields intentionally inherit global settings. When the
+// merged result is invalid (for example a stale minimum/fixed override whose
+// version was cleared) the account keeps the already-valid global policy
+// instead of silently dropping a platform restriction.
+func (s *Store) ClaudeClientPolicyForAccount(account *Account) ClaudeClientPolicy {
+	global := s.ClaudeClientPolicy()
+	if account == nil {
+		return global
+	}
+	policy := global
+	account.mu.RLock()
+	if account.ClaudeClientPlatformOverride != "" {
+		policy.Platform = ClaudeClientPlatform(account.ClaudeClientPlatformOverride)
+	}
+	if account.ClaudeVersionPolicyOverride != "" {
+		policy.VersionPolicy = ClaudeVersionPolicy(account.ClaudeVersionPolicyOverride)
+	}
+	if account.ClaudeClientVersionOverride != "" {
+		policy.ClientVersion = account.ClaudeClientVersionOverride
+	}
+	account.mu.RUnlock()
+	if normalized, err := NormalizeClaudeClientPolicy(policy); err == nil {
+		return normalized
+	}
+	return global
+}
+
+// ApplyAccountClaudeClientPolicy updates an in-memory override after the
+// credentials mutation has been committed.
+func (s *Store) ApplyAccountClaudeClientPolicy(dbID int64, policy ClaudeClientPolicy) bool {
+	account := s.FindByID(dbID)
+	if account == nil {
+		return false
+	}
+	account.mu.Lock()
+	account.ClaudeClientPlatformOverride = string(policy.Platform)
+	account.ClaudeVersionPolicyOverride = string(policy.VersionPolicy)
+	account.ClaudeClientVersionOverride = policy.ClientVersion
+	account.mu.Unlock()
+	return true
 }
 
 // SecurityConfig extracts the flattened Claude security fields from the
@@ -233,6 +316,11 @@ func ParseClaudeConfig(raw string) ClaudeConfig {
 	if cfg.SessionWindowLimit < 0 {
 		cfg.SessionWindowLimit = 0
 	}
+	if clientPolicy, err := NormalizeClaudeClientPolicy(cfg.ClaudeClientPolicy); err == nil {
+		cfg.ClaudeClientPolicy = clientPolicy
+	} else {
+		cfg.ClaudeClientPolicy = DefaultClaudeClientPolicy()
+	}
 	cfg.ClaudeSecurityConfig = NormalizeClaudeSecurityConfig(cfg.ClaudeSecurityConfig)
 	return cfg
 }
@@ -243,5 +331,6 @@ func applyClaudeConfigToStore(s *Store, raw string) {
 	s.SetClaudeFingerprintModeDefault(cfg.FingerprintMode)
 	s.SetClaudeDefaultTimezone(cfg.DefaultTimezone)
 	s.SetClaudeSessionWindowLimit(cfg.SessionWindowLimit)
+	s.SetClaudeClientPolicy(cfg.ClaudeClientPolicy)
 	s.SetClaudeSecurityConfig(cfg.SecurityConfig())
 }

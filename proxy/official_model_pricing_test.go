@@ -65,3 +65,21 @@ func TestParseXAIOfficialPricingMarkdown(t *testing.T) {
 		t.Fatalf("xAI prices = %+v", got)
 	}
 }
+
+func TestParseAnthropicOfficialPricingHTMLIncludesCacheWriteAndRead(t *testing.T) {
+	body := []byte(`<table><tr><th>Model</th><th>Input</th><th>5m Cache Write</th><th>1h Cache Write</th><th>Cache Read</th><th>Output</th></tr>
+<tr><td>Claude Fable 5.1</td><td>$10 / MTok</td><td>$12.50 / MTok</td><td>$20 / MTok</td><td>$0.25 / MTok</td><td>$50 / MTok</td></tr>
+<tr><td>Claude Fable 5</td><td>$10 / MTok</td><td>$12.50 / MTok</td><td>$20 / MTok</td><td>$1 / MTok</td><td>$50 / MTok</td></tr></table>`)
+	got, err := ParseAnthropicOfficialPricingHTML(body)
+	if err != nil {
+		t.Fatalf("ParseAnthropicOfficialPricingHTML: %v", err)
+	}
+	fable51 := got["claude-fable-5-1"]
+	if fable51.Input != 10 || fable51.CachedInput != 0.25 || fable51.CacheWrite5m != 12.5 || fable51.CacheWrite1h != 20 || fable51.Output != 50 {
+		t.Fatalf("Fable 5.1 pricing = %+v", fable51)
+	}
+	fable5 := got["claude-fable-5"]
+	if fable5.Input != 10 || fable5.CachedInput != 1 || fable5.CacheWrite5m != 12.5 || fable5.CacheWrite1h != 20 || fable5.Output != 50 {
+		t.Fatalf("Fable 5 pricing = %+v", fable5)
+	}
+}

@@ -331,6 +331,7 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 		"models_dev_url":       proxy.ModelsDevPricingSyncURL,
 		"official_openai_url":  proxy.OfficialOpenAIPricingURL,
 		"official_xai_url":     strings.TrimSuffix(proxy.OfficialXAIPricingURL, ".md"),
+		"official_claude_url":  proxy.OfficialAnthropicPricingURL,
 		"official_sync_config": officialPricingConfigResponse(officialCfg),
 	})
 }

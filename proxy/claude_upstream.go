@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -121,9 +122,22 @@ func markClaudeNativeRoute(resp *http.Response) {
 	}
 }
 
+// claudeClientPolicyErrorCode marks a request rejected by the gateway-side
+// Claude Code client policy (platform/version), never by the upstream.
+const claudeClientPolicyErrorCode = "claude_client_policy"
+
 // ExecuteClaudeMessagesRequest 把入站 Anthropic Messages 请求透传给 Claude Code
-// OAuth 账号对应的上游,返回原始上游响应。
+// OAuth 账号对应的上游,返回原始上游响应。它不做客户端平台/版本门禁:管理端的
+// 探测/测连/用量采样都走这里,因为它们不是下游客户端流量(见 issue: 开启
+// claude_code_cli_only 后 nil header 探针会被自己的策略拒掉并把整池标错)。
 func ExecuteClaudeMessagesRequest(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header, fingerprintMode string, securityConfigs ...auth.ClaudeSecurityConfig) (*http.Response, error) {
+	return ExecuteClaudeMessagesRequestWithPolicy(ctx, account, requestBody, proxyOverride, headers, fingerprintMode, auth.ClaudeClientPolicy{}, securityConfigs...)
+}
+
+// ExecuteClaudeMessagesRequestWithPolicy performs client platform/version
+// preflight before touching the Anthropic transport. The legacy function above
+// intentionally keeps the any/passthrough default for non-handler callers.
+func ExecuteClaudeMessagesRequestWithPolicy(ctx context.Context, account *auth.Account, requestBody []byte, proxyOverride string, headers http.Header, fingerprintMode string, clientPolicy auth.ClaudeClientPolicy, securityConfigs ...auth.ClaudeSecurityConfig) (*http.Response, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -147,6 +161,14 @@ func ExecuteClaudeMessagesRequest(ctx context.Context, account *auth.Account, re
 	if accessToken == "" {
 		return nil, ErrNoAvailableAccount()
 	}
+	model := strings.TrimSpace(gjson.GetBytes(requestBody, "model").String())
+	decision, policyErr := auth.ValidateClaudeClientRequest(clientPolicy, headers.Get("User-Agent"), model)
+	if policyErr != nil {
+		return nil, ErrBadRequest("Claude 客户端策略无效: " + policyErr.Error())
+	}
+	if !decision.Allowed {
+		return nil, &Error{Code: claudeClientPolicyErrorCode, Message: decision.DetailMessage(), Type: ErrorTypeInvalidRequest, Retryable: false, HTTPStatus: decision.HTTPStatus()}
+	}
 
 	securityConfig := auth.DefaultClaudeSecurityConfig()
 	if len(securityConfigs) > 0 {
@@ -166,7 +188,7 @@ func ExecuteClaudeMessagesRequest(ctx context.Context, account *auth.Account, re
 	if err != nil {
 		return nil, ErrInternalError("创建 Claude 请求失败", err)
 	}
-	applyClaudeMessagesHeaders(req, accessToken, headers, stream, fingerprint, fingerprintMode, securityConfig)
+	applyClaudeMessagesHeadersWithVersion(req, accessToken, headers, stream, fingerprint, fingerprintMode, decision.RewriteVersion, securityConfig)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -249,6 +271,30 @@ func applyClaudeMessagesHeaders(req *http.Request, accessToken string, incoming 
 	// after preserve/force resolution so the Usage page can show whether the
 	// upstream identity was actually rewritten.
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
+}
+
+// applyClaudeMessagesHeadersWithVersion is the policy-aware variant used by
+// ExecuteClaudeMessagesRequestWithPolicy. Keeping the legacy helper signature
+// avoids changing existing callers/tests while still recording the final UA.
+func applyClaudeMessagesHeadersWithVersion(req *http.Request, accessToken string, incoming http.Header, stream bool, fingerprint map[string]string, fingerprintMode, rewriteVersion string, securityConfigs ...auth.ClaudeSecurityConfig) {
+	applyClaudeMessagesHeaders(req, accessToken, incoming, stream, fingerprint, fingerprintMode, securityConfigs...)
+	if strings.TrimSpace(rewriteVersion) != "" {
+		rewritten := rewriteClaudeCLIUserAgentVersion(req.Header.Get("User-Agent"), rewriteVersion)
+		if rewritten != "" {
+			req.Header.Set("User-Agent", rewritten)
+			RecordUpstreamUserAgent(req.Context(), rewritten)
+		}
+	}
+}
+
+var claudeCLIUserAgentVersionPattern = regexp.MustCompile(`(?i)(\bclaude(?:-cli|-code)|\bclaude\s+code)([/\s:_-]*)(?:v?\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?)`)
+
+func rewriteClaudeCLIUserAgentVersion(userAgent, version string) string {
+	version = strings.TrimSpace(version)
+	if _, ok := auth.ParseClaudeClientVersion("claude-cli/" + version); !ok {
+		return ""
+	}
+	return claudeCLIUserAgentVersionPattern.ReplaceAllString(userAgent, "${1}${2}"+version)
 }
 
 // defaultClaudeIdentityHeader is a deterministic compatibility fallback for

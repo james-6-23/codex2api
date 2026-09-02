@@ -155,9 +155,32 @@ func (h *Handler) buildAccountResponse(
 	// Claude Code 指纹收敛模式 + 绑定时区,仅 Claude OAuth 账号暴露。
 	claudeFingerprintMode := ""
 	accountTimezone := ""
+	claudeClientPlatformOverride := ""
+	claudeVersionPolicyOverride := ""
+	claudeClientVersionOverride := ""
+	claudeClientPolicy := auth.ClaudeClientPolicy{}
 	if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) {
+		claudeClientPolicy = auth.ClaudeClientPolicy{Platform: auth.ClaudeClientPlatformAny, VersionPolicy: auth.ClaudeVersionPolicyPassthrough}
 		claudeFingerprintMode = auth.NormalizeClaudeFingerprintMode(row.GetCredential(auth.ClaudeFingerprintModeCredentialKey))
 		accountTimezone = strings.TrimSpace(row.GetCredential("timezone"))
+		claudeClientPlatformOverride = strings.ToLower(strings.TrimSpace(row.GetCredential(auth.ClaudeClientPlatformCredentialKey)))
+		claudeVersionPolicyOverride = strings.ToLower(strings.TrimSpace(row.GetCredential(auth.ClaudeVersionPolicyCredentialKey)))
+		claudeClientVersionOverride = strings.TrimSpace(row.GetCredential(auth.ClaudeClientVersionCredentialKey))
+		if h.store != nil {
+			claudeClientPolicy = h.store.ClaudeClientPolicy()
+		}
+		if claudeClientPlatformOverride != "" {
+			claudeClientPolicy.Platform = auth.ClaudeClientPlatform(claudeClientPlatformOverride)
+		}
+		if claudeVersionPolicyOverride != "" {
+			claudeClientPolicy.VersionPolicy = auth.ClaudeVersionPolicy(claudeVersionPolicyOverride)
+		}
+		if claudeClientVersionOverride != "" {
+			claudeClientPolicy.ClientVersion = claudeClientVersionOverride
+		}
+		if normalized, err := auth.NormalizeClaudeClientPolicy(claudeClientPolicy); err == nil {
+			claudeClientPolicy = normalized
+		}
 	}
 	ignoreUsageLimitStatusOverride := row.GetCredentialOptionalBool("ignore_usage_limit_status_override")
 	ignoreUsageLimitStatusEffective := h.store.IgnoreUsageLimitStatus()
@@ -241,6 +264,12 @@ func (h *Handler) buildAccountResponse(
 		SessionCapacityCurrent:        sessionCapacityCurrent,
 		ClaudeFingerprintMode:         claudeFingerprintMode,
 		ClaudeUserAgent:               claudeUserAgent,
+		ClaudeClientPlatform:          string(claudeClientPolicy.Platform),
+		ClaudeVersionPolicy:           string(claudeClientPolicy.VersionPolicy),
+		ClaudeClientVersion:           claudeClientPolicy.ClientVersion,
+		ClaudeClientPlatformOverride:  claudeClientPlatformOverride,
+		ClaudeVersionPolicyOverride:   claudeVersionPolicyOverride,
+		ClaudeClientVersionOverride:   claudeClientVersionOverride,
 		Timezone:                      accountTimezone,
 		CustomHeaders:                 customHeaders,
 		ProxyURL:                      row.ProxyURL,
@@ -259,9 +288,12 @@ func (h *Handler) buildAccountResponse(
 		Codex5HUsageUpdatedAt:         row.GetCredential("codex_5h_usage_updated_at"),
 		ClaudeUsageProbeAt:            row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
 		ClaudeUsageProbeError:         row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
+		ClaudeUsageWindows:            parseClaudeUsageWindows(row.GetCredential(auth.ClaudeUsageWindowsCredentialKey)),
 		UsageLimitOverride:            ignoreUsageLimitStatusOverride,
 		UsageLimitEffective:           ignoreUsageLimitStatusEffective,
 	}
+	// 凭据里只要存在 usage 窗口键(哪怕是空数组)就代表 OAuth usage 采样跑过。
+	resp.ClaudeUsageWindowsProbed = strings.TrimSpace(row.GetCredential(auth.ClaudeUsageWindowsCredentialKey)) != ""
 	if isAntigravityAccount {
 		resp.Models = antigravityPublishedModelsOrDefault(row.GetCredentialStringSlice("models"))
 	}
@@ -462,6 +494,18 @@ func (h *Handler) buildAccountResponse(
 		stripAccountDetailFields(&resp)
 	}
 	return resp
+}
+
+func parseClaudeUsageWindows(raw string) []auth.ClaudeUsageWindow {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var windows []auth.ClaudeUsageWindow
+	if err := json.Unmarshal([]byte(raw), &windows); err != nil {
+		return nil
+	}
+	return windows
 }
 
 func stripAccountDetailFields(resp *accountResponse) {

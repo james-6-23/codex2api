@@ -27,6 +27,7 @@ const UpstreamClaude = "claude"
 const (
 	ClaudeUsageProbeAtCredentialKey    = "claude_usage_probe_at"
 	ClaudeUsageProbeErrorCredentialKey = "claude_usage_probe_error"
+	ClaudeUsageWindowsCredentialKey    = "claude_usage_windows"
 )
 
 // isClaudeOAuthLocked 判断账号是否为 Claude Code OAuth 账号。调用方需持有 a.mu。

@@ -90,6 +90,8 @@ type FieldDef = {
 const PRIMARY_FIELDS: FieldDef[] = [
   { key: 'input', labelKey: 'settings.pricing.input', shortKey: 'settings.pricing.shortInput', tone: 'neutral' },
   { key: 'cached_input', labelKey: 'settings.pricing.cached', shortKey: 'settings.pricing.shortCached', tone: 'neutral' },
+  { key: 'cache_write_5m', labelKey: 'settings.pricing.cacheWrite5m', shortKey: 'settings.pricing.shortCacheWrite5m', tone: 'neutral' },
+  { key: 'cache_write_1h', labelKey: 'settings.pricing.cacheWrite1h', shortKey: 'settings.pricing.shortCacheWrite1h', tone: 'neutral' },
   { key: 'output', labelKey: 'settings.pricing.output', shortKey: 'settings.pricing.shortOutput', tone: 'neutral' },
 ]
 
@@ -392,7 +394,7 @@ function BillingRulePreview({ pricing }: { pricing: ModelPricingOverride }) {
             {formatPreviewRate(preview.standard)}
           </div>
           <div className='mt-0.5 text-[10px] text-muted-foreground'>
-            in / cached / out · USD/M
+            input / cache read / output · USD/M
           </div>
         </div>
         {preview.long ? (
@@ -578,6 +580,7 @@ export default function ModelPricing() {
   const [modelsDevUrl, setModelsDevUrl] = useState('')
   const [officialOpenAIUrl, setOfficialOpenAIUrl] = useState('')
   const [officialXAIUrl, setOfficialXAIUrl] = useState('')
+  const [officialClaudeUrl, setOfficialClaudeUrl] = useState('')
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState<string | null>(null)
   const [syncing, setSyncing] = useState(false)
@@ -613,6 +616,7 @@ export default function ModelPricing() {
       setModelsDevUrl(res.models_dev_url)
       setOfficialOpenAIUrl(res.official_openai_url)
       setOfficialXAIUrl(res.official_xai_url)
+      setOfficialClaudeUrl(res.official_claude_url)
       setSyncUrl(res.sync_url || '')
       setOfficialConfig(res.official_sync_config)
       const d: Record<string, ModelPricingOverride> = {}
@@ -1010,6 +1014,7 @@ export default function ModelPricing() {
 								<div className="mt-2 flex flex-wrap gap-3 text-[11px] font-semibold">
 									<a href={officialOpenAIUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">OpenAI <ArrowUpRight className="size-3" /></a>
 									<a href={officialXAIUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">xAI <ArrowUpRight className="size-3" /></a>
+									<a href={officialClaudeUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">Anthropic <ArrowUpRight className="size-3" /></a>
 								</div>
 							</div>
 							<Button className="shrink-0" onClick={() => void syncOfficial()} disabled={officialSyncing || (!officialConfig.include_openai && !officialConfig.include_grok && !officialConfig.include_claude)}>

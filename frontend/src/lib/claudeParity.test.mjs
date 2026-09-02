@@ -58,6 +58,10 @@ test('Claude account list refreshes after asynchronous sampling without stale ov
   assert.match(claude, /reloadAbortRef/)
   assert.match(claude, /samplingPoll|sample.*poll/i)
   assert.match(claude, /claude_usage_probe_at/)
+  assert.match(claude, /claude_usage_windows/)
+  assert.match(claude, /legacyUsageRefreshKey/)
+  assert.match(claude, /refreshAccountUsage\(id\)/)
+  assert.match(claude, /model_scoped/)
   assert.match(claude, /getAccountLiveState/)
   assert.match(claude, /AccountDetailSheet/)
   assert.match(claude, /onOpenDetail/)
@@ -65,6 +69,29 @@ test('Claude account list refreshes after asynchronous sampling without stale ov
   assert.match(claude, /<ClaudeTestModal/)
 })
 
+test('model pricing exposes Anthropic source and distinct cache write fields', () => {
+  const pricing = readFileSync(new URL('../pages/ModelPricing.tsx', import.meta.url), 'utf8')
+  assert.match(pricing, /officialClaudeUrl/)
+  assert.match(pricing, /cache_write_5m/)
+  assert.match(pricing, /cache_write_1h/)
+  assert.match(types, /cache_write_5m/)
+  assert.match(types, /cache_write_1h/)
+})
+
+test('Claude settings expose client platform and version policy controls', () => {
+  assert.match(settings, /clientPlatform|client_platform/)
+  assert.match(settings, /versionPolicy|version_policy/)
+  assert.match(settings, /clientVersion|client_version/)
+  assert.match(types, /client_platform: 'any' \| 'claude_code_cli_only'/)
+  assert.match(types, /version_policy: 'passthrough' \| 'fixed' \| 'minimum'/)
+})
+
+test('Claude account editor exposes per-account client policy overrides', () => {
+  assert.match(claude, /claude_client_platform|clientPlatform/)
+  assert.match(claude, /claude_version_policy|versionPolicy/)
+  assert.match(claude, /claude_client_version|clientVersion/)
+  assert.match(claude, /跟随全局|follow.*global/i)
+})
 test('Claude model whitelist stays provider-scoped and uses optimistic detail validation', () => {
   assert.match(claude, /CLAUDE_MODEL_ID_RE = \/\^claude-/)
   assert.match(claude, /api\.syncAccountModelsUpstream\(account\.id\)/)

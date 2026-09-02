@@ -180,3 +180,23 @@ func TestModelPricingOverride_LongPriorityFieldsRoundTripAndApply(t *testing.T) 
 		t.Fatalf("long priority projection lost values: %+v", projected)
 	}
 }
+
+func TestModelPricingOverride_CacheWriteFieldsRoundTripAndApply(t *testing.T) {
+	override := ModelPricingOverride{Input: 10, CachedInput: 1, CacheWrite5m: 12.5, CacheWrite1h: 20, Output: 50}
+	raw, err := MarshalModelPricingOverridesJSON(map[string]ModelPricingOverride{"claude-fable-5": override})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	parsed, err := ParseModelPricingOverridesJSON(raw)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if parsed["claude-fable-5"].CacheWrite5m != 12.5 || parsed["claude-fable-5"].CacheWrite1h != 20 {
+		t.Fatalf("cache-write fields lost: %+v", parsed["claude-fable-5"])
+	}
+	pricing := ModelPricing{}
+	parsed["claude-fable-5"].applyNonZero(&pricing)
+	if pricing.CacheWrite5mPricePerMToken != 12.5 || pricing.CacheWrite1hPricePerMToken != 20 {
+		t.Fatalf("cache-write fields not applied: %+v", pricing)
+	}
+}

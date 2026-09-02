@@ -3,6 +3,7 @@ package admin
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -190,13 +191,29 @@ func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth
 	if account == nil {
 		return nil
 	}
+	var oauthWindows []auth.ClaudeUsageWindow
 	defer func() {
 		// Count failed/metadata-free attempts for freshness as well. This is a
 		// bounded backoff marker, not a quota observation; it prevents a failed
 		// provider probe from being retried on every scheduler sweep.
 		account.MarkClaudeUsageObservation(time.Now())
-		h.recordClaudeUsageProbe(account, probeErr)
+		h.recordClaudeUsageProbe(account, probeErr, oauthWindows)
 	}()
+	// Claude Code exposes a zero-spend OAuth usage endpoint with model-scoped
+	// weekly limits. Prefer it so refreshing an account never consumes a message
+	// and Fable 5/5.1's shared quota is visible. Keep the Messages probe as a
+	// compatibility fallback for older tokens/proxies that do not expose it.
+	// Tests inject the Messages executor to provide a fully isolated upstream;
+	// skip the real OAuth request in that mode instead of reaching Anthropic.
+	if h != nil && h.executeClaudeUsageProbe == nil {
+		if windows, err := h.fetchClaudeOAuthUsage(ctx, account); err == nil && len(windows) > 0 {
+			oauthWindows = windows
+			h.applyClaudeOAuthUsage(account, windows)
+			return nil
+		} else if err != nil {
+			log.Printf("[账号 %d] Claude OAuth usage 端点不可用，回退 Messages 探针: %v", account.DBID, err)
+		}
+	}
 	model, modelErr := selectClaudeUsageProbeModel(account)
 	if modelErr != nil {
 		return modelErr
@@ -217,6 +234,7 @@ func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth
 			fingerprintMode = account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault())
 			securityConfig = h.store.ClaudeSecurityConfig()
 		}
+		// Operator-originated probe: never apply the downstream client policy.
 		resp, err = proxy.ExecuteClaudeMessagesRequest(ctx, account, body, proxyURL, nil, fingerprintMode, securityConfig)
 	}
 	if err != nil {
@@ -275,7 +293,50 @@ func (h *Handler) probeUsageViaClaudeMessages(ctx context.Context, account *auth
 // account-management UI. It never changes account health/cooldown state and a
 // persistence failure is intentionally best-effort: sampling must not block
 // request routing or turn a valid OAuth token into an error account.
-func (h *Handler) recordClaudeUsageProbe(account *auth.Account, probeErr error) {
+func (h *Handler) fetchClaudeOAuthUsage(ctx context.Context, account *auth.Account) ([]auth.ClaudeUsageWindow, error) {
+	if account == nil {
+		return nil, errors.New("Claude usage 缺少账号")
+	}
+	proxyURL := ""
+	if h != nil && h.store != nil {
+		proxyURL = h.store.ResolveProxyForAccount(account)
+	}
+	return auth.NewClaudeAuth(proxyURL).FetchUsage(ctx, account.GetAccessToken())
+}
+
+func (h *Handler) applyClaudeOAuthUsage(account *auth.Account, windows []auth.ClaudeUsageWindow) {
+	if account == nil || len(windows) == 0 {
+		return
+	}
+	observedAt := time.Now()
+	var has7d, has5h bool
+	var pct7d float64
+	account.ApplyUsageObservation(observedAt, func() {
+		for _, window := range windows {
+			switch window.Name {
+			case "5h":
+				account.SetUsageSnapshot5hAt(window.Utilization, window.ResetAt, observedAt)
+				has5h = true
+			case "7d":
+				account.SetUsageSnapshot(window.Utilization, observedAt)
+				pct7d = window.Utilization
+				if !window.ResetAt.IsZero() {
+					account.SetReset7dAt(window.ResetAt)
+				}
+				has7d = true
+			}
+		}
+		if h != nil && h.store != nil {
+			if has7d {
+				h.store.PersistUsageSnapshot(account, pct7d)
+			} else if has5h {
+				h.store.PersistUsageSnapshot5hOnly(account)
+			}
+		}
+	})
+}
+
+func (h *Handler) recordClaudeUsageProbe(account *auth.Account, probeErr error, windows []auth.ClaudeUsageWindow) {
 	if h == nil || h.db == nil || account == nil || account.DBID <= 0 {
 		return
 	}
@@ -285,6 +346,16 @@ func (h *Handler) recordClaudeUsageProbe(account *auth.Account, probeErr error) 
 	}
 	if probeErr != nil {
 		fields[auth.ClaudeUsageProbeErrorCredentialKey] = security.SafeTruncate(security.SanitizeLog(strings.TrimSpace(probeErr.Error())), 300)
+	}
+	// Always rewrite the window snapshot together with the probe timestamp so a
+	// probe that produced no OAuth windows (fallback Messages path, endpoint
+	// unavailable) clears stale model-scoped percentages instead of showing them
+	// under a fresh timestamp. The key's presence also marks the row as probed.
+	fields[auth.ClaudeUsageWindowsCredentialKey] = "[]"
+	if len(windows) > 0 {
+		if raw, err := json.Marshal(windows); err == nil {
+			fields[auth.ClaudeUsageWindowsCredentialKey] = string(raw)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()

@@ -17,6 +17,8 @@ interface StateShellProps {
   errorTitle?: string
   emptyTitle?: string
   emptyDescription?: string
+  // emptyIcon 替换空态图标块里的默认 Inbox(如渠道品牌 logo),外框样式不变。
+  emptyIcon?: ReactNode
 }
 
 function ShellFrame({
@@ -66,6 +68,7 @@ export default function StateShell({
   errorTitle,
   emptyTitle,
   emptyDescription,
+  emptyIcon,
 }: StateShellProps) {
   const { t } = useTranslation()
   const resolvedLoadingTitle = loadingTitle ?? t('common.loading')
@@ -120,7 +123,7 @@ export default function StateShell({
       <ShellFrame variant={variant}>
         <div className="relative">
           <div className="flex size-16 items-center justify-center rounded-2xl bg-[hsl(var(--info-bg))] text-[hsl(var(--info))] ring-1 ring-[hsl(var(--info))]/15">
-            <Inbox className="size-7" />
+            {emptyIcon ?? <Inbox className="size-7" />}
           </div>
           <span className="absolute -right-1 -top-1 size-3 rounded-full bg-primary/70 ring-2 ring-card" />
         </div>

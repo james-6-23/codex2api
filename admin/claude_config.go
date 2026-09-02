@@ -16,6 +16,7 @@ type claudeGlobalConfigDTO struct {
 	FingerprintMode    string `json:"fingerprint_mode"`     // preserve / force(空=preserve)
 	DefaultTimezone    string `json:"default_timezone"`     // 导入 Claude 账号的默认 IANA 时区
 	SessionWindowLimit int64  `json:"session_window_limit"` // 默认并发会话窗口数(0=跟随全局)
+	auth.ClaudeClientPolicy
 	auth.ClaudeSecurityConfig
 }
 
@@ -26,6 +27,7 @@ func (h *Handler) GetClaudeConfig(c *gin.Context) {
 		FingerprintMode:      h.store.ClaudeFingerprintModeDefault(),
 		DefaultTimezone:      h.store.ClaudeDefaultTimezone(),
 		SessionWindowLimit:   h.store.ClaudeSessionWindowLimit(),
+		ClaudeClientPolicy:   h.store.ClaudeClientPolicy(),
 		ClaudeSecurityConfig: security,
 	})
 }
@@ -57,12 +59,18 @@ func (h *Handler) UpdateClaudeConfig(c *gin.Context) {
 	if window > 1000 {
 		window = 1000
 	}
+	clientPolicy, err := auth.NormalizeClaudeClientPolicy(req.ClaudeClientPolicy)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	security := auth.NormalizeClaudeSecurityConfig(req.ClaudeSecurityConfig)
 
 	cfg := auth.ClaudeConfig{
 		FingerprintMode:      mode,
 		DefaultTimezone:      tz,
 		SessionWindowLimit:   window,
+		ClaudeClientPolicy:   clientPolicy,
 		ClaudeSecurityConfig: security,
 	}
 	raw, err := json.Marshal(cfg)
@@ -79,6 +87,7 @@ func (h *Handler) UpdateClaudeConfig(c *gin.Context) {
 	h.store.SetClaudeFingerprintModeDefault(mode)
 	h.store.SetClaudeDefaultTimezone(tz)
 	h.store.SetClaudeSessionWindowLimit(window)
+	h.store.SetClaudeClientPolicy(clientPolicy)
 	h.store.SetClaudeSecurityConfig(security)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -86,6 +95,9 @@ func (h *Handler) UpdateClaudeConfig(c *gin.Context) {
 		"fingerprint_mode":        mode,
 		"default_timezone":        tz,
 		"session_window_limit":    window,
+		"client_platform":         clientPolicy.Platform,
+		"version_policy":          clientPolicy.VersionPolicy,
+		"client_version":          clientPolicy.ClientVersion,
 		"allow_service_tier":      security.AllowServiceTier,
 		"allow_inference_geo":     security.AllowInferenceGeo,
 		"allow_speed":             security.AllowSpeed,

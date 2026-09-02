@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
-import { Zap } from "lucide-react";
+import { X, Zap } from "lucide-react";
 
 import { api } from "../api";
 import type { ProxyRow } from "../api";
@@ -9,6 +9,47 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useToast } from "../hooks/useToast";
 import { getErrorMessage } from "../utils/error";
+import { cn } from "@/lib/utils";
+
+// ProxyUrlInput 带内嵌清空按钮的代理 URL 输入框。各渠道账号弹窗的代理字段共用,
+// 手填与从代理池选择写的是同一个 value,X 一键清空两者。
+export function ProxyUrlInput({
+  value,
+  onChange,
+  placeholder,
+  disabled = false,
+  className,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  className?: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <div className={cn("relative", className)}>
+      <Input
+        className={value ? "w-full pr-8" : "w-full"}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        disabled={disabled}
+      />
+      {value && !disabled ? (
+        <button
+          type="button"
+          onClick={() => onChange("")}
+          title={t("accounts.clearProxy")}
+          aria-label={t("accounts.clearProxy")}
+          className="absolute inset-y-0 right-0 flex w-8 items-center justify-center rounded-r-md text-muted-foreground transition-colors hover:text-foreground"
+        >
+          <X className="size-3.5" />
+        </button>
+      ) : null}
+    </div>
+  );
+}
 
 // ProxyField 是账号表单里统一的代理选择字段(与 Codex 的 renderProxyInput 同构):
 //   第一行:手动填写代理 URL + 「测试」按钮(调 /proxies/test 验证连通与落地地点)
@@ -59,10 +100,10 @@ export function ProxyField({
     <div className="space-y-2">
       <span className="text-xs font-semibold text-muted-foreground">{label ?? t("accounts.proxyUrl")}</span>
       <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
-        <Input
+        <ProxyUrlInput
           className="min-w-0 flex-1"
           value={value}
-          onChange={(e) => onChange(e.target.value)}
+          onChange={onChange}
           placeholder={placeholder}
           disabled={disabled}
         />

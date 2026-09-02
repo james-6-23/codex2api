@@ -347,3 +347,17 @@ func TestClaudeNativeCreditsRequiredWithoutStatusEvidenceIsModelScoped(t *testin
 		t.Fatalf("message-only native billing failure kind = %q, want rate_limited_model", got.failureKind)
 	}
 }
+
+func TestClaudeNativeClientCompatibilityDoesNotCoolAccount(t *testing.T) {
+	store := newSyncTestStore()
+	defer store.Stop()
+	acc := &auth.Account{DBID: 93, UpstreamType: auth.UpstreamClaude, AccessToken: "claude-token", Status: auth.StatusReady}
+	outcome := streamOutcome{
+		logStatusCode:  http.StatusBadRequest,
+		failurePayload: []byte(`{"type":"response.failed","response":{"status_code":400,"error":{"type":"invalid_request_error","message":"Claude Code 2.1.205 does not support this model; version 2.1.251 or newer is required."}}}`),
+	}
+	got := (&Handler{store: store}).applyClaudeNativeFailureCooldown(acc, outcome, &http.Response{StatusCode: http.StatusOK, Header: make(http.Header)}, "claude-fable-5-1")
+	if acc.HasActiveCooldown() || got.failureKind != "client_compatibility" {
+		t.Fatalf("compatibility failure changed account state: cooldown=%v kind=%q", acc.HasActiveCooldown(), got.failureKind)
+	}
+}

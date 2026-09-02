@@ -126,7 +126,14 @@ type Account struct {
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go：Claude Code 出站身份头
 	// 收敛模式（preserve/force；空=跟随全局默认）。
 	ClaudeFingerprintMode string
-	claudeSessionWindow   int64
+	// Claude Code platform/version policy overrides. Empty values inherit the
+	// corresponding global policy from Store.
+	ClaudeClientPlatformOverride string
+	ClaudeVersionPolicyOverride  string
+	ClaudeClientVersionOverride  string
+	// claudeSessionWindow 是 Claude 账号的全局默认并发会话窗口数(装载时从系统设置
+	// 快照,>0 时作为无账号级/分组覆盖时的基础并发回退)。
+	claudeSessionWindow int64
 	// SessionCapacity* limits how many distinct downstream conversations may
 	// remain bound to this official Codex account. It is disabled by default.
 	SessionCapacityEnabled        bool
@@ -3337,6 +3344,7 @@ type Store struct {
 	affinitySpreadEnabled    atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	sessionWindowBalance     atomic.Bool  // 新会话在同优先级/健康层内优先落到低窗口账号
 	passiveInternalModels    atomic.Bool  // 可信派生内部模型仅复用原根会话账号
+	claudeClientPolicy       atomic.Value // ClaudeClientPolicy: 全局 Claude Code 平台/版本策略快照
 	grokAffinityMode         atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
 	grokProbeEnabled         atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
 	grokProbeIntervalMin     atomic.Int64 // 定期探测间隔（分钟，默认 30，下限 grokProbeMinIntervalMinutes）
@@ -5156,6 +5164,12 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	claudeFingerprintMode := NormalizeClaudeFingerprintMode(row.GetCredential(ClaudeFingerprintModeCredentialKey))
 	sessionCapacityMax, _ := row.GetCredentialInt64(SessionCapacityMaxCredentialKey)
 	sessionCapacityIdleTTLSeconds, _ := row.GetCredentialInt64(SessionCapacityIdleTTLSecondsKey)
+	var claudeClientPlatformOverride, claudeVersionPolicyOverride, claudeClientVersionOverride string
+	if strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamClaude) {
+		claudeClientPlatformOverride = strings.ToLower(strings.TrimSpace(row.GetCredential(ClaudeClientPlatformCredentialKey)))
+		claudeVersionPolicyOverride = strings.ToLower(strings.TrimSpace(row.GetCredential(ClaudeVersionPolicyCredentialKey)))
+		claudeClientVersionOverride = strings.TrimSpace(row.GetCredential(ClaudeClientVersionCredentialKey))
+	}
 	isOpenAIResponsesAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamOpenAIResponses) && strings.TrimSpace(baseURL) != "" && strings.TrimSpace(apiKey) != ""
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	isAntigravityAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamAntigravity) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
@@ -5179,6 +5193,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		HealthTier:                    HealthTierWarm,
 		AddedAt:                       row.CreatedAt.UnixNano(),
 		UpstreamType:                  upstreamType,
+		AntigravityProjectID:          strings.TrimSpace(row.GetCredential("project_id")),
 		BaseURL:                       strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:                        strings.TrimSpace(apiKey),
 		Models:                        models,
@@ -5186,10 +5201,24 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		CodexClientMetadataMode:       codexClientMetadataMode,
 		CodexFingerprintMode:          codexFingerprintMode,
 		ClaudeFingerprintMode:         claudeFingerprintMode,
+		ClaudeClientPlatformOverride:  claudeClientPlatformOverride,
+		ClaudeVersionPolicyOverride:   claudeVersionPolicyOverride,
+		ClaudeClientVersionOverride:   claudeClientVersionOverride,
 		claudeSessionWindow:           claudeSessionWindowForRow(upstreamType, s.ClaudeSessionWindowLimit()),
 		SessionCapacityEnabled:        row.GetCredentialBool(SessionCapacityEnabledCredentialKey),
 		SessionCapacityMax:            normalizeSessionCapacityMax(sessionCapacityMax),
 		SessionCapacityIdleTTLSeconds: normalizeSessionCapacityIdleTTLSeconds(sessionCapacityIdleTTLSeconds),
+	}
+	if strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamClaude) {
+		if observedRaw := strings.TrimSpace(row.GetCredential(ClaudeUsageProbeAtCredentialKey)); observedRaw != "" {
+			if observedAt, parseErr := time.Parse(time.RFC3339, observedRaw); parseErr == nil {
+				// This is only a freshness hint; quota validity remains false until
+				// an actual Anthropic response supplies a window header.
+				account.MarkClaudeUsageObservation(observedAt)
+			} else {
+				log.Printf("[账号 %d] 解析 claude_usage_probe_at 失败: %v", row.ID, parseErr)
+			}
+		}
 	}
 	if account.CredentialGeneration <= 0 {
 		account.CredentialGeneration = 1

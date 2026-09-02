@@ -246,3 +246,23 @@ func TestApplyClaudeMessagesHeadersForceCompletesPartialFingerprint(t *testing.T
 		}
 	}
 }
+
+func TestApplyClaudeMessagesHeadersRewritesFixedClaudeCLIVersion(t *testing.T) {
+	req, _ := http.NewRequest("POST", "https://api.anthropic.com/v1/messages", nil)
+	incoming := http.Header{}
+	incoming.Set("User-Agent", "claude-cli/2.1.205 (external, cli)")
+	applyClaudeMessagesHeadersWithVersion(req, "tok", incoming, false, nil, "preserve", "2.1.251")
+	if got := req.Header.Get("User-Agent"); got != "claude-cli/2.1.251 (external, cli)" {
+		t.Fatalf("fixed Claude CLI UA = %q", got)
+	}
+}
+
+func TestIsClaudeClientCompatibilityError(t *testing.T) {
+	body := []byte(`{"error":{"type":"invalid_request_error","message":"Claude Code 2.1.205 does not support this model; version 2.1.251 or newer is required."}}`)
+	if !isClaudeClientCompatibilityError(http.StatusBadRequest, body) {
+		t.Fatal("version-gated Claude 400 should be classified as client compatibility")
+	}
+	if isClaudeClientCompatibilityError(http.StatusBadRequest, []byte(`{"error":{"type":"invalid_request_error","message":"invalid max_tokens"}}`)) {
+		t.Fatal("ordinary invalid request must not be classified as client compatibility")
+	}
+}
