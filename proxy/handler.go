@@ -8077,6 +8077,7 @@ type codexWindowUsage struct {
 	usedPct   float64
 	resetSec  float64
 	windowMin float64
+	resetOK   bool
 	valid     bool
 }
 
@@ -8084,22 +8085,27 @@ func parseCodexWindowUsage(usedStr, windowStr, resetStr string) codexWindowUsage
 	if strings.TrimSpace(usedStr) == "" || strings.TrimSpace(windowStr) == "" {
 		return codexWindowUsage{}
 	}
-	var usedPct, windowMin, resetSec float64
-	if _, err := fmt.Sscanf(usedStr, "%f", &usedPct); err != nil {
+	usedPct, usedOK := parseFiniteUsageHeaderFloat(usedStr)
+	if !usedOK {
 		return codexWindowUsage{}
 	}
-	if _, err := fmt.Sscanf(windowStr, "%f", &windowMin); err != nil || windowMin <= 0 {
+	windowMin, windowOK := parseFiniteUsageHeaderFloat(windowStr)
+	if !windowOK || windowMin <= 0 {
 		return codexWindowUsage{}
 	}
+	var resetSec float64
+	resetOK := false
 	if strings.TrimSpace(resetStr) != "" {
-		if _, err := fmt.Sscanf(resetStr, "%f", &resetSec); err != nil {
-			resetSec = 0
+		if parsed, ok := parseFiniteUsageHeaderFloat(resetStr); ok {
+			resetSec = parsed
+			_, resetOK = usageResetAtFromAfter(time.Unix(1, 0), resetSec, windowMin*60)
 		}
 	}
 	return codexWindowUsage{
 		usedPct:   usedPct,
 		windowMin: windowMin,
 		resetSec:  resetSec,
+		resetOK:   resetOK,
 		valid:     true,
 	}
 }
@@ -8138,11 +8144,8 @@ func classifyCodex429Window(resp *http.Response, now time.Time) (codexRateLimitW
 		}
 	}
 
-	var resetAt time.Time
-	if chosen.resetSec > 0 {
-		resetAt = now.Add(time.Duration(chosen.resetSec) * time.Second)
-	}
-	return codexWindowType(chosen.windowMin), resetAt, !resetAt.IsZero()
+	resetAt, resetOK := usageResetAtFromAfter(now, chosen.resetSec, chosen.windowMin*60)
+	return codexWindowType(chosen.windowMin), resetAt, resetOK
 }
 
 func responseHasCodex5hHeaders(resp *http.Response) bool {
@@ -8701,17 +8704,25 @@ func parseCodexUsageHeaderObservation(resp *http.Response) codexUsageHeaderObser
 func applyCodexUsageHeaderObservation(store *auth.Store, account *auth.Account, observation codexUsageHeaderObservation, observedAt time.Time) codexUsageHeaderParseResult {
 	out := codexUsageHeaderParseResult{}
 	if observation.w5h.valid {
-		resetAt := observedAt.Add(time.Duration(observation.w5h.resetSec) * time.Second)
+		_, resetAt, _ := account.GetUsageSnapshot5h()
+		if observation.w5h.resetOK {
+			if candidate, ok := usageResetAtFromAfter(observedAt, observation.w5h.resetSec, observation.w5h.windowMin*60); ok {
+				resetAt = candidate
+			}
+		}
 		account.SetUsageSnapshot5hAt(observation.w5h.usedPct, resetAt, observedAt)
 	} else if observation.authoritative {
 		out.cleared5h = store.ClearAbsentUsageSnapshot5hAt(account, observedAt)
 	}
 
 	if observation.w7d.valid {
-		resetAt := observedAt.Add(time.Duration(observation.w7d.resetSec) * time.Second)
-		account.SetReset7dAt(resetAt)
-		account.SetWindow7dSeconds(int64(observation.w7d.windowMin * 60))
-		account.SetUsagePercent7d(observation.w7d.usedPct)
+		resetAt := time.Time{}
+		if observation.w7d.resetOK {
+			if candidate, ok := usageResetAtFromAfter(observedAt, observation.w7d.resetSec, observation.w7d.windowMin*60); ok {
+				resetAt = candidate
+			}
+		}
+		account.SetUsageSnapshot7dAt(observation.w7d.usedPct, resetAt, int64(observation.w7d.windowMin*60), observedAt)
 		out.usagePct7d = observation.w7d.usedPct
 		out.hasUsage7d = true
 	}

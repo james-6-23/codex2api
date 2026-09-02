@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -62,13 +63,97 @@ func (db *DB) ensureUsageAccountHourlyRollupsTable(ctx context.Context) error {
 	return err
 }
 
-// ensureUsageAccountBillingWindowRollupsTable creates the quota-window billing
-// snapshots used by the account list's local 5h/7d cost badges. The general
-// usage archive is intentionally hourly, which is too coarse for an upstream
-// quota reset that can happen at an arbitrary second. The compact snapshot uses
-// a minute-stable window identity: reset-after headers are relative to the
-// observation time and otherwise make the derived start drift by milliseconds
-// between requests or after an RFC3339 reload.
+type AccountBillingWindowKind string
+
+const (
+	AccountBillingWindow5h   AccountBillingWindowKind = "5h"
+	AccountBillingWindowLong AccountBillingWindowKind = "long"
+)
+
+type AccountBillingWindow struct {
+	AccountID int64
+	Kind      AccountBillingWindowKind
+	Start     time.Time
+	Duration  time.Duration
+}
+
+type AccountBillingWindowKey struct {
+	AccountID int64
+	Kind      AccountBillingWindowKind
+}
+
+const maxAccountBillingWindowDrift = 24 * time.Hour
+
+const maxLegacyAccountBillingWindowDrift = 5 * time.Minute
+
+// A duration correction can move the derived start substantially while the
+// upstream reset boundary stays the same. Preserve already archived cost when
+// those two independently derived reset instants differ only by clock/header
+// noise.
+const accountBillingWindowResetTolerance = 5 * time.Minute
+
+func accountBillingWindowDriftTolerance(duration time.Duration) time.Duration {
+	if duration <= 0 {
+		return 0
+	}
+	// State stores whole window seconds. Keep the tolerance on the same unit so
+	// the Go resolver and the portable SQLite/PostgreSQL UPSERT predicate agree.
+	tolerance := time.Duration(int64(duration/time.Second)/4) * time.Second
+	if tolerance > maxAccountBillingWindowDrift {
+		return maxAccountBillingWindowDrift
+	}
+	return tolerance
+}
+
+func legacyAccountBillingWindowDriftTolerance(duration time.Duration) time.Duration {
+	tolerance := accountBillingWindowDriftTolerance(duration)
+	if tolerance > maxLegacyAccountBillingWindowDrift {
+		return maxLegacyAccountBillingWindowDrift
+	}
+	return tolerance
+}
+
+func normalizeAccountBillingWindows(windows []AccountBillingWindow) ([]AccountBillingWindow, error) {
+	byKey := make(map[AccountBillingWindowKey]AccountBillingWindow, len(windows))
+	for _, window := range windows {
+		if window.AccountID <= 0 || window.Start.IsZero() || window.Duration < time.Second {
+			continue
+		}
+		switch window.Kind {
+		case AccountBillingWindow5h, AccountBillingWindowLong:
+		default:
+			return nil, fmt.Errorf("unsupported account billing window kind %q", window.Kind)
+		}
+		window.Start = window.Start.UTC()
+		window.Duration = time.Duration(int64(window.Duration/time.Second)) * time.Second
+		key := AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}
+		if previous, ok := byKey[key]; ok {
+			if previous.Start.Equal(window.Start) && previous.Duration == window.Duration {
+				continue
+			}
+			return nil, fmt.Errorf("conflicting account billing windows for account %d kind %s", window.AccountID, window.Kind)
+		}
+		byKey[key] = window
+	}
+
+	normalized := make([]AccountBillingWindow, 0, len(byKey))
+	for _, window := range byKey {
+		normalized = append(normalized, window)
+	}
+	sort.Slice(normalized, func(i, j int) bool {
+		if normalized[i].AccountID != normalized[j].AccountID {
+			return normalized[i].AccountID < normalized[j].AccountID
+		}
+		return normalized[i].Kind < normalized[j].Kind
+	})
+	return normalized, nil
+}
+
+// ensureUsageAccountBillingWindowRollupsTable keeps the original untyped table
+// readable for upgrades, while all new clears write to the typed v2 state table.
+// One v2 row is the stable anchor and archived cost for an account/window kind.
+// A separate kind is required because a 5h and long window can legitimately
+// have the same derived start while representing different billing ranges.
 func (db *DB) ensureUsageAccountBillingWindowRollupsTable(ctx context.Context) error {
 	if db == nil || db.conn == nil {
 		return fmt.Errorf("database is not initialized")
@@ -85,7 +170,18 @@ func (db *DB) ensureUsageAccountBillingWindowRollupsTable(ctx context.Context) e
 	if _, err = db.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_usage_account_billing_window_start ON usage_account_billing_window_rollups(window_start)`); err != nil {
 		return err
 	}
-	return db.migrateUsageAccountBillingWindowRollupKeys(ctx)
+	if err = db.migrateUsageAccountBillingWindowRollupKeys(ctx); err != nil {
+		return err
+	}
+	_, err = db.conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS usage_account_billing_window_states (
+		account_id BIGINT NOT NULL,
+		window_kind VARCHAR(16) NOT NULL,
+		window_seconds BIGINT NOT NULL,
+		anchor_start BIGINT NOT NULL,
+		account_billed DOUBLE PRECISION NOT NULL DEFAULT 0,
+		PRIMARY KEY (account_id, window_kind)
+	)`)
+	return err
 }
 
 const legacyBillingWindowNanosecondThreshold int64 = 1_000_000_000_000
@@ -125,39 +221,99 @@ func (db *DB) migrateUsageAccountBillingWindowRollupKeys(ctx context.Context) er
 	return tx.Commit()
 }
 
-type accountBillingWindow struct {
-	AccountID int64
-	Since     time.Time
+type accountBillingWindowState struct {
+	WindowSeconds int64
+	AnchorStart   int64
+	AccountBilled float64
 }
 
-func collectAccountBillingWindows(windowSets []map[int64]time.Time) []accountBillingWindow {
-	seen := make(map[string]struct{})
-	windows := make([]accountBillingWindow, 0)
-	for _, windowSet := range windowSets {
-		for accountID, since := range windowSet {
-			if accountID <= 0 || since.IsZero() {
-				continue
-			}
-			since = since.UTC()
-			key := fmt.Sprintf("%d:%d", accountID, accountBillingWindowRollupKey(since))
-			if _, ok := seen[key]; ok {
-				continue
-			}
-			seen[key] = struct{}{}
-			windows = append(windows, accountBillingWindow{AccountID: accountID, Since: since})
-		}
-	}
-	return windows
+type accountBillingWindowStateQueryer interface {
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
 }
 
-// archiveAccountBillingWindowsWithExec snapshots only the exact active quota
-// windows supplied by the runtime account store. Repeated clears add just the
-// newly-created detail rows to the same window. Old window rows are retained
-// but become unreachable as soon as the upstream reset advances the start.
-func (db *DB) archiveAccountBillingWindowsWithExec(ctx context.Context, tx *sql.Tx, windowSets []map[int64]time.Time) error {
-	windows := collectAccountBillingWindows(windowSets)
+type accountBillingWindowStateExecer interface {
+	ExecContext(context.Context, string, ...interface{}) (sql.Result, error)
+}
+
+const keepAccountBillingWindowStateSQL = `usage_account_billing_window_states.window_seconds = excluded.window_seconds
+	AND excluded.anchor_start <= usage_account_billing_window_states.anchor_start +
+		(CASE
+			WHEN excluded.window_seconds / 4 > 86400 THEN 86400
+			ELSE excluded.window_seconds / 4
+		END) * 1000000000`
+
+func sameAccountBillingWindowResetSQL() string {
+	return fmt.Sprintf(`
+		usage_account_billing_window_states.window_seconds > 0
+		AND excluded.window_seconds > 0
+		AND ABS(
+			(excluded.anchor_start - usage_account_billing_window_states.anchor_start) +
+			(excluded.window_seconds - usage_account_billing_window_states.window_seconds) * 1000000000
+		) <= %d
+	`, accountBillingWindowResetTolerance.Nanoseconds())
+}
+
+func keepAccountBillingWindowStateUpdateSQL() string {
+	// Once a reset generation has been expanded from a provisional weekly
+	// duration to its authoritative monthly duration, a stale process must not
+	// shrink it again and delete still-live early-month rows on the next clear.
+	return fmt.Sprintf(`(%s) OR ((%s) AND
+		excluded.window_seconds <= usage_account_billing_window_states.window_seconds)`,
+		keepAccountBillingWindowStateSQL, sameAccountBillingWindowResetSQL())
+}
+
+func preserveAccountBillingWindowCostSQL() string {
+	return fmt.Sprintf(`(%s) OR (%s)`, keepAccountBillingWindowStateSQL, sameAccountBillingWindowResetSQL())
+}
+
+// ensureAccountBillingWindowStates atomically establishes the first observed
+// anchor even before any log clear. Later observations inside the bounded drift
+// reuse it; a different reset generation replaces just that kind. A duration
+// correction that still describes the same reset boundary preserves its cost.
+func (db *DB) ensureAccountBillingWindowStates(ctx context.Context, execer accountBillingWindowStateExecer, windows []AccountBillingWindow) error {
 	if len(windows) == 0 {
 		return nil
+	}
+	const maxWindowsPerBatch = 500
+	for start := 0; start < len(windows); start += maxWindowsPerBatch {
+		end := start + maxWindowsPerBatch
+		if end > len(windows) {
+			end = len(windows)
+		}
+		values := make([]string, 0, end-start)
+		args := make([]interface{}, 0, (end-start)*4)
+		argIdx := 1
+		for _, window := range windows[start:end] {
+			if db.isSQLite() {
+				values = append(values, fmt.Sprintf("($%d, $%d, $%d, $%d, 0)", argIdx, argIdx+1, argIdx+2, argIdx+3))
+			} else {
+				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::VARCHAR, $%d::BIGINT, $%d::BIGINT, 0)", argIdx, argIdx+1, argIdx+2, argIdx+3))
+			}
+			args = append(args, window.AccountID, string(window.Kind), int64(window.Duration/time.Second), window.Start.UnixNano())
+			argIdx += 4
+		}
+		query := fmt.Sprintf(`INSERT INTO usage_account_billing_window_states(
+				account_id, window_kind, window_seconds, anchor_start, account_billed)
+			VALUES %s
+			ON CONFLICT (account_id, window_kind) DO UPDATE SET
+				window_seconds = excluded.window_seconds,
+				anchor_start = excluded.anchor_start,
+				account_billed = CASE
+					WHEN %s THEN usage_account_billing_window_states.account_billed
+					ELSE 0
+				END
+			WHERE NOT (%s)`, strings.Join(values, ","), preserveAccountBillingWindowCostSQL(), keepAccountBillingWindowStateUpdateSQL())
+		if _, err := execer.ExecContext(ctx, query, args...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (db *DB) loadAccountBillingWindowStates(ctx context.Context, queryer accountBillingWindowStateQueryer, windows []AccountBillingWindow) (map[AccountBillingWindowKey]accountBillingWindowState, error) {
+	states := make(map[AccountBillingWindowKey]accountBillingWindowState)
+	if len(windows) == 0 {
+		return states, nil
 	}
 
 	const maxWindowsPerBatch = 500
@@ -167,29 +323,147 @@ func (db *DB) archiveAccountBillingWindowsWithExec(ctx context.Context, tx *sql.
 			end = len(windows)
 		}
 		values := make([]string, 0, end-start)
-		args := make([]interface{}, 0, (end-start)*3)
+		args := make([]interface{}, 0, (end-start)*2)
 		argIdx := 1
 		for _, window := range windows[start:end] {
 			if db.isSQLite() {
-				values = append(values, fmt.Sprintf("($%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2))
+				values = append(values, fmt.Sprintf("($%d, $%d)", argIdx, argIdx+1))
 			} else {
-				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::BIGINT, $%d::TIMESTAMPTZ)", argIdx, argIdx+1, argIdx+2))
+				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::VARCHAR)", argIdx, argIdx+1))
 			}
-			args = append(args, window.AccountID, accountBillingWindowRollupKey(window.Since), db.timeArg(window.Since))
-			argIdx += 3
+			args = append(args, window.AccountID, string(window.Kind))
+			argIdx += 2
 		}
-		query := fmt.Sprintf(`WITH billing_windows(account_id, window_start, since_at) AS (VALUES %s)
-			INSERT INTO usage_account_billing_window_rollups(account_id, window_start, account_billed)
-			SELECT billing_windows.account_id, billing_windows.window_start,
+		query := fmt.Sprintf(`WITH requested(account_id, window_kind) AS (VALUES %s)
+			SELECT states.account_id, states.window_kind, states.window_seconds,
+				states.anchor_start, states.account_billed
+			FROM usage_account_billing_window_states states
+			JOIN requested ON requested.account_id = states.account_id
+				AND requested.window_kind = states.window_kind`, strings.Join(values, ","))
+		rows, err := queryer.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var accountID int64
+			var kind string
+			var state accountBillingWindowState
+			if err := rows.Scan(&accountID, &kind, &state.WindowSeconds, &state.AnchorStart, &state.AccountBilled); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			states[AccountBillingWindowKey{AccountID: accountID, Kind: AccountBillingWindowKind(kind)}] = state
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return states, nil
+}
+
+type resolvedAccountBillingWindow struct {
+	AccountBillingWindow
+	AnchorStart   time.Time
+	AccountBilled float64
+	Matched       bool
+}
+
+func resolveAccountBillingWindows(windows []AccountBillingWindow, states map[AccountBillingWindowKey]accountBillingWindowState) []resolvedAccountBillingWindow {
+	resolved := make([]resolvedAccountBillingWindow, 0, len(windows))
+	for _, window := range windows {
+		item := resolvedAccountBillingWindow{AccountBillingWindow: window, AnchorStart: window.Start}
+		key := AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}
+		state, ok := states[key]
+		if ok && state.WindowSeconds > 0 {
+			anchor := time.Unix(0, state.AnchorStart).UTC()
+			stateDuration := time.Duration(state.WindowSeconds) * time.Second
+			// The anchor is monotonic for one duration. A far-backward value can
+			// come from an old process or stale runtime snapshot and must not
+			// rewind a newer billing generation. A far-forward value is a rollover.
+			sameDuration := state.WindowSeconds == int64(window.Duration/time.Second) &&
+				window.Start.Sub(anchor) <= accountBillingWindowDriftTolerance(window.Duration)
+			resetDelta := window.Start.Add(window.Duration).Sub(anchor.Add(stateDuration))
+			sameResetWithoutShrink := stateDuration >= window.Duration &&
+				resetDelta >= -accountBillingWindowResetTolerance && resetDelta <= accountBillingWindowResetTolerance
+			if sameDuration || sameResetWithoutShrink {
+				item.Start = anchor
+				item.Duration = stateDuration
+				item.AnchorStart = anchor
+				item.AccountBilled = state.AccountBilled
+				item.Matched = true
+			}
+		}
+		resolved = append(resolved, item)
+	}
+	return resolved
+}
+
+// archiveAccountBillingWindowsWithExec archives each explicitly typed active
+// quota window. A matching v2 state keeps its first anchor, so relative reset
+// headers may drift across minutes or hours without changing the live filter or
+// archive identity. A different reset generation replaces only that kind;
+// same-boundary duration corrections keep the already archived cost.
+func (db *DB) archiveAccountBillingWindowsWithExec(ctx context.Context, tx *sql.Tx, input []AccountBillingWindow) error {
+	windows, err := normalizeAccountBillingWindows(input)
+	if err != nil {
+		return err
+	}
+	if len(windows) == 0 {
+		return nil
+	}
+	// Establish or advance every state while this clear transaction owns the
+	// row lock. A concurrent typed read cannot move the state between resolve
+	// and the cost UPSERT and make an older anchor win again.
+	if err := db.ensureAccountBillingWindowStates(ctx, tx, windows); err != nil {
+		return err
+	}
+	states, err := db.loadAccountBillingWindowStates(ctx, tx, windows)
+	if err != nil {
+		return err
+	}
+	resolved := resolveAccountBillingWindows(windows, states)
+
+	const maxWindowsPerBatch = 500
+	for start := 0; start < len(resolved); start += maxWindowsPerBatch {
+		end := start + maxWindowsPerBatch
+		if end > len(resolved) {
+			end = len(resolved)
+		}
+		values := make([]string, 0, end-start)
+		args := make([]interface{}, 0, (end-start)*5)
+		argIdx := 1
+		for _, window := range resolved[start:end] {
+			if db.isSQLite() {
+				values = append(values, fmt.Sprintf("($%d, $%d, $%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4))
+			} else {
+				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::VARCHAR, $%d::BIGINT, $%d::BIGINT, $%d::TIMESTAMPTZ)", argIdx, argIdx+1, argIdx+2, argIdx+3, argIdx+4))
+			}
+			args = append(args, window.AccountID, string(window.Kind), int64(window.Duration/time.Second), window.AnchorStart.UnixNano(), db.timeArg(window.AnchorStart))
+			argIdx += 5
+		}
+		query := fmt.Sprintf(`WITH billing_windows(account_id, window_kind, window_seconds, anchor_start, since_at) AS (VALUES %s)
+			INSERT INTO usage_account_billing_window_states(account_id, window_kind, window_seconds, anchor_start, account_billed)
+			SELECT billing_windows.account_id, billing_windows.window_kind,
+				billing_windows.window_seconds, billing_windows.anchor_start,
 				COALESCE(SUM(usage_logs.account_billed), 0)
 			FROM billing_windows
-			JOIN usage_logs ON usage_logs.account_id = billing_windows.account_id
+			LEFT JOIN usage_logs ON usage_logs.account_id = billing_windows.account_id
 				AND usage_logs.created_at >= billing_windows.since_at
 				AND usage_logs.status_code <> 499
 				AND TRIM(COALESCE(usage_logs.internal_reason, '')) = ''
-			GROUP BY billing_windows.account_id, billing_windows.window_start
-			ON CONFLICT (account_id, window_start) DO UPDATE SET
-				account_billed = usage_account_billing_window_rollups.account_billed + excluded.account_billed`, strings.Join(values, ","))
+			GROUP BY billing_windows.account_id, billing_windows.window_kind,
+				billing_windows.window_seconds, billing_windows.anchor_start
+			ON CONFLICT (account_id, window_kind) DO UPDATE SET
+				window_seconds = excluded.window_seconds,
+				anchor_start = excluded.anchor_start,
+				account_billed = CASE
+					WHEN usage_account_billing_window_states.window_seconds = excluded.window_seconds
+						AND usage_account_billing_window_states.anchor_start = excluded.anchor_start
+					THEN usage_account_billing_window_states.account_billed + excluded.account_billed
+					ELSE excluded.account_billed
+				END`, strings.Join(values, ","))
 		if _, err := tx.ExecContext(ctx, query, args...); err != nil {
 			return err
 		}

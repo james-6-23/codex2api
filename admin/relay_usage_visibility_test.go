@@ -50,8 +50,8 @@ func TestRelayAccountHidesHistoricalCodexQuotaState(t *testing.T) {
 	if item.UsagePercent7dOK || item.UsagePercent5hOK || item.Window7dSeconds != 0 || !item.Reset7dAt.IsZero() {
 		t.Fatalf("relay list exposed Codex quota state: %+v", item)
 	}
-	shortWindows, longWindows := handler.accountBillingWindows([]int64{accountID})
-	if len(shortWindows) != 0 || len(longWindows) != 0 {
-		t.Fatalf("relay account entered Codex billing windows: 5h=%v 7d=%v", shortWindows, longWindows)
+	windows := handler.accountBillingWindows([]int64{accountID})
+	if len(windows) != 0 {
+		t.Fatalf("relay account entered Codex billing windows: %v", windows)
 	}
 }

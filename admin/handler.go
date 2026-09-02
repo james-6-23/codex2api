@@ -1823,42 +1823,21 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	}
 
 	if view != "page" {
-		billing5hWindows := make(map[int64]time.Time)
-		billing7dWindows := make(map[int64]time.Time)
+		accountIDs := make([]int64, 0, len(accounts))
 		for i := range accounts {
-			acc, ok := accountMap[accounts[i].ID]
-			if !ok || acc.IsRelayStyle() {
-				continue
-			}
-			if t := acc.GetReset5hAt(); !t.IsZero() {
-				billing5hWindows[accounts[i].ID] = t.Add(-5 * time.Hour)
-			}
-			if t := acc.GetReset7dAt(); !t.IsZero() {
-				// 长窗口起点 = reset - 真实周期。free/team 是月窗(约 30 天),
-				// 写死减 7 天会把起点算到未来,成本恒为 0 (issue #324)。
-				windowDur := 7 * 24 * time.Hour
-				if sec := acc.GetWindow7dSeconds(); sec > 0 {
-					windowDur = time.Duration(sec) * time.Second
-				}
-				billing7dWindows[accounts[i].ID] = t.Add(-windowDur)
-			}
+			accountIDs = append(accountIDs, accounts[i].ID)
 		}
 
-		billed5h, billingErr := h.db.GetAccountsBilledSince(ctx, billing5hWindows)
+		billedWindows, billingErr := h.db.GetAccountsBilledWindows(ctx, h.accountBillingWindows(accountIDs))
 		if billingErr != nil {
-			log.Printf("批量获取账号 5h 成本失败: %v", billingErr)
-			billed5h = nil
-		}
-		billed7d, billingErr := h.db.GetAccountsBilledSince(ctx, billing7dWindows)
-		if billingErr != nil {
-			log.Printf("批量获取账号 7d 成本失败: %v", billingErr)
-			billed7d = nil
+			log.Printf("批量获取账号额度窗口成本失败: %v", billingErr)
+			billedWindows = nil
 		}
 		for i := range accounts {
-			if billed, ok := billed5h[accounts[i].ID]; ok {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: accounts[i].ID, Kind: database.AccountBillingWindow5h}]; ok {
 				accounts[i].Billed5h = &billed
 			}
-			if billed, ok := billed7d[accounts[i].ID]; ok {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: accounts[i].ID, Kind: database.AccountBillingWindowLong}]; ok {
 				accounts[i].Billed7d = &billed
 			}
 		}
@@ -1916,22 +1895,15 @@ func (h *Handler) GetAccount(c *gin.Context) {
 	runtimeAccount := h.store.FindByID(id)
 	resp := h.buildAccountResponse(row, runtimeAccount, requestCounts[id], usage5h[id], usage7d[id], true)
 	if runtimeAccount != nil && !runtimeAccount.IsRelayStyle() {
-		if resetAt := runtimeAccount.GetReset5hAt(); !resetAt.IsZero() {
-			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-5*time.Hour)); billedErr == nil {
+		billedWindows, billedErr := h.db.GetAccountsBilledWindows(ctx, h.accountBillingWindows([]int64{id}))
+		if billedErr != nil {
+			log.Printf("获取账号 %d 额度窗口成本失败: %v", id, billedErr)
+		} else {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: id, Kind: database.AccountBillingWindow5h}]; ok {
 				resp.Billed5h = &billed
-			} else {
-				log.Printf("获取账号 %d 5h 成本失败: %v", id, billedErr)
 			}
-		}
-		if resetAt := runtimeAccount.GetReset7dAt(); !resetAt.IsZero() {
-			windowDuration := 7 * 24 * time.Hour
-			if seconds := runtimeAccount.GetWindow7dSeconds(); seconds > 0 {
-				windowDuration = time.Duration(seconds) * time.Second
-			}
-			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-windowDuration)); billedErr == nil {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: id, Kind: database.AccountBillingWindowLong}]; ok {
 				resp.Billed7d = &billed
-			} else {
-				log.Printf("获取账号 %d 长窗口成本失败: %v", id, billedErr)
 			}
 		}
 	}
@@ -8206,8 +8178,8 @@ func (h *Handler) ClearUsageLogs(c *gin.Context) {
 			}
 		}
 	}
-	billing5hWindows, billing7dWindows := h.accountBillingWindows(accountIDs)
-	if err := h.db.ClearUsageLogs(ctx, billing5hWindows, billing7dWindows); err != nil {
+	billingWindows := h.accountBillingWindows(accountIDs)
+	if err := h.db.ClearUsageLogs(ctx, billingWindows...); err != nil {
 		writeInternalError(c, err)
 		return
 	}

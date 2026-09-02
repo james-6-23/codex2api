@@ -5006,6 +5006,73 @@ func TestSyncCodexUsageState_PartialUsedPercentHeaderDoesNotClear5h(t *testing.T
 	}
 }
 
+func TestSyncCodexUsageState_InvalidOrMissingResetPreservesExistingWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		resetValue string
+		setReset   bool
+	}{
+		{name: "missing"},
+		{name: "malformed", resetValue: "not-a-number", setReset: true},
+		{name: "zero", resetValue: "0", setReset: true},
+		{name: "negative", resetValue: "-1", setReset: true},
+		{name: "absolute timestamp in reset-after header", resetValue: "4102444800", setReset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+			account := &auth.Account{DBID: 301, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+			observedBefore := time.Now().Add(-time.Minute)
+			reset5h := time.Now().Add(3 * time.Hour).Truncate(time.Second)
+			reset7d := time.Now().Add(5 * 24 * time.Hour).Truncate(time.Second)
+			account.SetUsageSnapshot5hAt(10, reset5h, observedBefore)
+			account.SetReset7dAt(reset7d)
+			account.SetWindow7dSeconds(604800)
+
+			resp := &http.Response{Header: make(http.Header)}
+			resp.Header.Set("x-codex-primary-used-percent", "25")
+			resp.Header.Set("x-codex-primary-window-minutes", "300")
+			resp.Header.Set("x-codex-secondary-used-percent", "40")
+			resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+			if tc.setReset {
+				resp.Header.Set("x-codex-primary-reset-after-seconds", tc.resetValue)
+				resp.Header.Set("x-codex-secondary-reset-after-seconds", tc.resetValue)
+			}
+
+			result := SyncCodexUsageState(store, account, resp)
+			if !result.HasUsage5h || result.UsagePct5h != 25 || !result.HasUsage7d || result.UsagePct7d != 40 {
+				t.Fatalf("usage result = %+v, want updated percentages", result)
+			}
+			if pct, gotReset, ok := account.GetUsageSnapshot5h(); !ok || pct != 25 || !gotReset.Equal(reset5h) {
+				t.Fatalf("5h snapshot = (%v, %v, %v), want 25%% with preserved reset %v", pct, gotReset, ok, reset5h)
+			}
+			if got := account.GetReset7dAt(); !got.Equal(reset7d) {
+				t.Fatalf("7d reset = %v, want preserved %v", got, reset7d)
+			}
+		})
+	}
+}
+
+func TestSyncCodexUsageState_MissingResetDoesNotInventWindowBoundary(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 302, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "25")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-secondary-used-percent", "40")
+	resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+
+	result := SyncCodexUsageState(store, account, resp)
+	if !result.HasUsage5h || !result.HasUsage7d {
+		t.Fatalf("usage result = %+v, want both percentages applied", result)
+	}
+	if _, resetAt, ok := account.GetUsageSnapshot5h(); !ok || !resetAt.IsZero() {
+		t.Fatalf("5h reset = %v (valid=%v), want zero without a reset signal", resetAt, ok)
+	}
+	if resetAt := account.GetReset7dAt(); !resetAt.IsZero() {
+		t.Fatalf("7d reset = %v, want zero without a reset signal", resetAt)
+	}
+}
+
 func TestParseCodexUsageHeaders_7dOnlyClearsMemoryWithoutStore(t *testing.T) {
 	account := &auth.Account{DBID: 202, PlanType: "plus"}
 	account.SetUsageSnapshot5h(63, time.Now().Add(2*time.Hour))

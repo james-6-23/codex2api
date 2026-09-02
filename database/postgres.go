@@ -6190,10 +6190,9 @@ func (db *DB) ListUsageLogsByFilter(ctx context.Context, f UsageLogFilter) ([]*U
 	return logs, rows.Err()
 }
 
-// ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）。billingWindowSets
-// 是可选的账号精确额度窗口；管理端传入 5h/7d 窗口后，本地成本胶囊可在
-// 清理后保留，并在上游窗口起点变化时自然从新窗口重新计算。
-func (db *DB) ClearUsageLogs(ctx context.Context, billingWindowSets ...map[int64]time.Time) error {
+// ClearUsageLogs 清空所有使用日志（先快照累计值到基线表）。billingWindows
+// 是可选的显式 5h/long 窗口；清理与查询共享同一个稳定窗口 anchor。
+func (db *DB) ClearUsageLogs(ctx context.Context, billingWindows ...AccountBillingWindow) error {
 	// 先校验增量汇总是否与明细日志同步。这也兼容测试、手工 SQL 等绕过正常写入队列的场景。
 	if _, err := db.loadUsageStatsRollup(ctx, ""); err != nil {
 		return fmt.Errorf("读取清理前完整累计失败: %w", err)
@@ -6228,7 +6227,7 @@ func (db *DB) ClearUsageLogs(ctx context.Context, billingWindowSets ...map[int64
 	if err := db.archiveUsageLogsWithExec(ctx, tx); err != nil {
 		return fmt.Errorf("归档账号用量统计失败: %w", err)
 	}
-	if err := db.archiveAccountBillingWindowsWithExec(ctx, tx, billingWindowSets); err != nil {
+	if err := db.archiveAccountBillingWindowsWithExec(ctx, tx, billingWindows); err != nil {
 		return fmt.Errorf("归档账号额度窗口成本失败: %w", err)
 	}
 	if db.isSQLite() {
@@ -6442,7 +6441,264 @@ func (db *DB) GetAccountUsageWindows(ctx context.Context, shortSince, longSince 
 	return shortWindow, longWindow, nil
 }
 
-// GetAccountBilledSince 返回指定时间戳以来 account_billed 的总和
+// GetAccountBilledWindow returns one explicitly typed quota-window cost. Typed
+// callers are required for archived data because the legacy table cannot
+// otherwise distinguish a 5h window from a long window with the same start.
+func (db *DB) GetAccountBilledWindow(ctx context.Context, window AccountBillingWindow) (float64, error) {
+	result, err := db.GetAccountsBilledWindows(ctx, []AccountBillingWindow{window})
+	if err != nil {
+		return 0, err
+	}
+	return result[AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}], nil
+}
+
+func accountBillingWindowStatesEqual(left, right map[AccountBillingWindowKey]accountBillingWindowState) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, leftState := range left {
+		rightState, ok := right[key]
+		if !ok || leftState != rightState {
+			return false
+		}
+	}
+	return true
+}
+
+func (db *DB) getLiveAccountBillingWindowCosts(ctx context.Context, windows []resolvedAccountBillingWindow, result map[AccountBillingWindowKey]float64) error {
+	const maxWindowsPerBatch = 500
+	for start := 0; start < len(windows); start += maxWindowsPerBatch {
+		end := start + maxWindowsPerBatch
+		if end > len(windows) {
+			end = len(windows)
+		}
+		values := make([]string, 0, end-start)
+		args := make([]interface{}, 0, (end-start)*3)
+		argIdx := 1
+		for _, window := range windows[start:end] {
+			if db.isSQLite() {
+				values = append(values, fmt.Sprintf("($%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2))
+			} else {
+				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::VARCHAR, $%d::TIMESTAMPTZ)", argIdx, argIdx+1, argIdx+2))
+			}
+			args = append(args, window.AccountID, string(window.Kind), db.timeArg(window.AnchorStart))
+			argIdx += 3
+		}
+		query := fmt.Sprintf(`WITH billing_windows(account_id, window_kind, since_at) AS (VALUES %s)
+			SELECT billing_windows.account_id, billing_windows.window_kind,
+				COALESCE(SUM(usage_logs.account_billed), 0)
+			FROM billing_windows
+			LEFT JOIN usage_logs ON usage_logs.account_id = billing_windows.account_id
+				AND usage_logs.created_at >= billing_windows.since_at
+				AND usage_logs.status_code <> 499
+				AND TRIM(COALESCE(usage_logs.internal_reason, '')) = ''
+			GROUP BY billing_windows.account_id, billing_windows.window_kind`, strings.Join(values, ","))
+		rows, err := db.conn.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var accountID int64
+			var kind string
+			var billed float64
+			if err := rows.Scan(&accountID, &kind, &billed); err != nil {
+				rows.Close()
+				return err
+			}
+			key := AccountBillingWindowKey{AccountID: accountID, Kind: AccountBillingWindowKind(kind)}
+			result[key] += billed
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		rows.Close()
+	}
+	return nil
+}
+
+type legacyAccountBillingWindowRollup struct {
+	AccountID     int64
+	WindowStart   int64
+	AccountBilled float64
+}
+
+func (db *DB) loadLegacyAccountBillingWindowRollups(ctx context.Context, windows []resolvedAccountBillingWindow) ([]legacyAccountBillingWindowRollup, error) {
+	if len(windows) == 0 {
+		return nil, nil
+	}
+	rollups := make([]legacyAccountBillingWindowRollup, 0)
+	seen := make(map[[2]int64]struct{})
+	const maxWindowsPerBatch = 500
+	for start := 0; start < len(windows); start += maxWindowsPerBatch {
+		end := start + maxWindowsPerBatch
+		if end > len(windows) {
+			end = len(windows)
+		}
+		values := make([]string, 0, end-start)
+		args := make([]interface{}, 0, (end-start)*3)
+		argIdx := 1
+		for _, window := range windows[start:end] {
+			anchorSeconds := window.AnchorStart.Unix()
+			toleranceSeconds := int64(legacyAccountBillingWindowDriftTolerance(window.Duration) / time.Second)
+			if db.isSQLite() {
+				values = append(values, fmt.Sprintf("($%d, $%d, $%d)", argIdx, argIdx+1, argIdx+2))
+			} else {
+				values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::BIGINT, $%d::BIGINT)", argIdx, argIdx+1, argIdx+2))
+			}
+			args = append(args, window.AccountID, anchorSeconds-toleranceSeconds, anchorSeconds+toleranceSeconds)
+			argIdx += 3
+		}
+		query := fmt.Sprintf(`WITH billing_windows(account_id, min_start, max_start) AS (VALUES %s)
+			SELECT DISTINCT archived.account_id, archived.window_start, archived.account_billed
+			FROM usage_account_billing_window_rollups archived
+			JOIN billing_windows ON billing_windows.account_id = archived.account_id
+				AND archived.window_start >= billing_windows.min_start
+				AND archived.window_start <= billing_windows.max_start`, strings.Join(values, ","))
+		rows, err := db.conn.QueryContext(ctx, query, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var rollup legacyAccountBillingWindowRollup
+			if err := rows.Scan(&rollup.AccountID, &rollup.WindowStart, &rollup.AccountBilled); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			key := [2]int64{rollup.AccountID, rollup.WindowStart}
+			if _, ok := seen[key]; !ok {
+				seen[key] = struct{}{}
+				rollups = append(rollups, rollup)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+	return rollups, nil
+}
+
+// addLegacyAccountBillingWindowCosts gives every untyped legacy row at most one
+// owner. The closest absolute start wins; an exact ambiguity is skipped
+// because duplicating one row into both 5h and long totals would corrupt both.
+func addLegacyAccountBillingWindowCosts(windows []resolvedAccountBillingWindow, rollups []legacyAccountBillingWindowRollup, result map[AccountBillingWindowKey]float64) {
+	byAccount := make(map[int64][]resolvedAccountBillingWindow)
+	for _, window := range windows {
+		byAccount[window.AccountID] = append(byAccount[window.AccountID], window)
+	}
+	for _, rollup := range rollups {
+		candidates := byAccount[rollup.AccountID]
+		best := -1
+		bestDistance := math.MaxFloat64
+		ambiguous := false
+		for index, window := range candidates {
+			deltaSeconds := math.Abs(float64(rollup.WindowStart - window.AnchorStart.Unix()))
+			if deltaSeconds > legacyAccountBillingWindowDriftTolerance(window.Duration).Seconds() {
+				continue
+			}
+			switch {
+			case deltaSeconds < bestDistance-1e-12:
+				best = index
+				bestDistance = deltaSeconds
+				ambiguous = false
+			case math.Abs(deltaSeconds-bestDistance) <= 1e-12:
+				ambiguous = true
+			}
+		}
+		if best < 0 || ambiguous {
+			continue
+		}
+		window := candidates[best]
+		result[AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}] += rollup.AccountBilled
+	}
+}
+
+// GetAccountsBilledWindows returns stable archived + live costs for explicitly
+// typed windows. State is sampled around the live query so a concurrent log
+// clear cannot make the response omit or double-count the just-archived batch.
+func (db *DB) GetAccountsBilledWindows(ctx context.Context, input []AccountBillingWindow) (map[AccountBillingWindowKey]float64, error) {
+	windows, err := normalizeAccountBillingWindows(input)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[AccountBillingWindowKey]float64, len(windows))
+	for _, window := range windows {
+		result[AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}] = 0
+	}
+	if len(windows) == 0 {
+		return result, nil
+	}
+
+	// Keep the common page-refresh path read-only. Only missing states, duration
+	// changes, and forward movement beyond the drift allowance need the atomic
+	// transition UPSERT; same-window and stale-backward observations do not.
+	before, err := db.loadAccountBillingWindowStates(ctx, db.conn, windows)
+	if err != nil {
+		return nil, err
+	}
+	transitions := make([]AccountBillingWindow, 0)
+	for _, window := range windows {
+		key := AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}
+		state, ok := before[key]
+		if !ok || state.WindowSeconds != int64(window.Duration/time.Second) {
+			transitions = append(transitions, window)
+			continue
+		}
+		anchor := time.Unix(0, state.AnchorStart).UTC()
+		if window.Start.Sub(anchor) > accountBillingWindowDriftTolerance(window.Duration) {
+			transitions = append(transitions, window)
+		}
+	}
+	if err := db.ensureAccountBillingWindowStates(ctx, db.conn, transitions); err != nil {
+		return nil, err
+	}
+	if len(transitions) > 0 {
+		before, err = db.loadAccountBillingWindowStates(ctx, db.conn, windows)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	var resolved []resolvedAccountBillingWindow
+	const maxSnapshotAttempts = 3
+	stable := false
+	for attempt := 0; attempt < maxSnapshotAttempts; attempt++ {
+		resolved = resolveAccountBillingWindows(windows, before)
+		current := make(map[AccountBillingWindowKey]float64, len(windows))
+		for _, window := range resolved {
+			key := AccountBillingWindowKey{AccountID: window.AccountID, Kind: window.Kind}
+			current[key] = window.AccountBilled
+		}
+		if err := db.getLiveAccountBillingWindowCosts(ctx, resolved, current); err != nil {
+			return nil, err
+		}
+		after, err := db.loadAccountBillingWindowStates(ctx, db.conn, windows)
+		if err != nil {
+			return nil, err
+		}
+		if accountBillingWindowStatesEqual(before, after) {
+			result = current
+			stable = true
+			break
+		}
+		before = after
+	}
+	if !stable {
+		return nil, fmt.Errorf("account billing window state changed during query")
+	}
+
+	legacy, err := db.loadLegacyAccountBillingWindowRollups(ctx, resolved)
+	if err != nil {
+		return nil, err
+	}
+	addLegacyAccountBillingWindowCosts(resolved, legacy, result)
+	return result, nil
+}
+
+// GetAccountBilledSince 返回指定时间戳以来 account_billed 的总和。该兼容
+// API 没有窗口类型，只应供不需要 v2 归档语义的旧调用使用。
 func (db *DB) GetAccountBilledSince(ctx context.Context, accountID int64, since time.Time) (float64, error) {
 	result, err := db.GetAccountsBilledSince(ctx, map[int64]time.Time{accountID: since})
 	if err != nil {

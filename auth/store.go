@@ -10333,15 +10333,13 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 	if s.db == nil {
 		return
 	}
+	billingWindow := acc.BillingWindowSnapshot()
 
 	// 如果有 5h 数据，使用完整存储
 	if pct5h, ok := acc.GetUsagePercent5h(); ok {
-		reset5hAt := acc.GetReset5hAt()
-		reset7dAt := acc.GetReset7dAt()
-		window7dSeconds := acc.GetWindow7dSeconds()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, reset7dAt, window7dSeconds, pct5h, reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
+		if err := s.db.UpdateUsageSnapshotFull(ctx, acc.DBID, pct7d, billingWindow.Reset7dAt, billingWindow.Window7dSeconds, pct5h, billingWindow.Reset5hAt, now, acc.GetUsageUpdatedAt5h()); err != nil {
 			log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 		}
 		return
@@ -10349,7 +10347,7 @@ func (s *Store) PersistUsageSnapshot(acc *Account, pct7d float64) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, acc.GetReset7dAt(), acc.GetWindow7dSeconds(), now); err != nil {
+	if err := s.db.UpdateUsageSnapshot(ctx, acc.DBID, pct7d, billingWindow.Reset7dAt, billingWindow.Window7dSeconds, now); err != nil {
 		log.Printf("[账号 %d] 持久化用量快照失败: %v", acc.DBID, err)
 	}
 }

@@ -2796,7 +2796,7 @@ func TestUsageStatsBaselinePreservesCacheRateAndFirstTokenAfterClear(t *testing.
 	}
 }
 
-func TestAccountBilledWindowSurvivesClearWithStartDriftAndResetsOnNewWindow(t *testing.T) {
+func TestAccountBilledWindowV2KeepsFirstAnchorAcrossHourDriftAndResetsOnRollover(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
 	db, err := New("sqlite", dbPath)
 	if err != nil {
@@ -2805,62 +2805,430 @@ func TestAccountBilledWindowSurvivesClearWithStartDriftAndResetsOnNewWindow(t *t
 	defer db.Close()
 
 	ctx := context.Background()
-	base := time.Now().UTC().Add(-4 * time.Hour).Truncate(time.Minute)
-	currentStart := base.Add(30*time.Minute + 17*time.Second)
-	insertCost := func(createdAt time.Time, billed float64) {
+	currentStart := time.Date(2026, time.August, 25, 10, 15, 21, 123456789, time.UTC)
+	currentWindow := AccountBillingWindow{
+		AccountID: 1, Kind: AccountBillingWindowLong,
+		Start: currentStart, Duration: 7 * 24 * time.Hour,
+	}
+	insertCost := func(createdAt time.Time, statusCode int, reason string, billed float64) {
 		t.Helper()
 		_, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs
-			(account_id, status_code, account_billed, created_at)
-			VALUES (1, 200, $1, $2)`, billed, sqliteTimeParam(createdAt))
+			(account_id, status_code, internal_reason, account_billed, created_at)
+			VALUES (1, $1, $2, $3, $4)`, statusCode, reason, billed, sqliteTimeParam(createdAt))
 		if err != nil {
 			t.Fatalf("insert cost %.2f: %v", billed, err)
 		}
 	}
 
-	// The first row belongs to the previous upstream quota window even though
-	// it shares the same UTC hour as currentStart.
-	insertCost(currentStart.Add(-10*time.Minute), 100)
-	insertCost(currentStart.Add(10*time.Minute), 12)
-	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: currentStart}); err != nil {
-		t.Fatalf("ClearUsageLogs(current window): %v", err)
-	}
-	// reset-after is observed relatively, so the same upstream window can be
-	// reconstructed a few seconds later (and with different nanoseconds).
-	driftedStart := currentStart.Add(3*time.Second + 456*time.Millisecond)
-	billed, err := db.GetAccountBilledSince(ctx, 1, driftedStart)
+	insertCost(currentStart.Add(-10*time.Minute), 200, "", 100)
+	insertCost(currentStart.Add(10*time.Minute), 200, "", 12)
+	insertCost(currentStart.Add(15*time.Minute), 499, "", 50)
+	insertCost(currentStart.Add(20*time.Minute), 200, "billing_probe", 60)
+
+	// The first typed read establishes the canonical anchor before any clear.
+	billed, err := db.GetAccountBilledWindow(ctx, currentWindow)
 	if err != nil || billed != 12 {
-		t.Fatalf("drifted current window after clear = %.2f, err=%v, want 12", billed, err)
+		t.Fatalf("first observed current window = %.2f, err=%v, want 12", billed, err)
+	}
+	driftedWindow := currentWindow
+	driftedWindow.Start = currentStart.Add(3*time.Hour + 456*time.Millisecond)
+	billed, err = db.GetAccountBilledWindow(ctx, driftedWindow)
+	if err != nil || billed != 12 {
+		t.Fatalf("hour-drifted live current window = %.2f, err=%v, want 12", billed, err)
 	}
 
-	insertCost(currentStart.Add(12*time.Minute), 3)
-	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: driftedStart}); err != nil {
+	if err := db.ClearUsageLogs(ctx, driftedWindow); err != nil {
+		t.Fatalf("ClearUsageLogs(current window): %v", err)
+	}
+	billed, err = db.GetAccountBilledWindow(ctx, driftedWindow)
+	if err != nil || billed != 12 {
+		t.Fatalf("hour-drifted current window after clear = %.2f, err=%v, want 12", billed, err)
+	}
+
+	// A live row before the drifted observation still belongs to the stable
+	// anchor and must not disappear from the query's live half.
+	insertCost(currentStart.Add(time.Hour), 200, "", 3)
+	billed, err = db.GetAccountBilledWindow(ctx, driftedWindow)
+	if err != nil || billed != 15 {
+		t.Fatalf("archived + canonical-anchor live window = %.2f, err=%v, want 15", billed, err)
+	}
+	if err := db.ClearUsageLogs(ctx, driftedWindow); err != nil {
 		t.Fatalf("ClearUsageLogs(drifted current window): %v", err)
 	}
-	billed, err = db.GetAccountBilledSince(ctx, 1, currentStart.Add(900*time.Millisecond))
+	billed, err = db.GetAccountBilledWindow(ctx, currentWindow)
 	if err != nil || billed != 15 {
 		t.Fatalf("repeated archived current window = %.2f, err=%v, want 15", billed, err)
 	}
 
-	// Advancing the upstream reset to another minute must not reuse the old
-	// window snapshot.
-	newStart := currentStart.Add(15 * time.Minute)
-	billed, err = db.GetAccountBilledSince(ctx, 1, newStart)
+	var storedSeconds, storedAnchor int64
+	var storedBilled float64
+	if err := db.conn.QueryRowContext(ctx, `SELECT window_seconds, anchor_start, account_billed
+		FROM usage_account_billing_window_states WHERE account_id=1 AND window_kind='long'`).
+		Scan(&storedSeconds, &storedAnchor, &storedBilled); err != nil {
+		t.Fatalf("read stable window state: %v", err)
+	}
+	if storedSeconds != int64((7*24*time.Hour)/time.Second) || storedAnchor != currentStart.UnixNano() || storedBilled != 15 {
+		t.Fatalf("stable state = seconds:%d anchor:%d billed:%.2f, want %d/%d/15",
+			storedSeconds, storedAnchor, storedBilled, int64((7*24*time.Hour)/time.Second), currentStart.UnixNano())
+	}
+
+	// A real weekly rollover is far beyond the drift allowance. The typed read
+	// atomically establishes the new zero state even before it has live usage.
+	newWindow := currentWindow
+	newWindow.Start = currentStart.Add(7 * 24 * time.Hour)
+	billed, err = db.GetAccountBilledWindow(ctx, newWindow)
 	if err != nil || billed != 0 {
 		t.Fatalf("new reset window before live use = %.2f, err=%v, want 0", billed, err)
 	}
-	insertCost(newStart.Add(5*time.Minute), 4)
-	if err := db.ClearUsageLogs(ctx, map[int64]time.Time{1: newStart}); err != nil {
-		t.Fatalf("ClearUsageLogs(new window): %v", err)
+	if err := db.ClearUsageLogs(ctx, newWindow); err != nil {
+		t.Fatalf("ClearUsageLogs(empty new window): %v", err)
 	}
-	billed, err = db.GetAccountBilledSince(ctx, 1, newStart)
+	if err := db.conn.QueryRowContext(ctx, `SELECT anchor_start, account_billed
+		FROM usage_account_billing_window_states WHERE account_id=1 AND window_kind='long'`).
+		Scan(&storedAnchor, &storedBilled); err != nil {
+		t.Fatalf("read empty rollover state: %v", err)
+	}
+	if storedAnchor != newWindow.Start.UnixNano() || storedBilled != 0 {
+		t.Fatalf("empty rollover state = anchor:%d billed:%.2f, want %d/0", storedAnchor, storedBilled, newWindow.Start.UnixNano())
+	}
+	insertCost(newWindow.Start.Add(5*time.Minute), 200, "", 4)
+	billed, err = db.GetAccountBilledWindow(ctx, newWindow)
 	if err != nil || billed != 4 {
-		t.Fatalf("new reset window after clear = %.2f, err=%v, want 4", billed, err)
+		t.Fatalf("new reset window live cost = %.2f, err=%v, want 4", billed, err)
+	}
+}
+
+func TestAccountBilledWindowV2SeparatesKindsAndDurationChanges(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	longStart := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	shortStart := longStart.Add(2 * time.Hour)
+	windows := []AccountBillingWindow{
+		{AccountID: 1, Kind: AccountBillingWindow5h, Start: shortStart, Duration: 5 * time.Hour},
+		{AccountID: 1, Kind: AccountBillingWindowLong, Start: longStart, Duration: 7 * 24 * time.Hour},
+	}
+	for _, fixture := range []struct {
+		at     time.Time
+		billed float64
+	}{
+		{at: longStart.Add(time.Hour), billed: 10},
+		{at: shortStart.Add(time.Hour), billed: 2},
+	} {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs(account_id, status_code, account_billed, created_at)
+			VALUES (1, 200, $1, $2)`, fixture.billed, sqliteTimeParam(fixture.at)); err != nil {
+			t.Fatalf("insert billing fixture: %v", err)
+		}
+	}
+	if err := db.ClearUsageLogs(ctx, windows...); err != nil {
+		t.Fatalf("ClearUsageLogs(two kinds): %v", err)
+	}
+	drifted := []AccountBillingWindow{windows[0], windows[1]}
+	drifted[0].Start = drifted[0].Start.Add(time.Hour)
+	drifted[1].Start = drifted[1].Start.Add(6 * time.Hour)
+	billed, err := db.GetAccountsBilledWindows(ctx, drifted)
+	if err != nil {
+		t.Fatalf("GetAccountsBilledWindows(two kinds): %v", err)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 1, Kind: AccountBillingWindow5h}]; got != 2 {
+		t.Fatalf("5h billed = %.2f, want 2", got)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 1, Kind: AccountBillingWindowLong}]; got != 12 {
+		t.Fatalf("long billed = %.2f, want 12", got)
+	}
+	var stateCount int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_account_billing_window_states WHERE account_id=1`).Scan(&stateCount); err != nil {
+		t.Fatalf("count typed states: %v", err)
+	}
+	if stateCount != 2 {
+		t.Fatalf("typed state count = %d, want 2", stateCount)
 	}
 
-	insertCost(newStart.Add(10*time.Minute), 4)
-	billedByID, err := db.GetAccountsBilledSince(ctx, map[int64]time.Time{1: newStart})
-	if err != nil || billedByID[1] != 8 {
-		t.Fatalf("new archived + live window = %#v, err=%v, want 8", billedByID, err)
+	// A corrected duration with the same reset instant is still the same
+	// upstream billing generation. Keep the archived amount while adopting the
+	// newly authoritative monthly start/duration.
+	correctedMonthly := windows[1]
+	correctedMonthly.Duration = 30 * 24 * time.Hour
+	correctedMonthly.Start = windows[1].Start.Add(windows[1].Duration - correctedMonthly.Duration)
+	correctedBilled, err := db.GetAccountBilledWindow(ctx, correctedMonthly)
+	if err != nil || correctedBilled != 12 {
+		t.Fatalf("same-reset duration correction = %.2f, err=%v, want 12", correctedBilled, err)
+	}
+	var correctedSeconds, correctedAnchor int64
+	var correctedArchived float64
+	if err := db.conn.QueryRowContext(ctx, `SELECT window_seconds, anchor_start, account_billed
+		FROM usage_account_billing_window_states WHERE account_id=1 AND window_kind='long'`).
+		Scan(&correctedSeconds, &correctedAnchor, &correctedArchived); err != nil {
+		t.Fatalf("read corrected monthly state: %v", err)
+	}
+	if correctedSeconds != int64(correctedMonthly.Duration/time.Second) ||
+		correctedAnchor != correctedMonthly.Start.UnixNano() || correctedArchived != 12 {
+		t.Fatalf("corrected monthly state = seconds:%d anchor:%d billed:%.2f, want %d/%d/12",
+			correctedSeconds, correctedAnchor, correctedArchived,
+			int64(correctedMonthly.Duration/time.Second), correctedMonthly.Start.UnixNano())
+	}
+
+	// A stale process can still hold the old weekly duration. Its clear must use
+	// the expanded monthly anchor; otherwise the early-month row is deleted from
+	// usage_logs without ever entering the long-window archive.
+	for _, fixture := range []struct {
+		at     time.Time
+		billed float64
+	}{
+		{at: correctedMonthly.Start.Add(10 * 24 * time.Hour), billed: 5},
+		{at: windows[1].Start.Add(time.Hour), billed: 3},
+	} {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs(account_id, status_code, account_billed, created_at)
+			VALUES (1, 200, $1, $2)`, fixture.billed, sqliteTimeParam(fixture.at)); err != nil {
+			t.Fatalf("insert duration-correction fixture: %v", err)
+		}
+	}
+	if err := db.ClearUsageLogs(ctx, windows[1]); err != nil {
+		t.Fatalf("ClearUsageLogs(stale weekly duration): %v", err)
+	}
+	correctedBilled, err = db.GetAccountBilledWindow(ctx, correctedMonthly)
+	if err != nil || correctedBilled != 20 {
+		t.Fatalf("monthly after stale weekly clear = %.2f, err=%v, want 20", correctedBilled, err)
+	}
+	if err := db.conn.QueryRowContext(ctx, `SELECT window_seconds, anchor_start, account_billed
+		FROM usage_account_billing_window_states WHERE account_id=1 AND window_kind='long'`).
+		Scan(&correctedSeconds, &correctedAnchor, &correctedArchived); err != nil {
+		t.Fatalf("read monthly state after stale weekly clear: %v", err)
+	}
+	if correctedSeconds != int64(correctedMonthly.Duration/time.Second) ||
+		correctedAnchor != correctedMonthly.Start.UnixNano() || correctedArchived != 20 {
+		t.Fatalf("monthly state after stale weekly clear = seconds:%d anchor:%d billed:%.2f, want %d/%d/20",
+			correctedSeconds, correctedAnchor, correctedArchived,
+			int64(correctedMonthly.Duration/time.Second), correctedMonthly.Start.UnixNano())
+	}
+
+	// Keeping the old start while changing the duration moves the reset by 23
+	// days, so it is a genuinely different generation and must start at zero.
+	monthly := windows[1]
+	monthly.Duration = 30 * 24 * time.Hour
+	monthlyBilled, err := db.GetAccountBilledWindow(ctx, monthly)
+	if err != nil || monthlyBilled != 0 {
+		t.Fatalf("duration-changed long window = %.2f, err=%v, want 0", monthlyBilled, err)
+	}
+	shortBilled, err := db.GetAccountBilledWindow(ctx, windows[0])
+	if err != nil || shortBilled != 2 {
+		t.Fatalf("5h after long duration change = %.2f, err=%v, want 2", shortBilled, err)
+	}
+}
+
+func TestAccountBilledWindowV2SurvivesDatabaseReopen(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
+	ctx := context.Background()
+	window := AccountBillingWindow{
+		AccountID: 1,
+		Kind:      AccountBillingWindowLong,
+		Start:     time.Date(2026, time.August, 25, 10, 15, 21, 123456789, time.UTC),
+		Duration:  7 * 24 * time.Hour,
+	}
+
+	db, err := New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs(account_id, status_code, account_billed, created_at)
+		VALUES (1, 200, 9.75, $1)`, sqliteTimeParam(window.Start.Add(time.Hour))); err != nil {
+		db.Close()
+		t.Fatalf("insert billed fixture: %v", err)
+	}
+	if err := db.ClearUsageLogs(ctx, window); err != nil {
+		db.Close()
+		t.Fatalf("ClearUsageLogs: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close before reopen: %v", err)
+	}
+
+	db, err = New("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen sqlite: %v", err)
+	}
+	defer db.Close()
+	drifted := window
+	drifted.Start = drifted.Start.Add(6*time.Hour + 750*time.Millisecond)
+	billed, err := db.GetAccountBilledWindow(ctx, drifted)
+	if err != nil || billed != 9.75 {
+		t.Fatalf("reopened drifted window = %.2f, err=%v, want 9.75", billed, err)
+	}
+}
+
+func TestAccountBilledWindowV2KeepsNewerAnchorForStaleBackwardObservation(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	start := time.Date(2026, time.August, 25, 10, 0, 0, 987654321, time.UTC)
+	current := AccountBillingWindow{
+		AccountID: 1, Kind: AccountBillingWindowLong,
+		Start: start, Duration: 7 * 24 * time.Hour,
+	}
+	insert := func(at time.Time, billed float64) {
+		t.Helper()
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs(account_id, status_code, account_billed, created_at)
+			VALUES (1, 200, $1, $2)`, billed, sqliteTimeParam(at)); err != nil {
+			t.Fatalf("insert billed %.2f: %v", billed, err)
+		}
+	}
+
+	insert(start.Add(10*time.Minute), 4)
+	if err := db.ClearUsageLogs(ctx, current); err != nil {
+		t.Fatalf("ClearUsageLogs(current): %v", err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `CREATE TABLE billing_state_updates (id INTEGER)`); err != nil {
+		t.Fatalf("create update audit table: %v", err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `CREATE TRIGGER audit_billing_state_update
+		AFTER UPDATE ON usage_account_billing_window_states
+		BEGIN INSERT INTO billing_state_updates(id) VALUES (1); END`); err != nil {
+		t.Fatalf("create update audit trigger: %v", err)
+	}
+
+	withinDrift := current
+	withinDrift.Start = start.Add(time.Hour)
+	if billed, err := db.GetAccountBilledWindow(ctx, withinDrift); err != nil || billed != 4 {
+		t.Fatalf("same-window read = %.2f, err=%v, want 4", billed, err)
+	}
+	var updates int
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM billing_state_updates`).Scan(&updates); err != nil {
+		t.Fatalf("count same-window state updates: %v", err)
+	}
+	if updates != 0 {
+		t.Fatalf("same-window typed read wrote state %d times, want 0", updates)
+	}
+
+	stale := current
+	stale.Start = start.Add(-7 * 24 * time.Hour)
+	insert(start.Add(-time.Hour), 100)
+	insert(start.Add(time.Hour), 3)
+	if billed, err := db.GetAccountBilledWindow(ctx, stale); err != nil || billed != 7 {
+		t.Fatalf("stale-backward read = %.2f, err=%v, want canonical 7", billed, err)
+	}
+	if err := db.ClearUsageLogs(ctx, stale); err != nil {
+		t.Fatalf("ClearUsageLogs(stale backward): %v", err)
+	}
+	billed, err := db.GetAccountBilledWindow(ctx, current)
+	if err != nil || billed != 7 {
+		t.Fatalf("current after stale clear = %.2f, err=%v, want 7", billed, err)
+	}
+	var anchor int64
+	if err := db.conn.QueryRowContext(ctx, `SELECT anchor_start FROM usage_account_billing_window_states
+		WHERE account_id=1 AND window_kind='long'`).Scan(&anchor); err != nil {
+		t.Fatalf("read anchor after stale clear: %v", err)
+	}
+	if anchor != start.UnixNano() {
+		t.Fatalf("anchor after stale clear = %d, want %d", anchor, start.UnixNano())
+	}
+}
+
+func TestAccountBilledWindowV2ReadsLegacyRowsOnceAndCombinesNewStateAndLive(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "codex2api.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	longStart := time.Date(2026, time.August, 25, 0, 0, 0, 0, time.UTC)
+	shortStart := time.Date(2026, time.August, 31, 20, 0, 0, 0, time.UTC)
+	windows := []AccountBillingWindow{
+		{AccountID: 1, Kind: AccountBillingWindow5h, Start: shortStart, Duration: 5 * time.Hour},
+		{AccountID: 1, Kind: AccountBillingWindowLong, Start: longStart, Duration: 7 * 24 * time.Hour},
+	}
+	for _, fixture := range []struct {
+		start  time.Time
+		billed float64
+	}{
+		{start: longStart.Add(time.Minute), billed: 10},
+		{start: longStart.Add(-3 * time.Minute), billed: 2},
+		{start: longStart.Add(-7 * 24 * time.Hour), billed: 999},
+		{start: shortStart.Add(3 * time.Minute), billed: 5},
+	} {
+		if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_account_billing_window_rollups
+			(account_id, window_start, account_billed) VALUES (1, $1, $2)`, accountBillingWindowRollupKey(fixture.start), fixture.billed); err != nil {
+			t.Fatalf("insert legacy rollup: %v", err)
+		}
+	}
+
+	// One untyped row equally close to both kinds is fundamentally ambiguous.
+	// It must be skipped rather than counted in both totals.
+	ambiguousStart := time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC)
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_account_billing_window_rollups
+		(account_id, window_start, account_billed) VALUES (2, $1, 77)`, accountBillingWindowRollupKey(ambiguousStart)); err != nil {
+		t.Fatalf("insert ambiguous legacy rollup: %v", err)
+	}
+	// An expired 5h row can be only a few hours from a long-window start. The
+	// conservative legacy cap must not let the untyped row leak into long.
+	legacyCollisionStart := longStart.Add(5 * time.Hour)
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_account_billing_window_rollups
+		(account_id, window_start, account_billed) VALUES (3, $1, 88)`, accountBillingWindowRollupKey(legacyCollisionStart)); err != nil {
+		t.Fatalf("insert legacy cross-kind collision: %v", err)
+	}
+	legacyNearestStart := time.Date(2026, time.September, 2, 0, 0, 0, 0, time.UTC)
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_account_billing_window_rollups
+		(account_id, window_start, account_billed) VALUES (4, $1, 91)`, accountBillingWindowRollupKey(legacyNearestStart)); err != nil {
+		t.Fatalf("insert nearest-owner legacy rollup: %v", err)
+	}
+	allWindows := append(windows,
+		AccountBillingWindow{AccountID: 2, Kind: AccountBillingWindow5h, Start: ambiguousStart, Duration: 5 * time.Hour},
+		AccountBillingWindow{AccountID: 2, Kind: AccountBillingWindowLong, Start: ambiguousStart, Duration: 7 * 24 * time.Hour},
+		AccountBillingWindow{AccountID: 3, Kind: AccountBillingWindow5h, Start: longStart.Add(10 * time.Hour), Duration: 5 * time.Hour},
+		AccountBillingWindow{AccountID: 3, Kind: AccountBillingWindowLong, Start: longStart, Duration: 7 * 24 * time.Hour},
+		AccountBillingWindow{AccountID: 4, Kind: AccountBillingWindow5h, Start: legacyNearestStart.Add(-2 * time.Minute), Duration: 5 * time.Hour},
+		AccountBillingWindow{AccountID: 4, Kind: AccountBillingWindowLong, Start: legacyNearestStart.Add(4 * time.Minute), Duration: 7 * 24 * time.Hour},
+	)
+	billed, err := db.GetAccountsBilledWindows(ctx, allWindows)
+	if err != nil {
+		t.Fatalf("GetAccountsBilledWindows(legacy): %v", err)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 1, Kind: AccountBillingWindow5h}]; got != 5 {
+		t.Fatalf("legacy 5h billed = %.2f, want 5", got)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 1, Kind: AccountBillingWindowLong}]; got != 12 {
+		t.Fatalf("legacy long billed = %.2f, want 12", got)
+	}
+	for _, kind := range []AccountBillingWindowKind{AccountBillingWindow5h, AccountBillingWindowLong} {
+		if got := billed[AccountBillingWindowKey{AccountID: 2, Kind: kind}]; got != 0 {
+			t.Fatalf("ambiguous legacy %s billed = %.2f, want 0", kind, got)
+		}
+		if got := billed[AccountBillingWindowKey{AccountID: 3, Kind: kind}]; got != 0 {
+			t.Fatalf("legacy cross-kind collision %s billed = %.2f, want 0", kind, got)
+		}
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 4, Kind: AccountBillingWindow5h}]; got != 91 {
+		t.Fatalf("absolute-nearest legacy 5h billed = %.2f, want 91", got)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 4, Kind: AccountBillingWindowLong}]; got != 0 {
+		t.Fatalf("farther legacy long billed = %.2f, want 0", got)
+	}
+
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs(account_id, status_code, account_billed, created_at)
+		VALUES (1, 200, 3, $1)`, sqliteTimeParam(shortStart.Add(time.Hour))); err != nil {
+		t.Fatalf("insert post-upgrade archived cost: %v", err)
+	}
+	if err := db.ClearUsageLogs(ctx, windows...); err != nil {
+		t.Fatalf("ClearUsageLogs(v2 plus legacy): %v", err)
+	}
+	if _, err := db.conn.ExecContext(ctx, `INSERT INTO usage_logs(account_id, status_code, account_billed, created_at)
+		VALUES (1, 200, 2, $1)`, sqliteTimeParam(shortStart.Add(2*time.Hour))); err != nil {
+		t.Fatalf("insert post-upgrade live cost: %v", err)
+	}
+	billed, err = db.GetAccountsBilledWindows(ctx, windows)
+	if err != nil {
+		t.Fatalf("GetAccountsBilledWindows(legacy+v2+live): %v", err)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 1, Kind: AccountBillingWindow5h}]; got != 10 {
+		t.Fatalf("legacy+v2+live 5h = %.2f, want 10", got)
+	}
+	if got := billed[AccountBillingWindowKey{AccountID: 1, Kind: AccountBillingWindowLong}]; got != 17 {
+		t.Fatalf("legacy+v2+live long = %.2f, want 17", got)
 	}
 }
 
