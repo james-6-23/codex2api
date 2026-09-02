@@ -104,7 +104,8 @@ jobs:
         include:
           - name: admin-a-l
           - name: admin-m-z
-          - name: database
+          - name: database-a-p
+          - name: database-other
           - name: proxy
           - name: promptfilter
           - name: rest
@@ -121,8 +122,8 @@ jobs:
         run: mkdir -p frontend/dist && touch frontend/dist/placeholder
 
       # 重包各占一台 2 核 runner,避免 admin/database/proxy/promptfilter 互相抢核。
-      # admin 按测试名首字母再拆两片:整包 -race 在 2 核 runner 上要 ~12min,
-      # 会撞 go test 的 12m 超时(2026-08-26 main 上连续两次超时失败)。
+      # admin/database 按测试名首字母再拆两片:整包 -race 在 2 核 runner 上
+      # 会撞 go test 的 12m 超时。database 的第二片用 -skip 接住所有剩余测试。
       - name: Run Go tests with race detector
         run: |
           set -euo pipefail
