@@ -8356,9 +8356,8 @@ func (s *Store) SetSessionWindowBalanceEnabled(enabled bool) {
 	s.sessionWindowBalance.Store(enabled)
 }
 
-// PassiveInternalModelsEnabled reports whether a verified derived request may
-// use Luna or codex-auto-review on the root conversation's original account
-// without publishing those models in that account's configured model list.
+// PassiveInternalModelsEnabled reports whether verified internal requests,
+// including rootless requests, may bypass configured account model lists.
 func (s *Store) PassiveInternalModelsEnabled() bool {
 	if s == nil {
 		return false

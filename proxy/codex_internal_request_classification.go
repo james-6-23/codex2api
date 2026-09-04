@@ -3,7 +3,9 @@ package proxy
 import (
 	"strings"
 
+	"github.com/codex2api/api"
 	"github.com/gin-gonic/gin"
+	"github.com/tidwall/gjson"
 )
 
 const localSessionAccountingBypassContextKey = "local_session_accounting_bypass_v1"
@@ -48,6 +50,53 @@ func (h *Handler) verifiedNewAPISessionAccountingBypass(c *gin.Context) bool {
 		return false
 	}
 	return strings.TrimSpace(policyContext.Meta.PassiveFeature) != ""
+}
+
+func (h *Handler) classifyPassiveInternalRequest(c *gin.Context, root requestRootSessionIdentity) bool {
+	if root.conflict {
+		return false
+	}
+	if passiveInternalRequestAuthorized(c) {
+		return true
+	}
+	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() {
+		return false
+	}
+	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
+	verified := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
+	if !verified {
+		return classifyLocalCodexIndependentSessionAccounting(c, root)
+	}
+	if h.verifiedNewAPISessionAccountingBypass(c) {
+		return true
+	}
+	source := strings.TrimSpace(policyContext.Meta.ThreadSource)
+	return root.authoritative && !root.stable &&
+		policyContext.Meta.RootSessionState == newAPIPolicyRootSessionUnavailable &&
+		source != "" && !strings.EqualFold(source, "user")
+}
+
+func (h *Handler) passiveInternalModelsAllowed(c *gin.Context) bool {
+	return h != nil && h.store != nil && h.store.PassiveInternalModelsEnabled() && passiveInternalRequestAuthorized(c)
+}
+
+func (h *Handler) passiveInternalModelValidator(c *gin.Context, body []byte, validate api.ValidationRule) api.ValidationRule {
+	return func(value gjson.Result, path string) *api.ValidationError {
+		validationError := validate(value, path)
+		if validationError == nil || h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() {
+			return validationError
+		}
+		signedBody := ingressRequestBody(c, body)
+		if c != nil && isResponsesWebSocketUpgradeRequest(c.Request) {
+			signedBody = nil
+		}
+		h.primeNewAPIPolicyContext(c, signedBody)
+		h.resolveRequestRootSessionIdentityForContext(c, body)
+		if h.passiveInternalModelsAllowed(c) {
+			return nil
+		}
+		return validationError
+	}
 }
 
 func resetCodexInternalRequestClassificationFrame(c *gin.Context) {

@@ -281,7 +281,10 @@ func withSessionGraphClassification(identity requestRootSessionIdentity, signals
 // leaf fallback for ordinary HTTP traffic; Responses WS instead binds the
 // first coherent native root to the connection so later frames cannot drift
 // back to a Guardian leaf.
-func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, body []byte) requestRootSessionIdentity {
+func (h *Handler) resolveRequestRootSessionIdentityForContext(c *gin.Context, body []byte) (resolved requestRootSessionIdentity) {
+	defer func() {
+		setPassiveInternalAuthorization(c, h.classifyPassiveInternalRequest(c, resolved))
+	}()
 	if c == nil {
 		return requestRootSessionIdentity{}
 	}

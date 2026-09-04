@@ -65,11 +65,6 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h == nil || h.store == nil {
 		return false
 	}
-	if passiveInternalRequestAuthorized(c) {
-		// Field-classified internal turns contain transcript or original
-		// user text by design. Do not recursively filter it as a fresh user prompt.
-		return false
-	}
 	cfg := h.promptFilterConfigForRequest(c)
 	signedBody := ingressRequestBody(c, rawBody)
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, signedBody) {
@@ -77,6 +72,11 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
+	}
+	if passiveInternalRequestAuthorized(c) {
+		// Field-classified internal turns contain transcript or original
+		// user text by design. Do not recursively filter it as a fresh user prompt.
+		return false
 	}
 	// Skip envelope construction and body traversal when neither the local
 	// filter nor a body-dependent extension is enabled (issue #417).
@@ -149,9 +149,6 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	if h == nil || h.store == nil {
 		return false
 	}
-	if passiveInternalRequestAuthorized(c) {
-		return false
-	}
 	cfg := h.promptFilterConfigForRequest(c)
 	signedBody := ingressRequestBody(c, rawBody)
 	if apiErr := h.requiredNewAPIIdentityError(c, cfg.Advanced.NewAPI, signedBody); apiErr != nil {
@@ -160,6 +157,9 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
+	}
+	if passiveInternalRequestAuthorized(c) {
+		return false
 	}
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false

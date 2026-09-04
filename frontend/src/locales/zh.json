@@ -3856,7 +3856,7 @@
     "sessionWindowBalance": "新窗口均衡",
     "sessionWindowBalanceDesc": "仅在创建新会话时生效：先遵守账号调度优先级和健康档位，再优先选择当前活跃窗口更少的账号；窗口数相同时按调度分和当前并发择优。已有会话仍复用原账号。默认关闭。",
     "passiveInternalModels": "允许被动内部模型",
-    "passiveInternalModelsDesc": "开启后，已验证为当前窗口派生的 Guardian、Luna、自动审查和项目命名等被动内部请求可复用原账号；通过 NewAPI 时同时复用原渠道和渠道 Key，直连 Codex2API 时携带完整且可验证的原生 Codex 父子会话图也可生效。公开模型列表无需加入 gpt-5.6-luna 或 codex-auto-review。用户主动请求这些模型仍按普通模型权限拒绝；原账号或原渠道不可用时不会切换。默认关闭。",
+    "passiveInternalModelsDesc": "开启后，已验证的被动内部请求可豁免账号模型白名单，不限定模型名称。有根且原账号绑定仍在时复用原账号；无根或原根账号绑定缺失时临时选号，开启无根账号回溯后优先尝试同用户、令牌和设备范围内的最近账号，不覆盖正式根绑定。直连请求须有可验证的原生内部会话结构。普通用户请求仍受模型权限限制，风控冷却、会话锁、账号权限和上游能力限制不变；原账号绑定仍在但账号不可用时不会换号。默认关闭。",
     "codexUnlinkedAccountFallback": "允许无根请求回溯账号",
     "codexUnlinkedAccountFallbackDesc": "无可验证父窗口/根会话时，按已签名的 NewAPI 用户、令牌和设备信息（直连时按 API Key 与设备）查找当前请求之前最近使用的账号；仅本次临时使用，不覆盖正式根绑定。默认关闭。",
     "codexUnlinkedAccountFallbackSeconds": "无根回溯时间窗（秒）",

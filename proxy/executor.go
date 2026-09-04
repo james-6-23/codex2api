@@ -1399,6 +1399,20 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 			}
 		}
 	}
+	if h.passiveInternalModelsAllowed(c) && !identity.ownsRootBinding {
+		if !identity.relatedToRoot {
+			identity.unlinkedFallbackOnly = true
+		} else {
+			rootKey := sessionAffinityKey(identity.affinityID, requestAPIKeyID(c))
+			_, found := h.store.AccountSessionAccountID(rootKey, time.Now())
+			if !found {
+				_, found = h.store.SessionAffinityAccountID(rootKey)
+			}
+			if !found {
+				identity.unlinkedFallbackOnly = true
+			}
+		}
+	}
 	identity.protectedRelatedLease = identity.relatedToRoot && passiveInternalRequestAuthorized(c)
 	if identity.unlinkedFallbackOnly {
 		identity.affinityID = ""

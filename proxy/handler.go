@@ -647,13 +647,20 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 	return true
 }
 
-// applyPassiveInternalModelRouting lets a field-classified internal child
-// bypass the configured Models list. It remains pinned to the root session's
-// exact account; a missing, disabled, busy, cooled-down, or excluded root
-// account never falls back to another one.
+// applyPassiveInternalModelRouting bypasses model lists for classified internal
+// requests. Existing roots retain their account; rootless requests use normal
+// scheduling without creating a replacement root binding.
 func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
-	if h == nil || h.store == nil || !h.store.PassiveInternalModelsEnabled() || !passiveInternalRequestAuthorized(c) || !identity.relatedToRoot || identity.ownsRootBinding {
+	if !h.passiveInternalModelsAllowed(c) || identity.ownsRootBinding {
 		return filter
+	}
+	if !identity.relatedToRoot || identity.unlinkedFallbackOnly {
+		return func(account *auth.Account) bool {
+			if filter != nil && filter(account) {
+				return true
+			}
+			return passiveInternalAccountEligible(account, effectiveModel, allowRelay)
+		}
 	}
 	rootKey, related := auth.RelatedSessionRootKey(affinityKey)
 	if !related || rootKey == "" {
@@ -4016,7 +4023,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		// effort 别名；raw backing 与 account model_mapping 不是下游模型名。
 		rules["model"] = append(rules["model"], api.ModelValidator(antigravityAcceptedModelIDs()))
 	default:
-		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
+		rules["model"] = append(rules["model"], h.passiveInternalModelValidator(c, rawBody, h.modelValidator(supportedModels)))
 	}
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
@@ -6080,7 +6087,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	rules := api.ResponsesAPIValidationRulesForModel(mappedModel)
 	if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
-		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
+		rules["model"] = append(rules["model"], h.passiveInternalModelValidator(c, rawBody, h.modelValidator(supportedModels)))
 	}
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {
@@ -6121,6 +6128,8 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		sendImageOnlyModelError(c, model)
 		return
 	}
+	h.primeNewAPIPolicyContext(c, ingressRequestBody(c, rawBody))
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	if h.inspectPromptFilterOpenAI(c, rawBody, "/v1/responses/compact", model) {
 		return
 	}
@@ -6134,7 +6143,6 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
 	stopRetryDeadline := installContinuousRetryHTTPDeadline(c, continuousRetryPolicy, continuousRetryProtocolResponses)
 	defer stopRetryDeadline()
-	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
@@ -6986,7 +6994,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	rules := api.ChatCompletionValidationRules()
 	if requestUpstreamChannel(c) != database.UpstreamChannelGrok {
 		// grok 渠道 Key 的模型由 Grok 上游校验，跳过网关侧模型白名单
-		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
+		rules["model"] = append(rules["model"], h.passiveInternalModelValidator(c, rawBody, h.modelValidator(supportedModels)))
 	}
 	result := validator.ValidateRequest(rules)
 	if !result.Valid {

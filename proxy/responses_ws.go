@@ -374,7 +374,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 
 	validator := api.NewValidator(rawBody)
 	rules := api.ResponsesAPIValidationRulesForModel(model)
-	rules["model"] = append(rules["model"], api.ModelValidator(supportedModels))
+	rules["model"] = append(rules["model"], h.passiveInternalModelValidator(c, rawBody, api.ModelValidator(supportedModels)))
 	if result := validator.ValidateRequest(rules); !result.Valid {
 		apiErr = validator.ToAPIError()
 		_ = writeResponsesWSError(conn, apiErr)
@@ -1675,9 +1675,6 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 	if h == nil || h.store == nil {
 		return false, false
 	}
-	if passiveInternalRequestAuthorized(c) {
-		return false, false
-	}
 	cfg := h.promptFilterConfigForRequest(c)
 	if item, locked := h.activePromptConversationLock(c, cfg, nil, endpoint, model); locked {
 		restriction := promptCyberRestrictionDecision(item, cfg)
@@ -1698,6 +1695,9 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 		}
 		_ = writeResponsesWSError(conn, promptCyberRestrictionAPIError(restriction, nil))
 		return true, false
+	}
+	if passiveInternalRequestAuthorized(c) {
+		return false, false
 	}
 	// Keep disabled filters off the WebSocket request-body hot path too.
 	if !promptfilter.RequiresRequestText(cfg) {
