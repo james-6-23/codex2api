@@ -423,6 +423,13 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	turnContinuation := codexWSTurnContinuationToken(rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	respCacheOwner := responseCacheOwner(apiKeyID)
+	var previousResponseAffinity responseAccountAffinity
+	var previousResponseAffinityFound bool
+	if prevID := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()); prevID != "" {
+		lookupCtx, cancel := context.WithTimeout(c.Request.Context(), 300*time.Millisecond)
+		previousResponseAffinity, previousResponseAffinityFound = lookupResponseAccountAffinity(lookupCtx, h.cache, respCacheOwner, prevID)
+		cancel()
+	}
 	ruleIdentity := h.payloadRuleIdentity(c)
 	// 上下文压缩轮豁免首字超时看门狗（issue #381）：压缩首帧天然慢，超时换号无益。
 	bodySignalCompact := compactionMeta.ProtocolTriggered
@@ -585,6 +592,12 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
+			if attempt == 0 && previousResponseAffinityFound && !continuationPinned && !turnHasBinding {
+				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				if account != nil {
+					stickyProxyURL = account.GetProxyURL()
+				}
+			}
 			if !continuationPinned && hasPreviousResponse && !continuationDegraded {
 				// 绑定账号已被本次请求硬排除（上一轮 429/5xx 等）时不必再等它 30s：
 				// 排除在本请求内不会解除，直接剥离 previous_response_id 换号。
@@ -596,7 +609,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					}
 				}
 			}
-			if attempt == 0 && compactionAffinity.Known && !continuationPinned {
+			if account == nil && attempt == 0 && compactionAffinity.Known && !continuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 					h.store.Release(account)
@@ -1173,7 +1186,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			if tier := parsed.Get("response.service_tier").String(); tier != "" {
 				actualServiceTier = tier
 			}
-			if eventType == "response.completed" {
+			if eventType == "response.completed" || eventType == "response.incomplete" {
 				completedResponsePayload = append([]byte(nil), data...)
 			}
 			gotTerminal = true
@@ -1433,6 +1446,9 @@ func (h *Handler) streamResponsesWSUpstream(
 			// Only committed response.completed events become continuation history.
 			// Failed attempts and locally blocked/unwritable replays leave no cache.
 			cacheCompletedResponse(respCacheOwner, []byte(expandedInputRaw), completedResponsePayload)
+			if responseID := responseIDFromPayload(completedResponsePayload); responseID != "" {
+				h.recordResponseAccountAffinity(respCacheOwner, responseID, account.ID(), affinityKey, effectiveModel, responseAccountUpstreamType(account))
+			}
 		}
 	}
 	_ = wsReplay.Close()

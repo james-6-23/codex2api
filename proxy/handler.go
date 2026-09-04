@@ -4067,13 +4067,31 @@ func (h *Handler) Responses(c *gin.Context) {
 
 	capacityShedRetries := map[int64]int{}
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
+	// previous_response_id is a one-hop account ownership hint. Resolve it
+	// before ordinary scheduling so continuations can stay on the account that
+	// created the upstream response (including after a local WS mapping is
+	// lost). The mapping is owner-scoped and independently validated by the
+	// normal account filter; a miss simply falls back to existing routing.
+	var previousResponseAffinity responseAccountAffinity
+	var previousResponseAffinityFound bool
+	if bodyPreparation.PreviousResponseID != "" {
+		lookupCtx, cancel := context.WithTimeout(c.Request.Context(), 300*time.Millisecond)
+		previousResponseAffinity, previousResponseAffinityFound = lookupResponseAccountAffinity(lookupCtx, h.cache, respCacheOwner, bodyPreparation.PreviousResponseID)
+		cancel()
+	}
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
 	for attempt := 0; ; attempt++ {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
-			if attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
+			if attempt == 0 && previousResponseAffinityFound && !turnContinuationPinned && !turnHasBinding {
+				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				if account != nil {
+					stickyProxyURL = account.GetProxyURL()
+				}
+			}
+			if account == nil && attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 					h.store.Release(account)
@@ -5351,7 +5369,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
-					if eventType == "response.completed" {
+					if eventType == "response.completed" || eventType == "response.incomplete" {
 						// Cache only after the private replay reaches the downstream.
 						// Otherwise a local filter/write failure would publish an ID that
 						// the client never received. Truncated terminals remain uncached.
@@ -5618,7 +5636,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					if tier := parsed.Get("response.service_tier").String(); tier != "" {
 						actualServiceTier = tier
 					}
-					if eventType == "response.completed" {
+					if eventType == "response.completed" || eventType == "response.incomplete" {
 						completedResponseData = append(completedResponseData[:0], data...)
 						completedResponseOutputItems = append(completedResponseOutputItems[:0], outputCollector.Items()...)
 					}
@@ -5759,6 +5777,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				if isStream && len(completedResponseData) > 0 {
 					cacheCompletedResponseWithOutputItems(respCacheOwner, []byte(expandedInputRaw), completedResponseData, completedResponseOutputItems)
+					if responseID := responseIDFromPayload(completedResponseData); responseID != "" {
+						h.recordResponseAccountAffinity(respCacheOwner, responseID, account.ID(), affinityKey, effectiveModel, responseAccountUpstreamType(account))
+					}
 				}
 			}
 		}
@@ -5843,6 +5864,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					if len(completedResponseData) > 0 {
 						cacheCompletedResponseWithOutputItems(respCacheOwner, []byte(expandedInputRaw), completedResponseData, completedResponseOutputItems)
+						if responseID := responseIDFromPayload(completedResponseData); responseID != "" {
+							h.recordResponseAccountAffinity(respCacheOwner, responseID, account.ID(), affinityKey, effectiveModel, responseAccountUpstreamType(account))
+						}
 					}
 				}
 			} else {
@@ -5999,6 +6023,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
+	_, compactHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
 	if serviceTier != "" {
@@ -6011,6 +6036,14 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 准备上游请求体（previous_response_id 缓存按下游 API Key 隔离）
 	bodyPreparation := prepareCompactResponsesBodyForOwnerDetailed(rawBody, responseCacheOwner(apiKeyID))
 	codexBody := bodyPreparation.Body
+	respCacheOwner := responseCacheOwner(apiKeyID)
+	var previousResponseAffinity responseAccountAffinity
+	var previousResponseAffinityFound bool
+	if bodyPreparation.PreviousResponseID != "" {
+		lookupCtx, cancel := context.WithTimeout(c.Request.Context(), 300*time.Millisecond)
+		previousResponseAffinity, previousResponseAffinityFound = lookupResponseAccountAffinity(lookupCtx, h.cache, respCacheOwner, bodyPreparation.PreviousResponseID)
+		cancel()
+	}
 	continuationStatus, continuationReason, continuationUnavailable := responseCachePreparationFailure(bodyPreparation)
 	// strip 策略：剥离图片工具能力声明后作为普通文本请求继续（issue #411）。
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
@@ -6073,7 +6106,13 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var account *auth.Account
 		var stickyProxyURL string
 		var affinityGuard auth.SessionAffinityGuard
-		if attempt == 0 && compactionAffinity.Known {
+		if attempt == 0 && previousResponseAffinityFound && !compactHasBinding {
+			account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			if account != nil {
+				stickyProxyURL = account.GetProxyURL()
+			}
+		}
+		if account == nil && attempt == 0 && compactionAffinity.Known {
 			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 				h.store.Release(account)
@@ -6786,6 +6825,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 		h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
 		h.store.ReleaseForSessionWithGuard(account, affinityKey, affinityGuard)
+		if responseID := responseIDFromPayload(respBody); responseID != "" {
+			h.recordResponseAccountAffinity(respCacheOwner, responseID, account.ID(), affinityKey, effectiveModel, responseAccountUpstreamType(account))
+		}
 		c.Data(http.StatusOK, "application/json", respBody)
 		h.recordCompactionProvenanceFromPayload(context.Background(), account, respBody)
 		return
