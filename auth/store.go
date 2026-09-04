@@ -6651,12 +6651,31 @@ func (s *Store) admitSelectedAccountSession(account *Account, key string, now ti
 }
 
 func (s *Store) nextCapacityAdmittedFreshAccount(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy, now time.Time) *Account {
+	return s.nextCapacityAdmittedFreshAccountExcluding(key, apiKeyID, exclude, filter, policy, now, 0)
+}
+
+// nextCapacityAdmittedFreshAccountExcluding selects a fresh account while
+// excluding an owner that has already failed a non-capacity eligibility check.
+// The extra exclusion prevents a scheduler snapshot race from immediately
+// selecting the same owner again before its stale affinity is removed.
+func (s *Store) nextCapacityAdmittedFreshAccountExcluding(key string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy, now time.Time, excludedAccountID int64) *Account {
 	localExclude := cloneAccountExclusions(exclude)
+	if excludedAccountID > 0 {
+		localExclude[excludedAccountID] = true
+	}
+	attempted := make(map[int64]struct{})
 	for {
 		account := s.nextAccountForFreshAffinityWithDispatch(key, apiKeyID, localExclude, filter, policy)
 		if account == nil {
 			return nil
 		}
+		if _, repeated := attempted[account.DBID]; repeated {
+			// A scheduler implementation must honor exclusions. If it returns an
+			// already-tried account anyway, stop instead of spinning forever.
+			s.Release(account)
+			return nil
+		}
+		attempted[account.DBID] = struct{}{}
 		if s.admitSelectedAccountSession(account, key, now) {
 			return account
 		}
@@ -6731,6 +6750,11 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 	if key == "" {
 		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy), "", SessionAffinityGuard{}
 	}
+	// Keep the caller's explicit continuation requirement separate from the
+	// implicit retry pin below. A failure pin is only a retry hint; if the
+	// account becomes dispatch-ineligible while we are checking it, a fresh root
+	// must still be able to migrate to another account.
+	explicitPreserveBinding := preserveBinding
 
 	now := time.Now()
 	rootKey, relatedRequest := RelatedSessionRootKey(key)
@@ -6743,8 +6767,13 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		relatedSlotKey = key
 	}
 	// Account session capacity acts as a strong binding even if general account
-	// affinity is bounded or disabled. An active admitted conversation must not
-	// migrate to another upstream account.
+	// affinity is bounded or disabled. An active admitted conversation normally
+	// must not migrate to another upstream account. A fresh root request is the
+	// exception: if its owner is no longer dispatchable (for example quota
+	// auto-pause, an auth fence, or a request filter mismatch), the owner must be
+	// released and the request may be admitted on another account. The old code
+	// discarded the capacity/full distinction here and returned nil for every
+	// failed take, which turned an otherwise routable request into a 503.
 	if accountID, exists := s.AccountSessionAccountID(key, now); exists {
 		if exclude != nil && exclude[accountID] {
 			// A related Guardian/title/summary turn belongs to the root account.
@@ -6754,7 +6783,17 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			if relatedRequest {
 				return nil, "", SessionAffinityGuard{}
 			}
-			s.RemoveAccountSession(accountID, key)
+			if preserveBinding {
+				// An explicit continuation must never lose its owner merely
+				// because this attempt excluded it; the opaque upstream state is
+				// only valid on that account.
+				return nil, "", SessionAffinityGuard{}
+			}
+			// This is a request-local exclusion (usually a failed account on a
+			// retry). Remove both the hard window owner and the ordinary affinity
+			// entry before selecting a replacement, otherwise the stale owner is
+			// immediately found again on the next attempt.
+			s.UnbindSessionAffinity(key, accountID)
 		} else {
 			slotKey := key
 			concurrencyAllowance := int64(0)
@@ -6764,12 +6803,39 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			if protectedRelatedRequest {
 				concurrencyAllowance = 1
 			}
-			if acc := s.takeByIDModeWithConcurrencyAllowance(accountID, apiKeyID, exclude, filter, preserveBinding, slotKey, policy, concurrencyAllowance); acc != nil {
+			// A sticky retry pin is intentionally honored for a transient
+			// cooldown, but it must not keep an account that has become a hard
+			// dispatch fence (auto-pause, disabled, auth/error, exhausted usage)
+			// from being replaced. Related requests and explicit continuations
+			// remain strict regardless of the account state.
+			failurePinned := !relatedRequest && s.sessionAffinityFailurePinned(key, accountID) &&
+				s.accountMatchesSelectionConstraints(accountID, apiKeyID, exclude, filter, policy)
+			selectionPreserve := preserveBinding
+			if failurePinned && s.shouldRetainFailurePinnedBinding(accountID, now, policy) {
+				selectionPreserve = true
+			}
+			acc, capacityFull := s.takeByIDModeWithCapacity(accountID, apiKeyID, exclude, filter, selectionPreserve, slotKey, policy, concurrencyAllowance)
+			if acc != nil {
 				if s.admitSelectedAccountSession(acc, key, now) {
 					return acc, acc.GetProxyURL(), SessionAffinityGuard{}
 				}
 			}
-			return nil, "", SessionAffinityGuard{}
+			if relatedRequest || explicitPreserveBinding || capacityFull ||
+				(failurePinned && s.shouldRetainFailurePinnedBinding(accountID, time.Now(), policy)) {
+				// A related/continuation request cannot safely change accounts;
+				// a busy owner is a wait condition rather than permission to
+				// consume another account's session window.
+				return nil, "", SessionAffinityGuard{}
+			}
+			// The owner is unavailable for a fresh root request. Try another
+			// dispatchable account first; keep the old binding if the whole pool
+			// is unavailable so a later retry can use it after recovery.
+			fallback := s.nextCapacityAdmittedFreshAccountExcluding(key, apiKeyID, exclude, filter, policy, now, accountID)
+			if fallback == nil {
+				return nil, "", SessionAffinityGuard{}
+			}
+			s.UnbindSessionAffinity(key, accountID)
+			return fallback, "", SessionAffinityGuard{}
 		}
 	}
 	// Accounts without the hard window feature still have ordinary session
@@ -6823,12 +6889,18 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 
 	// 绑定账号是 Grok 时，用 Grok 专属粘性模式覆盖全局（默认 strict，减少中途换号致缓存失效）。
 	mode := s.GetAffinityMode()
+	failurePinned := false
 	if ok {
-		// A transient failure pin is stronger than bounded-affinity escape rules.
-		// It also prevents an unavailable/cooling account from silently falling
-		// through to a different account: the caller receives no candidate and can
-		// return the original error while preserving conversation ownership.
-		preserveBinding = preserveBinding || binding.failurePinned
+		// A transient failure pin is stronger than bounded-affinity escape rules
+		// only while the owner is in a recoverable cooldown. Once it becomes a
+		// hard dispatch fence (including quota auto-pause), ordinary fresh
+		// requests must be allowed to migrate. Explicit continuations always
+		// retain the binding through the preserveBinding argument.
+		failurePinned = binding.failurePinned && s.accountMatchesSelectionConstraints(binding.accountID, apiKeyID, exclude, filter, policy) &&
+			s.shouldRetainFailurePinnedBinding(binding.accountID, now, policy)
+		if failurePinned {
+			preserveBinding = true
+		}
 		if override := s.resolveGrokAffinityOverride(binding.accountID); override != "" {
 			mode = override
 		}
@@ -6839,7 +6911,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 
 	if ok {
 		if !s.affinityProxyStillValid(binding.accountID, binding.proxyURL) {
-			if preserveBinding {
+			if explicitPreserveBinding || (failurePinned && s.shouldRetainFailurePinnedBinding(binding.accountID, time.Now(), policy)) {
 				return s.takeByIDForContinuation(binding.accountID, apiKeyID, exclude, filter, key, policy), "", SessionAffinityGuard{}
 			}
 			s.UnbindSessionAffinity(key, binding.accountID)
@@ -6859,8 +6931,37 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			}
 		}
 
-		if expired || escape {
+		if expired {
 			s.UnbindSessionAffinity(key, binding.accountID)
+		} else if escape {
+			// Keep the old binding until a replacement is actually admitted. This
+			// matters when the owner is usage-limited and no other account is
+			// currently eligible: an authoritative continuation must still be able
+			// to find its original account (especially with
+			// ignore_usage_limit_status enabled), and a later retry can migrate
+			// once a replacement appears.
+			fallback := s.nextCapacityAdmittedFreshAccountExcluding(key, apiKeyID, exclude, filter, policy, now, binding.accountID)
+			if fallback != nil {
+				s.UnbindSessionAffinity(key, binding.accountID)
+				return fallback, "", SessionAffinityGuard{}
+			}
+			// Bounded affinity is an escape preference, not a requirement to
+			// manufacture a 503 when the owner is the only usable account. Reuse
+			// it if it still passes the request gates; unavailable owners (quota,
+			// auth, pause, etc.) fail this attempt and retain the binding for a
+			// strict continuation or a later recovery.
+			acc, _ := s.takeByIDModeWithCapacity(binding.accountID, apiKeyID, exclude, filter, false, key, policy, 0)
+			if acc != nil && s.admitSelectedAccountSession(acc, key, now) {
+				s.sessionMu.Lock()
+				if current, exists := s.sessionBindings[key]; exists && current.accountID == binding.accountID {
+					current.requestCount++
+					current.lastUsedAt = now
+					s.sessionBindings[key] = current
+				}
+				s.sessionMu.Unlock()
+				return acc, binding.proxyURL, SessionAffinityGuard{}
+			}
+			return nil, "", SessionAffinityGuard{}
 		} else {
 			acc, capacityFull := s.takeByIDModeWithCapacity(binding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy, 0)
 			if acc != nil && s.admitSelectedAccountSession(acc, key, now) {
@@ -6873,7 +6974,7 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				s.sessionMu.Unlock()
 				return acc, binding.proxyURL, SessionAffinityGuard{}
 			}
-			if preserveBinding {
+			if explicitPreserveBinding || (failurePinned && s.shouldRetainFailurePinnedBinding(binding.accountID, time.Now(), policy)) {
 				return nil, "", SessionAffinityGuard{}
 			}
 			if capacityFull {
@@ -6883,6 +6984,16 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				}
 				return fallback, "", SessionAffinityGuard{preserveAccountID: binding.accountID}
 			}
+			// The bound account failed a non-capacity eligibility check (quota,
+			// status, credential, model/group/egress filter, ...). A fresh root
+			// request may migrate, and the stale affinity must be removed once a
+			// replacement is available so the next attempt does not rediscover it.
+			fallback := s.nextCapacityAdmittedFreshAccountExcluding(key, apiKeyID, exclude, filter, policy, now, binding.accountID)
+			if fallback == nil {
+				return nil, "", SessionAffinityGuard{}
+			}
+			s.UnbindSessionAffinity(key, binding.accountID)
+			return fallback, "", SessionAffinityGuard{}
 		}
 	}
 	if binding, ok := s.getCachedSessionAffinity(key); ok {
@@ -6899,7 +7010,29 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 			cacheMode = override
 		}
 		if cacheMode == AffinityModeBounded && !preserveBinding && !s.affinityAccountStillHealthy(binding.accountID) {
-			// 不复用,落到完整挑号
+			// 不复用,落到完整挑号；找到替代账号后清理旧缓存，避免
+			// 自动暂停/状态恢复前的旧 owner 反复命中。
+			fallback := s.nextCapacityAdmittedFreshAccountExcluding(key, apiKeyID, exclude, filter, policy, now, binding.accountID)
+			if fallback != nil {
+				s.UnbindSessionAffinity(key, binding.accountID)
+				return fallback, "", SessionAffinityGuard{}
+			}
+			// If no alternative exists and the cached owner is still dispatchable
+			// (for example a lone warm account), keep serving it instead of turning
+			// bounded-affinity escape into a false 503. Hard fences are rejected by
+			// this take and retain the durable binding for continuations.
+			acc, _ := s.takeByIDModeWithCapacity(binding.accountID, apiKeyID, exclude, filter, false, key, policy, 0)
+			if acc != nil && s.admitSelectedAccountSession(acc, key, now) {
+				s.sessionMu.Lock()
+				if s.sessionBindings == nil {
+					s.sessionBindings = make(map[string]sessionAffinity)
+				}
+				binding.lastUsedAt = now
+				s.sessionBindings[key] = binding
+				s.sessionMu.Unlock()
+				return acc, binding.proxyURL, SessionAffinityGuard{}
+			}
+			return nil, "", SessionAffinityGuard{}
 		} else {
 			acc, capacityFull := s.takeByIDModeWithCapacity(binding.accountID, apiKeyID, exclude, filter, preserveBinding, key, policy, 0)
 			if acc != nil && s.admitSelectedAccountSession(acc, key, now) {
@@ -6921,6 +7054,12 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 				}
 				return fallback, "", SessionAffinityGuard{preserveAccountID: binding.accountID}
 			}
+			fallback := s.nextCapacityAdmittedFreshAccountExcluding(key, apiKeyID, exclude, filter, policy, now, binding.accountID)
+			if fallback == nil {
+				return nil, "", SessionAffinityGuard{}
+			}
+			s.UnbindSessionAffinity(key, binding.accountID)
+			return fallback, "", SessionAffinityGuard{}
 		}
 	}
 
@@ -7152,8 +7291,9 @@ func buildProxyPoolSet(urls []string) map[string]struct{} {
 	return set
 }
 
-// affinityAccountStillHealthy 检查一个粘性绑定的账号是否仍处于 healthy 桶。
-// 若已掉到 warm/risky/banned 或不可调度,则 bounded 模式会逃逸并重新挑号。
+// affinityAccountStillHealthy 检查一个粘性绑定的账号是否仍适合 fresh
+// dispatch。若已掉到 warm/risky/banned、主动暂停、有效冷却或用量自动暂停,
+// 则 bounded 模式会逃逸并重新挑号；已过期的 cooldown 不会造成无谓换号。
 func (s *Store) affinityAccountStillHealthy(accountID int64) bool {
 	if s == nil || accountID == 0 {
 		return false
@@ -7167,13 +7307,129 @@ func (s *Store) affinityAccountStillHealthy(accountID int64) bool {
 	if atomic.LoadInt32(&target.Disabled) != 0 || atomic.LoadInt32(&target.DispatchPaused) != 0 {
 		return false
 	}
+	now := time.Now()
 	target.mu.RLock()
 	defer target.mu.RUnlock()
-	if target.Status == StatusError || target.Status == StatusCooldown {
+	if target.Status == StatusError {
+		return false
+	}
+	// A cooldown that has already elapsed is recoverable and should not force
+	// an otherwise healthy sticky session to rotate. Active cooldowns and
+	// usage/auto-pause fences, however, are not eligible for a fresh request.
+	if target.Status == StatusCooldown && now.Before(target.CooldownUtil) {
+		return false
+	}
+	if target.quotaAutoPausedLocked(now) ||
+		target.usageWindowBlocksFreshDispatchLocked(now) {
 		return false
 	}
 	tier := target.healthTierLocked()
 	return tier == HealthTierHealthy
+}
+
+// sessionAffinityFailurePinned reports whether a local sticky-failure pin is
+// still attached to the exact session/account pair. Pins are intentionally
+// process-local; they are a retry hint rather than durable ownership evidence.
+func (s *Store) sessionAffinityFailurePinned(key string, accountID int64) bool {
+	if s == nil || accountID == 0 || strings.TrimSpace(key) == "" {
+		return false
+	}
+	s.sessionMu.RLock()
+	binding, ok := s.sessionBindings[strings.TrimSpace(key)]
+	s.sessionMu.RUnlock()
+	return ok && binding.accountID == accountID && binding.failurePinned
+}
+
+// accountMatchesSelectionConstraints reports whether a failure-pinned owner is
+// still a candidate for the current request. A failure pin is only a retry
+// hint for the same route; it must not turn a request-level model/group/API-key
+// or egress rejection into a permanent 503. Availability and concurrency are
+// deliberately excluded here because those are the conditions the pin is
+// meant to preserve while the owner recovers.
+func (s *Store) accountMatchesSelectionConstraints(accountID, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy) bool {
+	if s == nil || accountID == 0 || (exclude != nil && exclude[accountID]) {
+		return false
+	}
+	s.mu.RLock()
+	account := s.lookupByIDLocked(accountID)
+	s.mu.RUnlock()
+	if account == nil || !s.accountAllowedForAPIKey(account, apiKeyID) {
+		return false
+	}
+	filter = s.withUsableEgressFilter(filter)
+	if filter != nil && !filter(account) {
+		return false
+	}
+	// Model cooldowns are request-scoped eligibility fences and are normally
+	// supplied by the caller's filter (WithModelCooldownFilter). Do not inspect
+	// the account-level cached transport cooldown here: a recoverable 429 pin is
+	// precisely the condition this retry hint is intended to preserve.
+	return true
+}
+
+// shouldRetainFailurePinnedBinding distinguishes a recoverable account from a
+// hard dispatch fence. A sticky retry pin is useful for every account that can
+// still recover (including a ready account whose previous request failed), but
+// it must not turn a quota-paused, disabled, unauthorized, or otherwise
+// non-dispatchable account into a permanent 503 for a fresh request. The caller
+// still keeps explicit continuation/related requests strict; this helper only
+// governs the implicit pin added by the transient-retry policy.
+func (s *Store) shouldRetainFailurePinnedBinding(accountID int64, now time.Time, policy DispatchPolicy) bool {
+	if s == nil || accountID == 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if target := s.FindByID(accountID); target != nil {
+		// A runtime cooldown can survive a process restart while the in-memory
+		// Account is still marked ready. Hydrate it before deciding whether a
+		// transient failure pin is safe; otherwise takeByIDModeWithCapacity would
+		// reject the owner after this helper had already elected to preserve it,
+		// turning a usage/cooldown fallback into a false 503.
+		if s.tokenCache != nil {
+			s.accountHasCachedCooldown(target)
+		}
+		if atomic.LoadInt32(&target.Disabled) != 0 || atomic.LoadInt32(&target.DispatchPaused) != 0 {
+			return false
+		}
+		target.mu.RLock()
+		defer target.mu.RUnlock()
+		if target.Status == StatusError || target.healthTierLocked() == HealthTierBanned || !target.hasDispatchCredentialLocked() {
+			return false
+		}
+		// A usage/auto-pause fence is not a transient transport failure. It is
+		// safe for a fresh root request to migrate even when a previous retry
+		// pinned this session to the account.
+		if target.quotaAutoPausedLocked(now) ||
+			target.usageWindowBlocksFreshDispatchLocked(now) {
+			return false
+		}
+		// Spark has an independent usage window. A standard transport failure pin
+		// must not turn a fresh Spark request into a false 503 after that window
+		// is exhausted; the normal Spark scheduler can use another account. Keep
+		// the pin for recoverable transport cooldowns, which are intentionally
+		// handled below as a separate condition.
+		if policy == DispatchPolicySpark && target.sparkUsageExhaustedLocked(now) {
+			return false
+		}
+		if target.Status == StatusCooldown && now.Before(target.CooldownUtil) && isUsageLimitCooldownReason(target.CooldownReason) {
+			return false
+		}
+		// Credential refresh and other administrative/authentication fences are
+		// not recoverable transport retries. They can coexist briefly with a
+		// previously recorded failure pin (for example when another request gets
+		// a 401 concurrently), so do not let that pin turn an otherwise routable
+		// fresh request into a 503 while the account is being refreshed.
+		switch strings.ToLower(strings.TrimSpace(target.CooldownReason)) {
+		case "credential_refresh", "forbidden", "version_required", "payment_required", "quota_paused", "quota_exhausted", "spark_usage_limit":
+			return false
+		}
+		// Ready accounts and active non-usage cooldowns are recoverable; keep
+		// the pin so the existing sticky-retry contract remains unchanged.
+		return true
+	}
+	return false
 }
 
 func (s *Store) getCachedSessionAffinity(key string) (sessionAffinity, bool) {
@@ -8692,10 +8948,25 @@ func (s *Store) recomputeAllGroupBaseConcurrency() {
 }
 
 func (s *Store) recomputeAllEffectiveAutoPause() {
+	if s == nil {
+		return
+	}
+	baseLimit := atomic.LoadInt64(&s.maxConcurrency)
 	for _, acc := range s.accountSnapshotAccounts() {
+		if acc == nil {
+			continue
+		}
 		acc.mu.Lock()
 		acc.recomputeEffectiveAutoPause(s)
+		// The effective thresholds participate in both availability and the
+		// dynamic concurrency/health snapshot consumed by the indexed scheduler.
+		// Recompute it while applying a hot setting change; otherwise an account
+		// removed from an indexed bucket when it was auto-paused may never be
+		// reinserted when the threshold is relaxed (and can surface as a false
+		// 503), while the inverse transition can retain stale capacity metadata.
+		acc.recomputeSchedulerLocked(baseLimit)
 		acc.mu.Unlock()
+		s.fastSchedulerUpdate(acc)
 	}
 }
 
@@ -8732,6 +9003,12 @@ func (s *Store) AddAccounts(accounts []*Account) {
 		acc.grokRuntimeSink = s
 		acc.recomputeEffectiveIgnoreUsageLimitStatus(ignoreUsageLimit)
 		acc.recomputeEffectiveGroupBaseConcurrency(s)
+		// Accounts added through the runtime/admin path may not have gone
+		// through buildAccountFromRow (and therefore may not carry the resolved
+		// global/group auto-pause thresholds yet). Resolve them before the first
+		// scheduler snapshot so a freshly added, quota-paused account cannot
+		// briefly enter the pool or later become a sticky false-503 owner.
+		acc.recomputeEffectiveAutoPause(s)
 		acc.recomputeSchedulerLocked(maxConcurrency)
 		acc.mu.Unlock()
 		added = append(added, acc)

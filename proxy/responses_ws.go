@@ -555,9 +555,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	retryExclusions := newRetryAccountExclusions()
 	invalidEncryptedContentRetried := false
 	// 官方 Codex 每个 turn 都使用新的 ModelClientSession，并只在同一 turn 的
-	// 后续请求里回送 x-codex-turn-state。只有该信号和既有绑定同时存在时，才允许
-	// 忽略本地 WHAM 100% 快照；previous_response_id 本身不足以证明这是活跃 turn。
-	continuationPinned := turnContinuation && turnHasBinding
+	// 后续请求里回送 x-codex-turn-state。只有该信号和既有绑定/硬窗口 owner
+	// 同时存在时，才允许忽略本地 WHAM 100% 快照。previous_response_id 本身
+	// 不足以证明这是活跃 turn；但重启后若硬窗口 owner仍在，则它能补上本地
+	// affinity 丢失的连续性证据。
+	continuationPinned := codexContinuationPinned(turnContinuation, hasPreviousResponse, turnHasBinding, priorSessionAccountID)
 	continuationDegraded := false
 	degradeContinuation := func(reason string, attempt int) {
 		continuationDegraded = true

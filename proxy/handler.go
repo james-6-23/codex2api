@@ -425,6 +425,18 @@ func codexWSTurnContinuationToken(body []byte) string {
 	return codexTurnContinuationToken(nil, body)
 }
 
+// codexContinuationPinned reports whether the request carries enough local
+// continuity evidence to require the account that owns the current session
+// window. An ordinary affinity binding alone is not enough for a fresh turn;
+// a hard account-session owner, however, closes the restart gap for turn-state
+// and previous_response_id requests when the in-process affinity map was lost.
+func codexContinuationPinned(turnContinuation, hasPreviousResponse, hasBinding bool, hardOwnerAccountID int64) bool {
+	if turnContinuation && (hasBinding || hardOwnerAccountID > 0) {
+		return true
+	}
+	return hasPreviousResponse && hardOwnerAccountID > 0
+}
+
 // applyAffinityGroupRouting keeps fingerprinted requests on the API key's original groups
 // and routes requests without either a Codex engine fingerprint or the dedicated local
 // affinity header to the configured split groups.
@@ -3958,7 +3970,8 @@ func (h *Handler) Responses(c *gin.Context) {
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	turnContinuation := codexTurnContinuationToken(c.Request.Header, rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
-	turnContinuationPinned := turnContinuation && turnHasBinding
+	hasPreviousResponse := strings.TrimSpace(gjson.GetBytes(rawBody, "previous_response_id").String()) != ""
+	turnContinuationPinned := codexContinuationPinned(turnContinuation, hasPreviousResponse, turnHasBinding, priorSessionAccountID)
 	ruleIdentity := h.payloadRuleIdentity(c)
 	reasoningEffort := extractReasoningEffort(rawBody)
 	serviceTier := extractServiceTier(rawBody)
@@ -4103,10 +4116,10 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
-			} else if continuationUnavailable && !relayContinuationAttempted {
-				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			} else if turnContinuationPinned {
 				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			} else if continuationUnavailable && !relayContinuationAttempted {
+				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			} else {
 				account, stickyProxyURL, affinityGuard = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			}
@@ -6036,6 +6049,14 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// 准备上游请求体（previous_response_id 缓存按下游 API Key 隔离）
 	bodyPreparation := prepareCompactResponsesBodyForOwnerDetailed(rawBody, responseCacheOwner(apiKeyID))
 	codexBody := bodyPreparation.Body
+	// Compaction is itself a continuation of the user window. If either the
+	// ordinary affinity or the hard account-session owner survived a restart,
+	// keep it strict so a paused owner cannot make the compaction state cross
+	// accounts. A brand-new compaction root still uses normal scheduling.
+	compactContinuationPinned := priorSessionAccountID > 0
+	if _, bound := h.store.SessionAffinityAccountID(affinityKey); bound {
+		compactContinuationPinned = true
+	}
 	respCacheOwner := responseCacheOwner(apiKeyID)
 	var previousResponseAffinity responseAccountAffinity
 	var previousResponseAffinityFound bool
@@ -6106,13 +6127,13 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var account *auth.Account
 		var stickyProxyURL string
 		var affinityGuard auth.SessionAffinityGuard
-		if attempt == 0 && previousResponseAffinityFound && !compactHasBinding && priorSessionAccountID == 0 {
+		if attempt == 0 && previousResponseAffinityFound && !compactContinuationPinned && !compactHasBinding && priorSessionAccountID == 0 {
 			account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			}
 		}
-		if account == nil && attempt == 0 && compactionAffinity.Known {
+		if account == nil && attempt == 0 && compactionAffinity.Known && !compactContinuationPinned {
 			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 				h.store.Release(account)
@@ -6123,7 +6144,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 		}
 		if account == nil {
-			account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			if compactContinuationPinned {
+				account, stickyProxyURL = h.store.NextForContinuationWithDispatch(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			} else {
+				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			}
 		}
 		if account == nil {
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6150,7 +6175,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
 				return
 			}
-			account, stickyProxyURL, affinityGuard = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			if compactContinuationPinned {
+				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			} else {
+				account, stickyProxyURL, affinityGuard = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			}
 			if account == nil {
 				if !claimContinuousRetryTerminal(c, continuousRetryProtocolResponses) {
 					return
