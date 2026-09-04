@@ -73,6 +73,9 @@ var builtinModelInfos = []ModelInfo{
 	modelInfoForID("gpt-5.6-sol", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.6-terra", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.6-luna", ModelSourceBuiltin),
+	// gpt-6-astra is a newly published major-only Codex slug. Keep it in the
+	// builtin fallback so requests do not depend on a client manifest refresh.
+	modelInfoForID("gpt-6-astra", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.5", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.4", ModelSourceBuiltin),
 	modelInfoForID("gpt-5.4-mini", ModelSourceBuiltin),
@@ -119,7 +122,7 @@ func modelInfoForID(id string, source string) ModelInfo {
 	switch strings.ToLower(id) {
 	case "gpt-5.3-codex-spark":
 		info.ProOnly = true
-	case "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna":
+	case "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra":
 		info.APIKeyAuthAvailable = false
 	case "gpt-image-2":
 		info.Category = ModelCategoryImage
@@ -430,6 +433,8 @@ func modelSortRank(id string) int {
 // （官方文档同步 + manifest 学习共用）。策略：
 //   - gpt-5.4 及更高版本：允许
 //   - gpt-5.3：只允许 spark 变体（gpt-5.3-codex-spark），其余 5.3 下线
+//   - 当前明确适配的 major-only slug gpt-6-astra 单独放行；其他没有次版本号
+//     的新名称仍保持拒绝，避免把任意伪造模型加入注册表。
 //   - gpt-5.2 及更低、image、非 gpt- 前缀：拒绝
 func isAllowedUpstreamCodexModel(id string) bool {
 	id = strings.TrimSpace(strings.ToLower(id))
@@ -438,6 +443,9 @@ func isAllowedUpstreamCodexModel(id string) bool {
 	}
 	if !strings.HasPrefix(id, "gpt-") {
 		return false
+	}
+	if id == "gpt-6-astra" {
+		return true
 	}
 	version := strings.TrimPrefix(id, "gpt-")
 	if dash := strings.IndexByte(version, '-'); dash >= 0 {

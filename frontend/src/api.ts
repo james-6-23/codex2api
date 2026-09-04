@@ -847,9 +847,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
-  // 拉取该账号真实的上游模型清单(slug 列表,不落库),供白名单编辑器合并使用。
+  // 拉取该账号真实的上游模型清单；已有非空白名单会自动并入缺少的新模型，
+  // 空白名单保持“全部放行”语义。
   syncAccountModelsUpstream: (id: number) =>
-    request<{ models: string[] }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
+    request<{
+      models: string[]
+      whitelist?: string[]
+      whitelist_added?: string[]
+    }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
   // 用账号自身凭据并发探测系统文本模型(已排除 image),返回确认可用的模型及每个模型的判定明细。只读不落库。
   probeAccountModels: (id: number) =>
     request<{

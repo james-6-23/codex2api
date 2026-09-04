@@ -33,9 +33,10 @@ func TestParseOfficialCodexModelIDs(t *testing.T) {
 		<code>codex -m gpt-5.2</code>
 		<code>codex -m gpt-5.2-codex</code>
 		<code>codex -m gpt-4.1</code>
+		<code>codex -m gpt-6-astra</code>
 	`
 	models, skipped := ParseOfficialCodexModelIDs(html)
-	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark", "gpt-6-astra"} {
 		if !slices.Contains(models, model) {
 			t.Fatalf("parsed models missing %q in %v", model, models)
 		}
@@ -294,6 +295,9 @@ func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
 		"gpt-5.4":             true,
 		"gpt-5.4-mini":        true,
 		"gpt-6.0":             true,
+		"gpt-6-astra":         true,
+		"gpt-6-astra-v2":      false,
+		"gpt-6":               false,
 		"gpt-5.3-codex-spark": true,
 		"gpt-5.3-codex":       false,
 		"gpt-5.3":             false,

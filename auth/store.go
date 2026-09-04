@@ -9759,7 +9759,31 @@ func (s *Store) ApplyAccountModels(dbID int64, models []string) bool {
 	acc.mu.Lock()
 	acc.Models = normalizeModelList(models)
 	acc.mu.Unlock()
+	s.invalidateRoutingSchedulers()
+	s.fastSchedulerUpdate(acc)
 	return true
+}
+
+// MergeAccountModelsFromUpstream appends model IDs confirmed by the account's
+// own upstream manifest to an existing explicit allowlist. Empty allowlists
+// are the unlimited sentinel and remain empty. The database performs the
+// merge atomically so a background manifest refresh cannot clobber an admin
+// edit made at the same time; the returned list is the persisted result.
+func (s *Store) MergeAccountModelsFromUpstream(ctx context.Context, dbID int64, upstream []string) ([]string, []string, error) {
+	if s == nil || s.db == nil || dbID <= 0 || len(upstream) == 0 {
+		return nil, nil, nil
+	}
+	merged, added, err := s.db.MergeAccountModels(ctx, dbID, upstream)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Even when no new slug was appended, the transaction may have observed
+	// that another process cleared the whitelist. Refresh the runtime snapshot
+	// from the transaction result so routing does not keep a stale restriction.
+	if acc := s.FindByID(dbID); acc != nil {
+		s.ApplyAccountModels(dbID, merged)
+	}
+	return merged, added, nil
 }
 
 func (s *Store) ApplyAccountProxyURL(dbID int64, proxyURL string) bool {

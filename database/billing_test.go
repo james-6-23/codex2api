@@ -188,6 +188,7 @@ func TestGPT56VariantPricing(t *testing.T) {
 		{"gpt-5.6-terra", 2.0, 12.0, 0.2, 4.0, 24.0},
 		{"gpt-5.6-luna", 0.2, 1.2, 0.02, 0.4, 2.4},
 		{"gpt-5.6-sol-high", 5.0, 30.0, 0.5, 10.0, 60.0},
+		{"gpt-6-astra", 5.0, 30.0, 0.5, 10.0, 60.0},
 	}
 	for _, c := range cases {
 		p := GetModelPricing(c.model)
@@ -200,6 +201,13 @@ func TestGPT56VariantPricing(t *testing.T) {
 		got := CalculateCost(n, n, 0, c.model, "fast")
 		want := (c.priorityIn + c.priorityOut) * float64(n) / 1_000_000.0
 		assertFloatEqual(t, got, want)
+	}
+}
+
+func TestGPT6AstraPricingIsExact(t *testing.T) {
+	pricing := GetModelPricing("gpt-6-astra-v2")
+	if pricing.InputPricePerMToken == 5.0 && pricing.OutputPricePerMToken == 30.0 {
+		t.Fatalf("unsupported gpt-6-astra variant inherited exact-model pricing: %+v", pricing)
 	}
 }
 

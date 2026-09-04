@@ -5294,8 +5294,11 @@ export default function Accounts() {
       const result = await api.syncAccountModelsUpstream(modelsAccount.id);
       const fetched = result.models ?? [];
       setModelsDraft((current) => mergeModelLists(current, fetched));
+      const added = result.whitelist_added?.length ?? 0;
       showToast(
-        t("accounts.supportedModelsSyncDone", { count: fetched.length }),
+        added > 0
+          ? t("accounts.supportedModelsSyncDoneWithAutoAdded", { count: fetched.length, added })
+          : t("accounts.supportedModelsSyncDone", { count: fetched.length }),
       );
     } catch (error) {
       showToast(
@@ -10369,6 +10372,9 @@ export default function Accounts() {
                   </Button>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
+                  {t("accounts.supportedModelsSyncHint")}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
                   {t("accounts.supportedModelsProbeHint")}
                 </p>
                 {probeBoard.length > 0 && (
@@ -15223,11 +15229,21 @@ function TestConnectionModal({
 
         const modelsResp = await api.getModels();
         if (!active) return;
+        // Keep account-declared entries in the selector even when the global
+        // catalog is scoped, stale, or temporarily unavailable. This is
+        // especially important immediately after a newly published model is
+        // auto-added to an account whitelist.
+        const accountModels = (account.models ?? []).filter(
+          isConnectionTestModel,
+        );
         const upstreamModels = extractTextModels(modelsResp);
         const preferredModel = isConnectionTestModel(settings.test_model)
           ? settings.test_model
           : DEFAULT_TEST_MODEL;
-        const nextModels = uniqueTestModels(upstreamModels, preferredModel);
+        const nextModels = uniqueTestModels(
+          [...accountModels, ...upstreamModels],
+          preferredModel,
+        );
         setModelOptions(nextModels);
         setSelectedModel(
           (current) => current || nextModels[0] || DEFAULT_TEST_MODEL,
@@ -15261,7 +15277,10 @@ function TestConnectionModal({
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0] || "");
         } else {
-          const fallbackModels = uniqueTestModels([], DEFAULT_TEST_MODEL);
+          const fallbackModels = uniqueTestModels(
+            (account.models ?? []).filter(isConnectionTestModel),
+            DEFAULT_TEST_MODEL,
+          );
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0]);
         }

@@ -86,6 +86,18 @@ var (
 			LongOutputPricePerMToken:    45.0,
 			LongCacheReadPricePerMToken: 1.0,
 		}},
+		// gpt-6-astra: official price is not exposed by the current pricing
+		// endpoint yet. Use the conservative gpt-5.6-sol-equivalent snapshot
+		// ($5/$30, cache $0.50; long $10/$45, cache $1.00) until an official
+		// rate is published. Operators can override this exact key in settings.
+		{model: "gpt-6-astra", pricing: ModelPricing{
+			InputPricePerMToken:         5.0,
+			OutputPricePerMToken:        30.0,
+			CacheReadPricePerMToken:     0.5,
+			LongInputPricePerMToken:     10.0,
+			LongOutputPricePerMToken:    45.0,
+			LongCacheReadPricePerMToken: 1.0,
+		}},
 		// gpt-5.6-terra: 2026-07-30 官方降价 20%（$2/$12，原 $2.5/$15），priority 2×；
 		// 独立规范键，便于定价页单独覆盖，不与 gpt-5.4 互相污染。
 		{model: "gpt-5.6-terra", pricing: ModelPricing{
@@ -420,6 +432,8 @@ func normalizeCodexBillingModel(model string) (string, bool) {
 	// priority 均为 standard 的 2×，由 serviceTierCostMultiplier 兜底自动得出，无需显式配置。
 	case strings.Contains(compact, "gpt-5.6-sol") || strings.Contains(compact, "gpt5-6-sol") || strings.Contains(compact, "gpt5.6-sol"):
 		return "gpt-5.6-sol", true
+	case compact == "gpt-6-astra":
+		return "gpt-6-astra", true
 	case strings.Contains(compact, "gpt-5.6-terra") || strings.Contains(compact, "gpt5-6-terra") || strings.Contains(compact, "gpt5.6-terra"):
 		return "gpt-5.6-terra", true
 	case strings.Contains(compact, "gpt-5.6-luna") || strings.Contains(compact, "gpt5-6-luna") || strings.Contains(compact, "gpt5.6-luna"):
@@ -463,6 +477,12 @@ func modelRulePricing(model string) *ModelPricing {
 	bestLen := -1
 	for i := range modelPricingRules {
 		rule := modelPricingRules[i]
+		// gpt-6-astra is intentionally supported as one exact slug. Do not
+		// let the generic prefix matcher assign its price to look-alike future
+		// variants before those variants are explicitly supported.
+		if rule.model == "gpt-6-astra" && model != rule.model {
+			continue
+		}
 		if modelMatchesRule(model, rule.model) && len(rule.model) > bestLen {
 			bestIdx = i
 			bestLen = len(rule.model)

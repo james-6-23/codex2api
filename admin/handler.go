@@ -4404,7 +4404,8 @@ func validateAccountModelsForAccount(account *auth.Account, models []string) err
 }
 
 // SyncAccountUpstreamModels 用账号自身凭据实时拉取上游模型清单，
-// 返回该账号真实可用的模型 slug 列表。只读不落库，由管理端确认后再保存为白名单。
+// 返回该账号真实可用的模型 slug 列表。已有非空白名单会自动并入清单中
+// 缺少的新模型；空白名单代表“全部放行”，保持为空不落库。
 func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -4444,7 +4445,12 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 			return
 		}
 		models = auth.NormalizeAccountModels(models)
-		c.JSON(http.StatusOK, gin.H{"models": models})
+		whitelist, added, mergeErr := h.store.MergeAccountModelsFromUpstream(c.Request.Context(), id, models)
+		if mergeErr != nil {
+			writeError(c, http.StatusInternalServerError, fmt.Sprintf("更新账号模型白名单失败: %s", mergeErr.Error()))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"models": models, "whitelist": whitelist, "whitelist_added": added})
 		return
 	}
 	if account.IsOpenAIResponsesAPI() {
@@ -4465,7 +4471,12 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 		writeError(c, http.StatusBadGateway, "上游模型清单未返回可用模型")
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"models": models})
+	whitelist, added, mergeErr := h.store.MergeAccountModelsFromUpstream(c.Request.Context(), id, models)
+	if mergeErr != nil {
+		writeError(c, http.StatusInternalServerError, fmt.Sprintf("更新账号模型白名单失败: %s", mergeErr.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models, "whitelist": whitelist, "whitelist_added": added})
 }
 
 // importToken 导入时的统一 token 载体
@@ -9117,8 +9128,8 @@ type updateSettingsReq struct {
 	SessionAffinitySpread               *bool                            `json:"session_affinity_spread"`
 	SessionWindowBalanceEnabled         *bool                            `json:"session_window_balance_enabled"`
 	PassiveInternalModelsEnabled        *bool                            `json:"passive_internal_models_enabled"`
-	CodexUnlinkedAccountFallbackEnabled *bool                           `json:"codex_unlinked_account_fallback_enabled"`
-	CodexUnlinkedAccountFallbackSeconds *int                            `json:"codex_unlinked_account_fallback_seconds"`
+	CodexUnlinkedAccountFallbackEnabled *bool                            `json:"codex_unlinked_account_fallback_enabled"`
+	CodexUnlinkedAccountFallbackSeconds *int                             `json:"codex_unlinked_account_fallback_seconds"`
 	SessionSlotBufferEnabled            *bool                            `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            *int                             `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    *string                          `json:"grok_affinity_mode"`
