@@ -4085,7 +4085,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
-			if attempt == 0 && previousResponseAffinityFound && !turnContinuationPinned && !turnHasBinding {
+			if attempt == 0 && previousResponseAffinityFound && !turnContinuationPinned && !turnHasBinding && priorSessionAccountID == 0 {
 				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil {
 					stickyProxyURL = account.GetProxyURL()
@@ -6106,7 +6106,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var account *auth.Account
 		var stickyProxyURL string
 		var affinityGuard auth.SessionAffinityGuard
-		if attempt == 0 && previousResponseAffinityFound && !compactHasBinding {
+		if attempt == 0 && previousResponseAffinityFound && !compactHasBinding && priorSessionAccountID == 0 {
 			account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()

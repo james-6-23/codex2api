@@ -592,7 +592,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
-			if attempt == 0 && previousResponseAffinityFound && !continuationPinned && !turnHasBinding {
+			if attempt == 0 && previousResponseAffinityFound && !continuationPinned && !turnHasBinding && priorSessionAccountID == 0 {
 				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil {
 					stickyProxyURL = account.GetProxyURL()

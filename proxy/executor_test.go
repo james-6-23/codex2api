@@ -1635,6 +1635,60 @@ func TestResolveNativeCodexSessionGraphCollapsesSubagentsToRoot(t *testing.T) {
 	}
 }
 
+func TestResolveExplicitSessionIDUsesBodyNativeGraph(t *testing.T) {
+	body := []byte(`{"client_metadata":{"session_id":"` + testRootSessionA + `","thread_id":"` + testLeafSessionA + `","client_request_id":"` + testLeafSessionA + `","window_id":"` + testLeafSessionA + `:21","parent_thread_id":"` + testRootSessionA + `"}}`)
+
+	if got := ResolveExplicitSessionID(nil, body); got != testRootSessionA {
+		t.Fatalf("body native graph explicit id = %q, want root %q", got, testRootSessionA)
+	}
+	if got := ResolveStableExplicitSessionID(nil, body); got != testRootSessionA {
+		t.Fatalf("body native graph stable id = %q, want root %q", got, testRootSessionA)
+	}
+	identity := resolveRequestSessionIdentity(nil, body)
+	if identity.explicitUpstreamID != testRootSessionA || !identity.stableIdentity {
+		t.Fatalf("body native graph was not promoted to explicit identity: %+v", identity)
+	}
+}
+
+func TestResolveExplicitSessionIDRejectsIncompleteBodyNativeGraph(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"client_metadata":{"thread_id":"` + testLeafSessionA + `"}}`),
+		[]byte(`{"client_metadata":{"session_id":"` + testRootSessionA + `","thread_id":"` + testLeafSessionA + `","window_id":"` + testLeafSessionA + `:21"}}`),
+		[]byte(`{"client_metadata":{"session_id":"` + testRootSessionA + `","thread_id":"` + testLeafSessionA + `","client_request_id":"different","window_id":"` + testLeafSessionA + `:21","parent_thread_id":"` + testRootSessionA + `"}}`),
+	} {
+		if got := ResolveExplicitSessionID(nil, body); got != "" {
+			t.Fatalf("incomplete/conflicting body graph explicit id = %q, want empty", got)
+		}
+		if got := ResolveStableExplicitSessionID(nil, body); got != "" {
+			t.Fatalf("incomplete/conflicting body graph stable id = %q, want empty", got)
+		}
+	}
+}
+
+func TestResolveExplicitSessionIDHeaderNativeGraphWinsOverBodyGraph(t *testing.T) {
+	rootB := testRootSessionB
+	headers := nativeSessionHeaders(testRootSessionA, testLeafSessionA, 22)
+	body := []byte(`{"client_metadata":{"session_id":"` + rootB + `","thread_id":"` + testLeafSessionB + `","client_request_id":"` + testLeafSessionB + `","window_id":"` + testLeafSessionB + `:22","parent_thread_id":"` + rootB + `"}}`)
+
+	if got := ResolveExplicitSessionID(headers, body); got != testRootSessionA {
+		t.Fatalf("header native graph was overwritten by body graph: got %q, want %q", got, testRootSessionA)
+	}
+	if got := ResolveStableExplicitSessionID(headers, body); got != testRootSessionA {
+		t.Fatalf("header native stable graph was overwritten by body graph: got %q, want %q", got, testRootSessionA)
+	}
+}
+
+func TestResolveExplicitSessionIDBodyForkUsesCurrentRoot(t *testing.T) {
+	body := []byte(`{"client_metadata":{"session_id":"` + testLeafSessionA + `","thread_id":"` + testLeafSessionA + `","client_request_id":"` + testLeafSessionA + `","window_id":"` + testLeafSessionA + `:0","forked_from_thread_id":"` + testRootSessionA + `","thread_source":"user","request_kind":"turn"}}`)
+
+	if got := ResolveExplicitSessionID(nil, body); got != testLeafSessionA {
+		t.Fatalf("body fork explicit id = %q, want current root %q", got, testLeafSessionA)
+	}
+	if got := ResolveExplicitSessionID(nil, body); got == testRootSessionA {
+		t.Fatal("fork source thread was incorrectly used as current explicit session")
+	}
+}
+
 func TestResolveNativeCodexSessionGraphRejectsMismatchedWindow(t *testing.T) {
 	root := "7c0a82a4-1f90-41a0-8c52-50982eef3111"
 	headers := http.Header{

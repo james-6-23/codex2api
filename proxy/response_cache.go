@@ -770,7 +770,9 @@ func respCacheCleanupLoop() {
 	ticker := time.NewTicker(responseCleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		cleanupResponseCacheExpired(time.Now())
+		now := time.Now()
+		cleanupResponseCacheExpired(now)
+		cleanupResponseAccountAffinityExpired(now)
 	}
 }
 

@@ -6525,7 +6525,11 @@ func (s *Store) bindSessionAffinity(key string, account *Account, proxyURL strin
 	s.sessionBindings[key] = binding
 	s.sessionMu.Unlock()
 
-	if s.tokenCache != nil {
+	// Unstable/content-derived affinity is deliberately process-local. It may
+	// remain in sessionBindings for fast reuse during this process, but writing
+	// it to the shared runtime cache would resurrect a low-confidence account
+	// choice after a restart (and make it look like a durable root binding).
+	if s.tokenCache != nil && !isProcessLocalSessionAffinityKey(key) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 		if err := s.tokenCache.SetSessionAffinity(ctx, key, cache.SessionAffinityBinding{
@@ -6613,7 +6617,7 @@ func (s *Store) UnbindSessionAffinity(key string, accountID int64) {
 	}
 	s.sessionMu.Unlock()
 
-	if s.tokenCache != nil {
+	if s.tokenCache != nil && !isProcessLocalSessionAffinityKey(key) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
 		if err := s.tokenCache.DeleteSessionAffinity(ctx, key, accountID); err != nil {
@@ -7173,7 +7177,7 @@ func (s *Store) affinityAccountStillHealthy(accountID int64) bool {
 }
 
 func (s *Store) getCachedSessionAffinity(key string) (sessionAffinity, bool) {
-	if s == nil || s.tokenCache == nil {
+	if s == nil || s.tokenCache == nil || isProcessLocalSessionAffinityKey(key) {
 		return sessionAffinity{}, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)

@@ -26,6 +26,16 @@ const (
 
 const UnstableSessionCapacityPrefix = "unstable-affinity:"
 
+// isProcessLocalSessionAffinityKey identifies a low-confidence affinity key
+// (currently the content/Merkle-derived fallback). These keys are useful while
+// the current process is alive, but they are not proof of a durable upstream
+// conversation and must never be restored from or written to the shared
+// runtime cache. Keeping the predicate in auth centralizes the rule for every
+// cache/account-window path.
+func isProcessLocalSessionAffinityKey(key string) bool {
+	return strings.HasPrefix(strings.TrimSpace(key), UnstableSessionCapacityPrefix)
+}
+
 // relatedSessionCapacityPrefix includes a process-private nonce so an
 // untrusted Session-Id cannot impersonate the internal marker. Related keys are
 // runtime-only; their root key remains stable and is the only part used to
@@ -244,7 +254,7 @@ func (s *Store) ensureAccountSessionsLoaded(account *Account, now time.Time) {
 		for _, item := range collection.Sessions {
 			sessionID := strings.TrimSpace(item.SessionID)
 			if sessionID == "" || item.LastSeen.IsZero() || !item.LastSeen.Add(idleTTL).After(now) ||
-				strings.HasPrefix(sessionID, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionID) {
+				isProcessLocalSessionAffinityKey(sessionID) || isSessionAccountingBypassKey(sessionID) {
 				continue
 			}
 			if _, related := RelatedSessionRootKey(sessionID); related {
@@ -327,6 +337,9 @@ func (s *Store) persistAccountSessions(accountID int64, now time.Time, reconcile
 			success = false
 		}
 		for _, sessionID := range reconcileSessionIDs {
+			if isProcessLocalSessionAffinityKey(sessionID) {
+				continue
+			}
 			if err := s.tokenCache.DeleteRuntime(ctx, accountSessionOwnerRuntimeNamespace, sessionID); err != nil {
 				success = false
 			}
@@ -344,7 +357,7 @@ func (s *Store) persistAccountSessions(accountID int64, now time.Time, reconcile
 	maxRemaining := time.Duration(0)
 	remainingBySession := make(map[string]time.Duration, len(bySession))
 	for _, state := range bySession {
-		if state == nil || !state.lastSeen.Add(idleTTL).After(now) {
+		if state == nil || isProcessLocalSessionAffinityKey(state.sessionID) || !state.lastSeen.Add(idleTTL).After(now) {
 			continue
 		}
 		relatedSources := make([]AccountSessionRelatedSource, 0, len(state.relatedSources))
@@ -391,7 +404,7 @@ func (s *Store) persistAccountSessions(accountID int64, now time.Time, reconcile
 	seen := make(map[string]struct{}, len(reconcileSessionIDs))
 	for _, sessionID := range reconcileSessionIDs {
 		sessionID = strings.TrimSpace(sessionID)
-		if sessionID == "" {
+		if sessionID == "" || isProcessLocalSessionAffinityKey(sessionID) {
 			continue
 		}
 		if _, exists := seen[sessionID]; exists {
@@ -414,7 +427,7 @@ func (s *Store) persistAccountSessions(accountID int64, now time.Time, reconcile
 }
 
 func (s *Store) persistedAccountSessionOwner(sessionID string) (int64, bool) {
-	if s == nil || s.tokenCache == nil || strings.TrimSpace(sessionID) == "" {
+	if s == nil || s.tokenCache == nil || strings.TrimSpace(sessionID) == "" || isProcessLocalSessionAffinityKey(sessionID) {
 		return 0, false
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), accountSessionCacheTimeout)
@@ -456,7 +469,7 @@ func (s *Store) AdmitAccountSession(account *Account, sessionKey string, now tim
 		return false
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
-	if strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionKey) {
+	if isProcessLocalSessionAffinityKey(sessionKey) || isSessionAccountingBypassKey(sessionKey) {
 		return true
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -501,7 +514,7 @@ func (s *Store) CanAdmitAccountSession(account *Account, sessionKey string, now 
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
 	enabled, limit, idleTTL := account.SessionCapacityConfig()
-	if !enabled || sessionKey == "" || strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionKey) {
+	if !enabled || sessionKey == "" || isProcessLocalSessionAffinityKey(sessionKey) || isSessionAccountingBypassKey(sessionKey) {
 		return true
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -526,7 +539,7 @@ func (s *Store) CanAdmitAccountSession(account *Account, sessionKey string, now 
 // the new session. This prevents an unrelated full account from turning a
 // model/channel availability failure into a misleading session-capacity 429.
 func (s *Store) HasSessionCapacityExhaustionWithDispatch(apiKeyID int64, exclude map[int64]bool, filter AccountFilter, policy DispatchPolicy, sessionKey string, now time.Time) bool {
-	if s == nil || strings.TrimSpace(sessionKey) == "" || strings.HasPrefix(sessionKey, UnstableSessionCapacityPrefix) || isSessionAccountingBypassKey(sessionKey) {
+	if s == nil || strings.TrimSpace(sessionKey) == "" || isProcessLocalSessionAffinityKey(sessionKey) || isSessionAccountingBypassKey(sessionKey) {
 		return false
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -596,6 +609,12 @@ func (s *Store) AccountSessionAccountID(sessionKey string, now time.Time) (int64
 		}
 	}
 	s.accountSessionMu.Unlock()
+	// Low-confidence affinity is intentionally process-local. Do not consult
+	// persisted owner indexes (or the generic session-affinity cache) after a
+	// restart; an old content hash must not resurrect an account binding.
+	if isProcessLocalSessionAffinityKey(sessionKey) {
+		return 0, false
+	}
 	accountID, found := s.persistedAccountSessionOwner(sessionKey)
 	if !found {
 		accountID, found = s.SessionAffinityAccountID(sessionKey)
@@ -619,7 +638,7 @@ func (s *Store) AccountSessionAccountID(sessionKey string, now time.Time) (int64
 }
 
 func (s *Store) SetAccountSessionOwner(accountID int64, sessionKey string, owner AccountSessionOwner) {
-	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" || isSessionAccountingBypassKey(sessionKey) {
+	if s == nil || accountID <= 0 || strings.TrimSpace(sessionKey) == "" || isProcessLocalSessionAffinityKey(sessionKey) || isSessionAccountingBypassKey(sessionKey) {
 		return
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
@@ -876,7 +895,7 @@ func (s *Store) accountWindowCountsForScheduling(accounts []*Account, now time.T
 		if _, related := RelatedSessionRootKey(key); related {
 			continue
 		}
-		if isSessionAccountingBypassKey(key) {
+		if isProcessLocalSessionAffinityKey(key) || isSessionAccountingBypassKey(key) {
 			continue
 		}
 		if _, explicit := capacityEnabled[binding.accountID]; !explicit {

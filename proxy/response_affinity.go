@@ -54,6 +54,16 @@ var responseAffinityLocal = struct {
 	entries map[string]responseAccountAffinity
 }{entries: make(map[string]responseAccountAffinity)}
 
+func cleanupResponseAccountAffinityExpired(now time.Time) {
+	responseAffinityLocal.Lock()
+	for key, record := range responseAffinityLocal.entries {
+		if !record.ExpiresAt.After(now) {
+			delete(responseAffinityLocal.entries, key)
+		}
+	}
+	responseAffinityLocal.Unlock()
+}
+
 func responseAffinityKey(owner, responseID string) string {
 	owner = strings.TrimSpace(owner)
 	if owner == "" {

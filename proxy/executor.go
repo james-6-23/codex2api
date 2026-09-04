@@ -1251,13 +1251,14 @@ type relatedSessionObservation struct {
 // ResolveSessionID 从下游请求提取或生成 session ID
 // 优先级：
 //  1. Header: X-Codex2API-Affinity-Key（仅本地使用，先哈希再参与绑定）
-//  2. Header: Session_id
-//  3. Header: Conversation_id
-//  4. Header: Idempotency-Key
-//  5. Body:   prompt_cache_key
-//  6. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
+//  2. Native graph: headers or body client_metadata 的 root Session-Id
+//  3. Header: Session_id
+//  4. Header: Conversation_id
+//  5. Header: Idempotency-Key
+//  6. Body:   prompt_cache_key
+//  7. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
 //     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
-//  7. 基于 Bearer API Key 的确定性 UUID
+//  8. 基于 Bearer API Key 的确定性 UUID
 //
 // 第 6 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
 // 用户共用时，粘性粒度从"整个 Key 挤一个账号"细化为"每段对话独立粘定"。
@@ -1414,10 +1415,16 @@ func resolveDownstreamAffinityID(headers http.Header) string {
 }
 
 func ResolveExplicitSessionID(headers http.Header, body []byte) string {
+	// A complete native graph may be carried in response.create's body
+	// client_metadata (notably on WebSocket frames and on gateways that do not
+	// copy the native headers). Resolve that graph before the legacy single-value
+	// header fallbacks so a child leaf in Session-Id can still collapse to its
+	// verified root. A valid native header graph remains authoritative; body
+	// metadata is only considered when the header graph is absent/incomplete.
+	if root, ok := resolveNativeCodexSessionGraphWithBody(headers, body); ok {
+		return root
+	}
 	if headers != nil {
-		if root, ok := resolveNativeCodexSessionGraph(headers); ok {
-			return root
-		}
 		// 注意：Codex CLI 发的是连字符头 session-id / conversation-id（HTTP/2 全小写，
 		// 服务端规范化成 Session-Id / Conversation-Id），与旧的下划线写法 Session_id 不同，
 		// 两种都要认，否则取不到显式会话 id、affinity 只能退回内容种子。
@@ -1441,10 +1448,10 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 // request, so treating it as a conversation ID would create one session slot
 // per turn.
 func ResolveStableExplicitSessionID(headers http.Header, body []byte) string {
+	if root, ok := resolveNativeCodexSessionGraphWithBody(headers, body); ok {
+		return root
+	}
 	if headers != nil {
-		if root, ok := resolveNativeCodexSessionGraph(headers); ok {
-			return root
-		}
 		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id", "X-Session-ID", "OpenAI-Session-ID"} {
 			if v := strings.TrimSpace(headers.Get(key)); v != "" {
 				return v
@@ -1455,6 +1462,29 @@ func ResolveStableExplicitSessionID(headers http.Header, body []byte) string {
 		return v
 	}
 	return ""
+}
+
+// resolveNativeCodexSessionGraphWithBody returns a root only for a coherent
+// native graph. The official client can put the graph in either request
+// headers or response.create.client_metadata; callers that only inspect
+// headers otherwise fall back to content/API-key affinity and silently split a
+// single conversation. A valid complete header graph wins over body metadata,
+// while a conflicting/incomplete graph never lets one carrier overwrite the
+// other. The bool reports whether a native root was proven, not whether any
+// graph-shaped fields were observed.
+func resolveNativeCodexSessionGraphWithBody(headers http.Header, body []byte) (string, bool) {
+	if root, ok := resolveNativeCodexSessionGraph(headers); ok {
+		return root, true
+	}
+	identity := resolveRequestRootSessionIdentity(headers, body)
+	if identity.conflict || !identity.nativeRoot || !identity.stable {
+		return "", false
+	}
+	root := strings.TrimSpace(identity.sessionID)
+	if root == "" {
+		return "", false
+	}
+	return root, true
 }
 
 // resolveNativeCodexSessionGraph validates the stable headers emitted by the

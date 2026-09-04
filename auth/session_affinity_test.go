@@ -71,6 +71,52 @@ func TestNextForSessionUsesCachedAffinityWhenLocalBindingMissing(t *testing.T) {
 	}
 }
 
+func TestUnstableSessionAffinityStaysProcessLocal(t *testing.T) {
+	tokenCache := cache.NewMemory(1)
+	defer tokenCache.Close()
+	const unstableKey = UnstableSessionCapacityPrefix + "content-test"
+	account := &Account{DBID: 1, AccessToken: "tok-1"}
+	store := &Store{
+		accounts:       []*Account{account},
+		maxConcurrency: 2,
+		tokenCache:     tokenCache,
+	}
+
+	store.BindSessionAffinity(unstableKey, account, "")
+	if got, ok := store.SessionAffinityAccountID(unstableKey); !ok || got != account.DBID {
+		t.Fatalf("local unstable affinity = %d, %v; want account %d", got, ok, account.DBID)
+	}
+	if _, ok, err := tokenCache.GetSessionAffinity(context.Background(), unstableKey); err != nil {
+		t.Fatalf("GetSessionAffinity(unstable): %v", err)
+	} else if ok {
+		t.Fatal("unstable affinity must not be written to the runtime cache")
+	}
+
+	// A fresh Store sharing the same backend must not recover a content-derived
+	// choice. This is the restart boundary that distinguishes process-local
+	// fallback from a durable native session binding.
+	restarted := &Store{
+		accounts:       []*Account{{DBID: account.DBID, AccessToken: "tok-1"}},
+		maxConcurrency: 2,
+		tokenCache:     tokenCache,
+	}
+	if got, ok := restarted.SessionAffinityAccountID(unstableKey); ok {
+		t.Fatalf("restarted store recovered unstable account %d; want no binding", got)
+	}
+	if got, ok := restarted.AccountSessionAccountID(unstableKey, time.Now()); ok {
+		t.Fatalf("restarted account-session lookup recovered unstable account %d; want no binding", got)
+	}
+
+	// Stable explicit sessions retain the existing shared-cache behavior.
+	const stableKey = "stable-session"
+	store.BindSessionAffinity(stableKey, account, "")
+	if _, ok, err := tokenCache.GetSessionAffinity(context.Background(), stableKey); err != nil {
+		t.Fatalf("GetSessionAffinity(stable): %v", err)
+	} else if !ok {
+		t.Fatal("stable affinity should still be written to the runtime cache")
+	}
+}
+
 func TestNextForSessionRejectsRemovedPoolProxyAffinity(t *testing.T) {
 	const removedProxy = "http://removed.example:8080"
 	store := &Store{
