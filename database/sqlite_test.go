@@ -4871,3 +4871,34 @@ func TestSQLiteSystemSettingsWeakNetworkModeRoundtrip(t *testing.T) {
 		t.Fatal("codex_ws_weak_network_mode = true after disabling, want false")
 	}
 }
+
+func TestSQLiteSystemSettingsUnlinkedAccountFallbackRoundtrip(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "unlinked-fallback.sqlite"))
+	if err != nil {
+		t.Fatalf("New sqlite: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	settings, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings defaults: %v", err)
+	}
+	if settings == nil {
+		settings = &SystemSettings{}
+	}
+	if settings.CodexUnlinkedAccountFallbackEnabled || (settings.CodexUnlinkedAccountFallbackSeconds != 0 && settings.CodexUnlinkedAccountFallbackSeconds != 300) {
+		t.Fatalf("fallback defaults = enabled:%v seconds:%d", settings.CodexUnlinkedAccountFallbackEnabled, settings.CodexUnlinkedAccountFallbackSeconds)
+	}
+	settings.CodexUnlinkedAccountFallbackEnabled = true
+	settings.CodexUnlinkedAccountFallbackSeconds = 4200
+	if err := db.UpdateSystemSettings(ctx, settings); err != nil {
+		t.Fatalf("UpdateSystemSettings: %v", err)
+	}
+	got, err := db.GetSystemSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSystemSettings updated: %v", err)
+	}
+	if got == nil || !got.CodexUnlinkedAccountFallbackEnabled || got.CodexUnlinkedAccountFallbackSeconds != 3600 {
+		t.Fatalf("fallback roundtrip = %#v, want enabled=true seconds=3600", got)
+	}
+}

@@ -8938,6 +8938,8 @@ type settingsResponse struct {
 	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
 	SessionWindowBalanceEnabled         bool   `json:"session_window_balance_enabled"`
 	PassiveInternalModelsEnabled        bool   `json:"passive_internal_models_enabled"`
+	CodexUnlinkedAccountFallbackEnabled bool   `json:"codex_unlinked_account_fallback_enabled"`
+	CodexUnlinkedAccountFallbackSeconds int    `json:"codex_unlinked_account_fallback_seconds"`
 	SessionSlotBufferEnabled            bool   `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            int    `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    string `json:"grok_affinity_mode"`
@@ -9115,6 +9117,8 @@ type updateSettingsReq struct {
 	SessionAffinitySpread               *bool                            `json:"session_affinity_spread"`
 	SessionWindowBalanceEnabled         *bool                            `json:"session_window_balance_enabled"`
 	PassiveInternalModelsEnabled        *bool                            `json:"passive_internal_models_enabled"`
+	CodexUnlinkedAccountFallbackEnabled *bool                           `json:"codex_unlinked_account_fallback_enabled"`
+	CodexUnlinkedAccountFallbackSeconds *int                            `json:"codex_unlinked_account_fallback_seconds"`
 	SessionSlotBufferEnabled            *bool                            `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            *int                             `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    *string                          `json:"grok_affinity_mode"`
@@ -9943,6 +9947,8 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
 		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
+		CodexUnlinkedAccountFallbackEnabled: h.store.CodexUnlinkedAccountFallbackEnabled(),
+		CodexUnlinkedAccountFallbackSeconds: h.store.CodexUnlinkedAccountFallbackSeconds(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),
@@ -10811,6 +10817,15 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetPassiveInternalModelsEnabled(*req.PassiveInternalModelsEnabled)
 		log.Printf("设置已更新: passive_internal_models_enabled = %t", *req.PassiveInternalModelsEnabled)
 	}
+	if req.CodexUnlinkedAccountFallbackEnabled != nil {
+		h.store.SetCodexUnlinkedAccountFallbackEnabled(*req.CodexUnlinkedAccountFallbackEnabled)
+		log.Printf("设置已更新: codex_unlinked_account_fallback_enabled = %t", *req.CodexUnlinkedAccountFallbackEnabled)
+	}
+	if req.CodexUnlinkedAccountFallbackSeconds != nil {
+		v := database.NormalizeCodexUnlinkedAccountFallbackSeconds(*req.CodexUnlinkedAccountFallbackSeconds)
+		h.store.SetCodexUnlinkedAccountFallbackSeconds(v)
+		log.Printf("设置已更新: codex_unlinked_account_fallback_seconds = %d", v)
+	}
 	if req.GrokAffinityMode != nil {
 		h.store.SetGrokAffinityMode(*req.GrokAffinityMode)
 		log.Printf("设置已更新: grok_affinity_mode = %s", *req.GrokAffinityMode)
@@ -11440,6 +11455,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
 		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
+		CodexUnlinkedAccountFallbackEnabled: h.store.CodexUnlinkedAccountFallbackEnabled(),
+		CodexUnlinkedAccountFallbackSeconds: h.store.CodexUnlinkedAccountFallbackSeconds(),
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
 		MaxRetries:                          h.store.GetMaxRetries(),
@@ -11753,6 +11770,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
 		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
+		CodexUnlinkedAccountFallbackEnabled: h.store.CodexUnlinkedAccountFallbackEnabled(),
+		CodexUnlinkedAccountFallbackSeconds: h.store.CodexUnlinkedAccountFallbackSeconds(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),

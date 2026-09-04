@@ -600,6 +600,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					stickyProxyURL = account.GetProxyURL()
 				}
 			}
+			if account == nil && attempt == 0 {
+				account, stickyProxyURL = h.takeUnlinkedRecentAccount(c, sessionIdentity, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			}
 			if !continuationPinned && hasPreviousResponse && !continuationDegraded {
 				// 绑定账号已被本次请求硬排除（上一轮 429/5xx 等）时不必再等它 30s：
 				// 排除在本请求内不会解除，直接剥离 previous_response_id 换号。

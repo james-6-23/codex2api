@@ -91,6 +91,23 @@ const (
 	apiKeyCountCacheTTL       = 30 * time.Second
 )
 
+const unlinkedFallbackContextKey = "unlinked_account_fallback_v1"
+
+const unlinkedFallbackRuntimeNamespace = "codex-unlinked-account-fallback"
+
+type unlinkedFallbackContext struct {
+	Scope          string
+	RecordRoot     bool
+	RequestStarted time.Time
+}
+
+type unlinkedFallbackRuntimeRecord struct {
+	AccountID   int64     `json:"account_id"`
+	ProxyURL    string    `json:"proxy_url,omitempty"`
+	AffinityKey string    `json:"affinity_key,omitempty"`
+	ObservedAt  time.Time `json:"observed_at"`
+}
+
 type apiKeyRuntimeRecord struct {
 	ID        int64     `json:"id"`
 	Name      string    `json:"name"`
@@ -119,6 +136,66 @@ func (h *Handler) nextAccountForSessionWithDispatchGuard(sessionID string, apiKe
 		return nil, "", auth.SessionAffinityGuard{}
 	}
 	return h.store.NextForSessionWithDispatchGuard(sessionID, apiKeyID, exclude, filter, policy)
+}
+
+// takeUnlinkedRecentAccount returns the account used by the most recent
+// verified root request in the same user/token/device scope. It is deliberately
+// a preference, never a durable session binding: callers can continue with
+// ordinary scheduling when the remembered account is unavailable.
+func (h *Handler) takeUnlinkedRecentAccount(c *gin.Context, identity requestSessionIdentity, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, policy auth.DispatchPolicy) (*auth.Account, string) {
+	if h == nil || h.store == nil || h.cache == nil || c == nil || c.Request == nil || !identity.unlinkedFallbackOnly || identity.unlinkedFallbackScope == "" {
+		return nil, ""
+	}
+	raw, found, err := h.cache.GetRuntime(c.Request.Context(), unlinkedFallbackRuntimeNamespace, identity.unlinkedFallbackScope)
+	if err != nil || !found || len(raw) == 0 {
+		return nil, ""
+	}
+	var record unlinkedFallbackRuntimeRecord
+	if json.Unmarshal(raw, &record) != nil || record.AccountID <= 0 || record.ObservedAt.IsZero() {
+		return nil, ""
+	}
+	started := time.Now()
+	if value, ok := c.Get(unlinkedFallbackContextKey); ok {
+		if contextValue, valid := value.(unlinkedFallbackContext); valid && !contextValue.RequestStarted.IsZero() {
+			started = contextValue.RequestStarted
+		}
+	}
+	maxAge := time.Duration(h.store.CodexUnlinkedAccountFallbackSeconds()) * time.Second
+	if !record.ObservedAt.Before(started) || started.Sub(record.ObservedAt) > maxAge {
+		return nil, ""
+	}
+	account := h.store.TakePreferredAccountWithDispatch(record.AccountID, apiKeyID, exclude, filter, policy)
+	if account == nil {
+		return nil, ""
+	}
+	return account, strings.TrimSpace(record.ProxyURL)
+}
+
+func (h *Handler) recordUnlinkedRecentRoot(c *gin.Context, account *auth.Account, affinityKey string) {
+	if h == nil || h.store == nil || h.cache == nil || account == nil || affinityKey == "" {
+		return
+	}
+	raw, ok := c.Get(unlinkedFallbackContextKey)
+	contextValue, valid := raw.(unlinkedFallbackContext)
+	if !ok || !valid || !contextValue.RecordRoot || contextValue.Scope == "" {
+		return
+	}
+	record := unlinkedFallbackRuntimeRecord{
+		AccountID: account.ID(), ProxyURL: account.GetProxyURL(), AffinityKey: affinityKey, ObservedAt: time.Now(),
+	}
+	payload, err := json.Marshal(record)
+	if err != nil {
+		return
+	}
+	timeout := 300 * time.Millisecond
+	ctx := context.Background()
+	if c != nil && c.Request != nil {
+		ctx = c.Request.Context()
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	_ = h.cache.SetRuntime(writeCtx, unlinkedFallbackRuntimeNamespace, contextValue.Scope, payload,
+		time.Duration(h.store.CodexUnlinkedAccountFallbackSeconds())*time.Second)
 }
 
 func dispatchPolicyForModel(model string) auth.DispatchPolicy {
@@ -317,6 +394,13 @@ func (h *Handler) bindAccountSession(c *gin.Context, affinityKey string, account
 	if h == nil || h.store == nil || account == nil {
 		return
 	}
+	if c != nil {
+		if raw, ok := c.Get(unlinkedFallbackContextKey); ok {
+			if contextValue, valid := raw.(unlinkedFallbackContext); valid && contextValue.Scope != "" && !contextValue.RecordRoot {
+				return
+			}
+		}
+	}
 	h.store.BindSessionAffinity(affinityKey, account, proxyURL)
 	h.recordAccountSessionBinding(c, affinityKey, account)
 }
@@ -339,6 +423,15 @@ func (h *Handler) bindContinuousRetryAccountSessionWithGuard(c *gin.Context, aff
 	if h == nil || h.store == nil || account == nil {
 		return false
 	}
+	if c != nil {
+		if raw, ok := c.Get(unlinkedFallbackContextKey); ok {
+			if contextValue, valid := raw.(unlinkedFallbackContext); valid && contextValue.Scope != "" && !contextValue.RecordRoot {
+				// Temporal fallback accounts are request-local. Do not publish
+				// them into the formal affinity/window ledgers.
+				return true
+			}
+		}
+	}
 	var ctx context.Context
 	if c != nil && c.Request != nil {
 		ctx = c.Request.Context()
@@ -348,6 +441,11 @@ func (h *Handler) bindContinuousRetryAccountSessionWithGuard(c *gin.Context, aff
 	}
 	if !guard.PreservesExisting() {
 		h.recordAccountSessionBinding(c, affinityKey, account)
+	} else {
+		// An existing root binding is still a fresh observation for the
+		// temporal bridge. Refresh only the side index; do not rewrite the
+		// durable account-session owner.
+		h.recordUnlinkedRecentRoot(c, account, affinityKey)
 	}
 	return true
 }
@@ -372,6 +470,7 @@ func (h *Handler) recordAccountSessionBinding(c *gin.Context, affinityKey string
 		APIKeyID:   audit.APIKeyID,
 		APIKeyName: audit.APIKeyName,
 	})
+	h.recordUnlinkedRecentRoot(c, account, affinityKey)
 }
 
 // httpSessionFailureDispositionForPolicy layers the operator's continuous
@@ -4104,6 +4203,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					stickyProxyURL = account.GetProxyURL()
 				}
 			}
+			if account == nil && attempt == 0 {
+				account, stickyProxyURL = h.takeUnlinkedRecentAccount(c, sessionIdentity, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			}
 			if account == nil && attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
 				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
@@ -6133,6 +6235,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				stickyProxyURL = account.GetProxyURL()
 			}
 		}
+		if account == nil && attempt == 0 {
+			account, stickyProxyURL = h.takeUnlinkedRecentAccount(c, sessionIdentity, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+		}
 		if account == nil && attempt == 0 && compactionAffinity.Known && !compactContinuationPinned {
 			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
@@ -7011,7 +7116,15 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
-			account, stickyProxyURL, affinityGuard = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			if attempt == 0 {
+				account, stickyProxyURL = h.takeUnlinkedRecentAccount(c, sessionIdentity, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			}
+			if account != nil {
+				// the temporal bridge is request-local; skip the ordinary sticky
+				// selector below for this first attempt.
+			} else {
+				account, stickyProxyURL, affinityGuard = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
+			}
 		}
 		if account == nil {
 			if !claimContinuousRetryTerminal(c, continuousRetryProtocolChat) {

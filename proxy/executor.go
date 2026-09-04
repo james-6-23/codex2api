@@ -1239,6 +1239,11 @@ type requestSessionIdentity struct {
 	forkSourceAffinityID   string
 	bypassWindowAccounting bool
 	protectedRelatedLease  bool
+	// unlinkedFallbackOnly marks a request with no verified root. Its normal
+	// affinity key must not be persisted or used for session-window accounting;
+	// the optional recent-account bridge is strictly request-local.
+	unlinkedFallbackOnly  bool
+	unlinkedFallbackScope string
 }
 
 const relatedSessionObservationContextKey = "related_session_observation_v1"
@@ -1331,6 +1336,23 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 	}
 	setLocalSessionAccountingBypass(c, accountingBypass)
 	identity.bypassWindowAccounting = accountingBypass
+	if h != nil && h.store != nil && h.store.CodexUnlinkedAccountFallbackEnabled() {
+		scope := unlinkedFallbackScopeForRequest(c, body, policyContext, verifiedPolicy)
+		if scope != "" {
+			identity.unlinkedFallbackScope = scope
+			identity.unlinkedFallbackOnly = !rootIdentity.stable && !rootIdentity.conflict
+			if identity.unlinkedFallbackOnly {
+				// Keep upstreamSeed untouched, but remove the implicit local
+				// affinity key so this request cannot create/refresh a durable
+				// session binding while using the temporal bridge.
+				identity.affinityID = ""
+			}
+			c.Set(unlinkedFallbackContextKey, unlinkedFallbackContext{
+				Scope: scope, RecordRoot: rootIdentity.stable && !rootIdentity.related && !accountingBypass,
+				RequestStarted: time.Now(),
+			})
+		}
+	}
 	if rootIdentity.stable && !rootIdentity.conflict {
 		if fingerprint := strings.TrimSpace(rootIdentity.fingerprint); verifiedPolicy && fingerprint != "" {
 			identity.affinityID = "newapi-root-session:" + fingerprint
@@ -1378,6 +1400,9 @@ func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body [
 		}
 	}
 	identity.protectedRelatedLease = identity.relatedToRoot && passiveInternalRequestAuthorized(c)
+	if identity.unlinkedFallbackOnly {
+		identity.affinityID = ""
+	}
 	return identity
 }
 
@@ -1412,6 +1437,99 @@ func resolveDownstreamAffinityID(headers http.Header) string {
 	}
 	sum := sha256.Sum256([]byte("codex2api:downstream-affinity:" + raw))
 	return "affinity-" + hex.EncodeToString(sum[:16])
+}
+
+// resolveDownstreamInstallationID reads the client/device marker without
+// treating it as a root-session proof. It is only used to narrow the optional
+// no-root fallback scope, and may therefore safely be hashed before storage.
+func resolveDownstreamInstallationID(headers http.Header, body []byte) string {
+	if headers != nil {
+		for _, name := range []string{"X-Codex-Installation-Id", "X-Codex-Installation-ID"} {
+			if value := strings.TrimSpace(headers.Get(name)); value != "" && len(value) <= 256 && !strings.ContainsAny(value, "\r\n\x00") {
+				return value
+			}
+		}
+		for _, raw := range headers.Values(codexTurnMetadataHeader) {
+			if value := findDownstreamInstallationID([]byte(raw), 0); value != "" {
+				return value
+			}
+		}
+	}
+	return findDownstreamInstallationID(body, 0)
+}
+
+func findDownstreamInstallationID(raw []byte, depth int) string {
+	if depth > 3 || len(raw) == 0 || !gjson.ValidBytes(raw) {
+		return ""
+	}
+	value := gjson.ParseBytes(raw)
+	if value.Type == gjson.String {
+		text := strings.TrimSpace(value.String())
+		if text == "" || !gjson.Valid(text) {
+			return ""
+		}
+		return findDownstreamInstallationID([]byte(text), depth+1)
+	}
+	if !value.IsObject() {
+		return ""
+	}
+	for _, key := range []string{"x-codex-installation-id", "x_codex_installation_id", "installation_id"} {
+		candidate := strings.TrimSpace(value.Get(key).String())
+		if candidate != "" && len(candidate) <= 256 && !strings.ContainsAny(candidate, "\r\n\x00") {
+			return candidate
+		}
+	}
+	for _, key := range []string{"x-codex-turn-metadata", "x_codex_turn_metadata", "client_metadata", "response.client_metadata"} {
+		nested := value.Get(key)
+		if nested.Exists() && !nested.IsArray() {
+			if candidate := findDownstreamInstallationID([]byte(nested.Raw), depth+1); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func unlinkedFallbackScopeForRequest(c *gin.Context, body []byte, policyContext verifiedNewAPIPolicyContext, verifiedPolicy bool) string {
+	platform := "direct"
+	userID := ""
+	tokenID := ""
+	if verifiedPolicy && policyContext.MetaVerified {
+		platform = strings.TrimSpace(policyContext.Platform)
+		userID = strings.TrimSpace(policyContext.Identity.UserID)
+		if policyContext.Meta.TokenID > 0 {
+			tokenID = strconv.FormatInt(int64(policyContext.Meta.TokenID), 10)
+		}
+	}
+	installationID := ""
+	if verifiedPolicy && policyContext.MetaVerified {
+		installationID = strings.TrimSpace(policyContext.Meta.InstallationID)
+	}
+	if installationID == "" && c != nil && c.Request != nil {
+		installationID = resolveDownstreamInstallationID(c.Request.Header, body)
+	}
+	apiKeyHash := ""
+	// A verified NewAPI policy already provides the shared platform/user/token
+	// namespace. Do not append the downstream channel credential hash there:
+	// that value is different per NewAPI channel and would make the NewAPI and
+	// Codex2API fallback scopes diverge. Direct Codex2API requests still use the
+	// API-key hash as their only stable user surrogate.
+	if !verifiedPolicy && c != nil && c.Request != nil {
+		raw := strings.TrimSpace(c.Request.Header.Get("Authorization"))
+		if raw != "" {
+			sum := sha256.Sum256([]byte("codex2api:unlinked-api-key:" + raw))
+			apiKeyHash = hex.EncodeToString(sum[:16])
+		}
+	}
+	if userID == "" && apiKeyHash == "" {
+		return ""
+	}
+	if tokenID == "" && installationID == "" && apiKeyHash == "" {
+		return ""
+	}
+	canonical := strings.Join([]string{"unlinked-v1", platform, userID, tokenID, installationID, apiKeyHash}, "\x00")
+	sum := sha256.Sum256([]byte(canonical))
+	return "scope-" + hex.EncodeToString(sum[:16])
 }
 
 func ResolveExplicitSessionID(headers http.Header, body []byte) string {

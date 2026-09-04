@@ -1319,6 +1319,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_affinity_spread BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_window_balance_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS passive_internal_models_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_unlinked_account_fallback_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_unlinked_account_fallback_seconds INT DEFAULT 300;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_slot_buffer_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_slot_buffer_seconds INT DEFAULT 10;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS models_list_read_max_bytes BIGINT NOT NULL DEFAULT 8388608;
@@ -2198,98 +2200,100 @@ func NormalizeModelsListReadMaxBytes(value int64) int64 {
 
 // SystemSettings 运行时设置项
 type SystemSettings struct {
-	SiteName                           string
-	SiteLogo                           string
-	BackgroundConfig                   string // JSON: {"image":"...","opacity":18,"blur":0}
-	GrokConfig                         string // JSON: {"affinity_mode":"strict"}
-	ClaudeConfig                       string // JSON: {"fingerprint_mode":"preserve","default_timezone":"","session_window_limit":0}
-	MaxConcurrency                     int
-	GlobalRPM                          int
-	TestModel                          string
-	TestContent                        string
-	TestConcurrency                    int
-	ProxyURL                           string
-	PgMaxConns                         int
-	RedisPoolSize                      int
-	AutoCleanUnauthorized              bool
-	AutoCleanRateLimited               bool
-	AdminSecret                        string
-	AutoCleanFullUsage                 bool
-	AutoCleanError                     bool
-	AutoCleanExpired                   bool
-	LazyMode                           bool
-	ProxyPoolEnabled                   bool
-	FastSchedulerEnabled               bool
-	SchedulerEngine                    string
-	MaxRetries                         int
-	MaxRateLimitRetries                int
-	ContinuousRetryPolicy              string // JSON: database.ContinuousRetryPolicy
-	AllowRemoteMigration               bool
-	ModelMapping                       string // JSON: {"anthropic_model": "codex_model", ...}
-	CodexModelMapping                  string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
-	PayloadRules                       string // JSON: 请求体重写规则（default/override/append/filter 等规则组）
-	ReasoningEffortModels              string // JSON: [{"model":"gpt-5.5","effort":"xhigh"}, ...]
-	BackgroundRefreshIntervalMinutes   int
-	UsageProbeMaxAgeMinutes            int
-	UsageProbeConcurrency              int
-	UsageProbeResponsesFallbackEnabled bool
-	RecoveryProbeIntervalMinutes       int
-	SchedulerMode                      string
-	AffinityMode                       string // session 粘性模式: bounded / off / strict
-	SessionAffinitySpread              bool   // 新亲和键按 HRW 哈希散列选号(issue #484)
-	SessionWindowBalanceEnabled        bool   // 新会话优先选择当前活跃窗口较少的同层账号
-	PassiveInternalModelsEnabled       bool   // 可信派生请求允许复用原账号的内部模型
-	SessionSlotBufferEnabled           bool   // 成功请求结束后为原会话短暂保留并发槽
-	SessionSlotBufferSeconds           int    // 会话并发槽缓冲时间，默认 10 秒，范围 1..60
-	ModelsListReadMaxBytes             int64  // 上游 /models 与 Codex 模型清单的最大读取字节数，默认 8 MiB
-	ResinURL                           string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
-	ResinPlatformName                  string // Resin 平台标识，例如 codex2api
-	PromptFilterEnabled                bool
-	PromptFilterMode                   string
-	PromptFilterThreshold              int
-	PromptFilterStrictThreshold        int
-	PromptFilterStrictTerminalEnabled  bool
-	PromptFilterAdvancedConfig         string
-	PromptFilterLogMatches             bool
-	PromptFilterMaxTextLength          int
-	PromptFilterSensitiveWords         string
-	PromptFilterCustomPatterns         string
-	PromptFilterDisabledPatterns       string
-	PromptFilterReviewEnabled          bool
-	PromptFilterReviewAPIKey           string
-	PromptFilterReviewBaseURL          string
-	PromptFilterReviewModel            string
-	PromptFilterReviewTimeoutSeconds   int
-	PromptFilterReviewFailClosed       bool
-	ClientCompatMode                   string
-	CodexMinCLIVersion                 string
-	CodexUserAgentConfig               string
-	UsageLogMode                       string
-	UsageLogBatchSize                  int
-	UsageLogFlushIntervalSeconds       int
-	StreamFlushPolicy                  string
-	StreamFlushIntervalMS              int
-	FirstTokenMode                     string
-	FirstTokenTimeoutSeconds           int
-	BillingTierPolicy                  string
-	ImageStorageConfig                 string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
-	ShowFullUsageNumbers               bool
-	PublicKeyUsagePageEnabled          bool
-	PublicImageStudioPageEnabled       bool
-	PublicAccountPortalPageEnabled     bool // 账号自助添加公开门户开关，默认 false
-	CodexForceWebsocket                bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
-	CodexRequestCompression            bool // HTTP /responses 请求体 zstd 压缩（对齐真实客户端），默认 true
-	CodexWSWeakNetworkMode             bool // WS 弱网保守复用模式，默认 false
-	CodexWSKeepaliveEnabled            bool // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
-	CodexWSKeepaliveIntervalSec        int  // WS 保活 Ping 间隔（秒），默认 60
-	CodexWSHideUpstreamErrors          bool // 隐藏上游 WS 原始错误，默认 true
-	CodexWSSilentRetryEnabled          bool // 首包前 WS 上游错误静默换号重试，默认 true
-	CodexWSSilentMaxRetries            int  // WS 静默换号最大重试次数，默认 2
-	CodexWSSizeRouterEnabled           bool // 1009 自学习体积路由：超大请求直接首发 HTTP，默认 true
-	CodexWSBusyAcquireMaxWaitSec       int  // busy session/容量等待的累计上限（秒），默认 30（issue #413）
-	CodexWSBusyOverflowEnabled         bool // busy session 溢出到同账号兄弟连接，默认 false（issue #413）
-	CodexWSBusyPatienceSec             int  // 触发溢出前的短等待（秒），默认 2（issue #413）
-	CodexWSStatelessSlots              int  // 无状态请求每 (账号, cacheKey) 的持久连接槽位数，默认 8，范围 1-32（issue #522）
+	SiteName                            string
+	SiteLogo                            string
+	BackgroundConfig                    string // JSON: {"image":"...","opacity":18,"blur":0}
+	GrokConfig                          string // JSON: {"affinity_mode":"strict"}
+	ClaudeConfig                        string // JSON: {"fingerprint_mode":"preserve","default_timezone":"","session_window_limit":0}
+	MaxConcurrency                      int
+	GlobalRPM                           int
+	TestModel                           string
+	TestContent                         string
+	TestConcurrency                     int
+	ProxyURL                            string
+	PgMaxConns                          int
+	RedisPoolSize                       int
+	AutoCleanUnauthorized               bool
+	AutoCleanRateLimited                bool
+	AdminSecret                         string
+	AutoCleanFullUsage                  bool
+	AutoCleanError                      bool
+	AutoCleanExpired                    bool
+	LazyMode                            bool
+	ProxyPoolEnabled                    bool
+	FastSchedulerEnabled                bool
+	SchedulerEngine                     string
+	MaxRetries                          int
+	MaxRateLimitRetries                 int
+	ContinuousRetryPolicy               string // JSON: database.ContinuousRetryPolicy
+	AllowRemoteMigration                bool
+	ModelMapping                        string // JSON: {"anthropic_model": "codex_model", ...}
+	CodexModelMapping                   string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
+	PayloadRules                        string // JSON: 请求体重写规则（default/override/append/filter 等规则组）
+	ReasoningEffortModels               string // JSON: [{"model":"gpt-5.5","effort":"xhigh"}, ...]
+	BackgroundRefreshIntervalMinutes    int
+	UsageProbeMaxAgeMinutes             int
+	UsageProbeConcurrency               int
+	UsageProbeResponsesFallbackEnabled  bool
+	RecoveryProbeIntervalMinutes        int
+	SchedulerMode                       string
+	AffinityMode                        string // session 粘性模式: bounded / off / strict
+	SessionAffinitySpread               bool   // 新亲和键按 HRW 哈希散列选号(issue #484)
+	SessionWindowBalanceEnabled         bool   // 新会话优先选择当前活跃窗口较少的同层账号
+	PassiveInternalModelsEnabled        bool   // 可信派生请求允许复用原账号的内部模型
+	CodexUnlinkedAccountFallbackEnabled bool   // 无根关系请求允许按用户/token/设备回溯最近账号
+	CodexUnlinkedAccountFallbackSeconds int    // 无根关系回溯时间窗，默认 300 秒，范围 1..3600
+	SessionSlotBufferEnabled            bool   // 成功请求结束后为原会话短暂保留并发槽
+	SessionSlotBufferSeconds            int    // 会话并发槽缓冲时间，默认 10 秒，范围 1..60
+	ModelsListReadMaxBytes              int64  // 上游 /models 与 Codex 模型清单的最大读取字节数，默认 8 MiB
+	ResinURL                            string // Resin 代理池地址（含 Token），例如 http://127.0.0.1:2260/my-token
+	ResinPlatformName                   string // Resin 平台标识，例如 codex2api
+	PromptFilterEnabled                 bool
+	PromptFilterMode                    string
+	PromptFilterThreshold               int
+	PromptFilterStrictThreshold         int
+	PromptFilterStrictTerminalEnabled   bool
+	PromptFilterAdvancedConfig          string
+	PromptFilterLogMatches              bool
+	PromptFilterMaxTextLength           int
+	PromptFilterSensitiveWords          string
+	PromptFilterCustomPatterns          string
+	PromptFilterDisabledPatterns        string
+	PromptFilterReviewEnabled           bool
+	PromptFilterReviewAPIKey            string
+	PromptFilterReviewBaseURL           string
+	PromptFilterReviewModel             string
+	PromptFilterReviewTimeoutSeconds    int
+	PromptFilterReviewFailClosed        bool
+	ClientCompatMode                    string
+	CodexMinCLIVersion                  string
+	CodexUserAgentConfig                string
+	UsageLogMode                        string
+	UsageLogBatchSize                   int
+	UsageLogFlushIntervalSeconds        int
+	StreamFlushPolicy                   string
+	StreamFlushIntervalMS               int
+	FirstTokenMode                      string
+	FirstTokenTimeoutSeconds            int
+	BillingTierPolicy                   string
+	ImageStorageConfig                  string // JSON: {"backend":"s3","endpoint":"...","region":"...","bucket":"...","access_key":"...","secret_key":"...","prefix":"...","force_path_style":false}
+	ShowFullUsageNumbers                bool
+	PublicKeyUsagePageEnabled           bool
+	PublicImageStudioPageEnabled        bool
+	PublicAccountPortalPageEnabled      bool // 账号自助添加公开门户开关，默认 false
+	CodexForceWebsocket                 bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
+	CodexRequestCompression             bool // HTTP /responses 请求体 zstd 压缩（对齐真实客户端），默认 true
+	CodexWSWeakNetworkMode              bool // WS 弱网保守复用模式，默认 false
+	CodexWSKeepaliveEnabled             bool // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
+	CodexWSKeepaliveIntervalSec         int  // WS 保活 Ping 间隔（秒），默认 60
+	CodexWSHideUpstreamErrors           bool // 隐藏上游 WS 原始错误，默认 true
+	CodexWSSilentRetryEnabled           bool // 首包前 WS 上游错误静默换号重试，默认 true
+	CodexWSSilentMaxRetries             int  // WS 静默换号最大重试次数，默认 2
+	CodexWSSizeRouterEnabled            bool // 1009 自学习体积路由：超大请求直接首发 HTTP，默认 true
+	CodexWSBusyAcquireMaxWaitSec        int  // busy session/容量等待的累计上限（秒），默认 30（issue #413）
+	CodexWSBusyOverflowEnabled          bool // busy session 溢出到同账号兄弟连接，默认 false（issue #413）
+	CodexWSBusyPatienceSec              int  // 触发溢出前的短等待（秒），默认 2（issue #413）
+	CodexWSStatelessSlots               int  // 无状态请求每 (账号, cacheKey) 的持久连接槽位数，默认 8，范围 1-32（issue #522）
 	// GithubToken 用于 api.github.com 请求的 Personal Access Token（提升限流配额，
 	// 只发给 api.github.com，绝不发给镜像/其他主机；空表示未配置，issue #522）。
 	GithubToken string
@@ -2436,6 +2440,18 @@ func NormalizeSessionSlotBufferSeconds(seconds int) int {
 	return seconds
 }
 
+// NormalizeCodexUnlinkedAccountFallbackSeconds bounds the optional temporal
+// bridge used when a request has no verifiable root relationship.
+func NormalizeCodexUnlinkedAccountFallbackSeconds(seconds int) int {
+	if seconds <= 0 {
+		return 300
+	}
+	if seconds > 3600 {
+		return 3600
+	}
+	return seconds
+}
+
 // NormalizeSchedulerEngine preserves the old fast_scheduler_enabled setting
 // for upgraded databases whose new scheduler_engine column is still blank.
 func NormalizeSchedulerEngine(value string, legacyFastEnabled bool) string {
@@ -2478,6 +2494,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(session_affinity_spread, false),
 		       COALESCE(session_window_balance_enabled, false),
 		       COALESCE(passive_internal_models_enabled, false),
+		       COALESCE(codex_unlinked_account_fallback_enabled, false),
+		       COALESCE(codex_unlinked_account_fallback_seconds, 300),
 		       COALESCE(resin_url, ''),
 		       COALESCE(resin_platform_name, ''),
 		       COALESCE(prompt_filter_enabled, false),
@@ -2579,6 +2597,8 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.SessionAffinitySpread,
 		&s.SessionWindowBalanceEnabled,
 		&s.PassiveInternalModelsEnabled,
+		&s.CodexUnlinkedAccountFallbackEnabled,
+		&s.CodexUnlinkedAccountFallbackSeconds,
 		&s.ResinURL, &s.ResinPlatformName,
 		&s.PromptFilterEnabled, &s.PromptFilterMode, &s.PromptFilterThreshold, &s.PromptFilterStrictThreshold, &s.PromptFilterStrictTerminalEnabled, &s.PromptFilterAdvancedConfig,
 		&s.PromptFilterLogMatches, &s.PromptFilterMaxTextLength, &s.PromptFilterSensitiveWords,
@@ -2895,9 +2915,11 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				passive_internal_models_enabled,
 				scheduler_engine,
 					codex_request_compression,
-					auto_activate_5h_window_enabled
+					auto_activate_5h_window_enabled,
+					codex_unlinked_account_fallback_enabled,
+					codex_unlinked_account_fallback_seconds
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -2937,10 +2959,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $122 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $124 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $123 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $125 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -3015,6 +3037,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					session_slot_buffer_seconds = EXCLUDED.session_slot_buffer_seconds,
 					session_window_balance_enabled = EXCLUDED.session_window_balance_enabled,
 					passive_internal_models_enabled = EXCLUDED.passive_internal_models_enabled,
+					codex_unlinked_account_fallback_enabled = EXCLUDED.codex_unlinked_account_fallback_enabled,
+					codex_unlinked_account_fallback_seconds = EXCLUDED.codex_unlinked_account_fallback_seconds,
 					scheduler_engine = EXCLUDED.scheduler_engine,
 					auto_activate_5h_window_enabled = EXCLUDED.auto_activate_5h_window_enabled
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
@@ -3068,6 +3092,8 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		NormalizeSchedulerEngine(s.SchedulerEngine, s.FastSchedulerEnabled),
 		s.CodexRequestCompression,
 		s.AutoActivate5hWindowEnabled,
+		s.CodexUnlinkedAccountFallbackEnabled,
+		NormalizeCodexUnlinkedAccountFallbackSeconds(s.CodexUnlinkedAccountFallbackSeconds),
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey)
 	return err

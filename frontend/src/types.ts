@@ -1911,6 +1911,8 @@ export interface SystemSettings {
   session_affinity_spread?: boolean
   session_window_balance_enabled?: boolean
   passive_internal_models_enabled?: boolean
+  codex_unlinked_account_fallback_enabled?: boolean
+  codex_unlinked_account_fallback_seconds?: number
   session_slot_buffer_enabled: boolean
   session_slot_buffer_seconds: number
   grok_affinity_mode?: string

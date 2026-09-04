@@ -60,19 +60,24 @@ type newAPIOriginalAuditMeta struct {
 }
 
 type newAPIPolicyMeta struct {
-	PlatformID          string `json:"platform_id,omitempty"`
-	UserName            string `json:"user_name,omitempty"`
-	UserEmail           string `json:"user_email,omitempty"`
-	UserGroup           string `json:"user_group,omitempty"`
-	Profile             string `json:"profile"`
-	Mode                string `json:"mode"`
-	Provider            string `json:"provider"`
-	Protocol            string `json:"protocol"`
-	OriginalEndpoint    string `json:"original_endpoint,omitempty"`
-	OriginalProtocol    string `json:"original_protocol,omitempty"`
-	RequestedModel      string `json:"requested_model,omitempty"`
-	UpstreamModel       string `json:"upstream_model,omitempty"`
-	ChannelID           int    `json:"channel_id,omitempty"`
+	PlatformID       string `json:"platform_id,omitempty"`
+	UserName         string `json:"user_name,omitempty"`
+	UserEmail        string `json:"user_email,omitempty"`
+	UserGroup        string `json:"user_group,omitempty"`
+	Profile          string `json:"profile"`
+	Mode             string `json:"mode"`
+	Provider         string `json:"provider"`
+	Protocol         string `json:"protocol"`
+	OriginalEndpoint string `json:"original_endpoint,omitempty"`
+	OriginalProtocol string `json:"original_protocol,omitempty"`
+	RequestedModel   string `json:"requested_model,omitempty"`
+	UpstreamModel    string `json:"upstream_model,omitempty"`
+	ChannelID        int    `json:"channel_id,omitempty"`
+	// TokenID and InstallationID are signed NewAPI identity hints. They are
+	// deliberately kept separate from the root fingerprint and are used only
+	// to scope the optional no-root recent-account fallback.
+	TokenID             int    `json:"token_id,omitempty"`
+	InstallationID      string `json:"installation_id,omitempty"`
 	SessionFingerprint  string `json:"session_fingerprint,omitempty"`
 	RootSessionVersion  int    `json:"root_session_version,omitempty"`
 	RootSessionState    string `json:"root_session_state,omitempty"`
@@ -492,6 +497,12 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		meta.ChannelID = 0
 	}
 	var ok bool
+	if meta.TokenID < 0 {
+		return false
+	}
+	if meta.InstallationID, ok = normalizedVerifiedNewAPIIdentityText(meta.InstallationID, 256); !ok {
+		return false
+	}
 	if meta.UserName, ok = normalizedVerifiedNewAPIIdentityText(meta.UserName, 128); !ok {
 		return false
 	}

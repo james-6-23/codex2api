@@ -3344,6 +3344,8 @@ type Store struct {
 	affinitySpreadEnabled    atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	sessionWindowBalance     atomic.Bool  // 新会话在同优先级/健康层内优先落到低窗口账号
 	passiveInternalModels    atomic.Bool  // 可信派生内部模型仅复用原根会话账号
+	codexUnlinkedFallback    atomic.Bool  // 无根请求按用户/token/设备回溯最近账号
+	codexUnlinkedFallbackSec atomic.Int64 // 回溯时间窗秒数，默认 300
 	claudeClientPolicy       atomic.Value // ClaudeClientPolicy: 全局 Claude Code 平台/版本策略快照
 	grokAffinityMode         atomic.Value // string: "follow" / "bounded" / "off" / "strict"（"follow"=跟随全局）
 	grokProbeEnabled         atomic.Bool  // 定期探测 Grok 账号状态是否开启（默认关）
@@ -3899,6 +3901,8 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.SetSessionAffinitySpread(settings.SessionAffinitySpread)
 	s.SetSessionWindowBalanceEnabled(settings.SessionWindowBalanceEnabled)
 	s.SetPassiveInternalModelsEnabled(settings.PassiveInternalModelsEnabled)
+	s.SetCodexUnlinkedAccountFallbackEnabled(settings.CodexUnlinkedAccountFallbackEnabled)
+	s.SetCodexUnlinkedAccountFallbackSeconds(database.NormalizeCodexUnlinkedAccountFallbackSeconds(settings.CodexUnlinkedAccountFallbackSeconds))
 	s.SetGrokAffinityMode(grokAffinityModeFromConfig(settings.GrokConfig))
 	applyClaudeConfigToStore(s, settings.ClaudeConfig)
 	s.SetGrokProbeConfig(grokProbeConfigFromConfig(settings.GrokConfig))
@@ -8367,6 +8371,35 @@ func (s *Store) SetPassiveInternalModelsEnabled(enabled bool) {
 		return
 	}
 	s.passiveInternalModels.Store(enabled)
+}
+
+// CodexUnlinkedAccountFallbackEnabled reports whether requests without a
+// verifiable root may use the bounded recent-account bridge.
+func (s *Store) CodexUnlinkedAccountFallbackEnabled() bool {
+	return s != nil && s.codexUnlinkedFallback.Load()
+}
+
+func (s *Store) SetCodexUnlinkedAccountFallbackEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.codexUnlinkedFallback.Store(enabled)
+}
+
+// CodexUnlinkedAccountFallbackSeconds returns the bounded temporal bridge
+// window in seconds. It is always normalized to 1..3600 with 300 as default.
+func (s *Store) CodexUnlinkedAccountFallbackSeconds() int {
+	if s == nil {
+		return database.NormalizeCodexUnlinkedAccountFallbackSeconds(0)
+	}
+	return database.NormalizeCodexUnlinkedAccountFallbackSeconds(int(s.codexUnlinkedFallbackSec.Load()))
+}
+
+func (s *Store) SetCodexUnlinkedAccountFallbackSeconds(seconds int) {
+	if s == nil {
+		return
+	}
+	s.codexUnlinkedFallbackSec.Store(int64(database.NormalizeCodexUnlinkedAccountFallbackSeconds(seconds)))
 }
 
 // AffinityModeFollow 表示 Grok 会话粘性跟随全局 affinity_mode（不做 Grok 专属覆盖）。

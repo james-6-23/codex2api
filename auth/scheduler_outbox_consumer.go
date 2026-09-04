@@ -732,6 +732,8 @@ func (s *Store) reloadSchedulerSettings(ctx context.Context) error {
 	}
 	s.SetSessionWindowBalanceEnabled(settings.SessionWindowBalanceEnabled)
 	s.SetPassiveInternalModelsEnabled(settings.PassiveInternalModelsEnabled)
+	s.SetCodexUnlinkedAccountFallbackEnabled(settings.CodexUnlinkedAccountFallbackEnabled)
+	s.SetCodexUnlinkedAccountFallbackSeconds(database.NormalizeCodexUnlinkedAccountFallbackSeconds(settings.CodexUnlinkedAccountFallbackSeconds))
 	applyClaudeConfigToStore(s, settings.ClaudeConfig)
 	return nil
 }
