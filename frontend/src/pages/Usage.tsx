@@ -19,6 +19,7 @@ import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePer
 import type { APIKeyRow, OpsErrorSummary, SystemSettings, UsageAPIKeyStat, UsageEndpointStat, UsageFeatureStats, UsageLog, UsageModelStat, UsageStats, PromptFilterLog, PromptPolicyIncidentDetailResponse } from '../types'
 import { cn, formatCompactEmail } from '../lib/utils'
 import { formatUsageNumber as formatTokens } from '../lib/usageFormat'
+import { getUsageTokenBreakdown } from '../lib/usageTokenDisplay'
 import { formatBeijingTime } from '../utils/time'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
@@ -32,7 +33,7 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw } from 'lucide-react'
+import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, DatabaseBackup, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw } from 'lucide-react'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
@@ -384,6 +385,12 @@ function UsageCostCell({ log }: { log: UsageLog }) {
           {log.cached_tokens > 0 && (
             <CostTooltipRow label={t('usage.cacheReadCost')} value={formatUSD(log.cache_read_cost)} />
           )}
+          {(log.cache_write_5m_tokens ?? 0) > 0 && (
+            <CostTooltipRow label={t('usage.cacheWrite5mCost')} value={formatUSD(log.cache_write_5m_cost)} />
+          )}
+          {(log.cache_write_1h_tokens ?? 0) > 0 && (
+            <CostTooltipRow label={t('usage.cacheWrite1hCost')} value={formatUSD(log.cache_write_1h_cost)} />
+          )}
           {log.input_tokens > 0 && (
             <CostTooltipRow label={t('usage.inputUnitPrice')} value={formatTokenPricePerMillion(log.input_price_per_mtoken)} valueClassName="text-sky-300" />
           )}
@@ -392,6 +399,12 @@ function UsageCostCell({ log }: { log: UsageLog }) {
           )}
           {log.cached_tokens > 0 && log.cache_read_price_per_mtoken > 0 && (
             <CostTooltipRow label={t('usage.cacheReadUnitPrice')} value={formatTokenPricePerMillion(log.cache_read_price_per_mtoken)} valueClassName="text-cyan-300" />
+          )}
+          {(log.cache_write_5m_tokens ?? 0) > 0 && (log.cache_write_5m_price_per_mtoken ?? 0) > 0 && (
+            <CostTooltipRow label={t('usage.cacheWrite5mUnitPrice')} value={formatTokenPricePerMillion(log.cache_write_5m_price_per_mtoken)} valueClassName="text-amber-300" />
+          )}
+          {(log.cache_write_1h_tokens ?? 0) > 0 && (log.cache_write_1h_price_per_mtoken ?? 0) > 0 && (
+            <CostTooltipRow label={t('usage.cacheWrite1hUnitPrice')} value={formatTokenPricePerMillion(log.cache_write_1h_price_per_mtoken)} valueClassName="text-amber-300" />
           )}
           {requestedTier && (
             <CostTooltipRow label={t('usage.requestedTier')} value={formatServiceTierLabel(t, requestedTier)} valueClassName="text-slate-200" />
@@ -1208,6 +1221,52 @@ const usageTableHeadClass = 'text-[12px] font-semibold'
 const usageTableTextClass = 'text-[14px]'
 const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
 const usageTableBadgeClass = 'text-[13px]'
+
+function UsageInputTokenCount({ log }: { log: UsageLog }) {
+  const { t } = useTranslation()
+  const tokens = getUsageTokenBreakdown(log)
+  const title = tokens.isClaude
+    ? t('usage.claudeInputTooltip', {
+      input: formatTokens(tokens.inputTokens, true),
+      total: formatTokens(tokens.totalInputTokens, true),
+      read: formatTokens(tokens.cacheReadTokens, true),
+      write: formatTokens(tokens.cacheWriteTokens, true),
+    })
+    : `${t('usage.inputTokens')}: ${formatTokens(tokens.inputTokens, true)}`
+
+  return <span className="text-blue-500" title={title}>↓{formatTokens(tokens.inputTokens, true)}</span>
+}
+
+function UsageCacheBadges({ log, align = 'end' }: { log: UsageLog; align?: 'start' | 'end' }) {
+  const { t } = useTranslation()
+  const tokens = getUsageTokenBreakdown(log)
+  if (tokens.cacheReadTokens === 0 && tokens.cacheWriteTokens === 0) {
+    return <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+  }
+  const readTitle = t('usage.cacheReadTooltip', { tokens: formatTokens(tokens.cacheReadTokens, true) })
+  const writeTitle = t('usage.cacheCreateTooltip', {
+    tokens: formatTokens(tokens.cacheWriteTokens, true),
+    m5: formatTokens(tokens.cacheWrite5mTokens, true),
+    h1: formatTokens(tokens.cacheWrite1hTokens, true),
+  })
+
+  return (
+    <div className={cn('flex flex-col gap-1', align === 'start' ? 'items-start' : 'items-end')}>
+      {tokens.cacheReadTokens > 0 && (
+        <Badge variant="outline" title={readTitle} aria-label={readTitle} className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
+          <DatabaseZap className="size-3.5" aria-hidden="true" />
+          {formatTokens(tokens.cacheReadTokens, true)}
+        </Badge>
+      )}
+      {tokens.cacheWriteTokens > 0 && (
+        <Badge variant="outline" title={writeTitle} aria-label={writeTitle} className={`${usageTableBadgeClass} gap-1 border-transparent bg-amber-500/10 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400`}>
+          <DatabaseBackup className="size-3.5" aria-hidden="true" />
+          {formatTokens(tokens.cacheWriteTokens, true)}
+        </Badge>
+      )}
+    </div>
+  )
+}
 
 function StreamBadge({ stream }: { stream: boolean }) {
   return (
@@ -2059,7 +2118,7 @@ export default function Usage() {
                 {formatTokens(rangeTokens, showFullUsageNumbers)}
               </div>
               <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px] text-muted-foreground leading-snug">
-                <span>{t('usage.inputTokens')}: {formatTokens(rangePromptTokens, showFullUsageNumbers)}</span>
+                <span>{t('usage.totalInputTokens')}: {formatTokens(rangePromptTokens, showFullUsageNumbers)}</span>
                 <span>{t('usage.outputTokens')}: {formatTokens(rangeCompletionTokens, showFullUsageNumbers)}</span>
                 <span>{t('usage.cumulative')}: {formatTokens(cumulativeTokens, showFullUsageNumbers)}</span>
               </div>
@@ -2507,7 +2566,7 @@ export default function Usage() {
               <div className="grid gap-3 lg:hidden">
                 {logs.map((log: UsageLog) => {
                   const hasDetails = visibleColumns.account || visibleColumns.apiKey || visibleColumns.newapiUser || visibleColumns.clientIp || visibleColumns.endpoint || visibleColumns.userAgent
-                  const hasMetrics = visibleColumns.token || visibleColumns.timing || visibleColumns.tokensPerSec || visibleColumns.cost
+                  const hasMetrics = visibleColumns.token || visibleColumns.cached || visibleColumns.timing || visibleColumns.tokensPerSec || visibleColumns.cost
                   return (
                     <div
                       key={log.id}
@@ -2624,13 +2683,21 @@ export default function Usage() {
                               <div className="mt-1 font-mono tabular-nums">
                                 {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
                                   <>
-                                    <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
+                                    <UsageInputTokenCount log={log} />
                                     <span className="mx-0.5 text-border">/</span>
                                     <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
                                   </>
                                 ) : (
                                   <span className="text-muted-foreground">-</span>
                                 )}
+                              </div>
+                            </div>
+                          )}
+                          {visibleColumns.cached && (
+                            <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                              <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableCached')}</div>
+                              <div className="mt-1.5">
+                                <UsageCacheBadges log={log} align="start" />
                               </div>
                             </div>
                           )}
@@ -2832,7 +2899,7 @@ export default function Usage() {
                         {visibleColumns.token && <TableCell className="text-right">
                           {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
                             <div className={`${usageTableMonoClass} leading-relaxed`}>
-                              <span className="text-blue-500">↓{formatTokens(log.input_tokens, true)}</span>
+                              <UsageInputTokenCount log={log} />
                               <span className="mx-1 text-border">|</span>
                               <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
                               {log.reasoning_tokens > 0 && (
@@ -2847,14 +2914,7 @@ export default function Usage() {
                           )}
                         </TableCell>}
                         {visibleColumns.cached && <TableCell className="text-right">
-                          {log.cached_tokens > 0 ? (
-                            <Badge variant="outline" className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
-                              <DatabaseZap className="size-3.5" />
-                              {formatTokens(log.cached_tokens, true)}
-                            </Badge>
-                          ) : (
-                            <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
-                          )}
+                          <UsageCacheBadges log={log} />
                         </TableCell>}
                         {visibleColumns.wsAcquire && <TableCell className="text-right">
                           {(log.ws_acquire_ms ?? 0) > 0 ? (

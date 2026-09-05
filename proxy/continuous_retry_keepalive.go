@@ -184,6 +184,9 @@ func continuousRetryKeepaliveForContext(ctx context.Context) continuousRetryKeep
 }
 
 func activateContinuousRetryKeepalive(ctx context.Context) {
+	if apiKeyModelRequestAdmissionPending(ctx) {
+		return
+	}
 	if keepalive := continuousRetryKeepaliveForContext(ctx); keepalive != nil {
 		keepalive.Activate()
 	}

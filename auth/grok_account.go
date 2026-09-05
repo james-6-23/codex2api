@@ -203,6 +203,8 @@ type GrokRateLimitSnapshot struct {
 // SetGrokRateLimitSnapshot 更新配额余量快照（时间倒流的旧观测被忽略）。
 func (a *Account) SetGrokRateLimitSnapshot(snap GrokRateLimitSnapshot) {
 	a.setGrokRateLimitSnapshot(snap, true)
+	// 余量头是调度模式（剩余配额/顺序耗尽）的排序键来源，通知调度器重评桶内位置。
+	a.notifySchedulerUsageChanged()
 }
 
 // setGrokRateLimitSnapshot 的 markDirty=false 供启动恢复用:恢复的值本来就来自

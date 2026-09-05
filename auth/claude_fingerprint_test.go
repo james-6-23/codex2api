@@ -56,3 +56,18 @@ func TestGenerateClaudeFingerprint_ArchMatchesOS(t *testing.T) {
 		}
 	}
 }
+
+func TestGenerateClaudeFingerprint_UsesEffectiveCLIVersion(t *testing.T) {
+	t.Cleanup(func() { SetClaudeSyncedCLIVersion("") })
+	SetClaudeSyncedCLIVersion("2.1.300")
+	for i := 0; i < 10; i++ {
+		fp := GenerateClaudeFingerprint("")
+		if fp.UserAgent != "claude-cli/2.1.300 (external, cli)" {
+			t.Fatalf("UA 应使用生效版本, got %s", fp.UserAgent)
+		}
+	}
+	SetClaudeSyncedCLIVersion("")
+	if fp := GenerateClaudeFingerprint(""); fp.UserAgent != "claude-cli/"+BuiltinClaudeCLIVersion+" (external, cli)" {
+		t.Fatalf("无同步值时应使用内置版本, got %s", fp.UserAgent)
+	}
+}

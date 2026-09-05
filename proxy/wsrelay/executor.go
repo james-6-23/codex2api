@@ -218,6 +218,13 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 发送请求，失败时最多重试 2 次（重建连接）。
 	// 用 DiscardConnection 按连接指针精确清理：续链亲和取回的连接其 PoolKey
 	// 可能与当前请求的 proxy 组合不同，按参数重算 key 会漏删。
+	if err := proxy.ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(wsBody, "model").String()); err != nil {
+		if !wc.cancelUnsentReadLease(pr.RequestID) {
+			e.manager.DiscardConnection(wc)
+		}
+		wc.session.RemovePendingRequest(pr.RequestID)
+		return nil, err
+	}
 	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)

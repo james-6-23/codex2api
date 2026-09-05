@@ -7,6 +7,14 @@ import { Dialog as DialogPrimitive } from "radix-ui"
 import { cn } from "@/lib/utils"
 import { Button } from "@/components/ui/button"
 
+// Portaled dropdowns (select / group picker / proxy pool) close themselves on
+// Escape from a bubble-phase document listener, but Radix dismisses the layer in
+// the capture phase first. While one is open, keep the modal and let the
+// dropdown consume the key.
+function hasOpenPortalDropdown() {
+  return typeof document !== "undefined" && document.querySelector('[data-select-dropdown="true"]') !== null
+}
+
 function isInteractivePortalTarget(target: EventTarget | null) {
   return (
     target instanceof Element &&
@@ -57,6 +65,7 @@ function SheetContent({
   children,
   side = "right",
   showCloseButton = true,
+  onEscapeKeyDown,
   onInteractOutside,
   onPointerDownOutside,
   onFocusOutside,
@@ -81,6 +90,12 @@ function SheetContent({
             "left-[max(0.75rem,env(safe-area-inset-left))] sm:left-[max(1rem,env(safe-area-inset-left))] data-[state=closed]:slide-out-to-left data-[state=open]:slide-in-from-left data-[state=open]:fade-in-0 data-[state=closed]:fade-out-0",
           className,
         )}
+        onEscapeKeyDown={(event) => {
+          onEscapeKeyDown?.(event)
+          if (hasOpenPortalDropdown()) {
+            event.preventDefault()
+          }
+        }}
         onInteractOutside={(event) => {
           onInteractOutside?.(event)
           if (isInteractivePortalTarget(event.target)) {

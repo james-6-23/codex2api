@@ -700,6 +700,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 		logCodexFingerprintDebug("http", account, proxyURL, req.Header)
 
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+			return nil, err
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
@@ -772,6 +775,9 @@ func ExecuteOpenAIResponsesRequest(ctx context.Context, account *auth.Account, r
 			return nil, ErrInternalError("创建请求失败", err)
 		}
 		applyOpenAIResponsesRequestHeaders(req, account, apiKey, headers)
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(body, "model").String()); err != nil {
+			return nil, err
+		}
 		resp, err := client.Do(req)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
@@ -899,6 +905,9 @@ func ExecuteOpenAIResponsesCompactRequest(ctx context.Context, account *auth.Acc
 	}
 	applyOpenAIResponsesRequestHeaders(req, account, apiKey, headers)
 
+	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+		return nil, err
+	}
 	resp, err := getPooledClient(account, proxyURL).Do(req)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
@@ -986,6 +995,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	}
 	logCodexFingerprintDebug("compact", account, proxyURL, req.Header)
 
+	if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(requestBody, "model").String()); err != nil {
+		return nil, err
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
@@ -1260,12 +1272,13 @@ type relatedSessionObservation struct {
 //  3. Header: Session_id
 //  4. Header: Conversation_id
 //  5. Header: Idempotency-Key
-//  6. Body:   prompt_cache_key
-//  7. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
+//  6. Header: X-Session-Id / X-Session-Affinity（opencode 等第三方客户端）
+//  7. Body:   prompt_cache_key
+//  8. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
 //     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
-//  8. 基于 Bearer API Key 的确定性 UUID
+//  9. 基于 Bearer API Key 的确定性 UUID
 //
-// 第 6 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
+// 第 8 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
 // 用户共用时，粘性粒度从"整个 Key 挤一个账号"细化为"每段对话独立粘定"。
 // 专用 affinity header 永不参与上游 session ID / prompt_cache_key，也不会被转发；
 // 下游网关可用它传稳定的最终用户/对话标识，在共享 Bearer Key 时仍实现一人一号式绑定。
@@ -1325,8 +1338,11 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 // with a signed NewAPI session fingerprint when one was verified by the prompt
 // policy ingress stage. Untrusted X-NewAPI-* headers are never accepted here.
 func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body []byte) requestSessionIdentity {
+	return h.resolveRequestSessionIdentityWithBase(c, body, resolveRequestSessionIdentity(c.Request.Header, body))
+}
+
+func (h *Handler) resolveRequestSessionIdentityWithBase(c *gin.Context, body []byte, identity requestSessionIdentity) requestSessionIdentity {
 	c.Set(relatedSessionObservationContextKey, nil)
-	identity := resolveRequestSessionIdentity(c.Request.Header, body)
 	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
 	accountingBypass := h.verifiedNewAPISessionAccountingBypass(c)
@@ -1565,8 +1581,16 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 				return v
 			}
 		}
+		// opencode 等第三方 CLI 客户端用 x-session-id / x-session-affinity 标识会话
+		// （值为 ses_...，非 UUID，出站上由 claudeUpstreamSessionID 等确定性派生为
+		// UUIDv7）。优先级低于既有显式头，高于 body prompt_cache_key。
+		for _, key := range []string{"X-Session-Id", "X-Session-Affinity"} {
+			if v := strings.TrimSpace(headers.Get(key)); v != "" {
+				return v
+			}
+		}
 	}
-	// 优先从 body 的 prompt_cache_key 提取
+	// 没有显式会话头时，从 body 的 prompt_cache_key 提取。
 	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
 		return v
 	}

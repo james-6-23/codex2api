@@ -6,6 +6,7 @@ import RouteErrorBoundary from './components/RouteErrorBoundary'
 import StateShell from './components/StateShell'
 import { ToastProvider } from './components/ToastProvider'
 import { BrandingProvider } from './branding'
+import { VisibleChannelsProvider } from './visibleChannels'
 import { ThemeProvider } from './hooks/useTheme'
 import Dashboard from './pages/Dashboard'
 
@@ -55,6 +56,7 @@ export default function App() {
 function AdminApp() {
   return (
     <AuthGate>
+      <VisibleChannelsProvider>
       <Layout>
         <Routes>
           <Route path="/" element={<Dashboard />} />
@@ -85,6 +87,7 @@ function AdminApp() {
           <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />
         </Routes>
       </Layout>
+      </VisibleChannelsProvider>
     </AuthGate>
   )
 }

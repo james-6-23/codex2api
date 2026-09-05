@@ -189,6 +189,11 @@ func TestGPT56VariantPricing(t *testing.T) {
 		{"gpt-5.6-luna", 0.2, 1.2, 0.02, 0.4, 2.4},
 		{"gpt-5.6-sol-high", 5.0, 30.0, 0.5, 10.0, 60.0},
 		{"gpt-6-astra", 5.0, 30.0, 0.5, 10.0, 60.0},
+		// Trusted Access for Cyber 稳定别名（issue #624）：blue 即 sol，red 即
+		// 5.6-cyber（无公开定价）——都按 sol 计，绝不能掉进 $1/$2 默认价。
+		{"gpt-daybreak-blue-latest", 5.0, 30.0, 0.5, 10.0, 60.0},
+		{"gpt-daybreak-red-latest", 5.0, 30.0, 0.5, 10.0, 60.0},
+		{"gpt-5.6-cyber", 5.0, 30.0, 0.5, 10.0, 60.0},
 	}
 	for _, c := range cases {
 		p := GetModelPricing(c.model)
@@ -533,5 +538,20 @@ func TestClaudeFablePricingUsesOfficialCacheReadRates(t *testing.T) {
 	assertFloatEqual(t, fable5.CacheReadPricePerMToken, 1)
 	if fable5.CacheWrite5mPricePerMToken != 12.5 || fable5.CacheWrite1hPricePerMToken != 20 {
 		t.Fatalf("Fable 5 cache-write pricing = %+v", fable5)
+	}
+}
+
+func TestCanonicalBillingModelKeyDaybreakAliases(t *testing.T) {
+	for _, model := range []string{"gpt-daybreak-blue-latest", "gpt-daybreak-red-latest", "GPT-Daybreak-Blue-Latest"} {
+		if got := CanonicalBillingModelKey(model); got != "gpt-5.6-sol" {
+			t.Fatalf("CanonicalBillingModelKey(%q) = %q, want gpt-5.6-sol", model, got)
+		}
+	}
+	// 只认 gpt-daybreak- 前缀：带版本号的 ID 仍按自身版本计费，无关模型不沾光。
+	if got := CanonicalBillingModelKey("gpt-5.4-daybreak"); got != "gpt-5.4" {
+		t.Fatalf("CanonicalBillingModelKey(gpt-5.4-daybreak) = %q, want gpt-5.4", got)
+	}
+	if got := CanonicalBillingModelKey("daybreak-blue"); got == "gpt-5.6-sol" {
+		t.Fatal("bare daybreak-blue must not resolve to gpt-5.6-sol")
 	}
 }

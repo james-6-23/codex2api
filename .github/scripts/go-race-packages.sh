@@ -21,8 +21,11 @@ case "$shard" in
   database-other)
     echo "-skip ^Test[A-P] ./database"
     ;;
-  proxy)
-    echo ./proxy/...
+  proxy-a-g)
+    echo "-run ^Test[A-G] ./proxy/..."
+    ;;
+  proxy-h-z)
+    echo "-run ^Test[^A-G] ./proxy/..."
     ;;
   promptfilter)
     echo ./security/promptfilter

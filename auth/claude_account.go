@@ -10,11 +10,17 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
 )
+
+// ClaudeDeviceIDCredentialKey 是 credentials.custom_headers 中可选的显式 device_id
+// 覆盖键;缺省时由 ClaudeDeviceID 从账号身份确定性派生。
+const ClaudeDeviceIDCredentialKey = "claude_device_id"
 
 // UpstreamClaude 是 Claude Code OAuth 账号的 upstream_type 判别值。
 const UpstreamClaude = "claude"
@@ -43,6 +49,47 @@ func (a *Account) IsClaudeOAuth() bool {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.isClaudeOAuthLocked()
+}
+
+// ClaudeAccountUUID 返回登录/刷新时写入的 Anthropic 账号 uuid（account_id 凭据）。
+// 真实 CLI 的 metadata.user_id 里携带该值，缺失时返回空串。
+func (a *Account) ClaudeAccountUUID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return strings.TrimSpace(a.AccountID)
+}
+
+// ClaudeDeviceID 返回该账号用于 metadata.user_id.device_id 的稳定 64-hex 值：
+// 优先取显式配置的 claude_device_id，否则按账号身份确定性派生（同账号跨请求/
+// 跨重启恒定，避免引入新的持久化字段）。真实 CLI 的 device_id 也是稳定设备指纹。
+func (a *Account) ClaudeDeviceID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if v := strings.TrimSpace(a.CustomHeaders[ClaudeDeviceIDCredentialKey]); v != "" {
+		return v
+	}
+	// The admin custom-header normalizer canonicalizes this metadata key to
+	// Claude_device_id. Accept historical/mixed-case keys as well as the
+	// original lowercase spelling, without making it an outbound HTTP header.
+	for name, value := range a.CustomHeaders {
+		if strings.EqualFold(strings.TrimSpace(name), ClaudeDeviceIDCredentialKey) {
+			if value = strings.TrimSpace(value); value != "" {
+				return value
+			}
+		}
+	}
+	seed := strings.TrimSpace(a.AccountID)
+	if seed == "" {
+		seed = fmt.Sprintf("db-%d", a.DBID)
+	}
+	sum := sha256.Sum256([]byte("claude-code-device:" + seed))
+	return hex.EncodeToString(sum[:])
 }
 
 // refreshClaudeAccount 刷新一个 Claude Code OAuth 账号的 access token。

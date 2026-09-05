@@ -26,7 +26,7 @@ const (
 
 var (
 	codexClientVersionPatterns = []*regexp.Regexp{
-		regexp.MustCompile(`(?i)(?:^|[\s(;])(?:codex-tui|codex_cli_rs|codex_vscode|codex_app|codex_chatgpt_desktop|codex_atlas|codex_exec|codex_sdk_ts|opencode)/v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)(?:$|[\s;)])`),
+		regexp.MustCompile(`(?i)(?:^|[\s(;])(?:codex-tui|codex_cli_rs|codex_vscode|codex_app|codex_chatgpt_desktop|codex_atlas|codex_exec|codex_sdk_ts|codex desktop|opencode)/v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)(?:$|[\s;)])`),
 		regexp.MustCompile(`(?i)(?:^|[\s(;])codex\s+v?(\d+\.\d+\.\d+(?:-[A-Za-z0-9][A-Za-z0-9.-]*)?)(?:$|[\s;)])`),
 	}
 

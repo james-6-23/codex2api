@@ -141,8 +141,9 @@ func (h *Handler) TestConnection(c *gin.Context) {
 
 	// 构建最小测试请求体（参考 sub2api createOpenAITestPayload）
 	payload := buildConnectionTestPayload(h.store, testModel)
+	claudeSecurityCfg := h.store.ClaudeSecurityConfig()
 	if isClaudeAccount {
-		payload = buildClaudeConnectionTestPayload(h.store, testModel)
+		payload = buildClaudeConnectionTestPayload(h.store, testModel, claudeSecurityCfg)
 	}
 
 	// 发送请求
@@ -150,7 +151,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	var resp *http.Response
 	var reqErr error
 	if isClaudeAccount {
-		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), c.Request.Header.Clone(), account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), h.store.ClaudeSecurityConfig())
+		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), c.Request.Header.Clone(), account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), claudeSecurityCfg)
 	} else if isOpenAIResponsesAccount {
 		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), nil)
 	} else {
@@ -365,15 +366,16 @@ func buildConnectionTestPayload(store *auth.Store, model string) []byte {
 // shape used by Claude OAuth accounts. Keeping this separate from the
 // Responses test payload prevents an imported Claude token from ever being
 // sent through an OpenAI-shaped probe.
-func buildClaudeConnectionTestPayload(store *auth.Store, model string) []byte {
+func buildClaudeConnectionTestPayload(store *auth.Store, model string, securityCfg auth.ClaudeSecurityConfig) []byte {
 	content := auth.DefaultTestContent
 	if store != nil {
 		content = store.GetTestContent()
 	}
 	content = auth.NormalizeTestContent(auth.RenderTestContent(content))
+	maxTokens := claudeProbeTokenBudget(securityCfg)
 	body, err := json.Marshal(map[string]interface{}{
 		"model":      strings.TrimSpace(model),
-		"max_tokens": 32,
+		"max_tokens": maxTokens,
 		"stream":     true,
 		"messages": []map[string]interface{}{{
 			"role":    "user",
@@ -381,7 +383,7 @@ func buildClaudeConnectionTestPayload(store *auth.Store, model string) []byte {
 		}},
 	})
 	if err != nil {
-		return []byte(`{"model":"claude-haiku-4-5","max_tokens":1,"stream":true,"messages":[{"role":"user","content":"ping"}]}`)
+		return []byte(fmt.Sprintf(`{"model":"claude-haiku-4-5","max_tokens":%d,"stream":true,"messages":[{"role":"user","content":"ping"}]}`, maxTokens))
 	}
 	return body
 }
@@ -1348,7 +1350,8 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 	var resp *http.Response
 	var err error
 	if acc.IsClaudeOAuth() {
-		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, buildClaudeConnectionTestPayload(h.store, testModel), h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), h.store.ClaudeSecurityConfig())
+		securityCfg := h.store.ClaudeSecurityConfig()
+		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, buildClaudeConnectionTestPayload(h.store, testModel, securityCfg), h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), securityCfg)
 	} else if acc.IsRelayStyle() {
 		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
 	} else {
@@ -1476,14 +1479,15 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 		return "failed", modelErr.Error()
 	}
 	payload := buildConnectionTestPayload(h.store, testModel)
+	claudeSecurityCfg := h.store.ClaudeSecurityConfig()
 	if acc.IsClaudeOAuth() {
-		payload = buildClaudeConnectionTestPayload(h.store, testModel)
+		payload = buildClaudeConnectionTestPayload(h.store, testModel, claudeSecurityCfg)
 	}
 
 	var resp *http.Response
 	var err error
 	if acc.IsClaudeOAuth() {
-		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), h.store.ClaudeSecurityConfig())
+		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), claudeSecurityCfg)
 	} else if acc.IsRelayStyle() {
 		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
 	} else {

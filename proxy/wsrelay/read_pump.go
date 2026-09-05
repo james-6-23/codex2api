@@ -511,6 +511,21 @@ func (wc *WsConnection) BeginReadLease(requestID string) error {
 	return nil
 }
 
+// cancelUnsentReadLease returns only this request's untouched reservation to
+// idle. It must never erase a lease once a business frame write has started.
+func (wc *WsConnection) cancelUnsentReadLease(requestID string) bool {
+	state := wc.ensureReadState()
+	state.mu.Lock()
+	defer state.mu.Unlock()
+	if state.activeLease != requestID || state.leasePhase != readLeaseReserved || state.leaseWrite != nil || len(state.queue) != 0 {
+		return false
+	}
+	state.activeLease = ""
+	state.leasePhase = readLeaseIdle
+	state.leaseTerminalQueued = false
+	return true
+}
+
 func (wc *WsConnection) beginReadLeaseWrite(messageType int) (string, bool, error) {
 	if messageType != websocket.TextMessage && messageType != websocket.BinaryMessage {
 		return "", false, nil

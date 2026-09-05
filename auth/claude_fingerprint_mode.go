@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Claude Code 出站请求的指纹收敛模式(账号级;空值 = 跟随全局默认):
@@ -185,6 +186,118 @@ func (s *Store) ClaudeSessionWindowLimit() int64 {
 	return atomic.LoadInt64(&s.claudeSessionWindowLimit)
 }
 
+// CLIVersionSyncEnabledValue 把缺失字段解释为开启，避免老配置静默关闭同步。
+func (c ClaudeConfig) CLIVersionSyncEnabledValue() bool {
+	return c.CLIVersionSyncEnabled == nil || *c.CLIVersionSyncEnabled
+}
+
+// DefaultClaudeFirstTokenTimeoutSeconds 是 Claude OAuth 路径首字超时的默认值：
+// 长推理（effort xhigh、~150k 上下文）正常也会在 1~2 分钟内吐出首个 thinking delta，
+// 超过这个时间基本是上游卡死，继续等只会让并发位被僵尸请求占住。
+const DefaultClaudeFirstTokenTimeoutSeconds = 120
+
+// MaxClaudeFirstTokenTimeoutSeconds 与全局 first_token_timeout_seconds 的上限保持一致。
+const MaxClaudeFirstTokenTimeoutSeconds = 600
+
+// NormalizeClaudeFirstTokenTimeoutSeconds 把配置值钳到 [0,600]；nil（老配置缺失）取默认 120，
+// 负数视为 0（跟随全局）。
+func NormalizeClaudeFirstTokenTimeoutSeconds(seconds *int) int {
+	if seconds == nil {
+		return DefaultClaudeFirstTokenTimeoutSeconds
+	}
+	if *seconds <= 0 {
+		return 0
+	}
+	if *seconds > MaxClaudeFirstTokenTimeoutSeconds {
+		return MaxClaudeFirstTokenTimeoutSeconds
+	}
+	return *seconds
+}
+
+// FirstTokenTimeoutSecondsValue 返回归一化后的 Claude 首字超时秒数（0=跟随全局）。
+func (c ClaudeConfig) FirstTokenTimeoutSecondsValue() int {
+	return NormalizeClaudeFirstTokenTimeoutSeconds(c.FirstTokenTimeoutSeconds)
+}
+
+// StreamKeepaliveEnabledValue 把缺失字段解释为开启。
+func (c ClaudeConfig) StreamKeepaliveEnabledValue() bool {
+	return c.StreamKeepaliveEnabled == nil || *c.StreamKeepaliveEnabled
+}
+
+// SetClaudeFirstTokenTimeoutSeconds 发布 Claude 路径首字超时（0=跟随全局）。
+func (s *Store) SetClaudeFirstTokenTimeoutSeconds(seconds int) {
+	if s == nil {
+		return
+	}
+	if seconds < 0 {
+		seconds = 0
+	}
+	if seconds > MaxClaudeFirstTokenTimeoutSeconds {
+		seconds = MaxClaudeFirstTokenTimeoutSeconds
+	}
+	s.claudeFirstTokenTimeoutSec.Store(int64(seconds))
+	s.claudeFirstTokenTimeoutSet.Store(true)
+}
+
+// ClaudeFirstTokenTimeoutSeconds 返回 Claude 路径首字超时秒数；从未设置时取默认 120。
+func (s *Store) ClaudeFirstTokenTimeoutSeconds() int {
+	if s == nil {
+		return DefaultClaudeFirstTokenTimeoutSeconds
+	}
+	if !s.claudeFirstTokenTimeoutSet.Load() {
+		return DefaultClaudeFirstTokenTimeoutSeconds
+	}
+	return int(s.claudeFirstTokenTimeoutSec.Load())
+}
+
+// ClaudeFirstTokenTimeout 返回 Claude 路径首字超时时长；0 表示跟随全局设置。
+func (s *Store) ClaudeFirstTokenTimeout() time.Duration {
+	return time.Duration(s.ClaudeFirstTokenTimeoutSeconds()) * time.Second
+}
+
+// SetClaudeStreamKeepaliveEnabled 发布 Claude 流式首字前 SSE 保活开关。
+func (s *Store) SetClaudeStreamKeepaliveEnabled(enabled bool) {
+	if s == nil {
+		return
+	}
+	s.claudeStreamKeepaliveDisabled.Store(!enabled)
+}
+
+// ClaudeStreamKeepaliveEnabled 报告 Claude 流式首字前 SSE 保活是否开启（零值=开启）。
+func (s *Store) ClaudeStreamKeepaliveEnabled() bool {
+	return s != nil && !s.claudeStreamKeepaliveDisabled.Load()
+}
+
+// NormalizeClaudeCLIVersionSyncIntervalHours 钳到 [1,720]，0/负数视为默认 12。
+func NormalizeClaudeCLIVersionSyncIntervalHours(hours int) int {
+	if hours <= 0 {
+		return 12
+	}
+	if hours > 720 {
+		return 720
+	}
+	return hours
+}
+
+func (s *Store) SetClaudeCLIVersionSync(enabled bool, intervalHours int) {
+	if s == nil {
+		return
+	}
+	s.claudeCLIVersionSyncDisabled.Store(!enabled)
+	s.claudeCLIVersionSyncIntervalH.Store(int64(NormalizeClaudeCLIVersionSyncIntervalHours(intervalHours)))
+}
+
+func (s *Store) ClaudeCLIVersionSyncEnabled() bool {
+	return s != nil && !s.claudeCLIVersionSyncDisabled.Load()
+}
+
+func (s *Store) ClaudeCLIVersionSyncIntervalHours() int {
+	if s == nil {
+		return 12
+	}
+	return NormalizeClaudeCLIVersionSyncIntervalHours(int(s.claudeCLIVersionSyncIntervalH.Load()))
+}
+
 // ApplyAccountClaudeFingerprintMode 更新内存态账号的 Claude 指纹模式。
 func (s *Store) ApplyAccountClaudeFingerprintMode(dbID int64, mode string) bool {
 	acc := s.FindByID(dbID)
@@ -208,9 +321,16 @@ func claudeSessionWindowForRow(upstreamType string, globalWindow int64) int64 {
 // ClaudeConfig 是 ClaudeCode 全局配置(系统设置 claude_config 列反序列化目标)。
 // 全体 Claude 账号默认遵守;个体账号可通过编辑覆盖。
 type ClaudeConfig struct {
-	FingerprintMode    string `json:"fingerprint_mode"`     // preserve / force(空=preserve)
-	DefaultTimezone    string `json:"default_timezone"`     // 导入账号默认 IANA 时区
-	SessionWindowLimit int64  `json:"session_window_limit"` // 默认并发会话窗口数(0=跟随全局 maxConcurrency)
+	FingerprintMode             string `json:"fingerprint_mode"`                          // preserve / force(空=preserve)
+	DefaultTimezone             string `json:"default_timezone"`                          // 导入账号默认 IANA 时区
+	SessionWindowLimit          int64  `json:"session_window_limit"`                      // 默认并发会话窗口数(0=跟随全局 maxConcurrency)
+	CLIVersionSyncEnabled       *bool  `json:"cli_version_sync_enabled,omitempty"`        // 缺失=true
+	CLIVersionSyncIntervalHours int    `json:"cli_version_sync_interval_hours,omitempty"` // 0=12，钳 [1,720]
+	// FirstTokenTimeoutSeconds 是 Claude OAuth 路径专用的首字超时（秒）。缺失=默认
+	// DefaultClaudeFirstTokenTimeoutSeconds；显式 0=跟随全局 first_token_timeout_seconds。
+	FirstTokenTimeoutSeconds *int `json:"first_token_timeout_seconds,omitempty"`
+	// StreamKeepaliveEnabled 控制 Claude 流式请求在首字前是否向下游发 SSE 保活注释。缺失=开启。
+	StreamKeepaliveEnabled *bool `json:"stream_keepalive_enabled,omitempty"`
 	ClaudeClientPolicy
 	ClaudeSecurityConfig
 }
@@ -316,6 +436,9 @@ func ParseClaudeConfig(raw string) ClaudeConfig {
 	if cfg.SessionWindowLimit < 0 {
 		cfg.SessionWindowLimit = 0
 	}
+	cfg.CLIVersionSyncIntervalHours = NormalizeClaudeCLIVersionSyncIntervalHours(cfg.CLIVersionSyncIntervalHours)
+	normalizedTimeout := NormalizeClaudeFirstTokenTimeoutSeconds(cfg.FirstTokenTimeoutSeconds)
+	cfg.FirstTokenTimeoutSeconds = &normalizedTimeout
 	if clientPolicy, err := NormalizeClaudeClientPolicy(cfg.ClaudeClientPolicy); err == nil {
 		cfg.ClaudeClientPolicy = clientPolicy
 	} else {
@@ -331,6 +454,9 @@ func applyClaudeConfigToStore(s *Store, raw string) {
 	s.SetClaudeFingerprintModeDefault(cfg.FingerprintMode)
 	s.SetClaudeDefaultTimezone(cfg.DefaultTimezone)
 	s.SetClaudeSessionWindowLimit(cfg.SessionWindowLimit)
+	s.SetClaudeCLIVersionSync(cfg.CLIVersionSyncEnabledValue(), cfg.CLIVersionSyncIntervalHours)
+	s.SetClaudeFirstTokenTimeoutSeconds(cfg.FirstTokenTimeoutSecondsValue())
+	s.SetClaudeStreamKeepaliveEnabled(cfg.StreamKeepaliveEnabledValue())
 	s.SetClaudeClientPolicy(cfg.ClaudeClientPolicy)
 	s.SetClaudeSecurityConfig(cfg.SecurityConfig())
 }

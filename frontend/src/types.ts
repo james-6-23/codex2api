@@ -2,6 +2,13 @@ export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export type ISODateString = string
 export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'claude'
 
+// 管理台可见渠道设置（GET/PUT /settings/visible-channels）
+export interface VisibleChannelsSettings {
+  channels: UpstreamChannel[]
+  all: UpstreamChannel[]
+  fallback: UpstreamChannel
+}
+
 /** Claude Code OAuth：第一步返回授权 URL 与 state。 */
 export interface ClaudeAuthURLResponse {
   auth_url: string
@@ -2007,6 +2014,7 @@ export interface SystemSettings {
   codex_cli_version_sync_enabled: boolean
   codex_cli_version_sync_interval_hours: number
   codex_synced_cli_version?: string
+  codex_effective_cli_version?: string
   codex_user_agent_config: string
   usage_log_mode: 'full' | 'errors' | 'off' | string
   usage_log_batch_size: number
@@ -2949,11 +2957,30 @@ export interface ModelsResponse {
   warning?: string
 }
 
+export interface ChannelModelRefreshResult {
+  channel: 'codex' | 'claude' | 'grok' | 'antigravity' | string
+  groups?: number
+  refreshed: number
+  failed: number
+  added: string[]
+  error?: string
+}
+
+export interface RefreshAllModelsResponse {
+  type: 'complete'
+  message: string
+  channels: ChannelModelRefreshResult[]
+  added: string[]
+  model_count: number
+  duration_ms: number
+}
+
 export interface ModelSyncResponse {
   added: number
   updated: number
   unchanged: number
   skipped: string[]
+  removed?: string[]
   models: string[]
   items: ModelInfo[]
   last_synced_at: string
@@ -3159,6 +3186,8 @@ export interface UsageLog {
   has_compaction_history: boolean
   via_websocket?: boolean
   cached_tokens: number
+  cache_write_5m_tokens: number
+  cache_write_1h_tokens: number
   service_tier: string
   requested_service_tier: string
   actual_service_tier: string
@@ -3180,10 +3209,14 @@ export interface UsageLog {
   input_cost: number
   output_cost: number
   cache_read_cost: number
+  cache_write_5m_cost: number
+  cache_write_1h_cost: number
   total_cost: number
   input_price_per_mtoken: number
   output_price_per_mtoken: number
   cache_read_price_per_mtoken: number
+  cache_write_5m_price_per_mtoken: number
+  cache_write_1h_price_per_mtoken: number
   rate_multiplier: number
   long_context?: boolean
   long_context_threshold?: number
@@ -3359,6 +3392,30 @@ export interface APIKeyScopeSummaryItem {
   skip_requests?: number
 }
 
+export interface APIKeyModelRequestLimit {
+  /** Stable backend-generated identity; omit when adding a rule. */
+  id?: string
+  model: string
+  window: 'week'
+  max_requests: number
+  timezone: string
+  /** ISO weekday: Monday = 1, Sunday = 7. */
+  reset_weekday: number
+  reset_time: string
+}
+
+export interface APIKeyModelRequestUsage {
+  rule_id: string
+  model: string
+  window: 'week'
+  limit: number
+  used: number
+  remaining: number
+  window_start: ISODateString
+  reset_at: ISODateString
+  timezone: string
+}
+
 export interface APIKeyLimits {
   model_allow?: string[]
   model_deny?: string[]
@@ -3384,6 +3441,8 @@ export interface APIKeyLimits {
   allow_live?: boolean
   /** 分组 / 账号维度的用量预算（issue #439）。 */
   scope_limits?: APIKeyScopeLimit[]
+  /** Fixed weekly request budgets shared by models matching each rule. */
+  model_request_limits?: APIKeyModelRequestLimit[]
 }
 
 export interface APIKeyWindowUsage {
@@ -3586,6 +3645,7 @@ export interface PublicAPIKeyUsageResponse {
   key: PublicAPIKeyUsageKey
   range: PublicAPIKeyUsageRange
   usage: PublicAPIKeyUsageReport
+  model_request_usage?: APIKeyModelRequestUsage[]
 }
 
 export interface CreateAPIKeyResponse {
@@ -3756,6 +3816,13 @@ export interface ClaudeGlobalConfig {
   client_version: string
   default_timezone: string
   session_window_limit: number
+  cli_version_sync_enabled: boolean
+  cli_version_sync_interval_hours: number
+  first_token_timeout_seconds: number
+  stream_keepalive_enabled: boolean
+  synced_cli_version?: string
+  builtin_cli_version?: string
+  effective_cli_version?: string
   allow_service_tier: boolean
   allow_inference_geo: boolean
   allow_speed: boolean

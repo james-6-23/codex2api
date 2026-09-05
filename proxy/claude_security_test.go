@@ -170,14 +170,14 @@ func TestNormalizeClaudeRequestBodyNormalizesLegacyMaxTokensAlias(t *testing.T) 
 	}
 }
 
-func TestNormalizeClaudeRequestBodyDropsUnsupportedContextManagement(t *testing.T) {
+func TestNormalizeClaudeRequestBodyKeepsContextManagement(t *testing.T) {
 	body := []byte(`{"model":"claude-opus-4-7","max_tokens":13100,"messages":[],"context_management":{"edits":[{"type":"clear_tool_uses_20250919"}]},"thinking":{"type":"adaptive"},"output_config":{"effort":"high"}}`)
 	out, err := normalizeClaudeRequestBody(body, auth.DefaultClaudeSecurityConfig())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gjson.GetBytes(out, "context_management").Exists() {
-		t.Fatalf("context_management is rejected by the Claude OAuth endpoint: %s", out)
+	if !gjson.GetBytes(out, "context_management").Exists() {
+		t.Fatalf("context_management is sent with its paired beta, must survive normalization: %s", out)
 	}
 	for _, field := range []string{"thinking", "output_config"} {
 		if !gjson.GetBytes(out, field).Exists() {

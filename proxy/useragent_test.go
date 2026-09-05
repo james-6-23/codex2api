@@ -205,12 +205,12 @@ func TestCodexUserAgentConfigRawOverrideAppliesVersionFloor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NormalizeCodexUserAgentConfigJSON() error = %v", err)
 	}
-	_, version, ok := codexUserAgentFromConfig(normalized, "0.150.0")
+	_, version, ok := codexUserAgentFromConfig(normalized, "0.160.0")
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	if version != "0.150.0" {
-		t.Fatalf("version = %q, want floor 0.150.0", version)
+	if version != "0.160.0" {
+		t.Fatalf("version = %q, want floor 0.160.0", version)
 	}
 }
 

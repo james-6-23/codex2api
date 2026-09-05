@@ -240,6 +240,9 @@ func ExecuteGrokRequest(ctx context.Context, account *auth.Account, requestBody 
 		if model != "" {
 			req.Header.Set("x-grok-model-override", model)
 		}
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(body, "model").String()); err != nil {
+			return nil, err
+		}
 		resp, err := getPooledClient(account, proxyURL).Do(req)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {

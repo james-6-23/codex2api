@@ -444,6 +444,7 @@ func TestCurrentUserOverflowAboveExactCeilingCannotBecomeTerminalOrStrike(t *tes
 }
 
 func TestWindowedCurrentUserPrecheckBlocksTerminalBeyondSynchronousCeiling(t *testing.T) {
+	skipHeavyFixtureUnderRace(t)
 	cfg := RecommendedConfig()
 	cfg.Enabled = true
 	cfg.Mode = ModeBlock
@@ -461,6 +462,7 @@ func TestWindowedCurrentUserPrecheckBlocksTerminalBeyondSynchronousCeiling(t *te
 }
 
 func TestWindowedCurrentUserPrecheckDoesNotPromoteSignalOnlyVocabulary(t *testing.T) {
+	skipHeavyFixtureUnderRace(t)
 	cfg := RecommendedConfig()
 	cfg.Enabled = true
 	cfg.Mode = ModeBlock
@@ -477,6 +479,7 @@ func TestWindowedCurrentUserPrecheckDoesNotPromoteSignalOnlyVocabulary(t *testin
 }
 
 func TestWindowedCurrentUserPrecheckKeepsStrictSignalOnlyRuleDecisionBearing(t *testing.T) {
+	skipHeavyFixtureUnderRace(t)
 	cfg := RecommendedConfig()
 	cfg.Enabled = true
 	cfg.Mode = ModeBlock
@@ -607,6 +610,7 @@ func TestWindowedCurrentUserPrecheckPreservesDistantExcludeInDerivedView(t *test
 }
 
 func TestWindowedCurrentUserPrecheckBlocksDangerousDerivedView(t *testing.T) {
+	skipHeavyFixtureUnderRace(t)
 	cfg := RecommendedConfig()
 	cfg.Enabled = true
 	cfg.Mode = ModeBlock

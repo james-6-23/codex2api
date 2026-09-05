@@ -45,15 +45,16 @@ import (
 
 // Handler 管理后台 API 处理器
 type Handler struct {
-	store            *auth.Store
-	cache            cache.TokenCache
-	db               *database.DB
-	cacheCfgStore    responseCacheSettingsStore
-	rateLimiter      *proxy.RateLimiter
-	systemUpdate     *systemUpdater
-	systemUpdateOnce sync.Once
-	refreshAccount   func(context.Context, int64) error
-	probeUsage       func(context.Context, *auth.Account) error
+	store             *auth.Store
+	modelRefreshFuncs map[string]channelModelRefreshFunc // nil = 各渠道默认实现；测试注入用
+	cache             cache.TokenCache
+	db                *database.DB
+	cacheCfgStore     responseCacheSettingsStore
+	rateLimiter       *proxy.RateLimiter
+	systemUpdate      *systemUpdater
+	systemUpdateOnce  sync.Once
+	refreshAccount    func(context.Context, int64) error
+	probeUsage        func(context.Context, *auth.Account) error
 	// executeClaudeUsageProbe is injectable for tests; production uses the
 	// provider-native Anthropic Messages request directly.
 	executeClaudeUsageProbe func(context.Context, *auth.Account, []byte) (*http.Response, error)
@@ -851,6 +852,13 @@ func (h *Handler) mergeRefreshedDuplicateIntoExistingContext(parent context.Cont
 		log.Printf("合并导入账号 %d 凭证到已有账号 %d 失败: %v", newID, oldID, err)
 		return false
 	}
+	// 新凭证刚在刷新/探针里验证过可用，旧账号此前的 error / 401 unauthorized 态
+	// 已经过时：不清掉的话，重授权后的 RT 被合并进来、新账号被软删，用户看到的
+	// 却是旧账号继续挂着"未授权"直到自适应冷却到期（issue #618）。与 JWT 可解出
+	// 身份、走 upsertOAuthIdentityAccount 的导入路径对齐；限速冷却不受影响。
+	if h.clearReimportedAccountErrorState(ctx, oldRow, "合并凭证") {
+		log.Printf("合并导入账号 %d 凭证时已清除已有账号 %d 的错误/401 状态", newID, oldID)
+	}
 	// 先软删新账号、再重载旧账号：reloadTokenAccount 会异步触发旧账号的
 	// 探针→再合并，若此刻新账号仍活跃，反向查重会把旧账号合并进新账号，
 	// 两边都被软删。软删前置让后续任何查重都看不到新账号。
@@ -1164,6 +1172,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PATCH("/keys/:id", h.UpdateAPIKey)
 	api.POST("/keys/:id/reset-quota", h.ResetAPIKeyQuota)
 	api.GET("/keys/:id/scope-usage", h.GetAPIKeyScopeUsage)
+	api.GET("/keys/:id/model-request-usage", h.GetAPIKeyModelRequestUsage)
 	api.GET("/keys-scope-summary", h.GetAPIKeysScopeSummary)
 	api.POST("/keys/:id/scope-quota/reset", h.ResetAPIKeyScopeQuota)
 	api.DELETE("/keys/:id", h.DeleteAPIKey)
@@ -1184,9 +1193,12 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings", h.UpdateSettings)
 	api.GET("/settings/claude-config", h.GetClaudeConfig)
 	api.PUT("/settings/claude-config", h.UpdateClaudeConfig)
+	api.POST("/settings/claude-config/cli-version/sync", h.SyncClaudeCLIVersion)
 	api.GET("/settings/observed-instructions", h.GetObservedInstructions)
 	api.GET("/settings/invite-guide", h.GetInviteGuideSettings)
 	api.PUT("/settings/invite-guide", h.UpdateInviteGuideSettings)
+	api.GET("/settings/visible-channels", h.GetVisibleChannelsSettings)
+	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
@@ -1234,6 +1246,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/prompt-filter/intelligence/candidates/:id/dismiss", h.DismissPromptIntelligenceCandidate)
 	api.GET("/models", h.ListModels)
 	api.POST("/models/sync", h.SyncModels)
+	api.POST("/models/refresh-all", h.RefreshAllModels)
 	api.POST("/codex-cli-version/sync", h.SyncCodexCLIVersion)
 	api.GET("/model-pricing", h.ListModelPricing)
 	api.PUT("/model-pricing", h.UpdateModelPricing)
@@ -2868,7 +2881,11 @@ func accountCredentialWorkspaceRouteKeys(row *database.AccountRow) []string {
 	return tokenCredentialSeedWorkspaceRouteKeys(tokenCredentialSeedFromAccountRow(row))
 }
 
-func (h *Handler) existingCredentialWorkspaceRouteKeys(ctx context.Context) (map[string]bool, error) {
+// existingCredentialWorkspaceRouteOwners 返回「凭证工作区路由键 → 持有该凭证的
+// 活跃账号 ID」。去重命中时调用方凭 ID 回查账号状态，决定是普通跳过还是
+// 复活一个处于异常态的旧账号。同一路由理论上只有一个活跃账号；万一有多个
+// （allow_duplicate 导入过），保留先遇到的那个即可。
+func (h *Handler) existingCredentialWorkspaceRouteOwners(ctx context.Context) (map[string]int64, error) {
 	if h == nil || h.db == nil {
 		return nil, fmt.Errorf("database is not configured")
 	}
@@ -2876,13 +2893,29 @@ func (h *Handler) existingCredentialWorkspaceRouteKeys(ctx context.Context) (map
 	if err != nil {
 		return nil, err
 	}
-	keys := make(map[string]bool, len(rows))
+	owners := make(map[string]int64, len(rows))
 	for _, row := range rows {
 		for _, key := range accountCredentialWorkspaceRouteKeys(row) {
-			keys[key] = true
+			if _, exists := owners[key]; !exists {
+				owners[key] = row.ID
+			}
 		}
 	}
-	return keys, nil
+	return owners, nil
+}
+
+// reviveDuplicateRouteOwner 在按凭证路由去重命中已有账号后，尝试复活它（仅当
+// 该账号处于 error / unauthorized 态）。返回 true 表示已复活，调用方应计入
+// "更新"而非"重复"。
+func (h *Handler) reviveDuplicateRouteOwner(ctx context.Context, ownerID int64, source string) bool {
+	if h == nil || h.db == nil || ownerID <= 0 {
+		return false
+	}
+	row, err := h.db.GetAccountByID(ctx, ownerID)
+	if err != nil || row == nil {
+		return false
+	}
+	return h.reviveReimportedAccount(ctx, row, source)
 }
 
 func (h *Handler) findCredentialWorkspaceRouteDuplicate(ctx context.Context, seed tokenCredentialSeed, excludeID int64) (int64, error) {
@@ -3334,7 +3367,8 @@ func splitAccountCredentialLines(raw string, sanitize bool) []string {
 // accountCredentialDedup 跟踪 RT/ST 原文去重（用于 RT/ST 单账号/批量添加路径）。
 // 身份型（OAuth）去重在文件导入与 AT 路径单独处理，这里只覆盖加入时无法解出身份的 RT/ST。
 type accountCredentialDedup struct {
-	existingRoutes map[string]bool
+	// existingOwners 路由键 → 库里持有该凭证的活跃账号 ID。
+	existingOwners map[string]int64
 	seenRoutes     map[string]bool
 }
 
@@ -3342,17 +3376,16 @@ func (h *Handler) newAccountCredentialDedup(ctx context.Context) *accountCredent
 	d := &accountCredentialDedup{
 		seenRoutes: make(map[string]bool),
 	}
-	existingRoutes, err := h.existingCredentialWorkspaceRouteKeys(ctx)
+	existingOwners, err := h.existingCredentialWorkspaceRouteOwners(ctx)
 	if err != nil {
 		log.Printf("查询已有凭证工作区路由失败: %v", err)
-		existingRoutes = make(map[string]bool)
+		existingOwners = make(map[string]int64)
 	}
-	d.existingRoutes = existingRoutes
+	d.existingOwners = existingOwners
 	return d
 }
 
-// checkAndMark 返回 true 表示该 seed 与已有库或本批次重复（应跳过）；非重复时记录其凭证。
-func (d *accountCredentialDedup) checkAndMark(seed tokenCredentialSeed) bool {
+func (d *accountCredentialDedup) routeKeys(seed tokenCredentialSeed) []string {
 	keys := make([]string, 0, 2)
 	if key := credentialWorkspaceRouteKey("rt", seed.refreshToken, seed.customHeaders); key != "" {
 		keys = append(keys, key)
@@ -3360,15 +3393,26 @@ func (d *accountCredentialDedup) checkAndMark(seed tokenCredentialSeed) bool {
 	if key := credentialWorkspaceRouteKey("st", seed.sessionToken, seed.customHeaders); key != "" {
 		keys = append(keys, key)
 	}
+	return keys
+}
+
+// checkAndMarkOwner 返回该 seed 是否与已有库或本批次重复（应跳过）；非重复时
+// 记录其凭证。重复命中库里已有账号时一并返回该账号 ID（本批次内部重复返回
+// 0），供调用方判断是否复活异常态旧账号。
+func (d *accountCredentialDedup) checkAndMarkOwner(seed tokenCredentialSeed) (bool, int64) {
+	keys := d.routeKeys(seed)
 	for _, key := range keys {
-		if d.existingRoutes[key] || d.seenRoutes[key] {
-			return true
+		if ownerID, ok := d.existingOwners[key]; ok && ownerID > 0 {
+			return true, ownerID
+		}
+		if d.seenRoutes[key] {
+			return true, 0
 		}
 	}
 	for _, key := range keys {
 		d.seenRoutes[key] = true
 	}
-	return false
+	return false, 0
 }
 
 // AddAccount 添加新账号（支持批量：refresh_token/session_token 按行分割）
@@ -3470,6 +3514,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	successCount := 0
 	failCount := 0
 	duplicateCount := 0
+	revivedCount := 0
 	createdIDs := &importedAccountIDs{}
 	pending := make([]*auth.Account, 0, len(seeds))
 
@@ -3486,10 +3531,17 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
-		if dedup != nil && dedup.checkAndMark(seed) {
-			duplicateCount++
-			log.Printf("添加账号 %d 已存在（RT/ST 重复），跳过", i+1)
-			continue
+		if dedup != nil {
+			if duplicate, ownerID := dedup.checkAndMarkOwner(seed); duplicate {
+				// 同一凭证再添加一次且旧账号正挂在 error / 401 态：视为要求复活。
+				if h.reviveDuplicateRouteOwner(ctx, ownerID, "manual_add") {
+					revivedCount++
+					continue
+				}
+				duplicateCount++
+				log.Printf("添加账号 %d 已存在（RT/ST 重复），跳过", i+1)
+				continue
+			}
 		}
 
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
@@ -3507,9 +3559,12 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	h.commitImportedRuntimeAccounts(pending, "manual_add", req.SkipRefresh)
 
 	// 记录安全审计日志
-	security.SecurityAuditLog("ACCOUNTS_ADDED", fmt.Sprintf("success=%d duplicate=%d failed=%d ip=%s", successCount, duplicateCount, failCount, c.ClientIP()))
+	security.SecurityAuditLog("ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, revivedCount, duplicateCount, failCount, c.ClientIP()))
 
 	msg := fmt.Sprintf("成功添加 %d 个账号", successCount)
+	if revivedCount > 0 {
+		msg += fmt.Sprintf("，%d 个已有账号已恢复", revivedCount)
+	}
 	if duplicateCount > 0 {
 		msg += fmt.Sprintf("，%d 个重复跳过", duplicateCount)
 	}
@@ -3529,6 +3584,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message":      msg,
 		"success":      successCount,
+		"updated":      revivedCount,
 		"duplicate":    duplicateCount,
 		"failed":       failCount,
 		"bound_groups": boundGroups,
@@ -3544,10 +3600,17 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 	successCount := 0
 	failCount := 0
 	duplicateCount := 0
+	revivedCount := 0
 	sendImportEvent(c, importEvent{
 		Type: "progress", Current: 0, Total: total,
-		Success: 0, Duplicate: 0, Failed: 0,
+		Success: 0, Updated: 0, Duplicate: 0, Failed: 0,
 	})
+	progress := func(current int) {
+		sendImportEvent(c, importEvent{
+			Type: "progress", Current: current, Total: total,
+			Success: successCount, Updated: revivedCount, Duplicate: duplicateCount, Failed: failCount,
+		})
+	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
@@ -3567,23 +3630,24 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 			name = fmt.Sprintf("%s-%d", req.Name, i+1)
 		}
 
-		if dedup != nil && dedup.checkAndMark(seed) {
-			duplicateCount++
-			sendImportEvent(c, importEvent{
-				Type: "progress", Current: i + 1, Total: total,
-				Success: successCount, Duplicate: duplicateCount, Failed: failCount,
-			})
-			continue
+		if dedup != nil {
+			if duplicate, ownerID := dedup.checkAndMarkOwner(seed); duplicate {
+				// 同一凭证再添加一次且旧账号正挂在 error / 401 态：视为要求复活。
+				if h.reviveDuplicateRouteOwner(ctx, ownerID, "manual_add") {
+					revivedCount++
+				} else {
+					duplicateCount++
+				}
+				progress(i + 1)
+				continue
+			}
 		}
 
 		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
-			sendImportEvent(c, importEvent{
-				Type: "progress", Current: i + 1, Total: total,
-				Success: successCount, Duplicate: duplicateCount, Failed: failCount,
-			})
+			progress(i + 1)
 			continue
 		}
 
@@ -3591,20 +3655,17 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 		createdIDs.add(id)
 		pending = append(pending, h.newCodexAccountFromSeed(id, req.ProxyURL, seed))
 
-		sendImportEvent(c, importEvent{
-			Type: "progress", Current: i + 1, Total: total,
-			Success: successCount, Duplicate: duplicateCount, Failed: failCount,
-		})
+		progress(i + 1)
 	}
 	h.db.BatchInsertAccountEventsAsync(createdIDs.snapshot(), "added", "manual")
 	h.commitImportedRuntimeAccounts(pending, "manual_add", req.SkipRefresh)
 
-	security.SecurityAuditLog("ACCOUNTS_ADDED", fmt.Sprintf("success=%d duplicate=%d failed=%d ip=%s", successCount, duplicateCount, failCount, c.ClientIP()))
+	security.SecurityAuditLog("ACCOUNTS_ADDED", fmt.Sprintf("success=%d updated=%d duplicate=%d failed=%d ip=%s", successCount, revivedCount, duplicateCount, failCount, c.ClientIP()))
 	// 绑定必须在 complete 事件之前完成：前端收到 complete 就会刷新列表。
 	if err := h.bindImportedAccountGroups(ctx, createdIDs.snapshot(), groupIDs); err != nil {
 		sendImportEvent(c, importEvent{
 			Type: "progress", Current: total, Total: total,
-			Success: successCount, Duplicate: duplicateCount, Failed: failCount,
+			Success: successCount, Updated: revivedCount, Duplicate: duplicateCount, Failed: failCount,
 			Warning: "账号已添加，但分组绑定失败: " + err.Error(),
 		})
 	}
@@ -3613,7 +3674,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 
 	sendImportEvent(c, importEvent{
 		Type: "complete", Current: total, Total: total,
-		Success: successCount, Duplicate: duplicateCount, Failed: failCount,
+		Success: successCount, Updated: revivedCount, Duplicate: duplicateCount, Failed: failCount,
 		CreatedIDs: newAccountIDs,
 	})
 }
@@ -3713,11 +3774,11 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 	// 按 access_token 原文去重；身份型 AT 由 upsertOAuthIdentityAccount 按 OAuth 身份
 	//（email + 有效工作区）去重/更新。显式 Chatgpt-Account-Id 可把同一 AT
 	// 拆成多个独立工作区路由；同一路由仍会更新已有账号。
-	existingATRoutes := make(map[string]bool)
+	existingATRoutes := make(map[string]int64)
 	seenATRoutes := make(map[string]bool)
 	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(customHeaders) != ""
 	if !req.AllowDuplicate || workspaceOverrideKnown {
-		if got, err := h.existingCredentialWorkspaceRouteKeys(ctx); err != nil {
+		if got, err := h.existingCredentialWorkspaceRouteOwners(ctx); err != nil {
 			log.Printf("查询已有凭证工作区路由失败: %v", err)
 		} else {
 			existingATRoutes = got
@@ -3759,7 +3820,12 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 
 		if !req.AllowDuplicate || workspaceOverrideKnown {
 			routeKey := credentialWorkspaceRouteKey("at", at, seed.customHeaders)
-			if existingATRoutes[routeKey] || seenATRoutes[routeKey] {
+			if ownerID, exists := existingATRoutes[routeKey]; exists || seenATRoutes[routeKey] {
+				// 同一 AT 再添加一次且旧账号正挂在 error / 401 态：视为要求复活。
+				if exists && h.reviveDuplicateRouteOwner(ctx, ownerID, "manual_at") {
+					updatedCount++
+					continue
+				}
 				duplicateCount++
 				log.Printf("AT 账号 %d 已存在（access_token 与目标工作区重复），跳过", i+1)
 				continue
@@ -3832,11 +3898,11 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 	defer cancel()
 
-	existingATRoutes := make(map[string]bool)
+	existingATRoutes := make(map[string]int64)
 	seenATRoutes := make(map[string]bool)
 	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(req.CustomHeaders) != ""
 	if !req.AllowDuplicate || workspaceOverrideKnown {
-		if got, err := h.existingCredentialWorkspaceRouteKeys(ctx); err != nil {
+		if got, err := h.existingCredentialWorkspaceRouteOwners(ctx); err != nil {
 			log.Printf("查询已有凭证工作区路由失败: %v", err)
 		} else {
 			existingATRoutes = got
@@ -3882,8 +3948,13 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 
 		if !req.AllowDuplicate || workspaceOverrideKnown {
 			routeKey := credentialWorkspaceRouteKey("at", at, seed.customHeaders)
-			if existingATRoutes[routeKey] || seenATRoutes[routeKey] {
-				duplicateCount++
+			if ownerID, exists := existingATRoutes[routeKey]; exists || seenATRoutes[routeKey] {
+				// 同一 AT 再添加一次且旧账号正挂在 error / 401 态：视为要求复活。
+				if exists && h.reviveDuplicateRouteOwner(ctx, ownerID, "manual_at") {
+					updatedCount++
+				} else {
+					duplicateCount++
+				}
 				progress(i + 1)
 				continue
 			}
@@ -4406,6 +4477,9 @@ func validateAccountModelsForAccount(account *auth.Account, models []string) err
 // SyncAccountUpstreamModels 用账号自身凭据实时拉取上游模型清单，
 // 返回该账号真实可用的模型 slug 列表。已有非空白名单会自动并入清单中
 // 缺少的新模型；空白名单代表“全部放行”，保持为空不落库。
+// 但清单里注册表尚不认识的模型会顺手学习进注册表（只增不改不删，与客户端刷新
+// 选单时的学习同一实现）：否则 Trusted Access for Cyber 这类只有个别账号才有的模型
+// 探测看得见、保存进白名单后 /v1/models 却不列、调用直接报模型不存在（issue #624）。
 func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil {
@@ -4470,6 +4544,12 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	if len(models) == 0 {
 		writeError(c, http.StatusBadGateway, "上游模型清单未返回可用模型")
 		return
+	}
+	// 学习失败只记日志，不影响本次探测结果的返回。
+	if added, learnErr := proxy.LearnModelsFromManifest(ctx, h.db, manifest.Body, time.Now().UTC()); learnErr != nil {
+		log.Printf("[账号 %d] 模型清单学习失败（不影响探测结果）: %v", id, learnErr)
+	} else if len(added) > 0 {
+		log.Printf("[账号 %d] 已从上游模型清单学习 %d 个新模型进注册表: %s", id, len(added), strings.Join(added, ", "))
 	}
 	whitelist, added, mergeErr := h.store.MergeAccountModelsFromUpstream(c.Request.Context(), id, models)
 	if mergeErr != nil {
@@ -5566,6 +5646,21 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 	var newTokens []importToken
 	duplicateCount := ambiguousOAuthIdentityCount
 
+	// 命中「凭证一字不差的已有账号」时：账号状态正常计 duplicate 跳过；正挂在
+	// error / 401 unauthorized 态的进复活队列，稍后与新账号一起处理并计入
+	// "更新"——用户把同一份凭证再导一遍，就是在要求把这个号捞回来（issue #618）。
+	// 队列在去重阶段只读状态、不写库，复活动作放到后面的并发闸里执行。
+	var reviveRows []*database.AccountRow
+	queuedReviveIDs := make(map[int64]bool)
+	queueDuplicate := func(row *database.AccountRow) {
+		if row != nil && accountErrorStateNeedsReset(row) && !queuedReviveIDs[row.ID] {
+			queuedReviveIDs[row.ID] = true
+			reviveRows = append(reviveRows, row)
+			return
+		}
+		duplicateCount++
+	}
+
 	workspaceOverrideKnown := openaiidentity.WorkspaceOverrideFromHeaders(importCustomHeaders) != ""
 	if allowDuplicate && !workspaceOverrideKnown {
 		knownCount := 0
@@ -5589,7 +5684,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 					if err != nil {
 						log.Printf("查询已有 OAuth 账号 %d 失败: %v", duplicateID, err)
 					} else if importAccountCredentialFingerprint(row) == importTokenCredentialFingerprint(t, conflictingChatGPTIDs) {
-						duplicateCount++
+						queueDuplicate(row)
 						continue
 					}
 				}
@@ -5598,10 +5693,11 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 		}
 		duplicateCount += knownCount - knownUniqueCount - ambiguousOAuthIdentityCount
 	} else {
-		existingCredentialRoutes, err := h.existingCredentialWorkspaceRouteKeys(dedupeCtx)
+		// 路由键 → 持有者账号 ID；本批次新占的键记 0（无持有者，只用于批内去重）。
+		existingCredentialRoutes, err := h.existingCredentialWorkspaceRouteOwners(dedupeCtx)
 		if err != nil {
 			log.Printf("查询已有凭证工作区路由失败: %v", err)
-			existingCredentialRoutes = make(map[string]bool)
+			existingCredentialRoutes = make(map[string]int64)
 		}
 
 		for _, t := range unique {
@@ -5615,7 +5711,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 					if err != nil {
 						log.Printf("查询已有 OAuth 账号 %d 失败: %v", duplicateID, err)
 					} else if importAccountCredentialFingerprint(row) == importTokenCredentialFingerprint(t, conflictingChatGPTIDs) {
-						duplicateCount++
+						queueDuplicate(row)
 						continue
 					}
 				}
@@ -5625,19 +5721,29 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 
 			routeKeys := importTokenCredentialWorkspaceRouteKeys(t, conflictingChatGPTIDs, importCustomHeaders)
 			isDuplicate := false
+			var ownerID int64
 			for _, key := range routeKeys {
-				if existingCredentialRoutes[key] {
+				if id, exists := existingCredentialRoutes[key]; exists {
 					isDuplicate = true
+					ownerID = id
 					break
 				}
 			}
 			if isDuplicate {
-				duplicateCount++
+				var ownerRow *database.AccountRow
+				if ownerID > 0 {
+					if row, err := h.db.GetAccountByID(dedupeCtx, ownerID); err != nil {
+						log.Printf("查询已有凭证账号 %d 失败: %v", ownerID, err)
+					} else {
+						ownerRow = row
+					}
+				}
+				queueDuplicate(ownerRow)
 				continue
 			}
 			newTokens = append(newTokens, t)
 			for _, key := range routeKeys {
-				existingCredentialRoutes[key] = true
+				existingCredentialRoutes[key] = 0
 			}
 		}
 	}
@@ -5648,9 +5754,9 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 	}
 	duplicateCount += agentDuplicate
 
-	log.Printf("导入去重: 总计 %d 条, 数据库已存在 %d 条, 待导入 %d 条", total, duplicateCount, len(newTokens))
+	log.Printf("导入去重: 总计 %d 条, 数据库已存在 %d 条, 待复活 %d 条, 待导入 %d 条", total, duplicateCount, len(reviveRows), len(newTokens))
 
-	if len(newTokens) == 0 {
+	if len(newTokens) == 0 && len(reviveRows) == 0 {
 		// 无常规 token 待导入（可能是纯 Agent Identity 文件）；反映 agent 计数。
 		if err := h.bindImportedAccountGroups(c.Request.Context(), agentCreatedIDs, importGroupIDsFromContext(c)); err != nil {
 			log.Printf("导入: Agent Identity 账号分组绑定失败: %v", err)
@@ -5720,6 +5826,29 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 		},
 		func(e importEvent) bool { return sendImportEvent(c, e) },
 	)
+
+	// 复活队列：凭证一字不差、但旧账号正挂在 error / 401 态的重复条目。走同一个
+	// 写库并发闸，复活成功计入"更新"，状态已被别的流程清掉则退回"重复"。
+	// duplicateCount 被进度推送 goroutine 并发读取，这里只能改原子计数。
+	var revivedAsDuplicate int64
+	for _, row := range reviveRows {
+		if !dbLimiter.acquire(context.Background()) {
+			break
+		}
+		wg.Add(1)
+		go func(row *database.AccountRow) {
+			defer wg.Done()
+			defer dbLimiter.release()
+			reviveCtx, reviveCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer reviveCancel()
+			if h.reviveReimportedAccount(reviveCtx, row, "import") {
+				atomic.AddInt64(&updatedCount, 1)
+			} else {
+				atomic.AddInt64(&revivedAsDuplicate, 1)
+			}
+			atomic.AddInt64(&current, 1)
+		}(row)
+	}
 
 	for i, t := range newTokens {
 		if !dbLimiter.acquire(context.Background()) {
@@ -5861,6 +5990,8 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 	// 只 close(done) 不等待的话，收尾事件可能和最后一帧进度事件交错，
 	// 前端解析不到 complete，进度条永远停在最后一个百分比。
 	<-progressStopped
+	// 推送 goroutine 已退出，可以安全并入复活失败退回的重复计数。
+	duplicateCount += int(atomic.LoadInt64(&revivedAsDuplicate))
 
 	// 发送完成事件（并入 Agent Identity 计数）
 	suc := int(atomic.LoadInt64(&successCount)) + agentSuccess
@@ -8384,6 +8515,11 @@ func (h *Handler) CreateAPIKey(c *gin.Context) {
 	var limits database.APIKeyLimits
 	if req.Limits != nil {
 		limits = sanitizeAPIKeyLimits(*req.Limits)
+		limits.ModelRequestLimits, err = normalizeAdminAPIKeyModelRequestLimits(req.Limits.ModelRequestLimits, nil)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err := h.validateAPIKeyGroupIDs(ctx, limits.NoAffinityGroupIDs, "limits.no_affinity_group_ids"); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
@@ -8548,6 +8684,11 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 	}
 	if req.Limits != nil {
 		update.Limits = sanitizeAPIKeyLimits(*req.Limits)
+		update.Limits.ModelRequestLimits, err = normalizeAdminAPIKeyModelRequestLimits(req.Limits.ModelRequestLimits, row.Limits.ModelRequestLimits)
+		if err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
 		if err := h.validateAPIKeyGroupIDs(ctx, update.Limits.NoAffinityGroupIDs, "limits.no_affinity_group_ids"); err != nil {
 			writeError(c, http.StatusBadRequest, err.Error())
 			return
@@ -8573,7 +8714,11 @@ func (h *Handler) UpdateAPIKey(c *gin.Context) {
 		h.db.InvalidateScopeQuotaKeyCache()
 	}
 	h.invalidateAPIKeyRuntimeCaches(ctx, row.Key)
-	writeMessage(c, http.StatusOK, "API Key 已更新")
+	savedLimits := row.Limits
+	if update.LimitsSet {
+		savedLimits = update.Limits
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "API Key 已更新", "limits": savedLimits})
 }
 
 // sanitizeAPIKeyLimits 把请求体里来的 limits 归一:负值置 0,空白模型名过滤,字符串小写。
@@ -8621,6 +8766,7 @@ func sanitizeAPIKeyLimits(in database.APIKeyLimits) database.APIKeyLimits {
 		AllowLive:              in.AllowLive,
 		UpstreamChannel:        in.ResolveUpstreamChannel(),
 		ScopeLimits:            database.NormalizeAPIKeyScopeLimits(in.ScopeLimits),
+		ModelRequestLimits:     in.ModelRequestLimits,
 	}
 	// 归一后旧 bool 与新 policy 保持一致，避免两处配置漂移。
 	out.DisableImageGeneration = out.ImageGenerationPolicy == database.ImageGenerationPolicyBlock
@@ -8944,6 +9090,9 @@ type settingsResponse struct {
 	CodexCLIVersionSyncEnabled          bool   `json:"codex_cli_version_sync_enabled"`
 	CodexCLIVersionSyncIntervalHours    int    `json:"codex_cli_version_sync_interval_hours"`
 	CodexSyncedCLIVersion               string `json:"codex_synced_cli_version"`
+	// CodexEffectiveCLIVersion 是当前实际用于出站 UA 的版本(内置常量与同步值取大),
+	// 供设置页"设为同步版本"按钮使用——同步值可能过期或为空,内置值才是下限。
+	CodexEffectiveCLIVersion            string `json:"codex_effective_cli_version"`
 	SchedulerMode                       string `json:"scheduler_mode"`
 	AffinityMode                        string `json:"affinity_mode"`
 	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
@@ -9953,6 +10102,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
+		CodexEffectiveCLIVersion:            proxy.LatestCodexCLIVersionForHeaders(),
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
@@ -11776,6 +11926,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexCLIVersionSyncEnabled:          h.store.CodexCLIVersionSyncEnabled(),
 		CodexCLIVersionSyncIntervalHours:    h.store.CodexCLIVersionSyncIntervalHours(),
 		CodexSyncedCLIVersion:               proxy.CurrentRuntimeSettings().CodexSyncedCLIVersion,
+		CodexEffectiveCLIVersion:            proxy.LatestCodexCLIVersionForHeaders(),
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),

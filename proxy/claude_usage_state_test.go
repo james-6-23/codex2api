@@ -361,3 +361,25 @@ func TestClaudeNativeClientCompatibilityDoesNotCoolAccount(t *testing.T) {
 		t.Fatalf("compatibility failure changed account state: cooldown=%v kind=%q", acc.HasActiveCooldown(), got.failureKind)
 	}
 }
+
+// credits_required 说明该账号套餐没有这个模型：除冷却外还要把模型从账号白名单里移除，
+// 否则调度器会在冷却过期后继续把请求派给它。
+func TestHandleClaudeModelBillingRejection_DropsModelFromWhitelist(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	defer store.Stop()
+	acc := &auth.Account{DBID: 251, UpstreamType: auth.UpstreamClaude, Models: []string{"claude-fable-5-1", "claude-opus-5"}}
+	store.SetAccountsForTest([]*auth.Account{acc})
+	body := []byte(`{"type":"error","error":{"type":"rate_limit_error","message":"Usage credits are required for this model.","details":{"error_code":"credits_required","model":"claude-fable-5-1","disabled_reason":"org_level_disabled"}}}`)
+	if !HandleClaudeModelBillingRejection(store, acc, "claude-fable-5-1", http.StatusTooManyRequests, body) {
+		t.Fatal("credits_required must be handled")
+	}
+	acc.Mu().RLock()
+	models := append([]string(nil), acc.Models...)
+	acc.Mu().RUnlock()
+	if len(models) != 1 || models[0] != "claude-opus-5" {
+		t.Fatalf("whitelist after rejection = %v, want only claude-opus-5", models)
+	}
+	if !claudeAccountSupportsModel(acc, "claude-opus-5") || claudeAccountSupportsModel(acc, "claude-fable-5-1") {
+		t.Fatal("scheduler eligibility must reflect the pruned whitelist")
+	}
+}

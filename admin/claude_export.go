@@ -204,8 +204,10 @@ func buildClaudeExportZIP(entries []claudeExportEntry) ([]byte, error) {
 	return buffer.Bytes(), nil
 }
 
-// normalizeClaudeFingerprintHeaders accepts only the identity headers used by
-// Claude Code.  Authorization, Cookie, API keys, and arbitrary custom headers
+// normalizeClaudeFingerprintHeaders accepts Claude Code identity headers and
+// the account's device-ID metadata stored alongside them. The device ID is
+// deliberately not a ClaudeIdentityHeaderNames entry and is never sent as an
+// HTTP header. Authorization, Cookie, API keys, and arbitrary custom headers
 // must never cross an export boundary.
 func normalizeClaudeFingerprintHeaders(headers map[string]string) (map[string]string, error) {
 	if len(headers) == 0 {
@@ -215,6 +217,7 @@ func normalizeClaudeFingerprintHeaders(headers map[string]string) (map[string]st
 	for _, name := range auth.ClaudeIdentityHeaderNames {
 		allowed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
+	allowed[auth.ClaudeDeviceIDCredentialKey] = struct{}{}
 	out := make(map[string]string, len(headers))
 	for rawName, rawValue := range headers {
 		name := strings.TrimSpace(rawName)
@@ -273,24 +276,41 @@ func prepareClaudeTimezoneCredentialUpdateWithHeaders(row *database.AccountRow, 
 	if requestedHeaders != nil {
 		baseHeaders = requestedHeaders
 	}
+	// Keys are canonicalized up front: the generated fingerprint says
+	// "X-Stainless-OS" while previously persisted headers come back as
+	// "X-Stainless-Os", and normalizeCustomHeaders treats a case-only clash
+	// with different values as an error. Without this a same-timezone save
+	// failed whenever the freshly rolled OS differed from the stored one.
+	// 先统一成规范大小写：指纹生成的是 X-Stainless-OS，落库后读回是 X-Stainless-Os，
+	// 否则同时区保存时随机到不同 OS 就会触发"大小写重复且值冲突"。
 	merged := make(map[string]string)
 	keepIdentity := requestedHeaders == nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("timezone")), timezone)
 	for name, value := range auth.GenerateClaudeFingerprint(timezone).Headers() {
-		merged[name] = value
+		merged[http.CanonicalHeaderKey(strings.TrimSpace(name))] = value
+	}
+	// An explicit header patch may omit account metadata. Keep the stored
+	// device ID unless the operator also supplies a replacement for it.
+	for name, value := range row.GetCredentialStringMap("custom_headers") {
+		if strings.EqualFold(strings.TrimSpace(name), auth.ClaudeDeviceIDCredentialKey) {
+			merged[http.CanonicalHeaderKey(auth.ClaudeDeviceIDCredentialKey)] = value
+		}
 	}
 	for name, value := range baseHeaders {
 		lowerName := strings.ToLower(strings.TrimSpace(name))
+		canonicalName := http.CanonicalHeaderKey(strings.TrimSpace(name))
 		if _, isIdentity := identity[lowerName]; isIdentity {
 			// Keep a complete existing fingerprint stable when the operator
 			// saves the same timezone again; a timezone change (or explicit
 			// header patch) intentionally rotates the identity snapshot.
 			if keepIdentity {
-				merged[name] = value
+				merged[canonicalName] = value
 			}
 			continue
 		}
-		if isClaudeSafeOperationalHeader(name) {
-			merged[name] = value
+		// Rotating the platform fingerprint must not rotate or erase the
+		// account's persistent device identity.
+		if lowerName == auth.ClaudeDeviceIDCredentialKey || isClaudeSafeOperationalHeader(name) {
+			merged[canonicalName] = value
 		}
 	}
 	normalized, err := normalizeCustomHeaders(merged)
@@ -320,6 +340,7 @@ func claudeExportFingerprintHeaders(headers map[string]string) map[string]string
 	for _, name := range auth.ClaudeIdentityHeaderNames {
 		allowed[strings.ToLower(strings.TrimSpace(name))] = struct{}{}
 	}
+	allowed[auth.ClaudeDeviceIDCredentialKey] = struct{}{}
 	out := make(map[string]string)
 	for name, value := range headers {
 		if _, ok := allowed[strings.ToLower(strings.TrimSpace(name))]; !ok {

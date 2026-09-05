@@ -315,6 +315,9 @@ func StatusCodeFromError(err error) int {
 
 // ErrorToGinResponse writes the error as a JSON response to the gin context
 func ErrorToGinResponse(c *gin.Context, err error) {
+	if sendAPIKeyModelRequestQuotaError(c, err) {
+		return
+	}
 	if err == nil {
 		return
 	}

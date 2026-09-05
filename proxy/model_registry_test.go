@@ -28,12 +28,12 @@ func newTestModelRegistryDB(t *testing.T) *database.DB {
 func TestParseOfficialCodexModelIDs(t *testing.T) {
 	html := `
 		<astro-island props="{&quot;name&quot;:[0,&quot;gpt-5.5&quot;]}"></astro-island>
-		<code>codex -m gpt-5.4</code>
-		<code>codex -m gpt-5.3-codex-spark</code>
-		<code>codex -m gpt-5.2</code>
-		<code>codex -m gpt-5.2-codex</code>
-		<code>codex -m gpt-4.1</code>
-		<code>codex -m gpt-6-astra</code>
+		<div data-model-slug="gpt-5.4"></div>
+		<astro-island props="{&quot;slug&quot;:[0,&quot;gpt-5.3-codex-spark&quot;]}"></astro-island>
+		<div data-model-slug="gpt-5.2"></div>
+		<div data-model-slug="gpt-5.2-codex"></div>
+		<div data-model-slug="gpt-4.1"></div>
+		<div data-model-slug="gpt-6-astra"></div>
 	`
 	models, skipped := ParseOfficialCodexModelIDs(html)
 	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark", "gpt-6-astra"} {
@@ -55,7 +55,10 @@ func TestParseOfficialCodexModelIDs(t *testing.T) {
 func TestApplyOfficialCodexModelSyncMergesWithBuiltinImageModel(t *testing.T) {
 	db := newTestModelRegistryDB(t)
 	ctx := context.Background()
-	html := `gpt-5.5 gpt-5.4 gpt-5.4-mini gpt-5.3-codex gpt-5.3-codex-spark gpt-5.2 gpt-5.2-codex gpt-4.1`
+	html := ``
+	for _, id := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2", "gpt-5.2-codex", "gpt-4.1"} {
+		html += `<div data-model-slug="` + id + `"></div>`
+	}
 
 	result, err := ApplyOfficialCodexModelSync(ctx, db, html, time.Date(2026, 4, 24, 0, 0, 0, 0, time.UTC))
 	if err != nil {
@@ -290,12 +293,12 @@ func TestLearnModelsFromManifest_AllKnownIsNoOp(t *testing.T) {
 // 上游同步/学习的模型准入策略：5.4+ 放行，5.3 仅 spark，5.2 及以下下线。
 func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
 	cases := map[string]bool{
+		"gpt-6-astra":         true,
 		"gpt-5.6-sol":         true,
 		"gpt-5.5":             true,
 		"gpt-5.4":             true,
 		"gpt-5.4-mini":        true,
 		"gpt-6.0":             true,
-		"gpt-6-astra":         true,
 		"gpt-6-astra-v2":      false,
 		"gpt-6":               false,
 		"gpt-5.3-codex-spark": true,
@@ -308,6 +311,23 @@ func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
 		"gpt-4o":              false,
 		"gpt-image-2":         false,
 		"":                    false,
+		// Trusted Access for Cyber（issue #624）：稳定别名没有数字版本号，
+		// 但清单里出现即代表账号真实权益，必须放行；带版本号的 cyber 变体走常规规则。
+		"gpt-daybreak-blue-latest": true,
+		"gpt-daybreak-red-latest":  true,
+		"gpt-5.6-cyber":            true,
+		"gpt-5.5-cyber-preview":    true,
+		"gpt-":                     false,
+		"gpt-4o-mini":              false,
+		"gpt-5o":                   false,
+		"gpt-.foo":                 false,
+		"gpt-_foo":                 false,
+		"gpt-+foo":                 false,
+		"gpt-daybreak-image":       false,
+		"daybreak-blue":            false,
+		// 内部变体后缀（个别账号清单里的 gpt-5.6-sol-wm）：不学进注册表。
+		"gpt-5.6-sol-wm": false,
+		"gpt-6-astra-wm": false,
 	}
 	for id, want := range cases {
 		if got := isAllowedUpstreamCodexModel(id); got != want {
@@ -366,5 +386,173 @@ func TestSyncOfficialCodexModelsEmptyProxyStillAttempts(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "官方模型页面") {
 		t.Fatalf("unexpected error kind: %v", err)
+	}
+}
+
+func TestIsAllowedUpstreamCodexModelAcceptsOnlyKnownMajorOnlyVersion(t *testing.T) {
+	// gpt-6-astra 这类没有小数点的新一代型号必须被允许进入注册表。
+	for _, id := range []string{"gpt-6-astra"} {
+		if !isAllowedUpstreamCodexModel(id) {
+			t.Fatalf("%s should be allowed", id)
+		}
+	}
+	for _, id := range []string{"gpt-4", "gpt-4-turbo", "gpt-5", "gpt-5-codex", "gpt-6", "gpt-6-astra-v2", "gpt-7-nova"} {
+		if isAllowedUpstreamCodexModel(id) {
+			t.Fatalf("%s should be rejected", id)
+		}
+	}
+	models, _ := ParseOfficialCodexModelIDs(`<div data-model-slug="gpt-6-astra"></div> &quot;slug&quot;:[0,&quot;gpt-5.4&quot;]`)
+	if !slices.Contains(models, "gpt-6-astra") || !slices.Contains(models, "gpt-5.4") {
+		t.Fatalf("parsed models missing gpt-6-astra / gpt-5.4: %v", models)
+	}
+}
+
+func TestParseOfficialCodexModelIDsIgnoresNonModelContexts(t *testing.T) {
+	// 真实官方页里"长得像模型 ID"的噪声：导航文案、锚点、图片文件名，以及用法示例
+	// 代码里的家族占位名（codex --model gpt-5.6 / model = "gpt-5.6"）——官方并没有
+	// 叫 gpt-5.6 的模型，只有卡片的 data-model-slug / slug / name 属性才算目录条目。
+	html := `
+		<a href="#gpt-6-astra-in-enterprise">Using GPT-6 Astra</a>
+		<img src="/images/api/models/gpt-6-astra-texture.webp" alt="Astra">
+		<img src="/images/api/models/gpt-5.6-sol.webp">
+		<astro-island props="{&quot;name&quot;:[0,&quot;gpt-6-astra&quot;],&quot;wallpaperUrl&quot;:[0,&quot;/images/api/models/gpt-6-astra-texture.webp&quot;]}"></astro-island>
+		<div class="not-prose" data-model-slug="gpt-5.6-sol"><code>codex -m gpt-5.6-sol</code></div>
+		<astro-island props="{&quot;slug&quot;:[0,&quot;gpt-5.4-mini&quot;]}"></astro-island>
+		<astro-island props="{&quot;code&quot;:[0,&quot;codex --model gpt-5.6&quot;]}"></astro-island>
+		<astro-island props="{&quot;code&quot;:[0,&quot;codex exec -m gpt-5.6 \&quot;review\&quot;&quot;]}"></astro-island>
+		<span class="shiki-token">"gpt-5.6"</span>
+		<code>codex -m gpt-5.5</code>
+		<script>{"model":"gpt-5.4"}</script>
+	`
+	models, skipped := ParseOfficialCodexModelIDs(html)
+	want := []string{"gpt-6-astra", "gpt-5.6-sol", "gpt-5.4-mini"}
+	if len(models) != len(want) {
+		t.Fatalf("models = %v, want exactly %v (skipped=%v)", models, want, skipped)
+	}
+	for _, model := range want {
+		if !slices.Contains(models, model) {
+			t.Fatalf("parsed models missing %q in %v", model, models)
+		}
+	}
+	for _, junk := range []string{"gpt-6", "gpt-6-astra-in-enterprise", "gpt-6-astra-texture", "gpt-5.6", "gpt-5.5", "gpt-5.4"} {
+		if slices.Contains(models, junk) || slices.Contains(skipped, junk) {
+			t.Fatalf("%q should not be extracted at all (models=%v skipped=%v)", junk, models, skipped)
+		}
+	}
+}
+
+// issue #624：Trusted Access for Cyber 账号的清单里带 gpt-daybreak-blue-latest，
+// 学习后必须立刻进入请求侧支持列表，否则 /v1/models 不列、/responses 直接拒绝。
+func TestLearnModelsFromManifest_AdmitsNonVersionedCyberAlias(t *testing.T) {
+	db := newTestModelRegistryDB(t)
+	ctx := context.Background()
+	manifest := []byte(`{"models":[
+		{"slug":"gpt-5.5"},
+		{"slug":"gpt-daybreak-blue-latest"},
+		{"slug":"gpt-5.2-codex"}
+	]}`)
+	added, err := LearnModelsFromManifest(ctx, db, manifest, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("LearnModelsFromManifest error: %v", err)
+	}
+	if !slices.Equal(added, []string{"gpt-daybreak-blue-latest"}) {
+		t.Fatalf("added = %v, want [gpt-daybreak-blue-latest] (retired 5.2 must still be rejected)", added)
+	}
+	catalog, err := ListModelCatalog(ctx, db)
+	if err != nil {
+		t.Fatalf("ListModelCatalog: %v", err)
+	}
+	if !slices.Contains(catalog.Models, "gpt-daybreak-blue-latest") {
+		t.Fatalf("learned alias missing from catalog: %v", catalog.Models)
+	}
+	for _, item := range catalog.Items {
+		if item.ID == "gpt-daybreak-blue-latest" {
+			if item.Source != ModelSourceUpstreamManifest || item.Category != ModelCategoryCodex || !item.Enabled {
+				t.Fatalf("learned item = %+v", item)
+			}
+		}
+	}
+	if !slices.Contains(SupportedModelIDs(ctx, db), "gpt-daybreak-blue-latest") {
+		t.Fatal("learned alias must be accepted by the request-side model gate immediately")
+	}
+	if isRetiredCodexModel("gpt-daybreak-blue-latest") {
+		t.Fatal("non-versioned alias must never be treated as retired")
+	}
+}
+
+// 官方页是 official_codex_docs 来源行的唯一真值：页面上已不存在的该来源行
+// （早期解析噪声如裸 gpt-5.6）随同步删除；manifest 学习 / 手工来源与内置行不动。
+func TestApplyOfficialCodexModelSyncPrunesStaleOfficialRows(t *testing.T) {
+	db := newTestModelRegistryDB(t)
+	ctx := context.Background()
+	seed := []database.ModelRegistryRow{
+		{ID: "gpt-5.6", Enabled: true, Category: ModelCategoryCodex, Source: ModelSourceOfficialCodexDocs, APIKeyAuthAvailable: true},
+		{ID: "gpt-daybreak-blue-latest", Enabled: true, Category: ModelCategoryCodex, Source: ModelSourceUpstreamManifest, APIKeyAuthAvailable: true},
+		{ID: "gpt-7-manual", Enabled: true, Category: ModelCategoryCodex, Source: "manual", APIKeyAuthAvailable: true},
+		// 内置模型即使带 official 来源、页面暂时没列出，也不能删。
+		{ID: "gpt-5.4-mini", Enabled: false, Category: ModelCategoryCodex, Source: ModelSourceOfficialCodexDocs, APIKeyAuthAvailable: true},
+	}
+	if err := db.UpsertModelRegistryRows(ctx, seed); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	html := `<div data-model-slug="gpt-6-astra"></div><div data-model-slug="gpt-5.6-sol"></div>`
+	result, err := ApplyOfficialCodexModelSync(ctx, db, html, time.Now())
+	if err != nil {
+		t.Fatalf("ApplyOfficialCodexModelSync: %v", err)
+	}
+	if !slices.Equal(result.Removed, []string{"gpt-5.6"}) {
+		t.Fatalf("Removed = %v, want [gpt-5.6]", result.Removed)
+	}
+	rows, err := db.ListModelRegistry(ctx)
+	if err != nil {
+		t.Fatalf("ListModelRegistry: %v", err)
+	}
+	got := map[string]database.ModelRegistryRow{}
+	for _, row := range rows {
+		got[row.ID] = row
+	}
+	if _, ok := got["gpt-5.6"]; ok {
+		t.Fatal("stale official row gpt-5.6 should be deleted")
+	}
+	for _, keep := range []string{"gpt-daybreak-blue-latest", "gpt-7-manual", "gpt-5.4-mini", "gpt-6-astra", "gpt-5.6-sol"} {
+		if _, ok := got[keep]; !ok {
+			t.Fatalf("row %s should survive the sync", keep)
+		}
+	}
+	if got["gpt-5.4-mini"].Enabled {
+		t.Fatal("admin-disabled builtin row must keep enabled=false")
+	}
+	if slices.Contains(result.Models, "gpt-5.6") {
+		t.Fatalf("catalog still exposes gpt-5.6: %v", result.Models)
+	}
+}
+
+// 同步/学习进来的非内置模型排在列表最前，按版本新→旧；内置列表接在后面。
+func TestMergeModelInfosPutsSyncedModelsFirstNewestFirst(t *testing.T) {
+	rows := []database.ModelRegistryRow{
+		// 早期学进来的内部变体残留行：不再暴露。
+		{ID: "gpt-5.6-sol-wm", Enabled: true, Source: ModelSourceUpstreamManifest},
+		{ID: "gpt-daybreak-blue-latest", Enabled: true, Source: ModelSourceUpstreamManifest},
+		{ID: "gpt-6-nova", Enabled: true, Source: ModelSourceUpstreamManifest},
+		{ID: "gpt-5.7-terra", Enabled: true, Source: ModelSourceOfficialCodexDocs},
+		{ID: "gpt-5.7-sol", Enabled: true, Source: ModelSourceOfficialCodexDocs},
+		{ID: "gpt-7", Enabled: true, Source: ModelSourceUpstreamManifest},
+		// 内置行保持内置顺序，不参与前置。
+		{ID: "gpt-5.5", Enabled: true, Source: ModelSourceOfficialCodexDocs},
+	}
+	merged := mergeModelInfos(rows)
+	ids := make([]string, 0, len(merged))
+	for _, info := range merged {
+		ids = append(ids, info.ID)
+	}
+	wantHead := []string{"gpt-7", "gpt-6-nova", "gpt-5.7-sol", "gpt-5.7-terra", "gpt-daybreak-blue-latest"}
+	if !slices.Equal(ids[:len(wantHead)], wantHead) {
+		t.Fatalf("head = %v, want %v", ids[:len(wantHead)], wantHead)
+	}
+	if !slices.Equal(ids[len(wantHead):], BuiltinModelIDs()) {
+		t.Fatalf("tail = %v, want builtin order %v", ids[len(wantHead):], BuiltinModelIDs())
+	}
+	if slices.Contains(ids, "gpt-5.6-sol-wm") {
+		t.Fatalf("internal variant row must stay hidden: %v", ids)
 	}
 }

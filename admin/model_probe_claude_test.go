@@ -15,7 +15,7 @@ import (
 )
 
 func TestBuildClaudeConnectionTestPayloadUsesMessagesShape(t *testing.T) {
-	payload := buildClaudeConnectionTestPayload(nil, "claude-sonnet-4-5")
+	payload := buildClaudeConnectionTestPayload(nil, "claude-sonnet-4-5", auth.DefaultClaudeSecurityConfig())
 	var body map[string]interface{}
 	if err := json.Unmarshal(payload, &body); err != nil {
 		t.Fatalf("Claude connection payload is invalid JSON: %v", err)
@@ -28,6 +28,34 @@ func TestBuildClaudeConnectionTestPayloadUsesMessagesShape(t *testing.T) {
 	}
 	if _, ok := body["input"]; ok {
 		t.Fatalf("Claude connection payload must not use Responses input: %#v", body)
+	}
+}
+
+func TestClaudeProbePayloadsRespectOutputCap(t *testing.T) {
+	for _, tc := range []struct {
+		limit int64
+		want  int64
+	}{
+		{0, 4096}, {1, 1}, {32, 32}, {1024, 1024},
+		{4095, 4095}, {4096, 4096}, {8192, 4096},
+	} {
+		t.Run(strconv.FormatInt(tc.limit, 10), func(t *testing.T) {
+			cfg := auth.ClaudeSecurityConfig{MaxOutputTokens: tc.limit}
+			for name, payload := range map[string][]byte{
+				"model_probe":     buildClaudeModelProbePayload("claude-sonnet-4-5", cfg),
+				"connection_test": buildClaudeConnectionTestPayload(nil, "claude-sonnet-4-5", cfg),
+			} {
+				var body struct {
+					MaxTokens int64 `json:"max_tokens"`
+				}
+				if err := json.Unmarshal(payload, &body); err != nil {
+					t.Fatalf("%s invalid JSON: %v", name, err)
+				}
+				if body.MaxTokens != tc.want {
+					t.Errorf("%s max_tokens = %d, want %d for cap %d", name, body.MaxTokens, tc.want, tc.limit)
+				}
+			}
+		})
 	}
 }
 
@@ -51,6 +79,40 @@ func TestReadClaudeMessagesStreamEmitsTextDeltas(t *testing.T) {
 	status, detail := readClaudeMessagesStream(context.Background(), resp, func(text string) { _, _ = got.WriteString(text) })
 	if status != "success" || detail != "测试通过" || got.String() != "hello" {
 		t.Fatalf("Claude stream result = (%q, %q, %q)", status, detail, got.String())
+	}
+}
+
+func TestReadClaudeMessagesStreamAcceptsThinkingOnlyResponse(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(
+		"event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\n\n" +
+			"event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"sig\"}}\n\n" +
+			"event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	))}
+	status, detail := readClaudeMessagesStream(context.Background(), resp, nil)
+	if status != "success" || detail != "测试通过" {
+		t.Fatalf("Claude thinking-only stream result = (%q, %q), want success", status, detail)
+	}
+}
+
+func TestReadClaudeMessagesStreamStillFailsWithoutAnyContent(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"text/event-stream"}}, Body: io.NopCloser(strings.NewReader(
+		"event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"m1\"}}\n\n" +
+			"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n",
+	))}
+	status, detail := readClaudeMessagesStream(context.Background(), resp, nil)
+	if status != "failed" || detail != "Claude 探测未返回文本内容" {
+		t.Fatalf("empty Claude stream result = (%q, %q), want failed/no text", status, detail)
+	}
+}
+
+func TestReadClaudeMessagesStreamAcceptsNonStreamingThinkingOnlyMessage(t *testing.T) {
+	resp := &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(
+		`{"type":"message","content":[{"type":"thinking","thinking":"hmm"}],"stop_reason":"max_tokens"}`,
+	))}
+	status, detail := readClaudeMessagesStream(context.Background(), resp, nil)
+	if status != "success" || detail != "测试通过" {
+		t.Fatalf("Claude non-stream thinking-only result = (%q, %q), want success", status, detail)
 	}
 }
 

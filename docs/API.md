@@ -37,6 +37,17 @@ Codex2API 提供兼容 OpenAI 风格的 API 接口，同时包含完整的管理
 
 Anthropic `/v1/messages` 在没有可用 Claude OAuth 账号时，才将官方 `speed:"fast"` 映射为上游 Codex `service_tier:"priority"`；Claude OAuth 账号优先走原生 Anthropic Messages 透传，不经过该转换。Anthropic 请求侧 `service_tier`（Priority Tier）不在此映射范围内。用量日志的 `service_tier` / `fast` 过滤反映该解析结果。
 
+Claude 原生请求的显式会话来源依次为 `X-Claude-Code-Session-Id`、JSON 字符串形式的
+`metadata.user_id.session_id`、已有通用会话头/`prompt_cache_key`。最终会话仍按 API Key
+隔离，并在同一次请求的换号重试中保持不变；缺少显式会话时遵守现有请求隔离配置。
+出站会话头与 Claude 结构化身份中的 `session_id` 使用同一值，`device_id` 和
+`account_uuid` 则跟随实际选中账号；其他 metadata 字段及普通业务字符串 `user_id` 保留。
+system 前导块整理为计费标识、CLI 声明、其余原始块，保留原块属性及其余内容顺序。
+
+用量日志 API 的 Claude `input_tokens` 使用包含缓存读写的总输入口径，供统一统计和计费。
+管理后台明细中的 `↓` 则显示未缓存输入（总输入减去缓存读取及 5 分钟／1 小时缓存写入），
+悬浮说明展示完整拆分；缓存列分别用读取和创建图标显示对应数量。汇总卡仍显示含缓存的总输入。
+
 **Service Tier 语义说明**：请求侧 `fast` / `priority` 会统一以 `priority` 转发上游，其余取值（`auto`/`default`/`flex`/`scale` 等）不转发。用量日志区分三个字段：`requested_service_tier`（客户端请求意图）、`actual_service_tier`（上游回传 Tier，原样取自 `response.completed.response.service_tier`）、`billing_service_tier`（计费采用值，由 Tier 计费策略 `BillingTierPolicy` 决定）。默认 `actual` 以请求 Tier 为上限：上游只可用更便宜档位降低计费，不能把未请求 Fast 的调用抬升为 Fast，也不能用未知档位改变计费；`requested` 始终按请求意图计费。注意：在 ChatGPT OAuth / Codex backend 路径上，Fast 由上游服务端路由处理，`service_tier` 不是端到端可校验字段——上游回传 `default` 并不代表 Fast 未生效（openai/codex#14204 官方说明；#494 的交错 A/B 实测在回传 `default` 时仍有约 1.5× 生成吞吐提升）。因此"上游回传 Tier"仅反映上游申报值，不能单独用于判断加速是否生效。
 
 **Base URL:** `http://localhost:8080` (默认端口)
@@ -797,8 +808,10 @@ Claude 凭据。`access_token` 与 `refresh_token` 必填；同时接受单对�
 
 version 1 文档包含 `type=claude`、`auth_kind=oauth`、access/refresh token、账号 ID、
 过期时间、套餐、模型、代理、时区、`claude_fingerprint_mode`、标签、启用状态及
-`group_refs`。`fingerprint_headers` 只允许 `User-Agent`、`X-App` 和
-`X-Stainless-*` 身份头；任意 `Authorization`、Cookie、API Key 或其它自定义头均不会
+`group_refs`。`fingerprint_headers` 允许 `User-Agent`、`X-App` 和
+`X-Stainless-*` 身份头，以及可选的 `claude_device_id` 账号身份元数据；后者兼容键名大小写，
+在导入、导出及时区指纹重建时保留，仅用于请求体中的设备身份，不作为 HTTP 头发送。
+任意 `Authorization`、Cookie、API Key 或其它自定义头均不会
 进入导出文件。下载内容为明文高敏凭据，下载后应立即加密保存或在迁移完成后删除。
 
 #### POST /api/admin/accounts/:id/claude/models
@@ -847,6 +860,10 @@ Claude 账号详情还会返回脱敏的 `claude_user_agent` 指纹摘要；不�
 执行一次手动原生 Messages 测连并以 SSE 返回 `test_start`、`content`、`error`、
 `test_complete`。与只读模型探测不同，手动测连会同步真实账号的用量/限流与错误
 状态；上游明确 rejected/耗尽时不会被“成功”结果清除。
+
+Claude 模型探测和连接测试的输出预算默认 4096；配置了正数 `max_output_tokens` 时取两者
+较小值，`0` 表示不设应用层上限。完整响应只有 thinking 时也可通过；流式响应仍要求终止
+事件，空响应或错误不能算成功。测试预算不等于实际消耗，实际输出可能包含 thinking token。
 
 #### GET/PUT /api/admin/settings/claude-config
 
@@ -2310,6 +2327,10 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 | 503    | 服务不可用（账号池耗尽或依赖的共享上下文后端暂时故障） |
 | 598    | 上游流中断               |
 
+499 表示客户端取消或连接提前断开，原始请求日志及已记录的 Token 用量保留。
+账号列表的“请求（7D）”失败数、重试失败数和错误码分布均排除 499，避免将客户端取消
+归为账号故障；原有健康率、用量和计费汇总规则保持不变。
+
 ### 错误响应格式
 
 ```json
@@ -2371,6 +2392,64 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 
 - `global_rpm = 0`: 无限流
 - `global_rpm > 0`: 启用 RPM 限流
+
+### API Key 模型周请求次数预算
+
+API Key 的 `limits.model_request_limits` 可按最终映射模型限制固定日历周的请求次数。支持精确模型名及 `*` 通配，一条规则的匹配模型共用预算，多条命中规则同时生效。配置字段、计数口径及更新规则详见 [配置说明](CONFIGURATION.md#api-key-模型周请求次数预算)。
+
+管理端创建 `POST /api/admin/keys` 与更新 `PATCH /api/admin/keys/:id` 均接收该字段。新增规则省略 `id`，服务端生成；读取 `GET /api/admin/keys` 返回的 `limits` 获取已保存的 ID。更新已有规则时保留 ID，只能修改次数上限或调整顺序；模型与重置安排需通过删除旧规则、新增规则更改。非法配置或未知规则 ID 返回 `400`。
+
+管理员可使用管理鉴权查询当前周用量：
+
+```http
+GET /api/admin/keys/123/model-request-usage
+X-Admin-Key: YOUR_ADMIN_SECRET
+```
+
+```json
+{
+  "model_request_usage": [
+    {
+      "rule_id": "mr_example",
+      "model": "gpt-6*",
+      "window": "week",
+      "limit": 50,
+      "used": 12,
+      "remaining": 38,
+      "window_start": "2026-08-30T16:00:00Z",
+      "reset_at": "2026-09-06T16:00:00Z",
+      "timezone": "Asia/Shanghai"
+    }
+  ]
+}
+```
+
+公开自助接口 `GET /api/key-usage/summary` 与别名 `GET /api/key-usage/me` 在原有 `key`、`range`、`usage` 之外增加相同结构的顶层 `model_request_usage`。传入 `Authorization: Bearer YOUR_API_KEY`，只返回此 Key 的预算，不能通过查询参数读取其他 Key；公开用量页关闭时继续返回 `404`。没有配置时该字段为 `[]`。此字段始终反映当前固定周，与报表的 `range` 参数独立。
+
+预算耗尽时 HTTP 返回 `429`，错误码为 `rate_limit_reached`，`Retry-After` 表示距离该规则重置的秒数。`error.details` 包含耗尽规则的用量快照：
+
+```json
+{
+  "error": {
+    "type": "rate_limit_error",
+    "code": "rate_limit_reached",
+    "message": "API key weekly model request limit reached for \"gpt-6*\" (50/50)",
+    "details": {
+      "rule_id": "mr_example",
+      "model": "gpt-6*",
+      "window": "week",
+      "limit": 50,
+      "used": 50,
+      "remaining": 0,
+      "window_start": "2026-08-30T16:00:00Z",
+      "reset_at": "2026-09-06T16:00:00Z",
+      "timezone": "Asia/Shanghai"
+    }
+  }
+}
+```
+
+Responses WebSocket 升级后用对应错误帧返回拒绝信息，每个 `response.create` 分别计数；HTTP 流式请求在上游发送前检查。若较早的上游尝试已启动 HTTP 事件流，而后续重试映射到另一模型并耗尽其预算，已有流中会发送包含同样 `error.details` 的错误事件。该本地预算错误不会触发上游换号重试。计数依赖暂时不可用时返回 `503`，不静默放行。额度耗尽后可等待规则重置，或调用不匹配该规则且满足其他限制的模型。
 
 ### 账号级别限流
 

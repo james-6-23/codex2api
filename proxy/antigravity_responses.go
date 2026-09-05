@@ -148,6 +148,10 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 					req.Header.Set("x-goog-user-project", project)
 				}
 				var doErr error
+				if err := ConsumeAPIKeyModelRequestQuota(ctx, fmt.Sprint(gemini["model"])); err != nil {
+					discardLastRetryable()
+					return nil, err
+				}
 				resp, doErr = client.Do(req)
 				if doErr != nil {
 					last = doErr
@@ -415,6 +419,9 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", map[bool]string{true: "text/event-stream", false: "application/json"}[stream])
 	req.Header.Set("x-goog-api-key", apiKey)
+	if err := ConsumeAPIKeyModelRequestQuota(ctx, wireModel); err != nil {
+		return nil, err
+	}
 	return client.Do(req)
 }
 

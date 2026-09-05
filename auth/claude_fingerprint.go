@@ -10,6 +10,7 @@ package auth
 // 值域取自真实 Claude Code / @anthropic-ai SDK 在链路上出现过的组合,随机挑选但一旦
 // 落库即固定。真实 Claude Code 客户端直连时,其自带的这些头会被优先保留(见
 // proxy 层 applyClaudeMessagesHeaders),仅在缺失时才用这里合成的指纹补齐。
+// CLI 版本不再随机，始终使用 EffectiveClaudeCLIVersion()，并由后台同步任务回写到已有账号。
 
 import (
 	"crypto/rand"
@@ -18,11 +19,12 @@ import (
 	"time"
 )
 
-// 真实取值池(保持精简、贴近近期版本)。
+// 真实取值池(保持精简、贴近近期版本)。头部为 Claude Code 2.1.259 抓包确认的当前
+// 线上组合(@anthropic-ai/sdk 0.112.1 + Node v26.3.0),其余为历史抓包值,保留给
+// 老账号的兼容性与抽样多样性。
 var (
-	claudeCLIVersions = []string{"2.1.220", "2.1.219", "2.1.205", "2.0.14"}
-	claudeSDKVersions = []string{"0.68.0", "0.65.0", "0.63.1", "0.60.0"}
-	claudeNodeRuntime = []string{"v22.14.0", "v22.11.0", "v20.18.1", "v20.17.0"}
+	claudeSDKVersions = []string{"0.112.1", "0.68.0", "0.65.0", "0.63.1", "0.60.0"}
+	claudeNodeRuntime = []string{"v26.3.0", "v22.14.0", "v22.11.0", "v20.18.1", "v20.17.0"}
 	claudeStainlessOS = []string{"MacOS", "Linux", "Windows"}
 	claudeArchByOS    = map[string][]string{
 		"MacOS":   {"arm64", "x64"},
@@ -60,7 +62,7 @@ func claudePick(pool []string) string {
 // GenerateClaudeFingerprint 生成一套稳定指纹。timezone 为空时不设置(留给调用方决定
 // 是否用全局默认)。非空时会校验为合法 IANA 时区,非法则丢弃。
 func GenerateClaudeFingerprint(timezone string) ClaudeFingerprint {
-	cliVer := claudePick(claudeCLIVersions)
+	cliVer := EffectiveClaudeCLIVersion()
 	os := claudePick(claudeStainlessOS)
 	arch := claudePick(claudeArchByOS[os])
 	fp := ClaudeFingerprint{

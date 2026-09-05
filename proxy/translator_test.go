@@ -4082,3 +4082,28 @@ func TestPrepareResponsesBodyStripsTopLevelWebSocketEnvelopeType(t *testing.T) {
 		}
 	}
 }
+
+func TestModelSupportsMaxReasoningEffort(t *testing.T) {
+	cases := map[string]bool{
+		"gpt-5.6-sol":              true,
+		"gpt-5.6":                  true,
+		"gpt-6-astra":              true, // official model page lists Max for Astra; major-only ids follow major > 5
+		"gpt-6":                    true,
+		"gpt-7.0":                  true,
+		"gpt-5.5":                  false,
+		"gpt-5.4-mini":             false,
+		"gpt-daybreak-blue-latest": true, // alias of gpt-5.6-sol (issue #624)
+		"gpt-daybreak-red-latest":  true, // alias of gpt-5.6-cyber
+		"daybreak":                 false,
+		"gpt-5.4-daybreak":         false, // versioned ids follow their own version rule
+		"grok-4.6":                 false,
+	}
+	for model, want := range cases {
+		if got := modelSupportsMaxReasoningEffort(model); got != want {
+			t.Errorf("modelSupportsMaxReasoningEffort(%q) = %v, want %v", model, got, want)
+		}
+	}
+	if got := normalizeConfiguredReasoningEffort("max", "gpt-daybreak-blue-latest"); got != "max" {
+		t.Fatalf("daybreak max effort clamped to %q", got)
+	}
+}

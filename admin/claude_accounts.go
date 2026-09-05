@@ -330,13 +330,26 @@ func (h *Handler) RefreshClaudeModels(c *gin.Context) {
 func (h *Handler) RefreshAllClaudeModels(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 60*time.Second)
 	defer cancel()
-	rows, err := h.db.ListActiveByChannel(ctx, database.UpstreamChannelClaude)
+	refreshed, failed, err := h.refreshAllClaudeModels(ctx)
 	if err != nil {
 		writeInternalError(c, err)
 		return
 	}
-	refreshed, failed := 0, 0
-	allModels := map[string]struct{}{}
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "已刷新 Claude 账号可用模型",
+		"refreshed":   refreshed,
+		"failed":      failed,
+		"model_count": len(h.claudeChannelModels()),
+	})
+}
+
+// refreshAllClaudeModels 逐个 Claude 账号拉取上游模型清单并写回凭据，
+// 返回成功/失败账号数；列账号失败时返回 err。
+func (h *Handler) refreshAllClaudeModels(ctx context.Context) (refreshed, failed int, err error) {
+	rows, err := h.db.ListActiveByChannel(ctx, database.UpstreamChannelClaude)
+	if err != nil {
+		return 0, 0, err
+	}
 	for _, row := range rows {
 		accessToken := strings.TrimSpace(row.GetCredential("access_token"))
 		if accessToken == "" {
@@ -359,20 +372,12 @@ func (h *Handler) RefreshAllClaudeModels(c *gin.Context) {
 				acc.Mu().Unlock()
 			}
 		}
-		for _, m := range models {
-			allModels[m] = struct{}{}
-		}
 		refreshed++
 	}
 	if refreshed > 0 {
 		h.invalidateClaudeCatalogCaches()
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"message":     "已刷新 Claude 账号可用模型",
-		"refreshed":   refreshed,
-		"failed":      failed,
-		"model_count": len(allModels),
-	})
+	return refreshed, failed, nil
 }
 
 // resolveClaudeModelProxy mirrors the request path's proxy precedence for

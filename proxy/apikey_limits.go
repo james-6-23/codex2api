@@ -127,6 +127,7 @@ func apiKeyBatchWouldExceed(current int64, limit, requests int) bool {
 //   - http.StatusForbidden (403): 模型不在白名单 / 在黑名单
 //   - http.StatusTooManyRequests (429): rpm/rpd/cost/token 任一窗口超额
 func (h *Handler) enforceAPIKeyLimits(c *gin.Context, model string) (int, string) {
+	h.attachAPIKeyModelRequestQuota(c, false)
 	row := apiKeyRowFromContext(c)
 	if row == nil {
 		return 0, ""

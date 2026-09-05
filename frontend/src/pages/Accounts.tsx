@@ -4,8 +4,7 @@ import { createPortal } from "react-dom";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import type { ProxyRow } from "../api";
-import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
-import { ProxyUrlInput } from "../components/ProxyField";
+import { ProxyField } from "../components/ProxyField";
 import AccountProxyBadge from "../components/AccountProxyBadge";
 import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
 import {
@@ -14,6 +13,7 @@ import {
 } from "../lib/accountProxyBinding";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
+import { useVisibleChannels } from "../visibleChannels";
 import ModelLogo from "../components/ModelLogo";
 import OperationResultsModal from "../components/OperationResultsModal";
 import { cn } from "@/lib/utils";
@@ -1809,7 +1809,7 @@ const AccountCardItem = memo(function AccountCardItem({
 });
 
 export default function Accounts() {
-  const { t, i18n } = useTranslation();
+  const { t } = useTranslation();
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS;
   const [showAdd, setShowAdd] = useState(false);
   // providerView 由路由驱动，刷新浏览器后停留在当前上游视图。
@@ -1851,6 +1851,11 @@ export default function Accounts() {
       : normalizedPath.endsWith("/accounts/claude")
         ? "claude"
         : "codex";
+  const { channels: visibleChannels, isChannelVisible } = useVisibleChannels();
+  // 设置页隐藏了某个渠道后，直接打开它的账号路由要回落到 Codex 视图。
+  useEffect(() => {
+    if (!isChannelVisible(providerView)) navigate("/accounts", { replace: true });
+  }, [isChannelVisible, navigate, providerView]);
   const setProviderView = useCallback(
     (view: UpstreamChannel) => {
       navigate(
@@ -2008,7 +2013,6 @@ export default function Accounts() {
   const [editSessionCapacityEnabled, setEditSessionCapacityEnabled] = useState(false);
   const [editSessionCapacityMax, setEditSessionCapacityMax] = useState("5");
   const [editSessionCapacityIdleMinutes, setEditSessionCapacityIdleMinutes] = useState("60");
-  const [testingProxyKey, setTestingProxyKey] = useState<string | null>(null);
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
   // （选择器为空时自动隐藏，不影响手动填代理）。
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
@@ -2317,105 +2321,30 @@ export default function Accounts() {
   const selectAllRef = useRef<HTMLInputElement>(null);
   const { toast, showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
-  const ipApiLang = i18n.language?.startsWith("zh") ? "zh-CN" : "en";
-
-  const handleTestProxyUrl = async (rawUrl: string, testKey: string) => {
-    const url = rawUrl.trim();
-    if (!url) {
-      showToast(t("accounts.proxyUrlRequired"), "error");
-      return;
-    }
-    if (testingProxyKey !== null) return;
-
-    setTestingProxyKey(testKey);
-    try {
-      const result = await api.testProxy(url, undefined, ipApiLang);
-      if (!result.success) {
-        showToast(
-          t("accounts.proxyTestFailed", {
-            error: result.error || t("accounts.proxyTestUnknownError"),
-          }),
-          "error",
-        );
-        return;
-      }
-
-      const location =
-        result.location ||
-        [result.country, result.region, result.city].filter(Boolean).join(" ");
-      showToast(
-        t("accounts.proxyTestSuccess", {
-          ip: result.ip || "-",
-          location: location || "-",
-          latency: result.latency_ms ?? 0,
-        }),
-      );
-    } catch (error) {
-      showToast(
-        t("accounts.proxyTestFailed", { error: getErrorMessage(error) }),
-        "error",
-      );
-    } finally {
-      setTestingProxyKey((current) => (current === testKey ? null : current));
-    }
-  };
-
+  // 代理字段统一走 ProxyField(手填+测试+代理池下拉),与 Grok/Claude/Antigravity 同构。
   const renderProxyInput = ({
     value,
     onChange,
-    testKey,
     label = t("accounts.proxyUrl"),
     placeholder = t("accounts.proxyUrlPlaceholder"),
     disabled = false,
   }: {
     value: string;
     onChange: (value: string) => void;
-    testKey: string;
     label?: string;
     placeholder?: string;
     disabled?: boolean;
-  }) => {
-    const isTesting = testingProxyKey === testKey;
-    const testDisabled = disabled || !value.trim() || testingProxyKey !== null;
-    const hasProxyPool = proxyPool.length > 0;
-
-    return (
-      <div className="space-y-2.5">
-        <label className="block text-sm font-semibold text-muted-foreground">
-          {label}
-        </label>
-        {/* 第一行：手动填写代理 URL(带清空按钮) + 测试 */}
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-stretch">
-          <ProxyUrlInput
-            className="min-w-0 flex-1"
-            placeholder={placeholder}
-            value={value}
-            disabled={disabled}
-            onChange={onChange}
-          />
-          <Button
-            type="button"
-            variant="outline"
-            className="shrink-0 justify-center gap-1.5 sm:min-w-[108px]"
-            disabled={testDisabled}
-            onClick={() => void handleTestProxyUrl(value, testKey)}
-          >
-            <Zap className={`size-3.5 ${isTesting ? "animate-pulse" : ""}`} />
-            {isTesting ? t("accounts.testingProxy") : t("accounts.testProxy")}
-          </Button>
-        </div>
-        {/* 第二行：从代理池选择（有池条目时单独占一行，与上方 URL 输入左对齐） */}
-        {hasProxyPool ? (
-          <ProxyPoolSelect
-            className="w-full"
-            proxies={proxyPool}
-            disabled={disabled}
-            onSelect={onChange}
-          />
-        ) : null}
-      </div>
-    );
-  };
+  }) => (
+    <ProxyField
+      value={value}
+      onChange={onChange}
+      proxies={proxyPool}
+      label={label}
+      labelClassName="text-sm"
+      placeholder={placeholder}
+      disabled={disabled}
+    />
+  );
 
   const renderCustomHeadersTextarea = ({
     value,
@@ -6329,23 +6258,32 @@ export default function Accounts() {
   // 四个账号视图共用同一切换器（独立页面通过 headerSlot 注入）。
   // 滑块动画 + 品牌 logo，与仪表盘渠道过滤器视觉一致。
   // useMemo 保持引用稳定,否则每轮渲染的新元素会击穿独立账号页的 memo 边界。
-  const providerSwitcher = useMemo(() => (
-    <div className="relative grid w-full max-w-[560px] grid-cols-4 items-center rounded-lg border border-border bg-muted/40 p-0.5">
-      <span
-        aria-hidden
-        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/4)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{
-          transform: `translateX(${providerView === "grok" ? 100 : providerView === "antigravity" ? 200 : providerView === "claude" ? 300 : 0}%)`,
-        }}
-      />
-      {(
+  const providerSwitcherOptions = useMemo(
+    () =>
+      (
         [
           ["codex", t("accounts.providerViewCodex")],
           ["grok", t("accounts.providerViewGrok")],
           ["antigravity", t("accounts.providerViewAntigravity")],
           ["claude", t("accounts.providerViewClaude")],
         ] as const
-      ).map(([key, label]) => (
+      ).filter(([key]) => visibleChannels.includes(key)),
+    [t, visibleChannels],
+  );
+  const providerSwitcher = useMemo(() => (
+    <div
+      className="relative grid w-full max-w-[560px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
+      style={{ gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))` }}
+    >
+      <span
+        aria-hidden
+        className="absolute inset-y-0.5 left-0.5 rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
+        style={{
+          width: `calc((100% - 4px) / ${providerSwitcherOptions.length})`,
+          transform: `translateX(${Math.max(0, providerSwitcherOptions.findIndex(([key]) => key === providerView)) * 100}%)`,
+        }}
+      />
+      {providerSwitcherOptions.map(([key, label]) => (
         <button
           key={key}
           type="button"
@@ -6363,7 +6301,7 @@ export default function Accounts() {
         </button>
       ))}
     </div>
-  ), [providerView, setProviderView, t]);
+  ), [providerView, setProviderView, t, providerSwitcherOptions]);
 
   if (providerView === "grok") {
     // key 触发渠道切换时整块内容淡入过渡，切换器由 headerSlot 常驻不闪。
@@ -8103,7 +8041,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: addForm.proxy_url,
-                  testKey: "add-refresh-token",
                   onChange: (value) =>
                     setAddForm((form) => ({
                       ...form,
@@ -8137,7 +8074,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: addForm.proxy_url,
-                  testKey: "add-session-token",
                   onChange: (value) =>
                     setAddForm((form) => ({
                       ...form,
@@ -8174,7 +8110,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: atForm.proxy_url,
-                  testKey: "add-access-token",
                   onChange: (value) =>
                     setAtForm((form) => ({
                       ...form,
@@ -8208,7 +8143,6 @@ export default function Accounts() {
                 </div>
                 {renderProxyInput({
                   value: sessionProxyUrl,
-                  testKey: "add-session-json",
                   label: t("accounts.importProxyLabel"),
                   onChange: setSessionProxyUrl,
                 })}
@@ -8407,7 +8341,6 @@ export default function Accounts() {
                 })}
                 {renderProxyInput({
                   value: openAIForm.proxy_url,
-                  testKey: "add-openai-responses",
                   onChange: (value) =>
                     setOpenAIForm((form) => ({
                       ...form,
@@ -8519,7 +8452,6 @@ export default function Accounts() {
 
                 {renderProxyInput({
                   value: agentIdentityProxyUrl,
-                  testKey: "add-agent-identity",
                   onChange: setAgentIdentityProxyUrl,
                 })}
               </div>
@@ -8547,7 +8479,6 @@ export default function Accounts() {
                     </div>
                     {renderProxyInput({
                       value: oauthProxyUrl,
-                      testKey: "oauth-generate",
                       label: t("accounts.oauthProxyUrl"),
                       placeholder: t("accounts.oauthProxyUrlPlaceholder"),
                       onChange: setOauthProxyUrl,
@@ -8664,7 +8595,6 @@ export default function Accounts() {
             <div className="mb-4 space-y-1.5">
               {renderProxyInput({
                 value: importProxyUrl,
-                testKey: "import-batch",
                 label: t("accounts.importProxyLabel"),
                 onChange: setImportProxyUrl,
               })}
@@ -9547,7 +9477,6 @@ export default function Accounts() {
                     <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs space-y-4">
                       {renderProxyInput({
                         value: editOpenAIForm.proxy_url,
-                        testKey: "edit-openai-responses",
                         onChange: (value) =>
                           setEditOpenAIForm((form) => ({
                             ...form,
@@ -9586,7 +9515,6 @@ export default function Accounts() {
                         </div>
                         {renderProxyInput({
                           value: editOAuthProxyUrl,
-                          testKey: "edit-oauth-generate",
                           label: t("accounts.oauthProxyUrl"),
                           placeholder: t("accounts.oauthProxyUrlPlaceholder"),
                           onChange: setEditOAuthProxyUrl,
@@ -10016,7 +9944,6 @@ export default function Accounts() {
                         <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
                           {renderProxyInput({
                             value: editProxyUrl,
-                            testKey: "edit-account-proxy",
                             onChange: setEditProxyUrl,
                           })}
                         </div>

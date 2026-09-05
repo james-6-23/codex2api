@@ -34,8 +34,7 @@ import {
 } from "lucide-react";
 import { api, getAdminKey } from "../api";
 import type { ProxyRow } from "../api";
-import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
-import { ProxyUrlInput } from "../components/ProxyField";
+import { ProxyField } from "../components/ProxyField";
 import AccountProxyBadge from "../components/AccountProxyBadge";
 import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
 import {
@@ -2821,24 +2820,14 @@ function GrokAccounts({
                     />
                   </div>
                   <div>
-                    <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                      {t("grok.proxyUrl")}
-                    </label>
-                    <div className="flex flex-col gap-2 sm:flex-row">
-                      <ProxyUrlInput
-                        className="min-w-0 flex-1"
-                        placeholder="http://user:pass@host:port"
-                        value={form.proxy_url ?? ""}
-                        onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                      />
-                      <ProxyPoolSelect
-                        className="shrink-0 sm:w-[180px]"
-                        proxies={proxyPool}
-                        onSelect={(url) =>
-                          setForm((f) => ({ ...f, proxy_url: url }))
-                        }
-                      />
-                    </div>
+                    <ProxyField
+                      value={form.proxy_url ?? ""}
+                      onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
+                      proxies={proxyPool}
+                      label={t("grok.proxyUrl")}
+                      labelClassName="mb-2 text-sm font-medium"
+                      placeholder="http://user:pass@host:port"
+                    />
                   </div>
                 </>
               ) : (
@@ -2941,22 +2930,14 @@ function GrokAccounts({
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                  {t("grok.proxyUrl")}
-                </label>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <ProxyUrlInput
-                    className="min-w-0 flex-1"
-                    placeholder="http://user:pass@host:port"
-                    value={form.proxy_url ?? ""}
-                    onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                  />
-                  <ProxyPoolSelect
-                    className="shrink-0 sm:w-[180px]"
-                    proxies={proxyPool}
-                    onSelect={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                  />
-                </div>
+                <ProxyField
+                  value={form.proxy_url ?? ""}
+                  onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
+                  proxies={proxyPool}
+                  label={t("grok.proxyUrl")}
+                  labelClassName="mb-2 text-sm font-medium"
+                  placeholder="http://user:pass@host:port"
+                />
               </div>
 
               {ssoResult ? (
@@ -3125,22 +3106,14 @@ function GrokAccounts({
               </div>
 
               <div>
-                <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                  {t("grok.proxyUrl")}
-                </label>
-                <div className="flex flex-col gap-2 sm:flex-row">
-                  <ProxyUrlInput
-                    className="min-w-0 flex-1"
-                    placeholder="http://user:pass@host:port"
-                    value={form.proxy_url ?? ""}
-                    onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                  />
-                  <ProxyPoolSelect
-                    className="shrink-0 sm:w-[180px]"
-                    proxies={proxyPool}
-                    onSelect={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
-                  />
-                </div>
+                <ProxyField
+                  value={form.proxy_url ?? ""}
+                  onChange={(url) => setForm((f) => ({ ...f, proxy_url: url }))}
+                  proxies={proxyPool}
+                  label={t("grok.proxyUrl")}
+                  labelClassName="mb-2 text-sm font-medium"
+                  placeholder="http://user:pass@host:port"
+                />
               </div>
             </>
           )}
@@ -3852,24 +3825,14 @@ function GrokAccounts({
             ) : null}
 
             <div>
-              <label className="mb-2 block text-sm font-medium text-muted-foreground">
-                {t("grok.proxyUrl")}
-              </label>
-              <div className="flex flex-col gap-2 sm:flex-row">
-                <ProxyUrlInput
-                  className="min-w-0 flex-1"
-                  placeholder="http://user:pass@host:port"
-                  value={editForm.proxy_url}
-                  onChange={(url) => setEditForm((f) => ({ ...f, proxy_url: url }))}
-                />
-                <ProxyPoolSelect
-                  className="shrink-0 sm:w-[180px]"
-                  proxies={proxyPool}
-                  onSelect={(url) =>
-                    setEditForm((f) => ({ ...f, proxy_url: url }))
-                  }
-                />
-              </div>
+              <ProxyField
+                value={editForm.proxy_url}
+                onChange={(url) => setEditForm((f) => ({ ...f, proxy_url: url }))}
+                proxies={proxyPool}
+                label={t("grok.proxyUrl")}
+                labelClassName="mb-2 text-sm font-medium"
+                placeholder="http://user:pass@host:port"
+              />
             </div>
           </div>
         ) : null}

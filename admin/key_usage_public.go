@@ -20,9 +20,10 @@ const (
 )
 
 type publicAPIKeyUsageResponse struct {
-	Key   publicAPIKeyUsageKey            `json:"key"`
-	Range publicAPIKeyUsageRange          `json:"range"`
-	Usage *database.APIKeySelfUsageReport `json:"usage"`
+	Key               publicAPIKeyUsageKey               `json:"key"`
+	Range             publicAPIKeyUsageRange             `json:"range"`
+	Usage             *database.APIKeySelfUsageReport    `json:"usage"`
+	ModelRequestUsage []database.APIKeyModelRequestUsage `json:"model_request_usage"`
 }
 
 type publicAPIKeyUsageKey struct {
@@ -95,11 +96,20 @@ func (h *Handler) GetPublicAPIKeyUsageSummary(c *gin.Context) {
 		writeInternalError(c, err)
 		return
 	}
+	modelRequestUsage, err := h.db.GetAPIKeyModelRequestUsage(ctx, row.ID, row.Limits.ModelRequestLimits, rangeEnd)
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	if modelRequestUsage == nil {
+		modelRequestUsage = []database.APIKeyModelRequestUsage{}
+	}
 
 	c.JSON(http.StatusOK, publicAPIKeyUsageResponse{
-		Key:   newPublicAPIKeyUsageKey(row),
-		Range: newPublicAPIKeyUsageRange(rangeName, rangeStart, rangeEnd),
-		Usage: report,
+		Key:               newPublicAPIKeyUsageKey(row),
+		Range:             newPublicAPIKeyUsageRange(rangeName, rangeStart, rangeEnd),
+		Usage:             report,
+		ModelRequestUsage: modelRequestUsage,
 	})
 }
 

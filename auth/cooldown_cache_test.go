@@ -258,3 +258,26 @@ func TestModelCooldownFixedModeDoesNotBackoff(t *testing.T) {
 		t.Fatal("model cooldown should be cleared")
 	}
 }
+
+// 管理端在库层清掉 unauthorized 后必须能把跨实例冷却缓存一起清掉，否则调度器
+// 每次挑号回读缓存又把冷却盖回来。
+func TestForgetCachedAccountCooldownDropsRecord(t *testing.T) {
+	tokenCache := cache.NewMemory(4)
+	defer tokenCache.Close()
+
+	account := newFastSchedulerTestAccount(11, HealthTierHealthy, 100, 1)
+	store := &Store{accounts: []*Account{account}, maxConcurrency: 1, tokenCache: tokenCache}
+	store.setCachedAccountCooldown(account.DBID, "unauthorized", time.Now().Add(time.Hour))
+	if _, ok := store.getCachedAccountCooldown(account.DBID); !ok {
+		t.Fatal("precondition: cached cooldown missing")
+	}
+
+	store.ForgetCachedAccountCooldown(account.DBID)
+
+	if _, ok := store.getCachedAccountCooldown(account.DBID); ok {
+		t.Fatal("cached cooldown should have been dropped")
+	}
+	if store.accountHasCachedCooldown(account) {
+		t.Fatal("accountHasCachedCooldown() = true after forget, want false")
+	}
+}

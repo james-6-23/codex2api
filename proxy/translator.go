@@ -2559,29 +2559,36 @@ func normalizeReasoningEffortForModel(effort, model string) string {
 
 // modelSupportsMaxReasoningEffort 判断模型是否支持 reasoning.effort=max
 // （gpt-5.6 及更高版本；带变体后缀如 gpt-5.6-sol 同样识别）。
+// Trusted Access for Cyber 的 gpt-daybreak-*-latest 稳定别名指向 5.6 家族
+// （blue=gpt-5.6-sol、red=gpt-5.6-cyber，issue #624），同样放行。
 func modelSupportsMaxReasoningEffort(model string) bool {
 	model = strings.ToLower(strings.TrimSpace(model))
 	if !strings.HasPrefix(model, "gpt-") {
 		return false
+	}
+	if strings.HasPrefix(model, "gpt-daybreak-") {
+		return true
 	}
 	version := strings.TrimPrefix(model, "gpt-")
 	if dash := strings.IndexByte(version, '-'); dash >= 0 {
 		version = version[:dash]
 	}
 	parts := strings.Split(version, ".")
-	if len(parts) < 2 {
-		return false
-	}
 	major, err := strconv.Atoi(parts[0])
 	if err != nil {
+		return false
+	}
+	// 只有大版本号的新一代型号（gpt-6-astra、gpt-6）：官方模型页明确列出
+	// Max 档位，按 major > 5 放行；缺少 ".x" 不能当成旧模型钳掉。
+	if major > 5 {
+		return true
+	}
+	if len(parts) < 2 {
 		return false
 	}
 	minor, err := strconv.Atoi(parts[1])
 	if err != nil {
 		return false
-	}
-	if major > 5 {
-		return true
 	}
 	return major == 5 && minor >= 6
 }
@@ -3508,15 +3515,21 @@ type TokenDetails struct {
 }
 
 type UsageInfo struct {
-	PromptTokens        int           `json:"prompt_tokens"`
-	CompletionTokens    int           `json:"completion_tokens"`
-	TotalTokens         int           `json:"total_tokens"`
-	InputTokens         int           `json:"input_tokens,omitempty"`
-	OutputTokens        int           `json:"output_tokens,omitempty"`
-	ReasoningTokens     int           `json:"reasoning_tokens,omitempty"`
-	CachedTokens        int           `json:"cached_tokens,omitempty"`
-	PromptTokensDetails *TokenDetails `json:"prompt_tokens_details,omitempty"`
-	InputTokensDetails  *TokenDetails `json:"input_tokens_details,omitempty"`
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	TotalTokens      int `json:"total_tokens"`
+	InputTokens      int `json:"input_tokens,omitempty"`
+	OutputTokens     int `json:"output_tokens,omitempty"`
+	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+	CachedTokens     int `json:"cached_tokens,omitempty"`
+	// CacheWrite* 是 Anthropic 提示缓存写入 token（cache_creation_input_tokens 及其 5m/1h 细分）。
+	CacheWriteTokens   int `json:"cache_write_tokens,omitempty"`
+	CacheWrite5mTokens int `json:"cache_write_5m_tokens,omitempty"`
+	CacheWrite1hTokens int `json:"cache_write_1h_tokens,omitempty"`
+	// anthropicTotalApplied 标记 InputTokens 已转换为 Anthropic 总输入口径，避免重复累加。
+	anthropicTotalApplied bool
+	PromptTokensDetails   *TokenDetails `json:"prompt_tokens_details,omitempty"`
+	InputTokensDetails    *TokenDetails `json:"input_tokens_details,omitempty"`
 }
 
 func newUsageInfo(inputTokens, outputTokens, reasoningTokens, cachedTokens int) *UsageInfo {

@@ -963,6 +963,67 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 	}
 }
 
+func TestApplyCodexRequestHeadersAutoDerivesVersionFromDesktopUserAgent(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{
+		ClientCompatMode:   ClientCompatModeAuto,
+		CodexMinCLIVersion: "0.153.3",
+	})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	desktopUserAgent := "Codex Desktop/0.153.3 (Mac OS 26.4.0; arm64) dumb (codex_exec; 0.153.3)"
+	downstreamHeaders := http.Header{
+		"User-Agent": []string{desktopUserAgent},
+		"Originator": []string{"Codex Desktop"},
+	}
+
+	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", nil, downstreamHeaders)
+
+	if got := req.Header.Get("User-Agent"); got != desktopUserAgent {
+		t.Fatalf("User-Agent = %q, want %q", got, desktopUserAgent)
+	}
+	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
+		t.Fatalf("Originator = %q, want Codex Desktop", got)
+	}
+	if got := req.Header.Get("Version"); got != "0.153.3" {
+		t.Fatalf("Version = %q, want 0.153.3 derived from desktop User-Agent", got)
+	}
+}
+
+func TestApplyCodexRequestHeadersAutoUpgradesOldDesktopClient(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	ApplyRuntimeSettings(RuntimeSettings{
+		ClientCompatMode:   ClientCompatModeAuto,
+		CodexMinCLIVersion: "0.153.3",
+	})
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+
+	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+	if err != nil {
+		t.Fatalf("http.NewRequest() error = %v", err)
+	}
+	downstreamHeaders := http.Header{
+		"User-Agent": []string{"Codex Desktop/0.152.0 (Mac OS 26.4.0; arm64) dumb (codex_exec; 0.152.0)"},
+		"Originator": []string{"Codex Desktop"},
+	}
+
+	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", nil, downstreamHeaders)
+
+	if got := req.Header.Get("User-Agent"); got == downstreamHeaders.Get("User-Agent") {
+		t.Fatalf("User-Agent preserved old desktop UA %q", got)
+	}
+	if got := req.Header.Get("Originator"); got != Originator {
+		t.Fatalf("Originator = %q, want generated client originator %q", got, Originator)
+	}
+	if got := req.Header.Get("Version"); got != "0.153.3" {
+		t.Fatalf("Version = %q, want auto minimum 0.153.3", got)
+	}
+}
+
 func TestApplyCodexRequestHeadersAutoUpgradesOldCodexCLI(t *testing.T) {
 	prev := CurrentRuntimeSettings()
 	ApplyRuntimeSettings(RuntimeSettings{

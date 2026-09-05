@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/config"
@@ -15,6 +16,17 @@ import (
 )
 
 func newChatStreamTerminalTestHandler(t *testing.T, events []string) (*Handler, *atomic.Int32) {
+	t.Helper()
+	return newChatStreamServeTestHandler(t, func(w http.ResponseWriter) {
+		for _, event := range events {
+			_, _ = io.WriteString(w, "data: "+event+"\n\n")
+		}
+	})
+}
+
+// newChatStreamServeTestHandler 搭一个走 Resin HTTP 上游的 /v1/chat/completions
+// 测试环境，假上游按 serve 回调自由控制写入节奏（含 flush/静默）。
+func newChatStreamServeTestHandler(t *testing.T, serve func(w http.ResponseWriter)) (*Handler, *atomic.Int32) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 
@@ -25,9 +37,7 @@ func newChatStreamTerminalTestHandler(t *testing.T, events []string) (*Handler, 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
-		for _, event := range events {
-			_, _ = io.WriteString(w, "data: "+event+"\n\n")
-		}
+		serve(w)
 	}))
 	t.Cleanup(upstream.Close)
 	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
@@ -84,6 +94,50 @@ func TestChatCompletionsSuccessfulStreamStillAppendsDoneSentinel(t *testing.T) {
 	}
 	if got := strings.Count(body, "data: [DONE]\n\n"); got != 1 {
 		t.Fatalf("successful stream [DONE] count = %d, want 1; body=%q", got, body)
+	}
+}
+
+// TestChatCompletionsStreamKeepsDownstreamAliveDuringUpstreamSilence 验证 issue #623
+// 修复：首个内容 chunk 之后上游静默期间，/v1/chat/completions 翻译流也要定期写
+// SSE 注释刷新下游 idle timer，且首字前不得写出任何字节。
+func TestChatCompletionsStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
+	shortenDownstreamSSEKeepalive(t)
+	handler, calls := newChatStreamServeTestHandler(t, func(w http.ResponseWriter) {
+		writeCodexSSE(w,
+			`{"type":"response.created","response":{"id":"resp_silent"}}`,
+			`{"type":"response.output_text.delta","delta":"started"}`,
+		)
+		time.Sleep(40 * time.Millisecond)
+		writeCodexSSE(w,
+			`{"type":"response.output_text.delta","delta":"-resumed"}`,
+			`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		)
+	})
+
+	recorder := invokeChatCompletionsStream(t, handler)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, body)
+	}
+	firstContent := strings.Index(body, `"content":"started"`)
+	keepalive := strings.Index(body, downstreamSSEKeepaliveComment)
+	resumed := strings.Index(body, `"content":"-resumed"`)
+	if firstContent < 0 || keepalive < 0 || resumed < 0 {
+		t.Fatalf("stream must carry first content, a keepalive comment and the resumed content; body=%q", body)
+	}
+	if keepalive < firstContent || keepalive > resumed {
+		t.Fatalf("keepalive must land inside the upstream silence window (after %d, before %d), got %d; body=%q", firstContent, resumed, keepalive, body)
+	}
+	for frame := range strings.SplitSeq(body, "\n\n") {
+		if strings.Contains(frame, ": keepalive") && strings.TrimSpace(frame) != ": keepalive" {
+			t.Fatalf("keepalive comment interleaved with an SSE frame: %q", frame)
+		}
+	}
+	if got := strings.Count(body, "data: [DONE]\n\n"); got != 1 {
+		t.Fatalf("[DONE] count = %d, want 1; body=%q", got, body)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("upstream calls = %d, want 1", got)
 	}
 }
 

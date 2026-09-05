@@ -316,6 +316,7 @@ You must not output any other text. Only output the JSON object.`
 }
 
 func TestAmbientSafetyOversizedSignedTemplateUsesExactBuilderSource(t *testing.T) {
+	skipHeavyFixtureUnderRace(t)
 	const currentUserBudget = 16 * 1024
 
 	staticPrefix := ambientPromptPrefix + `
@@ -1060,6 +1061,7 @@ func TestExactGuardSegmentCacheSingleflightsConcurrentIdenticalText(t *testing.T
 }
 
 func TestExactGuardSegmentCacheReusesCurrentUserPrecheckKindsWithoutPromptRetention(t *testing.T) {
+	skipHeavyFixtureUnderRace(t)
 	cfg := testConfig(ModeBlock)
 	cfg.StrictTerminalEnabled = true
 	cfg.Advanced.Guard.Performance.ExactSegmentCacheEnabled = true

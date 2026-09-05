@@ -28,8 +28,7 @@ import {
 } from "lucide-react";
 import { api } from "../api";
 import type { ProxyRow } from "../api";
-import { ProxyPoolSelect } from "../components/ProxyPoolSelect";
-import { ProxyUrlInput } from "../components/ProxyField";
+import { ProxyField } from "../components/ProxyField";
 import type {
   AccountGroup,
   AccountListSummary,
@@ -506,18 +505,15 @@ function AccountMetadataFields({
   const { t } = useTranslation();
   return (
     <div className="grid gap-3 sm:grid-cols-2">
-      <label className="block space-y-1.5">
-        <span className="text-xs font-semibold text-muted-foreground">
-          {t("antigravity.proxyUrl")}
-        </span>
-        <ProxyUrlInput
-          value={proxyUrl}
-          onChange={onProxyUrlChange}
-          placeholder={t("antigravity.proxyUrlPlaceholder")}
-        />
-        {/* 从代理池选择：展示每条代理已绑定账号数/空闲，选中写入上面的输入框。 */}
-        <ProxyPoolSelect proxies={proxies} onSelect={onProxyUrlChange} />
-      </label>
+      {/* 代理字段与其他三个渠道同构:手填 + 测试 + 从代理池选择(含关联提示)。 */}
+      <ProxyField
+        className="space-y-1.5"
+        value={proxyUrl}
+        onChange={onProxyUrlChange}
+        proxies={proxies}
+        label={t("antigravity.proxyUrl")}
+        placeholder={t("antigravity.proxyUrlPlaceholder")}
+      />
       <div className="space-y-1.5">
         <span className="text-xs font-semibold text-muted-foreground">
           {t("accounts.groupsLabel")}

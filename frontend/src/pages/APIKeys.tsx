@@ -10,6 +10,8 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import APIKeyTokenUsagePanel from "../components/APIKeyTokenUsagePanel";
+import APIKeyModelRequestLimitsEditor from "../components/APIKeyModelRequestLimitsEditor";
+import APIKeyModelRequestUsageCard from "../components/APIKeyModelRequestUsage";
 import ChipInput from "../components/ChipInput";
 import Modal from "../components/Modal";
 import ChannelLogo from "../components/ChannelLogo";
@@ -23,6 +25,7 @@ import { useToast } from "../hooks/useToast";
 import type {
   AccountGroup,
   APIKeyLimits,
+  APIKeyModelRequestUsage,
   APIKeyScopeLimit,
   APIKeyScopeUsageItem,
   APIKeyScopeUsageWindow,
@@ -34,6 +37,11 @@ import type {
   SystemSettings,
 } from "../types";
 import { canStartAPIKeyBulkReset } from "../lib/apiKeyOperationState";
+import {
+  modelRequestLimitsFromAPIKey,
+  modelRequestLimitsToPayload,
+  type ModelRequestLimitFormState,
+} from "../lib/apiKeyModelRequests";
 import { getErrorMessage } from "../utils/error";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { Badge } from "@/components/ui/badge";
@@ -132,6 +140,7 @@ interface LimitsFormState {
   allowLive: boolean;
   upstreamChannel: UpstreamChannel;
   scopeLimits: ScopeLimitFormState[];
+  modelRequestLimits: ModelRequestLimitFormState[];
 }
 
 type ImageGenerationPolicy = "allow" | "strip" | "block";
@@ -255,6 +264,7 @@ const emptyLimitsForm: LimitsFormState = {
   allowLive: false,
   upstreamChannel: "auto",
   scopeLimits: [],
+  modelRequestLimits: [],
 };
 
 const initialCreateForm: CreateKeyFormState = {
@@ -300,6 +310,9 @@ export default function APIKeys() {
   const [editingKey, setEditingKey] = useState<APIKeyRow | null>(null);
   // 编辑抽屉里展示 scope 预算的当前用量（issue #439）；打开时按需拉一次。
   const [scopeUsage, setScopeUsage] = useState<APIKeyScopeUsageItem[]>([]);
+  const [modelRequestUsage, setModelRequestUsage] = useState<APIKeyModelRequestUsage[]>([]);
+  const [modelRequestUsageLoading, setModelRequestUsageLoading] = useState(false);
+  const [modelRequestUsageError, setModelRequestUsageError] = useState("");
   // 列表页的 scope 预算概览：按 Key ID 索引，仅在存在配了预算的 Key 时才有内容。
   const [scopeSummary, setScopeSummary] = useState<
     Record<string, APIKeyScopeSummaryItem[]>
@@ -317,6 +330,26 @@ export default function APIKeys() {
   const [refreshing, setRefreshing] = useState(false);
   const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
+
+  useEffect(() => {
+    let cancelled = false;
+    setModelRequestUsage([]);
+    setModelRequestUsageError("");
+    setModelRequestUsageLoading(false);
+    if (!editingKey || !editingKey.limits?.model_request_limits?.length) return;
+    setModelRequestUsageLoading(true);
+    void api.getAPIKeyModelRequestUsage(editingKey.id)
+      .then((result) => {
+        if (!cancelled) setModelRequestUsage(result.model_request_usage ?? []);
+      })
+      .catch((error) => {
+        if (!cancelled) setModelRequestUsageError(getErrorMessage(error));
+      })
+      .finally(() => {
+        if (!cancelled) setModelRequestUsageLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [editingKey]);
 
   useEffect(() => {
     return () => {
@@ -740,7 +773,7 @@ export default function APIKeys() {
         ...(createForm.key.trim() ? { key: createForm.key.trim() } : {}),
         ...(quotaLimit && quotaLimit > 0 ? { quota_limit: quotaLimit } : {}),
         allowed_group_ids: createForm.allowedGroupIds,
-        limits: limitsFormToPayload(createForm.limits),
+        limits: limitsFormToPayload(createForm.limits, t),
         ...expirationPayload,
       };
 
@@ -1129,8 +1162,11 @@ export default function APIKeys() {
       const expirationPayload = buildExpirationPayload(editForm, t, {
         clearNever: true,
       });
-      const limitsPayload = limitsFormToPayload(editForm.limits);
-      await api.updateAPIKey(editingKey.id, {
+      const limitsPayload = {
+        ...editingKey.limits,
+        ...limitsFormToPayload(editForm.limits, t),
+      };
+      const saved = await api.updateAPIKey(editingKey.id, {
         name: trimmed,
         quota_limit: quotaLimit,
         allowed_group_ids: editForm.allowedGroupIds,
@@ -1162,7 +1198,7 @@ export default function APIKeys() {
             name: trimmed,
             quota_limit: quotaLimit,
             allowed_group_ids: editForm.allowedGroupIds,
-            limits: limitsPayload,
+            limits: saved.limits ?? limitsPayload,
             expires_at: nextExpires ?? null,
           };
         }),
@@ -2384,6 +2420,12 @@ export default function APIKeys() {
                 onValueChange={(value) => setEditTab(value as "basic" | "limits")}
               />
 
+              <APIKeyModelRequestUsageCard
+                items={modelRequestUsage}
+                loading={modelRequestUsageLoading}
+                error={modelRequestUsageError}
+              />
+
               {editTab === "basic" ? (
                 <>
                   <div className="grid gap-4 sm:grid-cols-2">
@@ -2708,6 +2750,7 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
         ? limits.upstream_channel
         : "auto",
     scopeLimits: scopeLimitsFromAPIKey(limits.scope_limits),
+    modelRequestLimits: modelRequestLimitsFromAPIKey(limits.model_request_limits),
   };
 }
 
@@ -2909,7 +2952,7 @@ function parseTokenLimit(value: string, unit: TokenLimitUnit): number {
 // limitsFormToPayload 把表单值转为后端期望的 APIKeyLimits。
 // 空字符串或 0 在后端被视为 "未配置";所以不一一过滤,直接把全部字段都发出去。
 // (sanitizeAPIKeyLimits 在后端会把负值与空白清理掉)
-function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
+function limitsFormToPayload(form: LimitsFormState, t: Translator): APIKeyLimits {
   const num = (s: string) => {
     const n = Number(s.trim());
     return Number.isFinite(n) && n > 0 ? n : 0;
@@ -2947,6 +2990,7 @@ function limitsFormToPayload(form: LimitsFormState): APIKeyLimits {
     allow_live: form.upstreamChannel === "codex" && form.allowLive,
     upstream_channel:
       form.upstreamChannel === "auto" ? undefined : form.upstreamChannel,
+    model_request_limits: modelRequestLimitsToPayload(form.modelRequestLimits, t),
     scope_limits: form.scopeLimits
       .filter((row) => Number(row.scopeId.trim()) > 0)
       .filter(scopeLimitRowHasLimit)
@@ -3496,6 +3540,7 @@ function LimitsEditor({
     value.tokenLimit30d !== "" ||
     value.tokenLimitDaily !== "" ||
     value.scopeLimits.length > 0 ||
+    value.modelRequestLimits.length > 0 ||
     value.imageGenerationPolicy !== "allow";
   const [open, setOpen] = useState(hasAny || !!expanded);
   const tokenUnitOptions = useMemo(
@@ -3630,6 +3675,17 @@ function LimitsEditor({
             suffix={t("apiKeys.limits.concurrencySuffix")}
           />
         </div>
+      </LimitSection>
+
+      <LimitSection
+        icon={<CalendarClock className="size-3.5" />}
+        title={t("modelRequests.title")}
+        description={t("modelRequests.description")}
+      >
+        <APIKeyModelRequestLimitsEditor
+          value={value.modelRequestLimits}
+          onChange={(modelRequestLimits) => patch({ modelRequestLimits })}
+        />
       </LimitSection>
 
       <LimitSection

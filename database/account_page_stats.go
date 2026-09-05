@@ -30,6 +30,7 @@ func (db *DB) appendAccountIDFilter(args *[]interface{}, ids []int64) string {
 
 // GetAccountRequestCountsByIDs returns the same seven-day counters as
 // GetAccountRequestCounts, but restricts the scan to the visible account page.
+// Client cancellations (499) remain in raw logs but are not account failures.
 func (db *DB) GetAccountRequestCountsByIDs(ctx context.Context, ids []int64) (map[int64]*AccountRequestCount, error) {
 	return db.getAccountRequestCountsByIDs(ctx, ids, true)
 }
@@ -59,8 +60,8 @@ func (db *DB) getAccountRequestCountsByIDs(ctx context.Context, ids []int64, wit
 	query := fmt.Sprintf(`
 		SELECT account_id,
 			COALESCE(SUM(CASE WHEN status_code < 400 AND %s THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code >= 400 AND %s THEN 1 ELSE 0 END), 0),
-			COALESCE(SUM(CASE WHEN status_code >= 400 AND %s THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code <> 499 AND %s THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN status_code >= 400 AND status_code <> 499 AND %s THEN 1 ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN status_code = 429 THEN 1 ELSE 0 END), 0)
 		FROM usage_logs
 		WHERE created_at >= $1 AND %s AND %s
@@ -119,7 +120,7 @@ func (db *DB) attachErrorStatusCounts(ctx context.Context, result map[int64]*Acc
 	query := fmt.Sprintf(`
 		SELECT account_id, status_code, COUNT(*)
 		FROM usage_logs
-		WHERE created_at >= $1 AND status_code >= 400 AND %s AND %s%s
+		WHERE created_at >= $1 AND status_code >= 400 AND status_code <> 499 AND %s AND %s%s
 		GROUP BY account_id, status_code`, db.nonRetryUsageLogPredicate(), db.endUserUsageLogPredicate(), idFilter)
 	rows, err := db.conn.QueryContext(ctx, query, args...)
 	if err != nil {

@@ -2595,8 +2595,6 @@ function EditAccountModal({
     </div>
   );
 
-  const selectCls =
-    "h-9 w-full rounded-md border border-input bg-background px-2 text-sm text-foreground outline-none focus-visible:border-ring";
   const timezoneChoice = timezoneCustom
     ? CLAUDE_TIMEZONE_CUSTOM
     : findClaudeTimezoneOption(timezone)?.value ?? (timezone.trim() ? CLAUDE_TIMEZONE_CUSTOM : "");
@@ -2637,31 +2635,43 @@ function EditAccountModal({
           )}
           {field(
             t("claude.fingerprintModeLabel"),
-            <select className={selectCls} value={fpMode} onChange={(e) => setFpMode(e.target.value as "" | "preserve" | "force")}>
-              <option value="">{t("claude.fpFollowGlobal")}</option>
-              <option value="preserve">{t("claude.fpPreserve")}</option>
-              <option value="force">{t("claude.fpForce")}</option>
-            </select>,
+            <Select
+              value={fpMode}
+              onValueChange={(value) => setFpMode(value as "" | "preserve" | "force")}
+              options={[
+                { value: "", label: t("claude.fpFollowGlobal") },
+                { value: "preserve", label: t("claude.fpPreserve") },
+                { value: "force", label: t("claude.fpForce") },
+              ]}
+            />,
             t("claude.fingerprintModeHint"),
           )}
           {field(
             t("claude.clientPlatformLabel"),
-            <select className={selectCls} value={clientPlatform} onChange={(e) => setClientPlatform(e.target.value as "" | "any" | "claude_code_cli_only")}>
-              <option value="">{t("claude.clientPlatformAny")}</option>
-              <option value="any">{t("claude.clientPlatformUnrestricted")}</option>
-              <option value="claude_code_cli_only">{t("claude.clientPlatformCLIOnly")}</option>
-            </select>,
+            <Select
+              value={clientPlatform}
+              onValueChange={(value) => setClientPlatform(value as "" | "any" | "claude_code_cli_only")}
+              options={[
+                { value: "", label: t("claude.clientPlatformAny") },
+                { value: "any", label: t("claude.clientPlatformUnrestricted") },
+                { value: "claude_code_cli_only", label: t("claude.clientPlatformCLIOnly") },
+              ]}
+            />,
             t("claude.clientPlatformHint"),
           )}
           {field(
             t("claude.versionPolicyLabel"),
             <div className="space-y-1.5">
-              <select className={selectCls} value={versionPolicy} onChange={(e) => setVersionPolicy(e.target.value as "" | "passthrough" | "fixed" | "minimum")}>
-                <option value="">{t("claude.versionPolicyPassthrough")}</option>
-                <option value="passthrough">{t("claude.versionPolicyPassthroughExplicit")}</option>
-                <option value="fixed">{t("claude.versionPolicyFixed")}</option>
-                <option value="minimum">{t("claude.versionPolicyMinimum")}</option>
-              </select>
+              <Select
+                value={versionPolicy}
+                onValueChange={(value) => setVersionPolicy(value as "" | "passthrough" | "fixed" | "minimum")}
+                options={[
+                  { value: "", label: t("claude.versionPolicyPassthrough") },
+                  { value: "passthrough", label: t("claude.versionPolicyPassthroughExplicit") },
+                  { value: "fixed", label: t("claude.versionPolicyFixed") },
+                  { value: "minimum", label: t("claude.versionPolicyMinimum") },
+                ]}
+              />
               {versionPolicy === "fixed" || versionPolicy === "minimum" ? (
                 <Input value={clientVersion} onChange={(e) => setClientVersion(e.target.value)} placeholder="2.1.251" />
               ) : null}

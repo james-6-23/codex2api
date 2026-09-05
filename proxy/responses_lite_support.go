@@ -19,7 +19,6 @@ import (
 // RecordResponsesLiteSupportFromManifest 学习真值覆盖,种子过期可自愈。
 var builtinResponsesLiteSupport = map[string]bool{
 	"gpt-5.6-sol":       true,
-	"gpt-5.6-sol-wm":    true,
 	"gpt-5.6-terra":     true,
 	"gpt-5.6-luna":      true,
 	"codex-auto-review": true,

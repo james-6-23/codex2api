@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import {
+  AlertTriangle,
   ArrowUpRight,
   Check,
   ChevronDown,
@@ -30,6 +31,8 @@ import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { cn } from '@/lib/utils'
 import { useToast } from '../hooks/useToast'
+import { postAdminSSE } from '../hooks/useOperationProgress'
+import { applyModelRefreshEvent, readModelRefreshSSE, type ModelRefreshProgress } from '../lib/modelRefreshStream'
 import { getErrorMessage } from '../utils/error'
 import type { ModelPricingOverride, OfficialPricingSyncConfig } from '@/types'
 import {
@@ -153,7 +156,7 @@ function getOutputMultiplier(input: number, output: number): string | null {
   return `${ratio.toFixed(1).replace(/\.0$/, '')}x`
 }
 
-const PREFERRED_MODEL_ORDER = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
+const PREFERRED_MODEL_ORDER = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna'] as const
 
 function modelPreferredRank(model: string): number {
   const lower = model.trim().toLowerCase()
@@ -454,6 +457,62 @@ function BillingRulePreview({ pricing }: { pricing: ModelPricingOverride }) {
 
 // ModelCatalogModal 是"模型目录"弹窗:按 provider 分组、可搜索、点击某模型直接定位到
 // 价格行;可刷新账号真实可用模型;新出现的模型标"新",便于快速锁定。
+// 刷新进度面板：每渠道一行，显示已探测的套餐分组数、当前抽样账号，以及刷出来的新模型。
+function ModelRefreshProgressPanel({ progress, running }: { progress: ModelRefreshProgress; running: boolean }) {
+  const { t } = useTranslation()
+  const channels = CHANNEL_ORDER.filter((c) => progress[c]).map((c) => progress[c])
+  if (channels.length === 0) {
+    return (
+      <div className="flex items-center gap-2 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">
+        <Loader2 className="size-3.5 animate-spin" />
+        {t('settings.pricing.refreshStarting')}
+      </div>
+    )
+  }
+  return (
+    <div className="space-y-1.5 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3">
+      {channels.map((ch) => {
+        const label = CHANNEL_LABEL[ch.channel as Exclude<ChannelFilter, 'all'>] ?? ch.channel
+        const finished = ch.done || (!running && ch.total > 0 && ch.current >= ch.total)
+        const failed = Boolean(ch.error) || ch.failed > 0
+        return (
+          <div key={ch.channel} className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs">
+            <span className="flex w-24 shrink-0 items-center gap-1.5 font-semibold text-foreground/80">
+              {finished ? (
+                failed ? <AlertTriangle className="size-3.5 text-amber-500" /> : <Check className="size-3.5 text-emerald-500" />
+              ) : (
+                <Loader2 className="size-3.5 animate-spin text-sky-500" />
+              )}
+              <ChannelLogo channel={ch.channel as Exclude<ChannelFilter, 'all'>} size={14} />
+              {label}
+            </span>
+            <span className="text-muted-foreground">
+              {ch.total > 0
+                ? t('settings.pricing.refreshProbing', { current: ch.current, total: ch.total })
+                : finished
+                  ? t('settings.pricing.refreshNoAccounts')
+                  : t('settings.pricing.refreshStarting')}
+            </span>
+            {ch.lastPlan ? (
+              <span className="truncate font-mono text-[11px] text-muted-foreground">
+                {ch.lastPlan}
+                {ch.lastAccount ? ` · ${ch.lastAccount}` : ''}
+                {ch.lastStatus === 'failed' ? ` · ${t('settings.pricing.catalogRefreshChannelFailed')}${ch.lastError ? `: ${ch.lastError}` : ''}` : ''}
+              </span>
+            ) : null}
+            {ch.error ? <span className="text-[11px] text-amber-600 dark:text-amber-400">{ch.error}</span> : null}
+            {ch.added.map((m) => (
+              <span key={m} className="rounded-full bg-rose-500/15 px-1.5 py-0.5 font-mono text-[10px] font-bold text-rose-600 ring-1 ring-inset ring-rose-500/25 dark:text-rose-300">
+                +{m}
+              </span>
+            ))}
+          </div>
+        )
+      })}
+    </div>
+  )
+}
+
 function ModelCatalogModal({
   open,
   onClose,
@@ -464,6 +523,7 @@ function ModelCatalogModal({
   onJump,
   onRefresh,
   refreshing,
+  refreshProgress,
   onAcknowledge,
 }: {
   open: boolean
@@ -475,6 +535,7 @@ function ModelCatalogModal({
   onJump: (model: string) => void
   onRefresh: () => void
   refreshing: boolean
+  refreshProgress: ModelRefreshProgress | null
   onAcknowledge: () => void
 }) {
   const { t } = useTranslation()
@@ -518,6 +579,7 @@ function ModelCatalogModal({
       }
     >
       <div className="space-y-3">
+        {refreshProgress ? <ModelRefreshProgressPanel progress={refreshProgress} running={refreshing} /> : null}
         <div className="relative">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
@@ -602,6 +664,8 @@ export default function ModelPricing() {
   const [catalogQuery, setCatalogQuery] = useState('')
   const [jumpedModel, setJumpedModel] = useState('')
   const [refreshingModels, setRefreshingModels] = useState(false)
+  const [refreshProgress, setRefreshProgress] = useState<ModelRefreshProgress | null>(null)
+  const refreshProgressHideTimer = useRef<number | null>(null)
   const [seenBump, setSeenBump] = useState(0)
   const [syncOpen, setSyncOpen] = useState(false)
   const [expandedAdvanced, setExpandedAdvanced] = useState<Record<string, boolean>>({})
@@ -847,14 +911,39 @@ export default function ModelPricing() {
 
   const refreshCatalogModels = useCallback(async () => {
     setRefreshingModels(true)
+    if (refreshProgressHideTimer.current !== null) {
+      window.clearTimeout(refreshProgressHideTimer.current)
+      refreshProgressHideTimer.current = null
+    }
+    setRefreshProgress({})
     try {
-      const res = await api.refreshAllClaudeModels()
-      showToast(t('settings.pricing.catalogRefreshed', { count: res.model_count }))
+      // 统一刷新所有渠道：按套餐分组抽样探测，SSE 逐组推送进度，刷出新模型立刻显示。
+      const response = await postAdminSSE('/models/refresh-all?stream=1')
+      const res = await readModelRefreshSSE(response, (event) => {
+        setRefreshProgress((prev) => applyModelRefreshEvent(prev ?? {}, event))
+      })
+      if (!res) throw new Error(t('settings.pricing.refreshNoSummary'))
+      const detail = res.channels
+        .map((ch) => {
+          const label = CHANNEL_LABEL[ch.channel as Exclude<ChannelFilter, 'all'>] ?? ch.channel
+          const status = ch.error
+            ? t('settings.pricing.catalogRefreshChannelFailed')
+            : t('settings.pricing.catalogRefreshChannelGroups', { count: ch.groups ?? 0 })
+          const added = ch.added.length ? ` +${ch.added.join(', ')}` : ''
+          return `${label} ${status}${added}`
+        })
+        .join(' · ')
+      const failed = res.channels.some((ch) => ch.error)
+      showToast(t('settings.pricing.catalogRefreshed', { count: res.model_count, detail }), failed ? 'error' : undefined)
       await load()
     } catch (error) {
       showToast(getErrorMessage(error), 'error')
     } finally {
       setRefreshingModels(false)
+      refreshProgressHideTimer.current = window.setTimeout(() => {
+        setRefreshProgress(null)
+        refreshProgressHideTimer.current = null
+      }, 4000)
     }
   }, [load, showToast, t])
 
@@ -921,6 +1010,7 @@ export default function ModelPricing() {
         onJump={jumpToModel}
         onRefresh={() => void refreshCatalogModels()}
         refreshing={refreshingModels}
+        refreshProgress={refreshProgress}
         onAcknowledge={acknowledgeNewModels}
       />
 

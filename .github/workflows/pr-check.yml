@@ -102,11 +102,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - name: proxy-a-g
+          - name: proxy-h-z
           - name: admin-a-l
           - name: admin-m-z
           - name: database-a-p
           - name: database-other
-          - name: proxy
           - name: promptfilter
           - name: rest
     steps:

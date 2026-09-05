@@ -381,11 +381,7 @@ func (h *Handler) upsertOAuthIdentityAccountWithRuntime(ctx context.Context, nam
 		// 重新导入有效凭证时，若该账号此前处于错误/封禁（401）态，清除错误状态，
 		// 让重新加载后的运行时账号脱离 banned，并交由后续 probe 重新判定。
 		// 仅针对 error / unauthorized，避免误清合法的限速冷却（rate_limited）。
-		if accountErrorStateNeedsReset(row) {
-			if err := h.db.ClearError(ctx, duplicateID); err != nil {
-				log.Printf("重新导入清除账号 %d 错误状态失败: %v", duplicateID, err)
-			}
-		}
+		h.clearReimportedAccountErrorState(ctx, row, "重新导入")
 		if err := h.reloadTokenAccount(ctx, duplicateID, source); err != nil {
 			return 0, false, nil, err
 		}
@@ -416,6 +412,72 @@ func accountErrorStateNeedsReset(row *database.AccountRow) bool {
 		return true
 	}
 	return strings.EqualFold(strings.TrimSpace(row.CooldownReason), "unauthorized")
+}
+
+// clearReimportedAccountErrorState 在重新导入 / 重新授权 / 合并凭证拿到有效凭证后，
+// 就地清除已有账号的 error / unauthorized 状态。返回是否真的清过（账号不在
+// 该状态时什么都不做，限速冷却更不会被碰）。
+//
+// 库与跨实例冷却缓存必须一起清：调用方随后会 reloadTokenAccount 从库重建
+// 运行时账号，库里干净了内存才干净；而调度器挑号时还会回读缓存里的冷却
+// 记录并盖回账号，只清库会让账号继续被 unauthorized 缓存挡到 TTL 到期。
+// 内存里的 FailureStreak / PermanentRefreshFailures / Disabled 标志随重载
+// 一起归零，这里不需要单独处理。
+func (h *Handler) clearReimportedAccountErrorState(ctx context.Context, row *database.AccountRow, action string) bool {
+	if h == nil || h.db == nil || !accountErrorStateNeedsReset(row) {
+		return false
+	}
+	if err := h.db.ClearError(ctx, row.ID); err != nil {
+		log.Printf("%s清除账号 %d 错误状态失败: %v", action, row.ID, err)
+		return false
+	}
+	if h.store != nil {
+		h.store.ForgetCachedAccountCooldown(row.ID)
+	}
+	return true
+}
+
+// reviveReimportedAccount 处理「重复导入命中了一个处于 error / unauthorized 态的
+// 已有账号」：凭证一字不差，本来只会计一次 duplicate 跳过；但用户把同一份凭证
+// 再导一遍，就是在明确要求把这个号捞回来重新判定（issue #618）。这里清掉旧
+// 状态、重载运行时账号并重新探测，让它回到号池；探测若再次失败会照常重新
+// 落 unauthorized / error，代价只是一次上游探针。
+//
+// 账号本身状态正常（含限速冷却）时不做任何事、返回 false，调用方按普通重复
+// 计数——正常号重复导入不该产生任何副作用。
+func (h *Handler) reviveReimportedAccount(ctx context.Context, row *database.AccountRow, source string) bool {
+	if h == nil || h.db == nil || row == nil || !accountErrorStateNeedsReset(row) {
+		return false
+	}
+	if !h.clearReimportedAccountErrorState(ctx, row, "重复导入复活") {
+		return false
+	}
+	if h.store != nil {
+		// reloadTokenAccount 先移除再按库重建；重建失败时账号会从运行时池消失。
+		// 那样不能对外报"已复活"——把原来的运行时对象放回去（仍是异常态，与
+		// 未复活的结论一致），返回 false 让调用方按普通重复计数。
+		prev := h.store.FindByID(row.ID)
+		if err := h.reloadTokenAccount(ctx, row.ID, source); err != nil {
+			log.Printf("重复导入复活账号 %d 后重载运行时失败，保留原运行时状态: %v", row.ID, err)
+			if prev != nil && h.store.FindByID(row.ID) == nil {
+				h.store.AddAccount(prev)
+			}
+			return false
+		}
+		if acc := h.store.FindByID(row.ID); acc != nil &&
+			acc.GetAccessToken() == "" && !acc.IsCodexAgentIdentity() &&
+			!h.store.GetLazyMode() && strings.HasPrefix(source, "import") {
+			// 导入来源的重载不会自动换票（reloadTokenAccount 把 import* 来源
+			// 留给导入流程自己排队），裸 RT 账号在这里补上，走导入并发闸。
+			id := row.ID
+			h.runImportProbeTask(func(ctx context.Context) {
+				h.refreshImportedAccountAndProbe(ctx, id, source+"_refresh")
+			})
+		}
+	}
+	h.db.InsertAccountEventAsync(row.ID, "updated", source+"_revive")
+	log.Printf("重复导入命中处于异常态的已有账号 %d，已清除错误/401 状态并重新探测 (source=%s)", row.ID, source)
+	return true
 }
 
 func (h *Handler) loadInsertedTokenAccount(id int64, proxyURL string, seed tokenCredentialSeed, source string) {
@@ -561,11 +623,7 @@ func (h *Handler) UpdateOAuthAccountCode(c *gin.Context) {
 	// 与重新导入合并路径(upsertOAuthIdentityAccount)对齐:拿到新凭证后,
 	// 错误/401 态就地清除、交由探针重新判定,而不是让账号一直挂在"异常"
 	// 等一次可能失败的异步探针(issue #493)。限流冷却不在清除范围内。
-	if accountErrorStateNeedsReset(row) {
-		if err := h.db.ClearError(ctx, id); err != nil {
-			log.Printf("重新授权清除账号 %d 错误状态失败: %v", id, err)
-		}
-	}
+	h.clearReimportedAccountErrorState(ctx, row, "重新授权")
 
 	if err := h.reloadTokenAccount(ctx, id, "oauth_reauth"); err != nil {
 		writeError(c, http.StatusInternalServerError, "重新加载运行时账号失败: "+err.Error())

@@ -31,6 +31,7 @@ import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
 import CompactionBadges from '../components/CompactionBadges'
+import APIKeyModelRequestUsageCard from '../components/APIKeyModelRequestUsage'
 import { useTheme } from '../hooks/useTheme'
 import { usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import type {
@@ -381,6 +382,7 @@ export default function APIKeyUsagePortal() {
         {data && summary ? (
           <div className="space-y-5">
             <UsageTabs activeView={activeView} />
+            <APIKeyModelRequestUsageCard items={data.model_request_usage ?? []} />
 
             {/* 概览：核心指标 + 模型/端点分布 */}
             {activeView === 'overview' ? (

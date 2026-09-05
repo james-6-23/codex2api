@@ -262,9 +262,20 @@ func claudeProbeModelIDs(account *auth.Account) []string {
 	return []string{"claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"}
 }
 
-func buildClaudeModelProbePayload(model string) []byte {
+// claudeProbeMaxTokens leaves room for thinking plus a short answer. Respect
+// the configured output cap even when it only permits a thinking-only reply.
+const claudeProbeMaxTokens = 4096
+
+func claudeProbeTokenBudget(securityCfg auth.ClaudeSecurityConfig) int64 {
+	if securityCfg.MaxOutputTokens > 0 && securityCfg.MaxOutputTokens < claudeProbeMaxTokens {
+		return securityCfg.MaxOutputTokens
+	}
+	return claudeProbeMaxTokens
+}
+
+func buildClaudeModelProbePayload(model string, securityCfg auth.ClaudeSecurityConfig) []byte {
 	model = strings.TrimSpace(model)
-	return []byte(fmt.Sprintf(`{"model":%q,"max_tokens":8,"stream":true,"messages":[{"role":"user","content":"Reply with OK."}]}`, model))
+	return []byte(fmt.Sprintf(`{"model":%q,"max_tokens":%d,"stream":true,"messages":[{"role":"user","content":"Reply with OK."}]}`, model, claudeProbeTokenBudget(securityCfg)))
 }
 
 func (h *Handler) probeClaudeAccountModel(ctx context.Context, account *auth.Account, model string) (string, string) {
@@ -273,14 +284,15 @@ func (h *Handler) probeClaudeAccountModel(ctx context.Context, account *auth.Acc
 	if h == nil || h.store == nil {
 		return modelProbeError, "Claude 探测缺少运行时账号池"
 	}
+	securityCfg := h.store.ClaudeSecurityConfig()
 	resp, err := proxy.ExecuteClaudeMessagesRequest(
 		probeCtx,
 		account,
-		buildClaudeModelProbePayload(model),
+		buildClaudeModelProbePayload(model, securityCfg),
 		h.store.ResolveProxyForAccount(account),
 		nil,
 		account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()),
-		h.store.ClaudeSecurityConfig(),
+		securityCfg,
 	)
 	if err != nil {
 		if msg, ok := batchTestContextFailure(probeCtx, err); ok {
@@ -353,7 +365,9 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 			if text != "" && onText != nil {
 				onText(text)
 			}
-			if text == "" {
+			// thinking 模型可能只产出 thinking 块（预算被 thinking 吃光或
+			// 模型自行决定不回答），同样证明账号与模型可用。
+			if text == "" && !claudeMessageHasThinking(body) {
 				return "failed", "Claude 探测未返回文本内容"
 			}
 			return "success", "测试通过"
@@ -367,6 +381,7 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 		return "failed", "Claude 探测响应格式未知"
 	}
 	hasContent := false
+	hasThinking := false
 	gotTerminal := false
 	lastEvent := []byte(nil)
 	readErr := proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
@@ -380,9 +395,20 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 					onText(text)
 				}
 			}
+			hasThinking = hasThinking || claudeMessageHasThinking(data)
 			gotTerminal = true
 			return false
+		case "content_block_start":
+			// thinking 块出现即说明模型已开始生成（adaptive thinking 模型
+			// 可能整条响应只有 thinking，仍视为账号与模型可用）。
+			if gjson.GetBytes(data, "content_block.type").String() == "thinking" {
+				hasThinking = true
+			}
 		case "content_block_delta":
+			switch gjson.GetBytes(data, "delta.type").String() {
+			case "thinking_delta", "signature_delta":
+				hasThinking = true
+			}
 			if text := gjson.GetBytes(data, "delta.text").String(); strings.TrimSpace(text) != "" {
 				hasContent = true
 				if onText != nil {
@@ -413,7 +439,10 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 	if !gotTerminal {
 		return "failed", "Claude 探测未返回 message_stop"
 	}
-	if !hasContent {
+	// adaptive thinking 模型（opus-4.5/5、sonnet-4.5）在小预算下可能整条
+	// 响应只有 thinking 块而 stop_reason=max_tokens；thinking 输出本身即证明
+	// 账号与模型可用，不应误报"未返回文本内容"。
+	if !hasContent && !hasThinking {
 		return "failed", "Claude 探测未返回文本内容"
 	}
 	return "success", "测试通过"
@@ -427,6 +456,17 @@ func claudeMessageContentText(data []byte) string {
 		}
 	}
 	return text.String()
+}
+
+// claudeMessageHasThinking reports whether a (non-streaming) Claude message
+// carries thinking blocks, which still proves the model generated output.
+func claudeMessageHasThinking(data []byte) bool {
+	for _, item := range gjson.GetBytes(data, "content").Array() {
+		if item.Get("type").String() == "thinking" {
+			return true
+		}
+	}
+	return false
 }
 
 func isClaudeProbeRateLimited(data []byte) bool {

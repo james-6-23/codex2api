@@ -36,22 +36,38 @@ type modelPricingRule struct {
 }
 
 type CostBreakdown struct {
-	InputCost                 float64 `json:"input_cost"`
-	OutputCost                float64 `json:"output_cost"`
-	CacheReadCost             float64 `json:"cache_read_cost"`
-	TotalCost                 float64 `json:"total_cost"`
-	InputPricePerMToken       float64 `json:"input_price_per_mtoken"`
-	OutputPricePerMToken      float64 `json:"output_price_per_mtoken"`
-	CacheReadPricePerMToken   float64 `json:"cache_read_price_per_mtoken"`
-	ServiceTierCostMultiplier float64 `json:"service_tier_cost_multiplier"`
-	LongContext               bool    `json:"long_context"`
-	LongContextThreshold      int     `json:"long_context_threshold"`
+	InputCost                  float64 `json:"input_cost"`
+	OutputCost                 float64 `json:"output_cost"`
+	CacheReadCost              float64 `json:"cache_read_cost"`
+	TotalCost                  float64 `json:"total_cost"`
+	InputPricePerMToken        float64 `json:"input_price_per_mtoken"`
+	OutputPricePerMToken       float64 `json:"output_price_per_mtoken"`
+	CacheReadPricePerMToken    float64 `json:"cache_read_price_per_mtoken"`
+	CacheWrite5mCost           float64 `json:"cache_write_5m_cost"`
+	CacheWrite1hCost           float64 `json:"cache_write_1h_cost"`
+	CacheWrite5mPricePerMToken float64 `json:"cache_write_5m_price_per_mtoken"`
+	CacheWrite1hPricePerMToken float64 `json:"cache_write_1h_price_per_mtoken"`
+	ServiceTierCostMultiplier  float64 `json:"service_tier_cost_multiplier"`
+	LongContext                bool    `json:"long_context"`
+	LongContextThreshold       int     `json:"long_context_threshold"`
 }
 
 var (
 	defaultModelPricing = &ModelPricing{InputPricePerMToken: 1.0, OutputPricePerMToken: 2.0}
 
 	modelPricingRules = []modelPricingRule{
+		// gpt-6-astra: official price is not exposed by the current pricing
+		// endpoint yet. Use the conservative gpt-5.6-sol-equivalent snapshot
+		// ($5/$30, cache $0.50; long $10/$45, cache $1.00) until an official
+		// rate is published. Operators can override this exact key in settings.
+		{model: "gpt-6-astra", pricing: ModelPricing{
+			InputPricePerMToken:         5.0,
+			OutputPricePerMToken:        30.0,
+			CacheReadPricePerMToken:     0.5,
+			LongInputPricePerMToken:     10.0,
+			LongOutputPricePerMToken:    45.0,
+			LongCacheReadPricePerMToken: 1.0,
+		}},
 		{model: "gpt-5.5", pricing: ModelPricing{
 			InputPricePerMToken:                 5.0,
 			InputPricePerMTokenPriority:         12.5,
@@ -79,18 +95,6 @@ var (
 		// gpt-5.6-sol: standard 同 gpt-5.5，但 priority 为 2× standard（$10/$60），
 		// 低于 gpt-5.5 的 2.5×，故不复用 gpt-5.5 条目。priority 留空由 fast 档兜底 2×。
 		{model: "gpt-5.6-sol", pricing: ModelPricing{
-			InputPricePerMToken:         5.0,
-			OutputPricePerMToken:        30.0,
-			CacheReadPricePerMToken:     0.5,
-			LongInputPricePerMToken:     10.0,
-			LongOutputPricePerMToken:    45.0,
-			LongCacheReadPricePerMToken: 1.0,
-		}},
-		// gpt-6-astra: official price is not exposed by the current pricing
-		// endpoint yet. Use the conservative gpt-5.6-sol-equivalent snapshot
-		// ($5/$30, cache $0.50; long $10/$45, cache $1.00) until an official
-		// rate is published. Operators can override this exact key in settings.
-		{model: "gpt-6-astra", pricing: ModelPricing{
 			InputPricePerMToken:         5.0,
 			OutputPricePerMToken:        30.0,
 			CacheReadPricePerMToken:     0.5,
@@ -327,10 +331,17 @@ func UsageLogBilledCost(log *UsageLogInput) float64 {
 	if billingModel == "" {
 		billingModel = log.Model
 	}
-	return calculateCost(log.InputTokens, log.OutputTokens, log.CachedTokens, billingModel, usageLogBillingServiceTier(log))
+	return CalculateCostBreakdownWithCacheWrites(log.InputTokens, log.OutputTokens, log.CachedTokens, log.CacheWrite5mTokens, log.CacheWrite1hTokens, billingModel, usageLogBillingServiceTier(log)).TotalCost
 }
 
 func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model string, serviceTier string) CostBreakdown {
+	return CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedTokens, 0, 0, model, serviceTier)
+}
+
+// CalculateCostBreakdownWithCacheWrites 在 CalculateCostBreakdown 的基础上计入 Anthropic
+// 提示缓存写入（5 分钟 / 1 小时）。inputTokens 是总输入（未缓存 + 缓存命中 + 缓存写入），
+// 写入价缺省按输入价的 1.25 倍 / 2 倍。
+func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens int, model string, serviceTier string) CostBreakdown {
 	pricing := GetModelPricing(model)
 	threshold := longContextThreshold
 	if pricing.LongContextThresholdTokens > 0 {
@@ -378,27 +389,51 @@ func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model s
 	if cachedTokens > inputTokens {
 		cachedTokens = inputTokens
 	}
+	if cacheWrite5mTokens < 0 {
+		cacheWrite5mTokens = 0
+	}
+	if cacheWrite1hTokens < 0 {
+		cacheWrite1hTokens = 0
+	}
+	cacheWrite5mPrice := pricing.CacheWrite5mPricePerMToken
+	if cacheWrite5mPrice <= 0 {
+		cacheWrite5mPrice = inputPrice * 1.25
+	}
+	cacheWrite1hPrice := pricing.CacheWrite1hPricePerMToken
+	if cacheWrite1hPrice <= 0 {
+		cacheWrite1hPrice = inputPrice * 2
+	}
 
 	uncachedInputTokens := inputTokens
 	if cacheReadPrice > 0 {
 		uncachedInputTokens = inputTokens - cachedTokens
 	}
+	uncachedInputTokens -= cacheWrite5mTokens + cacheWrite1hTokens
+	if uncachedInputTokens < 0 {
+		uncachedInputTokens = 0
+	}
 
 	inputCost := float64(uncachedInputTokens) / 1000000.0 * inputPrice
 	cacheReadCost := float64(cachedTokens) / 1000000.0 * cacheReadPrice
+	cacheWrite5mCost := float64(cacheWrite5mTokens) / 1000000.0 * cacheWrite5mPrice
+	cacheWrite1hCost := float64(cacheWrite1hTokens) / 1000000.0 * cacheWrite1hPrice
 	outputCost := float64(outputTokens) / 1000000.0 * outputPrice
 
 	return CostBreakdown{
-		InputCost:                 inputCost * tierMultiplier,
-		OutputCost:                outputCost * tierMultiplier,
-		CacheReadCost:             cacheReadCost * tierMultiplier,
-		TotalCost:                 (inputCost + cacheReadCost + outputCost) * tierMultiplier,
-		InputPricePerMToken:       inputPrice * tierMultiplier,
-		OutputPricePerMToken:      outputPrice * tierMultiplier,
-		CacheReadPricePerMToken:   cacheReadPrice * tierMultiplier,
-		ServiceTierCostMultiplier: tierMultiplier,
-		LongContext:               longContextApplied,
-		LongContextThreshold:      threshold,
+		InputCost:                  inputCost * tierMultiplier,
+		OutputCost:                 outputCost * tierMultiplier,
+		CacheReadCost:              cacheReadCost * tierMultiplier,
+		CacheWrite5mCost:           cacheWrite5mCost * tierMultiplier,
+		CacheWrite1hCost:           cacheWrite1hCost * tierMultiplier,
+		TotalCost:                  (inputCost + cacheReadCost + cacheWrite5mCost + cacheWrite1hCost + outputCost) * tierMultiplier,
+		InputPricePerMToken:        inputPrice * tierMultiplier,
+		OutputPricePerMToken:       outputPrice * tierMultiplier,
+		CacheReadPricePerMToken:    cacheReadPrice * tierMultiplier,
+		CacheWrite5mPricePerMToken: cacheWrite5mPrice * tierMultiplier,
+		CacheWrite1hPricePerMToken: cacheWrite1hPrice * tierMultiplier,
+		ServiceTierCostMultiplier:  tierMultiplier,
+		LongContext:                longContextApplied,
+		LongContextThreshold:       threshold,
 	}
 }
 
@@ -421,6 +456,8 @@ func normalizeBillingModelName(model string) string {
 func normalizeCodexBillingModel(model string) (string, bool) {
 	compact := strings.NewReplacer(" ", "-", "_", "-").Replace(strings.ToLower(model))
 	switch {
+	case compact == "gpt-6-astra":
+		return "gpt-6-astra", true
 	case strings.Contains(compact, "gpt-5.5-pro") || strings.Contains(compact, "gpt5-5-pro") || strings.Contains(compact, "gpt5.5-pro"):
 		return "gpt-5.5-pro", true
 	case strings.Contains(compact, "gpt-5.5") || strings.Contains(compact, "gpt5-5") || strings.Contains(compact, "gpt5.5"):
@@ -432,14 +469,19 @@ func normalizeCodexBillingModel(model string) (string, bool) {
 	// priority 均为 standard 的 2×，由 serviceTierCostMultiplier 兜底自动得出，无需显式配置。
 	case strings.Contains(compact, "gpt-5.6-sol") || strings.Contains(compact, "gpt5-6-sol") || strings.Contains(compact, "gpt5.6-sol"):
 		return "gpt-5.6-sol", true
-	case compact == "gpt-6-astra":
-		return "gpt-6-astra", true
 	case strings.Contains(compact, "gpt-5.6-terra") || strings.Contains(compact, "gpt5-6-terra") || strings.Contains(compact, "gpt5.6-terra"):
 		return "gpt-5.6-terra", true
 	case strings.Contains(compact, "gpt-5.6-luna") || strings.Contains(compact, "gpt5-6-luna") || strings.Contains(compact, "gpt5.6-luna"):
 		return "gpt-5.6-luna", true
 	case strings.Contains(compact, "gpt-5.6") || strings.Contains(compact, "gpt5-6") || strings.Contains(compact, "gpt5.6"):
-		// 未知 gpt-5.6 变体：按最贵的 sol 兜底，避免低估计费。
+		// 未知 gpt-5.6 变体（含 gpt-5.6-cyber）：按最贵的 sol 兜底，避免低估计费。
+		return "gpt-5.6-sol", true
+	case strings.HasPrefix(compact, "gpt-daybreak-"):
+		// Trusted Access for Cyber 的稳定别名（issue #624）：官方文档写明
+		// gpt-daybreak-blue-latest 即 gpt-5.6-sol，gpt-daybreak-red-latest 即
+		// gpt-5.6-cyber（无独立公开定价）。两者都归到 5.6 家族最贵的 sol，
+		// 否则会落到 $1/$2 的默认价严重低估。只认 gpt-daybreak- 前缀，
+		// 带版本号的 ID（如 gpt-5.4-daybreak）仍走各自版本规则。
 		return "gpt-5.6-sol", true
 	case strings.Contains(compact, "gpt-5.4-mini") || strings.Contains(compact, "gpt5-4-mini") || strings.Contains(compact, "gpt5.4-mini"):
 		return "gpt-5.4-mini", true
@@ -477,9 +519,6 @@ func modelRulePricing(model string) *ModelPricing {
 	bestLen := -1
 	for i := range modelPricingRules {
 		rule := modelPricingRules[i]
-		// gpt-6-astra is intentionally supported as one exact slug. Do not
-		// let the generic prefix matcher assign its price to look-alike future
-		// variants before those variants are explicitly supported.
 		if rule.model == "gpt-6-astra" && model != rule.model {
 			continue
 		}

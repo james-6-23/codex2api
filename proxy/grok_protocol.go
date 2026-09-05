@@ -1941,6 +1941,9 @@ func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbo
 		if route.Protocol == GrokProtocolMessages && req.Header.Get("anthropic-version") == "" {
 			req.Header.Set("anthropic-version", "2023-06-01")
 		}
+		if err := ConsumeAPIKeyModelRequestQuota(ctx, preflight.Model); err != nil {
+			return nil, err
+		}
 		resp, doErr := getPooledClient(account, proxyURL).Do(req)
 		if doErr != nil {
 			if shouldRecyclePooledClient(doErr) {

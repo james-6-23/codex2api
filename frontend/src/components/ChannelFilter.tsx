@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import ChannelLogo from "./ChannelLogo";
 import { cn } from "@/lib/utils";
+import { useVisibleChannels } from "../visibleChannels";
 
 // 仪表盘/用量页共用的上游渠道过滤（全部/Codex/Grok/Antigravity/Claude）。
 // 选择持久化到 localStorage，两页共享同一份状态键。
@@ -39,7 +40,8 @@ export default function ChannelFilter({
   className?: string;
 }) {
   const { t } = useTranslation();
-  const options: Array<{
+  const { isChannelVisible } = useVisibleChannels();
+  const allOptions: Array<{
     key: UsageChannel;
     label: string;
     logo?: "codex" | "grok" | "antigravity" | "claude";
@@ -50,6 +52,13 @@ export default function ChannelFilter({
     { key: "antigravity", label: "Antigravity", logo: "antigravity" },
     { key: "claude", label: "Claude", logo: "claude" },
   ];
+  const options = allOptions.filter((o) => !o.logo || isChannelVisible(o.logo));
+  const count = options.length;
+  // 当前选中的渠道被设置页隐藏后回到「全部」，否则过滤条件停在一个看不见的选项上。
+  const hiddenSelection = value !== "" && !options.some((o) => o.key === value);
+  useEffect(() => {
+    if (hiddenSelection) onChange("");
+  }, [hiddenSelection, onChange]);
   const activeIndex = Math.max(
     0,
     options.findIndex((o) => o.key === value),
@@ -57,15 +66,16 @@ export default function ChannelFilter({
   return (
     <div
       className={cn(
-        "relative grid grid-cols-5 items-center rounded-lg border border-border bg-muted/40 p-0.5",
+        "relative grid items-center rounded-lg border border-border bg-muted/40 p-0.5",
         className,
       )}
+      style={{ gridTemplateColumns: `repeat(${count}, minmax(0, 1fr))` }}
     >
-      {/* 滑块指示器：等宽五格，translateX 过渡到选中项 */}
+      {/* 滑块指示器：按可见渠道数等分，translateX 过渡到选中项 */}
       <span
         aria-hidden
-        className="absolute inset-y-0.5 left-0.5 w-[calc((100%-4px)/5)] rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
-        style={{ transform: `translateX(${activeIndex * 100}%)` }}
+        className="absolute inset-y-0.5 left-0.5 rounded-md bg-background shadow-sm transition-transform duration-300 ease-out"
+        style={{ width: `calc((100% - 4px) / ${count})`, transform: `translateX(${activeIndex * 100}%)` }}
       />
       {options.map(({ key, label, logo }) => (
         <button

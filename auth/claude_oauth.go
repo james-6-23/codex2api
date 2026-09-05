@@ -51,9 +51,55 @@ const (
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 	// ClaudeOAuthBeta 是 OAuth 凭据调用推理接口时必须声明的 anthropic-beta 值。
 	ClaudeOAuthBeta = "oauth-2025-04-20"
+	// ClaudeCodeBeta 是真实 Claude Code CLI 恒定的 beta 标记（haiku 模型除外，
+	// 见 CLI 2.1.259 逆向：_re() 中 model 含 "haiku" 时不 push 该 beta）。
+	ClaudeCodeBeta = "claude-code-20250219"
 
 	claudeOAuthHTTPTimeout = 30 * time.Second
 )
+
+// DefaultClaudeAllowedBetaHeaders 是真实 Claude Code CLI（2.1.259 逆向 chunk 内
+// beta 注册表）在链路上出现过的 beta 值集合，外加已知下游客户端
+// （opencode/ai-sdk anthropic provider）固定携带的 fine-grained-tool-streaming
+// beta。当管理端未显式配置 ClaudeSecurityConfig.AllowedBetaHeaders 时，下游
+// 透传的 anthropic-beta 以该集合为白名单，避免任意第三方 beta 名混入 OAuth
+// 凭据的出站请求。
+var DefaultClaudeAllowedBetaHeaders = []string{
+	"claude-code-20250219",
+	"oauth-2025-04-20",
+	"context-1m-2025-08-07",
+	"interleaved-thinking-2025-05-14",
+	"fine-grained-tool-streaming-2025-05-14",
+	"redact-thinking-2026-02-12",
+	"thinking-token-count-2026-05-13",
+	"context-management-2025-06-27",
+	"prompt-caching-scope-2026-01-05",
+	"mid-conversation-system-2026-04-07",
+	"advanced-tool-use-2025-11-20",
+	"tool-search-tool-2025-10-19",
+	"effort-2025-11-24",
+	"task-budgets-2026-03-13",
+	"prompt-caching-evict-2026-05-12",
+	"fallback-credit-2026-06-01",
+	"extended-cache-ttl-2025-04-11",
+	"fast-mode-2026-02-01",
+	"structured-outputs-2025-12-15",
+	"web-search-2025-03-05",
+	"afk-mode-2026-01-31",
+	"advisor-tool-2026-03-01",
+	"cache-diagnosis-2026-04-07",
+	"context-hint-2026-04-09",
+	"mcp-servers-2025-12-04",
+	"files-api-2025-04-14",
+	"environments-2025-11-01",
+	"ccr-byoc-2025-07-29",
+	"per-turn-control-2026-07-01",
+	"mid-conversation-tool-changes-2026-07-01",
+	"server-side-fallback-2026-06-01",
+	"server-side-fallback-2026-07-01",
+	"auto-mode-classifier-2026-07-16",
+	"thinking-display-updates-2026-08-18",
+}
 
 // ClaudePKCECodes 保存一对 PKCE 校验码（RFC 7636，S256）。
 type ClaudePKCECodes struct {
