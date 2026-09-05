@@ -532,35 +532,45 @@ func (h *Handler) ListPromptFilterLogs(c *gin.Context) {
 }
 
 func (h *Handler) ClearPromptFilterLogs(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
-	defer cancel()
-	var err error
-	message := "Prompt 检查日志已清空；风险画像和上游 CY 事件已保留"
+	// 手动清空改为后台分批删除：几十万行日志在一条 DELETE + 10s 请求超时下清不完，
+	// 现在立即返回并在后台以 5000 行/批清理；与 CY 关联的日志一律跳过。
+	filter := database.PromptLogPurgeFilter{}
+	message := "Prompt 检查日志已开始后台清理；CY 关联日志、风险画像和上游 CY 事件已保留"
 	source := strings.ToLower(strings.TrimSpace(c.Query("source")))
 	if source != "" {
 		if source != "local_filter" {
 			writeError(c, http.StatusBadRequest, "source 仅支持 local_filter")
 			return
 		}
-		err = h.db.ClearPromptFilterLogsBySource(ctx, source)
-		message = "本地过滤与异步审计日志已清空；风险画像已保留"
+		filter.Source = source
+		message = "本地过滤与异步审计日志已开始后台清理；CY 关联日志和风险画像已保留"
 	} else {
 		switch strings.ToLower(strings.TrimSpace(c.Query("reviewed"))) {
 		case "":
-			err = h.db.ClearPromptFilterLogs(ctx)
 		case "true", "reviewed":
-			err = h.db.ClearPromptFilterLogsByReviewStatus(ctx, true)
-			message = "外部模型复核历史已清空；风险画像已保留"
+			reviewed := true
+			filter.Reviewed = &reviewed
+			message = "外部模型复核历史已开始后台清理；CY 关联日志和风险画像已保留"
 		case "false", "not_reviewed":
-			err = h.db.ClearPromptFilterLogsByReviewStatus(ctx, false)
-			message = "本地过滤与异步审计日志已清空；风险画像已保留"
+			reviewed := false
+			filter.Reviewed = &reviewed
+			message = "本地过滤与异步审计日志已开始后台清理；CY 关联日志和风险画像已保留"
 		default:
 			writeError(c, http.StatusBadRequest, "reviewed 必须为 true 或 false")
 			return
 		}
 	}
-	if err != nil {
-		writeInternalError(c, err)
+	cutoff := time.Now().Add(time.Second)
+	if !h.startPromptLogPurge(func(ctx context.Context) {
+		started := time.Now()
+		result, err := h.db.PurgePromptFilterLogs(ctx, cutoff, filter, promptLogPurgeBatchSize, promptLogPurgeBatchPause)
+		if err != nil {
+			log.Printf("[prompt-retention] 手动清空日志失败: %v（已删 %d 行）", err, result.Logs)
+			return
+		}
+		log.Printf("[prompt-retention] 手动清空日志完成: 删除 %d 行, batches=%d, %s", result.Logs, result.Batches, time.Since(started).Round(time.Millisecond))
+	}) {
+		writeError(c, http.StatusConflict, "已有清理任务在运行，请稍后再试")
 		return
 	}
 	writeMessage(c, http.StatusOK, message)
