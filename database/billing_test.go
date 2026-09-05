@@ -188,7 +188,6 @@ func TestGPT56VariantPricing(t *testing.T) {
 		{"gpt-5.6-terra", 2.0, 12.0, 0.2, 4.0, 24.0},
 		{"gpt-5.6-luna", 0.2, 1.2, 0.02, 0.4, 2.4},
 		{"gpt-5.6-sol-high", 5.0, 30.0, 0.5, 10.0, 60.0},
-		{"gpt-6-astra", 5.0, 30.0, 0.5, 10.0, 60.0},
 		// Trusted Access for Cyber 稳定别名（issue #624）：blue 即 sol，red 即
 		// 5.6-cyber（无公开定价）——都按 sol 计，绝不能掉进 $1/$2 默认价。
 		{"gpt-daybreak-blue-latest", 5.0, 30.0, 0.5, 10.0, 60.0},
@@ -210,9 +209,58 @@ func TestGPT56VariantPricing(t *testing.T) {
 }
 
 func TestGPT6AstraPricingIsExact(t *testing.T) {
-	pricing := GetModelPricing("gpt-6-astra-v2")
-	if pricing.InputPricePerMToken == 5.0 && pricing.OutputPricePerMToken == 30.0 {
-		t.Fatalf("unsupported gpt-6-astra variant inherited exact-model pricing: %+v", pricing)
+	for _, model := range []string{"gpt-6-astra-v2", "gpt-6", "gpt-6-nova", "gpt-6-astra-high-v2", "gpt-6-astra(unknown)"} {
+		if canonical := CanonicalBillingModelKey(model); canonical == "gpt-6-astra" {
+			t.Fatalf("unsupported model %q inherited Astra canonical key", model)
+		}
+		pricing := GetModelPricing(model)
+		if pricing.InputPricePerMToken == 10.0 && pricing.OutputPricePerMToken == 50.0 {
+			t.Fatalf("unsupported model %q inherited exact-model pricing: %+v", model, pricing)
+		}
+	}
+}
+
+// gpt-6-astra 在 Codex 中不收长上下文溢价：跨过 272K 后仍使用同一组单价。
+// standard $10/$50、缓存 $1；保留现有 fast 2× 倍率。
+func TestGPT6AstraPricing(t *testing.T) {
+	models := []string{"gpt-6-astra", "GPT-6-Astra"}
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} {
+		models = append(models, "gpt-6-astra-"+effort, "gpt-6-astra("+effort+")")
+	}
+	for _, model := range models {
+		if got := CanonicalBillingModelKey(model); got != "gpt-6-astra" {
+			t.Fatalf("CanonicalBillingModelKey(%q) = %q, want gpt-6-astra", model, got)
+		}
+		pricing := GetModelPricing(model)
+		assertFloatEqual(t, pricing.InputPricePerMToken, 10.0)
+		assertFloatEqual(t, pricing.OutputPricePerMToken, 50.0)
+		assertFloatEqual(t, pricing.CacheReadPricePerMToken, 1.0)
+		assertFloatEqual(t, pricing.LongInputPricePerMToken, 0)
+		assertFloatEqual(t, pricing.LongOutputPricePerMToken, 0)
+		assertFloatEqual(t, pricing.LongCacheReadPricePerMToken, 0)
+	}
+
+	for _, input := range []int{100_000, 271_999, 272_000, 272_001, 1_000_000} {
+		for _, tier := range []struct {
+			name       string
+			multiplier float64
+		}{{"", 1}, {"fast", 2}, {"priority", 2}, {"flex", 0.5}} {
+			const cached, output = 100_000, 1_000
+			got := CalculateCostBreakdown(input, output, cached, "gpt-6-astra", tier.name)
+			if got.LongContext {
+				t.Fatalf("Astra applied long-context pricing at input=%d tier=%q: %+v", input, tier.name, got)
+			}
+			assertFloatEqual(t, got.InputPricePerMToken, 10*tier.multiplier)
+			assertFloatEqual(t, got.CacheReadPricePerMToken, tier.multiplier)
+			assertFloatEqual(t, got.OutputPricePerMToken, 50*tier.multiplier)
+			want := (float64(input-cached)*10 + cached + output*50) / 1_000_000 * tier.multiplier
+			assertFloatEqual(t, got.TotalCost, want)
+		}
+	}
+
+	// gpt-5.6 家族不得被 gpt-6 前缀误伤。
+	if got := CanonicalBillingModelKey("gpt-5.6-sol"); got != "gpt-5.6-sol" {
+		t.Fatalf("CanonicalBillingModelKey(gpt-5.6-sol) = %q, want gpt-5.6-sol", got)
 	}
 }
 

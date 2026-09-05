@@ -956,6 +956,45 @@
     @apply relative z-0 overflow-auto rounded-xl border border-border bg-card;
   }
 
+  .action-menu-surface {
+    max-height: min(480px, var(--radix-dropdown-menu-content-available-height));
+    transform-origin: var(--radix-dropdown-menu-content-transform-origin);
+  }
+
+  .action-menu-surface[data-state="open"] {
+    animation: action-menu-in 140ms ease-out;
+  }
+
+  @keyframes action-menu-in {
+    from { opacity: 0; transform: scale(0.97); }
+    to { opacity: 1; transform: scale(1); }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .action-menu-surface[data-state="open"] { animation: none; }
+  }
+
+  .claude-stat-strip {
+    scrollbar-width: thin;
+    scrollbar-color: var(--color-border) transparent;
+  }
+
+  .claude-account-table [data-account-actions] {
+    position: sticky;
+    right: 0;
+    z-index: 1;
+    background: var(--color-card);
+    box-shadow: -8px 0 12px -10px color-mix(in oklab, var(--color-foreground) 30%, transparent);
+  }
+
+  .claude-account-table [data-slot="table-row"]:hover [data-account-actions] {
+    background: color-mix(in oklab, var(--color-muted) 58%, var(--color-card));
+  }
+
+  .claude-account-table [data-state="selected"] [data-account-actions] {
+    background: var(--color-muted);
+  }
+
   .data-table-shell [data-slot="table-container"] {
     max-height: min(680px, calc(100dvh - 280px));
   }
@@ -984,6 +1023,16 @@
 
   .data-table-shell [data-slot="table-row"]:hover {
     background: color-mix(in oklab, var(--color-muted) 58%, transparent);
+  }
+
+  .claude-account-table [data-slot="table-head"] {
+    height: 2.75rem;
+    background: color-mix(in oklab, var(--color-muted) 30%, var(--color-card));
+    text-transform: none;
+  }
+
+  .claude-account-table th[data-account-actions] {
+    z-index: 20;
   }
 
   /* 使用记录表：内容多为单行徽章/数字，收紧行高避免上下留白偏大 */

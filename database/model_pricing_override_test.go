@@ -181,6 +181,58 @@ func TestModelPricingOverride_LongPriorityFieldsRoundTripAndApply(t *testing.T) 
 	}
 }
 
+func TestModelPricingOverride_AstraIgnoresLongContextPrices(t *testing.T) {
+	t.Cleanup(func() { SetModelPricingOverrides(nil) })
+
+	for _, source := range []string{ModelPricingSourceCustom, ModelPricingSourceSynced} {
+		t.Run(source, func(t *testing.T) {
+			// 旧手工价和官方 API 同步价都可能包含长档；标准价和 Fast 价仍须保留。
+			override := ModelPricingOverride{
+				Source: source, Input: 12, CachedInput: 2, Output: 60,
+				InputPriority: 24, CachedInputPriority: 4, OutputPriority: 120,
+				InputLong: 30, CachedInputLong: 4, OutputLong: 90,
+				InputLongPriority: 60, CachedInputLongPriority: 8, OutputLongPriority: 180,
+				LongContextThresholdTokens: 200000,
+			}
+			SetModelPricingOverrides(map[string]ModelPricingOverride{
+				"gpt-6-astra": override,
+				"gpt-5.6-sol": override,
+			})
+			want := ModelPricingOverride{
+				Source: source, Input: 12, CachedInput: 2, Output: 60,
+				InputPriority: 24, CachedInputPriority: 4, OutputPriority: 120,
+			}
+			for _, model := range []string{"gpt-6-astra", "GPT-6-Astra", "gpt-6-astra-high", "gpt-6-astra(xhigh)"} {
+				projected := ModelPricingOverrideFromPricing(GetModelPricing(model), ModelPricingSourceFor("gpt-6-astra"))
+				if projected != want {
+					t.Fatalf("%s effective pricing = %+v, want %+v", model, projected, want)
+				}
+				for _, tier := range []string{"", "fast", "priority"} {
+					got := CalculateCostBreakdown(300000, 1000, 100000, model, tier)
+					if got.LongContext {
+						t.Fatalf("%s tier=%q restored long-context pricing: %+v", model, tier, got)
+					}
+					cost := 2.66 // 200K uncached * $12 + 100K cached * $2 + 1K output * $60.
+					if tier != "" {
+						cost *= 2
+					}
+					assertFloatEqual(t, got.TotalCost, cost)
+				}
+			}
+
+			// 相同的覆盖用于其他模型时，长档价和阈值全部继续生效。
+			if got := ModelPricingOverrideFromPricing(GetModelPricing("gpt-5.6-sol"), source); got != override {
+				t.Fatalf("other model override changed: %+v, want %+v", got, override)
+			}
+			other := CalculateCostBreakdown(300000, 1000, 100000, "gpt-5.6-sol", "fast")
+			if !other.LongContext || other.LongContextThreshold != 200000 {
+				t.Fatalf("other model lost long-context pricing: %+v", other)
+			}
+			assertFloatEqual(t, other.TotalCost, 12.98)
+		})
+	}
+}
+
 func TestModelPricingOverride_CacheWriteFieldsRoundTripAndApply(t *testing.T) {
 	override := ModelPricingOverride{Input: 10, CachedInput: 1, CacheWrite5m: 12.5, CacheWrite1h: 20, Output: 50}
 	raw, err := MarshalModelPricingOverridesJSON(map[string]ModelPricingOverride{"claude-fable-5": override})

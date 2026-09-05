@@ -56,17 +56,12 @@ var (
 	defaultModelPricing = &ModelPricing{InputPricePerMToken: 1.0, OutputPricePerMToken: 2.0}
 
 	modelPricingRules = []modelPricingRule{
-		// gpt-6-astra: official price is not exposed by the current pricing
-		// endpoint yet. Use the conservative gpt-5.6-sol-equivalent snapshot
-		// ($5/$30, cache $0.50; long $10/$45, cache $1.00) until an official
-		// rate is published. Operators can override this exact key in settings.
+		// gpt-6-astra：Codex 长上下文例外，超过 272K 仍按 $10/$50、缓存 $1。
+		// 保留现有 fast（priority）2× 倍率，由 serviceTierCostMultiplier 兜底。
 		{model: "gpt-6-astra", pricing: ModelPricing{
-			InputPricePerMToken:         5.0,
-			OutputPricePerMToken:        30.0,
-			CacheReadPricePerMToken:     0.5,
-			LongInputPricePerMToken:     10.0,
-			LongOutputPricePerMToken:    45.0,
-			LongCacheReadPricePerMToken: 1.0,
+			InputPricePerMToken:     10.0,
+			OutputPricePerMToken:    50.0,
+			CacheReadPricePerMToken: 1.0,
 		}},
 		{model: "gpt-5.5", pricing: ModelPricing{
 			InputPricePerMToken:                 5.0,
@@ -455,9 +450,14 @@ func normalizeBillingModelName(model string) string {
 
 func normalizeCodexBillingModel(model string) (string, bool) {
 	compact := strings.NewReplacer(" ", "-", "_", "-").Replace(strings.ToLower(model))
+	if suffix, ok := strings.CutPrefix(compact, "gpt-6-astra"); ok {
+		switch suffix {
+		case "", "-none", "-minimal", "-low", "-medium", "-high", "-xhigh", "-max", "-ultra",
+			"(none)", "(minimal)", "(low)", "(medium)", "(high)", "(xhigh)", "(max)", "(ultra)":
+			return "gpt-6-astra", true
+		}
+	}
 	switch {
-	case compact == "gpt-6-astra":
-		return "gpt-6-astra", true
 	case strings.Contains(compact, "gpt-5.5-pro") || strings.Contains(compact, "gpt5-5-pro") || strings.Contains(compact, "gpt5.5-pro"):
 		return "gpt-5.5-pro", true
 	case strings.Contains(compact, "gpt-5.5") || strings.Contains(compact, "gpt5-5") || strings.Contains(compact, "gpt5.5"):

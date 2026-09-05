@@ -66,7 +66,7 @@ test('Claude account list refreshes after asynchronous sampling without stale ov
   assert.match(claude, /AccountDetailSheet/)
   assert.match(claude, /onOpenDetail/)
   assert.match(claude, /<AccountDetailSheet/)
-  assert.match(claude, /<ClaudeTestModal/)
+  assert.match(claude, /<ClaudeConnectionTestModal/)
 })
 
 test('model pricing exposes Anthropic source and distinct cache write fields', () => {
@@ -113,7 +113,10 @@ test('Claude model whitelist stays provider-scoped and uses optimistic detail va
 })
 
 test('Claude default refresh keeps deterministic account order', () => {
-  assert.match(claude, /default:\s*\{\s*sort:\s*undefined,\s*order:\s*['"]asc['"]\s*\}/)
+  // No explicit sort selected → omit `sort` so the backend's deterministic ID order applies.
+  assert.match(claude, /useState<SortKey \| null>\(null\)/)
+  assert.match(claude, /const sort = sortKey \? SORT_FIELD\[sortKey\] : undefined/)
+  assert.match(claude, /const order: SortDir = sortKey \? sortDir : ['"]asc['"]/)
 })
 
 test('Claude security limits default to upstream-compatible unlimited mode', () => {
@@ -155,9 +158,10 @@ test('Claude quota display keeps an unknown value distinct from zero', () => {
 })
 
 test('Claude connection test waits for the SSE stream to close before refreshing', () => {
-  assert.match(claude, /receivedTerminalEvent/)
-  assert.match(claude, /Refresh only once the SSE stream has closed/)
-  assert.match(claude, /onSettledRef/)
+  const modal = readFileSync(new URL('../components/ClaudeConnectionTestModal.tsx', import.meta.url), 'utf8')
+  assert.match(modal, /receivedTerminalEvent/)
+  assert.match(modal, /Refresh only once the SSE stream has closed/)
+  assert.match(modal, /onSettledRef/)
 })
 
 test('Claude documentation uses the current alias and real provider catalog', () => {

@@ -26,11 +26,12 @@ var batchTestWhamTimeout = 5 * time.Second
 
 // testEvent SSE 测试事件
 type testEvent struct {
-	Type    string `json:"type"`              // test_start | content | test_complete | error
-	Text    string `json:"text,omitempty"`    // 内容文本
-	Model   string `json:"model,omitempty"`   // 测试模型
-	Success bool   `json:"success,omitempty"` // 是否成功
-	Error   string `json:"error,omitempty"`   // 错误信息
+	Type        string                 `json:"type"`              // test_start | content | diagnostics | test_complete | error
+	Text        string                 `json:"text,omitempty"`    // 内容文本
+	Model       string                 `json:"model,omitempty"`   // 测试模型
+	Success     bool                   `json:"success,omitempty"` // 是否成功
+	Error       string                 `json:"error,omitempty"`   // 错误信息
+	Diagnostics *claudeTestDiagnostics `json:"diagnostics,omitempty"`
 }
 
 type responsesTerminalOutcome uint8
@@ -142,8 +143,10 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	// 构建最小测试请求体（参考 sub2api createOpenAITestPayload）
 	payload := buildConnectionTestPayload(h.store, testModel)
 	claudeSecurityCfg := h.store.ClaudeSecurityConfig()
+	claudeFingerprintMode := ""
 	if isClaudeAccount {
 		payload = buildClaudeConnectionTestPayload(h.store, testModel, claudeSecurityCfg)
+		claudeFingerprintMode = account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault())
 	}
 
 	// 发送请求
@@ -151,19 +154,24 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	var resp *http.Response
 	var reqErr error
 	if isClaudeAccount {
-		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), c.Request.Header.Clone(), account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), claudeSecurityCfg)
+		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), c.Request.Header.Clone(), claudeFingerprintMode, claudeSecurityCfg)
 	} else if isOpenAIResponsesAccount {
 		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), nil)
 	} else {
 		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
 	}
 	if reqErr != nil {
-		sendTestEvent(c, testEvent{Type: "error", Error: fmt.Sprintf("请求失败: %s", reqErr.Error())})
+		event := testEvent{Type: "error", Error: fmt.Sprintf("请求失败: %s", reqErr.Error())}
+		if isClaudeAccount {
+			event.Diagnostics = newClaudeTestRecorder(nil, testModel, claudeFingerprintMode, account.GetAccessToken(), start).finish()
+			event.Error = sanitizeClaudeTestText(event.Error, account.GetAccessToken())
+		}
+		sendTestEvent(c, event)
 		return
 	}
 	defer resp.Body.Close()
 	if isClaudeAccount {
-		h.handleClaudeConnectionTest(c, account, resp, testModel, start, isTransient, restoreOnSuccess, &transientOutcome, id)
+		h.handleClaudeConnectionTest(c, account, resp, testModel, start, claudeFingerprintMode, isTransient, restoreOnSuccess, &transientOutcome, id)
 		return
 	}
 
@@ -394,22 +402,32 @@ func (h *Handler) handleClaudeConnectionTest(
 	resp *http.Response,
 	testModel string,
 	start time.Time,
+	fingerprintMode string,
 	isTransient bool,
 	restoreOnSuccess bool,
 	transientOutcome *string,
 	id int64,
 ) {
+	recorder := newClaudeTestRecorder(resp, testModel, fingerprintMode, account.GetAccessToken(), start)
+	// The final diagnostics follow the terminal result; clients must drain the
+	// SSE response before refreshing the invalidated account snapshot.
+	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", Diagnostics: recorder.finish()}) }()
 	if resp == nil {
 		sendTestEvent(c, testEvent{Type: "error", Error: "Claude 上游未返回响应"})
 		return
 	}
+	sendTestEvent(c, testEvent{Type: "diagnostics", Diagnostics: recorder.details})
 	usageStore := h.store
 	if isTransient {
 		usageStore = nil
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		message := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(body), 500))
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, claudeTestBodyLimit+1))
+		if len(body) > claudeTestBodyLimit {
+			recorder.capture.truncated = true
+		}
+		recorder.observe(body)
+		message := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(sanitizeClaudeTestText(string(body), recorder.accessToken), 500))
 		creditsRequired := false
 		if account.IsClaudeOAuth() {
 			creditsRequired = syncClaudeTestUsageState(usageStore, account, testModel, resp, body)
@@ -442,11 +460,12 @@ func (h *Handler) handleClaudeConnectionTest(
 	if account.IsClaudeOAuth() {
 		proxy.SyncClaudeUsageState(usageStore, account, resp)
 	}
-	status, detail := readClaudeMessagesStream(c.Request.Context(), resp, func(text string) {
+	status, detail := readClaudeMessagesStreamObserved(c.Request.Context(), resp, func(text string) {
 		if strings.TrimSpace(text) != "" {
+			recorder.contentReceived()
 			sendTestEvent(c, testEvent{Type: "content", Text: text})
 		}
-	})
+	}, recorder.observe)
 	if status != "success" {
 		if !isTransient {
 			applyClaudeConnectionStreamFailure(h, account, testModel, status, detail, resp)
@@ -454,7 +473,7 @@ func (h *Handler) handleClaudeConnectionTest(
 		if status == "rate_limited" && transientOutcome != nil && isTransient {
 			*transientOutcome = "rate_limited"
 		}
-		sendTestEvent(c, testEvent{Type: "error", Error: detail})
+		sendTestEvent(c, testEvent{Type: "error", Error: sanitizeClaudeTestText(detail, recorder.accessToken)})
 		return
 	}
 	if !isTransient && claudeConnectionTestShouldPreserveUsageCooldown(account, resp) {
@@ -487,7 +506,6 @@ func (h *Handler) handleClaudeConnectionTest(
 	} else {
 		h.store.RecordManualTestSuccess(account, time.Since(start))
 	}
-	sendTestEvent(c, testEvent{Type: "content", Text: fmt.Sprintf("\n\n--- 耗时 %dms ---", time.Since(start).Milliseconds())})
 	sendTestEvent(c, testEvent{Type: "test_complete", Success: true})
 }
 

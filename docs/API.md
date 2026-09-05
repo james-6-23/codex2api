@@ -857,9 +857,20 @@ Claude 账号详情还会返回脱敏的 `claude_user_agent` 指纹摘要；不�
 
 #### GET /api/admin/accounts/:id/test
 
-执行一次手动原生 Messages 测连并以 SSE 返回 `test_start`、`content`、`error`、
-`test_complete`。与只读模型探测不同，手动测连会同步真实账号的用量/限流与错误
+执行一次手动原生 Messages 测连并以 SSE 返回 `test_start`、`content`、`diagnostics`、
+`error`、`test_complete`。与只读模型探测不同，手动测连会同步真实账号的用量/限流与错误
 状态；上游明确 rejected/耗尽时不会被“成功”结果清除。
+
+Claude 测连的 `diagnostics` 对象包含本次上游 HTTP 状态、响应头耗时、首段文本/思考
+内容耗时、总耗时（均为毫秒）、请求/响应模型、实际使用的指纹模式，以及可观测到的
+Request ID、Organization ID、Message ID、结束原因和错误类型。`usage` 保留原生
+`input_tokens`（未缓存输入）、`output_tokens`、缓存读取/写入及 5m/1h 缓存写入明细；
+流式累计用量按最新值更新，不重复相加。未观测到的字段省略，不以零代替。
+
+`response_headers` 是经过白名单筛选的诊断响应头（限流、请求标识等，不含 Cookie 或
+认证头），`response_body` 是已读取的 JSON/SSE 脱敏预览，最多 64 KiB；截断时
+`body_truncated=true`。成功和失败均可携带诊断信息。最终 `diagnostics` 事件可能位于
+`test_complete`/`error` 之后，客户端应读到 SSE 关闭再刷新账号快照。
 
 Claude 模型探测和连接测试的输出预算默认 4096；配置了正数 `max_output_tokens` 时取两者
 较小值，`0` 表示不设应用层上限。完整响应只有 thinking 时也可通过；流式响应仍要求终止
@@ -1080,15 +1091,20 @@ curl -X POST http://localhost:8080/api/admin/accounts/at \
 
 测试账号连接。
 
-**响应:**
+**响应:** `text/event-stream`。以下为成功测连的事件示例：
 
-```json
-{
-  "success": true,
-  "latency_ms": 523,
-  "message": "连接正常"
-}
+```text
+data: {"type":"test_start","model":"claude-haiku-4-5"}
+
+data: {"type":"content","text":"pong"}
+
+data: {"type":"test_complete","success":true}
+
+data: {"type":"diagnostics","diagnostics":{"model":"claude-haiku-4-5","http_status":200,"duration_ms":523}}
 ```
+
+`diagnostics` 为 Claude 账号的附加事件；失败由 `error` 事件返回。具体诊断字段见上文
+Claude 原生 Messages 测连说明。
 
 #### GET /api/admin/accounts/:id/usage
 

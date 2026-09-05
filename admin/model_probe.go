@@ -350,6 +350,10 @@ func readClaudeProbeStream(ctx context.Context, resp *http.Response) (string, st
 // callback receives only visible text deltas; it is optional for model probes
 // and used by the account connection-test UI.
 func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText func(string)) (string, string) {
+	return readClaudeMessagesStreamObserved(ctx, resp, onText, nil)
+}
+
+func readClaudeMessagesStreamObserved(ctx context.Context, resp *http.Response, onText func(string), onEvent func([]byte)) (string, string) {
 	if resp == nil || resp.Body == nil {
 		return "failed", "Claude 探测响应为空"
 	}
@@ -358,6 +362,9 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err != nil {
 			return "failed", err.Error()
+		}
+		if onEvent != nil {
+			onEvent(body)
 		}
 		typ := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, "type").String()))
 		if typ == "message" {
@@ -386,6 +393,9 @@ func readClaudeMessagesStream(ctx context.Context, resp *http.Response, onText f
 	lastEvent := []byte(nil)
 	readErr := proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
 		lastEvent = append(lastEvent[:0], data...)
+		if onEvent != nil {
+			onEvent(data)
+		}
 		typ := strings.ToLower(strings.TrimSpace(gjson.GetBytes(data, "type").String()))
 		switch typ {
 		case "message":

@@ -58,6 +58,7 @@ import {
   type ProxyBindingContext,
 } from "../lib/accountProxyBinding";
 import ChannelLogo from "../components/ChannelLogo";
+import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
@@ -81,6 +82,8 @@ import {
   DEFAULT_PAGE_SIZE_OPTIONS,
   usePersistedPageSize,
 } from "../hooks/usePersistedPageSize";
+import { useAccountTableColumns } from "../hooks/useAccountTableColumns";
+import { useMediaQuery } from "../hooks/useMediaQuery";
 import { useToast } from "../hooks/useToast";
 import { cn } from "@/lib/utils";
 import { getErrorMessage } from "../utils/error";
@@ -90,6 +93,10 @@ type StatusFilter = "all" | "active" | "disabled" | "error";
 type ImportMode = "single" | "files";
 type BusyAction = "refresh" | "quota" | "toggle" | "delete";
 type OAuthModalStatus = "idle" | "starting" | "waiting" | "processing" | "completed" | "failed" | "cancelled";
+
+const ANTIGRAVITY_TABLE_COLUMNS = [
+  "project", "permission", "quota", "proxy", "status", "updatedAt",
+] as const;
 
 const ANTIGRAVITY_DEFAULT_MODELS = [
   "gemini-3-pro-preview",
@@ -911,6 +918,11 @@ function AntigravityManagementState({
 
 function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
   const { t } = useTranslation();
+  const isTableViewport = useMediaQuery("(min-width: 768px)");
+  const { columns: visibleColumns, toggleColumn, resetColumns } = useAccountTableColumns(
+    "codex2api:antigravity-accounts:visible-columns",
+    ANTIGRAVITY_TABLE_COLUMNS,
+  );
   const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
   const requestAbortRef = useRef<AbortController | null>(null);
@@ -1975,6 +1987,24 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
             {t("antigravity.clearFilters")}
           </Button>
         ) : null}
+        {isTableViewport ? (
+          <ColumnSettingsMenu
+            columns={visibleColumns}
+            columnOrder={ANTIGRAVITY_TABLE_COLUMNS}
+            onToggle={toggleColumn}
+            onReset={resetColumns}
+            title={t("accounts.columnSettings")}
+            resetTitle={t("accounts.columnReset")}
+            labels={{
+              project: t("antigravity.columnProject"),
+              permission: t("antigravity.columnPermission"),
+              quota: t("antigravity.columnQuota"),
+              proxy: t("accounts.proxyColumn"),
+              status: t("antigravity.columnStatus"),
+              updatedAt: t("antigravity.columnUpdated"),
+            }}
+          />
+        ) : null}
       </div>
 
       <StateShell
@@ -2015,12 +2045,24 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
             <TableHeader>
               <TableRow>
                 <TableHead>{t("antigravity.columnAccount")}</TableHead>
-                <TableHead>{t("antigravity.columnProject")}</TableHead>
-                <TableHead>{t("antigravity.columnPermission")}</TableHead>
-                <TableHead>{t("antigravity.columnQuota")}</TableHead>
-                <TableHead>{t("accounts.proxyColumn")}</TableHead>
-                <TableHead>{t("antigravity.columnStatus")}</TableHead>
-                <TableHead>{t("antigravity.columnUpdated")}</TableHead>
+                {visibleColumns.project ? (
+                  <TableHead>{t("antigravity.columnProject")}</TableHead>
+                ) : null}
+                {visibleColumns.permission ? (
+                  <TableHead>{t("antigravity.columnPermission")}</TableHead>
+                ) : null}
+                {visibleColumns.quota ? (
+                  <TableHead>{t("antigravity.columnQuota")}</TableHead>
+                ) : null}
+                {visibleColumns.proxy ? (
+                  <TableHead>{t("accounts.proxyColumn")}</TableHead>
+                ) : null}
+                {visibleColumns.status ? (
+                  <TableHead>{t("antigravity.columnStatus")}</TableHead>
+                ) : null}
+                {visibleColumns.updatedAt ? (
+                  <TableHead>{t("antigravity.columnUpdated")}</TableHead>
+                ) : null}
                 <TableHead className="w-[184px] text-right">
                   {t("antigravity.columnActions")}
                 </TableHead>
@@ -2059,64 +2101,76 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
                       </span>
                     </button>
                   </TableCell>
-                  <TableCell className="max-w-[220px]">
-                    <div className="truncate text-sm font-medium text-foreground">
-                      {subscriptionTier(account) || t("antigravity.tierUnknown")}
-                    </div>
-                    <div
-                      className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
-                      title={identityProjectID(account)}
-                    >
-                      {identityProjectID(account) || t("antigravity.projectPending")}
-                    </div>
-                  </TableCell>
-                  <TableCell className="max-w-[190px]">
-                    <PermissionBadge permissions={account.antigravity_permissions} />
-                    {account.antigravity_permissions?.reason ? (
-                      <div
-                        className="mt-1 max-w-[180px] truncate text-[11px] text-muted-foreground"
-                        title={account.antigravity_permissions.reason}
-                      >
-                        {account.antigravity_permissions.reason}
+                  {visibleColumns.project ? (
+                    <TableCell className="max-w-[220px]">
+                      <div className="truncate text-sm font-medium text-foreground">
+                        {subscriptionTier(account) || t("antigravity.tierUnknown")}
                       </div>
-                    ) : null}
-                    <SyncWarningAction warning={account.antigravity_sync_warning} />
-                  </TableCell>
-                  <TableCell>
-                    <CompactQuota
-                      account={account}
-                      onOpen={() => openDetailAccount(account.id)}
-                    />
-                  </TableCell>
-                  <TableCell className="min-w-[120px] max-w-[180px]">
-                    <AccountProxyBadge
-                      account={account}
-                      ctx={proxyBindingCtx}
-                      onClick={() => setQuickProxyAccount(account)}
-                    />
-                  </TableCell>
-                  <TableCell>
-                    <div className="flex flex-col items-start gap-1">
-                      <StatusBadge
-                        status={account.enabled === false ? "paused" : account.status}
-                        errorMessage={account.error_message}
-                      />
-                      {account.locked ? (
-                        <Badge variant="outline" className="text-[10px]">
-                          <KeyRound className="size-3" />
-                          {t("antigravity.locked")}
-                        </Badge>
+                      <div
+                        className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground"
+                        title={identityProjectID(account)}
+                      >
+                        {identityProjectID(account) || t("antigravity.projectPending")}
+                      </div>
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.permission ? (
+                    <TableCell className="max-w-[190px]">
+                      <PermissionBadge permissions={account.antigravity_permissions} />
+                      {account.antigravity_permissions?.reason ? (
+                        <div
+                          className="mt-1 max-w-[180px] truncate text-[11px] text-muted-foreground"
+                          title={account.antigravity_permissions.reason}
+                        >
+                          {account.antigravity_permissions.reason}
+                        </div>
                       ) : null}
-                    </div>
-                  </TableCell>
-                  <TableCell>
-                    <div className="text-xs text-foreground">
-                      {formatRelativeTime(account.updated_at, { variant: "compact" })}
-                    </div>
-                    <div className="mt-0.5 text-[10px] text-muted-foreground">
-                      {formatBeijingTime(account.updated_at)}
-                    </div>
-                  </TableCell>
+                      <SyncWarningAction warning={account.antigravity_sync_warning} />
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.quota ? (
+                    <TableCell>
+                      <CompactQuota
+                        account={account}
+                        onOpen={() => openDetailAccount(account.id)}
+                      />
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.proxy ? (
+                    <TableCell className="min-w-[120px] max-w-[180px]">
+                      <AccountProxyBadge
+                        account={account}
+                        ctx={proxyBindingCtx}
+                        onClick={() => setQuickProxyAccount(account)}
+                      />
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.status ? (
+                    <TableCell>
+                      <div className="flex flex-col items-start gap-1">
+                        <StatusBadge
+                          status={account.enabled === false ? "paused" : account.status}
+                          errorMessage={account.error_message}
+                        />
+                        {account.locked ? (
+                          <Badge variant="outline" className="text-[10px]">
+                            <KeyRound className="size-3" />
+                            {t("antigravity.locked")}
+                          </Badge>
+                        ) : null}
+                      </div>
+                    </TableCell>
+                  ) : null}
+                  {visibleColumns.updatedAt ? (
+                    <TableCell>
+                      <div className="text-xs text-foreground">
+                        {formatRelativeTime(account.updated_at, { variant: "compact" })}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-muted-foreground">
+                        {formatBeijingTime(account.updated_at)}
+                      </div>
+                    </TableCell>
+                  ) : null}
                   <TableCell>{renderActions(account)}</TableCell>
                 </TableRow>
               ))}

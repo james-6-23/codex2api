@@ -12,20 +12,31 @@ import {
   RefreshCw,
   RotateCcw,
   Lock,
+  Unlock,
   MoreHorizontal,
   Trash2,
-  Columns3,
   Plus,
-  CheckCircle,
-  XCircle,
   Loader2,
-  FlaskConical,
   SlidersHorizontal,
   Download,
   Upload,
+  Search,
+  Eye,
+  EyeOff,
+  FolderOpen,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Power,
+  PowerOff,
+  ListChecks,
+  Zap,
+  FileJson,
+  Hourglass,
+  Wallet,
 } from "lucide-react";
 
-import { api, getAdminKey } from "../api";
+import { api } from "../api";
 import type { NamedBlob } from "../api";
 import type { ProxyRow } from "../api";
 import type {
@@ -35,12 +46,15 @@ import type {
   AccountEmailDomainFacet,
   AccountPageStatsItem,
   AccountHealthBucket,
+  AccountsPageParams,
   ClaudeCredentialExportEntry,
 } from "../types";
 import AccountUsageModal from "../components/AccountUsageModal";
+import ClaudeConnectionTestModal from "../components/ClaudeConnectionTestModal";
 import AccountDetailSheet from "../components/AccountDetailSheet";
 import AccountHealthBar from "../components/AccountHealthBar";
 import RequestCountPills from "../components/RequestCountPills";
+import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import AccountGroupMultiSelect from "../components/AccountGroupMultiSelect";
 import AccountQuotaDistributionChart from "../components/AccountQuotaDistributionChart";
@@ -71,6 +85,14 @@ import type { AccountGroupFilterValue } from "../components/AccountGroupFilterSe
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { Card, CardContent } from "@/components/ui/card";
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import {
+  HeaderActionMenu,
+  type HeaderActionMenuItem,
+  type HeaderActionMenuSection,
+} from "../components/HeaderActionMenu";
+import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import {
   accountStateTableRowClass,
   resolveAccountOverlayKind,
@@ -118,7 +140,7 @@ function claudeUsagePct(v: unknown): number | null {
 }
 
 function usageTone(pct: number): string {
-  return pct >= 90 ? "bg-rose-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+  return pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
 }
 
 // formatCompactNum 紧凑数字:1234 → 1.2k。
@@ -204,28 +226,30 @@ function avatarInitial(acc: AccountRow): string {
 }
 
 // claudePlanBadge 按订阅档位配色(pro/max-5x/max-20x/team/enterprise/free)。
-function claudePlanBadge(plan: string): { label: string; cls: string } {
+// tone 只含配色,cls 是详情面板用的小徽章;表格列用 Codex PlanBadge 同尺寸另拼。
+function claudePlanBadge(plan: string): { label: string; tone: string; cls: string } {
   const p = plan.trim().toLowerCase();
   const base = "inline-flex items-center rounded-md px-1.5 py-0.5 text-[11px] font-medium ring-1 ring-inset";
+  const build = (label: string, tone: string) => ({ label, tone, cls: `${base} ${tone}` });
   switch (p) {
     case "pro":
-      return { label: "Pro", cls: `${base} bg-purple-50 text-purple-700 ring-purple-600/20 dark:bg-purple-950 dark:text-purple-300 dark:ring-purple-400/20` };
+      return build("Pro", "bg-purple-50 text-purple-700 ring-purple-600/20 dark:bg-purple-950 dark:text-purple-300 dark:ring-purple-400/20");
     case "max-5x":
-      return { label: "Max 5x", cls: `${base} bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/20` };
+      return build("Max 5x", "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/20");
     case "max-20x":
-      return { label: "Max 20x", cls: `${base} bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-400/20` };
+      return build("Max 20x", "bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950 dark:text-rose-300 dark:ring-rose-400/20");
     case "max":
-      return { label: "Max", cls: `${base} bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/20` };
+      return build("Max", "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300 dark:ring-amber-400/20");
     case "team":
-      return { label: "Team", cls: `${base} bg-sky-50 text-sky-700 ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/20` };
+      return build("Team", "bg-sky-50 text-sky-700 ring-sky-600/20 dark:bg-sky-950 dark:text-sky-300 dark:ring-sky-400/20");
     case "enterprise":
-      return { label: "Enterprise", cls: `${base} bg-indigo-50 text-indigo-700 ring-indigo-600/20 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-400/20` };
+      return build("Enterprise", "bg-indigo-50 text-indigo-700 ring-indigo-600/20 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-400/20");
     case "business":
-      return { label: "Business", cls: `${base} bg-indigo-50 text-indigo-700 ring-indigo-600/20 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-400/20` };
+      return build("Business", "bg-indigo-50 text-indigo-700 ring-indigo-600/20 dark:bg-indigo-950 dark:text-indigo-300 dark:ring-indigo-400/20");
     case "free":
-      return { label: "Free", cls: `${base} bg-zinc-100 text-zinc-600 ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-400 dark:ring-zinc-500/20` };
+      return build("Free", "bg-zinc-100 text-zinc-600 ring-zinc-500/20 dark:bg-zinc-900 dark:text-zinc-400 dark:ring-zinc-500/20");
     default:
-      return { label: plan, cls: `${base} bg-purple-50 text-purple-700 ring-purple-600/20 dark:bg-purple-950 dark:text-purple-300 dark:ring-purple-400/20` };
+      return build(plan, "bg-purple-50 text-purple-700 ring-purple-600/20 dark:bg-purple-950 dark:text-purple-300 dark:ring-purple-400/20");
   }
 }
 
@@ -283,21 +307,32 @@ type ClaudeStatusFilter =
 type AuthFilter = "all" | "oauth" | "api_key";
 type HealthTier = "healthy" | "warm" | "risky" | "banned";
 
-type SortKey = "default" | "group" | "priority" | "usage" | "requests" | "today";
-const SORT_MAP: Record<SortKey, { sort: NonNullable<Parameters<typeof api.getAccountsPage>[0]["sort"]> | undefined; order: "asc" | "desc" }> = {
-  // An explicit updated_at sort is unstable because sampling/refresh updates
-  // that timestamp. Omitting sort uses the backend's deterministic ID order,
-  // matching Codex and keeping rows in place after refresh.
-  default: { sort: undefined, order: "asc" },
-  group: { sort: "group", order: "asc" },
-  priority: { sort: "scheduler_priority", order: "desc" },
-  usage: { sort: "usage", order: "desc" },
-  requests: { sort: "requests", order: "desc" },
-  today: { sort: "today", order: "desc" },
+// 排序键(表头 / 排序按钮点击切换,同键再点翻转方向,与 Codex 一致)。
+// 未选排序时不传 sort:显式 updated_at 排序会被采样/刷新改写时间戳而抖动,
+// 省略则走后端确定性 ID 序,刷新后行位置不变。
+type SortKey = "group" | "priority" | "usage" | "requests" | "today" | "importTime";
+type SortDir = "asc" | "desc";
+const SORT_FIELD: Record<SortKey, NonNullable<AccountsPageParams["sort"]>> = {
+  group: "group",
+  priority: "scheduler_priority",
+  usage: "usage",
+  requests: "requests",
+  today: "today",
+  importTime: "created_at",
+};
+const SORT_DEFAULT_DIR: Record<SortKey, SortDir> = {
+  group: "asc",
+  priority: "desc",
+  usage: "desc",
+  requests: "desc",
+  today: "desc",
+  importTime: "desc",
 };
 
-// 可显隐列(序号/邮箱/操作为固定核心列,不参与切换)。持久化到 localStorage,与 Codex 一致。
+// 可显隐列(序号/邮箱/操作为固定核心列,不参与切换)。持久化到 localStorage,与 Codex 一致;
+// 标签列与 Codex 同样默认隐藏。
 const CLAUDE_TOGGLE_COLUMNS = [
+  "tags",
   "groups",
   "proxy",
   "priority",
@@ -333,7 +368,7 @@ function persistClaudeAnalysisVisibility(visible: boolean) {
 }
 
 function defaultClaudeCols(): ClaudeColVisibility {
-  return Object.fromEntries(CLAUDE_TOGGLE_COLUMNS.map((c) => [c, true])) as ClaudeColVisibility;
+  return Object.fromEntries(CLAUDE_TOGGLE_COLUMNS.map((c) => [c, c !== "tags"])) as ClaudeColVisibility;
 }
 
 function loadClaudeCols(): ClaudeColVisibility {
@@ -343,7 +378,7 @@ function loadClaudeCols(): ClaudeColVisibility {
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as Partial<ClaudeColVisibility>;
     return Object.fromEntries(
-      CLAUDE_TOGGLE_COLUMNS.map((c) => [c, typeof parsed[c] === "boolean" ? parsed[c] : true]),
+      CLAUDE_TOGGLE_COLUMNS.map((c) => [c, typeof parsed[c] === "boolean" ? parsed[c] : fallback[c]]),
     ) as ClaudeColVisibility;
   } catch {
     return fallback;
@@ -351,7 +386,7 @@ function loadClaudeCols(): ClaudeColVisibility {
 }
 
 // LiveCountdown 显示限流/重置的剩余时间,每秒刷新。
-// plain=true 为弱化文本样式(用量条下的 ⏱ 重置行);默认琥珀徽章(限流冷却)。
+// plain=true 为弱化文本样式;默认是与 Codex CooldownTimer 同款的琥珀沙漏胶囊(限流冷却)。
 function LiveCountdown({ until, label, plain = false }: { until?: string; label: string; plain?: boolean }) {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
@@ -367,8 +402,8 @@ function LiveCountdown({ until, label, plain = false }: { until?: string; label:
   const d = Math.floor(remain / 86400);
   const h = Math.floor((remain % 86400) / 3600);
   const m = Math.floor((remain % 3600) / 60);
-  const s = remain % 60;
-  const text = d > 0 ? `${d}d${h}h` : h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m${s}s` : `${s}s`;
+  const sec = remain % 60;
+  const text = d > 0 ? `${d}d${h}h` : h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m${sec}s` : `${sec}s`;
   if (plain) {
     return (
       <span className="text-[11px] font-medium text-muted-foreground tabular-nums">
@@ -377,54 +412,78 @@ function LiveCountdown({ until, label, plain = false }: { until?: string; label:
     );
   }
   return (
-    <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 tabular-nums dark:text-amber-400">
-      {label} {text}
+    <span
+      className="inline-flex h-6 min-w-[112px] shrink-0 items-center justify-center gap-1.5 rounded-full bg-amber-50 px-2 text-[11px] font-mono leading-none tabular-nums text-amber-700 ring-1 ring-inset ring-amber-200/70 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-400/20"
+      title={`${label} ${new Date(target).toLocaleString()}`}
+    >
+      <Hourglass className="size-3 shrink-0" aria-hidden="true" />
+      {text}
     </span>
   );
 }
 
-// UsageWindow 单条用量窗口(5h / 7d)。视觉对齐 Codex 的 UsageBar/UsageWindowStat:
-// - percent 有真实观测(Anthropic 统一限流头)→ 进度条 + 百分比 + ⏱重置倒计时;
+// 标签 / 条 / 百分比 三列固定宽度(与 Codex UsageBar 同款),避免 5h 与 7d 把进度条拉成不同长度。
+const USAGE_BAR_LABEL_CLASS = "w-10 shrink-0 text-[11px] font-medium text-muted-foreground";
+const USAGE_BAR_TRACK_CLASS = "h-1.5 w-[88px] shrink-0 overflow-hidden rounded-full bg-muted";
+const USAGE_BAR_META_CLASS = "mt-0.5 pl-[46px] text-[11px] font-medium text-muted-foreground";
+
+function hasWindowDetail(detail?: AccountRow["usage_5h_detail"]): boolean {
+  return Boolean(detail && ((detail.requests ?? 0) > 0 || (detail.tokens ?? 0) > 0));
+}
+
+// UsageWindow 单条用量窗口(5h / 7d)。视觉对齐 Codex 的 UsageBar / UsageWindowStat:
+// - percent 有真实观测(Anthropic 统一限流头)→ 进度条 + 百分比,明细与 ⏱重置各占一行;
 // - 仅有网关侧明细(req/tok/$)→ 明细行;
 // - 两者都无 → 不渲染(由父级统一显示 "-")。
 function UsageWindow({
   label,
   pct,
   reset,
-  resetLabel,
   detail,
 }: {
   label: string;
   pct: number | null;
   reset?: string;
-  resetLabel: string;
   detail?: AccountRow["usage_5h_detail"];
 }) {
-  const hasDetail = !!detail && ((detail.requests ?? 0) > 0 || (detail.tokens ?? 0) > 0);
-  const billed = typeof detail?.account_billed === "number" && detail.account_billed > 0 ? detail.account_billed : null;
+  const { t } = useTranslation();
+  const hasDetail = hasWindowDetail(detail);
   if (pct === null && !hasDetail) return null;
-  const rt = formatShortDateTime(reset);
-  // 明细(req/tok/$)进 tooltip,行内只留 标签+进度条+百分比+⏱重置,收窄整列。
-  const detailTitle = [
-    hasDetail ? `${formatCompactNum(detail?.requests)} req / ${formatCompactNum(detail?.tokens)} tok` : "",
-    billed !== null ? `$${billed.toFixed(4)}` : "",
-    rt ? `${resetLabel} ${rt.title}` : "",
-  ]
-    .filter(Boolean)
-    .join(" · ");
-  return (
-    <div className="flex items-center gap-1.5 whitespace-nowrap" title={detailTitle || undefined}>
-      <span className="w-[30px] shrink-0 text-[11px] font-medium text-muted-foreground">{label}</span>
-      <span className="h-1.5 w-14 shrink-0 overflow-hidden rounded-full bg-muted">
-        {pct !== null ? (
-          <span className={cn("block h-full rounded-full transition-all", usageTone(pct))} style={{ width: `${Math.min(100, pct)}%` }} />
+  const billed = typeof detail?.account_billed === "number" && detail.account_billed > 0 ? detail.account_billed : null;
+  const detailText = hasDetail
+    ? `${formatCompactNum(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactNum(detail?.tokens)} ${t("accounts.usageTokUnit")}`
+    : "";
+  if (pct === null) {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <div className="flex items-center gap-1.5 text-[11px] font-medium text-muted-foreground">
+          <span className={USAGE_BAR_LABEL_CLASS}>{label}</span>
+          <span>{detailText}</span>
+        </div>
+        {billed !== null ? (
+          <div className="pl-[46px] text-[10px] text-muted-foreground/80">
+            {t("accounts.accountBilledLabel")}: ${billed.toFixed(4)}
+          </div>
         ) : null}
-      </span>
-      <span className="w-[40px] shrink-0 text-right text-[12px] font-semibold tabular-nums">
-        {pct !== null ? `${pct.toFixed(1)}%` : "—"}
-      </span>
+      </div>
+    );
+  }
+  const resetTs = reset ? new Date(reset).getTime() : NaN;
+  const rt = Number.isFinite(resetTs) && resetTs > Date.now() ? formatShortDateTime(reset) : null;
+  return (
+    <div>
+      <div className="flex items-center gap-1.5">
+        <span className={USAGE_BAR_LABEL_CLASS}>{label}</span>
+        <div className={USAGE_BAR_TRACK_CLASS}>
+          <div className={cn("h-full rounded-full transition-all", usageTone(pct))} style={{ width: `${Math.min(100, pct)}%` }} />
+        </div>
+        <span className="w-[42px] shrink-0 text-right text-[12px] font-semibold tabular-nums">{pct.toFixed(1)}%</span>
+      </div>
+      {detailText ? <div className={USAGE_BAR_META_CLASS}>{detailText}</div> : null}
       {rt ? (
-        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">⏱{rt.label}</span>
+        <div className={USAGE_BAR_META_CLASS} title={rt.title}>
+          ⏱ {rt.label}
+        </div>
       ) : null}
     </div>
   );
@@ -434,7 +493,6 @@ function UsageWindow({
 const LEGACY_USAGE_BACKFILL_BATCH = 4;
 
 function ClaudeScopedUsageWindows({ windows }: { windows?: AccountRow["claude_usage_windows"] }) {
-  const { t } = useTranslation();
   const scoped = (windows ?? []).filter((window) => window.model_scoped && window.name !== "5h" && window.name !== "7d");
   if (scoped.length === 0) return null;
   return (
@@ -445,7 +503,6 @@ function ClaudeScopedUsageWindows({ windows }: { windows?: AccountRow["claude_us
           label={window.model_family === "fable" ? "Fable" : (window.label || window.name)}
           pct={claudeUsagePct(window.utilization)}
           reset={window.reset_at}
-          resetLabel={t("claude.resetIn")}
         />
       ))}
     </>
@@ -561,7 +618,9 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [tagFilter, setTagFilter] = useState<string>("all");
   const [domainFilter, setDomainFilter] = useState<string>("all");
   const [groupFilter, setGroupFilter] = useState<AccountGroupFilterValue>(EMPTY_ACCOUNT_GROUP_FILTER);
-  const [sortKey, setSortKey] = useState<SortKey>("default");
+  const [sortKey, setSortKey] = useState<SortKey | null>(null);
+  const [sortDir, setSortDir] = useState<SortDir>("desc");
+  const [showFilters, setShowFilters] = useState(false);
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(20);
   const [hideDomainTags, setHideDomainTags] = useState(false);
@@ -588,7 +647,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   // 筛选变化时回到第一页
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, statusFilter, healthTier, planFilter, authFilter, tagFilter, domainFilter, groupFilter, sortKey, pageSize]);
+  }, [debouncedSearch, statusFilter, healthTier, planFilter, authFilter, tagFilter, domainFilter, groupFilter, sortKey, sortDir, pageSize]);
 
   const claudeGroups = useMemo(() => groups.filter((g) => g.channel === "claude"), [groups]);
   const groupMap = useMemo(() => new Map(claudeGroups.map((g) => [g.id, g])), [claudeGroups]);
@@ -610,7 +669,8 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     reloadAbortRef.current = controller;
     const generation = ++reloadGenerationRef.current;
     try {
-      const { sort, order } = SORT_MAP[sortKey];
+      const sort = sortKey ? SORT_FIELD[sortKey] : undefined;
+      const order: SortDir = sortKey ? sortDir : "asc";
       const res = await api.getAccountsPage(
         {
           channel: "claude",
@@ -667,6 +727,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     domainFilter,
     groupFilter,
     sortKey,
+    sortDir,
     showToast,
   ]);
 
@@ -1192,7 +1253,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
       return next;
     });
   }, []);
-  const allSelected = accounts.length > 0 && accounts.every((a) => selected.has(a.id));
+  const allPageSelected = accounts.length > 0 && accounts.every((a) => selected.has(a.id));
   const toggleSelectAll = useCallback(() => {
     setSelected((prev) => {
       if (accounts.every((a) => prev.has(a.id))) return new Set();
@@ -1214,31 +1275,62 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     [selectedIds, reload, showToast],
   );
 
+  const handleBatchDelete = useCallback(async () => {
+    if (selectedIds.length === 0) return;
+    const ok = await confirm({
+      title: t("accounts.batchDeleteTitle"),
+      description: t("accounts.batchDeleteDesc", { count: selectedIds.length }),
+    });
+    if (!ok) return;
+    try {
+      await api.batchDeleteAccounts(selectedIds);
+      setSelected(new Set());
+      void reload();
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+    }
+  }, [confirm, reload, selectedIds, showToast, t]);
+
+  // ── 排序(与 Codex 一致:表头/按钮点击切换,同键再点翻转方向) ──
+  const toggleSort = useCallback((key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir((current) => (current === "desc" ? "asc" : "desc"));
+    } else {
+      setSortKey(key);
+      setSortDir(SORT_DEFAULT_DIR[key]);
+    }
+  }, [sortKey]);
+
+
   // ── 派生 UI 数据 ──────────────────────────────────────────
   const statChips = useMemo(() => {
     const s = summary;
-    const c: Array<{ id: ClaudeStatusFilter; label: string; count: number; tone?: string }> = [
+    const c: Array<{ id: ClaudeStatusFilter; label: string; count: number }> = [
       { id: "all", label: t("claude.statAll"), count: s?.total ?? total },
-      { id: "normal", label: t("claude.statNormal"), count: s?.normal ?? 0, tone: "text-emerald-600 dark:text-emerald-400" },
-      { id: "scheduling", label: t("claude.statScheduling"), count: s?.active ?? 0, tone: "text-sky-600 dark:text-sky-400" },
-      { id: "rate_limited", label: t("claude.statRateLimited"), count: s?.rate_limited ?? 0, tone: "text-amber-600 dark:text-amber-400" },
-      { id: "abnormal", label: t("claude.statAbnormal"), count: s?.abnormal ?? 0, tone: "text-rose-600 dark:text-rose-400" },
-      { id: "banned", label: t("claude.statBanned"), count: s?.banned ?? 0, tone: "text-rose-600 dark:text-rose-400" },
-      { id: "error", label: t("claude.statError"), count: s?.error ?? 0, tone: "text-rose-600 dark:text-rose-400" },
+      { id: "normal", label: t("claude.statNormal"), count: s?.normal ?? 0 },
+      { id: "scheduling", label: t("claude.statScheduling"), count: s?.active ?? 0 },
+      { id: "rate_limited", label: t("claude.statRateLimited"), count: s?.rate_limited ?? 0 },
+      { id: "abnormal", label: t("claude.statAbnormal"), count: s?.abnormal ?? 0 },
+      { id: "banned", label: t("claude.statBanned"), count: s?.banned ?? 0 },
+      { id: "error", label: t("claude.statError"), count: s?.error ?? 0 },
       { id: "unsampled", label: t("claude.statUnsampled"), count: s?.unsampled ?? 0 },
       { id: "disabled", label: t("claude.statDisabled"), count: s?.disabled ?? 0 },
       { id: "locked", label: t("claude.statLocked"), count: s?.locked ?? 0 },
     ];
     return c;
   }, [summary, total, t]);
+  const statusLabelFor = useCallback(
+    (id: ClaudeStatusFilter) => statChips.find((chip) => chip.id === id)?.label ?? id,
+    [statChips],
+  );
 
   const healthChips = useMemo(() => {
     const s = summary;
     return [
-      { id: "healthy" as HealthTier, label: t("claude.healthHealthy"), count: s?.healthy ?? 0, dot: "bg-emerald-500" },
-      { id: "warm" as HealthTier, label: t("claude.healthWarm"), count: s?.warm ?? 0, dot: "bg-amber-500" },
-      { id: "risky" as HealthTier, label: t("claude.healthRisky"), count: s?.risky ?? 0, dot: "bg-rose-500" },
-      { id: "banned" as HealthTier, label: t("claude.healthBanned"), count: s?.banned ?? 0, dot: "bg-zinc-500" },
+      { id: "healthy" as HealthTier, label: t("claude.healthHealthy"), count: s?.healthy ?? 0, tone: "success" as const },
+      { id: "warm" as HealthTier, label: t("claude.healthWarm"), count: s?.warm ?? 0, tone: "warning" as const },
+      { id: "risky" as HealthTier, label: t("claude.healthRisky"), count: s?.risky ?? 0, tone: "danger" as const },
+      { id: "banned" as HealthTier, label: t("claude.healthBanned"), count: s?.banned ?? 0, tone: "neutral" as const },
     ];
   }, [summary, t]);
 
@@ -1246,24 +1338,24 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     const plans = knownPlans.filter(Boolean).sort();
     return ["all", ...plans];
   }, [knownPlans]);
+  const planLabel = (plan: string) => (plan === "all" ? t("accounts.filterAll") : claudePlanBadge(plan).label);
 
-  // Claude 账号当前只支持 OAuth；不展示一个永远为 0 的 API Key 筛选，避免
+  // Claude 账号当前只支持 OAuth;不展示一个永远为 0 的 API Key 筛选,避免
   // 运营误以为 Claude API Key 可以走同一原生链路。
   const authTabs: Array<{ id: AuthFilter; label: string; count?: number }> = [
-    { id: "all", label: t("claude.authAll") },
-    { id: "oauth", label: t("claude.authOAuth"), count: summary?.oauth || summary?.total || 0 },
+    { id: "all", label: t("accounts.filterAll") },
+    { id: "oauth", label: "OAuth", count: summary?.oauth || summary?.total || 0 },
   ];
 
-  const filtersActive =
+  const hasFilterPills =
     statusFilter !== "all" ||
     healthTier !== null ||
     planFilter !== "all" ||
     authFilter !== "all" ||
     tagFilter !== "all" ||
     domainFilter !== "all" ||
-    !isAccountGroupFilterEmpty(groupFilter) ||
-    sortKey !== "default" ||
-    debouncedSearch.length > 0;
+    !isAccountGroupFilterEmpty(groupFilter);
+  const filtersActive = hasFilterPills || debouncedSearch.length > 0;
 
   const clearFilters = useCallback(() => {
     setStatusFilter("all");
@@ -1273,69 +1365,167 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     setTagFilter("all");
     setDomainFilter("all");
     setGroupFilter(EMPTY_ACCOUNT_GROUP_FILTER);
-    setSortKey("default");
     setSearch("");
+    setSortKey(null);
+    setSortDir("desc");
   }, []);
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
+  const poolEmpty = !loading && total === 0 && !filtersActive;
 
-  const selectFieldCls =
-    "h-8 rounded-md border border-input bg-background px-2 text-xs text-foreground outline-none focus-visible:border-ring";
+  const openAdd = (tab: "oauth" | "import") => {
+    setAddInitialTab(tab);
+    setShowAdd(true);
+  };
+
+  // 「管理」只收低频项;导入 / 导出 / 分析常驻在外(与 Codex 页一致)。
+  const manageSections: HeaderActionMenuSection[] = [
+    {
+      key: "maintenance",
+      label: t("accounts.maintenanceActions"),
+      items: [
+        {
+          key: "refresh-models",
+          label: t("claude.refreshAllModels"),
+          icon: <RefreshCw className="size-3.5" />,
+          disabled: total === 0,
+          onSelect: () => void handleRefreshAllModels(),
+        },
+      ],
+    },
+    {
+      key: "data",
+      label: t("accounts.dataActions"),
+      items: [
+        {
+          key: "export-healthy",
+          label: t("claude.exportHealthy"),
+          icon: <Download className="size-3.5" />,
+          disabled: exporting || total === 0,
+          onSelect: () => void handleExport("healthy"),
+        },
+      ],
+    },
+  ];
+
+  const filterPillClass =
+    "inline-flex max-w-full items-center gap-1.5 rounded-md border border-border/60 bg-background/70 px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-primary/30 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50";
+  const segmentGroupClass =
+    "flex h-8 max-w-full shrink-0 items-center gap-0.5 overflow-x-auto rounded-lg border border-border bg-muted/30 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden";
+  const segmentButtonClass = (active: boolean) =>
+    cn(
+      "flex h-6 shrink-0 items-center whitespace-nowrap rounded-md px-2 text-xs font-medium transition-colors",
+      active ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+    );
+  const sortOptions = [
+    { value: "default", label: t("claude.sortDefault") },
+    { value: "group", label: t("claude.sortGroup") },
+    { value: "priority", label: t("claude.sortPriority") },
+    { value: "usage", label: t("claude.sortUsage") },
+    { value: "requests", label: t("claude.sortRequests") },
+    { value: "today", label: t("claude.sortToday") },
+    { value: "importTime", label: t("accounts.importTime") },
+  ];
+  const renderSortHead = (key: SortKey, label: string, title?: string) => (
+    <TableHead aria-sort={sortKey === key ? (sortDir === "desc" ? "descending" : "ascending") : "none"} title={title}>
+      <button
+        type="button"
+        onClick={() => toggleSort(key)}
+        className={cn(
+          "group inline-flex items-center gap-1.5 rounded py-1 text-xs font-medium outline-none transition-colors hover:text-primary focus-visible:ring-2 focus-visible:ring-ring/50",
+          sortKey === key && "text-primary",
+        )}
+      >
+        {label}
+        {sortKey === key ? (
+          sortDir === "desc" ? <ArrowDown className="size-3.5" /> : <ArrowUp className="size-3.5" />
+        ) : <ArrowUpDown className="size-3 text-muted-foreground/35 group-hover:text-primary/70" />}
+      </button>
+    </TableHead>
+  );
 
   return (
-    <div>
+    <div className="relative @container/claude-accounts">
       <PageHeader
         title={t("claude.title")}
         description={t("claude.subtitle")}
         hideTitle={Boolean(headerSlot)}
         actionsBelow
         titleAdornment={headerSlot}
-        onRefresh={() => { void reload(); void loadAnalysis(); }}
         actions={
-          <div className="flex flex-wrap items-center gap-2">
-            <Button variant="outline" size="sm" onClick={() => setShowAnalysis((v) => !v)}>
-              <BarChart3 className="size-3.5" />
-              {showAnalysis ? t("usage.hideAnalysis") : t("usage.showAnalysis")}
+          <div className="flex w-full flex-wrap items-center gap-1.5 sm:gap-2 [&>button]:h-8">
+            <Button size="sm" className="min-w-0 sm:flex-none" onClick={() => openAdd("oauth")}>
+              <Plus className="size-3.5" />
+              {t("claude.addAccount")}
             </Button>
-            <Button variant="outline" size="sm" onClick={() => void handleRefreshAllModels()}>
-              {t("claude.refreshAllModels")}
+            <Button variant="outline" size="sm" className="size-8 p-0 md:w-auto md:px-2.5" title={t("claude.importCredentials")} aria-label={t("claude.importCredentials")} onClick={() => openAdd("import")}>
+              <Upload className="size-3.5" />
+              <span className="hidden md:inline">{t("claude.importCredentials")}</span>
             </Button>
             <Button
               variant="outline"
               size="sm"
-              disabled={exporting}
+              className="size-8 p-0 md:w-auto md:px-2.5"
+              title={selectedIds.length > 0 ? t("claude.exportSelected") : t("claude.exportAll")}
+              aria-label={selectedIds.length > 0 ? t("claude.exportSelected") : t("claude.exportAll")}
+              disabled={exporting || total === 0}
               onClick={() => void handleExport(selectedIds.length > 0 ? "selected" : "all")}
             >
               <Download className="size-3.5" />
-              {exporting ? t("claude.exporting") : selectedIds.length > 0 ? t("claude.exportSelected") : t("claude.exportAll")}
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => setShowManageGroups(true)}>
-              {t("claude.manageGroups")}
+              <span className="hidden md:inline">
+                {exporting ? t("claude.exporting") : selectedIds.length > 0 ? t("claude.exportSelected") : t("claude.exportAll")}
+              </span>
             </Button>
             <Button
               variant="outline"
-              onClick={() => {
-                setAddInitialTab("import");
-                setShowAdd(true);
-              }}
+              size="sm"
+              className={cn("size-8 p-0 sm:w-auto sm:px-2.5", showAnalysis && "border-primary/25 bg-primary/5 text-primary")}
+              aria-label={showAnalysis ? t("accounts.hideAnalysisCharts") : t("accounts.showAnalysisCharts")}
+              aria-pressed={showAnalysis}
+              title={showAnalysis ? t("accounts.hideAnalysisCharts") : t("accounts.showAnalysisCharts")}
+              onClick={() => setShowAnalysis((v) => !v)}
             >
-              <Upload className="size-3.5" />
-              {t("claude.importCredentials")}
+              <BarChart3 className="size-3.5" />
+              <span className="hidden sm:inline">
+                {showAnalysis ? t("accounts.hideAnalysisCharts") : t("accounts.showAnalysisCharts")}
+              </span>
             </Button>
+            <HeaderActionMenu
+              label={t("accounts.manageActions")}
+              icon={<SlidersHorizontal className="size-3.5" />}
+              align="end"
+              sections={manageSections}
+              compact
+            />
             <Button
-              onClick={() => {
-                setAddInitialTab("oauth");
-                setShowAdd(true);
-              }}
+              variant="outline"
+              size="icon-sm"
+              title={t("common.refresh")}
+              aria-label={t("common.refresh")}
+              disabled={loading}
+              onClick={() => { void reload(); void loadAnalysis(); }}
             >
-              {t("claude.addAccount")}
+              <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
             </Button>
           </div>
         }
       />
 
+      {loadError && accounts.length > 0 ? (
+        <div className="mb-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive" role="alert">
+          <span className="truncate">{loadError}</span>
+          <Button variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>
+        </div>
+      ) : null}
+      {loading && accounts.length > 0 ? (
+        <div className="mb-2 flex items-center justify-end gap-1.5 text-xs text-muted-foreground" role="status">
+          <Loader2 className="size-3 animate-spin" />
+          {t("common.loading")}
+        </div>
+      ) : null}
+
       {/* 统计卡(复用共享 CompactStat,与 Codex 同款:状态药丸 + 5h/7d·封禁/错误 details) */}
-      <div className="mb-4 grid grid-cols-2 gap-2 sm:gap-3 xl:grid-cols-5">
+      <div className="claude-stat-strip mb-4 flex snap-x gap-2 overflow-x-auto pb-1 @4xl/claude-accounts:grid @4xl/claude-accounts:grid-cols-5 @4xl/claude-accounts:gap-3 [&>button]:w-40 [&>button]:shrink-0 [&>button]:snap-start @4xl/claude-accounts:[&>button]:w-full">
         <CompactStat
           label={t("accounts.totalAccounts")}
           chipLabel={t("claude.statAll")}
@@ -1350,7 +1540,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
           value={summary?.normal ?? 0}
           tone="success"
           active={statusFilter === "normal"}
-          onClick={() => setStatusFilter(statusFilter === "normal" ? "all" : "normal")}
+          onClick={() => setStatusFilter("normal")}
         />
         <CompactStat
           label={t("accounts.schedulingAccounts")}
@@ -1358,7 +1548,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
           value={summary?.active ?? 0}
           tone="warning"
           active={statusFilter === "scheduling"}
-          onClick={() => setStatusFilter(statusFilter === "scheduling" ? "all" : "scheduling")}
+          onClick={() => setStatusFilter("scheduling")}
         />
         <CompactStat
           label={t("accounts.rateLimited")}
@@ -1370,7 +1560,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
             { label: "5h", value: summary?.rate_limited_5h ?? 0 },
             { label: "7d", value: summary?.rate_limited_7d ?? 0 },
           ]}
-          onClick={() => setStatusFilter(statusFilter === "rate_limited" ? "all" : "rate_limited")}
+          onClick={() => setStatusFilter("rate_limited")}
         />
         <CompactStat
           label={t("accounts.abnormalAccounts")}
@@ -1382,7 +1572,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
             { label: t("accounts.abnormalBannedShort"), value: summary?.banned ?? 0 },
             { label: t("accounts.abnormalErrorShort"), value: summary?.error ?? 0 },
           ]}
-          onClick={() => setStatusFilter(statusFilter === "abnormal" ? "all" : "abnormal")}
+          onClick={() => setStatusFilter("abnormal")}
         />
       </div>
 
@@ -1402,325 +1592,373 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
           <AccountRateLimitRecoveryChart analysis={analysis} compact className="min-w-0" />
         </div>
       ) : showAnalysis ? (
-        <div className="mb-4 rounded-xl border border-dashed border-border bg-muted/20 px-4 py-5 text-sm text-muted-foreground">
-          {analysisLoading ? t("common.loading") : analysisError ? (
-            <div className="flex flex-wrap items-center justify-between gap-3">
-              <span className="break-words">{analysisError}</span>
+        <div className="mb-4 flex min-h-28 items-center justify-center rounded-xl border border-dashed border-border bg-muted/20 px-4 text-sm text-muted-foreground">
+          {analysisError ? (
+            <div className="flex flex-wrap items-center justify-center gap-3 text-center">
+              <span>{analysisError}</span>
               <Button variant="outline" size="sm" onClick={() => void loadAnalysis()}>{t("common.retry")}</Button>
             </div>
-          ) : t("common.loading")}
+          ) : (
+            <span>{analysisLoading ? t("common.loading") : t("common.noData")}</span>
+          )}
         </div>
       ) : null}
 
-      {/* 统计芯片 */}
-      <div className="mb-3 flex flex-wrap items-center gap-1.5">
-        {statChips.map((chip) => {
-          const active = statusFilter === chip.id;
-          return (
-            <button
-              key={chip.id}
-              type="button"
-              onClick={() => setStatusFilter(chip.id)}
-              className={cn(
-                "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs font-semibold transition-colors",
-                active
-                  ? "border-primary/40 bg-primary/10 text-primary"
-                  : "border-border bg-muted/40 text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <span className={cn(!active && chip.tone)}>{chip.label}</span>
-              <span className="rounded-md bg-background/60 px-1 text-[10px] font-bold tabular-nums">{chip.count}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* 调度视图(点击按健康档过滤) */}
-      <div className="mb-3 flex flex-wrap items-center gap-3">
-        <span className="text-[11px] font-medium text-muted-foreground">{t("claude.schedulingView")}</span>
-        {healthChips.map((h) => {
-          const active = healthTier === h.id;
-          return (
-            <button
-              key={h.id}
-              type="button"
-              onClick={() => setHealthTier(active ? null : h.id)}
-              className={cn(
-                "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-xs transition-colors",
-                active ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
-              )}
-            >
-              <span className={cn("size-1.5 rounded-full", h.dot)} />
-              {h.label}
-              <span className="font-semibold tabular-nums text-foreground">{h.count}</span>
-            </button>
-          );
-        })}
-      </div>
-
-      {/* 套餐 Tab */}
-      {planTabs.length > 1 ? (
-        <div className="mb-2 flex flex-wrap items-center gap-1">
-          {planTabs.map((p) => {
-            const active = planFilter === p;
-            return (
+      {/* 搜索与状态共用一行;其余筛选按可用宽度排列,窄屏仍可按需展开。 */}
+      <div className="toolbar-surface mb-3 flex flex-col gap-2 px-3 py-2.5">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5">
+          <div className="relative min-w-0 flex-1 @4xl/claude-accounts:w-56 @4xl/claude-accounts:flex-none @6xl/claude-accounts:w-64">
+            <Search className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground/70" />
+            <Input
+              className="h-8 rounded-lg bg-background/70 pl-9 pr-8 text-[13px] shadow-none"
+              placeholder={t("claude.searchPlaceholder")}
+              aria-label={t("claude.searchPlaceholder")}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
+            {search ? (
+              <button type="button" className="absolute right-1.5 top-1/2 flex size-6 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50" aria-label={t("claude.clearSearch")} onClick={() => setSearch("")}>
+                <X className="size-3.5" />
+              </button>
+            ) : null}
+          </div>
+          <div className="order-last flex w-full min-w-0 items-center gap-0.5 overflow-x-auto @4xl/claude-accounts:order-none @4xl/claude-accounts:w-auto @4xl/claude-accounts:flex-1">
+            {statChips.map((chip) => (
               <button
-                key={p}
+                key={chip.id}
                 type="button"
-                onClick={() => setPlanFilter(p)}
+                aria-pressed={statusFilter === chip.id}
+                onClick={() => setStatusFilter(chip.id)}
                 className={cn(
-                  "rounded-md px-2 py-1 text-xs font-medium transition-colors",
-                  active ? "bg-primary text-primary-foreground" : "bg-muted/40 text-muted-foreground hover:text-foreground",
+                  "inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg px-2 py-1 text-xs font-medium outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50",
+                  statusFilter === chip.id
+                    ? "bg-primary/10 text-primary"
+                    : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
                 )}
               >
-                {p === "all" ? t("claude.planAll") : p}
+                {chip.label}
+                <span className={cn("min-w-4 rounded px-1 text-center text-[10px] tabular-nums", statusFilter === chip.id ? "bg-primary/10 text-primary" : "bg-muted/70 text-muted-foreground")}>
+                  {chip.count}
+                </span>
               </button>
-            );
-          })}
-        </div>
-      ) : null}
-
-      {/* 过滤条:OAuth/API + 分组 + 标签 + 域名 + 排序 + 搜索 */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <div className="inline-flex overflow-hidden rounded-md border border-border">
-          {authTabs.map((a) => (
-            <button
-              key={a.id}
-              type="button"
-              onClick={() => setAuthFilter(a.id)}
-              className={cn(
-                "px-2.5 py-1 text-xs font-medium transition-colors",
-                authFilter === a.id ? "bg-primary text-primary-foreground" : "bg-background text-muted-foreground hover:text-foreground",
-              )}
-            >
-              {a.label}
-              {typeof a.count === "number" ? <span className="ml-1 tabular-nums opacity-70">{a.count}</span> : null}
-            </button>
-          ))}
-        </div>
-
-        <AccountGroupFilterSelect
-          groups={claudeGroups}
-          value={groupFilter}
-          onChange={setGroupFilter}
-          className="w-40"
-        />
-
-        <Select
-          compact
-          className="w-32"
-          value={tagFilter}
-          onValueChange={setTagFilter}
-          options={[{ value: "all", label: t("claude.allTags") }, ...tags.map((tag) => ({ value: tag, label: tag }))]}
-        />
-
-        <Select
-          compact
-          className="w-36"
-          value={domainFilter}
-          onValueChange={setDomainFilter}
-          options={[
-            { value: "all", label: t("claude.allDomains") },
-            ...domains.map((d) => ({ value: d.domain, label: `${d.domain} (${d.total})` })),
-          ]}
-        />
-
-        <Select
-          compact
-          className="w-32"
-          value={sortKey}
-          onValueChange={(v) => setSortKey(v as SortKey)}
-          options={[
-            { value: "default", label: t("claude.sortDefault") },
-            { value: "group", label: t("claude.sortGroup") },
-            { value: "priority", label: t("claude.sortPriority") },
-            { value: "usage", label: t("claude.sortUsage") },
-            { value: "requests", label: t("claude.sortRequests") },
-            { value: "today", label: t("claude.sortToday") },
-          ]}
-        />
-
-        <button
-          type="button"
-          onClick={() => setHideDomainTags((v) => !v)}
-          className={cn(
-            "rounded-md border border-border px-2 py-1 text-xs transition-colors",
-            hideDomainTags ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
-          )}
-        >
-          {hideDomainTags ? t("claude.showDomainTags") : t("claude.hideDomainTags")}
-        </button>
-
-        <ColumnsMenu visible={visibleCols} onChange={setVisibleCols} />
-
-        <Input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder={t("claude.searchPlaceholder")}
-          className="h-8 max-w-xs flex-1"
-        />
-
-        {filtersActive ? (
-          <Button variant="ghost" size="sm" onClick={clearFilters}>
-            <X className="size-3.5" />
-            {t("claude.clearFilters")}
+            ))}
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            aria-expanded={showFilters}
+            aria-controls="claude-account-filters"
+            onClick={() => setShowFilters((current) => !current)}
+            className={cn("h-8 @4xl/claude-accounts:hidden", (showFilters || filtersActive) && "border-primary/25 bg-primary/5 text-primary")}
+          >
+            <SlidersHorizontal className="size-3.5" />
+            {t("accounts.filter")}
           </Button>
+          <div className="ml-auto shrink-0">
+            <ClaudeColumnSettingsMenu
+              columns={visibleCols}
+              onToggle={(column) => setVisibleCols((current) => ({ ...current, [column]: !current[column] }))}
+              onReset={() => setVisibleCols(defaultClaudeCols())}
+            />
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-border/50 pt-2">
+          <div className="flex min-h-8 min-w-0 max-w-full items-center gap-1 overflow-x-auto py-0.5">
+            <span className="mr-1 shrink-0 text-[11px] font-medium text-muted-foreground">{t("claude.schedulingView")}</span>
+            {healthChips.map((h) => (
+              <ClaudeSchedulerChip key={h.id} label={h.label} value={h.count} tone={h.tone} active={healthTier === h.id} onClick={() => setHealthTier(healthTier === h.id ? null : h.id)} />
+            ))}
+          </div>
+
+          <div id="claude-account-filters" className={cn("w-full flex-col gap-1.5 @4xl/claude-accounts:contents", showFilters ? "flex" : "hidden")}>
+            <div className="flex max-w-full flex-wrap items-center gap-1.5 @4xl/claude-accounts:ml-1">
+              {planTabs.length > 1 ? (
+                <div className={segmentGroupClass}>
+                  {planTabs.map((p) => (
+                    <button key={p} type="button" aria-pressed={planFilter === p} onClick={() => setPlanFilter(p)} className={segmentButtonClass(planFilter === p)}>{planLabel(p)}</button>
+                  ))}
+                </div>
+              ) : null}
+              <div className={segmentGroupClass}>
+                {authTabs.map((a) => (
+                  <button key={a.id} type="button" aria-pressed={authFilter === a.id} onClick={() => setAuthFilter(a.id)} className={segmentButtonClass(authFilter === a.id)}>
+                    {typeof a.count === "number" ? `${a.label} ${a.count}` : a.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 gap-1.5 @4xl/claude-accounts:contents">
+              <Select className="min-w-0 @4xl/claude-accounts:w-28" compact value={tagFilter} onValueChange={setTagFilter} options={[{ value: "all", label: t("accounts.tagsFilter") }, ...tags.map((tag) => ({ value: tag, label: tag }))]} />
+              <Select
+                className="min-w-0 @4xl/claude-accounts:w-36"
+                compact
+                value={domainFilter}
+                onValueChange={setDomainFilter}
+                options={[
+                  { value: "all", label: t("accounts.emailDomainFilter") },
+                  ...domains.map((d) => ({ value: d.domain, triggerLabel: d.domain, label: t("accounts.emailDomainFilterOption", { domain: d.domain, banned: d.banned, total: d.total }) })),
+                ]}
+              />
+              <AccountGroupFilterSelect className="min-w-0 @4xl/claude-accounts:w-32" groups={claudeGroups} value={groupFilter} onChange={setGroupFilter} />
+              <div className="flex min-w-0 items-center gap-1 @4xl/claude-accounts:w-36">
+                <Select
+                  className="min-w-0 flex-1"
+                  compact
+                  value={sortKey ?? "default"}
+                  onValueChange={(value) => {
+                    const next = value === "default" ? null : value as SortKey;
+                    setSortKey(next);
+                    setSortDir(next ? SORT_DEFAULT_DIR[next] : "desc");
+                  }}
+                  options={sortOptions}
+                />
+                {sortKey ? (
+                  <Button variant="ghost" size="icon-sm" className="text-primary" title={sortDir === "desc" ? t("claude.sortAscending") : t("claude.sortDescending")} aria-label={sortDir === "desc" ? t("claude.sortAscending") : t("claude.sortDescending")} onClick={() => setSortDir((current) => current === "desc" ? "asc" : "desc")}>
+                    {sortDir === "desc" ? <ArrowDown className="size-3.5" /> : <ArrowUp className="size-3.5" />}
+                  </Button>
+                ) : null}
+              </div>
+              <Button type="button" variant="ghost" size="sm" className="justify-start px-2 text-xs text-muted-foreground @4xl/claude-accounts:ml-auto" aria-pressed={!hideDomainTags} onClick={() => setHideDomainTags((v) => !v)}>
+                {hideDomainTags ? <Eye className="size-3.5" /> : <EyeOff className="size-3.5" />}
+                {hideDomainTags ? t("accounts.showEmailDomainTags") : t("accounts.hideEmailDomainTags")}
+              </Button>
+              <Button type="button" variant="ghost" size="sm" className="justify-start px-2 text-xs text-muted-foreground" onClick={() => setShowManageGroups(true)}>
+                <FolderOpen className="size-3.5" />{t("accounts.groupManage")}
+              </Button>
+            </div>
+          </div>
+        </div>
+
+        {filtersActive || sortKey !== null ? (
+          <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
+            {debouncedSearch ? (
+              <button type="button" onClick={() => setSearch("")} className={filterPillClass} title={debouncedSearch}>
+                <Search className="size-3 shrink-0" /><span className="max-w-40 truncate">{debouncedSearch}</span><X className="size-3 shrink-0" />
+              </button>
+            ) : null}
+            {sortKey !== null ? (
+              <button type="button" onClick={() => { setSortKey(null); setSortDir("desc"); }} className={filterPillClass} title={t("claude.sortDefault")}>
+                {sortDir === "desc" ? <ArrowDown className="size-3" /> : <ArrowUp className="size-3" />}
+                {sortOptions.find((option) => option.value === sortKey)?.label}<X className="size-3" />
+              </button>
+            ) : null}
+            {statusFilter !== "all" ? (
+              <button
+                type="button"
+                onClick={() => setStatusFilter("all")}
+                className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2.5 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15"
+              >
+                {statusLabelFor(statusFilter)}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            {healthTier !== null ? (
+              <button type="button" onClick={() => setHealthTier(null)} className={filterPillClass}>
+                {healthChips.find((h) => h.id === healthTier)?.label ?? healthTier}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            {planFilter !== "all" ? (
+              <button type="button" onClick={() => setPlanFilter("all")} className={filterPillClass}>
+                {planLabel(planFilter)}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            {authFilter !== "all" ? (
+              <button type="button" onClick={() => setAuthFilter("all")} className={filterPillClass}>
+                {authTabs.find((a) => a.id === authFilter)?.label ?? authFilter}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            {tagFilter !== "all" ? (
+              <button type="button" onClick={() => setTagFilter("all")} className={filterPillClass}>
+                {tagFilter}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            {domainFilter !== "all" ? (
+              <button type="button" onClick={() => setDomainFilter("all")} className={filterPillClass}>
+                {domainFilter}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            {!isAccountGroupFilterEmpty(groupFilter) ? (
+              <button type="button" onClick={() => setGroupFilter(EMPTY_ACCOUNT_GROUP_FILTER)} className={filterPillClass}>
+                {t("accounts.groupsLabel")}
+                <X className="size-3" />
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={clearFilters}
+              className="ml-auto text-[11px] font-medium text-muted-foreground transition-colors hover:text-foreground"
+            >
+              {t("accounts.clearFilters")}
+            </button>
+          </div>
         ) : null}
       </div>
 
-      {/* 批量操作条 */}
+      {/* 批量操作条(与 Codex 同款 sticky 玻璃条) */}
       {selectedIds.length > 0 ? (
-        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
-          <span className="font-semibold text-primary">{t("claude.selectedCount", { count: selectedIds.length })}</span>
-          <Button variant="ghost" size="sm" onClick={() => void runBatch({ enabled: true })}>
-            {t("claude.batchEnable")}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void runBatch({ enabled: false })}>
-            {t("claude.batchDisable")}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void runBatch({ locked: true })}>
-            {t("claude.batchLock")}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => void runBatch({ locked: false })}>
-            {t("claude.batchUnlock")}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
-            {t("claude.clearSelection")}
-          </Button>
+        <div className="sticky top-2 z-20 mb-4 flex items-center justify-between gap-3 rounded-xl border border-primary/20 bg-card/95 px-3 py-2 text-sm shadow-lg backdrop-blur-sm max-lg:flex-col max-lg:items-stretch">
+          <span className="font-semibold text-primary">{t("common.selected", { count: selectedIds.length })}</span>
+          <div className="flex flex-wrap items-center justify-end gap-1.5 max-lg:justify-start">
+            {!allPageSelected ? (
+              <Button variant="outline" size="sm" onClick={toggleSelectAll}>
+                <ListChecks className="size-3.5" />
+                <span>{t("accounts.selectCurrentPage")}</span>
+              </Button>
+            ) : null}
+            <Button variant="outline" size="sm" disabled={exporting} onClick={() => void handleExport("selected")}>
+              <Download className="size-3.5" />
+              <span className="hidden sm:inline">{t("claude.exportSelected")}</span>
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void runBatch({ enabled: true })}>
+              <Power className="size-3.5" />
+              <span className="hidden sm:inline">{t("accounts.enable")}</span>
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void runBatch({ enabled: false })}>
+              <PowerOff className="size-3.5" />
+              <span className="hidden sm:inline">{t("accounts.disable")}</span>
+            </Button>
+            <HeaderActionMenu
+              label={t("accounts.batchMore")}
+              icon={<MoreHorizontal className="size-3.5" />}
+              align="end"
+              compact
+              items={[
+                { key: "lock", label: t("accounts.lock"), icon: <Lock className="size-3.5" />, onSelect: () => void runBatch({ locked: true }) },
+                { key: "unlock", label: t("accounts.unlock"), icon: <Unlock className="size-3.5" />, onSelect: () => void runBatch({ locked: false }) },
+                { key: "delete", label: t("accounts.batchDelete"), icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: () => void handleBatchDelete() },
+              ]}
+            />
+            <Button variant="ghost" size="sm" onClick={() => setSelected(new Set())}>
+              {t("accounts.cancelSelection")}
+            </Button>
+          </div>
         </div>
       ) : null}
 
-      {/* 账号列表 */}
-      {loadError && accounts.length > 0 ? (
-        <div className="mb-3 flex items-center justify-between gap-3 rounded-lg border border-rose-500/30 bg-rose-500/5 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">
-          <span className="break-words">{loadError}</span>
-          <Button variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>
-        </div>
-      ) : null}
-      {loading && accounts.length === 0 ? (
-        <div className="py-16 text-center text-sm text-muted-foreground">{t("common.loading")}</div>
-      ) : loadError && accounts.length === 0 ? (
-        <div className="rounded-xl border border-rose-500/30 bg-rose-500/5 py-12 text-center text-sm text-rose-700 dark:text-rose-300">
-          <div>{loadError}</div>
-          <Button className="mt-3" variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>
-        </div>
-      ) : total === 0 && !filtersActive ? (
-        /* 空号池占位卡(与 Antigravity 页同款 StateShell):提示添加账号并直达授权弹窗 */
-        <StateShell
-          variant="page"
-          isEmpty
-          emptyIcon={<ChannelLogo channel="claude" size={30} />}
-          emptyTitle={t("claude.emptyTitle")}
-          emptyDescription={t("claude.emptyDescription")}
-          action={
-            <Button
-              onClick={() => {
-                setAddInitialTab("oauth");
-                setShowAdd(true);
+      {/* 账号列表(与 Codex 同款:Card > StateShell > data-table-shell > 共享 Table) */}
+      <Card>
+        <CardContent className="p-3 sm:p-4">
+          <StateShell
+            variant="section"
+            loading={loading && accounts.length === 0}
+            error={accounts.length === 0 ? loadError : null}
+            onRetry={() => void reload()}
+            isEmpty={accounts.length === 0}
+            emptyIcon={<ChannelLogo channel="claude" size={30} />}
+            emptyTitle={poolEmpty ? t("claude.emptyTitle") : t("claude.noMatchesTitle")}
+            emptyDescription={poolEmpty ? t("claude.emptyDescription") : t("claude.noMatchesDescription")}
+            action={
+              poolEmpty ? (
+                <Button onClick={() => openAdd("oauth")}>
+                  <Plus className="size-4" />
+                  {t("claude.addAccount")}
+                </Button>
+              ) : (
+                <Button variant="outline" onClick={clearFilters}>
+                  {t("claude.clearFilters")}
+                </Button>
+              )
+            }
+          >
+            <div className={cn("data-table-shell claude-account-table", accounts.length <= pageSize && "account-table-shell-fit-content")}>
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead className="w-10">
+                      <input
+                        type="checkbox"
+                        className="size-4 cursor-pointer accent-primary"
+                        checked={allPageSelected}
+                        onChange={toggleSelectAll}
+                        aria-label={t("accounts.selectAll")}
+                      />
+                    </TableHead>
+                    <TableHead className="text-[13px] font-semibold">{t("accounts.sequence")}</TableHead>
+                    <TableHead className="text-[13px] font-semibold">{t("accounts.email")}</TableHead>
+                    {visibleCols.tags ? <TableHead className="text-[13px] font-semibold">{t("accounts.tagsLabel")}</TableHead> : null}
+                    {visibleCols.groups ? (
+                      renderSortHead("group", t("accounts.groupsLabel"))
+                    ) : null}
+                    {visibleCols.proxy ? <TableHead className="text-[13px] font-semibold">{t("accounts.proxyColumn")}</TableHead> : null}
+                    {visibleCols.priority ? (
+                      renderSortHead("priority", t("accounts.schedulerPriorityColumn"))
+                    ) : null}
+                    {visibleCols.plan ? <TableHead className="text-[13px] font-semibold">{t("accounts.plan")}</TableHead> : null}
+                    {visibleCols.status ? <TableHead className="text-[13px] font-semibold">{t("accounts.status")}</TableHead> : null}
+                    {visibleCols.today ? (
+                      renderSortHead("today", t("accounts.todayStats"), t("accounts.todayStatsHint"))
+                    ) : null}
+                    {visibleCols.requests ? (
+                      renderSortHead("requests", t("accounts.requests"))
+                    ) : null}
+                    {visibleCols.usage ? (
+                      renderSortHead("usage", t("accounts.usage"))
+                    ) : null}
+                    {visibleCols.cost ? <TableHead className="text-[13px] font-semibold">{t("accounts.billed")}</TableHead> : null}
+                    {visibleCols.importTime ? (
+                      renderSortHead("importTime", t("accounts.importTime"))
+                    ) : null}
+                    {visibleCols.updatedAt ? <TableHead className="text-[13px] font-semibold">{t("accounts.updatedAt")}</TableHead> : null}
+                    <TableHead data-account-actions className="text-right text-xs font-medium">{t("accounts.actions")}</TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {displayRows.map((acc, idx) => (
+                    <ClaudeAccountRow
+                      key={acc.id}
+                      acc={acc}
+                      no={(page - 1) * pageSize + idx + 1}
+                      selected={selected.has(acc.id)}
+                      detailOpen={detailTarget?.id === acc.id}
+                      onToggleSelect={() => toggleSelect(acc.id)}
+                      groupMap={groupMap}
+                      healthBuckets={healthBars[String(acc.id)]}
+                      showDomainTags={!hideDomainTags}
+                      columns={visibleCols}
+                      proxyCtx={proxyBindingCtx}
+                      authJsonExporting={authJsonExportingIds.has(acc.id)}
+                      onEditProxy={() => setQuickProxyAccount(acc)}
+                      onRefresh={() => void handleRefresh(acc)}
+                      onRefreshModels={() => void handleRefreshModels(acc)}
+                      onExportOne={() => void handleExportOne(acc)}
+                      onToggleEnabled={() => void handleToggleEnabled(acc)}
+                      onToggleLock={() => void handleToggleLock(acc)}
+                      onResetStatus={() => void handleResetStatus(acc)}
+                      onAssignGroups={() => setAssignTarget(acc)}
+                      onUsage={() => setUsageTarget(acc)}
+                      onUsageRefreshed={() => handleRefreshUsage(acc)}
+                      onOpenDetail={() => void openDetail(acc)}
+                      onTest={() => setTestingTarget(acc)}
+                      onEdit={() => setEditTarget(acc)}
+                      onEditModels={() => void openModelsEditor(acc)}
+                      onDelete={() => void handleDelete(acc)}
+                    />
+                  ))}
+                </TableBody>
+              </Table>
+            </div>
+            <Pagination
+              page={page}
+              totalPages={totalPages}
+              onPageChange={setPage}
+              totalItems={total}
+              pageSize={pageSize}
+              onPageSizeChange={(next) => {
+                setPageSize(next);
+                setPage(1);
               }}
-            >
-              <Plus className="size-4" />
-              {t("claude.addAccount")}
-            </Button>
-          }
-        >
-          {null}
-        </StateShell>
-      ) : accounts.length === 0 ? (
-        <StateShell
-          variant="page"
-          isEmpty
-          emptyIcon={<ChannelLogo channel="claude" size={30} />}
-          emptyTitle={t("claude.noMatchesTitle")}
-          emptyDescription={t("claude.noMatchesDescription")}
-          action={
-            <Button variant="outline" onClick={clearFilters}>
-              {t("claude.clearFilters")}
-            </Button>
-          }
-        >
-          {null}
-        </StateShell>
-      ) : (
-        <div className="overflow-x-auto rounded-xl border border-border bg-card shadow-sm">
-          <table className="w-full border-collapse text-sm">
-            <thead>
-              <tr className="border-b border-border text-left text-[11px] font-semibold uppercase tracking-wide text-muted-foreground [&>th]:whitespace-nowrap">
-                <th className="w-10 px-3 py-2.5">
-                  <input
-                    type="checkbox"
-                    className="size-3.5 cursor-pointer accent-primary"
-                    checked={allSelected}
-                    onChange={toggleSelectAll}
-                    aria-label={t("accounts.selectAll")}
-                  />
-                </th>
-                <th className="px-2 py-2.5 text-center">{t("accounts.sequence")}</th>
-                <th className="px-2 py-2.5">{t("accounts.email")}</th>
-                {visibleCols.groups ? <th className="px-2 py-2.5 text-center">{t("accounts.groupsLabel")}</th> : null}
-                {visibleCols.proxy ? <th className="px-2 py-2.5 text-center">{t("accounts.proxyColumn")}</th> : null}
-                {visibleCols.priority ? <th className="px-2 py-2.5 text-center">{t("accounts.schedulerPriorityColumn")}</th> : null}
-                {visibleCols.plan ? <th className="px-2 py-2.5 text-center">{t("accounts.plan")}</th> : null}
-                {visibleCols.status ? <th className="px-2 py-2.5 text-center">{t("accounts.status")}</th> : null}
-                {visibleCols.today ? <th className="px-2 py-2.5 text-center">{t("claude.todayLabel")}</th> : null}
-                {visibleCols.requests ? <th className="px-2 py-2.5 text-center">{t("accounts.requests")}</th> : null}
-                {visibleCols.usage ? <th className="px-2 py-2.5 text-center">{t("accounts.usage")}</th> : null}
-                {visibleCols.cost ? <th className="px-2 py-2.5 text-center">{t("claude.costLabel")}</th> : null}
-                {visibleCols.importTime ? <th className="px-2 py-2.5 text-center">{t("accounts.importTime")}</th> : null}
-                {visibleCols.updatedAt ? <th className="px-2 py-2.5 text-center">{t("accounts.updatedAt")}</th> : null}
-                <th className="px-2 py-2.5 text-right">{t("accounts.actions")}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayRows.map((acc, idx) => (
-                <ClaudeAccountRow
-                  key={acc.id}
-                  acc={acc}
-                  no={(page - 1) * pageSize + idx + 1}
-                  selected={selected.has(acc.id)}
-                  onToggleSelect={() => toggleSelect(acc.id)}
-                  groupMap={groupMap}
-                  healthBuckets={healthBars[String(acc.id)]}
-                  hideDomainTags={hideDomainTags}
-                  columns={visibleCols}
-                  proxyCtx={proxyBindingCtx}
-                  onEditProxy={() => setQuickProxyAccount(acc)}
-                  onRefresh={() => void handleRefresh(acc)}
-                  onRefreshModels={() => void handleRefreshModels(acc)}
-                  onToggleEnabled={() => void handleToggleEnabled(acc)}
-                  onToggleLock={() => void handleToggleLock(acc)}
-                  onResetStatus={() => void handleResetStatus(acc)}
-                  onAssignGroups={() => setAssignTarget(acc)}
-                  onUsage={() => setUsageTarget(acc)}
-                  onUsageRefreshed={() => handleRefreshUsage(acc)}
-                  onOpenDetail={() => void openDetail(acc)}
-                  onTest={() => setTestingTarget(acc)}
-                  onEdit={() => setEditTarget(acc)}
-                  onEditModels={() => void openModelsEditor(acc)}
-                  onDelete={() => void handleDelete(acc)}
-                />
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {total > 0 ? (
-        <div className="mt-4">
-          <Pagination
-            page={page}
-            totalPages={totalPages}
-            onPageChange={setPage}
-            totalItems={total}
-            pageSize={pageSize}
-            onPageSizeChange={(next) => {
-              setPageSize(next);
-              setPage(1);
-            }}
-            pageSizeOptions={[10, 20, 50, 100]}
-          />
-        </div>
-      ) : null}
+              pageSizeOptions={[10, 20, 50, 100]}
+            />
+          </StateShell>
+        </CardContent>
+      </Card>
 
       {showAdd ? (
         <ClaudeAddModal
@@ -1803,9 +2041,9 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
           groups={(detailTarget.group_ids ?? []).map((id) => groupMap.get(id)).filter(Boolean) as AccountGroup[]}
           healthBuckets={healthBars[String(detailTarget.id)]}
           usageSlot={
-            <div className="space-y-1 rounded-xl border border-border bg-card p-3">
-              <UsageWindow label={t("claude.usage5h")} pct={claudeUsagePct(detailTarget.usage_percent_5h)} reset={detailTarget.reset_5h_at} resetLabel={t("claude.resetIn")} detail={detailTarget.usage_5h_detail} />
-              <UsageWindow label={t("claude.usage7d")} pct={claudeUsagePct(detailTarget.usage_percent_7d)} reset={detailTarget.reset_7d_at} resetLabel={t("claude.resetIn")} detail={detailTarget.usage_7d_detail} />
+            <div className="space-y-1.5 rounded-xl border border-border bg-card p-3">
+              <UsageWindow label={t("claude.usage5h")} pct={claudeUsagePct(detailTarget.usage_percent_5h)} reset={detailTarget.reset_5h_at} detail={detailTarget.usage_5h_detail} />
+              <UsageWindow label={t("claude.usage7d")} pct={claudeUsagePct(detailTarget.usage_percent_7d)} reset={detailTarget.reset_7d_at} detail={detailTarget.usage_7d_detail} />
               <ClaudeScopedUsageWindows windows={detailTarget.claude_usage_windows} />
             </div>
           }
@@ -1862,7 +2100,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
       ) : null}
 
       {testingTarget ? (
-        <ClaudeTestModal
+        <ClaudeConnectionTestModal
           account={testingTarget}
           onClose={() => setTestingTarget(null)}
           onSettled={handleClaudeTestSettled}
@@ -1887,20 +2125,27 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   );
 }
 
-// ── 号池模式表格行(视觉对齐 Codex Pool Mode 表格;数据取 Claude 真实链路) ──
+// ── 号池模式表格行(视觉对齐 Codex 表格行;数据取 Claude 真实链路) ──
+// 整行可点开详情;点到按钮/输入/菜单等交互元素时不触发,与 Codex 行为一致。
+const ROW_INTERACTIVE_SELECTOR =
+  'button, a, input, label, [role="menuitem"], [role="menu"], [data-slot="button"], [data-slot="select-trigger"]';
+
 function ClaudeAccountRow({
   acc,
   no,
   selected,
+  detailOpen,
   onToggleSelect,
   groupMap,
   healthBuckets,
-  hideDomainTags,
+  showDomainTags,
   columns,
   proxyCtx,
+  authJsonExporting,
   onEditProxy,
   onRefresh,
   onRefreshModels,
+  onExportOne,
   onToggleEnabled,
   onToggleLock,
   onResetStatus,
@@ -1916,15 +2161,18 @@ function ClaudeAccountRow({
   acc: AccountRow;
   no: number;
   selected: boolean;
+  detailOpen: boolean;
   onToggleSelect: () => void;
   groupMap: Map<number, AccountGroup>;
   healthBuckets?: AccountHealthBucket[];
-  hideDomainTags: boolean;
+  showDomainTags: boolean;
   columns: ClaudeColVisibility;
   proxyCtx: ProxyBindingContext;
+  authJsonExporting: boolean;
   onEditProxy: () => void;
   onRefresh: () => void;
   onRefreshModels: () => void;
+  onExportOne: () => void;
   onToggleEnabled: () => void;
   onToggleLock: () => void;
   onResetStatus: () => void;
@@ -1943,32 +2191,92 @@ function ClaudeAccountRow({
   const disabled = acc.enabled === false;
   const cooldownReason = (acc.status || "").toLowerCase().includes("rate") ? acc.error_message : "";
   const accGroups = (acc.group_ids || []).map((id) => groupMap.get(id)).filter(Boolean) as AccountGroup[];
-  const today = acc.usage_today_detail;
-  const billed5h = typeof acc.usage_5h_detail?.account_billed === "number" ? acc.usage_5h_detail.account_billed : 0;
-  const billed7d = typeof acc.usage_7d_detail?.account_billed === "number" ? acc.usage_7d_detail.account_billed : 0;
-  const todayBilled = typeof today?.account_billed === "number" ? today.account_billed : 0;
-  const created = formatShortDateTime(acc.created_at);
   const tableOverlayKind = resolveAccountOverlayKind(acc);
+  const tableOverlay = renderAccountStateOverlay(acc, t, {
+    compact: true,
+    markerOnly: true,
+    onRecover: onResetStatus,
+  });
+  const hasUsage =
+    pct5h !== null ||
+    pct7d !== null ||
+    hasWindowDetail(acc.usage_5h_detail) ||
+    hasWindowDetail(acc.usage_7d_detail) ||
+    (acc.claude_usage_windows ?? []).some((window) => window.model_scoped);
 
-  const iconBtn =
-    "inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground";
+  const rowMenuItems: HeaderActionMenuItem[] = [
+    { key: "edit", label: t("claude.editTitle"), icon: <Pencil className="size-3.5" />, onSelect: onEdit },
+    { key: "usage", label: t("accounts.usageDetail"), icon: <BarChart3 className="size-3.5" />, onSelect: onUsage },
+    { key: "test", label: t("accounts.testConnection"), icon: <Zap className="size-3.5" />, onSelect: onTest },
+    {
+      key: "refresh",
+      label: t("accounts.refreshAccessToken"),
+      icon: <RefreshCw className="size-3.5" />,
+      onSelect: onRefresh,
+    },
+    {
+      key: "export",
+      label: t("claude.exportCredential"),
+      icon: authJsonExporting ? <Loader2 className="size-3.5 animate-spin" /> : <FileJson className="size-3.5" />,
+      disabled: authJsonExporting,
+      onSelect: onExportOne,
+    },
+    {
+      key: "toggle-enabled",
+      label: disabled ? t("accounts.actionEnableScheduling") : t("accounts.actionDisableScheduling"),
+      icon: disabled ? <Power className="size-3.5" /> : <PowerOff className="size-3.5" />,
+      onSelect: onToggleEnabled,
+    },
+    {
+      key: "toggle-lock",
+      label: acc.locked ? t("accounts.actionUnlockAccount") : t("accounts.actionLockAccount"),
+      icon: acc.locked ? <Unlock className="size-3.5" /> : <Lock className="size-3.5" />,
+      onSelect: onToggleLock,
+    },
+    {
+      key: "reset-status",
+      label: acc.status === "overload_paused" ? t("accounts.overloadRecover") : t("accounts.resetStatus"),
+      icon: <RotateCcw className="size-3.5" />,
+      onSelect: onResetStatus,
+    },
+    {
+      key: "edit-models",
+      label: t("claude.modelsWhitelistAction"),
+      icon: <SlidersHorizontal className="size-3.5" />,
+      onSelect: onEditModels,
+    },
+    {
+      key: "refresh-models",
+      label: t("claude.refreshModels"),
+      icon: <RefreshCw className="size-3.5" />,
+      onSelect: onRefreshModels,
+    },
+    { key: "delete", label: t("accounts.deleteAccount"), icon: <Trash2 className="size-3.5" />, destructive: true, onSelect: onDelete },
+  ];
 
   return (
-    <tr
+    <TableRow
+      data-state={selected ? "selected" : undefined}
       className={cn(
-        "border-b border-border/60 align-middle transition-colors last:border-b-0 hover:bg-muted/30",
+        "cursor-pointer",
+        detailOpen ? "bg-primary/8" : selected ? "bg-primary/5" : "",
         accountStateTableRowClass(acc),
-        selected && "bg-primary/5",
       )}
+      onClick={(event) => {
+        const target = event.target as HTMLElement | null;
+        if (target?.closest(ROW_INTERACTIVE_SELECTOR)) return;
+        onOpenDetail();
+      }}
     >
       {/* 勾选 */}
-      <td className="px-3 py-3">
+      <TableCell>
         <div className="flex items-center gap-1">
           <input
             type="checkbox"
-            className="size-3.5 cursor-pointer accent-primary"
+            className="size-4 cursor-pointer accent-primary"
             checked={selected}
             onChange={onToggleSelect}
+            onClick={(event) => event.stopPropagation()}
             aria-label={acc.email || acc.name}
           />
           {!columns.status && tableOverlayKind ? (
@@ -1992,327 +2300,498 @@ function ClaudeAccountRow({
             </button>
           ) : null}
         </div>
-      </td>
+      </TableCell>
       {/* 序号 */}
-      <td className="px-2 py-3 text-center font-mono text-xs text-muted-foreground">{no}</td>
+      <TableCell className="text-[14px] font-mono text-muted-foreground" title={`ID ${acc.id}`}>
+        {no}
+      </TableCell>
       {/* 邮箱 */}
-      <td className="w-full min-w-[220px] px-2 py-3">
+      <TableCell className="min-w-[220px] whitespace-normal text-[14px] text-muted-foreground">
         <div className="flex min-w-0 items-center gap-2.5">
-          <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-orange-50 ring-1 ring-inset ring-orange-200 dark:bg-orange-950/70 dark:ring-orange-800">
-            <ChannelLogo channel="claude" size={20} />
+          <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-card ring-1 ring-border shadow-sm">
+            <ChannelLogo channel="claude" size={32} className="rounded-lg" />
           </span>
-          <div className="min-w-0">
+          <div className="flex min-w-0 flex-col items-start gap-1">
             <button
               type="button"
-              className="break-all text-left text-[13px] font-medium leading-snug text-foreground hover:text-primary"
+              className="break-all text-left font-medium text-foreground transition-colors hover:text-primary"
               title={t("accounts.openDetail")}
-              onClick={onOpenDetail}
+              onClick={(event) => {
+                event.stopPropagation();
+                onOpenDetail();
+              }}
             >
               {acc.email || acc.name || `#${acc.id}`}
             </button>
-            <div className="mt-0.5 flex flex-wrap items-center gap-1">
-              <span className="rounded bg-muted/70 px-1 py-0.5 font-mono text-[10px] text-muted-foreground">ID {acc.id}</span>
-              {acc.models?.length ? <span className="rounded bg-orange-500/10 px-1 py-0.5 text-[10px] text-orange-700 dark:text-orange-300">{t("claude.modelCount", { count: acc.models.length })}</span> : null}
-              {acc.last_used_at ? <span className="text-[10px] text-muted-foreground/70">{t("claude.lastUsed")}: {formatRelativeShort(acc.last_used_at, t)}</span> : null}
-              {!hideDomainTags && acc.email_domain ? (
-                <span className="rounded bg-muted/70 px-1 py-0.5 text-[10px] text-muted-foreground">@{acc.email_domain}</span>
-              ) : null}
-              {acc.locked ? (
-                <span className="inline-flex items-center rounded bg-blue-50 px-1 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
-                  <Lock className="mr-0.5 size-2.5" />
-                  {t("claude.statLocked")}
-                </span>
-              ) : null}
-            </div>
+            {showDomainTags && acc.email_domain ? (
+              <span
+                className="inline-flex max-w-full items-center break-all rounded-md bg-muted px-1.5 py-0.5 text-left text-[10px] font-medium leading-tight text-muted-foreground ring-1 ring-inset ring-border/80"
+                title={`${t("accounts.emailDomainSystemTag")}: @${acc.email_domain}`}
+              >
+                @{acc.email_domain}
+              </span>
+            ) : null}
+            {acc.locked || acc.models?.length || acc.last_used_at ? (
+              <div className="flex flex-wrap items-center gap-1">
+                {acc.locked ? (
+                  <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
+                    <Lock className="mr-0.5 size-2.5" />
+                    {t("accounts.lock")}
+                  </span>
+                ) : null}
+                {acc.models?.length ? (
+                  <button
+                    type="button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onEditModels();
+                    }}
+                    className="inline-flex items-center rounded-md bg-orange-50 px-1.5 py-0.5 text-[10px] font-medium text-orange-700 ring-1 ring-inset ring-orange-600/20 transition-colors hover:bg-orange-100 dark:bg-orange-950 dark:text-orange-300 dark:ring-orange-400/20 dark:hover:bg-orange-900"
+                    title={t("claude.modelsWhitelistAction")}
+                  >
+                    {t("claude.modelCount", { count: acc.models.length })}
+                  </button>
+                ) : null}
+                {acc.last_used_at ? (
+                  <span className="text-[10px] text-muted-foreground/70" title={formatShortDateTime(acc.last_used_at)?.title}>
+                    {t("claude.lastUsed")}: {formatRelativeShort(acc.last_used_at, t)}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
           </div>
         </div>
-      </td>
+      </TableCell>
+      {columns.tags ? (
+        <TableCell className="min-w-[120px]">
+          <ClaudeChipList items={acc.tags ?? []} />
+        </TableCell>
+      ) : null}
       {columns.groups ? (
-      <td className="min-w-[110px] px-2 py-3">
-        <div className="flex flex-wrap items-center justify-center gap-1">
-          {accGroups.map((g) => {
-            const color = normalizeGroupColor(g.color);
-            return (
-              <button
-                key={g.id}
-                type="button"
-                onClick={onAssignGroups}
-                className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold transition-opacity hover:opacity-85"
-                style={{ backgroundColor: `${color}14`, color, boxShadow: `inset 0 0 0 1px ${color}33` }}
-                title={g.description || g.name}
-              >
-                <span className="size-1.5 rounded-full bg-current" />
-                {g.name}
-              </button>
-            );
-          })}
-          <button
-            type="button"
-            onClick={onAssignGroups}
-            className="inline-flex items-center gap-1 rounded-md border border-dashed border-border px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary"
-          >
-            <Plus className="size-2.5" />
-            {t("claude.assignGroups")}
-          </button>
-        </div>
-      </td>
+        <TableCell className="min-w-[140px]">
+          <ClaudeGroupChipList groups={accGroups} onClick={onAssignGroups} emptyLabel={t("accounts.groupQuickEdit")} />
+        </TableCell>
       ) : null}
       {columns.proxy ? (
-      <td className="min-w-[120px] max-w-[180px] px-2 py-3">
-        <div className="flex items-center justify-center">
+        <TableCell className="min-w-[120px] max-w-[180px]">
           <AccountProxyBadge account={acc} ctx={proxyCtx} onClick={onEditProxy} />
-        </div>
-      </td>
+        </TableCell>
       ) : null}
       {columns.priority ? (
-      <td className="px-2 py-3 text-center">
-        <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] font-semibold text-muted-foreground" title={t("claude.priorityLabel")}>
-          P {acc.scheduler_priority ?? 0}
-        </span>
-      </td>
+        <TableCell>
+          <ClaudePriorityBadge acc={acc} />
+        </TableCell>
       ) : null}
       {columns.plan ? (
-      <td className="whitespace-nowrap px-2 py-3 text-center">
-        {acc.plan_type ? (
-          (() => {
-            const b = claudePlanBadge(acc.plan_type);
-            return <span className={b.cls}>{b.label}</span>;
-          })()
-        ) : (
-          <span className="text-xs text-muted-foreground/50">-</span>
-        )}
-      </td>
+        <TableCell>
+          <div className="flex flex-wrap items-center gap-1.5">
+            {acc.plan_type ? (
+              (() => {
+                const badge = claudePlanBadge(acc.plan_type);
+                return (
+                  <span className={cn("inline-flex min-w-0 max-w-full items-center truncate rounded-md px-2.5 py-1 text-[13px] font-semibold ring-1 ring-inset", badge.tone)}>
+                    {badge.label}
+                  </span>
+                );
+              })()
+            ) : (
+              <span className="text-[12px] text-muted-foreground">-</span>
+            )}
+            <ClaudeExpiryBadge expiresAt={acc.subscription_expires_at} planType={acc.plan_type} />
+          </div>
+        </TableCell>
       ) : null}
       {columns.status ? (
-      <td className="min-w-[170px] px-2 py-3">
-        <div className="flex flex-col items-center space-y-1.5">
-          {renderAccountStateOverlay(acc, t, {
-            compact: true,
-            markerOnly: true,
-            onRecover: acc.status === "overload_paused" ? onResetStatus : undefined,
-          }) ?? (
-            <>
-              <div className="flex flex-wrap items-center justify-center gap-1">
-				<StatusBadge status={getAccountStatusBadgeStatus(acc)} errorMessage={acc.error_message} detail={cooldownReason} />
+        <TableCell data-account-state-cell="status">
+          {tableOverlay ?? (
+            <div className="min-w-[168px] max-w-[240px] space-y-1.5">
+              <div className="flex min-h-6 flex-wrap items-center gap-1.5">
+                <StatusBadge status={getAccountStatusBadgeStatus(acc)} errorMessage={acc.error_message} detail={cooldownReason} />
                 <LiveCountdown until={acc.cooldown_until} label={t("claude.resetIn")} />
                 <ClaudeConcurrencyBadge acc={acc} />
                 {acc.claude_api ? (
-              <span
-                className={cn(
-                  "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
-                  acc.claude_usage_probe_error
-                    ? "bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950 dark:text-rose-300"
-                    : acc.claude_usage_probe_at
-                      ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300"
-                      : "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300",
-                )}
-                title={acc.claude_usage_probe_error || t("claude.samplingState.notSampled")}
-              >
-                {acc.claude_usage_probe_error
-                  ? t("claude.samplingState.error")
-                  : acc.claude_usage_probe_at
-                    ? t("claude.samplingState.sampled")
-                    : t("claude.samplingState.unsampled")}
-              </span>
+                  <span
+                    className={cn(
+                      "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
+                      acc.claude_usage_probe_error
+                        ? "bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950 dark:text-rose-300"
+                        : acc.claude_usage_probe_at
+                          ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300"
+                          : "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300",
+                    )}
+                    title={acc.claude_usage_probe_error || t("claude.samplingState.notSampled")}
+                  >
+                    {acc.claude_usage_probe_error
+                      ? t("claude.samplingState.error")
+                      : acc.claude_usage_probe_at
+                        ? t("claude.samplingState.sampled")
+                        : t("claude.samplingState.unsampled")}
+                  </span>
                 ) : null}
               </div>
               {acc.claude_api ? (
-                <div className="text-[10px] text-muted-foreground" title={acc.claude_usage_probe_error || undefined}>
+                <div className="truncate text-[11px] text-muted-foreground" title={acc.claude_usage_probe_error || undefined}>
                   {t("claude.lastSample")}: {acc.claude_usage_probe_at ? formatRelativeShort(acc.claude_usage_probe_at, t) : t("claude.samplingState.notSampled")}
                   {acc.claude_usage_probe_error ? ` · ${acc.claude_usage_probe_error}` : ""}
                 </div>
               ) : null}
               <AccountHealthBar buckets={healthBuckets} />
-            </>
+            </div>
           )}
-        </div>
-      </td>
+        </TableCell>
       ) : null}
       {columns.today ? (
-      <td className="px-2 py-3 text-center">
-        {today ? (
-          <div className="inline-flex flex-col items-center space-y-1 whitespace-nowrap text-[12px] tabular-nums">
-            <div className="flex items-center gap-1.5">
-              <span className={cn("inline-flex items-center gap-0.5", (today.requests ?? 0) > 0 ? "font-semibold text-foreground" : "text-muted-foreground/50")}>
-                <Activity className={cn("size-3", (today.requests ?? 0) > 0 ? "text-sky-500" : "text-muted-foreground/40")} aria-hidden />
-                {(today.requests ?? 0).toLocaleString()}
-              </span>
-              <span className={cn("inline-flex items-center gap-0.5", (today.tokens ?? 0) > 0 ? "font-semibold text-foreground" : "text-muted-foreground/50")}>
-                <Sparkles className={cn("size-3", (today.tokens ?? 0) > 0 ? "text-purple-500 dark:text-purple-400" : "text-muted-foreground/40")} aria-hidden />
-                {formatCompactNum(today.tokens)}
-              </span>
-            </div>
-            <span
-              className={cn(
-                "inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 font-mono text-[10px] ring-1 ring-inset",
-                todayBilled > 0
-                  ? "bg-emerald-500/10 font-medium text-emerald-700 ring-emerald-500/20 dark:text-emerald-400"
-                  : "bg-slate-500/10 text-slate-500 ring-slate-500/20 dark:text-slate-400",
-              )}
-            >
-              <Coins className={cn("size-2.5", todayBilled > 0 ? "text-emerald-500" : "opacity-50")} aria-hidden />
-              ${todayBilled > 0 ? (todayBilled < 0.01 ? "<0.01" : todayBilled.toFixed(2)) : "0.00"}
-            </span>
-          </div>
-        ) : (
-          <span className="font-mono text-xs text-muted-foreground/40">-</span>
-        )}
-      </td>
+        <TableCell>
+          <ClaudeTodayStatsCell acc={acc} />
+        </TableCell>
       ) : null}
       {columns.requests ? (
-      <td className="px-2 py-3 text-center">
-        <div className="flex justify-center">
+        <TableCell>
           <RequestCountPills account={acc} compact />
-        </div>
-      </td>
+        </TableCell>
       ) : null}
       {columns.usage ? (
-      <td className="px-2 py-3">
-        <div className="flex items-center justify-center gap-1.5">
-          <div className="min-w-0 space-y-1">
-            {pct5h !== null || pct7d !== null || acc.usage_5h_detail || acc.usage_7d_detail || (acc.claude_usage_windows ?? []).some((window) => window.model_scoped) ? (
-              <>
-                <UsageWindow label={t("claude.usage5h")} pct={pct5h} reset={acc.reset_5h_at} resetLabel={t("claude.resetIn")} detail={acc.usage_5h_detail} />
-                <UsageWindow label={t("claude.usage7d")} pct={pct7d} reset={acc.reset_7d_at} resetLabel={t("claude.resetIn")} detail={acc.usage_7d_detail} />
+        <TableCell>
+          {hasUsage ? (
+            <div className="flex w-56 items-start gap-1">
+              <div className="w-[188px] space-y-1.5">
+                <UsageWindow label={t("claude.usage5h")} pct={pct5h} reset={acc.reset_5h_at} detail={acc.usage_5h_detail} />
+                <UsageWindow label={t("claude.usage7d")} pct={pct7d} reset={acc.reset_7d_at} detail={acc.usage_7d_detail} />
                 <ClaudeScopedUsageWindows windows={acc.claude_usage_windows} />
-              </>
-            ) : (
-              <span className="text-xs text-muted-foreground/50">-</span>
-            )}
-          </div>
-          <UsageRefreshButton onRefresh={onUsageRefreshed} title={t("accounts.refreshUsage")} />
-        </div>
-      </td>
+              </div>
+              <UsageRefreshButton onRefresh={onUsageRefreshed} title={t("accounts.refreshUsage")} />
+            </div>
+          ) : (
+            <div className="flex items-center gap-1">
+              <span className="text-[13px] text-muted-foreground">-</span>
+              <UsageRefreshButton onRefresh={onUsageRefreshed} title={t("accounts.refreshUsage")} />
+            </div>
+          )}
+        </TableCell>
       ) : null}
       {columns.cost ? (
-      <td className="px-2 py-3 text-center">
-        <span className="inline-flex items-center whitespace-nowrap rounded-md bg-muted/60 px-1.5 py-0.5 font-mono text-[10px] tabular-nums text-muted-foreground">
-          5h: ${billed5h.toFixed(2)} / 7d: ${billed7d.toFixed(2)}
-        </span>
-      </td>
+        <TableCell className="whitespace-nowrap text-[13px] text-muted-foreground">
+          <ClaudeBilledCell acc={acc} />
+        </TableCell>
       ) : null}
       {columns.importTime ? (
-      <td className="whitespace-nowrap px-2 py-3 text-center text-xs tabular-nums text-muted-foreground" title={created?.title}>
-        {created?.label ?? "-"}
-      </td>
+        <TableCell className="whitespace-nowrap text-[13px] text-muted-foreground">
+          {formatBeijingTime(acc.created_at)}
+        </TableCell>
       ) : null}
       {columns.updatedAt ? (
-      <td className="whitespace-nowrap px-2 py-3 text-center text-xs text-muted-foreground">{formatRelativeShort(acc.updated_at, t)}</td>
+        <TableCell className="whitespace-nowrap text-[13px] text-muted-foreground">
+          {formatRelativeTime(acc.updated_at)}
+        </TableCell>
       ) : null}
       {/* 操作 */}
-      <td className="px-2 py-3">
+      <TableCell data-account-actions className="text-right">
         <div className="flex items-center justify-end gap-0.5">
-          <button type="button" className={iconBtn} onClick={onEdit} title={t("claude.editTitle")} aria-label={t("claude.editTitle")}>
+          <div className="hidden items-center gap-0.5 @4xl/claude-accounts:flex">
+          <Button variant="ghost" size="icon-sm" className="size-8" onClick={onEdit} title={t("claude.editTitle")} aria-label={t("claude.editTitle")}>
             <Pencil className="size-3.5" />
-          </button>
-          <button type="button" className={iconBtn} onClick={onUsage} title={t("accounts.actionUsageDetail")} aria-label={t("accounts.actionUsageDetail")}>
+          </Button>
+          <Button variant="ghost" size="icon-sm" className="size-8" onClick={onUsage} title={t("accounts.usageDetail")} aria-label={t("accounts.usageDetail")}>
             <BarChart3 className="size-3.5" />
-          </button>
-          <button type="button" className={iconBtn} onClick={onTest} title={t("accounts.testConnection")} aria-label={t("accounts.testConnection")}>
-            <FlaskConical className="size-3.5" />
-          </button>
-          <button type="button" className={iconBtn} onClick={onEditModels} title={t("claude.modelsWhitelistAction")} aria-label={t("claude.modelsWhitelistAction")}>
-            <SlidersHorizontal className="size-3.5" />
-          </button>
-          <button type="button" className={iconBtn} onClick={onRefreshModels} title={t("claude.refreshModels")} aria-label={t("claude.refreshModels")}>
-            <RefreshCw className="size-3.5" />
-          </button>
-          <button
-            type="button"
-            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-rose-500/10 hover:text-rose-600 dark:hover:text-rose-400"
-            onClick={onDelete}
-            title={t("common.delete")}
-            aria-label={t("common.delete")}
-          >
-            <Trash2 className="size-3.5" />
-          </button>
-          <RowOverflowMenu
-            items={[
-              { key: "refresh", label: t("common.refresh"), onClick: onRefresh },
-              { key: "reset", label: t("claude.resetStatus"), onClick: onResetStatus },
-              { key: "lock", label: acc.locked ? t("claude.unlock") : t("claude.lock"), onClick: onToggleLock },
-              { key: "toggle", label: disabled ? t("claude.enable") : t("claude.disable"), onClick: onToggleEnabled },
-            ]}
+          </Button>
+          <Button variant="ghost" size="icon-sm" className="size-8" onClick={onTest} title={t("accounts.testConnection")} aria-label={t("accounts.testConnection")}>
+            <Zap className="size-3.5" />
+          </Button>
+          </div>
+          <HeaderActionMenu
+            label={t("accounts.rowActions")}
+            icon={<MoreHorizontal className="size-3.5" />}
+            align="end"
+            compact
+            items={rowMenuItems}
+            triggerVariant="ghost"
           />
         </div>
-      </td>
-    </tr>
+      </TableCell>
+    </TableRow>
   );
 }
 
-// ColumnsMenu 列显隐下拉(与 Codex 的列控制一致):勾选切换,状态持久化到 localStorage。
-function ColumnsMenu({
-  visible,
-  onChange,
+// ClaudeSchedulerChip 调度视图药丸(与 Codex SchedulerChip 同款外观);Claude 页保留点击按健康档过滤。
+function ClaudeSchedulerChip({
+  label,
+  value,
+  tone,
+  active,
+  onClick,
 }: {
-  visible: ClaudeColVisibility;
-  onChange: (next: ClaudeColVisibility) => void;
+  label: string;
+  value: number;
+  tone: "neutral" | "success" | "warning" | "danger";
+  active: boolean;
+  onClick: () => void;
 }) {
-  const { t } = useTranslation();
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onEsc);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onEsc);
-    };
-  }, [open]);
-
-  const labelFor: Record<ClaudeCol, string> = {
-    groups: t("accounts.groupsLabel"),
-    proxy: t("accounts.proxyColumn"),
-    priority: t("accounts.schedulerPriorityColumn"),
-    plan: t("accounts.plan"),
-    status: t("accounts.status"),
-    today: t("claude.todayLabel"),
-    requests: t("accounts.requests"),
-    usage: t("accounts.usage"),
-    cost: t("claude.costLabel"),
-    importTime: t("accounts.importTime"),
-    updatedAt: t("accounts.updatedAt"),
-  };
-  const hiddenCount = CLAUDE_TOGGLE_COLUMNS.filter((c) => !visible[c]).length;
-
+  const toneStyle = {
+    neutral: "bg-muted text-muted-foreground",
+    success: "bg-emerald-500/10 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300",
+    warning: "bg-amber-500/10 text-amber-700 dark:bg-amber-500/15 dark:text-amber-300",
+    danger: "bg-red-500/10 text-red-700 dark:bg-red-500/15 dark:text-red-300",
+  }[tone];
+  const dotStyle = {
+    neutral: "bg-slate-400",
+    success: "bg-emerald-500",
+    warning: "bg-amber-500",
+    danger: "bg-red-500",
+  }[tone];
   return (
-    <div ref={rootRef} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((v) => !v)}
-        className="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-xs text-muted-foreground transition-colors hover:text-foreground"
-        aria-expanded={open}
+    <button
+      type="button"
+      aria-pressed={active}
+      onClick={onClick}
+      className={cn(
+        "inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full px-2 text-[11px] font-medium transition-shadow",
+        toneStyle,
+        active ? "ring-2 ring-primary/40" : "hover:ring-1 hover:ring-border",
+      )}
+    >
+      <span className={cn("size-1.5 rounded-full", dotStyle)} />
+      <span>{label}</span>
+      <span className="tabular-nums">{value}</span>
+    </button>
+  );
+}
+
+// ClaudePriorityBadge 调度优先级徽章(与 Codex SchedulerPriorityBadge 同款:正数蓝/负数琥珀/零灰)。
+function ClaudePriorityBadge({ acc }: { acc: AccountRow }) {
+  const { t } = useTranslation();
+  const raw = acc.scheduler_priority;
+  const priority = typeof raw === "number" && Number.isFinite(raw) ? Math.trunc(raw) : 0;
+  const value = priority > 0 ? `+${priority}` : String(priority);
+  const tone =
+    priority > 0
+      ? "border-blue-500/25 bg-blue-500/10 text-blue-700 dark:text-blue-300"
+      : priority < 0
+        ? "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300"
+        : "border-border bg-muted/40 text-muted-foreground";
+  return (
+    <span
+      className={cn("inline-flex shrink-0 items-center rounded-md border px-1.5 py-0.5 text-[10px] font-semibold tabular-nums", tone)}
+      title={t("accounts.schedulerPriorityBadgeTitle", { value })}
+    >
+      P {value}
+    </span>
+  );
+}
+
+// ClaudeExpiryBadge 订阅到期提醒(与 Codex ExpiryBadge 同款阈值:≤3d 红、≤7d 琥珀、已过期灰)。
+function ClaudeExpiryBadge({ expiresAt, planType }: { expiresAt?: string; planType?: string }) {
+  const { t, i18n } = useTranslation();
+  if (!expiresAt) return null;
+  const plan = (planType || "").toLowerCase().trim();
+  if (plan === "" || plan === "free") return null;
+  const timestamp = Date.parse(expiresAt);
+  if (Number.isNaN(timestamp)) return null;
+  const days = Math.floor((timestamp - Date.now()) / 86_400_000);
+  const localDate = new Date(timestamp).toLocaleDateString(i18n.language);
+  if (days < 0) {
+    return (
+      <span
+        title={t("accounts.subscriptionExpiredTitle", { date: localDate })}
+        className="inline-flex items-center rounded-md bg-zinc-200 px-1.5 py-0.5 text-[11px] font-medium text-zinc-700 ring-1 ring-inset ring-zinc-400/30 dark:bg-zinc-700/50 dark:text-zinc-300 dark:ring-zinc-500/30"
       >
-        <Columns3 className="size-3.5" />
-        {t("claude.columns")}
-        {hiddenCount > 0 ? <span className="tabular-nums opacity-70">({hiddenCount})</span> : null}
-      </button>
-      {open ? (
-        <div className="absolute right-0 top-full z-40 mt-1 w-44 overflow-hidden rounded-lg border border-border bg-popover py-1 shadow-lg">
-          {CLAUDE_TOGGLE_COLUMNS.map((c) => (
-            <label key={c} className="flex cursor-pointer items-center gap-2 px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-muted">
-              <input
-                type="checkbox"
-                checked={visible[c]}
-                onChange={() => onChange({ ...visible, [c]: !visible[c] })}
-              />
-              {labelFor[c]}
-            </label>
-          ))}
-        </div>
+        {t("accounts.subscriptionExpiredDays", { days: -days })}
+      </span>
+    );
+  }
+  if (days <= 3) {
+    return (
+      <span
+        title={t("accounts.subscriptionExpiresTitle", { date: localDate })}
+        className="inline-flex items-center rounded-md bg-red-100 px-1.5 py-0.5 text-[11px] font-semibold text-red-700 ring-1 ring-inset ring-red-500/30 dark:bg-red-500/20 dark:text-red-300 dark:ring-red-400/30"
+      >
+        {days === 0 ? t("accounts.subscriptionExpiresToday") : t("accounts.subscriptionExpiresDays", { days })}
+      </span>
+    );
+  }
+  if (days <= 7) {
+    return (
+      <span
+        title={t("accounts.subscriptionExpiresTitle", { date: localDate })}
+        className="inline-flex items-center rounded-md bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30"
+      >
+        {t("accounts.subscriptionExpiresDays", { days })}
+      </span>
+    );
+  }
+  return null;
+}
+
+// ClaudeChipList 标签芯片(与 Codex ChipList 同款:最多 3 个 + N,弱化配色不抢状态色)。
+function ClaudeChipList({ items }: { items: string[] }) {
+  if (items.length === 0) return null;
+  const visible = items.slice(0, 3);
+  const hidden = items.length - visible.length;
+  return (
+    <div className="flex flex-wrap gap-1">
+      {visible.map((item) => (
+        <span key={item} className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground ring-1 ring-inset ring-border/80">
+          {item}
+        </span>
+      ))}
+      {hidden > 0 ? (
+        <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">+{hidden}</span>
       ) : null}
     </div>
   );
 }
 
-// UsageRefreshButton 用量刷新按钮:点击时旋转动画,请求完成后停止(与全站刷新按钮一致)。
+// ClaudeGroupChipList 分组芯片(与 Codex GroupChipList 同款:最多 3 个 + N,悬停出铅笔,空态虚线快捷入口)。
+function ClaudeGroupChipList({
+  groups,
+  onClick,
+  emptyLabel,
+}: {
+  groups: AccountGroup[];
+  onClick: () => void;
+  emptyLabel: string;
+}) {
+  const visible = groups.slice(0, 3);
+  const hidden = groups.length - visible.length;
+  return (
+    <button type="button" className="group flex flex-wrap items-center gap-1 text-left" onClick={onClick} title={emptyLabel}>
+      {groups.length === 0 ? (
+        <span className="inline-flex items-center gap-1 rounded-md border border-dashed border-border px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
+          <Plus className="size-2.5" />
+          {emptyLabel}
+        </span>
+      ) : null}
+      {visible.map((group) => {
+        const color = normalizeGroupColor(group.color);
+        return (
+          <span
+            key={group.id}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-semibold"
+            style={{ backgroundColor: `${color}14`, color, boxShadow: `inset 0 0 0 1px ${color}33` }}
+            title={group.description || group.name}
+          >
+            <span className="size-1.5 rounded-full bg-current" />
+            {group.name}
+          </span>
+        );
+      })}
+      {hidden > 0 ? (
+        <span className="inline-flex items-center rounded-md bg-muted px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">+{hidden}</span>
+      ) : null}
+      {groups.length > 0 ? (
+        <Pencil className="mt-0.5 size-3 text-muted-foreground opacity-60 transition-opacity group-hover:opacity-100" />
+      ) : null}
+    </button>
+  );
+}
+
+// ClaudeTodayStatsCell 今日统计(与 Codex TodayStatsCell 同款:req/tok 两列 + 成本胶囊)。
+function ClaudeTodayStatsCell({ acc }: { acc: AccountRow }) {
+  const { t } = useTranslation();
+  const detail = acc.usage_today_detail;
+  if (!detail) return <span className="text-[12px] font-mono text-muted-foreground/40">-</span>;
+  const requests = detail.requests ?? 0;
+  const tokens = detail.tokens ?? 0;
+  const billed = typeof detail.account_billed === "number" ? detail.account_billed : 0;
+  const tooltip = [
+    `${t("accounts.todayStats")}:`,
+    `Requests: ${requests.toLocaleString()} req`,
+    `Tokens: ${tokens.toLocaleString()} tok`,
+    `${t("accounts.accountBilledLabel")}: $${billed.toFixed(4)}`,
+  ].join("\n");
+  return (
+    <div className="flex flex-col items-start gap-1 whitespace-nowrap text-[12px] tabular-nums" title={tooltip}>
+      <div className="flex items-center gap-2">
+        <span className={cn("inline-flex items-center gap-1", requests > 0 ? "font-semibold text-foreground" : "font-normal text-muted-foreground/50")}>
+          <Activity className={cn("size-3 shrink-0", requests > 0 ? "text-sky-500" : "text-muted-foreground/40")} aria-hidden />
+          <span>{requests > 0 ? requests.toLocaleString() : 0}</span>
+          <span className="text-[11px] font-normal text-muted-foreground/60">{t("accounts.usageReqUnit")}</span>
+        </span>
+        <span className={cn("inline-flex items-center gap-1", tokens > 0 ? "font-semibold text-foreground" : "font-normal text-muted-foreground/50")}>
+          <Sparkles className={cn("size-3 shrink-0", tokens > 0 ? "text-purple-500 dark:text-purple-400" : "text-muted-foreground/40")} aria-hidden />
+          <span>{formatCompactNum(tokens)}</span>
+          <span className="text-[11px] font-normal text-muted-foreground/60">{t("accounts.usageTokUnit")}</span>
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5 text-[11px]">
+        {billed > 0 ? (
+          <span
+            className="inline-flex items-center gap-1 rounded-md bg-emerald-500/10 px-1.5 py-0.5 font-mono text-[11px] font-medium tabular-nums text-emerald-700 ring-1 ring-inset ring-emerald-500/20 dark:text-emerald-400"
+            title={t("accounts.accountBilledLabel")}
+          >
+            <Coins className="size-3 shrink-0 text-emerald-500" aria-hidden />
+            ${billed < 0.01 ? "<0.01" : billed.toFixed(2)}
+          </span>
+        ) : (
+          <span
+            className="inline-flex items-center gap-1 rounded-md bg-slate-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-slate-500 ring-1 ring-inset ring-slate-500/20 dark:text-slate-400"
+            title={t("accounts.accountBilledLabel")}
+          >
+            <Coins className="size-3 shrink-0 opacity-50" aria-hidden />
+            $0.00
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ClaudeBilledCell 成本列(与 Codex BilledCell 的网关口径胶囊同款:5h / 7d 账号侧计费)。
+function ClaudeBilledCell({ acc }: { acc: AccountRow }) {
+  const { t } = useTranslation();
+  const h5 = typeof acc.usage_5h_detail?.account_billed === "number" ? acc.usage_5h_detail.account_billed.toFixed(2) : null;
+  const d7 = typeof acc.usage_7d_detail?.account_billed === "number" ? acc.usage_7d_detail.account_billed.toFixed(2) : null;
+  if (h5 === null && d7 === null) return <span className="text-[12px] text-muted-foreground">-</span>;
+  return (
+    <span
+      className="inline-flex items-center gap-1 whitespace-nowrap rounded-md bg-slate-500/10 px-1.5 py-0.5 font-mono text-[11px] tabular-nums text-slate-700 ring-1 ring-inset ring-slate-500/20 dark:text-slate-300"
+      title={t("accounts.billedGatewayHint")}
+    >
+      <Wallet className="size-3 shrink-0" aria-hidden />
+      {h5 !== null ? `5h: $${h5}` : null}
+      {h5 !== null && d7 !== null ? " / " : null}
+      {d7 !== null ? `7d: $${d7}` : null}
+    </span>
+  );
+}
+
+function ClaudeColumnSettingsMenu({
+  columns,
+  onToggle,
+  onReset,
+}: {
+  columns: ClaudeColVisibility;
+  onToggle: (column: ClaudeCol) => void;
+  onReset: () => void;
+}) {
+  const { t } = useTranslation();
+  const labelFor: Record<ClaudeCol, string> = {
+    tags: t("accounts.tagsLabel"),
+    groups: t("accounts.groupsLabel"),
+    proxy: t("accounts.proxyColumn"),
+    priority: t("accounts.schedulerPriorityColumn"),
+    plan: t("accounts.plan"),
+    status: t("accounts.status"),
+    today: t("accounts.todayStats"),
+    requests: t("accounts.requests"),
+    usage: t("accounts.usage"),
+    cost: t("accounts.billed"),
+    importTime: t("accounts.importTime"),
+    updatedAt: t("accounts.updatedAt"),
+  };
+  return (
+    <ColumnSettingsMenu
+      columns={columns}
+      columnOrder={CLAUDE_TOGGLE_COLUMNS}
+      labels={labelFor}
+      onToggle={onToggle}
+      onReset={onReset}
+      title={t("accounts.columnSettings")}
+      resetTitle={t("accounts.columnReset")}
+    />
+  );
+}
+
+// UsageRefreshButton 用量刷新按钮:点击时旋转动画,请求完成后停止(与 Codex 用量列的刷新按钮一致)。
 function UsageRefreshButton({ onRefresh, title }: { onRefresh: () => void | Promise<void>; title: string }) {
   const [spinning, setSpinning] = useState(false);
   return (
@@ -2321,7 +2800,8 @@ function UsageRefreshButton({ onRefresh, title }: { onRefresh: () => void | Prom
       title={title}
       aria-label={title}
       disabled={spinning}
-      onClick={async () => {
+      onClick={async (event) => {
+        event.stopPropagation();
         setSpinning(true);
         try {
           await onRefresh();
@@ -2329,86 +2809,10 @@ function UsageRefreshButton({ onRefresh, title }: { onRefresh: () => void | Prom
           setSpinning(false);
         }
       }}
-      className="mt-0.5 shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-60"
+      className="shrink-0 rounded p-0.5 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
     >
       <RefreshCw className={cn("size-3", spinning && "animate-spin")} />
     </button>
-  );
-}
-
-// RowOverflowMenu "…" 溢出菜单:表格在 overflow 容器内,菜单用 fixed 定位避免被裁剪。
-function RowOverflowMenu({
-  items,
-}: {
-  items: Array<{ key: string; label: string; onClick: () => void; danger?: boolean }>;
-}) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; right: number } | null>(null);
-  const btnRef = useRef<HTMLButtonElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const close = () => setOpen(false);
-    const onDown = (e: MouseEvent) => {
-      if (!menuRef.current?.contains(e.target as Node) && !btnRef.current?.contains(e.target as Node)) close();
-    };
-    const onEsc = (e: KeyboardEvent) => {
-      if (e.key === "Escape") close();
-    };
-    document.addEventListener("mousedown", onDown);
-    document.addEventListener("keydown", onEsc);
-    window.addEventListener("scroll", close, true);
-    window.addEventListener("resize", close);
-    return () => {
-      document.removeEventListener("mousedown", onDown);
-      document.removeEventListener("keydown", onEsc);
-      window.removeEventListener("scroll", close, true);
-      window.removeEventListener("resize", close);
-    };
-  }, [open]);
-
-  return (
-    <>
-      <button
-        ref={btnRef}
-        type="button"
-        className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-        onClick={() => {
-          const rect = btnRef.current?.getBoundingClientRect();
-          if (rect) setPos({ top: rect.bottom + 4, right: Math.max(8, window.innerWidth - rect.right) });
-          setOpen((v) => !v);
-        }}
-        aria-expanded={open}
-        aria-label="more"
-      >
-        <MoreHorizontal className="size-3.5" />
-      </button>
-      {open && pos ? (
-        <div
-          ref={menuRef}
-          className="fixed z-50 w-32 overflow-hidden rounded-lg border border-border bg-popover py-1 shadow-lg"
-          style={{ top: pos.top, right: pos.right }}
-        >
-          {items.map((item) => (
-            <button
-              key={item.key}
-              type="button"
-              onClick={() => {
-                setOpen(false);
-                item.onClick();
-              }}
-              className={cn(
-                "block w-full px-3 py-1.5 text-left text-xs transition-colors hover:bg-muted",
-                item.danger ? "text-rose-600 dark:text-rose-400" : "text-foreground",
-              )}
-            >
-              {item.label}
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </>
   );
 }
 
@@ -2961,179 +3365,6 @@ function ClaudeModelsModal({
 }
 
 // ── 添加账号弹窗:网页 OAuth 两步式 / 导入 token JSON ──────
-type ClaudeTestEvent = {
-  type: "test_start" | "content" | "test_complete" | "error";
-  model?: string;
-  text?: string;
-  error?: string;
-  success?: boolean;
-};
-
-function ClaudeTestModal({
-  account,
-  onClose,
-  onSettled,
-}: {
-  account: AccountRow;
-  onClose: () => void;
-  onSettled: () => void;
-}) {
-  const { t } = useTranslation();
-	const [status, setStatus] = useState<"connecting" | "streaming" | "success" | "error">("connecting");
-	const [output, setOutput] = useState<string[]>([]);
-	const [errorMessage, setErrorMessage] = useState("");
-	const settledRef = useRef(false);
-	const onSettledRef = useRef(onSettled);
-	onSettledRef.current = onSettled;
-	const modelOptions = useMemo(() => {
-		const blockedForCredits = new Set(
-			(account.model_cooldowns ?? [])
-				.filter((cooldown) => (cooldown.reason || "").toLowerCase().includes("credit"))
-				.map((cooldown) => cooldown.model.toLowerCase()),
-		);
-		const configured = (account.models ?? []).filter((item) => {
-			const normalized = item.trim().toLowerCase();
-			return normalized.startsWith("claude-") && !blockedForCredits.has(normalized);
-		});
-		return configured.length > 0
-			? configured
-			: ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"].filter(
-					(model) => !blockedForCredits.has(model),
-				);
-	}, [account.model_cooldowns, account.models]);
-	const [selectedModel, setSelectedModel] = useState(modelOptions[0] || "");
-	const model = selectedModel;
-
-	useEffect(() => {
-		if (!modelOptions.includes(selectedModel)) {
-			setSelectedModel(modelOptions[0] || "");
-		}
-	}, [modelOptions, selectedModel]);
-
-	const markSettled = useCallback(() => {
-		if (settledRef.current) return;
-		settledRef.current = true;
-		onSettledRef.current();
-	}, []);
-
-	useEffect(() => {
-		if (!model) return;
-		setStatus("connecting");
-    setOutput([]);
-    setErrorMessage("");
-    settledRef.current = false;
-    const controller = new AbortController();
-    const run = async () => {
-      try {
-        const query = new URLSearchParams({ model });
-        const response = await fetch(`/api/admin/accounts/${account.id}/test?${query.toString()}`, {
-          signal: controller.signal,
-          headers: getAdminKey() ? { "X-Admin-Key": getAdminKey() } : {},
-		});
-		if (!response.ok) {
-			const body = await response.text();
-			let message = `HTTP ${response.status}`;
-			try {
-				const parsed = JSON.parse(body) as { error?: string | { message?: string } };
-				if (typeof parsed.error === "string") message = parsed.error;
-				else if (parsed.error?.message) message = parsed.error.message;
-			} catch {
-				if (body.trim()) message = body.trim().slice(0, 500);
-			}
-			setStatus("error");
-			setErrorMessage(`${t("accounts.testFailed")}: ${message}`);
-			markSettled();
-          return;
-        }
-		const reader = response.body?.getReader();
-		if (!reader) throw new Error(t("accounts.browserStreamingUnsupported"));
-		const decoder = new TextDecoder();
-		let buffer = "";
-		let receivedTerminalEvent = false;
-        const process = (lines: string[]) => {
-          for (const line of lines) {
-            const trimmed = line.trim();
-            if (!trimmed.startsWith("data: ")) continue;
-            try {
-              const event = JSON.parse(trimmed.slice(6)) as ClaudeTestEvent;
-              if (event.type === "test_start") setStatus("streaming");
-              if (event.type === "content" && event.text) setOutput((prev) => [...prev, event.text!]);
-				if (event.type === "test_complete") {
-					receivedTerminalEvent = true;
-					setStatus(event.success ? "success" : "error");
-					if (!event.success) setErrorMessage(t("accounts.testFailed"));
-				}
-				if (event.type === "error") {
-					receivedTerminalEvent = true;
-					setStatus("error");
-					setErrorMessage(event.error || t("accounts.unknownError"));
-				}
-            } catch {
-              // Ignore comments/partial SSE frames.
-            }
-          }
-        };
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) {
-            buffer += decoder.decode();
-            break;
-          }
-          buffer += decoder.decode(value, { stream: true });
-          const lines = buffer.split("\n");
-          buffer = lines.pop() || "";
-          process(lines);
-		}
-		if (buffer.trim()) process([buffer]);
-		// The server invalidates its account snapshot in a handler defer after
-		// the terminal event. Refresh only once the SSE stream has closed.
-		if (receivedTerminalEvent) {
-			markSettled();
-		} else {
-			setStatus("error");
-			setErrorMessage(t("accounts.connectionEndedUnexpectedly"));
-          markSettled();
-        }
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        setStatus("error");
-        setErrorMessage(error instanceof Error ? error.message : t("accounts.connectionFailed"));
-        markSettled();
-      }
-    };
-    void run();
-    return () => controller.abort();
-	}, [account.id, markSettled, model, t]);
-
-  const StatusIcon = status === "success" ? CheckCircle : status === "error" ? XCircle : Loader2;
-  return (
-    <Modal
-      show
-      title={`${t("accounts.testConnectionTitle", { account: account.email || account.name || `#${account.id}` })} · Claude`}
-      onClose={onClose}
-      footer={<Button onClick={onClose}>{t("common.close")}</Button>}
-    >
-      <div className="space-y-3">
-        <div className="flex items-center gap-2 text-sm">
-          <StatusIcon className={cn("size-4", status === "connecting" || status === "streaming" ? "animate-spin text-blue-500" : status === "success" ? "text-emerald-500" : "text-rose-500")} />
-          <span>{status === "connecting" ? t("accounts.connecting") : status === "streaming" ? t("accounts.receivingResponse") : status === "success" ? t("accounts.testSuccess") : t("accounts.testFailed")}</span>
-	          {modelOptions.length > 0 ? (
-	            <Select
-	              compact
-	              className="ml-auto w-48"
-	              value={model}
-	              onValueChange={setSelectedModel}
-	              options={modelOptions.map((item) => ({ value: item, label: item }))}
-	            />
-	          ) : null}
-        </div>
-        {errorMessage ? <div className="break-words rounded-lg bg-rose-500/10 px-3 py-2 text-xs text-rose-700 dark:text-rose-300">{errorMessage}</div> : null}
-        <pre className="max-h-64 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-muted/30 p-3 text-xs leading-relaxed">{output.join("") || (status === "success" ? t("accounts.testSuccess") : t("common.loading"))}</pre>
-      </div>
-    </Modal>
-  );
-}
-
 function ClaudeAddModal({
   proxies,
   groups,

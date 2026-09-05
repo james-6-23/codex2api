@@ -1,6 +1,5 @@
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
-import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo } from "react";
-import { createPortal } from "react-dom";
+import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import type { ProxyRow } from "../api";
@@ -22,6 +21,12 @@ import AntigravityAccounts from "./AntigravityAccounts";
 import ClaudeAccounts from "./ClaudeAccounts";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
+import {
+  HeaderActionMenu,
+  type HeaderActionMenuItem,
+  type HeaderActionMenuSection,
+} from "../components/HeaderActionMenu";
+import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
@@ -7200,6 +7205,7 @@ export default function Accounts() {
                     </button>
                   </div>
                   <ColumnSettingsMenu
+                    columnOrder={ACCOUNT_TABLE_COLUMNS}
                     columns={visibleColumns}
                     onToggle={(column) =>
                       setVisibleColumns((current) => ({
@@ -13160,217 +13166,6 @@ function isSubscriptionPlan(planType?: string): boolean {
   );
 }
 
-interface HeaderActionMenuItem {
-  key: string;
-  label: string;
-  icon: ReactNode;
-  disabled?: boolean;
-  title?: string;
-  destructive?: boolean;
-  onSelect: () => void;
-}
-
-interface HeaderActionMenuSection {
-  key: string;
-  label?: string;
-  items: HeaderActionMenuItem[];
-}
-
-function HeaderActionMenu({
-  label,
-  icon,
-  items,
-  sections,
-  align = "end",
-  compact = false,
-  triggerVariant = "outline",
-}: {
-  label: string;
-  icon: ReactNode;
-  items?: HeaderActionMenuItem[];
-  sections?: HeaderActionMenuSection[];
-  align?: "start" | "end";
-  compact?: boolean;
-  triggerVariant?: "outline" | "default" | "ghost" | "secondary" | "destructive";
-}) {
-  const [open, setOpen] = useState(false);
-  const [menuPos, setMenuPos] = useState<{
-    top: number;
-    left: number;
-    openUpward: boolean;
-  } | null>(null);
-  const rootRef = useRef<HTMLDivElement>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
-  const resolvedSections: HeaderActionMenuSection[] =
-    sections && sections.length > 0
-      ? sections.filter((section) => section.items.length > 0)
-      : items && items.length > 0
-        ? [{ key: "default", items }]
-        : [];
-
-  const updateMenuPosition = useCallback(() => {
-    const trigger = rootRef.current;
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    const menuWidth = Math.min(288, window.innerWidth - 16);
-    const gap = 8;
-    const spaceBelow = window.innerHeight - rect.bottom - gap;
-    const spaceAbove = rect.top - gap;
-    // Prefer opening downward; flip up when near the bottom of the viewport.
-    const openUpward = spaceBelow < 240 && spaceAbove > spaceBelow;
-    let left =
-      align === "start" ? rect.left : rect.right - menuWidth;
-    left = Math.max(8, Math.min(left, window.innerWidth - menuWidth - 8));
-    const top = openUpward ? rect.top - gap : rect.bottom + gap;
-    setMenuPos({ top, left, openUpward });
-  }, [align]);
-
-  useLayoutEffect(() => {
-    if (!open) {
-      setMenuPos(null);
-      return;
-    }
-    updateMenuPosition();
-  }, [open, updateMenuPosition]);
-
-  useEffect(() => {
-    if (!open) return;
-
-    const handlePointerDown = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        rootRef.current?.contains(target) ||
-        menuRef.current?.contains(target)
-      ) {
-        return;
-      }
-      setOpen(false);
-    };
-
-    const handleEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setOpen(false);
-      }
-    };
-
-    const handleReposition = () => updateMenuPosition();
-
-    document.addEventListener("mousedown", handlePointerDown);
-    document.addEventListener("keydown", handleEscape);
-    window.addEventListener("resize", handleReposition);
-    // Capture scroll from nested table shells so the portal menu stays aligned.
-    window.addEventListener("scroll", handleReposition, true);
-
-    return () => {
-      document.removeEventListener("mousedown", handlePointerDown);
-      document.removeEventListener("keydown", handleEscape);
-      window.removeEventListener("resize", handleReposition);
-      window.removeEventListener("scroll", handleReposition, true);
-    };
-  }, [open, updateMenuPosition]);
-
-  const renderItem = (item: HeaderActionMenuItem) => (
-    <button
-      key={item.key}
-      type="button"
-      role="menuitem"
-      disabled={item.disabled}
-      title={item.title}
-      className={`flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-        item.destructive
-          ? "text-destructive hover:bg-destructive/10"
-          : "text-foreground hover:bg-accent/70"
-      }`}
-      onClick={() => {
-        if (item.disabled) return;
-        setOpen(false);
-        item.onSelect();
-      }}
-    >
-      <span
-        className={`flex size-5 shrink-0 items-center justify-center ${
-          item.destructive ? "text-destructive" : "text-muted-foreground"
-        }`}
-      >
-        {item.icon}
-      </span>
-      <span className="min-w-0 flex-1 truncate">{item.label}</span>
-    </button>
-  );
-
-  const menu =
-    open && menuPos
-      ? createPortal(
-          <div
-            ref={menuRef}
-            data-slot="action-menu-popover"
-            className="fixed z-[200] max-h-[min(70dvh,480px)] w-[min(18rem,calc(100vw-2rem))] overflow-y-auto overflow-x-hidden rounded-xl border border-border bg-popover p-1.5 shadow-[0_18px_40px_hsl(222_30%_18%/0.18)] backdrop-blur-sm"
-            style={
-              menuPos.openUpward
-                ? {
-                    left: menuPos.left,
-                    bottom: window.innerHeight - menuPos.top,
-                  }
-                : {
-                    left: menuPos.left,
-                    top: menuPos.top,
-                  }
-            }
-          >
-            <div role="menu" className="space-y-1">
-              {resolvedSections.map((section, sectionIndex) => (
-                <div key={section.key}>
-                  {section.label ? (
-                    <div
-                      className={`px-2.5 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground ${
-                        sectionIndex > 0
-                          ? "mt-1.5 border-t border-border/70 pt-2"
-                          : "pt-0.5"
-                      }`}
-                    >
-                      {section.label}
-                    </div>
-                  ) : sectionIndex > 0 ? (
-                    <div className="my-1 border-t border-border/70" />
-                  ) : null}
-                  <div className="space-y-0.5">
-                    {section.items.map(renderItem)}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>,
-          document.body,
-        )
-      : null;
-
-  return (
-    <div ref={rootRef} className="relative shrink-0">
-      <Button
-        type="button"
-        variant={triggerVariant}
-        size="sm"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-label={label}
-        onClick={() => setOpen((current) => !current)}
-        className={compact ? "px-2.5" : undefined}
-      >
-        {icon}
-        {!compact ? (
-          <>
-            {label}
-            <ChevronDown
-              className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
-            />
-          </>
-        ) : null}
-      </Button>
-      {menu}
-    </div>
-  );
-}
-
 function OperationProgressToast({
   progress,
   onClose,
@@ -14063,79 +13858,6 @@ function GroupChipList({
   }
 
   return <div className="mt-1.5 flex flex-wrap gap-1">{content}</div>;
-}
-
-function ColumnSettingsMenu({
-  columns,
-  onToggle,
-  onReset,
-  resetTitle,
-  labels,
-  title,
-}: {
-  columns: Record<AccountTableColumn, boolean>;
-  onToggle: (column: AccountTableColumn) => void;
-  onReset: () => void;
-  resetTitle: string;
-  labels: Record<AccountTableColumn, string>;
-  title: string;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const handler = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [open]);
-
-  return (
-    <div ref={rootRef} className="relative">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => setOpen((current) => !current)}
-        title={title}
-      >
-        <SlidersHorizontal className="size-3.5" />
-        {title}
-      </Button>
-      {open ? (
-        <div className="absolute right-0 top-[calc(100%+0.5rem)] z-50 w-48 max-w-[calc(100vw-2.5rem)] overflow-hidden rounded-lg border border-border bg-popover p-1.5 shadow-lg">
-          <button
-            type="button"
-            className="mb-1 flex w-full items-center justify-center rounded-md px-2.5 py-1.5 text-xs font-semibold text-primary transition-colors hover:bg-accent/70"
-            onClick={onReset}
-          >
-            {resetTitle}
-          </button>
-          {ACCOUNT_TABLE_COLUMNS.map((column) => (
-            <button
-              key={column}
-              type="button"
-              role="menuitemcheckbox"
-              aria-checked={columns[column]}
-              className="flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm text-foreground transition-colors hover:bg-accent/70"
-              onClick={() => onToggle(column)}
-            >
-              <span
-                className={`flex size-4 shrink-0 items-center justify-center rounded border ${columns[column] ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background"}`}
-              >
-                {columns[column] ? <Check className="size-3" /> : null}
-              </span>
-              <span className="min-w-0 flex-1 truncate">{labels[column]}</span>
-            </button>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  );
 }
 
 function AccountMobileCard({

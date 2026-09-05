@@ -92,5 +92,13 @@
     "input_long": 4,
     "cached_input_long": 0.4,
     "output_long": 18
+  },
+  "gpt-6-astra": {
+    "input": 10,
+    "cached_input": 1,
+    "output": 50,
+    "input_priority": 20,
+    "cached_input_priority": 2,
+    "output_priority": 100
   }
 }
