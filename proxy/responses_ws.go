@@ -525,12 +525,15 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				message = fmt.Sprintf("Upstream returned HTTP %d", lastFailure.status)
 			}
 			apiErr = api.NewAPIError(api.ErrorCode(fmt.Sprintf("upstream_%d", lastFailure.status)), message, api.ErrorTypeUpstream)
+			if capacityError := codexCapacityErrorForClient(lastFailure.body); capacityError != nil {
+				apiErr = capacityError
+			}
 		}
 		if !timeoutTerminalWritten {
 			_ = writeResponsesWSError(conn, apiErr)
 			timeoutTerminalWritten = true
 		}
-		return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
+		return newResponsesWSCloseError(responsesWSTerminalCloseCode(apiErr, websocket.CloseTryAgainLater), apiErr.Message, apiErr)
 	}
 	defer func() {
 		timedOut := settleContinuousRetryDeadline(c.Request.Context())
@@ -664,7 +667,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				return errResponsesWSClientGone
 			}
 			_ = writeResponsesWSError(conn, apiErr)
-			return newResponsesWSCloseError(websocket.CloseTryAgainLater, apiErr.Message, apiErr)
+			return newResponsesWSCloseError(responsesWSTerminalCloseCode(apiErr, websocket.CloseTryAgainLater), apiErr.Message, apiErr)
 		}
 		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
 			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
@@ -808,12 +811,19 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					return errResponsesWSClientGone
 				}
 				apiErr = api.NewAPIError(api.ErrCodeUpstreamError, reqErr.Error(), api.ErrorTypeUpstream)
+				if capacityError := codexCapacityRequestError(reqErr); capacityError != nil {
+					_ = writeResponsesWSError(conn, capacityError)
+					return newResponsesWSCloseError(websocket.ClosePolicyViolation, capacityError.Message, reqErr)
+				}
 				clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
 				_ = writeResponsesWSError(conn, clientErr)
 				return newResponsesWSCloseError(websocket.CloseInternalServerErr, clientErr.Message, reqErr)
 			}
 			log.Printf("Responses WebSocket upstream request failed (attempt %d): %v", attempt+1, reqErr)
 			lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, reqErr.Error(), api.ErrorTypeUpstream)
+			if capacityError := codexCapacityRequestError(reqErr); capacityError != nil {
+				lastRetryableUpstreamErr = capacityError
+			}
 			if shouldRetry {
 				rememberContinuousRetryRequestFailure(c.Request.Context(), reqErr)
 				if !h.waitBeforeRetryWithBudget(c.Request.Context(), generalRetries, continuousRetryLimitForRequestError(reqErr, maxRetries, continuousRetryPolicy)) {
@@ -827,13 +837,13 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				}
 				continue
 			}
-			apiErr = api.NewAPIError(api.ErrCodeUpstreamError, reqErr.Error(), api.ErrorTypeUpstream)
+			apiErr = lastRetryableUpstreamErr
 			clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
 			_ = writeResponsesWSError(conn, clientErr)
-			return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, reqErr)
+			return newResponsesWSCloseError(responsesWSTerminalCloseCode(clientErr, websocket.CloseTryAgainLater), clientErr.Message, reqErr)
 		}
 
 		if resp.StatusCode != http.StatusOK {
@@ -952,6 +962,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				return errResponsesWSClientGone
 			}
 			_ = writeResponsesWSError(conn, clientErr)
+			if codexCapacityErrorForClient(errBody) != nil {
+				return newResponsesWSCloseError(websocket.ClosePolicyViolation, clientErr.Message, apiErr)
+			}
 			return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
 		}
 
@@ -975,6 +988,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			var retryErr *responsesWSRetryableStreamError
 			if errors.As(err, &retryErr) {
 				lastRetryableUpstreamErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
+				if capacityError := codexCapacityErrorForClient(retryErr.outcome.failurePayload); capacityError != nil {
+					lastRetryableUpstreamErr = capacityError
+				}
 				disposition := h.streamSessionFailureDisposition(retryErr.outcome, nil, true)
 				if preserveContinuationBinding() {
 					disposition.retainAffinity = true
@@ -1005,13 +1021,13 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					}
 					continue
 				}
-				apiErr = api.NewAPIError(api.ErrCodeUpstreamError, retryErr.outcome.failureMessage, api.ErrorTypeUpstream)
+				apiErr = lastRetryableUpstreamErr
 				clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
 				if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 					return errResponsesWSClientGone
 				}
 				_ = writeResponsesWSError(conn, clientErr)
-				return newResponsesWSCloseError(websocket.CloseTryAgainLater, clientErr.Message, apiErr)
+				return newResponsesWSCloseError(responsesWSTerminalCloseCode(clientErr, websocket.CloseTryAgainLater), clientErr.Message, apiErr)
 			}
 			if errors.Is(err, errResponsesWSClientGone) {
 				return err
@@ -1178,10 +1194,6 @@ func (h *Handler) streamResponsesWSUpstream(
 				clientData = transformed
 			}
 		}
-		// 容量降载码（server_is_overloaded/slow_down）对 Codex CLI 是致命错误：
-		// 一旦要透传给客户端就改写为可重试的 server_error。冷却/计费/日志用的
-		// terminalFailurePayload 取改写前的原始 data，不受影响。
-		clientData = sanitizeCapacityShedEventForClient(eventType, clientData)
 		ttftGuard.MarkProgress(eventType)
 		isFirstToken := isFirstTokenResultForMode(parsed, currentFirstTokenMode())
 		if !ttftRecorded && isFirstToken {
@@ -1386,6 +1398,9 @@ func (h *Handler) streamResponsesWSUpstream(
 		fallbackLog.LogHTTPAttemptCompletion("/v1/responses", account.ID(), fallbackAttempt, totalDuration, firstTokenMs, outcome.logStatusCode)
 	}
 	downstreamWroteBeforeCommit := wroteAnyBody && wsReplay == nil
+	if !outcome.terminalLocal && codexCapacityErrorForClient(terminalFailurePayload) != nil {
+		rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, terminalFailurePayload)
+	}
 	transparentRetrySelected := retryEnabled && continuousRetryStreamFailureSelected(outcome, terminalFailurePayload, terminalFailureEventType, continuousRetryPolicy) && !downstreamWroteBeforeCommit && c.Request.Context().Err() == nil && writeErr == nil
 	if metadata, delegated := newAPIUpstreamCyberPolicyDecision(c); delegated && metadata.EventID != "" && !transparentRetrySelected {
 		_ = wsReplay.Close()
@@ -1584,6 +1599,13 @@ func (h *Handler) streamResponsesWSUpstream(
 	if writeErr != nil {
 		return errResponsesWSClientGone
 	}
+	if capacityError := codexCapacityErrorForClient(terminalFailurePayload); capacityError != nil && !downstreamWrote {
+		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
+			return errResponsesWSClientGone
+		}
+		_ = writeResponsesWSError(conn, capacityError)
+		return newResponsesWSCloseError(websocket.ClosePolicyViolation, capacityError.Message, capacityError)
+	}
 	if abortedForErrorClose && !downstreamWrote {
 		// 首 token 前上游失败且未向客户端写过任何帧:发结构化 error 帧后按错误类别
 		// 关闭连接,避免下游把"正常收尾的会话"当成功并按预估 input token 计费。
@@ -1767,10 +1789,20 @@ func writeResponsesWSError(conn *websocket.Conn, apiErr *api.APIError) error {
 }
 
 func responsesWSClientUpstreamAPIError(apiErr *api.APIError, hideUpstreamErrors bool) *api.APIError {
+	if apiErr != nil && isCodexCapacityCodeOrMessage(string(apiErr.Code), apiErr.Message) {
+		return apiErr
+	}
 	if !hideUpstreamErrors {
 		return apiErr
 	}
 	return api.NewAPIError(api.ErrCodeUpstreamError, responsesWSFriendlyUpstreamErr, api.ErrorTypeUpstream)
+}
+
+func responsesWSTerminalCloseCode(apiErr *api.APIError, fallback int) int {
+	if apiErr != nil && isCodexCapacityCodeOrMessage(string(apiErr.Code), apiErr.Message) {
+		return websocket.ClosePolicyViolation
+	}
+	return fallback
 }
 
 func writeResponsesWSMessage(conn *websocket.Conn, payload []byte) error {
@@ -1820,6 +1852,9 @@ func responsesWSCloseCodeForStatus(statusCode int) int {
 }
 
 func responsesWSUpstreamAPIError(statusCode int, body []byte) *api.APIError {
+	if capacityError := codexCapacityErrorForClient(body); capacityError != nil {
+		return capacityError
+	}
 	if isExplicitUpstreamCyberPolicy(body) {
 		return api.NewAPIError(api.ErrCodeInvalidRequest, upstreamCyberPolicyUserMessage, api.ErrorTypeInvalidRequest)
 	}

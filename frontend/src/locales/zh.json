@@ -3849,6 +3849,8 @@
     "codexWSBusyPatience": "溢出前短等待",
     "codexWSBusyPatienceDesc": "触发溢出前先等待原连接空闲的秒数：前一请求在短间隙内结束时直接复用原连接，保住连接局部性。默认 2 秒。",
     "codexOverloadPause": "过载自动暂停",
+    "codexCapacityRetryEnabled": "容量不足自动重试",
+    "codexCapacityRetryEnabledDesc": "默认关闭，容量不足或过载时直接结束。开启后仅按对应通道的有限重试次数在网关内补试，不受持续重试放大；耗尽后仍保留原始错误码和文案，不再改写为客户端可重试错误。HTTP 使用 400 避免常规 5xx/429 重试，内部日志保留上游状态。独立于过载熔断开关。",
     "codexOverloadPauseDesc": "上游返回 server_is_overloaded(服务过载)时按账号统计:滑动窗口内过载错误占比达到阈值就自动暂停该账号调度,到期自动恢复。仅 Codex 渠道。",
     "codexOverloadPauseEnabled": "启用过载熔断",
     "codexOverloadPauseEnabledDesc": "窗口内至少 5 次请求才参与判定,避免低流量账号被单次报错误伤;触发后账号显示「上游服务过载暂停」与恢复倒计时。",

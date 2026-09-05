@@ -150,69 +150,6 @@ func TestCapacityShedExhaustionSoftExcludes(t *testing.T) {
 	}
 }
 
-// 只有降载码（server_is_overloaded/slow_down）被改写为客户端可重试的 server_error，
-// 其余错误码（尤其 rate_limit_exceeded，客户端依赖其原码解析重试延时）必须原样保留；
-// 错误消息一律不动。
-func TestSanitizeCapacityShedEventForClient(t *testing.T) {
-	cases := []struct {
-		name        string
-		eventType   string
-		payload     string
-		wantContain string
-		wantAbsent  string
-	}{
-		{
-			name:        "failed 事件嵌套 code 改写",
-			eventType:   "response.failed",
-			payload:     `{"type":"response.failed","response":{"status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}}}`,
-			wantContain: `"code":"server_error"`,
-			wantAbsent:  "server_is_overloaded",
-		},
-		{
-			name:        "error 帧 code 改写且消息保留",
-			eventType:   "error",
-			payload:     `{"type":"error","error":{"code":"slow_down","message":"slow down"}}`,
-			wantContain: `"message":"slow down"`,
-			wantAbsent:  `"code":"slow_down"`,
-		},
-		{
-			name:        "rate_limit 不改写",
-			eventType:   "response.failed",
-			payload:     `{"type":"response.failed","response":{"error":{"code":"rate_limit_exceeded","message":"try again in 3s"}}}`,
-			wantContain: `"code":"rate_limit_exceeded"`,
-		},
-		{
-			name:        "普通 server_error 不改写",
-			eventType:   "error",
-			payload:     `{"type":"error","error":{"code":"server_error","message":"boom"}}`,
-			wantContain: `"code":"server_error"`,
-		},
-		{
-			name:        "非错误事件不碰",
-			eventType:   "response.completed",
-			payload:     `{"type":"response.completed","response":{"id":"resp_1"}}`,
-			wantContain: `"id":"resp_1"`,
-		},
-		{
-			name:        "非 JSON 不碰",
-			eventType:   "error",
-			payload:     `not-json`,
-			wantContain: `not-json`,
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			out := string(sanitizeCapacityShedEventForClient(tc.eventType, []byte(tc.payload)))
-			if !strings.Contains(out, tc.wantContain) {
-				t.Errorf("sanitize(%q) = %q, want contains %q", tc.payload, out, tc.wantContain)
-			}
-			if tc.wantAbsent != "" && strings.Contains(out, tc.wantAbsent) {
-				t.Errorf("sanitize(%q) = %q, want NOT contains %q", tc.payload, out, tc.wantAbsent)
-			}
-		})
-	}
-}
-
 // capacityShedEpilogue 复刻 Responses 流式路径对 error/response.failed 帧的
 // 抑制→拦截→defer/写出时序（与 handler.go 的三条 SSE 转发循环同构），返回是否
 // 命中首包前静默换号分支。
@@ -254,7 +191,7 @@ func capacityShedEpilogue(t *testing.T, c *gin.Context, events [][]byte, attempt
 		}
 		shouldDefer := !ttftRecorded && !gotTerminal &&
 			(isPreContentLifecycleEvent(eventType) || isRetryableUpstreamErrorFrame(eventType, data))
-		wrote, err := writeDeferredSSEData(streamWriter, &pending, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
+		wrote, err := writeDeferredSSEData(streamWriter, &pending, data, shouldDefer)
 		if err != nil {
 			t.Errorf("writeDeferredSSEData: %v", err)
 			return false
@@ -269,9 +206,7 @@ func capacityShedEpilogue(t *testing.T, c *gin.Context, events [][]byte, attempt
 	if abortedForHTTPError && !wroteAnyBody {
 		outcome := classifyResponseFailedOutcome(terminalFailurePayload)
 		c.Header("Content-Type", "application/json; charset=utf-8")
-		c.JSON(outcome.logStatusCode, gin.H{
-			"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
-		})
+		writeResponseFailedHTTPError(c, outcome.logStatusCode, terminalFailurePayload, outcome.failureMessage)
 	}
 	return false
 }
@@ -279,6 +214,7 @@ func capacityShedEpilogue(t *testing.T, c *gin.Context, events [][]byte, attempt
 // 回归用例（真实上游降载序列）：created → in_progress → error 帧 → response.failed。
 func TestStreamCapacityShedWireBehavior(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	setCodexCapacityRetryForTest(t, true)
 
 	shedError := []byte(`{"type":"error","error":{"type":"service_unavailable_error","code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."},"sequence_number":2}`)
 	shedFailed := []byte(`{"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"server_is_overloaded","message":"Our servers are currently overloaded. Please try again later."}},"sequence_number":3}`)
@@ -311,7 +247,7 @@ func TestStreamCapacityShedWireBehavior(t *testing.T) {
 		}
 	})
 
-	t.Run("首包前降载且重试耗尽 → 真实 5xx JSON 而非 200 流", func(t *testing.T) {
+	t.Run("首包前降载且重试耗尽 → 400 JSON 保留原始容量错误", func(t *testing.T) {
 		router := gin.New()
 		router.GET("/stream", func(c *gin.Context) {
 			capacityShedEpilogue(t, c, append(append([][]byte{}, preamble...), shedError, shedFailed), 3, 3)
@@ -326,15 +262,18 @@ func TestStreamCapacityShedWireBehavior(t *testing.T) {
 		defer resp.Body.Close()
 		body, _ := io.ReadAll(resp.Body)
 
-		if resp.StatusCode != http.StatusInternalServerError {
-			t.Errorf("status = %d, want 500 (body=%q)", resp.StatusCode, body)
+		if resp.StatusCode != http.StatusBadRequest {
+			t.Errorf("status = %d, want 400 (body=%q)", resp.StatusCode, body)
+		}
+		if gjson.GetBytes(body, "error.code").String() != "server_is_overloaded" {
+			t.Errorf("capacity code was lost: %s", body)
 		}
 		if !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 			t.Errorf("Content-Type = %q, want application/json", resp.Header.Get("Content-Type"))
 		}
 	})
 
-	t.Run("流中途降载 → 透传但降载码改写为可重试 server_error", func(t *testing.T) {
+	t.Run("流中途降载 → 保留原始降载码", func(t *testing.T) {
 		events := append(append([][]byte{}, preamble...),
 			[]byte(`{"type":"response.output_text.delta","delta":"partial"}`),
 			shedError, shedFailed)
@@ -362,11 +301,11 @@ func TestStreamCapacityShedWireBehavior(t *testing.T) {
 		if !strings.Contains(body, "response.failed") {
 			t.Errorf("body 应包含终止事件, got %q", body)
 		}
-		if !strings.Contains(body, `"code":"server_error"`) {
-			t.Errorf("降载码应改写为 server_error, got %q", body)
+		if strings.Contains(body, `"code":"server_error"`) {
+			t.Errorf("容量错误不应改写为 server_error, got %q", body)
 		}
-		if strings.Contains(body, "server_is_overloaded") {
-			t.Errorf("不应残留 server_is_overloaded, got %q", body)
+		if !strings.Contains(body, "server_is_overloaded") {
+			t.Errorf("应保留 server_is_overloaded, got %q", body)
 		}
 		if !strings.Contains(body, "Our servers are currently overloaded") {
 			t.Errorf("错误消息应原样保留, got %q", body)

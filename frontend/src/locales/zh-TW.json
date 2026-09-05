@@ -156,6 +156,8 @@
     "proxyPoolLinkedHint": "已關聯代理池節點（按位址綁定）：在「代理」頁修改該節點位址會同步到所有綁定帳號，刪除則自動解除綁定。"
   },
   "settings": {
+    "codexCapacityRetryEnabled": "容量不足自動重試",
+    "codexCapacityRetryEnabledDesc": "預設關閉，容量不足或過載時直接結束。開啟後僅依對應通道的有限重試次數在閘道內補試，不受持續重試放大；耗盡後仍保留原始錯誤碼與訊息，不再改寫為用戶端可重試錯誤。HTTP 使用 400 避免一般 5xx/429 重試，內部日誌保留上游狀態。獨立於過載熔斷開關。",
     "pricing": {
       "contextThreshold": "長上下文閾值",
       "revertThreshold": "還原為 {{value}} tokens",

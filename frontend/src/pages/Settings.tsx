@@ -2056,6 +2056,7 @@ export default function Settings() {
     github_token_configured: false,
     github_proxy_url: '',
     codex_overload_pause_enabled: false,
+    codex_capacity_retry_enabled: false,
     codex_overload_threshold_percent: 20,
     codex_overload_pause_minutes: 30,
     codex_overload_window_minutes: 5,
@@ -3529,6 +3530,15 @@ export default function Settings() {
 
               <SettingsCard title={t('settings.codexOverloadPause')} description={t('settings.codexOverloadPauseDesc')} icon={<ShieldAlert className="size-4" />}>
                 <div className="space-y-4">
+                  <div className={SETTINGS_SWITCH_ROW}>
+                    <SettingField label={t('settings.codexCapacityRetryEnabled')} description={t('settings.codexCapacityRetryEnabledDesc')} layout="switch">
+                      <Switch
+                        aria-label={t('settings.codexCapacityRetryEnabled')}
+                        checked={settingsForm.codex_capacity_retry_enabled}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_capacity_retry_enabled', checked)}
+                      />
+                    </SettingField>
+                  </div>
                   <div className={SETTINGS_SWITCH_ROW}>
                     <SettingField label={t('settings.codexOverloadPauseEnabled')} description={t('settings.codexOverloadPauseEnabledDesc')} layout="switch">
                       <Switch

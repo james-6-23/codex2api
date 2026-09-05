@@ -3849,6 +3849,8 @@
     "codexWSBusyPatience": "Overflow Patience",
     "codexWSBusyPatienceDesc": "Seconds to wait for the original connection to go idle before overflowing: requests finishing within a short gap still reuse it and keep connection locality. Default 2s.",
     "codexOverloadPause": "Overload Auto-Pause",
+    "codexCapacityRetryEnabled": "Retry Model Capacity Errors",
+    "codexCapacityRetryEnabledDesc": "Off by default: stop on capacity/overload errors. When enabled, retry only within the transport's finite gateway retry budget; continuous retry cannot extend it. On exhaustion, preserve the original error code and message without rewriting them to trigger client retries. HTTP uses 400 to avoid normal 5xx/429 retries; internal logs retain the upstream status. Independent of the overload breaker.",
     "codexOverloadPauseDesc": "Per-account stats on upstream server_is_overloaded errors: when their share within a sliding window reaches the threshold, the account is paused from scheduling and resumes automatically. Codex channel only.",
     "codexOverloadPauseEnabled": "Enable Overload Breaker",
     "codexOverloadPauseEnabledDesc": "Requires at least 5 requests in the window before judging, so low-traffic accounts are not tripped by a single error; tripped accounts show \"Upstream overload paused\" with a resume countdown.",

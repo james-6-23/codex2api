@@ -315,6 +315,11 @@ func StatusCodeFromError(err error) int {
 
 // ErrorToGinResponse writes the error as a JSON response to the gin context
 func ErrorToGinResponse(c *gin.Context, err error) {
+	if capacityError := codexCapacityRequestError(err); capacityError != nil {
+		c.Writer.Header().Del("Retry-After")
+		c.JSON(http.StatusBadRequest, gin.H{"error": capacityError})
+		return
+	}
 	if sendAPIKeyModelRequestQuotaError(c, err) {
 		return
 	}

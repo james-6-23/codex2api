@@ -1905,6 +1905,7 @@ export interface SystemSettings {
   github_proxy_url: string
   // Codex 过载熔断：窗口内 server_is_overloaded 占比达阈值自动暂停调度
   codex_overload_pause_enabled: boolean
+  codex_capacity_retry_enabled: boolean
   codex_overload_threshold_percent: number
   codex_overload_pause_minutes: number
   codex_overload_window_minutes: number

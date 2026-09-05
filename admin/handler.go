@@ -9091,6 +9091,7 @@ type settingsResponse struct {
 	GithubTokenConfigured               bool   `json:"github_token_configured"`
 	GithubProxyURL                      string `json:"github_proxy_url"`
 	CodexOverloadPauseEnabled           bool   `json:"codex_overload_pause_enabled"`
+	CodexCapacityRetryEnabled           bool   `json:"codex_capacity_retry_enabled"`
 	CodexOverloadThresholdPercent       int    `json:"codex_overload_threshold_percent"`
 	CodexOverloadPauseMinutes           int    `json:"codex_overload_pause_minutes"`
 	CodexOverloadWindowMinutes          int    `json:"codex_overload_window_minutes"`
@@ -9274,6 +9275,7 @@ type updateSettingsReq struct {
 	GithubToken                         *string                          `json:"github_token"`
 	GithubProxyURL                      *string                          `json:"github_proxy_url"`
 	CodexOverloadPauseEnabled           *bool                            `json:"codex_overload_pause_enabled"`
+	CodexCapacityRetryEnabled           *bool                            `json:"codex_capacity_retry_enabled"`
 	CodexOverloadThresholdPercent       *int                             `json:"codex_overload_threshold_percent"`
 	CodexOverloadPauseMinutes           *int                             `json:"codex_overload_pause_minutes"`
 	CodexOverloadWindowMinutes          *int                             `json:"codex_overload_window_minutes"`
@@ -10103,6 +10105,7 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		GithubTokenConfigured:               h.store.GithubToken() != "",
 		GithubProxyURL:                      h.store.GithubProxyURL(),
 		CodexOverloadPauseEnabled:           runtimeCfg.CodexOverloadPauseEnabled,
+		CodexCapacityRetryEnabled:           runtimeCfg.CodexCapacityRetryEnabled,
 		CodexOverloadThresholdPercent:       runtimeCfg.CodexOverloadThresholdPercent,
 		CodexOverloadPauseMinutes:           runtimeCfg.CodexOverloadPauseMinutes,
 		CodexOverloadWindowMinutes:          runtimeCfg.CodexOverloadWindowMinutes,
@@ -10898,6 +10901,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		runtimeCfg.CodexOverloadPauseEnabled = *req.CodexOverloadPauseEnabled
 		log.Printf("设置已更新: codex_overload_pause_enabled = %t", *req.CodexOverloadPauseEnabled)
 	}
+	if req.CodexCapacityRetryEnabled != nil {
+		runtimeCfg.CodexCapacityRetryEnabled = *req.CodexCapacityRetryEnabled
+	}
 	if req.CodexOverloadThresholdPercent != nil {
 		v := database.NormalizeCodexOverloadThresholdPercent(*req.CodexOverloadThresholdPercent)
 		runtimeCfg.CodexOverloadThresholdPercent = v
@@ -11612,6 +11618,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		GithubToken:                         h.store.GithubToken(),
 		GithubProxyURL:                      h.store.GithubProxyURL(),
 		CodexOverloadPauseEnabled:           runtimeCfg.CodexOverloadPauseEnabled,
+		CodexCapacityRetryEnabled:           runtimeCfg.CodexCapacityRetryEnabled,
 		CodexOverloadThresholdPercent:       runtimeCfg.CodexOverloadThresholdPercent,
 		CodexOverloadPauseMinutes:           runtimeCfg.CodexOverloadPauseMinutes,
 		CodexOverloadWindowMinutes:          runtimeCfg.CodexOverloadWindowMinutes,
@@ -11927,6 +11934,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		GithubTokenConfigured:               h.store.GithubToken() != "",
 		GithubProxyURL:                      h.store.GithubProxyURL(),
 		CodexOverloadPauseEnabled:           runtimeCfg.CodexOverloadPauseEnabled,
+		CodexCapacityRetryEnabled:           runtimeCfg.CodexCapacityRetryEnabled,
 		CodexOverloadThresholdPercent:       runtimeCfg.CodexOverloadThresholdPercent,
 		CodexOverloadPauseMinutes:           runtimeCfg.CodexOverloadPauseMinutes,
 		CodexOverloadWindowMinutes:          runtimeCfg.CodexOverloadWindowMinutes,

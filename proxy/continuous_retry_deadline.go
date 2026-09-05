@@ -400,6 +400,9 @@ func writeContinuousRetryTimeoutResponse(c *gin.Context, protocol continuousRetr
 }
 
 func writeContinuousRetryLastFailure(c *gin.Context, protocol continuousRetryHTTPProtocol, failure continuousRetryFailure) {
+	if writeCodexCapacityError(c, failure.body, protocol) {
+		return
+	}
 	status := failure.status
 	if status < 400 || status > 599 {
 		status = http.StatusBadGateway

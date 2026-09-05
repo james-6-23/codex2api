@@ -498,6 +498,9 @@ func writeCommittedResponsesRetryError(c *gin.Context, message string) bool {
 	if c.Request != nil && c.Request.Context().Err() != nil && !timedOut {
 		return true
 	}
+	if !timedOut && writeCommittedCodexCapacityError(c, continuousRetryProtocolResponses) {
+		return true
+	}
 	code := "upstream_error"
 	if timedOut {
 		c.Set(continuousRetryTimeoutWrittenKey, true)
@@ -537,6 +540,9 @@ func writeCommittedChatRetryError(c *gin.Context, message string) bool {
 	if c.Request != nil && c.Request.Context().Err() != nil && !timedOut {
 		return true
 	}
+	if !timedOut && writeCommittedCodexCapacityError(c, continuousRetryProtocolChat) {
+		return true
+	}
 	code := ErrorCodeUpstreamStreamBreak
 	if timedOut {
 		c.Set(continuousRetryTimeoutWrittenKey, true)
@@ -569,6 +575,9 @@ func writeCommittedAnthropicRetryError(c *gin.Context, errorType, message string
 		timedOut = true
 	}
 	if c.Request != nil && c.Request.Context().Err() != nil && !timedOut {
+		return true
+	}
+	if !timedOut && writeCommittedCodexCapacityError(c, continuousRetryProtocolAnthropic) {
 		return true
 	}
 	if timedOut {

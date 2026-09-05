@@ -102,6 +102,7 @@ type RuntimeSettings struct {
 	// Codex 过载熔断：单账号滑动窗口内 server_is_overloaded 错误占比达到阈值且样本数
 	// 足够时，自动暂停该账号调度一段时间（默认关闭）。
 	CodexOverloadPauseEnabled     bool
+	CodexCapacityRetryEnabled     bool
 	CodexOverloadThresholdPercent int // 触发比例（%），默认 20
 	CodexOverloadPauseMinutes     int // 暂停时长（分钟），默认 30
 	CodexOverloadWindowMinutes    int // 统计窗口（分钟），默认 5
@@ -362,6 +363,7 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.GithubToken = strings.TrimSpace(settings.GithubToken)
 		next.GithubProxyURL = strings.TrimSpace(settings.GithubProxyURL)
 		next.CodexOverloadPauseEnabled = settings.CodexOverloadPauseEnabled
+		next.CodexCapacityRetryEnabled = settings.CodexCapacityRetryEnabled
 		next.CodexOverloadThresholdPercent = settings.CodexOverloadThresholdPercent
 		next.CodexOverloadPauseMinutes = settings.CodexOverloadPauseMinutes
 		next.CodexOverloadWindowMinutes = settings.CodexOverloadWindowMinutes

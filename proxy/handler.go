@@ -2659,7 +2659,7 @@ func isRetryableUpstreamErrorFrame(eventType string, payload []byte, policies ..
 	// event commits the downstream response before the following
 	// `response.failed` event can be retried transparently.
 	outcome := classifyResponseFailedOutcome(payload)
-	return continuousRetryStreamFailureSelected(outcome, payload, eventType, policies...)
+	return codexCapacityErrorForClient(payload) != nil || continuousRetryStreamFailureSelected(outcome, payload, eventType, policies...)
 }
 
 // resolvePreContentRetryErrorCandidate promotes a standalone upstream error
@@ -2674,12 +2674,6 @@ func resolvePreContentRetryErrorCandidate(terminalFailurePayload, candidate []by
 	}
 	return append([]byte(nil), candidate...), true
 }
-
-// capacityShedRetryableClientCode 是把上游容量降载错误透传给下游时改写使用的
-// 错误码。Codex CLI 按闭集分类：server_is_overloaded / slow_down 被判致命
-// （提示 "Selected model is at capacity. Please try a different model." 并终止
-// 会话），而 server_error 等闭集之外的错误码会进入客户端内置的退避重试。
-const capacityShedRetryableClientCode = "server_error"
 
 // maxCapacityShedSameAccountRetries 是容量降载时在同一账号上退避重试的次数上限。
 // 降载是按客户端身份/模型容量分桶的请求级信号，换号并不改变被降载的因素，先在
@@ -2697,9 +2691,6 @@ func capacityShedHandlingDisabled() bool {
 	}
 }
 
-// isCapacityShedPayload 判断 response.failed / error 帧是否为上游容量降载
-// （server_is_overloaded / slow_down）。复用 sanitizeCapacityShedEventForClient
-// 的三条 code path，供分类与失败上报两侧共用。
 func isCapacityShedPayload(payload []byte) bool {
 	if len(payload) == 0 || !gjson.ValidBytes(payload) {
 		return false
@@ -2711,37 +2702,6 @@ func isCapacityShedPayload(payload []byte) bool {
 		}
 	}
 	return false
-}
-
-// sanitizeCapacityShedEventForClient 把即将写给下游的 error / response.failed
-// 事件中的容量降载错误码改写为客户端可重试的错误码。走到写出这一步说明网关侧
-// 换号重试已不可用（流中途已有输出）或已用尽；保留原始降载码只会让 Codex CLI
-// 就地终止会话。错误消息原样保留；监控、计费与账号冷却均基于改写前的原始
-// payload（terminalFailurePayload 在写出前捕获），不受影响。rate_limit_exceeded
-// 等其他错误码一律不动（客户端依赖原码解析重试延时）。
-func sanitizeCapacityShedEventForClient(eventType string, payload []byte) []byte {
-	switch strings.TrimSpace(eventType) {
-	case "error", "response.failed":
-	default:
-		return payload
-	}
-	if len(payload) == 0 || !gjson.ValidBytes(payload) {
-		return payload
-	}
-	updated := payload
-	for _, path := range []string{"error.code", "response.error.code", "response.status_details.error.code"} {
-		switch strings.ToLower(strings.TrimSpace(gjson.GetBytes(updated, path).String())) {
-		case "server_is_overloaded", "slow_down":
-		default:
-			continue
-		}
-		next, err := sjson.SetBytes(updated, path, capacityShedRetryableClientCode)
-		if err != nil {
-			return payload
-		}
-		updated = next
-	}
-	return updated
 }
 
 func (h *Handler) applyResponseFailedCooldown(account *auth.Account, payload []byte, resp *http.Response, model string) codex429Decision {
@@ -3582,6 +3542,9 @@ func isRetryableStatus(code int) bool {
 }
 
 func shouldRetryHTTPStatus(statusCode int, body []byte, generalRetries *int, rateLimitRetries *int, maxGeneralRetries, maxRateLimitRetries int, policies ...database.ContinuousRetryPolicy) bool {
+	if codexCapacityRetryDisabled(body) {
+		return false
+	}
 	policy := continuousRetryPolicyForCall(policies)
 	if isExplicitUpstreamCyberPolicy(body) {
 		return false
@@ -3618,6 +3581,9 @@ func shouldRetryHTTPStatus(statusCode int, body []byte, generalRetries *int, rat
 // retry budget and the caller's session disposition decides sticky versus
 // rotate routing.
 func (h *Handler) shouldRetryUpstreamHTTPStatus(statusCode int, body []byte, generalRetries *int, rateLimitRetries *int, maxGeneralRetries, maxRateLimitRetries int, policies ...database.ContinuousRetryPolicy) bool {
+	if codexCapacityRetryDisabled(body) {
+		return false
+	}
 	if shouldRetryHTTPStatus(statusCode, body, generalRetries, rateLimitRetries, maxGeneralRetries, maxRateLimitRetries, policies...) {
 		return true
 	}
@@ -3638,6 +3604,9 @@ func (h *Handler) shouldRetryUpstreamHTTPStatus(statusCode int, body []byte, gen
 }
 
 func shouldRetryRequestError(err error, generalRetries *int, maxGeneralRetries int, policies ...database.ContinuousRetryPolicy) bool {
+	if codexCapacityRequestRetryDisabled(err) {
+		return false
+	}
 	policy := continuousRetryPolicyForCall(policies)
 	if isExplicitUpstreamCyberPolicyError(err) {
 		return false
@@ -3662,11 +3631,18 @@ func shouldRetryRequestError(err error, generalRetries *int, maxGeneralRetries i
 // ErrUpstream(0, ..., cause) for failures from http.Client.Do; those remain
 // retryable even though a status-less Error cannot set Retryable by status.
 func isRetryableRequestError(err error) bool {
+	if codexCapacityRequestRetryDisabled(err) {
+		return false
+	}
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.Canceled) {
 		return false
+	}
+	if codexCapacityRequestError(err) != nil {
+		status, _, exists := continuousRetryHTTPErrorDetails(err)
+		return exists && (isRetryableStatus(status) || status == http.StatusTooManyRequests || status == http.StatusBadGateway || status == http.StatusGatewayTimeout)
 	}
 	var structured *Error
 	if errors.As(err, &structured) {
@@ -3865,6 +3841,9 @@ func (h *Handler) stickyTransportRetryEnabled() bool {
 func (h *Handler) shouldStickyTransportRetry(err error, kind string, timedOut, shouldRetry bool, policy database.ContinuousRetryPolicy) bool {
 	if !shouldRetry || timedOut || kind == "" || kind == upstreamErrorKindWsBusyAcquire || !h.stickyTransportRetryEnabled() {
 		return false
+	}
+	if codexCapacityRequestError(err) != nil {
+		return true
 	}
 	if policy.CatchesAllUpstreamFailures() {
 		return false
@@ -4467,6 +4446,12 @@ func (h *Handler) Responses(c *gin.Context) {
 				if wsHTTPFallback.ForceHTTP() {
 					wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, logStatusUpstreamStreamBreak)
 				}
+				if codexCapacityRequestError(reqErr) != nil {
+					if status, body, exists := continuousRetryHTTPErrorDetails(reqErr); exists {
+						lastStatusCode, lastBody = status, body
+					}
+					rememberContinuousRetryRequestFailure(c.Request.Context(), reqErr)
+				}
 				retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
 				shouldRetry := false
 				if retryable {
@@ -4680,6 +4665,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				stopTTFTGuard()
 				resp.Body.Close()
 				downstreamWrote := streamAttempt.downstreamWrote(wroteAnyBody)
+				if !outcome.terminalLocal && codexCapacityErrorForClient(outcome.failurePayload) != nil {
+					rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
+				}
 				if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), nil, continuousRetryPolicy) {
 					rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
 					_ = streamAttempt.Close()
@@ -4905,12 +4893,9 @@ func (h *Handler) Responses(c *gin.Context) {
 						imageLogInfo = mergeImageUsageLogInfo(imageLogInfo, imageUsageLogInfoFromImage(image))
 					}
 					if !clientGone {
-						// 可重试的 error 帧（上游降载先导帧）与生命周期帧一样缓冲：
-						// 立即写出会置位 wroteAnyBody，随后的 response.failed 就进不了
-						// 首包前静默换号分支。必须写出时改写降载码为客户端可重试码。
 						shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
 							(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))
-						wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
+						wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, data, shouldDefer)
 						if err != nil {
 							writeErr = err
 							clientGone = true
@@ -4998,6 +4983,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, totalDuration, firstTokenMs, outcome.logStatusCode)
 			}
 			downstreamWrote := streamAttempt.downstreamWrote(wroteAnyBody)
+			if !outcome.terminalLocal && codexCapacityErrorForClient(outcome.failurePayload) != nil {
+				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
+			}
 			if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), writeErr, continuousRetryPolicy) {
 				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, terminalFailurePayload)
 				_ = streamAttempt.Close()
@@ -5065,15 +5053,13 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 			if isStream && outcome.terminalLocal {
 				writeContinuousRetryLocalResponsesError(c)
-			} else if isStream && abortedForHTTPError && !downstreamWrote {
+			} else if isStream && (abortedForHTTPError || codexCapacityErrorForClient(terminalFailurePayload) != nil) && !downstreamWrote {
 				// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
 				// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
 				// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
 				if !writeCommittedResponsesRetryError(c, outcome.failureMessage) {
 					c.Header("Content-Type", "application/json; charset=utf-8")
-					c.JSON(outcome.logStatusCode, gin.H{
-						"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
-					})
+					writeResponseFailedHTTPError(c, outcome.logStatusCode, terminalFailurePayload, outcome.failureMessage)
 				}
 			} else if isStream && !downstreamWrote && outcome.logStatusCode == logStatusUpstreamStreamBreak &&
 				c.Request.Context().Err() == nil && writeErr == nil {
@@ -5090,7 +5076,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			if !isStream && nonStreamFailure != nil && readErr == nil {
 				status := safeGrokNativeHTTPStatus(outcome.logStatusCode)
 				if !writeCommittedResponsesRetryError(c, outcome.failureMessage) {
-					if len(nonStreamResponseBody) > 0 && gjson.ValidBytes(nonStreamResponseBody) {
+					if codexCapacityErrorForClient(nonStreamResponseBody) != nil {
+						writeCodexCapacityError(c, nonStreamResponseBody, continuousRetryProtocolOpenAI)
+					} else if len(nonStreamResponseBody) > 0 && gjson.ValidBytes(nonStreamResponseBody) {
 						c.Data(status, nonStreamContentType, nonStreamResponseBody)
 					} else {
 						c.JSON(status, gin.H{
@@ -5235,6 +5223,12 @@ func (h *Handler) Responses(c *gin.Context) {
 				wsHTTPFallback.Retain(account, proxyURL, wsElapsed, websocketMessageTooBigSource(reqErr.Error()))
 				log.Printf("上游 WebSocket 1009，保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/responses, ws_elapsed_ms=%d): %v", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), reqErr)
 				continue
+			}
+			if codexCapacityRequestError(reqErr) != nil {
+				if status, body, exists := continuousRetryHTTPErrorDetails(reqErr); exists {
+					lastStatusCode, lastBody = status, body
+				}
+				rememberContinuousRetryRequestFailure(c.Request.Context(), reqErr)
 			}
 			retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
 			shouldRetry := false
@@ -5616,12 +5610,9 @@ func (h *Handler) Responses(c *gin.Context) {
 					// 既无法按真实错误码返回，也无法走超窗压缩重试。
 					// preflightPassthrough（issue #425）恢复旧版语义：元数据事件立即下发，
 					// 管理员显式接受上述代价；生命周期事件（created/in_progress）不受开关影响。
-					// 可重试的 error 帧（上游降载先导帧）不受 preflightPassthrough 影响，
-					// 始终缓冲：立即写出会置位 wroteAnyBody，随后的 response.failed 就
-					// 进不了首包前静默换号/超窗压缩分支。必须写出时改写降载码。
 					shouldDefer := shouldDeferPreContentSSEEvent(eventType, contentTokenSeen, gotTerminal, preflightPassthrough) ||
 						(!contentTokenSeen && !visibleBody && !gotTerminal && isRetryableUpstreamErrorFrame(eventType, data, continuousRetryPolicy))
-					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, sanitizeCapacityShedEventForClient(eventType, data), shouldDefer)
+					wrote, err := writeDeferredSSEData(streamWriter, &pendingFirstTokenEvents, data, shouldDefer)
 					if err != nil {
 						writeErr = err
 						clientGone = true
@@ -5901,6 +5892,9 @@ func (h *Handler) Responses(c *gin.Context) {
 			log.Printf("上游 WebSocket 1009，首包前保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/responses, ws_elapsed_ms=%d): %s", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), outcome.failureMessage)
 			continue
 		}
+		if !outcome.terminalLocal && codexCapacityErrorForClient(outcome.failurePayload) != nil {
+			rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
+		}
 		if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), writeErr, continuousRetryPolicy) {
 			rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, terminalFailurePayload)
 			_ = streamAttempt.Close()
@@ -6011,15 +6005,13 @@ func (h *Handler) Responses(c *gin.Context) {
 
 		if isStream && outcome.terminalLocal {
 			writeContinuousRetryLocalResponsesError(c)
-		} else if isStream && abortedForHTTPError && !downstreamWrote {
+		} else if isStream && (abortedForHTTPError || codexCapacityErrorForClient(terminalFailurePayload) != nil) && !downstreamWrote {
 			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
 			// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
 			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
 			if !writeCommittedResponsesRetryError(c, outcome.failureMessage) {
 				c.Header("Content-Type", "application/json; charset=utf-8")
-				c.JSON(logStatusCode, gin.H{
-					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
-				})
+				writeResponseFailedHTTPError(c, logStatusCode, terminalFailurePayload, outcome.failureMessage)
 			}
 		} else if isStream && !downstreamWrote && logStatusCode == logStatusUpstreamStreamBreak &&
 			c.Request.Context().Err() == nil && writeErr == nil {
@@ -6036,9 +6028,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			if !claimContinuousRetryTerminal(c, continuousRetryProtocolResponses) {
 				// The deadline owns the terminal response.
 			} else if len(terminalFailurePayload) > 0 {
-				c.JSON(logStatusCode, gin.H{
-					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
-				})
+				writeResponseFailedHTTPError(c, logStatusCode, terminalFailurePayload, outcome.failureMessage)
 			} else if responseJSON != nil {
 				c.Header("Content-Type", "application/json")
 				c.Status(http.StatusOK)
@@ -6426,6 +6416,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 					return
 				}
 				kind := classifyTransportFailure(reqErr)
+				if codexCapacityRequestError(reqErr) != nil {
+					if status, body, exists := continuousRetryHTTPErrorDetails(reqErr); exists {
+						lastStatusCode, lastBody = status, body
+					}
+					rememberContinuousRetryRequestFailure(c.Request.Context(), reqErr)
+				}
 				retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
 				shouldRetry := retryable && shouldRetryRequestError(reqErr, &generalRetries, maxRetries, continuousRetryPolicy)
 				stickyRetry := h.shouldStickyTransportRetry(reqErr, kind, false, shouldRetry, continuousRetryPolicy)
@@ -6685,6 +6681,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 			kind := classifyTransportFailure(reqErr)
+			if codexCapacityRequestError(reqErr) != nil {
+				if status, body, exists := continuousRetryHTTPErrorDetails(reqErr); exists {
+					lastStatusCode, lastBody = status, body
+				}
+				rememberContinuousRetryRequestFailure(c.Request.Context(), reqErr)
+			}
 			retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
 			shouldRetry := retryable && shouldRetryRequestError(reqErr, &generalRetries, maxRetries, continuousRetryPolicy)
 			stickyRetry := h.shouldStickyTransportRetry(reqErr, kind, false, shouldRetry, continuousRetryPolicy)
@@ -7376,6 +7378,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				log.Printf("上游 WebSocket 1009，保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/chat/completions, ws_elapsed_ms=%d): %v", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), reqErr)
 				continue
 			}
+			if codexCapacityRequestError(reqErr) != nil {
+				if status, body, exists := continuousRetryHTTPErrorDetails(reqErr); exists {
+					lastStatusCode, lastBody = status, body
+				}
+				rememberContinuousRetryRequestFailure(c.Request.Context(), reqErr)
+			}
 			retryable := isRetryableRequestErrorForContext(c.Request.Context(), reqErr, continuousRetryPolicy)
 			shouldRetry := false
 			if retryable {
@@ -7557,6 +7565,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			ttftGuard.Stop()
 			resp.Body.Close()
 			downstreamWrote := streamAttempt.downstreamWrote(wroteAnyBody)
+			if !outcome.terminalLocal && codexCapacityErrorForClient(outcome.failurePayload) != nil {
+				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
+			}
 			if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), nil, continuousRetryPolicy) {
 				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
 				_ = streamAttempt.Close()
@@ -8000,6 +8011,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			log.Printf("上游 WebSocket 1009，首包前保留账号租约并降级 HTTP (fallback_id=%s, source=%s, attempt=%d, account=%d, endpoint=/v1/chat/completions, ws_elapsed_ms=%d): %s", wsHTTPFallback.ID(), wsHTTPFallback.Source(), attempt+1, account.ID(), wsElapsed.Milliseconds(), outcome.failureMessage)
 			continue
 		}
+		if !outcome.terminalLocal && codexCapacityErrorForClient(outcome.failurePayload) != nil {
+			rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
+		}
 		if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), writeErr, continuousRetryPolicy) {
 			rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, terminalFailurePayload)
 			_ = streamAttempt.Close()
@@ -8078,15 +8092,13 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		if isStream && outcome.terminalLocal {
 			writeContinuousRetryLocalChatError(c)
-		} else if isStream && abortedForHTTPError && !downstreamWrote {
+		} else if isStream && (abortedForHTTPError || codexCapacityErrorForClient(terminalFailurePayload) != nil) && !downstreamWrote {
 			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
 			// 覆盖预设的 SSE Content-Type 后按真实错误码返回 JSON,
 			// 避免下游中转/计费方把它当成功并按预估 input token 计费(与回调内 reset 呼应)。
 			if !writeCommittedChatRetryError(c, outcome.failureMessage) {
 				c.Header("Content-Type", "application/json; charset=utf-8")
-				c.JSON(logStatusCode, gin.H{
-					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
-				})
+				writeResponseFailedHTTPError(c, logStatusCode, terminalFailurePayload, outcome.failureMessage)
 			}
 		} else if isStream && !downstreamWrote && logStatusCode == logStatusUpstreamStreamBreak &&
 			c.Request.Context().Err() == nil && writeErr == nil {
@@ -8103,9 +8115,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if !claimContinuousRetryTerminal(c, continuousRetryProtocolChat) {
 				// The deadline owns the terminal response.
 			} else if len(terminalFailurePayload) > 0 {
-				c.JSON(logStatusCode, gin.H{
-					"error": gin.H{"message": outcome.failureMessage, "type": "upstream_error"},
-				})
+				writeResponseFailedHTTPError(c, logStatusCode, terminalFailurePayload, outcome.failureMessage)
 			} else if compactResult != nil {
 				c.Data(http.StatusOK, "application/json", compactResult)
 			} else {
@@ -9055,6 +9065,9 @@ func parseFloat(s string) float64 {
 
 // sendUpstreamError 发送上游错误响应给客户端
 func (h *Handler) sendUpstreamError(c *gin.Context, statusCode int, body []byte) {
+	if writeCodexCapacityError(c, body, continuousRetryProtocolOpenAI) {
+		return
+	}
 	if isExplicitUpstreamCyberPolicy(body) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{
@@ -9102,6 +9115,10 @@ func normalizedRetryAfter(value string) string {
 // sendFinalUpstreamError 重试用尽后的最终错误响应：识别 usage_limit_reached 改写为 503，其余透传
 func (h *Handler) sendFinalUpstreamError(c *gin.Context, statusCode int, body []byte) {
 	if !claimContinuousRetryTerminal(c, continuousRetryProtocolOpenAI) {
+		return
+	}
+	if codexCapacityErrorForClient(body) != nil {
+		h.sendUpstreamError(c, statusCode, body)
 		return
 	}
 	if details, ok := parseUsageLimitDetails(body); ok {
