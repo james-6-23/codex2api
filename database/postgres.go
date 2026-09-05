@@ -465,6 +465,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 			return nil, fmt.Errorf("创建提示词会话锁表失败: %w", err)
 		}
 	}
+	if err := db.ensureProxyRiskScoringTables(ctx); err != nil {
+		return nil, fmt.Errorf("创建代理风险评分表失败: %w", err)
+	}
 
 	// 启动批量写入后台协程
 	db.startLogFlusher()
@@ -3404,7 +3407,8 @@ type ProxyRow struct {
 	TestStatus    string    `json:"test_status"`
 	// BoundCount 是绑定到该代理的账号数,由列表接口按 proxy_url 聚合填充,
 	// 前端据此免拉全量账号(代理页大号池卡死问题)。
-	BoundCount int64 `json:"bound_count"`
+	BoundCount int64                   `json:"bound_count"`
+	RiskScore  *ProxyRiskScoreSnapshot `json:"risk_score,omitempty"`
 }
 
 // SetAccountProxyURLs 在单事务里批量更新账号的 proxy_url(代理均衡绑定)。
@@ -3485,7 +3489,19 @@ func (db *DB) ListProxies(ctx context.Context) ([]*ProxyRow, error) {
 		}
 		proxies = append(proxies, p)
 	}
-	return proxies, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	ids := make([]int64, 0, len(proxies))
+	for _, proxy := range proxies {
+		ids = append(ids, proxy.ID)
+	}
+	if scores, err := db.ListLatestProxyRiskScores(ctx, ids); err == nil {
+		for _, proxy := range proxies {
+			proxy.RiskScore = scores[proxy.ID]
+		}
+	}
+	return proxies, nil
 }
 
 // GetProxy returns one proxy by ID.

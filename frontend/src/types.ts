@@ -2204,6 +2204,7 @@ export interface PromptPolicyAuditHealth {
 export interface PromptPolicyIncidentDetailResponse {
 	incident: PromptPolicyIncident
 	matches: PromptFilterMatch[]
+	risk_subjects?: PromptRiskIncidentSubject[]
 	candidate?: {
 		id: number
 		status: string
@@ -2764,6 +2765,8 @@ export interface PromptIntelligenceEvidence {
   api_key_id?: number
   api_key_name?: string
   observed_at: string
+  incident_id?: string
+  risk_subjects?: PromptRiskIncidentSubject[]
 }
 
 export interface PromptIntelligenceEvidenceResponse {
@@ -2822,10 +2825,136 @@ export interface PromptIntelligenceAIAnalysisResponse {
   analysis_evidence_id: number
   provider: PromptIntelligenceAIProvider
   model: string
+  evidence_basis?: 'prompt' | 'context_only'
   decision: PromptIntelligenceAIDecision
   rule_candidate?: PromptIntelligenceCandidate
   rule_error?: string
   identity_update: PromptIdentityUpdateResult
+}
+
+export interface PromptRiskIncidentSubject {
+	subject_type: PromptRiskSubjectType
+	subject_key: string
+	subject_display: string
+	platform?: string
+	is_person: boolean
+	identity_confidence: number
+	newapi_user_id?: string
+	newapi_user_name?: string
+	newapi_user_email?: string
+	newapi_user_group?: string
+	event_count: number
+}
+
+export interface PromptIntelligenceDraftSuggestion {
+  provider: PromptIntelligenceAIProvider
+  model: string
+  evidence_basis: 'prompt' | 'context_only'
+  confidence: number
+  reason: string
+  rule: { name: string; pattern: string; weight: number; category: string; strict: boolean; rationale: string }
+  validation_error?: string
+  evidence_matched: number
+  evidence_total: number
+}
+
+export interface ProxyRiskScoreSnapshot {
+  id: number
+  proxy_id: number
+  profile_id: number
+  provider: string
+  resolved_ip: string
+  score: number | null
+  risk_level: string
+  recommendation: string
+  proxy_type?: string
+  is_vpn: boolean
+  is_tor: boolean
+  is_datacenter: boolean
+  is_blacklisted: boolean
+  blacklist_sources?: string[]
+  isp?: string
+  country?: string
+  latency_ms: number
+  status: string
+  error?: string
+  features_json?: string
+  raw_response_json?: string
+  checked_at: ISODateString
+  expires_at?: ISODateString | null
+}
+
+export interface ProxyRiskScoringProfile {
+  id: number
+  name: string
+  provider: string
+  engine?: string
+  enabled: boolean
+  priority: number
+  scamalytics_host: string
+  scamalytics_user: string
+  scamalytics_key_configured?: boolean
+  scamalytics_key_masked?: string
+  timeout_seconds: number
+  concurrency: number
+  request_delay_ms: number
+  cache_ttl_seconds: number
+  max_checks_per_job: number
+  daily_check_limit: number
+  credit_reserve: number
+  allow_force_refresh: boolean
+  resolve_hostnames: boolean
+  allow_private_targets: boolean
+  docs_url: string
+  tutorial_url: string
+  daily_used_date?: string
+  daily_used_count?: number
+  credits_remaining?: number | null
+  credits_used?: number | null
+  credit_reset_at?: ISODateString | null
+  last_quota_checked_at?: ISODateString | null
+  last_error?: string
+  created_at: ISODateString
+  updated_at: ISODateString
+}
+
+export interface PromptLogRetention {
+  retention_days: number
+  running: boolean
+  last_run_at?: string
+  last_deleted_logs: number
+  last_deleted_events: number
+  last_deleted_sources: number
+  last_duration_ms: number
+  last_error?: string
+}
+
+export interface ProxyRiskScoringJobItem {
+  seq: number
+  proxy_id: number
+  label: string
+  status: 'success' | 'error' | 'skipped' | 'cached' | string
+  error?: string
+  snapshot?: ProxyRiskScoreSnapshot | null
+  checked_at: ISODateString
+}
+
+export interface ProxyRiskScoringJob {
+  job_id: string
+  current?: string
+  items: ProxyRiskScoringJobItem[]
+  last_seq: number
+  profile_id: number
+  status: string
+  total: number
+  done: number
+  success: number
+  failed: number
+  skipped: number
+  cache_hits: number
+  error?: string
+  created_at: ISODateString
+  updated_at: ISODateString
 }
 
 export interface PromptIntelligenceHistoryResponse {

@@ -22,3 +22,17 @@ test('pages and components use the shared Select instead of a raw <select>', () 
   const offenders = files.filter((f) => /<select[\s>]/.test(readFileSync(f, 'utf8'))).map((f) => relative(srcRoot, f))
   assert.deepEqual(offenders, [], `raw <select> found; use components/ui/select.tsx (see DESIGN.md): ${offenders.join(', ')}`)
 })
+
+test('Proxies risk selects stay content-sized (not the Select wrapper default w-full)', () => {
+  const proxiesPath = join(srcRoot, 'pages', 'Proxies.tsx')
+  const content = readFileSync(proxiesPath, 'utf8')
+  const selectBlocks = content.match(/<Select\b[\s\S]*?\/>/g) ?? []
+  assert.equal(selectBlocks.length, 2, `expected 2 <Select /> usages in Proxies.tsx, found ${selectBlocks.length}`)
+  for (const block of selectBlocks) {
+    assert.match(
+      block,
+      /className=["'][^"']*\bw-auto\b[^"']*["']/,
+      `Select wrapper defaults to w-full unless className overrides it with w-auto; missing on: ${block.slice(0, 60)}...`
+    )
+  }
+})

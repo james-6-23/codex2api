@@ -94,7 +94,9 @@ func TestGrokBatchImportRevivesRecycledIdentity(t *testing.T) {
 	handler := &Handler{db: db, store: store}
 	ctx := context.Background()
 
-	authJSON := `{"refresh_token":"rt-issue-602","client_id":"cli-602","user_id":"user-602","email":"u602@example.com"}`
+	// Keep the imported credential usable so the detached post-import probe
+	// cannot race this test by trying to refresh the intentionally fake token.
+	authJSON := `{"refresh_token":"rt-issue-602","access_token":"at-issue-602","expires_at":"2099-01-01T00:00:00Z","client_id":"cli-602","user_id":"user-602","email":"u602@example.com"}`
 
 	first := doGrokBatchImport(t, handler, authJSON)
 	if first.Imported != 1 || len(first.Items) != 1 || !first.Items[0].OK {
