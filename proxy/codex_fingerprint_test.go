@@ -426,6 +426,7 @@ func TestApplyCodexFingerprintOffModeIsNoop(t *testing.T) {
 func TestApplyCodexFingerprintToBodyRewritesClientMetadata(t *testing.T) {
 	account := fingerprintAccount(t, auth.CodexFingerprintModeSession)
 	downstream := codexClientHeaders("", "client-session")
+	downstream.Set("Thread-Id", "client-thread")
 	ids := resolveCodexFingerprintIDs(account, downstream)
 	body := []byte(`{"model":"gpt-5.6-codex","client_metadata":{"x-codex-installation-id":"client-install","session_id":"client-session","thread_id":"client-thread","x-codex-window-id":"client-window:0","x-codex-turn-metadata":"{\"installation_id\":\"client-install\",\"session_id\":\"client-session\",\"sandbox\":\"read-only\"}"}}`)
 
@@ -587,6 +588,7 @@ func TestExecuteCompactRequestConvergesBodyAndHeaders(t *testing.T) {
 	// EvaluateEngineFingerprint 门）；标识头还需下游确实发过才会被覆盖。
 	downstream := codexClientHeaders(`{"installation_id":"client-install","session_id":"client-session"}`, "client-session")
 	downstream.Set("X-Codex-Installation-Id", "client-install")
+	downstream.Set("Thread-Id", "client-thread")
 	ids := resolveCodexFingerprintIDs(account, downstream)
 	if ids == nil {
 		t.Fatal("expected convergence ids for session mode")

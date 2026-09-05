@@ -127,6 +127,11 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 准备请求体
 	wsBody := e.prepareWebsocketBody(requestBody, sessionID)
+	ginHeaders = proxy.CodexRequestMetadataHeaders(ginHeaders, wsBody)
+	wsBody = applyCodexFrameMetadata(wsBody, ginHeaders)
+	fingerprint := proxy.NewCodexFingerprint(account, ginHeaders, wsBody)
+	ginHeaders = fingerprint.DownstreamHeaders()
+	wsBody = fingerprint.ApplyBody(wsBody)
 
 	headerSessionID := resolveHandshakeSessionID(sessionID, poolRouteKey, wsBody)
 	baseKey := strings.TrimSpace(poolRouteKey)
@@ -147,13 +152,9 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 
 	// 准备请求头
-	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
-	// Project the final compatibility headers (including account overrides) into
-	// this logical request's frame, then converge any newly introduced identity
-	// fields. This mirrors the official Codex canonical metadata projection.
+	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody, fingerprint)
 	wsBody = applyCodexFrameMetadata(wsBody, headers)
-	wsBody = proxy.ApplyCodexFingerprintToBody(wsBody, account, ginHeaders)
-	if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
+	if !proxy.IsStatelessWebsocketSessionID(sessionID) || !statelessOneShotEnabled() {
 		stripCodexFrameScopedHandshakeHeaders(headers)
 	}
 	// Record the attempted handshake UA immediately so failed handshakes are
@@ -185,12 +186,16 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	// 该响应的那条 WS 连接里。带续链 ID 的请求优先取回原连接（独占成功才用），
 	// 否则落到随机槽位会触发上游 "previous response not found"。
 	poolSessionID := proxy.ResolveCodexWebsocketTransportSessionKey(sessionID, ginHeaders)
+	requestScope := poolSessionID
+	if proxy.IsStatelessWebsocketSessionID(sessionID) {
+		requestScope = "stateless:" + baseKey
+	}
 	var wc *WsConnection
 	var pr *PendingRequest
 	var err2 error
 	acquireStart := time.Now()
 	if prevRespID := strings.TrimSpace(gjson.GetBytes(wsBody, "previous_response_id").String()); prevRespID != "" {
-		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey); pwc != nil {
+		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey, requestScope); pwc != nil {
 			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
 	}
@@ -258,12 +263,13 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	e.manager.StartHeartbeat(wc)
 
 	return &WsResponse{
-		conn:        wc,
-		pendingReq:  pr,
-		sessionID:   poolSessionID,
-		manager:     e.manager,
-		apiKey:      apiKey,
-		readErrChan: make(chan error, 1),
+		conn:         wc,
+		pendingReq:   pr,
+		sessionID:    poolSessionID,
+		requestScope: requestScope,
+		manager:      e.manager,
+		apiKey:       apiKey,
+		readErrChan:  make(chan error, 1),
 	}, nil
 }
 
@@ -333,6 +339,7 @@ func applyCodexFrameMetadata(body []byte, headers http.Header) []byte {
 	if len(body) == 0 || headers == nil || !gjson.ValidBytes(body) {
 		return body
 	}
+	headers = proxy.CodexRequestMetadataHeaders(headers, body)
 
 	rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata"))
 	if !gjson.GetBytes(body, codexTurnMetadataClientPath).Exists() && gjson.Valid(rawTurnMetadata) && gjson.Parse(rawTurnMetadata).IsObject() {
@@ -347,9 +354,12 @@ func applyCodexFrameMetadata(body []byte, headers http.Header) []byte {
 		canonicalField string
 	}{
 		{"X-Codex-Turn-State", "client_metadata.x-codex-turn-state", ""},
+		{"X-Codex-Window-Id", "client_metadata.x-codex-window-id", "window_id"},
+		{"X-Codex-Installation-Id", "client_metadata.x-codex-installation-id", "installation_id"},
+		{"Thread-Id", "client_metadata.thread_id", "thread_id"},
 		{"X-Client-Request-Id", "client_metadata.x-client-request-id", ""},
 		{"X-Codex-Parent-Thread-Id", "client_metadata.x-codex-parent-thread-id", "parent_thread_id"},
-		{"X-OpenAI-Subagent", "client_metadata.x-openai-subagent", ""},
+		{"X-OpenAI-Subagent", "client_metadata.x-openai-subagent", "subagent_kind"},
 		{"X-OpenAI-Memgen-Request", "client_metadata.x-openai-memgen-request", ""},
 	}
 	for _, projection := range projections {
@@ -451,6 +461,9 @@ func stripCodexFrameScopedHandshakeHeaders(headers http.Header) {
 	for _, name := range []string{
 		"X-Codex-Turn-State",
 		"X-Codex-Turn-Metadata",
+		"X-Codex-Window-Id",
+		"X-Codex-Installation-Id",
+		"Thread-Id",
 		"X-Client-Request-Id",
 		"X-Codex-Parent-Thread-Id",
 		"X-OpenAI-Subagent",
@@ -461,7 +474,7 @@ func stripCodexFrameScopedHandshakeHeaders(headers http.Header) {
 }
 
 // prepareWebsocketHeaders 准备 WebSocket 请求头
-func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte) http.Header {
+func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte, fingerprints ...*proxy.CodexFingerprint) http.Header {
 	headers := http.Header{}
 
 	// 认证头
@@ -503,7 +516,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	}
 	// X-Oai-Attestation：DeviceCheck 设备认证头（上游 openai/codex#20619），
 	// 仅在下游携带时透传，本代理不伪造（假 token 服务端验证必败，反而暴露）。
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Parent-Thread-Id", "X-OpenAI-Subagent", "X-OpenAI-Memgen-Request", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Codex-Window-Id", "X-Client-Request-Id", "X-Codex-Parent-Thread-Id", "X-OpenAI-Subagent", "X-OpenAI-Memgen-Request", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
 			headers.Set(name, value)
 		}
@@ -511,7 +524,11 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	// 指纹收敛：在透传之后覆盖客户端原值，在账号自定义头之前保留运维覆盖优先级。
 	// 握手头是逐连接冻结的，复用连接沿用建连时的取值；收敛值按账号恒定，正好与
 	// 这一语义相容。off 档为空操作。
-	proxy.ApplyCodexFingerprintHeaders(headers, account, ginHeaders)
+	if len(fingerprints) > 0 {
+		fingerprints[0].ApplyHeaders(headers)
+	} else {
+		proxy.ApplyCodexFingerprintHeaders(headers, account, ginHeaders)
+	}
 
 	// Account ID
 	if accountID != "" {
@@ -522,7 +539,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	// 都是 session-id / thread-id / x-client-request-id，也都不发 Conversation_id。
 	// legacy 档下该函数恢复旧的 Session_id + 清 Conversation_id 行为。
 	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
-		proxy.ApplyCodexSessionHeaders(headers, account, sessionID, ginHeaders, true)
+		proxy.ApplyCodexSessionHeaders(headers, account, sessionID, ginHeaders, true, fingerprints...)
 	}
 	for name, value := range account.GetCustomHeaders() {
 		name = strings.TrimSpace(name)
@@ -554,12 +571,13 @@ func (e *Executor) sendRequest(wc *WsConnection, body []byte, requestID string) 
 
 // WsResponse WebSocket 响应包装器
 type WsResponse struct {
-	conn        *WsConnection
-	pendingReq  *PendingRequest
-	sessionID   string
-	manager     *Manager
-	readErrChan chan error
-	closed      bool
+	conn         *WsConnection
+	pendingReq   *PendingRequest
+	sessionID    string
+	requestScope string
+	manager      *Manager
+	readErrChan  chan error
+	closed       bool
 	// apiKey 发起本请求的下游 API Key，用于 response_id → 连接绑定的归属校验。
 	apiKey string
 	// connBroken 标记读流因上游 WS 异常(非正常关闭)或下游写入失败而终止；
@@ -662,7 +680,7 @@ func (r *WsResponse) handleMessage(payload []byte, callback func(data []byte) bo
 				if r.conn.session != nil {
 					accountID = r.conn.session.AccountID
 				}
-				r.manager.BindResponseConn(respID, r.conn, r.sessionID, accountID, r.apiKey)
+				r.manager.BindResponseConn(respID, r.conn, r.sessionID, accountID, r.apiKey, r.requestScope)
 			}
 		}
 		return io.EOF

@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -47,12 +48,15 @@ const (
 // 确定性推导，因此请求头改写点和请求体改写点各自推导也必然得到同一组值，
 // 不需要跨函数传递即可保证一致。
 type codexFingerprintIDs struct {
-	mode           string
-	accountID      int64
-	installationID string
-	sessionID      string
-	threadID       string
-	windowID       string
+	mode            string
+	accountID       int64
+	installationID  string
+	sessionID       string
+	threadID        string
+	windowID        string
+	clientRequestID string
+	account         *auth.Account
+	lineageValues   map[string]string
 }
 
 // deriveStableCodexUUID 从种子确定性派生一个 UUIDv4 格式的字符串：同一种子恒定返回
@@ -180,6 +184,8 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 		mode:           mode,
 		accountID:      accountID,
 		installationID: resolveConvergedInstallationID(account, accountID),
+		account:        account,
+		lineageValues:  make(map[string]string),
 	}
 	if ids.installationID == "" {
 		return nil
@@ -193,24 +199,54 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 	ids.threadID = ids.sessionID
 	if mode == auth.CodexFingerprintModeSession {
 		clientSessionID, clientThreadID := extractClientCodexIdentity(downstreamHeaders)
-		var threadSeed string
-		switch {
-		case clientThreadID != "" && clientSessionID != "" && clientThreadID != clientSessionID:
-			// 子代理 / 多窗口：真实 thread 与 session 不同。仍按会话派生会把
-			// 多条线程收成一条，X-Client-Request-Id（实测恒等于 thread-id）
-			// 跟着塌缩后，上游按线程查找 previous_response_id 就会 400（#541）。
-			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v2:%d:%s", accountID, clientThreadID)
-		case clientSessionID != "":
-			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v1:%d:%s", accountID, clientSessionID)
-		case clientThreadID != "":
-			threadSeed = fmt.Sprintf("codex2api:codex-thread-id:v1:%d:%s", accountID, clientThreadID)
+		if clientThreadID == "" {
+			clientThreadID = clientSessionID
 		}
-		if threadSeed != "" {
-			ids.threadID = deriveStableCodexUUIDv7(threadSeed, codexIdentityUnixMilli(account, threadSeed))
+		if clientThreadID != "" {
+			ids.threadID = ids.convergeThreadID(clientThreadID)
 		}
 	}
-	ids.windowID = ids.threadID + ":0"
+	windowNumber := "0"
+	metadata := downstreamHeaders.Get(codexTurnMetadataHeader)
+	if number := gjson.Get(metadata, "window_number"); number.Type == gjson.Number && number.Int() >= 0 {
+		windowNumber = strconv.FormatInt(number.Int(), 10)
+	} else if window := downstreamHeaders.Get(codexWindowIDHeader); window != "" {
+		if separator := strings.LastIndexByte(window, ':'); separator >= 0 {
+			if number, err := strconv.ParseUint(window[separator+1:], 10, 63); err == nil {
+				windowNumber = strconv.FormatUint(number, 10)
+			}
+		}
+	}
+	ids.windowID = ids.threadID + ":" + windowNumber
+	ids.clientRequestID = convergedClientRequestID(downstreamHeaders.Get(codexClientRequestIDHeader), ids, downstreamHeaders)
+	for _, field := range codexLineageMetadataPaths {
+		if original := gjson.Get(metadata, field).String(); original != "" {
+			ids.lineageValues[field] = ids.convergeLineageValue(field, original)
+		}
+	}
 	return ids
+}
+
+func (ids *codexFingerprintIDs) convergeThreadID(original string) string {
+	if ids.mode == auth.CodexFingerprintModeFull {
+		return ids.sessionID
+	}
+	original = strings.TrimSpace(original)
+	if parsed, err := uuid.Parse(original); err == nil {
+		original = parsed.String()
+	}
+	seed := fmt.Sprintf("codex2api:codex-thread-id:v1:%d:%s", ids.accountID, original)
+	return deriveStableCodexUUIDv7(seed, codexIdentityUnixMilli(ids.account, seed))
+}
+
+func (ids *codexFingerprintIDs) convergeLineageValue(field, original string) string {
+	if target := ids.lineageValues[field]; target != "" {
+		return target
+	}
+	if field == "parent_thread_id" || field == "forked_from_thread_id" {
+		return ids.convergeThreadID(original)
+	}
+	return convergeCodexLineageValue(ids.accountID, field, original)
 }
 
 // resolveConvergedInstallationID 返回账号级恒定的 installation_id。
@@ -257,10 +293,13 @@ func extractClientCodexSessionID(headers http.Header) string {
 // （普通 OpenAI SDK 等）不会补发 x-codex-* 头，否则等于给一个本来没有 Codex 特征的
 // 请求伪造出半套客户端特征，比不发更可疑。
 func ApplyCodexFingerprintHeaders(outbound http.Header, account *auth.Account, downstreamHeaders http.Header) {
+	NewCodexFingerprint(account, downstreamHeaders, nil).ApplyHeaders(outbound)
+}
+
+func applyCodexFingerprintHeaders(outbound http.Header, ids *codexFingerprintIDs, downstreamHeaders http.Header) {
 	if outbound == nil {
 		return
 	}
-	ids := resolveCodexFingerprintIDs(account, downstreamHeaders)
 	if ids == nil {
 		return
 	}
@@ -295,14 +334,12 @@ func ApplyCodexFingerprintHeaders(outbound http.Header, account *auth.Account, d
 	if ids.mode != auth.CodexFingerprintModeDevice && downstreamHeaders != nil {
 		if original := strings.TrimSpace(downstreamHeaders.Get(codexParentThreadIDHeader)); original != "" {
 			overrideExistingHeader(outbound, downstreamHeaders, codexParentThreadIDHeader,
-				convergeCodexLineageValue(ids.accountID, "parent_thread_id", original))
+				ids.convergeLineageValue("parent_thread_id", original))
 		}
 	}
 }
 
 // overrideExistingHeader 仅在下游确实发过该头时，用收敛值覆盖出站取值。
-// 判定读下游头而非出站头：这两个标识头都不在 codexAllowedForwardHeaders 里，
-// 下游即使发了，到这一步出站请求上也没有。
 func overrideExistingHeader(outbound, downstreamHeaders http.Header, name, value string) {
 	if value == "" || downstreamHeaders == nil {
 		return
@@ -361,7 +398,10 @@ func extractClientCodexIdentity(headers http.Header) (sessionID, threadID string
 // ApplyCodexFingerprintToBody 收敛请求体 client_metadata 中的设备指纹。
 // 请求体没有 client_metadata 时原样返回。
 func ApplyCodexFingerprintToBody(body []byte, account *auth.Account, downstreamHeaders http.Header) []byte {
-	ids := resolveCodexFingerprintIDs(account, downstreamHeaders)
+	return NewCodexFingerprint(account, downstreamHeaders, body).ApplyBody(body)
+}
+
+func applyCodexFingerprintToBody(body []byte, ids *codexFingerprintIDs) []byte {
 	if ids == nil {
 		return body
 	}
@@ -374,13 +414,29 @@ func ApplyCodexFingerprintToBody(body []byte, account *auth.Account, downstreamH
 		body = setExistingJSONString(body, "client_metadata.session_id", ids.sessionID)
 		body = setExistingJSONString(body, "client_metadata.thread_id", ids.threadID)
 		body = setExistingJSONString(body, "client_metadata.x-codex-window-id", ids.windowID)
+		body = setExistingJSONString(body, "client_metadata.x-client-request-id", ids.clientRequestID)
+		for _, field := range codexLineageMetadataPaths {
+			for _, path := range []string{"client_metadata." + field, "client_metadata.x-codex-" + strings.ReplaceAll(field, "_", "-")} {
+				if original := gjson.GetBytes(body, path); original.Type == gjson.String && strings.TrimSpace(original.String()) != "" {
+					body = setExistingJSONString(body, path, ids.convergeLineageValue(field, original.String()))
+				}
+			}
+		}
 	}
 
 	// client_metadata 里可能内嵌一份 turn metadata JSON 字符串，同样要收敛。
 	const embeddedPath = "client_metadata.x-codex-turn-metadata"
-	if embedded := gjson.GetBytes(body, embeddedPath); embedded.Type == gjson.String {
-		if rewritten, changed := rewriteCodexTurnMetadataJSON(embedded.String(), ids); changed {
-			if updated, err := sjson.SetBytes(body, embeddedPath, rewritten); err == nil {
+	if embedded := gjson.GetBytes(body, embeddedPath); embedded.Type == gjson.String || embedded.IsObject() {
+		raw := embedded.String()
+		if rewritten, changed := rewriteCodexTurnMetadataJSON(raw, ids); changed {
+			var updated []byte
+			var err error
+			if embedded.IsObject() {
+				updated, err = sjson.SetRawBytes(body, embeddedPath, []byte(rewritten))
+			} else {
+				updated, err = sjson.SetBytes(body, embeddedPath, rewritten)
+			}
+			if err == nil {
 				body = updated
 			}
 		}
@@ -422,7 +478,7 @@ func rewriteCodexTurnMetadataJSON(raw string, ids *codexFingerprintIDs) (string,
 		changed = true
 	}
 	if ids.mode != auth.CodexFingerprintModeDevice {
-		if rewritten, ok := convergeCodexLineageMetadata(raw, ids.accountID); ok {
+		if rewritten, ok := convergeCodexLineageMetadata(raw, ids); ok {
 			raw = rewritten
 			changed = true
 		}
@@ -456,13 +512,11 @@ var codexLineageMetadataPaths = []string{
 
 // convergeCodexLineageMetadata 把谱系字段替换成按账号 + 原值派生的收敛值。
 //
-// 按原值派生（而非全部塌缩成一个常量）保住了形态：不同下游窗口/父线程在上游
-// 看来仍是不同的值，这正是真实客户端的样子；变的只是它们不再等于下游的真实标识。
 // 种子带 accountID，与本文件其它收敛值的惯例一致——否则同一个下游用户的同一
 // 窗口在不同账号下会派生出相同占位值，上游据此就能把两个账号关联到同一个人。
 //
 // 只改写已存在且非空的字符串键，不新增、不改变 metadata 形状。
-func convergeCodexLineageMetadata(raw string, accountID int64) (string, bool) {
+func convergeCodexLineageMetadata(raw string, ids *codexFingerprintIDs) (string, bool) {
 	changed := false
 	for _, path := range codexLineageMetadataPaths {
 		existing := gjson.Get(raw, path)
@@ -473,7 +527,7 @@ func convergeCodexLineageMetadata(raw string, accountID int64) (string, bool) {
 		if original == "" {
 			continue
 		}
-		converged := convergeCodexLineageValue(accountID, path, original)
+		converged := ids.convergeLineageValue(path, original)
 		if converged == original {
 			continue
 		}

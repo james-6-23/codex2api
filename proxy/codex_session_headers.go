@@ -90,7 +90,7 @@ func ConvergedCodexSessionIdentity(account *auth.Account, downstreamHeaders http
 //
 // 必须在指纹收敛之后、账号自定义头之前调用，与 ApplyCodexFingerprintHeaders
 // 保持同一套优先级约定。
-func ApplyCodexSessionHeaders(outbound http.Header, account *auth.Account, fallbackSessionID string, downstreamHeaders http.Header, legacyConversationID bool) {
+func ApplyCodexSessionHeaders(outbound http.Header, account *auth.Account, fallbackSessionID string, downstreamHeaders http.Header, legacyConversationID bool, fingerprints ...*CodexFingerprint) {
 	if outbound == nil {
 		return
 	}
@@ -109,7 +109,14 @@ func ApplyCodexSessionHeaders(outbound http.Header, account *auth.Account, fallb
 		return
 	}
 
-	convergedSessionID, threadID := ConvergedCodexSessionIdentity(account, downstreamHeaders)
+	var convergedSessionID, threadID string
+	if len(fingerprints) > 0 {
+		if ids := fingerprints[0].ids; ids != nil {
+			convergedSessionID, threadID = ids.sessionID, ids.threadID
+		}
+	} else {
+		convergedSessionID, threadID = ConvergedCodexSessionIdentity(account, downstreamHeaders)
+	}
 	if threadID == "" {
 		// off/device 档不会生成收敛后的 thread_id，但真实 Codex 的
 		// Thread-Id 仍是区分父任务与子 Agent 的会话语义。优先保留下游

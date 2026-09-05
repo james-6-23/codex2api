@@ -369,6 +369,7 @@ const (
 var codexAllowedForwardHeaders = []string{
 	"X-Codex-Turn-State",
 	"X-Codex-Turn-Metadata",
+	"X-Codex-Window-Id",
 	"X-Client-Request-Id",
 	"X-Codex-Parent-Thread-Id",
 	"X-OpenAI-Subagent",
@@ -544,9 +545,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// requested tier 归因走 EffectiveRequestedServiceTier（净化前取值），不受影响。
 		requestBody = sanitizeServiceTierForUpstream(requestBody)
 	}
-	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
-	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
-	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
+	headers = CodexRequestMetadataHeaders(headers, requestBody)
 	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
 	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
 	// lite 的模型带信号上游必 400，发出前剥离。
@@ -609,6 +608,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
 	}
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
+
+	fingerprint := NewCodexFingerprint(account, headers, requestBody)
+	requestBody = fingerprint.ApplyBody(requestBody)
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken
@@ -684,7 +686,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		}
 
 		// ==================== 请求头（伪装 Codex CLI） ====================
-		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+		applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers, fingerprint)
 		// Content-Encoding 在通用头装配之后设置：真实客户端也是在编码完成时才补这个头
 		// （codex-rs/http-client/src/request.rs prepare_encoded_json），且账号自定义头
 		// 不该有能力声明一个与实际字节不符的编码。
@@ -960,7 +962,9 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	// 真实标识，上游看到「头说设备 A、体说设备 B」这种真实客户端不会有的矛盾。
 	// 必须用 prepareCodexResponsesLiteTransport 之后的 headers（它可能返回克隆），
 	// 与下方 applyCodexRequestHeaders 取同一份下游头，两处推导结果才一致。
-	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
+	fingerprint := NewCodexFingerprint(account, headers, requestBody)
+	headers = fingerprint.DownstreamHeaders()
+	requestBody = fingerprint.ApplyBody(requestBody)
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
 	cacheKey := existingCacheKey
@@ -986,7 +990,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 		return nil, ErrInternalError("创建请求失败", err)
 	}
 
-	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers)
+	applyCodexRequestHeaders(req, account, accessToken, cacheKey, apiKey, deviceCfg, headers, fingerprint)
 	// routing hint 由网关按最终出站 body 合成，须在账号自定义头之后设置。
 	ApplyCodexRoutingHint(req.Header, account, requestBody)
 
@@ -1145,7 +1149,7 @@ func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
 	}
 }
 
-func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header) {
+func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessToken, cacheKey, apiKey string, deviceCfg *DeviceProfileConfig, downstreamHeaders http.Header, fingerprints ...*CodexFingerprint) {
 	if req == nil {
 		return
 	}
@@ -1196,14 +1200,18 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	}
 	// 指纹收敛必须在白名单透传之后（覆盖客户端原值）、账号自定义头之前（运维显式
 	// 配置保持最终优先）。off 档为空操作。
-	ApplyCodexFingerprintHeaders(req.Header, account, downstreamHeaders)
+	if len(fingerprints) > 0 {
+		fingerprints[0].ApplyHeaders(req.Header)
+	} else {
+		ApplyCodexFingerprintHeaders(req.Header, account, downstreamHeaders)
+	}
 	if accountID != "" {
 		req.Header.Set("Chatgpt-Account-Id", accountID)
 	}
 	// 会话标识头按真实客户端形态写出（session-id / thread-id / x-client-request-id）；
 	// 收敛开启时与 turn metadata 报同一组身份。CODEX_SESSION_HEADER_MODE=legacy
 	// 可整体退回旧的 Session_id 形态。
-	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false)
+	ApplyCodexSessionHeaders(req.Header, account, cacheKey, downstreamHeaders, false, fingerprints...)
 	applyAccountCustomHeaders(req, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }

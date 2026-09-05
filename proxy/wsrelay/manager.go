@@ -291,11 +291,12 @@ type Manager struct {
 // 防止跨 Key 用他人 response_id 定向挤上他人连接（与 response cache 的
 // owner 隔离同一原则）。
 type responseConnBinding struct {
-	conn       *WsConnection
-	sessionKey string
-	accountID  int64
-	apiKey     string
-	expiresAt  time.Time
+	conn         *WsConnection
+	sessionKey   string
+	requestScope string
+	accountID    int64
+	apiKey       string
+	expiresAt    time.Time
 }
 
 const (
@@ -1213,12 +1214,16 @@ func (m *Manager) DiscardConnection(wc *WsConnection) {
 }
 
 // BindResponseConn 记录 response_id 由哪条连接产出（续链亲和）。
-func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionKey string, accountID int64, apiKey string) {
+func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionKey string, accountID int64, apiKey string, requestScopes ...string) {
 	responseID = strings.TrimSpace(responseID)
 	if m == nil || responseID == "" || wc == nil {
 		return
 	}
 	now := time.Now()
+	requestScope := sessionKey
+	if len(requestScopes) > 0 {
+		requestScope = requestScopes[0]
+	}
 	m.respConnMu.Lock()
 	if m.respConnBindings == nil {
 		m.respConnBindings = make(map[string]responseConnBinding, 64)
@@ -1233,11 +1238,12 @@ func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionK
 	}
 	if len(m.respConnBindings) < responseConnBindingMaxEntries {
 		m.respConnBindings[responseID] = responseConnBinding{
-			conn:       wc,
-			sessionKey: sessionKey,
-			accountID:  accountID,
-			apiKey:     apiKey,
-			expiresAt:  now.Add(responseConnBindingTTL),
+			conn:         wc,
+			sessionKey:   sessionKey,
+			requestScope: requestScope,
+			accountID:    accountID,
+			apiKey:       apiKey,
+			expiresAt:    now.Add(responseConnBindingTTL),
 		}
 	}
 	m.respConnMu.Unlock()
@@ -1246,7 +1252,7 @@ func (m *Manager) BindResponseConn(responseID string, wc *WsConnection, sessionK
 // lookupResponseConn 返回 response_id 绑定的连接及其池内 sessionKey。
 // 绑定过期、账号/API Key 不匹配、连接已断开/被重建（池内同 key 已非同一指针）
 // 时返回 nil。
-func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey string) (*WsConnection, string) {
+func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey string, requestScopes ...string) (*WsConnection, string) {
 	responseID = strings.TrimSpace(responseID)
 	if m == nil || responseID == "" {
 		return nil, ""
@@ -1254,6 +1260,9 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 	now := time.Now()
 	m.respConnMu.Lock()
 	binding, ok := m.respConnBindings[responseID]
+	if ok && len(requestScopes) > 0 && binding.requestScope != requestScopes[0] {
+		ok = false
+	}
 	if ok && (now.After(binding.expiresAt) || binding.accountID != accountID || binding.apiKey != apiKey) {
 		if now.After(binding.expiresAt) {
 			delete(m.respConnBindings, responseID)
@@ -1278,8 +1287,8 @@ func (m *Manager) lookupResponseConn(responseID string, accountID int64, apiKey 
 // 成功返回 (连接, pendingRequest, 池内 sessionKey)；绑定失效或连接忙时返回 nil，
 // 调用方回退到常规 acquire 路径。忙时不等待：续链上下文虽在原连接，但排队会
 // 阻塞在前一个长响应后面，且该场景（同会话并发续链）极少，退化为缓存 miss 更稳。
-func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string) (*WsConnection, *PendingRequest, string) {
-	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey)
+func (m *Manager) AcquirePreferredConnection(responseID string, accountID int64, apiKey string, requestScopes ...string) (*WsConnection, *PendingRequest, string) {
+	wc, sessionKey := m.lookupResponseConn(responseID, accountID, apiKey, requestScopes...)
 	if wc == nil {
 		return nil, nil, ""
 	}
