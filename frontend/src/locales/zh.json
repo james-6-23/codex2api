@@ -1380,6 +1380,8 @@
     "codexClientMetadataAuto": "自动检测",
     "codexClientMetadataAlways": "始终发送",
     "codexClientMetadataOff": "不注入",
+    "codexInstallationIdLabel": "设备安装 ID",
+    "codexInstallationIdHint": "收敛开启时使用的固定安装 ID；关闭收敛不会删除。若设置了自定义安装 ID，此处显示覆盖值。",
     "codexFingerprintModeTitle": "设备指纹收敛",
     "codexFingerprintModeHint": "多人共享同一账号时，把出站请求里的设备与会话标识改写成账号级恒定值，降低上游看到的设备数和会话数。只影响 turn metadata 与 client_metadata，不改变上游会话隔离与 prompt cache 行为。",
     "codexFingerprintModeBatchHint": "批量设置所选账号的设备指纹收敛档位。仅对 Codex 官方账号生效，中转与 Grok 账号会忽略。",

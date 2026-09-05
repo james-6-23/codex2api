@@ -1583,6 +1583,7 @@ type accountResponse struct {
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
 	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
 	CodexFingerprintMode          string                      `json:"codex_fingerprint_mode,omitempty"`
+	CodexInstallationID           string                      `json:"codex_installation_id,omitempty"`
 	ClaudeFingerprintMode         string                      `json:"claude_fingerprint_mode,omitempty"`
 	ClaudeUserAgent               string                      `json:"claude_user_agent,omitempty"`
 	ClaudeClientPlatform          string                      `json:"claude_client_platform,omitempty"`
@@ -1890,6 +1891,19 @@ func (h *Handler) GetAccount(c *gin.Context) {
 		}
 		writeInternalError(c, err)
 		return
+	}
+
+	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
+	if (upstreamType == "" || strings.EqualFold(upstreamType, "codex")) && strings.TrimSpace(row.GetCredential(database.CodexInstallationIDCredentialKey)) == "" {
+		installationID, identityErr := h.db.EnsureCodexInstallationID(ctx, id)
+		if identityErr != nil {
+			writeInternalError(c, identityErr)
+			return
+		}
+		if row.Credentials == nil {
+			row.Credentials = make(map[string]interface{})
+		}
+		row.Credentials[database.CodexInstallationIDCredentialKey] = installationID
 	}
 
 	requestCounts, err := h.db.GetAccountRequestCountsByIDs(ctx, []int64{id})
@@ -3544,7 +3558,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			}
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3643,7 +3657,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 			}
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3833,7 +3847,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3961,7 +3975,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -5924,7 +5938,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(&seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -5948,7 +5962,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(&seed), proxyURL)
 				insertCancel()
 
 				if err != nil {

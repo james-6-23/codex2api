@@ -72,6 +72,16 @@ Codex2API 采用三层配置架构：
 
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
 
+### Codex 设备安装 ID
+
+Codex 官方账号在新建或导入落库时生成随机 UUIDv4，保存在账号 `credentials.codex_installation_id` 中，不等待 ChatGPT 账号 UUID 或首次 Token 刷新。旧账号首次加载时补齐并持久化；并发加载同一账号只保留一个值，保存失败不会使用临时随机值加入调度池。
+
+`device`、`session`、`full` 共用该安装 ID。重启、刷新 Token、补齐上游账号 UUID、关闭再开启收敛均不重新生成。不同部署独立创建账号时不再因数字 ID 相同而得到相同设备 ID。恢复同一份数据库备份会保留原设备 ID；删除后新建账号则生成新值。
+
+账号详情中的「设备安装 ID」支持查看和复制，关闭收敛时仍展示保留值。账号自定义头 `X-Codex-Installation-Id` 仍优先于持久化值，详情也展示该覆盖值；删除自定义覆盖后恢复使用持久化值。安装 ID 仅用于原有收敛载体，不会额外补发客户端没有携带的安装标识头。
+
+升级时未保存安装 ID 的旧账号会切换一次到新生成的固定值；已有自定义安装 ID 不受影响。部署后不要删除该凭据字段，否则后续加载会重新生成。
+
 ### 数据库配置
 
 #### PostgreSQL 模式

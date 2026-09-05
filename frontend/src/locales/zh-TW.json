@@ -76,6 +76,8 @@
     }
   },
   "accounts": {
+    "codexInstallationIdLabel": "裝置安裝 ID",
+    "codexInstallationIdHint": "收斂啟用時使用的固定安裝 ID；關閉收斂不會刪除。若設定了自訂安裝 ID，此處顯示覆寫值。",
     "todayStats": "今日統計",
     "todayStatsHint": "今日(0 點起)經由本閘道的請求數、Token 與成本",
     "largePoolSortDisabled": "後台正在聚合查詢中，請稍後再試",

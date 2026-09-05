@@ -217,6 +217,7 @@ export interface AccountRow {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_fingerprint_mode?: CodexFingerprintMode
+  codex_installation_id?: string
   session_capacity_enabled?: boolean
   session_capacity_max?: number
   session_capacity_idle_ttl_seconds?: number

@@ -6,17 +6,20 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/codex2api/internal/openaiidentity"
+	"github.com/google/uuid"
 )
 
 type tokenCredentialSeed struct {
-	refreshToken    string
-	sessionToken    string
-	accessToken     string
-	accessTokenType string
-	idToken         string
-	accountID       string
-	workspaceID     string
+	codexInstallationID string
+	refreshToken        string
+	sessionToken        string
+	accessToken         string
+	accessTokenType     string
+	idToken             string
+	accountID           string
+	workspaceID         string
 	// userID 是 OpenAI 用户 ID（user-...），仅作为账号元数据保存。
 	userID string
 	// allowDuplicate 仅允许有效工作区（Token workspace 或请求头覆盖）为空的账号重复。
@@ -234,8 +237,12 @@ func (h *Handler) defaultCodexFingerprintModeForNewAccount() string {
 // newCodexAccountCredentials 为新建/新导入的 Codex 账号生成 credentials，并盖上
 // 系统默认指纹收敛档位。仅用于插入新账号；更新已有账号凭证仍走 tokenCredentialMap，
 // 避免重新导入时覆盖用户在账号上手动调整过的档位。
-func (h *Handler) newCodexAccountCredentials(seed tokenCredentialSeed) map[string]interface{} {
-	credentials := tokenCredentialMap(seed)
+func (h *Handler) newCodexAccountCredentials(seed *tokenCredentialSeed) map[string]interface{} {
+	if seed.codexInstallationID == "" {
+		seed.codexInstallationID = uuid.NewString()
+	}
+	credentials := tokenCredentialMap(*seed)
+	credentials[database.CodexInstallationIDCredentialKey] = seed.codexInstallationID
 	if mode := h.defaultCodexFingerprintModeForNewAccount(); mode != auth.CodexFingerprintModeOff {
 		credentials[auth.CodexFingerprintModeCredentialKey] = mode
 	}
@@ -247,6 +254,7 @@ func (h *Handler) newCodexAccountCredentials(seed tokenCredentialSeed) map[strin
 func (h *Handler) newCodexAccountFromSeed(id int64, proxyURL string, seed tokenCredentialSeed) *auth.Account {
 	account := accountFromCredentialSeed(id, proxyURL, seed)
 	account.CodexFingerprintMode = h.defaultCodexFingerprintModeForNewAccount()
+	account.CodexInstallationID = seed.codexInstallationID
 	return account
 }
 

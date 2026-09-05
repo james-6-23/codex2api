@@ -198,6 +198,17 @@ func (h *Handler) buildAccountResponse(
 	tokenWorkspaceID := openaiidentity.NormalizeWorkspaceID(row.GetCredential("workspace_id"))
 	workspaceIDOverride := openaiidentity.WorkspaceOverrideFromHeaders(headers)
 	effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(tokenWorkspaceID, headers)
+	codexInstallationID := ""
+	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
+		identityAccount := &auth.Account{
+			CodexInstallationID: row.GetCredential(database.CodexInstallationIDCredentialKey),
+			CustomHeaders:       headers,
+		}
+		codexInstallationID = identityAccount.EffectiveCodexInstallationID()
+		if codexInstallationID == "" && runtimeAccount != nil {
+			codexInstallationID = runtimeAccount.EffectiveCodexInstallationID()
+		}
+	}
 	if includeDetails {
 		modelMapping = row.GetCredential("model_mapping")
 		if isClaudeAccount {
@@ -258,6 +269,7 @@ func (h *Handler) buildAccountResponse(
 		ModelMapping:                  modelMapping,
 		CodexClientMetadataMode:       codexClientMetadataMode,
 		CodexFingerprintMode:          codexFingerprintMode,
+		CodexInstallationID:           codexInstallationID,
 		SessionCapacityEnabled:        sessionCapacityEnabled,
 		SessionCapacityMax:            sessionCapacityMax,
 		SessionCapacityIdleTTLSeconds: sessionCapacityIdleTTLSeconds,

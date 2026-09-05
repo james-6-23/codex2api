@@ -128,6 +128,7 @@ type Account struct {
 	// CodexFingerprintMode 见 codex_fingerprint_mode.go：Codex 官方出站请求的
 	// 设备指纹收敛档位（off / device / session / full），默认 off。
 	CodexFingerprintMode string
+	CodexInstallationID  string
 	// ClaudeFingerprintMode 见 claude_fingerprint_mode.go：Claude Code 出站身份头
 	// 收敛模式（preserve/force；空=跟随全局默认）。
 	ClaudeFingerprintMode string
@@ -5196,6 +5197,16 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		return nil
 	}
 
+	installationID := strings.TrimSpace(row.GetCredential(database.CodexInstallationIDCredentialKey))
+	if installationID == "" && s.db != nil && (strings.TrimSpace(upstreamType) == "" || strings.EqualFold(strings.TrimSpace(upstreamType), "codex")) {
+		var err error
+		installationID, err = s.db.EnsureCodexInstallationID(ctx, row.ID)
+		if err != nil {
+			log.Printf("[账号 %d] 持久化设备安装 ID 失败，跳过加载: %v", row.ID, err)
+			return nil
+		}
+	}
+
 	account := &Account{
 		DBID:                          row.ID,
 		CredentialGeneration:          row.CredentialGeneration,
@@ -5214,6 +5225,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		ModelMapping:                  modelMapping,
 		CodexClientMetadataMode:       codexClientMetadataMode,
 		CodexFingerprintMode:          codexFingerprintMode,
+		CodexInstallationID:           installationID,
 		ClaudeFingerprintMode:         claudeFingerprintMode,
 		ClaudeClientPlatformOverride:  claudeClientPlatformOverride,
 		ClaudeVersionPolicyOverride:   claudeVersionPolicyOverride,

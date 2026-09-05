@@ -8407,6 +8407,10 @@ func (db *DB) InsertAccount(ctx context.Context, name string, refreshToken strin
 	credentials := map[string]interface{}{
 		"refresh_token": refreshToken,
 	}
+	credentials, err := prepareCodexDeviceCredentials(credentials)
+	if err != nil {
+		return 0, err
+	}
 	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
@@ -8453,6 +8457,10 @@ func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken stri
 	credentials := map[string]interface{}{
 		"access_token": accessToken,
 	}
+	credentials, err := prepareCodexDeviceCredentials(credentials)
+	if err != nil {
+		return 0, err
+	}
 	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {
 		return 0, err
@@ -8467,8 +8475,9 @@ func (db *DB) InsertATAccount(ctx context.Context, name string, accessToken stri
 
 // InsertAccountWithCredentials 插入带完整 credentials 的账号。
 func (db *DB) InsertAccountWithCredentials(ctx context.Context, name string, credentials map[string]interface{}, proxyURL string) (int64, error) {
-	if credentials == nil {
-		credentials = map[string]interface{}{}
+	credentials, err := prepareCodexDeviceCredentials(credentials)
+	if err != nil {
+		return 0, err
 	}
 	credJSON, err := json.Marshal(encryptSensitiveCredentials(credentials))
 	if err != nil {

@@ -1380,6 +1380,8 @@
     "codexClientMetadataAuto": "Auto detect",
     "codexClientMetadataAlways": "Always send",
     "codexClientMetadataOff": "Do not inject",
+    "codexInstallationIdLabel": "Device installation ID",
+    "codexInstallationIdHint": "Stable installation ID used when convergence is enabled; disabling convergence keeps it. A custom installation ID takes precedence and is shown here when configured.",
     "codexFingerprintModeTitle": "Device fingerprint convergence",
     "codexFingerprintModeHint": "When several people share one account, rewrite the device and session identifiers on outbound requests to account-level constants so upstream sees fewer devices and sessions. Only turn metadata and client_metadata are touched; upstream session isolation and prompt cache behaviour stay unchanged.",
     "codexFingerprintModeBatchHint": "Set the convergence level for the selected accounts. Only Codex accounts are affected; relay and Grok accounts ignore it.",
