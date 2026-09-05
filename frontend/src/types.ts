@@ -2201,9 +2201,24 @@ export interface PromptPolicyAuditHealth {
 	}
 }
 
+export interface PromptRiskIncidentSubject {
+	subject_type: PromptRiskSubjectType
+	subject_key: string
+	subject_display: string
+	platform?: string
+	is_person: boolean
+	identity_confidence: number
+	newapi_user_id?: string
+	newapi_user_name?: string
+	newapi_user_email?: string
+	newapi_user_group?: string
+	event_count: number
+}
+
 export interface PromptPolicyIncidentDetailResponse {
 	incident: PromptPolicyIncident
 	matches: PromptFilterMatch[]
+	risk_subjects?: PromptRiskIncidentSubject[]
 	candidate?: {
 		id: number
 		status: string
@@ -2764,6 +2779,8 @@ export interface PromptIntelligenceEvidence {
   api_key_id?: number
   api_key_name?: string
   observed_at: string
+  incident_id?: string
+  risk_subjects?: PromptRiskIncidentSubject[]
 }
 
 export interface PromptIntelligenceEvidenceResponse {
@@ -2822,10 +2839,23 @@ export interface PromptIntelligenceAIAnalysisResponse {
   analysis_evidence_id: number
   provider: PromptIntelligenceAIProvider
   model: string
+  evidence_basis?: 'prompt' | 'context_only'
   decision: PromptIntelligenceAIDecision
   rule_candidate?: PromptIntelligenceCandidate
   rule_error?: string
   identity_update: PromptIdentityUpdateResult
+}
+
+export interface PromptIntelligenceDraftSuggestion {
+  provider: PromptIntelligenceAIProvider
+  model: string
+  evidence_basis: 'prompt' | 'context_only'
+  confidence: number
+  reason: string
+  rule: { name: string; pattern: string; weight: number; category: string; strict: boolean; rationale: string }
+  validation_error?: string
+  evidence_matched: number
+  evidence_total: number
 }
 
 export interface PromptIntelligenceHistoryResponse {
@@ -2886,6 +2916,17 @@ export interface RefreshAllModelsResponse {
   added: string[]
   model_count: number
   duration_ms: number
+}
+
+export interface PromptLogRetention {
+  retention_days: number
+  running: boolean
+  last_run_at?: string
+  last_deleted_logs: number
+  last_deleted_events: number
+  last_deleted_sources: number
+  last_duration_ms: number
+  last_error?: string
 }
 
 export interface ModelSyncResponse {

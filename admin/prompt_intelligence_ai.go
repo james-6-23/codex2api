@@ -75,6 +75,7 @@ type promptIntelligenceAIAnalysisMetadata struct {
 	ReviewSystemPromptHash  string                       `json:"review_system_prompt_hash"`
 	UpstreamEvidenceCount   int                          `json:"upstream_evidence_count"`
 	LearnableEvidenceCount  int                          `json:"learnable_evidence_count"`
+	EvidenceBasis           string                       `json:"evidence_basis,omitempty"`
 	Result                  promptIntelligenceAIDecision `json:"result"`
 	RuleValidationError     string                       `json:"rule_validation_error,omitempty"`
 	IdentityValidationError string                       `json:"identity_validation_error,omitempty"`
@@ -116,10 +117,18 @@ type promptIdentityUpdateResult struct {
 	BlockReason        string   `json:"block_reason,omitempty"`
 }
 
+const (
+	// promptIntelligenceEvidenceBasisPrompt 表示归因基于至少一条完整用户 Prompt；
+	// promptIntelligenceEvidenceBasisContextOnly 表示只有会话 / 工具上下文证据。
+	promptIntelligenceEvidenceBasisPrompt      = "prompt"
+	promptIntelligenceEvidenceBasisContextOnly = "context_only"
+)
+
 type promptIntelligenceAIAnalysisResponse struct {
 	AnalysisEvidenceID int64                        `json:"analysis_evidence_id"`
 	Provider           string                       `json:"provider"`
 	Model              string                       `json:"model"`
+	EvidenceBasis      string                       `json:"evidence_basis"`
 	Decision           promptIntelligenceAIDecision `json:"decision"`
 	RuleCandidate      *promptIntelligenceCandidate `json:"rule_candidate,omitempty"`
 	RuleError          string                       `json:"rule_error,omitempty"`
@@ -302,9 +311,12 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 		writeError(c, http.StatusConflict, "该候选只有证据不足的 CY 记录，尚未提取到可学习的 Prompt 或关联上下文；已停止调用外部模型")
 		return
 	}
+	// 没有完整用户 Prompt 的 CY（Codex 工具回合：当前用户消息为空，命中来自
+	// history / tool_output 层）同样允许归因：证据包里保存了 session_context /
+	// tool_arguments / tool_output 段，按 evidence_basis=context_only 标注后送模型。
+	evidenceBasis := promptIntelligenceEvidenceBasisPrompt
 	if !promptIntelligenceHasDirectEvidence(learnableEvidence) {
-		writeError(c, http.StatusConflict, "该候选只有 context_only 上下文证据，没有完整用户 Prompt；已停止调用外部模型")
-		return
+		evidenceBasis = promptIntelligenceEvidenceBasisContextOnly
 	}
 	learnableEvidenceCount := countPromptIntelligenceLearnableEvidence(upstreamEvidence)
 
@@ -312,7 +324,7 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 	reviewCfg := promptfilter.NormalizeReviewConfig(cfg.Review)
 	reviewSystemPrompt := promptfilter.NormalizeReviewAdapterConfig(reviewCfg.Adapter).SystemPrompt
 	analysisSystemPrompt := buildPromptIntelligenceAIIdentity(reviewSystemPrompt)
-	analysisInput := buildPromptIntelligenceAIEvidenceInput(candidate, learnableEvidence)
+	analysisInput := buildPromptIntelligenceAIEvidenceInput(candidate, learnableEvidence, evidenceBasis)
 	rawOutput, attribution, err := h.callPromptIntelligenceAI(c.Request.Context(), request, reviewCfg, analysisSystemPrompt, analysisInput)
 	if err != nil {
 		status := http.StatusBadGateway
@@ -337,7 +349,7 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 		Version: 1, Provider: attribution.Provider, Model: attribution.Model,
 		APIKeyID: attribution.APIKeyID, APIKeyName: attribution.APIKeyName,
 		ReviewSystemPromptHash: promptfilter.StableEvidenceFingerprint("review-system-prompt", reviewSystemPrompt),
-		UpstreamEvidenceCount:  len(upstreamEvidence), LearnableEvidenceCount: learnableEvidenceCount, Result: decision,
+		UpstreamEvidenceCount:  len(upstreamEvidence), LearnableEvidenceCount: learnableEvidenceCount, EvidenceBasis: evidenceBasis, Result: decision,
 		RawOutputPreview: promptfilter.RedactedPreview(promptfilter.RedactSensitive(rawOutput), 4000),
 	}
 	if decision.Rule != nil {
@@ -363,7 +375,7 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 
 	response := promptIntelligenceAIAnalysisResponse{
 		AnalysisEvidenceID: analysisEvidence.ID, Provider: attribution.Provider, Model: attribution.Model,
-		Decision: decision,
+		Decision: decision, EvidenceBasis: evidenceBasis,
 		IdentityUpdate: promptIdentityUpdateResult{
 			Mode: request.IdentityUpdateMode, AnalysisEvidenceID: analysisEvidence.ID,
 		},
@@ -381,10 +393,12 @@ func (h *Handler) AnalyzePromptIntelligenceCandidate(c *gin.Context) {
 		if metadata.IdentityValidationError != "" {
 			response.IdentityUpdate.BlockReason = metadata.IdentityValidationError
 		} else if request.IdentityUpdateMode == promptIdentityUpdateModeGuardedAuto {
-			directEvidenceCount := countPromptIntelligenceDirectEvidence(upstreamEvidence)
+			// 受控自动应用的证据门槛按独立证据计数：完整 Prompt 与 context_only 上下文证据
+			// 都算（管理员已选择允许上下文证据触发自动模式）。
+			directEvidenceCount := countPromptIntelligenceAutoEligibleEvidence(upstreamEvidence)
 			response.IdentityUpdate.Eligible = decision.Confidence >= promptIdentityAutoMinConfidence && directEvidenceCount >= promptIdentityAutoMinUpstreamEvidence
 			if !response.IdentityUpdate.Eligible {
-				response.IdentityUpdate.BlockReason = fmt.Sprintf("受控自动应用要求置信度至少 %.2f 且同类完整 Prompt 证据至少 %d 条", promptIdentityAutoMinConfidence, promptIdentityAutoMinUpstreamEvidence)
+				response.IdentityUpdate.BlockReason = fmt.Sprintf("受控自动应用要求置信度至少 %.2f 且同类独立证据（完整 Prompt 或上下文）至少 %d 条", promptIdentityAutoMinConfidence, promptIdentityAutoMinUpstreamEvidence)
 			} else {
 				applied, applyErr := h.applyPromptIntelligenceIdentityPatch(c.Request.Context(), candidateID, analysisEvidence.ID, "guarded_auto")
 				if applyErr != nil {
@@ -466,6 +480,11 @@ Functional malware remains harmful regardless of ownership, simulation, lab,
 sandbox, research, or temporary-path framing. Defensive detection and analysis
 remain allowed, but executable ransomware encryption behavior is not benign.
 
+When evidence_basis is "context_only", the current user prompt was empty (an
+agent tool turn): attribute from related_context (session_context /
+tool_arguments / tool_output) and state in "reason" that the attribution is
+based on context rather than a user prompt.
+
 Analyze whether the evidence reveals a reusable detection gap. You may propose:
 1. one narrow RE2-compatible rule candidate; and/or
 2. up to eight short learned safety-guidance clauses that clarify classification.
@@ -485,7 +504,7 @@ only when evidence is ambiguous, too specific, effectively blocked already, or
 unsafe to generalize.`
 }
 
-func buildPromptIntelligenceAIEvidenceInput(candidate *database.PromptRuleCandidate, evidence []*database.PromptRuleCandidateEvidence) string {
+func buildPromptIntelligenceAIEvidenceInput(candidate *database.PromptRuleCandidate, evidence []*database.PromptRuleCandidateEvidence, evidenceBasis string) string {
 	type safeEvidence struct {
 		SourceKind      string                              `json:"source_kind"`
 		EvidenceQuality string                              `json:"evidence_quality"`
@@ -533,9 +552,15 @@ func buildPromptIntelligenceAIEvidenceInput(candidate *database.PromptRuleCandid
 			DecisionContext: contextFields,
 		})
 	}
+	if evidenceBasis == "" {
+		evidenceBasis = promptIntelligenceEvidenceBasisPrompt
+	}
 	payload := map[string]any{
 		"candidate_id": candidate.ID, "fingerprint": candidate.Fingerprint,
 		"evidence_count": candidate.EvidenceCount, "learnable_evidence_count": len(evidence),
+		// context_only：没有当前用户 Prompt，命中来自 related_context（session_context /
+		// tool_arguments / tool_output 段）；模型需据此归因并明确说明依据是上下文。
+		"evidence_basis":   evidenceBasis,
 		"sample_preview":   promptfilter.RedactedPreview(candidate.SamplePreview, 2000),
 		"coverage_summary": summarizePromptIntelligenceCoverage(evidence),
 		"evidence":         items,
@@ -774,6 +799,38 @@ func promptIntelligenceModerationOnlyModel(model string) bool {
 
 func promptIntelligenceHasDirectEvidence(evidence []*database.PromptRuleCandidateEvidence) bool {
 	return countPromptIntelligenceDirectEvidence(evidence) > 0
+}
+
+// countPromptIntelligenceAutoEligibleEvidence 是受控自动应用的证据计数：与
+// countPromptIntelligenceDirectEvidence 一样按去重后的独立证据计数，但 context_only
+// 证据也计入（以其上下文文本指纹去重）；只有 insufficient 被排除。
+func countPromptIntelligenceAutoEligibleEvidence(evidence []*database.PromptRuleCandidateEvidence) int {
+	seen := make(map[string]struct{}, len(evidence))
+	for _, row := range evidence {
+		learning := promptIntelligenceLearningEvidenceFromMetadata(row.MetadataJSON, row.SamplePreview)
+		if learning.Quality == "insufficient" {
+			continue
+		}
+		text := strings.TrimSpace(learning.PromptText)
+		if text == "" {
+			parts := make([]string, 0, len(learning.Context))
+			for _, segment := range learning.Context {
+				if value := strings.TrimSpace(segment.Text); value != "" {
+					parts = append(parts, value)
+				}
+			}
+			text = strings.Join(parts, "\n")
+		}
+		if text == "" {
+			continue
+		}
+		fingerprint := promptfilter.PromptEvidenceFingerprint(text)
+		if fingerprint == "" {
+			fingerprint = row.SourceRefHash
+		}
+		seen[fingerprint] = struct{}{}
+	}
+	return len(seen)
 }
 
 func callPromptIntelligenceReviewProvider(ctx context.Context, cfg promptfilter.ReviewConfig, model, systemPrompt, input string) (string, error) {
@@ -1022,9 +1079,13 @@ func (h *Handler) stagePromptIntelligenceAIRule(ctx context.Context, parent *dat
 }
 
 var (
-	promptIdentityForbiddenClause = regexp.MustCompile(`(?i)(sk-[a-z0-9]|authorization\s*:|bearer\s+|cookie\s*:|api[ _-]?key|private[ _-]?key|system\s+prompt|ignore\s+(all\s+)?(previous|prior|system)|override\s+(the\s+)?(instructions|policy)|change\s+(the\s+)?(json|output)|tool\s*call|https?://|<\/?user_input>|\[/?learned safety guidance|系統提示詞|系统提示词|忽略.{0,12}指令|更改.{0,12}輸出|更改.{0,12}输出|api.?密[鑰钥]|訪問令牌|访问令牌|工具調用|工具调用)`)                                                                 //nolint:lll
-	promptIdentityDomainSignal    = regexp.MustCompile(`(?i)(rce|exploit|malware|credential|unauthori[sz]ed|account abuse|phishing|ransomware|reverse shell|deepfake|doxx|credible threat|cyber|own system|authorized|defensive|漏洞|攻擊|攻击|惡意軟體|恶意软件|憑據|凭据|未授權|未授权|批量帳號|批量账号|釣魚|钓鱼|勒索|反彈.?shell|反弹.?shell|深度偽造|深度伪造|人肉|暴力威脅|暴力威胁|自有系統|自有系统|防禦|防御)`)                                                                                                                                                     //nolint:lll
-	promptIdentityDecisionSignal  = regexp.MustCompile(`(?i)(harmful|high.?risk|block|flag|classif|consider|treat|benign|safe|allow|no\s+weight|carry\s+no\s+weight|shall\s+not|must\s+not|normal\s+development|actual\s+(attack|abuse)|concrete\s+(attack|abuse)|unless.{0,80}(intent|attack|abuse)|without.{0,80}(intent|attack|abuse)|違規|违规|高風險|高风险|攔截|拦截|標記|标记|判定|視為|视为|合規|合规|放行|不應.{0,12}(視為|视为|判定|攔截|拦截)|不計.{0,8}(權重|权重)|正常開發|正常开发|除非.{0,30}(攻擊|攻击|濫用|滥用|意圖|意图)|沒有.{0,30}(攻擊|攻击|濫用|滥用|意圖|意图))`) //nolint:lll
+	promptIdentityForbiddenClause = regexp.MustCompile(`(?i)(sk-[a-z0-9]|authorization\s*:|bearer\s+|cookie\s*:|api[ _-]?key|private[ _-]?key|system\s+prompt|ignore\s+(all\s+)?(previous|prior|system)|override\s+(the\s+)?(instructions|policy)|change\s+(the\s+)?(json|output)|tool\s*call|https?://|<\/?user_input>|\[/?learned safety guidance|系統提示詞|系统提示词|忽略.{0,12}指令|更改.{0,12}輸出|更改.{0,12}输出|api.?密[鑰钥]|訪問令牌|访问令牌|工具調用|工具调用)`) //nolint:lll
+	// 安全领域词：条款必须落在内容安全分类范围内（漏洞 / 攻击 / 滥用 / 凭据 / 恶意软件 …），
+	// 否则就是通用行为指令。中英文都覆盖常见写法。
+	promptIdentityDomainSignal = regexp.MustCompile(`(?i)(rce|exploit|malware|credential|unauthori[sz]ed|account abuse|phishing|ransomware|reverse shell|deepfake|doxx|credible threat|cyber|own system|authorized|defensive|abuse|injection|privilege|backdoor|intrusion|pentest|vulnerab|security|漏洞|攻擊|攻击|惡意軟體|恶意软件|憑據|凭据|未授權|未授权|批量帳號|批量账号|釣魚|钓鱼|勒索|反彈.?shell|反弹.?shell|深度偽造|深度伪造|人肉|暴力威脅|暴力威胁|自有系統|自有系统|防禦|防御|濫用|滥用|入侵|滲透|渗透|木馬|木马|病毒|提權|提权|注入|越權|越权|掃描|扫描|後門|后门|安全)`) //nolint:lll
+	// 判定词：条款必须给出明确的分类结论（视为 / 不视为 / 属于正常 / 不按 … 处理 / 误报 …），
+	// 而不是泛泛的行为要求。中文表达多样，这里按"结论动词 + 否定形式"两类覆盖。
+	promptIdentityDecisionSignal = regexp.MustCompile(`(?i)(harmful|high.?risk|block|flag|classif|consider|treat|benign|safe|allow|legitimate|false.?positive|escalat|constitute|\bis\s+not\b|\bare\s+not\b|\bnot\s+(an?\s+)?(attack|abuse|exploit|malware|threat|violation|misuse)|does\s+not\s+(count|qualify|indicate|amount)|counts?\s+as|qualif(y|ies)\s+as|amounts?\s+to|no\s+weight|carry\s+no\s+weight|shall\s+not|must\s+not|should\s+not|normal\s+development|actual\s+(attack|abuse)|concrete\s+(attack|abuse)|unless.{0,80}(intent|attack|abuse)|without.{0,80}(intent|attack|abuse)|違規|违规|高風險|高风险|攔截|拦截|標記|标记|判定|視為|视为|視作|视作|合規|合规|放行|誤報|误报|不構成|不构成|不算|不是|不屬於|不属于|算作|當作|当作|歸為|归为|認定|认定|計入|计入|升級為|升级为|上升為|上升为|屬於.{0,12}(正常|合法|合規|合规|違規|违规|高風險|高风险|攻擊|攻击|濫用|滥用)|正常(開發|开发|文件|檔案|運維|运维|操作|使用|處理|处理|開發行為|开发行为)|不按.{0,20}(處理|处理)|不(應|应|應當|应当|得|能|要|可)(上升|升級|升级|視為|视为|視作|视作|判定|算作|當作|当作|歸為|归为|認定|认定|計入|计入|攔截|拦截|標記|标记|按.{0,12}處理|按.{0,12}处理)|不(予|做|作)(攔截|拦截|標記|标记|處理|处理)|(需|應|应|應當|应当|必須|必须)(攔截|拦截|標記|标记|阻斷|阻断|拒絕|拒绝)|不計.{0,8}(權重|权重)|除非.{0,30}(攻擊|攻击|濫用|滥用|意圖|意图)|沒有.{0,30}(攻擊|攻击|濫用|滥用|意圖|意图))`) //nolint:lll
 )
 
 func validatePromptIdentityClauses(clauses []string) string {

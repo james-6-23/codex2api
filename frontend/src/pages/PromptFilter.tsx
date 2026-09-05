@@ -2,7 +2,7 @@ import type { Dispatch, ReactNode, SetStateAction, TextareaHTMLAttributes } from
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Activity, AlertTriangle, BookOpen, CheckCircle2, ChevronDown, ClipboardCheck, Copy, FileText, Gauge, GitBranch, HelpCircle, Layers, ListChecks, Network, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, Shield, ShieldAlert, Sparkles, Trash2, Users, Wand2, X } from 'lucide-react'
+import { Activity, AlertTriangle, BookOpen, CheckCircle2, ChevronDown, ClipboardCheck, Copy, FileText, Gauge, GitBranch, HelpCircle, Layers, ListChecks, Loader2, Network, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, Shield, ShieldAlert, Sparkles, Trash2, Users, Wand2, X } from 'lucide-react'
 import { AdminAPIError, api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
@@ -17,7 +17,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings, PromptLogRetention, PromptRiskIncidentSubject, PromptIntelligenceDraftSuggestion } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -1552,6 +1552,13 @@ function IntelligenceView() {
   const [publishTarget, setPublishTarget] = useState<PromptIntelligenceCandidate | null>(null)
   const [draftTarget, setDraftTarget] = useState<PromptIntelligenceCandidate | null>(null)
   const [draftForm, setDraftForm] = useState({ name: '', pattern: '', weight: 35, category: 'cyber_abuse', strict: true, rationale: '' })
+  const [draftSuggesting, setDraftSuggesting] = useState(false)
+  // 草案生成的提供方独立于 AI 归因：审核用的 Review Key 和生成用的账号池 Key 不是一回事，
+  // 默认走账号池，上次选择记在本地。
+  const [draftProvider, setDraftProvider] = useState<PromptIntelligenceAIProvider>(() => readDraftAIPreference().provider)
+  const [draftModel, setDraftModel] = useState(() => readDraftAIPreference().model)
+  const [draftAPIKeyID, setDraftAPIKeyID] = useState(() => readDraftAIPreference().apiKeyId)
+  const [draftSuggestion, setDraftSuggestion] = useState<PromptIntelligenceDraftSuggestion | null>(null)
   const [evidenceLoading, setEvidenceLoading] = useState<number | null>(null)
   const [evidenceDialog, setEvidenceDialog] = useState<PromptIntelligenceEvidenceResponse | null>(null)
   const [dismissTarget, setDismissTarget] = useState<PromptIntelligenceCandidate | null>(null)
@@ -1642,12 +1649,49 @@ function IntelligenceView() {
     }
   }
 
-  const openDraft = (candidate: PromptIntelligenceCandidate) => {
+  const openDraft = async (candidate: PromptIntelligenceCandidate) => {
     setDraftTarget(candidate)
+    setDraftSuggestion(null)
     setDraftForm({
       name: '', pattern: '', weight: 35, category: 'cyber_abuse', strict: true,
       rationale: candidate.sample_preview ? t('promptFilter.intelligence.draftRationaleFromEvidence') : '',
     })
+    if (!gatewayKeys.length) {
+      try {
+        const response = await api.getPromptIntelligenceAIProviders()
+        setGatewayKeys(response.gateway_keys.filter((key) => key.status === 'active'))
+      } catch {
+        // Key 列表加载失败不影响手工填写草案。
+      }
+    }
+  }
+
+  // 让模型基于候选的 CY 证据先写出草案，预填表单；校验结果只提示，人审核后再保存。
+  const suggestDraft = async () => {
+    if (!draftTarget) return
+    setDraftSuggesting(true)
+    try {
+      writeDraftAIPreference({ provider: draftProvider, model: draftModel, apiKeyId: draftAPIKeyID })
+      const value = await api.suggestPromptIntelligenceCandidateDraft(draftTarget.id, {
+        provider: draftProvider,
+        model: draftModel.trim() || undefined,
+        api_key_id: draftProvider === 'account_pool' ? Number(draftAPIKeyID) || undefined : undefined,
+      })
+      setDraftSuggestion(value)
+      setDraftForm({
+        name: value.rule.name,
+        pattern: value.rule.pattern,
+        weight: value.rule.weight,
+        category: value.rule.category,
+        strict: value.rule.strict,
+        rationale: value.rule.rationale,
+      })
+      showToast(value.validation_error ? t('promptFilter.intelligence.draftSuggestedWithWarning') : t('promptFilter.intelligence.draftSuggested'), value.validation_error ? 'warning' : undefined)
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setDraftSuggesting(false)
+    }
   }
 
   const createDraft = async () => {
@@ -1750,9 +1794,11 @@ function IntelligenceView() {
 
   const lifecycleLabel = (status: string) => t(`promptFilter.intelligence.lifecycle.${status}`, { defaultValue: status || '-' })
   const sourceLabel = (source?: string) => t(`promptFilter.intelligence.source.${source || 'unknown'}`, { defaultValue: source || '-' })
-  const candidateTitle = (candidate: PromptIntelligenceCandidate) => candidate.kind === 'evidence'
+  // 标题统一带上候选 ID（#417）：列表、证据 / 归因 / 草案 / 发布弹窗都用它，
+  // 与上游 CY 事件详情里的「候选 · #ID」一一对应。
+  const candidateTitle = (candidate: PromptIntelligenceCandidate) => `#${candidate.id} · ${candidate.kind === 'evidence'
     ? t(candidate.lifecycle_status === 'published' ? 'promptFilter.intelligence.attributedEvidence' : 'promptFilter.intelligence.awaitingAttribution')
-    : candidate.name || t('promptFilter.intelligence.unnamedRule')
+    : candidate.name || t('promptFilter.intelligence.unnamedRule')}`
 
   const candidateLifecycleLabel = (candidate: PromptIntelligenceCandidate) => candidate.kind === 'evidence' && candidate.lifecycle_status === 'published'
     ? t('promptFilter.intelligence.attributed')
@@ -1830,21 +1876,22 @@ function IntelligenceView() {
           </div>
           <div className="mb-3 text-xs text-muted-foreground">{t('promptFilter.intelligence.reviewCount', { count: candidateTotal })}</div>
           <div className="overflow-x-auto rounded-lg border border-border bg-card">
-            <Table>
+            {/* 固定列宽：规则正则和说明只能在第一列内换行，不能横向压到来源 / 状态列上。 */}
+            <Table className="min-w-[1280px] table-fixed">
             <TableHeader>
               <TableRow>
                 <TableHead>{t('promptFilter.intelligence.ruleOrEvidence')}</TableHead>
-                <TableHead>{t('promptFilter.intelligence.sourceLabel')}</TableHead>
-                <TableHead>{t('promptFilter.intelligence.statusLabel')}</TableHead>
-                <TableHead>{t('promptFilter.intelligence.evidenceCount')}</TableHead>
-                <TableHead>{t('promptFilter.intelligence.lastSeen')}</TableHead>
-                <TableHead className="text-right">{t('common.actions')}</TableHead>
+                <TableHead className="w-[150px]">{t('promptFilter.intelligence.sourceLabel')}</TableHead>
+                <TableHead className="w-[100px]">{t('promptFilter.intelligence.statusLabel')}</TableHead>
+                <TableHead className="w-[70px]">{t('promptFilter.intelligence.evidenceCount')}</TableHead>
+                <TableHead className="w-[160px]">{t('promptFilter.intelligence.lastSeen')}</TableHead>
+                <TableHead className="w-[430px] text-right">{t('common.actions')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {candidates.map((candidate) => (
                 <TableRow key={candidate.id}>
-                  <TableCell className="max-w-xl">
+                  <TableCell className="min-w-0 whitespace-normal align-top">
                     <div className="flex flex-wrap items-center gap-2 font-medium">
                       {candidateTitle(candidate)}
                       <Badge variant="outline">{candidate.kind === 'evidence' ? t('promptFilter.intelligence.evidenceOnly') : candidate.change_type === 'update' ? t('promptFilter.intelligence.update') : t('promptFilter.intelligence.new')}</Badge>
@@ -1855,7 +1902,7 @@ function IntelligenceView() {
                         </Badge>
                       ) : null}
                     </div>
-                    {candidate.pattern ? <code className="mt-1 block break-all text-xs text-muted-foreground">{candidate.pattern}</code> : null}
+                    {candidate.pattern ? <code className="mt-1 block whitespace-pre-wrap break-all text-xs text-muted-foreground">{candidate.pattern}</code> : null}
                     {candidate.kind === 'pattern' ? (
                       <div className="mt-2 flex flex-wrap gap-1.5">
                         <Badge variant="outline">{t('promptFilter.intelligence.category')}: {candidate.category || '-'}</Badge>
@@ -1863,15 +1910,15 @@ function IntelligenceView() {
                         {candidate.strict ? <Badge variant="outline" className="border-destructive/40 text-destructive">strict</Badge> : null}
                       </div>
                     ) : null}
-                    {candidate.sample_preview ? <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{candidate.sample_preview}</p> : null}
-                    {candidate.rationale ? <p className="mt-1 text-xs text-muted-foreground">{candidate.rationale}</p> : null}
+                    {candidate.sample_preview ? <p className="mt-1 line-clamp-2 break-words text-xs text-muted-foreground">{candidate.sample_preview}</p> : null}
+                    {candidate.rationale ? <p className="mt-1 break-words text-xs text-muted-foreground">{candidate.rationale}</p> : null}
                   </TableCell>
-                  <TableCell><Badge variant="outline">{sourceLabel(candidate.source)}</Badge></TableCell>
-                  <TableCell><Badge variant="outline">{candidateLifecycleLabel(candidate)}</Badge></TableCell>
-                  <TableCell>{candidate.evidence_count}</TableCell>
-                  <TableCell className="whitespace-nowrap text-sm text-muted-foreground">{candidate.last_seen_at ? formatBeijingTime(candidate.last_seen_at) : '-'}</TableCell>
-                  <TableCell>
-                    <div className="flex justify-end gap-2">
+                  <TableCell className="align-top"><Badge variant="outline">{sourceLabel(candidate.source)}</Badge></TableCell>
+                  <TableCell className="align-top"><Badge variant="outline">{candidateLifecycleLabel(candidate)}</Badge></TableCell>
+                  <TableCell className="align-top">{candidate.evidence_count}</TableCell>
+                  <TableCell className="whitespace-nowrap align-top text-sm text-muted-foreground">{candidate.last_seen_at ? formatBeijingTime(candidate.last_seen_at) : '-'}</TableCell>
+                  <TableCell className="whitespace-normal align-top">
+                    <div className="flex flex-wrap justify-end gap-2">
                       <Button size="sm" variant="outline" disabled={evidenceLoading === candidate.id} onClick={() => void viewEvidence(candidate)}>
                         <FileText className="size-4" />
                         {t('promptFilter.intelligence.viewEvidence')}
@@ -1888,7 +1935,7 @@ function IntelligenceView() {
                             {candidate.ai_analyzed ? t('promptFilter.intelligence.aiViewResult') : t('promptFilter.intelligence.aiAnalyze')}
                           </Button>
                           {candidate.lifecycle_status === 'pending' ? (
-                            <Button size="sm" disabled={candidateAction === candidate.id} onClick={() => openDraft(candidate)}>
+                            <Button size="sm" disabled={candidateAction === candidate.id} onClick={() => void openDraft(candidate)}>
                               <Pencil className="size-4" />
                               {t('promptFilter.intelligence.createDraft')}
                             </Button>
@@ -2038,6 +2085,7 @@ function IntelligenceView() {
                 <Badge className="bg-sky-500/12 text-sky-600 dark:bg-sky-500/20 dark:text-sky-400">{t('promptFilter.intelligence.aiLearned')}</Badge>
                 <Badge variant="outline">{t('promptFilter.intelligence.aiConfidence')}: {(aiResult.decision.confidence * 100).toFixed(0)}%</Badge>
                 <Badge variant="outline">{aiResult.provider} · {aiResult.model}</Badge>
+                {aiResult.evidence_basis === 'context_only' ? <Badge variant="secondary">{t('promptFilter.intelligence.aiContextOnlyBasis')}</Badge> : null}
               </div>
               <p className="text-sm">{aiResult.decision.reason || t('promptFilter.intelligence.aiNoReason')}</p>
               {aiResult.decision.rule ? (
@@ -2115,6 +2163,12 @@ function IntelligenceView() {
                   {evidence.api_key_name ? <span>{evidence.api_key_name}</span> : null}
                   <span>{formatBeijingTime(evidence.observed_at)}</span>
                 </div>
+                {evidence.incident_id ? (
+                  <div className="mb-3">
+                    <div className="mb-1 text-xs font-semibold text-muted-foreground">{t('promptFilter.cyberRiskSubjects')} · <span className="font-mono font-normal">{evidence.incident_id.slice(0, 8)}</span></div>
+                    <PromptRiskSubjectList subjects={evidence.risk_subjects ?? []} compact />
+                  </div>
+                ) : null}
                 {evidence.sample_preview ? <p className="whitespace-pre-wrap break-words text-sm">{evidence.sample_preview}</p> : null}
                 {evidence.source_ref ? <p className="mt-2 break-all text-xs text-muted-foreground">{t('promptFilter.intelligence.sourceReference')}: {evidence.source_ref}</p> : null}
                 {Object.keys(evidence.metadata || {}).length ? <SoftCodeBlock className="mt-3">{JSON.stringify(evidence.metadata, null, 2)}</SoftCodeBlock> : null}
@@ -2152,6 +2206,57 @@ function IntelligenceView() {
           </DialogHeader>
           {draftTarget?.sample_preview ? (
             <div className="rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm whitespace-pre-wrap break-words">{draftTarget.sample_preview}</div>
+          ) : null}
+          <div className="space-y-3 rounded-lg border border-border bg-muted/20 p-3">
+            <div className="text-xs text-muted-foreground">
+              <div className="font-semibold text-foreground">{t('promptFilter.intelligence.draftSuggestTitle')}</div>
+              <div className="mt-0.5">{t('promptFilter.intelligence.draftSuggestHint')}</div>
+            </div>
+            <div className="grid gap-3 md:grid-cols-3">
+              <Field label={t('promptFilter.intelligence.aiProvider')}>
+                <Select
+                  value={draftProvider}
+                  onValueChange={(value) => setDraftProvider(value as PromptIntelligenceAIProvider)}
+                  options={[
+                    { value: 'account_pool', label: t('promptFilter.intelligence.aiProviderPool') },
+                    { value: 'review', label: t('promptFilter.intelligence.aiProviderReview') },
+                  ]}
+                />
+              </Field>
+              <Field label={t('promptFilter.intelligence.aiModel')} hint={t('promptFilter.intelligence.aiModelHint')}>
+                <Input value={draftModel} onChange={(event) => setDraftModel(event.target.value)} placeholder={t('promptFilter.intelligence.aiModelDefault')} />
+              </Field>
+              {draftProvider === 'account_pool' ? (
+                <Field label={t('promptFilter.intelligence.aiGatewayKey')} hint={t('promptFilter.intelligence.aiGatewayKeyHint')}>
+                  <Select
+                    value={draftAPIKeyID}
+                    onValueChange={setDraftAPIKeyID}
+                    options={[
+                      { value: '0', label: t('promptFilter.intelligence.aiGatewayKeyAuto') },
+                      ...gatewayKeys.map((key) => ({ value: String(key.id), label: `${key.name || `#${key.id}`} · ${key.masked}` })),
+                    ]}
+                  />
+                </Field>
+              ) : null}
+            </div>
+            <div className="flex justify-end">
+              <Button size="sm" variant="outline" disabled={draftSuggesting || candidateAction !== null} onClick={() => void suggestDraft()}>
+                {draftSuggesting ? <Loader2 className="size-3.5 animate-spin" /> : <Sparkles className="size-3.5" />}
+                {draftSuggesting ? t('promptFilter.intelligence.draftSuggesting') : t('promptFilter.intelligence.draftSuggest')}
+              </Button>
+            </div>
+          </div>
+          {draftSuggestion ? (
+            <div className={cn('rounded-lg border p-3 text-xs', draftSuggestion.validation_error ? 'border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))]' : 'border-[hsl(var(--success))]/30 bg-[hsl(var(--success))]/5')}>
+              <div className="flex flex-wrap items-center gap-1.5">
+                <Badge variant="outline">{draftSuggestion.provider} · {draftSuggestion.model}</Badge>
+                <Badge variant="outline">{t('promptFilter.intelligence.aiConfidence')}: {(draftSuggestion.confidence * 100).toFixed(0)}%</Badge>
+                {draftSuggestion.evidence_basis === 'context_only' ? <Badge variant="secondary">{t('promptFilter.intelligence.aiContextOnlyBasis')}</Badge> : null}
+                <Badge variant={draftSuggestion.evidence_matched > 0 ? 'outline' : 'destructive'}>{t('promptFilter.intelligence.draftSuggestMatches', { matched: draftSuggestion.evidence_matched, total: draftSuggestion.evidence_total })}</Badge>
+              </div>
+              {draftSuggestion.reason ? <p className="mt-2 text-sm">{draftSuggestion.reason}</p> : null}
+              {draftSuggestion.validation_error ? <p className="mt-2 font-medium text-[hsl(var(--warning))]">{t('promptFilter.intelligence.draftSuggestValidation')}: {draftSuggestion.validation_error}</p> : <p className="mt-2 text-[hsl(var(--success))]">{t('promptFilter.intelligence.draftSuggestValid')}</p>}
+            </div>
           ) : null}
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label={t('promptFilter.intelligence.draftName')}><Input value={draftForm.name} onChange={(event) => setDraftForm((current) => ({ ...current, name: event.target.value }))} /></Field>
@@ -3764,6 +3869,44 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [incidentError, setIncidentError] = useState<string | null>(null)
   const [clearingSection, setClearingSection] = useState<PromptLogClearSection | null>(null)
+  const [retention, setRetention] = useState<PromptLogRetention | null>(null)
+  const [retentionDraft, setRetentionDraft] = useState<number>(7)
+  const [retentionSaving, setRetentionSaving] = useState(false)
+  const [retentionRunning, setRetentionRunning] = useState(false)
+  const loadRetention = useCallback(async () => {
+    try {
+      const next = await api.getPromptLogRetention()
+      setRetention(next)
+      setRetentionDraft(next.retention_days)
+      setRetentionRunning(next.running)
+    } catch {
+      /* 保留设置读取失败不影响日志页其它功能 */
+    }
+  }, [])
+  useEffect(() => {
+    void loadRetention()
+  }, [loadRetention])
+  const saveRetention = async () => {
+    setRetentionSaving(true)
+    try {
+      const next = await api.updatePromptLogRetention(retentionDraft)
+      setRetention(next)
+      showToast(t('promptFilter.retention.saved', { days: next.retention_days }))
+    } catch (err) {
+      showToast(`${t('promptFilter.retention.saveFailed')}: ${getErrorMessage(err)}`, 'error')
+    } finally {
+      setRetentionSaving(false)
+    }
+  }
+  const runRetentionNow = async () => {
+    try {
+      await api.runPromptLogRetention()
+      setRetentionRunning(true)
+      showToast(t('promptFilter.retention.started'))
+    } catch (err) {
+      showToast(`${t('promptFilter.retention.runFailed')}: ${getErrorMessage(err)}`, 'error')
+    }
+  }
   const [auditHealth, setAuditHealth] = useState<PromptPolicyAuditHealth | null>(null)
   const [auditHealthOpen, setAuditHealthOpen] = useState(false)
   const [auditHealthLoading, setAuditHealthLoading] = useState(false)
@@ -3815,6 +3958,27 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
       setReviewLoading(false)
     }
   }, [reviewFilters, reviewPage, reviewPageSize])
+
+  // 后台清理进行中时轮询状态，跑完后刷新日志计数。
+  useEffect(() => {
+    if (!retentionRunning) return
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.getPromptLogRetention()
+        setRetention(next)
+        if (!next.running) {
+          setRetentionRunning(false)
+          setLogPage(1)
+          setReviewPage(1)
+          await Promise.all([loadReviewLogs(1), loadLocalLogs(1)])
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [retentionRunning, loadReviewLogs, loadLocalLogs])
+
 
   const loadIncidents = useCallback(async () => {
     setIncidentLoading(true)
@@ -3879,6 +4043,8 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
       }
 
       await api.clearPromptFilterLogs(section === 'review' ? { reviewed: true } : { source: 'local_filter' })
+      // 清空现已改为后台分批执行：先刷新一次，再轮询到清理结束后自动再刷新。
+      setRetentionRunning(true)
       // The two panels are projections of the same persisted rows. A reviewed
       // local-filter row appears in both, so either cleanup must refresh both
       // projections instead of leaving the other panel with stale records.
@@ -3925,6 +4091,40 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
         </div>
 
         <div className="space-y-5">
+          <section className="rounded-xl border p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">{t('promptFilter.retention.title')}</div>
+                <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.retention.description')}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {retention?.last_run_at
+                    ? t('promptFilter.retention.lastRun', {
+                        time: new Date(retention.last_run_at).toLocaleString(),
+                        logs: retention.last_deleted_logs,
+                        events: retention.last_deleted_events,
+                        sources: retention.last_deleted_sources,
+                        seconds: (retention.last_duration_ms / 1000).toFixed(1),
+                      })
+                    : t('promptFilter.retention.neverRun')}
+                  {retention?.last_error ? ` · ${t('promptFilter.retention.lastError', { error: retention.last_error })}` : ''}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">{t('promptFilter.retention.daysLabel')}</span>
+                <div className="w-24">
+                  <DraftNumberInput min={0} max={365} value={retentionDraft} onValueChange={(v) => setRetentionDraft(v)} />
+                </div>
+                <Button size="sm" variant="outline" onClick={() => void saveRetention()} disabled={retentionSaving || retention?.retention_days === retentionDraft}>
+                  {retentionSaving ? t('promptFilter.retention.saving') : t('common.save')}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void runRetentionNow()} disabled={retentionRunning || clearingSection !== null || (retention?.retention_days ?? 0) <= 0}>
+                  {retentionRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                  {retentionRunning ? t('promptFilter.retention.running') : t('promptFilter.retention.runNow')}
+                </Button>
+              </div>
+            </div>
+          </section>
+
           <section className="rounded-xl border p-4">
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>
@@ -5306,6 +5506,12 @@ function PromptPolicyIncidentDetailButton({ incident, onDeleted }: { incident: P
               </div>
               {(item.local_reason || item.local_reason_code) ? <PromptPolicyDetailField label={t('promptFilter.cyberReason')} value={item.local_reason || item.local_reason_code} /> : null}
               {detail && detail.matches.length > 0 ? <div><div className="mb-2 font-semibold">{t('promptFilter.testResultMatches')}</div><div className="flex flex-wrap gap-1.5">{detail.matches.map((match, index) => <Badge key={`${match.name}-${index}`} variant="secondary">{match.name} · {match.weight}</Badge>)}</div></div> : null}
+              {detail ? (
+                <div>
+                  <div className="mb-2 font-semibold">{t('promptFilter.cyberRiskSubjects')}</div>
+                  <PromptRiskSubjectList subjects={detail.risk_subjects ?? []} />
+                </div>
+              ) : null}
               {content ? <div><div className="mb-2 font-semibold">{t('promptFilter.userPromptLabel')}</div><pre className="max-h-[45vh] overflow-auto whitespace-pre-wrap break-words rounded-md border border-border bg-muted/30 p-3 text-xs">{content}</pre></div> : null}
               <div className="flex justify-end border-t pt-3"><Button size="sm" variant="outline" className="text-destructive hover:text-destructive" onClick={() => void deleteIncident()} disabled={deleting}>{deleting ? t('promptFilter.clearing') : t('promptFilter.deleteCyberIncident')}</Button></div>
             </div>
@@ -5315,6 +5521,91 @@ function PromptPolicyIncidentDetailButton({ incident, onDeleted }: { incident: P
       </Dialog>
     </>
   )
+}
+
+// CY 关联的画像主体列表：上游 CY 事件详情与 CY 学习审核的证据详情共用，
+// 人员主体排在最前，每个主体可直接打开画像详情。
+function PromptRiskSubjectList({ subjects, compact = false }: { subjects: PromptRiskIncidentSubject[]; compact?: boolean }) {
+  const { t } = useTranslation()
+  if (subjects.length === 0) {
+    return <p className="text-xs text-muted-foreground">{t('promptFilter.cyberRiskSubjectsEmpty')}</p>
+  }
+  return (
+    <div className={compact ? 'space-y-1' : 'space-y-1.5'}>
+      {subjects.map((subject) => (
+        <div key={`${subject.subject_type}:${subject.subject_key}`} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-muted/20 px-2.5 py-2">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Badge variant={subject.subject_type === 'newapi_user' ? 'default' : 'outline'}>{t(`promptFilter.risk.subjects.${subject.subject_type}`, { defaultValue: subject.subject_type })}</Badge>
+              <span className="font-medium">{subject.subject_display || subject.subject_key}</span>
+              {subject.is_person ? <Badge variant="secondary">{t('promptFilter.risk.personVerified')}</Badge> : null}
+            </div>
+            <div className="mt-1 flex flex-wrap gap-x-2 text-[11px] text-muted-foreground">
+              {subject.newapi_user_id ? <span>{t('promptFilter.risk.userId')} #{subject.newapi_user_id}</span> : null}
+              {subject.newapi_user_email ? <span>{subject.newapi_user_email}</span> : null}
+              {subject.newapi_user_name ? <span>{subject.newapi_user_name}</span> : null}
+              {subject.newapi_user_group ? <span>{t('promptFilter.risk.userGroup')}: {subject.newapi_user_group}</span> : null}
+              {subject.platform ? <span>{subject.platform}</span> : null}
+              <span className="font-mono">{subject.subject_key.slice(0, 18)}</span>
+              <span>{t('promptFilter.cyberRiskSubjectEvents', { count: subject.event_count })}</span>
+            </div>
+          </div>
+          <PromptRiskProfileDetailButton profile={riskSubjectToProfileStub(subject)} />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+const DRAFT_AI_PREFERENCE_KEY = 'prompt_intel_draft_ai'
+type DraftAIPreference = { provider: PromptIntelligenceAIProvider; model: string; apiKeyId: string }
+function readDraftAIPreference(): DraftAIPreference {
+  const fallback: DraftAIPreference = { provider: 'account_pool', model: '', apiKeyId: '0' }
+  try {
+    const raw = window.localStorage.getItem(DRAFT_AI_PREFERENCE_KEY)
+    if (!raw) return fallback
+    const parsed = JSON.parse(raw) as Partial<DraftAIPreference>
+    return {
+      provider: parsed.provider === 'review' ? 'review' : 'account_pool',
+      model: typeof parsed.model === 'string' ? parsed.model : '',
+      apiKeyId: typeof parsed.apiKeyId === 'string' ? parsed.apiKeyId : '0',
+    }
+  } catch {
+    return fallback
+  }
+}
+function writeDraftAIPreference(value: DraftAIPreference) {
+  try {
+    window.localStorage.setItem(DRAFT_AI_PREFERENCE_KEY, JSON.stringify(value))
+  } catch {
+    /* 本地偏好写入失败不影响生成 */
+  }
+}
+
+// CY 关联主体只有主体键和身份信息；画像详情按钮会用主体键拉取完整画像，这里只需一个占位对象。
+function riskSubjectToProfileStub(subject: PromptRiskIncidentSubject): PromptRiskProfile {
+  return {
+    subject_type: subject.subject_type,
+    subject_key: subject.subject_key,
+    subject_display: subject.subject_display || subject.subject_key,
+    platform: subject.platform,
+    newapi_user_id: subject.newapi_user_id,
+    newapi_user_name: subject.newapi_user_name,
+    newapi_user_email: subject.newapi_user_email,
+    newapi_user_group: subject.newapi_user_group,
+    is_person: subject.is_person,
+    identity_confidence: subject.identity_confidence,
+    risk_score: 0,
+    risk_level: 'low',
+    recommended_actions: [],
+    score_breakdown: { local_signal: 0, upstream_signal: 0, recurrence: 0, identity_confidence: subject.identity_confidence },
+    has_activity: subject.event_count > 0,
+    latest_at: new Date(0).toISOString(),
+    event_count: subject.event_count,
+    events_10m: 0,
+    events_24h: 0,
+    events_7d: 0,
+  } as unknown as PromptRiskProfile
 }
 
 function PromptPolicyDetailField({ label, value }: { label: string; value: string }) {
