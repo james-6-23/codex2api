@@ -46,7 +46,7 @@ func TestPopulateAccountSessionObservationRefreshesLastSeen(t *testing.T) {
 }
 
 func TestPopulateAccountSessionObservationUsesRootButKeepsLeafForAudit(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	root := promptSessionTestFingerprint("account-visible-root")
 	firstContext := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("account-main-leaf"), root)
 	policyContext := firstContext.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
@@ -71,7 +71,7 @@ func TestPopulateAccountSessionObservationUsesRootButKeepsLeafForAudit(t *testin
 }
 
 func TestPopulateAccountSessionObservationSkipsVerifiedAmbientBackgroundRequest(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	c := promptSessionLimitVerifiedRootUserContext(
 		promptSessionTestFingerprint("ambient-leaf-observation"),
 		promptSessionTestFingerprint("ambient-root-observation"),
@@ -178,7 +178,7 @@ func TestPopulateAccountSessionObservationDoesNotLeakRootAcrossWebSocketFrames(t
 }
 
 func TestPopulateAccountSessionObservationWaitsForSignedWebSocketRoot(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("ws-handshake-leaf"))
 	policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
 	policyContext.Meta.RootSessionVersion = 1
@@ -197,7 +197,7 @@ func TestPopulateAccountSessionObservationWaitsForSignedWebSocketRoot(t *testing
 }
 
 func TestPopulateAccountSessionObservationDoesNotUseLeafForAuthoritativeUnavailableHTTP(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("http-unavailable-leaf"))
 	policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
 	policyContext.Meta.RootSessionVersion = 1
@@ -216,7 +216,7 @@ func TestPopulateAccountSessionObservationDoesNotUseLeafForAuthoritativeUnavaila
 }
 
 func TestPopulateAccountSessionObservationUsesFrameRootWithLegacySignedMetadata(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("legacy-newapi-leaf"))
 	c.Request.Header.Set("Connection", "Upgrade")
 	c.Request.Header.Set("Upgrade", "websocket")

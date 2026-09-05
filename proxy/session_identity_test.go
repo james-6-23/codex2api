@@ -96,7 +96,7 @@ func TestResolveRequestSessionIdentityUsesSignedForkSourceAffinity(t *testing.T)
 	policy.Meta.ForkedFromSessionFingerprint = sourceFingerprint
 	c.Set(newAPIPolicyMetaContextKey, policy)
 
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	identity := handler.resolveRequestSessionIdentityForContext(c, []byte(`{"model":"gpt-5.6-sol","input":"fork"}`))
 	if identity.affinityID != "newapi-root-session:"+currentFingerprint {
 		t.Fatalf("fork affinity = %q, want independent current root", identity.affinityID)
@@ -110,7 +110,7 @@ func TestResolveRequestSessionIdentityUsesSignedForkSourceAffinity(t *testing.T)
 }
 
 func TestSignedRelatedRequestUsesRootAffinityWithNonCountingMarker(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	rootFingerprint := promptSessionTestFingerprint("shared-root-affinity")
 	mainContext := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("main-leaf-affinity"), rootFingerprint)
 	mainValue, _ := mainContext.Get(newAPIPolicyMetaContextKey)
@@ -143,7 +143,7 @@ func TestSignedRelatedRequestUsesRootAffinityWithNonCountingMarker(t *testing.T)
 }
 
 func TestSignedGuardianReviewedRootOverridesIndependentLeafGraph(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	rootFingerprint := newAPIRootSessionFingerprint("newapi", "42", testRootSessionA)
 	c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("guardian-leaf"), rootFingerprint)
 	policy := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
@@ -172,7 +172,7 @@ func TestSignedSystemPassiveRootOverrideAcceptsIndependentGraph(t *testing.T) {
 		"direct string":    []byte(`{"model":"gpt-5.6-luna","input":"generate metadata"}`),
 	} {
 		t.Run(name, func(t *testing.T) {
-			handler := promptSessionLimitVerifiedTestHandler()
+			handler := promptSessionLimitVerifiedTestHandler(t)
 			rootFingerprint := promptSessionTestFingerprint("system-passive-parent-root-" + name)
 			c := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("system-passive-leaf-"+name), rootFingerprint)
 			policy := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
@@ -193,7 +193,7 @@ func TestSignedSystemPassiveRootOverrideAcceptsIndependentGraph(t *testing.T) {
 }
 
 func TestSignedUserCompactionOwnsAndRecoversRootAffinity(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	rootFingerprint := promptSessionTestFingerprint("user-compaction-root")
 	ctx := promptSessionLimitVerifiedRootUserContext(promptSessionTestFingerprint("user-compaction-leaf"), rootFingerprint)
 	raw, _ := ctx.Get(newAPIPolicyMetaContextKey)

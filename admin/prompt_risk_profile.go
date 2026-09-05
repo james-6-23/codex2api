@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -358,7 +359,12 @@ func (h *Handler) UpdatePromptRiskProfileSessionLimit(c *gin.Context) {
 			Limit: req.Limit, WindowSeconds: req.WindowSeconds,
 		})
 		if err != nil {
-			writeError(c, http.StatusBadRequest, err.Error())
+			if errors.Is(err, database.ErrInvalidPromptSessionLimitOverride) {
+				writeError(c, http.StatusBadRequest, err.Error())
+			} else {
+				log.Printf("保存用户会话限制失败: %v", err)
+				writeError(c, http.StatusInternalServerError, "保存会话限制失败，请稍后重试")
+			}
 			return
 		}
 		if h.store != nil {

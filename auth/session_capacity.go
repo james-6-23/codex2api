@@ -53,7 +53,10 @@ var protectedRelatedSessionCapacityPrefix = "protected-related-affinity:" + uuid
 // a normal affinity identity, but it never enters account-window accounting.
 var sessionAccountingBypassCapacityPrefix = "non-accounting-affinity:" + uuid.NewString() + ":"
 
-const maxRelatedRequestDedupeEntries = 512
+const (
+	maxRelatedRequestDedupeEntries = 512
+	maxRelatedSessionSources       = 64
+)
 
 const (
 	accountSessionRuntimeNamespace      = "account-session-state-v1"
@@ -267,11 +270,8 @@ func (s *Store) ensureAccountSessionsLoaded(account *Account, now time.Time) {
 				relatedRequestCount: item.RelatedRequestCount,
 			}
 			if len(item.RelatedSources) > 0 {
-				state.relatedSources = make(map[string]*AccountSessionRelatedSource, len(item.RelatedSources))
 				for _, source := range item.RelatedSources {
-					sourceCopy := source
-					key := source.ThreadSource + "\x00" + source.RequestKind + "\x00" + source.SubagentKind
-					state.relatedSources[key] = &sourceCopy
+					state.addRelatedSource(source)
 				}
 			}
 			if len(item.RelatedRequestIDs) > 0 {
@@ -673,9 +673,6 @@ func (s *Store) RecordRelatedAccountSession(accountID int64, sessionKey string, 
 	if s == nil || accountID <= 0 || !related {
 		return
 	}
-	source.ThreadSource = normalizeRelatedSessionLabel(source.ThreadSource, 128)
-	source.RequestKind = normalizeRelatedSessionLabel(source.RequestKind, 128)
-	source.SubagentKind = normalizeRelatedSessionLabel(source.SubagentKind, 64)
 	requestID = normalizeRelatedSessionLabel(requestID, 256)
 
 	now := time.Now()
@@ -722,24 +719,35 @@ func (s *Store) RecordRelatedAccountSession(accountID int64, sessionKey string, 
 		}
 	}
 	state.relatedRequestCount++
-	key := source.ThreadSource + "\x00" + source.RequestKind + "\x00" + source.SubagentKind
-	if state.relatedSources == nil {
-		state.relatedSources = make(map[string]*AccountSessionRelatedSource)
-	}
-	item := state.relatedSources[key]
-	if item == nil {
-		item = &AccountSessionRelatedSource{
-			ThreadSource: source.ThreadSource,
-			RequestKind:  source.RequestKind,
-			SubagentKind: source.SubagentKind,
-		}
-		state.relatedSources[key] = item
-	}
-	item.Count++
+	source.Count = 1
+	state.addRelatedSource(source)
 	s.accountSessionMu.Unlock()
 	// Reconcile the root reverse index as well as the account collection so a
 	// restart observes the same extended idle lease.
 	s.persistAccountSessions(accountID, now, rootKey)
+}
+
+func (state *accountSessionState) addRelatedSource(source AccountSessionRelatedSource) {
+	if source.Count <= 0 {
+		return
+	}
+	source.ThreadSource = normalizeRelatedSessionLabel(source.ThreadSource, 128)
+	source.RequestKind = normalizeRelatedSessionLabel(source.RequestKind, 128)
+	source.SubagentKind = normalizeRelatedSessionLabel(source.SubagentKind, 64)
+	key := source.ThreadSource + "\x00" + source.RequestKind + "\x00" + source.SubagentKind
+	if state.relatedSources == nil {
+		state.relatedSources = make(map[string]*AccountSessionRelatedSource)
+	}
+	if state.relatedSources[key] == nil && len(state.relatedSources) >= maxRelatedSessionSources-1 {
+		source.ThreadSource, source.RequestKind, source.SubagentKind = "other", "", ""
+		key = "other\x00\x00"
+	}
+	item := state.relatedSources[key]
+	if item == nil {
+		state.relatedSources[key] = &source
+		return
+	}
+	item.Count += source.Count
 }
 
 func normalizeRelatedSessionLabel(value string, maxRunes int) string {
@@ -781,9 +789,9 @@ func (s *Store) RemoveAccountSession(accountID int64, sessionKey string) bool {
 	return true
 }
 
-func (s *Store) ClearAccountSessions(accountID int64) {
+func (s *Store) ClearAccountSessions(accountID int64) []string {
 	if s == nil || accountID <= 0 {
-		return
+		return nil
 	}
 	if account := s.FindByID(accountID); account != nil {
 		s.ensureAccountSessionsLoaded(account, time.Now())
@@ -801,6 +809,7 @@ func (s *Store) ClearAccountSessions(accountID int64) {
 	s.accountSessionsHydrated[accountID] = true
 	s.accountSessionMu.Unlock()
 	s.persistAccountSessions(accountID, time.Now(), sessionIDs...)
+	return sessionIDs
 }
 
 func (s *Store) AccountSessionSnapshots(accountID int64, now time.Time) []AccountSessionSnapshot {
@@ -856,7 +865,26 @@ func (s *Store) AccountSessionSnapshots(accountID int64, now time.Time) []Accoun
 }
 
 func (s *Store) AccountSessionCount(accountID int64, now time.Time) int64 {
-	return int64(len(s.AccountSessionSnapshots(accountID, now)))
+	if s == nil || accountID <= 0 {
+		return 0
+	}
+	account := s.FindByID(accountID)
+	if account == nil {
+		return 0
+	}
+	enabled, _, idleTTL := account.SessionCapacityConfig()
+	if !enabled {
+		return 0
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.ensureAccountSessionsLoaded(account, now)
+	s.accountSessionMu.Lock()
+	s.purgeExpiredAccountSessionsLocked(accountID, idleTTL, now)
+	count := len(s.accountSessions[accountID])
+	s.accountSessionMu.Unlock()
+	return int64(count)
 }
 
 // accountWindowCountsForScheduling returns one local active-window count per

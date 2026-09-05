@@ -147,9 +147,9 @@ func TestAccountResponseOmitsCodexFingerprintModeForRelayAccounts(t *testing.T) 
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)
 	accountID, err := db.InsertAccountWithCredentials(context.Background(), "relay", map[string]interface{}{
-		"upstream_type": auth.UpstreamOpenAIResponses,
-		"base_url":      "https://relay.example.com",
-		"api_key":       "relay-token",
+		"upstream_type":                        auth.UpstreamOpenAIResponses,
+		"base_url":                             "https://relay.example.com",
+		"api_key":                              "relay-token",
 		auth.CodexFingerprintModeCredentialKey: auth.CodexFingerprintModeFull,
 	}, "")
 	if err != nil {

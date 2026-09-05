@@ -312,6 +312,7 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
   const [open, setOpen] = useState(false);
   const [sessions, setSessions] = useState<AccountSessionSnapshot[] | null>(null);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [sessionNow, setSessionNow] = useState(() => Date.now());
   const sessionLoadPending = useRef(false);
   const current = Math.max(0, account.session_capacity_current ?? 0);
@@ -321,9 +322,12 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
     sessionLoadPending.current = true;
     if (showLoading) setLoading(true);
     void api.getAccountSessions(account.id)
-      .then((response) => setSessions(response.sessions ?? []))
-      .catch(() => {
-        if (showLoading) setSessions([]);
+      .then((response) => {
+        setSessions(response.sessions ?? []);
+        setLoadError(null);
+      })
+      .catch((error) => {
+        setLoadError(getErrorMessage(error));
       })
       .finally(() => {
         sessionLoadPending.current = false;
@@ -398,7 +402,13 @@ function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
             </div>
           ) : null}
 
-          {!loading && sessions?.length === 0 ? (
+          {loadError ? (
+            <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {loadError}
+            </div>
+          ) : null}
+
+          {!loading && !loadError && sessions?.length === 0 ? (
             <div className="flex min-h-32 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground">
               {t("accounts.sessionCapacityEmpty")}
             </div>

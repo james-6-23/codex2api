@@ -71,16 +71,19 @@ func promptSessionLimitVerifiedRootUserContext(sessionFingerprint, rootSessionFi
 	return c
 }
 
-func promptSessionLimitVerifiedTestHandler() *Handler {
+func promptSessionLimitVerifiedTestHandler(t *testing.T) *Handler {
+	t.Helper()
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{
 		APIKeyID: 7, PlatformCode: "newapi", Enabled: true, RequireSignedIdentity: true,
 	}})
 	return &Handler{store: store}
 }
 
-func promptSessionLimitOverrideTestHandler(item database.PromptSessionLimitOverride) *Handler {
-	handler := promptSessionLimitVerifiedTestHandler()
+func promptSessionLimitOverrideTestHandler(t *testing.T, item database.PromptSessionLimitOverride) *Handler {
+	t.Helper()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	store := handler.store
 	store.ApplyPromptSessionLimitOverride(item)
 	return handler
@@ -160,7 +163,7 @@ func TestPromptSessionCreationLimitCountsAlternateExplicitSessionHeaders(t *test
 }
 
 func TestPromptSessionCreationLimitSameRootGuardianDoesNotDuplicate(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -181,7 +184,7 @@ func TestPromptSessionCreationLimitSameRootGuardianDoesNotDuplicate(t *testing.T
 }
 
 func TestPromptSessionCreationLimitRelatedRequestNeverCreatesExpiredRoot(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -203,7 +206,7 @@ func TestPromptSessionCreationLimitRelatedRequestNeverCreatesExpiredRoot(t *test
 }
 
 func TestPromptSessionCreationLimitUserCompactionDoesNotRestoreMissingRootWindow(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -235,7 +238,7 @@ func TestPromptSessionCreationLimitProtocolCompactionDoesNotCreateWindow(t *test
 		{name: "compact endpoint", path: "/v1/responses/compact", body: []byte(`{"model":"gpt-5.6-sol","input":"context"}`)},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			handler := promptSessionLimitVerifiedTestHandler()
+			handler := promptSessionLimitVerifiedTestHandler(t)
 			cfg := promptfilter.Config{}
 			cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 			cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -255,7 +258,7 @@ func TestPromptSessionCreationLimitProtocolCompactionDoesNotCreateWindow(t *test
 }
 
 func TestPromptSessionCreationLimitUserCompactionReusesExistingRootWithoutChangingCreation(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{MaxTextLength: promptfilter.DefaultMaxTextLength}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 2
@@ -292,7 +295,7 @@ func TestPromptSessionCreationLimitUserCompactionReusesExistingRootWithoutChangi
 }
 
 func TestPromptSessionCreationLimitUserForkStillCreatesIndependentWindow(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 2
@@ -321,6 +324,7 @@ func TestPromptSessionCreationLimitLegacyWindowIsNotBackfilledFromCompaction(t *
 	runtimeCache := cache.NewMemory(1)
 	defer runtimeCache.Close()
 	store := auth.NewStore(nil, runtimeCache, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	store.ReplacePromptFilterNewAPIBindings([]*database.PromptFilterNewAPIBinding{{
 		APIKeyID: 7, PlatformCode: "newapi", Enabled: true, RequireSignedIdentity: true,
 	}})
@@ -371,7 +375,7 @@ func TestPromptSessionCreationLimitLegacyWindowIsNotBackfilledFromCompaction(t *
 }
 
 func TestPromptSessionCreationLimitSkipsVerifiedAmbientBackgroundRequest(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -412,7 +416,7 @@ func TestPromptSessionCreationLimitSkipsStandaloneNativeAmbientBackgroundRequest
 }
 
 func TestPromptSessionCreationLimitRejectsSignedWebSocketRootConflict(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 3
@@ -442,7 +446,7 @@ func TestPromptSessionCreationLimitHonorsAuthoritativeRootStates(t *testing.T) {
 	cfg.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
 
 	t.Run("conflict rejects without counting leaf", func(t *testing.T) {
-		handler := promptSessionLimitVerifiedTestHandler()
+		handler := promptSessionLimitVerifiedTestHandler(t)
 		c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("conflicting-leaf"))
 		policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
 		policyContext.Meta.RootSessionVersion = 1
@@ -456,7 +460,7 @@ func TestPromptSessionCreationLimitHonorsAuthoritativeRootStates(t *testing.T) {
 	})
 
 	t.Run("unavailable skips leaf accounting", func(t *testing.T) {
-		handler := promptSessionLimitVerifiedTestHandler()
+		handler := promptSessionLimitVerifiedTestHandler(t)
 		c := promptSessionLimitVerifiedUserContext(promptSessionTestFingerprint("unavailable-leaf"))
 		policyContext := c.MustGet(newAPIPolicyMetaContextKey).(verifiedNewAPIPolicyContext)
 		policyContext.Meta.RootSessionVersion = 1
@@ -499,7 +503,7 @@ func TestPromptSessionCreationLimitNestedGuardianLocalGraphDoesNotDuplicate(t *t
 }
 
 func TestPromptSessionCreationLimitDifferentRootsCountSeparately(t *testing.T) {
-	handler := promptSessionLimitVerifiedTestHandler()
+	handler := promptSessionLimitVerifiedTestHandler(t)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -720,7 +724,7 @@ func TestPromptSessionCreationLimitDoesNotCountIdempotencyKey(t *testing.T) {
 }
 
 func TestPromptSessionCreationLimitUserCustomOverrideBeatsDisabledGlobal(t *testing.T) {
-	handler := promptSessionLimitOverrideTestHandler(database.PromptSessionLimitOverride{
+	handler := promptSessionLimitOverrideTestHandler(t, database.PromptSessionLimitOverride{
 		Platform: "newapi", NewAPIUserID: "42", Mode: database.PromptSessionLimitModeCustom,
 		Limit: 1, WindowSeconds: 4800,
 	})
@@ -737,7 +741,7 @@ func TestPromptSessionCreationLimitUserCustomOverrideBeatsDisabledGlobal(t *test
 }
 
 func TestPromptSessionCreationLimitUserOffOverrideBeatsEnabledGlobal(t *testing.T) {
-	handler := promptSessionLimitOverrideTestHandler(database.PromptSessionLimitOverride{
+	handler := promptSessionLimitOverrideTestHandler(t, database.PromptSessionLimitOverride{
 		Platform: "newapi", NewAPIUserID: "42", Mode: database.PromptSessionLimitModeOff,
 	})
 	cfg := promptfilter.Config{}
@@ -752,6 +756,7 @@ func TestPromptSessionCreationLimitUserOffOverrideBeatsEnabledGlobal(t *testing.
 
 func TestPromptSessionCreationLimitIgnoresSelectedAccountWithoutWindowControl(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -773,6 +778,7 @@ func TestPromptSessionCreationLimitIgnoresSelectedAccountWithoutWindowControl(t 
 
 func TestPromptSessionCreationLimitCountsOnlyAfterWindowControlledAccountSelected(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1
@@ -798,6 +804,7 @@ func TestPromptSessionCreationLimitCountsOnlyAfterWindowControlledAccountSelecte
 
 func TestPromptSessionCreationLimitStoresCurrentWindowDetailWithoutRefreshingExpiry(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	cfg := promptfilter.Config{MaxTextLength: promptfilter.DefaultMaxTextLength}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 2
@@ -845,6 +852,7 @@ func TestPromptSessionCreationLimitStoresCurrentWindowDetailWithoutRefreshingExp
 
 func TestPromptSessionCreationLimitIgnoresInternalReviewRequest(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	cfg := promptfilter.Config{}
 	cfg.Advanced.Risk.SessionCreationLimitEnabled = true
 	cfg.Advanced.Risk.SessionCreationLimit = 1

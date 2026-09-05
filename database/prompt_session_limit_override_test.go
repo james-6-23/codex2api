@@ -2,6 +2,7 @@ package database
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 )
@@ -38,16 +39,28 @@ func TestPromptSessionLimitOverrideLifecycle(t *testing.T) {
 }
 
 func TestPromptSessionLimitOverrideValidatesCustomRange(t *testing.T) {
-	db, err := New("sqlite", filepath.Join(t.TempDir(), "session-limit-invalid.db"))
-	if err != nil {
-		t.Fatalf("New: %v", err)
+	valid := PromptSessionLimitOverride{Platform: "newapi", NewAPIUserID: "42", Mode: PromptSessionLimitModeCustom, Limit: 3, WindowSeconds: 3600}
+	for _, field := range []string{"identity", "mode", "limit", "window"} {
+		t.Run(field, func(t *testing.T) {
+			item := valid
+			switch field {
+			case "identity":
+				item.NewAPIUserID = ""
+			case "mode":
+				item.Mode = "unknown"
+			case "limit":
+				item.Limit = 0
+			case "window":
+				item.WindowSeconds = 59
+			}
+			_, err := (*DB)(nil).UpsertPromptSessionLimitOverride(t.Context(), item)
+			if !errors.Is(err, ErrInvalidPromptSessionLimitOverride) {
+				t.Fatalf("validation error = %v", err)
+			}
+		})
 	}
-	defer db.Close()
-	_, err = db.UpsertPromptSessionLimitOverride(context.Background(), PromptSessionLimitOverride{
-		Platform: "newapi", NewAPIUserID: "42", Mode: PromptSessionLimitModeCustom,
-		Limit: 0, WindowSeconds: 59,
-	})
-	if err == nil {
-		t.Fatal("invalid custom override was accepted")
+	_, err := (*DB)(nil).UpsertPromptSessionLimitOverride(t.Context(), valid)
+	if err == nil || errors.Is(err, ErrInvalidPromptSessionLimitOverride) {
+		t.Fatalf("database failure misclassified as validation: %v", err)
 	}
 }

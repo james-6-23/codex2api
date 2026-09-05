@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +14,55 @@ import (
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
+
+func TestPromptRiskSessionLimitSeparatesValidationAndDatabaseErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-limit-errors.db")
+	db, err := database.New("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.UpsertPromptRiskIdentities(t.Context(), []database.PromptRiskIdentityInput{{Platform: "newapi", ExternalUserID: "42"}}); err != nil {
+		t.Fatal(err)
+	}
+	profiles, _, err := db.ListPromptRiskProfiles(t.Context(), database.PromptRiskProfileQuery{SubjectType: database.PromptRiskSubjectNewAPIUser})
+	if err != nil || len(profiles) != 1 {
+		t.Fatalf("profiles=%#v err=%v", profiles, err)
+	}
+	handler := &Handler{db: db}
+	for _, scenario := range []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{"valid", `{"mode":"custom","limit":3,"window_seconds":3600}`, http.StatusOK},
+		{"invalid", `{"mode":"custom","limit":0,"window_seconds":59}`, http.StatusBadRequest},
+		{"database_failure", `{"mode":"custom","limit":3,"window_seconds":3600}`, http.StatusInternalServerError},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			if scenario.status == http.StatusInternalServerError {
+				connection, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if _, err := connection.ExecContext(t.Context(), `CREATE TRIGGER fail_override BEFORE INSERT ON prompt_session_limit_overrides
+					BEGIN SELECT RAISE(FAIL, 'forced override write failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Params = gin.Params{{Key: "subject_type", Value: database.PromptRiskSubjectNewAPIUser}, {Key: "subject_key", Value: profiles[0].SubjectKey}}
+			ctx.Request = httptest.NewRequest(http.MethodPut, "/session-limit", strings.NewReader(scenario.body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			handler.UpdatePromptRiskProfileSessionLimit(ctx)
+			if recorder.Code != scenario.status || strings.Contains(recorder.Body.String(), "forced override write failure") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
 
 func TestPromptRiskProfileListTimeoutAllowsProductionAggregation(t *testing.T) {
 	if promptRiskProfileListTimeout < 10*time.Second {

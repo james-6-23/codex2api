@@ -37,7 +37,9 @@ func (h *Handler) DeleteAccountSessions(c *gin.Context) {
 	}
 	sessionID := strings.TrimSpace(c.Query("session_id"))
 	if sessionID == "" {
-		h.store.ClearAccountSessions(id)
+		for _, releasedID := range h.store.ClearAccountSessions(id) {
+			h.store.UnbindSessionAffinity(releasedID, id)
+		}
 		c.JSON(http.StatusOK, gin.H{"message": "已释放全部会话槽"})
 		return
 	}

@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -29,12 +30,14 @@ type PromptSessionLimitOverride struct {
 
 var promptSessionLimitOverrideSchemaMu sync.Mutex
 
+var ErrInvalidPromptSessionLimitOverride = errors.New("invalid session limit override")
+
 func normalizePromptSessionLimitOverride(item PromptSessionLimitOverride) (PromptSessionLimitOverride, error) {
 	item.Platform = strings.ToLower(strings.TrimSpace(item.Platform))
 	item.NewAPIUserID = strings.TrimSpace(item.NewAPIUserID)
 	item.Mode = strings.ToLower(strings.TrimSpace(item.Mode))
 	if item.Platform == "" || item.NewAPIUserID == "" {
-		return item, errors.New("NewAPI platform and user id are required")
+		return item, fmt.Errorf("%w: NewAPI platform and user id are required", ErrInvalidPromptSessionLimitOverride)
 	}
 	switch item.Mode {
 	case PromptSessionLimitModeOff:
@@ -42,13 +45,13 @@ func normalizePromptSessionLimitOverride(item PromptSessionLimitOverride) (Promp
 		item.WindowSeconds = 0
 	case PromptSessionLimitModeCustom:
 		if item.Limit < 1 || item.Limit > 100000 {
-			return item, errors.New("session limit must be between 1 and 100000")
+			return item, fmt.Errorf("%w: session limit must be between 1 and 100000", ErrInvalidPromptSessionLimitOverride)
 		}
 		if item.WindowSeconds < 60 || item.WindowSeconds > 2592000 {
-			return item, errors.New("session limit window must be between 60 and 2592000 seconds")
+			return item, fmt.Errorf("%w: session limit window must be between 60 and 2592000 seconds", ErrInvalidPromptSessionLimitOverride)
 		}
 	default:
-		return item, errors.New("session limit override mode must be custom or off")
+		return item, fmt.Errorf("%w: session limit override mode must be custom or off", ErrInvalidPromptSessionLimitOverride)
 	}
 	return item, nil
 }

@@ -199,6 +199,7 @@ func TestAccountSessionStateRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
 	defer runtimeCache.Close()
 	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
 	firstStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(firstStore.Stop)
 	firstAccount := &Account{
 		DBID: 11, AccessToken: "first", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -220,6 +221,7 @@ func TestAccountSessionStateRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
 	}
 
 	secondStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(secondStore.Stop)
 	secondAccount := &Account{
 		DBID: 11, AccessToken: "second", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -243,6 +245,7 @@ func TestRelatedRequestRestoresAndRefreshesPersistedRootAfterRestart(t *testing.
 	defer runtimeCache.Close()
 	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
 	firstStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(firstStore.Stop)
 	firstAccount := &Account{
 		DBID: 12, AccessToken: "first", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600,
@@ -259,6 +262,7 @@ func TestRelatedRequestRestoresAndRefreshesPersistedRootAfterRestart(t *testing.
 	}
 
 	secondStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(secondStore.Stop)
 	secondAccount := &Account{
 		DBID: 12, AccessToken: "second", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 5, SessionCapacityIdleTTLSeconds: 3600,
@@ -299,6 +303,7 @@ func TestRestoredNearExpiryRootPersistsItsFirstReuse(t *testing.T) {
 	defer runtimeCache.Close()
 	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
 	firstStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(firstStore.Stop)
 	firstAccount := &Account{
 		DBID: 15, AccessToken: "first", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 60,
@@ -312,6 +317,7 @@ func TestRestoredNearExpiryRootPersistsItsFirstReuse(t *testing.T) {
 	firstStore.SetAccountSessionOwner(firstAccount.DBID, rootKey, AccountSessionOwner{UserName: "Arun"})
 
 	secondStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(secondStore.Stop)
 	secondAccount := &Account{
 		DBID: 15, AccessToken: "second", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 60,
@@ -341,6 +347,7 @@ func TestAccountSessionPersistenceRetriesImmediatelyAfterCacheFailure(t *testing
 	defer baseCache.Close()
 	runtimeCache := &failOnceAccountSessionRuntimeCache{TokenCache: baseCache}
 	store := NewStore(nil, runtimeCache, &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1})
+	t.Cleanup(store.Stop)
 	account := &Account{
 		DBID: 16, AccessToken: "token", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -364,6 +371,7 @@ func TestClearAccountSessionsRemovesPersistedRootAfterRestart(t *testing.T) {
 	defer runtimeCache.Close()
 	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
 	firstStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(firstStore.Stop)
 	firstAccount := &Account{
 		DBID: 13, AccessToken: "first", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -376,6 +384,7 @@ func TestClearAccountSessionsRemovesPersistedRootAfterRestart(t *testing.T) {
 	firstStore.ClearAccountSessions(firstAccount.DBID)
 
 	secondStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(secondStore.Stop)
 	secondAccount := &Account{
 		DBID: 13, AccessToken: "second", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -395,6 +404,7 @@ func TestDisableAccountSessionCapacityAfterRestartClearsPersistedOwner(t *testin
 	defer runtimeCache.Close()
 	settings := &database.SystemSettings{MaxConcurrency: 4, TestConcurrency: 1}
 	firstStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(firstStore.Stop)
 	firstAccount := &Account{
 		DBID: 14, AccessToken: "first", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -407,6 +417,7 @@ func TestDisableAccountSessionCapacityAfterRestartClearsPersistedOwner(t *testin
 	firstStore.SetAccountSessionOwner(firstAccount.DBID, rootKey, AccountSessionOwner{UserName: "Arun"})
 
 	secondStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(secondStore.Stop)
 	secondAccount := &Account{
 		DBID: 14, AccessToken: "second", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,
@@ -417,6 +428,7 @@ func TestDisableAccountSessionCapacityAfterRestartClearsPersistedOwner(t *testin
 	}
 
 	thirdStore := NewStore(nil, runtimeCache, settings)
+	t.Cleanup(thirdStore.Stop)
 	thirdAccount := &Account{
 		DBID: 14, AccessToken: "third", Status: StatusReady,
 		SessionCapacityEnabled: true, SessionCapacityMax: 1, SessionCapacityIdleTTLSeconds: 3600,

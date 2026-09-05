@@ -4968,7 +4968,8 @@ func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 		COALESCE(SUM(user_billed), 0) AS today_user_billed,
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN 1 ELSE 0 END), 0) AS rpm,
 		COALESCE(SUM(CASE WHEN created_at >= $2 THEN total_tokens ELSE 0 END), 0) AS tpm,
-		COALESCE(AVG(NULLIF(first_token_ms, 0)), 0) AS avg_first_token_ms,
+		COALESCE(SUM(NULLIF(first_token_ms, 0)), 0) AS first_token_ms_sum,
+		COUNT(NULLIF(first_token_ms, 0)) AS first_token_samples,
 		COALESCE(AVG(duration_ms), 0) AS avg_duration_ms,
 		COALESCE(SUM(CASE WHEN cached_tokens > 0 THEN 1 ELSE 0 END), 0) AS today_cache_hit_requests,
 		COALESCE(SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END), 0) AS today_errors
@@ -4981,11 +4982,13 @@ func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	var todayErrors int64
 	var todayCacheHitRequests int64
 	var todayCached int64
+	var totalFirstTokenMs float64
+	var totalFirstTokenSamples int64
 	err := db.conn.QueryRowContext(ctx, todayQuery, args...).Scan(
 		&stats.TodayRequests, &stats.TodayTokens, &stats.TodayPrompt, &stats.TodayCompletion, &todayCached,
 		&stats.TodayAccountBilled, &stats.TodayUserBilled,
 		&stats.RPM, &stats.TPM,
-		&stats.AvgFirstTokenMs,
+		&totalFirstTokenMs, &totalFirstTokenSamples,
 		&stats.AvgDurationMs,
 		&todayCacheHitRequests,
 		&todayErrors,
@@ -5006,8 +5009,10 @@ func (db *DB) getUsageStats(ctx context.Context, rangeStart, rangeEnd time.Time,
 	stats.TodayUserBilled += archived.UserBilled
 	todayCacheHitRequests += archived.CacheHits
 	todayErrors += archived.Errors
-	if explicitRange && archived.FirstTokenSamples > 0 {
-		stats.AvgFirstTokenMs = archived.FirstTokenSum / float64(archived.FirstTokenSamples)
+	totalFirstTokenMs += archived.FirstTokenSum
+	totalFirstTokenSamples += archived.FirstTokenSamples
+	if totalFirstTokenSamples > 0 {
+		stats.AvgFirstTokenMs = totalFirstTokenMs / float64(totalFirstTokenSamples)
 	}
 
 	rollup, err := db.loadUsageStatsRollup(ctx, channel)

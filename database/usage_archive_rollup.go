@@ -186,6 +186,8 @@ func (db *DB) ensureUsageAccountBillingWindowRollupsTable(ctx context.Context) e
 
 const legacyBillingWindowNanosecondThreshold int64 = 1_000_000_000_000
 
+const billingWindowMigrationLockID int64 = 0x6332613262776d31
+
 // accountBillingWindowRollupKey deliberately affects only the archive lookup
 // identity. Live usage_logs are still filtered by the exact since timestamp so
 // normalization never widens the active billing range.
@@ -198,11 +200,21 @@ func accountBillingWindowRollupKey(since time.Time) int64 {
 // successive log clears in the same upstream window, so they are summed. The
 // insert and delete share one transaction, making the migration idempotent.
 func (db *DB) migrateUsageAccountBillingWindowRollupKeys(ctx context.Context) error {
-	tx, err := db.conn.BeginTx(ctx, nil)
+	var options *sql.TxOptions
+	if !db.isSQLite() {
+		options = &sql.TxOptions{Isolation: sql.LevelReadCommitted}
+	}
+	tx, err := db.conn.BeginTx(ctx, options)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	if !db.isSQLite() {
+		if _, err = tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock($1)`, billingWindowMigrationLockID); err != nil {
+			return err
+		}
+	}
 
 	if _, err = tx.ExecContext(ctx, `
 		INSERT INTO usage_account_billing_window_rollups(account_id, window_start, account_billed)
@@ -720,6 +732,9 @@ func (db *DB) attachArchivedAccountRequestBreakdowns(ctx context.Context, result
 		}
 	}
 	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
 		return err
 	}
 	args = []interface{}{since}
