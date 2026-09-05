@@ -47,3 +47,13 @@ test('Chinese CY states and historical inference warnings are user-facing', () =
   assert.ok(usageSource.includes("t('usage.cyberPolicyLegacyInferred')"))
   assert.ok(promptFilterSource.includes("t('promptFilter.cyberLegacyUnknown')"))
 })
+
+test('audit log retention controls are wired to the retention API', () => {
+  assert.match(promptFilterSource, /api\.getPromptLogRetention\(\)/)
+  assert.match(promptFilterSource, /api\.updatePromptLogRetention\(/)
+  assert.match(promptFilterSource, /api\.runPromptLogRetention\(\)/)
+  assert.match(promptFilterSource, /DraftNumberInput min=\{0\} max=\{365\}/)
+  assert.match(apiSource, /\/prompt-filter\/retention/)
+  assert.equal(typeof zh.promptFilter.retention.title, 'string')
+  assert.equal(typeof zh.promptFilter.retention.lastRun, 'string')
+})

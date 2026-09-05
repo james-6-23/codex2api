@@ -2,7 +2,7 @@ import type { Dispatch, ReactNode, SetStateAction, TextareaHTMLAttributes } from
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, useParams, useSearchParams } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Activity, AlertTriangle, BookOpen, CheckCircle2, ChevronDown, ClipboardCheck, Copy, FileText, Gauge, GitBranch, HelpCircle, Layers, ListChecks, Network, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, Shield, ShieldAlert, Sparkles, Trash2, Users, Wand2, X } from 'lucide-react'
+import { Activity, AlertTriangle, BookOpen, CheckCircle2, ChevronDown, ClipboardCheck, Copy, FileText, Gauge, GitBranch, HelpCircle, Layers, ListChecks, Loader2, Network, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, Shield, ShieldAlert, Sparkles, Trash2, Users, Wand2, X } from 'lucide-react'
 import { AdminAPIError, api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
@@ -17,7 +17,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings, PromptLogRetention } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -3764,6 +3764,44 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
   const [reviewError, setReviewError] = useState<string | null>(null)
   const [incidentError, setIncidentError] = useState<string | null>(null)
   const [clearingSection, setClearingSection] = useState<PromptLogClearSection | null>(null)
+  const [retention, setRetention] = useState<PromptLogRetention | null>(null)
+  const [retentionDraft, setRetentionDraft] = useState<number>(7)
+  const [retentionSaving, setRetentionSaving] = useState(false)
+  const [retentionRunning, setRetentionRunning] = useState(false)
+  const loadRetention = useCallback(async () => {
+    try {
+      const next = await api.getPromptLogRetention()
+      setRetention(next)
+      setRetentionDraft(next.retention_days)
+      setRetentionRunning(next.running)
+    } catch {
+      /* 保留设置读取失败不影响日志页其它功能 */
+    }
+  }, [])
+  useEffect(() => {
+    void loadRetention()
+  }, [loadRetention])
+  const saveRetention = async () => {
+    setRetentionSaving(true)
+    try {
+      const next = await api.updatePromptLogRetention(retentionDraft)
+      setRetention(next)
+      showToast(t('promptFilter.retention.saved', { days: next.retention_days }))
+    } catch (err) {
+      showToast(`${t('promptFilter.retention.saveFailed')}: ${getErrorMessage(err)}`, 'error')
+    } finally {
+      setRetentionSaving(false)
+    }
+  }
+  const runRetentionNow = async () => {
+    try {
+      await api.runPromptLogRetention()
+      setRetentionRunning(true)
+      showToast(t('promptFilter.retention.started'))
+    } catch (err) {
+      showToast(`${t('promptFilter.retention.runFailed')}: ${getErrorMessage(err)}`, 'error')
+    }
+  }
   const [auditHealth, setAuditHealth] = useState<PromptPolicyAuditHealth | null>(null)
   const [auditHealthOpen, setAuditHealthOpen] = useState(false)
   const [auditHealthLoading, setAuditHealthLoading] = useState(false)
@@ -3815,6 +3853,27 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
       setReviewLoading(false)
     }
   }, [reviewFilters, reviewPage, reviewPageSize])
+
+  // 后台清理进行中时轮询状态，跑完后刷新日志计数。
+  useEffect(() => {
+    if (!retentionRunning) return
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await api.getPromptLogRetention()
+        setRetention(next)
+        if (!next.running) {
+          setRetentionRunning(false)
+          setLogPage(1)
+          setReviewPage(1)
+          await Promise.all([loadReviewLogs(1), loadLocalLogs(1)])
+        }
+      } catch {
+        /* ignore */
+      }
+    }, 2000)
+    return () => window.clearInterval(timer)
+  }, [retentionRunning, loadReviewLogs, loadLocalLogs])
+
 
   const loadIncidents = useCallback(async () => {
     setIncidentLoading(true)
@@ -3879,6 +3938,8 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
       }
 
       await api.clearPromptFilterLogs(section === 'review' ? { reviewed: true } : { source: 'local_filter' })
+      // 清空现已改为后台分批执行：先刷新一次，再轮询到清理结束后自动再刷新。
+      setRetentionRunning(true)
       // The two panels are projections of the same persisted rows. A reviewed
       // local-filter row appears in both, so either cleanup must refresh both
       // projections instead of leaving the other panel with stale records.
@@ -3925,6 +3986,40 @@ function LogsView({ onPromptLogsChanged }: { onPromptLogsChanged: () => Promise<
         </div>
 
         <div className="space-y-5">
+          <section className="rounded-xl border p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold">{t('promptFilter.retention.title')}</div>
+                <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.retention.description')}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {retention?.last_run_at
+                    ? t('promptFilter.retention.lastRun', {
+                        time: new Date(retention.last_run_at).toLocaleString(),
+                        logs: retention.last_deleted_logs,
+                        events: retention.last_deleted_events,
+                        sources: retention.last_deleted_sources,
+                        seconds: (retention.last_duration_ms / 1000).toFixed(1),
+                      })
+                    : t('promptFilter.retention.neverRun')}
+                  {retention?.last_error ? ` · ${t('promptFilter.retention.lastError', { error: retention.last_error })}` : ''}
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-muted-foreground">{t('promptFilter.retention.daysLabel')}</span>
+                <div className="w-24">
+                  <DraftNumberInput min={0} max={365} value={retentionDraft} onValueChange={(v) => setRetentionDraft(v)} />
+                </div>
+                <Button size="sm" variant="outline" onClick={() => void saveRetention()} disabled={retentionSaving || retention?.retention_days === retentionDraft}>
+                  {retentionSaving ? t('promptFilter.retention.saving') : t('common.save')}
+                </Button>
+                <Button size="sm" variant="outline" onClick={() => void runRetentionNow()} disabled={retentionRunning || clearingSection !== null || (retention?.retention_days ?? 0) <= 0}>
+                  {retentionRunning ? <Loader2 className="size-3.5 animate-spin" /> : <Trash2 className="size-3.5" />}
+                  {retentionRunning ? t('promptFilter.retention.running') : t('promptFilter.retention.runNow')}
+                </Button>
+              </div>
+            </div>
+          </section>
+
           <section className="rounded-xl border p-4">
             <div className="mb-3 flex items-start justify-between gap-3">
               <div>

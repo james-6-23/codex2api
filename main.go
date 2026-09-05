@@ -353,6 +353,8 @@ func main() {
 	adminHandler.StartWhamDailyUsageProbe(backgroundCtx)
 	// 官方模型价目轮询默认关闭；启用后只在网络解析完成后做一次短数据库写入。
 	adminHandler.StartOfficialPricingSync(backgroundCtx)
+	// Prompt 审核日志保留清理：默认保留 7 天，每小时分批清理过期行，CY 关联行不动。
+	adminHandler.StartPromptLogRetention(backgroundCtx)
 
 	// 后台定时同步 Codex CLI 模拟版本（启动即拉一次，之后按设置的间隔）；
 	// 出上游新版本门槛时无需发版即可跟进。开关/间隔在设置页可调，
