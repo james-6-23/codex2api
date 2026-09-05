@@ -104,8 +104,10 @@ jobs:
         include:
           - name: proxy-a-g
           - name: proxy-h-z
-          - name: admin
-          - name: database
+          - name: admin-a-l
+          - name: admin-m-z
+          - name: database-a-p
+          - name: database-other
           - name: promptfilter
           - name: rest
     steps:
@@ -120,9 +122,9 @@ jobs:
       - name: Create frontend dist placeholder
         run: mkdir -p frontend/dist && touch frontend/dist/placeholder
 
-      # 重包各占一台 2 核 runner,避免互相抢核。分片大小见 go-race-packages.sh:
-      # 测试建库走 SQLite schema 模板(database.PrepareSQLiteSchemaTemplate)后,
-      # admin/database 整包 -race 都在 1 分钟量级;proxy 是最重的包,按测试名首字母拆两片。
+      # 重包各占一台 2 核 runner,避免 admin/database/proxy/promptfilter 互相抢核。
+      # admin/database 按测试名首字母再拆两片:整包 -race 在 2 核 runner 上
+      # 会撞 go test 的 12m 超时。database 的第二片用 -skip 接住所有剩余测试。
       - name: Run Go tests with race detector
         run: |
           set -euo pipefail

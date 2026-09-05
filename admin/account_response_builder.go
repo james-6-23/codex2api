@@ -129,8 +129,28 @@ func (h *Handler) buildAccountResponse(
 	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
+	sessionCapacityEnabled := false
+	sessionCapacityMax := int64(0)
+	sessionCapacityIdleTTLSeconds := int64(0)
+	sessionCapacityCurrent := int64(0)
 	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
+		sessionCapacityEnabled = row.GetCredentialBool(auth.SessionCapacityEnabledCredentialKey)
+		if configured, ok := row.GetCredentialInt64(auth.SessionCapacityMaxCredentialKey); ok {
+			sessionCapacityMax = configured
+		}
+		if sessionCapacityMax <= 0 {
+			sessionCapacityMax = auth.DefaultSessionCapacityMax
+		}
+		if configured, ok := row.GetCredentialInt64(auth.SessionCapacityIdleTTLSecondsKey); ok {
+			sessionCapacityIdleTTLSeconds = configured
+		}
+		if sessionCapacityIdleTTLSeconds <= 0 {
+			sessionCapacityIdleTTLSeconds = auth.DefaultSessionCapacityIdleTTLSeconds
+		}
+		if sessionCapacityEnabled && runtimeAccount != nil {
+			sessionCapacityCurrent = h.store.AccountSessionCount(row.ID, time.Now())
+		}
 	}
 	// Claude Code 指纹收敛模式 + 绑定时区,仅 Claude OAuth 账号暴露。
 	claudeFingerprintMode := ""
@@ -178,6 +198,17 @@ func (h *Handler) buildAccountResponse(
 	tokenWorkspaceID := openaiidentity.NormalizeWorkspaceID(row.GetCredential("workspace_id"))
 	workspaceIDOverride := openaiidentity.WorkspaceOverrideFromHeaders(headers)
 	effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(tokenWorkspaceID, headers)
+	codexInstallationID := ""
+	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
+		identityAccount := &auth.Account{
+			CodexInstallationID: row.GetCredential(database.CodexInstallationIDCredentialKey),
+			CustomHeaders:       headers,
+		}
+		codexInstallationID = identityAccount.EffectiveCodexInstallationID()
+		if codexInstallationID == "" && runtimeAccount != nil {
+			codexInstallationID = runtimeAccount.EffectiveCodexInstallationID()
+		}
+	}
 	if includeDetails {
 		modelMapping = row.GetCredential("model_mapping")
 		if isClaudeAccount {
@@ -198,75 +229,80 @@ func (h *Handler) buildAccountResponse(
 		allowedAPIKeyIDs = row.GetCredentialInt64Slice("allowed_api_key_ids")
 	}
 	resp := accountResponse{
-		DetailLoaded:             includeDetails,
-		ID:                       row.ID,
-		Name:                     row.Name,
-		Email:                    email,
-		EmailDomain:              accountEmailDomain(email),
-		ChatGPTAccountID:         row.GetCredential("account_id"),
-		TokenWorkspaceID:         tokenWorkspaceID,
-		WorkspaceIDOverride:      workspaceIDOverride,
-		EffectiveWorkspaceID:     effectiveWorkspaceID,
-		PlanType:                 planType,
-		SubscriptionExpiresAt:    row.GetCredential("subscription_expires_at"),
-		Status:                   row.Status,
-		ErrorMessage:             row.ErrorMessage,
-		ATOnly:                   !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
-		CreditEnabled:            row.CreditEnabled,
-		CreditSkipUsageWindow:    row.CreditSkipUsageWindow,
-		SkipWarmTier:             row.SkipWarmTier,
-		AccountType:              row.Type,
-		AccessTokenType:          accountAccessTokenType(row),
-		OpenAIResponsesAPI:       isOpenAIResponsesAccount,
-		GrokAPI:                  isGrokAccount,
-		AntigravityAPI:           isAntigravityAccount,
-		ClaudeAPI:                isClaudeAccount,
-		AntigravityAuthKind:      antigravityAuthKind,
-		AgentIdentity:            isAgentIdentityCredentialRow(row),
-		GrokAuthKind:             grokAuthKind,
-		GrokPlan:                 grokPlan,
-		GrokBilling:              grokBilling,
-		AvatarURL:                row.GetCredential("avatar_url"),
-		VerifiedEmail:            row.GetCredentialBool("verified_email"),
-		ProjectID:                row.GetCredential("project_id"),
-		AntigravityQuota:         antigravityQuota,
-		AntigravityPermissions:   antigravityPermissions,
-		AntigravitySyncWarning:   row.GetCredential("antigravity_sync_warning"),
-		BaseURL:                  baseURL,
-		BalanceQueryURL:          balanceQueryURL,
-		Models:                   row.GetCredentialStringSlice("models"),
-		ModelMapping:             modelMapping,
-		CodexClientMetadataMode:  codexClientMetadataMode,
-		CodexFingerprintMode:     codexFingerprintMode,
-		ClaudeFingerprintMode:    claudeFingerprintMode,
-		ClaudeUserAgent:          claudeUserAgent,
-		ClaudeClientPlatform:     string(claudeClientPolicy.Platform),
-		ClaudeVersionPolicy:      string(claudeClientPolicy.VersionPolicy),
-		ClaudeClientVersion:      claudeClientPolicy.ClientVersion,
-		ClaudeClientPlatformOverride: claudeClientPlatformOverride,
-		ClaudeVersionPolicyOverride:  claudeVersionPolicyOverride,
-		ClaudeClientVersionOverride:  claudeClientVersionOverride,
-		Timezone:                 accountTimezone,
-		CustomHeaders:            customHeaders,
-		ProxyURL:                 row.ProxyURL,
-		Enabled:                  row.Enabled,
-		Locked:                   row.Locked,
-		AllowedAPIKeyIDs:         allowedAPIKeyIDs,
-		Tags:                     append([]string(nil), row.Tags...),
-		Note:                     row.Note,
-		ScoreBiasOverride:        nullableInt64Pointer(row.ScoreBiasOverride),
-		ScoreBiasEffective:       effectiveScoreBias(planType, row.ScoreBiasOverride),
-		BaseConcurrencyOverride:  nullableInt64Pointer(row.BaseConcurrencyOverride),
-		BaseConcurrencyEffective: effectiveBaseConcurrency(row.BaseConcurrencyOverride, int64(h.store.GetMaxConcurrency())),
-		CreatedAt:                row.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:                row.UpdatedAt.Format(time.RFC3339),
-		CodexUsageUpdatedAt:      row.GetCredential("codex_usage_updated_at"),
-		Codex5HUsageUpdatedAt:    row.GetCredential("codex_5h_usage_updated_at"),
-		ClaudeUsageProbeAt:       row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
-		ClaudeUsageProbeError:    row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
-		ClaudeUsageWindows:       parseClaudeUsageWindows(row.GetCredential(auth.ClaudeUsageWindowsCredentialKey)),
-		UsageLimitOverride:       ignoreUsageLimitStatusOverride,
-		UsageLimitEffective:      ignoreUsageLimitStatusEffective,
+		DetailLoaded:                  includeDetails,
+		ID:                            row.ID,
+		Name:                          row.Name,
+		Email:                         email,
+		EmailDomain:                   accountEmailDomain(email),
+		ChatGPTAccountID:              row.GetCredential("account_id"),
+		TokenWorkspaceID:              tokenWorkspaceID,
+		WorkspaceIDOverride:           workspaceIDOverride,
+		EffectiveWorkspaceID:          effectiveWorkspaceID,
+		PlanType:                      planType,
+		SubscriptionExpiresAt:         row.GetCredential("subscription_expires_at"),
+		Status:                        row.Status,
+		ErrorMessage:                  row.ErrorMessage,
+		ATOnly:                        !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		CreditEnabled:                 row.CreditEnabled,
+		CreditSkipUsageWindow:         row.CreditSkipUsageWindow,
+		SkipWarmTier:                  row.SkipWarmTier,
+		AccountType:                   row.Type,
+		AccessTokenType:               accountAccessTokenType(row),
+		OpenAIResponsesAPI:            isOpenAIResponsesAccount,
+		GrokAPI:                       isGrokAccount,
+		AntigravityAPI:                isAntigravityAccount,
+		ClaudeAPI:                     isClaudeAccount,
+		AntigravityAuthKind:           antigravityAuthKind,
+		AgentIdentity:                 isAgentIdentityCredentialRow(row),
+		GrokAuthKind:                  grokAuthKind,
+		GrokPlan:                      grokPlan,
+		GrokBilling:                   grokBilling,
+		AvatarURL:                     row.GetCredential("avatar_url"),
+		VerifiedEmail:                 row.GetCredentialBool("verified_email"),
+		ProjectID:                     row.GetCredential("project_id"),
+		AntigravityQuota:              antigravityQuota,
+		AntigravityPermissions:        antigravityPermissions,
+		AntigravitySyncWarning:        row.GetCredential("antigravity_sync_warning"),
+		BaseURL:                       baseURL,
+		BalanceQueryURL:               balanceQueryURL,
+		Models:                        row.GetCredentialStringSlice("models"),
+		ModelMapping:                  modelMapping,
+		CodexClientMetadataMode:       codexClientMetadataMode,
+		CodexFingerprintMode:          codexFingerprintMode,
+		CodexInstallationID:           codexInstallationID,
+		SessionCapacityEnabled:        sessionCapacityEnabled,
+		SessionCapacityMax:            sessionCapacityMax,
+		SessionCapacityIdleTTLSeconds: sessionCapacityIdleTTLSeconds,
+		SessionCapacityCurrent:        sessionCapacityCurrent,
+		ClaudeFingerprintMode:         claudeFingerprintMode,
+		ClaudeUserAgent:               claudeUserAgent,
+		ClaudeClientPlatform:          string(claudeClientPolicy.Platform),
+		ClaudeVersionPolicy:           string(claudeClientPolicy.VersionPolicy),
+		ClaudeClientVersion:           claudeClientPolicy.ClientVersion,
+		ClaudeClientPlatformOverride:  claudeClientPlatformOverride,
+		ClaudeVersionPolicyOverride:   claudeVersionPolicyOverride,
+		ClaudeClientVersionOverride:   claudeClientVersionOverride,
+		Timezone:                      accountTimezone,
+		CustomHeaders:                 customHeaders,
+		ProxyURL:                      row.ProxyURL,
+		Enabled:                       row.Enabled,
+		Locked:                        row.Locked,
+		AllowedAPIKeyIDs:              allowedAPIKeyIDs,
+		Tags:                          append([]string(nil), row.Tags...),
+		Note:                          row.Note,
+		ScoreBiasOverride:             nullableInt64Pointer(row.ScoreBiasOverride),
+		ScoreBiasEffective:            effectiveScoreBias(planType, row.ScoreBiasOverride),
+		BaseConcurrencyOverride:       nullableInt64Pointer(row.BaseConcurrencyOverride),
+		BaseConcurrencyEffective:      effectiveBaseConcurrency(row.BaseConcurrencyOverride, int64(h.store.GetMaxConcurrency())),
+		CreatedAt:                     row.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:                     row.UpdatedAt.Format(time.RFC3339),
+		CodexUsageUpdatedAt:           row.GetCredential("codex_usage_updated_at"),
+		Codex5HUsageUpdatedAt:         row.GetCredential("codex_5h_usage_updated_at"),
+		ClaudeUsageProbeAt:            row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
+		ClaudeUsageProbeError:         row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
+		ClaudeUsageWindows:            parseClaudeUsageWindows(row.GetCredential(auth.ClaudeUsageWindowsCredentialKey)),
+		UsageLimitOverride:            ignoreUsageLimitStatusOverride,
+		UsageLimitEffective:           ignoreUsageLimitStatusEffective,
 	}
 	// 凭据里只要存在 usage 窗口键(哪怕是空数组)就代表 OAuth usage 采样跑过。
 	resp.ClaudeUsageWindowsProbed = strings.TrimSpace(row.GetCredential(auth.ClaudeUsageWindowsCredentialKey)) != ""
@@ -337,26 +373,28 @@ func (h *Handler) buildAccountResponse(
 				SuccessRatePenalty:  debug.Breakdown.SuccessRatePenalty,
 			}
 		}
-		if usagePct, ok := runtimeAccount.GetUsagePercent7d(); ok {
-			resp.UsagePercent7d = &usagePct
-		}
-		if usagePct5h, ok := runtimeAccount.GetUsagePercent5h(); ok {
-			resp.UsagePercent5h = &usagePct5h
-		}
-		if usagePctSpark, ok := runtimeAccount.GetUsagePercentSpark(); ok {
-			resp.UsagePercentSpark = &usagePctSpark
-		}
-		if credits, ok := runtimeAccount.GetRateLimitResetCredits(); ok {
-			resp.RateLimitResetCredits = &credits
-		}
-		if applicable, ok := runtimeAccount.GetApplicableResetCredits(); ok {
-			resp.ApplicableResetCredits = &applicable
-		}
-		if balance, hasCredits, unlimited, overage, ok := runtimeAccount.GetCreditBalance(); ok {
-			resp.CreditsBalance = &balance
-			resp.CreditsHasCredits = &hasCredits
-			resp.CreditsUnlimited = &unlimited
-			resp.CreditsOverageLimitReached = &overage
+		if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
+			if usagePct, ok := runtimeAccount.GetUsagePercent7d(); ok {
+				resp.UsagePercent7d = &usagePct
+			}
+			if usagePct5h, ok := runtimeAccount.GetUsagePercent5h(); ok {
+				resp.UsagePercent5h = &usagePct5h
+			}
+			if usagePctSpark, ok := runtimeAccount.GetUsagePercentSpark(); ok {
+				resp.UsagePercentSpark = &usagePctSpark
+			}
+			if credits, ok := runtimeAccount.GetRateLimitResetCredits(); ok {
+				resp.RateLimitResetCredits = &credits
+			}
+			if applicable, ok := runtimeAccount.GetApplicableResetCredits(); ok {
+				resp.ApplicableResetCredits = &applicable
+			}
+			if balance, hasCredits, unlimited, overage, ok := runtimeAccount.GetCreditBalance(); ok {
+				resp.CreditsBalance = &balance
+				resp.CreditsHasCredits = &hasCredits
+				resp.CreditsUnlimited = &unlimited
+				resp.CreditsOverageLimitReached = &overage
+			}
 		}
 		if includeDetails {
 			if snapshot := runtimeAccount.GetDispatchCountSnapshot(); snapshot.Limit > 0 {
@@ -369,18 +407,20 @@ func (h *Handler) buildAccountResponse(
 				}
 			}
 		}
-		if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
-			resp.Reset5hAt = t.Format(time.RFC3339)
-		}
-		if t := runtimeAccount.GetReset7dAt(); !t.IsZero() {
-			resp.Reset7dAt = t.Format(time.RFC3339)
-		}
-		if t := runtimeAccount.GetResetSparkAt(); !t.IsZero() {
-			resp.ResetSparkAt = t.Format(time.RFC3339)
-		}
-		if sec := runtimeAccount.GetWindow7dSeconds(); sec > 0 {
-			resp.Window7dSeconds = &sec
-			resp.Window7dKind = runtimeAccount.Window7dKind()
+		if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
+			if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
+				resp.Reset5hAt = t.Format(time.RFC3339)
+			}
+			if t := runtimeAccount.GetReset7dAt(); !t.IsZero() {
+				resp.Reset7dAt = t.Format(time.RFC3339)
+			}
+			if t := runtimeAccount.GetResetSparkAt(); !t.IsZero() {
+				resp.ResetSparkAt = t.Format(time.RFC3339)
+			}
+			if sec := runtimeAccount.GetWindow7dSeconds(); sec > 0 {
+				resp.Window7dSeconds = &sec
+				resp.Window7dKind = runtimeAccount.Window7dKind()
+			}
 		}
 		if t := runtimeAccount.GetLastUsedAt(); !t.IsZero() {
 			resp.LastUsedAt = t.Format(time.RFC3339)

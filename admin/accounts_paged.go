@@ -745,14 +745,16 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 						item.GrokPlanCategory = resolved.Key
 					}
 				}
-				if runtimeSnapshot.UsagePercent5hValid {
-					item.UsagePercent5h, item.UsagePercent5hOK = runtimeSnapshot.UsagePercent5h, true
-				}
-				if runtimeSnapshot.UsagePercent7dValid {
-					item.UsagePercent7d, item.UsagePercent7dOK = runtimeSnapshot.UsagePercent7d, true
-				}
-				if runtimeSnapshot.UsagePercentSparkValid {
-					item.UsagePercentSpark, item.UsagePercentSparkOK = runtimeSnapshot.UsagePercentSpark, true
+				if !isOpenAIResponses && !isGrok && !isClaude {
+					if runtimeSnapshot.UsagePercent5hValid {
+						item.UsagePercent5h, item.UsagePercent5hOK = runtimeSnapshot.UsagePercent5h, true
+					}
+					if runtimeSnapshot.UsagePercent7dValid {
+						item.UsagePercent7d, item.UsagePercent7dOK = runtimeSnapshot.UsagePercent7d, true
+					}
+					if runtimeSnapshot.UsagePercentSparkValid {
+						item.UsagePercentSpark, item.UsagePercentSparkOK = runtimeSnapshot.UsagePercentSpark, true
+					}
 				}
 				item.HealthTier = runtimeSnapshot.HealthTier
 				item.DispatchScore = runtimeSnapshot.DispatchScore
@@ -763,10 +765,12 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 				item.ActiveRequests = runtimeSnapshot.ActiveRequests
 				item.OccupiedRequests = runtimeSnapshot.OccupiedRequests
 				item.DynamicConcurrency = runtimeSnapshot.DynamicConcurrencyLimit
-				item.Reset5hAt = runtimeSnapshot.Reset5hAt
-				item.Reset7dAt = runtimeSnapshot.Reset7dAt
-				item.ResetSparkAt = runtimeSnapshot.ResetSparkAt
-				item.Window7dSeconds = runtimeSnapshot.Window7dSeconds
+				if !isOpenAIResponses && !isGrok && !isClaude {
+					item.Reset5hAt = runtimeSnapshot.Reset5hAt
+					item.Reset7dAt = runtimeSnapshot.Reset7dAt
+					item.ResetSparkAt = runtimeSnapshot.ResetSparkAt
+					item.Window7dSeconds = runtimeSnapshot.Window7dSeconds
+				}
 				if runtimeSnapshot.CooldownReason != "" {
 					item.CooldownReason = runtimeSnapshot.CooldownReason
 					item.CooldownUntil = runtimeSnapshot.CooldownUntil

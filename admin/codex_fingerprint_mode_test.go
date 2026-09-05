@@ -147,9 +147,9 @@ func TestAccountResponseOmitsCodexFingerprintModeForRelayAccounts(t *testing.T) 
 	gin.SetMode(gin.TestMode)
 	db := newTestAdminDB(t)
 	accountID, err := db.InsertAccountWithCredentials(context.Background(), "relay", map[string]interface{}{
-		"upstream_type": auth.UpstreamOpenAIResponses,
-		"base_url":      "https://relay.example.com",
-		"api_key":       "relay-token",
+		"upstream_type":                        auth.UpstreamOpenAIResponses,
+		"base_url":                             "https://relay.example.com",
+		"api_key":                              "relay-token",
 		auth.CodexFingerprintModeCredentialKey: auth.CodexFingerprintModeFull,
 	}, "")
 	if err != nil {
@@ -242,12 +242,12 @@ func TestNewCodexAccountCredentialsStampsDefaultFingerprintMode(t *testing.T) {
 	seed := tokenCredentialSeed{refreshToken: "rt-stamp"}
 
 	// 默认 off：不写入键，与升级前行为完全一致。
-	if _, ok := handler.newCodexAccountCredentials(seed)[auth.CodexFingerprintModeCredentialKey]; ok {
+	if _, ok := handler.newCodexAccountCredentials(&seed)[auth.CodexFingerprintModeCredentialKey]; ok {
 		t.Fatal("默认 off 时不应写入 codex_fingerprint_mode 键")
 	}
 
 	store.SetCodexFingerprintDefaultMode(auth.CodexFingerprintModeSession)
-	credentials := handler.newCodexAccountCredentials(seed)
+	credentials := handler.newCodexAccountCredentials(&seed)
 	if got := credentials[auth.CodexFingerprintModeCredentialKey]; got != auth.CodexFingerprintModeSession {
 		t.Fatalf("credential = %v, want %q", got, auth.CodexFingerprintModeSession)
 	}

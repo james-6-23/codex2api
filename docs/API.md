@@ -1412,6 +1412,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 - `model`: 按模型过滤
 - `endpoint`: 按端点过滤
 - `api_key_id`: 按 API 密钥 ID 过滤
+- `q`: 模糊搜索错误、模型、端点、账号、NewAPI 用户、客户端 IP、客户端 User-Agent 或 API Key
 - `fast`: true/false (是否 fast 服务)
 - `stream`: true/false (是否流式)
 
@@ -1427,6 +1428,7 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
       "api_key_id": 3,
       "api_key_name": "Team A",
       "api_key_masked": "sk-t****...****1234",
+      "client_user_agent": "Codex Desktop/0.149.0-alpha.4.3 (Windows 10.0.26200; x86_64)",
       "endpoint": "/v1/chat/completions",
       "model": "gpt-5.5",
       "status_code": 200,

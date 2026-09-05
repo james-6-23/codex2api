@@ -2,17 +2,24 @@ package admin
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 )
 
 const promptRiskHistoryGuardrail = "画像只统计本地 warn/block 与上游 CY；影子审计和普通命中不再抬高风险。画像不会单独封禁当前请求，只控制可自动失效的模型复核豁免；达到阈值或再次出现 CY 时立即恢复同步审核。"
+const promptAccountStatusGuardrail = "账号状态仅记录会话窗口与已验证的 NewAPI 用户关联，不计算风险分、不参与审核、锁定或封号。"
 
 const promptRiskProfileListTimeout = 20 * time.Second
 
@@ -27,6 +34,8 @@ type promptRiskProfilesResponse struct {
 
 type promptRiskProfileDetailResponse struct {
 	Profile             *database.PromptRiskProfile           `json:"profile"`
+	SessionLimit        *promptRiskSessionLimitResponse       `json:"session_limit,omitempty"`
+	SessionWindows      []promptRiskSessionWindowResponse     `json:"session_windows"`
 	Events              []*database.PromptRiskEvent           `json:"events"`
 	TrustEvents         []*database.PromptRiskTrustEvent      `json:"trust_events"`
 	AdaptiveReviewBasis promptRiskAdaptiveReviewBasisResponse `json:"adaptive_review_basis"`
@@ -38,6 +47,38 @@ type promptRiskProfileDetailResponse struct {
 	TrustEventPageSize  int                                   `json:"trust_event_page_size"`
 	ScoringVersion      string                                `json:"scoring_version"`
 	Guardrail           string                                `json:"guardrail"`
+}
+
+type promptRiskSessionLimitResponse struct {
+	Mode                string `json:"mode"`
+	Limit               int    `json:"limit"`
+	WindowSeconds       int    `json:"window_seconds"`
+	EffectiveEnabled    bool   `json:"effective_enabled"`
+	EffectiveLimit      int    `json:"effective_limit"`
+	EffectiveWindow     int    `json:"effective_window_seconds"`
+	GlobalEnabled       bool   `json:"global_enabled"`
+	GlobalLimit         int    `json:"global_limit"`
+	GlobalWindowSeconds int    `json:"global_window_seconds"`
+	Source              string `json:"source"`
+}
+
+type promptRiskSessionLimitUpdateRequest struct {
+	Mode          string `json:"mode"`
+	Limit         int    `json:"limit"`
+	WindowSeconds int    `json:"window_seconds"`
+}
+
+type promptRiskSessionWindowResponse struct {
+	SessionHash      string     `json:"session_hash"`
+	CreatedAt        *time.Time `json:"created_at,omitempty"`
+	ExpiresAt        time.Time  `json:"expires_at"`
+	RemainingSeconds int64      `json:"remaining_seconds"`
+	AccountID        int64      `json:"account_id,omitempty"`
+	AccountName      string     `json:"account_name,omitempty"`
+	Model            string     `json:"model,omitempty"`
+	ReasoningEffort  string     `json:"reasoning_effort,omitempty"`
+	ClientUserAgent  string     `json:"client_user_agent,omitempty"`
+	PromptPreview    string     `json:"prompt_preview,omitempty"`
 }
 
 type promptRiskAdaptiveReviewBasisResponse struct {
@@ -93,11 +134,17 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 	if profiles == nil {
 		profiles = []*database.PromptRiskProfile{}
 	}
-	h.attachPromptRiskTrustPolicies(ctx, profiles)
-	h.attachPromptConversationLocks(ctx, profiles)
+	accountStatus := strings.TrimSpace(c.Query("subject_type")) == database.PromptRiskSubjectAccountStatus
+	guardrail := promptRiskHistoryGuardrail
+	if accountStatus {
+		guardrail = promptAccountStatusGuardrail
+	} else {
+		h.attachPromptRiskTrustPolicies(ctx, profiles)
+		h.attachPromptConversationLocks(ctx, profiles)
+	}
 	c.JSON(http.StatusOK, promptRiskProfilesResponse{
 		Profiles: profiles, Total: total, Page: page, PageSize: pageSize,
-		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: promptRiskHistoryGuardrail,
+		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: guardrail,
 	})
 }
 
@@ -160,12 +207,171 @@ func (h *Handler) GetPromptRiskProfile(c *gin.Context) {
 		return
 	}
 	adaptiveBasis := buildPromptRiskAdaptiveReviewBasis(profile, basis, adaptive, reviewEnabled, now)
+	sessionLimit := h.promptRiskSessionLimitResponse(profile)
+	sessionWindows := h.promptRiskSessionWindows(ctx, profile, now)
 	c.JSON(http.StatusOK, promptRiskProfileDetailResponse{
-		Profile: profile, Events: events, TrustEvents: trustEvents, AdaptiveReviewBasis: adaptiveBasis,
+		Profile: profile, SessionLimit: sessionLimit, SessionWindows: sessionWindows, Events: events, TrustEvents: trustEvents, AdaptiveReviewBasis: adaptiveBasis,
 		EventTotal: total, EventPage: eventPage, EventPageSize: eventPageSize,
 		TrustEventTotal: trustEventTotal, TrustEventPage: trustEventPage, TrustEventPageSize: trustEventPageSize,
 		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: promptRiskHistoryGuardrail,
 	})
+}
+
+func (h *Handler) promptRiskSessionWindows(ctx context.Context, profile *database.PromptRiskProfile, now time.Time) []promptRiskSessionWindowResponse {
+	items := make([]promptRiskSessionWindowResponse, 0)
+	if h == nil || h.cache == nil || profile == nil || profile.SubjectType != database.PromptRiskSubjectNewAPIUser {
+		return items
+	}
+	subject := cache.PromptSessionLimitSubject(profile.Platform, profile.NewAPIUserID)
+	if subject == "" {
+		return items
+	}
+	raw, found, err := h.cache.GetRuntime(ctx, cache.PromptSessionLimitRuntimeNamespace, subject)
+	if err != nil || !found {
+		return items
+	}
+	state := cache.PromptSessionLimitState{}
+	if json.Unmarshal(raw, &state) != nil {
+		return items
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	for sessionHash, expiresAt := range state.Sessions {
+		sessionHash = strings.TrimSpace(sessionHash)
+		if sessionHash == "" || !expiresAt.After(now) {
+			continue
+		}
+		detail := state.Details[sessionHash]
+		remaining := int64((expiresAt.Sub(now) + time.Second - 1) / time.Second)
+		item := promptRiskSessionWindowResponse{
+			SessionHash: sessionHash, ExpiresAt: expiresAt.UTC(), RemainingSeconds: remaining,
+			AccountID: detail.AccountID, Model: strings.TrimSpace(detail.Model), ReasoningEffort: strings.TrimSpace(detail.ReasoningEffort),
+			ClientUserAgent: strings.TrimSpace(detail.ClientUserAgent), PromptPreview: strings.TrimSpace(detail.PromptPreview),
+		}
+		if !detail.CreatedAt.IsZero() {
+			createdAt := detail.CreatedAt.UTC()
+			item.CreatedAt = &createdAt
+		}
+		if detail.AccountID > 0 && h.store != nil {
+			if account := h.store.FindByID(detail.AccountID); account != nil {
+				item.AccountName = strings.TrimSpace(account.Email)
+			}
+		}
+		items = append(items, item)
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].CreatedAt != nil && items[j].CreatedAt != nil && !items[i].CreatedAt.Equal(*items[j].CreatedAt) {
+			return items[i].CreatedAt.After(*items[j].CreatedAt)
+		}
+		return items[i].ExpiresAt.Before(items[j].ExpiresAt)
+	})
+	return items
+}
+
+func (h *Handler) promptRiskSessionLimitResponse(profile *database.PromptRiskProfile) *promptRiskSessionLimitResponse {
+	if profile == nil || profile.SubjectType != database.PromptRiskSubjectNewAPIUser || strings.TrimSpace(profile.NewAPIUserID) == "" {
+		return nil
+	}
+	risk := promptfilter.DefaultAdvancedConfig().Risk
+	if h.store != nil {
+		risk = promptfilter.NormalizeAdvancedConfig(h.store.GetPromptFilterConfig().Advanced).Risk
+	}
+	result := &promptRiskSessionLimitResponse{
+		Mode:                "inherit",
+		EffectiveEnabled:    risk.SessionCreationLimitEnabled,
+		EffectiveLimit:      risk.SessionCreationLimit,
+		EffectiveWindow:     risk.SessionCreationLimitWindowSeconds,
+		GlobalEnabled:       risk.SessionCreationLimitEnabled,
+		GlobalLimit:         risk.SessionCreationLimit,
+		GlobalWindowSeconds: risk.SessionCreationLimitWindowSeconds,
+		Source:              "global",
+	}
+	if h.store == nil {
+		return result
+	}
+	if override, ok := h.store.GetPromptSessionLimitOverride(profile.Platform, profile.NewAPIUserID); ok {
+		result.Mode = override.Mode
+		result.Limit = override.Limit
+		result.WindowSeconds = override.WindowSeconds
+		result.Source = "user"
+		if override.Mode == database.PromptSessionLimitModeOff {
+			result.EffectiveEnabled = false
+			result.EffectiveLimit = 0
+			result.EffectiveWindow = 0
+		} else {
+			result.EffectiveEnabled = true
+			result.EffectiveLimit = override.Limit
+			result.EffectiveWindow = override.WindowSeconds
+		}
+	}
+	return result
+}
+
+// UpdatePromptRiskProfileSessionLimit configures a verified NewAPI person's
+// session creation policy. inherit deletes the override, custom takes priority
+// over the global Prompt setting, and off explicitly exempts this person.
+func (h *Handler) UpdatePromptRiskProfileSessionLimit(c *gin.Context) {
+	subjectType := strings.TrimSpace(c.Param("subject_type"))
+	subjectKey := strings.TrimSpace(c.Param("subject_key"))
+	if subjectType != database.PromptRiskSubjectNewAPIUser || subjectKey == "" {
+		writeError(c, http.StatusBadRequest, "只有 NewAPI 用户画像可以单独配置会话限制")
+		return
+	}
+	var req promptRiskSessionLimitUpdateRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	req.Mode = strings.ToLower(strings.TrimSpace(req.Mode))
+	if req.Mode != "inherit" && req.Mode != database.PromptSessionLimitModeCustom && req.Mode != database.PromptSessionLimitModeOff {
+		writeError(c, http.StatusBadRequest, "会话限制模式必须是 inherit、custom 或 off")
+		return
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+	profile, err := h.db.GetPromptRiskProfile(ctx, subjectType, subjectKey)
+	if errors.Is(err, sql.ErrNoRows) {
+		writeError(c, http.StatusNotFound, "风险画像不存在")
+		return
+	}
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	platform := strings.ToLower(strings.TrimSpace(profile.Platform))
+	userID := strings.TrimSpace(profile.NewAPIUserID)
+	if platform == "" || userID == "" {
+		writeError(c, http.StatusBadRequest, "该画像缺少已验证的 NewAPI 用户身份")
+		return
+	}
+	if req.Mode == "inherit" {
+		if err := h.db.DeletePromptSessionLimitOverride(ctx, platform, userID); err != nil {
+			writeInternalError(c, err)
+			return
+		}
+		if h.store != nil {
+			h.store.DeletePromptSessionLimitOverride(platform, userID)
+		}
+	} else {
+		item, err := h.db.UpsertPromptSessionLimitOverride(ctx, database.PromptSessionLimitOverride{
+			Platform: platform, NewAPIUserID: userID, Mode: req.Mode,
+			Limit: req.Limit, WindowSeconds: req.WindowSeconds,
+		})
+		if err != nil {
+			if errors.Is(err, database.ErrInvalidPromptSessionLimitOverride) {
+				writeError(c, http.StatusBadRequest, err.Error())
+			} else {
+				log.Printf("保存用户会话限制失败: %v", err)
+				writeError(c, http.StatusInternalServerError, "保存会话限制失败，请稍后重试")
+			}
+			return
+		}
+		if h.store != nil {
+			h.store.ApplyPromptSessionLimitOverride(*item)
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"session_limit": h.promptRiskSessionLimitResponse(profile)})
 }
 
 func buildPromptRiskAdaptiveReviewBasis(profile *database.PromptRiskProfile, basis database.PromptRiskAdaptiveReviewBasis, adaptive promptfilter.AdaptiveReviewConfig, reviewEnabled bool, now time.Time) promptRiskAdaptiveReviewBasisResponse {

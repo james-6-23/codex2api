@@ -626,7 +626,7 @@ func parseMemoryStageOnePrompt(text string) (string, bool) {
 }
 
 func parseApprovalReassessmentPrompt(text string, envelope RequestEnvelope) (string, bool) {
-	if !approvalReassessmentModel(envelope) {
+	if !envelope.approvalSurfaceOK || !approvalReassessmentModel(envelope) {
 		return "", false
 	}
 	text = strings.TrimSpace(text)

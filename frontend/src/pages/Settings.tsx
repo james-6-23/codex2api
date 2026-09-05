@@ -2068,6 +2068,10 @@ export default function Settings() {
     scheduler_mode: 'round_robin',
     affinity_mode: 'bounded',
     session_affinity_spread: false,
+    session_window_balance_enabled: false,
+    passive_internal_models_enabled: false,
+    codex_unlinked_account_fallback_enabled: false,
+    codex_unlinked_account_fallback_seconds: 300,
     session_slot_buffer_enabled: false,
     session_slot_buffer_seconds: 10,
     grok_affinity_mode: 'strict',
@@ -5012,6 +5016,54 @@ export default function Settings() {
                         value={settingsForm.scheduler_mode}
                         onChange={(value) => autoSaveStringField('scheduler_mode', value)}
                         options={schedulerModeOptions}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.sessionWindowBalance')} description={t('settings.sessionWindowBalanceDesc')} layout="switch">
+                      <Switch
+                        checked={settingsForm.session_window_balance_enabled}
+                        onCheckedChange={(checked) => autoSaveBooleanField('session_window_balance_enabled', checked)}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.passiveInternalModels')} description={t('settings.passiveInternalModelsDesc')} layout="switch">
+                      <Switch
+                        checked={settingsForm.passive_internal_models_enabled}
+                        onCheckedChange={(checked) => autoSaveBooleanField('passive_internal_models_enabled', checked)}
+                      />
+                    </SettingField>
+                    <SettingField
+                      label={t('settings.codexUnlinkedAccountFallback')}
+                      description={t('settings.codexUnlinkedAccountFallbackDesc')}
+                      layout="switch"
+                    >
+                      <Switch
+                        checked={settingsForm.codex_unlinked_account_fallback_enabled}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_unlinked_account_fallback_enabled', checked)}
+                      />
+                    </SettingField>
+                    <SettingField
+                      label={t('settings.codexUnlinkedAccountFallbackSeconds')}
+                      description={t('settings.codexUnlinkedAccountFallbackSecondsDesc')}
+                    >
+                      <Input
+                        aria-label={t('settings.codexUnlinkedAccountFallbackSeconds')}
+                        type="number"
+                        min={1}
+                        max={3600}
+                        step={1}
+                        value={settingsForm.codex_unlinked_account_fallback_seconds}
+                        disabled={!settingsForm.codex_unlinked_account_fallback_enabled}
+                        onChange={(event) => {
+                          const value = Number(event.target.value)
+                          setSettingsForm((current) => ({
+                            ...current,
+                            codex_unlinked_account_fallback_seconds: Number.isFinite(value) ? value : 300,
+                          }))
+                        }}
+                        onBlur={(event) => {
+                          const value = Math.max(1, Math.min(3600, Number(event.target.value) || 300))
+                          setSettingsForm((current) => ({ ...current, codex_unlinked_account_fallback_seconds: value }))
+                          void autoSaveSettingsPatch({ codex_unlinked_account_fallback_seconds: value })
+                        }}
                       />
                     </SettingField>
                   </div>

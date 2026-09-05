@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -9,13 +10,103 @@ import (
 	"testing"
 	"time"
 
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
+func TestPromptRiskSessionLimitSeparatesValidationAndDatabaseErrors(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "session-limit-errors.db")
+	db, err := database.New("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.UpsertPromptRiskIdentities(t.Context(), []database.PromptRiskIdentityInput{{Platform: "newapi", ExternalUserID: "42"}}); err != nil {
+		t.Fatal(err)
+	}
+	profiles, _, err := db.ListPromptRiskProfiles(t.Context(), database.PromptRiskProfileQuery{SubjectType: database.PromptRiskSubjectNewAPIUser})
+	if err != nil || len(profiles) != 1 {
+		t.Fatalf("profiles=%#v err=%v", profiles, err)
+	}
+	handler := &Handler{db: db}
+	for _, scenario := range []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{"valid", `{"mode":"custom","limit":3,"window_seconds":3600}`, http.StatusOK},
+		{"invalid", `{"mode":"custom","limit":0,"window_seconds":59}`, http.StatusBadRequest},
+		{"database_failure", `{"mode":"custom","limit":3,"window_seconds":3600}`, http.StatusInternalServerError},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			if scenario.status == http.StatusInternalServerError {
+				connection, err := sql.Open("sqlite", path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer connection.Close()
+				if _, err := connection.ExecContext(t.Context(), `CREATE TRIGGER fail_override BEFORE INSERT ON prompt_session_limit_overrides
+					BEGIN SELECT RAISE(FAIL, 'forced override write failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Params = gin.Params{{Key: "subject_type", Value: database.PromptRiskSubjectNewAPIUser}, {Key: "subject_key", Value: profiles[0].SubjectKey}}
+			ctx.Request = httptest.NewRequest(http.MethodPut, "/session-limit", strings.NewReader(scenario.body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			handler.UpdatePromptRiskProfileSessionLimit(ctx)
+			if recorder.Code != scenario.status || strings.Contains(recorder.Body.String(), "forced override write failure") {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
+	}
+}
+
 func TestPromptRiskProfileListTimeoutAllowsProductionAggregation(t *testing.T) {
 	if promptRiskProfileListTimeout < 10*time.Second {
 		t.Fatalf("prompt risk profile list timeout = %s, want at least 10s for production aggregation", promptRiskProfileListTimeout)
+	}
+}
+
+func TestPromptRiskSessionWindowsReturnsOnlyCurrentlyActiveUserWindows(t *testing.T) {
+	runtimeCache := cache.NewMemory(1)
+	defer runtimeCache.Close()
+	now := time.Now().UTC().Truncate(time.Second)
+	createdAt := now.Add(-10 * time.Minute)
+	state := cache.PromptSessionLimitState{
+		Version: 2,
+		Sessions: map[string]time.Time{
+			"active-hash":  now.Add(20 * time.Minute),
+			"expired-hash": now.Add(-time.Second),
+		},
+		Details: map[string]cache.PromptSessionWindowDetail{
+			"active-hash":  {CreatedAt: createdAt, AccountID: 73, Model: "gpt-5.6-sol", ReasoningEffort: "high", ClientUserAgent: "codex_cli_rs/0.128.0", PromptPreview: "hello active window"},
+			"expired-hash": {CreatedAt: now.Add(-time.Hour), AccountID: 74},
+		},
+	}
+	raw, err := json.Marshal(state)
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	subject := cache.PromptSessionLimitSubject("NEWAPI", "user-42")
+	if err := runtimeCache.SetRuntime(t.Context(), cache.PromptSessionLimitRuntimeNamespace, subject, raw, time.Hour); err != nil {
+		t.Fatalf("SetRuntime: %v", err)
+	}
+	h := &Handler{cache: runtimeCache}
+	items := h.promptRiskSessionWindows(t.Context(), &database.PromptRiskProfile{
+		SubjectType: database.PromptRiskSubjectNewAPIUser, Platform: "newapi", NewAPIUserID: "user-42",
+	}, now)
+	if len(items) != 1 {
+		t.Fatalf("active windows = %#v, want one item", items)
+	}
+	item := items[0]
+	if item.SessionHash != "active-hash" || item.CreatedAt == nil || !item.CreatedAt.Equal(createdAt) || item.AccountID != 73 || item.Model != "gpt-5.6-sol" || item.ReasoningEffort != "high" || item.ClientUserAgent != "codex_cli_rs/0.128.0" || item.PromptPreview != "hello active window" {
+		t.Fatalf("active item = %#v", item)
+	}
+	if item.RemainingSeconds < 1199 || item.RemainingSeconds > 1200 {
+		t.Fatalf("remaining seconds = %d, want about 1200", item.RemainingSeconds)
 	}
 }
 

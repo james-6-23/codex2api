@@ -119,11 +119,15 @@ func (a *Account) SparkDispatchUsageLimited() bool {
 	return a.sparkUsageExhaustedLocked(now)
 }
 
-func (a *Account) dispatchableForPolicy(policy DispatchPolicy) bool {
+func (a *Account) dispatchableForPolicy(policy DispatchPolicy, traces ...*SelectionTrace) bool {
 	if policy == DispatchPolicySpark {
-		return a.SparkDispatchEligible()
+		eligible := a.SparkDispatchEligible()
+		if !eligible {
+			selectionTrace(traces).Reject("spark_account_unavailable")
+		}
+		return eligible
 	}
-	return a.IsAvailable()
+	return a.IsAvailable(traces...)
 }
 
 func (a *Account) dispatchableForPolicyLocked(now time.Time, policy DispatchPolicy) bool {

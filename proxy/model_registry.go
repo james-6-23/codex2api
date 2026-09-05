@@ -571,8 +571,6 @@ func isAllowedUpstreamCodexModel(id string) bool {
 	if dash := strings.IndexByte(version, '-'); dash >= 0 {
 		version = version[:dash]
 	}
-	// 版本号可能只有大版本（gpt-6-astra、gpt-6），没有小数点时 minor 视为 0，
-	// 不能因为缺少 ".x" 就把新一代型号拒之门外。
 	parts := strings.Split(version, ".")
 	major, err := strconv.Atoi(parts[0])
 	if err != nil {
@@ -581,6 +579,9 @@ func isAllowedUpstreamCodexModel(id string) bool {
 		// 以数字开头却解析不出的（gpt-4o 这类旧世代写法）仍按退役拒绝；
 		// 标点开头（gpt-.foo / gpt-_foo）不是任何已知命名，同样拒绝。
 		return version != "" && version[0] >= 'a' && version[0] <= 'z'
+	}
+	if len(parts) < 2 {
+		return id == "gpt-6-astra"
 	}
 	minor := 0
 	if len(parts) >= 2 {

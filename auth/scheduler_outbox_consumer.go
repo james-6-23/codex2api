@@ -325,11 +325,10 @@ func (s *Store) applySchedulerOutboxEvent(ctx context.Context, event database.Sc
 	case database.SchedulerEntityProxy:
 		return s.ReloadProxyPool()
 	case database.SchedulerEntitySettings:
-		// Settings are already applied synchronously by the instance handling the
-		// admin request. Cross-instance engine/settings pickup is handled by the
-		// persisted scheduler-engine setting when that field is present; unknown
-		// settings events are safe no-ops for older schemas.
-		return s.reloadSchedulerEngineSetting(ctx)
+		// The instance handling the admin request applies settings synchronously;
+		// every other replica must rebuild the same runtime policy snapshot from
+		// the durable row when it consumes this event.
+		return s.reloadSchedulerSettings(ctx)
 	default:
 		return nil
 	}
@@ -461,8 +460,33 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 		return
 	}
 
+	sessionCapacityEnabled, _, _ := src.SessionCapacityConfig()
+	sessionCapacityMax := normalizeSessionCapacityMax(src.SessionCapacityMax)
+	sessionCapacityIdleTTLSeconds := normalizeSessionCapacityIdleTTLSeconds(src.SessionCapacityIdleTTLSeconds)
+	dst.mu.RLock()
+	sessionCapacityChanged := dst.SessionCapacityEnabled != sessionCapacityEnabled ||
+		normalizeSessionCapacityMax(dst.SessionCapacityMax) != sessionCapacityMax ||
+		normalizeSessionCapacityIdleTTLSeconds(dst.SessionCapacityIdleTTLSeconds) != sessionCapacityIdleTTLSeconds
+	dst.mu.RUnlock()
+	sessionCapacityApplied := false
+	if sessionCapacityChanged {
+		// Apply this while dst still has its old provider/configuration. In
+		// particular, disabling capacity while changing to a relay account must
+		// hydrate the old persisted windows before clearing their reverse keys.
+		sessionCapacityApplied = s.ApplyAccountSessionCapacity(dst.DBID, sessionCapacityEnabled, sessionCapacityMax, sessionCapacityIdleTTLSeconds)
+	}
+
 	dst.mu.Lock()
 	identityChanged := dst.CredentialGeneration != src.CredentialGeneration
+	antigravityHardFenceChanged := dst.AntigravityHardBlocked != src.AntigravityHardBlocked ||
+		dst.AntigravityHardBlockReason != src.AntigravityHardBlockReason
+	if sessionCapacityChanged && !sessionCapacityApplied {
+		// Direct unit callers may pass an Account that is not registered in the
+		// Store. Production reloads always take the Apply path above.
+		dst.SessionCapacityEnabled = sessionCapacityEnabled
+		dst.SessionCapacityMax = sessionCapacityMax
+		dst.SessionCapacityIdleTTLSeconds = sessionCapacityIdleTTLSeconds
+	}
 	// Routing sub-pools only need invalidation when membership-relevant fields
 	// move; status/cooldown/usage churn stays live through the shared Account
 	// pointers (retainUnavailable). Without this gate, every 429-driven
@@ -482,13 +506,20 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.ProxyURL = src.ProxyURL
 	dst.CustomHeaders = cloneStringMap(src.CustomHeaders)
 	dst.UpstreamType = src.UpstreamType
+	dst.AntigravityProjectID = src.AntigravityProjectID
+	dst.AntigravityHardBlocked = src.AntigravityHardBlocked
+	dst.AntigravityHardBlockReason = src.AntigravityHardBlockReason
 	dst.BaseURL = src.BaseURL
 	dst.APIKey = src.APIKey
 	dst.Models = cloneStringSlice(src.Models)
 	dst.ModelMapping = src.ModelMapping
 	dst.CodexClientMetadataMode = src.CodexClientMetadataMode
 	dst.CodexFingerprintMode = src.CodexFingerprintMode
+	dst.CodexInstallationID = src.CodexInstallationID
 	dst.ClaudeFingerprintMode = src.ClaudeFingerprintMode
+	dst.ClaudeClientPlatformOverride = src.ClaudeClientPlatformOverride
+	dst.ClaudeVersionPolicyOverride = src.ClaudeVersionPolicyOverride
+	dst.ClaudeClientVersionOverride = src.ClaudeClientVersionOverride
 	dst.claudeSessionWindow = src.claudeSessionWindow
 	dst.CodexAuthMode = src.CodexAuthMode
 	dst.AgentRuntimeID = src.AgentRuntimeID
@@ -555,11 +586,14 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 	dst.ModelCooldownSecondsOverride = cloneIntPtr(src.ModelCooldownSecondsOverride)
 	dst.ModelCooldownBackoffOverride = cloneBoolPtr(src.ModelCooldownBackoffOverride)
 	dst.SubscriptionExpiresAt = src.SubscriptionExpiresAt
+	if identityChanged || antigravityHardFenceChanged ||
+		(src.AntigravityHardBlocked && src.PermanentRefreshFailures >= permanentRefreshFailureTerminalLimit) {
+		dst.PermanentRefreshFailures = src.PermanentRefreshFailures
+	}
 	if identityChanged {
 		dst.HealthTier = src.HealthTier
 		dst.SuccessStreak = 0
 		dst.FailureStreak = 0
-		dst.PermanentRefreshFailures = 0
 		dst.LastFailureKind = ""
 	}
 	dst.recomputeEffectiveIgnoreUsageLimitStatus(s.IgnoreUsageLimitStatus())
@@ -683,17 +717,24 @@ func (s *Store) reloadAccountGroupRoutingByID(ctx context.Context, groupID int64
 	return nil
 }
 
-// reloadSchedulerEngineSetting is completed by the persisted setting layer.
-// Keeping it as a method now makes settings events forward-compatible with a
-// rolling deployment where older replicas do not know the new column yet.
-func (s *Store) reloadSchedulerEngineSetting(ctx context.Context) error {
-	if strings.TrimSpace(os.Getenv("CODEX_SCHEDULER_ENGINE")) != "" {
+// reloadSchedulerSettings publishes the settings that directly affect account
+// selection and Claude request admission. CODEX_SCHEDULER_ENGINE overrides only
+// the engine choice; it must not suppress unrelated persisted settings.
+func (s *Store) reloadSchedulerSettings(ctx context.Context) error {
+	if s == nil || s.db == nil {
 		return nil
 	}
 	settings, err := s.db.GetSystemSettings(ctx)
 	if err != nil || settings == nil {
 		return err
 	}
-	s.SetSchedulerEngine(settings.SchedulerEngine)
+	if strings.TrimSpace(os.Getenv("CODEX_SCHEDULER_ENGINE")) == "" {
+		s.SetSchedulerEngine(settings.SchedulerEngine)
+	}
+	s.SetSessionWindowBalanceEnabled(settings.SessionWindowBalanceEnabled)
+	s.SetPassiveInternalModelsEnabled(settings.PassiveInternalModelsEnabled)
+	s.SetCodexUnlinkedAccountFallbackEnabled(settings.CodexUnlinkedAccountFallbackEnabled)
+	s.SetCodexUnlinkedAccountFallbackSeconds(database.NormalizeCodexUnlinkedAccountFallbackSeconds(settings.CodexUnlinkedAccountFallbackSeconds))
+	applyClaudeConfigToStore(s, settings.ClaudeConfig)
 	return nil
 }

@@ -1056,6 +1056,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/page-stats", h.GetAccountPageStats)
 	api.GET("/accounts/live", h.GetAccountLiveState)
 	api.GET("/accounts/:id", h.GetAccount)
+	api.GET("/accounts/:id/sessions", h.GetAccountSessions)
+	api.DELETE("/accounts/:id/sessions", h.DeleteAccountSessions)
 	api.POST("/accounts", h.AddAccount)
 	api.POST("/accounts/at", h.AddATAccount)
 	api.POST("/accounts/codex/agent-identity", h.ImportCodexAgentIdentity)
@@ -1106,6 +1108,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/sub2api/preview", h.PreviewSub2APIAccounts)
 	api.POST("/accounts/sub2api/import", h.ImportFromSub2API)
 	api.PATCH("/accounts/:id/models", h.UpdateAccountModels)
+	api.POST("/accounts/batch-models", h.BatchUpdateAccountModels)
 	api.POST("/accounts/:id/models/sync-upstream", h.SyncAccountUpstreamModels)
 	api.POST("/accounts/:id/models/probe", h.ProbeAccountModels)
 	api.PATCH("/accounts/:id/scheduler", h.UpdateAccountScheduler)
@@ -1208,6 +1211,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-policy/incidents/:incident_id", h.GetPromptPolicyIncident)
 	api.GET("/prompt-policy/risk-profiles", h.ListPromptRiskProfiles)
 	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
+	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/session-limit", h.UpdatePromptRiskProfileSessionLimit)
 	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.UpsertPromptRiskTrustPolicy)
 	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
 	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)
@@ -1579,6 +1583,7 @@ type accountResponse struct {
 	ModelMapping                  string                      `json:"model_mapping,omitempty"`
 	CodexClientMetadataMode       string                      `json:"codex_client_metadata_mode,omitempty"`
 	CodexFingerprintMode          string                      `json:"codex_fingerprint_mode,omitempty"`
+	CodexInstallationID           string                      `json:"codex_installation_id,omitempty"`
 	ClaudeFingerprintMode         string                      `json:"claude_fingerprint_mode,omitempty"`
 	ClaudeUserAgent               string                      `json:"claude_user_agent,omitempty"`
 	ClaudeClientPlatform          string                      `json:"claude_client_platform,omitempty"`
@@ -1609,6 +1614,10 @@ type accountResponse struct {
 	ActiveRequests                int64                       `json:"active_requests"`
 	OccupiedRequests              int64                       `json:"occupied_requests"`
 	SessionSlotBufferEnabled      bool                        `json:"session_slot_buffer_enabled"`
+	SessionCapacityEnabled        bool                        `json:"session_capacity_enabled,omitempty"`
+	SessionCapacityMax            int64                       `json:"session_capacity_max,omitempty"`
+	SessionCapacityIdleTTLSeconds int64                       `json:"session_capacity_idle_ttl_seconds,omitempty"`
+	SessionCapacityCurrent        int64                       `json:"session_capacity_current,omitempty"`
 	TotalRequests                 int64                       `json:"total_requests"`
 	LastUsedAt                    string                      `json:"last_used_at"`
 	SuccessRequests               int64                       `json:"success_requests"`
@@ -1828,42 +1837,21 @@ func (h *Handler) ListAccounts(c *gin.Context) {
 	}
 
 	if view != "page" {
-		billing5hWindows := make(map[int64]time.Time)
-		billing7dWindows := make(map[int64]time.Time)
+		accountIDs := make([]int64, 0, len(accounts))
 		for i := range accounts {
-			acc, ok := accountMap[accounts[i].ID]
-			if !ok {
-				continue
-			}
-			if t := acc.GetReset5hAt(); !t.IsZero() {
-				billing5hWindows[accounts[i].ID] = t.Add(-5 * time.Hour)
-			}
-			if t := acc.GetReset7dAt(); !t.IsZero() {
-				// 长窗口起点 = reset - 真实周期。free/team 是月窗(约 30 天),
-				// 写死减 7 天会把起点算到未来,成本恒为 0 (issue #324)。
-				windowDur := 7 * 24 * time.Hour
-				if sec := acc.GetWindow7dSeconds(); sec > 0 {
-					windowDur = time.Duration(sec) * time.Second
-				}
-				billing7dWindows[accounts[i].ID] = t.Add(-windowDur)
-			}
+			accountIDs = append(accountIDs, accounts[i].ID)
 		}
 
-		billed5h, billingErr := h.db.GetAccountsBilledSince(ctx, billing5hWindows)
+		billedWindows, billingErr := h.db.GetAccountsBilledWindows(ctx, h.accountBillingWindows(accountIDs))
 		if billingErr != nil {
-			log.Printf("批量获取账号 5h 成本失败: %v", billingErr)
-			billed5h = nil
-		}
-		billed7d, billingErr := h.db.GetAccountsBilledSince(ctx, billing7dWindows)
-		if billingErr != nil {
-			log.Printf("批量获取账号 7d 成本失败: %v", billingErr)
-			billed7d = nil
+			log.Printf("批量获取账号额度窗口成本失败: %v", billingErr)
+			billedWindows = nil
 		}
 		for i := range accounts {
-			if billed, ok := billed5h[accounts[i].ID]; ok {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: accounts[i].ID, Kind: database.AccountBillingWindow5h}]; ok {
 				accounts[i].Billed5h = &billed
 			}
-			if billed, ok := billed7d[accounts[i].ID]; ok {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: accounts[i].ID, Kind: database.AccountBillingWindowLong}]; ok {
 				accounts[i].Billed7d = &billed
 			}
 		}
@@ -1905,6 +1893,19 @@ func (h *Handler) GetAccount(c *gin.Context) {
 		return
 	}
 
+	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
+	if (upstreamType == "" || strings.EqualFold(upstreamType, "codex")) && strings.TrimSpace(row.GetCredential(database.CodexInstallationIDCredentialKey)) == "" {
+		installationID, identityErr := h.db.EnsureCodexInstallationID(ctx, id)
+		if identityErr != nil {
+			writeInternalError(c, identityErr)
+			return
+		}
+		if row.Credentials == nil {
+			row.Credentials = make(map[string]interface{})
+		}
+		row.Credentials[database.CodexInstallationIDCredentialKey] = installationID
+	}
+
 	requestCounts, err := h.db.GetAccountRequestCountsByIDs(ctx, []int64{id})
 	if err != nil {
 		log.Printf("获取账号 %d 请求统计失败: %v", id, err)
@@ -1920,23 +1921,16 @@ func (h *Handler) GetAccount(c *gin.Context) {
 
 	runtimeAccount := h.store.FindByID(id)
 	resp := h.buildAccountResponse(row, runtimeAccount, requestCounts[id], usage5h[id], usage7d[id], true)
-	if runtimeAccount != nil {
-		if resetAt := runtimeAccount.GetReset5hAt(); !resetAt.IsZero() {
-			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-5*time.Hour)); billedErr == nil {
+	if runtimeAccount != nil && !runtimeAccount.IsRelayStyle() {
+		billedWindows, billedErr := h.db.GetAccountsBilledWindows(ctx, h.accountBillingWindows([]int64{id}))
+		if billedErr != nil {
+			log.Printf("获取账号 %d 额度窗口成本失败: %v", id, billedErr)
+		} else {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: id, Kind: database.AccountBillingWindow5h}]; ok {
 				resp.Billed5h = &billed
-			} else {
-				log.Printf("获取账号 %d 5h 成本失败: %v", id, billedErr)
 			}
-		}
-		if resetAt := runtimeAccount.GetReset7dAt(); !resetAt.IsZero() {
-			windowDuration := 7 * 24 * time.Hour
-			if seconds := runtimeAccount.GetWindow7dSeconds(); seconds > 0 {
-				windowDuration = time.Duration(seconds) * time.Second
-			}
-			if billed, billedErr := h.db.GetAccountBilledSince(ctx, id, resetAt.Add(-windowDuration)); billedErr == nil {
+			if billed, ok := billedWindows[database.AccountBillingWindowKey{AccountID: id, Kind: database.AccountBillingWindowLong}]; ok {
 				resp.Billed7d = &billed
-			} else {
-				log.Printf("获取账号 %d 长窗口成本失败: %v", id, billedErr)
 			}
 		}
 	}
@@ -2038,6 +2032,9 @@ type updateAccountSchedulerReq struct {
 	CustomHeaders           json.RawMessage `json:"custom_headers"`
 	CodexFingerprintMode    json.RawMessage `json:"codex_fingerprint_mode"`
 	ClaudeFingerprintMode   json.RawMessage `json:"claude_fingerprint_mode"`
+	SessionCapacityEnabled  json.RawMessage `json:"session_capacity_enabled"`
+	SessionCapacityMax      json.RawMessage `json:"session_capacity_max"`
+	SessionCapacityIdleTTL  json.RawMessage `json:"session_capacity_idle_ttl_seconds"`
 	ClaudeClientPlatform    json.RawMessage `json:"claude_client_platform"`
 	ClaudeVersionPolicy     json.RawMessage `json:"claude_version_policy"`
 	ClaudeClientVersion     json.RawMessage `json:"claude_client_version"`
@@ -2062,6 +2059,9 @@ type accountSchedulerUpdate struct {
 	CustomHeaders           optionalCustomHeaders
 	CodexFingerprintMode    database.OptionalString
 	ClaudeFingerprintMode   database.OptionalString
+	SessionCapacityEnabled  database.OptionalBool
+	SessionCapacityMax      database.OptionalNullInt64
+	SessionCapacityIdleTTL  database.OptionalNullInt64
 	ClaudeClientPlatform    database.OptionalString
 	ClaudeVersionPolicy     database.OptionalString
 	ClaudeClientVersion     database.OptionalString
@@ -2175,6 +2175,18 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
+	sessionCapacityEnabled, err := parseOptionalBoolField(req.SessionCapacityEnabled, "session_capacity_enabled")
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	sessionCapacityMax, err := parseOptionalIntegerField(req.SessionCapacityMax, "session_capacity_max", 1, 100000)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
+	sessionCapacityIdleTTL, err := parseOptionalIntegerField(req.SessionCapacityIdleTTL, "session_capacity_idle_ttl_seconds", auth.MinSessionCapacityIdleTTLSeconds, auth.MaxSessionCapacityIdleTTLSeconds)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	credentialUpdates := make(map[string]interface{})
 	if customHeaders.Set {
 		credentialUpdates["custom_headers"] = cloneCustomHeaders(customHeaders.Values)
@@ -2196,6 +2208,23 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	}
 	if timezoneField.Set {
 		credentialUpdates["timezone"] = strings.TrimSpace(timezoneField.Value)
+	}
+	if sessionCapacityEnabled.Set {
+		credentialUpdates[auth.SessionCapacityEnabledCredentialKey] = sessionCapacityEnabled.Value
+	}
+	if sessionCapacityMax.Set {
+		if sessionCapacityMax.Value.Valid {
+			credentialUpdates[auth.SessionCapacityMaxCredentialKey] = sessionCapacityMax.Value.Int64
+		} else {
+			credentialUpdates[auth.SessionCapacityMaxCredentialKey] = auth.DefaultSessionCapacityMax
+		}
+	}
+	if sessionCapacityIdleTTL.Set {
+		if sessionCapacityIdleTTL.Value.Valid {
+			credentialUpdates[auth.SessionCapacityIdleTTLSecondsKey] = sessionCapacityIdleTTL.Value.Int64
+		} else {
+			credentialUpdates[auth.SessionCapacityIdleTTLSecondsKey] = auth.DefaultSessionCapacityIdleTTLSeconds
+		}
 	}
 	if autoPause5hThreshold.Set {
 		credentialUpdates["auto_pause_5h_threshold"] = autoPause5hThreshold.Value
@@ -2256,6 +2285,9 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 		ClaudeVersionPolicy:     claudeVersionPolicy,
 		ClaudeClientVersion:     claudeClientVersion,
 		Timezone:                timezoneField,
+		SessionCapacityEnabled:  sessionCapacityEnabled,
+		SessionCapacityMax:      sessionCapacityMax,
+		SessionCapacityIdleTTL:  sessionCapacityIdleTTL,
 		CredentialUpdates:       credentialUpdates,
 	}, nil
 }
@@ -2333,7 +2365,10 @@ func (u accountSchedulerUpdate) hasChanges() bool {
 		u.ClaudeClientPlatform.Set ||
 		u.ClaudeVersionPolicy.Set ||
 		u.ClaudeClientVersion.Set ||
-		u.Timezone.Set
+		u.Timezone.Set ||
+		u.SessionCapacityEnabled.Set ||
+		u.SessionCapacityMax.Set ||
+		u.SessionCapacityIdleTTL.Set
 }
 
 func optionalBoolFromPtr(value *bool) database.OptionalBool {
@@ -2637,6 +2672,30 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.CodexFingerprintMode.Set {
 		h.store.ApplyAccountCodexFingerprintMode(id, update.CodexFingerprintMode.Value)
+	}
+	if update.SessionCapacityEnabled.Set || update.SessionCapacityMax.Set || update.SessionCapacityIdleTTL.Set {
+		account := h.store.FindByID(id)
+		if account != nil {
+			enabled, limit, idleTTL := account.SessionCapacityConfig()
+			if update.SessionCapacityEnabled.Set {
+				enabled = update.SessionCapacityEnabled.Value
+			}
+			if update.SessionCapacityMax.Set {
+				if update.SessionCapacityMax.Value.Valid {
+					limit = update.SessionCapacityMax.Value.Int64
+				} else {
+					limit = auth.DefaultSessionCapacityMax
+				}
+			}
+			if update.SessionCapacityIdleTTL.Set {
+				if update.SessionCapacityIdleTTL.Value.Valid {
+					idleTTL = time.Duration(update.SessionCapacityIdleTTL.Value.Int64) * time.Second
+				} else {
+					idleTTL = time.Duration(auth.DefaultSessionCapacityIdleTTLSeconds) * time.Second
+				}
+			}
+			h.store.ApplyAccountSessionCapacity(id, enabled, limit, int64(idleTTL/time.Second))
+		}
 	}
 }
 
@@ -3499,7 +3558,7 @@ func (h *Handler) AddAccount(c *gin.Context) {
 			}
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3598,7 +3657,7 @@ func (h *Handler) streamAddAccounts(c *gin.Context, req addAccountReq, seeds []t
 			}
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("批量添加账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3788,7 +3847,7 @@ func (h *Handler) AddATAccount(c *gin.Context) {
 			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -3916,7 +3975,7 @@ func (h *Handler) streamAddATAccounts(c *gin.Context, req addATAccountReq, token
 			seenATRoutes[routeKey] = true
 		}
 
-		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), req.ProxyURL)
+		id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), req.ProxyURL)
 		if err != nil {
 			log.Printf("添加 AT 账号 %d 失败: %v", i+1, err)
 			failCount++
@@ -4430,7 +4489,8 @@ func validateAccountModelsForAccount(account *auth.Account, models []string) err
 }
 
 // SyncAccountUpstreamModels 用账号自身凭据实时拉取上游模型清单，
-// 返回该账号真实可用的模型 slug 列表。账号白名单本身只读不落库，由管理端确认后再保存；
+// 返回该账号真实可用的模型 slug 列表。已有非空白名单会自动并入清单中
+// 缺少的新模型；空白名单代表“全部放行”，保持为空不落库。
 // 但清单里注册表尚不认识的模型会顺手学习进注册表（只增不改不删，与客户端刷新
 // 选单时的学习同一实现）：否则 Trusted Access for Cyber 这类只有个别账号才有的模型
 // 探测看得见、保存进白名单后 /v1/models 却不列、调用直接报模型不存在（issue #624）。
@@ -4473,7 +4533,12 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 			return
 		}
 		models = auth.NormalizeAccountModels(models)
-		c.JSON(http.StatusOK, gin.H{"models": models})
+		whitelist, added, mergeErr := h.store.MergeAccountModelsFromUpstream(c.Request.Context(), id, models)
+		if mergeErr != nil {
+			writeError(c, http.StatusInternalServerError, fmt.Sprintf("更新账号模型白名单失败: %s", mergeErr.Error()))
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"models": models, "whitelist": whitelist, "whitelist_added": added})
 		return
 	}
 	if account.IsOpenAIResponsesAPI() {
@@ -4500,7 +4565,12 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	} else if len(added) > 0 {
 		log.Printf("[账号 %d] 已从上游模型清单学习 %d 个新模型进注册表: %s", id, len(added), strings.Join(added, ", "))
 	}
-	c.JSON(http.StatusOK, gin.H{"models": models})
+	whitelist, added, mergeErr := h.store.MergeAccountModelsFromUpstream(c.Request.Context(), id, models)
+	if mergeErr != nil {
+		writeError(c, http.StatusInternalServerError, fmt.Sprintf("更新账号模型白名单失败: %s", mergeErr.Error()))
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"models": models, "whitelist": whitelist, "whitelist_added": added})
 }
 
 // importToken 导入时的统一 token 载体
@@ -5868,7 +5938,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(&seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -5892,7 +5962,7 @@ func (h *Handler) importAccountsCommon(c *gin.Context, tokens []importToken, set
 				}
 
 				insertCtx, insertCancel := context.WithTimeout(context.Background(), 5*time.Second)
-				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(seed), proxyURL)
+				id, err := h.db.InsertAccountWithCredentials(insertCtx, name, h.newCodexAccountCredentials(&seed), proxyURL)
 				insertCancel()
 
 				if err != nil {
@@ -6436,6 +6506,58 @@ func uniqueAccountIDs(ids []int64) []int64 {
 		result = append(result, id)
 	}
 	return result
+}
+
+type batchUpdateAccountModelsRequest struct {
+	IDs    []int64  `json:"ids"`
+	Models []string `json:"models"`
+}
+
+// BatchUpdateAccountModels 批量替换 Codex OAuth 账号的模型白名单。
+func (h *Handler) BatchUpdateAccountModels(c *gin.Context) {
+	var req batchUpdateAccountModelsRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		writeError(c, http.StatusBadRequest, "请求格式错误")
+		return
+	}
+	ids := uniqueAccountIDs(req.IDs)
+	if len(ids) == 0 {
+		writeError(c, http.StatusBadRequest, "请提供要更新的账号 ID 列表")
+		return
+	}
+	models := auth.NormalizeAccountModels(req.Models)
+	if len(models) > 200 {
+		writeError(c, http.StatusBadRequest, "模型数量不能超过 200")
+		return
+	}
+	for _, model := range models {
+		if err := security.ValidateModelName(model); err != nil {
+			writeError(c, http.StatusBadRequest, fmt.Sprintf("模型名称无效: %s", model))
+			return
+		}
+	}
+	timeout := 15*time.Second + time.Duration(len(ids))*50*time.Millisecond
+	if timeout > 60*time.Second {
+		timeout = 60 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), timeout)
+	defer cancel()
+	var success, failed int64
+	for _, id := range ids {
+		account := h.store.FindByID(id)
+		if account == nil || account.IsRelayStyle() {
+			failed++
+			continue
+		}
+		if err := h.db.UpdateCredentials(ctx, id, map[string]interface{}{"models": models}); err != nil {
+			failed++
+			continue
+		}
+		h.store.ApplyAccountModels(id, models)
+		h.db.InsertAccountEventAsync(id, "updated", "batch_account_models")
+		success++
+	}
+	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("已更新 %d 个账号，失败 %d 个", success, failed), "success": success, "failed": failed, "models": models})
 }
 
 func (h *Handler) streamBatchDeleteAccounts(c *gin.Context, ids []int64) {
@@ -8198,10 +8320,22 @@ func (h *Handler) GetUsageLogs(c *gin.Context) {
 
 // ClearUsageLogs 清空所有使用日志
 func (h *Handler) ClearUsageLogs(c *gin.Context) {
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
+	// 清理前会把统计压缩进小时汇总表；大日志表上允许事务完整完成。
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Minute)
 	defer cancel()
 
-	if err := h.db.ClearUsageLogs(ctx); err != nil {
+	accountIDs := make([]int64, 0)
+	if h.store != nil {
+		accounts := h.store.Accounts()
+		accountIDs = make([]int64, 0, len(accounts))
+		for _, account := range accounts {
+			if account != nil {
+				accountIDs = append(accountIDs, account.ID())
+			}
+		}
+	}
+	billingWindows := h.accountBillingWindows(accountIDs)
+	if err := h.db.ClearUsageLogs(ctx, billingWindows...); err != nil {
 		writeInternalError(c, err)
 		return
 	}
@@ -8972,25 +9106,29 @@ type settingsResponse struct {
 	CodexSyncedCLIVersion               string `json:"codex_synced_cli_version"`
 	// CodexEffectiveCLIVersion 是当前实际用于出站 UA 的版本(内置常量与同步值取大),
 	// 供设置页"设为同步版本"按钮使用——同步值可能过期或为空,内置值才是下限。
-	CodexEffectiveCLIVersion       string `json:"codex_effective_cli_version"`
-	SchedulerMode                  string `json:"scheduler_mode"`
-	AffinityMode                   string `json:"affinity_mode"`
-	SessionAffinitySpread          bool   `json:"session_affinity_spread"`
-	SessionSlotBufferEnabled       bool   `json:"session_slot_buffer_enabled"`
-	SessionSlotBufferSeconds       int    `json:"session_slot_buffer_seconds"`
-	GrokAffinityMode               string `json:"grok_affinity_mode"`
-	GrokProbeEnabled               bool   `json:"grok_probe_enabled"`
-	GrokProbeIntervalMinutes       int    `json:"grok_probe_interval_minutes"`
-	GrokMaxRateLimitRetries        int    `json:"grok_max_rate_limit_retries"`
-	GrokFollowUpEffortEnabled      bool   `json:"grok_follow_up_effort_enabled"`
-	GrokFollowUpToolEffort         string `json:"grok_follow_up_tool_effort"`
-	GrokFollowUpSmallEffort        string `json:"grok_follow_up_small_effort"`
-	GrokQualityGuardEnabled        bool   `json:"grok_quality_guard_enabled"`
-	GrokQualityGuardMaxAttempts    int    `json:"grok_quality_guard_max_attempts"`
-	GrokQualityGuardHoldTimeoutSec int    `json:"grok_quality_guard_hold_timeout_sec"`
-	GrokQualityGuardOnExhausted    string `json:"grok_quality_guard_on_exhausted"`
-	GrokQualityGuardCooldownHours  int    `json:"grok_quality_guard_account_cooldown_hours"`
-	GrokOAuthClientID              string `json:"grok_oauth_client_id"`
+	CodexEffectiveCLIVersion            string `json:"codex_effective_cli_version"`
+	SchedulerMode                       string `json:"scheduler_mode"`
+	AffinityMode                        string `json:"affinity_mode"`
+	SessionAffinitySpread               bool   `json:"session_affinity_spread"`
+	SessionWindowBalanceEnabled         bool   `json:"session_window_balance_enabled"`
+	PassiveInternalModelsEnabled        bool   `json:"passive_internal_models_enabled"`
+	CodexUnlinkedAccountFallbackEnabled bool   `json:"codex_unlinked_account_fallback_enabled"`
+	CodexUnlinkedAccountFallbackSeconds int    `json:"codex_unlinked_account_fallback_seconds"`
+	SessionSlotBufferEnabled            bool   `json:"session_slot_buffer_enabled"`
+	SessionSlotBufferSeconds            int    `json:"session_slot_buffer_seconds"`
+	GrokAffinityMode                    string `json:"grok_affinity_mode"`
+	GrokProbeEnabled                    bool   `json:"grok_probe_enabled"`
+	GrokProbeIntervalMinutes            int    `json:"grok_probe_interval_minutes"`
+	GrokMaxRateLimitRetries             int    `json:"grok_max_rate_limit_retries"`
+	GrokFollowUpEffortEnabled           bool   `json:"grok_follow_up_effort_enabled"`
+	GrokFollowUpToolEffort              string `json:"grok_follow_up_tool_effort"`
+	GrokFollowUpSmallEffort             string `json:"grok_follow_up_small_effort"`
+	GrokQualityGuardEnabled             bool   `json:"grok_quality_guard_enabled"`
+	GrokQualityGuardMaxAttempts         int    `json:"grok_quality_guard_max_attempts"`
+	GrokQualityGuardHoldTimeoutSec      int    `json:"grok_quality_guard_hold_timeout_sec"`
+	GrokQualityGuardOnExhausted         string `json:"grok_quality_guard_on_exhausted"`
+	GrokQualityGuardCooldownHours       int    `json:"grok_quality_guard_account_cooldown_hours"`
+	GrokOAuthClientID                   string `json:"grok_oauth_client_id"`
 	// GrokOAuthClientIDEnvOverride 为 true 时，环境变量 GROK_OAUTH_CLIENT_ID 正压着上面这个设置，
 	// 前端据此提示「当前以环境变量为准」。GrokOAuthClientIDEffective 是实际生效值。
 	GrokOAuthClientIDEnvOverride bool   `json:"grok_oauth_client_id_env_override"`
@@ -9151,6 +9289,10 @@ type updateSettingsReq struct {
 	SchedulerMode                       *string                          `json:"scheduler_mode"`
 	AffinityMode                        *string                          `json:"affinity_mode"`
 	SessionAffinitySpread               *bool                            `json:"session_affinity_spread"`
+	SessionWindowBalanceEnabled         *bool                            `json:"session_window_balance_enabled"`
+	PassiveInternalModelsEnabled        *bool                            `json:"passive_internal_models_enabled"`
+	CodexUnlinkedAccountFallbackEnabled *bool                            `json:"codex_unlinked_account_fallback_enabled"`
+	CodexUnlinkedAccountFallbackSeconds *int                             `json:"codex_unlinked_account_fallback_seconds"`
 	SessionSlotBufferEnabled            *bool                            `json:"session_slot_buffer_enabled"`
 	SessionSlotBufferSeconds            *int                             `json:"session_slot_buffer_seconds"`
 	GrokAffinityMode                    *string                          `json:"grok_affinity_mode"`
@@ -9978,6 +10120,10 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
+		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
+		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
+		CodexUnlinkedAccountFallbackEnabled: h.store.CodexUnlinkedAccountFallbackEnabled(),
+		CodexUnlinkedAccountFallbackSeconds: h.store.CodexUnlinkedAccountFallbackSeconds(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),
@@ -10838,6 +10984,23 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		h.store.SetSessionAffinitySpread(*req.SessionAffinitySpread)
 		log.Printf("设置已更新: session_affinity_spread = %t", *req.SessionAffinitySpread)
 	}
+	if req.SessionWindowBalanceEnabled != nil {
+		h.store.SetSessionWindowBalanceEnabled(*req.SessionWindowBalanceEnabled)
+		log.Printf("设置已更新: session_window_balance_enabled = %t", *req.SessionWindowBalanceEnabled)
+	}
+	if req.PassiveInternalModelsEnabled != nil {
+		h.store.SetPassiveInternalModelsEnabled(*req.PassiveInternalModelsEnabled)
+		log.Printf("设置已更新: passive_internal_models_enabled = %t", *req.PassiveInternalModelsEnabled)
+	}
+	if req.CodexUnlinkedAccountFallbackEnabled != nil {
+		h.store.SetCodexUnlinkedAccountFallbackEnabled(*req.CodexUnlinkedAccountFallbackEnabled)
+		log.Printf("设置已更新: codex_unlinked_account_fallback_enabled = %t", *req.CodexUnlinkedAccountFallbackEnabled)
+	}
+	if req.CodexUnlinkedAccountFallbackSeconds != nil {
+		v := database.NormalizeCodexUnlinkedAccountFallbackSeconds(*req.CodexUnlinkedAccountFallbackSeconds)
+		h.store.SetCodexUnlinkedAccountFallbackSeconds(v)
+		log.Printf("设置已更新: codex_unlinked_account_fallback_seconds = %d", v)
+	}
 	if req.GrokAffinityMode != nil {
 		h.store.SetGrokAffinityMode(*req.GrokAffinityMode)
 		log.Printf("设置已更新: grok_affinity_mode = %s", *req.GrokAffinityMode)
@@ -11465,6 +11628,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
+		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
+		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
+		CodexUnlinkedAccountFallbackEnabled: h.store.CodexUnlinkedAccountFallbackEnabled(),
+		CodexUnlinkedAccountFallbackSeconds: h.store.CodexUnlinkedAccountFallbackSeconds(),
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
 		MaxRetries:                          h.store.GetMaxRetries(),
@@ -11777,6 +11944,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SchedulerMode:                       h.store.GetSchedulerMode(),
 		AffinityMode:                        h.store.GetAffinityMode(),
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
+		SessionWindowBalanceEnabled:         h.store.SessionWindowBalanceEnabled(),
+		PassiveInternalModelsEnabled:        h.store.PassiveInternalModelsEnabled(),
+		CodexUnlinkedAccountFallbackEnabled: h.store.CodexUnlinkedAccountFallbackEnabled(),
+		CodexUnlinkedAccountFallbackSeconds: h.store.CodexUnlinkedAccountFallbackSeconds(),
 		SessionSlotBufferEnabled:            h.store.SessionSlotBufferEnabled(),
 		SessionSlotBufferSeconds:            int(h.store.GetSessionSlotBuffer() / time.Second),
 		GrokAffinityMode:                    h.store.GetGrokAffinityMode(),

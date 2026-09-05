@@ -146,6 +146,75 @@ func TestAcquireAPIKeyConcurrencyInheritedByInternalChild(t *testing.T) {
 	}
 }
 
+func TestAcquireAPIKeyConcurrencyAllowsVerifiedPassiveGuardianAlongsideParent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &Handler{}
+	row := &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{MaxConcurrency: 1}}
+
+	parent, _ := testAPIKeyConcurrencyContext(row)
+	releaseParent, ok := handler.acquireAPIKeyConcurrency(parent)
+	if !ok || releaseParent == nil {
+		t.Fatalf("parent acquire ok=%v releaseNil=%v, want acquired", ok, releaseParent == nil)
+	}
+	defer releaseParent()
+
+	guardian, recorder := testAPIKeyConcurrencyContext(row)
+	setPassiveInternalAuthorization(guardian, true)
+	releaseGuardian, ok := handler.acquireAPIKeyConcurrency(guardian)
+	if !ok || releaseGuardian == nil {
+		t.Fatalf("verified Guardian acquire ok=%v releaseNil=%v, want one protected lease", ok, releaseGuardian == nil)
+	}
+	defer releaseGuardian()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("verified Guardian status = %d, want untouched 200", recorder.Code)
+	}
+	second, secondRecorder := testAPIKeyConcurrencyContext(row)
+	setPassiveInternalAuthorization(second, true)
+	if releaseSecond, secondOK := handler.acquireAPIKeyConcurrency(second); secondOK || releaseSecond != nil || secondRecorder.Code != http.StatusTooManyRequests {
+		t.Fatalf("second Guardian acquire ok=%v releaseNil=%v status=%d, want bounded 429", secondOK, releaseSecond == nil, secondRecorder.Code)
+	}
+}
+
+func TestAcquireAPIKeyWebSocketConcurrencyAllowsVerifiedPassiveGuardianAlongsideParent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := &Handler{}
+	row := &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{MaxConcurrency: 1}}
+
+	parent, _ := testAPIKeyConcurrencyContext(row)
+	releaseParent, ok := handler.acquireAPIKeyConcurrency(parent)
+	if !ok || releaseParent == nil {
+		t.Fatalf("parent acquire ok=%v releaseNil=%v, want acquired", ok, releaseParent == nil)
+	}
+	defer releaseParent()
+
+	guardian, _ := testAPIKeyConcurrencyContext(row)
+	setPassiveInternalAuthorization(guardian, true)
+	releaseGuardian, apiErr, ok := handler.acquireAPIKeyConcurrencyForWebSocket(guardian)
+	if !ok || releaseGuardian == nil || apiErr != nil {
+		t.Fatalf("verified Guardian WS acquire ok=%v releaseNil=%v err=%v, want one protected lease", ok, releaseGuardian == nil, apiErr)
+	}
+	defer releaseGuardian()
+	second, _ := testAPIKeyConcurrencyContext(row)
+	setPassiveInternalAuthorization(second, true)
+	if releaseSecond, secondErr, secondOK := handler.acquireAPIKeyConcurrencyForWebSocket(second); secondOK || releaseSecond != nil || secondErr == nil {
+		t.Fatalf("second Guardian WS acquire ok=%v releaseNil=%v err=%v, want bounded rejection", secondOK, releaseSecond == nil, secondErr)
+	}
+}
+
+func TestFieldClassifiedInternalRequestBypassesAPIKeyModelNameDrift(t *testing.T) {
+	row := &database.APIKeyRow{ID: 7, Limits: database.APIKeyLimits{ModelAllow: []string{"gpt-5.6-sol"}}}
+	internal, _ := testAPIKeyConcurrencyContext(row)
+	setPassiveInternalAuthorization(internal, true)
+	if status, message := (&Handler{}).enforceAPIKeyLimits(internal, "future-review-model"); status != 0 || message != "" {
+		t.Fatalf("field-classified internal model was rejected: status=%d message=%q", status, message)
+	}
+
+	ordinary, _ := testAPIKeyConcurrencyContext(row)
+	if status, _ := (&Handler{}).enforceAPIKeyLimits(ordinary, "future-review-model"); status != http.StatusForbidden {
+		t.Fatalf("ordinary unknown model status=%d, want 403", status)
+	}
+}
+
 func testAPIKeyConcurrencyContext(row *database.APIKeyRow) (*gin.Context, *httptest.ResponseRecorder) {
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)

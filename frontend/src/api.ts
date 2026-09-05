@@ -55,6 +55,7 @@ import type {
   AccountsPageResponse,
   AccountPageStatsResponse,
   AccountLiveStateResponse,
+  AccountSessionsResponse,
   ChartAggregation,
   CreateAccountResponse,
   CreateAPIKeyResponse,
@@ -132,6 +133,8 @@ import type {
   AccountOperationSelector,
   AccountHealthBarsResponse,
   BatchUpdateAccountsRequest,
+  BatchUpdateAccountModelsRequest,
+  BatchUpdateAccountModelsResponse,
   BackgroundUploadResponse,
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
@@ -841,12 +844,26 @@ export const api = {
     }>(`/accounts/${id}/usage/refresh`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getAccountSessions: (id: number, signal?: AbortSignal) =>
+    request<AccountSessionsResponse>(`/accounts/${id}/sessions`, { signal }),
+  releaseAccountSession: (id: number, sessionId?: string) =>
+    request<MessageResponse>(`/accounts/${id}/sessions${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`, { method: 'DELETE' }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),
-  // 拉取该账号真实的上游模型清单(slug 列表,不落库),供白名单编辑器合并使用。
+  batchUpdateAccountModels: (data: BatchUpdateAccountModelsRequest) =>
+    request<BatchUpdateAccountModelsResponse>('/accounts/batch-models', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  // 拉取该账号真实的上游模型清单；已有非空白名单会自动并入缺少的新模型，
+  // 空白名单保持“全部放行”语义。
   syncAccountModelsUpstream: (id: number) =>
-    request<{ models: string[] }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
+    request<{
+      models: string[]
+      whitelist?: string[]
+      whitelist_added?: string[]
+    }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
   // 用账号自身凭据并发探测系统文本模型(已排除 image),返回确认可用的模型及每个模型的判定明细。只读不落库。
   probeAccountModels: (id: number) =>
     request<{
@@ -1336,6 +1353,8 @@ export const api = {
 	},
 	getPromptRiskProfile: (subjectType: string, subjectKey: string, eventPage = 1, eventPageSize = 20, trustEventPage = 1, trustEventPageSize = 20) =>
 		request<import('./types').PromptRiskProfileDetailResponse>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}?event_page=${eventPage}&event_page_size=${eventPageSize}&trust_event_page=${trustEventPage}&trust_event_page_size=${trustEventPageSize}`),
+	updatePromptRiskProfileSessionLimit: (subjectType: string, subjectKey: string, data: { mode: import('./types').PromptRiskSessionLimitMode; limit: number; window_seconds: number }) =>
+		request<{ session_limit: import('./types').PromptRiskSessionLimitPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/session-limit`, { method: 'PUT', body: JSON.stringify(data) }),
 	upsertPromptRiskTrust: (subjectType: string, subjectKey: string, data: { duration_hours: number; risk_threshold: number; reason: string }) =>
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'PUT', body: JSON.stringify(data) }),
 	revokePromptRiskTrust: (subjectType: string, subjectKey: string) =>

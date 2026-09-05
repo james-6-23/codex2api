@@ -217,6 +217,11 @@ export interface AccountRow {
   model_mapping?: string
   codex_client_metadata_mode?: CodexClientMetadataMode
   codex_fingerprint_mode?: CodexFingerprintMode
+  codex_installation_id?: string
+  session_capacity_enabled?: boolean
+  session_capacity_max?: number
+  session_capacity_idle_ttl_seconds?: number
+  session_capacity_current?: number
   claude_fingerprint_mode?: 'preserve' | 'force' | ''
   claude_client_platform?: 'any' | 'claude_code_cli_only'
   claude_version_policy?: 'passthrough' | 'fixed' | 'minimum'
@@ -410,8 +415,43 @@ export interface AccountPageStatsResponse {
 }
 
 export interface AccountLiveStateResponse {
-  accounts: Record<string, { active_requests: number; occupied_requests: number }>
+  accounts: Record<string, {
+    active_requests: number
+    occupied_requests: number
+    session_capacity_current: number
+    session_capacity_max: number
+  }>
   session_slot_buffer_enabled: boolean
+}
+
+export interface AccountSessionOwner {
+  platform?: string
+  user_id?: string
+  user_name?: string
+  user_email?: string
+  api_key_id?: number
+  api_key_name?: string
+}
+
+export interface AccountSessionSnapshot {
+  session_id: string
+  last_seen: ISODateString
+  expires_at: ISODateString
+  remaining_seconds: number
+  owner?: AccountSessionOwner
+  related_request_count?: number
+  related_sources?: AccountSessionRelatedSource[]
+}
+
+export interface AccountSessionRelatedSource {
+  thread_source?: string
+  request_kind?: string
+  subagent_kind?: string
+  count: number
+}
+
+export interface AccountSessionsResponse {
+  sessions: AccountSessionSnapshot[]
 }
 
 export interface AccountsPageParams {
@@ -1311,12 +1351,22 @@ export interface UpdateAccountSchedulerRequest {
   scheduler_priority?: number | null
   custom_headers?: Record<string, string> | null
   codex_fingerprint_mode?: CodexFingerprintMode | null
+  session_capacity_enabled?: boolean
+  session_capacity_max?: number
+  session_capacity_idle_ttl_seconds?: number
   claude_fingerprint_mode?: 'preserve' | 'force' | '' | null
   claude_client_platform?: 'any' | 'claude_code_cli_only' | null
   claude_version_policy?: 'passthrough' | 'fixed' | 'minimum' | null
   claude_client_version?: string | null
   timezone?: string | null
 }
+
+export interface BatchUpdateAccountModelsRequest {
+  ids: number[]
+  models: string[]
+}
+
+export type BatchUpdateAccountModelsResponse = BatchUpdateGrokModelsResponse
 
 export interface BatchUpdateAccountsRequest extends UpdateAccountSchedulerRequest {
   ids?: number[]
@@ -1867,6 +1917,10 @@ export interface SystemSettings {
   scheduler_mode: string
   affinity_mode?: string
   session_affinity_spread?: boolean
+  session_window_balance_enabled?: boolean
+  passive_internal_models_enabled?: boolean
+  codex_unlinked_account_fallback_enabled?: boolean
+  codex_unlinked_account_fallback_seconds?: number
   session_slot_buffer_enabled: boolean
   session_slot_buffer_seconds: number
   grok_affinity_mode?: string
@@ -2222,7 +2276,7 @@ export interface PromptPolicyIncidentDetailResponse {
 	}
 }
 
-export type PromptRiskSubjectType = 'newapi_user' | 'session' | 'api_key' | 'client_ip' | 'upstream_account'
+export type PromptRiskSubjectType = 'newapi_user' | 'session' | 'api_key' | 'client_ip' | 'upstream_account' | 'account_status'
 export type PromptRiskLevel = 'low' | 'observed' | 'elevated' | 'high' | 'critical'
 
 export interface PromptRiskScoreBreakdown {
@@ -2322,6 +2376,10 @@ export interface PromptRiskProfile {
   api_key_masked?: string
   account_id?: number
   account_name?: string
+  account_email?: string
+  session_windows_24h?: number
+  session_unique_users?: number
+  session_windows_total?: number
   trust_policy?: PromptRiskTrustPolicy
   conversation_lock?: PromptConversationLock
 }
@@ -2400,6 +2458,8 @@ export interface PromptRiskProfilesResponse {
 
 export interface PromptRiskProfileDetailResponse {
   profile: PromptRiskProfile
+  session_limit?: PromptRiskSessionLimitPolicy
+  session_windows?: PromptRiskSessionWindow[]
   events: PromptRiskEvent[]
   trust_events: PromptRiskTrustEvent[]
   adaptive_review_basis: PromptRiskAdaptiveReviewBasis
@@ -2411,6 +2471,34 @@ export interface PromptRiskProfileDetailResponse {
   trust_event_page_size: number
   scoring_version: string
   guardrail: string
+}
+
+export interface PromptRiskSessionWindow {
+  session_hash: string
+  created_at?: ISODateString
+  expires_at: ISODateString
+  remaining_seconds: number
+  account_id?: number
+  account_name?: string
+  model?: string
+  reasoning_effort?: string
+  client_user_agent?: string
+  prompt_preview?: string
+}
+
+export type PromptRiskSessionLimitMode = 'inherit' | 'custom' | 'off'
+
+export interface PromptRiskSessionLimitPolicy {
+  mode: PromptRiskSessionLimitMode
+  limit: number
+  window_seconds: number
+  effective_enabled: boolean
+  effective_limit: number
+  effective_window_seconds: number
+  global_enabled: boolean
+  global_limit: number
+  global_window_seconds: number
+  source: 'global' | 'user' | string
 }
 
 export interface PromptFilterTestResponse {
@@ -3138,6 +3226,7 @@ export interface UsageLog {
   upstream_error_kind: string
 	error_message: string
 	prompt_policy_incident_id?: string
+	newapi_user_name?: string
 }
 
 export type UsageLogsResponse = ApiListResponse<'logs', UsageLog>

@@ -320,6 +320,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 				scheduler_mode TEXT DEFAULT 'round_robin',
 				affinity_mode TEXT DEFAULT 'bounded',
 				session_affinity_spread INTEGER DEFAULT 0,
+				session_window_balance_enabled INTEGER DEFAULT 0,
+				passive_internal_models_enabled INTEGER DEFAULT 0,
+				codex_unlinked_account_fallback_enabled INTEGER DEFAULT 0,
+				codex_unlinked_account_fallback_seconds INTEGER DEFAULT 300,
 				session_slot_buffer_enabled INTEGER DEFAULT 0,
 				session_slot_buffer_seconds INTEGER DEFAULT 10,
 				models_list_read_max_bytes INTEGER NOT NULL DEFAULT 8388608,
@@ -570,6 +574,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"usage_logs", "attempt_index", "INTEGER DEFAULT 0"},
 		{"usage_logs", "upstream_error_kind", "TEXT DEFAULT ''"},
 		{"usage_logs", "error_message", "TEXT DEFAULT ''"},
+		{"usage_logs", "newapi_user_name", "TEXT DEFAULT ''"},
 		{"usage_logs", "credential_generation", "INTEGER NOT NULL DEFAULT 0"},
 		{"system_settings", "continuous_retry_policy", "TEXT DEFAULT '{\"enabled\":false,\"catch_all\":false,\"categories\":[\"transport\",\"http_429\",\"http_5xx\",\"stream_error\"],\"status_codes\":[],\"error_codes\":[]}'"},
 		{"api_keys", "quota_limit", "REAL DEFAULT 0"},
@@ -729,6 +734,10 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "scheduler_mode", "TEXT DEFAULT 'round_robin'"},
 		{"system_settings", "affinity_mode", "TEXT DEFAULT 'bounded'"},
 		{"system_settings", "session_affinity_spread", "INTEGER DEFAULT 0"},
+		{"system_settings", "session_window_balance_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "passive_internal_models_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "codex_unlinked_account_fallback_enabled", "INTEGER DEFAULT 0"},
+		{"system_settings", "codex_unlinked_account_fallback_seconds", "INTEGER DEFAULT 300"},
 		{"system_settings", "session_slot_buffer_enabled", "INTEGER DEFAULT 0"},
 		{"system_settings", "session_slot_buffer_seconds", "INTEGER DEFAULT 10"},
 		{"system_settings", "models_list_read_max_bytes", "INTEGER NOT NULL DEFAULT 8388608"},
@@ -1135,6 +1144,21 @@ func (db *DB) getUsageStatsSQLite(ctx context.Context, rangeStart, rangeEnd time
 	); err != nil {
 		return nil, err
 	}
+	archived, err := db.archivedUsageSummaryForRange(ctx, rangeStart, rangeEnd, channel)
+	if err != nil {
+		return nil, fmt.Errorf("读取已清理用量汇总: %w", err)
+	}
+	stats.TodayRequests += archived.Requests
+	stats.TodayTokens += archived.Tokens
+	stats.TodayPrompt += archived.Prompt
+	stats.TodayCompletion += archived.Completion
+	stats.TodayCachedTokens += archived.Cached
+	stats.TodayAccountBilled += archived.AccountBilled
+	stats.TodayUserBilled += archived.UserBilled
+	todayCacheHitRequests += archived.CacheHits
+	todayErrors += archived.Errors
+	totalFirstTokenMs += archived.FirstTokenSum
+	totalFirstTokenSamples += archived.FirstTokenSamples
 
 	if stats.TodayRequests > 0 {
 		stats.ErrorRate = float64(todayErrors) / float64(stats.TodayRequests) * 100

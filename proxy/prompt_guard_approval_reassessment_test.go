@@ -193,6 +193,43 @@ func TestPromptGuardApprovalReassessmentWithoutSignedRequestedModelFailsClosed(t
 	}
 }
 
+func TestPromptGuardApprovalReassessmentUsesLocallyMappedRequestedModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newPromptGuardTestHandler(promptGuardTestConfig())
+	mappedBody := approvalReassessmentWireBody(t, approvalReassessmentWirePrompt(), "gpt-5.6-sol")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	cacheTrustedRequestedModel(c, "codex-auto-review")
+
+	got := handler.evaluatePromptGuard(c, mappedBody, mappedBody, "/v1/responses", "gpt-5.6-sol", promptfilter.TransportHTTP)
+	if got.Envelope.RequestedModel != "codex-auto-review" || got.Envelope.EffectiveModel != "gpt-5.6-sol" {
+		t.Fatalf("local model mapping attribution was lost: requested=%q effective=%q", got.Envelope.RequestedModel, got.Envelope.EffectiveModel)
+	}
+	if got.Decision.Action != promptfilter.ActionAllow || got.Decision.ApplicationPromptKind != "approval_reassessment" || got.Decision.StrikeEligible || len(got.Decision.Signals) != 0 {
+		t.Fatalf("direct mapped auto-review request recursively blocked: %+v", got.Decision)
+	}
+}
+
+func TestPromptGuardRequestedModelContextIsFrameLocal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler := newPromptGuardTestHandler(promptGuardTestConfig())
+	body := approvalReassessmentWireEvent(t, approvalReassessmentWirePrompt(), "gpt-5.6-sol")
+	c, _ := gin.CreateTestContext(httptest.NewRecorder())
+	c.Request = httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+
+	cacheTrustedRequestedModel(c, "codex-auto-review")
+	first := handler.evaluatePromptGuard(c, body, body, "/v1/responses", "gpt-5.6-sol", promptfilter.TransportWebSocket)
+	if first.Decision.ApplicationPromptKind != "approval_reassessment" {
+		t.Fatalf("first frame lost auto-review classification: %+v", first.Decision)
+	}
+
+	cacheTrustedRequestedModel(c, "gpt-5.6-sol")
+	second := handler.evaluatePromptGuard(c, body, body, "/v1/responses", "gpt-5.6-sol", promptfilter.TransportWebSocket)
+	if second.Decision.Action != promptfilter.ActionBlock || second.Decision.ApplicationPromptKind != "" || !second.Decision.StrikeEligible {
+		t.Fatalf("ordinary frame inherited prior auto-review model: %+v", second.Decision)
+	}
+}
+
 func TestPromptGuardApprovalReassessmentAuditsPlannedAction(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler := newPromptGuardTestHandler(promptGuardTestConfig())

@@ -13,12 +13,14 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
@@ -368,6 +370,9 @@ var codexAllowedForwardHeaders = []string{
 	"X-Codex-Turn-State",
 	"X-Codex-Turn-Metadata",
 	"X-Client-Request-Id",
+	"X-Codex-Parent-Thread-Id",
+	"X-OpenAI-Subagent",
+	"X-OpenAI-Memgen-Request",
 	"X-Codex-Beta-Features",
 	codexResponsesLiteHeader,
 	// DeviceCheck 设备认证头（上游 openai/codex#20619）。仅在下游真实 Codex
@@ -1233,26 +1238,47 @@ const downstreamAffinityHeader = "X-Codex2API-Affinity-Key"
 // dedicated downstream affinity header may only replace affinityID; it must
 // never change upstreamSeed or become an explicit upstream session.
 type requestSessionIdentity struct {
-	affinityID            string
-	upstreamSeed          string
-	explicitUpstreamID    string
-	hasDownstreamAffinity bool
-	hasRequestFingerprint bool
+	affinityID             string
+	upstreamSeed           string
+	explicitUpstreamID     string
+	stableIdentity         bool
+	hasDownstreamAffinity  bool
+	hasRequestFingerprint  bool
+	relatedToRoot          bool
+	ownsRootBinding        bool
+	relatedSource          auth.AccountSessionRelatedSource
+	relatedRequestID       string
+	forkSourceAffinityID   string
+	bypassWindowAccounting bool
+	protectedRelatedLease  bool
+	// unlinkedFallbackOnly marks a request with no verified root. Its normal
+	// affinity key must not be persisted or used for session-window accounting;
+	// the optional recent-account bridge is strictly request-local.
+	unlinkedFallbackOnly  bool
+	unlinkedFallbackScope string
+}
+
+const relatedSessionObservationContextKey = "related_session_observation_v1"
+
+type relatedSessionObservation struct {
+	Source    auth.AccountSessionRelatedSource
+	RequestID string
 }
 
 // ResolveSessionID 从下游请求提取或生成 session ID
 // 优先级：
 //  1. Header: X-Codex2API-Affinity-Key（仅本地使用，先哈希再参与绑定）
-//  2. Header: Session_id
-//  3. Header: Conversation_id
-//  4. Header: Idempotency-Key
-//  5. Header: X-Session-Id / X-Session-Affinity（opencode 等第三方客户端）
-//  6. Body:   prompt_cache_key
-//  7. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
+//  2. Native graph: headers or body client_metadata 的 root Session-Id
+//  3. Header: Session_id
+//  4. Header: Conversation_id
+//  5. Header: Idempotency-Key
+//  6. Header: X-Session-Id / X-Session-Affinity（opencode 等第三方客户端）
+//  7. Body:   prompt_cache_key
+//  8. Body:   内容派生种子（model+instructions+system+首条 user 消息，见
 //     deriveContentSessionSeed；带 previous_response_id 的续链请求跳过）
-//  8. 基于 Bearer API Key 的确定性 UUID
+//  9. 基于 Bearer API Key 的确定性 UUID
 //
-// 第 7 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
+// 第 8 级让"同一段对话的多轮请求"收敛到同一账号粘性键：单 API Key 供多终端
 // 用户共用时，粘性粒度从"整个 Key 挤一个账号"细化为"每段对话独立粘定"。
 // 专用 affinity header 永不参与上游 session ID / prompt_cache_key，也不会被转发；
 // 下游网关可用它传稳定的最终用户/对话标识，在共享 Bearer Key 时仍实现一人一号式绑定。
@@ -1263,6 +1289,7 @@ func ResolveSessionID(headers http.Header, body []byte) string {
 func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSessionIdentity {
 	hasEngineFingerprint := EvaluateEngineFingerprint(headers, body, nil)
 	explicitID := ResolveExplicitSessionID(headers, body)
+	stableIdentity := ResolveStableExplicitSessionID(headers, body) != ""
 	upstreamSeed := explicitID
 	if upstreamSeed == "" {
 		upstreamSeed = deriveContentSessionSeed(body)
@@ -1293,6 +1320,7 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 			affinityID:            affinityID,
 			upstreamSeed:          upstreamSeed,
 			explicitUpstreamID:    explicitID,
+			stableIdentity:        true,
 			hasDownstreamAffinity: true,
 			hasRequestFingerprint: true,
 		}
@@ -1301,8 +1329,132 @@ func resolveRequestSessionIdentity(headers http.Header, body []byte) requestSess
 		affinityID:            affinityID,
 		upstreamSeed:          upstreamSeed,
 		explicitUpstreamID:    explicitID,
+		stableIdentity:        stableIdentity,
 		hasRequestFingerprint: hasEngineFingerprint,
 	}
+}
+
+// resolveRequestSessionIdentityForContext upgrades the normal client identity
+// with a signed NewAPI session fingerprint when one was verified by the prompt
+// policy ingress stage. Untrusted X-NewAPI-* headers are never accepted here.
+func (h *Handler) resolveRequestSessionIdentityForContext(c *gin.Context, body []byte) requestSessionIdentity {
+	return h.resolveRequestSessionIdentityWithBase(c, body, resolveRequestSessionIdentity(c.Request.Header, body))
+}
+
+func (h *Handler) resolveRequestSessionIdentityWithBase(c *gin.Context, body []byte, identity requestSessionIdentity) requestSessionIdentity {
+	c.Set(relatedSessionObservationContextKey, nil)
+	status, policyContext := h.cachedNewAPIPolicyAuditState(c)
+	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
+	accountingBypass := h.verifiedNewAPISessionAccountingBypass(c)
+	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
+	if !verifiedPolicy {
+		accountingBypass = classifyLocalCodexIndependentSessionAccounting(c, rootIdentity)
+	}
+	setLocalSessionAccountingBypass(c, accountingBypass)
+	identity.bypassWindowAccounting = accountingBypass
+	if h != nil && h.store != nil && h.store.CodexUnlinkedAccountFallbackEnabled() {
+		scope := unlinkedFallbackScopeForRequest(c, body, policyContext, verifiedPolicy)
+		if scope != "" {
+			identity.unlinkedFallbackScope = scope
+			identity.unlinkedFallbackOnly = !rootIdentity.stable && !rootIdentity.conflict
+			if identity.unlinkedFallbackOnly {
+				// Keep upstreamSeed untouched, but remove the implicit local
+				// affinity key so this request cannot create/refresh a durable
+				// session binding while using the temporal bridge.
+				identity.affinityID = ""
+			}
+			c.Set(unlinkedFallbackContextKey, unlinkedFallbackContext{
+				Scope: scope, RecordRoot: rootIdentity.stable && !rootIdentity.related && !accountingBypass,
+				RequestStarted: time.Now(),
+			})
+		}
+	}
+	if rootIdentity.stable && !rootIdentity.conflict {
+		if fingerprint := strings.TrimSpace(rootIdentity.fingerprint); verifiedPolicy && fingerprint != "" {
+			identity.affinityID = "newapi-root-session:" + fingerprint
+		} else if rootIdentity.nativeRoot && strings.TrimSpace(rootIdentity.sessionID) != "" {
+			identity.affinityID = strings.TrimSpace(rootIdentity.sessionID)
+		}
+		identity.stableIdentity = true
+		identity.hasDownstreamAffinity = true
+		identity.hasRequestFingerprint = true
+		identity.relatedToRoot = rootIdentity.related
+		identity.ownsRootBinding = rootIdentity.ownsUserRootBinding()
+		identity.relatedSource = auth.AccountSessionRelatedSource{
+			ThreadSource: rootIdentity.threadSource,
+			RequestKind:  rootIdentity.requestKind,
+			SubagentKind: rootIdentity.subagentKind,
+		}
+		if verifiedPolicy {
+			if fingerprint := strings.TrimSpace(policyContext.Meta.ForkedFromSessionFingerprint); fingerprint != "" {
+				identity.forkSourceAffinityID = "newapi-root-session:" + fingerprint
+			} else if forkedFrom := strings.TrimSpace(rootIdentity.forkedFromSessionID); forkedFrom != "" {
+				if fingerprint := newAPIRootSessionFingerprint(policyContext.Platform, policyContext.Identity.UserID, forkedFrom); fingerprint != "" {
+					identity.forkSourceAffinityID = "newapi-root-session:" + fingerprint
+				}
+			}
+		} else if forkedFrom := strings.TrimSpace(rootIdentity.forkedFromSessionID); forkedFrom != "" {
+			identity.forkSourceAffinityID = forkedFrom
+		}
+		if rootIdentity.related {
+			identity.relatedRequestID = relatedSessionLogicalRequestID(c, body, policyContext, verifiedPolicy)
+			c.Set(relatedSessionObservationContextKey, relatedSessionObservation{
+				Source: identity.relatedSource, RequestID: identity.relatedRequestID,
+			})
+		}
+	} else if verifiedPolicy {
+		// Root-capable senders deliberately omit an affinity override when their
+		// signed root is unavailable/conflicting. Older leaf-only senders retain
+		// the compatibility path below.
+		if policyContext.Meta.RootSessionVersion == 0 {
+			if fingerprint := strings.TrimSpace(policyContext.Meta.SessionFingerprint); fingerprint != "" {
+				identity.affinityID = "newapi-session:" + fingerprint
+				identity.stableIdentity = true
+				identity.hasDownstreamAffinity = true
+				identity.hasRequestFingerprint = true
+			}
+		}
+	}
+	if h.passiveInternalModelsAllowed(c) && !identity.ownsRootBinding {
+		if !identity.relatedToRoot {
+			identity.unlinkedFallbackOnly = true
+		} else {
+			rootKey := sessionAffinityKey(identity.affinityID, requestAPIKeyID(c))
+			_, found := h.store.AccountSessionAccountID(rootKey, time.Now())
+			if !found {
+				_, found = h.store.SessionAffinityAccountID(rootKey)
+			}
+			if !found {
+				identity.unlinkedFallbackOnly = true
+			}
+		}
+	}
+	identity.protectedRelatedLease = identity.relatedToRoot && passiveInternalRequestAuthorized(c)
+	if identity.unlinkedFallbackOnly {
+		identity.affinityID = ""
+	}
+	return identity
+}
+
+func relatedSessionLogicalRequestID(c *gin.Context, body []byte, policyContext verifiedNewAPIPolicyContext, verifiedPolicy bool) string {
+	base := ""
+	if verifiedPolicy {
+		base = strings.TrimSpace(policyContext.Identity.RequestID)
+	}
+	if base == "" && c != nil && c.Request != nil {
+		base = firstNonEmptyHeader(c.Request.Header, "Idempotency-Key", "X-Client-Request-Id")
+	}
+	if eventID := promptGuardPolicyEventID(c); eventID != "" {
+		if base == "" {
+			base = "websocket"
+		}
+		return base + ":" + eventID
+	}
+	digest := sha256.Sum256(body)
+	if base == "" {
+		base = "standalone"
+	}
+	return base + ":" + hex.EncodeToString(digest[:8])
 }
 
 func resolveDownstreamAffinityID(headers http.Header) string {
@@ -1317,12 +1469,114 @@ func resolveDownstreamAffinityID(headers http.Header) string {
 	return "affinity-" + hex.EncodeToString(sum[:16])
 }
 
+// resolveDownstreamInstallationID reads the client/device marker without
+// treating it as a root-session proof. It is only used to narrow the optional
+// no-root fallback scope, and may therefore safely be hashed before storage.
+func resolveDownstreamInstallationID(headers http.Header, body []byte) string {
+	if headers != nil {
+		for _, name := range []string{"X-Codex-Installation-Id", "X-Codex-Installation-ID"} {
+			if value := strings.TrimSpace(headers.Get(name)); value != "" && len(value) <= 256 && !strings.ContainsAny(value, "\r\n\x00") {
+				return value
+			}
+		}
+		for _, raw := range headers.Values(codexTurnMetadataHeader) {
+			if value := findDownstreamInstallationID([]byte(raw), 0); value != "" {
+				return value
+			}
+		}
+	}
+	return findDownstreamInstallationID(body, 0)
+}
+
+func findDownstreamInstallationID(raw []byte, depth int) string {
+	if depth > 3 || len(raw) == 0 || !gjson.ValidBytes(raw) {
+		return ""
+	}
+	value := gjson.ParseBytes(raw)
+	if value.Type == gjson.String {
+		text := strings.TrimSpace(value.String())
+		if text == "" || !gjson.Valid(text) {
+			return ""
+		}
+		return findDownstreamInstallationID([]byte(text), depth+1)
+	}
+	if !value.IsObject() {
+		return ""
+	}
+	for _, key := range []string{"x-codex-installation-id", "x_codex_installation_id", "installation_id"} {
+		candidate := strings.TrimSpace(value.Get(key).String())
+		if candidate != "" && len(candidate) <= 256 && !strings.ContainsAny(candidate, "\r\n\x00") {
+			return candidate
+		}
+	}
+	for _, key := range []string{"x-codex-turn-metadata", "x_codex_turn_metadata", "client_metadata", "response.client_metadata"} {
+		nested := value.Get(key)
+		if nested.Exists() && !nested.IsArray() {
+			if candidate := findDownstreamInstallationID([]byte(nested.Raw), depth+1); candidate != "" {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
+func unlinkedFallbackScopeForRequest(c *gin.Context, body []byte, policyContext verifiedNewAPIPolicyContext, verifiedPolicy bool) string {
+	platform := "direct"
+	userID := ""
+	tokenID := ""
+	if verifiedPolicy && policyContext.MetaVerified {
+		platform = strings.TrimSpace(policyContext.Platform)
+		userID = strings.TrimSpace(policyContext.Identity.UserID)
+		if policyContext.Meta.TokenID > 0 {
+			tokenID = strconv.FormatInt(int64(policyContext.Meta.TokenID), 10)
+		}
+	}
+	installationID := ""
+	if verifiedPolicy && policyContext.MetaVerified {
+		installationID = strings.TrimSpace(policyContext.Meta.InstallationID)
+	}
+	if installationID == "" && c != nil && c.Request != nil {
+		installationID = resolveDownstreamInstallationID(c.Request.Header, body)
+	}
+	apiKeyHash := ""
+	// A verified NewAPI policy already provides the shared platform/user/token
+	// namespace. Do not append the downstream channel credential hash there:
+	// that value is different per NewAPI channel and would make the NewAPI and
+	// Codex2API fallback scopes diverge. Direct Codex2API requests still use the
+	// API-key hash as their only stable user surrogate.
+	if !verifiedPolicy && c != nil && c.Request != nil {
+		raw := strings.TrimSpace(c.Request.Header.Get("Authorization"))
+		if raw != "" {
+			sum := sha256.Sum256([]byte("codex2api:unlinked-api-key:" + raw))
+			apiKeyHash = hex.EncodeToString(sum[:16])
+		}
+	}
+	if userID == "" && apiKeyHash == "" {
+		return ""
+	}
+	if tokenID == "" && installationID == "" && apiKeyHash == "" {
+		return ""
+	}
+	canonical := strings.Join([]string{"unlinked-v1", platform, userID, tokenID, installationID, apiKeyHash}, "\x00")
+	sum := sha256.Sum256([]byte(canonical))
+	return "scope-" + hex.EncodeToString(sum[:16])
+}
+
 func ResolveExplicitSessionID(headers http.Header, body []byte) string {
+	// A complete native graph may be carried in response.create's body
+	// client_metadata (notably on WebSocket frames and on gateways that do not
+	// copy the native headers). Resolve that graph before the legacy single-value
+	// header fallbacks so a child leaf in Session-Id can still collapse to its
+	// verified root. A valid native header graph remains authoritative; body
+	// metadata is only considered when the header graph is absent/incomplete.
+	if root, ok := resolveNativeCodexSessionGraphWithBody(headers, body); ok {
+		return root
+	}
 	if headers != nil {
 		// 注意：Codex CLI 发的是连字符头 session-id / conversation-id（HTTP/2 全小写，
 		// 服务端规范化成 Session-Id / Conversation-Id），与旧的下划线写法 Session_id 不同，
 		// 两种都要认，否则取不到显式会话 id、affinity 只能退回内容种子。
-		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id", "Idempotency-Key"} {
+		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id", "X-Session-ID", "OpenAI-Session-ID", "Idempotency-Key"} {
 			if v := strings.TrimSpace(headers.Get(key)); v != "" {
 				return v
 			}
@@ -1342,6 +1596,85 @@ func ResolveExplicitSessionID(headers http.Header, body []byte) string {
 	}
 
 	return ""
+}
+
+// ResolveStableExplicitSessionID returns only identifiers that are expected to
+// remain constant for the lifetime of a conversation. Idempotency-Key is
+// intentionally excluded: many SDKs generate a new value for every HTTP
+// request, so treating it as a conversation ID would create one session slot
+// per turn.
+func ResolveStableExplicitSessionID(headers http.Header, body []byte) string {
+	if root, ok := resolveNativeCodexSessionGraphWithBody(headers, body); ok {
+		return root
+	}
+	if headers != nil {
+		for _, key := range []string{"Session-Id", "Session_id", "Conversation-Id", "Conversation_id", "X-Session-ID", "OpenAI-Session-ID"} {
+			if v := strings.TrimSpace(headers.Get(key)); v != "" {
+				return v
+			}
+		}
+	}
+	if v := strings.TrimSpace(gjson.GetBytes(body, "prompt_cache_key").String()); v != "" {
+		return v
+	}
+	return ""
+}
+
+// resolveNativeCodexSessionGraphWithBody returns a root only for a coherent
+// native graph. The official client can put the graph in either request
+// headers or response.create.client_metadata; callers that only inspect
+// headers otherwise fall back to content/API-key affinity and silently split a
+// single conversation. A valid complete header graph wins over body metadata,
+// while a conflicting/incomplete graph never lets one carrier overwrite the
+// other. The bool reports whether a native root was proven, not whether any
+// graph-shaped fields were observed.
+func resolveNativeCodexSessionGraphWithBody(headers http.Header, body []byte) (string, bool) {
+	if root, ok := resolveNativeCodexSessionGraph(headers); ok {
+		return root, true
+	}
+	identity := resolveRequestRootSessionIdentity(headers, body)
+	if identity.conflict || !identity.nativeRoot || !identity.stable {
+		return "", false
+	}
+	root := strings.TrimSpace(identity.sessionID)
+	if root == "" {
+		return "", false
+	}
+	return root, true
+}
+
+// resolveNativeCodexSessionGraph validates the stable headers emitted by the
+// official Codex client. Sub-agent threads keep Session-Id as their root while
+// Thread-Id/X-Client-Request-Id/X-Codex-Window-Id identify the child thread;
+// therefore every child of one window resolves to the root Session-Id.
+func resolveNativeCodexSessionGraph(headers http.Header) (string, bool) {
+	if headers == nil {
+		return "", false
+	}
+	root := strings.TrimSpace(headers.Get("Session-Id"))
+	thread := strings.TrimSpace(headers.Get("Thread-Id"))
+	clientRequest := strings.TrimSpace(headers.Get("X-Client-Request-Id"))
+	window := strings.TrimSpace(headers.Get("X-Codex-Window-Id"))
+	if root == "" || thread == "" || clientRequest == "" || window == "" {
+		return "", false
+	}
+	if _, err := uuid.Parse(root); err != nil {
+		return "", false
+	}
+	if _, err := uuid.Parse(thread); err != nil || !strings.EqualFold(thread, clientRequest) {
+		return "", false
+	}
+	windowParts := strings.Split(window, ":")
+	if len(windowParts) != 2 || !strings.EqualFold(strings.TrimSpace(windowParts[0]), thread) {
+		return "", false
+	}
+	if _, err := strconv.ParseUint(strings.TrimSpace(windowParts[1]), 10, 64); err != nil {
+		return "", false
+	}
+	if parent := strings.TrimSpace(headers.Get("X-Codex-Parent-Thread-Id")); parent != "" && !strings.EqualFold(parent, root) {
+		return "", false
+	}
+	return strings.ToLower(root), true
 }
 
 const statelessWebsocketSessionPrefix = "stateless-"

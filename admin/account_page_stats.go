@@ -73,16 +73,11 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 		todayModels = map[int64]map[string]database.AccountModelCount{}
 	}
 
-	billing5hWindows, billing7dWindows := h.accountBillingWindows(ids)
-	billed5h, err := h.db.GetAccountsBilledSince(ctx, billing5hWindows)
+	billingWindows := h.accountBillingWindows(ids)
+	billedWindows, err := h.db.GetAccountsBilledWindows(ctx, billingWindows)
 	if err != nil {
-		log.Printf("获取当前页账号 5h 成本失败: %v", err)
-		billed5h = map[int64]float64{}
-	}
-	billed7d, err := h.db.GetAccountsBilledSince(ctx, billing7dWindows)
-	if err != nil {
-		log.Printf("获取当前页账号长窗口成本失败: %v", err)
-		billed7d = map[int64]float64{}
+		log.Printf("获取当前页账号额度窗口成本失败: %v", err)
+		billedWindows = map[database.AccountBillingWindowKey]float64{}
 	}
 
 	// 官方结算快照缺失只是少一行展示，不能拖垮整页统计。
@@ -133,10 +128,10 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 			}
 			item.UsageTodayDetail = todayWindow
 		}
-		if value, ok := billed5h[id]; ok {
+		if value, ok := billedWindows[database.AccountBillingWindowKey{AccountID: id, Kind: database.AccountBillingWindow5h}]; ok {
 			item.Billed5h = &value
 		}
-		if value, ok := billed7d[id]; ok {
+		if value, ok := billedWindows[database.AccountBillingWindowKey{AccountID: id, Kind: database.AccountBillingWindowLong}]; ok {
 			item.Billed7d = &value
 		}
 		// 没有快照的账号不下发这个字段，前端显示占位而不是 $0；
@@ -157,27 +152,40 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"stats": stats})
 }
 
-func (h *Handler) accountBillingWindows(ids []int64) (map[int64]time.Time, map[int64]time.Time) {
-	shortWindows := make(map[int64]time.Time, len(ids))
-	longWindows := make(map[int64]time.Time, len(ids))
+func (h *Handler) accountBillingWindows(ids []int64) []database.AccountBillingWindow {
+	windows := make([]database.AccountBillingWindow, 0, len(ids)*2)
 	if h.store == nil {
-		return shortWindows, longWindows
+		return windows
 	}
 	for _, id := range ids {
 		account := h.store.FindByID(id)
 		if account == nil {
 			continue
 		}
-		if resetAt := account.GetReset5hAt(); !resetAt.IsZero() {
-			shortWindows[id] = resetAt.Add(-5 * time.Hour)
+		if account.IsRelayStyle() {
+			continue
 		}
-		if resetAt := account.GetReset7dAt(); !resetAt.IsZero() {
+		snapshot := account.BillingWindowSnapshot()
+		if !snapshot.Reset5hAt.IsZero() {
+			windows = append(windows, database.AccountBillingWindow{
+				AccountID: id,
+				Kind:      database.AccountBillingWindow5h,
+				Start:     snapshot.Reset5hAt.Add(-5 * time.Hour),
+				Duration:  5 * time.Hour,
+			})
+		}
+		if !snapshot.Reset7dAt.IsZero() {
 			window := 7 * 24 * time.Hour
-			if seconds := account.GetWindow7dSeconds(); seconds > 0 {
+			if seconds := snapshot.Window7dSeconds; seconds > 0 {
 				window = time.Duration(seconds) * time.Second
 			}
-			longWindows[id] = resetAt.Add(-window)
+			windows = append(windows, database.AccountBillingWindow{
+				AccountID: id,
+				Kind:      database.AccountBillingWindowLong,
+				Start:     snapshot.Reset7dAt.Add(-window),
+				Duration:  window,
+			})
 		}
 	}
-	return shortWindows, longWindows
+	return windows
 }

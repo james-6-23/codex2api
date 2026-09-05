@@ -572,7 +572,11 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 		if exclude != nil && exclude[entry.dbID] {
 			continue
 		}
-		if !entry.acc.AllowsAPIKey(apiKeyID) {
+		authorizationKeyID := apiKeyID
+		if authorizationKeyID < 0 {
+			authorizationKeyID = -authorizationKeyID
+		}
+		if !entry.acc.AllowsAPIKey(authorizationKeyID) {
 			continue
 		}
 		if s.groupCheck != nil && !s.groupCheck(apiKeyID, entry.acc) {

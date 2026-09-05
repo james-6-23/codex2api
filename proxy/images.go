@@ -1438,7 +1438,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	}
 
 	apiKeyID := requestAPIKeyID(c)
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, responsesBody)
+	sessionIdentity := h.resolveRequestSessionIdentityForContext(c, responsesBody)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)

@@ -33,6 +33,10 @@ const (
 	newAPIPolicyDecisionSignatureVersionV1 = "v1"
 	newAPIPolicyEventSignatureVersionV1    = "v1"
 	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
+	newAPISessionAccountingBypass          = "bypass"
+	newAPIPassiveFeatureRelatedInternal    = "related_internal"
+	newAPIPassiveFeatureSystemPassive      = "system_passive"
+	newAPIPassiveFeatureIndependent        = "independent_internal"
 )
 
 type newAPIIdentity struct {
@@ -56,20 +60,40 @@ type newAPIOriginalAuditMeta struct {
 }
 
 type newAPIPolicyMeta struct {
-	PlatformID         string `json:"platform_id,omitempty"`
-	UserName           string `json:"user_name,omitempty"`
-	UserEmail          string `json:"user_email,omitempty"`
-	UserGroup          string `json:"user_group,omitempty"`
-	Profile            string `json:"profile"`
-	Mode               string `json:"mode"`
-	Provider           string `json:"provider"`
-	Protocol           string `json:"protocol"`
-	OriginalEndpoint   string `json:"original_endpoint,omitempty"`
-	OriginalProtocol   string `json:"original_protocol,omitempty"`
-	RequestedModel     string `json:"requested_model,omitempty"`
-	UpstreamModel      string `json:"upstream_model,omitempty"`
-	ChannelID          int    `json:"channel_id,omitempty"`
-	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	PlatformID       string `json:"platform_id,omitempty"`
+	UserName         string `json:"user_name,omitempty"`
+	UserEmail        string `json:"user_email,omitempty"`
+	UserGroup        string `json:"user_group,omitempty"`
+	Profile          string `json:"profile"`
+	Mode             string `json:"mode"`
+	Provider         string `json:"provider"`
+	Protocol         string `json:"protocol"`
+	OriginalEndpoint string `json:"original_endpoint,omitempty"`
+	OriginalProtocol string `json:"original_protocol,omitempty"`
+	RequestedModel   string `json:"requested_model,omitempty"`
+	UpstreamModel    string `json:"upstream_model,omitempty"`
+	ChannelID        int    `json:"channel_id,omitempty"`
+	// TokenID and InstallationID are signed NewAPI identity hints. They are
+	// deliberately kept separate from the root fingerprint and are used only
+	// to scope the optional no-root recent-account fallback.
+	TokenID             int    `json:"token_id,omitempty"`
+	InstallationID      string `json:"installation_id,omitempty"`
+	SessionFingerprint  string `json:"session_fingerprint,omitempty"`
+	RootSessionVersion  int    `json:"root_session_version,omitempty"`
+	RootSessionState    string `json:"root_session_state,omitempty"`
+	RootSessionRelation string `json:"root_session_relation,omitempty"`
+	ThreadSource        string `json:"thread_source,omitempty"`
+	RequestKind         string `json:"request_kind,omitempty"`
+	SubagentKind        string `json:"subagent_kind,omitempty"`
+	SessionAccounting   string `json:"session_accounting,omitempty"`
+	PassiveFeature      string `json:"passive_feature,omitempty"`
+	// RootSessionFingerprint groups Guardian/sub-agent leaves under the
+	// user-visible Codex task. SessionFingerprint intentionally remains the
+	// exact leaf identity used by CYB conversation locking.
+	RootSessionFingerprint string `json:"root_session_fingerprint,omitempty"`
+	// ForkedFromSessionFingerprint is a signed affinity hint for a user-created
+	// fork. It identifies the source session without merging the fork's root.
+	ForkedFromSessionFingerprint string `json:"forked_from_session_fingerprint,omitempty"`
 }
 
 type verifiedNewAPIPolicyContext struct {
@@ -103,6 +127,22 @@ func (h *Handler) resolvePromptFilterNewAPIBinding(c *gin.Context) (database.Pro
 	binding, bound := h.store.GetPromptFilterNewAPIBinding(apiKeyID)
 	c.Set(newAPIBindingContextKey, resolvedPromptFilterNewAPIBinding{APIKeyID: apiKeyID, Binding: binding, Bound: bound})
 	return binding, bound
+}
+
+// primeNewAPIPolicyContext verifies optional signed NewAPI metadata before an
+// early routing/session decision. The normal prompt-filter ingress still owns
+// rejection and user-facing errors; this helper only makes an already-valid
+// identity available to code that must classify trusted application requests
+// before Prompt Guard runs.
+func (h *Handler) primeNewAPIPolicyContext(c *gin.Context, body []byte) {
+	if h == nil || h.store == nil || c == nil || strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) == "" {
+		return
+	}
+	cfg := h.promptFilterConfigForRequest(c)
+	if !cfg.Advanced.NewAPI.Enabled {
+		return
+	}
+	_, _ = h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, body)
 }
 
 // refreshNewAPIWebSocketBinding enforces binding revocation at every logical
@@ -457,6 +497,12 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		meta.ChannelID = 0
 	}
 	var ok bool
+	if meta.TokenID < 0 {
+		return false
+	}
+	if meta.InstallationID, ok = normalizedVerifiedNewAPIIdentityText(meta.InstallationID, 256); !ok {
+		return false
+	}
 	if meta.UserName, ok = normalizedVerifiedNewAPIIdentityText(meta.UserName, 128); !ok {
 		return false
 	}
@@ -472,6 +518,100 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		if err != nil || len(decoded) != 16 {
 			return false
 		}
+	}
+	meta.RootSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.RootSessionFingerprint))
+	meta.ForkedFromSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.ForkedFromSessionFingerprint))
+	meta.RootSessionState = strings.ToLower(strings.TrimSpace(meta.RootSessionState))
+	meta.RootSessionRelation = strings.ToLower(strings.TrimSpace(meta.RootSessionRelation))
+	if meta.RootSessionVersion < 0 || meta.RootSessionVersion > 1 {
+		return false
+	}
+	if meta.RootSessionVersion == 0 {
+		if meta.RootSessionState != "" || meta.RootSessionFingerprint != "" || meta.RootSessionRelation != "" {
+			return false
+		}
+	} else {
+		switch meta.RootSessionState {
+		case newAPIPolicyRootSessionResolved:
+			if meta.RootSessionFingerprint == "" {
+				return false
+			}
+			if meta.RootSessionRelation != "" && meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot && meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated {
+				return false
+			}
+		case newAPIPolicyRootSessionConflict, newAPIPolicyRootSessionUnavailable:
+			if meta.RootSessionFingerprint != "" || meta.RootSessionRelation != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	if meta.RootSessionFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.RootSessionFingerprint)
+		if err != nil || len(decoded) != 16 {
+			return false
+		}
+	}
+	if meta.ForkedFromSessionFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.ForkedFromSessionFingerprint)
+		if err != nil || len(decoded) != 16 || meta.RootSessionVersion != 1 ||
+			meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+			!strings.EqualFold(strings.TrimSpace(meta.ThreadSource), "user") ||
+			strings.TrimSpace(meta.SubagentKind) != "" {
+			return false
+		}
+	}
+	if meta.ThreadSource, ok = normalizedVerifiedNewAPIIdentityText(meta.ThreadSource, 128); !ok {
+		return false
+	}
+	if meta.RequestKind, ok = normalizedVerifiedNewAPIIdentityText(meta.RequestKind, 128); !ok {
+		return false
+	}
+	if meta.SubagentKind, ok = normalizedVerifiedNewAPIIdentityText(meta.SubagentKind, 64); !ok {
+		return false
+	}
+	meta.SessionAccounting = strings.ToLower(strings.TrimSpace(meta.SessionAccounting))
+	meta.PassiveFeature = strings.ToLower(strings.TrimSpace(meta.PassiveFeature))
+	switch meta.SessionAccounting {
+	case "":
+		switch meta.PassiveFeature {
+		case "":
+		case newAPIPassiveFeatureRelatedInternal:
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				strings.TrimSpace(meta.ThreadSource) == "" || strings.EqualFold(meta.ThreadSource, "user") {
+				return false
+			}
+		case newAPIPassiveFeatureSystemPassive:
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				!strings.EqualFold(meta.ThreadSource, "system") {
+				return false
+			}
+		default:
+			return false
+		}
+	case newAPISessionAccountingBypass:
+		if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot {
+			return false
+		}
+		switch meta.PassiveFeature {
+		case newAPIPassiveFeatureSystemPassive:
+			if !strings.EqualFold(meta.ThreadSource, "system") {
+				return false
+			}
+		case newAPIPassiveFeatureIndependent:
+			if strings.TrimSpace(meta.ThreadSource) == "" || strings.EqualFold(meta.ThreadSource, "user") {
+				return false
+			}
+		default:
+			return false
+		}
+	default:
+		return false
 	}
 	return true
 }

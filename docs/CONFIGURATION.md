@@ -61,6 +61,8 @@ Codex2API 采用三层配置架构：
 | `USE_WEBSOCKET` | 否 | `false` | 旧版开关；未设置 `CODEX_UPSTREAM_TRANSPORT` 时，`true` 等价于 `CODEX_UPSTREAM_TRANSPORT=ws` |
 | `CODEX_TRANSPORT_MODE` | 否 | `standard` | Codex HTTP transport：默认标准 Go TLS；`utls_chrome` 可回滚旧 Chrome uTLS 行为 |
 | `CODEX_WS_SEND_USER_AGENT` | 否 | `true` | WS 握手是否发送 Codex `User-Agent`/`Version`；设为 `false` 可关闭 |
+| `CODEX_SESSION_HEADER_MODE` | 否 | `native` | 出站会话头形态。`native` 发送真实客户端的 `Session-Id` / `Thread-Id` / `X-Client-Request-Id`；`legacy` 回退到旧的 `Session_id`（WS 另带 `Conversation_id`） |
+| `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `Session-Id` 使用指纹收敛后的会话身份；默认保持独立的上游会话/缓存键，仅让 `Thread-Id` 遵循对应指纹策略 |
 | `CODEX_SESSION_AFFINITY_TTL` | 否 | `1h` | Codex 会话到账号/代理的黏性 TTL，支持 `1h`、`90m` 或秒数 |
 | `CODEX_COMPACTION_AFFINITY_TTL` | 否 | `168h` | 加密压缩状态的来源亲和 TTL。缓存仅保存密文的 SHA-256 摘要、来源账号和兼容域；已知状态不会跨 Codex 官方、不同 Responses 中转或 Grok 上游流转 |
 | `CODEX_FINGERPRINT_DEBUG` | 否 | `false` | 输出脱敏指纹策略诊断日志，不记录 token |
@@ -69,6 +71,16 @@ Codex2API 采用三层配置架构：
 | `CODEX_SESSION_HEADER_ALIGN_CONVERGED` | 否 | `false` | 开启后 `session-id` 头改用指纹收敛后的会话身份，与 turn metadata 的 `session_id` 对齐。默认关：请求体 `prompt_cache_key` 始终独立隔离，但上游是否也拿该头参与缓存分组无法从客户端源码确认 |
 
 > `CODEX_UPSTREAM_TRANSPORT` 只控制 HTTP 入站请求转发到 Codex 上游时使用 `http` 还是 `ws`。客户端侧 WebSocket 入口独立可用：使用 `GET ws://<host>/v1/responses` 建连，首帧发送 `response.create` JSON，服务端会通过 Codex 上游 WS 返回 Responses 事件帧。
+
+### Codex 设备安装 ID
+
+Codex 官方账号在新建或导入落库时生成随机 UUIDv4，保存在账号 `credentials.codex_installation_id` 中，不等待 ChatGPT 账号 UUID 或首次 Token 刷新。旧账号首次加载时补齐并持久化；并发加载同一账号只保留一个值，保存失败不会使用临时随机值加入调度池。
+
+`device`、`session`、`full` 共用该安装 ID。重启、刷新 Token、补齐上游账号 UUID、关闭再开启收敛均不重新生成。不同部署独立创建账号时不再因数字 ID 相同而得到相同设备 ID。恢复同一份数据库备份会保留原设备 ID；删除后新建账号则生成新值。
+
+账号详情中的「设备安装 ID」支持查看和复制，关闭收敛时仍展示保留值。账号自定义头 `X-Codex-Installation-Id` 仍优先于持久化值，详情也展示该覆盖值；删除自定义覆盖后恢复使用持久化值。安装 ID 仅用于原有收敛载体，不会额外补发客户端没有携带的安装标识头。
+
+升级时未保存安装 ID 的旧账号会切换一次到新生成的固定值；已有自定义安装 ID 不受影响。部署后不要删除该凭据字段，否则后续加载会重新生成。
 
 ### 数据库配置
 

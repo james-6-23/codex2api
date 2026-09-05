@@ -30,6 +30,7 @@ const (
 	ErrCodeResponseContextUnavailable ErrorCode = "response_context_unavailable"
 	ErrCodeUnsupportedModel           ErrorCode = "unsupported_model"
 	ErrCodeRateLimitReached           ErrorCode = "rate_limit_reached"
+	ErrCodeAccountSessionCapacity     ErrorCode = "account_session_capacity_exceeded"
 
 	// Server errors
 	ErrCodeServerError        ErrorCode = "server_error"
@@ -130,7 +131,8 @@ func HTTPStatusCode(code ErrorCode) int {
 	case ErrCodeResponseContextUnavailable:
 		return http.StatusConflict
 	case ErrCodeInvalidRequest, ErrCodeInvalidParameter, ErrCodeMissingField, ErrCodeInvalidFieldType,
-		ErrCodeInvalidFieldFormat, ErrCodeContextLengthExceeded, ErrCodeUnsupportedModel:
+		ErrCodeInvalidFieldFormat, ErrCodeContextLengthExceeded, ErrCodeUnsupportedModel,
+		ErrCodeAccountSessionCapacity:
 		return http.StatusBadRequest
 	case ErrCodeServiceUnavailable:
 		return http.StatusServiceUnavailable

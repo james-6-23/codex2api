@@ -66,3 +66,22 @@ func (a *Account) EffectiveCodexFingerprintMode() string {
 	}
 	return NormalizeCodexFingerprintMode(a.CodexFingerprintMode)
 }
+
+func (a *Account) EffectiveCodexInstallationID() string {
+	if a == nil {
+		return ""
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.isRelayStyleLocked() {
+		return ""
+	}
+	for name, value := range a.CustomHeaders {
+		if strings.EqualFold(strings.TrimSpace(name), "X-Codex-Installation-Id") {
+			if pinned := strings.TrimSpace(value); pinned != "" {
+				return pinned
+			}
+		}
+	}
+	return strings.TrimSpace(a.CodexInstallationID)
+}

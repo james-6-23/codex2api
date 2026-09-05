@@ -60,7 +60,7 @@ func (r *dataThenErrorReadCloser) Close() error {
 }
 
 func TestSupportedModelsIncludeLatestRequestedModels(t *testing.T) {
-	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
+	for _, model := range []string{"gpt-5.5", "gpt-6-astra", "gpt-5.3-codex-spark", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
 		if !slices.Contains(SupportedModels, model) {
 			t.Fatalf("SupportedModels missing %q", model)
 		}
@@ -2215,9 +2215,10 @@ func assertNoAvailableAccountResponse(t *testing.T, body []byte) {
 
 	var payload struct {
 		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
+			RequestID string `json:"request_id"`
+			Message   string `json:"message"`
+			Type      string `json:"type"`
+			Code      string `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -2229,8 +2230,8 @@ func assertNoAvailableAccountResponse(t *testing.T, body []byte) {
 	if payload.Error.Type != ErrorTypeServerError {
 		t.Fatalf("type = %q, want %q", payload.Error.Type, ErrorTypeServerError)
 	}
-	if payload.Error.Code != ErrorCodeNoAvailableAccount {
-		t.Fatalf("code = %q, want %q", payload.Error.Code, ErrorCodeNoAvailableAccount)
+	if payload.Error.Code != "service_unavailable" || payload.Error.RequestID == "" {
+		t.Fatalf("expected generic service_unavailable and correlation ID; body=%s", body)
 	}
 }
 
@@ -4648,6 +4649,34 @@ func TestSyncCodexUsageStateUpdatesPlanTypeFromHeader(t *testing.T) {
 	}
 }
 
+func TestSyncCodexUsageStateIgnoresRelayForwardedCodexHeaders(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{
+		DBID:         101,
+		UpstreamType: auth.UpstreamOpenAIResponses,
+		BaseURL:      "https://relay.example.test",
+		APIKey:       "sk-relay",
+		PlanType:     "api",
+	}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-plan-type", "pro")
+	resp.Header.Set("x-codex-primary-used-percent", "6")
+	resp.Header.Set("x-codex-primary-window-minutes", "10080")
+	resp.Header.Set("x-codex-primary-reset-after-seconds", "500000")
+
+	result := SyncCodexUsageState(store, account, resp)
+
+	if result.HasUsage7d || result.HasUsage5h || result.Used5hHeaders {
+		t.Fatalf("relay usage sync result = %#v, want no Codex quota state", result)
+	}
+	if _, ok := account.GetUsagePercent7d(); ok {
+		t.Fatal("relay account accepted a forwarded Codex 7d snapshot")
+	}
+	if got := account.GetPlanType(); got != "api" {
+		t.Fatalf("relay plan type = %q, want api", got)
+	}
+}
+
 func TestApply429CooldownUnknown429UsesModelCooldown(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	account := &auth.Account{DBID: 102, PlanType: "pro"}
@@ -4915,6 +4944,12 @@ func TestSyncCodexUsageState_Clears5hWhenOnly7dHeaders(t *testing.T) {
 	if got := row.GetCredential("codex_5h_used_percent"); got != "" {
 		t.Errorf("persisted codex_5h_used_percent = %q, want cleared", got)
 	}
+	if got := row.GetCredential("codex_7d_reset_at"); got == "" {
+		t.Error("persisted codex_7d_reset_at is empty for 7d-only snapshot")
+	}
+	if got := row.GetCredential("codex_7d_window_seconds"); got != "604800" {
+		t.Errorf("persisted codex_7d_window_seconds = %q, want 604800", got)
+	}
 
 	reloadedStore := auth.NewStore(db, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
 	if err := reloadedStore.LoadAccountByID(ctx, id); err != nil {
@@ -4926,6 +4961,12 @@ func TestSyncCodexUsageState_Clears5hWhenOnly7dHeaders(t *testing.T) {
 	}
 	if _, ok := reloaded.GetUsagePercent5h(); ok {
 		t.Fatal("cleared 5h snapshot was hydrated again after reload")
+	}
+	if reloaded.GetReset7dAt().IsZero() {
+		t.Fatal("7d-only reset time was not restored after reload")
+	}
+	if got := reloaded.GetWindow7dSeconds(); got != 604800 {
+		t.Fatalf("reloaded Window7dSeconds = %d, want 604800", got)
 	}
 }
 
@@ -4963,6 +5004,73 @@ func TestSyncCodexUsageState_PartialUsedPercentHeaderDoesNotClear5h(t *testing.T
 	}
 	if pct, ok := account.GetUsagePercent5h(); !ok || pct != 63 {
 		t.Fatalf("usage_percent_5h = (%v, %v), want (63, true)", pct, ok)
+	}
+}
+
+func TestSyncCodexUsageState_InvalidOrMissingResetPreservesExistingWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		resetValue string
+		setReset   bool
+	}{
+		{name: "missing"},
+		{name: "malformed", resetValue: "not-a-number", setReset: true},
+		{name: "zero", resetValue: "0", setReset: true},
+		{name: "negative", resetValue: "-1", setReset: true},
+		{name: "absolute timestamp in reset-after header", resetValue: "4102444800", setReset: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+			account := &auth.Account{DBID: 301, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+			observedBefore := time.Now().Add(-time.Minute)
+			reset5h := time.Now().Add(3 * time.Hour).Truncate(time.Second)
+			reset7d := time.Now().Add(5 * 24 * time.Hour).Truncate(time.Second)
+			account.SetUsageSnapshot5hAt(10, reset5h, observedBefore)
+			account.SetReset7dAt(reset7d)
+			account.SetWindow7dSeconds(604800)
+
+			resp := &http.Response{Header: make(http.Header)}
+			resp.Header.Set("x-codex-primary-used-percent", "25")
+			resp.Header.Set("x-codex-primary-window-minutes", "300")
+			resp.Header.Set("x-codex-secondary-used-percent", "40")
+			resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+			if tc.setReset {
+				resp.Header.Set("x-codex-primary-reset-after-seconds", tc.resetValue)
+				resp.Header.Set("x-codex-secondary-reset-after-seconds", tc.resetValue)
+			}
+
+			result := SyncCodexUsageState(store, account, resp)
+			if !result.HasUsage5h || result.UsagePct5h != 25 || !result.HasUsage7d || result.UsagePct7d != 40 {
+				t.Fatalf("usage result = %+v, want updated percentages", result)
+			}
+			if pct, gotReset, ok := account.GetUsageSnapshot5h(); !ok || pct != 25 || !gotReset.Equal(reset5h) {
+				t.Fatalf("5h snapshot = (%v, %v, %v), want 25%% with preserved reset %v", pct, gotReset, ok, reset5h)
+			}
+			if got := account.GetReset7dAt(); !got.Equal(reset7d) {
+				t.Fatalf("7d reset = %v, want preserved %v", got, reset7d)
+			}
+		})
+	}
+}
+
+func TestSyncCodexUsageState_MissingResetDoesNotInventWindowBoundary(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 302, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+	resp := &http.Response{Header: make(http.Header)}
+	resp.Header.Set("x-codex-primary-used-percent", "25")
+	resp.Header.Set("x-codex-primary-window-minutes", "300")
+	resp.Header.Set("x-codex-secondary-used-percent", "40")
+	resp.Header.Set("x-codex-secondary-window-minutes", "10080")
+
+	result := SyncCodexUsageState(store, account, resp)
+	if !result.HasUsage5h || !result.HasUsage7d {
+		t.Fatalf("usage result = %+v, want both percentages applied", result)
+	}
+	if _, resetAt, ok := account.GetUsageSnapshot5h(); !ok || !resetAt.IsZero() {
+		t.Fatalf("5h reset = %v (valid=%v), want zero without a reset signal", resetAt, ok)
+	}
+	if resetAt := account.GetReset7dAt(); !resetAt.IsZero() {
+		t.Fatalf("7d reset = %v, want zero without a reset signal", resetAt)
 	}
 }
 

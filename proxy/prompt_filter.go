@@ -73,6 +73,11 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
 	}
+	if passiveInternalRequestAuthorized(c) {
+		// Field-classified internal turns contain transcript or original
+		// user text by design. Do not recursively filter it as a fresh user prompt.
+		return false
+	}
 	// Skip envelope construction and body traversal when neither the local
 	// filter nor a body-dependent extension is enabled (issue #417).
 	if !promptfilter.RequiresRequestText(cfg) {
@@ -152,6 +157,9 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
+	}
+	if passiveInternalRequestAuthorized(c) {
+		return false
 	}
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false
@@ -265,6 +273,7 @@ type promptFilterAuditContext struct {
 	NewAPIRequestID      string
 	NewAPIDecisionID     string
 	SessionHash          string
+	RootSessionHash      string
 	ClientIPHash         string
 }
 
@@ -280,6 +289,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 	populatePromptFilterAPIKeyMeta(c, input)
 	newAPIStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	sessionHash := ""
+	rootSessionHash := ""
 	newAPIChannelID := 0
 	newAPIUserName, newAPIUserEmail, newAPIUserGroup := "", "", ""
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && policyContext.MetaVerified {
@@ -294,6 +304,38 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		// make the same choice for optional unsigned bindings, disabled bindings,
 		// and failed optional verification—not only for completely unbound keys.
 		sessionHash = promptConversationLockFallbackSessionHash(c)
+	}
+	// Preserve exact-session accounting only when root resolution is not
+	// authoritative. A signed root-capable sender may explicitly report that
+	// the root is unavailable; that state must not fall back to the leaf and
+	// temporarily consume an operational account window.
+	rootSessionHash = ""
+	// RootSessionHash is deliberately operational-only. Prompt risk profiles
+	// and CYB evidence keep the exact leaf SessionHash, while account/session
+	// observations collapse hidden Guardian and sub-agent leaves to the main
+	// user-visible task.
+	if newAPIStatus == "verified" || newAPIStatus == "signed_response" || newAPIStatus == "unbound" {
+		rootBody := ingressRequestBody(c, nil)
+		if len(rootBody) == 0 && isResponsesWebSocketUpgradeRequest(c.Request) {
+			// WebSocket request headers belong to the connection, while the root
+			// session graph normally lives in the current response.create frame.
+			// The immutable HTTP ingress body is intentionally absent for WS, so
+			// use only this frame's already-cached body for operational grouping.
+			if frameBody, ok := rawRequestBodyFromContext(c); ok {
+				rootBody = frameBody
+			}
+		}
+		rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, rootBody)
+		if rootIdentity.stable && !rootIdentity.conflict && rootIdentity.sessionID != "" {
+			rootSessionHash = hashRiskIdentity(rootIdentity.sessionID)
+		} else if !rootIdentity.authoritative {
+			// Unbound/legacy traffic keeps exact-session compatibility. A
+			// root-capable signed sender can instead report that the current WS
+			// frame has no usable root yet; in that case leave the operational
+			// identity empty so its leaf is not temporarily counted as a second
+			// account window before a later frame binds the real root.
+			rootSessionHash = sessionHash
+		}
 	}
 	clientIP := input.ClientIP
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && strings.TrimSpace(policyContext.Identity.ClientIP) != "" {
@@ -317,6 +359,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		NewAPIUserGroup:      newAPIUserGroup,
 		NewAPIRequestID:      policyContext.Identity.RequestID,
 		SessionHash:          sessionHash,
+		RootSessionHash:      rootSessionHash,
 		ClientIPHash:         hashRiskIdentity(clientIP),
 	}
 }

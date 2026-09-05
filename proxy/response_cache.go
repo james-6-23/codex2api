@@ -216,6 +216,9 @@ func GetResponseCacheStats() ResponseCacheStats {
 // resetResponseCacheStateForTest replaces all local state with a deterministic
 // test configuration. It deliberately remains package-private.
 func resetResponseCacheStateForTest(config responseCacheConfig) {
+	responseAffinityLocal.Lock()
+	responseAffinityLocal.entries = make(map[string]responseAccountAffinity)
+	responseAffinityLocal.Unlock()
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
 	respCache.lru = list.New()
@@ -767,7 +770,9 @@ func respCacheCleanupLoop() {
 	ticker := time.NewTicker(responseCleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		cleanupResponseCacheExpired(time.Now())
+		now := time.Now()
+		cleanupResponseCacheExpired(now)
+		cleanupResponseAccountAffinityExpired(now)
 	}
 }
 

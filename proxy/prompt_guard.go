@@ -271,7 +271,7 @@ func promptGuardRequestContext(c *gin.Context) context.Context {
 }
 
 func (h *Handler) resolvePromptGuardOverrides(c *gin.Context, cfg promptfilter.Config, signedBody []byte, model string) (string, string, bool, string, string, promptfilter.ModelFamily, bool) {
-	requestedModel := model
+	requestedModel := trustedRequestedModel(c, model)
 	effectiveModel := model
 	policyContext, verified := h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, signedBody)
 	if !verified || !policyContext.MetaVerified {

@@ -98,7 +98,14 @@ func (h *Handler) acquireAPIKeyConcurrency(c *gin.Context) (func(), bool) {
 		return nil, true
 	}
 	limiter := h.apiKeyConcurrencyLimiter()
-	release, current, ok := limiter.acquire(row.ID, row.Limits.MaxConcurrency)
+	effectiveLimit := row.Limits.MaxConcurrency
+	if passiveInternalRequestAuthorized(c) {
+		// The main turn can be holding the configured slot while it waits for
+		// Guardian approval. Permit exactly one additional verified internal
+		// request, not an unbounded concurrency bypass.
+		effectiveLimit++
+	}
+	release, current, ok := limiter.acquire(row.ID, effectiveLimit)
 	if ok {
 		return release, true
 	}
@@ -113,7 +120,11 @@ func (h *Handler) acquireAPIKeyConcurrencyForWebSocket(c *gin.Context) (func(), 
 		return nil, nil, true
 	}
 	limiter := h.apiKeyConcurrencyLimiter()
-	release, current, ok := limiter.acquire(row.ID, row.Limits.MaxConcurrency)
+	effectiveLimit := row.Limits.MaxConcurrency
+	if passiveInternalRequestAuthorized(c) {
+		effectiveLimit++
+	}
+	release, current, ok := limiter.acquire(row.ID, effectiveLimit)
 	if ok {
 		return release, nil, true
 	}

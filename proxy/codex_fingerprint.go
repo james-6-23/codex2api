@@ -218,12 +218,8 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 // 真实设备标识上，且该值本来就会覆盖出站头（自定义头最后应用），这里一并采用可
 // 保证请求头与 metadata 中的取值一致。
 func resolveConvergedInstallationID(account *auth.Account, accountID int64) string {
-	for name, value := range account.GetCustomHeaders() {
-		if strings.EqualFold(strings.TrimSpace(name), codexInstallationIDHeader) {
-			if pinned := strings.TrimSpace(value); pinned != "" {
-				return pinned
-			}
-		}
+	if installationID := account.EffectiveCodexInstallationID(); installationID != "" {
+		return installationID
 	}
 	return deriveStableCodexUUID(fmt.Sprintf("codex2api:codex-install-id:v1:%d", accountID))
 }

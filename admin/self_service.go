@@ -253,7 +253,7 @@ func (h *Handler) upsertSelfServiceAccount(ctx context.Context, name, proxyURL s
 		}
 	}
 
-	id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(seed), proxyURL)
+	id, err := h.db.InsertAccountWithCredentials(ctx, name, h.newCodexAccountCredentials(&seed), proxyURL)
 	if err != nil {
 		return 0, err
 	}

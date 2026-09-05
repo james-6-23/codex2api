@@ -410,6 +410,9 @@ func (h *Handler) refreshAPIKeyAllowedGroupsAfterGroupDelete(ctx context.Context
 		}
 		if h.store != nil {
 			h.store.SetAPIKeyAllowedGroups(key.ID, key.AllowedGroupIDs)
+			h.store.SetAPIKeyNoAffinityGroups(key.ID, key.Limits.NoAffinityGroupIDs)
+			h.store.SetAPIKeyAllowedPlans(key.ID, key.Limits.PlanAllow)
+			h.store.SetAPIKeyUpstreamChannel(key.ID, key.Limits.ResolveUpstreamChannel())
 		}
 		h.invalidateAPIKeyRuntimeCaches(ctx, key.Key)
 	}

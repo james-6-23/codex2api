@@ -29,6 +29,7 @@ var (
 type continuousRetryReplay struct {
 	memory      bytes.Buffer
 	file        *os.File
+	filePath    string
 	size        int64
 	memoryLimit int64
 	totalLimit  int64
@@ -87,13 +88,16 @@ func (r *continuousRetryReplay) Write(data []byte) (int, error) {
 		if err != nil {
 			return 0, errContinuousRetryReplayStorage
 		}
-		// The open descriptor is sufficient for replay. Removing the directory
-		// entry immediately prevents abandoned attempts from leaving files behind.
-		if err := os.Remove(file.Name()); err != nil {
-			_ = file.Close()
-			return 0, errContinuousRetryReplayStorage
+		// Unix can unlink an open replay immediately. Windows normally cannot, so
+		// retain the path there (or on any filesystem with the same semantics) and
+		// remove it after closing. Treating the sharing violation as a storage
+		// failure made every file-backed replay fail on Windows before commit.
+		filePath := file.Name()
+		if err := os.Remove(filePath); err == nil || errors.Is(err, os.ErrNotExist) {
+			filePath = ""
 		}
 		r.file = file
+		r.filePath = filePath
 		if r.memory.Len() > 0 {
 			if err := writeAll(r.file, r.memory.Bytes()); err != nil {
 				_ = r.Close()
@@ -164,6 +168,12 @@ func (r *continuousRetryReplay) Close() error {
 			closeErr = errContinuousRetryReplayStorage
 		}
 		r.file = nil
+	}
+	if r.filePath != "" {
+		if err := os.Remove(r.filePath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			closeErr = errContinuousRetryReplayStorage
+		}
+		r.filePath = ""
 	}
 	return closeErr
 }

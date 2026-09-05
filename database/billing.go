@@ -450,13 +450,14 @@ func normalizeBillingModelName(model string) string {
 
 func normalizeCodexBillingModel(model string) (string, bool) {
 	compact := strings.NewReplacer(" ", "-", "_", "-").Replace(strings.ToLower(model))
+	if suffix, ok := strings.CutPrefix(compact, "gpt-6-astra"); ok {
+		switch suffix {
+		case "", "-none", "-minimal", "-low", "-medium", "-high", "-xhigh", "-max", "-ultra",
+			"(none)", "(minimal)", "(low)", "(medium)", "(high)", "(xhigh)", "(max)", "(ultra)":
+			return "gpt-6-astra", true
+		}
+	}
 	switch {
-	// gpt-6 世代（官方定价页 2026-09）：目前只有 astra 一个公开型号，
-	// 未知 gpt-6 变体按 astra 兜底，避免掉进 $1/$2 的默认价严重低估。
-	// 只认 gpt-6- / gpt-6. / 裸 gpt-6 前缀，gpt-5.6 不含 "gpt-6" 不会误命中。
-	case strings.HasPrefix(compact, "gpt-6-") || strings.HasPrefix(compact, "gpt-6.") || compact == "gpt-6" ||
-		strings.HasPrefix(compact, "gpt6-") || strings.HasPrefix(compact, "gpt6.") || compact == "gpt6":
-		return "gpt-6-astra", true
 	case strings.Contains(compact, "gpt-5.5-pro") || strings.Contains(compact, "gpt5-5-pro") || strings.Contains(compact, "gpt5.5-pro"):
 		return "gpt-5.5-pro", true
 	case strings.Contains(compact, "gpt-5.5") || strings.Contains(compact, "gpt5-5") || strings.Contains(compact, "gpt5.5"):
@@ -518,6 +519,9 @@ func modelRulePricing(model string) *ModelPricing {
 	bestLen := -1
 	for i := range modelPricingRules {
 		rule := modelPricingRules[i]
+		if rule.model == "gpt-6-astra" && model != rule.model {
+			continue
+		}
 		if modelMatchesRule(model, rule.model) && len(rule.model) > bestLen {
 			bestIdx = i
 			bestLen = len(rule.model)

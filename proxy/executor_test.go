@@ -508,6 +508,40 @@ func TestApplyCodexRequestHeadersForwardsAttestationOnlyWhenPresent(t *testing.T
 	}
 }
 
+func TestApplyCodexRequestHeadersForwardsOfficialCodexConversationGraph(t *testing.T) {
+	downstream := http.Header{}
+	downstream.Set("X-Codex-Parent-Thread-Id", "parent-thread")
+	downstream.Set("X-Codex-Forked-From-Thread-Id", "fork-thread")
+	downstream.Set("X-Codex-Turn-Metadata", `{"forked_from_thread_id":"fork-thread"}`)
+	downstream.Set("X-OpenAI-Subagent", "review")
+	downstream.Set("X-OpenAI-Memgen-Request", "true")
+
+	for _, mode := range []string{auth.CodexFingerprintModeOff, auth.CodexFingerprintModeDevice} {
+		t.Run(mode, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequest: %v", err)
+			}
+			account := &auth.Account{DBID: 42, AccountID: "acct-42", CodexFingerprintMode: mode}
+			applyCodexRequestHeaders(req, account, "token-123", "cache-key-1", "api-key-1", nil, downstream)
+
+			for _, name := range []string{
+				"X-Codex-Parent-Thread-Id",
+				"X-Codex-Turn-Metadata",
+				"X-OpenAI-Subagent",
+				"X-OpenAI-Memgen-Request",
+			} {
+				if got, want := req.Header.Get(name), downstream.Get(name); got != want {
+					t.Fatalf("%s = %q, want %q", name, got, want)
+				}
+			}
+			if got := req.Header.Get("X-Codex-Forked-From-Thread-Id"); got != "" {
+				t.Fatalf("unofficial fork header = %q, want empty", got)
+			}
+		})
+	}
+}
+
 func TestApplyCodexRequestHeadersForwardsResponsesLiteOnlyWhenPresent(t *testing.T) {
 	const headerName = codexResponsesLiteHeader
 	acc := &auth.Account{DBID: 42, AccountID: "acct-42"}
@@ -1491,6 +1525,17 @@ func TestResolveSessionIDPrefersContinuityHeaders(t *testing.T) {
 	}
 }
 
+func TestResolveStableExplicitSessionIDExcludesIdempotencyKey(t *testing.T) {
+	headers := http.Header{"Idempotency-Key": []string{"per-request-key"}}
+	if got := ResolveStableExplicitSessionID(headers, nil); got != "" {
+		t.Fatalf("stable explicit session id = %q, want empty", got)
+	}
+	identity := resolveRequestSessionIdentity(headers, nil)
+	if identity.stableIdentity {
+		t.Fatal("per-request idempotency key was marked as a stable conversation")
+	}
+}
+
 func TestResolveSessionIDUsesLocalAffinityHeader(t *testing.T) {
 	body := []byte(`{"model":"gpt-5.4","input":[{"role":"user","content":"same prompt"}]}`)
 	baseHeaders := http.Header{"Authorization": []string{"Bearer shared-key"}}
@@ -1624,6 +1669,97 @@ func TestResolveExplicitSessionIDDoesNotUseAPIKeyFallback(t *testing.T) {
 	}
 	if got := ResolveSessionID(headers, []byte(`{}`)); got == "" {
 		t.Fatal("ResolveSessionID() should still generate API-key fallback")
+	}
+}
+
+func TestResolveNativeCodexSessionGraphCollapsesSubagentsToRoot(t *testing.T) {
+	root := "7c0a82a4-1f90-41a0-8c52-50982eef3111"
+	child := "91bdd7ab-faaa-4b54-99cc-acde06704ed2"
+	rootHeaders := http.Header{
+		"Session-Id":          []string{root},
+		"Thread-Id":           []string{root},
+		"X-Client-Request-Id": []string{root},
+		"X-Codex-Window-Id":   []string{root + ":0"},
+	}
+	childHeaders := http.Header{
+		"Session-Id":               []string{root},
+		"Thread-Id":                []string{child},
+		"X-Client-Request-Id":      []string{child},
+		"X-Codex-Window-Id":        []string{child + ":18"},
+		"X-Codex-Parent-Thread-Id": []string{root},
+	}
+	if got := ResolveExplicitSessionID(rootHeaders, nil); got != root {
+		t.Fatalf("root graph = %q, want %q", got, root)
+	}
+	if got := ResolveExplicitSessionID(childHeaders, nil); got != root {
+		t.Fatalf("child graph = %q, want root %q", got, root)
+	}
+}
+
+func TestResolveExplicitSessionIDUsesBodyNativeGraph(t *testing.T) {
+	body := []byte(`{"client_metadata":{"session_id":"` + testRootSessionA + `","thread_id":"` + testLeafSessionA + `","client_request_id":"` + testLeafSessionA + `","window_id":"` + testLeafSessionA + `:21","parent_thread_id":"` + testRootSessionA + `"}}`)
+
+	if got := ResolveExplicitSessionID(nil, body); got != testRootSessionA {
+		t.Fatalf("body native graph explicit id = %q, want root %q", got, testRootSessionA)
+	}
+	if got := ResolveStableExplicitSessionID(nil, body); got != testRootSessionA {
+		t.Fatalf("body native graph stable id = %q, want root %q", got, testRootSessionA)
+	}
+	identity := resolveRequestSessionIdentity(nil, body)
+	if identity.explicitUpstreamID != testRootSessionA || !identity.stableIdentity {
+		t.Fatalf("body native graph was not promoted to explicit identity: %+v", identity)
+	}
+}
+
+func TestResolveExplicitSessionIDRejectsIncompleteBodyNativeGraph(t *testing.T) {
+	for _, body := range [][]byte{
+		[]byte(`{"client_metadata":{"thread_id":"` + testLeafSessionA + `"}}`),
+		[]byte(`{"client_metadata":{"session_id":"` + testRootSessionA + `","thread_id":"` + testLeafSessionA + `","window_id":"` + testLeafSessionA + `:21"}}`),
+		[]byte(`{"client_metadata":{"session_id":"` + testRootSessionA + `","thread_id":"` + testLeafSessionA + `","client_request_id":"different","window_id":"` + testLeafSessionA + `:21","parent_thread_id":"` + testRootSessionA + `"}}`),
+	} {
+		if got := ResolveExplicitSessionID(nil, body); got != "" {
+			t.Fatalf("incomplete/conflicting body graph explicit id = %q, want empty", got)
+		}
+		if got := ResolveStableExplicitSessionID(nil, body); got != "" {
+			t.Fatalf("incomplete/conflicting body graph stable id = %q, want empty", got)
+		}
+	}
+}
+
+func TestResolveExplicitSessionIDHeaderNativeGraphWinsOverBodyGraph(t *testing.T) {
+	rootB := testRootSessionB
+	headers := nativeSessionHeaders(testRootSessionA, testLeafSessionA, 22)
+	body := []byte(`{"client_metadata":{"session_id":"` + rootB + `","thread_id":"` + testLeafSessionB + `","client_request_id":"` + testLeafSessionB + `","window_id":"` + testLeafSessionB + `:22","parent_thread_id":"` + rootB + `"}}`)
+
+	if got := ResolveExplicitSessionID(headers, body); got != testRootSessionA {
+		t.Fatalf("header native graph was overwritten by body graph: got %q, want %q", got, testRootSessionA)
+	}
+	if got := ResolveStableExplicitSessionID(headers, body); got != testRootSessionA {
+		t.Fatalf("header native stable graph was overwritten by body graph: got %q, want %q", got, testRootSessionA)
+	}
+}
+
+func TestResolveExplicitSessionIDBodyForkUsesCurrentRoot(t *testing.T) {
+	body := []byte(`{"client_metadata":{"session_id":"` + testLeafSessionA + `","thread_id":"` + testLeafSessionA + `","client_request_id":"` + testLeafSessionA + `","window_id":"` + testLeafSessionA + `:0","forked_from_thread_id":"` + testRootSessionA + `","thread_source":"user","request_kind":"turn"}}`)
+
+	if got := ResolveExplicitSessionID(nil, body); got != testLeafSessionA {
+		t.Fatalf("body fork explicit id = %q, want current root %q", got, testLeafSessionA)
+	}
+	if got := ResolveExplicitSessionID(nil, body); got == testRootSessionA {
+		t.Fatal("fork source thread was incorrectly used as current explicit session")
+	}
+}
+
+func TestResolveNativeCodexSessionGraphRejectsMismatchedWindow(t *testing.T) {
+	root := "7c0a82a4-1f90-41a0-8c52-50982eef3111"
+	headers := http.Header{
+		"Session-Id":          []string{root},
+		"Thread-Id":           []string{root},
+		"X-Client-Request-Id": []string{root},
+		"X-Codex-Window-Id":   []string{"different:0"},
+	}
+	if _, ok := resolveNativeCodexSessionGraph(headers); ok {
+		t.Fatal("mismatched window graph was accepted")
 	}
 }
 

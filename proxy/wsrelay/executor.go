@@ -129,6 +129,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	wsBody := e.prepareWebsocketBody(requestBody, sessionID)
 
 	headerSessionID := resolveHandshakeSessionID(sessionID, poolRouteKey, wsBody)
+	baseKey := strings.TrimSpace(poolRouteKey)
+	if baseKey == "" && headerSessionID != sessionID {
+		baseKey = headerSessionID
+	}
 
 	// 构建 WebSocket URL
 	httpURL := proxy.CodexBaseURL + CodexWsEndpoint
@@ -144,6 +148,14 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 
 	// 准备请求头
 	headers := e.prepareWebsocketHeaders(accessToken, account, accountIDStr, headerSessionID, apiKey, deviceCfg, ginHeaders, wsBody)
+	// Project the final compatibility headers (including account overrides) into
+	// this logical request's frame, then converge any newly introduced identity
+	// fields. This mirrors the official Codex canonical metadata projection.
+	wsBody = applyCodexFrameMetadata(wsBody, headers)
+	wsBody = proxy.ApplyCodexFingerprintToBody(wsBody, account, ginHeaders)
+	if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
+		stripCodexFrameScopedHandshakeHeaders(headers)
+	}
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.
@@ -181,10 +193,6 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		if pwc, ppr, slotKey := e.manager.AcquirePreferredConnection(prevRespID, account.ID(), apiKey); pwc != nil {
 			wc, pr, poolSessionID = pwc, ppr, slotKey
 		}
-	}
-	baseKey := strings.TrimSpace(poolRouteKey)
-	if baseKey == "" && headerSessionID != sessionID {
-		baseKey = headerSessionID
 	}
 	if wc == nil {
 		if proxy.IsStatelessWebsocketSessionID(sessionID) && baseKey != "" && !statelessOneShotEnabled() {
@@ -314,6 +322,144 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	return wsBody
 }
 
+const codexTurnMetadataClientPath = "client_metadata.x-codex-turn-metadata"
+
+// applyCodexFrameMetadata projects request-scoped Codex compatibility headers
+// into the response.create frame. The official Codex client treats
+// client_metadata["x-codex-turn-metadata"] as the canonical HTTP/WS carrier;
+// flat parent/subagent fields remain compatibility projections. Existing frame
+// values always win because they are newer than connection upgrade headers.
+func applyCodexFrameMetadata(body []byte, headers http.Header) []byte {
+	if len(body) == 0 || headers == nil || !gjson.ValidBytes(body) {
+		return body
+	}
+
+	rawTurnMetadata := strings.TrimSpace(headers.Get("X-Codex-Turn-Metadata"))
+	if !gjson.GetBytes(body, codexTurnMetadataClientPath).Exists() && gjson.Valid(rawTurnMetadata) && gjson.Parse(rawTurnMetadata).IsObject() {
+		if updated, err := sjson.SetBytes(body, codexTurnMetadataClientPath, rawTurnMetadata); err == nil {
+			body = updated
+		}
+	}
+
+	projections := []struct {
+		header         string
+		path           string
+		canonicalField string
+	}{
+		{"X-Codex-Turn-State", "client_metadata.x-codex-turn-state", ""},
+		{"X-Client-Request-Id", "client_metadata.x-client-request-id", ""},
+		{"X-Codex-Parent-Thread-Id", "client_metadata.x-codex-parent-thread-id", "parent_thread_id"},
+		{"X-OpenAI-Subagent", "client_metadata.x-openai-subagent", ""},
+		{"X-OpenAI-Memgen-Request", "client_metadata.x-openai-memgen-request", ""},
+	}
+	for _, projection := range projections {
+		if firstCodexFrameValue(body, projection.path) != "" {
+			continue
+		}
+		value := ""
+		if projection.canonicalField != "" {
+			value = codexTurnMetadataStringField(body, projection.canonicalField)
+		}
+		if value == "" {
+			value = strings.TrimSpace(headers.Get(projection.header))
+		}
+		if projection.header == "X-OpenAI-Memgen-Request" {
+			switch requestKind := codexTurnMetadataStringField(body, "request_kind"); {
+			case strings.EqualFold(requestKind, "memory"):
+				value = "true"
+			case requestKind != "":
+				// Canonical metadata is authoritative over an incompatible
+				// connection-level compatibility header.
+				value = ""
+			}
+		}
+		if value == "" {
+			continue
+		}
+		if updated, err := sjson.SetBytes(body, projection.path, value); err == nil {
+			body = updated
+		}
+	}
+
+	parent := firstCodexFrameValue(body,
+		"client_metadata.parent_thread_id",
+		"client_metadata.x-codex-parent-thread-id",
+	)
+	if parent == "" {
+		parent = strings.TrimSpace(headers.Get("X-Codex-Parent-Thread-Id"))
+	}
+	body = mergeCodexTurnMetadataStringField(body, "parent_thread_id", parent)
+
+	if subagentKind := firstCodexFrameValue(body, "client_metadata.subagent_kind"); subagentKind != "" {
+		body = mergeCodexTurnMetadataStringField(body, "subagent_kind", subagentKind)
+	}
+	if strings.EqualFold(strings.TrimSpace(headers.Get("X-OpenAI-Memgen-Request")), "true") {
+		body = mergeCodexTurnMetadataStringField(body, "request_kind", "memory")
+	}
+	return body
+}
+
+func firstCodexFrameValue(body []byte, paths ...string) string {
+	for _, path := range paths {
+		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+func codexTurnMetadataStringField(body []byte, field string) string {
+	existing := gjson.GetBytes(body, codexTurnMetadataClientPath)
+	if existing.Type != gjson.String || !gjson.Valid(existing.String()) || !gjson.Parse(existing.String()).IsObject() {
+		return ""
+	}
+	return strings.TrimSpace(gjson.Get(existing.String(), field).String())
+}
+
+func mergeCodexTurnMetadataStringField(body []byte, field, value string) []byte {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return body
+	}
+
+	raw := "{}"
+	existing := gjson.GetBytes(body, codexTurnMetadataClientPath)
+	if existing.Exists() && existing.Type != gjson.Null {
+		if existing.Type != gjson.String || !gjson.Valid(existing.String()) || !gjson.Parse(existing.String()).IsObject() {
+			return body
+		}
+		raw = existing.String()
+	}
+	if gjson.Get(raw, field).Exists() {
+		return body
+	}
+	merged, err := sjson.Set(raw, field, value)
+	if err != nil {
+		return body
+	}
+	updated, err := sjson.SetBytes(body, codexTurnMetadataClientPath, merged)
+	if err != nil {
+		return body
+	}
+	return updated
+}
+
+// A stateless pooled connection can serve unrelated logical requests. Keep
+// request-scoped compatibility headers off its frozen handshake; their current
+// values are carried by each response.create frame instead.
+func stripCodexFrameScopedHandshakeHeaders(headers http.Header) {
+	for _, name := range []string{
+		"X-Codex-Turn-State",
+		"X-Codex-Turn-Metadata",
+		"X-Client-Request-Id",
+		"X-Codex-Parent-Thread-Id",
+		"X-OpenAI-Subagent",
+		"X-OpenAI-Memgen-Request",
+	} {
+		headers.Del(name)
+	}
+}
+
 // prepareWebsocketHeaders 准备 WebSocket 请求头
 func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Account, accountID, sessionID, apiKey string, deviceCfg *proxy.DeviceProfileConfig, ginHeaders http.Header, wsBody []byte) http.Header {
 	headers := http.Header{}
@@ -357,7 +503,7 @@ func (e *Executor) prepareWebsocketHeaders(accessToken string, account *auth.Acc
 	}
 	// X-Oai-Attestation：DeviceCheck 设备认证头（上游 openai/codex#20619），
 	// 仅在下游携带时透传，本代理不伪造（假 token 服务端验证必败，反而暴露）。
-	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
+	for _, name := range []string{"X-Codex-Turn-State", "X-Codex-Turn-Metadata", "X-Client-Request-Id", "X-Codex-Parent-Thread-Id", "X-OpenAI-Subagent", "X-OpenAI-Memgen-Request", "X-Responsesapi-Include-Timing-Metrics", "X-Oai-Attestation"} {
 		if value := strings.TrimSpace(ginHeaders.Get(name)); value != "" {
 			headers.Set(name, value)
 		}

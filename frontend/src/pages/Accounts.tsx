@@ -61,6 +61,7 @@ import type {
   AccountOperationSelector,
   AccountPageStatsItem,
   AccountLiveStateResponse,
+  AccountSessionSnapshot,
   UpstreamChannel,
   OpenAIResponsesBalanceResponse,
 } from "../types";
@@ -308,6 +309,203 @@ function AccountConcurrencyBadge({ account }: { account: AccountRow }) {
       />
       {showOccupied ? `${active}/${occupied}` : active}
     </span>
+  );
+}
+
+function AccountSessionCapacityBadge({ account }: { account: AccountRow }) {
+  const { t } = useTranslation();
+  const [open, setOpen] = useState(false);
+  const [sessions, setSessions] = useState<AccountSessionSnapshot[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [sessionNow, setSessionNow] = useState(() => Date.now());
+  const sessionLoadPending = useRef(false);
+  const current = Math.max(0, account.session_capacity_current ?? 0);
+  const maximum = Math.max(1, account.session_capacity_max ?? 5);
+  const load = useCallback((showLoading = true) => {
+    if (sessionLoadPending.current) return;
+    sessionLoadPending.current = true;
+    if (showLoading) setLoading(true);
+    void api.getAccountSessions(account.id)
+      .then((response) => {
+        setSessions(response.sessions ?? []);
+        setLoadError(null);
+      })
+      .catch((error) => {
+        setLoadError(getErrorMessage(error));
+      })
+      .finally(() => {
+        sessionLoadPending.current = false;
+        if (showLoading) setLoading(false);
+      });
+  }, [account.id]);
+  useEffect(() => {
+    if (!open || !account.session_capacity_enabled) return;
+    setSessionNow(Date.now());
+    const countdownID = window.setInterval(() => setSessionNow(Date.now()), 1000);
+    const refreshID = window.setInterval(() => load(false), 5000);
+    return () => {
+      window.clearInterval(countdownID);
+      window.clearInterval(refreshID);
+    };
+  }, [account.session_capacity_enabled, load, open]);
+  const openDetails = () => {
+    setOpen(true);
+    load();
+  };
+  if (!account.session_capacity_enabled) return null;
+  return (
+    <>
+      <button
+        type="button"
+        onClick={openDetails}
+        className="inline-flex items-center gap-1 rounded-md bg-violet-50 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-violet-700 ring-1 ring-inset ring-violet-500/20 transition-colors hover:bg-violet-100 dark:bg-violet-950 dark:text-violet-300 dark:ring-violet-400/20 dark:hover:bg-violet-900"
+      >
+        <Layers className="size-3" />
+        {t("accounts.sessionCapacityBadge", { current, maximum })}
+      </button>
+      <Modal
+        show={open}
+        title={t("accounts.sessionCapacityTooltipTitle", {
+          current,
+          maximum,
+        })}
+        contentClassName="sm:max-w-[780px]"
+        bodyClassName="sm:px-7 sm:py-6"
+        onClose={() => setOpen(false)}
+        footer={
+          <>
+            <Button
+              type="button"
+              variant="outline"
+              disabled={loading}
+              onClick={() => load()}
+            >
+              <RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />
+              {t("common.refresh")}
+            </Button>
+            <Button type="button" onClick={() => setOpen(false)}>
+              {t("common.close")}
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          <div className="rounded-xl border border-border bg-muted/30 px-4 py-3">
+            <div className="text-xs font-medium text-muted-foreground">
+              {t("accounts.sessionCapacityAccount")}
+            </div>
+            <div className="mt-1 break-all text-base font-semibold text-foreground">
+              {formatAccountName(account)}
+            </div>
+          </div>
+
+          {loading && sessions === null ? (
+            <div className="flex min-h-32 items-center justify-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="size-4 animate-spin" />
+              {t("common.loading")}
+            </div>
+          ) : null}
+
+          {loadError ? (
+            <div role="alert" className="rounded-xl border border-destructive/30 bg-destructive/5 px-4 py-3 text-sm text-destructive">
+              {loadError}
+            </div>
+          ) : null}
+
+          {!loading && !loadError && sessions?.length === 0 ? (
+            <div className="flex min-h-32 items-center justify-center rounded-xl border border-dashed border-border text-sm text-muted-foreground">
+              {t("accounts.sessionCapacityEmpty")}
+            </div>
+          ) : null}
+
+          {sessions?.map((session, index) => {
+            const ownerName =
+              session.owner?.user_name ||
+              session.owner?.user_email ||
+              (session.owner?.user_id
+                ? `#${session.owner.user_id}`
+                : session.owner?.api_key_name || "-");
+            const expiresAt = Date.parse(session.expires_at);
+            const remainingSeconds = Number.isFinite(expiresAt)
+              ? Math.max(0, Math.ceil((expiresAt - sessionNow) / 1000))
+              : Math.max(0, session.remaining_seconds ?? 0);
+            return (
+              <div
+                key={session.session_id}
+                className="rounded-xl border border-border bg-card p-4 shadow-sm"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className="flex size-6 shrink-0 items-center justify-center rounded-md bg-violet-500/12 text-xs font-bold tabular-nums text-violet-700 dark:bg-violet-400/15 dark:text-violet-300">
+                      {index + 1}
+                    </span>
+                    <span className="truncate text-sm font-bold text-violet-700 dark:text-violet-300">
+                      {ownerName}
+                    </span>
+                    {(session.related_request_count ?? 0) > 0 ? (
+                      <span className="shrink-0 rounded-md bg-cyan-500/12 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-cyan-700 ring-1 ring-inset ring-cyan-500/20 dark:bg-cyan-400/15 dark:text-cyan-300 dark:ring-cyan-400/20">
+                        {t("accounts.sessionCapacityRelatedCount", {
+                          count: session.related_request_count,
+                        })}
+                      </span>
+                    ) : null}
+                  </div>
+                  <span className="shrink-0 rounded-full bg-muted px-2.5 py-1 text-xs font-medium tabular-nums text-muted-foreground">
+                    {t("accounts.sessionCapacityRemaining", {
+                      seconds: remainingSeconds,
+                    })}
+                  </span>
+                </div>
+                <div className="mt-3 text-xs font-medium text-muted-foreground">
+                  {t("accounts.sessionCapacitySessionId")}
+                </div>
+                <div className="mt-1.5 overflow-x-auto rounded-lg bg-muted/45 px-3 py-2.5 font-mono text-[13px] leading-5 text-foreground">
+                  <span className="whitespace-nowrap">{session.session_id}</span>
+                </div>
+                {(session.related_sources?.length ?? 0) > 0 ? (
+                  <div className="mt-3">
+                    <div className="text-xs font-medium text-muted-foreground">
+                      {t("accounts.sessionCapacityRelatedSources")}
+                    </div>
+                    <div className="mt-1.5 space-y-1.5">
+                      {session.related_sources?.map((source, sourceIndex) => (
+                        <div
+                          key={`${source.thread_source ?? ""}:${source.request_kind ?? ""}:${source.subagent_kind ?? ""}:${sourceIndex}`}
+                          className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border/70 bg-muted/25 px-3 py-2 text-xs"
+                        >
+                          <span className="font-semibold tabular-nums text-cyan-700 dark:text-cyan-300">
+                            ×{source.count}
+                          </span>
+                          {source.thread_source ? (
+                            <span className="break-all text-foreground">
+                              <span className="text-muted-foreground">thread_source:</span>{" "}
+                              {source.thread_source}
+                            </span>
+                          ) : null}
+                          {source.request_kind ? (
+                            <span className="break-all text-foreground">
+                              <span className="text-muted-foreground">request_kind:</span>{" "}
+                              {source.request_kind}
+                            </span>
+                          ) : null}
+                          {source.subagent_kind ? (
+                            <span className="break-all text-foreground">
+                              <span className="text-muted-foreground">subagent_kind:</span>{" "}
+                              {source.subagent_kind}
+                            </span>
+                          ) : null}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </Modal>
+    </>
   );
 }
 
@@ -1368,7 +1566,7 @@ const AccountTableRow = memo(function AccountTableRow({
                               <TableCell data-account-state-cell="status">
                                 {tableOverlay ?? (
                                   <div
-                                    className="min-w-[168px] max-w-[240px] space-y-1.5"
+                                    className="min-w-[220px] max-w-[280px] space-y-1.5"
                                     title={[
                                       t("accounts.healthSummary", {
                                         health: formatHealthTier(
@@ -1392,7 +1590,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                       .filter(Boolean)
                                       .join("\n")}
                                   >
-                                    <div className="flex min-h-6 flex-wrap items-center gap-1.5">
+                                    <div className="flex min-h-6 flex-nowrap items-center gap-1.5">
                                       <StatusBadge
                                         status={getAccountStatusBadgeStatus(account)}
                                         detail={
@@ -1408,6 +1606,7 @@ const AccountTableRow = memo(function AccountTableRow({
                                         <AccountStatusCountdown account={account} />
                                       )}
                                       <AccountConcurrencyBadge account={account} />
+                                      <AccountSessionCapacityBadge account={account} />
                                     </div>
                                     <AccountHealthBar
                                       buckets={healthBuckets}
@@ -1826,6 +2025,9 @@ export default function Accounts() {
   const [editCustomHeadersText, setEditCustomHeadersText] = useState("");
   const [editCodexFingerprintMode, setEditCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
+  const [editSessionCapacityEnabled, setEditSessionCapacityEnabled] = useState(false);
+  const [editSessionCapacityMax, setEditSessionCapacityMax] = useState("5");
+  const [editSessionCapacityIdleMinutes, setEditSessionCapacityIdleMinutes] = useState("60");
   // 代理池条目：账号表单里"从代理池选择"下拉的数据源。加载失败静默留空
   // （选择器为空时自动隐藏，不影响手动填代理）。
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
@@ -2000,6 +2202,14 @@ export default function Accounts() {
   const [modelsSyncing, setModelsSyncing] = useState(false);
   const [modelsProbing, setModelsProbing] = useState(false);
   const [modelsSaving, setModelsSaving] = useState(false);
+  // 批量模型编辑：候选模型可从所选 OAuth 账号中随机取一个实时拉取，
+  // 也可由管理员手动补充；保存时统一覆盖全部所选 OAuth 账号。
+  const [showBatchModelsEditor, setShowBatchModelsEditor] = useState(false);
+  const [batchModelsDraft, setBatchModelsDraft] = useState<string[]>([]);
+  const [batchModelsInputDraft, setBatchModelsInputDraft] = useState("");
+  const [batchModelsSyncing, setBatchModelsSyncing] = useState(false);
+  const [batchModelsSaving, setBatchModelsSaving] = useState(false);
+  const [batchModelsSource, setBatchModelsSource] = useState("");
   // 探测看板：逐模型的实时测试状态（pending→testing→结果）。
   const [probeBoard, setProbeBoard] = useState<ModelProbeItem[]>([]);
   const [tagFilter, setTagFilter] = useState<string>("");
@@ -2068,6 +2278,9 @@ export default function Accounts() {
     useState(false);
   const [batchBaseConcurrencyInput, setBatchBaseConcurrencyInput] =
     useState("");
+  const [batchUpdateSkipWarmTier, setBatchUpdateSkipWarmTier] =
+    useState(false);
+  const [batchSkipWarmTier, setBatchSkipWarmTier] = useState(false);
   const [batchUpdateSchedulerPriority, setBatchUpdateSchedulerPriority] =
     useState(false);
   const [batchSchedulerPriorityInput, setBatchSchedulerPriorityInput] =
@@ -2078,6 +2291,16 @@ export default function Accounts() {
   ] = useState(false);
   const [batchCodexFingerprintMode, setBatchCodexFingerprintMode] =
     useState<CodexFingerprintMode>("off");
+  const [batchUpdateSessionCapacity, setBatchUpdateSessionCapacity] =
+    useState(false);
+  const [batchSessionCapacityEnabled, setBatchSessionCapacityEnabled] =
+    useState(false);
+  const [batchSessionCapacityMaxInput, setBatchSessionCapacityMaxInput] =
+    useState("5");
+  const [
+    batchSessionCapacityIdleMinutesInput,
+    setBatchSessionCapacityIdleMinutesInput,
+  ] = useState("60");
   const [batchMetaSubmitting, setBatchMetaSubmitting] = useState(false);
   const [showBatchQuotaAutoPauseEditor, setShowBatchQuotaAutoPauseEditor] =
     useState(false);
@@ -4904,10 +5127,16 @@ export default function Accounts() {
     setBatchScoreBiasInput("");
     setBatchUpdateBaseConcurrency(false);
     setBatchBaseConcurrencyInput("");
+    setBatchUpdateSkipWarmTier(false);
+    setBatchSkipWarmTier(false);
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
     setBatchUpdateCodexFingerprintMode(false);
     setBatchCodexFingerprintMode("off");
+    setBatchUpdateSessionCapacity(false);
+    setBatchSessionCapacityEnabled(false);
+    setBatchSessionCapacityMaxInput("5");
+    setBatchSessionCapacityIdleMinutesInput("60");
     setShowBatchMetaEditor(true);
   };
 
@@ -4921,10 +5150,16 @@ export default function Accounts() {
     setBatchScoreBiasInput("");
     setBatchUpdateBaseConcurrency(false);
     setBatchBaseConcurrencyInput("");
+    setBatchUpdateSkipWarmTier(false);
+    setBatchSkipWarmTier(false);
     setBatchUpdateSchedulerPriority(false);
     setBatchSchedulerPriorityInput("");
     setBatchUpdateCodexFingerprintMode(false);
     setBatchCodexFingerprintMode("off");
+    setBatchUpdateSessionCapacity(false);
+    setBatchSessionCapacityEnabled(false);
+    setBatchSessionCapacityMaxInput("5");
+    setBatchSessionCapacityIdleMinutesInput("60");
     setShowBatchMetaEditor(true);
   };
 
@@ -5003,8 +5238,11 @@ export default function Accounts() {
       const result = await api.syncAccountModelsUpstream(modelsAccount.id);
       const fetched = result.models ?? [];
       setModelsDraft((current) => mergeModelLists(current, fetched));
+      const added = result.whitelist_added?.length ?? 0;
       showToast(
-        t("accounts.supportedModelsSyncDone", { count: fetched.length }),
+        added > 0
+          ? t("accounts.supportedModelsSyncDoneWithAutoAdded", { count: fetched.length, added })
+          : t("accounts.supportedModelsSyncDone", { count: fetched.length }),
       );
     } catch (error) {
       showToast(
@@ -5131,6 +5369,121 @@ export default function Accounts() {
     }
   };
 
+  const openBatchModelsEditor = () => {
+    setBatchModelsDraft([]);
+    setBatchModelsInputDraft("");
+    setBatchModelsSource("");
+    setShowBatchModelsEditor(true);
+  };
+
+  const closeBatchModelsEditor = () => {
+    if (batchModelsSyncing || batchModelsSaving) return;
+    setShowBatchModelsEditor(false);
+    setBatchModelsDraft([]);
+    setBatchModelsInputDraft("");
+    setBatchModelsSource("");
+  };
+
+  const addBatchModelsDraftValues = (raw: string) => {
+    const next = parseModelTokens(raw);
+    if (next.length === 0) return;
+    setBatchModelsDraft((current) => mergeModelLists(current, next));
+    setBatchModelsInputDraft("");
+  };
+
+  const removeBatchModelsDraftValue = (model: string) => {
+    setBatchModelsDraft((current) =>
+      current.filter((item) => item !== model),
+    );
+  };
+
+  const handleBatchSyncModelsUpstream = async () => {
+    const candidateIDs = Array.from(selected);
+    if (candidateIDs.length === 0) {
+      showToast(t("accounts.batchModelsNoEligibleAccount"), "error");
+      return;
+    }
+
+    // Fisher-Yates 打乱后逐个尝试：首个账号是随机的，若它暂时失效则
+    // 自动尝试另一个所选账号，避免一次偶发上游错误让批量编辑无法使用。
+    const shuffled = [...candidateIDs];
+    for (let index = shuffled.length - 1; index > 0; index -= 1) {
+      const randomIndex = Math.floor(Math.random() * (index + 1));
+      [shuffled[index], shuffled[randomIndex]] = [
+        shuffled[randomIndex],
+        shuffled[index],
+      ];
+    }
+
+    setBatchModelsSyncing(true);
+    setBatchModelsSource("");
+    let lastError: unknown = null;
+    try {
+      for (const accountID of shuffled) {
+        try {
+          const result = await api.syncAccountModelsUpstream(accountID);
+          const fetched = result.models ?? [];
+          if (fetched.length === 0) continue;
+          setBatchModelsDraft((current) =>
+            mergeModelLists(current, fetched),
+          );
+          const sourceAccount = accounts.find(
+            (account) => account.id === accountID,
+          );
+          setBatchModelsSource(
+            sourceAccount ? formatAccountName(sourceAccount) : `#${accountID}`,
+          );
+          showToast(
+            t("accounts.batchModelsFetched", { count: fetched.length }),
+          );
+          return;
+        } catch (error) {
+          lastError = error;
+        }
+      }
+      showToast(
+        t("accounts.batchModelsFetchFailed", {
+          error: lastError ? getErrorMessage(lastError) : "empty model list",
+        }),
+        "error",
+      );
+    } finally {
+      setBatchModelsSyncing(false);
+    }
+  };
+
+  const handleBatchSaveModels = async () => {
+    const ids = Array.from(selected);
+    if (ids.length === 0) return;
+    setBatchModelsSaving(true);
+    try {
+      const result = await api.batchUpdateAccountModels({
+        ids,
+        models: batchModelsDraft,
+      });
+      showToast(
+        t("accounts.batchModelsSaveDone", {
+          success: result.success,
+          fail: result.failed,
+        }),
+      );
+      setShowBatchModelsEditor(false);
+      setBatchModelsDraft([]);
+      setBatchModelsInputDraft("");
+      setBatchModelsSource("");
+      await reload();
+    } catch (error) {
+      showToast(
+        t("accounts.batchModelsSaveFailed", {
+          error: getErrorMessage(error),
+        }),
+        "error",
+      );
+    } finally {
+      setBatchModelsSaving(false);
+    }
+  };
+
   const batchScoreBiasTrimmed = batchScoreBiasInput.trim();
   const batchScoreBiasValue = batchScoreBiasTrimmed
     ? parseIntegerInput(batchScoreBiasTrimmed)
@@ -5152,17 +5505,39 @@ export default function Accounts() {
   const batchSchedulerPriorityInvalid =
     batchUpdateSchedulerPriority &&
     isSchedulerPriorityInputInvalid(batchSchedulerPriorityInput);
+  const batchSessionCapacityMaxValue = parseIntegerInput(
+    batchSessionCapacityMaxInput.trim(),
+  );
+  const batchSessionCapacityIdleMinutesValue = parseIntegerInput(
+    batchSessionCapacityIdleMinutesInput.trim(),
+  );
+  const batchSessionCapacityMaxInvalid =
+    batchUpdateSessionCapacity &&
+    batchSessionCapacityEnabled &&
+    (batchSessionCapacityMaxValue === null ||
+      batchSessionCapacityMaxValue < 1 ||
+      batchSessionCapacityMaxValue > 100000);
+  const batchSessionCapacityIdleInvalid =
+    batchUpdateSessionCapacity &&
+    batchSessionCapacityEnabled &&
+    (batchSessionCapacityIdleMinutesValue === null ||
+      batchSessionCapacityIdleMinutesValue < 1 ||
+      batchSessionCapacityIdleMinutesValue > 43200);
   const batchMetaHasUpdates =
     batchUpdateTags ||
     batchUpdateGroups ||
     batchUpdateScoreBias ||
     batchUpdateBaseConcurrency ||
+    batchUpdateSkipWarmTier ||
     batchUpdateSchedulerPriority ||
-    batchUpdateCodexFingerprintMode;
+    batchUpdateCodexFingerprintMode ||
+    batchUpdateSessionCapacity;
   const batchMetaInvalid =
     batchScoreBiasInvalid ||
     batchBaseConcurrencyInvalid ||
-    batchSchedulerPriorityInvalid;
+    batchSchedulerPriorityInvalid ||
+    batchSessionCapacityMaxInvalid ||
+    batchSessionCapacityIdleInvalid;
 
   const handleBatchSaveMeta = async () => {
     const ids = Array.from(selected);
@@ -5184,12 +5559,19 @@ export default function Accounts() {
           scoreBias: batchScoreBiasValue,
           updateBaseConcurrency: batchUpdateBaseConcurrency,
           baseConcurrency: batchBaseConcurrencyValue,
+          updateSkipWarmTier: batchUpdateSkipWarmTier,
+          skipWarmTier: batchSkipWarmTier,
           updateSchedulerPriority: batchUpdateSchedulerPriority,
           schedulerPriority: schedulerPriorityInputToValue(
             batchSchedulerPriorityInput,
           ),
           updateCodexFingerprintMode: batchUpdateCodexFingerprintMode,
           codexFingerprintMode: batchCodexFingerprintMode,
+          updateSessionCapacity: batchUpdateSessionCapacity,
+          sessionCapacityEnabled: batchSessionCapacityEnabled,
+          sessionCapacityMax: batchSessionCapacityMaxValue ?? 5,
+          sessionCapacityIdleTTLSeconds:
+            (batchSessionCapacityIdleMinutesValue ?? 60) * 60,
         }),
       );
       showToast(
@@ -5436,6 +5818,9 @@ export default function Accounts() {
     setEditProxyUrl(account.proxy_url ?? "");
     setEditCustomHeadersText(formatCustomHeadersText(account.custom_headers));
     setEditCodexFingerprintMode(account.codex_fingerprint_mode ?? "off");
+    setEditSessionCapacityEnabled(account.session_capacity_enabled ?? false);
+    setEditSessionCapacityMax(String(account.session_capacity_max ?? 5));
+    setEditSessionCapacityIdleMinutes(String(Math.max(1, Math.round((account.session_capacity_idle_ttl_seconds ?? 3600) / 60))));
     setEditTags(account.tags ?? []);
     setEditGroupIds(account.group_ids ?? []);
     setEditOpenAIForm({
@@ -5491,6 +5876,9 @@ export default function Accounts() {
     setEditProxyUrl("");
     setEditCustomHeadersText("");
     setEditCodexFingerprintMode("off");
+    setEditSessionCapacityEnabled(false);
+    setEditSessionCapacityMax("5");
+    setEditSessionCapacityIdleMinutes("60");
     setEditTags([]);
     setEditGroupIds([]);
     setEditOpenAIForm({
@@ -5599,13 +5987,16 @@ export default function Accounts() {
 
   const handleSaveScheduler = async () => {
     if (!editingAccount) return;
+    const parsedSessionCapacityMax = Number.parseInt(editSessionCapacityMax, 10);
+    const parsedSessionCapacityIdleMinutes = Number.parseInt(editSessionCapacityIdleMinutes, 10);
     if (
       scoreInputInvalid ||
       concurrencyInputInvalid ||
       editAutoPause5hThresholdInvalid ||
       editAutoPause7dThresholdInvalid ||
       editDispatchCountLimitInvalid ||
-      editSchedulerPriorityInvalid
+      editSchedulerPriorityInvalid ||
+      (editSessionCapacityEnabled && (!Number.isFinite(parsedSessionCapacityMax) || parsedSessionCapacityMax < 1 || parsedSessionCapacityMax > 100000 || !Number.isFinite(parsedSessionCapacityIdleMinutes) || parsedSessionCapacityIdleMinutes < 1 || parsedSessionCapacityIdleMinutes > 43200))
     ) {
       showToast(t("accounts.schedulerInvalidInput"), "error");
       return;
@@ -5648,7 +6039,12 @@ export default function Accounts() {
         custom_headers: parsedCustomHeaders.value,
         // 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不下发该字段。
         ...(isCodexOfficialAccount(editingAccount)
-          ? { codex_fingerprint_mode: editCodexFingerprintMode }
+          ? {
+              codex_fingerprint_mode: editCodexFingerprintMode,
+              session_capacity_enabled: editSessionCapacityEnabled,
+              session_capacity_max: Number.isFinite(parsedSessionCapacityMax) ? parsedSessionCapacityMax : 5,
+              session_capacity_idle_ttl_seconds: (Number.isFinite(parsedSessionCapacityIdleMinutes) ? parsedSessionCapacityIdleMinutes : 60) * 60,
+            }
           : {}),
       };
       await api.updateAccountScheduler(editingAccount.id, payload);
@@ -7051,6 +7447,13 @@ export default function Accounts() {
                       icon: <FolderOpen className="size-3.5" />,
                       disabled: batchLoading || batchTesting,
                       onSelect: openBatchMetaEditor,
+                    },
+                    {
+                      key: "models",
+                      label: t("accounts.batchModelsEdit"),
+                      icon: <Layers className="size-3.5" />,
+                      disabled: batchLoading || batchTesting,
+                      onSelect: openBatchModelsEditor,
                     },
                     {
                       key: "auto-pause",
@@ -9590,6 +9993,52 @@ export default function Accounts() {
                           </div>
                         ) : null}
 
+                        {/* 账号活跃会话容量 */}
+                        {isCodexOfficialAccount(editingAccount) ? (
+                          <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
+                            <div className="flex items-start justify-between gap-4">
+                              <div>
+                                <div className="flex items-center gap-2 font-semibold text-foreground text-sm">
+                                  <Layers className="size-4 text-violet-500" />
+                                  <span>{t("accounts.sessionCapacityTitle")}</span>
+                                </div>
+                                <p className="mt-1 text-xs text-muted-foreground leading-relaxed">
+                                  {t("accounts.sessionCapacityHint")}
+                                </p>
+                              </div>
+                              <Switch
+                                checked={editSessionCapacityEnabled}
+                                onCheckedChange={setEditSessionCapacityEnabled}
+                                aria-label={t("accounts.sessionCapacityTitle")}
+                              />
+                            </div>
+                            <div className="mt-3 grid gap-3 md:grid-cols-2">
+                              <label className="space-y-1.5 text-xs text-muted-foreground">
+                                <span>{t("accounts.sessionCapacityMaxLabel")}</span>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  max={100000}
+                                  disabled={!editSessionCapacityEnabled}
+                                  value={editSessionCapacityMax}
+                                  onChange={(event) => setEditSessionCapacityMax(event.target.value)}
+                                />
+                              </label>
+                              <label className="space-y-1.5 text-xs text-muted-foreground">
+                                <span>{t("accounts.sessionCapacityIdleLabel")}</span>
+                                <Input
+                                  type="number"
+                                  min={1}
+                                  max={43200}
+                                  disabled={!editSessionCapacityEnabled}
+                                  value={editSessionCapacityIdleMinutes}
+                                  onChange={(event) => setEditSessionCapacityIdleMinutes(event.target.value)}
+                                />
+                              </label>
+                            </div>
+                          </div>
+                        ) : null}
+
                         {/* 自定义请求头 */}
                         <div className="rounded-xl border border-border/70 bg-card p-4.5 shadow-2xs hover:border-border/90 transition-colors md:col-span-2">
                           {renderCustomHeadersTextarea({
@@ -9866,6 +10315,9 @@ export default function Accounts() {
                   </Button>
                 </div>
                 <p className="mt-2 text-xs text-muted-foreground">
+                  {t("accounts.supportedModelsSyncHint")}
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
                   {t("accounts.supportedModelsProbeHint")}
                 </p>
                 {probeBoard.length > 0 && (
@@ -9936,6 +10388,143 @@ export default function Accounts() {
                   onRemove={removeModelsDraftValue}
                   emptyLabel={t("accounts.supportedModelsEmpty")}
                 />
+              </div>
+            </div>
+          </Modal>
+
+          <Modal
+            show={showBatchModelsEditor}
+            title={t("accounts.batchModelsTitle")}
+            contentClassName="sm:max-w-[620px]"
+            onClose={closeBatchModelsEditor}
+            footer={
+              <>
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={batchModelsSaving || batchModelsSyncing}
+                  onClick={closeBatchModelsEditor}
+                >
+                  {t("common.cancel")}
+                </Button>
+                <Button
+                  type="button"
+                  disabled={batchModelsSaving || batchModelsSyncing}
+                  onClick={() => void handleBatchSaveModels()}
+                >
+                  {batchModelsSaving
+                    ? t("common.saving")
+                    : batchModelsDraft.length === 0
+                      ? t("accounts.batchModelsClearSave")
+                      : t("common.save")}
+                </Button>
+              </>
+            }
+          >
+            <div className="space-y-4">
+              <div className="rounded-lg border border-border bg-muted/20 p-3 text-sm text-muted-foreground">
+                {t("accounts.batchModelsDesc", { count: selected.size })}
+              </div>
+
+              <div className="rounded-lg border border-border bg-muted/10 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    disabled={batchModelsSyncing || batchModelsSaving}
+                    onClick={() => void handleBatchSyncModelsUpstream()}
+                  >
+                    <RefreshCw
+                      className={`size-3.5 ${batchModelsSyncing ? "animate-spin" : ""}`}
+                    />
+                    {batchModelsSyncing
+                      ? t("accounts.batchModelsFetching")
+                      : t("accounts.batchModelsFetch")}
+                  </Button>
+                  {batchModelsSource ? (
+                    <span className="text-xs text-muted-foreground">
+                      {t("accounts.batchModelsSource", {
+                        account: batchModelsSource,
+                      })}
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {t("accounts.batchModelsFetchHint")}
+                </p>
+              </div>
+
+              <div className="flex gap-2">
+                <Input
+                  placeholder={t("accounts.openaiModelsPlaceholder")}
+                  value={batchModelsInputDraft}
+                  disabled={batchModelsSaving || batchModelsSyncing}
+                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                    setBatchModelsInputDraft(event.target.value)
+                  }
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      addBatchModelsDraftValues(batchModelsInputDraft);
+                    }
+                  }}
+                  onPaste={(event) => {
+                    const pasted = event.clipboardData.getData("text");
+                    if (parseModelTokens(pasted).length > 1) {
+                      event.preventDefault();
+                      addBatchModelsDraftValues(pasted);
+                    }
+                  }}
+                />
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={
+                    !batchModelsInputDraft.trim() ||
+                    batchModelsSaving ||
+                    batchModelsSyncing
+                  }
+                  onClick={() =>
+                    addBatchModelsDraftValues(batchModelsInputDraft)
+                  }
+                >
+                  <Plus className="size-3.5" />
+                  {t("accounts.openaiModelsAdd")}
+                </Button>
+              </div>
+
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-xs text-muted-foreground">
+                    {batchModelsDraft.length === 0
+                      ? t("accounts.supportedModelsHintAll")
+                      : t("accounts.supportedModelsHintCount", {
+                          count: batchModelsDraft.length,
+                        })}
+                  </span>
+                  {batchModelsDraft.length > 0 ? (
+                    <button
+                      type="button"
+                      className="shrink-0 text-xs text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
+                      disabled={batchModelsSaving || batchModelsSyncing}
+                      onClick={() => setBatchModelsDraft([])}
+                    >
+                      {t("accounts.supportedModelsClearAll")}
+                    </button>
+                  ) : null}
+                </div>
+                <ModelChipGrid
+                  variant="pills"
+                  models={batchModelsDraft}
+                  onRemove={removeBatchModelsDraftValue}
+                  emptyLabel={t("accounts.supportedModelsEmpty")}
+                />
+                {batchModelsDraft.length === 0 ? (
+                  <p className="text-xs text-amber-600 dark:text-amber-400">
+                    {t("accounts.batchModelsEmptyWarning")}
+                  </p>
+                ) : null}
               </div>
             </div>
           </Modal>
@@ -10142,6 +10731,34 @@ export default function Accounts() {
                     </div>
                   </div>
 
+                  <div className="rounded-xl border border-border p-4">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                          <Flame className="size-4 text-orange-500" />
+                          <span>{t("accounts.schedulerSkipWarmLabel")}</span>
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.schedulerSkipWarmHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateSkipWarmTier}
+                        onCheckedChange={setBatchUpdateSkipWarmTier}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.schedulerSkipWarmLabel")}`}
+                      />
+                    </div>
+                    <label className="mt-3 flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 p-3 text-sm font-medium text-foreground">
+                      <span>{t("accounts.batchSkipWarmEnabled")}</span>
+                      <Switch
+                        checked={batchSkipWarmTier}
+                        onCheckedChange={setBatchSkipWarmTier}
+                        disabled={!batchUpdateSkipWarmTier}
+                        aria-label={t("accounts.batchSkipWarmEnabled")}
+                      />
+                    </label>
+                  </div>
+
                   <div className="rounded-xl border border-border p-4 md:col-span-2">
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -10171,6 +10788,79 @@ export default function Accounts() {
                     />
                     <div className="mt-1.5 text-xs text-muted-foreground">
                       {codexFingerprintModeDetail(t, batchCodexFingerprintMode)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-border p-4 md:col-span-2">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="text-sm font-semibold text-foreground">
+                          {t("accounts.sessionCapacityTitle")}
+                        </div>
+                        <div className="mt-1 text-xs text-muted-foreground">
+                          {t("accounts.batchSessionCapacityHint")}
+                        </div>
+                      </div>
+                      <Switch
+                        checked={batchUpdateSessionCapacity}
+                        onCheckedChange={setBatchUpdateSessionCapacity}
+                        aria-label={`${t("accounts.batchMetaTitle")}: ${t("accounts.sessionCapacityTitle")}`}
+                      />
+                    </div>
+                    <div className="mt-3 rounded-lg border border-border/70 bg-muted/20 p-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-medium text-foreground">
+                          {t("accounts.batchSessionCapacityEnabled")}
+                        </span>
+                        <Switch
+                          checked={batchSessionCapacityEnabled}
+                          onCheckedChange={setBatchSessionCapacityEnabled}
+                          disabled={!batchUpdateSessionCapacity}
+                          aria-label={t("accounts.batchSessionCapacityEnabled")}
+                        />
+                      </div>
+                      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                        <label className="space-y-1.5 text-xs text-muted-foreground">
+                          <span>{t("accounts.sessionCapacityMaxLabel")}</span>
+                          <Input
+                            inputMode="numeric"
+                            value={batchSessionCapacityMaxInput}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              setBatchSessionCapacityMaxInput(event.target.value)
+                            }
+                            disabled={
+                              !batchUpdateSessionCapacity ||
+                              !batchSessionCapacityEnabled
+                            }
+                          />
+                          {batchSessionCapacityMaxInvalid ? (
+                            <span className="block text-red-500">
+                              {t("accounts.sessionCapacityMaxRange")}
+                            </span>
+                          ) : null}
+                        </label>
+                        <label className="space-y-1.5 text-xs text-muted-foreground">
+                          <span>{t("accounts.sessionCapacityIdleLabel")}</span>
+                          <Input
+                            inputMode="numeric"
+                            value={batchSessionCapacityIdleMinutesInput}
+                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                              setBatchSessionCapacityIdleMinutesInput(
+                                event.target.value,
+                              )
+                            }
+                            disabled={
+                              !batchUpdateSessionCapacity ||
+                              !batchSessionCapacityEnabled
+                            }
+                          />
+                          {batchSessionCapacityIdleInvalid ? (
+                            <span className="block text-red-500">
+                              {t("accounts.sessionCapacityIdleRange")}
+                            </span>
+                          ) : null}
+                        </label>
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -13383,6 +14073,7 @@ function AccountMobileCard({
                     errorMessage={account.error_message}
                   />
                   <AccountConcurrencyBadge account={account} />
+                  <AccountSessionCapacityBadge account={account} />
                 </div>
               </div>
             </div>
@@ -13731,9 +14422,11 @@ function AccountMobileCard({
               <AccountHealthBar buckets={healthBuckets} />
             </div>
           )}
-          {Math.max(account.active_requests ?? 0, account.occupied_requests ?? 0) > 0 && (
-            <div className="mt-1">
+          {(Math.max(account.active_requests ?? 0, account.occupied_requests ?? 0) > 0 ||
+            account.session_capacity_enabled) && (
+            <div className="mt-1 flex min-h-6 flex-wrap items-center gap-1.5">
               <AccountConcurrencyBadge account={account} />
+              <AccountSessionCapacityBadge account={account} />
             </div>
           )}
         </div>
@@ -14195,11 +14888,21 @@ function TestConnectionModal({
 
         const modelsResp = await api.getModels();
         if (!active) return;
+        // Keep account-declared entries in the selector even when the global
+        // catalog is scoped, stale, or temporarily unavailable. This is
+        // especially important immediately after a newly published model is
+        // auto-added to an account whitelist.
+        const accountModels = (account.models ?? []).filter(
+          isConnectionTestModel,
+        );
         const upstreamModels = extractTextModels(modelsResp);
         const preferredModel = isConnectionTestModel(settings.test_model)
           ? settings.test_model
           : DEFAULT_TEST_MODEL;
-        const nextModels = uniqueTestModels(upstreamModels, preferredModel);
+        const nextModels = uniqueTestModels(
+          [...accountModels, ...upstreamModels],
+          preferredModel,
+        );
         setModelOptions(nextModels);
         setSelectedModel(
           (current) => current || nextModels[0] || DEFAULT_TEST_MODEL,
@@ -14233,7 +14936,10 @@ function TestConnectionModal({
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0] || "");
         } else {
-          const fallbackModels = uniqueTestModels([], DEFAULT_TEST_MODEL);
+          const fallbackModels = uniqueTestModels(
+            (account.models ?? []).filter(isConnectionTestModel),
+            DEFAULT_TEST_MODEL,
+          );
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0]);
         }

@@ -33,9 +33,10 @@ func TestParseOfficialCodexModelIDs(t *testing.T) {
 		<div data-model-slug="gpt-5.2"></div>
 		<div data-model-slug="gpt-5.2-codex"></div>
 		<div data-model-slug="gpt-4.1"></div>
+		<div data-model-slug="gpt-6-astra"></div>
 	`
 	models, skipped := ParseOfficialCodexModelIDs(html)
-	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.4", "gpt-5.3-codex-spark", "gpt-6-astra"} {
 		if !slices.Contains(models, model) {
 			t.Fatalf("parsed models missing %q in %v", model, models)
 		}
@@ -298,6 +299,8 @@ func TestIsAllowedUpstreamCodexModel_Policy(t *testing.T) {
 		"gpt-5.4":             true,
 		"gpt-5.4-mini":        true,
 		"gpt-6.0":             true,
+		"gpt-6-astra-v2":      false,
+		"gpt-6":               false,
 		"gpt-5.3-codex-spark": true,
 		"gpt-5.3-codex":       false,
 		"gpt-5.3":             false,
@@ -386,14 +389,14 @@ func TestSyncOfficialCodexModelsEmptyProxyStillAttempts(t *testing.T) {
 	}
 }
 
-func TestIsAllowedUpstreamCodexModelAcceptsMajorOnlyVersions(t *testing.T) {
+func TestIsAllowedUpstreamCodexModelAcceptsOnlyKnownMajorOnlyVersion(t *testing.T) {
 	// gpt-6-astra 这类没有小数点的新一代型号必须被允许进入注册表。
-	for _, id := range []string{"gpt-6-astra", "gpt-6", "gpt-7-nova"} {
+	for _, id := range []string{"gpt-6-astra"} {
 		if !isAllowedUpstreamCodexModel(id) {
 			t.Fatalf("%s should be allowed", id)
 		}
 	}
-	for _, id := range []string{"gpt-4", "gpt-4-turbo", "gpt-5", "gpt-5-codex"} {
+	for _, id := range []string{"gpt-4", "gpt-4-turbo", "gpt-5", "gpt-5-codex", "gpt-6", "gpt-6-astra-v2", "gpt-7-nova"} {
 		if isAllowedUpstreamCodexModel(id) {
 			t.Fatalf("%s should be rejected", id)
 		}
