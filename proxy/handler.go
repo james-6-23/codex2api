@@ -131,11 +131,11 @@ func (h *Handler) nextAccountForSessionWithDispatch(sessionID string, apiKeyID i
 	return account, proxyURL
 }
 
-func (h *Handler) nextAccountForSessionWithDispatchGuard(sessionID string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, policy auth.DispatchPolicy) (*auth.Account, string, auth.SessionAffinityGuard) {
+func (h *Handler) nextAccountForSessionWithDispatchGuard(sessionID string, apiKeyID int64, exclude map[int64]bool, filter auth.AccountFilter, policy auth.DispatchPolicy, traces ...*auth.SelectionTrace) (*auth.Account, string, auth.SessionAffinityGuard) {
 	if h == nil || h.store == nil {
 		return nil, "", auth.SessionAffinityGuard{}
 	}
-	return h.store.NextForSessionWithDispatchGuard(sessionID, apiKeyID, exclude, filter, policy)
+	return h.store.NextForSessionWithDispatchGuard(sessionID, apiKeyID, exclude, filter, policy, traces...)
 }
 
 // takeUnlinkedRecentAccount returns the account used by the most recent
@@ -164,7 +164,7 @@ func (h *Handler) takeUnlinkedRecentAccount(c *gin.Context, identity requestSess
 	if !record.ObservedAt.Before(started) || started.Sub(record.ObservedAt) > maxAge {
 		return nil, ""
 	}
-	account := h.store.TakePreferredAccountWithDispatch(record.AccountID, apiKeyID, exclude, filter, policy)
+	account := h.store.TakePreferredAccountWithDispatch(record.AccountID, apiKeyID, exclude, filter, policy, selectionTraceForRequest(c))
 	if account == nil {
 		return nil, ""
 	}
@@ -216,7 +216,10 @@ func (h *Handler) withRequestModelCooldownFilter(c *gin.Context, model string, f
 	if passiveInternalRequestAuthorized(c) {
 		return filter
 	}
-	return h.withModelCooldownFilter(model, filter)
+	if h == nil || h.store == nil {
+		return filter
+	}
+	return h.store.WithModelCooldownFilter(model, filter, selectionTraceForRequest(c))
 }
 
 func (h *Handler) shouldUseWebsocketForHTTP() bool {
@@ -558,15 +561,15 @@ func applyAffinityGroupRouting(c *gin.Context, identity requestSessionIdentity, 
 	}
 
 	if !identity.hasRequestFingerprint {
-		return groupMembershipFilter(splitGroups, true, filter)
+		return groupMembershipFilter(splitGroups, true, filter, selectionTraceForRequest(c))
 	}
 
 	allowedGroups := int64GroupSet(row.AllowedGroupIDs)
 	if len(allowedGroups) == 0 {
 		// 不限分组：把分流组排除掉，其余（含未分组账号）照常可用。
-		return groupMembershipFilter(splitGroups, false, filter)
+		return groupMembershipFilter(splitGroups, false, filter, selectionTraceForRequest(c))
 	}
-	return groupMembershipFilter(allowedGroups, true, filter)
+	return groupMembershipFilter(allowedGroups, true, filter, selectionTraceForRequest(c))
 }
 
 func int64GroupSet(ids []int64) map[int64]struct{} {
@@ -584,9 +587,12 @@ func int64GroupSet(ids []int64) map[int64]struct{} {
 
 // groupMembershipFilter 在 filter 之上叠加分组门：want=true 要求账号命中 groups，
 // want=false 要求账号不在 groups 里。
-func groupMembershipFilter(groups map[int64]struct{}, want bool, filter auth.AccountFilter) auth.AccountFilter {
+func groupMembershipFilter(groups map[int64]struct{}, want bool, filter auth.AccountFilter, traces ...*auth.SelectionTrace) auth.AccountFilter {
 	return func(account *auth.Account) bool {
 		if account == nil || account.InAnyGroup(groups) != want {
+			if len(traces) > 0 {
+				traces[0].Reject("affinity_group_mismatch")
+			}
 			return false
 		}
 		return filter == nil || filter(account)
@@ -652,32 +658,46 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 // scheduling without creating a replacement root binding.
 func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
 	if !h.passiveInternalModelsAllowed(c) || identity.ownsRootBinding {
-		return filter
+		return selectionTraceForRequest(c).Filter("model_or_provider_mismatch", filter)
 	}
 	if !identity.relatedToRoot || identity.unlinkedFallbackOnly {
 		return func(account *auth.Account) bool {
 			if filter != nil && filter(account) {
 				return true
 			}
-			return passiveInternalAccountEligible(account, effectiveModel, allowRelay)
+			eligible := passiveInternalAccountEligible(account, effectiveModel, allowRelay)
+			if !eligible {
+				selectionTraceForRequest(c).Reject("model_or_provider_mismatch")
+			}
+			return eligible
 		}
 	}
 	rootKey, related := auth.RelatedSessionRootKey(affinityKey)
 	if !related || rootKey == "" {
-		return func(*auth.Account) bool { return false }
+		return func(*auth.Account) bool { selectionTraceForRequest(c).Reject("root_unresolved"); return false }
 	}
 	rootAccountID, found := h.store.AccountSessionAccountID(rootKey, time.Now())
 	if !found {
 		rootAccountID, found = h.store.SessionAffinityAccountID(rootKey)
 	}
 	return func(account *auth.Account) bool {
-		if !found || account == nil || account.DBID != rootAccountID {
+		if !found {
+			selectionTraceForRequest(c).Reject("root_unresolved")
+			return false
+		}
+		if account == nil || account.DBID != rootAccountID {
+			selectionTraceForRequest(c).Bind(rootAccountID)
+			selectionTraceForRequest(c).Reject("root_owner_mismatch")
 			return false
 		}
 		if filter == nil || filter(account) {
 			return true
 		}
-		return passiveInternalAccountEligible(account, effectiveModel, allowRelay)
+		eligible := passiveInternalAccountEligible(account, effectiveModel, allowRelay)
+		if !eligible {
+			selectionTraceForRequest(c).Reject("model_or_provider_mismatch")
+		}
+		return eligible
 	}
 }
 
@@ -696,7 +716,7 @@ func requestUpstreamChannel(c *gin.Context) string {
 func (h *Handler) applyUpstreamChannelFilter(c *gin.Context, effectiveModel string, filter auth.AccountFilter) auth.AccountFilter {
 	combine := func(channelFilter auth.AccountFilter) auth.AccountFilter {
 		return func(account *auth.Account) bool {
-			return channelFilter(account) && (filter == nil || filter(account))
+			return selectionTraceForRequest(c).Filter("upstream_channel_mismatch", channelFilter)(account) && (filter == nil || filter(account))
 		}
 	}
 	switch requestUpstreamChannel(c) {
@@ -709,6 +729,7 @@ func (h *Handler) applyUpstreamChannelFilter(c *gin.Context, effectiveModel stri
 	case database.UpstreamChannelCodex:
 		return func(account *auth.Account) bool {
 			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() {
+				selectionTraceForRequest(c).Reject("upstream_channel_mismatch")
 				return false
 			}
 			return filter == nil || filter(account)
@@ -727,9 +748,15 @@ func claudeChannelAccountFilter(model string) auth.AccountFilter {
 
 // excludeClaudeAccountsFilter fences the native-Messages-only Claude provider
 // from OpenAI Responses and Chat Completions routes.
-func excludeClaudeAccountsFilter(filter auth.AccountFilter) auth.AccountFilter {
+func excludeClaudeAccountsFilter(filter auth.AccountFilter, traces ...*auth.SelectionTrace) auth.AccountFilter {
 	return func(account *auth.Account) bool {
-		return account != nil && !account.IsClaudeOAuth() && (filter == nil || filter(account))
+		if account == nil || account.IsClaudeOAuth() {
+			if len(traces) > 0 {
+				traces[0].Reject("upstream_channel_mismatch")
+			}
+			return false
+		}
+		return filter == nil || filter(account)
 	}
 }
 
@@ -2112,9 +2139,12 @@ func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 	}
 }
 
-func relayOnlyAccountFilter(inner auth.AccountFilter) auth.AccountFilter {
+func relayOnlyAccountFilter(inner auth.AccountFilter, traces ...*auth.SelectionTrace) auth.AccountFilter {
 	return func(account *auth.Account) bool {
 		if account == nil || !account.IsRelayStyle() {
+			if len(traces) > 0 {
+				traces[0].Reject("upstream_channel_mismatch")
+			}
 			return false
 		}
 		return inner == nil || inner(account)
@@ -4148,13 +4178,14 @@ func (h *Handler) Responses(c *gin.Context) {
 	} else {
 		accountFilter = accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, allowCodexAccounts)
 	}
+	beginDispatchSelection(c)
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
-		accountFilter = relayOnlyAccountFilter(accountFilter)
+		accountFilter = relayOnlyAccountFilter(accountFilter, selectionTraceForRequest(c))
 	}
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
-	accountFilter = excludeClaudeAccountsFilter(accountFilter)
+	accountFilter = excludeClaudeAccountsFilter(accountFilter, selectionTraceForRequest(c))
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// resolveCompactionAffinity 只在已知来源相互冲突时报错；缓存故障按未知
@@ -4165,7 +4196,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 	if compactionAffinity.Known {
-		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter)
+		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter, selectionTraceForRequest(c))
 	}
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -4219,11 +4250,12 @@ func (h *Handler) Responses(c *gin.Context) {
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
 	for attempt := 0; ; attempt++ {
+		selectionTraceForRequest(c).Reset()
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
 			if attempt == 0 && previousResponseAffinityFound && !turnContinuationPinned && !turnHasBinding && priorSessionAccountID == 0 {
-				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 				if account != nil {
 					stickyProxyURL = account.GetProxyURL()
 				}
@@ -4232,7 +4264,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				account, stickyProxyURL = h.takeUnlinkedRecentAccount(c, sessionIdentity, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			}
 			if account == nil && attempt == 0 && compactionAffinity.Known && !turnContinuationPinned {
-				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 					h.store.Release(account)
 					account = nil
@@ -4246,7 +4278,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			} else if turnContinuationPinned {
 				account, stickyProxyURL = h.nextRetryAccountForContinuationWithDispatch(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			} else if continuationUnavailable && !relayContinuationAttempted {
-				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 			} else {
 				account, stickyProxyURL, affinityGuard = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, dispatchPolicy)
 			}
@@ -4280,6 +4312,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, msg)
 				return
 			}
+			selectionTraceForRequest(c).Freeze()
 			if h.store.HasUsageLimitedCandidateWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
 				if isStream && writeCommittedResponsesRetryError(c, "Codex account usage window limit reached") {
 					return
@@ -4287,6 +4320,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, "Codex 账号用量窗口已达上限")
 				return
 			}
+			selectionTraceForRequest(c).Freeze()
 			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
 				SendAccountSessionCapacityError(c)
 				return
@@ -4298,10 +4332,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				sendResponseContextUnavailable(c, continuationStatus, continuationReason)
 				return
 			}
-			if isStream && writeCommittedResponsesRetryError(c, noAvailableAccountMessage(effectiveModel)) {
-				return
-			}
-			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
+			h.sendDispatchUnavailable(c, isStream, false)
 			return
 		}
 		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
@@ -6228,11 +6259,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	// compact 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 中转账号会命中上游自身的 /responses/compact，使仅接入中转的用户也能压缩（issue #174）。
 	accountFilter := accountFilterForCompactResponsesModelWithOriginal(routingModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	beginDispatchSelection(c)
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
-	accountFilter = excludeClaudeAccountsFilter(accountFilter)
+	accountFilter = excludeClaudeAccountsFilter(accountFilter, selectionTraceForRequest(c))
 	if continuationUnavailable {
-		accountFilter = relayOnlyAccountFilter(accountFilter)
+		accountFilter = relayOnlyAccountFilter(accountFilter, selectionTraceForRequest(c))
 	}
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
@@ -6244,7 +6276,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		return
 	}
 	if compactionAffinity.Known {
-		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter)
+		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter, selectionTraceForRequest(c))
 	}
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -6265,11 +6297,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	for attempt := 0; ; attempt++ {
+		selectionTraceForRequest(c).Reset()
 		var account *auth.Account
 		var stickyProxyURL string
 		var affinityGuard auth.SessionAffinityGuard
 		if attempt == 0 && previousResponseAffinityFound && !compactContinuationPinned && !compactHasBinding && priorSessionAccountID == 0 {
-			account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 			if account != nil {
 				stickyProxyURL = account.GetProxyURL()
 			}
@@ -6278,7 +6311,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			account, stickyProxyURL = h.takeUnlinkedRecentAccount(c, sessionIdentity, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 		}
 		if account == nil && attempt == 0 && compactionAffinity.Known && !compactContinuationPinned {
-			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+			account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 			if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 				h.store.Release(account)
 				account = nil
@@ -6291,7 +6324,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			if compactContinuationPinned {
 				account, stickyProxyURL = h.store.NextForContinuationWithDispatch(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
 			} else {
-				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account, stickyProxyURL, affinityGuard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 			}
 		}
 		if account == nil {
@@ -6340,11 +6373,12 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 					sendCompactionUpstreamUnavailable(c)
 					return
 				}
+				selectionTraceForRequest(c).Freeze()
 				if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
 					SendAccountSessionCapacityError(c)
 					return
 				}
-				c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
+				h.sendDispatchUnavailable(c, false, false)
 				return
 			}
 		}
@@ -7120,10 +7154,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
 	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
 	accountFilter := accountFilterForResponsesModelWithOriginal(logModel, effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
+	beginDispatchSelection(c)
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
-	accountFilter = excludeClaudeAccountsFilter(accountFilter)
+	accountFilter = excludeClaudeAccountsFilter(accountFilter, selectionTraceForRequest(c))
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -7162,6 +7197,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
 	for attempt := 0; ; attempt++ {
+		selectionTraceForRequest(c).Reset()
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
@@ -7194,14 +7230,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				SendAPIKeyLimitError(c, http.StatusTooManyRequests, msg)
 				return
 			}
+			selectionTraceForRequest(c).Freeze()
 			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
 				SendAccountSessionCapacityError(c)
 				return
 			}
-			if isStream && writeCommittedChatRetryError(c, noAvailableAccountMessage(effectiveModel)) {
-				return
-			}
-			c.JSON(http.StatusServiceUnavailable, noAvailableAccountError(effectiveModel))
+			h.sendDispatchUnavailable(c, isStream, true)
 			return
 		}
 		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {

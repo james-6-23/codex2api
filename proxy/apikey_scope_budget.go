@@ -622,7 +622,7 @@ func (g *scopeBudgetGate) filter(inner auth.AccountFilter) auth.AccountFilter {
 	return g.filterWithConcurrencyAllowance(inner, 0)
 }
 
-func (g *scopeBudgetGate) filterWithConcurrencyAllowance(inner auth.AccountFilter, concurrencyAllowance int) auth.AccountFilter {
+func (g *scopeBudgetGate) filterWithConcurrencyAllowance(inner auth.AccountFilter, concurrencyAllowance int, traces ...*auth.SelectionTrace) auth.AccountFilter {
 	if g == nil {
 		return inner
 	}
@@ -631,10 +631,16 @@ func (g *scopeBudgetGate) filterWithConcurrencyAllowance(inner auth.AccountFilte
 			return false
 		}
 		if g.blocks(account) {
+			if len(traces) > 0 {
+				traces[0].Reject("scope_budget_exhausted")
+			}
 			g.blocked.Add(1)
 			return false
 		}
 		if g.concurrencyFullFor(account, concurrencyAllowance) {
+			if len(traces) > 0 {
+				traces[0].Reject("scope_concurrency_exhausted")
+			}
 			g.blocked.Add(1)
 			return false
 		}
@@ -667,7 +673,7 @@ func (h *Handler) applyScopeBudgetFilter(c *gin.Context, filter auth.AccountFilt
 	if passiveInternalRequestAuthorized(c) {
 		allowance = 1
 	}
-	return gate.filterWithConcurrencyAllowance(filter, allowance)
+	return gate.filterWithConcurrencyAllowance(filter, allowance, selectionTraceForRequest(c))
 }
 
 // scopeBudgetExhaustedMessage 返回本次请求因 scope 预算耗尽而剔除候选的说明,

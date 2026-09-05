@@ -2215,9 +2215,10 @@ func assertNoAvailableAccountResponse(t *testing.T, body []byte) {
 
 	var payload struct {
 		Error struct {
-			Message string `json:"message"`
-			Type    string `json:"type"`
-			Code    string `json:"code"`
+			RequestID string `json:"request_id"`
+			Message   string `json:"message"`
+			Type      string `json:"type"`
+			Code      string `json:"code"`
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
@@ -2229,8 +2230,8 @@ func assertNoAvailableAccountResponse(t *testing.T, body []byte) {
 	if payload.Error.Type != ErrorTypeServerError {
 		t.Fatalf("type = %q, want %q", payload.Error.Type, ErrorTypeServerError)
 	}
-	if payload.Error.Code != ErrorCodeNoAvailableAccount {
-		t.Fatalf("code = %q, want %q", payload.Error.Code, ErrorCodeNoAvailableAccount)
+	if payload.Error.Code != "service_unavailable" || payload.Error.RequestID == "" {
+		t.Fatalf("expected generic service_unavailable and correlation ID; body=%s", body)
 	}
 }
 

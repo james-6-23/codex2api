@@ -491,6 +491,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	accountFilter := accountFilterForModel(effectiveModel)
+	beginDispatchSelection(c)
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, false, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
@@ -504,7 +505,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
 	if compactionAffinity.Known {
-		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter)
+		accountFilter = compactionDomainFilter(compactionAffinity.CompatibilityDomain, accountFilter, selectionTraceForRequest(c))
 	}
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
@@ -593,6 +594,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	var affinityGuard auth.SessionAffinityGuard
 	for attempt := 0; ; attempt++ {
+		selectionTraceForRequest(c).Reset()
 		if c.Request.Context().Err() != nil {
 			return errResponsesWSClientGone
 		}
@@ -600,7 +602,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
 			if attempt == 0 && previousResponseAffinityFound && !continuationPinned && !turnHasBinding && priorSessionAccountID == 0 {
-				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.store.TakePreferredAccountWithDispatch(previousResponseAffinity.AccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 				if account != nil {
 					stickyProxyURL = account.GetProxyURL()
 				}
@@ -620,7 +622,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				}
 			}
 			if account == nil && attempt == 0 && compactionAffinity.Known && !continuationPinned {
-				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy)
+				account = h.store.TakePreferredAccountWithDispatch(compactionAffinity.PreferredAccountID, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, selectionTraceForRequest(c))
 				if account != nil && !h.store.AdmitAccountSession(account, affinityKey, time.Now()) {
 					h.store.Release(account)
 					account = nil
@@ -638,6 +640,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 		}
 		if account == nil {
+			selectionTraceForRequest(c).Freeze()
 			if c.Request.Context().Err() != nil {
 				return errResponsesWSClientGone
 			}
@@ -655,7 +658,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			} else if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
 				apiErr = api.NewAPIError(api.ErrCodeAccountSessionCapacity, accountSessionCapacityExceededMessage, api.ErrorTypeInvalidRequest)
 			} else {
-				apiErr = api.NewAPIError(api.ErrCodeServiceUnavailable, noAvailableAccountMessage(effectiveModel), api.ErrorTypeServer)
+				apiErr = h.dispatchUnavailableAPIError(c)
 			}
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				return errResponsesWSClientGone

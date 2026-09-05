@@ -303,10 +303,13 @@ func sendCompactionUpstreamUnavailable(c *gin.Context) {
 	api.SendErrorWithStatus(c, compactionUpstreamUnavailableAPIError(), http.StatusServiceUnavailable)
 }
 
-func compactionDomainFilter(domain string, next auth.AccountFilter) auth.AccountFilter {
+func compactionDomainFilter(domain string, next auth.AccountFilter, traces ...*auth.SelectionTrace) auth.AccountFilter {
 	domain = strings.TrimSpace(domain)
 	return func(account *auth.Account) bool {
 		if account == nil || accountCompactionDomain(account) != domain {
+			if len(traces) > 0 {
+				traces[0].Reject("compaction_domain_mismatch")
+			}
 			return false
 		}
 		return next == nil || next(account)
