@@ -11,6 +11,10 @@ import {
   resolveAccountOverlayKind,
 } from "./accountStateOverlay.ts";
 
+function readSource(relativePath) {
+  return readFileSync(new URL(relativePath, import.meta.url), "utf8").replace(/\r\n/g, "\n");
+}
+
 function sourceSlice(source, startMarker, endMarker) {
   const start = source.indexOf(startMarker);
   assert.notEqual(start, -1, `missing source marker: ${startMarker}`);
@@ -29,65 +33,34 @@ function occurrenceCount(source, value) {
   return source.split(value).length - 1;
 }
 
-test("account overlay kind keeps disabled precedence over overload", () => {
-  assert.equal(
-    resolveAccountOverlayKind({ enabled: false, status: "overload_paused" }),
-    "disabled",
-  );
-  assert.equal(
-    resolveAccountOverlayKind({ enabled: true, status: "overload_paused" }),
-    "overload",
-  );
-  assert.equal(resolveAccountOverlayKind({ enabled: true, status: "active" }), null);
-});
-
-test("disabled-only helpers reject active and overload accounts", () => {
-  const disabled = { enabled: false, status: "active" };
-  const overload = { enabled: true, status: "overload_paused" };
-  const active = { enabled: true, status: "active" };
-
-  assert.equal(isDisabledAccountOverlayAccount(disabled), true);
-  assert.equal(isDisabledAccountOverlayAccount(overload), false);
-  assert.equal(isDisabledAccountOverlayAccount(active), false);
-
-  assert.equal(accountStateSurfaceClass(disabled), " account-state-surface");
-  assert.equal(disabledAccountSurfaceClass(disabled), " account-state-surface");
-  assert.equal(disabledAccountSurfaceClass(overload), "");
-  assert.equal(disabledAccountSurfaceClass(active), "");
-
-  assert.equal(
-    accountStateTableRowClass(disabled),
-    " account-state-table-row account-state-table-row--disabled",
-  );
-  assert.equal(
-    accountStateTableRowClass(overload),
-    " account-state-table-row account-state-table-row--overload",
-  );
-  assert.equal(
-    disabledAccountTableRowClass(disabled),
-    " account-state-table-row account-state-table-row--disabled",
-  );
-  assert.equal(disabledAccountTableRowClass(overload), "");
-  assert.equal(disabledAccountTableRowClass(active), "");
+test("account state helpers preserve disabled precedence and disabled-only behavior", () => {
+  for (const [account, kind] of [
+    [{ enabled: false, status: "overload_paused" }, "disabled"],
+    [{ enabled: false, status: "active" }, "disabled"],
+    [{ enabled: true, status: "overload_paused" }, "overload"],
+    [{ enabled: true, status: "active" }, null],
+  ]) {
+    const context = JSON.stringify(account);
+    const disabled = kind === "disabled";
+    const surface = kind ? " account-state-surface" : "";
+    const row = kind ? ` account-state-table-row account-state-table-row--${kind}` : "";
+    assert.equal(resolveAccountOverlayKind(account), kind, context);
+    assert.equal(isDisabledAccountOverlayAccount(account), disabled, context);
+    assert.equal(accountStateSurfaceClass(account), surface, context);
+    assert.equal(accountStateTableRowClass(account), row, context);
+    assert.equal(disabledAccountSurfaceClass(account), disabled ? surface : "", context);
+    assert.equal(disabledAccountTableRowClass(account), disabled ? row : "", context);
+  }
 });
 
 test("table markers replace status content without entering selection cells", () => {
-  const accountsSource = readFileSync(
-    new URL("../pages/Accounts.tsx", import.meta.url),
-    "utf8",
-  );
-  const grokSource = readFileSync(
-    new URL("../pages/GrokAccounts.tsx", import.meta.url),
-    "utf8",
-  );
-
   const accountsRow = sourceSlice(
-    accountsSource,
+    readSource("../pages/Accounts.tsx"),
     "const AccountTableRow = memo(function AccountTableRow(",
     "// AccountMobileCard",
   );
   const grokRow = sourceSlice(
-    grokSource,
+    readSource("../pages/GrokAccounts.tsx"),
     "function GrokAccountTableRow(",
     "function grokFormatDollars",
   );
@@ -126,21 +99,22 @@ test("table markers replace status content without entering selection cells", ()
   );
   assert.doesNotMatch(grokRow, /\brenderAccountStateOverlay\(/);
 
-  assert.doesNotMatch(accountsSelectionCell, /\{tableOverlay\b/);
-  assert.doesNotMatch(grokSelectionCell, /\{tableOverlay\b/);
+  for (const [row, selectionCell, statusCell] of [
+    [accountsRow, accountsSelectionCell, accountsStatusCell],
+    [grokRow, grokSelectionCell, grokStatusCell],
+  ]) {
+    assert.doesNotMatch(selectionCell, /\{tableOverlay\b/);
+    assert.match(statusCell, /\{tableOverlay \?\? \(/);
+    assert.match(statusCell, /<AccountHealthBar/);
+    assert.equal(occurrenceCount(row, "{tableOverlay ?? ("), 1);
+  }
   assert.match(accountsSelectionCell, /tableOverlayKind/);
   assert.match(accountsSelectionCell, /className="sr-only"/);
   assert.match(accountsSelectionCell, /actions\.resetStatus\(account\)/);
-  assert.match(accountsStatusCell, /\{tableOverlay \?\? \(/);
-  assert.match(grokStatusCell, /\{tableOverlay \?\? \(/);
-  assert.match(accountsStatusCell, /<AccountHealthBar/);
-  assert.match(grokStatusCell, /<AccountHealthBar/);
-  assert.equal(occurrenceCount(accountsRow, "{tableOverlay ?? ("), 1);
-  assert.equal(occurrenceCount(grokRow, "{tableOverlay ?? ("), 1);
 });
 
 test("table styling has no positioned scrim on internal table boxes", () => {
-  const cssSource = readFileSync(new URL("../index.css", import.meta.url), "utf8");
+  const cssSource = readSource("../index.css");
   const tableRules = Array.from(
     cssSource.matchAll(/[^{}]*\.account-state-table-row[^{}]*\{[^{}]*\}/g),
     (match) => match[0],
@@ -156,10 +130,7 @@ test("table styling has no positioned scrim on internal table boxes", () => {
 });
 
 test("marker-only rendering stays in normal flow and is passed through", () => {
-  const componentSource = readFileSync(
-    new URL("../components/AccountStateOverlay.tsx", import.meta.url),
-    "utf8",
-  );
+  const componentSource = readSource("../components/AccountStateOverlay.tsx");
   const overlayComponent = sourceSlice(
     componentSource,
     "export function AccountStateOverlay(",
@@ -196,12 +167,8 @@ test("marker-only rendering stays in normal flow and is passed through", () => {
 });
 
 test("pull request CI runs frontend regression tests", () => {
-  const workflowSource = readFileSync(
-    new URL("../../../.github/workflows/pr-check.yml", import.meta.url),
-    "utf8",
-  );
   const frontendJob = sourceSlice(
-    workflowSource,
+    readSource("../../../.github/workflows/pr-check.yml"),
     "  frontend:\n",
     "  golangci-lint:\n",
   );
