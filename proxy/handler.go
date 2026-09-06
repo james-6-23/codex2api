@@ -657,7 +657,11 @@ func passiveInternalAccountEligible(account *auth.Account, effectiveModel string
 // requests. Existing roots retain their account; rootless requests use normal
 // scheduling without creating a replacement root binding.
 func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, effectiveModel string, identity requestSessionIdentity, affinityKey string, allowRelay bool, filter auth.AccountFilter) auth.AccountFilter {
-	if !h.passiveInternalModelsAllowed(c) || identity.ownsRootBinding {
+	allowModelBypass := h.passiveInternalModelsAllowed(c)
+	if identity.requiresRootAccount && (!identity.relatedToRoot || identity.unlinkedFallbackOnly) {
+		return func(*auth.Account) bool { selectionTraceForRequest(c).Reject("root_unresolved"); return false }
+	}
+	if (!allowModelBypass || identity.ownsRootBinding) && !identity.requiresRootAccount {
 		return selectionTraceForRequest(c).Filter("model_or_provider_mismatch", filter)
 	}
 	if !identity.relatedToRoot || identity.unlinkedFallbackOnly {
@@ -692,6 +696,10 @@ func (h *Handler) applyPassiveInternalModelRouting(c *gin.Context, effectiveMode
 		}
 		if filter == nil || filter(account) {
 			return true
+		}
+		if !allowModelBypass {
+			selectionTraceForRequest(c).Reject("model_or_provider_mismatch")
+			return false
 		}
 		eligible := passiveInternalAccountEligible(account, effectiveModel, allowRelay)
 		if !eligible {

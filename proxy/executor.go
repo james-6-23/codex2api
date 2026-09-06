@@ -1261,6 +1261,7 @@ type requestSessionIdentity struct {
 	forkSourceAffinityID   string
 	bypassWindowAccounting bool
 	protectedRelatedLease  bool
+	requiresRootAccount    bool
 	// unlinkedFallbackOnly marks a request with no verified root. Its normal
 	// affinity key must not be persisted or used for session-window accounting;
 	// the optional recent-account bridge is strictly request-local.
@@ -1357,6 +1358,10 @@ func (h *Handler) resolveRequestSessionIdentityWithBase(c *gin.Context, body []b
 	verifiedPolicy := (status == "verified" || status == "signed_response") && policyContext.MetaVerified
 	accountingBypass := h.verifiedNewAPISessionAccountingBypass(c)
 	rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, body)
+	identity.requiresRootAccount = strings.EqualFold(strings.TrimSpace(rootIdentity.threadSource), "ambient_suggestions")
+	if verifiedPolicy && strings.EqualFold(strings.TrimSpace(policyContext.Meta.ThreadSource), "ambient_suggestions") {
+		identity.requiresRootAccount = true
+	}
 	if !verifiedPolicy {
 		accountingBypass = classifyLocalCodexIndependentSessionAccounting(c, rootIdentity)
 	}
@@ -1425,7 +1430,9 @@ func (h *Handler) resolveRequestSessionIdentityWithBase(c *gin.Context, body []b
 			}
 		}
 	}
-	if h.passiveInternalModelsAllowed(c) && !identity.ownsRootBinding {
+	if identity.requiresRootAccount {
+		identity.unlinkedFallbackOnly = false
+	} else if h.passiveInternalModelsAllowed(c) && !identity.ownsRootBinding {
 		if !identity.relatedToRoot {
 			identity.unlinkedFallbackOnly = true
 		} else {
