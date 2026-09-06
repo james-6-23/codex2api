@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -602,6 +603,10 @@ func TestResponsesWebSocketUpgradeTurnStateDoesNotAuthorizeFreshFrame(t *testing
 }
 
 func TestResponsesWebSocketPinnedTurnDegradesPreviousResponseFailure(t *testing.T) {
+	resetResponseCacheForTest()
+	t.Cleanup(resetResponseCacheForTest)
+	setResponseCache("anon", "resp_missing", []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"earlier context"}`)})
+
 	gin.SetMode(gin.TestMode)
 	previousExec := WebsocketExecuteFunc
 	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
