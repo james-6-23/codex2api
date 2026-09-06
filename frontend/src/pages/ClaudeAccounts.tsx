@@ -70,6 +70,7 @@ import {
   type ProxyBindingContext,
 } from "../lib/accountProxyBinding";
 import ChipInput from "../components/ChipInput";
+import { formatCustomHeadersText, parseCustomHeadersText } from "../lib/accountQuickConfig";
 import { AccountGroupManagerModal, ACCOUNT_GROUP_COLORS } from "../components/AccountGroupManagerModal";
 import { Select } from "../components/ui/select";
 import ChannelLogo from "../components/ChannelLogo";
@@ -2125,6 +2126,8 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
                 {detailTarget.claude_auth_kind === "api_key" ? <>
                   <div>{t("claude.authKindAPIKey")}</div>
                   <div className="break-all">{t("claude.baseURLLabel")}: {detailTarget.claude_base_url}</div>
+                  <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.apiKeyIdentityLabel")}</span><span className="text-right">{detailTarget.claude_fingerprint_mode === "force" ? t("claude.apiKeyIdentityForce") : detailTarget.claude_fingerprint_mode === "preserve" ? t("claude.apiKeyIdentityPreserve") : t("claude.apiKeyIdentityOff")}</span></div>
+                  <div className="flex items-start justify-between gap-3"><span className="shrink-0 text-muted-foreground">{t("claude.upstreamUserAgent")}</span><span className="max-w-[260px] break-all text-right font-mono text-[10px]">{detailTarget.claude_user_agent || t("claude.apiKeyUAPassthrough")}</span></div>
                 </> : <>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.authOAuth")}</span><span className="font-medium">{t("claude.providerProtocol")}</span></div>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.subscriptionPlan")}</span><span>{(() => { const badge = claudePlanBadge(detailTarget.plan_type || "claude"); return <span className={badge.cls}>{badge.label}</span>; })()}</span></div>
@@ -2993,6 +2996,28 @@ function EditAccountModal({
   const [fpMode, setFpMode] = useState<"" | "preserve" | "force">(
     (account.claude_fingerprint_mode as "" | "preserve" | "force") ?? "",
   );
+  const isAPIKeyAccount = account.claude_auth_kind === "api_key";
+  // API Key 账号的自定义出站请求头(issue #647)。列表行不带 custom_headers(仅详情
+  // 响应携带),弹窗打开时按需拉一次详情回填,避免把空文本框当成"清空"保存。
+  const [customHeadersText, setCustomHeadersText] = useState(() => formatCustomHeadersText(account.custom_headers));
+  const [customHeadersLoaded, setCustomHeadersLoaded] = useState(!isAPIKeyAccount || account.detail_loaded === true || account.custom_headers !== undefined);
+  useEffect(() => {
+    if (customHeadersLoaded) return;
+    let cancelled = false;
+    void api.getAccount(account.id)
+      .then((detail) => {
+        if (cancelled) return;
+        setCustomHeadersText(formatCustomHeadersText(detail.custom_headers));
+        setFpMode((detail.claude_fingerprint_mode as "" | "preserve" | "force") ?? "");
+      })
+      .catch(() => {
+        /* 详情拉取失败时保留当前值;保存仍会走后端校验 */
+      })
+      .finally(() => {
+        if (!cancelled) setCustomHeadersLoaded(true);
+      });
+    return () => { cancelled = true; };
+  }, [account.id, customHeadersLoaded]);
   const [clientPlatform, setClientPlatform] = useState<"" | "any" | "claude_code_cli_only">(
     (account.claude_client_platform_override as "" | "any" | "claude_code_cli_only") ?? "",
   );
@@ -3014,6 +3039,16 @@ function EditAccountModal({
   };
 
   const save = useCallback(async () => {
+    // API Key 账号:自定义头必须是字符串到字符串的 JSON 对象;空文本 = 清空。
+    let apiKeyCustomHeaders: Record<string, string> | null = null;
+    if (isAPIKeyAccount) {
+      const parsed = parseCustomHeadersText(customHeadersText);
+      if (!parsed.ok) {
+        showToast(t("claude.customHeadersInvalid"), "error");
+        return;
+      }
+      apiKeyCustomHeaders = parsed.value;
+    }
     setBusy(true);
     try {
       await api.updateAccountScheduler(account.id, {
@@ -3022,7 +3057,7 @@ function EditAccountModal({
         scheduler_priority: parseNum(priority),
         score_bias_override: parseNum(scoreBias),
         base_concurrency_override: parseNum(concurrency),
-        ...(account.claude_auth_kind !== "api_key" ? {
+        ...(!isAPIKeyAccount ? {
         auto_pause_5h_threshold: parseNum(pause5h),
         auto_pause_7d_threshold: parseNum(pause7d),
         claude_fingerprint_mode: fpMode,
@@ -3030,7 +3065,11 @@ function EditAccountModal({
         claude_version_policy: versionPolicy || null,
         claude_client_version: clientVersion.trim() || null,
         timezone: timezone.trim(),
-        } : {}),
+        } : {
+        // API Key:claude_fingerprint_mode 语义为 Claude Code 客户端身份仿真开关。
+        claude_fingerprint_mode: fpMode,
+        ...(customHeadersLoaded ? { custom_headers: apiKeyCustomHeaders } : {}),
+        }),
       });
       showToast(t("claude.saved"), "success");
       // 手动输入的代理若不在代理管理中,询问是否存入(需在关闭弹窗前完成)。
@@ -3041,7 +3080,7 @@ function EditAccountModal({
     } finally {
       setBusy(false);
     }
-  }, [account.id, proxyUrl, proxies, confirm, tags, priority, scoreBias, concurrency, pause5h, pause7d, fpMode, clientPlatform, versionPolicy, clientVersion, timezone, onSaved, showToast, t]);
+  }, [account.id, isAPIKeyAccount, customHeadersText, customHeadersLoaded, proxyUrl, proxies, confirm, tags, priority, scoreBias, concurrency, pause5h, pause7d, fpMode, clientPlatform, versionPolicy, clientVersion, timezone, onSaved, showToast, t]);
 
   const field = (label: string, node: ReactNode, hint?: string) => (
     <div className="space-y-1">
@@ -3089,7 +3128,35 @@ function EditAccountModal({
             <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label="" />,
             t("claude.proxyHint"),
           )}
-          {account.claude_auth_kind !== "api_key" ? <>
+          {isAPIKeyAccount ? <>
+          {field(
+            t("claude.apiKeyIdentityLabel"),
+            <Select
+              value={fpMode}
+              onValueChange={(value) => setFpMode(value as "" | "preserve" | "force")}
+              options={[
+                { value: "", label: t("claude.apiKeyIdentityOff") },
+                { value: "preserve", label: t("claude.apiKeyIdentityPreserve") },
+                { value: "force", label: t("claude.apiKeyIdentityForce") },
+              ]}
+            />,
+            t("claude.apiKeyIdentityHint"),
+          )}
+          {field(
+            t("claude.customHeadersLabel"),
+            <textarea
+              value={customHeadersText}
+              onChange={(e) => setCustomHeadersText(e.target.value)}
+              placeholder={'{"X-App": "cli", "X-Gateway-Tenant": "team-a"}'}
+              rows={4}
+              spellCheck={false}
+              disabled={!customHeadersLoaded}
+              className="w-full rounded-md border border-input bg-background p-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20 disabled:opacity-60"
+            />,
+            t("claude.apiKeyCustomHeadersHint"),
+          )}
+          </> : null}
+          {!isAPIKeyAccount ? <>
           {field(
             t("claude.fingerprintModeLabel"),
             <Select
@@ -3461,6 +3528,9 @@ function ClaudeAddModal({
   const [setupTokens, setSetupTokens] = useState("");
   const [apiBaseUrl, setApiBaseUrl] = useState("https://api.anthropic.com");
   const [apiKey, setApiKey] = useState("");
+  // API Key 账号可选的客户端特征(issue #647):Claude Code 身份仿真 + 自定义请求头。
+  const [apiIdentityMode, setApiIdentityMode] = useState<"" | "preserve" | "force">("");
+  const [apiCustomHeadersText, setApiCustomHeadersText] = useState("");
   const [sessionKey, setSessionKey] = useState("");
   const [showSessionKey, setShowSessionKey] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -3603,11 +3673,18 @@ function ClaudeAddModal({
       showToast(t("claude.apiKeyRequired"), "error");
       return;
     }
+    const parsedHeaders = parseCustomHeadersText(apiCustomHeadersText);
+    if (!parsedHeaders.ok) {
+      showToast(t("claude.customHeadersInvalid"), "error");
+      return;
+    }
     setSubmitting(true);
     try {
       const result = await api.importClaudeToken({
         auth_kind: "api_key", base_url: apiBaseUrl, api_key: apiKey.trim(),
         name: name.trim(), proxy_url: proxyUrl.trim(), use_proxy_pool: useProxyPool,
+        ...(apiIdentityMode ? { claude_fingerprint_mode: apiIdentityMode } : {}),
+        ...(parsedHeaders.value ? { custom_headers: parsedHeaders.value } : {}),
       });
       await applyGroups(result.id);
       showToast(t("claude.added"), "success");
@@ -3618,7 +3695,7 @@ function ClaudeAddModal({
     } finally {
       setSubmitting(false);
     }
-  }, [apiKey, apiBaseUrl, name, proxyUrl, useProxyPool, applyGroups, onAdded, proxies, confirm, showToast, t]);
+  }, [apiKey, apiBaseUrl, apiIdentityMode, apiCustomHeadersText, name, proxyUrl, useProxyPool, applyGroups, onAdded, proxies, confirm, showToast, t]);
 
   const submitImport = useCallback(async () => {
     let parsed: Record<string, unknown> | unknown[];
@@ -3943,6 +4020,31 @@ function ClaudeAddModal({
             <label className="block space-y-1 text-xs">
               <span>API Key</span>
               <Input type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-…" spellCheck={false} />
+            </label>
+            <div className="space-y-1 text-xs">
+              <span>{t("claude.apiKeyIdentityLabel")}</span>
+              <Select
+                value={apiIdentityMode}
+                onValueChange={(value) => setApiIdentityMode(value as "" | "preserve" | "force")}
+                options={[
+                  { value: "", label: t("claude.apiKeyIdentityOff") },
+                  { value: "preserve", label: t("claude.apiKeyIdentityPreserve") },
+                  { value: "force", label: t("claude.apiKeyIdentityForce") },
+                ]}
+              />
+              <p className="text-[10px] leading-tight text-muted-foreground/70">{t("claude.apiKeyIdentityHint")}</p>
+            </div>
+            <label className="block space-y-1 text-xs">
+              <span>{t("claude.customHeadersLabel")}</span>
+              <textarea
+                value={apiCustomHeadersText}
+                onChange={(e) => setApiCustomHeadersText(e.target.value)}
+                placeholder={'{"X-App": "cli", "X-Gateway-Tenant": "team-a"}'}
+                rows={3}
+                spellCheck={false}
+                className="w-full rounded-md border border-input bg-background p-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20"
+              />
+              <p className="text-[10px] leading-tight text-muted-foreground/70">{t("claude.apiKeyCustomHeadersHint")}</p>
             </label>
             {commonFields}
           </div>

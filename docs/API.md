@@ -837,6 +837,26 @@ API Key 导入示例：
 {"auth_kind":"api_key","api_key":"example-key","base_url":"https://gateway.example/v1","name":"Messages gateway"}
 ```
 
+API Key 账号还可选配置两项客户端请求特征（默认都不启用，出站保持"按原始内容转发"）：
+
+- `custom_headers`：账号级自定义出站请求头（对象），附加到该账号的每个上游请求
+  （含 `/v1/models` 模型发现），最后套用、优先级最高，可显式指定 `User-Agent`。
+  `Authorization`、`x-api-key`、`Content-Type`、`Content-Length`、`Host`、`Accept`、
+  `Accept-Encoding`、`Transfer-Encoding`、`Connection` 为网关保留头，出现即返回 400。
+  `PATCH /api/admin/accounts/:id/scheduler` 的 `custom_headers` 对 API Key 账号执行同样校验，
+  传 `null` 清空。
+- `claude_fingerprint_mode`：Claude Code 客户端身份仿真。空（默认）= 透传，只保留下游
+  `User-Agent`（缺失时为 `Codex2API`）；`force` = 始终携带 Claude Code CLI 的基础身份头
+  （`User-Agent: claude-cli/<版本> (external, cli)`、`X-App`、`X-Stainless-*`、
+  `X-Stainless-Retry-Count/Timeout`、`anthropic-dangerous-direct-browser-access`）；
+  `preserve` = 下游是真实 Claude Code CLI 时保留其身份头、缺失才补齐，非 CLI 客户端按 `force` 处理。
+  只改请求头，不复制 OAuth 会话状态、系统提示词或 `metadata` 身份，也不改变 `x-api-key` 鉴权；
+  `custom_headers` 中的同名头优先于仿真值。该字段对 API Key 账号不继承 OAuth 的全局默认。
+
+```json
+{"auth_kind":"api_key","api_key":"example-key","base_url":"https://gateway.example/v1","claude_fingerprint_mode":"force","custom_headers":{"X-Gateway-Tenant":"team-a"}}
+```
+
 裸 RT 导入在刷新前检查已存凭据，命中直接返回 409；有运行时账号池时，与后台刷新使用同一刷新租约。
 
 #### POST /api/admin/accounts/claude/import-tokens

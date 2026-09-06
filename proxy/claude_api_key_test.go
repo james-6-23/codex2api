@@ -44,7 +44,9 @@ func TestClaudeAPIKeyOutboundPreservesNativeBodyAndHeaders(t *testing.T) {
 	t.Setenv("CODEX_TRANSPORT_MODE", "standard")
 	for i, base := range []string{"https://example.com", "https://example.com/v1/", "https://example.com/gateway/v1"} {
 		t.Run(base, func(t *testing.T) {
-			account := &auth.Account{DBID: int64(964510 + i), UpstreamType: auth.UpstreamClaude, ClaudeAuthKind: auth.ClaudeAuthKindAPIKey, AccessToken: "upstream-key", ClaudeBaseURL: base, CustomHeaders: map[string]string{"User-Agent": "claude-cli/1.0.0", "x-app": "cli"}}
+			// No custom headers and no identity mode: the historical neutral
+			// contract must stay byte-for-byte unchanged (issue #647 default).
+			account := &auth.Account{DBID: int64(964510 + i), UpstreamType: auth.UpstreamClaude, ClaudeAuthKind: auth.ClaudeAuthKindAPIKey, AccessToken: "upstream-key", ClaudeBaseURL: base}
 			installClaudeBoundaryTransport(t, account, func(req *http.Request) (*http.Response, error) {
 				body, err := io.ReadAll(req.Body)
 				if err != nil || !bytes.Equal(body, []byte(claudeAPIKeyTestBody)) {
@@ -57,7 +59,7 @@ func TestClaudeAPIKeyOutboundPreservesNativeBodyAndHeaders(t *testing.T) {
 				if req.Header.Get("x-api-key") != "upstream-key" || req.Header.Get("Authorization") != "" || req.UserAgent() != "my-sdk/1" || req.Header.Get("anthropic-version") != "2023-06-01" || req.Header.Get("anthropic-beta") != "custom-feature-2026" {
 					t.Fatalf("invalid headers: %v", req.Header)
 				}
-				for _, name := range []string{"x-app", "X-Claude-Code-Session-Id", "X-Stainless-Lang", "anthropic-dangerous-direct-browser-access"} {
+				for _, name := range []string{"x-app", "X-Claude-Code-Session-Id", "X-Stainless-Lang", "X-Stainless-Os", "X-Stainless-Retry-Count", "anthropic-dangerous-direct-browser-access"} {
 					if req.Header.Get(name) != "" {
 						t.Errorf("OAuth header leaked: %s", name)
 					}
@@ -66,10 +68,13 @@ func TestClaudeAPIKeyOutboundPreservesNativeBodyAndHeaders(t *testing.T) {
 			})
 			headers := http.Header{}
 			headers.Set("User-Agent", "my-sdk/1")
+			headers.Set("X-Stainless-Os", "Linux")
 			headers.Set("Authorization", "Bearer downstream-key")
 			headers.Set("x-api-key", "downstream-key")
 			headers.Set("anthropic-beta", "oauth-2025-04-20,claude-code-20250219,custom-feature-2026")
 			policy := auth.ClaudeClientPolicy{Platform: auth.ClaudeClientPlatformCLIOnly, VersionPolicy: auth.ClaudeVersionPolicyMinimum, ClientVersion: "99.0.0"}
+			// "force" here is the OAuth global default a caller may resolve; an
+			// API Key account without its own mode must still stay neutral.
 			resp, err := ExecuteClaudeMessagesRequestWithPolicy(context.Background(), account, []byte(claudeAPIKeyTestBody), "", headers, "force", policy)
 			if err != nil {
 				t.Fatal(err)
@@ -78,9 +83,116 @@ func TestClaudeAPIKeyOutboundPreservesNativeBodyAndHeaders(t *testing.T) {
 		})
 	}
 	request := httptest.NewRequest(http.MethodPost, "https://example.com", nil)
-	applyClaudeAPIKeyHeaders(request, "key", nil, true)
+	applyClaudeAPIKeyHeaders(request, "key", nil, true, nil, "")
 	if request.UserAgent() != "Codex2API" || request.Header.Get("Accept") != "text/event-stream" || request.Header.Get("anthropic-beta") != "" {
 		t.Fatalf("invalid neutral headers: %v", request.Header)
+	}
+}
+
+// TestClaudeAPIKeyAccountCustomHeadersApply covers issue #647 item 1: account
+// custom_headers reach the upstream and win over the neutral defaults, while the
+// gateway-owned reserved headers can never be overridden.
+func TestClaudeAPIKeyAccountCustomHeadersApply(t *testing.T) {
+	t.Setenv("CODEX_TRANSPORT_MODE", "standard")
+	account := &auth.Account{DBID: 964530, UpstreamType: auth.UpstreamClaude, ClaudeAuthKind: auth.ClaudeAuthKindAPIKey, AccessToken: "upstream-key", ClaudeBaseURL: "https://example.com", CustomHeaders: map[string]string{
+		"User-Agent":        "gateway-client/2.0",
+		"x-app":             "cli",
+		"X-Gateway-Tenant":  "team-a",
+		"anthropic-version": "2024-01-01",
+		// Reserved: must be ignored even when a legacy row contains them.
+		"x-api-key":     "evil",
+		"Authorization": "Bearer evil",
+		"Accept":        "text/plain",
+		"Content-Type":  "text/plain",
+	}}
+	calls := 0
+	installClaudeBoundaryTransport(t, account, func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.UserAgent() != "gateway-client/2.0" || req.Header.Get("X-App") != "cli" || req.Header.Get("X-Gateway-Tenant") != "team-a" || req.Header.Get("anthropic-version") != "2024-01-01" {
+			t.Fatalf("custom headers not applied: %v", req.Header)
+		}
+		if req.Header.Get("x-api-key") != "upstream-key" || req.Header.Get("Authorization") != "" || req.Header.Get("Accept") != "application/json" || req.Header.Get("Content-Type") != "application/json" {
+			t.Fatalf("reserved header overridden: %v", req.Header)
+		}
+		if req.Header.Get("X-Stainless-Lang") != "" {
+			t.Fatalf("identity emulation must stay off without a mode: %v", req.Header)
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(claudeAPIKeyTestResponse))}, nil
+	})
+	headers := http.Header{}
+	headers.Set("User-Agent", "my-sdk/1")
+	resp, err := ExecuteClaudeMessagesRequest(context.Background(), account, []byte(claudeAPIKeyTestBody), "", headers, "")
+	if err != nil || calls != 1 {
+		t.Fatalf("calls=%d err=%v", calls, err)
+	}
+	_ = resp.Body.Close()
+}
+
+// TestClaudeAPIKeyClientIdentityEmulation covers issue #647 item 2: the
+// optional Claude Code client identity for API Key accounts (preserve/force),
+// layered under custom headers and never copying OAuth session state.
+func TestClaudeAPIKeyClientIdentityEmulation(t *testing.T) {
+	t.Setenv("CODEX_TRANSPORT_MODE", "standard")
+	cliUA := "claude-cli/" + auth.EffectiveClaudeCLIVersion() + " (external, cli)"
+	cases := []struct {
+		name     string
+		mode     string
+		custom   map[string]string
+		incoming map[string]string
+		wantUA   string
+		wantOS   string
+		wantApp  string
+		wantFill bool
+	}{
+		{name: "force_non_cli", mode: "force", incoming: map[string]string{"User-Agent": "opencode/1.2", "X-Stainless-Os": "Windows"}, wantUA: cliUA, wantOS: "MacOS", wantApp: "cli", wantFill: true},
+		{name: "force_real_cli_overridden", mode: "force", incoming: map[string]string{"User-Agent": "claude-cli/1.0.0 (external, cli)", "X-Stainless-Os": "Windows"}, wantUA: cliUA, wantOS: "MacOS", wantApp: "cli", wantFill: true},
+		{name: "preserve_real_cli_kept", mode: "preserve", incoming: map[string]string{"User-Agent": "claude-cli/1.0.0 (external, cli)", "X-Stainless-Os": "Windows"}, wantUA: "claude-cli/1.0.0 (external, cli)", wantOS: "Windows", wantApp: "cli", wantFill: true},
+		{name: "preserve_non_cli_acts_as_force", mode: "preserve", incoming: map[string]string{"User-Agent": "opencode/1.2", "X-Stainless-Os": "Windows"}, wantUA: cliUA, wantOS: "MacOS", wantApp: "cli", wantFill: true},
+		{name: "custom_headers_win_over_identity", mode: "force", custom: map[string]string{"User-Agent": "gateway-client/2.0", "X-Stainless-OS": "Linux"}, incoming: map[string]string{"User-Agent": "opencode/1.2"}, wantUA: "gateway-client/2.0", wantOS: "Linux", wantApp: "cli", wantFill: true},
+	}
+	for i, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			account := &auth.Account{DBID: int64(964540 + i), UpstreamType: auth.UpstreamClaude, ClaudeAuthKind: auth.ClaudeAuthKindAPIKey, AccessToken: "upstream-key", ClaudeBaseURL: "https://example.com", ClaudeFingerprintMode: tc.mode, CustomHeaders: tc.custom}
+			calls := 0
+			installClaudeBoundaryTransport(t, account, func(req *http.Request) (*http.Response, error) {
+				calls++
+				if body, _ := io.ReadAll(req.Body); !bytes.Equal(body, []byte(claudeAPIKeyTestBody)) {
+					t.Fatalf("identity emulation must not touch the body: %s", body)
+				}
+				if req.UserAgent() != tc.wantUA || req.Header.Get("X-Stainless-Os") != tc.wantOS || req.Header.Get("X-App") != tc.wantApp {
+					t.Fatalf("identity headers: %v", req.Header)
+				}
+				if tc.wantFill {
+					for name, want := range map[string]string{"X-Stainless-Lang": "js", "X-Stainless-Runtime": "node", "X-Stainless-Retry-Count": "0", "X-Stainless-Timeout": "600", "anthropic-dangerous-direct-browser-access": "true"} {
+						if got := req.Header.Get(name); got != want {
+							t.Fatalf("%s=%q want %q", name, got, want)
+						}
+					}
+				}
+				if req.Header.Get("x-api-key") != "upstream-key" || req.Header.Get("Authorization") != "" || req.Header.Get("X-Claude-Code-Session-Id") != "" || strings.Contains(req.Header.Get("anthropic-beta"), "oauth") {
+					t.Fatalf("OAuth state leaked into API key request: %v", req.Header)
+				}
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(claudeAPIKeyTestResponse))}, nil
+			})
+			headers := http.Header{}
+			for name, value := range tc.incoming {
+				headers.Set(name, value)
+			}
+			headers.Set("anthropic-beta", "oauth-2025-04-20")
+			// Pass the neutral caller value: the mode must come from the account.
+			resp, err := ExecuteClaudeMessagesRequest(context.Background(), account, []byte(claudeAPIKeyTestBody), "", headers, "")
+			if err != nil || calls != 1 {
+				t.Fatalf("calls=%d err=%v", calls, err)
+			}
+			_ = resp.Body.Close()
+		})
+	}
+	// The recorded upstream User-Agent must be the final one.
+	ctx := withUserAgentAudit(context.Background())
+	request := httptest.NewRequest(http.MethodPost, "https://example.com", nil).WithContext(ctx)
+	applyClaudeAPIKeyHeaders(request, "key", http.Header{"User-Agent": {"opencode/1.2"}}, false, map[string]string{"User-Agent": "final/1"}, "force")
+	if got, known := upstreamUserAgentAudit(ctx); !known || got != "final/1" {
+		t.Fatalf("audit recorded %q (known=%t)", got, known)
 	}
 }
 

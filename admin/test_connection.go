@@ -424,10 +424,10 @@ func (h *Handler) handleClaudeConnectionTest(
 	transientOutcome *string,
 	id int64,
 ) {
+	// For API Key accounts fingerprintMode already carries the account-level
+	// client-identity emulation mode (empty = passthrough), so it is reported
+	// as-is instead of being blanked.
 	recorder := newClaudeTestRecorder(resp, testModel, fingerprintMode, account.GetAccessToken(), start)
-	if account.IsClaudeAPIKey() {
-		recorder.details.FingerprintMode = ""
-	}
 	// The final diagnostics follow the terminal result; clients must drain the
 	// SSE response before refreshing the invalidated account snapshot.
 	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", Diagnostics: recorder.finish()}) }()
