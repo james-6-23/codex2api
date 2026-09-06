@@ -54,6 +54,18 @@ func TestPostgresTraceAndCapabilities(t *testing.T) {
 	if string(got[id].Models["gpt-5.6-sol"]["use_responses_lite"]) != "true" {
 		t.Fatal("PostgreSQL capabilities missing")
 	}
+	testReviewDailyUsageLegacyColumns(t, db)
+	// Drain startup builders, then verify the online index path directly.
+	db.DrainBackgroundTasks(10 * time.Second)
+	if err := db.ensureUsageLogsGenerationIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"idx_usage_logs_request_id", "idx_usage_logs_upstream_request_id"} {
+		var valid bool
+		if err := db.conn.QueryRowContext(ctx, `SELECT indisvalid FROM pg_index WHERE indexrelid=to_regclass($1)`, name).Scan(&valid); err != nil || !valid {
+			t.Fatalf("index %s invalid: %v", name, err)
+		}
+	}
 	// Reopening runs the idempotent schema path and restores persisted state.
 	second, err := New("postgres", dsn)
 	if err != nil {

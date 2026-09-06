@@ -34,7 +34,7 @@ func wsContextTestSSE(id string, items ...string) string {
 }
 
 func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
-	for _, fallback := range []string{"previous_not_found", "http"} {
+	for _, fallback := range []string{"previous_not_found", "http", "incomplete", "expires_during_turn"} {
 		t.Run(fallback, func(t *testing.T) {
 			gin.SetMode(gin.TestMode)
 			resetResponseCacheForTest()
@@ -62,12 +62,22 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				case 1:
 					sse = wsContextTestSSE("resp_turn1", `{"type":"custom_tool_call","id":"ctc_one","call_id":"call_one","name":"exec","input":"print(\"hello\")"}`)
 				case 2:
+					if fallback == "expires_during_turn" {
+						respCache.mu.Lock()
+						if entry := respCache.store[responseCacheStoreKey("anon", "resp_turn1")]; entry != nil {
+							entry.expiresAt = time.Now().Add(-time.Second)
+						}
+						respCache.mu.Unlock()
+					}
 					if gjson.GetBytes(body, "input.#").Int() != 1 || gjson.GetBytes(body, "previous_response_id").String() != "resp_turn1" {
 						t.Error("healthy WS continuation must still send only the new tool result")
 					}
 					sse = wsContextTestSSE("resp_turn2", `{"type":"custom_tool_call","id":"ctc_two","call_id":"call_two","name":"exec","input":"print(\"world\")"}`)
 				case 3:
 					sse = wsContextTestSSE("resp_turn3", `{"type":"message","id":"msg_final","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"finished"}]}`)
+					if fallback == "incomplete" {
+						sse = strings.ReplaceAll(sse, "response.completed", "response.incomplete")
+					}
 				case 4:
 					if fallback == "http" {
 						return nil, errors.New("websocket: close 1009 (message too big)")
@@ -97,7 +107,7 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				`{"previous_response_id":"resp_turn2","input":[{"type":"custom_tool_call_output","call_id":"call_two","output":"world"}]}`,
 				`{"previous_response_id":"resp_turn3","input":[{"type":"message","role":"user","content":"continue"}]}`,
 			}
-			for _, input := range inputs {
+			for turnIndex, input := range inputs {
 				var request map[string]any
 				if err := json.Unmarshal([]byte(input), &request); err != nil {
 					t.Fatal(err)
@@ -108,7 +118,11 @@ func TestResponsesWSContextSurvivesMultiTurnFallback(t *testing.T) {
 				}
 				conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 				terminal := readResponsesWSTerminalEvent(t, conn)
-				if gjson.GetBytes(terminal, "type").String() != "response.completed" {
+				wantTerminal := "response.completed"
+				if fallback == "incomplete" && turnIndex == 2 {
+					wantTerminal = "response.incomplete"
+				}
+				if gjson.GetBytes(terminal, "type").String() != wantTerminal {
 					t.Fatalf("unexpected terminal: %s", terminal)
 				}
 			}
@@ -273,7 +287,7 @@ func TestResponsesWSContextMissingFailsClosedAndReleasesAccount(t *testing.T) {
 	}
 }
 
-// 健康路径不再在首字前查缓存：快照源只在真正需要时算一次并记住结果。
+// Snapshot construction pins L1 without affecting replay statistics, then merges once.
 func TestResponsesWSReplaySourceIsLazyAndMemoized(t *testing.T) {
 	resetResponseCacheForTest()
 	t.Cleanup(resetResponseCacheForTest)
@@ -288,8 +302,8 @@ func TestResponsesWSReplaySourceIsLazyAndMemoized(t *testing.T) {
 	if first == "" || first != second || gjson.Get(first, "#").Int() != 2 {
 		t.Fatalf("unexpected replay input: %q / %q", first, second)
 	}
-	if after := GetResponseCacheStats(); after.Hits != before.Hits+1 {
-		t.Fatalf("lookup was not memoized: hits %d -> %d", before.Hits, after.Hits)
+	if after := GetResponseCacheStats(); after.Hits != before.Hits || after.Misses != before.Misses {
+		t.Fatalf("snapshot construction polluted replay statistics: hits %d -> %d", before.Hits, after.Hits)
 	}
 	if got := newResponsesWSReplaySourceFromInput("[]").Input(); got != "[]" {
 		t.Fatalf("precomputed input = %q", got)

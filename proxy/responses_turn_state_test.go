@@ -29,7 +29,7 @@ func readResponsesWSTerminalEvent(t *testing.T, conn *websocket.Conn) []byte {
 			t.Fatalf("read websocket event: %v", err)
 		}
 		switch gjson.GetBytes(event, "type").String() {
-		case "response.completed", "response.failed", "error":
+		case "response.completed", "response.incomplete", "response.failed", "error":
 			return event
 		}
 	}

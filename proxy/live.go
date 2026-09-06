@@ -79,6 +79,10 @@ type liveCallRecord struct {
 	UserAgent             string    `json:"user_agent,omitempty"`
 	ClientIP              string    `json:"client_ip,omitempty"`
 	InboundEndpoint       string    `json:"inbound_endpoint,omitempty"`
+	RequestID             string    `json:"request_id,omitempty"`
+	UpstreamRequestID     string    `json:"upstream_request_id,omitempty"`
+	UpstreamProxyID       int64     `json:"upstream_proxy_id,omitempty"`
+	UpstreamProxyName     string    `json:"upstream_proxy_name,omitempty"`
 	UsageLogged           bool      `json:"usage_logged,omitempty"`
 }
 
@@ -286,7 +290,12 @@ func (h *Handler) LiveCreate(c *gin.Context) {
 		}
 
 		now := time.Now()
+		trace := snapshotUpstreamTrace(c.Request.Context())
 		record := &liveCallRecord{
+			RequestID:             trace.RequestID,
+			UpstreamRequestID:     trace.UpstreamRequestID,
+			UpstreamProxyID:       trace.Proxy.ID,
+			UpstreamProxyName:     trace.Proxy.Name,
 			CallID:                created.callID,
 			CallHash:              hashLiveCallID(created.callID),
 			AccountID:             account.ID(),

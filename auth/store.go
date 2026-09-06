@@ -96,6 +96,7 @@ type Account struct {
 	UpstreamRequestIDHeader   string
 	mu                        sync.RWMutex
 	usageSyncMu               sync.Mutex
+	modelCatalogMu            sync.Mutex
 	// grokRuntimeFactsMu serializes inference-response observations for this
 	// account. The sink performs generation-fenced database writes before it
 	// publishes any hard gate or routing invalidation back to memory.

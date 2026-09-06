@@ -25,6 +25,18 @@ const (
 
 var oauthRefreshLeaseOwnerSequence atomic.Uint64
 
+// WithOAuthRefreshLease serializes credential imports with background refreshes.
+// The callback must check persisted credentials again before consuming the token
+// and persist the rotated credentials before returning.
+func (s *Store) WithOAuthRefreshLease(ctx context.Context, refreshToken string, fn func(context.Context) error) error {
+	lease, err := s.acquireOAuthRefreshLease(ctx, refreshToken)
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+	return fn(lease.CriticalContext())
+}
+
 type oauthRefreshLocalLock struct {
 	ch   chan struct{}
 	refs int

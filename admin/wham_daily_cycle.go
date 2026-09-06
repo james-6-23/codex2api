@@ -100,7 +100,7 @@ func projectWhamDailyCycle(in whamDailyCycleInput, now time.Time) gin.H {
 	case in.UsedCredits <= 0:
 		// free 号 credits 恒 0；付费号周期刚开始时官方统计也可能还没出数。
 		out["reason"] = "no_credits"
-	case in.UsedPercent < whamDailyCycleMinPercent:
+	case in.UsedPercent <= whamDailyCycleMinPercent:
 		out["reason"] = "percent_too_low"
 	default:
 		usedUSD := in.UsedCredits / proxy.WhamCreditsPerUSD

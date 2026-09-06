@@ -57,8 +57,13 @@ func internalResponseAttributionFromRequest(c *gin.Context, reason string) *inte
 	if value, exists := c.Get(contextAPIKeyMasked); exists {
 		attribution.APIKeyMasked, _ = value.(string)
 	}
-	if requestContext := api.GetRequestContext(c); requestContext != nil {
-		attribution.ParentRequestID = strings.TrimSpace(requestContext.RequestID)
+	if c.Request != nil {
+		attribution.ParentRequestID = snapshotUpstreamTrace(c.Request.Context()).RequestID
+	}
+	if attribution.ParentRequestID == "" {
+		if requestContext := api.GetRequestContext(c); requestContext != nil {
+			attribution.ParentRequestID = strings.TrimSpace(requestContext.RequestID)
+		}
 	}
 	if attribution.ParentRequestID == "" {
 		attribution.ParentRequestID = strings.TrimSpace(c.GetHeader("X-Request-ID"))

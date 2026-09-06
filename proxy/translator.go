@@ -1926,17 +1926,18 @@ func copyChatResponsesControls(out map[string]any, req openAIRequest) error {
 			return fmt.Errorf("Chat Completions tool_choice %q cannot be represented by Responses", typed)
 		}
 	case map[string]any:
-		if strings.TrimSpace(firstNonEmptyAnyString(typed["type"])) != "function" {
+		toolType := strings.TrimSpace(firstNonEmptyAnyString(typed["type"]))
+		if toolType != "function" && toolType != "custom" {
 			return fmt.Errorf("Chat Completions tool_choice type %q cannot be represented by Responses", firstNonEmptyAnyString(typed["type"]))
 		}
 		name := strings.TrimSpace(firstNonEmptyAnyString(typed["name"]))
-		if function, ok := typed["function"].(map[string]any); ok && name == "" {
+		if function, ok := typed[toolType].(map[string]any); ok && name == "" {
 			name = strings.TrimSpace(firstNonEmptyAnyString(function["name"]))
 		}
 		if name == "" {
 			return fmt.Errorf("Chat Completions function tool_choice requires function.name")
 		}
-		out["tool_choice"] = map[string]any{"type": "function", "name": name}
+		out["tool_choice"] = map[string]any{"type": toolType, "name": name}
 		return nil
 	default:
 		return fmt.Errorf("Chat Completions tool_choice cannot be represented by Responses")

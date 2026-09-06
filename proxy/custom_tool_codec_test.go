@@ -107,13 +107,16 @@ func TestCustomToolAnthropicRoundTrip(t *testing.T) {
 			}
 			block := response.Content[0]
 			messages := []any{map[string]any{"role": "assistant", "content": response.Content}, map[string]any{"role": "user", "content": []any{map[string]any{"type": "tool_result", "tool_use_id": block.ID, "content": "ok"}}}}
-			request, _ := json.Marshal(map[string]any{"model": "gpt-6-astra", "messages": messages, "tools": []any{map[string]any{"name": "exec", "input_schema": map[string]any{"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}, "required": []string{"input"}}}}})
+			request, _ := json.Marshal(map[string]any{"model": "gpt-6-astra", "messages": messages, "tool_choice": map[string]any{"type": "tool", "name": "exec"}, "tools": []any{map[string]any{"name": "exec", "input_schema": map[string]any{"type": "object", "properties": map[string]any{"input": map[string]any{"type": "string"}}, "required": []string{"input"}}}}})
 			body, _, err := TranslateAnthropicToCodexWithModels(request, "", []string{"gpt-6-astra"})
 			if err != nil {
 				t.Fatal(err)
 			}
 			if gjson.GetBytes(body, "input.0.type").String() != "custom_tool_call" || gjson.GetBytes(body, "input.0.call_id").String() != "call_original" || gjson.GetBytes(body, "input.0.input").String() != input || gjson.GetBytes(body, "input.0.namespace").String() != "functions" || gjson.GetBytes(body, "input.1.type").String() != "custom_tool_call_output" || gjson.GetBytes(body, "input.1.call_id").String() != "call_original" {
 				t.Fatalf("custom Messages history failed to round-trip: %s", body)
+			}
+			if gjson.GetBytes(body, "tool_choice.type").String() != "custom" || gjson.GetBytes(body, "tool_choice.namespace").String() != "functions" {
+				t.Fatalf("custom tool choice not restored: %s", body)
 			}
 			if gjson.GetBytes(body, "tools.0.type").String() != "namespace" || gjson.GetBytes(body, "tools.0.name").String() != "functions" || gjson.GetBytes(body, "tools.0.tools.0.type").String() != "custom" {
 				t.Fatalf("wrapper declaration was not restored: %s", body)

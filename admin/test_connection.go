@@ -527,7 +527,11 @@ func (h *Handler) handleClaudeConnectionTest(
 	}
 	// 显式复探成功:该模型此前的模型级冷却(如 credits_required)已不成立,立即解除,
 	// 调度器无需等 30 分钟窗口自然到期。
-	if account.IsModelRateLimited(testModel) {
+	if err := h.store.RestoreClaudeAccountModel(c.Request.Context(), account, testModel); err != nil {
+		sendTestEvent(c, testEvent{Type: "error", Error: "模型复探成功，但恢复模型清单失败"})
+		return
+	}
+	if account.ClaudeModelWasRejected(testModel) || account.IsModelRateLimited(testModel) {
 		h.store.ClearModelCooldown(account, testModel)
 	}
 	proxy.NoteClaudeGatedModelSuccess(h.store, account, testModel)
@@ -861,6 +865,9 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 	if account != nil && account.IsClaudeOAuth() {
 		models := claudeProbeModelIDs(account)
 		if requested != "" {
+			if strings.HasPrefix(strings.ToLower(requested), "claude-") && account.ClaudeModelWasRejected(requested) {
+				return requested, nil
+			}
 			if h != nil && h.db != nil && account.DBID > 0 {
 				row, err := h.db.GetAccountByID(ctx, account.DBID)
 				if err == nil && row != nil {

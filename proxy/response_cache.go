@@ -226,6 +226,9 @@ func GetResponseCacheStats() ResponseCacheStats {
 func resetResponseCacheStateForTest(config responseCacheConfig) {
 	// 上一个测试的后台写入必须先落地，否则会写进重置后的后端。
 	drainResponseCacheBackendWrites()
+	responseCacheBackendWriter.mu.Lock()
+	responseCacheBackendWriter.draining = false
+	responseCacheBackendWriter.mu.Unlock()
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
 	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
@@ -346,8 +349,10 @@ const (
 )
 
 var responseCacheBackendWriter = struct {
-	wg    sync.WaitGroup
-	slots chan struct{}
+	wg       sync.WaitGroup
+	mu       sync.Mutex
+	draining bool
+	slots    chan struct{}
 }{slots: make(chan struct{}, responseCacheBackendWriteSlots)}
 
 // writeResponseContextBackend 把已入 L1 的条目写到共享后端。写入在后台完成，
@@ -362,10 +367,17 @@ func writeResponseContextBackend(runtimeCache cache.TokenCache, responseID, stor
 			log.Printf("写入 Redis response context 失败: response_id=%s err=%v", responseID, err)
 		}
 	}
+	responseCacheBackendWriter.mu.Lock()
+	if responseCacheBackendWriter.draining {
+		responseCacheBackendWriter.mu.Unlock()
+		write(cloneResponseContextItems(items), responseCacheBackendSyncTimeout)
+		return
+	}
 	select {
 	case responseCacheBackendWriter.slots <- struct{}{}:
 		payload := cloneResponseContextItems(items)
 		responseCacheBackendWriter.wg.Add(1)
+		responseCacheBackendWriter.mu.Unlock()
 		go func() {
 			defer func() {
 				<-responseCacheBackendWriter.slots
@@ -374,20 +386,26 @@ func writeResponseContextBackend(runtimeCache cache.TokenCache, responseID, stor
 			write(payload, responseCacheBackendWriteTimeout)
 		}()
 	default:
-		write(items, responseCacheBackendSyncTimeout)
+		responseCacheBackendWriter.mu.Unlock()
+		write(cloneResponseContextItems(items), responseCacheBackendSyncTimeout)
 	}
 }
 
 // drainResponseCacheBackendWrites 等待后台写入全部落地（测试与关停使用）。
 func drainResponseCacheBackendWrites() {
+	responseCacheBackendWriter.mu.Lock()
 	responseCacheBackendWriter.wg.Wait()
+	responseCacheBackendWriter.mu.Unlock()
 }
 
 // DrainResponseCacheBackendWrites 在关停时等待后台共享后端写入完成，最多等 timeout。
 func DrainResponseCacheBackendWrites(timeout time.Duration) bool {
+	responseCacheBackendWriter.mu.Lock()
+	responseCacheBackendWriter.draining = true
+	responseCacheBackendWriter.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		drainResponseCacheBackendWrites()
+		responseCacheBackendWriter.wg.Wait()
 		close(done)
 	}()
 	select {
@@ -577,6 +595,9 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 		if blob.refs == 0 {
 			if c.sharedItems[blob.key] == blob {
 				delete(c.sharedItems, blob.key)
+				if len(c.sharedItems) == 0 {
+					c.sharedItems = nil
+				}
 			}
 			c.stats.SharedPayloadBytes -= int64(len(blob.body))
 		}
@@ -777,6 +798,11 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 
 func getResponseCacheResultWithOwnership(owner, responseID string, borrow bool) responseCacheLookupResult {
 	result := lookupResponseCacheResultWithOwnership(owner, responseID, borrow)
+	recordResponseCacheLookup(owner, result)
+	return result
+}
+
+func recordResponseCacheLookup(owner string, result responseCacheLookupResult) {
 	respCache.mu.Lock()
 	// 任何续链查询（无论命中与否）都赋予 owner 写入资格：这是 on_demand
 	// 写入策略的准入信号，命中率与之无关。
@@ -800,7 +826,6 @@ func getResponseCacheResultWithOwnership(owner, responseID string, borrow bool) 
 		}
 	}
 	respCache.mu.Unlock()
-	return result
 }
 
 func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResult {

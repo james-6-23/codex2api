@@ -210,9 +210,6 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			UseResponsesLite: false,
 			InputModalities:  []string{"text"},
 		}
-		if key == "gpt-5.6-sol" && strings.EqualFold(model.OwnedBy, "openai") {
-			item.ServiceTiers = []map[string]string{{"id": "priority", "name": "Fast"}, {"id": "ultrafast", "name": "Ultrafast"}}
-		}
 		if strings.Contains(key, "image") {
 			item.InputModalities = []string{"text", "image"}
 		}

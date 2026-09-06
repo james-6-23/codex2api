@@ -174,12 +174,11 @@ function formatResetShort(iso?: string): { label: string; title: string } | null
   const d = new Date(iso);
   const ts = d.getTime();
   if (!Number.isFinite(ts) || ts <= Date.now()) return null;
-  const now = new Date();
-  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
-  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  const title = formatBeijingTime(iso);
+  const today = formatBeijingTime(new Date().toISOString()).slice(0, 10);
   return {
-    label: sameDay ? hm : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hm}`,
-    title: d.toLocaleString(),
+    label: title.slice(0, 10) === today ? title.slice(11, 16) : title.slice(5, 16),
+    title,
   };
 }
 
@@ -1395,8 +1394,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   }, [knownPlans]);
   const planLabel = (plan: string) => (plan === "all" ? t("accounts.filterAll") : claudePlanBadge(plan).label);
 
-  // Claude 账号当前只支持 OAuth;不展示一个永远为 0 的 API Key 筛选,避免
-  // 运营误以为 Claude API Key 可以走同一原生链路。
+  // Credential-kind counts come from the filtered account summary.
   const authTabs: Array<{ id: AuthFilter; label: string; count?: number }> = [
     { id: "all", label: t("accounts.filterAll") },
     { id: "oauth", label: "OAuth", count: summary?.oauth || 0 },
@@ -3937,6 +3935,7 @@ function ClaudeAddModal({
         {tab === "api_key" ? (
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">{t("claude.apiKeyHint")}</p>
+            <p className="text-xs text-muted-foreground">{t("claude.apiKeyPolicyHint")}</p>
             <label className="block space-y-1 text-xs">
               <span>{t("claude.baseURLLabel")}</span>
               <Input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} placeholder="https://api.anthropic.com" spellCheck={false} />

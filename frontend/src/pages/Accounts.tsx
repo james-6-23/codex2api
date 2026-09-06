@@ -14490,7 +14490,7 @@ function TestConnectionModal({
               ? "text-amber-600 dark:text-amber-400"
               : "text-red-600 dark:text-red-400",
     },
-    { key: "headers", label: t("accounts.testDiagHeadersTime"), value: formatCodexTestMS(diagnostics?.headers_ms), tone: "text-foreground" },
+    { key: "headers", label: t(diagnostics?.transport === "websocket" ? "accounts.testDiagFirstFrameTime" : "accounts.testDiagHeadersTime"), value: formatCodexTestMS(diagnostics?.transport === "websocket" ? diagnostics?.first_frame_ms : diagnostics?.headers_ms), tone: "text-foreground" },
     { key: "first", label: t("accounts.testDiagFirstContent"), value: formatCodexTestMS(diagnostics?.first_content_ms), tone: "text-foreground" },
     { key: "total", label: t("accounts.testDiagDuration"), value: formatCodexTestMS(diagnostics?.duration_ms), tone: "text-foreground" },
   ];

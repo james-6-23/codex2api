@@ -7,8 +7,8 @@ package auth
 // 429 credits_required,而 Fable 这类高档模型只有 Max 及以上才包含。于是把两类观测
 // 当作套餐信号:
 //   - 任何模型命中 credits_required → 套餐降为 pro(套餐已由 profile 判定为 pro/free/
-//     team/enterprise/business 时不再改动,只覆盖占位与 max 系列);
-//   - Fable 等高档模型成功响应 → 占位或 pro 升为 max。
+//     team/enterprise/business 时不再改动,OAuth 只补占位，Setup Token 可修正推断值);
+//   - Fable 等高档模型成功响应 → 占位或 Setup Token 的 pro 升为 max。
 //
 // 推断结果直接写进 credentials.plan_type;OAuth 账号下一次刷新若 profile 给出更准确
 // 的档位仍会覆盖(profile 是权威来源,这里只是补空)。
@@ -50,7 +50,7 @@ func (s *Store) ApplyClaudePlanFromCreditsRequired(ctx context.Context, acc *Acc
 		return "", "", false
 	}
 	previous = acc.GetPlanType()
-	if claudePlanPinnedByProvider(previous) {
+	if claudePlanPinnedByProvider(previous) || (!acc.IsClaudeSetupToken() && strings.TrimSpace(previous) != "" && previous != ClaudePlanUnknown) {
 		return previous, previous, false
 	}
 	if err := s.setClaudePlanType(ctx, acc, ClaudePlanPro); err != nil {
@@ -66,6 +66,9 @@ func (s *Store) ApplyClaudePlanFromGatedModelSuccess(ctx context.Context, acc *A
 		return "", "", false
 	}
 	previous = acc.GetPlanType()
+	if !acc.IsClaudeSetupToken() && strings.TrimSpace(previous) != "" && previous != ClaudePlanUnknown {
+		return previous, previous, false
+	}
 	switch strings.ToLower(strings.TrimSpace(previous)) {
 	case "", ClaudePlanUnknown, ClaudePlanPro, "claude-pro":
 	default:

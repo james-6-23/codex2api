@@ -145,7 +145,9 @@ func (t *anthropicStreamTranslator) finishCustomToolInput(final gjson.Result) []
 			t.toolInputError = fmt.Errorf("custom tool input must be text")
 			return nil
 		}
-		candidate = final.String()
+		if final.String() != "" {
+			candidate = final.String()
+		}
 	}
 	if !strings.HasPrefix(candidate, current) {
 		t.toolInputError = fmt.Errorf("custom tool input does not match streamed deltas")
@@ -226,7 +228,9 @@ func (st *StreamTranslator) finalizeCustomToolInput(index int, final gjson.Resul
 		if final.Type != gjson.String {
 			return st.failToolArguments(index, "must contain text input")
 		}
-		candidate = final.String()
+		if final.String() != "" {
+			candidate = final.String()
+		}
 	}
 	if len(candidate) > responseCacheMaxEntry {
 		return st.failToolArguments(index, "exceed the tool input size limit")

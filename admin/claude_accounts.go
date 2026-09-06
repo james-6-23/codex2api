@@ -511,6 +511,19 @@ func (h *Handler) insertClaudeAccount(c *gin.Context, ctx context.Context, name,
 // createClaudeAccount is the shared insertion path for OAuth and portable
 // credential imports. It never writes token values to logs or response bodies.
 func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timezone string, td *auth.ClaudeTokenData, source string, opts *claudeAccountImportOptions) (claudeAccountCreateResult, error) {
+	if h != nil && h.store != nil && td != nil && strings.TrimSpace(td.AccessToken) == "" && strings.TrimSpace(td.RefreshToken) != "" {
+		var result claudeAccountCreateResult
+		err := h.store.WithOAuthRefreshLease(ctx, td.RefreshToken, func(leaseCtx context.Context) error {
+			var err error
+			result, err = h.createClaudeAccountWithRefreshLease(leaseCtx, name, proxyURL, timezone, td, source, opts)
+			return err
+		})
+		return result, err
+	}
+	return h.createClaudeAccountWithRefreshLease(ctx, name, proxyURL, timezone, td, source, opts)
+}
+
+func (h *Handler) createClaudeAccountWithRefreshLease(ctx context.Context, name, proxyURL, timezone string, td *auth.ClaudeTokenData, source string, opts *claudeAccountImportOptions) (claudeAccountCreateResult, error) {
 	if h == nil || h.db == nil || td == nil {
 		return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusInternalServerError, Message: "Claude 账号存储未初始化"}
 	}
@@ -556,8 +569,16 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		}
 	}
 	if authKind == auth.ClaudeAuthKindOAuth && accessToken == "" {
-		// 裸 RT 导入(sk-ant-ort01-):先用 RT 换出 AT,顺带拿到邮箱/账号 UUID/套餐做查重与
-		// 展示;RT 无效在这里就失败,而不是入库后每次调度 401。
+		// Reject an existing credential before consuming its rotating refresh token.
+		rows, err := h.db.ListActiveByChannel(ctx, database.UpstreamChannelClaude)
+		if err != nil {
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusInternalServerError, Message: "查询 Claude 账号失败: " + err.Error()}
+		}
+		for _, row := range rows {
+			if strings.TrimSpace(row.GetCredential("refresh_token")) == refreshToken {
+				return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusConflict, Message: fmt.Sprintf("Claude 凭据已存在 (id=%d)", row.ID)}
+			}
+		}
 		refreshed, err := h.refreshClaudeCredentialsForImport(ctx, proxyURL, refreshToken)
 		if err != nil {
 			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadGateway, Message: "refresh_token 换取 access_token 失败: " + err.Error()}

@@ -103,7 +103,7 @@ func (o *ClaudeAuth) FetchModelsWithCredentials(ctx context.Context, token, kind
 		}
 		for _, model := range parsed.Data {
 			id := strings.TrimSpace(model.ID)
-			if id != "" && !seen[strings.ToLower(id)] {
+			if strings.HasPrefix(strings.ToLower(id), "claude-") && !seen[strings.ToLower(id)] {
 				seen[strings.ToLower(id)] = true
 				ids = append(ids, id)
 			}

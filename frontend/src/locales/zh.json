@@ -1338,6 +1338,7 @@
     "failureDetails": "失败详情",
     "unknownError": "未知错误",
     "testDiagHTTPStatus": "上游 HTTP",
+    "testDiagFirstFrameTime": "首帧耗时",
     "testDiagHeadersTime": "响应头耗时",
     "testDiagFirstContent": "首字耗时",
     "testDiagDuration": "总耗时",
@@ -5685,6 +5686,7 @@
     }
   },
   "claude": {
+    "apiKeyPolicyHint": "API Key 请求按原始内容转发，不应用 Claude Code 客户端/版本限制及 OAuth 请求上限；全局提示词过滤仍然生效。",
     "title": "Claude 账号",
     "subtitle": "Claude Code(Anthropic)OAuth 订阅账号池",
     "addAccount": "添加 Claude 账号",

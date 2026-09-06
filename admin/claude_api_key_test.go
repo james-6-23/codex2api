@@ -51,7 +51,8 @@ func TestClaudeAPIKeyImportExportAndRuntime(t *testing.T) {
 		if r.URL.Path != "/api/v1/models" || r.Header.Get("x-api-key") != "example-secret" || r.Header.Get("Authorization") != "" {
 			t.Errorf("model discovery must use account URL and API key: %s", r.URL)
 		}
-		w.WriteHeader(http.StatusNotFound) // Model discovery is best-effort.
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"data":[{"id":"claude-sonnet-4-5"},{"id":"gpt-4o"},{"id":"deepseek-chat"}]}`)
 	}))
 	t.Cleanup(server.Close)
 	input := fmt.Sprintf(`{"auth_kind":"api_key","base_url":%q,"api_key":"example-secret","refresh_token":"ignored","name":"My API"}`, server.URL+"/api/v1/")
@@ -67,6 +68,9 @@ func TestClaudeAPIKeyImportExportAndRuntime(t *testing.T) {
 		t.Fatalf("rows=%v err=%v", rows, err)
 	}
 	row := rows[0]
+	if models := row.GetCredentialStringSlice("models"); len(models) != 1 || models[0] != "claude-sonnet-4-5" {
+		t.Fatalf("mixed discovery leaked unsupported models: %v", models)
+	}
 	if row.GetCredential("access_token") != "example-secret" || row.GetCredential("refresh_token") != "" || row.GetCredential("expires_at") != "" || len(row.GetCredentialStringMap("custom_headers")) != 0 {
 		t.Fatal("API key storage leaked OAuth metadata or lost the secret")
 	}

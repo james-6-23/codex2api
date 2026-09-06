@@ -1338,6 +1338,7 @@
     "failureDetails": "Failure Details",
     "unknownError": "Unknown error",
     "testDiagHTTPStatus": "Upstream HTTP",
+    "testDiagFirstFrameTime": "Time to first frame",
     "testDiagHeadersTime": "Time to headers",
     "testDiagFirstContent": "First token",
     "testDiagDuration": "Total duration",
@@ -5685,6 +5686,7 @@
     }
   },
   "claude": {
+    "apiKeyPolicyHint": "API Key requests are forwarded as supplied. Claude Code client/version restrictions and OAuth request limits do not apply; the global Prompt Filter still applies.",
     "title": "Claude Accounts",
     "subtitle": "Claude Code (Anthropic) OAuth subscription pool",
     "addAccount": "Add Claude account",

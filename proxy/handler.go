@@ -3025,30 +3025,7 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		authHeader := c.GetHeader("Authorization")
-		// OpenAI-compatible WebSocket clients may carry the API key in the
-		// standard subprotocol list instead of an Authorization header:
-		//   Sec-WebSocket-Protocol: realtime, openai-insecure-api-key.<key>
-		// Only honor it on an actual WebSocket upgrade so an ordinary HTTP
-		// request cannot smuggle authentication through an unrelated header.
-		if authHeader == "" && isResponsesWebSocketUpgradeRequest(c.Request) {
-			if key := apiKeyFromWebSocketSubprotocol(c.GetHeader("Sec-WebSocket-Protocol")); key != "" {
-				authHeader = "Bearer " + key
-			}
-		}
-		// 兼容 Anthropic 客户端的多种认证方式:
-		// - x-api-key: Anthropic SDK 默认方式
-		// - ANTHROPIC_AUTH_TOKEN: Claude Code 通过此环境变量设置，
-		//   实际发送为 Authorization: Bearer <token>（已被上面覆盖）
-		//   或 anthropic-auth-token 自定义 header
-		if authHeader == "" {
-			for _, h := range []string{"x-api-key", "anthropic-auth-token"} {
-				if v := strings.TrimSpace(c.GetHeader(h)); v != "" {
-					authHeader = "Bearer " + v
-					break
-				}
-			}
-		}
+		authHeader := downstreamAuthorizationHeader(c.Request)
 		if authHeader == "" {
 			// Use standardized error format from api package
 			api.SendError(c, api.ErrMissingAPIKey)
@@ -4752,6 +4729,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
@@ -6737,6 +6715,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
@@ -8684,4 +8663,26 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 		}
 	}
 	return models
+}
+
+// downstreamAuthorizationHeader is shared by authentication and per-key memory
+// namespaces so supported header forms cannot collapse into an anonymous key.
+func downstreamAuthorizationHeader(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if value := req.Header.Get("Authorization"); value != "" {
+		return value
+	}
+	if isResponsesWebSocketUpgradeRequest(req) {
+		if key := apiKeyFromWebSocketSubprotocol(req.Header.Get("Sec-WebSocket-Protocol")); key != "" {
+			return "Bearer " + key
+		}
+	}
+	for _, name := range []string{"x-api-key", "anthropic-auth-token"} {
+		if value := strings.TrimSpace(req.Header.Get(name)); value != "" {
+			return "Bearer " + value
+		}
+	}
+	return ""
 }

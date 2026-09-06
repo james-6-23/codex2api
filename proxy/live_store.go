@@ -290,18 +290,22 @@ func (h *Handler) logLiveUsage(record *liveCallRecord) {
 	}
 	model := stringsOrDefault(record.Model, "gpt-live")
 	input := &database.UsageLogInput{
-		AccountID:        record.AccountID,
-		Channel:          database.UpstreamChannelCodex,
-		ClientIP:         record.ClientIP,
-		ClientUserAgent:  record.UserAgent,
-		Endpoint:         "/v1/live",
-		InboundEndpoint:  record.InboundEndpoint,
-		UpstreamEndpoint: "/backend-api/codex/realtime/calls",
-		Model:            model,
-		EffectiveModel:   model,
-		StatusCode:       200,
-		DurationMs:       duration,
-		APIKeyID:         record.APIKeyID,
+		RequestID:         record.RequestID,
+		UpstreamRequestID: record.UpstreamRequestID,
+		UpstreamProxyID:   record.UpstreamProxyID,
+		UpstreamProxyName: record.UpstreamProxyName,
+		AccountID:         record.AccountID,
+		Channel:           database.UpstreamChannelCodex,
+		ClientIP:          record.ClientIP,
+		ClientUserAgent:   record.UserAgent,
+		Endpoint:          "/v1/live",
+		InboundEndpoint:   record.InboundEndpoint,
+		UpstreamEndpoint:  "/backend-api/codex/realtime/calls",
+		Model:             model,
+		EffectiveModel:    model,
+		StatusCode:        200,
+		DurationMs:        duration,
+		APIKeyID:          record.APIKeyID,
 	}
 	if liveUsageLogForTest != nil {
 		liveUsageLogForTest(input)

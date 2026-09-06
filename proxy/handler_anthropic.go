@@ -495,6 +495,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		return
 	}
 
+	reviewedClaudeBody := canonicalBody
 	isStream := gjson.GetBytes(rawBody, "stream").Bool()
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
@@ -670,6 +671,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
@@ -698,15 +700,23 @@ func (h *Handler) Messages(c *gin.Context) {
 				if normalizeErr != nil {
 					ttftGuard.Stop()
 					h.store.Release(account)
+					if isStream && writeCommittedAnthropicRetryError(c, "invalid_request_error", normalizeErr.Error()) {
+						return
+					}
 					sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", normalizeErr.Error())
 					return
 				}
 				claudeRequestBody = normalized
 			}
-			if !bytes.Equal(claudeRequestBody, canonicalBody) && h.inspectPromptFilterAnthropic(c, claudeRequestBody, "/v1/messages", model) {
-				ttftGuard.Stop()
-				h.store.Release(account)
-				return
+			if !account.IsClaudeAPIKey() && !bytes.Equal(claudeRequestBody, reviewedClaudeBody) {
+				// Recheck changed prompt content once; transport-only normalization and
+				// retries of an already reviewed payload do not repeat external review.
+				if !sameAnthropicPromptContent(claudeRequestBody, reviewedClaudeBody) && h.inspectPromptFilterAnthropic(c, claudeRequestBody, "/v1/messages", model) {
+					ttftGuard.Stop()
+					h.store.Release(account)
+					return
+				}
+				reviewedClaudeBody = claudeRequestBody
 			}
 			if nativeModel := h.resolveNativeClaudeRequestModel(c, model); nativeModel != "" && !strings.EqualFold(nativeModel, model) {
 				if rewritten, rewriteErr := sjson.SetBytes(claudeRequestBody, "model", nativeModel); rewriteErr == nil {
@@ -1682,4 +1692,13 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		return
 	}
+}
+
+func sameAnthropicPromptContent(a, b []byte) bool {
+	for _, field := range []string{"messages", "system", "tools"} {
+		if gjson.GetBytes(a, field).Raw != gjson.GetBytes(b, field).Raw {
+			return false
+		}
+	}
+	return true
 }

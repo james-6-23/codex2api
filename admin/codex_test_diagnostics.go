@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/security/promptfilter"
@@ -51,6 +53,7 @@ type codexTestDiagnostics struct {
 	HTTPStatus     int    `json:"http_status,omitempty"`
 	DurationMS     *int64 `json:"duration_ms,omitempty"`
 	HeadersMS      *int64 `json:"headers_ms,omitempty"`
+	FirstFrameMS   *int64 `json:"first_frame_ms,omitempty"`
 	FirstContentMS *int64 `json:"first_content_ms,omitempty"`
 	Model          string `json:"model"`
 	ResponseModel  string `json:"response_model,omitempty"`
@@ -119,11 +122,41 @@ func codexTestSecrets(account *auth.Account) []string {
 func sanitizeCodexTestText(text string, secrets []string) string {
 	for _, secret := range secrets {
 		if secret != "" {
-			text = strings.ReplaceAll(text, secret, "[REDACTED]")
+			if len(secret) >= 8 {
+				text = strings.ReplaceAll(text, secret, "[REDACTED]")
+			} else {
+				text = redactCodexTestShortSecret(text, secret)
+			}
 		}
 	}
 	text = codexTestProxyCredentials.ReplaceAllString(text, "${1}[REDACTED]@")
 	return promptfilter.RedactSensitive(text)
+}
+
+// Short relay placeholders must not replace digits inside IDs or timestamps.
+// Exact standalone occurrences still need masking; skipping short secrets could
+// expose real credentials echoed by a provider.
+func redactCodexTestShortSecret(text, secret string) string {
+	var out strings.Builder
+	tokenChar := func(r rune) bool { return unicode.IsLetter(r) || unicode.IsNumber(r) || r == '_' || r == '-' }
+	for offset := 0; ; {
+		found := strings.Index(text[offset:], secret)
+		if found < 0 {
+			out.WriteString(text[offset:])
+			break
+		}
+		start, end := offset+found, offset+found+len(secret)
+		before, _ := utf8.DecodeLastRuneInString(text[:start])
+		after, _ := utf8.DecodeRuneInString(text[end:])
+		out.WriteString(text[offset:start])
+		if (start == 0 || !tokenChar(before)) && (end == len(text) || !tokenChar(after)) {
+			out.WriteString("[REDACTED]")
+		} else {
+			out.WriteString(secret)
+		}
+		offset = end
+	}
+	return out.String()
 }
 
 type codexTestRecorder struct {
@@ -131,6 +164,7 @@ type codexTestRecorder struct {
 	start   time.Time
 	secrets []string
 	capture codexTestCapture
+	account *auth.Account
 }
 
 func newCodexTestRecorder(resp *http.Response, model string, account *auth.Account, start time.Time) *codexTestRecorder {
@@ -143,6 +177,7 @@ func newCodexTestRecorder(resp *http.Response, model string, account *auth.Accou
 		details: &codexTestDiagnostics{Model: model},
 		start:   start,
 		secrets: secrets,
+		account: account,
 		// 多留一段,保证跨越预览边界的凭据也能被整体替换。
 		capture: codexTestCapture{limit: codexTestBodyLimit + lookahead},
 	}
@@ -151,15 +186,17 @@ func newCodexTestRecorder(resp *http.Response, model string, account *auth.Accou
 	}
 	r.details.HTTPStatus = resp.StatusCode
 	ms := max(int64(0), time.Since(start).Milliseconds())
-	r.details.HeadersMS = &ms
 	r.details.Transport = codexTestTransport(resp.Header)
-	r.details.RequestID = r.safeValue(codexTestRequestID(resp.Header, account))
-	r.details.CFRay = r.safeValue(resp.Header.Get("cf-ray"))
-	r.details.PlanType = r.safeValue(resp.Header.Get("x-codex-plan-type"))
-	r.details.PrimaryWindow = parseCodexTestWindowHeaders(resp.Header, "x-codex-primary-")
-	r.details.SecondaryWindow = parseCodexTestWindowHeaders(resp.Header, "x-codex-secondary-")
-	r.observeSafetyBufferingHeaders(resp.Header)
-	r.appendHeaders(resp.Header)
+	if r.details.Transport != "websocket" {
+		r.details.HeadersMS = &ms
+		r.details.RequestID = r.safeValue(codexTestRequestID(resp.Header, account))
+		r.details.CFRay = r.safeValue(resp.Header.Get("cf-ray"))
+		r.details.PlanType = r.safeValue(resp.Header.Get("x-codex-plan-type"))
+		r.details.PrimaryWindow = parseCodexTestWindowHeaders(resp.Header, "x-codex-primary-")
+		r.details.SecondaryWindow = parseCodexTestWindowHeaders(resp.Header, "x-codex-secondary-")
+		r.observeSafetyBufferingHeaders(resp.Header)
+		r.appendHeaders(resp.Header)
+	}
 	if resp.Body != nil {
 		resp.Body = struct {
 			io.Reader
@@ -217,11 +254,17 @@ func (r *codexTestRecorder) appendHeaders(header http.Header) {
 		if !codexTestHeaderAllowed(name) {
 			continue
 		}
-		for _, value := range header[key] {
-			if len(r.details.ResponseHeaders) >= 64 {
-				return
+		value := r.safeValue(strings.Join(header[key], ", "))
+		replaced := false
+		for i := range r.details.ResponseHeaders {
+			if r.details.ResponseHeaders[i].Name == name {
+				r.details.ResponseHeaders[i].Value = value
+				replaced = true
+				break
 			}
-			r.details.ResponseHeaders = append(r.details.ResponseHeaders, codexTestHeader{Name: name, Value: r.safeValue(value)})
+		}
+		if !replaced && len(r.details.ResponseHeaders) < 64 {
+			r.details.ResponseHeaders = append(r.details.ResponseHeaders, codexTestHeader{Name: name, Value: value})
 		}
 	}
 }
@@ -284,6 +327,10 @@ func (r *codexTestRecorder) observe(data []byte) {
 	event := gjson.ParseBytes(data)
 	if !event.IsObject() {
 		return
+	}
+	if r.details.Transport == "websocket" && r.details.FirstFrameMS == nil {
+		ms := max(int64(0), time.Since(r.start).Milliseconds())
+		r.details.FirstFrameMS = &ms
 	}
 	eventType := event.Get("type").String()
 	switch eventType {
@@ -387,6 +434,12 @@ func (r *codexTestRecorder) observeMetadataFrame(event gjson.Result) {
 		return true
 	})
 	r.appendHeaders(merged)
+	if id := codexTestRequestID(merged, r.account); id != "" {
+		r.details.RequestID = r.safeValue(id)
+	}
+	if ray := merged.Get("cf-ray"); ray != "" {
+		r.details.CFRay = r.safeValue(ray)
+	}
 	r.observeSafetyBufferingHeaders(merged)
 	if r.details.PlanType == "" {
 		r.details.PlanType = r.safeValue(merged.Get("x-codex-plan-type"))

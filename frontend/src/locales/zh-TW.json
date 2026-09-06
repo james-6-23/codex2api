@@ -105,6 +105,7 @@
     "testConnection": "測試連線",
     "testConnectionTitle": "測試連線 - {{account}}",
     "testDiagHTTPStatus": "上游 HTTP",
+    "testDiagFirstFrameTime": "首幀耗時",
     "testDiagHeadersTime": "回應標頭耗時",
     "testDiagFirstContent": "首字耗時",
     "testDiagDuration": "總耗時",
@@ -1232,6 +1233,7 @@
     "channel": "渠道"
   },
   "claude": {
+    "apiKeyPolicyHint": "API Key 請求按原始內容轉送，不套用 Claude Code 用戶端/版本限制及 OAuth 請求上限；全域提示詞過濾仍然生效。",
     "title": "Claude 帳號",
     "subtitle": "Claude Code(Anthropic)OAuth 訂閱帳號池",
     "addAccount": "新增 Claude 帳號",

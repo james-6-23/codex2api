@@ -294,7 +294,7 @@ func TestHandleClaudeModelBillingRejection_CreditsRequired_ModelLevel(t *testing
 
 func TestNoteClaudeGatedModelSuccessInfersMax(t *testing.T) {
 	store := newSyncTestStore()
-	acc := &auth.Account{UpstreamType: auth.UpstreamClaude, AccessToken: "at", PlanType: "claude"}
+	acc := &auth.Account{UpstreamType: auth.UpstreamClaude, ClaudeAuthKind: auth.ClaudeAuthKindSetupToken, AccessToken: "at", PlanType: "claude"}
 	NoteClaudeGatedModelSuccess(store, acc, "claude-sonnet-4-5")
 	if acc.GetPlanType() != "claude" {
 		t.Fatal("non-gated model must not change plan")

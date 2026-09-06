@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/codex2api/api"
+	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -18,11 +19,15 @@ import (
 // incremental request sent over a healthy upstream WebSocket. Missing ancestry
 // must not turn a partial input into a supposedly complete cached conversation.
 func responsesWSReplayInput(body []byte, owner string) (string, *api.APIError) {
+	return responsesWSReplayInputWithLookup(body, owner, getResponseCacheForReplay)
+}
+
+func responsesWSReplayInputWithLookup(body []byte, owner string, lookupFn func(string, string) responseCacheLookupResult) (string, *api.APIError) {
 	current := gjson.GetBytes(body, "input")
 	var items []json.RawMessage
 	previousID := strings.TrimSpace(gjson.GetBytes(body, "previous_response_id").String())
 	if previousID != "" {
-		lookup := getResponseCacheForReplay(owner, previousID)
+		lookup := lookupFn(owner, previousID)
 		if lookup.Kind != responseCacheLookupHit {
 			prepared := responsesBodyPreparation{PreviousResponseID: previousID, CacheLookup: lookup, RequiresLocalContext: true}
 			status, reason, _ := responseCachePreparationFailure(prepared)
@@ -149,32 +154,46 @@ func cacheResponsesWSCompletedResponse(owner, input string, completed []byte, ou
 }
 
 func degradeResponsesWSContinuationBody(body []byte, owner string) ([]byte, *api.APIError) {
+	expanded, _, err := degradeResponsesWSContinuationWithSource(body, owner, nil)
+	return expanded, err
+}
+
+// lost distinguishes an explicitly lossy fallback from a complete replay.
+func degradeResponsesWSContinuationWithSource(body []byte, owner string, source *responsesWSReplaySource) ([]byte, bool, *api.APIError) {
 	if gjson.GetBytes(body, "previous_response_id").String() == "" {
-		return body, nil
+		return body, false, nil
 	}
-	input, apiErr := responsesWSReplayInput(body, owner)
+	var input string
+	var apiErr *api.APIError
+	if source != nil && source.previous != nil {
+		input = source.Input()
+		recordResponseCacheLookup(owner, *source.previous)
+		apiErr = source.err
+	} else {
+		input, apiErr = responsesWSReplayInput(body, owner)
+	}
 	if apiErr != nil {
 		if !responsesWSContinuationFailOpen() {
-			return nil, apiErr
+			return nil, false, apiErr
 		}
 		// 逃生阀：退回旧行为，剥掉 previous_response_id 后按原样转发当轮 input。
 		// 上游看到的是丢失历史的会话，只在明确接受该风险时启用。
 		log.Printf("Responses WebSocket continuation context unavailable (%s); CODEX_WS_CONTINUATION_FAIL_OPEN=true, forwarding without history", responsesWSContextReason(apiErr))
 		stripped, err := sjson.DeleteBytes(body, "previous_response_id")
 		if err != nil {
-			return nil, apiErr
+			return nil, false, apiErr
 		}
-		return stripped, nil
+		return stripped, true, nil
 	}
 	expanded, err := sjson.SetRawBytes(body, "input", []byte(input))
 	if err != nil {
-		return nil, responsesWSContextUnavailable(http.StatusConflict, "invalid_context")
+		return nil, false, responsesWSContextUnavailable(http.StatusConflict, "invalid_context")
 	}
 	expanded, err = sjson.DeleteBytes(expanded, "previous_response_id")
 	if err != nil {
-		return nil, responsesWSContextUnavailable(http.StatusConflict, "invalid_context")
+		return nil, false, responsesWSContextUnavailable(http.StatusConflict, "invalid_context")
 	}
-	return expanded, nil
+	return expanded, false, nil
 }
 
 // responsesWSContinuationFailOpen 读取逃生阀：CODEX_WS_CONTINUATION_FAIL_OPEN=true
@@ -217,19 +236,29 @@ func markResponsesWSContinuationCapable(owner string, rawBody []byte) {
 	markResponseCacheChainOwnerIfOnDemand(owner)
 }
 
-// responsesWSReplaySource 按 attempt 惰性构建可回放快照。健康路径只在响应
-// 成功提交后写缓存时才需要它，缓存查找、合并与序列化因此都不在首字路径上；
-// 降级路径已经展开过 input，直接复用，不再二次过滤。
+// responsesWSReplaySource pins a live L1 ancestor at turn admission. Its immutable
+// bodies survive expiry/eviction during generation; merging and backend fallback
+// remain lazy and do not count as client replay hits or misses.
 type responsesWSReplaySource struct {
 	body        []byte
 	owner       string
 	precomputed bool
 	once        sync.Once
 	input       string
+	previous    *responseCacheLookupResult
+	err         *api.APIError
 }
 
 func newResponsesWSReplaySource(body []byte, owner string) *responsesWSReplaySource {
-	return &responsesWSReplaySource{body: body, owner: owner}
+	source := &responsesWSReplaySource{body: body, owner: owner}
+	if previousID := gjson.GetBytes(body, "previous_response_id").String(); previousID != "" {
+		respCache.mu.RLock()
+		if entry := respCache.store[responseCacheStoreKey(owner, previousID)]; entry != nil && time.Now().Before(entry.expiresAt) {
+			source.previous = &responseCacheLookupResult{Kind: responseCacheLookupHit, Source: responseCacheSourceLocal, Items: append([]json.RawMessage(nil), entry.items...)}
+		}
+		respCache.mu.RUnlock()
+	}
+	return source
 }
 
 func newResponsesWSReplaySourceFromInput(input string) *responsesWSReplaySource {
@@ -245,7 +274,22 @@ func (s *responsesWSReplaySource) Input() string {
 		return s.input
 	}
 	s.once.Do(func() {
-		s.input, _ = responsesWSReplayInput(s.body, s.owner)
+		s.input, s.err = responsesWSReplayInputWithLookup(s.body, s.owner, func(owner, id string) responseCacheLookupResult {
+			if s.previous != nil {
+				return *s.previous
+			}
+			return lookupResponseCacheResultWithOwnership(owner, id, true)
+		})
 	})
 	return s.input
+}
+
+// Record failures only when returning them to a client, not while considering a
+// best-effort snapshot after an otherwise successful upstream turn.
+func responsesWSContextCloseCode(apiErr *api.APIError) int {
+	if apiErr.Code == api.ErrCodeServiceUnavailable {
+		return websocket.CloseInternalServerErr
+	}
+	recordResponseCacheKnownUnavailableError()
+	return websocket.ClosePolicyViolation
 }

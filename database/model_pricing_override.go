@@ -51,10 +51,10 @@ type ModelPricingOverride struct {
 	LongContextThresholdTokens int `json:"long_context_threshold_tokens,omitempty"`
 }
 
-// normalizeModelPricingOverride 应用 Codex Astra 的长上下文计费例外。
+// NormalizeModelPricingOverride 应用 Codex Astra 的长上下文计费例外。
 // 旧覆盖、手工编辑和官方 API 定价同步都不能重新启用 Astra 的长档；
 // 标准价、priority 价及其他模型的覆盖保持原样。
-func normalizeModelPricingOverride(model string, o ModelPricingOverride) ModelPricingOverride {
+func NormalizeModelPricingOverride(model string, o ModelPricingOverride) ModelPricingOverride {
 	if CanonicalBillingModelKey(model) != "gpt-6-astra" {
 		return o
 	}
@@ -192,7 +192,12 @@ func (db *DB) MutateModelPricingSettings(ctx context.Context, syncURL *string, m
 		}
 	}
 	for model, override := range overrides {
-		overrides[model] = normalizeModelPricingOverride(model, override)
+		normalized := NormalizeModelPricingOverride(model, override)
+		if normalized.IsEmpty() {
+			delete(overrides, model)
+		} else {
+			overrides[model] = normalized
+		}
 	}
 	blob, err := MarshalModelPricingOverridesJSON(overrides)
 	if err != nil {
@@ -214,7 +219,7 @@ func SetModelPricingOverrides(m map[string]ModelPricingOverride) {
 	norm := make(map[string]ModelPricingOverride, len(m))
 	for k, v := range m {
 		key := strings.ToLower(strings.TrimSpace(k))
-		v = normalizeModelPricingOverride(key, v)
+		v = NormalizeModelPricingOverride(key, v)
 		if key == "" || v.IsEmpty() {
 			continue
 		}
@@ -298,7 +303,7 @@ func ParseModelPricingOverridesJSON(s string) (map[string]ModelPricingOverride, 
 	out := make(map[string]ModelPricingOverride, len(raw))
 	for k, v := range raw {
 		key := strings.ToLower(strings.TrimSpace(k))
-		v = normalizeModelPricingOverride(key, v)
+		v = NormalizeModelPricingOverride(key, v)
 		if key == "" || v.IsEmpty() {
 			continue
 		}

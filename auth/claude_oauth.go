@@ -561,12 +561,12 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	// 刷新请求体键序对齐官方客户端。
+	// Omit scope to inherit the original grant (RFC 6749 section 6). Web-session
+	// grants can be narrower than ClaudeOAuthScope.
 	reqBody := map[string]string{
 		"client_id":     ClaudeOAuthClientID,
 		"grant_type":    "refresh_token",
 		"refresh_token": refreshToken,
-		"scope":         ClaudeOAuthScope,
 	}
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {

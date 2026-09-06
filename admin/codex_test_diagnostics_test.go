@@ -363,19 +363,31 @@ func TestCodexTestRecorderDetectsWebsocketTransportAndMetadataFrames(t *testing.
 	headers := make(http.Header)
 	headers.Set("Upgrade", "websocket")
 	headers.Set("Sec-WebSocket-Accept", "abc")
+	headers.Set("X-Request-ID", "stale-handshake-id")
+	headers.Set("CF-Ray", "stale-ray")
 	headers.Set("Content-Type", "text/event-stream")
 	resp := &http.Response{StatusCode: 200, Header: headers, Body: io.NopCloser(strings.NewReader(""))}
 	r := newCodexTestRecorder(resp, "gpt-5.4", nil, time.Now())
 	if r.details.Transport != "websocket" {
 		t.Fatalf("transport = %q, want websocket", r.details.Transport)
 	}
+	if r.details.RequestID != "" || r.details.CFRay != "" || r.details.HeadersMS != nil || len(r.details.ResponseHeaders) != 0 {
+		t.Fatal("handshake metadata was attributed to this request")
+	}
 	r.observe([]byte(`{"type":"codex.rate_limits","plan_type":"pro","rate_limits":{"primary":{"used_percent":33,"window_minutes":300,"resets_in_seconds":900},"secondary":{"used_percent":8,"window_minutes":10080}}}`))
 	if r.details.PlanType != "pro" || r.details.PrimaryWindow == nil || *r.details.PrimaryWindow.UsedPercent != 33 || *r.details.PrimaryWindow.ResetAfterSeconds != 900 || r.details.SecondaryWindow == nil || *r.details.SecondaryWindow.WindowMinutes != 10080 {
 		t.Fatalf("codex.rate_limits frame not observed: %+v primary=%+v secondary=%+v", r.details, r.details.PrimaryWindow, r.details.SecondaryWindow)
 	}
-	r.observe([]byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"turn-1","set-cookie":"nope","x-request-id":"req_ws"}}`))
+	r.observe([]byte(`{"type":"codex.response.metadata","headers":{"x-codex-turn-state":"turn-1","set-cookie":"nope","x-request-id":"req_ws","cf-ray":"current-ray"}}`))
+	if r.details.RequestID != "req_ws" || r.details.CFRay != "current-ray" || r.details.FirstFrameMS == nil || r.details.HeadersMS != nil {
+		t.Fatal("request frame metadata missing")
+	}
+	r.observe([]byte(`{"type":"codex.response.metadata","headers":{"x-request-id":"req_ws"}}`))
 	names := make(map[string]string)
 	for _, header := range r.details.ResponseHeaders {
+		if _, exists := names[header.Name]; exists {
+			t.Fatalf("duplicate header: %s", header.Name)
+		}
 		names[header.Name] = header.Value
 	}
 	if names["x-codex-turn-state"] != "turn-1" || names["x-request-id"] != "req_ws" {
