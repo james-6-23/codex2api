@@ -3671,27 +3671,11 @@ func (h *Handler) Responses(c *gin.Context) {
 		// request before validation; the adapter performs the sole public->wire
 		// translation after an account proves it owns the required backing model.
 		requestModel = strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
-		mappedModel = requestModel
-		if logical, known := antigravityLogicalCompatibilityModel(requestModel); known {
-			effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(rawBody, "reasoning.effort").String()))
-			if effort == "" {
-				effort = "low"
-			}
-			allowedEfforts := make([]string, 0, len(logical.variants))
-			validEffort := false
-			for _, option := range logical.variants {
-				allowedEfforts = append(allowedEfforts, option.level)
-				validEffort = validEffort || effort == option.level
-			}
-			if !validEffort {
-				api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, "Model "+logical.id+" supports reasoning.effort: "+strings.Join(allowedEfforts, ", "), api.ErrorTypeInvalidRequest))
-				return
-			}
-			variant, ok := antigravityVariantForDefinition(logical, map[string]any{"effort": effort})
-			if ok {
-				mappedModel = logical.id + "-" + variant.level
-				rawBody, _ = sjson.SetBytes(rawBody, "model", mappedModel)
-			}
+		var foldErr *api.APIError
+		rawBody, mappedModel, foldErr = antigravityFoldLogicalModel(rawBody, requestModel)
+		if foldErr != nil {
+			api.SendError(c, foldErr)
+			return
 		}
 	} else if nativeRemoteCompactionV2 {
 		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredCompactModelMappingToBody(rawBody, supportedModels)

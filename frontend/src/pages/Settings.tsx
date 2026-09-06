@@ -7,7 +7,8 @@ import PageHeader from '../components/PageHeader'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { AntigravityOAuthClientSetting, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
+import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
+import { ANTIGRAVITY_DEFAULT_MODELS } from '../lib/antigravityModels'
 import { countPayloadRules } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
 import { DEFAULT_CLAUDE_MODEL_MAP } from '../lib/modelMapping'
@@ -99,6 +100,7 @@ import {
   Timer,
   Upload,
   Users,
+  Shuffle,
   Wifi,
   Wrench,
   X,
@@ -777,10 +779,207 @@ const SETTINGS_SWITCH_ROW = 'grid grid-cols-1 gap-3'
 // 一组只含开关的相关设置合并成一张卡，用 SettingField layout="row" 逐行排列，说明文字直接外显。
 const SETTINGS_ROW_LIST = 'divide-y divide-border/60'
 // 卡片级双列栅格：卡片高度不一，必须顶对齐，否则矮卡被拉高留下大片空白。
-const SETTINGS_CARD_GRID_2 = 'grid gap-4 lg:grid-cols-2 lg:items-start'
+const SETTINGS_CARD_GRID_2 = 'grid gap-4 lg:grid-cols-2 lg:items-stretch'
 
 // ClaudeCodeSettingsCard 是 ClaudeCode 全局配置卡片(独立读写 /settings/claude-config)。
 // 全体 Claude 账号默认遵守;个体账号可在「账号管理 → 编辑账号」里覆盖。
+// Claude / Antigravity 渠道的连通性测试卡片:独立于全局 test_model/test_content(那是
+// Codex 语义),按渠道保存默认探测模型与测活内容;留空模型 = 按账号目录自动选。
+const CLAUDE_TEST_MODEL_CHOICES = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-5']
+
+function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'claude' }) {
+  const { t } = useTranslation()
+  const { showToast } = useToast()
+  const [settings, setSettings] = useState<ChannelTestSettings | null>(null)
+  const [defaultContent, setDefaultContent] = useState('')
+  const [defaultConcurrency, setDefaultConcurrency] = useState(0)
+  const [contentDraft, setContentDraft] = useState('')
+  const [catalogChoices, setCatalogChoices] = useState<string[]>([])
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void api.getChannelTestSettings().then((response) => {
+      if (!active) return
+      setSettings(response[channel])
+      setContentDraft(response[channel].test_content)
+      setDefaultContent(response.default_test_content)
+      setDefaultConcurrency(response.default_test_concurrency)
+      setCatalogChoices(response.model_choices?.[channel] ?? [])
+    }).catch((error) => {
+      if (!active) return
+      showToast(getErrorMessage(error), 'error')
+    })
+    return () => {
+      active = false
+    }
+  }, [channel, showToast])
+
+  const save = useCallback(async (patch: Partial<ChannelTestSettings>) => {
+    setSaving(true)
+    try {
+      const response = await api.updateChannelTestSettings({ [channel]: patch })
+      setSettings(response[channel])
+      setContentDraft(response[channel].test_content)
+      setDefaultContent(response.default_test_content)
+      setDefaultConcurrency(response.default_test_concurrency)
+      setCatalogChoices(response.model_choices?.[channel] ?? [])
+      showToast(t('settings.channelTest.saved'), 'success')
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }, [channel, showToast, t])
+
+  // 候选优先取后端汇总的号池目录并集(Claude 多为带日期的具体 ID),读不到再回落常量。
+  const modelChoices = useMemo(() => {
+    const base = catalogChoices.length > 0
+      ? catalogChoices
+      : channel === 'antigravity' ? [...ANTIGRAVITY_DEFAULT_MODELS] : CLAUDE_TEST_MODEL_CHOICES
+    const current = settings?.test_model?.trim() ?? ''
+    const list = current && !base.includes(current) ? [current, ...base] : base
+    return [
+      { value: '', label: t('settings.channelTest.autoModel') },
+      ...list.map((model) => ({ value: model, label: model })),
+    ]
+  }, [catalogChoices, channel, settings?.test_model, t])
+
+  return (
+    <SettingsCard
+      title={t('settings.connectivityTest')}
+      description={t(channel === 'antigravity' ? 'settings.channelTest.antigravityDesc' : 'settings.channelTest.claudeDesc')}
+      icon={<Wifi className="size-4" />}
+    >
+      <div className="space-y-4">
+        <div className={SETTINGS_FIELD_GRID}>
+          <SettingField label={t('settings.testModelLabel')} description={t('settings.channelTest.modelHint')}>
+            <Select
+              value={settings?.test_model ?? ''}
+              onValueChange={(value) => void save({ test_model: value })}
+              options={modelChoices}
+              disabled={settings === null || saving}
+            />
+          </SettingField>
+          <SettingField
+            label={t('settings.testConcurrency')}
+            description={t('settings.channelTest.concurrencyHint', { value: defaultConcurrency || 1 })}
+          >
+            <DraftNumberInput
+              min={0}
+              max={200}
+              value={settings?.test_concurrency ?? 0}
+              placeholder={String(defaultConcurrency || 1)}
+              disabled={settings === null || saving}
+              onValueChange={(value) => {
+                if (value !== (settings?.test_concurrency ?? 0)) void save({ test_concurrency: value })
+              }}
+            />
+          </SettingField>
+        </div>
+        <SettingField label={t('settings.testContent')} description={t('settings.channelTest.contentHint')}>
+          <textarea
+            rows={3}
+            value={contentDraft}
+            placeholder={defaultContent || t('settings.testContentPlaceholder')}
+            disabled={settings === null || saving}
+            onChange={(e: ChangeEvent<HTMLTextAreaElement>) => setContentDraft(e.target.value)}
+            onBlur={(e) => {
+              const next = e.currentTarget.value.trim()
+              if (next !== (settings?.test_content ?? '')) void save({ test_content: next })
+            }}
+            className={cn(
+              'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
+            )}
+          />
+        </SettingField>
+      </div>
+    </SettingsCard>
+  )
+}
+
+// Antigravity 模型重定向:下游请求不带思考强度后缀的逻辑模型(gemini-3.8-flash)时,
+// 自动落到配置的固定档位(gemini-3.8-flash-high)。候选档位由后端按模型目录给出。
+function AntigravityModelRedirectCard() {
+  const { t } = useTranslation()
+  const { showToast } = useToast()
+  const [settings, setSettings] = useState<AntigravitySettingsResponse | null>(null)
+  const [saving, setSaving] = useState(false)
+
+  useEffect(() => {
+    let active = true
+    void api.getAntigravitySettings().then((response) => {
+      if (active) setSettings(response)
+    }).catch((error) => {
+      if (active) showToast(getErrorMessage(error), 'error')
+    })
+    return () => {
+      active = false
+    }
+  }, [showToast])
+
+  const save = useCallback(async (patch: { model_redirects?: Record<string, string>; redirect_overrides_effort?: boolean }) => {
+    setSaving(true)
+    try {
+      setSettings(await api.updateAntigravitySettings(patch))
+      showToast(t('settings.antigravityRedirect.saved'), 'success')
+    } catch (error) {
+      showToast(getErrorMessage(error), 'error')
+    } finally {
+      setSaving(false)
+    }
+  }, [showToast, t])
+
+  const setRedirect = (model: string, target: string) => {
+    if (!settings) return
+    const next = { ...settings.model_redirects }
+    if (target) next[model] = target
+    else delete next[model]
+    void save({ model_redirects: next })
+  }
+
+  return (
+    <SettingsCard
+      title={t('settings.antigravityRedirect.title')}
+      description={t('settings.antigravityRedirect.description')}
+      icon={<Shuffle className="size-4" />}
+    >
+      <div className="space-y-4">
+        <div className={SETTINGS_FIELD_GRID}>
+          {(settings?.choices ?? []).map((choice) => (
+            <SettingField
+              key={choice.model}
+              label={choice.model}
+              description={t('settings.antigravityRedirect.rowHint', { level: choice.default_level })}
+            >
+              <Select
+                value={settings?.model_redirects[choice.model] ?? ''}
+                onValueChange={(value) => setRedirect(choice.model, value)}
+                disabled={settings === null || saving}
+                options={[
+                  { value: '', label: t('settings.antigravityRedirect.noRedirect', { level: choice.default_level }) },
+                  ...choice.tiers.map((tier) => ({ value: tier, label: tier })),
+                ]}
+              />
+            </SettingField>
+          ))}
+        </div>
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2.5">
+          <div className="min-w-0">
+            <div className="text-sm font-medium">{t('settings.antigravityRedirect.overrideLabel')}</div>
+            <p className="mt-0.5 text-xs text-muted-foreground">{t('settings.antigravityRedirect.overrideHint')}</p>
+          </div>
+          <Switch
+            checked={settings?.redirect_overrides_effort ?? false}
+            disabled={settings === null || saving}
+            onCheckedChange={(checked) => void save({ redirect_overrides_effort: checked })}
+          />
+        </div>
+      </div>
+    </SettingsCard>
+  )
+}
+
 function ClaudeCodeSettingsCard() {
   const { t } = useTranslation()
   const { showToast } = useToast()
@@ -1220,12 +1419,15 @@ function SettingField({
   layout = 'stack',
   suffix,
   channels,
+  stretch = false,
 }: {
   label: string
   description?: string
   // row 布局下 description 直接外显，help 才进问号 tooltip；其他布局 help 与 description 合并进 tooltip。
   help?: string
   warning?: string
+  // stretch:stack 布局下让控件撑满剩余高度(等高卡片里的 textarea)。
+  stretch?: boolean
   children: ReactNode
   className?: string
   layout?: 'stack' | 'switch' | 'row'
@@ -1297,7 +1499,7 @@ function SettingField({
   }
 
   return (
-    <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
+    <div className={cn('flex min-w-0 flex-col gap-1.5', stretch && 'flex-1', className)}>
       <div className="flex min-h-5 items-center gap-1.5">
         <label className="block text-[13px] font-semibold leading-none text-foreground sm:text-sm">
           {label}
@@ -1305,7 +1507,7 @@ function SettingField({
         {tooltip ? <SettingHelp text={tooltip} /> : null}
         {scope}
       </div>
-      <div className="min-w-0">{control}</div>
+      <div className={cn('min-w-0', stretch && 'flex flex-1 flex-col [&>*]:flex-1')}>{control}</div>
       {warning ? (
         <p className="text-[11px] leading-relaxed text-amber-600 dark:text-amber-400 sm:text-xs">
           {warning}
@@ -3036,8 +3238,14 @@ export default function Settings() {
                     </div>
                   </div>
                 </SettingsCard>
-              <SettingsCard title={t('settings.connectivityTest')} description={t('settings.connectivityTestDesc')} icon={<Wifi className="size-4" />}>
-                <div className="space-y-4">
+              <SettingsCard
+                title={t('settings.connectivityTest')}
+                description={t('settings.connectivityTestDesc')}
+                icon={<Wifi className="size-4" />}
+                className="h-full"
+                contentClassName="flex h-full flex-col"
+              >
+                <div className="flex flex-1 flex-col gap-4">
                   <div className={SETTINGS_FIELD_GRID}>
                     <SettingField label={t('settings.testModelLabel')} description={t('settings.testModelHint')}>
                       <Select
@@ -3055,7 +3263,7 @@ export default function Settings() {
                       />
                     </SettingField>
                   </div>
-                  <SettingField label={t('settings.testContent')} description={t('settings.testContentDesc')}>
+                  <SettingField label={t('settings.testContent')} description={t('settings.testContentDesc')} stretch>
                     <textarea
                       rows={3}
                       value={settingsForm.test_content}
@@ -4059,6 +4267,7 @@ export default function Settings() {
           {activeTab === 'claude' ? (
             <>
               <SettingsSection id="settings-claude" title={t('settings.nav.claude')} description={t('settings.nav.claudeDesc')} icon={<ChannelLogo channel="claude" size={16} />}>
+                <ChannelConnectivityTestCard channel="claude" />
                 <ClaudeCodeSettingsCard />
               </SettingsSection>
             </>
@@ -4067,6 +4276,8 @@ export default function Settings() {
           {activeTab === 'antigravity' ? (
             <>
               <SettingsSection id="settings-antigravity" title={t('settings.nav.antigravity')} description={t('settings.nav.antigravityDesc')} icon={<ChannelLogo channel="antigravity" size={16} />}>
+              <ChannelConnectivityTestCard channel="antigravity" />
+              <AntigravityModelRedirectCard />
               <SettingsCard
                 title={t('settings.antigravityOAuth.title')}
                 description={t('settings.antigravityOAuth.description')}

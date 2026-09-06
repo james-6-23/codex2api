@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
+	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 func (h *Handler) antigravityAcceptedModels() []string {
@@ -358,6 +362,11 @@ func antigravityVariantForDefinition(definition antigravityPublicModelDefinition
 }
 
 func antigravityResolvedVariant(model string, reasoning map[string]any) (antigravityReasoningVariant, bool) {
+	// A configured redirect turns a bare logical model into a fixed tier before
+	// the usual effort-based selection; fixed tiers are never redirected.
+	if target, ok := antigravityRedirectedModel(model, reasoning); ok {
+		model = target
+	}
 	definition, ok := antigravityPublicModel(model)
 	if !ok {
 		definition, ok = antigravityLogicalCompatibilityModel(model)
@@ -366,4 +375,114 @@ func antigravityResolvedVariant(model string, reasoning map[string]any) (antigra
 		}
 	}
 	return antigravityVariantForDefinition(definition, reasoning)
+}
+
+// AntigravityRedirectChoice describes one bare logical model and the fixed
+// public tiers an operator may redirect it to.
+type AntigravityRedirectChoice struct {
+	Model        string   `json:"model"`
+	DefaultLevel string   `json:"default_level"`
+	Tiers        []string `json:"tiers"`
+}
+
+// AntigravityRedirectChoices lists every logical model that can carry a
+// redirect, in catalog order, with its tier IDs (`<model>-<level>`).
+func AntigravityRedirectChoices() []AntigravityRedirectChoice {
+	choices := make([]AntigravityRedirectChoice, 0, len(antigravityLogicalCompatibilityCatalog))
+	for _, logical := range antigravityLogicalCompatibilityCatalog {
+		tiers := make([]string, 0, len(logical.variants))
+		for _, variant := range logical.variants {
+			tier := logical.id + "-" + variant.level
+			if _, ok := antigravityPublicModel(tier); ok {
+				tiers = append(tiers, tier)
+			}
+		}
+		choices = append(choices, AntigravityRedirectChoice{Model: logical.id, DefaultLevel: logical.defaultReasoningLevel, Tiers: tiers})
+	}
+	return choices
+}
+
+// ValidateAntigravityModelRedirects checks that every redirect maps a bare
+// logical model to one of its own fixed tiers. Anything else (a tier as the
+// key, a tier of a different model, a raw wire ID) is rejected so the
+// settings page cannot persist a rule the adapter would silently ignore.
+func ValidateAntigravityModelRedirects(redirects map[string]string) error {
+	for model, target := range redirects {
+		logical, ok := antigravityLogicalCompatibilityModel(model)
+		if !ok {
+			return fmt.Errorf("model %q is not a redirectable logical model", model)
+		}
+		valid := false
+		for _, variant := range logical.variants {
+			if strings.EqualFold(strings.TrimSpace(target), logical.id+"-"+variant.level) {
+				valid = true
+				break
+			}
+		}
+		if !valid {
+			return fmt.Errorf("model %q cannot be redirected to %q", model, target)
+		}
+	}
+	return nil
+}
+
+// antigravityRedirectedModel resolves the configured fixed tier for a bare
+// logical model. By default the redirect only fills in a missing
+// reasoning.effort; with the override flag it also replaces an explicit one.
+func antigravityRedirectedModel(model string, reasoning map[string]any) (string, bool) {
+	logical, ok := antigravityLogicalCompatibilityModel(model)
+	if !ok {
+		return "", false
+	}
+	target := auth.AntigravityModelRedirect(logical.id)
+	if target == "" {
+		return "", false
+	}
+	if _, known := antigravityPublicModel(target); !known {
+		return "", false
+	}
+	if lowerStringField(reasoning, "effort") != "" && !auth.AntigravityRedirectOverridesEffort() {
+		return "", false
+	}
+	return target, true
+}
+
+// antigravityFoldLogicalModel rewrites a bare logical model in a Responses
+// body into the fixed tier it will actually run as: the configured redirect
+// first, otherwise the request's reasoning.effort (bare requests default to
+// low). It returns the rewritten body and the tier ID, or an API error for an
+// effort the model does not offer.
+func antigravityFoldLogicalModel(rawBody []byte, requestModel string) ([]byte, string, *api.APIError) {
+	logical, known := antigravityLogicalCompatibilityModel(requestModel)
+	if !known {
+		return rawBody, requestModel, nil
+	}
+	effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(rawBody, "reasoning.effort").String()))
+	reasoning := map[string]any{}
+	if effort != "" {
+		reasoning["effort"] = effort
+	}
+	if target, ok := antigravityRedirectedModel(logical.id, reasoning); ok {
+		rawBody, _ = sjson.SetBytes(rawBody, "model", target)
+		return rawBody, target, nil
+	}
+	if effort == "" {
+		effort = "low"
+	}
+	allowedEfforts := make([]string, 0, len(logical.variants))
+	validEffort := false
+	for _, option := range logical.variants {
+		allowedEfforts = append(allowedEfforts, option.level)
+		validEffort = validEffort || effort == option.level
+	}
+	if !validEffort {
+		return rawBody, requestModel, api.NewAPIError(api.ErrCodeInvalidParameter, "Model "+logical.id+" supports reasoning.effort: "+strings.Join(allowedEfforts, ", "), api.ErrorTypeInvalidRequest)
+	}
+	variant, ok := antigravityVariantForDefinition(logical, map[string]any{"effort": effort})
+	if !ok {
+		return rawBody, requestModel, nil
+	}
+	mapped := logical.id + "-" + variant.level
+	rawBody, _ = sjson.SetBytes(rawBody, "model", mapped)
+	return rawBody, mapped, nil
 }

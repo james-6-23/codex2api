@@ -3,6 +3,33 @@ export type ISODateString = string
 export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'claude'
 
 // 管理台可见渠道设置（GET/PUT /settings/visible-channels）
+export interface ChannelTestSettings {
+  test_model: string
+  test_content: string
+  // 0 = 沿用全局 test_concurrency
+  test_concurrency: number
+}
+
+export interface ChannelTestSettingsResponse {
+  antigravity: ChannelTestSettings
+  claude: ChannelTestSettings
+  default_test_content: string
+  default_test_concurrency: number
+  model_choices?: Partial<Record<'antigravity' | 'claude', string[]>>
+}
+
+export interface AntigravityRedirectChoice {
+  model: string
+  default_level: string
+  tiers: string[]
+}
+
+export interface AntigravitySettingsResponse {
+  model_redirects: Record<string, string>
+  redirect_overrides_effort: boolean
+  choices: AntigravityRedirectChoice[]
+}
+
 export interface VisibleChannelsSettings {
   channels: UpstreamChannel[]
   all: UpstreamChannel[]

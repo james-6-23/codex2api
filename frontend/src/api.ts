@@ -141,6 +141,9 @@ import type {
   UpstreamChannel,
   ClaudeGlobalConfig,
   VisibleChannelsSettings,
+  ChannelTestSettings,
+  ChannelTestSettingsResponse,
+  AntigravitySettingsResponse,
 } from './types'
 
 const BASE = '/api/admin'
@@ -977,6 +980,18 @@ export const api = {
     request<VisibleChannelsSettings>('/settings/visible-channels', {
       method: 'PUT',
       body: JSON.stringify({ channels }),
+    }),
+  getAntigravitySettings: () => request<AntigravitySettingsResponse>('/settings/antigravity'),
+  updateAntigravitySettings: (patch: { model_redirects?: Record<string, string>; redirect_overrides_effort?: boolean }) =>
+    request<AntigravitySettingsResponse>('/settings/antigravity', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
+    }),
+  getChannelTestSettings: () => request<ChannelTestSettingsResponse>('/settings/channel-tests'),
+  updateChannelTestSettings: (patch: Partial<Record<'antigravity' | 'claude', Partial<ChannelTestSettings>>>) =>
+    request<ChannelTestSettingsResponse>('/settings/channel-tests', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
     }),
   getInviteGuideSettings: () => request<{ enabled: boolean }>('/settings/invite-guide'),
   updateInviteGuideSettings: (enabled: boolean) =>

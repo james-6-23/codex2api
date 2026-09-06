@@ -11,6 +11,11 @@ const accounts = readFileSync(
   "utf8",
 );
 const types = readFileSync(new URL("../types.ts", import.meta.url), "utf8");
+// 测连弹窗已从 Accounts.tsx 抽成四渠道共用组件。
+const testModal = readFileSync(
+  new URL("../components/TestConnectionModal.tsx", import.meta.url),
+  "utf8",
+);
 const detailSheet = readFileSync(
   new URL("../components/AccountDetailSheet.tsx", import.meta.url),
   "utf8",
@@ -41,9 +46,10 @@ test("recycle-bin account projection preserves Claude provider identity", () => 
 });
 
 test("shared connection test modal selects Claude native models", () => {
-  assert.match(accounts, /isClaudeAccount/);
-  assert.match(accounts, /account\.claude_api/);
-  assert.match(accounts, /claude-opus-4-5|claude-sonnet-4-5/);
+  assert.match(accounts, /<TestConnectionModal/);
+  assert.match(testModal, /isClaudeAccount/);
+  assert.match(testModal, /account\.claude_api/);
+  assert.match(testModal, /claude-opus-4-5|claude-sonnet-4-5/);
 });
 
 test("shared account detail sheet keeps Claude out of Codex-only actions", () => {
