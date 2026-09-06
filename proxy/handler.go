@@ -7291,9 +7291,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var fullContent strings.Builder
 			var fullReasoning strings.Builder
 			var toolCalls []ToolCallResult
+			outputCollector := newResponseOutputCollector()
 			var finishReasonOverride string
 
 			readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+				outputCollector.Add(data)
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				ttftGuard.MarkProgress(eventType)
@@ -7321,7 +7323,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					// arguments 若被截断，整次上游响应按协议错误处理，不能把坏调用
 					// 返回并在下一轮继续污染历史。
 					var toolErr error
-					toolCalls, toolErr = ExtractToolCallsFromOutputValidated(data)
+					toolCalls, toolErr = ExtractToolCallsFromOutputValidated(restoreMissingResponseOutputsInEvent(data, outputCollector.Items()))
 					if toolErr != nil {
 						terminalFailurePayload = malformedToolArgumentsFailurePayload(toolErr)
 					}

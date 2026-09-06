@@ -1364,6 +1364,14 @@ func (h *Handler) Messages(c *gin.Context) {
 
 				// 翻译并写入
 				events := translator.translateEvent(data)
+				if translator.toolInputError != nil {
+					terminalFailurePayload = malformedToolArgumentsFailurePayload(translator.toolInputError)
+					gotTerminal = true
+					if visibleBody {
+						writeErr = writeAnthropicStreamErrorEvent(streamWriter, "api_error", translator.toolInputError.Error(), nil)
+					}
+					return false
+				}
 				if len(events) > 0 {
 					var payload bytes.Buffer
 					for _, evt := range events {
@@ -1433,6 +1441,11 @@ func (h *Handler) Messages(c *gin.Context) {
 					return false
 				}
 				accumulator.apply(translator.translateEvent(data))
+				if translator.toolInputError != nil {
+					terminalFailurePayload = malformedToolArgumentsFailurePayload(translator.toolInputError)
+					gotTerminal = true
+					return false
+				}
 
 				ttftGuard.MarkProgress(eventType)
 				if !ttftRecorded && isFirstTokenResultForMode(parsed, currentFirstTokenMode()) {

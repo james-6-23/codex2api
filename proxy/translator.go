@@ -51,9 +51,11 @@ type openAIMessage struct {
 
 // openAIToolCall 表示 assistant 消息中的工具调用
 type openAIToolCall struct {
-	Type     string `json:"type"`
-	ID       string `json:"id"`
-	Function struct {
+	Type      string              `json:"type"`
+	ID        string              `json:"id"`
+	Custom    *customToolCallData `json:"custom,omitempty"`
+	Namespace string              `json:"namespace,omitempty"`
+	Function  struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
@@ -121,10 +123,12 @@ type streamDelta struct {
 
 // toolCallDelta 工具调用增量
 type toolCallDelta struct {
-	Index    int               `json:"index"`
-	ID       string            `json:"id,omitempty"`
-	Type     string            `json:"type,omitempty"`
-	Function toolCallFuncDelta `json:"function"`
+	Index     int                 `json:"index"`
+	ID        string              `json:"id,omitempty"`
+	Type      string              `json:"type,omitempty"`
+	Function  *toolCallFuncDelta  `json:"function,omitempty"`
+	Custom    *customToolCallData `json:"custom,omitempty"`
+	Namespace string              `json:"namespace,omitempty"`
 }
 
 // toolCallFuncDelta 工具函数增量
@@ -161,12 +165,11 @@ type compactMessage struct {
 
 // compactToolCallOut 非流式响应中的工具调用
 type compactToolCallOut struct {
-	ID       string `json:"id"`
-	Type     string `json:"type"`
-	Function struct {
-		Name      string `json:"name"`
-		Arguments string `json:"arguments"`
-	} `json:"function"`
+	ID        string              `json:"id"`
+	Type      string              `json:"type"`
+	Function  *toolCallFuncDelta  `json:"function,omitempty"`
+	Custom    *customToolCallData `json:"custom,omitempty"`
+	Namespace string              `json:"namespace,omitempty"`
 }
 
 // openAIErrorResponse 错误响应
@@ -1855,6 +1858,14 @@ func buildChatResponsesRequest(req openAIRequest) map[string]any {
 		}
 	}
 
+	if choice := gjson.ParseBytes(req.ToolChoice); choice.Get("type").String() == "custom" {
+		name := choice.Get("custom.name").String()
+		if name == "" {
+			name = choice.Get("name").String()
+		}
+		out["tool_choice"] = map[string]any{"type": "custom", "name": name}
+	}
+
 	// 5. response_format → Responses text.format，并清理结构化输出 schema
 	if len(req.ResponseFormat) > 0 && string(req.ResponseFormat) != "null" {
 		var responseFormat map[string]any
@@ -1953,7 +1964,7 @@ func convertChatToolsToResponsesForGrok(rawTools []json.RawMessage) []any {
 		}
 		// A provider extension already using a Responses-shaped tool object can
 		// be carried into the canonical request without reinterpretation.
-		tools = append(tools, source)
+		tools = append(tools, lowerChatCustomTool(source))
 		_ = isFunction
 	}
 	return tools
@@ -1987,8 +1998,15 @@ func validateChatCompletionFunctionNames(req openAIRequest) error {
 			}
 		}
 		for callIdx, toolCall := range msg.ToolCalls {
-			if strings.TrimSpace(toolCall.Function.Name) == "" {
-				return invalidFunctionNameError(fmt.Sprintf("messages[%d].tool_calls[%d].function.name", msgIdx, callIdx))
+			name, field := toolCall.Function.Name, "function.name"
+			if toolCall.Type == "custom" {
+				name, field = "", "custom.name"
+				if toolCall.Custom != nil {
+					name = toolCall.Custom.Name
+				}
+			}
+			if strings.TrimSpace(name) == "" {
+				return invalidFunctionNameError(fmt.Sprintf("messages[%d].tool_calls[%d].%s", msgIdx, callIdx, field))
 			}
 			if callID := strings.TrimSpace(toolCall.ID); msg.Role == "assistant" && callID != "" {
 				knownCalls[callID] = struct{}{}
@@ -1996,6 +2014,16 @@ func validateChatCompletionFunctionNames(req openAIRequest) error {
 		}
 	}
 	for toolIdx, rawTool := range req.Tools {
+		if tool := gjson.ParseBytes(rawTool); tool.Get("type").String() == "custom" {
+			name, field := tool.Get("name").String(), "name"
+			if tool.Get("custom").IsObject() {
+				name, field = tool.Get("custom.name").String(), "custom.name"
+			}
+			if strings.TrimSpace(name) == "" {
+				return invalidFunctionNameError(fmt.Sprintf("tools[%d].%s", toolIdx, field))
+			}
+			continue
+		}
 		var parsed openAIToolParsed
 		if err := json.Unmarshal(rawTool, &parsed); err != nil || parsed.Type != "function" || parsed.Function == nil {
 			continue
@@ -2148,6 +2176,16 @@ func normalizeResponsesToolChoice(body map[string]any) bool {
 
 	modified := false
 	toolType := strings.TrimSpace(firstNonEmptyAnyString(choice["type"]))
+	if toolType == "custom" {
+		if nested, ok := choice["custom"].(map[string]any); ok {
+			if _, exists := choice["name"]; !exists {
+				choice["name"] = nested["name"]
+			}
+			delete(choice, "custom")
+			return true
+		}
+		return false
+	}
 	function, _ := choice["function"].(map[string]any)
 	name := strings.TrimSpace(firstNonEmptyAnyString(choice["name"]))
 	if toolType == "" && (function != nil || name != "") {
@@ -2621,13 +2659,24 @@ func upstreamServiceTier(tier string) (string, bool) {
 // convertMessagesToInputSlice 将 OpenAI messages 转换为 Codex input 数组（纯内存操作，零中间序列化）
 func convertMessagesToInputSlice(messages []openAIMessage) []any {
 	input := make([]any, 0, len(messages))
-
+	customCalls := make(map[string]bool)
+	for _, message := range messages {
+		for _, call := range message.ToolCalls {
+			if call.Type == "custom" {
+				customCalls[call.ID] = true
+			}
+		}
+	}
 	for _, m := range messages {
 		switch m.Role {
 		case "tool":
 			output, images := toolMessageOutputAndImages(m.Content)
+			outputType := "function_call_output"
+			if customCalls[m.ToolCallID] {
+				outputType = "custom_tool_call_output"
+			}
 			input = append(input, map[string]any{
-				"type":    "function_call_output",
+				"type":    outputType,
 				"call_id": m.ToolCallID,
 				"output":  output,
 			})
@@ -2661,6 +2710,14 @@ func convertMessagesToInputSlice(messages []openAIMessage) []any {
 					})
 				}
 				for _, tc := range m.ToolCalls {
+					if tc.Type == "custom" && tc.Custom != nil {
+						item := map[string]any{"type": "custom_tool_call", "call_id": tc.ID, "name": tc.Custom.Name, "input": tc.Custom.Input}
+						if tc.Namespace != "" {
+							item["namespace"] = tc.Namespace
+						}
+						input = append(input, item)
+						continue
+					}
 					input = append(input, map[string]any{
 						"type":      "function_call",
 						"call_id":   tc.ID,
@@ -2854,6 +2911,9 @@ func convertToolsToCodexFormat(rawTools []json.RawMessage) []any {
 			}
 			var passThrough any
 			_ = json.Unmarshal(raw, &passThrough)
+			if tool, ok := passThrough.(map[string]any); ok {
+				passThrough = lowerChatCustomTool(tool)
+			}
 			tools = append(tools, passThrough)
 			continue
 		}
@@ -3621,7 +3681,7 @@ func newToolCallAnnouncementChunk(id, model string, created int64, tcIndex int, 
 					Index: tcIndex,
 					ID:    callID,
 					Type:  "function",
-					Function: toolCallFuncDelta{
+					Function: &toolCallFuncDelta{
 						Name:      funcName,
 						Arguments: "",
 					},
@@ -3642,7 +3702,7 @@ func newToolCallDeltaChunk(id, model string, created int64, tcIndex int, argsDel
 			Delta: &streamDelta{
 				ToolCalls: []toolCallDelta{{
 					Index:    tcIndex,
-					Function: toolCallFuncDelta{Arguments: argsDelta},
+					Function: &toolCallFuncDelta{Arguments: argsDelta},
 				}},
 			},
 		}},
@@ -3771,6 +3831,8 @@ type ToolCallResult struct {
 	ID        string
 	Name      string
 	Arguments string
+	Type      string
+	Namespace string
 }
 
 // StreamTranslator 有状态的流式响应翻译器，跟踪 function_call 索引映射
@@ -3784,6 +3846,7 @@ type StreamTranslator struct {
 	toolCallTypes         map[int]string
 	toolCallNames         map[int]string
 	toolCallArguments     map[int]string
+	customToolInputs      map[int]*strings.Builder
 	toolCallFinalized     map[int]bool
 	invalidToolArguments  error
 	nextIdx               int
@@ -3800,6 +3863,7 @@ func NewStreamTranslator(chunkID, model string, created int64) *StreamTranslator
 		toolCallTypes:         make(map[int]string),
 		toolCallNames:         make(map[int]string),
 		toolCallArguments:     make(map[int]string),
+		customToolInputs:      make(map[int]*strings.Builder),
 		toolCallFinalized:     make(map[int]bool),
 	}
 }
@@ -3860,7 +3924,11 @@ func (st *StreamTranslator) failToolArguments(idx int, reason string) ([]byte, b
 		if name == "" {
 			name = "unknown"
 		}
-		st.invalidToolArguments = fmt.Errorf("upstream function call %q arguments %s", name, reason)
+		if st.toolCallTypes[idx] == "custom_tool_call" {
+			st.invalidToolArguments = fmt.Errorf("upstream custom tool call %q input %s", name, reason)
+		} else {
+			st.invalidToolArguments = fmt.Errorf("upstream function call %q arguments %s", name, reason)
+		}
 	}
 	return newErrorResponse(st.invalidToolArguments.Error()), true
 }
@@ -3967,6 +4035,9 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 		st.toolCallTypes[tcIdx] = itemType
 		st.toolCallNames[tcIdx] = name
 
+		if itemType == "custom_tool_call" {
+			return newCustomToolChunk(st.ChunkID, st.Model, st.Created, tcIdx, callID, name, "", parsed.Get("item.namespace").String()), false
+		}
 		return newToolCallAnnouncementChunk(st.ChunkID, st.Model, st.Created, tcIdx, callID, name), false
 
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
@@ -3975,6 +4046,9 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 			return nil, false
 		}
 		delta := parsed.Get("delta").String()
+		if st.toolCallTypes[tcIdx] == "custom_tool_call" {
+			return st.appendCustomToolInput(tcIdx, delta)
+		}
 		if eventType == "response.function_call_arguments.delta" && st.toolCallTypes[tcIdx] == "function_call" {
 			if st.toolCallFinalized[tcIdx] {
 				return st.failToolArguments(tcIdx, "continued after the done event")
@@ -3991,9 +4065,18 @@ func (st *StreamTranslator) TranslateParsed(parsed gjson.Result) ([]byte, bool) 
 		return st.finalizeOrdinaryToolArguments(tcIdx, parsed.Get("arguments").String())
 
 	case "response.custom_tool_call_input.done":
-		return nil, false
+		tcIdx, ok := st.toolCallIndex(parsed)
+		if !ok || st.toolCallTypes[tcIdx] != "custom_tool_call" {
+			return nil, false
+		}
+		return st.finalizeCustomToolInput(tcIdx, parsed.Get("input"))
 
 	case "response.output_item.done":
+		if parsed.Get("item.type").String() == "custom_tool_call" {
+			if idx, ok := st.toolCallIndex(parsed); ok {
+				return st.finalizeCustomToolInput(idx, parsed.Get("item.input"))
+			}
+		}
 		if parsed.Get("item.type").String() != "function_call" {
 			return nil, false
 		}
@@ -4147,8 +4230,13 @@ func BuildCompactResponseWithFinishReason(id, model string, created int64, conte
 				ID:   tc.ID,
 				Type: "function",
 			}
-			msg.ToolCalls[i].Function.Name = tc.Name
-			msg.ToolCalls[i].Function.Arguments = tc.Arguments
+			msg.ToolCalls[i].Namespace = tc.Namespace
+			if tc.Type == "custom_tool_call" || tc.Type == "custom" {
+				msg.ToolCalls[i].Type = "custom"
+				msg.ToolCalls[i].Custom = &customToolCallData{Name: tc.Name, Input: tc.Arguments}
+			} else {
+				msg.ToolCalls[i].Function = &toolCallFuncDelta{Name: tc.Name, Arguments: tc.Arguments}
+			}
 		}
 	}
 	if finishReasonOverride != "" {
@@ -4223,6 +4311,8 @@ func ExtractToolCallsFromOutputValidated(eventData []byte) ([]ToolCallResult, er
 			}
 			toolCalls = append(toolCalls, ToolCallResult{
 				ID:        callID,
+				Type:      itemType,
+				Namespace: item.Get("namespace").String(),
 				Name:      item.Get("name").String(),
 				Arguments: arguments,
 			})

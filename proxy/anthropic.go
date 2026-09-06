@@ -279,6 +279,9 @@ func resolveAnthropicModel(model string, dynamicMappingJSON string, supportedMod
 
 // toCodexCallID 将 Anthropic tool_use id 转换为 Codex call_id
 func toCodexCallID(anthropicID string) string {
+	if id, _, custom := parseAnthropicCustomToolID(anthropicID); custom {
+		return id
+	}
 	if strings.HasPrefix(anthropicID, "fc_") {
 		return anthropicID
 	}
@@ -333,6 +336,9 @@ func translateAnthropicToResponses(rawJSON []byte, modelMappingJSON string, supp
 		return nil, originalModel, err
 	}
 
+	if err := validateAnthropicCustomToolHistory(req.Messages); err != nil {
+		return nil, originalModel, err
+	}
 	// Grok 吃自动前缀缓存，system 必须按块拆开；Codex 仍拼成一条 developer。
 	input := buildCodexInput(req.System, req.Messages)
 	if preserveControls {
@@ -395,6 +401,7 @@ func translateAnthropicToResponses(rawJSON []byte, modelMappingJSON string, supp
 		}
 	}
 
+	restoreAnthropicCustomToolDeclarations(out)
 	body, err := json.Marshal(out)
 	if err != nil {
 		return nil, "", fmt.Errorf("marshal codex request: %w", err)
@@ -676,8 +683,12 @@ func appendUserBlocks(input []any, blocks []anthropicContentBlock) []any {
 				output = toolResultImageMovedMarker
 			}
 			callID := toCodexCallID(b.ToolUseID)
+			outputType := "function_call_output"
+			if _, _, custom := parseAnthropicCustomToolID(b.ToolUseID); custom {
+				outputType = "custom_tool_call_output"
+			}
 			input = append(input, map[string]any{
-				"type":    "function_call_output",
+				"type":    outputType,
 				"call_id": callID,
 				"output":  output,
 			})
@@ -725,6 +736,14 @@ func appendAssistantBlocks(input []any, blocks []anthropicContentBlock) []any {
 					"content": textParts,
 				})
 				textParts = nil
+			}
+			if id, namespace, custom := parseAnthropicCustomToolID(b.ID); custom {
+				item := map[string]any{"type": "custom_tool_call", "call_id": id, "name": b.Name, "input": gjson.GetBytes(b.Input, "input").String()}
+				if namespace != "" {
+					item["namespace"] = namespace
+				}
+				input = append(input, item)
+				continue
 			}
 			args := "{}"
 			if len(b.Input) > 0 {
@@ -960,21 +979,24 @@ func convertAnthropicToolChoice(raw json.RawMessage) any {
 
 // anthropicStreamTranslator 有状态的流式响应翻译器（Codex → Anthropic）
 type anthropicStreamTranslator struct {
-	model                  string
-	responseID             string
-	messageStartSent       bool
-	contentBlockIndex      int
-	contentBlockOpen       bool
-	currentBlockType       string // "text" | "thinking" | "tool_use"
-	currentToolUseID       string
-	currentToolUseName     string
-	currentToolInputBuffer strings.Builder
-	hasToolUse             bool
-	inputTokens            int
-	outputTokens           int
-	cachedTokens           int
-	pingAfterStartSent     bool
-	deltasSincePing        int
+	model                     string
+	responseID                string
+	messageStartSent          bool
+	contentBlockIndex         int
+	contentBlockOpen          bool
+	currentBlockType          string // "text" | "thinking" | "tool_use"
+	currentToolUseID          string
+	currentToolUseName        string
+	currentToolInputBuffer    strings.Builder
+	currentToolCustom         bool
+	currentToolInputFinalized bool
+	toolInputError            error
+	hasToolUse                bool
+	inputTokens               int
+	outputTokens              int
+	cachedTokens              int
+	pingAfterStartSent        bool
+	deltasSincePing           int
 }
 
 // newAnthropicStreamTranslator 创建流式翻译器
@@ -987,6 +1009,9 @@ func newAnthropicStreamTranslator(model string) *anthropicStreamTranslator {
 
 // translateEvent 将单个 Codex SSE 事件翻译为零或多个 Anthropic SSE 事件
 func (t *anthropicStreamTranslator) translateEvent(eventData []byte) []anthropicStreamEvent {
+	if t.toolInputError != nil {
+		return nil
+	}
 	eventType := gjson.GetBytes(eventData, "type").String()
 
 	switch eventType {
@@ -1004,6 +1029,11 @@ func (t *anthropicStreamTranslator) translateEvent(eventData []byte) []anthropic
 
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		return t.handleToolInputDelta(eventData)
+	case "response.custom_tool_call_input.done":
+		if t.currentToolCustom && t.contentBlockOpen {
+			return t.finishCustomToolInput(gjson.GetBytes(eventData, "input"))
+		}
+		return nil
 
 	case "response.output_text.done", "response.reasoning_summary_text.done",
 		"response.reasoning_text.done":
@@ -1106,6 +1136,16 @@ func (t *anthropicStreamTranslator) handleOutputItemAdded(data []byte) []anthrop
 		t.currentBlockType = "tool_use"
 		t.currentToolUseID = callID
 		t.currentToolUseName = name
+		t.currentToolCustom = itemType == "custom_tool_call"
+		t.currentToolInputFinalized = false
+		if t.currentToolCustom {
+			id := gjson.GetBytes(data, "item.call_id").String()
+			if id == "" {
+				id = gjson.GetBytes(data, "item.id").String()
+			}
+			callID = anthropicCustomToolID(id, gjson.GetBytes(data, "item.namespace").String())
+			t.currentToolUseID = callID
+		}
 		t.hasToolUse = true
 		events = append(events, t.startContentBlock(anthropicContentBlock{
 			Type:  "tool_use",
@@ -1113,6 +1153,9 @@ func (t *anthropicStreamTranslator) handleOutputItemAdded(data []byte) []anthrop
 			Name:  name,
 			Input: json.RawMessage("{}"),
 		})...)
+		if t.currentToolCustom {
+			events = append(events, t.contentBlockDelta(anthropicDelta{Type: "input_json_delta", PartialJSON: `{"input":"`})...)
+		}
 
 	case "message":
 		// text block 延迟到第一个 delta 时打开
@@ -1189,6 +1232,9 @@ func (t *anthropicStreamTranslator) handleToolInputDelta(data []byte) []anthropi
 	if delta == "" {
 		return nil
 	}
+	if t.currentToolCustom {
+		return t.customToolInputDelta(delta)
+	}
 	t.currentToolInputBuffer.WriteString(delta)
 	return t.contentBlockDelta(anthropicDelta{
 		Type:        "input_json_delta",
@@ -1211,6 +1257,13 @@ func (t *anthropicStreamTranslator) handleContentDone() []anthropicStreamEvent {
 // reasoning item 携带 encrypted_content 时先发 signature_delta 再关块：
 // signature 即密文本身，输入侧据此重建 reasoning item 回传上游。
 func (t *anthropicStreamTranslator) handleOutputItemDone(data []byte) []anthropicStreamEvent {
+	if t.contentBlockOpen && t.currentToolCustom && t.currentBlockType == "tool_use" && gjson.GetBytes(data, "item.type").String() == "custom_tool_call" {
+		events := t.finishCustomToolInput(gjson.GetBytes(data, "item.input"))
+		if t.toolInputError != nil {
+			return nil
+		}
+		return append(events, t.closeCurrentBlock()...)
+	}
 	if t.contentBlockOpen && t.currentBlockType == "thinking" &&
 		gjson.GetBytes(data, "item.type").String() == "reasoning" {
 		if sig := gjson.GetBytes(data, "item.encrypted_content").String(); sig != "" {
@@ -1302,14 +1355,16 @@ func (t *anthropicStreamTranslator) closeCurrentBlock() []anthropicStreamEvent {
 	if !t.contentBlockOpen {
 		return nil
 	}
+	var events []anthropicStreamEvent
+	if t.currentBlockType == "tool_use" && t.currentToolCustom && !t.currentToolInputFinalized {
+		events = append(events, t.finishCustomToolInput(gjson.Result{})...)
+	}
 	t.contentBlockOpen = false
+	t.currentToolCustom = false
 	idx := t.contentBlockIndex - 1
 	t.currentToolInputBuffer.Reset()
 
-	return []anthropicStreamEvent{{
-		Type:  "content_block_stop",
-		Index: &idx,
-	}}
+	return append(events, anthropicStreamEvent{Type: "content_block_stop", Index: &idx})
 }
 
 // anthropicEventToSSE 将 Anthropic 事件序列化为 SSE 格式
@@ -1510,7 +1565,12 @@ func buildAnthropicResponseFromCompleted(completedData []byte, model string) *an
 			name := item.Get("name").String()
 			args := item.Get("arguments").String()
 			if itemType == "custom_tool_call" {
-				args = item.Get("input").String()
+				args = string(wrappedCustomToolInput(item.Get("input").String()))
+				id := item.Get("call_id").String()
+				if id == "" {
+					id = item.Get("id").String()
+				}
+				callID = anthropicCustomToolID(id, item.Get("namespace").String())
 			}
 			if cleaned := sanitizeToolInputJSON(name, args); cleaned != "" {
 				args = cleaned
