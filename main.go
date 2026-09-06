@@ -24,6 +24,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/imagestore"
+	"github.com/codex2api/internal/version"
 	"github.com/codex2api/proxy"
 	"github.com/codex2api/proxy/wsrelay"
 	"github.com/codex2api/security"
@@ -562,6 +563,7 @@ func main() {
 		}
 		c.JSON(200, gin.H{
 			"status":          "ok",
+			"build_version":   version.Current(),
 			"available":       available,
 			"total":           total,
 			"counts_complete": countsComplete,

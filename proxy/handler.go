@@ -3665,13 +3665,49 @@ func (h *Handler) Responses(c *gin.Context) {
 	upstreamChannel := requestUpstreamChannel(c)
 	var requestModel, mappedModel string
 	var mappingApplied bool
-	if upstreamChannel == database.UpstreamChannelAntigravity {
+	nativeAntigravityModel := false
+	if upstreamChannel == database.UpstreamChannelAuto {
+		if logical, known := antigravityLogicalCompatibilityModel(gjson.GetBytes(rawBody, "model").String()); known {
+			for _, account := range h.store.Accounts() {
+				if !account.IsAntigravityAPI() || !account.AntigravityDispatchEnabled() {
+					continue
+				}
+				for _, variant := range logical.variants {
+					if antigravityAccountSupportsPublicModel(account, logical.id+"-"+variant.level) {
+						nativeAntigravityModel = true
+					}
+				}
+			}
+		}
+	}
+	if upstreamChannel == database.UpstreamChannelAntigravity || nativeAntigravityModel {
 		// Antigravity is a native, fixed public surface. Do not let global Codex
 		// aliases or synthesized reasoning aliases rewrite an Antigravity-only
 		// request before validation; the adapter performs the sole public->wire
 		// translation after an account proves it owns the required backing model.
 		requestModel = strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
 		mappedModel = requestModel
+		if logical, known := antigravityLogicalCompatibilityModel(requestModel); known {
+			effort := strings.ToLower(strings.TrimSpace(gjson.GetBytes(rawBody, "reasoning.effort").String()))
+			if effort == "" {
+				effort = "low"
+			}
+			allowedEfforts := make([]string, 0, len(logical.variants))
+			validEffort := false
+			for _, option := range logical.variants {
+				allowedEfforts = append(allowedEfforts, option.level)
+				validEffort = validEffort || effort == option.level
+			}
+			if !validEffort {
+				api.SendError(c, api.NewAPIError(api.ErrCodeInvalidParameter, "Model "+logical.id+" supports reasoning.effort: "+strings.Join(allowedEfforts, ", "), api.ErrorTypeInvalidRequest))
+				return
+			}
+			variant, ok := antigravityVariantForDefinition(logical, map[string]any{"effort": effort})
+			if ok {
+				mappedModel = logical.id + "-" + variant.level
+				rawBody, _ = sjson.SetBytes(rawBody, "model", mappedModel)
+			}
+		}
 	} else if nativeRemoteCompactionV2 {
 		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredCompactModelMappingToBody(rawBody, supportedModels)
 	} else {
@@ -3689,7 +3725,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	case database.UpstreamChannelAntigravity:
 		// Antigravity 专用 Key 公开稳定的逻辑模型，同时继续接受旧的固定
 		// effort 别名；raw backing 与 account model_mapping 不是下游模型名。
-		rules["model"] = append(rules["model"], api.ModelValidator(antigravityAcceptedModelIDs()))
+		rules["model"] = append(rules["model"], api.ModelValidator(h.antigravityAcceptedModels()))
 	default:
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
@@ -8583,7 +8619,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 	// middleware (including older embedders); a real key always gets an
 	// isolated, read-only account snapshot.
 	if row := apiKeyRowFromContext(c); row != nil {
-		api.SendList(c, "list", h.scopedModels(ctx, row))
+		api.SendList(c, "list", collapseAntigravityModelChoices(h.scopedModels(ctx, row)))
 		return
 	}
 	modelIDs := h.supportedModelIDs(ctx)
@@ -8596,7 +8632,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 			OwnedBy: "openai",
 		})
 	}
-	api.SendList(c, "list", models)
+	api.SendList(c, "list", collapseAntigravityModelChoices(models))
 }
 
 func (h *Handler) supportedModelIDs(ctx context.Context) []string {

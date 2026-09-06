@@ -85,7 +85,7 @@ func TestListModelsOrManifestServesAntigravityAsCodexManifest(t *testing.T) {
 			t.Fatalf("slug %s prefer_websockets=true, Antigravity must stay on HTTP", model.Slug)
 		}
 	}
-	if !got["gemini-3.6-flash-low"] || !got["gemini-3.6-flash-medium"] || !got["gemini-3.6-flash-high"] || !got["claude-sonnet-4-6"] || len(got) != 4 {
+	if !got["gemini-3.6-flash"] || !got["claude-sonnet-4-6"] || len(got) != 2 {
 		t.Fatalf("manifest slugs = %v, want cockpit Antigravity models", got)
 	}
 
@@ -95,7 +95,7 @@ func TestListModelsOrManifestServesAntigravityAsCodexManifest(t *testing.T) {
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"object":"list"`) {
 		t.Fatalf("cockpit list status=%d body=%s", rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "gemini-3.6-flash-low") || strings.Contains(rec.Body.String(), `"id":"gemini-3.6-flash"`) {
+	if strings.Contains(rec.Body.String(), "gemini-3.6-flash-low") || !strings.Contains(rec.Body.String(), `"id":"gemini-3.6-flash"`) {
 		t.Fatalf("cockpit list has wrong Antigravity surface: %s", rec.Body.String())
 	}
 }
@@ -122,7 +122,7 @@ func TestMergeCodexManifestModelsAppendsMissingRelaySlugs(t *testing.T) {
 	}
 }
 
-func TestScopedAntigravityManifestPublishesFixedTierModelsWithoutReasoningLevels(t *testing.T) {
+func TestScopedAntigravityManifestKeepsOnlyAvailableEfforts(t *testing.T) {
 	body, err := buildScopedCodexManifest([]api.Model{
 		{ID: "gemini-3.7-flash-high", OwnedBy: "google"},
 		{ID: "gemini-3.6-flash-medium", OwnedBy: "google"},
@@ -140,8 +140,8 @@ func TestScopedAntigravityManifestPublishesFixedTierModelsWithoutReasoningLevels
 		t.Fatal(err)
 	}
 	for _, item := range payload.Models {
-		if len(item.SupportedReasoningLevels) != 0 {
-			t.Fatalf("%s unexpectedly advertises reasoning levels: %v", item.Slug, item.SupportedReasoningLevels)
+		if strings.HasPrefix(item.Slug, "gemini-") && len(item.SupportedReasoningLevels) != 1 {
+			t.Fatalf("%s must expose only its scoped effort: %v", item.Slug, item.SupportedReasoningLevels)
 		}
 	}
 }

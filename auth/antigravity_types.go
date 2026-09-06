@@ -89,7 +89,7 @@ func (a *Account) AntigravityAPIKey() string {
 
 // AntigravityDefaultModelIDs is the conservative raw/wire fallback catalog.
 // Public model discovery expands these backing IDs through the proxy's native
-// 14-model projection; keeping wire IDs here preserves request admission and
+// model projection; keeping wire IDs here preserves request admission and
 // capability checks when an account has not completed its first sync yet.
 func AntigravityDefaultModelIDs() []string {
 	return []string{
@@ -100,6 +100,7 @@ func AntigravityDefaultModelIDs() []string {
 		"gemini-3.6-flash-medium",
 		"gemini-3.6-flash-high",
 		"gemini-3.7-flash-tiered",
+		"gemini-3.8-flash-tiered",
 		"gemini-3.1-pro-low",
 		"gemini-pro-agent",
 		"claude-opus-4-6-thinking",
@@ -294,6 +295,9 @@ type AntigravityAICredits struct {
 }
 
 type AntigravityQuotaSnapshot struct {
+	// Includes models with no quotaInfo; absence of quota is not zero capacity.
+	CatalogModelIDs      []string                `json:"catalog_model_ids,omitempty"`
+	InternalModelIDs     []string                `json:"internal_model_ids,omitempty"`
 	Models               []AntigravityModelQuota `json:"models"`
 	Groups               []AntigravityQuotaGroup `json:"quota_groups,omitempty"`
 	ModelForwardingRules map[string]string       `json:"model_forwarding_rules,omitempty"`

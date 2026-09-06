@@ -1,3 +1,4 @@
+import { ANTIGRAVITY_DEFAULT_MODELS as DEFAULT_ANTIGRAVITY_MODEL_OPTIONS } from "../lib/antigravityModels";
 import type { ChangeEvent, FormEvent, ReactNode } from "react";
 import {
   useCallback,
@@ -196,11 +197,6 @@ const DEFAULT_GROK_MODEL_OPTIONS = [
   "grok-2",
 ];
 
-const DEFAULT_ANTIGRAVITY_MODEL_OPTIONS = [
-  "gemini-3-pro-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-];
 // Keep this fallback in lockstep with proxy.defaultClaudeModelIDs. The
 // server catalog normally wins; these aliases are only used when no
 // Claude account has populated a catalog yet.
