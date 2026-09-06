@@ -2527,6 +2527,17 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
 			return
 		}
+		// Claude API Key 账号的 custom_headers 是出站自定义头(issue #647):网关保留头
+		// (Authorization / x-api-key / Content-Type / Accept 等)不允许覆盖。
+		if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) && claudeAuthKindForRow(row, true) == auth.ClaudeAuthKindAPIKey {
+			normalized, err := normalizeClaudeAPIKeyCustomHeaders(update.CustomHeaders.Values)
+			if err != nil {
+				writeError(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			update.CustomHeaders.Values = normalized
+			update.CredentialUpdates["custom_headers"] = cloneCustomHeaders(normalized)
+		}
 		seed := tokenCredentialSeedFromAccountRow(row)
 		previousOverride := openaiidentity.WorkspaceOverrideFromHeaders(seed.customHeaders)
 		seed.customHeaders = cloneCustomHeaders(update.CustomHeaders.Values)

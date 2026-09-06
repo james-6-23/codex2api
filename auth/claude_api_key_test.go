@@ -86,6 +86,77 @@ func TestClaudeAPIKeyModelDiscovery(t *testing.T) {
 	}
 }
 
+func TestClaudeAPIKeyIdentityModeDoesNotInheritGlobalDefault(t *testing.T) {
+	apiKey := &Account{DBID: 964502, UpstreamType: UpstreamClaude, ClaudeAuthKind: ClaudeAuthKindAPIKey, AccessToken: "key"}
+	if got := apiKey.EffectiveClaudeFingerprintMode(ClaudeFingerprintModeForce); got != "" {
+		t.Fatalf("API key without a mode inherited %q", got)
+	}
+	apiKey.ClaudeFingerprintMode = "Force"
+	if got := apiKey.EffectiveClaudeFingerprintMode(""); got != ClaudeFingerprintModeForce {
+		t.Fatalf("explicit API key mode lost: %q", got)
+	}
+	oauth := &Account{DBID: 964503, UpstreamType: UpstreamClaude, AccessToken: "at", RefreshToken: "rt"}
+	if got := oauth.EffectiveClaudeFingerprintMode(ClaudeFingerprintModeForce); got != ClaudeFingerprintModeForce {
+		t.Fatalf("OAuth global default regressed: %q", got)
+	}
+	if got := oauth.EffectiveClaudeFingerprintMode(""); got != ClaudeFingerprintModePreserve {
+		t.Fatalf("OAuth fallback regressed: %q", got)
+	}
+}
+
+func TestClaudeAPIKeyIdentityAndCustomHeaderHelpers(t *testing.T) {
+	for _, name := range []string{"Authorization", "x-api-key", "X-API-KEY", "content-type", "Content-Length", "Host", "Accept", "accept-encoding", "Transfer-Encoding", "connection"} {
+		if !IsClaudeAPIKeyReservedHeader(name) {
+			t.Fatalf("%s must be reserved", name)
+		}
+	}
+	for _, name := range []string{"User-Agent", "X-App", "anthropic-version", "anthropic-beta", "X-Gateway-Tenant"} {
+		if IsClaudeAPIKeyReservedHeader(name) {
+			t.Fatalf("%s must be configurable", name)
+		}
+	}
+	off := http.Header{}
+	ApplyClaudeAPIKeyIdentityHeaders(off, http.Header{"User-Agent": {"opencode/1"}}, "")
+	if len(off) != 0 {
+		t.Fatalf("mode off added headers: %v", off)
+	}
+	forced := http.Header{}
+	ApplyClaudeAPIKeyIdentityHeaders(forced, http.Header{"User-Agent": {"claude-cli/1.0.0 (external, cli)"}, "X-Stainless-Os": {"Windows"}, "X-Stainless-Retry-Count": {"2"}}, ClaudeFingerprintModeForce)
+	if forced.Get("User-Agent") != DefaultClaudeIdentityHeaderValue("user-agent") || forced.Get("X-Stainless-Os") != "MacOS" || forced.Get("X-Stainless-Retry-Count") != "2" || forced.Get("X-App") != "cli" {
+		t.Fatalf("force: %v", forced)
+	}
+	preserved := http.Header{}
+	ApplyClaudeAPIKeyIdentityHeaders(preserved, http.Header{"User-Agent": {"claude-cli/1.0.0 (external, cli)"}, "X-Stainless-Os": {"Windows"}}, ClaudeFingerprintModePreserve)
+	if preserved.Get("User-Agent") != "claude-cli/1.0.0 (external, cli)" || preserved.Get("X-Stainless-Os") != "Windows" || preserved.Get("X-Stainless-Arch") != "arm64" || preserved.Get("anthropic-dangerous-direct-browser-access") != "true" {
+		t.Fatalf("preserve: %v", preserved)
+	}
+	custom := http.Header{"X-Api-Key": {"real"}, "Accept": {"text/event-stream"}}
+	ApplyClaudeAPIKeyCustomHeaders(custom, map[string]string{"x-api-key": "evil", "Accept": "text/plain", " ": "blank", "X-App": "cli"})
+	if custom.Get("X-Api-Key") != "real" || custom.Get("Accept") != "text/event-stream" || custom.Get("X-App") != "cli" || len(custom) != 3 {
+		t.Fatalf("custom: %v", custom)
+	}
+	if ClaudeAPIKeyUpstreamUserAgent(nil, "") != "" || ClaudeAPIKeyUpstreamUserAgent(nil, "force") != DefaultClaudeIdentityHeaderValue("user-agent") || ClaudeAPIKeyUpstreamUserAgent(map[string]string{"user-agent": " custom/1 "}, "force") != "custom/1" {
+		t.Fatal("UA preview mismatch")
+	}
+}
+
+func TestClaudeAPIKeyModelDiscoveryCarriesAccountHeaders(t *testing.T) {
+	var seen http.Header
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
+		_, _ = w.Write([]byte(`{"data":[{"id":"claude-a"}]}`))
+	}))
+	t.Cleanup(server.Close)
+	account := &Account{DBID: 964504, UpstreamType: UpstreamClaude, ClaudeAuthKind: ClaudeAuthKindAPIKey, AccessToken: "test-key", ClaudeBaseURL: server.URL, ClaudeFingerprintMode: ClaudeFingerprintModeForce, CustomHeaders: map[string]string{"X-Gateway-Tenant": "team-a", "x-api-key": "evil"}}
+	models, err := NewClaudeAuth("").FetchModelsForAccount(context.Background(), account)
+	if err != nil || strings.Join(models, ",") != "claude-a" {
+		t.Fatalf("models=%v err=%v", models, err)
+	}
+	if seen.Get("x-api-key") != "test-key" || seen.Get("X-Gateway-Tenant") != "team-a" || seen.Get("X-App") != "cli" || !strings.HasPrefix(seen.Get("User-Agent"), "claude-cli/") {
+		t.Fatalf("discovery headers: %v", seen)
+	}
+}
+
 func TestClaudeAPIKeyModelDiscoveryDoesNotFollowRedirect(t *testing.T) {
 	var requests int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -180,7 +180,14 @@ func (h *Handler) buildAccountResponse(
 	effectiveWorkspaceID := openaiidentity.EffectiveWorkspaceID(tokenWorkspaceID, headers)
 	if includeDetails {
 		modelMapping = row.GetCredential("model_mapping")
-		if isClaudeAccount {
+		if isClaudeAccount && claudeAuthKindForRow(row, true) == auth.ClaudeAuthKindAPIKey {
+			// API Key custom_headers are operator configuration (never a generated
+			// fingerprint) and can't contain gateway-owned secrets (reserved names
+			// are rejected on write), so they are shown in full like Codex relay
+			// accounts. The UA preview reflects custom header > identity emulation.
+			customHeaders = headers
+			claudeUserAgent = auth.ClaudeAPIKeyUpstreamUserAgent(headers, claudeFingerprintMode)
+		} else if isClaudeAccount {
 			// Claude detail responses may be consumed by admin tooling, but must
 			// never expose arbitrary historical custom headers such as
 			// Authorization/Cookie/x-api-key. Keep only the provider identity

@@ -66,6 +66,10 @@ export interface ClaudeImportTokenRequest {
   proxy_url?: string
   use_proxy_pool?: boolean
   timezone?: string
+  /** API Key 账号:账号级自定义出站请求头,最后套用;网关保留头(鉴权/Content-Type/Accept 等)会被拒绝。 */
+  custom_headers?: Record<string, string> | null
+  /** API Key 账号:可选的 Claude Code 客户端身份仿真;空=透传(默认)。OAuth 账号沿用指纹替换语义。 */
+  claude_fingerprint_mode?: 'preserve' | 'force' | ''
 }
 
 /** Versioned, provider-scoped Claude OAuth export. Secret-bearing fields are

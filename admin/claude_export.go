@@ -78,9 +78,13 @@ type claudeExportEntry struct {
 	Timezone              string            `json:"timezone,omitempty"`
 	ClaudeFingerprintMode string            `json:"claude_fingerprint_mode,omitempty"`
 	FingerprintHeaders    map[string]string `json:"fingerprint_headers,omitempty"`
-	Tags                  []string          `json:"tags,omitempty"`
-	GroupRefs             []claudeGroupRef  `json:"group_refs,omitempty"`
-	Enabled               bool              `json:"enabled"`
+	// CustomHeaders are the operator-configured outbound headers of an API Key
+	// account (never exported for OAuth/Setup Token, whose custom_headers hold the
+	// generated fingerprint exposed via FingerprintHeaders instead).
+	CustomHeaders map[string]string `json:"custom_headers,omitempty"`
+	Tags          []string          `json:"tags,omitempty"`
+	GroupRefs     []claudeGroupRef  `json:"group_refs,omitempty"`
+	Enabled       bool              `json:"enabled"`
 
 	// exportFileName is only used as a ZIP member name and never serialized.
 	exportFileName string `json:"-"`
@@ -107,26 +111,51 @@ type claudeImportDocument struct {
 	Timezone              string
 	ClaudeFingerprintMode string
 	FingerprintHeaders    map[string]string
-	Tags                  []string
-	GroupRefs             []claudeGroupRef
-	Enabled               *bool
+	// CustomHeaders is only populated for api_key documents (operator headers);
+	// OAuth/Setup Token documents route their identity headers through
+	// FingerprintHeaders instead.
+	CustomHeaders map[string]string
+	Tags          []string
+	GroupRefs     []claudeGroupRef
+	Enabled       *bool
 }
 
 // claudeAccountImportOptions carries metadata that is not part of
 // auth.ClaudeTokenData.  It is consumed by the common account creation path.
 type claudeAccountImportOptions struct {
-	// AuthKind 是凭据形态(oauth / setup_token);空=按是否有 RT 推断。
-	AuthKind           string
-	BaseURL            string
-	Models             []string
-	PlanType           string
+	// AuthKind 是凭据形态(oauth / setup_token / api_key);空=按是否有 RT 推断。
+	AuthKind string
+	BaseURL  string
+	Models   []string
+	PlanType string
+	// FingerprintMode 对 OAuth/Setup Token 是指纹替换模式;对 api_key 是可选的
+	// Claude Code 客户端身份仿真开关(空=透传,见 auth.ApplyClaudeAPIKeyIdentityHeaders)。
 	FingerprintMode    string
 	FingerprintHeaders map[string]string
-	Tags               []string
-	GroupRefs          []claudeGroupRef
-	ResolvedGroupIDs   []int64
-	SkipModelFetch     bool
-	Enabled            *bool
+	// CustomHeaders 仅 api_key 使用:账号级自定义出站请求头(保留头在
+	// normalizeClaudeAPIKeyCustomHeaders 中拒绝)。
+	CustomHeaders    map[string]string
+	Tags             []string
+	GroupRefs        []claudeGroupRef
+	ResolvedGroupIDs []int64
+	SkipModelFetch   bool
+	Enabled          *bool
+}
+
+// normalizeClaudeAPIKeyCustomHeaders validates operator headers for a Claude
+// API Key account: the generic custom_headers rules plus rejection of the
+// gateway-owned reserved names (authentication, body framing, Accept).
+func normalizeClaudeAPIKeyCustomHeaders(headers map[string]string) (map[string]string, error) {
+	normalized, err := normalizeCustomHeaders(headers)
+	if err != nil {
+		return nil, err
+	}
+	for name := range normalized {
+		if auth.IsClaudeAPIKeyReservedHeader(name) {
+			return nil, fmt.Errorf("custom_headers 不能覆盖网关保留的请求头: %s", name)
+		}
+	}
+	return normalized, nil
 }
 
 type claudeImportResultItem struct {
@@ -412,8 +441,13 @@ func claudeAccountRowToExportEntry(row *database.AccountRow, groupRefs []claudeG
 		entry.RefreshToken = ""
 		entry.ExpiresAt = ""
 		entry.Timezone = ""
-		entry.ClaudeFingerprintMode = ""
+		// API Key accounts keep claude_fingerprint_mode (client identity emulation)
+		// and carry their operator headers as custom_headers; reserved names are
+		// dropped defensively so an export can always be re-imported.
 		entry.FingerprintHeaders = nil
+		if headers, err := normalizeClaudeAPIKeyCustomHeaders(claudeExportAPIKeyCustomHeaders(row.GetCredentialStringMap("custom_headers"))); err == nil {
+			entry.CustomHeaders = headers
+		}
 	}
 	entry.exportFileName = claudeExportFileName(entry.Email, entry.Name, row.ID)
 	return entry, true
@@ -816,9 +850,21 @@ func claudeImportDocumentFromWire(raw claudeImportWire) (claudeImportDocument, e
 	if len(headers) == 0 {
 		headers = raw.CustomHeaders
 	}
-	normalizedHeaders, err := normalizeClaudeFingerprintHeaders(headers)
-	if err != nil {
-		return claudeImportDocument{}, err
+	var normalizedHeaders, customHeaders map[string]string
+	var err error
+	if authKind == auth.ClaudeAuthKindAPIKey {
+		// API Key documents carry arbitrary operator headers (custom_headers; a
+		// legacy fingerprint_headers key is accepted as an alias) instead of a
+		// restricted identity fingerprint.
+		customHeaders, err = normalizeClaudeAPIKeyCustomHeaders(headers)
+		if err != nil {
+			return claudeImportDocument{}, err
+		}
+	} else {
+		normalizedHeaders, err = normalizeClaudeFingerprintHeaders(headers)
+		if err != nil {
+			return claudeImportDocument{}, err
+		}
 	}
 	models, err := normalizeClaudeImportModels(raw.Models)
 	if err != nil {
@@ -854,8 +900,30 @@ func claudeImportDocumentFromWire(raw claudeImportWire) (claudeImportDocument, e
 		ExpiresAt: strings.TrimSpace(raw.ExpiresAt), PlanType: strings.TrimSpace(raw.PlanType),
 		Models: models, ProxyURL: proxyURL, UseProxyPool: raw.UseProxyPool,
 		Timezone: timezone, ClaudeFingerprintMode: fingerprintMode, FingerprintHeaders: normalizedHeaders,
-		Tags: tags, GroupRefs: refs, Enabled: raw.Enabled,
+		CustomHeaders: customHeaders,
+		Tags:          tags, GroupRefs: refs, Enabled: raw.Enabled,
 	}, nil
+}
+
+// claudeExportAPIKeyCustomHeaders trims an API Key account's stored
+// custom_headers for export/import round trips: empty names/values and
+// gateway-reserved headers are removed rather than failing the whole export.
+func claudeExportAPIKeyCustomHeaders(headers map[string]string) map[string]string {
+	if len(headers) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(headers))
+	for name, value := range headers {
+		name = strings.TrimSpace(name)
+		if name == "" || auth.IsClaudeAPIKeyReservedHeader(name) || strings.TrimSpace(value) == "" {
+			continue
+		}
+		out[name] = value
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func parseClaudeImportDocuments(raw []byte) ([]claudeImportDocument, error) {
