@@ -2210,10 +2210,11 @@ func normalizeResponsesToolChoice(body map[string]any) bool {
 }
 
 type responsesBodyPrepareOptions struct {
-	forceStoreFalse            bool
-	expandPreviousResponse     bool
-	preservePreviousResponseID bool
-	cachedResponseItems        []json.RawMessage
+	forceStoreFalse              bool
+	expandPreviousResponse       bool
+	preservePreviousResponseID   bool
+	deferStructuredStringLengths bool
+	cachedResponseItems          []json.RawMessage
 	// cacheOwner 是 previous_response_id 展开时使用的缓存归属命名空间
 	//（见 responseCacheOwner）。owner 不匹配的缓存按未命中处理，防跨用户注入。
 	cacheOwner string
@@ -2266,10 +2267,12 @@ func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) response
 }
 
 // PrepareResponsesWebSocketBody keeps upstream response storage linkage for
-// native Responses WebSocket sessions.
+// native Responses WebSocket sessions. ExecuteRequest applies the final schema
+// policy once payload rules, account capabilities, and transport are known.
 func PrepareResponsesWebSocketBody(rawBody []byte) ([]byte, string) {
 	return prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
-		preservePreviousResponseID: true,
+		preservePreviousResponseID:   true,
+		deferStructuredStringLengths: true,
 	})
 }
 
@@ -2375,7 +2378,11 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 			delete(body, "service_tier")
 		}
 	}
-	normalizeResponsesStructuredOutputFormat(body)
+	// Native WS payload rules may enable Lite after this preparation step.
+	// Keep length constraints until ExecuteRequest can decide whether they apply.
+	normalizeResponsesStructuredOutputFormatWithPolicy(body, schemaNormalizationPolicy{
+		preserveStringLengths: opts.deferStructuredStringLengths,
+	})
 	normalizeResponsesFunctionTools(body)
 	normalizeResponsesToolChoice(body)
 	normalizeResponsesWebSearchTools(body)
@@ -2439,14 +2446,6 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		repairResponsesToolCallPairing(body)
 	}
 
-	// 保存展开后的 input 原始 JSON（用于响应缓存链路）
-	var expandedInputRaw string
-	if inputVal, ok := body["input"]; ok {
-		if b, err := json.Marshal(inputVal); err == nil {
-			expandedInputRaw = string(b)
-		}
-	}
-
 	// 7. 删除 Codex 不支持的字段
 	// 注意：prompt_cache_retention 上游(HTTP 与 WS 路径)均不接受，会返回
 	// 400 Unsupported parameter，因此在此一并剥离，executor / wsrelay 层也各自兜底删除。
@@ -2471,13 +2470,18 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 
 	result, err := json.Marshal(body)
 	if err != nil {
+		var expandedInputRaw string
+		if input, ok := body["input"]; ok {
+			if encoded, inputErr := json.Marshal(input); inputErr == nil {
+				expandedInputRaw = string(encoded)
+			}
+		}
 		return rawBody, expandedInputRaw
 	}
 	result = normalizeCompactionTriggerFinal(result, false)
-	if requestBodyHasCompactionTrigger(result) {
-		expandedInputRaw = gjson.GetBytes(result, "input").Raw
-	}
-	return result, expandedInputRaw
+	// Reuse the serialized input, including any final compaction adjustment.
+	// Serializing the same input tree separately doubles work on long histories.
+	return result, gjson.GetBytes(result, "input").Raw
 }
 
 // PrepareOpenAIResponsesBody keeps native OpenAI Responses requests compatible
@@ -3156,7 +3160,14 @@ func forEachSubSchema(schema map[string]interface{}, visit func(map[string]inter
 
 // stripUnsupportedSchemaKeys 递归删除 schema 中上游不支持的关键字
 func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
+	stripUnsupportedSchemaKeysWithPolicy(schema, schemaNormalizationPolicy{})
+}
+
+func stripUnsupportedSchemaKeysWithPolicy(schema map[string]interface{}, policy schemaNormalizationPolicy) {
 	for key := range unsupportedSchemaKeys {
+		if policy.preserveStringLengths && (key == "minLength" || key == "maxLength") {
+			continue
+		}
 		delete(schema, key)
 	}
 	// 显式写成 null 的 type 上游一律拒收（Codex Desktop 的 automation_update
@@ -3166,7 +3177,7 @@ func stripUnsupportedSchemaKeys(schema map[string]interface{}) {
 	if rawType, exists := schema["type"]; exists && rawType == nil {
 		delete(schema, "type")
 	}
-	forEachSubSchema(schema, stripUnsupportedSchemaKeys)
+	forEachSubSchema(schema, func(child map[string]any) { stripUnsupportedSchemaKeysWithPolicy(child, policy) })
 }
 
 func sanitizeSchemaForUpstream(schema map[string]interface{}) {
@@ -3176,12 +3187,22 @@ func sanitizeSchemaForUpstream(schema map[string]interface{}) {
 }
 
 func sanitizeStructuredOutputSchemaForUpstream(schema map[string]interface{}) {
-	sanitizeSchemaForUpstream(schema)
+	sanitizeStructuredOutputSchemaWithPolicy(schema, schemaNormalizationPolicy{})
+}
+
+func sanitizeStructuredOutputSchemaWithPolicy(schema map[string]interface{}, policy schemaNormalizationPolicy) {
+	stripUnsupportedSchemaKeysWithPolicy(schema, policy)
+	normalizeSchemaRequiredFields(schema)
+	ensureArrayItems(schema)
 	ensureObjectAdditionalPropertiesFalse(schema)
 	alignRequiredWithProperties(schema)
 }
 
 func normalizeResponsesStructuredOutputFormat(body map[string]any) bool {
+	return normalizeResponsesStructuredOutputFormatWithPolicy(body, schemaNormalizationPolicy{})
+}
+
+func normalizeResponsesStructuredOutputFormatWithPolicy(body map[string]any, policy schemaNormalizationPolicy) bool {
 	if len(body) == 0 {
 		return false
 	}
@@ -3199,7 +3220,7 @@ func normalizeResponsesStructuredOutputFormat(body map[string]any) bool {
 				modified = true
 			}
 		}
-		if sanitizeStructuredOutputSchema(responseFormat) {
+		if sanitizeStructuredOutputFormatWithPolicy(responseFormat, policy) {
 			modified = true
 		}
 	}
@@ -3212,7 +3233,7 @@ func normalizeResponsesStructuredOutputFormat(body map[string]any) bool {
 	if !ok {
 		return modified
 	}
-	if sanitizeStructuredOutputSchema(format) {
+	if sanitizeStructuredOutputFormatWithPolicy(format, policy) {
 		modified = true
 	}
 	if ensureJSONModeInputMentionsJSON(body, format) {
@@ -3335,14 +3356,18 @@ func responsesTextFormatFromResponseFormat(responseFormat map[string]any) map[st
 }
 
 func sanitizeStructuredOutputSchema(format map[string]any) bool {
+	return sanitizeStructuredOutputFormatWithPolicy(format, schemaNormalizationPolicy{})
+}
+
+func sanitizeStructuredOutputFormatWithPolicy(format map[string]any, policy schemaNormalizationPolicy) bool {
 	modified := false
 	if schema, ok := format["schema"].(map[string]any); ok && schema != nil {
-		sanitizeStructuredOutputSchemaForUpstream(schema)
+		sanitizeStructuredOutputSchemaWithPolicy(schema, policy)
 		modified = true
 	}
 	if jsonSchema, ok := format["json_schema"].(map[string]any); ok && jsonSchema != nil {
 		if schema, ok := jsonSchema["schema"].(map[string]any); ok && schema != nil {
-			sanitizeStructuredOutputSchemaForUpstream(schema)
+			sanitizeStructuredOutputSchemaWithPolicy(schema, policy)
 			modified = true
 		}
 	}

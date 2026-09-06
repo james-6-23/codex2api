@@ -592,6 +592,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		if responsesLite {
 			requestBody = normalizeCodexResponsesLiteBody(requestBody, false)
 		}
+		requestBody = normalizeCodexStructuredOutputForTransport(requestBody, true, responsesLite)
 		// 出站前最后兜底：任何中间改写都不能把普通 input 项放到
 		// compaction_trigger 后面，否则上游直接返回 invalid_request_error。
 		requestBody = normalizeCompactionTriggerFinal(requestBody, false)
@@ -615,6 +616,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if responsesLite {
 		requestBody = normalizeCodexResponsesLiteBody(requestBody, true)
 	}
+	requestBody = normalizeCodexStructuredOutputForTransport(requestBody, false, responsesLite)
 	requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 
 	account.Mu().RLock()

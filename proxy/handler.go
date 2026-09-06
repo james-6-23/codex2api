@@ -2799,29 +2799,37 @@ func restoreMissingResponseOutputs(responseJSON []byte, outputItems []json.RawMe
 	if len(responseJSON) == 0 || len(outputItems) == 0 {
 		return responseJSON
 	}
-	var response map[string]any
-	if err := json.Unmarshal(responseJSON, &response); err != nil {
+	terminalOutput := gjson.GetBytes(responseJSON, "output")
+	terminalCount := int64(-1)
+	if terminalOutput.IsArray() {
+		terminalCount = terminalOutput.Get("#").Int()
+	}
+	if terminalCount >= int64(len(outputItems)) {
 		return responseJSON
 	}
-	outputs := make([]any, 0, len(outputItems))
+	outputs := make([]json.RawMessage, 0, len(outputItems))
 	for _, rawItem := range outputItems {
 		if len(rawItem) == 0 || !gjson.ValidBytes(rawItem) {
 			continue
 		}
-		var decoded any
-		if err := json.Unmarshal(rawItem, &decoded); err != nil {
-			continue
-		}
-		outputs = append(outputs, decoded)
+		outputs = append(outputs, rawItem)
 	}
 	if len(outputs) == 0 {
 		return responseJSON
 	}
-	if terminalOutputs, ok := response["output"].([]any); ok && len(terminalOutputs) >= len(outputs) {
+	if terminalCount >= int64(len(outputs)) {
 		return responseJSON
 	}
-	response["output"] = outputs
-	restored, err := json.Marshal(response)
+	if firstNonSpace(responseJSON) != '{' || !gjson.ValidBytes(responseJSON) {
+		return responseJSON
+	}
+	encoded, err := json.Marshal(outputs)
+	if err != nil {
+		return responseJSON
+	}
+	// Patch only output. Large usage/attribution trees stay opaque, preserving
+	// unknown fields and exact JSON numbers while avoiding a full map round trip.
+	restored, err := sjson.SetRawBytes(responseJSON, "output", encoded)
 	if err != nil {
 		return responseJSON
 	}
