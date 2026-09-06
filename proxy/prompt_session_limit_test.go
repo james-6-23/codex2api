@@ -116,6 +116,40 @@ func TestPromptSessionCreationLimitCountsDistinctSessionsOnly(t *testing.T) {
 	}
 }
 
+func TestPromptSessionWindowReportsActualRecoveryWithoutRefreshingExpiry(test *testing.T) {
+	handler := &Handler{}
+	config := promptfilter.Config{}
+	config.Advanced.Risk.SessionCreationLimitEnabled = true
+	config.Advanced.Risk.SessionCreationLimit = 2
+	config.Advanced.Risk.SessionCreationLimitWindowSeconds = 3600
+	first := promptSessionLimitTestContext("recovery-first")
+	firstStatus, exceeded := handler.checkPromptSessionCreationLimit(first, config, nil)
+	if exceeded || first.Writer.Header().Get("X-Codex2API-Session-Next-Recovery-At") == "" {
+		test.Fatal("new window did not report its actual expiry")
+	}
+	expiresAt := time.Now().Add(90 * time.Second).Truncate(time.Second)
+	handler.promptSessionLimitMu.Lock()
+	handler.promptSessionLimits[firstStatus.Subject][firstStatus.SessionHash] = expiresAt
+	handler.promptSessionLimitMu.Unlock()
+	for _, sessionID := range []string{"recovery-first", "recovery-second", "recovery-third"} {
+		requestContext := promptSessionLimitTestContext(sessionID)
+		status, rejected := handler.checkPromptSessionCreationLimit(requestContext, config, nil)
+		if got := requestContext.Writer.Header().Get("X-Codex2API-Session-Next-Recovery-At"); got != fmt.Sprint(expiresAt.Unix()) {
+			test.Fatalf("%s changed the next release: %s", sessionID, got)
+		}
+		if rejected != (sessionID == "recovery-third") {
+			test.Fatalf("unexpected admission for %s: %+v", sessionID, status)
+		}
+		if rejected {
+			sendPromptSessionCreationLimitError(requestContext, status)
+			message := promptSessionCreationLimitAPIError(status).Message
+			if !strings.Contains(message, expiresAt.UTC().Format("2006-01-02 15:04:05 UTC")) || !strings.Contains(message, "秒后") {
+				test.Fatalf("missing user recovery estimate: %s", message)
+			}
+		}
+	}
+}
+
 func TestPromptSessionCreationLimitRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
 	runtimeCache := cache.NewMemory(1)
 	defer runtimeCache.Close()

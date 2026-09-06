@@ -138,14 +138,15 @@ func (h *Handler) persistPromptSessionLimits(subject string, now time.Time) {
 }
 
 type promptSessionCreationLimitStatus struct {
-	Enabled       bool
-	Subject       string
-	SessionHash   string
-	Used          int
-	Limit         int
-	WindowSeconds int
-	RetryAfter    int
-	Existing      bool
+	Enabled        bool
+	Subject        string
+	SessionHash    string
+	Used           int
+	Limit          int
+	WindowSeconds  int
+	RetryAfter     int
+	NextRecoveryAt time.Time
+	Existing       bool
 	// IdentityConflict means signed NewAPI root metadata and the current
 	// response.create frame describe different conversations. It is not a
 	// capacity exhaustion and must be surfaced with its own error code.
@@ -366,6 +367,7 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccountAdmission(c *gin.Con
 		sessions = make(map[string]time.Time)
 		h.promptSessionLimits[status.Subject] = sessions
 	}
+	status.NextRecoveryAt = earliestExpiry
 	if _, exists := sessions[status.SessionHash]; exists {
 		status.Existing = true
 		status.Used = len(sessions)
@@ -411,7 +413,7 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccountAdmission(c *gin.Con
 	}
 	if len(sessions) >= status.Limit {
 		status.Used = len(sessions)
-		status.RetryAfter = int(earliestExpiry.Sub(now).Seconds())
+		status.RetryAfter = int((earliestExpiry.Sub(now) + time.Second - 1) / time.Second)
 		if status.RetryAfter < 1 {
 			status.RetryAfter = 1
 		}
@@ -423,6 +425,9 @@ func (h *Handler) checkPromptSessionCreationLimitWithAccountAdmission(c *gin.Con
 	// users may have different window durations, so a later request must never
 	// clean another user's sessions using the later request's TTL.
 	sessions[status.SessionHash] = expiresAt
+	if status.NextRecoveryAt.IsZero() || expiresAt.Before(status.NextRecoveryAt) {
+		status.NextRecoveryAt = expiresAt
+	}
 	requestDetail.CreatedAt = now
 	requestDetail.ExpiresAt = expiresAt
 	details := h.promptSessionWindowDetails[status.Subject]
@@ -445,6 +450,11 @@ func writePromptSessionLimitHeaders(c *gin.Context, status promptSessionCreation
 	c.Header("X-Codex2API-Session-Limit", strconv.Itoa(status.Limit))
 	c.Header("X-Codex2API-Session-Used", strconv.Itoa(status.Used))
 	c.Header("X-Codex2API-Session-Window-Seconds", strconv.Itoa(status.WindowSeconds))
+	if !status.NextRecoveryAt.IsZero() && status.Used > 0 {
+		c.Header("X-Codex2API-Session-Next-Recovery-At", strconv.FormatInt(status.NextRecoveryAt.Unix(), 10))
+	} else {
+		c.Header("X-Codex2API-Session-Next-Recovery-At", "")
+	}
 	if status.RetryAfter > 0 {
 		c.Header("Retry-After", strconv.Itoa(status.RetryAfter))
 	}
@@ -457,6 +467,10 @@ func sendPromptSessionCreationLimitError(c *gin.Context, status promptSessionCre
 func promptSessionCreationLimitMessage(status promptSessionCreationLimitStatus) string {
 	if status.IdentityConflict {
 		return "会话标识发生冲突，请新建连接后重试"
+	}
+	if status.RetryAfter > 0 && !status.NextRecoveryAt.IsZero() {
+		return fmt.Sprintf("当前时间内创建窗口已达到上限，请复用已有会话。最近一个窗口预计于 %s 恢复（约 %d 分 %d 秒后）",
+			status.NextRecoveryAt.UTC().Format("2006-01-02 15:04:05 UTC"), status.RetryAfter/60, status.RetryAfter%60)
 	}
 	return "当前时间内创建窗口已达到上限，请复用已有会话或稍后再试"
 }
