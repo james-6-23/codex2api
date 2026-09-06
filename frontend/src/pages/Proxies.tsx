@@ -1254,12 +1254,15 @@ export default function Proxies() {
                             ) : null}
                             {isTesting ? (
                               <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-                            ) : p.test_location || p.test_ip || p.timezone_override || p.test_timezone ? (
-                              <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
+                            ) : (
+                              <span
+                                className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground"
+                                title={t(p.timezone_override ? "proxies.timezoneManual" : p.test_timezone ? "proxies.timezoneInferred" : "proxies.timezoneUnknownHint")}
+                              >
                                 <MapPin className="size-3 text-primary" />
-                                {[p.test_location, p.test_ip, p.timezone_override || p.test_timezone].filter(Boolean).join(" · ")}
+                                {[p.test_location, p.test_ip, p.timezone_override || p.test_timezone || t("proxies.timezoneUnknown")].filter(Boolean).join(" · ")}
                               </span>
-                            ) : null}
+                            )}
                           </div>
 
                           <div className="mt-3 flex flex-wrap gap-1.5">
@@ -1450,14 +1453,12 @@ export default function Proxies() {
                                 -
                               </span>
                             )}
-                            {(p.timezone_override || p.test_timezone) && (
-                              <div
-                                className="text-[11px] text-muted-foreground whitespace-nowrap"
-                                title={t(p.timezone_override ? "proxies.timezoneManual" : "proxies.timezoneInferred")}
-                              >
-                                {p.timezone_override || p.test_timezone}
-                              </div>
-                            )}
+                            <div
+                              className="text-[11px] text-muted-foreground whitespace-nowrap"
+                              title={t(p.timezone_override ? "proxies.timezoneManual" : p.test_timezone ? "proxies.timezoneInferred" : "proxies.timezoneUnknownHint")}
+                            >
+                              {p.timezone_override || p.test_timezone || t("proxies.timezoneUnknown")}
+                            </div>
                           </TableCell>
                           {/* Latency */}
                           <TableCell>

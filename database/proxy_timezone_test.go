@@ -2,7 +2,9 @@ package database
 
 import (
 	"context"
+	"database/sql"
 	"errors"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -38,7 +40,34 @@ func TestSQLiteProxyTimezoneMigration(test *testing.T) {
 }
 
 func TestProxyTimezonePersistence(test *testing.T) {
-	db := newProxyTestDB(test)
+	runProxyTimezonePersistence(test, newProxyTestDB(test))
+}
+
+func TestProxyTimezonePersistencePostgres(test *testing.T) {
+	dsn := os.Getenv("CODEX2API_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		test.Skip("CODEX2API_TEST_POSTGRES_DSN is not set")
+	}
+	connection, err := sql.Open("pgx", dsn)
+	if err != nil {
+		test.Fatal(err)
+	}
+	test.Cleanup(func() { _ = connection.Close() })
+	connection.SetMaxOpenConns(1)
+	if _, err := connection.ExecContext(context.Background(), `CREATE TEMP TABLE proxies (
+		id SERIAL PRIMARY KEY, url VARCHAR(500) NOT NULL UNIQUE,
+		label VARCHAR(255) DEFAULT '', enabled BOOLEAN DEFAULT TRUE, created_at TIMESTAMPTZ DEFAULT NOW(),
+		test_ip VARCHAR(100) DEFAULT '', test_location VARCHAR(255) DEFAULT '', test_latency_ms INT DEFAULT 0,
+		test_status VARCHAR(20) NOT NULL DEFAULT 'untested', test_timezone VARCHAR(100) DEFAULT '',
+		timezone_override VARCHAR(100) DEFAULT ''
+	)`); err != nil {
+		test.Fatal(err)
+	}
+	runProxyTimezonePersistence(test, &DB{conn: connection, driver: "postgres"})
+}
+
+func runProxyTimezonePersistence(test *testing.T, db *DB) {
+	test.Helper()
 	ctx := context.Background()
 	proxyURL := "http://timezone.example:8080"
 	proxyID, err := db.InsertProxy(ctx, proxyURL, "")

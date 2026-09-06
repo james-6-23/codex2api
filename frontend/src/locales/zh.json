@@ -4527,6 +4527,8 @@
     "timezoneHint": "留空使用代理测试推测的 IANA 时区；测试不会覆盖手动值。仅调整正文环境块的时区和当轮日期，不修改路径、Shell 或权限。无可用时区时保留原文。",
     "timezoneManual": "手动时区",
     "timezoneInferred": "IP 推测时区",
+    "timezoneUnknown": "时区未获取",
+    "timezoneUnknownHint": "重新测试代理获取时区，也可编辑代理手动指定；测试结果保存失败时无法更新自动时区。",
     "bind": "绑定",
     "bindAccounts": "绑定账号",
     "boundCount": "{{count}} 个账号",

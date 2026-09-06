@@ -3829,8 +3829,9 @@ func (db *DB) UpdateProxyTestResult(ctx context.Context, id int64, expectedURL, 
 		testTimezone = normalizeProxyTestTimezone(timezones[0])
 	}
 	res, err := db.conn.ExecContext(ctx,
-		`UPDATE proxies SET test_status = $1, test_ip = $2, test_location = $3, test_latency_ms = $4,
-		 test_timezone = CASE WHEN $1 <> 'success' THEN test_timezone WHEN $7 <> '' OR test_ip <> $2 THEN $7 ELSE test_timezone END
+		`UPDATE proxies SET test_status = CAST($1 AS TEXT), test_ip = CAST($2 AS TEXT), test_location = $3, test_latency_ms = $4,
+		 test_timezone = CASE WHEN CAST($1 AS TEXT) <> 'success' THEN test_timezone
+		 WHEN CAST($7 AS TEXT) <> '' OR test_ip <> CAST($2 AS TEXT) THEN CAST($7 AS TEXT) ELSE test_timezone END
 		 WHERE id = $5 AND url = $6`,
 		status, ip, location, latencyMs, id, expectedURL, testTimezone)
 	if err != nil {

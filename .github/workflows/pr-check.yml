@@ -79,6 +79,20 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: codex_test
+          POSTGRES_PASSWORD: codex_test
+          POSTGRES_DB: codex_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U codex_test -d codex_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -93,6 +107,11 @@ jobs:
 
       - name: Run Go tests
         run: go test -count=1 -timeout 8m ./...
+
+      - name: Test PostgreSQL proxy timezone persistence
+        env:
+          CODEX2API_TEST_POSTGRES_DSN: postgres://codex_test:codex_test@localhost:5432/codex_test?sslmode=disable
+        run: go test -count=1 -timeout 1m ./database -run '^TestProxyTimezonePersistencePostgres$'
 
   test-race:
     name: test-race (${{ matrix.name }})

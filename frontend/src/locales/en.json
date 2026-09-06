@@ -4527,6 +4527,8 @@
     "timezoneHint": "Leave empty to use the IANA timezone inferred by proxy testing. Tests never replace a manual override. Only the current environment timezone and date change; paths, shell and permissions remain intact. Without a timezone, the original text is preserved.",
     "timezoneManual": "Manual timezone",
     "timezoneInferred": "IP-inferred timezone",
+    "timezoneUnknown": "Timezone unavailable",
+    "timezoneUnknownHint": "Retest the proxy to infer its timezone, or set a manual override. Failed test-result saves cannot update the inferred timezone.",
     "bind": "Bind",
     "bindAccounts": "Bind accounts",
     "boundCount": "{{count}} accounts",
