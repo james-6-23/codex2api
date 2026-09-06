@@ -16,6 +16,8 @@ import (
 const (
 	upstreamCyberPolicyUserMessage       = "此内容因可能存在网络安全风险而被标记，本次已记录。请重新表述请求；再次触发可能会停用账号。如果确认是误判，请联系管理员。"
 	upstreamCyberPolicyLockedUserMessage = "此内容因可能存在网络安全风险而被标记，本次已记录并锁定当前对话。请新建对话后继续；再次触发可能会停用账号。如果确认是误判，请联系管理员解锁。"
+	upstreamBioPolicyUserMessage         = "此内容因可能存在生物安全风险而被标记，本次已记录。请重新表述请求；再次触发可能会停用账号。如果确认是误判，请联系管理员。"
+	upstreamBioPolicyLockedUserMessage   = "此内容因可能存在生物安全风险而被标记，本次已记录并锁定当前对话。请新建对话后继续；再次触发可能会停用账号。如果确认是误判，请联系管理员解锁。"
 	defaultLocalPromptBlockMessage       = "Request contains content blocked by prompt filter"
 )
 
@@ -535,7 +537,7 @@ func applyVerifiedNewAPIAuditMeta(policyContext verifiedNewAPIPolicyContext, inp
 }
 
 func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model string, body []byte, attempts ...upstreamCyberPolicyAttempt) (string, bool) {
-	errorCode := upstreamCyberPolicyCode(body)
+	errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(body))
 	if errorCode == "" {
 		return "", false
 	}
@@ -559,7 +561,14 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 		// Without a verified NewAPI identity, do not apply a Key-wide strike or
 		// cooldown. Keep the replay guard scoped to a stable Codex session or to
 		// the exact prompt fingerprint plus API Key and client IP.
-		h.lockPromptConversationAfterUnsignedUpstreamCYB(c, endpoint, model, incidentID)
+		locked := h.lockPromptConversationAfterUnsignedUpstreamCYB(c, endpoint, model, incidentID, errorCode)
+		_, hasSession := promptConversationLockFallbackIdentity(c)
+		if c != nil {
+			c.Set(upstreamPolicyResponseContextKey, newAPIPolicyDecisionMetadata{
+				ReasonCode: newAPIUpstreamCyberPolicyReasonCode, UpstreamPolicyCode: errorCode,
+				ConversationLocked: locked && hasSession,
+			})
+		}
 	}
 	return incidentID, accepted
 }
@@ -585,8 +594,9 @@ func upstreamCyberPolicyCode(body []byte) string {
 		return ""
 	}
 	for _, path := range []string{"codex_error_info", "error.codex_error_info", "error.code", "error.type", "code", "type"} {
-		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); strings.EqualFold(value, "cyber_policy") {
-			return "cyber_policy"
+		switch value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String())); value {
+		case "cyber_policy", "bio_policy":
+			return value
 		}
 	}
 	return ""
@@ -594,6 +604,19 @@ func upstreamCyberPolicyCode(body []byte) string {
 
 func isExplicitUpstreamCyberPolicy(body []byte) bool {
 	return upstreamCyberPolicyCode(responseFailedErrorBody(body)) != ""
+}
+
+func upstreamPolicyUserMessage(errorCode string, locked bool) string {
+	if errorCode == "bio_policy" {
+		if locked {
+			return upstreamBioPolicyLockedUserMessage
+		}
+		return upstreamBioPolicyUserMessage
+	}
+	if locked {
+		return upstreamCyberPolicyLockedUserMessage
+	}
+	return upstreamCyberPolicyUserMessage
 }
 
 func populatePromptFilterAPIKeyMeta(c *gin.Context, input *database.PromptFilterLogInput) {

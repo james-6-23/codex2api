@@ -23,6 +23,7 @@ import (
 
 const (
 	promptConversationLockedReasonCode = "conversation_cyber_locked"
+	promptUpstreamBioPolicyReasonCode  = "upstream_bio_policy"
 	promptFingerprintReplayReasonCode  = "fingerprint_replay_cooldown"
 	promptConversationLockedMessage    = "当前对话因上游 CYB 已被锁定。本次锁定拦截不会重复累计处罚；可等待自动到期，或由管理员在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。解除后再次触发 CYB 可能会停用账号。"
 	promptUserCyberCooldownReasonCode  = "user_cyber_cooldown"
@@ -163,6 +164,9 @@ func promptCyberRestrictionDecision(item *database.PromptConversationLock, cfg p
 		result.DecisionID = strings.TrimSpace(item.DecisionID)
 		result.RequestID = strings.TrimSpace(item.RequestID)
 		result.TriggerReasonCode = strings.TrimSpace(item.ReasonCode)
+		if item.TriggerReasonCode != "" {
+			result.TriggerReasonCode = item.TriggerReasonCode
+		}
 		result.AuditReference = result.IncidentID
 		if result.AuditReference == "" {
 			result.AuditReference = result.RequestID
@@ -199,10 +203,13 @@ func promptCyberRestrictionDecision(item *database.PromptConversationLock, cfg p
 		result.Message = fmt.Sprintf("该用户因上游 CYB 进入安全冷却，剩余约 %s；冷却期间所有新请求均不会转发，也不会重复累计处罚。%s管理员可在「Prompt 检查 → 风险画像 → 用户详情」解除冷却。错误码：%s。", remainingText, auditText, result.ReasonCode)
 	} else if result.Scope == database.PromptConversationRestrictionScopeFingerprintReplay {
 		result.Message = fmt.Sprintf("相同 Prompt 指纹近期已收到上游 CYB，当前请求进入精确重放冷却，剩余约 %s；不会封禁整个 API Key。%s管理员可在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。错误码：%s。", remainingText, auditText, result.ReasonCode)
-	} else if result.TriggerReasonCode != "" && result.TriggerReasonCode != newAPIUpstreamCyberPolicyReasonCode {
+	} else if result.TriggerReasonCode != "" && result.TriggerReasonCode != newAPIUpstreamCyberPolicyReasonCode && result.TriggerReasonCode != promptUpstreamBioPolicyReasonCode {
 		result.Message = fmt.Sprintf("当前对话因本地高风险规则已锁定，剩余约 %s；后续请求不会转发或重复累计处罚。触发原因：%s；%s管理员可在「Prompt 检查 → 风险画像 → 会话详情」审核并手动解锁。错误码：%s。", remainingText, result.TriggerReasonCode, auditText, result.ReasonCode)
 	} else {
 		result.Message = fmt.Sprintf("当前对话因上游 CYB 已锁定，剩余约 %s；后续请求不会转发或重复累计处罚。%s管理员可在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。错误码：%s。", remainingText, auditText, result.ReasonCode)
+	}
+	if result.TriggerReasonCode == promptUpstreamBioPolicyReasonCode {
+		result.Message = strings.ReplaceAll(result.Message, "上游 CYB", "上游生物安全策略（BIO）")
 	}
 	return result
 }
@@ -300,6 +307,7 @@ func promptCyberRestrictionLock(item *database.PromptConversationLock, exactConv
 		return nil
 	}
 	copy := *item
+	copy.TriggerReasonCode = item.ReasonCode
 	if exactConversation {
 		if item.IdentityKind == database.PromptConversationLockIdentityFingerprintReplay {
 			copy.ReasonCode = promptFingerprintReplayReasonCode
@@ -611,7 +619,7 @@ func (h *Handler) lockPromptConversationAfterUpstreamCYB(c *gin.Context, endpoin
 		Platform: identity.Platform, NewAPIUserID: identity.NewAPIUserID,
 		SessionFingerprint: identity.SessionFingerprint, SessionHash: identity.SessionHash,
 		IncidentID: incidentID, DecisionID: metadata.DecisionID, RequestID: metadata.RequestID,
-		ReasonCode: metadata.ReasonCode, Endpoint: endpoint, Model: model, LockedAt: time.Now().UTC(),
+		ReasonCode: upstreamPolicyLockReasonCode(metadata.UpstreamPolicyCode), Endpoint: endpoint, Model: model, LockedAt: time.Now().UTC(),
 	})
 	if err != nil {
 		log.Printf("persist prompt conversation lock failed decision=%s: %v", metadata.DecisionID, err)
@@ -628,7 +636,7 @@ func (h *Handler) lockPromptConversationAfterUpstreamCYB(c *gin.Context, endpoin
 // session/fingerprint replay lock. It never emits a NewAPI strike because the
 // request has no verified identity. A stable Codex session gets conversation
 // scope; otherwise the exact prompt fingerprint is paired with API key + IP.
-func (h *Handler) lockPromptConversationAfterUnsignedUpstreamCYB(c *gin.Context, endpoint, model, incidentID string) bool {
+func (h *Handler) lockPromptConversationAfterUnsignedUpstreamCYB(c *gin.Context, endpoint, model, incidentID string, errorCodes ...string) bool {
 	if h == nil || h.db == nil || c == nil {
 		return false
 	}
@@ -640,6 +648,9 @@ func (h *Handler) lockPromptConversationAfterUnsignedUpstreamCYB(c *gin.Context,
 	identity, reasonCode, ok := h.unsignedUpstreamCyberLockIdentity(c, signedBody, endpoint, model)
 	if !ok {
 		return false
+	}
+	if len(errorCodes) > 0 && errorCodes[0] == "bio_policy" {
+		reasonCode = promptUpstreamBioPolicyReasonCode
 	}
 	requestID := ensurePromptPolicyRequestCorrelationID(c)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
@@ -662,6 +673,13 @@ func (h *Handler) lockPromptConversationAfterUnsignedUpstreamCYB(c *gin.Context,
 	}
 	h.cachePromptConversationLock(c.Request.Context(), item, lockTTL)
 	return item != nil && item.Status == database.PromptConversationLockStatusActive
+}
+
+func upstreamPolicyLockReasonCode(errorCode string) string {
+	if errorCode == "bio_policy" {
+		return promptUpstreamBioPolicyReasonCode
+	}
+	return newAPIUpstreamCyberPolicyReasonCode
 }
 
 // promptGuardBlockHasLocalEvidence 判断最终 block 是否有本地检测证据(规则命中/

@@ -1872,7 +1872,7 @@ func markCyberPolicyUsageKind(input *database.UsageLogInput) {
 		return
 	}
 	msg := strings.ToLower(input.ErrorMessage)
-	if strings.Contains(msg, "cyber_policy") || strings.Contains(msg, "cyber security risk") {
+	if strings.Contains(msg, "cyber_policy") || strings.Contains(msg, "bio_policy") || strings.Contains(msg, "cyber security risk") {
 		input.UpstreamErrorKind = "cyber_policy"
 	}
 }
@@ -2518,7 +2518,7 @@ func classifyResponseFailedOutcome(payload []byte) streamOutcome {
 		// fallback is 500. CYB is a deterministic request-policy rejection: expose
 		// it as 400 and never rotate accounts/retry the same user request.
 		statusCode = http.StatusBadRequest
-		message = upstreamCyberPolicyUserMessage
+		message = upstreamPolicyUserMessage(upstreamCyberPolicyCode(errorBody), false)
 	}
 	if strings.TrimSpace(message) == "" || message == fmt.Sprintf("HTTP %d", statusCode) {
 		message = "上游返回 response.failed"
@@ -9074,7 +9074,7 @@ func (h *Handler) sendUpstreamError(c *gin.Context, statusCode int, body []byte)
 	if isExplicitUpstreamCyberPolicy(body) {
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error": gin.H{
-				"message": upstreamCyberPolicyResponseMessage(c),
+				"message": upstreamCyberPolicyResponseMessage(c, body),
 				"type":    "upstream_error",
 				"code":    newAPIUpstreamCyberPolicyReasonCode,
 			},

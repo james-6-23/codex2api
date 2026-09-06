@@ -1857,7 +1857,7 @@ func responsesWSUpstreamAPIError(statusCode int, body []byte) *api.APIError {
 		return capacityError
 	}
 	if isExplicitUpstreamCyberPolicy(body) {
-		return api.NewAPIError(api.ErrCodeInvalidRequest, upstreamCyberPolicyUserMessage, api.ErrorTypeInvalidRequest)
+		return api.NewAPIError(api.ErrCodeInvalidRequest, upstreamPolicyUserMessage(upstreamCyberPolicyCode(responseFailedErrorBody(body)), false), api.ErrorTypeInvalidRequest)
 	}
 	message := usageLogErrorMessage(statusCode, body)
 	if strings.TrimSpace(message) == "" {

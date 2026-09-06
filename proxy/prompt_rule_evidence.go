@@ -299,9 +299,9 @@ func (h *Handler) enqueueUpstreamCyberPolicyEvidence(c *gin.Context, endpoint, m
 		"evidence_quality":  evidenceQuality, "learning_evidence": learningBundle,
 	}
 	metadata := marshalPromptPolicyEvidenceMetadata(metadataFields, learningBundle, len(captured.Matches))
-	rationale := "上游返回 cyber_policy，等待归因和候选规则审核"
+	rationale := "上游返回 " + errorCode + "，等待归因和候选规则审核"
 	if evidenceQuality == promptPolicyEvidenceQualityInsufficient {
-		rationale = "上游返回 cyber_policy，但请求文本证据不足；仅归档并等待补证，不得用于自动学习"
+		rationale = "上游返回 " + errorCode + "，但请求文本证据不足；仅归档并等待补证，不得用于自动学习"
 	}
 	candidate := database.PromptRuleCandidateInput{
 		Fingerprint:   fingerprint,
@@ -329,7 +329,7 @@ func (h *Handler) enqueueUpstreamCyberPolicyEvidence(c *gin.Context, endpoint, m
 	accepted := h.db.EnqueuePromptPolicyIncident(&incident, &candidate, &evidence)
 	if accepted {
 		if policy, subjectKey, trusted := h.promptRiskTrustPolicyForRequest(c); trusted {
-			h.suspendPromptRiskTrustPolicy(policy, subjectKey, "上游返回 cyber_policy，恢复同步模型复核")
+			h.suspendPromptRiskTrustPolicy(policy, subjectKey, "上游返回 "+errorCode+"，恢复同步模型复核")
 		}
 	}
 	return incidentID, accepted

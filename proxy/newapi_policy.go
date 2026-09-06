@@ -27,6 +27,7 @@ const newAPIIdentityContextKey = "prompt_filter_verified_newapi_identity"
 const newAPIPolicyMetaContextKey = "prompt_filter_verified_newapi_policy_meta"
 const newAPIBindingContextKey = "prompt_filter_newapi_binding"
 const newAPIUpstreamCyberDecisionContextKey = "prompt_filter_newapi_upstream_cyber_decision"
+const upstreamPolicyResponseContextKey = "prompt_filter_upstream_policy_response"
 
 const (
 	newAPISignatureVersionV1               = "1"
@@ -801,7 +802,8 @@ func (h *Handler) sendNewAPIPolicyDecision(c *gin.Context, cfg promptfilter.Conf
 // upstream provider. Local prompt matches, external-review verdicts and other
 // upstream 4xx responses never use this path and therefore cannot add a strike.
 func (h *Handler) emitNewAPIUpstreamCyberPolicyDecision(c *gin.Context, endpoint string, model string, upstreamBody []byte) (newAPIPolicyDecisionMetadata, bool) {
-	if c == nil || upstreamCyberPolicyCode(upstreamBody) == "" {
+	errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(upstreamBody))
+	if c == nil || errorCode == "" {
 		return newAPIPolicyDecisionMetadata{}, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)
@@ -837,6 +839,7 @@ func (h *Handler) emitNewAPIUpstreamCyberPolicyDecision(c *gin.Context, endpoint
 		promptGuardPolicyEventID(c),
 		policyContext.VerificationSecret,
 	)
+	metadata.UpstreamPolicyCode = errorCode
 	c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
 	// Ordinary HTTP and pre-first-token SSE failures have not committed their
 	// response yet, so NewAPI can consume the signed decision from headers.
@@ -859,9 +862,21 @@ func newAPIUpstreamCyberPolicyDecision(c *gin.Context) (newAPIPolicyDecisionMeta
 	return metadata, ok && metadata.DecisionID != ""
 }
 
-func upstreamCyberPolicyResponseMessage(c *gin.Context) string {
+func upstreamCyberPolicyResponseMessage(c *gin.Context, payloads ...[]byte) string {
 	if metadata, ok := newAPIUpstreamCyberPolicyDecision(c); ok && metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
 		return newAPIPolicyDecisionAPIError(metadata).Message
+	}
+	if c != nil {
+		if value, exists := c.Get(upstreamPolicyResponseContextKey); exists {
+			if metadata, ok := value.(newAPIPolicyDecisionMetadata); ok {
+				return newAPIPolicyDecisionAPIError(metadata).Message
+			}
+		}
+	}
+	for _, payload := range payloads {
+		if errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(payload)); errorCode != "" {
+			return upstreamPolicyUserMessage(errorCode, false)
+		}
 	}
 	return upstreamCyberPolicyUserMessage
 }
@@ -869,11 +884,7 @@ func upstreamCyberPolicyResponseMessage(c *gin.Context) string {
 func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.APIError {
 	message := "请求违反安全策略，本次请求已被拒绝"
 	if metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
-		if metadata.ConversationLocked {
-			message = upstreamCyberPolicyLockedUserMessage
-		} else {
-			message = upstreamCyberPolicyUserMessage
-		}
+		message = upstreamPolicyUserMessage(metadata.UpstreamPolicyCode, metadata.ConversationLocked)
 	} else if metadata.ReasonCode == promptConversationLockedReasonCode {
 		message = promptConversationLockedMessage
 	} else if metadata.ReasonCode == promptUserCyberCooldownReasonCode {
@@ -957,6 +968,7 @@ type newAPIPolicyDecisionMetadata struct {
 	// included in the signed decision canonical form or forwarded as a policy
 	// punishment header.
 	ConversationLocked bool
+	UpstreamPolicyCode string
 }
 
 // strikeEligibleForDecision reports whether a decision may accrue toward a
@@ -1130,6 +1142,7 @@ func clearNewAPIUpstreamCyberPolicyDecision(c *gin.Context) {
 		return
 	}
 	c.Set(newAPIUpstreamCyberDecisionContextKey, nil)
+	c.Set(upstreamPolicyResponseContextKey, nil)
 	if c.Writer == nil || c.Writer.Written() {
 		return
 	}

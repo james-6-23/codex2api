@@ -1012,7 +1012,7 @@ func (db *DB) promptRiskActiveRestrictionSubjects(ctx context.Context, conversat
 		// Only a real upstream CYB expands to user scope. Local deterministic
 		// blocks remain attached to the exact session to avoid implicating every
 		// conversation of a shared user.
-		if identityKind == PromptConversationLockIdentityNewAPI && reasonCode == "upstream_cyber_policy" &&
+		if identityKind == PromptConversationLockIdentityNewAPI && (reasonCode == "upstream_cyber_policy" || reasonCode == "upstream_bio_policy") &&
 			(userCooldownTTL <= 0 || lockedAt.After(now.Add(-userCooldownTTL))) {
 			if subjectKey := PromptRiskNewAPIUserSubjectKey(platform, userID); subjectKey != "" {
 				key := PromptRiskSubjectNewAPIUser + "\x00" + subjectKey

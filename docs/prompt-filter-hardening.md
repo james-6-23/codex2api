@@ -1,5 +1,15 @@
 # Prompt filter hardening
 
+## Upstream CYB and BIO policy errors
+
+Structured `bio_policy` errors extend the existing `cyber_policy` enforcement path. Matching is case-insensitive and trims surrounding whitespace; it does not scan message text or match arbitrary `policy` substrings. HTTP, SSE, and WebSocket errors are terminal even with catch-all retries enabled.
+
+Both use the existing conversation-lock, user-cooldown, and CYB-strike settings. Verified NewAPI requests retain the existing signed `upstream_cyber_policy` punishment reason for compatibility; BIO does not need a separate NewAPI switch. Repeated blocked requests do not add strikes. Unsigned requests remain scoped to a Codex session or an API-key/IP/prompt fingerprint, never an entire shared key.
+
+BIO incidents retain `bio_policy` as the upstream error code and share the existing CYB audit/usage category. Persisted BIO locks use `upstream_bio_policy`, so subsequent lock/cooldown messages still identify biological safety after a restart. User-facing BIO messages describe biological rather than cybersecurity risk. No other upstream policy codes are added by this extension.
+
+## Strict terminal rules
+
 `prompt_filter_strict_terminal_enabled` is an opt-in compatibility-safe switch. Its default is `false`.
 
 When enabled, any enabled rule with `strict: true` becomes terminal: the request is blocked immediately, defensive-context discounts are not applied, and a secondary Moderations-compatible review cannot downgrade the verdict. This also applies to configured sensitive words, which are represented internally as strict rules.

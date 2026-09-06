@@ -4565,7 +4565,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   const activeRestriction = item.conversation_lock
   const isUserCooldown = activeRestriction?.restriction_scope === 'user_cooldown' || item.subject_type === 'newapi_user'
   const isFingerprintReplay = activeRestriction?.restriction_scope === 'fingerprint_replay'
-  const isLocalRestriction = !isUserCooldown && !isFingerprintReplay && activeRestriction?.reason_code !== 'upstream_cyber_policy'
+  const isLocalRestriction = !isUserCooldown && !isFingerprintReplay && !['upstream_cyber_policy', 'upstream_bio_policy'].includes(activeRestriction?.reason_code ?? '')
   const auditReference = activeRestriction?.incident_id || activeRestriction?.request_id || activeRestriction?.decision_id?.replace(/^local-block:/, '') || ''
   return <>
     <Button size="sm" variant="outline" onClick={() => { setEventPage(1); setTrustEventPage(1); setOpen(true) }}>{t('promptFilter.cyberDetail')}</Button>
