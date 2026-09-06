@@ -303,16 +303,26 @@ func (h *Handler) enforceAPIKeyLimitsAndReply(c *gin.Context, model string) bool
 // 大小写不敏感比较。
 func checkAPIKeyModel(model string, limits database.APIKeyLimits) string {
 	model = strings.ToLower(strings.TrimSpace(model))
+	base := ""
+	for _, logical := range antigravityLogicalCompatibilityCatalog {
+		for _, variant := range logical.variants {
+			if model == logical.id+"-"+variant.level {
+				base = logical.id
+			}
+		}
+	}
 	if len(limits.ModelAllow) > 0 {
 		for _, m := range limits.ModelAllow {
-			if strings.ToLower(strings.TrimSpace(m)) == model {
+			allowed := strings.ToLower(strings.TrimSpace(m))
+			if allowed == model || (base != "" && allowed == base) {
 				return ""
 			}
 		}
 		return fmt.Sprintf("Model %q is not allowed for this API key", model)
 	}
 	for _, m := range limits.ModelDeny {
-		if strings.ToLower(strings.TrimSpace(m)) == model {
+		denied := strings.ToLower(strings.TrimSpace(m))
+		if denied == model || (base != "" && denied == base) {
 			return fmt.Sprintf("Model %q is denied for this API key", model)
 		}
 	}

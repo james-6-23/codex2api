@@ -1,3 +1,4 @@
+import { ANTIGRAVITY_DEFAULT_MODELS } from "../lib/antigravityModels";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -97,12 +98,6 @@ type OAuthModalStatus = "idle" | "starting" | "waiting" | "processing" | "comple
 const ANTIGRAVITY_TABLE_COLUMNS = [
   "project", "permission", "quota", "proxy", "status", "updatedAt",
 ] as const;
-
-const ANTIGRAVITY_DEFAULT_MODELS = [
-  "gemini-3-pro-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-];
 
 function parseModelList(value: string): string[] {
   return Array.from(

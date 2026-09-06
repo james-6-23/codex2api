@@ -588,7 +588,9 @@ func responsesToGeminiInternal(raw []byte, project, model string) (map[string]an
 	if t, ok := in["temperature"].(float64); ok {
 		generationConfig["temperature"] = t
 	}
-	if thinkingBudget, enabled := antigravityGeminiThinkingBudget(model, wireModel, reasoning); enabled {
+	if level, enabled := antigravityGeminiThinkingLevel(model, wireModel, reasoning); enabled {
+		generationConfig["thinkingConfig"] = map[string]any{"thinkingLevel": level}
+	} else if thinkingBudget, enabled := antigravityGeminiThinkingBudget(model, wireModel, reasoning); enabled {
 		generationConfig["thinkingConfig"] = map[string]any{
 			"includeThoughts": true,
 			"thinkingBudget":  thinkingBudget,
@@ -828,6 +830,21 @@ func antigravityGeminiResolvedModel(model string, reasoning map[string]any) stri
 	return strings.TrimSpace(model)
 }
 
+// New tiered Flash uses a named level, not the older numeric budget ladder.
+// Fixed suffixes win over conflicting effort; bare models default to low.
+func antigravityGeminiThinkingLevel(requestedModel, wireModel string, reasoning map[string]any) (string, bool) {
+	if wireModel != "gemini-3.8-flash-tiered" {
+		return "", false
+	}
+	if variant, ok := antigravityResolvedVariant(requestedModel, reasoning); ok {
+		return strings.ToUpper(variant.level), true
+	}
+	if len(reasoning) == 0 {
+		return "LOW", true
+	}
+	return strings.ToUpper(antigravityGeminiReasoningTier(reasoning)), true
+}
+
 func antigravityGeminiThinkingBudget(requestedModel, wireModel string, reasoning map[string]any) (int, bool) {
 	var budget int
 	if _, ok := antigravityPublicModel(requestedModel); ok {
@@ -917,6 +934,8 @@ func antigravityGeminiThinkingBudgetCap(model string) int {
 func antigravityGeminiMaxOutputTokens(model string) int {
 	name := strings.ToLower(strings.TrimSpace(model))
 	switch {
+	case name == "gemini-3.8-flash-tiered":
+		return 65536
 	case strings.Contains(name, "claude"):
 		return 64000
 	case strings.Contains(name, "gpt-oss"):

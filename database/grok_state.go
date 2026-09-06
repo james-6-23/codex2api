@@ -976,6 +976,7 @@ func (db *DB) MergeAccountCredentialsForGeneration(ctx context.Context, accountI
 		"antigravity_sync_error": {}, "antigravity_sync_warning": {}, "antigravity_last_sync_attempt_at": {},
 		"antigravity_permanent_refresh_error": {},
 		"antigravity_catalog_source":          {}, "antigravity_catalog_verified": {},
+		"antigravity_catalog_updated_at": {}, "antigravity_quota": {},
 		"antigravity_capabilities": {}, "antigravity_capability_last_probe_at": {},
 	}
 	filtered := make(map[string]any, len(updates))

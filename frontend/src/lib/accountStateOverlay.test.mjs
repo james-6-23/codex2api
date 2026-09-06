@@ -201,7 +201,7 @@ test("pull request CI runs frontend regression tests", () => {
     "utf8",
   );
   const frontendJob = sourceSlice(
-    workflowSource,
+    workflowSource.replace(/\r\n/g, "\n"),
     "  frontend:\n",
     "  golangci-lint:\n",
   );

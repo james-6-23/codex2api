@@ -224,7 +224,7 @@ func TestScopedModelsIncludeAntigravityAccounts(t *testing.T) {
 	for _, model := range models {
 		found[model.ID] = true
 	}
-	if !found["gemini-3.7-flash-low"] || !found["gemini-3.7-flash-medium"] || !found["gemini-3.7-flash-high"] {
+	if !found["gemini-3.7-flash"] || len(found) != 1 {
 		t.Fatal("projected Antigravity public model missing from /v1/models")
 	}
 }
