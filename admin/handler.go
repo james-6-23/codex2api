@@ -12926,9 +12926,10 @@ func (h *Handler) UpdateProxy(c *gin.Context) {
 	}
 
 	var req struct {
-		URL     *string `json:"url"`
-		Label   *string `json:"label"`
-		Enabled *bool   `json:"enabled"`
+		URL              *string `json:"url"`
+		Label            *string `json:"label"`
+		Enabled          *bool   `json:"enabled"`
+		TimezoneOverride *string `json:"timezone_override"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
@@ -12943,6 +12944,10 @@ func (h *Handler) UpdateProxy(c *gin.Context) {
 		req.URL = &normalizedURL
 	}
 
+	if req.TimezoneOverride != nil && strings.TrimSpace(*req.TimezoneOverride) != "" && !validProxyTimezoneOverride(*req.TimezoneOverride) {
+		writeError(c, http.StatusBadRequest, "无效的 IANA 时区，请填写例如 America/Los_Angeles；留空恢复自动推测")
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
@@ -12957,7 +12962,7 @@ func (h *Handler) UpdateProxy(c *gin.Context) {
 	}
 	oldURL := strings.TrimSpace(existing.URL)
 
-	if err := h.db.UpdateProxy(ctx, id, req.URL, req.Label, req.Enabled); err != nil {
+	if err := h.db.UpdateProxy(ctx, id, req.URL, req.Label, req.Enabled, req.TimezoneOverride); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, http.StatusNotFound, "代理不存在")
 			return
@@ -13069,13 +13074,13 @@ func (h *Handler) CleanErrorProxies(c *gin.Context) {
 	})
 }
 
-func (h *Handler) persistProxyTestResult(ctx context.Context, id int64, expectedURL, status, ip, location string, latencyMs int) error {
+func (h *Handler) persistProxyTestResult(ctx context.Context, id int64, expectedURL, status, ip, location string, latencyMs int, timezones ...string) error {
 	if id <= 0 {
 		return nil
 	}
 	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
 	defer cancel()
-	if err := h.db.UpdateProxyTestResult(saveCtx, id, expectedURL, status, ip, location, latencyMs); err != nil {
+	if err := h.db.UpdateProxyTestResult(saveCtx, id, expectedURL, status, ip, location, latencyMs, timezones...); err != nil {
 		return err
 	}
 	if status == database.ProxyTestStatusError {
@@ -13151,6 +13156,7 @@ func (h *Handler) TestProxy(c *gin.Context) {
 			result.IP,
 			result.Location,
 			result.LatencyMs,
+			result.Timezone,
 		); err != nil {
 			respondProxyTestSaveError(c, err, result.Error)
 			return

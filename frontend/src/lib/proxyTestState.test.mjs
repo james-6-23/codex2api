@@ -14,6 +14,8 @@ const healthyProxy = {
   test_status: "success",
   test_ip: "1.2.3.4",
   test_location: "US",
+  test_timezone: "America/Los_Angeles",
+  timezone_override: "Asia/Tokyo",
   test_latency_ms: 100,
 };
 
@@ -51,6 +53,19 @@ test("conclusive probe failures mark the proxy as error", () => {
       test_latency_ms: 0,
     },
   );
+});
+
+test("proxy timezone probes preserve overrides and discard inference for a changed exit", () => {
+  for (const [result, expected] of [
+    [{ success: true, ip: "1.2.3.4", timezone: "Europe/London" }, "Europe/London"],
+    [{ success: true, ip: "1.2.3.4" }, "America/Los_Angeles"],
+    [{ success: true, ip: "5.6.7.8" }, ""],
+    [{ success: false, conclusive: true }, "America/Los_Angeles"],
+  ]) {
+    const updated = applyProxyTestResult(healthyProxy, result);
+    assert.equal(updated.test_timezone, expected);
+    assert.equal(updated.timezone_override, "Asia/Tokyo");
+  }
 });
 
 test("proxy batch SSE lines decode progress events", () => {

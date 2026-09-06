@@ -4000,6 +4000,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
+	h.bindCodexEnvironment(c, rawBody, handlerStart)
 	bodyReadDone := time.Now()
 	compactionMeta := requestCompactionMetaForHTTP(c, rawBody)
 	cacheRequestCompactionMeta(c, compactionMeta)
@@ -6117,6 +6118,7 @@ func (h *Handler) Responses(c *gin.Context) {
 
 // ResponsesCompact 处理 /v1/responses/compact 请求（非流式压缩接口，透传到上游 /responses/compact）
 func (h *Handler) ResponsesCompact(c *gin.Context) {
+	received := time.Now()
 	// 1. 读取请求体
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
@@ -6124,6 +6126,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		return
 	}
 	h.capturePromptRequestIngress(c, rawBody)
+	h.bindCodexEnvironment(c, rawBody, received)
 	cacheRequestCompactionMeta(c, requestCompactionMetaForHTTP(c, rawBody))
 
 	supportedModels := h.supportedModelIDs(c.Request.Context())

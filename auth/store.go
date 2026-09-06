@@ -3270,8 +3270,9 @@ type Store struct {
 	proxyPool            []string // 已启用且测试未失败的代理 URL 列表
 	proxyPoolSet         map[string]struct{}
 	managedProxySet      map[string]struct{} // proxies 表中的全部 URL（含禁用/测挂）
-	proxyPoolEnabled     bool                // 代理池是否开启
-	proxyRoundRobin      uint64              // 轮询计数器
+	proxyTimezones       map[string]*time.Location
+	proxyPoolEnabled     bool   // 代理池是否开启
+	proxyRoundRobin      uint64 // 轮询计数器
 
 	// Fast scheduler POC（默认关闭，通过环境变量启用）
 	fastScheduler            atomic.Pointer[FastScheduler]
@@ -4018,7 +4019,7 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	s.smartPacingWindows = normalizeSmartPacingWindows(settings.SmartPacingWindows)
 
 	// 加载代理池（含全部托管 URL，供禁用后 fail-closed 识别）
-	if settings.ProxyPoolEnabled && s.proxyPoolLoader != nil {
+	if s.proxyPoolLoader != nil {
 		if err := s.ReloadProxyPool(); err != nil {
 			log.Printf("代理池加载失败: %v", err)
 		}
@@ -4781,17 +4782,21 @@ func (s *Store) ReloadProxyPool() error {
 	}
 	enabledURLs := collectProxyURLs(proxies)
 	managedURLs := enabledURLs
+	timezoneRows := proxies
 	if inventory := s.proxyInventoryLoader; inventory != nil {
 		allProxies, invErr := inventory(ctx)
 		if invErr != nil {
 			return invErr
 		}
 		managedURLs = collectProxyURLs(allProxies)
+		timezoneRows = allProxies
 	}
+	proxyTimezones := buildProxyTimezones(timezoneRows)
 	s.mu.Lock()
 	s.proxyPool = enabledURLs
 	s.proxyPoolSet = buildProxyPoolSet(enabledURLs)
 	s.managedProxySet = buildProxyPoolSet(managedURLs)
+	s.proxyTimezones = proxyTimezones
 	s.mu.Unlock()
 	log.Printf("代理池已重新加载: %d 个活跃代理", len(enabledURLs))
 	return nil
@@ -4850,6 +4855,9 @@ func (s *Store) RemoveProxyURLs(proxyURLs []string) {
 	}
 	s.proxyPool = filtered
 	s.proxyPoolSet = buildProxyPoolSet(filtered)
+	for proxyURL := range removeSet {
+		delete(s.proxyTimezones, proxyURL)
+	}
 	s.mu.Unlock()
 	s.proxyPoolReloadMu.Unlock()
 

@@ -343,6 +343,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		_ = writeResponsesWSError(conn, apiErr)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, apiErr.Message, apiErr)
 	}
+	h.bindCodexEnvironment(c, rawBody, time.Now())
 	if h != nil && h.store != nil {
 		cfg := h.promptFilterConfigForRequest(c)
 		if cfg.Advanced.NewAPI.Enabled && strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) != "" {

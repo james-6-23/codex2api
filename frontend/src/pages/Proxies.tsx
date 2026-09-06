@@ -305,6 +305,7 @@ export default function Proxies() {
   const [editingProxy, setEditingProxy] = useState<ProxyRow | null>(null);
   const [editUrl, setEditUrl] = useState("");
   const [editLabel, setEditLabel] = useState("");
+  const [editTimezone, setEditTimezone] = useState("");
   const [editSaving, setEditSaving] = useState(false);
   const [editError, setEditError] = useState("");
 
@@ -616,6 +617,7 @@ export default function Proxies() {
     setEditingProxy(p);
     setEditUrl(p.url);
     setEditLabel(p.label || "");
+    setEditTimezone(p.timezone_override || "");
     setEditError("");
   };
 
@@ -632,6 +634,7 @@ export default function Proxies() {
       await api.updateProxy(editingProxy.id, {
         url: trimmedUrl,
         label: editLabel.trim(),
+        timezone_override: editTimezone.trim(),
       });
       setEditingProxy(null);
       await reload();
@@ -1251,11 +1254,10 @@ export default function Proxies() {
                             ) : null}
                             {isTesting ? (
                               <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
-                            ) : p.test_location ? (
+                            ) : p.test_location || p.test_ip || p.timezone_override || p.test_timezone ? (
                               <span className="inline-flex items-center gap-1 text-xs font-medium text-muted-foreground">
                                 <MapPin className="size-3 text-primary" />
-                                {p.test_location}
-                                {p.test_ip ? ` · ${p.test_ip}` : ""}
+                                {[p.test_location, p.test_ip, p.timezone_override || p.test_timezone].filter(Boolean).join(" · ")}
                               </span>
                             ) : null}
                           </div>
@@ -1448,6 +1450,14 @@ export default function Proxies() {
                                 -
                               </span>
                             )}
+                            {(p.timezone_override || p.test_timezone) && (
+                              <div
+                                className="text-[11px] text-muted-foreground whitespace-nowrap"
+                                title={t(p.timezone_override ? "proxies.timezoneManual" : "proxies.timezoneInferred")}
+                              >
+                                {p.timezone_override || p.test_timezone}
+                              </div>
+                            )}
                           </TableCell>
                           {/* Latency */}
                           <TableCell>
@@ -1603,6 +1613,22 @@ export default function Proxies() {
               onChange={(e) => setEditLabel(e.target.value)}
               placeholder={t("proxies.labelPlaceholder")}
             />
+          </label>
+          <label className="block space-y-1.5">
+            <span className="text-xs font-semibold text-muted-foreground">
+              {t("proxies.timezoneOverride")}
+            </span>
+            <Input
+              value={editTimezone}
+              onChange={(event) => setEditTimezone(event.target.value)}
+              placeholder={editingProxy?.test_timezone || "America/Los_Angeles"}
+              className="font-mono"
+              maxLength={100}
+            />
+            <p className="text-[11px] leading-relaxed text-muted-foreground">
+              {t("proxies.timezoneHint")}
+              {editingProxy?.test_timezone ? ` ${t("proxies.timezoneInferred")}: ${editingProxy.test_timezone}` : ""}
+            </p>
           </label>
           {editError && (
             <div className="flex items-center gap-2 rounded-md border border-destructive/20 bg-destructive/10 px-3 py-2 text-sm font-medium text-destructive">

@@ -763,6 +763,8 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"accounts", "image_quota_reset_at", "TEXT NULL"},
 		{"proxies", "test_ip", "TEXT DEFAULT ''"},
 		{"proxies", "test_location", "TEXT DEFAULT ''"},
+		{"proxies", "test_timezone", "TEXT DEFAULT ''"},
+		{"proxies", "timezone_override", "TEXT DEFAULT ''"},
 		{"proxies", "test_latency_ms", "INTEGER DEFAULT 0"},
 		{"proxies", "test_status", "TEXT NOT NULL DEFAULT 'untested'"},
 	}

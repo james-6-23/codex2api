@@ -230,7 +230,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		wc.session.RemovePendingRequest(pr.RequestID)
 		return nil, err
 	}
-	sendErr := e.sendRequest(wc, wsBody, pr.RequestID)
+	sendErr := e.sendRequest(wc, proxy.ApplyCodexEnvironment(ctx, wsBody, wc.proxyURL), pr.RequestID)
 	for retries := 0; shouldRetryWebsocketSendError(sendErr) && retries < 2; retries++ {
 		wc.session.RemovePendingRequest(pr.RequestID)
 		e.manager.DiscardConnection(wc)
@@ -251,7 +251,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 		if wc.upstreamUserAgentKnown {
 			proxy.RecordUpstreamUserAgent(ctx, wc.upstreamUserAgent)
 		}
-		sendErr = e.sendRequest(wc, wsBody, pr.RequestID)
+		sendErr = e.sendRequest(wc, proxy.ApplyCodexEnvironment(ctx, wsBody, wc.proxyURL), pr.RequestID)
 	}
 	if sendErr != nil {
 		wc.session.RemovePendingRequest(pr.RequestID)

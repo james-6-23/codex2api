@@ -621,6 +621,7 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	if proxyOverride != "" {
 		proxyURL = proxyOverride
 	}
+	requestBody = ApplyCodexEnvironment(ctx, requestBody, proxyURL)
 
 	isAgentIdentity := account.IsCodexAgentIdentity()
 	// Agent Identity 无 access_token，鉴权靠 AgentAssertion；请求前确保 task 已注册。
@@ -965,6 +966,7 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	fingerprint := NewCodexFingerprint(account, headers, requestBody)
 	headers = fingerprint.DownstreamHeaders()
 	requestBody = fingerprint.ApplyBody(requestBody)
+	requestBody = ApplyCodexEnvironment(ctx, requestBody, proxyURL)
 
 	existingCacheKey := strings.TrimSpace(gjson.GetBytes(requestBody, "prompt_cache_key").String())
 	cacheKey := existingCacheKey

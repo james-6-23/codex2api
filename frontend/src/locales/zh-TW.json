@@ -1253,6 +1253,10 @@
   },
   "proxies": {
     "idle": "空閒",
+    "timezoneOverride": "Codex 正文時區（手動覆蓋）",
+    "timezoneHint": "留空使用代理測試推測的 IANA 時區；測試不會覆蓋手動值。僅調整正文環境區塊的時區和當輪日期，不修改路徑、Shell 或權限。無可用時區時保留原文。",
+    "timezoneManual": "手動時區",
+    "timezoneInferred": "IP 推測時區",
     "bindKindClaude": "Claude",
     "accountKind": {
       "codex": "Codex",

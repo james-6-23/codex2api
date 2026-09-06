@@ -1544,7 +1544,7 @@ export const api = {
     request<{ message: string; inserted: number; total: number }>('/proxies', { method: 'POST', body: JSON.stringify(data) }),
   deleteProxy: (id: number) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'DELETE' }),
-  updateProxy: (id: number, data: { url?: string; label?: string; enabled?: boolean }) =>
+  updateProxy: (id: number, data: { url?: string; label?: string; enabled?: boolean; timezone_override?: string }) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   batchDeleteProxies: (ids: number[]) =>
     request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
@@ -1571,6 +1571,8 @@ export interface ProxyRow {
   created_at: string
   test_ip: string
   test_location: string
+  test_timezone: string
+  timezone_override: string
   test_latency_ms: number
   test_status: 'untested' | 'success' | 'error'
   /** 绑定到该代理的账号数(服务端聚合,前端免拉全量账号)。 */
@@ -1596,5 +1598,6 @@ export interface ProxyTestResult {
   isp?: string
   latency_ms?: number
   location?: string
+  timezone?: string
   error?: string
 }
