@@ -3950,6 +3950,24 @@
     "grokOAuthClientIdDesc": "Grok 授权（浏览器授权、设备码、SSO 转换、刷新令牌）使用的 OAuth client_id。留空 = 使用内置的官方 Grok CLI 公开 id。已有账号仍按各自凭据里保存的 client_id 刷新，改这里只影响之后新建的授权。环境变量 GROK_OAUTH_CLIENT_ID 优先级高于此处。",
     "grokOAuthClientIdPlaceholder": "留空使用内置默认",
     "grokOAuthClientIdEnvOverride": "当前由环境变量 GROK_OAUTH_CLIENT_ID 指定为 {{value}}，此处的设置不生效。要改回后台配置，请先清空该环境变量并重启。",
+    "antigravityRedirect": {
+      "title": "模型重定向",
+      "description": "下游请求不带思考强度后缀的模型（如 gemini-3.8-flash）时，自动按这里的配置落到某个固定档位（如 gemini-3.8-flash-high）。带后缀的固定档位不受影响。",
+      "rowHint": "不重定向时按请求的 reasoning.effort 选档，未指定则用默认档位（{{level}}）。",
+      "noRedirect": "不重定向（默认 {{level}}）",
+      "overrideLabel": "覆盖请求自带的思考强度",
+      "overrideHint": "默认只在请求没有指定 reasoning.effort 时生效；开启后即使请求带了 effort（如 Codex CLI 的默认 medium）也按重定向档位处理。",
+      "saved": "模型重定向已保存"
+    },
+    "channelTest": {
+      "antigravityDesc": "Antigravity 账号页“测试连接”与批量测试默认使用的探测模型和测活内容。模型留空时按账号目录自动选择（优先版本最新的 flash 低档）。",
+      "claudeDesc": "Claude 账号页“测试连接”与批量测试默认使用的探测模型和测活内容。模型留空时按账号目录自动选择（优先 haiku）。",
+      "autoModel": "自动选择",
+      "modelHint": "只有在该账号模型目录里的模型才会生效，否则退回自动选择；弹窗里仍可临时切换。",
+      "contentHint": "留空沿用全局测活内容。多行时每次随机抽取一行；支持 {{time}}、{{date}}、{{rand}}、{{rand:1-100}} 等变量。",
+      "concurrencyHint": "该渠道批量测试的并发数（0~200）。填 0 沿用全局并发（当前 {{value}}）；混合渠道的批量测试始终按全局并发。",
+      "saved": "连通性测试设置已保存"
+    },
     "antigravityOAuth": {
       "title": "Antigravity OAuth client",
       "description": "Google 登录（开始授权）与令牌刷新使用的 OAuth client 凭据。未配置时使用内置官方 Antigravity Desktop client，账号页可直接「开始授权」。保存自定义条目后立即生效，无需重启。环境变量 ANTIGRAVITY_OAUTH_CLIENTS 注入的条目优先级更高，同名 key 以环境变量为准。",

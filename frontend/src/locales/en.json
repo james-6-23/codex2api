@@ -3950,6 +3950,24 @@
     "grokOAuthClientIdDesc": "OAuth client_id used for Grok authorization (browser flow, device code, SSO conversion, token refresh). Empty = the built-in official Grok CLI public id. Existing accounts keep refreshing with the client_id stored in their own credentials, so this only affects authorizations created from now on. The GROK_OAUTH_CLIENT_ID environment variable takes precedence over this setting.",
     "grokOAuthClientIdPlaceholder": "Empty uses the built-in default",
     "grokOAuthClientIdEnvOverride": "Currently pinned to {{value}} by the GROK_OAUTH_CLIENT_ID environment variable; this setting has no effect. Clear that variable and restart to use the value configured here.",
+    "antigravityRedirect": {
+      "title": "Model redirects",
+      "description": "When a request names a model without a thinking-level suffix (e.g. gemini-3.8-flash), route it to the configured fixed tier (e.g. gemini-3.8-flash-high). Suffixed tiers are never redirected.",
+      "rowHint": "Without a redirect the tier follows the request's reasoning.effort, falling back to the default tier ({{level}}).",
+      "noRedirect": "No redirect (default {{level}})",
+      "overrideLabel": "Override the request's reasoning effort",
+      "overrideHint": "By default the redirect only applies when the request has no reasoning.effort; enable this to apply it even when an effort is present (e.g. Codex CLI's default medium).",
+      "saved": "Model redirects saved"
+    },
+    "channelTest": {
+      "antigravityDesc": "Probe model and prompt used by default for Test Connection and batch tests on the Antigravity accounts page. Leave the model empty to pick automatically from the account catalog (newest flash low tier first).",
+      "claudeDesc": "Probe model and prompt used by default for Test Connection and batch tests on the Claude accounts page. Leave the model empty to pick automatically from the account catalog (haiku first).",
+      "autoModel": "Auto",
+      "modelHint": "Only takes effect when the model is in that account's catalog; otherwise automatic selection is used. The test dialog can still switch models.",
+      "contentHint": "Empty falls back to the global test content. With multiple lines one is picked at random; supports {{time}}, {{date}}, {{rand}}, {{rand:1-100}}.",
+      "concurrencyHint": "Batch test concurrency for this channel (0~200). 0 follows the global concurrency (currently {{value}}); mixed-channel batches always use the global value.",
+      "saved": "Connectivity test settings saved"
+    },
     "antigravityOAuth": {
       "title": "Antigravity OAuth clients",
       "description": "OAuth client credentials used by Google sign-in (Start authorization) and token refresh. When none are configured, the built-in official Antigravity Desktop client is used so Start authorization works immediately. Custom entries apply immediately without a restart. Entries injected via the ANTIGRAVITY_OAUTH_CLIENTS environment variable take precedence for matching keys.",

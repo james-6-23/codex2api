@@ -349,3 +349,16 @@ func applyAntigravityCooldown(store *auth.Store, account *auth.Account, statusCo
 	}
 	return decision
 }
+
+// ApplyAntigravityCooldown lets admin connection tests reuse the Cloud Code
+// 429/503 quota mapping used by live dispatch: a per-(account, model) cooldown
+// sized from Google's structured retry hint, with the generic 429 policy as
+// fallback. It reports whether a cooldown was actually recorded so callers can
+// classify the failure as rate limiting instead of a broken account.
+func ApplyAntigravityCooldown(store *auth.Store, account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) bool {
+	if statusCode != http.StatusTooManyRequests && statusCode != http.StatusServiceUnavailable {
+		return false
+	}
+	decision := applyAntigravityCooldown(store, account, statusCode, body, resp, model)
+	return !decision.ResetAt.IsZero()
+}

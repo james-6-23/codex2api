@@ -221,6 +221,18 @@ func main() {
 		}
 	}
 	antigravityOAuthCancel()
+	antigravityCfgCtx, antigravityCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if raw, err := db.LoadAntigravityConfig(antigravityCfgCtx); err != nil {
+		log.Printf("加载 Antigravity 渠道设置失败(模型重定向不生效): %v", err)
+	} else if parsed, parseErr := auth.ParseAntigravitySettings(raw); parseErr != nil {
+		log.Printf("Antigravity 渠道设置解析失败(模型重定向不生效,请在管理页重新保存): %v", parseErr)
+	} else {
+		auth.SetConfiguredAntigravitySettings(parsed)
+		if len(parsed.ModelRedirects) > 0 {
+			log.Printf("Antigravity 模型重定向已加载: %d 条", len(parsed.ModelRedirects))
+		}
+	}
+	antigravityCfgCancel()
 
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
