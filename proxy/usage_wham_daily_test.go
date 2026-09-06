@@ -6,8 +6,9 @@ import (
 	"time"
 )
 
-// 当天的记录不带 token 字段，结算后才补齐。用指针区分「上游没给」与「给了 0」，
+// 2026-08 形态的当天记录不带 token 字段。用指针区分「上游没给」与「给了 0」，
 // 否则未结算的当天会被写成 0 token 并在后续回补时无法识别。
+// （2026-09 起当天行改为带 token 但缺 models，结算判定见 TestWhamDailyUsageDaySettledOnUsesDate。）
 func TestWhamDailyUsageUnsettledDayHasNoTokenFields(t *testing.T) {
 	raw := `{"data":[
 		{"date":"2026-08-10","totals":{"users":1,"threads":289,"turns":1179,"credits":41921.64596825,
@@ -29,8 +30,8 @@ func TestWhamDailyUsageUnsettledDayHasNoTokenFields(t *testing.T) {
 	}
 
 	settled := parsed.Data[0]
-	if !settled.Totals.Settled() {
-		t.Fatal("settled day reported as unsettled")
+	if !settled.Totals.HasTokenDetail() {
+		t.Fatal("settled day reported without token detail")
 	}
 	if got := *settled.Totals.TextTotalTokens; got != 1803919703 {
 		t.Fatalf("settled total tokens = %d", got)
@@ -51,8 +52,8 @@ func TestWhamDailyUsageUnsettledDayHasNoTokenFields(t *testing.T) {
 	}
 
 	unsettled := parsed.Data[1]
-	if unsettled.Totals.Settled() {
-		t.Fatal("unsettled day reported as settled")
+	if unsettled.Totals.HasTokenDetail() {
+		t.Fatal("unsettled day reported with token detail")
 	}
 	if unsettled.Totals.TextTotalTokens != nil {
 		t.Fatal("unsettled day must not carry token counts")
@@ -62,7 +63,7 @@ func TestWhamDailyUsageUnsettledDayHasNoTokenFields(t *testing.T) {
 	}
 }
 
-// 快照窗口必须覆盖上游全部保留期，否则漏跑一轮就会留下永久空洞。
+// 稳态滚动窗口固定 7 天（含今天）：当天与前几天的数值会变，整窗覆盖顺带补洞。
 func TestWhamDailyUsageWindowCoversRetention(t *testing.T) {
 	now := time.Date(2026, 8, 11, 15, 4, 5, 0, time.UTC)
 	start, end := WhamDailyUsageWindow(now)

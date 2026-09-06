@@ -96,6 +96,7 @@ func antigravityOAuthEndpointList() []string {
 // ExecuteAntigravityResponsesRequest adapts an OpenAI Responses request to the
 // Cloud Code v1internal Gemini envelope used by both Antigravity projects.
 func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Account, model string, body []byte, stream bool, proxyURL string) (*http.Response, error) {
+	resetUpstreamAttemptTrace(ctx)
 	if account == nil {
 		return nil, fmt.Errorf("antigravity account is nil")
 	}
@@ -152,7 +153,7 @@ func ExecuteAntigravityResponsesRequest(ctx context.Context, account *auth.Accou
 					discardLastRetryable()
 					return nil, err
 				}
-				resp, doErr = client.Do(req)
+				resp, doErr = doTracedUpstreamRequest(client, req, account, proxyURL)
 				if doErr != nil {
 					last = doErr
 					resp = nil
@@ -422,7 +423,7 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, wireModel); err != nil {
 		return nil, err
 	}
-	return client.Do(req)
+	return doTracedUpstreamRequest(client, req, account, proxyURL)
 }
 
 func responsesToGeminiInternal(raw []byte, project, model string) (map[string]any, error) {

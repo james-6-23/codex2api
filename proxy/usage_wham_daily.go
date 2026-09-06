@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/codex2api/auth"
@@ -16,15 +17,25 @@ import (
 // 与 wham/usage 一样零额度成本，但给的是官方结算口径的绝对值（credits 与 token 数），
 // 且能按客户端（CLI / Desktop / IDE / 网关流量）与模型拆分。
 //
-// 上游只保留最近 7 天：查更早的区间返回空数组，因此历史必须落到本地库，
-// 否则过期即永久丢失。
+// 上游可回溯的深度实测至少 84 天（2026-09-06 用 plus 号查到 12 周前；2026-08 首次
+// 接入时只回 7 天）。稳态同步仍只滚动回补最近 WhamDailyUsageRetentionDays 天，
+// 首次同步（本地没有任何快照）用 WhamDailyUsageBackfillDays 深回补一次；
+// 更久的历史仍然只存在于本地库。
 const WhamDailyUsageURL = "https://chatgpt.com/backend-api/wham/analytics/daily-workspace-usage-counts"
 
-// WhamDailyUsageRetentionDays 是上游的历史保留天数（含当天）。实测查询更早的
-// 区间一律返回空，快照任务按这个窗口回补即可覆盖漏跑的那几轮。
+// WhamDailyUsageRetentionDays 是稳态同步每轮回补的滚动窗口（含当天）。当天与前几天
+// 的数值会随结算变化，每轮整窗覆盖顺带修复漏跑的空洞。名字沿用「保留期」是历史
+// 原因：2026-08 接入时上游确实只回 7 天。
 const WhamDailyUsageRetentionDays = 7
 
+// WhamDailyUsageBackfillDays 是首次同步的深回补窗口。2026-09-06 实测 plus 号能查到
+// 抓包前 84 天（恰为 12 周、且起点是周日，疑似「最近 12 周」截断）；更早是否可查
+// 未验证，所以按已证实的深度取值。
+const WhamDailyUsageBackfillDays = 84
+
 // WhamCreditsPerUSD 是官方 credits 与美元的换算比例（1 美元 = 25 credits）。
+// 2026-09-06 实测：单模型已结算日的 token × 官方目录价 恰等于 credits/25，
+// 即 credits 就是按当时目录价计的 API 等价成本。
 const WhamCreditsPerUSD = 25.0
 
 // whamDailyUsageURLForTest 允许测试替换默认 URL。生产代码不要赋值。
@@ -45,6 +56,7 @@ type WhamDailyUsageResponse struct {
 }
 
 // WhamDailyUsageDay 是单个统计周期（group_by=day 时为一天，week 时为周起始日）。
+// 这个端点是稀疏的：没有消耗的日子不返回行。
 type WhamDailyUsageDay struct {
 	Date    string                 `json:"date"`
 	Totals  WhamDailyUsageCounts   `json:"totals"`
@@ -52,11 +64,21 @@ type WhamDailyUsageDay struct {
 	Models  []WhamDailyUsageModel  `json:"models"`
 }
 
+// SettledOn 判断这一天的记录是否已结算：日期早于 today（UTC 日期，YYYY-MM-DD）且
+// 带 token 明细。上游对「今天」这一行的形态改过（见 WhamDailyUsageCounts），按字段
+// 有无判断已不可靠，按日期判断才稳：今天的数值一定还在变，昨天及更早的在下一轮
+// 整窗回补时被覆盖。
+func (d WhamDailyUsageDay) SettledOn(today string) bool {
+	date := strings.TrimSpace(d.Date)
+	return date != "" && date < strings.TrimSpace(today) && d.Totals.HasTokenDetail()
+}
+
 // WhamDailyUsageCounts 是一组用量计数。
 //
-// 当天（未结算）的记录只有 users/threads/turns/credits，四个 token 字段整个缺失，
-// 因此全部用指针：区分「上游没给」与「上游给了 0」，避免把未结算的当天写成 0
-// 之后再也不回补。
+// 当天（未结算）记录的形态上游改过：2026-08 时只有 users/threads/turns/credits、
+// 四个 token 字段整个缺失；2026-09 实测反过来，token 与 credits 都在，缺的是 models
+// 键且 users/threads/turns 全 0。token 字段保留指针区分「上游没给」与「给了 0」，
+// 但「是否已结算」不能再靠字段有无判断，见 WhamDailyUsageDay.SettledOn。
 type WhamDailyUsageCounts struct {
 	Users   int     `json:"users"`
 	Threads int     `json:"threads"`
@@ -69,9 +91,9 @@ type WhamDailyUsageCounts struct {
 	TextTotalTokens         *int64 `json:"text_total_tokens,omitempty"`
 }
 
-// Settled 表示这条记录的 token 明细已结算。当天的记录不带 token 字段，
-// 隔天再查同一天才会补齐。
-func (c WhamDailyUsageCounts) Settled() bool {
+// HasTokenDetail 表示这条记录带有 token 明细字段。只说明字段存在，不代表已结算：
+// 当天的记录现在也会带 token 且全天持续变化，结算判定用 WhamDailyUsageDay.SettledOn。
+func (c WhamDailyUsageCounts) HasTokenDetail() bool {
 	return c.TextTotalTokens != nil
 }
 
@@ -82,7 +104,7 @@ func (c WhamDailyUsageCounts) USD() float64 {
 
 // WhamDailyUsageClient 是按客户端入口拆分的用量。client_id 取值实测包括
 // CODEX_CLI / CODEX_DESKTOP_APP / CODEX_IDE_VSCODE / CODEX_WORK_DESKTOP /
-// CODEX_SERVICE_EXEC / CODEX_SDK_TS，以及没有官方客户端标识的
+// CODEX_SERVICE_EXEC / CODEX_SDK_TS / CODEX_WEB，以及没有官方客户端标识的
 // CODEX_UNKNOWN_DEFAULT（走本网关的流量落在这一档）。
 type WhamDailyUsageClient struct {
 	ClientID string `json:"client_id"`
@@ -90,7 +112,8 @@ type WhamDailyUsageClient struct {
 }
 
 // WhamDailyUsageModel 是按模型拆分的用量。实测上游在这一层不返回 token 明细，
-// credits 也恒为 0，只有 users/threads/turns 有值。
+// credits 也恒为 0，只有 users/threads/turns 有值。模型维度的成本要用
+// daily-token-usage-breakdown 的份额分摊（见 usage_wham_breakdown.go）。
 type WhamDailyUsageModel struct {
 	Model string `json:"model"`
 	WhamDailyUsageCounts
@@ -107,10 +130,22 @@ func QueryWhamDailyUsage(ctx context.Context, account *auth.Account, proxyURL, s
 	return queryWhamDailyUsageWithURL(ctx, account, proxyURL, base, startDate, endDate)
 }
 
-// WhamDailyUsageWindow 返回覆盖上游全部保留期的日期区间（含今天）。
+// WhamDailyUsageWindow 返回稳态同步的滚动区间（含今天，UTC 日期）。
 func WhamDailyUsageWindow(now time.Time) (startDate, endDate string) {
+	return whamDailyUsageWindowDays(now, WhamDailyUsageRetentionDays)
+}
+
+// WhamDailyUsageBackfillWindow 返回首次同步的深回补区间（含今天，UTC 日期）。
+func WhamDailyUsageBackfillWindow(now time.Time) (startDate, endDate string) {
+	return whamDailyUsageWindowDays(now, WhamDailyUsageBackfillDays)
+}
+
+func whamDailyUsageWindowDays(now time.Time, days int) (startDate, endDate string) {
+	if days <= 0 {
+		days = 1
+	}
 	end := now.UTC()
-	start := end.AddDate(0, 0, -(WhamDailyUsageRetentionDays - 1))
+	start := end.AddDate(0, 0, -(days - 1))
 	return start.Format("2006-01-02"), end.Format("2006-01-02")
 }
 
@@ -158,7 +193,7 @@ func queryWhamDailyUsageWithURL(ctx context.Context, account *auth.Account, prox
 		return nil, resp, fmt.Errorf("daily usage returned status %d", resp.StatusCode)
 	}
 
-	// 7 天 × 含客户端与模型拆分，实测 pro 号 14KB；上限给到 1MB 足够冗余。
+	// 稀疏行 × 客户端与模型拆分，实测 plus 号 84 天约 77KB；上限给到 1MB 足够冗余。
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	_ = resp.Body.Close()
 	if err != nil {

@@ -33,13 +33,16 @@ export default function ClaudeConnectionTestModal({ account, onClose, onSettled 
   onSettledRef.current = onSettled;
   translationRef.current = t;
 
+  // 处于模型级冷却(credits_required 等)的模型仍可选:手工测试就是操作者主动复探,
+  // 服务端不再拦截显式指定的模型;这里只做标注,并把冷却中的模型排到后面、默认不选。
+  const cooled = useMemo(() => new Set((account.model_cooldowns ?? [])
+    .filter((cooldown) => !cooldown.reset_at || new Date(cooldown.reset_at).getTime() > Date.now())
+    .map((cooldown) => cooldown.model.toLowerCase())), [account.model_cooldowns]);
   const modelOptions = useMemo(() => {
-    const blocked = new Set((account.model_cooldowns ?? [])
-      .filter((cooldown) => (cooldown.reason || "").toLowerCase().includes("credit"))
-      .map((cooldown) => cooldown.model.toLowerCase()));
-    const configured = (account.models ?? []).map((item) => item.trim()).filter((item) => item.toLowerCase().startsWith("claude-") && !blocked.has(item.toLowerCase()));
-    return configured.length > 0 ? configured : ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"].filter((item) => !blocked.has(item));
-  }, [account.model_cooldowns, account.models]);
+    const configured = (account.models ?? []).map((item) => item.trim()).filter((item) => item.toLowerCase().startsWith("claude-"));
+    const base = configured.length > 0 ? configured : ["claude-opus-4-5", "claude-sonnet-4-5", "claude-haiku-4-5"];
+    return [...base.filter((item) => !cooled.has(item.toLowerCase())), ...base.filter((item) => cooled.has(item.toLowerCase()))];
+  }, [account.models, cooled]);
   const [model, setModel] = useState(modelOptions[0] || "");
   useEffect(() => {
     if (!modelOptions.includes(model)) setModel(modelOptions[0] || "");
@@ -186,7 +189,7 @@ export default function ClaudeConnectionTestModal({ account, onClose, onSettled 
             <p className="text-sm font-semibold text-foreground" role="status">{statusLabel}</p>
             <p className="mt-0.5 text-[11px] text-muted-foreground">Claude · Messages API</p>
           </div>
-          <Select compact className="w-full min-w-0 sm:w-60" value={model} onValueChange={setModel} disabled={running} options={modelOptions.map((item) => ({ value: item, label: item }))} />
+          <Select compact className="w-full min-w-0 sm:w-60" value={model} onValueChange={setModel} disabled={running} options={modelOptions.map((item) => ({ value: item, label: cooled.has(item.toLowerCase()) ? `${item} · ${t("claude.testModelCooling")}` : item }))} />
         </div>
 
         {errorMessage ? <div role="alert" className="break-words rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-xs leading-relaxed text-destructive">{errorMessage}</div> : null}

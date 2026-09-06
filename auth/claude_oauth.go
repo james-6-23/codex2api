@@ -44,11 +44,20 @@ const (
 	ClaudeOAuthTokenURL = "https://platform.claude.com/v1/oauth/token"
 	// ClaudeOAuthProfileURL 用 access token 换取账号身份（email / uuid / 组织）。
 	ClaudeOAuthProfileURL = "https://api.anthropic.com/api/oauth/profile"
-	// ClaudeOAuthRedirectURI 是官方客户端使用的本地回调地址；服务器场景下仅用于
-	// 拼装授权 URL，用户从跳转后的地址栏复制授权码即可，无需本机监听。
-	ClaudeOAuthRedirectURI = "http://localhost:54545/callback"
+	// ClaudeOAuthRedirectURI 是官方客户端「手动粘贴授权码」模式使用的托管回调页：
+	// 授权完成后页面直接把 code#state 展示给用户复制，服务器场景无需本机监听，
+	// 也不会像 localhost 回调那样出现「页面打不开」的困惑。
+	ClaudeOAuthRedirectURI = "https://platform.claude.com/oauth/code/callback"
+	// ClaudeOAuthLocalRedirectURI 是官方客户端本地回调地址。历史 CLI session 文件
+	// 未记录 redirect_uri 时按该值换码，保证旧会话仍可完成交换。
+	ClaudeOAuthLocalRedirectURI = "http://localhost:54545/callback"
 	// ClaudeOAuthScope 是 Claude Code 请求的权限范围，必须与官方一致。
 	ClaudeOAuthScope = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+	// ClaudeOAuthScopeInference 是 Setup Token(长效令牌)申请的最小权限范围，等同
+	// 官方 `claude setup-token` 命令：只能推理，不能读 profile / usage。
+	ClaudeOAuthScopeInference = "user:inference"
+	// ClaudeSetupTokenExpiresInSeconds 是 Setup Token 交换时请求的有效期(1 年)。
+	ClaudeSetupTokenExpiresInSeconds = 365 * 24 * 60 * 60
 	// ClaudeOAuthBeta 是 OAuth 凭据调用推理接口时必须声明的 anthropic-beta 值。
 	ClaudeOAuthBeta = "oauth-2025-04-20"
 	// ClaudeCodeBeta 是真实 Claude Code CLI 恒定的 beta 标记（haiku 模型除外，
@@ -112,6 +121,43 @@ type ClaudeLoginSession struct {
 	AuthURL  string `json:"auth_url"`
 	State    string `json:"state"`
 	Verifier string `json:"verifier"`
+	// RedirectURI 是本次授权 URL 使用的回调地址；交换时必须原样回传。空值表示
+	// 历史会话(本地回调)。
+	RedirectURI string `json:"redirect_uri,omitempty"`
+	// Scope 是本次申请的权限范围;空=完整 Claude Code scope。
+	Scope string `json:"scope,omitempty"`
+	// SetupToken 为 true 表示本次申请的是长效 Setup Token(仅 user:inference)。
+	SetupToken bool `json:"setup_token,omitempty"`
+}
+
+// ClaudeLoginOptions 控制一次登录申请的形态。零值 = 完整 OAuth + 托管回调页。
+type ClaudeLoginOptions struct {
+	// SetupToken 为 true 时申请长效 Setup Token:scope 收窄为 user:inference,
+	// 交换时附带 expires_in=1 年,拿到的 access_token 没有 refresh_token。
+	SetupToken bool
+	// RedirectURI 覆盖回调地址;空=ClaudeOAuthRedirectURI(托管回调页)。
+	RedirectURI string
+}
+
+// ExchangeOptions 返回与本会话匹配的交换参数。
+func (s *ClaudeLoginSession) ExchangeOptions() ClaudeExchangeOptions {
+	if s == nil {
+		return ClaudeExchangeOptions{}
+	}
+	redirect := strings.TrimSpace(s.RedirectURI)
+	if redirect == "" {
+		// 旧版 session 文件没有 redirect_uri 字段,当时默认是本地回调。
+		redirect = ClaudeOAuthLocalRedirectURI
+	}
+	return ClaudeExchangeOptions{RedirectURI: redirect, SetupToken: s.SetupToken}
+}
+
+// ClaudeExchangeOptions 控制授权码交换。
+type ClaudeExchangeOptions struct {
+	// RedirectURI 必须与生成授权 URL 时一致;空=ClaudeOAuthRedirectURI。
+	RedirectURI string
+	// SetupToken 为 true 时请求 1 年有效期,并跳过 profile 补全(scope 不含 user:profile)。
+	SetupToken bool
 }
 
 // ClaudeTokenData 是登录/刷新后得到的令牌与账号身份。
@@ -126,6 +172,9 @@ type ClaudeTokenData struct {
 	PlanType string
 	// ExpiresAt 是本次 access token 的过期时刻（本地时钟）。
 	ExpiresAt time.Time
+	// AuthKind 标记凭据形态:ClaudeAuthKindOAuth(可刷新)或 ClaudeAuthKindSetupToken
+	// (长效、无 RT)。空值按是否携带 refresh_token 推断。
+	AuthKind string
 }
 
 // claudeTokenResponse 映射 Anthropic OAuth token 端点的响应体。
@@ -201,6 +250,8 @@ type claudeAuthCodeExchangeRequest struct {
 	ClientID     string `json:"client_id"`
 	CodeVerifier string `json:"code_verifier"`
 	State        string `json:"state"`
+	// ExpiresIn 仅 Setup Token 交换时携带(秒),请求长效令牌。
+	ExpiresIn int `json:"expires_in,omitempty"`
 }
 
 // ClaudeAuth 封装 Claude OAuth 登录/刷新所需的 HTTP 客户端。
@@ -208,6 +259,7 @@ type claudeAuthCodeExchangeRequest struct {
 // 采用主/备双客户端 + 自动回退:
 //   - primary:uTLS 浏览器指纹客户端,规避 Anthropic 域名上的 Cloudflare 指纹拦截;
 //   - fallback:标准 http 客户端(ALPN 自动协商 h1/h2,兼容性更好)。
+//
 // 当 primary 出现传输错误或被判定为挑战(403)时,自动改用 fallback 重试。这样无论
 // 拦截来自指纹、强制 h2 还是网络层,都能提高登录/刷新成功率。
 type ClaudeAuth struct {
@@ -298,17 +350,31 @@ func generateClaudeOAuthState() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(stateBytes), nil
 }
 
-// BuildAuthURL 用给定 state 与 PKCE 拼装授权 URL。
+// BuildClaudeAuthURL 用给定 state 与 PKCE 拼装完整 OAuth 授权 URL(托管回调页)。
 func BuildClaudeAuthURL(state string, pkce *ClaudePKCECodes) (string, error) {
+	return BuildClaudeAuthURLWithOptions(state, pkce, ClaudeLoginOptions{})
+}
+
+// BuildClaudeAuthURLWithOptions 按登录选项拼装授权 URL:Setup Token 模式只申请
+// user:inference;redirect_uri 可覆盖(必须与后续交换一致)。
+func BuildClaudeAuthURLWithOptions(state string, pkce *ClaudePKCECodes, opts ClaudeLoginOptions) (string, error) {
 	if pkce == nil {
 		return "", fmt.Errorf("缺少 PKCE 校验码")
+	}
+	scope := ClaudeOAuthScope
+	if opts.SetupToken {
+		scope = ClaudeOAuthScopeInference
+	}
+	redirect := strings.TrimSpace(opts.RedirectURI)
+	if redirect == "" {
+		redirect = ClaudeOAuthRedirectURI
 	}
 	params := url.Values{
 		"code":                  {"true"},
 		"client_id":             {ClaudeOAuthClientID},
 		"response_type":         {"code"},
-		"redirect_uri":          {ClaudeOAuthRedirectURI},
-		"scope":                 {ClaudeOAuthScope},
+		"redirect_uri":          {redirect},
+		"scope":                 {scope},
 		"code_challenge":        {pkce.CodeChallenge},
 		"code_challenge_method": {"S256"},
 		"state":                 {state},
@@ -316,8 +382,14 @@ func BuildClaudeAuthURL(state string, pkce *ClaudePKCECodes) (string, error) {
 	return ClaudeOAuthAuthURL + "?" + params.Encode(), nil
 }
 
-// StartClaudeLogin 发起一次登录：生成 state + PKCE 并返回授权 URL 与需缓存的上下文。
+// StartClaudeLogin 发起一次完整 OAuth 登录：生成 state + PKCE 并返回授权 URL 与需缓存的上下文。
 func StartClaudeLogin() (*ClaudeLoginSession, error) {
+	return StartClaudeLoginWithOptions(ClaudeLoginOptions{})
+}
+
+// StartClaudeLoginWithOptions 按选项发起登录(完整 OAuth 或 Setup Token)。返回的
+// 会话记录了 redirect_uri / scope / 令牌形态,交换时用 ExchangeOptions() 回传。
+func StartClaudeLoginWithOptions(opts ClaudeLoginOptions) (*ClaudeLoginSession, error) {
 	pkce, err := GenerateClaudePKCE()
 	if err != nil {
 		return nil, err
@@ -326,17 +398,44 @@ func StartClaudeLogin() (*ClaudeLoginSession, error) {
 	if err != nil {
 		return nil, err
 	}
-	authURL, err := BuildClaudeAuthURL(state, pkce)
+	redirect := strings.TrimSpace(opts.RedirectURI)
+	if redirect == "" {
+		redirect = ClaudeOAuthRedirectURI
+	}
+	opts.RedirectURI = redirect
+	authURL, err := BuildClaudeAuthURLWithOptions(state, pkce, opts)
 	if err != nil {
 		return nil, err
 	}
-	return &ClaudeLoginSession{AuthURL: authURL, State: state, Verifier: pkce.CodeVerifier}, nil
+	scope := ClaudeOAuthScope
+	if opts.SetupToken {
+		scope = ClaudeOAuthScopeInference
+	}
+	return &ClaudeLoginSession{
+		AuthURL:     authURL,
+		State:       state,
+		Verifier:    pkce.CodeVerifier,
+		RedirectURI: redirect,
+		Scope:       scope,
+		SetupToken:  opts.SetupToken,
+	}, nil
 }
 
-// parseClaudeCodeAndState 从回调里拿到的 code 中拆出可能附带的 state 片段
-// （官方回调形如 code#state）。
+// parseClaudeCodeAndState 从用户粘贴的内容里拆出授权码与可能附带的 state。支持:
+//   - 托管回调页展示的 code#state;
+//   - 整条回调 URL(…/callback?code=XXX&state=YYY);
+//   - 纯 code。
 func parseClaudeCodeAndState(code string) (parsedCode, parsedState string) {
-	splits := strings.Split(strings.TrimSpace(code), "#")
+	raw := strings.TrimSpace(code)
+	if strings.HasPrefix(raw, "http://") || strings.HasPrefix(raw, "https://") {
+		if u, err := url.Parse(raw); err == nil {
+			q := u.Query()
+			if c := strings.TrimSpace(q.Get("code")); c != "" {
+				return c, strings.TrimSpace(q.Get("state"))
+			}
+		}
+	}
+	splits := strings.Split(raw, "#")
 	parsedCode = strings.TrimSpace(splits[0])
 	if len(splits) > 1 {
 		parsedState = strings.TrimSpace(splits[1])
@@ -345,11 +444,18 @@ func parseClaudeCodeAndState(code string) (parsedCode, parsedState string) {
 }
 
 // ExchangeCode 用授权码 + PKCE verifier 换取 access/refresh token，并回填账号身份。
+// 使用默认交换参数(托管回调页、完整 OAuth)。
 //
-//   - code：用户从回调地址栏复制的授权码（可含 #state 片段）。
+//   - code：用户从回调页复制的授权码（可含 #state 片段或整条回调 URL）。
 //   - state：StartClaudeLogin 返回的 state。
 //   - verifier：StartClaudeLogin 返回的 verifier。
 func (o *ClaudeAuth) ExchangeCode(ctx context.Context, code, state, verifier string) (*ClaudeTokenData, error) {
+	return o.ExchangeCodeWithOptions(ctx, code, state, verifier, ClaudeExchangeOptions{})
+}
+
+// ExchangeCodeWithOptions 是 ExchangeCode 的带选项版本:redirect_uri 必须与生成
+// 授权 URL 时一致;SetupToken 模式请求 1 年有效期且不补 profile。
+func (o *ClaudeAuth) ExchangeCodeWithOptions(ctx context.Context, code, state, verifier string, opts ClaudeExchangeOptions) (*ClaudeTokenData, error) {
 	if strings.TrimSpace(verifier) == "" {
 		return nil, fmt.Errorf("缺少 PKCE verifier")
 	}
@@ -364,14 +470,25 @@ func (o *ClaudeAuth) ExchangeCode(ctx context.Context, code, state, verifier str
 	if newState != "" {
 		effectiveState = newState
 	}
+	return o.exchangeAuthorizationCode(ctx, newCode, verifier, effectiveState, opts)
+}
 
+// exchangeAuthorizationCode 是 PKCE 流程最后一步,被浏览器授权与 sessionKey 登录共用。
+func (o *ClaudeAuth) exchangeAuthorizationCode(ctx context.Context, code, verifier, state string, opts ClaudeExchangeOptions) (*ClaudeTokenData, error) {
+	redirect := strings.TrimSpace(opts.RedirectURI)
+	if redirect == "" {
+		redirect = ClaudeOAuthRedirectURI
+	}
 	reqBody := claudeAuthCodeExchangeRequest{
 		GrantType:    "authorization_code",
-		Code:         newCode,
-		RedirectURI:  ClaudeOAuthRedirectURI,
+		Code:         code,
+		RedirectURI:  redirect,
 		ClientID:     ClaudeOAuthClientID,
 		CodeVerifier: verifier,
-		State:        effectiveState,
+		State:        state,
+	}
+	if opts.SetupToken {
+		reqBody.ExpiresIn = ClaudeSetupTokenExpiresInSeconds
 	}
 	jsonBody, err := json.Marshal(reqBody)
 	if err != nil {
@@ -394,6 +511,13 @@ func (o *ClaudeAuth) ExchangeCode(ctx context.Context, code, state, verifier str
 		return nil, fmt.Errorf("token 响应缺少 access_token")
 	}
 
+	expiresIn := tokenResp.ExpiresIn
+	if expiresIn <= 0 {
+		expiresIn = 3600
+		if opts.SetupToken {
+			expiresIn = ClaudeSetupTokenExpiresInSeconds
+		}
+	}
 	td := &ClaudeTokenData{
 		AccessToken:      tokenResp.AccessToken,
 		RefreshToken:     tokenResp.RefreshToken,
@@ -401,7 +525,14 @@ func (o *ClaudeAuth) ExchangeCode(ctx context.Context, code, state, verifier str
 		AccountUUID:      tokenResp.Account.UUID,
 		OrganizationUUID: tokenResp.Organization.UUID,
 		OrganizationName: tokenResp.Organization.Name,
-		ExpiresAt:        time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second),
+		ExpiresAt:        time.Now().Add(time.Duration(expiresIn) * time.Second),
+		AuthKind:         ClaudeAuthKindOAuth,
+	}
+	if opts.SetupToken {
+		// Setup Token 只有 user:inference,profile 端点必 403;不打无意义请求。
+		td.AuthKind = ClaudeAuthKindSetupToken
+		td.RefreshToken = ""
+		return td, nil
 	}
 	// 用 profile 端点补齐 token 响应可能缺失的身份字段。
 	if profile, errProfile := o.FetchProfile(ctx, tokenResp.AccessToken); errProfile == nil && profile != nil {

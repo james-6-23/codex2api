@@ -78,7 +78,9 @@ func isPreviousResponseNotFoundBody(payload []byte) bool {
 		}
 	}
 	for _, path := range []string{"error.message", "message"} {
-		if strings.Contains(strings.ToLower(gjson.GetBytes(body, path).String()), "previous response with id") {
+		message := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String()))
+		if message == "previous_response_id is not available for this user" ||
+			strings.Contains(message, "previous response with id") {
 			return true
 		}
 	}
@@ -331,6 +333,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// prior frame's config or body digest.
 	resetPromptRequestSecurityFrame(c)
 	resetPromptPolicyRequestCorrelationID(c)
+	resetUpstreamRequestTrace(c)
 	quotaParentRequest := c.Request
 	if err := h.refreshAPIKeyModelRequestQuotaTurn(c); err != nil {
 		return writeResponsesWSError(conn, apiKeyModelRequestError(err).apiErr)

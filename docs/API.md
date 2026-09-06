@@ -774,24 +774,58 @@ Claude Code OAuth 账号使用原生 Anthropic Messages 上游，不会进入 Co
 Token、授权码和账号 ID 仅为占位符，服务端不会在响应或日志中回显 access/refresh
 token。
 
+Claude 账号有两种凭据形态，记录在 `credentials.claude_auth_kind`，列表/详情响应以
+`claude_auth_kind` 回传，账号列表 `auth_kind` 筛选与 `summary.oauth / summary.setup_token`
+按此区分：
+
+- `oauth`：完整 Claude Code OAuth，`access_token + refresh_token`，AT 临期自动续期，
+  可读 profile / 官方 usage 端点；历史账号未写该键时一律视为 `oauth`。
+- `setup_token`：官方 `claude setup-token` 同款长效令牌（`sk-ant-oat01-…`），仅
+  `user:inference` scope，有效期 1 年，没有 refresh token，到期只能重新授权；用量改由
+  原生 Messages 探针采样，套餐信息缺省。适合批量号池。
+
 #### POST /api/admin/accounts/claude/oauth/auth-url
 
-创建一次性 PKCE 登录会话，返回授权地址与 `state`。`state` 默认 15 分钟有效且只能
-兑换一次。
+创建一次性 PKCE 登录会话，返回授权地址与 `state`。请求体可选 `{"mode":"oauth"|"setup_token"}`，
+默认 `oauth`；`setup_token` 只申请 `user:inference` 并在交换时请求 1 年有效期。回调地址
+为托管页 `https://platform.claude.com/oauth/code/callback`，授权后页面直接展示 `code#state`
+供复制（响应同时回传 `mode` 与 `redirect_uri`）。`state` 默认 15 分钟有效且只能兑换一次。
 
 #### POST /api/admin/accounts/claude/oauth/exchange-code
 
-使用 `state` 与回调 `code` 换取 Claude OAuth 凭据并入库。可选 `proxy_url`、
-`use_proxy_pool`、`timezone` 和 `name`；入库后会异步执行一次受控原生 Messages
-用量采样。
+使用 `state` 与回调 `code`（接受 `code#state`、纯 code 或整条回调 URL）换取 Claude
+凭据并入库，形态沿用生成链接时的 `mode`。可选 `proxy_url`、`use_proxy_pool`、
+`timezone` 和 `name`；入库后会异步执行一次受控原生 Messages 用量采样。
+
+#### POST /api/admin/accounts/claude/oauth/exchange-session-key
+
+用从已登录 claude.ai 浏览器复制的 `session_key`（sessionKey cookie，接受
+`sessionKey=...` 整段）一键换号：服务端代替浏览器完成组织选择、PKCE 授权与 token
+交换后直接入库，`mode` 同上决定换出 OAuth 凭据或 Setup Token。sessionKey 不落库、
+不回显，换号成功后即可作废。前两步打 claude.ai 网页端，走账号代理并使用浏览器指纹
+客户端；401/403 表示 sessionKey 失效，3xx 视为被 Cloudflare 拦截。
 
 #### POST /api/admin/accounts/claude/import
 
 直接导入 `cmd/claude_login -out` 生成的 JSON，或下面导出端点生成的 version 1
-Claude 凭据。`access_token` 与 `refresh_token` 必填；同时接受单对象、对象数组和
-`{"accounts":[...]}`。单对象保持历史 `{message,id,email}` 响应，批量导入返回
-`total`、`imported`、`failed` 与逐账号 `items/warnings`。`auth_kind` 仅允许
-`oauth`，模型列表仅允许 `claude-*`。
+Claude 凭据。同时接受单对象、对象数组和 `{"accounts":[...]}`。单对象保持历史
+`{message,id,email}` 响应，批量导入返回 `total`、`imported`、`failed` 与逐账号
+`items/warnings`。`auth_kind` 允许 `oauth`（默认，`refresh_token` 必填，`access_token` 可缺省——
+缺省时服务端先用 RT 走 refresh 授权换出 AT 并补齐邮箱/账号 UUID/套餐，RT 无效返回
+502）或 `setup_token`（只需 `access_token`，`expires_at` 缺省为 1 年）；未声明
+`auth_kind` 且没有 `refresh_token` 的文档仅当 `access_token` 形如 `sk-ant-oat01-`
+才按 `setup_token` 接受。模型列表仅允许 `claude-*`。
+
+#### POST /api/admin/accounts/claude/import-tokens
+
+（旧名 `/import-setup-tokens` 仍可用。）批量粘贴令牌：`text`（任意分隔的自由文本）
+与 `tokens` 数组都会按前缀抽取、保序去重，单次最多 200 枚。`sk-ant-oat01-` 按
+`setup_token` 长效令牌入库；`sk-ant-ort01-` 是 OAuth refresh token，入库前先刷新换出
+AT，按 `oauth` 形态保存，备注默认取邮箱。可选 `name`（Setup Token 的备注前缀，默认
+`claude`，按现有 `<prefix>-N` 最大序号继续编号；单枚且给了 `name` 时直接用作备注）、
+`proxy_url` / `use_proxy_pool`（代理池模式下每枚令牌各取一条）、`timezone`、
+`group_refs`。返回与批量导入相同的 `total/imported/failed/items`；同一令牌（Setup
+Token 按 AT、Refresh Token 刷新后按账号 UUID/RT）已存在返回 409（多枚时逐项失败）。
 
 导入文件可恢复账号名称、代理、时区、标签、启用状态、账号级指纹模式和受限身份头。
 分组使用 `group_refs: [{"name":"...","channel":"claude"}]` 按名称映射；不会复用
@@ -806,7 +840,7 @@ Claude 凭据。`access_token` 与 `refresh_token` 必填；同时接受单对�
 `X-Export-Count`、`Cache-Control: no-store, max-age=0`、`Pragma: no-cache` 和
 `X-Content-Type-Options: nosniff`。
 
-version 1 文档包含 `type=claude`、`auth_kind=oauth`、access/refresh token、账号 ID、
+version 1 文档包含 `type=claude`、`auth_kind`（`oauth` 或 `setup_token`，后者 `refresh_token` 为空）、access/refresh token、账号 ID、
 过期时间、套餐、模型、代理、时区、`claude_fingerprint_mode`、标签、启用状态及
 `group_refs`。`fingerprint_headers` 允许 `User-Agent`、`X-App` 和
 `X-Stainless-*` 身份头，以及可选的 `claude_device_id` 账号身份元数据；后者兼容键名大小写，
@@ -1103,8 +1137,54 @@ data: {"type":"test_complete","success":true}
 data: {"type":"diagnostics","diagnostics":{"model":"claude-haiku-4-5","http_status":200,"duration_ms":523}}
 ```
 
-`diagnostics` 为 Claude 账号的附加事件；失败由 `error` 事件返回。具体诊断字段见上文
-Claude 原生 Messages 测连说明。
+`diagnostics` 事件按渠道携带各自形态的诊断对象，失败由 `error` 事件返回。Claude 账号携带
+`diagnostics` 字段（具体字段见上文 Claude 原生 Messages 测连说明）；Codex / OpenAI Responses
+账号携带 `codex_diagnostics` 字段，两者不会同时出现。两种渠道都遵守同一顺序约定：拿到上游
+响应头后先推一帧只含状态码/响应头信息的诊断，流结束后再推带 `duration_ms` 的最终帧，最终帧
+可能位于 `test_complete`/`error` 之后，客户端应读到 SSE 关闭再刷新账号快照。请求在拿到响应
+头之前就失败（DNS/代理/超时）时不单发 `diagnostics` 事件，诊断对象直接挂在 `error` 事件上，
+只含 `model` 与 `duration_ms`。
+
+Codex 测连的 `codex_diagnostics` 对象包含：
+
+- `http_status`、`headers_ms`（拿到响应头耗时）、`first_content_ms`（首段文本耗时）、
+  `duration_ms`（总耗时），单位毫秒；未观测到的字段省略，不以零代替。
+- `model`（请求模型）、`response_model`（上游 `response.model`）、`transport`
+  （`http` / `websocket`，强制 WS 模式下用量窗口来自 `codex.rate_limits` 帧而非响应头）。
+- `request_id`（优先账号自定义的 `upstream_request_id_header`，否则依次取 `x-request-id`、
+  `request-id`、`x-openai-request-id`、`x-oai-request-id`、`x-goog-request-id`）、`response_id`
+  （`response.id`）、`cf_ray`、`plan_type`（`x-codex-plan-type`）。
+- `safety_buffering_enabled` / `safety_buffering_faster_model`：上游 `x-codex-safety-buffering-*`
+  头（HTTP 响应头或 WS 的 `codex.response.metadata` 帧）。enabled 只表示该模型开着"安全缓冲"
+  能力（上游可能为额外审查扣住输出），faster_model 是官方 CLI "Retry with a faster model"
+  的切换目标，不是本次的回答模型；`safety_buffered=true` 才表示本轮事件里出现过
+  `safety_buffering: true`。
+- `response_status`（最后观测到的 `response.status`，正常终态为 `completed` / `failed` /
+  `incomplete`；流在终态前中断时会停在 `in_progress` 等中间态）、`incomplete_reason`、
+  `error_type`、`error_code`（来自流内 `error` 事件、`response.error`、
+  `response.status_details.error` 或非 200 的 JSON 正文）。
+- `primary_window` / `secondary_window`：`x-codex-primary-*` / `x-codex-secondary-*` 三件套的
+  原样投影 `{used_percent, window_minutes, reset_after_seconds}`，按 `window_minutes` 判断是
+  5h（≥ 60）还是 7d（≥ 1440）窗口。
+- `usage`：终态 `input_tokens`、`output_tokens`、`total_tokens`、`cached_input_tokens`
+  （`input_tokens_details.cached_tokens`）、`reasoning_output_tokens`
+  （`output_tokens_details.reasoning_tokens`），按最新终态值覆盖。
+- `response_headers`：白名单筛选的诊断响应头（`x-codex-*`、`x-ratelimit-*`、`openai-*`、
+  请求标识、`retry-after`、`cf-ray` 等，不含 Cookie 或认证头）；`response_body`：已读取的
+  JSON/SSE 脱敏预览（Access Token / API Key / 代理凭据已替换），最多 64 KiB，截断时
+  `body_truncated=true`。
+
+```text
+data: {"type":"test_start","model":"gpt-5.4"}
+
+data: {"type":"diagnostics","codex_diagnostics":{"model":"gpt-5.4","http_status":200,"headers_ms":412,"transport":"http","request_id":"req_x","plan_type":"plus","primary_window":{"used_percent":12.5,"window_minutes":300,"reset_after_seconds":1800}}}
+
+data: {"type":"content","text":"pong"}
+
+data: {"type":"test_complete","success":true}
+
+data: {"type":"diagnostics","codex_diagnostics":{"model":"gpt-5.4","http_status":200,"headers_ms":412,"first_content_ms":980,"duration_ms":1210,"response_id":"resp_x","response_status":"completed","usage":{"input_tokens":20,"output_tokens":3,"total_tokens":23}}}
+```
 
 #### GET /api/admin/accounts/:id/usage
 

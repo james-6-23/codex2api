@@ -85,7 +85,7 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 				http.StatusBadGateway)
 			return
 		}
-		h.learnManifestModelsAsync(manifest.Body)
+		h.learnManifestModelsAsync(manifest.Body, account)
 		h.writeMergedCodexManifest(c, body, "", extraModels)
 		return
 	}
@@ -99,7 +99,7 @@ func (h *Handler) CodexModelsManifestHandler(c *gin.Context) {
 	}
 	// 顺手把清单里注册表不认识的新模型学习进注册表（只增不改不删），
 	// 让选单里出现的新模型立即通过请求侧模型校验，无需等手动同步。
-	h.learnManifestModelsAsync(manifest.Body)
+	h.learnManifestModelsAsync(manifest.Body, account)
 	h.writeMergedCodexManifest(c, manifest.Body, manifest.ETag, extraModels)
 }
 
@@ -120,6 +120,7 @@ func (h *Handler) serveScopedCodexManifest(c *gin.Context, row *database.APIKeyR
 		log.Printf("build scoped Codex manifest: %v", err)
 		return false
 	}
+	body = h.applyStoredModelCapabilities(c.Request.Context(), row, body)
 	h.writeCodexManifest(c, body, "")
 	return true
 }
@@ -175,15 +176,16 @@ func (h *Handler) writeCodexManifest(c *gin.Context, body []byte, etag string) {
 }
 
 type scopedCodexManifestItem struct {
-	Slug                     string   `json:"slug"`
-	DisplayName              string   `json:"display_name"`
-	Hidden                   bool     `json:"hidden"`
-	Availability             string   `json:"availability"`
-	SupportedInAPI           bool     `json:"supported_in_api"`
-	PreferWebsockets         bool     `json:"prefer_websockets"`
-	UseResponsesLite         bool     `json:"use_responses_lite"`
-	InputModalities          []string `json:"input_modalities,omitempty"`
-	SupportedReasoningLevels []string `json:"supported_reasoning_levels,omitempty"`
+	ServiceTiers             []map[string]string `json:"service_tiers,omitempty"`
+	Slug                     string              `json:"slug"`
+	DisplayName              string              `json:"display_name"`
+	Hidden                   bool                `json:"hidden"`
+	Availability             string              `json:"availability"`
+	SupportedInAPI           bool                `json:"supported_in_api"`
+	PreferWebsockets         bool                `json:"prefer_websockets"`
+	UseResponsesLite         bool                `json:"use_responses_lite"`
+	InputModalities          []string            `json:"input_modalities,omitempty"`
+	SupportedReasoningLevels []string            `json:"supported_reasoning_levels,omitempty"`
 }
 
 func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
@@ -207,6 +209,9 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			PreferWebsockets: false,
 			UseResponsesLite: false,
 			InputModalities:  []string{"text"},
+		}
+		if key == "gpt-5.6-sol" && strings.EqualFold(model.OwnedBy, "openai") {
+			item.ServiceTiers = []map[string]string{{"id": "priority", "name": "Fast"}, {"id": "ultrafast", "name": "Ultrafast"}}
 		}
 		if strings.Contains(key, "image") {
 			item.InputModalities = []string{"text", "image"}
@@ -312,7 +317,10 @@ const manifestLearnCacheTTL = 10 * time.Minute
 
 // learnManifestModelsAsync 判断清单里是否有缓存未见过的 slug，有则后台学习。
 // 学习失败只记日志，绝不影响清单透传本身。
-func (h *Handler) learnManifestModelsAsync(manifestBody []byte) {
+func (h *Handler) learnManifestModelsAsync(manifestBody []byte, accounts ...*auth.Account) {
+	for _, account := range accounts {
+		h.learnModelCapabilitiesAsync(account, manifestBody)
+	}
 	if len(manifestBody) == 0 {
 		return
 	}

@@ -1,8 +1,72 @@
 package proxy
 
 import (
+	"math"
 	"testing"
+
+	"github.com/codex2api/database"
 )
+
+func TestAstraPricingSourcesCannotRestoreLongContext(t *testing.T) {
+	t.Cleanup(func() { database.SetModelPricingOverrides(nil) })
+	for _, tt := range []struct {
+		name  string
+		body  string
+		parse func([]byte) (map[string]database.ModelPricingOverride, error)
+	}{
+		{
+			name: "flat JSON",
+			body: `{"gpt-6-astra":{"input":10,"cached_input":1,"output":50,
+				"input_priority":20,"cached_input_priority":2,"output_priority":100,
+				"input_long":20,"cached_input_long":2,"output_long":75,
+				"input_long_priority":40,"cached_input_long_priority":4,"output_long_priority":150}}`,
+			parse: parseModelPricingPayload,
+		},
+		{
+			name: "models.dev",
+			body: `{"openai":{"models":{"gpt-6-astra":{"cost":{
+				"input":10,"cache_read":1,"output":50,
+				"tiers":[{"input":20,"cache_read":2,"output":75,"tier":{"type":"context","size":272000}}]
+			}}}}}`,
+			parse: parseModelPricingPayload,
+		},
+		{
+			name: "official API Markdown",
+			body: `
+### Standard pricing data
+| Model | Short context input | Short context cached input | Short context cache writes | Short context output | Long context input | Long context cached input | Long context cache writes | Long context output |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gpt-6-astra | $10.00 | $1.00 | $12.50 | $50.00 | $20.00 | $2.00 | $25.00 | $75.00 |
+### Fast pricing data
+| Model | Short context input | Short context cached input | Short context cache writes | Short context output | Long context input | Long context cached input | Long context cache writes | Long context output |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| gpt-6-astra | $20.00 | $2.00 | $25.00 | $100.00 | $40.00 | $4.00 | $50.00 | $150.00 |
+`,
+			parse: ParseOpenAIOfficialPricingMarkdown,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := tt.parse([]byte(tt.body))
+			if err != nil {
+				t.Fatalf("parse source: %v", err)
+			}
+			if parsed["gpt-6-astra"].InputLong != 20 {
+				t.Fatalf("fixture must supply API long-context rates: %+v", parsed)
+			}
+			database.SetModelPricingOverrides(parsed)
+			for _, tier := range []string{"", "fast", "priority"} {
+				got := database.CalculateCostBreakdown(300000, 1000, 100000, "gpt-6-astra", tier)
+				want := 2.15
+				if tier != "" {
+					want = 4.3
+				}
+				if got.LongContext || math.Abs(got.TotalCost-want) > 1e-9 {
+					t.Fatalf("tier=%q restored API long-context rates: %+v, want total %v", tier, got, want)
+				}
+			}
+		})
+	}
+}
 
 func TestParseModelPricingPayloadFlat(t *testing.T) {
 	body := []byte(`{

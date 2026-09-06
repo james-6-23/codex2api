@@ -183,3 +183,57 @@ func TestUpdateAccountCredentialsCASKeepsEmbeddedFamilyCanonical(t *testing.T) {
 		t.Fatalf("updated row = generation %d family %q credentials %#v", row.CredentialGeneration, row.CredentialFamilyID, row.Credentials)
 	}
 }
+
+func TestSQLiteListAccountListProjectionCarriesClaudeAuthKind(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "account-list-projection-claude-auth-kind.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite) error: %v", err)
+	}
+	defer db.Close()
+	ctx := context.Background()
+	setupID, err := db.InsertAccountWithUpstream(ctx, "claude-setup", "anthropic", "claude", map[string]interface{}{
+		"upstream_type":    "claude",
+		"access_token":     "sk-ant-oat01-secret",
+		"claude_auth_kind": "setup_token",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oauthID, err := db.InsertAccountWithUpstream(ctx, "claude-oauth", "anthropic", "claude", map[string]interface{}{
+		"upstream_type": "claude",
+		"access_token":  "at",
+		"refresh_token": "rt",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiID, err := db.InsertAccountWithUpstream(ctx, "claude-api", "anthropic", "claude", map[string]interface{}{
+		"upstream_type": "claude", "claude_auth_kind": "api_key", "claude_base_url": "https://example.com/v1", "access_token": "api-secret",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows, err := db.ListAccountListProjection(ctx, UpstreamChannelClaude)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byID := map[int64]*AccountRow{}
+	for _, row := range rows {
+		byID[row.ID] = row
+	}
+	if got := byID[apiID]; got == nil || got.GetCredential("claude_auth_kind") != "api_key" || got.GetCredential("access_token") != "" || got.GetCredential("refresh_token") != "" {
+		t.Fatal("API key projection must carry auth kind without secret credentials")
+	}
+	if got := byID[setupID].GetCredential("claude_auth_kind"); got != "setup_token" {
+		t.Fatalf("setup token projection auth kind = %q", got)
+	}
+	if got := byID[setupID].GetCredential("access_token"); got != "" {
+		t.Fatalf("projection must never carry the access token, got %q", got)
+	}
+	if got := byID[oauthID].GetCredential("claude_auth_kind"); got != "" {
+		t.Fatalf("legacy oauth row must keep an empty auth kind in the projection, got %q", got)
+	}
+	if got := byID[oauthID].GetCredential("refresh_token"); got != "configured" {
+		t.Fatalf("refresh token presence marker = %q", got)
+	}
+}

@@ -99,9 +99,6 @@
     "output": 50,
     "input_priority": 20,
     "cached_input_priority": 2,
-    "output_priority": 100,
-    "input_long": 20,
-    "cached_input_long": 2,
-    "output_long": 75
+    "output_priority": 100
   }
 }

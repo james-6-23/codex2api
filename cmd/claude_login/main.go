@@ -13,6 +13,7 @@
 //	  程序换取 access/refresh token、打印账号身份，并自动试刷新一次。
 //
 // 可选参数：
+//
 //	-proxy   出站代理，如 http://127.0.0.1:7890 或 socks5://127.0.0.1:1080
 //	-session 自定义 session 文件路径（默认系统临时目录）
 //	-out     把最终 token（JSON）另存到指定文件，便于后续导入账号池
@@ -41,18 +42,19 @@ func main() {
 	proxy := flag.String("proxy", "", "出站代理 URL（可选）")
 	sessionPath := flag.String("session", defaultSessionPath(), "session 文件路径（承接 state/verifier）")
 	outPath := flag.String("out", "", "可选：把最终 token JSON 另存到该文件")
+	setupToken := flag.Bool("setup-token", false, "申请长效 Setup Token（仅 user:inference，1 年有效，无 refresh token）而非完整 OAuth")
 	flag.Parse()
 
 	if strings.TrimSpace(*code) == "" {
-		runStart(*sessionPath)
+		runStart(*sessionPath, *setupToken)
 		return
 	}
 	runExchange(*sessionPath, *code, *proxy, *outPath)
 }
 
 // runStart 生成授权 URL 并把 session 落盘。
-func runStart(sessionPath string) {
-	session, err := auth.StartClaudeLogin()
+func runStart(sessionPath string, setupToken bool) {
+	session, err := auth.StartClaudeLoginWithOptions(auth.ClaudeLoginOptions{SetupToken: setupToken})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "发起登录失败: %v\n", err)
 		os.Exit(1)
@@ -68,13 +70,14 @@ func runStart(sessionPath string) {
 	fmt.Println()
 	fmt.Println("   " + session.AuthURL)
 	fmt.Println()
-	fmt.Println("授权后浏览器会跳转到 http://localhost:54545/callback?code=...（页面打不开属正常）。")
-	fmt.Println("【推荐】只复制 code= 与 &state= 之间那段纯 code 值（无特殊字符，最省事）：")
+	if setupToken {
+		fmt.Println("（本次申请的是长效 Setup Token：仅推理权限，1 年有效，无 refresh token）")
+	}
+	fmt.Println("授权后页面会直接展示一段形如 code#state 的授权码，复制整段即可：")
 	fmt.Println()
-	fmt.Println("   go run ./cmd/claude_login -code '这里粘 code 值'")
+	fmt.Println("   go run ./cmd/claude_login -code '这里粘授权码'")
 	fmt.Println()
-	fmt.Println("若要粘整条回调 URL，务必用【单引号】包住（否则 zsh 会把 ? & 当通配符报 no matches found）：")
-	fmt.Println("   go run ./cmd/claude_login -code 'http://localhost:54545/callback?code=...&state=...'")
+	fmt.Println("若粘的是整条回调 URL，务必用【单引号】包住（否则 zsh 会把 ? & 当通配符报 no matches found）。")
 	fmt.Println()
 	fmt.Printf("(session 已存到 %s)\n", sessionPath)
 	fmt.Println("========================================================")
@@ -108,7 +111,7 @@ func runExchange(sessionPath, rawCode, proxy, outPath string) {
 	defer cancel()
 
 	fmt.Println(">> 正在换取 token ...")
-	td, err := client.ExchangeCode(ctx, code, state, session.Verifier)
+	td, err := client.ExchangeCodeWithOptions(ctx, code, state, session.Verifier, session.ExchangeOptions())
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "换取 token 失败: %v\n", err)
 		diagnoseClaudeLoginError(err)
@@ -139,6 +142,7 @@ func runExchange(sessionPath, rawCode, proxy, outPath string) {
 	if strings.TrimSpace(outPath) != "" {
 		out := map[string]any{
 			"upstream_type": auth.UpstreamClaude,
+			"auth_kind":     auth.NormalizeClaudeAuthKind(td.AuthKind, strings.TrimSpace(td.RefreshToken) != ""),
 			"access_token":  td.AccessToken,
 			"refresh_token": td.RefreshToken,
 			"email":         td.Email,

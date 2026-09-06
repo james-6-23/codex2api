@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -94,9 +95,24 @@ func TestGrokBatchImportRevivesRecycledIdentity(t *testing.T) {
 	handler := &Handler{db: db, store: store}
 	ctx := context.Background()
 
-	// Keep the imported credential usable so the detached post-import probe
-	// cannot race this test by trying to refresh the intentionally fake token.
-	authJSON := `{"refresh_token":"rt-issue-602","access_token":"at-issue-602","expires_at":"2099-01-01T00:00:00Z","client_id":"cli-602","user_id":"user-602","email":"u602@example.com"}`
+	// 导入后会起后台探针刷新凭据。测试凭据打到真实 auth.x.ai 只会换回
+	// invalid_grant——永久性错误,探针会把账号写成 error,与下面复活后的状态
+	// 断言竞速(CI 上偶发 status="error")。把令牌端点指到本地自签 TLS 桩:
+	// 刷新只会得到证书校验/503 这类瞬时错误,探针不再改写账号状态,也不再
+	// 依赖外网。故意不替换 http.DefaultTransport——后台探针可能在 Cleanup
+	// 恢复它时仍在读,会被 -race 抓到。
+	provider := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"error":"temporarily_unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(provider.Close)
+	providerURL, err := url.Parse(provider.URL)
+	if err != nil {
+		t.Fatalf("parse provider URL: %v", err)
+	}
+	t.Setenv(auth.EnvGrokOAuthHostAllowlist, providerURL.Host)
+
+	authJSON := `{"refresh_token":"rt-issue-602","client_id":"cli-602","user_id":"user-602","email":"u602@example.com",` +
+		`"token_endpoint":"` + provider.URL + `/oauth2/token","oidc_issuer":"` + provider.URL + `"}`
 
 	first := doGrokBatchImport(t, handler, authJSON)
 	if first.Imported != 1 || len(first.Items) != 1 || !first.Items[0].OK {

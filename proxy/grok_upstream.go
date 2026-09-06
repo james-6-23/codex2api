@@ -243,7 +243,7 @@ func ExecuteGrokRequest(ctx context.Context, account *auth.Account, requestBody 
 		if err := ConsumeAPIKeyModelRequestQuota(ctx, gjson.GetBytes(body, "model").String()); err != nil {
 			return nil, err
 		}
-		resp, err := getPooledClient(account, proxyURL).Do(req)
+		resp, err := doTracedUpstreamRequest(getPooledClient(account, proxyURL), req, account, proxyURL)
 		if err != nil {
 			if shouldRecyclePooledClient(err) {
 				recyclePooledClient(account, proxyURL)

@@ -83,6 +83,7 @@ func TestOpsResponseCacheMappingAndExactJSONShape(t *testing.T) {
 		t.Fatalf("decode response_cache JSON: %v; body=%s", err, data)
 	}
 	wantFields := []string{
+		"shared_payload_bytes",
 		"effective_config",
 		"applied_config",
 		"entries",

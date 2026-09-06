@@ -346,6 +346,7 @@ func responseCacheOpsResponseFromSnapshot(snapshot proxy.ResponseCacheOpsSnapsho
 		Entries:                snapshot.Stats.Entries,
 		MaxEntries:             snapshot.EffectiveConfig.MaxEntries,
 		CurrentBytes:           snapshot.Stats.Bytes,
+		SharedPayloadBytes:     snapshot.Stats.SharedPayloadBytes,
 		MaxBytes:               snapshot.EffectiveConfig.LocalMaxBytes,
 		HighWaterBytes:         snapshot.Stats.HighWaterBytes,
 		LargestEntryBytes:      snapshot.Stats.LargestSeenEntryBytes,

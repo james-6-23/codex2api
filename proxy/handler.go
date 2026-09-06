@@ -1180,6 +1180,7 @@ func noAvailableAnthropicAccountMessage(model string) string {
 
 // NewHandler 创建处理器
 func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCfg *DeviceProfileConfig) *Handler {
+	restoreModelCapabilities(store, db)
 	handler := &Handler{
 		store:      store,
 		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
@@ -1449,6 +1450,7 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 	populateClientIPFromRequest(c, input)
 	populateUserAgentMetaFromRequest(c, input)
 	populateWsAcquireFromRequest(c, input)
+	populateUpstreamTrace(c, input)
 	populateCompactUsageMetaFromRequest(c, input)
 	markCyberPolicyUsageKind(input)
 	h.logUsage(input)
@@ -1489,6 +1491,7 @@ func (h *Handler) logContinueThinkingRounds(c *gin.Context, res continueFoldResu
 			logInput.ErrorMessage = usageLogFailureMessage(statusCode, round.ErrMessage)
 			logInput.UpstreamErrorKind = "continue_thinking_error"
 		}
+		round.Trace.apply(logInput)
 		if round.Usage != nil {
 			logInput.PromptTokens = round.Usage.PromptTokens
 			logInput.CompletionTokens = round.Usage.CompletionTokens
@@ -2473,7 +2476,7 @@ func responseFailedStatusCodeWithEvidence(payload []byte) (int, bool) {
 		return http.StatusPaymentRequired, true
 	case strings.Contains(codeOrType, "forbidden") || strings.Contains(codeOrType, "permission"):
 		return http.StatusForbidden, true
-	case strings.Contains(codeOrType, "previous_response_not_found"):
+	case strings.Contains(codeOrType, "previous_response_not_found") || isPreviousResponseNotFoundBody(payload):
 		return http.StatusBadRequest, true
 	// 确定性客户端错误：输入超上下文窗口/字段超长/模型不存在等，换号重试
 	// 也必然失败。归为 400，避免落入 default 500 触发透明重试并惩罚账号
@@ -3004,6 +3007,7 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		attachUserAgentAudit(c)
 		attachWsAcquireAudit(c)
+		attachUpstreamTrace(c, h.store)
 		// 如果没有配置任何密钥
 		if !h.hasAnyKeys() {
 			if allowAnonymous {
@@ -5220,6 +5224,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				requestKeepaliveOwnsWrites := continuousRetryBuffersAttempts(continuousRetryPolicy) &&
 					continuousRetryKeepaliveActive(c.Request.Context()) && continuousRetryKeepaliveInterval > 0
 				fold := &continueFold{
+					trace:     func() upstreamTraceSnapshot { return snapshotUpstreamTrace(c.Request.Context()) },
 					baseBody:  upstreamBody,
 					maxRounds: contMaxRounds,
 					forward:   forward,

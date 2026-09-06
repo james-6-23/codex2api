@@ -60,13 +60,17 @@ type Handler struct {
 	// executeClaudeUsageProbe is injectable for tests; production uses the
 	// provider-native Anthropic Messages request directly.
 	executeClaudeUsageProbe func(context.Context, *auth.Account, []byte) (*http.Response, error)
-	activate5hWindow        func(context.Context, *auth.Account) error
-	executeUsageProbe       usageProbeRequestFunc
-	syncAccountPlanOnReset  func(context.Context, *auth.Account) error
-	queryResetCredits       func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
-	consumeResetCredit      func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
-	queryWhamDailyUsage     func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error)
-	sendCodexInvite         func(context.Context, *auth.Account, string, string, string, []string) (*proxy.CodexInviteResult, error)
+	// refreshClaudeTokensForImport is injectable for tests; production uses the
+	// real platform.claude.com refresh grant (see refreshClaudeCredentialsForImport).
+	refreshClaudeTokensForImport func(ctx context.Context, proxyURL, refreshToken string) (*auth.ClaudeTokenData, error)
+	activate5hWindow             func(context.Context, *auth.Account) error
+	executeUsageProbe            usageProbeRequestFunc
+	syncAccountPlanOnReset       func(context.Context, *auth.Account) error
+	queryResetCredits            func(context.Context, *auth.Account, string) (*proxy.WhamResetCreditsList, *http.Response, error)
+	consumeResetCredit           func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error)
+	queryWhamDailyUsage          func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyUsageResponse, *http.Response, error)
+	queryWhamDailyTokenBreakdown func(context.Context, *auth.Account, string, string, string) (*proxy.WhamDailyTokenBreakdownResponse, *http.Response, error)
+	sendCodexInvite              func(context.Context, *auth.Account, string, string, string, []string) (*proxy.CodexInviteResult, error)
 	// 列表 page-stats 发现当前页缺少官方结算快照时，按账号做即时回补；
 	// last/in-flight 避免翻页或前端重试把同一号打爆上游，failedAt 给持续
 	// 失败的账号更长的冷却，syncedOnce 记录「成功同步过但上游没有数据」
@@ -76,6 +80,7 @@ type Handler struct {
 	whamDailyBackfillInFlight  map[int64]struct{}
 	whamDailyBackfillFailedAt  map[int64]time.Time
 	whamDailySyncedOnce        map[int64]struct{}
+	whamDailyDeepSynced        map[int64]whamDailyDeepState
 	recordAccountEvent         func(int64, string, string)
 	proxyProbe                 func(context.Context, string, string) proxyProbeResult
 	reloadProxyPoolFn          func() error
@@ -991,6 +996,7 @@ func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *pro
 	handler.queryResetCredits = proxy.QueryWhamResetCredits
 	handler.consumeResetCredit = proxy.ConsumeResetCreditParsed
 	handler.queryWhamDailyUsage = proxy.QueryWhamDailyUsage
+	handler.queryWhamDailyTokenBreakdown = proxy.QueryWhamDailyTokenBreakdown
 	handler.sendCodexInvite = proxy.SendCodexInvite
 	handler.whamDailyBackfillLast = make(map[int64]time.Time)
 	handler.whamDailyBackfillInFlight = make(map[int64]struct{})
@@ -1080,7 +1086,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/grok/oauth/exchange-code", h.ExchangeGrokOAuthCode) // 兼容旧客户端
 	api.POST("/accounts/claude/oauth/auth-url", h.GenerateClaudeAuthURL)
 	api.POST("/accounts/claude/oauth/exchange-code", h.ExchangeClaudeOAuthCode)
+	api.POST("/accounts/claude/oauth/exchange-session-key", h.ExchangeClaudeSessionKey)
 	api.POST("/accounts/claude/import", h.ImportClaudeToken)
+	api.POST("/accounts/claude/import-setup-tokens", h.ImportClaudeSetupTokens) // 兼容旧名:同时接受 oat01/ort01
+	api.POST("/accounts/claude/import-tokens", h.ImportClaudeSetupTokens)
 	api.GET("/accounts/claude/export", h.ExportClaudeAccounts)
 	api.POST("/accounts/:id/claude/models", h.RefreshClaudeModels)
 	api.POST("/accounts/claude/models/refresh", h.RefreshAllClaudeModels)
@@ -1551,22 +1560,23 @@ func isDashboardRateLimitedAccount(status string, cooldownReason string) bool {
 // ==================== Accounts ====================
 
 type accountResponse struct {
-	DetailLoaded          bool   `json:"detail_loaded,omitempty"`
-	ID                    int64  `json:"id"`
-	Name                  string `json:"name"`
-	Email                 string `json:"email"`
-	EmailDomain           string `json:"email_domain,omitempty"`
-	ChatGPTAccountID      string `json:"chatgpt_account_id,omitempty"`
-	TokenWorkspaceID      string `json:"token_workspace_id,omitempty"`
-	WorkspaceIDOverride   string `json:"workspace_id_override,omitempty"`
-	EffectiveWorkspaceID  string `json:"effective_workspace_id,omitempty"`
-	PlanType              string `json:"plan_type"`
-	SubscriptionExpiresAt string `json:"subscription_expires_at,omitempty"`
-	Status                string `json:"status"`
-	ErrorMessage          string `json:"error_message,omitempty"`
-	ATOnly                bool   `json:"at_only"`
-	CreditEnabled         bool   `json:"credit_enabled"`
-	CreditSkipUsageWindow bool   `json:"credit_skip_usage_window"`
+	UpstreamRequestIDHeader string `json:"upstream_request_id_header"`
+	DetailLoaded            bool   `json:"detail_loaded,omitempty"`
+	ID                      int64  `json:"id"`
+	Name                    string `json:"name"`
+	Email                   string `json:"email"`
+	EmailDomain             string `json:"email_domain,omitempty"`
+	ChatGPTAccountID        string `json:"chatgpt_account_id,omitempty"`
+	TokenWorkspaceID        string `json:"token_workspace_id,omitempty"`
+	WorkspaceIDOverride     string `json:"workspace_id_override,omitempty"`
+	EffectiveWorkspaceID    string `json:"effective_workspace_id,omitempty"`
+	PlanType                string `json:"plan_type"`
+	SubscriptionExpiresAt   string `json:"subscription_expires_at,omitempty"`
+	Status                  string `json:"status"`
+	ErrorMessage            string `json:"error_message,omitempty"`
+	ATOnly                  bool   `json:"at_only"`
+	CreditEnabled           bool   `json:"credit_enabled"`
+	CreditSkipUsageWindow   bool   `json:"credit_skip_usage_window"`
 	// UsingCredits 是与 Status 并列的独立信号：用量窗口已打满但积分顶着，
 	// 状态仍是 active（可调度），前端据此在状态徽章旁并列一个「使用积分」徽章。
 	UsingCredits                  bool                        `json:"using_credits,omitempty"`
@@ -1577,6 +1587,8 @@ type accountResponse struct {
 	GrokAPI                       bool                        `json:"grok_api,omitempty"`
 	AntigravityAPI                bool                        `json:"antigravity_api,omitempty"`
 	ClaudeAPI                     bool                        `json:"claude_api,omitempty"`
+	ClaudeAuthKind                string                      `json:"claude_auth_kind,omitempty"`
+	ClaudeBaseURL                 string                      `json:"claude_base_url,omitempty"`
 	AntigravityAuthKind           string                      `json:"antigravity_auth_kind,omitempty"`
 	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
 	GrokAuthKind                  string                      `json:"grok_auth_kind,omitempty"`
@@ -2038,6 +2050,7 @@ func (h *Handler) listAccountsLite(c *gin.Context, ctx context.Context) {
 }
 
 type updateAccountSchedulerReq struct {
+	UpstreamRequestIDHeader json.RawMessage `json:"upstream_request_id_header"`
 	ScoreBiasOverride       json.RawMessage `json:"score_bias_override"`
 	BaseConcurrencyOverride json.RawMessage `json:"base_concurrency_override"`
 	SkipWarmTier            json.RawMessage `json:"skip_warm_tier"`
@@ -2192,7 +2205,14 @@ func parseAccountSchedulerUpdate(req updateAccountSchedulerReq) (accountSchedule
 	if codexFingerprintMode.Set {
 		codexFingerprintMode.Value = auth.NormalizeCodexFingerprintMode(codexFingerprintMode.Value)
 	}
+	requestIDHeader, err := parseOptionalStringField(req.UpstreamRequestIDHeader, "upstream_request_id_header", auth.ValidateUpstreamRequestIDHeader)
+	if err != nil {
+		return accountSchedulerUpdate{}, err
+	}
 	credentialUpdates := make(map[string]interface{})
+	if requestIDHeader.Set {
+		credentialUpdates[auth.UpstreamRequestIDHeaderCredentialKey] = strings.TrimSpace(requestIDHeader.Value)
+	}
 	if customHeaders.Set {
 		credentialUpdates["custom_headers"] = cloneCustomHeaders(customHeaders.Values)
 	}
@@ -2610,6 +2630,9 @@ func (h *Handler) applyAccountSchedulerRuntimeUpdate(id int64, update accountSch
 	}
 	if update.ProxyURL.Set {
 		h.store.ApplyAccountProxyURL(id, update.ProxyURL.Value)
+	}
+	if value, ok := update.CredentialUpdates[auth.UpstreamRequestIDHeaderCredentialKey].(string); ok {
+		h.store.ApplyAccountUpstreamRequestIDHeader(id, value)
 	}
 	if update.CustomHeaders.Set {
 		h.store.ApplyAccountCustomHeaders(id, update.CustomHeaders.Values)
@@ -4484,7 +4507,7 @@ func (h *Handler) SyncAccountUpstreamModels(c *gin.Context) {
 	if account.IsClaudeOAuth() {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
 		defer cancel()
-		models, fetchErr := auth.NewClaudeAuth(h.store.ResolveProxyForAccount(account)).FetchModels(ctx, account.GetAccessToken())
+		models, fetchErr := auth.NewClaudeAuth(h.store.ResolveProxyForAccount(account)).FetchModelsForAccount(ctx, account)
 		if fetchErr != nil {
 			writeError(c, http.StatusBadGateway, fmt.Sprintf("拉取 Claude 上游模型清单失败: %s", fetchErr.Error()))
 			return
@@ -8028,18 +8051,20 @@ func parseUsageLogsFilter(c *gin.Context, startTime, endTime time.Time) (databas
 	}
 
 	filter := database.UsageLogFilter{
-		Start:     startTime,
-		End:       endTime,
-		Page:      1,
-		PageSize:  20,
-		Email:     strings.TrimSpace(c.Query("email")),
-		Model:     strings.TrimSpace(c.Query("model")),
-		Endpoint:  strings.TrimSpace(c.Query("endpoint")),
-		APIKeyID:  apiKeyID,
-		AccountID: accountID,
-		ErrorKind: strings.TrimSpace(c.Query("error_kind")),
-		Query:     strings.TrimSpace(c.Query("q")),
-		Channel:   parseUsageChannel(c),
+		RequestID:         strings.TrimSpace(c.Query("request_id")),
+		UpstreamRequestID: strings.TrimSpace(c.Query("upstream_request_id")),
+		Start:             startTime,
+		End:               endTime,
+		Page:              1,
+		PageSize:          20,
+		Email:             strings.TrimSpace(c.Query("email")),
+		Model:             strings.TrimSpace(c.Query("model")),
+		Endpoint:          strings.TrimSpace(c.Query("endpoint")),
+		APIKeyID:          apiKeyID,
+		AccountID:         accountID,
+		ErrorKind:         strings.TrimSpace(c.Query("error_kind")),
+		Query:             strings.TrimSpace(c.Query("q")),
+		Channel:           parseUsageChannel(c),
 	}
 
 	if pageStr := c.Query("page"); pageStr != "" {

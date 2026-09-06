@@ -107,7 +107,7 @@ func TestBuildAccountResponseClaudeRedactsNonIdentityHeaders(t *testing.T) {
 	}
 }
 
-func TestClaudeImportParserAcceptsArrayAndRejectsNonOAuth(t *testing.T) {
+func TestClaudeImportParserAcceptsArrayAndRejectsUnknownAuthKind(t *testing.T) {
 	raw := `[{"type":"claude","version":1,"auth_kind":"oauth","name":"one","access_token":"at-1","refresh_token":"rt-1","account_id":"acct-1","models":["claude-sonnet-4-5"],"timezone":"Asia/Shanghai","tags":["prod"],"group_refs":[{"name":"Claude","channel":"claude"}],"enabled":false},{"upstream_type":"claude","access_token":"at-2","refresh_token":"rt-2"}]`
 	docs, err := parseClaudeImportDocuments([]byte(raw))
 	if err != nil {
@@ -119,8 +119,8 @@ func TestClaudeImportParserAcceptsArrayAndRejectsNonOAuth(t *testing.T) {
 	if docs[0].Models[0] != "claude-sonnet-4-5" || docs[0].Timezone != "Asia/Shanghai" {
 		t.Fatalf("parsed metadata = %+v", docs[0])
 	}
-	if _, err := parseClaudeImportDocuments([]byte(`{"type":"claude","auth_kind":"api_key","access_token":"at","refresh_token":"rt"}`)); err == nil {
-		t.Fatal("API-key auth_kind must be rejected")
+	if _, err := parseClaudeImportDocuments([]byte(`{"type":"claude","auth_kind":"unknown","access_token":"at","refresh_token":"rt"}`)); err == nil {
+		t.Fatal("unknown auth_kind must be rejected")
 	}
 }
 

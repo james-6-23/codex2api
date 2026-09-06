@@ -1698,7 +1698,7 @@ func ExecuteGrokNativeProtocolProbeAtOriginWithHeaders(ctx context.Context, acco
 	if protocol == GrokProtocolMessages {
 		req.Header.Set("anthropic-version", "2023-06-01")
 	}
-	resp, err := getPooledClient(account, proxyURL).Do(req)
+	resp, err := doTracedUpstreamRequest(getPooledClient(account, proxyURL), req, account, proxyURL)
 	if err != nil {
 		return nil, ErrUpstream(0, "请求 Grok 原生协议探针失败", err)
 	}
@@ -1883,6 +1883,7 @@ func fetchGrokMinimumClientVersion(ctx context.Context, account *auth.Account, p
 // Responses. The returned body always speaks Responses SSE on successful
 // Chat/Messages routes, preserving the existing downstream projection boundary.
 func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbound GrokProtocol, inboundBody, responsesBody []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
+	resetUpstreamAttemptTrace(ctx)
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -1944,7 +1945,7 @@ func ExecuteGrokProtocolRequest(ctx context.Context, account *auth.Account, inbo
 		if err := ConsumeAPIKeyModelRequestQuota(ctx, preflight.Model); err != nil {
 			return nil, err
 		}
-		resp, doErr := getPooledClient(account, proxyURL).Do(req)
+		resp, doErr := doTracedUpstreamRequest(getPooledClient(account, proxyURL), req, account, proxyURL)
 		if doErr != nil {
 			if shouldRecyclePooledClient(doErr) {
 				recyclePooledClient(account, proxyURL)

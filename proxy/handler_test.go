@@ -860,6 +860,28 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 			},
 		},
 		{
+			name: "unavailable for user HTTP rejection",
+			rejected: func() *http.Response {
+				return &http.Response{StatusCode: http.StatusBadRequest, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader(`{"error":{"message":"previous_response_id is not available for this user"}}`))}
+			},
+		},
+		{
+			name: "unavailable for user failed event",
+			rejected: func() *http.Response {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader("data: {\"type\":\"response.failed\",\"response\":{\"error\":{\"message\":\"previous_response_id is not available for this user\"}}}\n\n"))}
+			},
+		},
+		{
+			name:            "unavailable for user error event with replay",
+			continuousRetry: true,
+			rejected: func() *http.Response {
+				return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header),
+					Body: io.NopCloser(strings.NewReader("data: {\"type\":\"error\",\"message\":\"previous_response_id is not available for this user\"}\n\n"))}
+			},
+		},
+		{
 			name:            "in-stream error with catch-all replay",
 			continuousRetry: true,
 			rejected: func() *http.Response {

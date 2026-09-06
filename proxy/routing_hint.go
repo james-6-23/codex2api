@@ -26,7 +26,7 @@ func CodexRoutingHintDisabled() bool {
 
 // buildCodexRoutingHint 按最终出站 body（模型映射与 tier 净化之后）合成 hint 值。
 // model 缺失或含分隔符、拼出的值含控制字符时返回空（整头不发）。
-// tier 只放行 priority（fast 归一化）与 flex；default 是显式的标准路由哨兵，
+// tier 放行 priority（fast 归一化）、ultrafast 与 flex；default 是显式的标准路由哨兵，
 // 与缺失/auto/scale/未知值一样降为 model-only 形态。
 func buildCodexRoutingHint(requestBody []byte) string {
 	results := gjson.GetManyBytes(requestBody, "model", "service_tier")
@@ -39,7 +39,7 @@ func buildCodexRoutingHint(requestBody []byte) string {
 	if tier == "fast" {
 		tier = "priority"
 	}
-	if tier == "priority" || tier == "flex" {
+	if tier == "priority" || tier == "flex" || tier == "ultrafast" {
 		hint += ";tier=" + tier
 	}
 	if !validHTTPHeaderValue(hint) {

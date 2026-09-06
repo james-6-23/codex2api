@@ -15,6 +15,7 @@ export type QuickConfigSaveError =
 export type QuickConfigReadySaveError = Exclude<QuickConfigSaveError, "not_ready">;
 
 export interface QuickConfigAccountSource {
+  upstream_request_id_header?: string | null;
   id: number;
   detail_loaded?: boolean;
   codex_fingerprint_mode?: string | null;
@@ -29,6 +30,7 @@ export interface QuickConfigAccountSource {
 }
 
 export interface QuickConfigFormState {
+  upstreamRequestIdHeader: string;
   accountId: number;
   fingerprintMode: CodexFingerprintMode;
   scoreMode: "default" | "custom";
@@ -106,6 +108,7 @@ export function formStateFromAccount(
 ): QuickConfigFormState {
   return {
     accountId: account.id,
+    upstreamRequestIdHeader: account.upstream_request_id_header ?? "",
     fingerprintMode: normalizeCodexFingerprintMode(account.codex_fingerprint_mode),
     scoreMode: account.score_bias_override != null ? "custom" : "default",
     scoreInput:
@@ -198,6 +201,7 @@ export function buildQuickConfigSavePayload(
       skip_warm_tier: form.skipWarmTier,
       proxy_url: form.proxyUrl.trim() || null,
       custom_headers: parsedHeaders.value,
+      upstream_request_id_header: form.upstreamRequestIdHeader.trim(),
       codex_fingerprint_mode: form.fingerprintMode,
       tags: form.tags,
       group_ids: form.groupIds,

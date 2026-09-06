@@ -2213,7 +2213,7 @@ func prepareResponsesBodyForOwnerDetailed(rawBody []byte, owner string) response
 			preparation.Bypassed = true
 		} else {
 			preparation.RequiresLocalContext = currentInput.IsArray() && inputHasFunctionCallOutput(currentInput)
-			preparation.CacheLookup = getResponseCacheResult(owner, prevID)
+			preparation.CacheLookup = getResponseCacheForReplay(owner, prevID)
 		}
 	}
 	preparedBody, expandedInputRaw := prepareResponsesBodyWithOptions(rawBody, responsesBodyPrepareOptions{
@@ -2596,7 +2596,7 @@ func modelSupportsMaxReasoningEffort(model string) bool {
 // isAllowedServiceTier 判断 service_tier 是否在上游允许的范围内
 func isAllowedServiceTier(tier string) bool {
 	switch tier {
-	case "auto", "default", "flex", "priority", "scale", "fast":
+	case "auto", "default", "flex", "priority", "scale", "fast", "ultrafast":
 		return true
 	default:
 		return false
@@ -2604,11 +2604,13 @@ func isAllowedServiceTier(tier string) bool {
 }
 
 // upstreamServiceTier 将客户端 service_tier 映射为上游接受的值。
-// Codex 上游当前只接受 priority；auto/default/flex/scale 都不应显式转发。
+// priority/ultrafast 保留档位；auto/default/flex/scale 沿用现有省略策略。
 func upstreamServiceTier(tier string) (string, bool) {
 	switch tier {
 	case "fast", "priority":
 		return "priority", true
+	case "ultrafast":
+		return "ultrafast", true
 	case "auto", "default", "flex", "scale":
 		return "", false
 	default:
@@ -2901,7 +2903,7 @@ func sanitizeServiceTierForUpstream(body []byte) []byte {
 		return body
 	}
 	switch tier {
-	case "auto", "default", "flex", "priority", "scale", "fast":
+	case "auto", "default", "flex", "priority", "scale", "fast", "ultrafast":
 		body, _ = sjson.DeleteBytes(body, "serviceTier")
 		if upstreamTier, ok := upstreamServiceTier(tier); ok {
 			body, _ = sjson.SetBytes(body, "service_tier", upstreamTier)
@@ -2999,7 +3001,7 @@ func billingServiceTierCostRank(tier string) (int, bool) {
 		return 0, true
 	case "", "default", "standard", "auto", "scale":
 		return 1, true
-	case "priority":
+	case "priority", "ultrafast":
 		return 2, true
 	default:
 		return 1, false

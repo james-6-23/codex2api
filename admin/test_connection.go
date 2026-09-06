@@ -26,12 +26,15 @@ var batchTestWhamTimeout = 5 * time.Second
 
 // testEvent SSE 测试事件
 type testEvent struct {
-	Type        string                 `json:"type"`              // test_start | content | diagnostics | test_complete | error
-	Text        string                 `json:"text,omitempty"`    // 内容文本
-	Model       string                 `json:"model,omitempty"`   // 测试模型
-	Success     bool                   `json:"success,omitempty"` // 是否成功
-	Error       string                 `json:"error,omitempty"`   // 错误信息
-	Diagnostics *claudeTestDiagnostics `json:"diagnostics,omitempty"`
+	Type    string `json:"type"`              // test_start | content | diagnostics | test_complete | error
+	Text    string `json:"text,omitempty"`    // 内容文本
+	Model   string `json:"model,omitempty"`   // 测试模型
+	Success bool   `json:"success,omitempty"` // 是否成功
+	Error   string `json:"error,omitempty"`   // 错误信息
+	// diagnostics 事件按渠道携带各自形态的诊断对象:Claude 原生 Messages 测连用
+	// diagnostics,Codex/Responses 测连用 codex_diagnostics,两者不会同时出现。
+	Diagnostics      *claudeTestDiagnostics `json:"diagnostics,omitempty"`
+	CodexDiagnostics *codexTestDiagnostics  `json:"codex_diagnostics,omitempty"`
 }
 
 type responsesTerminalOutcome uint8
@@ -165,6 +168,10 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		if isClaudeAccount {
 			event.Diagnostics = newClaudeTestRecorder(nil, testModel, claudeFingerprintMode, account.GetAccessToken(), start).finish()
 			event.Error = sanitizeClaudeTestText(event.Error, account.GetAccessToken())
+		} else {
+			failed := newCodexTestRecorder(nil, testModel, account, start)
+			event.CodexDiagnostics = failed.finish()
+			event.Error = sanitizeCodexTestText(event.Error, failed.secrets)
 		}
 		sendTestEvent(c, event)
 		return
@@ -175,11 +182,19 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		return
 	}
 
+	// Codex/Responses 测连诊断:拿到响应头即先推一帧(状态码、用量窗口头),流结束后
+	// 再补最终帧(耗时、终态、usage、正文预览)。最终帧在终止事件之后,客户端要读到
+	// SSE 关闭再刷新账号快照。
+	recorder := newCodexTestRecorder(resp, testModel, account, start)
+	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.finish()}) }()
+	sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.details})
+
 	if resp.StatusCode != http.StatusOK {
 		if !isOpenAIResponsesAccount && !isTransient {
 			proxy.SyncCodexUsageState(h.store, account, resp)
 		}
 		errBody, _ := io.ReadAll(resp.Body)
+		recorder.observe(errBody)
 		errMsg := fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(errBody), 500))
 		if !isTransient {
 			switch resp.StatusCode {
@@ -241,39 +256,41 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	gotTerminal := false
 	sentTerminal := false
 	var lastUpstreamEvent []byte
+	emitContent := func(text string) {
+		hasContent = true
+		recorder.contentReceived()
+		sendTestEvent(c, testEvent{Type: "content", Text: text})
+	}
 	readErr := proxy.ReadSSEStream(resp.Body, func(data []byte) bool {
 		lastUpstreamEvent = append(lastUpstreamEvent[:0], data...)
+		recorder.observe(data)
 		eventType := gjson.GetBytes(data, "type").String()
 
 		switch eventType {
 		case "response.output_text.delta":
 			delta := gjson.GetBytes(data, "delta").String()
 			if delta != "" {
-				hasContent = true
-				sendTestEvent(c, testEvent{Type: "content", Text: delta})
+				emitContent(delta)
 			}
 		case "response.output_text.done":
 			if !hasContent {
 				text := gjson.GetBytes(data, "text").String()
 				if text != "" {
-					hasContent = true
-					sendTestEvent(c, testEvent{Type: "content", Text: text})
+					emitContent(text)
 				}
 			}
 		case "response.content_part.done":
 			if !hasContent {
 				text := gjson.GetBytes(data, "part.text").String()
 				if text != "" {
-					hasContent = true
-					sendTestEvent(c, testEvent{Type: "content", Text: text})
+					emitContent(text)
 				}
 			}
 		case "response.output_item.done":
 			if !hasContent {
 				text := extractOutputItemText(gjson.GetBytes(data, "item"))
 				if text != "" {
-					hasContent = true
-					sendTestEvent(c, testEvent{Type: "content", Text: text})
+					emitContent(text)
 				}
 			}
 		case "response.completed":
@@ -292,8 +309,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			if !hasContent {
 				text := extractCompletedOutputText(data)
 				if text != "" {
-					hasContent = true
-					sendTestEvent(c, testEvent{Type: "content", Text: text})
+					emitContent(text)
 				}
 			}
 			if !hasContent {
@@ -409,6 +425,9 @@ func (h *Handler) handleClaudeConnectionTest(
 	id int64,
 ) {
 	recorder := newClaudeTestRecorder(resp, testModel, fingerprintMode, account.GetAccessToken(), start)
+	if account.IsClaudeAPIKey() {
+		recorder.details.FingerprintMode = ""
+	}
 	// The final diagnostics follow the terminal result; clients must drain the
 	// SSE response before refreshing the invalidated account snapshot.
 	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", Diagnostics: recorder.finish()}) }()
@@ -506,6 +525,12 @@ func (h *Handler) handleClaudeConnectionTest(
 	} else {
 		h.store.RecordManualTestSuccess(account, time.Since(start))
 	}
+	// 显式复探成功:该模型此前的模型级冷却(如 credits_required)已不成立,立即解除,
+	// 调度器无需等 30 分钟窗口自然到期。
+	if account.IsModelRateLimited(testModel) {
+		h.store.ClearModelCooldown(account, testModel)
+	}
+	proxy.NoteClaudeGatedModelSuccess(h.store, account, testModel)
 	sendTestEvent(c, testEvent{Type: "test_complete", Success: true})
 }
 
@@ -854,9 +879,9 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 					}
 				}
 			}
-			if account.IsModelRateLimited(requested) {
-				return "", fmt.Errorf("该 Claude 模型当前不可用（模型级冷却）: %s", requested)
-			}
+			// 显式指定的模型不受模型级冷却(含 credits_required)阻拦:手工测试本身就是
+			// 操作者在主动复探(例如刚买了 credits / 想确认套餐),上游若仍拒绝会重新标记
+			// 冷却;若成功则由调用方清掉该模型的冷却。只有自动选模时才跳过冷却中的模型。
 			for _, model := range models {
 				if strings.EqualFold(strings.TrimSpace(model), requested) {
 					return strings.TrimSpace(model), nil
@@ -1401,6 +1426,7 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 			if status != "success" {
 				return "failed", msg
 			}
+			proxy.NoteClaudeGatedModelSuccess(h.store, acc, testModel)
 		} else if !acc.IsRelayStyle() {
 			usageState := proxy.SyncCodexUsageState(h.store, acc, resp)
 			applyUsageLimitedTestState(h.store, acc, usageState)

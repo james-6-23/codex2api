@@ -285,7 +285,30 @@ func TestHandleClaudeModelBillingRejection_CreditsRequired_ModelLevel(t *testing
 	if acc.IsModelRateLimited("claude-haiku-4-5-20251001") {
 		t.Fatal("其它模型不应受 credits_required 影响")
 	}
-	t.Log("credits_required: 仅 fable-5 冷却, 账号与其它模型不受影响")
+	// 套餐推断 hook:占位套餐降为 pro。
+	if got := acc.GetPlanType(); got != "pro" {
+		t.Fatalf("credits_required 应把占位套餐推断为 pro,got %q", got)
+	}
+	t.Log("credits_required: 仅 fable-5 冷却, 账号与其它模型不受影响, 套餐推断 pro")
+}
+
+func TestNoteClaudeGatedModelSuccessInfersMax(t *testing.T) {
+	store := newSyncTestStore()
+	acc := &auth.Account{UpstreamType: auth.UpstreamClaude, AccessToken: "at", PlanType: "claude"}
+	NoteClaudeGatedModelSuccess(store, acc, "claude-sonnet-4-5")
+	if acc.GetPlanType() != "claude" {
+		t.Fatal("non-gated model must not change plan")
+	}
+	NoteClaudeGatedModelSuccess(store, acc, "claude-fable-5")
+	if acc.GetPlanType() != "max" {
+		t.Fatalf("fable success should infer max, got %q", acc.GetPlanType())
+	}
+	// 之后再命中 credits_required(例如另一模型)会降回 pro;已是 pro 不再重复改动。
+	body := []byte(`{"type":"error","error":{"details":{"error_code":"credits_required","model":"claude-fable-5"}}}`)
+	HandleClaudeModelBillingRejection(store, acc, "claude-fable-5", http.StatusTooManyRequests, body)
+	if acc.GetPlanType() != "pro" {
+		t.Fatalf("credits_required after max should infer pro, got %q", acc.GetPlanType())
+	}
 }
 
 // 非 credits_required 的普通 429 → HandleClaudeModelBillingRejection 不处理(交给账号级同步)。

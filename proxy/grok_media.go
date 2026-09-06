@@ -286,7 +286,7 @@ func doGrokMediaRequest(ctx context.Context, account *auth.Account, profile grok
 			req.Header.Set(key, values[0])
 		}
 	}
-	resp, err := getPooledClient(account, proxyURL).Do(req)
+	resp, err := doTracedUpstreamRequest(getPooledClient(account, proxyURL), req, account, proxyURL)
 	if err != nil {
 		if shouldRecyclePooledClient(err) {
 			recyclePooledClient(account, proxyURL)
@@ -1335,7 +1335,7 @@ func (h *Handler) streamGrokVideoAsset(c *gin.Context, account *auth.Account, pr
 	// 浅拷贝共享连接池但独立 CheckRedirect:签名 URL 域外跳转一律拒绝(防 SSRF)。
 	client := *getPooledClient(account, proxyURL)
 	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
-	resp, err := client.Do(req)
+	resp, err := doTracedUpstreamRequest(&client, req, account, proxyURL)
 	if err != nil {
 		return false
 	}

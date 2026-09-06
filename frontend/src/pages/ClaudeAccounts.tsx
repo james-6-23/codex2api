@@ -34,6 +34,7 @@ import {
   FileJson,
   Hourglass,
   Wallet,
+  Clock,
 } from "lucide-react";
 
 import { api } from "../api";
@@ -162,6 +163,22 @@ function formatShortDateTime(iso?: string): { label: string; title: string } | n
   if (!Number.isFinite(d.getTime())) return null;
   return {
     label: `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`,
+    title: d.toLocaleString(),
+  };
+}
+
+// formatResetShort 重置时间的紧凑形态:当天只显示 HH:mm,跨天才带 MM-DD;完整时间放 title。
+// 用量列把重置时间与进度条同行摆放,省掉一行的同时保持 5h(当天)与 7d(跨天)都可读。
+function formatResetShort(iso?: string): { label: string; title: string } | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  const ts = d.getTime();
+  if (!Number.isFinite(ts) || ts <= Date.now()) return null;
+  const now = new Date();
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  const hm = `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+  return {
+    label: sameDay ? hm : `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${hm}`,
     title: d.toLocaleString(),
   };
 }
@@ -304,7 +321,7 @@ type ClaudeStatusFilter =
   | "disabled"
   | "locked";
 
-type AuthFilter = "all" | "oauth" | "api_key";
+type AuthFilter = "all" | "oauth" | "setup_token" | "api_key";
 type HealthTier = "healthy" | "warm" | "risky" | "banned";
 
 // 排序键(表头 / 排序按钮点击切换,同键再点翻转方向,与 Codex 一致)。
@@ -468,8 +485,7 @@ function UsageWindow({
       </div>
     );
   }
-  const resetTs = reset ? new Date(reset).getTime() : NaN;
-  const rt = Number.isFinite(resetTs) && resetTs > Date.now() ? formatShortDateTime(reset) : null;
+  const rt = formatResetShort(reset);
   return (
     <div>
       <div className="flex items-center gap-1.5">
@@ -478,13 +494,18 @@ function UsageWindow({
           <div className={cn("h-full rounded-full transition-all", usageTone(pct))} style={{ width: `${Math.min(100, pct)}%` }} />
         </div>
         <span className="w-[42px] shrink-0 text-right text-[12px] font-semibold tabular-nums">{pct.toFixed(1)}%</span>
+        {/* 重置时间与进度条同行:当天只显示时分,省一行高度;完整时间放 title */}
+        {rt ? (
+          <span
+            className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-[10px] tabular-nums text-muted-foreground/80"
+            title={`${t("claude.resetIn")} ${rt.title}`}
+          >
+            <Clock className="size-2.5" aria-hidden />
+            {rt.label}
+          </span>
+        ) : null}
       </div>
       {detailText ? <div className={USAGE_BAR_META_CLASS}>{detailText}</div> : null}
-      {rt ? (
-        <div className={USAGE_BAR_META_CLASS} title={rt.title}>
-          ⏱ {rt.label}
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -506,6 +527,40 @@ function ClaudeScopedUsageWindows({ windows }: { windows?: AccountRow["claude_us
         />
       ))}
     </>
+  );
+}
+
+// ClaudeSampleStateLine 状态列里的采样一行:彩色状态点 + 已采样/未采样/采样失败 + 相对时间。
+// 替代此前"采样胶囊 + 最后采样文字"两处冗余,少占一行;错误信息完整放 title,行内只截断展示。
+function ClaudeSampleStateLine({ acc }: { acc: AccountRow }) {
+  const { t } = useTranslation();
+  const probedAt = acc.claude_usage_probe_at;
+  const error = acc.claude_usage_probe_error;
+  const state: "error" | "sampled" | "unsampled" = error ? "error" : probedAt ? "sampled" : "unsampled";
+  const dot = {
+    error: "bg-rose-500",
+    sampled: "bg-emerald-500",
+    unsampled: "bg-amber-400",
+  }[state];
+  const label = {
+    error: t("claude.samplingState.error"),
+    sampled: t("claude.samplingState.sampled"),
+    unsampled: t("claude.samplingState.unsampled"),
+  }[state];
+  const absolute = probedAt ? formatShortDateTime(probedAt)?.title : undefined;
+  const title = [
+    `${t("claude.lastSample")}: ${absolute ?? t("claude.samplingState.notSampled")}`,
+    error || "",
+  ]
+    .filter(Boolean)
+    .join("\n");
+  return (
+    <div className="flex min-w-0 items-center gap-1.5 whitespace-nowrap text-[11px] leading-4 text-muted-foreground" title={title}>
+      <span className={cn("size-1.5 shrink-0 rounded-full", dot)} aria-hidden />
+      <span className={cn("font-medium", state === "error" ? "text-rose-600 dark:text-rose-400" : "text-foreground/80")}>{label}</span>
+      {probedAt ? <span className="tabular-nums text-muted-foreground/70">· {formatRelativeShort(probedAt, t)}</span> : null}
+      {error ? <span className="truncate text-muted-foreground/70">· {error}</span> : null}
+    </div>
   );
 }
 
@@ -549,7 +604,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [groups, setGroups] = useState<AccountGroup[]>([]);
 
   const [showAdd, setShowAdd] = useState(false);
-  const [addInitialTab, setAddInitialTab] = useState<"oauth" | "import">("oauth");
+  const [addInitialTab, setAddInitialTab] = useState<ClaudeAddTab>("oauth");
   const [exporting, setExporting] = useState(false);
   const [authJsonExportingIds, setAuthJsonExportingIds] = useState<Set<number>>(new Set());
   const [showManageGroups, setShowManageGroups] = useState(false);
@@ -741,7 +796,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   // 避免无限刷新或在后台标签页持续制造请求。
   const pendingSamplingKey = useMemo(
     () => accounts
-      .filter((acc) => acc.claude_api && !acc.claude_usage_probe_at && !acc.claude_usage_probe_error)
+      .filter((acc) => acc.claude_api && acc.claude_auth_kind !== "api_key" && !acc.claude_usage_probe_at && !acc.claude_usage_probe_error)
       .map((acc) => acc.id)
       .join(","),
     [accounts],
@@ -775,7 +830,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   // paid Messages fallback again on the next page visit.
   const legacyUsageRefreshKey = useMemo(
     () => accounts
-      .filter((acc) => acc.claude_api && Boolean(acc.claude_usage_probe_at) && !acc.claude_usage_windows_probed && !acc.claude_usage_probe_error)
+      .filter((acc) => acc.claude_api && acc.claude_auth_kind !== "api_key" && Boolean(acc.claude_usage_probe_at) && !acc.claude_usage_windows_probed && !acc.claude_usage_probe_error)
       .map((acc) => acc.id)
       .join(","),
     [accounts],
@@ -1344,7 +1399,9 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   // 运营误以为 Claude API Key 可以走同一原生链路。
   const authTabs: Array<{ id: AuthFilter; label: string; count?: number }> = [
     { id: "all", label: t("accounts.filterAll") },
-    { id: "oauth", label: "OAuth", count: summary?.oauth || summary?.total || 0 },
+    { id: "oauth", label: "OAuth", count: summary?.oauth || 0 },
+    { id: "setup_token", label: t("claude.authKindSetupToken"), count: summary?.setup_token || 0 },
+    { id: "api_key", label: t("claude.authKindAPIKey"), count: summary?.api_key || 0 },
   ];
 
   const hasFilterPills =
@@ -1373,7 +1430,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const poolEmpty = !loading && total === 0 && !filtersActive;
 
-  const openAdd = (tab: "oauth" | "import") => {
+  const openAdd = (tab: ClaudeAddTab) => {
     setAddInitialTab(tab);
     setShowAdd(true);
   };
@@ -1906,7 +1963,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
                       renderSortHead("importTime", t("accounts.importTime"))
                     ) : null}
                     {visibleCols.updatedAt ? <TableHead className="text-[13px] font-semibold">{t("accounts.updatedAt")}</TableHead> : null}
-                    <TableHead data-account-actions className="text-right text-xs font-medium">{t("accounts.actions")}</TableHead>
+                    <TableHead data-account-actions className="text-right text-[13px] font-semibold">{t("accounts.actions")}</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -2040,7 +2097,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
           account={detailTarget}
           groups={(detailTarget.group_ids ?? []).map((id) => groupMap.get(id)).filter(Boolean) as AccountGroup[]}
           healthBuckets={healthBars[String(detailTarget.id)]}
-          usageSlot={
+          usageSlot={detailTarget.claude_auth_kind === "api_key" ? <p className="text-xs text-muted-foreground">{t("claude.apiKeyUsageNA")}</p> :
             <div className="space-y-1.5 rounded-xl border border-border bg-card p-3">
               <UsageWindow label={t("claude.usage5h")} pct={claudeUsagePct(detailTarget.usage_percent_5h)} reset={detailTarget.reset_5h_at} detail={detailTarget.usage_5h_detail} />
               <UsageWindow label={t("claude.usage7d")} pct={claudeUsagePct(detailTarget.usage_percent_7d)} reset={detailTarget.reset_7d_at} detail={detailTarget.usage_7d_detail} />
@@ -2067,6 +2124,10 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
                 </Button>
               </div>
               <div className="space-y-2 rounded-xl border border-orange-200/70 bg-orange-50/50 p-3 text-xs dark:border-orange-900/60 dark:bg-orange-950/20">
+                {detailTarget.claude_auth_kind === "api_key" ? <>
+                  <div>{t("claude.authKindAPIKey")}</div>
+                  <div className="break-all">{t("claude.baseURLLabel")}: {detailTarget.claude_base_url}</div>
+                </> : <>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.authOAuth")}</span><span className="font-medium">{t("claude.providerProtocol")}</span></div>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.subscriptionPlan")}</span><span>{(() => { const badge = claudePlanBadge(detailTarget.plan_type || "claude"); return <span className={badge.cls}>{badge.label}</span>; })()}</span></div>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.subscriptionExpires")}</span><span className="text-right">{formatShortDateTime(detailTarget.subscription_expires_at)?.label ?? t("claude.metadataUnknown")}</span></div>
@@ -2075,9 +2136,12 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.versionPolicyLabel")}</span><span className="text-right">{detailTarget.claude_version_policy === "fixed" ? t("claude.versionPolicyFixed") : detailTarget.claude_version_policy === "minimum" ? t("claude.versionPolicyMinimum") : t("claude.versionPolicyPassthrough")}{detailTarget.claude_client_version ? ` · ${detailTarget.claude_client_version}` : ""}</span></div>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.timezoneLabel")}</span><span className="max-w-[250px] text-right">{detailTarget.timezone ? claudeTimezoneLabel(detailTarget.timezone) : t("claude.metadataUnknown")}</span></div>
                 <div className="flex items-start justify-between gap-3"><span className="shrink-0 text-muted-foreground">{t("claude.upstreamUserAgent")}</span><span className="max-w-[260px] break-all text-right font-mono text-[10px]">{detailTarget.claude_user_agent || t("claude.uaNotConfigured")}</span></div>
+                </>}
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.modelsLabel")}</span><span className="max-w-[230px] text-right">{detailTarget.models?.length ? t("claude.modelsWhitelistCount", { count: normalizeClaudeModelList(detailTarget.models).length }) : t("claude.modelsWhitelistAll")}</span></div>
+                {detailTarget.claude_auth_kind !== "api_key" ? <>
                 <div className="flex justify-between gap-3"><span className="text-muted-foreground">{t("claude.lastSample")}</span><span title={detailTarget.claude_usage_probe_at ? formatShortDateTime(detailTarget.claude_usage_probe_at)?.title : undefined}>{detailTarget.claude_usage_probe_at ? formatRelativeShort(detailTarget.claude_usage_probe_at, t) : t("claude.samplingState.notSampled")}</span></div>
                 {detailTarget.claude_usage_probe_error ? <div className="break-words text-rose-600 dark:text-rose-300">{detailTarget.claude_usage_probe_error}</div> : null}
+                </> : null}
               </div>
             </section>
           }
@@ -2186,6 +2250,7 @@ function ClaudeAccountRow({
   onDelete: () => void;
 }) {
   const { t } = useTranslation();
+  const isAPIKey = acc.claude_auth_kind === "api_key";
   const pct5h = claudeUsagePct(acc.usage_percent_5h);
   const pct7d = claudeUsagePct(acc.usage_percent_7d);
   const disabled = acc.enabled === false;
@@ -2208,12 +2273,12 @@ function ClaudeAccountRow({
     { key: "edit", label: t("claude.editTitle"), icon: <Pencil className="size-3.5" />, onSelect: onEdit },
     { key: "usage", label: t("accounts.usageDetail"), icon: <BarChart3 className="size-3.5" />, onSelect: onUsage },
     { key: "test", label: t("accounts.testConnection"), icon: <Zap className="size-3.5" />, onSelect: onTest },
-    {
+    ...(!isAPIKey ? [{
       key: "refresh",
       label: t("accounts.refreshAccessToken"),
       icon: <RefreshCw className="size-3.5" />,
       onSelect: onRefresh,
-    },
+    }] : []),
     {
       key: "export",
       label: t("claude.exportCredential"),
@@ -2331,7 +2396,7 @@ function ClaudeAccountRow({
                 @{acc.email_domain}
               </span>
             ) : null}
-            {acc.locked || acc.models?.length || acc.last_used_at ? (
+            {acc.locked || acc.models?.length || acc.last_used_at || acc.claude_auth_kind === "setup_token" || isAPIKey ? (
               <div className="flex flex-wrap items-center gap-1">
                 {acc.locked ? (
                   <span className="inline-flex items-center rounded-md bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 ring-1 ring-inset ring-blue-600/20 dark:bg-blue-950 dark:text-blue-400 dark:ring-blue-400/20">
@@ -2351,6 +2416,16 @@ function ClaudeAccountRow({
                   >
                     {t("claude.modelCount", { count: acc.models.length })}
                   </button>
+                ) : null}
+                {isAPIKey ? <span className="inline-flex items-center rounded-md bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300">{t("claude.authKindAPIKey")}</span> : null}
+                {/* 凭据形态徽章:长效 Setup Token 与模型数并排,和套餐列分离 */}
+                {acc.claude_auth_kind === "setup_token" ? (
+                  <span
+                    className="inline-flex items-center rounded-md bg-violet-50 px-1.5 py-0.5 text-[10px] font-medium text-violet-700 ring-1 ring-inset ring-violet-500/20 dark:bg-violet-950/40 dark:text-violet-300 dark:ring-violet-400/20"
+                    title={t("claude.authModeSetupTokenHint")}
+                  >
+                    {t("claude.authKindSetupToken")}
+                  </span>
                 ) : null}
                 {acc.last_used_at ? (
                   <span className="text-[10px] text-muted-foreground/70" title={formatShortDateTime(acc.last_used_at)?.title}>
@@ -2385,7 +2460,7 @@ function ClaudeAccountRow({
       {columns.plan ? (
         <TableCell>
           <div className="flex flex-wrap items-center gap-1.5">
-            {acc.plan_type ? (
+            {isAPIKey ? <span className="text-xs font-medium">API</span> : acc.plan_type ? (
               (() => {
                 const badge = claudePlanBadge(acc.plan_type);
                 return (
@@ -2397,7 +2472,7 @@ function ClaudeAccountRow({
             ) : (
               <span className="text-[12px] text-muted-foreground">-</span>
             )}
-            <ClaudeExpiryBadge expiresAt={acc.subscription_expires_at} planType={acc.plan_type} />
+            {!isAPIKey ? <ClaudeExpiryBadge expiresAt={acc.subscription_expires_at} planType={acc.plan_type} /> : null}
           </div>
         </TableCell>
       ) : null}
@@ -2409,32 +2484,9 @@ function ClaudeAccountRow({
                 <StatusBadge status={getAccountStatusBadgeStatus(acc)} errorMessage={acc.error_message} detail={cooldownReason} />
                 <LiveCountdown until={acc.cooldown_until} label={t("claude.resetIn")} />
                 <ClaudeConcurrencyBadge acc={acc} />
-                {acc.claude_api ? (
-                  <span
-                    className={cn(
-                      "inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] font-medium ring-1 ring-inset",
-                      acc.claude_usage_probe_error
-                        ? "bg-rose-50 text-rose-700 ring-rose-600/20 dark:bg-rose-950 dark:text-rose-300"
-                        : acc.claude_usage_probe_at
-                          ? "bg-emerald-50 text-emerald-700 ring-emerald-600/20 dark:bg-emerald-950 dark:text-emerald-300"
-                          : "bg-amber-50 text-amber-700 ring-amber-600/20 dark:bg-amber-950 dark:text-amber-300",
-                    )}
-                    title={acc.claude_usage_probe_error || t("claude.samplingState.notSampled")}
-                  >
-                    {acc.claude_usage_probe_error
-                      ? t("claude.samplingState.error")
-                      : acc.claude_usage_probe_at
-                        ? t("claude.samplingState.sampled")
-                        : t("claude.samplingState.unsampled")}
-                  </span>
-                ) : null}
               </div>
-              {acc.claude_api ? (
-                <div className="truncate text-[11px] text-muted-foreground" title={acc.claude_usage_probe_error || undefined}>
-                  {t("claude.lastSample")}: {acc.claude_usage_probe_at ? formatRelativeShort(acc.claude_usage_probe_at, t) : t("claude.samplingState.notSampled")}
-                  {acc.claude_usage_probe_error ? ` · ${acc.claude_usage_probe_error}` : ""}
-                </div>
-              ) : null}
+              {/* 采样状态与最后采样时间合成一行:状态点 + 文案 + 相对时间,错误信息放 title */}
+              {acc.claude_api && !isAPIKey ? <ClaudeSampleStateLine acc={acc} /> : null}
               <AccountHealthBar buckets={healthBuckets} />
             </div>
           )}
@@ -2452,9 +2504,9 @@ function ClaudeAccountRow({
       ) : null}
       {columns.usage ? (
         <TableCell>
-          {hasUsage ? (
-            <div className="flex w-56 items-start gap-1">
-              <div className="w-[188px] space-y-1.5">
+          {isAPIKey ? <span className="text-xs text-muted-foreground">{t("claude.apiKeyUsageNA")}</span> : hasUsage ? (
+            <div className="flex min-w-[232px] items-center gap-1.5">
+              <div className="min-w-0 flex-1 space-y-1">
                 <UsageWindow label={t("claude.usage5h")} pct={pct5h} reset={acc.reset_5h_at} detail={acc.usage_5h_detail} />
                 <UsageWindow label={t("claude.usage7d")} pct={pct7d} reset={acc.reset_7d_at} detail={acc.usage_7d_detail} />
                 <ClaudeScopedUsageWindows windows={acc.claude_usage_windows} />
@@ -2475,12 +2527,12 @@ function ClaudeAccountRow({
         </TableCell>
       ) : null}
       {columns.importTime ? (
-        <TableCell className="whitespace-nowrap text-[13px] text-muted-foreground">
+        <TableCell className="whitespace-nowrap text-[13px] tabular-nums text-muted-foreground">
           {formatBeijingTime(acc.created_at)}
         </TableCell>
       ) : null}
       {columns.updatedAt ? (
-        <TableCell className="whitespace-nowrap text-[13px] text-muted-foreground">
+        <TableCell className="whitespace-nowrap text-[13px] tabular-nums text-muted-foreground">
           {formatRelativeTime(acc.updated_at)}
         </TableCell>
       ) : null}
@@ -2972,6 +3024,7 @@ function EditAccountModal({
         scheduler_priority: parseNum(priority),
         score_bias_override: parseNum(scoreBias),
         base_concurrency_override: parseNum(concurrency),
+        ...(account.claude_auth_kind !== "api_key" ? {
         auto_pause_5h_threshold: parseNum(pause5h),
         auto_pause_7d_threshold: parseNum(pause7d),
         claude_fingerprint_mode: fpMode,
@@ -2979,6 +3032,7 @@ function EditAccountModal({
         claude_version_policy: versionPolicy || null,
         claude_client_version: clientVersion.trim() || null,
         timezone: timezone.trim(),
+        } : {}),
       });
       showToast(t("claude.saved"), "success");
       // 手动输入的代理若不在代理管理中,询问是否存入(需在关闭弹窗前完成)。
@@ -3037,6 +3091,7 @@ function EditAccountModal({
             <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label="" />,
             t("claude.proxyHint"),
           )}
+          {account.claude_auth_kind !== "api_key" ? <>
           {field(
             t("claude.fingerprintModeLabel"),
             <Select
@@ -3105,6 +3160,7 @@ function EditAccountModal({
             </div>,
             t("claude.timezoneHint"),
           )}
+          </> : null}
         </div>
 
         {/* 调度 */}
@@ -3130,6 +3186,7 @@ function EditAccountModal({
           </div>
         </div>
 
+        {account.claude_auth_kind !== "api_key" ? <>
         {/* 自动暂停 */}
         <div className="space-y-3 rounded-lg border border-border/60 p-3">
           <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
@@ -3140,6 +3197,8 @@ function EditAccountModal({
             {field(t("claude.autoPause7dLabel"), <Input value={pause7d} onChange={(e) => setPause7d(e.target.value)} placeholder="90" inputMode="numeric" />)}
           </div>
         </div>
+
+        </> : null}
 
         {/* 标签 */}
         {field(
@@ -3364,7 +3423,10 @@ function ClaudeModelsModal({
   );
 }
 
-// ── 添加账号弹窗:网页 OAuth 两步式 / 导入 token JSON ──────
+// ── 添加账号弹窗:网页授权(OAuth / Setup Token) / 粘贴 Setup Token / sessionKey 登录 / 导入凭据 JSON ──────
+type ClaudeAddTab = "oauth" | "setup_token" | "api_key" | "cookie" | "import";
+type ClaudeAuthMode = "oauth" | "setup_token";
+
 function ClaudeAddModal({
   proxies,
   groups,
@@ -3374,14 +3436,16 @@ function ClaudeAddModal({
 }: {
   proxies: ProxyRow[];
   groups: AccountGroup[];
-  initialTab?: "oauth" | "import";
+  initialTab?: ClaudeAddTab;
   onClose: () => void;
   onAdded: () => void;
 }) {
   const { t } = useTranslation();
   const { showToast } = useToast();
   const { confirm, confirmDialog } = useConfirmDialog();
-  const [tab, setTab] = useState<"oauth" | "import">(initialTab);
+  const [tab, setTab] = useState<ClaudeAddTab>(initialTab);
+  // 令牌形态:网页授权与 sessionKey 登录共用。setup_token=长效 1 年、仅推理、无 RT。
+  const [authMode, setAuthMode] = useState<ClaudeAuthMode>("oauth");
 
   const [proxyUrl, setProxyUrl] = useState("");
   const [useProxyPool, setUseProxyPool] = useState(false);
@@ -3392,9 +3456,15 @@ function ClaudeAddModal({
   const [groupIds, setGroupIds] = useState<Set<number>>(new Set());
 
   const [authUrl, setAuthUrl] = useState("");
+  const [authUrlMode, setAuthUrlMode] = useState<ClaudeAuthMode>("oauth");
   const [state, setState] = useState("");
   const [callback, setCallback] = useState("");
   const [tokenJson, setTokenJson] = useState("");
+  const [setupTokens, setSetupTokens] = useState("");
+  const [apiBaseUrl, setApiBaseUrl] = useState("https://api.anthropic.com");
+  const [apiKey, setApiKey] = useState("");
+  const [sessionKey, setSessionKey] = useState("");
+  const [showSessionKey, setShowSessionKey] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const toggleGroup = useCallback((id: number) => {
@@ -3405,6 +3475,11 @@ function ClaudeAddModal({
       return next;
     });
   }, []);
+
+  const selectedGroupRefs = useMemo(
+    () => groups.filter((group) => groupIds.has(group.id)).map((group) => ({ name: group.name, channel: "claude" as const })),
+    [groups, groupIds],
+  );
 
   // 添加成功后,如选择了分组则批量指派(用新账号返回的 id)。
   const applyGroups = useCallback(
@@ -3424,15 +3499,19 @@ function ClaudeAddModal({
   const genAuthUrl = useCallback(async () => {
     setAuthUrlLoading(true);
     try {
-      const res = await api.generateClaudeAuthURL();
+      const res = await api.generateClaudeAuthURL(authMode);
       setAuthUrl(res.auth_url);
       setState(res.state);
+      setAuthUrlMode(res.mode === "setup_token" ? "setup_token" : "oauth");
     } catch (error) {
       showToast(t("claude.authUrlFailed") + ": " + getErrorMessage(error), "error");
     } finally {
       setAuthUrlLoading(false);
     }
-  }, [showToast, t]);
+  }, [authMode, showToast, t]);
+
+  // 切换令牌形态后旧链接的 scope 已不匹配,需重新生成。
+  const authUrlStale = Boolean(authUrl) && authUrlMode !== authMode;
 
   const submitOAuth = useCallback(async () => {
     const code = extractCode(callback);
@@ -3461,6 +3540,88 @@ function ClaudeAddModal({
     }
   }, [callback, name, onAdded, proxyUrl, proxies, confirm, showToast, state, t, timezone, useProxyPool, applyGroups]);
 
+  const submitSessionKey = useCallback(async () => {
+    if (!sessionKey.trim()) {
+      showToast(t("claude.cookieExchangeFailed"), "error");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await api.exchangeClaudeSessionKey({
+        session_key: sessionKey.trim(),
+        mode: authMode,
+        name: name.trim() || undefined,
+        proxy_url: useProxyPool ? undefined : proxyUrl.trim() || undefined,
+        use_proxy_pool: useProxyPool || undefined,
+        timezone: timezone.trim() || undefined,
+      });
+      await applyGroups(res?.id);
+      setSessionKey("");
+      showToast(t("claude.added"), "success");
+      if (!useProxyPool) await maybeOfferSaveProxyToPool(proxyUrl, proxies, confirm, showToast, t);
+      onAdded();
+    } catch (error) {
+      showToast(t("claude.cookieExchangeFailed") + ": " + getErrorMessage(error), "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [authMode, name, onAdded, proxyUrl, proxies, confirm, sessionKey, showToast, t, timezone, useProxyPool, applyGroups]);
+
+  const submitSetupTokens = useCallback(async () => {
+    if (!/sk-ant-(oat01|ort01)-/.test(setupTokens)) {
+      showToast(t("claude.setupTokenMissing"), "error");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const res = await api.importClaudeSetupTokens({
+        text: setupTokens,
+        name: name.trim() || undefined,
+        proxy_url: useProxyPool ? undefined : proxyUrl.trim() || undefined,
+        use_proxy_pool: useProxyPool || undefined,
+        timezone: timezone.trim() || undefined,
+        group_refs: selectedGroupRefs.length > 0 ? selectedGroupRefs : undefined,
+      });
+      const firstError = res.items?.find((item) => !item.ok)?.error;
+      if (res.imported > 0) {
+        showToast(t("claude.setupTokenImported", { imported: res.imported, total: res.total }), res.failed > 0 ? "warning" : "success");
+      } else {
+        showToast(t("claude.importNothingAdded") + (firstError ? ": " + firstError : ""), "warning");
+      }
+      if (res.imported > 0) {
+        setSetupTokens("");
+        if (!useProxyPool) await maybeOfferSaveProxyToPool(proxyUrl, proxies, confirm, showToast, t);
+        onAdded();
+      }
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [name, onAdded, proxyUrl, proxies, confirm, selectedGroupRefs, setupTokens, showToast, t, timezone, useProxyPool]);
+
+  const submitAPIKey = useCallback(async () => {
+    if (!apiKey.trim() || !apiBaseUrl || /\s/.test(apiBaseUrl)) {
+      showToast(t("claude.apiKeyRequired"), "error");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const result = await api.importClaudeToken({
+        auth_kind: "api_key", base_url: apiBaseUrl, api_key: apiKey.trim(),
+        name: name.trim(), proxy_url: proxyUrl.trim(), use_proxy_pool: useProxyPool,
+      });
+      await applyGroups(result.id);
+      showToast(t("claude.added"), "success");
+      if (!useProxyPool) await maybeOfferSaveProxyToPool(proxyUrl, proxies, confirm, showToast, t);
+      onAdded();
+    } catch (error) {
+      showToast(getErrorMessage(error), "error");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [apiKey, apiBaseUrl, name, proxyUrl, useProxyPool, applyGroups, onAdded, proxies, confirm, showToast, t]);
+
   const submitImport = useCallback(async () => {
     let parsed: Record<string, unknown> | unknown[];
     try {
@@ -3477,9 +3638,12 @@ function ClaudeAddModal({
         ? parsed.accounts
         : [parsed];
     const firstDocument = documents[0];
+    // access_token / refresh_token 至少一个:OAuth 只给 RT 时服务端先刷新换出 AT;
+    // Setup Token 文档没有 RT,由服务端按 auth_kind / 令牌形状判定。
     if (!firstDocument || typeof firstDocument !== "object" || Array.isArray(firstDocument)
-      || typeof (firstDocument as Record<string, unknown>).access_token !== "string"
-      || typeof (firstDocument as Record<string, unknown>).refresh_token !== "string") {
+      || (typeof (firstDocument as Record<string, unknown>).access_token !== "string"
+        && typeof (firstDocument as Record<string, unknown>).refresh_token !== "string"
+        && typeof (firstDocument as Record<string, unknown>).api_key !== "string")) {
       showToast(t("claude.invalidJson"), "error");
       return;
     }
@@ -3497,9 +3661,6 @@ function ClaudeAddModal({
     }
     setSubmitting(true);
     try {
-      const selectedGroupRefs = groups
-        .filter((group) => groupIds.has(group.id))
-        .map((group) => ({ name: group.name, channel: "claude" as const }));
       const applyOverrides = (document: unknown): ClaudeCredentialExportEntry => {
         const source = document as Record<string, unknown>;
         return {
@@ -3529,7 +3690,7 @@ function ClaudeAddModal({
     } finally {
       setSubmitting(false);
     }
-  }, [groups, groupIds, name, onAdded, proxyUrl, proxies, confirm, showToast, t, timezone, tokenJson, useProxyPool, applyGroups]);
+  }, [name, onAdded, proxyUrl, proxies, confirm, selectedGroupRefs, showToast, t, timezone, tokenJson, useProxyPool, applyGroups]);
 
   const handleImportFile = useCallback(async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -3548,6 +3709,30 @@ function ClaudeAddModal({
     }
   }, [showToast, t]);
 
+  // 令牌形态切换(网页授权 / sessionKey 登录共用)。
+  const authModeSwitch = (
+    <div className="space-y-1">
+      <span className="text-xs font-semibold text-muted-foreground">{t("claude.authModeLabel")}</span>
+      <div className="flex flex-wrap gap-1.5">
+        {(["oauth", "setup_token"] as ClaudeAuthMode[]).map((mode) => (
+          <button
+            key={mode}
+            type="button"
+            aria-pressed={authMode === mode}
+            onClick={() => setAuthMode(mode)}
+            className={cn(
+              "inline-flex items-center rounded-md border px-2 py-1 text-[11px] transition-colors",
+              authMode === mode ? "border-primary bg-primary/10 text-primary" : "border-border text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {mode === "oauth" ? t("claude.authModeOAuth") : t("claude.authModeSetupToken")}
+          </button>
+        ))}
+      </div>
+      {authMode === "setup_token" ? <p className="text-[11px] text-muted-foreground">{t("claude.authModeSetupTokenHint")}</p> : null}
+    </div>
+  );
+
   const commonFields = (
     <div className="space-y-2">
       <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label={t("claude.proxyLabel")} disabled={useProxyPool} />
@@ -3555,7 +3740,12 @@ function ClaudeAddModal({
         <input type="checkbox" checked={useProxyPool} onChange={(e) => setUseProxyPool(e.target.checked)} />
         {t("claude.useProxyPool")}
       </label>
-      <Input value={name} onChange={(e) => setName(e.target.value)} placeholder={t("claude.namePlaceholder")} />
+      <Input
+        value={name}
+        onChange={(e) => setName(e.target.value)}
+        placeholder={tab === "setup_token" ? t("claude.setupTokenNamePlaceholder") : t("claude.namePlaceholder")}
+      />
+      {tab !== "api_key" ? (
       <div className="space-y-1">
         <Select
           value={timezoneCustom ? CLAUDE_TIMEZONE_CUSTOM : (findClaudeTimezoneOption(timezone)?.value ?? (timezone.trim() ? CLAUDE_TIMEZONE_CUSTOM : ""))}
@@ -3577,6 +3767,7 @@ function ClaudeAddModal({
         {findClaudeTimezoneOption(timezone) ? <p className="text-[10px] text-muted-foreground">{claudeTimezoneLabel(timezone)}</p> : null}
         {timezoneCustom ? <Input value={timezone} onChange={(e) => setTimezone(e.target.value)} placeholder={t("claude.timezonePlaceholder")} /> : null}
       </div>
+      ) : null}
       {groups.length > 0 ? (
         <div className="space-y-1">
           <span className="text-xs font-semibold text-muted-foreground">{t("claude.filterGroup")}</span>
@@ -3612,6 +3803,46 @@ function ClaudeAddModal({
     </div>
   );
 
+  const submitButton = (() => {
+    switch (tab) {
+      case "oauth":
+        return (
+          <Button onClick={() => void submitOAuth()} disabled={submitting || !authUrl}>
+            {t("claude.exchange")}
+          </Button>
+        );
+      case "api_key":
+        return <Button onClick={() => void submitAPIKey()} disabled={submitting}>{submitting ? <Loader2 className="size-3.5 animate-spin" /> : null}{t("claude.import")}</Button>;
+      case "setup_token":
+        return (
+          <Button onClick={() => void submitSetupTokens()} disabled={submitting}>
+            {t("claude.importSetupTokens")}
+          </Button>
+        );
+      case "cookie":
+        return (
+          <Button onClick={() => void submitSessionKey()} disabled={submitting}>
+            {submitting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            {t("claude.cookieExchange")}
+          </Button>
+        );
+      default:
+        return (
+          <Button onClick={() => void submitImport()} disabled={submitting}>
+            {t("claude.import")}
+          </Button>
+        );
+    }
+  })();
+
+  const tabs: Array<{ id: ClaudeAddTab; label: string }> = [
+    { id: "oauth", label: t("claude.tabOAuth") },
+    { id: "setup_token", label: t("claude.tabSetupToken") },
+    { id: "api_key", label: t("claude.authKindAPIKey") },
+    { id: "cookie", label: t("claude.tabCookie") },
+    { id: "import", label: t("claude.tabImport") },
+  ];
+
   return (
     <Modal
       show
@@ -3623,30 +3854,22 @@ function ClaudeAddModal({
           <Button variant="ghost" onClick={onClose}>
             {t("common.cancel")}
           </Button>
-          {tab === "oauth" ? (
-            <Button onClick={() => void submitOAuth()} disabled={submitting}>
-              {t("claude.exchange")}
-            </Button>
-          ) : (
-            <Button onClick={() => void submitImport()} disabled={submitting}>
-              {t("claude.import")}
-            </Button>
-          )}
+          {submitButton}
         </div>
       }
     >
       <div className="space-y-4">
-        <div className="flex gap-2">
-          <Button variant={tab === "oauth" ? "default" : "ghost"} size="sm" onClick={() => setTab("oauth")}>
-            {t("claude.tabOAuth")}
-          </Button>
-          <Button variant={tab === "import" ? "default" : "ghost"} size="sm" onClick={() => setTab("import")}>
-            {t("claude.tabImport")}
-          </Button>
+        <div className="flex flex-wrap gap-2">
+          {tabs.map((item) => (
+            <Button key={item.id} variant={tab === item.id ? "default" : "ghost"} size="sm" onClick={() => setTab(item.id)}>
+              {item.label}
+            </Button>
+          ))}
         </div>
 
         {tab === "oauth" ? (
           <div className="space-y-3">
+            {authModeSwitch}
             <p className="text-xs text-muted-foreground">{t("claude.step1")}</p>
             {/* 先生成并展示授权链接(不自动弹授权页),用户核对后自行打开/复制 */}
             {!authUrl ? (
@@ -3657,6 +3880,7 @@ function ClaudeAddModal({
             ) : (
               <div className="space-y-2 rounded-lg border border-border bg-muted/30 p-3">
                 <p className="text-xs text-muted-foreground">{t("claude.authUrlReady")}</p>
+                {authUrlStale ? <p className="text-xs text-amber-600 dark:text-amber-400">{t("claude.authUrlStale")}</p> : null}
                 {/* 完整 URL 直接作为可点击链接展示:全量换行(break-all)不出滚动条 */}
                 <a
                   href={authUrl}
@@ -3692,7 +3916,67 @@ function ClaudeAddModal({
             <Input value={callback} onChange={(e) => setCallback(e.target.value)} placeholder={t("claude.callbackPlaceholder")} />
             {commonFields}
           </div>
-        ) : (
+        ) : null}
+
+        {tab === "setup_token" ? (
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">{t("claude.setupTokenHint")}</p>
+            <textarea
+              value={setupTokens}
+              onChange={(e) => setSetupTokens(e.target.value)}
+              placeholder={t("claude.setupTokenPlaceholder")}
+              rows={6}
+              spellCheck={false}
+              className="w-full rounded-md border border-input bg-background p-2 font-mono text-xs outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/20"
+            />
+            <p className="text-[11px] text-muted-foreground">{t("claude.authModeSetupTokenHint")}</p>
+            {commonFields}
+          </div>
+        ) : null}
+
+        {tab === "api_key" ? (
+          <div className="space-y-3">
+            <p className="text-xs text-muted-foreground">{t("claude.apiKeyHint")}</p>
+            <label className="block space-y-1 text-xs">
+              <span>{t("claude.baseURLLabel")}</span>
+              <Input value={apiBaseUrl} onChange={(e) => setApiBaseUrl(e.target.value)} placeholder="https://api.anthropic.com" spellCheck={false} />
+            </label>
+            <label className="block space-y-1 text-xs">
+              <span>API Key</span>
+              <Input type="password" autoComplete="off" value={apiKey} onChange={(e) => setApiKey(e.target.value)} placeholder="sk-ant-…" spellCheck={false} />
+            </label>
+            {commonFields}
+          </div>
+        ) : null}
+
+        {tab === "cookie" ? (
+          <div className="space-y-3">
+            {authModeSwitch}
+            <p className="text-xs text-muted-foreground">{t("claude.cookieHint")}</p>
+            <div className="relative">
+              <Input
+                type={showSessionKey ? "text" : "password"}
+                autoComplete="off"
+                spellCheck={false}
+                value={sessionKey}
+                onChange={(e) => setSessionKey(e.target.value)}
+                placeholder={t("claude.cookiePlaceholder")}
+                className="pr-9 font-mono text-xs"
+              />
+              <button
+                type="button"
+                className="absolute inset-y-0 right-2 inline-flex items-center text-muted-foreground hover:text-foreground"
+                onClick={() => setShowSessionKey((v) => !v)}
+                aria-label={showSessionKey ? t("claude.hideSessionKey") : t("claude.showSessionKey")}
+              >
+                {showSessionKey ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+              </button>
+            </div>
+            {commonFields}
+          </div>
+        ) : null}
+
+        {tab === "import" ? (
           <div className="space-y-3">
             <p className="text-xs text-muted-foreground">{t("claude.importHint")}</p>
             <textarea
@@ -3704,7 +3988,7 @@ function ClaudeAddModal({
             />
             {commonFields}
           </div>
-        )}
+        ) : null}
       </div>
       {confirmDialog}
     </Modal>

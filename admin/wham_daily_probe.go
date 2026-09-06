@@ -55,7 +55,7 @@ const (
 	// 白白消耗上游配额；失败账号交给小时级探针兜底即可。
 	whamDailyUsageBackfillFailureCooldown = 15 * time.Minute
 
-	// whamDailyUsageKeepDays 是本地快照保留期。上游只有 7 天，本地留一年足够看趋势。
+	// whamDailyUsageKeepDays 是本地快照保留期。上游可回溯约 84 天，本地留一年足够看趋势。
 	whamDailyUsageKeepDays = 365
 
 	// whamDailyUsageMinAccountAge 是自动刷新官方结算的最短账号年龄。
@@ -65,10 +65,11 @@ const (
 
 var whamDailyUsageProbeOnce sync.Once
 
-// StartWhamDailyUsageProbe 周期性把官方结算用量落库。
+// StartWhamDailyUsageProbe 周期性把官方结算用量（counts + 模型×速度拆分）落库。
 //
-// 上游 daily-workspace-usage-counts 只保留 7 天，过期即永久丢失，所以这个任务是
-// 长期历史的唯一来源；漏跑超过 7 天就会留下永久空洞。
+// 上游 daily-workspace-usage-counts 可回溯深度有限（实测约 84 天），更久的历史只在
+// 本地库里，所以这个任务是长期历史的唯一来源。稳态每轮滚动回补 7 天，首次同步
+// 深回补 84 天，漏跑几轮不会留下空洞。
 func (h *Handler) StartWhamDailyUsageProbe(ctx context.Context) {
 	if h == nil || h.db == nil || h.store == nil {
 		return
@@ -168,7 +169,7 @@ func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[in
 
 			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
-			_, err := h.syncWhamDailyUsage(reqCtx, acc)
+			outcome, err := h.syncWhamDailyUsage(reqCtx, acc)
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
@@ -179,6 +180,10 @@ func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[in
 				return
 			}
 			okCount++
+			// 拆分端点失败不算整体失败：counts 已落库，份额下一轮再补。
+			if outcome.BreakdownErr != nil {
+				log.Printf("官方模型拆分快照失败 account=%d: %v", acc.DBID, outcome.BreakdownErr)
+			}
 		}(account)
 	}
 	wg.Wait()
@@ -241,16 +246,24 @@ func whamDailyUsageBackfillEligible(account *auth.Account) bool {
 	if account == nil || account.DBID <= 0 {
 		return false
 	}
-	// WHAM is a ChatGPT-only control-plane endpoint. Claude OAuth credentials
-	// belong to Anthropic Messages and must never be sent to WHAM (even though
-	// they carry an access token and are relay-style accounts).
-	if account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() {
+	if !whamDailyUsageChannelSupported(account) {
 		return false
 	}
 	if isCodexATAccount(account) {
 		return false
 	}
 	return account.GetAccessToken() != ""
+}
+
+// whamDailyUsageChannelSupported 判断账号所属渠道是否有 ChatGPT WHAM 端点。
+// WHAM 只属于 ChatGPT 控制面：中转、Grok、Claude OAuth 与 Antigravity（Google）的
+// 凭据属于别家，即便带着 access token 也绝不能发去 wham（Antigravity 漏判曾表现为
+// 每轮探针都记一条 401）。探针候选与手动刷新都要过这道门。
+func whamDailyUsageChannelSupported(account *auth.Account) bool {
+	if account == nil {
+		return false
+	}
+	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI())
 }
 
 // isCodexATAccount 识别 at-... 形态的纯 AT 凭据。这类凭据能调用
@@ -339,9 +352,14 @@ func (h *Handler) runWhamDailyUsageBackfill(accounts []*auth.Account) {
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
-			if _, err := h.syncWhamDailyUsage(ctx, acc); err != nil {
+			outcome, err := h.syncWhamDailyUsage(ctx, acc)
+			if err != nil {
 				h.markWhamDailyBackfillFailed(acc.DBID)
 				log.Printf("官方用量即时回补失败 account=%d: %v", acc.DBID, err)
+				return
+			}
+			if outcome.BreakdownErr != nil {
+				log.Printf("官方模型拆分即时回补失败 account=%d: %v", acc.DBID, outcome.BreakdownErr)
 			}
 		}(account)
 	}

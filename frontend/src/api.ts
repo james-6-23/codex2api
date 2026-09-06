@@ -89,6 +89,9 @@ import type {
   OAuthExchangeResponse,
   OAuthURLResponse,
   ClaudeAuthURLResponse,
+  ClaudeAuthKind,
+  ClaudeSessionKeyExchangeRequest,
+  ClaudeSetupTokenImportRequest,
   ClaudeExchangeCodeRequest,
   ClaudeImportTokenRequest,
   ClaudeCredentialExportEntry,
@@ -740,12 +743,27 @@ export const api = {
     request<void>(`/accounts/antigravity/oauth/${encodeURIComponent(sessionId)}`, {
       method: 'DELETE',
     }),
-  // Claude Code OAuth：第一步取授权 URL（服务端暂存 state→verifier）。
-  generateClaudeAuthURL: () =>
+  // Claude Code OAuth：第一步取授权 URL（服务端暂存 state→verifier）。mode=setup_token
+  // 申请长效 Setup Token(仅推理 scope,1 年有效,无 RT)。
+  generateClaudeAuthURL: (mode: ClaudeAuthKind = 'oauth') =>
     request<ClaudeAuthURLResponse>('/accounts/claude/oauth/auth-url', {
       method: 'POST',
-      body: JSON.stringify({}),
+      body: JSON.stringify({ mode }),
       timeoutMs: 15_000,
+    }),
+  // claude.ai sessionKey(cookie)一键换号:服务端代跑 OAuth 三步。
+  exchangeClaudeSessionKey: (data: ClaudeSessionKeyExchangeRequest) =>
+    request<ClaudeAddAccountResponse>('/accounts/claude/oauth/exchange-session-key', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
+    }),
+  // 批量粘贴 sk-ant-oat01- Setup Token。
+  importClaudeSetupTokens: (data: ClaudeSetupTokenImportRequest) =>
+    request<ClaudeImportBundleResponse>('/accounts/claude/import-setup-tokens', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 120_000,
     }),
   // 第二步：用 state+code 换取 token 并入库（可选从代理池分配代理）。
   exchangeClaudeOAuthCode: (data: ClaudeExchangeCodeRequest) =>
@@ -754,12 +772,12 @@ export const api = {
       body: JSON.stringify(data),
       timeoutMs: 90_000,
     }),
-  // CLI 直导：吃 cmd/claude_login -out 产出的 token JSON。
+  // Claude 凭据导入：OAuth、Setup Token 或 Base URL + API Key。
   importClaudeToken: (data: ClaudeImportTokenRequest) =>
     request<ClaudeAddAccountResponse>('/accounts/claude/import', {
       method: 'POST',
       body: JSON.stringify(data),
-      timeoutMs: 20_000,
+      timeoutMs: 60_000,
     }),
   /** Import a versioned Claude credential object or bundle. */
   importClaudeCredentialBundle: (

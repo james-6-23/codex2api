@@ -323,6 +323,18 @@ func TestConnectionTestModelForClaudeRejectsStaleRuntimeModel(t *testing.T) {
 	}
 }
 
+func TestConnectionTestModelForClaudeExplicitRequestBypassesModelCooldown(t *testing.T) {
+	account := &auth.Account{
+		UpstreamType: auth.UpstreamClaude,
+		Models:       []string{"claude-haiku-4-5", "claude-fable-5"},
+	}
+	account.SetModelCooldownUntil("claude-fable-5", "credits_required", time.Now().Add(time.Hour))
+	model, err := (&Handler{}).connectionTestModelForAccount(context.Background(), account, "claude-fable-5")
+	if err != nil || model != "claude-fable-5" {
+		t.Fatalf("explicit Claude test model=(%q,%v), want the cooled model to be allowed for a manual re-probe", model, err)
+	}
+}
+
 func TestConnectionTestModelForClaudeSkipsModelCooldown(t *testing.T) {
 	account := &auth.Account{
 		UpstreamType: auth.UpstreamClaude,

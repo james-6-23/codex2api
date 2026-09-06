@@ -28,6 +28,7 @@ func TestBuildCodexRoutingHint(t *testing.T) {
 	}{
 		{"fast normalizes to priority", `{"model":"gpt-5.6-codex","service_tier":"fast"}`, "model=gpt-5.6-codex;tier=priority"},
 		{"priority kept", `{"model":"gpt-5.6-codex","service_tier":"priority"}`, "model=gpt-5.6-codex;tier=priority"},
+		{"ultrafast kept", `{"model":"gpt-5.6-sol","service_tier":"ultrafast"}`, "model=gpt-5.6-sol;tier=ultrafast"},
 		{"flex kept", `{"model":"gpt-5.6-codex","service_tier":"flex"}`, "model=gpt-5.6-codex;tier=flex"},
 		{"default drops to model-only", `{"model":"gpt-5.6","service_tier":"default"}`, "model=gpt-5.6"},
 		{"auto drops to model-only", `{"model":"gpt-5.6","service_tier":"auto"}`, "model=gpt-5.6"},

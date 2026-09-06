@@ -545,7 +545,9 @@ export default function ApiReference() {
     { id: 'claude-list', label: '/accounts?channel=claude', method: 'GET' },
     { id: 'claude-auth-url', label: '/claude/oauth/auth-url', method: 'POST' },
     { id: 'claude-exchange-code', label: '/claude/oauth/exchange-code', method: 'POST' },
+    { id: 'claude-exchange-session-key', label: '/claude/oauth/exchange-session-key', method: 'POST' },
     { id: 'claude-import', label: '/claude/import', method: 'POST' },
+    { id: 'claude-import-setup-tokens', label: '/claude/import-tokens', method: 'POST' },
     { id: 'claude-refresh-token', label: '/accounts/:id/refresh', method: 'POST' },
     { id: 'claude-refresh-models', label: '/accounts/:id/claude/models', method: 'POST' },
     { id: 'claude-refresh-all-models', label: '/claude/models/refresh', method: 'POST' },
@@ -1291,22 +1293,26 @@ curl --request POST \\
         path="/api/admin/accounts/claude/oauth/auth-url"
         title={copy('生成 Claude OAuth 授权链接', 'Generate a Claude OAuth authorization URL')}
         description={copy(
-          '创建一次 15 分钟有效的 OAuth 登录会话，返回授权 URL 与一次性 state。服务端只暂存 PKCE verifier，不返回或记录账号 Token。',
-          'Create a 15-minute OAuth login session and return an authorization URL plus one-time state. The server retains only the PKCE verifier and does not return or log account tokens.',
+          '创建一次 15 分钟有效的 OAuth 登录会话，返回授权 URL 与一次性 state。mode 为空或 oauth 申请可刷新的完整凭据；mode=setup_token 申请长效 Setup Token（仅 user:inference，1 年有效，无 refresh token）。回调页会直接展示 code#state 供复制。服务端只暂存 PKCE verifier，不返回或记录账号 Token。',
+          'Create a 15-minute OAuth login session and return an authorization URL plus one-time state. Omit mode (or use oauth) for a refreshable credential; mode=setup_token requests a long-lived Setup Token (user:inference only, valid one year, no refresh token). The callback page shows code#state for copying. The server retains only the PKCE verifier and does not return or log account tokens.',
         )}
         apiKey={firstKey}
         baseUrl={baseUrl}
         allKeys={allKeys}
-        defaultBody="{}"
+        defaultBody={`{
+  "mode": "oauth"
+}`}
         curlExample={`curl --request POST \\
   --url ${baseUrl}/api/admin/accounts/claude/oauth/auth-url \\
   --header 'X-Admin-Key: <admin_secret>' \\
   --header 'Content-Type: application/json' \\
-  --data '{}'`}
+  --data '{"mode":"setup_token"}'`}
         responseExamples={[
           { code: 200, body: `{
   "auth_url": "https://claude.ai/oauth/authorize?...&state=<state>",
-  "state": "<state>"
+  "state": "<state>",
+  "mode": "setup_token",
+  "redirect_uri": "https://platform.claude.com/oauth/code/callback"
 }` },
           { code: 401, body: `{"error":"Unauthorized"}` },
         ]}
@@ -1355,13 +1361,52 @@ curl --request POST \\
       />
 
       <EndpointDoc
+        id="claude-exchange-session-key"
+        method="POST"
+        path="/api/admin/accounts/claude/oauth/exchange-session-key"
+        title={copy('用 claude.ai sessionKey 一键换号', 'Exchange a claude.ai sessionKey for an account')}
+        description={copy(
+          '提交从已登录 claude.ai 浏览器复制的 sessionKey cookie，服务端代替浏览器完成组织选择、PKCE 授权与 token 交换，直接入库。mode=setup_token 换出长效 Setup Token；默认换出可刷新 OAuth 凭据。sessionKey 不落库，换号成功后即可作废。',
+          'Submit the sessionKey cookie copied from a signed-in claude.ai browser session. The server performs organization discovery, PKCE authorization, and the token exchange on your behalf and stores the account. mode=setup_token yields a long-lived Setup Token; the default yields a refreshable OAuth credential. The sessionKey is never persisted and can be discarded afterwards.',
+        )}
+        apiKey={firstKey}
+        baseUrl={baseUrl}
+        allKeys={allKeys}
+        defaultBody={`{
+  "session_key": "sk-ant-sid01-...",
+  "mode": "oauth",
+  "name": "claude-web",
+  "proxy_url": "",
+  "use_proxy_pool": true,
+  "timezone": "Asia/Shanghai"
+}`}
+        curlExample={`curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts/claude/oauth/exchange-session-key \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+  "session_key": "sk-ant-sid01-...",
+  "mode": "setup_token",
+  "use_proxy_pool": true
+}'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "message": "成功添加 Claude 账号",
+  "id": 44,
+  "email": "user@example.com"
+}` },
+          { code: 502, body: `{"error":"sessionKey 换取凭据失败: 读取组织列表 被拒绝 (status 401):sessionKey 无效或已过期,请重新从浏览器复制"}` },
+        ]}
+      />
+
+      <EndpointDoc
         id="claude-import"
         method="POST"
         path="/api/admin/accounts/claude/import"
         title={copy('导入 Claude Token JSON', 'Import Claude token JSON')}
         description={copy(
-          '导入 cmd/claude_login 或 Claude 专用导出端点生成的凭据。支持单对象、数组和 accounts bundle；会恢复标签、分组名称映射、时区与稳定指纹。access_token 与 refresh_token 必填。',
-          'Import credentials produced by cmd/claude_login or the Claude export endpoint. Single objects, arrays, and accounts bundles restore tags, name-based group mappings, timezone, and the stable fingerprint. access_token and refresh_token are required.',
+          '导入 cmd/claude_login 或 Claude 专用导出端点生成的凭据。支持单对象、数组和 accounts bundle；会恢复标签、分组名称映射、时区与稳定指纹。OAuth 文档要求 refresh_token（access_token 可省略，服务端先刷新换出）；auth_kind=setup_token（或 access_token 形如 sk-ant-oat01-）的长效令牌文档只需 access_token。',
+          'Import credentials produced by cmd/claude_login or the Claude export endpoint. Single objects, arrays, and accounts bundles restore tags, name-based group mappings, timezone, and the stable fingerprint. OAuth documents require refresh_token (access_token may be omitted; the server refreshes first); auth_kind=setup_token documents (or an access_token shaped like sk-ant-oat01-) only need access_token.',
         )}
         apiKey={firstKey}
         baseUrl={baseUrl}
@@ -1397,6 +1442,46 @@ curl --request POST \\
 }` },
           { code: 400, body: `{"error":"access_token 与 refresh_token 均为必填"}` },
           { code: 409, body: `{"error":"Claude 账号已存在 (id=42)"}` },
+        ]}
+      />
+
+      <EndpointDoc
+        id="claude-import-setup-tokens"
+        method="POST"
+        path="/api/admin/accounts/claude/import-tokens"
+        title={copy('批量粘贴 Claude 令牌（Setup Token / Refresh Token）', 'Bulk paste Claude tokens (Setup Token / refresh token)')}
+        description={copy(
+          '粘贴 sk-ant-oat01-（`claude setup-token` 产出的长效令牌）或 sk-ant-ort01-（OAuth refresh token）令牌，text 任意分隔或 tokens 数组，单次最多 200 枚，按前缀分类并去重。Setup Token 入库为 setup_token 形态、备注按 name 前缀（默认 claude）编号；Refresh Token 先刷新换出 access token 再按 oauth 形态入库、备注默认取邮箱。重复令牌返回 409/逐项失败。旧路径 /import-setup-tokens 仍可用。',
+          'Paste sk-ant-oat01- (long-lived tokens from `claude setup-token`) and/or sk-ant-ort01- (OAuth refresh tokens) as free-form text or a tokens array, up to 200 per request; tokens are classified by prefix and de-duplicated. Setup Tokens are stored as setup_token accounts named under the name prefix (default claude); refresh tokens are exchanged for an access token first and stored as oauth accounts named by email. Duplicates return 409 / per-item failures. The legacy /import-setup-tokens path still works.',
+        )}
+        apiKey={firstKey}
+        baseUrl={baseUrl}
+        allKeys={allKeys}
+        defaultBody={`{
+  "text": "sk-ant-oat01-...\\nsk-ant-ort01-...",
+  "name": "claude",
+  "proxy_url": "",
+  "use_proxy_pool": true,
+  "timezone": "Asia/Shanghai",
+  "group_refs": [{ "name": "Claude", "channel": "claude" }]
+}`}
+        curlExample={`curl --request POST \\
+  --url ${baseUrl}/api/admin/accounts/claude/import-tokens \\
+  --header 'X-Admin-Key: <admin_secret>' \\
+  --header 'Content-Type: application/json' \\
+  --data '{
+  "tokens": ["sk-ant-oat01-...", "sk-ant-ort01-..."],
+  "use_proxy_pool": true
+}'`}
+        responseExamples={[
+          { code: 200, body: `{
+  "total": 2,
+  "imported": 2,
+  "failed": 0,
+  "items": [{ "id": 45, "ok": true }, { "id": 46, "ok": true }]
+}` },
+          { code: 400, body: `{"error":"未找到 sk-ant-oat01-(Setup Token)或 sk-ant-ort01-(Refresh Token)开头的令牌"}` },
+          { code: 409, body: `{"error":"Claude Setup Token 已存在 (id=45)"}` },
         ]}
       />
 
@@ -1665,8 +1750,8 @@ data: {"type":"done","available":["claude-haiku-4-5"]}` },
         path="/api/admin/accounts/:id/test?model=claude-haiku-4-5"
         title={copy('测试 Claude 账号连接', 'Test a Claude account connection')}
         description={copy(
-          '执行一次最小原生 Messages SSE 测试，返回 test_start、content、error 或 test_complete 事件。与模型探测不同，手动测连会同步真实账号状态和限流信息。',
-          'Run a minimal native Messages SSE request and emit test_start, content, error, or test_complete events. Unlike capability probing, a manual connection test synchronizes the real account status and rate-limit information.',
+          '执行一次最小 SSE 测连，返回 test_start、content、diagnostics、error 或 test_complete 事件。与模型探测不同，手动测连会同步真实账号状态和限流信息。diagnostics 事件按渠道携带诊断对象：Claude 账号为 diagnostics 字段，Codex / Responses 账号为 codex_diagnostics 字段（HTTP 状态、分段耗时、x-codex 用量窗口、终态 usage、白名单响应头与脱敏正文预览）；最终诊断帧可能位于终止事件之后，需读到 SSE 关闭。',
+          'Run a minimal SSE connection test and emit test_start, content, diagnostics, error, or test_complete events. Unlike capability probing, a manual connection test synchronizes the real account status and rate-limit information. The diagnostics event carries a channel-specific object: Claude accounts use the diagnostics field, Codex / Responses accounts use codex_diagnostics (HTTP status, phase timings, x-codex usage windows, final usage, whitelisted response headers and a redacted body preview); the final diagnostics frame may follow the terminal event, so drain the stream to SSE close.',
         )}
         apiKey={firstKey}
         baseUrl={baseUrl}

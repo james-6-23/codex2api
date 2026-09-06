@@ -435,6 +435,14 @@ export default function AccountQuickConfigSheet({
               />
             </div>
 
+            <div className="space-y-1.5">
+              <label className="block text-xs font-semibold text-foreground" htmlFor="upstream-request-id-header">上游请求 ID 响应头</label>
+              <Input id="upstream-request-id-header" maxLength={64} value={form.upstreamRequestIdHeader}
+                onChange={(e: ChangeEvent<HTMLInputElement>) => patchForm({ upstreamRequestIdHeader: e.target.value })}
+                placeholder="自动识别 X-Request-ID / Request-ID" />
+              <p className="text-[11px] text-muted-foreground">填写上游用于定位请求的响应头名称，留空自动识别。WebSocket 轮次不记录握手请求 ID。</p>
+            </div>
+
             <div className="space-y-1.5 pt-1 border-t border-border/40">
               <label className="block text-xs font-semibold text-foreground">
                 自定义请求头 JSON

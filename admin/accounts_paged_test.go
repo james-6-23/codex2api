@@ -833,10 +833,18 @@ func TestBatchOperationsRejectIDsTogetherWithSelector(t *testing.T) {
 
 // 删除/封禁后统计卡曾因快照缓存(5s TTL + stale-while-revalidate)不失效而
 // 显示变更前数字;失效后同一 TTL 窗口内必须立刻拿到重建的新 summary。
+// warmRequestCountCache 预热渠道的请求统计缓存,让首次投影不再起后台统计刷新。
+// 该刷新完成时会推进快照代数;若抢在同步重建安装快照之前落地,快照根本不会
+// 入缓存,后续"命中热快照"的断言就成了对全量投影的断言(CI 上偶发失败)。
+func warmRequestCountCache(handler *Handler, channel string) {
+	handler.storeRequestCountCache(channel, map[int64]*database.AccountRequestCount{}, map[int64]*database.AccountTimeRangeUsage{}, time.Time{})
+}
+
 func TestAccountMutationInvalidationServesFreshSummary(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler, codexIDs, _ := newPagedAccountsHandler(t)
 	ctx := context.Background()
+	warmRequestCountCache(handler, database.UpstreamChannelCodex)
 
 	before, err := handler.getAccountListSnapshot(ctx, database.UpstreamChannelCodex)
 	if err != nil {
@@ -875,6 +883,7 @@ func TestPruneAccountsFromSnapshotCachesKeepsWarmSnapshot(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler, codexIDs, _ := newPagedAccountsHandler(t)
 	ctx := context.Background()
+	warmRequestCountCache(handler, database.UpstreamChannelCodex)
 
 	before, err := handler.getAccountListSnapshot(ctx, database.UpstreamChannelCodex)
 	if err != nil {

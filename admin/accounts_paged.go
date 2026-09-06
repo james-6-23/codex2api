@@ -101,6 +101,7 @@ type accountListSnapshotItem struct {
 	OpenAIResponses     bool
 	Antigravity         bool
 	Claude              bool
+	ClaudeAuthKind      string
 	ClaudeUsageProbeAt  string
 	ClaudeUsageProbeErr string
 	SearchText          string
@@ -125,6 +126,7 @@ type accountListSummary struct {
 	Risky                int `json:"risky"`
 	OAuth                int `json:"oauth"`
 	APIKey               int `json:"api_key"`
+	SetupToken           int `json:"setup_token"`
 	SubscriptionUnlocked int `json:"subscription_unlocked"`
 	Unauthorized24h      int `json:"unauthorized_24h"`
 	RateLimited1h        int `json:"rate_limited_1h"`
@@ -344,7 +346,7 @@ func validateAccountPageFilters(query accountPageQuery) error {
 	if !validStatuses[query.Status] {
 		return fmt.Errorf("unsupported status")
 	}
-	validAuthKinds := map[string]bool{"": true, "all": true, auth.GrokAuthKindOAuth: true, auth.GrokAuthKindAPIKey: true}
+	validAuthKinds := map[string]bool{"": true, "all": true, auth.GrokAuthKindOAuth: true, auth.GrokAuthKindAPIKey: true, auth.ClaudeAuthKindSetupToken: true}
 	if !validAuthKinds[query.AuthKind] {
 		return fmt.Errorf("unsupported auth_kind")
 	}
@@ -721,6 +723,7 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 		Email: email, EmailDomain: accountEmailDomain(email), Tags: append([]string(nil), row.Tags...),
 		SchedulerPriority: valueOrZero(accountSchedulerPriority(row)), OpenAIResponses: isOpenAIResponses,
 		Antigravity: isAntigravity, Claude: isClaude,
+		ClaudeAuthKind:      claudeAuthKindForRow(row, isClaude),
 		ClaudeUsageProbeAt:  row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
 		ClaudeUsageProbeErr: row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
 	}
@@ -1102,6 +1105,11 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			if item.GrokAuthKind != query.AuthKind {
 				return false
 			}
+		} else if channel == database.UpstreamChannelClaude {
+			// Claude 渠道:oauth=可刷新 OAuth 凭据,setup_token=长效 Setup Token。
+			if item.ClaudeAuthKind != query.AuthKind {
+				return false
+			}
 		} else if item.OpenAIResponses != (query.AuthKind == auth.GrokAuthKindAPIKey) {
 			// Codex 渠道复用 auth_kind：api_key=Responses API 中转账号，oauth=官方账号（issue #522）
 			return false
@@ -1426,7 +1434,13 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 			summary.APIKey++
 		}
 		if item.Claude {
-			summary.OAuth++
+			if item.ClaudeAuthKind == auth.ClaudeAuthKindAPIKey {
+				summary.APIKey++
+			} else if item.ClaudeAuthKind == auth.ClaudeAuthKindSetupToken {
+				summary.SetupToken++
+			} else {
+				summary.OAuth++
+			}
 		}
 		if channel == database.UpstreamChannelCodex {
 			if item.OpenAIResponses {

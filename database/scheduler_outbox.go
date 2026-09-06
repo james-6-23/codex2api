@@ -205,6 +205,7 @@ func (db *DB) installSQLiteSchedulerOutboxTriggers(ctx context.Context) error {
 		  OR COALESCE(json_extract(OLD.credentials,'$.models'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.models'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.model_mapping'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.model_mapping'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.custom_headers'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.custom_headers'),'')
+		  OR COALESCE(json_extract(OLD.credentials,'$.upstream_request_id_header'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.upstream_request_id_header'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.allowed_api_key_ids'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.allowed_api_key_ids'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.plan_type'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.plan_type'),'')
 		  OR COALESCE(json_extract(OLD.credentials,'$.dispatch_count_limit'),'') IS NOT COALESCE(json_extract(NEW.credentials,'$.dispatch_count_limit'),'')
@@ -349,6 +350,7 @@ func (db *DB) installPostgresSchedulerOutboxTriggers(ctx context.Context) error 
 			COALESCE(OLD.credentials->'models','null'::jsonb) IS DISTINCT FROM COALESCE(NEW.credentials->'models','null'::jsonb) OR
 			COALESCE(OLD.credentials->>'model_mapping','') IS DISTINCT FROM COALESCE(NEW.credentials->>'model_mapping','') OR
 			COALESCE(OLD.credentials->'custom_headers','null'::jsonb) IS DISTINCT FROM COALESCE(NEW.credentials->'custom_headers','null'::jsonb) OR
+			COALESCE(OLD.credentials->>'upstream_request_id_header','') IS DISTINCT FROM COALESCE(NEW.credentials->>'upstream_request_id_header','') OR
 			COALESCE(OLD.credentials->'allowed_api_key_ids','null'::jsonb) IS DISTINCT FROM COALESCE(NEW.credentials->'allowed_api_key_ids','null'::jsonb) OR
 			COALESCE(OLD.credentials->>'plan_type','') IS DISTINCT FROM COALESCE(NEW.credentials->>'plan_type','') OR
 			COALESCE(OLD.credentials->>'dispatch_count_limit','') IS DISTINCT FROM COALESCE(NEW.credentials->>'dispatch_count_limit','') OR

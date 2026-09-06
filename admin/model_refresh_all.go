@@ -281,6 +281,10 @@ func groupAccountsByPlan(accounts []*auth.Account, include func(*auth.Account) b
 			continue
 		}
 		plan := modelRefreshPlanKey(account)
+		if account.IsClaudeAPIKey() {
+			// API services and keys have independent catalogs even when their plan labels match.
+			plan = fmt.Sprintf("api_key:%d", account.ID())
+		}
 		byPlan[plan] = append(byPlan[plan], account)
 	}
 	plans := make([]string, 0, len(byPlan))
@@ -440,7 +444,7 @@ func (h *Handler) refreshClaudeChannelModels(ctx context.Context, emit modelRefr
 			if accessToken == "" {
 				return 0, nil, fmt.Errorf("账号缺少 access_token")
 			}
-			models, err := auth.NewClaudeAuth(h.store.ResolveProxyForAccount(sample)).FetchModels(ctx, accessToken)
+			models, err := auth.NewClaudeAuth(h.store.ResolveProxyForAccount(sample)).FetchModelsForAccount(ctx, sample)
 			if err != nil {
 				return 0, nil, err
 			}

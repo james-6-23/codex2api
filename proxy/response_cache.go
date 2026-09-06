@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"container/list"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +65,7 @@ func responseCacheStoreKey(owner, responseID string) string {
 type responseCacheEntry struct {
 	key       string
 	items     []json.RawMessage
+	blobs     []*sharedResponseContextItem
 	bytes     int64
 	expiresAt time.Time
 	element   *list.Element
@@ -96,6 +99,9 @@ func defaultResponseCacheConfig() responseCacheConfig {
 // 否则计 Miss（含负标记、后端错误/损坏、重建超限）。Local*/Remote* 是分层口径。
 // 不变量：Hits = LocalHits + RemoteHits；Hits + Misses = LocalHits + LocalMisses。
 type ResponseCacheStats struct {
+	// Unique retained payload bytes, excluding slice/map overhead and active
+	// readers. Bytes below remains the conservative logical eviction budget.
+	SharedPayloadBytes     int64
 	Entries                int
 	Bytes                  int64
 	HighWaterBytes         int64
@@ -122,6 +128,7 @@ type ResponseCacheStats struct {
 type responseCacheState struct {
 	mu           sync.RWMutex
 	store        map[string]*responseCacheEntry
+	sharedItems  map[[sha256.Size]byte]*sharedResponseContextItem
 	lru          *list.List
 	markers      map[string]*responseCacheMarker
 	markerLRU    *list.List
@@ -187,6 +194,7 @@ var respCache responseCacheState
 
 func init() {
 	respCache.store = make(map[string]*responseCacheEntry)
+	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
 	respCache.lru = list.New()
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
@@ -218,6 +226,7 @@ func GetResponseCacheStats() ResponseCacheStats {
 func resetResponseCacheStateForTest(config responseCacheConfig) {
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
+	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
 	respCache.lru = list.New()
 	respCache.markers = make(map[string]*responseCacheMarker)
 	respCache.markerLRU = list.New()
@@ -324,9 +333,7 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 	defer respCache.mu.Unlock()
 
 	items = trimResponseContextTail(items, respCache.config.maxItems)
-	if normalizedItems, err := cache.NormalizeResponseContextItems(items); err == nil {
-		items = normalizedItems
-	}
+	items, hashes, normalized := respCache.normalizeResponseContextItemsLocked(items)
 	var entryBytes int64
 	for _, item := range items {
 		entryBytes += int64(len(item))
@@ -350,7 +357,6 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		return items, false, overL1ByteBudget
 	}
 
-	retainedItems := cloneResponseContextItems(items)
 	for len(respCache.store)+1 > respCache.config.maxEntries ||
 		respCache.stats.Bytes+entryBytes > respCache.config.maxBytes {
 		oldest := respCache.oldestLocked()
@@ -372,9 +378,11 @@ func admitResponseCache(storeKey string, items []json.RawMessage) ([]json.RawMes
 		respCache.removeEntryLocked(oldest, reason)
 	}
 
+	retainedItems, blobs := respCache.retainResponseContextItemsLocked(items, hashes, normalized)
 	entry := &responseCacheEntry{
 		key:       storeKey,
 		items:     retainedItems,
+		blobs:     blobs,
 		bytes:     entryBytes,
 		expiresAt: time.Now().Add(respCache.config.ttl),
 	}
@@ -395,6 +403,77 @@ func cloneResponseContextItems(items []json.RawMessage) []json.RawMessage {
 		itemsCopy[i] = append(json.RawMessage(nil), item...)
 	}
 	return itemsCopy
+}
+
+// Cached bodies are immutable. Identical items across response IDs share an
+// owned allocation; reference counts follow cache entries only. Eviction drops
+// ownership without modifying bytes, so an active replay remains valid.
+type sharedResponseContextItem struct {
+	key        [sha256.Size]byte
+	body       json.RawMessage
+	refs       int
+	normalized bool
+}
+
+// Previously interned canonical bytes have already passed JSON validation and
+// escape normalization. Rechecking every historical item on every turn would
+// consume the allocation savings in repeated parsing. Only new bytes need it.
+func (c *responseCacheState) normalizeResponseContextItemsLocked(items []json.RawMessage) ([]json.RawMessage, [][sha256.Size]byte, bool) {
+	hashes := make([][sha256.Size]byte, len(items))
+	var normalized []json.RawMessage
+	for i, item := range items {
+		key := sha256.Sum256(item)
+		if blob := c.sharedItems[key]; blob != nil && blob.normalized && bytes.Equal(blob.body, item) {
+			hashes[i] = key
+			continue
+		}
+		next, err := cache.NormalizeResponseContextItems([]json.RawMessage{item})
+		if err != nil {
+			return items, nil, false
+		} // Preserve legacy all-or-nothing normalization.
+		if !bytes.Equal(item, next[0]) {
+			if normalized == nil {
+				normalized = append([]json.RawMessage(nil), items...)
+			}
+			normalized[i] = next[0]
+			key = sha256.Sum256(next[0])
+		}
+		hashes[i] = key
+	}
+	if normalized != nil {
+		items = normalized
+	}
+	return items, hashes, true
+}
+
+func (c *responseCacheState) retainResponseContextItemsLocked(items []json.RawMessage, hashes [][sha256.Size]byte, normalized bool) ([]json.RawMessage, []*sharedResponseContextItem) {
+	if c.sharedItems == nil {
+		c.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
+	}
+	retained := make([]json.RawMessage, len(items))
+	blobs := make([]*sharedResponseContextItem, len(items))
+	for i, item := range items {
+		var key [sha256.Size]byte
+		if hashes != nil {
+			key = hashes[i]
+		} else {
+			key = sha256.Sum256(item)
+		}
+		blob := c.sharedItems[key]
+		if blob == nil || !bytes.Equal(blob.body, item) {
+			blob = &sharedResponseContextItem{key: key, body: append(json.RawMessage(nil), item...)}
+			// A hash collision must never alias unrelated content or replace a
+			// live intern entry. The colliding item stays privately owned.
+			if c.sharedItems[key] == nil {
+				c.sharedItems[key] = blob
+			}
+			c.stats.SharedPayloadBytes += int64(len(item))
+		}
+		blob.refs++
+		blob.normalized = blob.normalized || normalized
+		retained[i], blobs[i] = blob.body, blob
+	}
+	return retained, blobs
 }
 
 type responseCacheRemovalReason uint8
@@ -423,6 +502,15 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 		return
 	}
 	delete(c.store, entry.key)
+	for _, blob := range entry.blobs {
+		blob.refs--
+		if blob.refs == 0 {
+			if c.sharedItems[blob.key] == blob {
+				delete(c.sharedItems, blob.key)
+			}
+			c.stats.SharedPayloadBytes -= int64(len(blob.body))
+		}
+	}
 	if entry.element != nil {
 		c.lru.Remove(entry.element)
 	}
@@ -603,12 +691,22 @@ func getResponseCache(owner, responseID string) []json.RawMessage {
 	return result.Items
 }
 
+// getResponseCacheForReplay is reserved for request preparation. Callers must
+// treat item bodies as immutable and replace, never mutate, an item to edit it.
+func getResponseCacheForReplay(owner, responseID string) responseCacheLookupResult {
+	return getResponseCacheResultWithOwnership(owner, responseID, true)
+}
+
 // getResponseCacheResult preserves enough lookup state for the HTTP handlers
 // to distinguish a reconstructable hit from a final local/backend failure.
 // 命中/未命中计数只在这个出口、单一临界区内记账一次：聚合 Hits/Misses 是
 // 端到端口径，Local*/Remote* 是分层口径，两组在任意快照瞬间保持一致。
 func getResponseCacheResult(owner, responseID string) responseCacheLookupResult {
-	result := lookupResponseCacheResult(owner, responseID)
+	return getResponseCacheResultWithOwnership(owner, responseID, false)
+}
+
+func getResponseCacheResultWithOwnership(owner, responseID string, borrow bool) responseCacheLookupResult {
+	result := lookupResponseCacheResultWithOwnership(owner, responseID, borrow)
 	respCache.mu.Lock()
 	// 任何续链查询（无论命中与否）都赋予 owner 写入资格：这是 on_demand
 	// 写入策略的准入信号，命中率与之无关。
@@ -636,6 +734,10 @@ func getResponseCacheResult(owner, responseID string) responseCacheLookupResult 
 }
 
 func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResult {
+	return lookupResponseCacheResultWithOwnership(owner, responseID, false)
+}
+
+func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow bool) responseCacheLookupResult {
 	storeKey := responseCacheStoreKey(owner, responseID)
 	respCache.mu.Lock()
 	entry, ok := respCache.store[storeKey]
@@ -652,6 +754,11 @@ func lookupResponseCacheResult(owner, responseID string) responseCacheLookupResu
 			// 取引用后在锁外克隆，避免大条目命中时锁内做兆级拷贝。
 			items := entry.items
 			respCache.mu.Unlock()
+			if borrow {
+				// Each reader owns its sequence header. Bodies stay immutable;
+				// append/replacing an item cannot alter another reader's list.
+				return responseCacheLookupResult{Items: append([]json.RawMessage(nil), items...), Kind: responseCacheLookupHit, Source: responseCacheSourceLocal}
+			}
 			return responseCacheLookupResult{
 				Items:  cloneResponseContextItems(items),
 				Kind:   responseCacheLookupHit,

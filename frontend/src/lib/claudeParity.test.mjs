@@ -149,7 +149,7 @@ test('Claude detail metadata exposes safe operational fields without credentials
   assert.match(providerSlot, /subscription_expires_at/)
   assert.match(providerSlot, /claude_fingerprint_mode/)
   assert.match(providerSlot, /claude_usage_probe_at/)
-  assert.doesNotMatch(providerSlot, /access_token|refresh_token|custom_headers|api_key/i)
+  assert.doesNotMatch(providerSlot, /access_token|refresh_token|custom_headers|detailTarget\s*(?:\.\s*api_key\b|\[\s*['"]api_key['"]\s*\])/i)
 })
 
 test('Claude quota display keeps an unknown value distinct from zero', () => {

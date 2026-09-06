@@ -43,7 +43,7 @@ const FALLBACK_MODELS = [
 ];
 type CCSwitchApp = "claude" | "codex" | "gemini";
 type QuickToolTab = "codex-cli" | "claude-code" | "cc-switch" | "cherry-studio";
-type QuickServiceTier = "default" | "fast";
+type QuickServiceTier = "default" | "fast" | "ultrafast";
 type QuickReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "ultra";
 
 const CC_SWITCH_LOGO = "https://ccswitch.io/assets/cc-switch-logo-BPrI77SG.png";
@@ -495,8 +495,8 @@ function buildCCSwitchImportUrl({
   Object.entries(models).forEach(([key, value]) => {
     if (value) params.set(key, value);
   });
-  if (app === "codex" && serviceTier === "fast") {
-    params.set("service_tier", "fast");
+  if (app === "codex" && serviceTier && serviceTier !== "default") {
+    params.set("service_tier", serviceTier);
   }
   if (app === "codex" && reasoningEffort) {
     params.set("model_reasoning_effort", reasoningEffort);
@@ -917,7 +917,7 @@ export default function Docs() {
   const activeKey = selectedKey || firstKey || "YOUR_API_KEY";
 
   const codexServiceTierLine =
-    quickServiceTier === "fast" ? '\nservice_tier = "fast"' : "";
+    quickServiceTier === "default" ? "" : `\nservice_tier = "${quickServiceTier}"`;
   const codexConfigToml = `model_provider = "OpenAI"
 model = "${quickStartModel}"
 review_model = "${quickStartModel}"
@@ -1197,6 +1197,7 @@ set CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`;
                           label: t("docs.clientConfig.fastModeEnabled"),
                           value: "fast",
                         },
+                        { label: "Ultrafast", value: "ultrafast" },
                       ]}
                     />
                   </FieldBox>

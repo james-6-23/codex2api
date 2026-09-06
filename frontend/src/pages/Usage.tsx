@@ -11,6 +11,7 @@ import ChannelLogo from '../components/ChannelLogo'
 import CompactionBadges from '../components/CompactionBadges'
 import ModelLogo from '../components/ModelLogo'
 import Modal from '../components/Modal'
+import ColumnSettingsMenu from '../components/ColumnSettingsMenu'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
@@ -324,12 +325,13 @@ function formatTokenPricePerMillion(value?: number | null): string {
 
 function isFastTier(tier?: string | null): boolean {
   const normalized = (tier || '').trim().toLowerCase()
-  return normalized === 'fast' || normalized === 'priority'
+  return normalized === 'fast' || normalized === 'priority' || normalized === 'ultrafast'
 }
 
 function formatServiceTierLabel(t: ReturnType<typeof useTranslation>['t'], tier?: string | null): string {
   const normalized = (tier || '').trim().toLowerCase()
   if (!normalized) return '-'
+  if (normalized === 'ultrafast') return 'Ultrafast'
   if (isFastTier(normalized)) return t('usage.billingTierFast')
   if (normalized === 'default') return t('usage.billingTierStandard')
   return normalized
@@ -357,7 +359,7 @@ function UsageCostCell({ log }: { log: UsageLog }) {
   )
 
   if (!hasCostContext) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
   }
 
   return (
@@ -969,7 +971,7 @@ function UsageErrorSummaryCell({ log, mobile = false }: { log: UsageLog; mobile?
   const hasError = log.status_code >= 400 || Boolean(errorKind || message)
 
   if (!hasError) {
-    return mobile ? null : <span className="text-muted-foreground">-</span>
+    return mobile ? null : <span className="text-muted-foreground/50">-</span>
   }
 
   return (
@@ -1018,7 +1020,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
       ? t('usage.userAgentOverridden')
       : t('usage.userAgentPreserved')
 
-  if (!hasAudit) {
+  if (!hasAudit && !log.request_id && !log.upstream_request_id) {
     return (
       <div className="font-mono text-[11px] text-muted-foreground" title={t('usage.userAgentNotRecorded')}>
         UA: -
@@ -1026,8 +1028,32 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
     )
   }
 
-  const content = (
+  const statusChip = (
+    <Badge
+      variant="outline"
+      className={`ml-auto shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
+        log.user_agent_overridden
+          ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
+          : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
+      }`}
+    >
+      {statusLabel}
+    </Badge>
+  )
+  // 客户端与上游 UA 完全一致且未改写:合成一行(C=U),两行会重复同一串字符串白占行高。
+  const sameUA = !log.user_agent_overridden && Boolean(clientUserAgent) && clientUserAgent === upstreamUserAgent
+
+  const content = sameUA ? (
+    <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} font-mono text-[11px] leading-relaxed`}>
+      <div className="flex min-w-0 items-center gap-1.5" title={`${t('usage.clientUserAgent')} = ${t('usage.upstreamUserAgent')}`}>
+        <span className="shrink-0 font-sans font-semibold text-muted-foreground">C=U</span>
+        <span className="min-w-0 truncate text-foreground/80">{clientUserAgent}</span>
+        {statusChip}
+      </div>
+    </div>
+  ) : (
     <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} space-y-1 font-mono text-[11px] leading-relaxed`}>
+      {log.request_id ? <div className="truncate text-muted-foreground" title={`Request ID: ${log.request_id}`}>ID: {log.request_id}</div> : null}
       <div className="flex min-w-0 items-center gap-1.5" title={t('usage.clientUserAgent')}>
         <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">C</span>
         <span className="min-w-0 truncate text-foreground/80">{clientUserAgent || '-'}</span>
@@ -1035,18 +1061,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
       <div className="flex min-w-0 items-center gap-1.5" title={t('usage.upstreamUserAgent')}>
         <span className="w-4 shrink-0 font-sans font-semibold text-muted-foreground">U</span>
         <span className="min-w-0 truncate text-foreground/80">{upstreamLabel}</span>
-        {hasAudit ? (
-          <Badge
-            variant="outline"
-            className={`ml-auto shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
-              log.user_agent_overridden
-                ? 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300'
-                : 'bg-emerald-500/12 text-emerald-700 dark:bg-emerald-500/20 dark:text-emerald-300'
-            }`}
-          >
-            {statusLabel}
-          </Badge>
-        ) : null}
+        {statusChip}
       </div>
     </div>
   )
@@ -1072,6 +1087,9 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
             <div className="font-semibold text-background/70">{t('usage.upstreamUserAgent')}</div>
             <div className="mt-0.5 break-all font-mono leading-relaxed">{upstreamLabel}</div>
           </div>
+          {log.request_id ? <div className="break-all font-mono">Request ID: {log.request_id}</div> : null}
+          {log.upstream_request_id ? <div className="break-all font-mono">Upstream ID: {log.upstream_request_id}</div> : null}
+          {log.upstream_proxy_name ? <div className="break-all">Proxy: {log.upstream_proxy_name}{log.upstream_proxy_id ? ` (#${log.upstream_proxy_id})` : ''}</div> : null}
           <div className="font-semibold">{statusLabel}</div>
           {log.via_websocket ? (
             <div className="leading-relaxed text-background/70">{t('usage.userAgentWebSocketHint')}</div>
@@ -1217,7 +1235,7 @@ function CyberPolicyField({ label, value, danger = false }: { label: string; val
   )
 }
 
-const usageTableHeadClass = 'text-[12px] font-semibold'
+const usageTableHeadClass = 'text-[13px] font-semibold'
 const usageTableTextClass = 'text-[14px]'
 const usageTableMonoClass = 'font-mono text-[13px] tabular-nums'
 const usageTableBadgeClass = 'text-[13px]'
@@ -1241,7 +1259,7 @@ function UsageCacheBadges({ log, align = 'end' }: { log: UsageLog; align?: 'star
   const { t } = useTranslation()
   const tokens = getUsageTokenBreakdown(log)
   if (tokens.cacheReadTokens === 0 && tokens.cacheWriteTokens === 0) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
   }
   const readTitle = t('usage.cacheReadTooltip', { tokens: formatTokens(tokens.cacheReadTokens, true) })
   const writeTitle = t('usage.cacheCreateTooltip', {
@@ -1250,8 +1268,9 @@ function UsageCacheBadges({ log, align = 'end' }: { log: UsageLog; align?: 'star
     h1: formatTokens(tokens.cacheWrite1hTokens, true),
   })
 
+  // 读/写两枚徽章横排(空间不够再换行),不再竖着堆叠把整行撑高
   return (
-    <div className={cn('flex flex-col gap-1', align === 'start' ? 'items-start' : 'items-end')}>
+    <div className={cn('flex flex-wrap items-center gap-1', align === 'start' ? 'justify-start' : 'justify-end')}>
       {tokens.cacheReadTokens > 0 && (
         <Badge variant="outline" title={readTitle} aria-label={readTitle} className={`${usageTableBadgeClass} gap-1 border-transparent bg-indigo-500/10 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400`}>
           <DatabaseZap className="size-3.5" aria-hidden="true" />
@@ -1268,6 +1287,31 @@ function UsageCacheBadges({ log, align = 'end' }: { log: UsageLog; align?: 'star
   )
 }
 
+// UsageTimeCell 时间列双色:日期弱化、时分秒突出,扫表时先看到时间;整串仍在 title。
+function UsageTimeCell({ value }: { value?: string | null }) {
+  const full = formatBeijingTime(value)
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}:\d{2})$/.exec(full)
+  if (!m) return <span>{full}</span>
+  return (
+    <span title={full}>
+      <span className="text-[11px] text-muted-foreground/60">{m[1]}</span>
+      <span className="ml-1.5 text-foreground/80">{m[2]}</span>
+    </span>
+  )
+}
+
+// UsageEndpointText 端点列双色:公共前缀 /v1/ 弱化,真正区分请求类型的尾段突出。
+function UsageEndpointText({ value }: { value: string }) {
+  const m = /^(\/v\d+\/)(.+)$/.exec(value)
+  if (!m) return <span className="text-muted-foreground">{value}</span>
+  return (
+    <>
+      <span className="text-muted-foreground/50">{m[1]}</span>
+      <span className="text-foreground/80">{m[2]}</span>
+    </>
+  )
+}
+
 function StreamBadge({ stream }: { stream: boolean }) {
   return (
     <Badge
@@ -1277,7 +1321,8 @@ function StreamBadge({ stream }: { stream: boolean }) {
         'border-transparent',
         stream
           ? 'bg-indigo-500/12 text-indigo-600 dark:bg-indigo-500/20 dark:text-indigo-400'
-          : 'bg-muted/60 text-muted-foreground',
+          // 非流式是少数派,给琥珀色让它在一列 stream 里能被一眼挑出来
+          : 'bg-amber-500/12 text-amber-700 dark:bg-amber-500/20 dark:text-amber-300',
       )}
     >
       {stream ? 'stream' : 'sync'}
@@ -1475,6 +1520,9 @@ const USAGE_COLUMN_DEFINITIONS: Array<{ key: UsageTableColumn; labelKey: string 
   { key: 'time', labelKey: 'usage.tableTime' },
 ]
 
+// 列设置菜单按这个顺序列出可选列，与表头顺序一致。
+const USAGE_TABLE_COLUMN_ORDER: readonly UsageTableColumn[] = USAGE_COLUMN_DEFINITIONS.map((column) => column.key)
+
 const USAGE_VISIBLE_COLUMNS_KEY = 'codex2api:usage:visible-columns'
 const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   status: true,
@@ -1536,7 +1584,7 @@ function tokensPerSecClassName(value: number): string {
 function TokensPerSecCell({ log }: { log: UsageLog }) {
   const value = computeOutputTokensPerSec(log)
   if (value == null) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
   }
   return (
     <span className={`${usageTableMonoClass} ${tokensPerSecClassName(value)}`} title={`${value.toFixed(2)} tok/s`}>
@@ -1637,7 +1685,7 @@ function TimingCell({ log }: { log: UsageLog }) {
   const firstMs = log.first_token_ms || 0
   const durationMs = log.duration_ms || 0
   if (firstMs <= 0 && durationMs <= 0) {
-    return <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+    return <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
   }
 
   const firstLabel = firstMs > 0 ? formatLatencyMs(firstMs) : '-'
@@ -1694,60 +1742,6 @@ function persistUsageVisibleColumns(columns: Record<UsageTableColumn, boolean>) 
   try { localStorage.setItem(USAGE_VISIBLE_COLUMNS_KEY, JSON.stringify(columns)) } catch { /* ignore */ }
 }
 
-function ColumnSettingsDropdown({
-  open,
-  columns,
-  onOpenChange,
-  onToggle,
-}: {
-  open: boolean
-  columns: Record<UsageTableColumn, boolean>
-  onOpenChange: (open: boolean) => void
-  onToggle: (key: UsageTableColumn) => void
-}) {
-  const { t } = useTranslation()
-
-  return (
-    <div className="relative">
-      <Button
-        type="button"
-        variant="outline"
-        size="sm"
-        onClick={() => onOpenChange(!open)}
-        aria-haspopup="menu"
-        aria-expanded={open}
-      >
-        <SlidersHorizontal className="size-3.5" />
-        {t('accounts.columnSettings', { defaultValue: 'Columns' })}
-      </Button>
-      {open ? (
-        <div
-          role="menu"
-          className="absolute right-0 z-20 mt-2 w-56 max-w-[calc(100vw-2.5rem)] rounded-lg border border-border bg-popover p-2 text-popover-foreground shadow-lg"
-        >
-          <div className="mb-1 px-2 py-1 text-[11px] font-semibold uppercase text-muted-foreground">
-            {t('accounts.columnSettings', { defaultValue: 'Columns' })}
-          </div>
-          {USAGE_COLUMN_DEFINITIONS.map((column) => (
-            <label
-              key={column.key}
-              className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-[13px] hover:bg-muted"
-            >
-              <input
-                type="checkbox"
-                className="size-3.5 rounded border-border"
-                checked={columns[column.key]}
-                onChange={() => onToggle(column.key)}
-              />
-              <span>{t(column.labelKey)}</span>
-            </label>
-          ))}
-        </div>
-      ) : null}
-    </div>
-  )
-}
-
 export default function Usage() {
   const { t } = useTranslation()
   const { toast, showToast } = useToast()
@@ -1785,7 +1779,11 @@ export default function Usage() {
   const pageSizeOptions = DEFAULT_PAGE_SIZE_OPTIONS
   const searchTimer = useRef<ReturnType<typeof setTimeout>>(null)
   const [visibleColumns, setVisibleColumns] = useState<Record<UsageTableColumn, boolean>>(getInitialUsageVisibleColumns)
-  const [columnSettingsOpen, setColumnSettingsOpen] = useState(false)
+  // 列设置菜单与账号管理页共用同一个组件，标签按当前语言从列定义里取。
+  const usageColumnLabels = useMemo(
+    () => Object.fromEntries(USAGE_COLUMN_DEFINITIONS.map((column) => [column.key, t(column.labelKey)])) as Record<UsageTableColumn, string>,
+    [t],
+  )
   const [showAnalysis, setShowAnalysis] = useState(getInitialAnalysisVisibility)
   const [channel, setChannel] = useUsageChannel()
 
@@ -2442,11 +2440,14 @@ export default function Usage() {
                 ) : null}
 
                 <div className="ml-auto shrink-0">
-                  <ColumnSettingsDropdown
-                    open={columnSettingsOpen}
+                  <ColumnSettingsMenu
+                    columnOrder={USAGE_TABLE_COLUMN_ORDER}
                     columns={visibleColumns}
-                    onOpenChange={setColumnSettingsOpen}
+                    labels={usageColumnLabels}
                     onToggle={(key) => setVisibleColumns((current) => ({ ...current, [key]: !current[key] }))}
+                    onReset={() => setVisibleColumns({ ...DEFAULT_USAGE_VISIBLE_COLUMNS })}
+                    title={t('accounts.columnSettings')}
+                    resetTitle={t('accounts.columnReset')}
                   />
                 </div>
               </div>
@@ -2613,7 +2614,7 @@ export default function Usage() {
                               className="gap-0.5 border-transparent bg-blue-500/12 text-[11px] font-semibold text-blue-600 dark:bg-blue-500/20 dark:text-blue-400"
                             >
                               <Zap className="size-3" />
-                              Fast
+                              {formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}
                             </Badge>
                           ) : null}
                           {visibleColumns.type && <StreamBadge stream={log.stream} />}
@@ -2833,7 +2834,7 @@ export default function Usage() {
                                 title={`${t('usage.billingTier')}: ${formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}`}
                               >
                                 <Zap className="size-3" />
-                                Fast
+                                {formatServiceTierLabel(t, log.billing_service_tier || log.service_tier)}
                               </Badge>
                             )}
                           </div>
@@ -2866,9 +2867,7 @@ export default function Usage() {
                                 : undefined
                             }
                           >
-                            <span className="text-muted-foreground">
-                              {log.inbound_endpoint || log.endpoint || '-'}
-                            </span>
+                            <UsageEndpointText value={log.inbound_endpoint || log.endpoint || '-'} />
                           </div>
                         </TableCell>}
                         {visibleColumns.type && <TableCell>
@@ -2883,7 +2882,7 @@ export default function Usage() {
                         </TableCell>}
                         {visibleColumns.token && <TableCell className="text-right">
                           {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                            <div className={`${usageTableMonoClass} leading-relaxed`}>
+                            <div className={`${usageTableMonoClass} whitespace-nowrap leading-relaxed`}>
                               <UsageInputTokenCount log={log} />
                               <span className="mx-1 text-border">|</span>
                               <span className="text-emerald-500">↑{formatTokens(log.output_tokens, true)}</span>
@@ -2895,7 +2894,7 @@ export default function Usage() {
                               )}
                             </div>
                           ) : (
-                            <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>
+                            <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>
                           )}
                         </TableCell>}
                         {visibleColumns.cached && <TableCell className="text-right">
@@ -2909,7 +2908,7 @@ export default function Usage() {
                             >
                               {(log.ws_acquire_ms as number) > 1000 ? `${((log.ws_acquire_ms as number) / 1000).toFixed(1)}s` : `${log.ws_acquire_ms}ms`}
                             </span>
-                          ) : <span className={`${usageTableMonoClass} text-muted-foreground`}>-</span>}
+                          ) : <span className={`${usageTableMonoClass} text-muted-foreground/50`}>-</span>}
                         </TableCell>}
                         {visibleColumns.timing && (
                           <TableCell className="text-right">
@@ -2927,8 +2926,8 @@ export default function Usage() {
                         {visibleColumns.error && <TableCell>
                           <UsageErrorSummaryCell log={log} />
                         </TableCell>}
-                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-right text-muted-foreground whitespace-nowrap`}>
-                          {formatBeijingTime(log.created_at)}
+                        {visibleColumns.time && <TableCell className={`${usageTableMonoClass} text-right whitespace-nowrap`}>
+                          <UsageTimeCell value={log.created_at} />
                         </TableCell>}
                       </TableRow>
                       )

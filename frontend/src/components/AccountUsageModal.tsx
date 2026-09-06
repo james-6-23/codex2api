@@ -22,7 +22,7 @@ import {
 } from 'lucide-react'
 import Modal from './Modal'
 import { api } from '../api'
-import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem, WhamDailyUsageItem, WhamDailyUsageResponse, WhamDailyUsageSplit } from '../types'
+import type { AccountKeyStat, AccountModelStat, AccountRow, AccountUsageDayStat, AccountUsageDetail, ResetCreditItem, WhamDailyUsageBreakdownEntry, WhamDailyUsageCycle, WhamDailyUsageItem, WhamDailyUsageResponse, WhamDailyUsageSplit } from '../types'
 import { formatUsageNumber, officialUsdFromDailyItems, supportsOfficialUsage } from '../lib/usageFormat'
 import { useShowFullUsageNumbers } from '../hooks/useShowFullUsageNumbers'
 import { getErrorMessage } from '../utils/error'
@@ -510,7 +510,8 @@ function QualityPage({ data }: { data: AccountUsageDetail }) {
 
 // OfficialUsagePage 展示 OpenAI 侧的结算口径用量，与其他 tab 的本地 usage_logs
 // 聚合是两套数据：这里的 credits 与 token 是官方账单数，且能按客户端入口拆分，
-// 能看出某个号有多少消耗来自本网关、多少来自官方客户端。
+// 能看出某个号有多少消耗来自本网关、多少来自官方客户端；按模型的成本来自
+// 模型×速度拆分端点的份额分摊（含 fast/priority 档）。
 function OfficialUsagePage({
   accountId,
   range,
@@ -580,8 +581,10 @@ function OfficialUsagePage({
     () => aggregateSplits(items, 'clients', creditsPerUSD),
     [items, creditsPerUSD],
   )
-  const modelTotals = useMemo(
-    () => aggregateSplits(items, 'models', creditsPerUSD),
+  // 模型维度的成本来自 daily-token-usage-breakdown 的份额分摊（counts 在模型维度
+  // 不给 credits）。窗口里一天拆分都没同步到时退回旧的按轮次展示。
+  const modelSplit = useMemo(
+    () => aggregateModelBreakdown(items, creditsPerUSD),
     [items, creditsPerUSD],
   )
 
@@ -622,6 +625,11 @@ function OfficialUsagePage({
           {t('accounts.usageOfficialRefreshFailed', { reason: data.refresh_error })}
         </div>
       )}
+      {data?.breakdown_refresh_error && (
+        <div className="rounded-lg bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400">
+          {t('accounts.usageOfficialBreakdownRefreshFailed', { reason: data.breakdown_refresh_error })}
+        </div>
+      )}
 
       {items.length === 0 ? (
         <div className="py-10 text-center text-sm text-muted-foreground">
@@ -652,6 +660,8 @@ function OfficialUsagePage({
             />
           </div>
 
+          {data?.cycle && <OfficialCycleCards cycle={data.cycle} />}
+
           <section className="rounded-2xl border bg-background p-4">
             <div className="mb-3 text-xs font-semibold uppercase text-muted-foreground">
               {t('accounts.usageOfficialDailyTrend')}
@@ -671,10 +681,16 @@ function OfficialUsagePage({
             />
             <OfficialSplitTable
               title={t('accounts.usageOfficialByModel')}
-              rows={modelTotals}
+              rows={modelSplit.rows}
               emptyLabel={t('accounts.usageOfficialEmpty')}
-              // 上游在模型维度不返回 credits/token（恒为 0），只展示会话与轮次。
-              hideCost
+              // 有拆分就按分摊成本展示；free 号 credits 恒 0 只有份额，改显示平均占比；
+              // 窗口内一天拆分都没有（旧快照）时退回只看轮次。
+              costMode={!modelSplit.hasBreakdown ? 'none' : modelSplit.hasCost ? 'usd' : 'share'}
+              footnote={
+                modelSplit.hasBreakdown && modelSplit.breakdownDays < modelSplit.totalDays
+                  ? t('accounts.usageOfficialBreakdownCoverage', { covered: modelSplit.breakdownDays, total: modelSplit.totalDays })
+                  : undefined
+              }
             />
           </div>
         </>
@@ -699,23 +715,105 @@ function OfficialUsageDayRow({ item, maxCredits }: { item: WhamDailyUsageItem; m
       >
         {formatUSD(item.usd)}
       </span>
-      <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
-        {item.settled ? formatTokens(item.total_tokens, fullNumbers) : t('accounts.usageOfficialUnsettled')}
+      {/* 当天（UTC）的行也带 token，只是全天在变：有数就显示，未结算时挂个标记。 */}
+      <span
+        className="w-20 shrink-0 text-right tabular-nums text-muted-foreground"
+        title={item.settled ? undefined : t('accounts.usageOfficialUnsettled')}
+      >
+        {item.total_tokens > 0 ? formatTokens(item.total_tokens, fullNumbers) : t('accounts.usageOfficialUnsettled')}
+        {item.total_tokens > 0 && !item.settled && <span className="ml-0.5 text-[10px] opacity-70">*</span>}
       </span>
     </div>
   )
 }
 
+// OfficialCycleCards 展示当前重置周期的已用官方成本、实时已用百分比与额度估算。
+// 估算 = 已用成本 ÷ 已用百分比：两个上游端点都给不出周额度的绝对值（拆分端点的
+// percent 是区间峰值归一化），这是唯一站得住的推法。百分比只有整数精度，所以给出
+// ±0.5% 的区间，并在不足 10% 时标不可靠。
+function OfficialCycleCards({ cycle }: { cycle: WhamDailyUsageCycle }) {
+  const { t } = useTranslation()
+  const reasonText = (() => {
+    switch (cycle.reason) {
+      case 'no_window':
+        return t('accounts.usageOfficialCycleReasonNoWindow')
+      case 'window_stale':
+        return t('accounts.usageOfficialCycleReasonWindowStale')
+      case 'no_percent':
+        return t('accounts.usageOfficialCycleReasonNoPercent')
+      case 'no_credits':
+        return t('accounts.usageOfficialCycleReasonNoCredits')
+      case 'percent_too_low':
+        return t('accounts.usageOfficialCycleReasonPercentTooLow')
+      default:
+        return ''
+    }
+  })()
+  const percent = cycle.used_percent
+  const percentText = percent == null ? '—' : `${Number.isInteger(percent) ? percent : percent.toFixed(1)}%`
+  const estimate = cycle.estimate
+  const estimateDetail = estimate
+    ? [
+        t('accounts.usageOfficialCycleEstimateRange', { low: formatUSD(estimate.usd_low), high: formatUSD(estimate.usd_high) }),
+        estimate.reliable ? '' : t('accounts.usageOfficialCycleUnreliable'),
+      ]
+        .filter(Boolean)
+        .join(' · ')
+    : reasonText
+  return (
+    <div className="grid gap-3 sm:grid-cols-3">
+      <CompactMetric
+        icon={<Coins className="size-4" />}
+        label={t('accounts.usageOfficialCycleUsed')}
+        value={formatUSD(cycle.used_usd)}
+        detail={
+          cycle.start_at
+            ? t('accounts.usageOfficialCycleUsedDetail', { days: cycle.days, start: formatBeijingTime(cycle.start_at) })
+            : reasonText || undefined
+        }
+      />
+      <CompactMetric
+        icon={<Gauge className="size-4" />}
+        label={t('accounts.usageOfficialCyclePercent')}
+        value={percentText}
+        detail={
+          cycle.reset_at
+            ? t('accounts.usageOfficialCyclePercentDetail', {
+                reset: formatBeijingTime(cycle.reset_at),
+                time: cycle.used_percent_updated_at ? formatBeijingTime(cycle.used_percent_updated_at) : '—',
+              })
+            : reasonText || undefined
+        }
+      />
+      <div title={t('accounts.usageOfficialCycleEstimateHint')}>
+        <CompactMetric
+          icon={<BarChart3 className="size-4" />}
+          label={t('accounts.usageOfficialCycleEstimate')}
+          value={estimate ? formatUSD(estimate.usd) : t('accounts.usageOfficialCycleUnavailable')}
+          detail={estimateDetail || undefined}
+        />
+      </div>
+    </div>
+  )
+}
+
+// costMode 决定最右列：usd 显示分摊成本；share 显示窗口内的平均日份额（free 号只有
+// 份额没有 credits）；none 不显示（旧快照的模型维度没有成本）。
+type SplitCostMode = 'usd' | 'share' | 'none'
+
 function OfficialSplitTable({
   title,
   rows,
   emptyLabel,
-  hideCost = false,
+  costMode = 'usd',
+  footnote,
 }: {
   title: string
   rows: AggregatedSplit[]
   emptyLabel: string
-  hideCost?: boolean
+  costMode?: SplitCostMode
+  // 表格下方的说明，例如拆分只覆盖了窗口内的一部分天数。
+  footnote?: string
 }) {
   const { t } = useTranslation()
   return (
@@ -733,7 +831,7 @@ function OfficialSplitTable({
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {formatNumber(row.turns)} {t('accounts.usageOfficialTurnUnit')}
               </span>
-              {!hideCost && (
+              {costMode === 'usd' && (
                 <span
                   className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground"
                   title={t('accounts.usageOfficialCreditsRaw', { credits: formatCredits(row.credits) })}
@@ -741,10 +839,19 @@ function OfficialSplitTable({
                   {formatUSD(row.usd)}
                 </span>
               )}
+              {costMode === 'share' && (
+                <span
+                  className="w-20 shrink-0 text-right font-semibold tabular-nums text-foreground"
+                  title={t('accounts.usageOfficialShareHint')}
+                >
+                  {formatShare(row.share)}
+                </span>
+              )}
             </div>
           ))}
         </div>
       )}
+      {footnote && <div className="mt-3 text-[11px] text-muted-foreground">{footnote}</div>}
     </section>
   )
 }
@@ -755,10 +862,119 @@ interface AggregatedSplit {
   usd: number
   turns: number
   tokens: number
+  // 窗口内的平均日份额（0~1），只有模型拆分会填；份额不能跨天相加，这里是按天平均。
+  share: number
+}
+
+interface ModelBreakdownSplit {
+  rows: AggregatedSplit[]
+  // 窗口内至少一天同步到了拆分；否则退回 counts.models 的轮次视图。
+  hasBreakdown: boolean
+  // 拆分里有任何非零成本；free 号全为 0，此时只有份额可看。
+  hasCost: boolean
+  // 有拆分的天数 / 窗口内的天数：老快照只有最近几天带拆分，成本与轮次只统计这些天，
+  // 覆盖不全时表格下方要说明，否则会被当成整个窗口的模型成本。
+  breakdownDays: number
+  totalDays: number
+}
+
+// aggregateModelBreakdown 把每天的模型×速度份额分摊成本累加到整个窗口。
+//
+// 行按 (model, speed) 分；fast（priority 档）单独成行并在标签上标出。轮次来自
+// counts.models（只有模型维度、没有速度维度）：一个模型有 standard 行就记在
+// standard 行上，只有 fast 行就记在 fast 行上，绝不重复计入。counts 里有、拆分里没有
+// 的模型（例如占比为 0 的目录项）补一行零成本，保证轮次不丢。
+function aggregateModelBreakdown(items: WhamDailyUsageItem[], creditsPerUSD: number): ModelBreakdownSplit {
+  const withBreakdown = items.filter((item) => item.breakdown_available && Array.isArray(item.breakdown))
+  if (withBreakdown.length === 0) {
+    return {
+      rows: aggregateSplits(items, 'models', creditsPerUSD),
+      hasBreakdown: false,
+      hasCost: false,
+      breakdownDays: 0,
+      totalDays: items.length,
+    }
+  }
+
+  type Row = AggregatedSplit & { model: string; speed: string; shareSum: number }
+  const rows = new Map<string, Row>()
+  const keyOf = (model: string, speed: string) => `${model} ${speed}`
+  for (const item of withBreakdown) {
+    for (const entry of item.breakdown as WhamDailyUsageBreakdownEntry[]) {
+      const model = (entry.model ?? '').trim() || '-'
+      const speed = (entry.speed ?? '').trim().toLowerCase() || 'standard'
+      const key = keyOf(model, speed)
+      const row =
+        rows.get(key) ??
+        {
+          label: speed === 'standard' ? model : `${model} · ${speed}`,
+          model,
+          speed,
+          credits: 0,
+          usd: 0,
+          turns: 0,
+          tokens: 0,
+          share: 0,
+          shareSum: 0,
+        }
+      row.credits += entry.credits ?? 0
+      row.usd += (entry.credits ?? 0) / creditsPerUSD
+      row.shareSum += entry.share ?? 0
+      rows.set(key, row)
+    }
+  }
+
+  // 轮次按模型汇总，再挂到该模型的 standard 行（没有则挂到它唯一的其他速度行）。
+  // 只统计带拆分的那些天：成本与轮次必须是同一个窗口，否则 7 天的成本配 30 天的轮次
+  // 会让人误读单轮成本。
+  const turnsByModel = new Map<string, number>()
+  for (const item of withBreakdown) {
+    for (const split of item.models ?? []) {
+      const model = (split.model ?? '').trim() || '-'
+      turnsByModel.set(model, (turnsByModel.get(model) ?? 0) + (split.turns ?? 0))
+    }
+  }
+  for (const [model, turns] of turnsByModel) {
+    const standard = rows.get(keyOf(model, 'standard'))
+    if (standard) {
+      standard.turns += turns
+      continue
+    }
+    const sibling = [...rows.values()].find((row) => row.model === model)
+    if (sibling) {
+      sibling.turns += turns
+      continue
+    }
+    rows.set(keyOf(model, 'standard'), {
+      label: model,
+      model,
+      speed: 'standard',
+      credits: 0,
+      usd: 0,
+      turns,
+      tokens: 0,
+      share: 0,
+      shareSum: 0,
+    })
+  }
+
+  const days = withBreakdown.length
+  const out: AggregatedSplit[] = [...rows.values()].map(({ model: _model, speed: _speed, shareSum, ...row }) => ({
+    ...row,
+    share: days > 0 ? shareSum / days : 0,
+  }))
+  const hasCost = out.some((row) => row.usd > 0)
+  out.sort((a, b) =>
+    hasCost
+      ? (b.usd - a.usd) || (b.turns - a.turns)
+      : (b.share - a.share) || (b.turns - a.turns),
+  )
+  return { rows: out, hasBreakdown: true, hasCost, breakdownDays: days, totalDays: items.length }
 }
 
 // aggregateSplits 把每天的拆分数组按 client_id / model 累加到整个窗口，按成本降序。
-// 模型维度上游不给 credits，退化成按轮次排序。
+// counts 在模型维度不给 credits，直接用这个函数看模型时只能按轮次排序；模型成本
+// 走 aggregateModelBreakdown。
 function aggregateSplits(
   items: WhamDailyUsageItem[],
   field: 'clients' | 'models',
@@ -769,7 +985,7 @@ function aggregateSplits(
     const splits: WhamDailyUsageSplit[] = item[field] ?? []
     for (const split of splits) {
       const label = (field === 'clients' ? split.client_id : split.model)?.trim() || '-'
-      const current = totals.get(label) ?? { label, credits: 0, usd: 0, turns: 0, tokens: 0 }
+      const current = totals.get(label) ?? { label, credits: 0, usd: 0, turns: 0, tokens: 0, share: 0 }
       current.credits += split.credits ?? 0
       current.usd += (split.credits ?? 0) / creditsPerUSD
       current.turns += split.turns ?? 0
@@ -794,6 +1010,14 @@ function formatUSD(value: number): string {
   if (!Number.isFinite(value) || value === 0) return '$0'
   if (Math.abs(value) < 0.01) return '<$0.01'
   return `$${value.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
+
+// 份额（0~1）显示成百分比；小于 0.1% 的碎屑显示 "<0.1%"。
+function formatShare(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '0%'
+  const percent = value * 100
+  if (percent < 0.1) return '<0.1%'
+  return `${percent.toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: percent < 10 ? 1 : 0 })}%`
 }
 
 function QualitySignals({ data }: { data: AccountUsageDetail }) {

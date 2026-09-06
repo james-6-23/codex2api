@@ -132,6 +132,12 @@ func TestPrepareWebsocketHeadersSendsRoutingHintFromBody(t *testing.T) {
 	}
 
 	// 无 body 时不发。
+	headers = exec.prepareWebsocketHeaders("token-123", account, "42", "session-123", "api-key-1", nil, http.Header{}, []byte(`{"model":"gpt-5.6-sol","service_tier":"ultrafast"}`))
+	if got := headers.Get("X-Codex-Routing-Hint"); got != "model=gpt-5.6-sol;tier=ultrafast" {
+		t.Fatalf("Ultrafast routing hint = %q", got)
+	}
+
+	// 无 body 时不发。
 	headers = exec.prepareWebsocketHeaders("token-123", account, "42", "session-123", "api-key-1", nil, http.Header{}, nil)
 	if got := headers.Get("X-Codex-Routing-Hint"); got != "" {
 		t.Fatalf("X-Codex-Routing-Hint = %q, want empty without body", got)

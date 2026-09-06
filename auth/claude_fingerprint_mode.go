@@ -380,6 +380,9 @@ func (s *Store) ClaudeClientVersion() string {
 // version was cleared) the account keeps the already-valid global policy
 // instead of silently dropping a platform restriction.
 func (s *Store) ClaudeClientPolicyForAccount(account *Account) ClaudeClientPolicy {
+	if account.IsClaudeAPIKey() {
+		return ClaudeClientPolicy{Platform: ClaudeClientPlatformAny, VersionPolicy: ClaudeVersionPolicyPassthrough}
+	}
 	global := s.ClaudeClientPolicy()
 	if account == nil {
 		return global

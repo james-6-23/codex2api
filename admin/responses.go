@@ -187,6 +187,7 @@ type opsResponseCacheConfig struct {
 }
 
 type opsResponseCache struct {
+	SharedPayloadBytes     int64                  `json:"shared_payload_bytes"`
 	EffectiveConfig        opsResponseCacheConfig `json:"effective_config"`
 	AppliedConfig          opsResponseCacheConfig `json:"applied_config"`
 	Entries                int                    `json:"entries"`

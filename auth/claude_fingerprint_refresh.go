@@ -64,7 +64,7 @@ func RefreshClaudeFingerprintVersions(ctx context.Context, store *Store, persist
 			continue
 		}
 		acc.mu.RLock()
-		isClaude := strings.EqualFold(strings.TrimSpace(acc.UpstreamType), UpstreamClaude)
+		isClaude := acc.isClaudeOAuthLocked() && !acc.isClaudeAPIKeyLocked()
 		headers := cloneStringMap(acc.CustomHeaders)
 		dbID := acc.DBID
 		acc.mu.RUnlock()

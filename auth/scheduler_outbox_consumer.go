@@ -473,6 +473,7 @@ func (s *Store) applyPersistentAccountSnapshot(dst, src *Account, enabled bool) 
 		!slices.Equal(dst.GroupIDs, src.GroupIDs) ||
 		!slices.Equal(dst.AllowedAPIKeyIDs, src.AllowedAPIKeyIDs)
 	dst.RefreshToken = src.RefreshToken
+	dst.UpstreamRequestIDHeader = src.UpstreamRequestIDHeader
 	dst.SessionToken = src.SessionToken
 	dst.AccessToken = src.AccessToken
 	dst.ExpiresAt = src.ExpiresAt

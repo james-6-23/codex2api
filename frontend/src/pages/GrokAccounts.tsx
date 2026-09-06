@@ -31,6 +31,10 @@ import {
   Pencil,
   BarChart3,
   Layers,
+  ArrowDown,
+  ArrowUp,
+  ArrowUpDown,
+  Clock,
 } from "lucide-react";
 import { api, getAdminKey } from "../api";
 import type { ProxyRow } from "../api";
@@ -349,6 +353,14 @@ function shortHost(raw?: string | null): string {
 
 // 套餐徽章：使用后端解析出的官方 tier 展示名；付费档琥珀，Free 绿色。
 // 表格用常规尺寸、空值显示占位「—」；卡片用 compact 尺寸、空值不渲染。
+// GrokSortIcon 表头排序指示(与 Codex/Claude 页同款图标,替代此前的 ↑↓ 文本箭头)。
+function GrokSortIcon({ active, dir }: { active: boolean; dir: "asc" | "desc" }) {
+  if (active) {
+    return dir === "desc" ? <ArrowDown className="size-3.5" /> : <ArrowUp className="size-3.5" />;
+  }
+  return <ArrowUpDown className="size-3 text-muted-foreground/35 group-hover:text-primary/70" />;
+}
+
 function GrokPlanBadge({
   account,
   compact = false,
@@ -2557,7 +2569,7 @@ function GrokAccounts({
         >
           {viewMode === "table" && isDesktop ? (
             <div className="data-table-shell hidden lg:block">
-              <Table className="[&_td]:px-2.5 [&_th]:px-2.5 [&_td]:py-4">
+              <Table className="[&_td]:px-2.5 [&_th]:px-2.5 [&_td]:py-3">
                 <TableHeader>
                   <TableRow>
                     <TableHead className="w-9">
@@ -2596,11 +2608,13 @@ function GrokAccounts({
                     ) : null}
                     {visibleColumns.requests ? (
                       <TableHead
+                        aria-sort={sortKey === "requests" ? (sortDir === "desc" ? "descending" : "ascending") : "none"}
                         className={cn(
                           "select-none text-[13px] font-semibold transition-colors",
                           usageSortBlocked
                             ? "cursor-not-allowed text-muted-foreground"
-                            : "cursor-pointer hover:text-primary",
+                            : "group cursor-pointer hover:text-primary",
+                          sortKey === "requests" && "text-primary",
                         )}
                         title={
                           usageSortBlocked
@@ -2609,25 +2623,25 @@ function GrokAccounts({
                         }
                         onClick={() => toggleSort("requests")}
                       >
-                        {t("accounts.requests")}{" "}
-                        {sortKey === "requests"
-                          ? sortDir === "desc"
-                            ? "↓"
-                            : "↑"
-                          : ""}
+                        <span className="inline-flex items-center gap-1.5">
+                          {t("accounts.requests")}
+                          <GrokSortIcon active={sortKey === "requests"} dir={sortDir} />
+                        </span>
                       </TableHead>
                     ) : null}
                     {visibleColumns.usage ? (
                       <TableHead
-                        className="min-w-[170px] cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary"
+                        aria-sort={sortKey === "usage" ? (sortDir === "desc" ? "descending" : "ascending") : "none"}
+                        className={cn(
+                          "group min-w-[232px] cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary",
+                          sortKey === "usage" && "text-primary",
+                        )}
                         onClick={() => toggleSort("usage")}
                       >
-                        {t("accounts.usage")}{" "}
-                        {sortKey === "usage"
-                          ? sortDir === "desc"
-                            ? "↓"
-                            : "↑"
-                          : ""}
+                        <span className="inline-flex items-center gap-1.5">
+                          {t("accounts.usage")}
+                          <GrokSortIcon active={sortKey === "usage"} dir={sortDir} />
+                        </span>
                       </TableHead>
                     ) : null}
                     {visibleColumns.models ? (
@@ -2637,15 +2651,17 @@ function GrokAccounts({
                     ) : null}
                     {visibleColumns.updatedAt ? (
                       <TableHead
-                        className="cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary"
+                        aria-sort={sortKey === "updated" ? (sortDir === "desc" ? "descending" : "ascending") : "none"}
+                        className={cn(
+                          "group cursor-pointer select-none text-[13px] font-semibold transition-colors hover:text-primary",
+                          sortKey === "updated" && "text-primary",
+                        )}
                         onClick={() => toggleSort("updated")}
                       >
-                        {t("grok.colUpdated")}{" "}
-                        {sortKey === "updated"
-                          ? sortDir === "desc"
-                            ? "↓"
-                            : "↑"
-                          : ""}
+                        <span className="inline-flex items-center gap-1.5">
+                          {t("grok.colUpdated")}
+                          <GrokSortIcon active={sortKey === "updated"} dir={sortDir} />
+                        </span>
                       </TableHead>
                     ) : null}
                     <TableHead className="text-right text-[13px] font-semibold">
@@ -4418,8 +4434,8 @@ function GrokAccountTableRow({
         />
       </TableCell>
       {visibleColumns.sequence ? (
-        <TableCell className="font-mono text-[12px] text-muted-foreground">
-          #{sequence}
+        <TableCell className="font-mono text-[13px] tabular-nums text-muted-foreground" title={`ID ${account.id}`}>
+          {sequence}
         </TableCell>
       ) : null}
       <TableCell>
@@ -4523,7 +4539,7 @@ function GrokAccountTableRow({
         </TableCell>
       ) : null}
       {visibleColumns.usage ? (
-        <TableCell className="min-w-[170px]">
+        <TableCell className="min-w-[232px]">
           <GrokUsageCell account={account} onRefreshed={onUsageRefreshed} />
         </TableCell>
       ) : null}
@@ -5257,6 +5273,14 @@ function grokFormatResetAt(
   return { label: full.slice(5), title: full };
 }
 
+// grokShortResetLabel 把 "MM-DD HH:mm:ss" 压成表格内联形态:当天只留 HH:mm,跨天留 "MM-DD HH:mm"。
+function grokShortResetLabel(label: string): string {
+  const noSeconds = label.slice(0, 11);
+  // "今天"按显示时区算(formatBeijingTime 同一口径),避免浏览器本地日期与显示时区错位。
+  const today = formatBeijingTime(new Date().toISOString(), "").slice(5, 10);
+  return today && noSeconds.startsWith(`${today} `) ? noSeconds.slice(6) : noSeconds;
+}
+
 function grokFormatCompactNumber(value?: number): string {
   const n = Number(value || 0);
   if (n >= 1_000_000)
@@ -5344,16 +5368,17 @@ function GrokUsageBar({
           >
             {valueText}
           </span>
+          {/* 重置时间与进度条同行:当天只显示时分,跨天带月日;完整时间在 tooltip */}
+          {resetTime ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-0.5 whitespace-nowrap text-[10px] tabular-nums text-muted-foreground/80"
+              title={`${t("grok.quotaReset")} ${resetTime.title}`}
+            >
+              <Clock className="size-2.5" aria-hidden />
+              {grokShortResetLabel(resetTime.label)}
+            </span>
+          ) : null}
         </div>
-        {resetTime ? (
-          <div
-            className="mt-0.5 pl-[34px] text-[10px] font-medium text-muted-foreground/80"
-            title={resetTime.title}
-          >
-            {/* 表格空间紧张，重置时间去掉秒（完整时间在 tooltip） */}
-            ⏱ {t("grok.quotaReset")} {resetTime.label.slice(0, 11)}
-          </div>
-        ) : null}
       </div>
     );
   }

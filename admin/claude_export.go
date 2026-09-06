@@ -65,6 +65,7 @@ type claudeExportEntry struct {
 	Type                  string            `json:"type"`
 	Version               int               `json:"version"`
 	AuthKind              string            `json:"auth_kind"`
+	BaseURL               string            `json:"base_url,omitempty"`
 	Email                 string            `json:"email,omitempty"`
 	Name                  string            `json:"name,omitempty"`
 	AccessToken           string            `json:"access_token"`
@@ -92,6 +93,7 @@ type claudeImportDocument struct {
 	Type                  string
 	Version               int
 	AuthKind              string
+	BaseURL               string
 	Email                 string
 	Name                  string
 	AccessToken           string
@@ -113,6 +115,9 @@ type claudeImportDocument struct {
 // claudeAccountImportOptions carries metadata that is not part of
 // auth.ClaudeTokenData.  It is consumed by the common account creation path.
 type claudeAccountImportOptions struct {
+	// AuthKind 是凭据形态(oauth / setup_token);空=按是否有 RT 推断。
+	AuthKind           string
+	BaseURL            string
 	Models             []string
 	PlanType           string
 	FingerprintMode    string
@@ -264,6 +269,9 @@ func prepareClaudeTimezoneCredentialUpdateWithHeaders(row *database.AccountRow, 
 		!strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) {
 		return false, nil
 	}
+	if claudeAuthKindForRow(row, true) == auth.ClaudeAuthKindAPIKey {
+		return false, nil
+	}
 	timezone = strings.TrimSpace(timezone)
 	if err := validateAccountTimezone(timezone); err != nil {
 		return false, err
@@ -367,13 +375,18 @@ func claudeAccountRowToExportEntry(row *database.AccountRow, groupRefs []claudeG
 	}
 	accessToken := strings.TrimSpace(row.GetCredential("access_token"))
 	refreshToken := strings.TrimSpace(row.GetCredential("refresh_token"))
-	if accessToken == "" || refreshToken == "" {
+	if accessToken == "" {
+		return claudeExportEntry{}, false
+	}
+	authKind := auth.InferClaudeAuthKind(row.GetCredential(auth.ClaudeAuthKindCredentialKey), accessToken, refreshToken)
+	if authKind == auth.ClaudeAuthKindOAuth && refreshToken == "" {
+		// 一个没有 RT 的「OAuth」行只剩即将过期的 AT,导出到别处也无法续期。
 		return claudeExportEntry{}, false
 	}
 	entry := claudeExportEntry{
 		Type:                  "claude",
 		Version:               claudeCredentialExportVersion,
-		AuthKind:              "oauth",
+		AuthKind:              authKind,
 		Email:                 strings.TrimSpace(row.GetCredential("email")),
 		Name:                  row.Name,
 		AccessToken:           accessToken,
@@ -389,6 +402,18 @@ func claudeAccountRowToExportEntry(row *database.AccountRow, groupRefs []claudeG
 		Tags:                  append([]string(nil), row.Tags...),
 		GroupRefs:             append([]claudeGroupRef(nil), groupRefs...),
 		Enabled:               row.Enabled,
+	}
+	if authKind == auth.ClaudeAuthKindAPIKey {
+		baseURL, err := auth.NormalizeClaudeBaseURL(row.GetCredential(auth.ClaudeBaseURLCredentialKey))
+		if err != nil {
+			return claudeExportEntry{}, false
+		}
+		entry.BaseURL = baseURL
+		entry.RefreshToken = ""
+		entry.ExpiresAt = ""
+		entry.Timezone = ""
+		entry.ClaudeFingerprintMode = ""
+		entry.FingerprintHeaders = nil
 	}
 	entry.exportFileName = claudeExportFileName(entry.Email, entry.Name, row.ID)
 	return entry, true
@@ -470,6 +495,7 @@ type claudeImportWire struct {
 	UpstreamType          string                      `json:"upstream_type"`
 	Version               int                         `json:"version"`
 	AuthKind              string                      `json:"auth_kind"`
+	BaseURL               string                      `json:"base_url"`
 	Email                 string                      `json:"email"`
 	Name                  string                      `json:"name"`
 	AccessToken           string                      `json:"access_token"`
@@ -489,6 +515,7 @@ type claudeImportWire struct {
 	Groups                []claudeGroupRef            `json:"groups"`
 	Enabled               *bool                       `json:"enabled"`
 	Credentials           *claudeImportCredentialWire `json:"credentials"`
+	APIKey                string                      `json:"api_key"`
 }
 
 type claudeImportCredentialWire struct {
@@ -496,6 +523,7 @@ type claudeImportCredentialWire struct {
 	UpstreamType          string            `json:"upstream_type"`
 	Version               int               `json:"version"`
 	AuthKind              string            `json:"auth_kind"`
+	BaseURL               string            `json:"base_url,omitempty"`
 	Email                 string            `json:"email"`
 	Name                  string            `json:"name"`
 	AccessToken           string            `json:"access_token"`
@@ -514,6 +542,7 @@ type claudeImportCredentialWire struct {
 	GroupRefs             []claudeGroupRef  `json:"group_refs"`
 	Groups                []claudeGroupRef  `json:"groups"`
 	Enabled               *bool             `json:"enabled"`
+	APIKey                string            `json:"api_key"`
 }
 
 func mergeClaudeImportWire(root claudeImportWire, nested *claudeImportCredentialWire) claudeImportWire {
@@ -531,6 +560,12 @@ func mergeClaudeImportWire(root claudeImportWire, nested *claudeImportCredential
 	}
 	if root.AuthKind == "" {
 		root.AuthKind = nested.AuthKind
+	}
+	if root.BaseURL == "" {
+		root.BaseURL = nested.BaseURL
+	}
+	if root.APIKey == "" {
+		root.APIKey = nested.APIKey
 	}
 	if root.Email == "" {
 		root.Email = nested.Email
@@ -706,13 +741,54 @@ func claudeImportDocumentFromWire(raw claudeImportWire) (claudeImportDocument, e
 		return claudeImportDocument{}, fmt.Errorf("unsupported Claude credential version %d", raw.Version)
 	}
 	authKind := strings.ToLower(strings.TrimSpace(raw.AuthKind))
-	if authKind != "" && authKind != "oauth" {
-		return claudeImportDocument{}, errors.New("Claude credential auth_kind must be oauth")
+	if !auth.IsValidClaudeAuthKind(authKind) {
+		return claudeImportDocument{}, errors.New("Claude credential auth_kind must be oauth, setup_token or api_key")
 	}
 	accessToken := strings.TrimSpace(raw.AccessToken)
 	refreshToken := strings.TrimSpace(raw.RefreshToken)
-	if accessToken == "" || refreshToken == "" {
-		return claudeImportDocument{}, errors.New("Claude credential requires access_token and refresh_token")
+	baseURL := ""
+	if authKind == auth.ClaudeAuthKindAPIKey {
+		if key := strings.TrimSpace(raw.APIKey); key != "" {
+			if accessToken != "" && accessToken != key {
+				return claudeImportDocument{}, errors.New("api_key and access_token must match when both are supplied")
+			}
+			accessToken = key
+		}
+		if accessToken == "" || strings.IndexFunc(accessToken, unicode.IsSpace) >= 0 {
+			return claudeImportDocument{}, errors.New("Claude api_key credential requires a non-empty key without whitespace")
+		}
+		var err error
+		baseURL, err = auth.NormalizeClaudeBaseURL(raw.BaseURL)
+		if err != nil {
+			return claudeImportDocument{}, err
+		}
+		refreshToken = ""
+		raw.ExpiresAt = ""
+	}
+	if accessToken == "" && refreshToken == "" {
+		return claudeImportDocument{}, errors.New("Claude credential requires access_token or refresh_token")
+	}
+	// 形态推断:未声明 auth_kind 时,有 RT 视为 oauth(AT 可缺省,入库前用 RT 刷出);
+	// 无 RT 仅当 AT 形如官方 Setup Token(sk-ant-oat01-)才视为 setup_token,否则拒绝——
+	// 避免把一个 1 小时就过期的裸 OAuth AT 误当长效令牌。
+	if authKind == "" {
+		switch {
+		case refreshToken != "":
+			authKind = auth.ClaudeAuthKindOAuth
+		case auth.LooksLikeClaudeSetupToken(accessToken):
+			authKind = auth.ClaudeAuthKindSetupToken
+		default:
+			return claudeImportDocument{}, errors.New("Claude credential requires refresh_token (or auth_kind=setup_token)")
+		}
+	}
+	if authKind == auth.ClaudeAuthKindOAuth && refreshToken == "" {
+		return claudeImportDocument{}, errors.New("Claude oauth credential requires refresh_token")
+	}
+	if authKind == auth.ClaudeAuthKindSetupToken {
+		if accessToken == "" {
+			return claudeImportDocument{}, errors.New("Claude setup_token credential requires access_token")
+		}
+		refreshToken = ""
 	}
 	for _, metadata := range []struct {
 		field    string
@@ -772,7 +848,7 @@ func claudeImportDocumentFromWire(raw claudeImportWire) (claudeImportDocument, e
 		}
 	}
 	return claudeImportDocument{
-		Type: strings.TrimSpace(raw.Type), Version: raw.Version, AuthKind: authKind,
+		Type: strings.TrimSpace(raw.Type), Version: raw.Version, AuthKind: authKind, BaseURL: baseURL,
 		Email: strings.TrimSpace(raw.Email), Name: strings.TrimSpace(raw.Name),
 		AccessToken: accessToken, RefreshToken: refreshToken, AccountID: strings.TrimSpace(raw.AccountID),
 		ExpiresAt: strings.TrimSpace(raw.ExpiresAt), PlanType: strings.TrimSpace(raw.PlanType),
