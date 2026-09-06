@@ -2,8 +2,11 @@ package proxy
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/codex2api/api"
@@ -151,7 +154,17 @@ func degradeResponsesWSContinuationBody(body []byte, owner string) ([]byte, *api
 	}
 	input, apiErr := responsesWSReplayInput(body, owner)
 	if apiErr != nil {
-		return nil, apiErr
+		if !responsesWSContinuationFailOpen() {
+			return nil, apiErr
+		}
+		// 逃生阀：退回旧行为，剥掉 previous_response_id 后按原样转发当轮 input。
+		// 上游看到的是丢失历史的会话，只在明确接受该风险时启用。
+		log.Printf("Responses WebSocket continuation context unavailable (%s); CODEX_WS_CONTINUATION_FAIL_OPEN=true, forwarding without history", responsesWSContextReason(apiErr))
+		stripped, err := sjson.DeleteBytes(body, "previous_response_id")
+		if err != nil {
+			return nil, apiErr
+		}
+		return stripped, nil
 	}
 	expanded, err := sjson.SetRawBytes(body, "input", []byte(input))
 	if err != nil {
@@ -162,4 +175,77 @@ func degradeResponsesWSContinuationBody(body []byte, owner string) ([]byte, *api
 		return nil, responsesWSContextUnavailable(http.StatusConflict, "invalid_context")
 	}
 	return expanded, nil
+}
+
+// responsesWSContinuationFailOpen 读取逃生阀：CODEX_WS_CONTINUATION_FAIL_OPEN=true
+// 时上下文不可恢复不再关连接，而是按旧行为剥 id 硬发。
+func responsesWSContinuationFailOpen() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("CODEX_WS_CONTINUATION_FAIL_OPEN"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+func responsesWSContextReason(apiErr *api.APIError) string {
+	if apiErr == nil {
+		return ""
+	}
+	switch details := apiErr.Details.(type) {
+	case []api.ErrorDetail:
+		for _, detail := range details {
+			if detail.Message != "" {
+				return detail.Message
+			}
+		}
+	case api.ErrorDetail:
+		if details.Message != "" {
+			return details.Message
+		}
+	}
+	return apiErr.Message
+}
+
+// markResponsesWSContinuationCapable 给可能续链的 WS 会话在根轮就授予 on_demand
+// 写入资格。Codex CLI 全量上下文每轮 store:false，永远不会带 previous_response_id
+// 回来，不能为它开闸；store 非 false 的会话才有机会续链，若根轮不入缓存，
+// 之后每轮都因祖先缺失无法成快照，降级必然失败。
+func markResponsesWSContinuationCapable(owner string, rawBody []byte) {
+	if store := gjson.GetBytes(rawBody, "store"); store.Exists() && store.Type == gjson.False {
+		return
+	}
+	markResponseCacheChainOwnerIfOnDemand(owner)
+}
+
+// responsesWSReplaySource 按 attempt 惰性构建可回放快照。健康路径只在响应
+// 成功提交后写缓存时才需要它，缓存查找、合并与序列化因此都不在首字路径上；
+// 降级路径已经展开过 input，直接复用，不再二次过滤。
+type responsesWSReplaySource struct {
+	body        []byte
+	owner       string
+	precomputed bool
+	once        sync.Once
+	input       string
+}
+
+func newResponsesWSReplaySource(body []byte, owner string) *responsesWSReplaySource {
+	return &responsesWSReplaySource{body: body, owner: owner}
+}
+
+func newResponsesWSReplaySourceFromInput(input string) *responsesWSReplaySource {
+	return &responsesWSReplaySource{input: input, precomputed: true}
+}
+
+// Input 返回可回放快照；祖先缺失、超限或不可移植时返回空串，调用方据此跳过写缓存。
+func (s *responsesWSReplaySource) Input() string {
+	if s == nil {
+		return ""
+	}
+	if s.precomputed {
+		return s.input
+	}
+	s.once.Do(func() {
+		s.input, _ = responsesWSReplayInput(s.body, s.owner)
+	})
+	return s.input
 }

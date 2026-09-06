@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -316,11 +317,13 @@ func TestResponseCacheRuntimeRefillDoesNotReturnRetainedCopy(t *testing.T) {
 
 type mutatingResponseContextCache struct {
 	cache.TokenCache
+	calls atomic.Int32
 }
 
 func (c *mutatingResponseContextCache) SharedAcrossInstances() bool { return true }
 
 func (c *mutatingResponseContextCache) SetResponseContext(_ context.Context, _ string, items []json.RawMessage, _ time.Duration) error {
+	c.calls.Add(1)
 	if len(items) > 0 && len(items[0]) > 0 {
 		items[0][0] = 'X'
 	}
@@ -341,9 +344,14 @@ func TestResponseCacheRuntimeWriterCannotMutateRetainedCopy(t *testing.T) {
 	original := responseCacheTestItem(1, "runtime-writer")
 	want := append(json.RawMessage(nil), original...)
 	setResponseCache("key:1", "runtime-writer", []json.RawMessage{original})
+	drainResponseCacheBackendWrites()
 
-	if original[0] != 'X' {
-		t.Fatal("mutating runtime writer did not exercise its input mutation")
+	if runtimeCache.calls.Load() != 1 {
+		t.Fatal("mutating runtime writer was not invoked")
+	}
+	// 后台写入拿的是私有克隆：写入方的改动既到不了调用方切片，也到不了 L1。
+	if original[0] == 'X' {
+		t.Fatal("runtime writer mutated the caller's slice")
 	}
 	if got := getResponseCache("key:1", "runtime-writer"); string(got[0]) != string(want) {
 		t.Fatalf("runtime writer mutated retained copy: got %s, want %s", got[0], want)

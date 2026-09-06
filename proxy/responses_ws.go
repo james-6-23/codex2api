@@ -404,6 +404,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	turnContinuation := codexWSTurnContinuationToken(rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	respCacheOwner := responseCacheOwner(apiKeyID)
+	markResponsesWSContinuationCapable(respCacheOwner, rawBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
 	// 上下文压缩轮豁免首字超时看门狗（issue #381）：压缩首帧天然慢，超时换号无益。
 	bodySignalCompact := compactionMeta.ProtocolTriggered
@@ -414,7 +415,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	}
 
 	codexBody, _ := PrepareResponsesWebSocketBody(rawBody)
-	expandedInputRaw, _ := responsesWSReplayInput(codexBody, respCacheOwner)
+	// 可回放快照按 attempt 惰性构建（responsesWSReplaySource），只在响应成功
+	// 提交后为写缓存计算一次；健康路径的首字不再背缓存查找、合并与序列化。
 	// strip 策略：剥离图片工具能力声明后作为普通文本请求继续（issue #411）。
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
@@ -541,7 +543,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		continuationDegraded = true
 		continuationPinned = false
 		codexBody = expanded
-		expandedInputRaw = responsesInputRaw(codexBody)
 		log.Printf("Responses WebSocket continuation degraded: %s, stripped previous_response_id and retried once (attempt %d)", reason, attempt)
 		return nil
 	}
@@ -668,7 +669,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图卡死。
 		upstreamBody := codexBody
-		attemptExpandedInputRaw := expandedInputRaw
+		attemptReplay := newResponsesWSReplaySource(codexBody, respCacheOwner)
 		if useWebsocket {
 			upstreamBody = stripResponsesImageGenerationTool(codexBody)
 		} else if prevID := strings.TrimSpace(gjson.GetBytes(codexBody, "previous_response_id").String()); prevID != "" {
@@ -681,7 +682,8 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				_ = writeResponsesWSError(conn, contextErr)
 				return newResponsesWSCloseError(websocket.ClosePolicyViolation, contextErr.Message, contextErr)
 			}
-			attemptExpandedInputRaw = responsesInputRaw(upstreamBody)
+			// 降级时快照已经算过一次，直接复用展开后的 input，不再二次过滤。
+			attemptReplay = newResponsesWSReplaySourceFromInput(responsesInputRaw(upstreamBody))
 		}
 		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
 		serviceTier = EffectiveRequestedServiceTier(upstreamBody, effectiveModel, downstreamHeaders, attemptIdentity)
@@ -806,7 +808,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					}
 					if codexChanged {
 						codexBody = strippedCodexBody
-						expandedInputRaw = responsesInputRaw(codexBody)
 					}
 					log.Printf("Responses WebSocket upstream rejected encrypted_content, stripped encrypted reasoning context and retried once (attempt %d)", attempt+1)
 					h.store.Release(account)
@@ -906,7 +907,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		preserveAffinity := preserveContinuationBinding()
 		allowContinuationDegrade := canDegradeContinuation()
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptExpandedInputRaw, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptReplay, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
 			if continuousRetryDeadlineExceeded(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
@@ -1024,7 +1025,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	reasoningEffort string,
 	serviceTier string,
 	respCacheOwner string,
-	expandedInputRaw string,
+	replayInput *responsesWSReplaySource,
 	start time.Time,
 	ttftGuard *firstTokenTimeoutGuard,
 	retryEnabled bool,
@@ -1406,7 +1407,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			// Only committed response.completed events become continuation history.
 			// Failed attempts and locally blocked/unwritable replays leave no cache.
 			if !outputCollector.overflow {
-				cacheResponsesWSCompletedResponse(respCacheOwner, expandedInputRaw, completedResponsePayload, outputCollector.Items())
+				cacheResponsesWSCompletedResponse(respCacheOwner, replayInput.Input(), completedResponsePayload, outputCollector.Items())
 			}
 		}
 	}

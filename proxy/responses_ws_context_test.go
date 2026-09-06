@@ -212,6 +212,7 @@ func TestResponsesWSContextRecoversFromSharedBackend(t *testing.T) {
 	t.Cleanup(func() { resetResponseCacheForTest(); backend.TokenCache.Close() })
 	input := `[{"type":"additional_tools","tools":[]},{"type":"message","role":"user","content":"root"}]`
 	cacheResponsesWSCompletedResponse("key:1", input, []byte(`{"response":{"id":"resp_shared","output":[]}}`), []json.RawMessage{json.RawMessage(`{"type":"message","role":"assistant","phase":"final_answer","content":"answer"}`)})
+	drainResponseCacheBackendWrites()
 	backend.mu.Lock()
 	backend.bounded = cache.ResponseContextReadResult{Status: cache.ResponseContextReadFound, Items: cloneResponseContextItems(backend.writes[responseCacheStoreKey("key:1", "resp_shared")])}
 	backend.mu.Unlock()
@@ -269,5 +270,116 @@ func TestResponsesWSContextMissingFailsClosedAndReleasesAccount(t *testing.T) {
 	}
 	if attempts.Load() != 1 || account.GetActiveRequests() != 0 {
 		t.Fatalf("retried without history or leaked account lease: attempts=%d active=%d", attempts.Load(), account.GetActiveRequests())
+	}
+}
+
+// 健康路径不再在首字前查缓存：快照源只在真正需要时算一次并记住结果。
+func TestResponsesWSReplaySourceIsLazyAndMemoized(t *testing.T) {
+	resetResponseCacheForTest()
+	t.Cleanup(resetResponseCacheForTest)
+	setResponseCache("key:1", "resp_prev", []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"root"}`)})
+	before := GetResponseCacheStats()
+	source := newResponsesWSReplaySource([]byte(`{"previous_response_id":"resp_prev","input":[{"type":"message","role":"user","content":"next"}]}`), "key:1")
+	if after := GetResponseCacheStats(); after.Hits != before.Hits || after.Misses != before.Misses {
+		t.Fatal("replay source looked up the cache eagerly")
+	}
+	first := source.Input()
+	second := source.Input()
+	if first == "" || first != second || gjson.Get(first, "#").Int() != 2 {
+		t.Fatalf("unexpected replay input: %q / %q", first, second)
+	}
+	if after := GetResponseCacheStats(); after.Hits != before.Hits+1 {
+		t.Fatalf("lookup was not memoized: hits %d -> %d", before.Hits, after.Hits)
+	}
+	if got := newResponsesWSReplaySourceFromInput("[]").Input(); got != "[]" {
+		t.Fatalf("precomputed input = %q", got)
+	}
+	var missing *responsesWSReplaySource
+	if missing.Input() != "" {
+		t.Fatal("nil source must yield no snapshot")
+	}
+	if got := newResponsesWSReplaySource([]byte(`{"previous_response_id":"resp_gone","input":[]}`), "key:1").Input(); got != "" {
+		t.Fatalf("missing ancestry produced a snapshot: %q", got)
+	}
+}
+
+// 逃生阀：默认 fail-closed；显式打开后剥 id 硬发，input 原样保留。
+func TestResponsesWSContinuationFailOpenEscapeHatch(t *testing.T) {
+	resetResponseCacheForTest()
+	t.Cleanup(resetResponseCacheForTest)
+	body := []byte(`{"previous_response_id":"resp_missing","input":[{"type":"message","role":"user","content":"next"}]}`)
+	if _, apiErr := degradeResponsesWSContinuationBody(body, "key:1"); apiErr == nil {
+		t.Fatal("fail-closed default was bypassed")
+	}
+	t.Setenv("CODEX_WS_CONTINUATION_FAIL_OPEN", "true")
+	degraded, apiErr := degradeResponsesWSContinuationBody(body, "key:1")
+	if apiErr != nil {
+		t.Fatalf("fail-open escape hatch still failed: %v", apiErr)
+	}
+	if gjson.GetBytes(degraded, "previous_response_id").Exists() || gjson.GetBytes(degraded, "input.#").Int() != 1 || gjson.GetBytes(degraded, "input.0.content").String() != "next" {
+		t.Fatalf("legacy degrade body mismatch: %s", degraded)
+	}
+}
+
+// on_demand 下 WS 根轮凭 store 信号取得写入资格：store:false（Codex CLI 全量
+// 上下文）不写，未声明或 true 的会话从根轮起入缓存，后续降级才有祖先可用。
+func TestResponsesWSContextOnDemandBootstrapsFromStoreSignal(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	cacheConfig := defaultResponseCacheConfig()
+	cacheConfig.writePolicy = database.ResponseCacheWritePolicyOnDemand
+	resetResponseCacheStateForTest(cacheConfig)
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() {
+		WebsocketExecuteFunc = previousExec
+		resetResponseCacheForTest()
+	})
+	var turn atomic.Int32
+	WebsocketExecuteFunc = func(context.Context, *auth.Account, []byte, string, string, string, *DeviceProfileConfig, http.Header, string) (*http.Response, error) {
+		id := fmt.Sprintf("resp_%d", turn.Add(1))
+		sse := wsContextTestSSE(id, `{"type":"message","id":"msg_x","role":"assistant","content":[{"type":"output_text","text":"ok"}]}`)
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(sse))}, nil
+	}
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	t.Cleanup(store.Stop)
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "test-token", PlanType: "plus", AccountID: "test-account"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+	router := gin.New()
+	handler.RegisterRoutes(router)
+	server := httptest.NewServer(router)
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	send := func(payload string) {
+		t.Helper()
+		if err := conn.WriteMessage(websocket.TextMessage, []byte(payload)); err != nil {
+			t.Fatal(err)
+		}
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		if terminal := readResponsesWSTerminalEvent(t, conn); gjson.GetBytes(terminal, "type").String() != "response.completed" {
+			t.Fatalf("unexpected terminal: %s", terminal)
+		}
+	}
+	// 缓存写入发生在终态帧写给客户端之后；帧循环是串行的，所以上一轮的写入
+	// 决定在下一轮终态到达时必然已经落定，断言按这个顺序排。
+	send(`{"type":"response.create","model":"gpt-5.4","store":false,"input":[{"type":"message","role":"user","content":"full context every turn"}]}`)
+	send(`{"type":"response.create","model":"gpt-5.4","input":[{"type":"message","role":"user","content":"incremental root"}]}`)
+	if getResponseCache("anon", "resp_1") != nil {
+		t.Fatal("store:false root turn was cached under on_demand")
+	}
+	send(`{"type":"response.create","model":"gpt-5.4","previous_response_id":"resp_2","input":[{"type":"message","role":"user","content":"second turn"}]}`)
+	if getResponseCache("anon", "resp_2") == nil {
+		t.Fatal("continuation-capable root turn was not cached under on_demand")
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if cached := getResponseCache("anon", "resp_3"); len(cached) == 4 {
+			break
+		} else if time.Now().After(deadline) {
+			t.Fatalf("continuation snapshot has %d items, want root + answer + new message + answer", len(cached))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

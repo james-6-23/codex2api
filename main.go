@@ -624,6 +624,9 @@ func main() {
 	adminHandler.WaitAutoActivate5hWindow()
 	wsKeepalive.Stop()
 	wsrelay.ShutdownExecutor()
+	if !proxy.DrainResponseCacheBackendWrites(2 * time.Second) {
+		log.Printf("部分响应上下文后台写入未在关闭窗口内完成")
+	}
 	store.Stop()
 	// 所有请求入口和后台生产者停止后，再排空仍可能访问 Store、缓存或数据库的短任务。
 	if !db.DrainBackgroundTasks(2 * time.Second) {

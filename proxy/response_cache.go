@@ -224,6 +224,8 @@ func GetResponseCacheStats() ResponseCacheStats {
 // resetResponseCacheStateForTest replaces all local state with a deterministic
 // test configuration. It deliberately remains package-private.
 func resetResponseCacheStateForTest(config responseCacheConfig) {
+	// 上一个测试的后台写入必须先落地，否则会写进重置后的后端。
+	drainResponseCacheBackendWrites()
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
 	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
@@ -288,6 +290,17 @@ func removeResponseCacheChainOwnerLocked(owner string) {
 	respCache.stats.ChainOwners = len(respCache.chainOwners)
 }
 
+// markResponseCacheChainOwnerIfOnDemand 在 on_demand 写入策略下把 owner 标为
+// 近期续链者；always 策略下写入本就放行，不占 LRU 名额。
+func markResponseCacheChainOwnerIfOnDemand(owner string) {
+	respCache.mu.Lock()
+	defer respCache.mu.Unlock()
+	if respCache.config.writePolicy != database.ResponseCacheWritePolicyOnDemand {
+		return
+	}
+	markResponseCacheChainOwnerLocked(owner)
+}
+
 // responseCacheWriteAllowed 判断当前写入策略下 owner 是否有写入资格。
 // on_demand 下过期记录按不合格处理（惰性删除交给清理循环）。
 func responseCacheWriteAllowed(owner string) bool {
@@ -320,11 +333,68 @@ func setResponseCache(owner, responseID string, items []json.RawMessage) {
 	respCache.mu.RUnlock()
 
 	if runtimeCache != nil && len(runtimeItems) > 0 {
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		writeResponseContextBackend(runtimeCache, responseID, storeKey, runtimeItems)
+	}
+}
+
+const (
+	// 后台写入并发槽位；耗尽后退回同步写（背压而非丢弃）。
+	responseCacheBackendWriteSlots = 16
+	// 后台写入不在请求路径上，给大载荷留足时间；同步兜底写沿用旧上限。
+	responseCacheBackendWriteTimeout = 2 * time.Second
+	responseCacheBackendSyncTimeout  = 500 * time.Millisecond
+)
+
+var responseCacheBackendWriter = struct {
+	wg    sync.WaitGroup
+	slots chan struct{}
+}{slots: make(chan struct{}, responseCacheBackendWriteSlots)}
+
+// writeResponseContextBackend 把已入 L1 的条目写到共享后端。写入在后台完成，
+// 调用方（响应收尾、串行的 WS 帧循环）不再等 Redis 往返；槽位耗尽时退回同步写，
+// 保证 L1 未命中时共享后端仍能兜底。后台写持有调用方切片的私有克隆，返回后
+// 调用方或后端对各自副本的改动互不可见（memcpy 远比一次 Redis 往返便宜）。
+func writeResponseContextBackend(runtimeCache cache.TokenCache, responseID, storeKey string, items []json.RawMessage) {
+	write := func(payload []json.RawMessage, timeout time.Duration) {
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
-		if err := runtimeCache.SetResponseContext(ctx, storeKey, runtimeItems, responseCacheTTL); err != nil {
+		if err := runtimeCache.SetResponseContext(ctx, storeKey, payload, responseCacheTTL); err != nil {
 			log.Printf("写入 Redis response context 失败: response_id=%s err=%v", responseID, err)
 		}
+	}
+	select {
+	case responseCacheBackendWriter.slots <- struct{}{}:
+		payload := cloneResponseContextItems(items)
+		responseCacheBackendWriter.wg.Add(1)
+		go func() {
+			defer func() {
+				<-responseCacheBackendWriter.slots
+				responseCacheBackendWriter.wg.Done()
+			}()
+			write(payload, responseCacheBackendWriteTimeout)
+		}()
+	default:
+		write(items, responseCacheBackendSyncTimeout)
+	}
+}
+
+// drainResponseCacheBackendWrites 等待后台写入全部落地（测试与关停使用）。
+func drainResponseCacheBackendWrites() {
+	responseCacheBackendWriter.wg.Wait()
+}
+
+// DrainResponseCacheBackendWrites 在关停时等待后台共享后端写入完成，最多等 timeout。
+func DrainResponseCacheBackendWrites(timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		drainResponseCacheBackendWrites()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
 	}
 }
 
