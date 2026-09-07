@@ -24,18 +24,21 @@ const promptAccountStatusGuardrail = "账号状态仅记录会话窗口与已验
 const promptRiskProfileListTimeout = 20 * time.Second
 
 type promptRiskProfilesResponse struct {
-	Profiles       []*database.PromptRiskProfile `json:"profiles"`
-	Total          int                           `json:"total"`
-	Page           int                           `json:"page"`
-	PageSize       int                           `json:"page_size"`
-	ScoringVersion string                        `json:"scoring_version"`
-	Guardrail      string                        `json:"guardrail"`
+	Profiles       []*database.PromptRiskProfile   `json:"profiles"`
+	Total          int                             `json:"total"`
+	Page           int                             `json:"page"`
+	PageSize       int                             `json:"page_size"`
+	ScoringVersion string                          `json:"scoring_version"`
+	Guardrail      string                          `json:"guardrail"`
+	AccountSummary *database.AccountSessionSummary `json:"account_summary,omitempty"`
 }
 
 type promptRiskProfileDetailResponse struct {
 	Profile             *database.PromptRiskProfile           `json:"profile"`
 	SessionLimit        *promptRiskSessionLimitResponse       `json:"session_limit,omitempty"`
 	SessionWindows      []promptRiskSessionWindowResponse     `json:"session_windows"`
+	SessionUsage        *database.SessionUsageStats           `json:"session_usage,omitempty"`
+	ManualWindowLocks   []*database.PromptManualWindowLock    `json:"manual_window_locks"`
 	Events              []*database.PromptRiskEvent           `json:"events"`
 	TrustEvents         []*database.PromptRiskTrustEvent      `json:"trust_events"`
 	AdaptiveReviewBasis promptRiskAdaptiveReviewBasisResponse `json:"adaptive_review_basis"`
@@ -79,6 +82,7 @@ type promptRiskSessionWindowResponse struct {
 	ReasoningEffort  string     `json:"reasoning_effort,omitempty"`
 	ClientUserAgent  string     `json:"client_user_agent,omitempty"`
 	PromptPreview    string     `json:"prompt_preview,omitempty"`
+	Last500At        *time.Time `json:"last_500_at,omitempty"`
 }
 
 type promptRiskAdaptiveReviewBasisResponse struct {
@@ -120,13 +124,14 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), promptRiskProfileListTimeout)
 	defer cancel()
 	lockTTL, userCooldownTTL := h.promptConversationRestrictionTTLs()
-	profiles, total, err := h.db.ListPromptRiskProfiles(ctx, database.PromptRiskProfileQuery{
+	query := database.PromptRiskProfileQuery{
 		Page: page, PageSize: pageSize, SubjectType: c.Query("subject_type"), Platform: c.Query("platform"),
 		RiskLevel: c.Query("risk_level"), APIKeyID: apiKeyID, AccountID: accountID, MinScore: minScore, Query: c.Query("q"),
 		UpstreamCYOnly: c.Query("cy_only") == "true", ActivityState: activityState,
 		PrioritizeActiveLocks: true, ActiveLocksOnly: c.Query("locked_only") == "true",
 		ConversationLockTTL: lockTTL, UserCyberCooldownTTL: userCooldownTTL,
-	})
+	}
+	profiles, total, err := h.db.ListPromptRiskProfiles(ctx, query)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -136,8 +141,14 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 	}
 	accountStatus := strings.TrimSpace(c.Query("subject_type")) == database.PromptRiskSubjectAccountStatus
 	guardrail := promptRiskHistoryGuardrail
+	var accountSummary *database.AccountSessionSummary
 	if accountStatus {
 		guardrail = promptAccountStatusGuardrail
+		accountSummary, err = h.db.GetAccountSessionSummary(ctx, query)
+		if err != nil {
+			writeInternalError(c, err)
+			return
+		}
 	} else {
 		h.attachPromptRiskTrustPolicies(ctx, profiles)
 		h.attachPromptConversationLocks(ctx, profiles)
@@ -145,6 +156,7 @@ func (h *Handler) ListPromptRiskProfiles(c *gin.Context) {
 	c.JSON(http.StatusOK, promptRiskProfilesResponse{
 		Profiles: profiles, Total: total, Page: page, PageSize: pageSize,
 		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: guardrail,
+		AccountSummary: accountSummary,
 	})
 }
 
@@ -209,9 +221,29 @@ func (h *Handler) GetPromptRiskProfile(c *gin.Context) {
 	adaptiveBasis := buildPromptRiskAdaptiveReviewBasis(profile, basis, adaptive, reviewEnabled, now)
 	sessionLimit := h.promptRiskSessionLimitResponse(profile)
 	sessionWindows := h.promptRiskSessionWindows(ctx, profile, now)
+	var sessionUsage *database.SessionUsageStats
+	manualLocks := make([]*database.PromptManualWindowLock, 0)
+	if profile.SubjectType == database.PromptRiskSubjectNewAPIUser {
+		sessionUsage, err = h.db.GetNewAPIUserSessionUsage(ctx, profile.Platform, profile.NewAPIUserID)
+		if err != nil {
+			writeInternalError(c, err)
+			return
+		}
+		manualLocks, err = h.db.ListPromptUserWindowLocks(ctx, profile.Platform, profile.NewAPIUserID, now)
+		if err != nil {
+			writeInternalError(c, err)
+			return
+		}
+		if err := h.attachPromptWindowAccountErrors(ctx, profile, sessionWindows); err != nil {
+			writeInternalError(c, err)
+			return
+		}
+	}
 	c.JSON(http.StatusOK, promptRiskProfileDetailResponse{
 		Profile: profile, SessionLimit: sessionLimit, SessionWindows: sessionWindows, Events: events, TrustEvents: trustEvents, AdaptiveReviewBasis: adaptiveBasis,
-		EventTotal: total, EventPage: eventPage, EventPageSize: eventPageSize,
+		SessionUsage:      sessionUsage,
+		ManualWindowLocks: manualLocks,
+		EventTotal:        total, EventPage: eventPage, EventPageSize: eventPageSize,
 		TrustEventTotal: trustEventTotal, TrustEventPage: trustEventPage, TrustEventPageSize: trustEventPageSize,
 		ScoringVersion: database.PromptRiskScoringVersion, Guardrail: promptRiskHistoryGuardrail,
 	})

@@ -202,6 +202,7 @@ func (h *Handler) checkPromptSessionCreationLimitForSelectedAccount(c *gin.Conte
 // affinity admission separate from user-window creation. priorSessionAccountID
 // describes the account-session state before scheduling selected account.
 func (h *Handler) checkPromptSessionCreationLimitForSelectedAccountAdmission(c *gin.Context, body []byte, account *auth.Account, affinityKey string, priorSessionAccountID int64) (promptSessionCreationLimitStatus, bool) {
+	clearAccountSessionObservationContext(c)
 	if account == nil || (c != nil && c.GetBool("prompt_intelligence_internal")) {
 		return promptSessionCreationLimitStatus{}, false
 	}
@@ -209,7 +210,17 @@ func (h *Handler) checkPromptSessionCreationLimitForSelectedAccountAdmission(c *
 	if !enabled {
 		return promptSessionCreationLimitStatus{}, false
 	}
-	return h.checkPromptSessionCreationLimitWithAccountAdmission(c, h.promptFilterConfigForRequest(c), body, account, affinityKey, priorSessionAccountID)
+	status, exceeded := h.checkPromptSessionCreationLimitWithAccountAdmission(c, h.promptFilterConfigForRequest(c), body, account, affinityKey, priorSessionAccountID)
+	if !exceeded && c != nil && status.Subject != "" && status.SessionHash != "" {
+		h.promptSessionLimitMu.Lock()
+		expiresAt := h.promptSessionLimits[status.Subject][status.SessionHash]
+		h.promptSessionLimitMu.Unlock()
+		c.Set(promptSessionWindowExpiresAtContextKey, expiresAt)
+	}
+	if !exceeded && c != nil && h.store != nil {
+		c.Set(accountSessionUsagePeriodContextKey, h.store.AccountSessionUsagePeriod(account.ID(), affinityKey, time.Now().UTC()))
+	}
+	return status, exceeded
 }
 
 // releaseSelectedAccountAfterPromptSessionRejection undoes only the capacity

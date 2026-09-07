@@ -238,6 +238,11 @@ func TestAccountSessionStateRestoresFromRuntimeCacheAfterRestart(t *testing.T) {
 	if !after[0].LastSeen.Equal(before[0].LastSeen) {
 		t.Fatalf("restored last_seen = %s, want %s", after[0].LastSeen, before[0].LastSeen)
 	}
+	firstPeriod := firstStore.AccountSessionUsagePeriod(firstAccount.DBID, rootKey, time.Now())
+	secondPeriod := secondStore.AccountSessionUsagePeriod(secondAccount.DBID, rootKey, time.Now())
+	if firstPeriod.ID == "" || firstPeriod.ID != secondPeriod.ID || !firstPeriod.StartedAt.Equal(secondPeriod.StartedAt) {
+		t.Fatalf("usage period changed after restart: first=%+v second=%+v", firstPeriod, secondPeriod)
+	}
 }
 
 func TestRelatedRequestRestoresAndRefreshesPersistedRootAfterRestart(t *testing.T) {

@@ -1361,6 +1361,10 @@ export const api = {
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'DELETE' }),
 	unlockPromptConversation: (lockKey: string, reason = '管理员主动解锁', scope: 'conversation' | 'user_cooldown' = 'conversation') =>
 		request<{ lock: import('./types').PromptConversationLock; scope: string; unlocked_count: number }>(`/prompt-policy/conversation-locks/${encodeURIComponent(lockKey)}/unlock`, { method: 'POST', body: JSON.stringify({ reason, scope }) }),
+	lockPromptUserWindow: (subjectKey: string, sessionHash: string, windowExpiresAt: string) =>
+		request<{ lock: import('./types').PromptManualWindowLock }>(`/prompt-policy/risk-profiles/newapi_user/${encodeURIComponent(subjectKey)}/session-windows/${encodeURIComponent(sessionHash)}/lock`, { method: 'POST', body: JSON.stringify({ window_expires_at: windowExpiresAt }) }),
+	unlockPromptUserWindow: (subjectKey: string, sessionHash: string) =>
+		request<{ ok: boolean }>(`/prompt-policy/risk-profiles/newapi_user/${encodeURIComponent(subjectKey)}/session-windows/${encodeURIComponent(sessionHash)}/unlock`, { method: 'POST' }),
   testPromptFilter: (data: { text: string; endpoint?: string; model?: string }) =>
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
   testPromptReview: (data: PromptReviewTestRequest) =>

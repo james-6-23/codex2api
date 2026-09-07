@@ -148,6 +148,8 @@ type AccountSessionRelatedSource struct {
 
 type accountSessionState struct {
 	sessionID             string
+	usagePeriodID         string
+	usageStartedAt        time.Time
 	lastSeen              time.Time
 	lastPersisted         time.Time
 	owner                 AccountSessionOwner
@@ -159,6 +161,8 @@ type accountSessionState struct {
 
 type persistedAccountSessionState struct {
 	SessionID           string                        `json:"session_id"`
+	UsagePeriodID       string                        `json:"usage_period_id,omitempty"`
+	UsageStartedAt      time.Time                     `json:"usage_started_at,omitempty"`
 	LastSeen            time.Time                     `json:"last_seen"`
 	Owner               AccountSessionOwner           `json:"owner,omitempty"`
 	RelatedRequestCount int64                         `json:"related_request_count,omitempty"`
@@ -265,6 +269,8 @@ func (s *Store) ensureAccountSessionsLoaded(account *Account, now time.Time) {
 			}
 			state := &accountSessionState{
 				sessionID:           sessionID,
+				usagePeriodID:       item.UsagePeriodID,
+				usageStartedAt:      item.UsageStartedAt,
 				lastSeen:            item.LastSeen,
 				owner:               item.Owner,
 				relatedRequestCount: item.RelatedRequestCount,
@@ -368,6 +374,7 @@ func (s *Store) persistAccountSessions(accountID int64, now time.Time, reconcile
 		}
 		collection.Sessions = append(collection.Sessions, persistedAccountSessionState{
 			SessionID: state.sessionID, LastSeen: state.lastSeen, Owner: state.owner,
+			UsagePeriodID: state.usagePeriodID, UsageStartedAt: state.usageStartedAt,
 			RelatedRequestCount: state.relatedRequestCount, RelatedSources: relatedSources,
 			RelatedRequestIDs: append([]string(nil), state.relatedRequestIDOrder...),
 		})
@@ -503,7 +510,7 @@ func (s *Store) AdmitAccountSession(account *Account, sessionKey string, now tim
 		s.accountSessionMu.Unlock()
 		return false
 	}
-	bySession[sessionKey] = &accountSessionState{sessionID: sessionKey, lastSeen: now}
+	bySession[sessionKey] = &accountSessionState{sessionID: sessionKey, lastSeen: now, usagePeriodID: uuid.NewString(), usageStartedAt: now}
 	s.accountSessionMu.Unlock()
 	return true
 }

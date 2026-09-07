@@ -353,6 +353,9 @@ type usageLogEntry struct {
 	NewAPIUserID             string
 	RecordSessionObservation bool
 	ObservedAt               time.Time
+	SessionUsagePeriodID     string
+	SessionUsageStartedAt    time.Time
+	SessionWindowExpiresAt   time.Time
 	CacheWrite5mTokens       int
 	CacheWrite1hTokens       int
 }
@@ -476,6 +479,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 	}
 	if err := db.ensureAccountSessionObservationsTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建账号会话观测表失败: %w", err)
+	}
+	if err := db.ensurePromptWindowOperationsTables(ctx); err != nil {
+		return nil, fmt.Errorf("创建会话窗口操作表失败: %w", err)
 	}
 	if err := db.ensureUsageAccountHourlyRollupsTable(ctx); err != nil {
 		return nil, fmt.Errorf("创建用量归档汇总表失败: %w", err)
@@ -4267,7 +4273,8 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 	// 用户计费金额与账号计费金额相同（简化版，未来可支持倍率）
 	userBilled := accountBilled
-	if !storeUsageLog && !log.RecordSessionObservation && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
+	hasWindowError := log.StatusCode == 500 && log.AccountID > 0 && !log.SessionWindowExpiresAt.IsZero() && validPromptWindowScope(log.NewAPIPlatform, log.NewAPIUserID, log.SessionHash)
+	if !storeUsageLog && !log.RecordSessionObservation && log.SessionUsagePeriodID == "" && !hasWindowError && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
 		return nil
 	}
 
@@ -4330,6 +4337,9 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 		NewAPIUserID:             clampUsageLogText(log.NewAPIUserID, usageLogAPIKeyNameMaxLen),
 		RecordSessionObservation: log.RecordSessionObservation,
 		ObservedAt:               log.ObservedAt,
+		SessionUsagePeriodID:     log.SessionUsagePeriodID,
+		SessionUsageStartedAt:    log.SessionUsageStartedAt,
+		SessionWindowExpiresAt:   log.SessionWindowExpiresAt,
 		CacheWrite5mTokens:       log.CacheWrite5mTokens,
 		CacheWrite1hTokens:       log.CacheWrite1hTokens,
 	})
@@ -4403,6 +4413,9 @@ type UsageLogInput struct {
 	NewAPIUserID             string
 	RecordSessionObservation bool
 	ObservedAt               time.Time
+	SessionUsagePeriodID     string
+	SessionUsageStartedAt    time.Time
+	SessionWindowExpiresAt   time.Time
 	CacheWrite5mTokens       int
 	CacheWrite1hTokens       int
 }
@@ -4736,7 +4749,7 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 	if err := applyUsageStatsRollupWithExec(ctx, tx, logsToStore); err != nil {
 		return fmt.Errorf("更新用量累计汇总: %w", err)
 	}
-	if err := applyAccountSessionObservationsWithExec(ctx, tx, batch); err != nil {
+	if err := db.applyAccountSessionObservationsWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新账号会话观测: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
@@ -4786,7 +4799,7 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 	if err := applyUsageStatsRollupWithExec(ctx, tx, logsToStore); err != nil {
 		return fmt.Errorf("更新用量累计汇总: %w", err)
 	}
-	if err := applyAccountSessionObservationsWithExec(ctx, tx, batch); err != nil {
+	if err := db.applyAccountSessionObservationsWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新账号会话观测: %w", err)
 	}
 	if err := tx.Commit(); err != nil {

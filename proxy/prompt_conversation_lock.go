@@ -743,6 +743,18 @@ func (h *Handler) lockPromptConversationOnLocalBlock(c *gin.Context, cfg promptf
 }
 
 func (h *Handler) rejectLockedPromptConversation(c *gin.Context, cfg promptfilter.Config, signedBody, responseBody []byte, endpoint, model string) bool {
+	if apiErr := h.promptManualWindowLockError(c, cfg, ingressRequestBody(c, responseBody), signedBody); apiErr != nil {
+		status := http.StatusBadRequest
+		if apiErr.Code == api.ErrCodeServiceUnavailable {
+			status = http.StatusServiceUnavailable
+		}
+		if requestUsesAnthropicErrorEnvelope(c) {
+			c.JSON(status, gin.H{"type": "error", "error": gin.H{"type": string(apiErr.Type), "message": apiErr.Message}})
+		} else {
+			api.SendErrorWithStatus(c, apiErr, status)
+		}
+		return true
+	}
 	item, locked := h.activePromptConversationLock(c, cfg, signedBody, endpoint, model)
 	if !locked {
 		return false

@@ -1212,6 +1212,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-policy/risk-profiles", h.ListPromptRiskProfiles)
 	api.GET("/prompt-policy/risk-profiles/:subject_type/:subject_key", h.GetPromptRiskProfile)
 	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/session-limit", h.UpdatePromptRiskProfileSessionLimit)
+	api.POST("/prompt-policy/risk-profiles/:subject_type/:subject_key/session-windows/:session_hash/lock", h.LockPromptUserWindow)
+	api.POST("/prompt-policy/risk-profiles/:subject_type/:subject_key/session-windows/:session_hash/unlock", h.UnlockPromptUserWindow)
 	api.PUT("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.UpsertPromptRiskTrustPolicy)
 	api.DELETE("/prompt-policy/risk-profiles/:subject_type/:subject_key/trust", h.RevokePromptRiskTrustPolicy)
 	api.POST("/prompt-policy/conversation-locks/:lock_key/unlock", h.UnlockPromptConversation)

@@ -2381,6 +2381,7 @@ export interface PromptRiskProfile {
   session_windows_24h?: number
   session_unique_users?: number
   session_windows_total?: number
+  session_average_duration_seconds?: number | null
   trust_policy?: PromptRiskTrustPolicy
   conversation_lock?: PromptConversationLock
 }
@@ -2454,6 +2455,7 @@ export interface PromptRiskProfilesResponse {
   page: number
   page_size: number
   scoring_version: string
+  account_summary?: AccountSessionSummary
   guardrail: string
 }
 
@@ -2461,6 +2463,8 @@ export interface PromptRiskProfileDetailResponse {
   profile: PromptRiskProfile
   session_limit?: PromptRiskSessionLimitPolicy
   session_windows?: PromptRiskSessionWindow[]
+  session_usage?: SessionUsageStats
+  manual_window_locks?: PromptManualWindowLock[]
   events: PromptRiskEvent[]
   trust_events: PromptRiskTrustEvent[]
   adaptive_review_basis: PromptRiskAdaptiveReviewBasis
@@ -2485,6 +2489,30 @@ export interface PromptRiskSessionWindow {
   reasoning_effort?: string
   client_user_agent?: string
   prompt_preview?: string
+  last_500_at?: ISODateString
+}
+
+export interface PromptManualWindowLock {
+  platform: string
+  newapi_user_id: string
+  session_hash: string
+  locked_at: ISODateString
+  expires_at: ISODateString
+  unlocked_at?: ISODateString
+}
+
+export interface SessionUsageStats {
+  window_count: number
+  average_duration_seconds: number | null
+}
+
+export interface AccountSessionSummary {
+  account_count: number
+  average_windows_24h: number
+  average_unique_users: number
+  average_windows_total: number
+  average_duration_seconds: number | null
+  latest_at?: ISODateString
 }
 
 export type PromptRiskSessionLimitMode = 'inherit' | 'custom' | 'off'

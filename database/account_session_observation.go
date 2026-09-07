@@ -38,6 +38,18 @@ func (db *DB) ensureAccountSessionObservationsTable(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_session_observations_first_seen ON account_session_observations(first_seen)`,
 		`CREATE INDEX IF NOT EXISTS idx_account_session_observations_account_first ON account_session_observations(account_id, first_seen)`,
+		`CREATE INDEX IF NOT EXISTS idx_account_session_observations_user ON account_session_observations(newapi_platform, newapi_user_id, session_hash)`,
+		`CREATE TABLE IF NOT EXISTS account_session_usage_periods (
+			account_id BIGINT NOT NULL,
+			period_id VARCHAR(64) NOT NULL,
+			session_hash VARCHAR(64) NOT NULL,
+			newapi_platform VARCHAR(100) NOT NULL DEFAULT '',
+			newapi_user_id VARCHAR(255) NOT NULL DEFAULT '',
+			first_seen TIMESTAMP NOT NULL,
+			last_seen TIMESTAMP NOT NULL,
+			PRIMARY KEY(account_id, period_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_account_session_usage_periods_user ON account_session_usage_periods(newapi_platform, newapi_user_id)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.conn.ExecContext(ctx, statement); err != nil {
@@ -47,9 +59,15 @@ func (db *DB) ensureAccountSessionObservationsTable(ctx context.Context) error {
 	return nil
 }
 
-func applyAccountSessionObservationsWithExec(ctx context.Context, execer sqlExecer, batch []usageLogEntry) error {
+func (db *DB) applyAccountSessionObservationsWithExec(ctx context.Context, execer sqlExecer, batch []usageLogEntry) error {
 	if execer == nil || len(batch) == 0 {
 		return nil
+	}
+	if err := db.applyAccountSessionUsagePeriodsWithExec(ctx, execer, batch); err != nil {
+		return err
+	}
+	if err := db.applyPromptSessionAccountErrorsWithExec(ctx, execer, batch); err != nil {
+		return err
 	}
 	// One request can produce retry/continuation rows. Collapse the batch so a
 	// conversation produces at most one upsert per account per flush.
@@ -117,26 +135,10 @@ func (db *DB) listAccountStatusProfiles(ctx context.Context, query PromptRiskPro
 	if query.PageSize <= 0 || query.PageSize > 200 {
 		query.PageSize = 20
 	}
-	clauses := []string{"a.status <> 'deleted'", "COALESCE(a.error_message, '') <> 'deleted'"}
-	args := make([]any, 0, 4)
-	if query.AccountID > 0 {
-		args = append(args, query.AccountID)
-		clauses = append(clauses, fmt.Sprintf("a.id=$%d", len(args)))
+	where, args, valid := accountStatusProfileFilter(query)
+	if !valid {
+		return []*PromptRiskProfile{}, 0, nil
 	}
-	if value := strings.TrimSpace(query.SubjectKey); value != "" {
-		if accountID, err := strconv.ParseInt(value, 10, 64); err == nil && accountID > 0 {
-			args = append(args, accountID)
-			clauses = append(clauses, fmt.Sprintf("a.id=$%d", len(args)))
-		} else {
-			return []*PromptRiskProfile{}, 0, nil
-		}
-	}
-	if value := strings.TrimSpace(query.Query); value != "" {
-		args = append(args, "%"+strings.ToLower(value)+"%")
-		placeholder := fmt.Sprintf("$%d", len(args))
-		clauses = append(clauses, fmt.Sprintf(`(LOWER(COALESCE(a.name,'')) LIKE %s OR LOWER(COALESCE(CAST(a.credentials AS TEXT),'')) LIKE %s OR CAST(a.id AS TEXT) LIKE %s)`, placeholder, placeholder, placeholder))
-	}
-	where := strings.Join(clauses, " AND ")
 	var total int
 	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts a WHERE `+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
@@ -149,7 +151,7 @@ func (db *DB) listAccountStatusProfiles(ctx context.Context, query PromptRiskPro
 		COUNT(o.session_hash),
 		COALESCE(SUM(CASE WHEN o.first_seen >= $`+strconv.Itoa(cutoffArg)+` THEN 1 ELSE 0 END),0),
 		COUNT(DISTINCT CASE WHEN o.newapi_user_id<>'' THEN o.newapi_platform || ':' || o.newapi_user_id END),
-		MAX(o.last_seen)
+		MAX(o.last_seen), (SELECT AVG(`+db.sessionObservationDurationSQL()+`) FROM account_session_usage_periods o WHERE o.account_id=a.id)
 	FROM accounts a
 	LEFT JOIN account_session_observations o ON o.account_id=a.id
 	WHERE `+where+`
@@ -166,7 +168,7 @@ func (db *DB) listAccountStatusProfiles(ctx context.Context, query PromptRiskPro
 		var credentialsRaw any
 		var latestRaw any
 		if err := rows.Scan(&profile.AccountID, &profile.AccountName, &credentialsRaw,
-			&profile.SessionWindowsTotal, &profile.SessionWindows24h, &profile.SessionUniqueUsers, &latestRaw); err != nil {
+			&profile.SessionWindowsTotal, &profile.SessionWindows24h, &profile.SessionUniqueUsers, &latestRaw, &profile.SessionAverageDurationSeconds); err != nil {
 			return nil, 0, err
 		}
 		profile.SubjectKey = strconv.FormatInt(profile.AccountID, 10)
@@ -187,4 +189,32 @@ func (db *DB) listAccountStatusProfiles(ctx context.Context, query PromptRiskPro
 		profiles = append(profiles, profile)
 	}
 	return profiles, total, rows.Err()
+}
+
+func accountStatusProfileFilter(query PromptRiskProfileQuery) (string, []any, bool) {
+	clauses := []string{"a.status <> 'deleted'", "COALESCE(a.error_message, '') <> 'deleted'"}
+	args := make([]any, 0, 4)
+	if query.AccountID > 0 {
+		args = append(args, query.AccountID)
+		clauses = append(clauses, fmt.Sprintf("a.id=$%d", len(args)))
+	}
+	if value := strings.TrimSpace(query.SubjectKey); value != "" {
+		if accountID, err := strconv.ParseInt(value, 10, 64); err == nil && accountID > 0 {
+			args = append(args, accountID)
+			clauses = append(clauses, fmt.Sprintf("a.id=$%d", len(args)))
+		} else {
+			return "", nil, false
+		}
+	}
+	if value := strings.TrimSpace(query.Query); value != "" {
+		args = append(args, "%"+strings.ToLower(value)+"%")
+		placeholder := fmt.Sprintf("$%d", len(args))
+		clauses = append(clauses, fmt.Sprintf(`(LOWER(COALESCE(a.name,'')) LIKE %s OR LOWER(COALESCE(CAST(a.credentials AS TEXT),'')) LIKE %s OR CAST(a.id AS TEXT) LIKE %s)`, placeholder, placeholder, placeholder))
+	}
+	if query.ActivityState == "active" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM account_session_observations activity WHERE activity.account_id=a.id)")
+	} else if query.ActivityState == "identity_only" {
+		clauses = append(clauses, "NOT EXISTS (SELECT 1 FROM account_session_observations activity WHERE activity.account_id=a.id)")
+	}
+	return strings.Join(clauses, " AND "), args, true
 }

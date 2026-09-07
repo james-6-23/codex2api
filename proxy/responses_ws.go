@@ -1713,6 +1713,10 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 		return false, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)
+	if apiErr := h.promptManualWindowLockError(c, cfg, rawBody, nil); apiErr != nil {
+		_ = writeResponsesWSError(conn, apiErr)
+		return true, false
+	}
 	if item, locked := h.activePromptConversationLock(c, cfg, nil, endpoint, model); locked {
 		restriction := promptCyberRestrictionDecision(item, cfg)
 		profile := strings.ToLower(strings.TrimSpace(cfg.Advanced.Guard.DefaultProfile))

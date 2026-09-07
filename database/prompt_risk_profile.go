@@ -78,8 +78,11 @@ type PromptRiskProfile struct {
 	SessionWindows24h    int                      `json:"session_windows_24h,omitempty"`
 	SessionUniqueUsers   int                      `json:"session_unique_users,omitempty"`
 	SessionWindowsTotal  int                      `json:"session_windows_total,omitempty"`
-	TrustPolicy          *PromptRiskTrustPolicy   `json:"trust_policy,omitempty"`
-	ConversationLock     *PromptConversationLock  `json:"conversation_lock,omitempty"`
+
+	SessionAverageDurationSeconds *float64 `json:"session_average_duration_seconds,omitempty"`
+
+	TrustPolicy      *PromptRiskTrustPolicy  `json:"trust_policy,omitempty"`
+	ConversationLock *PromptConversationLock `json:"conversation_lock,omitempty"`
 }
 
 type PromptRiskScoreBreakdown struct {

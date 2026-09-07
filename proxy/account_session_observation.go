@@ -5,16 +5,26 @@ import (
 	"strings"
 	"time"
 
+	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
 const maxAccountSessionObservationCacheEntries = 100000
+const accountSessionUsagePeriodContextKey = "account_session_usage_period"
+const promptSessionWindowExpiresAtContextKey = "prompt_session_window_expires_at"
 const accountSessionObservationRefreshInterval = 5 * time.Minute
 
 type accountSessionObservationCacheEntry struct {
 	Attributed bool
 	RecordedAt time.Time
+}
+
+func clearAccountSessionObservationContext(c *gin.Context) {
+	if c != nil {
+		c.Set(accountSessionUsagePeriodContextKey, auth.AccountSessionUsagePeriod{})
+		c.Set(promptSessionWindowExpiresAtContextKey, time.Time{})
+	}
 }
 
 // populateAccountSessionObservation enriches the normal usage-log path with
@@ -38,6 +48,15 @@ func (h *Handler) populateAccountSessionObservation(c *gin.Context, input *datab
 	if input.AccountID <= 0 || input.SessionHash == "" {
 		return
 	}
+	if raw, exists := c.Get(promptSessionWindowExpiresAtContextKey); exists {
+		input.SessionWindowExpiresAt, _ = raw.(time.Time)
+	}
+	if raw, exists := c.Get(accountSessionUsagePeriodContextKey); exists {
+		if period, valid := raw.(auth.AccountSessionUsagePeriod); valid && period.AccountID == input.AccountID {
+			input.SessionUsagePeriodID = period.ID
+			input.SessionUsageStartedAt = period.StartedAt
+		}
+	}
 
 	key := fmt.Sprintf("%d:%s", input.AccountID, input.SessionHash)
 	hasVerifiedUser := input.NewAPIUserID != ""
@@ -58,7 +77,5 @@ func (h *Handler) populateAccountSessionObservation(c *gin.Context, input *datab
 		}
 	}
 	h.accountSessionObservationMu.Unlock()
-	if input.RecordSessionObservation {
-		input.ObservedAt = now
-	}
+	input.ObservedAt = now
 }
