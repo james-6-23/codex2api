@@ -313,16 +313,42 @@ func (h *Handler) GetPromptIntelligenceCandidateEvidence(c *gin.Context) {
 		return
 	}
 	evidence := make([]gin.H, 0, len(evidenceRows))
+	// 每条上游 CY 证据都挂着一个 CY 记录；把该 CY 的画像主体（人员 / 会话 / Key / IP /
+	// 上游账号）一并带回，审核证据时能直接看到是哪个用户并跳到画像。
+	subjectsByIncident := map[string][]database.PromptRiskIncidentSubject{}
 	for _, row := range evidenceRows {
 		var metadata any = map[string]any{}
 		if json.Unmarshal([]byte(row.MetadataJSON), &metadata) != nil {
 			metadata = map[string]any{}
+		}
+		incidentID := strings.TrimSpace(row.PromptPolicyIncidentID)
+		if incidentID == "" {
+			if fields, ok := metadata.(map[string]any); ok {
+				incidentID = strings.TrimSpace(fmt.Sprint(fields["incident_id"]))
+				if incidentID == "<nil>" {
+					incidentID = ""
+				}
+			}
+		}
+		subjects := []database.PromptRiskIncidentSubject{}
+		if incidentID != "" {
+			cached, ok := subjectsByIncident[incidentID]
+			if !ok {
+				if listed, listErr := h.db.ListPromptRiskSubjectsForIncident(c.Request.Context(), incidentID); listErr == nil {
+					cached = listed
+				}
+				subjectsByIncident[incidentID] = cached
+			}
+			if cached != nil {
+				subjects = cached
+			}
 		}
 		evidence = append(evidence, gin.H{
 			"id": row.ID, "source_kind": row.SourceKind, "source_ref": row.SourceRef,
 			"sample_preview": row.SamplePreview, "metadata": metadata, "protocol": row.Protocol,
 			"provider": row.Provider, "model": row.Model, "api_key_id": row.APIKeyID,
 			"api_key_name": row.APIKeyName, "observed_at": row.ObservedAt,
+			"incident_id": incidentID, "risk_subjects": subjects,
 		})
 	}
 	c.JSON(http.StatusOK, gin.H{"candidate": promptIntelligenceCandidateFromDB(item, h.store.GetPromptFilterConfig()), "evidence": evidence})

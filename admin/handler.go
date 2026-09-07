@@ -47,6 +47,8 @@ import (
 type Handler struct {
 	store             *auth.Store
 	modelRefreshFuncs map[string]channelModelRefreshFunc // nil = 各渠道默认实现；测试注入用
+	proxyRiskJobsMu   sync.RWMutex
+	proxyRiskJobs     map[string]*proxyRiskScoringJob
 	cache             cache.TokenCache
 	db                *database.DB
 	cacheCfgStore     responseCacheSettingsStore
@@ -969,6 +971,7 @@ func parseUsageChannel(c *gin.Context) string {
 func NewHandler(store *auth.Store, db *database.DB, tc cache.TokenCache, rl *proxy.RateLimiter, adminSecretEnv string) *Handler {
 	handler := &Handler{
 		store:                store,
+		proxyRiskJobs:        make(map[string]*proxyRiskScoringJob),
 		cache:                tc,
 		db:                   db,
 		cacheCfgStore:        db,
@@ -1216,6 +1219,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
 	api.GET("/prompt-filter/logs/match", h.MatchPromptFilterLog)
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
+	api.GET("/prompt-filter/retention", h.GetPromptLogRetention)
+	api.PUT("/prompt-filter/retention", h.UpdatePromptLogRetention)
+	api.POST("/prompt-filter/retention/run", h.RunPromptLogRetentionNow)
 	api.GET("/prompt-policy/incidents", h.ListPromptPolicyIncidents)
 	api.DELETE("/prompt-policy/incidents", h.ClearPromptPolicyIncidents)
 	api.DELETE("/prompt-policy/incidents/:incident_id", h.DeletePromptPolicyIncident)
@@ -1253,6 +1259,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/prompt-filter/intelligence/candidates/:id/identity-updates/:evidence_id/apply", h.ApplyPromptIntelligenceIdentityUpdate)
 	api.POST("/prompt-filter/intelligence/candidates/:id/identity-updates/:evidence_id/rollback", h.RollbackPromptIntelligenceIdentityUpdate)
 	api.POST("/prompt-filter/intelligence/candidates/:id/draft", h.CreatePromptIntelligenceCandidateDraft)
+	api.POST("/prompt-filter/intelligence/candidates/:id/draft/suggest", h.SuggestPromptIntelligenceCandidateDraft)
 	api.POST("/prompt-filter/intelligence/candidates/:id/publish", h.PublishPromptIntelligenceCandidate)
 	api.POST("/prompt-filter/intelligence/candidates/:id/dismiss", h.DismissPromptIntelligenceCandidate)
 	api.GET("/models", h.ListModels)
@@ -1285,6 +1292,16 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/proxies/test", h.TestProxy)
 	api.POST("/proxies/test-all", h.TestAllProxies)
 	api.POST("/proxies/auto-balance", h.AutoBalanceProxies)
+	api.GET("/proxy-risk-scoring/profiles", h.ListProxyRiskScoringProfiles)
+	api.POST("/proxy-risk-scoring/profiles", h.CreateProxyRiskScoringProfile)
+	api.PATCH("/proxy-risk-scoring/profiles/:profile_id", h.UpdateProxyRiskScoringProfile)
+	api.DELETE("/proxy-risk-scoring/profiles/:profile_id", h.DeleteProxyRiskScoringProfile)
+	api.POST("/proxy-risk-scoring/profiles/:profile_id/test", h.TestProxyRiskScoringProfile)
+	api.POST("/proxies/risk-score", h.StartProxyRiskScoringJob)
+	api.GET("/proxies/risk-score/jobs/:job_id", h.GetProxyRiskScoringJob)
+	api.POST("/proxies/risk-score/jobs/:job_id/cancel", h.CancelProxyRiskScoringJob)
+	api.GET("/proxies/:id/risk-score", h.GetProxyRiskScore)
+	api.GET("/proxies/:id/risk-score/history", h.ListProxyRiskScoreHistory)
 
 	// OAuth 授权流程
 	api.POST("/oauth/generate-auth-url", h.GenerateOAuthURL)

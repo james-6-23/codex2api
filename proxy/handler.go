@@ -1788,6 +1788,15 @@ func excludeRelayAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
 	}
 }
 
+func excludeAntigravityAccountsFilter(inner auth.AccountFilter) auth.AccountFilter {
+	return func(account *auth.Account) bool {
+		if account == nil || account.IsAntigravityAPI() {
+			return false
+		}
+		return inner == nil || inner(account)
+	}
+}
+
 func relayOnlyAccountFilter(inner auth.AccountFilter) auth.AccountFilter {
 	return func(account *auth.Account) bool {
 		if account == nil || !account.IsRelayStyle() {

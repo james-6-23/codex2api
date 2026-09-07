@@ -770,6 +770,11 @@ func (db *DB) DeletePromptPolicyIncident(ctx context.Context, incidentID string)
 		if _, err := tx.ExecContext(ctx, `UPDATE prompt_rule_candidate_evidence SET prompt_policy_incident_id=NULL WHERE prompt_policy_incident_id=$1`, incidentID); err != nil {
 			return err
 		}
+		// 管理员主动删除 CY 时，其关联的审核日志 / 风险事件 / 来源记录一并清理；
+		// 保留策略平时会绕开这些行，只有这里才是它们的出口。
+		if err := deletePromptIncidentEvidenceTx(ctx, tx, incidentID); err != nil {
+			return err
+		}
 		if _, err := tx.ExecContext(ctx, `DELETE FROM prompt_policy_incidents WHERE incident_id=$1`, incidentID); err != nil {
 			return err
 		}
@@ -903,13 +908,30 @@ func (db *DB) ClearPromptPolicyIncidents(ctx context.Context) error {
 	if db == nil {
 		return nil
 	}
-	if db.isSQLite() {
-		if _, err := db.conn.ExecContext(ctx, `DELETE FROM prompt_policy_incidents`); err != nil {
+	return db.withSQLiteWriteLock(ctx, func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
 			return err
 		}
-		_, err := db.conn.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name='prompt_policy_incidents'`)
-		return err
-	}
-	_, err := db.conn.ExecContext(ctx, `TRUNCATE TABLE prompt_policy_incidents RESTART IDENTITY`)
-	return err
+		defer tx.Rollback()
+		// 清空 CY 同时清空其全部证据链（日志 / 风险事件 / 来源记录）。
+		if err := deleteAllPromptIncidentEvidenceTx(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE usage_logs SET prompt_policy_incident_id=NULL WHERE prompt_policy_incident_id IS NOT NULL`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE prompt_rule_candidate_evidence SET prompt_policy_incident_id=NULL WHERE prompt_policy_incident_id IS NOT NULL`); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM prompt_policy_incidents`); err != nil {
+			return err
+		}
+		if db.isSQLite() {
+			if _, err := tx.ExecContext(ctx, `DELETE FROM sqlite_sequence WHERE name='prompt_policy_incidents'`); err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
 }

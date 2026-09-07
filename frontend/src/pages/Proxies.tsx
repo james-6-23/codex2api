@@ -20,11 +20,14 @@ import {
   Power,
   ShieldCheck,
   RotateCcw,
+  ExternalLink,
+  Settings2,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { Select } from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -34,7 +37,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { api, type ProxyRow } from "../api";
-import type { AccountRow } from "../types";
+import type { AccountRow, ProxyRiskScoreSnapshot, ProxyRiskScoringJob, ProxyRiskScoringProfile } from "../types";
 import ChannelLogo from "../components/ChannelLogo";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
@@ -62,6 +65,31 @@ const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 type BindFilter = "all" | "unbound" | "this" | "other";
 type BindKindFilter = "all" | "codex" | "grok" | "claude";
 type StatusFilter = "all" | "enabled" | "disabled" | "error" | "untested";
+type RiskFilter = "all" | "unscored" | "low" | "medium" | "high" | "very_high" | "error" | "stale";
+
+const EMPTY_RISK_PROFILE: Omit<ProxyRiskScoringProfile, "id" | "created_at" | "updated_at"> & { id: number; created_at: string; updated_at: string } = {
+  id: 0,
+  name: "",
+  provider: "scamalytics",
+  enabled: false,
+  priority: 0,
+  scamalytics_host: "",
+  scamalytics_user: "",
+  timeout_seconds: 8,
+  concurrency: 3,
+  request_delay_ms: 250,
+  cache_ttl_seconds: 3600,
+  max_checks_per_job: 0,
+  daily_check_limit: 0,
+  credit_reserve: 0,
+  allow_force_refresh: false,
+  resolve_hostnames: false,
+  allow_private_targets: false,
+  docs_url: "https://www.scamalytics.com/",
+  tutorial_url: "",
+  created_at: "",
+  updated_at: "",
+};
 
 function accountDisplayName(account: AccountRow): string {
   if (account.openai_responses_api) {
@@ -208,6 +236,135 @@ function ProxyStatusBadge({ proxy }: { proxy: ProxyRow }) {
   );
 }
 
+function riskScoreTone(score: ProxyRiskScoreSnapshot | null | undefined): string {
+  if (!score || score.status === "error" || score.status === "skipped") return "text-muted-foreground";
+  if (score.risk_level === "very high" || score.risk_level === "high" || score.is_blacklisted || score.is_tor) return "text-red-600 dark:text-red-400";
+  if (score.risk_level === "medium" || score.is_vpn || score.is_datacenter) return "text-amber-600 dark:text-amber-400";
+  return "text-emerald-600 dark:text-emerald-400";
+}
+
+function riskScoreBadgeClass(score: ProxyRiskScoreSnapshot | null | undefined): string {
+  if (!score || score.status === "error" || score.status === "skipped") return "border-border bg-muted/40 text-muted-foreground";
+  if (score.risk_level === "very high" || score.risk_level === "high" || score.is_blacklisted || score.is_tor) return "border-red-500/25 bg-red-500/10 text-red-700 dark:text-red-300";
+  if (score.risk_level === "medium" || score.is_vpn || score.is_datacenter) return "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  return "border-emerald-500/25 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+}
+
+function proxyRiskFeatures(score: ProxyRiskScoreSnapshot, t: (key: string) => string): string[] {
+  const features = [
+    score.is_tor ? t("proxies.riskFeatureTor") : "",
+    score.is_vpn ? t("proxies.riskFeatureVpn") : "",
+    score.is_datacenter ? t("proxies.riskFeatureDatacenter") : "",
+    score.is_blacklisted ? t("proxies.riskFeatureBlacklist") : "",
+    score.proxy_type || "",
+  ].filter(Boolean);
+  return Array.from(new Set(features));
+}
+
+function proxyRiskLevelLabel(score: ProxyRiskScoreSnapshot | null | undefined, t: (key: string) => string): string {
+  const level = score?.risk_level?.trim().toLowerCase();
+  if (level === "low") return t("proxies.riskLevelLow");
+  if (level === "medium") return t("proxies.riskLevelMedium");
+  if (level === "high") return t("proxies.riskLevelHigh");
+  if (level === "very high" || level === "very_high") return t("proxies.riskLevelVeryHigh");
+  return t("proxies.riskUnknownLevel");
+}
+
+function ProxyRiskScoreSummary({ score }: { score?: ProxyRiskScoreSnapshot | null }) {
+  const { t } = useTranslation();
+  if (!score || score.status === "unscored") {
+    return <span className="text-xs text-muted-foreground">{t("proxies.riskUnscored")}</span>;
+  }
+  if (score.status === "error" || score.status === "skipped") {
+    return (
+      <div className="min-w-[210px] space-y-1.5">
+        <span className="inline-flex items-center gap-1 rounded-full border border-border bg-muted/40 px-2 py-0.5 text-[11px] font-semibold text-muted-foreground">
+          <AlertTriangle className="size-3" /> {t("proxies.riskScoreError")}
+        </span>
+        {score.error ? <div className="max-w-[250px] break-words text-[11px] leading-4 text-muted-foreground" title={score.error}>{score.error}</div> : null}
+      </div>
+    );
+  }
+  const features = proxyRiskFeatures(score, t);
+  return (
+    <div className="min-w-[230px] max-w-[290px] space-y-1.5">
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-bold tabular-nums", riskScoreBadgeClass(score))}>
+          <ShieldCheck className="mr-1 size-3" />
+          {score.score === null || score.score === undefined ? t("proxies.riskUnknownScore") : `${score.score} / 100`}
+        </span>
+        <span className={cn("text-xs font-semibold", riskScoreTone(score))}>{proxyRiskLevelLabel(score, t)}</span>
+      </div>
+      {features.length ? <div className="flex flex-wrap gap-1 text-[10px] text-muted-foreground">{features.map((feature) => <span key={feature} className="rounded bg-muted/60 px-1.5 py-0.5">{feature}</span>)}</div> : null}
+      <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-0.5 text-[11px] leading-4 text-muted-foreground">
+        {score.isp ? <span className="max-w-[240px] break-words whitespace-normal" title={score.isp}>{t("proxies.riskISP")}: {score.isp}</span> : null}
+        {score.country ? <span>{score.country}</span> : null}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11px]">
+        <span className={cn("font-semibold", riskScoreTone(score))}>{t(`proxies.riskRecommendation.${score.recommendation || "keep"}`, { defaultValue: score.recommendation || t("proxies.riskKeep") })}</span>
+        <span className="text-muted-foreground">{score.latency_ms > 0 ? `${score.latency_ms}ms` : "-"}</span>
+      </div>
+      <div className="text-[10px] text-muted-foreground">{score.resolved_ip || "-"} · {formatProxyRiskTime(score.checked_at)}</div>
+    </div>
+  );
+}
+
+function ProxyRiskScoreTableCells({ score }: { score?: ProxyRiskScoreSnapshot | null }) {
+  const { t } = useTranslation();
+  const unavailable = !score || score.status === "unscored";
+  const failed = score?.status === "error" || score?.status === "skipped";
+  if (unavailable || failed) {
+    return (
+      <>
+        <TableCell className="w-[110px] min-w-[110px] align-top">
+          <span className="text-xs text-muted-foreground">{failed ? t("proxies.riskScoreError") : t("proxies.riskUnscored")}</span>
+        </TableCell>
+        <TableCell className="w-[110px] min-w-[110px] align-top"><span className="text-xs text-muted-foreground">-</span></TableCell>
+        <TableCell className="w-[250px] min-w-[250px] max-w-[250px] align-top">
+          {score?.error ? <span className="block max-w-[240px] break-words text-xs leading-4 text-muted-foreground" title={score.error}>{score.error}</span> : <span className="text-xs text-muted-foreground">-</span>}
+        </TableCell>
+        <TableCell className="w-[270px] min-w-[270px] max-w-[270px] align-top"><span className="text-xs text-muted-foreground">-</span></TableCell>
+        <TableCell className="w-[180px] min-w-[180px] align-top"><span className="text-xs text-muted-foreground">-</span></TableCell>
+      </>
+    );
+  }
+  const features = proxyRiskFeatures(score, t);
+  return (
+    <>
+      <TableCell className="w-[110px] min-w-[110px] align-top">
+        <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-bold tabular-nums", riskScoreBadgeClass(score))}>
+          {score.score === null || score.score === undefined ? t("proxies.riskUnknownScore") : `${score.score} / 100`}
+        </span>
+      </TableCell>
+      <TableCell className="w-[110px] min-w-[110px] align-top"><span className={cn("text-xs font-semibold", riskScoreTone(score))}>{proxyRiskLevelLabel(score, t)}</span></TableCell>
+      <TableCell className="w-[250px] min-w-[250px] max-w-[250px] align-top">
+        {features.length ? <div className="flex max-w-[240px] flex-wrap gap-1">{features.map((feature) => <span key={feature} className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px] text-muted-foreground">{feature}</span>)}</div> : <span className="text-xs text-muted-foreground">-</span>}
+      </TableCell>
+      <TableCell className="w-[270px] min-w-[270px] max-w-[270px] align-top">
+        <div className="max-w-[260px] break-words whitespace-normal space-y-0.5 text-xs text-muted-foreground">
+          <span className="block" title={score.isp || undefined}>{score.isp || "-"}</span>
+          {score.country ? <span className="block text-[11px]">{score.country}</span> : null}
+        </div>
+      </TableCell>
+      <TableCell className="w-[180px] min-w-[180px] align-top">
+        <span className={cn("whitespace-nowrap text-xs font-semibold", riskScoreTone(score))}>{t(`proxies.riskRecommendation.${score.recommendation || "keep"}`, { defaultValue: score.recommendation || t("proxies.riskKeep") })}</span>
+      </TableCell>
+    </>
+  );
+}
+
+function formatProxyRiskTime(value?: string | null): string {
+  if (!value) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "-";
+  return date.toLocaleString();
+}
+
+function parseNonNegativeDraft(value: string, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
+}
+
 const BindAccountRow = memo(function BindAccountRow({
   account,
   checked,
@@ -310,6 +467,18 @@ export default function Proxies() {
 
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
+  const [riskFilter, setRiskFilter] = useState<RiskFilter>("all");
+
+  const [riskProfiles, setRiskProfiles] = useState<ProxyRiskScoringProfile[]>([]);
+  const [riskProfileOpen, setRiskProfileOpen] = useState(false);
+  const [riskProfileDraft, setRiskProfileDraft] = useState({ ...EMPTY_RISK_PROFILE, scamalytics_key: "" });
+  const [riskProfileSaving, setRiskProfileSaving] = useState(false);
+  const [riskProfileTesting, setRiskProfileTesting] = useState(false);
+  const [riskTestResult, setRiskTestResult] = useState<ProxyRiskScoreSnapshot | null>(null);
+  const [riskJob, setRiskJob] = useState<ProxyRiskScoringJob | null>(null);
+  const riskPollCancelledRef = useRef(false);
+  const riskPollSeqRef = useRef(0);
+  const [riskRecentIds, setRiskRecentIds] = useState<Set<number>>(new Set());
 
   const [accounts, setAccounts] = useState<AccountRow[]>([]);
   const [accountsLoading, setAccountsLoading] = useState(false);
@@ -387,12 +556,14 @@ export default function Proxies() {
 
   const reload = useCallback(async () => {
     try {
-      const [proxyRes, settingsRes] = await Promise.all([
+      const [proxyRes, settingsRes, riskRes] = await Promise.all([
         api.listProxies(),
         api.getSettings(),
+        api.listProxyRiskScoringProfiles().catch(() => ({ profiles: [] as ProxyRiskScoringProfile[] })),
       ]);
       setProxies(proxyRes.proxies);
       setPoolEnabled(settingsRes.proxy_pool_enabled);
+      setRiskProfiles(riskRes.profiles ?? []);
     } catch (error) {
       showToast(
         t("proxies.loadFailed", { error: getErrorMessage(error) }),
@@ -428,6 +599,14 @@ export default function Proxies() {
       if (statusFilter === "disabled" && p.enabled) return false;
       if (statusFilter === "error" && p.test_status !== "error") return false;
       if (statusFilter === "untested" && p.test_status && p.test_status !== "untested") return false;
+      const risk = p.risk_score;
+      if (riskFilter === "unscored" && risk) return false;
+      if (riskFilter === "stale" && (!risk || !risk.expires_at || new Date(risk.expires_at).getTime() > Date.now())) return false;
+      if (riskFilter === "error" && (!risk || (risk.status !== "error" && risk.status !== "skipped"))) return false;
+      if (riskFilter === "low" && (!risk || risk.risk_level !== "low")) return false;
+      if (riskFilter === "medium" && (!risk || risk.risk_level !== "medium")) return false;
+      if (riskFilter === "high" && (!risk || !["high", "very high"].includes(risk.risk_level))) return false;
+      if (riskFilter === "very_high" && (!risk || risk.risk_level !== "very high")) return false;
 
       if (q) {
         const matchUrl = p.url.toLowerCase().includes(q);
@@ -438,7 +617,7 @@ export default function Proxies() {
       }
       return true;
     });
-  }, [proxies, query, statusFilter]);
+  }, [proxies, query, riskFilter, statusFilter]);
 
   const totalPages = Math.max(1, Math.ceil(filteredProxies.length / pageSize));
   const currentPage = Math.min(page, totalPages);
@@ -558,6 +737,176 @@ export default function Proxies() {
       setPoolEnabled(!next);
     }
   };
+
+  const activeRiskProfile = useMemo(
+    () => riskProfiles.find((profile) => profile.enabled && profile.scamalytics_host?.trim()) ?? null,
+    [riskProfiles],
+  );
+
+  const openRiskProfile = useCallback((profile?: ProxyRiskScoringProfile) => {
+    setRiskProfileDraft({
+      ...EMPTY_RISK_PROFILE,
+      ...(profile ?? {}),
+      scamalytics_key: "",
+    });
+    setRiskTestResult(null);
+    setRiskProfileOpen(true);
+  }, []);
+
+  const saveRiskProfile = useCallback(async () => {
+    if (!riskProfileDraft.name.trim() || !riskProfileDraft.scamalytics_host.trim() || !riskProfileDraft.scamalytics_user.trim() || (!riskProfileDraft.scamalytics_key.trim() && !riskProfileDraft.id)) {
+      showToast(t("proxies.riskProfileRequired"), "error");
+      return;
+    }
+    setRiskProfileSaving(true);
+    try {
+      const payload = {
+        name: riskProfileDraft.name.trim(),
+        provider: riskProfileDraft.provider,
+        enabled: riskProfileDraft.enabled,
+        priority: Number(riskProfileDraft.priority) || 0,
+        scamalytics_host: riskProfileDraft.scamalytics_host.trim(),
+        scamalytics_user: riskProfileDraft.scamalytics_user.trim(),
+        ...(riskProfileDraft.scamalytics_key.trim() ? { scamalytics_key: riskProfileDraft.scamalytics_key.trim() } : {}),
+        timeout_seconds: Number(riskProfileDraft.timeout_seconds) || 8,
+        concurrency: Number(riskProfileDraft.concurrency) || 3,
+        request_delay_ms: Number(riskProfileDraft.request_delay_ms) || 0,
+        cache_ttl_seconds: Number(riskProfileDraft.cache_ttl_seconds) || 3600,
+        max_checks_per_job: Number(riskProfileDraft.max_checks_per_job) || 0,
+        daily_check_limit: Number(riskProfileDraft.daily_check_limit) || 0,
+        credit_reserve: Number(riskProfileDraft.credit_reserve) || 0,
+        allow_force_refresh: Boolean(riskProfileDraft.allow_force_refresh),
+        resolve_hostnames: Boolean(riskProfileDraft.resolve_hostnames),
+        allow_private_targets: Boolean(riskProfileDraft.allow_private_targets),
+        docs_url: riskProfileDraft.docs_url.trim(),
+        tutorial_url: riskProfileDraft.tutorial_url.trim(),
+      };
+      if (riskProfileDraft.id > 0) {
+        await api.updateProxyRiskScoringProfile(riskProfileDraft.id, payload);
+      } else {
+        await api.createProxyRiskScoringProfile(payload);
+      }
+      setRiskProfileOpen(false);
+      await reload();
+      showToast(t("proxies.riskProfileSaved"), "success");
+    } catch (error) {
+      showToast(t("proxies.riskProfileSaveFailed", { error: getErrorMessage(error) }), "error");
+    } finally {
+      setRiskProfileSaving(false);
+    }
+  }, [reload, riskProfileDraft, showToast, t]);
+
+  const testRiskProfile = useCallback(async () => {
+    if (riskProfileDraft.id <= 0) return;
+    setRiskProfileTesting(true);
+    setRiskTestResult(null);
+    try {
+      const result = await api.testProxyRiskScoringProfile(riskProfileDraft.id);
+      setRiskTestResult(result.snapshot ?? null);
+      showToast(result.success ? t("proxies.riskProfileTestSuccess", { latency: result.latency_ms ?? 0 }) : t("proxies.riskProfileTestFailed", { error: result.error ?? "-" }), result.success ? "success" : "error");
+      await reload();
+    } catch (error) {
+      showToast(t("proxies.riskProfileTestFailed", { error: getErrorMessage(error) }), "error");
+    } finally {
+      setRiskProfileTesting(false);
+    }
+  }, [reload, riskProfileDraft.id, showToast, t]);
+
+  const deleteRiskProfile = useCallback(async () => {
+    if (riskProfileDraft.id <= 0) return;
+    const profileName = riskProfileDraft.name.trim() || t("proxies.riskProfileTitle");
+    const confirmed = await confirm({
+      title: t("proxies.riskProfileDeleteTitle"),
+      description: t("proxies.riskProfileDeleteDesc", { name: profileName }),
+      confirmText: t("proxies.riskProfileDeleteConfirm"),
+      tone: "destructive",
+      confirmVariant: "destructive",
+    });
+    if (!confirmed) return;
+    setRiskProfileSaving(true);
+    try {
+      await api.deleteProxyRiskScoringProfile(riskProfileDraft.id);
+      setRiskProfileOpen(false);
+      await reload();
+      showToast(t("proxies.riskProfileDeleted"), "success");
+    } catch (error) {
+      showToast(t("proxies.riskProfileDeleteFailed", { error: getErrorMessage(error) }), "error");
+    } finally {
+      setRiskProfileSaving(false);
+    }
+  }, [confirm, reload, riskProfileDraft.id, riskProfileDraft.name, showToast, t]);
+
+  const pollRiskJob = useCallback(async (jobID: string) => {
+    if (riskPollCancelledRef.current) return;
+    try {
+      // 只取上次游标之后的增量：检测完一条就把分数合并进表格对应行，并短暂高亮。
+      const next = await api.getProxyRiskScoringJob(jobID, riskPollSeqRef.current);
+      riskPollSeqRef.current = Math.max(riskPollSeqRef.current, next.last_seq ?? 0);
+      const items = next.items ?? [];
+      if (items.length > 0) {
+        const byProxy = new Map<number, ProxyRiskScoreSnapshot | null>();
+        for (const item of items) {
+          if (item.snapshot) byProxy.set(item.proxy_id, item.snapshot);
+        }
+        if (byProxy.size > 0) {
+          setProxies((prev) =>
+            prev.map((proxy) =>
+              byProxy.has(proxy.id) ? { ...proxy, risk_score: byProxy.get(proxy.id) ?? proxy.risk_score } : proxy,
+            ),
+          );
+        }
+        const touched = items.map((item) => item.proxy_id);
+        setRiskRecentIds((prev) => new Set([...prev, ...touched]));
+        window.setTimeout(() => {
+          setRiskRecentIds((prev) => {
+            const cleared = new Set(prev);
+            for (const id of touched) cleared.delete(id);
+            return cleared;
+          });
+        }, 2500);
+      }
+      setRiskJob(next);
+      if (next.status === "queued" || next.status === "running") {
+        window.setTimeout(() => void pollRiskJob(jobID), 1000);
+      } else {
+        await reload();
+      }
+    } catch (error) {
+      showToast(t("proxies.riskJobFailed", { error: getErrorMessage(error) }), "error");
+    }
+  }, [reload, showToast, t]);
+
+  const startRiskScoring = useCallback(async (proxyIDs?: number[]) => {
+    if (!activeRiskProfile) {
+      showToast(t("proxies.riskNoActiveProfile"), "error");
+      setRiskProfileOpen(true);
+      return;
+    }
+    riskPollCancelledRef.current = false;
+    riskPollSeqRef.current = 0;
+    try {
+      const job = await api.startProxyRiskScoringJob({ profile_id: activeRiskProfile.id, proxy_ids: proxyIDs, force: false });
+      setRiskJob(job);
+      window.setTimeout(() => void pollRiskJob(job.job_id), 300);
+    } catch (error) {
+      showToast(t("proxies.riskJobFailed", { error: getErrorMessage(error) }), "error");
+    }
+  }, [activeRiskProfile, pollRiskJob, showToast, t]);
+
+  const cancelRiskScoring = useCallback(async () => {
+    if (!riskJob) return;
+    riskPollCancelledRef.current = true;
+    try {
+      await api.cancelProxyRiskScoringJob(riskJob.job_id);
+      setRiskJob((current) => current ? { ...current, status: "cancelled" } : current);
+    } catch (error) {
+      showToast(t("proxies.riskJobFailed", { error: getErrorMessage(error) }), "error");
+    }
+  }, [riskJob, showToast, t]);
+
+  useEffect(() => () => {
+    riskPollCancelledRef.current = true;
+  }, []);
 
   const handleAdd = async () => {
     const urls = addInput
@@ -879,6 +1228,23 @@ export default function Proxies() {
         className="mb-0 sm:mb-0"
         actions={
           <>
+            <div className="flex h-9 shrink-0 items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-2.5" title={t("proxies.riskReferenceOnly")}>
+              <ShieldCheck className="size-3.5 text-primary" />
+              <span className="hidden text-[12px] font-medium text-muted-foreground sm:inline">
+                {activeRiskProfile ? `${t("proxies.riskEnabled")} · ${activeRiskProfile.name}` : t("proxies.riskDisabled")}
+              </span>
+              <Button type="button" variant="ghost" size="icon-xs" onClick={() => openRiskProfile(activeRiskProfile ?? undefined)} title={t("proxies.riskConfigure")}>
+                <Settings2 className="size-3.5" />
+              </Button>
+            </div>
+            <Button type="button" variant="outline" onClick={() => void startRiskScoring(pagedProxies.map((proxy) => proxy.id))} disabled={!activeRiskProfile || testsRunning || Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}>
+              <ShieldCheck className="size-4" />
+              {t("proxies.riskScoreCurrentPage")}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => void startRiskScoring()} disabled={!activeRiskProfile || testsRunning || Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}>
+              <ShieldCheck className="size-4" />
+              {t("proxies.riskScoreAll")}
+            </Button>
             <div
               className="flex h-9 shrink-0 items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3"
               title={
@@ -984,6 +1350,24 @@ export default function Proxies() {
               className="h-full bg-primary transition-all duration-300 rounded-full"
               style={{ width: `${(testAllDone / testAllTotal) * 100}%` }}
             />
+          </div>
+        </div>
+      ) : null}
+
+      {riskJob && ["queued", "running"].includes(riskJob.status) ? (
+        <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 p-3.5 space-y-2">
+          <div className="flex items-center justify-between gap-3 text-xs font-semibold">
+            <span className="flex min-w-0 items-center gap-1.5 text-sky-700 dark:text-sky-300">
+              <Loader2 className="size-3.5 shrink-0 animate-spin" />
+              <span className="truncate">{t("proxies.riskScoringProgress", { done: riskJob.done, total: riskJob.total, success: riskJob.success, failed: riskJob.failed, skipped: riskJob.skipped, cache: riskJob.cache_hits })}</span>
+              {riskJob.current ? (
+                <span className="truncate font-mono text-[11px] font-normal text-sky-700/80 dark:text-sky-300/80">· {t("proxies.riskScoringCurrent", { label: riskJob.current })}</span>
+              ) : null}
+            </span>
+            <Button type="button" variant="ghost" size="sm" onClick={() => void cancelRiskScoring()} className="h-7 shrink-0 text-xs">{t("proxies.riskCancel")}</Button>
+          </div>
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-sky-500/10">
+            <div className="h-full bg-sky-500 transition-all duration-300" style={{ width: `${riskJob.total > 0 ? Math.min(100, (riskJob.done / riskJob.total) * 100) : 0}%` }} />
           </div>
         </div>
       ) : null}
@@ -1150,6 +1534,26 @@ export default function Proxies() {
               );
             })}
           </div>
+          <Select
+            compact
+            value={riskFilter}
+            onValueChange={(value) => {
+              setRiskFilter(value as RiskFilter);
+              setPage(1);
+            }}
+            className="w-auto shrink-0"
+            triggerClassName="h-8 shrink-0 text-xs font-medium"
+            options={[
+              { value: "all", label: t("proxies.riskFilterAll") },
+              { value: "unscored", label: t("proxies.riskFilterUnscored") },
+              { value: "low", label: t("proxies.riskFilterLow") },
+              { value: "medium", label: t("proxies.riskFilterMedium") },
+              { value: "high", label: t("proxies.riskFilterHigh") },
+              { value: "very_high", label: t("proxies.riskFilterVeryHigh") },
+              { value: "stale", label: t("proxies.riskFilterStale") },
+              { value: "error", label: t("proxies.riskFilterError") },
+            ]}
+          />
         </div>
       </div>
 
@@ -1259,6 +1663,10 @@ export default function Proxies() {
                               </span>
                             ) : null}
                           </div>
+                          <div className="mt-3 rounded-lg border border-border/70 bg-muted/20 p-2">
+                            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">{t("proxies.riskScoreColumn")}</div>
+                            <span className={cn("inline-block rounded-md transition-colors duration-700", riskRecentIds.has(p.id) && "bg-sky-500/15 ring-1 ring-sky-500/40")}><ProxyRiskScoreSummary score={p.risk_score} /></span>
+                          </div>
 
                           <div className="mt-3 flex flex-wrap gap-1.5">
                             <Button
@@ -1327,7 +1735,22 @@ export default function Proxies() {
 
               {/* Desktop table */}
               <div className="data-table-shell hidden lg:block">
-                <Table>
+                <Table className="table-fixed min-w-[2360px]">
+                  <colgroup>
+                    <col className="w-10" />
+                    <col className="w-[400px]" />
+                    <col className="w-[130px]" />
+                    <col className="w-[120px]" />
+                    <col className="w-[210px]" />
+                    <col className="w-[160px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[110px]" />
+                    <col className="w-[250px]" />
+                    <col className="w-[270px]" />
+                    <col className="w-[180px]" />
+                    <col className="w-[270px]" />
+                  </colgroup>
                   <TableHeader>
                     <TableRow>
                       <TableHead className="w-10">
@@ -1338,13 +1761,18 @@ export default function Proxies() {
                           className="size-4 rounded"
                         />
                       </TableHead>
-                      <TableHead>{t("proxies.colUrl")}</TableHead>
-                      <TableHead>{t("proxies.colStatus")}</TableHead>
-                      <TableHead>{t("proxies.colBound")}</TableHead>
-                      <TableHead>{t("proxies.colLocation")}</TableHead>
-                      <TableHead>{t("proxies.colIp")}</TableHead>
-                      <TableHead>{t("proxies.colLatency")}</TableHead>
-                      <TableHead className="text-right">
+                      <TableHead className="w-[400px] min-w-[400px]">{t("proxies.colUrl")}</TableHead>
+                      <TableHead className="w-[130px] min-w-[130px]">{t("proxies.colStatus")}</TableHead>
+                      <TableHead className="w-[120px] min-w-[120px]">{t("proxies.colBound")}</TableHead>
+                      <TableHead className="w-[210px] min-w-[210px]">{t("proxies.colLocation")}</TableHead>
+                      <TableHead className="w-[160px] min-w-[160px]">{t("proxies.colIp")}</TableHead>
+                      <TableHead className="w-[110px] min-w-[110px]">{t("proxies.colLatency")}</TableHead>
+                      <TableHead className="w-[110px] min-w-[110px]">{t("proxies.riskScoreValueColumn")}</TableHead>
+                      <TableHead className="w-[110px] min-w-[110px]">{t("proxies.riskLevelColumn")}</TableHead>
+                      <TableHead className="w-[250px] min-w-[250px]">{t("proxies.riskFeaturesColumn")}</TableHead>
+                      <TableHead className="w-[270px] min-w-[270px]">{t("proxies.riskISPColumn")}</TableHead>
+                      <TableHead className="w-[180px] min-w-[180px]">{t("proxies.riskRecommendationColumn")}</TableHead>
+                      <TableHead className="w-[270px] min-w-[270px] text-right">
                         {t("proxies.colActions")}
                       </TableHead>
                     </TableRow>
@@ -1354,7 +1782,7 @@ export default function Proxies() {
                       const isTesting = testingIds.has(p.id);
                       const scheme = getProxyScheme(p.url);
                       return (
-                        <TableRow key={p.id}>
+                        <TableRow key={p.id} className={cn("transition-colors duration-700", riskRecentIds.has(p.id) && "bg-sky-500/10")}>
                           <TableCell>
                             <input
                               type="checkbox"
@@ -1368,8 +1796,8 @@ export default function Proxies() {
                               className="size-4 rounded"
                             />
                           </TableCell>
-                          <TableCell className="max-w-[380px] whitespace-normal">
-                            <div className="flex items-center gap-2">
+                          <TableCell className="w-[400px] min-w-[400px] max-w-[400px]">
+                            <div className="flex min-w-0 items-center gap-2">
                               <SchemeBadge scheme={scheme} />
                               {p.label ? (
                                 <span className="inline-flex rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-semibold text-primary">
@@ -1400,16 +1828,16 @@ export default function Proxies() {
                                   <Eye className="size-3.5" />
                                 )}
                               </Button>
-                              <span className="font-mono text-[13px] font-medium break-all text-foreground">
+                              <span className="min-w-0 flex-1 truncate whitespace-nowrap font-mono text-[13px] font-medium text-foreground" title={revealedIds.has(p.id) ? p.url : maskUrl(p.url)}>
                                 {revealedIds.has(p.id) ? p.url : maskUrl(p.url)}
                               </span>
                             </div>
                           </TableCell>
-                          <TableCell>
+                          <TableCell className="w-[130px] min-w-[130px]">
                             <ProxyStatusBadge proxy={p} />
                           </TableCell>
                           {/* Bound accounts */}
-                          <TableCell>
+                          <TableCell className="w-[120px] min-w-[120px]">
                             <button
                               type="button"
                               onClick={() => openBindModal(p)}
@@ -1423,7 +1851,7 @@ export default function Proxies() {
                             </button>
                           </TableCell>
                           {/* Location */}
-                          <TableCell>
+                          <TableCell className="w-[210px] min-w-[210px]">
                             {isTesting ? (
                               <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
                             ) : p.test_location ? (
@@ -1438,7 +1866,7 @@ export default function Proxies() {
                             )}
                           </TableCell>
                           {/* IP */}
-                          <TableCell>
+                          <TableCell className="w-[160px] min-w-[160px]">
                             {p.test_ip ? (
                               <span className="text-[13px] font-mono font-medium text-foreground whitespace-nowrap">
                                 {p.test_ip}
@@ -1450,7 +1878,7 @@ export default function Proxies() {
                             )}
                           </TableCell>
                           {/* Latency */}
-                          <TableCell>
+                          <TableCell className="w-[110px] min-w-[110px]">
                             {p.test_latency_ms > 0 ? (
                               <span
                                 className={`inline-flex px-2 py-0.5 rounded-full text-xs font-bold ${latencyColor(p.test_latency_ms)} ${latencyBg(p.test_latency_ms)}`}
@@ -1463,13 +1891,14 @@ export default function Proxies() {
                               </span>
                             )}
                           </TableCell>
-                          <TableCell>
-                            <div className="flex items-center gap-1 justify-end">
+                          <ProxyRiskScoreTableCells score={p.risk_score} />
+                          <TableCell className="w-[270px] min-w-[270px] max-w-[270px] overflow-hidden">
+                            <div className="flex flex-nowrap items-center justify-end gap-1">
                               <Button
                                 variant="outline"
                                 size="sm"
                                 onClick={() => openBindModal(p)}
-                                className="border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 hover:text-primary dark:border-primary/25 dark:bg-primary/10 dark:hover:bg-primary/15"
+                                className="whitespace-nowrap border-primary/20 bg-primary/5 text-primary hover:bg-primary/10 hover:text-primary dark:border-primary/25 dark:bg-primary/10 dark:hover:bg-primary/15"
                                 title={t("proxies.bindAccounts")}
                               >
                                 <Link2 className="size-3.5" />
@@ -1551,6 +1980,103 @@ export default function Proxies() {
           )}
         </CardContent>
       </Card>
+
+      <Modal
+        show={riskProfileOpen}
+        title={t("proxies.riskProfileTitle")}
+        onClose={() => {
+          if (!riskProfileSaving && !riskProfileTesting) setRiskProfileOpen(false);
+        }}
+        contentClassName="sm:max-w-4xl"
+        footer={
+          <div className="flex w-full flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap gap-2">
+              {riskProfileDraft.id > 0 ? (
+                <Button type="button" variant="outline" onClick={() => void testRiskProfile()} disabled={riskProfileSaving || riskProfileTesting}>
+                  {riskProfileTesting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
+                  {t("proxies.riskProfileTest")}
+                </Button>
+              ) : null}
+              {riskProfileDraft.id > 0 ? (
+                <Button type="button" variant="ghost" className="text-destructive hover:bg-destructive/10 hover:text-destructive" onClick={() => void deleteRiskProfile()} disabled={riskProfileSaving || riskProfileTesting}>
+                  <Trash2 className="size-3.5" />
+                  {t("proxies.riskProfileDelete")}
+                </Button>
+              ) : null}
+              <Button type="button" variant="ghost" onClick={() => openRiskProfile()} disabled={riskProfileSaving || riskProfileTesting}>{t("proxies.riskProfileNew")}</Button>
+            </div>
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" onClick={() => setRiskProfileOpen(false)} disabled={riskProfileSaving || riskProfileTesting}>{t("common.cancel")}</Button>
+              <Button type="button" onClick={() => void saveRiskProfile()} disabled={riskProfileSaving || riskProfileTesting}>
+                {riskProfileSaving ? <Loader2 className="size-3.5 animate-spin" /> : <ShieldCheck className="size-3.5" />}
+                {riskProfileSaving ? t("common.saving") : t("common.save")}
+              </Button>
+            </div>
+          </div>
+        }
+      >
+        <div className="space-y-5">
+          {riskProfiles.length > 0 ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-lg border border-border/70 bg-muted/20 p-3">
+              <span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskProfileSelect")}</span>
+              <Select
+                value={String(riskProfileDraft.id)}
+                onValueChange={(value) => {
+                  const selectedProfile = riskProfiles.find((profile) => profile.id === Number(value));
+                  if (selectedProfile) openRiskProfile(selectedProfile);
+                }}
+                className="w-auto shrink-0 min-w-[220px]"
+                options={riskProfiles.map((profile) => ({
+                  value: String(profile.id),
+                  label: `${profile.name}${profile.enabled ? ` · ${t("proxies.riskEnabled")}` : ` · ${t("proxies.riskDisabled")}`}`,
+                }))}
+              />
+            </div>
+          ) : null}
+          <p className="rounded-lg border border-sky-500/20 bg-sky-500/5 px-3 py-2 text-xs leading-5 text-muted-foreground"><span className="font-semibold text-foreground">{t("proxies.riskBuiltInEngine")}</span> {t("proxies.riskReferenceOnly")}</p>
+          {riskProfileDraft.id > 0 ? (
+            <div className="grid gap-3 rounded-lg border border-border/70 bg-muted/20 p-3 sm:grid-cols-4">
+              <div><div className="text-[11px] font-semibold text-muted-foreground">{t("proxies.riskDailyUsed")}</div><div className="mt-1 text-sm font-bold tabular-nums text-foreground">{riskProfileDraft.daily_used_count ?? 0}</div><div className="text-[10px] text-muted-foreground">{riskProfileDraft.daily_used_date || t("proxies.riskNotChecked")}</div></div>
+              <div><div className="text-[11px] font-semibold text-muted-foreground">{t("proxies.riskCreditsRemaining")}</div><div className="mt-1 text-sm font-bold tabular-nums text-foreground">{riskProfileDraft.credits_remaining == null ? t("proxies.riskQuotaUnknown") : riskProfileDraft.credits_remaining}</div></div>
+              <div><div className="text-[11px] font-semibold text-muted-foreground">{t("proxies.riskCreditsUsed")}</div><div className="mt-1 text-sm font-bold tabular-nums text-foreground">{riskProfileDraft.credits_used == null ? t("proxies.riskQuotaUnknown") : riskProfileDraft.credits_used}</div></div>
+              <div><div className="text-[11px] font-semibold text-muted-foreground">{t("proxies.riskQuotaCheckedAt")}</div><div className="mt-1 text-xs font-medium text-foreground">{formatProxyRiskTime(riskProfileDraft.last_quota_checked_at)}</div></div>
+            </div>
+          ) : null}
+          <div className="grid gap-4 sm:grid-cols-3">
+            <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskProfileName")}</span><Input value={riskProfileDraft.name} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, name: event.target.value }))} placeholder="Scamalytics 主账号" /></label>
+            <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskScamalyticsHost")}</span><Input value={riskProfileDraft.scamalytics_host} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, scamalytics_host: event.target.value }))} placeholder="api11.scamalytics.com" className="font-mono" /></label>
+            <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskScamalyticsUser")}</span><Input value={riskProfileDraft.scamalytics_user} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, scamalytics_user: event.target.value }))} placeholder="username" /></label>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskScamalyticsKey")}</span><Input type="password" value={riskProfileDraft.scamalytics_key} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, scamalytics_key: event.target.value }))} placeholder={riskProfileDraft.id > 0 ? t("proxies.riskSecretConfigured", { masked: riskProfiles.find((profile) => profile.id === riskProfileDraft.id)?.scamalytics_key_masked ?? "" }) : t("proxies.riskSecretPlaceholder")} autoComplete="new-password" /></label>
+            <div className="rounded-lg border border-border/70 bg-muted/20 p-3 text-[11px] leading-5 text-muted-foreground"><div className="font-semibold text-foreground">{t("proxies.riskBuiltInEngine")}</div><div>{t("proxies.riskBuiltInEngineHint")}</div></div>
+          </div>
+          {riskTestResult ? (
+            <div className="rounded-lg border border-emerald-500/25 bg-emerald-500/5 p-3">
+              <div className="mb-2 text-xs font-semibold text-foreground">{t("proxies.riskTestResultTitle")}</div>
+              <ProxyRiskScoreSummary score={riskTestResult} />
+            </div>
+          ) : null}
+          <div className="grid gap-4 sm:grid-cols-3">
+            {([["timeout_seconds", t("proxies.riskTimeout"), 8], ["concurrency", t("proxies.riskConcurrency"), 3], ["request_delay_ms", t("proxies.riskDelay"), 250], ["cache_ttl_seconds", t("proxies.riskCacheTTL"), 3600], ["max_checks_per_job", t("proxies.riskJobLimit"), 0], ["daily_check_limit", t("proxies.riskDailyLimit"), 0], ["credit_reserve", t("proxies.riskCreditReserve"), 0]] as const).map(([field, label, fallback]) => (
+              <label key={field} className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{label}</span><Input type="number" min={0} value={String(riskProfileDraft[field])} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, [field]: parseNonNegativeDraft(event.target.value, fallback) }))} /></label>
+            ))}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 p-3"><span><span className="block text-xs font-semibold">{t("proxies.riskEnabled")}</span><span className="text-[11px] text-muted-foreground">{t("proxies.riskEnabledDesc")}</span></span><Switch checked={riskProfileDraft.enabled} onCheckedChange={(checked) => setRiskProfileDraft((current) => ({ ...current, enabled: checked }))} /></label>
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 p-3"><span><span className="block text-xs font-semibold">{t("proxies.riskResolveHostnames")}</span><span className="text-[11px] text-muted-foreground">{t("proxies.riskResolveHostnamesDesc")}</span></span><Switch checked={riskProfileDraft.resolve_hostnames} onCheckedChange={(checked) => setRiskProfileDraft((current) => ({ ...current, resolve_hostnames: checked }))} /></label>
+            <label className="flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/20 p-3"><span><span className="block text-xs font-semibold">{t("proxies.riskForceRefresh")}</span><span className="text-[11px] text-muted-foreground">{t("proxies.riskForceRefreshDesc")}</span></span><Switch checked={riskProfileDraft.allow_force_refresh} onCheckedChange={(checked) => setRiskProfileDraft((current) => ({ ...current, allow_force_refresh: checked }))} /></label>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskDocsURL")}</span><Input value={riskProfileDraft.docs_url} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, docs_url: event.target.value }))} className="font-mono" /></label>
+            <label className="space-y-1.5"><span className="text-xs font-semibold text-muted-foreground">{t("proxies.riskTutorialURL")}</span><Input value={riskProfileDraft.tutorial_url} onChange={(event) => setRiskProfileDraft((current) => ({ ...current, tutorial_url: event.target.value }))} className="font-mono" /></label>
+          </div>
+          <div className="flex flex-wrap gap-2 text-xs">
+            {riskProfileDraft.docs_url ? <a className="inline-flex items-center gap-1 text-primary hover:underline" href={riskProfileDraft.docs_url} target="_blank" rel="noreferrer"><ExternalLink className="size-3" />{t("proxies.riskOpenDocs")}</a> : null}
+            {riskProfileDraft.tutorial_url ? <a className="inline-flex items-center gap-1 text-primary hover:underline" href={riskProfileDraft.tutorial_url} target="_blank" rel="noreferrer"><ExternalLink className="size-3" />{t("proxies.riskOpenTutorial")}</a> : null}
+          </div>
+        </div>
+      </Modal>
 
       <Modal
         show={Boolean(editingProxy)}

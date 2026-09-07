@@ -78,6 +78,10 @@ import type {
   MessageResponse,
   ModelSyncResponse,
   RefreshAllModelsResponse,
+  ProxyRiskScoreSnapshot,
+  ProxyRiskScoringProfile,
+  ProxyRiskScoringJob,
+  PromptLogRetention,
   ModelPricingOverride,
 	OfficialPricingSyncConfig,
 	OfficialPricingSyncResult,
@@ -1347,6 +1351,11 @@ export const api = {
 		request<PromptPolicyIncidentDetailResponse>(`/prompt-policy/incidents/${encodeURIComponent(incidentId)}`),
 	getPromptPolicyAuditHealth: () =>
 		request<PromptPolicyAuditHealth>('/prompt-policy/incidents/health'),
+	getPromptLogRetention: () => request<PromptLogRetention>('/prompt-filter/retention'),
+	updatePromptLogRetention: (retentionDays: number) =>
+		request<PromptLogRetention>('/prompt-filter/retention', { method: 'PUT', body: JSON.stringify({ retention_days: retentionDays }) }),
+	runPromptLogRetention: () =>
+		request<{ started: boolean; retention_days: number }>('/prompt-filter/retention/run', { method: 'POST' }),
 	clearPromptPolicyIncidents: () =>
 		request<MessageResponse>('/prompt-policy/incidents', { method: 'DELETE' }),
 	deletePromptPolicyIncident: (incidentId: string) =>
@@ -1425,6 +1434,8 @@ export const api = {
     request<import('./types').PromptIntelligenceAIProvidersResponse>('/prompt-filter/intelligence/ai-providers'),
   analyzePromptIntelligenceCandidate: (id: number, data: import('./types').PromptIntelligenceAIAnalysisRequest) =>
     request<import('./types').PromptIntelligenceAIAnalysisResponse>(`/prompt-filter/intelligence/candidates/${id}/analyze`, { method: 'POST', body: JSON.stringify(data) }),
+  suggestPromptIntelligenceCandidateDraft: (id: number, data: { provider: import('./types').PromptIntelligenceAIProvider; model?: string; api_key_id?: number }) =>
+    request<import('./types').PromptIntelligenceDraftSuggestion>(`/prompt-filter/intelligence/candidates/${id}/draft/suggest`, { method: 'POST', body: JSON.stringify(data), timeoutMs: 90_000 }),
   applyPromptIntelligenceIdentityUpdate: (candidateId: number, evidenceId: number) =>
     request<{ identity_update: import('./types').PromptIdentityUpdateResult }>(`/prompt-filter/intelligence/candidates/${candidateId}/identity-updates/${evidenceId}/apply`, { method: 'POST' }),
   rollbackPromptIntelligenceIdentityUpdate: (candidateId: number, evidenceId: number) =>
@@ -1566,6 +1577,26 @@ export const api = {
     request<{ message: string; cleaned: number; unbound: number }>('/proxies/clean-error', { method: 'POST' }),
   autoBalanceProxies: (data: { channel?: 'codex' | 'grok' | 'claude'; mode?: 'unbound' | 'all'; max_per_proxy?: number; proxy_ids?: number[] }) =>
     request<AutoBalanceProxiesResult>('/proxies/auto-balance', { method: 'POST', body: JSON.stringify(data) }),
+  listProxyRiskScoringProfiles: () =>
+    request<{ profiles: ProxyRiskScoringProfile[] }>('/proxy-risk-scoring/profiles'),
+  createProxyRiskScoringProfile: (data: Partial<ProxyRiskScoringProfile> & { scamalytics_key?: string }) =>
+    request<ProxyRiskScoringProfile>('/proxy-risk-scoring/profiles', { method: 'POST', body: JSON.stringify(data) }),
+  updateProxyRiskScoringProfile: (id: number, data: Partial<ProxyRiskScoringProfile> & { scamalytics_key?: string }) =>
+    request<ProxyRiskScoringProfile>(`/proxy-risk-scoring/profiles/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  deleteProxyRiskScoringProfile: (id: number) =>
+    request<MessageResponse>(`/proxy-risk-scoring/profiles/${id}`, { method: 'DELETE' }),
+  testProxyRiskScoringProfile: (id: number) =>
+    request<{ success: boolean; latency_ms?: number; score?: number | null; risk_level?: string; credits_remaining?: number | null; snapshot?: ProxyRiskScoreSnapshot | null; message?: string; error?: string }>(`/proxy-risk-scoring/profiles/${id}/test`, { method: 'POST' }),
+  startProxyRiskScoringJob: (data: { profile_id?: number; proxy_ids?: number[]; force?: boolean }) =>
+    request<ProxyRiskScoringJob>('/proxies/risk-score', { method: 'POST', body: JSON.stringify(data) }),
+  getProxyRiskScoringJob: (id: string, after = 0) =>
+    request<ProxyRiskScoringJob>(`/proxies/risk-score/jobs/${encodeURIComponent(id)}${after > 0 ? `?after=${after}` : ''}`),
+  cancelProxyRiskScoringJob: (id: string) =>
+    request<MessageResponse>(`/proxies/risk-score/jobs/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  getProxyRiskScore: (id: number) =>
+    request<ProxyRiskScoreSnapshot | { score: null; status: 'unscored' }>(`/proxies/${id}/risk-score`),
+  getProxyRiskScoreHistory: (id: number, profileId: number, page = 1, pageSize = 20) =>
+    request<{ items: ProxyRiskScoreSnapshot[]; total: number; page: number; page_size: number }>(`/proxies/${id}/risk-score/history?profile_id=${profileId}&page=${page}&page_size=${pageSize}`),
   testProxy: (url: string, id?: number, lang?: string) =>
     request<ProxyTestResult>('/proxies/test', { method: 'POST', body: JSON.stringify({ url, id, lang }) }),
   // OAuth
@@ -1587,6 +1618,7 @@ export interface ProxyRow {
   test_location: string
   test_latency_ms: number
   test_status: 'untested' | 'success' | 'error'
+  risk_score?: ProxyRiskScoreSnapshot | null
   /** 绑定到该代理的账号数(服务端聚合,前端免拉全量账号)。 */
   bound_count: number
 }
