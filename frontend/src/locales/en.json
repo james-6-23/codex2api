@@ -1338,6 +1338,7 @@
     "failureDetails": "Failure Details",
     "unknownError": "Unknown error",
     "testDiagHTTPStatus": "Upstream HTTP",
+    "testDiagFirstFrameTime": "Time to first frame",
     "testDiagHeadersTime": "Time to headers",
     "testDiagFirstContent": "First token",
     "testDiagDuration": "Total duration",
@@ -3980,6 +3981,24 @@
     "grokOAuthClientIdDesc": "OAuth client_id used for Grok authorization (browser flow, device code, SSO conversion, token refresh). Empty = the built-in official Grok CLI public id. Existing accounts keep refreshing with the client_id stored in their own credentials, so this only affects authorizations created from now on. The GROK_OAUTH_CLIENT_ID environment variable takes precedence over this setting.",
     "grokOAuthClientIdPlaceholder": "Empty uses the built-in default",
     "grokOAuthClientIdEnvOverride": "Currently pinned to {{value}} by the GROK_OAUTH_CLIENT_ID environment variable; this setting has no effect. Clear that variable and restart to use the value configured here.",
+    "antigravityRedirect": {
+      "title": "Model redirects",
+      "description": "When a request names a model without a thinking-level suffix (e.g. gemini-3.8-flash), route it to the configured fixed tier (e.g. gemini-3.8-flash-high). Suffixed tiers are never redirected.",
+      "rowHint": "Without a redirect the tier follows the request's reasoning.effort, falling back to the default tier ({{level}}).",
+      "noRedirect": "No redirect (default {{level}})",
+      "overrideLabel": "Override the request's reasoning effort",
+      "overrideHint": "By default the redirect only applies when the request has no reasoning.effort; enable this to apply it even when an effort is present (e.g. Codex CLI's default medium).",
+      "saved": "Model redirects saved"
+    },
+    "channelTest": {
+      "antigravityDesc": "Probe model and prompt used by default for Test Connection and batch tests on the Antigravity accounts page. Leave the model empty to pick automatically from the account catalog (newest flash low tier first).",
+      "claudeDesc": "Probe model and prompt used by default for Test Connection and batch tests on the Claude accounts page. Leave the model empty to pick automatically from the account catalog (haiku first).",
+      "autoModel": "Auto",
+      "modelHint": "Only takes effect when the model is in that account's catalog; otherwise automatic selection is used. The test dialog can still switch models.",
+      "contentHint": "Empty falls back to the global test content. With multiple lines one is picked at random; supports {{time}}, {{date}}, {{rand}}, {{rand:1-100}}.",
+      "concurrencyHint": "Batch test concurrency for this channel (0~200). 0 follows the global concurrency (currently {{value}}); mixed-channel batches always use the global value.",
+      "saved": "Connectivity test settings saved"
+    },
     "antigravityOAuth": {
       "title": "Antigravity OAuth clients",
       "description": "OAuth client credentials used by Google sign-in (Start authorization) and token refresh. When none are configured, the built-in official Antigravity Desktop client is used so Start authorization works immediately. Custom entries apply immediately without a restart. Entries injected via the ANTIGRAVITY_OAUTH_CLIENTS environment variable take precedence for matching keys.",
@@ -5807,6 +5826,7 @@
     }
   },
   "claude": {
+    "apiKeyPolicyHint": "API Key requests are forwarded as supplied. Claude Code client/version restrictions and OAuth request limits do not apply; the global Prompt Filter still applies.",
     "title": "Claude Accounts",
     "subtitle": "Claude Code (Anthropic) OAuth subscription pool",
     "addAccount": "Add Claude account",
@@ -5862,6 +5882,15 @@
     "apiKeyHint": "Use an Anthropic or Messages-compatible API key. Base URL is the API service address, separate from the outbound proxy. Path prefixes and a final /v1 are supported; trailing slashes are removed.",
     "apiKeyRequired": "Enter a valid Base URL and a non-empty API key. The URL must not contain whitespace.",
     "apiKeyUsageNA": "No subscription quota windows for API keys",
+    "apiKeyIdentityLabel": "Client identity",
+    "apiKeyIdentityOff": "Passthrough (default, no identity headers)",
+    "apiKeyIdentityPreserve": "Claude Code identity: keep a real CLI client's headers, fill in when missing or non-CLI",
+    "apiKeyIdentityForce": "Claude Code identity: always present CLI identity headers",
+    "apiKeyIdentityHint": "Optional: send the basic Claude Code CLI client characteristics (User-Agent / X-App / X-Stainless-*) upstream for gateways that inspect the caller. Headers only — no OAuth session state or system prompt is copied and API key authentication is unchanged.",
+    "customHeadersLabel": "Custom headers (JSON)",
+    "apiKeyCustomHeadersHint": "Added to every upstream request of this account (including model discovery) and applied last, so they take precedence; User-Agent may be set explicitly. Gateway-owned headers such as Authorization, x-api-key, Content-Type and Accept cannot be overridden.",
+    "customHeadersInvalid": "Custom headers must be a JSON object of string values",
+    "apiKeyUAPassthrough": "Downstream User-Agent passthrough (Codex2API when absent)",
     "setupTokenHint": "Paste sk-ant-oat01- (long-lived Setup Tokens from `claude setup-token`) and/or sk-ant-ort01- (OAuth refresh tokens). Multiple tokens may be mixed (newline/comma/space separated); they are classified by prefix and de-duplicated. Refresh tokens are exchanged for an access token first, filling in email and plan.",
     "setupTokenPlaceholder": "sk-ant-oat01-...\nsk-ant-ort01-...",
     "setupTokenNamePlaceholder": "Name prefix (optional; Setup Tokens use claude-N numbering, refresh tokens default to the email)",

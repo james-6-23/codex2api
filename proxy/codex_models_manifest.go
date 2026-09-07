@@ -175,24 +175,42 @@ func (h *Handler) writeCodexManifest(c *gin.Context, body []byte, etag string) {
 	c.Data(http.StatusOK, "application/json", body)
 }
 
+type codexReasoningLevel = api.ModelReasoningLevel
+
 type scopedCodexManifestItem struct {
-	ServiceTiers             []map[string]string `json:"service_tiers,omitempty"`
-	Slug                     string              `json:"slug"`
-	DisplayName              string              `json:"display_name"`
-	Hidden                   bool                `json:"hidden"`
-	Availability             string              `json:"availability"`
-	SupportedInAPI           bool                `json:"supported_in_api"`
-	PreferWebsockets         bool                `json:"prefer_websockets"`
-	UseResponsesLite         bool                `json:"use_responses_lite"`
-	InputModalities          []string            `json:"input_modalities,omitempty"`
-	SupportedReasoningLevels []string            `json:"supported_reasoning_levels,omitempty"`
+	ServiceTiers               []map[string]string   `json:"service_tiers,omitempty"`
+	Slug                       string                `json:"slug"`
+	DisplayName                string                `json:"display_name"`
+	Hidden                     bool                  `json:"hidden"`
+	Availability               string                `json:"availability"`
+	SupportedInAPI             bool                  `json:"supported_in_api"`
+	PreferWebsockets           bool                  `json:"prefer_websockets"`
+	UseResponsesLite           bool                  `json:"use_responses_lite"`
+	InputModalities            []string              `json:"input_modalities,omitempty"`
+	SupportedReasoningLevels   []codexReasoningLevel `json:"supported_reasoning_levels"`
+	DefaultReasoningLevel      string                `json:"default_reasoning_level"`
+	Description                string                `json:"description"`
+	ShellType                  string                `json:"shell_type"`
+	Visibility                 string                `json:"visibility"`
+	Priority                   int                   `json:"priority"`
+	BaseInstructions           string                `json:"base_instructions"`
+	SupportsReasoningSummaries bool                  `json:"supports_reasoning_summaries"`
+	SupportVerbosity           bool                  `json:"support_verbosity"`
+	SupportsParallelToolCalls  bool                  `json:"supports_parallel_tool_calls"`
+	ExperimentalSupportedTools []string              `json:"experimental_supported_tools"`
+	TruncationPolicy           map[string]any        `json:"truncation_policy"`
+	ContextWindow              int                   `json:"context_window,omitempty"`
 }
 
 func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
+	fold, levels := antigravityModelChoiceGroups(models)
 	items := make([]scopedCodexManifestItem, 0, len(models))
 	seen := make(map[string]struct{}, len(models))
 	for _, model := range models {
 		slug := strings.TrimSpace(model.ID)
+		if base, ok := fold[strings.ToLower(slug)]; ok {
+			slug = base
+		}
 		if slug == "" {
 			continue
 		}
@@ -202,16 +220,20 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 		}
 		seen[key] = struct{}{}
 		item := scopedCodexManifestItem{
-			Slug:             slug,
-			DisplayName:      slug,
-			Availability:     "available",
-			SupportedInAPI:   true,
-			PreferWebsockets: false,
-			UseResponsesLite: false,
-			InputModalities:  []string{"text"},
-		}
-		if key == "gpt-5.6-sol" && strings.EqualFold(model.OwnedBy, "openai") {
-			item.ServiceTiers = []map[string]string{{"id": "priority", "name": "Fast"}, {"id": "ultrafast", "name": "Ultrafast"}}
+			Slug:                     slug,
+			DisplayName:              slug,
+			Availability:             "available",
+			SupportedInAPI:           true,
+			PreferWebsockets:         false,
+			UseResponsesLite:         false,
+			InputModalities:          []string{"text"},
+			SupportedReasoningLevels: []codexReasoningLevel{},
+			DefaultReasoningLevel:    "none",
+			Description:              "Gateway model: " + slug,
+			ShellType:                "shell_command", Visibility: "list",
+			BaseInstructions:           "You are a helpful coding assistant.",
+			ExperimentalSupportedTools: []string{},
+			TruncationPolicy:           map[string]any{"mode": "tokens", "limit": 10000},
 		}
 		if strings.Contains(key, "image") {
 			item.InputModalities = []string{"text", "image"}
@@ -219,10 +241,18 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 		// Antigravity's reasoning metadata is provider-specific. Never infer
 		// levels from names such as "thinking" or "reason": Claude Opus
 		// `*-thinking` is not a Gemini reasoning-control model.
-		if _, isAntigravityModel := antigravityPublicModel(slug); isAntigravityModel {
-			item.SupportedReasoningLevels = antigravityCodexReasoningLevels(slug)
-		} else if !strings.EqualFold(strings.TrimSpace(model.OwnedBy), "google") && (strings.Contains(key, "thinking") || strings.Contains(key, "reason")) {
-			item.SupportedReasoningLevels = []string{"low", "medium", "high"}
+		if available := levels[slug]; len(available) > 0 {
+			for _, level := range available {
+				item.SupportedReasoningLevels = append(item.SupportedReasoningLevels, codexReasoningLevel{Effort: level, Description: "Antigravity " + level + " reasoning"})
+			}
+			item.DefaultReasoningLevel = available[0]
+			item.SupportsReasoningSummaries = true
+		}
+		if slug == "gemini-3.8-flash" {
+			item.ContextWindow = 1048576
+			// The current OAuth adapter accepts text parts only, even though the
+			// upstream model itself has vision. Advertise the gateway contract.
+			item.InputModalities = []string{"text"}
 		}
 		items = append(items, item)
 	}
@@ -263,6 +293,32 @@ func mergeCodexManifestModels(body []byte, extras []api.Model) ([]byte, error) {
 	if err := json.Unmarshal(rawModels, &models); err != nil {
 		return nil, err
 	}
+	// Locally routed Antigravity variants are authoritative for their base
+	// model. An upstream manifest can contain stale capabilities or fixed
+	// effort aliases; keeping those by slug would discard the current scoped
+	// contract (including a key restricted to a single effort).
+	_, localLevels := antigravityModelChoiceGroups(extras)
+	replacedSlugs := make(map[string]bool)
+	for _, definition := range antigravityLogicalCompatibilityCatalog {
+		if len(localLevels[definition.id]) == 0 {
+			continue
+		}
+		replacedSlugs[definition.id] = true
+		for _, variant := range definition.variants {
+			replacedSlugs[definition.id+"-"+variant.level] = true
+		}
+	}
+	retained := models[:0]
+	for _, raw := range models {
+		var item struct {
+			Slug string `json:"slug"`
+		}
+		if json.Unmarshal(raw, &item) == nil && replacedSlugs[strings.ToLower(strings.TrimSpace(item.Slug))] {
+			continue
+		}
+		retained = append(retained, raw)
+	}
+	models = retained
 	seen := make(map[string]struct{}, len(models)+len(extraRoot.Models))
 	for _, raw := range models {
 		var item struct {

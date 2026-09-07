@@ -87,15 +87,6 @@ func isPreviousResponseNotFoundBody(payload []byte) bool {
 	return false
 }
 
-// degradeResponsesWSContinuationBody 把续链请求降级为自包含请求：先用本地响应缓存
-// 把历史 items 补回 input，再剥离 previous_response_id。剥离后请求不再依赖上游会话
-// 状态，可以落到任意账号继续，而不是整轮失败。
-func degradeResponsesWSContinuationBody(codexBody []byte, cacheOwner string) []byte {
-	expanded, _ := expandPreviousResponse(codexBody, cacheOwner)
-	expanded, _ = sjson.DeleteBytes(expanded, "previous_response_id")
-	return expanded
-}
-
 type responsesWSCloseError struct {
 	code   int
 	reason string
@@ -413,6 +404,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	turnContinuation := codexWSTurnContinuationToken(rawBody) != ""
 	_, turnHasBinding := h.store.SessionAffinityAccountID(affinityKey)
 	respCacheOwner := responseCacheOwner(apiKeyID)
+	markResponsesWSContinuationCapable(respCacheOwner, rawBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
 	// 上下文压缩轮豁免首字超时看门狗（issue #381）：压缩首帧天然慢，超时换号无益。
 	bodySignalCompact := compactionMeta.ProtocolTriggered
@@ -422,7 +414,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		c.Set("x-service-tier", resolveServiceTier("", serviceTier))
 	}
 
-	codexBody, expandedInputRaw := PrepareResponsesWebSocketBody(rawBody)
+	codexBody, _ := PrepareResponsesWebSocketBody(rawBody)
+	// Pin an available L1 ancestor before upstream generation; defer backend
+	// lookup, merging and serialization until a snapshot is actually needed.
 	// strip 策略：剥离图片工具能力声明后作为普通文本请求继续（issue #411）。
 	codexBody = applyImageGenerationStripPolicy(c, codexBody)
 	if err := validateResponsesImageGenerationSizes(codexBody); err != nil {
@@ -541,12 +535,21 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// 忽略本地 WHAM 100% 快照；previous_response_id 本身不足以证明这是活跃 turn。
 	continuationPinned := turnContinuation && turnHasBinding
 	continuationDegraded := false
-	degradeContinuation := func(reason string, attempt int) {
+	turnReplay := newResponsesWSReplaySource(codexBody, respCacheOwner)
+	degradeContinuation := func(reason string, attempt int) *api.APIError {
+		expanded, lost, contextErr := degradeResponsesWSContinuationWithSource(codexBody, respCacheOwner, turnReplay)
+		if contextErr != nil {
+			return contextErr
+		}
 		continuationDegraded = true
 		continuationPinned = false
-		codexBody = degradeResponsesWSContinuationBody(codexBody, respCacheOwner)
-		expandedInputRaw = responsesInputRaw(codexBody)
+		codexBody = expanded
+		turnReplay = newResponsesWSReplaySourceFromInput(responsesInputRaw(expanded))
+		if lost {
+			turnReplay = newResponsesWSReplaySourceFromInput("")
+		}
 		log.Printf("Responses WebSocket continuation degraded: %s, stripped previous_response_id and retried once (attempt %d)", reason, attempt)
+		return nil
 	}
 	preserveContinuationBinding := func() bool {
 		return continuationPinned || (hasPreviousResponse && !continuationDegraded)
@@ -581,7 +584,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 				// id 也不能被带到一个明确不同的账号上反复失败。
 				if boundID, bound := h.store.SessionAffinityAccountID(affinityKey); bound {
 					if exclude := retryExclusions.ForSelection(); exclude[boundID] {
-						degradeContinuation(fmt.Sprintf("bound account %d excluded by this request", boundID), attempt+1)
+						if contextErr := degradeContinuation(fmt.Sprintf("bound account %d excluded by this request", boundID), attempt+1); contextErr != nil {
+							_ = writeResponsesWSError(conn, contextErr)
+							return newResponsesWSCloseError(responsesWSContextCloseCode(contextErr), contextErr.Message, contextErr)
+						}
 					}
 				}
 			}
@@ -668,27 +674,35 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图卡死。
 		upstreamBody := codexBody
-		attemptExpandedInputRaw := expandedInputRaw
+		attemptReplay := turnReplay
 		if useWebsocket {
 			upstreamBody = stripResponsesImageGenerationTool(codexBody)
 		} else if prevID := strings.TrimSpace(gjson.GetBytes(codexBody, "previous_response_id").String()); prevID != "" {
-			// HTTP 上游不支持续链（executor 出站前会剥掉 previous_response_id）：
-			// 命中本地响应缓存时先把历史展开进 input[] 再剥离，避免降级后静默失忆；
-			// 未命中只能按原样继续，明确记日志便于诊断（issue #548）。只改本次
-			// attempt 的出站体，后续换回 WS 的重试仍用原始续链请求。
-			if cached := getResponseCache(respCacheOwner, prevID); cached != nil {
-				upstreamBody = degradeResponsesWSContinuationBody(codexBody, respCacheOwner)
-				attemptExpandedInputRaw = responsesInputRaw(upstreamBody)
-				log.Printf("Responses WebSocket HTTP 降级：previous_response_id=%s 已用本地缓存展开为自包含请求 (account=%d)", prevID, account.ID())
-			} else {
-				log.Printf("Responses WebSocket HTTP 降级：previous_response_id=%s 本地缓存未命中，上游侧会话历史将不可用 (account=%d)", prevID, account.ID())
+			var contextErr *api.APIError
+			var lost bool
+			upstreamBody, lost, contextErr = degradeResponsesWSContinuationWithSource(codexBody, respCacheOwner, turnReplay)
+			if contextErr != nil {
+				ttftGuard.Stop()
+				upstreamCancel()
+				h.store.Release(account)
+				_ = writeResponsesWSError(conn, contextErr)
+				return newResponsesWSCloseError(responsesWSContextCloseCode(contextErr), contextErr.Message, contextErr)
 			}
+			// 降级时快照已经算过一次，直接复用展开后的 input，不再二次过滤。
+			attemptReplay = newResponsesWSReplaySourceFromInput(responsesInputRaw(upstreamBody))
+			if lost {
+				attemptReplay = nil
+			}
+		}
+		if gjson.GetBytes(rawBody, "store").Type == gjson.False {
+			attemptReplay = nil
 		}
 		// service_tier 记账按 payload 规则改写后的值归因（覆写 service_tier 的规则才生效）。
 		serviceTier = EffectiveRequestedServiceTier(upstreamBody, effectiveModel, downstreamHeaders, attemptIdentity)
 		// 在 useWebsocket 最终确定后再派生上游身份键：与 handler.go 的
 		// Responses/ChatCompletions 路径一致——无显式会话默认每请求隔离上游身份，
 		// WS 路径交给 ExecuteRequest 的 stateless 槽位池处理。
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamSessionID := resolveUpstreamSessionID(apiKeyID, sessionIdentity.upstreamSeed, sessionIdentity.explicitUpstreamID, useWebsocket)
 		resp, reqErr := executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
 			return ExecuteRequest(upstreamCtx, account, upstreamBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
@@ -807,7 +821,15 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 					}
 					if codexChanged {
 						codexBody = strippedCodexBody
-						expandedInputRaw = responsesInputRaw(codexBody)
+						// Keep the admitted ancestor while dropping rejected opaque items from
+						// this attempt. A previously lossy fallback must remain unwritable.
+						if turnReplay != nil && !(turnReplay.precomputed && turnReplay.input == "") {
+							updated := newResponsesWSReplaySource(codexBody, respCacheOwner)
+							if turnReplay.previous != nil {
+								updated.previous = turnReplay.previous
+							}
+							turnReplay = updated
+						}
 					}
 					log.Printf("Responses WebSocket upstream rejected encrypted_content, stripped encrypted reasoning context and retried once (attempt %d)", attempt+1)
 					h.store.Release(account)
@@ -821,7 +843,11 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			// 上游认不出续链 id：账号本身是好的，别记失败也别排除它，
 			// 降级成自包含请求后原地重试一次（issue #400）。
 			if canDegradeContinuation() && isPreviousResponseNotFoundBody(errBody) {
-				degradeContinuation(fmt.Sprintf("upstream rejected previous_response_id on account %d", account.ID()), attempt+1)
+				if contextErr := degradeContinuation(fmt.Sprintf("upstream rejected previous_response_id on account %d", account.ID()), attempt+1); contextErr != nil {
+					h.store.Release(account)
+					_ = writeResponsesWSError(conn, contextErr)
+					return newResponsesWSCloseError(responsesWSContextCloseCode(contextErr), contextErr.Message, contextErr)
+				}
 				SyncCodexUsageState(h.store, account, resp)
 				h.store.Release(account)
 				continue
@@ -903,7 +929,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		preserveAffinity := preserveContinuationBinding()
 		allowContinuationDegrade := canDegradeContinuation()
-		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptExpandedInputRaw, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
+		if err := h.streamResponsesWSUpstream(c, conn, resp, account, proxyURL, affinityKey, affinityGuard, preserveAffinity, allowContinuationDegrade, logModel, effectiveModel, logEffectiveModel, reasoningEffort, serviceTier, respCacheOwner, attemptReplay, start, ttftGuard, retryEnabled, hideUpstreamErrors, useWebsocket, fallbackLog, attempt+1, options, continuousRetryPolicy); err != nil {
 			if continuousRetryDeadlineExceeded(c.Request.Context()) {
 				return errResponsesWSClientGone
 			}
@@ -911,7 +937,10 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			if canDegradeContinuation() && errors.As(err, &continuationErr) {
 				// 账号已在流内释放，未记失败也未解绑：剥离续链 id 后原地再试一次。
 				// turn-state 钉号同样走这条路：上游已经说找不到 id，换号无益，剥 id 才能继续。
-				degradeContinuation(fmt.Sprintf("upstream rejected previous_response_id on account %d", account.ID()), attempt+1)
+				if contextErr := degradeContinuation(fmt.Sprintf("upstream rejected previous_response_id on account %d", account.ID()), attempt+1); contextErr != nil {
+					_ = writeResponsesWSError(conn, contextErr)
+					return newResponsesWSCloseError(responsesWSContextCloseCode(contextErr), contextErr.Message, contextErr)
+				}
 				continue
 			}
 			var retryErr *responsesWSRetryableStreamError
@@ -1018,7 +1047,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	reasoningEffort string,
 	serviceTier string,
 	respCacheOwner string,
-	expandedInputRaw string,
+	replayInput *responsesWSReplaySource,
 	start time.Time,
 	ttftGuard *firstTokenTimeoutGuard,
 	retryEnabled bool,
@@ -1059,6 +1088,7 @@ func (h *Handler) streamResponsesWSUpstream(
 	var terminalFailureClientPayload []byte
 	var preContentErrorCandidate []byte
 	var completedResponsePayload []byte
+	outputCollector := newResponseOutputCollector()
 	terminalFailureEventType := ""
 	wroteAnyBody := false
 	var wsReplay *continuousRetryWSReplay
@@ -1105,6 +1135,7 @@ func (h *Handler) streamResponsesWSUpstream(
 		if wsReplay == nil {
 			h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
 		}
+		outputCollector.Add(data)
 		parsed := gjson.ParseBytes(data)
 		eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 		clientData := data
@@ -1140,7 +1171,7 @@ func (h *Handler) streamResponsesWSUpstream(
 			if tier := parsed.Get("response.service_tier").String(); tier != "" {
 				actualServiceTier = tier
 			}
-			if eventType == "response.completed" {
+			if eventType == "response.completed" || eventType == "response.incomplete" {
 				completedResponsePayload = append([]byte(nil), data...)
 			}
 			gotTerminal = true
@@ -1392,12 +1423,14 @@ func (h *Handler) streamResponsesWSUpstream(
 			})
 		}
 		if len(completedResponsePayload) > 0 {
-			if options != nil && options.onResponseCompleted != nil {
+			if options != nil && options.onResponseCompleted != nil && gjson.GetBytes(completedResponsePayload, "type").String() == "response.completed" {
 				options.onResponseCompleted(append([]byte(nil), completedResponsePayload...))
 			}
-			// Only committed response.completed events become continuation history.
+			// Committed completed/incomplete responses can be continuation history.
 			// Failed attempts and locally blocked/unwritable replays leave no cache.
-			cacheCompletedResponse(respCacheOwner, []byte(expandedInputRaw), completedResponsePayload)
+			if !outputCollector.overflow {
+				cacheResponsesWSCompletedResponse(respCacheOwner, replayInput.Input(), completedResponsePayload, outputCollector.Items())
+			}
 		}
 	}
 	_ = wsReplay.Close()

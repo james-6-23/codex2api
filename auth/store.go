@@ -96,6 +96,7 @@ type Account struct {
 	UpstreamRequestIDHeader   string
 	mu                        sync.RWMutex
 	usageSyncMu               sync.Mutex
+	modelCatalogMu            sync.Mutex
 	// grokRuntimeFactsMu serializes inference-response observations for this
 	// account. The sink performs generation-fenced database writes before it
 	// publishes any hard gate or routing invalidation back to memory.
@@ -3225,6 +3226,7 @@ type Store struct {
 	usageProbe                         func(context.Context, *Account) error
 	usageProbeCompletion               func()
 	usageProbeBatch                    atomic.Bool
+	antigravityCatalogBatch            atomic.Bool
 	recoveryProbeBatch                 atomic.Bool
 	autoCleanUnauthorized              atomic.Bool
 	autoCleanRateLimited               atomic.Bool
@@ -5745,6 +5747,8 @@ func (s *Store) StartBackgroundRefresh() {
 	go func() {
 		defer s.wg.Done()
 		refreshTimer := time.NewTimer(s.GetBackgroundRefreshInterval())
+		catalogTimer := time.NewTimer(10 * time.Second)
+		defer catalogTimer.Stop()
 		autoCleanupTicker := time.NewTicker(30 * time.Second)
 		fullUsageCleanupTicker := time.NewTicker(5 * time.Minute)
 		expiredCleanupTicker := time.NewTicker(15 * time.Minute)
@@ -5780,6 +5784,9 @@ func (s *Store) StartBackgroundRefresh() {
 
 		for {
 			select {
+			case <-catalogTimer.C:
+				s.triggerAntigravityCatalogRefresh()
+				catalogTimer.Reset(antigravityCatalogRefreshInterval)
 			case <-refreshTimer.C:
 				if s.GetLazyMode() {
 					s.TriggerUsageProbeAsync()
@@ -11412,13 +11419,29 @@ func antigravityCredentialFromStoreRow(row *database.AccountRow) AntigravityCred
 }
 
 func antigravityRefreshModels(result AntigravitySyncResult) []string {
-	models := make([]string, 0, len(result.Quota.Models))
-	for _, model := range result.Quota.Models {
+	return AntigravityDiscoveredModels(result.Quota)
+}
+
+// Keep the complete raw catalog in the quota snapshot, but never publish IDs
+// explicitly marked internal by the provider into the dispatch model list.
+func AntigravityDiscoveredModels(quota AntigravityQuotaSnapshot) []string {
+	internal := make(map[string]bool)
+	for _, id := range quota.InternalModelIDs {
+		internal[strings.ToLower(id)] = true
+	}
+	models := append([]string(nil), quota.CatalogModelIDs...)
+	for _, model := range quota.Models {
 		if id := strings.TrimSpace(model.ModelID); id != "" {
 			models = append(models, id)
 		}
 	}
-	return normalizeModelList(models)
+	visible := models[:0]
+	for _, id := range models {
+		if !internal[strings.ToLower(id)] {
+			visible = append(visible, id)
+		}
+	}
+	return normalizeModelList(visible)
 }
 
 func antigravityCredentialRotated(row *database.AccountRow, credential AntigravityCredential) bool {

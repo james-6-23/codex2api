@@ -99,6 +99,8 @@ type Handler struct {
 	imageProxy                 *proxy.Handler
 	antigravitySyncAccount     func(context.Context, int64) antigravityRefreshItem
 	antigravityCapabilityProbe antigravityCapabilityExecutor
+	// Claude / Antigravity 渠道连通性测试配置的进程内缓存（首次读库，PUT 刷新）。
+	channelTestCfg atomic.Pointer[database.ChannelTestConfig]
 
 	// 导入触发的用量采样队列。固定数量 worker 消费任务，避免“一账号一 goroutine”
 	// 在大文件导入时堆出成千上万个阻塞协程。
@@ -1208,6 +1210,10 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings/invite-guide", h.UpdateInviteGuideSettings)
 	api.GET("/settings/visible-channels", h.GetVisibleChannelsSettings)
 	api.PUT("/settings/visible-channels", h.UpdateVisibleChannelsSettings)
+	api.GET("/settings/channel-tests", h.GetChannelTestSettings)
+	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
+	api.GET("/settings/antigravity", h.GetAntigravitySettings)
+	api.PUT("/settings/antigravity", h.UpdateAntigravitySettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
@@ -2543,6 +2549,17 @@ func (h *Handler) UpdateAccountScheduler(c *gin.Context) {
 			}
 			writeError(c, http.StatusInternalServerError, "查询账号失败: "+err.Error())
 			return
+		}
+		// Claude API Key 账号的 custom_headers 是出站自定义头(issue #647):网关保留头
+		// (Authorization / x-api-key / Content-Type / Accept 等)不允许覆盖。
+		if strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) && claudeAuthKindForRow(row, true) == auth.ClaudeAuthKindAPIKey {
+			normalized, err := normalizeClaudeAPIKeyCustomHeaders(update.CustomHeaders.Values)
+			if err != nil {
+				writeError(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			update.CustomHeaders.Values = normalized
+			update.CredentialUpdates["custom_headers"] = cloneCustomHeaders(normalized)
 		}
 		seed := tokenCredentialSeedFromAccountRow(row)
 		previousOverride := openaiidentity.WorkspaceOverrideFromHeaders(seed.customHeaders)

@@ -550,26 +550,7 @@ func applyClaudeOutboundVersionAlignment(req *http.Request, required string) *Er
 // Claude Code identity headers. It is deliberately a fixed, provider-shaped
 // value rather than a per-request random value, so force mode cannot drift.
 func defaultClaudeIdentityHeader(name string) string {
-	switch strings.ToLower(strings.TrimSpace(name)) {
-	case "user-agent":
-		return "claude-cli/" + auth.EffectiveClaudeCLIVersion() + " (external, cli)"
-	case "x-app":
-		return "cli"
-	case "x-stainless-lang":
-		return "js"
-	case "x-stainless-package-version":
-		return "0.112.1"
-	case "x-stainless-os":
-		return "MacOS"
-	case "x-stainless-arch":
-		return "arm64"
-	case "x-stainless-runtime":
-		return "node"
-	case "x-stainless-runtime-version":
-		return "v26.3.0"
-	default:
-		return ""
-	}
+	return auth.DefaultClaudeIdentityHeaderValue(name)
 }
 
 func cloneStringMap(m map[string]string) map[string]string {

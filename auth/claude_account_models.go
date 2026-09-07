@@ -12,6 +12,8 @@ func (s *Store) DropAccountModel(ctx context.Context, acc *Account, model string
 	if s == nil || acc == nil {
 		return false, nil
 	}
+	acc.modelCatalogMu.Lock()
+	defer acc.modelCatalogMu.Unlock()
 	target := strings.ToLower(strings.TrimSpace(model))
 	if target == "" {
 		return false, nil
@@ -45,4 +47,47 @@ func (s *Store) DropAccountModel(ctx context.Context, acc *Account, model string
 	acc.mu.Unlock()
 	s.fastSchedulerUpdate(acc)
 	return true, nil
+}
+
+// ClaudeModelWasRejected allows an explicit administrator probe to retry a model
+// removed by a billing rejection, without bypassing other whitelist exclusions.
+func (a *Account) ClaudeModelWasRejected(model string) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	cooldown, ok := a.ModelCooldowns[normalizeModelCooldownKey(model)]
+	return ok && cooldown.Reason == "credits_required"
+}
+
+// RestoreClaudeAccountModel restores a successfully probed billing rejection.
+// An empty list remains unrestricted. Serialize against DropAccountModel so
+// concurrent probes of different models cannot overwrite each other's updates.
+func (s *Store) RestoreClaudeAccountModel(ctx context.Context, acc *Account, model string) error {
+	if s == nil || acc == nil || !acc.ClaudeModelWasRejected(model) {
+		return nil
+	}
+	acc.modelCatalogMu.Lock()
+	defer acc.modelCatalogMu.Unlock()
+	acc.mu.RLock()
+	models := append([]string(nil), acc.Models...)
+	id := acc.DBID
+	acc.mu.RUnlock()
+	if len(models) == 0 {
+		return nil
+	}
+	for _, existing := range models {
+		if strings.EqualFold(existing, model) {
+			return nil
+		}
+	}
+	models = append(models, strings.TrimSpace(model))
+	if s.db != nil && id > 0 {
+		if err := s.db.UpdateCredentials(ctx, id, map[string]interface{}{"models": models}); err != nil {
+			return err
+		}
+	}
+	acc.mu.Lock()
+	acc.Models = models
+	acc.mu.Unlock()
+	s.fastSchedulerUpdate(acc)
+	return nil
 }

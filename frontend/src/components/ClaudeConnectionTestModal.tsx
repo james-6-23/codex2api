@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, CheckCircle2, ChevronRight, Copy, Loader2, RefreshCw, XCircle } from "lucide-react";
-import { getAdminKey } from "../api";
+import { api, getAdminKey } from "../api";
 import type { AccountRow } from "../types";
 import { claudeTestTokenMetrics, readClaudeTestEvents } from "../lib/claudeConnectionTest";
 import type { ClaudeTestDiagnostics } from "../lib/claudeConnectionTest";
@@ -47,6 +47,26 @@ export default function ClaudeConnectionTestModal({ account, onClose, onSettled 
   useEffect(() => {
     if (!modelOptions.includes(model)) setModel(modelOptions[0] || "");
   }, [model, modelOptions]);
+  // 系统设置里为 Claude 配置的默认测试模型优先(与后端自动选模一致);只在用户还没
+  // 手动切换过时生效,读不到设置或模型不在该账号目录/正在冷却则保持自动选择。
+  const userPickedRef = useRef(false);
+  useEffect(() => {
+    let active = true;
+    void api.getChannelTestSettings().then((settings) => {
+      if (!active || userPickedRef.current) return;
+      const preferred = settings.claude.test_model.trim().toLowerCase();
+      if (!preferred || cooled.has(preferred)) return;
+      const match = modelOptions.find((item) => item.toLowerCase() === preferred);
+      if (match) setModel(match);
+    }).catch(() => {
+      /* 沿用自动选择 */
+    });
+    return () => {
+      active = false;
+    };
+    // 只在打开弹窗时读取一次配置。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const markSettled = useCallback(() => {
     if (settledRef.current) return;
@@ -189,7 +209,7 @@ export default function ClaudeConnectionTestModal({ account, onClose, onSettled 
             <p className="text-sm font-semibold text-foreground" role="status">{statusLabel}</p>
             <p className="mt-0.5 text-[11px] text-muted-foreground">Claude · Messages API</p>
           </div>
-          <Select compact className="w-full min-w-0 sm:w-60" value={model} onValueChange={setModel} disabled={running} options={modelOptions.map((item) => ({ value: item, label: cooled.has(item.toLowerCase()) ? `${item} · ${t("claude.testModelCooling")}` : item }))} />
+          <Select compact className="w-full min-w-0 sm:w-60" value={model} onValueChange={(value) => { userPickedRef.current = true; setModel(value); }} disabled={running} options={modelOptions.map((item) => ({ value: item, label: cooled.has(item.toLowerCase()) ? `${item} · ${t("claude.testModelCooling")}` : item }))} />
         </div>
 
         {errorMessage ? <div role="alert" className="break-words rounded-lg border border-destructive/20 bg-destructive/5 px-3 py-2.5 text-xs leading-relaxed text-destructive">{errorMessage}</div> : null}

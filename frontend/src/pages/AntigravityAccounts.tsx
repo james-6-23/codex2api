@@ -1,3 +1,4 @@
+import { ANTIGRAVITY_DEFAULT_MODELS } from "../lib/antigravityModels";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, ReactNode } from "react";
 import { useTranslation } from "react-i18next";
@@ -25,6 +26,7 @@ import {
   Trash2,
   Upload,
   X,
+  Zap,
 } from "lucide-react";
 import { api } from "../api";
 import type { ProxyRow } from "../api";
@@ -61,6 +63,7 @@ import ChannelLogo from "../components/ChannelLogo";
 import ColumnSettingsMenu from "../components/ColumnSettingsMenu";
 import { CompactStat } from "../components/CompactStat";
 import Modal from "../components/Modal";
+import TestConnectionModal from "../components/TestConnectionModal";
 import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
 import StateShell from "../components/StateShell";
@@ -97,12 +100,6 @@ type OAuthModalStatus = "idle" | "starting" | "waiting" | "processing" | "comple
 const ANTIGRAVITY_TABLE_COLUMNS = [
   "project", "permission", "quota", "proxy", "status", "updatedAt",
 ] as const;
-
-const ANTIGRAVITY_DEFAULT_MODELS = [
-  "gemini-3-pro-preview",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
-];
 
 function parseModelList(value: string): string[] {
   return Array.from(
@@ -970,6 +967,7 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
     EMPTY_ACCOUNT_GROUP_FILTER,
   );
   const [busy, setBusy] = useState<{ id: number; action: BusyAction } | null>(null);
+  const [testingAccount, setTestingAccount] = useState<AccountRow | null>(null);
 
   // 代理池 + 代理池开关 + 全局代理:代理徽章的判定输入。本页此前只有纯文本代理
   // 输入框,没接过代理池,这里补上(拉取失败静默留空,不影响手填)。
@@ -1797,6 +1795,16 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
     const isAPIKey = account.antigravity_auth_kind === "api_key";
     return (
       <div className="flex items-center justify-end gap-0.5">
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          disabled={accountBusy}
+          onClick={() => setTestingAccount(account)}
+          title={t("accounts.testConnection")}
+          aria-label={t("accounts.testConnection")}
+        >
+          <Zap />
+        </Button>
         <Button
           variant="ghost"
           size="icon-sm"
@@ -2997,6 +3005,14 @@ function AntigravityAccounts({ headerSlot }: { headerSlot?: ReactNode } = {}) {
         onClose={() => setQuickProxyAccount(null)}
         onSaved={() => reload({ silent: true })}
       />
+
+      {testingAccount ? (
+        <TestConnectionModal
+          account={testingAccount}
+          onClose={() => setTestingAccount(null)}
+          onSettled={() => void reload()}
+        />
+      ) : null}
 
       {confirmDialog}
     </div>

@@ -29,8 +29,8 @@ type encryptedDigest = [sha256.Size]byte
 // encryptedScopeKey namespaces remembered rejections. Only the raw downstream
 // session ID is digested; the other dimensions are plain, non-secret values
 // (the API key's stable identity is the same derivation used for
-// prompt_cache_key) and are deliberately kept out of the hash so that nothing
-// credential-related ever feeds a general-purpose hash.
+// prompt_cache_key). That stable identity is derived from the credential with
+// SHA-256; the original credential is never retained in this memory.
 type encryptedScopeKey struct {
 	owner       int64
 	keyIdentity string
@@ -184,6 +184,8 @@ func stripRememberedEncryptedContent(body []byte, invalid map[encryptedDigest]st
 	return next
 }
 
+type encryptedContentSessionKey struct{}
+
 type encryptedContentAttempt struct {
 	memory *encryptedContentMemory
 	key    encryptedScopeKey
@@ -192,6 +194,9 @@ type encryptedContentAttempt struct {
 func prepareEncryptedContentAttempt(ctx context.Context, account *auth.Account, body []byte, session string, headers http.Header) ([]byte, *encryptedContentAttempt) {
 	if account == nil || !bytes.Contains(body, []byte(`"encrypted_content"`)) {
 		return body, nil
+	}
+	if affinity, ok := ctx.Value(encryptedContentSessionKey{}).(string); ok {
+		session = affinity
 	}
 	if local := resolveDownstreamAffinityID(headers); local != "" {
 		session = local
@@ -211,7 +216,7 @@ func prepareEncryptedContentAttempt(ctx context.Context, account *auth.Account, 
 	// are kept.
 	key := encryptedScopeKey{
 		owner:       owner,
-		keyIdentity: deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(headers.Get("Authorization")), "Bearer "), nil),
+		keyIdentity: deterministicPromptCacheKey(strings.TrimPrefix(strings.TrimSpace(downstreamAuthorizationHeader(&http.Request{Header: headers})), "Bearer "), nil),
 		account:     account.ID(),
 		generation:  account.GetCredentialGeneration(),
 		session:     sha256.Sum256([]byte(session)),
@@ -224,10 +229,6 @@ func (a *encryptedContentAttempt) observeResponse(resp *http.Response, sentBody 
 	if a == nil || resp == nil || resp.Body == nil {
 		return
 	}
-	digests := encryptedPayloadDigests(sentBody)
-	if len(digests) == 0 {
-		return
-	}
 	stream := resp.StatusCode < 400 && (strings.Contains(resp.Header.Get("Content-Type"), "text/event-stream") || gjson.GetBytes(sentBody, "stream").Bool())
 	if !stream && resp.StatusCode != http.StatusBadRequest {
 		return
@@ -237,7 +238,7 @@ func (a *encryptedContentAttempt) observeResponse(resp *http.Response, sentBody 
 		// Missing encrypted_content is a different failure; it cannot prove
 		// that any supplied ciphertext was rejected.
 		if isRejectedEncryptedContentFailure(body) {
-			a.memory.mark(a.key, digests)
+			a.memory.mark(a.key, encryptedPayloadDigests(sentBody))
 		}
 	}}
 }

@@ -36,13 +36,13 @@ Ultrafast 默认采用**本网关当前的 Fast 计费规则**：优先使用模
 
 成功获取 Codex 模型清单后，将允许的能力字段保存至 `model_capability_snapshots`。每个快照属于一个账号和凭据版本。部分字段缺失时保留该账号此前有效字段；无效或不可用清单不清空快照。旧凭据和较早异步任务不能覆盖新状态。
 
-清单回退按当前 API Key 可访问的账号合并能力：布尔能力取交集、上下文限制取较小值、支持列表取交集，未知或冲突能力保守处理。模型 instructions 等非能力内容不会存入快照。重启会恢复用于 Responses Lite 转发判断的账号能力。
+清单回退按当前 API Key 可访问的账号合并能力：布尔能力取交集、上下文限制取较小值、支持列表取交集，未知或冲突能力保守处理，`input_modalities` 至少保留 `["text"]`；未知账号的限额与高级能力不会借用其他账号的值。Fast/Ultrafast 仅在已学习的账号能力交集中声明。同一凭据代的部分清单按模型及字段合并，旧客户端省略的模型仍保留；凭据代变化后重新学习。模型 instructions 等非能力内容不会存入快照。重启会恢复用于 Responses Lite 转发判断的账号能力。
 
 ## 重放缓存
 
 相同历史项在本地响应缓存条目之间共享不可变正文；请求重建只复制序列结构。可修改的缓存读取接口仍返回独立副本。淘汰释放缓存持有关系，正在使用的重放仍可安全完成。
 
-原有逻辑字节预算、条目上限、TTL、owner 隔离及 Redis 格式保持兼容。运维 API 的 `response_cache.shared_payload_bytes` 表示缓存持有的去重正文大小；`current_bytes` 仍是用于容量控制的逻辑大小，二者均不等于进程 RSS。
+原有逻辑字节预算、条目上限、TTL、owner 隔离及 Redis 格式保持兼容。运维 API 的 `response_cache.shared_payload_bytes` 表示缓存持有的去重正文大小；`current_bytes` 仍是用于容量控制的逻辑大小，二者均不等于进程 RSS，不包含每项簿记和 map/slice 开销。全唯一的小条目可能放大这部分内存；共享池为空时会释放 map 桶的引用。
 
 本地缓存基准：128 轮，每轮新增约 10 KiB，缓存写入后读取重放序列；为单独比较复制开销，基准将逻辑预算设为 256 MiB。Apple M5 / darwin arm64 / Go 1.26.6，`-benchtime=5x -count=3`，取各指标中位数：
 
@@ -65,3 +65,16 @@ go test ./proxy -run '^$' -bench '^BenchmarkResponseCacheReplay128Turns$' -bench
 ```
 
 `TestPostgresTraceAndCapabilities` 使用 `CODEX2API_TEST_POSTGRES_DSN` 指定的空白临时 PostgreSQL 数据库验证迁移、日志读写和快照恢复。真实上游模型的可用性、Ultrafast 权限及实际计费仍由部署使用的上游决定。
+
+## 失效密文记忆的边界
+
+失效密文记忆使用下游稳定会话身份，与默认隔离模式下每次出站生成的随机 UUID 分离。
+Bearer、`x-api-key`、`anthropic-auth-token` 和合法 WebSocket 子协议鉴权均按各自 API Key 隔离。
+内存中保留派生身份和密文摘要，不保存原始凭据；API Key 派生身份仍沿用 SHA-256 派生流程。
+
+上游 `invalid_encrypted_content` 通常不指明哪一个条目失效，因此当前恢复策略记录该失败请求中的全部
+reasoning/compaction 密文项，后续同账号、同凭据代、同会话内命中者会被剥离。有效密文也可能随同批次被剥离，
+不能将此行为理解为准确定位单个坏条目；客户端需要保留可回放的明文历史。记忆最多保留 30 分钟。
+
+按需缓存下，WS 未显式设置 `store:false` 的帧仍授予写入资格，以便第一次续链就有根快照。
+这类客户端的写入量可能接近 always；每轮自行发送完整上下文的客户端应设置 `store:false`。

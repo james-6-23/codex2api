@@ -542,31 +542,59 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 // CONCURRENTLY 构建被中断会留下 INVALID 索引且使 IF NOT EXISTS 误判存在，
 // 所以先探测有效性，无效则先删再建。
 func (db *DB) ensureUsageLogsGenerationIndex(parent context.Context) error {
-	const indexName = "idx_usage_logs_account_generation_created_at"
 	ctx, cancel := context.WithTimeout(parent, 60*time.Minute)
 	defer cancel()
+	conn, err := db.conn.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	// Serialize builders across instances without delaying service startup.
+	var locked bool
+	if err := conn.QueryRowContext(ctx, `SELECT pg_try_advisory_lock(hashtext('codex2api:usage-log-indexes'))`).Scan(&locked); err != nil {
+		return err
+	}
+	if !locked {
+		return nil
+	}
+	defer func() {
+		unlockCtx, unlockCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer unlockCancel()
+		if _, err := conn.ExecContext(unlockCtx, `SELECT pg_advisory_unlock(hashtext('codex2api:usage-log-indexes'))`); err != nil {
+			log.Printf("释放 usage_logs 索引构建锁失败: %v", err)
+		}
+	}()
+	for _, index := range []struct{ name, definition string }{
+		{"idx_usage_logs_account_generation_created_at", "(account_id, credential_generation, created_at)"},
+		{"idx_usage_logs_request_id", "(request_id) WHERE request_id <> ''"},
+		{"idx_usage_logs_upstream_request_id", "(upstream_request_id) WHERE upstream_request_id <> ''"},
+	} {
+		if err := ensureUsageLogsOnlineIndex(ctx, conn, index.name, index.definition); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
+func ensureUsageLogsOnlineIndex(ctx context.Context, conn *sql.Conn, indexName, definition string) error {
 	var exists, valid bool
-	err := db.conn.QueryRowContext(ctx, `
-		SELECT to_regclass($1) IS NOT NULL,
-		       COALESCE((SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass($1)), FALSE)
-	`, indexName).Scan(&exists, &valid)
+	err := conn.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL,
+ COALESCE((SELECT i.indisvalid FROM pg_index i WHERE i.indexrelid = to_regclass($1)), FALSE)`, indexName).Scan(&exists, &valid)
 	if err != nil {
 		return fmt.Errorf("探测索引 %s 状态失败: %w", indexName, err)
 	}
 	if exists && valid {
 		return nil
 	}
-	if exists && !valid {
-		if _, err := db.conn.ExecContext(ctx, `DROP INDEX `+quotePostgresIdent(indexName)); err != nil {
+	if exists {
+		if _, err := conn.ExecContext(ctx, `DROP INDEX CONCURRENTLY IF EXISTS `+quotePostgresIdent(indexName)); err != nil {
 			return fmt.Errorf("清理无效索引 %s 失败: %w", indexName, err)
 		}
 	}
-	// CONCURRENTLY 不能在事务块内执行；单条 ExecContext 走 autocommit，满足要求。
-	if _, err := db.conn.ExecContext(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS `+quotePostgresIdent(indexName)+` ON usage_logs(account_id, credential_generation, created_at)`); err != nil {
+	if _, err := conn.ExecContext(ctx, `CREATE INDEX CONCURRENTLY IF NOT EXISTS `+quotePostgresIdent(indexName)+` ON usage_logs`+definition); err != nil {
 		return fmt.Errorf("在线创建索引 %s 失败: %w", indexName, err)
 	}
-	log.Printf("usage_logs 代际索引 %s 已就绪", indexName)
+	log.Printf("usage_logs 索引 %s 已就绪", indexName)
 	return nil
 }
 
@@ -1183,8 +1211,6 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_request_id VARCHAR(128) DEFAULT '';
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_proxy_id BIGINT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS upstream_proxy_name VARCHAR(255) DEFAULT '';
-	CREATE INDEX IF NOT EXISTS idx_usage_logs_request_id ON usage_logs(request_id) WHERE request_id <> '';
-	CREATE INDEX IF NOT EXISTS idx_usage_logs_upstream_request_id ON usage_logs(upstream_request_id) WHERE upstream_request_id <> '';
 
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_count INT DEFAULT 0;
 	ALTER TABLE usage_logs ADD COLUMN IF NOT EXISTS image_width INT DEFAULT 0;
@@ -1247,6 +1273,8 @@ func (db *DB) migrate(ctx context.Context) error {
 				antigravity_oauth_config TEXT DEFAULT '{}',
 				invite_guide_config TEXT DEFAULT '{}',
 				visible_channels_config TEXT DEFAULT '{}',
+				channel_test_config TEXT DEFAULT '{}',
+				antigravity_config TEXT DEFAULT '{}',
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.4',
@@ -1315,6 +1343,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_oauth_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS invite_guide_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS visible_channels_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS channel_test_config TEXT DEFAULT '{}';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
@@ -7797,6 +7827,9 @@ func (db *DB) PurgeAccount(ctx context.Context, id int64) error {
 	if err := db.deleteGrokAccountStateTx(ctx, tx, "= $1", id); err != nil {
 		return err
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM model_capability_snapshots WHERE account_id = $1`, id); err != nil {
+		return err
+	}
 	query := `DELETE FROM accounts WHERE id = $1 AND (status = 'deleted' OR COALESCE(error_message, '') = 'deleted')`
 	res, err := tx.ExecContext(ctx, query, id)
 	if err != nil {
@@ -7823,6 +7856,9 @@ func (db *DB) PurgeDeletedAccounts(ctx context.Context) (int64, error) {
 	}
 	defer tx.Rollback()
 	deletedPredicate := `IN (SELECT id FROM accounts WHERE status = 'deleted' OR COALESCE(error_message, '') = 'deleted')`
+	if _, err := tx.ExecContext(ctx, `DELETE FROM model_capability_snapshots WHERE account_id `+deletedPredicate); err != nil {
+		return 0, err
+	}
 	if err := db.deleteGrokAccountStateTx(ctx, tx, deletedPredicate); err != nil {
 		return 0, err
 	}

@@ -310,7 +310,11 @@ func (h *Handler) applyStoredModelCapabilities(ctx context.Context, row *databas
 		}
 		for name, value := range intersectCodexCapabilities(candidates) {
 			if bytes.Equal(value, []byte("null")) {
-				delete(model, name)
+				if name == "input_modalities" {
+					model[name] = json.RawMessage(`["text"]`)
+				} else {
+					delete(model, name)
+				}
 			} else {
 				model[name] = value
 			}

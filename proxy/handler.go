@@ -2808,29 +2808,37 @@ func restoreMissingResponseOutputs(responseJSON []byte, outputItems []json.RawMe
 	if len(responseJSON) == 0 || len(outputItems) == 0 {
 		return responseJSON
 	}
-	var response map[string]any
-	if err := json.Unmarshal(responseJSON, &response); err != nil {
+	terminalOutput := gjson.GetBytes(responseJSON, "output")
+	terminalCount := int64(-1)
+	if terminalOutput.IsArray() {
+		terminalCount = terminalOutput.Get("#").Int()
+	}
+	if terminalCount >= int64(len(outputItems)) {
 		return responseJSON
 	}
-	outputs := make([]any, 0, len(outputItems))
+	outputs := make([]json.RawMessage, 0, len(outputItems))
 	for _, rawItem := range outputItems {
 		if len(rawItem) == 0 || !gjson.ValidBytes(rawItem) {
 			continue
 		}
-		var decoded any
-		if err := json.Unmarshal(rawItem, &decoded); err != nil {
-			continue
-		}
-		outputs = append(outputs, decoded)
+		outputs = append(outputs, rawItem)
 	}
 	if len(outputs) == 0 {
 		return responseJSON
 	}
-	if terminalOutputs, ok := response["output"].([]any); ok && len(terminalOutputs) >= len(outputs) {
+	if terminalCount >= int64(len(outputs)) {
 		return responseJSON
 	}
-	response["output"] = outputs
-	restored, err := json.Marshal(response)
+	if firstNonSpace(responseJSON) != '{' || !gjson.ValidBytes(responseJSON) {
+		return responseJSON
+	}
+	encoded, err := json.Marshal(outputs)
+	if err != nil {
+		return responseJSON
+	}
+	// Patch only output. Large usage/attribution trees stay opaque, preserving
+	// unknown fields and exact JSON numbers while avoiding a full map round trip.
+	restored, err := sjson.SetRawBytes(responseJSON, "output", encoded)
 	if err != nil {
 		return responseJSON
 	}
@@ -3026,30 +3034,7 @@ func (h *Handler) authMiddleware() gin.HandlerFunc {
 			return
 		}
 
-		authHeader := c.GetHeader("Authorization")
-		// OpenAI-compatible WebSocket clients may carry the API key in the
-		// standard subprotocol list instead of an Authorization header:
-		//   Sec-WebSocket-Protocol: realtime, openai-insecure-api-key.<key>
-		// Only honor it on an actual WebSocket upgrade so an ordinary HTTP
-		// request cannot smuggle authentication through an unrelated header.
-		if authHeader == "" && isResponsesWebSocketUpgradeRequest(c.Request) {
-			if key := apiKeyFromWebSocketSubprotocol(c.GetHeader("Sec-WebSocket-Protocol")); key != "" {
-				authHeader = "Bearer " + key
-			}
-		}
-		// 兼容 Anthropic 客户端的多种认证方式:
-		// - x-api-key: Anthropic SDK 默认方式
-		// - ANTHROPIC_AUTH_TOKEN: Claude Code 通过此环境变量设置，
-		//   实际发送为 Authorization: Bearer <token>（已被上面覆盖）
-		//   或 anthropic-auth-token 自定义 header
-		if authHeader == "" {
-			for _, h := range []string{"x-api-key", "anthropic-auth-token"} {
-				if v := strings.TrimSpace(c.GetHeader(h)); v != "" {
-					authHeader = "Bearer " + v
-					break
-				}
-			}
-		}
+		authHeader := downstreamAuthorizationHeader(c.Request)
 		if authHeader == "" {
 			// Use standardized error format from api package
 			api.SendError(c, api.ErrMissingAPIKey)
@@ -3674,13 +3659,33 @@ func (h *Handler) Responses(c *gin.Context) {
 	upstreamChannel := requestUpstreamChannel(c)
 	var requestModel, mappedModel string
 	var mappingApplied bool
-	if upstreamChannel == database.UpstreamChannelAntigravity {
+	nativeAntigravityModel := false
+	if upstreamChannel == database.UpstreamChannelAuto {
+		if logical, known := antigravityLogicalCompatibilityModel(gjson.GetBytes(rawBody, "model").String()); known {
+			for _, account := range h.store.Accounts() {
+				if !account.IsAntigravityAPI() || !account.AntigravityDispatchEnabled() {
+					continue
+				}
+				for _, variant := range logical.variants {
+					if antigravityAccountSupportsPublicModel(account, logical.id+"-"+variant.level) {
+						nativeAntigravityModel = true
+					}
+				}
+			}
+		}
+	}
+	if upstreamChannel == database.UpstreamChannelAntigravity || nativeAntigravityModel {
 		// Antigravity is a native, fixed public surface. Do not let global Codex
 		// aliases or synthesized reasoning aliases rewrite an Antigravity-only
 		// request before validation; the adapter performs the sole public->wire
 		// translation after an account proves it owns the required backing model.
 		requestModel = strings.TrimSpace(gjson.GetBytes(rawBody, "model").String())
-		mappedModel = requestModel
+		var foldErr *api.APIError
+		rawBody, mappedModel, foldErr = antigravityFoldLogicalModel(rawBody, requestModel)
+		if foldErr != nil {
+			api.SendError(c, foldErr)
+			return
+		}
 	} else if nativeRemoteCompactionV2 {
 		rawBody, requestModel, mappedModel, mappingApplied = h.applyConfiguredCompactModelMappingToBody(rawBody, supportedModels)
 	} else {
@@ -3698,7 +3703,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	case database.UpstreamChannelAntigravity:
 		// Antigravity 专用 Key 公开稳定的逻辑模型，同时继续接受旧的固定
 		// effort 别名；raw backing 与 account model_mapping 不是下游模型名。
-		rules["model"] = append(rules["model"], api.ModelValidator(antigravityAcceptedModelIDs()))
+		rules["model"] = append(rules["model"], api.ModelValidator(h.antigravityAcceptedModels()))
 	default:
 		rules["model"] = append(rules["model"], h.modelValidator(supportedModels))
 	}
@@ -4753,6 +4758,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		// 身份按 attempt 附加实际选中账号维度：account_* 门随重试换号重新匹配（issue #410）。
 		attemptIdentity := ruleIdentity.WithSelectedAccount(account, h.store)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
@@ -6738,6 +6744,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			lastUpstreamCancel()
 		}
 		upstreamCtx, upstreamCancel := newDrainableUpstreamContext(c.Request.Context(), upstreamDrainTimeout)
+		upstreamCtx = context.WithValue(upstreamCtx, encryptedContentSessionKey{}, sessionIdentity.affinityID)
 		upstreamCtx = WithPayloadRuleIdentity(upstreamCtx, attemptIdentity)
 		lastUpstreamCancel = upstreamCancel
 		ttftGuard := newFirstTokenTimeoutGuard(currentFirstTokenTimeout(), upstreamCancel)
@@ -7300,9 +7307,11 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var fullContent strings.Builder
 			var fullReasoning strings.Builder
 			var toolCalls []ToolCallResult
+			outputCollector := newResponseOutputCollector()
 			var finishReasonOverride string
 
 			readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
+				outputCollector.Add(data)
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				ttftGuard.MarkProgress(eventType)
@@ -7330,7 +7339,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 					// arguments 若被截断，整次上游响应按协议错误处理，不能把坏调用
 					// 返回并在下一轮继续污染历史。
 					var toolErr error
-					toolCalls, toolErr = ExtractToolCallsFromOutputValidated(data)
+					toolCalls, toolErr = ExtractToolCallsFromOutputValidated(restoreMissingResponseOutputsInEvent(data, outputCollector.Items()))
 					if toolErr != nil {
 						terminalFailurePayload = malformedToolArgumentsFailurePayload(toolErr)
 					}
@@ -8592,7 +8601,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 	// middleware (including older embedders); a real key always gets an
 	// isolated, read-only account snapshot.
 	if row := apiKeyRowFromContext(c); row != nil {
-		api.SendList(c, "list", h.scopedModels(ctx, row))
+		api.SendList(c, "list", collapseAntigravityModelChoices(h.scopedModels(ctx, row)))
 		return
 	}
 	modelIDs := h.supportedModelIDs(ctx)
@@ -8605,7 +8614,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 			OwnedBy: "openai",
 		})
 	}
-	api.SendList(c, "list", models)
+	api.SendList(c, "list", collapseAntigravityModelChoices(models))
 }
 
 func (h *Handler) supportedModelIDs(ctx context.Context) []string {
@@ -8683,4 +8692,26 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 		}
 	}
 	return models
+}
+
+// downstreamAuthorizationHeader is shared by authentication and per-key memory
+// namespaces so supported header forms cannot collapse into an anonymous key.
+func downstreamAuthorizationHeader(req *http.Request) string {
+	if req == nil {
+		return ""
+	}
+	if value := req.Header.Get("Authorization"); value != "" {
+		return value
+	}
+	if isResponsesWebSocketUpgradeRequest(req) {
+		if key := apiKeyFromWebSocketSubprotocol(req.Header.Get("Sec-WebSocket-Protocol")); key != "" {
+			return "Bearer " + key
+		}
+	}
+	for _, name := range []string{"x-api-key", "anthropic-auth-token"} {
+		if value := strings.TrimSpace(req.Header.Get(name)); value != "" {
+			return "Bearer " + value
+		}
+	}
+	return ""
 }

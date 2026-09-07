@@ -74,12 +74,16 @@ func TestProjectWhamDailyCycleReasons(t *testing.T) {
 		{"stale window", func(in *whamDailyCycleInput) { in.ResetAt = now.Add(-time.Second) }, "window_stale", false},
 		{"no percent", func(in *whamDailyCycleInput) { in.UsedPercentOK = false }, "no_percent", false},
 		{"no credits", func(in *whamDailyCycleInput) { in.UsedCredits = 0 }, "no_credits", true},
+		{"percent boundary", func(in *whamDailyCycleInput) { in.UsedPercent = 0.5 }, "percent_too_low", true},
 		{"percent too low", func(in *whamDailyCycleInput) { in.UsedPercent = 0 }, "percent_too_low", true},
 	}
 	for _, tc := range cases {
 		in := ok
 		tc.mutate(&in)
 		out := projectWhamDailyCycle(in, now)
+		if _, err := json.Marshal(out); err != nil {
+			t.Fatalf("%s is not JSON serializable: %v", tc.name, err)
+		}
 		if out["reason"] != tc.reason || out["available"] != tc.avail {
 			t.Fatalf("%s: reason=%v available=%v, want %s/%v", tc.name, out["reason"], out["available"], tc.reason, tc.avail)
 		}

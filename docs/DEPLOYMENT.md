@@ -599,3 +599,10 @@ docker compose -f docker-compose.sqlite.yml start
 | SQLite 本地 | codex2api-sqlite-local | codex2api-sqlite-local_sqlite-data-local |
 
 **注意:** 不同模式的数据卷相互隔离，切换 compose 文件后看到空数据是正常现象。
+
+### 大型用量表的索引升级
+
+PostgreSQL 的网关/上游请求 ID 索引与账号代际索引在启动后的后台使用
+`CREATE INDEX CONCURRENTLY` 构建，避免在启动迁移事务中扫描大表并阻塞写入。
+多实例通过数据库 advisory lock 协调构建；中断遗留的 INVALID 索引会在线清理后重建。
+构建失败只影响相关查询性能，服务继续运行并在下次启动重试；日志可查看构建结果。

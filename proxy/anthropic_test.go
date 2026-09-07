@@ -941,7 +941,7 @@ func TestAnthropicStreamTranslator_CustomToolCallInputDelta(t *testing.T) {
 	for _, evt := range streamed {
 		if evt.Type == "content_block_delta" && evt.Delta != nil && evt.Delta.Type == "input_json_delta" {
 			sawDelta = true
-			if !jsonEqual(t, evt.Delta.PartialJSON, `{"query":"hello"}`) {
+			if evt.Delta.PartialJSON != `{\"query\":\"hello\"}` {
 				t.Fatalf("custom tool input = %q", evt.Delta.PartialJSON)
 			}
 		}

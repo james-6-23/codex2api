@@ -21,6 +21,8 @@ type recordingResponseContextBackend struct {
 	bounded    cache.ResponseContextReadResult
 	boundedErr error
 	writes     map[string][]json.RawMessage
+	// blockWrites 非 nil 时，SetResponseContext 先等它关闭再落盘，用于验证后台写入。
+	blockWrites chan struct{}
 }
 
 type legacySharedResponseContextBackend struct {
@@ -59,6 +61,9 @@ func newRecordingResponseContextBackend(shared bool) *recordingResponseContextBa
 func (b *recordingResponseContextBackend) SharedAcrossInstances() bool { return b.shared }
 
 func (b *recordingResponseContextBackend) SetResponseContext(_ context.Context, key string, items []json.RawMessage, _ time.Duration) error {
+	if b.blockWrites != nil {
+		<-b.blockWrites
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.setCalls++
@@ -104,6 +109,7 @@ func TestResponseCacheMemoryBackendIsNeverUsed(t *testing.T) {
 	if got := getResponseCacheResult("key:1", "missing"); got.Kind != responseCacheLookupMiss {
 		t.Fatalf("lookup = %+v, want ordinary miss", got)
 	}
+	drainResponseCacheBackendWrites()
 	if sets, gets := backend.counts(); sets != 0 || gets != 0 {
 		t.Fatalf("non-shared backend calls = set:%d get:%d, want zero", sets, gets)
 	}
@@ -125,12 +131,14 @@ func TestResponseCacheSharedWritesSmallAndLocallyOversizedEntries(t *testing.T) 
 	setResponseCache("key:1", "small", small)
 	setResponseCache("key:1", "oversize", oversize)
 
+	drainResponseCacheBackendWrites()
 	if sets, _ := backend.counts(); sets != 2 {
 		t.Fatalf("backend set calls = %d, want 2", sets)
 	}
 	if got := getResponseCacheResult("key:1", "small"); got.Kind != responseCacheLookupHit || got.Source != responseCacheSourceLocal {
 		t.Fatalf("small lookup = %+v, want local hit", got)
 	}
+	drainResponseCacheBackendWrites()
 	backend.mu.Lock()
 	written := cloneResponseContextItems(backend.writes[responseCacheStoreKey("key:1", "oversize")])
 	backend.mu.Unlock()
@@ -162,6 +170,7 @@ func TestResponseCacheBackendPromotionAndServeWithoutPromotion(t *testing.T) {
 		if second.Kind != responseCacheLookupHit || second.Source != responseCacheSourceLocal {
 			t.Fatalf("second lookup = %+v, want local hit", second)
 		}
+		drainResponseCacheBackendWrites()
 		if _, gets := backend.counts(); gets != 1 {
 			t.Fatalf("backend gets = %d, want 1", gets)
 		}
@@ -187,6 +196,7 @@ func TestResponseCacheBackendPromotionAndServeWithoutPromotion(t *testing.T) {
 				t.Fatalf("lookup %d = %+v, want non-promoted backend hit", lookup+1, got)
 			}
 		}
+		drainResponseCacheBackendWrites()
 		if _, gets := backend.counts(); gets != 2 {
 			t.Fatalf("backend gets = %d, want 2", gets)
 		}
@@ -463,5 +473,72 @@ func TestResponseCacheAggregateHitMissEndToEnd(t *testing.T) {
 	}
 	if stats.Hits+stats.Misses != stats.LocalHits+stats.LocalMisses {
 		t.Fatalf("invariant broken: hits+misses=%d, lookups=%d", stats.Hits+stats.Misses, stats.LocalHits+stats.LocalMisses)
+	}
+}
+
+// 后台写入：调用方不等共享后端往返，L1 立即可读；槽位耗尽时退回同步写（背压）。
+func TestResponseCacheBackendWritesAreAsynchronousWithBackpressure(t *testing.T) {
+	resetResponseCacheStateForTest(testResponseCacheConfig())
+	backend := newRecordingResponseContextBackend(true)
+	backend.blockWrites = make(chan struct{})
+	var release sync.Once
+	SetResponseContextCache(backend)
+	t.Cleanup(func() {
+		release.Do(func() { close(backend.blockWrites) })
+		drainResponseCacheBackendWrites()
+		SetResponseContextCache(nil)
+		_ = backend.TokenCache.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		setResponseCache("key:1", "async", []json.RawMessage{responseCacheTestItem(1, "async")})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("setResponseCache waited for the shared backend write")
+	}
+	if got := getResponseCacheResult("key:1", "async"); got.Kind != responseCacheLookupHit || got.Source != responseCacheSourceLocal {
+		t.Fatalf("local admission must not wait for the backend: %+v", got)
+	}
+	if sets, _ := backend.counts(); sets != 0 {
+		t.Fatalf("backend write landed before release: %d", sets)
+	}
+
+	// 填满剩余槽位后，下一次写入必须同步等待，而不是丢弃。
+	for i := 1; i < responseCacheBackendWriteSlots; i++ {
+		setResponseCache("key:1", fmt.Sprintf("fill-%d", i), []json.RawMessage{responseCacheTestItem(i+1, "fill")})
+	}
+	blocked := make(chan struct{})
+	go func() {
+		setResponseCache("key:1", "overflow", []json.RawMessage{responseCacheTestItem(99, "overflow")})
+		close(blocked)
+	}()
+	select {
+	case <-blocked:
+		t.Fatal("write beyond the async slots returned without waiting for the backend")
+	case <-time.After(100 * time.Millisecond):
+	}
+	release.Do(func() { close(backend.blockWrites) })
+	select {
+	case <-blocked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("synchronous fallback write never completed")
+	}
+	drainResponseCacheBackendWrites()
+	if sets, _ := backend.counts(); sets != responseCacheBackendWriteSlots+1 {
+		t.Fatalf("backend set calls = %d, want %d", sets, responseCacheBackendWriteSlots+1)
+	}
+	backend.mu.Lock()
+	_, async := backend.writes[responseCacheStoreKey("key:1", "async")]
+	_, overflow := backend.writes[responseCacheStoreKey("key:1", "overflow")]
+	backend.mu.Unlock()
+	if !async || !overflow {
+		t.Fatalf("writes missing: async=%v overflow=%v", async, overflow)
+	}
+	if !DrainResponseCacheBackendWrites(time.Second) {
+		t.Fatal("drain reported pending writes after completion")
 	}
 }

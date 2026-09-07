@@ -1028,7 +1028,7 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
     )
   }
 
-  const statusChip = (
+  const statusChip = hasAudit ? (
     <Badge
       variant="outline"
       className={`ml-auto shrink-0 border-transparent px-1.5 py-0 text-[10px] font-semibold ${
@@ -1039,12 +1039,13 @@ function UserAgentCell({ log, mobile = false }: { log: UsageLog; mobile?: boolea
     >
       {statusLabel}
     </Badge>
-  )
+  ) : null
   // 客户端与上游 UA 完全一致且未改写:合成一行(C=U),两行会重复同一串字符串白占行高。
   const sameUA = !log.user_agent_overridden && Boolean(clientUserAgent) && clientUserAgent === upstreamUserAgent
 
   const content = sameUA ? (
     <div className={`${mobile ? 'w-full' : 'w-[260px] max-w-[28vw]'} font-mono text-[11px] leading-relaxed`}>
+      {log.request_id ? <div className="truncate text-muted-foreground" title={`Request ID: ${log.request_id}`}>ID: {log.request_id}</div> : null}
       <div className="flex min-w-0 items-center gap-1.5" title={`${t('usage.clientUserAgent')} = ${t('usage.upstreamUserAgent')}`}>
         <span className="shrink-0 font-sans font-semibold text-muted-foreground">C=U</span>
         <span className="min-w-0 truncate text-foreground/80">{clientUserAgent}</span>

@@ -10,7 +10,17 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func applyClaudeAPIKeyHeaders(req *http.Request, key string, incoming http.Header, stream bool) {
+// applyClaudeAPIKeyHeaders builds the neutral API Key request headers, then
+// layers two optional account-level features on top (issue #647):
+//
+//  1. identityMode — Claude Code client identity emulation (claude_fingerprint_mode
+//     with API Key semantics: ""=off, preserve, force), see
+//     auth.ApplyClaudeAPIKeyIdentityHeaders.
+//  2. customHeaders — operator-configured credentials.custom_headers, applied
+//     last so they win; reserved gateway-owned headers are never overridden.
+//
+// With neither configured the request is byte-for-byte the historical contract.
+func applyClaudeAPIKeyHeaders(req *http.Request, key string, incoming http.Header, stream bool, customHeaders map[string]string, identityMode string) {
 	req.Header.Set("x-api-key", key)
 	req.Header.Del("Authorization")
 	req.Header.Set("Content-Type", "application/json")
@@ -35,16 +45,26 @@ func applyClaudeAPIKeyHeaders(req *http.Request, key string, incoming http.Heade
 	} else {
 		req.Header.Set("Accept", "application/json")
 	}
+	auth.ApplyClaudeAPIKeyIdentityHeaders(req.Header, incoming, identityMode)
+	auth.ApplyClaudeAPIKeyCustomHeaders(req.Header, customHeaders)
+	// Record only the final User-Agent so the Usage page shows what the upstream
+	// actually saw after identity emulation and custom headers were applied.
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 }
 
 // executeClaudeAPIKeyMessages preserves the native body, including system,
-// metadata and provider-specific thinking signatures. Only account routing and
-// authentication are supplied by the gateway.
+// metadata and provider-specific thinking signatures. Only account routing,
+// authentication and the optional account-level header features (custom
+// headers / Claude Code client identity) are supplied by the gateway.
 func executeClaudeAPIKeyMessages(ctx context.Context, account *auth.Account, body []byte, proxyOverride string, headers http.Header) (*http.Response, error) {
 	account.Mu().RLock()
 	key, baseURL, proxyURL := strings.TrimSpace(account.AccessToken), account.ClaudeBaseURL, account.ProxyURL
+	customHeaders := cloneStringMap(account.CustomHeaders)
 	account.Mu().RUnlock()
+	// The identity mode is read from the account itself rather than from the
+	// caller: for API Key accounts an unset mode must stay "off" even when the
+	// caller resolved the OAuth global default.
+	identityMode := account.EffectiveClaudeFingerprintMode("")
 	if key == "" {
 		return nil, ErrNoAvailableAccount()
 	}
@@ -62,7 +82,7 @@ func executeClaudeAPIKeyMessages(ctx context.Context, account *auth.Account, bod
 	if err != nil {
 		return nil, ErrInternalError("创建 Claude 请求失败", err)
 	}
-	applyClaudeAPIKeyHeaders(req, key, headers, gjson.GetBytes(body, "stream").Bool())
+	applyClaudeAPIKeyHeaders(req, key, headers, gjson.GetBytes(body, "stream").Bool(), customHeaders, identityMode)
 	if err := ConsumeAPIKeyModelRequestQuota(ctx, strings.TrimSpace(gjson.GetBytes(body, "model").String())); err != nil {
 		return nil, err
 	}

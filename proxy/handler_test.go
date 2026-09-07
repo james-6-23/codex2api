@@ -840,6 +840,10 @@ func TestResponsesWebSocketContinuationKeepsBoundAccountPastBoundedLimit(t *test
 // 上游认不出续链 id 时（换号、上游未落库、跨实例等），网关应剥离
 // previous_response_id 降级重试一次，而不是把 400 甩给客户端（issue #400）。
 func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousResponse(t *testing.T) {
+	resetResponseCacheForTest()
+	t.Cleanup(resetResponseCacheForTest)
+	setResponseCache("anon", "resp_stale", []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"earlier context"}`)})
+
 	previousResponseNotFoundBody := `{"error":{"type":"invalid_request_error","code":"previous_response_not_found","message":"Previous response with id 'resp_stale' not found."}}`
 	completedSSE := "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_new\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1,\"total_tokens\":2}}}\n\n"
 
@@ -1011,6 +1015,10 @@ func TestResponsesWebSocketContinuationDegradesWhenUpstreamRejectsPreviousRespon
 // 绑定账号被本次请求硬排除（限流等）后，续链请求不应死等它 30 秒再整轮失败：
 // 剥离 previous_response_id 后换号继续。
 func TestResponsesWebSocketContinuationDegradesWhenBoundAccountExcluded(t *testing.T) {
+	resetResponseCacheForTest()
+	t.Cleanup(resetResponseCacheForTest)
+	setResponseCache("anon", "resp_stale", []json.RawMessage{json.RawMessage(`{"type":"message","role":"user","content":"earlier context"}`)})
+
 	gin.SetMode(gin.TestMode)
 
 	previousExec := WebsocketExecuteFunc

@@ -129,6 +129,8 @@ func antigravityPublishedModelForObservation(model string, publishedModels []str
 // wire models, but the admin response exposes exactly one quota entry for it.
 func antigravityPublishedQuota(raw auth.AntigravityQuotaSnapshot) auth.AntigravityQuotaSnapshot {
 	projected := raw
+	projected.CatalogModelIDs = antigravityPublishedModels(auth.AntigravityDiscoveredModels(raw))
+	projected.InternalModelIDs = nil
 	projected.Models = []auth.AntigravityModelQuota{}
 	// Forwarding rules are provider-wire implementation details and are not an
 	// admin-facing model contract.
@@ -1696,10 +1698,7 @@ func antigravityCredentialUpdates(result auth.AntigravitySyncResult, previous *d
 	if err != nil {
 		return nil, err
 	}
-	models := make([]string, 0, len(quotaSnapshot.Models))
-	for _, model := range quotaSnapshot.Models {
-		models = append(models, model.ModelID)
-	}
+	models := auth.AntigravityDiscoveredModels(quotaSnapshot)
 	updates := map[string]any{
 		"upstream_type": auth.UpstreamAntigravity,
 		"access_token":  result.Credential.AccessToken, "refresh_token": result.Credential.RefreshToken,

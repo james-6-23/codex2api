@@ -184,6 +184,7 @@ type antigravityQuotaResponse struct {
 			ResetTime         string   `json:"resetTime"`
 		} `json:"quotaInfo"`
 		DisplayName        string          `json:"displayName"`
+		IsInternal         bool            `json:"isInternal"`
 		SupportsImages     *bool           `json:"supportsImages"`
 		SupportsThinking   *bool           `json:"supportsThinking"`
 		ThinkingBudget     *int            `json:"thinkingBudget"`
@@ -954,6 +955,12 @@ func normalizeAntigravityQuota(payload antigravityQuotaResponse, now time.Time) 
 		Models: []AntigravityModelQuota{}, ModelForwardingRules: map[string]string{}, UpdatedAt: now.UTC(),
 	}
 	for modelID, model := range payload.Models {
+		if validAntigravityDiscoveredModelID(strings.TrimSpace(modelID)) {
+			result.CatalogModelIDs = append(result.CatalogModelIDs, strings.TrimSpace(modelID))
+			if model.IsInternal {
+				result.InternalModelIDs = append(result.InternalModelIDs, strings.TrimSpace(modelID))
+			}
+		}
 		if model.QuotaInfo == nil || !isTrackedAntigravityModel(modelID) {
 			continue
 		}
@@ -977,6 +984,8 @@ func normalizeAntigravityQuota(payload antigravityQuotaResponse, now time.Time) 
 		})
 	}
 	sort.Slice(result.Models, func(i, j int) bool { return result.Models[i].ModelID < result.Models[j].ModelID })
+	sort.Strings(result.CatalogModelIDs)
+	sort.Strings(result.InternalModelIDs)
 	for oldID, rule := range payload.DeprecatedModelIDs {
 		if strings.TrimSpace(oldID) != "" && strings.TrimSpace(rule.NewModelID) != "" {
 			result.ModelForwardingRules[oldID] = strings.TrimSpace(rule.NewModelID)

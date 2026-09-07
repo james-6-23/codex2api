@@ -60,7 +60,8 @@ func (db *DB) SaveModelCapabilities(ctx context.Context, snapshot ModelCapabilit
 			}
 			_ = json.Unmarshal([]byte(oldJSON), &old)
 		}
-		merged := make(map[string]map[string]json.RawMessage, len(snapshot.Models))
+		// Client-version-filtered manifests are partial observations, not deletions.
+		merged := old
 		for model, fields := range snapshot.Models {
 			values := make(map[string]json.RawMessage)
 			for name, value := range old[model] {
@@ -70,6 +71,9 @@ func (db *DB) SaveModelCapabilities(ctx context.Context, snapshot ModelCapabilit
 				values[name] = value
 			}
 			merged[model] = values
+		}
+		if len(merged) > 512 {
+			return fmt.Errorf("model capability snapshot exceeds model limit")
 		}
 		encoded, err := json.Marshal(merged)
 		if err != nil {

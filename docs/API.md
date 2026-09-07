@@ -182,6 +182,10 @@ data: {"id":"chatcmpl-xxx","object":"chat.completion.chunk","created":1712345678
 data: [DONE]
 ```
 
+**自定义工具：** Chat 请求支持 `tools[].type="custom"` 与嵌套 `custom` 声明，历史和响应使用 `tool_calls[].custom.name/input`。`custom.input` 始终是原始文本，即使其内容恰好是 JSON；普通函数仍使用 `function.arguments`。流式 custom 输入放在 `delta.tool_calls[].custom.input`，调用 ID 与工具结果的 `tool_call_id` 保持配对。非流式响应也会从 `output_item.done` 补回最终响应中缺失的调用。
+
+Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输入通过 `{"input":"原始文本"}` 包装。调用 ID 携带可逆的类型标记；客户端回传该 ID 和输入对象后，网关恢复原始 custom 调用及对应结果。需要这种桥接的工具应声明仅包含字符串 `input` 属性的 `input_schema`；后续请求依据已标记的调用历史恢复工具类型和命名空间。普通函数输入不会依据字段名被猜测为 custom。`input.done`/`output_item.done` 可补齐遗漏的末尾增量；与已发送输入矛盾或超过输入上限的 custom 调用按上游协议错误结束。
+
 ### 2. Responses
 
 **端点:** `POST /v1/responses`
@@ -218,7 +222,10 @@ data: [DONE]
 | include              | array        | 否   | 包含的额外字段                                                                                     |
 | previous_response_id | string       | 否   | 上一响应 ID，用于上下文连续                                                                        |
 
-`previous_response_id` 的上下文先查当前进程的有界 L1。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口不执行这次本地查找，会保留 `previous_response_id` 交给上游。
+`previous_response_id` 的上下文先查当前进程的有界 L1。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的 relay-style 后备，网关可保留原始 `previous_response_id` 继续转发，而不是立即返回上述错误。客户端原生 Responses WebSocket 入口在上游连接正常时保留 `previous_response_id` 并只发送当轮增量，轮次开始时保留仍有效的 L1 祖先引用，快照合并与序列化在响应成功提交后才执行并写入本地缓存，共享后端（Redis）写入在后台完成，不占首字路径。缓存会收集 `response.output_item.done`，因此最终 `response.output` 为空时也能保留消息、`phase`、工具调用/结果及 Lite `additional_tools` 声明。`response.completed` 和 `response.incomplete` 成功提交后均可写入，仍受写入策略、TTL 和容量限制约束；按需写入模式下，`store` 未显式为 `false` 的 WebSocket 会话从根轮起即有写入资格；显式 `store:false` 的会话（如 Codex CLI 全量上下文）不写缓存，其历史无法事后恢复。续链失效、换号或转为 HTTP 时，只有能够恢复所需上下文才继续发送；缺失、超限或不可移植的加密状态返回 `response_context_unavailable` 错误帧，共享后端故障返回 `service_unavailable`，随后关闭连接（409 使用 1008，后端暂时不可用使用 1011）。客户端应重发完整上下文并开始新的响应链。
+祖先在轮次开始前已过期或被淘汰时，网关不会把增量伪装成完整快照；该链后续健康轮也不能自行补全历史。缓存 TTL 为 10 分钟，Memory 模式重启会丢失缓存。设置环境变量 `CODEX_WS_CONTINUATION_FAIL_OPEN=true` 可退回旧行为：上下文不可恢复时剥离 `previous_response_id` 后按原样转发，上游将看不到历史；这次有损降级产生的响应不写回放缓存，关闭逃生阀后也不会信任残缺快照。
+
+对于原生 WebSocket 的结构化输出，`gpt-6-astra` 和 `gpt-5.6-luna` 在显式启用 Responses Lite 时保留 JSON Schema 的 `minLength` / `maxLength`。Lite 信号可来自 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite=true`、`X-OpenAI-Internal-Codex-Responses-Lite: true` 请求头，或由 Payload Rules 注入该元数据标记。该放行仅用于结构化输出；已有工具参数清洗继续使用保守规则。长度约束在入口准备阶段暂时保留，最终出站前才根据最终模型、规则改写后的 Lite 信号、账号 Lite 能力和实际传输统一处理。其他模型、最终未启用 Lite、HTTP 和 Compact 请求沿用原有清洗策略，HTTP 降级请求不会携带不适用的约束。
 
 原生 WebSocket 入口为 `GET /v1/responses`。通过校验与 API Key 限制后，较新的同 API Key、同渠道/分组路由作用域、同会话请求会抢占仍在运行的旧请求，并先取消旧上游以释放账号与并发位。`stream_id` 是抢占键的一部分，因此多路复用的不同流互不影响；不同 API Key 或不同路由作用域也不会互相取消。只有 `prompt_cache_key`、显式会话头、`previous_response_id`、turn state、专用 affinity key 或可稳定派生的内容会话存在时才启用，纯 API Key 兜底身份不会把无关请求合并。Redis 模式支持跨实例抢占，Memory 模式仅在当前进程内生效。
 
@@ -767,15 +774,15 @@ Grok 账号编辑页支持账号级模型映射，可让只请求 GPT 模型名�
 }
 ```
 
-### Claude OAuth 与原生 Messages
+### Claude 凭据与原生 Messages
 
 Claude Code OAuth 账号使用原生 Anthropic Messages 上游，不会进入 Codex WHAM
 或 Responses 探针。以下端点均受现有 `X-Admin-Key` 管理鉴权保护；请求示例中的
 Token、授权码和账号 ID 仅为占位符，服务端不会在响应或日志中回显 access/refresh
 token。
 
-Claude 账号有两种凭据形态，记录在 `credentials.claude_auth_kind`，列表/详情响应以
-`claude_auth_kind` 回传，账号列表 `auth_kind` 筛选与 `summary.oauth / summary.setup_token`
+Claude 账号有三种凭据形态，记录在 `credentials.claude_auth_kind`，列表/详情响应以
+`claude_auth_kind` 回传，账号列表 `auth_kind` 筛选与 `summary.oauth / summary.setup_token / summary.api_key`
 按此区分：
 
 - `oauth`：完整 Claude Code OAuth，`access_token + refresh_token`，AT 临期自动续期，
@@ -783,6 +790,13 @@ Claude 账号有两种凭据形态，记录在 `credentials.claude_auth_kind`，
 - `setup_token`：官方 `claude setup-token` 同款长效令牌（`sk-ant-oat01-…`），仅
   `user:inference` scope，有效期 1 年，没有 refresh token，到期只能重新授权；用量改由
   原生 Messages 探针采样，套餐信息缺省。适合批量号池。
+- `api_key`：Anthropic 或 Messages 兼容服务的 API Key，必填 `api_key` 与 `base_url`；
+  无 OAuth 刷新和订阅用量采样。`base_url` 支持路径前缀和末尾 `/v1`，移除尾部斜杠，
+  已含 `/v1` 时不重复追加。拒绝 URL 中的用户名/密码、query 和 fragment；允许 HTTP 和私网服务。
+  列表/详情返回 `claude_base_url`，按 `auth_kind=api_key` 筛选。
+
+API Key 请求体原样转发，不应用 Claude Code 指纹、客户端平台/版本策略或 OAuth 的
+`ClaudeSecurityConfig` 请求上限与字段净化；网关通用鉴权、限流和提示词过滤仍生效。
 
 #### POST /api/admin/accounts/claude/oauth/auth-url
 
@@ -804,6 +818,7 @@ Claude 账号有两种凭据形态，记录在 `credentials.claude_auth_kind`，
 交换后直接入库，`mode` 同上决定换出 OAuth 凭据或 Setup Token。sessionKey 不落库、
 不回显，换号成功后即可作废。前两步打 claude.ai 网页端，走账号代理并使用浏览器指纹
 客户端；401/403 表示 sessionKey 失效，3xx 视为被 Cloudflare 拦截。
+OAuth 刷新省略 `scope`，沿用最初授予的权限，避免把网页授权的较窄范围扩成完整 CLI 范围。
 
 #### POST /api/admin/accounts/claude/import
 
@@ -812,9 +827,37 @@ Claude 凭据。同时接受单对象、对象数组和 `{"accounts":[...]}`。�
 `{message,id,email}` 响应，批量导入返回 `total`、`imported`、`failed` 与逐账号
 `items/warnings`。`auth_kind` 允许 `oauth`（默认，`refresh_token` 必填，`access_token` 可缺省——
 缺省时服务端先用 RT 走 refresh 授权换出 AT 并补齐邮箱/账号 UUID/套餐，RT 无效返回
-502）或 `setup_token`（只需 `access_token`，`expires_at` 缺省为 1 年）；未声明
+502）、`setup_token`（只需 `access_token`，`expires_at` 缺省为 1 年）或 `api_key`；未声明
 `auth_kind` 且没有 `refresh_token` 的文档仅当 `access_token` 形如 `sk-ant-oat01-`
-才按 `setup_token` 接受。模型列表仅允许 `claude-*`。
+才按 `setup_token` 接受。模型列表仅允许 `claude-*`；API Key 自动发现会过滤兼容网关返回的其他模型。
+
+API Key 导入示例：
+
+```json
+{"auth_kind":"api_key","api_key":"example-key","base_url":"https://gateway.example/v1","name":"Messages gateway"}
+```
+
+API Key 账号还可选配置两项客户端请求特征（默认都不启用，出站保持"按原始内容转发"）：
+
+- `custom_headers`：账号级自定义出站请求头（对象），附加到该账号的每个上游请求
+  （含 `/v1/models` 模型发现），最后套用、优先级最高，可显式指定 `User-Agent`。
+  `Authorization`、`x-api-key`、`Content-Type`、`Content-Length`、`Host`、`Accept`、
+  `Accept-Encoding`、`Transfer-Encoding`、`Connection` 为网关保留头，出现即返回 400。
+  `PATCH /api/admin/accounts/:id/scheduler` 的 `custom_headers` 对 API Key 账号执行同样校验，
+  传 `null` 清空。
+- `claude_fingerprint_mode`：Claude Code 客户端身份仿真。空（默认）= 透传，只保留下游
+  `User-Agent`（缺失时为 `Codex2API`）；`force` = 始终携带 Claude Code CLI 的基础身份头
+  （`User-Agent: claude-cli/<版本> (external, cli)`、`X-App`、`X-Stainless-*`、
+  `X-Stainless-Retry-Count/Timeout`、`anthropic-dangerous-direct-browser-access`）；
+  `preserve` = 下游是真实 Claude Code CLI 时保留其身份头、缺失才补齐，非 CLI 客户端按 `force` 处理。
+  只改请求头，不复制 OAuth 会话状态、系统提示词或 `metadata` 身份，也不改变 `x-api-key` 鉴权；
+  `custom_headers` 中的同名头优先于仿真值。该字段对 API Key 账号不继承 OAuth 的全局默认。
+
+```json
+{"auth_kind":"api_key","api_key":"example-key","base_url":"https://gateway.example/v1","claude_fingerprint_mode":"force","custom_headers":{"X-Gateway-Tenant":"team-a"}}
+```
+
+裸 RT 导入在刷新前检查已存凭据，命中直接返回 409；有运行时账号池时，与后台刷新使用同一刷新租约。
 
 #### POST /api/admin/accounts/claude/import-tokens
 
@@ -825,7 +868,7 @@ AT，按 `oauth` 形态保存，备注默认取邮箱。可选 `name`（Setup To
 `claude`，按现有 `<prefix>-N` 最大序号继续编号；单枚且给了 `name` 时直接用作备注）、
 `proxy_url` / `use_proxy_pool`（代理池模式下每枚令牌各取一条）、`timezone`、
 `group_refs`。返回与批量导入相同的 `total/imported/failed/items`；同一令牌（Setup
-Token 按 AT、Refresh Token 刷新后按账号 UUID/RT）已存在返回 409（多枚时逐项失败）。
+Token 按 AT、Refresh Token 刷新前按原 RT，刷新后再按账号 UUID/RT）已存在返回 409（多枚时逐项失败）。
 
 导入文件可恢复账号名称、代理、时区、标签、启用状态、账号级指纹模式和受限身份头。
 分组使用 `group_refs: [{"name":"...","channel":"claude"}]` 按名称映射；不会复用
@@ -834,19 +877,19 @@ Token 按 AT、Refresh Token 刷新后按账号 UUID/RT）已存在返回 409（
 
 #### GET /api/admin/accounts/claude/export
 
-导出管理员专用的完整 Claude OAuth 凭据。`ids=1,2` 可精确选择账号，省略时导出全部；
+导出管理员专用的完整 Claude 凭据。`ids=1,2` 可精确选择账号，省略时导出全部；
 `filter=all|healthy` 控制是否只包含当前健康账号；`format=auto|json|zip` 控制输出格式
 （默认 auto：单条 JSON、多条 ZIP；`format=json` 可得到可直接再次导入的对象数组）。响应设置 `Content-Disposition`、实际数量
 `X-Export-Count`、`Cache-Control: no-store, max-age=0`、`Pragma: no-cache` 和
 `X-Content-Type-Options: nosniff`。
 
-version 1 文档包含 `type=claude`、`auth_kind`（`oauth` 或 `setup_token`，后者 `refresh_token` 为空）、access/refresh token、账号 ID、
+version 1 文档包含 `type=claude`、`auth_kind`（`oauth`、`setup_token` 或 `api_key`，后两者 `refresh_token` 为空）、access/refresh token、账号 ID、
 过期时间、套餐、模型、代理、时区、`claude_fingerprint_mode`、标签、启用状态及
 `group_refs`。`fingerprint_headers` 允许 `User-Agent`、`X-App` 和
 `X-Stainless-*` 身份头，以及可选的 `claude_device_id` 账号身份元数据；后者兼容键名大小写，
 在导入、导出及时区指纹重建时保留，仅用于请求体中的设备身份，不作为 HTTP 头发送。
-任意 `Authorization`、Cookie、API Key 或其它自定义头均不会
-进入导出文件。下载内容为明文高敏凭据，下载后应立即加密保存或在迁移完成后删除。
+`fingerprint_headers` 不包含 `Authorization`、Cookie、API Key 或其它自定义头。
+`api_key` 形态会在凭据字段中导出 `api_key` 和 `base_url`，用于完整恢复账号。下载内容为明文高敏凭据，下载后应立即加密保存或在迁移完成后删除。
 
 #### POST /api/admin/accounts/:id/claude/models
 
@@ -1145,9 +1188,12 @@ data: {"type":"diagnostics","diagnostics":{"model":"claude-haiku-4-5","http_stat
 头之前就失败（DNS/代理/超时）时不单发 `diagnostics` 事件，诊断对象直接挂在 `error` 事件上，
 只含 `model` 与 `duration_ms`。
 
+WebSocket 诊断不使用连接池的旧握手头：`headers_ms` 留空，`first_frame_ms` 表示本次请求首个上游帧的等待时间。
+`request_id`、`cf_ray` 和响应头来自本次 metadata 帧；同名头以最新帧覆盖。未收到相应字段时留空。
+
 Codex 测连的 `codex_diagnostics` 对象包含：
 
-- `http_status`、`headers_ms`（拿到响应头耗时）、`first_content_ms`（首段文本耗时）、
+- `http_status`、`headers_ms`（HTTP 拿到响应头耗时）、`first_frame_ms`（WS 首帧耗时）、`first_content_ms`（首段文本耗时）、
   `duration_ms`（总耗时），单位毫秒；未观测到的字段省略，不以零代替。
 - `model`（请求模型）、`response_model`（上游 `response.model`）、`transport`
   （`http` / `websocket`，强制 WS 模式下用量窗口来自 `codex.rate_limits` 帧而非响应头）。
@@ -1482,6 +1528,10 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 
 获取使用日志。
 
+HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `request_id`，浏览器可通过 CORS 读取。
+既有 `X-Request-ID` 是请求上下文/访问日志 ID，可能回显客户端传入值，与该网关追踪 ID 独立；排查用量请使用 `X-Codex2API-Request-ID`。
+自动压缩用量的 `parent_request_id` 优先引用父请求的网关追踪 ID；`/v1/live` 结算沿用建连请求的追踪信息。
+
 **查询参数:**
 
 - `start`: RFC3339 开始时间
@@ -1492,6 +1542,9 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 - `model`: 按模型过滤
 - `endpoint`: 按端点过滤
 - `api_key_id`: 按 API 密钥 ID 过滤
+- `request_id`: 网关追踪 ID，精确匹配
+- `upstream_request_id`: 上游请求 ID，精确匹配
+- `q`: 模糊搜索，包含网关及上游请求 ID
 - `fast`: true/false (是否 fast 服务)
 - `stream`: true/false (是否流式)
 
@@ -1503,6 +1556,10 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
     {
       "id": 1,
       "account_id": 1,
+      "request_id": "019-example-gateway-id",
+      "upstream_request_id": "req_example",
+      "upstream_proxy_id": 1,
+      "upstream_proxy_name": "local-egress",
       "account_email": "user@example.com",
       "api_key_id": 3,
       "api_key_name": "Team A",

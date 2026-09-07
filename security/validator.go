@@ -196,11 +196,13 @@ func MaskSensitiveData(input string) string {
 	return result
 }
 
-// MaskURLCredentials masks password-like userinfo in URL strings for logs.
+var embeddedURLCredentials = regexp.MustCompile(`(?i)([a-z][a-z0-9+.-]*://)[^\s/@]+@`)
+
+// MaskURLCredentials masks userinfo in URLs, including URLs embedded in labels.
 func MaskURLCredentials(input string) string {
 	parsed, err := url.Parse(input)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User == nil {
-		return input
+		return embeddedURLCredentials.ReplaceAllString(input, "${1}redacted@")
 	}
 	username := parsed.User.Username()
 	if _, hasPassword := parsed.User.Password(); hasPassword {

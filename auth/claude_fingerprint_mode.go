@@ -106,13 +106,20 @@ func IsValidClaudeFingerprintMode(value string) bool {
 }
 
 // EffectiveClaudeFingerprintMode 返回账号生效模式:账号级覆盖 > 全局默认 > preserve。
+//
+// API Key 账号例外:该模式对它们是可选的 Claude Code 客户端身份仿真开关,未设置
+// 即为空(透传,默认不注入任何身份头),绝不继承 OAuth 账号的全局默认。
 func (a *Account) EffectiveClaudeFingerprintMode(globalDefault string) string {
 	if a != nil {
 		a.mu.RLock()
 		mode := a.ClaudeFingerprintMode
+		apiKey := a.isClaudeAPIKeyLocked()
 		a.mu.RUnlock()
 		if m := NormalizeClaudeFingerprintMode(mode); m != "" {
 			return m
+		}
+		if apiKey {
+			return ""
 		}
 	}
 	if m := NormalizeClaudeFingerprintMode(globalDefault); m != "" {

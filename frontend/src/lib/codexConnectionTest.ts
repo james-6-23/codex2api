@@ -19,6 +19,7 @@ export interface CodexTestDiagnostics {
   http_status?: number;
   duration_ms?: number;
   headers_ms?: number;
+  first_frame_ms?: number;
   first_content_ms?: number;
   model: string;
   response_model?: string;

@@ -15,8 +15,8 @@ func TestApplyClaudePlanFromCreditsRequired(t *testing.T) {
 	}{
 		{"claude", "pro", true},
 		{"", "pro", true},
-		{"max", "pro", true},
-		{"max-20x", "pro", true},
+		{"max", "max", false},
+		{"max-20x", "max-20x", false},
 		{"pro", "pro", false},
 		{"team", "team", false},
 		{"free", "free", false},
@@ -41,7 +41,7 @@ func TestApplyClaudePlanFromGatedModelSuccess(t *testing.T) {
 	if !IsClaudeCreditsGatedModel("claude-fable-5") || IsClaudeCreditsGatedModel("claude-sonnet-4-5") {
 		t.Fatal("gated model detection drifted")
 	}
-	for plan, want := range map[string]string{"claude": "max", "": "max", "pro": "max", "max-5x": "max-5x", "team": "team"} {
+	for plan, want := range map[string]string{"claude": "max", "": "max", "pro": "pro", "max-5x": "max-5x", "team": "team"} {
 		acc := &Account{UpstreamType: UpstreamClaude, AccessToken: "at", PlanType: plan}
 		s.ApplyClaudePlanFromGatedModelSuccess(context.Background(), acc, "claude-fable-5")
 		if acc.GetPlanType() != want {

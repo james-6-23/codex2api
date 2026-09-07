@@ -93,12 +93,19 @@ func SendAccepted(c *gin.Context, data interface{}) {
 
 // Model represents an OpenAI-style model object
 type Model struct {
-	ID         string `json:"id"`
-	Object     string `json:"object"`
-	Created    int64  `json:"created"`
-	OwnedBy    string `json:"owned_by"`
-	Root       string `json:"root,omitempty"`
-	Parent     string `json:"parent,omitempty"`
+	ID                       string                `json:"id"`
+	Object                   string                `json:"object"`
+	Created                  int64                 `json:"created"`
+	OwnedBy                  string                `json:"owned_by"`
+	Root                     string                `json:"root,omitempty"`
+	Parent                   string                `json:"parent,omitempty"`
+	SupportedReasoningLevels []ModelReasoningLevel `json:"supported_reasoning_levels,omitempty"`
+	DefaultReasoningLevel    string                `json:"default_reasoning_level,omitempty"`
+}
+
+type ModelReasoningLevel struct {
+	Effort      string `json:"effort"`
+	Description string `json:"description"`
 }
 
 // ModelList represents a list of models

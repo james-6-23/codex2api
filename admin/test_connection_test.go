@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,12 +16,132 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestRunSingleBatchTestRejectsAntigravity(t *testing.T) {
-	handler := &Handler{}
-	account := &auth.Account{UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token"}
+func antigravityTestSSEBody(text string) string {
+	return "event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"" + text + "\"}\n\n" +
+		"event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
+}
+
+func newAntigravityConnectionTestAccount() *auth.Account {
+	return &auth.Account{
+		DBID:                 7,
+		UpstreamType:         auth.UpstreamAntigravity,
+		AccessToken:          "google-token",
+		AntigravityProjectID: "project-1",
+		Models:               []string{"gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent"},
+		Status:               auth.StatusReady,
+		HealthTier:           auth.HealthTierHealthy,
+	}
+}
+
+func TestConnectionAntigravityUsesNativeExecutorAndStreamsContent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := auth.NewStore(nil, nil, nil)
+	account := newAntigravityConnectionTestAccount()
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	var gotModel string
+	var gotStream bool
+	handler.antigravityCapabilityProbe = func(_ context.Context, acc *auth.Account, model string, body []byte, stream bool, _ string) (*http.Response, error) {
+		if acc != account {
+			t.Fatalf("executor received account %+v, want runtime account", acc)
+		}
+		gotModel, gotStream = model, stream
+		if gjson.GetBytes(body, "model").String() != model || !gjson.GetBytes(body, "input").Exists() {
+			t.Fatalf("unexpected Responses payload: %s", body)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(antigravityTestSSEBody("pong"))),
+		}, nil
+	}
+	router := gin.New()
+	router.GET("/api/admin/accounts/:id/test", handler.TestConnection)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/accounts/7/test", nil))
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if !gotStream {
+		t.Fatal("Antigravity connection test must request a streamed response")
+	}
+	if gotModel != "gemini-3.5-flash-low" {
+		t.Fatalf("test model = %q, want published cheapest flash tier", gotModel)
+	}
+	body := recorder.Body.String()
+	for _, needle := range []string{`"type":"test_start"`, `"text":"pong"`, `"type":"test_complete"`, `"success":true`} {
+		if !strings.Contains(body, needle) {
+			t.Fatalf("SSE response %q missing %s", body, needle)
+		}
+	}
+	if strings.Contains(body, "尚未接入") {
+		t.Fatalf("Antigravity test still rejected: %s", body)
+	}
+}
+
+func TestConnectionAntigravityRejectsUnknownModel(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := auth.NewStore(nil, nil, nil)
+	account := newAntigravityConnectionTestAccount()
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	handler.antigravityCapabilityProbe = func(context.Context, *auth.Account, string, []byte, bool, string) (*http.Response, error) {
+		t.Fatal("executor must not run for an unsupported model")
+		return nil, nil
+	}
+	router := gin.New()
+	router.GET("/api/admin/accounts/:id/test", handler.TestConnection)
+
+	recorder := httptest.NewRecorder()
+	router.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/api/admin/accounts/7/test?model=gpt-5.5", nil))
+	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "gpt-5.5") {
+		t.Fatalf("status=%d body=%s, want 400 naming the rejected model", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestRunSingleBatchTestAntigravityUsesNativeExecutor(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	account := newAntigravityConnectionTestAccount()
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	calls := 0
+	handler.antigravityCapabilityProbe = func(_ context.Context, _ *auth.Account, model string, _ []byte, stream bool, _ string) (*http.Response, error) {
+		calls++
+		if !stream || model != "gemini-3.5-flash-low" {
+			t.Fatalf("executor args model=%q stream=%v", model, stream)
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"text/event-stream"}},
+			Body:       io.NopCloser(strings.NewReader(antigravityTestSSEBody("ok"))),
+		}, nil
+	}
 	status, message := handler.runSingleBatchTest(context.Background(), account)
-	if status != "failed" || !strings.Contains(message, "Antigravity") {
-		t.Fatalf("runSingleBatchTest() = (%q, %q), want explicit Antigravity rejection", status, message)
+	if status != "success" || calls != 1 {
+		t.Fatalf("runSingleBatchTest() = (%q, %q) calls=%d, want success via Antigravity executor", status, message, calls)
+	}
+}
+
+func TestRunSingleBatchTestAntigravityCapacity503IsRateLimited(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	account := newAntigravityConnectionTestAccount()
+	store.AddAccount(account)
+	handler := &Handler{store: store}
+	handler.antigravityCapabilityProbe = func(context.Context, *auth.Account, string, []byte, bool, string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusServiceUnavailable,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{"error":{"code":503,"status":"UNAVAILABLE","message":"No capacity available for model gemini-3.5-flash-low on the server","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"MODEL_CAPACITY_EXHAUSTED"}]}}`)),
+		}, nil
+	}
+	status, _ := handler.runSingleBatchTest(context.Background(), account)
+	if status != "rate_limited" {
+		t.Fatalf("status = %q, want rate_limited for shared capacity exhaustion", status)
+	}
+	if account.RuntimeStatus() == "error" {
+		t.Fatal("shared capacity exhaustion must not mark the account as error")
 	}
 }
 
@@ -387,5 +508,22 @@ func TestFormatNoOutputUpstreamErrorIncludesCompletedEvent(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("formatted no-output error %q does not contain %q", got, want)
 		}
+	}
+}
+
+func TestPreferredAntigravityFlashLowModelPicksNewestVersion(t *testing.T) {
+	models := []string{
+		"gemini-3.5-flash-low", "gemini-3.5-flash-high", "gemini-3.6-flash-low",
+		"gemini-3.8-flash-low", "gemini-3.7-flash-low", "gemini-3.1-pro-low", "claude-sonnet-4-6",
+	}
+	if got := preferredAntigravityFlashLowModel(models, nil); got != "gemini-3.8-flash-low" {
+		t.Fatalf("preferred = %q, want newest flash low tier", got)
+	}
+	limited := func(model string) bool { return model == "gemini-3.8-flash-low" }
+	if got := preferredAntigravityFlashLowModel(models, limited); got != "gemini-3.7-flash-low" {
+		t.Fatalf("preferred with 3.8 cooled = %q, want next newest", got)
+	}
+	if got := preferredAntigravityFlashLowModel([]string{"claude-sonnet-4-6"}, nil); got != "" {
+		t.Fatalf("preferred without flash tiers = %q, want empty", got)
 	}
 }

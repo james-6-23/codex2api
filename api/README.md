@@ -109,7 +109,7 @@ Rate limits are returned in response headers:
 | `/api/admin/accounts/claude/oauth/auth-url` | POST | 生成 Claude OAuth PKCE 授权 URL（`mode=oauth|setup_token`） |
 | `/api/admin/accounts/claude/oauth/exchange-code` | POST | 兑换 Claude OAuth code 并入库 |
 | `/api/admin/accounts/claude/oauth/exchange-session-key` | POST | 用 claude.ai sessionKey 一键换出 OAuth 凭据 / Setup Token 并入库 |
-| `/api/admin/accounts/claude/import` | POST | 导入 Claude Token JSON / 对象数组 / `accounts` bundle（`auth_kind=oauth|setup_token`，OAuth 可只给 refresh_token） |
+| `/api/admin/accounts/claude/import` | POST | 导入 Claude Token JSON / 对象数组 / `accounts` bundle（`auth_kind=oauth|setup_token|api_key`，OAuth 可只给 refresh_token；api_key 必填 api_key/base_url） |
 | `/api/admin/accounts/claude/import-tokens` | POST | 批量粘贴 `sk-ant-oat01-` Setup Token / `sk-ant-ort01-` Refresh Token 入库（旧名 `/import-setup-tokens`） |
 | `/api/admin/accounts/claude/export` | GET | 导出完整 Claude OAuth 凭据（单 JSON / 多账号 ZIP） |
 | `/api/admin/accounts/:id/claude/models` | POST | 刷新单个 Claude 上游模型目录 |

@@ -3,6 +3,33 @@ export type ISODateString = string
 export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'claude'
 
 // 管理台可见渠道设置（GET/PUT /settings/visible-channels）
+export interface ChannelTestSettings {
+  test_model: string
+  test_content: string
+  // 0 = 沿用全局 test_concurrency
+  test_concurrency: number
+}
+
+export interface ChannelTestSettingsResponse {
+  antigravity: ChannelTestSettings
+  claude: ChannelTestSettings
+  default_test_content: string
+  default_test_concurrency: number
+  model_choices?: Partial<Record<'antigravity' | 'claude', string[]>>
+}
+
+export interface AntigravityRedirectChoice {
+  model: string
+  default_level: string
+  tiers: string[]
+}
+
+export interface AntigravitySettingsResponse {
+  model_redirects: Record<string, string>
+  redirect_overrides_effort: boolean
+  choices: AntigravityRedirectChoice[]
+}
+
 export interface VisibleChannelsSettings {
   channels: UpstreamChannel[]
   all: UpstreamChannel[]
@@ -66,6 +93,10 @@ export interface ClaudeImportTokenRequest {
   proxy_url?: string
   use_proxy_pool?: boolean
   timezone?: string
+  /** API Key 账号:账号级自定义出站请求头,最后套用;网关保留头(鉴权/Content-Type/Accept 等)会被拒绝。 */
+  custom_headers?: Record<string, string> | null
+  /** API Key 账号:可选的 Claude Code 客户端身份仿真;空=透传(默认)。OAuth 账号沿用指纹替换语义。 */
+  claude_fingerprint_mode?: 'preserve' | 'force' | ''
 }
 
 /** Versioned, provider-scoped Claude OAuth export. Secret-bearing fields are

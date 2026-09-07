@@ -284,6 +284,7 @@ func (h *Handler) ImportClaudeToken(c *gin.Context) {
 			PlanType:           document.PlanType,
 			FingerprintMode:    document.ClaudeFingerprintMode,
 			FingerprintHeaders: document.FingerprintHeaders,
+			CustomHeaders:      document.CustomHeaders,
 			Tags:               document.Tags,
 			GroupRefs:          document.GroupRefs,
 			ResolvedGroupIDs:   resolvedGroupIDs,
@@ -364,7 +365,7 @@ func (h *Handler) RefreshClaudeModels(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "账号缺少 access_token,请先刷新或重新导入")
 		return
 	}
-	models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(id, row.ProxyURL)).FetchModelsWithCredentials(ctx, accessToken, row.GetCredential(auth.ClaudeAuthKindCredentialKey), row.GetCredential(auth.ClaudeBaseURLCredentialKey))
+	models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(id, row.ProxyURL)).FetchModelsWithCredentialsAndHeaders(ctx, accessToken, row.GetCredential(auth.ClaudeAuthKindCredentialKey), row.GetCredential(auth.ClaudeBaseURLCredentialKey), row.GetCredentialStringMap("custom_headers"), row.GetCredential(auth.ClaudeFingerprintModeCredentialKey))
 	if ferr != nil {
 		writeError(c, http.StatusBadGateway, "拉取可用模型失败: "+ferr.Error())
 		return
@@ -420,7 +421,7 @@ func (h *Handler) refreshAllClaudeModels(ctx context.Context) (refreshed, failed
 			failed++
 			continue
 		}
-		models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(row.ID, row.ProxyURL)).FetchModelsWithCredentials(ctx, accessToken, row.GetCredential(auth.ClaudeAuthKindCredentialKey), row.GetCredential(auth.ClaudeBaseURLCredentialKey))
+		models, ferr := auth.NewClaudeAuth(h.resolveClaudeModelProxy(row.ID, row.ProxyURL)).FetchModelsWithCredentialsAndHeaders(ctx, accessToken, row.GetCredential(auth.ClaudeAuthKindCredentialKey), row.GetCredential(auth.ClaudeBaseURLCredentialKey), row.GetCredentialStringMap("custom_headers"), row.GetCredential(auth.ClaudeFingerprintModeCredentialKey))
 		if ferr != nil || len(models) == 0 {
 			failed++
 			continue
@@ -511,6 +512,19 @@ func (h *Handler) insertClaudeAccount(c *gin.Context, ctx context.Context, name,
 // createClaudeAccount is the shared insertion path for OAuth and portable
 // credential imports. It never writes token values to logs or response bodies.
 func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timezone string, td *auth.ClaudeTokenData, source string, opts *claudeAccountImportOptions) (claudeAccountCreateResult, error) {
+	if h != nil && h.store != nil && td != nil && strings.TrimSpace(td.AccessToken) == "" && strings.TrimSpace(td.RefreshToken) != "" {
+		var result claudeAccountCreateResult
+		err := h.store.WithOAuthRefreshLease(ctx, td.RefreshToken, func(leaseCtx context.Context) error {
+			var err error
+			result, err = h.createClaudeAccountWithRefreshLease(leaseCtx, name, proxyURL, timezone, td, source, opts)
+			return err
+		})
+		return result, err
+	}
+	return h.createClaudeAccountWithRefreshLease(ctx, name, proxyURL, timezone, td, source, opts)
+}
+
+func (h *Handler) createClaudeAccountWithRefreshLease(ctx context.Context, name, proxyURL, timezone string, td *auth.ClaudeTokenData, source string, opts *claudeAccountImportOptions) (claudeAccountCreateResult, error) {
 	if h == nil || h.db == nil || td == nil {
 		return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusInternalServerError, Message: "Claude 账号存储未初始化"}
 	}
@@ -556,8 +570,16 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		}
 	}
 	if authKind == auth.ClaudeAuthKindOAuth && accessToken == "" {
-		// 裸 RT 导入(sk-ant-ort01-):先用 RT 换出 AT,顺带拿到邮箱/账号 UUID/套餐做查重与
-		// 展示;RT 无效在这里就失败,而不是入库后每次调度 401。
+		// Reject an existing credential before consuming its rotating refresh token.
+		rows, err := h.db.ListActiveByChannel(ctx, database.UpstreamChannelClaude)
+		if err != nil {
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusInternalServerError, Message: "查询 Claude 账号失败: " + err.Error()}
+		}
+		for _, row := range rows {
+			if strings.TrimSpace(row.GetCredential("refresh_token")) == refreshToken {
+				return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusConflict, Message: fmt.Sprintf("Claude 凭据已存在 (id=%d)", row.ID)}
+			}
+		}
 		refreshed, err := h.refreshClaudeCredentialsForImport(ctx, proxyURL, refreshToken)
 		if err != nil {
 			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadGateway, Message: "refresh_token 换取 access_token 失败: " + err.Error()}
@@ -625,10 +647,28 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 			}
 		}
 
+	} else if opts != nil && len(opts.CustomHeaders) > 0 {
+		// API Key 账号没有生成指纹;custom_headers 是运维显式配置的出站请求头
+		// (issue #647),保留头(鉴权/Content-Type/Accept 等)拒绝入库。
+		normalized, err := normalizeClaudeAPIKeyCustomHeaders(opts.CustomHeaders)
+		if err != nil {
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: err.Error()}
+		}
+		customHeaders = normalized
+	}
+	// 对 OAuth/Setup Token 是指纹替换模式;对 API Key 是可选的 Claude Code 客户端
+	// 身份仿真开关(空=透传)。两种形态都按账号持久化。
+	fingerprintMode := ""
+	if opts != nil && strings.TrimSpace(opts.FingerprintMode) != "" {
+		if !auth.IsValidClaudeFingerprintMode(opts.FingerprintMode) {
+			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: "claude_fingerprint_mode must be preserve, force, or empty"}
+		}
+		fingerprintMode = auth.NormalizeClaudeFingerprintMode(opts.FingerprintMode)
 	}
 
 	// 动态拉取该账号**真实可用**的模型(Anthropic /v1/models),存进 credentials.models;
 	// 失败不阻断导入(DefaultClaudeModelIDsForAccount 会回退到内置兜底集)。
+	// API Key 账号的发现请求带同一套自定义头/客户端身份,保证网关看到的请求形态一致。
 	var claudeModels []string
 	if opts != nil && len(opts.Models) > 0 {
 		models, modelErr := normalizeClaudeImportModels(opts.Models)
@@ -640,7 +680,7 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 		// A large bundle should not serialize one upstream /v1/models request per
 		// account. Leave the catalog empty so the normal default Claude model set
 		// is used; operators can refresh the catalog explicitly after import.
-	} else if models, ferr := auth.NewClaudeAuth(proxyURL).FetchModelsWithCredentials(ctx, accessToken, authKind, baseURL); ferr == nil && len(models) > 0 {
+	} else if models, ferr := auth.NewClaudeAuth(proxyURL).FetchModelsWithCredentialsAndHeaders(ctx, accessToken, authKind, baseURL, customHeaders, fingerprintMode); ferr == nil && len(models) > 0 {
 		claudeModels = models
 	} else if ferr != nil {
 		log.Printf("拉取 Claude 账号可用模型失败(将用兜底集): %v", ferr)
@@ -648,13 +688,6 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 	planType := claudePlanOrDefault(td.PlanType)
 	if opts != nil && strings.TrimSpace(opts.PlanType) != "" {
 		planType = claudePlanOrDefault(opts.PlanType)
-	}
-	fingerprintMode := ""
-	if opts != nil && strings.TrimSpace(opts.FingerprintMode) != "" {
-		if !auth.IsValidClaudeFingerprintMode(opts.FingerprintMode) {
-			return claudeAccountCreateResult{}, &claudeAccountCreateError{Status: http.StatusBadRequest, Message: "claude_fingerprint_mode must be preserve, force, or empty"}
-		}
-		fingerprintMode = auth.NormalizeClaudeFingerprintMode(opts.FingerprintMode)
 	}
 
 	credentials := map[string]interface{}{
@@ -672,9 +705,10 @@ func (h *Handler) createClaudeAccount(ctx context.Context, name, proxyURL, timez
 	if authKind == auth.ClaudeAuthKindAPIKey {
 		credentials[auth.ClaudeBaseURLCredentialKey] = baseURL
 		delete(credentials, "expires_at")
-		delete(credentials, "custom_headers")
 		delete(credentials, "timezone")
-		fingerprintMode = ""
+		if len(customHeaders) == 0 {
+			delete(credentials, "custom_headers")
+		}
 	}
 	if fingerprintMode != "" {
 		credentials[auth.ClaudeFingerprintModeCredentialKey] = fingerprintMode

@@ -99,11 +99,6 @@ func (h *Handler) TestConnection(c *gin.Context) {
 		account = transient
 		isTransient = true
 	}
-	if account.IsAntigravityAPI() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Antigravity 账号尚未接入推理测连，请使用配额刷新"})
-		return
-	}
-
 	// 连接测试虽是 SSE GET，却会写入未授权、错误、限流或恢复状态。等流结束后
 	// 再失效列表/分析快照，避免账号页继续把已判定的 401 账号显示为“未采样”。
 	if !isTransient {
@@ -111,11 +106,24 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 
 	isClaudeAccount := account.IsClaudeOAuth()
-	isOpenAIResponsesAccount := account.IsRelayStyle() && !isClaudeAccount
+	// Antigravity 也归在 relay 风格里，但上游是 Cloud Code v1internal 信封，
+	// 须走专属执行器（内含多端点回退与 429/503 配额语义），不能落到通用 relay 路径。
+	isAntigravityAccount := account.IsAntigravityAPI()
+	isOpenAIResponsesAccount := account.IsRelayStyle() && !isClaudeAccount && !isAntigravityAccount
 	// Agent Identity 无 AT，凭私钥动态签名，跳过 AT 预检（请求走 Codex 执行器动态签名）。
-	if !isOpenAIResponsesAccount && !account.IsCodexAgentIdentity() && account.GetAccessToken() == "" {
+	if !isOpenAIResponsesAccount && !isAntigravityAccount && !account.IsCodexAgentIdentity() && account.GetAccessToken() == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "账号没有可用的 Access Token，请先刷新"})
 		return
+	}
+	// Antigravity OAuth 号的 AT 会过期；测连前若已无 AT，先用 RT 换一次，
+	// 让操作者看到的是推理结果而不是必然的 401。回收站里的临时账号不回写凭据。
+	if isAntigravityAccount && !isTransient && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth {
+		if _, bearer := account.AntigravityCredentials(); bearer == "" {
+			if refreshErr := h.store.RefreshAntigravityAccount(c.Request.Context(), account); refreshErr != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Antigravity 账号没有可用的 Access Token，刷新失败: " + refreshErr.Error()})
+				return
+			}
+		}
 	}
 
 	testModel, err := h.connectionTestModelForAccount(c.Request.Context(), account, strings.TrimSpace(c.Query("model")))
@@ -144,11 +152,10 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 
 	// 构建最小测试请求体（参考 sub2api createOpenAITestPayload）
-	payload := buildConnectionTestPayload(h.store, testModel)
 	claudeSecurityCfg := h.store.ClaudeSecurityConfig()
+	payload := h.buildAccountConnectionTestPayload(c.Request.Context(), account, testModel, claudeSecurityCfg)
 	claudeFingerprintMode := ""
 	if isClaudeAccount {
-		payload = buildClaudeConnectionTestPayload(h.store, testModel, claudeSecurityCfg)
 		claudeFingerprintMode = account.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault())
 	}
 
@@ -158,6 +165,8 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	var reqErr error
 	if isClaudeAccount {
 		resp, reqErr = proxy.ExecuteClaudeMessagesRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), c.Request.Header.Clone(), claudeFingerprintMode, claudeSecurityCfg)
+	} else if isAntigravityAccount {
+		resp, reqErr = h.executeAntigravityConnectionTest(c.Request.Context(), account, testModel, payload, h.store.ResolveProxyForAccount(account), !isTransient)
 	} else if isOpenAIResponsesAccount {
 		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), nil)
 	} else {
@@ -190,7 +199,7 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	sendTestEvent(c, testEvent{Type: "diagnostics", CodexDiagnostics: recorder.details})
 
 	if resp.StatusCode != http.StatusOK {
-		if !isOpenAIResponsesAccount && !isTransient {
+		if !isOpenAIResponsesAccount && !isAntigravityAccount && !isTransient {
 			proxy.SyncCodexUsageState(h.store, account, resp)
 		}
 		errBody, _ := io.ReadAll(resp.Body)
@@ -216,10 +225,18 @@ func (h *Handler) TestConnection(c *gin.Context) {
 			case http.StatusTooManyRequests:
 				// Grok 虽是 relay 风格，但有自己的免费额度语义（free-usage-exhausted → 24h），
 				// 不能并入"relay 一律 1 分钟 rate_limited"，否则耗尽会被标成短冷却、1 分钟即恢复。
-				if isOpenAIResponsesAccount && !account.IsGrokAPI() {
+				// Antigravity 的 429 带 Google 结构化配额状态，按（账号,模型）冷却并取上游重试提示。
+				if isAntigravityAccount {
+					proxy.ApplyAntigravityCooldown(h.store, account, resp.StatusCode, errBody, resp, testModel)
+				} else if isOpenAIResponsesAccount && !account.IsGrokAPI() {
 					h.store.MarkCooldown(account, time.Minute, "rate_limited")
 				} else {
 					proxy.Apply429Cooldown(h.store, account, errBody, resp, testModel)
+				}
+			case http.StatusServiceUnavailable:
+				// Cloud Code 用 503 表达共享容量耗尽（MODEL_CAPACITY_EXHAUSTED），只做模型级短冷却。
+				if isAntigravityAccount {
+					proxy.ApplyAntigravityCooldown(h.store, account, resp.StatusCode, errBody, resp, testModel)
 				}
 			}
 		}
@@ -232,7 +249,8 @@ func (h *Handler) TestConnection(c *gin.Context) {
 	}
 
 	var usageState proxy.CodexUsageSyncResult
-	if !isOpenAIResponsesAccount {
+	// Antigravity 没有 x-codex-* 用量头，跳过 Codex 用量同步。
+	if !isOpenAIResponsesAccount && !isAntigravityAccount {
 		usageStore := h.store
 		if isTransient {
 			usageStore = nil // 临时账号只读取用量头用于展示，不写入存储
@@ -395,7 +413,21 @@ func buildClaudeConnectionTestPayload(store *auth.Store, model string, securityC
 	if store != nil {
 		content = store.GetTestContent()
 	}
-	content = auth.NormalizeTestContent(auth.RenderTestContent(content))
+	return buildClaudeConnectionTestPayloadWithContent(model, auth.RenderTestContent(content), securityCfg)
+}
+
+// buildAccountConnectionTestPayload 按账号渠道构造测连请求体：Claude 走原生 Messages
+// 形状，其余走 Responses 形状；用户输入取渠道自定义测活内容，留空沿用全局。
+func (h *Handler) buildAccountConnectionTestPayload(ctx context.Context, account *auth.Account, model string, securityCfg auth.ClaudeSecurityConfig) []byte {
+	content := h.connectionTestContentForAccount(ctx, account)
+	if account != nil && account.IsClaudeOAuth() {
+		return buildClaudeConnectionTestPayloadWithContent(model, content, securityCfg)
+	}
+	return buildTestPayloadWithContent(model, content)
+}
+
+func buildClaudeConnectionTestPayloadWithContent(model string, content string, securityCfg auth.ClaudeSecurityConfig) []byte {
+	content = auth.NormalizeTestContent(content)
 	maxTokens := claudeProbeTokenBudget(securityCfg)
 	body, err := json.Marshal(map[string]interface{}{
 		"model":      strings.TrimSpace(model),
@@ -424,10 +456,10 @@ func (h *Handler) handleClaudeConnectionTest(
 	transientOutcome *string,
 	id int64,
 ) {
+	// For API Key accounts fingerprintMode already carries the account-level
+	// client-identity emulation mode (empty = passthrough), so it is reported
+	// as-is instead of being blanked.
 	recorder := newClaudeTestRecorder(resp, testModel, fingerprintMode, account.GetAccessToken(), start)
-	if account.IsClaudeAPIKey() {
-		recorder.details.FingerprintMode = ""
-	}
 	// The final diagnostics follow the terminal result; clients must drain the
 	// SSE response before refreshing the invalidated account snapshot.
 	defer func() { sendTestEvent(c, testEvent{Type: "diagnostics", Diagnostics: recorder.finish()}) }()
@@ -527,7 +559,11 @@ func (h *Handler) handleClaudeConnectionTest(
 	}
 	// 显式复探成功:该模型此前的模型级冷却(如 credits_required)已不成立,立即解除,
 	// 调度器无需等 30 分钟窗口自然到期。
-	if account.IsModelRateLimited(testModel) {
+	if err := h.store.RestoreClaudeAccountModel(c.Request.Context(), account, testModel); err != nil {
+		sendTestEvent(c, testEvent{Type: "error", Error: "模型复探成功，但恢复模型清单失败"})
+		return
+	}
+	if account.ClaudeModelWasRejected(testModel) || account.IsModelRateLimited(testModel) {
 		h.store.ClearModelCooldown(account, testModel)
 	}
 	proxy.NoteClaudeGatedModelSuccess(h.store, account, testModel)
@@ -861,6 +897,9 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 	if account != nil && account.IsClaudeOAuth() {
 		models := claudeProbeModelIDs(account)
 		if requested != "" {
+			if strings.HasPrefix(strings.ToLower(requested), "claude-") && account.ClaudeModelWasRejected(requested) {
+				return requested, nil
+			}
 			if h != nil && h.db != nil && account.DBID > 0 {
 				row, err := h.db.GetAccountByID(ctx, account.DBID)
 				if err == nil && row != nil {
@@ -892,6 +931,15 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 		if len(models) == 0 {
 			return "", fmt.Errorf("该 Claude 账号没有可用于测试的文本模型")
 		}
+		// 系统设置里为 Claude 配置的默认测试模型优先；不在该账号目录或正处于
+		// 模型级冷却时退回自动选模，不因配置了一个不合适的模型就让测连失败。
+		if configured := h.channelTestSettingsForAccount(ctx, account).TestModel; configured != "" {
+			for _, candidate := range models {
+				if strings.EqualFold(strings.TrimSpace(candidate), configured) && !account.IsModelRateLimited(candidate) {
+					return strings.TrimSpace(candidate), nil
+				}
+			}
+		}
 		for _, candidate := range models {
 			if !account.IsModelRateLimited(candidate) && strings.Contains(strings.ToLower(candidate), "haiku") {
 				return strings.TrimSpace(candidate), nil
@@ -903,6 +951,13 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 			}
 		}
 		return "", fmt.Errorf("该 Claude 账号的文本模型均处于模型级冷却")
+	}
+	if account != nil && account.IsAntigravityAPI() {
+		defaults := []string{h.channelTestSettingsForAccount(ctx, account).TestModel}
+		if h != nil && h.store != nil {
+			defaults = append(defaults, strings.TrimSpace(h.store.GetTestModel()))
+		}
+		return antigravityConnectionTestModel(account, requested, defaults...)
 	}
 	if account == nil || !account.IsRelayStyle() {
 		if requested == "" {
@@ -956,6 +1011,129 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 func isTextConnectionModel(model string) bool {
 	model = strings.TrimSpace(strings.ToLower(model))
 	return model != "" && !strings.Contains(model, "image")
+}
+
+// antigravityConnectionTestModels 是 Antigravity 账号可用于测连的文本模型：
+// 把账号同步到的 wire 目录（或安全默认集）投影成对外发布的固定档位 ID，
+// 与账号页下拉、/v1/models 暴露的是同一份真相。
+func antigravityConnectionTestModels(account *auth.Account) []string {
+	if account == nil {
+		return nil
+	}
+	published := proxy.AntigravityPublishedModelIDs(account.AntigravityModels())
+	models := make([]string, 0, len(published))
+	for _, model := range published {
+		if isTextConnectionModel(model) {
+			models = append(models, strings.TrimSpace(model))
+		}
+	}
+	return models
+}
+
+// antigravityConnectionTestModel 选定 Antigravity 测连模型。显式指定的模型
+// 不受模型级冷却阻拦（手工测试本身就是操作者在主动复探）；自动选模时依次尝试
+// 各级默认（渠道设置、全局测试模型），再偏向版本最新的 flash 低档，最后才落到
+// 第一个未冷却的模型。
+func antigravityConnectionTestModel(account *auth.Account, requested string, defaultModels ...string) (string, error) {
+	models := antigravityConnectionTestModels(account)
+	if len(models) == 0 {
+		return "", fmt.Errorf("该 Antigravity 账号没有可用于测试的文本模型")
+	}
+	requested = strings.TrimSpace(requested)
+	if requested != "" {
+		for _, model := range models {
+			if strings.EqualFold(model, requested) {
+				return model, nil
+			}
+		}
+		return "", fmt.Errorf("该 Antigravity 账号不支持测试模型: %s", requested)
+	}
+	for _, defaultModel := range defaultModels {
+		defaultModel = strings.TrimSpace(defaultModel)
+		if defaultModel == "" {
+			continue
+		}
+		for _, model := range models {
+			if strings.EqualFold(model, defaultModel) && !account.IsModelRateLimited(model) {
+				return model, nil
+			}
+		}
+	}
+	if model := preferredAntigravityFlashLowModel(models, account.IsModelRateLimited); model != "" {
+		return model, nil
+	}
+	for _, model := range models {
+		if !account.IsModelRateLimited(model) {
+			return model, nil
+		}
+	}
+	return models[0], nil
+}
+
+// preferredAntigravityFlashLowModel 在 flash 低档里挑版本号最高的那个。账号同步到的
+// 目录会长期保留已下线的旧版（如 gemini-3.5-flash 上游只回一句下线提示就断流），
+// 老版本排在前面，按目录顺序取首个会把测连默认打到死模型上。
+func preferredAntigravityFlashLowModel(models []string, rateLimited func(string) bool) string {
+	best := ""
+	bestVersion := -1.0
+	for _, model := range models {
+		lower := strings.ToLower(strings.TrimSpace(model))
+		if !strings.Contains(lower, "flash") || !strings.HasSuffix(lower, "-low") {
+			continue
+		}
+		if rateLimited != nil && rateLimited(model) {
+			continue
+		}
+		version := antigravityModelVersion(lower)
+		if best == "" || version > bestVersion {
+			best, bestVersion = strings.TrimSpace(model), version
+		}
+	}
+	return best
+}
+
+// antigravityModelVersion 取 gemini-<major>.<minor>-… 里的数字版本；解析不出返回 0。
+func antigravityModelVersion(model string) float64 {
+	rest := strings.TrimPrefix(model, "gemini-")
+	if rest == model {
+		return 0
+	}
+	end := 0
+	for end < len(rest) && (rest[end] == '.' || (rest[end] >= '0' && rest[end] <= '9')) {
+		end++
+	}
+	if end == 0 {
+		return 0
+	}
+	version, err := strconv.ParseFloat(strings.TrimSuffix(rest[:end], "."), 64)
+	if err != nil {
+		return 0
+	}
+	return version
+}
+
+// executeAntigravityConnectionTest 用 Antigravity 专属执行器跑测连请求，
+// 返回的是已归一化成 Responses SSE 的响应，后续可复用 Codex 路径的流解析。
+// 与调度路径一致：OAuth 号收到 401 先用 RT 换一次 AT 再重试一次，避免仅因
+// AT 过期就把号标成未授权；allowRefresh=false（回收站临时账号）不回写凭据。
+func (h *Handler) executeAntigravityConnectionTest(ctx context.Context, account *auth.Account, model string, payload []byte, proxyURL string, allowRefresh bool) (*http.Response, error) {
+	execute := h.antigravityProbeExecutor()
+	resp, err := execute(ctx, account, model, payload, true, proxyURL)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+	if resp.StatusCode != http.StatusUnauthorized || !allowRefresh || h == nil || h.store == nil ||
+		account.AntigravityAuthKind() != auth.AntigravityAuthKindOAuth {
+		return resp, nil
+	}
+	if refreshErr := h.store.RefreshAntigravityAccount(ctx, account); refreshErr != nil {
+		// 刷新也失败：把原始 401 交给调用方按未授权处理。
+		return resp, nil
+	}
+	if resp.Body != nil {
+		_ = resp.Body.Close()
+	}
+	return execute(ctx, account, model, payload, true, proxyURL)
 }
 
 type batchTestRequest struct {
@@ -1251,10 +1429,7 @@ func (h *Handler) streamBatchTest(c *gin.Context, accounts []*auth.Account, miss
 
 func (h *Handler) runBatchTest(ctx context.Context, accounts []*auth.Account, missingCount int, testFn func(context.Context, *auth.Account) (string, string), onProgress func(batchOperationEvent)) batchTestCounts {
 	total := len(accounts) + missingCount
-	concurrency := h.store.GetTestConcurrency()
-	if concurrency <= 0 {
-		concurrency = 1
-	}
+	concurrency := h.batchTestConcurrency(ctx, accounts)
 
 	var (
 		successCount   int64
@@ -1357,8 +1532,8 @@ func (h *Handler) emitBatchTestProgress(
 func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (string, string) {
 	testCtx, cancel := context.WithTimeout(ctx, batchTestAccountTimeout)
 	defer cancel()
-	if acc == nil || acc.IsAntigravityAPI() {
-		return "failed", "Antigravity 账号尚未接入推理测连"
+	if acc == nil {
+		return "failed", "账号不存在"
 	}
 
 	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && acc.GetAccessToken() == "" {
@@ -1387,14 +1562,16 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		h.store.MarkError(acc, "批量测试失败: "+modelErr.Error())
 		return "failed", modelErr.Error()
 	}
-	payload := buildConnectionTestPayload(h.store, testModel)
+	securityCfg := h.store.ClaudeSecurityConfig()
+	payload := h.buildAccountConnectionTestPayload(testCtx, acc, testModel, securityCfg)
 	start := time.Now()
 
 	var resp *http.Response
 	var err error
 	if acc.IsClaudeOAuth() {
-		securityCfg := h.store.ClaudeSecurityConfig()
-		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, buildClaudeConnectionTestPayload(h.store, testModel, securityCfg), h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), securityCfg)
+		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), securityCfg)
+	} else if acc.IsAntigravityAPI() {
+		resp, err = h.executeAntigravityConnectionTest(testCtx, acc, testModel, payload, h.store.ResolveProxyForAccount(acc), true)
 	} else if acc.IsRelayStyle() {
 		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
 	} else {
@@ -1471,6 +1648,8 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 				return "rate_limited", fmt.Sprintf("上游模型 %s 需要 usage credits，当前账号套餐不可用", testModel)
 			}
 			proxy.SyncClaudeUsageState(h.store, acc, resp)
+		} else if acc.IsAntigravityAPI() {
+			proxy.ApplyAntigravityCooldown(h.store, acc, resp.StatusCode, body, resp, testModel)
 		} else if acc.IsRelayStyle() && !acc.IsGrokAPI() {
 			h.store.MarkCooldown(acc, time.Minute, "rate_limited")
 		} else {
@@ -1490,6 +1669,11 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 			h.store.MarkCooldownWithErrorExactDuration(acc, 24*time.Hour, "unauthorized", msg)
 			return "banned", msg
 		}
+		// Cloud Code 503 是共享容量耗尽，号本身有效：记模型级冷却并按限流归类。
+		if acc.IsAntigravityAPI() && resp.StatusCode == http.StatusServiceUnavailable &&
+			proxy.ApplyAntigravityCooldown(h.store, acc, resp.StatusCode, body, resp, testModel) {
+			return "rate_limited", msg
+		}
 		if shouldMarkBatchTestAccountError(resp.StatusCode, body) {
 			if proxy.IsDeactivatedWorkspaceError(body) {
 				h.store.MarkDeactivatedWorkspace(acc, "批量测试"+msg)
@@ -1507,8 +1691,8 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account) (string, string) {
 	testCtx, cancel := context.WithTimeout(ctx, batchTestAccountTimeout)
 	defer cancel()
-	if acc == nil || acc.IsAntigravityAPI() {
-		return "failed", "Antigravity 账号尚未接入推理测连"
+	if acc == nil {
+		return "failed", "账号不存在"
 	}
 
 	if !acc.IsRelayStyle() && !acc.IsCodexAgentIdentity() && acc.GetAccessToken() == "" {
@@ -1522,16 +1706,16 @@ func (h *Handler) runRecycleBinSingleTest(ctx context.Context, acc *auth.Account
 		}
 		return "failed", modelErr.Error()
 	}
-	payload := buildConnectionTestPayload(h.store, testModel)
 	claudeSecurityCfg := h.store.ClaudeSecurityConfig()
-	if acc.IsClaudeOAuth() {
-		payload = buildClaudeConnectionTestPayload(h.store, testModel, claudeSecurityCfg)
-	}
+	payload := h.buildAccountConnectionTestPayload(testCtx, acc, testModel, claudeSecurityCfg)
 
 	var resp *http.Response
 	var err error
 	if acc.IsClaudeOAuth() {
 		resp, err = proxy.ExecuteClaudeMessagesRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil, acc.EffectiveClaudeFingerprintMode(h.store.ClaudeFingerprintModeDefault()), claudeSecurityCfg)
+	} else if acc.IsAntigravityAPI() {
+		// 回收站账号是临时对象：401 不做凭据刷新，只展示结果。
+		resp, err = h.executeAntigravityConnectionTest(testCtx, acc, testModel, payload, h.store.ResolveProxyForAccount(acc), false)
 	} else if acc.IsRelayStyle() {
 		resp, err = proxy.ExecuteRelayStyleRequest(testCtx, acc, payload, h.store.ResolveProxyForAccount(acc), nil)
 	} else {
