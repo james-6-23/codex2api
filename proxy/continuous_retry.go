@@ -53,6 +53,9 @@ func continuousRetryPreflightPassthrough(settings RuntimeSettings) bool {
 }
 
 func continuousRetryHTTPSelected(policy database.ContinuousRetryPolicy, status int, body []byte) bool {
+	if codexCapacityErrorForClient(body) != nil {
+		return false
+	}
 	if !policy.Enabled {
 		return false
 	}
@@ -148,6 +151,9 @@ func isExplicitUpstreamCyberPolicyError(err error) bool {
 }
 
 func continuousRetryRequestErrorSelected(policy database.ContinuousRetryPolicy, err error) bool {
+	if codexCapacityRequestError(err) != nil {
+		return false
+	}
 	if !policy.Enabled || err == nil {
 		return false
 	}
@@ -170,6 +176,9 @@ func continuousRetryRequestErrorSelected(policy database.ContinuousRetryPolicy, 
 }
 
 func continuousRetryStreamSelected(outcome streamOutcome, payload []byte, eventType string, policies ...database.ContinuousRetryPolicy) bool {
+	if codexCapacityErrorForClient(payload) != nil || codexCapacityErrorForClient(outcome.failurePayload) != nil {
+		return false
+	}
 	policy := continuousRetryPolicyForCall(policies)
 	if !policy.Enabled || outcome.terminalLocal {
 		return false
@@ -279,6 +288,9 @@ func continuousRetryStreamFailureSelected(outcome streamOutcome, payload []byte,
 	}
 	if isExplicitUpstreamCyberPolicy(payload) || isExplicitUpstreamCyberPolicy(outcome.failurePayload) || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") {
 		return false
+	}
+	if codexCapacityErrorForClient(payload) != nil || codexCapacityErrorForClient(outcome.failurePayload) != nil {
+		return CurrentRuntimeSettings().CodexCapacityRetryEnabled
 	}
 	return outcome.penalize || continuousRetryStreamSelected(outcome, payload, eventType, policies...)
 }

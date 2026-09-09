@@ -5,7 +5,7 @@ import type { AccountLiveStateResponse } from '../types'
 // Merge a live poll response into an account list. Rows whose live concurrency
 // counters did not change keep their object identity, and a no-op poll returns the
 // original array, so the 1s polling cadence cannot defeat row-level memoization.
-export function mergeAccountLiveState<T extends { id: number; active_requests?: number; occupied_requests?: number; session_slot_buffer_enabled?: boolean }>(
+export function mergeAccountLiveState<T extends { id: number; active_requests?: number; occupied_requests?: number; session_slot_buffer_enabled?: boolean; session_capacity_current?: number; session_capacity_max?: number; session_capacity_reserved?: number; session_capacity_reserved_current?: number }>(
   current: T[],
   response: AccountLiveStateResponse,
 ): T[] {
@@ -14,10 +14,18 @@ export function mergeAccountLiveState<T extends { id: number; active_requests?: 
     const activeRequests = response.accounts[String(account.id)]?.active_requests ?? 0
     const occupiedRequests = response.accounts[String(account.id)]?.occupied_requests ?? activeRequests
     const slotBufferEnabled = response.session_slot_buffer_enabled === true
+    const sessionCapacityCurrent = response.accounts[String(account.id)]?.session_capacity_current ?? 0
+    const sessionCapacityMax = response.accounts[String(account.id)]?.session_capacity_max ?? account.session_capacity_max ?? 0
+    const reserved = response.accounts[String(account.id)]?.session_capacity_reserved ?? account.session_capacity_reserved ?? 0
+    const reservedCurrent = response.accounts[String(account.id)]?.session_capacity_reserved_current ?? account.session_capacity_reserved_current ?? 0
     if (
       (account.active_requests ?? 0) === activeRequests &&
       (account.occupied_requests ?? account.active_requests ?? 0) === occupiedRequests &&
-      (account.session_slot_buffer_enabled ?? false) === slotBufferEnabled
+      (account.session_slot_buffer_enabled ?? false) === slotBufferEnabled &&
+      (account.session_capacity_current ?? 0) === sessionCapacityCurrent &&
+      (account.session_capacity_max ?? 0) === sessionCapacityMax &&
+      (account.session_capacity_reserved ?? 0) === reserved &&
+      (account.session_capacity_reserved_current ?? 0) === reservedCurrent
     ) return account
     changed = true
     return {
@@ -25,6 +33,10 @@ export function mergeAccountLiveState<T extends { id: number; active_requests?: 
       active_requests: activeRequests,
       occupied_requests: occupiedRequests,
       session_slot_buffer_enabled: slotBufferEnabled,
+      session_capacity_current: sessionCapacityCurrent,
+      session_capacity_max: sessionCapacityMax,
+      session_capacity_reserved: reserved,
+      session_capacity_reserved_current: reservedCurrent,
     }
   })
   return changed ? next : current

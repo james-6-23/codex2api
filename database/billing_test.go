@@ -208,21 +208,36 @@ func TestGPT56VariantPricing(t *testing.T) {
 	}
 }
 
+func TestGPT6AstraPricingIsExact(t *testing.T) {
+	for _, model := range []string{"gpt-6-astra-v2", "gpt-6", "gpt-6-nova", "gpt-6-astra-high-v2", "gpt-6-astra(unknown)"} {
+		if canonical := CanonicalBillingModelKey(model); canonical == "gpt-6-astra" {
+			t.Fatalf("unsupported model %q inherited Astra canonical key", model)
+		}
+		pricing := GetModelPricing(model)
+		if pricing.InputPricePerMToken == 10.0 && pricing.OutputPricePerMToken == 50.0 {
+			t.Fatalf("unsupported model %q inherited exact-model pricing: %+v", model, pricing)
+		}
+	}
+}
+
 // gpt-6-astra 在 Codex 中不收长上下文溢价：跨过 272K 后仍使用同一组单价。
 // standard $10/$50、缓存 $1；保留现有 fast 2× 倍率。
-// 变体后缀 / 思考强度别名同价；未知 gpt-6 变体按 astra 兜底，绝不能掉进默认价。
 func TestGPT6AstraPricing(t *testing.T) {
-	for _, model := range []string{"gpt-6-astra", "gpt-6-astra-high", "gpt-6-astra(xhigh)", "GPT-6-Astra", "gpt-6", "gpt-6-nova"} {
+	models := []string{"gpt-6-astra", "GPT-6-Astra"}
+	for _, effort := range []string{"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"} {
+		models = append(models, "gpt-6-astra-"+effort, "gpt-6-astra("+effort+")")
+	}
+	for _, model := range models {
 		if got := CanonicalBillingModelKey(model); got != "gpt-6-astra" {
 			t.Fatalf("CanonicalBillingModelKey(%q) = %q, want gpt-6-astra", model, got)
 		}
-		p := GetModelPricing(model)
-		assertFloatEqual(t, p.InputPricePerMToken, 10.0)
-		assertFloatEqual(t, p.OutputPricePerMToken, 50.0)
-		assertFloatEqual(t, p.CacheReadPricePerMToken, 1.0)
-		assertFloatEqual(t, p.LongInputPricePerMToken, 0)
-		assertFloatEqual(t, p.LongOutputPricePerMToken, 0)
-		assertFloatEqual(t, p.LongCacheReadPricePerMToken, 0)
+		pricing := GetModelPricing(model)
+		assertFloatEqual(t, pricing.InputPricePerMToken, 10.0)
+		assertFloatEqual(t, pricing.OutputPricePerMToken, 50.0)
+		assertFloatEqual(t, pricing.CacheReadPricePerMToken, 1.0)
+		assertFloatEqual(t, pricing.LongInputPricePerMToken, 0)
+		assertFloatEqual(t, pricing.LongOutputPricePerMToken, 0)
+		assertFloatEqual(t, pricing.LongCacheReadPricePerMToken, 0)
 	}
 
 	for _, input := range []int{100_000, 271_999, 272_000, 272_001, 1_000_000} {

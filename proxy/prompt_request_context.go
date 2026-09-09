@@ -50,6 +50,7 @@ func promptRequestSecurityState(c *gin.Context) *promptRequestSecurityContext {
 // old connection.
 func resetPromptRequestSecurityFrame(c *gin.Context) {
 	if c != nil {
+		clearAccountSessionObservationContext(c)
 		c.Set(promptRequestSecurityContextKey, &promptRequestSecurityContext{})
 		// A WebSocket connection carries multiple logical requests. Never let a
 		// prior turn's upstream CYB decision leak into the next turn.
@@ -104,6 +105,7 @@ func (h *Handler) capturePromptRequestIngress(c *gin.Context, body []byte) {
 		return
 	}
 	ensurePromptPolicyRequestCorrelationID(c)
+	captureUsageRequestIngress(c, body)
 	if h == nil || h.store == nil {
 		return
 	}

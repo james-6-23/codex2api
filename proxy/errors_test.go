@@ -190,3 +190,12 @@ func TestErrorErrorMethod(t *testing.T) {
 		t.Errorf("expected %s, got %s", expected, errStr)
 	}
 }
+func TestErrUpstreamPreservesMissingHTTPStatus(t *testing.T) {
+	err := ErrUpstream(0, "transport failed", errors.New("EOF"))
+	if err.HTTPStatus != 0 {
+		t.Fatalf("HTTPStatus = %d, want statusless 0", err.HTTPStatus)
+	}
+	if err.UpstreamStatusCode() != 0 {
+		t.Fatalf("UpstreamStatusCode = %d, want statusless 0", err.UpstreamStatusCode())
+	}
+}

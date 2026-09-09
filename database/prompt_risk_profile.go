@@ -74,8 +74,15 @@ type PromptRiskProfile struct {
 	APIKeyMasked         string                   `json:"api_key_masked,omitempty"`
 	AccountID            int64                    `json:"account_id,omitempty"`
 	AccountName          string                   `json:"account_name,omitempty"`
-	TrustPolicy          *PromptRiskTrustPolicy   `json:"trust_policy,omitempty"`
-	ConversationLock     *PromptConversationLock  `json:"conversation_lock,omitempty"`
+	AccountEmail         string                   `json:"account_email,omitempty"`
+	SessionWindows24h    int                      `json:"session_windows_24h,omitempty"`
+	SessionUniqueUsers   int                      `json:"session_unique_users,omitempty"`
+	SessionWindowsTotal  int                      `json:"session_windows_total,omitempty"`
+
+	SessionAverageDurationSeconds *float64 `json:"session_average_duration_seconds,omitempty"`
+
+	TrustPolicy      *PromptRiskTrustPolicy  `json:"trust_policy,omitempty"`
+	ConversationLock *PromptConversationLock `json:"conversation_lock,omitempty"`
 }
 
 type PromptRiskScoreBreakdown struct {
@@ -1008,7 +1015,7 @@ func (db *DB) promptRiskActiveRestrictionSubjects(ctx context.Context, conversat
 		// Only a real upstream CYB expands to user scope. Local deterministic
 		// blocks remain attached to the exact session to avoid implicating every
 		// conversation of a shared user.
-		if identityKind == PromptConversationLockIdentityNewAPI && reasonCode == "upstream_cyber_policy" &&
+		if identityKind == PromptConversationLockIdentityNewAPI && (reasonCode == "upstream_cyber_policy" || reasonCode == "upstream_bio_policy") &&
 			(userCooldownTTL <= 0 || lockedAt.After(now.Add(-userCooldownTTL))) {
 			if subjectKey := PromptRiskNewAPIUserSubjectKey(platform, userID); subjectKey != "" {
 				key := PromptRiskSubjectNewAPIUser + "\x00" + subjectKey
@@ -1080,6 +1087,9 @@ func promptRiskActiveProfileMatchesQuery(profile PromptRiskProfile, query Prompt
 func (db *DB) ListPromptRiskProfiles(ctx context.Context, query PromptRiskProfileQuery) ([]*PromptRiskProfile, int, error) {
 	if db == nil {
 		return nil, 0, nil
+	}
+	if strings.TrimSpace(query.SubjectType) == PromptRiskSubjectAccountStatus {
+		return db.listAccountStatusProfiles(ctx, query)
 	}
 	if query.Page <= 0 {
 		query.Page = 1

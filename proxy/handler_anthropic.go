@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/codex2api/api"
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
@@ -165,17 +166,15 @@ func claudeHasAuthoritativeQuotaCooldown(account *auth.Account) bool {
 }
 
 // sendAnthropicError 发送 Anthropic 格式的错误响应
-func sendAnthropicError(c *gin.Context, statusCode int, errType, message string) {
+func sendAnthropicError(c *gin.Context, statusCode int, errType, message string, codes ...api.ErrorCode) {
 	if !claimContinuousRetryTerminal(c, continuousRetryProtocolAnthropic) {
 		return
 	}
-	c.JSON(statusCode, gin.H{
-		"type": "error",
-		"error": gin.H{
-			"type":    errType,
-			"message": message,
-		},
-	})
+	errorBody := gin.H{"type": errType, "message": message}
+	if len(codes) > 0 && codes[0] != "" {
+		errorBody["code"] = codes[0]
+	}
+	c.JSON(statusCode, gin.H{"type": "error", "error": errorBody})
 }
 
 // writeAnthropicStreamErrorEvent 通过流写入器发送 Anthropic 协议的流内 error 事件。
@@ -434,6 +433,7 @@ func (h *Handler) translateAnthropicMessagesToCodexOnce(state *anthropicCodexTra
 
 // Messages 处理 /v1/messages 请求（Anthropic Messages API → Codex Responses）
 func (h *Handler) Messages(c *gin.Context) {
+	defer h.finishSessionCooldown(c)
 	// 1. 读取请求体
 	rawBody, err := readRawRequestBody(c)
 	if err != nil {
@@ -492,6 +492,15 @@ func (h *Handler) Messages(c *gin.Context) {
 		rejectAnthropicMessagesRequest(c, http.StatusBadRequest, "invalid_request_error", "messages is required")
 		return
 	}
+	// Resolve the session before prompt and API-key policy checks, matching the
+	// native Responses path while retaining the Messages handler's raw-body
+	// affinity identity.
+	h.primeNewAPIPolicyContext(c, ingressRequestBody(c, rawBody))
+	baseIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+	if nativeClaudeRoute {
+		baseIdentity = resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
+	}
+	sessionIdentity := h.resolveRequestSessionIdentityWithBase(c, rawBody, baseIdentity)
 	if h.inspectPromptFilterAnthropic(c, canonicalBody, "/v1/messages", model) {
 		return
 	}
@@ -515,6 +524,10 @@ func (h *Handler) Messages(c *gin.Context) {
 	if h.enforceAPIKeyLimitsAndReply(c, effectiveModel) {
 		return
 	}
+	if waitError := h.waitForBackgroundRootAccount(c, sessionIdentity); waitError != nil {
+		sendAnthropicError(c, http.StatusBadRequest, string(waitError.Type), waitError.Message, waitError.Code)
+		return
+	}
 	releaseAPIKeyConcurrency, ok := h.acquireAPIKeyConcurrency(c)
 	if !ok {
 		return
@@ -525,8 +538,17 @@ func (h *Handler) Messages(c *gin.Context) {
 	// /v1/messages 同时允许官方 Codex OAuth 账号与中转（OpenAI Responses API）账号：
 	// 翻译后的请求体本身就是 Responses 形态，中转账号直接以 HTTP 转发，
 	// 使仅接入中转的用户也能使用 Claude Code（issue #181）。
+	apiKeyID := requestAPIKeyID(c)
+	affinityKey := capacityAwareSessionAffinityKey(sessionIdentity, apiKeyID)
+	priorSessionAccountID, _ := h.store.AccountSessionAccountID(affinityKey, time.Now())
+	beginDispatchSelection(c)
+	if modelError := h.configureSessionModelAffinity(c, sessionIdentity, affinityKey, effectiveModel, effectiveModel, false); modelError != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": modelError})
+		return
+	}
 	accountFilter := accountFilterForResponsesModel(effectiveModel, modelIDInList(effectiveModel, SupportedModelIDs(c.Request.Context(), h.db)))
-	accountFilter = h.withModelCooldownFilter(effectiveModel, accountFilter)
+	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
+	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyUpstreamChannelFilter(c, effectiveModel, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// scope 并发位在选中账号后才能占，请求退出时统一释放（issue #439 v2）。
@@ -542,14 +564,8 @@ func (h *Handler) Messages(c *gin.Context) {
 	reasoningEffort := extractReasoningEffort(routingBody)
 	serviceTier := extractServiceTier(routingBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
-	if nativeClaudeRoute {
-		sessionIdentity = resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
-	}
 	var codexTranslation anthropicCodexTranslation
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
-	apiKeyID := requestAPIKeyID(c)
-	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
 	// 与 ccbridge 的请求级身份一致性设计相同：在换号循环外确定一次，
 	// 但保留本项目的 API Key 隔离和无显式会话时的每请求隔离语义。
 	claudeSessionID := ""
@@ -576,6 +592,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	}()
 
 	capacityShedRetries := map[int64]int{}
+	dispatchPolicy := dispatchPolicyForModel(effectiveModel)
 	var affinityGuard auth.SessionAffinityGuard
 	grokQualityAttempts := 0
 	var lastClaudePolicyErr *Error
@@ -587,6 +604,13 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		if account == nil {
 			if !claimContinuousRetryTerminal(c, continuousRetryProtocolAnthropic) {
+				return
+			}
+			if modelError := sessionModelErrorForRequest(c); modelError != nil {
+				if isStream && writeCommittedAnthropicRetryError(c, string(modelError.Type), modelError.Message) {
+					return
+				}
+				c.JSON(http.StatusBadRequest, gin.H{"type": "error", "error": modelError})
 				return
 			}
 			if lastClaudePolicyErr != nil {
@@ -611,10 +635,25 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusTooManyRequests, "rate_limit_error", msg)
 				return
 			}
+			if h.store.HasSessionCapacityExhaustionWithDispatch(apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy, affinityKey, time.Now()) {
+				sendAnthropicError(c, http.StatusBadRequest, "invalid_request_error", accountSessionCapacityExceededMessage)
+				return
+			}
 			if isStream && writeCommittedAnthropicRetryError(c, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel)) {
 				return
 			}
 			sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", noAvailableAnthropicAccountMessage(effectiveModel))
+			return
+		}
+		if status, exceeded := h.checkPromptSessionCreationLimitForSelectedAccountAdmission(c, rawBody, account, affinityKey, priorSessionAccountID); exceeded {
+			h.releaseSelectedAccountAfterPromptSessionRejection(account, affinityKey, priorSessionAccountID)
+			writePromptSessionLimitHeaders(c, status)
+			apiErr := promptSessionCreationLimitAPIError(status)
+			statusCode := http.StatusBadRequest
+			if status.AdmissionCode == api.ErrCodeServiceUnavailable {
+				statusCode = http.StatusServiceUnavailable
+			}
+			sendAnthropicError(c, statusCode, "invalid_request_error", apiErr.Message, apiErr.Code)
 			return
 		}
 		if attempt > 0 {
@@ -626,7 +665,7 @@ func (h *Handler) Messages(c *gin.Context) {
 		start := time.Now()
 		proxyURL := h.resolveProxyForAttempt(account, stickyProxyURL)
 		if !retainedHTTPFallback && !continuousRetryBuffersAttempts(continuousRetryPolicy) {
-			if !bindContinuousRetrySessionAffinityWithGuard(c.Request.Context(), h.store, affinityKey, account, proxyURL, affinityGuard) {
+			if !h.bindContinuousRetryAccountSessionWithGuard(c, affinityKey, account, proxyURL, affinityGuard) {
 				h.store.Release(account)
 				return
 			}
@@ -828,8 +867,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			// because waiting again on the same key would repeat the queue (issue #413).
 			// 缓冲传输重试保留同一账号且不处罚、不解绑、不排除（issue #331）；
 			// busy acquire 超时会轮换账号，避免同一 key 重复排队（issue #413）。
-			stickyRetry := continuousRetryBuffersAttempts(continuousRetryPolicy) &&
-				h.shouldStickyTransportRetry(reqErr, kind, timedOut, shouldRetry, continuousRetryPolicy)
+			stickyRetry := h.shouldStickyTransportRetry(reqErr, kind, timedOut, shouldRetry, continuousRetryPolicy)
 			if retryable && shouldPenalizeTransportKind(kind) && !(timedOut && shouldRetry) && !stickyRetry {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
@@ -949,9 +987,6 @@ func (h *Handler) Messages(c *gin.Context) {
 					log.Printf("Antigravity OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
 				}
 			}
-			if kind := classifyHTTPFailure(resp.StatusCode); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) {
-				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
-			}
 			// Claude 的 429 credits_required 是模型级计费门槛:只冷却该模型,不按账号级限流处理
 			// (否则会连累该号的其它可用模型)。命中则跳过账号级用量/限流同步。
 			if account.IsClaudeOAuth() && HandleClaudeModelBillingRejection(h.store, account, attemptEffectiveModel, resp.StatusCode, errBody) {
@@ -959,18 +994,26 @@ func (h *Handler) Messages(c *gin.Context) {
 			} else {
 				syncAnthropicUsageStateForAccount(h.store, account, resp)
 			}
-			h.store.Release(account)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
-			retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
-
 			log.Printf("上游返回错误 (attempt %d, status %d, /v1/messages): %s", attempt+1, resp.StatusCode, upstreamErrorConsoleBody(errBody))
 			logUpstreamError("/v1/messages", resp.StatusCode, model, account.ID(), errBody)
 			promptPolicyIncidentID := acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/messages", model, errBody, upstreamCyberPolicyAttempt{
 				Transport: upstreamPromptPolicyTransport(isStream, useWebsocket), StatusCode: resp.StatusCode,
 				AccountID: account.ID(), AttemptIndex: attempt + 1,
 			}))
-			decision := h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
-			shouldRetry := shouldRetryHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+			shouldRetry := h.shouldRetryUpstreamHTTPStatus(resp.StatusCode, errBody, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+			disposition := h.httpSessionFailureDispositionForPolicy(resp.StatusCode, errBody, shouldRetry, continuousRetryPolicy)
+			decision := codex429Decision{}
+			if disposition.reportAccount {
+				if kind := classifyHTTPFailure(resp.StatusCode); kind != "" {
+					h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
+				}
+				decision = h.applyCooldownForModel(account, resp.StatusCode, errBody, resp, attemptEffectiveModel)
+			}
+			h.store.Release(account)
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
+			if !disposition.retrySameAccount && !disposition.retainAffinity {
+				retryExclusions.MarkHTTPFailure(account.ID(), resp.StatusCode, errBody, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+			}
 			usageTiers := resolveUsageServiceTiers("", serviceTier)
 			h.logUsageForRequest(c, &database.UsageLogInput{
 				AccountID:              account.ID(),
@@ -996,6 +1039,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			})
 
 			if shouldRetry {
+				if disposition.retrySameAccount {
+					log.Printf("HTTP %d 临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %s, /v1/messages)", resp.StatusCode, account.ID(), retryAttemptProgress(attempt, maxRetries))
+				}
 				clearNewAPIUpstreamCyberPolicyDecision(c)
 				lastStatusCode = resp.StatusCode
 				lastBody = errBody
@@ -1105,6 +1151,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			resp.Body.Close()
 			downstreamWrote := streamAttempt.downstreamWrote(wroteAnyBody)
 			if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), nil, continuousRetryPolicy) {
+				disposition := h.streamSessionFailureDisposition(outcome, outcome.failurePayload, true)
 				rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, outcome.failurePayload)
 				_ = streamAttempt.Close()
 				retryLog := database.UsageLogInput{
@@ -1125,10 +1172,14 @@ func (h *Handler) Messages(c *gin.Context) {
 					applyUsageCacheWritesToLog(&retryLog, usage)
 				}
 				h.logUsageForRequest(c, &retryLog)
-				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+				if disposition.reportAccount {
+					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+				}
 				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				retryExclusions.MarkStreamFailure(account.ID(), outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+				h.applySessionFailureAffinity(affinityKey, account, disposition)
+				if !disposition.retrySameAccount && !disposition.retainAffinity {
+					retryExclusions.MarkStreamFailure(account.ID(), outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
+				}
 				retryOrdinal, retryLimit := retryStateForStreamOutcome(outcome, generalRetries, rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 				if !h.waitBeforeRetryWithBudget(c.Request.Context(), retryOrdinal, retryLimit, resp) {
 					return
@@ -1185,8 +1236,11 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 			h.logUsageForRequest(c, logInput)
 			if outcome.penalize {
-				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				disposition := h.streamSessionFailureDisposition(outcome, nil, false)
+				if disposition.reportAccount {
+					h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+				}
+				h.applySessionFailureAffinity(affinityKey, account, disposition)
 			} else if outcome.logStatusCode == http.StatusOK {
 				h.store.ClearModelCooldown(account, attemptEffectiveModel)
 				h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)
@@ -1540,6 +1594,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			continue
 		}
 		if shouldTransparentRetryStreamWithBudgets(outcome, &generalRetries, &rateLimitRetries, maxRetries, attemptMaxRateLimitRetries, downstreamWrote, c.Request.Context().Err(), writeErr, continuousRetryPolicy) {
+			disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, true)
 			rememberContinuousRetryStreamFailure(c.Request.Context(), outcome, terminalFailurePayload)
 			_ = streamAttempt.Close()
 			clearNewAPIUpstreamCyberPolicyDecision(c)
@@ -1554,15 +1609,21 @@ func (h *Handler) Messages(c *gin.Context) {
 				retryAttemptProgress(attempt, maxRetries), account.ID(), outcome.failureMessage)
 			recyclePooledClient(account, proxyURL)
 			syncAnthropicUsageStateForAccount(h.store, account, resp)
-			if isFirstTokenTimeoutOutcome(outcome) {
+			if isFirstTokenTimeoutOutcome(outcome) && !disposition.retrySameAccount {
 				retryExclusions.MarkSoftFirstTokenTimeout(account.ID())
-			} else {
+			} else if disposition.reportAccount {
 				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
 			}
 			resp.Body.Close()
 			h.store.Release(account)
-			h.unbindOrRetainAffinityForCapacityShedWithGuard(retryExclusions, affinityKey, account, proxyURL, affinityGuard, outcome, capacityShedRetries, continuousRetryPolicy)
+			if disposition.retrySameAccount {
+				h.applySessionFailureAffinity(affinityKey, account, disposition)
+				log.Printf("流式临时故障粘滞重试：保留账号 %d 与会话亲和 (attempt %s, /v1/messages)", account.ID(), retryAttemptProgress(attempt, maxRetries))
+			} else {
+				h.unbindOrRetainAffinityForCapacityShedWithGuard(retryExclusions, affinityKey, account, proxyURL, affinityGuard, outcome, capacityShedRetries, continuousRetryPolicy)
+			}
 			if !isFirstTokenTimeoutOutcome(outcome) && !outcome.capacityShed &&
+				!disposition.retrySameAccount &&
 				retryLimitForStreamOutcome(outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy) == -1 {
 				retryExclusions.MarkStreamFailure(account.ID(), outcome, maxRetries, attemptMaxRateLimitRetries, continuousRetryPolicy)
 			}
@@ -1616,7 +1677,11 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 
 		if !continuousRetryBuffersAttempts(continuousRetryPolicy) || continuousRetryBufferedAttemptCommitted(continuousRetryPolicy, outcome) {
-			h.store.BindSessionAffinityWithGuard(affinityKey, account, proxyURL, affinityGuard)
+			if !h.bindContinuousRetryAccountSessionWithGuard(c, affinityKey, account, proxyURL, affinityGuard) {
+				resp.Body.Close()
+				h.store.Release(account)
+				return
+			}
 		}
 
 		logStatusCode := outcome.logStatusCode
@@ -1682,9 +1747,12 @@ func (h *Handler) Messages(c *gin.Context) {
 			NoteClaudeGatedModelSuccess(h.store, account, attemptEffectiveModel)
 		}
 		if outcome.penalize {
+			disposition := h.streamSessionFailureDisposition(outcome, terminalFailurePayload, false)
 			recyclePooledClient(account, proxyURL)
-			h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
-			h.store.UnbindSessionAffinity(affinityKey, account.ID())
+			if disposition.reportAccount {
+				h.reportStreamOutcomeFailure(account, outcome, time.Duration(totalDuration)*time.Millisecond)
+			}
+			h.applySessionFailureAffinity(affinityKey, account, disposition)
 		} else if outcome.logStatusCode == http.StatusOK {
 			h.store.ClearModelCooldown(account, attemptEffectiveModel)
 			h.store.ReportRequestSuccess(account, time.Duration(totalDuration)*time.Millisecond)

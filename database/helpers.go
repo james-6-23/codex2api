@@ -99,6 +99,7 @@ func parseDBTimeString(value string) (time.Time, error) {
 	layouts := []string{
 		time.RFC3339Nano,
 		time.RFC3339,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
 		"2006-01-02 15:04:05.999999999-07:00",
 		"2006-01-02 15:04:05.999999999",
 		"2006-01-02 15:04:05",
@@ -131,6 +132,13 @@ func (db *DB) timeArg(value time.Time) interface{} {
 		return sqliteTimeParam(value)
 	}
 	return value
+}
+
+func (db *DB) preciseTimeArg(value time.Time) any {
+	if db != nil && db.isSQLite() {
+		return value.UTC().Format("2006-01-02 15:04:05.000000000")
+	}
+	return value.UTC()
 }
 
 func decodeCredentials(raw interface{}) map[string]interface{} {

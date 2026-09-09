@@ -682,12 +682,15 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 		usageApplied = account.ApplyUsageObservation(observedAt, func() {
 			if w5h != nil {
 				resetAt := whamWindowResetAt(w5h, observedAt)
+				if resetAt.IsZero() {
+					_, resetAt, _ = account.GetUsageSnapshot5h()
+				}
 				account.SetUsageSnapshot5hAt(w5h.UsedPercent, resetAt, observedAt)
 				result.UsagePct5h = w5h.UsedPercent
 				result.Reset5hAt = resetAt
 				result.HasUsage5h = true
 				result.Used5hHeaders = true
-				if store != nil {
+				if store != nil && !resetAt.IsZero() {
 					// 5h 窗口重置时刻武装「到点即探」，窗口翻新即刷新进度条。
 					store.WakeBoundaryProbe(resetAt)
 				}
@@ -698,12 +701,13 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 
 			if w7d != nil {
 				resetAt := whamWindowResetAt(w7d, observedAt)
-				account.SetReset7dAt(resetAt)
-				account.SetWindow7dSeconds(w7d.LimitWindowSeconds)
+				account.SetUsageSnapshot7dAt(w7d.UsedPercent, resetAt, w7d.LimitWindowSeconds, observedAt)
 				result.UsagePct7d = w7d.UsedPercent
 				result.HasUsage7d = true
 				if store != nil {
-					store.WakeBoundaryProbe(resetAt)
+					if !resetAt.IsZero() {
+						store.WakeBoundaryProbe(resetAt)
+					}
 					store.PersistUsageSnapshot(account, w7d.UsedPercent)
 					if result.UsagePct7d >= 100 {
 						result.Usage7dRateLimited = store.MarkUsage7dRateLimited(account)
@@ -839,10 +843,15 @@ func whamWindowResetAt(w *WhamUsageWindow, now time.Time) time.Time {
 	}
 	// reset_at 是 unix 时间戳（秒），优先使用；缺失时 fallback 到 reset_after_seconds
 	if w.ResetAt > 0 {
-		return time.Unix(w.ResetAt, 0)
+		resetAt := time.Unix(w.ResetAt, 0)
+		if normalized, ok := usageResetAtFromAbsolute(resetAt, now, w.LimitWindowSeconds); ok {
+			return normalized
+		}
 	}
 	if w.ResetAfterSeconds > 0 {
-		return now.Add(time.Duration(w.ResetAfterSeconds) * time.Second)
+		if resetAt, ok := usageResetAtFromAfter(now, float64(w.ResetAfterSeconds), float64(w.LimitWindowSeconds)); ok {
+			return resetAt
+		}
 	}
 	return time.Time{}
 }

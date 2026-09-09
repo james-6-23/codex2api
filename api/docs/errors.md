@@ -61,6 +61,8 @@ All API errors follow this structure:
 | `upstream_error` | Error from upstream service |
 | `upstream_timeout` | Request to upstream timed out |
 
+Codex Responses, compact Responses, Chat, and Responses WebSocket selection failures now use the generic `service_unavailable` surface with a request ID. Protected NewAPI administrator diagnostics are described in `dispatch-diagnostics.md`; existing quota, session-limit, policy, and upstream error contracts are unchanged.
+
 ## Error Types
 
 | Type | Description |

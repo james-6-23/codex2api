@@ -106,12 +106,12 @@ func APIKeyScopeInflight(apiKeyID int64, scopeType string, scopeID int64) int {
 }
 
 // scopeConcurrencyFull 判断某条 scope 的并发位是否已满。
-func scopeConcurrencyFull(apiKeyID int64, scope database.APIKeyScopeLimit) bool {
+func scopeConcurrencyFull(apiKeyID int64, scope database.APIKeyScopeLimit, allowance int) bool {
 	if scope.MaxConcurrency <= 0 {
 		return false
 	}
 	key := scopeSkipKey{apiKeyID: apiKeyID, scopeType: scope.ResolveScopeType(), scopeID: scope.ScopeID}
-	return apiKeyScopeConcurrency.count(key) >= scope.MaxConcurrency
+	return apiKeyScopeConcurrency.count(key) >= scope.MaxConcurrency+max(0, allowance)
 }
 
 // scopeMatchesAccount 判断账号是否落在某条 scope 上。

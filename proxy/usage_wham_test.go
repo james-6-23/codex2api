@@ -594,6 +594,61 @@ func TestApplyWhamUsage_UsedPercentOnlyPayloadPreserves5h(t *testing.T) {
 	}
 }
 
+func TestApplyWhamUsage_MissingOrInvalidResetPreservesExistingWindows(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		resetAtOffset time.Duration
+	}{
+		{name: "missing"},
+		{name: "past absolute reset", resetAtOffset: -time.Hour},
+		{name: "far future absolute reset", resetAtOffset: 40 * 24 * time.Hour},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+			account := &auth.Account{DBID: 45, AccessToken: "at", PlanType: "plus", Status: auth.StatusReady}
+			observedBefore := time.Now().Add(-time.Minute)
+			reset5h := time.Now().Add(3 * time.Hour).Truncate(time.Second)
+			reset7d := time.Now().Add(5 * 24 * time.Hour).Truncate(time.Second)
+			account.SetUsageSnapshot5hAt(10, reset5h, observedBefore)
+			account.SetReset7dAt(reset7d)
+			account.SetWindow7dSeconds(604800)
+
+			usage := &WhamUsage{PlanType: "plus"}
+			usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 25, LimitWindowSeconds: 18000}
+			usage.RateLimit.SecondaryWindow = &WhamUsageWindow{UsedPercent: 40, LimitWindowSeconds: 604800}
+			if tc.resetAtOffset != 0 {
+				candidate := time.Now().Add(tc.resetAtOffset).Unix()
+				usage.RateLimit.PrimaryWindow.ResetAt = candidate
+				usage.RateLimit.SecondaryWindow.ResetAt = candidate
+			}
+
+			result := ApplyWhamUsage(store, account, usage)
+			if !result.HasUsage5h || result.UsagePct5h != 25 || !result.HasUsage7d || result.UsagePct7d != 40 {
+				t.Fatalf("usage result = %+v, want updated percentages", result)
+			}
+			if pct, gotReset, ok := account.GetUsageSnapshot5h(); !ok || pct != 25 || !gotReset.Equal(reset5h) {
+				t.Fatalf("5h snapshot = (%v, %v, %v), want 25%% with preserved reset %v", pct, gotReset, ok, reset5h)
+			}
+			if got := account.GetReset7dAt(); !got.Equal(reset7d) {
+				t.Fatalf("7d reset = %v, want preserved %v", got, reset7d)
+			}
+		})
+	}
+}
+
+func TestWhamWindowResetAtFallsBackFromInvalidAbsoluteToResetAfter(t *testing.T) {
+	now := time.Date(2026, time.September, 2, 12, 0, 0, 0, time.UTC)
+	window := &WhamUsageWindow{
+		LimitWindowSeconds: 604800,
+		ResetAt:            now.Add(-time.Hour).Unix(),
+		ResetAfterSeconds:  3600,
+	}
+
+	if got, want := whamWindowResetAt(window, now), now.Add(time.Hour); !got.Equal(want) {
+		t.Fatalf("whamWindowResetAt() = %v, want reset-after fallback %v", got, want)
+	}
+}
+
 // 防御性测试：即使后端把 5h/7d 字段顺序对调，分类也必须按 limit_window_seconds 走。
 func TestApplyWhamUsage_ClassifiesByWindowSeconds(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})

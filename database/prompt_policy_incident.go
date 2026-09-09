@@ -480,7 +480,7 @@ func reconcileStoredPromptPolicyIncidentFromShadowTx(ctx context.Context, tx *sq
 		local_reason_code=$6,
 		local_primary_origin=CASE WHEN $7<>'' THEN $7 ELSE local_primary_origin END,
 		local_matched_patterns=$8
-		WHERE request_correlation_id=$9 AND upstream_error_code='cyber_policy'`,
+		WHERE request_correlation_id=$9 AND upstream_error_code IN ('cyber_policy', 'bio_policy')`,
 		PromptPolicyComparisonLocalDetected, PromptPolicyEvaluationCompleted, PromptPolicyOutcomeNoHit, PromptPolicyOutcomeAuditHit,
 		input.AuditScore, input.ReasonCode, input.PrimaryOrigin, input.MatchedPatterns, strings.TrimSpace(input.RequestCorrelationID)); err != nil {
 		return err
@@ -488,7 +488,7 @@ func reconcileStoredPromptPolicyIncidentFromShadowTx(ctx context.Context, tx *sq
 	rows, err := tx.QueryContext(ctx, `SELECT evidence.id, evidence.metadata_json
 		FROM prompt_rule_candidate_evidence evidence
 		JOIN prompt_policy_incidents incident ON incident.incident_id=evidence.prompt_policy_incident_id
-		WHERE incident.request_correlation_id=$1 AND incident.upstream_error_code='cyber_policy'
+		WHERE incident.request_correlation_id=$1 AND incident.upstream_error_code IN ('cyber_policy', 'bio_policy')
 		  AND evidence.source_kind=$2`, strings.TrimSpace(input.RequestCorrelationID), PromptRuleCandidateSourceUpstreamCyberPolicy)
 	if err != nil {
 		return err
@@ -527,7 +527,7 @@ func reconcileStoredPromptPolicyIncidentFromShadowTx(ctx context.Context, tx *sq
 		event_kind='upstream_cy_local_detected', request_risk_score=28, evidence_confidence=85,
 		local_outcome=$1, local_comparison=$2, reason_code=$3
 		WHERE source_type=$4 AND source_id IN (
-			SELECT incident_id FROM prompt_policy_incidents WHERE request_correlation_id=$5 AND upstream_error_code='cyber_policy'
+			SELECT incident_id FROM prompt_policy_incidents WHERE request_correlation_id=$5 AND upstream_error_code IN ('cyber_policy', 'bio_policy')
 		)`, PromptPolicyOutcomeAuditHit, PromptPolicyComparisonLocalDetected, input.ReasonCode, promptRiskSourceIncident, strings.TrimSpace(input.RequestCorrelationID))
 	return err
 }

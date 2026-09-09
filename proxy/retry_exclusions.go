@@ -432,10 +432,10 @@ func (h *Handler) waitForRetryAccountAvailableWithGuard(ctx context.Context, aff
 	}
 	waitForAccount := func(waitCtx context.Context, timeout time.Duration) (*auth.Account, string, auth.SessionAffinityGuard) {
 		if preserveBinding {
-			account, proxyURL := h.store.WaitForContinuationAvailableWithDispatch(waitCtx, affinityKey, timeout, apiKeyID, exclude, filter, policy)
+			account, proxyURL := h.store.WaitForContinuationAvailableWithDispatch(waitCtx, affinityKey, timeout, apiKeyID, exclude, filter, policy, auth.SelectionTraceFromContext(ctx))
 			return account, proxyURL, auth.SessionAffinityGuard{}
 		}
-		return h.store.WaitForSessionAvailableWithDispatchGuard(waitCtx, affinityKey, timeout, apiKeyID, exclude, filter, policy)
+		return h.store.WaitForSessionAvailableWithDispatchGuard(waitCtx, affinityKey, timeout, apiKeyID, exclude, filter, policy, auth.SelectionTraceFromContext(ctx))
 	}
 	const maximumWait = 30 * time.Second
 	if !continuousRetryKeepaliveActive(ctx) || continuousRetryKeepaliveInterval <= 0 {
@@ -532,14 +532,15 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 		return nil, "", auth.SessionAffinityGuard{}
 	}
 	for {
+		auth.SelectionTraceFromContext(ctx).Reset()
 		exclude := exclusions.ForSelection()
 		var account *auth.Account
 		var stickyProxyURL string
 		var guard auth.SessionAffinityGuard
 		if preserveBinding {
-			account, stickyProxyURL = h.store.NextForContinuationWithDispatch(affinityKey, apiKeyID, exclude, filter, policy)
+			account, stickyProxyURL = h.store.NextForContinuationWithDispatch(affinityKey, apiKeyID, exclude, filter, policy, auth.SelectionTraceFromContext(ctx))
 		} else {
-			account, stickyProxyURL, guard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, exclude, filter, policy)
+			account, stickyProxyURL, guard = h.nextAccountForSessionWithDispatchGuard(affinityKey, apiKeyID, exclude, filter, policy, auth.SelectionTraceFromContext(ctx))
 		}
 		if account != nil {
 			if ctx.Err() != nil {
@@ -547,6 +548,9 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 				return nil, "", auth.SessionAffinityGuard{}
 			}
 			return account, stickyProxyURL, guard
+		}
+		if auth.SelectionTraceFromContext(ctx).SessionModelDenied() {
+			return nil, "", auth.SessionAffinityGuard{}
 		}
 		h.store.TriggerDispatchStateReconcileAsync()
 		account, stickyProxyURL, guard = h.waitForRetryAccountAvailableWithGuard(ctx, affinityKey, apiKeyID, exclude, filter, preserveBinding, policy)
@@ -561,6 +565,9 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 			return nil, "", auth.SessionAffinityGuard{}
 		}
 		if !exclusions.ResetSoft() {
+			if auth.SelectionTraceFromContext(ctx).SessionModelDenied() {
+				return nil, "", auth.SessionAffinityGuard{}
+			}
 			if exclusions.ResetTransient() {
 				log.Printf("可恢复故障已遍历账号池，清空本轮暂态排除并进入下一轮重试")
 				continue

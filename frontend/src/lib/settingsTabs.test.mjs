@@ -2,7 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 
-const settings = readFileSync(new URL('../pages/Settings.tsx', import.meta.url), 'utf8')
+const settings = readFileSync(new URL('../pages/Settings.tsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
 const en = JSON.parse(readFileSync(new URL('../locales/en.json', import.meta.url), 'utf8'))
 

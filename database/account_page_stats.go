@@ -81,6 +81,13 @@ func (db *DB) getAccountRequestCountsByIDs(ctx context.Context, ids []int64, wit
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	archivedCounts, err := db.archivedAccountRequestCounts(ctx, time.Now().AddDate(0, 0, -7), ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range archivedCounts {
+		mergeAccountRequestCount(result, item)
+	}
 	// 错误码/成功模型拆分只给当前页胶囊用。全池分批刷新若也跑这两条
 	// GROUP BY,每一批都会把 usage_logs 再扫两遍。
 	if withBreakdown && len(ids) <= accountRequestCountBreakdownMaxIDs {
@@ -88,6 +95,9 @@ func (db *DB) getAccountRequestCountsByIDs(ctx context.Context, ids []int64, wit
 			return nil, err
 		}
 		if err := db.attachSuccessModelCounts(ctx, result, ids); err != nil {
+			return nil, err
+		}
+		if err := db.attachArchivedAccountRequestBreakdowns(ctx, result, ids); err != nil {
 			return nil, err
 		}
 	}
@@ -221,6 +231,16 @@ func (db *DB) GetAccountUsageWindowsByIDs(ctx context.Context, ids []int64, shor
 	if err := rows.Err(); err != nil {
 		return nil, nil, err
 	}
+	archivedShort, err := db.archivedAccountTimeRangeUsage(ctx, shortSince, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	archivedLong, err := db.archivedAccountTimeRangeUsage(ctx, longSince, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	mergeAccountTimeRangeUsage(shortWindow, archivedShort)
+	mergeAccountTimeRangeUsage(longWindow, archivedLong)
 	return shortWindow, longWindow, nil
 }
 
@@ -252,7 +272,15 @@ func (db *DB) GetAccountUsageSinceByIDs(ctx context.Context, ids []int64, since 
 		}
 		result[usage.AccountID] = usage
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	archived, err := db.archivedAccountTimeRangeUsage(ctx, since, ids)
+	if err != nil {
+		return nil, err
+	}
+	mergeAccountTimeRangeUsage(result, archived)
+	return result, nil
 }
 
 // GetAccountModelCountsSinceByIDs 按模型拆分指定账号在 since 之后的请求数、成功数与平均首字时长。
@@ -291,7 +319,36 @@ func (db *DB) GetAccountModelCountsSinceByIDs(ctx context.Context, ids []int64, 
 		}
 		result[accountID][model] = count
 	}
-	return result, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	args = []interface{}{since.UTC().Unix() / 3600 * 3600}
+	idFilter = db.appendAccountIDFilter(&args, ids)
+	archiveRows, err := db.conn.QueryContext(ctx, `SELECT account_id, model,
+		COALESCE(SUM(end_user_requests),0), COALESCE(SUM(success_requests),0)
+		FROM usage_account_hourly_rollups
+		WHERE bucket_start >= $1 AND `+idFilter+`
+		GROUP BY account_id, model`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer archiveRows.Close()
+	for archiveRows.Next() {
+		var accountID int64
+		var model string
+		var count AccountModelCount
+		if err := archiveRows.Scan(&accountID, &model, &count.Requests, &count.Success); err != nil {
+			return nil, err
+		}
+		if result[accountID] == nil {
+			result[accountID] = make(map[string]AccountModelCount)
+		}
+		current := result[accountID][model]
+		current.Requests += count.Requests
+		current.Success += count.Success
+		result[accountID][model] = current
+	}
+	return result, archiveRows.Err()
 }
 
 func positiveUniqueIDs(ids []int64) []int64 {

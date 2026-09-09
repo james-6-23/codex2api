@@ -55,6 +55,7 @@ import type {
   AccountsPageResponse,
   AccountPageStatsResponse,
   AccountLiveStateResponse,
+  AccountSessionsResponse,
   ChartAggregation,
   CreateAccountResponse,
   CreateAPIKeyResponse,
@@ -141,6 +142,8 @@ import type {
   AccountOperationSelector,
   AccountHealthBarsResponse,
   BatchUpdateAccountsRequest,
+  BatchUpdateAccountModelsRequest,
+  BatchUpdateAccountModelsResponse,
   BackgroundUploadResponse,
   CreateAccountGroupRequest,
   UpdateAccountGroupRequest,
@@ -868,12 +871,26 @@ export const api = {
     }>(`/accounts/${id}/usage/refresh`, { method: 'POST' }),
   updateAccountScheduler: (id: number, data: UpdateAccountSchedulerRequest) =>
     request<MessageResponse>(`/accounts/${id}/scheduler`, { method: 'PATCH', body: JSON.stringify(data) }),
+  getAccountSessions: (id: number, signal?: AbortSignal) =>
+    request<AccountSessionsResponse>(`/accounts/${id}/sessions`, { signal }),
+  releaseAccountSession: (id: number, sessionId?: string) =>
+    request<MessageResponse>(`/accounts/${id}/sessions${sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : ''}`, { method: 'DELETE' }),
   // 设置 OAuth 账号的支持模型白名单;空数组表示清空(该账号可调度所有模型)。返回归一化后的白名单。
   updateAccountModels: (id: number, models: string[]) =>
     request<{ models: string[] }>(`/accounts/${id}/models`, { method: 'PATCH', body: JSON.stringify({ models }) }),
-  // 拉取该账号真实的上游模型清单(slug 列表,不落库),供白名单编辑器合并使用。
+  batchUpdateAccountModels: (data: BatchUpdateAccountModelsRequest) =>
+    request<BatchUpdateAccountModelsResponse>('/accounts/batch-models', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  // 拉取该账号真实的上游模型清单；已有非空白名单会自动并入缺少的新模型，
+  // 空白名单保持“全部放行”语义。
   syncAccountModelsUpstream: (id: number) =>
-    request<{ models: string[] }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
+    request<{
+      models: string[]
+      whitelist?: string[]
+      whitelist_added?: string[]
+    }>(`/accounts/${id}/models/sync-upstream`, { method: 'POST' }),
   // 用账号自身凭据并发探测系统文本模型(已排除 image),返回确认可用的模型及每个模型的判定明细。只读不落库。
   probeAccountModels: (id: number) =>
     request<{
@@ -1141,6 +1158,8 @@ export const api = {
       { signal: params.signal },
     )
   },
+  getUsageRequestDiagnostics: (id: number, signal?: AbortSignal) =>
+    request<import('./lib/usageRequestDiagnostics').UsageRequestDiagnosticDetail>(`/usage/logs/${id}/diagnostics`, { signal }),
   getUsageLogs: (params: { start?: string; end?: string; limit?: number } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.start && params.end) {
@@ -1384,12 +1403,18 @@ export const api = {
 	},
 	getPromptRiskProfile: (subjectType: string, subjectKey: string, eventPage = 1, eventPageSize = 20, trustEventPage = 1, trustEventPageSize = 20) =>
 		request<import('./types').PromptRiskProfileDetailResponse>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}?event_page=${eventPage}&event_page_size=${eventPageSize}&trust_event_page=${trustEventPage}&trust_event_page_size=${trustEventPageSize}`),
+	updatePromptRiskProfileSessionLimit: (subjectType: string, subjectKey: string, data: { mode: import('./types').PromptRiskSessionLimitMode; limit: number; window_seconds: number }) =>
+		request<{ session_limit: import('./types').PromptRiskSessionLimitPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/session-limit`, { method: 'PUT', body: JSON.stringify(data) }),
 	upsertPromptRiskTrust: (subjectType: string, subjectKey: string, data: { duration_hours: number; risk_threshold: number; reason: string }) =>
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'PUT', body: JSON.stringify(data) }),
 	revokePromptRiskTrust: (subjectType: string, subjectKey: string) =>
 		request<{ policy: import('./types').PromptRiskTrustPolicy }>(`/prompt-policy/risk-profiles/${encodeURIComponent(subjectType)}/${encodeURIComponent(subjectKey)}/trust`, { method: 'DELETE' }),
 	unlockPromptConversation: (lockKey: string, reason = '管理员主动解锁', scope: 'conversation' | 'user_cooldown' = 'conversation') =>
 		request<{ lock: import('./types').PromptConversationLock; scope: string; unlocked_count: number }>(`/prompt-policy/conversation-locks/${encodeURIComponent(lockKey)}/unlock`, { method: 'POST', body: JSON.stringify({ reason, scope }) }),
+	lockPromptUserWindow: (subjectKey: string, sessionHash: string, windowExpiresAt: string) =>
+		request<{ lock: import('./types').PromptManualWindowLock }>(`/prompt-policy/risk-profiles/newapi_user/${encodeURIComponent(subjectKey)}/session-windows/${encodeURIComponent(sessionHash)}/lock`, { method: 'POST', body: JSON.stringify({ window_expires_at: windowExpiresAt }) }),
+	unlockPromptUserWindow: (subjectKey: string, sessionHash: string) =>
+		request<{ ok: boolean }>(`/prompt-policy/risk-profiles/newapi_user/${encodeURIComponent(subjectKey)}/session-windows/${encodeURIComponent(sessionHash)}/unlock`, { method: 'POST' }),
   testPromptFilter: (data: { text: string; endpoint?: string; model?: string }) =>
     request<PromptFilterTestResponse>('/prompt-filter/test', { method: 'POST', body: JSON.stringify(data) }),
   testPromptReview: (data: PromptReviewTestRequest) =>
@@ -1575,7 +1600,7 @@ export const api = {
     request<{ message: string; inserted: number; total: number }>('/proxies', { method: 'POST', body: JSON.stringify(data) }),
   deleteProxy: (id: number) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'DELETE' }),
-  updateProxy: (id: number, data: { url?: string; label?: string; enabled?: boolean }) =>
+  updateProxy: (id: number, data: { url?: string; label?: string; enabled?: boolean; timezone_override?: string }) =>
     request<MessageResponse>(`/proxies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   batchDeleteProxies: (ids: number[]) =>
     request<{ message: string; deleted: number }>('/proxies/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }),
@@ -1622,6 +1647,8 @@ export interface ProxyRow {
   created_at: string
   test_ip: string
   test_location: string
+  test_timezone: string
+  timezone_override: string
   test_latency_ms: number
   test_status: 'untested' | 'success' | 'error'
   risk_score?: ProxyRiskScoreSnapshot | null
@@ -1648,5 +1675,6 @@ export interface ProxyTestResult {
   isp?: string
   latency_ms?: number
   location?: string
+  timezone?: string
   error?: string
 }

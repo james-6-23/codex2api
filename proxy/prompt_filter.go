@@ -16,6 +16,8 @@ import (
 const (
 	upstreamCyberPolicyUserMessage       = "此内容因可能存在网络安全风险而被标记，本次已记录。请重新表述请求；再次触发可能会停用账号。如果确认是误判，请联系管理员。"
 	upstreamCyberPolicyLockedUserMessage = "此内容因可能存在网络安全风险而被标记，本次已记录并锁定当前对话。请新建对话后继续；再次触发可能会停用账号。如果确认是误判，请联系管理员解锁。"
+	upstreamBioPolicyUserMessage         = "此内容因可能存在生物安全风险而被标记，本次已记录。请重新表述请求；再次触发可能会停用账号。如果确认是误判，请联系管理员。"
+	upstreamBioPolicyLockedUserMessage   = "此内容因可能存在生物安全风险而被标记，本次已记录并锁定当前对话。请新建对话后继续；再次触发可能会停用账号。如果确认是误判，请联系管理员解锁。"
 	defaultLocalPromptBlockMessage       = "Request contains content blocked by prompt filter"
 )
 
@@ -70,8 +72,18 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 	if h.rejectRequiredNewAPIIdentity(c, cfg.Advanced.NewAPI, signedBody) {
 		return true
 	}
+	if apiErr := h.requestWindowGrantError(c); apiErr != nil {
+		api.SendError(c, apiErr)
+		return true
+	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
+	}
+	h.recordUsageAuthorization(c, "audit")
+	if passiveInternalRequestAuthorized(c) {
+		// Field-classified internal turns contain transcript or original
+		// user text by design. Do not recursively filter it as a fresh user prompt.
+		return false
 	}
 	// Skip envelope construction and body traversal when neither the local
 	// filter nor a body-dependent extension is enabled (issue #417).
@@ -150,8 +162,16 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		sendAnthropicError(c, http.StatusUnauthorized, "authentication_error", apiErr.Message)
 		return true
 	}
+	if apiErr := h.requestWindowGrantError(c); apiErr != nil {
+		sendAnthropicError(c, api.HTTPStatusCode(apiErr.Code), string(apiErr.Type), apiErr.Message, apiErr.Code)
+		return true
+	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
 		return true
+	}
+	h.recordUsageAuthorization(c, "audit")
+	if passiveInternalRequestAuthorized(c) {
+		return false
 	}
 	if !promptfilter.RequiresRequestText(cfg) {
 		return false
@@ -265,6 +285,7 @@ type promptFilterAuditContext struct {
 	NewAPIRequestID      string
 	NewAPIDecisionID     string
 	SessionHash          string
+	RootSessionHash      string
 	ClientIPHash         string
 }
 
@@ -280,6 +301,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 	populatePromptFilterAPIKeyMeta(c, input)
 	newAPIStatus, policyContext := h.cachedNewAPIPolicyAuditState(c)
 	sessionHash := ""
+	rootSessionHash := ""
 	newAPIChannelID := 0
 	newAPIUserName, newAPIUserEmail, newAPIUserGroup := "", "", ""
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && policyContext.MetaVerified {
@@ -294,6 +316,38 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		// make the same choice for optional unsigned bindings, disabled bindings,
 		// and failed optional verification—not only for completely unbound keys.
 		sessionHash = promptConversationLockFallbackSessionHash(c)
+	}
+	// Preserve exact-session accounting only when root resolution is not
+	// authoritative. A signed root-capable sender may explicitly report that
+	// the root is unavailable; that state must not fall back to the leaf and
+	// temporarily consume an operational account window.
+	rootSessionHash = ""
+	// RootSessionHash is deliberately operational-only. Prompt risk profiles
+	// and CYB evidence keep the exact leaf SessionHash, while account/session
+	// observations collapse hidden Guardian and sub-agent leaves to the main
+	// user-visible task.
+	if newAPIStatus == "verified" || newAPIStatus == "signed_response" || newAPIStatus == "unbound" {
+		rootBody := ingressRequestBody(c, nil)
+		if len(rootBody) == 0 && isResponsesWebSocketUpgradeRequest(c.Request) {
+			// WebSocket request headers belong to the connection, while the root
+			// session graph normally lives in the current response.create frame.
+			// The immutable HTTP ingress body is intentionally absent for WS, so
+			// use only this frame's already-cached body for operational grouping.
+			if frameBody, ok := rawRequestBodyFromContext(c); ok {
+				rootBody = frameBody
+			}
+		}
+		rootIdentity := h.resolveRequestRootSessionIdentityForContext(c, rootBody)
+		if rootIdentity.stable && !rootIdentity.conflict && rootIdentity.sessionID != "" {
+			rootSessionHash = hashRiskIdentity(rootIdentity.sessionID)
+		} else if !rootIdentity.authoritative {
+			// Unbound/legacy traffic keeps exact-session compatibility. A
+			// root-capable signed sender can instead report that the current WS
+			// frame has no usable root yet; in that case leave the operational
+			// identity empty so its leaf is not temporarily counted as a second
+			// account window before a later frame binds the real root.
+			rootSessionHash = sessionHash
+		}
 	}
 	clientIP := input.ClientIP
 	if (newAPIStatus == "verified" || newAPIStatus == "signed_response") && strings.TrimSpace(policyContext.Identity.ClientIP) != "" {
@@ -317,6 +371,7 @@ func (h *Handler) capturePromptFilterAuditContext(c *gin.Context) promptFilterAu
 		NewAPIUserGroup:      newAPIUserGroup,
 		NewAPIRequestID:      policyContext.Identity.RequestID,
 		SessionHash:          sessionHash,
+		RootSessionHash:      rootSessionHash,
 		ClientIPHash:         hashRiskIdentity(clientIP),
 	}
 }
@@ -492,7 +547,7 @@ func applyVerifiedNewAPIAuditMeta(policyContext verifiedNewAPIPolicyContext, inp
 }
 
 func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model string, body []byte, attempts ...upstreamCyberPolicyAttempt) (string, bool) {
-	errorCode := upstreamCyberPolicyCode(body)
+	errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(body))
 	if errorCode == "" {
 		return "", false
 	}
@@ -516,7 +571,14 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 		// Without a verified NewAPI identity, do not apply a Key-wide strike or
 		// cooldown. Keep the replay guard scoped to a stable Codex session or to
 		// the exact prompt fingerprint plus API Key and client IP.
-		h.lockPromptConversationAfterUnsignedUpstreamCYB(c, endpoint, model, incidentID)
+		locked := h.lockPromptConversationAfterUnsignedUpstreamCYB(c, endpoint, model, incidentID, errorCode)
+		_, hasSession := promptConversationLockFallbackIdentity(c)
+		if c != nil {
+			c.Set(upstreamPolicyResponseContextKey, newAPIPolicyDecisionMetadata{
+				ReasonCode: newAPIUpstreamCyberPolicyReasonCode, UpstreamPolicyCode: errorCode,
+				ConversationLocked: locked && hasSession,
+			})
+		}
 	}
 	return incidentID, accepted
 }
@@ -542,8 +604,9 @@ func upstreamCyberPolicyCode(body []byte) string {
 		return ""
 	}
 	for _, path := range []string{"codex_error_info", "error.codex_error_info", "error.code", "error.type", "code", "type"} {
-		if value := strings.TrimSpace(gjson.GetBytes(body, path).String()); strings.EqualFold(value, "cyber_policy") {
-			return "cyber_policy"
+		switch value := strings.ToLower(strings.TrimSpace(gjson.GetBytes(body, path).String())); value {
+		case "cyber_policy", "bio_policy":
+			return value
 		}
 	}
 	return ""
@@ -551,6 +614,19 @@ func upstreamCyberPolicyCode(body []byte) string {
 
 func isExplicitUpstreamCyberPolicy(body []byte) bool {
 	return upstreamCyberPolicyCode(responseFailedErrorBody(body)) != ""
+}
+
+func upstreamPolicyUserMessage(errorCode string, locked bool) string {
+	if errorCode == "bio_policy" {
+		if locked {
+			return upstreamBioPolicyLockedUserMessage
+		}
+		return upstreamBioPolicyUserMessage
+	}
+	if locked {
+		return upstreamCyberPolicyLockedUserMessage
+	}
+	return upstreamCyberPolicyUserMessage
 }
 
 func populatePromptFilterAPIKeyMeta(c *gin.Context, input *database.PromptFilterLogInput) {

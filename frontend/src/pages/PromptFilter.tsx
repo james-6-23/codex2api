@@ -7,6 +7,11 @@ import { AdminAPIError, api } from '../api'
 import PageHeader from '../components/PageHeader'
 import Pagination from '../components/Pagination'
 import PromptFilterNewAPIBindings from '../components/PromptFilterNewAPIBindings'
+import SessionCreationCooldownControls from '../components/SessionCreationCooldownControls'
+import { defaultSessionCreationCooldown, parseSessionCreationCooldown } from '../lib/sessionCreationCooldown'
+import type { SessionCreationCooldownConfig } from '../lib/sessionCreationCooldown'
+import type { AccountSessionSummary, PromptManualWindowLock } from '../types'
+import { formatSessionUsageDuration } from '../lib/sessionUsageStats'
 import StateShell from '../components/StateShell'
 import { StatTile } from '../components/StatTile'
 import { DEFAULT_PAGE_SIZE_OPTIONS, usePersistedPageSize } from '../hooks/usePersistedPageSize'
@@ -17,7 +22,7 @@ import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { getErrorMessage } from '../utils/error'
 import { getPromptFilterScoreBand, normalizePromptFilterScore } from '../lib/promptFilterScore'
 import { parseAdvancedConfigDocument, patchAdvancedConfigDocument, readAdvancedConfigPath } from '../types'
-import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, SystemSettings, PromptLogRetention, PromptRiskIncidentSubject, PromptIntelligenceDraftSuggestion } from '../types'
+import type { AdvancedConfigObject, AdvancedConfigPatch, PromptFilterLog, PromptFilterMatch, PromptFilterRule, PromptFilterRulesResponse, PromptFilterTestResponse, PromptGuardConfig, PromptGuardLayer, PromptGuardMode, PromptGuardProfile, PromptGuardProvider, PromptIdentityUpdateMode, PromptIntelligenceAIAnalysisResponse, PromptIntelligenceAIProvider, PromptIntelligenceCandidate, PromptIntelligenceEvidenceResponse, PromptIntelligenceGatewayKey, PromptIntelligenceRun, PromptPolicyAuditHealth, PromptPolicyIncident, PromptPolicyIncidentDetailResponse, PromptReviewAPIKeyDescriptor, PromptReviewKeyTestResult, PromptReviewProfile, PromptReviewTestResponse, PromptRiskProfile, PromptRiskProfileDetailResponse, PromptRiskSessionWindow, SystemSettings, PromptLogRetention, PromptRiskIncidentSubject, PromptIntelligenceDraftSuggestion } from '../types'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
@@ -225,7 +230,7 @@ type AdvancedProtectionConfig = {
     max_encoded_blocks: number
   }
   context_discount: { enabled: boolean; intent_aware: boolean; max_discount: number; operational_max_discount: number }
-  risk: { enabled: boolean; window_seconds: number; block_threshold: number; review_threshold: number; user_weight_percent: number; ip_weight_percent: number; session_weight_percent: number }
+  risk: { enabled: boolean; window_seconds: number; block_threshold: number; review_threshold: number; user_weight_percent: number; ip_weight_percent: number; session_weight_percent: number; session_creation_limit_enabled: boolean; session_creation_limit: number; session_creation_limit_window_seconds: number; session_creation_cooldown: SessionCreationCooldownConfig }
   sidecar: {
     enabled: boolean
     base_url: string
@@ -316,7 +321,7 @@ const defaultAdvancedProtection: AdvancedProtectionConfig = {
     max_encoded_blocks: 16,
   },
   context_discount: { enabled: true, intent_aware: true, max_discount: 90, operational_max_discount: 0 },
-  risk: { enabled: false, window_seconds: 600, block_threshold: 100, review_threshold: 60, user_weight_percent: 60, ip_weight_percent: 20, session_weight_percent: 20 },
+  risk: { enabled: false, window_seconds: 600, block_threshold: 100, review_threshold: 60, user_weight_percent: 60, ip_weight_percent: 20, session_weight_percent: 20, session_creation_limit_enabled: false, session_creation_limit: 5, session_creation_limit_window_seconds: 3600, session_creation_cooldown: defaultSessionCreationCooldown() },
   sidecar: {
     enabled: false,
     base_url: '',
@@ -421,7 +426,7 @@ function parseAdvancedProtection(value: AdvancedConfigObject): AdvancedProtectio
     },
     normalization: { ...defaultAdvancedProtection.normalization, ...(value.normalization || {}) },
     context_discount: { ...defaultAdvancedProtection.context_discount, ...(value.context_discount || {}) },
-    risk: { ...defaultAdvancedProtection.risk, ...(value.risk || {}) },
+    risk: { ...defaultAdvancedProtection.risk, ...(value.risk || {}), session_creation_cooldown: parseSessionCreationCooldown(readAdvancedConfigPath(value, ['risk', 'session_creation_cooldown'])) },
     sidecar: {
       ...sidecar,
       mode: sidecarModes.includes(sidecar.mode) ? sidecar.mode : defaultAdvancedProtection.sidecar.mode,
@@ -1234,6 +1239,26 @@ function AdvancedProtectionEditor({
               <CompactField label={t('promptFilter.reviewThreshold')} hint={t('promptFilter.help.reviewThreshold')}><DraftNumberInput min={1} max={1000} value={config.risk.review_threshold} onValueChange={(v) => update('risk', { review_threshold: v })} /></CompactField>
             </div>
           </details>
+          <div className="mt-4 border-t pt-4">
+            <SwitchField
+              label={t('promptFilter.sessionCreationLimitTitle')}
+              hint={t('promptFilter.sessionCreationLimitHint')}
+              checked={config.risk.session_creation_limit_enabled}
+              onCheckedChange={(next) => update('risk', { session_creation_limit_enabled: next })}
+            />
+            {config.risk.session_creation_limit_enabled ? (
+              <div className="mt-3 grid gap-3 sm:grid-cols-2">
+                <CompactField label={t('promptFilter.sessionCreationLimitCount')}>
+                  <DraftNumberInput min={1} max={100000} value={config.risk.session_creation_limit} onValueChange={(v) => update('risk', { session_creation_limit: v })} />
+                </CompactField>
+                <CompactField label={t('promptFilter.sessionCreationLimitWindow')} hint={t('promptFilter.sessionCreationLimitWindowHint')}>
+                  <DraftNumberInput min={60} max={2592000} value={config.risk.session_creation_limit_window_seconds} onValueChange={(v) => update('risk', { session_creation_limit_window_seconds: v })} />
+                </CompactField>
+              </div>
+            ) : null}
+            <SessionCreationCooldownControls value={config.risk.session_creation_cooldown}
+              onChange={(next) => applyPatches(Object.entries(next).map(([key, nextValue]) => ({ path: ['risk', 'session_creation_cooldown', key], value: nextValue })))} />
+          </div>
         </AdvancedPanel>
 
         <AdvancedPanel title={t('promptFilter.outputScanTitle')}>
@@ -4323,6 +4348,7 @@ function RiskProfilesView() {
   const [page, setPage] = useState(1)
   const [pageSize, setPageSize] = usePersistedPageSize('prompt_risk_profiles', 20, DEFAULT_PAGE_SIZE_OPTIONS)
   const [profiles, setProfiles] = useState<PromptRiskProfile[]>([])
+  const [accountSummary, setAccountSummary] = useState<AccountSessionSummary | null>(null)
   const [total, setTotal] = useState(0)
   const [scoringVersion, setScoringVersion] = useState('')
   const [guardrail, setGuardrail] = useState('')
@@ -4348,6 +4374,7 @@ function RiskProfilesView() {
 		activityState: filters.activityState,
       })
       setProfiles(result.profiles ?? [])
+      setAccountSummary(result.account_summary ?? null)
       setTotal(result.total ?? 0)
       setScoringVersion(result.scoring_version ?? '')
       setGuardrail(result.guardrail ?? '')
@@ -4372,6 +4399,7 @@ function RiskProfilesView() {
     setPage(1)
   }
   const totalPages = Math.max(1, Math.ceil(total / pageSize))
+  const accountStatusView = filters.subjectType === 'account_status'
   const pageSummary = useMemo(() => {
     const summary = { frozen: 0, cy: 0, critical: 0, high: 0 }
     for (const profile of profiles) {
@@ -4399,7 +4427,7 @@ function RiskProfilesView() {
 
         <div className="mb-4 rounded-lg border border-[hsl(var(--warning))]/30 bg-[hsl(var(--warning-bg))] p-3 text-sm text-[hsl(var(--warning))]">
           <div className="flex items-start gap-2"><ShieldAlert className="mt-0.5 size-4 shrink-0" /><span>{guardrail || t('promptFilter.risk.guardrail')}</span></div>
-          {scoringVersion ? <div className="mt-1 pl-6 font-mono text-xs opacity-75">{scoringVersion}</div> : null}
+          {!accountStatusView && scoringVersion ? <div className="mt-1 pl-6 font-mono text-xs opacity-75">{scoringVersion}</div> : null}
         </div>
 
         <div className="mb-4 grid gap-2 sm:grid-cols-4">
@@ -4418,6 +4446,9 @@ function RiskProfilesView() {
           <Button size="sm" variant={!draftFilters.lockedOnly && !draftFilters.cyOnly && draftFilters.subjectType === '' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: false, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: false, cyOnly: false })); setPage(1) }}>
             <Network className="size-4" />{t('promptFilter.risk.allObjects')}
           </Button>
+          <Button size="sm" variant={!draftFilters.lockedOnly && !draftFilters.cyOnly && draftFilters.subjectType === 'account_status' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, cyOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setFilters((current) => ({ ...current, subjectType: 'account_status', lockedOnly: false, cyOnly: false, riskLevel: '', minScore: '', platform: '', apiKeyId: '' })); setPage(1) }}>
+            <Activity className="size-4" />{t('promptFilter.risk.accountStatus')}
+          </Button>
           <Button size="sm" variant={draftFilters.lockedOnly ? 'destructive' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: '', lockedOnly: true, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: '', lockedOnly: true, cyOnly: false })); setPage(1) }}>
             <ShieldAlert className="size-4" />{t('promptFilter.risk.lockedProfiles')}
           </Button>
@@ -4430,26 +4461,26 @@ function RiskProfilesView() {
           <Button size="sm" variant={!draftFilters.cyOnly && draftFilters.subjectType === 'upstream_account' ? 'default' : 'outline'} onClick={() => { setDraftFilters((current) => ({ ...current, subjectType: 'upstream_account', lockedOnly: false, cyOnly: false })); setFilters((current) => ({ ...current, subjectType: 'upstream_account', lockedOnly: false, cyOnly: false })); setPage(1) }}>
             {t('promptFilter.risk.upstreamAccountProfiles')}
           </Button>
-          <span className="text-xs leading-5 text-muted-foreground">{draftFilters.lockedOnly ? t('promptFilter.risk.lockedProfilesHint') : draftFilters.cyOnly ? t('promptFilter.risk.upstreamCYProfilesHint') : draftFilters.subjectType === 'newapi_user' ? t('promptFilter.risk.peopleProfilesHint') : t('promptFilter.risk.nonPersonHint')}</span>
+          <span className="text-xs leading-5 text-muted-foreground">{draftFilters.lockedOnly ? t('promptFilter.risk.lockedProfilesHint') : draftFilters.cyOnly ? t('promptFilter.risk.upstreamCYProfilesHint') : draftFilters.subjectType === 'account_status' ? t('promptFilter.risk.accountStatusHint') : draftFilters.subjectType === 'newapi_user' ? t('promptFilter.risk.peopleProfilesHint') : t('promptFilter.risk.nonPersonHint')}</span>
         </div>
 
         <div className="mb-4 grid grid-cols-[repeat(auto-fit,minmax(155px,1fr))] gap-3">
           <Field label={t('promptFilter.risk.subjectType')}>
             <Select value={draftFilters.subjectType} onValueChange={(value) => setDraftFilters((current) => ({ ...current, subjectType: value }))} options={[
               { label: t('common.all'), value: '' },
-              ...['newapi_user', 'session', 'api_key', 'client_ip', 'upstream_account'].map((value) => ({ label: t(`promptFilter.risk.subjects.${value}`), value })),
+              ...['newapi_user', 'session', 'api_key', 'client_ip', 'upstream_account', 'account_status'].map((value) => ({ label: t(`promptFilter.risk.subjects.${value}`), value })),
             ]} />
           </Field>
-          <Field label={t('promptFilter.risk.level')}>
+          {!accountStatusView ? <Field label={t('promptFilter.risk.level')}>
             <Select value={draftFilters.riskLevel} onValueChange={(value) => setDraftFilters((current) => ({ ...current, riskLevel: value }))} options={[
               { label: t('common.all'), value: '' },
               ...['low', 'observed', 'elevated', 'high', 'critical'].map((value) => ({ label: t(`promptFilter.risk.levels.${value}`), value })),
             ]} />
-          </Field>
-          <Field label={t('promptFilter.risk.platform')}><Input value={draftFilters.platform} onChange={(event) => setDraftFilters((current) => ({ ...current, platform: event.target.value }))} placeholder="newapi" /></Field>
-          <Field label={t('promptFilter.apiKeyId')}><Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" /></Field>
+          </Field> : null}
+          {!accountStatusView ? <Field label={t('promptFilter.risk.platform')}><Input value={draftFilters.platform} onChange={(event) => setDraftFilters((current) => ({ ...current, platform: event.target.value }))} placeholder="newapi" /></Field> : null}
+          {!accountStatusView ? <Field label={t('promptFilter.apiKeyId')}><Input value={draftFilters.apiKeyId} onChange={(event) => setDraftFilters((current) => ({ ...current, apiKeyId: event.target.value }))} placeholder="ID" /></Field> : null}
           <Field label={t('promptFilter.risk.accountId')}><Input value={draftFilters.accountId} onChange={(event) => setDraftFilters((current) => ({ ...current, accountId: event.target.value }))} placeholder="ID" /></Field>
-          <Field label={t('promptFilter.risk.minScore')}><Input type="number" min={0} max={100} value={draftFilters.minScore} onChange={(event) => setDraftFilters((current) => ({ ...current, minScore: event.target.value }))} placeholder="0" /></Field>
+          {!accountStatusView ? <Field label={t('promptFilter.risk.minScore')}><Input type="number" min={0} max={100} value={draftFilters.minScore} onChange={(event) => setDraftFilters((current) => ({ ...current, minScore: event.target.value }))} placeholder="0" /></Field> : null}
           <Field label={t('promptFilter.risk.activityState')}><Select value={draftFilters.activityState} onValueChange={(value) => setDraftFilters((current) => ({ ...current, activityState: value as RiskProfileFilters['activityState'] }))} options={[
             { label: t('common.all'), value: '' },
             { label: t('promptFilter.risk.activityStates.active'), value: 'active' },
@@ -4464,7 +4495,7 @@ function RiskProfilesView() {
         </div>
 
         <StateShell loading={loading} error={error} isEmpty={!loading && profiles.length === 0} onRetry={() => void loadProfiles()} emptyTitle={t('promptFilter.risk.empty')}>
-          <RiskProfilesTable profiles={profiles} />
+          <RiskProfilesTable profiles={profiles} accountStatus={accountStatusView} accountSummary={accountSummary} />
           <Pagination page={page} totalPages={totalPages} totalItems={total} pageSize={pageSize} onPageChange={setPage} onPageSizeChange={(next) => { setPage(1); setPageSize(next) }} pageSizeOptions={DEFAULT_PAGE_SIZE_OPTIONS} />
         </StateShell>
       </CardContent>
@@ -4501,8 +4532,137 @@ function formatPromptRestrictionRemaining(seconds?: number) {
   return remainder > 0 ? `${hours}h ${remainder}m` : `${hours}h`
 }
 
-function RiskProfilesTable({ profiles }: { profiles: PromptRiskProfile[] }) {
+function formatPromptSessionWindowCountdown(expiresAt: string, now: number) {
+  const total = Math.max(0, Math.ceil((Date.parse(expiresAt) - now) / 1000))
+  const days = Math.floor(total / 86400)
+  const hours = Math.floor((total % 86400) / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  const clock = [hours, minutes, seconds].map((value) => String(value).padStart(2, '0')).join(':')
+  return days > 0 ? `${days}d ${clock}` : clock
+}
+
+function formatPromptSessionClientUserAgent(userAgent?: string) {
+  const normalized = userAgent?.trim() || ''
+  if (!normalized) return '-'
+  const firstProduct = normalized.split(/\s+/, 1)[0]
+  const versionSeparator = firstProduct.indexOf('/')
+  return versionSeparator > 0 ? firstProduct.slice(0, versionSeparator) : firstProduct
+}
+
+function PromptRiskSessionWindows({ windows, manualLocks, onLock, onUnlock, busy }: {
+  windows: PromptRiskSessionWindow[]
+  manualLocks: PromptManualWindowLock[]
+  onLock: (session: PromptRiskSessionWindow) => Promise<void>
+  onUnlock: (sessionHash: string) => Promise<void>
+  busy: boolean
+}) {
   const { t } = useTranslation()
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    setNow(Date.now())
+    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(timer)
+  }, [])
+  const active = useMemo(
+    () => windows.filter((item) => Number.isFinite(Date.parse(item.expires_at)) && Date.parse(item.expires_at) > now),
+    [now, windows],
+  )
+  const activeLocks = manualLocks.filter((lock) => !lock.unlocked_at && Date.parse(lock.expires_at) > now)
+  const inactiveLockedWindows = activeLocks.filter((lock) => !active.some((session) => session.session_hash === lock.session_hash))
+  return <div className="mt-4 rounded-lg border border-violet-500/20 bg-background/75 p-3">
+    <div className="flex flex-wrap items-center justify-between gap-2">
+      <div className="text-sm font-semibold">{t('promptFilter.risk.sessionLimit.activeWindows')}</div>
+      <Badge variant="outline">{active.length}</Badge>
+    </div>
+    {!active.length ? <div className="mt-3 rounded-md border border-dashed px-3 py-5 text-center text-xs text-muted-foreground">{t('promptFilter.risk.sessionLimit.noActiveWindows')}</div> : <div className="mt-3 space-y-2">
+      {active.map((session, index) => {
+        const account = session.account_name || (session.account_id ? `Account #${session.account_id}` : '-')
+        const manualLock = activeLocks.find((lock) => lock.session_hash === session.session_hash)
+        return <div key={session.session_hash} className="rounded-lg border bg-card p-3 shadow-sm">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0 text-xs font-semibold text-violet-700 dark:text-violet-300">#{index + 1} · <span className="font-mono" title={session.session_hash}>{session.session_hash.slice(0, 16)}</span></div>
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {session.expanded !== undefined ? <Badge variant="outline" className={session.expanded ? 'border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300' : 'text-muted-foreground'} title={t('promptFilter.risk.sessionLimit.tariffHint')}>
+                {t(session.expanded ? 'promptFilter.risk.sessionLimit.expandedWindow' : 'promptFilter.risk.sessionLimit.standardWindow')} · ×{session.multiplier ?? 1}
+              </Badge> : null}
+              {manualLock ? <Badge variant="destructive" title={t('promptFilter.risk.sessionLimit.manualLockUntil', { time: formatBeijingTime(manualLock.expires_at) })}>{t('promptFilter.risk.sessionLimit.manuallyLocked')}</Badge> : null}
+              <div className="rounded-full bg-violet-500/10 px-2.5 py-1 font-mono text-xs font-semibold tabular-nums text-violet-700 dark:text-violet-300">{formatPromptSessionWindowCountdown(session.expires_at, now)}</div>
+              <Button size="sm" variant={manualLock ? 'outline' : 'destructive'} disabled={busy} onClick={() => void (manualLock ? onUnlock(session.session_hash) : onLock(session))}>
+                <Shield className="size-3.5" />{t(manualLock ? 'promptFilter.risk.sessionLimit.unlockWindow' : 'promptFilter.risk.sessionLimit.lockWindow')}
+              </Button>
+            </div>
+          </div>
+          <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.createdAt')} value={session.created_at ? formatBeijingTime(session.created_at) : '-'} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.expiresAt')} value={formatBeijingTime(session.expires_at)} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.account')} value={<span className="flex flex-wrap items-center justify-between gap-2"><span className="min-w-0 break-all">{account}</span>{session.last_500_at ? <Badge variant="destructive" className="shrink-0 gap-1" tabIndex={0} title={t('promptFilter.risk.sessionLimit.account500Hint', { time: formatBeijingTime(session.last_500_at) })} aria-label={t('promptFilter.risk.sessionLimit.account500Hint', { time: formatBeijingTime(session.last_500_at) })}><AlertTriangle className="size-3" />500</Badge> : null}</span>} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.model')} value={session.model || '-'} />
+            <PromptPolicyDetailField label={t('promptFilter.risk.sessionLimit.reasoningEffort')} value={session.reasoning_effort || '-'} />
+            <PromptPolicyDetailField
+              label={t('promptFilter.risk.sessionLimit.clientUserAgent')}
+              value={formatPromptSessionClientUserAgent(session.client_user_agent)}
+              title={session.client_user_agent}
+            />
+          </div>
+          <div className="mt-2 rounded-md bg-muted/45 px-3 py-2">
+            <div className="text-[11px] font-medium text-muted-foreground">{t('promptFilter.risk.sessionLimit.prompt')}</div>
+            <div className="mt-1 whitespace-pre-wrap break-words text-xs leading-5 text-foreground" title={session.prompt_preview}>{session.prompt_preview || '-'}</div>
+          </div>
+        </div>
+      })}
+    </div>}
+    {inactiveLockedWindows.length > 0 ? <div className="mt-3 space-y-2 rounded-md border border-destructive/25 p-3">
+      <div className="text-xs font-semibold">{t('promptFilter.risk.sessionLimit.otherLockedWindows')}</div>
+      {inactiveLockedWindows.map((lock) => <div key={lock.session_hash} className="flex flex-wrap items-center justify-between gap-2 text-xs">
+        <span className="font-mono" title={lock.session_hash}>{lock.session_hash.slice(0, 16)}</span>
+        <span className="text-muted-foreground">{t('promptFilter.risk.sessionLimit.manualLockUntil', { time: formatBeijingTime(lock.expires_at) })}</span>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void onUnlock(lock.session_hash)}>{t('promptFilter.risk.sessionLimit.unlockWindow')}</Button>
+      </div>)}
+    </div> : null}
+  </div>
+}
+
+function RiskProfilesTable({ profiles, accountStatus = false, accountSummary }: { profiles: PromptRiskProfile[]; accountStatus?: boolean; accountSummary?: AccountSessionSummary | null }) {
+  const { t } = useTranslation()
+  if (accountStatus) {
+    return (
+      <div className="overflow-x-auto rounded-lg border border-border">
+        <Table>
+          <TableHeader><TableRow>
+            <TableHead>{t('promptFilter.risk.account')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.windows24h')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.linkedUsers')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.totalWindows')}</TableHead>
+            <TableHead className="text-right" title={t('promptFilter.risk.averageWindowDurationHint')}>{t('promptFilter.risk.averageWindowDuration')}</TableHead>
+            <TableHead className="text-right">{t('promptFilter.risk.lastWindowActivity')}</TableHead>
+          </TableRow></TableHeader>
+          <TableBody>
+            {accountSummary ? <TableRow className="bg-muted/50 font-semibold" title={t('promptFilter.risk.accountAverageHint')}>
+              <TableCell>{t('promptFilter.risk.accountAverage', { count: accountSummary.account_count })}</TableCell>
+              <TableCell className="text-right font-mono">{accountSummary.average_windows_24h.toFixed(2)}</TableCell>
+              <TableCell className="text-right font-mono">{accountSummary.average_unique_users.toFixed(2)}</TableCell>
+              <TableCell className="text-right font-mono">{accountSummary.average_windows_total.toFixed(2)}</TableCell>
+              <TableCell className="text-right font-mono">{formatSessionUsageDuration(accountSummary.average_duration_seconds)}</TableCell>
+              <TableCell className="text-right text-xs text-muted-foreground">{accountSummary.latest_at ? formatBeijingTime(accountSummary.latest_at) : '-'}</TableCell>
+            </TableRow> : null}
+            {profiles.map((profile) => (
+            <TableRow key={`account-status:${profile.account_id ?? profile.subject_key}`}>
+              <TableCell>
+                <div className="font-medium">{profile.account_name || profile.subject_display || `Account #${profile.account_id}`}</div>
+                <div className="mt-1 text-xs text-muted-foreground">#{profile.account_id}{profile.account_email ? ` · ${profile.account_email}` : ''}</div>
+              </TableCell>
+              <TableCell className="text-right font-mono font-semibold">{profile.session_windows_24h ?? 0}</TableCell>
+              <TableCell className="text-right font-mono font-semibold">{profile.session_unique_users ?? 0}</TableCell>
+              <TableCell className="text-right font-mono font-semibold">{profile.session_windows_total ?? 0}</TableCell>
+              <TableCell className="text-right font-mono font-semibold">{formatSessionUsageDuration(profile.session_average_duration_seconds)}</TableCell>
+              <TableCell className="text-right text-xs text-muted-foreground">{profile.has_activity ? formatBeijingTime(profile.latest_at) : '-'}</TableCell>
+            </TableRow>
+          ))}</TableBody>
+        </Table>
+      </div>
+    )
+  }
   return (
     <div className="overflow-x-auto rounded-lg border border-border">
       <Table>
@@ -4547,6 +4707,9 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   const [open, setOpen] = useState(false)
   const [trustOpen, setTrustOpen] = useState(false)
   const [trustSaving, setTrustSaving] = useState(false)
+  const [sessionLimitSaving, setSessionLimitSaving] = useState(false)
+  const [windowActionBusy, setWindowActionBusy] = useState(false)
+  const [sessionLimitDraft, setSessionLimitDraft] = useState<{ mode: 'inherit' | 'custom' | 'off'; limit: number; windowSeconds: number }>({ mode: 'inherit', limit: 5, windowSeconds: 3600 })
   const [unlockingConversation, setUnlockingConversation] = useState(false)
   const [trustDraft, setTrustDraft] = useState({ durationHours: 24, riskThreshold: 35, reason: '' })
   const [detail, setDetail] = useState<PromptRiskProfileDetailResponse | null>(null)
@@ -4571,6 +4734,15 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   }, [eventPage, eventPageSize, open, profile.subject_key, profile.subject_type, trustEventPage, trustEventPageSize])
 
   useEffect(() => { void loadDetail() }, [loadDetail])
+  useEffect(() => {
+    const policy = detail?.session_limit
+    if (!policy) return
+    setSessionLimitDraft({
+      mode: policy.mode,
+      limit: policy.mode === 'custom' ? policy.limit : Math.max(1, policy.global_limit || 5),
+      windowSeconds: policy.mode === 'custom' ? policy.window_seconds : Math.max(60, policy.global_window_seconds || 3600),
+    })
+  }, [detail?.session_limit])
   const item = detail?.profile ?? profile
   const totalPages = Math.max(1, Math.ceil((detail?.event_total ?? 0) / eventPageSize))
   const trustEventTotalPages = Math.max(1, Math.ceil((detail?.trust_event_total ?? 0) / trustEventPageSize))
@@ -4603,6 +4775,44 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
       setTrustSaving(false)
     }
   }
+  const saveSessionLimit = async () => {
+    setSessionLimitSaving(true)
+    try {
+      await api.updatePromptRiskProfileSessionLimit(item.subject_type, item.subject_key, {
+        mode: sessionLimitDraft.mode,
+        limit: sessionLimitDraft.limit,
+        window_seconds: sessionLimitDraft.windowSeconds,
+      })
+      showToast(t('promptFilter.risk.sessionLimit.saved'))
+      await loadDetail()
+    } catch (err) {
+      showToast(getErrorMessage(err), 'error')
+    } finally {
+      setSessionLimitSaving(false)
+    }
+  }
+  const lockWindow = async (session: PromptRiskSessionWindow) => {
+    if (windowActionBusy || !window.confirm(t('promptFilter.risk.sessionLimit.lockWindowConfirm'))) return
+    setWindowActionBusy(true)
+    try {
+      await api.lockPromptUserWindow(item.subject_key, session.session_hash, session.expires_at)
+      showToast(t('promptFilter.risk.sessionLimit.windowLocked'))
+      await loadDetail()
+    } catch (err) {
+      showToast(getErrorMessage(err), 'error')
+    } finally { setWindowActionBusy(false) }
+  }
+  const unlockWindow = async (sessionHash: string) => {
+    if (windowActionBusy || !window.confirm(t('promptFilter.risk.sessionLimit.unlockWindowConfirm'))) return
+    setWindowActionBusy(true)
+    try {
+      await api.unlockPromptUserWindow(item.subject_key, sessionHash)
+      showToast(t('promptFilter.risk.sessionLimit.windowUnlocked'))
+      await loadDetail()
+    } catch (err) {
+      showToast(getErrorMessage(err), 'error')
+    } finally { setWindowActionBusy(false) }
+  }
   const unlockConversation = async () => {
     const lock = item.conversation_lock
     const userCooldown = lock?.restriction_scope === 'user_cooldown' || item.subject_type === 'newapi_user'
@@ -4624,7 +4834,7 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
   const activeRestriction = item.conversation_lock
   const isUserCooldown = activeRestriction?.restriction_scope === 'user_cooldown' || item.subject_type === 'newapi_user'
   const isFingerprintReplay = activeRestriction?.restriction_scope === 'fingerprint_replay'
-  const isLocalRestriction = !isUserCooldown && !isFingerprintReplay && activeRestriction?.reason_code !== 'upstream_cyber_policy'
+  const isLocalRestriction = !isUserCooldown && !isFingerprintReplay && !['upstream_cyber_policy', 'upstream_bio_policy'].includes(activeRestriction?.reason_code ?? '')
   const auditReference = activeRestriction?.incident_id || activeRestriction?.request_id || activeRestriction?.decision_id?.replace(/^local-block:/, '') || ''
   return <>
     <Button size="sm" variant="outline" onClick={() => { setEventPage(1); setTrustEventPage(1); setOpen(true) }}>{t('promptFilter.cyberDetail')}</Button>
@@ -4641,6 +4851,46 @@ function PromptRiskProfileDetailButton({ profile }: { profile: PromptRiskProfile
             </div>
             <div className="mt-3 grid gap-2 sm:grid-cols-2 lg:grid-cols-4"><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.lockedAt')} value={formatBeijingTime(item.conversation_lock.locked_at)} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.expiresAt')} value={item.conversation_lock.expires_at ? formatBeijingTime(item.conversation_lock.expires_at) : '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.remaining')} value={formatPromptRestrictionRemaining(item.conversation_lock.remaining_seconds)} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.reason')} value={isUserCooldown ? 'user_cyber_cooldown' : item.conversation_lock.reason_code || 'conversation_cyber_locked'} /><PromptPolicyDetailField label={t('promptFilter.colEndpoint')} value={item.conversation_lock.endpoint || '-'} /><PromptPolicyDetailField label={t('promptFilter.reviewModel')} value={item.conversation_lock.model || '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.auditReference')} value={auditReference || '-'} /><PromptPolicyDetailField label={t('promptFilter.risk.conversationLock.decisionId')} value={item.conversation_lock.decision_id || '-'} /></div>
             {auditReference ? <div className="mt-3 flex flex-wrap items-center gap-2"><Button size="sm" variant="outline" asChild><NavLink to={`/prompt-filter/logs?audit=${encodeURIComponent(auditReference)}`}><Search className="size-3.5" />{t('promptFilter.risk.conversationLock.openAudit')}</NavLink></Button><span className="font-mono text-xs text-muted-foreground">{auditReference}</span></div> : null}
+          </div> : null}
+          {item.subject_type === 'newapi_user' && detail?.session_limit ? <div className="rounded-lg border border-violet-500/25 bg-violet-500/5 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="flex items-center gap-2 font-semibold"><Layers className="size-4 text-violet-600 dark:text-violet-300" />{t('promptFilter.risk.sessionLimit.title')}<Badge variant="outline">{t(`promptFilter.risk.sessionLimit.modes.${detail.session_limit.mode}`)}</Badge></div>
+                <p className="mt-1 max-w-3xl text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.sessionLimit.description')}</p>
+              </div>
+              <div className="text-right text-xs text-muted-foreground">
+                <div>{t('promptFilter.risk.sessionLimit.effective')}</div>
+                <div className="mt-1 font-mono text-sm font-semibold text-foreground">{detail.session_limit.effective_enabled ? `${detail.session_limit.effective_limit} / ${detail.session_limit.effective_window_seconds}s` : t('promptFilter.risk.sessionLimit.unlimited')}</div>
+              </div>
+            </div>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <Field label={t('promptFilter.risk.sessionLimit.mode')}>
+                <Select value={sessionLimitDraft.mode} onValueChange={(value) => setSessionLimitDraft((current) => ({ ...current, mode: value as 'inherit' | 'custom' | 'off' }))} options={[
+                  { value: 'inherit', label: t('promptFilter.risk.sessionLimit.modes.inherit') },
+                  { value: 'custom', label: t('promptFilter.risk.sessionLimit.modes.custom') },
+                  { value: 'off', label: t('promptFilter.risk.sessionLimit.modes.off') },
+                ]} />
+              </Field>
+              <Field label={t('promptFilter.risk.sessionLimit.limit')} hint={t('promptFilter.risk.sessionLimit.limitHint')}>
+                <DraftNumberInput min={1} max={100000} disabled={sessionLimitDraft.mode !== 'custom'} value={sessionLimitDraft.limit} onValueChange={(value) => setSessionLimitDraft((current) => ({ ...current, limit: value }))} />
+              </Field>
+              <Field label={t('promptFilter.risk.sessionLimit.window')} hint={t('promptFilter.risk.sessionLimit.windowHint')}>
+                <DraftNumberInput min={60} max={2592000} disabled={sessionLimitDraft.mode !== 'custom'} value={sessionLimitDraft.windowSeconds} onValueChange={(value) => setSessionLimitDraft((current) => ({ ...current, windowSeconds: value }))} />
+              </Field>
+            </div>
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-md border bg-background/70 px-3 py-2">
+              <span className="text-xs leading-5 text-muted-foreground">{t('promptFilter.risk.sessionLimit.priorityHint', { limit: detail.session_limit.global_limit, seconds: detail.session_limit.global_window_seconds })}</span>
+              <Button size="sm" disabled={sessionLimitSaving || (sessionLimitDraft.mode === 'custom' && (sessionLimitDraft.limit < 1 || sessionLimitDraft.windowSeconds < 60))} onClick={() => void saveSessionLimit()}>{sessionLimitSaving ? t('common.saving') : t('common.save')}</Button>
+            </div>
+            <PromptRiskSessionWindows windows={detail.session_windows ?? []} manualLocks={detail.manual_window_locks ?? []} onLock={lockWindow} onUnlock={unlockWindow} busy={windowActionBusy} />
+            <div className="mt-3 rounded-md border bg-background/70 px-3 py-2" title={t('promptFilter.risk.averageWindowDurationHint')}>
+              <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+                <span>{t('promptFilter.risk.averageWindowDuration')}</span>
+                <span className="font-mono font-semibold">{formatSessionUsageDuration(detail.session_usage?.average_duration_seconds)}</span>
+              </div>
+              <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.risk.windowDurationSamples', { count: detail.session_usage?.window_count ?? 0 })}</p>
+              <p className="mt-1 text-xs text-muted-foreground">{t('promptFilter.risk.averageWindowDurationHint')}</p>
+            </div>
           </div> : null}
           <div className="rounded-lg border bg-muted/20 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
@@ -5608,8 +5858,8 @@ function riskSubjectToProfileStub(subject: PromptRiskIncidentSubject): PromptRis
   } as unknown as PromptRiskProfile
 }
 
-function PromptPolicyDetailField({ label, value }: { label: string; value: string }) {
-  return <div className="rounded-md border border-border bg-muted/20 p-2.5"><div className="text-xs font-semibold text-muted-foreground">{label}</div><div className="mt-1 break-words">{value}</div></div>
+function PromptPolicyDetailField({ label, value, title }: { label: string; value: ReactNode; title?: string }) {
+  return <div className="rounded-md border border-border bg-muted/20 p-2.5"><div className="text-xs font-semibold text-muted-foreground">{label}</div><div className="mt-1 break-words" title={title}>{value}</div></div>
 }
 
 function formatPromptPolicyScore(value: number | null | undefined, unscored: string) {

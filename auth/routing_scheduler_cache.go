@@ -2,7 +2,6 @@ package auth
 
 import (
 	"sync/atomic"
-	"time"
 )
 
 const (
@@ -44,7 +43,7 @@ func (s *Store) routingFastScheduler(apiKeyID int64) *FastScheduler {
 	entry, ok := s.routingSchedulers[apiKeyID]
 	s.routingSchedulersMu.RUnlock()
 	if ok {
-		entry.lastHitNS.Store(time.Now().UnixNano())
+		entry.lastHitNS.Store(s.routingSchedulerAccess.Add(1))
 		if s.schedulerMetrics != nil {
 			s.schedulerMetrics.routingCacheHits.Add(1)
 		}
@@ -112,7 +111,7 @@ func (s *Store) publishRoutingScheduler(apiKeyID int64, scheduler *FastScheduler
 	}
 	s.ensureRoutingSchedulerCapacityLocked(accounts, alias)
 	entry := &routingSchedulerEntry{scheduler: scheduler, accounts: accounts, alias: alias}
-	entry.lastHitNS.Store(time.Now().UnixNano())
+	entry.lastHitNS.Store(s.routingSchedulerAccess.Add(1))
 	s.routingSchedulers[apiKeyID] = entry
 	s.routingSchedulerAccounts += accounts
 	if alias {

@@ -61,6 +61,7 @@ type PromptConversationLock struct {
 	DecisionID         string     `json:"decision_id"`
 	RequestID          string     `json:"request_id,omitempty"`
 	ReasonCode         string     `json:"reason_code"`
+	TriggerReasonCode  string     `json:"trigger_reason_code,omitempty"`
 	Endpoint           string     `json:"endpoint,omitempty"`
 	Model              string     `json:"model,omitempty"`
 	TriggerCount       int64      `json:"trigger_count"`
@@ -311,7 +312,7 @@ func (db *DB) GetActivePromptConversationRestriction(ctx context.Context, lockKe
 	}
 	query := promptConversationLockSelect + ` WHERE status='active' AND (
 		($1<>'' AND lock_key=$1 AND locked_at>$4) OR
-		(platform=$2 AND newapi_user_id=$3 AND reason_code='upstream_cyber_policy' AND locked_at>$5)
+		(platform=$2 AND newapi_user_id=$3 AND reason_code IN ('upstream_cyber_policy', 'upstream_bio_policy') AND locked_at>$5)
 	) ORDER BY CASE WHEN $1<>'' AND lock_key=$1 THEN 0 ELSE 1 END, locked_at DESC LIMIT 1`
 	item, err := scanPromptConversationLock(db.conn.QueryRowContext(ctx, query,
 		lockKey, platform, newAPIUserID, conversationCutoff, userCutoff,

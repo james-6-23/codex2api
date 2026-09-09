@@ -532,7 +532,7 @@ func TestContinuousRetryBufferedStickyTransportRetryKeepsSameAccount(t *testing.
 	}
 }
 
-func TestContinuousRetryDisabledMessagesStickyTransportRetryRotatesAccounts(t *testing.T) {
+func TestContinuousRetryDisabledMessagesStickyTransportRetryKeepsSameAccount(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousSettings := CurrentRuntimeSettings()
 	t.Cleanup(func() { ApplyRuntimeSettings(previousSettings) })
@@ -553,14 +553,14 @@ func TestContinuousRetryDisabledMessagesStickyTransportRetryRotatesAccounts(t *t
 	if scenario.calls.Load() != 2 || len(scenario.accountIDs) != 2 {
 		t.Fatalf("transport attempts = calls %d accounts %v; body=%q", scenario.calls.Load(), scenario.accountIDs, recorder.Body.String())
 	}
-	if scenario.accountIDs[0] == scenario.accountIDs[1] {
-		t.Fatalf("policy-disabled retry stayed on the failed account: %v", scenario.accountIDs)
+	if scenario.accountIDs[0] != scenario.accountIDs[1] {
+		t.Fatalf("policy-disabled sticky retry rotated accounts: %v", scenario.accountIDs)
 	}
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "sticky-success") {
-		t.Fatalf("rotated retry response = status %d body %q", recorder.Code, recorder.Body.String())
+		t.Fatalf("sticky retry response = status %d body %q", recorder.Code, recorder.Body.String())
 	}
 	if boundID, ok := store.SessionAffinityAccountID(affinityKey); !ok || boundID != scenario.accountIDs[1] {
-		t.Fatalf("rotated winner affinity = account %d ok=%v, attempts=%v", boundID, ok, scenario.accountIDs)
+		t.Fatalf("sticky winner affinity = account %d ok=%v, attempts=%v", boundID, ok, scenario.accountIDs)
 	}
 }
 

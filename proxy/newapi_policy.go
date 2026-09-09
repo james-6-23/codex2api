@@ -27,12 +27,17 @@ const newAPIIdentityContextKey = "prompt_filter_verified_newapi_identity"
 const newAPIPolicyMetaContextKey = "prompt_filter_verified_newapi_policy_meta"
 const newAPIBindingContextKey = "prompt_filter_newapi_binding"
 const newAPIUpstreamCyberDecisionContextKey = "prompt_filter_newapi_upstream_cyber_decision"
+const upstreamPolicyResponseContextKey = "prompt_filter_upstream_policy_response"
 
 const (
 	newAPISignatureVersionV1               = "1"
 	newAPIPolicyDecisionSignatureVersionV1 = "v1"
 	newAPIPolicyEventSignatureVersionV1    = "v1"
 	newAPIUpstreamCyberPolicyReasonCode    = "upstream_cyber_policy"
+	newAPISessionAccountingBypass          = "bypass"
+	newAPIPassiveFeatureRelatedInternal    = "related_internal"
+	newAPIPassiveFeatureSystemPassive      = "system_passive"
+	newAPIPassiveFeatureIndependent        = "independent_internal"
 )
 
 type newAPIIdentity struct {
@@ -56,20 +61,45 @@ type newAPIOriginalAuditMeta struct {
 }
 
 type newAPIPolicyMeta struct {
-	PlatformID         string `json:"platform_id,omitempty"`
-	UserName           string `json:"user_name,omitempty"`
-	UserEmail          string `json:"user_email,omitempty"`
-	UserGroup          string `json:"user_group,omitempty"`
-	Profile            string `json:"profile"`
-	Mode               string `json:"mode"`
-	Provider           string `json:"provider"`
-	Protocol           string `json:"protocol"`
-	OriginalEndpoint   string `json:"original_endpoint,omitempty"`
-	OriginalProtocol   string `json:"original_protocol,omitempty"`
-	RequestedModel     string `json:"requested_model,omitempty"`
-	UpstreamModel      string `json:"upstream_model,omitempty"`
-	ChannelID          int    `json:"channel_id,omitempty"`
-	SessionFingerprint string `json:"session_fingerprint,omitempty"`
+	WindowGrant      string `json:"window_grant,omitempty"`
+	PlatformID       string `json:"platform_id,omitempty"`
+	UserName         string `json:"user_name,omitempty"`
+	UserEmail        string `json:"user_email,omitempty"`
+	UserGroup        string `json:"user_group,omitempty"`
+	Profile          string `json:"profile"`
+	Mode             string `json:"mode"`
+	Provider         string `json:"provider"`
+	Protocol         string `json:"protocol"`
+	OriginalEndpoint string `json:"original_endpoint,omitempty"`
+	OriginalProtocol string `json:"original_protocol,omitempty"`
+	RequestedModel   string `json:"requested_model,omitempty"`
+	UpstreamModel    string `json:"upstream_model,omitempty"`
+	ChannelID        int    `json:"channel_id,omitempty"`
+	// TokenID and InstallationID are signed NewAPI identity hints. They are
+	// deliberately kept separate from the root fingerprint and are used only
+	// to scope the optional no-root recent-account fallback.
+	TokenID             int    `json:"token_id,omitempty"`
+	InstallationID      string `json:"installation_id,omitempty"`
+	SessionFingerprint  string `json:"session_fingerprint,omitempty"`
+	RootSessionVersion  int    `json:"root_session_version,omitempty"`
+	RootSessionState    string `json:"root_session_state,omitempty"`
+	RootSessionRelation string `json:"root_session_relation,omitempty"`
+	ThreadSource        string `json:"thread_source,omitempty"`
+	RequestKind         string `json:"request_kind,omitempty"`
+	SubagentKind        string `json:"subagent_kind,omitempty"`
+	SessionAccounting   string `json:"session_accounting,omitempty"`
+	PassiveFeature      string `json:"passive_feature,omitempty"`
+	// RootSessionFingerprint groups Guardian/sub-agent leaves under the
+	// user-visible Codex task. SessionFingerprint intentionally remains the
+	// exact leaf identity used by CYB conversation locking.
+	RootSessionFingerprint string `json:"root_session_fingerprint,omitempty"`
+	// ForkedFromSessionFingerprint is a signed affinity hint for a user-created
+	// fork. It identifies the source session without merging the fork's root.
+	ForkedFromSessionFingerprint string `json:"forked_from_session_fingerprint,omitempty"`
+	RootAccountWaitMillis        *int64 `json:"root_account_wait_millis,omitempty"`
+	OriginalRootFingerprint      string `json:"original_root_fingerprint,omitempty"`
+	RootAssociation              string `json:"root_association,omitempty"`
+	RootCandidateCount           *int   `json:"root_candidate_count,omitempty"`
 }
 
 type verifiedNewAPIPolicyContext struct {
@@ -103,6 +133,22 @@ func (h *Handler) resolvePromptFilterNewAPIBinding(c *gin.Context) (database.Pro
 	binding, bound := h.store.GetPromptFilterNewAPIBinding(apiKeyID)
 	c.Set(newAPIBindingContextKey, resolvedPromptFilterNewAPIBinding{APIKeyID: apiKeyID, Binding: binding, Bound: bound})
 	return binding, bound
+}
+
+// primeNewAPIPolicyContext verifies optional signed NewAPI metadata before an
+// early routing/session decision. The normal prompt-filter ingress still owns
+// rejection and user-facing errors; this helper only makes an already-valid
+// identity available to code that must classify trusted application requests
+// before Prompt Guard runs.
+func (h *Handler) primeNewAPIPolicyContext(c *gin.Context, body []byte) {
+	if h == nil || h.store == nil || c == nil || strings.TrimSpace(c.GetHeader("X-NewAPI-Signature")) == "" {
+		return
+	}
+	cfg := h.promptFilterConfigForRequest(c)
+	if !cfg.Advanced.NewAPI.Enabled {
+		return
+	}
+	_, _ = h.verifyNewAPIPolicyContext(c, cfg.Advanced.NewAPI, body)
 }
 
 // refreshNewAPIWebSocketBinding enforces binding revocation at every logical
@@ -338,7 +384,7 @@ func (h *Handler) verifyNewAPIPolicyContext(c *gin.Context, cfg promptfilter.New
 		c.Set(newAPIPolicyMetaContextKey, policyContext)
 		return policyContext, true
 	}
-	if encoded == "" || signature == "" || len(encoded) > 4096 {
+	if encoded == "" || signature == "" || len(encoded) > 8192 {
 		if bound {
 			return verifiedNewAPIPolicyContext{}, false
 		}
@@ -358,7 +404,7 @@ func (h *Handler) verifyNewAPIPolicyContext(c *gin.Context, cfg promptfilter.New
 		return policyContext, true
 	}
 	payload, err := base64.RawURLEncoding.DecodeString(encoded)
-	if err != nil || len(payload) > 3072 || json.Unmarshal(payload, &policyContext.Meta) != nil {
+	if err != nil || len(payload) > 6144 || json.Unmarshal(payload, &policyContext.Meta) != nil || (len(payload) > 3072 && policyContext.Meta.WindowGrant == "") {
 		if bound {
 			return verifiedNewAPIPolicyContext{}, false
 		}
@@ -424,6 +470,9 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 	if meta == nil {
 		return false
 	}
+	if len(meta.WindowGrant) > 4096 {
+		return false
+	}
 	if strings.TrimSpace(meta.PlatformID) != "" {
 		platformID, ok := database.NormalizePromptFilterPlatformCode(meta.PlatformID)
 		if !ok {
@@ -457,6 +506,12 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		meta.ChannelID = 0
 	}
 	var ok bool
+	if meta.TokenID < 0 {
+		return false
+	}
+	if meta.InstallationID, ok = normalizedVerifiedNewAPIIdentityText(meta.InstallationID, 256); !ok {
+		return false
+	}
 	if meta.UserName, ok = normalizedVerifiedNewAPIIdentityText(meta.UserName, 128); !ok {
 		return false
 	}
@@ -472,6 +527,113 @@ func normalizeVerifiedNewAPIPolicyMeta(meta *newAPIPolicyMeta) bool {
 		if err != nil || len(decoded) != 16 {
 			return false
 		}
+	}
+	meta.RootSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.RootSessionFingerprint))
+	meta.OriginalRootFingerprint = strings.ToLower(strings.TrimSpace(meta.OriginalRootFingerprint))
+	if meta.OriginalRootFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.OriginalRootFingerprint)
+		if err != nil || len(decoded) != 16 {
+			return false
+		}
+	}
+	if meta.RootAssociation, ok = normalizedVerifiedNewAPIIdentityText(meta.RootAssociation, 64); !ok {
+		return false
+	}
+	if meta.RootCandidateCount != nil && (*meta.RootCandidateCount < 0 || *meta.RootCandidateCount > 64) {
+		return false
+	}
+	meta.ForkedFromSessionFingerprint = strings.ToLower(strings.TrimSpace(meta.ForkedFromSessionFingerprint))
+	meta.RootSessionState = strings.ToLower(strings.TrimSpace(meta.RootSessionState))
+	meta.RootSessionRelation = strings.ToLower(strings.TrimSpace(meta.RootSessionRelation))
+	if meta.RootSessionVersion < 0 || meta.RootSessionVersion > 1 {
+		return false
+	}
+	if meta.RootSessionVersion == 0 {
+		if meta.RootSessionState != "" || meta.RootSessionFingerprint != "" || meta.RootSessionRelation != "" {
+			return false
+		}
+	} else {
+		switch meta.RootSessionState {
+		case newAPIPolicyRootSessionResolved:
+			if meta.RootSessionFingerprint == "" {
+				return false
+			}
+			if meta.RootSessionRelation != "" && meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot && meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated {
+				return false
+			}
+		case newAPIPolicyRootSessionConflict, newAPIPolicyRootSessionUnavailable:
+			if meta.RootSessionFingerprint != "" || meta.RootSessionRelation != "" {
+				return false
+			}
+		default:
+			return false
+		}
+	}
+	if meta.RootSessionFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.RootSessionFingerprint)
+		if err != nil || len(decoded) != 16 {
+			return false
+		}
+	}
+	if meta.ForkedFromSessionFingerprint != "" {
+		decoded, err := hex.DecodeString(meta.ForkedFromSessionFingerprint)
+		if err != nil || len(decoded) != 16 || meta.RootSessionVersion != 1 ||
+			meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+			!strings.EqualFold(strings.TrimSpace(meta.ThreadSource), "user") ||
+			strings.TrimSpace(meta.SubagentKind) != "" {
+			return false
+		}
+	}
+	if meta.ThreadSource, ok = normalizedVerifiedNewAPIIdentityText(meta.ThreadSource, 128); !ok {
+		return false
+	}
+	if meta.RequestKind, ok = normalizedVerifiedNewAPIIdentityText(meta.RequestKind, 128); !ok {
+		return false
+	}
+	if meta.SubagentKind, ok = normalizedVerifiedNewAPIIdentityText(meta.SubagentKind, 64); !ok {
+		return false
+	}
+	meta.SessionAccounting = strings.ToLower(strings.TrimSpace(meta.SessionAccounting))
+	meta.PassiveFeature = strings.ToLower(strings.TrimSpace(meta.PassiveFeature))
+	switch meta.SessionAccounting {
+	case "":
+		switch meta.PassiveFeature {
+		case "":
+		case newAPIPassiveFeatureRelatedInternal:
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				strings.TrimSpace(meta.ThreadSource) == "" || strings.EqualFold(meta.ThreadSource, "user") {
+				return false
+			}
+		case newAPIPassiveFeatureSystemPassive:
+			if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+				meta.RootSessionRelation != newAPIPolicyRootSessionRelationRelated ||
+				!strings.EqualFold(meta.ThreadSource, "system") {
+				return false
+			}
+		default:
+			return false
+		}
+	case newAPISessionAccountingBypass:
+		if meta.RootSessionVersion != 1 || meta.RootSessionState != newAPIPolicyRootSessionResolved ||
+			meta.RootSessionRelation != newAPIPolicyRootSessionRelationRoot {
+			return false
+		}
+		switch meta.PassiveFeature {
+		case newAPIPassiveFeatureSystemPassive:
+			if !strings.EqualFold(meta.ThreadSource, "system") {
+				return false
+			}
+		case newAPIPassiveFeatureIndependent:
+			if strings.TrimSpace(meta.ThreadSource) == "" || strings.EqualFold(meta.ThreadSource, "user") {
+				return false
+			}
+		default:
+			return false
+		}
+	default:
+		return false
 	}
 	return true
 }
@@ -661,7 +823,8 @@ func (h *Handler) sendNewAPIPolicyDecision(c *gin.Context, cfg promptfilter.Conf
 // upstream provider. Local prompt matches, external-review verdicts and other
 // upstream 4xx responses never use this path and therefore cannot add a strike.
 func (h *Handler) emitNewAPIUpstreamCyberPolicyDecision(c *gin.Context, endpoint string, model string, upstreamBody []byte) (newAPIPolicyDecisionMetadata, bool) {
-	if c == nil || upstreamCyberPolicyCode(upstreamBody) == "" {
+	errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(upstreamBody))
+	if c == nil || errorCode == "" {
 		return newAPIPolicyDecisionMetadata{}, false
 	}
 	cfg := h.promptFilterConfigForRequest(c)
@@ -697,6 +860,7 @@ func (h *Handler) emitNewAPIUpstreamCyberPolicyDecision(c *gin.Context, endpoint
 		promptGuardPolicyEventID(c),
 		policyContext.VerificationSecret,
 	)
+	metadata.UpstreamPolicyCode = errorCode
 	c.Set(newAPIUpstreamCyberDecisionContextKey, metadata)
 	// Ordinary HTTP and pre-first-token SSE failures have not committed their
 	// response yet, so NewAPI can consume the signed decision from headers.
@@ -719,9 +883,21 @@ func newAPIUpstreamCyberPolicyDecision(c *gin.Context) (newAPIPolicyDecisionMeta
 	return metadata, ok && metadata.DecisionID != ""
 }
 
-func upstreamCyberPolicyResponseMessage(c *gin.Context) string {
+func upstreamCyberPolicyResponseMessage(c *gin.Context, payloads ...[]byte) string {
 	if metadata, ok := newAPIUpstreamCyberPolicyDecision(c); ok && metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
 		return newAPIPolicyDecisionAPIError(metadata).Message
+	}
+	if c != nil {
+		if value, exists := c.Get(upstreamPolicyResponseContextKey); exists {
+			if metadata, ok := value.(newAPIPolicyDecisionMetadata); ok {
+				return newAPIPolicyDecisionAPIError(metadata).Message
+			}
+		}
+	}
+	for _, payload := range payloads {
+		if errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(payload)); errorCode != "" {
+			return upstreamPolicyUserMessage(errorCode, false)
+		}
 	}
 	return upstreamCyberPolicyUserMessage
 }
@@ -729,11 +905,7 @@ func upstreamCyberPolicyResponseMessage(c *gin.Context) string {
 func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.APIError {
 	message := "请求违反安全策略，本次请求已被拒绝"
 	if metadata.ReasonCode == newAPIUpstreamCyberPolicyReasonCode {
-		if metadata.ConversationLocked {
-			message = upstreamCyberPolicyLockedUserMessage
-		} else {
-			message = upstreamCyberPolicyUserMessage
-		}
+		message = upstreamPolicyUserMessage(metadata.UpstreamPolicyCode, metadata.ConversationLocked)
 	} else if metadata.ReasonCode == promptConversationLockedReasonCode {
 		message = promptConversationLockedMessage
 	} else if metadata.ReasonCode == promptUserCyberCooldownReasonCode {
@@ -817,6 +989,7 @@ type newAPIPolicyDecisionMetadata struct {
 	// included in the signed decision canonical form or forwarded as a policy
 	// punishment header.
 	ConversationLocked bool
+	UpstreamPolicyCode string
 }
 
 // strikeEligibleForDecision reports whether a decision may accrue toward a
@@ -990,6 +1163,7 @@ func clearNewAPIUpstreamCyberPolicyDecision(c *gin.Context) {
 		return
 	}
 	c.Set(newAPIUpstreamCyberDecisionContextKey, nil)
+	c.Set(upstreamPolicyResponseContextKey, nil)
 	if c.Writer == nil || c.Writer.Written() {
 		return
 	}

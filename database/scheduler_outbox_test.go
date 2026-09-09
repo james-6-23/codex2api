@@ -3,11 +3,62 @@ package database
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
+
+var (
+	schedulerOutboxPostgresCaptureOnce  sync.Once
+	schedulerOutboxPostgresCaptureMu    sync.Mutex
+	schedulerOutboxPostgresCaptureQuery string
+)
+
+type schedulerOutboxPostgresCaptureDriver struct{}
+type schedulerOutboxPostgresCaptureConn struct{}
+
+func (schedulerOutboxPostgresCaptureDriver) Open(string) (driver.Conn, error) {
+	return schedulerOutboxPostgresCaptureConn{}, nil
+}
+
+func (schedulerOutboxPostgresCaptureConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("Prepare is not supported by scheduler outbox DDL capture")
+}
+
+func (schedulerOutboxPostgresCaptureConn) Close() error { return nil }
+
+func (schedulerOutboxPostgresCaptureConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("transactions are not supported by scheduler outbox DDL capture")
+}
+
+func (schedulerOutboxPostgresCaptureConn) ExecContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Result, error) {
+	schedulerOutboxPostgresCaptureMu.Lock()
+	schedulerOutboxPostgresCaptureQuery = query
+	schedulerOutboxPostgresCaptureMu.Unlock()
+	return driver.RowsAffected(0), nil
+}
+
+var schedulerOutboxRoutingCredentialCases = []struct {
+	key   string
+	value interface{}
+}{
+	{key: "claude_client_platform", value: "claude_code_cli_only"},
+	{key: "claude_version_policy", value: "minimum"},
+	{key: "claude_client_version", value: "2.1.251"},
+	{key: "session_capacity_enabled", value: true},
+	{key: "session_capacity_max", value: int64(8)},
+	{key: "session_capacity_idle_ttl_seconds", value: int64(7200)},
+	{key: "project_id", value: "google-project"},
+	{key: "antigravity_quota", value: `{"forbidden":true,"models":[]}`},
+	{key: "antigravity_permissions", value: `{"allowed":false,"reason":"policy denied"}`},
+	{key: "antigravity_entitlements", value: `{"allowed":false,"reason":"legacy policy denied"}`},
+	{key: "antigravity_sync_error", value: "Antigravity token refresh failed: invalid_grant"},
+	{key: "antigravity_permanent_refresh_error", value: "Antigravity token refresh failed: invalid_grant"},
+}
 
 func TestSchedulerOutboxRoundTripAndCleanup(t *testing.T) {
 	db, err := New("sqlite", filepath.Join(t.TempDir(), "scheduler-outbox.db"))
@@ -147,6 +198,76 @@ func TestSchedulerOutboxTriggersExcludeAccountUsageSnapshots(t *testing.T) {
 	afterToken, err := db.SchedulerOutboxHighWatermark(ctx)
 	if err != nil || afterToken <= afterUsage {
 		t.Fatalf("routing credential update watermark = %d, previous=%d, err=%v", afterToken, afterUsage, err)
+	}
+}
+
+func TestSQLiteSchedulerOutboxTriggerTracksRuntimeCredentialChanges(t *testing.T) {
+	db, err := New("sqlite", filepath.Join(t.TempDir(), "scheduler-runtime-credential-trigger.db"))
+	if err != nil {
+		t.Fatalf("New(sqlite): %v", err)
+	}
+	defer db.Close()
+
+	ctx := context.Background()
+	accountID, err := db.InsertAccount(ctx, "runtime-credential-account", "rt", "")
+	if err != nil {
+		t.Fatalf("InsertAccount: %v", err)
+	}
+	watermark, err := db.SchedulerOutboxHighWatermark(ctx)
+	if err != nil {
+		t.Fatalf("SchedulerOutboxHighWatermark: %v", err)
+	}
+
+	for _, tc := range schedulerOutboxRoutingCredentialCases {
+		t.Run(tc.key, func(t *testing.T) {
+			if err := db.UpdateCredentials(ctx, accountID, map[string]interface{}{tc.key: tc.value}); err != nil {
+				t.Fatalf("UpdateCredentials(%s): %v", tc.key, err)
+			}
+			events, err := db.ListSchedulerOutboxEventsAfter(ctx, watermark, 10)
+			if err != nil {
+				t.Fatalf("ListSchedulerOutboxEventsAfter(%s): %v", tc.key, err)
+			}
+			if len(events) != 1 || events[0].EntityType != SchedulerEntityAccount || events[0].EntityID != accountID {
+				t.Fatalf("events after %s update = %+v, want one account/%d event", tc.key, events, accountID)
+			}
+			watermark = events[0].ID
+		})
+	}
+}
+
+func TestPostgresSchedulerOutboxTriggerTracksRuntimeCredentialChanges(t *testing.T) {
+	schedulerOutboxPostgresCaptureOnce.Do(func() {
+		sql.Register("scheduler-outbox-postgres-ddl-capture", schedulerOutboxPostgresCaptureDriver{})
+	})
+	conn, err := sql.Open("scheduler-outbox-postgres-ddl-capture", "")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	defer conn.Close()
+
+	schedulerOutboxPostgresCaptureMu.Lock()
+	schedulerOutboxPostgresCaptureQuery = ""
+	schedulerOutboxPostgresCaptureMu.Unlock()
+	db := &DB{conn: conn, driver: "postgres"}
+	if err := db.installPostgresSchedulerOutboxTriggers(context.Background()); err != nil {
+		t.Fatalf("installPostgresSchedulerOutboxTriggers: %v", err)
+	}
+	schedulerOutboxPostgresCaptureMu.Lock()
+	query := schedulerOutboxPostgresCaptureQuery
+	schedulerOutboxPostgresCaptureMu.Unlock()
+	start := strings.Index(query, "CREATE TRIGGER scheduler_outbox_accounts_update")
+	end := strings.Index(query, "CREATE TRIGGER scheduler_outbox_accounts_delete")
+	if start < 0 || end <= start {
+		t.Fatalf("captured PostgreSQL DDL does not contain the account update trigger: %s", query)
+	}
+	accountUpdateDDL := query[start:end]
+	for _, tc := range schedulerOutboxRoutingCredentialCases {
+		for _, row := range []string{"OLD", "NEW"} {
+			fragment := row + ".credentials->>'" + tc.key + "'"
+			if !strings.Contains(accountUpdateDDL, fragment) {
+				t.Errorf("PostgreSQL account update trigger missing %q", fragment)
+			}
+		}
 	}
 }
 

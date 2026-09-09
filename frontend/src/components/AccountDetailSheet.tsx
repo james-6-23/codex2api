@@ -450,6 +450,24 @@ export default function AccountDetailSheet({
           </SheetHeader>
 
           <SheetBody className="space-y-5">
+            {account.codex_installation_id && (
+              <Section title={t("accounts.codexInstallationIdLabel")}>
+                <div className="rounded-xl border border-border bg-card p-3">
+                  <div className="flex items-center gap-2">
+                    <code className="min-w-0 flex-1 break-all text-xs">
+                      {account.codex_installation_id}
+                    </code>
+                    <CopyValueButton
+                      value={account.codex_installation_id}
+                      label={t("accounts.codexInstallationIdLabel")}
+                    />
+                  </div>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {t("accounts.codexInstallationIdHint")}
+                  </p>
+                </div>
+              </Section>
+            )}
             <Section title={t("accounts.status")}>
               <div className="space-y-3 rounded-xl border border-border bg-card p-3">
                 <div className="flex flex-wrap items-center gap-2">

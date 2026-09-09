@@ -30,6 +30,15 @@ func TestNewMemory_DefaultPoolSize(t *testing.T) {
 	}
 }
 
+func TestPromptSessionLimitSubjectNormalizesPlatform(t *testing.T) {
+	if got := PromptSessionLimitSubject(" NewAPI ", " user-42 "); got != "newapi:newapi:user-42" {
+		t.Fatalf("PromptSessionLimitSubject() = %q", got)
+	}
+	if got := PromptSessionLimitSubject("", "user-42"); got != "" {
+		t.Fatalf("empty platform subject = %q", got)
+	}
+}
+
 func TestBuildRedisClientOptionsSupportsRedissURL(t *testing.T) {
 	opts, err := buildRedisClientOptions(RedisOptions{
 		Addr:     "rediss://default:secret@example.upstash.io:6379/2",

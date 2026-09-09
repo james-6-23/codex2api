@@ -207,11 +207,15 @@ export default function TestConnectionModal({
 
         const modelsResp = await api.getModels();
         if (!active) return;
+        const accountModels = (account.models ?? []).filter(isConnectionTestModel);
         const upstreamModels = extractTextModels(modelsResp);
         const preferredModel = isConnectionTestModel(settings.test_model)
           ? settings.test_model
           : DEFAULT_TEST_MODEL;
-        const nextModels = uniqueTestModels(upstreamModels, preferredModel);
+        const nextModels = uniqueTestModels(
+          [...accountModels, ...upstreamModels],
+          preferredModel,
+        );
         setModelOptions(nextModels);
         setSelectedModel(
           (current) => current || nextModels[0] || DEFAULT_TEST_MODEL,
@@ -249,7 +253,10 @@ export default function TestConnectionModal({
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0] || "");
         } else {
-          const fallbackModels = uniqueTestModels([], DEFAULT_TEST_MODEL);
+          const fallbackModels = uniqueTestModels(
+            (account.models ?? []).filter(isConnectionTestModel),
+            DEFAULT_TEST_MODEL,
+          );
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0]);
         }

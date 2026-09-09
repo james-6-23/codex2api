@@ -229,6 +229,9 @@ func resetResponseCacheStateForTest(config responseCacheConfig) {
 	responseCacheBackendWriter.mu.Lock()
 	responseCacheBackendWriter.draining = false
 	responseCacheBackendWriter.mu.Unlock()
+	responseAffinityLocal.Lock()
+	responseAffinityLocal.entries = make(map[string]responseAccountAffinity)
+	responseAffinityLocal.Unlock()
 	respCache.mu.Lock()
 	respCache.store = make(map[string]*responseCacheEntry)
 	respCache.sharedItems = make(map[[sha256.Size]byte]*sharedResponseContextItem)
@@ -969,7 +972,9 @@ func respCacheCleanupLoop() {
 	ticker := time.NewTicker(responseCleanupInterval)
 	defer ticker.Stop()
 	for range ticker.C {
-		cleanupResponseCacheExpired(time.Now())
+		now := time.Now()
+		cleanupResponseCacheExpired(now)
+		cleanupResponseAccountAffinityExpired(now)
 	}
 }
 

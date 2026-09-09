@@ -402,6 +402,45 @@ func TestScopeConcurrencyFilterBlocksWhenFullAndReleasesAfterwards(t *testing.T)
 	}
 }
 
+func TestVerifiedPassiveGuardianGetsExactlyOneProtectedScopeSlot(t *testing.T) {
+	const apiKeyID = int64(4343)
+	scope := database.APIKeyScopeLimit{ScopeType: database.APIKeyScopeTypeGroup, ScopeID: 10, MaxConcurrency: 1}
+	account := &auth.Account{DBID: 1, GroupIDs: []int64{10}}
+	handler := &Handler{}
+
+	parentGate := newScopeBudgetGate(apiKeyID, []database.APIKeyScopeLimit{scope})
+	parent, _ := gin.CreateTestContext(httptest.NewRecorder())
+	parent.Set(contextScopeBudgetGate, parentGate)
+	handler.AcquireAPIKeyScopeConcurrency(parent, account)
+	defer handler.ReleaseAPIKeyScopeConcurrency(parent)
+	if got := APIKeyScopeInflight(apiKeyID, database.APIKeyScopeTypeGroup, 10); got != 1 {
+		t.Fatalf("parent inflight = %d, want 1", got)
+	}
+
+	guardianGate := newScopeBudgetGate(apiKeyID, []database.APIKeyScopeLimit{scope})
+	guardian, _ := gin.CreateTestContext(httptest.NewRecorder())
+	guardian.Set(contextScopeBudgetGate, guardianGate)
+	setPassiveInternalAuthorization(guardian, true)
+	filter := handler.applyScopeBudgetFilter(guardian, nil)
+	if filter != nil && !filter(account) {
+		t.Fatal("verified Guardian was blocked by its parent's occupied scope slot")
+	}
+	handler.AcquireAPIKeyScopeConcurrency(guardian, account)
+	defer handler.ReleaseAPIKeyScopeConcurrency(guardian)
+	if got := APIKeyScopeInflight(apiKeyID, database.APIKeyScopeTypeGroup, 10); got != 2 {
+		t.Fatalf("Guardian protected scope lease inflight=%d, want 2", got)
+	}
+
+	secondGate := newScopeBudgetGate(apiKeyID, []database.APIKeyScopeLimit{scope})
+	second, _ := gin.CreateTestContext(httptest.NewRecorder())
+	second.Set(contextScopeBudgetGate, secondGate)
+	setPassiveInternalAuthorization(second, true)
+	secondFilter := handler.applyScopeBudgetFilter(second, nil)
+	if secondFilter == nil || secondFilter(account) {
+		t.Fatal("second Guardian exceeded the single protected scope slot")
+	}
+}
+
 func TestScopeConcurrencyLeaseSelfHeals(t *testing.T) {
 	key := scopeSkipKey{apiKeyID: 99, scopeType: database.APIKeyScopeTypeAccount, scopeID: 5}
 	lease := apiKeyScopeConcurrency.acquire(key)

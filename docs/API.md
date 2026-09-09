@@ -1551,7 +1551,7 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
 - `api_key_id`: 按 API 密钥 ID 过滤
 - `request_id`: 网关追踪 ID，精确匹配
 - `upstream_request_id`: 上游请求 ID，精确匹配
-- `q`: 模糊搜索，包含网关及上游请求 ID
+- `q`: 模糊搜索错误、模型、端点、账号、NewAPI 用户、客户端 IP、客户端 User-Agent 、API Key、网关请求 ID 或上游请求 ID
 - `fast`: true/false (是否 fast 服务)
 - `stream`: true/false (是否流式)
 
@@ -1571,6 +1571,7 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
       "api_key_id": 3,
       "api_key_name": "Team A",
       "api_key_masked": "sk-t****...****1234",
+      "client_user_agent": "Codex Desktop/0.149.0-alpha.4.3 (Windows 10.0.26200; x86_64)",
       "endpoint": "/v1/chat/completions",
       "model": "gpt-5.5",
       "status_code": 200,

@@ -200,11 +200,13 @@ func TestDeleteAccountGroupPrunesScopeLimits(t *testing.T) {
 		Name:            "scoped",
 		Key:             "sk-scope-prune-1234567890",
 		AllowedGroupIDs: []int64{keptID, doomedID},
-		Limits: APIKeyLimits{ScopeLimits: []APIKeyScopeLimit{
-			{ScopeType: APIKeyScopeTypeGroup, ScopeID: keptID, Cost1d: 5},
-			{ScopeType: APIKeyScopeTypeGroup, ScopeID: doomedID, Cost1d: 3},
-			{ScopeType: APIKeyScopeTypeAccount, ScopeID: doomedID, Cost1d: 1},
-		}},
+		Limits: APIKeyLimits{
+			ScopeLimits: []APIKeyScopeLimit{
+				{ScopeType: APIKeyScopeTypeGroup, ScopeID: keptID, Cost1d: 5},
+				{ScopeType: APIKeyScopeTypeGroup, ScopeID: doomedID, Cost1d: 3},
+				{ScopeType: APIKeyScopeTypeAccount, ScopeID: doomedID, Cost1d: 1},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("InsertAPIKeyWithOptions 返回错误: %v", err)
