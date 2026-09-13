@@ -171,6 +171,28 @@ func TestModelRequestQuotaExecutorRetriesAndFreshRequest(t *testing.T) {
 	}
 }
 
+func TestModelRequestQuotaActivatesSSEKeepaliveAfterAdmission(t *testing.T) {
+	previousInterval := continuousRetryKeepaliveInterval
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
+	t.Cleanup(func() { continuousRetryKeepaliveInterval = previousInterval })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, modelQuotaSSE)
+	}))
+	t.Cleanup(upstream.Close)
+	_, _, router := newModelQuotaTestHandler(t, 2, upstream.URL, false)
+
+	response := performModelQuotaRequest(router, "/v1/responses", `{"model":"gpt-6-astra","input":"hi","stream":true}`)
+	body := response.Body.String()
+	keepaliveAt := strings.Index(body, downstreamSSEKeepaliveComment)
+	completedAt := strings.Index(body, `"type":"response.completed"`)
+	if response.Code != http.StatusOK || keepaliveAt < 0 || completedAt < 0 || keepaliveAt > completedAt {
+		t.Fatalf("status=%d keepalive=%d completed=%d body=%q", response.Code, keepaliveAt, completedAt, body)
+	}
+}
+
 func TestModelRequestQuotaWebsocketFramesAndOtherModel(t *testing.T) {
 	previousExecute := WebsocketExecuteFunc
 	t.Cleanup(func() { WebsocketExecuteFunc = previousExecute })

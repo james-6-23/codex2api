@@ -1065,7 +1065,7 @@ func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	}
 }
 
-func TestForwardImagesPrecommitKeepalivePreservesHTTPFailure(t *testing.T) {
+func TestForwardImagesInitialKeepaliveCommitsSSEFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
 	previousResin := resinCfg.Load()
@@ -1100,18 +1100,14 @@ func TestForwardImagesPrecommitKeepalivePreservesHTTPFailure(t *testing.T) {
 	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
 
 	recorder := httptest.NewRecorder()
-	writer := &informationalRecordingWriter{ResponseRecorder: recorder}
-	c, _ := gin.CreateTestContext(writer)
+	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/images/generations", nil)
 	responsesBody := []byte(`{"model":"gpt-5.4","input":"draw a test image","tools":[{"type":"image_generation","model":"gpt-image-2"}],"stream":true}`)
 	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
 
 	body := recorder.Body.String()
-	if len(writer.informational) == 0 || writer.informational[0] != http.StatusProcessing {
-		t.Fatalf("informational statuses = %v, want HTTP 102", writer.informational)
-	}
-	if recorder.Code != http.StatusTeapot || !strings.Contains(body, "stop now") {
-		t.Fatalf("final HTTP error = status %d body %q", recorder.Code, body)
+	if recorder.Code != http.StatusOK || !strings.Contains(body, downstreamSSEKeepaliveComment) || !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
+		t.Fatalf("committed SSE error = status %d body %q", recorder.Code, body)
 	}
 }
 

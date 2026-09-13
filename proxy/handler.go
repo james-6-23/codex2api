@@ -5323,7 +5323,7 @@ func (h *Handler) Responses(c *gin.Context) {
 			// 思考截断自动续想（默认关闭）：开启时用折叠状态机包裹 forward，
 			// 命中 518n-2 截断指纹则用同一账号续发上游并折叠成单响应；
 			// 关闭时保持原有逐事件透传路径，字节级零变化。请求级 keepalive
-			// 统一负责响应提交前的 102 和提交后的 SSE 注释。
+			// 统一负责首个模型事件前后的 SSE 注释。
 			if contEnabled {
 				requestKeepaliveOwnsWrites := continuousRetryKeepaliveActive(c.Request.Context()) && continuousRetryKeepaliveInterval > 0
 				fold := &continueFold{

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/codex2api/auth"
@@ -26,6 +27,7 @@ type continuousRetryKeepalive interface {
 type continuousRetryKeepaliveContextKey struct{}
 
 type requestContinuousRetryKeepalive struct {
+	mu     sync.Mutex
 	active bool
 	last   time.Time
 	write  func() error
@@ -33,17 +35,23 @@ type requestContinuousRetryKeepalive struct {
 }
 
 func (k *requestContinuousRetryKeepalive) Activate() {
-	if k != nil && !k.active {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.active {
 		k.active = true
-		// Start the heartbeat window when unlimited retry actually begins.
-		// Short backoff calls then accumulate toward the same deadline instead
-		// of restarting a fresh interval on every retry.
+		// 从请求具备下游保活资格时开始计时；后续短等待共用同一时间窗，
+		// 不在每次重试时重新开始一个完整周期。
 		k.last = time.Now()
 	}
 }
 
 func (k *requestContinuousRetryKeepalive) Deactivate() {
 	if k != nil {
+		k.mu.Lock()
+		defer k.mu.Unlock()
 		k.active = false
 	}
 }
@@ -57,11 +65,21 @@ func (k *requestContinuousRetryKeepalive) SetActive(active bool) {
 }
 
 func (k *requestContinuousRetryKeepalive) Active() bool {
-	return k != nil && k.active
+	if k == nil {
+		return false
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return k.active
 }
 
 func (k *requestContinuousRetryKeepalive) Keepalive() error {
-	if k == nil || !k.active || k.write == nil {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if !k.active || k.write == nil {
 		return nil
 	}
 	if continuousRetryKeepaliveInterval <= 0 {
@@ -120,16 +138,14 @@ func installContinuousRetrySSEKeepaliveWithOptions(c *gin.Context, stream bool, 
 	if options.payload == "" {
 		options.payload = continuousRetryKeepaliveComment
 	}
-	informationalWriter, supportsInformational := unwrapHTTPResponseWriter(responseWriter)
 	original := c.Request
 	requestCtx, cancel := context.WithCancelCause(original.Context())
 	keepalive := &requestContinuousRetryKeepalive{write: func() error {
 		setSSEStreamHeaders(c, options.contentType)
 		if !c.Writer.Written() {
-			if supportsInformational {
-				informationalWriter.WriteHeader(http.StatusProcessing)
-			}
-			return nil
+			// Cloudflare 对 102 之后的最终响应仍有 125s 限制；长期保活
+			// 必须建立 SSE 200，再持续写入协议内心跳帧。
+			c.Writer.WriteHeaderNow()
 		}
 		if _, err := io.WriteString(responseWriter, options.payload); err != nil {
 			return err
@@ -248,7 +264,12 @@ func continuousRetryKeepaliveDelay(keepalive continuousRetryKeepalive) time.Dura
 		return 0
 	}
 	requestKeepalive, ok := keepalive.(*requestContinuousRetryKeepalive)
-	if !ok || requestKeepalive.last.IsZero() {
+	if !ok {
+		return continuousRetryKeepaliveInterval
+	}
+	requestKeepalive.mu.Lock()
+	defer requestKeepalive.mu.Unlock()
+	if requestKeepalive.last.IsZero() {
 		return continuousRetryKeepaliveInterval
 	}
 	delay := continuousRetryKeepaliveInterval - time.Since(requestKeepalive.last)
@@ -291,7 +312,7 @@ func executeHTTPWithContinuousRetryKeepalive(ctx context.Context, execute func()
 	if execute == nil {
 		return nil, errors.New("nil upstream executor")
 	}
-	if keepalive == nil || !keepalive.Active() || continuousRetryKeepaliveInterval <= 0 {
+	if keepalive == nil || continuousRetryKeepaliveInterval <= 0 {
 		return execute()
 	}
 
@@ -316,8 +337,10 @@ func executeHTTPWithContinuousRetryKeepalive(ctx context.Context, execute func()
 			stopContinuousRetryTimer(timer)
 			return callResult.response, callResult.err
 		case <-timer.C:
-			if err := keepalive.Keepalive(); err != nil {
-				return nil, err
+			if keepalive.Active() {
+				if err := keepalive.Keepalive(); err != nil {
+					return nil, err
+				}
 			}
 		case <-ctx.Done():
 			stopContinuousRetryTimer(timer)

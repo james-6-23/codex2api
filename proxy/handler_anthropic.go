@@ -1242,7 +1242,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			streamAttempt = h.newContinuousRetryStreamAttempt(continuousRetryBuffersAttempts(continuousRetryPolicy), c.Writer, flusher)
 			streamWriter := h.newAttemptStreamFlushWriter(c, streamAttempt, c.Writer, flusher)
 			var pendingFirstTokenEvents bytes.Buffer
-			// 请求级 Messages keepalive 在响应提交前发送 102，提交后发送
+			// 请求级 Messages keepalive 从首个模型事件前开始发送
 			// Anthropic 原生 ping；翻译写入与保活不会再由独立 ticker 并发。
 			// contentStarted 用严格口径（isFirstTokenResult）跟踪"首个真实内容帧"，
 			// 专供流提交决策（缓冲/重试窗口/failed 抑制）使用；ttftRecorded 按

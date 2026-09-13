@@ -232,7 +232,7 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *
 	}
 }
 
-func TestSendGrokNativeHTTPErrorAfterPrecommitKeepalivePreservesHTTPError(t *testing.T) {
+func TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
 		name     string
@@ -246,8 +246,7 @@ func TestSendGrokNativeHTTPErrorAfterPrecommitKeepalivePreservesHTTPError(t *tes
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			writer := &informationalRecordingWriter{ResponseRecorder: recorder}
-			ctx, _ := gin.CreateTestContext(writer)
+			ctx, _ := gin.CreateTestContext(recorder)
 			ctx.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
 			stop := installContinuousRetrySSEKeepalive(ctx, true, "text/event-stream")
 			defer stop()
@@ -264,11 +263,9 @@ func TestSendGrokNativeHTTPErrorAfterPrecommitKeepalivePreservesHTTPError(t *tes
 				failureMessage: "upstream busy",
 			})
 
-			if len(writer.informational) != 1 || writer.informational[0] != http.StatusProcessing {
-				t.Fatalf("informational statuses = %v, want [%d]", writer.informational, http.StatusProcessing)
-			}
-			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "upstream busy") {
-				t.Fatalf("final HTTP error = status %d body %q", recorder.Code, recorder.Body.String())
+			body := recorder.Body.String()
+			if recorder.Code != http.StatusOK || !strings.Contains(body, downstreamSSEKeepaliveComment) || !strings.Contains(body, "upstream busy") {
+				t.Fatalf("committed SSE error = status %d body %q", recorder.Code, body)
 			}
 		})
 	}

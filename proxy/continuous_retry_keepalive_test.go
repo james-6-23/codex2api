@@ -336,9 +336,9 @@ func TestContinuousRetryMessagesKeepaliveWritesPingAfterCommit(t *testing.T) {
 	}
 }
 
-func TestContinuousRetrySSEKeepaliveUsesHTTP102BeforeCommit(t *testing.T) {
+func TestContinuousRetrySSEKeepaliveCommitsHeartbeatBeforeFirstEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	recorder := &informationalRecordingWriter{ResponseRecorder: httptest.NewRecorder()}
+	recorder := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
 	stop := installContinuousRetrySSEKeepalive(c, true, "text/event-stream")
@@ -350,23 +350,21 @@ func TestContinuousRetrySSEKeepaliveUsesHTTP102BeforeCommit(t *testing.T) {
 	keepalive.Activate()
 	keepalive.last = time.Time{}
 	if err := keepalive.Keepalive(); err != nil {
-		t.Fatalf("write informational heartbeat: %v", err)
+		t.Fatalf("write initial heartbeat: %v", err)
 	}
-	if len(recorder.informational) != 1 || recorder.informational[0] != http.StatusProcessing {
-		t.Fatalf("informational statuses = %v, want [%d]", recorder.informational, http.StatusProcessing)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
 	}
-	if recorder.Body.Len() != 0 {
-		t.Fatalf("pre-commit SSE body = %q, want empty", recorder.Body.String())
+	if got := recorder.Body.String(); got != continuousRetryKeepaliveComment {
+		t.Fatalf("initial SSE heartbeat = %q, want %q", got, continuousRetryKeepaliveComment)
 	}
 
-	setSSEStreamHeaders(c, "text/event-stream")
-	c.Writer.WriteHeaderNow()
 	keepalive.last = time.Time{}
 	if err := keepalive.Keepalive(); err != nil {
 		t.Fatalf("write committed heartbeat: %v", err)
 	}
-	if got := recorder.Body.String(); got != continuousRetryKeepaliveComment {
-		t.Fatalf("committed SSE body = %q, want %q", got, continuousRetryKeepaliveComment)
+	if got := recorder.Body.String(); got != continuousRetryKeepaliveComment+continuousRetryKeepaliveComment {
+		t.Fatalf("SSE heartbeat body = %q", got)
 	}
 }
 
