@@ -145,7 +145,8 @@ func TestSessionAccountFailoverOutboundWindowsAndReturnToAccount(test *testing.T
 	oldRequest, oldBody := outboundEpochTestRequest(test, handler, 48)
 	handler.attachSessionOutboundEpoch(oldRequest, hashRiskIdentity(key), record)
 	fingerprint := NewCodexTransportFingerprint(first, nil, oldBody, "cache")
-	require.Error(test, fingerprint.ClaimSessionIdentity(oldRequest.Request.Context(), first, "test-user-key"))
+	require.NoError(test, fingerprint.ClaimSessionIdentity(oldRequest.Request.Context(), first, "test-user-key"))
+	require.Equal(test, sessions[3]+":2", fingerprint.DownstreamHeaders().Get("X-Codex-Window-Id"))
 }
 
 func TestSessionAccountFailoverRelatedWindowAndContinuationEpoch(test *testing.T) {
@@ -203,9 +204,55 @@ func TestSessionAccountFailoverFlatWindowNumberUsesEmbeddedThread(test *testing.
 	fingerprint := NewCodexTransportFingerprint(target, nil, body, "cache")
 	require.NoError(test, fingerprint.ClaimSessionIdentity(request.Request.Context(), target, "test-user-key"))
 	mapped := fingerprint.ApplyBody(body)
-	require.EqualValues(test, 101, gjson.GetBytes(mapped, "client_metadata.window_number").Uint())
+	require.EqualValues(test, 1, gjson.GetBytes(mapped, "client_metadata.window_number").Uint())
 	require.Equal(test, mapped, fingerprint.ApplyBody(mapped))
 	body, _ = sjson.SetBytes(body, "client_metadata.window_number", 149)
 	fingerprint = NewCodexTransportFingerprint(target, nil, body, "cache")
 	require.Error(test, fingerprint.ClaimSessionIdentity(request.Request.Context(), target, "test-user-key"))
+}
+
+func TestSessionAccountFailoverRollbackContextIdentity(test *testing.T) {
+	handler, owner, target, key := failoverTestSetup(test, true)
+	config := handler.store.GetPromptFilterConfig()
+	config.Advanced.Risk.SessionContinuityMode = "enforce"
+	handler.store.SetPromptFilterConfig(config)
+	_, err := handler.db.CommitSessionContinuity(context.Background(), hashRiskIdentity(key), database.SessionContinuityRecord{AccountID: owner.ID(), ThreadID: continuityTestThread, NumberKnown: true, Number: 16})
+	require.NoError(test, err)
+	atomic.StoreInt32(&owner.Disabled, 1)
+	var mappedSession string
+	for index, step := range []struct {
+		original, expected uint64
+		contextID          string
+	}{
+		{16, 0, "01a09935-e304-7631-8fa3-ef6da401d261"},
+		{15, 1, "01a098f6-a753-7472-878a-b93c55180188"},
+		{15, 1, "01a098f6-a753-7472-878a-b93c55180188"},
+		{16, 2, "01a0995d-3268-7fb0-9109-b70a663a3302"},
+		{16, 0, "01a09935-e304-7631-8fa3-ef6da401d261"},
+	} {
+		request, body := outboundEpochTestRequest(test, handler, step.original)
+		body, _ = sjson.SetBytes(body, "client_metadata.x-codex-turn-metadata.context_window_id", step.contextID)
+		original := bytes.Clone(body)
+		require.Nil(test, handler.configureSessionModelAffinity(request, requestSessionIdentity{stableIdentity: true}, key, "gpt-5.6-sol", "gpt-5.6-sol", false, body))
+		if index == 0 {
+			selected, _, handled := handler.takeSessionAccountFailover(request.Request.Context(), key, 0, nil, nil, auth.DispatchPolicyStandard)
+			require.True(test, handled)
+			require.Same(test, target, selected)
+			handler.store.Release(selected)
+		}
+		require.Nil(test, handler.commitSessionContinuity(request, target))
+		fingerprint := NewCodexTransportFingerprint(target, request.Request.Header, body, "cache")
+		require.NoError(test, fingerprint.ClaimSessionIdentity(request.Request.Context(), target, "test-user-key"))
+		mapped := fingerprint.ApplyBody(body)
+		metadata := diagnosticMetadataObject(gjson.GetBytes(mapped, "client_metadata.x-codex-turn-metadata"))
+		require.Equal(test, step.expected, metadata.Get("window_number").Uint())
+		require.Equal(test, metadata.Get("window_id").String(), fingerprint.DownstreamHeaders().Get("X-Codex-Window-Id"))
+		if mappedSession != "" {
+			require.Equal(test, mappedSession, metadata.Get("thread_id").String())
+		}
+		mappedSession = metadata.Get("thread_id").String()
+		require.Equal(test, original, body)
+		require.False(test, continuityRequest(request).Diagnostic.WouldBlock)
+		handler.continuityRecords = nil
+	}
 }

@@ -4181,6 +4181,14 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, modelError)
 		return
 	}
+	routingBody, routingHeaders := sessionRestartRoutingContext(c, rawBody)
+	turnContinuation = codexTurnContinuationToken(routingHeaders, routingBody) != ""
+	hasPreviousResponse = strings.TrimSpace(gjson.GetBytes(routingBody, "previous_response_id").String()) != ""
+	turnContinuationPinned = codexContinuationPinned(turnContinuation, hasPreviousResponse, turnHasBinding, priorSessionAccountID)
+	if !hasPreviousResponse && bodyPreparation.PreviousResponseID != "" {
+		bodyPreparation = prepareResponsesBodyForOwnerDetailed(routingBody, respCacheOwner)
+		continuationStatus, continuationReason, continuationUnavailable = responseCachePreparationFailure(bodyPreparation)
+	}
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	if continuationUnavailable {
@@ -4192,7 +4200,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// resolveCompactionAffinity 只在已知来源相互冲突时报错；缓存故障按未知
 	// 来源处理，保持正常调度。
-	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), rawBody)
+	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), routingBody)
 	if compactionAffinityErr != nil {
 		sendCompactionProvenanceConflict(c)
 		return
@@ -6349,6 +6357,11 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		api.SendError(c, modelError)
 		return
 	}
+	routingBody, _ := sessionRestartRoutingContext(c, rawBody)
+	if gjson.GetBytes(routingBody, "previous_response_id").String() == "" && bodyPreparation.PreviousResponseID != "" {
+		continuationUnavailable = false
+		previousResponseAffinityFound = false
+	}
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, true, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = excludeClaudeAccountsFilter(accountFilter, selectionTraceForRequest(c))
@@ -6359,7 +6372,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// resolveCompactionAffinity 只在已知来源相互冲突时报错；缓存故障按未知
 	// 来源处理，保持正常调度。
-	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), rawBody)
+	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), routingBody)
 	if compactionAffinityErr != nil {
 		sendCompactionProvenanceConflict(c)
 		return

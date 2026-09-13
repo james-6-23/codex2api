@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )
@@ -18,7 +19,7 @@ type CodexFingerprint struct {
 	accountIdentityInputs     []string
 	accountTurnIdentityInputs map[string]codexTurnIdentityInput
 	accountIdentityReferences map[string]bool
-	accountWindowInputs       map[string]uint64
+	accountWindowInputs       map[string]database.SessionOutboundWindowInput
 	accountWindowInputError   error
 	accountIdentity           *codexAccountIdentity
 	accountIdentityDiagnostic *codexAccountIdentityDiagnostic

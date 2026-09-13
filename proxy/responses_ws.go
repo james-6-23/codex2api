@@ -504,13 +504,19 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		_ = writeAuditedResponsesWSError(c, conn, modelError)
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, modelError.Message, modelError)
 	}
+	routingBody, _ := sessionRestartRoutingContext(c, rawBody)
+	turnContinuation = codexWSTurnContinuationToken(routingBody) != ""
+	hasPreviousResponse = strings.TrimSpace(gjson.GetBytes(routingBody, "previous_response_id").String()) != ""
+	if !hasPreviousResponse {
+		previousResponseAffinityFound = false
+	}
 	accountFilter = h.applyPassiveInternalModelRouting(c, effectiveModel, sessionIdentity, affinityKey, false, accountFilter)
 	accountFilter = h.withRequestModelCooldownFilter(c, effectiveModel, accountFilter)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	// resolveCompactionAffinity 只在已知来源相互冲突时报错；缓存故障按未知
 	// 来源处理，保持正常调度。
-	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), rawBody)
+	compactionAffinity, compactionAffinityErr := h.resolveCompactionAffinity(c.Request.Context(), routingBody)
 	if compactionAffinityErr != nil {
 		apiErr = compactionProvenanceConflictAPIError()
 		_ = writeAuditedResponsesWSError(c, conn, apiErr)
@@ -747,13 +753,23 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		// WebSocket 上游下剥离自动注入的图片工具，防止模型自主生图卡死。
 		upstreamBody := codexBody
+		var restartError error
+		upstreamBody, downstreamHeaders, restartError = PrepareSessionRestartOutbound(upstreamCtx, account, upstreamBody, downstreamHeaders)
+		if restartError != nil {
+			ttftGuard.Stop()
+			upstreamCancel()
+			h.store.Release(account)
+			failure := api.NewAPIError("codex_session_failover_context_required", restartError.Error(), api.ErrorTypeInvalidRequest)
+			_ = writeAuditedResponsesWSError(c, conn, failure)
+			return newResponsesWSCloseError(websocket.ClosePolicyViolation, failure.Message, failure)
+		}
 		attemptReplay := turnReplay
 		if useWebsocket {
-			upstreamBody = stripResponsesImageGenerationTool(codexBody)
-		} else if prevID := strings.TrimSpace(gjson.GetBytes(codexBody, "previous_response_id").String()); prevID != "" {
+			upstreamBody = stripResponsesImageGenerationTool(upstreamBody)
+		} else if prevID := strings.TrimSpace(gjson.GetBytes(upstreamBody, "previous_response_id").String()); prevID != "" {
 			var contextErr *api.APIError
 			var lost bool
-			upstreamBody, lost, contextErr = degradeResponsesWSContinuationWithSource(codexBody, respCacheOwner, turnReplay)
+			upstreamBody, lost, contextErr = degradeResponsesWSContinuationWithSource(upstreamBody, respCacheOwner, turnReplay)
 			if contextErr != nil {
 				ttftGuard.Stop()
 				upstreamCancel()

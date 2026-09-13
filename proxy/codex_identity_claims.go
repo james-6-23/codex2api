@@ -30,7 +30,7 @@ func codexIdentityRequestError(err error) *api.APIError {
 		return nil
 	}
 	switch requestError.Code {
-	case "codex_session_identity_invalid", "codex_session_identity_conflict", "codex_session_identity_unavailable", "codex_background_account_mismatch":
+	case "codex_session_identity_invalid", "codex_session_identity_conflict", "codex_session_identity_unavailable", "codex_background_account_mismatch", "codex_session_failover_context_required":
 		return api.NewAPIError(api.ErrorCode(requestError.Code), requestError.Message, api.ErrorTypeInvalidRequest)
 	default:
 		return nil

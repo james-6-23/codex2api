@@ -66,7 +66,7 @@ func TestWebsocketSessionFailoverResetsWindowAndConnection(test *testing.T) {
 				return
 			}
 			seen <- capture{request.Header.Clone(), body, index}
-			if err := connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"epoch-response","status":"completed","output":[{"type":"reasoning","id":"epoch-reasoning","encrypted_content":"epoch-state-%d"}],"usage":{"input_tokens":1,"output_tokens":1}}}`, index))); err != nil {
+			if err := connection.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf(`{"type":"response.completed","response":{"id":"epoch-response","status":"completed","output":[{"type":"reasoning","id":"epoch-reasoning","encrypted_content":"gAAAAepoch-state-%d"}],"usage":{"input_tokens":1,"output_tokens":1}}}`, index))); err != nil {
 				return
 			}
 		}
@@ -104,7 +104,11 @@ func TestWebsocketSessionFailoverResetsWindowAndConnection(test *testing.T) {
 			require.NoError(test, err)
 		}
 		if number == 1 || number == 3 {
-			body, err = sjson.SetRawBytes(body, "input", []byte(fmt.Sprintf(`[{"type":"reasoning","id":"epoch-reasoning","encrypted_content":"epoch-state-%d"},{"role":"user","content":"continue"}]`, number/2+1)))
+			body, err = sjson.SetRawBytes(body, "input", []byte(fmt.Sprintf(`[{"type":"reasoning","id":"epoch-reasoning","encrypted_content":"gAAAAepoch-state-%d"},{"role":"user","content":"continue"}]`, number/2+1)))
+			require.NoError(test, err)
+		}
+		if number == 2 || number == 4 {
+			body, err = sjson.SetRawBytes(body, "input", []byte(fmt.Sprintf(`[{"type":"reasoning","encrypted_content":"gAAAAepoch-state-%d"},{"type":"compaction","encrypted_content":"gAAAAold-compaction"},{"role":"user","content":[{"type":"input_file","file_id":"old-file"},{"type":"input_text","text":"current task"}]}]`, number/2)))
 			require.NoError(test, err)
 		}
 		recorder := httptest.NewRecorder()
@@ -120,6 +124,15 @@ func TestWebsocketSessionFailoverResetsWindowAndConnection(test *testing.T) {
 		select {
 		case sent := <-seen:
 			captures = append(captures, sent)
+			if number == 2 || number == 4 {
+				require.NotContains(test, string(sent.body), "gAAAAepoch-state-")
+				require.NotContains(test, string(sent.body), "gAAAAold-compaction")
+				require.NotContains(test, string(sent.body), "old-file")
+				require.Contains(test, string(sent.body), "current task")
+			}
+			if number == 3 {
+				require.Contains(test, string(sent.body), "gAAAAepoch-state-2")
+			}
 			meta := gjson.Parse(gjson.GetBytes(sent.body, "client_metadata.x-codex-turn-metadata").String())
 			require.EqualValues(test, number%2, meta.Get("window_number").Uint())
 			require.Equal(test, sent.headers.Get("Thread-Id")+fmt.Sprintf(":%d", number%2), meta.Get("window_id").String())

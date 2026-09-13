@@ -11,20 +11,23 @@ import (
 var ErrSessionOwnerConflict = errors.New("session account ownership changed")
 
 type SessionContinuityRecord struct {
-	AccountID           int64             `json:"account_id"`
-	ThreadID            string            `json:"thread_id"`
-	Number              uint64            `json:"number"`
-	NumberKnown         bool              `json:"number_known"`
-	LastSeen            time.Time         `json:"last_seen"`
-	LastCompleted       time.Time         `json:"last_completed,omitempty"`
-	CompletedNumber     *uint64           `json:"completed_number,omitempty"`
-	LastStatus          int               `json:"last_status,omitempty"`
-	PreviousAccountID   int64             `json:"previous_account_id,omitempty"`
-	FailoverCount       uint64            `json:"failover_count,omitempty"`
-	LastFailoverAt      time.Time         `json:"last_failover_at,omitempty"`
-	LastFailoverReason  string            `json:"last_failover_reason,omitempty"`
-	OutboundWindowReset bool              `json:"outbound_window_reset,omitempty"`
-	OutboundWindowBases map[string]uint64 `json:"outbound_window_bases,omitempty"`
+	AccountID           int64                                  `json:"account_id"`
+	ThreadID            string                                 `json:"thread_id"`
+	Number              uint64                                 `json:"number"`
+	NumberKnown         bool                                   `json:"number_known"`
+	LastSeen            time.Time                              `json:"last_seen"`
+	LastCompleted       time.Time                              `json:"last_completed,omitempty"`
+	CompletedNumber     *uint64                                `json:"completed_number,omitempty"`
+	LastStatus          int                                    `json:"last_status,omitempty"`
+	PreviousAccountID   int64                                  `json:"previous_account_id,omitempty"`
+	FailoverCount       uint64                                 `json:"failover_count,omitempty"`
+	LastFailoverAt      time.Time                              `json:"last_failover_at,omitempty"`
+	LastFailoverReason  string                                 `json:"last_failover_reason,omitempty"`
+	OutboundWindowReset bool                                   `json:"outbound_window_reset,omitempty"`
+	OutboundWindowBases map[string]uint64                      `json:"outbound_window_bases,omitempty"`
+	OutboundWindowMode  string                                 `json:"outbound_window_mode,omitempty"`
+	OutboundWindows     map[string]*SessionOutboundWindowState `json:"outbound_windows,omitempty"`
+	LossyContextRestart bool                                   `json:"lossy_context_restart,omitempty"`
 }
 
 func (db *DB) ReadSessionContinuity(ctx context.Context, key string) (SessionContinuityRecord, bool, error) {

@@ -549,6 +549,10 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 		// requested tier 归因走 EffectiveRequestedServiceTier（净化前取值），不受影响。
 		requestBody = sanitizeServiceTierForUpstream(requestBody)
 	}
+	requestBody, headers, upstreamErr = PrepareSessionRestartOutbound(ctx, account, requestBody, headers)
+	if upstreamErr != nil {
+		return nil, upstreamErr
+	}
 	headers = CodexRequestMetadataHeaders(headers, requestBody)
 	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
 	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
@@ -988,6 +992,10 @@ func ExecuteCompactRequest(ctx context.Context, account *auth.Account, requestBo
 	var encryptedAttempt *encryptedContentAttempt
 	requestBody, encryptedAttempt = prepareEncryptedContentAttempt(ctx, account, requestBody, sessionID, headers)
 	defer func() { encryptedAttempt.observeResponse(upstreamResponse, requestBody) }()
+	requestBody, headers, upstreamErr = PrepareSessionRestartOutbound(ctx, account, requestBody, headers)
+	if upstreamErr != nil {
+		return nil, upstreamErr
+	}
 	responsesLite := gateResponsesLiteForAccount(codexResponsesLiteRequested(requestBody, headers), requestBody, account)
 
 	account.Mu().RLock()

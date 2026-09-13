@@ -128,7 +128,7 @@ func evaluateSessionContinuity(previous database.SessionContinuityRecord, found 
 		return "window_advanced", false
 	}
 	if number < previous.Number {
-		return "window_regressed", true
+		return "window_regressed", owner <= 0 || previous.AccountID != owner
 	}
 	return "window_gap", true
 }
@@ -247,6 +247,9 @@ func (handler *Handler) prepareSessionContinuity(request *gin.Context, identity 
 		owner = entry.Record.AccountID
 		if entry.Record.FailoverCount > 0 {
 			diagnostic.AccountFailover = &sessionAccountFailoverDiagnostic{Result: "restored", PreviousAccountID: entry.Record.PreviousAccountID, AccountID: owner, Generation: entry.Record.FailoverCount, Reason: entry.Record.LastFailoverReason}
+			if entry.Record.LossyContextRestart {
+				diagnostic.AccountFailover = usageRequestDiagnosticState(request).AccountFailover
+			}
 			if err := handler.validateMigratedSessionContext(request, body, entry.Record, affinityKey); err != nil {
 				return err
 			}

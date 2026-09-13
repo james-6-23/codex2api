@@ -34,6 +34,9 @@ test('session failover translations include identity and non-migration constrain
       assert.equal(settings.codexSessionFailoverEnabled, '账号不可用或会话容量不足时允许换号')
     }
     const hint = settings.codexSessionFailoverEnabledHint
+    assert.match(hint, /有损重开|有損重開|lossy restart/, locale)
+    assert.match(hint, /出站副本|outbound copy/, locale)
+    assert.match(hint, /没有可用输入|沒有可用輸入|no usable input/, locale)
     for (const constraint of [/previous_response_id/, /500/, /busy/, /默认关闭|預設關閉|Off by default/, /出站身份段|出站身分段|outbound identity segment/, /后续.*请求|後續.*請求|Later requests/, /完整明文上下文|full plaintext context/, /加密上下文|encrypted context/, /加密推理|encrypted reasoning/, /加密压缩|加密壓縮|compaction/, /未知的 previous_response_id|unknown previous_response_id/, /新建会话|建立新會話|new conversation/, /握手|handshake/, /黑名单|黑名單|blacklist/, /过期|到期|expiry/, /窗口|window/, /分组集合必须完全一致|分組集合必須完全一致|Group membership must match exactly/, /47→0/, /48→1/]) {
       assert.match(hint, constraint, locale)
     }

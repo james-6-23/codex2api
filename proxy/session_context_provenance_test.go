@@ -175,9 +175,16 @@ func TestSessionContextProvenanceNativeWebsocketFlow(test *testing.T) {
 	test.Setenv("CODEX_REQUEST_COMPRESSION", "off")
 	var received atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		received.Add(1)
+		step := received.Add(1)
+		body := readUpstreamRequestBody(request)
+		if step > 1 {
+			require.NotContains(test, string(body), "old-restart-")
+		}
+		if step == 3 {
+			require.Contains(test, string(body), "gAAAAnative-ws-state")
+		}
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"native-ws-response\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"native-ws-reasoning\",\"encrypted_content\":\"native-ws-state\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))
+		_, _ = writer.Write([]byte("data: {\"type\":\"response.completed\",\"response\":{\"id\":\"native-ws-response\",\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"id\":\"native-ws-reasoning\",\"encrypted_content\":\"gAAAAnative-ws-state\"}],\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}}\n\n"))
 	}))
 	test.Cleanup(upstream.Close)
 	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "native-context"})
@@ -198,8 +205,13 @@ func TestSessionContextProvenanceNativeWebsocketFlow(test *testing.T) {
 		}
 		_, body := failoverTestRequest(test, handler)
 		body, _ = sjson.SetBytes(body, "type", "response.create")
+		if step == 1 {
+			body, _ = sjson.SetRawBytes(body, "input", []byte(`[{"type":"reasoning","encrypted_content":"gAAAAold-restart-reasoning"},{"type":"compaction","encrypted_content":"gAAAAold-restart-compaction"},{"role":"user","content":"continue current task"}]`))
+			body, _ = sjson.SetBytes(body, "previous_response_id", "old-restart-response")
+			body, _ = sjson.SetBytes(body, "client_metadata.x-codex-turn-state", "old-restart-state")
+		}
 		if step == 2 {
-			body, _ = sjson.SetRawBytes(body, "input", []byte(`[{"type":"reasoning","id":"native-ws-reasoning","encrypted_content":"native-ws-state"},{"role":"user","content":"continue"}]`))
+			body, _ = sjson.SetRawBytes(body, "input", []byte(`[{"type":"reasoning","id":"native-ws-reasoning","encrypted_content":"gAAAAnative-ws-state"},{"role":"user","content":"continue"}]`))
 		}
 		require.NoError(test, connection.WriteMessage(websocket.TextMessage, body))
 		require.NoError(test, connection.SetReadDeadline(time.Now().Add(5*time.Second)))

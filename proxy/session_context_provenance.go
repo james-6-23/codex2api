@@ -29,13 +29,17 @@ func sessionContextTokenKey(scope, kind, value string) string {
 }
 
 func (handler *Handler) sessionContextVerifier(request *gin.Context, record database.SessionContinuityRecord, rootKeys ...string) (sessionContextTokenVerifier, context.CancelFunc) {
-	lookup, cancel := context.WithTimeout(request.Request.Context(), time.Second)
 	scope := ""
 	if handler.store != nil && len(rootKeys) > 0 {
 		if account := handler.store.FindByID(record.AccountID); account != nil {
 			scope = sessionContextScope(responseCacheOwnerForRequest(request, requestAPIKeyID(request)), hashRiskIdentity(rootKeys[0]), account.EffectiveAccountID(), record)
 		}
 	}
+	return handler.sessionContextVerifierForScope(request.Request.Context(), scope)
+}
+
+func (handler *Handler) sessionContextVerifierForScope(ctx context.Context, scope string) (sessionContextTokenVerifier, context.CancelFunc) {
+	lookup, cancel := context.WithTimeout(ctx, time.Second)
 	checked := make(map[string]bool)
 	return func(kind, value string) bool {
 		if scope == "" || strings.TrimSpace(value) == "" {

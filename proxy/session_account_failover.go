@@ -68,7 +68,7 @@ func sessionFailoverContextError(request *gin.Context, diagnostic *sessionAccoun
 	}
 	request.Header("X-Should-Retry", "false")
 	return api.NewAPIErrorWithDetails("codex_session_failover_context_required", message, api.ErrorTypeInvalidRequest,
-		gin.H{"reason": block, "trigger_reason": diagnostic.TriggerReason, "phase": diagnostic.Phase, "retry": "stop", "context_blockers": diagnostic.ContextBlockers})
+		gin.H{"reason": block, "trigger_reason": diagnostic.TriggerReason, "phase": diagnostic.Phase, "retry": "stop", "context_blockers": diagnostic.ContextBlockers, "context_cleanup": diagnostic.ContextCleanup})
 }
 
 type sessionAccountFailoverPlan struct {
@@ -80,6 +80,25 @@ type sessionAccountFailoverPlan struct {
 }
 
 func (handler *Handler) validateMigratedSessionContext(request *gin.Context, body []byte, record database.SessionContinuityRecord, rootKeys ...string) *api.APIError {
+	if record.LossyContextRestart {
+		epoch := outboundEpochFromContext(request.Request.Context())
+		if epoch == nil || epoch.record.AccountID != record.AccountID || epoch.record.FailoverCount != record.FailoverCount {
+			return sessionContinuityError("owner_conflict")
+		}
+		known, cancel := epoch.restartContextVerifier(request.Request.Context())
+		defer cancel()
+		_, _, report, err := cleanSessionRestartContext(sessionFailoverRequestHeaders(request), body, known)
+		if err != nil {
+			diagnostic := &sessionAccountFailoverDiagnostic{Phase: "after_switch", PreviousAccountID: record.PreviousAccountID, AccountID: record.AccountID, Generation: record.FailoverCount, ContextCleanup: report}
+			failure := sessionFailoverContextError(request, diagnostic, "missing_request_context")
+			failure.Message = err.Error()
+			if typed, ok := err.(*Error); ok {
+				failure.Message = typed.Message
+			}
+			return failure
+		}
+		return nil
+	}
 	known, cancelKnown := handler.sessionContextVerifier(request, record, rootKeys...)
 	defer cancelKnown()
 	blocked, blockers := inspectSessionFailoverContext(sessionFailoverRequestHeaders(request), body, known)
@@ -225,7 +244,12 @@ func (handler *Handler) prepareSessionAccountFailover(request *gin.Context, key 
 	diagnostic := &sessionAccountFailoverDiagnostic{Result: "blocked", Reason: reason, TriggerReason: reason, Phase: "before_switch", PreviousAccountID: owner.ID(), Generation: state.Record.FailoverCount}
 	state.Diagnostic.AccountFailover = diagnostic
 	usageRequestDiagnosticState(request).AccountFailover = diagnostic
-	block, blockers := inspectSessionFailoverContext(sessionFailoverRequestHeaders(request), body, nil)
+	cleaned, cleanedHeaders, cleanup, cleanupError := cleanSessionRestartContext(sessionFailoverRequestHeaders(request), body, nil)
+	diagnostic.ContextCleanup = cleanup
+	block, blockers := inspectSessionFailoverContext(cleanedHeaders, cleaned, nil)
+	if cleanupError != nil {
+		block, blockers = "missing_request_context", nil
+	}
 	diagnostic.ContextBlockers = blockers
 	if handler.db == nil || state.Record.AccountID != owner.ID() {
 		block = "persistent_owner_required"
@@ -238,7 +262,14 @@ func (handler *Handler) prepareSessionAccountFailover(request *gin.Context, key 
 		diagnostic.ContextBlockers = nil
 	}
 	if block != "" {
-		return false, sessionFailoverContextError(request, diagnostic, block)
+		failure := sessionFailoverContextError(request, diagnostic, block)
+		if cleanupError != nil && block == "missing_request_context" {
+			failure.Message = cleanupError.Error()
+			if typed, ok := cleanupError.(*Error); ok {
+				failure.Message = typed.Message
+			}
+		}
+		return false, failure
 	}
 	if err := handler.recoverSessionFailoverGrant(request, key); err != nil {
 		diagnostic.Reason = "window_grant_unavailable"
@@ -328,6 +359,8 @@ func (handler *Handler) takeSessionAccountFailover(ctx context.Context, key stri
 			return nil, "", true
 		}
 		input := database.SessionAccountFailover{RootKey: state.Key, AffinityKey: key, ExpectedAccountID: old.ID(), AccountID: candidate.ID(), ExpectedGeneration: entry.Record.FailoverCount, Reason: plan.Diagnostic.Reason, At: time.Now().UTC(), ResetOutboundWindow: true, WindowThreadID: state.ThreadID, WindowNumber: state.Number}
+		input.WindowContextID = fingerprint.accountWindowInputs[state.ThreadID].ContextID
+		input.LossyContextRestart = true
 		grant := windowGrantForRequest(request)
 		if grant != nil {
 			input.WindowSubject = cache.PromptSessionLimitSubject(grant.Platform, grant.UserID)

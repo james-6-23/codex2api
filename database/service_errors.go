@@ -55,6 +55,13 @@ type SessionAccountFailoverDiagnostic struct {
 	AccountID         int64                   `json:"account_id,omitempty"`
 	Generation        uint64                  `json:"generation"`
 	ContextBlockers   []SessionContextBlocker `json:"context_blockers,omitempty"`
+	ContextCleanup    *SessionContextCleanup  `json:"context_cleanup,omitempty"`
+}
+
+type SessionContextCleanup struct {
+	Mode    string         `json:"mode"`
+	Phase   string         `json:"phase"`
+	Removed map[string]int `json:"removed"`
 }
 
 type ServiceErrorEvent struct {
@@ -260,6 +267,20 @@ func normalizeServiceError(event ServiceErrorEvent) ServiceErrorEvent {
 			blocker.Kind = serviceErrorString(blocker.Kind, 64)
 			blocker.Path = serviceErrorString(blocker.Path, 256)
 			blocker.ItemType = serviceErrorString(blocker.ItemType, 64)
+		}
+		if failover.ContextCleanup != nil {
+			cleanup := *failover.ContextCleanup
+			cleanup.Mode, cleanup.Phase = serviceErrorString(cleanup.Mode, 64), serviceErrorString(cleanup.Phase, 64)
+			cleanup.Removed = make(map[string]int)
+			for kind, count := range failover.ContextCleanup.Removed {
+				if len(cleanup.Removed) >= 32 {
+					break
+				}
+				if count > 0 {
+					cleanup.Removed[serviceErrorString(kind, 64)] = count
+				}
+			}
+			failover.ContextCleanup = &cleanup
 		}
 		event.AccountFailover = &failover
 	}

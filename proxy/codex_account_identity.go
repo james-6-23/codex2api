@@ -73,16 +73,16 @@ type codexAccountIdentityDiagnostic struct {
 }
 
 type codexAccountIdentity struct {
-	mode         string
-	secret       []byte
-	owner        string
-	account      string
-	epoch        string
-	preserveRoot bool
-	windowBases  map[string]uint64
-	aliases      map[string]string
-	turnAliases  map[string]string
-	diagnostic   codexAccountIdentityDiagnostic
+	mode          string
+	secret        []byte
+	owner         string
+	account       string
+	epoch         string
+	preserveRoot  bool
+	windowNumbers map[string]uint64
+	aliases       map[string]string
+	turnAliases   map[string]string
+	diagnostic    codexAccountIdentityDiagnostic
 }
 
 var codexAccountIdentityFields = []string{
@@ -443,10 +443,8 @@ func (mapping *codexAccountIdentity) rewriteWindow(original string) string {
 	if separator := strings.LastIndexByte(original, ':'); separator >= 0 {
 		thread := strings.ToLower(original[:separator])
 		suffix := original[separator:]
-		if base, found := mapping.windowBases[thread]; found {
-			if number, err := strconv.ParseUint(suffix[1:], 10, 64); err == nil && number >= base {
-				suffix = ":" + strconv.FormatUint(number-base, 10)
-			}
+		if number, found := mapping.windowNumbers[thread]; found {
+			suffix = ":" + strconv.FormatUint(number, 10)
 		}
 		return mapping.rewriteValue(original[:separator]) + suffix
 	}
@@ -470,11 +468,9 @@ func (mapping *codexAccountIdentity) rewriteMetadata(raw string, fallbackThreads
 	if thread == "" && len(fallbackThreads) > 0 {
 		thread = fallbackThreads[0]
 	}
-	if base, found := mapping.windowBases[strings.ToLower(thread)]; found {
+	if number, found := mapping.windowNumbers[strings.ToLower(thread)]; found {
 		if value := gjson.Get(raw, "window_number"); value.Type == gjson.Number {
-			if number, err := strconv.ParseUint(value.Raw, 10, 64); err == nil && number >= base {
-				raw, _ = sjson.Set(raw, "window_number", number-base)
-			}
+			raw, _ = sjson.Set(raw, "window_number", number)
 		}
 	}
 	for _, field := range append(append([]string(nil), codexAccountIdentityFields...), "x-client-request-id", "client_request_id", "x_client_request_id", "window_id", "x-codex-window-id", "x_codex_window_id") {

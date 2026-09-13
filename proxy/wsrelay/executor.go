@@ -117,6 +117,10 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	}
 	observer := proxy.UpstreamTransportObserver(ctx)
 	observer.Continuation("new_chain", "not_required")
+	requestBody, ginHeaders, resultErr = proxy.PrepareSessionRestartOutbound(ctx, account, requestBody, ginHeaders)
+	if resultErr != nil {
+		return nil, resultErr
+	}
 
 	account.Mu().RLock()
 	accessToken := account.AccessToken

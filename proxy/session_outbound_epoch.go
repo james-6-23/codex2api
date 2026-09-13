@@ -18,6 +18,7 @@ type sessionOutboundEpoch struct {
 	preview         bool
 	owner           string
 	upstreamAccount string
+	diagnostic      *sessionAccountFailoverDiagnostic
 }
 
 func outboundEpochFromContext(ctx context.Context) *sessionOutboundEpoch {
@@ -43,6 +44,13 @@ func (handler *Handler) attachSessionOutboundEpoch(request *gin.Context, key str
 			if account := handler.store.FindByID(record.AccountID); account != nil {
 				epoch.upstreamAccount = account.EffectiveAccountID()
 			}
+		}
+		if record.LossyContextRestart {
+			state := usageRequestDiagnosticState(request)
+			if state.AccountFailover == nil {
+				state.AccountFailover = &sessionAccountFailoverDiagnostic{Result: "restored", Phase: "after_switch", Reason: record.LastFailoverReason, PreviousAccountID: record.PreviousAccountID, AccountID: record.AccountID, Generation: record.FailoverCount}
+			}
+			epoch.diagnostic = state.AccountFailover
 		}
 	}
 	request.Request = request.Request.WithContext(context.WithValue(request.Request.Context(), sessionOutboundEpochContextKey{}, epoch))

@@ -34,12 +34,22 @@ func TestSessionFailoverBlockedDiagnosticSeparatesTriggerAndContext(test *testin
 			require.NoError(test, err)
 			finish := handler.beginServiceErrorAudit(request)
 			failure := handler.configureSessionModelAffinity(request, requestSessionIdentity{stableIdentity: true}, key, "gpt-5.6-sol", "gpt-5.6-sol", false, body)
+			if scenario.path != "input" {
+				require.Nil(test, failure)
+				diagnostic := usageRequestDiagnosticState(request).AccountFailover
+				require.Equal(test, "pending", diagnostic.Result)
+				require.Equal(test, "account_disabled", diagnostic.TriggerReason)
+				require.NotEmpty(test, diagnostic.ContextCleanup.Removed)
+				finish()
+				return
+			}
 			require.NotNil(test, failure)
 			require.Equal(test, "codex_session_failover_context_required", string(failure.Code))
 			require.Equal(test, http.StatusBadRequest, api.HTTPStatusCode(failure.Code))
 			details, err := json.Marshal(failure.Details)
 			require.NoError(test, err)
-			require.Equal(test, scenario.reason, gjson.GetBytes(details, "reason").String())
+			require.Equal(test, "missing_request_context", gjson.GetBytes(details, "reason").String())
+			require.Equal(test, "lossy_restart", gjson.GetBytes(details, "context_cleanup.mode").String())
 			require.Equal(test, "account_disabled", gjson.GetBytes(details, "trigger_reason").String())
 			require.Equal(test, "before_switch", gjson.GetBytes(details, "phase").String())
 			require.Equal(test, "false", request.Writer.Header().Get("X-Should-Retry"))
@@ -50,7 +60,7 @@ func TestSessionFailoverBlockedDiagnosticSeparatesTriggerAndContext(test *testin
 			event := page.Items[0]
 			require.Equal(test, http.StatusBadRequest, event.StatusCode)
 			require.NotNil(test, event.AccountFailover)
-			require.Equal(test, scenario.reason, event.AccountFailover.BlockReason)
+			require.Equal(test, "missing_request_context", event.AccountFailover.BlockReason)
 			require.Equal(test, "account_disabled", event.AccountFailover.TriggerReason)
 			require.Equal(test, owner.ID(), event.AccountFailover.PreviousAccountID)
 			require.Equal(test, "not_started", gjson.GetBytes(event.UpstreamInfo, "transport").String())

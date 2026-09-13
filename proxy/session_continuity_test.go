@@ -154,7 +154,7 @@ func TestSessionContinuityWindowRulesAndMetadata(test *testing.T) {
 		number  uint64
 		reason  string
 		blocked bool
-	}{{71, "same_window", false}, {72, "window_advanced", false}, {74, "window_gap", true}, {70, "window_regressed", true}} {
+	}{{71, "same_window", false}, {72, "window_advanced", false}, {74, "window_gap", true}, {70, "window_regressed", false}} {
 		reason, blocked := evaluateSessionContinuity(previous, true, continuityTestThread, item.number, 1695)
 		require.Equal(test, item.reason, reason)
 		require.Equal(test, item.blocked, blocked)

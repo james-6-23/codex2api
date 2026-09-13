@@ -24,6 +24,8 @@ type SessionAccountFailover struct {
 	ResetOutboundWindow bool
 	WindowThreadID      string
 	WindowNumber        uint64
+	WindowContextID     string
+	LossyContextRestart bool
 }
 
 func (db *DB) SwitchSessionContinuityAccount(ctx context.Context, input SessionAccountFailover) (SessionContinuityRecord, *UserWindowGrant, error) {
@@ -95,8 +97,14 @@ func (db *DB) SwitchSessionContinuityAccount(ctx context.Context, input SessionA
 		record.LastFailoverReason = input.Reason
 		record.OutboundWindowReset = input.ResetOutboundWindow
 		record.OutboundWindowBases = nil
+		record.OutboundWindows = nil
+		record.OutboundWindowMode = ""
+		record.LossyContextRestart = input.LossyContextRestart
 		if input.ResetOutboundWindow {
 			record.OutboundWindowBases = map[string]uint64{input.WindowThreadID: input.WindowNumber}
+			record.OutboundWindowMode = "context-v1"
+			window := SessionOutboundWindowInput{Number: input.WindowNumber, ContextID: input.WindowContextID}
+			record.OutboundWindows = map[string]*SessionOutboundWindowState{input.WindowThreadID: {Next: 1, Entries: map[string]SessionOutboundWindowEntry{window.key(): {Original: input.WindowNumber, Number: 0}}}}
 		}
 		payload, err := json.Marshal(record)
 		if err != nil {

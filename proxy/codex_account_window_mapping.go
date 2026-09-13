@@ -7,14 +7,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/codex2api/database"
 	"github.com/tidwall/gjson"
 )
 
 type codexAccountWindowChange struct {
-	ThreadID string `json:"thread_id"`
-	Original uint64 `json:"original_number"`
-	Base     uint64 `json:"base_number"`
-	Outbound uint64 `json:"outbound_number"`
+	ThreadID  string `json:"thread_id"`
+	Original  uint64 `json:"original_number"`
+	Base      uint64 `json:"base_number"`
+	Outbound  uint64 `json:"outbound_number"`
+	ContextID string `json:"context_window_id,omitempty"`
+	Mode      string `json:"mode,omitempty"`
 }
 
 func parseAccountWindow(value string) (string, uint64, error) {
@@ -98,6 +101,41 @@ func codexAccountWindowInputs(headers http.Header, body []byte) (map[string]uint
 	return windows, nil
 }
 
+func codexAccountWindowIdentities(headers http.Header, body []byte) (map[string]database.SessionOutboundWindowInput, error) {
+	numbers, err := codexAccountWindowInputs(headers, body)
+	if err != nil {
+		return nil, err
+	}
+	inputs := make(map[string]database.SessionOutboundWindowInput, len(numbers))
+	for thread, number := range numbers {
+		inputs[thread] = database.SessionOutboundWindowInput{Number: number}
+	}
+	metadata := gjson.GetBytes(body, "client_metadata")
+	for _, source := range []gjson.Result{metadata, diagnosticMetadataObject(metadata.Get("x-codex-turn-metadata")), gjson.Parse(headers.Get(codexTurnMetadataHeader))} {
+		thread := strings.ToLower(accountMetadataThread(source))
+		if thread == "" {
+			thread = strings.ToLower(headers.Get(codexThreadIDHeader))
+		}
+		input, exists := inputs[thread]
+		if !exists {
+			continue
+		}
+		for _, field := range []string{"context_window_id", "x-codex-context-window-id", "x_codex_context_window_id"} {
+			value := source.Get(field)
+			if !value.Exists() {
+				continue
+			}
+			identity := normalizeSessionGraphValue(value.String())
+			if value.Type != gjson.String || !validSessionGraphUUID(identity) || input.ContextID != "" && input.ContextID != identity {
+				return nil, errors.New("context window identity is inconsistent")
+			}
+			input.ContextID = identity
+		}
+		inputs[thread] = input
+	}
+	return inputs, nil
+}
+
 func (fingerprint *CodexFingerprint) prepareAccountWindows(ctx context.Context, mapping *codexAccountIdentity, epoch *sessionOutboundEpoch) error {
 	if epoch == nil || !epoch.record.OutboundWindowReset {
 		return nil
@@ -105,22 +143,20 @@ func (fingerprint *CodexFingerprint) prepareAccountWindows(ctx context.Context, 
 	if fingerprint.accountWindowInputError != nil {
 		return codexAccountIdentityError("出站窗口序号不一致，无法按迁移段重新编号。")
 	}
-	bases := epoch.record.OutboundWindowBases
+	numbers := make(map[string]uint64)
+	for thread := range fingerprint.accountWindowInputs {
+		numbers[thread] = 0
+	}
 	if !epoch.preview {
 		var err error
-		bases, err = epoch.handler.db.ResolveSessionOutboundWindows(ctx, epoch.key, epoch.record.AccountID, epoch.record.FailoverCount, fingerprint.accountWindowInputs)
+		numbers, err = epoch.handler.db.ResolveSessionOutboundWindowNumbers(ctx, epoch.key, epoch.record.AccountID, epoch.record.FailoverCount, fingerprint.accountWindowInputs)
 		if err != nil {
-			return codexAccountIdentityError("无法确认当前账号的窗口起始序号，或请求早于本次迁移，请重新发起请求。")
+			return codexAccountIdentityError("无法确认当前账号代次的上下文窗口映射，请重新发起请求。")
 		}
 	}
-	mapping.windowBases = make(map[string]uint64)
-	for thread, number := range fingerprint.accountWindowInputs {
-		base, exists := bases[thread]
-		if !exists || number < base {
-			return codexAccountIdentityError("请求窗口早于当前账号迁移段，已停止发送。")
-		}
-		mapping.windowBases[thread] = base
-		mapping.diagnostic.Windows = append(mapping.diagnostic.Windows, codexAccountWindowChange{ThreadID: thread, Original: number, Base: base, Outbound: number - base})
+	mapping.windowNumbers = numbers
+	for thread, input := range fingerprint.accountWindowInputs {
+		mapping.diagnostic.Windows = append(mapping.diagnostic.Windows, codexAccountWindowChange{ThreadID: thread, Original: input.Number, Base: epoch.record.OutboundWindowBases[thread], Outbound: numbers[thread], ContextID: input.ContextID, Mode: "context-v1"})
 	}
 	return nil
 }

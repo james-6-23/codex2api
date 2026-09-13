@@ -135,6 +135,11 @@ func TestSessionAccountFailoverOpaqueRequestsAndFiltering(test *testing.T) {
 			prepareError := handler.configureSessionModelAffinity(request, requestSessionIdentity{stableIdentity: true}, key, "gpt-5.6-sol", "gpt-5.6-sol", false, body)
 			if prepareError == nil {
 				selected, _, _ := handler.takeSessionAccountFailover(request.Request.Context(), key, 0, nil, filter, auth.DispatchPolicyStandard)
+				if scenario == "previous" || scenario == "turn_state" {
+					require.Same(test, target, selected)
+					handler.store.Release(selected)
+					return
+				}
 				require.Nil(test, selected)
 			}
 			record, _, err := handler.db.ReadSessionContinuity(context.Background(), hashRiskIdentity(key))
@@ -184,7 +189,10 @@ func TestSessionAccountFailoverDispatchAndRestore(test *testing.T) {
 	raw, _ = sjson.SetBytes(raw, "previous_response_id", "old-response")
 	record, _, err := handler.db.ReadSessionContinuity(context.Background(), hashRiskIdentity(key))
 	require.NoError(test, err)
-	require.NotNil(test, handler.validateMigratedSessionContext(restored, raw, record))
+	require.Nil(test, handler.validateMigratedSessionContext(restored, raw, record))
+	cleaned, _, err := PrepareSessionRestartOutbound(restored.Request.Context(), target, raw, restored.Request.Header)
+	require.NoError(test, err)
+	require.False(test, gjson.GetBytes(cleaned, "previous_response_id").Exists())
 }
 
 func TestSessionAccountFailoverHTTPIngress(test *testing.T) {
@@ -208,6 +216,11 @@ func runSessionAccountFailoverIngress(test *testing.T, compact bool) {
 		}
 		body, _ := io.ReadAll(request.Body)
 		headers := request.Header.Clone()
+		if request.Header.Get("Chatgpt-Account-Id") == target.AccountID {
+			require.NotContains(test, string(body), "old-restart-")
+			require.Contains(test, string(body), "current plaintext")
+			require.Empty(test, request.Header.Get("X-Codex-Turn-State"))
+		}
 		headers.Set("test-body-session", gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata.session_id").String())
 		seen <- headers
 		if strings.HasSuffix(request.URL.Path, "/responses/compact") {
@@ -228,6 +241,11 @@ func runSessionAccountFailoverIngress(test *testing.T, compact bool) {
 		}
 		_, body := failoverTestRequest(test, handler)
 		body, _ = sjson.SetBytes(body, "stream", true)
+		if expected == target {
+			body, _ = sjson.SetRawBytes(body, "input", []byte(`[{"type":"reasoning","encrypted_content":"gAAAAold-restart-reasoning"},{"type":"compaction","encrypted_content":"gAAAAold-restart-compaction"},{"role":"user","content":[{"type":"input_file","file_id":"old-restart-file"},{"type":"input_text","text":"current plaintext"}]}]`))
+			body, _ = sjson.SetBytes(body, "previous_response_id", "old-restart-response")
+			body, _ = sjson.SetBytes(body, "client_metadata.x-codex-turn-state", "old-restart-turn-state")
+		}
 		path := "/v1/responses"
 		if expected == target && compact {
 			path = "/v1/responses/compact"
