@@ -137,43 +137,70 @@ func (handler *Handler) recordResponseContextProvenance(request *gin.Context, ac
 }
 
 func sessionFailoverContextBlockWithVerifier(headers http.Header, body []byte, known sessionContextTokenVerifier) string {
+	reason, _ := inspectSessionFailoverContext(headers, body, known)
+	return reason
+}
+
+func inspectSessionFailoverContext(headers http.Header, body []byte, known sessionContextTokenVerifier) (string, []database.SessionContextBlocker) {
 	for _, path := range []string{"previous_response_id", "conversation", "conversation_id"} {
 		if value := gjson.GetBytes(body, path); value.Exists() && value.Type != gjson.Null && value.String() != "" {
-			return "upstream_continuation"
+			return "upstream_continuation", []database.SessionContextBlocker{{Kind: path, Path: path}}
 		}
 	}
 	allowed := func(kind, value string) bool { return known != nil && known(kind, value) }
-	for _, token := range []string{headers.Get("X-Codex-Turn-State"), gjson.GetBytes(body, "client_metadata.x-codex-turn-state").String()} {
+	for index, token := range []string{headers.Get("X-Codex-Turn-State"), gjson.GetBytes(body, "client_metadata.x-codex-turn-state").String()} {
 		if token != "" && !allowed("turn_state", token) {
-			return "connection_turn_state"
+			path := "headers.X-Codex-Turn-State"
+			if index == 1 {
+				path = "client_metadata.x-codex-turn-state"
+			}
+			return "connection_turn_state", []database.SessionContextBlocker{{Kind: "turn_state", Path: path}}
 		}
 	}
 	input := gjson.GetBytes(body, "input")
 	if !input.Exists() || input.Type == gjson.Null || input.IsArray() && len(input.Array()) == 0 {
-		return "missing_request_context"
+		return "missing_request_context", []database.SessionContextBlocker{{Kind: "missing_input", Path: "input"}}
 	}
-	blocked := false
-	var inspect func(gjson.Result)
-	inspect = func(value gjson.Result) {
-		if blocked || !value.IsArray() && !value.IsObject() {
+	var blockers []database.SessionContextBlocker
+	var inspect func(gjson.Result, string, string)
+	inspect = func(value gjson.Result, path, itemType string) {
+		if len(blockers) >= 8 || !value.IsArray() && !value.IsObject() {
 			return
+		}
+		if value.IsObject() && value.Get("type").Exists() {
+			itemType = "unknown"
+			switch candidate := value.Get("type").String(); candidate {
+			case "compaction", "reasoning", "message", "input_file", "input_image", "item_reference", "function_call", "function_call_output":
+				itemType = candidate
+			}
 		}
 		if value.IsObject() && value.Get("type").String() == "item_reference" && !allowed("item_reference", value.Get("id").String()) {
-			blocked = true
+			blockers = append(blockers, database.SessionContextBlocker{Kind: "item_reference", Path: path + ".id", ItemType: itemType})
 			return
 		}
+		index := 0
 		value.ForEach(func(key, item gjson.Result) bool {
-			if (key.String() == "encrypted_content" || key.String() == "file_id") && item.Type != gjson.Null && item.String() != "" && !allowed(key.String(), item.String()) {
-				blocked = true
-				return false
+			childPath := path + ".[field]"
+			if value.IsArray() {
+				childPath = path + "[" + strconv.Itoa(index) + "]"
+				index++
+			} else {
+				switch key.String() {
+				case "content", "encrypted_content", "file_id", "image_url", "file", "data":
+					childPath = path + "." + key.String()
+				}
 			}
-			inspect(item)
-			return !blocked
+			if (key.String() == "encrypted_content" || key.String() == "file_id") && item.Type != gjson.Null && item.String() != "" && !allowed(key.String(), item.String()) {
+				blockers = append(blockers, database.SessionContextBlocker{Kind: key.String(), Path: childPath, ItemType: itemType})
+			} else {
+				inspect(item, childPath, itemType)
+			}
+			return len(blockers) < 8
 		})
 	}
-	inspect(input)
-	if blocked {
-		return "opaque_upstream_context"
+	inspect(input, "input", "")
+	if len(blockers) > 0 {
+		return "opaque_upstream_context", blockers
 	}
 	calls := make(map[string]bool)
 	for _, item := range input.Array() {
@@ -181,10 +208,10 @@ func sessionFailoverContextBlockWithVerifier(headers http.Header, body []byte, k
 			calls[item.Get("call_id").String()] = true
 		}
 	}
-	for _, item := range input.Array() {
+	for index, item := range input.Array() {
 		if strings.HasSuffix(item.Get("type").String(), "_call_output") && !calls[item.Get("call_id").String()] {
-			return "incomplete_tool_context"
+			return "incomplete_tool_context", []database.SessionContextBlocker{{Kind: "missing_tool_call", Path: "input[" + strconv.Itoa(index) + "].call_id"}}
 		}
 	}
-	return ""
+	return "", nil
 }

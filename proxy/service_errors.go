@@ -258,11 +258,13 @@ func (handler *Handler) recordServiceError(ctx *gin.Context, status int, apiErro
 		if diagnostics, ok := value.(*usageRequestDiagnostics); ok && diagnostics != nil {
 			incoming = diagnostics.Incoming
 			event.AccountFailover = diagnostics.AccountFailover
+			event.PromptSafety = diagnostics.PromptSafety
 			if event.AccountFailover == nil && diagnostics.Continuity != nil {
 				event.AccountFailover = diagnostics.Continuity.AccountFailover
 			}
 			event.NewAPIRequestID, event.ScopeHash = diagnostics.NewAPIRequestID, diagnostics.Recent.Scope
 			event.RootAccountLookup, event.RootAccountWait, event.RootAccountWaitMs = diagnostics.RootAccountLookup, diagnostics.RootAccountWait, diagnostics.RootAccountWaitMillis
+			event.BackgroundWindowWait = diagnostics.BackgroundWindowWait
 			if resolved := diagnostics.Resolved; resolved != nil {
 				event.ThreadSource, event.RequestKind, event.SubagentKind = resolved.ThreadSource, resolved.RequestKind, resolved.SubagentKind
 				event.RootFingerprint = resolved.RootFingerprint

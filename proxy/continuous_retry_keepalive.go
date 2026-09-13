@@ -589,10 +589,12 @@ func writeCommittedAnthropicRetryError(c *gin.Context, errorType, message string
 		errorType = "api_error"
 		message = continuousRetryTimeoutMessage
 	}
-	payload, _ := json.Marshal(gin.H{
-		"type":  "error",
-		"error": gin.H{"type": errorType, "message": message},
-	})
+	errorBody := gin.H{"type": errorType, "message": message}
+	if !timedOut && promptSafetyDiagnostic(c) != nil {
+		failure := upstreamPromptSafetyAPIError(c, nil)
+		errorBody = gin.H{"type": failure.Type, "code": failure.Code, "message": failure.Message, "details": failure.Details}
+	}
+	payload, _ := json.Marshal(gin.H{"type": "error", "error": errorBody})
 	_, _ = c.Writer.WriteString("event: error\ndata: " + string(payload) + "\n\n")
 	if flusher, ok := c.Writer.(http.Flusher); ok {
 		flusher.Flush()

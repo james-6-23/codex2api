@@ -43,6 +43,10 @@
 
 两端共享最多 60 秒的找根/账号绑定等待。NewAPI 已消耗的时间通过签名 `root_account_wait_millis` 扣除。无法证明主根关联的旧网关或直连独立请求返回 400 `codex_background_root_unavailable`，不会仅凭一个最近账号记录建立关联；有明确主根的请求才进入账号等待。等待不创建窗口，不持有上游账号或 API Key 并发位，超时返回 400 `codex_root_account_wait_timeout`。主账号不可用、被排除或不能执行当前模型时不改选其他账号；已有被动模型豁免和压缩绑定规则继续生效。
 
+找到持久账号归属或粘性绑定，不等于主会话账号窗口已经恢复。启用账号窗口限制时，后台请求还会在同一等待预算内等待原根、原账号的有效窗口；本地主请求准入会立即唤醒等待者，跨实例按原根定期复查。同账号其他会话的窗口不会唤醒放行本请求，后台不会自行创建主窗口。账号未启用窗口限制时保留原有粘性绑定语义。等待后重新检查持久归属及换号代次，账号变化、A→B→A 或持久记录丢失均停止当前请求；正常调度和实际出站前仍再次验证，不因“等到过窗口”而跳过后续保护。
+
+使用日志和服务错误 JSON 增加 `background_window_wait`：`result` 为 `ready`、`timeout`、`canceled`、`owner_changed`、`ownership_unavailable`、`account_unavailable`、`grant_unavailable`、`context_unavailable`、`validation_failed` 或 `unavailable`；同时记录等待账号 `account_id`、换号代次 `generation` 和本地耗时 `duration_ms`。`root_account_wait_millis` 包含绑定、窗口授权及有效窗口等待总耗时，各阶段不重新获得 60 秒预算。会话前缀提取和找根规则不因这项等待修复改变。
+
 ## 根命名与窗口授权
 
 `thread_title`、`thread_title_reconsideration`、`thread_description` 允许同一主会话多次触发，不再按主根认领一次命名机会，也不返回 `codex_root_already_named`。命名请求仍须具有有效主根，通过原账号/窗口准入和会话连续性校验；缺根、根账号不可用、会话锁定或过期时不改选账号。旧数据库命名记录保留但不再读写用于准入，无需清理；新请求不再写入 `naming` 的 `claimed`、`duplicate` 或 `unavailable`，历史日志保持原样。NewAPI 同步移除标题的一次占用限制，身份范围、唯一主根与渠道绑定检查不变。

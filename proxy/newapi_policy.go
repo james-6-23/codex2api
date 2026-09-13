@@ -911,6 +911,8 @@ func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.AP
 		message = promptConversationLockedMessage
 	} else if metadata.ReasonCode == promptUserCyberCooldownReasonCode {
 		message = promptUserCyberCooldownMessage
+	} else if metadata.ReasonCode == promptSafetyLockedReason {
+		message = "当前对话或其父对话已因上游提示安全拒绝被网关锁定，请联系管理员审核解锁或等待到期；不累计 CYB 处罚。"
 	}
 	apiErr := api.NewAPIError(api.ErrorCode("request_policy_violation"), message, api.ErrorTypeInvalidRequest)
 	apiErr.Details = newAPIPolicyDecisionDetails(metadata)
@@ -920,7 +922,7 @@ func newAPIPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata) *api.AP
 func newAPILocalPromptPolicyDecisionAPIError(metadata newAPIPolicyDecisionMetadata, cfg promptfilter.Config) *api.APIError {
 	apiErr := newAPIPolicyDecisionAPIError(metadata)
 	switch metadata.ReasonCode {
-	case newAPIUpstreamCyberPolicyReasonCode, promptConversationLockedReasonCode, promptUserCyberCooldownReasonCode:
+	case newAPIUpstreamCyberPolicyReasonCode, promptConversationLockedReasonCode, promptUserCyberCooldownReasonCode, promptSafetyLockedReason:
 		return apiErr
 	default:
 		apiErr.Message = localPromptBlockMessage(cfg)

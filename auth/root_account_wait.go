@@ -11,13 +11,17 @@ import (
 type rootAccountWaitState struct {
 	changed         chan struct{}
 	waiters         int
+	windowWaiters   int
 	revision        uint64
 	checkedRevision uint64
 	checkedAt       time.Time
 	checking        bool
 	checkLocal      bool
 	accountID       int64
+	windowAccountID int64
 }
+
+var ErrRootAccountOwnerChanged = errors.New("main conversation account changed while waiting for its window")
 
 func (store *Store) notifyRootAccountWaiters(key string) {
 	store.rootAccountWaitMu.Lock()
@@ -31,6 +35,18 @@ func (store *Store) notifyRootAccountWaiters(key string) {
 }
 
 func (store *Store) WaitForRootAccount(requestContext context.Context, key string) (int64, error) {
+	return store.waitForRootAccount(requestContext, key, 0)
+}
+
+func (store *Store) WaitForRootAccountWindow(requestContext context.Context, key string, accountID int64) error {
+	if accountID <= 0 {
+		return errors.New("main conversation account is missing")
+	}
+	_, err := store.waitForRootAccount(requestContext, key, accountID)
+	return err
+}
+
+func (store *Store) waitForRootAccount(requestContext context.Context, key string, expectedAccountID int64) (int64, error) {
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return 0, errors.New("main root key is missing")
@@ -52,11 +68,23 @@ func (store *Store) WaitForRootAccount(requestContext context.Context, key strin
 		store.rootAccountWaiters[key] = state
 	}
 	state.waiters++
+	if expectedAccountID > 0 {
+		state.windowWaiters++
+		if state.windowWaiters == 1 {
+			state.revision++
+			state.checkLocal = true
+			close(state.changed)
+			state.changed = make(chan struct{})
+		}
+	}
 	store.rootAccountWaitMu.Unlock()
 	defer func() {
 		store.rootAccountWaitMu.Lock()
 		defer store.rootAccountWaitMu.Unlock()
 		state.waiters--
+		if expectedAccountID > 0 {
+			state.windowWaiters--
+		}
 		if state.waiters == 0 {
 			delete(store.rootAccountWaiters, key)
 		}
@@ -67,21 +95,40 @@ func (store *Store) WaitForRootAccount(requestContext context.Context, key strin
 		}
 		store.rootAccountWaitMu.Lock()
 		fresh := state.checkedRevision == state.revision && !state.checkedAt.IsZero() && time.Since(state.checkedAt) < time.Second
-		if fresh && state.accountID > 0 {
+		if fresh && expectedAccountID > 0 && ((state.accountID > 0 && state.accountID != expectedAccountID) || (state.windowAccountID > 0 && state.windowAccountID != expectedAccountID)) {
+			store.rootAccountWaitMu.Unlock()
+			return 0, ErrRootAccountOwnerChanged
+		}
+		if fresh && (expectedAccountID == 0 && state.accountID > 0 || expectedAccountID > 0 && state.windowAccountID == expectedAccountID) {
 			accountID := state.accountID
+			if expectedAccountID > 0 {
+				accountID = expectedAccountID
+			}
 			store.rootAccountWaitMu.Unlock()
 			return accountID, requestContext.Err()
 		}
 		if !fresh && !state.checking {
 			state.checking = true
 			revision, checkLocal := state.revision, state.checkLocal
+			checkWindow := state.windowWaiters > 0
 			state.checkLocal = false
 			store.rootAccountWaitMu.Unlock()
 			accountID := store.loadRootAccountWaitBinding(requestContext, key, checkLocal)
+			var windowAccountID int64
+			if checkWindow {
+				if owner, active := store.AccountSessionAccountID(key, time.Now()); active {
+					windowAccountID = owner
+				} else if account := store.FindByID(accountID); account != nil && !account.SessionCapacityLimits().Enabled {
+					if owner, active := store.LiveSessionAccountID(key, time.Now()); active {
+						windowAccountID = owner
+					}
+				}
+			}
 			store.rootAccountWaitMu.Lock()
 			state.checking = false
 			if revision == state.revision && requestContext.Err() == nil {
 				state.accountID = accountID
+				state.windowAccountID = windowAccountID
 				state.checkedAt = time.Now()
 				state.checkedRevision = revision
 			}

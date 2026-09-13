@@ -844,6 +844,15 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 
 			if !retryable {
+				if body := upstreamPromptSafetyRequestErrorBody(reqErr); len(body) > 0 {
+					h.recordUpstreamPromptSafety(c, "/v1/responses", model, body)
+					if !claimContinuousRetrySuccessContext(c.Request.Context()) {
+						return errResponsesWSClientGone
+					}
+					failure := upstreamPromptSafetyAPIError(c, body)
+					_ = writeAuditedResponsesWSError(c, conn, failure)
+					return newResponsesWSCloseError(websocket.ClosePolicyViolation, failure.Message, reqErr)
+				}
 				if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 					return errResponsesWSClientGone
 				}
@@ -1006,6 +1015,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			}
 
 			apiErr = responsesWSUpstreamAPIError(resp.StatusCode, errBody)
+			if isUpstreamPromptSafetyRefusal(errBody) && !isExplicitUpstreamCyberPolicy(errBody) {
+				apiErr = upstreamPromptSafetyAPIError(c, errBody)
+			}
 			clientErr := responsesWSClientUpstreamAPIError(apiErr, hideUpstreamErrors)
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				return errResponsesWSClientGone
@@ -1245,8 +1257,12 @@ func (h *Handler) streamResponsesWSUpstream(
 		eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 		eventType, data, parsed = rewriteEmptyIncompleteTerminal(emptyIncomplete, eventType, data, parsed)
 		clientData := data
+		if (eventType == "response.failed" || eventType == "error") && isUpstreamPromptSafetyRefusal(data) && !isExplicitUpstreamCyberPolicy(data) {
+			h.recordUpstreamPromptSafety(c, "/v1/responses", model, data)
+			clientData = attachUpstreamPromptSafetyDetails(c, data)
+		}
 		if options != nil && options.transformClientEvent != nil {
-			if transformed := options.transformClientEvent(data); len(transformed) > 0 {
+			if transformed := options.transformClientEvent(clientData); len(transformed) > 0 {
 				clientData = transformed
 			}
 		}
@@ -1658,6 +1674,14 @@ func (h *Handler) streamResponsesWSUpstream(
 	if writeErr != nil {
 		return errResponsesWSClientGone
 	}
+	if isUpstreamPromptSafetyRefusal(terminalFailurePayload) && !isExplicitUpstreamCyberPolicy(terminalFailurePayload) && !downstreamWrote {
+		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
+			return errResponsesWSClientGone
+		}
+		failure := upstreamPromptSafetyAPIError(c, terminalFailurePayload)
+		_ = writeAuditedResponsesWSError(c, conn, failure)
+		return newResponsesWSCloseError(websocket.ClosePolicyViolation, failure.Message, failure)
+	}
 	if capacityError := codexCapacityErrorForClient(terminalFailurePayload); capacityError != nil && !downstreamWrote {
 		if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 			return errResponsesWSClientGone
@@ -1779,7 +1803,12 @@ func (h *Handler) inspectPromptFilterOpenAIForWebSocket(c *gin.Context, conn *we
 		_ = writeAuditedResponsesWSError(c, conn, apiErr)
 		return true, false
 	}
-	if item, locked := h.activePromptConversationLock(c, cfg, nil, endpoint, model); locked {
+	item, locked, lockError := h.requestPromptConversationLock(c, cfg, rawBody, nil, endpoint, model)
+	if lockError != nil {
+		_ = writeAuditedResponsesWSError(c, conn, lockError)
+		return true, false
+	}
+	if locked {
 		restriction := promptCyberRestrictionDecision(item, cfg)
 		profile := strings.ToLower(strings.TrimSpace(cfg.Advanced.Guard.DefaultProfile))
 		switch profile {
@@ -1867,6 +1896,11 @@ func writeResponsesWSError(conn *websocket.Conn, apiErr *api.APIError) error {
 }
 
 func responsesWSClientUpstreamAPIError(apiErr *api.APIError, hideUpstreamErrors bool) *api.APIError {
+	if apiErr != nil && apiErr.Code == "invalid_prompt" {
+		if details, ok := apiErr.Details.(gin.H); ok && details["reason_code"] == upstreamPromptSafetyReason {
+			return apiErr
+		}
+	}
 	if apiErr != nil && isCodexCapacityCodeOrMessage(string(apiErr.Code), apiErr.Message) {
 		return apiErr
 	}
@@ -1933,6 +1967,9 @@ func responsesWSCloseCodeForStatus(statusCode int) int {
 }
 
 func responsesWSUpstreamAPIError(statusCode int, body []byte) *api.APIError {
+	if isUpstreamPromptSafetyRefusal(body) && !isExplicitUpstreamCyberPolicy(body) {
+		return upstreamPromptSafetyAPIError(nil, body)
+	}
 	if capacityError := codexCapacityErrorForClient(body); capacityError != nil {
 		return capacityError
 	}

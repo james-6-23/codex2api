@@ -6,6 +6,18 @@ const source = readFileSync(new URL('../pages/PromptFilter.tsx', import.meta.url
 const types = readFileSync(new URL('../types.ts', import.meta.url), 'utf8')
 const api = readFileSync(new URL('../api.ts', import.meta.url), 'utf8')
 
+test('upstream invalid prompt safety locks are separate from CYB and local rules', () => {
+  assert.match(source, /isPromptSafetyRestriction = activeRestriction\?\.reason_code === 'upstream_invalid_prompt_policy'/)
+  assert.match(source, /value: 'upstream_invalid_prompt_policy'/)
+  assert.match(source, /isPromptSafetyRestriction \? 'promptFilter.risk.conversationLock.safetyTitle'/)
+  assert.match(source, /isPromptSafetyRestriction \? 'promptFilter.risk.conversationLock.safetyDescription'/)
+  for (const locale of ['zh', 'en', 'zh-TW']) {
+    const messages = JSON.parse(readFileSync(new URL(`../locales/${locale}.json`, import.meta.url), 'utf8'))
+    assert.equal(typeof messages.promptFilter.risk.conversationLock.safetyTitle, 'string')
+    assert.equal(typeof messages.promptFilter.risk.conversationLock.safetyDescription, 'string')
+  }
+})
+
 test('CY incidents and local logs use independent pagination state', () => {
   assert.match(source, /usePersistedPageSize\('prompt_policy_incidents'/)
   assert.match(source, /page: incidentPage,\s+pageSize: incidentPageSize/)

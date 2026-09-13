@@ -14,6 +14,8 @@ type CodexIdentityMappingPolicy struct {
 	Secret string `json:"-"`
 }
 
+const CodexIdentityMappingUUIDv7 = "account-uuid7-v2"
+
 type CodexIdentityAliasClaim struct {
 	AliasKey  string
 	SourceKey string
@@ -28,6 +30,7 @@ func (db *DB) ensureCodexIdentityMappingTables(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS codex_identity_alias_claims (alias_key TEXT PRIMARY KEY, source_key TEXT NOT NULL UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS codex_identity_epochs (identity_key TEXT PRIMARY KEY, state TEXT NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS codex_identity_references (reference_key TEXT PRIMARY KEY, state TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS codex_identity_uuid7_values (identity_key TEXT PRIMARY KEY, value TEXT NOT NULL UNIQUE)`,
 		`CREATE TABLE IF NOT EXISTS codex_session_context_tokens (token_key TEXT PRIMARY KEY, expires_at BIGINT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_codex_session_context_tokens_expiry ON codex_session_context_tokens(expires_at)`,
 	} {
@@ -55,7 +58,7 @@ func (db *DB) ResolveCodexIdentityMapping(ctx context.Context, rootKey string, l
 	err = db.withWriteTx(ctx, func(tx *sql.Tx) error {
 		policy.Mode = "preserve"
 		if enabled {
-			policy.Mode = "account-suffix-v1"
+			policy.Mode = CodexIdentityMappingUUIDv7
 			for _, key := range legacyKeys {
 				var exists bool
 				if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM codex_identity_claims WHERE identity_key=$1)`, key).Scan(&exists); err != nil {
@@ -71,9 +74,9 @@ func (db *DB) ResolveCodexIdentityMapping(ctx context.Context, rootKey string, l
 		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM codex_identity_mapping_secret WHERE id=1)`).Scan(&secretExists); err != nil {
 			return err
 		}
-		if !secretExists && policy.Mode == "account-suffix-v1" {
+		if !secretExists && policy.Mode != "preserve" {
 			var mappingExists bool
-			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM codex_identity_mapping_policies WHERE mode='account-suffix-v1')`).Scan(&mappingExists); err != nil {
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM codex_identity_mapping_policies WHERE mode IN ('account-suffix-v1','account-uuid7-v2'))`).Scan(&mappingExists); err != nil {
 				return err
 			}
 			if mappingExists {
@@ -89,7 +92,7 @@ func (db *DB) ResolveCodexIdentityMapping(ctx context.Context, rootKey string, l
 		if policy.Mode == "preserve" {
 			return nil
 		}
-		if policy.Mode != "account-suffix-v1" {
+		if policy.Mode != "account-suffix-v1" && policy.Mode != CodexIdentityMappingUUIDv7 {
 			return errors.New("unsupported codex identity mapping policy")
 		}
 		var secret [32]byte

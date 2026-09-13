@@ -1197,6 +1197,15 @@ export const api = {
     search.set('confirmed', 'true')
     return requestBlob(`/usage/logs/export?${search}`, { method: 'POST', signal })
   },
+  getUsageLogExportPage: (scope: 'filtered' | 'all', params: UsageLogQueryParams | undefined, cursor: string, signal: AbortSignal) => {
+    if (scope === 'filtered' && !params) throw new Error('Filtered export requires a time range')
+    const search = scope === 'filtered' && params ? buildUsageLogSearchParams(params) : new URLSearchParams()
+    search.set('scope', scope)
+    search.set('confirmed', 'true')
+    search.set('paged', 'true')
+    if (cursor) search.set('cursor', cursor)
+    return request<import('./lib/usageLogExport').UsageLogExportPage>(`/usage/logs/export?${search}`, { method: 'POST', signal })
+  },
   getUsageLogs: (params: { start?: string; end?: string; limit?: number } = {}) => {
     const searchParams = new URLSearchParams()
     if (params.start && params.end) {

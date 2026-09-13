@@ -68,7 +68,7 @@ func TestCodexTurnIdentityRewritesOnlyOutboundMetadata(test *testing.T) {
 		require.NoError(test, fingerprint.ClaimSessionIdentity(ctx, account, "test-user-key"))
 		turn, rootTurn := requireTurnIdentityOutput(test, fingerprint, body)
 		require.NotEqual(test, turnIdentitySample, turn)
-		require.Equal(test, turnIdentitySample[:27], turn[:27])
+		require.NotEqual(test, turnIdentitySample[:13], turn[:13])
 		require.Equal(test, turn, rootTurn)
 		if previousTurn != "" {
 			require.Equal(test, previousTurn, turn)

@@ -6495,13 +6495,27 @@ func (db *DB) WalkUsageLogsForExport(ctx context.Context, filter *UsageLogFilter
 	return db.walkUsageLogExport(ctx, filter, true, visit)
 }
 
-func (db *DB) walkUsageLogExport(ctx context.Context, filter *UsageLogFilter, includeDiagnostics bool, visit func(*UsageLogExportEntry) error) error {
+func (db *DB) walkUsageLogExport(ctx context.Context, filter *UsageLogFilter, includeDiagnostics bool, visit func(*UsageLogExportEntry) error, cursors ...*UsageLogExportCursor) error {
 	where := "1=1"
 	var args []interface{}
 	if filter != nil {
 		where, args = db.buildUsageLogWhere(*filter)
 	}
+	paged := len(cursors) > 0 && cursors[0] != nil
+	if paged {
+		cursor := cursors[0]
+		where += fmt.Sprintf(` AND u.id <= $%d`, len(args)+1)
+		args = append(args, cursor.SnapshotID)
+		if cursor.BeforeID > 0 {
+			at, _ := db.timeRangeArgs(cursor.BeforeTime, cursor.BeforeTime)
+			where += fmt.Sprintf(` AND (u.created_at < $%d OR (u.created_at = $%d AND u.id < $%d))`, len(args)+1, len(args)+1, len(args)+2)
+			args = append(args, at, cursor.BeforeID)
+		}
+	}
 	where += ` ORDER BY u.created_at DESC, u.id DESC`
+	if paged {
+		where += ` LIMIT 201`
+	}
 	diagnosticColumn := `''`
 	if includeDiagnostics {
 		diagnosticColumn = `COALESCE(u.request_diagnostics, '')`

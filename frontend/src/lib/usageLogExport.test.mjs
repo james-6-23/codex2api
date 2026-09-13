@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { test } from 'node:test'
 import { api } from '../api.ts'
-import { confirmedUsageLogDownload, saveUsageLogExport } from './usageLogExport.ts'
+import { confirmedUsageLogDownload, downloadUsageLogPages, saveUsageLogExport } from './usageLogExport.ts'
 
 test('canceling confirmation does not request or save an export', async () => {
   const calls = []
@@ -92,4 +92,71 @@ test('usage page exposes two confirmed download actions and a privacy warning', 
       assert.equal(typeof messages[key], 'string')
     }
   }
+})
+
+const pageMetadata = '{"version":1,"scope":"all","generated_at":"2026-09-12T00:00:00Z","filters":{}}'
+const exportPage = (records, next = '') => ({ version: 1, metadata: pageMetadata, records, next_cursor: next, complete: !next })
+
+test('paged downloads preserve large integers and avoid repeated records when retrying a page', async context => {
+  context.mock.method(globalThis, 'setTimeout', callback => { queueMicrotask(callback); return 1 })
+  const cursors = []
+  const saved = []
+  let attempts = 0
+  const result = await downloadUsageLogPages(async cursor => {
+    cursors.push(cursor)
+    if (!cursor) return exportPage(['{"id":1,"counter":9007199254740993}'], 'page-2')
+    if (attempts++ === 0) throw new TypeError('Failed to fetch')
+    return exportPage(['{"id":2}'])
+  }, blob => saved.push(blob), new AbortController().signal, () => {})
+  assert.deepEqual(cursors, ['', 'page-2', 'page-2'])
+  assert.equal(result.records, 2)
+  assert.equal(saved.length, 1)
+  const raw = await saved[0].text()
+  assert.match(raw, /9007199254740993/)
+  assert.equal(JSON.parse(raw).logs.length, 2)
+  assert.equal(JSON.parse(raw).export_complete, true)
+})
+
+test('large exports save bounded valid JSON parts and mark only the last part as the completed export', async () => {
+  const saved = []
+  const result = await downloadUsageLogPages(async () => exportPage(['{"id":1}', '{"id":2}', '{"id":3}']), (blob, part) => saved.push({ blob, part }), new AbortController().signal, () => {}, 10)
+  assert.equal(result.parts, 3)
+  const decoded = await Promise.all(saved.map(async savedPart => JSON.parse(await savedPart.blob.text())))
+  assert.deepEqual(decoded.map(part => part.logs[0].id), [1, 2, 3])
+  assert.deepEqual(decoded.map(part => part.export_complete), [false, false, true])
+  assert.deepEqual(decoded.map(part => part.part), [1, 2, 3])
+  assert.equal(decoded[2].exported_records, 3)
+})
+
+test('failed, canceled, or inconsistent batches never save the unfinished part', async () => {
+  for (const failure of ['failure', 'canceled', 'cursor', 'snapshot', 'record']) {
+    const controller = new AbortController()
+    await assert.rejects(downloadUsageLogPages(async cursor => {
+      if (!cursor) return exportPage(['{"id":1}'], 'next')
+      if (failure === 'failure') throw new Error('interrupted')
+      if (failure === 'canceled') { controller.abort(); return exportPage(['{"id":2}']) }
+      if (failure === 'cursor') return exportPage(['{"id":2}'], 'next')
+      if (failure === 'record') return exportPage(['{"broken":'])
+      return { ...exportPage(['{"id":2}']), metadata: '{"scope":"filtered"}' }
+    }, () => assert.fail('must not save a partial or mismatched export'), controller.signal, () => {}))
+  }
+})
+
+test('paged export API preserves scope, authentication, cancellation, and the opaque cursor', async context => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => 'admin-test' } })
+  context.after(() => { if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor); else delete globalThis.localStorage })
+  context.mock.method(globalThis, 'fetch', async (url, options) => {
+    const query = new URL(url, 'http://localhost').searchParams
+    assert.equal(query.get('scope'), 'all')
+    assert.equal(query.get('paged'), 'true')
+    assert.equal(query.get('confirmed'), 'true')
+    assert.equal(query.get('cursor'), 'opaque-cursor')
+    assert.equal(query.has('q'), false)
+    assert.equal(options.headers.get('X-Admin-Key'), 'admin-test')
+    assert.equal(options.method, 'POST')
+    return new Response(JSON.stringify(exportPage([])), { headers: { 'Content-Type': 'application/json' } })
+  })
+  const page = await api.getUsageLogExportPage('all', { q: 'ignored', start: 'ignored', end: 'ignored' }, 'opaque-cursor', new AbortController().signal)
+  assert.equal(page.complete, true)
 })

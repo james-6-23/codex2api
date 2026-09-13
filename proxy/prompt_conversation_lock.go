@@ -25,7 +25,7 @@ const (
 	promptConversationLockedReasonCode = "conversation_cyber_locked"
 	promptUpstreamBioPolicyReasonCode  = "upstream_bio_policy"
 	promptFingerprintReplayReasonCode  = "fingerprint_replay_cooldown"
-	promptConversationLockedMessage    = "当前对话因上游 CYB 已被锁定。本次锁定拦截不会重复累计处罚；可等待自动到期，或由管理员在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。解除后再次触发 CYB 可能会停用账号。"
+	promptConversationLockedMessage    = "当前对话或其父对话因上游 CYB 已被锁定。本次锁定拦截不会重复累计处罚；可等待自动到期，或由管理员在「Prompt 检查 → 风险画像 → 会话详情」手动解锁。解除后再次触发 CYB 可能会停用账号。"
 	promptUserCyberCooldownReasonCode  = "user_cyber_cooldown"
 	promptUserCyberCooldownMessage     = "该用户因上游 CYB 现处于安全冷却期。冷却期间的新请求不会继续转发，也不会重复累计处罚；可等待自动到期，或由管理员在「Prompt 检查 → 风险画像 → 用户详情」手动解除冷却。"
 	promptConversationLockCacheTTL     = 30 * time.Second
@@ -211,6 +211,10 @@ func promptCyberRestrictionDecision(item *database.PromptConversationLock, cfg p
 	if result.TriggerReasonCode == promptUpstreamBioPolicyReasonCode {
 		result.Message = strings.ReplaceAll(result.Message, "上游 CYB", "上游生物安全策略（BIO）")
 	}
+	if result.TriggerReasonCode == upstreamPromptSafetyReason {
+		result.ReasonCode = promptSafetyLockedReason
+		result.Message = fmt.Sprintf("当前对话或其父对话因上游提示安全拒绝已被网关锁定，剩余约 %s；不会自动重试、换号重放或累计 CYB 处罚。%s管理员可在「Prompt 检查 → 风险画像 → 会话详情」审核解锁。错误码：%s。", remainingText, auditText, result.ReasonCode)
+	}
 	return result
 }
 
@@ -239,6 +243,9 @@ func promptCyberRestrictionDetails(restriction promptCyberRestriction, signedDet
 	details["restriction_scope"] = restriction.Scope
 	details["retry_after_seconds"] = restriction.RetryAfterSeconds
 	details["manual_unlock_path"] = "/admin/prompt-filter/profiles"
+	if restriction.ReasonCode == promptSafetyLockedReason {
+		details["retry"], details["strike_eligible"] = "stop", false
+	}
 	if !restriction.LockedAt.IsZero() {
 		details["locked_at"] = restriction.LockedAt.Format(time.RFC3339)
 	}
@@ -275,6 +282,13 @@ func writePromptCyberRestrictionHeaders(c *gin.Context, restriction promptCyberR
 		return
 	}
 	c.Header("X-Codex2API-Policy-Restriction-Scope", restriction.Scope)
+	if restriction.ReasonCode == promptSafetyLockedReason {
+		c.Header("X-Should-Retry", "false")
+		expires := restriction.ExpiresAt
+		diagnostic := &database.PromptSafetyDiagnostic{Reason: upstreamPromptSafetyReason, UpstreamCode: "invalid_prompt", LockResult: "active_lock", Locked: true, Retry: "stop", ExpiresAt: &expires}
+		c.Set(upstreamPromptSafetyContextKey, diagnostic)
+		usageRequestDiagnosticState(c).PromptSafety = diagnostic
+	}
 	if restriction.RetryAfterSeconds > 0 {
 		c.Header("Retry-After", strconv.FormatInt(restriction.RetryAfterSeconds, 10))
 	}
@@ -327,8 +341,11 @@ func promptConversationLockFallbackIdentity(c *gin.Context) (promptConversationL
 	if c == nil {
 		return promptConversationLockIdentity{}, false
 	}
-	apiKeyID := requestAPIKeyID(c)
-	fingerprint := promptSessionFingerprint32(promptConversationSessionSignal(c))
+	return promptConversationLockFallbackIdentityForSession(requestAPIKeyID(c), promptConversationSessionSignal(c))
+}
+
+func promptConversationLockFallbackIdentityForSession(apiKeyID int64, session string) (promptConversationLockIdentity, bool) {
+	fingerprint := promptSessionFingerprint32(session)
 	if apiKeyID == 0 || len(fingerprint) != 32 {
 		return promptConversationLockIdentity{}, false
 	}
@@ -341,7 +358,7 @@ func promptConversationLockFallbackIdentity(c *gin.Context) (promptConversationL
 		Platform:           promptConversationLockFallbackPlatform,
 		NewAPIUserID:       subject,
 		SessionFingerprint: fingerprint,
-		SessionHash:        promptConversationLockFallbackSessionHash(c),
+		SessionHash:        hashRiskIdentity(fingerprint),
 	}, true
 }
 
@@ -755,7 +772,19 @@ func (h *Handler) rejectLockedPromptConversation(c *gin.Context, cfg promptfilte
 		}
 		return true
 	}
-	item, locked := h.activePromptConversationLock(c, cfg, signedBody, endpoint, model)
+	item, locked, lockError := h.requestPromptConversationLock(c, cfg, ingressRequestBody(c, responseBody), signedBody, endpoint, model)
+	if lockError != nil {
+		status := http.StatusBadRequest
+		if lockError.Code == api.ErrCodeServiceUnavailable {
+			status = http.StatusServiceUnavailable
+		}
+		if requestUsesAnthropicErrorEnvelope(c) {
+			c.JSON(status, gin.H{"type": "error", "error": gin.H{"type": string(lockError.Type), "message": lockError.Message}})
+		} else {
+			api.SendErrorWithStatus(c, lockError, status)
+		}
+		return true
+	}
 	if !locked {
 		return false
 	}

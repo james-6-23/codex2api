@@ -125,7 +125,7 @@ func TestWebsocketAccountIdentityReuseFailureHTTPAndAccountBoundary(test *testin
 			require.NotEqual(test, firstCache, cache)
 		}
 		require.NotEqual(test, root, session)
-		require.Equal(test, root[:27], session[:27])
+		require.NotEqual(test, root[:13], session[:13])
 		require.Equal(test, session, sent.headers.Get("Thread-Id"))
 		require.Equal(test, session, sent.headers.Get("X-Client-Request-Id"))
 		require.Equal(test, account.AccountID, sent.headers.Get("Chatgpt-Account-Id"))
@@ -135,7 +135,7 @@ func TestWebsocketAccountIdentityReuseFailureHTTPAndAccountBoundary(test *testin
 		require.Equal(test, fmt.Sprintf("%s:%d", session, index), gjson.Get(metadata, "window_id").String())
 		mappedTurn := gjson.Get(metadata, "turn_id").String()
 		require.NotEqual(test, originalTurn, mappedTurn)
-		require.Equal(test, originalTurn[:27], mappedTurn[:27])
+		require.NotEqual(test, originalTurn[:13], mappedTurn[:13])
 		if index == 0 {
 			firstTurn = mappedTurn
 		}
@@ -237,7 +237,7 @@ func TestWebsocketAccountIdentityPassiveFrames(test *testing.T) {
 					}
 					session, mappedThread := sent.headers.Get("Session-Id"), sent.headers.Get("Thread-Id")
 					require.NotEqual(test, root, session)
-					require.Equal(test, root[:27], session[:27])
+					require.NotEqual(test, root[:13], session[:13])
 					require.Equal(test, account.AccountID, sent.headers.Get("Chatgpt-Account-Id"))
 					require.Equal(test, session, gjson.GetBytes(sent.body, "client_metadata.session_id").String())
 					require.Equal(test, mappedThread, gjson.GetBytes(sent.body, "client_metadata.thread_id").String())

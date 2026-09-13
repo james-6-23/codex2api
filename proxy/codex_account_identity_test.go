@@ -74,7 +74,7 @@ func TestCodexAccountIdentityStableAcrossTransportsAccountsAndRestart(test *test
 	mapped := first.ApplyBody(body)
 	root := gjson.GetBytes(mapped, "client_metadata.session_id").String()
 	thread := gjson.GetBytes(mapped, "client_metadata.thread_id").String()
-	require.Equal(test, accountIdentitySampleRoot[:27], root[:27])
+	require.NotEqual(test, accountIdentitySampleRoot[:13], root[:13])
 	require.NotEqual(test, accountIdentitySampleRoot, root)
 	require.NotEqual(test, root, thread)
 	require.Equal(test, root, gjson.GetBytes(mapped, "client_metadata.parent_thread_id").String())
@@ -89,7 +89,7 @@ func TestCodexAccountIdentityStableAcrossTransportsAccountsAndRestart(test *test
 	for _, field := range []string{"turn_id", "root_turn_id"} {
 		original := gjson.GetBytes(body, "client_metadata.x-codex-turn-metadata."+field).String()
 		require.NotEqual(test, original, metadata.Get(field).String())
-		require.Equal(test, original[:27], metadata.Get(field).String()[:27])
+		require.NotEqual(test, original[:13], metadata.Get(field).String()[:13])
 	}
 	require.Equal(test, metadata.Get("turn_id").String(), metadata.Get("root_turn_id").String())
 	for _, field := range []string{"turn_started_at_unix_ms", "request_kind", "window_number"} {

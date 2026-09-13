@@ -10,15 +10,17 @@ import (
 )
 
 type CodexIdentityEpoch struct {
-	RootKey    string `json:"root_key,omitempty"`
-	Generation uint64 `json:"generation"`
-	Segment    string `json:"segment,omitempty"`
+	RootKey        string `json:"root_key,omitempty"`
+	Generation     uint64 `json:"generation"`
+	Segment        string `json:"segment,omitempty"`
+	MappingVersion string `json:"mapping_version,omitempty"`
 }
 
 func validCodexIdentityEpoch(epoch CodexIdentityEpoch) bool {
 	_, rootError := hex.DecodeString(epoch.RootKey)
 	validRoot := epoch.RootKey == "" || (len(epoch.RootKey) == 24 || len(epoch.RootKey) == 64) && rootError == nil && epoch.RootKey == strings.ToLower(epoch.RootKey)
-	return validRoot && (epoch.Segment == "" || ValidSessionOperationKey(epoch.Segment))
+	return validRoot && (epoch.Segment == "" || ValidSessionOperationKey(epoch.Segment)) &&
+		(epoch.MappingVersion == "" || epoch.MappingVersion == CodexIdentityMappingUUIDv7)
 }
 
 func (db *DB) PublishCodexIdentityEpoch(ctx context.Context, identityKey string, next CodexIdentityEpoch) error {
@@ -54,6 +56,9 @@ func (db *DB) PublishCodexIdentityEpoch(ctx context.Context, identityKey string,
 			return err
 		}
 		if existing.Generation > next.Generation || existing.Generation == next.Generation && existing.Segment != next.Segment || existing.RootKey != "" && next.RootKey != "" && existing.RootKey != next.RootKey {
+			return ErrSessionOwnerConflict
+		}
+		if existing.Generation == next.Generation && existing.MappingVersion != next.MappingVersion {
 			return ErrSessionOwnerConflict
 		}
 		if next.RootKey == "" {

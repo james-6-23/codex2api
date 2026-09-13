@@ -70,7 +70,7 @@ func TestCodexAccountIdentityPassiveHTTPAndCompact(test *testing.T) {
 					session := sent.headers.Get("Session-Id")
 					thread := sent.headers.Get("Thread-Id")
 					require.NotEqual(test, accountIdentitySampleRoot, session)
-					require.Equal(test, accountIdentitySampleRoot[:27], session[:27])
+					require.NotEqual(test, accountIdentitySampleRoot[:13], session[:13])
 					require.Equal(test, account.AccountID, sent.headers.Get("Chatgpt-Account-Id"))
 					require.Equal(test, session, gjson.GetBytes(sent.body, "client_metadata.session_id").String())
 					require.Equal(test, thread, gjson.GetBytes(sent.body, "client_metadata.thread_id").String())

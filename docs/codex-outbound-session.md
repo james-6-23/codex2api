@@ -84,23 +84,25 @@ busy 同会话溢出功能保留，只使用同账号、同隔离分区及兼容
 
 ## 可选账号级稳定映射
 
-设置 `CODEX_OUTBOUND_SESSION_MODE=account` 并重启服务，为尚未登记的 Codex 会话启用 `account-suffix-v1`。默认仍为 preserve，不自动改变线上策略。不适用于 Responses 中转或其他提供商。
+设置 `CODEX_OUTBOUND_SESSION_MODE=account` 并重启服务，为尚未登记的 Codex 会话启用 `account-uuid7-v2`。默认仍为 preserve，不自动改变线上策略。不适用于 Responses 中转或其他提供商。
 
-- 只替换 UUIDv7 最后 9 个十六进制字符（36 bit）。保留前 27 个字符、时间戳、版本及 variant；不是每次请求重新抽签。该策略只接受合法 RFC variant 的 UUIDv7 会话和上下文 ID，其他格式拒绝发送。
-- 对完整原始 UUID 规范化后，使用 HMAC-SHA256 派生后缀。密钥为数据库首次启用时生成的 32 字节随机值；消息为 JSON 数组 `["account-suffix-v1", "identity", owner_hash, actual_chatgpt_account_id, original_uuid]`。归属使用已有已验证用户维度，不能只用原后缀或账号 ID 充当秘密。
+- 新策略生成完整 UUIDv7，不再保留原 UUID 的时间前缀。首次建立出站映射时使用服务端 UTC Unix 毫秒时间，固定 UUIDv7 版本和 RFC variant 位，剩余 74 bit 由 HMAC 派生。只接受合法 UUIDv7 入站身份，其他格式拒绝发送。
+- HMAC 密钥为数据库中持久保存的 32 字节随机值，派生域包含版本、身份种类、已验证用户归属、目标实际 `Chatgpt-Account-Id`、完整原始 UUID，以及已有迁移段。第一次生成的完整 UUID 存入 `codex_identity_uuid7_values`；后续请求只读取，不重新取当前时间生成。并发实例通过唯一约束复用同一个获胜值，而不是各自生成后直接发出。
 - 同用户、同实际 `Chatgpt-Account-Id`、同完整原始 ID 的结果稳定；HTTP、compact、WS、重试和重启一致。同上游账号重复导入不会因为本地账号编号不同而改变映射。实际账号不同则独立映射，默认仍禁止自动换号；只有显式开启下述开关才允许受保护的迁移。
 - Session-Id、Thread-Id、正文 session/thread、父线程、fork 来源、context_window_id 及窗口 ID 前缀共用映射。原本相等仍相等，子线程不会折叠成父线程，窗口序号不变。X-Client-Request-Id 及正文投影只在其值引用这些身份时同步替换，不改写独立的请求跟踪 ID。
 - prompt_cache_key 使用独立 `prompt-cache` 派生域并按账号、用户分区，不把缓存键拿来作为握手 Session-Id。日志仍只保存缓存键摘要。
-- turn_id 与 root_turn_id 在账号映射模式下也保留 UUIDv7 前 27 个字符，仅稳定改写末 9 位，使用独立的轮次映射域；同一个原始轮次同时出现在两种字段时得到同一个出站值。旧 preserve 会话继续保留轮次值。
+- turn_id 与 root_turn_id 使用独立轮次映射域并记录来源阶段的映射版本；新阶段同样生成完整 UUIDv7。同一个原始轮次同时出现在两种字段时得到同一个出站值。引用旧阶段的轮次沿用旧阶段映射，旧 preserve 会话继续保留轮次值。
 - 不改入站 NewAPI 签名、本地主会话解析、黑名单、永久绑定或日志搜索前缀。原始 turn_id/root_turn_id 仍用于本地找根、关联和入口日志，改写只作用于最终 HTTP 头、WS 握手元数据和出站正文副本。parent_turn_id、时间戳、设备级处理、connection_id、上游 response_id、previous_response_id、工具 call_id 和 encrypted_content 不在此映射范围。
 
 ### 旧会话与故障保护
 
 首次登记策略时检查已有 `codex_identity_claims`：已发送并登记的会话继续 preserve，避免活跃会话突然变号。账号隔离模式下，新 fork/父引用优先使用对应账号的出站映射；旧 preserve 父会话仅在核实原账号、未迁移阶段后允许保留原始父引用，具体条件见下文。既有 account 映射在环境变量切回 preserve 后仍继续原映射，不破坏恢复链；不要通过删除记录强制重新生成。
 
-部署前完整备份数据库，包括 `codex_identity_claims`、`codex_identity_mapping_secret`、`codex_identity_mapping_policies`、`codex_identity_alias_claims`、`codex_identity_epochs`、`codex_identity_references` 和 `codex_session_context_tokens`。映射密钥不得手动轮换、复制到日志或只恢复部分表。新版本多实例应共享数据库；不能与不识别该策略的旧版本混跑同一会话。无法追溯未曾登记的历史请求，因此不保证首次接入服务的外部旧会话保持历史出站身份。
+已经登记的 `account-suffix-v1` 会话继续使用原算法和原结果，不强制迁移；新会话和下一次成功换号的新段才采用 v2。A→B→A 每个迁移段独立，同一段的主请求、压缩、关联 session 引用、重试和重启复用原映射。父引用使用对应父段的版本，允许新子会话引用旧版本父映射。关联请求原本独立的 thread_id 不会被强制合并为主 session_id。
 
-映射/冲突登记有事务约束且无 TTL。密钥丢失、数据库不可用、归属冲突、别名碰撞都停止请求，不退化为原始 ID、随机改写或自动换号。后 9 位只有 36 bit，不能声称数学上绝无碰撞；同保留前缀的派生别名碰撞由持久化唯一约束拒绝。没有数据库的嵌入式调用不能启用 account 模式；宿主可用 `WithCodexIdentityStore` 提供存储上下文。
+部署前完整备份数据库，包括 `codex_identity_claims`、`codex_identity_mapping_secret`、`codex_identity_mapping_policies`、`codex_identity_alias_claims`、`codex_identity_epochs`、`codex_identity_references`、`codex_identity_uuid7_values` 和 `codex_session_context_tokens`。映射密钥不得手动轮换、复制到日志或只恢复部分表。新版本多实例应共享数据库；不能与不识别该策略的旧版本混跑同一会话。无法追溯未曾登记的历史请求，因此不保证首次接入服务的外部旧会话保持历史出站身份。
+
+映射/冲突登记有事务约束且无 TTL，存储量随新的身份及轮次增长。密钥丢失、数据库不可用、归属冲突、别名碰撞都停止请求，不退化为原始 ID、随机重抽或自动换号。持久唯一约束仍检查碰撞，不能声称数学上绝无碰撞。没有数据库的嵌入式调用不能启用 account 模式；宿主可用 `WithCodexIdentityStore` 提供存储上下文。
 
 ### 改写日志
 
@@ -109,12 +111,12 @@ busy 同会话溢出功能保留，只使用同账号、同隔离分区及兼容
 ```json
 {
   "account_mapping": {
-    "version": "account-suffix-v1",
+    "version": "account-uuid7-v2",
     "status": "mapped",
     "scope_hash": "脱敏归属摘要",
     "chatgpt_account_id": "实际账号 ID",
     "cache_partitioned": true,
-    "changes": [{ "original": "原始 UUIDv7", "outbound": "映射后 UUIDv7" }]
+    "changes": [{ "original": "原始 UUIDv7", "outbound": "映射后 UUIDv7", "version": "account-uuid7-v2", "mapped_at": "2026-09-13T12:00:00Z" }]
   }
 }
 ```
@@ -127,7 +129,13 @@ busy 同会话溢出功能保留，只使用同账号、同隔离分区及兼容
 
 WS 握手中的轮次信息是建连时的已改写快照；复用连接后，本轮值以当前帧正文为准。不会为了更新每轮 turn_id 重建连接，也不会把旧握手快照的轮次值重新灌入当前正文。
 
-此功能是账号隔离，不承诺匿名、不可关联或消除 500。UUID 前缀/时间、未改动的轮次、设备、内容、账号和出口等仍可能具有相关性；上游不透明响应及加密上下文不能通过改 UUID 迁移到其他账号。
+`changes[].version` 是该 ID 实际使用的版本，`mapped_at` 是 v2 出站 UUID 中固定的首次映射时间，重试时不更新；它不是请求成功时间或账号切换提交时间。上述字段仅是本地改写诊断，不发送上游。
+
+此功能是账号隔离，不承诺匿名、不可关联或消除 500。未改动的设备、请求时间、内容、账号和出口等仍可能具有相关性；上游不透明响应及加密上下文不能通过改 UUID 迁移到其他账号。
+
+换号失败时，`account_failover.context_blockers` 最多记录 8 个命中的字段路径、类型和输入项类型，例如 `input[3].encrypted_content` / `reasoning`、`input[5].content[0].file_id` 或 `input[7].id` / `item_reference`。不记录字段值、加密正文、文件编号或工具调用编号；未知自定义字段名与类型也不直接记录。此诊断不会放宽迁移校验，`block_reason` 和错误码保持兼容；缺少持久归属的提示明确要求恢复绑定，而非误导为只需补未加密正文。
+
+用户创建的 fork 在签名元数据明确指向父会话且属于普通 user/turn 时，可以申请自己的普通或扩容窗口，不再因 `root_relation=related` 被误当后台请求跳过。首次报价先查子会话归属，无子绑定时用签名父指纹恢复账号，但授权和预留使用子会话自己的键；已开启并接受倍率的扩容优先使用该账号的扩容容量，不借用父窗口预留，也不因此先换号。标题、Guardian、压缩及绕过计数的后台请求不借此创建付费窗口，原有确认、额度和签名校验保留。
 
 ## 绑定账号不可用时允许换号
 

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -22,6 +23,7 @@ import (
 type CodexIdentityStore interface {
 	ClaimCodexIdentities(context.Context, []string, string) error
 	ResolveCodexIdentityMapping(context.Context, string, []string, bool) (database.CodexIdentityMappingPolicy, error)
+	ResolveCodexIdentityUUIDv7(context.Context, string, string) (string, error)
 	ClaimCodexIdentityAliases(context.Context, []database.CodexIdentityAliasClaim) error
 	PublishCodexIdentityEpoch(context.Context, string, database.CodexIdentityEpoch) error
 	ReadCodexIdentityReference(context.Context, string, string) (database.CodexIdentityEpoch, bool, bool, error)
@@ -38,9 +40,11 @@ func WithCodexIdentityStore(ctx context.Context, store CodexIdentityStore) conte
 }
 
 type codexAccountIdentityChange struct {
-	Original string   `json:"original"`
-	Outbound string   `json:"outbound"`
-	Fields   []string `json:"fields,omitempty"`
+	Original string     `json:"original"`
+	Outbound string     `json:"outbound"`
+	Fields   []string   `json:"fields,omitempty"`
+	Version  string     `json:"version,omitempty"`
+	MappedAt *time.Time `json:"mapped_at,omitempty"`
 }
 
 type codexAccountIdentityDiagnosticKey struct{}
@@ -69,6 +73,7 @@ type codexAccountIdentityDiagnostic struct {
 }
 
 type codexAccountIdentity struct {
+	mode         string
 	secret       []byte
 	owner        string
 	account      string
@@ -184,14 +189,14 @@ func (fingerprint *CodexFingerprint) prepareAccountIdentity(ctx context.Context,
 		diagnostic.Status = "preserved_existing"
 		return nil
 	}
-	if !preserveRoot && policy.Mode != "account-suffix-v1" {
+	if !preserveRoot && policy.Mode != "account-suffix-v1" && policy.Mode != database.CodexIdentityMappingUUIDv7 {
 		return codexAccountIdentityError("出站身份映射版本不受支持，请检查服务版本。")
 	}
 	secret, err := hex.DecodeString(policy.Secret)
 	if !preserveRoot && (err != nil || len(secret) != 32) {
 		return codexAccountIdentityError("出站身份映射密钥不可用，请恢复完整数据库。")
 	}
-	mapping := &codexAccountIdentity{secret: secret, owner: owner, account: upstreamAccount, epoch: epochKey, preserveRoot: preserveRoot, aliases: make(map[string]string)}
+	mapping := &codexAccountIdentity{mode: policy.Mode, secret: secret, owner: owner, account: upstreamAccount, epoch: epochKey, preserveRoot: preserveRoot, aliases: make(map[string]string)}
 	if err := fingerprint.prepareAccountWindows(ctx, mapping, epoch); err != nil {
 		return err
 	}
@@ -222,6 +227,9 @@ func (fingerprint *CodexFingerprint) prepareAccountIdentity(ctx context.Context,
 	references := make(map[string]database.CodexIdentityEpoch)
 	legacyParentPreserved := false
 	currentEpoch := database.CodexIdentityEpoch{Segment: epochKey}
+	if policy.Mode == database.CodexIdentityMappingUUIDv7 {
+		currentEpoch.MappingVersion = policy.Mode
+	}
 	if epoch != nil {
 		currentEpoch.RootKey, currentEpoch.Generation = epoch.key, epoch.record.FailoverCount
 	}
@@ -298,7 +306,7 @@ func (fingerprint *CodexFingerprint) prepareAccountIdentity(ctx context.Context,
 			diagnostic.PreservedIDs = append(diagnostic.PreservedIDs, original)
 			continue
 		}
-		if identityPolicy.Mode != "account-suffix-v1" || len(mapping.secret) > 0 && identityPolicy.Secret != hex.EncodeToString(mapping.secret) {
+		if identityPolicy.Mode != "account-suffix-v1" && identityPolicy.Mode != database.CodexIdentityMappingUUIDv7 || len(mapping.secret) > 0 && identityPolicy.Secret != hex.EncodeToString(mapping.secret) {
 			return codexAccountIdentityError("关联会话身份映射不一致，请检查数据库完整性。")
 		}
 		if len(mapping.secret) == 0 {
@@ -309,15 +317,16 @@ func (fingerprint *CodexFingerprint) prepareAccountIdentity(ctx context.Context,
 		}
 		identityMapping := *mapping
 		identityMapping.epoch = identityEpoch.Segment
-		outbound := original[:len(original)-9] + identityMapping.digest("identity", original)[:9]
-		if outbound == original {
-			return codexAccountIdentityError("出站会话标识发生冲突，已停止请求，请联系管理员。")
+		identityMapping.mode = identityPolicy.Mode
+		outbound, err := identityMapping.mapUUID(ctx, store, "identity", original)
+		if err != nil {
+			return err
 		}
 		mapping.aliases[original] = outbound
 		if referenceDiagnostic != nil {
 			referenceDiagnostic.Action = "mapped"
 		}
-		diagnostic.Changes = append(diagnostic.Changes, codexAccountIdentityChange{Original: original, Outbound: outbound})
+		diagnostic.Changes = append(diagnostic.Changes, identityMapping.identityChange(original, outbound))
 		sourceKey := codexIdentityDigest("codex-account-alias-source-v1", owner, upstreamAccount, original)
 		if identityEpoch.Segment != "" {
 			sourceKey = codexIdentityDigest("codex-account-segment-source-v1", owner, upstreamAccount, identityEpoch.Segment, original)
@@ -409,6 +418,9 @@ func legacyCodexParentReferenceBlock(epoch *sessionOutboundEpoch, accountID int6
 
 func (mapping *codexAccountIdentity) digest(domain, original string) string {
 	parts := []string{"account-suffix-v1", domain, mapping.owner, mapping.account, original}
+	if mapping.mode == database.CodexIdentityMappingUUIDv7 {
+		parts[0] = mapping.mode
+	}
 	if mapping.epoch != "" {
 		parts = append(parts, mapping.epoch)
 	}

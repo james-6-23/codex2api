@@ -46,13 +46,29 @@ func sessionFailoverContextError(request *gin.Context, diagnostic *sessionAccoun
 	case "window_identity_required":
 		reason = "缺少有效的会话窗口标识"
 	}
-	message := "绑定账号不可用，当前请求不能安全换号：" + reason + "。请恢复完整未加密上下文，或新开对话。"
+	if len(diagnostic.ContextBlockers) > 0 {
+		first := diagnostic.ContextBlockers[0]
+		labels := map[string]string{"encrypted_content": "加密上下文", "file_id": "上游文件引用", "item_reference": "上游输入项引用"}
+		if label := labels[first.Kind]; label != "" {
+			reason = "携带不能确认可迁移的" + label
+		}
+		reason += "（" + first.Path
+		if first.ItemType != "" {
+			reason += "，类型 " + first.ItemType
+		}
+		reason += "）"
+	}
+	guidance := "请恢复完整未加密上下文，或新开对话。"
+	if block == "persistent_owner_required" {
+		guidance = "请恢复原会话账号绑定，或新开对话。"
+	}
+	message := "绑定账号不可用，当前请求不能安全换号：" + reason + "。" + guidance
 	if diagnostic.Phase == "after_switch" {
-		message = "会话已更换绑定账号，当前请求不能安全续接：" + reason + "。请恢复完整未加密上下文，或新开对话。"
+		message = "会话已更换绑定账号，当前请求不能安全续接：" + reason + "。" + guidance
 	}
 	request.Header("X-Should-Retry", "false")
 	return api.NewAPIErrorWithDetails("codex_session_failover_context_required", message, api.ErrorTypeInvalidRequest,
-		gin.H{"reason": block, "trigger_reason": diagnostic.TriggerReason, "phase": diagnostic.Phase, "retry": "stop"})
+		gin.H{"reason": block, "trigger_reason": diagnostic.TriggerReason, "phase": diagnostic.Phase, "retry": "stop", "context_blockers": diagnostic.ContextBlockers})
 }
 
 type sessionAccountFailoverPlan struct {
@@ -66,7 +82,7 @@ type sessionAccountFailoverPlan struct {
 func (handler *Handler) validateMigratedSessionContext(request *gin.Context, body []byte, record database.SessionContinuityRecord, rootKeys ...string) *api.APIError {
 	known, cancelKnown := handler.sessionContextVerifier(request, record, rootKeys...)
 	defer cancelKnown()
-	blocked := sessionFailoverContextBlockWithVerifier(sessionFailoverRequestHeaders(request), body, known)
+	blocked, blockers := inspectSessionFailoverContext(sessionFailoverRequestHeaders(request), body, known)
 	if blocked == "missing_request_context" {
 		return nil
 	}
@@ -81,7 +97,7 @@ func (handler *Handler) validateMigratedSessionContext(request *gin.Context, bod
 		}
 		if found && affinity.AccountID == record.AccountID && segmentMatches {
 			withoutPrevious, _ := sjson.DeleteBytes(body, "previous_response_id")
-			blocked = sessionFailoverContextBlockWithVerifier(sessionFailoverRequestHeaders(request), withoutPrevious, known)
+			blocked, blockers = inspectSessionFailoverContext(sessionFailoverRequestHeaders(request), withoutPrevious, known)
 			if blocked == "missing_request_context" || blocked == "incomplete_tool_context" {
 				blocked = ""
 			}
@@ -91,6 +107,7 @@ func (handler *Handler) validateMigratedSessionContext(request *gin.Context, bod
 		return sessionFailoverContextError(request, &sessionAccountFailoverDiagnostic{
 			Phase: "after_switch", TriggerReason: record.LastFailoverReason,
 			PreviousAccountID: record.PreviousAccountID, AccountID: record.AccountID, Generation: record.FailoverCount,
+			ContextBlockers: blockers,
 		}, blocked)
 	}
 	return nil
@@ -104,12 +121,15 @@ func sessionFailoverRequestHeaders(request *gin.Context) http.Header {
 }
 
 func (handler *Handler) restoreMigratedSessionOwner(request *gin.Context, key string, body []byte) *api.APIError {
+	if root, related := auth.RelatedSessionRootKey(key); related {
+		if backgroundAccountMatchFromContext(request.Request.Context()) == nil {
+			handler.attachSessionOutboundEpoch(request, "", database.SessionContinuityRecord{})
+		}
+		return handler.prepareBackgroundAccountMatch(request, root, body)
+	}
 	handler.attachSessionOutboundEpoch(request, "", database.SessionContinuityRecord{})
 	request.Request = request.Request.WithContext(context.WithValue(request.Request.Context(), backgroundAccountMatchContextKey{}, (*backgroundAccountMatch)(nil)))
 	usageRequestDiagnosticState(request).BackgroundAccountMatch = nil
-	if root, related := auth.RelatedSessionRootKey(key); related {
-		return handler.prepareBackgroundAccountMatch(request, root, body)
-	}
 	if handler.db == nil || key == "" {
 		return nil
 	}
@@ -205,13 +225,17 @@ func (handler *Handler) prepareSessionAccountFailover(request *gin.Context, key 
 	diagnostic := &sessionAccountFailoverDiagnostic{Result: "blocked", Reason: reason, TriggerReason: reason, Phase: "before_switch", PreviousAccountID: owner.ID(), Generation: state.Record.FailoverCount}
 	state.Diagnostic.AccountFailover = diagnostic
 	usageRequestDiagnosticState(request).AccountFailover = diagnostic
-	block := sessionFailoverContextBlock(sessionFailoverRequestHeaders(request), body)
+	block, blockers := inspectSessionFailoverContext(sessionFailoverRequestHeaders(request), body, nil)
+	diagnostic.ContextBlockers = blockers
 	if handler.db == nil || state.Record.AccountID != owner.ID() {
 		block = "persistent_owner_required"
+		diagnostic.ContextBlockers = nil
 	} else if state.Diagnostic.WouldBlock {
 		block = "invalid_session_continuity"
+		diagnostic.ContextBlockers = nil
 	} else if !state.Known || state.ThreadID == "" {
 		block = "window_identity_required"
+		diagnostic.ContextBlockers = nil
 	}
 	if block != "" {
 		return false, sessionFailoverContextError(request, diagnostic, block)

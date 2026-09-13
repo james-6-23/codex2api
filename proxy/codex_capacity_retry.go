@@ -108,6 +108,9 @@ func writeCommittedCodexCapacityError(c *gin.Context, protocol continuousRetryHT
 }
 
 func writeResponseFailedHTTPError(c *gin.Context, status int, body []byte, message string) {
+	if writeUpstreamPromptSafetyError(c, body) {
+		return
+	}
 	if writeCodexCapacityError(c, body, continuousRetryProtocolOpenAI) {
 		return
 	}

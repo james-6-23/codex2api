@@ -97,9 +97,6 @@ func (handler *Handler) bindWindowGrantOwner(request *gin.Context, accountID int
 
 func (handler *Handler) windowQuoteOwner(request *gin.Context, identity verifiedNewAPIPolicyContext) (int64, string, error) {
 	key := sessionAffinityKey("newapi-root-session:"+identity.Meta.RootSessionFingerprint, identity.APIKeyID)
-	if owner, found := handler.store.LiveSessionAccountID(key, time.Now()); found {
-		return owner, key, nil
-	}
 	entry, found, err := handler.readSessionContinuity(request.Request.Context(), hashRiskIdentity(key))
 	if err != nil {
 		return 0, "", err
@@ -107,7 +104,21 @@ func (handler *Handler) windowQuoteOwner(request *gin.Context, identity verified
 	if found {
 		return entry.Record.AccountID, key, nil
 	}
+	if owner, found := handler.store.LiveSessionAccountID(key, time.Now()); found {
+		return owner, key, nil
+	}
+	if userForkWindow(identity.Meta) {
+		owner, _, err := handler.resolveForkSourceOwner(request.Request.Context(), requestSessionIdentity{forkSourceAffinityID: "newapi-root-session:" + identity.Meta.ForkedFromSessionFingerprint}, key, identity.APIKeyID)
+		if err != nil || owner == 0 {
+			return 0, "", errors.New("无法恢复 fork 父会话账号")
+		}
+		return owner, key, nil
+	}
 	return 0, "", nil
+}
+
+func userForkWindow(meta newAPIPolicyMeta) bool {
+	return meta.ThreadSource == "user" && meta.RequestKind == "turn" && meta.SubagentKind == "" && meta.PassiveFeature == "" && meta.SessionAccounting != newAPISessionAccountingBypass && meta.ForkedFromSessionFingerprint != "" && meta.ForkedFromSessionFingerprint != meta.RootSessionFingerprint
 }
 
 func (handler *Handler) upgradePersonalWindow(request *gin.Context, identity verifiedNewAPIPolicyContext, input windowControlRequest, windows map[string]personalWindow) {

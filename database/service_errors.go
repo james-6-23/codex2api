@@ -22,15 +22,39 @@ const (
 	serviceErrorMaxRows       = 100000
 )
 
+type SessionContextBlocker struct {
+	Kind     string `json:"kind"`
+	Path     string `json:"path"`
+	ItemType string `json:"item_type,omitempty"`
+}
+
+type BackgroundWindowWaitDiagnostic struct {
+	Result     string `json:"result"`
+	AccountID  int64  `json:"account_id"`
+	Generation uint64 `json:"generation"`
+	DurationMs int64  `json:"duration_ms"`
+}
+
+type PromptSafetyDiagnostic struct {
+	Reason       string     `json:"reason"`
+	UpstreamCode string     `json:"upstream_code"`
+	LockResult   string     `json:"lock_result"`
+	Locked       bool       `json:"conversation_locked"`
+	Retry        string     `json:"retry"`
+	Strike       bool       `json:"strike_eligible"`
+	ExpiresAt    *time.Time `json:"expires_at,omitempty"`
+}
+
 type SessionAccountFailoverDiagnostic struct {
-	Result            string `json:"result"`
-	Reason            string `json:"reason,omitempty"`
-	TriggerReason     string `json:"trigger_reason,omitempty"`
-	BlockReason       string `json:"block_reason,omitempty"`
-	Phase             string `json:"phase,omitempty"`
-	PreviousAccountID int64  `json:"previous_account_id,omitempty"`
-	AccountID         int64  `json:"account_id,omitempty"`
-	Generation        uint64 `json:"generation"`
+	Result            string                  `json:"result"`
+	Reason            string                  `json:"reason,omitempty"`
+	TriggerReason     string                  `json:"trigger_reason,omitempty"`
+	BlockReason       string                  `json:"block_reason,omitempty"`
+	Phase             string                  `json:"phase,omitempty"`
+	PreviousAccountID int64                   `json:"previous_account_id,omitempty"`
+	AccountID         int64                   `json:"account_id,omitempty"`
+	Generation        uint64                  `json:"generation"`
+	ContextBlockers   []SessionContextBlocker `json:"context_blockers,omitempty"`
 }
 
 type ServiceErrorEvent struct {
@@ -64,10 +88,12 @@ type ServiceErrorEvent struct {
 	RootAccountLookup      string                            `json:"root_account_lookup,omitempty"`
 	RootAccountWait        string                            `json:"root_account_wait,omitempty"`
 	RootAccountWaitMs      int64                             `json:"root_account_wait_ms,omitempty"`
+	BackgroundWindowWait   *BackgroundWindowWaitDiagnostic   `json:"background_window_wait,omitempty"`
 	CandidateRejections    []string                          `json:"candidate_rejections,omitempty"`
 	ClientInfo             map[string]string                 `json:"client_info,omitempty"`
 	UpstreamInfo           json.RawMessage                   `json:"upstream,omitempty"`
 	AccountFailover        *SessionAccountFailoverDiagnostic `json:"account_failover,omitempty"`
+	PromptSafety           *PromptSafetyDiagnostic           `json:"prompt_safety,omitempty"`
 }
 
 type ServiceErrorFilter struct {
@@ -176,6 +202,11 @@ func normalizeServiceError(event ServiceErrorEvent) ServiceErrorEvent {
 	}
 	event.Message = serviceErrorString(event.Message, 2048)
 	event.Endpoint = serviceErrorString(event.Endpoint, 256)
+	if event.BackgroundWindowWait != nil {
+		wait := *event.BackgroundWindowWait
+		wait.Result = serviceErrorString(wait.Result, 64)
+		event.BackgroundWindowWait = &wait
+	}
 	if event.CreatedAt.IsZero() {
 		event.CreatedAt = time.Now().UTC()
 	}
@@ -207,10 +238,28 @@ func normalizeServiceError(event ServiceErrorEvent) ServiceErrorEvent {
 		remaining -= len(name) + len(value)
 	}
 	event.ClientInfo = clientInfo
+	if event.PromptSafety != nil {
+		diagnostic := *event.PromptSafety
+		for _, field := range []*string{&diagnostic.Reason, &diagnostic.UpstreamCode, &diagnostic.LockResult, &diagnostic.Retry} {
+			*field = serviceErrorString(*field, 160)
+		}
+		if diagnostic.ExpiresAt != nil {
+			expires := *diagnostic.ExpiresAt
+			diagnostic.ExpiresAt = &expires
+		}
+		event.PromptSafety = &diagnostic
+	}
 	if event.AccountFailover != nil {
 		failover := *event.AccountFailover
 		for _, field := range []*string{&failover.Result, &failover.Reason, &failover.TriggerReason, &failover.BlockReason, &failover.Phase} {
 			*field = serviceErrorString(*field, 160)
+		}
+		failover.ContextBlockers = append([]SessionContextBlocker(nil), failover.ContextBlockers[:min(len(failover.ContextBlockers), 8)]...)
+		for index := range failover.ContextBlockers {
+			blocker := &failover.ContextBlockers[index]
+			blocker.Kind = serviceErrorString(blocker.Kind, 64)
+			blocker.Path = serviceErrorString(blocker.Path, 256)
+			blocker.ItemType = serviceErrorString(blocker.ItemType, 64)
 		}
 		event.AccountFailover = &failover
 	}

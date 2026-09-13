@@ -60,6 +60,10 @@ func (h *Handler) ExportUsageLogs(c *gin.Context) {
 		return
 	}
 	defer h.usageLogExportBusy.Store(false)
+	if c.Query("paged") == "true" {
+		h.exportUsageLogPage(c, scope, filters, filter)
+		return
+	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Minute)
 	defer cancel()
 	file, err := os.CreateTemp("", "codex2api-usage-export-*.json")

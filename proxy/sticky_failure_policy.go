@@ -36,6 +36,9 @@ func isRequestScopedHTTPFailure(statusCode int, body []byte) bool {
 }
 
 func (h *Handler) httpSessionFailureDisposition(statusCode int, body []byte, shouldRetry bool) sessionFailureDisposition {
+	if isUpstreamPromptSafetyRefusal(body) {
+		return sessionFailureDisposition{retainAffinity: true}
+	}
 	permanent := isPermanentAccountHTTPFailure(statusCode, body)
 	requestScoped := isRequestScopedHTTPFailure(statusCode, body)
 	sticky := h.stickyTransportRetryEnabled()

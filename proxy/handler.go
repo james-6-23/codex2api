@@ -1740,6 +1740,10 @@ func (h *Handler) logUsageForRequest(c *gin.Context, input *database.UsageLogInp
 		receipt.Successful = true
 	}
 	markCyberPolicyUsageKind(input)
+	if diagnostic := promptSafetyDiagnostic(c); diagnostic != nil && input.StatusCode >= 400 && input.StatusCode != logStatusClientClosed {
+		input.UpstreamErrorKind = "safety_policy"
+		input.StatusCode = http.StatusBadRequest
+	}
 	h.logUsage(input)
 }
 
@@ -3524,7 +3528,7 @@ func shouldRetryHTTPStatus(statusCode int, body []byte, generalRetries *int, rat
 		return false
 	}
 	policy := continuousRetryPolicyForCall(policies)
-	if isExplicitUpstreamCyberPolicy(body) {
+	if isHardStopUpstreamPolicy(body) {
 		return false
 	}
 	if isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures() {
@@ -3569,7 +3573,7 @@ func (h *Handler) shouldRetryUpstreamHTTPStatus(statusCode int, body []byte, gen
 		return false
 	}
 	policy := continuousRetryPolicyForCall(policies)
-	if isExplicitUpstreamCyberPolicy(body) ||
+	if isHardStopUpstreamPolicy(body) ||
 		(isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures()) ||
 		continuousRetryHTTPSelected(policy, statusCode, body) {
 		return false
@@ -3589,7 +3593,7 @@ func shouldRetryRequestError(err error, generalRetries *int, maxGeneralRetries i
 		return false
 	}
 	policy := continuousRetryPolicyForCall(policies)
-	if isExplicitUpstreamCyberPolicyError(err) {
+	if isHardStopUpstreamPolicyError(err) {
 		return false
 	}
 	if _, body, ok := continuousRetryHTTPErrorDetails(err); ok && isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures() {
@@ -3649,7 +3653,7 @@ func isRetryableRequestErrorForContext(ctx context.Context, err error, policies 
 		return false
 	}
 	policy := continuousRetryPolicyForCall(policies)
-	if isExplicitUpstreamCyberPolicyError(err) {
+	if isHardStopUpstreamPolicyError(err) {
 		return false
 	}
 	if _, body, ok := continuousRetryHTTPErrorDetails(err); ok && isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures() {
@@ -4509,6 +4513,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 
 				if !retryable {
+					if h.rejectUpstreamPromptSafetyRequestError(c, reqErr) {
+						return
+					}
 					if isStream && writeCommittedResponsesRetryError(c, continuousRetryRequestErrorMessage(reqErr)) {
 						return
 					}
@@ -4850,6 +4857,10 @@ func (h *Handler) Responses(c *gin.Context) {
 					}
 					parsed := gjson.ParseBytes(data)
 					eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+					if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+						h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+						data = attachUpstreamPromptSafetyDetails(c, data)
+					}
 					ttftGuard.MarkProgress(eventType)
 					isFirstToken := isFirstTokenResultForMode(parsed, currentFirstTokenMode())
 					if !ttftRecorded && isFirstToken {
@@ -5302,6 +5313,9 @@ func (h *Handler) Responses(c *gin.Context) {
 
 			// 不可重试的结构化错误直接返回
 			if !retryable {
+				if h.rejectUpstreamPromptSafetyRequestError(c, reqErr) {
+					return
+				}
 				if isStream && writeCommittedResponsesRetryError(c, continuousRetryRequestErrorMessage(reqErr)) {
 					return
 				}
@@ -5550,6 +5564,10 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+					h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+					data = attachUpstreamPromptSafetyDetails(c, data)
+				}
 
 				// TTFT: 记录第一个实际内容事件的时间
 				ttftGuard.MarkProgress(eventType)
@@ -5837,6 +5855,10 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+					h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+					data = attachUpstreamPromptSafetyDetails(c, data)
+				}
 				if eventType == "error" {
 					terminalFailurePayload = terminalUpstreamErrorPayload(data)
 					gotTerminal = true
@@ -6522,6 +6544,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				}
 
 				if !retryable {
+					if h.rejectUpstreamPromptSafetyRequestError(c, reqErr) {
+						return
+					}
 					ErrorToGinResponse(c, reqErr)
 					return
 				}
@@ -6787,6 +6812,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 
 			if !retryable {
+				if h.rejectUpstreamPromptSafetyRequestError(c, reqErr) {
+					return
+				}
 				ErrorToGinResponse(c, reqErr)
 				return
 			}
@@ -7517,6 +7545,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 
 			// 不可重试的结构化错误直接返回
 			if !retryable {
+				if h.rejectUpstreamPromptSafetyRequestError(c, reqErr) {
+					return
+				}
 				if isStream && writeCommittedChatRetryError(c, continuousRetryRequestErrorMessage(reqErr)) {
 					return
 				}
@@ -7850,6 +7881,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				defer downstreamMu.Unlock()
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+					h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+					data = attachUpstreamPromptSafetyDetails(c, data)
+				}
 				if eventType == "response.failed" {
 					statusCode := classifyResponseFailedOutcome(data).logStatusCode
 					var incidentID string
@@ -8019,6 +8054,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				outputCollector.Add(data)
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+					h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+					data = attachUpstreamPromptSafetyDetails(c, data)
+				}
 				ttftGuard.MarkProgress(eventType)
 				if !ttftRecorded && isFirstTokenResultForMode(parsed, currentFirstTokenMode()) {
 					firstTokenMs = int(time.Since(start).Milliseconds())
@@ -9203,6 +9242,9 @@ func parseFloat(s string) float64 {
 
 // sendUpstreamError 发送上游错误响应给客户端
 func (h *Handler) sendUpstreamError(c *gin.Context, statusCode int, body []byte) {
+	if writeUpstreamPromptSafetyError(c, body) {
+		return
+	}
 	if writeCodexCapacityError(c, body, continuousRetryProtocolOpenAI) {
 		return
 	}
@@ -9253,6 +9295,9 @@ func normalizedRetryAfter(value string) string {
 // sendFinalUpstreamError 重试用尽后的最终错误响应：识别 usage_limit_reached 改写为 503，其余透传
 func (h *Handler) sendFinalUpstreamError(c *gin.Context, statusCode int, body []byte) {
 	if !claimContinuousRetryTerminal(c, continuousRetryProtocolOpenAI) {
+		return
+	}
+	if writeUpstreamPromptSafetyError(c, body) {
 		return
 	}
 	if codexCapacityErrorForClient(body) != nil {

@@ -94,6 +94,7 @@ func (db *DB) ensureSessionErrorSchema(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS session_blacklist (session_key TEXT PRIMARY KEY, user_id TEXT NOT NULL, session_id TEXT NOT NULL, identity_data TEXT NOT NULL, locked INTEGER NOT NULL, updated_at BIGINT NOT NULL)`,
 		`CREATE INDEX IF NOT EXISTS idx_session_blacklist_active ON session_blacklist(locked, updated_at, session_key)`,
 		`CREATE TABLE IF NOT EXISTS session_identity_links (session_key TEXT PRIMARY KEY, parent_key TEXT NOT NULL)`,
+		`CREATE TABLE IF NOT EXISTS session_policy_lock_identities (session_key TEXT NOT NULL, lock_kind TEXT NOT NULL, lock_key TEXT NOT NULL, PRIMARY KEY(session_key,lock_kind,lock_key))`,
 	} {
 		if _, err := db.conn.ExecContext(ctx, statement); err != nil {
 			return err

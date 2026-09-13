@@ -896,6 +896,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 
 			if !retryable {
+				if h.rejectUpstreamPromptSafetyRequestError(c, reqErr) {
+					return
+				}
 				var structured *Error
 				if errors.As(reqErr, &structured) && structured.Code == claudeClientPolicyErrorCode {
 					// The gateway-side client policy is per account (overrides differ),
@@ -1056,6 +1059,13 @@ func (h *Handler) Messages(c *gin.Context) {
 					return
 				}
 				continue
+			}
+			if isUpstreamPromptSafetyRefusal(errBody) && !isExplicitUpstreamCyberPolicy(errBody) {
+				if isStream && writeCommittedAnthropicRetryError(c, "invalid_request_error", upstreamPromptSafetyAPIError(c, errBody).Message) {
+					return
+				}
+				writeUpstreamPromptSafetyError(c, errBody)
+				return
 			}
 			if isExplicitUpstreamCyberPolicy(errBody) {
 				if isStream && writeCommittedAnthropicRetryError(c, "invalid_request_error", upstreamCyberPolicyResponseMessage(c)) {
@@ -1346,6 +1356,10 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+					h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+					data = attachUpstreamPromptSafetyDetails(c, data)
+				}
 
 				// TTFT 跟踪
 				ttftGuard.MarkProgress(eventType)
@@ -1418,6 +1432,12 @@ func (h *Handler) Messages(c *gin.Context) {
 					terminalFailurePayload = append([]byte(nil), failurePayload...)
 					gotTerminal = true
 					var policyDetails gin.H
+					if isUpstreamPromptSafetyRefusal(failurePayload) && !isExplicitUpstreamCyberPolicy(failurePayload) {
+						h.recordUpstreamPromptSafety(c, "/v1/messages", model, failurePayload)
+						failure := upstreamPromptSafetyAPIError(c, failurePayload)
+						failedOutcome.failureMessage = failure.Message
+						policyDetails = gin.H{"codex2api_safety": failure.Details}
+					}
 					if isExplicitUpstreamCyberPolicy(failurePayload) {
 						promptPolicyIncidentID = acceptedPromptPolicyIncidentID(h.logUpstreamCyberPolicy(c, "/v1/messages", model, responseFailedErrorBody(failurePayload), upstreamCyberPolicyAttempt{
 							Transport: upstreamPromptPolicyTransport(true, useWebsocket), StatusCode: failedOutcome.logStatusCode,
@@ -1507,6 +1527,10 @@ func (h *Handler) Messages(c *gin.Context) {
 			readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				if eventType == "error" && isUpstreamPromptSafetyRefusal(data) {
+					h.recordUpstreamPromptSafety(c, c.Request.URL.Path, c.GetString("x-model"), data)
+					data = attachUpstreamPromptSafetyDetails(c, data)
+				}
 				if eventType == "error" {
 					terminalFailurePayload = terminalUpstreamErrorPayload(data)
 					gotTerminal = true

@@ -246,7 +246,7 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 	var granted *database.UserWindowGrant
 	var deniedRecovery time.Time
 	quoteReason := ""
-	background := identity.Meta.RootSessionRelation == newAPIPolicyRootSessionRelationRelated || identity.Meta.SessionAccounting == newAPISessionAccountingBypass || identity.Meta.RequestKind == "compaction" || (identity.Meta.ThreadSource != "" && identity.Meta.ThreadSource != "user")
+	background := identity.Meta.RootSessionRelation == newAPIPolicyRootSessionRelationRelated && !userForkWindow(identity.Meta) || identity.Meta.SessionAccounting == newAPISessionAccountingBypass || identity.Meta.RequestKind == "compaction" || (identity.Meta.ThreadSource != "" && identity.Meta.ThreadSource != "user")
 	err = handler.db.UpdateUserWindowAdmissions(ctx, subject, func(state *database.UserWindowAdmissionState) error {
 		if state.Reservations == nil {
 			state.Reservations = make(map[string]map[string]time.Time)
@@ -294,12 +294,15 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 			}
 		}()
 		if grant := state.Windows[root]; grant != nil {
+			if input.Operation == "quote" && !background && grant.OwnerAccountID == 0 && ownerAccountID > 0 {
+				grant.OwnerAccountID, grant.OwnerKey = ownerAccountID, ownerKey
+			}
 			copy := *grant
 			granted = &copy
 			return nil
 		}
 		if window, found := windows[root]; found {
-			granted = &database.UserWindowGrant{ID: uuid.NewString(), Root: root, CreatedAt: window.CreatedAt, ExpiresAt: window.ExpiresAt, Confirmed: true, Expanded: window.Expanded, Multiplier: window.Multiplier, ExtraLimit: input.ExtraLimit}
+			granted = &database.UserWindowGrant{ID: uuid.NewString(), Root: root, CreatedAt: window.CreatedAt, ExpiresAt: window.ExpiresAt, Confirmed: true, Expanded: window.Expanded, Multiplier: window.Multiplier, ExtraLimit: input.ExtraLimit, OwnerAccountID: ownerAccountID, OwnerKey: ownerKey}
 			state.Windows[root] = granted
 			return nil
 		}

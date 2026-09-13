@@ -39,6 +39,11 @@ func backgroundAccountMatchFromContext(ctx context.Context) *backgroundAccountMa
 }
 
 func (handler *Handler) prepareBackgroundAccountMatch(request *gin.Context, rootKey string, body []byte) *api.APIError {
+	if previous := backgroundAccountMatchFromContext(request.Request.Context()); previous != nil {
+		if previous.rootKey != rootKey || ValidateBackgroundAccountMatch(request.Request.Context(), handler.store.FindByID(previous.accountID)) != nil {
+			return api.NewAPIError(api.ErrCodeBackgroundRootUnavailable, "主窗口恢复后账号归属已变化或窗口失效，后台请求已停止，请重新发起请求。", api.ErrorTypeInvalidRequest)
+		}
+	}
 	entry, persisted, err := handler.readSessionContinuity(request.Request.Context(), hashRiskIdentity(rootKey))
 	if err != nil {
 		return sessionContinuityError("ownership_unavailable")
@@ -57,6 +62,11 @@ func (handler *Handler) prepareBackgroundAccountMatch(request *gin.Context, root
 				live, active = handler.store.LiveSessionAccountID(rootKey, time.Now())
 			}
 		}
+	}
+	if previous := backgroundAccountMatchFromContext(request.Request.Context()); previous != nil &&
+		(accountID != previous.accountID || generation != previous.generation || previous.persisted && !persisted) {
+		previous.diagnostic.Result = "owner_changed"
+		return api.NewAPIError(api.ErrCodeBackgroundRootUnavailable, "主窗口恢复后账号或换号代次已变化，后台请求已停止，请重新发起请求。", api.ErrorTypeInvalidRequest)
 	}
 	account := handler.store.FindByID(accountID)
 	if account != nil && account.SessionCapacityLimits().Enabled {

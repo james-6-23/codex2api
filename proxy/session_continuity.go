@@ -305,7 +305,7 @@ func (handler *Handler) prepareSessionContinuity(request *gin.Context, identity 
 func sessionContinuityError(reason string) *api.APIError {
 	message := "会话上下文序号不连续，请恢复正确的对话后重试。"
 	if reason == "unbound_nonzero" {
-		message = "当前请求来自已有上下文窗口，但无法恢复原会话账号，请新开对话后重试。"
+		message = "当前请求来自已有上下文窗口，请新开对话后重试。"
 	} else if reason == "unbound_compaction" {
 		message = "无法恢复当前压缩请求的原会话账号，请先恢复主会话连接；无法恢复时请新开对话。"
 	} else if reason == "fork_owner_unavailable" {

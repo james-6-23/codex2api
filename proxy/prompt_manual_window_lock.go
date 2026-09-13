@@ -36,13 +36,20 @@ func (h *Handler) promptManualWindowLockError(c *gin.Context, cfg promptfilter.C
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
-	_, err := h.db.GetActivePromptUserWindowLock(ctx, policyContext.Platform, policyContext.Identity.UserID, hashRiskIdentity(sessionID), time.Now().UTC())
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+	keys, failure := h.promptLockLineageKeys(c, rootBody, policyContext, verified, "window", hashRiskIdentity(sessionID))
+	if failure != nil {
+		return failure
 	}
-	if err != nil {
-		log.Printf("check manual conversation lock failed: %v", err)
-		return api.NewAPIError(api.ErrCodeServiceUnavailable, "暂时无法确认会话状态，请稍后重试", api.ErrorTypeServer)
+	for _, key := range keys {
+		_, err := h.db.GetActivePromptUserWindowLock(ctx, policyContext.Platform, policyContext.Identity.UserID, key, time.Now().UTC())
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			log.Printf("check manual conversation lock failed: %v", err)
+			return api.NewAPIError(api.ErrCodeServiceUnavailable, "暂时无法确认会话状态，请稍后重试", api.ErrorTypeServer)
+		}
+		return api.NewAPIError(promptManualWindowLockedCode, "当前会话或其父会话已由管理员锁定，请联系管理员解锁或等待锁定到期。", api.ErrorTypeInvalidRequest)
 	}
-	return api.NewAPIError(promptManualWindowLockedCode, "当前会话已由管理员锁定，请联系管理员解锁或等待锁定到期。", api.ErrorTypeInvalidRequest)
+	return nil
 }

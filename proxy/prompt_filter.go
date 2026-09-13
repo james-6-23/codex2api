@@ -547,6 +547,10 @@ func applyVerifiedNewAPIAuditMeta(policyContext verifiedNewAPIPolicyContext, inp
 }
 
 func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model string, body []byte, attempts ...upstreamCyberPolicyAttempt) (string, bool) {
+	if isUpstreamPromptSafetyRefusal(body) && !isExplicitUpstreamCyberPolicy(body) {
+		h.recordUpstreamPromptSafety(c, endpoint, model, body)
+		return "", false
+	}
 	errorCode := upstreamCyberPolicyCode(responseFailedErrorBody(body))
 	if errorCode == "" {
 		return "", false
@@ -588,6 +592,10 @@ func (h *Handler) logUpstreamCyberPolicy(c *gin.Context, endpoint string, model 
 // decision in that frame. Callers use the boolean to avoid logging the same
 // terminal event again during stream cleanup.
 func (h *Handler) attachUpstreamCyberPolicyStreamDecision(c *gin.Context, endpoint string, model string, body []byte, attempt upstreamCyberPolicyAttempt) ([]byte, string, bool) {
+	if isUpstreamPromptSafetyRefusal(body) && !isExplicitUpstreamCyberPolicy(body) {
+		h.recordUpstreamPromptSafety(c, endpoint, model, body)
+		return attachUpstreamPromptSafetyDetails(c, body), "", true
+	}
 	if !isExplicitUpstreamCyberPolicy(body) {
 		return body, "", false
 	}

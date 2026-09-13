@@ -11,7 +11,7 @@ import ChannelLogo from '../components/ChannelLogo'
 import CompactionBadges from '../components/CompactionBadges'
 import UsageRequestDiagnostics, { UsageRequestTypeButton } from '../components/UsageRequestDiagnostics'
 import { usageRequestTypes, usageRequestTypeLabelKey } from '../lib/usageRequestDiagnostics'
-import { confirmedUsageLogDownload, saveUsageLogExport } from '../lib/usageLogExport'
+import { confirmedUsageLogDownload, downloadUsageLogPages, saveUsageLogExport } from '../lib/usageLogExport'
 import ModelLogo from '../components/ModelLogo'
 import Modal from '../components/Modal'
 import ColumnSettingsMenu from '../components/ColumnSettingsMenu'
@@ -1776,6 +1776,7 @@ export default function Usage() {
   const [pageSize, setPageSize] = usePersistedPageSize('usage_logs', 20, DEFAULT_PAGE_SIZE_OPTIONS)
   const [clearing, setClearing] = useState(false)
   const [exporting, setExporting] = useState<'filtered' | 'all' | null>(null)
+  const [exportProgress, setExportProgress] = useState({ records: 0, bytes: 0, parts: 0 })
   const exportController = useRef<AbortController | null>(null)
   useEffect(() => () => exportController.current?.abort(), [])
   const [timeRange, setTimeRange] = useState<UsageTimeRangeKey>(getInitialUsageRange)
@@ -1890,6 +1891,8 @@ export default function Usage() {
     const controller = new AbortController()
     exportController.current = controller
     setExporting(scope)
+    setExportProgress({ records: 0, bytes: 0, parts: 0 })
+    let savedParts = 0
     const params = scope === 'filtered' ? buildLogFilterParams() : undefined
     try {
       const saved = await confirmedUsageLogDownload(
@@ -1902,19 +1905,28 @@ export default function Usage() {
                 <p className="break-all text-xs text-muted-foreground">{params.start} — {params.end}</p>
               )}
               <p className="text-sm text-amber-700 dark:text-amber-300">{t('usage.exportPrivacy')}</p>
+              <p className="text-sm text-muted-foreground">{t('usage.exportPagedHint')}</p>
             </div>
           ),
           confirmText: t('usage.exportConfirm'),
           tone: 'warning',
         }),
-        () => api.downloadUsageLogs(scope, params, controller.signal),
-        (blob) => saveUsageLogExport(blob, scope),
+        () => downloadUsageLogPages(
+          (cursor, signal) => api.getUsageLogExportPage(scope, params, cursor, signal),
+          (blob, part) => { saveUsageLogExport(blob, scope, part); savedParts = part },
+          controller.signal,
+          setExportProgress,
+        ),
+        () => {},
       )
       if (saved) showToast(t('usage.exportSuccess'))
     } catch (error) {
       if (!controller.signal.aborted) {
-        showToast(t('usage.exportFailed', { error: error instanceof Error ? error.message : String(error) }), 'error')
+        const message = error instanceof Error ? error.message : String(error)
+        const errorKey = ({ usage_export_network: 'usage.exportNetworkError', usage_export_invalid_page: 'usage.exportInvalidPage', usage_export_changed: 'usage.exportChanged' } as Record<string, string>)[message]
+        showToast(t('usage.exportFailed', { error: errorKey ? t(errorKey) : message }), 'error')
       }
+      if (savedParts > 0) showToast(t('usage.exportPartial', { count: savedParts }), 'error')
     } finally {
       exportController.current = null
       setExporting(null)
@@ -2341,6 +2353,7 @@ export default function Usage() {
                 {exporting !== null && (
                   <Button type="button" variant="ghost" size="sm" onClick={() => exportController.current?.abort()}>
                     {t('usage.exportCancel')}
+                    <span className="ml-2 text-xs">{t('usage.exportProgress', { count: exportProgress.records, mb: (exportProgress.bytes / 1048576).toFixed(1), parts: exportProgress.parts })}</span>
                   </Button>
                 )}
                 <Button

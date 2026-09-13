@@ -62,7 +62,7 @@ func continuousRetryHTTPSelected(policy database.ContinuousRetryPolicy, status i
 	// 明确的上游 CYB 是请求级安全终态；即使开启 catch-all 也不能换号重放。
 	// An explicit upstream CYB is a request-level safety terminal and must not
 	// rotate accounts even when catch-all is enabled.
-	if isExplicitUpstreamCyberPolicy(body) {
+	if isHardStopUpstreamPolicy(body) {
 		return false
 	}
 	if isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures() {
@@ -103,7 +103,7 @@ func continuousRetryLimitForRequestError(err error, generalLimit int, policies .
 	if isContinuousRetryLocalFailure(err) {
 		return generalLimit
 	}
-	if isExplicitUpstreamCyberPolicyError(err) {
+	if isHardStopUpstreamPolicyError(err) {
 		return generalLimit
 	}
 	if status, body, ok := continuousRetryHTTPErrorDetails(err); ok {
@@ -166,7 +166,7 @@ func continuousRetryRequestErrorSelected(policy database.ContinuousRetryPolicy, 
 	if errors.Is(err, errContinuousRetryDeadlineExceeded) || isContinuousRetryLocalFailure(err) {
 		return false
 	}
-	if isExplicitUpstreamCyberPolicyError(err) {
+	if isHardStopUpstreamPolicyError(err) {
 		return false
 	}
 	status, body, ok := continuousRetryHTTPErrorDetails(err)
@@ -196,7 +196,7 @@ func continuousRetryStreamSelected(outcome streamOutcome, payload []byte, eventT
 	if !isActualUpstreamStreamFailure(outcome, eventType) {
 		return false
 	}
-	if strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") || isExplicitUpstreamCyberPolicy(payload) || isExplicitUpstreamCyberPolicy(outcome.failurePayload) {
+	if strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") || isHardStopUpstreamPolicy(payload) || isHardStopUpstreamPolicy(outcome.failurePayload) {
 		return false
 	}
 	if isExplicitUpstreamSafetyPolicy(payload) && !policy.CatchesAllUpstreamFailures() {
@@ -298,7 +298,7 @@ func continuousRetryStreamFailureSelected(outcome streamOutcome, payload []byte,
 	if outcome.terminalLocal || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "continuous_retry_timeout") {
 		return false
 	}
-	if isExplicitUpstreamCyberPolicy(payload) || isExplicitUpstreamCyberPolicy(outcome.failurePayload) || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") {
+	if isHardStopUpstreamPolicy(payload) || isHardStopUpstreamPolicy(outcome.failurePayload) || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") {
 		return false
 	}
 	if codexCapacityErrorForClient(payload) != nil || codexCapacityErrorForClient(outcome.failurePayload) != nil {

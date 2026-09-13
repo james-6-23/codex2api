@@ -80,9 +80,13 @@ func (fingerprint *CodexFingerprint) prepareAccountTurnIdentity(ctx context.Cont
 		}
 		turnMapping := *mapping
 		turnMapping.epoch = turnEpoch.Segment
-		outbound := original[:len(original)-9] + turnMapping.digest("turn", original)[:9]
-		if outbound == original {
-			return nil, codexAccountIdentityError("出站轮次标识发生冲突，已停止请求，请联系管理员。")
+		turnMapping.mode = "account-suffix-v1"
+		if turnEpoch.MappingVersion == database.CodexIdentityMappingUUIDv7 {
+			turnMapping.mode = turnEpoch.MappingVersion
+		}
+		outbound, err := turnMapping.mapUUID(ctx, store, "turn", original)
+		if err != nil {
+			return nil, err
 		}
 		mapping.turnAliases[original] = outbound
 		fields := make([]string, 0, 2)
@@ -92,7 +96,7 @@ func (fingerprint *CodexFingerprint) prepareAccountTurnIdentity(ctx context.Cont
 		if input.Root {
 			fields = append(fields, "root_turn_id")
 		}
-		diagnostic.Changes = append(diagnostic.Changes, codexAccountIdentityChange{Original: original, Outbound: outbound, Fields: fields})
+		diagnostic.Changes = append(diagnostic.Changes, turnMapping.identityChange(original, outbound, fields...))
 		plan.claims = append(plan.claims, database.CodexIdentityAliasClaim{
 			AliasKey:  codexIdentityDigest("codex-account-alias-v1", outbound),
 			SourceKey: codexIdentityDigest("codex-account-turn-source-v1", mapping.owner, mapping.account, turnMapping.epoch, original),
