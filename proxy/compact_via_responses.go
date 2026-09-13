@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -142,10 +143,14 @@ func isCanonicalCompactionTrigger(item gjson.Result) bool {
 // response.output_item.done（含 compaction 项）补齐 output。上游以 response.failed
 // 终止时原样返回该事件负载，由调用方按上游错误处理；流在终止事件前结束视为读错误。
 func collectCompactResponsesSSE(body io.Reader) (responseJSON []byte, failedPayload []byte, err error) {
+	return collectCompactResponsesSSEWithContinuousRetryKeepalive(context.Background(), body)
+}
+
+func collectCompactResponsesSSEWithContinuousRetryKeepalive(ctx context.Context, body io.Reader) (responseJSON []byte, failedPayload []byte, err error) {
 	outputItems := make([]json.RawMessage, 0, 2)
 	seenOutputItems := make(map[string]struct{})
 	var completed []byte
-	readErr := ReadSSEStream(body, func(data []byte) bool {
+	readErr := readSSEStreamWithContinuousRetryKeepalive(ctx, body, func(_ string, data []byte) bool {
 		if item, ok := extractResponseOutputItemDone(data, seenOutputItems); ok {
 			outputItems = append(outputItems, item)
 		}

@@ -11,12 +11,11 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
-	"github.com/gorilla/websocket"
 )
 
-const continuousRetryKeepaliveComment = ": keepalive\n\n"
+const continuousRetryKeepaliveComment = downstreamSSEKeepaliveComment
 
-var continuousRetryKeepaliveInterval = 15 * time.Second
+var continuousRetryKeepaliveInterval = downstreamSSEKeepaliveInterval
 
 type continuousRetryKeepalive interface {
 	Activate()
@@ -43,12 +42,29 @@ func (k *requestContinuousRetryKeepalive) Activate() {
 	}
 }
 
+func (k *requestContinuousRetryKeepalive) Deactivate() {
+	if k != nil {
+		k.active = false
+	}
+}
+
+func (k *requestContinuousRetryKeepalive) SetActive(active bool) {
+	if active {
+		k.Activate()
+		return
+	}
+	k.Deactivate()
+}
+
 func (k *requestContinuousRetryKeepalive) Active() bool {
 	return k != nil && k.active
 }
 
 func (k *requestContinuousRetryKeepalive) Keepalive() error {
 	if k == nil || !k.active || k.write == nil {
+		return nil
+	}
+	if continuousRetryKeepaliveInterval <= 0 {
 		return nil
 	}
 	if !k.last.IsZero() && time.Since(k.last) < continuousRetryKeepaliveInterval {
@@ -65,23 +81,60 @@ func (k *requestContinuousRetryKeepalive) Keepalive() error {
 }
 
 func installContinuousRetrySSEKeepalive(c *gin.Context, stream bool, contentType string) func() {
-	if c == nil || c.Request == nil || c.Writer == nil || !stream {
+	return installContinuousRetrySSEKeepaliveWithOptions(c, stream, continuousRetrySSEKeepaliveOptions{
+		contentType: contentType,
+		payload:     continuousRetryKeepaliveComment,
+	})
+}
+
+// installContinuousRetryMessagesKeepalive 使用 Messages 协议要求的 ping 事件。
+func installContinuousRetryMessagesKeepalive(c *gin.Context, stream bool) func() {
+	return installContinuousRetrySSEKeepaliveWithOptions(c, stream, continuousRetrySSEKeepaliveOptions{
+		contentType: "text/event-stream; charset=utf-8",
+		payload:     downstreamMessagesKeepaliveEvent,
+	})
+}
+
+type continuousRetrySSEKeepaliveOptions struct {
+	contentType string
+	payload     string
+}
+
+func installContinuousRetrySSEKeepaliveWithOptions(c *gin.Context, stream bool, options continuousRetrySSEKeepaliveOptions) func() {
+	if !stream {
+		return installContinuousRetryHTTPInformationalKeepalive(c)
+	}
+	if c == nil || c.Request == nil || c.Writer == nil {
 		return func() {}
 	}
-	if _, ok := c.Writer.(http.Flusher); !ok {
+	responseWriter, ok := c.Writer.(http.ResponseWriter)
+	if !ok {
 		return func() {}
 	}
-	if contentType == "" {
-		contentType = "text/event-stream"
+	if _, ok := responseWriter.(http.Flusher); !ok {
+		return func() {}
 	}
+	if options.contentType == "" {
+		options.contentType = "text/event-stream"
+	}
+	if options.payload == "" {
+		options.payload = continuousRetryKeepaliveComment
+	}
+	informationalWriter, supportsInformational := unwrapHTTPResponseWriter(responseWriter)
 	original := c.Request
 	requestCtx, cancel := context.WithCancelCause(original.Context())
 	keepalive := &requestContinuousRetryKeepalive{write: func() error {
-		setSSEStreamHeaders(c, contentType)
-		if _, err := c.Writer.WriteString(continuousRetryKeepaliveComment); err != nil {
+		setSSEStreamHeaders(c, options.contentType)
+		if !c.Writer.Written() {
+			if supportsInformational {
+				informationalWriter.WriteHeader(http.StatusProcessing)
+			}
+			return nil
+		}
+		if _, err := io.WriteString(responseWriter, options.payload); err != nil {
 			return err
 		}
-		if flusher, ok := c.Writer.(http.Flusher); ok {
+		if flusher, ok := responseWriter.(http.Flusher); ok {
 			flusher.Flush()
 		}
 		return nil
@@ -91,6 +144,24 @@ func installContinuousRetrySSEKeepalive(c *gin.Context, stream bool, contentType
 		cancel(nil)
 		c.Request = original
 	}
+}
+
+func unwrapHTTPResponseWriter(writer http.ResponseWriter) (http.ResponseWriter, bool) {
+	if writer == nil {
+		return nil, false
+	}
+	for depth := 0; depth < 8; depth++ {
+		unwrapper, ok := writer.(interface{ Unwrap() http.ResponseWriter })
+		if !ok {
+			return writer, depth > 0
+		}
+		next := unwrapper.Unwrap()
+		if next == nil {
+			return nil, false
+		}
+		writer = next
+	}
+	return nil, false
 }
 
 // installContinuousRetryHTTPInformationalKeepalive installs a non-committing
@@ -107,25 +178,8 @@ func installContinuousRetryHTTPInformationalKeepalive(c *gin.Context) func() {
 	if !ok {
 		return func() {}
 	}
-	// Gin exposes one Unwrap layer, but middleware may add another. Resolve a
-	// short chain while refusing to guess when the final writer is unknown.
-	unwrapped := false
-	for depth := 0; depth < 8; depth++ {
-		unwrapper, canUnwrap := writer.(interface{ Unwrap() http.ResponseWriter })
-		if !canUnwrap {
-			break
-		}
-		next := unwrapper.Unwrap()
-		if next == nil {
-			return func() {}
-		}
-		writer = next
-		unwrapped = true
-	}
+	writer, unwrapped := unwrapHTTPResponseWriter(writer)
 	if !unwrapped {
-		return func() {}
-	}
-	if _, stillWrapped := writer.(interface{ Unwrap() http.ResponseWriter }); stillWrapped {
 		return func() {}
 	}
 	original := c.Request
@@ -139,22 +193,6 @@ func installContinuousRetryHTTPInformationalKeepalive(c *gin.Context) func() {
 		},
 		cancel: cancel,
 	}
-	c.Request = original.WithContext(context.WithValue(requestCtx, continuousRetryKeepaliveContextKey{}, continuousRetryKeepalive(keepalive)))
-	return func() {
-		cancel(nil)
-		c.Request = original
-	}
-}
-
-func installContinuousRetryWSKeepalive(c *gin.Context, conn *websocket.Conn) func() {
-	if c == nil || c.Request == nil || conn == nil {
-		return func() {}
-	}
-	original := c.Request
-	requestCtx, cancel := context.WithCancelCause(original.Context())
-	keepalive := &requestContinuousRetryKeepalive{write: func() error {
-		return conn.WriteControl(websocket.PingMessage, []byte("continuous-retry"), time.Now().Add(responsesWSWriteTimeout))
-	}, cancel: cancel}
 	c.Request = original.WithContext(context.WithValue(requestCtx, continuousRetryKeepaliveContextKey{}, continuousRetryKeepalive(keepalive)))
 	return func() {
 		cancel(nil)

@@ -7,15 +7,28 @@ import (
 )
 
 const (
-	// 普通 Responses SSE 在上游长时间只思考、不产出可转发事件时，也要持续
-	// 刷新下游链路的 idle timer。10 秒低于常见的 30/60 秒反代超时，同时
-	// 每分钟仅增加几十字节；SSE 注释不会被 Codex 客户端当作模型输出。
-	defaultDownstreamSSEKeepaliveInterval = 10 * time.Second
-	downstreamSSEKeepaliveComment         = ": keepalive\n\n"
+	// 普通 SSE 在上游长时间只思考、不产出可转发事件时，也要持续刷新下游
+	// 链路的 idle timer。SSE 注释不会被客户端当作模型输出。
+	defaultDownstreamHTTPKeepaliveInterval = 30 * time.Second
+	defaultDownstreamSSEKeepaliveInterval  = defaultDownstreamHTTPKeepaliveInterval
+	downstreamSSEKeepaliveComment          = ": keepalive\n\n"
+	downstreamMessagesKeepaliveEvent       = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
 )
 
-// 变量形式只为处理器级测试缩短等待；生产运行保持默认 10 秒。
-var downstreamSSEKeepaliveInterval = defaultDownstreamSSEKeepaliveInterval
+// 变量形式只为处理器级测试缩短等待；生产运行从环境变量读取。
+var downstreamSSEKeepaliveInterval = downstreamSSEKeepaliveIntervalFromEnv()
+
+func downstreamSSEKeepaliveIntervalFromEnv() time.Duration {
+	return durationFromEnv("DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL", defaultDownstreamSSEKeepaliveInterval)
+}
+
+// ConfigureDownstreamKeepaliveFromEnv 在 config.Load 读取 .env 后刷新保活配置。
+// 进程环境变量仍会在包初始化时生效。
+func ConfigureDownstreamKeepaliveFromEnv() {
+	downstreamSSEKeepaliveInterval = downstreamSSEKeepaliveIntervalFromEnv()
+	continuousRetryKeepaliveInterval = downstreamSSEKeepaliveInterval
+	downstreamWSKeepaliveInterval = downstreamWSKeepaliveIntervalFromEnv()
+}
 
 // startDownstreamSSEKeepalive 周期执行 writeKeepalive，直到请求取消、写失败
 // 或调用 stop。stop 会等待 goroutine 完整退出，保证流收尾后不再并发写入。

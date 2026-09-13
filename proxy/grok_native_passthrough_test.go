@@ -232,22 +232,22 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *
 	}
 }
 
-func TestSendGrokNativeHTTPErrorAfterKeepaliveUsesProtocolEvent(t *testing.T) {
+func TestSendGrokNativeHTTPErrorAfterPrecommitKeepalivePreservesHTTPError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
-		name       string
-		protocol   GrokProtocol
-		path       string
-		wantMarker string
+		name     string
+		protocol GrokProtocol
+		path     string
 	}{
-		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses", wantMarker: `"type":"response.failed"`},
-		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions", wantMarker: `"type":"upstream_error"`},
-		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages", wantMarker: "event: error\n"},
+		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses"},
+		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions"},
+		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			ctx, _ := gin.CreateTestContext(recorder)
+			writer := &informationalRecordingWriter{ResponseRecorder: recorder}
+			ctx, _ := gin.CreateTestContext(writer)
 			ctx.Request = httptest.NewRequest(http.MethodPost, tc.path, nil)
 			stop := installContinuousRetrySSEKeepalive(ctx, true, "text/event-stream")
 			defer stop()
@@ -264,8 +264,11 @@ func TestSendGrokNativeHTTPErrorAfterKeepaliveUsesProtocolEvent(t *testing.T) {
 				failureMessage: "upstream busy",
 			})
 
-			if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), tc.wantMarker) {
-				t.Fatalf("committed protocol error = status %d body %q", recorder.Code, recorder.Body.String())
+			if len(writer.informational) != 1 || writer.informational[0] != http.StatusProcessing {
+				t.Fatalf("informational statuses = %v, want [%d]", writer.informational, http.StatusProcessing)
+			}
+			if recorder.Code != http.StatusServiceUnavailable || !strings.Contains(recorder.Body.String(), "upstream busy") {
+				t.Fatalf("final HTTP error = status %d body %q", recorder.Code, recorder.Body.String())
 			}
 		})
 	}

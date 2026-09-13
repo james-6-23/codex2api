@@ -82,7 +82,6 @@ const (
 	MaxImageEditInputCount = 16
 
 	imageStreamConnectedComment = ": connected\n\n"
-	imageStreamKeepaliveComment = ": keepalive\n\n"
 
 	// imageCloudURLTTL 控制 response_format=url 时返回的预签名云直链有效期。
 	imageCloudURLTTL = time.Hour
@@ -90,8 +89,6 @@ const (
 	imageOAuthUnavailableCooldown = 30 * time.Minute
 	imageModelTextMaxBytes        = 600
 )
-
-var imageStreamKeepaliveInterval = 15 * time.Second
 
 // imagesMainModelFallbacks 是驱动主模型被上游按"不支持"拒绝时的候选序列,
 // 按 free/plus/pro 三档 manifest 的交集从便宜到贵排列。
@@ -1569,9 +1566,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 	defer stopRetryDeadline()
 	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, stream, "text/event-stream")
 	defer stopRetryKeepalive()
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
-		activateContinuousRetryKeepalive(c.Request.Context())
-	}
+	activateContinuousRetryKeepalive(c.Request.Context())
 	maxRetries := h.getMaxRetries()
 	maxRateLimitRetries := h.getMaxRateLimitRetries()
 	generalRetries := 0
@@ -1723,7 +1718,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -2656,7 +2651,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 		modelText      strings.Builder
 	)
 	requireTerminal := len(requireSuccessfulTerminal) > 0 && requireSuccessfulTerminal[0]
-	err := ReadSSEStreamWithEvent(body, func(event string, data []byte) bool {
+	err := readSSEStreamWithContinuousRetryKeepalive(ctx, body, func(event string, data []byte) bool {
 		collectImageModelText(&modelText, data)
 		if meta, eventCreatedAt, ok := extractImageMetaFromLifecycleEvent(data); ok {
 			mergeImageMeta(&firstMeta, meta)
@@ -2856,12 +2851,7 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 	if err := writeKeepalive(imageStreamConnectedComment); err != nil {
 		return nil, 0, 0, imageUsageLogInfo{}, false, getReadErr()
 	}
-	stopKeepalive := startImageStreamKeepalive(c.Request.Context(), imageStreamKeepaliveInterval, func() bool {
-		return writeKeepalive(imageStreamKeepaliveComment) == nil
-	})
-	defer stopKeepalive()
-
-	err := ReadSSEStreamWithEvent(body, func(event string, data []byte) bool {
+	err := readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), body, func(event string, data []byte) bool {
 		if getReadErr() != nil {
 			return false
 		}
@@ -2962,7 +2952,6 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		}
 		return true
 	})
-	stopKeepalive()
 	writeMu.Lock()
 	if finalizeErr := streamWriter.Finalize(); finalizeErr != nil && readErr == nil {
 		if streamAttempt != nil {
@@ -3014,41 +3003,6 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 	}
 	writeMu.Unlock()
 	return usage, imageCount, firstTokenMs, imageLogInfo, wroteImageOutput, getReadErr()
-}
-
-func startImageStreamKeepalive(ctx context.Context, interval time.Duration, writeKeepalive func() bool) func() {
-	if interval <= 0 || writeKeepalive == nil {
-		return func() {}
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	done := make(chan struct{})
-	exited := make(chan struct{})
-	var stopOnce sync.Once
-	go func() {
-		defer close(exited)
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				if !writeKeepalive() {
-					return
-				}
-			case <-ctx.Done():
-				return
-			case <-done:
-				return
-			}
-		}
-	}()
-	return func() {
-		stopOnce.Do(func() {
-			close(done)
-		})
-		<-exited
-	}
 }
 
 func imageGenerationFailureError(payload []byte) error {

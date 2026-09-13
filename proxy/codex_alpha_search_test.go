@@ -2,10 +2,14 @@ package proxy
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
+	"net/textproto"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
@@ -163,5 +167,65 @@ func TestCodexAlphaSearchHandler_RelayOnlyPoolFastFails(t *testing.T) {
 
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503; body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestCodexAlphaSearchHandler_KeepsJSONResponseAliveWhileReadingBody(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previousInterval := continuousRetryKeepaliveInterval
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
+	t.Cleanup(func() { continuousRetryKeepaliveInterval = previousInterval })
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		time.Sleep(30 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"output":[]}`))
+	}))
+	defer upstream.Close()
+	codexAlphaSearchURLForTest = upstream.URL
+	defer func() { codexAlphaSearchURLForTest = "" }()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-search", PlanType: "plus"})
+	handler := NewHandler(store, nil, nil, nil)
+	engine := gin.New()
+	engine.POST("/v1/alpha/search", handler.CodexAlphaSearchHandler)
+	server := httptest.NewServer(engine)
+	defer server.Close()
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/v1/alpha/search", strings.NewReader(`{"model":"gpt-5.6-sol"}`))
+	if err != nil {
+		t.Fatalf("build request: %v", err)
+	}
+	informational := make(chan int, 1)
+	trace := &httptrace.ClientTrace{Got1xxResponse: func(code int, _ textproto.MIMEHeader) error {
+		select {
+		case informational <- code:
+		default:
+		}
+		return nil
+	}}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), trace))
+	response, err := server.Client().Do(request)
+	if err != nil {
+		t.Fatalf("request: %v", err)
+	}
+	defer response.Body.Close()
+	select {
+	case code := <-informational:
+		if code != http.StatusProcessing {
+			t.Fatalf("informational status = %d, want %d", code, http.StatusProcessing)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("alpha search did not emit HTTP 102 while reading response body")
+	}
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if response.StatusCode != http.StatusOK || string(body) != `{"output":[]}` {
+		t.Fatalf("response = %d %q, want 200 JSON", response.StatusCode, body)
 	}
 }

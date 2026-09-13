@@ -50,7 +50,7 @@ func newAnthropicStreamFailureTestHandler(t *testing.T, serve func(call int32, w
 func invokeAnthropicMessagesStream(t *testing.T, handler *Handler) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()
-	ctx, _ := gin.CreateTestContext(recorder)
+	ctx, _ := gin.CreateTestContext(&informationalRecordingWriter{ResponseRecorder: recorder})
 	body := `{"model":"claude-opus-4-6","max_tokens":128,"stream":true,"messages":[{"role":"user","content":"hello"}]}`
 	ctx.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(body))
 	ctx.Request.Header.Set("Content-Type", "application/json")
@@ -190,14 +190,19 @@ func TestMessagesResponseFailedCyberPolicyEntersUnifiedAuditAndCandidateQueue(t 
 // 能在上游几十毫秒的静默里观察到心跳；测试结束恢复默认值。
 func shortenDownstreamSSEKeepalive(t *testing.T) {
 	t.Helper()
-	previousInterval := downstreamSSEKeepaliveInterval
-	t.Cleanup(func() { downstreamSSEKeepaliveInterval = previousInterval })
+	previousSSEInterval := downstreamSSEKeepaliveInterval
+	previousRetryInterval := continuousRetryKeepaliveInterval
+	t.Cleanup(func() {
+		downstreamSSEKeepaliveInterval = previousSSEInterval
+		continuousRetryKeepaliveInterval = previousRetryInterval
+	})
 	downstreamSSEKeepaliveInterval = 5 * time.Millisecond
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
 }
 
 // TestMessagesStreamKeepsDownstreamAliveDuringUpstreamSilence 验证 issue #623 修复：
 // 首个内容帧之后上游静默（长推理/等工具边界）期间，/v1/messages 翻译流要像
-// /v1/responses 一样定期写 SSE 注释刷新下游 idle timer，且注释不能插进事件中间。
+// Anthropic 原生协议一样定期写 ping 刷新下游 idle timer，且事件不能插入帧中间。
 func TestMessagesStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 	shortenDownstreamSSEKeepalive(t)
 	handler, calls := newAnthropicStreamFailureTestHandler(t, func(call int32, w http.ResponseWriter) {
@@ -220,10 +225,15 @@ func TestMessagesStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, body)
 	}
 	firstContent := strings.Index(body, "started")
-	keepalive := strings.Index(body, downstreamSSEKeepaliveComment)
 	resumed := strings.Index(body, "-resumed")
+	keepalive := -1
+	if firstContent >= 0 {
+		if offset := strings.Index(body[firstContent:], downstreamMessagesKeepaliveEvent); offset >= 0 {
+			keepalive = firstContent + offset
+		}
+	}
 	if firstContent < 0 || keepalive < 0 || resumed < 0 {
-		t.Fatalf("stream must carry first content, a keepalive comment and the resumed content; body=%q", body)
+		t.Fatalf("stream must carry first content, a ping and the resumed content; body=%q", body)
 	}
 	if keepalive < firstContent || keepalive > resumed {
 		t.Fatalf("keepalive must land inside the upstream silence window (after %d, before %d), got %d; body=%q", firstContent, resumed, keepalive, body)
@@ -231,10 +241,10 @@ func TestMessagesStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 	if !strings.Contains(body, "message_stop") {
 		t.Fatalf("stream should still end cleanly; body=%q", body)
 	}
-	// 注释必须独占一个 SSE 帧（以空行分隔），不能和 event/data 行混在同一帧里。
+	// ping 必须独占一个 SSE 帧（以空行分隔），不能和 event/data 行混在同一帧里。
 	for frame := range strings.SplitSeq(body, "\n\n") {
-		if strings.Contains(frame, ": keepalive") && strings.TrimSpace(frame) != ": keepalive" {
-			t.Fatalf("keepalive comment interleaved with an SSE frame: %q", frame)
+		if strings.Contains(frame, "event: ping") && strings.TrimSpace(frame) != strings.TrimSpace(downstreamMessagesKeepaliveEvent) {
+			t.Fatalf("ping interleaved with an SSE frame: %q", frame)
 		}
 	}
 	if got := calls.Load(); got != 1 {
@@ -245,13 +255,10 @@ func TestMessagesStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 // TestMessagesStreamPreContentBreakRetriesTransparently 验证 issue #435 修复：
 // 首个真实内容帧之前的结构帧（output_item.added 等）只缓冲不落盘，
 // 此窗口内上游断流仍可静默换号/重试，下游最终拿到一条完整干净的成功响应。
-// 第一轮静默时间刻意超过下游保活间隔（issue #623）：首字前绝不能写注释，
-// 否则 200 提前落盘，透明重试窗口被心跳自己关掉。
 func TestMessagesStreamPreContentBreakRetriesTransparently(t *testing.T) {
-	shortenDownstreamSSEKeepalive(t)
 	handler, calls := newAnthropicStreamFailureTestHandler(t, func(call int32, w http.ResponseWriter) {
 		if call == 1 {
-			// 第一轮：只发结构帧、静默超过心跳间隔后断流（正文永远没来）
+			// 第一轮：只发结构帧后断流（正文永远没来）。
 			writeCodexSSE(w,
 				`{"type":"response.created","response":{"id":"resp_retry_1"}}`,
 				`{"type":"response.output_item.added","item":{"type":"reasoning"}}`,
@@ -284,10 +291,6 @@ func TestMessagesStreamPreContentBreakRetriesTransparently(t *testing.T) {
 	}
 	if !strings.Contains(body, "message_stop") {
 		t.Fatalf("successful retry should end with message_stop; body=%q", body)
-	}
-	// 第一轮静默期间心跳 ticker 已多次触发，但首字前不得写出任何字节。
-	if keepalive := strings.Index(body, downstreamSSEKeepaliveComment); keepalive >= 0 && keepalive < strings.Index(body, "retried") {
-		t.Fatalf("keepalive comment must not be written before the first real content; body=%q", body)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("upstream calls = %d, want 2 (break + transparent retry)", got)
