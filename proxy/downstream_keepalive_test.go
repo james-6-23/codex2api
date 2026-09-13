@@ -7,6 +7,38 @@ import (
 	"time"
 )
 
+// TestDownstreamSSEKeepaliveIntervalFromEnv 验证 HTTP/SSE 保活周期的默认、覆盖和禁用值。
+func TestDownstreamSSEKeepaliveIntervalFromEnv(t *testing.T) {
+	const fallback = defaultDownstreamSSEKeepaliveInterval
+	tests := []struct {
+		name string
+		raw  string
+		want time.Duration
+	}{
+		{name: "default", want: fallback},
+		{name: "custom", raw: "45s", want: 45 * time.Second},
+		{name: "disabled", raw: "0", want: 0},
+		{name: "invalid", raw: "later", want: fallback},
+		{name: "negative", raw: "-1s", want: fallback},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL", test.raw)
+			if got := downstreamSSEKeepaliveIntervalFromEnv(); got != test.want {
+				t.Fatalf("interval = %s, want %s", got, test.want)
+			}
+		})
+	}
+}
+
+// TestDownstreamMessagesKeepaliveEvent 验证 Messages 使用兼容协议的 ping 事件载荷。
+func TestDownstreamMessagesKeepaliveEvent(t *testing.T) {
+	const want = "event: ping\ndata: {\"type\":\"ping\"}\n\n"
+	if downstreamMessagesKeepaliveEvent != want {
+		t.Fatalf("Messages keepalive = %q, want %q", downstreamMessagesKeepaliveEvent, want)
+	}
+}
+
 func TestDownstreamSSEKeepaliveStopsAndJoins(t *testing.T) {
 	var writes atomic.Int32
 	firstWrite := make(chan struct{}, 1)

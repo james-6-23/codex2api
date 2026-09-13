@@ -27,12 +27,7 @@ const (
 	reasoningTruncationStep    = 518
 	continueThinkingMarkerText = "Continue thinking..."
 
-	// 隐藏续想轮的下游保活间隔与内容。隐藏轮期间(开轮握手、续想轮无可转发
-	// reasoning)下游可能长时间收不到任何字节,反代的空闲读超时(常见 60~125s)
-	// 会拦腰掐断连接并诱发客户端整轮重试循环(issue #458)。SSE 注释行是标准
-	// 协议内容,客户端解析器一律忽略,但能刷新链路上每一跳的空闲计时器。
-	continueKeepaliveInterval = 15 * time.Second
-	continueKeepaliveComment  = ": keepalive\n\n"
+	continueKeepaliveComment = ": keepalive\n\n"
 )
 
 // isReasoningTruncationTokens 判断 reasoning token 数是否命中截断指纹（518*n - 2）。
@@ -112,12 +107,12 @@ type continueFold struct {
 	openRound  func(body []byte) (*http.Response, error) // 用同一账号/通道开续想轮
 	clientGone func() bool                               // 客户端是否已断开
 
-	// keepalive 隐藏轮期间向下游写 SSE 注释保活,返回 false 表示下游已死、停止
+	// keepalive 折叠期间向下游写 SSE 注释保活,返回 false 表示下游已死、停止
 	// 保活(折叠本身继续,由 clientGone 语义收尾)。nil 关闭保活。回调运行在独立
 	// goroutine,与 forward 并发,由调用方负责写路径互斥;首个真实字节写出前
 	// 是否跳过也由回调自行判断(提前写会提交 200 header)。
 	keepalive func() bool
-	// keepaliveInterval 保活间隔;<=0 用 continueKeepaliveInterval。测试用。
+	// keepaliveInterval 保活间隔;<=0 禁用。测试用。
 	keepaliveInterval time.Duration
 }
 
@@ -484,23 +479,18 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 	st := &foldState{}
 	var result continueFoldResult
 
-	// 保活循环只在确认进入隐藏续想后启动(首轮命中指纹、决定续想的那一刻),
-	// 单纯透传的首轮不启动——正常路径零变化。停止时同步等 goroutine 退出,
+	// 保活覆盖整个折叠周期，包括可能长时间无输出的首轮。停止时同步等 goroutine 退出,
 	// 保证 fold 返回后不会再有保活回调与收尾 flush 并发。
 	var keepaliveStop, keepaliveDone chan struct{}
 	startKeepalive := func() {
-		if f.keepalive == nil || keepaliveStop != nil {
+		if f.keepalive == nil || f.keepaliveInterval <= 0 || keepaliveStop != nil {
 			return
-		}
-		interval := f.keepaliveInterval
-		if interval <= 0 {
-			interval = continueKeepaliveInterval
 		}
 		keepaliveStop = make(chan struct{})
 		keepaliveDone = make(chan struct{})
 		go func() {
 			defer close(keepaliveDone)
-			ticker := time.NewTicker(interval)
+			ticker := time.NewTicker(f.keepaliveInterval)
 			defer ticker.Stop()
 			for {
 				select {
@@ -514,6 +504,7 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 			}
 		}()
 	}
+	startKeepalive()
 	defer func() {
 		if keepaliveStop != nil {
 			close(keepaliveStop)
@@ -603,9 +594,6 @@ func runContinueThinkingFold(firstResp *http.Response, f *continueFold) continue
 			result.StopReason = stopReason
 			return result
 		}
-
-		// 续想确认:从现在起进入隐藏轮,启动下游保活(幂等,多轮只启一次)。
-		startKeepalive()
 
 		// 续想：本轮 reasoning 剥 id 后连同 marker 追加到回放尾巴。
 		for _, ritem := range outcome.roundReasoning {

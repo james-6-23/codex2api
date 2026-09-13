@@ -24,8 +24,22 @@ func sseBody(events ...string) io.ReadCloser {
 	return io.NopCloser(strings.NewReader(b.String()))
 }
 
+// sseResponse 构造包含给定事件的成功测试 SSE 响应。
 func sseResponse(events ...string) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Body: sseBody(events...)}
+}
+
+// delayedSSEResponse 返回在指定延迟后写入事件的测试 SSE 响应。
+func delayedSSEResponse(delay time.Duration, events ...string) *http.Response {
+	reader, writer := io.Pipe()
+	payload := sseBody(events...)
+	go func() {
+		defer writer.Close()
+		defer payload.Close()
+		time.Sleep(delay)
+		_, _ = io.Copy(writer, payload)
+	}()
+	return &http.Response{StatusCode: http.StatusOK, Body: reader}
 }
 
 func evCreated() string {
@@ -684,6 +698,8 @@ func cleanSecondRound() *http.Response {
 	)
 }
 
+// TestFoldKeepaliveFiresDuringHiddenRoundAndStopsAfterFold 验证隐藏续想轮等待期间会保活，
+// 且整个折叠结束后停止回调。
 func TestFoldKeepaliveFiresDuringHiddenRoundAndStopsAfterFold(t *testing.T) {
 	var counter atomic.Int32
 	f := keepaliveFold(t, &counter, func() bool { return true }, 80*time.Millisecond, cleanSecondRound())
@@ -704,26 +720,50 @@ func TestFoldKeepaliveFiresDuringHiddenRoundAndStopsAfterFold(t *testing.T) {
 	}
 }
 
-func TestFoldKeepaliveNotStartedOnCleanSingleRound(t *testing.T) {
+// TestFoldKeepaliveFiresDuringCleanFirstRoundAndStops 验证首轮静默期间会发送保活，
+// 且折叠结束后保活协程会停止。
+func TestFoldKeepaliveFiresDuringCleanFirstRoundAndStops(t *testing.T) {
 	var counter atomic.Int32
 	f := keepaliveFold(t, &counter, func() bool { return true }, 0, nil)
 	f.openRound = func([]byte) (*http.Response, error) {
 		t.Fatal("未命中指纹不应开续想轮")
 		return nil, nil
 	}
-
-	res := runContinueThinkingFold(sseResponse(
+	resp := delayedSSEResponse(30*time.Millisecond,
 		evCreated(),
 		evReasoningAdded(1, 0),
 		evReasoningDone(2, 0, "enc-a"),
 		evCompleted(3, 100, 600, 400), // 400 不命中指纹
+	)
+
+	res := runContinueThinkingFold(resp, f)
+	if res.StopReason != continueStopClean || res.RoundsRun != 1 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	after := counter.Load()
+	if after < 1 {
+		t.Fatalf("首轮延迟 30ms、间隔 10ms，保活至少应触发 1 次, got %d", after)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := counter.Load(); got != after {
+		t.Fatalf("fold 返回后保活仍在触发: %d -> %d", after, got)
+	}
+}
+
+// TestFoldKeepaliveDisabledAtZeroInterval 验证保活间隔为零时不会启动心跳。
+func TestFoldKeepaliveDisabledAtZeroInterval(t *testing.T) {
+	var counter atomic.Int32
+	f := keepaliveFold(t, &counter, func() bool { return true }, 0, nil)
+	f.keepaliveInterval = 0
+	res := runContinueThinkingFold(delayedSSEResponse(30*time.Millisecond,
+		evCreated(),
+		evCompleted(1, 100, 600, 400),
 	), f)
 	if res.StopReason != continueStopClean || res.RoundsRun != 1 {
 		t.Fatalf("unexpected result: %+v", res)
 	}
-	time.Sleep(30 * time.Millisecond)
 	if got := counter.Load(); got != 0 {
-		t.Fatalf("单轮干净结束不进隐藏轮,保活不应触发, got %d", got)
+		t.Fatalf("间隔为 0 时不应触发保活, got %d", got)
 	}
 }
 

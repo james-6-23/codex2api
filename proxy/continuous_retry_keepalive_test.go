@@ -21,6 +21,20 @@ type recordingContinuousRetryKeepalive struct {
 	err    error
 }
 
+type informationalRecordingWriter struct {
+	*httptest.ResponseRecorder
+	informational []int
+}
+
+// WriteHeader 记录信息响应，其他状态码交给 ResponseRecorder 处理。
+func (w *informationalRecordingWriter) WriteHeader(code int) {
+	if code >= http.StatusContinue && code < http.StatusOK {
+		w.informational = append(w.informational, code)
+		return
+	}
+	w.ResponseRecorder.WriteHeader(code)
+}
+
 func (k *recordingContinuousRetryKeepalive) Activate() { k.active = true }
 func (k *recordingContinuousRetryKeepalive) Active() bool {
 	return k.active
@@ -34,6 +48,7 @@ func contextWithContinuousRetryKeepalive(keepalive continuousRetryKeepalive) con
 	return context.WithValue(context.Background(), continuousRetryKeepaliveContextKey{}, keepalive)
 }
 
+// TestRequestContinuousRetryKeepaliveAccumulatesShortWaits 验证短等待共用同一心跳时间窗。
 func TestRequestContinuousRetryKeepaliveAccumulatesShortWaits(t *testing.T) {
 	previousInterval := continuousRetryKeepaliveInterval
 	continuousRetryKeepaliveInterval = time.Minute
@@ -61,6 +76,19 @@ func TestRequestContinuousRetryKeepaliveAccumulatesShortWaits(t *testing.T) {
 	}
 	if writes != 1 {
 		t.Fatalf("due heartbeat writes = %d, want 1", writes)
+	}
+}
+
+// TestSetContinuousRetryKeepaliveActive 验证请求级保活可以切换激活状态。
+func TestSetContinuousRetryKeepaliveActive(t *testing.T) {
+	keepalive := &requestContinuousRetryKeepalive{}
+	keepalive.SetActive(true)
+	if !keepalive.Active() {
+		t.Fatal("keepalive was not activated")
+	}
+	keepalive.SetActive(false)
+	if keepalive.Active() {
+		t.Fatal("keepalive was not deactivated")
 	}
 }
 
@@ -214,6 +242,30 @@ func TestExecuteHTTPWithContinuousRetryKeepaliveWhileWaitingForHeaders(t *testin
 	}
 }
 
+// TestRunWithContinuousRetryKeepaliveDuringBlockingOperation 验证阻塞操作期间保活仍持续触发。
+func TestRunWithContinuousRetryKeepaliveDuringBlockingOperation(t *testing.T) {
+	previousInterval := continuousRetryKeepaliveInterval
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
+	t.Cleanup(func() { continuousRetryKeepaliveInterval = previousInterval })
+
+	keepalive := &recordingContinuousRetryKeepalive{}
+	keepalive.Activate()
+	ctx := contextWithContinuousRetryKeepalive(keepalive)
+	value, err := runWithContinuousRetryKeepalive(ctx, func() string {
+		time.Sleep(35 * time.Millisecond)
+		return "done"
+	})
+	if err != nil {
+		t.Fatalf("run blocking operation: %v", err)
+	}
+	if value != "done" {
+		t.Fatalf("operation result = %q, want done", value)
+	}
+	if keepalive.writes < 2 {
+		t.Fatalf("heartbeat writes = %d, want at least 2", keepalive.writes)
+	}
+}
+
 func TestReadSSEStreamWithContinuousRetryKeepaliveWhileWaitingForFrame(t *testing.T) {
 	previousInterval := continuousRetryKeepaliveInterval
 	continuousRetryKeepaliveInterval = time.Millisecond
@@ -253,6 +305,7 @@ func TestReadSSEStreamWithContinuousRetryKeepaliveWhileWaitingForFrame(t *testin
 	}
 }
 
+// TestContinuousRetrySSEKeepaliveAndCommittedErrors 验证已提交 SSE 可同时承载心跳和错误事件。
 func TestContinuousRetrySSEKeepaliveAndCommittedErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -267,6 +320,8 @@ func TestContinuousRetrySSEKeepaliveAndCommittedErrors(t *testing.T) {
 	}
 	keepalive.Activate()
 	keepalive.last = time.Time{}
+	setSSEStreamHeaders(c, "text/event-stream")
+	c.Writer.WriteHeaderNow()
 	if err := keepalive.Keepalive(); err != nil {
 		t.Fatalf("write SSE heartbeat: %v", err)
 	}
@@ -282,6 +337,64 @@ func TestContinuousRetrySSEKeepaliveAndCommittedErrors(t *testing.T) {
 	}
 	if body := recorder.Body.String(); !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "upstream failed") {
 		t.Fatalf("committed Responses SSE error = %q", body)
+	}
+}
+
+// TestContinuousRetryMessagesKeepaliveWritesPingAfterCommit 验证 Messages 使用原生 ping 事件保活。
+func TestContinuousRetryMessagesKeepaliveWritesPingAfterCommit(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/messages", nil)
+	stop := installContinuousRetryMessagesKeepalive(c, true)
+	defer stop()
+
+	keepalive, ok := continuousRetryKeepaliveForContext(c.Request.Context()).(*requestContinuousRetryKeepalive)
+	if !ok {
+		t.Fatal("Messages heartbeat was not installed")
+	}
+	keepalive.Activate()
+	keepalive.last = time.Time{}
+	setSSEStreamHeaders(c, "text/event-stream; charset=utf-8")
+	c.Writer.WriteHeaderNow()
+	if err := keepalive.Keepalive(); err != nil {
+		t.Fatalf("write Messages heartbeat: %v", err)
+	}
+	if got := recorder.Body.String(); got != downstreamMessagesKeepaliveEvent {
+		t.Fatalf("Messages heartbeat body = %q, want %q", got, downstreamMessagesKeepaliveEvent)
+	}
+}
+
+// TestContinuousRetrySSEKeepaliveCommitsHeartbeatBeforeFirstEvent 验证首个心跳会先提交 SSE 200。
+func TestContinuousRetrySSEKeepaliveCommitsHeartbeatBeforeFirstEvent(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	stop := installContinuousRetrySSEKeepalive(c, true, "text/event-stream")
+	defer stop()
+	keepalive, ok := continuousRetryKeepaliveForContext(c.Request.Context()).(*requestContinuousRetryKeepalive)
+	if !ok {
+		t.Fatal("SSE heartbeat was not installed")
+	}
+	keepalive.Activate()
+	keepalive.last = time.Time{}
+	if err := keepalive.Keepalive(); err != nil {
+		t.Fatalf("write initial heartbeat: %v", err)
+	}
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", recorder.Code)
+	}
+	if got := recorder.Body.String(); got != continuousRetryKeepaliveComment {
+		t.Fatalf("initial SSE heartbeat = %q, want %q", got, continuousRetryKeepaliveComment)
+	}
+
+	keepalive.last = time.Time{}
+	if err := keepalive.Keepalive(); err != nil {
+		t.Fatalf("write committed heartbeat: %v", err)
+	}
+	if got := recorder.Body.String(); got != continuousRetryKeepaliveComment+continuousRetryKeepaliveComment {
+		t.Fatalf("SSE heartbeat body = %q", got)
 	}
 }
 

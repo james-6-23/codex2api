@@ -52,18 +52,24 @@ func (h *Handler) LiveSideband(c *gin.Context) {
 		go h.liveCalls().finalize(record)
 		return
 	}
-	defer func() { _ = downstream.Close() }()
+	proxyCtx, cancel := context.WithCancel(c.Request.Context())
+	var upstream *websocket.Conn
+	stopDownstreamKeepalive := startDownstreamWSKeepalive(proxyCtx, downstream, cancel)
+	defer func() {
+		cancel()
+		_ = downstream.Close()
+		if upstream != nil {
+			_ = upstream.Close()
+		}
+		stopDownstreamKeepalive()
+	}()
 
-	upstream, err := h.dialLiveSideband(c.Request.Context(), record)
+	upstream, err = h.dialLiveSideband(proxyCtx, record)
 	if err != nil {
 		_ = downstream.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseInternalServerErr, "live sideband unavailable"))
 		h.liveCalls().finalize(record)
 		return
 	}
-	defer func() { _ = upstream.Close() }()
-
-	proxyCtx, cancel := context.WithCancel(c.Request.Context())
-	defer cancel()
 	errCh := make(chan error, 2)
 	go func() { errCh <- copyLiveSideband(proxyCtx, upstream, downstream) }()
 	go func() { errCh <- copyLiveSideband(proxyCtx, downstream, upstream) }()
@@ -72,14 +78,17 @@ func (h *Handler) LiveSideband(c *gin.Context) {
 	h.liveCalls().finalize(record)
 }
 
+// copyLiveSideband 在两个 WebSocket 连接之间双向复制一条数据流。
 func copyLiveSideband(ctx context.Context, dst, src *websocket.Conn) error {
 	if dst == nil || src == nil {
 		return errLiveCallNotFound
 	}
 	go func() {
 		<-ctx.Done()
-		_ = src.SetReadDeadline(time.Now())
-		_ = dst.SetWriteDeadline(time.Now())
+		// Gorilla 允许 Close 与读写并发，直接关闭可同时解除两端阻塞，
+		// 也避免与 SetReadDeadline/SetWriteDeadline 竞争。
+		_ = src.Close()
+		_ = dst.Close()
 	}()
 	for {
 		if err := ctx.Err(); err != nil {

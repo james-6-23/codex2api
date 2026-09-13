@@ -1623,16 +1623,20 @@ func TestResponsesHTTPIngressFallsBackToHTTPWhenForcedWebsocketMessageTooBig(t *
 	}
 }
 
+// TestResponsesHTTPIngressKeepsDownstreamAliveDuringUpstreamSilence 验证 HTTP SSE
+// 入站请求在上游静默期间仍向下游发送保活。
 func TestResponsesHTTPIngressKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 
 	previousExec := WebsocketExecuteFunc
 	previousSettings := CurrentRuntimeSettings()
-	previousInterval := downstreamSSEKeepaliveInterval
+	previousSSEInterval := downstreamSSEKeepaliveInterval
+	previousRetryInterval := continuousRetryKeepaliveInterval
 	t.Cleanup(func() {
 		WebsocketExecuteFunc = previousExec
 		ApplyRuntimeSettings(previousSettings)
-		downstreamSSEKeepaliveInterval = previousInterval
+		downstreamSSEKeepaliveInterval = previousSSEInterval
+		continuousRetryKeepaliveInterval = previousRetryInterval
 	})
 
 	nextSettings := previousSettings
@@ -1640,6 +1644,7 @@ func TestResponsesHTTPIngressKeepsDownstreamAliveDuringUpstreamSilence(t *testin
 	nextSettings.CodexContinueThinking = false
 	ApplyRuntimeSettings(nextSettings)
 	downstreamSSEKeepaliveInterval = 5 * time.Millisecond
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
 
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
 		pr, pw := io.Pipe()

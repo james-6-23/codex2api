@@ -1011,6 +1011,7 @@ func TestForwardImagesExplicitToolMissingCoolsModel(t *testing.T) {
 	}
 }
 
+// TestForwardImagesEmptyTerminalRetriesSameAccountOnce 验证空终态会在同一账号上重试一次。
 func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
@@ -1065,7 +1066,9 @@ func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	}
 }
 
-func TestForwardImagesCommittedKeepaliveEndsWithSSEFailure(t *testing.T) {
+// TestForwardImagesInitialKeepaliveCommitsSSEFailure 验证 Images 首个保活提交 SSE 后，
+// 本地失败会转换为协议错误事件。
+func TestForwardImagesInitialKeepaliveCommitsSSEFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
 	previousResin := resinCfg.Load()
@@ -1106,11 +1109,8 @@ func TestForwardImagesCommittedKeepaliveEndsWithSSEFailure(t *testing.T) {
 	handler.forwardImagesRequest(c, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", responsesBody, "b64_json", "image_generation", true)
 
 	body := recorder.Body.String()
-	if recorder.Code != http.StatusOK || !strings.HasPrefix(body, continuousRetryKeepaliveComment) {
-		t.Fatalf("heartbeat did not commit SSE response: status=%d body=%q", recorder.Code, body)
-	}
-	if !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
-		t.Fatalf("committed stream missing terminal response.failed: %q", body)
+	if recorder.Code != http.StatusOK || !strings.Contains(body, downstreamSSEKeepaliveComment) || !strings.Contains(body, `"type":"response.failed"`) || !strings.Contains(body, "stop now") {
+		t.Fatalf("committed SSE error = status %d body %q", recorder.Code, body)
 	}
 }
 
@@ -1352,72 +1352,6 @@ func TestBuildImageErrorUsageLogRecordsFailure(t *testing.T) {
 	}
 	if logInput.ImageCount != 1 || logInput.ImageWidth != 1024 || logInput.ImageFormat != "png" {
 		t.Fatalf("image fields = %#v, want count=1 width=1024 format=png", logInput)
-	}
-}
-
-func TestStartImageStreamKeepaliveStopsWhenWriterFails(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	var mu sync.Mutex
-	writes := 0
-	wrote := make(chan struct{}, 1)
-	stop := startImageStreamKeepalive(ctx, time.Millisecond, func() bool {
-		mu.Lock()
-		writes++
-		mu.Unlock()
-		select {
-		case wrote <- struct{}{}:
-		default:
-		}
-		return false
-	})
-	defer stop()
-
-	select {
-	case <-wrote:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("keepalive did not write")
-	}
-	time.Sleep(10 * time.Millisecond)
-	mu.Lock()
-	finalWrites := writes
-	mu.Unlock()
-	if finalWrites != 1 {
-		t.Fatalf("keepalive kept writing after writer failure: got %d writes, want 1", finalWrites)
-	}
-}
-
-func TestStartImageStreamKeepaliveStopWaitsForWriter(t *testing.T) {
-	entered := make(chan struct{})
-	release := make(chan struct{})
-	var enteredOnce sync.Once
-	stop := startImageStreamKeepalive(context.Background(), time.Millisecond, func() bool {
-		enteredOnce.Do(func() { close(entered) })
-		<-release
-		return false
-	})
-
-	select {
-	case <-entered:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("keepalive writer did not start")
-	}
-	stopped := make(chan struct{})
-	go func() {
-		stop()
-		close(stopped)
-	}()
-	select {
-	case <-stopped:
-		t.Fatal("stop returned while keepalive writer was still running")
-	case <-time.After(10 * time.Millisecond):
-	}
-	close(release)
-	select {
-	case <-stopped:
-	case <-time.After(100 * time.Millisecond):
-		t.Fatal("stop did not join keepalive goroutine")
 	}
 }
 

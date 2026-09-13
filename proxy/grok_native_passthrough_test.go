@@ -201,6 +201,8 @@ func TestForwardGrokNativeTypelessEventErrorStaysPrivateAcrossProtocols(t *testi
 	}
 }
 
+// TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError 验证首个可见事件前
+// 的失败仍返回协议对应的 HTTP 错误，而不会伪造成功流。
 func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
@@ -232,7 +234,9 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *
 	}
 }
 
-func TestSendGrokNativeHTTPErrorAfterKeepaliveUsesProtocolEvent(t *testing.T) {
+// TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE 验证首个保活提交 SSE 后，
+// Grok 各协议的错误仍以协议事件返回。
+func TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
 		name       string
@@ -241,7 +245,7 @@ func TestSendGrokNativeHTTPErrorAfterKeepaliveUsesProtocolEvent(t *testing.T) {
 		wantMarker string
 	}{
 		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses", wantMarker: `"type":"response.failed"`},
-		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions", wantMarker: `"type":"upstream_error"`},
+		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions", wantMarker: `"error":{"code":"upstream_stream_break"`},
 		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages", wantMarker: "event: error\n"},
 	}
 	for _, tc := range tests {
@@ -264,8 +268,12 @@ func TestSendGrokNativeHTTPErrorAfterKeepaliveUsesProtocolEvent(t *testing.T) {
 				failureMessage: "upstream busy",
 			})
 
-			if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), tc.wantMarker) {
-				t.Fatalf("committed protocol error = status %d body %q", recorder.Code, recorder.Body.String())
+			body := recorder.Body.String()
+			if recorder.Code != http.StatusOK ||
+				!strings.Contains(body, downstreamSSEKeepaliveComment) ||
+				!strings.Contains(body, tc.wantMarker) ||
+				!strings.Contains(body, "upstream busy") {
+				t.Fatalf("committed SSE error = status %d body %q", recorder.Code, body)
 			}
 		})
 	}

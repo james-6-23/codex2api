@@ -1028,7 +1028,7 @@ func forwardGrokNativeResponseObserved(c *gin.Context, resp *http.Response, prot
 	privateAttempt := output != nil && output != c.Writer
 	resp.Header.Del(grokNativeRouteHeader)
 	if !streaming {
-		body, err := readAllLimited(resp.Body, grokMaxDecodedBody)
+		body, err := readAllLimitedWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, grokMaxDecodedBody)
 		if err != nil {
 			return nil, classifyStreamOutcome(nil, err, nil, false), false, 0
 		}
@@ -3942,9 +3942,7 @@ func (h *Handler) Responses(c *gin.Context) {
 	defer stopRetryDeadline()
 	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, isStream, "text/event-stream")
 	defer stopRetryKeepalive()
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
-		activateContinuousRetryKeepalive(c.Request.Context())
-	}
+	activateContinuousRetryKeepalive(c.Request.Context())
 
 	// 3. 带重试的上游请求
 	maxRetries := h.getMaxRetries()
@@ -4245,7 +4243,7 @@ func (h *Handler) Responses(c *gin.Context) {
 					wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 				}
 				retryAfter := normalizedRetryAfter(resp.Header.Get("Retry-After"))
-				errBody, _ := io.ReadAll(resp.Body)
+				errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -4636,7 +4634,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				}
 			} else {
 				var respBody []byte
-				respBody, readErr = io.ReadAll(resp.Body)
+				respBody, readErr = readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 				if readErr == nil {
 					if isEmptyIncompleteResponseBody(respBody) {
 						respBody = synthesizeEmptyIncompleteFailureBody(respBody)
@@ -4995,7 +4993,7 @@ func (h *Handler) Responses(c *gin.Context) {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/responses", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
 			retryAfter := normalizedRetryAfter(resp.Header.Get("Retry-After"))
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -5324,40 +5322,10 @@ func (h *Handler) Responses(c *gin.Context) {
 
 			// 思考截断自动续想（默认关闭）：开启时用折叠状态机包裹 forward，
 			// 命中 518n-2 截断指纹则用同一账号续发上游并折叠成单响应；
-			// 关闭时保持原有逐事件透传路径，字节级零变化。
-			// 默认（未启用自动续想）路径也可能在 xhigh/max 的长推理阶段数十秒
-			// 没有可转发帧。定期写标准 SSE 注释，避免本机反代/Tailscale
-			// 把健康长流误判为空闲连接。自动续想路径已有自己的隐藏轮保活，
-			// 缓冲式持续重试下 streamWriter 写的是私有缓冲、真实心跳由 request
-			// 级 keepalive 负责，两种情况都不重复启动第二个 ticker。
-			stopDownstreamKeepalive := func() {}
-			if !contEnabled && !continuousRetryBuffersAttempts(continuousRetryPolicy) {
-				stopDownstreamKeepalive = startDownstreamSSEKeepalive(c.Request.Context(), downstreamSSEKeepaliveInterval, func() bool {
-					downstreamMu.Lock()
-					defer downstreamMu.Unlock()
-					if c.Request.Context().Err() != nil {
-						clientGone = true
-						return false
-					}
-					if clientGone {
-						return false
-					}
-					// 首个真实字节前不能写注释，否则会提前提交 HTTP 200，
-					// 破坏首包前 response.failed 的真实状态码与换号重试语义。
-					if !wroteAnyBody {
-						return true
-					}
-					if err := streamWriter.WriteSSEComment(downstreamSSEKeepaliveComment); err != nil {
-						writeErr = err
-						clientGone = true
-						return false
-					}
-					return true
-				})
-			}
+			// 关闭时保持原有逐事件透传路径，字节级零变化。请求级 keepalive
+			// 统一负责首个模型事件前后的 SSE 注释。
 			if contEnabled {
-				requestKeepaliveOwnsWrites := continuousRetryBuffersAttempts(continuousRetryPolicy) &&
-					continuousRetryKeepaliveActive(c.Request.Context()) && continuousRetryKeepaliveInterval > 0
+				requestKeepaliveOwnsWrites := continuousRetryKeepaliveActive(c.Request.Context()) && continuousRetryKeepaliveInterval > 0
 				fold := &continueFold{
 					trace:     func() upstreamTraceSnapshot { return snapshotUpstreamTrace(c.Request.Context()) },
 					baseBody:  upstreamBody,
@@ -5380,9 +5348,8 @@ func (h *Handler) Responses(c *gin.Context) {
 					keepalive: func() bool {
 						downstreamMu.Lock()
 						defer downstreamMu.Unlock()
-						// Buffered retry modes use the request-level heartbeat, which
-						// writes to the real ResponseWriter. Keep the write on this fold
-						// tick so hidden-round reads and heartbeats remain serialized.
+						// 请求级心跳写入真实 ResponseWriter；保留在折叠 ticker
+						// 内执行，使隐藏轮读取与心跳写入串行。
 						if requestKeepaliveOwnsWrites {
 							if keepalive := continuousRetryKeepaliveForContext(c.Request.Context()); keepalive != nil {
 								if err := keepalive.Keepalive(); err != nil {
@@ -5454,7 +5421,6 @@ func (h *Handler) Responses(c *gin.Context) {
 			} else {
 				readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, forwardWithEvent)
 			}
-			stopDownstreamKeepalive()
 			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
 			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
 			if writeErr == nil && wroteAnyBody {
@@ -5878,6 +5844,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
 	stopRetryDeadline := installContinuousRetryHTTPDeadline(c, continuousRetryPolicy, continuousRetryProtocolResponses)
 	defer stopRetryDeadline()
+	stopRetryKeepalive := installContinuousRetryHTTPInformationalKeepalive(c)
+	defer stopRetryKeepalive()
+	activateContinuousRetryKeepalive(c.Request.Context())
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
 	apiKeyID := requestAPIKeyID(c)
 	affinityKey := sessionAffinityKey(sessionIdentity.affinityID, apiKeyID)
@@ -6042,7 +6011,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				attemptEffectiveModel = mappedModel
 				attemptLogEffectiveModel = usageEffectiveModelForMapping(logModel, attemptEffectiveModel, true)
 			}
-			resp, reqErr := ExecuteOpenAIResponsesCompactRequest(c.Request.Context(), account, upstreamBody, proxyURL, downstreamHeaders)
+			resp, reqErr := executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
+				return ExecuteOpenAIResponsesCompactRequest(c.Request.Context(), account, upstreamBody, proxyURL, downstreamHeaders)
+			})
 			durationMs := int(time.Since(start).Milliseconds())
 
 			if reqErr != nil {
@@ -6079,7 +6050,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 			}
 
 			if resp.StatusCode != http.StatusOK {
-				errBody, _ := io.ReadAll(resp.Body)
+				errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 				rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 				resp.Body.Close()
 				if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6157,7 +6128,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 				return
 			}
 
-			respBody, readErr := io.ReadAll(resp.Body)
+			respBody, readErr := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 			resp.Body.Close()
 			if readErr != nil {
 				totalDuration := int(time.Since(start).Milliseconds())
@@ -6281,9 +6252,13 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var reqErr error
 		if compactViaResponses {
 			upstreamEndpointLabel = "/v1/responses"
-			resp, reqErr = ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
+			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
+				return ExecuteRequest(c.Request.Context(), account, appendCompactionTriggerToResponsesBody(codexBody), upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, false)
+			})
 		} else {
-			resp, reqErr = ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
+				return ExecuteCompactRequest(c.Request.Context(), account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders)
+			})
 		}
 		durationMs := int(time.Since(start).Milliseconds())
 
@@ -6321,7 +6296,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolResponses) {
@@ -6405,9 +6380,9 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 		var readErr error
 		var compactFailedPayload []byte
 		if compactViaResponses {
-			respBody, compactFailedPayload, readErr = collectCompactResponsesSSE(resp.Body)
+			respBody, compactFailedPayload, readErr = collectCompactResponsesSSEWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 		} else {
-			respBody, readErr = io.ReadAll(resp.Body)
+			respBody, readErr = readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 		}
 		resp.Body.Close()
 		if readErr != nil {
@@ -6638,6 +6613,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	}
 }
 
+// ChatCompletions 处理 OpenAI Chat Completions 请求，并在流式响应中发送协议保活。
 func (h *Handler) ChatCompletions(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := readRawRequestBody(c)
@@ -6744,9 +6720,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	defer stopRetryDeadline()
 	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, isStream, "text/event-stream")
 	defer stopRetryKeepalive()
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
-		activateContinuousRetryKeepalive(c.Request.Context())
-	}
+	activateContinuousRetryKeepalive(c.Request.Context())
 
 	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, codexBody)
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
@@ -7010,7 +6984,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if wsHTTPFallback.ForceHTTP() && !useWebsocket {
 				wsHTTPFallback.LogHTTPAttemptCompletion("/v1/chat/completions", account.ID(), attempt+1, durationMs, 0, resp.StatusCode)
 			}
-			errBody, _ := io.ReadAll(resp.Body)
+			errBody, _ := readAllWithContinuousRetryKeepalive(c.Request.Context(), resp.Body)
 			rememberContinuousRetryHTTPFailure(c.Request.Context(), resp, errBody)
 			resp.Body.Close()
 			if continuousRetryCommitExpired(c, continuousRetryProtocolChat) {
@@ -7253,42 +7227,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			// 但继续读上游直到 response.completed/failed，以拿到准确 usage。
 			clientGone := false
 			var pendingFirstTokenChunks bytes.Buffer
-			// downstreamMu 串行化翻译写路径与其共享状态(clientGone/writeErr/
-			// wroteAnyBody/streamWriter):下游保活 goroutine 与翻译回调并发写
-			// 同一个 ResponseWriter,必须互斥。
-			var downstreamMu sync.Mutex
-			// 与 /v1/responses 同一套下游保活:首个内容帧之后上游长推理期间定期
-			// 写 SSE 注释,避免反代/CDN 把健康长流当空闲连接掐断(issue #623)。
-			// 缓冲式持续重试下 streamWriter 写的是私有缓冲,真实下游心跳由
-			// request 级 keepalive 负责,不再起第二个。
-			stopDownstreamKeepalive := func() {}
-			if !continuousRetryBuffersAttempts(continuousRetryPolicy) {
-				stopDownstreamKeepalive = startDownstreamSSEKeepalive(c.Request.Context(), downstreamSSEKeepaliveInterval, func() bool {
-					downstreamMu.Lock()
-					defer downstreamMu.Unlock()
-					if c.Request.Context().Err() != nil {
-						clientGone = true
-						return false
-					}
-					if clientGone {
-						return false
-					}
-					// 首个真实字节前不能写注释,否则会提前提交 HTTP 200,
-					// 破坏首包前 response.failed 的真实状态码与换号重试语义。
-					if !wroteAnyBody {
-						return true
-					}
-					if err := streamWriter.WriteSSEComment(downstreamSSEKeepaliveComment); err != nil {
-						writeErr = err
-						clientGone = true
-						return false
-					}
-					return true
-				})
-			}
 			readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), resp.Body, func(sseEvent string, data []byte) bool {
-				downstreamMu.Lock()
-				defer downstreamMu.Unlock()
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
 				if eventType == "response.failed" {
@@ -7434,8 +7373,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 				return true
 			})
-			// stop 会等保活 goroutine 完整退出,之后的收尾写入不再有并发方。
-			stopDownstreamKeepalive()
 			// 仅在真的写过 body 时才做收尾 flush:flusher.Flush 会先提交 HTTP 200 header,
 			// 零写入时提前 flush 会让循环外的 c.JSON(4xx) 失效(status 已定型为 200)。
 			if writeErr == nil && wroteAnyBody {

@@ -59,7 +59,7 @@ func durationFromEnv(key string, fallback time.Duration) time.Duration {
 	}
 	d, err := time.ParseDuration(raw)
 	if err != nil || d < 0 {
-		log.Printf("[CodexTransport] %s=%q 非法，沿用默认 %s", key, raw, fallback)
+		log.Printf("[Config] %s=%q 非法，沿用默认 %s", key, raw, fallback)
 		return fallback
 	}
 	return d
