@@ -279,6 +279,25 @@ Redis 模式会把 response context 保存到共享后端。后端值在重建�
 
 ### WebSocket 连接池与 1009 降级
 
+后台「系统设置 → Codex → WebSocket」提供 `CodexWSContextTakeover`（JSON / 数据库字段 `codex_ws_context_takeover`），默认 `false`，新增迁移及数据库 `NULL` 均按关闭处理。管理 API 的局部更新省略该字段或传入 `null` 时保留已保存值，显式 `false` 才会关闭。
+
+关闭时保持现有 Gorilla 路径的 `permessage-deflate` 逐条消息独立压缩；开启时请求协商类似官方的跨消息压缩字典复用，但不保证与官方握手头完全一致。服务端可拒绝压缩或要求不复用字典，开启会增加每条连接的内存占用。这不是 HTTP 请求体 zstd 开关，也不修改聊天上下文、会话或响应 ID。
+
+开启路径使用 `github.com/coder/websocket`，实际 offer 为 `permessage-deflate; client_max_window_bits`。服务端返回 `client_max_window_bits=9` 至 `15` 时，出站压缩器按协商值限制历史窗口为 512 B 至 32 KiB；服务端省略该参数时使用 32 KiB。协商的 client/server 窗口位数必须为 9–15，返回 8 位时握手失败，不静默扩大窗口。小窗口复用现有 `github.com/klauspost/compress/flate` 的自定义窗口压缩器，各窗口大小和实际压缩等级分别复用压缩器，避免跨连接串用配置。服务端仍可要求逐消息重置字典或拒绝压缩。关闭路径继续发送 `permessage-deflate; server_no_context_takeover; client_no_context_takeover`。两种路径均维持 HTTP/1.1 升级与 TLS 证书校验。
+
+开启路径固定使用 `third_party/coder-websocket` 中的 v1.8.15 兼容补丁，随源码构建，不依赖修改本机模块缓存。补丁保留压缩分片结束前的解压资源、默认将数据帧限制为 16 KiB，并使 Ping/Pong 写入预算与数据写入预算一致。心跳只发送 Ping；探针由读循环关联 Pong，业务响应提前证明连接存活后不会因短探针超时取消尚在发送的 Ping。HTTP 代理下的明文 WS 继续使用 CONNECT。补丁来源及范围见该目录的 `PATCHES.md`。
+
+开启「WS 压缩字典复用」后，可编辑以下选项；关闭主开关时界面禁用选项，但保留已保存值：
+
+| JSON / 数据库字段 | 默认值 | 行为 |
+| --- | --- | --- |
+| `codex_ws_compression_level` | `1` | 1–9 整数；1 优先速度，更高等级通常以 CPU 时间换压缩率。仅协商为 15 位（32 KiB，含省略窗口参数）时应用该等级；9–14 位使用小窗口压缩器的固定策略，界面有明确说明 |
+| `codex_ws_disable_fragmentation` | `false` | 界面以正向「WS 分帧发送」开关展示，默认开启。设为 `true` 即关闭分帧，每条消息发一个数据帧；`false` 每帧最多 16 KiB，压缩被拒绝时也保留此分帧设置 |
+
+上述选项仅作用于新压缩路径，不改变 Gorilla 路径。管理 API 对缺省或 `null` 保留已有值，非法等级（非整数或超出 1–9）返回 400。旧数据库迁移和 NULL 使用默认值；数据库保存与运行时加载会把无效历史等级归一为 1。关闭分帧后，大消息期间控制帧需等待当前数据帧发送完成。
+
+**设置变更仅对新建的上游 WebSocket 连接生效。** 已有连接及 continuation 续链继续沿用建连时的协商结果，直到连接自然替换；切换本身不清空连接池、不强制重连、不打断正在执行的请求。
+
 - 每个账号的上游物理 WebSocket 连接数受其当前 `DynamicConcurrencyLimit` 限制。
 - 新建或复用连接时如果超过新上限，只淘汰最老的空闲连接；当前请求使用的连接和其他活跃连接不会被中断。
 - 上游在尚未向下游输出内容时返回 close 1009，或本地读取触发等价的 read-limit 错误，网关会保留同一账号租约和已解析代理，最多降级一次 HTTP。

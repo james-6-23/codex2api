@@ -96,18 +96,32 @@ func (handler *Handler) bindWindowGrantOwner(request *gin.Context, accountID int
 }
 
 func (handler *Handler) windowQuoteOwner(request *gin.Context, identity verifiedNewAPIPolicyContext) (int64, string, error) {
+	diagnostic := windowControlDiagnostic(request)
+	if diagnostic != nil {
+		diagnostic.OwnerSource = "none"
+	}
 	key := sessionAffinityKey("newapi-root-session:"+identity.Meta.RootSessionFingerprint, identity.APIKeyID)
 	entry, found, err := handler.readSessionContinuity(request.Request.Context(), hashRiskIdentity(key))
 	if err != nil {
 		return 0, "", err
 	}
 	if found {
+		if diagnostic != nil {
+			diagnostic.OwnerSource = "continuity"
+			diagnostic.OwnerLastSeen, diagnostic.OwnerLastCompleted, diagnostic.OwnerLastStatus = entry.Record.LastSeen, entry.Record.LastCompleted, entry.Record.LastStatus
+		}
 		return entry.Record.AccountID, key, nil
 	}
 	if owner, found := handler.store.LiveSessionAccountID(key, time.Now()); found {
+		if diagnostic != nil {
+			diagnostic.OwnerSource = "live_session"
+		}
 		return owner, key, nil
 	}
 	if userForkWindow(identity.Meta) {
+		if diagnostic != nil {
+			diagnostic.OwnerSource = "fork_parent"
+		}
 		owner, _, err := handler.resolveForkSourceOwner(request.Request.Context(), requestSessionIdentity{forkSourceAffinityID: "newapi-root-session:" + identity.Meta.ForkedFromSessionFingerprint}, key, identity.APIKeyID)
 		if err != nil || owner == 0 {
 			return 0, "", errors.New("无法恢复 fork 父会话账号")

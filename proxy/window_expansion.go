@@ -181,6 +181,7 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 	subject := cache.PromptSessionLimitSubject(identity.Platform, identity.Identity.UserID)
 	limit, seconds := handler.userWindowControlLimits(request, identity)
 	windows := handler.userWindowControlSnapshot(subject, now)
+	diagnostic := handler.beginWindowControlDiagnostic(request, input, identity, subject, now, limit, seconds, len(windows))
 	if input.Operation == "upgrade" {
 		handler.upgradePersonalWindow(request, identity, input, windows)
 		return
@@ -233,13 +234,17 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 	if input.Operation == "quote" {
 		ownerAccountID, ownerKey, err = handler.windowQuoteOwner(request, identity)
 		if err != nil {
+			diagnostic.Decision = "owner_lookup_failed"
 			writeWindowControlError(request, http.StatusServiceUnavailable, "window_owner_unavailable", "会话账号归属暂时无法确认，请稍后重试")
 			return
 		}
 	}
 	ownerNeedsExpansion := false
+	diagnostic.OwnerAccountID = ownerAccountID
 	if ownerAccountID > 0 {
-		ownerNeedsExpansion = !handler.store.CanAdmitAccountSession(handler.store.FindByID(ownerAccountID), ownerKey, now)
+		allowed, accountDiagnostic := handler.store.CanAdmitAccountSessionWithDiagnostic(handler.store.FindByID(ownerAccountID), ownerKey, now)
+		ownerNeedsExpansion = !allowed
+		diagnostic.Account = &accountDiagnostic
 	}
 	ctx, cancel := context.WithTimeout(request.Request.Context(), 2*time.Second)
 	defer cancel()
@@ -248,6 +253,8 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 	quoteReason := ""
 	background := identity.Meta.RootSessionRelation == newAPIPolicyRootSessionRelationRelated && !userForkWindow(identity.Meta) || identity.Meta.SessionAccounting == newAPISessionAccountingBypass || identity.Meta.RequestKind == "compaction" || (identity.Meta.ThreadSource != "" && identity.Meta.ThreadSource != "user")
 	err = handler.db.UpdateUserWindowAdmissions(ctx, subject, func(state *database.UserWindowAdmissionState) error {
+		// Capture the root grant before expiry cleanup removes its evidence.
+		diagnostic.Grant = observeWindowGrant(state.Windows[root], now)
 		if state.Reservations == nil {
 			state.Reservations = make(map[string]map[string]time.Time)
 		}
@@ -314,6 +321,7 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 			return nil
 		}
 		if len(state.Windows) >= 1100 {
+			diagnostic.Decision = "admission_state_limit"
 			return errWindowAdmissionDenied
 		}
 		ordinary, expanded := 0, 0
@@ -337,7 +345,22 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 			}
 		}
 		useExpansion := ordinary >= limit || ownerNeedsExpansion
+		diagnostic.CountsEvaluated = true
+		diagnostic.OrdinaryUsed, diagnostic.ExpandedUsed = ordinary, expanded
+		diagnostic.NeedsExpansion = useExpansion
 		if useExpansion && (!input.AllowExpansion || input.ExtraLimit <= expanded || input.Multiplier <= 1) {
+			diagnostic.Decision = "user_window_limit"
+			if ownerNeedsExpansion {
+				diagnostic.Decision = "owner_admission_rejected"
+			}
+			switch {
+			case !input.AllowExpansion:
+				diagnostic.ExpansionBlock = "not_authorized"
+			case input.ExtraLimit <= expanded:
+				diagnostic.ExpansionBlock = "extra_limit_exhausted"
+			default:
+				diagnostic.ExpansionBlock = "multiplier_not_expanded"
+			}
 			for _, window := range windows {
 				if deniedRecovery.IsZero() || window.ExpiresAt.Before(deniedRecovery) {
 					deniedRecovery = window.ExpiresAt
@@ -363,6 +386,9 @@ func (handler *Handler) ControlNewAPIUserWindows(request *gin.Context) {
 		return nil
 	})
 	if err != nil {
+		if !errors.Is(err, errWindowAdmissionDenied) {
+			diagnostic.Decision = "storage_failed"
+		}
 		statusCode := http.StatusServiceUnavailable
 		message := "窗口服务暂时不可用，请稍后重试"
 		if errors.Is(err, errWindowAdmissionDenied) {

@@ -31,13 +31,33 @@
 请求诊断中的“最终出站身份”对应 `diagnostics.upstream.outbound_identity`，服务错误沿用同一上游诊断。只采集部署后的请求，不能回填历史日志。
 
 - `http.headers` / `http.turn_metadata`：HTTP 业务改写、设备收敛、账号自定义头完成后，进入传输层前的请求头及头内元数据。
-- `ws_handshake.headers` / `ws_handshake.turn_metadata`：实际建连调用的握手头，随连接保存脱敏快照；复用时读取原连接快照，不根据当前配置重新推导。建连失败时属于尝试使用的握手值，结合握手状态判断是否建立连接；没有历史快照的连接不伪造数据。
+- `ws_handshake.headers`：从 HTTP 握手写出回调采集白名单，包含 WebSocket 库生成的头，随连接保存脱敏快照；复用时读取原连接快照，不根据当前配置重新推导。头内 turn metadata 保持现有有界、脱敏 JSON 表示。没有历史快照的连接不伪造数据。
 - `body.client_metadata` / `body.turn_metadata`：HTTP 最终 JSON 或 WS 本次业务帧内的身份字段；WS 在环境改写后、写帧前采集。不同窗口或轮次可能复用同一握手，但帧元数据仍按当前请求记录。
 - `body.links`：仅记录 `prompt_cache_key`、`previous_response_id` 的摘要，用于比对是否相同，不保存原始值。
 
 白名单包含 UA、Originator、Version、设备、会话、线程、窗口、轮次及部分协议开关。标准 UUID 和 `UUID:窗口号` 保留便于核对，非标准身份值只保留摘要，重复头额外标记 `_multiple=true`。正文和头内同名字段分别展示，即使不一致也不互相覆盖。这里只记录，不因不一致擅自修改出站值。
 
-不记录 Authorization、Cookie、API Key、代理凭据、attestation、提示词、完整请求正文或加密内容。超长元数据标记不可采集，客户端文本做限长与敏感内容遮盖。日志反映网关准备或提交给传输层的值，不等于上游已经收到；外部代理后续修改也不在此采集范围，仍需结合 `send_phase`、上游请求 ID 和错误来源判断。
+不记录 Authorization、Cookie、API Key、代理凭据、attestation 的原文、提示词、完整请求正文或加密内容。超长元数据标记不可采集，客户端文本做限长与敏感内容遮盖。日志反映网关准备或提交给传输层的值，不等于上游已经收到；外部代理后续修改也不在此采集范围，仍需结合 `send_phase`、上游请求 ID 和错误来源判断。
+
+### WebSocket 握手头与脱敏
+
+“最终出站身份”的 `ws_handshake.headers` 覆盖以下字段，使用日志和服务错误诊断共用此快照：
+
+| 字段 | 记录方式 |
+| --- | --- |
+| `Host` | 实际 Host 主机及端口；不记录 URL 路径、查询、用户名或密码 |
+| `Authorization`、`Sec-WebSocket-Key`、`X-Oai-Attestation` | 非空只记 `[present]`，空值记 `[empty]`；不保存原文、前后缀或摘要 |
+| `Chatgpt-Account-Id`、`Session-Id` 及旧会话别名、`X-Resin-Account` | `hash:` 摘要；此处标准 UUID 也不回显，仍支持与帧会话一致性比较 |
+| `Sec-WebSocket-Protocol` | 摘要；自定义子协议可能包含不透明认证数据，不回显 |
+| `Connection`、`Upgrade`、`Sec-WebSocket-Version`、`Sec-WebSocket-Extensions` | 实际写出值，经限长和敏感文本遮盖 |
+| `User-Agent`、`Version`、`Originator`、`OpenAI-Beta`、`X-Codex-Beta-Features` | 沿用客户端文本的脱敏、限长规则 |
+| `X-Codex-Routing-Hint`、`X-Responsesapi-Include-Timing-Metrics` | 实际写出值，经限长和敏感文本遮盖 |
+
+只收集白名单，不复制 Cookie、Proxy-Authorization 或未知自定义头。`duplicate_headers` 保留多值/重复头标记；摘要及文本取首值，不拼接潜在敏感的额外值。UA 被关闭、可选字段未发送时不填造值。扩展字段记录客户端的压缩提议，不代表服务端最终接受的结果。
+
+`ws_handshake.capture_stage` 区分证据阶段：`prepared` 为建连前准备值（尚未观察到 WS 请求写出，库生成的头可能缺失）；`headers_partial` 为部分头的写出回调；`headers_serialized` 为头已序列化、尚未观察到整个握手请求写出完成；`written` 为请求写出回调成功；`write_failed` 为写请求出错。缓冲区回调不证明远端已收到，HTTP 403 拒绝也可能对应 `written`，须同时看 `handshake_status`。代理 CONNECT 的头不会被当成 WS 握手头。拨号结束后快照冻结，迟到回调不能改写已保存诊断。
+
+以上只补采新建连接；历史日志无法回填。既有入站/帧元数据及设备字段仍遵循原来的 UUID 关联策略，这里的账号和会话摘要规则专用于出站 WS 握手头。
 
 请求诊断仍遵循 12 KiB 总限制。超过限制时先省略入站明细，仍超限则省略出站身份明细并标记 `outbound_identity.truncated=true`（界面显示 `capture_truncated=true`），避免仅因身份明细过长丢失整个请求的路由和错误诊断。缺失或截断字段不应解读为实际上游未收到该字段。
 

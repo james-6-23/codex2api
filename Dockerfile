@@ -29,6 +29,7 @@ ENV GOPROXY=https://goproxy.cn,direct
 
 WORKDIR /app
 COPY go.mod go.sum ./
+COPY third_party/coder-websocket ./third_party/coder-websocket
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 

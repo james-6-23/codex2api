@@ -81,7 +81,10 @@ type RuntimeSettings struct {
 	// CodexRequestCompression 对 HTTP /responses 请求体做 zstd 压缩（默认 true，
 	// 与真实 Codex CLI 一致）。与 CodexForceWebsocket 正交：WS 路径走
 	// permessage-deflate（拨号器已开启），本项只作用于 HTTP 路径，两者可同时生效。
-	CodexRequestCompression bool
+	CodexRequestCompression     bool
+	CodexWSContextTakeover      bool
+	CodexWSCompressionLevel     int
+	CodexWSDisableFragmentation bool
 	// CodexWSWeakNetworkMode 对 VPN/住宅代理等不稳定链路采用保守复用：
 	// 缩短空闲/最大寿命、每次复用都做真实 Ping/Pong，并暂停空闲保活（默认 false）。
 	CodexWSWeakNetworkMode bool
@@ -184,6 +187,9 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		BillingTierPolicy:                defaultBillingTierPolicy,
 		ModelsListReadMaxBytes:           database.DefaultModelsListReadMaxBytes,
 		CodexRequestCompression:          defaultCodexRequestCompression,
+		CodexWSContextTakeover:           false,
+		CodexWSCompressionLevel:          1,
+		CodexWSDisableFragmentation:      false,
 		CodexWSHideErrors:                defaultCodexWSHideErrors,
 		CodexWSSilentRetry:               defaultCodexWSSilentRetry,
 		CodexWSSilentRetries:             defaultCodexWSSilentRetries,
@@ -268,6 +274,7 @@ func NormalizeBillingTierPolicy(policy string) string {
 }
 
 func NormalizeRuntimeSettings(settings RuntimeSettings) RuntimeSettings {
+	settings.CodexWSCompressionLevel = database.NormalizeCodexWSCompressionLevel(settings.CodexWSCompressionLevel)
 	defaults := DefaultRuntimeSettings()
 	settings.ClientCompatMode = NormalizeClientCompatMode(settings.ClientCompatMode)
 	settings.StreamFlushPolicy = NormalizeStreamFlushPolicy(settings.StreamFlushPolicy)
@@ -356,6 +363,9 @@ func ApplyRuntimeSettingsFromSystem(settings *database.SystemSettings) RuntimeSe
 		next.ModelsListReadMaxBytes = settings.ModelsListReadMaxBytes
 		next.CodexForceWebsocket = settings.CodexForceWebsocket
 		next.CodexRequestCompression = settings.CodexRequestCompression
+		next.CodexWSContextTakeover = settings.CodexWSContextTakeover
+		next.CodexWSCompressionLevel = settings.CodexWSCompressionLevel
+		next.CodexWSDisableFragmentation = settings.CodexWSDisableFragmentation
 		next.CodexWSWeakNetworkMode = settings.CodexWSWeakNetworkMode
 		next.CodexWSHideErrors = settings.CodexWSHideUpstreamErrors
 		next.CodexWSSilentRetry = settings.CodexWSSilentRetryEnabled

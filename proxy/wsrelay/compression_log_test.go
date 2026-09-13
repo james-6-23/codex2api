@@ -51,4 +51,20 @@ func TestLogCompressionNegotiationDedupe(t *testing.T) {
 	if buf.Len() != 0 {
 		t.Fatalf("两种结果各报过一次后应完全静默: %q", buf.String())
 	}
+	for _, extensions := range []string{
+		"permessage-deflate",
+		"permessage-deflate; server_no_context_takeover",
+		"permessage-deflate; client_no_context_takeover",
+	} {
+		response := &http.Response{Header: http.Header{"Sec-Websocket-Extensions": {extensions}}}
+		logCompressionNegotiation(response, 6)
+		if !strings.Contains(buf.String(), extensions) {
+			t.Fatalf("new negotiated compression mode was not logged: %q", buf.String())
+		}
+		buf.Reset()
+		logCompressionNegotiation(response, 7)
+		if buf.Len() != 0 {
+			t.Fatalf("duplicate compression mode was logged again: %q", buf.String())
+		}
+	}
 }

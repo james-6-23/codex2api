@@ -46,7 +46,7 @@ func (h *Handler) ExportUsageLogs(c *gin.Context) {
 			return
 		}
 		filter = &parsed
-		for _, key := range []string{"start", "end", "q", "request_type", "model", "endpoint", "api_key_id", "account_id", "fast", "stream", "compact", "has_compaction_history", "channel", "status", "status_code", "error_only", "error_kind", "retry", "via_websocket", "include_canceled", "email", "request_id", "upstream_request_id"} {
+		for _, key := range []string{"start", "end", "q", "search_scope", "request_type", "model", "endpoint", "api_key_id", "account_id", "fast", "stream", "compact", "has_compaction_history", "channel", "status", "status_code", "error_only", "error_kind", "retry", "via_websocket", "include_canceled", "email", "request_id", "upstream_request_id"} {
 			if value := c.Query(key); value != "" {
 				filters[key] = usageExportSecretPattern.ReplaceAllString(security.MaskURLCredentials(value), "[REDACTED]")
 			}

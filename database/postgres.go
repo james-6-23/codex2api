@@ -1118,7 +1118,16 @@ func (db *DB) migrate(ctx context.Context) error {
 		if err := db.migrateSQLite(ctx); err != nil {
 			return err
 		}
-		return db.ensureSQLiteColumn(ctx, "system_settings", "codex_session_failover_enabled", "INTEGER DEFAULT 0")
+		if err := db.ensureSQLiteColumn(ctx, "system_settings", "codex_session_failover_enabled", "INTEGER DEFAULT 0"); err != nil {
+			return err
+		}
+		if err := db.ensureSQLiteColumn(ctx, "system_settings", "codex_ws_context_takeover", "INTEGER DEFAULT 0"); err != nil {
+			return err
+		}
+		if err := db.ensureSQLiteColumn(ctx, "system_settings", "codex_ws_compression_level", "INTEGER DEFAULT 1"); err != nil {
+			return err
+		}
+		return db.ensureSQLiteColumn(ctx, "system_settings", "codex_ws_disable_fragmentation", "INTEGER DEFAULT 0")
 	}
 	query := `
 	CREATE TABLE IF NOT EXISTS accounts (
@@ -1505,6 +1514,9 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_force_websocket BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_request_compression BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_weak_network_mode BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_context_takeover BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_compression_level INTEGER DEFAULT 1;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_disable_fragmentation BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_keepalive_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_keepalive_interval_sec INT DEFAULT 60;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_ws_hide_upstream_errors BOOLEAN DEFAULT TRUE;
@@ -2440,10 +2452,13 @@ type SystemSettings struct {
 	ShowFullUsageNumbers                bool
 	PublicKeyUsagePageEnabled           bool
 	PublicImageStudioPageEnabled        bool
-	PublicAccountPortalPageEnabled      bool   // 账号自助添加公开门户开关，默认 false
-	CodexForceWebsocket                 bool   // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
-	CodexRequestCompression             bool   // HTTP /responses 请求体 zstd 压缩（对齐真实客户端），默认 true
-	CodexWSWeakNetworkMode              bool   // WS 弱网保守复用模式，默认 false
+	PublicAccountPortalPageEnabled      bool // 账号自助添加公开门户开关，默认 false
+	CodexForceWebsocket                 bool // 强制 Codex 上游走 WebSocket（复用连接池），默认 false
+	CodexRequestCompression             bool // HTTP /responses 请求体 zstd 压缩（对齐真实客户端），默认 true
+	CodexWSWeakNetworkMode              bool // WS 弱网保守复用模式，默认 false
+	CodexWSContextTakeover              bool
+	CodexWSCompressionLevel             int
+	CodexWSDisableFragmentation         bool
 	CodexWSKeepaliveEnabled             bool   // 启用上游 WS 空闲连接保活（仅 Ping，不发业务帧），默认 false
 	CodexWSKeepaliveIntervalSec         int    // WS 保活 Ping 间隔（秒），默认 60
 	CodexWSHideUpstreamErrors           bool   // 隐藏上游 WS 原始错误，默认 true
@@ -2750,7 +2765,10 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(codex_capacity_retry_enabled, false),
 		       COALESCE(codex_images_main_model, ''),
 		       COALESCE(codex_telemetry_enabled, false),
-		       COALESCE(codex_session_failover_enabled, false)
+		       COALESCE(codex_session_failover_enabled, false),
+		       COALESCE(codex_ws_context_takeover, false),
+		       CASE WHEN codex_ws_compression_level BETWEEN 1 AND 9 THEN codex_ws_compression_level ELSE 1 END,
+		       COALESCE(codex_ws_disable_fragmentation, false)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -2839,6 +2857,9 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexImagesMainModel,
 		&s.CodexTelemetryEnabled,
 		&s.CodexSessionFailoverEnabled,
+		&s.CodexWSContextTakeover,
+		&s.CodexWSCompressionLevel,
+		&s.CodexWSDisableFragmentation,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -3092,9 +3113,12 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_capacity_retry_enabled,
 					codex_images_main_model,
 					codex_telemetry_enabled,
-					codex_session_failover_enabled
+					codex_session_failover_enabled,
+					codex_ws_context_takeover,
+					codex_ws_compression_level,
+					codex_ws_disable_fragmentation
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $128, $129, $130)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -3134,10 +3158,10 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $128 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $131 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $129 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $132 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -3201,6 +3225,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 					codex_preflight_sse_passthrough_enabled = EXCLUDED.codex_preflight_sse_passthrough_enabled,
 					utls_shutdown_timeout_minutes = EXCLUDED.utls_shutdown_timeout_minutes,
 					codex_ws_weak_network_mode = EXCLUDED.codex_ws_weak_network_mode,
+					codex_ws_context_takeover = EXCLUDED.codex_ws_context_takeover,
+					codex_ws_compression_level = EXCLUDED.codex_ws_compression_level,
+					codex_ws_disable_fragmentation = EXCLUDED.codex_ws_disable_fragmentation,
 					codex_fingerprint_default_mode = EXCLUDED.codex_fingerprint_default_mode,
 					compact_via_responses_enabled = EXCLUDED.compact_via_responses_enabled,
 					codex_ws_stateless_slots = EXCLUDED.codex_ws_stateless_slots,
@@ -3277,6 +3304,9 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 		strings.TrimSpace(s.CodexImagesMainModel),
 		s.CodexTelemetryEnabled,
 		s.CodexSessionFailoverEnabled,
+		s.CodexWSContextTakeover,
+		NormalizeCodexWSCompressionLevel(s.CodexWSCompressionLevel),
+		s.CodexWSDisableFragmentation,
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey)
 	return err
@@ -6225,6 +6255,7 @@ type UsageLogFilter struct {
 	StatusFamily          string
 	ErrorKind             string
 	Query                 string
+	SearchScope           string // empty/all searches all supported fields
 	Channel               string // 上游渠道（codex/grok），空=全部
 	RetryOnly             *bool  // nil=全部, true=仅重试请求, false=仅首次请求
 	ViaWebsocketOnly      *bool  // nil=全部, true=仅 WebSocket, false=仅 HTTP
@@ -6337,28 +6368,7 @@ func (db *DB) buildUsageLogWhere(f UsageLogFilter) (string, []interface{}) {
 	}
 	if f.Query != "" {
 		p := addArg("%" + f.Query + "%")
-		parts = append(parts, fmt.Sprintf(`(
-			LOWER(COALESCE(u.error_message, '')) LIKE LOWER(%[1]s)
- OR LOWER(COALESCE(u.request_id, '')) LIKE LOWER(%[1]s)
- OR LOWER(COALESCE(u.upstream_request_id, '')) LIKE LOWER(%[1]s)
- OR LOWER(COALESCE(u.session_id_prefix, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.upstream_error_kind, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.model, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.effective_model, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.inbound_endpoint, '')) LIKE LOWER(%[1]s)
-				OR LOWER(COALESCE(u.upstream_endpoint, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.api_key_name, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.api_key_masked, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.newapi_user_name, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.client_ip, '')) LIKE LOWER(%[1]s)
-			OR LOWER(COALESCE(u.client_user_agent, '')) LIKE LOWER(%[1]s)
-				OR u.account_id IN (
-					SELECT search_accounts.id
-					FROM accounts search_accounts
-					WHERE LOWER(COALESCE(search_accounts.name, '')) LIKE LOWER(%[1]s)
-						OR LOWER(COALESCE(CAST(search_accounts.credentials AS TEXT), '')) LIKE LOWER(%[1]s)
-				)
-		)`, p))
+		parts = append(parts, usageSearchPredicate(f.SearchScope, p))
 	}
 
 	return strings.Join(parts, " AND "), args

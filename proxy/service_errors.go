@@ -298,6 +298,7 @@ func (handler *Handler) recordServiceError(ctx *gin.Context, status int, apiErro
 	}
 	event.ClientInfo = usageDiagnosticClientInfo(incoming)
 	if endpoint == "/v1/session-windows" {
+		event.WindowControl = windowControlDiagnostic(ctx)
 		if operation := ctx.GetString(windowControlOperationContextKey); operation != "" {
 			if event.ClientInfo == nil {
 				event.ClientInfo = make(map[string]string)

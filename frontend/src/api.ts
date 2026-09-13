@@ -490,6 +490,7 @@ function buildOpsErrorSearchParams(params: {
 }
 
 export type UsageLogQueryParams = {
+	searchScope?: import('./lib/usageSearchScope').UsageSearchScope
   requestType?: string
   start: string
   end: string
@@ -519,6 +520,7 @@ export function buildUsageLogSearchParams(params: UsageLogQueryParams) {
   search.set('end', params.end)
   if (params.email) search.set('email', params.email)
   if (params.q) search.set('q', params.q)
+  if (params.q && params.searchScope && params.searchScope !== 'all') search.set('search_scope', params.searchScope)
   if (params.model) search.set('model', params.model)
   if (params.endpoint) search.set('endpoint', params.endpoint)
   if (params.apiKeyId) search.set('api_key_id', params.apiKeyId)

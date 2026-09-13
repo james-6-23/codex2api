@@ -28,7 +28,7 @@ func newReadPumpTestConnection(t *testing.T, serve func(*websocket.Conn)) (*Mana
 	return newReadPumpTestConnectionWithUpgrader(t, websocket.Upgrader{}, serve)
 }
 
-func newReadPumpTestConnectionWithUpgrader(t *testing.T, upgrader websocket.Upgrader, serve func(*websocket.Conn)) (*Manager, *WsConnection) {
+func newReadPumpTestConnectionWithUpgrader(t *testing.T, upgrader websocket.Upgrader, serve func(*websocket.Conn), contextTakeover ...bool) (*Manager, *WsConnection) {
 	t.Helper()
 
 	ready := make(chan struct{})
@@ -45,7 +45,13 @@ func newReadPumpTestConnectionWithUpgrader(t *testing.T, upgrader websocket.Upgr
 	}))
 
 	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
-	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	var conn upstreamWebsocket
+	var err error
+	if len(contextTakeover) > 0 && contextTakeover[0] {
+		conn, _, err = dialContextTakeover(context.Background(), websocket.DefaultDialer, wsURL, nil)
+	} else {
+		conn, _, err = websocket.DefaultDialer.Dial(wsURL, nil)
+	}
 	if err != nil {
 		server.Close()
 		t.Fatalf("dial websocket: %v", err)
@@ -55,7 +61,7 @@ func newReadPumpTestConnectionWithUpgrader(t *testing.T, upgrader websocket.Upgr
 	key := manager.poolKey(1, wsURL, "read-pump-test", "")
 	session := NewSession(1, manager)
 	session.SetConnected(true)
-	wc := NewWsConnection(conn, session, wsURL)
+	wc := newUpstreamWsConnection(conn, session, wsURL)
 	wc.PoolKey = key
 	wc.onReadFailure = manager.DiscardConnection
 	wc.installControlHandlers()

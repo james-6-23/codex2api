@@ -51,7 +51,10 @@ func TestOutboundIdentityUsesOriginalHandshakeOnReuse(test *testing.T) {
 	for _, name := range []string{"User-Agent", "Originator", "Version", "X-Codex-Installation-Id"} {
 		require.Equal(test, actual.Get(name), first.upstreamIdentity.Headers[name])
 	}
-	require.NotContains(test, first.upstreamIdentity.Headers, "Authorization")
+	require.Equal(test, "[present]", first.upstreamIdentity.Headers["Authorization"])
+	require.Equal(test, "[present]", first.upstreamIdentity.Headers["Sec-WebSocket-Key"])
+	require.Equal(test, "written", first.upstreamIdentity.CaptureStage)
+	require.Equal(test, actual.Get("Sec-WebSocket-Extensions"), first.upstreamIdentity.Headers["Sec-WebSocket-Extensions"])
 	releaseUnsentConnection(manager, first, pending)
 	headers.Set("X-Codex-Turn-Metadata", `{"window_number":2}`)
 	reused, pending, err := manager.AcquireConnection(ctx, account, wsURL, "identity-session", headers, "")

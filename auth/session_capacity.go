@@ -534,16 +534,36 @@ func (s *Store) AdmitAccountSession(account *Account, sessionKey string, now tim
 }
 
 func (s *Store) CanAdmitAccountSession(account *Account, sessionKey string, now time.Time, traces ...*SelectionTrace) bool {
+	return s.canAdmitAccountSession(account, sessionKey, now, nil, traces...)
+}
+
+func (s *Store) CanAdmitAccountSessionWithDiagnostic(account *Account, sessionKey string, now time.Time) (bool, database.AccountSessionAdmissionDiagnostic) {
+	diagnostic := database.AccountSessionAdmissionDiagnostic{SlotState: "not_checked"}
+	allowed := s.canAdmitAccountSession(account, sessionKey, now, &diagnostic)
+	return allowed, diagnostic
+}
+
+func (s *Store) canAdmitAccountSession(account *Account, sessionKey string, now time.Time, diagnostic *database.AccountSessionAdmissionDiagnostic, traces ...*SelectionTrace) bool {
+	decision := func(allowed bool, reason string) bool {
+		if diagnostic != nil {
+			diagnostic.Reason = reason
+		}
+		return allowed
+	}
 	if s == nil || account == nil {
-		return false
+		return decision(false, "account_unavailable")
 	}
 	sessionKey = strings.TrimSpace(sessionKey)
 	limits := account.SessionCapacityLimits()
+	if diagnostic != nil {
+		diagnostic.Enabled, diagnostic.TotalLimit, diagnostic.ReservedLimit = limits.Enabled, limits.Total, limits.Reserved
+		diagnostic.IdleTTLSeconds = int64(limits.IdleTTL / time.Second)
+	}
 	if !limits.Enabled || sessionKey == "" || isProcessLocalSessionAffinityKey(sessionKey) || isSessionAccountingBypassKey(sessionKey) {
-		return true
+		return decision(true, "capacity_bypassed")
 	}
 	if _, related := RelatedSessionRootKey(sessionKey); related {
-		return true
+		return decision(true, "related_session")
 	}
 	if now.IsZero() {
 		now = time.Now()
@@ -551,19 +571,36 @@ func (s *Store) CanAdmitAccountSession(account *Account, sessionKey string, now 
 	s.ensureAccountSessionsLoaded(account, now)
 	s.accountSessionMu.Lock()
 	defer s.accountSessionMu.Unlock()
+	if diagnostic != nil {
+		diagnostic.SlotState = "missing"
+		if state := s.accountSessions[account.DBID][sessionKey]; state != nil {
+			diagnostic.LastSeen, diagnostic.ExpiresAt = state.lastSeen, state.lastSeen.Add(limits.IdleTTL)
+			diagnostic.SlotReserved = state.reserved
+			diagnostic.SlotState = "active"
+			if !diagnostic.ExpiresAt.After(now) {
+				diagnostic.SlotState = "expired"
+			}
+		}
+	}
 	reservedCount := s.purgeExpiredAccountSessionsLocked(account.DBID, limits.IdleTTL, now)
 	bySession := s.accountSessions[account.DBID]
+	if diagnostic != nil {
+		diagnostic.TotalUsed, diagnostic.ReservedUsed = int64(len(bySession)), reservedCount
+	}
 	if bySession[sessionKey] != nil {
 		if bySession[sessionKey].pendingUpgrade {
-			return false
+			return decision(false, "upgrade_pending")
 		}
 		if bySession[sessionKey].reserved && !selectionTrace(traces).ExpandedWindow() && selectionTrace(traces) != nil {
-			return int64(len(bySession))-reservedCount < limits.Total-limits.Reserved
+			return decision(int64(len(bySession))-reservedCount < limits.Total-limits.Reserved, "reserved_slot_reclassification")
 		}
-		return true
+		return decision(true, "existing_slot")
 	}
 	_, allowed := accountSessionSlotAvailable(int64(len(bySession)), reservedCount, limits, selectionTrace(traces).ExpandedWindow())
-	return allowed
+	if allowed {
+		return decision(true, "slot_available")
+	}
+	return decision(false, "session_capacity_full")
 }
 
 // HasSessionCapacityExhaustionWithDispatch reports capacity exhaustion only

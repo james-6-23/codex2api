@@ -14,6 +14,7 @@ import (
 type OutboundHeaderDiagnostic struct {
 	Headers      map[string]string `json:"headers"`
 	TurnMetadata map[string]string `json:"-"`
+	CaptureStage string            `json:"capture_stage,omitempty"`
 }
 
 type outboundBodyDiagnostic struct {
@@ -47,11 +48,13 @@ func (diagnostic *OutboundHeaderDiagnostic) UnmarshalJSON(data []byte) error {
 	var decoded struct {
 		Headers          map[string]string `json:"headers"`
 		DuplicateHeaders []string          `json:"duplicate_headers"`
+		CaptureStage     string            `json:"capture_stage"`
 	}
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		return err
 	}
 	diagnostic.Headers = decoded.Headers
+	diagnostic.CaptureStage = decoded.CaptureStage
 	if diagnostic.Headers == nil {
 		diagnostic.Headers = make(map[string]string)
 	}
@@ -75,7 +78,8 @@ func (diagnostic OutboundHeaderDiagnostic) MarshalJSON() ([]byte, error) {
 	return json.Marshal(struct {
 		Headers          map[string]string `json:"headers"`
 		DuplicateHeaders []string          `json:"duplicate_headers,omitempty"`
-	}{headers, duplicates})
+		CaptureStage     string            `json:"capture_stage,omitempty"`
+	}{headers, duplicates, diagnostic.CaptureStage})
 }
 
 func outboundMetadataJSON(raw gjson.Result) map[string]any {
@@ -248,7 +252,7 @@ func outboundSessionConsistency(identity *outboundIdentityDiagnostic) string {
 		}
 	}
 	for _, value := range values[1:] {
-		if value != values[0] {
+		if outboundComparableIdentity(value) != outboundComparableIdentity(values[0]) {
 			return "mismatched"
 		}
 	}
@@ -271,7 +275,7 @@ func (observer *TransportObserver) OutboundWebsocketHandshake(diagnostic *Outbou
 	}
 	var copied *OutboundHeaderDiagnostic
 	if diagnostic != nil {
-		copied = &OutboundHeaderDiagnostic{Headers: maps.Clone(diagnostic.Headers), TurnMetadata: maps.Clone(diagnostic.TurnMetadata)}
+		copied = &OutboundHeaderDiagnostic{Headers: maps.Clone(diagnostic.Headers), TurnMetadata: maps.Clone(diagnostic.TurnMetadata), CaptureStage: diagnostic.CaptureStage}
 	}
 	observer.updateOutboundIdentity(func(identity *outboundIdentityDiagnostic) {
 		identity.WSHandshake = copied

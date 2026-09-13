@@ -38,6 +38,7 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { Activity, Box, Clock, Zap, AlertTriangle, Search, Brain, DatabaseZap, DatabaseBackup, X, Image as ImageIcon, Info, CircleDollarSign, BarChart3, KeyRound, Route, SlidersHorizontal, ShieldAlert, RefreshCw, ChevronDown, RotateCcw, Download, Loader2 } from 'lucide-react'
+import { USAGE_SEARCH_SCOPES, type UsageSearchScope } from '../lib/usageSearchScope'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 
@@ -1790,6 +1791,7 @@ export default function Usage() {
   const [errorSummary, setErrorSummary] = useState<OpsErrorSummary | null>(null)
   const [searchInput, setSearchInput] = useState('')
   const [searchQuery, setSearchQuery] = useState('')
+  const [searchScope, setSearchScope] = useState<UsageSearchScope>('all')
   const [filterStatus, setFilterStatus] = useState<UsageStatusFilter>('')
   const [filterRequestType, setFilterRequestType] = useState('')
   const [filterModel, setFilterModel] = useState('')
@@ -1828,6 +1830,21 @@ export default function Usage() {
       setPage(1)
     }, 400)
   }, [])
+
+  const handleSearchScopeChange = (value: string) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    setSearchScope(value as UsageSearchScope)
+    setSearchQuery(searchInput.trim())
+    setPage(1)
+  }
+
+  const searchSessionPrefix = (value: string) => {
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    setSearchScope('session')
+    setSearchInput(value)
+    setSearchQuery(value.trim())
+    setPage(1)
+  }
 
   useEffect(() => () => {
     if (searchTimer.current) clearTimeout(searchTimer.current)
@@ -1868,6 +1885,7 @@ export default function Usage() {
       start,
       end,
       q: searchQuery || undefined,
+      searchScope,
       requestType: filterRequestType || undefined,
       model: filterModel || undefined,
       endpoint: filterEndpoint || undefined,
@@ -1884,7 +1902,7 @@ export default function Usage() {
       retry: filterRetry || undefined,
       viaWebsocket: filterTransport === 'ws' ? 'true' : filterTransport === 'http' ? 'false' : undefined,
     }
-  }, [timeRange, customRange, searchQuery, filterModel, filterEndpoint, filterApiKeyId, filterAccountId, filterFast, filterType, channel, filterStatus, filterRequestType, filterErrorKind, filterRetry, filterTransport])
+  }, [timeRange, customRange, searchQuery, searchScope, filterModel, filterEndpoint, filterApiKeyId, filterAccountId, filterFast, filterType, channel, filterStatus, filterRequestType, filterErrorKind, filterRetry, filterTransport])
 
   const downloadLogs = async (scope: 'filtered' | 'all') => {
     if (exportController.current) return
@@ -2118,6 +2136,8 @@ export default function Usage() {
   const rangeTokensLabel = t('usage.rangeTokensCard', { range: rangeLabel })
   const rangeCostLabel = t('usage.rangeCostCard', { range: rangeLabel })
   const resetLogFilters = () => {
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    setSearchScope('all')
     setSearchInput('')
     setSearchQuery('')
     setFilterStatus('')
@@ -2470,14 +2490,24 @@ export default function Usage() {
             {/* 主筛选栏 */}
             <div className="toolbar-surface mb-4 overflow-visible">
               <div className="flex flex-wrap items-center gap-2 max-lg:gap-1.5">
-                <div className="relative min-w-60 flex-1 max-sm:w-full">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
-                  <Input
-                    className="h-8 rounded-lg pl-8 text-[13px]"
-                    placeholder={t('usage.searchLogs')}
-                    value={searchInput}
-                    onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleSearchChange(e.target.value)}
+                <div className="flex min-w-0 flex-[1_1_24rem] items-center gap-2 max-sm:w-full max-sm:basis-full">
+                  <Select
+                    className="w-40 shrink-0"
+                    compact
+                    value={searchScope}
+                    onValueChange={handleSearchScopeChange}
+                    placeholder={t('usage.searchScopeLabel')}
+                    options={USAGE_SEARCH_SCOPES.map(value => ({ value, label: t(`usage.searchScopes.${value}`) }))}
                   />
+                  <div className="relative min-w-0 flex-1">
+                    <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      className="h-8 rounded-lg pl-8 text-[13px]"
+                      placeholder={searchScope === 'all' ? t('usage.searchLogs') : t('usage.searchInField', { field: t(`usage.searchScopes.${searchScope}`) })}
+                      value={searchInput}
+                      onChange={(e: React.ChangeEvent<HTMLInputElement>) => handleSearchChange(e.target.value)}
+                    />
+                  </div>
                 </div>
 
                 <Select
@@ -2733,7 +2763,7 @@ export default function Usage() {
                           />
                           <InternalRequestBadge log={log} />
                           {visibleColumns.requestType && <UsageRequestTypeButton log={log} onClick={() => setDiagnosticsLog(log)} />}
-                          {visibleColumns.sessionIDPrefix && <span className="text-xs" title={t('usage.sessionIDPrefixHint')}>{t('usage.sessionIDPrefix')}: {log.session_id_prefix ? <button type="button" className="font-mono text-primary hover:underline" onClick={() => handleSearchChange(log.session_id_prefix!)}>{log.session_id_prefix}</button> : '-'}</span>}
+                          {visibleColumns.sessionIDPrefix && <span className="text-xs" title={t('usage.sessionIDPrefixHint')}>{t('usage.sessionIDPrefix')}: {log.session_id_prefix ? <button type="button" className="font-mono text-primary hover:underline" onClick={() => searchSessionPrefix(log.session_id_prefix!)}>{log.session_id_prefix}</button> : '-'}</span>}
                         </div>
                         {visibleColumns.time && (
                           <div className="shrink-0 whitespace-nowrap text-right text-[11px] tabular-nums text-muted-foreground">
@@ -2960,7 +2990,7 @@ export default function Usage() {
                           </div>
                         </TableCell>}
                         {visibleColumns.requestType && <TableCell><UsageRequestTypeButton log={log} onClick={() => setDiagnosticsLog(log)} /></TableCell>}
-                        {visibleColumns.sessionIDPrefix && <TableCell className="font-mono text-xs" title={t('usage.sessionIDPrefixHint')}>{log.session_id_prefix ? <button type="button" className="text-primary hover:underline" onClick={() => handleSearchChange(log.session_id_prefix!)}>{log.session_id_prefix}</button> : '-'}</TableCell>}
+                        {visibleColumns.sessionIDPrefix && <TableCell className="font-mono text-xs" title={t('usage.sessionIDPrefixHint')}>{log.session_id_prefix ? <button type="button" className="text-primary hover:underline" onClick={() => searchSessionPrefix(log.session_id_prefix!)}>{log.session_id_prefix}</button> : '-'}</TableCell>}
                         {visibleColumns.account && <TableCell className={`${usageTableTextClass} text-muted-foreground`}>
                           <span className="block max-w-[180px] truncate whitespace-nowrap" title={formatUsageAccountTitle(log)}>
                             {formatUsageAccountLabel(log)}

@@ -101,6 +101,7 @@ type ServiceErrorEvent struct {
 	UpstreamInfo           json.RawMessage                   `json:"upstream,omitempty"`
 	AccountFailover        *SessionAccountFailoverDiagnostic `json:"account_failover,omitempty"`
 	PromptSafety           *PromptSafetyDiagnostic           `json:"prompt_safety,omitempty"`
+	WindowControl          *WindowControlDiagnostic          `json:"window_control,omitempty"`
 }
 
 type ServiceErrorFilter struct {
@@ -208,6 +209,7 @@ func normalizeServiceError(event ServiceErrorEvent) ServiceErrorEvent {
 		event.NewAPIUserID, event.NewAPIUserName = "", ""
 	}
 	event.Message = serviceErrorString(event.Message, 2048)
+	event.WindowControl = cloneWindowControlDiagnostic(event.WindowControl)
 	event.Endpoint = serviceErrorString(event.Endpoint, 256)
 	if event.BackgroundWindowWait != nil {
 		wait := *event.BackgroundWindowWait

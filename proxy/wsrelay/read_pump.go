@@ -128,26 +128,36 @@ func (wc *WsConnection) installControlHandlers() {
 		if wc.conn == nil {
 			return
 		}
-		wc.conn.SetPingHandler(func(appData string) error {
+		if socket, takeover := wc.conn.(*contextTakeoverSocket); takeover {
+			socket.onPing = wc.touchInbound
+			socket.onPong = wc.handlePong
+			return
+		}
+		connection := wc.conn.(*websocket.Conn)
+		connection.SetPingHandler(func(appData string) error {
 			// 对端 Ping 到达证明 TCP 入向仍活，计入 inbound 活跃（供 probe 免往返
 			// 判断）；不刷新 lastUsed，空闲逐出语义不变。
 			wc.touchInbound()
-			return wc.conn.WriteControl(
+			return connection.WriteControl(
 				websocket.PongMessage,
 				[]byte(appData),
 				time.Now().Add(WriteTimeout),
 			)
 		})
-		wc.conn.SetPongHandler(func(appData string) error {
-			if wc.session != nil {
-				wc.session.HandlePong()
-			}
-			wc.Touch()
-			wc.touchInbound()
-			wc.notifyProbePong(appData)
+		connection.SetPongHandler(func(appData string) error {
+			wc.handlePong(appData)
 			return nil
 		})
 	})
+}
+
+func (wc *WsConnection) handlePong(appData string) {
+	if wc.session != nil {
+		wc.session.HandlePong()
+	}
+	wc.Touch()
+	wc.touchInbound()
+	wc.notifyProbePong(appData)
 }
 
 // StartReadPump starts the connection's sole underlying WebSocket reader.
@@ -1014,9 +1024,22 @@ func probeConnectionWithTimeoutInternal(wc *WsConnection, timeout time.Duration,
 		wc.probeStateMu.Unlock()
 	}()
 
-	err := wc.conn.WriteControl(websocket.PingMessage, []byte(payload), deadline)
-	if err != nil {
-		return false
+	var pingDone <-chan error
+	if socket, takeover := wc.conn.(*contextTakeoverSocket); takeover {
+		// A short liveness probe must not cancel a control write after inbound
+		// business data has already rescued the request. Bound writes separately.
+		ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
+		completed := make(chan error, 1)
+		pingDone = completed
+		go func() {
+			defer cancel()
+			completed <- socket.writePing(ctx, payload)
+		}()
+	} else {
+		err := wc.conn.(*websocket.Conn).WriteControl(websocket.PingMessage, []byte(payload), deadline)
+		if err != nil {
+			return false
+		}
 	}
 
 	remaining := time.Until(deadline)
@@ -1029,6 +1052,11 @@ func probeConnectionWithTimeoutInternal(wc *WsConnection, timeout time.Duration,
 		select {
 		case <-result:
 			return wc.IsConnected()
+		case err := <-pingDone:
+			if err != nil {
+				return false
+			}
+			pingDone = nil
 		case <-queueNotify:
 			// A business frame can arrive while the Ping probe is waiting. It
 			// proves the transport is alive and must be delivered without adding

@@ -8253,6 +8253,11 @@ func parseUsageLogStatusFilter(c *gin.Context, filter *database.UsageLogFilter) 
 }
 
 func parseUsageLogsFilter(c *gin.Context, startTime, endTime time.Time) (database.UsageLogFilter, bool) {
+	searchScope := strings.TrimSpace(c.Query("search_scope"))
+	if !database.ValidUsageSearchScope(searchScope) {
+		writeError(c, http.StatusBadRequest, "无效的搜索范围")
+		return database.UsageLogFilter{}, false
+	}
 	requestType := strings.TrimSpace(c.Query("request_type"))
 	switch requestType {
 	case "", "user", "related_internal", "independent_internal", "related_unclassified", "compaction", "gateway_internal", "unknown", "not_recorded":
@@ -8285,6 +8290,7 @@ func parseUsageLogsFilter(c *gin.Context, startTime, endTime time.Time) (databas
 		ErrorKind:         strings.TrimSpace(c.Query("error_kind")),
 		Query:             strings.TrimSpace(c.Query("q")),
 		Channel:           parseUsageChannel(c),
+		SearchScope:       searchScope,
 	}
 
 	if pageStr := c.Query("page"); pageStr != "" {
@@ -9220,6 +9226,9 @@ type settingsResponse struct {
 	CodexForceWebsocket                 bool   `json:"codex_force_websocket"`
 	CodexRequestCompression             bool   `json:"codex_request_compression"`
 	CodexWSWeakNetworkMode              bool   `json:"codex_ws_weak_network_mode"`
+	CodexWSContextTakeover              bool   `json:"codex_ws_context_takeover"`
+	CodexWSCompressionLevel             int    `json:"codex_ws_compression_level"`
+	CodexWSDisableFragmentation         bool   `json:"codex_ws_disable_fragmentation"`
 	CodexWSKeepaliveEnabled             bool   `json:"codex_ws_keepalive_enabled"`
 	CodexWSKeepaliveIntervalSec         int    `json:"codex_ws_keepalive_interval_sec"`
 	CodexWSHideUpstreamErrors           bool   `json:"codex_ws_hide_upstream_errors"`
@@ -9407,6 +9416,9 @@ type updateSettingsReq struct {
 	CodexForceWebsocket                 *bool                            `json:"codex_force_websocket"`
 	CodexRequestCompression             *bool                            `json:"codex_request_compression"`
 	CodexWSWeakNetworkMode              *bool                            `json:"codex_ws_weak_network_mode"`
+	CodexWSContextTakeover              *bool                            `json:"codex_ws_context_takeover"`
+	CodexWSCompressionLevel             *int                             `json:"codex_ws_compression_level"`
+	CodexWSDisableFragmentation         *bool                            `json:"codex_ws_disable_fragmentation"`
 	CodexWSKeepaliveEnabled             *bool                            `json:"codex_ws_keepalive_enabled"`
 	CodexWSKeepaliveIntervalSec         *int                             `json:"codex_ws_keepalive_interval_sec"`
 	CodexWSHideUpstreamErrors           *bool                            `json:"codex_ws_hide_upstream_errors"`
@@ -10241,6 +10253,9 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexForceWebsocket:                 h.store.CodexForceWebsocket(),
 		CodexRequestCompression:             h.store.CodexRequestCompression(),
 		CodexWSWeakNetworkMode:              runtimeCfg.CodexWSWeakNetworkMode,
+		CodexWSContextTakeover:              runtimeCfg.CodexWSContextTakeover,
+		CodexWSCompressionLevel:             runtimeCfg.CodexWSCompressionLevel,
+		CodexWSDisableFragmentation:         runtimeCfg.CodexWSDisableFragmentation,
 		CodexWSKeepaliveEnabled:             h.store.CodexWSKeepaliveEnabled(),
 		CodexWSKeepaliveIntervalSec:         h.store.CodexWSKeepaliveIntervalSec(),
 		CodexWSHideUpstreamErrors:           h.store.CodexWSHideUpstreamErrors(),
@@ -10479,6 +10494,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "请求格式错误")
 		return
 	}
+	if req.CodexWSCompressionLevel != nil && (*req.CodexWSCompressionLevel < 1 || *req.CodexWSCompressionLevel > 9) {
+		writeError(c, http.StatusBadRequest, "codex_ws_compression_level must be between 1 and 9")
+		return
+	}
+
 	if req.PromptFilterCustomPatternsExpected != nil && req.PromptFilterCustomPatterns == nil {
 		writeError(c, http.StatusBadRequest, "Prompt 自定义规则版本快照不能单独提交")
 		return
@@ -10748,6 +10768,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	previousAutoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
 	if existingSettings != nil {
 		runtimeCfg.CodexSessionFailoverEnabled = existingSettings.CodexSessionFailoverEnabled
+		runtimeCfg.CodexWSContextTakeover = existingSettings.CodexWSContextTakeover
+		runtimeCfg.CodexWSCompressionLevel = database.NormalizeCodexWSCompressionLevel(existingSettings.CodexWSCompressionLevel)
+		runtimeCfg.CodexWSDisableFragmentation = existingSettings.CodexWSDisableFragmentation
 	}
 	previousAutoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
 	previousAutoActivate5hWindowEnabled := runtimeCfg.AutoActivate5hWindowEnabled
@@ -10979,6 +11002,16 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if req.CodexWSWeakNetworkMode != nil {
 		runtimeCfg.CodexWSWeakNetworkMode = *req.CodexWSWeakNetworkMode
 		log.Printf("设置已更新: codex_ws_weak_network_mode = %t", *req.CodexWSWeakNetworkMode)
+	}
+	if req.CodexWSCompressionLevel != nil {
+		runtimeCfg.CodexWSCompressionLevel = *req.CodexWSCompressionLevel
+	}
+	if req.CodexWSDisableFragmentation != nil {
+		runtimeCfg.CodexWSDisableFragmentation = *req.CodexWSDisableFragmentation
+	}
+	if req.CodexWSContextTakeover != nil {
+		runtimeCfg.CodexWSContextTakeover = *req.CodexWSContextTakeover
+		log.Printf("设置已更新: codex_ws_context_takeover = %t", runtimeCfg.CodexWSContextTakeover)
 	}
 
 	if req.CodexWSKeepaliveEnabled != nil {
@@ -11781,6 +11814,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexForceWebsocket:                 h.store.CodexForceWebsocket(),
 		CodexRequestCompression:             h.store.CodexRequestCompression(),
 		CodexWSWeakNetworkMode:              runtimeCfg.CodexWSWeakNetworkMode,
+		CodexWSContextTakeover:              runtimeCfg.CodexWSContextTakeover,
+		CodexWSCompressionLevel:             runtimeCfg.CodexWSCompressionLevel,
+		CodexWSDisableFragmentation:         runtimeCfg.CodexWSDisableFragmentation,
 		CodexWSKeepaliveEnabled:             h.store.CodexWSKeepaliveEnabled(),
 		CodexWSKeepaliveIntervalSec:         h.store.CodexWSKeepaliveIntervalSec(),
 		CodexWSHideUpstreamErrors:           h.store.CodexWSHideUpstreamErrors(),
@@ -12110,6 +12146,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexForceWebsocket:                 h.store.CodexForceWebsocket(),
 		CodexRequestCompression:             h.store.CodexRequestCompression(),
 		CodexWSWeakNetworkMode:              runtimeCfg.CodexWSWeakNetworkMode,
+		CodexWSContextTakeover:              runtimeCfg.CodexWSContextTakeover,
+		CodexWSCompressionLevel:             runtimeCfg.CodexWSCompressionLevel,
+		CodexWSDisableFragmentation:         runtimeCfg.CodexWSDisableFragmentation,
 		CodexWSKeepaliveEnabled:             h.store.CodexWSKeepaliveEnabled(),
 		CodexWSKeepaliveIntervalSec:         h.store.CodexWSKeepaliveIntervalSec(),
 		CodexWSHideUpstreamErrors:           h.store.CodexWSHideUpstreamErrors(),

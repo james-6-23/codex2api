@@ -2154,6 +2154,9 @@ export default function Settings() {
       codex_images_main_model: cacheNormalized.codex_images_main_model ?? '',
       codex_telemetry_enabled: cacheNormalized.codex_telemetry_enabled ?? false,
       codex_session_failover_enabled: cacheNormalized.codex_session_failover_enabled ?? false,
+      codex_ws_context_takeover: cacheNormalized.codex_ws_context_takeover ?? false,
+      codex_ws_compression_level: cacheNormalized.codex_ws_compression_level ?? 1,
+      codex_ws_disable_fragmentation: cacheNormalized.codex_ws_disable_fragmentation ?? false,
       billing_tier_policy: normalizeBillingTierPolicyValue(cacheNormalized.billing_tier_policy),
       first_token_mode: normalizeFirstTokenModeValue(cacheNormalized.first_token_mode),
       models_list_read_max_bytes:
@@ -2206,6 +2209,9 @@ export default function Settings() {
     codex_force_websocket: false,
     codex_telemetry_enabled: false,
     codex_request_compression: true,
+    codex_ws_context_takeover: false,
+    codex_ws_compression_level: 1,
+    codex_ws_disable_fragmentation: false,
     codex_ws_weak_network_mode: false,
     codex_ws_keepalive_enabled: false,
     codex_ws_keepalive_interval_sec: 60,
@@ -3623,6 +3629,27 @@ export default function Settings() {
                       <Switch
                         checked={settingsForm.codex_request_compression}
                         onCheckedChange={(checked) => autoSaveBooleanField('codex_request_compression', checked)}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.codexWSContextTakeover')} description={t('settings.codexWSContextTakeoverHint')} layout="switch" channels={CHANNELS_CODEX_ONLY}>
+                      <Switch
+                        checked={settingsForm.codex_ws_context_takeover}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_context_takeover', checked)}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.codexWSCompressionLevel')} description={t('settings.codexWSCompressionLevelHint')} channels={CHANNELS_CODEX_ONLY}>
+                      <Select
+                        value={String(settingsForm.codex_ws_compression_level)}
+                        disabled={!settingsForm.codex_ws_context_takeover}
+                        onValueChange={(value) => void autoSaveSettingsPatch({ codex_ws_compression_level: Number(value) })}
+                        options={Array.from({ length: 9 }, (_, index) => ({ value: String(index + 1), label: String(index + 1) }))}
+                      />
+                    </SettingField>
+                    <SettingField label={t('settings.codexWSFragmentation')} description={t('settings.codexWSFragmentationHint')} layout="switch" channels={CHANNELS_CODEX_ONLY}>
+                      <Switch
+                        checked={!settingsForm.codex_ws_disable_fragmentation}
+                        disabled={!settingsForm.codex_ws_context_takeover}
+                        onCheckedChange={(checked) => autoSaveBooleanField('codex_ws_disable_fragmentation', !checked)}
                       />
                     </SettingField>
                     <SettingField label={t('settings.codexWSWeakNetworkMode')} description={t('settings.codexWSWeakNetworkModeDesc')} layout="switch">

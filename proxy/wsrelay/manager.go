@@ -33,7 +33,7 @@ const (
 // WsConnection WebSocket 连接包装
 type WsConnection struct {
 	// WebSocket 连接
-	conn *websocket.Conn
+	conn upstreamWebsocket
 
 	// 握手时实际发送给上游的 User-Agent。连接复用时每个请求沿用该值，
 	// 不能用当前配置重新推导，否则设置变更后会记录并未发送的 UA。
@@ -144,6 +144,13 @@ func configureWebsocketDialerProxy(dialer *websocket.Dialer, rawProxyURL string)
 
 // NewWsConnection 创建 WebSocket 连接
 func NewWsConnection(conn *websocket.Conn, session *Session, wsURL string) *WsConnection {
+	if conn == nil {
+		return newUpstreamWsConnection(nil, session, wsURL)
+	}
+	return newUpstreamWsConnection(conn, session, wsURL)
+}
+
+func newUpstreamWsConnection(conn upstreamWebsocket, session *Session, wsURL string) *WsConnection {
 	wc := &WsConnection{
 		conn:         conn,
 		session:      session,
@@ -1112,10 +1119,6 @@ func (m *Manager) probe(wc *WsConnection) bool {
 	return probeConnection(wc)
 }
 
-// wsCompressionSeen 记录本进程已上报过的 permessage-deflate 协商结果
-// (bit0=已见协商成功,bit1=已见未协商)。拨号器一直在 offer 压缩,但协商是否
-// 成功此前没有任何可见信号;结果由上游部署与出站链路(直连/Resin)决定,按
-// 结果去重、每种只报一次,混合链路下也不会逐连接刷日志。
 var wsCompressionSeen atomic.Int32
 
 // logCompressionNegotiation 上报本次握手的 permessage-deflate 协商结果。
@@ -1124,10 +1127,18 @@ func logCompressionNegotiation(resp *http.Response, accountID int64) {
 		return
 	}
 	extensions := resp.Header.Get("Sec-Websocket-Extensions")
-	bit := int32(2)
-	if strings.Contains(strings.ToLower(extensions), "permessage-deflate") {
-		bit = 1
+	normalized := strings.ToLower(extensions)
+	mode := uint(0)
+	if strings.Contains(normalized, "permessage-deflate") {
+		mode = 1
+		if strings.Contains(normalized, "server_no_context_takeover") {
+			mode += 1
+		}
+		if strings.Contains(normalized, "client_no_context_takeover") {
+			mode += 2
+		}
 	}
+	bit := int32(1 << mode)
 	for {
 		seen := wsCompressionSeen.Load()
 		if seen&bit != 0 {
@@ -1137,7 +1148,7 @@ func logCompressionNegotiation(resp *http.Response, accountID int64) {
 			break
 		}
 	}
-	if bit == 1 {
+	if mode != 0 {
 		log.Printf("[WS] 上游已协商 permessage-deflate,帧压缩生效 (account=%d, extensions=%q)", accountID, extensions)
 	} else {
 		log.Printf("[WS] 上游未协商 permessage-deflate,帧走明文 (account=%d)", accountID)
@@ -1182,9 +1193,20 @@ func (m *Manager) createConnection(
 	// 拨号连接
 	observer := proxy.UpstreamTransportObserver(ctx)
 	observer.HandshakeProfile(websocketConnectionProfile(headers))
-	outboundIdentity := proxy.CaptureOutboundIdentityHeaders(headers)
+	outboundIdentity := proxy.CaptureOutboundWebsocketHeaders(headers)
+	outboundIdentity.CaptureStage = "prepared"
 	observer.OutboundWebsocketHandshake(outboundIdentity)
-	conn, resp, err := dialer.DialContext(ctx, wsURL, headers)
+	ctx, finishHandshakeDiagnostic := proxy.TraceOutboundWebsocketHandshake(ctx, outboundIdentity)
+	var conn upstreamWebsocket
+	var resp *http.Response
+	var err error
+	if proxy.CurrentRuntimeSettings().CodexWSContextTakeover {
+		conn, resp, err = dialContextTakeover(ctx, dialer, wsURL, headers)
+	} else {
+		conn, resp, err = dialer.DialContext(ctx, wsURL, headers)
+	}
+	outboundIdentity = finishHandshakeDiagnostic()
+	observer.OutboundWebsocketHandshake(outboundIdentity)
 	if resp != nil {
 		observer.ResponseHeaders(resp.StatusCode, resp.Header, true)
 	}
@@ -1203,7 +1225,7 @@ func (m *Manager) createConnection(
 	logCompressionNegotiation(resp, account.ID())
 
 	// 创建连接包装
-	wc := NewWsConnection(conn, session, wsURL)
+	wc := newUpstreamWsConnection(conn, session, wsURL)
 	wc.account = account
 	wc.PoolKey = poolKey
 	wc.proxyURL = proxyURL
@@ -1443,15 +1465,24 @@ func (m *Manager) ReplaceConnection(
 
 // SendHeartbeat 发送心跳 Ping
 func (m *Manager) SendHeartbeat(wc *WsConnection) error {
-	wc.writeMu.Lock()
-	defer wc.writeMu.Unlock()
+	if _, takeover := wc.conn.(*contextTakeoverSocket); !takeover {
+		wc.writeMu.Lock()
+		defer wc.writeMu.Unlock()
+	}
 
 	if !wc.IsConnected() {
 		return fmt.Errorf("connection is not connected")
 	}
 
 	deadline := time.Now().Add(10 * time.Second)
-	err := wc.conn.WriteControl(websocket.PingMessage, []byte{}, deadline)
+	var err error
+	if socket, takeover := wc.conn.(*contextTakeoverSocket); takeover {
+		ctx, cancel := context.WithTimeout(context.Background(), WriteTimeout)
+		defer cancel()
+		err = socket.writePing(ctx, "")
+	} else {
+		err = wc.conn.(*websocket.Conn).WriteControl(websocket.PingMessage, []byte{}, deadline)
+	}
 	if err != nil {
 		wc.noteExit("heartbeat_write_failure", err)
 		// 写路径故障 ≠ 读路径已死：有在途请求时只摘池禁止新复用，不关 socket、

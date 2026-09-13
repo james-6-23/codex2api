@@ -273,6 +273,12 @@
     "proxyPoolLinkedHint": "已關聯代理池節點（按位址綁定）：在「代理」頁修改該節點位址會同步到所有綁定帳號，刪除則自動解除綁定。"
   },
   "settings": {
+    "codexWSContextTakeover": "WS 壓縮字典重用",
+    "codexWSCompressionLevel": "WS 壓縮等級",
+    "codexWSCompressionLevelHint": "開啟 WS 壓縮字典重用後可設定。1 級優先速度，等級越高通常壓得更小、越耗 CPU；預設 1。僅在協商視窗為 32 KiB 時生效，較小視窗使用固定壓縮策略。僅影響新建立的連線。",
+    "codexWSFragmentation": "WS 分幀傳送",
+    "codexWSFragmentationHint": "開啟 WS 壓縮字典重用後可設定，預設開啟。每幀最多 16 KiB，讓心跳等控制訊息有機會穿插傳送；關閉後整條訊息使用一個資料幀。僅影響新建立的連線，關閉新壓縮模式不會清除已儲存的選項。",
+    "codexWSContextTakeoverHint": "預設關閉：維持現有 permessage-deflate 逐條訊息獨立壓縮。開啟後協商類似官方的跨訊息壓縮字典重用，每條連線佔用更多記憶體；伺服器仍可拒絕壓縮或要求訊息獨立壓縮。設定變更僅對新建立的上游 WebSocket 連線生效，既有連線及續鏈保持不變，直到自然替換，不主動中斷。獨立於 HTTP zstd 壓縮，不修改聊天上下文或會話/回應 ID。",
     "codexSessionFailoverEnabled": "帳號不可用或會話容量不足時允許換號",
     "codexSessionFailoverEnabledHint": "預設關閉。帳號額度耗盡、自動/手動暫停、停用或無法接納目前窗口時，允許後續請求有損重開；目標帳號分組集合必須完全一致，不得增加或減少分組。每次換號建立新的出站身分段及握手，窗口從 0 開始（47→0、48→1）；相同上下文保持編號，回退或恢復的上下文獨立持久化映射，不產生負數，切回舊帳號也建立新段。只在出站副本清理舊加密上下文（加密推理、加密壓縮）、檔案/輸入項引用、未知的 previous_response_id 及舊 turn-state；會遺失對應歷史或資料，請優先提供完整明文上下文。清理後沒有可用輸入時需補充資料或建立新會話。目前帳號本段已核實的新內容保留。原始尋根、入站編號、使用者額度及窗口授權到期時間不變。不會僅因 500、busy、黑名單或綁定到期而換號，不繞過使用者併發、擴容確認或黑名單限制。",
     "codexTelemetry": "用戶端遙測（實驗性）",
@@ -1443,6 +1449,21 @@
       "sections": { "request": "請求資訊", "client": "用戶端與裝置", "upstream": "上游出口、連線與錯誤階段", "outbound": "最終出站身分（HTTP／WS 握手／本文）", "resolved": "實際解析結果", "audit": "內容審核階段", "dispatch": "模型調度階段", "windows": "視窗處理結果", "routing": "帳號選擇結果", "recent": "無根最近帳號回溯", "incoming": "入口欄位（按來源區分）" }
     },
     "searchLogs": "搜尋會話前綴、錯誤、模型、端點、帳號、NewAPI 使用者、IP、用戶端 UA 或 API Key…",
+    "searchScopeLabel": "搜尋範圍",
+    "searchInField": "搜尋{{field}}…",
+    "searchScopes": {
+      "all": "全部欄位",
+      "session": "會話前綴",
+      "request": "請求 ID",
+      "error": "錯誤",
+      "model": "模型",
+      "endpoint": "端點",
+      "account": "帳號",
+      "newapi_user": "NewAPI 使用者名稱",
+      "ip": "IP",
+      "user_agent": "用戶端 UA",
+      "api_key": "API Key"
+    },
     "sessionIDPrefix": "會話 ID 前綴",
     "allRequestTypes": "全部請求類別",
     "sessionIDPrefixHint": "入站 session_id 的前 8 位，僅用於關聯觀察，不代表父子關係；未擷取、無有效 UUID 或欄位衝突時顯示 -。",
