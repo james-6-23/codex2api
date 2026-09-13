@@ -1414,11 +1414,20 @@ const AccountTableRow = memo(function AccountTableRow({
                             )}
                             {visibleColumns.subscription && (
                               <TableCell>
-                                <SubscriptionBadge
-                                  accountId={account.id}
-                                  subscription={account.subscription}
-                                  canRefresh
-                                />
+                                <div className="flex flex-col items-start gap-1.5">
+                                  <SubscriptionBadge
+                                    accountId={account.id}
+                                    subscription={account.subscription}
+                                    canRefresh
+                                  />
+                                  <SubscriptionExpiryDate
+                                    expiresAt={
+                                      account.subscription?.expires_at ??
+                                      account.subscription_expires_at
+                                    }
+                                    planType={account.plan_type}
+                                  />
+                                </div>
                               </TableCell>
                             )}
                             {visibleColumns.status && (
@@ -12885,6 +12894,48 @@ function formatPlanLabel(planType?: string): string {
   if (lower === "prolite" || lower === "pro_lite" || lower === "pro-lite")
     return "ProLite";
   return raw;
+}
+
+function SubscriptionExpiryDate({
+  expiresAt,
+  planType,
+}: {
+  expiresAt?: string;
+  planType?: string;
+}) {
+  const { t, i18n } = useTranslation();
+  if (!expiresAt) return null;
+  const plan = (planType || "").toLowerCase().trim();
+  if (plan === "" || plan === "free" || plan === "api") return null;
+
+  const timestamp = Date.parse(expiresAt);
+  if (Number.isNaN(timestamp)) return null;
+
+  const localDate = new Date(timestamp).toLocaleString(i18n.language, {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+  const title = t(
+    timestamp < Date.now()
+      ? "accounts.subscriptionExpiredTitle"
+      : "accounts.subscriptionExpiresTitle",
+    { date: localDate },
+  );
+
+  return (
+    <time
+      dateTime={expiresAt}
+      title={title}
+      aria-label={title}
+      className="whitespace-nowrap text-[11px] text-muted-foreground tabular-nums"
+    >
+      {localDate}
+    </time>
+  );
 }
 
 function isWorkspacePlan(planType?: string): boolean {
