@@ -78,6 +78,7 @@ func (h *Handler) LiveSideband(c *gin.Context) {
 	h.liveCalls().finalize(record)
 }
 
+// copyLiveSideband 在两个 WebSocket 连接之间双向复制一条数据流。
 func copyLiveSideband(ctx context.Context, dst, src *websocket.Conn) error {
 	if dst == nil || src == nil {
 		return errLiveCallNotFound

@@ -1623,6 +1623,8 @@ func TestResponsesHTTPIngressFallsBackToHTTPWhenForcedWebsocketMessageTooBig(t *
 	}
 }
 
+// TestResponsesHTTPIngressKeepsDownstreamAliveDuringUpstreamSilence 验证 HTTP SSE
+// 入站请求在上游静默期间仍向下游发送保活。
 func TestResponsesHTTPIngressKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 

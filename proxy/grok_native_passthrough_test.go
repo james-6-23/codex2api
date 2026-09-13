@@ -201,6 +201,8 @@ func TestForwardGrokNativeTypelessEventErrorStaysPrivateAcrossProtocols(t *testi
 	}
 }
 
+// TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError 验证首个可见事件前
+// 的失败仍返回协议对应的 HTTP 错误，而不会伪造成功流。
 func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
@@ -232,6 +234,8 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *
 	}
 }
 
+// TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE 验证首个保活提交 SSE 后，
+// Grok 各协议的错误仍以协议事件返回。
 func TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {

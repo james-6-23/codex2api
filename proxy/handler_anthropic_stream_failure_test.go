@@ -47,6 +47,7 @@ func newAnthropicStreamFailureTestHandler(t *testing.T, serve func(call int32, w
 	return NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil), &calls
 }
 
+// invokeAnthropicMessagesStream 调用 Messages 流处理器并返回测试响应记录器。
 func invokeAnthropicMessagesStream(t *testing.T, handler *Handler) *httptest.ResponseRecorder {
 	t.Helper()
 	recorder := httptest.NewRecorder()

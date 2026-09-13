@@ -6613,6 +6613,7 @@ func (h *Handler) ResponsesCompact(c *gin.Context) {
 	}
 }
 
+// ChatCompletions 处理 OpenAI Chat Completions 请求，并在流式响应中发送协议保活。
 func (h *Handler) ChatCompletions(c *gin.Context) {
 	// 1. 读取请求体
 	rawBody, err := readRawRequestBody(c)

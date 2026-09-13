@@ -18,6 +18,7 @@ const (
 // 变量形式只为处理器级测试缩短等待；生产运行从环境变量读取。
 var downstreamSSEKeepaliveInterval = downstreamSSEKeepaliveIntervalFromEnv()
 
+// downstreamSSEKeepaliveIntervalFromEnv 读取下游 HTTP/SSE 保活周期配置。
 func downstreamSSEKeepaliveIntervalFromEnv() time.Duration {
 	return durationFromEnv("DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL", defaultDownstreamSSEKeepaliveInterval)
 }

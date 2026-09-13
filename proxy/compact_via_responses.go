@@ -146,6 +146,8 @@ func collectCompactResponsesSSE(body io.Reader) (responseJSON []byte, failedPayl
 	return collectCompactResponsesSSEWithContinuousRetryKeepalive(context.Background(), body)
 }
 
+// collectCompactResponsesSSEWithContinuousRetryKeepalive 聚合上游 compact SSE，
+// 并在读取期间通过请求级保活刷新下游连接。
 func collectCompactResponsesSSEWithContinuousRetryKeepalive(ctx context.Context, body io.Reader) (responseJSON []byte, failedPayload []byte, err error) {
 	outputItems := make([]json.RawMessage, 0, 2)
 	seenOutputItems := make(map[string]struct{})

@@ -26,6 +26,7 @@ type informationalRecordingWriter struct {
 	informational []int
 }
 
+// WriteHeader 记录信息响应，其他状态码交给 ResponseRecorder 处理。
 func (w *informationalRecordingWriter) WriteHeader(code int) {
 	if code >= http.StatusContinue && code < http.StatusOK {
 		w.informational = append(w.informational, code)
@@ -47,6 +48,7 @@ func contextWithContinuousRetryKeepalive(keepalive continuousRetryKeepalive) con
 	return context.WithValue(context.Background(), continuousRetryKeepaliveContextKey{}, keepalive)
 }
 
+// TestRequestContinuousRetryKeepaliveAccumulatesShortWaits 验证短等待共用同一心跳时间窗。
 func TestRequestContinuousRetryKeepaliveAccumulatesShortWaits(t *testing.T) {
 	previousInterval := continuousRetryKeepaliveInterval
 	continuousRetryKeepaliveInterval = time.Minute
@@ -77,6 +79,7 @@ func TestRequestContinuousRetryKeepaliveAccumulatesShortWaits(t *testing.T) {
 	}
 }
 
+// TestSetContinuousRetryKeepaliveActive 验证请求级保活可以切换激活状态。
 func TestSetContinuousRetryKeepaliveActive(t *testing.T) {
 	keepalive := &requestContinuousRetryKeepalive{}
 	keepalive.SetActive(true)
@@ -278,6 +281,7 @@ func TestReadSSEStreamWithContinuousRetryKeepaliveWhileWaitingForFrame(t *testin
 	}
 }
 
+// TestContinuousRetrySSEKeepaliveAndCommittedErrors 验证已提交 SSE 可同时承载心跳和错误事件。
 func TestContinuousRetrySSEKeepaliveAndCommittedErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -312,6 +316,7 @@ func TestContinuousRetrySSEKeepaliveAndCommittedErrors(t *testing.T) {
 	}
 }
 
+// TestContinuousRetryMessagesKeepaliveWritesPingAfterCommit 验证 Messages 使用原生 ping 事件保活。
 func TestContinuousRetryMessagesKeepaliveWritesPingAfterCommit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()
@@ -336,6 +341,7 @@ func TestContinuousRetryMessagesKeepaliveWritesPingAfterCommit(t *testing.T) {
 	}
 }
 
+// TestContinuousRetrySSEKeepaliveCommitsHeartbeatBeforeFirstEvent 验证首个心跳会先提交 SSE 200。
 func TestContinuousRetrySSEKeepaliveCommitsHeartbeatBeforeFirstEvent(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	recorder := httptest.NewRecorder()

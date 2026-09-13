@@ -34,6 +34,7 @@ type requestContinuousRetryKeepalive struct {
 	cancel context.CancelCauseFunc
 }
 
+// Activate 开始请求级保活时间窗；重复激活不会重置已有时间窗。
 func (k *requestContinuousRetryKeepalive) Activate() {
 	if k == nil {
 		return
@@ -48,6 +49,7 @@ func (k *requestContinuousRetryKeepalive) Activate() {
 	}
 }
 
+// Deactivate 停止请求级保活，但保留请求上下文供调用方收尾。
 func (k *requestContinuousRetryKeepalive) Deactivate() {
 	if k != nil {
 		k.mu.Lock()
@@ -56,6 +58,7 @@ func (k *requestContinuousRetryKeepalive) Deactivate() {
 	}
 }
 
+// SetActive 根据端点协议开关启用或停用请求级保活。
 func (k *requestContinuousRetryKeepalive) SetActive(active bool) {
 	if active {
 		k.Activate()
@@ -64,6 +67,7 @@ func (k *requestContinuousRetryKeepalive) SetActive(active bool) {
 	k.Deactivate()
 }
 
+// Active 报告请求级保活当前是否处于激活状态。
 func (k *requestContinuousRetryKeepalive) Active() bool {
 	if k == nil {
 		return false
@@ -73,6 +77,7 @@ func (k *requestContinuousRetryKeepalive) Active() bool {
 	return k.active
 }
 
+// Keepalive 在心跳到期时写入一次协议保活，并在写失败时取消请求。
 func (k *requestContinuousRetryKeepalive) Keepalive() error {
 	if k == nil {
 		return nil
@@ -98,6 +103,7 @@ func (k *requestContinuousRetryKeepalive) Keepalive() error {
 	return nil
 }
 
+// installContinuousRetrySSEKeepalive 为流式端点安装 SSE 注释保活，非流式端点转用 102。
 func installContinuousRetrySSEKeepalive(c *gin.Context, stream bool, contentType string) func() {
 	return installContinuousRetrySSEKeepaliveWithOptions(c, stream, continuousRetrySSEKeepaliveOptions{
 		contentType: contentType,
@@ -118,6 +124,7 @@ type continuousRetrySSEKeepaliveOptions struct {
 	payload     string
 }
 
+// installContinuousRetrySSEKeepaliveWithOptions 安装带指定内容类型和心跳载荷的请求保活。
 func installContinuousRetrySSEKeepaliveWithOptions(c *gin.Context, stream bool, options continuousRetrySSEKeepaliveOptions) func() {
 	if !stream {
 		return installContinuousRetryHTTPInformationalKeepalive(c)
@@ -162,6 +169,7 @@ func installContinuousRetrySSEKeepaliveWithOptions(c *gin.Context, stream bool, 
 	}
 }
 
+// unwrapHTTPResponseWriter 解开中间件包装的 ResponseWriter，并报告是否发生了解包。
 func unwrapHTTPResponseWriter(writer http.ResponseWriter) (http.ResponseWriter, bool) {
 	if writer == nil {
 		return nil, false
@@ -252,6 +260,7 @@ func activateContinuousRetryKeepaliveForLimit(ctx context.Context, retryLimit in
 	}
 }
 
+// continuousRetryKeepaliveActive 报告上下文中的请求级保活是否已激活。
 func continuousRetryKeepaliveActive(ctx context.Context) bool {
 	if keepalive := continuousRetryKeepaliveForContext(ctx); keepalive != nil {
 		return keepalive.Active()
@@ -259,6 +268,7 @@ func continuousRetryKeepaliveActive(ctx context.Context) bool {
 	return false
 }
 
+// continuousRetryKeepaliveDelay 计算距离下一次请求级心跳的剩余等待时间。
 func continuousRetryKeepaliveDelay(keepalive continuousRetryKeepalive) time.Duration {
 	if continuousRetryKeepaliveInterval <= 0 {
 		return 0
@@ -289,6 +299,7 @@ func continuousRetryContextError(ctx context.Context) error {
 	return ctx.Err()
 }
 
+// stopContinuousRetryTimer 停止计时器并清空可能已排队的计时事件。
 func stopContinuousRetryTimer(timer *time.Timer) {
 	if timer == nil || timer.Stop() {
 		return

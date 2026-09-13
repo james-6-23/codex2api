@@ -1011,6 +1011,7 @@ func TestForwardImagesExplicitToolMissingCoolsModel(t *testing.T) {
 	}
 }
 
+// TestForwardImagesEmptyTerminalRetriesSameAccountOnce 验证空终态会在同一账号上重试一次。
 func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
@@ -1065,6 +1066,8 @@ func TestForwardImagesEmptyTerminalRetriesSameAccountOnce(t *testing.T) {
 	}
 }
 
+// TestForwardImagesInitialKeepaliveCommitsSSEFailure 验证 Images 首个保活提交 SSE 后，
+// 本地失败会转换为协议错误事件。
 func TestForwardImagesInitialKeepaliveCommitsSSEFailure(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()

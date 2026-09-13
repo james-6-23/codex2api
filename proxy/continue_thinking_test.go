@@ -24,10 +24,12 @@ func sseBody(events ...string) io.ReadCloser {
 	return io.NopCloser(strings.NewReader(b.String()))
 }
 
+// sseResponse 构造包含给定事件的成功测试 SSE 响应。
 func sseResponse(events ...string) *http.Response {
 	return &http.Response{StatusCode: http.StatusOK, Body: sseBody(events...)}
 }
 
+// delayedSSEResponse 返回在指定延迟后写入事件的测试 SSE 响应。
 func delayedSSEResponse(delay time.Duration, events ...string) *http.Response {
 	reader, writer := io.Pipe()
 	payload := sseBody(events...)
@@ -696,6 +698,8 @@ func cleanSecondRound() *http.Response {
 	)
 }
 
+// TestFoldKeepaliveFiresDuringHiddenRoundAndStopsAfterFold 验证隐藏续想轮等待期间会保活，
+// 且整个折叠结束后停止回调。
 func TestFoldKeepaliveFiresDuringHiddenRoundAndStopsAfterFold(t *testing.T) {
 	var counter atomic.Int32
 	f := keepaliveFold(t, &counter, func() bool { return true }, 80*time.Millisecond, cleanSecondRound())
@@ -716,6 +720,8 @@ func TestFoldKeepaliveFiresDuringHiddenRoundAndStopsAfterFold(t *testing.T) {
 	}
 }
 
+// TestFoldKeepaliveFiresDuringCleanFirstRoundAndStops 验证首轮静默期间会发送保活，
+// 且折叠结束后保活协程会停止。
 func TestFoldKeepaliveFiresDuringCleanFirstRoundAndStops(t *testing.T) {
 	var counter atomic.Int32
 	f := keepaliveFold(t, &counter, func() bool { return true }, 0, nil)
@@ -744,6 +750,7 @@ func TestFoldKeepaliveFiresDuringCleanFirstRoundAndStops(t *testing.T) {
 	}
 }
 
+// TestFoldKeepaliveDisabledAtZeroInterval 验证保活间隔为零时不会启动心跳。
 func TestFoldKeepaliveDisabledAtZeroInterval(t *testing.T) {
 	var counter atomic.Int32
 	f := keepaliveFold(t, &counter, func() bool { return true }, 0, nil)

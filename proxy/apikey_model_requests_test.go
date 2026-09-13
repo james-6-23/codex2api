@@ -133,6 +133,8 @@ func TestModelRequestQuotaHTTPMappedModelAndProtocolErrors(t *testing.T) {
 	}
 }
 
+// TestModelRequestQuotaExecutorRetriesAndFreshRequest 验证同一逻辑请求的重试共享一次额度扣减，
+// 且重新进入处理器时仍使用新的请求身份。
 func TestModelRequestQuotaExecutorRetriesAndFreshRequest(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -171,6 +173,8 @@ func TestModelRequestQuotaExecutorRetriesAndFreshRequest(t *testing.T) {
 	}
 }
 
+// TestModelRequestQuotaActivatesSSEKeepaliveAfterAdmission 验证额度准入成功后，
+// 上游尚未返回响应头时也会激活下游 SSE 保活。
 func TestModelRequestQuotaActivatesSSEKeepaliveAfterAdmission(t *testing.T) {
 	previousInterval := continuousRetryKeepaliveInterval
 	continuousRetryKeepaliveInterval = 5 * time.Millisecond

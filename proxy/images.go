@@ -1547,6 +1547,7 @@ func (h *Handler) nextImageAccount(c *gin.Context, apiKeyID int64, exclude map[i
 	return h.nextAccountForSessionWithFilter("", apiKeyID, exclude, h.applyScopeBudgetFilter(c, fallbackFilter))
 }
 
+// forwardImagesRequest 执行 Images 请求的账号调度、上游重试、响应聚合和下游输出。
 func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestModel, logModel, logEffectiveModel string, responsesBody []byte, responseFormat, streamPrefix string, stream bool) {
 	if strings.TrimSpace(logModel) == "" {
 		logModel = requestModel
@@ -2638,6 +2639,7 @@ func imageErrorPrefersSameAccountRetry(err error) bool {
 	return outcome != nil && outcome.kind == imageNoOutputEmpty
 }
 
+// collectImagesResponse 聚合 Images 上游 SSE，并在读取期间维持请求级下游保活。
 func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, fallbackModel string, urlFor imageURLBuilder, upscalePlan imageUpscalePlan, requireSuccessfulTerminal ...bool) ([]byte, *UsageInfo, int, imageUsageLogInfo, error) {
 	var (
 		out            []byte
@@ -2733,6 +2735,7 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 	return out, usage, len(gjson.GetBytes(out, "data").Array()), imageLogInfo, nil
 }
 
+// streamImagesResponse 将 Images 上游事件转发为下游 SSE，并插入协议保活帧。
 func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseFormat, streamPrefix, fallbackModel string, start time.Time, upscalePlan imageUpscalePlan, attempts ...*continuousRetryStreamAttempt) (*UsageInfo, int, int, imageUsageLogInfo, bool, error) {
 	c.Header("Content-Type", "text/event-stream")
 	c.Header("Cache-Control", "no-cache")
