@@ -360,6 +360,49 @@ func executeHTTPWithContinuousRetryKeepalive(ctx context.Context, execute func()
 	}
 }
 
+// runWithContinuousRetryKeepalive 在阻塞操作运行期间继续写入请求级保活。
+// 操作结果仍由调用方线程消费，心跳写入失败或请求取消会作为错误返回。
+func runWithContinuousRetryKeepalive[T any](ctx context.Context, operation func() T) (T, error) {
+	var zero T
+	if operation == nil {
+		return zero, errors.New("nil keepalive operation")
+	}
+	keepalive := continuousRetryKeepaliveForContext(ctx)
+	if keepalive == nil || !keepalive.Active() || continuousRetryKeepaliveInterval <= 0 {
+		return operation(), nil
+	}
+	result := make(chan T, 1)
+	go func() { result <- operation() }()
+	for {
+		delay := continuousRetryKeepaliveDelay(keepalive)
+		if delay <= 0 {
+			if err := keepalive.Keepalive(); err != nil {
+				return <-result, err
+			}
+			delay = continuousRetryKeepaliveDelay(keepalive)
+			if delay <= 0 {
+				delay = continuousRetryKeepaliveInterval
+			}
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case value := <-result:
+			stopContinuousRetryTimer(timer)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return value, continuousRetryContextError(ctx)
+			}
+			return value, nil
+		case <-timer.C:
+			if err := keepalive.Keepalive(); err != nil {
+				return <-result, err
+			}
+		case <-ctx.Done():
+			stopContinuousRetryTimer(timer)
+			return <-result, continuousRetryContextError(ctx)
+		}
+	}
+}
+
 type continuousRetryReadResult struct {
 	data []byte
 	err  error

@@ -242,6 +242,30 @@ func TestExecuteHTTPWithContinuousRetryKeepaliveWhileWaitingForHeaders(t *testin
 	}
 }
 
+// TestRunWithContinuousRetryKeepaliveDuringBlockingOperation 验证阻塞操作期间保活仍持续触发。
+func TestRunWithContinuousRetryKeepaliveDuringBlockingOperation(t *testing.T) {
+	previousInterval := continuousRetryKeepaliveInterval
+	continuousRetryKeepaliveInterval = 5 * time.Millisecond
+	t.Cleanup(func() { continuousRetryKeepaliveInterval = previousInterval })
+
+	keepalive := &recordingContinuousRetryKeepalive{}
+	keepalive.Activate()
+	ctx := contextWithContinuousRetryKeepalive(keepalive)
+	value, err := runWithContinuousRetryKeepalive(ctx, func() string {
+		time.Sleep(35 * time.Millisecond)
+		return "done"
+	})
+	if err != nil {
+		t.Fatalf("run blocking operation: %v", err)
+	}
+	if value != "done" {
+		t.Fatalf("operation result = %q, want done", value)
+	}
+	if keepalive.writes < 2 {
+		t.Fatalf("heartbeat writes = %d, want at least 2", keepalive.writes)
+	}
+}
+
 func TestReadSSEStreamWithContinuousRetryKeepaliveWhileWaitingForFrame(t *testing.T) {
 	previousInterval := continuousRetryKeepaliveInterval
 	continuousRetryKeepaliveInterval = time.Millisecond

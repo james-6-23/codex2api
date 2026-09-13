@@ -239,13 +239,14 @@ func TestForwardGrokNativeFailureBeforeVisibleOutputReturnsProtocolHTTPError(t *
 func TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	tests := []struct {
-		name     string
-		protocol GrokProtocol
-		path     string
+		name       string
+		protocol   GrokProtocol
+		path       string
+		wantMarker string
 	}{
-		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses"},
-		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions"},
-		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages"},
+		{name: "responses", protocol: GrokProtocolResponses, path: "/v1/responses", wantMarker: `"type":"response.failed"`},
+		{name: "chat", protocol: GrokProtocolChatCompletions, path: "/v1/chat/completions", wantMarker: `"error":{"code":"upstream_stream_break"`},
+		{name: "messages", protocol: GrokProtocolMessages, path: "/v1/messages", wantMarker: "event: error\n"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -268,7 +269,10 @@ func TestSendGrokNativeErrorAfterInitialKeepaliveUsesSSE(t *testing.T) {
 			})
 
 			body := recorder.Body.String()
-			if recorder.Code != http.StatusOK || !strings.Contains(body, downstreamSSEKeepaliveComment) || !strings.Contains(body, "upstream busy") {
+			if recorder.Code != http.StatusOK ||
+				!strings.Contains(body, downstreamSSEKeepaliveComment) ||
+				!strings.Contains(body, tc.wantMarker) ||
+				!strings.Contains(body, "upstream busy") {
 				t.Fatalf("committed SSE error = status %d body %q", recorder.Code, body)
 			}
 		})

@@ -2286,6 +2286,16 @@ func applyImageUpscalePlan(ctx context.Context, plan imageUpscalePlan, results [
 	return results
 }
 
+// applyImageUpscalePlanWithKeepalive 在图片超分期间保持下游连接有协议流量。
+func applyImageUpscalePlanWithKeepalive(ctx context.Context, plan imageUpscalePlan, results []imageCallResult) ([]imageCallResult, error) {
+	if !plan.enabled() {
+		return results, nil
+	}
+	return runWithContinuousRetryKeepalive(ctx, func() []imageCallResult {
+		return applyImageUpscalePlan(ctx, plan, results)
+	})
+}
+
 func imageFormatFromContentType(contentType string) string {
 	switch strings.ToLower(strings.TrimSpace(contentType)) {
 	case "image/jpeg", "image/jpg":
@@ -2691,7 +2701,12 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 				readErr = classifyImageNoOutput(modelText.String())
 				return false
 			}
-			results = applyImageUpscalePlan(ctx, upscalePlan, results)
+			var upscaleErr error
+			results, upscaleErr = applyImageUpscalePlanWithKeepalive(ctx, upscalePlan, results)
+			if upscaleErr != nil {
+				readErr = upscaleErr
+				return false
+			}
 			out, readErr = buildImagesAPIResponse(ctx, results, createdAt, usageRaw, firstMeta, responseFormat, urlFor)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
 			return false
@@ -2722,7 +2737,10 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 			for i := range pendingResults {
 				mergeImageMeta(&pendingResults[i], firstMeta)
 			}
-			pendingResults = applyImageUpscalePlan(ctx, upscalePlan, pendingResults)
+			pendingResults, readErr = applyImageUpscalePlanWithKeepalive(ctx, upscalePlan, pendingResults)
+			if readErr != nil {
+				return nil, usage, 0, imageLogInfo, readErr
+			}
 			out, readErr = buildImagesAPIResponse(ctx, pendingResults, createdAt, nil, firstMeta, responseFormat, urlFor)
 			if readErr != nil {
 				return nil, usage, 0, imageLogInfo, readErr
@@ -2917,8 +2935,16 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 				setReadErr(err)
 				return false
 			}
-			// 超分期间 keepalive 注释帧仍在发送,下游连接不会因此空闲超时。
-			results = applyImageUpscalePlan(c.Request.Context(), upscalePlan, results)
+			// 超分期间由独立的请求级保活循环继续发送注释帧。
+			var upscaleErr error
+			results, upscaleErr = applyImageUpscalePlanWithKeepalive(c.Request.Context(), upscalePlan, results)
+			if upscaleErr != nil {
+				if wroteImageOutput {
+					_ = writeEvent("error", buildImagesStreamErrorPayload(upscaleErr.Error()))
+				}
+				setReadErr(upscaleErr)
+				return false
+			}
 			eventName := streamPrefix + ".completed"
 			for _, image := range results {
 				mergeImageMeta(&image, streamMeta)
@@ -2974,7 +3000,14 @@ func (h *Handler) streamImagesResponse(c *gin.Context, body io.Reader, responseF
 		_ = writeRaw("", true)
 	}
 	if imageCount == 0 && len(pendingResults) > 0 && getReadErr() == nil && streamAttempt == nil {
-		pendingResults = applyImageUpscalePlan(c.Request.Context(), upscalePlan, pendingResults)
+		var upscaleErr error
+		pendingResults, upscaleErr = applyImageUpscalePlanWithKeepalive(c.Request.Context(), upscalePlan, pendingResults)
+		if upscaleErr != nil {
+			setReadErr(upscaleErr)
+		}
+		if getReadErr() != nil {
+			return usage, imageCount, firstTokenMs, imageLogInfo, wroteImageOutput, getReadErr()
+		}
 		eventName := streamPrefix + ".completed"
 		for _, image := range pendingResults {
 			mergeImageMeta(&image, streamMeta)
