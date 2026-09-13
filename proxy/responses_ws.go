@@ -239,9 +239,11 @@ func (h *Handler) ResponsesWebSocket(c *gin.Context) {
 	conn.SetReadLimit(int64(security.MaxRequestBodySize))
 	requestCtx, messages, readPumpDone, cancel := startResponsesWSReadPump(c.Request.Context(), conn)
 	c.Request = c.Request.WithContext(requestCtx)
+	stopDownstreamKeepalive := startDownstreamWSKeepalive(requestCtx, conn, cancel)
 	defer func() {
 		cancel()
 		_ = conn.Close()
+		stopDownstreamKeepalive()
 		<-readPumpDone
 	}()
 
@@ -510,11 +512,6 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 		stopRetryDeadline()
 	}()
-	stopRetryKeepalive := installContinuousRetryWSKeepalive(c, conn)
-	defer stopRetryKeepalive()
-	if continuousRetryBuffersAttempts(continuousRetryPolicy) {
-		activateContinuousRetryKeepalive(c.Request.Context())
-	}
 	// The continuous selector is independent from the legacy finite WebSocket
 	// silent-retry switch. Selected failures use its unlimited budget even when
 	// the legacy switch is disabled; unselected failures retain old semantics.

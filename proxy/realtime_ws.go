@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,8 +57,15 @@ func (h *Handler) RealtimeWebSocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
-	defer conn.Close()
 	conn.SetReadLimit(int64(security.MaxRequestBodySize))
+	requestCtx, cancel := context.WithCancel(c.Request.Context())
+	c.Request = c.Request.WithContext(requestCtx)
+	stopDownstreamKeepalive := startDownstreamWSKeepalive(requestCtx, conn, cancel)
+	defer func() {
+		cancel()
+		_ = conn.Close()
+		stopDownstreamKeepalive()
+	}()
 
 	state := realtimeTextSession{Model: strings.TrimSpace(c.Query("model"))}
 	if err := writeResponsesWSMessage(conn, marshalRealtimeServerEvent(map[string]any{
