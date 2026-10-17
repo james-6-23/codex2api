@@ -768,6 +768,10 @@ func shouldAutoInjectResponsesImageGenerationTool(body map[string]any) bool {
 	if hasTopLevelResponsesImageOptions(body) {
 		return true
 	}
+	// An implicit image tool must not evict an explicitly supplied tool at capacity.
+	if tools, ok := body["tools"].([]any); ok && len(tools) >= maxTools {
+		return false
+	}
 	return !hasStructuredResponsesFormat(body)
 }
 

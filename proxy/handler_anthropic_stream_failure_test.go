@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"io"
@@ -65,6 +66,50 @@ func writeCodexSSE(w http.ResponseWriter, events ...string) {
 	}
 	if flusher, ok := w.(http.Flusher); ok {
 		flusher.Flush()
+	}
+}
+
+func TestMessagesStreamsThinkingBeforeUpstreamCompletes(t *testing.T) {
+	for name, event := range map[string]string{
+		"delta":        `{"type":"response.reasoning_summary_text.delta","delta":"early thought"}`,
+		"initial part": `{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":"early thought"}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			previousRuntime := CurrentRuntimeSettings()
+			runtime := previousRuntime
+			runtime.CodexForceWebsocket = false
+			runtime.StreamFlushPolicy = "immediate"
+			ApplyRuntimeSettings(runtime)
+			t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime) })
+			finish := make(chan struct{})
+			handler, _ := newAnthropicStreamFailureTestHandler(t, func(_ int32, w http.ResponseWriter) {
+				writeCodexSSE(w,
+					`{"type":"response.created"}`,
+					`{"type":"response.output_item.added","item":{"type":"reasoning"}}`,
+					event,
+				)
+				<-finish
+				writeCodexSSE(w, `{"type":"response.completed","response":{"status":"completed","output":[],"usage":{"input_tokens":1,"output_tokens":1}}}`)
+			})
+			router := gin.New()
+			router.POST("/v1/messages", handler.Messages)
+			downstream := httptest.NewServer(router)
+			t.Cleanup(downstream.Close)
+			t.Cleanup(func() { close(finish) })
+			client := &http.Client{Timeout: 5 * time.Second}
+			resp, err := client.Post(downstream.URL+"/v1/messages", "application/json", strings.NewReader(`{"model":"claude-sonnet-4-6","stream":true,"messages":[{"role":"user","content":"hello"}]}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer resp.Body.Close()
+			scanner := bufio.NewScanner(resp.Body)
+			for scanner.Scan() {
+				if strings.Contains(scanner.Text(), `"thinking":"early thought"`) {
+					return
+				}
+			}
+			t.Fatalf("thinking was not flushed before upstream completion: %v", scanner.Err())
+		})
 	}
 }
 

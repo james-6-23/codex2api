@@ -4975,7 +4975,7 @@
     "streamFlushInterval": "合并刷新间隔",
     "streamFlushIntervalDesc": "coalesce 模式下两次 flush 的最小间隔，单位毫秒（1~1000）。",
     "firstTokenExcludesWsAcquire": "首字时间不含取连耗时",
-    "firstTokenExcludesWsAcquireDesc": "开启后，用量日志记录的首字时间扣除本次请求的 WS 连接获取耗时（排队/探活/握手），只反映上游产出首个内容的速度；取连耗时仍单独记录在“取连耗时”列，两列相加即完整口径。默认关闭，保持含取连的历史口径。仅影响新写入的日志。",
+    "firstTokenExcludesWsAcquireDesc": "开启后，用量日志记录的首字时间扣除本次请求的 WS 连接获取耗时（排队/探活/握手）。首字采用宽松口径：上游 response.created / in_progress 之后的首个非终态响应事件，含结构帧，不代表首个可见文字或端到端延迟。取连耗时单独记录，两列相加为含取连的首响应时间。默认关闭，仅影响新写入的日志。",
     "firstTokenTimeout": "首字超时重试",
     "firstTokenTimeoutDesc": "流式请求在指定秒数内上游没有返回任何响应事件（response.created / in_progress 之外）时，取消当前上游并按最大重试次数换号重试；0 = 关闭。推理阶段产生的结构/推理帧会被视为已开始响应，不会误触发，因此长推理不会被误中断。",
     "imageStorage": "图片存储",

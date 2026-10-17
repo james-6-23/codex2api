@@ -45,6 +45,23 @@ Claude 原生请求的显式会话来源依次为 `X-Claude-Code-Session-Id`、J
 `account_uuid` 则跟随实际选中账号；其他 metadata 字段及普通业务字符串 `user_id` 保留。
 system 前导块整理为计费标识、CLI 声明、其余原始块，保留原块属性及其余内容顺序。
 
+Messages→Codex 映射将工具结果中的 `tool_reference` 保留为含工具名称的 JSON 文本，
+`search_result`（用户消息或工具结果）及 `browser_state`（工具结果）也以原始 JSON 文本保留，
+避免丢失搜索来源、正文、标签页和状态变化；这些数据提供上下文，不提供 Claude 原生引用渲染。
+工具参数仍按增量发送；完成事件携带完整参数时仅补齐缺失后缀，内容冲突或非法 JSON 会明确报错。
+工具表超过现有 128 项容量时，优先保留未延迟加载、历史调用、已发现和 `tool_choice` 指定的工具，
+再按原顺序填充剩余容量；满容量时不会额外注入默认图片工具挤掉已选定义。
+必须同时保留的工具超过 128 项时明确报错，调用方需减少活跃工具
+或使用 `defer_loading`，避免静默截断所需定义。Grok 路径继续使用其原有工具表处理。
+
+Messages→Codex 的服务端 `web_search` 使用官方 Codex `/alpha/search`，复用当前账号、
+出口和客户端身份；搜索由网关执行，结果交回模型生成回答，并转换为配对的
+`server_tool_use` / `web_search_tool_result`。不切换第三方搜索服务。流式与非流式请求
+均支持，并累计搜索前后模型请求的实际 token 用量。支持 `allowed_domains`，遵守
+`max_uses`，每个请求最多执行 8 次搜索；耗尽后移除搜索工具，让模型基于已有结果回答。
+目前独立搜索适配不支持 `user_location` 和 `blocked_domains`，显式设置时返回错误，
+避免静默忽略限制。OpenAI Responses 中转账号继续转发原有 hosted `web_search`。
+
 用量日志 API 的 Claude `input_tokens` 使用包含缓存读写的总输入口径，供统一统计和计费。
 管理后台明细中的 `↓` 则显示未缓存输入（总输入减去缓存读取及 5 分钟／1 小时缓存写入），
 悬浮说明展示完整拆分；缓存列分别用读取和创建图标显示对应数量。汇总卡仍显示含缓存的总输入。
@@ -1752,6 +1769,10 @@ HTTP `/v1/*` 响应的 `X-Codex2API-Request-ID` 对应下方可检索的 `reques
 ```
 
 `upstream_turn_state` 是上游响应回带的 `X-Codex-Turn-State`（HTTP 取响应头，WebSocket 取流内 metadata 帧），空串表示没有。`injected_turn_state` 与 `turn_state_overridden` 只保留给更早版本写入的用量记录。
+
+`first_token_ms` 对 Responses 上游使用宽松口径：从本次上游尝试开始，到 `response.created` / `response.in_progress` 之外的首个非终态响应事件，包含没有可见文本的结构帧。它不是首个正文字符的时间，也不包含尝试开始前的入站处理和调度等待，不能直接与客户端会话日志推算的首字时间比较。
+
+`ws_acquire_ms` 包含 WebSocket 取连的排队、探活和握手耗时。默认计入 `first_token_ms`；开启 `first_token_excludes_ws_acquire` 后，两列相加可恢复含取连的首响应时间。`output_tokens` 包含推理等不可见输出，比较正文显示速度时还需核对 `reasoning_tokens`、推理强度和实际首个内容帧的时间，不能只用不同来源的平均首字值归因。
 
 #### GET /api/admin/usage/chart-data
 

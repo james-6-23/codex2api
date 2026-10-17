@@ -73,18 +73,41 @@ type anthropicContentBlock struct {
 	Source       *anthropicImageSource  `json:"source,omitempty"`
 	ID           string                 `json:"id,omitempty"`
 	Name         string                 `json:"name,omitempty"`
+	ToolName     string                 `json:"tool_name,omitempty"`
 	Input        json.RawMessage        `json:"input,omitempty"`
 	ToolUseID    string                 `json:"tool_use_id,omitempty"`
 	Content      json.RawMessage        `json:"content,omitempty"`
 	IsError      bool                   `json:"is_error,omitempty"`
 	CacheControl *anthropicCacheControl `json:"cache_control,omitempty"`
+	Title        string                 `json:"title,omitempty"`
+	Context      string                 `json:"context,omitempty"`
+	Structured   json.RawMessage        `json:"-"`
 }
 
 type anthropicCacheControl struct {
 	Type string `json:"type,omitempty"`
 }
 
+func (b *anthropicContentBlock) UnmarshalJSON(data []byte) error {
+	kind := gjson.GetBytes(data, "type").String()
+	if kind == "search_result" || kind == "browser_state" {
+		// These blocks have different source/state shapes; retain all original fields.
+		*b = anthropicContentBlock{Type: kind, Structured: bytes.Clone(data)}
+		return nil
+	}
+	type plainBlock anthropicContentBlock
+	var decoded plainBlock
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*b = anthropicContentBlock(decoded)
+	return nil
+}
+
 func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
+	if b.Type == "search_result" || b.Type == "browser_state" {
+		return b.Structured, nil
+	}
 	type contentBlock struct {
 		Type      string                `json:"type"`
 		Text      *string               `json:"text,omitempty"`
@@ -93,10 +116,13 @@ func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
 		Source    *anthropicImageSource `json:"source,omitempty"`
 		ID        string                `json:"id,omitempty"`
 		Name      string                `json:"name,omitempty"`
+		ToolName  string                `json:"tool_name,omitempty"`
 		Input     json.RawMessage       `json:"input,omitempty"`
 		ToolUseID string                `json:"tool_use_id,omitempty"`
 		Content   json.RawMessage       `json:"content,omitempty"`
 		IsError   bool                  `json:"is_error,omitempty"`
+		Title     string                `json:"title,omitempty"`
+		Context   string                `json:"context,omitempty"`
 	}
 
 	out := contentBlock{
@@ -105,10 +131,13 @@ func (b anthropicContentBlock) MarshalJSON() ([]byte, error) {
 		Source:    b.Source,
 		ID:        b.ID,
 		Name:      b.Name,
+		ToolName:  b.ToolName,
 		Input:     b.Input,
 		ToolUseID: b.ToolUseID,
 		Content:   b.Content,
 		IsError:   b.IsError,
+		Title:     b.Title,
+		Context:   b.Context,
 	}
 	if b.Type == "text" || b.Text != "" {
 		out.Text = &b.Text
@@ -134,6 +163,7 @@ type anthropicTool struct {
 	BlockedDomains []string               `json:"blocked_domains,omitempty"`
 	UserLocation   map[string]any         `json:"user_location,omitempty"`
 	CacheControl   *anthropicCacheControl `json:"cache_control,omitempty"`
+	DeferLoading   bool                   `json:"defer_loading,omitempty"`
 }
 
 // ==================== Anthropic 响应类型 ====================
@@ -390,6 +420,16 @@ func translateAnthropicToResponses(rawJSON []byte, modelMappingJSON string, supp
 
 	originalModel := req.Model
 	codexModel := resolveAnthropicModelForRoute(req.Model, modelMappingJSON, supportedModels, servedDirectly)
+	if !preserveControls {
+		if err := validateAnthropicCodexContent(req.Messages); err != nil {
+			return nil, originalModel, err
+		}
+		tools, err := selectAnthropicCodexTools(req)
+		if err != nil {
+			return nil, originalModel, err
+		}
+		req.Tools = tools
+	}
 	if err := validateAnthropicToolReferences(req.Messages); err != nil {
 		return nil, originalModel, err
 	}
@@ -604,6 +644,10 @@ func appendTranslatedMessages(input []any, messages []anthropicMessage) []any {
 			input = appendUserBlocks(input, blocks)
 		case "assistant":
 			input = appendAssistantBlocks(input, blocks)
+		case "system", "developer":
+			if text := parseAnthropicSystem(msg.Content); text != "" {
+				input = append(input, grokDeveloperMessage(text))
+			}
 		}
 	}
 	return input
@@ -651,7 +695,9 @@ func parseAnthropicSystem(raw json.RawMessage) string {
 	var parts []string
 	for _, block := range parseAnthropicSystemBlocks(raw) {
 		if block.Type == "text" && block.Text != "" {
-			parts = append(parts, block.Text)
+			if text := stripClaudeCodeSystemMetadata(block.Text); text != "" {
+				parts = append(parts, text)
+			}
 		}
 	}
 	return strings.Join(parts, "\n\n")
@@ -722,7 +768,13 @@ func appendUserBlocks(input []any, blocks []anthropicContentBlock) []any {
 	for _, b := range blocks {
 		switch b.Type {
 		case "text":
-			contentParts = append(contentParts, map[string]any{"type": "input_text", "text": b.Text})
+			if text := normalizeClaudeCodeTransportReminder(b.Text); text != "" || b.Text == "" {
+				contentParts = append(contentParts, map[string]any{"type": "input_text", "text": text})
+			}
+		case "document":
+			contentParts = append(contentParts, map[string]any{"type": "input_text", "text": anthropicTextDocument(b)})
+		case "search_result":
+			contentParts = append(contentParts, map[string]any{"type": "input_text", "text": string(b.Structured)})
 		case "image":
 			if b.Source != nil {
 				dataURI := fmt.Sprintf("data:%s;base64,%s", b.Source.MediaType, b.Source.Data)
@@ -781,6 +833,11 @@ func appendAssistantBlocks(input []any, blocks []anthropicContentBlock) []any {
 		switch b.Type {
 		case "text":
 			textParts = append(textParts, map[string]any{"type": "output_text", "text": b.Text})
+		case "server_tool_use":
+			// Hosted search history is context, not a client tool to execute again.
+			textParts = append(textParts, map[string]any{"type": "output_text", "text": fmt.Sprintf("[Previous server_tool_use %q, id %q]\n%s", b.Name, b.ID, b.Input)})
+		case "web_search_tool_result":
+			textParts = append(textParts, map[string]any{"type": "output_text", "text": fmt.Sprintf("[Previous web_search_tool_result for %q]\n%s", b.ToolUseID, b.Content)})
 		case "tool_use":
 			// 先把已有文本作为 message 输出
 			if len(textParts) > 0 {
@@ -889,6 +946,14 @@ func extractToolResultText(b anthropicContentBlock) string {
 		for _, cb := range blocks {
 			if cb.Type == "text" && cb.Text != "" {
 				parts = append(parts, cb.Text)
+			} else if cb.Type == "document" {
+				parts = append(parts, anthropicTextDocument(cb))
+			} else if cb.Type == "tool_reference" {
+				// Codex has no tool_reference block; keep it in the paired tool output.
+				reference, _ := json.Marshal(cb)
+				parts = append(parts, string(reference))
+			} else if cb.Type == "search_result" || cb.Type == "browser_state" {
+				parts = append(parts, string(cb.Structured))
 			}
 		}
 		return strings.Join(parts, "\n")
@@ -1171,6 +1236,7 @@ type anthropicStreamTranslator struct {
 	contentBlockOpen          bool
 	currentBlockType          string // "text" | "thinking" | "tool_use"
 	currentToolUseID          string
+	currentToolItemID         string
 	currentToolUseName        string
 	currentToolInputBuffer    strings.Builder
 	currentToolCustom         bool
@@ -1213,8 +1279,26 @@ func (t *anthropicStreamTranslator) translateEvent(eventData []byte) []anthropic
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		return t.handleThinkingDelta(eventData)
 
+	case "response.reasoning_summary_part.added":
+		if gjson.GetBytes(eventData, "part.type").String() != "summary_text" {
+			return nil
+		}
+		events := t.ensureThinkingBlock()
+		if text := gjson.GetBytes(eventData, "part.text").String(); text != "" {
+			events = append(events, t.contentBlockDelta(anthropicDelta{Type: "thinking_delta", Thinking: text})...)
+		}
+		return events
+	case "response.reasoning_summary_part.done":
+		// The full part text repeats deltas; keep the block open for the item's signature.
+		return nil
+
 	case "response.function_call_arguments.delta", "response.custom_tool_call_input.delta":
 		return t.handleToolInputDelta(eventData)
+	case "response.function_call_arguments.done":
+		if t.contentBlockOpen && t.currentBlockType == "tool_use" && !t.currentToolCustom && t.checkToolInputItem(gjson.GetBytes(eventData, "item_id").String()) {
+			return t.finishFunctionToolInput(gjson.GetBytes(eventData, "arguments"))
+		}
+		return nil
 	case "response.custom_tool_call_input.done":
 		if t.currentToolCustom && t.contentBlockOpen {
 			return t.finishCustomToolInput(gjson.GetBytes(eventData, "input"))
@@ -1322,6 +1406,7 @@ func (t *anthropicStreamTranslator) handleOutputItemAdded(data []byte) []anthrop
 		t.currentBlockType = "tool_use"
 		t.currentToolUseID = callID
 		t.currentToolUseName = name
+		t.currentToolItemID = gjson.GetBytes(data, "item.id").String()
 		t.currentToolCustom = itemType == "custom_tool_call"
 		t.currentToolInputFinalized = false
 		if t.currentToolCustom {
@@ -1402,6 +1487,14 @@ func (t *anthropicStreamTranslator) handleThinkingDelta(data []byte) []anthropic
 		return nil
 	}
 
+	events := t.ensureThinkingBlock()
+	return append(events, t.contentBlockDelta(anthropicDelta{
+		Type:     "thinking_delta",
+		Thinking: delta,
+	})...)
+}
+
+func (t *anthropicStreamTranslator) ensureThinkingBlock() []anthropicStreamEvent {
 	var events []anthropicStreamEvent
 	if !t.messageStartSent {
 		events = append(events, t.handleCreated()...)
@@ -1417,10 +1510,6 @@ func (t *anthropicStreamTranslator) handleThinkingDelta(data []byte) []anthropic
 		})...)
 	}
 
-	events = append(events, t.contentBlockDelta(anthropicDelta{
-		Type:     "thinking_delta",
-		Thinking: delta,
-	})...)
 	return events
 }
 
@@ -1432,8 +1521,20 @@ func (t *anthropicStreamTranslator) handleToolInputDelta(data []byte) []anthropi
 	if delta == "" {
 		return nil
 	}
+	if !t.contentBlockOpen || t.currentBlockType != "tool_use" || !t.checkToolInputItem(gjson.GetBytes(data, "item_id").String()) {
+		t.toolInputError = fmt.Errorf("tool input delta has no matching open tool call")
+		return nil
+	}
 	if t.currentToolCustom {
 		return t.customToolInputDelta(delta)
+	}
+	if t.currentToolInputFinalized {
+		t.toolInputError = fmt.Errorf("function tool arguments continued after the done event")
+		return nil
+	}
+	if len(delta) > responseCacheMaxEntry-t.currentToolInputBuffer.Len() {
+		t.toolInputError = fmt.Errorf("function tool arguments exceed the size limit")
+		return nil
 	}
 	t.currentToolInputBuffer.WriteString(delta)
 	return t.contentBlockDelta(anthropicDelta{
@@ -1485,6 +1586,16 @@ func (t *anthropicStreamTranslator) handleOutputItemDone(data []byte) []anthropi
 		}
 		return append(events, t.closeCurrentBlock()...)
 	}
+	if t.contentBlockOpen && !t.currentToolCustom && t.currentBlockType == "tool_use" && gjson.GetBytes(data, "item.type").String() == "function_call" {
+		if !t.checkToolInputItem(gjson.GetBytes(data, "item.id").String()) {
+			return nil
+		}
+		events := t.finishFunctionToolInput(gjson.GetBytes(data, "item.arguments"))
+		if t.toolInputError != nil {
+			return nil
+		}
+		return append(events, t.closeCurrentBlock()...)
+	}
 	if t.contentBlockOpen && t.currentBlockType == "thinking" &&
 		gjson.GetBytes(data, "item.type").String() == "reasoning" {
 		if sig := gjson.GetBytes(data, "item.encrypted_content").String(); sig != "" {
@@ -1506,7 +1617,18 @@ func (t *anthropicStreamTranslator) handleCompleted(data []byte) []anthropicStre
 		events = append(events, t.handleCreated()...)
 	}
 
+	if t.contentBlockOpen && t.currentBlockType == "tool_use" && !t.currentToolCustom {
+		for _, item := range gjson.GetBytes(data, "response.output").Array() {
+			if item.Get("type").String() == "function_call" && ((t.currentToolItemID != "" && item.Get("id").String() == t.currentToolItemID) || (t.currentToolUseID != "" && fromCodexCallID(item.Get("call_id").String()) == t.currentToolUseID)) {
+				events = append(events, t.finishFunctionToolInput(item.Get("arguments"))...)
+				break
+			}
+		}
+	}
 	events = append(events, t.closeCurrentBlock()...)
+	if t.toolInputError != nil {
+		return nil
+	}
 
 	// 提取 usage
 	usage := gjson.GetBytes(data, "response.usage")
@@ -1573,7 +1695,7 @@ func (t *anthropicStreamTranslator) handleFailed() []anthropicStreamEvent {
 }
 
 // closeCurrentBlock 关闭当前打开的 content block。
-// tool_use 的 arguments 已在 handleToolInputDelta 按碎片下发，这里只关块。
+// Streamed arguments are validated before closing; done events already supplied missing suffixes.
 func (t *anthropicStreamTranslator) closeCurrentBlock() []anthropicStreamEvent {
 	if !t.contentBlockOpen {
 		return nil
@@ -1582,8 +1704,15 @@ func (t *anthropicStreamTranslator) closeCurrentBlock() []anthropicStreamEvent {
 	if t.currentBlockType == "tool_use" && t.currentToolCustom && !t.currentToolInputFinalized {
 		events = append(events, t.finishCustomToolInput(gjson.Result{})...)
 	}
+	if t.currentBlockType == "tool_use" && !t.currentToolCustom && !t.currentToolInputFinalized {
+		events = append(events, t.finishFunctionToolInput(gjson.Result{})...)
+	}
+	if t.toolInputError != nil {
+		return nil
+	}
 	t.contentBlockOpen = false
 	t.currentToolCustom = false
+	t.currentToolItemID = ""
 	idx := t.contentBlockIndex - 1
 	t.currentToolInputBuffer.Reset()
 

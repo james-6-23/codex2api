@@ -289,7 +289,7 @@ func (h *Handler) hasNativeClaudeAccountMatching(c *gin.Context, model string, a
 		// native route before the final selector runs.
 		rawBody, _ := rawRequestBodyFromContext(c)
 		rawBody = ingressRequestBody(c, rawBody)
-		identity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
+		identity := resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
 		accountFilter = applyAffinityGroupRouting(c, identity, accountFilter)
 	}
 	for _, account := range h.store.Accounts() {
@@ -393,7 +393,7 @@ func (h *Handler) hasDirectMessagesModelAccountMatching(c *gin.Context, model st
 	if c != nil && c.Request != nil {
 		rawBody, _ := rawRequestBodyFromContext(c)
 		rawBody = ingressRequestBody(c, rawBody)
-		groupFilter = applyAffinityGroupRouting(c, resolveRequestSessionIdentity(c.Request.Header, rawBody), nil)
+		groupFilter = applyAffinityGroupRouting(c, resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody), nil)
 	}
 	now := time.Now()
 	for _, account := range h.store.Accounts() {
@@ -695,10 +695,8 @@ func (h *Handler) Messages(c *gin.Context) {
 	reasoningEffort := extractReasoningEffort(routingBody)
 	serviceTier := extractServiceTier(routingBody)
 	ruleIdentity := h.payloadRuleIdentity(c)
-	sessionIdentity := resolveRequestSessionIdentity(c.Request.Header, rawBody)
-	if nativeClaudeRoute {
-		sessionIdentity = resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
-	}
+	// 会话属于入站 Messages 协议，与选中的上游渠道无关。
+	sessionIdentity := resolveClaudeRequestSessionIdentity(c.Request.Header, rawBody)
 	var codexTranslation anthropicCodexTranslation
 	accountFilter = applyAffinityGroupRouting(c, sessionIdentity, accountFilter)
 	apiKeyID := requestAPIKeyID(c)
@@ -996,7 +994,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			upstreamCtx = WithCodexTurnStateAffinityKey(upstreamCtx, affinityKey)
 			guardCodexTurnStateEcho(affinityKey, account, downstreamHeaders)
 			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				return ExecuteRequest(upstreamCtx, account, codexBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
+				return executeAnthropicCodexRequest(upstreamCtx, account, codexBody, canonicalBody, upstreamSessionID, proxyURL, apiKey, deviceCfg, downstreamHeaders, useWebsocket)
 			})
 		}
 		durationMs := int(time.Since(start).Milliseconds())
@@ -1567,9 +1565,8 @@ func (h *Handler) Messages(c *gin.Context) {
 					payloadString := payload.String()
 					// 首个真实内容帧之前的所有帧（结构帧 output_item.added /
 					// content_part.added 也算）一律先缓冲：一旦写出任何字节，首包前
-					// 静默换号重试窗口就永久关闭（issue #435）。内容帧到达（含思考
-					// delta，几乎紧跟结构帧，不违反 issue #207 的思考及时性）即整段
-					// flush，之后不再缓冲。
+					// 静默换号重试窗口就永久关闭（issue #435）。真实内容到达（含思考
+					// delta）即整段 flush，之后不再缓冲。
 					shouldDefer := !contentStarted && !gotTerminal
 					if shouldDefer {
 						pendingFirstTokenEvents.WriteString(payloadString)

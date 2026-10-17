@@ -314,7 +314,7 @@ func claudeUpstreamSessionID(raw string) string {
 	return DeriveStableSessionUUIDv7("codex2api:claude-session:" + raw)
 }
 
-// resolveClaudeRequestSessionIdentity 仅在 Claude 原生路径识别 CLI 身份：
+// resolveClaudeRequestSessionIdentity 在 Claude 原生与 Messages 映射路径识别 CLI 身份：
 // 专用会话头 > 结构化 user_id.session_id > 既有通用会话来源。
 // 仍交给既有解析器处理本地 affinity，并由 handler 按 API Key 隔离上游身份。
 func resolveClaudeRequestSessionIdentity(headers http.Header, body []byte) requestSessionIdentity {

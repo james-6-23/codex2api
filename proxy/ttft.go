@@ -39,16 +39,9 @@ func isFirstTokenEvent(eventType string) bool {
 	return false
 }
 
-// isPreContentLifecycleEvent 判断一个 SSE 事件是否为纯前置生命周期帧
-// （response.created / response.in_progress）——它们不携带任何模型产出。
-//
-// 这是唯一可以在"流可见地开始"之前短暂缓冲的帧：缓冲它们，才能在首个真实
-// token 到来前遇到可重试的上游故障时，静默换号重试且客户端不会看到"假开始"。
-//
-// 除此之外的所有帧——包括标志响应已开始的结构帧 response.output_item.added /
-// response.content_part.added，以及随后的 reasoning 帧——都必须立即下发给客户端
-// 以保证响应及时性。把它们一直压到"首个内容 token"才下发（issue #207），会让
-// 推理型请求在整个思考阶段看起来像卡死。
+// isPreContentLifecycleEvent 识别不含模型产出的 response.created / in_progress。
+// 宽松首字统计排除这些帧；下游提交与首内容前重试另由 isFirstTokenResult 判断，
+// 不能用这个生命周期分类决定结构帧是否应立即下发。
 func isPreContentLifecycleEvent(eventType string) bool {
 	switch strings.TrimSpace(eventType) {
 	case "response.created", "response.in_progress":
@@ -68,6 +61,9 @@ func isFirstTokenResult(parsed gjson.Result) bool {
 		return outputItemHasFirstTokenContent(parsed.Get("item"))
 	case "response.content_part.done":
 		return contentPartHasFirstTokenContent(parsed.Get("part"))
+	case "response.reasoning_summary_part.added":
+		return parsed.Get("part.type").String() == "summary_text" &&
+			contentPartHasFirstTokenContent(parsed.Get("part"))
 	case "response.function_call_arguments.done":
 		return stringFieldHasValue(parsed, "arguments")
 	}

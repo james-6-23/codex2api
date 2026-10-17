@@ -4976,7 +4976,7 @@
     "streamFlushInterval": "Coalesce Interval",
     "streamFlushIntervalDesc": "Minimum interval between flushes in coalesce mode, in milliseconds (1~1000).",
     "firstTokenExcludesWsAcquire": "First Token Excludes Conn Acquire",
-    "firstTokenExcludesWsAcquireDesc": "When enabled, the first-token time recorded in usage logs excludes the WS connection acquire time (queueing/probing/handshake) of the request, reflecting only how fast the upstream produced the first content. Acquire time is still recorded separately in the Conn Acquire column; the two columns add up to the full duration. Off by default to keep the historical semantics. Only affects newly written logs.",
+    "firstTokenExcludesWsAcquireDesc": "When enabled, logged first-token time excludes WS connection acquisition (queueing/probing/handshake). This metric uses the first non-terminal response event after response.created / in_progress, including structural events; it is not the time to visible text or end-to-end latency. Conn Acquire is recorded separately; adding both gives acquisition-inclusive first-response time. Off by default. Only affects newly written logs.",
     "firstTokenTimeout": "First Token Timeout",
     "firstTokenTimeoutDesc": "For streaming requests, cancel the current upstream call and retry with another account if the upstream returns no response event (other than response.created / in_progress) within N seconds; 0 = disabled. Structural and reasoning frames emitted during the thinking phase count as 'response started', so long reasoning turns are not interrupted by mistake.",
     "imageStorage": "Image Storage",

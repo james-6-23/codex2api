@@ -83,6 +83,8 @@ func TestIsFirstTokenPayload(t *testing.T) {
 		{"output_item_added_function_call", []byte(`{"type":"response.output_item.added","item":{"type":"function_call","name":"lookup"}}`), false},
 		{"output_item_done_empty_reasoning", []byte(`{"type":"response.output_item.done","item":{"type":"reasoning"}}`), false},
 		{"content_part_added", []byte(`{"type":"response.content_part.added","part":{"type":"output_text","text":""}}`), false},
+		{"empty_reasoning_summary_part", []byte(`{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":""}}`), false},
+		{"reasoning_summary_part_with_text", []byte(`{"type":"response.reasoning_summary_part.added","part":{"type":"summary_text","text":"initial thought"}}`), true},
 		{"output_text_delta", []byte(`{"type":"response.output_text.delta","delta":"hello"}`), true},
 		{"function_call_arguments_delta", []byte(`{"type":"response.function_call_arguments.delta","delta":"{\"city\""}`), true},
 		{"function_call_arguments_done", []byte(`{"type":"response.function_call_arguments.done","arguments":"{}"}`), true},

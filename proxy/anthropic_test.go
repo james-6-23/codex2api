@@ -1079,6 +1079,39 @@ func TestAnthropicThinkingSignatureRoundTrip_Output(t *testing.T) {
 	}
 }
 
+func TestAnthropicReasoningSummaryPartsPreserveInitialTextAndSignature(t *testing.T) {
+	for _, itemAdded := range []bool{false, true} {
+		t.Run(strconv.FormatBool(itemAdded), func(t *testing.T) {
+			tr := newAnthropicStreamTranslator("claude-sonnet-4-6")
+			acc := newAnthropicResponseAccumulator("claude-sonnet-4-6")
+			if itemAdded {
+				acc.apply(tr.translateEvent([]byte(`{"type":"response.output_item.added","item":{"type":"reasoning"}}`)))
+			}
+			for _, event := range []string{
+				`{"type":"response.reasoning_summary_part.added","summary_index":0,"part":{"type":"summary_text","text":"Initial"}}`,
+				`{"type":"response.reasoning_summary_text.delta","summary_index":0,"delta":" thought"}`,
+				`{"type":"response.reasoning_summary_part.done","summary_index":0,"part":{"type":"summary_text","text":"Initial thought"}}`,
+				`{"type":"response.reasoning_summary_part.added","summary_index":1,"part":{"type":"summary_text","text":""}}`,
+				`{"type":"response.reasoning_summary_text.delta","summary_index":1,"delta":"; second part"}`,
+				`{"type":"response.reasoning_summary_part.done","summary_index":1,"part":{"type":"summary_text","text":"; second part"}}`,
+			} {
+				events := tr.translateEvent([]byte(event))
+				for _, emitted := range events {
+					if emitted.Type == "content_block_stop" {
+						t.Fatal("summary parts must stay open until the reasoning signature arrives")
+					}
+				}
+				acc.apply(events)
+			}
+			acc.apply(tr.translateEvent([]byte(`{"type":"response.output_item.done","item":{"type":"reasoning","encrypted_content":"SIG"}}`)))
+			resp := acc.build(nil)
+			if len(resp.Content) != 1 || resp.Content[0].Thinking != "Initial thought; second part" || resp.Content[0].Signature != "SIG" {
+				t.Fatalf("summary parts were dropped, duplicated, or lost their signature: %+v", resp.Content)
+			}
+		})
+	}
+}
+
 func TestAnthropicThinkingSignatureRoundTrip_NoSignatureNoDelta(t *testing.T) {
 	tr := newAnthropicStreamTranslator("claude-sonnet-4-5")
 	var all []anthropicStreamEvent

@@ -2100,7 +2100,7 @@ func TestPrepareResponsesBody_PromptCompatAndTopLevelImageOptions(t *testing.T) 
 	}
 }
 
-func TestPrepareResponsesBody_InjectsImageToolWithinToolLimit(t *testing.T) {
+func TestPrepareResponsesBody_DefaultImageToolDoesNotDisplaceToolsAtCapacity(t *testing.T) {
 	tools := make([]any, maxTools)
 	for i := range tools {
 		tools[i] = map[string]any{
@@ -2128,12 +2128,10 @@ func TestPrepareResponsesBody_InjectsImageToolWithinToolLimit(t *testing.T) {
 	if len(outTools) != maxTools {
 		t.Fatalf("tools count = %d, want %d; body=%s", len(outTools), maxTools, got)
 	}
-	last := outTools[len(outTools)-1]
-	if last.Get("type").String() != "image_generation" {
-		t.Fatalf("last tool type = %q, want image_generation; body=%s", last.Get("type").String(), got)
-	}
-	if last.Get("model").String() != defaultImagesToolModel {
-		t.Fatalf("image tool model = %q, want %q; body=%s", last.Get("model").String(), defaultImagesToolModel, got)
+	for i, tool := range outTools {
+		if tool.Get("type").String() != "function" || tool.Get("name").String() != fmt.Sprintf("tool_%d", i) {
+			t.Fatalf("implicit image injection displaced a supplied tool: index=%d tool=%s", i, tool.Raw)
+		}
 	}
 }
 
