@@ -38,7 +38,10 @@ type Settings struct {
 	Questions          []Question `json:"questions"`
 }
 
-const CandyPrompt = "在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状，分别为圆形和五角星形，不同的形状靠手感可以分辨，现已知苹果味圆形有7颗、苹果味五角星形有7颗、桃子味圆形有9颗、桃子味五角星形有6颗、西瓜味圆形有8颗、西瓜味五角星形有4颗，参赛者需要在活动前决定摸出的糖果数目，那么最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖，同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求，最终只恢复数字结果。"
+// CandyPrompt is the built-in reasoning check. Keep the no-tools/no-network
+// constraint: the question is public, so a browsing model could otherwise look
+// up the published answer instead of reasoning through it.
+const CandyPrompt = "不允许调用工具和联网。在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状，分别为圆形和五角星形，不同的形状靠手感可以分辨，现已知苹果味圆形有7颗、苹果味五角星形有7颗、桃子味圆形有9颗、桃子味五角星形有6颗、西瓜味圆形有8颗、西瓜味五角星形有4颗，参赛者需要在活动前决定摸出的糖果数目，那么最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖，同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求，最终只回复数字结果。"
 
 func DefaultSettings() Settings {
 	return Settings{Revision: 1, GPTModel: "gpt-6-astra", ClaudeModel: "claude-sonnet-4-6", ReasoningEffort: "high", JudgeMode: "answer", IntervalSeconds: 300, RetrySeconds: 60, TimeoutSeconds: 180, Concurrency: 4, Retention: 200, NewAccountsEnabled: true, Action: "none", DegradeThreshold: 2, RecoverThreshold: 1, Questions: []Question{{ID: "candy", Name: "糖果配对", Prompt: CandyPrompt, ExpectedAnswer: "21", MatchMode: "exact", MaxDurationMS: 20000, Enabled: true}}}

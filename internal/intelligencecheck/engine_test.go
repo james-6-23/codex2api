@@ -1,6 +1,9 @@
 package intelligencecheck
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestGrade(t *testing.T) {
 	q := DefaultSettings().Questions[0]
@@ -36,6 +39,16 @@ func TestGrade(t *testing.T) {
 		t.Fatal("regex")
 	}
 }
+func TestDefaultCandyPromptRequiresOfflineReasoning(t *testing.T) {
+	p := DefaultSettings().Questions[0].Prompt
+	if !strings.HasPrefix(p, "不允许调用工具和联网。") {
+		t.Fatalf("candy prompt must forbid tools and network access: %q", p)
+	}
+	if !strings.HasSuffix(p, "最终只回复数字结果。") {
+		t.Fatalf("candy prompt must ask for a numeric answer: %q", p)
+	}
+}
+
 func TestValidation(t *testing.T) {
 	s := DefaultSettings()
 	if err := ValidateSettings(s); err != nil {
