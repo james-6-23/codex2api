@@ -107,13 +107,18 @@ func DeviceProfileConfigFromEnv(lookup func(string) string) *DeviceProfileConfig
 	trimmed := func(key string) string {
 		return strings.TrimSpace(lookup(key))
 	}
+	rawStabilize := trimmed("STABILIZE_DEVICE_PROFILE")
+	stabilize := true
+	if rawStabilize != "" {
+		stabilize = strings.EqualFold(rawStabilize, "true")
+	}
 	return &DeviceProfileConfig{
 		UserAgent:              trimmed("CODEX_USER_AGENT"),
 		PackageVersion:         trimmed("CODEX_PACKAGE_VERSION"),
 		RuntimeVersion:         trimmed("CODEX_RUNTIME_VERSION"),
 		OS:                     trimmed("CODEX_OS"),
 		Arch:                   trimmed("CODEX_ARCH"),
-		StabilizeDeviceProfile: strings.EqualFold(trimmed("STABILIZE_DEVICE_PROFILE"), "true"),
+		StabilizeDeviceProfile: stabilize,
 		BetaFeatures:           trimmed("CODEX_BETA_FEATURES"),
 	}
 }

@@ -12,7 +12,7 @@ services:
       CODEX_REQUEST_MEMORY_BUDGET_MB: "${CODEX_REQUEST_MEMORY_BUDGET_MB:-}"
       ADMIN_SECRET: "123456"
       CODEX_UPSTREAM_TRANSPORT: "http"
-      CODEX_TRANSPORT_MODE: "standard"
+      CODEX_TRANSPORT_MODE: "utls_chrome"
       IMAGE_ASSET_DIR: "/data/images"
       LOG_DIR: "/app/logs"
       DATABASE_DRIVER: "postgres"
