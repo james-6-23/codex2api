@@ -176,6 +176,15 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 
 	// 探针本身也进用量记录:测连 / 降智检测各有独立内部原因,用量页据此打标。
 	usageReason := connectionTestReason(quality)
+	if c.GetBool(scheduledTestContextKey) {
+		usageReason = "scheduled_connection_test"
+		if !isClaudeAccount && !isAntigravityAccount && !isOpenAIResponsesAccount {
+			// Codex Responses models do not all expose the same reasoning tiers.
+			// `none` is the lowest-cost tier supported by gpt-6-luna and avoids
+			// sending the unsupported `minimal` value to the upstream API.
+			payload, _ = sjson.SetBytes(payload, "reasoning.effort", "none")
+		}
+	}
 	usageEndpoint := connectionTestEndpoint(account)
 	usageEffort := connectionTestReasoningEffort(payload)
 
@@ -214,8 +223,8 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 		resp, reqErr = h.executeAntigravityConnectionTest(c.Request.Context(), account, testModel, payload, h.store.ResolveProxyForAccount(account), !isTransient)
 	} else if isOpenAIResponsesAccount {
 		resp, reqErr = proxy.ExecuteRelayStyleRequest(c.Request.Context(), account, payload, h.store.ResolveProxyForAccount(account), nil)
-	} else if quality != nil {
-		// 降智检测是一次性长生成(常达数分钟),不需要 WS 续链;强制走独立 HTTP SSE,
+	} else if quality != nil || c.GetBool(scheduledTestContextKey) {
+		// 降智检测和定时激活均使用独立 HTTP SSE，不依赖 WS 续链或重连；
 		// 不受"强制 WebSocket"影响,也不占用/依赖池化长连接。
 		resp, reqErr = proxy.ExecuteRequest(c.Request.Context(), account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil, false)
 	} else {

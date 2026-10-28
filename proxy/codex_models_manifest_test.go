@@ -157,18 +157,19 @@ func TestMergedCodexManifestUsesScopedCapabilitiesAndGatewayETag(t *testing.T) {
 	if first.Code != http.StatusOK || first.Header().Get("ETag") == `W/"upstream-validator"` || first.Header().Get("ETag") == "" {
 		t.Fatalf("source ETag bypassed gateway representation: status=%d etag=%q", first.Code, first.Header().Get("ETag"))
 	}
-	if gjson.GetBytes(first.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(first.Body.Bytes(), "models.0.experimental_supported_tools").Raw != "[]" || gjson.GetBytes(first.Body.Bytes(), "models.0.base_instructions").String() != "keep source instructions" || !gjson.GetBytes(first.Body.Bytes(), "future.keep").Bool() {
+	// An account that has not been observed yet cannot narrow the live descriptor.
+	if !gjson.GetBytes(first.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(first.Body.Bytes(), "models.0.experimental_supported_tools").Raw != `["function"]` || gjson.GetBytes(first.Body.Bytes(), "models.0.base_instructions").String() != "keep source instructions" || !gjson.GetBytes(first.Body.Bytes(), "future.keep").Bool() {
 		t.Fatalf("unknown capabilities or source fields mishandled: %s", first.Body.String())
 	}
 	if cached := request(first.Header().Get("ETag")); cached.Code != http.StatusNotModified || cached.Body.Len() != 0 {
 		t.Fatalf("unchanged gateway manifest did not cache: status=%d body=%s", cached.Code, cached.Body.String())
 	}
-	models := parseCodexModelCapabilities(source)
+	models := parseCodexModelCapabilities([]byte(`{"models":[{"slug":"gpt-6-astra","use_responses_lite":false,"experimental_supported_tools":[]}]}`))
 	if err := db.SaveModelCapabilities(ctx, database.ModelCapabilitySnapshot{AccountID: id, CredentialGeneration: row.CredentialGeneration, ObservedAt: time.Now().UnixNano(), Models: models}); err != nil {
 		t.Fatal(err)
 	}
 	updated := request(first.Header().Get("ETag"))
-	if updated.Code != http.StatusOK || updated.Header().Get("ETag") == first.Header().Get("ETag") || !gjson.GetBytes(updated.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(updated.Body.Bytes(), "models.0.experimental_supported_tools").Raw != `["function"]` {
+	if updated.Code != http.StatusOK || updated.Header().Get("ETag") == first.Header().Get("ETag") || gjson.GetBytes(updated.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(updated.Body.Bytes(), "models.0.experimental_supported_tools").Raw != "[]" {
 		t.Fatalf("new scoped capabilities hidden behind stale ETag: status=%d body=%s", updated.Code, updated.Body.String())
 	}
 }

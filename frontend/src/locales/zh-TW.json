@@ -352,6 +352,25 @@
     }
   },
   "accounts": {
+    "activationTitle": "定時啟用",
+    "activationEnabled": "啟用定時測試",
+    "activationTimezone": "時區：Asia/Shanghai（北京時間）",
+    "activationSaved": "定時測試計畫已儲存",
+    "activationUnsaved": "有未儲存的修改",
+    "activationSaveHint": "儲存後依計畫自動執行",
+    "activationWeekdays": "工作日 · 週一至週五",
+    "activationWeekends": "週末 · 週六、週日",
+    "activationAdd": "新增",
+    "activationRemove": "刪除 {{time}}",
+    "activationNoTimes": "尚未新增時間點",
+    "activationExecutionHint": "每個時間點使用目前帳號、所選模型和測試內容傳送一次請求，會消耗該帳號額度。失敗不重試、不換號；關閉頁面後仍由伺服器執行。停用帳號或關閉開關後停止後續計畫，錯過的時間點不補發。",
+    "activationRecords": "最近執行記錄",
+    "activationNoRecords": "尚無執行記錄；儲存計畫不會立即傳送請求。",
+    "activationReset": "下次 5 小時重設",
+    "activationStatus_success": "成功",
+    "activationStatus_failed": "失敗",
+    "activationStatus_skipped": "已略過",
+    "activationStatus_unknown": "結果未確認",
     "refreshAllUsage": "一鍵重新整理用量",
     "refreshAllUsageHint": "查詢執行池中所有支援 WHAM 的 Codex 帳號，更新 5 小時和週用量進度條。",
     "batchUsageRefreshing": "正在重新整理用量",
@@ -534,6 +553,8 @@
     "hrefClickHint": "點擊開啟跳轉位址（未設定時開啟 api-base）；Alt/Option+點擊 設定自訂連結"
   },
   "settings": {
+    "schedulerModeReset5hFirst": "5 小時即將重置優先",
+    "schedulerModeReset5hFirstDesc": "在相同調度優先級與健康檔位內，優先使用 5 小時窗口最早重置且仍有額度的 Codex 帳號；額度耗盡、限流、無權限或併發已滿時順延。以已觀測的重置時間為準，過期、未知或不適用的窗口沿用原有調度。不自動啟用帳號、不推算下個週期。保留既有會話綁定；新會話首次選號優先於親和雜湊。週限額與現有安全限制繼續生效。",
     "codexClientVersions": {
       "platform": "用戶端 / 平台",
       "pair": "應用程式 / 內建 CLI",
@@ -1677,6 +1698,8 @@
     "cyberRiskSubjectEvents": "{{count}} 筆事件"
   },
   "usage": {
+    "internalScheduledActivation": "定時啟用",
+    "internalScheduledActivationTooltip": "伺服器依目前帳號儲存的計畫傳送的連線測試請求",
     "usageAnalysis": "用量分析",
     "modelStatsDesc": "主要模型的請求、Token 與金額分布。",
     "modelStatsScope": "占比依金額排名前 10 的模型計算。",

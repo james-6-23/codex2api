@@ -179,6 +179,7 @@ function UpstreamResponseModelBadge({
 // 网关自身发起的请求按 internal_reason 细分:测连 / 降智检测 / 超窗摘要,
 // 其余未知原因统一显示为"内部请求"。
 const INTERNAL_REQUEST_PRESENTATION: Record<string, { labelKey: string; tooltipKey: string; Icon: typeof Brain }> = {
+  scheduled_connection_test: { labelKey: 'usage.internalScheduledActivation', tooltipKey: 'usage.internalScheduledActivationTooltip', Icon: PlugZap },
   connection_test: { labelKey: 'usage.internalConnectionTest', tooltipKey: 'usage.internalConnectionTestTooltip', Icon: PlugZap },
   intelligence_check: { labelKey: 'usage.internalIntelligenceCheck', tooltipKey: 'usage.internalIntelligenceCheckTooltip', Icon: Brain },
   quality_test: { labelKey: 'usage.internalQualityTest', tooltipKey: 'usage.internalQualityTestTooltip', Icon: FlaskConical },

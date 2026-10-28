@@ -565,7 +565,7 @@ previous_response_id 连续请求
 
 三个数据库预算分别控制 L1 总量、L1 单条准入和共享后端重建上限。只有预算实际变化的事务提交才分配递增 generation，并立即应用到写入实例；同值或空更新不递增。其他实例每 5 秒读取一次，单次最多等待 3 秒，只应用更新的 generation。读取失败时保留最后一次有效配置，并记录同步错误供运维页展示。
 
-Memory 模式只有 L1。已知超限/淘汰，或依赖的必需上下文缺失/过期且没有 relay 后备时，Responses/Compact 连续请求可返回 HTTP `409 response_context_unavailable`。Redis 值损坏或超过重建上限且没有 relay 后备时同样返回 409；共享后端传输故障且请求确实依赖该上下文时可返回 HTTP `503`。Redis 中未超过重建上限的上下文不会仅因超过 L1 准入预算而失败。
+Memory 缓存配合 SQLite 文件主库时默认以本地磁盘持久层（`cache/durable_response_context.go`）作为 L2：L1 淘汰、超过 L1 准入预算或进程重启后仍从磁盘恢复，原生 WebSocket 共享来源记录仍只在进程内。关闭持久层后只有 L1；已知超限/淘汰，或依赖的必需上下文缺失/过期且没有 relay 后备时，Responses/Compact 连续请求可返回 HTTP `409 previous_response_not_found`。Redis 值损坏或超过重建上限且没有 relay 后备时同样返回 409；共享后端传输故障且请求确实依赖该上下文时可返回 HTTP `503`。Redis 中未超过重建上限的上下文不会仅因超过 L1 准入预算而失败。
 
 客户端原生 Responses WebSocket 在健康连接上保留 `previous_response_id`，向上游发送当轮增量；原连接丢失后的恢复仍依赖完整的本地或共享快照，受上述预算、完整性和 409/503 错误语义约束。HTTP Responses/Compact 的原生 Codex 路径必须在当前归属内重建父引用；原生 OpenAI Responses relay 可保留父 ID 交给自己的上游恢复。
 

@@ -101,7 +101,7 @@ test("Markdown includes the same guides, parameters and alternate examples as th
     assert.match(markdown, /\*\*200 · URL\*\*/);
     assert.match(markdown, /\*\*multipart\*\*/);
     assert.equal(markdown.split('model = "chosen-model"').length, 2);
-    assert.match(markdown, /response_context_unavailable/);
+    assert.match(markdown, /previous_response_not_found/);
     assert.match(markdown, /model_request_limits/);
   }
 });

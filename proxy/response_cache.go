@@ -214,13 +214,27 @@ func init() {
 	go respCacheCleanupLoop()
 }
 
+// SetResponseContextCache installs the L2 backend behind the local L1. A
+// shared (Redis) cache or a durable local store qualifies; a plain in-process
+// cache would only duplicate L1 and is ignored.
 func SetResponseContextCache(tc cache.TokenCache) {
 	respCache.mu.Lock()
 	respCache.runtimeCache = nil
-	if tc != nil && tc.SharedAcrossInstances() {
+	if tc != nil && (tc.SharedAcrossInstances() || cache.IsDurableResponseContextCache(tc)) {
 		respCache.runtimeCache = tc
 	}
 	respCache.mu.Unlock()
+}
+
+// backendPersistsKeyLocked reports whether the L2 backend also holds key.
+// Native WebSocket snapshots carry account provenance and are persisted only
+// to a shared backend, so with a durable local store they keep the L1-only
+// eviction and oversize markers.
+func (c *responseCacheState) backendPersistsKeyLocked(key string) bool {
+	if c.runtimeCache == nil {
+		return false
+	}
+	return c.runtimeCache.SharedAcrossInstances() || !strings.HasPrefix(key, nativeWSCachePrefix)
 }
 
 // GetResponseCacheStats returns a thread-safe local-cache snapshot.
@@ -348,6 +362,9 @@ func setResponseCache(owner, responseID string, items []json.RawMessage) {
 
 	respCache.mu.RLock()
 	runtimeCache := respCache.runtimeCache
+	if !respCache.backendPersistsKeyLocked(storeKey) {
+		runtimeCache = nil
+	}
 	respCache.mu.RUnlock()
 
 	if runtimeCache != nil && len(runtimeItems) > 0 {
@@ -404,10 +421,10 @@ func admitResponseCacheWithTicket(storeKey string, items []json.RawMessage) ([]j
 		entryBytes > respCache.config.maxBytes
 	if respCache.config.maxEntries <= 0 || overL1ByteBudget {
 		respCache.stats.OversizeSkips++
-		if respCache.runtimeCache == nil && overL1ByteBudget {
+		if !respCache.backendPersistsKeyLocked(storeKey) && overL1ByteBudget {
 			respCache.stats.OversizeRejections++
 		}
-		if respCache.runtimeCache == nil {
+		if !respCache.backendPersistsKeyLocked(storeKey) {
 			respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
 		} else {
 			respCache.setWriteMarkerLocked(storeKey, responseCacheLookupBackendPending, time.Now().Add(respCache.config.ttl), serial)
@@ -421,10 +438,10 @@ func admitResponseCacheWithTicket(storeKey string, items []json.RawMessage) ([]j
 		if oldest == nil {
 			overL1ByteBudget = respCache.stats.Bytes+entryBytes > respCache.config.maxBytes
 			respCache.stats.OversizeSkips++
-			if respCache.runtimeCache == nil && overL1ByteBudget {
+			if !respCache.backendPersistsKeyLocked(storeKey) && overL1ByteBudget {
 				respCache.stats.OversizeRejections++
 			}
-			if respCache.runtimeCache == nil {
+			if !respCache.backendPersistsKeyLocked(storeKey) {
 				respCache.setMarkerLocked(storeKey, responseCacheLookupKnownOversize, time.Now().Add(respCache.config.ttl))
 			} else {
 				respCache.setWriteMarkerLocked(storeKey, responseCacheLookupBackendPending, time.Now().Add(respCache.config.ttl), serial)
@@ -565,7 +582,7 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 	delete(c.store, entry.key)
 	// Preserve a bounded identity fence after Redis-backed eviction so an old
 	// asynchronous result cannot overwrite a newer admission's failure state.
-	if c.runtimeCache != nil && reason != responseCacheRemovalReplace && c.markers[entry.key] == nil {
+	if c.backendPersistsKeyLocked(entry.key) && reason != responseCacheRemovalReplace && c.markers[entry.key] == nil {
 		c.setWriteMarkerLocked(entry.key, responseCacheLookupBackendPending, entry.expiresAt, entry.serial)
 	}
 	for _, blob := range entry.blobs {
@@ -590,12 +607,12 @@ func (c *responseCacheState) removeEntryLocked(entry *responseCacheEntry, reason
 		c.stats.Expirations++
 	case responseCacheRemovalCountEviction:
 		c.stats.CountEvictions++
-		if c.runtimeCache == nil {
+		if !c.backendPersistsKeyLocked(entry.key) {
 			c.setMarkerLocked(entry.key, responseCacheLookupKnownEvicted, entry.expiresAt)
 		}
 	case responseCacheRemovalByteEviction:
 		c.stats.ByteEvictions++
-		if c.runtimeCache == nil {
+		if !c.backendPersistsKeyLocked(entry.key) {
 			c.setMarkerLocked(entry.key, responseCacheLookupKnownEvicted, entry.expiresAt)
 		}
 	}
@@ -823,6 +840,9 @@ func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow boo
 	respCache.mu.Lock()
 	entry, ok := respCache.store[storeKey]
 	runtimeCache := respCache.runtimeCache
+	if !respCache.backendPersistsKeyLocked(storeKey) {
+		runtimeCache = nil
+	}
 	config := respCache.config
 	writeFailed := false
 	expired := false
@@ -875,11 +895,15 @@ func lookupResponseCacheResultWithOwnership(owner, responseID string, borrow boo
 		}
 		return responseCacheLookupResult{Kind: responseCacheLookupMiss}
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	readTimeout := 500 * time.Millisecond
+	if cache.IsDurableResponseContextCache(runtimeCache) && !runtimeCache.SharedAcrossInstances() {
+		readTimeout = 5 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel()
 	backendResult, err := readResponseContextBackend(ctx, runtimeCache, storeKey, config)
 	if err != nil {
-		log.Printf("读取 Redis response context 失败: response_id=%s err=%v", responseID, err)
+		log.Printf("读取 response context 后端失败: response_id=%s err=%v", responseID, err)
 		return responseCacheLookupResult{Kind: responseCacheLookupBackendError, Err: err}
 	}
 	switch backendResult.Status {

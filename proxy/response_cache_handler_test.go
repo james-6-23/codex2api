@@ -31,7 +31,7 @@ func TestResponsesContinuationUnavailableWaitsForRelayRouting(t *testing.T) {
 			t.Fatalf("status = %d, want 409; body=%s", recorder.Code, recorder.Body.String())
 		}
 		if code := gjson.Get(recorder.Body.String(), "error.code").String(); code != string(api.ErrCodeResponseContextUnavailable) {
-			t.Fatalf("error code = %q, want response_context_unavailable; body=%s", code, recorder.Body.String())
+			t.Fatalf("error code = %q, want previous_response_not_found; body=%s", code, recorder.Body.String())
 		}
 		if strings.Contains(recorder.Body.String(), "resp_missing") {
 			t.Fatalf("error body echoed response ID: %s", recorder.Body.String())

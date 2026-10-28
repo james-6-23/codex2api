@@ -198,3 +198,42 @@ func (db *DB) DeleteMaintenanceJob(ctx context.Context, entityID int64, jobKind 
 	_, err := db.conn.ExecContext(ctx, `DELETE FROM maintenance_jobs WHERE entity_id=$1 AND job_kind=$2`, entityID, jobKind)
 	return err
 }
+
+// TryClaimMaintenanceJob claims one durable, one-shot maintenance slot. The
+// composite key makes retries after a restart or concurrent workers a no-op.
+func (db *DB) TryClaimMaintenanceJob(ctx context.Context, entityID int64, jobKind string, dueAt time.Time) (bool, error) {
+	if db == nil || db.conn == nil {
+		return false, nil
+	}
+	var claimed bool
+	err := db.withSQLiteWriteLock(ctx, func() error {
+		result, err := db.conn.ExecContext(ctx, `
+			INSERT INTO maintenance_jobs(entity_id, job_kind, due_at, attempts, updated_at)
+			VALUES ($1, $2, $3, 1, CURRENT_TIMESTAMP)
+			ON CONFLICT(entity_id, job_kind) DO NOTHING`,
+			entityID, jobKind, db.timeArg(dueAt))
+		if err != nil {
+			return err
+		}
+		rows, err := result.RowsAffected()
+		claimed = err == nil && rows == 1
+		return err
+	})
+	return claimed, err
+}
+
+// FinishMaintenanceJob records the outcome of a claimed one-shot slot. The
+// summary is caller-provided so scheduled jobs can retain the observed next
+// reset time without storing credentials or response bodies.
+func (db *DB) FinishMaintenanceJob(ctx context.Context, entityID int64, jobKind, summary string) error {
+	if db == nil || db.conn == nil {
+		return nil
+	}
+	return db.withSQLiteWriteLock(ctx, func() error {
+		_, err := db.conn.ExecContext(ctx, `
+			UPDATE maintenance_jobs
+			SET last_error = $3, lease_owner = '', lease_until = NULL, updated_at = CURRENT_TIMESTAMP
+			WHERE entity_id = $1 AND job_kind = $2`, entityID, jobKind, summary)
+		return err
+	})
+}

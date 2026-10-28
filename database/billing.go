@@ -92,6 +92,18 @@ var (
 			LongOutputPricePerMToken:    15.0,
 			LongCacheReadPricePerMToken: 0.2,
 		}},
+		// gpt-6.1-terra 官方标准价 $1/$5、缓存读取 $0.05、缓存写入 $1.25，
+		// 超过 272K 为 $2/$7.50、缓存 $0.10；fast 档沿用 2×。
+		{model: "gpt-6.1-terra", pricing: ModelPricing{
+			InputPricePerMToken:         1.0,
+			OutputPricePerMToken:        5.0,
+			CacheReadPricePerMToken:     0.05,
+			CacheWrite5mPricePerMToken:  1.25,
+			CacheWrite1hPricePerMToken:  1.25,
+			LongInputPricePerMToken:     2.0,
+			LongOutputPricePerMToken:    7.5,
+			LongCacheReadPricePerMToken: 0.1,
+		}},
 		{model: "gpt-6-luna", pricing: ModelPricing{
 			InputPricePerMToken:         0.1,
 			OutputPricePerMToken:        0.5,
@@ -544,6 +556,8 @@ func normalizeCodexBillingModel(model string) (string, bool) {
 		return "gpt-6-sol", true
 	case strings.HasPrefix(compact, "gpt-6.1-sol") || strings.HasPrefix(compact, "gpt6.1-sol"):
 		return "gpt-6.1-sol", true
+	case strings.HasPrefix(compact, "gpt-6.1-terra") || strings.HasPrefix(compact, "gpt6.1-terra"):
+		return "gpt-6.1-terra", true
 	case strings.HasPrefix(compact, "gpt-6-luna") || strings.HasPrefix(compact, "gpt6-luna"):
 		return "gpt-6-luna", true
 	// 未知 gpt-6 变体按 astra 兜底，避免掉进 $1/$2 的默认价严重低估。

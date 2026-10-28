@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -75,8 +76,17 @@ type RedisConfig struct {
 
 // CacheConfig 缓存核心配置。
 type CacheConfig struct {
-	Driver string
-	Redis  RedisConfig
+	Driver               string
+	Redis                RedisConfig
+	ResponseContextStore ResponseContextStoreConfig
+}
+
+// ResponseContextStoreConfig 是 Memory 驱动下 previous_response_id 上下文的本地磁盘持久层。
+// Path 为空表示关闭；默认放在 SQLite 主库同目录的独立文件中，不进入主库备份。
+type ResponseContextStoreConfig struct {
+	Path     string
+	TTL      time.Duration
+	MaxBytes int64
 }
 
 // Label 返回用于展示的缓存标签。
@@ -240,6 +250,11 @@ func Load(envPath string) (*Config, error) {
 	}
 	cfg.Cache.Redis.TLS = parseBoolEnv(os.Getenv("REDIS_TLS"))
 	cfg.Cache.Redis.InsecureSkipVerify = parseBoolEnv(os.Getenv("REDIS_INSECURE_SKIP_VERIFY"))
+	responseContextStore, err := loadResponseContextStoreConfig(cfg.Cache.Driver, cfg.Database)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Cache.ResponseContextStore = responseContextStore
 
 	// 校验必填物理层配置
 	switch cfg.Database.Driver {
@@ -323,4 +338,74 @@ func normalizeCodexUpstreamTransport(value string) string {
 	default:
 		return ""
 	}
+}
+
+const (
+	defaultResponseContextStoreTTLHours = 48
+	defaultResponseContextStoreMaxMB    = 2048
+)
+
+// loadResponseContextStoreConfig 解析 RESPONSE_CONTEXT_STORE_*。
+//   - RESPONSE_CONTEXT_STORE_PATH：显式路径；off/none/false/0 关闭。未设置时，
+//     Memory 缓存 + SQLite 主库默认使用主库同目录下的 response-context.db。
+//   - RESPONSE_CONTEXT_STORE_TTL_HOURS：最短保留时长（1~720，默认 48）。
+//   - RESPONSE_CONTEXT_STORE_MAX_MB：去重后条目正文总量上限（64~65536，默认 2048）。
+func loadResponseContextStoreConfig(cacheDriver string, db DatabaseConfig) (ResponseContextStoreConfig, error) {
+	result := ResponseContextStoreConfig{
+		TTL:      defaultResponseContextStoreTTLHours * time.Hour,
+		MaxBytes: int64(defaultResponseContextStoreMaxMB) << 20,
+	}
+	if value := strings.TrimSpace(os.Getenv("RESPONSE_CONTEXT_STORE_TTL_HOURS")); value != "" {
+		hours, err := strconv.Atoi(value)
+		if err != nil || hours < 1 || hours > 720 {
+			return result, fmt.Errorf("RESPONSE_CONTEXT_STORE_TTL_HOURS 必须是 1~720 的整数: %q", value)
+		}
+		result.TTL = time.Duration(hours) * time.Hour
+	}
+	if value := strings.TrimSpace(os.Getenv("RESPONSE_CONTEXT_STORE_MAX_MB")); value != "" {
+		mb, err := strconv.ParseInt(value, 10, 64)
+		if err != nil || mb < 64 || mb > 65536 {
+			return result, fmt.Errorf("RESPONSE_CONTEXT_STORE_MAX_MB 必须是 64~65536 的整数: %q", value)
+		}
+		result.MaxBytes = mb << 20
+	}
+	path, explicit := os.LookupEnv("RESPONSE_CONTEXT_STORE_PATH")
+	path = strings.TrimSpace(path)
+	if explicit && path != "" {
+		switch strings.ToLower(path) {
+		case "off", "none", "false", "0":
+			return result, nil
+		}
+		if cacheDriver != "memory" {
+			return result, fmt.Errorf("RESPONSE_CONTEXT_STORE_PATH 仅支持 memory 缓存驱动；redis 模式使用共享上下文后端")
+		}
+		result.Path = path
+		return result, nil
+	}
+	// Redis 已经是共享后端；只在 Memory 驱动下默认启用本地持久层。
+	if cacheDriver != "memory" || db.Driver != "sqlite" {
+		return result, nil
+	}
+	if dir := sqliteDatabaseDir(db.Path); dir != "" {
+		result.Path = filepath.Join(dir, "response-context.db")
+	}
+	return result, nil
+}
+
+// sqliteDatabaseDir 返回 SQLite 主库文件所在目录；内存库或无法识别的 DSN 返回空。
+func sqliteDatabaseDir(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" || path == ":memory:" || strings.Contains(strings.ToLower(path), "mode=memory") {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(path), "file:") {
+		path = path[len("file:"):]
+		if index := strings.IndexByte(path, '?'); index >= 0 {
+			path = path[:index]
+		}
+	}
+	if path == "" || path == ":memory:" {
+		return ""
+	}
+	return filepath.Dir(path)
 }

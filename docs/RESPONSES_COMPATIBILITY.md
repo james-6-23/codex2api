@@ -26,7 +26,7 @@ X-Codex2API-Strict-Compatibility: true
 
 HTTP Responses/Compact 在处理原始 JSON 时拒绝重复的顶层 `input` 或 `previous_response_id`，返回 `400 invalid_request`，避免不同解析器选取不同值；JSON 转义后的同名键也算重复。嵌套字段和正常原生 Responses relay 的数值、父引用不受此检查改写。
 
-原生 Codex HTTP 出站需要展开并删除 `previous_response_id`。每个非空父响应引用都必须在当前请求归属的缓存中得到证明；缓存缺失或过期返回 409，后端故障返回 503，不会丢弃引用后继续返回一轮没有历史的成功响应。新工具调用对仍需拼接父快照，不能据此推断客户端重传了所有祖先。只有重叠 `call_id` 且完整父前缀一致时才跳过重复拼接；比较仅忽略已定义的顶层 item ID 和内部元数据。部分重放、调用内容冲突或重复定义父调用返回 `409 response_context_unavailable`，客户端可重发完整历史并省略父 ID。相同消息文本本身不会触发去重。
+原生 Codex HTTP 出站需要展开并删除 `previous_response_id`。每个非空父响应引用都必须在当前请求归属的缓存中得到证明；缓存缺失或过期返回 409，后端故障返回 503，不会丢弃引用后继续返回一轮没有历史的成功响应。新工具调用对仍需拼接父快照，不能据此推断客户端重传了所有祖先。只有重叠 `call_id` 且完整父前缀一致时才跳过重复拼接；比较仅忽略已定义的顶层 item ID 和内部元数据。部分重放、调用内容冲突或重复定义父调用返回 `409 previous_response_not_found`，客户端可重发完整历史并省略父 ID。相同消息文本本身不会触发去重。
 
 当前 HTTP 缓存主要保存工具上下文，不为普通消息新增会话存储。普通文本父轮的后续 HTTP 请求应发送完整历史并省略 `previous_response_id`；需要增量续链时使用经过验证的 WS 路径。原生 Responses relay 可把父 ID 交给自己的上游恢复，不套用 Codex 的本地缓存缺失限制；其他仅做协议翻译的渠道不能因此自动获得服务端父响应存储能力。
 

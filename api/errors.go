@@ -30,7 +30,7 @@ const (
 	ErrCodeInvalidStreamID            ErrorCode = "invalid_stream_id"
 	ErrCodeWebsocketStreamLimit       ErrorCode = "websocket_stream_limit_reached"
 	ErrCodeContextLengthExceeded      ErrorCode = "context_length_exceeded"
-	ErrCodeResponseContextUnavailable ErrorCode = "response_context_unavailable"
+	ErrCodeResponseContextUnavailable ErrorCode = "previous_response_not_found"
 	ErrCodeUnsupportedModel           ErrorCode = "unsupported_model"
 	ErrCodeRateLimitReached           ErrorCode = "rate_limit_reached"
 

@@ -177,7 +177,7 @@ func TestReviewWSFailOpenDoesNotPoisonLaterFailClosed(t *testing.T) {
 				if i == 0 && gjson.GetBytes(terminal, "type").String() != "response.completed" {
 					t.Fatalf("escape hatch failed: %s", terminal)
 				}
-				if i == 1 && gjson.GetBytes(terminal, "error.code").String() != "response_context_unavailable" {
+				if i == 1 && gjson.GetBytes(terminal, "error.code").String() != "previous_response_not_found" {
 					t.Fatalf("lossy history became trusted: %s", terminal)
 				}
 			}
@@ -288,7 +288,7 @@ func TestReviewWSHTTPFallbackMissingContextReleasesLease(t *testing.T) {
 	}
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	_, body, err := conn.ReadMessage()
-	if err != nil || gjson.GetBytes(body, "error.code").String() != "response_context_unavailable" {
+	if err != nil || gjson.GetBytes(body, "error.code").String() != "previous_response_not_found" {
 		t.Fatalf("missing fail-closed error: %s %v", body, err)
 	}
 	if int64(http.StatusConflict) != gjson.GetBytes(body, "status").Int() || int64(0) != account.GetActiveRequests() {

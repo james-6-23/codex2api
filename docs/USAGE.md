@@ -37,7 +37,7 @@ Claude 上游支持 OAuth、Setup Token 和 API Key + Base URL。后者不走 OA
 - `/admin/docs#structured-output`：Responses 使用 `text.format`，Chat 使用 `response_format`；支持的约束取决于最终模型、渠道和传输方式。
 - `/admin/docs#protocols`：协议、模型映射、思考强度与服务档位说明。
 
-`previous_response_id` 依赖同一密钥范围内可恢复的上下文。缓存受容量、TTL 和写入策略限制，Memory 模式重启会丢失。遇到 `409 response_context_unavailable` 时，重发完整必需历史并开始新链。详见 [Responses 上下文](API.md#responses-上下文不可用)。
+`previous_response_id` 依赖同一密钥范围内可恢复的上下文。缓存受容量、TTL 和写入策略限制；Memory 缓存配合 SQLite 文件主库时默认有磁盘持久层，关闭后重启会丢失。遇到 `409 previous_response_not_found` 时，重发完整必需历史并开始新链。详见 [Responses 上下文](API.md#responses-上下文不可用)。
 
 SDK 示例的基础调用与流式事件按 [OpenAI SDK 文档](https://developers.openai.com/api/docs/libraries) 和 [流式响应文档](https://developers.openai.com/api/docs/guides/streaming-responses) 编写；模型名、路由及兼容性边界以本网关为准。
 
@@ -63,7 +63,7 @@ GPT Image 2.5 的 Flare / Sunburst 支持 `auto/low/medium/high/xhigh/max`；省
 | 503 `no_available_account` | 检查账号启用状态、冷却、并发及可用模型 |
 | 503 `account_pool_concurrency_saturated` | 账号在，但并发窗口已满；稍后重试或提高并发上限 |
 | 503 `account_pool_usage_limit_reached` | 账号池额度耗尽；根据 `Retry-After` 等待重置或补充账号 |
-| 409 `response_context_unavailable` | 重发完整上下文，开始新响应链 |
+| 409 `previous_response_not_found` | 重发完整上下文，开始新响应链 |
 | 503 `service_unavailable` | 检查共享上下文或预算存储，退避后重试 |
 | 404 | 核对是否重复拼接 `/v1`、服务器版本和完整路径；任务查询还要检查所属密钥及有效期 |
 

@@ -567,6 +567,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	// 忽略本地 WHAM 100% 快照；previous_response_id 本身不足以证明这是活跃 turn。
 	continuationPinned := turnContinuation && turnHasBinding
 	continuationDegraded := false
+	quotaFailover := false
 	if err := waitNativeWSCommit(c.Request.Context(), lookupOwner, gjson.GetBytes(codexBody, "previous_response_id").String()); err != nil {
 		return writeResponsesWSErrorForContext(c, conn, nativeResponsesWSContextError(responsesWSContextUnavailable(http.StatusServiceUnavailable, "context_commit_pending")))
 	}
@@ -620,6 +621,26 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		account, stickyProxyURL, retainedHTTPFallback := wsHTTPFallback.Take()
 		if !retainedHTTPFallback {
 			affinityGuard = auth.SessionAffinityGuard{}
+			quotaAffinityReleased := false
+			if preserveContinuationBinding() {
+				if boundID, bound := h.store.SessionAffinityAccountID(affinityKey); bound {
+					if limited := h.quotaBlockedContinuationAccount(boundID); limited != nil {
+						replayRaw, replayBody, contextErr := responsesWSQuotaReplayBody(rawBody, codexBody, turnReplay)
+						if contextErr != nil {
+							logQuotaFailoverRejected(c, "websocket", limited.ID(), attempt+1, rawBody, contextErr)
+							return writeResponsesWSRecoveryErrorForContext(c, conn, nativeResponsesWSContextError(contextErr))
+						}
+						rawBody, codexBody = replayRaw, replayBody
+						turnReplay = newResponsesWSReplaySourceFromRecovery(responsesInputRaw(replayBody), turnReplay)
+						continuationPinned = false
+						continuationDegraded = true
+						quotaFailover = true
+						quotaAffinityReleased = true
+						h.store.UnbindSessionAffinity(affinityKey, limited.ID())
+						log.Printf("[quota-failover] complete WebSocket context admitted; releasing exhausted account affinity (account=%d, attempt=%d, encrypted_reasoning=%d)", limited.ID(), attempt+1, quotaFailoverEncryptedReasoning(rawBody))
+					}
+				}
+			}
 			if !continuationPinned && hasPreviousResponse && !continuationDegraded {
 				// 绑定账号已被本次请求硬排除（上一轮 429/5xx 等）时不必再等它 30s：
 				// 排除在本请求内不会解除，直接剥离 previous_response_id 换号。
@@ -641,7 +662,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			} else if continuationPinned {
 				// 续链重试同样传 SelectionOptions，避免重试把渠道上下文丢掉。
 				account, stickyProxyURL, selectionErr = h.nextRetryAccountForContinuationWithSelection(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, selectionOpts)
-			} else {
+			} else if !quotaAffinityReleased || h.quotaFailoverHasCandidate(affinityKey, apiKeyID, retryExclusions.ForSelection(), accountFilter, dispatchPolicy) {
 				account, stickyProxyURL, affinityGuard, selectionErr = h.nextRetryAccountForSessionWithDispatchGuard(c.Request.Context(), affinityKey, apiKeyID, retryExclusions, accountFilter, selectionOpts)
 			}
 		}
@@ -709,6 +730,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			deviceCfg = &DeviceProfileConfig{StabilizeDeviceProfile: false}
 		}
 		downstreamHeaders := c.Request.Header.Clone()
+		if quotaFailover {
+			downstreamHeaders.Del(codexTurnStateHeader)
+		}
 
 		if lastUpstreamCancel != nil {
 			lastUpstreamCancel()

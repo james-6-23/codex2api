@@ -350,10 +350,14 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 		}
 	}
 	snapshots := make(map[int64]database.ModelCapabilitySnapshot)
+	// Without a readable store an observed narrower account cannot be told
+	// apart from an unobserved one, so every account stays a blocker.
+	snapshotsLoaded := false
 	if h != nil && h.db != nil {
 		stored, err := h.db.ListModelCapabilities(ctx, ids)
 		if err == nil {
 			snapshots = stored
+			snapshotsLoaded = true
 		}
 	}
 	for _, account := range accounts {
@@ -369,19 +373,43 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 			continue
 		}
 		filter := codexManifestCapabilityAccountFilter(row, slug)
+		var live map[string]json.RawMessage
+		if upstream {
+			live = make(map[string]json.RawMessage)
+			for name, kind := range codexCapabilityKinds {
+				if raw := model[name]; validCodexCapability(kind, raw) {
+					live[name] = raw
+				}
+			}
+		}
 		var candidates []map[string]json.RawMessage
+		eligible := 0
+		websocketEligible := accountFilterForResponsesWebSocket(slug)
+		allWebsocketEligible := true
 		for _, account := range accounts {
 			if !filter(account) {
 				continue
+			}
+			eligible++
+			if !websocketEligible(account) {
+				allWebsocketEligible = false
 			}
 			target := slug
 			if mapped, ok := resolveAccountModelMapping(account, slug); ok {
 				target = mapped
 			}
-			snapshot := snapshots[account.ID()]
+			snapshot, observed := snapshots[account.ID()]
+			observed = observed && snapshot.CredentialGeneration == account.GetCredentialGeneration()
 			var fields map[string]json.RawMessage
-			if snapshot.CredentialGeneration == account.GetCredentialGeneration() {
-				fields = snapshot.Models[strings.ToLower(strings.TrimSpace(target))]
+			if observed {
+				fields, observed = snapshot.Models[strings.ToLower(strings.TrimSpace(target))]
+			}
+			// Against a live descriptor, an account without a current observation
+			// of this model (relay-style upstreams never learn; new or rotated
+			// credentials have not been seen yet) is unknown rather than a
+			// downgrade. Request-side gates still handle such accounts per call.
+			if upstream && snapshotsLoaded && !observed {
+				continue
 			}
 			validated := make(map[string]json.RawMessage)
 			for name, raw := range fields {
@@ -389,22 +417,30 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 					validated[name] = raw
 				}
 			}
+			if upstream && snapshotsLoaded {
+				// Fields an older observation did not declare cannot narrow, and
+				// the live descriptor stays the upper bound for those it did.
+				for name, raw := range live {
+					if _, declared := validated[name]; !declared {
+						validated[name] = raw
+					}
+				}
+			}
 			candidates = append(candidates, validated)
 		}
 		if upstream {
-			validated := make(map[string]json.RawMessage)
-			for name, kind := range codexCapabilityKinds {
-				if raw := model[name]; validCodexCapability(kind, raw) {
-					validated[name] = raw
-				}
-			}
 			// No eligible credential means there is no usable capability proof.
-			if len(candidates) == 0 {
+			if eligible == 0 {
 				candidates = append(candidates, nil)
 			}
-			candidates = append(candidates, validated)
+			candidates = append(candidates, live)
 		}
 		effective := intersectCodexCapabilities(candidates)
+		// Unknown observations cannot widen the transports actually available
+		// to this key. HTTP-only relays never learn a capability snapshot.
+		if !allWebsocketEligible {
+			effective["prefer_websockets"] = json.RawMessage("false")
+		}
 		for name, kind := range codexCapabilityKinds {
 			value := effective[name]
 			if len(value) == 0 || bytes.Equal(value, []byte("null")) {
