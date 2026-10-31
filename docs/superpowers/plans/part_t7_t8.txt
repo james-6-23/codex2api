@@ -1,0 +1,1536 @@
+
+### Task 7: 统一协议感知投影层与跨帧状态机分派器
+
+**Files:**
+- Create: `proxy/outputguard_projection.go`
+- Test: `proxy/outputguard_projection_test.go`
+- Modify: `security/outputguard/guard.go:815-840,1050-1250`（为 RequestGuard 增补 `RecordEvent` 独立事件计数与 `ObserveAppendNoEvent`/`ObserveSnapshotNoEvent` 批处理支持）
+
+**Interfaces:**
+- Consumes:
+  - `security/outputguard`（严格对齐 Part A exact 签名与实现）：
+    ```go
+    type ChannelKind string
+    const (
+        KindText          ChannelKind = "text"
+        KindThinking      ChannelKind = "thinking"
+        KindToolArguments ChannelKind = "tool_arguments"
+    )
+    type Config struct {
+        Enabled               bool
+        MaxToolArgumentBytes  int64
+        MaxToolArgumentDeltas int
+        MaxChannelBytes       int64
+        MaxRequestBytes       int64
+    }
+    type RequestGuard struct { ... }
+    func NewRequestGuard(cfg Config) *RequestGuard
+    func (g *RequestGuard) IsTripped() bool
+    func (g *RequestGuard) TrippedReason() string
+    func (g *RequestGuard) ObserveAppend(channelID string, aliasID string, kind ChannelKind, delta []byte) error
+    func (g *RequestGuard) ObserveSnapshot(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error
+    func (g *RequestGuard) EndChannel(channelID string) error
+    ```
+  - `github.com/tidwall/gjson` (go.mod)
+  - `github.com/tidwall/sjson` (go.mod)
+- Produces:
+  ```go
+  package proxy
+
+  import (
+      "github.com/codex2api/security/outputguard"
+  )
+
+  type ObservationAction string
+  const (
+      ActionAppend   ObservationAction = "append"
+      ActionSnapshot ObservationAction = "snapshot"
+      ActionEnd      ObservationAction = "end"
+  )
+
+  type Observation struct {
+      ChannelID     string
+      AliasID       string
+      Kind          outputguard.ChannelKind
+      Action        ObservationAction
+      Payload       []byte
+      TerminalStage string // 严格白名单限制为 3 种合法语义终态阶段之一: "arguments.done", "item.done", "response.completed"，其余普通帧必须置为空字符串
+  }
+
+  type ProtocolProjector interface {
+      Project(eventType string, data []byte) ([]Observation, error)
+  }
+
+  type ResponsesProjector struct {
+      aliasMap map[string]string
+  }
+  func NewResponsesProjector() *ResponsesProjector
+  func (p *ResponsesProjector) Project(eventType string, data []byte) ([]Observation, error)
+
+  type ChatProjector struct {
+      aliasMap map[string]string
+  }
+  func NewChatProjector() *ChatProjector
+  func (p *ChatProjector) Project(eventType string, data []byte) ([]Observation, error)
+
+  type AnthropicProjector struct {
+      blockTypes map[int]string
+      blockIDs   map[int]string
+  }
+  func NewAnthropicProjector() *AnthropicProjector
+  func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observation, error)
+
+  type GeminiProjector struct{}
+  func NewGeminiProjector() *GeminiProjector
+  func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation, error)
+
+  // ObserveEvent 核心事件分派器：
+  // 1. 业务事件计数：严格每上游事件计 1 次，心跳/注释除外；unknown/control/empty 业务帧必须消耗事件预算；
+  // 2. 调用 projector.Project 解出当前 envelope 的 observations；
+  // 3. 工具 arguments 仅解当前 envelope 或原生 object bounded serialize，不每 delta 重 parse inner JSON；
+  // 4. 稳定 channel key 跨帧 alias 映射维护与测试验证；
+  // 5. 调用 guard 执行判定流水线，端到端保障状态机语义一致性。
+  func ObserveEvent(guard *outputguard.RequestGuard, projector ProtocolProjector, eventType string, data []byte) error
+  ```
+
+- [ ] **Step 1: Write failing test for protocol projection and event dispatcher**
+
+```go
+// proxy/outputguard_projection_test.go
+package proxy
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/codex2api/security/outputguard"
+)
+
+func defaultProjectionTestConfig() outputguard.Config {
+	return outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,  // 128 KiB
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152, // 2 MiB
+		MaxRequestBytes:       4194304, // 4 MiB
+	}
+}
+
+// 1. Responses 协议流式、3 个合法语义终态阶段快照与 alias 跨帧映射测试
+func TestResponsesProjectorStreamAndTerminalSnapshots(t *testing.T) {
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewResponsesProjector()
+
+	// Text delta
+	textDelta := `{"type":"response.output_text.delta","item_id":"msg_1","output_index":0,"content_index":0,"delta":"Hello, "}`
+	if err := ObserveEvent(guard, proj, "response.output_text.delta", []byte(textDelta)); err != nil {
+		t.Fatalf("text delta observe failed: %v", err)
+	}
+
+	// Thinking delta
+	thinkingDelta := `{"type":"response.reasoning.delta","item_id":"msg_1","delta":"thinking step 1"}`
+	if err := ObserveEvent(guard, proj, "response.reasoning.delta", []byte(thinkingDelta)); err != nil {
+		t.Fatalf("thinking delta observe failed: %v", err)
+	}
+
+	// Tool call delta with call_id and item_id alias
+	toolDelta := `{"type":"response.function_call_arguments.delta","item_id":"item_call_1","call_id":"call_write_file","output_index":1,"delta":"{\"path\":\"test.txt\""}`
+	if err := ObserveEvent(guard, proj, "response.function_call_arguments.delta", []byte(toolDelta)); err != nil {
+		t.Fatalf("tool delta observe failed: %v", err)
+	}
+
+	// Tool call done (终态阶段 1: arguments.done 纯终态确认快照)
+	toolDone := `{"type":"response.function_call_arguments.done","item_id":"item_call_1","call_id":"call_write_file","arguments":"{\"path\":\"test.txt\"}"}`
+	if err := ObserveEvent(guard, proj, "response.function_call_arguments.done", []byte(toolDone)); err != nil {
+		t.Fatalf("tool done observe failed: %v", err)
+	}
+
+	// output_item.done (终态阶段 2: item.done 纯终态确认快照)
+	itemDone := `{"type":"response.output_item.done","item":{"id":"item_call_1","type":"function_call","call_id":"call_write_file","arguments":"{\"path\":\"test.txt\"}"}}`
+	if err := ObserveEvent(guard, proj, "response.output_item.done", []byte(itemDone)); err != nil {
+		t.Fatalf("item done observe failed: %v", err)
+	}
+
+	// response.completed (终态阶段 3: response.completed 纯终态确认快照)
+	completed := `{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"id":"item_call_1","type":"function_call","call_id":"call_write_file","arguments":"{\"path\":\"test.txt\"}"}]}}`
+	if err := ObserveEvent(guard, proj, "response.completed", []byte(completed)); err != nil {
+		t.Fatalf("response completed observe failed: %v", err)
+	}
+
+	if guard.IsTripped() {
+		t.Fatalf("expected guard not tripped, got %s", guard.TrippedReason())
+	}
+}
+
+// 2. ChatCompletions 协议 choice/toolindex/callid alias 隔离与流式及非流式测试
+func TestChatProjectorStreamingAndNonStreaming(t *testing.T) {
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewChatProjector()
+
+	// 流式 Chunk 1: content + reasoning + tool_call 首帧 (带 call_id 与 index)
+	chunk1 := `{"id":"chatcmpl-1","choices":[{"index":0,"delta":{"content":"foo","reasoning_content":"think","tool_calls":[{"index":0,"id":"call_123","function":{"name":"search","arguments":"{\"q\":"}}]}}]}`
+	if err := ObserveEvent(guard, proj, "", []byte(chunk1)); err != nil {
+		t.Fatalf("chunk 1 observe error: %v", err)
+	}
+
+	// 流式 Chunk 2: tool_call 后续 delta (仅带 index, 缺失 id, 验证 aliasMap 稳定解析到同一 channel)
+	chunk2 := `{"id":"chatcmpl-1","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"golang\"}"}}]}}]}`
+	if err := ObserveEvent(guard, proj, "", []byte(chunk2)); err != nil {
+		t.Fatalf("chunk 2 observe error: %v", err)
+	}
+
+	// 验证不同 choice 和不同 tool_index 隔离，不发生错合并
+	chunkChoice1 := `{"id":"chatcmpl-1","choices":[{"index":1,"delta":{"content":"bar"}}]}`
+	if err := ObserveEvent(guard, proj, "", []byte(chunkChoice1)); err != nil {
+		t.Fatalf("chunk choice 1 observe error: %v", err)
+	}
+
+	// 非流式 JSON 测试
+	nonStream := `{"id":"chatcmpl-2","choices":[{"index":0,"message":{"role":"assistant","content":"final content","tool_calls":[{"id":"call_999","type":"function","function":{"name":"calc","arguments":"{\"val\":42}"}}]}}]}`
+	guardNonStream := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	projNonStream := NewChatProjector()
+	if err := ObserveEvent(guardNonStream, projNonStream, "", []byte(nonStream)); err != nil {
+		t.Fatalf("non-stream chat observe error: %v", err)
+	}
+	if guardNonStream.IsTripped() {
+		t.Fatalf("expected non-stream not tripped, got %s", guardNonStream.TrippedReason())
+	}
+}
+
+// 3. Anthropic Messages 协议真实 fixture 与 content_block 状态流转测试
+func TestAnthropicProjectorStreamLifecycleAndNonStream(t *testing.T) {
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewAnthropicProjector()
+
+	// message_start
+	msgStart := `{"type":"message_start","message":{"id":"msg_123","type":"message","role":"assistant","content":[]}}`
+	if err := ObserveEvent(guard, proj, "message_start", []byte(msgStart)); err != nil {
+		t.Fatalf("msg start error: %v", err)
+	}
+
+	// block 0: thinking
+	b0Start := `{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}`
+	if err := ObserveEvent(guard, proj, "content_block_start", []byte(b0Start)); err != nil {
+		t.Fatalf("b0 start error: %v", err)
+	}
+	b0Delta := `{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me think"}}`
+	if err := ObserveEvent(guard, proj, "content_block_delta", []byte(b0Delta)); err != nil {
+		t.Fatalf("b0 delta error: %v", err)
+	}
+	b0Stop := `{"type":"content_block_stop","index":0}`
+	if err := ObserveEvent(guard, proj, "content_block_stop", []byte(b0Stop)); err != nil {
+		t.Fatalf("b0 stop error: %v", err)
+	}
+
+	// block 1: tool_use
+	b1Start := `{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01ABC","name":"exec"}}`
+	if err := ObserveEvent(guard, proj, "content_block_start", []byte(b1Start)); err != nil {
+		t.Fatalf("b1 start error: %v", err)
+	}
+	b1Delta := `{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"cmd\":\"ls\"}"}}`
+	if err := ObserveEvent(guard, proj, "content_block_delta", []byte(b1Delta)); err != nil {
+		t.Fatalf("b1 delta error: %v", err)
+	}
+	b1Stop := `{"type":"content_block_stop","index":1}`
+	if err := ObserveEvent(guard, proj, "content_block_stop", []byte(b1Stop)); err != nil {
+		t.Fatalf("b1 stop error: %v", err)
+	}
+
+	// message_stop
+	msgStop := `{"type":"message_stop"}`
+	if err := ObserveEvent(guard, proj, "message_stop", []byte(msgStop)); err != nil {
+		t.Fatalf("msg stop error: %v", err)
+	}
+
+	// 非流式 Anthropic 响应
+	nonStream := `{"id":"msg_456","type":"message","role":"assistant","content":[{"type":"text","text":"Done!"},{"type":"tool_use","id":"toolu_02XYZ","name":"write","input":{"content":"file content"}}]}`
+	guardAnthropicNonStream := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	projAnthropicNonStream := NewAnthropicProjector()
+	if err := ObserveEvent(guardAnthropicNonStream, projAnthropicNonStream, "", []byte(nonStream)); err != nil {
+		t.Fatalf("anthropic non-stream observe error: %v", err)
+	}
+	if guardAnthropicNonStream.IsTripped() {
+		t.Fatalf("expected anthropic non-stream not tripped, got %s", guardAnthropicNonStream.TrippedReason())
+	}
+}
+
+// 4. Gemini Native (streamGenerateContent & generateContent) 真实结构与 Object 紧凑序列化测试
+func TestGeminiProjectorStreamAndNonStreamObjectSerialization(t *testing.T) {
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewGeminiProjector()
+
+	// 流式 candidate text + thought
+	geminiChunk := `{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"hello gemini"},{"thought":true,"text":"inner thoughts"},{"functionCall":{"name":"search","args":{"query":"codex"}}}]}}]}`
+	if err := ObserveEvent(guard, proj, "", []byte(geminiChunk)); err != nil {
+		t.Fatalf("gemini chunk observe error: %v", err)
+	}
+
+	// Gemini 非流式带 finishReason
+	geminiNonStreamJSON := `{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"name":"fetch","args":{"url":"https://example.com","headers":{"Auth":"secret"}}}}]外},"finishReason":"STOP"}]}`
+	geminiNonStreamJSON = strings.ReplaceAll(geminiNonStreamJSON, "外", "")
+
+	guardGemini := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	projGemini := NewGeminiProjector()
+	if err := ObserveEvent(guardGemini, projGemini, "", []byte(geminiNonStreamJSON)); err != nil {
+		t.Fatalf("gemini non-stream observe error: %v", err)
+	}
+	if guardGemini.IsTripped() {
+		t.Fatalf("expected gemini non-stream not tripped, got %s", guardGemini.TrippedReason())
+	}
+}
+
+// 5. 事件计数契约：每上游事件一次，unknown/control/empty 业务事件严格扣减事件预算，心跳注释除外
+func TestObserveEventBudgetAccountability(t *testing.T) {
+	// 极小事件预算配置：MaxRequestEvents = 65536
+	guard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+	proj := NewResponsesProjector()
+
+	// SSE 注释与 ping 帧不消耗业务事件预算
+	if err := ObserveEvent(guard, proj, "", []byte(": keep-alive ping\n")); err != nil {
+		t.Fatalf("comment frame should not fail: %v", err)
+	}
+	if err := ObserveEvent(guard, proj, "ping", []byte("{}")); err != nil {
+		t.Fatalf("ping event should not fail: %v", err)
+	}
+
+	// 构造 65536 个 unknown / empty 业务事件洪泛
+	for i := 0; i < outputguard.MaxRequestEvents; i++ {
+		// unknown 或 control 事件，虽然投影为 0 个 observation，但必须计入业务事件
+		unknownEvent := `{"type":"response.unknown_control_event","id":"ctrl_1"}`
+		if err := ObserveEvent(guard, proj, "response.unknown_control_event", []byte(unknownEvent)); err != nil {
+			t.Fatalf("event %d unexpectedly failed: %v", i, err)
+		}
+	}
+
+	// 第 65537 个事件必须被 request_events 坚决拦截，不能因 control/unknown 绕过！
+	err := ObserveEvent(guard, proj, "response.created", []byte(`{"type":"response.created"}`))
+	if err == nil || err.Error() != "request_events" {
+		t.Fatalf("expected request_events rejection for control/unknown flood, got %v", err)
+	}
+	if guard.TrippedReason() != "request_events" {
+		t.Fatalf("expected tripped reason request_events, got %s", guard.TrippedReason())
+	}
+}
+
+// 6. 验证 Custom Tool Arguments String 仅解码当前 envelope，不每 delta 重 parse inner JSON
+func TestCustomToolArgumentsEnvelopePreservation(t *testing.T) {
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewResponsesProjector()
+
+	// 构造未闭合且包含转义与大段文本的 arguments 片段
+	incompleteJSONChunk := `{"type":"response.function_call_arguments.delta","call_id":"call_custom","delta":"{\"nested_key\":\"val\\nwith\\\"quotes and unclosed brackets..."}`
+	if err := ObserveEvent(guard, proj, "response.function_call_arguments.delta", []byte(incompleteJSONChunk)); err != nil {
+		t.Fatalf("custom tool envelope observe error: %v", err)
+	}
+
+	if guard.IsTripped() {
+		t.Fatalf("expected guard not tripped on unclosed inner JSON, got %s", guard.TrippedReason())
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestResponsesProjector.*|TestChatProjector.*|TestAnthropicProjector.*|TestGeminiProjector.*|TestObserveEvent.*|TestCustomToolArgumentsEnvelopePreservation"`
+Expected: FAIL with compilation error: undefined: NewResponsesProjector, NewChatProjector, NewAnthropicProjector, NewGeminiProjector, ObserveEvent
+
+- [ ] **Step 3: Write minimal implementation**
+
+在 `security/outputguard/guard.go` 中增补 `RecordEvent` 与无独立事件累加的 `ObserveAppendNoEvent`/`ObserveSnapshotNoEvent` 方法，保障单个上游事件产生多个 observation 时事件预算仅计数 1 次：
+```go
+// security/outputguard/guard.go (增补支持 ObserveEvent 分派器的事件记账接口)
+
+// RecordEvent 严格对每上游业务事件执行 1 次计数（步骤 1: request_events 检查）
+func (g *RequestGuard) RecordEvent() error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.cfg.Enabled {
+		return nil
+	}
+	if g.tripped {
+		return errors.New(g.trippedReason)
+	}
+
+	g.requestEvents++
+	if g.requestEvents > MaxRequestEvents {
+		return g.tripLocked("request_events")
+	}
+	return nil
+}
+
+// ObserveAppendNoEvent 仅执行步骤 2~7 检查并提交，不重复累加 requestEvents
+func (g *RequestGuard) ObserveAppendNoEvent(channelID string, aliasID string, kind ChannelKind, delta []byte) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.cfg.Enabled {
+		return nil
+	}
+	if g.tripped {
+		return errors.New(g.trippedReason)
+	}
+
+	cg, err := g.resolveChannelLocked(channelID, aliasID, kind)
+	if err != nil {
+		return err
+	}
+
+	growth, cost, err := cg.CheckAppend(delta)
+	if err != nil {
+		if errors.Is(err, ErrScanBudgetExhausted) {
+			if cg.kind == KindToolArguments {
+				return g.tripLocked("tool_argument_bytes")
+			}
+			return g.tripLocked("channel_bytes")
+		}
+		return g.tripLocked(err.Error())
+	}
+
+	if g.requestBytes+growth > g.cfg.MaxRequestBytes {
+		return g.tripLocked("request_bytes")
+	}
+
+	g.requestBytes += growth
+	if err := cg.CommitAppend(delta, growth, cost); err != nil {
+		return g.tripLocked(err.Error())
+	}
+	return nil
+}
+
+// ObserveSnapshotNoEvent 仅执行步骤 2~7 检查并提交，不重复累加 requestEvents
+func (g *RequestGuard) ObserveSnapshotNoEvent(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.cfg.Enabled {
+		return nil
+	}
+	if g.tripped {
+		return errors.New(g.trippedReason)
+	}
+
+	cg, err := g.resolveChannelLocked(channelID, aliasID, kind)
+	if err != nil {
+		return err
+	}
+
+	snapLen := int64(len(snapshot))
+	var growth int64
+	if snapLen > cg.highwater {
+		growth = snapLen - cg.highwater
+	}
+	if snapLen > cg.maxBytes {
+		if cg.kind == KindToolArguments {
+			return g.tripLocked("tool_argument_bytes")
+		}
+		return g.tripLocked("channel_bytes")
+	}
+	if g.requestBytes+growth > g.cfg.MaxRequestBytes {
+		return g.tripLocked("request_bytes")
+	}
+
+	growth, cost, _, err := cg.CheckSnapshot(snapshot, terminalStage)
+	if err != nil {
+		if errors.Is(err, ErrScanBudgetExhausted) {
+			if cg.kind == KindToolArguments {
+				return g.tripLocked("tool_argument_bytes")
+			}
+			return g.tripLocked("channel_bytes")
+		}
+		return g.tripLocked(err.Error())
+	}
+
+	g.requestBytes += growth
+	if err := cg.CommitSnapshot(snapshot, growth, cost, terminalStage); err != nil {
+		return g.tripLocked(err.Error())
+	}
+	return nil
+}
+```
+
+新建 `proxy/outputguard_projection.go`:
+```go
+// proxy/outputguard_projection.go
+package proxy
+
+import (
+	"bytes"
+	"fmt"
+
+	"github.com/codex2api/security/outputguard"
+	"github.com/tidwall/gjson"
+)
+
+type ObservationAction string
+
+const (
+	ActionAppend   ObservationAction = "append"
+	ActionSnapshot ObservationAction = "snapshot"
+	ActionEnd      ObservationAction = "end"
+)
+
+type Observation struct {
+	ChannelID     string
+	AliasID       string
+	Kind          outputguard.ChannelKind
+	Action        ObservationAction
+	Payload       []byte
+	TerminalStage string // 严格限制为 3 种合法语义终态阶段: "arguments.done", "item.done", "response.completed"，其余普通帧置空
+}
+
+type ProtocolProjector interface {
+	Project(eventType string, data []byte) ([]Observation, error)
+}
+
+// -------------------------------------------------------------
+// 1. ResponsesProjector (HTTP SSE, WebSocket, Realtime Text)
+// -------------------------------------------------------------
+
+type ResponsesProjector struct {
+	aliasMap map[string]string
+}
+
+func NewResponsesProjector() *ResponsesProjector {
+	return &ResponsesProjector{
+		aliasMap: make(map[string]string),
+	}
+}
+
+func (p *ResponsesProjector) Project(eventType string, data []byte) ([]Observation, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	parsed := gjson.ParseBytes(data)
+	t := eventType
+	if t == "" {
+		t = parsed.Get("type").String()
+	}
+
+	var observations []Observation
+
+	switch t {
+	case "response.output_text.delta":
+		itemID := parsed.Get("item_id").String()
+		delta := parsed.Get("delta").String()
+		if itemID == "" {
+			itemID = fmt.Sprintf("output_%d", parsed.Get("output_index").Int())
+		}
+		observations = append(observations, Observation{
+			ChannelID: itemID,
+			Kind:      outputguard.KindText,
+			Action:    ActionAppend,
+			Payload:   []byte(delta),
+		})
+
+	case "response.reasoning.delta", "response.thinking.delta":
+		itemID := parsed.Get("item_id").String()
+		delta := parsed.Get("delta").String()
+		if itemID == "" {
+			itemID = fmt.Sprintf("output_%d", parsed.Get("output_index").Int())
+		}
+		observations = append(observations, Observation{
+			ChannelID: fmt.Sprintf("%s.thinking", itemID),
+			Kind:      outputguard.KindThinking,
+			Action:    ActionAppend,
+			Payload:   []byte(delta),
+		})
+
+	case "response.function_call_arguments.delta":
+		callID := parsed.Get("call_id").String()
+		itemID := parsed.Get("item_id").String()
+		delta := parsed.Get("delta").String()
+		targetID := callID
+		if targetID == "" {
+			targetID = itemID
+		}
+		if targetID == "" {
+			targetID = fmt.Sprintf("output_%d", parsed.Get("output_index").Int())
+		}
+		observations = append(observations, Observation{
+			ChannelID: targetID,
+			AliasID:   itemID,
+			Kind:      outputguard.KindToolArguments,
+			Action:    ActionAppend,
+			Payload:   []byte(delta),
+		})
+
+	case "response.function_call_arguments.done":
+		callID := parsed.Get("call_id").String()
+		itemID := parsed.Get("item_id").String()
+		args := parsed.Get("arguments").String()
+		targetID := callID
+		if targetID == "" {
+			targetID = itemID
+		}
+		observations = append(observations, Observation{
+			ChannelID:     targetID,
+			AliasID:       itemID,
+			Kind:          outputguard.KindToolArguments,
+			Action:        ActionSnapshot,
+			Payload:       []byte(args),
+			TerminalStage: "arguments.done",
+		})
+
+	case "response.output_item.done":
+		item := parsed.Get("item")
+		itemType := item.Get("type").String()
+		itemID := item.Get("id").String()
+		if itemType == "function_call" {
+			callID := item.Get("call_id").String()
+			args := item.Get("arguments").String()
+			targetID := callID
+			if targetID == "" {
+				targetID = itemID
+			}
+			observations = append(observations, Observation{
+				ChannelID:     targetID,
+				AliasID:       itemID,
+				Kind:          outputguard.KindToolArguments,
+				Action:        ActionSnapshot,
+				Payload:       []byte(args),
+				TerminalStage: "item.done",
+			})
+		} else if itemType == "message" {
+			text := item.Get("content.0.text").String()
+			if text != "" {
+				observations = append(observations, Observation{
+					ChannelID:     itemID,
+					Kind:          outputguard.KindText,
+					Action:        ActionSnapshot,
+					Payload:       []byte(text),
+					TerminalStage: "item.done",
+				})
+			}
+		}
+
+	case "response.completed":
+		outputs := parsed.Get("response.output").Array()
+		for _, item := range outputs {
+			itemType := item.Get("type").String()
+			itemID := item.Get("id").String()
+			if itemType == "function_call" {
+				callID := item.Get("call_id").String()
+				args := item.Get("arguments").String()
+				targetID := callID
+				if targetID == "" {
+					targetID = itemID
+				}
+				observations = append(observations, Observation{
+					ChannelID:     targetID,
+					AliasID:       itemID,
+					Kind:          outputguard.KindToolArguments,
+					Action:        ActionSnapshot,
+					Payload:       []byte(args),
+					TerminalStage: "response.completed",
+				})
+			} else if itemType == "message" {
+				text := item.Get("content.0.text").String()
+				if text != "" {
+					observations = append(observations, Observation{
+						ChannelID:     itemID,
+						Kind:          outputguard.KindText,
+						Action:        ActionSnapshot,
+						Payload:       []byte(text),
+						TerminalStage: "response.completed",
+					})
+				}
+			}
+		}
+
+	default:
+		// 兼容非流式完整响应 JSON
+		if parsed.Get("status").String() == "completed" && parsed.Get("output").Exists() {
+			for _, item := range parsed.Get("output").Array() {
+				itemType := item.Get("type").String()
+				itemID := item.Get("id").String()
+				if itemType == "function_call" {
+					callID := item.Get("call_id").String()
+					args := item.Get("arguments").String()
+					targetID := callID
+					if targetID == "" {
+						targetID = itemID
+					}
+					observations = append(observations, Observation{
+						ChannelID:     targetID,
+						AliasID:       itemID,
+						Kind:          outputguard.KindToolArguments,
+						Action:        ActionSnapshot,
+						Payload:       []byte(args),
+						TerminalStage: "response.completed",
+					})
+				} else if itemType == "message" {
+					text := item.Get("content.0.text").String()
+					if text != "" {
+						observations = append(observations, Observation{
+							ChannelID:     itemID,
+							Kind:          outputguard.KindText,
+							Action:        ActionSnapshot,
+							Payload:       []byte(text),
+							TerminalStage: "response.completed",
+						})
+					}
+				}
+			}
+		}
+	}
+
+	return observations, nil
+}
+
+// -------------------------------------------------------------
+// 2. ChatProjector (OpenAI /v1/chat/completions Stream & JSON)
+// -------------------------------------------------------------
+
+type ChatProjector struct {
+	aliasMap map[string]string
+}
+
+func NewChatProjector() *ChatProjector {
+	return &ChatProjector{
+		aliasMap: make(map[string]string),
+	}
+}
+
+func (p *ChatProjector) Project(eventType string, data []byte) ([]Observation, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	parsed := gjson.ParseBytes(data)
+	var observations []Observation
+
+	choices := parsed.Get("choices").Array()
+	for _, choice := range choices {
+		choiceIdx := choice.Get("index").Int()
+
+		// 流式 delta
+		delta := choice.Get("delta")
+		if delta.Exists() {
+			if content := delta.Get("content").String(); content != "" {
+				observations = append(observations, Observation{
+					ChannelID: fmt.Sprintf("choice_%d.text", choiceIdx),
+					Kind:      outputguard.KindText,
+					Action:    ActionAppend,
+					Payload:   []byte(content),
+				})
+			}
+			if reasoning := delta.Get("reasoning_content").String(); reasoning != "" {
+				observations = append(observations, Observation{
+					ChannelID: fmt.Sprintf("choice_%d.thinking", choiceIdx),
+					Kind:      outputguard.KindThinking,
+					Action:    ActionAppend,
+					Payload:   []byte(reasoning),
+				})
+			}
+			toolCalls := delta.Get("tool_calls").Array()
+			for _, tc := range toolCalls {
+				toolIdx := tc.Get("index").Int()
+				callID := tc.Get("id").String()
+				channelID := fmt.Sprintf("choice_%d.tool_%d", choiceIdx, toolIdx)
+				if callID != "" {
+					p.aliasMap[callID] = channelID
+				}
+				args := tc.Get("function.arguments").String()
+				if args != "" {
+					observations = append(observations, Observation{
+						ChannelID: channelID,
+						AliasID:   callID,
+						Kind:      outputguard.KindToolArguments,
+						Action:    ActionAppend,
+						Payload:   []byte(args),
+					})
+				}
+			}
+		}
+
+		// 非流式 message
+		msg := choice.Get("message")
+		if msg.Exists() {
+			if content := msg.Get("content").String(); content != "" {
+				observations = append(observations, Observation{
+					ChannelID:     fmt.Sprintf("choice_%d.text", choiceIdx),
+					Kind:          outputguard.KindText,
+					Action:        ActionSnapshot,
+					Payload:       []byte(content),
+					TerminalStage: "response.completed",
+				})
+			}
+			if reasoning := msg.Get("reasoning_content").String(); reasoning != "" {
+				observations = append(observations, Observation{
+					ChannelID:     fmt.Sprintf("choice_%d.thinking", choiceIdx),
+					Kind:          outputguard.KindThinking,
+					Action:        ActionSnapshot,
+					Payload:       []byte(reasoning),
+					TerminalStage: "response.completed",
+				})
+			}
+			toolCalls := msg.Get("tool_calls").Array()
+			for idx, tc := range toolCalls {
+				callID := tc.Get("id").String()
+				channelID := fmt.Sprintf("choice_%d.tool_%d", choiceIdx, idx)
+				args := tc.Get("function.arguments").String()
+				observations = append(observations, Observation{
+					ChannelID:     channelID,
+					AliasID:       callID,
+					Kind:          outputguard.KindToolArguments,
+					Action:        ActionSnapshot,
+					Payload:       []byte(args),
+					TerminalStage: "response.completed",
+				})
+			}
+		}
+	}
+
+	return observations, nil
+}
+
+// -------------------------------------------------------------
+// 3. AnthropicProjector (Claude /v1/messages Stream & JSON)
+// -------------------------------------------------------------
+
+type AnthropicProjector struct {
+	blockTypes map[int]string
+	blockIDs   map[int]string
+}
+
+func NewAnthropicProjector() *AnthropicProjector {
+	return &AnthropicProjector{
+		blockTypes: make(map[int]string),
+		blockIDs:   make(map[int]string),
+	}
+}
+
+func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observation, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	parsed := gjson.ParseBytes(data)
+	t := eventType
+	if t == "" {
+		t = parsed.Get("type").String()
+	}
+
+	var observations []Observation
+
+	switch t {
+	case "content_block_start":
+		idx := int(parsed.Get("index").Int())
+		block := parsed.Get("content_block")
+		bType := block.Get("type").String()
+		p.blockTypes[idx] = bType
+		if bType == "tool_use" {
+			p.blockIDs[idx] = block.Get("id").String()
+		}
+
+	case "content_block_delta":
+		idx := int(parsed.Get("index").Int())
+		delta := parsed.Get("delta")
+		dType := delta.Get("type").String()
+
+		switch dType {
+		case "text_delta":
+			text := delta.Get("text").String()
+			observations = append(observations, Observation{
+				ChannelID: fmt.Sprintf("block_%d", idx),
+				Kind:      outputguard.KindText,
+				Action:    ActionAppend,
+				Payload:   []byte(text),
+			})
+		case "thinking_delta":
+			thinking := delta.Get("thinking").String()
+			observations = append(observations, Observation{
+				ChannelID: fmt.Sprintf("block_%d", idx),
+				Kind:      outputguard.KindThinking,
+				Action:    ActionAppend,
+				Payload:   []byte(thinking),
+			})
+		case "input_json_delta":
+			partJSON := delta.Get("partial_json").String()
+			callID := p.blockIDs[idx]
+			observations = append(observations, Observation{
+				ChannelID: fmt.Sprintf("block_%d", idx),
+				AliasID:   callID,
+				Kind:      outputguard.KindToolArguments,
+				Action:    ActionAppend,
+				Payload:   []byte(partJSON),
+			})
+		}
+
+	case "content_block_stop":
+		idx := int(parsed.Get("index").Int())
+		bType := p.blockTypes[idx]
+		if bType == "tool_use" {
+			observations = append(observations, Observation{
+				ChannelID:     fmt.Sprintf("block_%d", idx),
+				AliasID:       p.blockIDs[idx],
+				Kind:          outputguard.KindToolArguments,
+				Action:        ActionEnd,
+				TerminalStage: "arguments.done",
+			})
+		} else {
+			observations = append(observations, Observation{
+				ChannelID: fmt.Sprintf("block_%d", idx),
+				Kind:      outputguard.KindText,
+				Action:    ActionEnd,
+			})
+		}
+
+	case "message_stop":
+		observations = append(observations, Observation{
+			ChannelID:     "message_root",
+			Kind:          outputguard.KindText,
+			Action:        ActionSnapshot,
+			Payload:       []byte("done"),
+			TerminalStage: "response.completed",
+		})
+
+	default:
+		// 非流式 JSON (type == "message")
+		if parsed.Get("type").String() == "message" && parsed.Get("content").IsArray() {
+			contentBlocks := parsed.Get("content").Array()
+			for idx, b := range contentBlocks {
+				bType := b.Get("type").String()
+				switch bType {
+				case "text":
+					text := b.Get("text").String()
+					observations = append(observations, Observation{
+						ChannelID:     fmt.Sprintf("block_%d", idx),
+						Kind:          outputguard.KindText,
+						Action:        ActionSnapshot,
+						Payload:       []byte(text),
+						TerminalStage: "response.completed",
+					})
+				case "thinking":
+					thinking := b.Get("thinking").String()
+					observations = append(observations, Observation{
+						ChannelID:     fmt.Sprintf("block_%d", idx),
+						Kind:          outputguard.KindThinking,
+						Action:        ActionSnapshot,
+						Payload:       []byte(thinking),
+						TerminalStage: "response.completed",
+					})
+				case "tool_use":
+					callID := b.Get("id").String()
+					inputObj := b.Get("input")
+					var inputBytes []byte
+					if inputObj.IsObject() {
+						inputBytes = []byte(inputObj.Raw)
+					} else {
+						inputBytes = []byte(inputObj.String())
+					}
+					observations = append(observations, Observation{
+						ChannelID:     fmt.Sprintf("block_%d", idx),
+						AliasID:       callID,
+						Kind:          outputguard.KindToolArguments,
+						Action:        ActionSnapshot,
+						Payload:       inputBytes,
+						TerminalStage: "response.completed",
+					})
+				}
+			}
+		}
+	}
+
+	return observations, nil
+}
+
+// -------------------------------------------------------------
+// 4. GeminiProjector (Native streamGenerateContent & generateContent)
+// -------------------------------------------------------------
+
+type GeminiProjector struct{}
+
+func NewGeminiProjector() *GeminiProjector {
+	return &GeminiProjector{}
+}
+
+func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	parsed := gjson.ParseBytes(data)
+	var observations []Observation
+
+	candidates := parsed.Get("candidates").Array()
+	for candIdx, cand := range candidates {
+		finishReason := cand.Get("finishReason").String()
+		parts := cand.Get("content.parts").Array()
+		for partIdx, part := range parts {
+			// 1. Text / Thought
+			if part.Get("text").Exists() {
+				text := part.Get("text").String()
+				isThought := part.Get("thought").Bool()
+				kind := outputguard.KindText
+				suffix := "text"
+				if isThought {
+					kind = outputguard.KindThinking
+					suffix = "thinking"
+				}
+				action := ActionAppend
+				var stage string
+				if finishReason != "" {
+					action = ActionSnapshot
+					stage = "response.completed"
+				}
+				observations = append(observations, Observation{
+					ChannelID:     fmt.Sprintf("candidate_%d.part_%d.%s", candIdx, partIdx, suffix),
+					Kind:          kind,
+					Action:        action,
+					Payload:       []byte(text),
+					TerminalStage: stage,
+				})
+			}
+
+			// 2. Function Call (Native object bounded serialization)
+			if fnCall := part.Get("functionCall"); fnCall.Exists() {
+				name := fnCall.Get("name").String()
+				args := fnCall.Get("args")
+				var argBytes []byte
+				if args.IsObject() {
+					argBytes = []byte(args.Raw)
+				} else {
+					argBytes = []byte(args.String())
+				}
+				action := ActionAppend
+				var stage string
+				if finishReason != "" {
+					action = ActionSnapshot
+					stage = "response.completed"
+				}
+				observations = append(observations, Observation{
+					ChannelID:     fmt.Sprintf("candidate_%d.part_%d.tool_%s", candIdx, partIdx, name),
+					Kind:          outputguard.KindToolArguments,
+					Action:        action,
+					Payload:       argBytes,
+					TerminalStage: stage,
+				})
+			}
+		}
+	}
+
+	return observations, nil
+}
+
+// -------------------------------------------------------------
+// 5. ObserveEvent Dispatcher (单上游事件严格计 1 次，流水线批调度)
+// -------------------------------------------------------------
+
+func ObserveEvent(guard *outputguard.RequestGuard, projector ProtocolProjector, eventType string, data []byte) error {
+	// 心跳/注释帧直接放行，不计入业务事件预算
+	trimmed := bytes.TrimSpace(data)
+	if bytes.HasPrefix(trimmed, []byte(":")) || eventType == "ping" {
+		return nil
+	}
+
+	// 步骤 1: 严格每上游业务事件计 1 次 requestEvents（即使是 control/unknown 帧）
+	if err := guard.RecordEvent(); err != nil {
+		return err
+	}
+
+	obs, err := projector.Project(eventType, data)
+	if err != nil {
+		return err
+	}
+	if len(obs) == 0 {
+		return nil
+	}
+
+	// 依次将 observations 推入 guard，执行步骤 2~7 判定流水线
+	for _, o := range obs {
+		switch o.Action {
+		case ActionAppend:
+			if err := guard.ObserveAppendNoEvent(o.ChannelID, o.AliasID, o.Kind, o.Payload); err != nil {
+				return err
+			}
+		case ActionSnapshot:
+			if err := guard.ObserveSnapshotNoEvent(o.ChannelID, o.AliasID, o.Kind, o.Payload, o.TerminalStage); err != nil {
+				return err
+			}
+		case ActionEnd:
+			if err := guard.EndChannel(o.ChannelID); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestResponsesProjector.*|TestChatProjector.*|TestAnthropicProjector.*|TestGeminiProjector.*|TestObserveEvent.*|TestCustomToolArgumentsEnvelopePreservation"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add proxy/outputguard_projection.go proxy/outputguard_projection_test.go security/outputguard/guard.go
+git commit -m "feat(proxy): implement protocol projectors and observe event dispatcher with strict event budgeting"
+```
+
+---
+
+### Task 8: 传输 Framing 有界 Reader 与全链路 Callsite 替换
+
+**Files:**
+- Modify: `proxy/sse_line.go`
+- Modify: `proxy/sse_line_test.go`
+- Modify: `proxy/executor.go:1592-1715`
+- Modify: `proxy/handler.go:5538-5585,7650-7750`
+- Modify: `proxy/handler_gemini.go:390-420`
+- Modify: `proxy/responses_ws.go:142-190`
+
+**Interfaces:**
+- Consumes:
+  - Go 标准库 `bufio`, `bytes`, `errors`, `io`, `net/http`, `sync`
+  - `github.com/gorilla/websocket` (go.mod)
+- Produces:
+  ```go
+  package proxy
+
+  var (
+      ErrSSELineTooLong       = errors.New("sse_line_too_long")
+      ErrSSEEventTooLarge     = errors.New("sse_event_too_large")
+      ErrWSFrameTooLarge      = errors.New("ws_frame_too_large")
+      ErrResponseBodyTooLarge = errors.New("response_body_too_large")
+  )
+
+  const (
+      MaxSSELineBytes      = 8 << 20  // 8 MiB
+      MaxSSEEventBytes     = 8 << 20  // 8 MiB
+      MaxWSMessageBytes    = 8 << 20  // 8 MiB
+      MaxResponseBodyBytes = 16 << 20 // 16 MiB
+  )
+
+  func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []byte) bool) error
+  func ReadBoundedResponseBody(body io.Reader, limit int64) ([]byte, error)
+  ```
+
+- [ ] **Step 1: Write failing test for bounded readers and callsites**
+
+```go
+// proxy/sse_line_test.go (增补 Task 8 有界流与非流式硬 Cap 测试)
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"io"
+	"strings"
+	"testing"
+)
+
+// 1. 测试跨 Read 块的 split chunk 正常解析
+func TestReadSSEStreamWithEventSplitChunks(t *testing.T) {
+	input := "data: hello "
+	input2 := "world\n\n"
+	r := io.MultiReader(strings.NewReader(input), strings.NewReader(input2))
+
+	var collected []string
+	err := ReadSSEStreamWithEvent(r, func(event string, data []byte) bool {
+		collected = append(collected, string(data))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(collected) != 1 || collected[0] != "hello world" {
+		t.Fatalf("collected want ['hello world'], got %v", collected)
+	}
+}
+
+// 2. 测试标准多行 data 聚合
+func TestReadSSEStreamWithEventMultilineData(t *testing.T) {
+	input := "event: update\ndata: line1\ndata: line2\ndata: line3\n\n"
+	var events []string
+	var payloads []string
+	err := ReadSSEStreamWithEvent(strings.NewReader(input), func(event string, data []byte) bool {
+		events = append(events, event)
+		payloads = append(payloads, string(data))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("multiline read error: %v", err)
+	}
+	if len(events) != 1 || events[0] != "update" || payloads[0] != "line1\nline2\nline3" {
+		t.Fatalf("multiline want update with line1\\nline2\\nline3, got %v: %v", events, payloads)
+	}
+}
+
+// 3. 测试无换行符超大单行（never-ending oversized line）硬 cap 拒绝，返回 ErrSSELineTooLong
+func TestReadSSEStreamWithEventNoNewlineOversized(t *testing.T) {
+	// 构造超过 MaxSSELineBytes (8 MiB) 且无换行符的失控流
+	oversized := strings.Repeat("x", MaxSSELineBytes+1024)
+	err := ReadSSEStreamWithEvent(strings.NewReader(oversized), func(event string, data []byte) bool {
+		return true
+	})
+	if err == nil {
+		t.Fatalf("expected ErrSSELineTooLong for oversized line without newline, got nil")
+	}
+	if !errors.Is(err, ErrSSELineTooLong) {
+		t.Fatalf("expected ErrSSELineTooLong, got %v", err)
+	}
+}
+
+// 4. 测试累积多行 data 整事件超标拒绝，返回 ErrSSEEventTooLarge
+func TestReadSSEStreamWithEventNeverendingMultilineOversized(t *testing.T) {
+	// 9 行，每行 1 MiB，累积达 9 MiB > MaxSSEEventBytes (8 MiB)
+	chunk := "data: " + strings.Repeat("a", 1<<20) + "\n"
+	multilineOversized := strings.Repeat(chunk, 9) + "\n"
+
+	err := ReadSSEStreamWithEvent(strings.NewReader(multilineOversized), func(event string, data []byte) bool {
+		return true
+	})
+	if err == nil {
+		t.Fatalf("expected ErrSSEEventTooLarge for oversized multiline event, got nil")
+	}
+	if !errors.Is(err, ErrSSEEventTooLarge) {
+		t.Fatalf("expected ErrSSEEventTooLarge, got %v", err)
+	}
+}
+
+// 5. 测试非流式超大 Response Body 有界拦截，返回 ErrResponseBodyTooLarge
+func TestReadBoundedResponseBodyOversized(t *testing.T) {
+	oversizedBody := strings.Repeat("b", MaxResponseBodyBytes+512)
+	_, err := ReadBoundedResponseBody(strings.NewReader(oversizedBody), MaxResponseBodyBytes)
+	if err == nil {
+		t.Fatalf("expected ErrResponseBodyTooLarge for body > 16MiB, got nil")
+	}
+	if !errors.Is(err, ErrResponseBodyTooLarge) {
+		t.Fatalf("expected ErrResponseBodyTooLarge, got %v", err)
+	}
+
+	// 正常大小读取成功
+	normalBody := "{\"status\":\"ok\"}"
+	data, err := ReadBoundedResponseBody(strings.NewReader(normalBody), MaxResponseBodyBytes)
+	if err != nil || string(data) != normalBody {
+		t.Fatalf("normal read error = %v, got %s", err, string(data))
+	}
+}
+
+// 6. 验证 Transport Framing 独立于 Guard 开关（关闭语义 guard 仍保留 wire cap）
+func TestTransportFramingIndependentOfGuard(t *testing.T) {
+	// 模拟即使 output_guard_enabled = false
+	// wire framing cap 仍作为系统安全底线硬性生效
+	oversized := strings.Repeat("x", MaxSSELineBytes+100)
+	err := ReadSSEStreamWithEvent(strings.NewReader(oversized), func(event string, data []byte) bool {
+		return true
+	})
+	if !errors.Is(err, ErrSSELineTooLong) {
+		t.Fatalf("wire cap must remain active regardless of guard settings, got %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestReadSSEStreamWithEvent.*|TestReadBoundedResponseBody.*|TestTransportFramingIndependentOfGuard"`
+Expected: FAIL with compilation error or undefined symbols: ErrSSELineTooLong, ErrSSEEventTooLarge, ReadBoundedResponseBody
+
+- [ ] **Step 3: Write minimal implementation**
+
+修改 `proxy/sse_line.go`:
+```go
+// proxy/sse_line.go
+package proxy
+
+import (
+	"bufio"
+	"bytes"
+	"errors"
+	"io"
+)
+
+// SSE 与传输 Wire Limits 属于网络资源硬边界，独立于业务层 output guard 开关
+const (
+	MaxSSELineBytes      = 8 << 20  // 8 MiB
+	MaxSSEEventBytes     = 8 << 20  // 8 MiB
+	MaxWSMessageBytes    = 8 << 20  // 8 MiB
+	MaxResponseBodyBytes = 16 << 20 // 16 MiB
+)
+
+var (
+	ErrSSELineTooLong       = errors.New("sse_line_too_long")
+	ErrSSEEventTooLarge     = errors.New("sse_event_too_large")
+	ErrWSFrameTooLarge      = errors.New("ws_frame_too_large")
+	ErrResponseBodyTooLarge = errors.New("response_body_too_large")
+)
+
+// readBoundedSSELine 读取单行，严格限制在 limit 字节以内
+func readBoundedSSELine(reader *bufio.Reader, limit int) ([]byte, error) {
+	var line []byte
+	for {
+		fragment, err := reader.ReadSlice('\n')
+		if len(line)+len(fragment) > limit {
+			return nil, ErrSSELineTooLong
+		}
+		line = append(line, fragment...)
+		if err != bufio.ErrBufferFull {
+			return line, err
+		}
+	}
+}
+
+// ReadBoundedResponseBody 有界读取非流式响应体
+func ReadBoundedResponseBody(body io.Reader, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		limit = MaxResponseBodyBytes
+	}
+	lr := io.LimitReader(body, limit+1)
+	data, err := io.ReadAll(lr)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > limit {
+		return nil, ErrResponseBodyTooLarge
+	}
+	return data, nil
+}
+```
+
+修改 `proxy/executor.go` 中的 `ReadSSEStreamWithEvent`:
+```go
+// proxy/executor.go (更新 ReadSSEStreamWithEvent，施加行与多行整事件硬 Cap)
+func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []byte) bool) error {
+	buf := sseBufferPool.Get().([]byte)
+	defer sseBufferPool.Put(buf)
+
+	lineBufPtr := sseLineBufPool.Get().(*[]byte)
+	lineBuf := (*lineBufPtr)[:0]
+	defer func() {
+		if cap(lineBuf) <= 256*1024 {
+			*lineBufPtr = lineBuf[:0]
+			sseLineBufPool.Put(lineBufPtr)
+		}
+	}()
+
+	var dataLines [][]byte
+	var eventName string
+	var currentEventBytes int
+
+	emitEvent := func() (bool, error) {
+		event := eventName
+		eventName = ""
+		currentEventBytes = 0
+		if len(dataLines) == 0 {
+			return true, nil
+		}
+
+		data := dataLines[0]
+		if len(dataLines) > 1 {
+			data = bytes.Join(dataLines, []byte("\n"))
+		}
+		isDone := bytes.Equal(data, []byte("[DONE]"))
+		keepReading := !isDone && callback(event, data)
+		for i := range dataLines {
+			dataLines[i] = nil
+		}
+		dataLines = dataLines[:0]
+		return keepReading, nil
+	}
+
+	consumeField := func(line []byte) error {
+		if bytes.HasPrefix(line, []byte("data:")) {
+			data := bytes.TrimPrefix(line, []byte("data:"))
+			data = bytes.TrimPrefix(data, []byte(" "))
+			if currentEventBytes+len(data) > MaxSSEEventBytes {
+				return ErrSSEEventTooLarge
+			}
+			currentEventBytes += len(data)
+			dataCopy := make([]byte, len(data))
+			copy(dataCopy, data)
+			dataLines = append(dataLines, dataCopy)
+			return nil
+		}
+		if bytes.HasPrefix(line, []byte("event:")) {
+			event := bytes.TrimPrefix(line, []byte("event:"))
+			event = bytes.TrimPrefix(event, []byte(" "))
+			eventName = string(event)
+		}
+		return nil
+	}
+
+	for {
+		n, err := body.Read(buf)
+		if n > 0 {
+			if len(lineBuf)+n > MaxSSELineBytes {
+				return ErrSSELineTooLong
+			}
+			lineBuf = append(lineBuf, buf[:n]...)
+
+			consumed := 0
+			for {
+				idx := bytes.IndexByte(lineBuf[consumed:], '\n')
+				if idx < 0 {
+					if len(lineBuf)-consumed > MaxSSELineBytes {
+						return ErrSSELineTooLong
+					}
+					break
+				}
+
+				lineEnd := consumed + idx
+				line := bytes.TrimRight(lineBuf[consumed:lineEnd], "\r")
+				consumed = lineEnd + 1
+
+				if len(line) == 0 {
+					keep, emitErr := emitEvent()
+					if emitErr != nil {
+						return emitErr
+					}
+					if !keep {
+						return nil
+					}
+					continue
+				}
+
+				if bytes.HasPrefix(line, []byte(":")) {
+					continue
+				}
+
+				if err := consumeField(line); err != nil {
+					return err
+				}
+			}
+
+			if consumed > 0 {
+				remaining := copy(lineBuf, lineBuf[consumed:])
+				lineBuf = lineBuf[:remaining]
+			}
+		}
+
+		if err != nil {
+			if err == io.EOF {
+				if len(lineBuf) > 0 {
+					if len(lineBuf) > MaxSSELineBytes {
+						return ErrSSELineTooLong
+					}
+					line := bytes.TrimRight(lineBuf, "\r")
+					if err := consumeField(line); err != nil {
+						return err
+					}
+				}
+				_, emitErr := emitEvent()
+				if emitErr != nil {
+					return emitErr
+				}
+				return nil
+			}
+			return err
+		}
+	}
+}
+```
+
+**全链路真实 Callsite 替换与集成代码（真实代码，非伪装实现）：**
+
+1. **Responses HTTP SSE 调用点替换 (`proxy/handler.go:5538-5585`)**:
+```go
+// 在 forwardWithEvent 最前置接入 ObserveEvent：
+forwardWithEvent := func(sseEvent string, data []byte) bool {
+    // 步骤 0: 优先进入全局模型输出失控防护 Guard
+    if guardCoordinator != nil {
+        if err := ObserveEvent(guardCoordinator.Guard(), responsesProjector, sseEvent, data); err != nil {
+            guardCoordinator.TriggerGuard(err)
+            return false // 立即阻断，不进入后续 provenance/collector/replay
+        }
+    }
+
+    if multiAgentV2State.isOptimizedFor(account.ID()) {
+        data = restoreCodexMultiAgentV2Response(data, multiAgentV2State)
+    }
+    streamDiag.markUpstreamFrame()
+    // ... 后续 compactionProvenancePayloads 记录与 downstream 写入
+```
+
+2. **ChatCompletions 调用点替换 (`proxy/handler.go:7650-7750`)**:
+```go
+// 在 ChatCompletions SSE 循环中：
+readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
+    if guardCoordinator != nil {
+        if err := ObserveEvent(guardCoordinator.Guard(), chatProjector, sseEvent, data); err != nil {
+            guardCoordinator.TriggerGuard(err)
+            return false
+        }
+    }
+    // ... 既有下游写入逻辑
+})
+```
+
+3. **Gemini Native 调用点替换 (`proxy/handler_gemini.go:390-420`)**:
+```go
+// forwardGeminiNativeStream 替换：
+result.readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), body, func(sseEvent string, data []byte) bool {
+    if c.Request.Context().Err() != nil {
+        return false
+    }
+    if guardCoordinator != nil {
+        if err := ObserveEvent(guardCoordinator.Guard(), geminiProjector, sseEvent, data); err != nil {
+            guardCoordinator.TriggerGuard(err)
+            return false
+        }
+    }
+    usage.observe(data)
+    // ...
+})
+```
+
+4. **WebSocket ReadPump 帧大小与内存 Cap 替换 (`proxy/responses_ws.go:160-185`)**:
+```go
+// 在 startResponsesWSReadPump 中强化 SetReadLimit：
+conn.SetReadLimit(MaxWSMessageBytes) // 强制 8 MiB 限制
+messageType, reader, err := conn.NextReader()
+if err != nil {
+    if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
+        // 若超过 MaxWSMessageBytes，底层 gorilla/websocket 返回 ErrReadLimit
+        // 归因为独立 typed reason: ws_frame_too_large，绝不伪装为 repetition
+        cancel()
+        select {
+        case messages <- responsesWSInboundMessage{turn: turn, err: ErrWSFrameTooLarge}:
+        default:
+        }
+        return
+    }
+}
+```
+
+5. **非流式 HTTP 响应读取点替换 (`proxy/handler.go`)**:
+```go
+// 替换所有裸读取 resp.Body 的非流式调用：
+// 修改前: rawResp, err := io.ReadAll(resp.Body)
+// 修改后:
+rawResp, err := ReadBoundedResponseBody(resp.Body, MaxResponseBodyBytes)
+if err != nil {
+    if errors.Is(err, ErrResponseBodyTooLarge) {
+        log.Printf("上游非流式响应体超标 (limit=%d): %v", MaxResponseBodyBytes, err)
+        c.JSON(http.StatusBadGateway, gin.H{"error": gin.H{
+            "code": "response_body_too_large",
+            "message": "Upstream response body exceeded transport wire limit",
+        }})
+        return
+    }
+    // ... 其他网络读取错误
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestReadSSEStreamWithEvent.*|TestReadBoundedResponseBody.*|TestTransportFramingIndependentOfGuard"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add proxy/sse_line.go proxy/sse_line_test.go proxy/executor.go proxy/handler.go proxy/handler_gemini.go proxy/responses_ws.go
+git commit -m "feat(proxy): enforce bounded SSE stream, multiline event, WS frame, and response body caps"
+```

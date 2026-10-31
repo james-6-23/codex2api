@@ -1,0 +1,78 @@
+# Codex2API 全局模型输出失控防护 Implementation Plan
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 基于已审查通过的设计规格，为 Codex2API 建立全局模型输出失控防护体系（协议感知增量重复检测 + 字节/事件硬预算 + 请求级切断 + 限制最大输出长度），在模型输出进入聚合、回放、缓存及下游之前拦截异常流量，消除下游全量重解析引发的 O(n²) 性能雪崩。
+
+**Architecture:** 采用分层解耦与自下而上的无环依赖架构：
+1. 核心状态机与算法层（`security/outputguard`）：实现常量空间 8192-byte 滑动窗口、KMP 前缀函数求最短周期（$1 \le p \le 256$、有限串周期数学不要求 $L \pmod p = 0$ 且有独立非整倍数测试验证）、步长 1024-byte 检查点与严格尾检；单 channel 扫描预算（$2 \times \text{limit}$）与至多 3 次合法纯终态快照许可（单遍历 Hash 流水线比对，处理上限绝对锁定于 $5 \times \text{limit}$）；请求级 8 步无歧义判定流水线（先字节高水位与 request_bytes 累加判定，再资格/等价性检查与成本计算，首 reason 冻结），内置读写并发互斥锁（`sync.RWMutex`），保障 ObserveAppend/IsTripped 并发无 race。
+2. 数据库与持久化层（`database`）：基于 `system_settings` 表实施 PostgreSQL/SQLite 模式迁移；`*bool` 三态指针语义防止零值覆盖显式关闭（经 Go 标准库 `sql.NullBool` 源码证实原生支持 SQLite `int64` 的 0/1 转换）；单事务同连接读取旧值与加锁（Postgres `FOR UPDATE` / SQLite 独占写锁）、窄更新与 CAS 自增 `generation`，彻底消除死锁与丢更新。
+3. 运行时配置与入口 Ready 门禁层（`proxy`）：不可变配置快照、5 秒后台 Revision 轮询器（`StartOutputGuardConfigPoller`）、冷启动未就绪检测（`RequireOutputGuardReady`），默认 `isReady = false`，仅首次从 DB 成功加载或应用配置后置为 true；main 启动挂接初始化与 poller；HTTP 入口返回 503 `api.ErrCodeServiceUnavailable`，WebSocket/Realtime 在握手或首帧返回 CloseTryAgainLater (1013) 错误。
+4. 管理端与前端 UI 层（`admin`, `frontend`）：复用既有 `/api/admin/settings` GET/PUT，支持独立分组、单位展示、恢复默认（恢复 Spec 默认配置）、严格层级范围校验（$16\text{KiB} \le \text{tool} \le \text{channel} \le \text{request} \le 64\text{MiB}$）；非法配置记录诊断日志；提供完整前端 React 界面与 TypeScript 类型契约，并以 `pnpm run typecheck` 验证。
+5. 统一协议投影层（`proxy`）：将 Responses HTTP/WS、ChatCompletions、Messages、Gemini Native 及 Realtime 文本子集的流式 chunk 及非流式 JSON 事件实时投影为统一语义观察（`Observation`）；实现 Anthropic、Gemini Native 及各协议非流式真实 JSON 投影器与单元测试。
+6. 强制终止与下游通知层（`proxy`）：先实现 `GuardTerminationCoordinator` 与 `SendDownstreamGuardTerminal`。guard 命中时原子切换 `tripped` 状态并冻结首个 reason；优先主动 Cancel 上游 context（直接调用 cancel 跳过 5 秒 usage drain，关闭 HTTP body，WS lease 废弃不归还健康池）；清空本地 pending、provenance、collector、replay、writer buffers；下游通知写入采用 `downstreamMu.TryLock()` 避免死锁，持锁写操作通过 `http.ResponseController.SetWriteDeadline` 施加 5 秒硬超时；不支持 deadline（`ErrNotSupported`）或已断开时标记 `clientGone` 安全退出；补齐 Gemini SDK 兼容格式及 WebSocket 1013 / error 帧。
+7. 链路编排与重试阻断层（`proxy`）：在前置拦截点（Responses HTTP/WS, Chat, Messages, Gemini, Realtime）将投影器、RequestGuard 与终止协调器组装串联；在 `continuousRetryStreamSelected`、`shouldTransparentRetryStream` 及自动续想入口最前置拦截 `guardTripped`，坚决不重试；在 `retryExclusions` 中豁免账号健康惩罚（使用真实符号 `exclusions.forHardSelection()` 与 `exclusions.hasResettable()` 断言）。
+8. 综合验收集成测试层（`test/outputguard`）：完整实现 Spec §9 场景 1~28 全场景代码，提供脱敏 fixture、机器自动化判定阈值，覆盖成本上界 8a/b/c、入口矩阵、cancel/body close 无 drain、重试上游调用数恒为 1、全协议错误结构、TryLock/deadline 降级、冷启动 503 / 并发 patch / 恢复默认、TTFT p95 <= 10ms、CPU <= 20%、线性比值 ratio <= 2.5、每 channel <= 64KiB、10 分钟内存/Goroutine/FD 启停快照。
+
+**Tech Stack:** Go 1.26+ (gin-gonic/gin, tidwall/gjson, modernc.org/sqlite, jackc/pgx/v5), TypeScript + React 19 (前端契约与界面).
+
+**Spec:** `docs/superpowers/specs/2026-10-28-model-output-guard-design.md`
+
+## Global Constraints
+
+- **范围限制**：只涉及文字输出的 LLM（含 text、thinking、tool arguments）；只修订计划文件 `docs/superpowers/plans/2026-10-28-model-output-guard-tdd-plan.md`，不修改 spec、业务源码、数据库或其他文件；不修改 DSH、客户端或已安装 npm 包；设计文档 §10 的设计取舍已全部由用户确认。
+- **不可妥协的设计取舍**：
+  - 默认全局开启，仅管理员可在后台显式关闭；与 prompt filter 相互独立。
+  - 首期采用精确短周期重复检测 + 硬预算，不引入语义模型，不自动改写或拆分工具参数。
+  - 默认工具参数上限 128 KiB、4096 非空 deltas；单 channel 字节上限 2 MiB；单请求字节上限 4 MiB；合法大 `write` 也拦截，后台可调高。
+  - 只切断当前入口请求或 WebSocket 逻辑 turn；代理端禁止任何形式的透明重试与自动续想，绝不惩罚账号健康分。
+  - 全协议覆盖：涵盖 Responses HTTP/WS、ChatCompletions、Messages、Gemini Native 及 Realtime WebSocket 桥接的文本/工具子集；专用媒体接口、Realtime 原生音频 Modality（显式拒绝）及协议管理帧不计入语义重复检测。
+  - transport reader 有界行/事件/framing 保护（SSE 8 MiB、WS frame 8 MiB）独立于 guard 开关，关闭语义 guard 仍保留 wire cap。
+- **技术异议核实结论（对首轮评审意见 M2 与 I8 的技术审查回应）**：
+  - **M2 关于 SQLite 不支持 sql.NullBool 的澄清**：经查证 Go 标准库 `database/sql/convert.go:383` 及 `database/sql/driver/types.go:87-92`，`sql.NullBool.Scan` 内部调用 `convertAssign`，明确原生支持驱动返回的 `int64`（0 对应 false，1 对应 true）。在 `modernc.org/sqlite` 驱动下，SQLite 的 `INTEGER` 字段扫描至 `sql.NullBool` 完全合法，无需盲目绕开 `sql.NullBool`。本计划在数据库结构层保留 `*bool` 指针三态语义，在底层 Scan 阶段通过 `sql.NullBool` 准确反序列化。
+  - **I8 关于 KMP 前缀周期整除性的数学核实**：评审建议曾提及“检查 L % p == 0”，但根据 Spec §5.2 规则 3 明确要求：“命中证据是连续 8 KiB 的精确周期窗口；最长周期时也含至少 32 次重复，不要求窗口长度整除周期”。在有限长度字符串（8192 字节）上，若最短周期为 $p$（例如事故模式 $p = 30$），$8192 \pmod{30} = 22 \ne 0$。KMP 前缀函数的最大 border $k = \pi[L-1]$ 对应的最小周期候选值为 $p = L - k$。当且仅当 $1 \le p \le 256$ 且 $\forall i \in [p, L): s[i] == s[i-p]$ 时即为严格周期，绝不能加入 $L \pmod p == 0$ 的错误过滤。本计划在 Task 1 中明确提供非整倍数（$p=30, 8192\pmod{30}=22$）的针对性数学验证测试。
+- **编译与验证约束**：
+  - Go 测试命令必须指定独立缓存路径：`GOCACHE=/tmp/go-build GOPATH=/tmp/go go test ...`。
+  - 前端类型校验命令：`cd frontend && pnpm run typecheck`。
+- **TDD 流程纪律**：每个任务严格遵循 Step 1 (Write failing test) -> Step 2 (Verify Red) -> Step 3 (Minimal implementation) -> Step 4 (Verify Green) -> Step 5 (Commit)。绝不使用占位符，严禁假测试与“Red or pass”。
+
+---
+
+## File Structure
+
+| 文件路径 | 状态 | 职责描述 |
+|---|---|---|
+| `security/outputguard/repetition.go` | 新建 | 8192B 滑动窗口 Ring Buffer、KMP 前缀函数求最短周期（$1 \le p \le 256$、支持非整除周期）、1024B 步长检查点与严格尾检 |
+| `security/outputguard/repetition_test.go` | 新建 | 周期检测器单元测试（命中短周期、非整倍数周期 $p=30$、非周期放行、大 delta 跨步长、<8192B 尾检放行、未对齐最新 8192B 窗口检测） |
+| `security/outputguard/channel.go` | 新建 | 单 Channel 状态机：已计费高水位、累计扫描预算扣减、3 次合法纯终态快照许可、单遍历 Hash 流水线、处理量 $5 \times \text{limit}$ 封顶 |
+| `security/outputguard/channel_test.go` | 新建 | Channel 状态机单元测试（高水位推进、用例 8a/8b/8c 纯终态许可与变体超额拦截） |
+| `security/outputguard/guard.go` | 新建 | 请求级 `RequestGuard` 状态机：事件预算（65536）、Channel 计数（128）、Delta 计数（4096）、§5.3 严格 8 步判定流水线、`sync.RWMutex` 并发安全保障 |
+| `security/outputguard/guard_test.go` | 新建 | 请求级 Guard 单元测试（事件洪泛拦截、Channel 洪泛拦截、Delta 洪泛拦截、字节溢出、首个 reason 冻结、并发 race 检验） |
+| `database/output_guard_settings.go` | 新建 | 数据库层 `OutputGuardSettings`、`*bool` 三态指针、同事务锁机制（Postgres FOR UPDATE / SQLite 独占写锁）与 CAS 自增 `generation` |
+| `database/output_guard_settings_test.go` | 新建 | 数据库迁移与设置读写测试（SQLite/PostgreSQL 默认填充、显式 false 持久化、并发独立窄更新不丢字段与防死锁） |
+| `database/sqlite.go` | 修改 | `system_settings` 表增加 output_guard 6 个字段的 SQLite 迁移列（INTEGER） |
+| `database/postgres.go` | 修改 | `system_settings` 表增加 output_guard 6 个字段的 PostgreSQL 迁移列（BOOLEAN/BIGINT/INT） |
+| `proxy/output_guard_settings.go` | 新建 | 运行时不可变配置快照、5 秒后台 Revision 轮询器、`ApplyOutputGuardSettings`、冷启动未就绪 503 检查、非法配置诊断日志 |
+| `proxy/output_guard_settings_test.go` | 新建 | 运行时配置生效与 5 秒轮询更新测试、冷启动未就绪 503 门禁测试、非法配置诊断日志测试 |
+| `admin/output_guard_settings.go` | 新建 | 管理端 Admin API：扩展现有 GET/PUT `/api/admin/settings`，支持独立分组、单位显示、恢复默认、严格层级范围校验 |
+| `admin/output_guard_settings_test.go` | 新建 | Admin API 单元测试（范围校验失败回滚与诊断日志、恢复默认设置、合法修改即时生效、同事务安全合并） |
+| `frontend/src/types.ts` | 修改 | 增加 `OutputGuardSettings` 前端类型契约 |
+| `frontend/src/pages/admin/SystemSettingsPage.tsx` | 修改 | 管理端 UI 界面：新增独立的“模型输出失控防护”分组卡片，含 5 项配置、单位（KiB/MiB）、高风险提示与“恢复默认”操作按钮 |
+| `proxy/outputguard_projection.go` | 新建 | 统一协议投影器：将 Responses HTTP/WS、ChatCompletions、Messages、Gemini Native 及 Realtime 文本流式与非流式事件投影为标准 `Observation` |
+| `proxy/outputguard_projection_test.go` | 新建 | 协议投影器单元测试（各协议 chunk/snapshot/非流式 JSON 正确转换为 ChannelID、Kind、Action 及 Payload） |
+| `proxy/outputguard_cancel.go` | 新建 | 终止协调器：原子切换 `tripped` 状态并冻结首 reason、主动 Cancel 上游 context、关闭 body、绕过 5s drain、清空在途缓冲 |
+| `proxy/outputguard_cancel_test.go` | 新建 | 上游取消与缓冲废弃测试（mock upstream 立即收到 context cancel，无 5s 延迟，本地 pending/collector/replay/writer 缓冲彻底清空） |
+| `proxy/outputguard_downstream.go` | 新建 | 下游失败通知写入：各协议终态错误帧构建（Responses, Chat, Anthropic, Gemini Native, WebSocket）、`downstreamMu.TryLock()` 有界锁获取、持锁内 `SetWriteDeadline(5s)` 写入与 ErrNotSupported 安全降级 |
+| `proxy/outputguard_downstream_test.go` | 新建 | 下游写入测试（各协议标准错误结构断言、TryLock 竞争失败安全放弃不卡死、持锁超时回收、不支持 deadline 安全退出） |
+| `proxy/continuous_retry.go` | 修改 | `continuousRetryStreamSelected` 最前置识别 `guardTripped`，坚决不重试 |
+| `proxy/retry_exclusions.go` | 修改 | `MarkStreamFailure` 识别 guard 失败，豁免账号健康分惩罚，不增加错误计数 |
+| `proxy/outputguard_retry_test.go` | 新建 | 重试阻断与账号豁免测试（使用真实符号 `exclusions.forHardSelection()` 与 `exclusions.hasResettable()` 断言） |
+| `proxy/handler.go` | 修改 | Responses HTTP SSE `forwardWithEvent` 及非流式接入前置 guard 检查；ChatCompletions 流式与非流式接入前置 guard 检查 |
+| `proxy/responses_ws.go` | 修改 | Responses WebSocket 接入每个逻辑 turn 的前置 guard 检查（早于 collector 与 replay） |
+| `proxy/realtime_ws.go` | 修改 | Realtime 文本转接 session 严格继承全局 guard |
+| `proxy/handler_anthropic.go` | 修改 | Messages (Claude Native) 流式与非流式接入前置 guard 检查 |
+| `proxy/handler_gemini.go` | 修改 | Gemini Native `streamGenerateContent` 及非流式接入前置 guard 检查 |
+| `proxy/main_init.go` | 新建 | 主程序初始化接线：挂载 `proxy.StartOutputGuardConfigPoller`，执行冷启动配置预加载 |
+| `test/outputguard/acceptance_detection_test.go` | 新建 | 综合验收测试：场景 1~11（短周期、不同 delta 边界切分、9215B 片段、8a/8b/8c 专项、短文本尾检放行） |
+| `test/outputguard/acceptance_lifecycle_test.go` | 新建 | 综合验收测试：场景 12~20（各入口流式/非流式全链路终止、无 5s drain、并发无 race、无重试、账号无惩罚） |
+| `test/outputguard/acceptance_benchmark_test.go` | 新建 | 综合验收测试：场景 21~28（配置轮询、冷启动 503、CPU O(N) 线性度、内存 <=64KiB、细 delta 4096 专项压测分析） |

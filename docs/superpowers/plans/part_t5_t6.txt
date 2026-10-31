@@ -1,0 +1,1349 @@
+
+### Task 5: 运行时不可变配置快照、5 秒后台 Revision 轮询器与冷启动就绪门禁
+
+**Files:**
+- Create: `proxy/output_guard_settings.go`
+- Create: `proxy/output_guard_settings_test.go`
+- Modify: `main.go:265-270`
+
+**Interfaces:**
+- Consumes:
+  - `database.OutputGuardSettings`:
+    ```go
+    type OutputGuardSettings struct {
+        Enabled               *bool `json:"output_guard_enabled"`
+        MaxToolArgumentBytes  int64 `json:"output_guard_max_tool_argument_bytes"`
+        MaxToolArgumentDeltas int   `json:"output_guard_max_tool_argument_deltas"`
+        MaxChannelBytes       int64 `json:"output_guard_max_channel_bytes"`
+        MaxRequestBytes       int64 `json:"output_guard_max_request_bytes"`
+        ConfigGeneration      int64 `json:"output_guard_config_generation"`
+    }
+    ```
+  - `database.DefaultOutputGuardSettings() database.OutputGuardSettings`
+  - `database.ValidateOutputGuardSettings(database.OutputGuardSettings) error`
+  - `database.DB.GetOutputGuardSettings(context.Context) (database.OutputGuardSettings, error)`
+- Produces:
+  ```go
+  package proxy
+
+  import (
+      "context"
+      "time"
+      "github.com/codex2api/database"
+      "github.com/gin-gonic/gin"
+      "github.com/gorilla/websocket"
+  )
+
+  type OutputGuardAppliedConfig struct {
+      Enabled               bool
+      MaxToolArgumentBytes  int64
+      MaxToolArgumentDeltas int
+      MaxChannelBytes       int64
+      MaxRequestBytes       int64
+      Generation            int64
+  }
+
+  type OutputGuardConfigSyncStatus struct {
+      LastSuccessfulSyncAt time.Time
+      LastSyncError        string
+  }
+
+  type OutputGuardSettingsReader interface {
+      GetOutputGuardSettings(context.Context) (database.OutputGuardSettings, error)
+  }
+
+  func ApplyOutputGuardSettings(settings database.OutputGuardSettings) bool
+  func CurrentOutputGuardConfig() OutputGuardAppliedConfig
+  func GetOutputGuardConfigSyncStatus() OutputGuardConfigSyncStatus
+  func IsOutputGuardReady() bool
+  func SetOutputGuardReadyForTest(ready bool)
+  func ResetOutputGuardStateForTest()
+  func LoadOutputGuardSettings(ctx context.Context, reader OutputGuardSettingsReader) error
+  func StartOutputGuardConfigPoller(parent context.Context, db *database.DB) bool
+
+  // 门禁检查接口（供 Task 7/8 各协议与 WebSocket/Realtime 挂接）
+  func RequireOutputGuardReadyHTTP(c *gin.Context) bool
+  func RequireOutputGuardReadyWS(conn *websocket.Conn) bool
+  func RequireOutputGuardReadyStream(conn *websocket.Conn, streamID string) bool
+  ```
+
+- [ ] **Step 1: Write failing test for proxy output guard runtime settings, poller, LKG, and readiness gates**
+
+```go
+// proxy/output_guard_settings_test.go
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/codex2api/api"
+	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+)
+
+type controlledOutputGuardSettingsReader struct {
+	mu       sync.Mutex
+	requests chan chan outputGuardSettingsReadResult
+}
+
+type outputGuardSettingsReadResult struct {
+	settings database.OutputGuardSettings
+	err      error
+}
+
+func newControlledOutputGuardSettingsReader() *controlledOutputGuardSettingsReader {
+	return &controlledOutputGuardSettingsReader{
+		requests: make(chan chan outputGuardSettingsReadResult, 16),
+	}
+}
+
+func (r *controlledOutputGuardSettingsReader) GetOutputGuardSettings(ctx context.Context) (database.OutputGuardSettings, error) {
+	respCh := make(chan outputGuardSettingsReadResult, 1)
+	select {
+	case <-ctx.Done():
+		return database.OutputGuardSettings{}, ctx.Err()
+	case r.requests <- respCh:
+	}
+
+	select {
+	case <-ctx.Done():
+		return database.OutputGuardSettings{}, ctx.Err()
+	case res := <-respCh:
+		return res.settings, res.err
+	}
+}
+
+func (r *controlledOutputGuardSettingsReader) respond(t *testing.T, res outputGuardSettingsReadResult) {
+	t.Helper()
+	select {
+	case respCh := <-r.requests:
+		respCh <- res
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for GetOutputGuardSettings request")
+	}
+}
+
+func waitForOutputGuardConfigGeneration(t *testing.T, targetGen int64) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if CurrentOutputGuardConfig().Generation == targetGen {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for output guard config generation %d (current: %d)", targetGen, CurrentOutputGuardConfig().Generation)
+}
+
+func waitForOutputGuardSyncError(t *testing.T, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		status := GetOutputGuardConfigSyncStatus()
+		if status.LastSyncError != "" && (substr == "" || errors.New(status.LastSyncError) != nil) {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for output guard sync error containing %q", substr)
+}
+
+func TestOutputGuardColdStartNotReadyReturns503(t *testing.T) {
+	ResetOutputGuardStateForTest()
+	t.Cleanup(ResetOutputGuardStateForTest)
+
+	if IsOutputGuardReady() {
+		t.Fatal("expected cold start IsOutputGuardReady = false")
+	}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	passed := RequireOutputGuardReadyHTTP(c)
+	if passed {
+		t.Fatal("expected RequireOutputGuardReadyHTTP to reject cold start request")
+	}
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected HTTP 503, got %d", w.Code)
+	}
+	var errResp struct {
+		Error struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+			Type    string `json:"type"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &errResp); err != nil {
+		t.Fatalf("unmarshal error response failed: %v", err)
+	}
+	if errResp.Error.Code != string(api.ErrCodeServiceUnavailable) {
+		t.Fatalf("expected error code %q, got %q", api.ErrCodeServiceUnavailable, errResp.Error.Code)
+	}
+	if errResp.Error.Code == "model_output_guard_triggered" {
+		t.Fatalf("must NOT use runtime tripped error code on cold start 503")
+	}
+}
+
+func TestOutputGuardExplicitDisabledSemanticVsColdStart(t *testing.T) {
+	ResetOutputGuardStateForTest()
+	t.Cleanup(ResetOutputGuardStateForTest)
+
+	// Cold start: not ready
+	if IsOutputGuardReady() {
+		t.Fatal("expected cold start not ready")
+	}
+
+	// Load DB settings with Enabled = false
+	disabled := false
+	dbSettings := database.OutputGuardSettings{
+		Enabled:               &disabled,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+		ConfigGeneration:      1,
+	}
+
+	applied := ApplyOutputGuardSettings(dbSettings)
+	if !applied {
+		t.Fatal("ApplyOutputGuardSettings failed")
+	}
+
+	// Once loaded successfully, IsOutputGuardReady is true even when Enabled = false!
+	if !IsOutputGuardReady() {
+		t.Fatal("expected IsOutputGuardReady = true after explicit disabled settings loaded")
+	}
+
+	cfg := CurrentOutputGuardConfig()
+	if cfg.Enabled != false {
+		t.Fatalf("expected applied config Enabled = false, got %v", cfg.Enabled)
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	passed := RequireOutputGuardReadyHTTP(c)
+	if !passed {
+		t.Fatal("expected RequireOutputGuardReadyHTTP to pass when system is ready and explicitly disabled")
+	}
+	if w.Code == http.StatusServiceUnavailable {
+		t.Fatalf("did not expect 503 when explicitly disabled and ready")
+	}
+}
+
+func TestOutputGuardConfigGenerationIncrementsAndLKGMaintained(t *testing.T) {
+	ResetOutputGuardStateForTest()
+	t.Cleanup(ResetOutputGuardStateForTest)
+
+	enabled := true
+	initial := database.OutputGuardSettings{
+		Enabled:               &enabled,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+		ConfigGeneration:      1,
+	}
+	if !ApplyOutputGuardSettings(initial) {
+		t.Fatal("failed to apply initial generation 1")
+	}
+
+	cfg1 := CurrentOutputGuardConfig()
+	if cfg1.Generation != 1 || cfg1.MaxToolArgumentBytes != 131072 {
+		t.Fatalf("initial config mismatch: %+v", cfg1)
+	}
+
+	// Stale generation rejected
+	stale := initial
+	stale.MaxToolArgumentBytes = 262144
+	if ApplyOutputGuardSettings(stale) {
+		t.Fatal("stale generation 1 should be rejected")
+	}
+	if CurrentOutputGuardConfig().MaxToolArgumentBytes != 131072 {
+		t.Fatal("LKG overwritten by stale generation")
+	}
+
+	// Apply generation 2
+	gen2 := initial
+	gen2.MaxToolArgumentBytes = 262144
+	gen2.ConfigGeneration = 2
+	if !ApplyOutputGuardSettings(gen2) {
+		t.Fatal("failed to apply generation 2")
+	}
+	cfg2 := CurrentOutputGuardConfig()
+	if cfg2.Generation != 2 || cfg2.MaxToolArgumentBytes != 262144 {
+		t.Fatalf("generation 2 mismatch: %+v", cfg2)
+	}
+
+	// Illegal configuration validation failure preserves LKG
+	illegal := initial
+	illegal.MaxToolArgumentBytes = 50000000 // exceeds 4MiB
+	illegal.ConfigGeneration = 3
+	if ApplyOutputGuardSettings(illegal) {
+		t.Fatal("illegal configuration should be rejected")
+	}
+	cfgPreserved := CurrentOutputGuardConfig()
+	if cfgPreserved.Generation != 2 || cfgPreserved.MaxToolArgumentBytes != 262144 {
+		t.Fatalf("LKG not preserved after illegal config: %+v", cfgPreserved)
+	}
+}
+
+func TestOutputGuardPollerLifecycleRecoveryAndStop(t *testing.T) {
+	ResetOutputGuardStateForTest()
+	t.Cleanup(ResetOutputGuardStateForTest)
+
+	reader := newControlledOutputGuardSettingsReader()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		runOutputGuardConfigPoller(ctx, reader, 5*time.Millisecond, 100*time.Millisecond)
+	}()
+
+	enabled := true
+	// 1. Initial read
+	reader.respond(t, outputGuardSettingsReadResult{
+		settings: database.OutputGuardSettings{
+			Enabled:               &enabled,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+			ConfigGeneration:      2,
+		},
+	})
+	waitForOutputGuardConfigGeneration(t, 2)
+	if !IsOutputGuardReady() {
+		t.Fatal("expected IsOutputGuardReady = true after successful poll")
+	}
+
+	// 2. Outage: DB error preserves LKG
+	reader.respond(t, outputGuardSettingsReadResult{
+		err: errors.New("simulated database disconnect"),
+	})
+	waitForOutputGuardSyncError(t, "simulated database disconnect")
+	if CurrentOutputGuardConfig().Generation != 2 {
+		t.Fatal("LKG generation lost during DB outage")
+	}
+
+	// 3. Recovery: next poll succeeds with generation 3
+	reader.respond(t, outputGuardSettingsReadResult{
+		settings: database.OutputGuardSettings{
+			Enabled:               &enabled,
+			MaxToolArgumentBytes:  262144,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+			ConfigGeneration:      3,
+		},
+	})
+	waitForOutputGuardConfigGeneration(t, 3)
+	if CurrentOutputGuardConfig().MaxToolArgumentBytes != 262144 {
+		t.Fatal("failed to update config after recovery")
+	}
+
+	// 4. Cancel ctx and verify poller stops
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("poller failed to stop cleanly after context cancel")
+	}
+}
+
+func TestOutputGuardWSReadinessGate(t *testing.T) {
+	ResetOutputGuardStateForTest()
+	t.Cleanup(ResetOutputGuardStateForTest)
+
+	// Create test WebSocket server
+	upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		if !RequireOutputGuardReadyWS(conn) {
+			return
+		}
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("ready"))
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + server.URL[len("http"):]
+	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial WS failed: %v", err)
+	}
+	defer conn.Close()
+
+	// When not ready, server should send 503 error frame / CloseTryAgainLater (1013)
+	_, msg, err := conn.ReadMessage()
+	if err != nil {
+		var closeErr *websocket.CloseError
+		if errors.As(err, &closeErr) {
+			if closeErr.Code != websocket.CloseTryAgainLater {
+				t.Fatalf("expected close code 1013 CloseTryAgainLater, got %d", closeErr.Code)
+			}
+			return
+		}
+	}
+	if len(msg) > 0 {
+		var errResp struct {
+			Error struct {
+				Code string `json:"code"`
+			} `json:"error"`
+		}
+		_ = json.Unmarshal(msg, &errResp)
+		if errResp.Error.Code != string(api.ErrCodeServiceUnavailable) {
+			t.Fatalf("expected error frame with code %s, got %s", api.ErrCodeServiceUnavailable, errResp.Error.Code)
+		}
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestOutputGuard.*"`
+Expected: FAIL with "undefined: ApplyOutputGuardSettings", "undefined: RequireOutputGuardReadyHTTP", etc.
+
+- [ ] **Step 3: Write minimal implementation for proxy/output_guard_settings.go and wire in main.go**
+
+```go
+// proxy/output_guard_settings.go
+package proxy
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/codex2api/api"
+	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+)
+
+const (
+	outputGuardConfigPollInterval = 5 * time.Second
+	outputGuardConfigReadTimeout  = 3 * time.Second
+)
+
+type OutputGuardAppliedConfig struct {
+	Enabled               bool
+	MaxToolArgumentBytes  int64
+	MaxToolArgumentDeltas int
+	MaxChannelBytes       int64
+	MaxRequestBytes       int64
+	Generation            int64
+}
+
+type OutputGuardConfigSyncStatus struct {
+	LastSuccessfulSyncAt time.Time
+	LastSyncError        string
+}
+
+type OutputGuardSettingsReader interface {
+	GetOutputGuardSettings(context.Context) (database.OutputGuardSettings, error)
+}
+
+type outputGuardState struct {
+	mu          sync.RWMutex
+	config      OutputGuardAppliedConfig
+	lastSyncAt  time.Time
+	lastSyncErr string
+	isReady     atomic.Bool
+}
+
+var globalOutputGuardState = &outputGuardState{}
+
+func init() {
+	ResetOutputGuardStateForTest()
+}
+
+func ResetOutputGuardStateForTest() {
+	globalOutputGuardState.mu.Lock()
+	defer globalOutputGuardState.mu.Unlock()
+	globalOutputGuardState.config = OutputGuardAppliedConfig{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+		Generation:            0,
+	}
+	globalOutputGuardState.lastSyncAt = time.Time{}
+	globalOutputGuardState.lastSyncErr = ""
+	globalOutputGuardState.isReady.Store(false)
+}
+
+func SetOutputGuardReadyForTest(ready bool) {
+	globalOutputGuardState.isReady.Store(ready)
+}
+
+func IsOutputGuardReady() bool {
+	return globalOutputGuardState.isReady.Load()
+}
+
+func CurrentOutputGuardConfig() OutputGuardAppliedConfig {
+	globalOutputGuardState.mu.RLock()
+	defer globalOutputGuardState.mu.RUnlock()
+	return globalOutputGuardState.config
+}
+
+func GetOutputGuardConfigSyncStatus() OutputGuardConfigSyncStatus {
+	globalOutputGuardState.mu.RLock()
+	defer globalOutputGuardState.mu.RUnlock()
+	return OutputGuardConfigSyncStatus{
+		LastSuccessfulSyncAt: globalOutputGuardState.lastSyncAt,
+		LastSyncError:        globalOutputGuardState.lastSyncErr,
+	}
+}
+
+func ApplyOutputGuardSettings(settings database.OutputGuardSettings) bool {
+	if err := database.ValidateOutputGuardSettings(settings); err != nil {
+		log.Printf("[output-guard] 非法配置已被拒绝，保留 LKG: %v", err)
+		recordOutputGuardConfigSyncError(err)
+		return false
+	}
+
+	globalOutputGuardState.mu.Lock()
+	defer globalOutputGuardState.mu.Unlock()
+
+	if settings.ConfigGeneration <= globalOutputGuardState.config.Generation {
+		return false
+	}
+
+	enabledVal := true
+	if settings.Enabled != nil {
+		enabledVal = *settings.Enabled
+	}
+
+	globalOutputGuardState.config = OutputGuardAppliedConfig{
+		Enabled:               enabledVal,
+		MaxToolArgumentBytes:  settings.MaxToolArgumentBytes,
+		MaxToolArgumentDeltas: settings.MaxToolArgumentDeltas,
+		MaxChannelBytes:       settings.MaxChannelBytes,
+		MaxRequestBytes:       settings.MaxRequestBytes,
+		Generation:            settings.ConfigGeneration,
+	}
+	globalOutputGuardState.isReady.Store(true)
+	return true
+}
+
+func LoadOutputGuardSettings(ctx context.Context, reader OutputGuardSettingsReader) error {
+	settings, err := readOutputGuardSettings(ctx, reader, outputGuardConfigReadTimeout)
+	if err != nil {
+		if ctx == nil || ctx.Err() == nil {
+			recordOutputGuardConfigSyncError(err)
+		}
+		return err
+	}
+	if err := database.ValidateOutputGuardSettings(settings); err != nil {
+		recordOutputGuardConfigSyncError(err)
+		return err
+	}
+	ApplyOutputGuardSettings(settings)
+	recordOutputGuardConfigSyncSuccess(time.Now())
+	return nil
+}
+
+func StartOutputGuardConfigPoller(parent context.Context, db *database.DB) bool {
+	if db == nil {
+		return false
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	return db.RunBackgroundTask(func(lifecycle context.Context) {
+		taskCtx, cancel := context.WithCancel(lifecycle)
+		stopParent := context.AfterFunc(parent, cancel)
+		defer func() {
+			stopParent()
+			cancel()
+		}()
+		runOutputGuardConfigPoller(
+			taskCtx,
+			db,
+			outputGuardConfigPollInterval,
+			outputGuardConfigReadTimeout,
+		)
+	})
+}
+
+func runOutputGuardConfigPoller(
+	ctx context.Context,
+	reader OutputGuardSettingsReader,
+	interval time.Duration,
+	readTimeout time.Duration,
+) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if interval <= 0 {
+		interval = outputGuardConfigPollInterval
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			settings, err := readOutputGuardSettings(ctx, reader, readTimeout)
+			if err != nil {
+				if ctx.Err() != nil {
+					return
+				}
+				recordOutputGuardConfigSyncError(err)
+				continue
+			}
+			if err := database.ValidateOutputGuardSettings(settings); err != nil {
+				recordOutputGuardConfigSyncError(err)
+				continue
+			}
+			ApplyOutputGuardSettings(settings)
+			recordOutputGuardConfigSyncSuccess(time.Now())
+		}
+	}
+}
+
+func readOutputGuardSettings(
+	parent context.Context,
+	reader OutputGuardSettingsReader,
+	timeout time.Duration,
+) (database.OutputGuardSettings, error) {
+	if reader == nil {
+		return database.OutputGuardSettings{}, fmt.Errorf("output guard settings reader is nil")
+	}
+	if parent == nil {
+		parent = context.Background()
+	}
+	if err := parent.Err(); err != nil {
+		return database.OutputGuardSettings{}, err
+	}
+	if timeout <= 0 || timeout > outputGuardConfigReadTimeout {
+		timeout = outputGuardConfigReadTimeout
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	return reader.GetOutputGuardSettings(ctx)
+}
+
+func recordOutputGuardConfigSyncSuccess(at time.Time) {
+	globalOutputGuardState.mu.Lock()
+	globalOutputGuardState.lastSyncAt = at
+	globalOutputGuardState.lastSyncErr = ""
+	globalOutputGuardState.mu.Unlock()
+}
+
+func recordOutputGuardConfigSyncError(err error) {
+	if err == nil {
+		return
+	}
+	globalOutputGuardState.mu.Lock()
+	globalOutputGuardState.lastSyncErr = err.Error()
+	globalOutputGuardState.mu.Unlock()
+}
+
+// 门禁检查实现：冷启动未就绪返回 503，严禁以 log.Fatalf 冒充 503
+
+func RequireOutputGuardReadyHTTP(c *gin.Context) bool {
+	if IsOutputGuardReady() {
+		return true
+	}
+	apiErr := api.NewAPIError(
+		api.ErrCodeServiceUnavailable,
+		"Service configuration unavailable; failed to load output guard settings",
+		api.ErrorTypeServer,
+	)
+	api.SendErrorWithStatus(c, apiErr, http.StatusServiceUnavailable)
+	return false
+}
+
+func RequireOutputGuardReadyWS(conn *websocket.Conn) bool {
+	if IsOutputGuardReady() {
+		return true
+	}
+	if conn == nil {
+		return false
+	}
+	apiErr := api.NewAPIError(
+		api.ErrCodeServiceUnavailable,
+		"Service configuration unavailable; failed to load output guard settings",
+		api.ErrorTypeServer,
+	)
+	_ = writeResponsesWSErrorWithin(conn, apiErr, 2*time.Second)
+	_ = conn.WriteControl(
+		websocket.CloseMessage,
+		websocket.FormatCloseMessage(websocket.CloseTryAgainLater, "Service configuration unavailable"),
+		time.Now().Add(time.Second),
+	)
+	_ = conn.Close()
+	return false
+}
+
+func RequireOutputGuardReadyStream(conn *websocket.Conn, streamID string) bool {
+	if IsOutputGuardReady() {
+		return true
+	}
+	if conn == nil {
+		return false
+	}
+	apiErr := api.NewAPIError(
+		api.ErrCodeServiceUnavailable,
+		"Service configuration unavailable; failed to load output guard settings",
+		api.ErrorTypeServer,
+	)
+	_ = writeResponsesWSErrorForStream(conn, apiErr, streamID, 2*time.Second)
+	return false
+}
+```
+
+精确插入锚点：`main.go:265-270`（紧随 ResponseCache 设置加载与日志之后，挂载 OutputGuard 加载与 Poller）：
+
+```go
+	// main.go 锚点替换：紧接 line 265
+	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
+	log.Printf(
+		"响应缓存设置已加载: generation=%d total=%d entry=%d reconstruct=%d",
+		appliedResponseCache.Generation,
+		appliedResponseCache.LocalMaxBytes,
+		appliedResponseCache.LocalMaxEntryBytes,
+		appliedResponseCache.ReconstructMaxBytes,
+	)
+
+	// --- 插入开始: OutputGuard 加载与后台 5 秒轮询器启动 ---
+	outputGuardCtx, outputGuardCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := proxy.LoadOutputGuardSettings(outputGuardCtx, db); err != nil {
+		outputGuardCancel()
+		// 严禁 log.Fatalf 冒充 503！冷启动加载失败仅记录警告日志，保持 IsOutputGuardReady=false，
+		// 请求进入时由门禁准确返回 HTTP 503 api.ErrCodeServiceUnavailable，且 poller 后续轮询成功时可无缝自愈恢复。
+		log.Printf("警告: 加载模型输出失控防护设置失败（冷启动门禁将返回 503 直至 DB 轮询恢复）: %v", err)
+	} else {
+		outputGuardCancel()
+		appliedGuard := proxy.CurrentOutputGuardConfig()
+		log.Printf(
+			"模型输出失控防护设置已加载: generation=%d enabled=%t tool_bytes=%d tool_deltas=%d channel_bytes=%d request_bytes=%d",
+			appliedGuard.Generation,
+			appliedGuard.Enabled,
+			appliedGuard.MaxToolArgumentBytes,
+			appliedGuard.MaxToolArgumentDeltas,
+			appliedGuard.MaxChannelBytes,
+			appliedGuard.MaxRequestBytes,
+		)
+	}
+	proxy.StartOutputGuardConfigPoller(context.Background(), db)
+	// --- 插入结束 ---
+```
+
+- [ ] **Step 4: Run test to verify it passes (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestOutputGuard.*"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add proxy/output_guard_settings.go proxy/output_guard_settings_test.go main.go
+git commit -m "feat(proxy): add output guard runtime config snapshot, poller and cold start readiness gate"
+```
+
+---
+
+### Task 6: 复用 Admin Settings GET/PUT 扩展与完整独立前端 UI 卡片
+
+**Files:**
+- Create: `admin/output_guard_settings.go`
+- Create: `admin/output_guard_settings_test.go`
+- Modify: `admin/handler.go:9460-9640` (`settingsResponse`, `updateSettingsReq`, `GetSettings`, `UpdateSettings`)
+- Modify: `frontend/src/types.ts:2300-2315`
+- Modify: `frontend/src/pages/Settings.tsx:200-220, 6545-6600`
+- Test: `frontend/src/lib/outputGuardSettings.test.mjs` (新建前端纯逻辑测试)
+
+**Interfaces:**
+- Consumes:
+  - `database.OutputGuardSettings` / `database.OutputGuardSettingsUpdate` (来自 Task 4)
+  - `proxy.CurrentOutputGuardConfig()` / `proxy.ApplyOutputGuardSettings()` (来自 Task 5)
+  - `database.ValidateOutputGuardSettings(database.OutputGuardSettings) error`
+- Produces:
+  - Admin REST API:
+    - `GET /api/admin/settings` 返回 5 个完整对称字段 + 1 个只读 generation：
+      - `output_guard_enabled`: bool
+      - `output_guard_max_tool_argument_bytes`: int64
+      - `output_guard_max_tool_argument_deltas`: int
+      - `output_guard_max_channel_bytes`: int64
+      - `output_guard_max_request_bytes`: int64
+      - `output_guard_config_generation`: int64 (只读)
+    - `PUT /api/admin/settings` 接收上述 5 个字段的可选 patch，若传入 `output_guard_config_generation` 则报错 400（只读字段禁止提交）。
+  - Frontend TypeScript Contract (`frontend/src/types.ts`):
+    - `SystemSettings` 增加上述 6 个属性（含 `readonly output_guard_config_generation: number`）。
+  - Frontend UI (`frontend/src/pages/Settings.tsx`):
+    - 位于 General Tab 独立的“模型输出失控防护 (Model Output Guard)”专属卡片（不挂在 PromptFilter 下）。
+    - 5 个完整配置项输入，单位展示 KiB / MiB 与格式化转换，非法层级交互反馈（`tool <= channel <= request`），显式 false 准确提交，以及“恢复默认”5 字段原子提交。
+
+- [ ] **Step 1: Write failing test for admin GET/PUT settings with output guard fields, range validation, explicit false, and readonly revision rejection**
+
+```go
+// admin/output_guard_settings_test.go
+package admin
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/codex2api/database"
+	"github.com/codex2api/proxy"
+	"github.com/gin-gonic/gin"
+)
+
+func TestAdminOutputGuardSettingsGetSymmetricFields(t *testing.T) {
+	db := newResponseCacheSettingsTestDB(t)
+	handler := &Handler{db: db}
+
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/admin/settings", nil)
+
+	handler.GetSettings(c)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal response failed: %v", err)
+	}
+
+	// Verify all 6 symmetric fields exist
+	fields := []string{
+		"output_guard_enabled",
+		"output_guard_max_tool_argument_bytes",
+		"output_guard_max_tool_argument_deltas",
+		"output_guard_max_channel_bytes",
+		"output_guard_max_request_bytes",
+		"output_guard_config_generation",
+	}
+	for _, f := range fields {
+		if _, ok := resp[f]; !ok {
+			t.Fatalf("expected field %q in GET /api/admin/settings response", f)
+		}
+	}
+
+	if resp["output_guard_enabled"] != true {
+		t.Fatalf("expected output_guard_enabled = true by default, got %v", resp["output_guard_enabled"])
+	}
+	if int64(resp["output_guard_max_tool_argument_bytes"].(float64)) != 131072 {
+		t.Fatalf("expected tool argument bytes 131072, got %v", resp["output_guard_max_tool_argument_bytes"])
+	}
+}
+
+func TestAdminOutputGuardSettingsPutValidationAndReadOnlyRevision(t *testing.T) {
+	db := newResponseCacheSettingsTestDB(t)
+	handler := &Handler{db: db}
+	gin.SetMode(gin.TestMode)
+
+	// 1. Rejection of readonly output_guard_config_generation
+	{
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"output_guard_config_generation": 999}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected HTTP 400 when submitting readonly output_guard_config_generation, got %d", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "只读") {
+			t.Fatalf("expected error mentioning readonly, got %s", w.Body.String())
+		}
+	}
+
+	// 2. Rejection of out-of-range parameters (16KiB..4MiB, etc.)
+	{
+		// Tool bytes too small: 1024 < 16384
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"output_guard_max_tool_argument_bytes": 1024}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected HTTP 400 for tool bytes < 16KiB, got %d", w.Code)
+		}
+	}
+
+	// 3. Rejection of hierarchy violation: tool > channel
+	{
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(`{"output_guard_max_tool_argument_bytes": 3145728, "output_guard_max_channel_bytes": 2097152}`))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(c)
+
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("expected HTTP 400 for hierarchy violation tool > channel, got %d", w.Code)
+		}
+	}
+
+	// 4. Successful update with explicit false & verify generation increment
+	{
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		payload := `{"output_guard_enabled": false, "output_guard_max_tool_argument_bytes": 65536}`
+		c.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings", strings.NewReader(payload))
+		c.Request.Header.Set("Content-Type", "application/json")
+		handler.UpdateSettings(c)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("expected HTTP 200 for valid PUT, got %d, body: %s", w.Code, w.Body.String())
+		}
+
+		var resp map[string]any
+		_ = json.Unmarshal(w.Body.Bytes(), &resp)
+		if resp["output_guard_enabled"] != false {
+			t.Fatalf("expected output_guard_enabled = false, got %v", resp["output_guard_enabled"])
+		}
+		if int64(resp["output_guard_max_tool_argument_bytes"].(float64)) != 65536 {
+			t.Fatalf("expected tool bytes = 65536, got %v", resp["output_guard_max_tool_argument_bytes"])
+		}
+		if int64(resp["output_guard_config_generation"].(float64)) <= 1 {
+			t.Fatalf("expected generation incremented, got %v", resp["output_guard_config_generation"])
+		}
+
+		// Also check local runtime instance updated immediately
+		cfg := proxy.CurrentOutputGuardConfig()
+		if cfg.Enabled != false || cfg.MaxToolArgumentBytes != 65536 {
+			t.Fatalf("local proxy runtime config not updated immediately: %+v", cfg)
+		}
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify it fails (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./admin -run "TestAdminOutputGuard.*"`
+Expected: FAIL with "unknown field output_guard_enabled" or failed assertions.
+
+- [ ] **Step 3: Write minimal implementation for admin backend and frontend integration**
+
+1. 编写 `admin/output_guard_settings.go`:
+```go
+// admin/output_guard_settings.go
+package admin
+
+import (
+	"fmt"
+	"github.com/codex2api/database"
+)
+
+func validateOutputGuardSettingsUpdateRanges(update database.OutputGuardSettingsUpdate) error {
+	if update.MaxToolArgumentBytes != nil {
+		val := *update.MaxToolArgumentBytes
+		if val < 16384 || val > 4194304 {
+			return fmt.Errorf("output_guard_max_tool_argument_bytes 必须在 16KiB(16384) ~ 4MiB(4194304) 之间")
+		}
+	}
+	if update.MaxToolArgumentDeltas != nil {
+		val := *update.MaxToolArgumentDeltas
+		if val < 256 || val > 65536 {
+			return fmt.Errorf("output_guard_max_tool_argument_deltas 必须在 256 ~ 65536 之间")
+		}
+	}
+	if update.MaxChannelBytes != nil {
+		val := *update.MaxChannelBytes
+		if val < 131072 || val > 16777216 {
+			return fmt.Errorf("output_guard_max_channel_bytes 必须在 128KiB(131072) ~ 16MiB(16777216) 之间")
+		}
+	}
+	if update.MaxRequestBytes != nil {
+		val := *update.MaxRequestBytes
+		if val < 262144 || val > 67108864 {
+			return fmt.Errorf("output_guard_max_request_bytes 必须在 256KiB(262144) ~ 64MiB(67108864) 之间")
+		}
+	}
+	return nil
+}
+```
+
+2. 在 `admin/handler.go` 中扩展 `settingsResponse`、`updateSettingsReq`、`GetSettings` 及 `UpdateSettings`：
+- 在 `settingsResponse`（约 line 9460）中添加：
+```go
+	OutputGuardEnabled              bool  `json:"output_guard_enabled"`
+	OutputGuardMaxToolArgumentBytes int64 `json:"output_guard_max_tool_argument_bytes"`
+	OutputGuardMaxToolArgumentDeltas int   `json:"output_guard_max_tool_argument_deltas"`
+	OutputGuardMaxChannelBytes      int64 `json:"output_guard_max_channel_bytes"`
+	OutputGuardMaxRequestBytes      int64 `json:"output_guard_max_request_bytes"`
+	OutputGuardConfigGeneration     int64 `json:"output_guard_config_generation"`
+```
+
+- 在 `updateSettingsReq`（约 line 9635）中添加：
+```go
+	OutputGuardEnabled               *bool   `json:"output_guard_enabled"`
+	OutputGuardMaxToolArgumentBytes  *int64  `json:"output_guard_max_tool_argument_bytes"`
+	OutputGuardMaxToolArgumentDeltas *int    `json:"output_guard_max_tool_argument_deltas"`
+	OutputGuardMaxChannelBytes       *int64  `json:"output_guard_max_channel_bytes"`
+	OutputGuardMaxRequestBytes       *int64  `json:"output_guard_max_request_bytes"`
+	OutputGuardConfigGeneration      rawJSON `json:"output_guard_config_generation"`
+```
+
+- 在 `GetSettings`（约 line 10240 之后）读取并注入 output guard 字段：
+```go
+	outputGuardSettings, err := h.db.GetOutputGuardSettings(ctx)
+	if err != nil {
+		outputGuardSettings = database.DefaultOutputGuardSettings()
+	}
+	outputGuardEnabled := true
+	if outputGuardSettings.Enabled != nil {
+		outputGuardEnabled = *outputGuardSettings.Enabled
+	}
+```
+并在 `settingsResponse` 结构字面量中填充：
+```go
+		OutputGuardEnabled:              outputGuardEnabled,
+		OutputGuardMaxToolArgumentBytes: outputGuardSettings.MaxToolArgumentBytes,
+		OutputGuardMaxToolArgumentDeltas: outputGuardSettings.MaxToolArgumentDeltas,
+		OutputGuardMaxChannelBytes:      outputGuardSettings.MaxChannelBytes,
+		OutputGuardMaxRequestBytes:      outputGuardSettings.MaxRequestBytes,
+		OutputGuardConfigGeneration:     outputGuardSettings.ConfigGeneration,
+```
+
+- 在 `UpdateSettings`（约 line 10600 及 line 10750）添加只读校验、更新合并与立即生效逻辑：
+```go
+	if req.OutputGuardConfigGeneration != nil {
+		writeError(c, http.StatusBadRequest, "output_guard_config_generation 为只读字段")
+		return
+	}
+
+	outputGuardUpdate := database.OutputGuardSettingsUpdate{
+		Enabled:               req.OutputGuardEnabled,
+		MaxToolArgumentBytes:  req.OutputGuardMaxToolArgumentBytes,
+		MaxToolArgumentDeltas: req.OutputGuardMaxToolArgumentDeltas,
+		MaxChannelBytes:       req.OutputGuardMaxChannelBytes,
+		MaxRequestBytes:       req.OutputGuardMaxRequestBytes,
+	}
+	outputGuardUpdateRequested := outputGuardUpdate.Enabled != nil ||
+		outputGuardUpdate.MaxToolArgumentBytes != nil ||
+		outputGuardUpdate.MaxToolArgumentDeltas != nil ||
+		outputGuardUpdate.MaxChannelBytes != nil ||
+		outputGuardUpdate.MaxRequestBytes != nil
+
+	if err := validateOutputGuardSettingsUpdateRanges(outputGuardUpdate); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var outputGuardSettings database.OutputGuardSettings
+	if outputGuardUpdateRequested {
+		currentGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+			return
+		}
+		mergedGuard := currentGuard
+		if outputGuardUpdate.Enabled != nil {
+			val := *outputGuardUpdate.Enabled
+			mergedGuard.Enabled = &val
+		}
+		if outputGuardUpdate.MaxToolArgumentBytes != nil {
+			mergedGuard.MaxToolArgumentBytes = *outputGuardUpdate.MaxToolArgumentBytes
+		}
+		if outputGuardUpdate.MaxToolArgumentDeltas != nil {
+			mergedGuard.MaxToolArgumentDeltas = *outputGuardUpdate.MaxToolArgumentDeltas
+		}
+		if outputGuardUpdate.MaxChannelBytes != nil {
+			mergedGuard.MaxChannelBytes = *outputGuardUpdate.MaxChannelBytes
+		}
+		if outputGuardUpdate.MaxRequestBytes != nil {
+			mergedGuard.MaxRequestBytes = *outputGuardUpdate.MaxRequestBytes
+		}
+		if err := database.ValidateOutputGuardSettings(mergedGuard); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		committedGuard, err := h.db.UpdateOutputGuardSettings(c.Request.Context(), outputGuardUpdate)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "保存防护设置失败："+err.Error())
+			return
+		}
+		outputGuardSettings = committedGuard
+		proxy.ApplyOutputGuardSettings(committedGuard)
+	} else {
+		latestGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+			return
+		}
+		outputGuardSettings = latestGuard
+	}
+```
+
+并在 `UpdateSettings` 结尾的 `c.JSON(http.StatusOK, response)` 中带上最新的 `outputGuardSettings` 字段。
+
+3. 修改 `frontend/src/types.ts`（约 line 2305 处）：
+```typescript
+  output_guard_enabled: boolean
+  output_guard_max_tool_argument_bytes: number
+  output_guard_max_tool_argument_deltas: number
+  output_guard_max_channel_bytes: number
+  output_guard_max_request_bytes: number
+  readonly output_guard_config_generation: number
+```
+
+4. 编写前端纯函数测试 `frontend/src/lib/outputGuardSettings.test.mjs`：
+```javascript
+import test from 'node:test'
+import assert from 'node:assert/strict'
+
+const KIB = 1024
+const MIB = 1024 * 1024
+
+export const DEFAULT_OUTPUT_GUARD_SETTINGS = {
+  output_guard_enabled: true,
+  output_guard_max_tool_argument_bytes: 128 * KIB,
+  output_guard_max_tool_argument_deltas: 4096,
+  output_guard_max_channel_bytes: 2 * MIB,
+  output_guard_max_request_bytes: 4 * MIB,
+}
+
+export function validateOutputGuardHierarchy(settings) {
+  const tool = settings.output_guard_max_tool_argument_bytes
+  const channel = settings.output_guard_max_channel_bytes
+  const request = settings.output_guard_max_request_bytes
+  if (tool > channel) {
+    return '工具参数上限不能超过单 Channel 字节上限'
+  }
+  if (channel > request) {
+    return '单 Channel 字节上限不能超过单请求语义预算'
+  }
+  return null
+}
+
+export function bytesToKiB(bytes) {
+  return Math.round(bytes / KIB)
+}
+
+export function kibToBytes(kib) {
+  return kib * KIB
+}
+
+export function bytesToMiB(bytes) {
+  return Math.round(bytes / MIB)
+}
+
+export function mibToBytes(mib) {
+  return mib * MIB
+}
+
+test('validateOutputGuardHierarchy enforces tool <= channel <= request', () => {
+  assert.equal(validateOutputGuardHierarchy({
+    output_guard_max_tool_argument_bytes: 128 * KIB,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+  }), null)
+
+  assert.equal(validateOutputGuardHierarchy({
+    output_guard_max_tool_argument_bytes: 3 * MIB,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+  }), '工具参数上限不能超过单 Channel 字节上限')
+
+  assert.equal(validateOutputGuardHierarchy({
+    output_guard_max_tool_argument_bytes: 128 * KIB,
+    output_guard_max_channel_bytes: 8 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+  }), '单 Channel 字节上限不能超过单请求语义预算')
+})
+```
+
+5. 在 `frontend/src/pages/Settings.tsx` 中新增“模型输出失控防护”分组卡片：
+- 在 constants 区域定义：
+```typescript
+const KIB = 1024
+const DEFAULT_OUTPUT_GUARD_TOOL_BYTES = 128 * KIB
+const DEFAULT_OUTPUT_GUARD_TOOL_DELTAS = 4096
+const DEFAULT_OUTPUT_GUARD_CHANNEL_BYTES = 2 * MIB
+const DEFAULT_OUTPUT_GUARD_REQUEST_BYTES = 4 * MIB
+
+const OUTPUT_GUARD_KEYS = [
+  'output_guard_enabled',
+  'output_guard_max_tool_argument_bytes',
+  'output_guard_max_tool_argument_deltas',
+  'output_guard_max_channel_bytes',
+  'output_guard_max_request_bytes',
+] as const satisfies ReadonlyArray<keyof SystemSettings>
+```
+
+- 在 JSX 中（位于 General Tab 的安全分区 `id="settings-security"` 内，紧邻 Prompt 风控卡片之后，新增独立的 `SettingsCard`）：
+```tsx
+                <SettingsCard
+                  title="模型输出失控防护 (Runaway Output Guard)"
+                  icon={<ShieldAlert className="size-4" />}
+                  tone={settingsForm.output_guard_enabled ? 'default' : 'danger'}
+                  badge={
+                    <Badge variant={settingsForm.output_guard_enabled ? 'outline' : 'destructive'} className="text-[11px] gap-1">
+                      <span className={`size-1.5 rounded-full ${settingsForm.output_guard_enabled ? 'bg-emerald-400' : 'bg-red-500'}`} />
+                      {settingsForm.output_guard_enabled ? '已启用全局防护' : '已关闭 (高风险)'}
+                    </Badge>
+                  }
+                  actions={
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="text-xs h-7 gap-1"
+                      onClick={() => {
+                        const patch = {
+                          output_guard_enabled: true,
+                          output_guard_max_tool_argument_bytes: DEFAULT_OUTPUT_GUARD_TOOL_BYTES,
+                          output_guard_max_tool_argument_deltas: DEFAULT_OUTPUT_GUARD_TOOL_DELTAS,
+                          output_guard_max_channel_bytes: DEFAULT_OUTPUT_GUARD_CHANNEL_BYTES,
+                          output_guard_max_request_bytes: DEFAULT_OUTPUT_GUARD_REQUEST_BYTES,
+                        }
+                        setSettingsForm(f => ({ ...f, ...patch }))
+                        savePartialSettings(patch)
+                      }}
+                    >
+                      <RotateCcw className="size-3" />
+                      恢复默认防护
+                    </Button>
+                  }
+                >
+                  <div className="space-y-4">
+                    {!settingsForm.output_guard_enabled && (
+                      <div className="rounded-xl border border-destructive/30 bg-destructive/10 p-3.5 text-xs text-destructive flex items-start gap-2">
+                        <AlertTriangle className="size-4 shrink-0 mt-0.5" />
+                        <div>
+                          <p className="font-semibold">高风险操作警告：失控防护已全局关闭</p>
+                          <p className="opacity-90">关闭后模型失控生成死循环、重复代码或细碎 arguments delta 时，将直接击穿代理并在下游引发 O(n²) 全量重解析雪崩。仅用于临时诊断，请尽快重新开启！</p>
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="flex items-center justify-between p-3 rounded-lg border bg-muted/20">
+                      <div>
+                        <div className="text-sm font-medium">启用失控输出防护</div>
+                        <div className="text-xs text-muted-foreground">全局实时检测持续短周期重复、细碎 arguments 泛洪与字节预算超额并前置切断</div>
+                      </div>
+                      <Switch
+                        checked={settingsForm.output_guard_enabled}
+                        onCheckedChange={(checked) => {
+                          setSettingsForm(f => ({ ...f, output_guard_enabled: checked }))
+                          savePartialSettings({ output_guard_enabled: checked })
+                        }}
+                      />
+                    </div>
+
+                    <div className={SETTINGS_FIELD_GRID}>
+                      <SettingField
+                        label="工具参数字节上限 (KiB)"
+                        description="单次工具调用完整参数序列化字节硬上限（默认 128 KiB，范围 16 KiB..4 MiB）"
+                      >
+                        <Input
+                          type="number"
+                          value={Math.round(settingsForm.output_guard_max_tool_argument_bytes / 1024)}
+                          onChange={(e) => {
+                            const val = Math.max(16, Math.min(4096, parseInt(e.target.value) || 128)) * 1024
+                            setSettingsForm(f => ({ ...f, output_guard_max_tool_argument_bytes: val }))
+                          }}
+                          onBlur={() => savePartialSettings({ output_guard_max_tool_argument_bytes: settingsForm.output_guard_max_tool_argument_bytes })}
+                        />
+                      </SettingField>
+
+                      <SettingField
+                        label="工具非空 Delta 数量上限"
+                        description="限制细碎 arguments delta 触发下游高频重解析事件的次数（默认 4096，范围 256..65536）"
+                      >
+                        <Input
+                          type="number"
+                          value={settingsForm.output_guard_max_tool_argument_deltas}
+                          onChange={(e) => {
+                            const val = Math.max(256, Math.min(65536, parseInt(e.target.value) || 4096))
+                            setSettingsForm(f => ({ ...f, output_guard_max_tool_argument_deltas: val }))
+                          }}
+                          onBlur={() => savePartialSettings({ output_guard_max_tool_argument_deltas: settingsForm.output_guard_max_tool_argument_deltas })}
+                        />
+                      </SettingField>
+
+                      <SettingField
+                        label="单 Channel 字节上限 (MiB)"
+                        description="单 text/thinking 生成通道累计字节上限（默认 2 MiB，范围 128 KiB..16 MiB）"
+                      >
+                        <Input
+                          type="number"
+                          value={Math.round(settingsForm.output_guard_max_channel_bytes / (1024 * 1024))}
+                          onChange={(e) => {
+                            const val = Math.max(1, Math.min(16, parseInt(e.target.value) || 2)) * 1024 * 1024
+                            setSettingsForm(f => ({ ...f, output_guard_max_channel_bytes: val }))
+                          }}
+                          onBlur={() => savePartialSettings({ output_guard_max_channel_bytes: settingsForm.output_guard_max_channel_bytes })}
+                        />
+                      </SettingField>
+
+                      <SettingField
+                        label="单请求语义预算 (MiB)"
+                        description="跨所有 channel、attempt 及自动续想的累计语义字节预算（默认 4 MiB，范围 256 KiB..64 MiB）"
+                      >
+                        <Input
+                          type="number"
+                          value={Math.round(settingsForm.output_guard_max_request_bytes / (1024 * 1024))}
+                          onChange={(e) => {
+                            const val = Math.max(1, Math.min(64, parseInt(e.target.value) || 4)) * 1024 * 1024
+                            setSettingsForm(f => ({ ...f, output_guard_max_request_bytes: val }))
+                          }}
+                          onBlur={() => savePartialSettings({ output_guard_max_request_bytes: settingsForm.output_guard_max_request_bytes })}
+                        />
+                      </SettingField>
+                    </div>
+
+                    {settingsForm.output_guard_max_tool_argument_bytes > settingsForm.output_guard_max_channel_bytes && (
+                      <p className="text-xs text-destructive">层级错误：工具参数上限不能超过单 Channel 字节上限！</p>
+                    )}
+                    {settingsForm.output_guard_max_channel_bytes > settingsForm.output_guard_max_request_bytes && (
+                      <p className="text-xs text-destructive">层级错误：单 Channel 字节上限不能超过单请求语义预算！</p>
+                    )}
+                  </div>
+                </SettingsCard>
+```
+
+- [ ] **Step 4: Run test to verify it passes (Green)**
+
+Run:
+1. `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./admin -run "TestAdminOutputGuard.*"`
+Expected: PASS ok github.com/codex2api/admin
+2. `cd frontend && node --experimental-strip-types --test src/lib/outputGuardSettings.test.mjs`
+Expected: PASS ok
+3. `cd frontend && pnpm run typecheck`
+Expected: exit code 0, no errors
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add admin/output_guard_settings.go admin/output_guard_settings_test.go admin/handler.go frontend/src/types.ts frontend/src/pages/Settings.tsx frontend/src/lib/outputGuardSettings.test.mjs
+git commit -m "feat(admin,frontend): add output guard settings GET/PUT and standalone management UI card"
+```

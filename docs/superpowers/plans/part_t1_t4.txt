@@ -1,0 +1,1727 @@
+
+## Tasks
+
+### Task 1: 周期性短重复检测核心算法（Prefix Function 线性检测器）
+
+**Files:**
+- Create: `security/outputguard/repetition.go`
+- Test: `security/outputguard/repetition_test.go`
+
+**Interfaces:**
+- Produces:
+  ```go
+  package outputguard
+
+  const (
+      WindowSizeBytes     = 8192
+      CheckpointStepBytes = 1024
+      MaxRepetitionPeriod = 256
+      MinRepetitionPeriod = 1
+  )
+
+  type RepetitionDetector struct {
+      window                [WindowSizeBytes]byte
+      count                 int64 // channel 累计写入总字节数
+      head                  int   // ring buffer 写入游标 (0..8191)
+      lastCheckedCheckpoint int64
+  }
+
+  func NewRepetitionDetector() *RepetitionDetector
+  func (d *RepetitionDetector) Push(data []byte) (hit bool, period int)
+  func (d *RepetitionDetector) CheckTail() (hit bool, period int)
+  func (d *RepetitionDetector) Reset()
+  ```
+
+- [ ] **Step 1: Write failing test for repetition detector (including non-multiple periodic math verification and unaligned tail check)**
+
+```go
+// security/outputguard/repetition_test.go
+package outputguard
+
+import (
+	"bytes"
+	"math/rand"
+	"testing"
+)
+
+func TestRepetitionDetectorNormalText(t *testing.T) {
+	d := NewRepetitionDetector()
+	// 伪随机非周期数据
+	r := rand.New(rand.NewSource(12345))
+	nonRepeating := make([]byte, 10000)
+	r.Read(nonRepeating)
+
+	hit, _ := d.Push(nonRepeating)
+	if hit {
+		t.Fatalf("expected no repetition hit for pseudo-random data, got hit=true")
+	}
+}
+
+func TestRepetitionDetectorShortPeriodHit(t *testing.T) {
+	d := NewRepetitionDetector()
+	// 创建真实事故重复模式：周期 p = 30 ("_auditfree.md_pluginless.tmp.m")
+	// 数学核实重点：8192 % 30 = 22 != 0，验证有限串数学周期不要求 L % p == 0！
+	pattern := []byte("_auditfree.md_pluginless.tmp.m")
+	if len(pattern) != 30 {
+		t.Fatalf("pattern length = %d, want 30", len(pattern))
+	}
+	var stream []byte
+	for len(stream) < 9500 {
+		stream = append(stream, pattern...)
+	}
+
+	// 以 512 字节分块送入
+	hitFound := false
+	var hitPeriod int
+	for offset := 0; offset < len(stream); offset += 512 {
+		end := offset + 512
+		if end > len(stream) {
+			end = len(stream)
+		}
+		hit, p := d.Push(stream[offset:end])
+		if hit {
+			hitFound = true
+			hitPeriod = p
+			break
+		}
+	}
+
+	if !hitFound {
+		t.Fatalf("expected repetition hit for 30-byte periodic pattern (non-multiple of 8192), got hit=false")
+	}
+	if hitPeriod != 30 {
+		t.Fatalf("expected detected period 30, got %d", hitPeriod)
+	}
+}
+
+func TestRepetitionDetectorTailCheckShortText(t *testing.T) {
+	d := NewRepetitionDetector()
+	// 短文本 < 8192 字节：即使内容高度周期，尾检必须返回 hit=false (Spec §5.2 规则 6)
+	pattern := bytes.Repeat([]byte("abc"), 500) // 1500 字节
+	hit, _ := d.Push(pattern)
+	if hit {
+		t.Fatalf("expected hit=false during push for <8192 bytes")
+	}
+	hit, _ = d.CheckTail()
+	if hit {
+		t.Fatalf("expected hit=false for tail check with <8192 bytes total")
+	}
+}
+
+func TestRepetitionDetectorTailCheckUnalignedWindow(t *testing.T) {
+	d := NewRepetitionDetector()
+	// 构造真实非对齐尾检样本：
+	// 前 108 字节为非周期杂散前缀，后随 8192 字节周期为 10 的重复片段，总长 8300 字节。
+	// 在常规 Push 过程中：
+	// - 当累计达到 8192 字节时触发检查点，此时窗口包含 108 字节杂散前缀 + 8084 字节周期内容，不是完整周期，Push 判定 hit=false；
+	// - 后续送入剩余 108 字节（总长 8300 字节），尚未到达下一个 1024 检查点（9216 字节），Push 仍未命中；
+	// - 此时流结束触发 CheckTail()：提取当前最新的 8192 字节窗口，恰好完全由周期 10 的数据组成，CheckTail 必须精准返回 hit=true, period=10。
+	prefix := []byte("non-periodic-header-padding-1234567890-abcdefghijklmnopqrstuvwxyz!@#$%^&*()-random-preamble-bytes-to-offset-boundary-xxxx")
+	if len(prefix) != 108 {
+		t.Fatalf("prefix length = %d, want 108", len(prefix))
+	}
+	pattern := []byte("0123456789") // period 10
+	periodicPart := bytes.Repeat(pattern, 8192/10)
+	periodicPart = append(periodicPart, pattern[:8192%10]...) // 恰好 8192 字节纯周期
+	if len(periodicPart) != 8192 {
+		t.Fatalf("periodicPart length = %d, want 8192", len(periodicPart))
+	}
+
+	fullStream := append(prefix, periodicPart...) // 总长 108 + 8192 = 8300 字节
+
+	// 分块推送，断言 Push 期间不会命中（因为 8192 检查点包含前缀，而后续未到 9216 检查点）
+	for offset := 0; offset < len(fullStream); offset += 500 {
+		end := offset + 500
+		if end > len(fullStream) {
+			end = len(fullStream)
+		}
+		hit, _ := d.Push(fullStream[offset:end])
+		if hit {
+			t.Fatalf("Push prematurely hit at offset %d, expected tail check to detect", offset)
+		}
+	}
+
+	// 触发尾检
+	hit, p := d.CheckTail()
+	if !hit {
+		t.Fatalf("expected CheckTail to detect pure periodic window of latest 8192 bytes, got hit=false")
+	}
+	if p != 10 {
+		t.Fatalf("expected detected period 10, got %d", p)
+	}
+}
+
+func TestRepetitionDetectorConsecutive9215BytesGuaranteedHit(t *testing.T) {
+	d := NewRepetitionDetector()
+	// Spec §5.2 规则 3: 步长 1024B，任意起点的连续周期片段达到 9215B 时必存在检查点完整落入
+	prefix := make([]byte, 512) // 任意偏置前缀 512B
+	for i := range prefix {
+		prefix[i] = byte(i % 127)
+	}
+	pattern := []byte("repeated_segment_32_bytes_test_")
+	periodicBody := bytes.Repeat(pattern, 300) // > 9215B
+	stream := append(prefix, periodicBody...)
+
+	hit := false
+	for offset := 0; offset < len(stream); offset += 256 {
+		end := offset + 256
+		if end > len(stream) {
+			end = len(stream)
+		}
+		if ok, _ := d.Push(stream[offset:end]); ok {
+			hit = true
+			break
+		}
+	}
+	if !hit {
+		t.Fatalf("expected 9215-byte periodic segment to trigger repetition hit within checkpoints")
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./security/outputguard -run "TestRepetitionDetector.*"`
+Expected: FAIL with compilation error: undefined: NewRepetitionDetector
+
+- [ ] **Step 3: Write minimal implementation**
+
+```go
+// security/outputguard/repetition.go
+package outputguard
+
+const (
+	WindowSizeBytes     = 8192
+	CheckpointStepBytes = 1024
+	MaxRepetitionPeriod = 256
+	MinRepetitionPeriod = 1
+)
+
+type RepetitionDetector struct {
+	window                [WindowSizeBytes]byte
+	count                 int64 // channel 累计写入总字节数
+	head                  int   // ring buffer 写入游标 (0..8191)
+	lastCheckedCheckpoint int64
+}
+
+func NewRepetitionDetector() *RepetitionDetector {
+	return &RepetitionDetector{}
+}
+
+func (d *RepetitionDetector) Reset() {
+	d.count = 0
+	d.head = 0
+	d.lastCheckedCheckpoint = 0
+}
+
+func (d *RepetitionDetector) Push(data []byte) (hit bool, period int) {
+	for _, b := range data {
+		d.window[d.head] = b
+		d.head = (d.head + 1) % WindowSizeBytes
+		d.count++
+
+		// 每新增 CheckpointStepBytes 到达检查点
+		if d.count >= WindowSizeBytes && (d.count-d.lastCheckedCheckpoint) >= CheckpointStepBytes {
+			d.lastCheckedCheckpoint = d.count - (d.count % CheckpointStepBytes)
+			if ok, p := d.checkCurrentWindow(); ok {
+				return true, p
+			}
+		}
+	}
+	return false, 0
+}
+
+func (d *RepetitionDetector) CheckTail() (hit bool, period int) {
+	// Spec §5.2 规则 6: 如果 channel 累计总字节数 < 8192，不判定重复，直接放行
+	if d.count < WindowSizeBytes {
+		return false, 0
+	}
+	// 已满 8192 窗口但尾部未对齐 1024，提取最新的完整 8192 窗口执行一次求周期检查
+	return d.checkCurrentWindow()
+}
+
+// checkCurrentWindow 提取当前 ring buffer 中的线性 8192 字节，使用前缀函数求最短周期 1 <= p <= 256
+// 数学核实说明：有限字符串周期不要求 L % p == 0（例如事故周期 p=30, 8192 % 30 = 22 != 0）。
+// 前缀函数的最大 border k = pi[L-1] 对应最小周期 p = L - k。
+// 当且仅当 1 <= p <= 256 且满足全部 p <= i < 8192 的 window[i] == window[i-p] 时判定命中。
+func (d *RepetitionDetector) checkCurrentWindow() (bool, int) {
+	if d.count < WindowSizeBytes {
+		return false, 0
+	}
+	// 展开当前最新的 8192 字节连续视图
+	var linear [WindowSizeBytes]byte
+	idx := d.head // d.head 此时指向最老的那个字节
+	for i := 0; i < WindowSizeBytes; i++ {
+		linear[i] = d.window[(idx+i)%WindowSizeBytes]
+	}
+
+	// 采用 KMP prefix function (pi table) 在 O(N) 线性时间求周期
+	pi := make([]int, WindowSizeBytes)
+	for i := 1; i < WindowSizeBytes; i++ {
+		j := pi[i-1]
+		for j > 0 && linear[i] != linear[j] {
+			j = pi[j-1]
+		}
+		if linear[i] == linear[j] {
+			j++
+		}
+		pi[i] = j
+	}
+
+	k := pi[WindowSizeBytes-1]
+	p := WindowSizeBytes - k
+	if p >= MinRepetitionPeriod && p <= MaxRepetitionPeriod {
+		// 校验边界：根据 border 定义，linear[0..k-1] == linear[p..L-1]
+		// 即对于所有 p <= i < 8192, 严格满足 linear[i] == linear[i-p]
+		return true, p
+	}
+
+	return false, 0
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./security/outputguard -run "TestRepetitionDetector.*"`
+Expected: PASS ok github.com/codex2api/security/outputguard
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add security/outputguard/repetition.go security/outputguard/repetition_test.go
+git commit -m "feat(outputguard): implement sliding window linear repetition detector"
+```
+
+---
+
+### Task 2: Channel 状态机与扫描预算/纯终态确认配额机制
+
+**Files:**
+- Create: `security/outputguard/channel.go`
+- Test: `security/outputguard/channel_test.go`
+
+**Interfaces:**
+- Consumes: `RepetitionDetector` from Task 1
+- Produces:
+  ```go
+  package outputguard
+
+  type ChannelKind string
+  const (
+      KindText          ChannelKind = "text"
+      KindThinking      ChannelKind = "thinking"
+      KindToolArguments ChannelKind = "tool_arguments"
+  )
+
+  type ChannelGuard struct {
+      id                    string
+      kind                  ChannelKind
+      maxBytes              int64
+      maxDeltas             int
+      remainingScanBudget   int64
+      highwater             int64
+      deltaCount            int
+      terminalBaselineHash  uint64
+      hasBaselineHash       bool
+      terminalPermitsUsed   int
+      consumedTerminalTypes map[string]bool
+      detector              *RepetitionDetector
+      isClosed              bool
+  }
+
+  func NewChannelGuard(id string, kind ChannelKind, maxBytes int64, maxDeltas int) *ChannelGuard
+  func (c *ChannelGuard) Highwater() int64
+  func (c *ChannelGuard) DeltaCount() int
+  func (c *ChannelGuard) RemainingScanBudget() int64
+  func (c *ChannelGuard) ReleaseWindow()
+  func (c *ChannelGuard) CheckAppend(delta []byte) (growth int64, cost int64, err error)
+  func (c *ChannelGuard) CommitAppend(delta []byte, growth int64, cost int64) error
+  func (c *ChannelGuard) CheckSnapshot(snapshot []byte, terminalStage string) (growth int64, cost int64, skipRepetition bool, err error)
+  func (c *ChannelGuard) CommitSnapshot(snapshot []byte, growth int64, cost int64, terminalStage string) error
+  func (c *ChannelGuard) CheckTail() error
+  ```
+
+- [ ] **Step 1: Write failing test for channel state machine and quota**
+
+```go
+// security/outputguard/channel_test.go
+package outputguard
+
+import (
+	"bytes"
+	"testing"
+)
+
+func TestChannelGuardHighwaterGrowthAndScanBudget(t *testing.T) {
+	// 工具 channel: maxBytes = 128 KiB (131072), scanBudget = 2 * 128 KiB = 256 KiB
+	cg := NewChannelGuard("call_1", KindToolArguments, 131072, 4096)
+
+	// Append 64 KiB of non-repeating data
+	delta1 := make([]byte, 65536)
+	for i := range delta1 {
+		delta1[i] = byte((i * 17) % 251)
+	}
+
+	growth, cost, err := cg.CheckAppend(delta1)
+	if err != nil {
+		t.Fatalf("CheckAppend delta1 error: %v", err)
+	}
+	if growth != 65536 || cost != 65536 {
+		t.Fatalf("delta1: want growth=65536, cost=65536, got growth=%d, cost=%d", growth, cost)
+	}
+	if err := cg.CommitAppend(delta1, growth, cost); err != nil {
+		t.Fatalf("CommitAppend delta1 error: %v", err)
+	}
+
+	if cg.Highwater() != 65536 {
+		t.Fatalf("want highwater=65536, got %d", cg.Highwater())
+	}
+	if cg.RemainingScanBudget() != 262144-65536 {
+		t.Fatalf("want remainingScanBudget=%d, got %d", 262144-65536, cg.RemainingScanBudget())
+	}
+}
+
+// Spec §9.1 Case 8a: 耗尽扫描预算后变体快照超额拦截
+func TestChannelGuardCase8a_ScanBudgetExhaustionAndVariantRejection(t *testing.T) {
+	cg := NewChannelGuard("call_1", KindToolArguments, 131072, 4096)
+	// 以 128 次 1 KiB delta 耗尽 128 KiB 扫描预算 (剩余 128 KiB)
+	chunk := make([]byte, 1024)
+	for i := range chunk {
+		chunk[i] = byte((i*7 + 3) % 251)
+	}
+	var fullParam []byte
+	for i := 0; i < 128; i++ {
+		fullParam = append(fullParam, chunk...)
+		growth, cost, err := cg.CheckAppend(chunk)
+		if err != nil {
+			t.Fatalf("step %d append error: %v", i, err)
+		}
+		if err := cg.CommitAppend(chunk, growth, cost); err != nil {
+			t.Fatalf("step %d commit append error: %v", i, err)
+		}
+	}
+	if cg.RemainingScanBudget() != 131072 {
+		t.Fatalf("remaining scan budget want 131072, got %d", cg.RemainingScanBudget())
+	}
+
+	// 首个 128 KiB 白名单终态快照到达 (arguments.done)，尚无 baseline hash，cost = 128 KiB
+	growth, cost, skipRepetition, err := cg.CheckSnapshot(fullParam, "arguments.done")
+	if err != nil {
+		t.Fatalf("arguments.done snapshot error: %v", err)
+	}
+	if cost != 131072 || growth != 0 || skipRepetition {
+		t.Fatalf("arguments.done: want cost=131072, growth=0, skipRepetition=false; got cost=%d, growth=%d, skip=%v", cost, growth, skipRepetition)
+	}
+	if err := cg.CommitSnapshot(fullParam, growth, cost, "arguments.done"); err != nil {
+		t.Fatalf("arguments.done commit snapshot error: %v", err)
+	}
+
+	if cg.RemainingScanBudget() != 0 {
+		t.Fatalf("remaining scan budget want 0, got %d", cg.RemainingScanBudget())
+	}
+
+	// 紧接着收到修改了 1 个字节的 128 KiB 变体快照 (item.done)
+	variantParam := bytes.Clone(fullParam)
+	variantParam[65536] ^= 0xFF
+
+	_, _, _, err = cg.CheckSnapshot(variantParam, "item.done")
+	if err == nil {
+		t.Fatalf("expected variant snapshot to be rejected with scan budget exhaustion, got nil")
+	}
+	if err != ErrScanBudgetExhausted {
+		t.Fatalf("expected ErrScanBudgetExhausted, got %v", err)
+	}
+}
+
+// Spec §9.1 Case 8b: 合法终态链零计费放行与无资格拒绝
+func TestChannelGuardCase8b_TerminalChainZeroCostAndExhaustion(t *testing.T) {
+	cg := NewChannelGuard("call_1", KindToolArguments, 131072, 4096)
+	fullParam := make([]byte, 131072)
+	for i := range fullParam {
+		fullParam[i] = byte((i*13 + 5) % 251)
+	}
+	// append 128 KiB
+	growth, cost, _ := cg.CheckAppend(fullParam)
+	_ = cg.CommitAppend(fullParam, growth, cost)
+
+	// arguments.done 消耗最后 128 KiB 扫描预算并建立 baseline hash
+	growth, cost, _, _ = cg.CheckSnapshot(fullParam, "arguments.done")
+	_ = cg.CommitSnapshot(fullParam, growth, cost, "arguments.done")
+
+	// item.done 具备资格且 Hash 完全一致 -> cost = 0, skipRepetition = true
+	growth, cost, skipRepetition, err := cg.CheckSnapshot(fullParam, "item.done")
+	if err != nil {
+		t.Fatalf("item.done snapshot error: %v", err)
+	}
+	if cost != 0 || !skipRepetition {
+		t.Fatalf("item.done: want cost=0, skipRepetition=true; got cost=%d, skip=%v", cost, skipRepetition)
+	}
+	_ = cg.CommitSnapshot(fullParam, growth, cost, "item.done")
+
+	// response.completed 同样具备资格且 Hash 一致 -> cost = 0
+	growth, cost, skipRepetition, err = cg.CheckSnapshot(fullParam, "response.completed")
+	if err != nil {
+		t.Fatalf("response.completed snapshot error: %v", err)
+	}
+	if cost != 0 || !skipRepetition {
+		t.Fatalf("response.completed: want cost=0, skipRepetition=true")
+	}
+	_ = cg.CommitSnapshot(fullParam, growth, cost, "response.completed")
+
+	// 重发同类型 response.completed -> 失去资格，走 cost = 128 KiB，因剩余扫描预算为 0 被拦截
+	_, _, _, err = cg.CheckSnapshot(fullParam, "response.completed")
+	if err != ErrScanBudgetExhausted {
+		t.Fatalf("duplicate response.completed: want ErrScanBudgetExhausted, got %v", err)
+	}
+}
+
+// Spec §9.1 Case 8c: 非白名单普通快照绝不建立 baseline
+func TestChannelGuardCase8c_NonTerminalSnapshotCannotEstablishBaseline(t *testing.T) {
+	cg := NewChannelGuard("c_text", KindText, 2097152, 4096)
+	snap := []byte("intermediate full snapshot text")
+	growth, cost, skip, err := cg.CheckSnapshot(snap, "unknown_or_intermediate_type")
+	if err != nil {
+		t.Fatalf("CheckSnapshot error: %v", err)
+	}
+	if skip || cost != int64(len(snap)) {
+		t.Fatalf("want skip=false, cost=%d, got skip=%v, cost=%d", len(snap), skip, cost)
+	}
+	_ = cg.CommitSnapshot(snap, growth, cost, "unknown_or_intermediate_type")
+
+	// 确认 hasBaselineHash 仍为 false，未建立 baseline
+	if cg.hasBaselineHash {
+		t.Fatalf("expected hasBaselineHash=false for non-terminal snapshot, got true")
+	}
+}
+
+func TestChannelGuardHashMismatchDiscardsQuotaAndChargesFullCost(t *testing.T) {
+	cg := NewChannelGuard("c_tool", KindToolArguments, 131072, 4096)
+	data1 := bytes.Repeat([]byte("hello world "), 100) // 1200 字节
+	growth, cost, _, _ := cg.CheckSnapshot(data1, "arguments.done")
+	_ = cg.CommitSnapshot(data1, growth, cost, "arguments.done")
+
+	if !cg.hasBaselineHash {
+		t.Fatalf("expected baseline hash created")
+	}
+
+	// 紧接着发送篡改变体快照
+	data2 := bytes.Repeat([]byte("corrupted data!"), 80) // 1200 字节
+	growth, cost, skip, err := cg.CheckSnapshot(data2, "item.done")
+	if err != nil {
+		t.Fatalf("unexpected CheckSnapshot error: %v", err)
+	}
+	if skip {
+		t.Fatalf("expected skip=false for hash mismatch")
+	}
+	if cost != int64(len(data2)) {
+		t.Fatalf("expected full cost %d, got %d", len(data2), cost)
+	}
+
+	// CommitSnapshot 篡改帧后，该类型许可必须标记废弃
+	_ = cg.CommitSnapshot(data2, growth, cost, "item.done")
+	if !cg.consumedTerminalTypes["item.done"] {
+		t.Fatalf("expected item.done marked as consumed/discarded")
+	}
+	// 基准 Hash 绝不能被篡改快照覆盖
+	h := uint64(0)
+	for _, b := range data1 {
+		h = (h ^ uint64(b)) * 1099511628211
+	}
+	if cg.terminalBaselineHash != h {
+		t.Fatalf("expected baseline hash to stay unchanged")
+	}
+}
+
+func TestChannelGuardTailCheck(t *testing.T) {
+	cg := NewChannelGuard("c_text", KindText, 2097152, 4096)
+	// 短文本放行
+	_ = cg.CommitAppend([]byte("short text"), 10, 10)
+	if err := cg.CheckTail(); err != nil {
+		t.Fatalf("expected nil error for short text tail check, got %v", err)
+	}
+
+	// 长周期文本检出
+	cg2 := NewChannelGuard("c_periodic", KindText, 2097152, 4096)
+	pattern := []byte("0123456789")
+	data := bytes.Repeat(pattern, 850) // 8500 字节
+	// 避免在 append 触发检查点，直接写入 window
+	cg2.detector.window = [8192]byte{}
+	for i := 0; i < 8500; i++ {
+		cg2.detector.window[i%8192] = pattern[i%10]
+	}
+	cg2.detector.count = 8500
+	cg2.detector.head = 8500 % 8192
+
+	if err := cg2.CheckTail(); err != ErrRepetitionDetected {
+		t.Fatalf("expected ErrRepetitionDetected for periodic tail check, got %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./security/outputguard -run "TestChannelGuard.*"`
+Expected: FAIL with compilation error: undefined: NewChannelGuard
+
+- [ ] **Step 3: Write minimal implementation**
+
+```go
+// security/outputguard/channel.go
+package outputguard
+
+import (
+	"errors"
+)
+
+var (
+	ErrToolArgumentBytesExceeded = errors.New("tool_argument_bytes")
+	ErrChannelBytesExceeded      = errors.New("channel_bytes")
+	ErrScanBudgetExhausted       = errors.New("scan_budget_exhausted")
+	ErrRepetitionDetected        = errors.New("repetition")
+	ErrToolDeltasExceeded        = errors.New("tool_argument_deltas")
+)
+
+type ChannelKind string
+
+const (
+	KindText          ChannelKind = "text"
+	KindThinking      ChannelKind = "thinking"
+	KindToolArguments ChannelKind = "tool_arguments"
+)
+
+// allowedTerminalTypes 白名单终态类型（Spec §5.3）
+var allowedTerminalTypes = map[string]bool{
+	"arguments.done":     true,
+	"item.done":          true,
+	"response.completed": true,
+}
+
+// fnv64a 计算 64 位 FNV-1a Hash，用于流水线单遍历比对与基准记录
+func fnv64a(data []byte) uint64 {
+	var h uint64 = 14695981039346656037
+	for _, b := range data {
+		h = (h ^ uint64(b)) * 1099511628211
+	}
+	return h
+}
+
+type ChannelGuard struct {
+	id                    string
+	kind                  ChannelKind
+	maxBytes              int64
+	maxDeltas             int
+	remainingScanBudget   int64
+	highwater             int64
+	deltaCount            int
+	terminalBaselineHash  uint64
+	hasBaselineHash       bool
+	terminalPermitsUsed   int
+	consumedTerminalTypes map[string]bool
+	detector              *RepetitionDetector
+	isClosed              bool
+}
+
+func NewChannelGuard(id string, kind ChannelKind, maxBytes int64, maxDeltas int) *ChannelGuard {
+	return &ChannelGuard{
+		id:                    id,
+		kind:                  kind,
+		maxBytes:              maxBytes,
+		maxDeltas:             maxDeltas,
+		remainingScanBudget:   2 * maxBytes, // 累计扫描预算为 2 * limit (Spec §5.3)
+		consumedTerminalTypes: make(map[string]bool),
+		detector:              NewRepetitionDetector(),
+	}
+}
+
+func (c *ChannelGuard) Highwater() int64           { return c.highwater }
+func (c *ChannelGuard) DeltaCount() int            { return c.deltaCount }
+func (c *ChannelGuard) RemainingScanBudget() int64 { return c.remainingScanBudget }
+
+func (c *ChannelGuard) ReleaseWindow() {
+	c.detector = nil
+	c.isClosed = true
+}
+
+func (c *ChannelGuard) CheckAppend(delta []byte) (growth int64, cost int64, err error) {
+	deltaLen := int64(len(delta))
+	if c.kind == KindToolArguments && deltaLen > 0 {
+		if c.deltaCount+1 > c.maxDeltas {
+			return 0, 0, ErrToolDeltasExceeded
+		}
+	}
+	newHighwater := c.highwater + deltaLen
+	if newHighwater > c.maxBytes {
+		if c.kind == KindToolArguments {
+			return 0, 0, ErrToolArgumentBytesExceeded
+		}
+		return 0, 0, ErrChannelBytesExceeded
+	}
+
+	cost = deltaLen
+	if c.remainingScanBudget < cost {
+		return 0, 0, ErrScanBudgetExhausted
+	}
+
+	return deltaLen, cost, nil
+}
+
+func (c *ChannelGuard) CommitAppend(delta []byte, growth int64, cost int64) error {
+	c.highwater += growth
+	if c.kind == KindToolArguments && len(delta) > 0 {
+		c.deltaCount++
+	}
+	c.remainingScanBudget -= cost
+
+	if c.detector != nil && len(delta) > 0 {
+		hit, _ := c.detector.Push(delta)
+		if hit {
+			return ErrRepetitionDetected
+		}
+	}
+	return nil
+}
+
+func (c *ChannelGuard) CheckSnapshot(snapshot []byte, terminalStage string) (growth int64, cost int64, skipRepetition bool, err error) {
+	snapLen := int64(len(snapshot))
+	if snapLen > c.highwater {
+		growth = snapLen - c.highwater
+	}
+	if snapLen > c.maxBytes {
+		if c.kind == KindToolArguments {
+			return 0, 0, false, ErrToolArgumentBytesExceeded
+		}
+		return 0, 0, false, ErrChannelBytesExceeded
+	}
+
+	// 资格检查：仅白名单终态类型且具备 baseline hash 且许可未耗尽 (Spec §5.3 步骤 5)
+	// 合法与非法终态配额判断严格在 hash 前！无资格绝不提前计算 hash。
+	isEligible := c.hasBaselineHash &&
+		allowedTerminalTypes[terminalStage] &&
+		!c.consumedTerminalTypes[terminalStage] &&
+		c.terminalPermitsUsed < 3
+
+	if isEligible {
+		// 计算 snapshot Hash 比对 baseline hash
+		currentHash := fnv64a(snapshot)
+		if currentHash == c.terminalBaselineHash {
+			// Hash 完全一致，纯终态确认快照零计费放行，跳过步骤 7 重复扫描
+			return growth, 0, true, nil
+		}
+		// Hash 不一致（变体篡改），作废该类型许可，全额计费
+		cost = snapLen
+	} else {
+		// 无免除资格（包括中间替换、首帧终态、重发同类型或超出 3 次配额），严禁提前 Hash，直接全额计费
+		cost = snapLen
+	}
+
+	if c.remainingScanBudget < cost {
+		return 0, 0, false, ErrScanBudgetExhausted
+	}
+
+	return growth, cost, false, nil
+}
+
+func (c *ChannelGuard) CommitSnapshot(snapshot []byte, growth int64, cost int64, terminalStage string) error {
+	c.highwater += growth
+	c.remainingScanBudget -= cost
+
+	// 白名单终态类型快照消耗本类型配额
+	if allowedTerminalTypes[terminalStage] {
+		c.consumedTerminalTypes[terminalStage] = true
+		c.terminalPermitsUsed++
+	}
+
+	// 终态首帧建立 baseline hash：仅白名单终态帧类型允许在首帧建立 baseline hash (Spec §5.3)
+	// 如果之前未建立 baseline 且当前属于白名单类型，在单次遍历中建立 baseline hash
+	shouldSetBaseline := !c.hasBaselineHash && allowedTerminalTypes[terminalStage]
+
+	if cost > 0 && c.detector != nil {
+		c.detector.Reset()
+
+		if shouldSetBaseline {
+			// 单次流水线处理：一次遍历同时送入 detector.Push 并同步更新 Hash
+			var h uint64 = 14695981039346656037
+			for _, b := range snapshot {
+				h = (h ^ uint64(b)) * 1099511628211
+			}
+			c.terminalBaselineHash = h
+			c.hasBaselineHash = true
+		}
+
+		hit, _ := c.detector.Push(snapshot)
+		if hit {
+			return ErrRepetitionDetected
+		}
+		hit, _ = c.detector.CheckTail()
+		if hit {
+			return ErrRepetitionDetected
+		}
+	}
+
+	return nil
+}
+
+func (c *ChannelGuard) CheckTail() error {
+	if c.detector != nil {
+		if hit, _ := c.detector.CheckTail(); hit {
+			return ErrRepetitionDetected
+		}
+	}
+	return nil
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./security/outputguard -run "TestChannelGuard.*"`
+Expected: PASS ok github.com/codex2api/security/outputguard
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add security/outputguard/channel.go security/outputguard/channel_test.go
+git commit -m "feat(outputguard): implement channel guard with scan budget and terminal quota"
+```
+
+---
+
+### Task 3: 请求级 RequestGuard 协调器与统一判定优先级及并发契约
+
+**Files:**
+- Create: `security/outputguard/guard.go`
+- Test: `security/outputguard/guard_test.go`
+
+**Interfaces:**
+- Consumes: `ChannelGuard` from Task 2
+- Produces:
+  ```go
+  package outputguard
+
+  import "sync"
+
+  const (
+      MaxRequestEvents   = 65536
+      MaxRequestChannels = 128
+      TriggeredCode      = "model_output_guard_triggered"
+  )
+
+  type Config struct {
+      Enabled               bool
+      MaxToolArgumentBytes  int64
+      MaxToolArgumentDeltas int
+      MaxChannelBytes       int64
+      MaxRequestBytes       int64
+  }
+
+  type RequestGuard struct {
+      mu            sync.RWMutex
+      cfg           Config
+      requestEvents int
+      requestBytes  int64
+      channels      map[string]*ChannelGuard
+      aliasMap      map[string]string // alias mapping (e.g. index -> call_id)
+      tripped       bool
+      trippedReason string
+  }
+
+  func NewRequestGuard(cfg Config) *RequestGuard
+  func (g *RequestGuard) ObserveAppend(channelID string, aliasID string, kind ChannelKind, delta []byte) error
+  func (g *RequestGuard) ObserveSnapshot(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error
+  func (g *RequestGuard) EndChannel(channelID string) error
+  func (g *RequestGuard) IsTripped() bool
+  func (g *RequestGuard) TrippedReason() string
+  ```
+
+- [ ] **Step 1: Write failing test for RequestGuard (including 8-step precedence, first reason freeze, EndChannel tail check, and concurrency race)**
+
+```go
+// security/outputguard/guard_test.go
+package outputguard
+
+import (
+	"bytes"
+	"fmt"
+	"sync"
+	"testing"
+)
+
+func defaultTestConfig() Config {
+	return Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,  // 128 KiB
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152, // 2 MiB
+		MaxRequestBytes:       4194304, // 4 MiB
+	}
+}
+
+func TestRequestGuardRequestEventsFlood(t *testing.T) {
+	rg := NewRequestGuard(defaultTestConfig())
+	delta := []byte("a")
+	for i := 0; i < MaxRequestEvents; i++ {
+		if err := rg.ObserveAppend("c1", "", KindText, delta); err != nil {
+			t.Fatalf("unexpected error at event %d: %v", i, err)
+		}
+	}
+	// 第 65537 个事件必须被拒绝并判定为 request_events (Spec §5.3 步骤 1)
+	err := rg.ObserveAppend("c1", "", KindText, delta)
+	if err == nil || err.Error() != "request_events" {
+		t.Fatalf("expected request_events, got %v", err)
+	}
+	if !rg.IsTripped() || rg.TrippedReason() != "request_events" {
+		t.Fatalf("expected tripped with request_events, got %s", rg.TrippedReason())
+	}
+}
+
+func TestRequestGuardChannelFlood(t *testing.T) {
+	rg := NewRequestGuard(defaultTestConfig())
+	// 验证累计 128 个 Channel 限制：
+	// 第二轮核实修正：消除未定义符号 'A'，使用 fmt.Sprintf 或安全字符生成独立 channel ID
+	for i := 0; i < MaxRequestChannels; i++ {
+		cid := fmt.Sprintf("chan_%d", i)
+		if err := rg.ObserveAppend(cid, "", KindText, []byte("x")); err != nil {
+			t.Fatalf("channel %d error: %v", i, err)
+		}
+	}
+	// 第 129 个 Channel 必须被拒绝并判定为 channel_count (Spec §5.3 步骤 2)
+	err := rg.ObserveAppend("channel_129", "", KindText, []byte("x"))
+	if err == nil || err.Error() != "channel_count" {
+		t.Fatalf("expected channel_count, got %v", err)
+	}
+}
+
+func TestRequestGuardChannelCumulativeNotReturnedOnEnd(t *testing.T) {
+	rg := NewRequestGuard(defaultTestConfig())
+	// 验证 EndChannel 结束 channel 不返还累计 channel 配额 (Spec §5.1)
+	for i := 0; i < MaxRequestChannels; i++ {
+		cid := fmt.Sprintf("chan_%d", i)
+		_ = rg.ObserveAppend(cid, "", KindText, []byte("x"))
+		_ = rg.EndChannel(cid)
+	}
+	// 尝试再开一个 channel，必须被拒绝为 channel_count
+	err := rg.ObserveAppend("extra_channel", "", KindText, []byte("x"))
+	if err == nil || err.Error() != "channel_count" {
+		t.Fatalf("expected channel_count rejection after 128 closed channels, got %v", err)
+	}
+}
+
+func TestRequestGuardEndChannelExecutesTailCheck(t *testing.T) {
+	rg := NewRequestGuard(defaultTestConfig())
+	// 构造在 Push 时未触发检查点但流结束时已包含 8192 字节周期的流
+	pattern := []byte("0123456789")
+	periodicBody := bytes.Repeat(pattern, 8192/10)
+	periodicBody = append(periodicBody, pattern[:8192%10]...) // 恰好 8192B 周期
+	// 先推送 100 字节杂散
+	prefix := make([]byte, 100)
+	for i := range prefix {
+		prefix[i] = byte(i)
+	}
+	full := append(prefix, periodicBody...) // 8292 字节，未达下一个 1024 检查点
+
+	// 推送数据，Push 期间不触发 repetition（8192 检查点含 prefix 杂散，8292 未到检查点）
+	for offset := 0; offset < len(full); offset += 500 {
+		end := offset + 500
+		if end > len(full) {
+			end = len(full)
+		}
+		_ = rg.ObserveAppend("c_tail", "", KindText, full[offset:end])
+	}
+	if rg.IsTripped() {
+		t.Fatalf("expected not tripped before EndChannel")
+	}
+
+	// 调用 EndChannel：必须先执行尾检，发现周期性短重复，成功拦截并冻结 repetition！
+	err := rg.EndChannel("c_tail")
+	if err == nil || err.Error() != "repetition" {
+		t.Fatalf("expected repetition hit during EndChannel tail check, got %v", err)
+	}
+	if !rg.IsTripped() || rg.TrippedReason() != "repetition" {
+		t.Fatalf("expected tripped with repetition, got %s", rg.TrippedReason())
+	}
+}
+
+func TestRequestGuardRequestBytesPrecedenceOverScanBudget(t *testing.T) {
+	// Spec §5.3 严格 8 步优先级：先步骤 4 语义字节预算检查 (request_bytes)，后步骤 6 扫描预算
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       1000, // 仅 1000 字节请求上限
+	})
+
+	// 一次传入 1500 字节快照 -> 必须报 request_bytes，而非 channel_bytes 或 scan_budget
+	err := rg.ObserveSnapshot("c1", "", KindText, make([]byte, 1500), "")
+	if err == nil || err.Error() != "request_bytes" {
+		t.Fatalf("expected request_bytes priority over scan budget, got %v", err)
+	}
+	// 首个 reason 必须冻结
+	if rg.TrippedReason() != "request_bytes" {
+		t.Fatalf("expected frozen reason request_bytes, got %s", rg.TrippedReason())
+	}
+
+	// 再次调用仍然返回首个冻结 reason
+	err2 := rg.ObserveAppend("c1", "", KindText, []byte("x"))
+	if err2 == nil || err2.Error() != "request_bytes" {
+		t.Fatalf("expected idempotent frozen reason request_bytes, got %v", err2)
+	}
+}
+
+func TestRequestGuardToolArgumentDeltasFlood(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 10,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	for i := 0; i < 10; i++ {
+		if err := rg.ObserveAppend("call_1", "", KindToolArguments, []byte("a")); err != nil {
+			t.Fatalf("delta %d error: %v", i, err)
+		}
+	}
+	// 第 11 个非空 delta 必须被拦截为 tool_argument_deltas (Spec §5.3 步骤 3)
+	err := rg.ObserveAppend("call_1", "", KindToolArguments, []byte("a"))
+	if err == nil || err.Error() != "tool_argument_deltas" {
+		t.Fatalf("expected tool_argument_deltas, got %v", err)
+	}
+}
+
+func TestRequestGuardConcurrentAppendAndIsTrippedNoRace(t *testing.T) {
+	rg := NewRequestGuard(defaultTestConfig())
+	var wg sync.WaitGroup
+
+	// 并发写
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			cid := fmt.Sprintf("c_concurrent_%d", id%3)
+			for j := 0; j < 50; j++ {
+				_ = rg.ObserveAppend(cid, "", KindText, []byte("a"))
+			}
+		}(i)
+	}
+
+	// 并发读状态
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 50; j++ {
+				_ = rg.IsTripped()
+				_ = rg.TrippedReason()
+			}
+		}()
+	}
+
+	wg.Wait()
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v -race ./security/outputguard -run "TestRequestGuard.*"`
+Expected: FAIL with compilation error: undefined: NewRequestGuard
+
+- [ ] **Step 3: Write minimal implementation**
+
+```go
+// security/outputguard/guard.go
+package outputguard
+
+import (
+	"errors"
+	"sync"
+)
+
+const (
+	MaxRequestEvents   = 65536
+	MaxRequestChannels = 128
+	TriggeredCode      = "model_output_guard_triggered"
+)
+
+type Config struct {
+	Enabled               bool
+	MaxToolArgumentBytes  int64
+	MaxToolArgumentDeltas int
+	MaxChannelBytes       int64
+	MaxRequestBytes       int64
+}
+
+type RequestGuard struct {
+	mu            sync.RWMutex
+	cfg           Config
+	requestEvents int
+	requestBytes  int64
+	channels      map[string]*ChannelGuard
+	aliasMap      map[string]string
+	tripped       bool
+	trippedReason string
+}
+
+func NewRequestGuard(cfg Config) *RequestGuard {
+	return &RequestGuard{
+		cfg:      cfg,
+		channels: make(map[string]*ChannelGuard),
+		aliasMap: make(map[string]string),
+	}
+}
+
+func (g *RequestGuard) IsTripped() bool {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.tripped
+}
+
+func (g *RequestGuard) TrippedReason() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.trippedReason
+}
+
+func (g *RequestGuard) tripLocked(reason string) error {
+	if !g.tripped {
+		g.tripped = true
+		g.trippedReason = reason
+	}
+	return errors.New(g.trippedReason)
+}
+
+func (g *RequestGuard) resolveChannelLocked(channelID, aliasID string, kind ChannelKind) (*ChannelGuard, error) {
+	targetID := channelID
+	if targetID == "" && aliasID != "" {
+		if mapped, ok := g.aliasMap[aliasID]; ok {
+			targetID = mapped
+		} else {
+			targetID = aliasID
+		}
+	}
+	if targetID == "" {
+		targetID = "default"
+	}
+	if aliasID != "" && targetID != aliasID {
+		g.aliasMap[aliasID] = targetID
+	}
+
+	cg, exists := g.channels[targetID]
+	if !exists {
+		// 步骤 2: Channel 数量检查 (Spec §5.3)
+		if len(g.channels)+1 > MaxRequestChannels {
+			return nil, g.tripLocked("channel_count")
+		}
+		maxBytes := g.cfg.MaxChannelBytes
+		if kind == KindToolArguments {
+			maxBytes = g.cfg.MaxToolArgumentBytes
+		}
+		cg = NewChannelGuard(targetID, kind, maxBytes, g.cfg.MaxToolArgumentDeltas)
+		g.channels[targetID] = cg
+	}
+	return cg, nil
+}
+
+// ObserveAppend 严格执行 Spec §5.3 优先级流水线（先字节高水位与 request_bytes 累加判定，再资格/成本，首 reason 冻结）
+func (g *RequestGuard) ObserveAppend(channelID string, aliasID string, kind ChannelKind, delta []byte) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.cfg.Enabled {
+		return nil
+	}
+	if g.tripped {
+		return errors.New(g.trippedReason)
+	}
+
+	// 步骤 1: 事件预算检查
+	g.requestEvents++
+	if g.requestEvents > MaxRequestEvents {
+		return g.tripLocked("request_events")
+	}
+
+	// 步骤 2: Channel 检查
+	cg, err := g.resolveChannelLocked(channelID, aliasID, kind)
+	if err != nil {
+		return err
+	}
+
+	// 步骤 3 & 4: Delta 计数与语义字节高水位检查
+	growth, cost, err := cg.CheckAppend(delta)
+	if err != nil {
+		if errors.Is(err, ErrScanBudgetExhausted) {
+			if cg.kind == KindToolArguments {
+				return g.tripLocked("tool_argument_bytes")
+			}
+			return g.tripLocked("channel_bytes")
+		}
+		return g.tripLocked(err.Error())
+	}
+
+	if g.requestBytes+growth > g.cfg.MaxRequestBytes {
+		return g.tripLocked("request_bytes")
+	}
+
+	// 步骤 5, 6, 7: 提交高水位并执行周期扫描
+	g.requestBytes += growth
+	if err := cg.CommitAppend(delta, growth, cost); err != nil {
+		return g.tripLocked(err.Error())
+	}
+
+	return nil
+}
+
+// ObserveSnapshot 严格执行 Spec §5.3 快照判定流水线
+func (g *RequestGuard) ObserveSnapshot(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if !g.cfg.Enabled {
+		return nil
+	}
+	if g.tripped {
+		return errors.New(g.trippedReason)
+	}
+
+	// 步骤 1: 事件预算检查
+	g.requestEvents++
+	if g.requestEvents > MaxRequestEvents {
+		return g.tripLocked("request_events")
+	}
+
+	// 步骤 2: Channel 检查
+	cg, err := g.resolveChannelLocked(channelID, aliasID, kind)
+	if err != nil {
+		return err
+	}
+
+	// 步骤 4: 语义字节预算检查 (先检查高水位推进与 request_bytes 上限)
+	snapLen := int64(len(snapshot))
+	var growth int64
+	if snapLen > cg.highwater {
+		growth = snapLen - cg.highwater
+	}
+	if snapLen > cg.maxBytes {
+		if cg.kind == KindToolArguments {
+			return g.tripLocked("tool_argument_bytes")
+		}
+		return g.tripLocked("channel_bytes")
+	}
+	if g.requestBytes+growth > g.cfg.MaxRequestBytes {
+		return g.tripLocked("request_bytes")
+	}
+
+	// 步骤 5 & 6: 资格/等价性检查与扫描预算扣减
+	growth, cost, _, err := cg.CheckSnapshot(snapshot, terminalStage)
+	if err != nil {
+		if errors.Is(err, ErrScanBudgetExhausted) {
+			if cg.kind == KindToolArguments {
+				return g.tripLocked("tool_argument_bytes")
+			}
+			return g.tripLocked("channel_bytes")
+		}
+		return g.tripLocked(err.Error())
+	}
+
+	// 步骤 7: 提交高水位与扫描
+	g.requestBytes += growth
+	if err := cg.CommitSnapshot(snapshot, growth, cost, terminalStage); err != nil {
+		return g.tripLocked(err.Error())
+	}
+
+	return nil
+}
+
+// EndChannel 在关闭 channel 前执行尾检，释放窗口内存，累计 channel 映射不返还
+func (g *RequestGuard) EndChannel(channelID string) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	if cg, exists := g.channels[channelID]; exists {
+		// 先执行尾检 (Spec §5.2 规则 6)
+		if err := cg.CheckTail(); err != nil {
+			return g.tripLocked(err.Error())
+		}
+		// 尾检通过后安全释放滑动窗口内存 (<=64KiB)
+		cg.ReleaseWindow()
+	}
+	return nil
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v -race ./security/outputguard -run "TestRequestGuard.*"`
+Expected: PASS ok github.com/codex2api/security/outputguard
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add security/outputguard/guard.go security/outputguard/guard_test.go
+git commit -m "feat(outputguard): implement request guard coordinator with 8-step precedence and RWMutex"
+```
+
+---
+
+### Task 4: 数据库表结构迁移与三态指针持久化（SQLite & PostgreSQL）
+
+**Files:**
+- Create: `database/output_guard_settings.go`
+- Modify: `database/sqlite.go:730-740`
+- Modify: `database/postgres.go:1600-1610,3230-3240`
+- Test: `database/output_guard_settings_test.go`
+
+**Interfaces:**
+- Produces:
+  ```go
+  package database
+
+  type OutputGuardSettings struct {
+      Enabled               *bool `json:"output_guard_enabled"`
+      MaxToolArgumentBytes  int64 `json:"output_guard_max_tool_argument_bytes"`
+      MaxToolArgumentDeltas int   `json:"output_guard_max_tool_argument_deltas"`
+      MaxChannelBytes       int64 `json:"output_guard_max_channel_bytes"`
+      MaxRequestBytes       int64 `json:"output_guard_max_request_bytes"`
+      ConfigGeneration      int64 `json:"output_guard_config_generation"`
+  }
+
+  type OutputGuardSettingsUpdate struct {
+      Enabled               *bool
+      MaxToolArgumentBytes  *int64
+      MaxToolArgumentDeltas *int
+      MaxChannelBytes       *int64
+      MaxRequestBytes       *int64
+  }
+
+  func (db *DB) GetOutputGuardSettings(ctx context.Context) (OutputGuardSettings, error)
+  func (db *DB) UpdateOutputGuardSettings(ctx context.Context, update OutputGuardSettingsUpdate) (OutputGuardSettings, error)
+  ```
+
+- [ ] **Step 1: Write failing test for OutputGuardSettings migration, tri-state persistence, generation overflow protection, and narrow update isolation**
+
+```go
+// database/output_guard_settings_test.go
+package database
+
+import (
+	"context"
+	"errors"
+	"math"
+	"os"
+	"sync"
+	"testing"
+)
+
+func runOnAllDBDrivers(t *testing.T, testFn func(t *testing.T, db *DB)) {
+	t.Run("sqlite", func(t *testing.T) {
+		db := newResponseCacheSettingsTestDB(t)
+		testFn(t, db)
+	})
+
+	if dsn := os.Getenv("CODEX2API_TEST_POSTGRES_DSN"); dsn != "" {
+		t.Run("postgres", func(t *testing.T) {
+			db, err := New("postgres", dsn)
+			if err != nil {
+				t.Fatalf("New(postgres) error = %v", err)
+			}
+			defer db.Close()
+			testFn(t, db)
+		})
+	}
+}
+
+func TestOutputGuardSettingsFreshDefaults(t *testing.T) {
+	runOnAllDBDrivers(t, func(t *testing.T, db *DB) {
+		got, err := db.GetOutputGuardSettings(context.Background())
+		if err != nil {
+			t.Fatalf("GetOutputGuardSettings error = %v", err)
+		}
+
+		if got.Enabled == nil || *got.Enabled != true {
+			t.Fatalf("default Enabled want true, got %v", got.Enabled)
+		}
+		if got.MaxToolArgumentBytes != 131072 {
+			t.Fatalf("default MaxToolArgumentBytes want 131072, got %d", got.MaxToolArgumentBytes)
+		}
+		if got.MaxToolArgumentDeltas != 4096 {
+			t.Fatalf("default MaxToolArgumentDeltas want 4096, got %d", got.MaxToolArgumentDeltas)
+		}
+		if got.MaxChannelBytes != 2097152 {
+			t.Fatalf("default MaxChannelBytes want 2097152, got %d", got.MaxChannelBytes)
+		}
+		if got.MaxRequestBytes != 4194304 {
+			t.Fatalf("default MaxRequestBytes want 4194304, got %d", got.MaxRequestBytes)
+		}
+		if got.ConfigGeneration < 1 {
+			t.Fatalf("default ConfigGeneration want >= 1, got %d", got.ConfigGeneration)
+		}
+	})
+}
+
+func TestOutputGuardSettingsExplicitFalseTriState(t *testing.T) {
+	runOnAllDBDrivers(t, func(t *testing.T, db *DB) {
+		ctx := context.Background()
+
+		disabled := false
+		updated, err := db.UpdateOutputGuardSettings(ctx, OutputGuardSettingsUpdate{
+			Enabled: &disabled,
+		})
+		if err != nil {
+			t.Fatalf("UpdateOutputGuardSettings error = %v", err)
+		}
+		if updated.Enabled == nil || *updated.Enabled != false {
+			t.Fatalf("expected updated Enabled=false, got %v", updated.Enabled)
+		}
+
+		// 重新读取断言显式 false 得到正确保留（不被默认 true 覆盖）
+		readBack, err := db.GetOutputGuardSettings(ctx)
+		if err != nil {
+			t.Fatalf("readBack error = %v", err)
+		}
+		if readBack.Enabled == nil || *readBack.Enabled != false {
+			t.Fatalf("expected readBack Enabled=false, got %v", readBack.Enabled)
+		}
+	})
+}
+
+func TestOutputGuardSettingsGenerationOverflow(t *testing.T) {
+	runOnAllDBDrivers(t, func(t *testing.T, db *DB) {
+		ctx := context.Background()
+		// 人为将 generation 置为 math.MaxInt64
+		if _, err := db.conn.ExecContext(ctx, `
+			INSERT INTO system_settings (id, output_guard_config_generation)
+			VALUES (1, $1)
+			ON CONFLICT (id) DO UPDATE SET output_guard_config_generation = $1
+		`, int64(math.MaxInt64)); err != nil {
+			t.Fatalf("seed max generation: %v", err)
+		}
+
+		toolBytes := int64(65536)
+		_, err := db.UpdateOutputGuardSettings(ctx, OutputGuardSettingsUpdate{
+			MaxToolArgumentBytes: &toolBytes,
+		})
+		if !errors.Is(err, ErrOutputGuardGenerationOverflow) {
+			t.Fatalf("expected ErrOutputGuardGenerationOverflow, got %v", err)
+		}
+	})
+}
+
+func TestOutputGuardSettingsNarrowUpdateNotOverwrittenBySystemSettings(t *testing.T) {
+	runOnAllDBDrivers(t, func(t *testing.T, db *DB) {
+		ctx := context.Background()
+		toolBytes := int64(262144) // 256 KiB
+		disabled := false
+		committed, err := db.UpdateOutputGuardSettings(ctx, OutputGuardSettingsUpdate{
+			Enabled:              &disabled,
+			MaxToolArgumentBytes: &toolBytes,
+		})
+		if err != nil {
+			t.Fatalf("UpdateOutputGuardSettings error = %v", err)
+		}
+
+		// 模拟管理员保存常规设置（老 SystemSettings 全量写）
+		if err := db.UpdateSystemSettings(ctx, &SystemSettings{SiteName: "stale full update"}); err != nil {
+			t.Fatalf("UpdateSystemSettings error = %v", err)
+		}
+
+		// 重新读取 OutputGuardSettings，断言窄更新字段绝不被全量写覆盖
+		got, err := db.GetOutputGuardSettings(ctx)
+		if err != nil {
+			t.Fatalf("GetOutputGuardSettings error = %v", err)
+		}
+		if got.Enabled == nil || *got.Enabled != false {
+			t.Fatalf("Enabled overwritten by UpdateSystemSettings: got %v, want false", got.Enabled)
+		}
+		if got.MaxToolArgumentBytes != committed.MaxToolArgumentBytes {
+			t.Fatalf("MaxToolArgumentBytes overwritten: got %d, want %d", got.MaxToolArgumentBytes, committed.MaxToolArgumentBytes)
+		}
+	})
+}
+
+func TestOutputGuardSettingsConcurrentUpdatesNoDeadlock(t *testing.T) {
+	runOnAllDBDrivers(t, func(t *testing.T, db *DB) {
+		ctx := context.Background()
+		var wg sync.WaitGroup
+		errCh := make(chan error, 10)
+
+		for i := 0; i < 10; i++ {
+			wg.Add(1)
+			go func(idx int) {
+				defer wg.Done()
+				toolBytes := int64(131072 + idx*1024)
+				channelBytes := int64(2097152 + idx*1024)
+				requestBytes := int64(4194304 + idx*1024)
+				_, err := db.UpdateOutputGuardSettings(ctx, OutputGuardSettingsUpdate{
+					MaxToolArgumentBytes: &toolBytes,
+					MaxChannelBytes:      &channelBytes,
+					MaxRequestBytes:      &requestBytes,
+				})
+				if err != nil {
+					errCh <- err
+				}
+			}(i)
+		}
+
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			t.Fatalf("concurrent update failed: %v", err)
+		}
+	})
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./database -run "TestOutputGuardSettings.*"`
+Expected: FAIL with compilation error: undefined: db.GetOutputGuardSettings
+
+- [ ] **Step 3: Write minimal implementation**
+
+修改 `database/sqlite.go` 添加列：
+```go
+// 在 database/sqlite.go 中的 columns 切片中添加：
+{"system_settings", "output_guard_enabled", "INTEGER DEFAULT 1"},
+{"system_settings", "output_guard_max_tool_argument_bytes", "INTEGER NOT NULL DEFAULT 131072"},
+{"system_settings", "output_guard_max_tool_argument_deltas", "INTEGER NOT NULL DEFAULT 4096"},
+{"system_settings", "output_guard_max_channel_bytes", "INTEGER NOT NULL DEFAULT 2097152"},
+{"system_settings", "output_guard_max_request_bytes", "INTEGER NOT NULL DEFAULT 4194304"},
+{"system_settings", "output_guard_config_generation", "INTEGER NOT NULL DEFAULT 1"},
+```
+
+修改 `database/postgres.go` 添加列及隔离 UpdateSystemSettings：
+```go
+// 在 database/postgres.go initPostgresSchema 中添加：
+ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_enabled BOOLEAN DEFAULT TRUE;
+ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_tool_argument_bytes BIGINT NOT NULL DEFAULT 131072;
+ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_tool_argument_deltas INT NOT NULL DEFAULT 4096;
+ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_channel_bytes BIGINT NOT NULL DEFAULT 2097152;
+ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_request_bytes BIGINT NOT NULL DEFAULT 4194304;
+ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_config_generation BIGINT NOT NULL DEFAULT 1;
+
+// 在 database/postgres.go UpdateSystemSettings 的 ON CONFLICT (id) DO UPDATE SET 中：
+// 确保不包含 output_guard_* 字段，使该 6 个字段完全由独立的窄更新函数单独维护，不被老全局设置全量写回覆盖！
+```
+
+新建 `database/output_guard_settings.go`:
+```go
+package database
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"math"
+)
+
+var (
+	ErrInvalidOutputGuardSettings     = errors.New("invalid output guard settings")
+	ErrOutputGuardGenerationOverflow = errors.New("output guard config generation overflow")
+)
+
+type OutputGuardSettings struct {
+	Enabled               *bool `json:"output_guard_enabled"`
+	MaxToolArgumentBytes  int64 `json:"output_guard_max_tool_argument_bytes"`
+	MaxToolArgumentDeltas int   `json:"output_guard_max_tool_argument_deltas"`
+	MaxChannelBytes       int64 `json:"output_guard_max_channel_bytes"`
+	MaxRequestBytes       int64 `json:"output_guard_max_request_bytes"`
+	ConfigGeneration      int64 `json:"output_guard_config_generation"`
+}
+
+type OutputGuardSettingsUpdate struct {
+	Enabled               *bool
+	MaxToolArgumentBytes  *int64
+	MaxToolArgumentDeltas *int
+	MaxChannelBytes       *int64
+	MaxRequestBytes       *int64
+}
+
+func DefaultOutputGuardSettings() OutputGuardSettings {
+	t := true
+	return OutputGuardSettings{
+		Enabled:               &t,
+		MaxToolArgumentBytes:  131072,  // 128 KiB
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152, // 2 MiB
+		MaxRequestBytes:       4194304, // 4 MiB
+		ConfigGeneration:      1,
+	}
+}
+
+func ValidateOutputGuardSettings(s OutputGuardSettings) error {
+	if s.MaxToolArgumentBytes < 16384 || s.MaxToolArgumentBytes > 4194304 {
+		return fmt.Errorf("%w: max_tool_argument_bytes must be 16KiB..4MiB", ErrInvalidOutputGuardSettings)
+	}
+	if s.MaxToolArgumentDeltas < 256 || s.MaxToolArgumentDeltas > 65536 {
+		return fmt.Errorf("%w: max_tool_argument_deltas must be 256..65536", ErrInvalidOutputGuardSettings)
+	}
+	if s.MaxChannelBytes < 131072 || s.MaxChannelBytes > 16777216 {
+		return fmt.Errorf("%w: max_channel_bytes must be 128KiB..16MiB", ErrInvalidOutputGuardSettings)
+	}
+	if s.MaxRequestBytes < 262144 || s.MaxRequestBytes > 67108864 {
+		return fmt.Errorf("%w: max_request_bytes must be 256KiB..64MiB", ErrInvalidOutputGuardSettings)
+	}
+	if s.MaxToolArgumentBytes > s.MaxChannelBytes || s.MaxChannelBytes > s.MaxRequestBytes {
+		return fmt.Errorf("%w: requires tool <= channel <= request bytes", ErrInvalidOutputGuardSettings)
+	}
+	return nil
+}
+
+func (db *DB) outputGuardSettingsSelectQuery(forUpdate bool) string {
+	query := `SELECT output_guard_enabled,
+		COALESCE(output_guard_max_tool_argument_bytes, 131072),
+		COALESCE(output_guard_max_tool_argument_deltas, 4096),
+		COALESCE(output_guard_max_channel_bytes, 2097152),
+		COALESCE(output_guard_max_request_bytes, 4194304),
+		COALESCE(output_guard_config_generation, 1)
+		FROM system_settings WHERE id = 1`
+	if forUpdate && db.driver == "postgres" {
+		query += " FOR UPDATE"
+	}
+	return query
+}
+
+func (db *DB) GetOutputGuardSettings(ctx context.Context) (OutputGuardSettings, error) {
+	settings := DefaultOutputGuardSettings()
+	var enabled sql.NullBool
+	err := db.conn.QueryRowContext(ctx, db.outputGuardSettingsSelectQuery(false)).Scan(
+		&enabled,
+		&settings.MaxToolArgumentBytes,
+		&settings.MaxToolArgumentDeltas,
+		&settings.MaxChannelBytes,
+		&settings.MaxRequestBytes,
+		&settings.ConfigGeneration,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return settings, nil
+	}
+	if err != nil {
+		return OutputGuardSettings{}, err
+	}
+	if enabled.Valid {
+		val := enabled.Bool
+		settings.Enabled = &val
+	}
+	return settings, nil
+}
+
+func (db *DB) UpdateOutputGuardSettings(ctx context.Context, update OutputGuardSettingsUpdate) (OutputGuardSettings, error) {
+	var committed OutputGuardSettings
+
+	operation := func() error {
+		tx, err := db.conn.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// 确保 id=1 存在
+		if _, err := tx.ExecContext(ctx, `INSERT INTO system_settings (id) VALUES (1) ON CONFLICT(id) DO NOTHING`); err != nil {
+			return err
+		}
+
+		current := DefaultOutputGuardSettings()
+		var enabled sql.NullBool
+		err = tx.QueryRowContext(ctx, db.outputGuardSettingsSelectQuery(true)).Scan(
+			&enabled,
+			&current.MaxToolArgumentBytes,
+			&current.MaxToolArgumentDeltas,
+			&current.MaxChannelBytes,
+			&current.MaxRequestBytes,
+			&current.ConfigGeneration,
+		)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		if enabled.Valid {
+			val := enabled.Bool
+			current.Enabled = &val
+		}
+
+		next := current
+		if update.Enabled != nil {
+			val := *update.Enabled
+			next.Enabled = &val
+		}
+		if update.MaxToolArgumentBytes != nil {
+			next.MaxToolArgumentBytes = *update.MaxToolArgumentBytes
+		}
+		if update.MaxToolArgumentDeltas != nil {
+			next.MaxToolArgumentDeltas = *update.MaxToolArgumentDeltas
+		}
+		if update.MaxChannelBytes != nil {
+			next.MaxChannelBytes = *update.MaxChannelBytes
+		}
+		if update.MaxRequestBytes != nil {
+			next.MaxRequestBytes = *update.MaxRequestBytes
+		}
+
+		// Generation 溢出保护
+		if current.ConfigGeneration == math.MaxInt64 {
+			return ErrOutputGuardGenerationOverflow
+		}
+		next.ConfigGeneration++
+
+		if err := ValidateOutputGuardSettings(next); err != nil {
+			return err
+		}
+
+		updateQuery := `UPDATE system_settings SET
+			output_guard_enabled = $1,
+			output_guard_max_tool_argument_bytes = $2,
+			output_guard_max_tool_argument_deltas = $3,
+			output_guard_max_channel_bytes = $4,
+			output_guard_max_request_bytes = $5,
+			output_guard_config_generation = $6
+			WHERE id = 1`
+
+		var enabledVal any
+		if next.Enabled != nil {
+			enabledVal = *next.Enabled
+		} else {
+			enabledVal = true
+		}
+
+		if _, err := tx.ExecContext(ctx, updateQuery,
+			enabledVal,
+			next.MaxToolArgumentBytes,
+			next.MaxToolArgumentDeltas,
+			next.MaxChannelBytes,
+			next.MaxRequestBytes,
+			next.ConfigGeneration,
+		); err != nil {
+			return err
+		}
+
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		committed = next
+		return nil
+	}
+
+	if db.isSQLite() {
+		if err := db.withSQLiteWriteLock(ctx, operation); err != nil {
+			return OutputGuardSettings{}, err
+		}
+	} else {
+		if err := operation(); err != nil {
+			return OutputGuardSettings{}, err
+		}
+	}
+
+	return committed, nil
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./database -run "TestOutputGuardSettings.*"`
+Expected: PASS ok github.com/codex2api/database
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add database/output_guard_settings.go database/output_guard_settings_test.go database/sqlite.go database/postgres.go
+git commit -m "feat(database): add output guard settings table migration and tri-state persistence"
+```

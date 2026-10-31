@@ -1,0 +1,1025 @@
+
+### Task 9: 模型输出失控防护强制终止协调与下游通知原语
+
+**Files:**
+- Modify: `proxy/handler.go:2343-2375, 2419-2475`（扩展 `streamOutcome` 字段 `guardTripped` 与 `guardReason`，并提供防护状态叠加原语 `OverlayGuardOutcome`）
+- Modify: `proxy/stream_flush_writer.go:23-45, 403-465`（为 `streamFlushWriter` 增加 `DiscardBuffered()` 与 `aborted` 标记，确保终止后 `Flush`/`Finalize` 绝不释放残留字节）
+- Create: `proxy/outputguard_cancel.go`（定义终止协调器 `GuardTerminationCoordinator`，负责原子标记 `tripped`、冻结首 reason、先于写锁主动 Cancel 上游与 Close body、丢弃在途缓冲）
+- Create: `proxy/outputguard_cancel_test.go`（测试上游立即取消与关闭响应体先于写锁、多次并发触发原子幂等、在途缓冲彻底丢弃、typed outcome 不被覆盖）
+- Create: `proxy/outputguard_downstream.go`（定义下游通知原语 `SendDownstreamGuardTerminalHTTP` 与 `SendDownstreamGuardTerminalWS`、有界写超时注入 `ApplyDownstreamWriteDeadline`、多协议终态 Envelope 渲染）
+- Create: `proxy/outputguard_downstream_test.go`（测试 TryLock 争用非阻塞放弃、锁内 5s deadline 写入、底层不支持 deadline 安全退出不执行无界写、Responses/Chat/Anthropic/Gemini/WS 终态结构断言）
+
+**Interfaces:**
+- Consumes:
+  - `security/outputguard` (来自 Task 1~3, 定义于 `security/outputguard/guard.go`):
+    ```go
+    type Config struct {
+        Enabled               bool
+        MaxToolArgumentBytes  int64
+        MaxToolArgumentDeltas int
+        MaxChannelBytes       int64
+        MaxRequestBytes       int64
+    }
+    type RequestGuard struct { ... }
+    func NewRequestGuard(cfg Config) *RequestGuard
+    func (g *RequestGuard) IsTripped() bool
+    func (g *RequestGuard) TrippedReason() string
+    ```
+  - `api` 统一错误定义 (定义于 `api/errors.go`):
+    ```go
+    type ErrorCode string
+    const (
+        ErrCodeServerError   ErrorCode = "server_error"
+        ErrCodeUpstreamError ErrorCode = "upstream_error"
+    )
+    type ErrorType string
+    const (
+        ErrorTypeServer   ErrorType = "server_error"
+        ErrorTypeUpstream ErrorType = "upstream_error"
+    )
+    type APIError struct {
+        Code    ErrorCode `json:"code"`
+        Message string    `json:"message"`
+        Type    ErrorType `json:"type"`
+    }
+    func NewAPIError(code ErrorCode, message string, errType ErrorType) *APIError
+    ```
+  - `github.com/gorilla/websocket` (go.mod)
+  - `github.com/gin-gonic/gin` (go.mod)
+
+- Produces (供 Task 10 及各协议 Handler 消费的明确签名):
+  ```go
+  package proxy
+
+  import (
+      "context"
+      "io"
+      "net/http"
+      "sync"
+      "time"
+
+      "github.com/codex2api/security/outputguard"
+      "github.com/gin-gonic/gin"
+      "github.com/gorilla/websocket"
+  )
+
+  const (
+      GuardTriggeredPublicCode    = "model_output_guard_triggered"
+      GuardTriggeredPublicMessage = "Upstream model output exceeded the gateway safety policy; generation was stopped."
+      GuardWriteDeadlineTimeout   = 5 * time.Second
+  )
+
+  // streamOutcome 扩展字段（用于在代理内部全链路传递 Guard 命中状态与类型化原因）
+  type streamOutcome struct {
+      logStatusCode     int
+      failureKind       string
+      failureMessage    string
+      failurePayload    []byte
+      penalize          bool
+      capacityShed      bool
+      verifyAccountAuth bool
+      requestScoped     bool
+      modelUnsupported  bool
+      terminalLocal     bool
+      guardTripped      bool   // 标记输出失控防护触发
+      guardReason       string // 冻结的内部 reason：repetition, tool_argument_bytes 等
+  }
+
+  // OverlayGuardOutcome 确保 typed guard outcome 具备绝对优先级，绝不被 ctxErr (499) 或 readErr (598) 覆盖
+  func OverlayGuardOutcome(outcome streamOutcome, guard *outputguard.RequestGuard) streamOutcome
+
+  // GuardTerminationCoordinator 终止协调器：原子标记 tripped，主动 cancel 上游 context（跳过 5s drain），
+  // 关闭 HTTP 响应体，清理本地在途缓冲
+  type GuardTerminationCoordinator struct {
+      guard          *outputguard.RequestGuard
+      cancelUpstream context.CancelFunc
+      body           io.Closer
+      once           sync.Once
+      trippedOutcome streamOutcome
+  }
+
+  func NewGuardTerminationCoordinator(guard *outputguard.RequestGuard, cancelUpstream context.CancelFunc, body io.Closer) *GuardTerminationCoordinator
+  func (c *GuardTerminationCoordinator) HandleTripped(reason string, discardBuffers ...func()) streamOutcome
+
+  // DiscardBuffered 清空 streamFlushWriter 内存缓冲与安全窗，确保后续 Finalize 绝不再释放异常内容
+  func (w *streamFlushWriter) DiscardBuffered()
+
+  // ApplyDownstreamWriteDeadline 持锁内统一为 ResponseWriter 施加 5s 有界写超时；遇到 ErrNotSupported 显式返回
+  func ApplyDownstreamWriteDeadline(w http.ResponseWriter, timeout time.Duration) error
+
+  // 下游尽力交付终态写入原语
+  func SendDownstreamGuardTerminalHTTP(c *gin.Context, mu *sync.Mutex, clientGone *bool, protocol string, reason string) error
+  func SendDownstreamGuardTerminalWS(conn *websocket.Conn, streamID string, reason string) error
+
+  // FormatGuardTerminalEnvelope 渲染各协议标准错误 envelope（用于单元测试与下游写入）
+  func FormatGuardTerminalEnvelope(protocol string, streamID string) ([]byte, int, error)
+  ```
+
+---
+
+#### 9a. 终止协调器、上游立即取消与本地缓冲 Discard 原语
+
+- [ ] **Step 1: Write failing test for GuardTerminationCoordinator and buffer discard**
+
+```go
+// proxy/outputguard_cancel_test.go
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"net/http"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/codex2api/security/outputguard"
+)
+
+type recordingCloser struct {
+	mu       sync.Mutex
+	closed   bool
+	closedAt time.Time
+}
+
+func (r *recordingCloser) Close() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.closed = true
+	r.closedAt = time.Now()
+	return nil
+}
+
+func (r *recordingCloser) IsClosed() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closed
+}
+
+// 1. 验证 guard 命中时，上游 cancel 和 body close 必须先于写锁争用执行
+func TestGuardTerminationPrecedesDownstreamLock(t *testing.T) {
+	cfg := outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  128 * 1024,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2 * 1024 * 1024,
+		MaxRequestBytes:       4 * 1024 * 1024,
+	}
+	rg := outputguard.NewRequestGuard(cfg)
+
+	upstreamCtx, upstreamCancel := context.WithCancel(context.Background())
+	defer upstreamCancel()
+
+	closer := &recordingCloser{}
+	coordinator := NewGuardTerminationCoordinator(rg, upstreamCancel, closer)
+
+	var downstreamMu sync.Mutex
+	downstreamMu.Lock() // 模拟下游写锁已被占用
+
+	var cancelTime time.Time
+	var lockAttemptTime time.Time
+
+	// 触发 guard 终止
+	outcome := coordinator.HandleTripped("repetition", func() {
+		// 模拟清空本地缓冲
+	})
+
+	// 断言 1: 上游 context 已经立即 canceled
+	select {
+	case <-upstreamCtx.Done():
+		cancelTime = time.Now()
+	default:
+		t.Fatalf("expected upstream context to be canceled immediately")
+	}
+
+	// 断言 2: HTTP body 已经关闭
+	if !closer.IsClosed() {
+		t.Fatalf("expected upstream body to be closed immediately")
+	}
+
+	// 断言 3: outcome 为 model_output_guard，且状态码为 502，不计入账号惩罚
+	if !outcome.guardTripped || outcome.guardReason != "repetition" {
+		t.Fatalf("unexpected guard outcome: %+v", outcome)
+	}
+	if outcome.logStatusCode != http.StatusBadGateway {
+		t.Fatalf("expected logStatusCode 502, got %d", outcome.logStatusCode)
+	}
+	if outcome.penalize {
+		t.Fatalf("expected penalize == false for guard failure")
+	}
+
+	// 模拟后续下游通知尝试获取锁
+	lockAttemptTime = time.Now()
+	if !cancelTime.IsZero() && cancelTime.After(lockAttemptTime) {
+		t.Fatalf("upstream cancellation must precede downstream lock attempt")
+	}
+	downstreamMu.Unlock()
+}
+
+// 2. 验证并发多次调用 HandleTripped 具备原子幂等性，上游 cancel/close 仅调用一次，且 reason 保持首个冻结
+func TestGuardTerminationIdempotentReasonFreeze(t *testing.T) {
+	cfg := outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  128 * 1024,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2 * 1024 * 1024,
+		MaxRequestBytes:       4 * 1024 * 1024,
+	}
+	rg := outputguard.NewRequestGuard(cfg)
+
+	cancelCalls := int32(0)
+	upstreamCancel := func() {
+		atomic.AddInt32(&cancelCalls, 1)
+	}
+	closer := &recordingCloser{}
+	coordinator := NewGuardTerminationCoordinator(rg, upstreamCancel, closer)
+
+	var discardCalls int32
+	var wg sync.WaitGroup
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			reason := "repetition"
+			if idx > 0 {
+				reason = "channel_bytes"
+			}
+			out := coordinator.HandleTripped(reason, func() {
+				atomic.AddInt32(&discardCalls, 1)
+			})
+			if out.guardReason != "repetition" {
+				t.Errorf("expected frozen reason repetition, got %s", out.guardReason)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+
+	if calls := atomic.LoadInt32(&cancelCalls); calls != 1 {
+		t.Fatalf("expected cancelUpstream to be called exactly once, got %d", calls)
+	}
+	if !closer.IsClosed() {
+		t.Fatalf("expected body to be closed")
+	}
+	if atomic.LoadInt32(&discardCalls) == 0 {
+		t.Fatalf("expected discard callbacks to be executed")
+	}
+}
+
+// 3. 验证 streamFlushWriter.DiscardBuffered 使随后的 Finalize 绝不释放任何异常数据
+func TestStreamFlushWriterDiscardBuffered(t *testing.T) {
+	var sink bytes.Buffer
+	w := newStreamFlushWriter(&sink, nil)
+
+	// 写入尚未刷新的 SSE 事件碎片与数据
+	_ = w.WriteBytes([]byte("data: partial runaway malicious repetition\n\n"))
+	if sink.Len() > 0 {
+		t.Fatalf("buffer should not flush prematurely")
+	}
+
+	// 命中 Guard，调用 DiscardBuffered 清空在途缓冲
+	w.DiscardBuffered()
+
+	// 模拟外层 defer w.Finalize()
+	err := w.Finalize()
+	if err != nil {
+		t.Fatalf("Finalize returned error: %v", err)
+	}
+
+	// 断言：sink 绝无任何字节写出！
+	if sink.Len() != 0 {
+		t.Fatalf("expected sink to be empty after DiscardBuffered and Finalize, got %d bytes: %q", sink.Len(), sink.String())
+	}
+}
+
+// 4. 验证 OverlayGuardOutcome 不会被下游取消 (499) 或上游读断流 (598) 覆盖
+func TestOverlayGuardOutcomePreservesIdentity(t *testing.T) {
+	cfg := outputguard.Config{Enabled: true, MaxRequestBytes: 100}
+	rg := outputguard.NewRequestGuard(cfg)
+	_ = rg.ObserveAppend("c1", "", outputguard.KindText, bytes.Repeat([]byte("A"), 200)) // 触发 request_bytes
+
+	if !rg.IsTripped() {
+		t.Fatalf("expected guard to be tripped")
+	}
+
+	// 模拟网络层产生的下游取消错误
+	ctxErr := context.Canceled
+	readErr := errors.New("read tcp: connection reset by peer")
+	rawOutcome := classifyStreamOutcome(ctxErr, readErr, nil, false)
+
+	// 若未叠加 guard，默认会被归类为 499 客户端断开
+	if rawOutcome.logStatusCode != logStatusClientClosed {
+		t.Fatalf("raw outcome should be client closed (499), got %d", rawOutcome.logStatusCode)
+	}
+
+	// 经过 OverlayGuardOutcome 叠加
+	finalOutcome := OverlayGuardOutcome(rawOutcome, rg)
+
+	if !finalOutcome.guardTripped {
+		t.Fatalf("expected guardTripped == true")
+	}
+	if finalOutcome.guardReason != "request_bytes" {
+		t.Fatalf("expected guardReason == request_bytes, got %s", finalOutcome.guardReason)
+	}
+	if finalOutcome.logStatusCode != http.StatusBadGateway {
+		t.Fatalf("expected logStatusCode == 502, got %d", finalOutcome.logStatusCode)
+	}
+	if finalOutcome.penalize {
+		t.Fatalf("expected penalize == false")
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestGuardTerminationPrecedesDownstreamLock|TestGuardTerminationIdempotentReasonFreeze|TestStreamFlushWriterDiscardBuffered|TestOverlayGuardOutcomePreservesIdentity"`
+Expected: FAIL with compilation errors: `NewGuardTerminationCoordinator undefined`, `w.DiscardBuffered undefined`, `OverlayGuardOutcome undefined`.
+
+- [ ] **Step 3: Implement minimal code for coordinator and buffer discard**
+
+1. 修改 `proxy/handler.go` 增补 `streamOutcome` 字段与 `OverlayGuardOutcome`：
+
+```go
+// proxy/handler.go:2343-2375
+type streamOutcome struct {
+	logStatusCode     int
+	failureKind       string
+	failureMessage    string
+	failurePayload    []byte
+	penalize          bool
+	capacityShed      bool
+	verifyAccountAuth bool
+	requestScoped     bool
+	modelUnsupported  bool
+	terminalLocal     bool
+	guardTripped      bool   // 标记模型输出失控防护触发
+	guardReason       string // 冻结的内部触发原因
+}
+
+// OverlayGuardOutcome 检查 RequestGuard 是否已触发；若已触发，无条件提升为 Guard 终态，消除 499/598 覆盖
+func OverlayGuardOutcome(outcome streamOutcome, guard *outputguard.RequestGuard) streamOutcome {
+	if guard == nil || !guard.IsTripped() {
+		return outcome
+	}
+	outcome.guardTripped = true
+	outcome.guardReason = guard.TrippedReason()
+	outcome.logStatusCode = http.StatusBadGateway
+	outcome.failureKind = "model_output_guard"
+	outcome.failureMessage = GuardTriggeredPublicMessage
+	outcome.failurePayload = nil // 杜绝模型内部异常 payload 泄漏进日志或回放
+	outcome.penalize = false     // 输出异常不是账号故障，严禁惩罚账号
+	outcome.terminalLocal = true
+	return outcome
+}
+```
+
+2. 修改 `proxy/stream_flush_writer.go` 增加 `DiscardBuffered` 支持：
+
+```go
+// proxy/stream_flush_writer.go
+type streamFlushWriter struct {
+	writer        io.Writer
+	flusher       http.Flusher
+	policy        string
+	interval      time.Duration
+	lastFlush     time.Time
+	buffer        bytes.Buffer
+	outputScanner *promptfilter.OutputScanner
+	scanCarry     []byte
+	writtenBytes  atomic.Int64
+	diag          *streamPhaseDiagnostics
+	aborted       bool // 新增：标记流已废弃，后续所有 Flush/Finalize 均为 no-op
+}
+
+// DiscardBuffered 丢弃所有未落地的在途数据与安全窗，并阻止后续 Finalize 写入
+func (w *streamFlushWriter) DiscardBuffered() {
+	if w == nil {
+		return
+	}
+	w.buffer.Reset()
+	w.scanCarry = nil
+	w.outputScanner = nil
+	w.aborted = true
+}
+
+func (w *streamFlushWriter) Flush() error {
+	if w == nil || w.aborted {
+		return nil
+	}
+	...
+}
+
+func (w *streamFlushWriter) Finalize() error {
+	if w == nil || w.aborted {
+		return nil
+	}
+	...
+}
+```
+
+3. 创建 `proxy/outputguard_cancel.go`：
+
+```go
+// proxy/outputguard_cancel.go
+package proxy
+
+import (
+	"context"
+	"io"
+	"net/http"
+	"sync"
+
+	"github.com/codex2api/security/outputguard"
+)
+
+// GuardTerminationCoordinator 协调模型失控切断流程，严格保证前置 Cancel 与资源回收
+type GuardTerminationCoordinator struct {
+	guard          *outputguard.RequestGuard
+	cancelUpstream context.CancelFunc
+	body           io.Closer
+	once           sync.Once
+	trippedOutcome streamOutcome
+}
+
+// NewGuardTerminationCoordinator 构造终止协调器实例
+func NewGuardTerminationCoordinator(guard *outputguard.RequestGuard, cancelUpstream context.CancelFunc, body io.Closer) *GuardTerminationCoordinator {
+	return &GuardTerminationCoordinator{
+		guard:          guard,
+		cancelUpstream: cancelUpstream,
+		body:           body,
+	}
+}
+
+// HandleTripped 在 guard 命中时原子调用：
+// 1. 冻结首 reason 并生成统一 streamOutcome；
+// 2. 先于任何写锁立即主动 Cancel 上游 context 并关闭响应体（跳过 5s drain）；
+// 3. 执行所有注册的本地缓冲清空回调（如 DiscardBuffered、collector 清空、provenance 清空）；
+// 4. 并发调用保证幂等，仅首次执行实际清理。
+func (c *GuardTerminationCoordinator) HandleTripped(reason string, discardBuffers ...func()) streamOutcome {
+	if c == nil {
+		return streamOutcome{
+			logStatusCode:  http.StatusBadGateway,
+			failureKind:    "model_output_guard",
+			failureMessage: GuardTriggeredPublicMessage,
+			guardTripped:   true,
+			guardReason:    reason,
+			penalize:       false,
+			terminalLocal:  true,
+		}
+	}
+
+	c.once.Do(func() {
+		// 1. 立即主动取消上游 context（绝不等待下游锁，跳过 5s usage drain）
+		if c.cancelUpstream != nil {
+			c.cancelUpstream()
+		}
+
+		// 2. 立即关闭上游 HTTP 响应体
+		if c.body != nil {
+			_ = c.body.Close()
+		}
+
+		// 3. 丢弃本地所有在途缓冲
+		for _, discard := range discardBuffers {
+			if discard != nil {
+				discard()
+			}
+		}
+
+		// 4. 确定冻结的内部 reason
+		frozenReason := reason
+		if c.guard != nil && c.guard.IsTripped() && c.guard.TrippedReason() != "" {
+			frozenReason = c.guard.TrippedReason()
+		}
+
+		c.trippedOutcome = streamOutcome{
+			logStatusCode:  http.StatusBadGateway,
+			failureKind:    "model_output_guard",
+			failureMessage: GuardTriggeredPublicMessage,
+			guardTripped:   true,
+			guardReason:    frozenReason,
+			penalize:       false,
+			terminalLocal:  true,
+		}
+	})
+
+	return c.trippedOutcome
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v -race ./proxy -run "TestGuardTerminationPrecedesDownstreamLock|TestGuardTerminationIdempotentReasonFreeze|TestStreamFlushWriterDiscardBuffered|TestOverlayGuardOutcomePreservesIdentity"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add proxy/handler.go proxy/stream_flush_writer.go proxy/outputguard_cancel.go proxy/outputguard_cancel_test.go
+git commit -m "feat(proxy): add guard termination coordinator and buffer discard primitives"
+```
+
+---
+
+#### 9b. 下游安全通知写入、TryLock/Deadline 控制与多协议终态
+
+- [ ] **Step 1: Write failing test for downstream terminal writer and deadline hooks**
+
+```go
+// proxy/outputguard_downstream_test.go
+package proxy
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/codex2api/api"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
+)
+
+// 1. 验证 TryLock 锁争用时非阻塞安全放弃，不产生孤儿协程且标记 clientGone
+func TestSendDownstreamGuardTerminalHTTPTryLockContention(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request = req
+
+	var downstreamMu sync.Mutex
+	clientGone := false
+
+	// 先行持有下游写锁（模拟慢写或 keepalive ticker 正在占用）
+	downstreamMu.Lock()
+
+	lockHoldReleased := make(chan struct{})
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		downstreamMu.Unlock()
+		close(lockHoldReleased)
+	}()
+
+	// 在锁被占用的情况下调用 SendDownstreamGuardTerminalHTTP：必须立即非阻塞返回！
+	err := SendDownstreamGuardTerminalHTTP(c, &downstreamMu, &clientGone, "responses", "repetition")
+	if err == nil {
+		t.Fatalf("expected non-nil error when lock is contended")
+	}
+	if !clientGone {
+		t.Fatalf("expected clientGone to be set to true on lock contention")
+	}
+
+	// 确认 recorder 中绝无任何字节写出（锁被占有时不执行无界等待写）
+	if w.Body.Len() != 0 {
+		t.Fatalf("expected no body written on lock contention, got %s", w.Body.String())
+	}
+
+	<-lockHoldReleased
+}
+
+// 自定义 Mock ResponseWriter，模拟不支持 SetWriteDeadline (ErrNotSupported)
+type unsupportedDeadlineWriter struct {
+	http.ResponseWriter
+	writeCalled bool
+}
+
+func (u *unsupportedDeadlineWriter) Write(b []byte) (int, error) {
+	u.writeCalled = true
+	return u.ResponseWriter.Write(b)
+}
+
+// 2. 验证底层不支持 ResponseController WriteDeadline 时安全退出，不进行潜在阻塞写
+func TestSendDownstreamGuardTerminalHTTPErrNotSupported(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	rec := httptest.NewRecorder()
+	unsupported := &unsupportedDeadlineWriter{ResponseWriter: rec}
+
+	c, _ := gin.CreateTestContext(unsupported)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request = req
+
+	// 预先标记已写入头（已 commit 状态）
+	rec.WriteHeader(http.StatusOK)
+
+	var downstreamMu sync.Mutex
+	clientGone := false
+
+	err := SendDownstreamGuardTerminalHTTP(c, &downstreamMu, &clientGone, "responses", "repetition")
+	if err == nil {
+		t.Fatalf("expected error when deadline is unsupported on raw mock writer")
+	}
+	if !clientGone {
+		t.Fatalf("expected clientGone == true when deadline is unsupported")
+	}
+	if unsupported.writeCalled {
+		t.Fatalf("expected no write when deadline is unsupported")
+	}
+}
+
+// 3. 验证 HTTP 尚未提交头时返回 502 及公开 JSON 错误，不泄露内部 reason
+func TestSendDownstreamGuardTerminalHTTPUncommitted(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	c.Request = req
+
+	var downstreamMu sync.Mutex
+	clientGone := false
+
+	err := SendDownstreamGuardTerminalHTTP(c, &downstreamMu, &clientGone, "responses", "repetition")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if w.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502, got %d", w.Code)
+	}
+
+	body := w.Body.String()
+	// 断言公开错误码
+	if !strings.Contains(body, GuardTriggeredPublicCode) {
+		t.Fatalf("expected code %s in body: %s", GuardTriggeredPublicCode, body)
+	}
+	// 断言绝不泄露内部 reason "repetition"
+	if strings.Contains(body, "repetition") {
+		t.Fatalf("body leaked internal reason 'repetition': %s", body)
+	}
+}
+
+// 4. 验证各协议流式已提交时生成的终态 Envelope 格式
+func TestFormatGuardTerminalEnvelope(t *testing.T) {
+	// 4a. Responses SSE -> response.failed，无 response.completed
+	respData, status, err := FormatGuardTerminalEnvelope("responses", "")
+	if err != nil {
+		t.Fatalf("responses envelope error: %v", err)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("responses stream status want 200, got %d", status)
+	}
+	respStr := string(respData)
+	if !strings.Contains(respStr, `"type":"response.failed"`) || !strings.Contains(respStr, GuardTriggeredPublicCode) {
+		t.Fatalf("responses envelope invalid: %s", respStr)
+	}
+	if strings.Contains(respStr, "response.completed") {
+		t.Fatalf("responses envelope must not contain response.completed")
+	}
+
+	// 4b. Chat SSE -> error envelope，严禁 [DONE]
+	chatData, _, err := FormatGuardTerminalEnvelope("chat", "")
+	if err != nil {
+		t.Fatalf("chat envelope error: %v", err)
+	}
+	chatStr := string(chatData)
+	if !strings.Contains(chatStr, GuardTriggeredPublicCode) || !strings.Contains(chatStr, `"error":{`) {
+		t.Fatalf("chat envelope invalid: %s", chatStr)
+	}
+	if strings.Contains(chatStr, "[DONE]") {
+		t.Fatalf("chat envelope must not contain [DONE]")
+	}
+
+	// 4c. Anthropic SSE -> event: error，严禁 message_stop
+	anthropicData, _, err := FormatGuardTerminalEnvelope("anthropic", "")
+	if err != nil {
+		t.Fatalf("anthropic envelope error: %v", err)
+	}
+	anthropicStr := string(anthropicData)
+	if !strings.Contains(anthropicStr, "event: error\n") || !strings.Contains(anthropicStr, `"type":"error"`) {
+		t.Fatalf("anthropic envelope invalid: %s", anthropicStr)
+	}
+	if strings.Contains(anthropicStr, "message_stop") {
+		t.Fatalf("anthropic envelope must not contain message_stop")
+	}
+
+	// 4d. Gemini Native -> 裸 JSON，无 data: 前缀
+	geminiData, _, err := FormatGuardTerminalEnvelope("gemini", "")
+	if err != nil {
+		t.Fatalf("gemini envelope error: %v", err)
+	}
+	geminiStr := string(geminiData)
+	if strings.HasPrefix(geminiStr, "data:") {
+		t.Fatalf("gemini envelope must be bare JSON without data: prefix, got: %s", geminiStr)
+	}
+	if !strings.Contains(geminiStr, `"status":"UNAVAILABLE"`) || !strings.Contains(geminiStr, `"code":502`) {
+		t.Fatalf("gemini envelope invalid: %s", geminiStr)
+	}
+
+	// 4e. WebSocket -> 带 stream_id 的 error 帧
+	wsData, _, err := FormatGuardTerminalEnvelope("websocket", "stream_xyz")
+	if err != nil {
+		t.Fatalf("ws envelope error: %v", err)
+	}
+	wsStr := string(wsData)
+	if !strings.Contains(wsStr, `"stream_id":"stream_xyz"`) || !strings.Contains(wsStr, GuardTriggeredPublicCode) {
+		t.Fatalf("ws envelope invalid: %s", wsStr)
+	}
+}
+
+// 5. 验证 WebSocket 下游失败写入与连接安全关闭
+func TestSendDownstreamGuardTerminalWSSuccess(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{CheckOrigin: func(r *http.Request) bool { return true }}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		// 调用 SendDownstreamGuardTerminalWS 写入流错误帧
+		_ = SendDownstreamGuardTerminalWS(conn, "turn_001", "repetition")
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial error: %v", err)
+	}
+	defer clientConn.Close()
+
+	_, msg, err := clientConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read error: %v", err)
+	}
+
+	parsed := gjson.ParseBytes(msg)
+	if parsed.Get("type").String() != "error" || parsed.Get("stream_id").String() != "turn_001" {
+		t.Fatalf("unexpected ws frame: %s", string(msg))
+	}
+	if parsed.Get("error.code").String() != GuardTriggeredPublicCode {
+		t.Fatalf("expected code %s, got %s", GuardTriggeredPublicCode, parsed.Get("error.code").String())
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestSendDownstreamGuardTerminalHTTP.*|TestFormatGuardTerminalEnvelope|TestSendDownstreamGuardTerminalWSSuccess"`
+Expected: FAIL with compilation errors: `SendDownstreamGuardTerminalHTTP undefined`, `FormatGuardTerminalEnvelope undefined`.
+
+- [ ] **Step 3: Implement minimal code for downstream terminal writer**
+
+创建 `proxy/outputguard_downstream.go`：
+
+```go
+// proxy/outputguard_downstream.go
+package proxy
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/codex2api/api"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+)
+
+const (
+	GuardTriggeredPublicCode    = "model_output_guard_triggered"
+	GuardTriggeredPublicMessage = "Upstream model output exceeded the gateway safety policy; generation was stopped."
+	GuardWriteDeadlineTimeout   = 5 * time.Second
+)
+
+// ApplyDownstreamWriteDeadline 使用 Go 1.20+ http.NewResponseController 施加有界写超时；
+// 若底层不支持，返回 http.ErrNotSupported
+func ApplyDownstreamWriteDeadline(w http.ResponseWriter, timeout time.Duration) error {
+	if w == nil {
+		return errors.New("nil response writer")
+	}
+	rc := http.NewResponseController(w)
+	if rc == nil {
+		return http.ErrNotSupported
+	}
+	if timeout <= 0 {
+		return rc.SetWriteDeadline(time.Time{})
+	}
+	return rc.SetWriteDeadline(time.Now().Add(timeout))
+}
+
+// FormatGuardTerminalEnvelope 根据协议格式化标准终态错误帧；脱敏输出，绝不回显内部 reason 或模型 payload
+func FormatGuardTerminalEnvelope(protocol string, streamID string) ([]byte, int, error) {
+	normProto := strings.ToLower(strings.TrimSpace(protocol))
+	switch normProto {
+	case "responses":
+		payload, err := json.Marshal(gin.H{
+			"type": "response.failed",
+			"response": gin.H{
+				"created_at": time.Now().Unix(),
+				"status":     "failed",
+				"error": gin.H{
+					"message": GuardTriggeredPublicMessage,
+					"type":    api.ErrorTypeUpstream,
+					"code":    GuardTriggeredPublicCode,
+				},
+			},
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return []byte("data: " + string(payload) + "\n\n"), http.StatusOK, nil
+
+	case "chat":
+		payload, err := json.Marshal(gin.H{
+			"error": gin.H{
+				"message": GuardTriggeredPublicMessage,
+				"type":    api.ErrorTypeUpstream,
+				"code":    GuardTriggeredPublicCode,
+			},
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return []byte("data: " + string(payload) + "\n\n"), http.StatusOK, nil
+
+	case "anthropic":
+		payload, err := json.Marshal(gin.H{
+			"type": "error",
+			"error": gin.H{
+				"type":    "api_error",
+				"message": GuardTriggeredPublicMessage,
+			},
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return []byte("event: error\ndata: " + string(payload) + "\n\n"), http.StatusOK, nil
+
+	case "gemini":
+		// Native Gemini SDK 约定：流式末尾输出裸 JSON 错误（无 data: 前缀）
+		payload, err := json.Marshal(gin.H{
+			"error": gin.H{
+				"code":    http.StatusBadGateway,
+				"message": GuardTriggeredPublicMessage,
+				"status":  "UNAVAILABLE",
+			},
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return payload, http.StatusOK, nil
+
+	case "websocket":
+		payload, err := json.Marshal(struct {
+			Type     string        `json:"type"`
+			StreamID string        `json:"stream_id,omitempty"`
+			Status   int           `json:"status"`
+			Error    *api.APIError `json:"error"`
+		}{
+			Type:     "error",
+			StreamID: streamID,
+			Status:   http.StatusBadGateway,
+			Error:    api.NewAPIError(GuardTriggeredPublicCode, GuardTriggeredPublicMessage, api.ErrorTypeUpstream),
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return payload, http.StatusOK, nil
+
+	default:
+		// 通用 HTTP 502 JSON
+		payload, err := json.Marshal(gin.H{
+			"error": gin.H{
+				"message": GuardTriggeredPublicMessage,
+				"type":    api.ErrorTypeUpstream,
+				"code":    GuardTriggeredPublicCode,
+			},
+		})
+		if err != nil {
+			return nil, 0, err
+		}
+		return payload, http.StatusBadGateway, nil
+	}
+}
+
+// SendDownstreamGuardTerminalHTTP 向下游 HTTP 连接尽力写入 Guard 终态错误帧：
+// 1. 若尚未提交 HTTP 头，直接以 502 返回标准 JSON 错误；
+// 2. 若已提交流式头，使用 downstreamMu.TryLock() 尝试非阻塞获取锁；
+//    - 若获取失败（锁争用），立即放弃写入并标记 clientGone = true，绝不引入孤儿 goroutine 挂死；
+// 3. 持锁后调用 ApplyDownstreamWriteDeadline 施加 5s 写入超时；
+//    - 若底层返回 ErrNotSupported 或已断开，立即安全退出放弃写帧，标记 clientGone = true；
+// 4. 写入对应协议的终态帧并调用 Flush。
+func SendDownstreamGuardTerminalHTTP(c *gin.Context, mu *sync.Mutex, clientGone *bool, protocol string, reason string) error {
+	if c == nil || c.Writer == nil {
+		if clientGone != nil {
+			*clientGone = true
+		}
+		return errors.New("nil context or writer")
+	}
+
+	// 1. 未提交头的主路径：直接返回 502 JSON
+	if !c.Writer.Written() {
+		c.Header("Content-Type", "application/json; charset=utf-8")
+		c.JSON(http.StatusBadGateway, gin.H{
+			"error": gin.H{
+				"message": GuardTriggeredPublicMessage,
+				"type":    api.ErrorTypeUpstream,
+				"code":    GuardTriggeredPublicCode,
+			},
+		})
+		if clientGone != nil {
+			*clientGone = true
+		}
+		return nil
+	}
+
+	// 2. 已开始流式写入：有界非阻塞锁获取
+	if mu != nil {
+		if !mu.TryLock() {
+			// 锁被保活 ticker 或写协程占用，立即放弃尽力交付，标记 clientGone 安全退出
+			if clientGone != nil {
+				*clientGone = true
+			}
+			return errors.New("downstream write lock busy; dropped guard terminal notification")
+		}
+		defer mu.Unlock()
+	}
+
+	if c.Request != nil && c.Request.Context().Err() != nil {
+		if clientGone != nil {
+			*clientGone = true
+		}
+		return c.Request.Context().Err()
+	}
+
+	// 3. 持锁内设置 5 秒硬超时
+	if err := ApplyDownstreamWriteDeadline(c.Writer, GuardWriteDeadlineTimeout); err != nil {
+		// 底层不支持 SetWriteDeadline（如测试 mock 或部分反代），严禁执行无界阻塞写
+		if clientGone != nil {
+			*clientGone = true
+		}
+		return fmt.Errorf("set write deadline failed (%w); safely dropped write", err)
+	}
+	defer func() {
+		_ = ApplyDownstreamWriteDeadline(c.Writer, 0) // 清除超时
+	}()
+
+	// 4. 格式化并写入协议终态
+	envelope, _, err := FormatGuardTerminalEnvelope(protocol, "")
+	if err != nil {
+		return err
+	}
+
+	if _, err := c.Writer.Write(envelope); err != nil {
+		if clientGone != nil {
+			*clientGone = true
+		}
+		return err
+	}
+
+	if flusher, ok := c.Writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+
+	if clientGone != nil {
+		*clientGone = true
+	}
+	return nil
+}
+
+// SendDownstreamGuardTerminalWS 向 WebSocket 写入 stream 关联的错误帧
+func SendDownstreamGuardTerminalWS(conn *websocket.Conn, streamID string, reason string) error {
+	if conn == nil {
+		return errors.New("nil websocket conn")
+	}
+
+	envelope, _, err := FormatGuardTerminalEnvelope("websocket", streamID)
+	if err != nil {
+		return err
+	}
+
+	// WebSocket transport 复用原生 SetWriteDeadline
+	_ = conn.SetWriteDeadline(time.Now().Add(GuardWriteDeadlineTimeout))
+	defer func() {
+		_ = conn.SetWriteDeadline(time.Time{})
+	}()
+
+	return conn.WriteMessage(websocket.TextMessage, envelope)
+}
+```
+
+- [ ] **Step 4: Run test to verify it passes (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v -race ./proxy -run "TestSendDownstreamGuardTerminalHTTP.*|TestFormatGuardTerminalEnvelope|TestSendDownstreamGuardTerminalWSSuccess"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add proxy/outputguard_downstream.go proxy/outputguard_downstream_test.go
+git commit -m "feat(proxy): implement downstream guard terminal writer with TryLock and 5s deadline"
+```
