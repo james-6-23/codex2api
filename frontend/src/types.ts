@@ -2300,6 +2300,12 @@ export interface SystemSettings {
   response_cache_reconstruct_max_bytes: number
   response_cache_write_policy: ResponseCacheWritePolicy
   readonly response_cache_config_generation: number
+  output_guard_enabled: boolean
+  output_guard_max_tool_argument_bytes: number
+  output_guard_max_tool_argument_deltas: number
+  output_guard_max_channel_bytes: number
+  output_guard_max_request_bytes: number
+  readonly output_guard_config_generation: number
   relay_model_cooldown_mode: ModelCooldownMode
   relay_model_cooldown_seconds: number
   relay_model_cooldown_backoff_enabled: boolean

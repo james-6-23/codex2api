@@ -215,7 +215,7 @@ func ErrUpstreamTimeout(cause error) *Error {
 // ErrUpstreamStreamBreak creates an upstream stream break error
 func ErrUpstreamStreamBreak(message string) *Error {
 	if message == "" {
-		message = "Upstream stream ended prematurely"
+		message = "Upstream stream ended prematurely (status 502)"
 	}
 	return &Error{
 		Code:       ErrorCodeUpstreamStreamBreak,

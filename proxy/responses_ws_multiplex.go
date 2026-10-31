@@ -44,6 +44,20 @@ func writeResponsesWSPayload(conn *websocket.Conn, payload []byte, timeout time.
 	return conn.WriteMessage(websocket.TextMessage, payload)
 }
 
+// sendResponsesWSGuardTerminal serializes the guard terminal frame on the
+// connection's shared write lock. gorilla/websocket panics on concurrent
+// writers, and runResponsesWSMultiplex may run up to 16 same-connection lanes
+// in parallel. Unregistered connections (single direct test sockets outside
+// the multiplexer) have no competing lane and are written directly.
+func sendResponsesWSGuardTerminal(conn *websocket.Conn, streamID string, reason string) error {
+	if lock, ok := responsesWSWriters.Load(conn); ok {
+		mu := lock.(*sync.Mutex)
+		mu.Lock()
+		defer mu.Unlock()
+	}
+	return SendDownstreamGuardTerminalWS(conn, streamID, reason)
+}
+
 func responsesWSStreamID(raw []byte) (string, *api.APIError) {
 	value := gjson.GetBytes(raw, "stream_id")
 	if !value.Exists() {

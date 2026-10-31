@@ -9460,6 +9460,12 @@ type settingsResponse struct {
 	OAuthModelCooldownSeconds          int                              `json:"oauth_model_cooldown_seconds"`
 	OAuthModelCooldownBackoffEnabled   bool                             `json:"oauth_model_cooldown_backoff_enabled"`
 	OAuthUnsupportedCooldownSeconds    int                              `json:"oauth_unsupported_model_cooldown_seconds"`
+	OutputGuardEnabled                 bool                             `json:"output_guard_enabled"`
+	OutputGuardMaxToolArgumentBytes    int64                            `json:"output_guard_max_tool_argument_bytes"`
+	OutputGuardMaxToolArgumentDeltas   int                              `json:"output_guard_max_tool_argument_deltas"`
+	OutputGuardMaxChannelBytes         int64                            `json:"output_guard_max_channel_bytes"`
+	OutputGuardMaxRequestBytes         int64                            `json:"output_guard_max_request_bytes"`
+	OutputGuardConfigGeneration        int64                            `json:"output_guard_config_generation"`
 }
 
 type rawJSON = json.RawMessage
@@ -9634,6 +9640,12 @@ type updateSettingsReq struct {
 	OAuthModelCooldownSeconds           *int                             `json:"oauth_model_cooldown_seconds"`
 	OAuthModelCooldownBackoffEnabled    *bool                            `json:"oauth_model_cooldown_backoff_enabled"`
 	OAuthUnsupportedCooldownSeconds     *int                             `json:"oauth_unsupported_model_cooldown_seconds"`
+	OutputGuardEnabled                  *bool                            `json:"output_guard_enabled"`
+	OutputGuardMaxToolArgumentBytes     *int64                           `json:"output_guard_max_tool_argument_bytes"`
+	OutputGuardMaxToolArgumentDeltas    *int                             `json:"output_guard_max_tool_argument_deltas"`
+	OutputGuardMaxChannelBytes          *int64                           `json:"output_guard_max_channel_bytes"`
+	OutputGuardMaxRequestBytes          *int64                           `json:"output_guard_max_request_bytes"`
+	OutputGuardConfigGeneration         rawJSON                          `json:"output_guard_config_generation"`
 }
 
 func updateSettingsHasFieldsOtherThanCustomPatterns(req updateSettingsReq) bool {
@@ -10238,6 +10250,14 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "读取响应缓存设置失败："+err.Error())
 		return
 	}
+	outputGuardSettings, err := h.db.GetOutputGuardSettings(ctx)
+	if err != nil {
+		outputGuardSettings = database.DefaultOutputGuardSettings()
+	}
+	outputGuardEnabled := false
+	if outputGuardSettings.Enabled != nil {
+		outputGuardEnabled = *outputGuardSettings.Enabled
+	}
 	dbSettings, _ := h.db.GetSystemSettings(ctx)
 	_, adminAuthSource := h.resolveAdminSecret(c.Request.Context())
 	adminSecret := ""
@@ -10473,6 +10493,12 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SmartPacingMinConcurrency:           h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                  h.store.GetSmartPacingWindows(),
 		IgnoreUsageLimitStatus:              h.store.IgnoreUsageLimitStatus(),
+		OutputGuardEnabled:                  outputGuardEnabled,
+		OutputGuardMaxToolArgumentBytes:     outputGuardSettings.MaxToolArgumentBytes,
+		OutputGuardMaxToolArgumentDeltas:    outputGuardSettings.MaxToolArgumentDeltas,
+		OutputGuardMaxChannelBytes:          outputGuardSettings.MaxChannelBytes,
+		OutputGuardMaxRequestBytes:          outputGuardSettings.MaxRequestBytes,
+		OutputGuardConfigGeneration:         outputGuardSettings.ConfigGeneration,
 	})
 }
 
@@ -10597,6 +10623,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	defer h.settingsUpdateMu.Unlock()
 	if req.ResponseCacheConfigGeneration != nil {
 		writeError(c, http.StatusBadRequest, "response_cache_config_generation 为只读字段")
+		return
+	}
+	if req.OutputGuardConfigGeneration != nil {
+		writeError(c, http.StatusBadRequest, "output_guard_config_generation 为只读字段")
 		return
 	}
 	if req.CodexImagesMainModel != nil {
@@ -10746,6 +10776,69 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if err := database.ValidateResponseCacheSettings(responseCacheSettings); err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
+	}
+
+	outputGuardUpdate := database.OutputGuardSettingsUpdate{
+		Enabled:               req.OutputGuardEnabled,
+		MaxToolArgumentBytes:  req.OutputGuardMaxToolArgumentBytes,
+		MaxToolArgumentDeltas: req.OutputGuardMaxToolArgumentDeltas,
+		MaxChannelBytes:       req.OutputGuardMaxChannelBytes,
+		MaxRequestBytes:       req.OutputGuardMaxRequestBytes,
+	}
+	outputGuardUpdateRequested := outputGuardUpdate.Enabled != nil ||
+		outputGuardUpdate.MaxToolArgumentBytes != nil ||
+		outputGuardUpdate.MaxToolArgumentDeltas != nil ||
+		outputGuardUpdate.MaxChannelBytes != nil ||
+		outputGuardUpdate.MaxRequestBytes != nil
+
+	if err := validateOutputGuardSettingsUpdateRanges(outputGuardUpdate); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	var outputGuardSettings database.OutputGuardSettings
+	if outputGuardUpdateRequested {
+		currentGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+			return
+		}
+		mergedGuard := currentGuard
+		if outputGuardUpdate.Enabled != nil {
+			val := *outputGuardUpdate.Enabled
+			mergedGuard.Enabled = &val
+		}
+		if outputGuardUpdate.MaxToolArgumentBytes != nil {
+			mergedGuard.MaxToolArgumentBytes = *outputGuardUpdate.MaxToolArgumentBytes
+		}
+		if outputGuardUpdate.MaxToolArgumentDeltas != nil {
+			mergedGuard.MaxToolArgumentDeltas = *outputGuardUpdate.MaxToolArgumentDeltas
+		}
+		if outputGuardUpdate.MaxChannelBytes != nil {
+			mergedGuard.MaxChannelBytes = *outputGuardUpdate.MaxChannelBytes
+		}
+		if outputGuardUpdate.MaxRequestBytes != nil {
+			mergedGuard.MaxRequestBytes = *outputGuardUpdate.MaxRequestBytes
+		}
+		if err := database.ValidateOutputGuardSettings(mergedGuard); err != nil {
+			writeError(c, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		committedGuard, err := h.db.UpdateOutputGuardSettings(c.Request.Context(), outputGuardUpdate)
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "保存防护设置失败："+err.Error())
+			return
+		}
+		outputGuardSettings = committedGuard
+		proxy.ApplyOutputGuardSettings(committedGuard)
+	} else {
+		latestGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
+		if err != nil {
+			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+			return
+		}
+		outputGuardSettings = latestGuard
 	}
 
 	currentAdminSecret := ""
@@ -12383,6 +12476,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SmartPacingMinConcurrency:           h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                  h.store.GetSmartPacingWindows(),
 		IgnoreUsageLimitStatus:              h.store.IgnoreUsageLimitStatus(),
+		OutputGuardEnabled:                  outputGuardSettings.Enabled == nil || *outputGuardSettings.Enabled,
+		OutputGuardMaxToolArgumentBytes:     outputGuardSettings.MaxToolArgumentBytes,
+		OutputGuardMaxToolArgumentDeltas:    outputGuardSettings.MaxToolArgumentDeltas,
+		OutputGuardMaxChannelBytes:          outputGuardSettings.MaxChannelBytes,
+		OutputGuardMaxRequestBytes:          outputGuardSettings.MaxRequestBytes,
+		OutputGuardConfigGeneration:         outputGuardSettings.ConfigGeneration,
 	})
 }
 

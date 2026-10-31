@@ -30,6 +30,7 @@ import (
 	"github.com/codex2api/database"
 	"github.com/codex2api/proxy/internal/jsonbody"
 	"github.com/codex2api/security"
+	"github.com/codex2api/security/outputguard"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
@@ -1234,10 +1235,22 @@ func forwardGrokNativeResponseTo(readCtx context.Context, c *gin.Context, resp *
 func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, resp *http.Response, protocol GrokProtocol, streaming bool, startedAt time.Time, firstVisible func(), output io.Writer, outputFlusher http.Flusher, observe func([]byte)) (*UsageInfo, streamOutcome, bool, int) {
 	privateAttempt := output != nil && output != c.Writer
 	resp.Header.Del(grokNativeRouteHeader)
+	// [OutputGuard] 原生透传严格按真实上游协议选择投影器；终止协调器以 resp.Body
+	// 为关闭目标，命中后先取消/关闭上游，再尽力交付下游协议终态。
+	requestGuard := outputguard.NewRequestGuard(nativeGuardCoreConfig())
+	projector := selectNativeProjector(string(protocol), false, false)
+	guardCoord := NewGuardTerminationCoordinator(requestGuard, nil, resp.Body)
 	if !streaming {
 		body, err := readAllLimitedWithContinuousRetryKeepalive(readCtx, resp.Body, grokMaxDecodedBody)
 		if err != nil {
 			return nil, classifyStreamOutcome(nil, err, nil, false), false, 0
+		}
+		// [OutputGuard 全量 Snapshot 检查] 在任何响应字节写出之前判定完整响应。
+		if err := ObserveEvent(requestGuard, projector, "", body); err != nil || requestGuard.IsTripped() {
+			reason := requestGuard.TrippedReason()
+			trippedOutcome := guardCoord.HandleTripped(reason)
+			_ = SendDownstreamGuardTerminalHTTP(c, nil, nil, grokProtocolGuardName(protocol), reason)
+			return nil, trippedOutcome, false, 0
 		}
 		if failure, failed := protocolNonStreamFailure(protocol, body); failed {
 			return grokNativeUsage(protocol, body), failure, false, 0
@@ -1296,6 +1309,23 @@ func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, 
 	frameErr := error(nil)
 	readErr := readRawGrokSSEFramesWithContinuousRetryKeepalive(readCtx, resp.Body, func(frame rawGrokSSEFrame) bool {
 		if frame.HasData && !frame.Done {
+			// [OutputGuard 前置检查] 命中帧不得进入 observe、usage 统计、
+			// pending 缓冲或下游写入；guard 判定必须先于所有转发副作用。
+			if err := ObserveEvent(requestGuard, projector, frame.Event, frame.Data); err != nil || requestGuard.IsTripped() {
+				reason := requestGuard.TrippedReason()
+				failure = guardCoord.HandleTripped(reason, func() { pending.Reset() })
+				// 原生流一旦命中就必须交付协议终态而不是伪造完成；先提交
+				// SSE 200 头，04a 才能在已提交写路径写出协议专属 envelope。
+				if !c.Writer.Written() {
+					if c.Writer.Header().Get("Content-Type") == "" {
+						c.Header("Content-Type", "text/event-stream; charset=utf-8")
+					}
+					c.Writer.WriteHeaderNow()
+				}
+				_ = SendDownstreamGuardTerminalHTTP(c, nil, nil, grokProtocolGuardName(protocol), reason)
+				terminal, failed = true, true
+				return false
+			}
 			if observe != nil {
 				observe(frame.Data)
 			}
@@ -1370,9 +1400,11 @@ func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, 
 	}
 	if failed {
 		failure = overlayContinuousRetryLocalFailure(failure, readErr, writeErr)
+		failure = OverlayGuardOutcome(failure, requestGuard)
 		return usage, failure, wrote, firstTokenMs
 	}
 	outcome := classifyStreamOutcome(continuousRetryContextError(c.Request.Context()), readErr, writeErr, terminal)
+	outcome = OverlayGuardOutcome(outcome, requestGuard)
 	if !terminal && wrote && c.Request.Context().Err() == nil && writeErr == nil {
 		_ = writeGrokNativeStreamBreakTo(output, protocol, streamCreatedAt)
 		outputFlusher.Flush()
@@ -2365,6 +2397,38 @@ type streamOutcome struct {
 	// terminalLocal 标记代理自身的回放/存储失败；它们不参与上游重试或账号健康度，
 	// 并且必须以协议终态错误结束。
 	terminalLocal bool
+	// guardTripped 标记本次请求因模型输出失控防护触发而被强制终止。
+	guardTripped bool
+	// guardReason 冻结首次触发原因（由终止协调器保证），仅用于用量日志与脱敏终态。
+	guardReason string
+}
+
+// OverlayGuardOutcome 以 guard 终态绝对覆盖既有 outcome：输出失控防护命中时，
+// 499/598 等断流分类不得再遮蔽 502 终态。failurePayload 置 nil，防止把已经
+// 判定为失控的上游原始帧带入策略匹配或日志回显；penalize=false 保证不会把
+// 被网关主动终止的请求记成上游账号故障。
+//
+// 除 penalize 外，capacityShed / modelUnsupported / requestScoped /
+// verifyAccountAuth 这些会改变下游分支的分类标记也必须清零：它们分别对应
+// 容量降载重试、模型不支持换号、请求级故障归因与 WS 鉴权探针，残留任意一个
+// 都会让 guard 终态被当成普通上游故障处理，破坏“绝对优先”语义。
+func OverlayGuardOutcome(outcome streamOutcome, guard *outputguard.RequestGuard) streamOutcome {
+	if guard == nil || !guard.IsTripped() {
+		return outcome
+	}
+	outcome.guardTripped = true
+	outcome.guardReason = guard.TrippedReason()
+	outcome.logStatusCode = http.StatusBadGateway
+	outcome.failureKind = "model_output_guard"
+	outcome.failureMessage = GuardTriggeredPublicMessage
+	outcome.failurePayload = nil
+	outcome.penalize = false
+	outcome.capacityShed = false
+	outcome.modelUnsupported = false
+	outcome.requestScoped = false
+	outcome.verifyAccountAuth = false
+	outcome.terminalLocal = true
+	return outcome
 }
 
 const continuousRetryLocalFailureMessage = "Internal proxy replay failure"
@@ -3529,7 +3593,7 @@ const (
 
 // upstreamStreamBreakMessage 是断流反馈给下游的稳定可读消息；机器识别用
 // 稳定错误码 ErrorCodeUpstreamStreamBreak，下游网关/客户端可据此自动重试。
-const upstreamStreamBreakMessage = "Upstream stream ended prematurely; safe to retry"
+const upstreamStreamBreakMessage = "Upstream stream ended prematurely; safe to retry (status 502)"
 
 // writeResponsesStreamBreakEvent 在已写出正文的 Responses SSE 流上合成
 // response.failed 终止事件。首包后断流无法整段静默重试，又不能让 SSE 静默
@@ -4010,6 +4074,17 @@ func firstGJSONInt(body []byte, paths ...string) int64 {
 	return 0
 }
 
+// outputGuardHTTPGateArmed 判断 HTTP 入口是否应执行输出失控防护就绪门禁。
+// 生产 main 在注册路由前必定先尝试加载配置：成功则 IsOutputGuardReady，
+// 失败则 lastSyncError 非空，两者都说明 readiness 已有结论。只有从未尝试
+// 过加载的进程（例如直接构造 Handler 的单元测试）才保持旧的放行语义。
+func outputGuardHTTPGateArmed() bool {
+	if IsOutputGuardReady() {
+		return true
+	}
+	return GetOutputGuardConfigSyncStatus().LastSyncError != ""
+}
+
 // Responses 处理 /v1/responses 请求（原生透传，增强输入验证）
 func (h *Handler) Responses(c *gin.Context) {
 	// 1. 读取请求体
@@ -4029,6 +4104,19 @@ func (h *Handler) Responses(c *gin.Context) {
 		api.SendError(c, contextErr)
 		return
 	}
+	// [OutputGuard 门禁与状态机初始化] 必须在 attempt 循环外初始化一次，
+	// 跨 attempt 继承事件与字节预算，严禁每次 attempt 重建。
+	if outputGuardHTTPGateArmed() && !RequireOutputGuardReadyHTTP(c) {
+		return
+	}
+	guardSnapshot := CurrentOutputGuardConfig()
+	reqGuard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               guardSnapshot.Enabled,
+		MaxToolArgumentBytes:  guardSnapshot.MaxToolArgumentBytes,
+		MaxToolArgumentDeltas: guardSnapshot.MaxToolArgumentDeltas,
+		MaxChannelBytes:       guardSnapshot.MaxChannelBytes,
+		MaxRequestBytes:       guardSnapshot.MaxRequestBytes,
+	})
 	h.capturePromptRequestIngress(c, rawBody)
 	bodyReadDone := time.Now()
 	compactionMeta := requestCompactionMetaForHTTP(c, rawBody)
@@ -4761,7 +4849,9 @@ func (h *Handler) Responses(c *gin.Context) {
 				if continuousRetryBufferedAttemptCommitted(continuousRetryPolicy, outcome) {
 					h.store.BindSessionAffinityWithGuard(affinityKey, account, proxyURL, affinityGuard)
 				}
-				if outcome.terminalLocal && c.Request.Context().Err() == nil {
+				if outcome.guardTripped {
+					// guard 终态已由 native forwarder 写出，绝不合成 local 收尾。
+				} else if outcome.terminalLocal && c.Request.Context().Err() == nil {
 					writeContinuousRetryLocalResponsesError(c)
 				} else if !downstreamWrote && outcome.logStatusCode != http.StatusOK && c.Request.Context().Err() == nil {
 					if !writeCommittedResponsesRetryError(c, outcome.failureMessage) {
@@ -4842,6 +4932,13 @@ func (h *Handler) Responses(c *gin.Context) {
 			promptPolicyIncidentID := ""
 			upstreamCyberPolicyLogged := false
 			var streamAttempt *continuousRetryStreamAttempt
+			// [OutputGuard] relay-style 分支（OpenAI Responses 中转、Antigravity
+			// Responses 等）拥有独立于标准 Codex 主分支的流式事件循环与非流式
+			// 响应体路径：沿用入口处创建的 reqGuard（跨 attempt 继承预算），再按
+			// attempt 建立终止协调器与 Responses 投影器，确保命中后先取消上游、
+			// 丢弃本地缓冲，最后才尽力交付脱敏终态。
+			guardCoord := NewGuardTerminationCoordinator(reqGuard, upstreamCancel, resp.Body)
+			responsesProjector := NewResponsesProjector()
 
 			if isStream {
 				setSSEStreamHeaders(c, "text/event-stream")
@@ -4868,6 +4965,18 @@ func (h *Handler) Responses(c *gin.Context) {
 				var pendingFirstTokenEvents bytes.Buffer
 				emptyIncomplete := &emptyIncompleteTracker{}
 				readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
+					// [OutputGuard 前置检查] 必须早于 provenance/usage 记录、事件重写、
+					// 首 token 统计与下游写路径；命中事件对后续逻辑绝对不可见。
+					if err := ObserveEvent(reqGuard, responsesProjector, normalizedUpstreamSSEEventType(sseEvent, data), data); err != nil || reqGuard.IsTripped() {
+						gotTerminal = true
+						guardCoord.HandleTripped(reqGuard.TrippedReason(), func() {
+							compactionDigests = nil
+							pendingFirstTokenEvents.Reset()
+							streamWriter.DiscardBuffered()
+						})
+						_ = SendDownstreamGuardTerminalHTTP(c, nil, &clientGone, "responses", reqGuard.TrippedReason())
+						return false
+					}
 					streamDiag.markUpstreamFrame()
 					if account.IsGrokAPI() || continuousRetryBuffersAttempts(continuousRetryPolicy) {
 						compactionDigests.addPayload(data)
@@ -4985,25 +5094,38 @@ func (h *Handler) Responses(c *gin.Context) {
 					if isEmptyIncompleteResponseBody(respBody) {
 						respBody = synthesizeEmptyIncompleteFailureBody(respBody)
 					}
-					nonStreamResponseBody = append([]byte(nil), respBody...)
-					usage = extractUsageFromResult(gjson.GetBytes(respBody, "usage"))
-					actualServiceTier = gjson.GetBytes(respBody, "service_tier").String()
-					observeUpstreamResponseModelBody(responseModelObserver, respBody)
-					imageLogInfo = imageUsageLogInfoFromResponseJSON(respBody)
-					gotTerminal = true
-					if contentType := resp.Header.Get("Content-Type"); contentType != "" {
-						nonStreamContentType = contentType
-					}
-					if failure, failed := protocolNonStreamFailure(GrokProtocolResponses, respBody); failed {
-						failureCopy := failure
-						nonStreamFailure = &failureCopy
-						terminalFailurePayload = append([]byte(nil), respBody...)
+					// [OutputGuard 全量 Snapshot 检查] relay 非流式响应体是完整
+					// Responses JSON；必须在聚合、用量提取与任何写出之前判定，
+					// 命中后绝不把已经失控的响应体下发。
+					if err := ObserveEvent(reqGuard, responsesProjector, "", respBody); err != nil || reqGuard.IsTripped() {
+						gotTerminal = true
+						guardCoord.HandleTripped(reqGuard.TrippedReason(), func() {
+							nonStreamResponseBody = nil
+							nonStreamFailure = nil
+							terminalFailurePayload = nil
+						})
+					} else {
+						nonStreamResponseBody = append([]byte(nil), respBody...)
+						usage = extractUsageFromResult(gjson.GetBytes(respBody, "usage"))
+						actualServiceTier = gjson.GetBytes(respBody, "service_tier").String()
+						observeUpstreamResponseModelBody(responseModelObserver, respBody)
+						imageLogInfo = imageUsageLogInfoFromResponseJSON(respBody)
+						gotTerminal = true
+						if contentType := resp.Header.Get("Content-Type"); contentType != "" {
+							nonStreamContentType = contentType
+						}
+						if failure, failed := protocolNonStreamFailure(GrokProtocolResponses, respBody); failed {
+							failureCopy := failure
+							nonStreamFailure = &failureCopy
+							terminalFailurePayload = append([]byte(nil), respBody...)
+						}
 					}
 				}
 			}
 
 			totalDuration := int(time.Since(start).Milliseconds())
 			outcome := classifyStreamOutcome(continuousRetryContextError(c.Request.Context()), readErr, writeErr, gotTerminal)
+			outcome = OverlayGuardOutcome(outcome, reqGuard)
 			outcome = overlayContinuousRetryLocalFailure(outcome, readErr, writeErr)
 			if nonStreamFailure != nil {
 				outcome = *nonStreamFailure
@@ -5103,7 +5225,22 @@ func (h *Handler) Responses(c *gin.Context) {
 			if continuousRetryBufferedAttemptCommitted(continuousRetryPolicy, outcome) {
 				h.store.BindSessionAffinityWithGuard(affinityKey, account, proxyURL, affinityGuard)
 			}
-			if isStream && outcome.terminalLocal {
+			if outcome.guardTripped {
+				// 非流式完整响应快照命中时尚未提交任何下游字节：直接返回 502
+				// 脱敏 envelope。流式命中已由 SendDownstreamGuardTerminalHTTP
+				// 写出（未提交则同为 502 JSON，已提交则写协议内终态帧），此处
+				// 不再重复写。
+				if !downstreamWrote && !c.Writer.Written() {
+					c.Header("Content-Type", "application/json; charset=utf-8")
+					c.JSON(http.StatusBadGateway, gin.H{
+						"error": gin.H{
+							"message": outcome.failureMessage,
+							"type":    outputguard.TriggeredCode,
+							"code":    outputguard.TriggeredCode,
+						},
+					})
+				}
+			} else if isStream && outcome.terminalLocal {
 				writeContinuousRetryLocalResponsesError(c)
 			} else if isStream && abortedForHTTPError && !downstreamWrote {
 				// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
@@ -5495,6 +5632,10 @@ func (h *Handler) Responses(c *gin.Context) {
 		var streamAttempt *continuousRetryStreamAttempt
 		// 断流现场判据(issue #491):区分下游背压拖停上游读取 vs 上游自己重置。
 		streamDiag := newStreamPhaseDiagnostics()
+		// [OutputGuard] 本次 attempt 的原子终止协调器与 Responses projector：
+		// 流式与非流式共用同一套上游取消、缓冲清理与 502 终态语义。
+		guardCoord := NewGuardTerminationCoordinator(reqGuard, upstreamCancel, resp.Body)
+		responsesProjector := NewResponsesProjector()
 
 		if isStream {
 			// 流式透传 + TTFT 跟踪
@@ -5540,6 +5681,19 @@ func (h *Handler) Responses(c *gin.Context) {
 					data = restoreCodexMultiAgentV2Response(data, multiAgentV2State)
 				}
 				streamDiag.markUpstreamFrame()
+				// [OutputGuard 前置检查] 必须早于 provenance bytes.Clone、collector
+				// 累积、replay 与 downstreamMu 写路径；命中事件对后续逻辑绝对不可见。
+				if err := ObserveEvent(reqGuard, responsesProjector, normalizedUpstreamSSEEventType(sseEvent, data), data); err != nil {
+					gotTerminal = true
+					guardCoord.HandleTripped(reqGuard.TrippedReason(), func() {
+						compactionProvenancePayloads = nil
+						outputCollector.clearOverflow()
+						streamWriter.DiscardBuffered()
+						completedResponseData = nil
+					})
+					_ = SendDownstreamGuardTerminalHTTP(c, &downstreamMu, &clientGone, "responses", reqGuard.TrippedReason())
+					return false
+				}
 				if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 					compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
 				} else {
@@ -5802,6 +5956,16 @@ func (h *Handler) Responses(c *gin.Context) {
 				if multiAgentV2State.isOptimizedFor(account.ID()) {
 					data = restoreCodexMultiAgentV2Response(data, multiAgentV2State)
 				}
+				// [OutputGuard 前置检查] 必须早于 provenance 记录与聚合。
+				if err := ObserveEvent(reqGuard, responsesProjector, normalizedUpstreamSSEEventType(sseEvent, data), data); err != nil {
+					gotTerminal = true
+					guardCoord.HandleTripped(reqGuard.TrippedReason(), func() {
+						compactionProvenancePayloads = nil
+						outputCollector.clearOverflow()
+						completedResponseData = nil
+					})
+					return false
+				}
 				if continuousRetryBuffersAttempts(continuousRetryPolicy) {
 					compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
 				} else {
@@ -5871,6 +6035,7 @@ func (h *Handler) Responses(c *gin.Context) {
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(continuousRetryContextError(c.Request.Context()), readErr, writeErr, gotTerminal)
+		outcome = OverlayGuardOutcome(outcome, reqGuard)
 		outcome = overlayContinuousRetryLocalFailure(outcome, readErr, writeErr)
 		var candidatePromoted bool
 		terminalFailurePayload, candidatePromoted = resolvePreContentRetryErrorCandidate(terminalFailurePayload, preContentErrorCandidate, contentTokenSeen, wroteAnyBody, gotTerminal, readErr, c.Request.Context().Err(), writeErr)
@@ -6018,7 +6183,18 @@ func (h *Handler) Responses(c *gin.Context) {
 			}
 		}
 
-		if isStream && outcome.terminalLocal {
+		if outcome.guardTripped {
+			if !downstreamWrote && !c.Writer.Written() {
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{
+						"message": outcome.failureMessage,
+						"type":    outputguard.TriggeredCode,
+						"code":    outputguard.TriggeredCode,
+					},
+				})
+			}
+		} else if isStream && outcome.terminalLocal {
 			writeContinuousRetryLocalResponsesError(c)
 		} else if isStream && abortedForHTTPError && !downstreamWrote {
 			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
@@ -7030,6 +7206,19 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Failed to read request body", api.ErrorTypeInvalidRequest))
 		return
 	}
+	// [OutputGuard 门禁与状态机初始化] 必须在 attempt 循环外初始化一次，
+	// 跨 attempt 继承事件与字节预算，严禁每次 attempt 重建。
+	if outputGuardHTTPGateArmed() && !RequireOutputGuardReadyHTTP(c) {
+		return
+	}
+	guardSnapshot := CurrentOutputGuardConfig()
+	reqGuard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               guardSnapshot.Enabled,
+		MaxToolArgumentBytes:  guardSnapshot.MaxToolArgumentBytes,
+		MaxToolArgumentDeltas: guardSnapshot.MaxToolArgumentDeltas,
+		MaxChannelBytes:       guardSnapshot.MaxChannelBytes,
+		MaxRequestBytes:       guardSnapshot.MaxRequestBytes,
+	})
 	if rejectDuplicateJSONField(c, rawBody, "messages") {
 		return
 	}
@@ -7595,7 +7784,9 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			if continuousRetryBufferedAttemptCommitted(continuousRetryPolicy, outcome) {
 				h.store.BindSessionAffinityWithGuard(affinityKey, account, proxyURL, affinityGuard)
 			}
-			if outcome.terminalLocal && c.Request.Context().Err() == nil {
+			if outcome.guardTripped {
+				// guard 终态已由 native forwarder 写出，绝不合成 local 收尾。
+			} else if outcome.terminalLocal && c.Request.Context().Err() == nil {
 				writeContinuousRetryLocalChatError(c)
 			} else if !downstreamWrote && outcome.logStatusCode != http.StatusOK && c.Request.Context().Err() == nil {
 				if !writeCommittedChatRetryError(c, outcome.failureMessage) {
@@ -7670,6 +7861,10 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		chunkID := "chatcmpl-" + uuid.New().String()[:8]
 		emptyIncomplete := &emptyIncompleteTracker{}
 		created := time.Now().Unix()
+		// [OutputGuard] 上游始终是 Responses SSE；projector 与终止协调器在
+		// 流式/非流式之间共享，保证命中后只执行一次原子终止。
+		guardCoord := NewGuardTerminationCoordinator(reqGuard, upstreamCancel, resp.Body)
+		chatResponsesProjector := NewResponsesProjector()
 
 		if isStream {
 			streamTranslator := NewStreamTranslator(chunkID, responseModel, created)
@@ -7701,6 +7896,16 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				// [OutputGuard 前置检查] 必须早于 streamTranslator 累积与下游写出。
+				if err := ObserveEvent(reqGuard, chatResponsesProjector, eventType, data); err != nil {
+					gotTerminal = true
+					guardCoord.HandleTripped(reqGuard.TrippedReason(), func() {
+						pendingFirstTokenChunks.Reset()
+						streamWriter.DiscardBuffered()
+					})
+					_ = SendDownstreamGuardTerminalHTTP(c, nil, &clientGone, "chat", reqGuard.TrippedReason())
+					return false
+				}
 				ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 				if eventType == "response.failed" {
 					statusCode := classifyResponseFailedOutcome(data).logStatusCode
@@ -7867,9 +8072,17 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			var finishReasonOverride string
 
 			readErr = readSSEStreamWithContinuousRetryKeepalive(readCtx, resp.Body, func(sseEvent string, data []byte) bool {
-				outputCollector.Add(data)
 				parsed := gjson.ParseBytes(data)
 				eventType := normalizedUpstreamSSEEventType(sseEvent, data)
+				// [OutputGuard 前置检查] 必须早于 fullContent/fullReasoning 累加。
+				if err := ObserveEvent(reqGuard, chatResponsesProjector, eventType, data); err != nil {
+					gotTerminal = true
+					guardCoord.HandleTripped(reqGuard.TrippedReason(), func() {
+						outputCollector.clearOverflow()
+					})
+					return false
+				}
+				outputCollector.Add(data)
 				ApplyCodexUsageEventFrame(h.store, account, eventType, parsed, time.Now())
 				ttftGuard.MarkProgress(eventType)
 				if !ttftRecorded && isLooseFirstTokenResult(parsed) {
@@ -7926,6 +8139,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		// 断流检测 + token 估算
 		totalDuration := int(time.Since(start).Milliseconds())
 		outcome := classifyStreamOutcome(continuousRetryContextError(c.Request.Context()), readErr, writeErr, gotTerminal)
+		outcome = OverlayGuardOutcome(outcome, reqGuard)
 		var candidatePromoted bool
 		terminalFailurePayload, candidatePromoted = resolvePreContentRetryErrorCandidate(terminalFailurePayload, preContentErrorCandidate, contentTokenSeen, wroteAnyBody, gotTerminal, readErr, c.Request.Context().Err(), writeErr)
 		if candidatePromoted && isStream {
@@ -8042,7 +8256,18 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 				}
 			}
 		}
-		if isStream && outcome.terminalLocal {
+		if outcome.guardTripped {
+			if !downstreamWrote && !c.Writer.Written() {
+				c.Header("Content-Type", "application/json; charset=utf-8")
+				c.JSON(http.StatusBadGateway, gin.H{
+					"error": gin.H{
+						"message": outcome.failureMessage,
+						"type":    outputguard.TriggeredCode,
+						"code":    outputguard.TriggeredCode,
+					},
+				})
+			}
+		} else if isStream && outcome.terminalLocal {
 			writeContinuousRetryLocalChatError(c)
 		} else if isStream && abortedForHTTPError && !downstreamWrote {
 			// 流式:首 token 前上游失败、未向下游写过任何内容,HTTP 200 header 尚未提交,
@@ -8137,75 +8362,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 		}
 		return
 	}
-}
-
-// handleStreamResponse 处理流式响应（翻译 Codex → OpenAI）
-func (h *Handler) handleStreamResponse(c *gin.Context, body io.Reader, model, chunkID string, created int64) {
-	c.Header("Content-Type", "text/event-stream")
-	c.Header("Cache-Control", "no-cache")
-	c.Header("Connection", "keep-alive")
-	c.Header("X-Accel-Buffering", "no")
-
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error": gin.H{"message": "streaming not supported", "type": "server_error"},
-		})
-		return
-	}
-
-	streamWriter := h.newStreamFlushWriter(c, c.Writer, flusher)
-	err := ReadSSEStream(body, func(data []byte) bool {
-		translation := TranslateStreamChunkResult(data, model, chunkID, created)
-		if translation.Chunk != nil {
-			if err := streamWriter.WriteSSEData(translation.Chunk); err != nil {
-				return false
-			}
-		}
-		if translation.Terminal {
-			if !translation.Failed {
-				if err := streamWriter.WriteString("data: [DONE]\n\n"); err != nil {
-					return false
-				}
-			}
-			_ = streamWriter.Flush()
-			return false
-		}
-		return true
-	})
-	_ = streamWriter.Flush()
-
-	if err != nil {
-		log.Printf("读取上游流失败: %v", err)
-	}
-}
-
-// handleCompactResponse 处理非流式响应
-func (h *Handler) handleCompactResponse(c *gin.Context, body io.Reader, model, chunkID string, created int64) {
-	var fullContent strings.Builder
-	var fullReasoning strings.Builder
-	var usage *UsageInfo
-
-	_ = ReadSSEStream(body, func(data []byte) bool {
-		eventType := gjson.GetBytes(data, "type").String()
-		switch eventType {
-		case "response.output_text.delta":
-			delta := gjson.GetBytes(data, "delta").String()
-			fullContent.WriteString(delta)
-		case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
-			fullReasoning.WriteString(gjson.GetBytes(data, "delta").String())
-		case "response.completed":
-			usage = extractUsage(data)
-			return false
-		case "response.failed":
-			return false
-		}
-		return true
-	})
-
-	result := BuildCompactResponse(chunkID, model, created, fullContent.String(), fullReasoning.String(), nil, usage)
-
-	c.Data(http.StatusOK, "application/json", result)
 }
 
 // ==================== 通用辅助 ====================

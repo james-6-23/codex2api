@@ -14,6 +14,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
+	"github.com/codex2api/security/outputguard"
 	"github.com/gin-gonic/gin"
 	"github.com/tidwall/gjson"
 )
@@ -146,6 +147,11 @@ func (h *Handler) GeminiModelsAction(c *gin.Context) {
 	}
 	if !gjson.ValidBytes(rawBody) {
 		api.SendError(c, api.NewAPIError(api.ErrCodeInvalidRequest, "Invalid JSON in request body", api.ErrorTypeInvalidRequest))
+		return
+	}
+	// [OutputGuard 冷启动门禁] 仅在 readiness 已有结论时强制门禁，避免直接构造
+	// Handler 的旧测试在从未加载配置的全局态下被整体 503。
+	if outputGuardHTTPGateArmed() && !RequireOutputGuardReadyHTTP(c) {
 		return
 	}
 
@@ -391,12 +397,34 @@ type geminiNativeStreamResult struct {
 // for usage logging. Emit complete SSE events and flush each one so a thought
 // does not sit in the HTTP buffer while the upstream prepares its answer.
 func forwardGeminiNativeStream(c *gin.Context, body io.Reader, startedAt time.Time) geminiNativeStreamResult {
+	return forwardGeminiNativeStreamGuarded(c, body, startedAt, nil, nil, nil)
+}
+
+// forwardGeminiNativeStreamGuarded 在逐帧写出之前执行 Gemini 投影与 Guard 判定。
+// guard 为 nil 时保持原有转发语义，供不关心 Guard 的既有调用方复用。
+func forwardGeminiNativeStreamGuarded(c *gin.Context, body io.Reader, startedAt time.Time, guard *outputguard.RequestGuard, coord *GuardTerminationCoordinator, projector ProtocolProjector) geminiNativeStreamResult {
 	var result geminiNativeStreamResult
 	var usage geminiNativeUsage
 	activateContinuousRetryKeepalive(c.Request.Context())
 	result.readErr = readSSEStreamWithContinuousRetryKeepalive(c.Request.Context(), body, func(_ string, data []byte) bool {
 		if c.Request.Context().Err() != nil {
 			return false
+		}
+		// [OutputGuard 前置检查] 逐 candidate parts 追加检测；绝不能因为某个
+		// candidate 带 finishReason 就把整个流误判为 Snapshot 而跳过逐帧判定。
+		if guard != nil {
+			if err := ObserveEvent(guard, projector, "", data); err != nil || guard.IsTripped() {
+				reason := guard.TrippedReason()
+				_ = coord.HandleTripped(reason)
+				if c.Writer.Written() {
+					_ = SendDownstreamGuardTerminalHTTP(c, nil, nil, "gemini", reason)
+				} else {
+					// Gemini SDK 不解析 SSE 错误；未提交响应头时直接给出裸 JSON 502。
+					writeGeminiNativeError(c, http.StatusBadGateway, GuardTriggeredPublicMessage)
+				}
+				result.readErr = errModelOutputGuardTriggered
+				return false
+			}
 		}
 		usage.observe(data)
 		if result.firstTokenMs == 0 && !startedAt.IsZero() && geminiNativeHasContent(data) {
@@ -476,6 +504,11 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 	accountFilter = h.applyUpstreamChannelFilter(c, model, accountFilter)
 	accountFilter = h.applyScopeBudgetFilter(c, accountFilter)
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
+
+	// [OutputGuard 状态机初始化] attempt 循环外单次初始化，跨 attempt 继承事件
+	// 与语义字节预算；Gemini 流式与非流式共用同一个请求级状态机。
+	requestGuard := outputguard.NewRequestGuard(nativeGuardCoreConfig())
+	geminiProjector := NewGeminiProjector()
 
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
@@ -653,13 +686,17 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 			return
 		}
 
+		// [OutputGuard] 本次 attempt 的终止协调器：命中时先取消上游并关闭 body，
+		// 再丢弃任何尚未写出的下游缓冲。
+		guardCoord := NewGuardTerminationCoordinator(requestGuard, upstreamCancel, resp.Body)
+
 		if stream {
 			c.Header("Content-Type", "text/event-stream; charset=utf-8")
 			c.Header("Cache-Control", "no-cache")
 			c.Header("Connection", "keep-alive")
 			c.Header("X-Accel-Buffering", "no")
 			c.Status(resp.StatusCode)
-			result := forwardGeminiNativeStream(c, resp.Body, start)
+			result := forwardGeminiNativeStreamGuarded(c, resp.Body, start, requestGuard, guardCoord, geminiProjector)
 			_ = resp.Body.Close()
 			upstreamCancel()
 			h.store.Release(account)
@@ -677,11 +714,13 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 			if !claimContinuousRetrySuccessContext(c.Request.Context()) {
 				outcome = classifyStreamOutcome(errContinuousRetryDeadlineExceeded, nil, nil, false)
 			}
+			// Guard 终态绝对覆盖 499/598/continuation 分类，绝不允许断流分类遮蔽。
+			outcome = OverlayGuardOutcome(outcome, requestGuard)
 			if outcome.penalize {
 				h.reportStreamOutcomeFailure(account, outcome, time.Since(start))
 				h.store.UnbindSessionAffinity(affinityKey, account.ID())
 			}
-			if outcome.logStatusCode != http.StatusOK {
+			if outcome.logStatusCode != http.StatusOK && !outcome.guardTripped {
 				if !writeContinuousRetryTimeoutResponse(c, continuousRetryProtocolGemini) && ctxErr == nil && result.writeErr == nil {
 					status, message := http.StatusBadGateway, "Upstream Gemini stream failed before completion"
 					if upstreamStreamErr != nil {
@@ -729,6 +768,29 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 			if claimContinuousRetryTerminal(c, continuousRetryProtocolGemini) && c.Request.Context().Err() == nil {
 				writeGeminiNativeError(c, http.StatusBadGateway, "Failed to read upstream Gemini response")
 			}
+			return
+		}
+		// [OutputGuard 全量 Snapshot 检查] 保留现有 8MiB 有界读取，但在任何 JSON
+		// 写入下游之前对完整响应执行一次 Snapshot 判定。
+		if err := ObserveEvent(requestGuard, geminiProjector, "", out); err != nil || requestGuard.IsTripped() {
+			reason := requestGuard.TrippedReason()
+			guardOutcome := guardCoord.HandleTripped(reason)
+			h.store.Release(account)
+			writeGeminiNativeError(c, http.StatusBadGateway, GuardTriggeredPublicMessage)
+			h.logUsageForRequest(c, &database.UsageLogInput{
+				AccountID:         account.ID(),
+				Endpoint:          inboundEndpoint,
+				Model:             model,
+				EffectiveModel:    model,
+				StatusCode:        guardOutcome.logStatusCode,
+				DurationMs:        int(time.Since(start).Milliseconds()),
+				InboundEndpoint:   inboundEndpoint,
+				UpstreamEndpoint:  upstreamEndpoint,
+				Stream:            false,
+				AttemptIndex:      attempt + 1,
+				UpstreamErrorKind: guardOutcome.failureKind,
+				ErrorMessage:      usageLogFailureMessage(guardOutcome.logStatusCode, guardOutcome.failureMessage),
+			})
 			return
 		}
 		usage := geminiNativeUsageFromBody(out)

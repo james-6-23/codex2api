@@ -1377,6 +1377,12 @@ func (db *DB) migrate(ctx context.Context) error {
 			response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864,
 			response_cache_write_policy VARCHAR(20) NOT NULL DEFAULT 'always',
 			response_cache_config_generation BIGINT NOT NULL DEFAULT 1,
+			output_guard_enabled BOOLEAN DEFAULT FALSE,
+			output_guard_max_tool_argument_bytes BIGINT NOT NULL DEFAULT 262144,
+			output_guard_max_tool_argument_deltas INT NOT NULL DEFAULT 4096,
+			output_guard_max_channel_bytes BIGINT NOT NULL DEFAULT 2097152,
+			output_guard_max_request_bytes BIGINT NOT NULL DEFAULT 4194304,
+			output_guard_config_generation BIGINT NOT NULL DEFAULT 1,
 			models_list_read_max_bytes BIGINT NOT NULL DEFAULT 8388608
 		);
 	CREATE TABLE IF NOT EXISTS api_key_model_request_counters (
@@ -1583,6 +1589,12 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_seconds INT NOT NULL DEFAULT 300;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_backoff_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_unsupported_model_cooldown_seconds INT NOT NULL DEFAULT 1800;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_tool_argument_bytes BIGINT NOT NULL DEFAULT 262144;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_tool_argument_deltas INT NOT NULL DEFAULT 4096;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_channel_bytes BIGINT NOT NULL DEFAULT 2097152;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_request_bytes BIGINT NOT NULL DEFAULT 4194304;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_config_generation BIGINT NOT NULL DEFAULT 1;
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
