@@ -145,97 +145,114 @@ func (db *DB) GetOutputGuardSettings(ctx context.Context) (OutputGuardSettings, 
 
 func (db *DB) UpdateOutputGuardSettings(ctx context.Context, update OutputGuardSettingsUpdate) (OutputGuardSettings, error) {
 	var committed OutputGuardSettings
-	err := db.withSQLiteWriteLock(ctx, func() error {
-		tx, err := db.conn.BeginTx(ctx, nil)
-		if err != nil {
-			return err
-		}
-		defer func() { _ = tx.Rollback() }()
-
+	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO system_settings (id) VALUES (1)
 			ON CONFLICT (id) DO NOTHING
 		`); err != nil {
 			return err
 		}
-
-		current := DefaultOutputGuardSettings()
-		if err := scanOutputGuardSettings(
-			tx.QueryRowContext(ctx, db.outputGuardSettingsSelectQuery(!db.isSQLite())),
-			&current,
-		); err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-
-		next := current
-		if update.Enabled != nil {
-			val := *update.Enabled
-			next.Enabled = &val
-		}
-		if update.MaxToolArgumentBytes != nil {
-			next.MaxToolArgumentBytes = *update.MaxToolArgumentBytes
-		}
-		if update.MaxToolArgumentDeltas != nil {
-			next.MaxToolArgumentDeltas = *update.MaxToolArgumentDeltas
-		}
-		if update.MaxChannelBytes != nil {
-			next.MaxChannelBytes = *update.MaxChannelBytes
-		}
-		if update.MaxRequestBytes != nil {
-			next.MaxRequestBytes = *update.MaxRequestBytes
-		}
-
-		if err := ValidateOutputGuardSettings(next); err != nil {
-			return err
-		}
-
-		changed := (update.Enabled != nil && (current.Enabled == nil || *current.Enabled != *next.Enabled)) ||
-			(update.MaxToolArgumentBytes != nil && current.MaxToolArgumentBytes != next.MaxToolArgumentBytes) ||
-			(update.MaxToolArgumentDeltas != nil && current.MaxToolArgumentDeltas != next.MaxToolArgumentDeltas) ||
-			(update.MaxChannelBytes != nil && current.MaxChannelBytes != next.MaxChannelBytes) ||
-			(update.MaxRequestBytes != nil && current.MaxRequestBytes != next.MaxRequestBytes)
-
-		if changed {
-			if current.ConfigGeneration == math.MaxInt64 {
-				return ErrOutputGuardGenerationOverflow
-			}
-			next.ConfigGeneration = current.ConfigGeneration + 1
-
-			var enabledVal any
-			if next.Enabled != nil {
-				if db.isSQLite() {
-					if *next.Enabled {
-						enabledVal = int64(1)
-					} else {
-						enabledVal = int64(0)
-					}
-				} else {
-					enabledVal = *next.Enabled
-				}
-			}
-
-			if _, err := tx.ExecContext(ctx, `
-				UPDATE system_settings
-				SET output_guard_enabled = $1,
-				    output_guard_max_tool_argument_bytes = $2,
-				    output_guard_max_tool_argument_deltas = $3,
-				    output_guard_max_channel_bytes = $4,
-				    output_guard_max_request_bytes = $5,
-				    output_guard_config_generation = $6
-				WHERE id = 1
-			`, enabledVal, next.MaxToolArgumentBytes, next.MaxToolArgumentDeltas, next.MaxChannelBytes, next.MaxRequestBytes, next.ConfigGeneration); err != nil {
-				return err
-			}
-		}
-
-		if err := tx.Commit(); err != nil {
-			return err
-		}
-		committed = next
-		return nil
+		var err error
+		committed, err = db.updateOutputGuardSettingsTx(ctx, tx, update)
+		return err
 	})
 	if err != nil {
 		return OutputGuardSettings{}, err
 	}
 	return committed, nil
+}
+
+// UpdateSystemSettingsWithOutputGuard 在同一个事务内保存全局设置和输出防护设置。
+// 防护列与 system_settings 的其余列同属一行；任一校验或写入失败时整体回滚，
+// 避免“整体保存失败但防护配置已单独提交并热应用”的部分提交。
+func (db *DB) UpdateSystemSettingsWithOutputGuard(ctx context.Context, settings *SystemSettings, update OutputGuardSettingsUpdate) (OutputGuardSettings, error) {
+	var committed OutputGuardSettings
+	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if err := updateSystemSettingsWithExecer(ctx, tx, settings); err != nil {
+			return err
+		}
+		var err error
+		committed, err = db.updateOutputGuardSettingsTx(ctx, tx, update)
+		return err
+	})
+	if err != nil {
+		return OutputGuardSettings{}, err
+	}
+	return committed, nil
+}
+
+// updateOutputGuardSettingsTx 在调用方提供的事务内读取当前防护配置、合并更新、
+// 校验并递增 generation。generation 的读取与写入同处一个事务，因此并发保存
+// 不会丢更新或产生重复 generation。
+func (db *DB) updateOutputGuardSettingsTx(ctx context.Context, tx *sql.Tx, update OutputGuardSettingsUpdate) (OutputGuardSettings, error) {
+	current := DefaultOutputGuardSettings()
+	if err := scanOutputGuardSettings(
+		tx.QueryRowContext(ctx, db.outputGuardSettingsSelectQuery(!db.isSQLite())),
+		&current,
+	); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return OutputGuardSettings{}, err
+	}
+
+	next := current
+	if update.Enabled != nil {
+		val := *update.Enabled
+		next.Enabled = &val
+	}
+	if update.MaxToolArgumentBytes != nil {
+		next.MaxToolArgumentBytes = *update.MaxToolArgumentBytes
+	}
+	if update.MaxToolArgumentDeltas != nil {
+		next.MaxToolArgumentDeltas = *update.MaxToolArgumentDeltas
+	}
+	if update.MaxChannelBytes != nil {
+		next.MaxChannelBytes = *update.MaxChannelBytes
+	}
+	if update.MaxRequestBytes != nil {
+		next.MaxRequestBytes = *update.MaxRequestBytes
+	}
+
+	if err := ValidateOutputGuardSettings(next); err != nil {
+		return OutputGuardSettings{}, err
+	}
+
+	changed := (update.Enabled != nil && (current.Enabled == nil || *current.Enabled != *next.Enabled)) ||
+		(update.MaxToolArgumentBytes != nil && current.MaxToolArgumentBytes != next.MaxToolArgumentBytes) ||
+		(update.MaxToolArgumentDeltas != nil && current.MaxToolArgumentDeltas != next.MaxToolArgumentDeltas) ||
+		(update.MaxChannelBytes != nil && current.MaxChannelBytes != next.MaxChannelBytes) ||
+		(update.MaxRequestBytes != nil && current.MaxRequestBytes != next.MaxRequestBytes)
+
+	if changed {
+		if current.ConfigGeneration == math.MaxInt64 {
+			return OutputGuardSettings{}, ErrOutputGuardGenerationOverflow
+		}
+		next.ConfigGeneration = current.ConfigGeneration + 1
+
+		var enabledVal any
+		if next.Enabled != nil {
+			if db.isSQLite() {
+				if *next.Enabled {
+					enabledVal = int64(1)
+				} else {
+					enabledVal = int64(0)
+				}
+			} else {
+				enabledVal = *next.Enabled
+			}
+		}
+
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE system_settings
+			SET output_guard_enabled = $1,
+			    output_guard_max_tool_argument_bytes = $2,
+			    output_guard_max_tool_argument_deltas = $3,
+			    output_guard_max_channel_bytes = $4,
+			    output_guard_max_request_bytes = $5,
+			    output_guard_config_generation = $6
+			WHERE id = 1
+		`, enabledVal, next.MaxToolArgumentBytes, next.MaxToolArgumentDeltas, next.MaxChannelBytes, next.MaxRequestBytes, next.ConfigGeneration); err != nil {
+			return OutputGuardSettings{}, err
+		}
+	}
+
+	return next, nil
 }

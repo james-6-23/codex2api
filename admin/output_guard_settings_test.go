@@ -150,3 +150,48 @@ func TestAdminOutputGuardSettings_PutValidationAndReadonlyRejection(t *testing.T
 		}
 	}
 }
+
+// TestAdminOutputGuardSettings_NotPersistedOrAppliedWhenLaterValidationFails 覆盖
+// “防护配置先于后续校验落库并热应用”的部分提交回归：同一请求里后续字段校验
+// 失败时，防护配置必须既未写库，也未热应用。
+func TestAdminOutputGuardSettings_NotPersistedOrAppliedWhenLaterValidationFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, db := newTestAdminHandlerFixture(t)
+	ctx := context.Background()
+
+	beforeDB, err := db.GetOutputGuardSettings(ctx)
+	if err != nil {
+		t.Fatalf("read guard settings before request: %v", err)
+	}
+	beforeRuntime := proxy.CurrentOutputGuardConfig()
+
+	// models_list_read_max_bytes 的校验发生在防护设置之后；它失败时整个保存
+	// 请求返回 400，防护设置不应留下任何已提交或已生效的痕迹。
+	w := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
+		"output_guard_enabled":       true,
+		"models_list_read_max_bytes": 1,
+	})
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 on invalid models_list_read_max_bytes, got %d, body: %s", w.Code, w.Body.String())
+	}
+
+	afterDB, err := db.GetOutputGuardSettings(ctx)
+	if err != nil {
+		t.Fatalf("read guard settings after request: %v", err)
+	}
+	if afterDB.ConfigGeneration != beforeDB.ConfigGeneration ||
+		afterDB.MaxToolArgumentBytes != beforeDB.MaxToolArgumentBytes ||
+		afterDB.MaxChannelBytes != beforeDB.MaxChannelBytes ||
+		afterDB.MaxRequestBytes != beforeDB.MaxRequestBytes ||
+		afterDB.MaxToolArgumentDeltas != beforeDB.MaxToolArgumentDeltas ||
+		afterDB.Enabled == nil || beforeDB.Enabled == nil || *afterDB.Enabled != *beforeDB.Enabled {
+		t.Fatalf("guard settings must not be committed when later validation fails: before=%+v after=%+v", beforeDB, afterDB)
+	}
+
+	afterRuntime := proxy.CurrentOutputGuardConfig()
+	if afterRuntime.Generation != beforeRuntime.Generation ||
+		afterRuntime.Enabled != beforeRuntime.Enabled ||
+		afterRuntime.MaxToolArgumentBytes != beforeRuntime.MaxToolArgumentBytes {
+		t.Fatalf("guard runtime config must not be applied when later validation fails: before=%+v after=%+v", beforeRuntime, afterRuntime)
+	}
+}

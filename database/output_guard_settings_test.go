@@ -189,6 +189,51 @@ func TestOutputGuardSettingsNarrowUpdateNotOverwrittenBySystemSettings(t *testin
 	})
 }
 
+func TestUpdateSystemSettingsWithOutputGuardRollsBackOnGuardValidationFailure(t *testing.T) {
+	runOnAllOutputGuardDBDrivers(t, func(t *testing.T, db *DB) {
+		ctx := context.Background()
+		if err := db.UpdateSystemSettings(ctx, &SystemSettings{SiteName: "before-rollback"}); err != nil {
+			t.Fatalf("seed system settings: %v", err)
+		}
+		beforeSettings, err := db.GetSystemSettings(ctx)
+		if err != nil || beforeSettings == nil {
+			t.Fatalf("GetSystemSettings before = %+v, err = %v", beforeSettings, err)
+		}
+		beforeGuard, err := db.GetOutputGuardSettings(ctx)
+		if err != nil {
+			t.Fatalf("GetOutputGuardSettings before = %v", err)
+		}
+
+		invalidToolBytes := int64(1)
+		_, err = db.UpdateSystemSettingsWithOutputGuard(ctx, &SystemSettings{SiteName: "must-roll-back"}, OutputGuardSettingsUpdate{
+			MaxToolArgumentBytes: &invalidToolBytes,
+		})
+		if !errors.Is(err, ErrInvalidOutputGuardSettings) {
+			t.Fatalf("expected ErrInvalidOutputGuardSettings, got %v", err)
+		}
+
+		afterSettings, err := db.GetSystemSettings(ctx)
+		if err != nil || afterSettings == nil {
+			t.Fatalf("GetSystemSettings after = %+v, err = %v", afterSettings, err)
+		}
+		if afterSettings.SiteName != beforeSettings.SiteName {
+			t.Fatalf("system settings committed despite guard failure: before site=%q after site=%q", beforeSettings.SiteName, afterSettings.SiteName)
+		}
+
+		afterGuard, err := db.GetOutputGuardSettings(ctx)
+		if err != nil {
+			t.Fatalf("GetOutputGuardSettings after = %v", err)
+		}
+		if afterGuard.ConfigGeneration != beforeGuard.ConfigGeneration ||
+			afterGuard.MaxToolArgumentBytes != beforeGuard.MaxToolArgumentBytes ||
+			afterGuard.MaxChannelBytes != beforeGuard.MaxChannelBytes ||
+			afterGuard.MaxRequestBytes != beforeGuard.MaxRequestBytes ||
+			afterGuard.MaxToolArgumentDeltas != beforeGuard.MaxToolArgumentDeltas {
+			t.Fatalf("guard settings committed despite rollback: before=%+v after=%+v", beforeGuard, afterGuard)
+		}
+	})
+}
+
 func TestOutputGuardSettingsGenerationOverflowRollback(t *testing.T) {
 	runOnAllOutputGuardDBDrivers(t, func(t *testing.T, db *DB) {
 		ctx := context.Background()

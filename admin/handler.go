@@ -10825,13 +10825,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 
-		committedGuard, err := h.db.UpdateOutputGuardSettings(c.Request.Context(), outputGuardUpdate)
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "保存防护设置失败："+err.Error())
-			return
-		}
-		outputGuardSettings = committedGuard
-		proxy.ApplyOutputGuardSettings(committedGuard)
+		// 防护设置的写入必须与 system_settings 的其余列共享同一个事务，
+		// 因此这里只做只读校验与合并；真正落库推迟到下面调用
+		// UpdateSystemSettingsWithOutputGuard，避免后续步骤失败时留下
+		// 已保存且已热应用的半截配置。
+		outputGuardSettings = mergedGuard
 	} else {
 		latestGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
 		if err != nil {
@@ -11961,7 +11959,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	// 持久化保存到数据库
-	err = h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
+	systemSettings := &database.SystemSettings{
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,
 		MaxConcurrency:                      h.store.GetMaxConcurrency(),
@@ -12095,9 +12093,22 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		IgnoreUsageLimitStatus:              h.store.IgnoreUsageLimitStatus(),
 		ModelPricingOverrides:               modelPricingOverrides,
 		ModelPricingSyncURL:                 modelPricingSyncURL,
-	})
+	}
+
+	// 防护列与 system_settings 其余列在同一行、同一事务中提交：任一写入失败
+	// 都不会留下已保存的防护配置。热应用必须等事务提交成功后再执行。
+	var committedOutputGuard database.OutputGuardSettings
+	if outputGuardUpdateRequested {
+		committedOutputGuard, err = h.db.UpdateSystemSettingsWithOutputGuard(c.Request.Context(), systemSettings, outputGuardUpdate)
+	} else {
+		err = h.db.UpdateSystemSettings(c.Request.Context(), systemSettings)
+	}
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if outputGuardUpdateRequested {
+			writeError(c, http.StatusInternalServerError, "保存防护设置失败，设置未生效："+err.Error())
+			return
+		}
 		if req.CodexImagesMainModel != nil {
 			writeError(c, http.StatusInternalServerError, "保存生图设置失败，文本驱动模型未生效")
 			return
@@ -12137,6 +12148,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			return
 		}
 	} else {
+		if outputGuardUpdateRequested {
+			outputGuardSettings = committedOutputGuard
+			if proxy.ApplyOutputGuardSettings(committedOutputGuard) {
+				log.Printf("设置已更新: output_guard generation=%d", committedOutputGuard.ConfigGeneration)
+			} else {
+				log.Printf("输出防护配置已提交，但运行时应用被拒绝（已有更新的 generation 或配置非法）: generation=%d", committedOutputGuard.ConfigGeneration)
+			}
+		}
 		if req.SessionSlotBufferSeconds != nil {
 			h.store.SetSessionSlotBuffer(time.Duration(sessionSlotBufferSeconds) * time.Second)
 			log.Printf("设置已更新: session_slot_buffer_seconds = %d", sessionSlotBufferSeconds)
