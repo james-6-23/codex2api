@@ -733,6 +733,8 @@ type APIKeySelfUsageLog struct {
 	UserBilling
 	ID                     int64     `json:"id"`
 	Channel                string    `json:"channel"`
+	ClientIP               string    `json:"client_ip"`
+	ClientUserAgent        string    `json:"client_user_agent"`
 	Endpoint               string    `json:"endpoint"`
 	Model                  string    `json:"model"`
 	EffectiveModel         string    `json:"effective_model"`
@@ -742,6 +744,7 @@ type APIKeySelfUsageLog struct {
 	FirstTokenMS           int       `json:"first_token_ms"`
 	InputTokens            int       `json:"input_tokens"`
 	OutputTokens           int       `json:"output_tokens"`
+	ReasoningTokens        int       `json:"reasoning_tokens"`
 	CachedTokens           int       `json:"cached_tokens"`
 	ImageInputTokens       int       `json:"image_input_tokens"`
 	ImageOutputTokens      int       `json:"image_output_tokens"`
@@ -1266,6 +1269,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 		SELECT
 			id,
 			COALESCE(channel, ''),
+			COALESCE(client_ip, ''), COALESCE(client_user_agent, ''),
 			` + apiKeySelfEndpointExpr + ` AS endpoint_name,
 			COALESCE(model, ''),
 			COALESCE(effective_model, ''),
@@ -1275,6 +1279,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			COALESCE(first_token_ms, 0),
 			COALESCE(input_tokens, 0),
 			COALESCE(output_tokens, 0),
+			COALESCE(reasoning_tokens, 0),
 			COALESCE(cached_tokens, 0),
 			COALESCE(image_input_tokens, 0), COALESCE(image_output_tokens, 0), COALESCE(cached_image_input_tokens, 0),
 			COALESCE(total_tokens, 0),
@@ -1304,6 +1309,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 		if err := rows.Scan(
 			&item.ID,
 			&item.Channel,
+			&item.ClientIP, &item.ClientUserAgent,
 			&item.Endpoint,
 			&item.Model,
 			&item.EffectiveModel,
@@ -1313,6 +1319,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			&item.FirstTokenMS,
 			&item.InputTokens,
 			&item.OutputTokens,
+			&item.ReasoningTokens,
 			&item.CachedTokens, &item.ImageInputTokens, &item.ImageOutputTokens, &item.CachedImageInputTokens,
 			&item.TotalTokens,
 			&item.UserBilled, &item.UserBillingMode, &item.ImageUnitPrice, &item.BilledImageCount,

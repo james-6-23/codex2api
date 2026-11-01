@@ -12,7 +12,6 @@ import {
   CalendarClock,
   Clock3,
   CircleDollarSign,
-  DatabaseZap,
   Eye,
   EyeOff,
   Gauge,
@@ -37,7 +36,7 @@ import {
 import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
-import CompactionBadges from '../components/CompactionBadges'
+import { PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
 import ChannelLogo from '../components/ChannelLogo'
 import ModelLogo from '../components/ModelLogo'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
@@ -1470,22 +1469,16 @@ function RecentLogsTable({
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-mono text-muted-foreground">{log.endpoint || '-'}</span>
-                <Badge
-                  variant="outline"
-                  className="text-[11px]"
-                  style={{ background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)', color: log.stream ? '#6366f1' : '#6b7280', borderColor: 'transparent' }}
-                >
-                  {log.stream ? 'stream' : 'sync'}
-                </Badge>
+                <PublicUsageRequestType log={log} />
               </div>
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs">
+                <dt className="text-muted-foreground">{t('usage.tableClientIP')}</dt>
+                <dd className="break-all font-mono text-muted-foreground">{log.client_ip || '-'}</dd>
+                <dt className="text-muted-foreground">{t('usage.tableUserAgent')}</dt>
+                <dd><PublicUsageUserAgent value={log.client_user_agent} /></dd>
+              </dl>
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border/50 text-xs">
-                {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                  <div className="font-mono text-[12px] tabular-nums">
-                    <span className="text-blue-500">↓{formatNumber(log.input_tokens)}</span>
-                    <span className="mx-1 text-border">|</span>
-                    <span className="text-emerald-500">↑{formatNumber(log.output_tokens)}</span>
-                  </div>
-                ) : <span className="font-mono text-[12px] text-muted-foreground">-</span>}
+                <PublicUsageTokens log={log} />
                 <span className="font-mono text-[12px] text-muted-foreground">
                   {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
                 </span>
@@ -1503,6 +1496,8 @@ function RecentLogsTable({
               <TableRow>
                 <TableHead className="text-[12px] font-semibold">{t('usage.tableStatus')}</TableHead>
                 <TableHead className="text-[12px] font-semibold">{t('usage.tableModel')}</TableHead>
+                <TableHead className="text-[12px] font-semibold">{t('usage.tableClientIP')}</TableHead>
+                <TableHead className="text-[12px] font-semibold">{t('usage.tableUserAgent')}</TableHead>
                 <TableHead className="text-[12px] font-semibold">{t('keyUsage.endpoint')}</TableHead>
                 <TableHead className="text-[12px] font-semibold">{t('usage.tableType')}</TableHead>
                 <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableToken')}</TableHead>
@@ -1535,36 +1530,19 @@ function RecentLogsTable({
                     </div>
                   </TableCell>
                   <TableCell>
+                    <span className="whitespace-nowrap font-mono text-[12px] text-muted-foreground">{log.client_ip || '-'}</span>
+                  </TableCell>
+                  <TableCell>
+                    <PublicUsageUserAgent value={log.client_user_agent} />
+                  </TableCell>
+                  <TableCell>
                     <span className="font-mono text-[13px] text-muted-foreground">{log.endpoint || '-'}</span>
                   </TableCell>
                   <TableCell>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <Badge
-                        variant="outline"
-                        className="text-[13px]"
-                        style={{ background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)', color: log.stream ? '#6366f1' : '#6b7280', borderColor: 'transparent' }}
-                      >
-                        {log.stream ? 'stream' : 'sync'}
-                      </Badge>
-                      <CompactionBadges
-                        compact={log.compact}
-                        hasCompactionHistory={log.has_compaction_history}
-                      />
-                    </div>
+                    <PublicUsageRequestType log={log} />
                   </TableCell>
                   <TableCell className="text-right">
-                    {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                      <div className="whitespace-nowrap font-mono text-[13px] tabular-nums leading-relaxed">
-                        <span className="text-blue-500">↓{formatNumber(log.input_tokens)}</span>
-                        <span className="mx-1 text-border">|</span>
-                        <span className="text-emerald-500">↑{formatNumber(log.output_tokens)}</span>
-                        {log.cached_tokens > 0 ? (
-                          <span className="ml-1 inline-flex items-center gap-0.5 text-indigo-500" title={t('usage.cacheReadCost')}><DatabaseZap className="size-3" />{formatNumber(log.cached_tokens)}</span>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <span className="font-mono text-[13px] text-muted-foreground">-</span>
-                    )}
+                    <PublicUsageTokens log={log} />
                   </TableCell>
                   <TableCell className="text-right">
                     <LogCostCell log={log} />
@@ -1589,7 +1567,7 @@ function RecentLogsTable({
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
+                  <TableCell colSpan={11} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
                 </TableRow>
               )}
             </TableBody>
