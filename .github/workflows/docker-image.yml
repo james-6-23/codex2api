@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       build_version:
-        description: 'Version label shown in the admin UI, e.g. 2.0.6'
+        description: 'Version label and manual image tag, e.g. 2.0.6 or dev-abc1234'
         required: false
         type: string
 
@@ -61,10 +61,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          flavor: latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ inputs.build_version || github.ref_name }},enable=${{ inputs.build_version != '' || startsWith(github.ref, 'refs/tags/v') }}
             type=semver,pattern={{major}}.{{minor}},value=${{ inputs.build_version || github.ref_name }},enable=${{ inputs.build_version != '' || startsWith(github.ref, 'refs/tags/v') }}
-            type=raw,value=latest
+            type=raw,value=${{ inputs.build_version }},enable=${{ github.event_name == 'workflow_dispatch' && inputs.build_version != '' }}
+            type=raw,value=latest,enable=${{ github.event_name != 'workflow_dispatch' || github.ref_name == github.event.repository.default_branch }}
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
