@@ -372,3 +372,64 @@ func TestOutputGuardStreamReadinessGate(t *testing.T) {
 		t.Fatalf("expected service_unavailable, got %+v", streamErrResp.Error)
 	}
 }
+
+// blockingOutputGuardSettingsReader 模拟数据库读挂起，直到 ctx 超时/取消。
+type blockingOutputGuardSettingsReader struct{}
+
+func (blockingOutputGuardSettingsReader) GetOutputGuardSettings(ctx context.Context) (database.OutputGuardSettings, error) {
+	<-ctx.Done()
+	return database.OutputGuardSettings{}, ctx.Err()
+}
+
+// TestLoadOutputGuardSettingsFailureRecordsSyncError 验证冷启动加载失败（父 ctx
+// 超时/取消）同样记录 LastSyncError，使 outputGuardHTTPGateArmed 在首次后台
+// 轮询前保持门禁并按 503 拦截。修复前父 ctx 超时路径会跳过记录，冷启动到首次
+// 轮询（约 5s）期间 HTTP 请求会以 guard 关闭状态放行。
+func TestLoadOutputGuardSettingsFailureRecordsSyncError(t *testing.T) {
+	cases := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{"parent deadline", func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 20*time.Millisecond)
+		}},
+		{"parent canceled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, func() {}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ResetOutputGuardStateForTest()
+			t.Cleanup(ResetOutputGuardStateForTest)
+
+			ctx, cancel := tc.ctx()
+			defer cancel()
+
+			if err := LoadOutputGuardSettings(ctx, blockingOutputGuardSettingsReader{}); err == nil {
+				t.Fatal("expected cold-start load to fail")
+			}
+			if IsOutputGuardReady() {
+				t.Fatal("failed cold-start load must not mark output guard ready")
+			}
+			if status := GetOutputGuardConfigSyncStatus(); status.LastSyncError == "" {
+				t.Fatal("failed cold-start load must record LastSyncError so the readiness gate stays armed")
+			}
+			if !outputGuardHTTPGateArmed() {
+				t.Fatal("gate must be armed after failed cold-start load")
+			}
+
+			gin.SetMode(gin.TestMode)
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+			if RequireOutputGuardReadyHTTP(c) {
+				t.Fatal("expected HTTP request to be blocked with 503 during cold start")
+			}
+			if w.Code != http.StatusServiceUnavailable {
+				t.Fatalf("expected HTTP 503, got %d", w.Code)
+			}
+		})
+	}
+}

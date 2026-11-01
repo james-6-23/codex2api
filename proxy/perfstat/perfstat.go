@@ -135,6 +135,11 @@ func ValidateTTFTAndCPUGates(res TTFTAndCPUBenchmarkResult) error {
 	if res.BaselineCPUMs <= 0 {
 		return fmt.Errorf("invalid experiment: baseline CPU time must be > 0, got %.4f ms", res.BaselineCPUMs)
 	}
+	// guard 侧同样必须为正：guard=0 会让 CPUIncreaseRatio 算成 -1（-100%）
+	// 并因此静默通过增量门禁，属于无效测量而非性能改善。
+	if res.GuardCPUMs <= 0 {
+		return fmt.Errorf("invalid experiment: guard CPU time must be > 0, got %.4f ms", res.GuardCPUMs)
+	}
 	if res.TTFTDeltaMs > 10.0 {
 		return fmt.Errorf("TTFT p95 delta gate failed: target <= 10.0ms, got %.2fms (baseline=%.2fms, guard=%.2fms)",
 			res.TTFTDeltaMs, res.BaselineP95TTFTMs, res.GuardP95TTFTMs)

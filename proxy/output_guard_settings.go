@@ -117,9 +117,11 @@ func ApplyOutputGuardSettings(settings database.OutputGuardSettings) bool {
 func LoadOutputGuardSettings(ctx context.Context, reader OutputGuardSettingsReader) error {
 	settings, err := readOutputGuardSettings(ctx, reader, OutputGuardConfigReadTimeout)
 	if err != nil {
-		if ctx == nil || ctx.Err() == nil {
-			recordOutputGuardConfigSyncError(err)
-		}
+		// 冷启动失败必须留下同步错误：outputGuardHTTPGateArmed 依据
+		// LastSyncError 判断 readiness 已有结论。若此处因父 ctx 超时/取消而
+		// 跳过记录，首次后台轮询（约 5s）之前 HTTP 入口会以 guard 关闭状态
+		// 放行请求，冷启动 503 门禁形同虚设。
+		recordOutputGuardConfigSyncError(err)
 		return err
 	}
 	if err := database.ValidateOutputGuardSettings(settings); err != nil {

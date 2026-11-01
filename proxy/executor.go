@@ -1650,10 +1650,16 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 			// 单行与多行累积事件都必须在 wire 层硬性受限，避免超大事件
 			// 长期占用内存。空 data 行（len(data)==0）也必须至少计 1 字节：
 			// 否则无穷多的 "data:" 行在事件边界缺失时会让 dataLines 无界增长。
-			if currentEventBytes+max(len(data), 1) > maxSSEEventBytes {
+			// 多行事件最终由 bytes.Join 以 '\n' 拼接，第一条之后的每行还要
+			// 额外计 1 字节分隔符；否则 k 行事件可累积到约 2×maxSSEEventBytes。
+			lineBytes := max(len(data), 1)
+			if len(dataLines) > 0 {
+				lineBytes++
+			}
+			if currentEventBytes+lineBytes > maxSSEEventBytes {
 				return errSSEEventTooLarge
 			}
-			currentEventBytes += max(len(data), 1)
+			currentEventBytes += lineBytes
 			// 使用 copy 避免底层数组共享导致的内存泄漏
 			dataCopy := make([]byte, len(data))
 			copy(dataCopy, data)

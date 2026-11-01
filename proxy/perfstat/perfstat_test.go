@@ -104,6 +104,24 @@ func TestValidateTTFTAndCPUGates(t *testing.T) {
 		t.Fatalf("expected baseline <= 0 to fail as invalid experiment, got: %v", err)
 	}
 
+	// 2b. guard CPU <= 0 同样是无效实验：ratio 会被算成 -1（-100%）并静默通过。
+	invalidGuard := TTFTAndCPUBenchmarkResult{
+		BaselineP95TTFTMs: 15.0,
+		GuardP95TTFTMs:    22.0,
+		TTFTDeltaMs:       7.0,
+		BaselineCPUMs:     10.0,
+		GuardCPUMs:        0.0, // 无效！
+		CPUIncreaseRatio:  -1.0,
+	}
+	err = ValidateTTFTAndCPUGates(invalidGuard)
+	if err == nil || !strings.Contains(err.Error(), "guard CPU time must be > 0") {
+		t.Fatalf("expected guard = 0 to fail as invalid experiment, got: %v", err)
+	}
+	invalidGuard.GuardCPUMs = -5.0
+	if err := ValidateTTFTAndCPUGates(invalidGuard); err == nil || !strings.Contains(err.Error(), "guard CPU time must be > 0") {
+		t.Fatalf("expected negative guard CPU to fail as invalid experiment, got: %v", err)
+	}
+
 	// 3. TTFT 增量超标 FAIL (Red)
 	badTTFT := TTFTAndCPUBenchmarkResult{
 		BaselineP95TTFTMs: 10.0,

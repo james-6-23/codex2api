@@ -174,6 +174,45 @@ func TestReadSSEStreamWithEventEmptyDataLinesCountTowardCap(t *testing.T) {
 	}
 }
 
+// TestReadSSEStreamWithEventMultilineJoinSeparatorsCountTowardCap 验证多行事件
+// 把 bytes.Join 插入的 '\n' 分隔符也计入事件上限：拼接后恰好等于上限的 payload
+// 可以送达 callback，超 1 字节则拒绝且不投递。修复前只统计 data 内容，k 行事件
+// 的实际长度可达 maxSSEEventBytes + (k-1)，极端情况下约 2 倍上限。
+func TestReadSSEStreamWithEventMultilineJoinSeparatorsCountTowardCap(t *testing.T) {
+	half := maxSSEEventBytes / 2
+
+	// joined = half + 1 + (half - 1) = maxSSEEventBytes，恰好等于上限。
+	exact := "data: " + strings.Repeat("a", half) + "\n" +
+		"data: " + strings.Repeat("b", half-1) + "\n\n"
+	payloadLen := 0
+	err := ReadSSEStreamWithEvent(strings.NewReader(exact), func(_ string, data []byte) bool {
+		payloadLen = len(data)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("event at exact cap must be accepted: %v", err)
+	}
+	if payloadLen != maxSSEEventBytes {
+		t.Fatalf("payload len = %d, want %d", payloadLen, maxSSEEventBytes)
+	}
+
+	// joined = maxSSEEventBytes + 1，必须拒绝。
+	// 修复前 content 合计仍是 maxSSEEventBytes，会被误判合法并投递超限事件。
+	over := "data: " + strings.Repeat("a", half) + "\n" +
+		"data: " + strings.Repeat("b", half) + "\n\n"
+	callbackCalls := 0
+	err = ReadSSEStreamWithEvent(strings.NewReader(over), func(string, []byte) bool {
+		callbackCalls++
+		return true
+	})
+	if !errors.Is(err, ErrSSEEventTooLarge) {
+		t.Fatalf("expected ErrSSEEventTooLarge for event over cap, got %v", err)
+	}
+	if callbackCalls != 0 {
+		t.Fatalf("oversized event must not be delivered, got %d call(s)", callbackCalls)
+	}
+}
+
 // TestReadSSEStreamWithEventAcceptsNearLimitLineAcrossReads 验证一条接近 wire
 // 上限的合法行跨多次 Read 到达时不被误判超长：行长检查必须在找到换行后按
 // 完整行判断，而不是在 append 前按"未完成缓冲区 + 本次读取"的总长度判断。
