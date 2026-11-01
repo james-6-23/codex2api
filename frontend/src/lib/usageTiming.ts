@@ -9,7 +9,7 @@ type UsageTimingLog = {
 const MIN_GENERATION_WINDOW_MS = 20
 const MS_PER_SECOND = 1_000
 
-export type TimingTone = 'good' | 'normal' | 'warn' | 'bad' | 'muted'
+export type TimingTone = 'good' | 'warn' | 'bad' | 'muted'
 
 export function computeOutputTokensPerSec(log: UsageTimingLog): number | null {
   if (log.status_code >= 400) return null
@@ -51,12 +51,4 @@ export function durationTone(ms: number): TimingTone {
   if (ms > 30000) return 'bad'
   if (ms > 10000) return 'warn'
   return 'good'
-}
-
-export function tokensPerSecTone(value: number | null): TimingTone {
-  if (value == null) return 'muted'
-  if (value >= 80) return 'good'
-  if (value >= 30) return 'normal'
-  if (value >= 10) return 'warn'
-  return 'bad'
 }

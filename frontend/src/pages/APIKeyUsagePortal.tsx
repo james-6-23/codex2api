@@ -36,7 +36,8 @@ import {
 import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
-import { PublicUsagePerformance, PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
+import { PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
+import { TimingCell, TokensPerSecCell, UsageCacheBadges } from '../components/UsageLogMetrics'
 import ReasoningEffortBadge from '../components/ReasoningEffortBadge'
 import ChannelLogo from '../components/ChannelLogo'
 import ModelLogo from '../components/ModelLogo'
@@ -1481,9 +1482,23 @@ function RecentLogsTable({
                 <dt className="text-muted-foreground">{t('usage.tableUserAgent')}</dt>
                 <dd><PublicUsageUserAgent value={log.client_user_agent} /></dd>
               </dl>
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border/50 text-xs">
-                <PublicUsageTokens log={log} />
-                <PublicUsagePerformance log={log} />
+              <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableToken')}</div>
+                  <div className="mt-1"><PublicUsageTokens log={log} /></div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableCached')}</div>
+                  <div className="mt-1.5"><UsageCacheBadges log={log} align="start" /></div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground" title={t('usage.tableTimingHint')}>{t('usage.tableTiming')}</div>
+                  <div className="mt-1.5"><TimingCell log={log} /></div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground" title={t('usage.tableTokensPerSecHint')}>{t('usage.tableTokensPerSec')}</div>
+                  <div className="mt-1"><TokensPerSecCell log={log} /></div>
+                </div>
               </div>
             </Card>
           )) : (
@@ -1496,16 +1511,18 @@ function RecentLogsTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableStatus')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableModel')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableClientIP')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableUserAgent')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('keyUsage.endpoint')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableType')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableToken')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableCost')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableTiming')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableTime')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableStatus')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableModel')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableClientIP')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableUserAgent')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('keyUsage.endpoint')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableType')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableToken')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableCached')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold"><span title={t('usage.tableTimingHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableTiming')}</span></TableHead>
+                <TableHead className="text-right text-[13px] font-semibold"><span title={t('usage.tableTokensPerSecHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableTokensPerSec')}</span></TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableCost')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableTime')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1545,10 +1562,16 @@ function RecentLogsTable({
                     <PublicUsageTokens log={log} />
                   </TableCell>
                   <TableCell className="text-right">
-                    <LogCostCell log={log} />
+                    <UsageCacheBadges log={log} />
                   </TableCell>
                   <TableCell className="text-right">
-                    <PublicUsagePerformance log={log} />
+                    <TimingCell log={log} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <TokensPerSecCell log={log} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <LogCostCell log={log} />
                   </TableCell>
                   <TableCell className="text-right">
                     <span className="whitespace-nowrap font-mono text-[13px] text-muted-foreground">{formatBeijingTime(log.created_at)}</span>
@@ -1556,7 +1579,7 @@ function RecentLogsTable({
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={10} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
+                  <TableCell colSpan={12} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
                 </TableRow>
               )}
             </TableBody>

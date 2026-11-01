@@ -747,6 +747,8 @@ type APIKeySelfUsageLog struct {
 	ReasoningTokens        int       `json:"reasoning_tokens"`
 	ReasoningEffort        string    `json:"reasoning_effort"`
 	CachedTokens           int       `json:"cached_tokens"`
+	CacheWrite5mTokens     int       `json:"cache_write_5m_tokens"`
+	CacheWrite1hTokens     int       `json:"cache_write_1h_tokens"`
 	ImageInputTokens       int       `json:"image_input_tokens"`
 	ImageOutputTokens      int       `json:"image_output_tokens"`
 	CachedImageInputTokens int       `json:"cached_image_input_tokens"`
@@ -1283,6 +1285,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			COALESCE(reasoning_tokens, 0),
 			COALESCE(reasoning_effort, ''),
 			COALESCE(cached_tokens, 0),
+			COALESCE(cache_write_5m_tokens, 0), COALESCE(cache_write_1h_tokens, 0),
 			COALESCE(image_input_tokens, 0), COALESCE(image_output_tokens, 0), COALESCE(cached_image_input_tokens, 0),
 			COALESCE(total_tokens, 0),
 			COALESCE(user_billed, 0),
@@ -1323,7 +1326,8 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			&item.OutputTokens,
 			&item.ReasoningTokens,
 			&item.ReasoningEffort,
-			&item.CachedTokens, &item.ImageInputTokens, &item.ImageOutputTokens, &item.CachedImageInputTokens,
+			&item.CachedTokens, &item.CacheWrite5mTokens, &item.CacheWrite1hTokens,
+			&item.ImageInputTokens, &item.ImageOutputTokens, &item.CachedImageInputTokens,
 			&item.TotalTokens,
 			&item.UserBilled, &item.UserBillingMode, &item.ImageUnitPrice, &item.BilledImageCount,
 			&item.ServiceTier,

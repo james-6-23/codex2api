@@ -4103,6 +4103,8 @@ export interface PublicAPIKeyUsageLog {
   reasoning_tokens: number
   reasoning_effort: string
   cached_tokens: number
+  cache_write_5m_tokens?: number
+  cache_write_1h_tokens?: number
   total_tokens: number
   user_billed: number
   input_cost: number
