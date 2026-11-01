@@ -10252,7 +10252,11 @@ func (h *Handler) GetSettings(c *gin.Context) {
 	}
 	outputGuardSettings, err := h.db.GetOutputGuardSettings(ctx)
 	if err != nil {
-		outputGuardSettings = database.DefaultOutputGuardSettings()
+		// 防护设置读取失败时不能用默认值兜底：代理进程可能仍在用上一次成功
+		// 应用的配置（可能已启用），返回默认值会让 UI 显示与实际运行状态不符。
+		log.Printf("读取输出防护设置失败: %v", err)
+		writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+		return
 	}
 	outputGuardEnabled := false
 	if outputGuardSettings.Enabled != nil {
@@ -10791,48 +10795,15 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		outputGuardUpdate.MaxChannelBytes != nil ||
 		outputGuardUpdate.MaxRequestBytes != nil
 
-	if err := validateOutputGuardSettingsUpdateRanges(outputGuardUpdate); err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
+	// 防护设置的读取、合并、校验与 generation 递增全部交给
+	// UpdateSystemSettingsWithOutputGuard 在同一个写事务内完成。这里不再做事务外
+	// 的预读取/预合并/预校验：并发保存时事务外读到的旧值会把合法 patch 误判为
+	// 400，而事务内真正的拒绝又会被当成 500。
 	var outputGuardSettings database.OutputGuardSettings
-	if outputGuardUpdateRequested {
-		currentGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
-		if err != nil {
-			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
-			return
-		}
-		mergedGuard := currentGuard
-		if outputGuardUpdate.Enabled != nil {
-			val := *outputGuardUpdate.Enabled
-			mergedGuard.Enabled = &val
-		}
-		if outputGuardUpdate.MaxToolArgumentBytes != nil {
-			mergedGuard.MaxToolArgumentBytes = *outputGuardUpdate.MaxToolArgumentBytes
-		}
-		if outputGuardUpdate.MaxToolArgumentDeltas != nil {
-			mergedGuard.MaxToolArgumentDeltas = *outputGuardUpdate.MaxToolArgumentDeltas
-		}
-		if outputGuardUpdate.MaxChannelBytes != nil {
-			mergedGuard.MaxChannelBytes = *outputGuardUpdate.MaxChannelBytes
-		}
-		if outputGuardUpdate.MaxRequestBytes != nil {
-			mergedGuard.MaxRequestBytes = *outputGuardUpdate.MaxRequestBytes
-		}
-		if err := database.ValidateOutputGuardSettings(mergedGuard); err != nil {
-			writeError(c, http.StatusBadRequest, err.Error())
-			return
-		}
-
-		// 防护设置的写入必须与 system_settings 的其余列共享同一个事务，
-		// 因此这里只做只读校验与合并；真正落库推迟到下面调用
-		// UpdateSystemSettingsWithOutputGuard，避免后续步骤失败时留下
-		// 已保存且已热应用的半截配置。
-		outputGuardSettings = mergedGuard
-	} else {
+	if !outputGuardUpdateRequested {
 		latestGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
 		if err != nil {
+			log.Printf("读取输出防护设置失败: %v", err)
 			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
 			return
 		}
@@ -12106,6 +12077,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
 		if outputGuardUpdateRequested {
+			// 事务内校验失败是调用方输入问题，映射 400；其余（数据库/IO 等）才是 500。
+			if errors.Is(err, database.ErrInvalidOutputGuardSettings) {
+				writeError(c, http.StatusBadRequest, err.Error())
+				return
+			}
 			writeError(c, http.StatusInternalServerError, "保存防护设置失败，设置未生效："+err.Error())
 			return
 		}
