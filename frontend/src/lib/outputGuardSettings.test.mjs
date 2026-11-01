@@ -7,6 +7,7 @@ import {
   DEFAULT_OUTPUT_GUARD_SETTINGS,
   OUTPUT_GUARD_KEYS,
   isOutputGuardKey,
+  omitOutputGuardFields,
   validateOutputGuardHierarchy,
   validateOutputGuardRanges,
   bytesToKiB,
@@ -34,6 +35,30 @@ test('OUTPUT_GUARD_KEYS covers exactly the 5 writable settings', () => {
   assert.equal(isOutputGuardKey('output_guard_enabled'), true)
   assert.equal(isOutputGuardKey('output_guard_config_generation'), false)
   assert.equal(isOutputGuardKey('unknown_key'), false)
+})
+
+test('full-form saves omit every writable output guard field', () => {
+  const settings = {
+    site_name: 'CodexProxy',
+    output_guard_enabled: true,
+    output_guard_max_tool_argument_bytes: 256 * KIB,
+    output_guard_max_tool_argument_deltas: 4096,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+    output_guard_config_generation: 17,
+  }
+
+  const payload = omitOutputGuardFields(settings)
+
+  for (const key of OUTPUT_GUARD_KEYS) {
+    assert.equal(Object.hasOwn(payload, key), false, `${key} must not be part of a full-form save`)
+  }
+  assert.deepEqual(payload, {
+    site_name: 'CodexProxy',
+    // 生成号由 buildWritableSettingsPayload 单独剔除，这里只验证不误删其他字段。
+    output_guard_config_generation: 17,
+  })
+  assert.equal(settings.output_guard_enabled, true, 'the source settings object must not be mutated')
 })
 
 test('validateOutputGuardHierarchy validates tool <= channel <= request', () => {

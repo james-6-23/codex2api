@@ -37,6 +37,19 @@ export function isOutputGuardKey(key: string): boolean {
   return OUTPUT_GUARD_KEYS.indexOf(key as (typeof OUTPUT_GUARD_KEYS)[number]) !== -1
 }
 
+/**
+ * 整表单保存前剔除 guard 写入字段：guard 只允许走自动保存（按 key 打补丁）
+ * 路径。整表单提交会把手动打开页面时读到的陈旧快照连同新一轮 generation
+ * 一起上送，可能覆盖其他管理员刚改过、甚至刚关闭的 guard 配置。
+ */
+export function omitOutputGuardFields<T extends object>(settings: T): T {
+  const payload = { ...settings }
+  for (const key of OUTPUT_GUARD_KEYS) {
+    Reflect.deleteProperty(payload, key)
+  }
+  return payload
+}
+
 export function validateOutputGuardHierarchy(settings: {
   output_guard_max_tool_argument_bytes: number
   output_guard_max_channel_bytes: number

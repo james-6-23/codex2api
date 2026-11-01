@@ -21,6 +21,7 @@ import {
   findClaudeTimezoneOption,
 } from '../lib/claudeAccountOptions'
 import { buildWritableSettingsPayload } from '../lib/settingsPayload'
+import { resolveByteLimitCommit } from '../lib/byteLimitCommit'
 import { mergeConfirmedSettingsValues, resolveAutoSaveRollbackValues } from '../lib/settingsAutoSave'
 import {
   buildContinuousRetryCatchAllPatch,
@@ -42,9 +43,11 @@ import {
 } from '../lib/responseCacheMetrics'
 import {
   DEFAULT_OUTPUT_GUARD_SETTINGS,
+  KIB,
   OUTPUT_GUARD_KEYS,
   bytesToKiB,
   kibToBytes,
+  omitOutputGuardFields,
   validateOutputGuardHierarchy,
   validateOutputGuardRanges,
 } from '../lib/outputGuardSettings'
@@ -287,6 +290,14 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
 const SETTINGS_SECTION_SPY_OFFSET_PX = 140
 // 手动保存字段的脏检查里跳过的键：生成号是服务端只读，自定义 Prompt 规则由规则页单独保存。
 const SETTINGS_DIRTY_IGNORED_KEYS: ReadonlySet<string> = new Set(['response_cache_config_generation', 'output_guard_config_generation', 'prompt_filter_custom_patterns', 'codex_images_default_main_model', 'codex_egress'])
+
+// 以 KiB/MiB 展示、blur 自动保存的字节上限字段：展示值是四舍五入后的整数，
+// blur 提交必须回到持久化的原始字节值判断，否则未编辑的字段也会被舍入改写。
+type ByteLimitField =
+  | 'output_guard_max_tool_argument_bytes'
+  | 'output_guard_max_channel_bytes'
+  | 'output_guard_max_request_bytes'
+  | 'models_list_read_max_bytes'
 
 const getDefaultModelMappingEntries = (): ModelMappingEntry[] =>
   Object.entries(DEFAULT_CLAUDE_MODEL_MAP) as ModelMappingEntry[]
@@ -3092,6 +3103,28 @@ export default function Settings() {
     }
   }, [commitSettingsForm, finishAutoSaveRequest, showToast, t])
 
+  // 字节上限输入框的 blur 提交：展示单位值没变时不做任何写入，并保留持久化的
+  // 原始字节值，避免把 131073 这类非整倍数值舍入成 131072。基准取持久化快照
+  // 而不是当前表单值——键入时表单已经变成换算后的新字节值了。
+  const commitByteLimitField = useCallback((
+    field: ByteLimitField,
+    submittedUnits: number,
+    bytesPerUnit: number,
+  ) => {
+    const decision = resolveByteLimitCommit(
+      persistedSettings?.[field],
+      submittedUnits,
+      bytesPerUnit,
+    )
+    if (!decision.submit) {
+      if (settingsFormRef.current[field] !== decision.bytes) {
+        commitSettingsForm({ ...settingsFormRef.current, [field]: decision.bytes })
+      }
+      return
+    }
+    void autoSaveSettingsPatch({ [field]: decision.bytes })
+  }, [autoSaveSettingsPatch, commitSettingsForm, persistedSettings])
+
   const autoSaveContinuousRetryPatch = useCallback((patch: Partial<SystemSettings>) => {
     return continuousRetrySaveQueueRef.current(() => autoSaveSettingsPatch(patch))
   }, [autoSaveSettingsPatch])
@@ -3253,9 +3286,11 @@ export default function Settings() {
     setSavingSettings(true)
     try {
       const adminSecretChanged = settingsForm.admin_auth_source !== 'env' && settingsForm.admin_secret !== loadedAdminSecret
-	      const payload: Partial<SystemSettings> = buildWritableSettingsPayload(normalized)
+	      const payload: Partial<SystemSettings> = omitOutputGuardFields(buildWritableSettingsPayload(normalized))
       // 自定义 Prompt 规则由规则页单独保存，避免普通设置提交覆盖并发发布结果。
       delete payload.prompt_filter_custom_patterns
+      // 失控防护字段只走自动保存：整表单提交会把手动打开页面时读到的陈旧快照
+      // 连同新 generation 一起上送，可能覆盖其他管理员刚改过、甚至刚关闭的 guard。
       const updated = await api.updateSettings(payload)
       setPersistedSettings(commitSettingsForm(updated))
       // 手动保存同样刷新"最后一次服务器确认"快照，后续自动保存失败时不会
@@ -6316,9 +6351,7 @@ export default function Settings() {
                             }))
                           }
                           onValueCommit={(value) =>
-                            void autoSaveSettingsPatch({
-                              models_list_read_max_bytes: mibToBytes(value),
-                            })
+                            commitByteLimitField('models_list_read_max_bytes', value, MIB)
                           }
                         />
                         <span className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-[11px] font-medium text-muted-foreground">
@@ -6784,7 +6817,7 @@ export default function Settings() {
                             setSettingsForm((f) => ({ ...f, output_guard_max_tool_argument_bytes: kibToBytes(val) }))
                           }}
                           onValueCommit={(val) => {
-                            void autoSaveSettingsPatch({ output_guard_max_tool_argument_bytes: kibToBytes(val) })
+                            commitByteLimitField('output_guard_max_tool_argument_bytes', val, KIB)
                           }}
                         />
                       </SettingField>
@@ -6818,7 +6851,7 @@ export default function Settings() {
                             setSettingsForm((f) => ({ ...f, output_guard_max_channel_bytes: kibToBytes(val) }))
                           }}
                           onValueCommit={(val) => {
-                            void autoSaveSettingsPatch({ output_guard_max_channel_bytes: kibToBytes(val) })
+                            commitByteLimitField('output_guard_max_channel_bytes', val, KIB)
                           }}
                         />
                       </SettingField>
@@ -6835,7 +6868,7 @@ export default function Settings() {
                             setSettingsForm((f) => ({ ...f, output_guard_max_request_bytes: kibToBytes(val) }))
                           }}
                           onValueCommit={(val) => {
-                            void autoSaveSettingsPatch({ output_guard_max_request_bytes: kibToBytes(val) })
+                            commitByteLimitField('output_guard_max_request_bytes', val, KIB)
                           }}
                         />
                       </SettingField>
