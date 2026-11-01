@@ -737,7 +737,6 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-cli/0.91.0")
 
 	// Resin 反代：注入临时账号身份头
 	if proxy.IsResinEnabled() && tempID != "" {
