@@ -130,6 +130,20 @@ func (l *apiKeyConcurrencyLimiter) acquireTracked(id int64, limit int) (func(), 
 	return l.acquire(id, limit)
 }
 
+// APIKeyConcurrency 只读取指定密钥的并发数，不为闲置密钥创建计数器。
+func (h *Handler) APIKeyConcurrency(apiKeyID int64) int64 {
+	if h == nil {
+		return 0
+	}
+	limiter := h.apiKeyConcurrencyLimiter()
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+	if counter := limiter.counters[apiKeyID]; counter != nil {
+		return counter.inflight.Load()
+	}
+	return 0
+}
+
 // APIKeyConcurrencySnapshot 返回当前进程中各密钥的并发快照。
 func (h *Handler) APIKeyConcurrencySnapshot() map[int64]int64 {
 	result := make(map[int64]int64)

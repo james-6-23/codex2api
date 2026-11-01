@@ -1099,6 +1099,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	keyUsage := r.Group("/api/key-usage")
 	keyUsage.GET("/summary", h.GetPublicAPIKeyUsageSummary)
 	keyUsage.GET("/me", h.GetPublicAPIKeyUsageSummary)
+	keyUsage.GET("/concurrency", h.GetPublicAPIKeyConcurrency)
 
 	// 账号自助添加公开门户（无 admin 鉴权；开关门控 + IP 限流；见 self_service.go）
 	accountPortal := r.Group("/api/account-portal")

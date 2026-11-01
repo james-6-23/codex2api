@@ -42,6 +42,7 @@ import ChannelLogo from '../components/ChannelLogo'
 import ModelLogo from '../components/ModelLogo'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import APIKeyModelRequestUsageCard from '../components/APIKeyModelRequestUsage'
+import PublicAPIKeyConcurrencyBadge from '../components/PublicAPIKeyConcurrencyBadge'
 import { usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import type {
   APIKeyLimits,
@@ -391,7 +392,7 @@ export default function APIKeyUsagePortal() {
 
       <main className="relative mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6">
         {data ? (
-          <QuotaHero data={data} quotaPercent={quotaPercent} controls={controls} />
+          <QuotaHero data={data} apiKey={activeAPIKey} quotaPercent={quotaPercent} controls={controls} />
         ) : (
           <Card className="py-0">
             <CardContent className="flex flex-wrap items-center justify-between gap-3 p-3.5">
@@ -718,7 +719,7 @@ function quotaTone(percent: number): QuotaTone {
   return 'emerald'
 }
 
-function QuotaHero({ data, quotaPercent, controls }: { data: PublicAPIKeyUsageResponse; quotaPercent: number; controls: ReactNode }) {
+function QuotaHero({ data, apiKey, quotaPercent, controls }: { data: PublicAPIKeyUsageResponse; apiKey: string; quotaPercent: number; controls: ReactNode }) {
   const { t } = useTranslation()
   const { key } = data
   const hasQuota = key.quota_limit > 0
@@ -760,9 +761,10 @@ function QuotaHero({ data, quotaPercent, controls }: { data: PublicAPIKeyUsageRe
               <KeyRound className="size-4" />
             </div>
             <div className="min-w-0">
-              <div className="flex min-w-0 items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span className="truncate text-[15px] font-semibold text-foreground">{key.name || t('keyUsage.keyCard')}</span>
                 <StatusPill status={key.status} label={t(`apiKeys.status.${key.status}`)} />
+                <PublicAPIKeyConcurrencyBadge key={apiKey} apiKey={apiKey} limit={key.limits.max_concurrency} />
               </div>
               <div className="truncate font-mono text-xs text-muted-foreground">{key.key}</div>
             </div>

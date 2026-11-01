@@ -583,6 +583,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  getPublicAPIKeyConcurrency: (apiKey: string) =>
+    requestAPIKeyUsage<{ current: number }>('/concurrency', apiKey),
   getPublicAPIKeyUsage: (apiKey: string, range = '30d', params: { page?: number; pageSize?: number } & PublicAPIKeyUsageLogFilter = {}) => {
     const search = new URLSearchParams()
     search.set('range', range)
