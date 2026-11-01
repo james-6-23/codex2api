@@ -104,6 +104,59 @@ func TestRequestGuardEndChannelExecutesTailCheck(t *testing.T) {
 	}
 }
 
+// B1 回归：EndChannel 之后迟到的 append/snapshot 仍必须继续接受周期检测。
+// 真实场景：Anthropic 在 content_block_stop 之后仍可能下发 content_block_delta，
+// 不能因为窗口已释放就完全跳过扫描。
+func TestRequestGuardPostEndObservationsStillScanned(t *testing.T) {
+	t.Run("AppendAfterEnd", func(t *testing.T) {
+		rg := NewRequestGuard(defaultTestConfig())
+		if err := rg.ObserveAppend("c_post", "", KindText, []byte("non-repeating prefix")); err != nil {
+			t.Fatalf("prefix append error: %v", err)
+		}
+		if err := rg.EndChannel("c_post"); err != nil {
+			t.Fatalf("EndChannel error: %v", err)
+		}
+
+		periodic := bytes.Repeat([]byte("0123456789"), 1024) // 10240 字节，周期 10
+		var got error
+		for off := 0; off < len(periodic); off += 1024 {
+			end := off + 1024
+			if end > len(periodic) {
+				end = len(periodic)
+			}
+			got = rg.ObserveAppend("c_post", "", KindText, periodic[off:end])
+			if got != nil {
+				break
+			}
+		}
+		if got == nil || got.Error() != "repetition" {
+			t.Fatalf("post-end append must still trigger repetition detection, got %v", got)
+		}
+		if !rg.IsTripped() || rg.TrippedReason() != "repetition" {
+			t.Fatalf("expected tripped with repetition, got %s", rg.TrippedReason())
+		}
+	})
+
+	t.Run("SnapshotAfterEnd", func(t *testing.T) {
+		rg := NewRequestGuard(defaultTestConfig())
+		if err := rg.ObserveAppend("c_post_snap", "", KindText, []byte("x")); err != nil {
+			t.Fatalf("append error: %v", err)
+		}
+		if err := rg.EndChannel("c_post_snap"); err != nil {
+			t.Fatalf("EndChannel error: %v", err)
+		}
+
+		snapshot := bytes.Repeat([]byte("abcdef"), 1500) // 9000 字节，周期 6
+		err := rg.ObserveSnapshot("c_post_snap", "", KindText, snapshot, "unknown_or_intermediate_type")
+		if err == nil || err.Error() != "repetition" {
+			t.Fatalf("post-end snapshot must still trigger repetition detection, got %v", err)
+		}
+		if !rg.IsTripped() || rg.TrippedReason() != "repetition" {
+			t.Fatalf("expected tripped with repetition, got %s", rg.TrippedReason())
+		}
+	})
+}
+
 func TestRequestGuardRequestBytesPrecedenceOverScanBudget(t *testing.T) {
 	// Spec §5.3 严格 8 步优先级：先步骤 4 语义字节预算检查 (request_bytes)，后步骤 6 扫描预算
 	rg := NewRequestGuard(Config{

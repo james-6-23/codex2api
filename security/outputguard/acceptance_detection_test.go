@@ -3,6 +3,7 @@ package outputguard
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"math"
@@ -601,9 +602,9 @@ func TestAcceptanceScenario8_BudgetScanPermitsAndBoundingCases(t *testing.T) {
 		}
 		_ = cg.CommitSnapshot(snap, g, c, "arguments.done")
 
-		// 真实内部私有统计断言：验证 baseline hash 建立与扫描预算扣减
-		if cg.terminalBaselineHash == 0 || !cg.hasBaselineHash {
-			t.Fatalf("baseline hash not established")
+		// 真实内部私有统计断言：验证 SHA-256 baseline 摘要建立与扫描预算扣减
+		if !cg.hasBaselineHash || cg.terminalBaselineHash != sha256.Sum256(snap) {
+			t.Fatalf("baseline sha256 digest not established")
 		}
 		if cg.remainingScanBudget != 0 {
 			t.Fatalf("scan budget must be exhausted (0), got %d", cg.remainingScanBudget)

@@ -2,6 +2,8 @@ package outputguard
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"errors"
 	"math/rand"
 	"testing"
 )
@@ -173,10 +175,154 @@ func TestChannelGuardHashMismatchDiscardsQuotaAndChargesFullCost(t *testing.T) {
 	if !cg.consumedTerminalTypes["item.done"] {
 		t.Fatalf("expected item.done marked as consumed/discarded")
 	}
-	// 基准 Hash 绝不能被篡改快照覆盖
-	h := fnv64a(data1)
-	if cg.terminalBaselineHash != h {
-		t.Fatalf("expected baseline hash to stay unchanged")
+	// 基准摘要绝不能被篡改快照覆盖，且必须是抗碰撞的 SHA-256（32B）而非 64-bit FNV
+	wantDigest := sha256.Sum256(data1)
+	if cg.terminalBaselineHash != wantDigest {
+		t.Fatalf("expected baseline sha256 digest to stay unchanged")
+	}
+	if cg.terminalBaselineHash == sha256.Sum256(data2) {
+		t.Fatalf("expected tampered snapshot to have a different sha256 digest")
+	}
+}
+
+// B2 回归：终态等价比对使用抗碰撞 SHA-256 摘要。
+// 旧实现使用 64-bit FNV-1a，攻击者可用碰撞让"改动过的快照"零成本通过；
+// 这里直接验证 SHA-256 路径的选择性：同长度单字节篡改的摘要必然不同且被全额计费。
+func TestChannelGuardTerminalBaselineDigestIsCollisionResistant(t *testing.T) {
+	cg := NewChannelGuard("c_digest", KindToolArguments, 262144, 4096)
+	data1 := bytes.Repeat([]byte("terminal-snapshot-"), 64)
+	growth, cost, _, err := cg.CheckSnapshot(data1, "arguments.done")
+	if err != nil {
+		t.Fatalf("first snapshot CheckSnapshot error: %v", err)
+	}
+	if err := cg.CommitSnapshot(data1, growth, cost, "arguments.done"); err != nil {
+		t.Fatalf("first snapshot CommitSnapshot error: %v", err)
+	}
+
+	if !cg.hasBaselineHash {
+		t.Fatalf("expected baseline digest created")
+	}
+	if len(cg.terminalBaselineHash) != sha256.Size {
+		t.Fatalf("baseline digest must be %d bytes (sha256), got %d", sha256.Size, len(cg.terminalBaselineHash))
+	}
+	if cg.terminalBaselineHash != sha256.Sum256(data1) {
+		t.Fatalf("baseline digest must equal sha256(snapshot)")
+	}
+
+	variant := bytes.Clone(data1)
+	variant[len(variant)-1] ^= 0x01
+	if sha256.Sum256(variant) == cg.terminalBaselineHash {
+		t.Fatalf("sha256 digest collision on single-byte mutation is unexpected")
+	}
+
+	growth, cost, skip, err := cg.CheckSnapshot(variant, "item.done")
+	if err != nil {
+		t.Fatalf("variant CheckSnapshot error: %v", err)
+	}
+	if skip {
+		t.Fatalf("mutated variant must not be treated as equivalent terminal snapshot")
+	}
+	if cost != int64(len(variant)) {
+		t.Fatalf("mutated variant must be fully charged, want %d got %d", len(variant), cost)
+	}
+}
+
+// B1 回归：channel 结束（ReleaseWindow）后迟到的 append 仍必须接受周期检测。
+// 对应 Anthropic 在 content_block_stop 之后仍下发 content_block_delta 的场景。
+func TestChannelGuardPostEndAppendStillScans(t *testing.T) {
+	cg := NewChannelGuard("c_post_append", KindText, 1<<20, 4096)
+	prefix := []byte("non-repeating-prefix-")
+	growth, cost, err := cg.CheckAppend(prefix)
+	if err != nil {
+		t.Fatalf("prefix CheckAppend error: %v", err)
+	}
+	if err := cg.CommitAppend(prefix, growth, cost); err != nil {
+		t.Fatalf("prefix CommitAppend error: %v", err)
+	}
+
+	cg.ReleaseWindow()
+	if cg.isClosed != true || cg.detector != nil || cg.postEnd == nil {
+		t.Fatalf("ReleaseWindow must close channel and switch to bounded post-end detector")
+	}
+
+	periodic := bytes.Repeat([]byte("0123456789"), 1024) // 10240 字节，周期 10
+	var scanErr error
+	for off := 0; off < len(periodic); off += 1024 {
+		end := off + 1024
+		if end > len(periodic) {
+			end = len(periodic)
+		}
+		chunk := periodic[off:end]
+		growth, cost, err := cg.CheckAppend(chunk)
+		if err != nil {
+			t.Fatalf("post-end CheckAppend error: %v", err)
+		}
+		if err := cg.CommitAppend(chunk, growth, cost); err != nil {
+			scanErr = err
+			break
+		}
+	}
+	if !errors.Is(scanErr, ErrRepetitionDetected) {
+		t.Fatalf("post-end append must still trigger repetition detection, got %v", scanErr)
+	}
+}
+
+// B1 回归：channel 结束后的 snapshot 仍必须接受周期检测。
+func TestChannelGuardPostEndSnapshotStillScans(t *testing.T) {
+	cg := NewChannelGuard("c_post_snapshot", KindText, 1<<20, 4096)
+	cg.ReleaseWindow()
+
+	snapshot := bytes.Repeat([]byte("abcdef"), 1500) // 9000 字节，周期 6
+	growth, cost, skip, err := cg.CheckSnapshot(snapshot, "unknown_or_intermediate_type")
+	if err != nil {
+		t.Fatalf("post-end CheckSnapshot error: %v", err)
+	}
+	if skip {
+		t.Fatalf("non-terminal snapshot must not be treated as equivalent")
+	}
+	if err := cg.CommitSnapshot(snapshot, growth, cost, "unknown_or_intermediate_type"); !errors.Is(err, ErrRepetitionDetected) {
+		t.Fatalf("post-end snapshot must still trigger repetition detection, got %v", err)
+	}
+}
+
+// B1 回归：结束后扫描仍受 2*limit 扫描预算约束，不能借关闭通道绕过预算。
+func TestChannelGuardPostEndScanBudgetStillEnforced(t *testing.T) {
+	cg := NewChannelGuard("c_post_budget", KindText, 4096, 4096)
+	if cg.RemainingScanBudget() != 8192 {
+		t.Fatalf("want initial scan budget 8192, got %d", cg.RemainingScanBudget())
+	}
+
+	r := rand.New(rand.NewSource(424242))
+	full := make([]byte, 4096)
+	r.Read(full)
+	growth, cost, err := cg.CheckAppend(full)
+	if err != nil {
+		t.Fatalf("pre-end CheckAppend error: %v", err)
+	}
+	if err := cg.CommitAppend(full, growth, cost); err != nil {
+		t.Fatalf("pre-end CommitAppend error: %v", err)
+	}
+	if cg.RemainingScanBudget() != 4096 {
+		t.Fatalf("pre-end append must consume 4096 budget, remaining=%d", cg.RemainingScanBudget())
+	}
+
+	cg.ReleaseWindow()
+
+	// 结束后的快照扫描同样扣减预算（非重复数据不触发检测，但必须计费）。
+	growth, cost, _, err = cg.CheckSnapshot(full, "unknown_or_intermediate_type")
+	if err != nil {
+		t.Fatalf("post-end CheckSnapshot error: %v", err)
+	}
+	if err := cg.CommitSnapshot(full, growth, cost, "unknown_or_intermediate_type"); err != nil {
+		t.Fatalf("post-end CommitSnapshot error: %v", err)
+	}
+	if cg.RemainingScanBudget() != 0 {
+		t.Fatalf("post-end snapshot must consume remaining budget, remaining=%d", cg.RemainingScanBudget())
+	}
+
+	// 预算耗尽后，结束后的快照不得再获得免费扫描。
+	if _, _, _, err := cg.CheckSnapshot(full, "unknown_or_intermediate_type"); !errors.Is(err, ErrScanBudgetExhausted) {
+		t.Fatalf("post-end scan must fail once budget exhausted, got %v", err)
 	}
 }
 
