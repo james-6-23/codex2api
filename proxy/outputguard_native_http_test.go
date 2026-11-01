@@ -150,8 +150,11 @@ func TestNativeHTTP_MessagesNativeClaudeStreamGuardTripped(t *testing.T) {
 	if got := upstreamCalls.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 upstream call, got %d", got)
 	}
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, GuardTriggeredPublicMessage) {
-		t.Fatalf("expected the sanitized anthropic guard terminal, got: %s", outputGuardTestBodySummary(body))
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected status 502 for uncommitted claude stream guard trip, got %d; body: %s", recorder.Code, outputGuardTestBodySummary(body))
+	}
+	if !strings.Contains(body, GuardTriggeredPublicCode) || !strings.Contains(body, GuardTriggeredPublicMessage) {
+		t.Fatalf("expected the sanitized public guard terminal, got: %s", outputGuardTestBodySummary(body))
 	}
 	if strings.Contains(body, "message_stop") {
 		t.Fatalf("guard terminal must not be followed by a forged message_stop: %s", outputGuardTestBodySummary(body))
@@ -390,6 +393,9 @@ func TestNativeHTTP_GrokNativeProjectorDispatchGuardTripped(t *testing.T) {
 	if !chatOutcome.guardTripped || chatOutcome.logStatusCode != http.StatusBadGateway {
 		t.Fatalf("expected chat guard outcome with 502, got: %+v", chatOutcome)
 	}
+	if chatRecorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502 for uncommitted chat stream guard trip, got %d", chatRecorder.Code)
+	}
 	chatBody := chatRecorder.Body.String()
 	if !strings.Contains(chatBody, GuardTriggeredPublicCode) {
 		t.Fatalf("expected sanitized chat guard terminal, got: %s", outputGuardTestBodySummary(chatBody))
@@ -437,6 +443,9 @@ func TestNativeHTTP_GrokNativeProjectorDispatchGuardTripped(t *testing.T) {
 	if !responsesOutcome.guardTripped || responsesOutcome.logStatusCode != http.StatusBadGateway {
 		t.Fatalf("expected responses guard outcome with 502, got: %+v", responsesOutcome)
 	}
+	if responsesRecorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502 for uncommitted responses stream guard trip, got %d", responsesRecorder.Code)
+	}
 	responsesBody := responsesRecorder.Body.String()
 	if !strings.Contains(responsesBody, GuardTriggeredPublicCode) {
 		t.Fatalf("expected sanitized responses guard terminal, got: %s", outputGuardTestBodySummary(responsesBody))
@@ -450,6 +459,75 @@ func TestNativeHTTP_GrokNativeProjectorDispatchGuardTripped(t *testing.T) {
 	if got := responsesCalls.Load(); got != 1 {
 		t.Fatalf("expected exactly 1 responses upstream call, got %d", got)
 	}
+
+	// 补充验证：若下游已经提交响应头（部分内容已下发），guard 命中应保持 200 并写出协议专属 SSE error envelope
+	t.Run("CommittedStreamPreserves200WithSSEErrorEnvelope", func(t *testing.T) {
+		committedUpstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			flusher, _ := w.(http.Flusher)
+			// 先发一帧合法正常内容，让代理提交 200 响应头并写入下游
+			safePayload, _ := json.Marshal(gin.H{
+				"id":      "chatcmpl-grok-committed-1",
+				"choices": []gin.H{{"index": 0, "delta": gin.H{"content": "normal prefix"}}},
+			})
+			_, _ = io.WriteString(w, "data: "+string(safePayload)+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(10 * time.Millisecond)
+			// 再下发失控命中帧
+			tripFrame, _ := json.Marshal(gin.H{
+				"id": "chatcmpl-grok-committed-2",
+				"choices": []gin.H{
+					{
+						"index": 0,
+						"delta": gin.H{
+							"tool_calls": []gin.H{
+								{"index": 0, "id": "call_guard_committed", "function": gin.H{"name": "write", "arguments": chatPayload}},
+							},
+						},
+					},
+				},
+			})
+			_, _ = io.WriteString(w, "data: "+string(tripFrame)+"\n\n")
+			if flusher != nil {
+				flusher.Flush()
+			}
+			select {
+			case <-r.Context().Done():
+			case <-time.After(2 * time.Second):
+			}
+		}))
+		t.Cleanup(committedUpstream.Close)
+
+		committedCtx, committedRecorder := newNativeGuardGinContext(t)
+		committedResp, err := http.Get(committedUpstream.URL)
+		if err != nil {
+			t.Fatalf("http.Get committed upstream: %v", err)
+		}
+		_, committedOutcome, wrote, _ := forwardGrokNativeResponseTo(
+			context.Background(), committedCtx, committedResp, GrokProtocolChatCompletions, true, time.Now(), func() {}, nil, nil,
+		)
+		if !committedOutcome.guardTripped || committedOutcome.logStatusCode != http.StatusBadGateway {
+			t.Fatalf("expected committed stream guard outcome with 502, got: %+v", committedOutcome)
+		}
+		if !wrote {
+			t.Fatal("expected downstream to have written bytes before guard trip")
+		}
+		if committedRecorder.Code != http.StatusOK {
+			t.Fatalf("expected committed stream to preserve HTTP 200, got %d", committedRecorder.Code)
+		}
+		committedBody := committedRecorder.Body.String()
+		if !strings.Contains(committedBody, "normal prefix") {
+			t.Fatalf("expected prefix content delivered, got: %s", outputGuardTestBodySummary(committedBody))
+		}
+		if !strings.Contains(committedBody, GuardTriggeredPublicCode) {
+			t.Fatalf("expected protocol error envelope with GuardTriggeredPublicCode, got: %s", outputGuardTestBodySummary(committedBody))
+		}
+		if strings.Contains(committedBody, "runaway_tool_argument_val") {
+			t.Fatalf("the tripped tool arguments leaked downstream: %s", outputGuardTestBodySummary(committedBody))
+		}
+	})
 }
 
 // 5. 冷启动门禁：配置加载失败（lastSyncError 已记录、未就绪）时，Messages 与

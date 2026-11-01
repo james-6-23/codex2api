@@ -138,10 +138,12 @@ func TestNativeHTTP_GrokMessagesGuardBudgetInheritedAcrossAttempts(t *testing.T)
 	if got := upstreamCalls.Load(); got != 2 {
 		t.Fatalf("expected 2 upstream calls (retryable stream break + guarded attempt), got %d; body=%s", got, outputGuardTestBodySummary(body))
 	}
-	// 重试等待期间 Messages keepalive 已提交 SSE 200 头，因此 Guard 终态按既有
-	// 语义以 anthropic error envelope 下发；关键是它必须是 Guard 终态而不是
-	// 伪造的 message_stop / 成功完成态。
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, GuardTriggeredPublicMessage) {
+	// 在未向下游写出任何内容时 Guard 命中：
+	// 响应头未提交，按 PR 规范直接以脱敏 502 JSON 返回（包含 GuardTriggeredPublicCode 与 GuardTriggeredPublicMessage）。
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502 for uncommitted retry guard trip, got %d; body=%s", recorder.Code, outputGuardTestBodySummary(body))
+	}
+	if !strings.Contains(body, GuardTriggeredPublicCode) || !strings.Contains(body, GuardTriggeredPublicMessage) {
 		t.Fatalf("expected the sanitized anthropic guard terminal, got: %s", outputGuardTestBodySummary(body))
 	}
 	for _, leaked := range []string{chunkA[:32], chunkB[:32]} {
@@ -261,7 +263,10 @@ func TestNativeHTTP_GrokMessagesGuardScopeIsolatesChannelsAcrossAttempts(t *test
 	if got := upstreamCalls.Load(); got != 2 {
 		t.Fatalf("expected 2 upstream calls (retryable stream break + guarded attempt), got %d; body=%s", got, outputGuardTestBodySummary(body))
 	}
-	if !strings.Contains(body, "event: error") || !strings.Contains(body, GuardTriggeredPublicMessage) {
+	if recorder.Code != http.StatusBadGateway {
+		t.Fatalf("expected HTTP 502 for uncommitted retry guard trip, got %d; body=%s", recorder.Code, outputGuardTestBodySummary(body))
+	}
+	if !strings.Contains(body, GuardTriggeredPublicCode) || !strings.Contains(body, GuardTriggeredPublicMessage) {
 		t.Fatalf("expected the sanitized anthropic guard terminal, got: %s", outputGuardTestBodySummary(body))
 	}
 	if strings.Contains(body, toolChunk[:32]) {

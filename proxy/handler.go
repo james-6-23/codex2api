@@ -1324,14 +1324,12 @@ func forwardGrokNativeResponseObservedWithScope(readCtx context.Context, c *gin.
 			if err := ObserveEvent(requestGuard, projector, frame.Event, frame.Data); err != nil || requestGuard.IsTripped() {
 				reason := requestGuard.TrippedReason()
 				failure = guardCoord.HandleTripped(reason, func() { pending.Reset() })
-				// 原生流一旦命中就必须交付协议终态而不是伪造完成；先提交
-				// SSE 200 头，04a 才能在已提交写路径写出协议专属 envelope。
-				if !c.Writer.Written() {
-					if c.Writer.Header().Get("Content-Type") == "" {
-						c.Header("Content-Type", "text/event-stream; charset=utf-8")
-					}
-					c.Writer.WriteHeaderNow()
-				}
+				// 原生流命中交付协议终态：
+				// - 若尚未提交任何响应头（!c.Writer.Written()，如首帧即命中），
+				//   SendDownstreamGuardTerminalHTTP 的未提交分支会直接写出脱敏 502 JSON 错误，
+				//   避免下游按 HTTP 状态码误判为 200 成功。
+				// - 若部分内容已下发导致响应头已提交，保持 HTTP 200 + 协议专属 SSE error envelope，
+				//   通过协议内的错误帧通知客户端中断并完成脱敏。
 				_ = SendDownstreamGuardTerminalHTTP(c, nil, nil, grokProtocolGuardName(protocol), reason)
 				terminal, failed = true, true
 				return false
