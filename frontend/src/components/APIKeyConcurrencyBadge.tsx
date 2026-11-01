@@ -34,13 +34,12 @@ export function useAPIKeyConcurrency() {
   return counts;
 }
 
-export default function APIKeyConcurrencyBadge({ current, limit, showIdle = false }: {
+export default function APIKeyConcurrencyBadge({ current, limit }: {
   current?: number;
   limit?: number;
-  showIdle?: boolean;
 }) {
   const { t } = useTranslation();
-  if (current === undefined || (!showIdle && current <= 0)) return null;
+  if (current === undefined || current <= 0) return null;
 
   return (
     <Badge
@@ -49,7 +48,7 @@ export default function APIKeyConcurrencyBadge({ current, limit, showIdle = fals
       className="gap-1.5 rounded-full border-blue-500/20 bg-blue-50 px-2 py-0.5 text-[11px] font-semibold tabular-nums text-blue-600 shadow-2xs dark:border-blue-400/20 dark:bg-blue-950 dark:text-blue-400"
     >
       <span
-        className={`size-1.5 rounded-full bg-blue-500 dark:bg-blue-400 ${current > 0 ? "animate-pulse" : ""}`}
+        className="size-1.5 animate-pulse rounded-full bg-blue-500 dark:bg-blue-400"
         aria-hidden
       />
       {current}/{limit && limit > 0 ? limit : "∞"}

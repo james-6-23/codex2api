@@ -42,6 +42,7 @@ import ModelLogo from '../components/ModelLogo'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import APIKeyModelRequestUsageCard from '../components/APIKeyModelRequestUsage'
 import PublicAPIKeyConcurrencyBadge from '../components/PublicAPIKeyConcurrencyBadge'
+import APIKeyChannelBadge from '../components/APIKeyChannelBadge'
 import { usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import type {
   APIKeyLimits,
@@ -764,6 +765,7 @@ function QuotaHero({ data, apiKey, quotaPercent, controls }: { data: PublicAPIKe
                 <span className="truncate text-[15px] font-semibold text-foreground">{key.name || t('keyUsage.keyCard')}</span>
                 <StatusPill status={key.status} label={t(`apiKeys.status.${key.status}`)} />
                 <PublicAPIKeyConcurrencyBadge key={apiKey} apiKey={apiKey} limit={key.limits.max_concurrency} />
+                <APIKeyChannelBadge channel={key.limits.upstream_channel} />
               </div>
               <div className="truncate font-mono text-xs text-muted-foreground">{key.key}</div>
             </div>

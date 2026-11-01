@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import APIKeyConcurrencyBadge, { useAPIKeyConcurrency } from "../components/APIKeyConcurrencyBadge";
+import APIKeyChannelBadge from "../components/APIKeyChannelBadge";
 import APIKeyTokenUsagePanel from "../components/APIKeyTokenUsagePanel";
 import APIKeyModelRequestLimitsEditor from "../components/APIKeyModelRequestLimitsEditor";
 import APIKeyModelRequestUsageCard from "../components/APIKeyModelRequestUsage";
@@ -1569,7 +1570,7 @@ export default function APIKeys() {
                                     status={getAPIKeyStatus(keyRow)}
                                     t={t}
                                   />
-                                  <KeyChannelBadge keyRow={keyRow} t={t} />
+                                  <APIKeyChannelBadge channel={keyRow.limits?.upstream_channel} />
                                   <APIKeyPromptPolicyBadge binding={promptBindingsByKey.get(keyRow.id)} />
                                   <KeyScopeBudgetBadge
                                     items={scopeSummary[String(keyRow.id)]}
@@ -1782,7 +1783,7 @@ export default function APIKeys() {
                                         status={getAPIKeyStatus(keyRow)}
                                         t={t}
                                       />
-                                      <KeyChannelBadge keyRow={keyRow} t={t} />
+                                      <APIKeyChannelBadge channel={keyRow.limits?.upstream_channel} />
                                       <APIKeyPromptPolicyBadge binding={promptBindingsByKey.get(keyRow.id)} />
                                       <KeyScopeBudgetBadge
                                         items={scopeSummary[String(keyRow.id)]}
@@ -3207,76 +3208,6 @@ function KeyScopeBudgetBadge({
         percent: Math.min(100, Math.round(tightest.ratio * 100)),
         window: tightest.window || "-",
       })}
-    </Badge>
-  );
-}
-
-// KeyChannelBadge 展示该 Key 的上游渠道限定（auto/codex/grok），一眼区分 Key 用途。
-function KeyChannelBadge({
-  keyRow,
-  t,
-}: {
-  keyRow: APIKeyRow;
-  t: Translator;
-}) {
-  const channel = keyRow.limits?.upstream_channel;
-  if (channel === "grok") {
-    return (
-      <Badge
-        variant="outline"
-        title={t("apiKeys.limits.upstreamChannelGrok")}
-        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
-      >
-        <ChannelLogo channel="grok" size={12} />
-        Grok
-      </Badge>
-    );
-  }
-  if (channel === "antigravity") {
-    return (
-      <Badge
-        variant="outline"
-        title={t("apiKeys.limits.upstreamChannelAntigravity")}
-        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
-      >
-        <ChannelLogo channel="antigravity" size={12} />
-        Antigravity
-      </Badge>
-    );
-  }
-  if (channel === "codex") {
-    return (
-      <Badge
-        variant="outline"
-        title={t("apiKeys.limits.upstreamChannelCodex")}
-        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
-      >
-        <ChannelLogo channel="codex" size={12} />
-        Codex
-      </Badge>
-    );
-  }
-  if (channel === "claude") {
-    return (
-      <Badge
-        variant="outline"
-        title={t("apiKeys.limits.upstreamChannelClaude")}
-        className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-foreground"
-      >
-        <ChannelLogo channel="claude" size={12} />
-        Claude
-      </Badge>
-    );
-  }
-  // auto：路由图标表示"不限渠道，按模型自动路由"
-  return (
-    <Badge
-      variant="outline"
-      title={t("apiKeys.limits.upstreamChannelHint.auto")}
-      className="gap-1 border-transparent bg-muted/70 px-1.5 py-0 text-[11px] font-semibold text-muted-foreground"
-    >
-      <Waypoints className="size-3" />
-      {t("apiKeys.limits.upstreamChannelAutoTab")}
     </Badge>
   );
 }

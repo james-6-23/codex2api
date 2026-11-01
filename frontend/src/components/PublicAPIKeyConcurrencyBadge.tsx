@@ -31,5 +31,5 @@ export default function PublicAPIKeyConcurrencyBadge({ apiKey, limit }: { apiKey
       document.removeEventListener('visibilitychange', refresh)
     }
   }, [apiKey])
-  return <APIKeyConcurrencyBadge current={current} limit={limit} showIdle />
+  return <APIKeyConcurrencyBadge current={current} limit={limit} />
 }
