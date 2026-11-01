@@ -23,6 +23,7 @@ import (
 	"github.com/codex2api/config"
 	"github.com/codex2api/database"
 	"github.com/codex2api/security/outputguard"
+	"github.com/codex2api/security/promptfilter"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
@@ -520,6 +521,66 @@ func assertWSGuardTerminalThen1013(t *testing.T, conn *websocket.Conn, runawayPa
 	if !errors.As(nextErr, &closeErr) || closeErr.Code != websocket.CloseTryAgainLater {
 		t.Fatalf("expected websocket close %d (CloseTryAgainLater), got %v", websocket.CloseTryAgainLater, nextErr)
 	}
+}
+
+// TestResponsesWebSocketGuardTripSkipsBufferedFlush 回归 guard 命中后仍补写
+// outputBuffer 的问题：命中前被输出过滤缓冲的消息不得在 guard 终态帧之后再
+// flush 给客户端——终态必须是连接关闭前的最后一帧。
+func TestResponsesWebSocketGuardTripSkipsBufferedFlush(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	pattern := "ws_buffered_runaway_12345678_"
+	runawayText := strings.Repeat(pattern, 400)
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
+		sse := `data: {"type":"response.output_text.delta","delta":"buffered-before-guard"}` + "\n\n" +
+			`data: {"type":"response.output_text.delta","delta":"` + runawayText + `"}` + "\n\n"
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       io.NopCloser(strings.NewReader(sse)),
+		}, nil
+	}
+
+	handler, store, account := setupLifecycleTestHandler(t, "https://upstream.example", "", "gpt-5.5")
+	account.ResponsesUpstreamTransport = auth.OpenAIResponsesTransportHTTP
+	store.SetCodexModelMapping(`{"client-ws-alias":"gpt-5.5"}`)
+	// 开启输出过滤缓冲，让 guard 命中前的合法 delta 停留在 outputBuffer 中；
+	// 命中时缓冲区仍非空，才能覆盖"终态后 flush"这条路径。
+	filterConfig := promptfilter.DefaultConfig()
+	filterConfig.Enabled = true
+	filterConfig.Mode = promptfilter.ModeBlock
+	filterConfig.Advanced.Output = promptfilter.OutputConfig{
+		Enabled:      true,
+		BufferBytes:  1 << 20,
+		OverlapBytes: 64,
+		StrictOnly:   true,
+	}
+	store.SetPromptFilterConfig(filterConfig)
+
+	router := gin.New()
+	router.GET("/v1/responses", handler.ResponsesWebSocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	turnReq := `{"model":"client-ws-alias","input":"hello"}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(turnReq)); err != nil {
+		t.Fatalf("write websocket turn: %v", err)
+	}
+
+	assertWSGuardTerminalThen1013(t, conn, pattern)
 }
 
 // 场景 12 (WS 并发回归): 同一连接上两个命名 lane 同时命中 guard。gorilla/websocket

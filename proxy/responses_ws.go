@@ -1446,7 +1446,9 @@ func (h *Handler) streamResponsesWSUpstream(
 	if err := failPendingResponsesWSInterrupt(c.Request.Context(), conn); err != nil {
 		writeErr = err
 	}
-	if writeErr == nil && outputBuffer != nil && wsReplay == nil {
+	// guard 命中（或写失败）后 clientGone 已置位：guard 终态帧是连接关闭前的
+	// 最后一帧，命中后不得再把 outputBuffer 中残留的消息补写到下游。
+	if writeErr == nil && !clientGone && outputBuffer != nil && wsReplay == nil {
 		remaining, err := outputBuffer.Flush()
 		if err != nil {
 			writeErr = err

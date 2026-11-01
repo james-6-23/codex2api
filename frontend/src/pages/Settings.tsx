@@ -21,6 +21,7 @@ import {
   findClaudeTimezoneOption,
 } from '../lib/claudeAccountOptions'
 import { buildWritableSettingsPayload } from '../lib/settingsPayload'
+import { mergeConfirmedSettingsValues, resolveAutoSaveRollbackValues } from '../lib/settingsAutoSave'
 import {
   buildContinuousRetryCatchAllPatch,
   buildContinuousRetryEnabledPatch,
@@ -2904,6 +2905,10 @@ export default function Settings() {
   const backgroundFileInputRef = useRef<HTMLInputElement>(null)
   const persistedBrandingRef = useRef<Partial<SiteBranding> | null>(null)
   const settingsFormRef = useRef(settingsForm)
+  // 最后一次被服务器确认的设置快照（首次加载成功或自动/手动保存成功后更新）。
+  // 键入型字段在 blur 提交前已同步进 settingsFormRef，自动保存失败若按该值
+  // 回滚，会把从未被服务端接受的草稿留在界面上；回滚必须以本快照为准。
+  const confirmedSettingsRef = useRef<SystemSettings | null>(null)
   const autoSavePendingCountRef = useRef(0)
   const autoSaveFieldVersionsRef = useRef<Record<string, number>>({})
   const autoSaveStatusTimerRef = useRef<number | null>(null)
@@ -2997,7 +3002,6 @@ export default function Settings() {
       ...previous,
       ...patch,
     })
-    const rollbackPatch = getSettingsPatchValues(previous, patchKeys)
     markPersisted(getSettingsPatchValues(optimistic, patchKeys))
     const requestedVersions: Record<string, number> = {}
 
@@ -3017,6 +3021,12 @@ export default function Settings() {
 
     try {
       const updated = await api.updateSettings(getSettingsPatchValues(optimistic, patchKeys))
+      // 本次请求提交的字段已被服务器确认；记录到快照里，"最后一次服务器确认
+      // 的设置"才能作为后续失败的可靠回滚目标。
+      confirmedSettingsRef.current = mergeConfirmedSettingsValues(
+        confirmedSettingsRef.current,
+        getSettingsPatchValues(updated, patchKeys),
+      )
       const mergeKeys = patchKeys.filter((key) => {
         const fieldKey = String(key)
         return autoSaveFieldVersionsRef.current[fieldKey] === requestedVersions[fieldKey]
@@ -3063,11 +3073,18 @@ export default function Settings() {
         return autoSaveFieldVersionsRef.current[fieldKey] === requestedVersions[fieldKey]
       })
       if (rollbackKeys.length > 0) {
+        // 回滚到最后的服务器确认值，而不是提交前的表单值：键入型字段在 blur
+        // 提交前就把草稿写进了 settingsFormRef，那个值从未被服务端接受。
+        const rollbackValues = resolveAutoSaveRollbackValues(
+          confirmedSettingsRef.current,
+          previous,
+          rollbackKeys,
+        )
         commitSettingsForm({
           ...settingsFormRef.current,
-          ...getSettingsPatchValues({ ...previous, ...rollbackPatch }, rollbackKeys),
+          ...rollbackValues,
         })
-        markPersisted(getSettingsPatchValues({ ...previous, ...rollbackPatch }, rollbackKeys))
+        markPersisted(rollbackValues)
       }
       const message = getErrorMessage(error)
       showToast(`${t('settings.autoSaveFailed')}: ${message}`, 'error')
@@ -3185,6 +3202,8 @@ export default function Settings() {
   const loadSettingsData = useCallback(async () => {
     const [health, settings, modelsResp] = await Promise.all([api.getHealth(), api.getSettings(), api.getModels()])
     setPersistedSettings(commitSettingsForm(settings))
+    // commitSettingsForm 已把归一化后的加载结果同步进 settingsFormRef。
+    confirmedSettingsRef.current = settingsFormRef.current
     const branding = {
       site_name: settings.site_name,
       site_logo: settings.site_logo,
@@ -3239,6 +3258,9 @@ export default function Settings() {
       delete payload.prompt_filter_custom_patterns
       const updated = await api.updateSettings(payload)
       setPersistedSettings(commitSettingsForm(updated))
+      // 手动保存同样刷新"最后一次服务器确认"快照，后续自动保存失败时不会
+      // 回滚到这次手动保存之前的旧值。
+      confirmedSettingsRef.current = settingsFormRef.current
       const branding = {
         site_name: updated.site_name,
         site_logo: updated.site_logo,

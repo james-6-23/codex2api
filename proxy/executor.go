@@ -1671,11 +1671,6 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 	for {
 		n, err := body.Read(buf)
 		if n > 0 {
-			// 未完成行在缓冲区中持续累积，必须在 append 前就拒绝超过
-			// wire 上限的输入，避免无换行巨量数据无限增长。
-			if len(lineBuf)+n > maxSSELineBytes {
-				return errSSELineTooLong
-			}
 			lineBuf = append(lineBuf, buf[:n]...)
 
 			// 按行处理。用偏移量扫描，最后一次性把未完成行搬到缓冲区头部；
@@ -1685,9 +1680,9 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 			for {
 				idx := bytes.IndexByte(lineBuf[consumed:], '\n')
 				if idx < 0 {
-					// 深度防御（defense in depth）：上面的 append 前检查已保证
-					// len(lineBuf) <= maxSSELineBytes 且 consumed >= 0，此处数学上
-					// 不可达，仅作为未来改动的兜底。
+					// 无换行：只约束这条未完成行的内容长度。每次 Read 最多再
+					// 追加 len(buf) 字节，因此内存增长有界（<= 行上限 + 一次
+					// Read），不会因无换行的巨量数据无限增长。
 					if len(lineBuf)-consumed > maxSSELineBytes {
 						return errSSELineTooLong
 					}
@@ -1695,6 +1690,13 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 				}
 
 				lineEnd := consumed + idx
+				// 行长检查必须放在找到换行之后、按完整行判断：本次读取可能
+				// 恰好补完一条接近上限的合法行，其后还跟着其他行/事件；若在
+				// append 前按"未完成缓冲区 + 本次读取"的总长度判断，会把这条
+				// 合法行误判为超长。
+				if lineEnd-consumed > maxSSELineBytes {
+					return errSSELineTooLong
+				}
 				line := bytes.TrimRight(lineBuf[consumed:lineEnd], "\r")
 				consumed = lineEnd + 1
 
@@ -1728,8 +1730,9 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 		if err != nil {
 			if err == io.EOF {
 				if len(lineBuf) > 0 {
-					// 深度防御（defense in depth）：lineBuf 在 append 前已被
-					// maxSSELineBytes 限制，此处数学上不可达，仅作未来改动兜底。
+					// 深度防御（defense in depth）：扫描循环的无换行分支已把
+					// 未完成行限制在 maxSSELineBytes 内，此处数学上不可达，仅
+					// 作为未来改动的兜底。
 					if len(lineBuf) > maxSSELineBytes {
 						return errSSELineTooLong
 					}

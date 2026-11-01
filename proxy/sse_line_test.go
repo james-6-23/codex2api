@@ -174,6 +174,42 @@ func TestReadSSEStreamWithEventEmptyDataLinesCountTowardCap(t *testing.T) {
 	}
 }
 
+// TestReadSSEStreamWithEventAcceptsNearLimitLineAcrossReads 验证一条接近 wire
+// 上限的合法行跨多次 Read 到达时不被误判超长：行长检查必须在找到换行后按
+// 完整行判断，而不是在 append 前按"未完成缓冲区 + 本次读取"的总长度判断。
+func TestReadSSEStreamWithEventAcceptsNearLimitLineAcrossReads(t *testing.T) {
+	// 注释行内容恰好等于上限（不含换行），随后紧跟一个合法事件。8 MiB 内容
+	// 正好由 128 次 64 KiB 读取铺满；第 129 次读取同时带回换行与后续事件。
+	// 修复前 len(lineBuf)+n > maxSSELineBytes 会在扫描前直接返回错误。
+	input := ":" + strings.Repeat("x", maxSSELineBytes-1) + "\n" + "data: ok\n\n"
+
+	var collected []string
+	err := ReadSSEStreamWithEvent(strings.NewReader(input), func(_ string, data []byte) bool {
+		collected = append(collected, string(data))
+		return true
+	})
+	if err != nil {
+		t.Fatalf("near-limit legal line must not be rejected: %v", err)
+	}
+	if len(collected) != 1 || collected[0] != "ok" {
+		t.Fatalf("collected = %v, want ['ok']", collected)
+	}
+}
+
+// TestReadSSEStreamWithEventRejectsNewlineTerminatedOversizedLine 验证带换行的
+// 超限行仍被拒绝：行长检查移入扫描循环后，不能只靠"无换行"分支兜底而放过
+// 完整行，否则超限行会先累积到内存再被当成合法行解析。
+func TestReadSSEStreamWithEventRejectsNewlineTerminatedOversizedLine(t *testing.T) {
+	input := ":" + strings.Repeat("x", maxSSELineBytes) + "\n" + "data: ok\n\n"
+
+	err := ReadSSEStreamWithEvent(strings.NewReader(input), func(string, []byte) bool {
+		return true
+	})
+	if !errors.Is(err, ErrSSELineTooLong) {
+		t.Fatalf("err = %v, want ErrSSELineTooLong", err)
+	}
+}
+
 // TestReadBoundedResponseBodyMaxInt64Limit 验证 limit=math.MaxInt64 时不会因
 // limit+1 溢出为负导致 io.LimitReader 立即 EOF、静默返回空数据。
 func TestReadBoundedResponseBodyMaxInt64Limit(t *testing.T) {
