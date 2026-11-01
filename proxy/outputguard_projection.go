@@ -85,18 +85,29 @@ func (p *ResponsesProjector) Project(eventType string, data []byte) ([]Observati
 			Payload:   payload,
 		})
 
-	case "response.reasoning.delta", "response.thinking.delta":
-		res := gjson.GetManyBytes(data, "item_id", "delta", "content_index", "output_index")
+	case "response.reasoning.delta", "response.thinking.delta",
+		"response.reasoning_text.delta", "response.reasoning_summary_text.delta":
+		res := gjson.GetManyBytes(data, "item_id", "delta", "content_index", "output_index", "summary_index")
 		itemID := res[0].String()
 		cIdx := res[2].Int()
 		if itemID == "" {
 			itemID = "output_" + strconv.FormatInt(res[3].Int(), 10)
 		}
 		cid := itemID + ":thinking:" + strconv.FormatInt(cIdx, 10)
+		aliasID := itemID + ".thinking"
+		// reasoning_summary_text.delta 的 part 分隔符是 summary_index（不携带 content_index），
+		// 必须按 summary_index 独立分通道，且 alias 也按 part 隔离：共享 alias 会在
+		// RequestGuard.resolveChannelLocked 中把后续 part 合并回首通道，使独立 part 的
+		// 字节/重复检查失去意义。
+		if t == "response.reasoning_summary_text.delta" {
+			sIdx := strconv.FormatInt(res[4].Int(), 10)
+			cid = itemID + ":thinking:summary:" + sIdx
+			aliasID = itemID + ".thinking.summary." + sIdx
+		}
 		payload := extractJSONStringPayload(res[1], data)
 		observations = append(observations, Observation{
 			ChannelID: cid,
-			AliasID:   itemID + ".thinking",
+			AliasID:   aliasID,
 			Kind:      outputguard.KindThinking,
 			Action:    ActionAppend,
 			Payload:   payload,
@@ -799,6 +810,10 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 	for candIdx, cand := range candidates {
 		finishReason := cand.Get("finishReason").String()
 		parts := cand.Get("content.parts").Array()
+		// 非流式整包响应的快照判定不得依赖 finishReason：上游可以省略该字段，
+		// 若退化为 Append 就会跳过全文扫描与尾检，使 8KiB~9214B 的重复尾逃逸。
+		nonStreamSnapshot := p.mode == GeminiProjectorModeNonStream ||
+			(p.mode == GeminiProjectorModeAuto && !p.isStream && finishReason != "")
 		// 按 candidate 跟踪已见 part 索引数：收尾 chunk 可能不带 parts。
 		if len(parts) > p.candidatePartCounts[candIdx] {
 			p.candidatePartCounts[candIdx] = len(parts)
@@ -817,7 +832,7 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 				}
 				action := ActionAppend
 				var stage string
-				if !p.isStream && finishReason != "" {
+				if nonStreamSnapshot {
 					action = ActionSnapshot
 					stage = "response.completed"
 				}
@@ -843,7 +858,7 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 
 				action := ActionAppend
 				var stage string
-				if !p.isStream && finishReason != "" {
+				if nonStreamSnapshot {
 					action = ActionSnapshot
 					stage = "response.completed"
 				}

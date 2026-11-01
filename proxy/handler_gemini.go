@@ -483,6 +483,17 @@ func writeGeminiNativeError(c *gin.Context, status int, message string) {
 	}
 }
 
+// geminiRequestProjector 按入站方法显式选择 Gemini 投影模式。
+// 绝不能沿用 Auto 模式从响应体推测流式性：generateContent 是单包快照，若 body 不含
+// finishReason，Auto 会把它误判为流式而退化为 Append，跳过全文快照与尾检，
+// 使 8KiB~9214B 的重复尾逃逸；streamGenerateContent 则必须始终按逐帧流式处理。
+func geminiRequestProjector(stream bool) *GeminiProjector {
+	if stream {
+		return NewGeminiProjectorWithMode(GeminiProjectorModeStream)
+	}
+	return NewGeminiProjectorWithMode(GeminiProjectorModeNonStream)
+}
+
 // handleGeminiGenerateContent 处理 native Gemini generateContent /
 // streamGenerateContent 请求：候选池被硬限定为 Antigravity OAuth 并叠加跨实例冷却、
 // 渠道与预算过滤，按 stream 决定是否安装 SSE 心跳，并在持续重试策略下带重试排除项
@@ -508,7 +519,7 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 	// [OutputGuard 状态机初始化] attempt 循环外单次初始化，跨 attempt 继承事件
 	// 与语义字节预算；Gemini 流式与非流式共用同一个请求级状态机。
 	requestGuard := outputguard.NewRequestGuard(nativeGuardCoreConfig())
-	geminiProjector := NewGeminiProjector()
+	geminiProjector := geminiRequestProjector(stream)
 
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)

@@ -2,6 +2,7 @@
 package proxy
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -690,5 +691,132 @@ func TestGeminiProjectorFinishReasonWithoutPartsEndsTrackedChannels(t *testing.T
 	}
 	if !guard.IsTripped() || guard.TrippedReason() != "repetition" {
 		t.Fatalf("expected repetition trip from tracked part tail check, got err=%v tripped=%v reason=%q", err, guard.IsTripped(), guard.TrippedReason())
+	}
+}
+
+// -----------------------------------------------------------------------------
+// I1 回归测试：reasoning summary/text delta 必须进入 thinking 通道
+// -----------------------------------------------------------------------------
+
+// I1: response.reasoning_summary_text.delta 与 response.reasoning_text.delta 必须产生
+// thinking 观察；summary 各 part 按 summary_index（而非 content_index）独立分通道。
+func TestResponsesProjectorReasoningSummaryDeltaChannels(t *testing.T) {
+	cfg := defaultProjectionTestConfig()
+	cfg.MaxChannelBytes = 1000
+
+	guard := outputguard.NewRequestGuard(cfg)
+	proj := NewResponsesProjector()
+
+	summaryEvent := func(summaryIndex int, delta string) []byte {
+		return []byte(fmt.Sprintf(
+			`{"type":"response.reasoning_summary_text.delta","item_id":"rs_summary","output_index":0,"summary_index":%d,"delta":%q}`,
+			summaryIndex, delta,
+		))
+	}
+
+	// 两个 part 各 600 字节，合计 1200 > MaxChannelBytes；若共享 content_index=0
+	// 或共享 alias，就会被合并成单通道而误触发 channel_bytes。
+	for _, part := range []struct {
+		index int
+		delta string
+	}{{0, strings.Repeat("s", 600)}, {1, strings.Repeat("t", 600)}} {
+		if err := ObserveEvent(guard, proj, "response.reasoning_summary_text.delta", summaryEvent(part.index, part.delta)); err != nil {
+			t.Fatalf("summary part %d observe failed: %v", part.index, err)
+		}
+	}
+	if guard.IsTripped() {
+		t.Fatalf("distinct summary_index parts were merged into one channel: %s", guard.TrippedReason())
+	}
+	if got := guard.ActiveChannelCount(); got != 2 {
+		t.Fatalf("expected 2 independent summary channels, got %d", got)
+	}
+
+	// 同一个 summary part 继续追加并突破单通道字节预算，必须命中 channel_bytes，
+	// 证明 summary delta 真正进入了 thinking 通道预算检查。
+	err := ObserveEvent(guard, proj, "response.reasoning_summary_text.delta", summaryEvent(0, strings.Repeat("s", 600)))
+	if err == nil || guard.TrippedReason() != "channel_bytes" {
+		t.Fatalf("expected channel_bytes for summary delta overflow, got err=%v reason=%q", err, guard.TrippedReason())
+	}
+}
+
+// I1: summary / reasoning-text delta 的超长周期文本必须命中 repetition 检测。
+func TestResponsesProjectorReasoningDeltaRepetitionDetection(t *testing.T) {
+	periodic := strings.Repeat("reasoning-cycle-", 700)
+	cases := []struct {
+		name      string
+		eventType string
+		event     []byte
+	}{
+		{
+			name:      "reasoning_summary_text",
+			eventType: "response.reasoning_summary_text.delta",
+			event: []byte(fmt.Sprintf(
+				`{"type":"response.reasoning_summary_text.delta","item_id":"rs_repeat","output_index":0,"summary_index":0,"delta":%q}`,
+				periodic,
+			)),
+		},
+		{
+			name:      "reasoning_text",
+			eventType: "response.reasoning_text.delta",
+			event: []byte(fmt.Sprintf(
+				`{"type":"response.reasoning_text.delta","item_id":"rt_repeat","output_index":1,"content_index":0,"delta":%q}`,
+				periodic,
+			)),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+			proj := NewResponsesProjector()
+			err := ObserveEvent(guard, proj, tc.eventType, tc.event)
+			if !guard.IsTripped() || guard.TrippedReason() != "repetition" {
+				t.Fatalf("%s: expected repetition trip, got err=%v tripped=%v reason=%q", tc.name, err, guard.IsTripped(), guard.TrippedReason())
+			}
+		})
+	}
+}
+
+// -----------------------------------------------------------------------------
+// I2 回归测试：非流式 Gemini 快照不依赖 finishReason
+// -----------------------------------------------------------------------------
+
+// I2: 非流式模式下 text / tool arguments 即使没有 finishReason 也必须产出 Snapshot。
+func TestGeminiProjectorNonStreamSnapshotWithoutFinishReason(t *testing.T) {
+	proj := NewGeminiProjectorWithMode(GeminiProjectorModeNonStream)
+	body := `{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"plain passthrough"},{"functionCall":{"id":"call_1","name":"fn","args":{"a":1}}}]}}]}`
+	obs, err := proj.Project("", []byte(body))
+	if err != nil {
+		t.Fatalf("project error: %v", err)
+	}
+	var textObs, toolObs *Observation
+	for i := range obs {
+		switch obs[i].Kind {
+		case outputguard.KindText:
+			textObs = &obs[i]
+		case outputguard.KindToolArguments:
+			toolObs = &obs[i]
+		}
+	}
+	if textObs == nil || textObs.Action != ActionSnapshot || textObs.TerminalStage != "response.completed" {
+		t.Fatalf("expected text snapshot without finishReason, got %+v", textObs)
+	}
+	if toolObs == nil || toolObs.Action != ActionSnapshot || toolObs.TerminalStage != "response.completed" {
+		t.Fatalf("expected tool arguments snapshot without finishReason, got %+v", toolObs)
+	}
+}
+
+// I2: 无 finishReason 的非流式整包响应必须执行全量 Snapshot 与尾检。
+// 100 字节杂散前缀 + 8200 字节周期正文：8192 检查点窗口不命中，总量 < 9216
+// 也到不了第二个检查点；退化为 Append 时周期尾部会直接逃逸。
+func TestGeminiProjectorNonStreamWithoutFinishReasonDetectsRepeatedTail(t *testing.T) {
+	prefix := strings.Repeat("z", 100)
+	periodic := strings.Repeat("0123456789", 820)
+	body := `{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"` + prefix + periodic + `"}]}}]}`
+
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewGeminiProjectorWithMode(GeminiProjectorModeNonStream)
+	err := ObserveEvent(guard, proj, "", []byte(body))
+	if !guard.IsTripped() || guard.TrippedReason() != "repetition" {
+		t.Fatalf("I2 failure: non-stream body without finishReason skipped snapshot/tail check: err=%v tripped=%v reason=%q", err, guard.IsTripped(), guard.TrippedReason())
 	}
 }
