@@ -308,3 +308,93 @@ func TestAdminOutputGuardSettings_UpdateDBErrorMapsTo500(t *testing.T) {
 		t.Fatalf("guard update must be rolled back when the transaction fails")
 	}
 }
+
+// TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails 覆盖 review 意见：
+// 当 UpdateSettings 携带 max_concurrency 且 guard 保存失败（如非法参数返回 400 或 DB 失败返回 500）时，
+// 运行时并发必须保持旧值，不能被污染；数据库亦保持旧值；成功路径下正常热应用并持久化。
+func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, db := newTestAdminHandlerFixture(t)
+	ctx := context.Background()
+
+	// 准备初始状态：max_concurrency 初始设为 5
+	initMaxConcurrency := 5
+	wInit := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
+		"max_concurrency": initMaxConcurrency,
+	})
+	if wInit.Code != http.StatusOK {
+		t.Fatalf("init max_concurrency failed: code=%d body=%s", wInit.Code, wInit.Body.String())
+	}
+	if got := handler.store.GetMaxConcurrency(); got != initMaxConcurrency {
+		t.Fatalf("expected store max_concurrency=%d, got %d", initMaxConcurrency, got)
+	}
+
+	// 1. PUT max_concurrency: 99 + 非法 output_guard_max_channel_bytes
+	// 期望返回 400，运行时并发保持 5，数据库中 max_concurrency 仍为 5
+	wErr := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
+		"max_concurrency":                99,
+		"output_guard_max_channel_bytes": 10, // 低于 MinOutputGuardMaxChannelBytes (128KiB)
+	})
+	if wErr.Code != http.StatusBadRequest {
+		t.Fatalf("expected HTTP 400 on invalid guard settings, got %d, body: %s", wErr.Code, wErr.Body.String())
+	}
+	if got := handler.store.GetMaxConcurrency(); got != initMaxConcurrency {
+		t.Fatalf("store max_concurrency must remain %d after guard validation failure, got %d", initMaxConcurrency, got)
+	}
+	persisted, err := db.GetSystemSettings(ctx)
+	if err != nil || persisted == nil {
+		t.Fatalf("get persisted settings: %v", err)
+	}
+	if persisted.MaxConcurrency != initMaxConcurrency {
+		t.Fatalf("persisted max_concurrency must remain %d, got %d", initMaxConcurrency, persisted.MaxConcurrency)
+	}
+
+	// 2. 成功路径：PUT max_concurrency: 12 + 合法 output_guard_max_channel_bytes
+	// 期望返回 200，运行时立即更新为 12，数据库更新为 12
+	targetChannelBytes := database.MinOutputGuardMaxChannelBytes * 2
+	wSuccess := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
+		"max_concurrency":                12,
+		"output_guard_max_channel_bytes": targetChannelBytes,
+	})
+	if wSuccess.Code != http.StatusOK {
+		t.Fatalf("expected HTTP 200 on valid update, got %d, body: %s", wSuccess.Code, wSuccess.Body.String())
+	}
+	if got := handler.store.GetMaxConcurrency(); got != 12 {
+		t.Fatalf("store max_concurrency must be updated to 12 on success, got %d", got)
+	}
+	persistedSuccess, err := db.GetSystemSettings(ctx)
+	if err != nil || persistedSuccess == nil {
+		t.Fatalf("get persisted settings on success: %v", err)
+	}
+	// 3. 500 场景：当数据库出错导致 guard 保存失败返回 500 时，运行时与 DB 同样保持旧值
+	{
+		handler500, db500, dbPath := newTestAdminHandlerFixtureWithPath(t)
+		wInit500 := invokeAdminSettingsEndpoint(t, handler500, http.MethodPut, map[string]any{
+			"max_concurrency": 7,
+		})
+		if wInit500.Code != http.StatusOK {
+			t.Fatalf("init max_concurrency for 500 test failed: %d", wInit500.Code)
+		}
+		// 破坏 output_guard_max_channel_bytes 列，使事务执行 guard 更新时报 DB 错误
+		execAdminOutputGuardTestSQLite(t, dbPath,
+			"ALTER TABLE system_settings DROP COLUMN output_guard_max_channel_bytes")
+
+		wErr500 := invokeAdminSettingsEndpoint(t, handler500, http.MethodPut, map[string]any{
+			"max_concurrency":      88,
+			"output_guard_enabled": true,
+		})
+		if wErr500.Code != http.StatusInternalServerError {
+			t.Fatalf("expected HTTP 500 on db error during guard update, got %d, body: %s", wErr500.Code, wErr500.Body.String())
+		}
+		if got := handler500.store.GetMaxConcurrency(); got != 7 {
+			t.Fatalf("store max_concurrency must remain 7 after guard db failure, got %d", got)
+		}
+		persisted500, err := db500.GetSystemSettings(ctx)
+		if err != nil || persisted500 == nil {
+			t.Fatalf("get persisted settings after 500: %v", err)
+		}
+		if persisted500.MaxConcurrency != 7 {
+			t.Fatalf("persisted max_concurrency must remain 7 after 500, got %d", persisted500.MaxConcurrency)
+		}
+	}
+}

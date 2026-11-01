@@ -10922,6 +10922,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	hasAdminSecret := strings.TrimSpace(currentAdminSecret) != "" || strings.TrimSpace(h.adminSecretEnv) != ""
 	runtimeCfg := proxy.CurrentRuntimeSettings()
+	previousMaxConcurrency := h.store.GetMaxConcurrency()
 	previousAutoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
 	previousAutoResetCreditsOnExhaustionEnabled := runtimeCfg.AutoResetCreditsOnExhaustionEnabled
 	previousAutoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
@@ -10953,14 +10954,16 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	usageLogBatchSize := h.db.GetUsageLogBatchSize()
 	usageLogFlushIntervalSeconds := h.db.GetUsageLogFlushIntervalSeconds()
 
+	maxConcurrencyToApply := previousMaxConcurrency
+	maxConcurrencyChanged := false
 	if req.MaxConcurrency != nil {
 		v := *req.MaxConcurrency
 		if v < 1 {
 			v = 1
 		}
 		// 不再设上限：由运营按机器与上游承载自行决定
-		h.store.SetMaxConcurrency(v)
-		log.Printf("设置已更新: max_concurrency = %d", v)
+		maxConcurrencyToApply = v
+		maxConcurrencyChanged = true
 	}
 
 	if req.GlobalRPM != nil {
@@ -11933,7 +11936,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	systemSettings := &database.SystemSettings{
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,
-		MaxConcurrency:                      h.store.GetMaxConcurrency(),
+		MaxConcurrency:                      maxConcurrencyToApply,
 		GlobalRPM:                           h.rateLimiter.GetRPM(),
 		TestModel:                           h.store.GetTestModel(),
 		CodexImagesMainModel:                codexImagesMainModel,
@@ -12218,6 +12221,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				return current
 			})
 			log.Printf("设置已更新: models_list_read_max_bytes = %d", modelsListReadMaxBytes)
+		}
+		if maxConcurrencyChanged {
+			h.store.SetMaxConcurrency(maxConcurrencyToApply)
+			log.Printf("设置已更新: max_concurrency = %d", maxConcurrencyToApply)
 		}
 	}
 
