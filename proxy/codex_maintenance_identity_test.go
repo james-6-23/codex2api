@@ -35,17 +35,6 @@ func chatOutboundIdentityHeaders(t *testing.T, account *auth.Account) http.Heade
 	return req.Header
 }
 
-func TestCodexMaintenanceIdentityDisabledKeepsBuiltin(t *testing.T) {
-	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
-		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = false
-	})
-	identity := ResolveCodexMaintenanceIdentity(&auth.Account{DBID: 1}, nil)
-	if identity.Unified || identity.UserAgent != MinimalCodexCLIUserAgentForHeaders() || identity.Originator != Originator {
-		t.Fatalf("switch off must keep the built-in identity, got %+v", identity)
-	}
-}
-
 func TestCodexMaintenanceIdentityMatchesChatOutbound(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -61,13 +50,12 @@ func TestCodexMaintenanceIdentityMatchesChatOutbound(t *testing.T) {
 			applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 				s.ClientCompatMode = tc.mode
 				s.CodexUserAgentConfig = tc.config
-				s.CodexUnifiedClientIdentityEnabled = true
 			})
 			for id := int64(1); id <= 12; id++ {
 				account := &auth.Account{DBID: id}
-				identity := ResolveCodexMaintenanceIdentity(account, nil)
+				identity := mustResolveCodexMaintenanceIdentity(t, account, nil)
 				chat := chatOutboundIdentityHeaders(t, account)
-				if !identity.Unified || identity.UserAgent != chat.Get("User-Agent") || identity.Originator != chat.Get("Originator") || identity.Version != chat.Get("Version") {
+				if identity.UserAgent != chat.Get("User-Agent") || identity.Originator != chat.Get("Originator") || identity.Version != chat.Get("Version") {
 					t.Fatalf("account %d: maintenance %+v, chat UA=%q Originator=%q Version=%q",
 						id, identity, chat.Get("User-Agent"), chat.Get("Originator"), chat.Get("Version"))
 				}
@@ -79,9 +67,8 @@ func TestCodexMaintenanceIdentityMatchesChatOutbound(t *testing.T) {
 func TestCodexMaintenanceIdentityDesktopOriginatorFollowsUserAgent(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
-	identity := ResolveCodexMaintenanceIdentity(&auth.Account{DBID: 3}, nil)
+	identity := mustResolveCodexMaintenanceIdentity(t, &auth.Account{DBID: 3}, nil)
 	if !strings.HasPrefix(identity.UserAgent, "Codex Desktop/"+identity.Version+" ") || identity.Originator != "Codex Desktop" {
 		t.Fatalf("desktop persona must keep UA prefix, Version and Originator aligned: %+v", identity)
 	}
@@ -90,14 +77,13 @@ func TestCodexMaintenanceIdentityDesktopOriginatorFollowsUserAgent(t *testing.T)
 func TestCodexMaintenanceIdentityAppliesAccountIdentityHeaders(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
 	account := &auth.Account{DBID: 5, CustomHeaders: map[string]string{
 		"user-agent": "codex_vscode/0.150.0 (Windows 10.0.26100; x86_64) unknown (codex_vscode; 0.150.0)",
 		"Originator": "codex_vscode",
 		"Version":    "0.150.0",
 	}}
-	identity := ResolveCodexMaintenanceIdentity(account, nil)
+	identity := mustResolveCodexMaintenanceIdentity(t, account, nil)
 	chat := chatOutboundIdentityHeaders(t, account)
 	if identity.UserAgent != chat.Get("User-Agent") || identity.Originator != chat.Get("Originator") || identity.Version != chat.Get("Version") {
 		t.Fatalf("pinned account headers must win like on chat: maintenance %+v, chat UA=%q Originator=%q Version=%q",
@@ -108,23 +94,20 @@ func TestCodexMaintenanceIdentityAppliesAccountIdentityHeaders(t *testing.T) {
 	}
 }
 
-func TestCodexMaintenanceIdentityFallsBackWhenVersionFloorUnavailable(t *testing.T) {
+func TestCodexMaintenanceIdentityRejectsUnavailableVersion(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.ClientCompatMode = ClientCompatModeAuto
 		s.CodexMinCLIVersion = "99.0.0"
 		s.CodexUserAgentConfig = "{}"
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
-	identity := ResolveCodexMaintenanceIdentity(&auth.Account{DBID: 1}, nil)
-	if identity.Unified || identity.UserAgent != MinimalCodexCLIUserAgentForHeaders() || identity.Originator != Originator {
-		t.Fatalf("unresolvable identity must fall back to built-in, got %+v", identity)
+	if _, err := ResolveCodexMaintenanceIdentity(&auth.Account{DBID: 1}, nil); err == nil {
+		t.Fatal("unresolvable identity must return an error")
 	}
 }
 
 func TestQueryWhamUsageUsesUnifiedIdentity(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
 	var got http.Header
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -138,12 +121,12 @@ func TestQueryWhamUsageUsesUnifiedIdentity(t *testing.T) {
 	if _, _, err := queryWhamUsageWithURL(context.Background(), account, "", server.URL); err != nil {
 		t.Fatalf("queryWhamUsageWithURL: %v", err)
 	}
-	want := ResolveCodexMaintenanceIdentity(account, nil)
+	want := mustResolveCodexMaintenanceIdentity(t, account, nil)
 	if got.Get("User-Agent") != want.UserAgent || got.Get("Originator") != "Codex Desktop" {
 		t.Fatalf("wham probe identity UA=%q Originator=%q, want %+v", got.Get("User-Agent"), got.Get("Originator"), want)
 	}
 	// 维护请求不凭空补发真实客户端不会带的身份头。
-	if got.Get("Version") != "" || got.Get(codexInstallationIDHeader) != "" {
+	if got.Get("Version") != "" || got.Get(codexInstallationIDHeader) != "" || got.Get("X-Oai-Attestation") != "" {
 		t.Fatalf("wham probe must not add Version/installation headers: Version=%q installation=%q", got.Get("Version"), got.Get(codexInstallationIDHeader))
 	}
 }
@@ -151,7 +134,6 @@ func TestQueryWhamUsageUsesUnifiedIdentity(t *testing.T) {
 func TestQueryChatGPTSubscriptionUsesUnifiedIdentity(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
 	var gotUA, gotOriginator string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +156,6 @@ func TestQueryChatGPTSubscriptionUsesUnifiedIdentity(t *testing.T) {
 func TestFetchCodexModelsManifestUnifiedIdentityAlignsClientVersion(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
 	var gotUA, gotOriginator, gotVersion, gotClientVersion string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -189,7 +170,7 @@ func TestFetchCodexModelsManifestUnifiedIdentityAlignsClientVersion(t *testing.T
 		if _, err := fetchCodexModelsManifestWithURL(context.Background(), account, "", server.URL, "0.140.0", "", nil); err != nil {
 			t.Fatalf("fetch: %v", err)
 		}
-		want := ResolveCodexMaintenanceIdentity(account, nil)
+		want := mustResolveCodexMaintenanceIdentity(t, account, nil)
 		if gotUA != want.UserAgent || gotOriginator != "Codex Desktop" || gotVersion != want.Version || gotClientVersion != want.Version {
 			t.Fatalf("UA=%q Originator=%q Version=%q client_version=%q, want %+v", gotUA, gotOriginator, gotVersion, gotClientVersion, want)
 		}
@@ -211,7 +192,6 @@ func TestFetchCodexModelsManifestUnifiedIdentityAlignsClientVersion(t *testing.T
 func TestCodexModelDiscoveryUnifiedIdentityMatchesRelayChat(t *testing.T) {
 	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
 		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = true
 	})
 	const baseURL, apiKey = "https://relay.example.com/v1", "sk-relay"
 	account := &auth.Account{DBID: 7, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: baseURL, APIKey: apiKey}
@@ -244,25 +224,11 @@ func TestCodexModelDiscoveryUnifiedIdentityMatchesRelayChat(t *testing.T) {
 	}
 }
 
-func TestCodexModelDiscoveryDisabledKeepsLegacyIdentity(t *testing.T) {
-	applyMaintenanceIdentitySettings(t, func(s *RuntimeSettings) {
-		s.CodexUserAgentConfig = testDesktopUserAgentConfig
-		s.CodexUnifiedClientIdentityEnabled = false
-	})
-	const baseURL, apiKey = "https://relay.example.com/v1", "sk-relay"
-	discovery := http.Header{}
-	ApplyCodexModelDiscoveryHeaders(discovery, nil, baseURL, apiKey)
-	if discovery.Get("User-Agent") != MinimalCodexCLIUserAgentForHeaders() || discovery.Get("Originator") != Originator || discovery.Get("x-codex-app-version") != "" {
-		t.Fatalf("switch off must keep the built-in discovery identity: %v", discovery)
+func mustResolveCodexMaintenanceIdentity(t *testing.T, account *auth.Account, headers http.Header) CodexMaintenanceIdentity {
+	t.Helper()
+	identity, err := ResolveCodexMaintenanceIdentity(account, headers)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if want := deriveStableCodexUUID("codex2api:model-discovery-installation:v1:" + baseURL + "|" + apiKey); discovery.Get(codexInstallationIDHeader) != want {
-		t.Fatalf("installation id = %q, want legacy seed %q", discovery.Get(codexInstallationIDHeader), want)
-	}
-
-	account := &auth.Account{DBID: 7, UpstreamType: auth.UpstreamOpenAIResponses, BaseURL: baseURL, APIKey: apiKey}
-	first, _ := ensureCodexClientInstallationMetadata([]byte(`{}`), account, http.Header{"Authorization": {"Bearer sk-downstream-1"}})
-	second, _ := ensureCodexClientInstallationMetadata([]byte(`{}`), account, http.Header{"Authorization": {"Bearer sk-downstream-2"}})
-	if gjson.GetBytes(first, "client_metadata.x-codex-installation-id").String() == gjson.GetBytes(second, "client_metadata.x-codex-installation-id").String() {
-		t.Fatal("switch off must keep the per-downstream-key installation id")
-	}
+	return identity
 }

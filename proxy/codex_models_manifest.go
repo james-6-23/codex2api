@@ -476,7 +476,7 @@ type CodexModelsManifest struct {
 // 演进，透传使网关无需跟进 schema 变化，且返回的始终是账号真实的模型权限
 // （区别于内置模型注册表的"理论列表"）。
 //
-// downstream 是下游透传请求的原始头（后台拉取传 nil），只在统一身份开关开启时参与
+// downstream 是下游透传请求的原始头（后台拉取传 nil），参与
 // 出站身份解析，规则与对话请求一致。
 func FetchCodexModelsManifest(ctx context.Context, account *auth.Account, proxyURL, clientVersion, ifNoneMatch string, downstream http.Header) (*CodexModelsManifest, error) {
 	endpoint := CodexModelsManifestURL
@@ -498,22 +498,12 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 		return nil, fmt.Errorf("account has no access token")
 	}
 
-	// UA 版本段、Version 头与 client_version query 三者保持同一版本，避免出站身份
-	// 自相矛盾。统一身份开启时三者都取解析出的身份版本：清单按 client_version 过滤
-	// 模型，对话请求以该版本出站，清单也必须按同一版本拿。
-	identity := ResolveCodexMaintenanceIdentity(account, downstream)
-	userAgent := ""
-	if identity.Unified {
-		clientVersion = firstNonEmptyString(identity.Version, clientVersion)
-		userAgent = identity.UserAgent
+	// 清单过滤版本与本次对话身份版本保持一致。
+	identity, err := ResolveCodexMaintenanceIdentity(account, downstream)
+	if err != nil {
+		return nil, err
 	}
-	clientVersion = strings.TrimSpace(clientVersion)
-	if clientVersion == "" {
-		clientVersion = effectiveLatestCodexCLIVersion()
-	}
-	if userAgent == "" {
-		userAgent = replaceCodexUserAgentVersion(defaultCodexCLIUserAgent, clientVersion)
-	}
+	clientVersion = firstNonEmptyString(identity.Version, clientVersion)
 	requestURL := endpoint + "?client_version=" + url.QueryEscape(clientVersion)
 
 	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -524,7 +514,7 @@ func fetchCodexModelsManifestWithURL(ctx context.Context, account *auth.Account,
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", userAgent)
+	req.Header.Set("User-Agent", identity.UserAgent)
 	req.Header.Set("Originator", identity.Originator)
 	req.Header.Set("Version", clientVersion)
 	if ifNoneMatch = strings.TrimSpace(ifNoneMatch); ifNoneMatch != "" {
