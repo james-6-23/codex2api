@@ -36,7 +36,8 @@ import {
 import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
-import { PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
+import { PublicUsagePerformance, PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
+import ReasoningEffortBadge from '../components/ReasoningEffortBadge'
 import ChannelLogo from '../components/ChannelLogo'
 import ModelLogo from '../components/ModelLogo'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
@@ -1463,6 +1464,7 @@ function RecentLogsTable({
                 <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                   <LogStatusBadge code={log.status_code} onFilter={filterStatus} compact />
                   <LogModelBadge log={log} active={filter.model === log.model} onToggle={toggleModel} compact />
+                  <ReasoningEffortBadge effort={log.reasoning_effort} />
                   {log.effective_model && log.effective_model !== log.model ? (
                     <Badge variant="outline" className="border-transparent bg-blue-500/10 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">→ {log.effective_model}</Badge>
                   ) : null}
@@ -1481,9 +1483,7 @@ function RecentLogsTable({
               </dl>
               <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border/50 text-xs">
                 <PublicUsageTokens log={log} />
-                <span className="font-mono text-[12px] text-muted-foreground">
-                  {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
-                </span>
+                <PublicUsagePerformance log={log} />
               </div>
             </Card>
           )) : (
@@ -1504,10 +1504,7 @@ function RecentLogsTable({
                 <TableHead className="text-[12px] font-semibold">{t('usage.tableType')}</TableHead>
                 <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableToken')}</TableHead>
                 <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableCost')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">
-                  <span title={t('usage.tableFirstTokenHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableFirstToken')}</span>
-                </TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableDuration')}</TableHead>
+                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableTiming')}</TableHead>
                 <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableTime')}</TableHead>
               </TableRow>
             </TableHeader>
@@ -1523,6 +1520,7 @@ function RecentLogsTable({
                         <Badge variant="outline" className="border-transparent bg-cyan-500/12 text-[11px] font-semibold uppercase text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400">ws</Badge>
                       ) : null}
                       <LogModelBadge log={log} active={filter.model === log.model} onToggle={toggleModel} />
+                      <ReasoningEffortBadge effort={log.reasoning_effort} />
                       {log.effective_model && log.effective_model !== log.model ? (
                         <Badge variant="outline" className="border-transparent bg-blue-500/10 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">→ {log.effective_model}</Badge>
                       ) : null}
@@ -1550,18 +1548,7 @@ function RecentLogsTable({
                     <LogCostCell log={log} />
                   </TableCell>
                   <TableCell className="text-right">
-                    {log.first_token_ms > 0 ? (
-                      <span className={`font-mono text-[13px] tabular-nums ${log.first_token_ms > 5000 ? 'text-red-500' : log.first_token_ms > 2000 ? 'text-amber-500' : 'text-emerald-500'}`}>
-                        {log.first_token_ms > 1000 ? `${(log.first_token_ms / 1000).toFixed(1)}s` : `${log.first_token_ms}ms`}
-                      </span>
-                    ) : (
-                      <span className="font-mono text-[13px] text-muted-foreground">-</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <span className={`font-mono text-[13px] tabular-nums ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>
-                      {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
-                    </span>
+                    <PublicUsagePerformance log={log} />
                   </TableCell>
                   <TableCell className="text-right">
                     <span className="whitespace-nowrap font-mono text-[13px] text-muted-foreground">{formatBeijingTime(log.created_at)}</span>
@@ -1569,7 +1556,7 @@ function RecentLogsTable({
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={11} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
+                  <TableCell colSpan={10} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
                 </TableRow>
               )}
             </TableBody>

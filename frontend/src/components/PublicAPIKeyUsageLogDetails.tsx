@@ -2,9 +2,11 @@ import { Brain, DatabaseZap } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { PublicAPIKeyUsageLog } from '../types'
 import { formatUsageNumber } from '../lib/usageFormat'
+import { computeOutputTokensPerSec, durationTone, firstTokenTone, formatLatencyMs, formatTokensPerSec, tokensPerSecTone } from '../lib/usageTiming'
 import CompactionBadges from './CompactionBadges'
 import UsageDaybreakBadge from './UsageDaybreakBadge'
 import { Badge } from './ui/badge'
+import UsageTimingBadge from './UsageTimingBadge'
 
 export function PublicUsageRequestType({ log }: { log: PublicAPIKeyUsageLog }) {
   return (
@@ -55,5 +57,17 @@ export function PublicUsageUserAgent({ value }: { value: string }) {
     <span className="block break-all font-mono text-[12px] text-muted-foreground lg:max-w-[240px] lg:truncate" title={value || '-'}>
       {value || '-'}
     </span>
+  )
+}
+
+export function PublicUsagePerformance({ log }: { log: PublicAPIKeyUsageLog }) {
+  const { t } = useTranslation()
+  const speed = computeOutputTokensPerSec(log)
+  return (
+    <div className="flex flex-col items-end gap-1">
+      <UsageTimingBadge kind="first" label="TTFT" value={formatLatencyMs(log.first_token_ms)} tone={firstTokenTone(log.first_token_ms)} title={t('usage.tableFirstTokenHint')} />
+      <UsageTimingBadge kind="duration" label={t('usage.timingDuration')} value={formatLatencyMs(log.duration_ms)} tone={durationTone(log.duration_ms)} title={t('usage.tableDuration')} />
+      <UsageTimingBadge kind="speed" label="tok/s" value={speed == null ? '-' : formatTokensPerSec(speed)} tone={tokensPerSecTone(speed)} title={t('usage.tableTokensPerSecHint')} />
+    </div>
   )
 }

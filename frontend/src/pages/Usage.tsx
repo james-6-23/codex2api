@@ -13,6 +13,9 @@ import ChannelLogo from '../components/ChannelLogo'
 import CompactionBadges from '../components/CompactionBadges'
 import UsageDaybreakBadge from '../components/UsageDaybreakBadge'
 import ModelLogo from '../components/ModelLogo'
+import ReasoningEffortBadge from '../components/ReasoningEffortBadge'
+import UsageTimingBadge from '../components/UsageTimingBadge'
+import { computeOutputTokensPerSec, durationTone, firstTokenTone, formatLatencyMs, formatTokensPerSec } from '../lib/usageTiming'
 import Modal from '../components/Modal'
 import ColumnSettingsMenu from '../components/ColumnSettingsMenu'
 import StateShell from '../components/StateShell'
@@ -55,32 +58,6 @@ const DatabasePlus = createLucideIcon('database-plus', [
   ['ellipse', { cx: '12', cy: '5', rx: '9', ry: '3', key: 'msslwz' }],
 ])
 
-/** Color ramp for reasoning effort: cool/muted → hot/intense. */
-function getReasoningEffortBadgeClassName(effort: string): string {
-  switch (effort.trim().toLowerCase()) {
-    case 'none':
-    case 'off':
-      return 'border-transparent bg-slate-500/12 text-slate-500 dark:bg-slate-500/20 dark:text-slate-400'
-    case 'minimal':
-    case 'min':
-      return 'border-transparent bg-sky-500/12 text-sky-600 dark:bg-sky-500/20 dark:text-sky-400'
-    case 'low':
-      return 'border-transparent bg-emerald-500/12 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-400'
-    case 'medium':
-    case 'med':
-      return 'border-transparent bg-amber-500/12 text-amber-600 dark:bg-amber-500/20 dark:text-amber-400'
-    case 'high':
-      return 'border-transparent bg-orange-500/14 text-orange-600 dark:bg-orange-500/22 dark:text-orange-400'
-    case 'xhigh':
-    case 'max':
-      return 'border-transparent bg-rose-500/14 text-rose-600 dark:bg-rose-500/22 dark:text-rose-400'
-    case 'ultra':
-      return 'border-transparent bg-violet-500/14 text-violet-600 dark:bg-violet-500/22 dark:text-violet-300'
-    default:
-      return 'border-transparent bg-muted text-muted-foreground'
-  }
-}
-
 function usageRequestedModelTitle(
   log: UsageLog,
   ultraHint: string,
@@ -92,20 +69,6 @@ function usageRequestedModelTitle(
   if (actual && actual !== log.model) parts.push(actual)
   parts.push(filterHint)
   return parts.join('\n')
-}
-
-function ReasoningEffortBadge({ effort }: { effort: string }) {
-  const label = effort.trim()
-  if (!label) return null
-  return (
-    <Badge
-      variant="outline"
-      title={`reasoning: ${label}`}
-      className={`text-[11px] font-semibold lowercase tracking-wide ${getReasoningEffortBadgeClassName(label)}`}
-    >
-      {label}
-    </Badge>
-  )
 }
 
 // ===== 上游响应模型审计（移植自 sub2api）=====
@@ -1482,34 +1445,6 @@ const DEFAULT_USAGE_VISIBLE_COLUMNS: Record<UsageTableColumn, boolean> = {
   time: true,
 }
 
-/**
- * Output tokens/sec from existing log fields — no backend change needed.
- * Prefers generation window (duration − first_token) so TTFT does not drag the rate down.
- */
-function computeOutputTokensPerSec(log: UsageLog): number | null {
-  if (log.status_code >= 400) return null
-  const outputTokens = Math.max(0, log.output_tokens || log.completion_tokens || 0)
-  if (outputTokens <= 0 || log.duration_ms <= 0) return null
-
-  let generationMs = log.duration_ms
-  if (log.first_token_ms > 0 && log.first_token_ms < log.duration_ms) {
-    generationMs = log.duration_ms - log.first_token_ms
-  }
-  // Guard tiny windows (e.g. first token almost equals end) that explode the rate.
-  if (generationMs < 20) generationMs = log.duration_ms
-  if (generationMs <= 0) return null
-
-  return outputTokens / (generationMs / 1000)
-}
-
-function formatTokensPerSec(value: number): string {
-  if (!Number.isFinite(value) || value <= 0) return '-'
-  if (value >= 1000) return `${(value / 1000).toFixed(1)}k`
-  if (value >= 100) return value.toFixed(0)
-  if (value >= 10) return value.toFixed(1)
-  return value.toFixed(2)
-}
-
 function tokensPerSecClassName(value: number): string {
   // Rough bands for visual scan; absolute numbers vary by model.
   if (value >= 80) return 'text-emerald-600 dark:text-emerald-400'
@@ -1527,91 +1462,6 @@ function TokensPerSecCell({ log }: { log: UsageLog }) {
     <span className={`${usageTableMonoClass} ${tokensPerSecClassName(value)}`} title={`${value.toFixed(2)} tok/s`}>
       {formatTokensPerSec(value)}
       <span className="ml-0.5 text-[11px] font-medium opacity-70">tok/s</span>
-    </span>
-  )
-}
-
-function formatLatencyMs(ms: number): string {
-  if (!Number.isFinite(ms) || ms <= 0) return '-'
-  if (ms >= 1000) return `${(ms / 1000).toFixed(1)}s`
-  return `${Math.round(ms)}ms`
-}
-
-type TimingTone = 'good' | 'warn' | 'bad' | 'muted'
-
-function firstTokenTone(ms: number): TimingTone {
-  if (ms <= 0) return 'muted'
-  if (ms > 5000) return 'bad'
-  if (ms > 2000) return 'warn'
-  return 'good'
-}
-
-function durationTone(ms: number): TimingTone {
-  if (ms <= 0) return 'muted'
-  if (ms > 30000) return 'bad'
-  if (ms > 10000) return 'warn'
-  return 'good'
-}
-
-/** 数值色阶：在各自胶囊内单独表意快慢。 */
-const TIMING_VALUE_TONE: Record<TimingTone, string> = {
-  good: 'text-emerald-700 dark:text-emerald-300',
-  warn: 'text-amber-700 dark:text-amber-300',
-  bad: 'text-red-600 dark:text-red-400',
-  muted: 'text-muted-foreground',
-}
-
-/**
- * 首字 / 耗时 用固定身份色胶囊区分（蓝 vs 紫），
- * 扫表时即使数值色相同也能立刻分辨是哪一项。
- */
-const TIMING_PILL_SHELL = {
-  first:
-    'bg-sky-500/12 ring-1 ring-inset ring-sky-500/25 dark:bg-sky-500/16 dark:ring-sky-400/30',
-  duration:
-    'bg-violet-500/12 ring-1 ring-inset ring-violet-500/25 dark:bg-violet-500/16 dark:ring-violet-400/30',
-  muted: 'bg-muted/60 ring-1 ring-inset ring-border',
-} as const
-
-const TIMING_PILL_LABEL = {
-  first: 'text-sky-700/85 dark:text-sky-300/90',
-  duration: 'text-violet-700/85 dark:text-violet-300/90',
-  muted: 'text-muted-foreground',
-} as const
-
-function TimingPill({
-  kind,
-  label,
-  valueMs,
-  tone,
-}: {
-  kind: 'first' | 'duration'
-  label: string
-  valueMs: number
-  tone: TimingTone
-}) {
-  const display = valueMs > 0 ? formatLatencyMs(valueMs) : '-'
-  const shell = tone === 'muted' ? TIMING_PILL_SHELL.muted : TIMING_PILL_SHELL[kind]
-  const labelClass = tone === 'muted' ? TIMING_PILL_LABEL.muted : TIMING_PILL_LABEL[kind]
-
-  return (
-    <span
-      className={cn(
-        'inline-flex h-5 items-center gap-0.5 rounded-full px-1.5 whitespace-nowrap',
-        shell,
-      )}
-    >
-      <span className={cn('text-[10px] font-semibold leading-none tracking-tight', labelClass)}>
-        {label}
-      </span>
-      <span
-        className={cn(
-          'font-mono text-[11px] font-bold tabular-nums leading-none',
-          TIMING_VALUE_TONE[tone],
-        )}
-      >
-        {display}
-      </span>
     </span>
   )
 }
@@ -1636,16 +1486,16 @@ function TimingCell({ log }: { log: UsageLog }) {
 
   return (
     <div className="inline-flex items-center gap-1" title={title || undefined}>
-      <TimingPill
+      <UsageTimingBadge
         kind="first"
         label={t('usage.timingFirst')}
-        valueMs={firstMs}
+        value={formatLatencyMs(firstMs)}
         tone={firstTokenTone(firstMs)}
       />
-      <TimingPill
+      <UsageTimingBadge
         kind="duration"
         label={t('usage.timingDuration')}
-        valueMs={durationMs}
+        value={formatLatencyMs(durationMs)}
         tone={durationTone(durationMs)}
       />
     </div>

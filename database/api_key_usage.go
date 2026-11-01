@@ -745,6 +745,7 @@ type APIKeySelfUsageLog struct {
 	InputTokens            int       `json:"input_tokens"`
 	OutputTokens           int       `json:"output_tokens"`
 	ReasoningTokens        int       `json:"reasoning_tokens"`
+	ReasoningEffort        string    `json:"reasoning_effort"`
 	CachedTokens           int       `json:"cached_tokens"`
 	ImageInputTokens       int       `json:"image_input_tokens"`
 	ImageOutputTokens      int       `json:"image_output_tokens"`
@@ -1280,6 +1281,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			COALESCE(input_tokens, 0),
 			COALESCE(output_tokens, 0),
 			COALESCE(reasoning_tokens, 0),
+			COALESCE(reasoning_effort, ''),
 			COALESCE(cached_tokens, 0),
 			COALESCE(image_input_tokens, 0), COALESCE(image_output_tokens, 0), COALESCE(cached_image_input_tokens, 0),
 			COALESCE(total_tokens, 0),
@@ -1320,6 +1322,7 @@ func (db *DB) listAPIKeySelfRecentLogs(ctx context.Context, apiKeyID int64, rang
 			&item.InputTokens,
 			&item.OutputTokens,
 			&item.ReasoningTokens,
+			&item.ReasoningEffort,
 			&item.CachedTokens, &item.ImageInputTokens, &item.ImageOutputTokens, &item.CachedImageInputTokens,
 			&item.TotalTokens,
 			&item.UserBilled, &item.UserBillingMode, &item.ImageUnitPrice, &item.BilledImageCount,
