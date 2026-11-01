@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -282,21 +283,76 @@ func TestAcceptanceScenario24_RealPipelineTTFTAndCPUGates(t *testing.T) {
 
 // 场景 25: 1/2/4 MiB CPU median 每翻倍 <= 2.5，分别核验 envelope、scan 与
 // snapshot；全部 guard 不得 tripped，PRNG 非周期数据不得被误判 repetition。
+//
+// 针对 CI（如 2-vCPU 容器）环境下的调度与 GC 抖动，本测试采用：
+//  1. 计时区外预构建 payload（消除 json.Marshal 与 string 转换的临时分配对 CPU 时间的干扰）；
+//  2. 7 轮交错测量（每轮依次跑 1/2/4 MiB，使同一轮的时间噪声对三个 size 近似同等影响）；
+//  3. 按轮计算 ratio1=cpu(2MiB,r)/cpu(1MiB,r) 与 ratio2=cpu(4MiB,r)/cpu(2MiB,r)，
+//     并对各轮 ratio 取中位数，断言中位数 ratio <= 2.5（envelope/scan/snapshot 各自独立，门限 2.5 保持不变）。
 func TestAcceptanceScenario25_LinearScalingRatiosDetailed(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("skipping Scenario 25 process CPU linearity gating on non-Linux platform (RUSAGE unsupported)")
 	}
 	sizes := []int{1048576, 2097152, 4194304} // 1 MiB, 2 MiB, 4 MiB
-	var envelopeMedians, scanMedians, snapshotMedians []float64
+	const rounds = 7
+	const chunkSize = 16384
 
 	prng := perfstat.NewNonRepeatingPRNG(987654321)
 
-	for _, size := range sizes {
-		data := prng.GenerateASCII(size)
-		var envCPUs, scanCPUs, snapCPUs []float64
+	type testDataSet struct {
+		size             int
+		raw              []byte
+		envelopePayloads [][]byte
+		chunks           [][]byte
+	}
 
-		for r := 0; r < 5; r++ {
-			// A. Envelope 投影开销：走真实 ResponsesProjector + ObserveEvent。
+	datasets := make([]testDataSet, len(sizes))
+	for i, size := range sizes {
+		data := prng.GenerateASCII(size)
+		var envPayloads [][]byte
+		var chunks [][]byte
+		for offset := 0; offset < size; offset += chunkSize {
+			end := offset + chunkSize
+			if end > size {
+				end = size
+			}
+			chunk := data[offset:end]
+			chunks = append(chunks, chunk)
+			payload, err := json.Marshal(map[string]any{
+				"type":          "response.output_text.delta",
+				"item_id":       "item_proj",
+				"content_index": 0,
+				"delta":         string(chunk),
+			})
+			if err != nil {
+				t.Fatalf("marshal envelope payload for size %d: %v", size, err)
+			}
+			envPayloads = append(envPayloads, payload)
+		}
+		datasets[i] = testDataSet{
+			size:             size,
+			raw:              data,
+			envelopePayloads: envPayloads,
+			chunks:           chunks,
+		}
+	}
+
+	// 记录每轮每个 size 的 CPU 耗时 (us)
+	envCPUs := make([][]float64, len(sizes))
+	scanCPUs := make([][]float64, len(sizes))
+	snapCPUs := make([][]float64, len(sizes))
+	for i := range sizes {
+		envCPUs[i] = make([]float64, rounds)
+		scanCPUs[i] = make([]float64, rounds)
+		snapCPUs[i] = make([]float64, rounds)
+	}
+
+	for r := 0; r < rounds; r++ {
+		// 交错测量：每轮内依次执行 1MiB, 2MiB, 4MiB
+		for i, ds := range datasets {
+			size := ds.size
+
+			// A. Envelope 投影开销：走真实 ResponsesProjector + ObserveEvent
 			projector := NewResponsesProjector()
 			rgEnv := outputguard.NewRequestGuard(outputguard.Config{
 				Enabled:               true,
@@ -310,27 +366,14 @@ func TestAcceptanceScenario25_LinearScalingRatiosDetailed(t *testing.T) {
 			if tEnv.GetrusageFailed() {
 				t.Fatalf("failed to read process CPU timer")
 			}
-			for offset := 0; offset < size; offset += 16384 {
-				end := offset + 16384
-				if end > size {
-					end = size
-				}
-				payload, err := json.Marshal(map[string]any{
-					"type":          "response.output_text.delta",
-					"item_id":       "item_proj",
-					"content_index": 0,
-					"delta":         string(data[offset:end]),
-				})
-				if err != nil {
-					t.Fatalf("marshal envelope payload: %v", err)
-				}
+			for _, payload := range ds.envelopePayloads {
 				if err := ObserveEvent(rgEnv, projector, "response.output_text.delta", payload); err != nil {
 					t.Fatalf("size %d round %d ObserveEvent projection failed: %v", size, r, err)
 				}
 			}
-			envCPUs = append(envCPUs, float64(tEnv.ElapsedProcessCPU().Microseconds()))
+			envCPUs[i][r] = float64(tEnv.ElapsedProcessCPU().Microseconds())
 
-			// B. 扫描器线性周期检测与状态机开销。
+			// B. 扫描器线性周期检测与状态机开销
 			rg := outputguard.NewRequestGuard(outputguard.Config{
 				Enabled:               true,
 				MaxToolArgumentBytes:  int64(size * 2),
@@ -343,27 +386,23 @@ func TestAcceptanceScenario25_LinearScalingRatiosDetailed(t *testing.T) {
 			if tScan.GetrusageFailed() {
 				t.Fatalf("failed to read process CPU timer")
 			}
-			for offset := 0; offset < size; offset += 16384 {
-				end := offset + 16384
-				if end > size {
-					end = size
-				}
-				if err := rg.ObserveAppend("c_linear", "", outputguard.KindText, data[offset:end]); err != nil {
+			for _, chunk := range ds.chunks {
+				if err := rg.ObserveAppend("c_linear", "", outputguard.KindText, chunk); err != nil {
 					t.Fatalf("size %d round %d scan tripped unexpectedly: %v", size, r, err)
 				}
 			}
-			scanCPUs = append(scanCPUs, float64(tScan.ElapsedProcessCPU().Microseconds()))
+			scanCPUs[i][r] = float64(tScan.ElapsedProcessCPU().Microseconds())
 
 			// C. Snapshot 完整快照比对开销：append 已把 highwater 推到 size，
-			// snapshot 仍须对整份快照做费时的重复检测与 hash 计算。
+			// snapshot 仍须对整份快照做费时的重复检测与 hash 计算
 			tSnap := perfstat.StartProcessCPUTimer()
 			if tSnap.GetrusageFailed() {
 				t.Fatalf("failed to read process CPU timer")
 			}
-			if err := rg.ObserveSnapshot("c_linear", "", outputguard.KindText, data, "response.completed"); err != nil {
+			if err := rg.ObserveSnapshot("c_linear", "", outputguard.KindText, ds.raw, "response.completed"); err != nil {
 				t.Fatalf("size %d round %d snapshot tripped unexpectedly: %v", size, r, err)
 			}
-			snapCPUs = append(snapCPUs, float64(tSnap.ElapsedProcessCPU().Microseconds()))
+			snapCPUs[i][r] = float64(tSnap.ElapsedProcessCPU().Microseconds())
 
 			if rg.IsTripped() {
 				t.Fatalf("guard erroneously tripped for non-repeating data: %s", rg.TrippedReason())
@@ -372,10 +411,23 @@ func TestAcceptanceScenario25_LinearScalingRatiosDetailed(t *testing.T) {
 				t.Fatalf("guard erroneously tripped during projection: %s", rgEnv.TrippedReason())
 			}
 		}
+	}
 
-		envelopeMedians = append(envelopeMedians, perfstat.CalculateMedian(envCPUs))
-		scanMedians = append(scanMedians, perfstat.CalculateMedian(scanCPUs))
-		snapshotMedians = append(snapshotMedians, perfstat.CalculateMedian(snapCPUs))
+	// 计算各 size 的 CPU 中位数（用于日志展示与诊断）
+	envelopeMedians := []float64{
+		perfstat.CalculateMedian(envCPUs[0]),
+		perfstat.CalculateMedian(envCPUs[1]),
+		perfstat.CalculateMedian(envCPUs[2]),
+	}
+	scanMedians := []float64{
+		perfstat.CalculateMedian(scanCPUs[0]),
+		perfstat.CalculateMedian(scanCPUs[1]),
+		perfstat.CalculateMedian(scanCPUs[2]),
+	}
+	snapshotMedians := []float64{
+		perfstat.CalculateMedian(snapCPUs[0]),
+		perfstat.CalculateMedian(snapCPUs[1]),
+		perfstat.CalculateMedian(snapCPUs[2]),
 	}
 
 	t.Logf("Scenario 25 Envelope Medians (us): 1MiB=%.1f, 2MiB=%.1f, 4MiB=%.1f",
@@ -385,16 +437,50 @@ func TestAcceptanceScenario25_LinearScalingRatiosDetailed(t *testing.T) {
 	t.Logf("Scenario 25 Snapshot Medians (us): 1MiB=%.1f, 2MiB=%.1f, 4MiB=%.1f",
 		snapshotMedians[0], snapshotMedians[1], snapshotMedians[2])
 
-	// 机器自动化判定线性度：每翻倍比值必须 <= 2.5，三个分项独立核验。
-	if err := perfstat.ValidateLinearScalingRatio(scanMedians[0], scanMedians[1], scanMedians[2]); err != nil {
-		t.Fatalf("Scan scaling failed linearity ratio gate: %v", err)
+	// 按轮比值计算与中位数校验：
+	// 每轮计算 ratio1 = cpu(2MiB, r) / cpu(1MiB, r)，ratio2 = cpu(4MiB, r) / cpu(2MiB, r)
+	validateRoundRatios := func(name string, cpus [][]float64) {
+		r1Samples := make([]float64, rounds)
+		r2Samples := make([]float64, rounds)
+		for r := 0; r < rounds; r++ {
+			c1 := cpus[0][r]
+			c2 := cpus[1][r]
+			c4 := cpus[2][r]
+			if c1 <= 0 || c2 <= 0 || c4 <= 0 ||
+				math.IsNaN(c1) || math.IsNaN(c2) || math.IsNaN(c4) ||
+				math.IsInf(c1, 0) || math.IsInf(c2, 0) || math.IsInf(c4, 0) {
+				t.Fatalf("%s round %d: invalid CPU samples (1MiB=%.2f, 2MiB=%.2f, 4MiB=%.2f)", name, r, c1, c2, c4)
+			}
+			r1Samples[r] = c2 / c1
+			r2Samples[r] = c4 / c2
+		}
+
+		medR1 := perfstat.CalculateMedian(r1Samples)
+		medR2 := perfstat.CalculateMedian(r2Samples)
+
+		t.Logf("Scenario 25 %s Scaling Ratios (median of %d rounds): 1MiB->2MiB=%.2f, 2MiB->4MiB=%.2f (per-round 1->2: %s, 2->4: %s)",
+			name, rounds, medR1, medR2, formatScenario25Ratios(r1Samples), formatScenario25Ratios(r2Samples))
+
+		const maxAllowedRatio = 2.5
+		if medR1 > maxAllowedRatio {
+			t.Fatalf("%s scaling failed linearity ratio gate: ratio (1MiB->2MiB) median got %.2f > %.1f", name, medR1, maxAllowedRatio)
+		}
+		if medR2 > maxAllowedRatio {
+			t.Fatalf("%s scaling failed linearity ratio gate: ratio (2MiB->4MiB) median got %.2f > %.1f", name, medR2, maxAllowedRatio)
+		}
 	}
-	if err := perfstat.ValidateLinearScalingRatio(envelopeMedians[0], envelopeMedians[1], envelopeMedians[2]); err != nil {
-		t.Fatalf("Envelope scaling failed linearity ratio gate: %v", err)
+
+	validateRoundRatios("Scan", scanCPUs)
+	validateRoundRatios("Envelope", envCPUs)
+	validateRoundRatios("Snapshot", snapCPUs)
+}
+
+func formatScenario25Ratios(ratios []float64) string {
+	parts := make([]string, len(ratios))
+	for i, r := range ratios {
+		parts[i] = fmt.Sprintf("%.2f", r)
 	}
-	if err := perfstat.ValidateLinearScalingRatio(snapshotMedians[0], snapshotMedians[1], snapshotMedians[2]); err != nil {
-		t.Fatalf("Snapshot scaling failed linearity ratio gate: %v", err)
-	}
+	return "[" + strings.Join(parts, ", ") + "]"
 }
 
 // 场景 26: 单 channel 活状态引用 <= 64 KiB；>= 10 分钟真实长跑并发异常退出
