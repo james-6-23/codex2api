@@ -1312,7 +1312,9 @@ func (h *Handler) Messages(c *gin.Context) {
 			}
 			// [OutputGuard] 复用循环外创建的 requestGuard，使被缓冲的重试 attempt
 			// 承接已消耗的事件/字节预算；每次 attempt 只重建投影器与终止协调器。
-			usage, outcome, wroteAnyBody, firstTokenMs := forwardGrokNativeResponseObserved(readCtx, c, resp, GrokProtocolMessages, isStream, start, ttftGuard.Stop, streamAttempt.writerOr(c.Writer), streamAttempt.flusherOr(downstreamFlusher), nil, requestGuard)
+			// 显式传入 attempt 作用域，隔离各 attempt 的通道身份。
+			attemptScope := fmt.Sprintf("a%d", attempt)
+			usage, outcome, wroteAnyBody, firstTokenMs := forwardGrokNativeResponseObservedWithScope(readCtx, c, resp, GrokProtocolMessages, isStream, start, ttftGuard.Stop, streamAttempt.writerOr(c.Writer), streamAttempt.flusherOr(downstreamFlusher), nil, requestGuard, attemptScope)
 			if account.IsClaudeOAuth() {
 				// Anthropic 的 input_tokens 不含缓存命中/写入，转换成计费层的总输入口径。
 				applyAnthropicUsageSemantics(usage)
@@ -1467,7 +1469,10 @@ func (h *Handler) Messages(c *gin.Context) {
 		var streamAttempt *continuousRetryStreamAttempt
 		// [OutputGuard] 本次 attempt 的投影器与终止协调器。原生 Claude 是
 		// Anthropic SSE；其余能走到这里的 Messages 上游都已被翻译成 Responses SSE。
-		activeProjector := selectNativeProjector("messages", account.IsClaudeOAuth(), !account.IsClaudeOAuth())
+		// 投影器显式附加 attempt 作用域（a<attempt>），隔离同一请求不同 attempt 内
+		// 同名 block 的通道身份，防止跨 attempt 混淆通道类型与绕过工具预算。
+		attemptScope := fmt.Sprintf("a%d", attempt)
+		activeProjector := selectNativeProjectorWithScope("messages", account.IsClaudeOAuth(), !account.IsClaudeOAuth(), attemptScope)
 		guardCoord := NewGuardTerminationCoordinator(requestGuard, upstreamCancel, resp.Body)
 
 		if isStream {

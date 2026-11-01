@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -488,10 +489,14 @@ func writeGeminiNativeError(c *gin.Context, status int, message string) {
 // finishReason，Auto 会把它误判为流式而退化为 Append，跳过全文快照与尾检，
 // 使 8KiB~9214B 的重复尾逃逸；streamGenerateContent 则必须始终按逐帧流式处理。
 func geminiRequestProjector(stream bool) *GeminiProjector {
+	return geminiRequestProjectorWithScope(stream, "")
+}
+
+func geminiRequestProjectorWithScope(stream bool, scope string) *GeminiProjector {
 	if stream {
-		return NewGeminiProjectorWithMode(GeminiProjectorModeStream)
+		return NewGeminiProjectorWithScopeAndMode(scope, GeminiProjectorModeStream)
 	}
-	return NewGeminiProjectorWithMode(GeminiProjectorModeNonStream)
+	return NewGeminiProjectorWithScopeAndMode(scope, GeminiProjectorModeNonStream)
 }
 
 // handleGeminiGenerateContent 处理 native Gemini generateContent /
@@ -519,7 +524,6 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 	// [OutputGuard 状态机初始化] attempt 循环外单次初始化，跨 attempt 继承事件
 	// 与语义字节预算；Gemini 流式与非流式共用同一个请求级状态机。
 	requestGuard := outputguard.NewRequestGuard(nativeGuardCoreConfig())
-	geminiProjector := geminiRequestProjector(stream)
 
 	continuousRetryPolicy := continuousRetryPolicyForCall(nil)
 	rememberContinuousRetryPolicyForRequest(c, continuousRetryPolicy)
@@ -697,8 +701,10 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 			return
 		}
 
-		// [OutputGuard] 本次 attempt 的终止协调器：命中时先取消上游并关闭 body，
-		// 再丢弃任何尚未写出的下游缓冲。
+		// [OutputGuard] 本次 attempt 的终止协调器与投影器：命中时先取消上游并关闭 body，
+		// 再丢弃任何尚未写出的下游缓冲。投影器携带 attempt 作用域，隔离各 attempt 的通道身份。
+		attemptScope := fmt.Sprintf("a%d", attempt)
+		attemptProjector := geminiRequestProjectorWithScope(stream, attemptScope)
 		guardCoord := NewGuardTerminationCoordinator(requestGuard, upstreamCancel, resp.Body)
 
 		if stream {
@@ -707,7 +713,7 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 			c.Header("Connection", "keep-alive")
 			c.Header("X-Accel-Buffering", "no")
 			c.Status(resp.StatusCode)
-			result := forwardGeminiNativeStreamGuarded(c, resp.Body, start, requestGuard, guardCoord, geminiProjector)
+			result := forwardGeminiNativeStreamGuarded(c, resp.Body, start, requestGuard, guardCoord, attemptProjector)
 			_ = resp.Body.Close()
 			upstreamCancel()
 			h.store.Release(account)
@@ -783,7 +789,7 @@ func (h *Handler) handleGeminiGenerateContent(c *gin.Context, model string, rawB
 		}
 		// [OutputGuard 全量 Snapshot 检查] 保留现有 8MiB 有界读取，但在任何 JSON
 		// 写入下游之前对完整响应执行一次 Snapshot 判定。
-		if err := ObserveEvent(requestGuard, geminiProjector, "", out); err != nil || requestGuard.IsTripped() {
+		if err := ObserveEvent(requestGuard, attemptProjector, "", out); err != nil || requestGuard.IsTripped() {
 			reason := requestGuard.TrippedReason()
 			guardOutcome := guardCoord.HandleTripped(reason)
 			h.store.Release(account)

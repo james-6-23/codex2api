@@ -29,8 +29,14 @@ func nativeGuardCoreConfig() outputguard.Config {
 // 严禁按客户端下游请求路径盲目推测上游协议：原生 Claude 永远是 Anthropic SSE，
 // Codex/Responses 中转永远是 Responses SSE，其余按上游协议名分派。
 func selectNativeProjector(protocol string, isNativeClaude bool, isCodexResponses bool) ProtocolProjector {
+	return selectNativeProjectorWithScope(protocol, isNativeClaude, isCodexResponses, "")
+}
+
+// selectNativeProjectorWithScope 为指定 attempt 作用域选择投影器，
+// 确保不同 attempt 内同名 block / part 的通道身份物理隔离。
+func selectNativeProjectorWithScope(protocol string, isNativeClaude bool, isCodexResponses bool, scope string) ProtocolProjector {
 	if isNativeClaude {
-		return NewAnthropicProjector()
+		return NewAnthropicProjectorWithScope(scope)
 	}
 	if isCodexResponses {
 		return NewResponsesProjector()
@@ -38,9 +44,9 @@ func selectNativeProjector(protocol string, isNativeClaude bool, isCodexResponse
 	norm := strings.ToLower(strings.TrimSpace(protocol))
 	switch norm {
 	case "anthropic", "messages":
-		return NewAnthropicProjector()
+		return NewAnthropicProjectorWithScope(scope)
 	case "gemini":
-		return NewGeminiProjector()
+		return NewGeminiProjectorWithScopeAndMode(scope, GeminiProjectorModeAuto)
 	case "chat", "chat_completions", "chatcompletions":
 		return NewChatProjector()
 	case "responses":

@@ -820,3 +820,74 @@ func TestGeminiProjectorNonStreamWithoutFinishReasonDetectsRepeatedTail(t *testi
 		t.Fatalf("I2 failure: non-stream body without finishReason skipped snapshot/tail check: err=%v tripped=%v reason=%q", err, guard.IsTripped(), guard.TrippedReason())
 	}
 }
+
+// -----------------------------------------------------------------------------
+// 回归测试：Anthropic 与 Gemini 投影器支持 attempt 作用域隔离通道身份
+// -----------------------------------------------------------------------------
+
+func TestRegression_AnthropicProjectorAttemptScopeEnforcesToolBudget(t *testing.T) {
+	cfg := outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  16 * 1024,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       128 * 1024,
+		MaxRequestBytes:       512 * 1024,
+	}
+	guard := outputguard.NewRequestGuard(cfg)
+
+	// Attempt 1: 序号 0，block_0 作为 text 通道写入 50 KiB (未超 128 KiB channel 限额，也未超 512 KiB request 限额)
+	proj1 := NewAnthropicProjectorWithScope("a0")
+	_ = ObserveEvent(guard, proj1, "message_start", []byte(`{"type":"message_start","message":{"id":"msg_1"}}`))
+	_ = ObserveEvent(guard, proj1, "content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`))
+	_ = ObserveEvent(guard, proj1, "content_block_delta", []byte(fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"%s"}}`, outputGuardTestRandomText(101, 50*1024))))
+
+	if guard.IsTripped() {
+		t.Fatalf("attempt 1 should not trip guard: %v", guard.TrippedReason())
+	}
+
+	// Attempt 2: 序号 1，同名 block_0 作为 tool_use 写入 20 KiB (> 16 KiB MaxToolArgumentBytes)
+	proj2 := NewAnthropicProjectorWithScope("a1")
+	_ = ObserveEvent(guard, proj2, "message_start", []byte(`{"type":"message_start","message":{"id":"msg_2"}}`))
+	_ = ObserveEvent(guard, proj2, "content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"toolu_01","name":"exec"}}`))
+	_ = ObserveEvent(guard, proj2, "content_block_delta", []byte(fmt.Sprintf(`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"%s"}}`, outputGuardTestRandomText(202, 20*1024))))
+
+	// 此时 attempt 2 必须触发 tool_argument_bytes，不能因为 attempt 1 曾把 block_0 作为 text 通道而逃逸！
+	if !guard.IsTripped() {
+		t.Fatalf("expected guard to trip on attempt 2 tool arguments limit")
+	}
+	if got := guard.TrippedReason(); got != "tool_argument_bytes" {
+		t.Fatalf("expected tripped reason %q, got %q", "tool_argument_bytes", got)
+	}
+}
+
+func TestRegression_GeminiProjectorAttemptScopeEnforcesToolBudget(t *testing.T) {
+	cfg := outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  16 * 1024,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       128 * 1024,
+		MaxRequestBytes:       512 * 1024,
+	}
+	guard := outputguard.NewRequestGuard(cfg)
+
+	// Attempt 1: candidate 0 part 0 作为 text 通道写入 50 KiB
+	proj1 := NewGeminiProjectorWithScopeAndMode("a0", GeminiProjectorModeStream)
+	chunk1 := fmt.Sprintf(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"%s"}]}}]}`, outputGuardTestRandomText(301, 50*1024))
+	_ = ObserveEvent(guard, proj1, "", []byte(chunk1))
+
+	if guard.IsTripped() {
+		t.Fatalf("attempt 1 should not trip guard: %v", guard.TrippedReason())
+	}
+
+	// Attempt 2: 作用域隔离后，相同的 candidate 0 part 0 作为 functionCall 写入 20 KiB (> 16 KiB)
+	proj2 := NewGeminiProjectorWithScopeAndMode("a1", GeminiProjectorModeStream)
+	chunk2 := fmt.Sprintf(`{"candidates":[{"index":0,"content":{"role":"model","parts":[{"functionCall":{"id":"call_scoped","name":"fn","args":{"param":"%s"}}}]}}]}`, outputGuardTestRandomText(402, 20*1024))
+	_ = ObserveEvent(guard, proj2, "", []byte(chunk2))
+
+	if !guard.IsTripped() {
+		t.Fatalf("expected guard to trip on attempt 2 tool arguments limit in Gemini")
+	}
+	if got := guard.TrippedReason(); got != "tool_argument_bytes" {
+		t.Fatalf("expected tripped reason %q, got %q", "tool_argument_bytes", got)
+	}
+}

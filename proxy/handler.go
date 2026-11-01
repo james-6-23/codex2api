@@ -1237,6 +1237,10 @@ func forwardGrokNativeResponseTo(readCtx context.Context, c *gin.Context, resp *
 // 重试 attempt 承接已消耗的事件/字节预算；为 nil 时才新建（仅供单次转发的
 // 旧测试入口使用）。绝不能在本函数内无条件重建状态机。
 func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, resp *http.Response, protocol GrokProtocol, streaming bool, startedAt time.Time, firstVisible func(), output io.Writer, outputFlusher http.Flusher, observe func([]byte), requestGuard *outputguard.RequestGuard) (*UsageInfo, streamOutcome, bool, int) {
+	return forwardGrokNativeResponseObservedWithScope(readCtx, c, resp, protocol, streaming, startedAt, firstVisible, output, outputFlusher, observe, requestGuard, "")
+}
+
+func forwardGrokNativeResponseObservedWithScope(readCtx context.Context, c *gin.Context, resp *http.Response, protocol GrokProtocol, streaming bool, startedAt time.Time, firstVisible func(), output io.Writer, outputFlusher http.Flusher, observe func([]byte), requestGuard *outputguard.RequestGuard, scope string) (*UsageInfo, streamOutcome, bool, int) {
 	privateAttempt := output != nil && output != c.Writer
 	resp.Header.Del(grokNativeRouteHeader)
 	// [OutputGuard] 原生透传严格按真实上游协议选择投影器；终止协调器以 resp.Body
@@ -1244,7 +1248,7 @@ func forwardGrokNativeResponseObserved(readCtx context.Context, c *gin.Context, 
 	if requestGuard == nil {
 		requestGuard = outputguard.NewRequestGuard(nativeGuardCoreConfig())
 	}
-	projector := selectNativeProjector(string(protocol), false, false)
+	projector := selectNativeProjectorWithScope(string(protocol), false, false, scope)
 	guardCoord := NewGuardTerminationCoordinator(requestGuard, nil, resp.Body)
 	if !streaming {
 		body, err := readAllLimitedWithContinuousRetryKeepalive(readCtx, resp.Body, grokMaxDecodedBody)

@@ -551,15 +551,28 @@ func (p *ChatProjector) Project(eventType string, data []byte) ([]Observation, e
 // -------------------------------------------------------------
 
 type AnthropicProjector struct {
+	scope      string
 	blockTypes map[int]string
 	blockIDs   map[int]string
 }
 
 func NewAnthropicProjector() *AnthropicProjector {
+	return NewAnthropicProjectorWithScope("")
+}
+
+func NewAnthropicProjectorWithScope(scope string) *AnthropicProjector {
 	return &AnthropicProjector{
+		scope:      scope,
 		blockTypes: make(map[int]string),
 		blockIDs:   make(map[int]string),
 	}
+}
+
+func (p *AnthropicProjector) scopedChannelID(raw string) string {
+	if p.scope == "" {
+		return raw
+	}
+	return p.scope + "/" + raw
 }
 
 func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observation, error) {
@@ -588,7 +601,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 		if bType == "text" {
 			if text := block.Get("text").String(); text != "" {
 				observations = append(observations, Observation{
-					ChannelID: fmt.Sprintf("block_%d", idx),
+					ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 					Kind:      outputguard.KindText,
 					Action:    ActionAppend,
 					Payload:   []byte(text),
@@ -610,7 +623,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 			}
 			if len(payload) > 0 {
 				observations = append(observations, Observation{
-					ChannelID: fmt.Sprintf("block_%d", idx),
+					ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 					AliasID:   p.blockIDs[idx],
 					Kind:      outputguard.KindToolArguments,
 					Action:    ActionAppend,
@@ -628,7 +641,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 		case "text_delta":
 			text := delta.Get("text").String()
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", idx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 				Kind:      outputguard.KindText,
 				Action:    ActionAppend,
 				Payload:   []byte(text),
@@ -636,7 +649,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 		case "thinking_delta":
 			thinking := delta.Get("thinking").String()
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", idx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 				Kind:      outputguard.KindThinking,
 				Action:    ActionAppend,
 				Payload:   []byte(thinking),
@@ -645,7 +658,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 			partJSON := delta.Get("partial_json").String()
 			callID := p.blockIDs[idx]
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", idx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 				AliasID:   callID,
 				Kind:      outputguard.KindToolArguments,
 				Action:    ActionAppend,
@@ -658,20 +671,20 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 		bType := p.blockTypes[idx]
 		if bType == "tool_use" {
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", idx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 				AliasID:   p.blockIDs[idx],
 				Kind:      outputguard.KindToolArguments,
 				Action:    ActionEnd,
 			})
 		} else if bType == "thinking" {
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", idx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 				Kind:      outputguard.KindThinking,
 				Action:    ActionEnd,
 			})
 		} else {
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", idx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 				Kind:      outputguard.KindText,
 				Action:    ActionEnd,
 			})
@@ -687,7 +700,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 				kind = outputguard.KindThinking
 			}
 			observations = append(observations, Observation{
-				ChannelID: fmt.Sprintf("block_%d", blockIdx),
+				ChannelID: p.scopedChannelID(fmt.Sprintf("block_%d", blockIdx)),
 				AliasID:   p.blockIDs[blockIdx],
 				Kind:      kind,
 				Action:    ActionEnd,
@@ -704,7 +717,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 				case "text":
 					text := b.Get("text").String()
 					observations = append(observations, Observation{
-						ChannelID:     fmt.Sprintf("block_%d", idx),
+						ChannelID:     p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 						Kind:          outputguard.KindText,
 						Action:        ActionSnapshot,
 						Payload:       []byte(text),
@@ -713,7 +726,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 				case "thinking":
 					thinking := b.Get("thinking").String()
 					observations = append(observations, Observation{
-						ChannelID:     fmt.Sprintf("block_%d", idx),
+						ChannelID:     p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 						Kind:          outputguard.KindThinking,
 						Action:        ActionSnapshot,
 						Payload:       []byte(thinking),
@@ -729,7 +742,7 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 						inputBytes = []byte(inputObj.String())
 					}
 					observations = append(observations, Observation{
-						ChannelID:     fmt.Sprintf("block_%d", idx),
+						ChannelID:     p.scopedChannelID(fmt.Sprintf("block_%d", idx)),
 						AliasID:       callID,
 						Kind:          outputguard.KindToolArguments,
 						Action:        ActionSnapshot,
@@ -757,6 +770,7 @@ const (
 )
 
 type GeminiProjector struct {
+	scope                 string
 	candidateToolCounters map[int]int
 	candidateToolKeys     map[int][]string
 	candidatePartCounts   map[int]int
@@ -765,17 +779,16 @@ type GeminiProjector struct {
 }
 
 func NewGeminiProjector() *GeminiProjector {
-	return &GeminiProjector{
-		candidateToolCounters: make(map[int]int),
-		candidateToolKeys:     make(map[int][]string),
-		candidatePartCounts:   make(map[int]int),
-		mode:                  GeminiProjectorModeAuto,
-		isStream:              false,
-	}
+	return NewGeminiProjectorWithScopeAndMode("", GeminiProjectorModeAuto)
 }
 
 func NewGeminiProjectorWithMode(mode GeminiProjectorMode) *GeminiProjector {
+	return NewGeminiProjectorWithScopeAndMode("", mode)
+}
+
+func NewGeminiProjectorWithScopeAndMode(scope string, mode GeminiProjectorMode) *GeminiProjector {
 	p := &GeminiProjector{
+		scope:                 scope,
 		candidateToolCounters: make(map[int]int),
 		candidateToolKeys:     make(map[int][]string),
 		candidatePartCounts:   make(map[int]int),
@@ -783,6 +796,13 @@ func NewGeminiProjectorWithMode(mode GeminiProjectorMode) *GeminiProjector {
 		isStream:              mode == GeminiProjectorModeStream,
 	}
 	return p
+}
+
+func (p *GeminiProjector) scopedChannelID(raw string) string {
+	if p.scope == "" {
+		return raw
+	}
+	return p.scope + "/" + raw
 }
 
 func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation, error) {
@@ -837,7 +857,7 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 					stage = "response.completed"
 				}
 				observations = append(observations, Observation{
-					ChannelID:     fmt.Sprintf("candidate_%d.part_%d.%s", candIdx, partIdx, suffix),
+					ChannelID:     p.scopedChannelID(fmt.Sprintf("candidate_%d.part_%d.%s", candIdx, partIdx, suffix)),
 					Kind:          kind,
 					Action:        action,
 					Payload:       []byte(text),
@@ -887,7 +907,7 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 				}
 
 				observations = append(observations, Observation{
-					ChannelID:     channelID,
+					ChannelID:     p.scopedChannelID(channelID),
 					AliasID:       callID,
 					Kind:          outputguard.KindToolArguments,
 					Action:        action,
@@ -902,12 +922,12 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 		if finishReason != "" {
 			for i := 0; i < p.candidatePartCounts[candIdx]; i++ {
 				observations = append(observations, Observation{
-					ChannelID: fmt.Sprintf("candidate_%d.part_%d.text", candIdx, i),
+					ChannelID: p.scopedChannelID(fmt.Sprintf("candidate_%d.part_%d.text", candIdx, i)),
 					Kind:      outputguard.KindText,
 					Action:    ActionEnd,
 				})
 				observations = append(observations, Observation{
-					ChannelID: fmt.Sprintf("candidate_%d.part_%d.thinking", candIdx, i),
+					ChannelID: p.scopedChannelID(fmt.Sprintf("candidate_%d.part_%d.thinking", candIdx, i)),
 					Kind:      outputguard.KindThinking,
 					Action:    ActionEnd,
 				})
@@ -915,7 +935,7 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 			if totalTools, exists := p.candidateToolCounters[candIdx]; exists {
 				for tIdx := 0; tIdx < totalTools; tIdx++ {
 					observations = append(observations, Observation{
-						ChannelID: fmt.Sprintf("candidate_%d.tool_idx_%d", candIdx, tIdx),
+						ChannelID: p.scopedChannelID(fmt.Sprintf("candidate_%d.tool_idx_%d", candIdx, tIdx)),
 						Kind:      outputguard.KindToolArguments,
 						Action:    ActionEnd,
 					})
@@ -924,7 +944,7 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 			if toolKeys, exists := p.candidateToolKeys[candIdx]; exists {
 				for _, k := range toolKeys {
 					observations = append(observations, Observation{
-						ChannelID: k,
+						ChannelID: p.scopedChannelID(k),
 						Kind:      outputguard.KindToolArguments,
 						Action:    ActionEnd,
 					})
