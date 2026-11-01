@@ -1648,11 +1648,12 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 			data := bytes.TrimPrefix(line, []byte("data:"))
 			data = bytes.TrimPrefix(data, []byte(" "))
 			// 单行与多行累积事件都必须在 wire 层硬性受限，避免超大事件
-			// 长期占用内存。空 data 行（len(data)==0）也必须至少计 1 字节：
-			// 否则无穷多的 "data:" 行在事件边界缺失时会让 dataLines 无界增长。
-			// 多行事件最终由 bytes.Join 以 '\n' 拼接，第一条之后的每行还要
-			// 额外计 1 字节分隔符；否则 k 行事件可累积到约 2×maxSSEEventBytes。
-			lineBytes := max(len(data), 1)
+			// 长期占用内存。计量必须严格对齐 bytes.Join 交付给 callback 的
+			// 实际字节数：第一条 data 行计 len(data)，之后每条计 1 + len(data)
+			// （含 1 字节 '\n' 分隔符）。空 data 行（len(data)==0）从第二条起
+			// 每行计入 1 字节分隔符，累积到 maxSSEEventBytes 时同样受硬上限
+			// 约束，既防止无界增长，又保证恰好 8MiB 的合法事件不被误拒。
+			lineBytes := len(data)
 			if len(dataLines) > 0 {
 				lineBytes++
 			}

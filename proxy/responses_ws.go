@@ -1443,8 +1443,12 @@ func (h *Handler) streamResponsesWSUpstream(
 			(!isResponsesTerminalEvent(eventType) || awaitingResponsesWSInterruptAck(c.Request.Context())) &&
 			!(gotTerminal && isResponsesWSInterruptAck(eventType))
 	})
-	if err := failPendingResponsesWSInterrupt(c.Request.Context(), conn); err != nil {
-		writeErr = err
+	// clientGone（guard 命中或下游写失败）后抑制未决 interrupt 的失败确认帧：
+	// guard 终态帧必须是连接关闭前的最后一帧，不得在终态后再下发 response.interrupt.failed。
+	if !clientGone {
+		if err := failPendingResponsesWSInterrupt(c.Request.Context(), conn); err != nil {
+			writeErr = err
+		}
 	}
 	// guard 命中（或写失败）后 clientGone 已置位：guard 终态帧是连接关闭前的
 	// 最后一帧，命中后不得再把 outputBuffer 中残留的消息补写到下游。

@@ -152,12 +152,12 @@ func TestTransportFramingIndependentOfGuard(t *testing.T) {
 	}
 }
 
-// TestReadSSEStreamWithEventEmptyDataLinesCountTowardCap 验证空 data: 行同样
-// 计入事件字节上限。每行至少计 1 字节，否则无限多的空 data 行会在事件边界
-// （空行）始终不出现时无界累积内存（修复前 currentEventBytes 恒不增长，
-// callback 会收到约 8MiB 的纯换行 payload 且 err=nil）。
+// TestReadSSEStreamWithEventEmptyDataLinesCountTowardCap 验证空 data: 行
+// 同样按 bytes.Join 分隔符计入事件字节上限。除首行外每条空行计 1 字节，
+// 达到 maxSSEEventBytes+2 行时累积分隔符达到 maxSSEEventBytes+1 字节，
+// 触发 ErrSSEEventTooLarge，防止事件边界缺失时空行无界累积。
 func TestReadSSEStreamWithEventEmptyDataLinesCountTowardCap(t *testing.T) {
-	input := strings.Repeat("data:\n", maxSSEEventBytes+1)
+	input := strings.Repeat("data:\n", maxSSEEventBytes+2)
 
 	callbackCalls := 0
 	payloadLen := 0
@@ -171,6 +171,61 @@ func TestReadSSEStreamWithEventEmptyDataLinesCountTowardCap(t *testing.T) {
 	}
 	if callbackCalls != 0 {
 		t.Fatalf("callback must not receive the unbounded event, got %d call(s), last payload len %d", callbackCalls, payloadLen)
+	}
+}
+
+// TestReadSSEStreamWithEventExactCapSingleAndMultiline 验证多行事件（包括含空 data 行及纯空 data 行）
+// 在拼接后恰好等于 8MiB 上限时均被成功接受，且交付字节数与上限严格一致。
+func TestReadSSEStreamWithEventExactCapSingleAndMultiline(t *testing.T) {
+	half := maxSSEEventBytes / 2
+
+	// 1. 多行普通文本拼接后恰好 8MiB
+	// joined = half + 1 + (half - 1) = maxSSEEventBytes
+	exact := "data: " + strings.Repeat("a", half) + "\n" +
+		"data: " + strings.Repeat("b", half-1) + "\n\n"
+	payloadLen := 0
+	err := ReadSSEStreamWithEvent(strings.NewReader(exact), func(_ string, data []byte) bool {
+		payloadLen = len(data)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("multiline event at exact cap must be accepted: %v", err)
+	}
+	if payloadLen != maxSSEEventBytes {
+		t.Fatalf("payload len = %d, want %d", payloadLen, maxSSEEventBytes)
+	}
+
+	// 2. 多行含有空 data 行，拼接后恰好 8MiB：
+	// 第一行 half 字节，第二行空 data，第三行 half-2 字节。
+	// bytes.Join 结果: half + "\n" + "" + "\n" + (half - 2) = maxSSEEventBytes
+	// 修复前空 data 行计 2 字节导致累计为 maxSSEEventBytes + 1 被误拒。
+	withEmptyLineExact := "data: " + strings.Repeat("y", half) + "\n" +
+		"data:\n" +
+		"data: " + strings.Repeat("z", half-2) + "\n\n"
+	payloadLen = 0
+	err = ReadSSEStreamWithEvent(strings.NewReader(withEmptyLineExact), func(_ string, data []byte) bool {
+		payloadLen = len(data)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("multiline event with empty line at exact cap must be accepted: %v", err)
+	}
+	if payloadLen != maxSSEEventBytes {
+		t.Fatalf("multiline payload len = %d, want %d", payloadLen, maxSSEEventBytes)
+	}
+
+	// 3. 纯空行拼接恰好 8MiB（maxSSEEventBytes+1 条空 data: 行，Join 后得到 8MiB 个换行符）
+	exactEmptyLines := strings.Repeat("data:\n", maxSSEEventBytes+1) + "\n"
+	payloadLen = 0
+	err = ReadSSEStreamWithEvent(strings.NewReader(exactEmptyLines), func(_ string, data []byte) bool {
+		payloadLen = len(data)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("pure empty lines event at exact cap must be accepted: %v", err)
+	}
+	if payloadLen != maxSSEEventBytes {
+		t.Fatalf("pure empty lines payload len = %d, want %d", payloadLen, maxSSEEventBytes)
 	}
 }
 

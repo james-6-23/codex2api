@@ -583,6 +583,105 @@ func TestResponsesWebSocketGuardTripSkipsBufferedFlush(t *testing.T) {
 	assertWSGuardTerminalThen1013(t, conn, pattern)
 }
 
+// TestResponsesWebSocketGuardTripWithPendingInterruptDropsFailedFrame 回归 guard 命中
+// 且存在未确认的 response.interrupt 场景：guard 终态帧必须是连接关闭前的最后一帧，
+// 不得在其后补发 response.interrupt.failed 帧。
+func TestResponsesWebSocketGuardTripWithPendingInterruptDropsFailedFrame(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+
+	pattern := "ws_guard_interrupt_runaway_12345678_"
+	runawayText := strings.Repeat(pattern, 400)
+
+	pipeR, pipeW := io.Pipe()
+	interruptReceived := make(chan struct{})
+
+	previousExec := WebsocketExecuteFunc
+	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
+	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
+		// 注册 interrupt 上游发送函数，模拟上游支持 interrupt
+		RegisterResponsesWSInterrupt(ctx, func(payload []byte) error {
+			close(interruptReceived)
+			return nil
+		})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     make(http.Header),
+			Body:       pipeR,
+		}, nil
+	}
+
+	handler, store, account := setupLifecycleTestHandler(t, "https://upstream.example", "", "gpt-5.5")
+	account.ResponsesUpstreamTransport = auth.OpenAIResponsesTransportHTTP
+	store.SetCodexModelMapping(`{"client-ws-alias":"gpt-5.5"}`)
+
+	router := gin.New()
+	router.GET("/v1/responses", handler.ResponsesWebSocket)
+	server := httptest.NewServer(router)
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/v1/responses"
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial websocket failed: %v", err)
+	}
+	defer conn.Close()
+	if resp != nil {
+		_ = resp.Body.Close()
+	}
+
+	turnReq := `{"model":"client-ws-alias","input":"hello"}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(turnReq)); err != nil {
+		t.Fatalf("write websocket turn: %v", err)
+	}
+
+	// 上游先下发 response.created 和一个正常 delta，触发首包下发并记录 response.id
+	go func() {
+		_, _ = pipeW.Write([]byte("data: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_guard_int_test\"}}\n\n"))
+		_, _ = pipeW.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n"))
+	}()
+
+	// 消费 response.created 帧
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msgType, msg, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read response.created: %v", err)
+	}
+	if msgType != websocket.TextMessage || gjson.GetBytes(msg, "type").String() != "response.created" {
+		t.Fatalf("msgType=%d payload=%s, want response.created", msgType, string(msg))
+	}
+
+	// 消费 delta 帧
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	msgType, msg, err = conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("read delta: %v", err)
+	}
+	if msgType != websocket.TextMessage || gjson.GetBytes(msg, "type").String() != "response.output_text.delta" {
+		t.Fatalf("msgType=%d payload=%s, want response.output_text.delta", msgType, string(msg))
+	}
+
+	// 此时 response.id 已绑定，客户端发送 interrupt
+	interruptReq := `{"type":"response.interrupt","response_id":"resp_guard_int_test","mode":"discard_partial_items"}`
+	if err := conn.WriteMessage(websocket.TextMessage, []byte(interruptReq)); err != nil {
+		t.Fatalf("write interrupt req: %v", err)
+	}
+
+	// 等待网关将 interrupt 分发并调用 state.send（置位 state.requested）
+	select {
+	case <-interruptReceived:
+	case <-time.After(5 * time.Second):
+		t.Fatal("timeout waiting for interrupt to be processed by gateway")
+	}
+
+	// 上游推送失控文本命中 guard，并且不上报 interrupt ack，模拟未决中断场景
+	go func() {
+		_, _ = pipeW.Write([]byte("data: {\"type\":\"response.output_text.delta\",\"delta\":\"" + runawayText + "\"}\n\n"))
+	}()
+
+	// 断言：终态必须是 guard terminal 错误帧，且随后的 close 之后无任何额外帧（如 response.interrupt.failed）
+	assertWSGuardTerminalThen1013(t, conn, pattern)
+}
+
 // 场景 12 (WS 并发回归): 同一连接上两个命名 lane 同时命中 guard。gorilla/websocket
 // 禁止同一 conn 并发写；终态帧必须经 per-conn 写锁串行化，否则并发写会 panic、
 // 产生帧损坏并让 -race 报数据竞争。两个 lane 各自收到含 GuardTriggeredPublicCode
