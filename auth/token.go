@@ -53,9 +53,10 @@ type AccountInfo struct {
 // resinAccountID 可选，Resin 启用时传入账号标识用于粘性代理
 func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL string, resinAccountID ...string) (*TokenData, *AccountInfo, error) {
 	data, err := json.Marshal(map[string]string{
-		"grant_type":    "refresh_token",
-		"client_id":     ClientID,
-		"refresh_token": refreshToken,
+		"grant_type":     "refresh_token",
+		"client_id":      ClientID,
+		"refresh_token":  refreshToken,
+		"refresh_reason": codexOAuthRefreshReason(ctx),
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("编码刷新请求失败: %w", err)
@@ -77,6 +78,7 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	applyCodexOAuthIdentity(req)
 
 	// Resin 反代：注入账号身份头
 	if ResinRequestDecorator != nil && accountID != "" {

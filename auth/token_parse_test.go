@@ -89,7 +89,7 @@ func TestRefreshAccessTokenRejectsEmptyAccessToken(t *testing.T) {
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 			t.Errorf("decode refresh request: %v", err)
 		}
-		want := map[string]string{"grant_type": "refresh_token", "client_id": ClientID, "refresh_token": "rt-old"}
+		want := map[string]string{"grant_type": "refresh_token", "client_id": ClientID, "refresh_token": "rt-old", "refresh_reason": "forced"}
 		if !reflect.DeepEqual(want, payload) {
 			t.Errorf("refresh payload: want %v, got %v", want, payload)
 		}

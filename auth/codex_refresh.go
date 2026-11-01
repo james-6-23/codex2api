@@ -82,6 +82,13 @@ func (s *Store) refreshCodexAccount(ctx context.Context, acc *Account, force boo
 	if lease != nil {
 		ctx = lease.CriticalContext()
 	}
+	if rt != "" {
+		identityCtx, err := withCodexOAuthIdentity(ctx, acc, force)
+		if err != nil {
+			return err
+		}
+		ctx = identityCtx
+	}
 	var attempt *database.CodexRefreshAttempt
 	if rt != "" && s.db != nil {
 		var err error
