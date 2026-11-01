@@ -22,7 +22,11 @@ import {
 } from '../lib/claudeAccountOptions'
 import { buildWritableSettingsPayload } from '../lib/settingsPayload'
 import { resolveByteLimitCommit } from '../lib/byteLimitCommit'
-import { mergeConfirmedSettingsValues, resolveAutoSaveRollbackValues } from '../lib/settingsAutoSave'
+import {
+  mergeConfirmedSettingsValues,
+  mergeConfirmedSettingsWithVersions,
+  resolveAutoSaveRollbackValues,
+} from '../lib/settingsAutoSave'
 import {
   buildContinuousRetryCatchAllPatch,
   buildContinuousRetryEnabledPatch,
@@ -48,6 +52,7 @@ import {
   bytesToKiB,
   kibToBytes,
   omitOutputGuardFields,
+  preserveOutputGuardFields,
   validateOutputGuardHierarchy,
   validateOutputGuardRanges,
 } from '../lib/outputGuardSettings'
@@ -2920,6 +2925,7 @@ export default function Settings() {
   // 键入型字段在 blur 提交前已同步进 settingsFormRef，自动保存失败若按该值
   // 回滚，会把从未被服务端接受的草稿留在界面上；回滚必须以本快照为准。
   const confirmedSettingsRef = useRef<SystemSettings | null>(null)
+  const confirmedFieldVersionsRef = useRef<Record<string, number>>({})
   const autoSavePendingCountRef = useRef(0)
   const autoSaveFieldVersionsRef = useRef<Record<string, number>>({})
   const autoSaveStatusTimerRef = useRef<number | null>(null)
@@ -3034,10 +3040,15 @@ export default function Settings() {
       const updated = await api.updateSettings(getSettingsPatchValues(optimistic, patchKeys))
       // 本次请求提交的字段已被服务器确认；记录到快照里，"最后一次服务器确认
       // 的设置"才能作为后续失败的可靠回滚目标。
-      confirmedSettingsRef.current = mergeConfirmedSettingsValues(
+      // 为每个字段检查版本：若同一字段有更新版本的响应已提前到达，旧响应不应覆盖新基线。
+      const mergedConfirmedState = mergeConfirmedSettingsWithVersions(
         confirmedSettingsRef.current,
+        confirmedFieldVersionsRef.current,
         getSettingsPatchValues(updated, patchKeys),
+        requestedVersions,
       )
+      confirmedSettingsRef.current = mergedConfirmedState.confirmed
+      confirmedFieldVersionsRef.current = mergedConfirmedState.confirmedVersions
       const mergeKeys = patchKeys.filter((key) => {
         const fieldKey = String(key)
         return autoSaveFieldVersionsRef.current[fieldKey] === requestedVersions[fieldKey]
@@ -3292,9 +3303,12 @@ export default function Settings() {
       // 失控防护字段只走自动保存：整表单提交会把手动打开页面时读到的陈旧快照
       // 连同新 generation 一起上送，可能覆盖其他管理员刚改过、甚至刚关闭的 guard。
       const updated = await api.updateSettings(payload)
-      setPersistedSettings(commitSettingsForm(updated))
+      // 手动保存成功后以服务器响应更新表单，但必须保留当前本地的 guard 字段，
+      // 防止保存期间或之前通过 autosave 生效的新 guard 值被手动响应里的旧 guard 字段冲回。
+      const safeMerged = preserveOutputGuardFields(updated, settingsFormRef.current)
+      setPersistedSettings(commitSettingsForm(safeMerged))
       // 手动保存同样刷新"最后一次服务器确认"快照，后续自动保存失败时不会
-      // 回滚到这次手动保存之前的旧值。
+      // 回滚到这次手动保存之前的旧值。这里同样保留 guard 字段。
       confirmedSettingsRef.current = settingsFormRef.current
       const branding = {
         site_name: updated.site_name,

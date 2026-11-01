@@ -8,6 +8,7 @@ import {
   OUTPUT_GUARD_KEYS,
   isOutputGuardKey,
   omitOutputGuardFields,
+  preserveOutputGuardFields,
   validateOutputGuardHierarchy,
   validateOutputGuardRanges,
   bytesToKiB,
@@ -121,3 +122,40 @@ test('unit conversions work accurately', () => {
   assert.equal(bytesToMiB(2 * 1024 * 1024), 2)
   assert.equal(mibToBytes(2), 2 * 1024 * 1024)
 })
+
+test('preserveOutputGuardFields keeps current guard fields and config generation from current state', () => {
+  const updatedFromServer = {
+    site_name: 'NewServerSiteName',
+    output_guard_enabled: false,
+    output_guard_max_tool_argument_bytes: 256 * KIB,
+    output_guard_max_tool_argument_deltas: 4096,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+    output_guard_config_generation: 1,
+  }
+
+  const currentLocalState = {
+    site_name: 'OldSiteName',
+    output_guard_enabled: true,
+    output_guard_max_tool_argument_bytes: 512 * KIB,
+    output_guard_max_tool_argument_deltas: 8192,
+    output_guard_max_channel_bytes: 4 * MIB,
+    output_guard_max_request_bytes: 8 * MIB,
+    output_guard_config_generation: 5,
+  }
+
+  const result = preserveOutputGuardFields(updatedFromServer, currentLocalState)
+
+  assert.equal(result.site_name, 'NewServerSiteName', 'non-guard fields must take the server updated values')
+  assert.equal(result.output_guard_enabled, true)
+  assert.equal(result.output_guard_max_tool_argument_bytes, 512 * KIB)
+  assert.equal(result.output_guard_max_tool_argument_deltas, 8192)
+  assert.equal(result.output_guard_max_channel_bytes, 4 * MIB)
+  assert.equal(result.output_guard_max_request_bytes, 8 * MIB)
+  assert.equal(result.output_guard_config_generation, 5)
+
+  // Ensure immutability
+  assert.equal(updatedFromServer.site_name, 'NewServerSiteName')
+  assert.equal(updatedFromServer.output_guard_enabled, false)
+})
+

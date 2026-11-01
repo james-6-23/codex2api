@@ -30,3 +30,57 @@ export function mergeConfirmedSettingsValues<T extends object>(
 ): T | null {
   return confirmed ? { ...confirmed, ...confirmedValues } : confirmed
 }
+
+export interface ConfirmedSettingsVersionState<T extends object> {
+  confirmed: T | null
+  confirmedVersions: Record<string, number>
+}
+
+/**
+ * 带有字段版本检查的服务器确认值合并函数。
+ *
+ * 为每个字段记录"最后确认的请求版本"；合并时逐字段比较本次响应所携带的请求版本
+ * 是否新于该字段最后确认版本。若旧响应晚于新响应到达，跳过旧字段值，防止回滚基线
+ * 被冲回过期值。
+ */
+export function mergeConfirmedSettingsWithVersions<T extends object>(
+  confirmed: T | null,
+  confirmedVersions: Record<string, number>,
+  incomingValues: Partial<T>,
+  incomingVersions: Record<string, number>,
+): ConfirmedSettingsVersionState<T> {
+  const nextVersions: Record<string, number> = { ...confirmedVersions }
+  const acceptableValues: Partial<T> = {}
+  let hasUpdate = false
+
+  for (const key of Object.keys(incomingValues) as Array<keyof T>) {
+    const fieldKey = String(key)
+    const incomingVer = incomingVersions[fieldKey] ?? 0
+    const currentVer = nextVersions[fieldKey] ?? 0
+    if (incomingVer > currentVer) {
+      acceptableValues[key] = incomingValues[key]
+      nextVersions[fieldKey] = incomingVer
+      hasUpdate = true
+    }
+  }
+
+  if (!confirmed) {
+    return {
+      confirmed: null,
+      confirmedVersions: nextVersions,
+    }
+  }
+
+  if (!hasUpdate) {
+    return {
+      confirmed,
+      confirmedVersions: nextVersions,
+    }
+  }
+
+  return {
+    confirmed: { ...confirmed, ...acceptableValues },
+    confirmedVersions: nextVersions,
+  }
+}
+

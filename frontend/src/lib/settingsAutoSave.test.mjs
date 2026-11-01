@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   mergeConfirmedSettingsValues,
+  mergeConfirmedSettingsWithVersions,
   resolveAutoSaveRollbackValues,
 } from "./settingsAutoSave.ts";
 
@@ -89,3 +90,95 @@ test("confirmed snapshot takes over only the acknowledged request's fields", () 
     "no snapshot is created before the initial load confirms one",
   );
 });
+
+test("confirmed settings merge with field versions ignores stale out-of-order responses", () => {
+  const initial = {
+    output_guard_max_channel_bytes: 2 * 1024 * 1024,
+    output_guard_max_request_bytes: 4 * 1024 * 1024,
+    site_name: "InitialSite",
+  };
+  let confirmedState = {
+    confirmed: initial,
+    confirmedVersions: {
+      output_guard_max_channel_bytes: 1,
+      output_guard_max_request_bytes: 1,
+      site_name: 1,
+    },
+  };
+
+  // 请求 2 先到达并确认（例如 channel_bytes 变为 8MB）
+  confirmedState = mergeConfirmedSettingsWithVersions(
+    confirmedState.confirmed,
+    confirmedState.confirmedVersions,
+    { output_guard_max_channel_bytes: 8 * 1024 * 1024 },
+    { output_guard_max_channel_bytes: 3 }, // version 3
+  );
+
+  assert.equal(
+    confirmedState.confirmed?.output_guard_max_channel_bytes,
+    8 * 1024 * 1024,
+  );
+  assert.equal(
+    confirmedState.confirmedVersions.output_guard_max_channel_bytes,
+    3,
+  );
+
+  // 请求 1（旧响应，例如 version 2，带旧值 4MB）后到达
+  const afterStaleResponse = mergeConfirmedSettingsWithVersions(
+    confirmedState.confirmed,
+    confirmedState.confirmedVersions,
+    { output_guard_max_channel_bytes: 4 * 1024 * 1024 },
+    { output_guard_max_channel_bytes: 2 }, // version 2 < 3
+  );
+
+  // 必须保持为新值 8MB，不能被旧响应 4MB 覆盖
+  assert.equal(
+    afterStaleResponse.confirmed?.output_guard_max_channel_bytes,
+    8 * 1024 * 1024,
+    "stale response must not overwrite newer confirmed baseline",
+  );
+  assert.equal(
+    afterStaleResponse.confirmedVersions.output_guard_max_channel_bytes,
+    3,
+  );
+
+  // 另一个字段（如 request_bytes，version 2 > 1）正常合并
+  const multiFieldResponse = mergeConfirmedSettingsWithVersions(
+    afterStaleResponse.confirmed,
+    afterStaleResponse.confirmedVersions,
+    {
+      output_guard_max_channel_bytes: 4 * 1024 * 1024, // 旧的 version 2，仍被忽略
+      output_guard_max_request_bytes: 16 * 1024 * 1024, // 新的 version 2 > 1，被接受
+    },
+    {
+      output_guard_max_channel_bytes: 2,
+      output_guard_max_request_bytes: 2,
+    },
+  );
+
+  assert.equal(
+    multiFieldResponse.confirmed?.output_guard_max_channel_bytes,
+    8 * 1024 * 1024,
+  );
+  assert.equal(
+    multiFieldResponse.confirmed?.output_guard_max_request_bytes,
+    16 * 1024 * 1024,
+  );
+  assert.equal(
+    multiFieldResponse.confirmedVersions.output_guard_max_request_bytes,
+    2,
+  );
+});
+
+test("confirmed settings merge with field versions handles null initial confirmed snapshot safely", () => {
+  const result = mergeConfirmedSettingsWithVersions(
+    null,
+    {},
+    { output_guard_max_channel_bytes: 2 * 1024 * 1024 },
+    { output_guard_max_channel_bytes: 1 },
+  );
+
+  assert.equal(result.confirmed, null);
+  assert.equal(result.confirmedVersions.output_guard_max_channel_bytes, 1);
+});
+

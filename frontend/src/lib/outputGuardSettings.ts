@@ -89,6 +89,28 @@ export function validateOutputGuardRanges(settings: {
   return null
 }
 
+/**
+ * 从响应或表单中仅保留非 guard 字段（用 current 中的 guard 字段替换或从响应中剔除 guard 字段）。
+ *
+ * 手动保存时不应让服务器响应覆盖当前表单和基线中的 guard 字段（guard 字段仅走自动保存）。
+ */
+export function preserveOutputGuardFields<T extends object>(
+  updated: T,
+  current: T,
+): T {
+  const result = { ...updated }
+  for (const key of OUTPUT_GUARD_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(current, key)) {
+      result[key as keyof T] = current[key as keyof T]
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(current, 'output_guard_config_generation')) {
+    (result as Record<string, unknown>).output_guard_config_generation =
+      (current as Record<string, unknown>).output_guard_config_generation
+  }
+  return result
+}
+
 export function bytesToKiB(bytes: number): number { return Math.round(bytes / KIB) }
 export function kibToBytes(kib: number): number { return kib * KIB }
 export function bytesToMiB(bytes: number): number { return Math.round(bytes / MIB) }

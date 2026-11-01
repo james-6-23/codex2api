@@ -46,3 +46,18 @@ test('blur commits of unit-displayed byte limits go through the rounding-safe he
     )
   }
 })
+
+test('manual save response preserves guard fields instead of blindly overwriting', () => {
+  const saveHandler = extractBalancedBody(
+    settingsSource,
+    'const handleSaveSettings = async () =>',
+    'Settings save handler',
+  )
+
+  assert.equal(
+    saveHandler.includes('preserveOutputGuardFields(updated, settingsFormRef.current)'),
+    true,
+    'manual save response must keep guard fields from settingsFormRef.current',
+  )
+})
+
