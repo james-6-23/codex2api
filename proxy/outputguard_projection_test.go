@@ -546,3 +546,149 @@ func TestRegression03C_GeminiWithIDToolChannelFinishReasonEnd(t *testing.T) {
 		t.Fatalf("expected repetition trip on tail check for with-ID gemini tool, got tripped=%v reason=%q", guard.IsTripped(), guard.TrippedReason())
 	}
 }
+
+// -----------------------------------------------------------------------------
+// A1 回归测试：response.incomplete 终态投影（流式事件与非流式 body 两条路径）
+// -----------------------------------------------------------------------------
+
+func TestResponsesProjectorIncompleteProjection(t *testing.T) {
+	proj := NewResponsesProjector()
+
+	assertPartial := func(t *testing.T, obs []Observation, itemID, text string) {
+		t.Helper()
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation for %s, got %d: %+v", itemID, len(obs), obs)
+		}
+		o := obs[0]
+		if o.ChannelID != itemID+":content:0" || o.Kind != outputguard.KindText ||
+			o.Action != ActionSnapshot || string(o.Payload) != text ||
+			o.TerminalStage != "response.completed" {
+			t.Fatalf("unexpected observation for %s: %+v (payload=%q)", itemID, o, o.Payload)
+		}
+	}
+
+	// 流式 response.incomplete 事件：修复前 switch 不匹配该事件，观察数为 0。
+	streamEvent := `{"type":"response.incomplete","response":{"id":"resp_1","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"id":"msg_1","type":"message","content":[{"type":"output_text","text":"partial stream"}]}]}}`
+	obs, err := proj.Project("response.incomplete", []byte(streamEvent))
+	if err != nil {
+		t.Fatalf("project stream incomplete: %v", err)
+	}
+	assertPartial(t, obs, "msg_1", "partial stream")
+
+	// 非流式 body（eventType 为空）：修复前 default 仅接受 status=completed。
+	nonStreamBody := `{"id":"resp_2","object":"response","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"id":"msg_2","type":"message","content":[{"type":"output_text","text":"partial body"}]}]}`
+	obs, err = proj.Project("", []byte(nonStreamBody))
+	if err != nil {
+		t.Fatalf("project non-stream incomplete: %v", err)
+	}
+	assertPartial(t, obs, "msg_2", "partial body")
+}
+
+// -----------------------------------------------------------------------------
+// A2 回归测试：content_block_start 直接携带的 text/input 必须作为 append 观察
+// -----------------------------------------------------------------------------
+
+func TestAnthropicProjectorContentBlockStartPayload(t *testing.T) {
+	t.Run("text", func(t *testing.T) {
+		proj := NewAnthropicProjector()
+		obs, err := proj.Project("content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"prefilled text"}}`))
+		if err != nil {
+			t.Fatalf("project error: %v", err)
+		}
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation for start-frame text, got %d: %+v", len(obs), obs)
+		}
+		o := obs[0]
+		if o.ChannelID != "block_0" || o.Kind != outputguard.KindText ||
+			o.Action != ActionAppend || string(o.Payload) != "prefilled text" {
+			t.Fatalf("unexpected start-frame text observation: %+v (payload=%q)", o, o.Payload)
+		}
+	})
+
+	t.Run("tool_use_input", func(t *testing.T) {
+		proj := NewAnthropicProjector()
+		obs, err := proj.Project("content_block_start", []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_01","name":"exec","input":{"q":1}}}`))
+		if err != nil {
+			t.Fatalf("project error: %v", err)
+		}
+		if len(obs) != 1 {
+			t.Fatalf("expected 1 observation for start-frame input, got %d: %+v", len(obs), obs)
+		}
+		o := obs[0]
+		if o.ChannelID != "block_1" || o.AliasID != "toolu_01" ||
+			o.Kind != outputguard.KindToolArguments || o.Action != ActionAppend ||
+			string(o.Payload) != `{"q":1}` {
+			t.Fatalf("unexpected start-frame input observation: %+v (payload=%q)", o, o.Payload)
+		}
+	})
+
+	t.Run("empty_placeholders", func(t *testing.T) {
+		proj := NewAnthropicProjector()
+		for _, body := range []string{
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_02","name":"exec","input":{}}}`,
+		} {
+			obs, err := proj.Project("content_block_start", []byte(body))
+			if err != nil {
+				t.Fatalf("project error for %s: %v", body, err)
+			}
+			if len(obs) != 0 {
+				t.Fatalf("empty placeholder must not produce observations, body=%s obs=%+v", body, obs)
+			}
+		}
+	})
+
+	t.Run("text_byte_budget", func(t *testing.T) {
+		cfg := defaultProjectionTestConfig()
+		cfg.MaxChannelBytes = 8
+		guard := outputguard.NewRequestGuard(cfg)
+		proj := NewAnthropicProjector()
+		err := ObserveEvent(guard, proj, "content_block_start", []byte(`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":"123456789"}}`))
+		if err == nil || guard.TrippedReason() != "channel_bytes" {
+			t.Fatalf("expected channel_bytes trip from start-frame text, got err=%v reason=%q", err, guard.TrippedReason())
+		}
+	})
+
+	t.Run("tool_input_byte_budget", func(t *testing.T) {
+		cfg := defaultProjectionTestConfig()
+		cfg.MaxToolArgumentBytes = 8
+		guard := outputguard.NewRequestGuard(cfg)
+		proj := NewAnthropicProjector()
+		err := ObserveEvent(guard, proj, "content_block_start", []byte(`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_03","name":"exec","input":{"query":"abcdef"}}}`))
+		if err == nil || guard.TrippedReason() != "tool_argument_bytes" {
+			t.Fatalf("expected tool_argument_bytes trip from start-frame input, got err=%v reason=%q", err, guard.TrippedReason())
+		}
+	})
+}
+
+// -----------------------------------------------------------------------------
+// A3 回归测试：finishReason 收尾 chunk 无 parts 时也必须结束前序已见索引
+// -----------------------------------------------------------------------------
+
+func TestGeminiProjectorFinishReasonWithoutPartsEndsTrackedChannels(t *testing.T) {
+	guard := outputguard.NewRequestGuard(defaultProjectionTestConfig())
+	proj := NewGeminiProjector()
+
+	// chunk1: 100 字节杂散前缀 + 8200 字节周期正文。
+	// 8192 检查点窗口含杂散前缀不命中，尾部未被检查；只有 finishReason 的 End 尾检能命中。
+	prefix := strings.Repeat("z", 100)
+	periodic := strings.Repeat("0123456789", 820)
+	chunk1 := `{"candidates":[{"index":0,"content":{"role":"model","parts":[{"text":"` + prefix + periodic + `"}]}}]}`
+	if err := ObserveEvent(guard, proj, "", []byte(chunk1)); err != nil {
+		t.Fatalf("chunk1 error: %v", err)
+	}
+	if guard.IsTripped() {
+		t.Fatalf("chunk1 unexpectedly tripped: %s", guard.TrippedReason())
+	}
+
+	// chunk2: 收尾 chunk 不含 parts；修复前只按当前 chunk 索引数（0）触发 End，
+	// 前序 chunk 打开的 candidate_0.part_0.text channel 永远不会被尾检。
+	chunk2 := `{"candidates":[{"index":0,"content":{"role":"model","parts":[]},"finishReason":"STOP"}]}`
+	err := ObserveEvent(guard, proj, "", []byte(chunk2))
+	if err == nil && !guard.IsTripped() {
+		t.Fatalf("A3 failure: finishReason without parts skipped tail check for previously opened channels")
+	}
+	if !guard.IsTripped() || guard.TrippedReason() != "repetition" {
+		t.Fatalf("expected repetition trip from tracked part tail check, got err=%v tripped=%v reason=%q", err, guard.IsTripped(), guard.TrippedReason())
+	}
+}

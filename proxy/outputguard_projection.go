@@ -254,21 +254,26 @@ func (p *ResponsesProjector) Project(eventType string, data []byte) ([]Observati
 			}
 		}
 
-	case "response.completed":
+	case "response.completed", "response.incomplete":
 		if !parsed.Exists() {
 			parsed = gjson.ParseBytes(data)
 		}
-		outputs := parsed.Get("response.output").Array()
-		for _, item := range outputs {
+		// SSE 终态事件的 output 通常内嵌于 response；非流式完整 body 则位于顶层。
+		outputs := parsed.Get("response.output")
+		if !outputs.Exists() {
+			outputs = parsed.Get("output")
+		}
+		for _, item := range outputs.Array() {
 			observations = append(observations, p.projectResponsesOutputItem(item, "response.completed")...)
 		}
 
 	default:
-		// 兼容非流式完整响应 JSON
+		// 兼容非流式完整响应 JSON（completed 与 incomplete 均为语义终态）
 		if !parsed.Exists() {
 			parsed = gjson.ParseBytes(data)
 		}
-		if parsed.Get("status").String() == "completed" && parsed.Get("output").Exists() {
+		status := parsed.Get("status").String()
+		if (status == "completed" || status == "incomplete") && parsed.Get("output").Exists() {
 			for _, item := range parsed.Get("output").Array() {
 				observations = append(observations, p.projectResponsesOutputItem(item, "response.completed")...)
 			}
@@ -567,6 +572,41 @@ func (p *AnthropicProjector) Project(eventType string, data []byte) ([]Observati
 		if bType == "tool_use" {
 			p.blockIDs[idx] = block.Get("id").String()
 		}
+		// Grok Messages 原生路由可能在 start 帧内直接携带正文/工具入参；
+		// 这些字节同样必须进入字节预算与重复扫描，不能只记录 block 元信息。
+		if bType == "text" {
+			if text := block.Get("text").String(); text != "" {
+				observations = append(observations, Observation{
+					ChannelID: fmt.Sprintf("block_%d", idx),
+					Kind:      outputguard.KindText,
+					Action:    ActionAppend,
+					Payload:   []byte(text),
+				})
+			}
+		} else if bType == "tool_use" {
+			input := block.Get("input")
+			var payload []byte
+			if input.IsObject() || input.IsArray() {
+				payload = bytes.TrimSpace([]byte(input.Raw))
+				if len(payload) <= 2 { // "{}" / "[]" 空占位不产生观察
+					payload = nil
+				}
+			} else if input.Exists() {
+				payload = []byte(input.String())
+				if len(payload) == 0 {
+					payload = nil
+				}
+			}
+			if len(payload) > 0 {
+				observations = append(observations, Observation{
+					ChannelID: fmt.Sprintf("block_%d", idx),
+					AliasID:   p.blockIDs[idx],
+					Kind:      outputguard.KindToolArguments,
+					Action:    ActionAppend,
+					Payload:   payload,
+				})
+			}
+		}
 
 	case "content_block_delta":
 		idx := int(parsed.Get("index").Int())
@@ -708,6 +748,7 @@ const (
 type GeminiProjector struct {
 	candidateToolCounters map[int]int
 	candidateToolKeys     map[int][]string
+	candidatePartCounts   map[int]int
 	mode                  GeminiProjectorMode
 	isStream              bool
 }
@@ -716,6 +757,7 @@ func NewGeminiProjector() *GeminiProjector {
 	return &GeminiProjector{
 		candidateToolCounters: make(map[int]int),
 		candidateToolKeys:     make(map[int][]string),
+		candidatePartCounts:   make(map[int]int),
 		mode:                  GeminiProjectorModeAuto,
 		isStream:              false,
 	}
@@ -725,6 +767,7 @@ func NewGeminiProjectorWithMode(mode GeminiProjectorMode) *GeminiProjector {
 	p := &GeminiProjector{
 		candidateToolCounters: make(map[int]int),
 		candidateToolKeys:     make(map[int][]string),
+		candidatePartCounts:   make(map[int]int),
 		mode:                  mode,
 		isStream:              mode == GeminiProjectorModeStream,
 	}
@@ -756,6 +799,10 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 	for candIdx, cand := range candidates {
 		finishReason := cand.Get("finishReason").String()
 		parts := cand.Get("content.parts").Array()
+		// 按 candidate 跟踪已见 part 索引数：收尾 chunk 可能不带 parts。
+		if len(parts) > p.candidatePartCounts[candIdx] {
+			p.candidatePartCounts[candIdx] = len(parts)
+		}
 
 		for partIdx, part := range parts {
 			// 1. Text / Thought
@@ -835,9 +882,10 @@ func (p *GeminiProjector) Project(eventType string, data []byte) ([]Observation,
 			}
 		}
 
-		// finishReason 尾检触发 ActionEnd
+		// finishReason 尾检触发 ActionEnd：结束该 candidate 已见的所有 part 索引，
+		// 确保无 parts 的收尾 chunk 同样能关闭此前 chunk 打开的 text/thinking channel。
 		if finishReason != "" {
-			for i := 0; i < len(parts); i++ {
+			for i := 0; i < p.candidatePartCounts[candIdx]; i++ {
 				observations = append(observations, Observation{
 					ChannelID: fmt.Sprintf("candidate_%d.part_%d.text", candIdx, i),
 					Kind:      outputguard.KindText,
