@@ -310,21 +310,23 @@ func TestAdminOutputGuardSettings_UpdateDBErrorMapsTo500(t *testing.T) {
 }
 
 // TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails 覆盖 review 意见：
-// 当 UpdateSettings 携带 max_concurrency / max_retries / max_rate_limit_retries 且 guard 保存失败（如非法参数返回 400 或 DB 失败返回 500）时，
+// 当 UpdateSettings 携带 max_concurrency / max_retries / max_rate_limit_retries / global_rpm 且 guard 保存失败（如非法参数返回 400 或 DB 失败返回 500）时，
 // 运行时配置必须保持旧值，不能被污染；数据库亦保持旧值；成功路径下正常热应用并持久化。
 func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler, db := newTestAdminHandlerFixture(t)
 	ctx := context.Background()
 
-	// 准备初始状态：max_concurrency 初始设为 5，max_retries 初始设为 3，max_rate_limit_retries 设为 1
+	// 准备初始状态：max_concurrency 初始设为 5，max_retries 初始设为 3，max_rate_limit_retries 设为 1，global_rpm 设为 100
 	initMaxConcurrency := 5
 	initMaxRetries := 3
 	initMaxRateLimitRetries := 1
+	initGlobalRPM := 100
 	wInit := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
 		"max_concurrency":        initMaxConcurrency,
 		"max_retries":            initMaxRetries,
 		"max_rate_limit_retries": initMaxRateLimitRetries,
+		"global_rpm":             initGlobalRPM,
 	})
 	if wInit.Code != http.StatusOK {
 		t.Fatalf("init settings failed: code=%d body=%s", wInit.Code, wInit.Body.String())
@@ -338,13 +340,17 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 	if got := handler.store.GetMaxRateLimitRetries(); got != initMaxRateLimitRetries {
 		t.Fatalf("expected store max_rate_limit_retries=%d, got %d", initMaxRateLimitRetries, got)
 	}
+	if got := handler.rateLimiter.GetRPM(); got != initGlobalRPM {
+		t.Fatalf("expected rate limiter rpm=%d, got %d", initGlobalRPM, got)
+	}
 
-	// 1. PUT max_concurrency: 99, max_retries: 7, max_rate_limit_retries: 8 + 非法 output_guard_max_channel_bytes
+	// 1. PUT max_concurrency: 99, max_retries: 7, max_rate_limit_retries: 8, global_rpm: 999 + 非法 output_guard_max_channel_bytes
 	// 期望返回 400，运行时保持旧值，数据库中亦保持旧值
 	wErr := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
 		"max_concurrency":                99,
 		"max_retries":                    7,
 		"max_rate_limit_retries":         8,
+		"global_rpm":                     999,
 		"output_guard_max_channel_bytes": 10, // 低于 MinOutputGuardMaxChannelBytes (128KiB)
 	})
 	if wErr.Code != http.StatusBadRequest {
@@ -359,6 +365,9 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 	if got := handler.store.GetMaxRateLimitRetries(); got != initMaxRateLimitRetries {
 		t.Fatalf("store max_rate_limit_retries must remain %d after guard validation failure, got %d", initMaxRateLimitRetries, got)
 	}
+	if got := handler.rateLimiter.GetRPM(); got != initGlobalRPM {
+		t.Fatalf("rate limiter rpm must remain %d after guard validation failure, got %d", initGlobalRPM, got)
+	}
 	persisted, err := db.GetSystemSettings(ctx)
 	if err != nil || persisted == nil {
 		t.Fatalf("get persisted settings: %v", err)
@@ -372,14 +381,18 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 	if persisted.MaxRateLimitRetries != initMaxRateLimitRetries {
 		t.Fatalf("persisted max_rate_limit_retries must remain %d, got %d", initMaxRateLimitRetries, persisted.MaxRateLimitRetries)
 	}
+	if persisted.GlobalRPM != initGlobalRPM {
+		t.Fatalf("persisted global_rpm must remain %d, got %d", initGlobalRPM, persisted.GlobalRPM)
+	}
 
-	// 2. 成功路径：PUT max_concurrency: 12, max_retries: 6, max_rate_limit_retries: 4 + 合法 output_guard_max_channel_bytes
+	// 2. 成功路径：PUT max_concurrency: 12, max_retries: 6, max_rate_limit_retries: 4, global_rpm: 250 + 合法 output_guard_max_channel_bytes
 	// 期望返回 200，运行时立即更新，数据库持久化更新
 	targetChannelBytes := database.MinOutputGuardMaxChannelBytes * 2
 	wSuccess := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
 		"max_concurrency":                12,
 		"max_retries":                    6,
 		"max_rate_limit_retries":         4,
+		"global_rpm":                     250,
 		"output_guard_max_channel_bytes": targetChannelBytes,
 	})
 	if wSuccess.Code != http.StatusOK {
@@ -394,6 +407,9 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 	if got := handler.store.GetMaxRateLimitRetries(); got != 4 {
 		t.Fatalf("store max_rate_limit_retries must be updated to 4 on success, got %d", got)
 	}
+	if got := handler.rateLimiter.GetRPM(); got != 250 {
+		t.Fatalf("rate limiter rpm must be updated to 250 on success, got %d", got)
+	}
 	persistedSuccess, err := db.GetSystemSettings(ctx)
 	if err != nil || persistedSuccess == nil {
 		t.Fatalf("get persisted settings on success: %v", err)
@@ -407,6 +423,9 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 	if persistedSuccess.MaxRateLimitRetries != 4 {
 		t.Fatalf("persisted max_rate_limit_retries must be 4 on success, got %d", persistedSuccess.MaxRateLimitRetries)
 	}
+	if persistedSuccess.GlobalRPM != 250 {
+		t.Fatalf("persisted global_rpm must be 250 on success, got %d", persistedSuccess.GlobalRPM)
+	}
 	// 3. 500 场景：当数据库出错导致 guard 保存失败返回 500 时，运行时与 DB 同样保持旧值
 	{
 		handler500, db500, dbPath := newTestAdminHandlerFixtureWithPath(t)
@@ -414,6 +433,7 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 			"max_concurrency":        7,
 			"max_retries":            2,
 			"max_rate_limit_retries": 1,
+			"global_rpm":             50,
 		})
 		if wInit500.Code != http.StatusOK {
 			t.Fatalf("init settings for 500 test failed: %d", wInit500.Code)
@@ -426,6 +446,7 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 			"max_concurrency":        88,
 			"max_retries":            9,
 			"max_rate_limit_retries": 5,
+			"global_rpm":             888,
 			"output_guard_enabled":   true,
 		})
 		if wErr500.Code != http.StatusInternalServerError {
@@ -440,6 +461,9 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 		if got := handler500.store.GetMaxRateLimitRetries(); got != 1 {
 			t.Fatalf("store max_rate_limit_retries must remain 1 after guard db failure, got %d", got)
 		}
+		if got := handler500.rateLimiter.GetRPM(); got != 50 {
+			t.Fatalf("rate limiter rpm must remain 50 after guard db failure, got %d", got)
+		}
 		persisted500, err := db500.GetSystemSettings(ctx)
 		if err != nil || persisted500 == nil {
 			t.Fatalf("get persisted settings after 500: %v", err)
@@ -452,6 +476,9 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenGuardSaveFails(t *
 		}
 		if persisted500.MaxRateLimitRetries != 1 {
 			t.Fatalf("persisted max_rate_limit_retries must remain 1 after 500, got %d", persisted500.MaxRateLimitRetries)
+		}
+		if persisted500.GlobalRPM != 50 {
+			t.Fatalf("persisted global_rpm must remain 50 after 500, got %d", persisted500.GlobalRPM)
 		}
 	}
 }
@@ -512,19 +539,95 @@ func TestAdminOutputGuardSettings_MaxConcurrencyNotChangedWhenModelsListWriteFai
 	}
 }
 
+// TestAdminSettings_RuntimeLimitsAppliedWhenContinuousRetryFails 覆盖 T1 review 意见：
+// 运行时 retry 上限热应用早于 UpdateContinuousRetryPolicy：若该写失败返回 500，
+// DB 已提交新 max_rate_limit_retries / max_retries / max_concurrency / global_rpm，
+// 本实例内存必须已在 settings 事务提交成功后立即更新生效。
+func TestAdminSettings_RuntimeLimitsAppliedWhenContinuousRetryFails(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	handler, db, dbPath := newTestAdminHandlerFixtureWithPath(t)
+	ctx := context.Background()
+
+	// 初始状态：max_concurrency: 3, max_retries: 2, max_rate_limit_retries: 1, global_rpm: 60
+	wInit := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
+		"max_concurrency":        3,
+		"max_retries":            2,
+		"max_rate_limit_retries": 1,
+		"global_rpm":             60,
+	})
+	if wInit.Code != http.StatusOK {
+		t.Fatalf("init settings failed: %d, body: %s", wInit.Code, wInit.Body.String())
+	}
+
+	// 在 SQLite 上安装触发器：禁止修改 continuous_retry_policy，模拟 UpdateContinuousRetryPolicy 抛错返回 500
+	execAdminOutputGuardTestSQLite(t, dbPath, `
+		CREATE TRIGGER fail_continuous_retry_update BEFORE UPDATE OF continuous_retry_policy ON system_settings
+		BEGIN
+			SELECT RAISE(ABORT, 'simulated continuous_retry_policy write failure');
+		END;
+	`)
+
+	// PUT 更新 max_concurrency: 18, max_retries: 6, max_rate_limit_retries: 5, global_rpm: 300, continuous_retry_enabled: true
+	wFail := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
+		"max_concurrency":          18,
+		"max_retries":              6,
+		"max_rate_limit_retries":   5,
+		"global_rpm":               300,
+		"continuous_retry_enabled": true,
+	})
+	if wFail.Code != http.StatusInternalServerError {
+		t.Fatalf("expected HTTP 500 when continuous_retry write fails, got %d, body: %s", wFail.Code, wFail.Body.String())
+	}
+	if !strings.Contains(wFail.Body.String(), "保存持续重试策略失败") {
+		t.Fatalf("expected error message to contain '保存持续重试策略失败', got: %s", wFail.Body.String())
+	}
+
+	// settings 事务已成功提交：运行时配置必须已被热应用，与 DB 一致
+	if got := handler.store.GetMaxConcurrency(); got != 18 {
+		t.Fatalf("store max_concurrency must be applied on settings transaction success, expected 18, got %d", got)
+	}
+	if got := handler.store.GetMaxRetries(); got != 6 {
+		t.Fatalf("store max_retries must be applied on settings transaction success, expected 6, got %d", got)
+	}
+	if got := handler.store.GetMaxRateLimitRetries(); got != 5 {
+		t.Fatalf("store max_rate_limit_retries must be applied on settings transaction success, expected 5, got %d", got)
+	}
+	if got := handler.rateLimiter.GetRPM(); got != 300 {
+		t.Fatalf("rate limiter rpm must be applied on settings transaction success, expected 300, got %d", got)
+	}
+
+	persisted, err := db.GetSystemSettings(ctx)
+	if err != nil || persisted == nil {
+		t.Fatalf("get persisted settings: %v", err)
+	}
+	if persisted.MaxConcurrency != 18 {
+		t.Fatalf("persisted max_concurrency must be 18, got %d", persisted.MaxConcurrency)
+	}
+	if persisted.MaxRetries != 6 {
+		t.Fatalf("persisted max_retries must be 6, got %d", persisted.MaxRetries)
+	}
+	if persisted.MaxRateLimitRetries != 5 {
+		t.Fatalf("persisted max_rate_limit_retries must be 5, got %d", persisted.MaxRateLimitRetries)
+	}
+	if persisted.GlobalRPM != 300 {
+		t.Fatalf("persisted global_rpm must be 300, got %d", persisted.GlobalRPM)
+	}
+}
+
 // TestAdminSettings_UpdateSystemSettingsDBErrorReturns500 覆盖 review 意见：
-// 当仅修改 max_concurrency / max_retries / max_rate_limit_retries 且 UpdateSystemSettings 失败时，
+// 当仅修改 max_concurrency / max_retries / max_rate_limit_retries / global_rpm 且 UpdateSystemSettings 失败时，
 // 必须返回 500 且运行时和数据库均不应用变更（不能落到成功路径返回 200）。
 func TestAdminSettings_UpdateSystemSettingsDBErrorReturns500(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	handler, db, dbPath := newTestAdminHandlerFixtureWithPath(t)
 	ctx := context.Background()
 
-	// 初始状态：max_concurrency 设为 3，max_retries 设为 2，max_rate_limit_retries 设为 1
+	// 初始状态：max_concurrency 设为 3，max_retries 设为 2，max_rate_limit_retries 设为 1，global_rpm 设为 50
 	wInit := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
 		"max_concurrency":        3,
 		"max_retries":            2,
 		"max_rate_limit_retries": 1,
+		"global_rpm":             50,
 	})
 	if wInit.Code != http.StatusOK {
 		t.Fatalf("init settings failed: %d, body: %s", wInit.Code, wInit.Body.String())
@@ -538,11 +641,12 @@ func TestAdminSettings_UpdateSystemSettingsDBErrorReturns500(t *testing.T) {
 		END;
 	`)
 
-	// 仅修改 max_concurrency, max_retries, max_rate_limit_retries
+	// 仅修改 max_concurrency, max_retries, max_rate_limit_retries, global_rpm
 	wFail := invokeAdminSettingsEndpoint(t, handler, http.MethodPut, map[string]any{
 		"max_concurrency":        9,
 		"max_retries":            5,
 		"max_rate_limit_retries": 4,
+		"global_rpm":             500,
 	})
 	if wFail.Code != http.StatusInternalServerError {
 		t.Fatalf("expected HTTP 500 when UpdateSystemSettings fails, got %d, body: %s", wFail.Code, wFail.Body.String())
@@ -561,6 +665,9 @@ func TestAdminSettings_UpdateSystemSettingsDBErrorReturns500(t *testing.T) {
 	if got := handler.store.GetMaxRateLimitRetries(); got != 1 {
 		t.Fatalf("store max_rate_limit_retries must remain 1 after DB failure, got %d", got)
 	}
+	if got := handler.rateLimiter.GetRPM(); got != 50 {
+		t.Fatalf("rate limiter rpm must remain 50 after DB failure, got %d", got)
+	}
 
 	// 断言数据库保持旧值
 	persisted, err := db.GetSystemSettings(ctx)
@@ -575,5 +682,8 @@ func TestAdminSettings_UpdateSystemSettingsDBErrorReturns500(t *testing.T) {
 	}
 	if persisted.MaxRateLimitRetries != 1 {
 		t.Fatalf("persisted max_rate_limit_retries must remain 1, got %d", persisted.MaxRateLimitRetries)
+	}
+	if persisted.GlobalRPM != 50 {
+		t.Fatalf("persisted global_rpm must remain 50, got %d", persisted.GlobalRPM)
 	}
 }

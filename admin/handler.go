@@ -10966,13 +10966,16 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		maxConcurrencyChanged = true
 	}
 
+	previousGlobalRPM := h.rateLimiter.GetRPM()
+	globalRPMToApply := previousGlobalRPM
+	globalRPMChanged := false
 	if req.GlobalRPM != nil {
 		v := *req.GlobalRPM
 		if v < 0 {
 			v = 0
 		}
-		h.rateLimiter.UpdateRPM(v)
-		log.Printf("设置已更新: global_rpm = %d", v)
+		globalRPMToApply = v
+		globalRPMChanged = true
 	}
 
 	if req.TestModel != nil && *req.TestModel != "" {
@@ -11943,7 +11946,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,
 		MaxConcurrency:                      maxConcurrencyToApply,
-		GlobalRPM:                           h.rateLimiter.GetRPM(),
+		GlobalRPM:                           globalRPMToApply,
 		TestModel:                           h.store.GetTestModel(),
 		CodexImagesMainModel:                codexImagesMainModel,
 		TestContent:                         h.store.GetTestContent(),
@@ -12135,6 +12138,25 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "保存系统设置失败，设置未生效："+err.Error())
 		return
 	} else {
+		// settings 事务提交成功后立即热应用基础运行时上限与全局限流，
+		// 确保后续 UpdateContinuousRetryPolicy 等独立步骤即使失败，
+		// 已提交到数据库的并发/重试/RPM 配置在本实例内存中也保持一致。
+		if maxConcurrencyChanged {
+			h.store.SetMaxConcurrency(maxConcurrencyToApply)
+			log.Printf("设置已更新: max_concurrency = %d", maxConcurrencyToApply)
+		}
+		if maxRetriesChanged {
+			h.store.SetMaxRetries(maxRetriesToApply)
+			log.Printf("设置已更新: max_retries = %d", maxRetriesToApply)
+		}
+		if maxRateLimitRetriesChanged {
+			h.store.SetMaxRateLimitRetries(maxRateLimitRetriesToApply)
+			log.Printf("设置已更新: max_rate_limit_retries = %d", maxRateLimitRetriesToApply)
+		}
+		if globalRPMChanged {
+			h.rateLimiter.UpdateRPM(globalRPMToApply)
+			log.Printf("设置已更新: global_rpm = %d", globalRPMToApply)
+		}
 		if outputGuardUpdateRequested {
 			outputGuardSettings = committedOutputGuard
 			if proxy.ApplyOutputGuardSettings(committedOutputGuard) {
@@ -12217,18 +12239,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				return runtimeCfg
 			})
 			h.triggerAutoActivate5hScan()
-		}
-		if maxConcurrencyChanged {
-			h.store.SetMaxConcurrency(maxConcurrencyToApply)
-			log.Printf("设置已更新: max_concurrency = %d", maxConcurrencyToApply)
-		}
-		if maxRetriesChanged {
-			h.store.SetMaxRetries(maxRetriesToApply)
-			log.Printf("设置已更新: max_retries = %d", maxRetriesToApply)
-		}
-		if maxRateLimitRetriesChanged {
-			h.store.SetMaxRateLimitRetries(maxRateLimitRetriesToApply)
-			log.Printf("设置已更新: max_rate_limit_retries = %d", maxRateLimitRetriesToApply)
 		}
 		if modelsListReadLimitChanged {
 			if updateErr := h.db.UpdateModelsListReadMaxBytes(c.Request.Context(), *req.ModelsListReadMaxBytes); updateErr != nil {
