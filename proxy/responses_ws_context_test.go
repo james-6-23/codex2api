@@ -279,7 +279,7 @@ func TestResponsesWSContextMissingFailsClosedAndReleasesAccount(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gjson.GetBytes(payload, "error.code").String() != "response_context_unavailable" {
+	if gjson.GetBytes(payload, "error.code").String() != "previous_response_not_found" {
 		t.Fatalf("unexpected error: %s", payload)
 	}
 	if attempts.Load() != 1 || account.GetActiveRequests() != 0 {

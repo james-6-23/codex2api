@@ -2543,6 +2543,7 @@ export default function Settings() {
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
     { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
     { label: t('settings.schedulerModeFillFirst'), value: 'fill_first' },
+    { label: t('settings.schedulerModeReset5hFirst'), value: 'reset_5h_first' },
   ]
   const schedulerEngineOptions = [
     { label: t('settings.schedulerEngineLegacy'), value: 'legacy' },
@@ -6147,9 +6148,9 @@ export default function Settings() {
                     </div>
                     <SettingField
                       label={t('settings.schedulerMode')}
-                      description={t('settings.schedulerModeDesc')}
-                      warning={settingsForm.scheduler_engine !== 'legacy' ? undefined : t('settings.schedulerModeRequiresFast')}
-                      className={cn(settingsForm.scheduler_engine === 'legacy' && 'opacity-60')}
+                      description={settingsForm.scheduler_mode === 'reset_5h_first' ? t('settings.schedulerModeReset5hFirstDesc') : t('settings.schedulerModeDesc')}
+                      warning={settingsForm.scheduler_engine !== 'legacy' || settingsForm.scheduler_mode === 'reset_5h_first' ? undefined : t('settings.schedulerModeRequiresFast')}
+                      className={cn(settingsForm.scheduler_engine === 'legacy' && settingsForm.scheduler_mode !== 'reset_5h_first' && 'opacity-60')}
                     >
                       <SegmentedPillGroup
                         value={settingsForm.scheduler_mode}

@@ -19,7 +19,8 @@ type fastSchedulerEntry struct {
 	dbID          int64
 	dispatchScore float64
 	proven        bool
-	priority      int64 // 账号调度优先级（issue #358）：全局降序选择，同优先级内再按健康桶调度
+	priority      int64     // 账号调度优先级（issue #358）：全局降序选择，同优先级内再按健康桶调度
+	reset5hAt     time.Time // immutable sort key until Update or a reset boundary
 }
 
 type fastSchedulerPosition struct {
@@ -61,7 +62,8 @@ type FastScheduler struct {
 	// requires rebuilding every API-key sub-pool.
 	retainUnavailable bool
 	// resorts 统计整桶重排次数，用于回归测试锁定"批量写入不再逐条重排"这个性质。
-	resorts atomic.Uint64
+	resorts             atomic.Uint64
+	reset5hOrderExpires map[AccountHealthTier]time.Time
 }
 
 // ResortCount 返回累计的整桶重排次数。
@@ -162,6 +164,7 @@ func (s *FastScheduler) SetSchedulerMode(mode string) {
 // entryLessLocked 是所有调度模式共用的桶内排序谓词。调用方必须持有 s.mu。
 //
 // 各模式的排序键：
+//   - reset_5h_first：有效 Codex 5h 重置时间升序，未知窗口沿用轮询兜底
 //   - fill_first：7d 用量降序，流量集中在剩余额度最少的账号（issue #501）
 //   - remaining_quota：7d 用量升序，优先用剩余额度多的账号
 //   - round_robin 的 healthy 桶：7d 用量升序，把负载摊平到所有可用账号（issue #150）
@@ -172,6 +175,11 @@ func (s *FastScheduler) SetSchedulerMode(mode string) {
 func (s *FastScheduler) entryLessLocked(tier AccountHealthTier, a, b *fastSchedulerEntry) bool {
 	if a.priority != b.priority {
 		return a.priority > b.priority
+	}
+	if s.schedulerMode == SchedulerModeReset5hFirst {
+		if order := compareReset5hDeadlines(a.reset5hAt, b.reset5hAt); order != 0 {
+			return order < 0
+		}
 	}
 	switch {
 	case s.schedulerMode == "fill_first":
@@ -184,7 +192,7 @@ func (s *FastScheduler) entryLessLocked(tier AccountHealthTier, a, b *fastSchedu
 		if usageA != usageB {
 			return usageA < usageB
 		}
-	case s.schedulerMode == "round_robin" && tier == HealthTierHealthy:
+	case (s.schedulerMode == "round_robin" || s.schedulerMode == SchedulerModeReset5hFirst) && tier == HealthTierHealthy:
 		usageA, usageB := a.acc.usagePercentForScheduling(), b.acc.usagePercentForScheduling()
 		if usageA != usageB {
 			return usageA < usageB
@@ -208,6 +216,9 @@ func (s *FastScheduler) sortBucketLocked(tier AccountHealthTier) {
 	s.generation++
 	entries := s.buckets[tier]
 	delete(s.unsorted, tier)
+	if s.schedulerMode == SchedulerModeReset5hFirst {
+		s.refreshReset5hOrderLocked(tier, time.Now())
+	}
 	if len(entries) == 0 {
 		return
 	}
@@ -224,6 +235,14 @@ func (s *FastScheduler) sortBucketLocked(tier AccountHealthTier) {
 // ensureSortedLocked 在取号前把被打乱的桶补排一次。写入侧只打标不排序，
 // 一批连续变更（例如批量导入、并发 Release）在这里合并成一次排序。
 func (s *FastScheduler) ensureSortedLocked() {
+	if s.schedulerMode == SchedulerModeReset5hFirst {
+		now := time.Now()
+		for tier, expiry := range s.reset5hOrderExpires {
+			if !expiry.IsZero() && !expiry.After(now) {
+				s.unsorted[tier] = true
+			}
+		}
+	}
 	if len(s.unsorted) == 0 {
 		return
 	}
@@ -276,6 +295,7 @@ func (s *FastScheduler) Rebuild(accounts []*Account) {
 	}
 	s.positions = make(map[int64]fastSchedulerPosition, len(accounts))
 	s.unsorted = map[AccountHealthTier]bool{}
+	s.reset5hOrderExpires = map[AccountHealthTier]time.Time{}
 
 	// 批量插入：先全部放入桶中，不逐条排序
 	now := time.Now()
@@ -297,6 +317,7 @@ func (s *FastScheduler) Rebuild(accounts []*Account) {
 			dispatchScore: dispatchScore,
 			proven:        proven,
 			priority:      acc.schedulerPriority(),
+			reset5hAt:     acc.reset5hSchedulingDeadline(now),
 		})
 	}
 
@@ -367,14 +388,18 @@ func (s *FastScheduler) updateLocked(acc *Account, now time.Time) {
 	}
 
 	previousPriority := entries[pos.index].priority
+	previousReset5h := entries[pos.index].reset5hAt
 	entries[pos.index] = fastSchedulerEntry{
 		acc:           acc,
 		dbID:          acc.DBID,
 		dispatchScore: dispatchScore,
 		proven:        proven,
 		priority:      acc.schedulerPriority(),
+		reset5hAt:     acc.reset5hSchedulingDeadline(now),
 	}
-	if previousPriority != entries[pos.index].priority {
+	s.trackReset5hDeadlineLocked(tier, entries[pos.index].reset5hAt)
+	if previousPriority != entries[pos.index].priority ||
+		(s.schedulerMode == SchedulerModeReset5hFirst && !previousReset5h.Equal(entries[pos.index].reset5hAt)) {
 		s.generation++
 	}
 	if s.entryOutOfOrderLocked(tier, entries, pos.index) {
@@ -404,7 +429,9 @@ func (s *FastScheduler) appendLocked(acc *Account, tier AccountHealthTier, dispa
 		dispatchScore: dispatchScore,
 		proven:        proven,
 		priority:      acc.schedulerPriority(),
+		reset5hAt:     acc.reset5hSchedulingDeadline(time.Now()),
 	})
+	s.trackReset5hDeadlineLocked(tier, entries[len(entries)-1].reset5hAt)
 	s.buckets[tier] = entries
 	s.positions[acc.DBID] = fastSchedulerPosition{tier: tier, index: len(entries) - 1}
 	if len(entries) > 1 && s.entryLessLocked(tier, &entries[len(entries)-1], &entries[len(entries)-2]) {
@@ -540,6 +567,22 @@ func (s *FastScheduler) acquireExcludingWithDispatch(apiKeyID int64, exclude map
 				if inspectOnly || s.schedulerMode == "remaining_quota" || s.schedulerMode == "fill_first" {
 					cursor = &zeroCursor
 				}
+				// Rank known Codex deadlines before the ordinary fallback range.
+				// New affinity hashing must not skip the earliest deadline.
+				if s.schedulerMode == SchedulerModeReset5hFirst && policy != DispatchPolicySpark {
+					knownEnd := segStart + sort.Search(segEnd-segStart, func(i int) bool {
+						return bucket[segStart+i].reset5hAt.IsZero()
+					})
+					acc, stale := s.scanRangeLocked(tier, segStart, knownEnd, &zeroCursor, nil, apiKeyID, exclude, filter, policy, inspectOnly, &stats)
+					if acc != nil {
+						return acc
+					}
+					if stale {
+						changed = true
+						break priorityLoop
+					}
+					segStart = knownEnd
+				}
 				acc, stale := s.scanRangeLocked(tier, segStart, segEnd, cursor, affinityHash, apiKeyID, exclude, filter, policy, inspectOnly, &stats)
 				if acc != nil {
 					return acc
@@ -558,9 +601,10 @@ func (s *FastScheduler) acquireExcludingWithDispatch(apiKeyID int64, exclude map
 }
 
 type fastSchedulerCandidate struct {
-	acc      *Account
-	occupied int64
-	usage    float64
+	acc       *Account
+	occupied  int64
+	usage     float64
+	reset5hAt time.Time
 }
 
 // scanRangeLocked copies a bounded window while holding mu, then releases mu
@@ -574,6 +618,8 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 	}
 	start := int(cursor.Add(1)-1) % rangeLen
 	windowSize := fastSchedulerCandidateWindow
+	resetFirst := s.schedulerMode == SchedulerModeReset5hFirst && policy != DispatchPolicySpark &&
+		!bucket[rangeStart].reset5hAt.IsZero()
 	if affinityHash != nil {
 		start = int(*affinityHash % uint64(rangeLen))
 		windowSize = 1 // retain deterministic affinity order
@@ -612,6 +658,9 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 				continue
 			}
 			candidate := fastSchedulerCandidate{acc: entry.acc, occupied: occupied}
+			if resetFirst {
+				candidate.reset5hAt = entry.reset5hAt
+			}
 			if quotaMode {
 				candidate.usage = entry.acc.usagePercentForScheduling()
 			}
@@ -626,6 +675,9 @@ func (s *FastScheduler) scanRangeLocked(expectedTier AccountHealthTier, rangeSta
 			for j := i; j > 0; j-- {
 				a, b := candidates[j], candidates[j-1]
 				less := a.occupied < b.occupied
+				if resetFirst && !a.reset5hAt.Equal(b.reset5hAt) {
+					less = compareReset5hDeadlines(a.reset5hAt, b.reset5hAt) < 0
+				}
 				if quotaMode && a.usage != b.usage {
 					less = a.usage < b.usage
 					if s.schedulerMode == "fill_first" {
@@ -679,6 +731,10 @@ func (s *FastScheduler) acquireCandidatesOutsideLock(candidates []fastSchedulerC
 		if !current {
 			stats.restarts++
 			return nil, true
+		}
+		if !candidate.reset5hAt.IsZero() && !candidate.reset5hAt.After(time.Now()) {
+			stats.restarts++
+			return nil, true // next locked pass invalidates the expired sort key
 		}
 		// A slow filter can outlive a cooldown/disable/concurrency change.
 		tier, _, limit, _, available := acc.fastSchedulerSnapshotForPolicy(baseLimit, time.Now(), policy)

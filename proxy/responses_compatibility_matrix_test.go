@@ -210,7 +210,7 @@ func TestResponsesCompatibilityMatrixHTTPContinuationStorage(t *testing.T) {
 					}
 					second := request(secondRaw, 7)
 					if native && loseL1 && !shared {
-						if second.Code != 409 || gjson.GetBytes(second.Body.Bytes(), "error.code").String() != "response_context_unavailable" || calls.Load() != 1 {
+						if second.Code != 409 || gjson.GetBytes(second.Body.Bytes(), "error.code").String() != "previous_response_not_found" || calls.Load() != 1 {
 							t.Fatalf("lost memory history did not fail closed: %d %s calls=%d", second.Code, second.Body.String(), calls.Load())
 						}
 					} else {

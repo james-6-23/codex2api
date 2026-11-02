@@ -103,7 +103,7 @@ func validateResponsesWSReplayItems(items []json.RawMessage, options responsesWS
 }
 
 func responsesWSContextUnavailable(status int, reason string) *api.APIError {
-	code, kind, message := api.ErrCodeResponseContextUnavailable, api.ErrorTypeInvalidRequest, "Previous response context is unavailable"
+	code, kind, message := api.ErrCodeResponseContextUnavailable, api.ErrorTypeInvalidRequest, responseContextUnavailableMessage
 	if status == http.StatusServiceUnavailable {
 		code, kind, message = api.ErrCodeServiceUnavailable, api.ErrorTypeServer, "Previous response context backend is temporarily unavailable"
 	}
