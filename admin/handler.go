@@ -11483,6 +11483,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: antigravity_oauth_clients = %d 个 client, active_key=%q", len(normalized.Clients), normalized.ActiveKey)
 	}
 
+	previousMaxRetries := h.store.GetMaxRetries()
+	maxRetriesToApply := previousMaxRetries
+	maxRetriesChanged := false
 	if req.MaxRetries != nil {
 		v := *req.MaxRetries
 		if v < 0 {
@@ -11491,8 +11494,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if v > 10 {
 			v = 10
 		}
-		h.store.SetMaxRetries(v)
-		log.Printf("设置已更新: max_retries = %d", v)
+		maxRetriesToApply = v
+		maxRetriesChanged = true
 	}
 
 	if req.MaxRateLimitRetries != nil {
@@ -12003,7 +12006,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
-		MaxRetries:                          h.store.GetMaxRetries(),
+		MaxRetries:                          maxRetriesToApply,
 		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
 		TransportRetryPolicy:                h.store.GetTransportRetryPolicy(),
@@ -12210,6 +12213,14 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			})
 			h.triggerAutoActivate5hScan()
 		}
+		if maxConcurrencyChanged {
+			h.store.SetMaxConcurrency(maxConcurrencyToApply)
+			log.Printf("设置已更新: max_concurrency = %d", maxConcurrencyToApply)
+		}
+		if maxRetriesChanged {
+			h.store.SetMaxRetries(maxRetriesToApply)
+			log.Printf("设置已更新: max_retries = %d", maxRetriesToApply)
+		}
 		if modelsListReadLimitChanged {
 			if updateErr := h.db.UpdateModelsListReadMaxBytes(c.Request.Context(), *req.ModelsListReadMaxBytes); updateErr != nil {
 				writeError(c, http.StatusInternalServerError, "保存模型列表读取上限失败："+updateErr.Error())
@@ -12221,10 +12232,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 				return current
 			})
 			log.Printf("设置已更新: models_list_read_max_bytes = %d", modelsListReadMaxBytes)
-		}
-		if maxConcurrencyChanged {
-			h.store.SetMaxConcurrency(maxConcurrencyToApply)
-			log.Printf("设置已更新: max_concurrency = %d", maxConcurrencyToApply)
 		}
 	}
 
