@@ -11498,6 +11498,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		maxRetriesChanged = true
 	}
 
+	previousMaxRateLimitRetries := h.store.GetMaxRateLimitRetries()
+	maxRateLimitRetriesToApply := previousMaxRateLimitRetries
+	maxRateLimitRetriesChanged := false
 	if req.MaxRateLimitRetries != nil {
 		v := *req.MaxRateLimitRetries
 		if v < 0 {
@@ -11506,8 +11509,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if v > 10 {
 			v = 10
 		}
-		h.store.SetMaxRateLimitRetries(v)
-		log.Printf("设置已更新: max_rate_limit_retries = %d", v)
+		maxRateLimitRetriesToApply = v
+		maxRateLimitRetriesChanged = true
 	}
 
 	if req.RetryIntervalMS != nil {
@@ -12007,7 +12010,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
 		MaxRetries:                          maxRetriesToApply,
-		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
+		MaxRateLimitRetries:                 maxRateLimitRetriesToApply,
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
 		TransportRetryPolicy:                h.store.GetTransportRetryPolicy(),
 		ContinuousRetryPolicy:               database.EncodeContinuousRetryPolicy(h.store.GetContinuousRetryPolicy()),
@@ -12129,6 +12132,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "保存持续重试策略失败，设置未生效")
 			return
 		}
+		writeError(c, http.StatusInternalServerError, "保存系统设置失败，设置未生效："+err.Error())
+		return
 	} else {
 		if outputGuardUpdateRequested {
 			outputGuardSettings = committedOutputGuard
@@ -12220,6 +12225,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if maxRetriesChanged {
 			h.store.SetMaxRetries(maxRetriesToApply)
 			log.Printf("设置已更新: max_retries = %d", maxRetriesToApply)
+		}
+		if maxRateLimitRetriesChanged {
+			h.store.SetMaxRateLimitRetries(maxRateLimitRetriesToApply)
+			log.Printf("设置已更新: max_rate_limit_retries = %d", maxRateLimitRetriesToApply)
 		}
 		if modelsListReadLimitChanged {
 			if updateErr := h.db.UpdateModelsListReadMaxBytes(c.Request.Context(), *req.ModelsListReadMaxBytes); updateErr != nil {
