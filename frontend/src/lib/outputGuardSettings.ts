@@ -124,26 +124,50 @@ export function preserveOutputGuardFields<T extends object>(
 
 /**
  * 手动保存成功时刷新确认快照：
- * 只把非 guard 字段从表单复制到确认快照，guard 字段保留确认快照中已有的值。
- * 避免把在途 autosave 的未确认 guard 值带进确认快照（该 autosave 失败时回滚会恢复被拒值）。
+ * 1. 把非 guard 字段从表单复制到确认快照；
+ * 2. 若服务器响应中的 output_guard_config_generation 大于确认快照中的 generation，
+ *    说明服务器已提交并确认了更新的 guard 配置，确认快照同步采纳服务器响应中的 guard 字段与 generation；
+ * 3. 否则保留确认快照中已有的 guard 字段与 generation，
+ *    避免把在途 autosave 的未确认 guard 值带进确认快照（该 autosave 失败时回滚会恢复被拒值）。
  */
 export function preserveConfirmedGuardFields<T extends object>(
   currentForm: T,
   confirmed: T | null,
+  serverResponse?: T | null,
 ): T {
-  if (!confirmed) {
-    return { ...currentForm }
-  }
   const result = { ...currentForm }
-  for (const key of OUTPUT_GUARD_KEYS) {
-    if (Object.prototype.hasOwnProperty.call(confirmed, key)) {
-      result[key as keyof T] = confirmed[key as keyof T]
+
+  const serverGenRaw = serverResponse ? (serverResponse as Record<string, unknown>).output_guard_config_generation : undefined
+  const confirmedGenRaw = confirmed ? (confirmed as Record<string, unknown>).output_guard_config_generation : undefined
+
+  const serverGen = typeof serverGenRaw === 'number' && Number.isFinite(serverGenRaw) ? serverGenRaw : -1
+  const confirmedGen = typeof confirmedGenRaw === 'number' && Number.isFinite(confirmedGenRaw) ? confirmedGenRaw : -1
+
+  if (serverGen > confirmedGen && serverResponse) {
+    for (const key of OUTPUT_GUARD_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(serverResponse, key)) {
+        result[key as keyof T] = serverResponse[key as keyof T]
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(serverResponse, 'output_guard_config_generation')) {
+      (result as Record<string, unknown>).output_guard_config_generation =
+        (serverResponse as Record<string, unknown>).output_guard_config_generation
+    }
+    return result
+  }
+
+  if (confirmed) {
+    for (const key of OUTPUT_GUARD_KEYS) {
+      if (Object.prototype.hasOwnProperty.call(confirmed, key)) {
+        result[key as keyof T] = confirmed[key as keyof T]
+      }
+    }
+    if (Object.prototype.hasOwnProperty.call(confirmed, 'output_guard_config_generation')) {
+      (result as Record<string, unknown>).output_guard_config_generation =
+        (confirmed as Record<string, unknown>).output_guard_config_generation
     }
   }
-  if (Object.prototype.hasOwnProperty.call(confirmed, 'output_guard_config_generation')) {
-    (result as Record<string, unknown>).output_guard_config_generation =
-      (confirmed as Record<string, unknown>).output_guard_config_generation
-  }
+
   return result
 }
 

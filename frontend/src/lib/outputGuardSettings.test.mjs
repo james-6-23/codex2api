@@ -192,7 +192,7 @@ test('preserveOutputGuardFields adopts server guard fields when server generatio
   assert.equal(result.output_guard_config_generation, 10)
 })
 
-test('preserveConfirmedGuardFields copies only non-guard fields and keeps confirmed guard fields', () => {
+test('preserveConfirmedGuardFields copies only non-guard fields and keeps confirmed guard fields when server generation is not newer', () => {
   const currentForm = {
     site_name: 'UpdatedSiteName',
     output_guard_enabled: true, // in-flight draft
@@ -225,9 +225,73 @@ test('preserveConfirmedGuardFields copies only non-guard fields and keeps confir
   assert.equal(result.output_guard_max_request_bytes, 4 * MIB)
   assert.equal(result.output_guard_config_generation, 4)
 
+  // When serverResponse generation is equal or lower, confirmed guard fields are kept
+  const serverOlderResponse = {
+    site_name: 'UpdatedSiteName',
+    output_guard_enabled: true,
+    output_guard_max_tool_argument_bytes: 1024 * KIB,
+    output_guard_max_tool_argument_deltas: 16384,
+    output_guard_max_channel_bytes: 8 * MIB,
+    output_guard_max_request_bytes: 16 * MIB,
+    output_guard_config_generation: 4, // not newer than confirmedSnapshot (4)
+  }
+  const resultEqual = preserveConfirmedGuardFields(currentForm, confirmedSnapshot, serverOlderResponse)
+  assert.equal(resultEqual.site_name, 'UpdatedSiteName')
+  assert.equal(resultEqual.output_guard_enabled, false)
+  assert.equal(resultEqual.output_guard_max_tool_argument_bytes, 256 * KIB)
+  assert.equal(resultEqual.output_guard_max_tool_argument_deltas, 4096)
+  assert.equal(resultEqual.output_guard_max_channel_bytes, 2 * MIB)
+  assert.equal(resultEqual.output_guard_max_request_bytes, 4 * MIB)
+  assert.equal(resultEqual.output_guard_config_generation, 4)
+
   // Handles null confirmed gracefully
   const nullConfirmedResult = preserveConfirmedGuardFields(currentForm, null)
   assert.deepEqual(nullConfirmedResult, currentForm)
 })
+
+test('preserveConfirmedGuardFields adopts server guard fields and generation when server generation is newer', () => {
+  const currentForm = {
+    site_name: 'FormSiteName',
+    output_guard_enabled: false,
+    output_guard_max_tool_argument_bytes: 256 * KIB,
+    output_guard_max_tool_argument_deltas: 4096,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+    output_guard_config_generation: 4,
+  }
+
+  const confirmedSnapshot = {
+    site_name: 'OldSiteName',
+    output_guard_enabled: false,
+    output_guard_max_tool_argument_bytes: 256 * KIB,
+    output_guard_max_tool_argument_deltas: 4096,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+    output_guard_config_generation: 4,
+  }
+
+  const serverResponse = {
+    site_name: 'ServerSiteName',
+    output_guard_enabled: true,
+    output_guard_max_tool_argument_bytes: 1024 * KIB,
+    output_guard_max_tool_argument_deltas: 16384,
+    output_guard_max_channel_bytes: 8 * MIB,
+    output_guard_max_request_bytes: 16 * MIB,
+    output_guard_config_generation: 8,
+  }
+
+  const result = preserveConfirmedGuardFields(currentForm, confirmedSnapshot, serverResponse)
+
+  // Non-guard field updated from currentForm
+  assert.equal(result.site_name, 'FormSiteName')
+  // Guard fields adopted from serverResponse
+  assert.equal(result.output_guard_enabled, true)
+  assert.equal(result.output_guard_max_tool_argument_bytes, 1024 * KIB)
+  assert.equal(result.output_guard_max_tool_argument_deltas, 16384)
+  assert.equal(result.output_guard_max_channel_bytes, 8 * MIB)
+  assert.equal(result.output_guard_max_request_bytes, 16 * MIB)
+  assert.equal(result.output_guard_config_generation, 8)
+})
+
 
 

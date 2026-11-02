@@ -3309,9 +3309,10 @@ export default function Settings() {
       const safeMerged = preserveOutputGuardFields(updated, settingsFormRef.current)
       setPersistedSettings(commitSettingsForm(safeMerged))
       // 手动保存同样刷新"最后一次服务器确认"快照，后续自动保存失败时不会
-      // 回滚到这次手动保存之前的旧值。这里只把非 guard 字段从表单复制到确认快照，
-      // guard 字段保留确认快照中已有的值，避免把在途 autosave 的未确认 guard 值带进快照。
-      confirmedSettingsRef.current = preserveConfirmedGuardFields(settingsFormRef.current, confirmedSettingsRef.current)
+      // 回滚到这次手动保存之前的旧值。这里只把非 guard 字段从表单复制到确认快照；
+      // 若响应中的 generation 大于确认快照，则同步采纳服务器 guard 字段与 generation，
+      // 否则保留确认快照中已有的 guard 字段，避免把在途 autosave 的未确认 guard 值带进快照。
+      confirmedSettingsRef.current = preserveConfirmedGuardFields(settingsFormRef.current, confirmedSettingsRef.current, updated)
       const branding = {
         site_name: updated.site_name,
         site_logo: updated.site_logo,

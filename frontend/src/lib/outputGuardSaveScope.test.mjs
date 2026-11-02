@@ -61,7 +61,7 @@ test('manual save response preserves guard fields instead of blindly overwriting
   )
 })
 
-test('manual save success path only copies non-guard fields into confirmed snapshot', () => {
+test('manual save success path reconciles confirmed snapshot guard fields with server response generation', () => {
   const saveHandler = extractBalancedBody(
     settingsSource,
     'const handleSaveSettings = async () =>',
@@ -69,9 +69,9 @@ test('manual save success path only copies non-guard fields into confirmed snaps
   )
 
   assert.equal(
-    saveHandler.includes('preserveConfirmedGuardFields(settingsFormRef.current, confirmedSettingsRef.current)'),
+    saveHandler.includes('preserveConfirmedGuardFields(settingsFormRef.current, confirmedSettingsRef.current, updated)'),
     true,
-    'manual save must not overwrite confirmed snapshot guard fields with in-flight form draft',
+    'manual save must reconcile confirmed snapshot guard fields with server response generation',
   )
 })
 
