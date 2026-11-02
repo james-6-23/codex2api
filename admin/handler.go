@@ -187,6 +187,10 @@ type Handler struct {
 	autoActivate5hWake             chan struct{}
 	autoActivate5hStartOnce        sync.Once
 	autoActivate5hWG               sync.WaitGroup
+	scheduledTestStartOnce         sync.Once
+	scheduledTestWG                sync.WaitGroup
+	scheduledTestGateOnce          sync.Once
+	scheduledTestGate              chan struct{}
 	resetCreditPostMu              sync.Mutex
 	resetCreditPostWG              sync.WaitGroup
 	resetCreditPostCtx             context.Context
@@ -1230,6 +1234,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/invite/plan", h.GetInviteGuidePlan)
 	api.POST("/accounts/invite/plan/probe", h.ProbeInviteGuidePlan)
 	api.GET("/accounts/:id/test", h.TestConnection)
+	api.GET("/accounts/:id/scheduled-tests", h.GetScheduledConnectionTests)
+	api.PUT("/accounts/:id/scheduled-tests", h.UpdateScheduledConnectionTests)
 	api.GET("/accounts/:id/model-detector", h.DetectCodexModel)
 	api.GET("/modeltrace/bank", h.GetModelTraceBank)
 	api.POST("/modeltrace/bank/update", h.UpdateModelTraceBank)

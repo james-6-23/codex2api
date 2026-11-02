@@ -60,9 +60,15 @@ func nativeWSReplayAccountFilter(filter auth.AccountFilter, source *responsesWSR
 	}
 }
 
+// Native WebSocket provenance needs cross-instance runtime state. A durable
+// local response-context store keeps every other runtime value in process
+// memory, so it must not turn on the shared native path.
 func nativeWSSharedBackend() cache.TokenCache {
 	respCache.mu.RLock()
 	defer respCache.mu.RUnlock()
+	if respCache.runtimeCache == nil || !respCache.runtimeCache.SharedAcrossInstances() {
+		return nil
+	}
 	return respCache.runtimeCache
 }
 

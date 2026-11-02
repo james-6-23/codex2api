@@ -148,13 +148,15 @@ func TestResponsesTurnStateExpiredBindingUsesBaselineSchedulerWhenContinuousRetr
 	}
 }
 
-func TestResponsesTurnStateDoesNotRerouteAfterAuthoritativeLimit(t *testing.T) {
+func TestResponsesTurnStateReroutesFullContextAfterAuthoritativeLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	var upstreamHits atomic.Int64
+	var authorization atomic.Value
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamHits.Add(1)
+		authorization.Store(r.Header.Get("Authorization"))
 		w.Header().Set("Content-Type", "text/event-stream")
-		_, _ = io.WriteString(w, "data: "+`{"type":"response.completed","response":{"id":"resp_wrong_account","output":[]}}`+"\n\n")
+		_, _ = io.WriteString(w, "data: "+`{"type":"response.completed","response":{"id":"resp_rerouted","output":[]}}`+"\n\n")
 	}))
 	t.Cleanup(upstream.Close)
 
@@ -176,14 +178,14 @@ func TestResponsesTurnStateDoesNotRerouteAfterAuthoritativeLimit(t *testing.T) {
 		c.Request.Header.Set(codexTurnStateHeader, "turn-state-hard-limited")
 	}, handler.Responses, []byte(`{"model":"gpt-5.5","input":"continue","stream":true}`))
 
-	if recorder.Code != http.StatusTooManyRequests {
-		t.Fatalf("status = %d, want 429; body=%s", recorder.Code, recorder.Body.String())
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "resp_rerouted") {
+		t.Fatalf("full context did not fail over: status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if code := gjson.GetBytes(recorder.Body.Bytes(), "error.code").String(); code != "rate_limit_reached" {
-		t.Fatalf("error.code = %q, want rate_limit_reached", code)
+	if upstreamHits.Load() != 1 {
+		t.Fatalf("healthy upstream hits=%d, want 1", upstreamHits.Load())
 	}
-	if upstreamHits.Load() != 0 {
-		t.Fatalf("active turn was rerouted after authoritative limit: upstream hits=%d", upstreamHits.Load())
+	if authorization.Load() != "Bearer healthy-token" {
+		t.Fatal("request did not use the healthy account credential")
 	}
 }
 
@@ -468,17 +470,19 @@ func TestResponsesWebSocketFreshTurnReportsUsageLimitAs429(t *testing.T) {
 	}
 }
 
-func TestResponsesWebSocketTurnStateDoesNotRerouteAfterAuthoritativeLimit(t *testing.T) {
+func TestResponsesWebSocketTurnStateReroutesFullContextAfterAuthoritativeLimit(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousExec := WebsocketExecuteFunc
 	t.Cleanup(func() { WebsocketExecuteFunc = previousExec })
 	var upstreamCalls atomic.Int64
+	var selectedID atomic.Int64
 	WebsocketExecuteFunc = func(ctx context.Context, account *auth.Account, requestBody []byte, sessionID string, proxyOverride string, apiKey string, deviceCfg *DeviceProfileConfig, headers http.Header, poolRouteKey string) (*http.Response, error) {
 		upstreamCalls.Add(1)
+		selectedID.Store(account.ID())
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header:     make(http.Header),
-			Body:       io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{"id":"resp_wrong_account"}}` + "\n\n")),
+			Body:       io.NopCloser(strings.NewReader(`data: {"type":"response.completed","response":{"id":"resp_rerouted"}}` + "\n\n")),
 		}, nil
 	}
 
@@ -528,11 +532,14 @@ func TestResponsesWebSocketTurnStateDoesNotRerouteAfterAuthoritativeLimit(t *tes
 	if err != nil {
 		t.Fatalf("read websocket error event: %v", err)
 	}
-	if code := gjson.GetBytes(event, "error.code").String(); code != "rate_limit_reached" {
-		t.Fatalf("error.code = %q, want rate_limit_reached; body=%s", code, event)
+	if typ := gjson.GetBytes(event, "type").String(); typ != "response.completed" {
+		t.Fatalf("event type=%q, want response.completed; body=%s", typ, event)
 	}
-	if upstreamCalls.Load() != 0 {
-		t.Fatalf("active WebSocket turn was rerouted after authoritative limit: upstream calls=%d", upstreamCalls.Load())
+	if upstreamCalls.Load() != 1 {
+		t.Fatalf("healthy upstream calls=%d, want 1", upstreamCalls.Load())
+	}
+	if selectedID.Load() != 2 {
+		t.Fatalf("selected account=%d, want healthy account 2", selectedID.Load())
 	}
 }
 
