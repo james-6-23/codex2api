@@ -37,11 +37,15 @@ export interface ConfirmedSettingsVersionState<T extends object> {
 }
 
 /**
- * 带有字段版本检查的服务器确认值合并函数。
+ * 带有版本或 output_guard_config_generation 检查的服务器确认值合并函数。
  *
- * 为每个字段记录"最后确认的请求版本"；合并时逐字段比较本次响应所携带的请求版本
- * 是否新于该字段最后确认版本。若旧响应晚于新响应到达，跳过旧字段值，防止回滚基线
- * 被冲回过期值。
+ * 为每个字段记录"最后确认的请求版本"；合并时：
+ * 1. 若字段属于 output guard，且 incomingValues 包含 output_guard_config_generation：
+ *    比较 incomingValues.output_guard_config_generation 与 confirmed 中现有的 output_guard_config_generation。
+ *    若响应中的 generation 更大（或相等且 incomingVer >= currentVer），说明服务器该提交更新，采纳该值；
+ *    若响应中的 generation 更小，说明服务器先提交了该响应对应的配置，后提交了已确认的配置，忽略旧响应字段。
+ * 2. 对于其他字段（或不带 generation 时），逐字段比较本次响应所携带的请求版本是否新于该字段最后确认版本。
+ * 若旧响应晚于新响应到达，跳过旧字段值，防止回滚基线被冲回过期值。
  */
 export function mergeConfirmedSettingsWithVersions<T extends object>(
   confirmed: T | null,
@@ -53,10 +57,34 @@ export function mergeConfirmedSettingsWithVersions<T extends object>(
   const acceptableValues: Partial<T> = {}
   let hasUpdate = false
 
+  const incomingGuardGen = (incomingValues as Record<string, unknown>).output_guard_config_generation
+  const currentGuardGen = confirmed ? (confirmed as Record<string, unknown>).output_guard_config_generation : undefined
+  const hasIncomingGuardGen = typeof incomingGuardGen === 'number' && Number.isFinite(incomingGuardGen)
+  const hasCurrentGuardGen = typeof currentGuardGen === 'number' && Number.isFinite(currentGuardGen)
+
   for (const key of Object.keys(incomingValues) as Array<keyof T>) {
     const fieldKey = String(key)
     const incomingVer = incomingVersions[fieldKey] ?? 0
     const currentVer = nextVersions[fieldKey] ?? 0
+
+    // 判断 output guard 字段
+    const isGuardKey = fieldKey.startsWith('output_guard_')
+    if (isGuardKey && hasIncomingGuardGen && hasCurrentGuardGen) {
+      if ((incomingGuardGen as number) > (currentGuardGen as number)) {
+        acceptableValues[key] = incomingValues[key]
+        nextVersions[fieldKey] = Math.max(currentVer, incomingVer)
+        hasUpdate = true
+      } else if ((incomingGuardGen as number) === (currentGuardGen as number)) {
+        if (incomingVer >= currentVer) {
+          acceptableValues[key] = incomingValues[key]
+          nextVersions[fieldKey] = incomingVer
+          hasUpdate = true
+        }
+      }
+      // generation 更小则跳过
+      continue
+    }
+
     if (incomingVer > currentVer) {
       acceptableValues[key] = incomingValues[key]
       nextVersions[fieldKey] = incomingVer

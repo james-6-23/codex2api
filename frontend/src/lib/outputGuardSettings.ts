@@ -90,14 +90,25 @@ export function validateOutputGuardRanges(settings: {
 }
 
 /**
- * 从响应或表单中仅保留非 guard 字段（用 current 中的 guard 字段替换或从响应中剔除 guard 字段）。
- *
- * 手动保存时不应让服务器响应覆盖当前表单和基线中的 guard 字段（guard 字段仅走自动保存）。
+ * 从响应或表单中保留 guard 字段：
+ * 比较服务器响应的 output_guard_config_generation 与本地 generation。
+ * 若服务器响应更新（更大），说明其他管理员在页面打开期间修改了 guard，采纳服务器 guard 字段与 generation；
+ * 否则保留本地表单的 guard 字段与 generation（保持对在途 autosave 的保护）。
  */
 export function preserveOutputGuardFields<T extends object>(
   updated: T,
   current: T,
 ): T {
+  const updatedGen = (updated as Record<string, unknown>).output_guard_config_generation
+  const currentGen = (current as Record<string, unknown>).output_guard_config_generation
+
+  const serverGen = typeof updatedGen === 'number' && Number.isFinite(updatedGen) ? updatedGen : -1
+  const localGen = typeof currentGen === 'number' && Number.isFinite(currentGen) ? currentGen : -1
+
+  if (serverGen > localGen) {
+    return { ...updated }
+  }
+
   const result = { ...updated }
   for (const key of OUTPUT_GUARD_KEYS) {
     if (Object.prototype.hasOwnProperty.call(current, key)) {
@@ -107,6 +118,31 @@ export function preserveOutputGuardFields<T extends object>(
   if (Object.prototype.hasOwnProperty.call(current, 'output_guard_config_generation')) {
     (result as Record<string, unknown>).output_guard_config_generation =
       (current as Record<string, unknown>).output_guard_config_generation
+  }
+  return result
+}
+
+/**
+ * 手动保存成功时刷新确认快照：
+ * 只把非 guard 字段从表单复制到确认快照，guard 字段保留确认快照中已有的值。
+ * 避免把在途 autosave 的未确认 guard 值带进确认快照（该 autosave 失败时回滚会恢复被拒值）。
+ */
+export function preserveConfirmedGuardFields<T extends object>(
+  currentForm: T,
+  confirmed: T | null,
+): T {
+  if (!confirmed) {
+    return { ...currentForm }
+  }
+  const result = { ...currentForm }
+  for (const key of OUTPUT_GUARD_KEYS) {
+    if (Object.prototype.hasOwnProperty.call(confirmed, key)) {
+      result[key as keyof T] = confirmed[key as keyof T]
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(confirmed, 'output_guard_config_generation')) {
+    (result as Record<string, unknown>).output_guard_config_generation =
+      (confirmed as Record<string, unknown>).output_guard_config_generation
   }
   return result
 }

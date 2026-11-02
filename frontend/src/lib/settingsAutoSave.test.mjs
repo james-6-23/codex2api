@@ -182,3 +182,68 @@ test("confirmed settings merge with field versions handles null initial confirme
   assert.equal(result.confirmedVersions.output_guard_max_channel_bytes, 1);
 });
 
+test("confirmed settings merge uses output_guard_config_generation to resolve out-of-order responses", () => {
+  const initial = {
+    output_guard_max_channel_bytes: 2 * 1024 * 1024,
+    output_guard_config_generation: 1,
+  };
+  let confirmedState = {
+    confirmed: initial,
+    confirmedVersions: {
+      output_guard_max_channel_bytes: 1,
+    },
+  };
+
+  // 场景：两个 channel-bytes 保存重叠。
+  // 请求 A (先发, client version 2) 后写，服务器提交后生成 version 2 (4MiB, generation 3)
+  // 请求 B (后发, client version 3) 先写，服务器提交后生成 version 1 (8MiB, generation 2)
+  // 客户端先收到请求 B 的响应 (8MiB, generation 2)
+  confirmedState = mergeConfirmedSettingsWithVersions(
+    confirmedState.confirmed,
+    confirmedState.confirmedVersions,
+    {
+      output_guard_max_channel_bytes: 8 * 1024 * 1024,
+      output_guard_config_generation: 2,
+    },
+    { output_guard_max_channel_bytes: 3 }, // client requestedVersion 3
+  );
+
+  assert.equal(confirmedState.confirmed?.output_guard_max_channel_bytes, 8 * 1024 * 1024);
+  assert.equal(confirmedState.confirmed?.output_guard_config_generation, 2);
+
+  // 客户端后收到请求 A 的响应 (4MiB, generation 3, client requestedVersion 2 < 3)
+  // 虽然 client version 2 < 3，但服务器端的 output_guard_config_generation 3 > 2，证明请求 A 是服务器最终提交值
+  confirmedState = mergeConfirmedSettingsWithVersions(
+    confirmedState.confirmed,
+    confirmedState.confirmedVersions,
+    {
+      output_guard_max_channel_bytes: 4 * 1024 * 1024,
+      output_guard_config_generation: 3,
+    },
+    { output_guard_max_channel_bytes: 2 }, // client requestedVersion 2
+  );
+
+  // 客户端基线必须采纳服务器最终提交值 4MiB，而不是被请求顺序丢弃保留 8MiB
+  assert.equal(
+    confirmedState.confirmed?.output_guard_max_channel_bytes,
+    4 * 1024 * 1024,
+    "client baseline must equal server final committed value when server generation is newer",
+  );
+  assert.equal(confirmedState.confirmed?.output_guard_config_generation, 3);
+
+  // 反向验证：如果再收到一个旧 generation 的响应（例如 generation 1），则必须丢弃
+  const afterOlderGen = mergeConfirmedSettingsWithVersions(
+    confirmedState.confirmed,
+    confirmedState.confirmedVersions,
+    {
+      output_guard_max_channel_bytes: 2 * 1024 * 1024,
+      output_guard_config_generation: 1,
+    },
+    { output_guard_max_channel_bytes: 4 }, // client version 即使更大也不接受
+  );
+
+  assert.equal(afterOlderGen.confirmed?.output_guard_max_channel_bytes, 4 * 1024 * 1024);
+  assert.equal(afterOlderGen.confirmed?.output_guard_config_generation, 3);
+});
+
+
