@@ -912,6 +912,10 @@ export const api = {
     }),
   refreshAccount: (id: number) =>
     request<MessageResponse>(`/accounts/${id}/refresh`, { method: 'POST' }),
+  getScheduledConnectionTests: (id: number) =>
+    request<import('./types').ScheduledConnectionTestResponse>(`/accounts/${id}/scheduled-tests`),
+  updateScheduledConnectionTests: (id: number, data: import('./types').ScheduledConnectionTestConfig) =>
+    request<import('./types').ScheduledConnectionTestConfig>(`/accounts/${id}/scheduled-tests`, { method: 'PUT', body: JSON.stringify(data) }),
   getAccount: (id: number, signal?: AbortSignal) =>
     request<AccountRow>(`/accounts/${id}`, { signal }),
   forceUsageProbe: () =>
