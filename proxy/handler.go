@@ -7341,7 +7341,12 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 	defer h.ReleaseAPIKeyScopeConcurrency(c)
 	stopRetryDeadline := installContinuousRetryHTTPDeadline(c, continuousRetryPolicy, continuousRetryProtocolChat)
 	defer stopRetryDeadline()
-	stopRetryKeepalive := installContinuousRetrySSEKeepalive(c, isStream, "text/event-stream")
+	// issue #623：首字前不得写出任何字节（避免提前提交 200，破坏首字前真实
+	// HTTP 错误返回与静默换号语义）。请求级保活仍提前激活以满足读循环的
+	// Active() 判定，但写入受 chatContentWritten 门闩约束，仅在首个真实内容
+	// 写出后才允许落盘。
+	var chatContentWritten atomic.Bool
+	stopRetryKeepalive := installContinuousRetrySSEKeepaliveWithGate(c, isStream, "text/event-stream", chatContentWritten.Load)
 	defer stopRetryKeepalive()
 	activateContinuousRetryKeepalive(c.Request.Context())
 
@@ -8015,6 +8020,7 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 						clientGone = true
 					} else if wrote {
 						wroteAnyBody = true
+						chatContentWritten.Store(true)
 					}
 					if shouldDefer && !wrote {
 						return !isResponsesTerminalEvent(eventType)

@@ -97,6 +97,45 @@ func TestChatCompletionsSuccessfulStreamStillAppendsDoneSentinel(t *testing.T) {
 	}
 }
 
+// TestChatCompletionsStreamNoBytesBeforeFirstContentWhenUpstreamSlow 验证 issue #623
+// 的"首字前不得写出任何字节"：上游在首字前静默超过保活间隔时，不得提前写出
+// keepalive 注释（那会提交 200，破坏首字前真实 HTTP 错误返回与静默换号语义）；
+// 首个内容写出后，静默期仍应正常保活。
+func TestChatCompletionsStreamNoBytesBeforeFirstContentWhenUpstreamSlow(t *testing.T) {
+	shortenDownstreamSSEKeepalive(t)
+	handler, _ := newChatStreamServeTestHandler(t, func(w http.ResponseWriter) {
+		// 首字前静默远超 5ms 保活间隔：此期间不得写出任何字节。
+		time.Sleep(30 * time.Millisecond)
+		writeCodexSSE(w,
+			`{"type":"response.created","response":{"id":"resp_slow_start"}}`,
+			`{"type":"response.output_text.delta","delta":"slow-started"}`,
+		)
+		time.Sleep(40 * time.Millisecond)
+		writeCodexSSE(w,
+			`{"type":"response.output_text.delta","delta":"-resumed"}`,
+			`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
+		)
+	})
+
+	recorder := invokeChatCompletionsStream(t, handler)
+	body := recorder.Body.String()
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, body)
+	}
+	firstContent := strings.Index(body, `"content":"slow-started"`)
+	keepalive := strings.Index(body, downstreamSSEKeepaliveComment)
+	resumed := strings.Index(body, `"content":"-resumed"`)
+	if firstContent < 0 || keepalive < 0 || resumed < 0 {
+		t.Fatalf("stream must carry first content, a keepalive comment and the resumed content; body=%q", body)
+	}
+	if keepalive < firstContent {
+		t.Fatalf("no bytes may be written before the first content token (keepalive at %d, first content at %d); body=%q", keepalive, firstContent, body)
+	}
+	if keepalive > resumed {
+		t.Fatalf("keepalive must land inside the upstream silence window (after %d, before %d), got %d; body=%q", firstContent, resumed, keepalive, body)
+	}
+}
+
 // TestChatCompletionsStreamKeepsDownstreamAliveDuringUpstreamSilence 验证 issue #623
 // 修复：首个内容 chunk 之后上游静默期间，/v1/chat/completions 翻译流也要定期写
 // SSE 注释刷新下游 idle timer，且首字前不得写出任何字节。
