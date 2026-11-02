@@ -1171,6 +1171,40 @@ func TestShouldRetryImageStreamErrorDoesNotRetryOutputPolicyFailure(t *testing.T
 	}
 }
 
+func handleImageRetryFixtureMetrics(w http.ResponseWriter, r *http.Request) bool {
+	// Background metrics share the Resin endpoint but are not image attempts.
+	if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/https/ab.chatgpt.com/otlp/v1/metrics") {
+		return false
+	}
+	w.WriteHeader(http.StatusNoContent)
+	return true
+}
+
+func TestImageRetryFixtureMetricsIsolation(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		method  string
+		path    string
+		handled bool
+	}{
+		{"metrics", http.MethodPost, "/fixture/https/ab.chatgpt.com/otlp/v1/metrics", true},
+		{"image", http.MethodPost, "/fixture/https/chatgpt.com/backend-api/codex/responses", false},
+		{"wrong_method", http.MethodGet, "/fixture/https/ab.chatgpt.com/otlp/v1/metrics", false},
+		{"wrong_host", http.MethodPost, "/fixture/https/other.example/otlp/v1/metrics", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			handled := handleImageRetryFixtureMetrics(recorder, httptest.NewRequest(tc.method, tc.path, nil))
+			if handled != tc.handled {
+				t.Fatalf("handled = %v, want %v", handled, tc.handled)
+			}
+			if handled && recorder.Code != http.StatusNoContent {
+				t.Fatalf("metrics status = %d, want 204", recorder.Code)
+			}
+		})
+	}
+}
+
 func TestForwardImagesCatchAllRetriesBeyondOrdinaryAttemptCap(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime := CurrentRuntimeSettings()
@@ -1184,7 +1218,10 @@ func TestForwardImagesCatchAllRetriesBeyondOrdinaryAttemptCap(t *testing.T) {
 	ApplyRuntimeSettings(nextRuntime)
 
 	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleImageRetryFixtureMetrics(w, r) {
+			return
+		}
 		attempt := calls.Add(1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		if attempt <= maxImageAttempts {
@@ -1235,7 +1272,10 @@ func TestForwardImagesCatchAllDiscardsPartialImageFromFailedAttempt(t *testing.T
 	ApplyRuntimeSettings(nextRuntime)
 
 	var calls atomic.Int32
-	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if handleImageRetryFixtureMetrics(w, r) {
+			return
+		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		if calls.Add(1) == 1 {
 			_, _ = fmt.Fprint(w, `data: {"type":"response.image_generation_call.partial_image","partial_image_b64":"ZmFpbGVkLXBhcnRpYWw=","partial_image_index":0}`+"\n\n")

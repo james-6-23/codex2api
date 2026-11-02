@@ -102,6 +102,9 @@ func grokJSONString(value any) string {
 
 func grokToolSearchArguments(value any) any {
 	text := strings.TrimSpace(grokJSONString(value))
+	if text == "" {
+		return map[string]any{}
+	}
 	var decoded any
 	if text != "" && json.Unmarshal([]byte(text), &decoded) == nil {
 		return decoded
