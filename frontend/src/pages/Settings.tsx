@@ -3048,7 +3048,16 @@ export default function Settings() {
         getSettingsPatchValues(updated, patchKeys),
         requestedVersions,
       )
-      confirmedSettingsRef.current = mergedConfirmedState.confirmed
+      const confirmedWithGeneration = mergedConfirmedState.confirmed && typeof updated.output_guard_config_generation === 'number'
+        ? {
+            ...mergedConfirmedState.confirmed,
+            output_guard_config_generation: Math.max(
+              mergedConfirmedState.confirmed.output_guard_config_generation || 0,
+              updated.output_guard_config_generation,
+            ),
+          }
+        : mergedConfirmedState.confirmed
+      confirmedSettingsRef.current = confirmedWithGeneration
       confirmedFieldVersionsRef.current = mergedConfirmedState.confirmedVersions
       const mergeKeys = patchKeys.filter((key) => {
         const fieldKey = String(key)

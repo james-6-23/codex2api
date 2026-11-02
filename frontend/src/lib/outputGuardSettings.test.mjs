@@ -293,5 +293,67 @@ test('preserveConfirmedGuardFields adopts server guard fields and generation whe
   assert.equal(result.output_guard_config_generation, 8)
 })
 
+test('autosave success advances confirmed snapshot generation and prevents older manual save from overwriting confirmed guard values', () => {
+  // 1. 初始确认快照处于 generation 4
+  const initialConfirmed = {
+    site_name: 'MyProxy',
+    output_guard_enabled: false,
+    output_guard_max_tool_argument_bytes: 256 * KIB,
+    output_guard_max_tool_argument_deltas: 4096,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+    output_guard_config_generation: 4,
+  }
+
+  // 2. autosave 提交 guard 更新成功，服务器响应将 generation 推进至 7
+  const autosaveServerResponse = {
+    ...initialConfirmed,
+    output_guard_enabled: true,
+    output_guard_max_channel_bytes: 8 * MIB,
+    output_guard_config_generation: 7,
+  }
+
+  // autosave 成功推进确认快照的 generation
+  const advancedConfirmed = {
+    ...initialConfirmed,
+    output_guard_enabled: true,
+    output_guard_max_channel_bytes: 8 * MIB,
+    output_guard_config_generation: Math.max(
+      initialConfirmed.output_guard_config_generation || 0,
+      autosaveServerResponse.output_guard_config_generation,
+    ),
+  }
+  assert.equal(advancedConfirmed.output_guard_config_generation, 7)
+  assert.equal(advancedConfirmed.output_guard_enabled, true)
+  assert.equal(advancedConfirmed.output_guard_max_channel_bytes, 8 * MIB)
+
+  // 3. 随后到达的手动保存响应携带较旧的 guard 值和较旧的 generation (5 < 7)
+  // 如果 generation 未推进（停留在 4），5 > 4 会错误覆盖；推进到 7 后，5 < 7 不得覆盖
+  const manualSaveResponseStale = {
+    site_name: 'MyProxyUpdatedName',
+    output_guard_enabled: false,
+    output_guard_max_tool_argument_bytes: 256 * KIB,
+    output_guard_max_tool_argument_deltas: 4096,
+    output_guard_max_channel_bytes: 2 * MIB,
+    output_guard_max_request_bytes: 4 * MIB,
+    output_guard_config_generation: 5, // older than advanced generation 7
+  }
+
+  const currentForm = {
+    ...advancedConfirmed,
+    site_name: 'MyProxyUpdatedName',
+  }
+
+  const reconciledSnapshot = preserveConfirmedGuardFields(currentForm, advancedConfirmed, manualSaveResponseStale)
+
+  // 非 guard 字段更新
+  assert.equal(reconciledSnapshot.site_name, 'MyProxyUpdatedName')
+  // 确认的 guard 字段必须保留 autosave 推进后的最新值（true / 8MiB / gen 7），不得被旧响应冲回
+  assert.equal(reconciledSnapshot.output_guard_enabled, true)
+  assert.equal(reconciledSnapshot.output_guard_max_channel_bytes, 8 * MIB)
+  assert.equal(reconciledSnapshot.output_guard_config_generation, 7)
+})
+
+
 
 

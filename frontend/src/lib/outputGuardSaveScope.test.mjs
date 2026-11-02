@@ -75,4 +75,19 @@ test('manual save success path reconciles confirmed snapshot guard fields with s
   )
 })
 
+test('autosave success path advances confirmed snapshot guard generation', () => {
+  const autoSaveHandler = extractBalancedBody(
+    settingsSource,
+    'const autoSaveSettingsPatch = useCallback(async (patch: Partial<SystemSettings>) =>',
+    'Settings auto-save handler',
+  )
+
+  assert.equal(
+    autoSaveHandler.includes('output_guard_config_generation: Math.max('),
+    true,
+    'autosave success must advance confirmed snapshot output_guard_config_generation',
+  )
+})
+
+
 
