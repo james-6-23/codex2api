@@ -117,16 +117,6 @@ func installContinuousRetrySSEKeepalive(c *gin.Context, stream bool, contentType
 	})
 }
 
-// installContinuousRetrySSEKeepaliveWithGate 与 installContinuousRetrySSEKeepalive
-// 相同，但可提供 gate 控制心跳写入时机（例如首字前禁止写出任何字节）。
-func installContinuousRetrySSEKeepaliveWithGate(c *gin.Context, stream bool, contentType string, gate func() bool) func() {
-	return installContinuousRetrySSEKeepaliveWithOptions(c, stream, continuousRetrySSEKeepaliveOptions{
-		contentType: contentType,
-		payload:     continuousRetryKeepaliveComment,
-		gate:        gate,
-	})
-}
-
 // installContinuousRetryMessagesKeepalive 使用 Messages 协议要求的 ping 事件。
 func installContinuousRetryMessagesKeepalive(c *gin.Context, stream bool) func() {
 	return installContinuousRetrySSEKeepaliveWithOptions(c, stream, continuousRetrySSEKeepaliveOptions{
@@ -138,9 +128,6 @@ func installContinuousRetryMessagesKeepalive(c *gin.Context, stream bool) func()
 type continuousRetrySSEKeepaliveOptions struct {
 	contentType string
 	payload     string
-	// gate 可选：返回 false 时本次心跳写入被跳过（用于首字前禁止写出任何字节，
-	// 避免提前提交 200 破坏首字前真实 HTTP 错误返回语义）。
-	gate func() bool
 }
 
 // installContinuousRetrySSEKeepaliveWithOptions 安装带指定内容类型和心跳载荷的请求保活。
@@ -167,9 +154,6 @@ func installContinuousRetrySSEKeepaliveWithOptions(c *gin.Context, stream bool, 
 	original := c.Request
 	requestCtx, cancel := context.WithCancelCause(original.Context())
 	keepalive := &requestContinuousRetryKeepalive{ctx: requestCtx, write: func() error {
-		if options.gate != nil && !options.gate() {
-			return nil
-		}
 		setSSEStreamHeaders(c, options.contentType)
 		if !c.Writer.Written() {
 			// Cloudflare 对 102 之后的最终响应仍有 125s 限制；长期保活
