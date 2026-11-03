@@ -123,6 +123,10 @@ export interface AntigravitySettingsResponse {
   quota_refresh_interval_minutes?: number
   /** 配额硬门禁开关：开启后配额耗尽账号直接 429，不进入排队。 */
   quota_gate_enabled?: boolean
+  /** 临期优先调度开关：周配额临近重置且仍有存量的账号优先承接新会话（仅 round_robin）。 */
+  expiry_priority_enabled?: boolean
+  /** 临期时间窗（小时），允许范围 1–168。 */
+  expiry_priority_horizon_hours?: number
   /** 渠道配置 CAS 版本号（只读，后端下发）。 */
   config_revision?: number
   choices: AntigravityRedirectChoice[]

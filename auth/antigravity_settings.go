@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync/atomic"
+	"time"
 )
 
 // Antigravity 渠道级设置（system_settings.antigravity_config 列）。包含模型重定向
@@ -21,6 +22,14 @@ const (
 	AntigravityQuotaRefreshIntervalMinMinutes     = 3
 	AntigravityQuotaRefreshIntervalMaxMinutes     = 60
 	AntigravityQuotaRefreshIntervalDefaultMinutes = 60
+)
+
+// 临期优先调度的时间窗（小时）取值范围与缺省值：周配额离重置不超过该时长、且仍有
+// 存量额度的账号在同优先级同健康档位内优先承接新会话。
+const (
+	AntigravityExpiryPriorityHorizonMinHours     = 1
+	AntigravityExpiryPriorityHorizonMaxHours     = 168
+	AntigravityExpiryPriorityHorizonDefaultHours = 24
 )
 
 // AntigravitySettings 是 antigravity_config 列的 JSON 形态。
@@ -42,6 +51,13 @@ type AntigravitySettings struct {
 	// QuotaGateEnabled 是硬门禁止血开关（缺省 true）：只控制是否用配额事实阻断调度
 	// 与软评分，不改写、不删除已落库快照（Spec §8.1）。
 	QuotaGateEnabled *bool `json:"quota_gate_enabled,omitempty"`
+	// ExpiryPriorityEnabled 开启临期优先调度（缺省 false）：新会话选号时，请求模型所在
+	// 配额族的周配额临近重置且仍有存量的账号优先承接，避免到期清零浪费。只在
+	// round_robin + 加权避险路径上生效。
+	ExpiryPriorityEnabled *bool `json:"expiry_priority_enabled,omitempty"`
+	// ExpiryPriorityHorizonHours 是「临期」的时间窗，缺省 24，范围 [1, 168]。读取一律
+	// 经 GetExpiryPriorityHorizonHours 钳位。
+	ExpiryPriorityHorizonHours *int `json:"expiry_priority_horizon_hours,omitempty"`
 	// ConfigRevision 是跨实例拒旧的单调递增版本号，由 PUT 侧在 CAS 事务内生成。
 	ConfigRevision int64 `json:"config_revision,omitempty"`
 }
@@ -77,6 +93,26 @@ func (s AntigravitySettings) GetQuotaGateEnabled() bool {
 	return *s.QuotaGateEnabled
 }
 
+// GetExpiryPriorityEnabled 返回临期优先调度的生效值，未配置视为关闭。
+func (s AntigravitySettings) GetExpiryPriorityEnabled() bool {
+	return s.ExpiryPriorityEnabled != nil && *s.ExpiryPriorityEnabled
+}
+
+// GetExpiryPriorityHorizonHours 返回钳位到 [1, 168] 的临期时间窗，未配置视为 24。
+func (s AntigravitySettings) GetExpiryPriorityHorizonHours() int {
+	if s.ExpiryPriorityHorizonHours == nil {
+		return AntigravityExpiryPriorityHorizonDefaultHours
+	}
+	value := *s.ExpiryPriorityHorizonHours
+	if value < AntigravityExpiryPriorityHorizonMinHours {
+		return AntigravityExpiryPriorityHorizonMinHours
+	}
+	if value > AntigravityExpiryPriorityHorizonMaxHours {
+		return AntigravityExpiryPriorityHorizonMaxHours
+	}
+	return value
+}
+
 // clone 深拷贝全部字段（含新增指针字段），避免调用方改写进程内已生效配置。
 func (s AntigravitySettings) clone() AntigravitySettings {
 	out := AntigravitySettings{
@@ -85,6 +121,8 @@ func (s AntigravitySettings) clone() AntigravitySettings {
 		QuotaRefreshEnabled:         cloneOptionalBool(s.QuotaRefreshEnabled),
 		QuotaRefreshIntervalMinutes: cloneOptionalInt(s.QuotaRefreshIntervalMinutes),
 		QuotaGateEnabled:            cloneOptionalBool(s.QuotaGateEnabled),
+		ExpiryPriorityEnabled:       cloneOptionalBool(s.ExpiryPriorityEnabled),
+		ExpiryPriorityHorizonHours:  cloneOptionalInt(s.ExpiryPriorityHorizonHours),
 		ConfigRevision:              s.ConfigRevision,
 	}
 	if len(s.ModelRedirects) > 0 {
@@ -242,6 +280,15 @@ func AntigravityRedirectOverridesEffort() bool {
 	return v.RedirectOverridesEffort
 }
 
+// AntigravityExpiryPriority 返回临期优先调度的开关与时间窗（热路径读，不深拷贝）。
+func AntigravityExpiryPriority() (bool, time.Duration) {
+	v, _ := configuredAntigravitySettings.Load().(AntigravitySettings)
+	if !v.GetExpiryPriorityEnabled() {
+		return false, 0
+	}
+	return true, time.Duration(v.GetExpiryPriorityHorizonHours()) * time.Hour
+}
+
 // AntigravityExposeThoughts 报告是否向下游下发 Gemini 思考内容。
 func AntigravityExposeThoughts() bool {
 	v, _ := configuredAntigravitySettings.Load().(AntigravitySettings)
@@ -270,7 +317,8 @@ func EncodeAntigravitySettings(settings AntigravitySettings) (string, error) {
 	}
 	if len(normalized.ModelRedirects) == 0 && !normalized.RedirectOverridesEffort && !normalized.ExposeThoughts &&
 		normalized.QuotaRefreshEnabled == nil && normalized.QuotaRefreshIntervalMinutes == nil &&
-		normalized.QuotaGateEnabled == nil && normalized.ConfigRevision == 0 {
+		normalized.QuotaGateEnabled == nil && normalized.ExpiryPriorityEnabled == nil &&
+		normalized.ExpiryPriorityHorizonHours == nil && normalized.ConfigRevision == 0 {
 		return "{}", nil
 	}
 	encoded, err := json.Marshal(normalized)

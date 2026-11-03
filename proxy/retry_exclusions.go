@@ -598,7 +598,7 @@ func (h *Handler) nextRetryAccountWithGuard(ctx context.Context, affinityKey str
 		// waitForRetryAccountAvailableWithGuard 的排队等待只会白耗本次请求的重试预算。
 		// 混合原因（部分配额、部分容量 / 冷却 / 鉴权）不满足「全部因配额阻断」，
 		// 仍走既有排队与 503 路径。
-		if quotaErr := h.store.AntigravityQuotaGateExhaustion(affinityKey, apiKeyID, exclude, filter, preserveBinding); quotaErr != nil {
+		if quotaErr := h.store.AntigravityQuotaGateExhaustion(affinityKey, apiKeyID, exclude, filter, preserveBinding, opts.Model); quotaErr != nil {
 			return nil, "", auth.SessionAffinityGuard{}, quotaErr
 		}
 		h.store.TriggerDispatchStateReconcileAsync()

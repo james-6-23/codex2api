@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/codex2api/auth"
 	"github.com/gin-gonic/gin"
@@ -221,5 +222,53 @@ func TestAntigravitySettingsPUTRestoresQuotaFieldsDroppedByOldWriter(t *testing.
 	raw, err := db.GetAntigravityConfigRaw(ctx)
 	if err != nil || !strings.Contains(raw, `"quota_gate_enabled":false`) || !strings.Contains(raw, `"gemini-3.8-flash-high"`) {
 		t.Fatalf("persisted=%q err=%v", raw, err)
+	}
+}
+
+// TestAntigravitySettingsPUTExpiryPriority 覆盖临期优先开关与时间窗的保存、范围校验与 null 重置。
+func TestAntigravitySettingsPUTExpiryPriority(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	previous := auth.ConfiguredAntigravitySettings()
+	t.Cleanup(func() { auth.SetConfiguredAntigravitySettings(previous) })
+	auth.SetConfiguredAntigravitySettings(auth.AntigravitySettings{})
+	db := newTestAdminDB(t)
+	handler := &Handler{db: db}
+	router := gin.New()
+	router.PUT("/api/admin/settings/antigravity", handler.UpdateAntigravitySettings)
+
+	put := func(body string) (int, antigravitySettingsResponse) {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPut, "/api/admin/settings/antigravity", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		router.ServeHTTP(rec, req)
+		var payload antigravitySettingsResponse
+		_ = json.Unmarshal(rec.Body.Bytes(), &payload)
+		return rec.Code, payload
+	}
+
+	code, payload := put(`{"expiry_priority_enabled":true}`)
+	if code != http.StatusOK || !payload.ExpiryPriorityEnabled || payload.ExpiryPriorityHorizonHours != 24 {
+		t.Fatalf("enable: code=%d payload=%+v", code, payload)
+	}
+	if enabled, horizon := auth.AntigravityExpiryPriority(); !enabled || horizon != 24*time.Hour {
+		t.Fatalf("runtime expiry priority = %v %v", enabled, horizon)
+	}
+
+	code, payload = put(`{"expiry_priority_horizon_hours":12}`)
+	if code != http.StatusOK || !payload.ExpiryPriorityEnabled || payload.ExpiryPriorityHorizonHours != 12 {
+		t.Fatalf("horizon: code=%d payload=%+v", code, payload)
+	}
+	for _, body := range []string{`{"expiry_priority_horizon_hours":0}`, `{"expiry_priority_horizon_hours":169}`, `{"expiry_priority_enabled":"yes"}`} {
+		if code, _ := put(body); code != http.StatusBadRequest {
+			t.Fatalf("PUT %s status=%d, want 400", body, code)
+		}
+	}
+
+	code, payload = put(`{"expiry_priority_enabled":null}`)
+	if code != http.StatusOK || payload.ExpiryPriorityEnabled || payload.ExpiryPriorityHorizonHours != 12 {
+		t.Fatalf("null reset: code=%d payload=%+v", code, payload)
+	}
+	if enabled, _ := auth.AntigravityExpiryPriority(); enabled {
+		t.Fatal("null must reset expiry priority to disabled")
 	}
 }
