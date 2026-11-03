@@ -4,7 +4,7 @@ import { api } from '../api'
 import { refreshIntelligenceBars } from '../hooks/useIntelligenceBars'
 import { useToast } from '../hooks/useToast'
 import type { IntelligenceBar } from '../lib/intelligenceCheck'
-import { intelligenceColor, intelligenceLabels, intelligenceWindow } from '../lib/intelligenceCheck'
+import { intelligenceColor, intelligenceLabels, intelligenceWindow, intelligenceScheduleLabel } from '../lib/intelligenceCheck'
 import { getErrorMessage } from '../utils/error'
 import AccountStatusBar from './AccountStatusBar'
 import AccountIntelligenceHistoryDialog from './AccountIntelligenceHistoryDialog'
@@ -61,6 +61,7 @@ export default function AccountIntelligenceBar({ bar, error }: AccountIntelligen
       {error && <span role="status" className="text-[10px] text-destructive">加载失败</span>}
       {bar?.action && bar.action !== 'none' && <span className="text-[10px] text-muted-foreground">{intelligenceLabels[bar.action]}</span>}
     </div>}
+    <p className="mb-1 text-[10px] text-muted-foreground">{intelligenceScheduleLabel(bar)}</p>
     <AccountStatusBar label="最近 20 次降智检测，由旧到新" rate={error ? null : rate} rateClass={rateClass}
       blocks={[
         ...Array.from({ length: 20 - records.length }, () => ({ tooltip: <span className="text-muted-foreground">暂无检测记录</span> })),
