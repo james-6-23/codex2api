@@ -115,6 +115,16 @@
     "cached_input_long": 0.2,
     "output_long": 15
   },
+  "gpt-6.1-terra": {
+    "input": 1,
+    "cached_input": 0.05,
+    "cache_write_5m": 1.25,
+    "cache_write_1h": 1.25,
+    "output": 5,
+    "input_long": 2,
+    "cached_input_long": 0.1,
+    "output_long": 7.5
+  },
   "gpt-6-sol": {
     "input": 2,
     "cached_input": 0.2,

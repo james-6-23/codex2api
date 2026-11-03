@@ -19,23 +19,28 @@ type Question struct {
 	Enabled        bool   `json:"enabled"`
 }
 type Settings struct {
-	Revision           int64      `json:"revision"`
-	Enabled            bool       `json:"enabled"`
-	GPTModel           string     `json:"gpt_model"`
-	ClaudeModel        string     `json:"claude_model"`
-	ReasoningEffort    string     `json:"reasoning_effort"`
-	JudgeMode          string     `json:"judge_mode"`
-	IntervalSeconds    int        `json:"interval_seconds"`
-	RetrySeconds       int        `json:"retry_seconds"`
-	TimeoutSeconds     int        `json:"timeout_seconds"`
-	Concurrency        int        `json:"concurrency"`
-	Retention          int        `json:"retention"`
-	NewAccountsEnabled bool       `json:"new_accounts_enabled"`
-	Action             string     `json:"action"`
-	DegradeThreshold   int        `json:"degrade_threshold"`
-	RecoverThreshold   int        `json:"recover_threshold"`
-	TargetGroupID      int64      `json:"target_group_id"`
-	Questions          []Question `json:"questions"`
+	AdaptiveEnabled        bool       `json:"adaptive_enabled"`
+	PauseInitialSeconds    int        `json:"pause_initial_seconds"`
+	PauseMaxSeconds        int        `json:"pause_max_seconds"`
+	RecoveryInitialSeconds int        `json:"recovery_initial_seconds"`
+	RecoveryMinSeconds     int        `json:"recovery_min_seconds"`
+	Revision               int64      `json:"revision"`
+	Enabled                bool       `json:"enabled"`
+	GPTModel               string     `json:"gpt_model"`
+	ClaudeModel            string     `json:"claude_model"`
+	ReasoningEffort        string     `json:"reasoning_effort"`
+	JudgeMode              string     `json:"judge_mode"`
+	IntervalSeconds        int        `json:"interval_seconds"`
+	RetrySeconds           int        `json:"retry_seconds"`
+	TimeoutSeconds         int        `json:"timeout_seconds"`
+	Concurrency            int        `json:"concurrency"`
+	Retention              int        `json:"retention"`
+	NewAccountsEnabled     bool       `json:"new_accounts_enabled"`
+	Action                 string     `json:"action"`
+	DegradeThreshold       int        `json:"degrade_threshold"`
+	RecoverThreshold       int        `json:"recover_threshold"`
+	TargetGroupID          int64      `json:"target_group_id"`
+	Questions              []Question `json:"questions"`
 }
 
 // CandyPrompt is the built-in reasoning check. Keep the no-tools/no-network
@@ -44,9 +49,13 @@ type Settings struct {
 const CandyPrompt = "不允许调用工具和联网。在一个黑色的袋子里放有三种口味的糖果，每种糖果有两种不同的形状，分别为圆形和五角星形，不同的形状靠手感可以分辨，现已知苹果味圆形有7颗、苹果味五角星形有7颗、桃子味圆形有9颗、桃子味五角星形有6颗、西瓜味圆形有8颗、西瓜味五角星形有4颗，参赛者需要在活动前决定摸出的糖果数目，那么最少取出多少个糖果才能保证手中同时拥有不同形状的苹果味和桃子味的糖，同时手中有圆形苹果味匹配五角星桃子味糖果，或者有圆形桃子味匹配五角星苹果味糖果都满足要求，最终只回复数字结果。"
 
 func DefaultSettings() Settings {
-	return Settings{Revision: 1, GPTModel: "gpt-6-astra", ClaudeModel: "claude-sonnet-4-6", ReasoningEffort: "high", JudgeMode: "answer", IntervalSeconds: 300, RetrySeconds: 60, TimeoutSeconds: 180, Concurrency: 4, Retention: 200, NewAccountsEnabled: true, Action: "none", DegradeThreshold: 2, RecoverThreshold: 1, Questions: []Question{{ID: "candy", Name: "糖果配对", Prompt: CandyPrompt, ExpectedAnswer: "21", MatchMode: "exact", MaxDurationMS: 20000, Enabled: true}}}
+	return Settings{PauseInitialSeconds: 1800, PauseMaxSeconds: 172800, RecoveryInitialSeconds: 300, RecoveryMinSeconds: 120, Revision: 1, GPTModel: "gpt-6-astra", ClaudeModel: "claude-sonnet-4-6", ReasoningEffort: "high", JudgeMode: "answer", IntervalSeconds: 300, RetrySeconds: 60, TimeoutSeconds: 180, Concurrency: 4, Retention: 200, NewAccountsEnabled: true, Action: "none", DegradeThreshold: 2, RecoverThreshold: 1, Questions: []Question{{ID: "candy", Name: "糖果配对", Prompt: CandyPrompt, ExpectedAnswer: "21", MatchMode: "exact", MaxDurationMS: 20000, Enabled: true}}}
 }
 func ValidateSettings(s Settings) error {
+	s = AdaptiveDefaults(s)
+	if s.PauseInitialSeconds < 1 || s.PauseMaxSeconds < s.PauseInitialSeconds || s.PauseMaxSeconds > 30*86400 || s.RecoveryMinSeconds < 1 || s.RecoveryInitialSeconds < s.RecoveryMinSeconds || s.RecoveryInitialSeconds > s.PauseInitialSeconds {
+		return fmt.Errorf("invalid adaptive check intervals")
+	}
 	if strings.TrimSpace(s.GPTModel) == "" || strings.TrimSpace(s.ClaudeModel) == "" {
 		return fmt.Errorf("both channel models are required")
 	}
@@ -111,16 +120,17 @@ func ValidateSettings(s Settings) error {
 }
 
 type Observation struct {
-	Output           string            `json:"output"`
-	DurationMS       int64             `json:"duration_ms"`
-	Complete         bool              `json:"complete"`
-	Error            string            `json:"error"`
-	Interrupted      bool              `json:"interrupted"`
-	InputTokens      int64             `json:"input_tokens"`
-	OutputTokens     int64             `json:"output_tokens"`
-	ReasoningTokens  int64             `json:"reasoning_tokens"`
-	ResponseModel    string            `json:"response_model"`
-	EffectiveContext map[string]string `json:"effective_context,omitempty"`
+	CredentialRejected bool              `json:"credential_rejected,omitempty"`
+	Output             string            `json:"output"`
+	DurationMS         int64             `json:"duration_ms"`
+	Complete           bool              `json:"complete"`
+	Error              string            `json:"error"`
+	Interrupted        bool              `json:"interrupted"`
+	InputTokens        int64             `json:"input_tokens"`
+	OutputTokens       int64             `json:"output_tokens"`
+	ReasoningTokens    int64             `json:"reasoning_tokens"`
+	ResponseModel      string            `json:"response_model"`
+	EffectiveContext   map[string]string `json:"effective_context,omitempty"`
 }
 type Result struct {
 	Status        string `json:"status"`
@@ -192,17 +202,23 @@ func Grade(q Question, mode string, o Observation) Result {
 }
 
 type State struct {
-	OriginalGroupChannels map[int64]string `json:"original_group_channels,omitempty"`
-	NextQuestionID        string           `json:"next_question_id,omitempty"`
-	LastQuestionID        string           `json:"last_question_id,omitempty"`
-	DegradeStreak         int              `json:"failed_streak"`
-	RecoverStreak         int              `json:"passed_streak"`
-	OwnedAction           string           `json:"action"`
-	OriginalGroupIDs      []int64          `json:"original_group_ids,omitempty"`
+	PauseBackoffSeconds         int              `json:"pause_backoff_seconds,omitempty"`
+	ErrorRetrySeconds           int              `json:"error_retry_seconds,omitempty"`
+	NextIntervalSeconds         int              `json:"next_interval_seconds,omitempty"`
+	ProbePhase                  string           `json:"probe_phase,omitempty"`
+	BlockedCredentialGeneration *int64           `json:"blocked_credential_generation,omitempty"`
+	OriginalGroupChannels       map[int64]string `json:"original_group_channels,omitempty"`
+	NextQuestionID              string           `json:"next_question_id,omitempty"`
+	LastQuestionID              string           `json:"last_question_id,omitempty"`
+	DegradeStreak               int              `json:"failed_streak"`
+	RecoverStreak               int              `json:"passed_streak"`
+	OwnedAction                 string           `json:"action"`
+	OriginalGroupIDs            []int64          `json:"original_group_ids,omitempty"`
 }
 
-// Transition treats errors and interruptions as neutral observations. Ownership
-// blocks stacking, and only the owning policy may release its pause.
+// Transition never grades errors as degradation. Adaptive pause recovery
+// requires uninterrupted passes; legacy counters keep their neutral semantics.
+// Ownership blocks stacking, and only the owning policy may release its pause.
 func Transition(c Settings, s State, status string) (State, string) {
 	switch status {
 	case "normal":
@@ -212,6 +228,9 @@ func Transition(c Settings, s State, status string) (State, string) {
 		s.DegradeStreak++
 		s.RecoverStreak = 0
 	default:
+		if c.AdaptiveEnabled && s.OwnedAction == "pause" {
+			s.RecoverStreak = 0
+		}
 		return s, ""
 	}
 	if s.OwnedAction != "" {

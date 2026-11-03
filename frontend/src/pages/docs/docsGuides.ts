@@ -235,8 +235,8 @@ export function buildGuides(baseUrl: string, locale: DocsLocale): GuideSpec[] {
           "Store the original input, all response.output items and tool results, then send them together on the next turn. Saving only output_text can lose reasoning and tool context. The example executes only the allowed tool and preserves call pairing.",
         ),
         c(
-          "previous_response_id 依赖当前密钥作用域内可恢复的历史。缓存受 TTL、容量及写入策略约束，Memory 模式重启会丢失；store:false 的部分会话不会写入回放缓存。收到 409 response_context_unavailable 时重发完整历史并开始新链，不能只反复提交同一个失效 ID。",
-          "previous_response_id requires recoverable history in the same key scope. TTL, capacity and write policy apply, and Memory mode loses history on restart; some store:false sessions do not populate replay history. On 409 response_context_unavailable, send full history and start a new chain instead of retrying the same unavailable ID.",
+          "previous_response_id 依赖当前密钥作用域内可恢复的历史。缓存受 TTL、容量及写入策略约束，Memory 缓存配合 SQLite 文件主库时默认启用磁盘持久层，关闭后重启会丢失；store:false 的部分会话不会写入回放缓存。收到 409 previous_response_not_found 时重发完整历史并开始新链，不能只反复提交同一个失效 ID。",
+          "previous_response_id requires recoverable history in the same key scope. TTL, capacity and write policy apply, and Memory caching with a file-backed SQLite database enables a local on-disk store by default (without it, history is lost on restart); some store:false sessions do not populate replay history. On 409 previous_response_not_found, send full history and start a new chain instead of retrying the same unavailable ID.",
         ),
       ],
       examples: [
@@ -405,7 +405,7 @@ export function buildGuides(baseUrl: string, locale: DocsLocale): GuideSpec[] {
             ),
           ],
           [
-            "409 · response_context_unavailable",
+            "409 · previous_response_not_found",
             c(
               "上一轮上下文缺失；携带完整必需历史重新发起，开始新响应链。",
               "Previous context is unavailable. Resend the full required history and start a new chain.",

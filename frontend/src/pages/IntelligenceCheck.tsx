@@ -155,6 +155,10 @@ export default function IntelligenceCheck() {
   };
   const numeric = (
     key:
+      | "pause_initial_seconds"
+      | "pause_max_seconds"
+      | "recovery_initial_seconds"
+      | "recovery_min_seconds"
       | "interval_seconds"
       | "retry_seconds"
       | "timeout_seconds"
@@ -293,6 +297,18 @@ export default function IntelligenceCheck() {
               {numeric("timeout_seconds", "请求超时（秒）", 1, 3600)}
               {numeric("concurrency", "全局检测并发", 1, 100)}
               {numeric("retention", "每账号保留记录", 1, 10000)}
+              <div className="sm:col-span-2">
+                {field("自适应检测", <Switch aria-label="自适应检测" checked={settings.adaptive_enabled ?? false} onCheckedChange={v => change("adaptive_enabled", v)} />,
+                  "暂停后未通过则间隔翻倍；检测正常后加速确认。恢复调度后，正常检测逐步减轻历史退避。关闭时沿用固定间隔。")}
+              </div>
+              {settings.adaptive_enabled && <>
+                {numeric("pause_initial_seconds", "暂停初始间隔（秒）", 1, 2592000)}
+                {numeric("pause_max_seconds", "暂停最大间隔（秒）", 1, 2592000)}
+                {numeric("recovery_initial_seconds", "恢复确认初始间隔（秒）", 1, 2592000)}
+                {numeric("recovery_min_seconds", "恢复确认最短间隔（秒）", 1, 2592000)}
+                <p className="text-xs text-muted-foreground sm:col-span-2">恢复确认间隔逐次减半（最短间隔至少一分钟时按整分钟向下取整），直到达到下方连续通过次数。实际等待有最多 10% 的提前抖动。最大间隔越长，发现恢复可能越晚。</p>
+              </>}
+
             </CardContent>
           </Card>
           <Card>
@@ -404,7 +420,7 @@ export default function IntelligenceCheck() {
                 </div>
               )}
               <p className="text-xs leading-relaxed text-muted-foreground">
-                上游错误不打断连续次数。人工修改调度或分组优先，并重置连续次数。关闭暂停策略不会自动释放已有暂停；关闭切组策略后，已切组账号仍可按恢复阈值还原原分组。检测暂停期间继续检测。
+                上游错误不计为降智；开启自适应时会中断恢复确认。人工修改调度或分组优先，并重置连续次数。关闭暂停策略不会自动释放已有暂停；关闭切组策略后，已切组账号仍可按恢复阈值还原原分组。检测暂停期间继续检测。
               </p>
             </CardContent>
           </Card>

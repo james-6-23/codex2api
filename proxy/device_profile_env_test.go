@@ -49,3 +49,22 @@ func TestDeviceProfileConfigFromEnv(t *testing.T) {
 		t.Fatalf("BetaFeatures = %q", cfg.BetaFeatures)
 	}
 }
+
+func TestDeviceProfileConfigFromEnvDefaultStabilize(t *testing.T) {
+	// 未显式配置时默认为 true
+	cfgDefault := DeviceProfileConfigFromEnv(func(string) string { return "" })
+	if !cfgDefault.StabilizeDeviceProfile {
+		t.Fatal("expected default StabilizeDeviceProfile to be true when env is unset")
+	}
+
+	// 显式传 false 时为 false
+	cfgDisabled := DeviceProfileConfigFromEnv(func(key string) string {
+		if key == "STABILIZE_DEVICE_PROFILE" {
+			return "false"
+		}
+		return ""
+	})
+	if cfgDisabled.StabilizeDeviceProfile {
+		t.Fatal("expected StabilizeDeviceProfile to be false when set to false")
+	}
+}

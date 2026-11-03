@@ -134,7 +134,8 @@ func executeAntigravityResponses(ctx context.Context, account *auth.Account, mod
 	// One snapshot per request keeps the upstream includeThoughts flag and the
 	// downstream reasoning output consistent if the switch flips mid-stream.
 	exposeThoughts := antigravityExposeThoughtsForRequest(body)
-	gemini, err := responsesToGeminiInternalWithThoughts(body, project, model, account, exposeThoughts)
+	body, toolAliases := prepareAntigravityResponsesTools(body)
+	gemini, err := responsesToGeminiInternalPrepared(body, project, model, account, exposeThoughts)
 	if err != nil {
 		return nil, err
 	}
@@ -178,12 +179,18 @@ func executeAntigravityResponses(ctx context.Context, account *auth.Account, mod
 			sse := newAntigravitySSEResponseBodyWithThoughts(resp.Body, customTools, exposeThoughts, publicModel)
 			sse.jsonMode = jsonMode
 			resp.Body = sse
+			if len(toolAliases) > 0 {
+				resp.Body = newGrokNamespaceReverser(resp.Body, true, toolAliases)
+			}
 			resp.Header.Set("Content-Type", "text/event-stream")
 			return resp, nil
 		}
 		converted, convertErr := newAntigravityJSONResponseBodyWithThoughts(resp.Body, publicModel, customTools, exposeThoughts)
 		if convertErr != nil {
 			return nil, convertErr
+		}
+		if len(toolAliases) > 0 {
+			converted = newGrokNamespaceReverser(converted, false, toolAliases)
 		}
 		resp.Body = converted
 		return resp, nil
@@ -548,6 +555,11 @@ func responsesToGeminiInternalForAccount(raw []byte, project, model string, acco
 }
 
 func responsesToGeminiInternalWithThoughts(raw []byte, project, model string, account *auth.Account, exposeThoughts bool) (map[string]any, error) {
+	raw, _ = prepareAntigravityResponsesTools(raw)
+	return responsesToGeminiInternalPrepared(raw, project, model, account, exposeThoughts)
+}
+
+func responsesToGeminiInternalPrepared(raw []byte, project, model string, account *auth.Account, exposeThoughts bool) (map[string]any, error) {
 	var in map[string]any
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return nil, fmt.Errorf("decode Responses request: %w", err)
@@ -708,8 +720,14 @@ func responsesToGeminiInternalWithThoughts(raw []byte, project, model string, ac
 	if tools, ok := in["tools"].([]any); ok {
 		if declarations := antigravityGeminiFunctionDeclarations(tools); len(declarations) > 0 && antigravityGeminiFunctionToolsEnabled() && antigravityGeminiSupportsFunctionTools(wireModel) {
 			request["tools"] = []any{map[string]any{"functionDeclarations": declarations}}
+			callingConfig := map[string]any{"mode": antigravityGeminiToolMode(in["tool_choice"])}
+			if choice, ok := in["tool_choice"].(map[string]any); ok && lowerStringField(choice, "type") == "function" {
+				if name := firstAntigravityString(choice, "name"); name != "" {
+					callingConfig["allowedFunctionNames"] = []any{name}
+				}
+			}
 			request["toolConfig"] = map[string]any{
-				"functionCallingConfig":            map[string]any{"mode": antigravityGeminiToolMode(in["tool_choice"])},
+				"functionCallingConfig":            callingConfig,
 				"includeServerSideToolInvocations": true,
 			}
 		} else if len(declarations) > 0 && antigravityGeminiToolChoiceRequiresFunctions(in["tool_choice"]) {
@@ -2368,7 +2386,7 @@ func (b *antigravitySSEBody) addFunctionCalls(calls []antigravityFunctionCall) {
 		matched := false
 		for index := range b.functions {
 			existing := &b.functions[index]
-			if existing.CallID == functionCall.CallID || (existing.Name == functionCall.Name && existing.Arguments == functionCall.Arguments) {
+			if functionCall.CallID != "" && existing.CallID == functionCall.CallID {
 				if functionCall.Name != "" {
 					existing.Name = functionCall.Name
 				}

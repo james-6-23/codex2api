@@ -959,6 +959,25 @@
     "heroChannelTitle": "{{channel}}：可用账号 {{available}}/{{total}} · 今日请求 {{requests}}"
   },
   "accounts": {
+    "activationTitle": "定时激活",
+    "activationEnabled": "启用定时激活",
+    "activationTimezone": "时区：Asia/Shanghai（北京时间）",
+    "activationSaved": "定时激活计划已保存",
+    "activationUnsaved": "有未保存的修改",
+    "activationSaveHint": "保存后按计划自动执行",
+    "activationWeekdays": "工作日 · 周一至周五",
+    "activationWeekends": "周末 · 周六、周日",
+    "activationAdd": "添加",
+    "activationRemove": "删除 {{time}}",
+    "activationNoTimes": "尚未添加时间点",
+    "activationExecutionHint": "每个时间点使用当前账号、所选模型和测试内容发送一次请求，会消耗该账号额度。失败不重试、不换号；关闭页面后仍由服务器执行。停用账号或关闭开关后停止后续计划，错过的时间点不补发。",
+    "activationRecords": "最近执行记录",
+    "activationNoRecords": "暂无执行记录；保存计划不会立即发送请求。",
+    "activationReset": "下次 5 小时重置",
+    "activationStatus_success": "成功",
+    "activationStatus_failed": "失败",
+    "activationStatus_skipped": "已跳过",
+    "activationStatus_unknown": "结果未确认",
     "refreshAllUsage": "一键刷新用量",
     "refreshAllUsageHint": "查询运行池中所有支持 WHAM 的 Codex 账号，更新 5 小时和周用量进度条。",
     "batchUsageRefreshing": "正在刷新用量",
@@ -2653,6 +2672,8 @@
     "reason7dUrgency": "7d 快重置"
   },
   "usage": {
+    "internalScheduledActivation": "定时激活",
+    "internalScheduledActivationTooltip": "服务器按当前账号保存的计划发送的测试连接请求",
     "usageAnalysis": "用量分析",
     "imageInputTokens": "图片输入 token",
     "imageOutputTokens": "图片输出 token",
@@ -4416,6 +4437,8 @@
     }
   },
   "settings": {
+    "schedulerModeReset5hFirst": "5 小时临近重置优先",
+    "schedulerModeReset5hFirstDesc": "同一调度优先级和健康档位内，优先使用 5 小时窗口最早重置且仍有额度的 Codex 账号；额度耗尽、限流、无权限或并发已满时顺延。以已观测的重置时间为准，过期、未知或不适用的窗口沿用原调度兜底；不自动激活账号、不推算下一个周期。已有会话绑定继续保留；新会话首次选号优先于亲和散列。周限额和现有安全限制继续生效。",
     "codexClientVersions": {
       "platform": "客户端 / 平台",
       "pair": "应用 / 内置 CLI",
@@ -4534,7 +4557,7 @@
       "writePolicyAlways": "始终写入",
       "writePolicyOnDemand": "按需写入",
       "l1Note": "默认 8 MiB 是 L1 单条准入限制。Redis 模式下，更大的上下文仍可在重建上限内续链，但不会提升到本地 L1。",
-      "memoryNote": "Memory 模式下，超限或已淘汰的上下文无法从后端恢复；依赖该上下文的续链可能返回 HTTP 409 response_context_unavailable。",
+      "memoryNote": "Memory 缓存配合 SQLite 文件主库时默认启用本地磁盘持久层，符合条件的上下文可从磁盘恢复；关闭持久层后，依赖缺失上下文的续链可能返回 HTTP 409 previous_response_not_found。",
       "validation": {
         "total_integer": "本地总预算必须是整数 MiB。",
         "total_range": "本地总预算必须在 8–4096 MiB 之间。",

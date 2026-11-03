@@ -748,7 +748,7 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	if proxy.IsResinEnabled() && tempID != "" {
 		client = &http.Client{Timeout: 30 * time.Second}
 	} else {
-		client = auth.BuildHTTPClient(proxyURL)
+		client = auth.BuildUTLSHTTPClient(proxyURL)
 	}
 	resp, err := client.Do(req)
 	if err != nil {
