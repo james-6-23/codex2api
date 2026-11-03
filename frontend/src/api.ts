@@ -338,7 +338,7 @@ async function requestAPIKeyUsage<T>(path: string, apiKey: string, options: Requ
 
   if (!res.ok) {
     const body = await res.text()
-    throw new Error(extractAdminErrorMessage(body, res.status))
+    throw new AdminAPIError(res.status, extractAdminErrorMessage(body, res.status))
   }
 
   return (await res.json()) as T
@@ -583,6 +583,8 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  getPublicAPIKeyConcurrency: (apiKey: string, options: RequestInit = {}) =>
+    requestAPIKeyUsage<{ current: number }>('/concurrency', apiKey, options),
   getPublicAPIKeyUsage: (apiKey: string, range = '30d', params: { page?: number; pageSize?: number } & PublicAPIKeyUsageLogFilter = {}) => {
     const search = new URLSearchParams()
     search.set('range', range)

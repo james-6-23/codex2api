@@ -2,7 +2,6 @@ package admin
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"net/http"
 	"strconv"
@@ -17,6 +16,7 @@ import (
 const (
 	publicAPIKeyUsageDefaultLogPageSize = 25
 	publicAPIKeyUsageMaxLogPageSize     = 100
+	publicAPIKeyUsageTimeout            = 8 * time.Second
 )
 
 type publicAPIKeyUsageResponse struct {
@@ -47,22 +47,10 @@ type publicAPIKeyUsageRange struct {
 }
 
 func (h *Handler) GetPublicAPIKeyUsageSummary(c *gin.Context) {
-	if h == nil || h.db == nil {
-		writeError(c, http.StatusServiceUnavailable, "服务未就绪")
-		return
-	}
-	enabled, err := h.PublicAPIKeyUsagePageEnabled(c.Request.Context())
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if !enabled {
-		writeError(c, http.StatusNotFound, "API Key 自助用量页未启用")
-		return
-	}
-	key := extractPublicAPIKey(c)
-	if key == "" {
-		writeError(c, http.StatusUnauthorized, "缺少 Authorization Bearer API Key")
+	ctx, cancel := context.WithTimeout(c.Request.Context(), publicAPIKeyUsageTimeout)
+	defer cancel()
+	row := h.publicAPIKeyUsageRow(c, ctx)
+	if row == nil {
 		return
 	}
 
@@ -79,27 +67,6 @@ func (h *Handler) GetPublicAPIKeyUsageSummary(c *gin.Context) {
 	logFilter, err := parsePublicAPIKeyUsageLogFilter(c.Query("model"), c.Query("endpoint"), c.Query("status"), c.Query("stream"), c.Query("channel"))
 	if err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
-	defer cancel()
-
-	row, err := h.db.GetAPIKeyByValue(ctx, key)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			security.SecurityAuditLog("KEY_USAGE_AUTH_FAILED", "ip="+security.SanitizeLog(c.ClientIP())+" key="+security.MaskAPIKey(key))
-			writeError(c, http.StatusUnauthorized, "API Key 无效或不存在")
-			return
-		}
-		writeInternalError(c, err)
-		return
-	}
-	// 停用是管理员吊销凭据，与代理链路一致直接拒绝；过期/额度用尽仍可读，
-	// 让持有者看到状态与历史用量，明白调用为何失败。
-	if !row.Enabled {
-		security.SecurityAuditLog("KEY_USAGE_AUTH_FAILED_DISABLED_KEY", "ip="+security.SanitizeLog(c.ClientIP())+" key="+security.MaskAPIKey(key))
-		writeError(c, http.StatusUnauthorized, "API Key 已停用")
 		return
 	}
 

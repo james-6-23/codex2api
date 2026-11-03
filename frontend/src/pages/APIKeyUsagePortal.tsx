@@ -1,6 +1,6 @@
 import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
 import { mediaBillingUnit } from '../lib/imageBilling'
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
@@ -12,7 +12,6 @@ import {
   CalendarClock,
   Clock3,
   CircleDollarSign,
-  DatabaseZap,
   Eye,
   EyeOff,
   Gauge,
@@ -37,11 +36,15 @@ import {
 import { api } from '../api'
 import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
 import Pagination from '../components/Pagination'
-import CompactionBadges from '../components/CompactionBadges'
+import { PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
+import { TimingCell, TokensPerSecCell, UsageCacheBadges } from '../components/UsageLogMetrics'
+import ReasoningEffortBadge from '../components/ReasoningEffortBadge'
 import ChannelLogo from '../components/ChannelLogo'
 import ModelLogo from '../components/ModelLogo'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import APIKeyModelRequestUsageCard from '../components/APIKeyModelRequestUsage'
+import PublicAPIKeyConcurrencyBadge from '../components/PublicAPIKeyConcurrencyBadge'
+import APIKeyChannelBadge from '../components/APIKeyChannelBadge'
 import { usePersistedPageSize } from '../hooks/usePersistedPageSize'
 import type {
   APIKeyLimits,
@@ -95,6 +98,8 @@ export default function APIKeyUsagePortal() {
     return stored.key ? stored.remember : true
   })
   const [activeAPIKey, setActiveAPIKey] = useState(() => readStoredAPIKey().key)
+  // 记录最新的有效 key，用于丢弃切换/退出前发出的过期响应
+  const activeAPIKeyRef = useRef(activeAPIKey)
   const [showKey, setShowKey] = useState(false)
   const [range, setRange] = useState<UsageRange>('30d')
   const [logPage, setLogPage] = useState(1)
@@ -108,22 +113,25 @@ export default function APIKeyUsagePortal() {
 
   // 已登录后的刷新/切换时间范围（沿用当前会话的 key）
   const reload = async (nextRange = range, nextLogPage = logPage, nextLogPageSize = logPageSize, nextFilter = logFilter) => {
-    if (!activeAPIKey) return
+    const requestAPIKey = activeAPIKey
+    if (!requestAPIKey) return
     setLoading(true)
     setError('')
     try {
-      const result = await api.getPublicAPIKeyUsage(activeAPIKey, nextRange, {
+      const result = await api.getPublicAPIKeyUsage(requestAPIKey, nextRange, {
         page: nextLogPage,
         pageSize: nextLogPageSize,
         ...nextFilter,
       })
+      if (activeAPIKeyRef.current !== requestAPIKey) return
       setData(result)
       const responsePage = result.usage.recent_logs_page || nextLogPage
       if (responsePage !== nextLogPage) setLogPage(responsePage)
     } catch (err) {
+      if (activeAPIKeyRef.current !== requestAPIKey) return
       setError(getErrorMessage(err))
     } finally {
-      setLoading(false)
+      if (activeAPIKeyRef.current === requestAPIKey) setLoading(false)
     }
   }
 
@@ -146,6 +154,7 @@ export default function APIKeyUsagePortal() {
       } catch (err) {
         if (!cancelled) {
           setError(getErrorMessage(err))
+          activeAPIKeyRef.current = ''
           setActiveAPIKey('')
           clearStoredAPIKey()
           setData(null)
@@ -180,6 +189,7 @@ export default function APIKeyUsagePortal() {
       })
       setData(result)
       setLogPage(1)
+      activeAPIKeyRef.current = trimmed
       setActiveAPIKey(trimmed)
       writeStoredAPIKey(trimmed, remember)
     } catch (err) {
@@ -229,9 +239,11 @@ export default function APIKeyUsagePortal() {
 
   const handleLogout = () => {
     clearStoredAPIKey()
+    activeAPIKeyRef.current = ''
     setActiveAPIKey('')
     setAPIKeyInput('')
     setData(null)
+    setLoading(false)
     setError('')
     setLogPage(1)
     setLogFilter({})
@@ -391,7 +403,7 @@ export default function APIKeyUsagePortal() {
 
       <main className="relative mx-auto max-w-[1600px] space-y-5 px-4 py-5 sm:px-6">
         {data ? (
-          <QuotaHero data={data} quotaPercent={quotaPercent} controls={controls} />
+          <QuotaHero data={data} apiKey={activeAPIKey} quotaPercent={quotaPercent} controls={controls} />
         ) : (
           <Card className="py-0">
             <CardContent className="flex flex-wrap items-center justify-between gap-3 p-3.5">
@@ -718,7 +730,7 @@ function quotaTone(percent: number): QuotaTone {
   return 'emerald'
 }
 
-function QuotaHero({ data, quotaPercent, controls }: { data: PublicAPIKeyUsageResponse; quotaPercent: number; controls: ReactNode }) {
+function QuotaHero({ data, apiKey, quotaPercent, controls }: { data: PublicAPIKeyUsageResponse; apiKey: string; quotaPercent: number; controls: ReactNode }) {
   const { t } = useTranslation()
   const { key } = data
   const hasQuota = key.quota_limit > 0
@@ -760,9 +772,11 @@ function QuotaHero({ data, quotaPercent, controls }: { data: PublicAPIKeyUsageRe
               <KeyRound className="size-4" />
             </div>
             <div className="min-w-0">
-              <div className="flex min-w-0 items-center gap-2">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
                 <span className="truncate text-[15px] font-semibold text-foreground">{key.name || t('keyUsage.keyCard')}</span>
                 <StatusPill status={key.status} label={t(`apiKeys.status.${key.status}`)} />
+                <PublicAPIKeyConcurrencyBadge key={apiKey} apiKey={apiKey} limit={key.limits.max_concurrency} />
+                <APIKeyChannelBadge channel={key.limits.upstream_channel} />
               </div>
               <div className="truncate font-mono text-xs text-muted-foreground">{key.key}</div>
             </div>
@@ -1460,6 +1474,7 @@ function RecentLogsTable({
                 <div className="flex flex-wrap items-center gap-1.5 min-w-0">
                   <LogStatusBadge code={log.status_code} onFilter={filterStatus} compact />
                   <LogModelBadge log={log} active={filter.model === log.model} onToggle={toggleModel} compact />
+                  <ReasoningEffortBadge effort={log.reasoning_effort} />
                   {log.effective_model && log.effective_model !== log.model ? (
                     <Badge variant="outline" className="border-transparent bg-blue-500/10 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">→ {log.effective_model}</Badge>
                   ) : null}
@@ -1468,25 +1483,31 @@ function RecentLogsTable({
               </div>
               <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                 <span className="font-mono text-muted-foreground">{log.endpoint || '-'}</span>
-                <Badge
-                  variant="outline"
-                  className="text-[11px]"
-                  style={{ background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)', color: log.stream ? '#6366f1' : '#6b7280', borderColor: 'transparent' }}
-                >
-                  {log.stream ? 'stream' : 'sync'}
-                </Badge>
+                <PublicUsageRequestType log={log} />
               </div>
-              <div className="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-border/50 text-xs">
-                {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                  <div className="font-mono text-[12px] tabular-nums">
-                    <span className="text-blue-500">↓{formatNumber(log.input_tokens)}</span>
-                    <span className="mx-1 text-border">|</span>
-                    <span className="text-emerald-500">↑{formatNumber(log.output_tokens)}</span>
-                  </div>
-                ) : <span className="font-mono text-[12px] text-muted-foreground">-</span>}
-                <span className="font-mono text-[12px] text-muted-foreground">
-                  {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
-                </span>
+              <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-2 gap-y-1 text-xs">
+                <dt className="text-muted-foreground">{t('usage.tableClientIP')}</dt>
+                <dd className="break-all font-mono text-muted-foreground">{log.client_ip || '-'}</dd>
+                <dt className="text-muted-foreground">{t('usage.tableUserAgent')}</dt>
+                <dd><PublicUsageUserAgent value={log.client_user_agent} /></dd>
+              </dl>
+              <div className="mt-3 grid grid-cols-1 gap-2 text-xs sm:grid-cols-2">
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableToken')}</div>
+                  <div className="mt-1"><PublicUsageTokens log={log} /></div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground">{t('usage.tableCached')}</div>
+                  <div className="mt-1.5"><UsageCacheBadges log={log} align="start" /></div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground" title={t('usage.tableTimingHint')}>{t('usage.tableTiming')}</div>
+                  <div className="mt-1.5"><TimingCell log={log} /></div>
+                </div>
+                <div className="rounded-lg border border-border/70 bg-card/60 px-2.5 py-2">
+                  <div className="text-[11px] font-semibold text-muted-foreground" title={t('usage.tableTokensPerSecHint')}>{t('usage.tableTokensPerSec')}</div>
+                  <div className="mt-1"><TokensPerSecCell log={log} /></div>
+                </div>
               </div>
             </Card>
           )) : (
@@ -1499,17 +1520,18 @@ function RecentLogsTable({
           <Table>
             <TableHeader>
               <TableRow>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableStatus')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableModel')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('keyUsage.endpoint')}</TableHead>
-                <TableHead className="text-[12px] font-semibold">{t('usage.tableType')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableToken')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableCost')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">
-                  <span title={t('usage.tableFirstTokenHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableFirstToken')}</span>
-                </TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableDuration')}</TableHead>
-                <TableHead className="text-right text-[12px] font-semibold">{t('usage.tableTime')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableStatus')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableModel')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableClientIP')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableUserAgent')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('keyUsage.endpoint')}</TableHead>
+                <TableHead className="text-[13px] font-semibold">{t('usage.tableType')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableToken')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableCached')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold"><span title={t('usage.tableTimingHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableTiming')}</span></TableHead>
+                <TableHead className="text-right text-[13px] font-semibold"><span title={t('usage.tableTokensPerSecHint')} className="cursor-help underline decoration-dotted underline-offset-2">{t('usage.tableTokensPerSec')}</span></TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableCost')}</TableHead>
+                <TableHead className="text-right text-[13px] font-semibold">{t('usage.tableTime')}</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -1524,6 +1546,7 @@ function RecentLogsTable({
                         <Badge variant="outline" className="border-transparent bg-cyan-500/12 text-[11px] font-semibold uppercase text-cyan-600 dark:bg-cyan-500/20 dark:text-cyan-400">ws</Badge>
                       ) : null}
                       <LogModelBadge log={log} active={filter.model === log.model} onToggle={toggleModel} />
+                      <ReasoningEffortBadge effort={log.reasoning_effort} />
                       {log.effective_model && log.effective_model !== log.model ? (
                         <Badge variant="outline" className="border-transparent bg-blue-500/10 text-[11px] font-medium text-blue-600 dark:bg-blue-500/20 dark:text-blue-400">→ {log.effective_model}</Badge>
                       ) : null}
@@ -1533,53 +1556,31 @@ function RecentLogsTable({
                     </div>
                   </TableCell>
                   <TableCell>
+                    <span className="whitespace-nowrap font-mono text-[12px] text-muted-foreground">{log.client_ip || '-'}</span>
+                  </TableCell>
+                  <TableCell>
+                    <PublicUsageUserAgent value={log.client_user_agent} />
+                  </TableCell>
+                  <TableCell>
                     <span className="font-mono text-[13px] text-muted-foreground">{log.endpoint || '-'}</span>
                   </TableCell>
                   <TableCell>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <Badge
-                        variant="outline"
-                        className="text-[13px]"
-                        style={{ background: log.stream ? 'rgba(99, 102, 241, 0.12)' : 'rgba(107, 114, 128, 0.12)', color: log.stream ? '#6366f1' : '#6b7280', borderColor: 'transparent' }}
-                      >
-                        {log.stream ? 'stream' : 'sync'}
-                      </Badge>
-                      <CompactionBadges
-                        compact={log.compact}
-                        hasCompactionHistory={log.has_compaction_history}
-                      />
-                    </div>
+                    <PublicUsageRequestType log={log} />
                   </TableCell>
                   <TableCell className="text-right">
-                    {log.status_code < 400 && (log.input_tokens > 0 || log.output_tokens > 0) ? (
-                      <div className="whitespace-nowrap font-mono text-[13px] tabular-nums leading-relaxed">
-                        <span className="text-blue-500">↓{formatNumber(log.input_tokens)}</span>
-                        <span className="mx-1 text-border">|</span>
-                        <span className="text-emerald-500">↑{formatNumber(log.output_tokens)}</span>
-                        {log.cached_tokens > 0 ? (
-                          <span className="ml-1 inline-flex items-center gap-0.5 text-indigo-500" title={t('usage.cacheReadCost')}><DatabaseZap className="size-3" />{formatNumber(log.cached_tokens)}</span>
-                        ) : null}
-                      </div>
-                    ) : (
-                      <span className="font-mono text-[13px] text-muted-foreground">-</span>
-                    )}
+                    <PublicUsageTokens log={log} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <UsageCacheBadges log={log} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <TimingCell log={log} />
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <TokensPerSecCell log={log} />
                   </TableCell>
                   <TableCell className="text-right">
                     <LogCostCell log={log} />
-                  </TableCell>
-                  <TableCell className="text-right">
-                    {log.first_token_ms > 0 ? (
-                      <span className={`font-mono text-[13px] tabular-nums ${log.first_token_ms > 5000 ? 'text-red-500' : log.first_token_ms > 2000 ? 'text-amber-500' : 'text-emerald-500'}`}>
-                        {log.first_token_ms > 1000 ? `${(log.first_token_ms / 1000).toFixed(1)}s` : `${log.first_token_ms}ms`}
-                      </span>
-                    ) : (
-                      <span className="font-mono text-[13px] text-muted-foreground">-</span>
-                    )}
-                  </TableCell>
-                  <TableCell className="text-right">
-                    <span className={`font-mono text-[13px] tabular-nums ${log.duration_ms > 30000 ? 'text-red-500' : log.duration_ms > 10000 ? 'text-amber-500' : 'text-muted-foreground'}`}>
-                      {log.duration_ms > 1000 ? `${(log.duration_ms / 1000).toFixed(1)}s` : `${log.duration_ms}ms`}
-                    </span>
                   </TableCell>
                   <TableCell className="text-right">
                     <span className="whitespace-nowrap font-mono text-[13px] text-muted-foreground">{formatBeijingTime(log.created_at)}</span>
@@ -1587,7 +1588,7 @@ function RecentLogsTable({
                 </TableRow>
               )) : (
                 <TableRow>
-                  <TableCell colSpan={9} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
+                  <TableCell colSpan={12} className="py-8 text-center text-muted-foreground">{emptyText}</TableCell>
                 </TableRow>
               )}
             </TableBody>
