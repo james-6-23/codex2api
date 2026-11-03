@@ -350,3 +350,64 @@ func TestAntigravityBalancedSelectionPrefersExpiringFamily(t *testing.T) {
 	}
 	store.Release(acc)
 }
+
+// groups 不给本族桶时退回 models 级压力，也只取同族模型条目。
+func TestComputeQuotaPressureForModelModelsFallbackStaysInFamily(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	snap := &AntigravityQuotaSnapshot{
+		SchemaVersion: 2,
+		Models: []AntigravityModelQuota{
+			{ModelID: "gemini-3.8-flash-high", RemainingFraction: agFloat(1), FractionPresent: true},
+			{ModelID: "claude-sonnet-4-6", RemainingFraction: agFloat(0), FractionPresent: true},
+		},
+	}
+	if p := snap.ComputeQuotaPressureForModel("gemini-3.8-flash-high", now); p != 0 {
+		t.Fatalf("gemini fallback pressure=%v want 0 (claude entries excluded)", p)
+	}
+	if p := snap.ComputeQuotaPressureForModel("claude-sonnet-4-6", now); p != 1 {
+		t.Fatalf("claude fallback pressure=%v want 1", p)
+	}
+	if p := snap.ComputeQuotaPressure(now); p != 0.5 {
+		t.Fatalf("account-wide fallback pressure=%v want 0.5", p)
+	}
+}
+
+// 整号与模型族同时被挡时，Retry-After 取请求模型所在族的恢复时刻。
+func TestAntigravityAccountQuotaGateBlockUsesModelFamilyReset(t *testing.T) {
+	now := time.Now().Truncate(time.Second)
+	acc := &Account{UpstreamType: UpstreamAntigravity, AntigravityQuota: agFamilySnapshot(now,
+		agFamilyBucket("gemini-5h", "5h", agFloat(0), now, now.Add(4*time.Hour)),
+		agFamilyBucket("3p-weekly", "weekly", agFloat(0), now, now.Add(72*time.Hour)),
+	)}
+	cases := map[string]time.Duration{"claude-sonnet-4-6": 72 * time.Hour, "gemini-3.8-flash-high": 4 * time.Hour, "": 4 * time.Hour}
+	for model, want := range cases {
+		blocked, resetAt := antigravityAccountQuotaGateBlock(acc, model)
+		if !blocked || !resetAt.Equal(now.Add(want)) {
+			t.Errorf("model %q: blocked=%v reset=%v want %v", model, blocked, resetAt, now.Add(want))
+		}
+	}
+}
+
+// 临期加分要求 groups 元数据可信，且同族 5h 未知为零。
+func TestAntigravityExpiryUrgencyRequiresTrustAndOpen5h(t *testing.T) {
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	weekly := agFamilyBucket("gemini-weekly", "weekly", agFloat(0.8), now, now.Add(10*time.Hour))
+
+	untrusted := &Account{UpstreamType: UpstreamAntigravity, AntigravityQuota: agFamilySnapshot(now, weekly)}
+	untrusted.AntigravityQuota.SourceMetadata = nil
+	if _, urgent := untrusted.antigravityExpiryUrgency("gemini-3.8-flash-high", 24*time.Hour, now); urgent {
+		t.Fatal("untrusted groups metadata must not earn expiry priority")
+	}
+
+	zero5h := &Account{UpstreamType: UpstreamAntigravity, AntigravityQuota: agFamilySnapshot(now,
+		weekly, agFamilyBucket("gemini-5h", "5h", agFloat(0), now, now.Add(2*time.Hour)))}
+	if _, urgent := zero5h.antigravityExpiryUrgency("gemini-3.8-flash-high", 24*time.Hour, now); urgent {
+		t.Fatal("zero same-family 5h bucket must suppress expiry priority")
+	}
+	// 别族 5h 为零不影响。
+	other5h := &Account{UpstreamType: UpstreamAntigravity, AntigravityQuota: agFamilySnapshot(now,
+		weekly, agFamilyBucket("3p-5h", "5h", agFloat(0), now, now.Add(2*time.Hour)))}
+	if _, urgent := other5h.antigravityExpiryUrgency("gemini-3.8-flash-high", 24*time.Hour, now); !urgent {
+		t.Fatal("zero 5h bucket of another family must not suppress expiry priority")
+	}
+}

@@ -1104,6 +1104,7 @@ function AntigravityQuotaSettingsCard() {
               <p className="mt-0.5 text-xs text-muted-foreground">{t('antigravityQuota.refreshEnabledHint')}</p>
             </div>
             <Switch
+              aria-label={t('antigravityQuota.refreshEnabled')}
               checked={settings?.quota_refresh_enabled ?? false}
               disabled={settings === null || saving}
               onCheckedChange={(checked) => void save({ quota_refresh_enabled: checked })}
@@ -1115,6 +1116,7 @@ function AntigravityQuotaSettingsCard() {
               <p className="mt-0.5 text-xs text-muted-foreground">{t('antigravityQuota.gateEnabledHint')}</p>
             </div>
             <Switch
+              aria-label={t('antigravityQuota.gateEnabled')}
               checked={settings?.quota_gate_enabled ?? false}
               disabled={settings === null || saving}
               onCheckedChange={(checked) => void save({ quota_gate_enabled: checked })}
@@ -1126,6 +1128,7 @@ function AntigravityQuotaSettingsCard() {
               <p className="mt-0.5 text-xs text-muted-foreground">{t('antigravityQuota.expiryPriorityHint')}</p>
             </div>
             <Switch
+              aria-label={t('antigravityQuota.expiryPriority')}
               checked={settings?.expiry_priority_enabled ?? false}
               disabled={settings === null || saving}
               onCheckedChange={(checked) => void save({ expiry_priority_enabled: checked })}
@@ -1137,6 +1140,7 @@ function AntigravityQuotaSettingsCard() {
           description={t('antigravityQuota.expiryHorizonHint')}
         >
           <DraftNumberInput
+            aria-label={t('antigravityQuota.expiryHorizon')}
             value={expiryHorizonHours}
             min={1}
             max={168}
@@ -1154,6 +1158,7 @@ function AntigravityQuotaSettingsCard() {
           description={t('antigravityQuota.refreshIntervalHint')}
         >
           <DraftNumberInput
+            aria-label={t('antigravityQuota.refreshInterval')}
             value={intervalMinutes}
             min={3}
             max={60}

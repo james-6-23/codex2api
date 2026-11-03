@@ -99,8 +99,10 @@ func (snap *AntigravityQuotaSnapshot) ComputeQuotaPressureForModel(model string,
 		return neutralQuotaPressure
 	}
 	var scope antigravityQuotaBucketScope
+	family := antigravityQuotaFamilyUnknown
 	if strings.TrimSpace(model) != "" {
 		scope, _ = antigravityQuotaScopeForModel(snap, model, true)
+		family = antigravityModelQuotaFamily(model)
 	}
 	var total, weight float64
 	for _, window := range quotaPressureWindows {
@@ -121,9 +123,13 @@ func (snap *AntigravityQuotaSnapshot) ComputeQuotaPressureForModel(model string,
 
 	// groups 完全不可用（无 summary、窗口全部未识别、quota 关闭期间）：
 	// 回退 models 级压力，只统计 presence 有效的条目，防止加权避让静默退化。
+	// 模型可归族时只取同族条目：其余族的余量与本次请求会扣的配额无关。
 	var modelSum float64
 	var modelCount int
 	for _, m := range snap.Models {
+		if family != antigravityQuotaFamilyUnknown && antigravityModelQuotaFamily(m.ModelID) != family {
+			continue
+		}
 		if m.FractionPresent && m.RemainingFraction != nil {
 			v := *m.RemainingFraction
 			if v >= 0.0 && v <= 1.0 && !math.IsNaN(v) && !math.IsInf(v, 0) {
@@ -174,8 +180,8 @@ const antigravityExpiryMinHours = 0.5
 // 周配额才是到期清零会造成实际浪费的那一份。同族多个周桶取最紧（剩余最少）的那个——
 // 能用掉的量受最紧桶约束。
 //
-// 返回 urgent=true 当且仅当：模型可归族、存在新鲜（未超 TTL）且数值合法的周桶、
-// 剩余 ≥ 5%、可信重置时刻在 (now, now+horizon] 内。此时 score = R / max(T小时, 0.5)：
+// 返回 urgent=true 当且仅当：groups 元数据可信、模型可归族、同族 5h 桶未知为零、
+// 存在新鲜（未超 TTL）且数值合法的周桶、剩余 ≥ 5%、可信重置时刻在 (now, now+horizon] 内。此时 score = R / max(T小时, 0.5)：
 // 剩得越多、离重置越近越优先。未知族的桶不参与——加分不能建立在猜测上。
 func (a *Account) antigravityExpiryUrgency(model string, horizon time.Duration, now time.Time) (score float64, urgent bool) {
 	if a == nil || horizon <= 0 {
@@ -184,7 +190,8 @@ func (a *Account) antigravityExpiryUrgency(model string, horizon time.Duration, 
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	snap := &a.AntigravityQuota
-	if snap.SchemaVersion != 2 {
+	// 与硬门禁同一信任口径：groups 来源元数据不可信时桶数值不作为加分依据。
+	if snap.SchemaVersion != 2 || !antigravityQuotaGroupsMetaTrusted(snap, now) {
 		return 0, false
 	}
 	scope, known := antigravityQuotaScopeForModel(snap, model, false)
@@ -199,7 +206,18 @@ func (a *Account) antigravityExpiryUrgency(model string, horizon time.Duration, 
 				continue
 			}
 			w, ok := NormalizeAntigravityWindow(b.Window)
-			if !ok || w != "weekly" || !b.FractionPresent || b.RemainingFraction == nil {
+			if !ok {
+				continue
+			}
+			if w == "5h" {
+				// 同族 5h 已知为零：周配额再临期也接不了新请求，不加分（门禁关闭时它仍
+				// 可调度，只是不被提前，免得白耗一次上游 429 重试）。
+				if blocked, _, _ := antigravityQuotaBucketGateBlock(b, now); blocked {
+					return 0, false
+				}
+				continue
+			}
+			if w != "weekly" || !b.FractionPresent || b.RemainingFraction == nil {
 				continue
 			}
 			v := *b.RemainingFraction

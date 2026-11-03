@@ -56,9 +56,16 @@ func antigravityAccountQuotaGateBlock(acc *Account, model string) (bool, time.Ti
 	}
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
-	exhausted, _, resetAt := acc.IsAntigravityQuotaExhaustedLocked(time.Now())
-	if !exhausted && strings.TrimSpace(model) != "" {
-		exhausted, _, resetAt = acc.isAntigravityModelQuotaExhaustedLocked(model, time.Now())
+	now := time.Now()
+	// 先按请求模型所在族判：被挡时到期取该族的恢复时刻——整号口径取的是最早恢复的族，
+	// 拿它给另一族的请求当 Retry-After 会让客户端过早重试。模型族未被挡但整号被挡
+	// （未知族零桶、或模型族在快照里缺席）时才退回整号到期。
+	exhausted, resetAt := false, time.Time{}
+	if strings.TrimSpace(model) != "" {
+		exhausted, _, resetAt = acc.isAntigravityModelQuotaExhaustedLocked(model, now)
+	}
+	if !exhausted {
+		exhausted, _, resetAt = acc.IsAntigravityQuotaExhaustedLocked(now)
 	}
 	if !exhausted {
 		return false, time.Time{}
@@ -291,11 +298,17 @@ func antigravityQuotaGateApplicable(snapshot *AntigravityQuotaSnapshot, now time
 		return false
 	}
 	// 缺失即 unknown，不构成阻断依据。
-	meta, ok := snapshot.SourceMetadata["groups"]
-	if !ok || meta.AppliedSeq <= 0 || meta.ObservedAt.IsZero() || meta.ObservedAt.After(now) {
+	return antigravityQuotaGroupsMetaTrusted(snapshot, now)
+}
+
+// antigravityQuotaGroupsMetaTrusted 报告 groups 来源元数据是否可信：applied_seq > 0、
+// observed_at 非零且不在未来。门禁与临期加分共用这一口径。
+func antigravityQuotaGroupsMetaTrusted(snapshot *AntigravityQuotaSnapshot, now time.Time) bool {
+	if snapshot == nil {
 		return false
 	}
-	return true
+	meta, ok := snapshot.SourceMetadata["groups"]
+	return ok && meta.AppliedSeq > 0 && !meta.ObservedAt.IsZero() && !meta.ObservedAt.After(now)
 }
 
 // antigravityQuotaScopeGateBlock 在 scope 内的桶上求值硬门禁：任一桶处于阻断态即阻断。

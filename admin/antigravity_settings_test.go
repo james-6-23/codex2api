@@ -258,6 +258,10 @@ func TestAntigravitySettingsPUTExpiryPriority(t *testing.T) {
 	if code != http.StatusOK || !payload.ExpiryPriorityEnabled || payload.ExpiryPriorityHorizonHours != 12 {
 		t.Fatalf("horizon: code=%d payload=%+v", code, payload)
 	}
+	if raw, err := db.GetAntigravityConfigRaw(context.Background()); err != nil ||
+		!strings.Contains(raw, `"expiry_priority_enabled":true`) || !strings.Contains(raw, `"expiry_priority_horizon_hours":12`) {
+		t.Fatalf("persisted=%q err=%v", raw, err)
+	}
 	for _, body := range []string{`{"expiry_priority_horizon_hours":0}`, `{"expiry_priority_horizon_hours":169}`, `{"expiry_priority_enabled":"yes"}`} {
 		if code, _ := put(body); code != http.StatusBadRequest {
 			t.Fatalf("PUT %s status=%d, want 400", body, code)
