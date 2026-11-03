@@ -126,3 +126,16 @@ func TestIntelligenceBoundProxyFailureNeverFallsBack(t *testing.T) {
 		t.Fatalf("proxy network failure result=%+v", result)
 	}
 }
+
+func TestIntelligenceCredentialRejected(t *testing.T) {
+	for _, raw := range []string{`{"error":{"code":"token_revoked"}}`, `{"response":{"error":{"code":"account_deactivated"}}}`} {
+		if !intelligenceCredentialRejected([]byte(raw)) {
+			t.Fatal(raw)
+		}
+	}
+	for _, raw := range []string{`{"error":{"code":"server_error"}}`, `{"error":{"code":"token_expired"}}`, `{"output":"token_revoked"}`, `invalid JSON`} {
+		if intelligenceCredentialRejected([]byte(raw)) {
+			t.Fatal("transient or generated text blocked credentials", raw)
+		}
+	}
+}

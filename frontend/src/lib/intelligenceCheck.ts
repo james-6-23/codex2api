@@ -11,6 +11,11 @@ export interface IntelligenceQuestion {
   enabled: boolean;
 }
 export interface IntelligenceSettings {
+  adaptive_enabled: boolean;
+  pause_initial_seconds: number;
+  pause_max_seconds: number;
+  recovery_initial_seconds: number;
+  recovery_min_seconds: number;
   revision: number;
   enabled: boolean;
   gpt_model: string;
@@ -93,6 +98,10 @@ export interface IntelligenceAccount {
   next_due_at?: string | null;
 }
 export interface IntelligenceBar {
+  probe_phase?: string;
+  next_interval_seconds?: number;
+  next_due_at?: string | null;
+  passed_streak?: number;
   active_run_id?: number;
   active_status?: "queued" | "running";
   enabled: boolean;
@@ -160,4 +169,17 @@ export function latestRequestGuard() {
     next: () => ++revision,
     isCurrent: (value: number) => value === revision,
   };
+}
+
+export function intelligenceScheduleLabel(bar: IntelligenceBar): string {
+  const labels: Record<string, string> = {
+    normal: '正常检测', backoff: '退避中', recovering: '恢复确认',
+    retrying: '异常重试', credential_blocked: '等待凭证修复',
+  };
+  const label = labels[bar.probe_phase || ''];
+  if (!label) return '';
+  if (bar.probe_phase === 'credential_blocked') return label;
+  const progress = bar.probe_phase === 'recovering' ? ` · 连续通过 ${bar.passed_streak ?? 0} 次` : '';
+  const due = bar.enabled && bar.next_due_at ? ` · 下次 ${new Date(bar.next_due_at).toLocaleString()}` : '';
+  return label + progress + due;
 }

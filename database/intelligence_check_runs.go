@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	ic "github.com/codex2api/internal/intelligencecheck"
+	"math/rand/v2"
 	"strings"
 	"time"
 )
@@ -82,7 +83,7 @@ func intelligenceCheckSnapshot(s ic.Settings, a IntelligenceCheckAccount, source
 	}
 	snapshot := s
 	snapshot.Questions = nil
-	r := IntelligenceCheckRun{AccountID: a.AccountID, AccountName: a.AccountName, Channel: a.Channel, Source: source, Status: "queued", ConfigRevision: s.Revision, ManualRevision: a.ManualRevision, Model: model, ReasoningEffort: effort, JudgeMode: s.JudgeMode, Question: question, Settings: snapshot, CreatedAt: created.UTC()}
+	r := IntelligenceCheckRun{CredentialGeneration: a.CredentialGeneration, AccountID: a.AccountID, AccountName: a.AccountName, Channel: a.Channel, Source: source, Status: "queued", ConfigRevision: s.Revision, ManualRevision: a.ManualRevision, Model: model, ReasoningEffort: effort, JudgeMode: s.JudgeMode, Question: question, Settings: snapshot, CreatedAt: created.UTC()}
 	return r, nil
 }
 
@@ -167,7 +168,7 @@ func (db *DB) EnqueueDueIntelligenceChecks(ctx context.Context, now time.Time, l
 			}
 		}
 
-		rows, err := tx.QueryContext(ctx, `SELECT a.id FROM accounts a JOIN intelligence_check_accounts s ON s.account_id=a.id WHERE `+db.intelligenceEligibleSQL()+filter+` AND `+intelligenceAutomaticSQL("a", "s")+` AND s.next_due_ms<=$1 AND NOT EXISTS(SELECT 1 FROM intelligence_check_runs r WHERE r.account_id=a.id AND r.status IN ('queued','running')) ORDER BY s.next_due_ms,a.id LIMIT $2`, args...)
+		rows, err := tx.QueryContext(ctx, `SELECT a.id FROM accounts a JOIN intelligence_check_accounts s ON s.account_id=a.id WHERE `+db.intelligenceEligibleSQL()+filter+` AND `+db.intelligenceAutomaticSQL("a", "s")+` AND s.next_due_ms<=$1 AND NOT EXISTS(SELECT 1 FROM intelligence_check_runs r WHERE r.account_id=a.id AND r.status IN ('queued','running')) ORDER BY s.next_due_ms,a.id LIMIT $2`, args...)
 
 		if err != nil {
 			return err
@@ -220,7 +221,7 @@ func (db *DB) ClaimIntelligenceCheck(ctx context.Context, owner string, now time
 		if active >= s.Concurrency {
 			return nil
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT `+intelligenceRunColumns+` FROM intelligence_check_runs WHERE status='queued' AND ready_ms<=$1 AND (`+db.intelligenceJSONField("source")+`='manual' OR ($2 AND account_id IN (SELECT s.account_id FROM intelligence_check_accounts s JOIN accounts a ON a.id=s.account_id WHERE `+intelligenceAutomaticSQL("a", "s")+`))) ORDER BY ready_ms,id LIMIT 100`, now.UnixMilli(), s.Enabled)
+		rows, err := tx.QueryContext(ctx, `SELECT `+intelligenceRunColumns+` FROM intelligence_check_runs WHERE status='queued' AND ready_ms<=$1 AND (`+db.intelligenceJSONField("source")+`='manual' OR ($2 AND account_id IN (SELECT s.account_id FROM intelligence_check_accounts s JOIN accounts a ON a.id=s.account_id WHERE `+db.intelligenceAutomaticSQL("a", "s")+`))) ORDER BY ready_ms,id LIMIT 100`, now.UnixMilli(), s.Enabled)
 		if err != nil {
 			return err
 		}
@@ -352,7 +353,7 @@ func (db *DB) FinishIntelligenceCheck(ctx context.Context, id int64, owner strin
 		if err != nil && !errors.Is(err, ErrIntelligenceCheckUnsupportedAccount) {
 			return err
 		}
-		if err == nil && r.ConfigRevision == s.Revision && r.ManualRevision == a.ManualRevision {
+		if err == nil && r.ConfigRevision == s.Revision && r.ManualRevision == a.ManualRevision && r.CredentialGeneration == a.CredentialGeneration {
 			next, action := ic.Transition(s, a.State, grade.Status)
 			if grade.Status != "interrupted" {
 				next.LastQuestionID = r.Question.ID
@@ -366,16 +367,22 @@ func (db *DB) FinishIntelligenceCheck(ctx context.Context, id int64, owner strin
 			if err = db.intelligenceApplyActionTx(ctx, tx, &a, &next, &r, action, s); err != nil {
 				return err
 			}
-			raw, _ := json.Marshal(next)
-			delay := s.IntervalSeconds
-			if grade.Status == "error" || grade.Status == "interrupted" {
-				delay = s.RetrySeconds
+			next, delay := ic.Schedule(s, a.State, next, grade.Status)
+			if next.BlockedCredentialGeneration != nil && *next.BlockedCredentialGeneration != a.CredentialGeneration {
+				next.BlockedCredentialGeneration = nil
 			}
+			if s.AdaptiveEnabled && o.CredentialRejected {
+				generation := a.CredentialGeneration
+				next.BlockedCredentialGeneration = &generation
+			} else if grade.Status == "normal" {
+				next.BlockedCredentialGeneration = nil
+			}
+			raw, _ := json.Marshal(next)
 			cursor := a.QuestionCursor
 			if grade.Status != "interrupted" {
 				cursor++
 			}
-			if _, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET state_json=$1,quality_paused=$2,next_due_ms=$3,question_cursor=$4,status=$5 WHERE account_id=$6`, string(raw), a.QualityPaused, now.Add(time.Duration(delay)*time.Second).UnixMilli(), cursor, grade.Status, r.AccountID); err != nil {
+			if _, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET state_json=$1,quality_paused=$2,next_due_ms=$3,question_cursor=$4,status=$5 WHERE account_id=$6`, string(raw), a.QualityPaused, intelligenceNextDue(s, now, delay), cursor, grade.Status, r.AccountID); err != nil {
 				return err
 			}
 		} else {
@@ -505,8 +512,17 @@ func (db *DB) ExpireIntelligenceCheckLeases(ctx context.Context, now time.Time) 
 				return err
 			}
 			if r.ConfigRevision == s.Revision {
-				if _, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET next_due_ms=$1,status='interrupted' WHERE account_id=$2 AND manual_revision=$3`, now.Add(time.Duration(s.RetrySeconds)*time.Second).UnixMilli(), r.AccountID, r.ManualRevision); err != nil {
-					return err
+				a, e := db.intelligenceAccountTx(ctx, tx, r.AccountID)
+				if e != nil && !errors.Is(e, ErrIntelligenceCheckUnsupportedAccount) {
+					return e
+				}
+				if e == nil && a.ManualRevision == r.ManualRevision && a.CredentialGeneration == r.CredentialGeneration {
+					next, _ := ic.Transition(s, a.State, "interrupted")
+					next, delay := ic.Schedule(s, a.State, next, "interrupted")
+					raw, _ := json.Marshal(next)
+					if _, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET next_due_ms=$1,status='interrupted',state_json=$2 WHERE account_id=$3`, intelligenceNextDue(s, now, delay), string(raw), r.AccountID); err != nil {
+						return err
+					}
 				}
 			}
 			if err = db.intelligenceRetainTx(ctx, tx, r.AccountID, s.Retention); err != nil {
@@ -582,16 +598,18 @@ func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64
 	if db.isSQLite() {
 		automaticEnabled = `json_extract(config_json,'$.enabled')`
 	}
-	active := `r.status='running' OR (r.status='queued' AND (` + db.intelligenceJSONField("source") + `='manual' OR (` + intelligenceAutomaticSQL("acc", "a") + ` AND (SELECT ` + automaticEnabled + ` FROM intelligence_check_settings WHERE id=1))))`
-	rows, err := db.conn.QueryContext(ctx, `SELECT a.account_id,a.enabled,a.quality_paused,a.state_json,COALESCE(r.id,0),COALESCE(r.status,'') FROM intelligence_check_accounts a JOIN accounts acc ON acc.id=a.account_id LEFT JOIN intelligence_check_runs r ON r.account_id=a.account_id AND r.status IN ('queued','running') AND (`+active+`) WHERE a.account_id IN (`+ph+`)`, args...)
+	active := `r.status='running' OR (r.status='queued' AND (` + db.intelligenceJSONField("source") + `='manual' OR (` + db.intelligenceAutomaticSQL("acc", "a") + ` AND (SELECT ` + automaticEnabled + ` FROM intelligence_check_settings WHERE id=1))))`
+	rows, err := db.conn.QueryContext(ctx, `SELECT a.account_id,a.enabled,a.quality_paused,a.state_json,a.next_due_ms,COALESCE(acc.credential_generation,1),(COALESCE(acc.enabled,TRUE) AND (SELECT `+automaticEnabled+` FROM intelligence_check_settings WHERE id=1)),COALESCE(r.id,0),COALESCE(r.status,'') FROM intelligence_check_accounts a JOIN accounts acc ON acc.id=a.account_id LEFT JOIN intelligence_check_runs r ON r.account_id=a.account_id AND r.status IN ('queued','running') AND (`+active+`) WHERE a.account_id IN (`+ph+`)`, args...)
 	if err != nil {
 		return nil, err
 	}
 	for rows.Next() {
 		var id int64
 		var b IntelligenceCheckBar
+		var due, generation int64
+		var automaticAllowed bool
 		var raw string
-		if err = rows.Scan(&id, &b.Enabled, &b.QualityPaused, &raw, &b.ActiveRunID, &b.ActiveStatus); err != nil {
+		if err = rows.Scan(&id, &b.Enabled, &b.QualityPaused, &raw, &due, &generation, &automaticAllowed, &b.ActiveRunID, &b.ActiveStatus); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -601,6 +619,15 @@ func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64
 			return nil, err
 		}
 		b.OwnedAction = s.OwnedAction
+		b.ProbePhase, b.NextIntervalSeconds, b.PassedStreak = s.ProbePhase, s.NextIntervalSeconds, s.RecoverStreak
+		if due > 0 && automaticAllowed && b.Enabled {
+			when := time.UnixMilli(due)
+			b.NextDueAt = &when
+		}
+		if s.BlockedCredentialGeneration != nil && *s.BlockedCredentialGeneration == generation {
+			b.ProbePhase = "credential_blocked"
+			b.NextDueAt = nil
+		}
 		b.Records = []IntelligenceCheckRunSummary{}
 		out[id] = b
 	}
@@ -635,4 +662,14 @@ func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64
 		out[accountID] = b
 	}
 	return out, rows.Err()
+}
+
+// Add bounded jitter without exceeding the configured interval or maximum.
+// Persist the selected deadline; polling and restarts never redraw it.
+func intelligenceNextDue(s ic.Settings, now time.Time, seconds int) int64 {
+	delay := time.Duration(seconds) * time.Second
+	if s.AdaptiveEnabled {
+		delay -= time.Duration(rand.Int64N(max(1, int64(delay/10))))
+	}
+	return now.Add(delay).UnixMilli()
 }

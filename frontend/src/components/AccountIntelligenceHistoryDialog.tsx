@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { refreshIntelligenceBars } from '../hooks/useIntelligenceBars'
-import { intelligenceColor, intelligenceLabels, type IntelligenceRun, type IntelligencePage } from '../lib/intelligenceCheck'
+import { intelligenceColor, intelligenceLabels, intelligenceScheduleLabel, type IntelligenceBar, type IntelligenceRun, type IntelligencePage } from '../lib/intelligenceCheck'
 import { getErrorMessage } from '../utils/error'
 import { Button } from './ui/button'
 import { Switch } from './ui/switch'
@@ -26,10 +26,11 @@ export default function AccountIntelligenceHistoryDialog({ accountID, accountNam
   const [data, setData] = useState<IntelligencePage<IntelligenceRun> | null>(null)
   const [enabled, setEnabled] = useState<boolean | null>(null)
   const [error, setError] = useState('')
+  const [schedule, setSchedule] = useState<IntelligenceBar | null>(null)
   const [saving, setSaving] = useState(false)
   const changing = useRef(false)
   const [refresh, setRefresh] = useState(0)
-  useEffect(() => { setPage(1); setEnabled(null) }, [accountID])
+  useEffect(() => { setPage(1); setEnabled(null); setSchedule(null) }, [accountID])
   useEffect(() => {
     setData(null)
     setError('')
@@ -45,6 +46,7 @@ export default function AccountIntelligenceHistoryDialog({ accountID, accountNam
         ])
         if (controller.signal.aborted) return
         setData(runs)
+        setSchedule(bars.bars[String(accountID)] ?? null)
         if (!changing.current) setEnabled(bars.bars[String(accountID)]?.enabled ?? false)
         setError('')
       } catch (e) {
@@ -80,6 +82,7 @@ export default function AccountIntelligenceHistoryDialog({ accountID, accountNam
         </label>
         <Button variant="outline" size="sm" onClick={() => setRefresh(n => n + 1)}>刷新记录</Button>
       </div>
+      {schedule && <p className="text-sm text-muted-foreground">{intelligenceScheduleLabel(schedule)}</p>}
       {error && <p role="alert" className="text-sm text-destructive">{error}</p>}
       {!data && !error && <p className="py-8 text-center text-sm text-muted-foreground">正在加载…</p>}
       {data?.items.length === 0 && <p className="py-8 text-center text-sm text-muted-foreground">暂无检测记录，可在账号状态条上方点击立即检测。</p>}
