@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,6 +21,12 @@ var (
 	sseDataSuffix = []byte("\n\n")
 )
 
+// streamFlushWriter 负责 SSE 流的缓冲合并与冲刷传输。
+//
+// 并发契约：同一实例的 Flush/WriteBytes/WriteString/WriteSSEData/Finalize 等写入方法
+// 不得跨 goroutine 并发调用，调用方必须通过外部互斥（例如 handler 中的 downstreamMu）
+// 进行串行化保护。内部 mu 与 atomic aborted 仅用于协调输出失控丢弃（DiscardBuffered）
+// 与写入/冲刷之间的并发状态清理，避免 DiscardBuffered 等待慢速下游 I/O。
 type streamFlushWriter struct {
 	writer        io.Writer
 	flusher       http.Flusher
@@ -36,16 +43,51 @@ type streamFlushWriter struct {
 	scanCarry    []byte
 	writtenBytes atomic.Int64
 	diag         *streamPhaseDiagnostics
+	// aborted 标记缓冲已被输出失控防护强制丢弃。置位后 Flush/Finalize 必须
+	// 静默短路，绝不能再把残留字节写回下游或释放扫描器安全窗。
+	// 用 atomic.Bool 而不是普通字段：DiscardBuffered 必须把置位放在所有锁竞争
+	// 之前（先让新进入的写入短路，再清理缓冲），并且与 Flush/WriteBytes/
+	// Finalize 的读取天然无数据竞争。CAS 保证并发触发时只有第一个调用真正执行
+	// 清理。
+	aborted atomic.Bool
+	// mu 保护 buffer / scanCarry / outputScanner / lastFlush 的读写与清理。
+	// 保活 goroutine（issue #458）与 forward goroutine 会并发共享同一个 writer
+	// 调 Flush/WriteBytes，guard 的 discard 回调又在 HandleTripped 的 once 里
+	// 锁外执行；没有这把锁时 bytes.Buffer 会被并发读写（数据竞争、输出错乱，
+	// 最坏 panic）。
+	//
+	// 下游写（w.writer.Write / flusher.Flush）一律在锁外做：慢速客户端可能让
+	// 写入长期阻塞，若在锁内调用就等于让 DiscardBuffered 等待下游 I/O，会破坏
+	// guard 终止编排“不被下游写锁延迟”的约束，也可能与用户回调互相重入。
+	mu sync.Mutex
 }
 
 // Small buffers are reused across token events; an exceptional large event
 // must not keep its allocation alive for the rest of a long stream.
+// 调用方必须持有 w.mu。
 func (w *streamFlushWriter) resetBuffer() {
 	if w.buffer.Cap() > 256<<10 {
 		w.buffer = bytes.Buffer{}
 	} else {
 		w.buffer.Reset()
 	}
+}
+
+// takeBufferedLocked 取走合并缓冲当前内容的快照并重置缓冲。返回的切片在解锁
+// 后仍可安全写下游：resetBuffer 只复用 w.buffer 自己的底层数组，快照独立。
+// 调用方必须持有 w.mu。
+func (w *streamFlushWriter) takeBufferedLocked() []byte {
+	if w.buffer.Len() == 0 {
+		return nil
+	}
+	data := append([]byte(nil), w.buffer.Bytes()...)
+	w.resetBuffer()
+	return data
+}
+
+// flushDueLocked 报告合并缓冲是否已到冲刷时间点。调用方必须持有 w.mu。
+func (w *streamFlushWriter) flushDueLocked() bool {
+	return w.lastFlush.IsZero() || time.Since(w.lastFlush) >= w.interval
 }
 
 // streamPhaseDiagnostics 采集流阶段的断流现场判据。
@@ -173,6 +215,8 @@ func (h *Handler) commitStreamAttempt(c *gin.Context, attempt *continuousRetrySt
 	return filtered.Finalize()
 }
 
+// scanOutput 把待输出字节送进输出扫描器并只返回可立刻落地的部分。
+// 它会读写 outputScanner 与 scanCarry，调用方必须持有 w.mu。
 func (w *streamFlushWriter) scanOutput(data []byte) ([]byte, error) {
 	if w == nil || w.outputScanner == nil {
 		return data, nil
@@ -301,78 +345,130 @@ func (w *streamFlushWriter) diagnosticsClock() time.Time {
 	return time.Now()
 }
 
+// WriteString 向流中写入字符串。
+// 契约：同一实例的 Flush/WriteBytes/WriteString 等方法不得跨 goroutine 并发调用。
 func (w *streamFlushWriter) WriteString(data string) error {
 	if w == nil || w.writer == nil {
 		return nil
 	}
+	if w.aborted.Load() {
+		return nil
+	}
+	w.mu.Lock()
+	if w.aborted.Load() {
+		// 入口检查后 DiscardBuffered 已置位：绝不能再把字节写回缓冲，否则
+		// 清理后的缓冲会被重新填满，“缓冲彻底丢弃”不成立。
+		w.mu.Unlock()
+		return nil
+	}
 	filtered, err := w.scanOutput([]byte(data))
+	coalesce := w.policy == StreamFlushPolicyCoalesce
+	due := false
+	if err == nil && len(filtered) > 0 && coalesce {
+		_, _ = w.buffer.WriteString(string(filtered))
+		due = w.flushDueLocked()
+	}
+	w.mu.Unlock()
 	if err != nil || len(filtered) == 0 {
 		return err
 	}
-	data = string(filtered)
-	if w.policy != StreamFlushPolicyCoalesce {
-		if err := w.writeUnderlyingString(data); err != nil {
+	if !coalesce {
+		if w.aborted.Load() {
+			return nil
+		}
+		if err := w.writeUnderlyingString(string(filtered)); err != nil {
 			return err
 		}
 		w.flushTransport()
 		return nil
 	}
-	if _, err := w.buffer.WriteString(data); err != nil {
-		return err
-	}
-	if w.lastFlush.IsZero() || time.Since(w.lastFlush) >= w.interval {
+	if due {
 		return w.Flush()
 	}
 	return nil
 }
 
+// WriteBytes 向流中写入字节切片。
+// 契约：同一实例的 Flush/WriteBytes/WriteString 等方法不得跨 goroutine 并发调用。
 func (w *streamFlushWriter) WriteBytes(data []byte) error {
 	if w == nil || w.writer == nil || len(data) == 0 {
 		return nil
 	}
-	var err error
-	data, err = w.scanOutput(data)
-	if err != nil || len(data) == 0 {
+	if w.aborted.Load() {
+		return nil
+	}
+	w.mu.Lock()
+	if w.aborted.Load() {
+		w.mu.Unlock()
+		return nil
+	}
+	filtered, err := w.scanOutput(data)
+	coalesce := w.policy == StreamFlushPolicyCoalesce
+	due := false
+	if err == nil && len(filtered) > 0 && coalesce {
+		_, _ = w.buffer.Write(filtered)
+		due = w.flushDueLocked()
+	}
+	w.mu.Unlock()
+	if err != nil || len(filtered) == 0 {
 		return err
 	}
-	if w.policy != StreamFlushPolicyCoalesce {
-		if err := w.writeUnderlying(data); err != nil {
+	if !coalesce {
+		if w.aborted.Load() {
+			return nil
+		}
+		if err := w.writeUnderlying(filtered); err != nil {
 			return err
 		}
 		w.flushTransport()
 		return nil
 	}
-	if _, err := w.buffer.Write(data); err != nil {
-		return err
-	}
-	if w.lastFlush.IsZero() || time.Since(w.lastFlush) >= w.interval {
+	if due {
 		return w.Flush()
 	}
 	return nil
 }
 
+// WriteSSEData 向流中写入一条 SSE 数据帧（带 "data: " 前缀与 "\n\n" 后缀）。
+// 契约：同一实例的 Flush/WriteBytes/WriteSSEData 等方法不得跨 goroutine 并发调用。
 func (w *streamFlushWriter) WriteSSEData(data []byte) error {
 	if w == nil || w.writer == nil {
+		return nil
+	}
+	if w.aborted.Load() {
 		return nil
 	}
 	framed := make([]byte, 0, len(sseDataPrefix)+len(data)+len(sseDataSuffix))
 	framed = append(framed, sseDataPrefix...)
 	framed = append(framed, data...)
 	framed = append(framed, sseDataSuffix...)
-	var err error
-	framed, err = w.scanOutput(framed)
-	if err != nil || len(framed) == 0 {
+	w.mu.Lock()
+	if w.aborted.Load() {
+		w.mu.Unlock()
+		return nil
+	}
+	filtered, err := w.scanOutput(framed)
+	coalesce := w.policy == StreamFlushPolicyCoalesce
+	due := false
+	if err == nil && len(filtered) > 0 && coalesce {
+		w.buffer.Write(filtered)
+		due = w.flushDueLocked()
+	}
+	w.mu.Unlock()
+	if err != nil || len(filtered) == 0 {
 		return err
 	}
-	if w.policy != StreamFlushPolicyCoalesce {
-		if err := w.writeUnderlying(framed); err != nil {
+	if !coalesce {
+		if w.aborted.Load() {
+			return nil
+		}
+		if err := w.writeUnderlying(filtered); err != nil {
 			return err
 		}
 		w.flushTransport()
 		return nil
 	}
-	w.buffer.Write(framed)
-	if w.lastFlush.IsZero() || time.Since(w.lastFlush) >= w.interval {
+	if due {
 		return w.Flush()
 	}
 	return nil
@@ -387,11 +483,20 @@ func (w *streamFlushWriter) WriteSSEComment(comment string) error {
 	if w == nil || w.writer == nil || comment == "" {
 		return nil
 	}
-	if w.buffer.Len() > 0 {
-		if err := w.writeUnderlying(w.buffer.Bytes()); err != nil {
-			return err
-		}
-		w.resetBuffer()
+	if w.aborted.Load() {
+		return nil
+	}
+	w.mu.Lock()
+	buffered := w.takeBufferedLocked()
+	w.mu.Unlock()
+	if w.aborted.Load() {
+		return nil
+	}
+	if err := w.writeUnderlying(buffered); err != nil {
+		return err
+	}
+	if w.aborted.Load() {
+		return nil
 	}
 	if err := w.writeUnderlyingString(comment); err != nil {
 		return err
@@ -400,26 +505,60 @@ func (w *streamFlushWriter) WriteSSEComment(comment string) error {
 	return nil
 }
 
+// DiscardBuffered 彻底丢弃本地缓冲：清空合并 buffer、扫描暂存尾巴并解绑输出
+// 扫描器，同时置位 aborted。guard 命中后调用一次即可保证后续 Flush/Finalize
+// 不再输出任何数据。
+//
+// 并发契约：aborted 用 CAS 最先置位，保证多路触发（guard 判定、保活/forward
+// 竞态）下只有第一个调用执行清理；CAS 失败说明已有调用完成过丢弃，直接返回。
+// 清理过程只拿内部状态锁，不碰下游写锁，因此不会被慢速客户端拖住。
+func (w *streamFlushWriter) DiscardBuffered() {
+	if w == nil {
+		return
+	}
+	if !w.aborted.CompareAndSwap(false, true) {
+		return
+	}
+	w.mu.Lock()
+	w.resetBuffer()
+	w.scanCarry = nil
+	w.outputScanner = nil
+	w.mu.Unlock()
+}
+
+// Flush 冲刷当前合并缓冲与输出扫描器已放行的安全窗。
+// 契约：同一实例的 Flush/WriteBytes 等方法不得跨 goroutine 并发调用。
 func (w *streamFlushWriter) Flush() error {
 	if w == nil {
 		return nil
 	}
-	if w.buffer.Len() > 0 {
-		if err := w.writeUnderlying(w.buffer.Bytes()); err != nil {
-			return err
-		}
-		w.resetBuffer()
+	if w.aborted.Load() {
+		return nil
 	}
+	// 锁内只做缓冲/安全窗的快照与清理，写下游在锁外完成。
+	w.mu.Lock()
+	buffered := w.takeBufferedLocked()
+	var released []byte
+	var scanErr error
 	if w.outputScanner != nil {
-		pending, err := w.outputScanner.Flush()
-		if err != nil {
-			return err
-		}
-		if len(pending) > 0 {
-			if err := w.writeUnderlying(pending); err != nil {
-				return err
-			}
-		}
+		released, scanErr = w.outputScanner.Flush()
+	}
+	w.mu.Unlock()
+	if w.aborted.Load() {
+		// 已判定失控的缓冲快照就地丢弃，不再释放到下游。
+		return nil
+	}
+	if err := w.writeUnderlying(buffered); err != nil {
+		return err
+	}
+	if scanErr != nil {
+		return scanErr
+	}
+	if w.aborted.Load() {
+		return nil
+	}
+	if err := w.writeUnderlying(released); err != nil {
+		return err
 	}
 	w.flushTransport()
 	return nil
@@ -428,33 +567,50 @@ func (w *streamFlushWriter) Flush() error {
 // Finalize releases the retained safety window at a real semantic end-of-stream.
 // A transport Flush must not call this because an unsafe phrase may span chunks.
 func (w *streamFlushWriter) Finalize() error {
-	if w == nil {
+	if w == nil || w.aborted.Load() {
 		return nil
 	}
-	if w.buffer.Len() > 0 {
-		if err := w.writeUnderlying(w.buffer.Bytes()); err != nil {
-			return err
-		}
-		w.resetBuffer()
+	// 第一阶段：只取走合并缓冲快照，写下游在锁外。
+	w.mu.Lock()
+	buffered := w.takeBufferedLocked()
+	w.mu.Unlock()
+	if w.aborted.Load() {
+		return nil
 	}
+	if err := w.writeUnderlying(buffered); err != nil {
+		return err
+	}
+	// 第二阶段：释放扫描器安全窗与暂存的半个事件。仍不持锁写下游。
+	w.mu.Lock()
+	if w.aborted.Load() {
+		w.mu.Unlock()
+		return nil
+	}
+	var released, carry []byte
+	var scanErr error
 	if w.outputScanner != nil {
-		pending, err := w.outputScanner.Finalize()
-		if err != nil {
+		released, scanErr = w.outputScanner.Finalize()
+		if scanErr != nil {
+			// 判定拦截时连同暂存的半个事件一起丢弃。
 			w.scanCarry = nil
-			return err
-		}
-		// 流真正结束:先补齐暂存的半个事件,再写扫描器释放的安全窗。
-		if len(w.scanCarry) > 0 {
-			if err := w.writeUnderlying(w.scanCarry); err != nil {
-				return err
-			}
+		} else {
+			carry = w.scanCarry
 			w.scanCarry = nil
 		}
-		if len(pending) > 0 {
-			if err := w.writeUnderlying(pending); err != nil {
-				return err
-			}
-		}
+	}
+	w.mu.Unlock()
+	if scanErr != nil {
+		return scanErr
+	}
+	if w.aborted.Load() {
+		return nil
+	}
+	// 流真正结束:先补齐暂存的半个事件,再写扫描器释放的安全窗。
+	if err := w.writeUnderlying(carry); err != nil {
+		return err
+	}
+	if err := w.writeUnderlying(released); err != nil {
+		return err
 	}
 	w.flushTransport()
 	return nil
@@ -465,5 +621,7 @@ func (w *streamFlushWriter) flushTransport() {
 		return
 	}
 	w.flusher.Flush()
+	w.mu.Lock()
 	w.lastFlush = time.Now()
+	w.mu.Unlock()
 }

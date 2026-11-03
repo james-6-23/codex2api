@@ -264,6 +264,23 @@ func main() {
 		appliedResponseCache.ReconstructMaxBytes,
 	)
 
+	// 模型输出失控防护设置：冷启动读取失败不致命，由后台 5 秒轮询器恢复；
+	// 未就绪期间 HTTP/WS/Stream 门禁统一返回 503 service_unavailable。
+	outputGuardCtx, outputGuardCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if err := proxy.LoadOutputGuardSettings(outputGuardCtx, db); err != nil {
+		outputGuardCancel()
+		log.Printf("警告: 加载模型输出失控防护设置失败（冷启动门禁将返回 503 直至 DB 轮询恢复）: %v", err)
+	} else {
+		outputGuardCancel()
+		appliedGuard := proxy.CurrentOutputGuardConfig()
+		log.Printf(
+			"模型输出失控防护设置已加载: generation=%d enabled=%t tool_bytes=%d tool_deltas=%d channel_bytes=%d request_bytes=%d",
+			appliedGuard.Generation, appliedGuard.Enabled, appliedGuard.MaxToolArgumentBytes,
+			appliedGuard.MaxToolArgumentDeltas, appliedGuard.MaxChannelBytes, appliedGuard.MaxRequestBytes,
+		)
+	}
+	proxy.StartOutputGuardConfigPoller(context.Background(), db)
+
 	// 4. 初始化缓存（使用数据库中保存的连接池大小）
 	redisPoolSize := 30
 	if settings.RedisPoolSize > 0 {

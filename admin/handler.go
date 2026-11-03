@@ -9468,6 +9468,12 @@ type settingsResponse struct {
 	OAuthModelCooldownSeconds          int                              `json:"oauth_model_cooldown_seconds"`
 	OAuthModelCooldownBackoffEnabled   bool                             `json:"oauth_model_cooldown_backoff_enabled"`
 	OAuthUnsupportedCooldownSeconds    int                              `json:"oauth_unsupported_model_cooldown_seconds"`
+	OutputGuardEnabled                 bool                             `json:"output_guard_enabled"`
+	OutputGuardMaxToolArgumentBytes    int64                            `json:"output_guard_max_tool_argument_bytes"`
+	OutputGuardMaxToolArgumentDeltas   int                              `json:"output_guard_max_tool_argument_deltas"`
+	OutputGuardMaxChannelBytes         int64                            `json:"output_guard_max_channel_bytes"`
+	OutputGuardMaxRequestBytes         int64                            `json:"output_guard_max_request_bytes"`
+	OutputGuardConfigGeneration        int64                            `json:"output_guard_config_generation"`
 }
 
 type rawJSON = json.RawMessage
@@ -9641,6 +9647,12 @@ type updateSettingsReq struct {
 	OAuthModelCooldownSeconds           *int                             `json:"oauth_model_cooldown_seconds"`
 	OAuthModelCooldownBackoffEnabled    *bool                            `json:"oauth_model_cooldown_backoff_enabled"`
 	OAuthUnsupportedCooldownSeconds     *int                             `json:"oauth_unsupported_model_cooldown_seconds"`
+	OutputGuardEnabled                  *bool                            `json:"output_guard_enabled"`
+	OutputGuardMaxToolArgumentBytes     *int64                           `json:"output_guard_max_tool_argument_bytes"`
+	OutputGuardMaxToolArgumentDeltas    *int                             `json:"output_guard_max_tool_argument_deltas"`
+	OutputGuardMaxChannelBytes          *int64                           `json:"output_guard_max_channel_bytes"`
+	OutputGuardMaxRequestBytes          *int64                           `json:"output_guard_max_request_bytes"`
+	OutputGuardConfigGeneration         rawJSON                          `json:"output_guard_config_generation"`
 }
 
 func updateSettingsHasFieldsOtherThanCustomPatterns(req updateSettingsReq) bool {
@@ -10245,6 +10257,18 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		writeError(c, http.StatusInternalServerError, "读取响应缓存设置失败："+err.Error())
 		return
 	}
+	outputGuardSettings, err := h.db.GetOutputGuardSettings(ctx)
+	if err != nil {
+		// 防护设置读取失败时不能用默认值兜底：代理进程可能仍在用上一次成功
+		// 应用的配置（可能已启用），返回默认值会让 UI 显示与实际运行状态不符。
+		log.Printf("读取输出防护设置失败: %v", err)
+		writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+		return
+	}
+	outputGuardEnabled := false
+	if outputGuardSettings.Enabled != nil {
+		outputGuardEnabled = *outputGuardSettings.Enabled
+	}
 	dbSettings, _ := h.db.GetSystemSettings(ctx)
 	_, adminAuthSource := h.resolveAdminSecret(c.Request.Context())
 	adminSecret := ""
@@ -10479,6 +10503,12 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		SmartPacingMinConcurrency:           h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                  h.store.GetSmartPacingWindows(),
 		IgnoreUsageLimitStatus:              h.store.IgnoreUsageLimitStatus(),
+		OutputGuardEnabled:                  outputGuardEnabled,
+		OutputGuardMaxToolArgumentBytes:     outputGuardSettings.MaxToolArgumentBytes,
+		OutputGuardMaxToolArgumentDeltas:    outputGuardSettings.MaxToolArgumentDeltas,
+		OutputGuardMaxChannelBytes:          outputGuardSettings.MaxChannelBytes,
+		OutputGuardMaxRequestBytes:          outputGuardSettings.MaxRequestBytes,
+		OutputGuardConfigGeneration:         outputGuardSettings.ConfigGeneration,
 	})
 }
 
@@ -10603,6 +10633,10 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	defer h.settingsUpdateMu.Unlock()
 	if req.ResponseCacheConfigGeneration != nil {
 		writeError(c, http.StatusBadRequest, "response_cache_config_generation 为只读字段")
+		return
+	}
+	if req.OutputGuardConfigGeneration != nil {
+		writeError(c, http.StatusBadRequest, "output_guard_config_generation 为只读字段")
 		return
 	}
 	if req.CodexImagesMainModel != nil {
@@ -10754,6 +10788,34 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		return
 	}
 
+	outputGuardUpdate := database.OutputGuardSettingsUpdate{
+		Enabled:               req.OutputGuardEnabled,
+		MaxToolArgumentBytes:  req.OutputGuardMaxToolArgumentBytes,
+		MaxToolArgumentDeltas: req.OutputGuardMaxToolArgumentDeltas,
+		MaxChannelBytes:       req.OutputGuardMaxChannelBytes,
+		MaxRequestBytes:       req.OutputGuardMaxRequestBytes,
+	}
+	outputGuardUpdateRequested := outputGuardUpdate.Enabled != nil ||
+		outputGuardUpdate.MaxToolArgumentBytes != nil ||
+		outputGuardUpdate.MaxToolArgumentDeltas != nil ||
+		outputGuardUpdate.MaxChannelBytes != nil ||
+		outputGuardUpdate.MaxRequestBytes != nil
+
+	// 防护设置的读取、合并、校验与 generation 递增全部交给
+	// UpdateSystemSettingsWithOutputGuard 在同一个写事务内完成。这里不再做事务外
+	// 的预读取/预合并/预校验：并发保存时事务外读到的旧值会把合法 patch 误判为
+	// 400，而事务内真正的拒绝又会被当成 500。
+	var outputGuardSettings database.OutputGuardSettings
+	if !outputGuardUpdateRequested {
+		latestGuard, err := h.db.GetOutputGuardSettings(c.Request.Context())
+		if err != nil {
+			log.Printf("读取输出防护设置失败: %v", err)
+			writeError(c, http.StatusInternalServerError, "读取防护设置失败："+err.Error())
+			return
+		}
+		outputGuardSettings = latestGuard
+	}
+
 	currentAdminSecret := ""
 	siteName := database.DefaultSiteName
 	siteLogo := ""
@@ -10866,6 +10928,7 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 	hasAdminSecret := strings.TrimSpace(currentAdminSecret) != "" || strings.TrimSpace(h.adminSecretEnv) != ""
 	runtimeCfg := proxy.CurrentRuntimeSettings()
+	previousMaxConcurrency := h.store.GetMaxConcurrency()
 	previousAutoResetCreditsEnabled := runtimeCfg.AutoResetCreditsEnabled
 	previousAutoResetCreditsOnExhaustionEnabled := runtimeCfg.AutoResetCreditsOnExhaustionEnabled
 	previousAutoResetCreditsBeforeExpiryMin := runtimeCfg.AutoResetCreditsBeforeExpiryMin
@@ -10897,23 +10960,28 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	usageLogBatchSize := h.db.GetUsageLogBatchSize()
 	usageLogFlushIntervalSeconds := h.db.GetUsageLogFlushIntervalSeconds()
 
+	maxConcurrencyToApply := previousMaxConcurrency
+	maxConcurrencyChanged := false
 	if req.MaxConcurrency != nil {
 		v := *req.MaxConcurrency
 		if v < 1 {
 			v = 1
 		}
 		// 不再设上限：由运营按机器与上游承载自行决定
-		h.store.SetMaxConcurrency(v)
-		log.Printf("设置已更新: max_concurrency = %d", v)
+		maxConcurrencyToApply = v
+		maxConcurrencyChanged = true
 	}
 
+	previousGlobalRPM := h.rateLimiter.GetRPM()
+	globalRPMToApply := previousGlobalRPM
+	globalRPMChanged := false
 	if req.GlobalRPM != nil {
 		v := *req.GlobalRPM
 		if v < 0 {
 			v = 0
 		}
-		h.rateLimiter.UpdateRPM(v)
-		log.Printf("设置已更新: global_rpm = %d", v)
+		globalRPMToApply = v
+		globalRPMChanged = true
 	}
 
 	if req.TestModel != nil && *req.TestModel != "" {
@@ -11424,6 +11492,9 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		log.Printf("设置已更新: antigravity_oauth_clients = %d 个 client, active_key=%q", len(normalized.Clients), normalized.ActiveKey)
 	}
 
+	previousMaxRetries := h.store.GetMaxRetries()
+	maxRetriesToApply := previousMaxRetries
+	maxRetriesChanged := false
 	if req.MaxRetries != nil {
 		v := *req.MaxRetries
 		if v < 0 {
@@ -11432,10 +11503,13 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if v > 10 {
 			v = 10
 		}
-		h.store.SetMaxRetries(v)
-		log.Printf("设置已更新: max_retries = %d", v)
+		maxRetriesToApply = v
+		maxRetriesChanged = true
 	}
 
+	previousMaxRateLimitRetries := h.store.GetMaxRateLimitRetries()
+	maxRateLimitRetriesToApply := previousMaxRateLimitRetries
+	maxRateLimitRetriesChanged := false
 	if req.MaxRateLimitRetries != nil {
 		v := *req.MaxRateLimitRetries
 		if v < 0 {
@@ -11444,8 +11518,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		if v > 10 {
 			v = 10
 		}
-		h.store.SetMaxRateLimitRetries(v)
-		log.Printf("设置已更新: max_rate_limit_retries = %d", v)
+		maxRateLimitRetriesToApply = v
+		maxRateLimitRetriesChanged = true
 	}
 
 	if req.RetryIntervalMS != nil {
@@ -11870,11 +11944,11 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 	}
 
 	// 持久化保存到数据库
-	err = h.db.UpdateSystemSettings(c.Request.Context(), &database.SystemSettings{
+	systemSettings := &database.SystemSettings{
 		SiteName:                            siteName,
 		SiteLogo:                            siteLogo,
-		MaxConcurrency:                      h.store.GetMaxConcurrency(),
-		GlobalRPM:                           h.rateLimiter.GetRPM(),
+		MaxConcurrency:                      maxConcurrencyToApply,
+		GlobalRPM:                           globalRPMToApply,
 		TestModel:                           h.store.GetTestModel(),
 		CodexImagesMainModel:                codexImagesMainModel,
 		TestContent:                         h.store.GetTestContent(),
@@ -11940,8 +12014,8 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SessionAffinitySpread:               h.store.GetSessionAffinitySpread(),
 		SessionSlotBufferEnabled:            sessionSlotBufferEnabled,
 		SessionSlotBufferSeconds:            sessionSlotBufferSeconds,
-		MaxRetries:                          h.store.GetMaxRetries(),
-		MaxRateLimitRetries:                 h.store.GetMaxRateLimitRetries(),
+		MaxRetries:                          maxRetriesToApply,
+		MaxRateLimitRetries:                 maxRateLimitRetriesToApply,
 		RetryIntervalMS:                     h.store.GetRetryIntervalMS(),
 		TransportRetryPolicy:                h.store.GetTransportRetryPolicy(),
 		ContinuousRetryPolicy:               database.EncodeContinuousRetryPolicy(h.store.GetContinuousRetryPolicy()),
@@ -12003,9 +12077,27 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		IgnoreUsageLimitStatus:              h.store.IgnoreUsageLimitStatus(),
 		ModelPricingOverrides:               modelPricingOverrides,
 		ModelPricingSyncURL:                 modelPricingSyncURL,
-	})
+	}
+
+	// 防护列与 system_settings 其余列在同一行、同一事务中提交：任一写入失败
+	// 都不会留下已保存的防护配置。热应用必须等事务提交成功后再执行。
+	var committedOutputGuard database.OutputGuardSettings
+	if outputGuardUpdateRequested {
+		committedOutputGuard, err = h.db.UpdateSystemSettingsWithOutputGuard(c.Request.Context(), systemSettings, outputGuardUpdate)
+	} else {
+		err = h.db.UpdateSystemSettings(c.Request.Context(), systemSettings)
+	}
 	if err != nil {
 		log.Printf("无法持久化保存设置: %v", err)
+		if outputGuardUpdateRequested {
+			// 事务内校验失败是调用方输入问题，映射 400；其余（数据库/IO 等）才是 500。
+			if errors.Is(err, database.ErrInvalidOutputGuardSettings) {
+				writeError(c, http.StatusBadRequest, err.Error())
+				return
+			}
+			writeError(c, http.StatusInternalServerError, "保存防护设置失败，设置未生效："+err.Error())
+			return
+		}
 		if req.CodexImagesMainModel != nil {
 			writeError(c, http.StatusInternalServerError, "保存生图设置失败，文本驱动模型未生效")
 			return
@@ -12044,7 +12136,36 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 			writeError(c, http.StatusInternalServerError, "保存持续重试策略失败，设置未生效")
 			return
 		}
+		writeError(c, http.StatusInternalServerError, "保存系统设置失败，设置未生效："+err.Error())
+		return
 	} else {
+		// settings 事务提交成功后立即热应用基础运行时上限与全局限流，
+		// 确保后续 UpdateContinuousRetryPolicy 等独立步骤即使失败，
+		// 已提交到数据库的并发/重试/RPM 配置在本实例内存中也保持一致。
+		if maxConcurrencyChanged {
+			h.store.SetMaxConcurrency(maxConcurrencyToApply)
+			log.Printf("设置已更新: max_concurrency = %d", maxConcurrencyToApply)
+		}
+		if maxRetriesChanged {
+			h.store.SetMaxRetries(maxRetriesToApply)
+			log.Printf("设置已更新: max_retries = %d", maxRetriesToApply)
+		}
+		if maxRateLimitRetriesChanged {
+			h.store.SetMaxRateLimitRetries(maxRateLimitRetriesToApply)
+			log.Printf("设置已更新: max_rate_limit_retries = %d", maxRateLimitRetriesToApply)
+		}
+		if globalRPMChanged {
+			h.rateLimiter.UpdateRPM(globalRPMToApply)
+			log.Printf("设置已更新: global_rpm = %d", globalRPMToApply)
+		}
+		if outputGuardUpdateRequested {
+			outputGuardSettings = committedOutputGuard
+			if proxy.ApplyOutputGuardSettings(committedOutputGuard) {
+				log.Printf("设置已更新: output_guard generation=%d", committedOutputGuard.ConfigGeneration)
+			} else {
+				log.Printf("输出防护配置已提交，但运行时应用被拒绝（已有更新的 generation 或配置非法）: generation=%d", committedOutputGuard.ConfigGeneration)
+			}
+		}
 		if req.SessionSlotBufferSeconds != nil {
 			h.store.SetSessionSlotBuffer(time.Duration(sessionSlotBufferSeconds) * time.Second)
 			log.Printf("设置已更新: session_slot_buffer_seconds = %d", sessionSlotBufferSeconds)
@@ -12383,6 +12504,12 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		SmartPacingMinConcurrency:           h.store.GetSmartPacingMinConcurrency(),
 		SmartPacingWindows:                  h.store.GetSmartPacingWindows(),
 		IgnoreUsageLimitStatus:              h.store.IgnoreUsageLimitStatus(),
+		OutputGuardEnabled:                  outputGuardSettings.Enabled == nil || *outputGuardSettings.Enabled,
+		OutputGuardMaxToolArgumentBytes:     outputGuardSettings.MaxToolArgumentBytes,
+		OutputGuardMaxToolArgumentDeltas:    outputGuardSettings.MaxToolArgumentDeltas,
+		OutputGuardMaxChannelBytes:          outputGuardSettings.MaxChannelBytes,
+		OutputGuardMaxRequestBytes:          outputGuardSettings.MaxRequestBytes,
+		OutputGuardConfigGeneration:         outputGuardSettings.ConfigGeneration,
 	})
 }
 

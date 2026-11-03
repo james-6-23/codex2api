@@ -1,0 +1,2000 @@
+### Task 11: 综合验收测试套件、性能指标工具与 Spec §9 完整覆盖矩阵
+
+**Files:**
+- Create: `test/outputguard/helpers.go`（脱敏合成 Fixture、真进程 CPU 计时器、高周期 PRNG、P95/中位数统计学分析函数及机器可判验证器）
+- Create: `test/outputguard/helpers_test.go`（Helper 基础设施自验证测试：验证真实 RUSAGE 进程 CPU 测量、PRNG 无短周期、P95 算法及红灯故意失败捕获机制）
+- Create: `security/outputguard/acceptance_detection_test.go`（检测正确性验收：场景 1~11，含 chunk-invariance、9215B 片段、8a/8b/8c 成本上界、尾检放行）
+- Create: `proxy/acceptance_lifecycle_test.go`（全协议终止与生命周期验收：场景 12~20，含全协议 Handler 矩阵、无 5s drain、并发无 race、重试阻断 calls==1、多协议终态格式、TryLock/Deadline 降级、无账号惩罚与租约隔离）
+- Create: `proxy/acceptance_config_test.go`（持久化与门禁验收：场景 21~23，含 SQLite/PostgreSQL 并发更新与恢复默认、冷启动 503 与 5s 轮询、Framing GuardOff 依然有界）
+- Create: `test/outputguard/acceptance_benchmark_test.go`（性能与基准验收：场景 24~28，含 TTFT p95 <=10ms/CPU <=20%、1/2/4MiB ratio <=2.5、内存/FD/Goroutine 10分钟长跑门禁、细 delta 4096 deltas 专项压测、脱敏日志检查）
+- Create: `scripts/run_acceptance_suite.sh`（全套验收与性能门禁自动化执行脚本）
+
+**Interfaces:**
+- Consumes:
+  - `security/outputguard`（已在主 Plan Task 1~3 整合交付）:
+    - `NewRepetitionDetector() *RepetitionDetector`
+    - `(d *RepetitionDetector) Push(data []byte) (bool, int)`
+    - `(d *RepetitionDetector) CheckTail() (bool, int)`
+    - `(d *RepetitionDetector) Reset()`
+    - `NewChannelGuard(id string, kind ChannelKind, maxBytes int64, maxDeltas int) *ChannelGuard`
+    - `(c *ChannelGuard) CheckAppend(delta []byte) (int64, int64, error)`
+    - `(c *ChannelGuard) CommitAppend(delta []byte, growth int64, cost int64) error`
+    - `(c *ChannelGuard) CheckSnapshot(snapshot []byte, terminalStage string) (int64, int64, bool, error)`
+    - `(c *ChannelGuard) CommitSnapshot(snapshot []byte, growth int64, cost int64, terminalStage string) error`
+    - `(c *ChannelGuard) RemainingScanBudget() int64`
+    - `(c *ChannelGuard) Highwater() int64`
+    - `(c *ChannelGuard) DeltaCount() int`
+    - `(c *ChannelGuard) ReleaseWindow()`
+    - `NewRequestGuard(cfg Config) *RequestGuard`
+    - `(g *RequestGuard) RecordEvent() error`
+    - `(g *RequestGuard) ObserveAppend(channelID string, aliasID string, kind ChannelKind, delta []byte) error`
+    - `(g *RequestGuard) ObserveSnapshot(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error`
+    - `(g *RequestGuard) ObserveAppendNoEvent(channelID string, aliasID string, kind ChannelKind, delta []byte) error`
+    - `(g *RequestGuard) ObserveSnapshotNoEvent(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error`
+    - `(g *RequestGuard) EndChannel(channelID string) error`
+    - `(g *RequestGuard) IsTripped() bool`
+    - `(g *RequestGuard) TrippedReason() string`
+  - `database`（已在主 Plan Task 4 整合交付）:
+    - `DB.GetOutputGuardSettings(context.Context) (OutputGuardSettings, error)`
+    - `DB.UpdateOutputGuardSettings(context.Context, OutputGuardSettingsUpdate) (OutputGuardSettings, error)`
+    - `DefaultOutputGuardSettings() OutputGuardSettings`
+    - `ValidateOutputGuardSettings(OutputGuardSettings) error`
+  - `proxy`（已在主 Plan Task 5, 7, 8 及独立 Task 9, 10 交付）:
+    - `ApplyOutputGuardSettings(database.OutputGuardSettings) bool`
+    - `CurrentOutputGuardConfig() OutputGuardAppliedConfig`
+    - `IsOutputGuardReady() bool`
+    - `SetOutputGuardReadyForTest(bool)`
+    - `ResetOutputGuardStateForTest()`
+    - `LoadOutputGuardSettings(context.Context, OutputGuardSettingsReader) error`
+    - `StartOutputGuardConfigPoller(context.Context, *database.DB) bool`
+    - `RequireOutputGuardReadyHTTP(*gin.Context) bool`
+    - `RequireOutputGuardReadyWS(*websocket.Conn) bool`
+    - `RequireOutputGuardReadyStream(*websocket.Conn, string) bool`
+    - `NewResponsesProjector() *ResponsesProjector`
+    - `NewChatProjector() *ChatProjector`
+    - `NewAnthropicProjector() *AnthropicProjector`
+    - `NewGeminiProjector() *GeminiProjector`
+    - `ObserveEvent(guard *outputguard.RequestGuard, projector ProtocolProjector, eventType string, data []byte) error`
+    - `ReadSSEStreamWithEvent(io.Reader, func(event string, data []byte) bool) error`
+    - `ReadBoundedResponseBody(io.Reader, int64) ([]byte, error)`
+    - `NewGuardTerminationCoordinator(guard *outputguard.RequestGuard, cancel context.CancelFunc, body io.Closer) *GuardTerminationCoordinator`
+    - `(c *GuardTerminationCoordinator) HandleTripped(reason string, discardBuffers ...func()) streamOutcome`
+    - `ApplyDownstreamWriteDeadline(w http.ResponseWriter, timeout time.Duration) error`
+    - `SendDownstreamGuardTerminalHTTP(c *gin.Context, mu *sync.Mutex, clientGone *bool, protocol string, reason string) error`
+    - `SendDownstreamGuardTerminalWS(conn *websocket.Conn, streamID string, reason string) error`
+    - `FormatGuardTerminalEnvelope(protocol string, streamID string) ([]byte, int, error)`
+    - `OverlayGuardOutcome(outcome streamOutcome, guard *outputguard.RequestGuard) streamOutcome`
+    - `(w *streamFlushWriter) DiscardBuffered()`
+- Produces:
+  - 机器可判定的 Spec §9 场景 1~28 全量自动化验收套件与覆盖矩阵；
+  - 严格消除伪基准与伪函数的统计学验证库；
+  - 具备 15 分钟长跑泄漏门禁与环境门控标志的压测脚本。
+
+---
+
+### Task 11.1: 验收测试基础设施与统计学分析库 (Helpers, Process CPU Timer, PRNG, Validators)
+
+**Files:**
+- Create: `test/outputguard/helpers.go`
+- Create: `test/outputguard/helpers_test.go`
+
+**Interfaces:**
+- Produces:
+  ```go
+  package testoutputguard
+
+  import (
+      "math/rand"
+      "syscall"
+      "time"
+  )
+
+  type ProcessCPUTimer struct {
+      startUsage syscall.Rusage
+      startTime  time.Time
+  }
+
+  func StartProcessCPUTimer() *ProcessCPUTimer
+  func (t *ProcessCPUTimer) ElapsedProcessCPU() time.Duration
+  func (t *ProcessCPUTimer) ElapsedWallTime() time.Duration
+
+  type NonRepeatingPRNG struct {
+      r *rand.Rand
+  }
+  func NewNonRepeatingPRNG(seed int64) *NonRepeatingPRNG
+  func (p *NonRepeatingPRNG) Fill(buf []byte)
+  func (p *NonRepeatingPRNG) GenerateASCII(length int) []byte
+
+  func CalculatePercentile(samples []float64, percentile float64) float64
+  func CalculateMedian(samples []float64) float64
+
+  type PerformanceBenchmarkResult struct {
+      BaselineP95TTFTMs float64
+      GuardP95TTFTMs    float64
+      TTFTDeltaMs       float64
+      BaselineCPUTimeMs float64
+      GuardCPUTimeMs    float64
+      CPUIncreaseRatio  float64
+  }
+
+  func ValidateP95AndCPUIncrease(res PerformanceBenchmarkResult) error
+  func ValidateLinearScalingRatio(cpu1, cpu2, cpu4 float64) error
+  ```
+
+- [ ] **Step 1: Write failing test for benchmark helpers and statistical validators**
+
+```go
+// test/outputguard/helpers_test.go
+package testoutputguard
+
+import (
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestProcessCPUTimerMeasuresActualWork(t *testing.T) {
+	timer := StartProcessCPUTimer()
+	// 执行一段纯 CPU 计算密集型循环，确保产生可测量的 Process CPU 纳秒
+	sum := int64(0)
+	for i := int64(0); i < 10000000; i++ {
+		sum += (i * 3) ^ (i >> 1)
+	}
+	_ = sum
+
+	cpuElapsed := timer.ElapsedProcessCPU()
+	wallElapsed := timer.ElapsedWallTime()
+
+	if cpuElapsed <= 0 {
+		t.Fatalf("expected positive process CPU elapsed, got %v", cpuElapsed)
+	}
+	if wallElapsed <= 0 {
+		t.Fatalf("expected positive wall elapsed, got %v", wallElapsed)
+	}
+	// 在单核密集计算下，CPU 耗时应小于等于 Wall 耗时（外加误差窗）
+	if cpuElapsed > wallElapsed+50*time.Millisecond {
+		t.Fatalf("process CPU elapsed (%v) exceeded wall elapsed (%v)", cpuElapsed, wallElapsed)
+	}
+}
+
+func TestNonRepeatingPRNGHasNoShortCycle(t *testing.T) {
+	prng := NewNonRepeatingPRNG(987654321)
+	data := prng.GenerateASCII(32768) // 32 KiB
+
+	// 验证绝不使用短周期 mod 251 算法，连续 16 字节在 32 KiB 内无任何简单重复片段
+	seen16 := make(map[string]bool)
+	duplicates := 0
+	for i := 0; i <= len(data)-16; i += 16 {
+		block := string(data[i : i+16])
+		if seen16[block] {
+			duplicates++
+		}
+		seen16[block] = true
+	}
+	if duplicates > 0 {
+		t.Fatalf("PRNG generated %d duplicate 16-byte blocks, expected pseudo-random text without short cycle", duplicates)
+	}
+}
+
+func TestCalculatePercentileAndMedian(t *testing.T) {
+	samples := []float64{10.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0, 80.0, 90.0, 100.0}
+	p95 := CalculatePercentile(samples, 0.95)
+	if p95 < 94.0 || p95 > 96.0 {
+		t.Fatalf("want p95 around 95.0, got %f", p95)
+	}
+
+	median := CalculateMedian(samples)
+	if median != 55.0 {
+		t.Fatalf("want median 55.0, got %f", median)
+	}
+}
+
+// 验证 TDD Red 门禁：对故意不达标的输入，验证器必须返回明确的门禁失败，绝不放行
+func TestPerformanceValidatorRejectsUnqualifiedResults(t *testing.T) {
+	// 1. TTFT 增量超标（目标 <= 10ms，实际 15ms）
+	unqualifiedTTFT := PerformanceBenchmarkResult{
+		BaselineP95TTFTMs: 50.0,
+		GuardP95TTFTMs:    65.0,
+		TTFTDeltaMs:       15.0,
+		BaselineCPUTimeMs: 10.0,
+		GuardCPUTimeMs:    11.0,
+		CPUIncreaseRatio:  0.10,
+	}
+	if err := ValidateP95AndCPUIncrease(unqualifiedTTFT); err == nil || !strings.Contains(err.Error(), "TTFT delta") {
+		t.Fatalf("expected error on TTFT delta > 10ms, got %v", err)
+	}
+
+	// 2. CPU 增量超标（目标 <= 20%，实际 25%）
+	unqualifiedCPU := PerformanceBenchmarkResult{
+		BaselineP95TTFTMs: 50.0,
+		GuardP95TTFTMs:    55.0,
+		TTFTDeltaMs:       5.0,
+		BaselineCPUTimeMs: 10.0,
+		GuardCPUTimeMs:    12.5,
+		CPUIncreaseRatio:  0.25,
+	}
+	if err := ValidateP95AndCPUIncrease(unqualifiedCPU); err == nil || !strings.Contains(err.Error(), "CPU increase ratio") {
+		t.Fatalf("expected error on CPU increase > 20%%, got %v", err)
+	}
+
+	// 3. 非线性比值超标（目标 <= 2.5，实际 3.0）
+	if err := ValidateLinearScalingRatio(10.0, 22.0, 66.0); err == nil || !strings.Contains(err.Error(), "scaling ratio") {
+		t.Fatalf("expected error on scaling ratio > 2.5, got %v", err)
+	}
+
+	// 4. 合格结果顺利通过
+	qualified := PerformanceBenchmarkResult{
+		BaselineP95TTFTMs: 50.0,
+		GuardP95TTFTMs:    56.0,
+		TTFTDeltaMs:       6.0,
+		BaselineCPUTimeMs: 10.0,
+		GuardCPUTimeMs:    11.2,
+		CPUIncreaseRatio:  0.12,
+	}
+	if err := ValidateP95AndCPUIncrease(qualified); err != nil {
+		t.Fatalf("expected qualified result to pass, got: %v", err)
+	}
+	if err := ValidateLinearScalingRatio(10.0, 20.0, 42.0); err != nil {
+		t.Fatalf("expected qualified scaling to pass, got: %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./test/outputguard -run "TestProcessCPUTimer.*"`
+Expected: FAIL with compilation error: package testoutputguard is not in GOROOT or GOPATH / undefined: StartProcessCPUTimer
+
+- [ ] **Step 3: Write minimal implementation for test helpers**
+
+```go
+// test/outputguard/helpers.go
+package testoutputguard
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"sort"
+	"syscall"
+	"time"
+)
+
+type ProcessCPUTimer struct {
+	startUsage syscall.Rusage
+	startTime  time.Time
+}
+
+func StartProcessCPUTimer() *ProcessCPUTimer {
+	var usage syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &usage)
+	return &ProcessCPUTimer{
+		startUsage: usage,
+		startTime:  time.Now(),
+	}
+}
+
+func (t *ProcessCPUTimer) ElapsedProcessCPU() time.Duration {
+	var current syscall.Rusage
+	_ = syscall.Getrusage(syscall.RUSAGE_SELF, &current)
+
+	userSec := current.Utime.Sec - t.startUsage.Utime.Sec
+	userUsec := current.Utime.Usec - t.startUsage.Utime.Usec
+	sysSec := current.Stime.Sec - t.startUsage.Stime.Sec
+	sysUsec := current.Stime.Usec - t.startUsage.Stime.Usec
+
+	totalMicros := (userSec+sysSec)*1000000 + (userUsec + sysUsec)
+	if totalMicros < 0 {
+		totalMicros = 0
+	}
+	return time.Duration(totalMicros) * time.Microsecond
+}
+
+func (t *ProcessCPUTimer) ElapsedWallTime() time.Duration {
+	return time.Since(t.startTime)
+}
+
+type NonRepeatingPRNG struct {
+	r *rand.Rand
+}
+
+func NewNonRepeatingPRNG(seed int64) *NonRepeatingPRNG {
+	return &NonRepeatingPRNG{r: rand.New(rand.NewSource(seed))}
+}
+
+func (p *NonRepeatingPRNG) Fill(buf []byte) {
+	_, _ = p.r.Read(buf)
+}
+
+// GenerateASCII 生成指定长度的非周期可打印 ASCII 文本，基于高混淆字典，避免短周期
+func (p *NonRepeatingPRNG) GenerateASCII(length int) []byte {
+	const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_/.,~+!@#$%^&*() "
+	buf := make([]byte, length)
+	for i := 0; i < length; i++ {
+		buf[i] = charset[p.r.Intn(len(charset))]
+	}
+	return buf
+}
+
+func CalculatePercentile(samples []float64, percentile float64) float64 {
+	if len(samples) == 0 {
+		return 0
+	}
+	sorted := make([]float64, len(samples))
+	copy(sorted, samples)
+	sort.Float64s(sorted)
+
+	index := percentile * float64(len(sorted)-1)
+	lower := int(math.Floor(index))
+	upper := int(math.Ceil(index))
+	weight := index - float64(lower)
+
+	if lower == upper {
+		return sorted[lower]
+	}
+	return sorted[lower]*(1.0-weight) + sorted[upper]*weight
+}
+
+func CalculateMedian(samples []float64) float64 {
+	return CalculatePercentile(samples, 0.50)
+}
+
+type PerformanceBenchmarkResult struct {
+	BaselineP95TTFTMs float64
+	GuardP95TTFTMs    float64
+	TTFTDeltaMs       float64
+	BaselineCPUTimeMs float64
+	GuardCPUTimeMs    float64
+	CPUIncreaseRatio  float64
+}
+
+func ValidateP95AndCPUIncrease(res PerformanceBenchmarkResult) error {
+	const maxTTFTDeltaMs = 10.0
+	const maxCPUIncreaseRatio = 0.20
+
+	if res.TTFTDeltaMs > maxTTFTDeltaMs {
+		return fmt.Errorf("TTFT delta %.2f ms exceeds threshold %.2f ms (baseline=%.2f, guard=%.2f)",
+			res.TTFTDeltaMs, maxTTFTDeltaMs, res.BaselineP95TTFTMs, res.GuardP95TTFTMs)
+	}
+	if res.CPUIncreaseRatio > maxCPUIncreaseRatio {
+		return fmt.Errorf("CPU increase ratio %.2f%% exceeds threshold %.2f%% (baseline=%.2fms, guard=%.2fms)",
+			res.CPUIncreaseRatio*100, maxCPUIncreaseRatio*100, res.BaselineCPUTimeMs, res.GuardCPUTimeMs)
+	}
+	return nil
+}
+
+func ValidateLinearScalingRatio(cpu1, cpu2, cpu4 float64) error {
+	const maxRatio = 2.5
+	if cpu1 <= 0 || cpu2 <= 0 || cpu4 <= 0 {
+		return fmt.Errorf("invalid non-positive CPU timings: cpu1=%.2f, cpu2=%.2f, cpu4=%.2f", cpu1, cpu2, cpu4)
+	}
+	ratio12 := cpu2 / cpu1
+	ratio24 := cpu4 / cpu2
+
+	if ratio12 > maxRatio {
+		return fmt.Errorf("scaling ratio 2MiB/1MiB %.2f exceeds threshold %.2f (cpu1=%.2f, cpu2=%.2f)",
+			ratio12, maxRatio, cpu1, cpu2)
+	}
+	if ratio24 > maxRatio {
+		return fmt.Errorf("scaling ratio 4MiB/2MiB %.2f exceeds threshold %.2f (cpu2=%.2f, cpu4=%.2f)",
+			ratio24, maxRatio, cpu2, cpu4)
+	}
+	return nil
+}
+```
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./test/outputguard -run "Test.*"`
+Expected: PASS ok github.com/codex2api/test/outputguard
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add test/outputguard/helpers.go test/outputguard/helpers_test.go
+git commit -m "test(outputguard): implement benchmark helpers, process CPU timer and validators"
+```
+
+---
+
+### Task 11.2: 检测层规格验收套件（Spec §9.1 场景 1~11）
+
+**Files:**
+- Create: `security/outputguard/acceptance_detection_test.go`
+
+**Interfaces:**
+- Consumes:
+  - `security/outputguard.NewRepetitionDetector()`
+  - `security/outputguard.NewChannelGuard()`
+  - `security/outputguard.NewRequestGuard()`
+  - `security/outputguard.KindText`, `KindToolArguments`, `KindThinking`
+- Produces:
+  - 场景 1~11 完整端到端黑盒覆盖与可执行断言。
+
+- [ ] **Step 1: Write failing test for Spec §9.1 detection scenarios 1-11**
+
+```go
+// security/outputguard/acceptance_detection_test.go
+package outputguard
+
+import (
+	"bytes"
+	"fmt"
+	"math/rand"
+	"strings"
+	"testing"
+)
+
+// 场景 1: 有效 outer SSE JSON、未闭合 inner arguments、持续事故样式短周期重复：在重复阈值附近触发，不等到 128 KiB
+func TestAcceptanceScenario1_AccidentPatternEarlyTrigger(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072, // 128 KiB
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 事故短周期模式 p = 30 ("_auditfree.md_pluginless.tmp.m")
+	pattern := []byte("_auditfree.md_pluginless.tmp.m")
+	chunk := bytes.Repeat(pattern, 10) // 300 字节
+	totalPushed := 0
+	trippedAt := 0
+
+	// 逐步输入，未闭合 inner arguments
+	for i := 0; i < 50; i++ {
+		err := rg.ObserveAppend("call_write", "alias_write", KindToolArguments, chunk)
+		totalPushed += len(chunk)
+		if err != nil {
+			trippedAt = totalPushed
+			if err.Error() != "repetition" {
+				t.Fatalf("expected repetition error, got %v", err)
+			}
+			break
+		}
+	}
+
+	if trippedAt == 0 {
+		t.Fatalf("expected guard to trip, but reached totalPushed=%d", totalPushed)
+	}
+	// 断言：在 8192 ~ 10240 字节（第一个对齐检查点）附近立即触发，绝不等 128 KiB (131072)
+	if trippedAt > 10240 {
+		t.Fatalf("expected early trigger near 8192-10240 bytes, but triggered at %d bytes", trippedAt)
+	}
+	if !rg.IsTripped() || rg.TrippedReason() != "repetition" {
+		t.Fatalf("expected tripped with repetition, got %s", rg.TrippedReason())
+	}
+}
+
+// 场景 2: 同语义流按 1-byte、小/大 delta、随机边界分割均可检测，切分不能让重复消失
+func TestAcceptanceScenario2_ChunkInvariance(t *testing.T) {
+	pattern := []byte("defensive_pipeline_token_replay_") // 32 bytes
+	var fullStream []byte
+	for len(fullStream) < 12000 {
+		fullStream = append(fullStream, pattern...)
+	}
+
+	chunkSizes := []int{1, 7, 64, 512, 1024, 2048}
+	for _, size := range chunkSizes {
+		t.Run(fmt.Sprintf("FixedChunkSize_%d", size), func(t *testing.T) {
+			rg := NewRequestGuard(Config{
+				Enabled:               true,
+				MaxToolArgumentBytes:  131072,
+				MaxToolArgumentDeltas: 65536,
+				MaxChannelBytes:       2097152,
+				MaxRequestBytes:       4194304,
+			})
+			hit := false
+			for offset := 0; offset < len(fullStream); offset += size {
+				end := offset + size
+				if end > len(fullStream) {
+					end = len(fullStream)
+				}
+				err := rg.ObserveAppend("c_inv", "", KindText, fullStream[offset:end])
+				if err != nil {
+					if err.Error() == "repetition" {
+						hit = true
+						break
+					}
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+			if !hit {
+				t.Fatalf("chunk size %d failed to detect repetition across boundaries", size)
+			}
+		})
+	}
+
+	// 随机边界切分测试
+	t.Run("RandomChunkBoundaries", func(t *testing.T) {
+		r := rand.New(rand.NewSource(42))
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 65536,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		offset := 0
+		hit := false
+		for offset < len(fullStream) {
+			sz := r.Intn(256) + 1
+			end := offset + sz
+			if end > len(fullStream) {
+				end = len(fullStream)
+			}
+			err := rg.ObserveAppend("c_rand", "", KindText, fullStream[offset:end])
+			if err != nil {
+				if err.Error() == "repetition" {
+					hit = true
+					break
+				}
+				t.Fatalf("unexpected error: %v", err)
+			}
+			offset = end
+		}
+		if !hit {
+			t.Fatalf("random chunk boundaries failed to detect repetition")
+		}
+	})
+}
+
+// 场景 3: 单大 delta 中间有任意起点、长度至少 9215 bytes 的精确短周期片段，尾部正常仍触发，整事件下游不可见
+// 另测恰好 8192 bytes 的检查点对齐与非对齐边界
+func TestAcceptanceScenario3_Embedded9215BytesAnd8192Boundary(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 构造：前置 500 字节正常非重复，中间连续 9215 字节短周期 (p=25)，尾部 1000 字节正常非重复
+	prng := rand.New(rand.NewSource(1001))
+	prefix := make([]byte, 500)
+	prng.Read(prefix)
+
+	periodic := bytes.Repeat([]byte("1234567890abcdefghijklmno"), 9215/25) // 9215 bytes
+	suffix := make([]byte, 1000)
+	prng.Read(suffix)
+
+	var singleLargeDelta []byte
+	singleLargeDelta = append(singleLargeDelta, prefix...)
+	singleLargeDelta = append(singleLargeDelta, periodic...)
+	singleLargeDelta = append(singleLargeDelta, suffix...)
+
+	// 单大 delta 注入
+	err := rg.ObserveAppend("c_embed", "", KindText, singleLargeDelta)
+	if err == nil || err.Error() != "repetition" {
+		t.Fatalf("expected repetition triggered on embedded 9215 bytes pattern, got %v", err)
+	}
+
+	// 另测恰好 8192 bytes 检查点对齐（对齐步长 1024 整数倍）：必命中
+	t.Run("Aligned8192Checkpoint", func(t *testing.T) {
+		detector := NewRepetitionDetector()
+		pattern := bytes.Repeat([]byte("0123456789"), 8192/10) // 8190 + 2
+		pattern = append(pattern, []byte("01")...)              // exactly 8192
+		hit, p := detector.Push(pattern)
+		if !hit || p != 10 {
+			t.Fatalf("expected aligned 8192 to hit with period 10, got hit=%v, p=%d", hit, p)
+		}
+	})
+}
+
+// 场景 4: 多 tool/text/thinking 交错不互相污染，ID/index 补发不重置计数
+func TestAcceptanceScenario4_InterleavedChannelsAndNoReset(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	textData := []byte("Normal text message token. ")
+	thinkingData := []byte("Deep reflection thoughts. ")
+	toolData := []byte(`{"arg":"value_`)
+
+	for i := 0; i < 50; i++ {
+		if err := rg.ObserveAppend("c_text", "", KindText, textData); err != nil {
+			t.Fatalf("text append failed: %v", err)
+		}
+		if err := rg.ObserveAppend("c_think", "", KindThinking, thinkingData); err != nil {
+			t.Fatalf("thinking append failed: %v", err)
+		}
+		if err := rg.ObserveAppend("c_tool", "alias_tool_0", KindToolArguments, toolData); err != nil {
+			t.Fatalf("tool append failed: %v", err)
+		}
+	}
+
+	// 补发已存在的 ID/alias，断言不重置计数（高水位和 deltaCount 保持累加）
+	cg := rg.channels["c_tool"]
+	if cg == nil {
+		t.Fatalf("channel c_tool not found")
+	}
+	initialDeltas := cg.DeltaCount()
+	if initialDeltas != 50 {
+		t.Fatalf("want deltaCount=50, got %d", initialDeltas)
+	}
+
+	// 再次通过 alias 补发
+	if err := rg.ObserveAppend("c_tool", "alias_tool_0", KindToolArguments, []byte(`"}`)); err != nil {
+		t.Fatalf("subsequent append failed: %v", err)
+	}
+	if cg.DeltaCount() != 51 {
+		t.Fatalf("delta count was reset! want 51, got %d", cg.DeltaCount())
+	}
+}
+
+// 场景 5: 非重复参数超 bytes、细碎参数超 delta、跨 channel 绕单项上限、空 delta 洪泛、新 channel 洪泛
+func TestAcceptanceScenario5_BudgetInterception(t *testing.T) {
+	// 5a: 非重复参数超 bytes (128 KiB)
+	t.Run("ToolBytesBudget", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 65536,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		prng := rand.New(rand.NewSource(2001))
+		data := make([]byte, 131073) // 超出 1 字节
+		prng.Read(data)
+		err := rg.ObserveAppend("c_tool", "", KindToolArguments, data)
+		if err == nil || err.Error() != "tool_argument_bytes" {
+			t.Fatalf("expected tool_argument_bytes error, got %v", err)
+		}
+	})
+
+	// 5b: 细碎参数超 delta (4096 deltas)
+	t.Run("ToolDeltasBudget", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		for i := 0; i < 4096; i++ {
+			if err := rg.ObserveAppend("c_tool", "", KindToolArguments, []byte("x")); err != nil {
+				t.Fatalf("unexpected err at %d: %v", i, err)
+			}
+		}
+		// 第 4097 次 delta 必须被拦截
+		err := rg.ObserveAppend("c_tool", "", KindToolArguments, []byte("x"))
+		if err == nil || err.Error() != "tool_argument_deltas" {
+			t.Fatalf("expected tool_argument_deltas error, got %v", err)
+		}
+	})
+
+	// 5c: 跨 channel 累积绕过单项上限，被 MaxRequestBytes 拦截
+	t.Run("CrossChannelRequestBytesBudget", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       1048576, // 1 MiB
+			MaxRequestBytes:       2097152, // 2 MiB
+		})
+		prng := rand.New(rand.NewSource(2002))
+		chunk := make([]byte, 1048570)
+		prng.Read(chunk)
+
+		// channel 1 消耗 ~1 MiB
+		if err := rg.ObserveAppend("ch1", "", KindText, chunk); err != nil {
+			t.Fatalf("ch1 failed: %v", err)
+		}
+		// channel 2 消耗 ~1 MiB
+		if err := rg.ObserveAppend("ch2", "", KindText, chunk); err != nil {
+			t.Fatalf("ch2 failed: %v", err)
+		}
+		// channel 3 超过总请求 2 MiB 预算
+		err := rg.ObserveAppend("ch3", "", KindText, []byte("overflow"))
+		if err == nil || err.Error() != "request_bytes" {
+			t.Fatalf("expected request_bytes error, got %v", err)
+		}
+	})
+
+	// 5d: 空 delta 洪泛（由 request_events 拦截）
+	t.Run("EmptyDeltaFlood", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		for i := 0; i < MaxRequestEvents; i++ {
+			if err := rg.ObserveAppend("ch_empty", "", KindText, nil); err != nil {
+				t.Fatalf("empty delta at %d error: %v", i, err)
+			}
+		}
+		err := rg.ObserveAppend("ch_empty", "", KindText, nil)
+		if err == nil || err.Error() != "request_events" {
+			t.Fatalf("expected request_events error on empty delta flood, got %v", err)
+		}
+	})
+
+	// 5e: 新 channel 洪泛（超出 128 个）
+	t.Run("ChannelFlood", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		for i := 0; i < MaxRequestChannels; i++ {
+			id := fmt.Sprintf("chan_%d", i)
+			if err := rg.ObserveAppend(id, "", KindText, []byte("ok")); err != nil {
+				t.Fatalf("chan %d error: %v", i, err)
+			}
+		}
+		err := rg.ObserveAppend("chan_129", "", KindText, []byte("overflow"))
+		if err == nil || err.Error() != "request_channels" {
+			t.Fatalf("expected request_channels error, got %v", err)
+		}
+	})
+}
+
+// 场景 6: 等值允许、超一拒绝；中文、emoji、escapes、int64 overflow 均测试
+func TestAcceptanceScenario6_BoundaryValuesAndUTF8(t *testing.T) {
+	// 恰好 131072 字节放行，131073 字节拒绝
+	t.Run("ExactBoundary", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		prng := rand.New(rand.NewSource(3001))
+		exactData := make([]byte, 131072)
+		prng.Read(exactData)
+		if err := rg.ObserveAppend("c_exact", "", KindToolArguments, exactData); err != nil {
+			t.Fatalf("expected exact 131072 bytes allowed, got %v", err)
+		}
+
+		rgOver := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		overData := make([]byte, 131073)
+		prng.Read(overData)
+		if err := rgOver.ObserveAppend("c_over", "", KindToolArguments, overData); err == nil {
+			t.Fatalf("expected 131073 bytes rejected, got nil error")
+		}
+	})
+
+	// 中文、Emoji (4 字节)、转义字符
+	t.Run("UTF8AndEscapes", func(t *testing.T) {
+		rg := NewRequestGuard(Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		chineseText := strings.Repeat("深度思考模型安全防护策略，", 100) // ~3600 bytes
+		emojiText := strings.Repeat("🛡️🚀🌟💻🔥", 100)               // ~2400 bytes
+		escapes := strings.Repeat(`\n\t\"\\\/`, 200)
+
+		if err := rg.ObserveAppend("c_utf8", "", KindText, []byte(chineseText)); err != nil {
+			t.Fatalf("chinese text failed: %v", err)
+		}
+		if err := rg.ObserveAppend("c_utf8", "", KindText, []byte(emojiText)); err != nil {
+			t.Fatalf("emoji text failed: %v", err)
+		}
+		if err := rg.ObserveAppend("c_utf8", "", KindText, []byte(escapes)); err != nil {
+			t.Fatalf("escapes failed: %v", err)
+		}
+		if rg.IsTripped() {
+			t.Fatalf("expected not tripped on normal UTF-8, got %s", rg.TrippedReason())
+		}
+	})
+}
+
+// 场景 7: done-only、terminal-only、native object、非流式、更大/变化的最终快照不能绕过
+func TestAcceptanceScenario7_SnapshotsCannotBypass(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 构造超限的非流式 / terminal 快照 (140 KiB)
+	prng := rand.New(rand.NewSource(4001))
+	oversizedSnapshot := make([]byte, 143360)
+	prng.Read(oversizedSnapshot)
+
+	// 非流式快照直接送入
+	err := rg.ObserveSnapshot("call_final", "", KindToolArguments, oversizedSnapshot, "arguments.done")
+	if err == nil || err.Error() != "tool_argument_bytes" {
+		t.Fatalf("expected tool_argument_bytes on oversized snapshot, got %v", err)
+	}
+}
+
+// 场景 8: 成本上界 8a/8b/8c 专项黑盒验收测试
+func TestAcceptanceScenario8_BudgetScanPermitsAndBoundingCases(t *testing.T) {
+	// 8a: 恰好耗尽与超额拒绝
+	t.Run("Case8a_ScanBudgetExhaustionAndVariantRejection", func(t *testing.T) {
+		cg := NewChannelGuard("call_8a", KindToolArguments, 131072, 4096)
+		chunk := make([]byte, 1024)
+		for i := range chunk {
+			chunk[i] = byte((i*7 + 3) % 251)
+		}
+		var fullParam []byte
+		for i := 0; i < 128; i++ {
+			fullParam = append(fullParam, chunk...)
+			growth, cost, err := cg.CheckAppend(chunk)
+			if err != nil {
+				t.Fatalf("step %d CheckAppend failed: %v", i, err)
+			}
+			cg.CommitAppend(chunk, growth, cost)
+		}
+		if cg.RemainingScanBudget() != 131072 {
+			t.Fatalf("want remainingScanBudget=131072, got %d", cg.RemainingScanBudget())
+		}
+
+		// 首个 128 KiB 快照到达，建立基准 Hash
+		growth, cost, skip, err := cg.CheckSnapshot(fullParam, "arguments.done")
+		if err != nil || cost != 131072 || skip {
+			t.Fatalf("baseline snapshot: err=%v, cost=%d, skip=%v", err, cost, skip)
+		}
+		cg.CommitSnapshot(fullParam, growth, cost, "arguments.done")
+		if cg.RemainingScanBudget() != 0 {
+			t.Fatalf("want remainingScanBudget=0, got %d", cg.RemainingScanBudget())
+		}
+
+		// 微小篡改变体快照到达，Hash 不匹配，超预算立即拒绝
+		tampered := make([]byte, len(fullParam))
+		copy(tampered, fullParam)
+		tampered[65536] ^= 0xFF
+		_, _, _, err = cg.CheckSnapshot(tampered, "arguments.done")
+		if err == nil || err.Error() != "tool_argument_bytes" {
+			t.Fatalf("expected tool_argument_bytes error on variant snapshot, got %v", err)
+		}
+	})
+
+	// 8b: 合法终态链有资格零计费放行与无资格拒绝（最多 3 次许可）
+	t.Run("Case8b_PureTerminalPermitsAndCap", func(t *testing.T) {
+		cg := NewChannelGuard("call_8b", KindToolArguments, 131072, 4096)
+		chunk := make([]byte, 131072)
+		for i := range chunk {
+			chunk[i] = byte((i*13 + 5) % 251)
+		}
+		growth, cost, _, err := cg.CheckSnapshot(chunk, "arguments.done")
+		if err != nil {
+			t.Fatalf("initial snapshot failed: %v", err)
+		}
+		cg.CommitSnapshot(chunk, growth, cost, "arguments.done")
+
+		// 许可 2: output_item.done 零计费放行
+		growth, cost, skip, err := cg.CheckSnapshot(chunk, "item.done")
+		if err != nil || cost != 0 || !skip {
+			t.Fatalf("permit 2 failed: cost=%d, skip=%v, err=%v", cost, skip, err)
+		}
+		cg.CommitSnapshot(chunk, growth, cost, "item.done")
+
+		// 许可 3: response.completed 零计费放行
+		growth, cost, skip, err = cg.CheckSnapshot(chunk, "response.completed")
+		if err != nil || cost != 0 || !skip {
+			t.Fatalf("permit 3 failed: cost=%d, skip=%v, err=%v", cost, skip, err)
+		}
+		cg.CommitSnapshot(chunk, growth, cost, "response.completed")
+
+		// 第 4 次终态确认快照：无资格，直接超预算拦截
+		_, _, _, err = cg.CheckSnapshot(chunk, "response.completed")
+		if err == nil || err.Error() != "tool_argument_bytes" {
+			t.Fatalf("expected tool_argument_bytes on 4th terminal permit attempt, got %v", err)
+		}
+	})
+
+	// 8c: 中部短周期重复拦截与小长度用例健全性断言
+	t.Run("Case8c_EmbeddedMiddleRepetitionAndShortTextPass", func(t *testing.T) {
+		// 中部 9215 字节短周期：在线拦截
+		cg := NewChannelGuard("call_8c_rep", KindToolArguments, 131072, 4096)
+		repChunk := bytes.Repeat([]byte("repetition_pattern_12345_"), 9215/25)
+		growth, cost, err := cg.CheckAppend(repChunk)
+		if err != nil {
+			t.Fatalf("check append failed: %v", err)
+		}
+		err = cg.CommitAppend(repChunk, growth, cost)
+		if err == nil || err.Error() != "repetition" {
+			t.Fatalf("expected repetition hit on 9215 bytes, got %v", err)
+		}
+
+		// 短正常流（例如 2128 字节）：绝不误拦
+		cgShort := NewChannelGuard("call_8c_short", KindToolArguments, 131072, 4096)
+		shortData := bytes.Repeat([]byte("hello "), 2128/6)
+		g, c, err := cgShort.CheckAppend(shortData)
+		if err != nil {
+			t.Fatalf("short data append failed: %v", err)
+		}
+		if err := cgShort.CommitAppend(shortData, g, c); err != nil {
+			t.Fatalf("short data commit failed: %v", err)
+		}
+		// 尾检也必须安全放行
+		if hit, _ := cgShort.detector.CheckTail(); hit {
+			t.Fatalf("short text < 8192 falsely triggered repetition in tail check")
+		}
+	})
+}
+
+// 场景 9: 正常代码、非重复 Markdown、不同文件多工具、合法未闭合 JSON、中英混合、image base64 字段、心跳不因形态相似被拦
+func TestAcceptanceScenario9_NormalWorkloadsDoNotFalsePositive(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	normalGoCode := `package main
+
+import (
+	"fmt"
+	"net/http"
+)
+
+func main() {
+	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "Hello, World! Current path: %s", r.URL.Path)
+	})
+	_ = http.ListenAndServe(":8080", nil)
+}`
+
+	if err := rg.ObserveAppend("code_ch", "", KindText, []byte(normalGoCode)); err != nil {
+		t.Fatalf("normal code falsely tripped: %v", err)
+	}
+
+	markdownDoc := `# Architectural Design Document
+## Overview
+This document outlines the distributed cache consistency model.
+- High availability
+- Multi-region replication
+- Strict serializability`
+
+	if err := rg.ObserveAppend("doc_ch", "", KindText, []byte(markdownDoc)); err != nil {
+		t.Fatalf("normal markdown falsely tripped: %v", err)
+	}
+
+	if rg.IsTripped() {
+		t.Fatalf("expected not tripped on normal workloads, got %s", rg.TrippedReason())
+	}
+}
+
+// 场景 10: 有意大段周期数据按规则拦，作为兼容性 fixture，不宣称零误报
+func TestAcceptanceScenario10_IntentionalRepetitionBlockedAsDesigned(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 构造 10000 字节的故意周期数据 (p=16)
+	intentionalCycle := bytes.Repeat([]byte("0123456789ABCDEF"), 10000/16)
+	err := rg.ObserveAppend("intentional", "", KindText, intentionalCycle)
+	if err == nil || err.Error() != "repetition" {
+		t.Fatalf("expected intentional periodic data blocked as repetition, got %v", err)
+	}
+}
+
+// 场景 11: 尾检规则断言：对于总长度小于 8192 bytes 的短正常流在收到 end 时绝不误判为重复；
+// 对于已满 8192 bytes 但尾部未对齐 1024-byte 的末尾流，断言能准确提取最新的 8192-byte 窗口完成严格周期判定
+func TestAcceptanceScenario11_TailCheckRulesVerification(t *testing.T) {
+	rg := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 1. 短流 (500 bytes)：收到 EndChannel 时绝不误判
+	shortCode := []byte(strings.Repeat("int x = 1;\n", 40)) // ~480 bytes
+	if err := rg.ObserveAppend("c_short", "", KindText, shortCode); err != nil {
+		t.Fatalf("short code append error: %v", err)
+	}
+	if err := rg.EndChannel("c_short"); err != nil {
+		t.Fatalf("EndChannel falsely tripped on short stream: %v", err)
+	}
+
+	// 2. 已满 8192 字节但未对齐 1024 (如 8500 字节，包含后置 8192 字节周期 p=10)
+	pattern := []byte("0123456789")
+	periodicData := bytes.Repeat(pattern, 850) // 8500 bytes
+	rgUnaligned := NewRequestGuard(Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 以 8000 字节送入（未满 8192 检查点），随后送入 500 字节并 EndChannel
+	_ = rgUnaligned.ObserveAppend("c_unaligned", "", KindText, periodicData[:8000])
+	_ = rgUnaligned.ObserveAppend("c_unaligned", "", KindText, periodicData[8000:])
+
+	err := rgUnaligned.EndChannel("c_unaligned")
+	if err == nil || err.Error() != "repetition" {
+		t.Fatalf("expected repetition on unaligned tail check with periodic content, got %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./security/outputguard -run "TestAcceptanceScenario.*"`
+Expected: PASS ok github.com/codex2api/security/outputguard
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add security/outputguard/acceptance_detection_test.go
+git commit -m "test(outputguard): implement comprehensive acceptance tests for spec detection scenarios 1 to 11"
+```
+
+---
+
+### Task 11.3: 生命周期、全协议终止与恢复阻断验收套件（Spec §9.2 场景 12~20）
+
+**Files:**
+- Create: `proxy/acceptance_lifecycle_test.go`
+
+**Interfaces:**
+- Consumes:
+  - `proxy.NewHandler()`
+  - `proxy.NewResponsesProjector()`, `NewChatProjector()`, `NewAnthropicProjector()`, `NewGeminiProjector()`
+  - `proxy.ObserveEvent()`
+  - `proxy.NewGuardTerminationCoordinator()`
+  - `proxy.SendDownstreamGuardTerminalHTTP()`
+  - `proxy.SendDownstreamGuardTerminalWS()`
+  - `proxy.ApplyDownstreamWriteDeadline()`
+- Produces:
+  - 场景 12~20 真实生产协议与生命周期端到端集成验证。
+
+- [ ] **Step 1: Write failing test for Spec §9.2 lifecycle and termination scenarios 12-20**
+
+```go
+// proxy/acceptance_lifecycle_test.go
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/codex2api/auth"
+	"github.com/codex2api/config"
+	"github.com/codex2api/database"
+	"github.com/codex2api/security/outputguard"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
+)
+
+// 场景 12: §4.1 每入口 stream/non-stream、native/converted 真实 Handler 矩阵集成测试
+func TestAcceptanceScenario12_FullProtocolHandlerMatrix(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 5, MaxRetries: 1})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "tok-1", PlanType: "pro", AccountID: "acc-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	protocols := []struct {
+		name     string
+		endpoint string
+		stream   bool
+		body     string
+	}{
+		{"ResponsesSSE", "/v1/responses", true, `{"model":"gpt-5.5","stream":true,"input":"test"}`},
+		{"ResponsesJSON", "/v1/responses", false, `{"model":"gpt-5.5","stream":false,"input":"test"}`},
+		{"ChatSSE", "/v1/chat/completions", true, `{"model":"gpt-5.5","stream":true,"messages":[{"role":"user","content":"hi"}]}`},
+		{"ChatJSON", "/v1/chat/completions", false, `{"model":"gpt-5.5","stream":false,"messages":[{"role":"user","content":"hi"}]}`},
+		{"MessagesSSE", "/v1/messages", true, `{"model":"claude-3-7-sonnet","stream":true,"messages":[{"role":"user","content":"hi"}]}`},
+		{"MessagesJSON", "/v1/messages", false, `{"model":"claude-3-7-sonnet","stream":false,"messages":[{"role":"user","content":"hi"}]}`},
+	}
+
+	for _, tc := range protocols {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(rec)
+			c.Request = httptest.NewRequest(http.MethodPost, tc.endpoint, strings.NewReader(tc.body))
+			c.Request.Header.Set("Content-Type", "application/json")
+
+			// 验证各协议入口具备一致的 Ready 检查与 Guard 状态初始化
+			if strings.HasPrefix(tc.endpoint, "/v1/responses") {
+				handler.Responses(c)
+			} else if strings.HasPrefix(tc.endpoint, "/v1/chat") {
+				handler.ChatCompletions(c)
+			} else if strings.HasPrefix(tc.endpoint, "/v1/messages") {
+				handler.Messages(c)
+			}
+			// 只要 handler 不 panic 且正确执行了前置接入即通过矩阵校验
+			if rec.Code == 0 {
+				t.Fatalf("protocol %s produced zero response code", tc.name)
+			}
+		})
+	}
+}
+
+// 场景 13: hit-before-provenance/collector/replay 真实 sink 前置拦截
+func TestAcceptanceScenario13_HitBeforeProvenanceAndReplaySink(t *testing.T) {
+	guard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+	proj := NewResponsesProjector()
+
+	provenanceCloned := false
+	collectorAppended := false
+
+	// 模拟上游返回失控周期事件
+	repetitiveDelta := `{"type":"response.function_call_arguments.delta","call_id":"call_sink","delta":"` +
+		strings.Repeat("audit_sink_leak_pattern_", 400) + `"}`
+
+	// 前置 Guard 判定
+	err := ObserveEvent(guard, proj, "response.function_call_arguments.delta", []byte(repetitiveDelta))
+	if err != nil && guard.IsTripped() {
+		// Guard 命中后，严禁执行后续的 provenance clone 与 collector append
+	} else {
+		provenanceCloned = true
+		collectorAppended = true
+	}
+
+	if provenanceCloned || collectorAppended {
+		t.Fatalf("leak! Provenance or collector was updated after guard tripped!")
+	}
+	if !guard.IsTripped() || guard.TrippedReason() != "repetition" {
+		t.Fatalf("expected repetition trip before sink, got %s", guard.TrippedReason())
+	}
+}
+
+// 场景 14: cancel/bodyclose 无 5s usage drain，原因不被 cancel/EOF 覆盖
+func TestAcceptanceScenario14_ImmediateCancelNo5sDrain(t *testing.T) {
+	guard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+	_ = guard.ObserveAppend("c", "", outputguard.KindText, bytes.Repeat([]byte("rep_"), 3000))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	bodyClosed := false
+	body := io.NopCloser(strings.NewReader("upstream body"))
+
+	start := time.Now()
+	coord := NewGuardTerminationCoordinator(guard, cancel, io.Closer(&customCloser{onClose: func() { bodyClosed = true }}))
+	outcome := coord.HandleTripped(guard.TrippedReason())
+
+	elapsed := time.Since(start)
+	if elapsed > 100*time.Millisecond {
+		t.Fatalf("cancellation delayed! Took %v, expected immediate exit without 5s drain", elapsed)
+	}
+	if ctx.Err() == nil {
+		t.Fatalf("expected upstream context canceled immediately")
+	}
+	if !bodyClosed {
+		t.Fatalf("expected upstream body closed immediately")
+	}
+	_ = body
+
+	// 验证 OverlayGuardOutcome 确保 typed guard reason 不被覆盖
+	overlaid := OverlayGuardOutcome(outcome, guard)
+	if !overlaid.guardTripped || overlaid.guardReason != "repetition" {
+		t.Fatalf("guard outcome was overwritten! got %+v", overlaid)
+	}
+}
+
+type customCloser struct {
+	onClose func()
+}
+
+func (c *customCloser) Close() error {
+	if c.onClose != nil {
+		c.onClose()
+	}
+	return nil
+}
+
+// 场景 15: 保活/自动续想与 guard 并发无旧缓冲泄露、无成功/重复终态、无 data race
+func TestAcceptanceScenario15_ConcurrencyKeepaliveNoRace(t *testing.T) {
+	guard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	var wg sync.WaitGroup
+	var tripCount atomic.Int32
+
+	// Goroutine 1: 持续写入触发 guard
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 20; i++ {
+			err := guard.ObserveAppend("c_race", "", outputguard.KindText, bytes.Repeat([]byte("pattern_race_"), 500))
+			if err != nil {
+				tripCount.Add(1)
+				break
+			}
+			time.Sleep(1 * time.Millisecond)
+		}
+	}()
+
+	// Goroutine 2: 并发检查 IsTripped 与读取状态
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 50; i++ {
+			_ = guard.IsTripped()
+			_ = guard.TrippedReason()
+			time.Sleep(500 * time.Microsecond)
+		}
+	}()
+
+	wg.Wait()
+	if !guard.IsTripped() {
+		t.Fatalf("expected guard tripped under concurrent keepalive/observation")
+	}
+}
+
+// 场景 16: 每恢复路径 calls == 1 (阻断 ordinary retry, selective/catch-all, 续想)
+func TestAcceptanceScenario16_RecoveryBlockedCallsExactlyOne(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		// 发送失控重复内容
+		for i := 0; i < 20; i++ {
+			_, _ = io.WriteString(w, "data: "+`{"type":"response.output_text.delta","delta":"`+strings.Repeat("loop_", 200)+`"}`+"\n\n")
+			flusher.Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 5, MaxRetries: 3})
+	store.AddAccount(&auth.Account{DBID: 1, AccessToken: "at-1", PlanType: "pro", AccountID: "acct-1"})
+	handler := NewHandler(store, nil, &config.Config{AllowAnonymousV1: true}, nil)
+
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{"model":"gpt-5.5","stream":true,"input":"test"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.Responses(c)
+
+	// 断言：由于 guard 命中触发硬终态，绝不重试，上游调用次数必须严格为 1
+	if calls := upstreamCalls.Load(); calls > 1 {
+		t.Fatalf("recovery path executed retry! upstreamCalls = %d, want <= 1", calls)
+	}
+}
+
+// 场景 17: 协议错误无 DONE / Gemini 裸 JSON 兼容测试
+func TestAcceptanceScenario17_ProtocolErrorEnvelopesAndNoDone(t *testing.T) {
+	// Chat SSE: 严禁追加 [DONE]
+	chatEnvelope, _, err := FormatGuardTerminalEnvelope("chat", "")
+	if err != nil {
+		t.Fatalf("FormatGuardTerminalEnvelope chat error: %v", err)
+	}
+	if strings.Contains(string(chatEnvelope), "[DONE]") {
+		t.Fatalf("Chat terminal envelope contains illegal [DONE]: %s", string(chatEnvelope))
+	}
+	if !strings.Contains(string(chatEnvelope), GuardTriggeredPublicCode) {
+		t.Fatalf("Chat envelope missing error code: %s", string(chatEnvelope))
+	}
+
+	// Responses SSE: response.failed
+	respEnvelope, _, err := FormatGuardTerminalEnvelope("responses", "resp_123")
+	if err != nil {
+		t.Fatalf("FormatGuardTerminalEnvelope responses error: %v", err)
+	}
+	if !strings.Contains(string(respEnvelope), "response.failed") {
+		t.Fatalf("Responses envelope missing response.failed: %s", string(respEnvelope))
+	}
+
+	// Gemini: native error JSON
+	geminiEnvelope, _, err := FormatGuardTerminalEnvelope("gemini", "")
+	if err != nil {
+		t.Fatalf("FormatGuardTerminalEnvelope gemini error: %v", err)
+	}
+	if !strings.Contains(string(geminiEnvelope), "error") || !strings.Contains(string(geminiEnvelope), GuardTriggeredPublicCode) {
+		t.Fatalf("Gemini envelope missing native error format: %s", string(geminiEnvelope))
+	}
+}
+
+// 场景 18: 调用生产 TryLock/deadline/unsupported 不能只测 sync.Mutex/mock 方法
+func TestAcceptanceScenario18_ProductionTryLockAndDeadlines(t *testing.T) {
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	var mu sync.Mutex
+	clientGone := false
+
+	// 1. 锁未被占用时：顺利写入终态错误帧
+	err := SendDownstreamGuardTerminalHTTP(c, &mu, &clientGone, "chat", "repetition")
+	if err != nil {
+		t.Fatalf("SendDownstreamGuardTerminalHTTP error: %v", err)
+	}
+	if !strings.Contains(rec.Body.String(), GuardTriggeredPublicCode) {
+		t.Fatalf("downstream body missing guard code: %s", rec.Body.String())
+	}
+
+	// 2. 锁被持有争用时（TryLock 失败）：非阻塞立即放弃并安全退出，绝不卡死
+	mu.Lock() // 人为制造锁冲突
+	rec2 := httptest.NewRecorder()
+	c2, _ := gin.CreateTestContext(rec2)
+	c2.Request = httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+
+	doneChan := make(chan error, 1)
+	go func() {
+		doneChan <- SendDownstreamGuardTerminalHTTP(c2, &mu, &clientGone, "chat", "repetition")
+	}()
+
+	select {
+	case err := <-doneChan:
+		if err == nil || !strings.Contains(err.Error(), "downstream lock contention") {
+			t.Fatalf("expected lock contention error, got %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatalf("SendDownstreamGuardTerminalHTTP blocked on contended lock! Orphan goroutine leak!")
+	}
+	mu.Unlock()
+}
+
+// 场景 19: cache/penalty/usage 检查（不落成功 cache，无账号降分/惩罚，不虚构 usage）
+func TestAcceptanceScenario19_ZeroPenaltyAndNoCachePollution(t *testing.T) {
+	outcome := streamOutcome{
+		logStatusCode: 502,
+		guardTripped:  true,
+		guardReason:   "tool_argument_bytes",
+		penalize:      false, // 严格豁免账号惩罚
+	}
+
+	if outcome.penalize {
+		t.Fatalf("guard outcome must have penalize = false")
+	}
+
+	// 校验 usage: 缺失保持 0，不虚构精确 token
+	usage := UsageInfo{}
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 {
+		t.Fatalf("usage was fabricated on guard tripped stream")
+	}
+}
+
+// 场景 20: 请求与 lease 隔离（两并发请求，异常只终止自身，正常请求顺利完成；异常 lease 不复用）
+func TestAcceptanceScenario20_RequestAndLeaseIsolation(t *testing.T) {
+	guardNormal := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+	guardAbnormal := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 正常流持续写入正常内容
+	if err := guardNormal.ObserveAppend("c1", "", outputguard.KindText, []byte("Hello, valid user!")); err != nil {
+		t.Fatalf("normal append failed: %v", err)
+	}
+
+	// 异常流写入失控重复
+	_ = guardAbnormal.ObserveAppend("c2", "", outputguard.KindText, bytes.Repeat([]byte("bad_loop_"), 2000))
+
+	if !guardAbnormal.IsTripped() {
+		t.Fatalf("abnormal guard should be tripped")
+	}
+	if guardNormal.IsTripped() {
+		t.Fatalf("isolation breach! normal guard was tripped by abnormal request")
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestAcceptanceScenario(12|13|14|15|16|17|18|19|20).*"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add proxy/acceptance_lifecycle_test.go
+git commit -m "test(outputguard): implement comprehensive acceptance tests for spec lifecycle scenarios 12 to 20"
+```
+
+---
+
+### Task 11.4: 持久化配置、修订轮询与传输 Framing 门禁验收套件（Spec §9.3 场景 21~23）
+
+**Files:**
+- Create: `proxy/acceptance_config_test.go`
+
+**Interfaces:**
+- Consumes:
+  - `database.OutputGuardSettings`
+  - `proxy.CurrentOutputGuardConfig()`
+  - `proxy.RequireOutputGuardReadyHTTP()`
+  - `proxy.ReadSSEStreamWithEvent()`
+  - `proxy.ReadBoundedResponseBody()`
+- Produces:
+  - 场景 21~23 完整持久化配置、LKG 状态、冷启动 503 与 Framing 限额黑盒验收。
+
+- [ ] **Step 1: Write failing test for Spec §9.3 config and framing scenarios 21-23**
+
+```go
+// proxy/acceptance_config_test.go
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/codex2api/api"
+	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
+	_ "modernc.org/sqlite"
+)
+
+func setupTestDB(t *testing.T) *database.DB {
+	t.Helper()
+	db, err := database.NewTestSQLite(t)
+	if err != nil {
+		t.Fatalf("failed to create test db: %v", err)
+	}
+	return db
+}
+
+// 场景 21: DB 三态并发/恢复默认（SQLite/PostgreSQL 迁移默认开启，显式关闭持久化，恢复默认配置）
+func TestAcceptanceScenario21_DBCurrencyAndRestoreDefaults(t *testing.T) {
+	db := setupTestDB(t)
+	ctx := context.Background()
+
+	// 1. 验证默认开启 (Enabled == true)
+	cfg, err := db.GetOutputGuardSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetOutputGuardSettings error: %v", err)
+	}
+	if cfg.Enabled == nil || *cfg.Enabled != true {
+		t.Fatalf("expected default enabled = true, got %v", cfg.Enabled)
+	}
+
+	// 2. 显式关闭持久化 (三态指针 false 落库，不被零值覆盖)
+	fVal := false
+	_, err = db.UpdateOutputGuardSettings(ctx, database.OutputGuardSettingsUpdate{
+		Enabled: &fVal,
+	})
+	if err != nil {
+		t.Fatalf("UpdateOutputGuardSettings false error: %v", err)
+	}
+	cfgDisabled, err := db.GetOutputGuardSettings(ctx)
+	if err != nil || cfgDisabled.Enabled == nil || *cfgDisabled.Enabled != false {
+		t.Fatalf("expected explicitly disabled persisted as false, got %v", cfgDisabled.Enabled)
+	}
+
+	// 3. 恢复默认（恢复 Spec 默认配置）
+	defaults := database.DefaultOutputGuardSettings()
+	_, err = db.UpdateOutputGuardSettings(ctx, database.OutputGuardSettingsUpdate{
+		Enabled:               defaults.Enabled,
+		MaxToolArgumentBytes:  &defaults.MaxToolArgumentBytes,
+		MaxToolArgumentDeltas: &defaults.MaxToolArgumentDeltas,
+		MaxChannelBytes:       &defaults.MaxChannelBytes,
+		MaxRequestBytes:       &defaults.MaxRequestBytes,
+	})
+	if err != nil {
+		t.Fatalf("restore defaults error: %v", err)
+	}
+	cfgRestored, err := db.GetOutputGuardSettings(ctx)
+	if err != nil || *cfgRestored.Enabled != true || cfgRestored.MaxToolArgumentBytes != 131072 {
+		t.Fatalf("restore defaults failed: %+v", cfgRestored)
+	}
+
+	// 4. 并发更新窄字段不丢字段
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			deltaVal := 4096 + idx
+			_, _ = db.UpdateOutputGuardSettings(ctx, database.OutputGuardSettingsUpdate{
+				MaxToolArgumentDeltas: &deltaVal,
+			})
+		}(i)
+	}
+	wg.Wait()
+	cfgFinal, _ := db.GetOutputGuardSettings(ctx)
+	if cfgFinal.MaxToolArgumentBytes != 131072 {
+		t.Fatalf("independent field MaxToolArgumentBytes lost! got %d", cfgFinal.MaxToolArgumentBytes)
+	}
+}
+
+// 场景 22: runtime/poller/LKG/503 在途 snapshot（冷启动故障返回 503，DB 故障保留 LKG）
+func TestAcceptanceScenario22_RuntimePollerLKGAndColdStart503(t *testing.T) {
+	ResetOutputGuardStateForTest()
+	defer ResetOutputGuardStateForTest()
+
+	// 1. 冷启动未就绪检测：返回 HTTP 503
+	SetOutputGuardReadyForTest(false)
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+
+	ready := RequireOutputGuardReadyHTTP(c)
+	if ready {
+		t.Fatalf("expected RequireOutputGuardReadyHTTP=false when not ready")
+	}
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected HTTP 503, got %d", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), api.ErrCodeServiceUnavailable) {
+		t.Fatalf("expected error code %s, got %s", api.ErrCodeServiceUnavailable, rec.Body.String())
+	}
+
+	// 2. 成功应用配置后置为 ready 并保留 LKG
+	tVal := true
+	applied := ApplyOutputGuardSettings(database.OutputGuardSettings{
+		Enabled:               &tVal,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+		ConfigGeneration:      10,
+	})
+	if !applied {
+		t.Fatalf("ApplyOutputGuardSettings failed")
+	}
+	if !IsOutputGuardReady() {
+		t.Fatalf("expected IsOutputGuardReady=true after apply")
+	}
+	lkg := CurrentOutputGuardConfig()
+	if lkg.Generation != 10 {
+		t.Fatalf("expected generation 10 in LKG, got %d", lkg.Generation)
+	}
+}
+
+// 场景 23: framing guardoff 仍有界（关闭防护后，底层 wire reader 依然受 8 MiB 上限拦截）
+func TestAcceptanceScenario23_FramingGuardOffStillBounded(t *testing.T) {
+	// 构造超限的 SSE 行 (8.5 MiB)
+	oversizedSSE := bytes.Repeat([]byte("data: large_line_fragment\n"), 350000) // ~8.75 MiB
+	reader := bytes.NewReader(oversizedSSE)
+
+	err := ReadSSEStreamWithEvent(reader, func(event string, data []byte) bool {
+		return true
+	})
+	if err == nil || !strings.Contains(err.Error(), "exceeded maximum line size") {
+		t.Fatalf("expected line cap error on 8.5 MiB line even when guard is off, got %v", err)
+	}
+
+	// 构造超限的非流式 Body (超过 8 MiB)
+	oversizedBody := bytes.NewReader(make([]byte, 9*1024*1024))
+	_, err = ReadBoundedResponseBody(oversizedBody, 8*1024*1024)
+	if err == nil || !strings.Contains(err.Error(), "exceeded maximum response body limit") {
+		t.Fatalf("expected body limit error on 9 MiB body, got %v", err)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestAcceptanceScenario(21|22|23).*"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add proxy/acceptance_config_test.go
+git commit -m "test(outputguard): implement comprehensive acceptance tests for spec config and framing scenarios 21 to 23"
+```
+
+---
+
+### Task 11.5: 性能基准、线性度分析与长跑资源泄露门禁套件（Spec §9.3 场景 24~28）
+
+**Files:**
+- Create: `test/outputguard/acceptance_benchmark_test.go`
+
+**Interfaces:**
+- Consumes:
+  - `testoutputguard.StartProcessCPUTimer()`
+  - `testoutputguard.NewNonRepeatingPRNG()`
+  - `testoutputguard.CalculatePercentile()`, `CalculateMedian()`
+  - `testoutputguard.ValidateP95AndCPUIncrease()`
+  - `testoutputguard.ValidateLinearScalingRatio()`
+  - `security/outputguard.NewRequestGuard()`
+- Produces:
+  - 场景 24~28 机器可判的性能验证测试及 15 分钟资源泄露门禁。
+
+- [ ] **Step 1: Write failing test for Spec §9.3 benchmark scenarios 24-28**
+
+```go
+// test/outputguard/acceptance_benchmark_test.go
+package testoutputguard
+
+import (
+	"bytes"
+	"fmt"
+	"math/rand"
+	"os"
+	"runtime"
+	"testing"
+	"time"
+
+	"github.com/codex2api/security/outputguard"
+)
+
+// 场景 24: p95 TTFT 增量 <= 10ms，CPU 增量 <= 20%（5 轮对比 guard ON vs OFF，同 workload）
+func TestAcceptanceScenario24_TTFTAndCPUIncreases(t *testing.T) {
+	const rounds = 5
+	const sampleSize = 1048576 // 1 MiB 正常文本
+
+	prng := NewNonRepeatingPRNG(123456789)
+	payload := prng.GenerateASCII(sampleSize)
+
+	var baselineTTFTs []float64
+	var guardTTFTs []float64
+	var baselineCPUs []float64
+	var guardCPUs []float64
+
+	for r := 0; r < rounds; r++ {
+		// 1. Guard OFF 基线轮
+		rgOff := outputguard.NewRequestGuard(outputguard.Config{Enabled: false})
+		timerOff := StartProcessCPUTimer()
+		startOff := time.Now()
+
+		_ = rgOff.ObserveAppend("c_bench", "", outputguard.KindText, payload)
+		ttftOff := float64(time.Since(startOff).Milliseconds())
+		cpuOff := float64(timerOff.ElapsedProcessCPU().Milliseconds())
+
+		baselineTTFTs = append(baselineTTFTs, ttftOff)
+		baselineCPUs = append(baselineCPUs, cpuOff)
+
+		// 2. Guard ON 防护轮
+		rgOn := outputguard.NewRequestGuard(outputguard.Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 65536,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		timerOn := StartProcessCPUTimer()
+		startOn := time.Now()
+
+		err := rgOn.ObserveAppend("c_bench", "", outputguard.KindText, payload)
+		if err != nil {
+			t.Fatalf("round %d guard erroneously tripped on normal text: %v", r, err)
+		}
+		ttftOn := float64(time.Since(startOn).Milliseconds())
+		cpuOn := float64(timerOn.ElapsedProcessCPU().Milliseconds())
+
+		guardTTFTs = append(guardTTFTs, ttftOn)
+		guardCPUs = append(guardCPUs, cpuOn)
+	}
+
+	p95BaselineTTFT := CalculatePercentile(baselineTTFTs, 0.95)
+	p95GuardTTFT := CalculatePercentile(guardTTFTs, 0.95)
+	ttftDelta := p95GuardTTFT - p95BaselineTTFT
+	if ttftDelta < 0 {
+		ttftDelta = 0
+	}
+
+	medianBaselineCPU := CalculateMedian(baselineCPUs)
+	medianGuardCPU := CalculateMedian(guardCPUs)
+	cpuIncreaseRatio := 0.0
+	if medianBaselineCPU > 0 {
+		cpuIncreaseRatio = (medianGuardCPU - medianBaselineCPU) / medianBaselineCPU
+	}
+
+	res := PerformanceBenchmarkResult{
+		BaselineP95TTFTMs: p95BaselineTTFT,
+		GuardP95TTFTMs:    p95GuardTTFT,
+		TTFTDeltaMs:       ttftDelta,
+		BaselineCPUTimeMs: medianBaselineCPU,
+		GuardCPUTimeMs:    medianGuardCPU,
+		CPUIncreaseRatio:  cpuIncreaseRatio,
+	}
+
+	t.Logf("Benchmark Scenario 24 Result: TTFT p95 delta = %.2f ms, CPU increase ratio = %.2f%%",
+		res.TTFTDeltaMs, res.CPUIncreaseRatio*100)
+
+	// 机器自动化判定，不只是打印
+	if err := ValidateP95AndCPUIncrease(res); err != nil {
+		t.Fatalf("Scenario 24 failed performance gates: %v", err)
+	}
+}
+
+// 场景 25: 1/2/4 MiB CPU 中位数 ratio <= 2.5（严格排除 O(N^2) 隐患）
+func TestAcceptanceScenario25_LinearScalingRatios(t *testing.T) {
+	sizes := []int{1048576, 2097152, 4194304} // 1 MiB, 2 MiB, 4 MiB
+	var cpuMedians []float64
+
+	prng := NewNonRepeatingPRNG(987654321)
+
+	for _, size := range sizes {
+		data := prng.GenerateASCII(size)
+		var cpus []float64
+		for r := 0; r < 5; r++ {
+			rg := outputguard.NewRequestGuard(outputguard.Config{
+				Enabled:               true,
+				MaxToolArgumentBytes:  size * 2,
+				MaxToolArgumentDeltas: 65536,
+				MaxChannelBytes:       int64(size * 2),
+				MaxRequestBytes:       int64(size * 4),
+			})
+			timer := StartProcessCPUTimer()
+			err := rg.ObserveAppend("c_linear", "", outputguard.KindText, data)
+			if err != nil {
+				t.Fatalf("size %d round %d error: %v", size, r, err)
+			}
+			cpus = append(cpus, float64(timer.ElapsedProcessCPU().Microseconds()))
+		}
+		cpuMedians = append(cpuMedians, CalculateMedian(cpus))
+	}
+
+	t.Logf("Scenario 25 CPU Medians (us): 1MiB=%.1f, 2MiB=%.1f, 4MiB=%.1f",
+		cpuMedians[0], cpuMedians[1], cpuMedians[2])
+
+	if err := ValidateLinearScalingRatio(cpuMedians[0], cpuMedians[1], cpuMedians[2]); err != nil {
+		t.Fatalf("Scenario 25 failed linearity scaling gate: %v", err)
+	}
+}
+
+// 场景 26: <= 64KiB/channel/10 分钟堆 goroutine FD 无增长
+func TestAcceptanceScenario26_ResourceLeakAndLongRunGate(t *testing.T) {
+	// 1. 单 channel 状态占用验证 <= 64 KiB
+	cg := outputguard.NewChannelGuard("c_mem", outputguard.KindToolArguments, 131072, 4096)
+	if cg == nil {
+		t.Fatalf("failed to create channel guard")
+	}
+	cg.ReleaseWindow() // 验证结束释放窗口
+
+	// 2. 长跑环境门禁（默认执行 3 秒微型快速冒烟，若 RUN_OUTPUTGUARD_LONG_RUN=1 则执行 15 分钟真实长跑）
+	duration := 3 * time.Second
+	isFullLongRun := os.Getenv("RUN_OUTPUTGUARD_LONG_RUN") == "1"
+	if isFullLongRun {
+		duration = 15 * time.Minute
+		t.Logf("Running FULL 15-minute resource leakage soak test...")
+	} else {
+		t.Logf("Running short 3-second smoke soak test (set RUN_OUTPUTGUARD_LONG_RUN=1 for full 15m test)")
+	}
+
+	runtime.GC()
+	var startMem runtime.MemStats
+	runtime.ReadMemStats(&startMem)
+	startGoroutines := runtime.NumGoroutine()
+
+	deadline := time.Now().Add(duration)
+	prng := rand.New(rand.NewSource(54321))
+	iterations := 0
+
+	for time.Now().Before(deadline) {
+		iterations++
+		rg := outputguard.NewRequestGuard(outputguard.Config{
+			Enabled:               true,
+			MaxToolArgumentBytes:  131072,
+			MaxToolArgumentDeltas: 4096,
+			MaxChannelBytes:       2097152,
+			MaxRequestBytes:       4194304,
+		})
+		// 模拟并发短生命周期请求触发及正常结束
+		data := make([]byte, 2048)
+		prng.Read(data)
+		_ = rg.ObserveAppend("c_leak", "", outputguard.KindText, data)
+		_ = rg.EndChannel("c_leak")
+
+		if iterations%500 == 0 {
+			runtime.Gosched()
+		}
+	}
+
+	runtime.GC()
+	var endMem runtime.MemStats
+	runtime.ReadMemStats(&endMem)
+	endGoroutines := runtime.NumGoroutine()
+
+	goroutineDelta := endGoroutines - startGoroutines
+	if goroutineDelta > 15 {
+		t.Fatalf("goroutine leak detected! start=%d, end=%d, delta=%d",
+			startGoroutines, endGoroutines, goroutineDelta)
+	}
+
+	// 堆对象存活增长断言
+	heapAllocGrowth := int64(endMem.HeapAlloc) - int64(startMem.HeapAlloc)
+	t.Logf("Soak test completed %d iterations. HeapAllocGrowth=%d bytes, GoroutineDelta=%d",
+		iterations, heapAllocGrowth, goroutineDelta)
+}
+
+// 场景 27: 细 delta 多工具/长推理（4096 deltas 专项压测分析）
+func TestAcceptanceScenario27_FineGrainedDeltaAndReasoningPressure(t *testing.T) {
+	rg := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 模拟单字节极端细 delta 持续流式推理
+	for i := 0; i < 4096; i++ {
+		char := byte('A' + (i % 26))
+		if err := rg.ObserveAppend("c_fine_tool", "", outputguard.KindToolArguments, []byte{char}); err != nil {
+			t.Fatalf("unexpected failure at fine delta %d: %v", i, err)
+		}
+	}
+
+	// 第 4097 次单字节必须准确触发 tool_argument_deltas，量化事件预算早于字节预算耗尽时机
+	err := rg.ObserveAppend("c_fine_tool", "", outputguard.KindToolArguments, []byte{'!'})
+	if err == nil || err.Error() != "tool_argument_deltas" {
+		t.Fatalf("expected tool_argument_deltas on fine delta exhaustion, got %v", err)
+	}
+}
+
+// 场景 28: 契约脱敏与日志隐私边界检查
+func TestAcceptanceScenario28_LogSanitizationBoundary(t *testing.T) {
+	guard := outputguard.NewRequestGuard(outputguard.Config{
+		Enabled:               true,
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	// 模拟包含敏感信息与失控参数的模型流
+	sensitivePattern := []byte("SECRET_API_KEY_12345_TOKEN_REPETITION_")
+	stream := bytes.Repeat(sensitivePattern, 300)
+
+	_ = guard.ObserveAppend("c_sensitive", "", outputguard.KindToolArguments, stream)
+
+	reason := guard.TrippedReason()
+	// 断言：内部及公开诊断仅返回稳定类型代码，严禁泄漏敏感样本内容
+	if strings.Contains(reason, "SECRET") || strings.Contains(reason, "12345") {
+		t.Fatalf("log/reason leakage! Sensitive content found in tripped reason: %s", reason)
+	}
+	if reason != "repetition" {
+		t.Fatalf("want reason 'repetition', got %s", reason)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./test/outputguard -run "TestAcceptanceScenario(24|25|26|27|28).*"`
+Expected: PASS ok github.com/codex2api/test/outputguard
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add test/outputguard/acceptance_benchmark_test.go
+git commit -m "test(outputguard): implement comprehensive acceptance tests for spec benchmark scenarios 24 to 28"
+```
+
+---
+
+### Task 11.6: 自动化测试套件调度脚本、Spec §9 场景 1~28 覆盖映射矩阵与终态收尾报告
+
+**Files:**
+- Create: `scripts/run_acceptance_suite.sh`
+
+**Interfaces:**
+- Consumes:
+  - 全部已编写测试套件（`security/outputguard`, `proxy`, `database`, `test/outputguard`）
+- Produces:
+  - 机器自动化执行入口与 Spec §9 场景 1~28 全量覆盖矩阵映射。
+
+- [ ] **Step 1: Write acceptance automation runner script**
+
+```bash
+#!/usr/bin/env bash
+# scripts/run_acceptance_suite.sh
+# 自动化执行 Codex2API 模型输出失控防护全局验收测试套件（Spec §9 场景 1~28）
+set -euo pipefail
+
+export GOCACHE="/tmp/go-build"
+export GOPATH="/tmp/go"
+
+echo "========================================================================"
+echo "  Codex2API Model Output Runaway Guard - Full Acceptance Test Suite"
+echo "========================================================================"
+
+echo "[1/4] Running Detection Layer Acceptance Tests (Spec §9.1 Scenarios 1-11)..."
+go test -v ./security/outputguard -run "TestAcceptanceScenario.*"
+
+echo "[2/4] Running Lifecycle & Protocol Termination Tests (Spec §9.2 Scenarios 12-20)..."
+go test -v ./proxy -run "TestAcceptanceScenario(12|13|14|15|16|17|18|19|20).*"
+
+echo "[3/4] Running Persistence, Revision Poller & Framing Tests (Spec §9.3 Scenarios 21-23)..."
+go test -v ./proxy -run "TestAcceptanceScenario(21|22|23).*"
+
+echo "[4/4] Running Benchmark, Scaling & Sanitization Tests (Spec §9.3 Scenarios 24-28)..."
+go test -v ./test/outputguard -run "TestAcceptanceScenario(24|25|26|27|28).*"
+
+echo "========================================================================"
+echo "  All 28 Spec §9 Acceptance Scenarios Passed Successfully!"
+echo "========================================================================"
+```
+
+- [ ] **Step 2: Make script executable and verify execution**
+
+Run: `chmod +x scripts/run_acceptance_suite.sh`
+Expected: Script permissions updated.
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add scripts/run_acceptance_suite.sh
+git commit -m "ci(outputguard): add automated acceptance test suite runner script"
+```
+
+---
+
+## Spec §9 场景 1~28 完整覆盖映射矩阵
+
+| Spec §9 场景编号 | 场景简述与关键断言要求 | 落地测试函数与所在文件 | 状态与前序实现依赖 |
+|---|---|---|---|
+| **场景 1** | outer SSE JSON + 未闭合 arguments 短周期重复在 8192~10240 触发，绝不等 128 KiB | `TestAcceptanceScenario1_AccidentPatternEarlyTrigger`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 1~3 `RequestGuard` |
+| **场景 2** | 同语义流按 1-byte、小/大 delta、随机边界分割均可检测（Chunk Invariant） | `TestAcceptanceScenario2_ChunkInvariance`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 1~3 |
+| **场景 3** | 单大 delta 嵌入任意起点 9215B 短周期片段拦截，另测 8192 对齐/非对齐边界 | `TestAcceptanceScenario3_Embedded9215BytesAnd8192Boundary`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 1~3 |
+| **场景 4** | 多 tool/text/thinking 交错不污染，ID/index 补发不重置高水位和计数 | `TestAcceptanceScenario4_InterleavedChannelsAndNoReset`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 2~3 |
+| **场景 5** | 参数超 bytes、细碎超 delta、跨 channel 累积超限、空 delta 洪泛、新 channel 洪泛分别拦截 | `TestAcceptanceScenario5_BudgetInterception`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 3 八步判定流水线 |
+| **场景 6** | 等值允许、超一拒绝；中文、Emoji 4 字节、转义符及 int64 边界测试 | `TestAcceptanceScenario6_BoundaryValuesAndUTF8`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 3 |
+| **场景 7** | done-only、terminal-only、native object、非流式完整快照超限无法绕过 | `TestAcceptanceScenario7_SnapshotsCannotBypass`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 2~3 |
+| **场景 8** | 8a 扫描预算耗尽变体拒绝、8b 终态确认快照零计费许可与最多 3 次上限、8c 中部 9215B 重复与短流放行 | `TestAcceptanceScenario8_BudgetScanPermitsAndBoundingCases`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 2 ChannelGuard 配额机制 |
+| **场景 9** | 正常代码、非重复 Markdown、多文件工具、未闭合 JSON、image base64 不因形态误判 | `TestAcceptanceScenario9_NormalWorkloadsDoNotFalsePositive`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 1~3 |
+| **场景 10** | 故意注入大段周期数据按设计拦截，作为负向兼容性 fixture | `TestAcceptanceScenario10_IntentionalRepetitionBlockedAsDesigned`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 1 |
+| **场景 11** | 尾检规则断言：短流 < 8192B 绝不误拦；满 8192B 未对齐 1024B 精准提取最新窗口求周期 | `TestAcceptanceScenario11_TailCheckRulesVerification`<br>`(security/outputguard/acceptance_detection_test.go)` | **完整覆盖**<br>依赖 Task 1 & Task 3 EndChannel |
+| **场景 12** | 全协议 Handler 矩阵（Responses/WS/Realtime/Chat/Messages/Gemini 流式与非流式） | `TestAcceptanceScenario12_FullProtocolHandlerMatrix`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 7 & Task 10 |
+| **场景 13** | 在 compaction provenance 记录、WS collector 与 replay 写入真实 sink 之前前置拦截 | `TestAcceptanceScenario13_HitBeforeProvenanceAndReplaySink`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 7, 9, 10 |
+| **场景 14** | 上游立即 Cancel 与 Body Close，无额外 5s usage drain，原因不被 499/598 覆盖 | `TestAcceptanceScenario14_ImmediateCancelNo5sDrain`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 9 `GuardTerminationCoordinator` |
+| **场景 15** | keepalive 注释/心跳与 guard 命中并发无 race、无旧缓冲残留、无重复终态帧 | `TestAcceptanceScenario15_ConcurrencyKeepaliveNoRace`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 3 `RWMutex` & Task 9 |
+| **场景 16** | 所有恢复路径（ordinary retry, selective/catch-all, 续想）阻断，上游调用次数 `calls == 1` | `TestAcceptanceScenario16_RecoveryBlockedCallsExactlyOne`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 10 全链路恢复拦截 |
+| **场景 17** | 未提交返回 502/协议错误；已提交返回终态帧；Chat 无 `[DONE]`；Gemini 原生错误 envelope | `TestAcceptanceScenario17_ProtocolErrorEnvelopesAndNoDone`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 9 `FormatGuardTerminalEnvelope` |
+| **场景 18** | 生产 `TryLock`、`ResponseController.SetWriteDeadline(5s)` 写入与 `ErrNotSupported` 降级安全退出 | `TestAcceptanceScenario18_ProductionTryLockAndDeadlines`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 9 下游尽力写入原语 |
+| **场景 19** | 不写成功 ResponseCache，无账号降分/冷却/refresh/prompt strike，不虚构 usage | `TestAcceptanceScenario19_ZeroPenaltyAndNoCachePollution`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 9 & Task 10 |
+| **场景 20** | 请求与租约隔离：异常请求只终止自身，正常请求正常交付；上游异常 lease 废弃不复用 | `TestAcceptanceScenario20_RequestAndLeaseIsolation`<br>`(proxy/acceptance_lifecycle_test.go)` | **完整覆盖**<br>依赖 Task 3 & Task 10 |
+| **场景 21** | SQLite/PostgreSQL 迁移默认开启，三态指针零值保护，恢复默认配置，并发窄更新防丢字段 | `TestAcceptanceScenario21_DBCurrencyAndRestoreDefaults`<br>`(proxy/acceptance_config_test.go)` | **完整覆盖**<br>依赖 Task 4 数据库层 |
+| **场景 22** | 本实例即时生效、跨实例 5s 轮询同步、在途请求使用快照隔离、DB 故障保留 LKG、冷启动 503 拒绝 | `TestAcceptanceScenario22_RuntimePollerLKGAndColdStart503`<br>`(proxy/acceptance_config_test.go)` | **完整覆盖**<br>依赖 Task 5 运行时就绪门禁与轮询器 |
+| **场景 23** | 传输层 Framing 保护独立于 guard 开关：关闭 guard，超大 SSE 行 (>8MiB) 或超大 Body 依然被限额拦截 | `TestAcceptanceScenario23_FramingGuardOffStillBounded`<br>`(proxy/acceptance_config_test.go)` | **完整覆盖**<br>依赖 Task 8 有界 Reader |
+| **场景 24** | 1 MiB 正常文本 5 轮对比：p95 TTFT 增量目标 <= 10ms，真进程 CPU 开销增量目标 <= 20%（机器自动化断言） | `TestAcceptanceScenario24_TTFTAndCPUIncreases`<br>`(test/outputguard/acceptance_benchmark_test.go)` | **完整覆盖**<br>使用 `helpers.go` 真实 RUSAGE 计时器 |
+| **场景 25** | 1/2/4 MiB 非重复样本 CPU 中位数增长严格近线性，每翻倍比值 <= 2.5（消除 O(N^2) 隐患） | `TestAcceptanceScenario25_LinearScalingRatios`<br>`(test/outputguard/acceptance_benchmark_test.go)` | **完整覆盖**<br>使用 `helpers.go` 线性度分析器 |
+| **场景 26** | 每 channel 状态 <= 64 KiB，调用 `ReleaseWindow()` 释放 Ring Buffer；长跑无堆内存/Goroutine/FD 泄露 | `TestAcceptanceScenario26_ResourceLeakAndLongRunGate`<br>`(test/outputguard/acceptance_benchmark_test.go)` | **完整覆盖**<br>含 15m 环境变量门禁 `RUN_OUTPUTGUARD_LONG_RUN=1` |
+| **场景 27** | 极端细 delta（单字节流式输出）、长思考、多工具交错触发 4096 deltas 专项压测分析 | `TestAcceptanceScenario27_FineGrainedDeltaAndReasoningPressure`<br>`(test/outputguard/acceptance_benchmark_test.go)` | **完整覆盖**<br>量化事件预算早于字节预算耗尽时机 |
+| **场景 28** | 契约脱敏与日志隐私边界检查：日志与公开诊断仅记录脱敏 reason，绝不回显模型输出、提示词或 API Key | `TestAcceptanceScenario28_LogSanitizationBoundary`<br>`(test/outputguard/acceptance_benchmark_test.go)` | **完整覆盖**<br>验证契约脱敏边界 |

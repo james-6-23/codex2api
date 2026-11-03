@@ -1616,12 +1616,14 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 
 	var dataLines [][]byte
 	var eventName string
+	var currentEventBytes int
 
-	emitEvent := func() bool {
+	emitEvent := func() (bool, error) {
 		event := eventName
 		eventName = ""
+		currentEventBytes = 0
 		if len(dataLines) == 0 {
-			return true
+			return true, nil
 		}
 
 		// 绝大多数上游事件只有一条 data: 行，直接交给 callback，避免
@@ -1638,24 +1640,39 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 			dataLines[i] = nil
 		}
 		dataLines = dataLines[:0]
-		return keepReading
+		return keepReading, nil
 	}
 
-	consumeField := func(line []byte) {
+	consumeField := func(line []byte) error {
 		if bytes.HasPrefix(line, []byte("data:")) {
 			data := bytes.TrimPrefix(line, []byte("data:"))
 			data = bytes.TrimPrefix(data, []byte(" "))
+			// 单行与多行累积事件都必须在 wire 层硬性受限，避免超大事件
+			// 长期占用内存。计量必须严格对齐 bytes.Join 交付给 callback 的
+			// 实际字节数：第一条 data 行计 len(data)，之后每条计 1 + len(data)
+			// （含 1 字节 '\n' 分隔符）。空 data 行（len(data)==0）从第二条起
+			// 每行计入 1 字节分隔符，累积到 maxSSEEventBytes 时同样受硬上限
+			// 约束，既防止无界增长，又保证恰好 8MiB 的合法事件不被误拒。
+			lineBytes := len(data)
+			if len(dataLines) > 0 {
+				lineBytes++
+			}
+			if currentEventBytes+lineBytes > maxSSEEventBytes {
+				return errSSEEventTooLarge
+			}
+			currentEventBytes += lineBytes
 			// 使用 copy 避免底层数组共享导致的内存泄漏
 			dataCopy := make([]byte, len(data))
 			copy(dataCopy, data)
 			dataLines = append(dataLines, dataCopy)
-			return
+			return nil
 		}
 		if bytes.HasPrefix(line, []byte("event:")) {
 			event := bytes.TrimPrefix(line, []byte("event:"))
 			event = bytes.TrimPrefix(event, []byte(" "))
 			eventName = string(event)
 		}
+		return nil
 	}
 
 	for {
@@ -1670,15 +1687,32 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 			for {
 				idx := bytes.IndexByte(lineBuf[consumed:], '\n')
 				if idx < 0 {
+					// 无换行：只约束这条未完成行的内容长度。每次 Read 最多再
+					// 追加 len(buf) 字节，因此内存增长有界（<= 行上限 + 一次
+					// Read），不会因无换行的巨量数据无限增长。
+					if len(lineBuf)-consumed > maxSSELineBytes {
+						return errSSELineTooLong
+					}
 					break
 				}
 
 				lineEnd := consumed + idx
+				// 行长检查必须放在找到换行之后、按完整行判断：本次读取可能
+				// 恰好补完一条接近上限的合法行，其后还跟着其他行/事件；若在
+				// append 前按"未完成缓冲区 + 本次读取"的总长度判断，会把这条
+				// 合法行误判为超长。
+				if lineEnd-consumed > maxSSELineBytes {
+					return errSSELineTooLong
+				}
 				line := bytes.TrimRight(lineBuf[consumed:lineEnd], "\r")
 				consumed = lineEnd + 1
 
 				if len(line) == 0 {
-					if !emitEvent() {
+					keep, emitErr := emitEvent()
+					if emitErr != nil {
+						return emitErr
+					}
+					if !keep {
 						return nil
 					}
 					continue
@@ -1689,7 +1723,9 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 				}
 
 				// 解析 SSE event/data 字段，支持标准多行 data 聚合。
-				consumeField(line)
+				if err := consumeField(line); err != nil {
+					return err
+				}
 			}
 
 			if consumed > 0 {
@@ -1701,11 +1737,19 @@ func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []b
 		if err != nil {
 			if err == io.EOF {
 				if len(lineBuf) > 0 {
+					// 深度防御（defense in depth）：扫描循环的无换行分支已把
+					// 未完成行限制在 maxSSELineBytes 内，此处数学上不可达，仅
+					// 作为未来改动的兜底。
+					if len(lineBuf) > maxSSELineBytes {
+						return errSSELineTooLong
+					}
 					line := bytes.TrimRight(lineBuf, "\r")
-					consumeField(line)
+					if err := consumeField(line); err != nil {
+						return err
+					}
 				}
-				if !emitEvent() {
-					return nil
+				if _, emitErr := emitEvent(); emitErr != nil {
+					return emitErr
 				}
 				return nil
 			}

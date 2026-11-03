@@ -63,6 +63,9 @@ func (h *Handler) RealtimeWebSocket(c *gin.Context) {
 	if err != nil {
 		return
 	}
+	if outputGuardHTTPGateArmed() && !RequireOutputGuardReadyWS(conn) {
+		return
+	}
 	conn.SetReadLimit(int64(security.MaxRequestBodySize))
 	requestCtx, cancel := context.WithCancel(c.Request.Context())
 	c.Request = c.Request.WithContext(requestCtx)
@@ -72,6 +75,9 @@ func (h *Handler) RealtimeWebSocket(c *gin.Context) {
 		_ = conn.Close()
 		stopDownstreamKeepalive()
 	}()
+
+	unregisterWriter := registerResponsesWSWriter(conn)
+	defer unregisterWriter()
 
 	state := realtimeTextSession{Model: strings.TrimSpace(c.Query("model"))}
 	stateMemory, _ := security.TryAcquireRequestMemory(0)

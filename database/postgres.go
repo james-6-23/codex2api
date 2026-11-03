@@ -1377,6 +1377,12 @@ func (db *DB) migrate(ctx context.Context) error {
 			response_cache_reconstruct_max_bytes BIGINT NOT NULL DEFAULT 67108864,
 			response_cache_write_policy VARCHAR(20) NOT NULL DEFAULT 'always',
 			response_cache_config_generation BIGINT NOT NULL DEFAULT 1,
+			output_guard_enabled BOOLEAN DEFAULT FALSE,
+			output_guard_max_tool_argument_bytes BIGINT NOT NULL DEFAULT 262144,
+			output_guard_max_tool_argument_deltas INT NOT NULL DEFAULT 4096,
+			output_guard_max_channel_bytes BIGINT NOT NULL DEFAULT 2097152,
+			output_guard_max_request_bytes BIGINT NOT NULL DEFAULT 4194304,
+			output_guard_config_generation BIGINT NOT NULL DEFAULT 1,
 			models_list_read_max_bytes BIGINT NOT NULL DEFAULT 8388608
 		);
 	CREATE TABLE IF NOT EXISTS api_key_model_request_counters (
@@ -1582,6 +1588,12 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_seconds INT NOT NULL DEFAULT 300;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_model_cooldown_backoff_enabled BOOLEAN NOT NULL DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS oauth_unsupported_model_cooldown_seconds INT NOT NULL DEFAULT 1800;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_enabled BOOLEAN DEFAULT FALSE;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_tool_argument_bytes BIGINT NOT NULL DEFAULT 262144;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_tool_argument_deltas INT NOT NULL DEFAULT 4096;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_channel_bytes BIGINT NOT NULL DEFAULT 2097152;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_max_request_bytes BIGINT NOT NULL DEFAULT 4194304;
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS output_guard_config_generation BIGINT NOT NULL DEFAULT 1;
 
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_5h_threshold DOUBLE PRECISION DEFAULT 0;
 	ALTER TABLE account_groups ADD COLUMN IF NOT EXISTS auto_pause_7d_threshold DOUBLE PRECISION DEFAULT 0;
@@ -3020,10 +3032,22 @@ func NormalizeCodexFingerprintDefaultMode(mode string) string {
 	}
 }
 
+// systemSettingsExecer 让同一份 system_settings upsert 既能直接在连接上执行，
+// 也能在事务内执行，供需要原子提交多份设置的调用方复用。
+type systemSettingsExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
 // UpdateSystemSettings 更新全局设置（upsert：无行时自动插入）。
 // codex_synced_cli_version 与 model_pricing_* 由各自的窄更新独立维护；冲突更新时
 // 保留数据库当前值，避免管理员保存其他设置时回滚后台同步刚写入的数据。
 func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error {
+	return updateSystemSettingsWithExecer(ctx, db.conn, s)
+}
+
+// updateSystemSettingsWithExecer 执行全局设置 upsert。它不关心调用方是
+// *sql.DB 还是 *sql.Tx，由调用方决定是否与其他写入共享事务。
+func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsExecer, s *SystemSettings) error {
 	reasoningEffortModels := strings.TrimSpace(s.ReasoningEffortModels)
 	if reasoningEffortModels == "" {
 		reasoningEffortModels = "[]"
@@ -3042,7 +3066,7 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 	if testContent == "" {
 		testContent = "hi"
 	}
-	_, err := db.conn.ExecContext(ctx, `
+	_, err := execer.ExecContext(ctx, `
 			INSERT INTO system_settings (
 				id, site_name, site_logo, max_concurrency, global_rpm, test_model, test_content, test_concurrency, proxy_url, pg_max_conns, redis_pool_size,
 				auto_clean_unauthorized, auto_clean_rate_limited, admin_secret, auto_clean_full_usage, proxy_pool_enabled,

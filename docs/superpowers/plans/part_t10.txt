@@ -1,0 +1,621 @@
+
+### Task 10: 全协议 Handler 接线、前置 Guard 拦截与全链路恢复阻断
+
+**Files:**
+- Modify: `proxy/continuous_retry.go:172-185, 276-285`
+- Modify: `proxy/retry_exclusions.go:209-245`
+- Modify: `proxy/handler.go:2905-2935, 4014-4050, 4405-4420, 5045-5085, 5270-5285, 5538-5588, 5680-5755, 5915-5955, 6030-6070, 7025-7065, 7380-7415, 7560-7575, 7700-7810, 7960-7985`
+- Modify: `proxy/responses_ws.go:246-270, 700-715, 835-850, 1050-1070, 1251-1315`
+- Modify: `proxy/realtime_ws.go:40-60, 140-160`
+- Modify: `proxy/handler_anthropic.go:547-570, 830-845, 1035-1050, 1330-1345, 1570-1615, 1720-1768`
+- Modify: `proxy/handler_gemini.go:123-160, 462-520`
+- Test: `proxy/outputguard_handler_test.go`
+
+**Interfaces:**
+- Consumes:
+  - `security/outputguard` (来自 Task 1~3, 定义于 `security/outputguard/guard.go`):
+    ```go
+    type ChannelKind string
+    const (
+        KindText          ChannelKind = "text"
+        KindThinking      ChannelKind = "thinking"
+        KindToolArguments ChannelKind = "tool_arguments"
+    )
+    type Config struct {
+        Enabled               bool
+        MaxToolArgumentBytes  int64
+        MaxToolArgumentDeltas int
+        MaxChannelBytes       int64
+        MaxRequestBytes       int64
+    }
+    type RequestGuard struct { ... }
+    func NewRequestGuard(cfg Config) *RequestGuard
+    func (g *RequestGuard) ObserveAppend(channelID string, aliasID string, kind ChannelKind, delta []byte) error
+    func (g *RequestGuard) ObserveSnapshot(channelID string, aliasID string, kind ChannelKind, snapshot []byte, terminalStage string) error
+    func (g *RequestGuard) EndChannel(channelID string) error
+    func (g *RequestGuard) IsTripped() bool
+    func (g *RequestGuard) TrippedReason() string
+    ```
+  - `proxy` 运行时配置快照与就绪门禁 (来自 Task 5, 定义于 `proxy/output_guard_settings.go`):
+    ```go
+    func RequireOutputGuardReadyHTTP(c *gin.Context) bool
+    func RequireOutputGuardReadyWS(conn *websocket.Conn) bool
+    func RequireOutputGuardReadyStream(conn *websocket.Conn, streamID string) bool
+    func CurrentOutputGuardConfig() OutputGuardAppliedConfig
+    ```
+  - `proxy` 协议投影器与分派原语 (来自 Task 7, 定义于 `proxy/outputguard_projection.go`):
+    ```go
+    type ProtocolProjector interface {
+        Project(eventType string, data []byte) ([]Observation, error)
+    }
+    func NewResponsesProjector() *ResponsesProjector
+    func NewChatProjector() *ChatProjector
+    func NewAnthropicProjector() *AnthropicProjector
+    func NewGeminiProjector() *GeminiProjector
+    func ObserveEvent(guard *outputguard.RequestGuard, projector ProtocolProjector, eventType string, data []byte) error
+    ```
+  - `proxy` 传输 Framing 有界 Reader 与 Cap (来自 Task 8, 定义于 `proxy/sse_line.go`):
+    ```go
+    func ReadSSEStreamWithEvent(body io.Reader, callback func(event string, data []byte) bool) error
+    func ReadBoundedResponseBody(body io.Reader, limit int64) ([]byte, error)
+    ```
+  - `proxy` 强制终止与下游通知基础原语 (来自 Task 9 契约定义, 计划落于 `proxy/outputguard_cancel.go` 与 `proxy/outputguard_downstream.go`):
+    > **接口契约与依赖差异说明（重要声明）**：
+    > 1. Task 10 仅负责 handler 接线与全链路恢复阻断，**不扩充原语的内部实现**。
+    > 2. Task 9 由独立作者正在编写 `part_t9.txt`，相关终止与下游通知原语目前尚未落地生产代码，本计划严格依赖 Task 9 所定义的接口契约（而非声称生产已存在）：
+    >    ```go
+    >    // streamOutcome 扩展字段（用于在代理内部全链路传递 Guard 命中状态与类型化原因）
+    >    type streamOutcome struct {
+    >        ...
+    >        guardTripped bool
+    >        guardReason  string
+    >    }
+    >
+    >    // 终止协调原语：原子标记 tripped，主动 cancel 上游 context（跳过 5s usage drain），
+    >    // 关闭 HTTP 响应体，废弃所属 WS lease；清空本地在途 pending/provenance/collector/replay/writer 缓冲
+    >    type GuardTerminationCoordinator struct { ... }
+    >    func NewGuardTerminationCoordinator(guard *outputguard.RequestGuard, cancelUpstream context.CancelFunc, body io.Closer) *GuardTerminationCoordinator
+    >    func (c *GuardTerminationCoordinator) HandleTripped(reason string, discardBuffers ...func()) streamOutcome
+    >
+    >    // 下游通知写入原语：TryLock 非阻塞获取 downstreamMu，成功后持锁通过 ResponseController.SetWriteDeadline(5s) 写入协议错误帧；
+    >    // 遇到 ErrNotSupported 或锁冲突立即安全放弃并标记 clientGone，绝不阻塞主流程回收
+    >    func SendDownstreamGuardTerminalHTTP(c *gin.Context, mu *sync.Mutex, clientGone *bool, protocol string, reason string) error
+    >    func SendDownstreamGuardTerminalWS(conn *websocket.Conn, streamID string, reason string) error
+    >    ```
+    > 3. **核心事件计数契约差异说明**：Task 7 (C) 在 `ObserveEvent` 中设计了 `guard.RecordEvent()` 先扣 1 次事件，随后对多 observation 使用 `ObserveAppendNoEvent`；而 Task 1~3 (A) 发布的 `RequestGuard` 接口中未暴露独立的 `RecordEvent`（由内部判定流水线管理）。Task 10 在 handler 层面统一消费 Task 7 暴露的高级事件入口 `ObserveEvent(guard, projector, eventType, data)`，两者的内部计数差异由后续整体整合阶段统一，Task 10 不在 handler 内直接调用未定义的底层 `RecordEvent`。
+
+- Produces:
+  - 覆盖 `/v1/responses` (HTTP 流式/非流式, WebSocket, Realtime 文本子集), `/v1/chat/completions`, `/v1/messages`, Gemini Native (`streamGenerateContent`/`generateContent`), Grok, Antigravity 渠道的全局防御闭环。
+  - 请求级与 WS turn 级的配置快照与 `RequestGuard` 实例生命周期管理（跨 attempt 保持累积，calls == 1）。
+  - 前置检查点保护：guard 检查必须在 `bytes.Clone` provenance 记录、collector 累加、translator 转换与 replay 写入之前。
+  - 全链路恢复阻断：在 ordinary retry, selective/catch-all retry, 换号, WS->HTTP fallback, 缺失上下文恢复, 自动压缩, 自动续想等全部恢复点无条件阻断，确保账号健康零受罚、cache/续链零污染、用量不虚构不 drain。
+
+---
+
+- [ ] **Step 1: Write failing integration test for handler wiring and recovery blocking**
+
+```go
+// proxy/outputguard_handler_test.go
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/codex2api/api"
+	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
+	"github.com/codex2api/security/outputguard"
+	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
+	"github.com/tidwall/gjson"
+)
+
+// 辅助函数：构造测试用的 Handler
+func setupTestProxyHandlerWithUpstream(t *testing.T, upstreamURL string) (*Handler, *gin.Engine) {
+	gin.SetMode(gin.TestMode)
+	db := newTestModelRegistryDB(t)
+	store := auth.NewStore(db)
+
+	account := &auth.Account{
+		Type:     auth.AccountTypeCodexOAuth,
+		Status:   auth.AccountStatusActive,
+		Provider: "openai",
+	}
+	account.SetID(101)
+	store.AddAccount(account)
+
+	h := &Handler{
+		db:    db,
+		store: store,
+	}
+
+	router := gin.New()
+	router.POST("/v1/responses", h.Responses)
+	router.POST("/v1/chat/completions", h.ChatCompletions)
+	router.POST("/v1/messages", h.Messages)
+	router.POST("/v1beta/models/:action", h.GeminiModelsAction)
+	router.GET("/v1/responses", h.ResponsesWebSocket)
+	router.GET("/v1/realtime", h.RealtimeWebSocket)
+
+	return h, router
+}
+
+// 1. 验证 Responses HTTP 流式上游失控输出被前置拦截，不进入 provenance/collector，立即 cancel 上游且阻断重试
+func TestResponsesHTTPStreamGuardTrippedAndRecoveryBlocked(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	SetOutputGuardReadyForTest(true)
+	defer ResetOutputGuardStateForTest()
+
+	// 模拟上游返回持续短周期重复的流式 arguments
+	upstreamCalls := int32(0)
+	upstreamCanceled := make(chan struct{})
+	var cancelOnce sync.Once
+
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&upstreamCalls, 1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+
+		// 监听 client cancel
+		notify := r.Context().Done()
+		go func() {
+			<-notify
+			cancelOnce.Do(func() {
+				close(upstreamCanceled)
+			})
+		}()
+
+		// 发送合法开始事件
+		_, _ = fmt.Fprintf(w, "event: response.created\ndata: {\"type\":\"response.created\",\"response\":{\"id\":\"resp_1\"}}\n\n")
+		flusher.Flush()
+
+		// 持续发送短周期重复 delta (p=10, 8192B 以上)
+		pattern := "0123456789"
+		for i := 0; i < 900; i++ {
+			chunk := fmt.Sprintf("event: response.function_call_arguments.delta\ndata: {\"type\":\"response.function_call_arguments.delta\",\"call_id\":\"call_1\",\"delta\":%q}\n\n", pattern)
+			_, err := fmt.Fprint(w, chunk)
+			if err != nil {
+				return // 客户端已主动断开
+			}
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	// 配置 Guard 阈值 (使用 Spec 默认值)
+	ApplyOutputGuardSettings(database.OutputGuardSettings{
+		MaxToolArgumentBytes:  131072,
+		MaxToolArgumentDeltas: 4096,
+		MaxChannelBytes:       2097152,
+		MaxRequestBytes:       4194304,
+	})
+
+	_, router := setupTestProxyHandlerWithUpstream(t, upstreamServer.URL)
+
+	reqBody := `{"model":"gpt-5.4","stream":true,"input":[{"role":"user","content":"run"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	// 断言 1：上游只被调用了 1 次（禁止任何透明重试、换号重试或 catch-all 循环）
+	if calls := atomic.LoadInt32(&upstreamCalls); calls != 1 {
+		t.Fatalf("expected exactly 1 upstream call, got %d", calls)
+	}
+
+	// 断言 2：上游 context 被主动 cancel（跳过了 5s usage drain）
+	select {
+	case <-upstreamCanceled:
+		// 正常收到上游取消
+	case <-time.After(2 * time.Second):
+		t.Fatalf("expected upstream context to be canceled immediately, timed out")
+	}
+
+	respBody := w.Body.String()
+	// 断言 3：下游收到标准的 response.failed 终态，且错误码为 model_output_guard_triggered
+	if !strings.Contains(respBody, "model_output_guard_triggered") {
+		t.Fatalf("expected response.failed with model_output_guard_triggered, got: %s", respBody)
+	}
+	// 断言 4：下游严禁收到完成帧 response.completed
+	if strings.Contains(respBody, "response.completed") {
+		t.Fatalf("downstream received response.completed after guard tripped!")
+	}
+}
+
+// 2. 验证 continuousRetryStreamSelected 与 shouldTransparentRetryStream 坚决阻断 guardTripped
+func TestRecoveryPointsBlockGuardTripped(t *testing.T) {
+	guardOutcome := streamOutcome{
+		logStatusCode:  http.StatusOK,
+		failureKind:    "model_output_guard",
+		failureMessage: "Upstream model output exceeded safety policy",
+		guardTripped:   true,
+		guardReason:    "repetition",
+		penalize:       false,
+	}
+
+	catchAllPolicy := database.ContinuousRetryPolicy{
+		Enabled:    true,
+		MaxRetries: 5,
+		Categories: []string{"all"},
+	}
+
+	// 1) continuousRetryStreamSelected 必须返回 false
+	if continuousRetryStreamSelected(guardOutcome, nil, "response.failed", catchAllPolicy) {
+		t.Fatalf("continuousRetryStreamSelected must return false for guardTripped")
+	}
+
+	// 2) continuousRetryStreamFailureSelected 必须返回 false
+	if continuousRetryStreamFailureSelected(guardOutcome, nil, "response.failed", catchAllPolicy) {
+		t.Fatalf("continuousRetryStreamFailureSelected must return false for guardTripped")
+	}
+
+	// 3) shouldTransparentRetryStreamWithBudgets 必须返回 false
+	general := 0
+	rate := 0
+	if shouldTransparentRetryStreamWithBudgets(guardOutcome, &general, &rate, 3, 3, false, nil, nil, catchAllPolicy) {
+		t.Fatalf("shouldTransparentRetryStreamWithBudgets must return false for guardTripped")
+	}
+}
+
+// 3. 验证 retryExclusions 对 guardTripped 豁免健康度惩罚 (使用真实方法 forHardSelection / hasResettable)
+func TestRetryExclusionsZeroPenaltyForGuardTripped(t *testing.T) {
+	exclusions := newRetryAccountExclusions()
+	accountID := int64(1001)
+
+	guardOutcome := streamOutcome{
+		logStatusCode:  http.StatusBadGateway,
+		failureKind:    "model_output_guard",
+		guardTripped:   true,
+		guardReason:    "tool_argument_bytes",
+		penalize:       false,
+	}
+
+	exclusions.MarkStreamFailure(accountID, guardOutcome, 3, 3)
+
+	// 断言：账号没有被放入 hard 或 transient 排除列表
+	if exclusions.hasResettable() {
+		t.Fatalf("exclusions.hasResettable() should be false for guard failure")
+	}
+	hard := exclusions.forHardSelection()
+	if hard != nil && hard[accountID] {
+		t.Fatalf("account %d was penalized in hard exclusions for guard failure", accountID)
+	}
+}
+
+// 4. 验证 WebSocket 入口 Ready 检查未就绪返回 1013 Close 帧，已就绪则正常 turn 检测
+func TestResponsesWebSocketReadinessAndGuardTripped(t *testing.T) {
+	SetOutputGuardReadyForTest(false)
+	defer ResetOutputGuardStateForTest()
+
+	// 冷启动未就绪时建立 WebSocket
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upgrader := websocket.Upgrader{}
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		// 消费 Task 5 门禁
+		if !RequireOutputGuardReadyWS(conn) {
+			return
+		}
+	}))
+	defer server.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(server.URL, "http")
+	conn, resp, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err == nil {
+		defer conn.Close()
+		_, _, readErr := conn.ReadMessage()
+		if readErr == nil {
+			t.Fatalf("expected websocket close error, got nil")
+		}
+	} else if resp != nil && resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 or close 1013 on unready WS, got: %d", resp.StatusCode)
+	}
+}
+
+// 5. 验证锁内 SetWriteDeadline 与 TryLock 终态写入非阻塞
+func TestDownstreamWriteWithDeadlineAndTryLock(t *testing.T) {
+	var mu sync.Mutex
+	clientGone := false
+
+	// 模拟已持锁的耗时写协程
+	mu.Lock()
+	lockReleased := make(chan struct{})
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		mu.Unlock()
+		close(lockReleased)
+	}()
+
+	// 终态写入尝试 TryLock：若锁被占用应立即非阻塞放弃，绝不挂起
+	err := SendDownstreamGuardTerminalHTTP(nil, &mu, &clientGone, "responses", "repetition")
+	if err == nil {
+		t.Fatalf("expected error or early return when downstream lock is busy")
+	}
+
+	<-lockReleased
+}
+
+// 6. 验证 Chat Completions 流式失控输出拦截：不追加 [DONE]，返回合法 error 帧
+func TestChatCompletionsStreamGuardTrippedNoDone(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	SetOutputGuardReadyForTest(true)
+	defer ResetOutputGuardStateForTest()
+
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher, _ := w.(http.Flusher)
+
+		// 持续发送超大文本 delta (触发 channel_bytes)
+		bigChunk := strings.Repeat("A", 100000)
+		for i := 0; i < 25; i++ { // > 2.5 MiB
+			payload := fmt.Sprintf("data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", bigChunk)
+			_, _ = fmt.Fprint(w, payload)
+			flusher.Flush()
+		}
+	}))
+	defer upstreamServer.Close()
+
+	_, router := setupTestProxyHandlerWithUpstream(t, upstreamServer.URL)
+
+	reqBody := `{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"generate"}]}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	respBody := w.Body.String()
+	// 下游严禁出现 [DONE] 标记
+	if strings.Contains(respBody, "[DONE]") {
+		t.Fatalf("Chat Completions stream contained [DONE] after guard tripped: %s", respBody)
+	}
+	// 下游必须出现 model_output_guard_triggered 错误码
+	if !strings.Contains(respBody, "model_output_guard_triggered") {
+		t.Fatalf("expected model_output_guard_triggered in chat stream, got: %s", respBody)
+	}
+}
+```
+
+- [ ] **Step 2: Run test to verify failure (Red)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v ./proxy -run "TestResponsesHTTPStreamGuardTrippedAndRecoveryBlocked|TestRecoveryPointsBlockGuardTripped|TestRetryExclusionsZeroPenaltyForGuardTripped|TestChatCompletionsStreamGuardTrippedNoDone"`
+Expected: FAIL with compilation/runtime errors: `streamOutcome.guardTripped undefined` or `upstreamCalls > 1`.
+
+- [ ] **Step 3: Implement minimal code for Handler wiring and recovery blocking**
+
+#### 3.1 恢复与重试机制最前置阻断 (`proxy/continuous_retry.go`, `proxy/retry_exclusions.go`, `proxy/handler.go`)
+
+在 `proxy/continuous_retry.go` 的 `continuousRetryStreamSelected` 和 `continuousRetryStreamFailureSelected` 最开头插入 guardTripped 快速短路：
+
+```go
+// proxy/continuous_retry.go:172
+func continuousRetryStreamSelected(outcome streamOutcome, payload []byte, eventType string, policies ...database.ContinuousRetryPolicy) bool {
+	// Guard 命中是请求级硬终态，绝不允许任何形式的 continuous retry 重新拉起！
+	if outcome.guardTripped {
+		return false
+	}
+	policy := continuousRetryPolicyForCall(policies)
+	if !policy.Enabled || outcome.terminalLocal {
+		return false
+	}
+...
+```
+
+```go
+// proxy/continuous_retry.go:276
+func continuousRetryStreamFailureSelected(outcome streamOutcome, payload []byte, eventType string, policies ...database.ContinuousRetryPolicy) bool {
+	if outcome.guardTripped || outcome.terminalLocal || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "continuous_retry_timeout") {
+		return false
+	}
+...
+```
+
+在 `proxy/retry_exclusions.go` 的 `MarkStreamFailureForEvent` 中增加对 `guardTripped` 的免罚判断：
+
+```go
+// proxy/retry_exclusions.go:209
+func (r *retryAccountExclusions) MarkStreamFailureForEvent(accountID int64, outcome streamOutcome, eventType string, generalLimit, rateLimit int, policies ...database.ContinuousRetryPolicy) {
+	// 模型输出失控属于模型生成异常，不是账号故障的充分证据，严禁对账号施加健康度惩罚！
+	if outcome.guardTripped || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "model_output_guard") {
+		return
+	}
+	failureKind := strings.ToLower(strings.TrimSpace(outcome.failureKind))
+...
+```
+
+在 `proxy/handler.go` 的 `shouldTransparentRetryStreamEventWithBudgets` 最开头增加 guardTripped 拦截：
+
+```go
+// proxy/handler.go:2909
+func shouldTransparentRetryStreamEventWithBudgets(outcome streamOutcome, eventType string, generalRetries, rateLimitRetries *int, maxGeneralRetries, maxRateLimitRetries int, wroteAnyBody bool, ctxErr, writeErr error, policies ...database.ContinuousRetryPolicy) bool {
+	if outcome.guardTripped {
+		return false
+	}
+	if outcome.terminalLocal || wroteAnyBody || ctxErr != nil || writeErr != nil || outcome.logStatusCode == logStatusClientClosed {
+		return false
+	}
+...
+```
+
+#### 3.2 `/v1/responses` HTTP 流式与非流式接线 (`proxy/handler.go`)
+
+在 `Responses` 处理函数中：
+1. 入口检查门禁：`if !RequireOutputGuardReadyHTTP(c) { return }`
+2. 初始化逻辑请求级 Guard 快照（跨 attempt 共享，单次请求 `reqGuard` 仅创建 1 次，不随 attempt 重新创建）：
+   ```go
+   appliedGuardCfg := CurrentOutputGuardConfig()
+   reqGuard := outputguard.NewRequestGuard(outputguard.Config{
+       Enabled:               appliedGuardCfg.Enabled,
+       MaxToolArgumentBytes:  appliedGuardCfg.MaxToolArgumentBytes,
+       MaxToolArgumentDeltas: appliedGuardCfg.MaxToolArgumentDeltas,
+       MaxChannelBytes:       appliedGuardCfg.MaxChannelBytes,
+       MaxRequestBytes:       appliedGuardCfg.MaxRequestBytes,
+   })
+   responsesProjector := NewResponsesProjector()
+   ```
+3. 在流式透传 `forwardWithEvent` 最开头（**必须早于 `bytes.Clone` provenance 记录与 `outputCollector.Add`**）插入 Guard 检查：
+   ```go
+   // proxy/handler.go:5538
+   forwardWithEvent := func(sseEvent string, data []byte) bool {
+       if multiAgentV2State.isOptimizedFor(account.ID()) {
+           data = restoreCodexMultiAgentV2Response(data, multiAgentV2State)
+       }
+       streamDiag.markUpstreamFrame()
+
+       // Output Guard 前置检查：必须在 bytes.Clone 记录 provenance、collector 累积及下游写入之前执行！
+       if err := ObserveEvent(reqGuard, responsesProjector, sseEvent, data); err != nil {
+           // Guard 命中！立即执行强制终止契约：
+           // 1. 取消上游 context（直接调用 cancel 跳过 5s usage drain）
+           if lastUpstreamCancel != nil {
+               lastUpstreamCancel()
+           }
+           // 2. 丢弃未提交的在途缓冲（provenance, collector, replay, pending buffers）
+           compactionProvenancePayloads = nil
+           outputCollector.clearOverflow()
+           pendingFirstTokenEvents.Reset()
+           if streamWriter != nil {
+               streamWriter.DiscardBuffered()
+           }
+           // 3. 标记 outcome 为 guardTripped，保留 typed reason
+           outcome = streamOutcome{
+               logStatusCode:  http.StatusBadGateway,
+               failureKind:    "model_output_guard",
+               failureMessage: "Upstream model output exceeded safety policy; generation was stopped.",
+               guardTripped:   true,
+               guardReason:    reqGuard.TrippedReason(),
+               penalize:       false,
+           }
+           // 4. 下游尽力交付写入错误帧（TryLock + SetWriteDeadline 5s，防挂死）
+           _ = SendDownstreamGuardTerminalHTTP(c, &downstreamMu, &clientGone, "responses", reqGuard.TrippedReason())
+           return false
+       }
+
+       if continuousRetryBuffersAttempts(continuousRetryPolicy) {
+           compactionProvenancePayloads = append(compactionProvenancePayloads, bytes.Clone(data))
+       } else {
+           h.recordCompactionProvenanceFromPayload(context.Background(), account, data)
+       }
+       downstreamMu.Lock()
+       defer downstreamMu.Unlock()
+       ...
+   ```
+4. 在锁内所有常规写操作（包括数据帧写和注释保活写）之前，统一调用 `rc.SetWriteDeadline(time.Now().Add(5 * time.Second))`：
+   ```go
+   if rc := http.NewResponseController(c.Writer); rc != nil {
+       if err := rc.SetWriteDeadline(time.Now().Add(5 * time.Second)); err != nil {
+           if errors.Is(err, http.ErrNotSupported) {
+               // 不支持 Deadline 控制的底层，严禁无界阻塞同步写，安全退出
+               clientGone = true
+               return false
+           }
+       }
+   }
+   ```
+5. 在恢复选择点（WebSocket 1009 降级 HTTP、首包前透明重试、自动续想、自动压缩等）前置阻断：
+   ```go
+   // proxy/handler.go:5915
+   if outcome.guardTripped {
+       _ = streamAttempt.Close()
+       resp.Body.Close()
+       h.store.Release(account)
+       // 严格不重试、不降级、不写成功缓存
+       return
+   }
+   ```
+6. 非流式响应处理：在读取完整响应体 `ReadBoundedResponseBody` 后，通过 `responsesProjector` 进行一次性完整快照观察；若触发 guard，清空本地缓冲并返回 502 错误，不返回半截 JSON。
+
+#### 3.3 `/v1/responses` WebSocket 与 `/v1/realtime` 接线 (`proxy/responses_ws.go`, `proxy/realtime_ws.go`)
+
+1. 在 `ResponsesWebSocket` 握手阶段与 `RealtimeWebSocket` 建立阶段消费门禁：
+   ```go
+   if !RequireOutputGuardReadyWS(conn) {
+       return
+   }
+   ```
+2. 对每个 WebSocket 逻辑 turn 创建独立的 `RequestGuard` 实例（与逻辑 turn 生命周期绑定）：
+   ```go
+   // proxy/responses_ws.go
+   turnGuard := outputguard.NewRequestGuard(outputguard.Config{
+       Enabled:               appliedGuardCfg.Enabled,
+       MaxToolArgumentBytes:  appliedGuardCfg.MaxToolArgumentBytes,
+       MaxToolArgumentDeltas: appliedGuardCfg.MaxToolArgumentDeltas,
+       MaxChannelBytes:       appliedGuardCfg.MaxChannelBytes,
+       MaxRequestBytes:       appliedGuardCfg.MaxRequestBytes,
+   })
+   turnProjector := NewResponsesProjector()
+   ```
+3. 在 `readSSEStreamWithContinuousRetryKeepalive` 回调中最前置插入 `ObserveEvent`：
+   - 命中时立即废弃上游 WS lease（不归还健康池），关闭上游 body；
+   - 丢弃 collector、replay、pendingFirstTokenMessages；
+   - 标记 `turnOutcome.guardTripped = true`；
+   - 经由 `SendDownstreamGuardTerminalWS` 仅向当前 stream 发送失败帧，不影响无故障的复用流；
+   - 阻断 `wsHTTPFallback` 记录与重试。
+4. 在 `realtime_ws.go` 中，`normalizeRealtimeTextClientEvent` 显式拒绝音频 Modality；转发到 Responses WS 的文本 turn 自动继承上述 `turnGuard` 约束。
+
+#### 3.4 `/v1/chat/completions` 接线 (`proxy/handler.go`)
+
+1. 入口检查：`if !RequireOutputGuardReadyHTTP(c) { return }`
+2. 初始化 `chatProjector := NewChatProjector()` 与单请求级 `reqGuard`。
+3. 在流式转发回调中，于 `TranslateStreamChunkResult` 之前执行 `ObserveEvent`：
+   - 命中时主动 cancel 上游 context，清空 `pendingFirstTokenChunks`；
+   - 经由 `SendDownstreamGuardTerminalHTTP(..., "chat", ...)` 写入 OpenAI 格式错误包；
+   - 坚决**不追加 `data: [DONE]\n\n`**；
+   - 阻断后续 attempt，豁免账号惩罚。
+
+#### 3.5 `/v1/messages` (Anthropic) 接线 (`proxy/handler_anthropic.go`)
+
+1. 入口检查：`if !RequireOutputGuardReadyHTTP(c) { return }`
+2. 初始化 `anthropicProjector := NewAnthropicProjector()` 与请求级 `reqGuard`。
+3. 在流式循环（line 1575 之前）执行 `ObserveEvent`：
+   - 必须早于 `translator.translateEvent(data)`；
+   - 命中时 cancel 上游 context，清空 `pendingFirstTokenEvents`；
+   - 发送 Anthropic 标准 `event: error` 结构（带 `model_output_guard_triggered` code）；
+   - 坚决**不伪造 `message_stop` 或 tool input 完成**；
+   - 阻断重试并安全退出。
+
+#### 3.6 Gemini Native 接线 (`proxy/handler_gemini.go`)
+
+1. 在 `GeminiModelsAction` 与 `handleGeminiGenerateContent` 最前置检查门禁：
+   `if !RequireOutputGuardReadyHTTP(c) { return }`
+2. 初始化 `geminiProjector := NewGeminiProjector()` 与请求级 `reqGuard`。
+3. 在流式读取块回调中最前置投影检查：
+   - 命中时主动 cancel 上游；
+   - 采用 Gemini SDK 兼容的错误输出结构（复用已有的 `sendUpstreamError` 或原生 error payload，不伪造不支持的 `event: error` 导致客户端崩溃）；
+   - 阻断重试循环。
+
+#### 3.7 Grok 与 Antigravity 原生渠道透传校验
+
+在 Grok native passthrough 以及 Antigravity 专属通道中：
+- 即使协议为 native 转发，数据流在到达下游 ResponseWriter 或 attempt writer 之前，一律经由 `ObserveEvent` 进行语义投影与预算/周期检查；
+- 命中时坚决终止本次 dispatch，不让原生流绕过防护。
+
+- [ ] **Step 4: Run test to verify passing (Green)**
+
+Run: `GOCACHE=/tmp/go-build GOPATH=/tmp/go go test -v -race ./proxy -run "TestResponsesHTTPStreamGuardTrippedAndRecoveryBlocked|TestRecoveryPointsBlockGuardTripped|TestRetryExclusionsZeroPenaltyForGuardTripped|TestResponsesWebSocketReadinessAndGuardTripped|TestDownstreamWriteWithDeadlineAndTryLock|TestChatCompletionsStreamGuardTrippedNoDone"`
+Expected: PASS ok github.com/codex2api/proxy
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add proxy/continuous_retry.go proxy/retry_exclusions.go proxy/handler.go proxy/responses_ws.go proxy/realtime_ws.go proxy/handler_anthropic.go proxy/handler_gemini.go proxy/outputguard_handler_test.go
+git commit -m "feat(proxy): wire model output guard across all protocols with complete recovery blocking"
+```
