@@ -19,18 +19,19 @@ import (
 const intelligenceOutputLimit = 256 * 1024
 
 type intelligenceExecution struct {
-	Output           string
-	Error            string
-	Complete         bool
-	Interrupted      bool
-	DurationMS       int64
-	ResponseModel    string
-	InputTokens      int
-	OutputTokens     int
-	ReasoningTokens  int
-	CachedTokens     int
-	terminalPayload  []byte
-	EffectiveContext map[string]string
+	CredentialRejected bool
+	Output             string
+	Error              string
+	Complete           bool
+	Interrupted        bool
+	DurationMS         int64
+	ResponseModel      string
+	InputTokens        int
+	OutputTokens       int
+	ReasoningTokens    int
+	CachedTokens       int
+	terminalPayload    []byte
+	EffectiveContext   map[string]string
 }
 
 // Uses the same outbound executors as generation, with no browser request context
@@ -123,6 +124,7 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		result.Error = fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(raw), 4096))
+		result.CredentialRejected = intelligenceCredentialRejected(raw)
 		h.applyIntelligenceUpstreamFailure(account, resp, model, raw)
 		return
 	}
@@ -132,6 +134,7 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 		proxy.SyncCodexUsageState(h.store, account, resp)
 	}
 	result = readIntelligenceStream(resp.Body, claude)
+	result.CredentialRejected = intelligenceCredentialRejected(result.terminalPayload)
 	if ctx.Err() != nil {
 		result.Complete = false
 		result.Error = ctx.Err().Error()
@@ -361,4 +364,14 @@ func readIntelligenceStream(body io.Reader, claude bool) (result intelligenceExe
 		result.Error = "上游流已中断，未收到成功终态"
 	}
 	return
+}
+
+func intelligenceCredentialRejected(payload []byte) bool {
+	for _, path := range []string{"error.code", "response.error.code"} {
+		switch gjson.GetBytes(payload, path).String() {
+		case "token_revoked", "account_deactivated", "workspace_deactivated", "organization_deactivated":
+			return true
+		}
+	}
+	return false
 }

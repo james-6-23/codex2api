@@ -176,7 +176,9 @@ func queryWhamDailyUsageWithURL(ctx context.Context, account *auth.Account, prox
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
 	req.Header.Set("Accept", "application/json")
-	ResolveCodexMaintenanceIdentity(account, nil).Apply(req.Header)
+	if err := applyCodexMaintenanceHeaders(req, account); err != nil {
+		return nil, nil, err
+	}
 	// 与 wham 用量查询一致：自定义头覆盖工作区 ID 时，统计必须查覆盖后的空间，
 	// 否则拿到的是与实际流量不同的空间。
 	if accountID := account.EffectiveAccountID(); accountID != "" {

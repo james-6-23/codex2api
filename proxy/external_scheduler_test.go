@@ -145,6 +145,32 @@ func TestPinnedResponsesIgnoresModelCooldown(t *testing.T) {
 	}
 }
 
+func TestPinnedResponsesContinuationDoesNotReleaseQuotaBlockedAccount(t *testing.T) {
+	handler, upstream, accounts := newPinnedCodexHandler(t, nil, func(w http.ResponseWriter, _ *http.Request) {
+		writePinnedSuccessSSE(w)
+	})
+	const session = "external-quota-turn"
+	key := sessionAffinityKey(session, 7)
+	handler.store.MarkResponsesPremium5hRateLimited(accounts[1], time.Now().Add(2*time.Hour))
+	handler.store.BindSessionAffinity(key, accounts[1], "")
+
+	recorder := httptest.NewRecorder()
+	ctx := pinnedTestContext(recorder, "/v1/responses", `{"model":"gpt-5.5","input":"continue","stream":true}`, 7, 2)
+	ctx.Request.Header.Set("Session-Id", session)
+	ctx.Request.Header.Set(codexTurnStateHeader, "pinned-turn-state")
+	handler.Responses(ctx)
+
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "pinned-ok") {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if got := upstream.authorizations(); len(got) != 1 || got[0] != "Bearer at-2" {
+		t.Fatalf("externally pinned continuation selected the wrong account: %q", got)
+	}
+	if id, ok := handler.store.SessionAffinityAccountID(key); !ok || id != 2 {
+		t.Fatalf("pinned affinity changed: id=%d present=%v", id, ok)
+	}
+}
+
 // Retrying or failing over is the external scheduler's decision, even with
 // gateway retry budgets configured and a healthy sibling account in the pool.
 func TestPinnedChatReturnsUpstreamFailureWithoutFailover(t *testing.T) {

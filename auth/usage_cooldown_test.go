@@ -64,11 +64,15 @@ func TestUsageCooldownNeverShortensActiveCooldown(t *testing.T) {
 				{"equal usage", time.Hour, time.Hour, premium5hCooldownReason, false},
 				{"shorter 7d usage", 6 * time.Hour, time.Hour, "rate_limited_7d", false},
 				{"equal 7d usage", time.Hour, time.Hour, "rate_limited_7d", false},
+				{"shorter legacy rate_limited", 6 * time.Hour, time.Hour, "rate_limited", false},
+				{"shorter legacy usage_limited", 6 * time.Hour, time.Hour, "usage_limited", false},
+				{"equal legacy usage_limit", time.Hour, time.Hour, "usage_limit", false},
 				{"extend usage", time.Hour, 2 * time.Hour, premium5hCooldownReason, true},
 				{"new cooldown", 0, 2 * time.Hour, "", true},
 				{"expired cooldown", -time.Hour, 2 * time.Hour, ResponsesRateLimitedCooldownReason, true},
 			} {
 				t.Run(tc.name, func(t *testing.T) {
+					legacy7d := tc.reason == "rate_limited" || tc.reason == "rate_limited_7d" || tc.reason == "usage_limited" || tc.reason == "usage_limit"
 					now := time.Now().UTC().Truncate(time.Second)
 					resetAt := now.Add(tc.reset)
 					id, err := db.InsertAccountWithCredentials(ctx, "usage-cooldown", map[string]interface{}{"access_token": "test-token", "plan_type": "plus"}, "")
@@ -84,7 +88,7 @@ func TestUsageCooldownNeverShortensActiveCooldown(t *testing.T) {
 					wantWrites := 1
 					if tc.prior != 0 {
 						acc.Status, acc.CooldownUtil, acc.CooldownReason = StatusCooldown, now.Add(tc.prior), tc.reason
-						if source == "responses" && tc.reason == "rate_limited_7d" {
+						if source == "responses" && legacy7d {
 							acc.Reset7dAt = acc.CooldownUtil
 						}
 						if err := db.SetCooldown(ctx, id, tc.reason, acc.CooldownUtil); err != nil {
@@ -95,7 +99,7 @@ func TestUsageCooldownNeverShortensActiveCooldown(t *testing.T) {
 							store.setCachedAccountCooldown(id, tc.reason, acc.CooldownUtil)
 							if !tc.wantChange {
 								wantUntil, wantReason = acc.CooldownUtil, tc.reason
-								if source == "responses" && (tc.reason == premium5hCooldownReason || tc.reason == "rate_limited_7d") {
+								if source == "responses" && (tc.reason == premium5hCooldownReason || legacy7d) {
 									wantReason = ResponsesRateLimitedCooldownReason
 								} else {
 									wantWrites--

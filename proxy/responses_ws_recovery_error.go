@@ -11,7 +11,7 @@ import (
 
 func responsesWSErrorStatus(err *api.APIError) int {
 	switch string(err.Code) {
-	case "previous_response_not_found", string(api.ErrCodeResponseContextUnavailable):
+	case string(api.ErrCodeResponseContextUnavailable):
 		return http.StatusConflict
 	case ErrorCodeAccountPoolConcurrencySaturated, ErrorCodeUpstreamWSConnectionCapacity:
 		return http.StatusServiceUnavailable

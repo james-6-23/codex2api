@@ -294,7 +294,7 @@ func recordResponseCacheBackendWriteResult(storeKey, responseID string, serial u
 	}
 	respCache.mu.Unlock()
 	if err != nil {
-		log.Printf("写入 Redis response context 失败: response_id=%s err=%v", responseID, err)
+		log.Printf("写入 response context 后端失败: response_id=%s err=%v", responseID, err)
 	}
 }
 func drainResponseCacheBackendWrites() { responseCacheBackendWriter.drain(context.Background(), false) }

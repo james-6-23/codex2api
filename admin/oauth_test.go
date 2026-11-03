@@ -26,6 +26,9 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 	handler := &Handler{db: db, store: store}
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if "codex-cli/0.91.0" == r.Header.Get("User-Agent") {
+			t.Error("token exchange still sends the obsolete hard-coded User-Agent")
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"access_token": "access-from-exchange",

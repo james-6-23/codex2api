@@ -157,18 +157,19 @@ func TestMergedCodexManifestUsesScopedCapabilitiesAndGatewayETag(t *testing.T) {
 	if first.Code != http.StatusOK || first.Header().Get("ETag") == `W/"upstream-validator"` || first.Header().Get("ETag") == "" {
 		t.Fatalf("source ETag bypassed gateway representation: status=%d etag=%q", first.Code, first.Header().Get("ETag"))
 	}
-	if gjson.GetBytes(first.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(first.Body.Bytes(), "models.0.experimental_supported_tools").Raw != "[]" || gjson.GetBytes(first.Body.Bytes(), "models.0.base_instructions").String() != "keep source instructions" || !gjson.GetBytes(first.Body.Bytes(), "future.keep").Bool() {
+	// An account that has not been observed yet cannot narrow the live descriptor.
+	if !gjson.GetBytes(first.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(first.Body.Bytes(), "models.0.experimental_supported_tools").Raw != `["function"]` || gjson.GetBytes(first.Body.Bytes(), "models.0.base_instructions").String() != "keep source instructions" || !gjson.GetBytes(first.Body.Bytes(), "future.keep").Bool() {
 		t.Fatalf("unknown capabilities or source fields mishandled: %s", first.Body.String())
 	}
 	if cached := request(first.Header().Get("ETag")); cached.Code != http.StatusNotModified || cached.Body.Len() != 0 {
 		t.Fatalf("unchanged gateway manifest did not cache: status=%d body=%s", cached.Code, cached.Body.String())
 	}
-	models := parseCodexModelCapabilities(source)
+	models := parseCodexModelCapabilities([]byte(`{"models":[{"slug":"gpt-6-astra","use_responses_lite":false,"experimental_supported_tools":[]}]}`))
 	if err := db.SaveModelCapabilities(ctx, database.ModelCapabilitySnapshot{AccountID: id, CredentialGeneration: row.CredentialGeneration, ObservedAt: time.Now().UnixNano(), Models: models}); err != nil {
 		t.Fatal(err)
 	}
 	updated := request(first.Header().Get("ETag"))
-	if updated.Code != http.StatusOK || updated.Header().Get("ETag") == first.Header().Get("ETag") || !gjson.GetBytes(updated.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(updated.Body.Bytes(), "models.0.experimental_supported_tools").Raw != `["function"]` {
+	if updated.Code != http.StatusOK || updated.Header().Get("ETag") == first.Header().Get("ETag") || gjson.GetBytes(updated.Body.Bytes(), "models.0.use_responses_lite").Bool() || gjson.GetBytes(updated.Body.Bytes(), "models.0.experimental_supported_tools").Raw != "[]" {
 		t.Fatalf("new scoped capabilities hidden behind stale ETag: status=%d body=%s", updated.Code, updated.Body.String())
 	}
 }
@@ -221,6 +222,8 @@ func TestAntigravityManifestDoesNotInferReasoningFromNonGeminiNames(t *testing.T
 
 func TestFetchCodexModelsManifest_PassesThroughBodyAndETag(t *testing.T) {
 	const manifestBody = `{"models":[{"slug":"gpt-5.6-sol"},{"slug":"gpt-5.6-terra"}]}`
+	account := &auth.Account{DBID: 1, AccessToken: "at-123", AccountID: "acc-1"}
+	identity := mustResolveCodexMaintenanceIdentity(t, account, nil)
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "Bearer at-123" {
@@ -229,17 +232,17 @@ func TestFetchCodexModelsManifest_PassesThroughBodyAndETag(t *testing.T) {
 		if got := r.Header.Get("chatgpt-account-id"); got != "acc-1" {
 			t.Errorf("chatgpt-account-id = %q, want acc-1", got)
 		}
-		if got := r.Header.Get("Originator"); got != Originator {
-			t.Errorf("Originator = %q, want %q", got, Originator)
+		if got := r.Header.Get("Originator"); identity.Originator != got {
+			t.Errorf("Originator: want %q, got %q", identity.Originator, got)
 		}
-		if !strings.HasPrefix(r.Header.Get("User-Agent"), "codex-tui/") {
-			t.Errorf("User-Agent = %q, want codex-tui prefix", r.Header.Get("User-Agent"))
+		if got := r.Header.Get("User-Agent"); identity.UserAgent != got {
+			t.Errorf("User-Agent: want %q, got %q", identity.UserAgent, got)
 		}
-		if got := r.Header.Get("Version"); got != "0.140.0" {
-			t.Errorf("Version = %q, want 0.140.0", got)
+		if got := r.Header.Get("Version"); identity.Version != got {
+			t.Errorf("Version: want %q, got %q", identity.Version, got)
 		}
-		if got := r.URL.Query().Get("client_version"); got != "0.140.0" {
-			t.Errorf("client_version = %q, want 0.140.0", got)
+		if got := r.URL.Query().Get("client_version"); identity.Version != got {
+			t.Errorf("client_version: want %q, got %q", identity.Version, got)
 		}
 		w.Header().Set("ETag", `W/"abc123"`)
 		w.Header().Set("Content-Type", "application/json")
@@ -247,7 +250,6 @@ func TestFetchCodexModelsManifest_PassesThroughBodyAndETag(t *testing.T) {
 	}))
 	defer server.Close()
 
-	account := &auth.Account{DBID: 1, AccessToken: "at-123", AccountID: "acc-1"}
 	manifest, err := fetchCodexModelsManifestWithURL(context.Background(), account, "", server.URL, "0.140.0", "", nil)
 	if err != nil {
 		t.Fatalf("fetchCodexModelsManifestWithURL error: %v", err)

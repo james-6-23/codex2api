@@ -97,48 +97,45 @@ func TestChatCompletionsSuccessfulStreamStillAppendsDoneSentinel(t *testing.T) {
 	}
 }
 
-// TestChatCompletionsStreamNoBytesBeforeFirstContentWhenUpstreamSlow 验证 issue #623
-// 的"首字前不得写出任何字节"：上游在首字前静默超过保活间隔时，不得提前写出
-// keepalive 注释（那会提交 200，破坏首字前真实 HTTP 错误返回与静默换号语义）；
-// 首个内容写出后，静默期仍应正常保活。
-func TestChatCompletionsStreamNoBytesBeforeFirstContentWhenUpstreamSlow(t *testing.T) {
-	shortenDownstreamSSEKeepalive(t)
-	handler, _ := newChatStreamServeTestHandler(t, func(w http.ResponseWriter) {
-		// 首字前静默远超 5ms 保活间隔：此期间不得写出任何字节。
-		time.Sleep(30 * time.Millisecond)
-		writeCodexSSE(w,
-			`{"type":"response.created","response":{"id":"resp_slow_start"}}`,
-			`{"type":"response.output_text.delta","delta":"slow-started"}`,
-		)
-		time.Sleep(40 * time.Millisecond)
-		writeCodexSSE(w,
-			`{"type":"response.output_text.delta","delta":"-resumed"}`,
-			`{"type":"response.completed","response":{"status":"completed","usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}`,
-		)
-	})
+// Require a complete keepalive frame between the two content boundaries.
+func chatKeepaliveInsideSilence(body string, firstContent, resumed int) int {
+	if firstContent < 0 || resumed <= firstContent || resumed > len(body) {
+		return -1
+	}
+	offset := strings.Index(body[firstContent:resumed], "\n\n"+downstreamSSEKeepaliveComment)
+	if offset < 0 {
+		return -1
+	}
+	return firstContent + offset + 2
+}
 
-	recorder := invokeChatCompletionsStream(t, handler)
-	body := recorder.Body.String()
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, body)
-	}
-	firstContent := strings.Index(body, `"content":"slow-started"`)
-	keepalive := strings.Index(body, downstreamSSEKeepaliveComment)
-	resumed := strings.Index(body, `"content":"-resumed"`)
-	if firstContent < 0 || keepalive < 0 || resumed < 0 {
-		t.Fatalf("stream must carry first content, a keepalive comment and the resumed content; body=%q", body)
-	}
-	if keepalive < firstContent {
-		t.Fatalf("no bytes may be written before the first content token (keepalive at %d, first content at %d); body=%q", keepalive, firstContent, body)
-	}
-	if keepalive > resumed {
-		t.Fatalf("keepalive must land inside the upstream silence window (after %d, before %d), got %d; body=%q", firstContent, resumed, keepalive, body)
+func TestChatKeepaliveSilenceWindow(t *testing.T) {
+	first := "data: started\n\n"
+	resumed := "data: resumed\n\n"
+	for _, tc := range []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"inside", first + downstreamSSEKeepaliveComment + resumed, true},
+		{"early_and_inside", downstreamSSEKeepaliveComment + first + downstreamSSEKeepaliveComment + resumed, true},
+		{"early_only", downstreamSSEKeepaliveComment + first + resumed, false},
+		{"late_only", first + resumed + downstreamSSEKeepaliveComment, false},
+		{"interleaved", "data: started\n" + downstreamSSEKeepaliveComment + resumed, false},
+		{"missing_first", downstreamSSEKeepaliveComment + resumed, false},
+		{"reversed", resumed + downstreamSSEKeepaliveComment + first, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := chatKeepaliveInsideSilence(tc.body, strings.Index(tc.body, "data: started"), strings.Index(tc.body, "data: resumed"))
+			if (got >= 0) != tc.want {
+				t.Fatalf("keepalive inside silence = %v, want %v", got >= 0, tc.want)
+			}
+		})
 	}
 }
 
-// TestChatCompletionsStreamKeepsDownstreamAliveDuringUpstreamSilence 验证 issue #623
-// 修复：首个内容 chunk 之后上游静默期间，/v1/chat/completions 翻译流也要定期写
-// SSE 注释刷新下游 idle timer，且首字前不得写出任何字节。
+// Request-level heartbeats may precede model output (65565d6f); issue #623
+// still requires an independent keepalive frame during upstream silence.
 func TestChatCompletionsStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testing.T) {
 	shortenDownstreamSSEKeepalive(t)
 	handler, calls := newChatStreamServeTestHandler(t, func(w http.ResponseWriter) {
@@ -159,8 +156,9 @@ func TestChatCompletionsStreamKeepsDownstreamAliveDuringUpstreamSilence(t *testi
 		t.Fatalf("status = %d, want 200; body=%q", recorder.Code, body)
 	}
 	firstContent := strings.Index(body, `"content":"started"`)
-	keepalive := strings.Index(body, downstreamSSEKeepaliveComment)
 	resumed := strings.Index(body, `"content":"-resumed"`)
+	// Request-level keepalives may also precede the first content frame.
+	keepalive := chatKeepaliveInsideSilence(body, firstContent, resumed)
 	if firstContent < 0 || keepalive < 0 || resumed < 0 {
 		t.Fatalf("stream must carry first content, a keepalive comment and the resumed content; body=%q", body)
 	}

@@ -2569,6 +2569,7 @@ export default function Settings() {
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
     { label: t('settings.schedulerModeRemainingQuota'), value: 'remaining_quota' },
     { label: t('settings.schedulerModeFillFirst'), value: 'fill_first' },
+    { label: t('settings.schedulerModeReset5hFirst'), value: 'reset_5h_first' },
   ]
   const schedulerEngineOptions = [
     { label: t('settings.schedulerEngineLegacy'), value: 'legacy' },
@@ -2670,7 +2671,6 @@ export default function Settings() {
       codex_images_main_model: cacheNormalized.codex_images_main_model ?? '',
       codex_telemetry_enabled: cacheNormalized.codex_telemetry_enabled ?? false,
       codex_telemetry_timing_debug: cacheNormalized.codex_telemetry_timing_debug ?? false,
-      codex_unified_client_identity_enabled: cacheNormalized.codex_unified_client_identity_enabled ?? false,
       billing_tier_policy: normalizeBillingTierPolicyValue(cacheNormalized.billing_tier_policy),
       first_token_mode: 'loose',
       models_list_read_max_bytes:
@@ -2725,7 +2725,6 @@ export default function Settings() {
     codex_force_websocket: false,
     codex_telemetry_enabled: false,
     codex_telemetry_timing_debug: false,
-    codex_unified_client_identity_enabled: false,
     codex_request_compression: true,
     codex_ws_weak_network_mode: false,
     codex_ws_keepalive_enabled: false,
@@ -5123,24 +5122,6 @@ export default function Settings() {
                     </>
                   )}
                 </div>
-                <div className="mt-4 border-t border-border/60 pt-4">
-                  <SettingField
-                    label={t('settings.codexUnifiedClientIdentity')}
-                    description={t('settings.codexUnifiedClientIdentityDesc')}
-                    layout="row"
-                  >
-                    <Switch
-                      aria-label={t('settings.codexUnifiedClientIdentity')}
-                      checked={settingsForm.codex_unified_client_identity_enabled}
-                      onCheckedChange={(checked) => autoSaveBooleanField('codex_unified_client_identity_enabled', checked)}
-                    />
-                  </SettingField>
-                  {settingsForm.codex_unified_client_identity_enabled && settingsForm.client_compat_mode !== 'force' ? (
-                    <p className="mt-2 text-[11px] leading-relaxed text-amber-600 dark:text-amber-400 sm:text-xs">
-                      {t('settings.codexUnifiedClientIdentityCompatHint')}
-                    </p>
-                  ) : null}
-                </div>
               </SettingsCard>
               </SettingsSection>
 
@@ -6272,9 +6253,9 @@ export default function Settings() {
                     </div>
                     <SettingField
                       label={t('settings.schedulerMode')}
-                      description={t('settings.schedulerModeDesc')}
-                      warning={settingsForm.scheduler_engine !== 'legacy' ? undefined : t('settings.schedulerModeRequiresFast')}
-                      className={cn(settingsForm.scheduler_engine === 'legacy' && 'opacity-60')}
+                      description={settingsForm.scheduler_mode === 'reset_5h_first' ? t('settings.schedulerModeReset5hFirstDesc') : t('settings.schedulerModeDesc')}
+                      warning={settingsForm.scheduler_engine !== 'legacy' || settingsForm.scheduler_mode === 'reset_5h_first' ? undefined : t('settings.schedulerModeRequiresFast')}
+                      className={cn(settingsForm.scheduler_engine === 'legacy' && settingsForm.scheduler_mode !== 'reset_5h_first' && 'opacity-60')}
                     >
                       <SegmentedPillGroup
                         value={settingsForm.scheduler_mode}

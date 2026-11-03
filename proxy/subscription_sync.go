@@ -61,8 +61,8 @@ func (p subscriptionHeaderProfile) String() string {
 }
 
 // applySubscriptionHeaders 写入订阅端点的身份头。浏览器形态是专为绕过网页端挑战的
-// 回退，不受统一身份开关影响；Codex 形态与其他维护请求同源（issue #774）。
-func applySubscriptionHeaders(req *http.Request, account *auth.Account, profile subscriptionHeaderProfile) {
+// 回退，保持独立的浏览器协议；Codex 形态与其他维护请求同源（issue #774）。
+func applySubscriptionHeaders(req *http.Request, account *auth.Account, profile subscriptionHeaderProfile) error {
 	req.Header.Set("Accept", "application/json")
 	switch profile {
 	case subscriptionHeadersBrowser:
@@ -70,8 +70,9 @@ func applySubscriptionHeaders(req *http.Request, account *auth.Account, profile 
 		req.Header.Set("Referer", "https://chatgpt.com/")
 		req.Header.Set("User-Agent", subscriptionsBrowserUserAgent)
 	default:
-		ResolveCodexMaintenanceIdentity(account, nil).Apply(req.Header)
+		return applyCodexMaintenanceHeaders(req, account)
 	}
+	return nil
 }
 
 // shouldRetrySubscriptionWithBrowser 判断某种身份被拒后是否值得换另一种身份再试：
@@ -229,7 +230,9 @@ func queryChatGPTSubscriptionWith(ctx context.Context, account *auth.Account, pr
 		return nil, fmt.Errorf("build subscriptions request: %w", err)
 	}
 	req.Header.Set("Authorization", "Bearer "+accessToken)
-	applySubscriptionHeaders(req, account, profile)
+	if err := applySubscriptionHeaders(req, account, profile); err != nil {
+		return nil, err
+	}
 	if viaResin {
 		req.Header.Set("X-Resin-Account", ResinAccountID(account))
 	}

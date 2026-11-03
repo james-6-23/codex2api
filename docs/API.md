@@ -244,8 +244,8 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 | include              | array        | 否   | 包含的额外字段                                                                                     |
 | previous_response_id | string       | 否   | 上一响应 ID，用于上下文连续                                                                        |
 
-`previous_response_id` 的上下文先查当前进程的有界 L1。本地与 Redis 共享上下文的默认绝对 TTL 为 45 分钟，覆盖聊天上游连接 30 分钟空闲回收后的恢复窗口，仍受缓存容量和账号兼容性限制。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式没有共享 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 response_context_unavailable`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的原生 OpenAI Responses relay 后备，网关可保留原始 `previous_response_id` 交给其上游恢复；其他仅做协议翻译的账号不具备这一后备能力。原生 Codex HTTP 的每个非空父引用都要求当前归属的本地或共享快照证明；普通文本父轮不新增 HTTP 会话存储，应重发完整历史并省略父 ID。重叠工具历史仅在能证明完整父前缀重放时去重，否则返回 409。客户端原生 Responses WebSocket 入口在上游连接正常时保留 `previous_response_id` 并只发送当轮增量，轮次开始时保留仍有效的 L1 祖先引用，快照合并与序列化在响应成功提交后才执行并写入本地缓存，共享后端（Redis）写入在后台完成，不占首字路径。缓存会收集 `response.output_item.done`，因此最终 `response.output` 为空时也能保留消息、`phase`、工具调用/结果及 Lite `additional_tools` 声明。`response.completed` 和 `response.incomplete` 成功提交后均可写入，仍受写入策略、TTL 和容量限制约束；按需写入模式下，`store` 未显式为 `false` 的 WebSocket 会话从根轮起即有写入资格；显式 `store:false` 的原生 WS 会话（如 Codex CLI）使用隔离的完整快照及共享后端恢复，不表示网关完全不缓存历史；仍受 TTL、容量和完整性限制。续链失效、换号或转为 HTTP 时，只有能够恢复所需上下文才继续发送；缺失、超限或不可移植的加密状态返回 `response_context_unavailable` 错误帧，共享后端故障返回 `service_unavailable`，此类恢复失败终止本轮并返回错误帧，命名流附带 `stream_id`；连接仍可接收新的完整上下文请求。协议、鉴权或连接资源错误仍可关闭连接。客户端应重发完整上下文并开始新的响应链。
-祖先在轮次开始前已过期或被淘汰时，网关不会把增量伪装成完整快照；该链后续健康轮也不能自行补全历史。缓存 TTL 为 45 分钟，Memory 模式重启会丢失缓存。设置环境变量 `CODEX_WS_CONTINUATION_FAIL_OPEN=true` 可退回旧行为：上下文不可恢复时剥离 `previous_response_id` 后按原样转发，上游将看不到历史；这次有损降级产生的响应不写回放缓存，关闭逃生阀后也不会信任残缺快照。
+`previous_response_id` 的上下文先查当前进程的有界 L1。本地与 Redis 共享上下文的默认绝对 TTL 为 45 分钟，覆盖聊天上游连接 30 分钟空闲回收后的恢复窗口，仍受缓存容量和账号兼容性限制。已认证请求按 API Key ID 隔离；未配置任何 API Key、显式启用 `CODEX_ALLOW_ANONYMOUS=true` 后放行的请求共用 `anon` 命名空间。Redis 模式在 L1 未命中时可从共享后端重建；后端值未超过重建上限但超过 L1 准入预算时仍可服务本次请求，只是不提升到 L1。Memory 模式在关闭磁盘持久层时没有 response context 后备，依赖上下文被判定为超限、已淘汰或缺失时可能返回 HTTP `409 previous_response_not_found`。共享后端暂时不可用且请求依赖该上下文时可能返回 HTTP `503 service_unavailable`。如果账号池存在可用的原生 OpenAI Responses relay 后备，网关可保留原始 `previous_response_id` 交给其上游恢复；其他仅做协议翻译的账号不具备这一后备能力。原生 Codex HTTP 的每个非空父引用都要求当前归属的本地或共享快照证明；普通文本父轮不新增 HTTP 会话存储，应重发完整历史并省略父 ID。重叠工具历史仅在能证明完整父前缀重放时去重，否则返回 409。客户端原生 Responses WebSocket 入口在上游连接正常时保留 `previous_response_id` 并只发送当轮增量，轮次开始时保留仍有效的 L1 祖先引用，快照合并与序列化在响应成功提交后才执行并写入本地缓存，共享后端（Redis）写入在后台完成，不占首字路径。缓存会收集 `response.output_item.done`，因此最终 `response.output` 为空时也能保留消息、`phase`、工具调用/结果及 Lite `additional_tools` 声明。`response.completed` 和 `response.incomplete` 成功提交后均可写入，仍受写入策略、TTL 和容量限制约束；按需写入模式下，`store` 未显式为 `false` 的 WebSocket 会话从根轮起即有写入资格；显式 `store:false` 的原生 WS 会话（如 Codex CLI）使用隔离的完整快照及共享后端恢复，不表示网关完全不缓存历史；仍受 TTL、容量和完整性限制。续链失效、换号或转为 HTTP 时，只有能够恢复所需上下文才继续发送；缺失、超限或不可移植的加密状态返回 `previous_response_not_found` 错误帧，共享后端故障返回 `service_unavailable`，此类恢复失败终止本轮并返回错误帧，命名流附带 `stream_id`；连接仍可接收新的完整上下文请求。协议、鉴权或连接资源错误仍可关闭连接。客户端应重发完整上下文并开始新的响应链。
+祖先在轮次开始前已过期或被淘汰时，网关不会把增量伪装成完整快照；该链后续健康轮也不能自行补全历史。L1 缓存 TTL 为 45 分钟；Memory 模式重启会丢失原生 WebSocket 快照。设置环境变量 `CODEX_WS_CONTINUATION_FAIL_OPEN=true` 可退回旧行为：上下文不可恢复时剥离 `previous_response_id` 后按原样转发，上游将看不到历史；这次有损降级产生的响应不写回放缓存，关闭逃生阀后也不会信任残缺快照。
 
 对于原生 WebSocket 的结构化输出，`gpt-6-astra` 和 `gpt-5.6-luna` 在显式启用 Responses Lite 时保留 JSON Schema 的 `minLength` / `maxLength`。Lite 信号可来自 `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite=true`、`X-OpenAI-Internal-Codex-Responses-Lite: true` 请求头，或由 Payload Rules 注入该元数据标记。该放行仅用于结构化输出；已有工具参数清洗继续使用保守规则。长度约束在入口准备阶段暂时保留，最终出站前才根据最终模型、规则改写后的 Lite 信号、账号 Lite 能力和实际传输统一处理。其他模型、最终未启用 Lite、HTTP 和 Compact 请求沿用原有清洗策略，HTTP 降级请求不会携带不适用的约束。
 
@@ -2148,7 +2148,6 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "continuous_retry_error_codes": [],
   "continuous_retry_max_duration_seconds": 600,
   "codex_fingerprint_default_mode": "off",
-  "codex_unified_client_identity_enabled": false,
   "scheduler_mode": "round_robin",
   "allow_remote_migration": false,
   "database_driver": "postgres",
@@ -2196,7 +2195,7 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 
 `codex_fingerprint_default_mode`（`off`/`device`/`session`/`full`，默认 `off`）是新导入或新建 Codex 账号默认盖上的设备指纹收敛档位，只影响之后新加入的账号；已有账号档位不变，入库后仍可在账号级单独调整。非法取值返回 HTTP 400。
 
-`codex_unified_client_identity_enabled`（默认 `false`）控制网关自发的 Codex 维护请求是否与对话请求使用同一份客户端身份。开启后，wham 用量查询、重置券查询与消耗、每日用量、token 明细、订阅同步（Codex 形态）、模型清单（含下游透传）以及 OpenAI Responses 中转账号的模型发现，都改用与对话出站相同的解析：按 `codex_user_agent_config` 生成（号池模式按账号抽取画像），`Originator` 跟随生成的 UA，最后套用账号自定义头里的 `User-Agent` / `Originator` / `Version`。模型清单的 `client_version` 查询参数、`Version` 头与 UA 版本段取同一版本；中转账号的 installation id 改为按中转凭据派生，对话请求体与模型发现请求头取同一值。维护请求不会新增原本不发送的头（例如 wham 探针不补 `Version` 或 `X-Codex-Installation-Id`）。订阅同步被挑战时的浏览器形态回退、邀请接口与外部版本/指纹库同步不受影响。配置身份解析失败（如 `auto` 模式下版本低于最低要求）时回退内置 `codex-tui` 身份并限频记日志。该开关不改变对话请求的身份选择：`client_compat_mode` 不是 `force` 时，官方 Codex 客户端的对话请求仍透传其自身 UA，要让账号对上游只呈现一份身份需同时使用 `force`。
+Codex 维护请求默认与对话请求共用客户端身份解析和账号自定义身份头，设置中不再提供单独开关。模型清单版本与解析出的客户端版本保持一致；身份解析失败时返回错误，不回退固定身份。维护请求仅设置各端点所需的头，不额外添加会话标识或 attestation。订阅同步的浏览器协议回退保持独立。兼容模式允许官方客户端透传时，后台请求使用配置身份，不追踪或复用某个下游客户端的实时身份。
 
 `max_retries`、`max_rate_limit_retries` 与 `codex_ws_silent_max_retries` 是原有的有限重试预算，管理界面和 API 范围均为 `0` 到 `10`（`0` 禁用对应预算）。需要持续重试时使用独立的 `continuous_retry_enabled` 开关；它不会改变这些有限预算的含义。开关打开后，可在 `continuous_retry_categories` 选择 `transport`、`http_429`、`http_4xx`、`http_5xx`、`stream_error`、`response_failed`、`context_error`，并用 `continuous_retry_status_codes`（例如 `[403,404,501]`）或 `continuous_retry_error_codes`（例如 `["rate_limited","context_length_exceeded"]`）精确追加匹配。类别、状态码、错误代码任一命中即可进入持续重试；403、404、上下文错误及“全部 `response.failed`”默认不选中（501 已由默认的 `http_5xx` 类别覆盖）。普通自选模式不会把结构化安全策略拒绝升级为无限重试。永久额度/余额错误（如 `insufficient_quota`、`quota_exceeded`、`billing_hard_limit`、`billing_limit_reached`、`spend_limit`、`credit_balance`、`insufficient_balance`、`usage_limited`）不会因为通用类别进入无限循环；只有管理员明确选择对应额度错误代码，或明确启用下述超级开关时，才会进入持续重试。
 
@@ -2798,7 +2797,7 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 | account_pool_concurrency_saturated | 匹配账号的并发窗口已满 | 稍后重试，或提高单账号并发上限 |
 | account_pool_usage_limit_reached | 账号池额度耗尽   | 等待冷却或添加新账号             |
 | rate_limit_exceeded              | 限流触发         | 降低请求频率                     |
-| response_context_unavailable     | `previous_response_id` 所需上下文不可用 | 重新发送完整上下文或开始新的响应链 |
+| previous_response_not_found      | `previous_response_id` 所需上下文不可用 | 重新发送完整上下文或开始新的响应链 |
 | service_unavailable              | 依赖的共享上下文后端暂时不可用 | 退避后重试并检查 Redis 状态 |
 
 ### Responses 上下文不可用
@@ -2811,8 +2810,8 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 ```json
 {
   "error": {
-    "code": "response_context_unavailable",
-    "message": "Previous response context is unavailable",
+    "code": "previous_response_not_found",
+    "message": "Previous response not found; resend the full conversation input without previous_response_id",
     "type": "invalid_request_error",
     "details": {
       "field": "previous_response_id",
@@ -2989,3 +2988,7 @@ Retry-After: 3600
 ### 可选的持久化生图队列
 
 设置 `IMAGE_JOB_WORKERS=2` 可启用固定并发的数据库任务队列。启用后创建接口只返回 `job.id` 和 `job.status`；参考图在任务执行时读取。数据库增量迁移、内存限制、重启恢复及兼容性详见 [图片任务队列](IMAGE_JOB_QUEUE.md)。
+
+### 自适应降智检测配置
+
+`PUT /api/admin/intelligence-check/settings` 支持 `adaptive_enabled`、`pause_initial_seconds`、`pause_max_seconds`、`recovery_initial_seconds`、`recovery_min_seconds`。仍需提交当前 `revision` 和完整设置。字段语义、边界与兼容规则见 [自适应降智检测](INTELLIGENCE_BACKOFF.md)。检测 bars 增加 `probe_phase`、`next_interval_seconds`、`passed_streak`、`next_due_at`，用于展示退避或恢复确认进度。

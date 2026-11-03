@@ -1571,7 +1571,6 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS ignore_usage_limit_status BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_on_exhaustion_enabled BOOLEAN DEFAULT FALSE;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_unified_client_identity_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_reset_credits_before_expiry_min INT DEFAULT 60;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS auto_activate_5h_window_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS utls_shutdown_timeout_minutes INT DEFAULT 30;
@@ -2466,7 +2465,6 @@ type SystemSettings struct {
 	CodexUserAgentConfig               string
 	CodexTelemetryEnabled              bool
 	CodexTelemetryTimingDebug          bool
-	CodexUnifiedClientIdentityEnabled  bool   // 网关自发维护请求统一使用配置的客户端身份（默认关闭，issue #774）
 	CodexImagesMainModel               string // 空值沿用部署默认的生图文本驱动模型
 	UsageLogMode                       string
 	UsageLogBatchSize                  int
@@ -2788,7 +2786,6 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(codex_oauth_keepalive_enabled, false),
 		       COALESCE(codex_telemetry_timing_debug, false),
 		       COALESCE(auto_reset_credits_on_exhaustion_enabled, false),
-		       COALESCE(codex_unified_client_identity_enabled, false),
 		       COALESCE(codex_ws_downstream_keepalive_slots, 8)
 			FROM system_settings WHERE id = 1
 		`).Scan(
@@ -2878,7 +2875,6 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexOAuthKeepaliveEnabled,
 		&s.CodexTelemetryTimingDebug,
 		&s.AutoResetCreditsOnExhaustionEnabled,
-		&s.CodexUnifiedClientIdentityEnabled,
 		&s.CodexWSDownstreamKeepaliveSlots,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -3157,10 +3153,9 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 					codex_oauth_keepalive_enabled,
 					codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled,
-					codex_unified_client_identity_enabled,
 					codex_ws_downstream_keepalive_slots
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $128, $131)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $130)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -3200,10 +3195,10 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 				prompt_filter_log_matches = EXCLUDED.prompt_filter_log_matches,
 				prompt_filter_max_text_length = EXCLUDED.prompt_filter_max_text_length,
 				prompt_filter_sensitive_words = EXCLUDED.prompt_filter_sensitive_words,
-				prompt_filter_custom_patterns = CASE WHEN $129 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
+				prompt_filter_custom_patterns = CASE WHEN $128 THEN system_settings.prompt_filter_custom_patterns ELSE EXCLUDED.prompt_filter_custom_patterns END,
 				prompt_filter_disabled_patterns = EXCLUDED.prompt_filter_disabled_patterns,
 				prompt_filter_review_enabled = EXCLUDED.prompt_filter_review_enabled,
-				prompt_filter_review_api_key = CASE WHEN $130 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
+				prompt_filter_review_api_key = CASE WHEN $129 THEN system_settings.prompt_filter_review_api_key ELSE EXCLUDED.prompt_filter_review_api_key END,
 				prompt_filter_review_base_url = EXCLUDED.prompt_filter_review_base_url,
 				prompt_filter_review_model = EXCLUDED.prompt_filter_review_model,
 				prompt_filter_review_timeout_seconds = EXCLUDED.prompt_filter_review_timeout_seconds,
@@ -3286,7 +3281,6 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 					codex_oauth_keepalive_enabled = EXCLUDED.codex_oauth_keepalive_enabled,
 					codex_telemetry_timing_debug = EXCLUDED.codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled = EXCLUDED.auto_reset_credits_on_exhaustion_enabled,
-					codex_unified_client_identity_enabled = EXCLUDED.codex_unified_client_identity_enabled,
 					codex_ws_downstream_keepalive_slots = EXCLUDED.codex_ws_downstream_keepalive_slots
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
@@ -3344,7 +3338,6 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 		s.CodexOAuthKeepaliveEnabled,
 		s.CodexTelemetryTimingDebug,
 		s.AutoResetCreditsOnExhaustionEnabled,
-		s.CodexUnifiedClientIdentityEnabled,
 		s.PreservePromptFilterCustomPatterns,
 		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots))
 	return err

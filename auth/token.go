@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
@@ -11,7 +12,6 @@ import (
 	"log"
 	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,11 +20,10 @@ import (
 
 // OpenAI OAuth 常量（与 CLIProxyAPI / sub2api 一致）
 const (
-	TokenURL      = "https://auth.openai.com/oauth/token"
-	SessionURL    = "https://chatgpt.com/api/auth/session"
-	ClientID      = "app_EMoamEEZ73f0CkXaXp7hrann"
-	RefreshScopes = "openid profile email"
-	MaxRetries    = 3
+	TokenURL   = "https://auth.openai.com/oauth/token"
+	SessionURL = "https://chatgpt.com/api/auth/session"
+	ClientID   = "app_EMoamEEZ73f0CkXaXp7hrann"
+	MaxRetries = 3
 )
 
 // ResinRequestDecorator 由外部（main.go）注入，用于在 Resin 启用时改写请求 URL 和添加 Header。
@@ -53,11 +52,14 @@ type AccountInfo struct {
 // RefreshAccessToken 用 RT 换取 AT
 // resinAccountID 可选，Resin 启用时传入账号标识用于粘性代理
 func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL string, resinAccountID ...string) (*TokenData, *AccountInfo, error) {
-	data := url.Values{
-		"grant_type":    {"refresh_token"},
-		"client_id":     {ClientID},
-		"refresh_token": {refreshToken},
-		"scope":         {RefreshScopes},
+	data, err := json.Marshal(map[string]string{
+		"grant_type":     "refresh_token",
+		"client_id":      ClientID,
+		"refresh_token":  refreshToken,
+		"refresh_reason": codexOAuthRefreshReason(ctx),
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("编码刷新请求失败: %w", err)
 	}
 
 	// Resin 反代模式：改写 URL
@@ -70,12 +72,13 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 		targetURL = ResinRequestDecorator(TokenURL, accountID)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, targetURL, bytes.NewReader(data))
 	if err != nil {
 		return nil, nil, fmt.Errorf("创建请求失败: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	applyCodexOAuthIdentity(req)
 
 	// Resin 反代：注入账号身份头
 	if ResinRequestDecorator != nil && accountID != "" {
@@ -87,7 +90,7 @@ func RefreshAccessToken(ctx context.Context, refreshToken string, proxyURL strin
 	if ResinRequestDecorator != nil && accountID != "" {
 		client = &http.Client{Timeout: 30 * time.Second}
 	} else {
-		client = buildHTTPClient(proxyURL)
+		client = buildUTLSHTTPClient(proxyURL)
 	}
 	resp, err := client.Do(req)
 	if err != nil {

@@ -959,6 +959,25 @@
     "heroChannelTitle": "{{channel}}: {{available}}/{{total}} accounts available · {{requests}} requests today"
   },
   "accounts": {
+    "activationTitle": "Scheduled activation",
+    "activationEnabled": "Enable scheduled activation",
+    "activationTimezone": "Timezone: Asia/Shanghai (UTC+8)",
+    "activationSaved": "Activation schedule saved",
+    "activationUnsaved": "Unsaved changes",
+    "activationSaveHint": "Runs automatically after saving",
+    "activationWeekdays": "Weekdays · Mon–Fri",
+    "activationWeekends": "Weekends · Sat–Sun",
+    "activationAdd": "Add",
+    "activationRemove": "Remove {{time}}",
+    "activationNoTimes": "No times added",
+    "activationExecutionHint": "Each slot sends one request with this account, model and test content, consuming its quota. No retry or account fallback. The server runs schedules after this page is closed. Disabling the account or this switch stops future runs. Missed slots are not replayed.",
+    "activationRecords": "Recent runs",
+    "activationNoRecords": "No runs yet. Saving does not send a request.",
+    "activationReset": "Next 5-hour reset",
+    "activationStatus_success": "Success",
+    "activationStatus_failed": "Failed",
+    "activationStatus_skipped": "Skipped",
+    "activationStatus_unknown": "Outcome unknown",
     "refreshAllUsage": "Refresh All Usage",
     "refreshAllUsageHint": "Query all WHAM-capable Codex accounts in the runtime pool and update their 5-hour and weekly usage bars.",
     "batchUsageRefreshing": "Refreshing usage",
@@ -2653,6 +2672,8 @@
     "reason7dUrgency": "7d Reset Soon"
   },
   "usage": {
+    "internalScheduledActivation": "Scheduled activation",
+    "internalScheduledActivationTooltip": "A connection test sent by the server using this account’s saved schedule",
     "usageAnalysis": "Usage breakdown",
     "imageInputTokens": "Image input tokens",
     "imageOutputTokens": "Image output tokens",
@@ -4417,6 +4438,8 @@
     }
   },
   "settings": {
+    "schedulerModeReset5hFirst": "5h Reset First",
+    "schedulerModeReset5hFirstDesc": "Within the same account priority and health tier, prefer Codex accounts with remaining quota and the earliest observed 5-hour reset. Skip exhausted, rate-limited, unauthorized or full accounts. Expired, unknown or inapplicable windows use normal scheduling fallback. This does not activate accounts or predict future cycles. Existing session bindings remain; fresh selection takes precedence over affinity hashing. Weekly limits and existing admission rules still apply.",
     "codexClientVersions": {
       "platform": "Client / platform",
       "pair": "App / embedded CLI",
@@ -4537,7 +4560,7 @@
       "writePolicyAlways": "Always",
       "writePolicyOnDemand": "On demand",
       "l1Note": "The default 8 MiB entry value is an L1 admission limit. With Redis, a larger context may still continue up to the reconstruction limit, but it is not promoted into local L1.",
-      "memoryNote": "In Memory mode, an oversize or evicted context cannot be recovered from another backend. A dependent continuation may return HTTP 409 response_context_unavailable.",
+      "memoryNote": "With Memory caching and a file-backed SQLite database, eligible contexts are written to a local on-disk store by default. With the store disabled, a continuation that depends on a missing context may return HTTP 409 previous_response_not_found.",
       "validation": {
         "total_integer": "Local total budget must be a whole number of MiB.",
         "total_range": "Local total budget must be between 8 and 4096 MiB.",
@@ -4902,9 +4925,6 @@
     "codexTelemetryDesc": "Send simulated Codex analytics events and OTLP metrics using the selected client identity. Events are synthesized, not observed from real tool use. Off by default; CODEX_TELEMETRY_ENABLED=false forces it off at the deployment level.",
     "codexTelemetryTiming": "Telemetry timing probe (temporary)",
     "codexTelemetryTimingDesc": "Diagnostic only: prints [TELEMETRY-TIMING] logs for request setup, startup metric build and streaming parse time. Off by default with zero overhead; CODEX_TELEMETRY_TIMING_DEBUG=1 also enables it.",
-    "codexUnifiedClientIdentity": "Unified client identity for maintenance requests",
-    "codexUnifiedClientIdentityDesc": "When on, gateway-originated requests (usage probes, reset credits, daily usage, subscription sync, model manifest and relay model discovery) use the same client identity as chat requests, including pool personas and per-account identity headers, instead of the built-in codex-tui identity. The browser fallback used by subscription sync is unaffected. Off by default.",
-    "codexUnifiedClientIdentityCompatHint": "Compatibility mode is not Force Simulated: chat requests from official Codex clients still pass through their own User-Agent, so an account may still show more than one identity upstream. Switch compatibility mode to Force Simulated for full unification.",
     "codexCliVersionSyncInterval": "Auto-sync interval",
     "codexCliVersionSyncIntervalDesc": "Wait time between automatic syncs (hours, range 1-720).",
     "codexUserAgentRaw": "Raw User-Agent Override",

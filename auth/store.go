@@ -2105,6 +2105,25 @@ func (a *Account) FreshDispatchUsageLimited() bool {
 	return a.Status == StatusCooldown && now.Before(a.CooldownUtil) && isUsageLimitCooldownReason(a.CooldownReason)
 }
 
+// QuotaAutoPaused reports whether this otherwise dispatchable account is
+// fenced only by its configured 5h/7d auto-pause threshold. The decision uses
+// valid usage windows, thresholds and reset times alone. Manually disabled or
+// paused accounts, accounts without credentials, errors, bans and plain
+// concurrency saturation are not quota pauses. Unlike a local 100% WHAM
+// observation, the threshold fence has no continuation exception: every
+// scheduler path rejects the account until its window resets.
+func (a *Account) QuotaAutoPaused() bool {
+	if a == nil || atomic.LoadInt32(&a.Disabled) != 0 || atomic.LoadInt32(&a.DispatchPaused) != 0 {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if a.Status == StatusError || a.healthTierLocked() == HealthTierBanned || !a.hasDispatchCredentialLocked() {
+		return false
+	}
+	return a.quotaAutoPausedLocked(time.Now())
+}
+
 func (a *Account) recomputeEffectiveIgnoreUsageLimitStatus(global bool) {
 	if a.IgnoreUsageLimitStatusOverride != nil {
 		a.ignoreUsageLimitStatus = *a.IgnoreUsageLimitStatusOverride
@@ -4093,7 +4112,7 @@ type Store struct {
 	codexModelMapping             atomic.Value // Codex 模型映射 JSON 字符串
 	payloadRules                  atomic.Value // Payload 请求体重写规则 JSON 字符串
 	reasoningEffortModels         atomic.Value // 带思考强度的模型别名 JSON 数组
-	schedulerMode                 atomic.Value // string: "round_robin" / "remaining_quota" / "fill_first"
+	schedulerMode                 atomic.Value // string: "round_robin" / "remaining_quota" / "fill_first" / "reset_5h_first"
 	affinityMode                  atomic.Value // string: "bounded" / "off" / "strict"
 	affinitySpreadEnabled         atomic.Bool  // 新亲和键按 HRW 哈希散列选号(issue #484)
 	claudeFingerprintDefault      atomic.Value // string: Claude 指纹模式全局默认（preserve/force;空=preserve）
@@ -4996,6 +5015,9 @@ func (s *Store) fastSchedulerUpdate(acc *Account) {
 	scheduler := s.getFastScheduler()
 	if scheduler != nil {
 		scheduler.Update(acc)
+	}
+	if s.GetSchedulerMode() == SchedulerModeReset5hFirst {
+		s.refreshRoutingReset5hAccount(acc)
 	}
 	s.notifySchedulerAccountAvailability(acc, true)
 }
@@ -7277,6 +7299,7 @@ func (s *Store) NextExcludingWithDispatch(apiKeyID int64, exclude map[int64]bool
 		bestSchedulerPriority := minSchedulerPriority - 1
 		bestPriority := -1
 		bestDispatchScore := -math.MaxFloat64
+		var bestReset5h time.Time
 		var bestLoad int64 = math.MaxInt64
 		var bestLimit int64
 		maxConcurrency := s.maxConcurrency.Load()
@@ -7306,14 +7329,21 @@ func (s *Store) NextExcludingWithDispatch(apiKeyID int64, exclude map[int64]bool
 			// 账号调度优先级严格先于健康档位与调度分（issue #358）
 			schedulerPriority := acc.schedulerPriority()
 			priority := tierPriority(tier)
+			var reset5h time.Time
+			resetOrder := 0
+			if s.GetSchedulerMode() == SchedulerModeReset5hFirst && policy != DispatchPolicySpark {
+				reset5h = acc.reset5hSchedulingDeadline(time.Now())
+				resetOrder = compareReset5hDeadlines(reset5h, bestReset5h)
+			}
 			if schedulerPriority > bestSchedulerPriority ||
 				(schedulerPriority == bestSchedulerPriority && (priority > bestPriority ||
-					(priority == bestPriority && (dispatchScore > bestDispatchScore ||
+					(priority == bestPriority && (resetOrder < 0 || resetOrder == 0 && (dispatchScore > bestDispatchScore ||
 						(dispatchScore == bestDispatchScore && load < bestLoad) ||
-						(dispatchScore == bestDispatchScore && load == bestLoad && fastRandN(2) == 0))))) {
+						(dispatchScore == bestDispatchScore && load == bestLoad && fastRandN(2) == 0)))))) {
 				bestSchedulerPriority = schedulerPriority
 				bestPriority = priority
 				bestDispatchScore = dispatchScore
+				bestReset5h = reset5h
 				bestLoad = load
 				bestLimit = limit
 				best = acc
@@ -7478,6 +7508,7 @@ func (s *Store) nextExcludingWithFilterLazy(apiKeyID int64, exclude map[int64]bo
 		bestSchedulerPriority := minSchedulerPriority - 1
 		bestPriority := -1
 		bestDispatchScore := -math.MaxFloat64
+		var bestReset5h time.Time
 		var bestLoad int64 = math.MaxInt64
 		maxConcurrency := s.maxConcurrency.Load()
 
@@ -7514,14 +7545,21 @@ func (s *Store) nextExcludingWithFilterLazy(apiKeyID int64, exclude map[int64]bo
 			// 账号调度优先级严格先于健康档位与调度分（issue #358）
 			schedulerPriority := acc.schedulerPriority()
 			priority := tierPriority(tier)
+			var reset5h time.Time
+			resetOrder := 0
+			if s.GetSchedulerMode() == SchedulerModeReset5hFirst && policy != DispatchPolicySpark {
+				reset5h = acc.reset5hSchedulingDeadline(time.Now())
+				resetOrder = compareReset5hDeadlines(reset5h, bestReset5h)
+			}
 			if schedulerPriority > bestSchedulerPriority ||
 				(schedulerPriority == bestSchedulerPriority && (priority > bestPriority ||
-					(priority == bestPriority && (dispatchScore > bestDispatchScore ||
+					(priority == bestPriority && (resetOrder < 0 || resetOrder == 0 && (dispatchScore > bestDispatchScore ||
 						(dispatchScore == bestDispatchScore && load < bestLoad) ||
-						(dispatchScore == bestDispatchScore && load == bestLoad && fastRandN(2) == 0))))) {
+						(dispatchScore == bestDispatchScore && load == bestLoad && fastRandN(2) == 0)))))) {
 				bestSchedulerPriority = schedulerPriority
 				bestPriority = priority
 				bestDispatchScore = dispatchScore
+				bestReset5h = reset5h
 				bestLoad = load
 				best = acc
 			}
@@ -7871,7 +7909,10 @@ func (s *Store) nextAccountForFreshAffinityWithDispatch(key string, apiKeyID int
 	if acc, handled := s.selectAntigravityBalancedAccount(key, apiKeyID, exclude, filter, opts); handled {
 		return acc
 	}
-	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" {
+	// Deadline priority governs fresh selection; an existing binding is handled
+	// before reaching this method and remains intact.
+	if !s.GetSessionAffinitySpread() || strings.TrimSpace(key) == "" ||
+		(s.GetSchedulerMode() == SchedulerModeReset5hFirst && policy != DispatchPolicySpark) {
 		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy)
 	}
 	filter = s.withUsableEgressFilter(filter)
@@ -8315,7 +8356,7 @@ func (s *Store) UsageLimitedCandidateSummary(apiKeyID int64, exclude map[int64]b
 			continue
 		}
 		cachedCooldown := s.accountHasCachedCooldown(acc)
-		usageLimited := acc.FreshDispatchUsageLimited()
+		usageLimited := acc.FreshDispatchUsageLimited() || acc.QuotaAutoPaused()
 		if policy == DispatchPolicySpark {
 			usageLimited = acc.SparkDispatchUsageLimited()
 		}
@@ -9110,7 +9151,7 @@ func (s *Store) GetSchedulerMode() string {
 // SetSchedulerMode 设置调度模式并传播到 FastScheduler
 func (s *Store) SetSchedulerMode(mode string) {
 	switch mode {
-	case "round_robin", "remaining_quota", "fill_first":
+	case "round_robin", "remaining_quota", "fill_first", SchedulerModeReset5hFirst:
 		// ok
 	default:
 		mode = "round_robin"

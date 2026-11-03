@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -81,6 +82,17 @@ func TestParseIDTokenEmptyReturnsEmptyInfo(t *testing.T) {
 
 func TestRefreshAccessTokenRejectsEmptyAccessToken(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if "application/json" != r.Header.Get("Content-Type") {
+			t.Errorf("Content-Type: want application/json, got %q", r.Header.Get("Content-Type"))
+		}
+		var payload map[string]string
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode refresh request: %v", err)
+		}
+		want := map[string]string{"grant_type": "refresh_token", "client_id": ClientID, "refresh_token": "rt-old", "refresh_reason": "forced"}
+		if !reflect.DeepEqual(want, payload) {
+			t.Errorf("refresh payload: want %v, got %v", want, payload)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"refresh_token":"rt-new","expires_in":3600}`))
 	}))

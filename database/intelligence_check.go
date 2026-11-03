@@ -47,34 +47,36 @@ type IntelligenceCheckRunFilter struct {
 	Offset, Limit           int
 }
 type IntelligenceCheckAccount struct {
-	ConfigError    string     `json:"config_error,omitempty"`
-	AccountID      int64      `json:"account_id"`
-	AccountName    string     `json:"account_name"`
-	Channel        string     `json:"channel"`
-	Enabled        bool       `json:"enabled"`
-	ManualEnabled  bool       `json:"manual_enabled"`
-	AccountStatus  string     `json:"account_status"`
-	Status         string     `json:"latest_status"`
-	QualityPaused  bool       `json:"quality_paused"`
-	ManualRevision int64      `json:"manual_revision"`
-	NextDueAt      *time.Time `json:"next_due_at"`
-	QuestionCursor int        `json:"question_cursor"`
+	CredentialGeneration int64      `json:"-"`
+	ConfigError          string     `json:"config_error,omitempty"`
+	AccountID            int64      `json:"account_id"`
+	AccountName          string     `json:"account_name"`
+	Channel              string     `json:"channel"`
+	Enabled              bool       `json:"enabled"`
+	ManualEnabled        bool       `json:"manual_enabled"`
+	AccountStatus        string     `json:"account_status"`
+	Status               string     `json:"latest_status"`
+	QualityPaused        bool       `json:"quality_paused"`
+	ManualRevision       int64      `json:"manual_revision"`
+	NextDueAt            *time.Time `json:"next_due_at"`
+	QuestionCursor       int        `json:"question_cursor"`
 	ic.State
 }
 type IntelligenceCheckRun struct {
-	ID              int64       `json:"id"`
-	AccountID       int64       `json:"account_id"`
-	AccountName     string      `json:"account_name"`
-	Channel         string      `json:"channel"`
-	Source          string      `json:"source"`
-	Status          string      `json:"status"`
-	ConfigRevision  int64       `json:"config_revision"`
-	ManualRevision  int64       `json:"manual_revision"`
-	Model           string      `json:"model"`
-	ReasoningEffort string      `json:"reasoning_effort"`
-	JudgeMode       string      `json:"judge_mode"`
-	Question        ic.Question `json:"question"`
-	Settings        ic.Settings `json:"settings"`
+	CredentialGeneration int64       `json:"credential_generation,omitempty"`
+	ID                   int64       `json:"id"`
+	AccountID            int64       `json:"account_id"`
+	AccountName          string      `json:"account_name"`
+	Channel              string      `json:"channel"`
+	Source               string      `json:"source"`
+	Status               string      `json:"status"`
+	ConfigRevision       int64       `json:"config_revision"`
+	ManualRevision       int64       `json:"manual_revision"`
+	Model                string      `json:"model"`
+	ReasoningEffort      string      `json:"reasoning_effort"`
+	JudgeMode            string      `json:"judge_mode"`
+	Question             ic.Question `json:"question"`
+	Settings             ic.Settings `json:"settings"`
 	ic.Observation
 	AnswerPassed  bool       `json:"answer_passed"`
 	LatencyPassed bool       `json:"latency_passed"`
@@ -87,12 +89,16 @@ type IntelligenceCheckRun struct {
 	LeaseUntil    int64      `json:"-"`
 }
 type IntelligenceCheckBar struct {
-	ActiveRunID   int64                         `json:"active_run_id,omitempty"`
-	ActiveStatus  string                        `json:"active_status,omitempty"`
-	Enabled       bool                          `json:"enabled"`
-	QualityPaused bool                          `json:"quality_paused"`
-	OwnedAction   string                        `json:"action"`
-	Records       []IntelligenceCheckRunSummary `json:"records"`
+	ProbePhase          string                        `json:"probe_phase,omitempty"`
+	NextIntervalSeconds int                           `json:"next_interval_seconds,omitempty"`
+	PassedStreak        int                           `json:"passed_streak"`
+	NextDueAt           *time.Time                    `json:"next_due_at,omitempty"`
+	ActiveRunID         int64                         `json:"active_run_id,omitempty"`
+	ActiveStatus        string                        `json:"active_status,omitempty"`
+	Enabled             bool                          `json:"enabled"`
+	QualityPaused       bool                          `json:"quality_paused"`
+	OwnedAction         string                        `json:"action"`
+	Records             []IntelligenceCheckRunSummary `json:"records"`
 }
 type IntelligenceCheckRunSummary struct {
 	ID           int64      `json:"id"`
@@ -179,7 +185,7 @@ func (db *DB) intelligenceSettingsTx(ctx context.Context, tx *sql.Tx) (ic.Settin
 		return s, err
 	}
 	err := json.Unmarshal([]byte(raw), &s)
-	return s, err
+	return ic.AdaptiveDefaults(s), err
 }
 func (db *DB) GetIntelligenceCheckSettings(ctx context.Context) (ic.Settings, error) {
 	var raw string
@@ -188,9 +194,10 @@ func (db *DB) GetIntelligenceCheckSettings(ctx context.Context) (ic.Settings, er
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &s)
 	}
-	return s, err
+	return ic.AdaptiveDefaults(s), err
 }
 func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) (ic.Settings, error) {
+	s = ic.AdaptiveDefaults(s)
 	if err := ic.ValidateSettings(s); err != nil {
 		return s, err
 	}
@@ -262,14 +269,35 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 			return err
 		}
 		for id, state := range states {
+			delay := s.IntervalSeconds
+			state.ErrorRetrySeconds = 0
+			state.ProbePhase = ""
+			if s.AdaptiveEnabled {
+				state.ProbePhase = "normal"
+				if state.PauseBackoffSeconds > 0 {
+					state.PauseBackoffSeconds = min(s.PauseMaxSeconds, max(s.PauseInitialSeconds, state.PauseBackoffSeconds))
+				}
+				if state.OwnedAction == "pause" {
+					if state.PauseBackoffSeconds == 0 {
+						state.PauseBackoffSeconds = s.PauseInitialSeconds
+					}
+					delay, state.ProbePhase = state.PauseBackoffSeconds, "backoff"
+				}
+			} else {
+				state.BlockedCredentialGeneration = nil
+				state.PauseBackoffSeconds = 0
+			}
+			state.NextIntervalSeconds = delay
 			raw, _ := json.Marshal(state)
-			if _, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET state_json=$1 WHERE account_id=$2`, string(raw), id); err != nil {
+			// Keep an earlier due check unless switching timing policies.
+			due := time.Now().Add(time.Duration(delay) * time.Second).UnixMilli()
+			if _, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET state_json=$1,next_due_ms=CASE WHEN next_due_ms>$3 OR $4 THEN $3 ELSE next_due_ms END WHERE account_id=$2`, string(raw), id, due, old.AdaptiveEnabled != s.AdaptiveEnabled); err != nil {
 				return err
 			}
 		}
 		return nil
 	})
-	return s, err
+	return ic.AdaptiveDefaults(s), err
 }
 func (db *DB) intelligenceUpstreamExpr() string {
 	if db.isSQLite() {
@@ -286,8 +314,12 @@ func (db *DB) intelligenceEligibleSQL() string {
 
 // intelligenceAutomaticSQL admits scheduled checks only for accounts that opted
 // in and are not manually disabled. Manual checks bypass both switches.
-func intelligenceAutomaticSQL(account, state string) string {
-	return state + `.enabled=TRUE AND COALESCE(` + account + `.enabled,TRUE)=TRUE`
+func (db *DB) intelligenceAutomaticSQL(account, state string) string {
+	blocked := "(" + state + ".state_json::jsonb->>'blocked_credential_generation')::bigint"
+	if db.isSQLite() {
+		blocked = "json_extract(" + state + ".state_json,'$.blocked_credential_generation')"
+	}
+	return state + `.enabled=TRUE AND COALESCE(` + account + `.enabled,TRUE)=TRUE AND (` + blocked + ` IS NULL OR ` + blocked + `<>COALESCE(` + account + `.credential_generation,1))`
 }
 func intelligencePage(offset, limit int) (int, int) {
 	if offset < 0 {
@@ -302,13 +334,13 @@ func intelligencePage(offset, limit int) (int, int) {
 	return offset, limit
 }
 
-const intelligenceAccountColumns = `a.id,a.name, s.enabled,COALESCE(a.enabled,TRUE),a.status,s.status,s.quality_paused,s.manual_revision,s.next_due_ms,s.question_cursor,s.state_json,`
+const intelligenceAccountColumns = `a.id,a.name,COALESCE(a.credential_generation,1), s.enabled,COALESCE(a.enabled,TRUE),a.status,s.status,s.quality_paused,s.manual_revision,s.next_due_ms,s.question_cursor,s.state_json,`
 
 func scanIntelligenceAccount(row interface{ Scan(...interface{}) error }) (IntelligenceCheckAccount, error) {
 	var a IntelligenceCheckAccount
 	var due int64
 	var raw string
-	err := row.Scan(&a.AccountID, &a.AccountName, &a.Enabled, &a.ManualEnabled, &a.AccountStatus, &a.Status, &a.QualityPaused, &a.ManualRevision, &due, &a.QuestionCursor, &raw, &a.Channel)
+	err := row.Scan(&a.AccountID, &a.AccountName, &a.CredentialGeneration, &a.Enabled, &a.ManualEnabled, &a.AccountStatus, &a.Status, &a.QualityPaused, &a.ManualRevision, &due, &a.QuestionCursor, &raw, &a.Channel)
 	if err == nil {
 		err = json.Unmarshal([]byte(raw), &a.State)
 	}
@@ -469,6 +501,8 @@ func (db *DB) intelligenceManualMutationTx(ctx context.Context, tx *sql.Tx, ids 
 		state.OriginalGroupIDs = nil
 		state.OriginalGroupChannels = nil
 		if schedulingWrite {
+			state.PauseBackoffSeconds, state.ErrorRetrySeconds, state.NextIntervalSeconds = 0, 0, 0
+			state.ProbePhase = ""
 			state.OwnedAction = ""
 			paused = false
 		} else if state.OwnedAction == "switch_group" {

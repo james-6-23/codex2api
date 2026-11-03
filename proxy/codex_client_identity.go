@@ -2,11 +2,8 @@ package proxy
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"strings"
-	"sync/atomic"
-	"time"
 
 	"github.com/codex2api/auth"
 )
@@ -93,9 +90,6 @@ type CodexMaintenanceIdentity struct {
 	UserAgent  string
 	Originator string
 	Version    string
-	// Unified 表示身份来自统一身份开关下的配置解析；false 为内置 codex-tui 身份
-	// （开关关闭，或配置解析失败后的回退）。
-	Unified bool
 }
 
 // Apply 写入维护请求的身份头。Version 只由已经发送它的调用方自行写入：
@@ -108,39 +102,17 @@ func (id CodexMaintenanceIdentity) Apply(headers http.Header) {
 	headers.Set("Originator", id.Originator)
 }
 
-const codexMaintenanceIdentityFallbackLogEvery = 10 * time.Minute
-
-var codexMaintenanceIdentityFallbackLastLog atomic.Int64
-
-// ResolveCodexMaintenanceIdentity 返回网关自发维护请求使用的客户端身份。
-//
-// 统一身份开关（codex_unified_client_identity_enabled）关闭时保持内置 codex-tui 身份。
-// 开启后与对话出站走同一套解析：号池画像按账号抽取、Originator 跟随生成的 UA，最后
-// 套用账号自定义头里的身份头，覆盖顺序与对话请求一致，使同一账号对上游只呈现一份
-// 客户端身份（issue #774）。downstream 为空表示纯后台请求；模型清单透传时传入下游头，
-// 透传官方客户端的规则也与对话一致。
-//
-// 配置的版本低于最低版本要求时回退内置身份并限频记日志：探针承担 401 识别、额度
-// 刷新与自动暂停，不能因为身份配置问题停摆。
-func ResolveCodexMaintenanceIdentity(account *auth.Account, downstream http.Header) CodexMaintenanceIdentity {
-	builtin := CodexMaintenanceIdentity{
-		UserAgent:  MinimalCodexCLIUserAgentForHeaders(),
-		Originator: Originator,
-		Version:    effectiveLatestCodexCLIVersion(),
-	}
-	if !CurrentRuntimeSettings().CodexUnifiedClientIdentityEnabled {
-		return builtin
-	}
+// ResolveCodexMaintenanceIdentity 与对话请求共用身份解析和账号覆盖规则。
+func ResolveCodexMaintenanceIdentity(account *auth.Account, downstream http.Header) (CodexMaintenanceIdentity, error) {
 	identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{Account: account, Headers: downstream})
 	if err == nil && strings.TrimSpace(identity.UserAgent) == "" {
 		err = errEmptyCodexMaintenanceUserAgent
 	}
 	if err != nil {
-		logCodexMaintenanceIdentityFallback(account, err)
-		return builtin
+		return CodexMaintenanceIdentity{}, err
 	}
 
-	resolved := CodexMaintenanceIdentity{UserAgent: identity.UserAgent, Version: identity.Version, Unified: true}
+	resolved := CodexMaintenanceIdentity{UserAgent: identity.UserAgent, Version: identity.Version}
 	if identity.Generated {
 		resolved.Originator = CodexOriginatorForGeneratedUserAgent(identity.UserAgent)
 	} else if originator := strings.TrimSpace(downstream.Get("Originator")); originator != "" && IsCodexOfficialClientByHeaders("", originator) {
@@ -167,23 +139,27 @@ func ResolveCodexMaintenanceIdentity(account *auth.Account, downstream http.Head
 			resolved.Version = value
 		}
 	}
-	return resolved
+	return resolved, nil
 }
 
 var errEmptyCodexMaintenanceUserAgent = errors.New("resolved empty User-Agent")
 
-func logCodexMaintenanceIdentityFallback(account *auth.Account, err error) {
-	now := time.Now().UnixNano()
-	last := codexMaintenanceIdentityFallbackLastLog.Load()
-	if last != 0 && time.Duration(now-last) < codexMaintenanceIdentityFallbackLogEvery {
-		return
+// OAuth 默认客户端只需要 UA 和 Originator，不复用对话 attestation。
+func CodexOAuthIdentityHeaders(account *auth.Account) (http.Header, error) {
+	identity, err := ResolveCodexMaintenanceIdentity(account, nil)
+	if err != nil {
+		return nil, err
 	}
-	if !codexMaintenanceIdentityFallbackLastLog.CompareAndSwap(last, now) {
-		return
+	headers := make(http.Header)
+	identity.Apply(headers)
+	return headers, nil
+}
+
+func applyCodexMaintenanceHeaders(req *http.Request, account *auth.Account) error {
+	identity, err := ResolveCodexMaintenanceIdentity(account, nil)
+	if err != nil {
+		return err
 	}
-	accountID := int64(0)
-	if account != nil {
-		accountID = account.ID()
-	}
-	log.Printf("[CodexIdentity] 统一身份解析失败，维护请求回退内置身份: account_id=%d err=%v", accountID, err)
+	identity.Apply(req.Header)
+	return nil
 }

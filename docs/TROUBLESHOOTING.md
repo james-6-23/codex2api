@@ -8,7 +8,7 @@
 - [数据库问题](#数据库问题)
 - [账号池问题](#账号池问题)
 - [API 请求问题](#api-请求问题)
-  - [Responses 上下文连续请求](#症状-409-response_context_unavailable)
+  - [Responses 上下文连续请求](#症状-409-previous_response_not_found)
 - [性能问题](#性能问题)
 - [网络/代理问题](#网络代理问题)
 - [日志分析](#日志分析)
@@ -272,9 +272,9 @@ curl -s -H "X-Admin-Key: your-secret" http://localhost:8080/api/admin/accounts |
 2. 清理冷却状态的账号
 3. 等待冷却结束
 
-### 症状: 409 response_context_unavailable
+### 症状: 409 previous_response_not_found
 
-该错误表示 `previous_response_id` 所需上下文已经确定无法在当前路径重建。常见原因包括 Memory 模式下单条上下文超过 L1 准入预算、依赖上下文已被条数/字节 LRU 淘汰、必需上下文普通缺失或已经过期，或 Redis 值损坏、超过重建上限。
+该错误表示 `previous_response_id` 所需上下文已经确定无法在当前路径重建（旧版本返回的错误码为 `response_context_unavailable`）。常见原因包括关闭磁盘持久层的 Memory 模式下单条上下文超过 L1 准入预算、依赖上下文已被条数/字节 LRU 淘汰、必需上下文普通缺失或已经过期（含超过持久层保留期），或后端值损坏、超过重建上限。日志中的 `[response-context] unavailable` 行给出具体原因。
 
 ```bash
 # 查看当前预算、逻辑占用、淘汰和不可用计数
@@ -302,6 +302,7 @@ curl -s -H "X-Admin-Key: your-secret" \
 1. 不要对同一个已确定不可用的 `previous_response_id` 做无条件重试；重新发送完整必需上下文或开始新的响应链。
 2. Memory 模式重点查看 `oversize_rejections`、`count_evictions` 和 `byte_evictions`。可在设置页调整本地总量/单条准入，但总量不是 RSS 硬上限。
 3. Redis 模式重点查看 `last_config_sync_error`、Redis 健康状态和 `reconstruct_max_bytes`。共享值在重建上限内但超过 L1 准入时会计入 `oversize_bypasses`，仍能服务请求，不需要仅为该计数扩大 L1。
+4. 日志出现 `[quota-failover] rejected` 时，表示会话固定的账号额度耗尽或被自动暂停，而请求中带有无法迁移到其他账号的状态：`item_reference`、加密压缩项、其他非 reasoning 的加密项，或缺少配对调用的工具输出。日志中的 `reason` 和各项计数会指明具体原因。加密 reasoning 不会导致拒绝：它随请求切到新账号，新账号若以 `invalid_encrypted_content` 拒绝，网关会剥离加密 reasoning 后重试一次，消息和工具调用保持完整。
 
 ### 症状: previous response context backend 返回 503
 

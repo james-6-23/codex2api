@@ -12,7 +12,7 @@ const root = fileURLToPath(new URL('../', import.meta.url))
 let artifactDir
 let browser, script, css
 const question = { id: 'candy', name: '糖果配对', prompt: '本地演示题目，最终只恢复数字结果。', expected_answer: '21', match_mode: 'exact', max_duration_ms: 20000, enabled: true }
-const settings = { revision: 1, enabled: false, gpt_model: 'gpt-6-astra', claude_model: 'claude-sonnet-4-6', reasoning_effort: 'high', judge_mode: 'answer', interval_seconds: 300, retry_seconds: 60, timeout_seconds: 180, concurrency: 4, retention: 200, new_accounts_enabled: true, action: 'none', degrade_threshold: 2, recover_threshold: 1, target_group_id: 0, questions: [question] }
+const settings = { adaptive_enabled: false, pause_initial_seconds: 1800, pause_max_seconds: 172800, recovery_initial_seconds: 300, recovery_min_seconds: 120, revision: 1, enabled: false, gpt_model: 'gpt-6-astra', claude_model: 'claude-sonnet-4-6', reasoning_effort: 'high', judge_mode: 'answer', interval_seconds: 300, retry_seconds: 60, timeout_seconds: 180, concurrency: 4, retention: 200, new_accounts_enabled: true, action: 'none', degrade_threshold: 2, recover_threshold: 1, target_group_id: 0, questions: [question] }
 const accounts = [{ account_id: 1, account_name: '本地 Codex 测试账号', channel: 'codex', enabled: true, latest_status: 'degraded', failed_streak: 2, passed_streak: 0, action: 'pause', next_due_at: '2026-10-15T13:00:00Z' }]
 const run = { id: 11, account_id: 1, account_name: accounts[0].account_name, channel: 'codex', source: 'manual', status: 'degraded', config_revision: 1, model: 'gpt-6-astra', response_model: 'gpt-6-astra', reasoning_effort: 'high', judge_mode: 'answer', question, output: '29', error: '', duration_ms: 4120, input_tokens: 120, output_tokens: 10, reasoning_tokens: 8, created_at: '2026-10-15T12:00:00Z', started_at: '2026-10-15T12:00:00Z', completed_at: '2026-10-15T12:00:04Z', action: 'pause' }
 before(async () => {
@@ -296,4 +296,24 @@ test('Claude account table and detail receive batch intelligence history', async
  await page.getByRole('dialog').getByLabel('最近 20 次降智检测，由旧到新').waitFor()
  await assertActionsFollowStatus(page.getByRole('dialog'))
  assert.ok(await page.evaluate(() => window.__calls.filter(c => c.name === 'getIntelligenceBars').every(c => JSON.stringify(c.args[0])==='[1]')))
+})
+
+
+test('adaptive settings can be enabled and saved with an independent long cap', async t => {
+ const page = await fixture(t)
+ await page.getByRole('switch', {name:'自适应检测',exact:true}).click()
+ assert.equal(await page.getByLabel('暂停最大间隔（秒）',{exact:true}).inputValue(),'172800')
+ await page.getByLabel('暂停最大间隔（秒）',{exact:true}).fill('259200')
+ await page.getByRole('button',{name:'保存配置',exact:true}).click()
+ await page.getByRole('button',{name:'保存配置',exact:true,disabled:true}).waitFor()
+ assert.equal(await page.evaluate(()=>window.__config.adaptive_enabled),true)
+ assert.equal(await page.evaluate(()=>window.__config.pause_max_seconds),259200)
+ await page.screenshot({path:path.join(artifactDir,'settings-adaptive.png'),fullPage:true})
+})
+
+test('account bar shows recovery progress and persisted next probe', async t => {
+ const page = await fixture(t,{bar:true})
+ await page.evaluate(()=>{window.__bar={...window.__bar,action:'pause',probe_phase:'recovering',passed_streak:1,next_due_at:'2026-11-03T12:00:00Z'}})
+ await page.getByText(/恢复确认 · 连续通过 1 次 · 下次/).waitFor({timeout:6000})
+ await page.screenshot({path:path.join(artifactDir,'account-recovering.png'),fullPage:true})
 })

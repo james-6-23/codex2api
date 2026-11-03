@@ -2213,7 +2213,6 @@ export interface SystemSettings {
   codex_force_websocket: boolean
   codex_telemetry_enabled: boolean
   codex_telemetry_timing_debug: boolean
-  codex_unified_client_identity_enabled: boolean
   codex_request_compression: boolean
   codex_ws_weak_network_mode: boolean
   codex_ws_keepalive_enabled: boolean
@@ -4095,6 +4094,8 @@ export interface PublicAPIKeyUsageLog {
   billed_image_count?: number
   id: number
   channel?: UpstreamChannel | ''
+  client_ip: string
+  client_user_agent: string
   endpoint: string
   model: string
   effective_model: string
@@ -4104,7 +4105,11 @@ export interface PublicAPIKeyUsageLog {
   first_token_ms: number
   input_tokens: number
   output_tokens: number
+  reasoning_tokens: number
+  reasoning_effort: string
   cached_tokens: number
+  cache_write_5m_tokens?: number
+  cache_write_1h_tokens?: number
   total_tokens: number
   user_billed: number
   input_cost: number
@@ -4430,4 +4435,28 @@ export interface ClaudeGlobalConfig {
   max_output_tokens: number
   max_tool_count: number
   max_tool_schema_bytes: number
+}
+
+
+export interface ScheduledConnectionTestConfig {
+  enabled: boolean
+  model: string
+  content: string
+  weekday_times: string[]
+  weekend_times: string[]
+}
+export interface ScheduledConnectionTestRecord {
+  scheduled_at: string
+  attempted_at?: string
+  account_id: number
+  model?: string
+  status: 'success' | 'failed' | 'skipped' | 'unknown'
+  success: boolean
+  error?: string
+  next_reset_5h_at?: string
+}
+export interface ScheduledConnectionTestResponse {
+  config: ScheduledConnectionTestConfig
+  timezone: string
+  records: ScheduledConnectionTestRecord[]
 }
