@@ -652,7 +652,8 @@ func (db *DB) getAllAPIKeysCostSince(ctx context.Context, since time.Time, honor
 }
 
 // APIKeySelfUsageReport 是 API Key 自助统计页使用的只读聚合结果。
-// 只包含当前 key 自己的 usage_logs 数据,不返回账号池、客户端 IP、raw key 等后台字段。
+// 只包含当前 key 自己的 usage_logs 数据(含经该 key 发起请求的客户端 IP 与 User-Agent,
+// 共享同一 key 的持有者可互相看到),不返回其他 key 的日志、账号池、raw key 等后台字段。
 type APIKeySelfUsageReport struct {
 	Summary            APIKeySelfUsageSummary     `json:"summary"`
 	Windows            APIKeySelfUsageWindows     `json:"windows"`
