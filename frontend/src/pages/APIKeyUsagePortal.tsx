@@ -1,6 +1,6 @@
 import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
 import { mediaBillingUnit } from '../lib/imageBilling'
-import { type FormEvent, type ReactNode, useEffect, useMemo, useState } from 'react'
+import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { NavLink, useNavigate, useParams } from 'react-router-dom'
 import { Cell, Pie, PieChart, ResponsiveContainer, Tooltip as RechartsTooltip } from 'recharts'
@@ -98,6 +98,8 @@ export default function APIKeyUsagePortal() {
     return stored.key ? stored.remember : true
   })
   const [activeAPIKey, setActiveAPIKey] = useState(() => readStoredAPIKey().key)
+  // 记录最新的有效 key，用于丢弃切换/退出前发出的过期响应
+  const activeAPIKeyRef = useRef(activeAPIKey)
   const [showKey, setShowKey] = useState(false)
   const [range, setRange] = useState<UsageRange>('30d')
   const [logPage, setLogPage] = useState(1)
@@ -111,22 +113,25 @@ export default function APIKeyUsagePortal() {
 
   // 已登录后的刷新/切换时间范围（沿用当前会话的 key）
   const reload = async (nextRange = range, nextLogPage = logPage, nextLogPageSize = logPageSize, nextFilter = logFilter) => {
-    if (!activeAPIKey) return
+    const requestAPIKey = activeAPIKey
+    if (!requestAPIKey) return
     setLoading(true)
     setError('')
     try {
-      const result = await api.getPublicAPIKeyUsage(activeAPIKey, nextRange, {
+      const result = await api.getPublicAPIKeyUsage(requestAPIKey, nextRange, {
         page: nextLogPage,
         pageSize: nextLogPageSize,
         ...nextFilter,
       })
+      if (activeAPIKeyRef.current !== requestAPIKey) return
       setData(result)
       const responsePage = result.usage.recent_logs_page || nextLogPage
       if (responsePage !== nextLogPage) setLogPage(responsePage)
     } catch (err) {
+      if (activeAPIKeyRef.current !== requestAPIKey) return
       setError(getErrorMessage(err))
     } finally {
-      setLoading(false)
+      if (activeAPIKeyRef.current === requestAPIKey) setLoading(false)
     }
   }
 
@@ -149,6 +154,7 @@ export default function APIKeyUsagePortal() {
       } catch (err) {
         if (!cancelled) {
           setError(getErrorMessage(err))
+          activeAPIKeyRef.current = ''
           setActiveAPIKey('')
           clearStoredAPIKey()
           setData(null)
@@ -183,6 +189,7 @@ export default function APIKeyUsagePortal() {
       })
       setData(result)
       setLogPage(1)
+      activeAPIKeyRef.current = trimmed
       setActiveAPIKey(trimmed)
       writeStoredAPIKey(trimmed, remember)
     } catch (err) {
@@ -232,9 +239,11 @@ export default function APIKeyUsagePortal() {
 
   const handleLogout = () => {
     clearStoredAPIKey()
+    activeAPIKeyRef.current = ''
     setActiveAPIKey('')
     setAPIKeyInput('')
     setData(null)
+    setLoading(false)
     setError('')
     setLogPage(1)
     setLogFilter({})
