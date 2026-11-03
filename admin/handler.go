@@ -4439,7 +4439,7 @@ func (h *Handler) FetchOpenAIResponsesModels(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 20*time.Second)
 	defer cancel()
-	// 编辑已有账号时带上账号本身：号池画像按账号抽取，统一身份开关下与该账号的
+	// 编辑已有账号时带上账号本身：号池画像按账号抽取，与该账号的
 	// 对话请求取同一份身份（issue #774）；新建账号尚未落库，为空。
 	var account *auth.Account
 	if req.AccountID > 0 && h.store != nil {
@@ -4620,7 +4620,9 @@ func fetchOpenAIResponsesModelIDs(ctx context.Context, account *auth.Account, ba
 	}
 	req.Header.Set("Authorization", "Bearer "+apiKey)
 	req.Header.Set("Accept", "application/json")
-	proxy.ApplyCodexModelDiscoveryHeaders(req.Header, account, baseURL, apiKey)
+	if err := proxy.ApplyCodexModelDiscoveryHeaders(req.Header, account, baseURL, apiKey); err != nil {
+		return nil, err
+	}
 	for name, value := range customHeaders {
 		name = strings.TrimSpace(name)
 		if name == "" {
@@ -9424,7 +9426,6 @@ type settingsResponse struct {
 	CodexUserAgentConfig               string                           `json:"codex_user_agent_config"`
 	CodexTelemetryEnabled              bool                             `json:"codex_telemetry_enabled"`
 	CodexTelemetryTimingDebug          bool                             `json:"codex_telemetry_timing_debug"`
-	CodexUnifiedClientIdentityEnabled  bool                             `json:"codex_unified_client_identity_enabled"`
 	UsageLogMode                       string                           `json:"usage_log_mode"`
 	UsageLogBatchSize                  int                              `json:"usage_log_batch_size"`
 	UsageLogFlushIntervalSeconds       int                              `json:"usage_log_flush_interval_seconds"`
@@ -9598,7 +9599,6 @@ type updateSettingsReq struct {
 	CodexUserAgentConfig                *string                          `json:"codex_user_agent_config"`
 	CodexTelemetryEnabled               *bool                            `json:"codex_telemetry_enabled"`
 	CodexTelemetryTimingDebug           *bool                            `json:"codex_telemetry_timing_debug"`
-	CodexUnifiedClientIdentityEnabled   *bool                            `json:"codex_unified_client_identity_enabled"`
 	UsageLogMode                        *string                          `json:"usage_log_mode"`
 	UsageLogBatchSize                   *int                             `json:"usage_log_batch_size"`
 	UsageLogFlushIntervalSeconds        *int                             `json:"usage_log_flush_interval_seconds"`
@@ -10449,7 +10449,6 @@ func (h *Handler) GetSettings(c *gin.Context) {
 		CodexUserAgentConfig:                runtimeCfg.CodexUserAgentConfig,
 		CodexTelemetryEnabled:               runtimeCfg.CodexTelemetryEnabled,
 		CodexTelemetryTimingDebug:           runtimeCfg.CodexTelemetryTimingDebug,
-		CodexUnifiedClientIdentityEnabled:   runtimeCfg.CodexUnifiedClientIdentityEnabled,
 		UsageLogMode:                        h.db.GetUsageLogMode(),
 		UsageLogBatchSize:                   h.db.GetUsageLogBatchSize(),
 		UsageLogFlushIntervalSeconds:        h.db.GetUsageLogFlushIntervalSeconds(),
@@ -11544,10 +11543,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		runtimeCfg.CodexTelemetryTimingDebug = *req.CodexTelemetryTimingDebug
 		log.Printf("设置已更新: codex_telemetry_timing_debug = %t", runtimeCfg.CodexTelemetryTimingDebug)
 	}
-	if req.CodexUnifiedClientIdentityEnabled != nil {
-		runtimeCfg.CodexUnifiedClientIdentityEnabled = *req.CodexUnifiedClientIdentityEnabled
-		log.Printf("设置已更新: codex_unified_client_identity_enabled = %t", runtimeCfg.CodexUnifiedClientIdentityEnabled)
-	}
 	if req.StreamFlushPolicy != nil {
 		runtimeCfg.StreamFlushPolicy = proxy.NormalizeStreamFlushPolicy(*req.StreamFlushPolicy)
 		log.Printf("设置已更新: stream_flush_policy = %s", runtimeCfg.StreamFlushPolicy)
@@ -11982,7 +11977,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexUserAgentConfig:                runtimeCfg.CodexUserAgentConfig,
 		CodexTelemetryEnabled:               runtimeCfg.CodexTelemetryEnabled,
 		CodexTelemetryTimingDebug:           runtimeCfg.CodexTelemetryTimingDebug,
-		CodexUnifiedClientIdentityEnabled:   runtimeCfg.CodexUnifiedClientIdentityEnabled,
 		UsageLogMode:                        usageLogMode,
 		UsageLogBatchSize:                   usageLogBatchSize,
 		UsageLogFlushIntervalSeconds:        usageLogFlushIntervalSeconds,
@@ -12359,7 +12353,6 @@ func (h *Handler) UpdateSettings(c *gin.Context) {
 		CodexUserAgentConfig:                runtimeCfg.CodexUserAgentConfig,
 		CodexTelemetryEnabled:               runtimeCfg.CodexTelemetryEnabled,
 		CodexTelemetryTimingDebug:           runtimeCfg.CodexTelemetryTimingDebug,
-		CodexUnifiedClientIdentityEnabled:   runtimeCfg.CodexUnifiedClientIdentityEnabled,
 		UsageLogMode:                        usageLogMode,
 		UsageLogBatchSize:                   usageLogBatchSize,
 		UsageLogFlushIntervalSeconds:        usageLogFlushIntervalSeconds,

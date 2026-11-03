@@ -2148,7 +2148,6 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
   "continuous_retry_error_codes": [],
   "continuous_retry_max_duration_seconds": 600,
   "codex_fingerprint_default_mode": "off",
-  "codex_unified_client_identity_enabled": false,
   "scheduler_mode": "round_robin",
   "allow_remote_migration": false,
   "database_driver": "postgres",
@@ -2196,7 +2195,7 @@ curl -X DELETE "http://localhost:8080/api/admin/account-groups/1?force=true" \
 
 `codex_fingerprint_default_mode`（`off`/`device`/`session`/`full`，默认 `off`）是新导入或新建 Codex 账号默认盖上的设备指纹收敛档位，只影响之后新加入的账号；已有账号档位不变，入库后仍可在账号级单独调整。非法取值返回 HTTP 400。
 
-`codex_unified_client_identity_enabled`（默认 `false`）控制网关自发的 Codex 维护请求是否与对话请求使用同一份客户端身份。开启后，wham 用量查询、重置券查询与消耗、每日用量、token 明细、订阅同步（Codex 形态）、模型清单（含下游透传）以及 OpenAI Responses 中转账号的模型发现，都改用与对话出站相同的解析：按 `codex_user_agent_config` 生成（号池模式按账号抽取画像），`Originator` 跟随生成的 UA，最后套用账号自定义头里的 `User-Agent` / `Originator` / `Version`。模型清单的 `client_version` 查询参数、`Version` 头与 UA 版本段取同一版本；中转账号的 installation id 改为按中转凭据派生，对话请求体与模型发现请求头取同一值。维护请求不会新增原本不发送的头（例如 wham 探针不补 `Version` 或 `X-Codex-Installation-Id`）。订阅同步被挑战时的浏览器形态回退、邀请接口与外部版本/指纹库同步不受影响。配置身份解析失败（如 `auto` 模式下版本低于最低要求）时回退内置 `codex-tui` 身份并限频记日志。该开关不改变对话请求的身份选择：`client_compat_mode` 不是 `force` 时，官方 Codex 客户端的对话请求仍透传其自身 UA，要让账号对上游只呈现一份身份需同时使用 `force`。
+Codex 维护请求默认与对话请求共用客户端身份解析和账号自定义身份头，设置中不再提供单独开关。模型清单版本与解析出的客户端版本保持一致；身份解析失败时返回错误，不回退固定身份。维护请求仅设置各端点所需的头，不额外添加会话标识或 attestation。订阅同步的浏览器协议回退保持独立。兼容模式允许官方客户端透传时，后台请求使用配置身份，不追踪或复用某个下游客户端的实时身份。
 
 `max_retries`、`max_rate_limit_retries` 与 `codex_ws_silent_max_retries` 是原有的有限重试预算，管理界面和 API 范围均为 `0` 到 `10`（`0` 禁用对应预算）。需要持续重试时使用独立的 `continuous_retry_enabled` 开关；它不会改变这些有限预算的含义。开关打开后，可在 `continuous_retry_categories` 选择 `transport`、`http_429`、`http_4xx`、`http_5xx`、`stream_error`、`response_failed`、`context_error`，并用 `continuous_retry_status_codes`（例如 `[403,404,501]`）或 `continuous_retry_error_codes`（例如 `["rate_limited","context_length_exceeded"]`）精确追加匹配。类别、状态码、错误代码任一命中即可进入持续重试；403、404、上下文错误及“全部 `response.failed`”默认不选中（501 已由默认的 `http_5xx` 类别覆盖）。普通自选模式不会把结构化安全策略拒绝升级为无限重试。永久额度/余额错误（如 `insufficient_quota`、`quota_exceeded`、`billing_hard_limit`、`billing_limit_reached`、`spend_limit`、`credit_balance`、`insufficient_balance`、`usage_limited`）不会因为通用类别进入无限循环；只有管理员明确选择对应额度错误代码，或明确启用下述超级开关时，才会进入持续重试。
 

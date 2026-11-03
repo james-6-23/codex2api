@@ -2213,7 +2213,6 @@ export interface SystemSettings {
   codex_force_websocket: boolean
   codex_telemetry_enabled: boolean
   codex_telemetry_timing_debug: boolean
-  codex_unified_client_identity_enabled: boolean
   codex_request_compression: boolean
   codex_ws_weak_network_mode: boolean
   codex_ws_keepalive_enabled: boolean

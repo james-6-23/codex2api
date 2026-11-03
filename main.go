@@ -375,6 +375,7 @@ func main() {
 	claudeCLIVersionCancel()
 
 	// 5. 初始化账号管理器
+	auth.CodexOAuthIdentityHeaders = proxy.CodexOAuthIdentityHeaders
 	store := auth.NewStore(db, tc, settings)
 	store.SetSchedulerWaitLimits(cfg.SchedulerMaxWaiters, cfg.SchedulerMaxWaitersPerKey)
 

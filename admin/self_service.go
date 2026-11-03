@@ -140,6 +140,11 @@ func (h *Handler) GenerateAccountPortalAuthURL(c *gin.Context) {
 		return
 	}
 
+	authURL, err := buildOAuthAuthorizeURL(oauthDefaultRedirectURI, state, codeVerifier)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "客户端身份配置无效: "+err.Error())
+		return
+	}
 	globalOAuthStore.set(sessionID, &oauthSession{
 		State:        state,
 		CodeVerifier: codeVerifier,
@@ -149,7 +154,6 @@ func (h *Handler) GenerateAccountPortalAuthURL(c *gin.Context) {
 		CreatedAt:    time.Now(),
 	})
 
-	authURL := buildOAuthAuthorizeURL(oauthDefaultRedirectURI, state, codeVerifier)
 	c.JSON(http.StatusOK, gin.H{
 		"auth_url":   authURL,
 		"session_id": sessionID,

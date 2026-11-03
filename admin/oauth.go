@@ -214,6 +214,11 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		return
 	}
 
+	authURL, err := buildOAuthAuthorizeURL(redirectURI, state, codeVerifier)
+	if err != nil {
+		writeError(c, http.StatusBadRequest, "客户端身份配置无效: "+err.Error())
+		return
+	}
 	globalOAuthStore.set(sessionID, &oauthSession{
 		State:        state,
 		CodeVerifier: codeVerifier,
@@ -223,13 +228,17 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{
-		"auth_url":   buildOAuthAuthorizeURL(redirectURI, state, codeVerifier),
+		"auth_url":   authURL,
 		"session_id": sessionID,
 	})
 }
 
 // buildOAuthAuthorizeURL 组装 Codex CLI PKCE 授权链接（admin 与公开自助门户共用）。
-func buildOAuthAuthorizeURL(redirectURI, state, codeVerifier string) string {
+func buildOAuthAuthorizeURL(redirectURI, state, codeVerifier string) (string, error) {
+	headers, err := proxy.CodexOAuthIdentityHeaders(nil)
+	if err != nil {
+		return "", err
+	}
 	params := neturl.Values{}
 	params.Set("response_type", "code")
 	params.Set("client_id", oauthClientID)
@@ -240,7 +249,8 @@ func buildOAuthAuthorizeURL(redirectURI, state, codeVerifier string) string {
 	params.Set("code_challenge_method", "S256")
 	params.Set("id_token_add_organizations", "true")
 	params.Set("codex_cli_simplified_flow", "true")
-	return oauthAuthorizeURL + "?" + params.Encode()
+	params.Set("originator", headers.Get("Originator"))
+	return oauthAuthorizeURL + "?" + params.Encode(), nil
 }
 
 // ExchangeOAuthCode 用授权码兑换 token，并写入新账号
@@ -737,7 +747,6 @@ func doOAuthCodeExchange(ctx context.Context, code, codeVerifier, redirectURI, p
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "codex-cli/0.91.0")
 
 	// Resin 反代：注入临时账号身份头
 	if proxy.IsResinEnabled() && tempID != "" {

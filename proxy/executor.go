@@ -1009,7 +1009,7 @@ func ensureCodexClientInstallationMetadata(requestBody []byte, account *auth.Acc
 	}
 
 	installationID := ""
-	if CurrentRuntimeSettings().CodexUnifiedClientIdentityEnabled && account != nil {
+	if account != nil {
 		// 统一身份：按中转凭据派生账号级设备标识，与模型发现请求头同值，
 		// 不再按下游 Key 分裂成多台设备（issue #774）。
 		if baseURL, apiKey := account.OpenAIResponsesCredentials(); baseURL != "" && apiKey != "" {

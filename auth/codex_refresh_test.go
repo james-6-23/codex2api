@@ -51,7 +51,18 @@ func writeCodexRefreshedTokens(w http.ResponseWriter) {
 
 func TestCodexRefreshBackgroundPreservesQuotaCooldown(t *testing.T) {
 	var calls atomic.Int32
-	store, db, id, _ := codexRefreshFixture(t, func(w http.ResponseWriter, _ *http.Request) { calls.Add(1); writeCodexRefreshedTokens(w) })
+	previous := CodexOAuthIdentityHeaders
+	CodexOAuthIdentityHeaders = func(*Account) (http.Header, error) {
+		return http.Header{"User-Agent": {"codex2api/test"}, "Originator": {"codex2api"}, "X-Oai-Attestation": {"excluded"}}, nil
+	}
+	t.Cleanup(func() { CodexOAuthIdentityHeaders = previous })
+	store, db, id, _ := codexRefreshFixture(t, func(w http.ResponseWriter, req *http.Request) {
+		calls.Add(1)
+		if "codex2api/test" != req.Header.Get("User-Agent") || "codex2api" != req.Header.Get("Originator") || "" != req.Header.Get("X-Oai-Attestation") {
+			t.Error("OAuth refresh did not apply only the selected client identity")
+		}
+		writeCodexRefreshedTokens(w)
+	})
 	account := store.FindByID(id)
 	until := time.Now().Add(7 * 24 * time.Hour).Truncate(time.Second)
 	account.SetCooldownUntil(until, "rate_limited_7d")

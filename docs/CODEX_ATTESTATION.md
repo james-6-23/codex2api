@@ -4,6 +4,10 @@ Codex 账号的 HTTP、Responses WebSocket、Live 建连和 sideband 共用一�
 `X-Oai-Attestation` 规则，适用于 Desktop、TUI、IDE、Exec、SDK 等客户端身份。
 平台取自最终出站 User-Agent；服务器的操作系统只决定能否实际调用原生 DeviceCheck。
 
+OAuth 换码、令牌刷新和普通维护请求不调用对话的 attestation provider，也不复用对话证明。
+这与 Codex `rust-v0.166.0` 的登录客户端和默认 HTTP 头构建保持一致；令牌刷新只复用
+所选客户端的 UA、Originator，授权链接携带 Originator，换码使用独立客户端。
+
 ## 平台与失败状态
 
 | 出站身份或原生结果 | 自动行为 |
