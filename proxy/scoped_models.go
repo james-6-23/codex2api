@@ -235,7 +235,13 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 
 		default:
 			for _, item := range catalog.Items {
-				if !account.ModelCatalogEligible() || !item.Enabled || !account.SupportsCodexModel(item.ID) {
+				if !account.ModelCatalogEligible() || !item.Enabled {
+					continue
+				}
+				// 图片模型是独立能力轴:Images 路径按 imageCapableAccountFilter 调度,
+				// 不看账号文本白名单(issue #826)。发现端点与之同源,否则纯文本白名单
+				// 会隐藏实际可生图的型号,下游插件无法自动发现。
+				if !isImageModelInfo(item) && !account.SupportsCodexModel(item.ID) {
 					continue
 				}
 				if item.ProOnly && !isSparkPlanCandidate(account.GetPlanType()) {
