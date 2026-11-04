@@ -49,7 +49,8 @@ function createMockDocument({ matchingSelectors = [], sheetCount = 1 } = {}) {
 function createMockElement(matchingTags = []) {
   return {
     closest: (selector) => {
-      const match = matchingTags.some((tag) => selector.includes(tag))
+      const selectorParts = selector.split(',').map((part) => part.trim())
+      const match = matchingTags.some((tag) => selectorParts.includes(tag))
       return match ? {} : null
     },
   }
@@ -59,7 +60,8 @@ test('isEditableKeyboardTarget identifies inputs, textareas, selects, and conten
   assert.equal(isEditableKeyboardTarget(createMockElement(['input'])), true)
   assert.equal(isEditableKeyboardTarget(createMockElement(['textarea'])), true)
   assert.equal(isEditableKeyboardTarget(createMockElement(['select'])), true)
-  assert.equal(isEditableKeyboardTarget(createMockElement(['contenteditable'])), true)
+  assert.equal(isEditableKeyboardTarget(createMockElement(['[contenteditable="true"]'])), true)
+  assert.equal(isEditableKeyboardTarget(createMockElement(['[contenteditable="false"]'])), false)
   assert.equal(isEditableKeyboardTarget(createMockElement([])), false)
   assert.equal(isEditableKeyboardTarget(null), false)
   assert.equal(isEditableKeyboardTarget({}), false)
