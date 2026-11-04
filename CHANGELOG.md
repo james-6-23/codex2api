@@ -1,5 +1,35 @@
 # Changelog
 
+## v3.1.3 - 2026-11-04
+
+### Features
+
+- **Model output runaway guard stops degenerate generations before they reach clients (#845, @ggg17226).** An opt-in guard detects periodic repetition, tool-argument delta floods, byte-budget overruns and terminal-frame abuse across Responses, Chat Completions, Anthropic, Gemini and Grok native streams, including downstream WebSocket. On a hit the upstream is cancelled, buffered output is discarded, and the client receives `502 model_output_guard_triggered` (or a WebSocket error frame with close code 1013) without automatic retry or account-health penalty; hits are recorded in `usage_logs` with `upstream_error_kind=model_output_guard`. Limits are configured from the settings page (tool ≤ channel ≤ request), polled every 5 seconds across instances, and default to off. Independently of the guard, SSE framing now enforces an 8 MiB per-line/event cap.
+
+- **Responses continuations can move off a quota-blocked account, and contexts survive restarts (#838, @dundunge).** When the bound account is confirmed quota-limited or auto-paused by a usage threshold, HTTP and WebSocket continuations whose context can be replayed are rebound to another eligible account; non-migratable references, encrypted compaction state or incomplete tool pairs still return an error. With the Memory cache driver and a SQLite main database, response contexts are also written to a separate `response-context.db` (deduplicated, 48-hour sliding retention, 2 GiB cap by default) and recovered after L1 eviction or restart; `RESPONSE_CONTEXT_STORE_PATH=off` disables it. The file holds conversation content and is not included in main-database backups.
+
+- **New `reset_5h_first` scheduler mode and per-account scheduled connection tests (#838, @dundunge).** The optional mode prefers available Codex accounts whose observed 5h window resets soonest, within existing priority and health tiers. Accounts can schedule weekday/weekend connection tests (off by default); enabled tests send real upstream requests, do not retry, and do not backfill missed slots. See `docs/RESET_5H_PRIORITY.md`.
+
+- **Antigravity quota gates are isolated per model family, with optional expiry-first scheduling (#848, requested by @yanhao98; #850).** Quota buckets and models are grouped into Gemini, Claude+GPT and Argon families by ID prefix. An exhausted `3p-weekly` bucket no longer blocks Gemini requests on the same account; the whole account is gated only when every recognised family is exhausted, and selection, 429 `Retry-After` and quota pressure all follow the requested model's family. Unknown buckets and models keep the previous account-wide behavior. The new `expiry_priority_enabled` setting (off by default, 1–168h window, default 24h) lets round-robin selection prefer accounts whose weekly bucket for the requested family resets soon with at least 5% remaining.
+
+- **Intelligence checks can back off adaptively and confirm recovery progressively (#849, @bikeread).** The opt-in mode backs off auto-paused accounts exponentially up to a configurable cap, switches to short confirmation intervals after the first pass, and resumes traffic only after the existing recovery threshold. Backoff state persists across restarts, and credentials rejected upstream pause automatic checks until they are updated. See `docs/INTELLIGENCE_BACKOFF.md`.
+
+- **The API key self-service usage page shows concurrency and richer request logs (#847, @bxb1337).** The page now displays the key's channel scope and current concurrency (refreshed every 5 seconds, paused when hidden), and request logs add client IP and User-Agent, reasoning effort, separate reasoning tokens, cache read/write, timing and throughput, sharing display components with the admin usage page.
+
+### Fixes
+
+- **Claude account and shared group editors convert auto-pause thresholds from percent (#843, reported by @xpzhang).** The Claude per-account scheduler dialog and the shared group manager labelled thresholds as percentages but submitted the raw value, so entering 95 failed with "must be between 0 and 1" and saved ratios were displayed as decimals. Both now convert percent to ratio on save and back on display, validate 0–100, and accept decimals. Values previously saved as `0.95` are correct and now display as 95.
+
+- **Codex maintenance requests and OAuth refresh share the conversation identity (#846, @bxb1337).** The separate client-identity toggle is removed; maintenance requests, model-manifest discovery and token refresh use the same identity resolution and per-account overrides as conversations. Code exchange no longer sends the fixed legacy `codex-cli/0.91.0` UA, refresh uses JSON with `refresh_reason`, and an unresolvable identity configuration now returns an error instead of falling back to a built-in identity.
+
+- **OAuth token exchange and refresh use the Chrome TLS fingerprint, and device profiles are stable by default (#839, @frank8ai).** Refresh-token and admin authorization-code requests no longer use the Go standard TLS stack. `STABILIZE_DEVICE_PROFILE` now defaults to `true`, so an account's device/system profile no longer drifts between requests; set it to `false` to restore the previous behavior. The example configuration recommends `CODEX_TRANSPORT_MODE=utls_chrome`; the code default is unchanged.
+
+- **Antigravity preserves deferred Responses tool identities (#842, @frank8ai).** Namespace, custom and tool-search declarations, search-loaded tools, call history and forced tool choices are bridged to flat Gemini functions and restored to their original identities in JSON, native SSE and buffered SSE responses. Streamed function-call updates merge only by matching call ID, so distinct calls with identical arguments are no longer collapsed.
+
+- **Context errors, 413 diagnostics, model manifests and pricing (#838, @dundunge).** The missing-context error code changes from `response_context_unavailable` to `previous_response_not_found`, prompting clients to resend the full context. Oversized-request 413 responses report the limit, detection stage and observed size. Merging live upstream manifests with account snapshots no longer clears capability fields for unobserved accounts. `gpt-6.1-terra` gains built-in pricing.
+
+- **Dependency security update.** `golang.org/x/net` moves to v0.62.0 for GO-2026-6860.
+
 ## v3.1.2 - 2026-10-28
 
 ### Features
