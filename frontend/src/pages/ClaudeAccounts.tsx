@@ -76,6 +76,11 @@ import {
 } from "../lib/accountProxyBinding";
 import ChipInput from "../components/ChipInput";
 import { formatCustomHeadersText, parseCustomHeadersText } from "../lib/accountQuickConfig";
+import {
+  autoPauseThresholdPercentToRatio,
+  formatAutoPauseThresholdPercent,
+  isAutoPauseThresholdPercentInvalid,
+} from "../lib/autoPauseThreshold";
 import { AccountGroupManagerModal, ACCOUNT_GROUP_COLORS } from "../components/AccountGroupManagerModal";
 import { Select } from "../components/ui/select";
 import ChannelLogo from "../components/ChannelLogo";
@@ -2981,12 +2986,9 @@ function EditAccountModal({
   const [concurrency, setConcurrency] = useState(
     account.base_concurrency_override != null ? String(account.base_concurrency_override) : "",
   );
-  const [pause5h, setPause5h] = useState(
-    account.auto_pause_5h_threshold != null ? String(account.auto_pause_5h_threshold) : "",
-  );
-  const [pause7d, setPause7d] = useState(
-    account.auto_pause_7d_threshold != null ? String(account.auto_pause_7d_threshold) : "",
-  );
+  // 自动暂停阈值后端存 0..1 比例,输入框按百分比展示/输入(issue #843)。
+  const [pause5h, setPause5h] = useState(() => formatAutoPauseThresholdPercent(account.auto_pause_5h_threshold));
+  const [pause7d, setPause7d] = useState(() => formatAutoPauseThresholdPercent(account.auto_pause_7d_threshold));
   const [fpMode, setFpMode] = useState<"" | "preserve" | "force">(
     (account.claude_fingerprint_mode as "" | "preserve" | "force") ?? "",
   );
@@ -3043,6 +3045,10 @@ function EditAccountModal({
       }
       apiKeyCustomHeaders = parsed.value;
     }
+    if (!isAPIKeyAccount && (isAutoPauseThresholdPercentInvalid(pause5h) || isAutoPauseThresholdPercentInvalid(pause7d))) {
+      showToast(t("accounts.autoPauseThresholdRange"), "error");
+      return;
+    }
     setBusy(true);
     try {
       await api.updateAccountScheduler(account.id, {
@@ -3052,8 +3058,8 @@ function EditAccountModal({
         score_bias_override: parseNum(scoreBias),
         base_concurrency_override: parseNum(concurrency),
         ...(!isAPIKeyAccount ? {
-        auto_pause_5h_threshold: parseNum(pause5h),
-        auto_pause_7d_threshold: parseNum(pause7d),
+        auto_pause_5h_threshold: autoPauseThresholdPercentToRatio(pause5h),
+        auto_pause_7d_threshold: autoPauseThresholdPercentToRatio(pause7d),
         claude_fingerprint_mode: fpMode,
         claude_client_platform: clientPlatform || null,
         claude_version_policy: versionPolicy || null,
@@ -3252,8 +3258,8 @@ function EditAccountModal({
             {t("claude.editSectionAutoPause")}
           </div>
           <div className="grid grid-cols-2 gap-3">
-            {field(t("claude.autoPause5hLabel"), <Input value={pause5h} onChange={(e) => setPause5h(e.target.value)} placeholder="90" inputMode="numeric" />)}
-            {field(t("claude.autoPause7dLabel"), <Input value={pause7d} onChange={(e) => setPause7d(e.target.value)} placeholder="90" inputMode="numeric" />)}
+            {field(t("claude.autoPause5hLabel"), <Input value={pause5h} onChange={(e) => setPause5h(e.target.value)} placeholder="90" inputMode="decimal" />)}
+            {field(t("claude.autoPause7dLabel"), <Input value={pause7d} onChange={(e) => setPause7d(e.target.value)} placeholder="90" inputMode="decimal" />)}
           </div>
         </div>
 

@@ -91,6 +91,11 @@ import { getErrorMessage } from "../utils/error";
 import { formatRelativeTime, formatBeijingTime } from "../utils/time";
 import { buildBatchMetadataUpdate } from "../lib/accountBatchUpdate";
 import {
+  autoPauseThresholdPercentToRatio as percentThresholdInputToRatio,
+  formatAutoPauseThresholdPercent as formatQuotaAutoPausePercentInput,
+  isAutoPauseThresholdPercentInvalid as isPercentThresholdInputInvalid,
+} from "../lib/autoPauseThreshold";
+import {
   collectAccountOperationResult,
   snapshotAccountOperationResults,
   type AccountOperationResult,
@@ -902,28 +907,6 @@ function parseOAuthCallbackParams(rawUrl: string): { code: string; state: string
       state: params.get("state") ?? "",
     };
   }
-}
-
-function formatQuotaAutoPausePercentInput(value?: number | null): string {
-  if (typeof value !== "number" || value <= 0) return "";
-  const percent = value * 100;
-  if (Number.isInteger(percent)) return String(percent);
-  return String(Number(percent.toFixed(2)));
-}
-
-function isPercentThresholdInputInvalid(value: string): boolean {
-  const trimmed = value.trim();
-  if (!trimmed) return false;
-  const parsed = Number(trimmed);
-  return !Number.isFinite(parsed) || parsed < 0 || parsed > 100;
-}
-
-function percentThresholdInputToRatio(value: string): number | null {
-  const trimmed = value.trim();
-  if (!trimmed) return null;
-  const parsed = Number(trimmed);
-  if (!Number.isFinite(parsed) || parsed <= 0) return null;
-  return parsed / 100;
 }
 
 function formatDispatchCountLimitInput(value?: number | null): string {

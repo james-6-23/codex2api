@@ -11,6 +11,11 @@ import { cn } from "@/lib/utils";
 import { useToast } from "../hooks/useToast";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { getErrorMessage } from "../utils/error";
+import {
+  autoPauseThresholdPercentToRatio,
+  formatAutoPauseThresholdPercent,
+  isAutoPauseThresholdPercentInvalid,
+} from "../lib/autoPauseThreshold";
 
 // 分组管理器的调色板(与账号页一致,避免各页各造一套)。
 export const ACCOUNT_GROUP_COLORS = [
@@ -89,8 +94,9 @@ export function AccountGroupManagerModal({
       description: g.description ?? "",
       color: normalizeGroupColor(g.color),
       baseConcurrency: g.base_concurrency_override != null ? String(g.base_concurrency_override) : "",
-      autoPause5h: g.auto_pause_5h_threshold ? String(g.auto_pause_5h_threshold) : "",
-      autoPause7d: g.auto_pause_7d_threshold ? String(g.auto_pause_7d_threshold) : "",
+      // 阈值后端存 0..1 比例,输入框按百分比展示(issue #843)。
+      autoPause5h: formatAutoPauseThresholdPercent(g.auto_pause_5h_threshold),
+      autoPause7d: formatAutoPauseThresholdPercent(g.auto_pause_7d_threshold),
       proxyUrls: (g.proxy_urls ?? []).join("\n"),
     });
   };
@@ -101,14 +107,18 @@ export function AccountGroupManagerModal({
       showToast(t("accountGroups.nameRequired"), "error");
       return;
     }
+    if (isAutoPauseThresholdPercentInvalid(draft.autoPause5h) || isAutoPauseThresholdPercentInvalid(draft.autoPause7d)) {
+      showToast(t("accounts.autoPauseThresholdRange"), "error");
+      return;
+    }
     setBusy(true);
     const payload = {
       name,
       description: draft.description.trim(),
       color: normalizeGroupColor(draft.color),
       base_concurrency_override: parseNum(draft.baseConcurrency),
-      auto_pause_5h_threshold: parseNum(draft.autoPause5h) ?? 0,
-      auto_pause_7d_threshold: parseNum(draft.autoPause7d) ?? 0,
+      auto_pause_5h_threshold: autoPauseThresholdPercentToRatio(draft.autoPause5h) ?? 0,
+      auto_pause_7d_threshold: autoPauseThresholdPercentToRatio(draft.autoPause7d) ?? 0,
       proxy_urls: draft.proxyUrls
         .split(/[\n,]/)
         .map((s) => s.trim())
@@ -204,11 +214,11 @@ export function AccountGroupManagerModal({
             </div>
             <div className="space-y-1">
               <span className={fieldLabel}>{t("accountGroups.autoPause5h")}</span>
-              <Input value={draft.autoPause5h} onChange={(e) => setDraft({ ...draft, autoPause5h: e.target.value })} placeholder="0" inputMode="numeric" />
+              <Input value={draft.autoPause5h} onChange={(e) => setDraft({ ...draft, autoPause5h: e.target.value })} placeholder="0" inputMode="decimal" />
             </div>
             <div className="space-y-1">
               <span className={fieldLabel}>{t("accountGroups.autoPause7d")}</span>
-              <Input value={draft.autoPause7d} onChange={(e) => setDraft({ ...draft, autoPause7d: e.target.value })} placeholder="0" inputMode="numeric" />
+              <Input value={draft.autoPause7d} onChange={(e) => setDraft({ ...draft, autoPause7d: e.target.value })} placeholder="0" inputMode="decimal" />
             </div>
           </div>
           <div className="space-y-1">
