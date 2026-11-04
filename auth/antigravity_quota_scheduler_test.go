@@ -464,7 +464,7 @@ func TestAntigravityQuotaSchedulerRefreshesQuotaExhaustedAccount(t *testing.T) {
 		}}}},
 	}
 	// 先自证硬门禁确实为真，否则本用例什么也没保住。
-	if blocked, _ := antigravityAccountQuotaGateBlock(acc); !blocked {
+	if blocked, _ := antigravityAccountQuotaGateBlock(acc, ""); !blocked {
 		t.Fatal("fixture must carry a live known_zero hard gate")
 	}
 

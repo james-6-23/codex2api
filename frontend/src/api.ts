@@ -1070,6 +1070,8 @@ export const api = {
     quota_refresh_enabled?: boolean
     quota_refresh_interval_minutes?: number
     quota_gate_enabled?: boolean
+    expiry_priority_enabled?: boolean
+    expiry_priority_horizon_hours?: number
   }) =>
     request<AntigravitySettingsResponse>('/settings/antigravity', {
       method: 'PUT',

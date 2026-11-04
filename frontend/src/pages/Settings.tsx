@@ -1114,6 +1114,7 @@ function AntigravityQuotaSettingsCard() {
   }, [showToast, t])
 
   const intervalMinutes = settings?.quota_refresh_interval_minutes ?? 10
+  const expiryHorizonHours = settings?.expiry_priority_horizon_hours ?? 24
 
   return (
     <SettingsCard
@@ -1129,6 +1130,7 @@ function AntigravityQuotaSettingsCard() {
               <p className="mt-0.5 text-xs text-muted-foreground">{t('antigravityQuota.refreshEnabledHint')}</p>
             </div>
             <Switch
+              aria-label={t('antigravityQuota.refreshEnabled')}
               checked={settings?.quota_refresh_enabled ?? false}
               disabled={settings === null || saving}
               onCheckedChange={(checked) => void save({ quota_refresh_enabled: checked })}
@@ -1140,17 +1142,49 @@ function AntigravityQuotaSettingsCard() {
               <p className="mt-0.5 text-xs text-muted-foreground">{t('antigravityQuota.gateEnabledHint')}</p>
             </div>
             <Switch
+              aria-label={t('antigravityQuota.gateEnabled')}
               checked={settings?.quota_gate_enabled ?? false}
               disabled={settings === null || saving}
               onCheckedChange={(checked) => void save({ quota_gate_enabled: checked })}
             />
           </div>
+          <div className="flex items-center justify-between gap-3 rounded-lg border border-border/60 px-3 py-2.5">
+            <div className="min-w-0">
+              <div className="text-sm font-medium">{t('antigravityQuota.expiryPriority')}</div>
+              <p className="mt-0.5 text-xs text-muted-foreground">{t('antigravityQuota.expiryPriorityHint')}</p>
+            </div>
+            <Switch
+              aria-label={t('antigravityQuota.expiryPriority')}
+              checked={settings?.expiry_priority_enabled ?? false}
+              disabled={settings === null || saving}
+              onCheckedChange={(checked) => void save({ expiry_priority_enabled: checked })}
+            />
+          </div>
         </div>
+        <SettingField
+          label={t('antigravityQuota.expiryHorizon')}
+          description={t('antigravityQuota.expiryHorizonHint')}
+        >
+          <DraftNumberInput
+            aria-label={t('antigravityQuota.expiryHorizon')}
+            value={expiryHorizonHours}
+            min={1}
+            max={168}
+            integer
+            disabled={settings === null || saving || !settings?.expiry_priority_enabled}
+            className="max-w-32"
+            onValueCommit={(value) => {
+              if (value !== expiryHorizonHours) void save({ expiry_priority_horizon_hours: value })
+            }}
+            onValueChange={() => {}}
+          />
+        </SettingField>
         <SettingField
           label={t('antigravityQuota.refreshInterval')}
           description={t('antigravityQuota.refreshIntervalHint')}
         >
           <DraftNumberInput
+            aria-label={t('antigravityQuota.refreshInterval')}
             value={intervalMinutes}
             min={3}
             max={60}

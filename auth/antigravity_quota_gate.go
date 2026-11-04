@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -47,17 +48,68 @@ func quotaGateRetryAfter(resetAt time.Time, now time.Time) time.Duration {
 
 // antigravityAccountQuotaGateBlock 是自锁封装的「是否被硬门禁阻断 + 阻断到期时刻」，
 // 供锁外的候选集合求值使用；与选号复用的是同一个谓词，不存在第二套判定口径。
-func antigravityAccountQuotaGateBlock(acc *Account) (bool, time.Time) {
+//
+// model 非空时按请求模型所在配额族求值（某一族耗尽只挡该族请求）；为空时退回整号口径。
+func antigravityAccountQuotaGateBlock(acc *Account, model string) (bool, time.Time) {
 	if acc == nil {
 		return false, time.Time{}
 	}
 	acc.mu.RLock()
 	defer acc.mu.RUnlock()
-	exhausted, _, resetAt := acc.IsAntigravityQuotaExhaustedLocked(time.Now())
+	now := time.Now()
+	// 先按请求模型所在族判：被挡时到期取该族的恢复时刻——整号口径取的是最早恢复的族，
+	// 拿它给另一族的请求当 Retry-After 会让客户端过早重试。模型族未被挡但整号被挡
+	// （未知族零桶、或模型族在快照里缺席）时才退回整号到期。
+	exhausted, resetAt := false, time.Time{}
+	if strings.TrimSpace(model) != "" {
+		exhausted, _, resetAt = acc.isAntigravityModelQuotaExhaustedLocked(model, now)
+	}
+	if !exhausted {
+		exhausted, _, resetAt = acc.IsAntigravityQuotaExhaustedLocked(now)
+	}
 	if !exhausted {
 		return false, time.Time{}
 	}
 	return true, resetAt
+}
+
+// isAntigravityModelQuotaExhaustedLocked 是带模型上下文的硬门禁谓词（Locked 语义同
+// IsAntigravityQuotaExhaustedLocked）。非 Antigravity 账号恒为假。
+func (a *Account) isAntigravityModelQuotaExhaustedLocked(model string, now time.Time) (bool, string, time.Time) {
+	if a == nil || a.UpstreamType != UpstreamAntigravity {
+		return false, "", time.Time{}
+	}
+	return antigravityQuotaSnapshotGateBlockForModel(&a.AntigravityQuota, model, now)
+}
+
+// antigravityAccountModelQuotaBlocked 是自锁封装的模型级门禁查询。
+func antigravityAccountModelQuotaBlocked(acc *Account, model string, now time.Time) bool {
+	if acc == nil {
+		return false
+	}
+	acc.mu.RLock()
+	defer acc.mu.RUnlock()
+	blocked, _, _ := acc.isAntigravityModelQuotaExhaustedLocked(model, now)
+	return blocked
+}
+
+// withAntigravityModelQuotaFilter 在 filter 外叠加模型级配额门禁：整号门禁只在所有配额族
+// 都耗尽时才把账号移出候选，某一族耗尽的账号仍留在调度器里，由这里按本次请求的模型
+// 挡掉——Claude 周配额用完的号仍能接 Gemini 请求，反之亦然。model 为空时原样返回。
+//
+// 门禁先于调用方 filter 求值，被门禁挡掉的账号不会触发 filter 闭包（也就不会多一次
+// Redis 读）；每个账号对调用方 filter 的求值次数不变。
+func withAntigravityModelQuotaFilter(filter AccountFilter, model string) AccountFilter {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return filter
+	}
+	return func(acc *Account) bool {
+		if antigravityAccountModelQuotaBlocked(acc, model, time.Now()) {
+			return false
+		}
+		return filter == nil || filter(acc)
+	}
 }
 
 // antigravityQuotaGateCandidateScope 判定账号是否仍在候选集合内：管理面停用（禁用 /
@@ -84,7 +136,11 @@ func antigravityQuotaGateCandidateScope(acc *Account) bool {
 //     都属于「混合原因」，返回 nil，调用方保持既有 503 / 无可用账号语义；
 //   - 续链（preserveBinding=true）的候选集合就是绑定的那个账号，绑定关系不因阻断改变；
 //   - 只做一次只读求值，调用方不得再据此二次推断 reason。
-func (s *Store) AntigravityQuotaGateExhaustion(sessionKey string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool) *QuotaExhaustedError {
+//
+// model 是本次请求的 public model：候选是否「被配额阻断」按该模型所在配额族判定，与
+// 选号侧的模型级过滤器同口径；filter 必须是调用方的原始过滤器，不能已叠加模型级门禁，
+// 否则被阻断的候选会先被滤掉，整池耗尽就退化成无候选的 503。
+func (s *Store) AntigravityQuotaGateExhaustion(sessionKey string, apiKeyID int64, exclude map[int64]bool, filter AccountFilter, preserveBinding bool, model string) *QuotaExhaustedError {
 	if s == nil {
 		return nil
 	}
@@ -130,7 +186,7 @@ func (s *Store) AntigravityQuotaGateExhaustion(sessionKey string, apiKeyID int64
 
 	var earliestReset time.Time
 	for _, acc := range candidates {
-		blocked, resetAt := antigravityAccountQuotaGateBlock(acc)
+		blocked, resetAt := antigravityAccountQuotaGateBlock(acc, model)
 		if !blocked {
 			return nil // 混合原因：不是「全部因配额阻断」
 		}
@@ -161,56 +217,153 @@ func (a *Account) IsAntigravityQuotaExhaustedLocked(now time.Time) (bool, string
 	return antigravityQuotaSnapshotGateBlock(&a.AntigravityQuota, now)
 }
 
-// antigravityQuotaSnapshotGateBlock 是硬门禁谓词的唯一实现体：只依赖一份 V2 配额快照
+// antigravityQuotaSnapshotGateBlock 是整号口径的硬门禁谓词：只依赖一份 V2 配额快照
 // 与当前时钟，不读 Account 的其他字段。调度门禁与展示侧（管理端 /state）都经由它求值，
 // 避免出现第二套判定口径（Spec §3.3）。
+//
+// 配额按模型族分桶（Gemini / Claude+GPT / Argon），某一族耗尽不影响其他族的请求，
+// 所以整号只在「没有任何一族还能用」时才阻断：
+//   - 未知族的桶（ID 前缀无法归族）已知为零：不知道它限制谁，按整号阻断（保守）；
+//   - 所有已识别族都各自被阻断：整号阻断，到期取最早恢复的那一族；
+//   - 否则放行，由携带模型上下文的选号过滤器（antigravityQuotaSnapshotGateBlockForModel）
+//     按请求模型所在族再判一次。
 func antigravityQuotaSnapshotGateBlock(snapshot *AntigravityQuotaSnapshot, now time.Time) (bool, string, time.Time) {
-	// 止血开关：若系统设置关闭门禁，立即放行（Spec §8.1，不影响已落库快照）
-	if !ConfiguredAntigravitySettings().GetQuotaGateEnabled() {
+	if !antigravityQuotaGateApplicable(snapshot, now) {
 		return false, "", time.Time{}
 	}
-	if snapshot == nil {
+	if blocked, reason, resetAt := antigravityQuotaScopeGateBlock(snapshot, func(b AntigravityQuotaBucket) bool {
+		return antigravityBucketQuotaFamily(b.BucketID) == antigravityQuotaFamilyUnknown
+	}, now); blocked {
+		return true, reason, resetAt
+	}
+	seen := map[antigravityQuotaFamily]bool{}
+	var families []antigravityQuotaFamily
+	for _, g := range snapshot.Groups {
+		for _, b := range g.Buckets {
+			if _, ok := NormalizeAntigravityWindow(b.Window); !ok {
+				continue
+			}
+			family := antigravityBucketQuotaFamily(b.BucketID)
+			if family == antigravityQuotaFamilyUnknown || seen[family] {
+				continue
+			}
+			seen[family] = true
+			families = append(families, family)
+		}
+	}
+	if len(families) == 0 {
 		return false, "", time.Time{}
+	}
+	var (
+		earliest       time.Time
+		earliestReason string
+	)
+	for _, family := range families {
+		blocked, reason, resetAt := antigravityQuotaScopeGateBlock(snapshot, func(b AntigravityQuotaBucket) bool {
+			return antigravityBucketQuotaFamily(b.BucketID) == family
+		}, now)
+		if !blocked {
+			return false, "", time.Time{} // 至少还有一族可用：整号不阻断
+		}
+		if earliest.IsZero() || resetAt.Before(earliest) {
+			earliest, earliestReason = resetAt, reason
+		}
+	}
+	return true, earliestReason, earliest
+}
+
+// antigravityQuotaSnapshotGateBlockForModel 是带模型上下文的硬门禁谓词：只看 model
+// 所在族（以及无法归族的保守桶）。model 无法归族时退回「任一桶为零即阻断」的整号严格
+// 口径——与分族之前的行为一致，宁可多挡不可错放。
+func antigravityQuotaSnapshotGateBlockForModel(snapshot *AntigravityQuotaSnapshot, model string, now time.Time) (bool, string, time.Time) {
+	if !antigravityQuotaGateApplicable(snapshot, now) {
+		return false, "", time.Time{}
+	}
+	scope, _ := antigravityQuotaScopeForModel(snapshot, model, true)
+	return antigravityQuotaScopeGateBlock(snapshot, scope, now)
+}
+
+// antigravityQuotaGateApplicable 校验门禁的全局前提：开关开启、V2 快照、且 groups 来源
+// 元数据可信（Spec §3.1：applied_seq > 0、observed_at 非零且不在未来）。
+func antigravityQuotaGateApplicable(snapshot *AntigravityQuotaSnapshot, now time.Time) bool {
+	// 止血开关：若系统设置关闭门禁，立即放行（Spec §8.1，不影响已落库快照）
+	if !ConfiguredAntigravitySettings().GetQuotaGateEnabled() {
+		return false
+	}
+	if snapshot == nil {
+		return false
 	}
 	// legacy 快照（无 schema_version=2）：旧数据显式 0 不可信，绝不硬封（Spec §3.1）
 	if snapshot.SchemaVersion != 2 {
-		return false, "", time.Time{}
+		return false
 	}
-	// 元数据可信条件（Spec §3.1）：applied_seq > 0、observed_at 非零且不在未来；
 	// 缺失即 unknown，不构成阻断依据。
-	meta, ok := snapshot.SourceMetadata["groups"]
-	if !ok || meta.AppliedSeq <= 0 || meta.ObservedAt.IsZero() || meta.ObservedAt.After(now) {
-		return false, "", time.Time{}
-	}
+	return antigravityQuotaGroupsMetaTrusted(snapshot, now)
+}
 
+// antigravityQuotaGroupsMetaTrusted 报告 groups 来源元数据是否可信：applied_seq > 0、
+// observed_at 非零且不在未来。门禁与临期加分共用这一口径。
+func antigravityQuotaGroupsMetaTrusted(snapshot *AntigravityQuotaSnapshot, now time.Time) bool {
+	if snapshot == nil {
+		return false
+	}
+	meta, ok := snapshot.SourceMetadata["groups"]
+	return ok && meta.AppliedSeq > 0 && !meta.ObservedAt.IsZero() && !meta.ObservedAt.After(now)
+}
+
+// antigravityQuotaScopeGateBlock 在 scope 内的桶上求值硬门禁：任一桶处于阻断态即阻断。
+// 多个桶同时阻断时，到期取最晚的那个——作用域要等所有零桶都恢复才可用（例如 5h 与
+// weekly 同时为零，Retry-After 应指向周重置而不是 5h 重置）。
+func antigravityQuotaScopeGateBlock(snapshot *AntigravityQuotaSnapshot, scope antigravityQuotaBucketScope, now time.Time) (bool, string, time.Time) {
+	var (
+		blocked      bool
+		latestReason string
+		latest       time.Time
+	)
 	for _, g := range snapshot.Groups {
 		for _, b := range g.Buckets {
-			w, ok := NormalizeAntigravityWindow(b.Window)
-			if !ok || !b.FractionPresent || b.RemainingFraction == nil {
-				continue // 白名单外 / 无 presence / 无数值 → unknown，不阻断
-			}
-			if *b.RemainingFraction != 0.0 {
-				continue // known_positive（含极小正数）与解析层未收敛的非法值一律不阻断
-			}
-			resetAt, hasReset := ValidateResetTime(b.ResetTime, b.ObservedAt, w)
-			ttlDeadline := b.ObservedAt.Add(time.Duration(b.TTLSeconds) * time.Second)
-			if hasReset {
-				if now.Before(resetAt) {
-					if now.After(ttlDeadline) {
-						// 超龄已知零（stale）：观测年龄超 TTL 但 resetAt 未到，
-						// 保持阻断并标记 stale，进入优先补查，绝不静默放行（Spec §3.3）
-						return true, "stale_zero", resetAt
-					}
-					return true, "known_zero", resetAt // 阻断持续到可信 resetAt
-				}
-				// resetAt 已过：窗口滚动转 unknown，仅解除本桶，不清其他有效零桶
+			if !scope(b) {
 				continue
 			}
-			// 无可信 resetAt：TTL 兜底阻断，避免永久封禁
-			if now.Before(ttlDeadline) {
-				return true, "known_zero", ttlDeadline
+			bucketBlocked, reason, resetAt := antigravityQuotaBucketGateBlock(b, now)
+			if !bucketBlocked {
+				continue
 			}
+			if !blocked || resetAt.After(latest) {
+				latest, latestReason = resetAt, reason
+			}
+			blocked = true
 		}
+	}
+	return blocked, latestReason, latest
+}
+
+// antigravityQuotaBucketGateBlock 是单桶的阻断判定。
+func antigravityQuotaBucketGateBlock(b AntigravityQuotaBucket, now time.Time) (bool, string, time.Time) {
+	w, ok := NormalizeAntigravityWindow(b.Window)
+	if !ok || !b.FractionPresent || b.RemainingFraction == nil {
+		return false, "", time.Time{} // 白名单外 / 无 presence / 无数值 → unknown，不阻断
+	}
+	if *b.RemainingFraction != 0.0 {
+		return false, "", time.Time{} // known_positive（含极小正数）与解析层未收敛的非法值一律不阻断
+	}
+	resetAt, hasReset := ValidateResetTime(b.ResetTime, b.ObservedAt, w)
+	ttlDeadline := b.ObservedAt.Add(time.Duration(b.TTLSeconds) * time.Second)
+	if hasReset {
+		if now.Before(resetAt) {
+			if now.After(ttlDeadline) {
+				// 超龄已知零（stale）：观测年龄超 TTL 但 resetAt 未到，
+				// 保持阻断并标记 stale，进入优先补查，绝不静默放行（Spec §3.3）
+				return true, "stale_zero", resetAt
+			}
+			return true, "known_zero", resetAt // 阻断持续到可信 resetAt
+		}
+		// resetAt 已过：窗口滚动转 unknown，仅解除本桶，不清其他有效零桶
+		return false, "", time.Time{}
+	}
+	// 无可信 resetAt：TTL 兜底阻断，避免永久封禁
+	if now.Before(ttlDeadline) {
+		return true, "known_zero", ttlDeadline
 	}
 	return false, "", time.Time{}
 }

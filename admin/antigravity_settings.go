@@ -30,6 +30,8 @@ type antigravitySettingsResponse struct {
 	QuotaRefreshEnabled         bool                              `json:"quota_refresh_enabled"`
 	QuotaRefreshIntervalMinutes int                               `json:"quota_refresh_interval_minutes"`
 	QuotaGateEnabled            bool                              `json:"quota_gate_enabled"`
+	ExpiryPriorityEnabled       bool                              `json:"expiry_priority_enabled"`
+	ExpiryPriorityHorizonHours  int                               `json:"expiry_priority_horizon_hours"`
 	ConfigRevision              int64                             `json:"config_revision"`
 	Choices                     []proxy.AntigravityRedirectChoice `json:"choices"`
 }
@@ -47,6 +49,8 @@ func buildAntigravitySettingsResponse(settings auth.AntigravitySettings) antigra
 		QuotaRefreshEnabled:         settings.GetQuotaRefreshEnabled(),
 		QuotaRefreshIntervalMinutes: settings.GetQuotaRefreshIntervalMinutes(),
 		QuotaGateEnabled:            settings.GetQuotaGateEnabled(),
+		ExpiryPriorityEnabled:       settings.GetExpiryPriorityEnabled(),
+		ExpiryPriorityHorizonHours:  settings.GetExpiryPriorityHorizonHours(),
 		ConfigRevision:              settings.ConfigRevision,
 		Choices:                     proxy.AntigravityRedirectChoices(),
 	}
@@ -71,12 +75,18 @@ type antigravitySettingsPatch struct {
 	quotaRefreshIntervalPresent bool
 	quotaGateEnabled            *bool
 	quotaGateEnabledPresent     bool
+
+	expiryPriorityEnabled        *bool
+	expiryPriorityEnabledPresent bool
+	expiryPriorityHorizonHours   *int
+	expiryPriorityHorizonPresent bool
 }
 
 // empty 报告 patch 是否未包含任何更新字段。
 func (p antigravitySettingsPatch) empty() bool {
 	return p.modelRedirects == nil && p.redirectOverridesEffort == nil && p.exposeThoughts == nil &&
-		!p.quotaRefreshEnabledPresent && !p.quotaRefreshIntervalPresent && !p.quotaGateEnabledPresent
+		!p.quotaRefreshEnabledPresent && !p.quotaRefreshIntervalPresent && !p.quotaGateEnabledPresent &&
+		!p.expiryPriorityEnabledPresent && !p.expiryPriorityHorizonPresent
 }
 
 // isJSONNull 报告原始 JSON 字段是否显式为 null 字面量。
@@ -142,6 +152,32 @@ func parseAntigravitySettingsPatch(body []byte) (antigravitySettingsPatch, error
 				return patch, err
 			}
 			patch.quotaGateEnabled = value
+		case "expiry_priority_enabled":
+			patch.expiryPriorityEnabledPresent = true
+			if isJSONNull(raw) {
+				patch.expiryPriorityEnabled = nil
+				continue
+			}
+			value, err := decodeAntigravityBool(raw, "expiry_priority_enabled")
+			if err != nil {
+				return patch, err
+			}
+			patch.expiryPriorityEnabled = value
+		case "expiry_priority_horizon_hours":
+			patch.expiryPriorityHorizonPresent = true
+			if isJSONNull(raw) {
+				patch.expiryPriorityHorizonHours = nil
+				continue
+			}
+			var hours int
+			if err := json.Unmarshal(raw, &hours); err != nil {
+				return patch, fmt.Errorf("expiry_priority_horizon_hours 必须是整数")
+			}
+			if hours < auth.AntigravityExpiryPriorityHorizonMinHours || hours > auth.AntigravityExpiryPriorityHorizonMaxHours {
+				return patch, fmt.Errorf("expiry_priority_horizon_hours 必须在 [%d, %d] 之间",
+					auth.AntigravityExpiryPriorityHorizonMinHours, auth.AntigravityExpiryPriorityHorizonMaxHours)
+			}
+			patch.expiryPriorityHorizonHours = &hours
 		case "quota_refresh_interval_minutes":
 			patch.quotaRefreshIntervalPresent = true
 			if isJSONNull(raw) {
@@ -210,6 +246,14 @@ func mergeAntigravitySettingsPatch(base auth.AntigravitySettings, patch antigrav
 		merged.QuotaGateEnabled = restore.QuotaGateEnabled
 		restored = true
 	}
+	// 临期优先缺省关闭：混布窗口里被旧版本整包覆盖丢失只会回到「关」，不像门禁止血
+	// 开关那样会被默认值无痕反转，因此不参与回写恢复。
+	if patch.expiryPriorityEnabledPresent {
+		merged.ExpiryPriorityEnabled = patch.expiryPriorityEnabled
+	}
+	if patch.expiryPriorityHorizonPresent {
+		merged.ExpiryPriorityHorizonHours = patch.expiryPriorityHorizonHours
+	}
 	return merged, restored
 }
 
@@ -230,7 +274,7 @@ func (h *Handler) UpdateAntigravitySettings(c *gin.Context) {
 		return
 	}
 	if patch.empty() {
-		writeError(c, http.StatusBadRequest, "缺少 model_redirects、redirect_overrides_effort、expose_thoughts、quota_refresh_enabled、quota_refresh_interval_minutes 或 quota_gate_enabled 字段")
+		writeError(c, http.StatusBadRequest, "缺少 model_redirects、redirect_overrides_effort、expose_thoughts、quota_refresh_enabled、quota_refresh_interval_minutes、quota_gate_enabled、expiry_priority_enabled 或 expiry_priority_horizon_hours 字段")
 		return
 	}
 	if h.db == nil {
@@ -295,9 +339,10 @@ func (h *Handler) UpdateAntigravitySettings(c *gin.Context) {
 
 	// 本机按 revision 单调应用（含 revision 回退检测与基线重建）。
 	outcome := auth.ApplyConfiguredAntigravitySettings(applied)
-	log.Printf("设置已更新: antigravity_config redirects=%d overrides_effort=%v expose_thoughts=%v quota_refresh_enabled=%v quota_refresh_interval_minutes=%d quota_gate_enabled=%v config_revision=%d apply=%s",
+	log.Printf("设置已更新: antigravity_config redirects=%d overrides_effort=%v expose_thoughts=%v quota_refresh_enabled=%v quota_refresh_interval_minutes=%d quota_gate_enabled=%v expiry_priority_enabled=%v expiry_priority_horizon_hours=%d config_revision=%d apply=%s",
 		len(applied.ModelRedirects), applied.RedirectOverridesEffort, applied.ExposeThoughts,
 		applied.GetQuotaRefreshEnabled(), applied.GetQuotaRefreshIntervalMinutes(), applied.GetQuotaGateEnabled(),
+		applied.GetExpiryPriorityEnabled(), applied.GetExpiryPriorityHorizonHours(),
 		applied.ConfigRevision, outcome)
 	// quota_refresh_enabled / interval 可能已变化：立即唤醒配额巡检调度器按新配置重算槽位，
 	// 不必等下一轮自然到点。

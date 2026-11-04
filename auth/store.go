@@ -7765,6 +7765,9 @@ func (s *Store) nextForSessionWithFilter(key string, apiKeyID int64, exclude map
 		return nil, "", SessionAffinityGuard{}
 	}
 	policy := opts.Policy
+	// 模型级配额门禁：整号门禁只在所有配额族都耗尽时才移出账号，这里按本次请求模型所在
+	// 族补一道过滤，绑定复用、续链、借用与 Fresh 选号共用同一个包装后的 filter。
+	filter = withAntigravityModelQuotaFilter(filter, opts.Model)
 	key = strings.TrimSpace(key)
 	if key == "" {
 		return s.NextExcludingWithDispatch(apiKeyID, exclude, filter, policy), "", SessionAffinityGuard{}
@@ -8538,8 +8541,11 @@ func (s *Store) waitForSessionAvailableWithFilter(ctx context.Context, key strin
 	if timeout <= 0 || ctx.Err() != nil {
 		return nil, "", SessionAffinityGuard{}, ctx.Err()
 	}
+	// 候选探测与选号同口径地看模型级配额门禁；选号本身由 nextForSessionWithFilter 自行
+	// 包装，这里传给它的仍是原始 filter，避免同一门禁叠两层。
+	candidateFilter := withAntigravityModelQuotaFilter(filter, opts.Model)
 	hasCandidate := func() bool {
-		return s.HasDispatchCandidate(key, apiKeyID, exclude, filter, preserveBinding, policy)
+		return s.HasDispatchCandidate(key, apiKeyID, exclude, candidateFilter, preserveBinding, policy)
 	}
 	// Indexed/shadow also wait on an empty snapshot: another replica may add
 	// an account and notify this process through the durable outbox.
