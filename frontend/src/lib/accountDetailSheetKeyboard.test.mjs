@@ -2,142 +2,172 @@ import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
+import {
+  hasBlockingModalOrOverlay,
+  isEditableKeyboardTarget,
+  shouldHandleAccountDetailKeyNavigation,
+} from './accountDetailSheetKeyboard.ts'
+
 const detailSheetSource = readFileSync(
   new URL('../components/AccountDetailSheet.tsx', import.meta.url),
   'utf8',
 )
+const keyboardHelperSource = readFileSync(
+  new URL('./accountDetailSheetKeyboard.ts', import.meta.url),
+  'utf8',
+)
 
-test('AccountDetailSheet source code checks modifiers, input elements, and open dialogs', () => {
-  // Ensure keyboard listener filters modifiers
-  assert.match(
-    detailSheetSource,
-    /event\.altKey\s*\|\|\s*event\.ctrlKey\s*\|\|\s*event\.metaKey\s*\|\|\s*event\.shiftKey/,
-  )
+/**
+ * Creates a mock document for querying overlays.
+ *
+ * @param {object} options
+ * @param {string[]} [options.matchingSelectors]
+ * @param {number} [options.sheetCount]
+ * @returns {object}
+ */
+function createMockDocument({ matchingSelectors = [], sheetCount = 1 } = {}) {
+  return {
+    querySelector: (selector) => {
+      const match = matchingSelectors.some((sel) => selector.includes(sel))
+      return match ? {} : null
+    },
+    querySelectorAll: (selector) => {
+      if (selector.includes('[data-slot="sheet-content"]')) {
+        return { length: sheetCount }
+      }
+      return { length: 0 }
+    },
+  }
+}
 
-  // Ensure input, textarea, select, contenteditable elements are not hijacked
-  assert.match(
-    detailSheetSource,
-    /target\?\.closest\(\s*['"]input,\s*textarea,\s*select,\s*\[contenteditable=["']true["']\]['"]\s*\)/,
-  )
+/**
+ * Creates a mock DOM element with a closest() matcher.
+ *
+ * @param {string[]} matchingTags
+ * @returns {object}
+ */
+function createMockElement(matchingTags = []) {
+  return {
+    closest: (selector) => {
+      const match = matchingTags.some((tag) => selector.includes(tag))
+      return match ? {} : null
+    },
+  }
+}
 
-  // Ensure active modal/dialog stops sheet navigation
-  assert.match(detailSheetSource, /\[data-slot="dialog-content"\]/)
+test('isEditableKeyboardTarget identifies inputs, textareas, selects, and contenteditable', () => {
+  assert.equal(isEditableKeyboardTarget(createMockElement(['input'])), true)
+  assert.equal(isEditableKeyboardTarget(createMockElement(['textarea'])), true)
+  assert.equal(isEditableKeyboardTarget(createMockElement(['select'])), true)
+  assert.equal(isEditableKeyboardTarget(createMockElement(['contenteditable'])), true)
+  assert.equal(isEditableKeyboardTarget(createMockElement([])), false)
+  assert.equal(isEditableKeyboardTarget(null), false)
+  assert.equal(isEditableKeyboardTarget({}), false)
 })
 
-test('Simulated DOM event handling matches expected keyboard behavior', () => {
-  // Extract and evaluate the handler logic in a controlled DOM-like context
-  function createEnvironment({
-    activeTarget = null,
-    hasDialog = false,
-    canGoPrev = true,
-    canGoNext = true,
-  }) {
-    let prevCalled = 0
-    let nextCalled = 0
+test('hasBlockingModalOrOverlay recognizes dialogs, alert dialogs, dropdowns, and multiple sheets', () => {
+  const dialogDoc = createMockDocument({ matchingSelectors: ['[data-slot="dialog-content"]'] })
+  assert.equal(hasBlockingModalOrOverlay(dialogDoc), true)
 
-    const mockDocument = {
-      querySelector: (selector) => {
-        if (hasDialog && selector.includes('[data-slot="dialog-content"]')) {
-          return {}
-        }
-        return null
-      },
-      querySelectorAll: (selector) => {
-        if (selector.includes('[data-slot="sheet-content"]')) {
-          return { length: 1 }
-        }
-        return []
-      },
-    }
+  const alertDoc = createMockDocument({ matchingSelectors: ['[role="alertdialog"]'] })
+  assert.equal(hasBlockingModalOrOverlay(alertDoc), true)
 
-    const handler = (event) => {
-      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return
-      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
-      const target = event.target
-      if (target?.closest?.('input, textarea, select, [contenteditable="true"]')) {
-        return
-      }
-      if (
-        mockDocument.querySelector(
-          '[data-slot="dialog-content"], [role="dialog"]:not([data-slot="sheet-content"]), [role="alertdialog"], [data-select-dropdown="true"]',
-        ) ||
-        mockDocument.querySelectorAll('[data-slot="sheet-content"]').length > 1
-      ) {
-        return
-      }
-      if (event.key === 'ArrowLeft' && canGoPrev) {
-        event.preventDefault()
-        prevCalled++
-      } else if (event.key === 'ArrowRight' && canGoNext) {
-        event.preventDefault()
-        nextCalled++
-      }
-    }
+  const selectDoc = createMockDocument({ matchingSelectors: ['[data-select-dropdown="true"]'] })
+  assert.equal(hasBlockingModalOrOverlay(selectDoc), true)
 
-    return {
-      dispatch: (key, opts = {}) => {
-        let prevented = false
-        const event = {
-          key,
-          target: activeTarget,
-          altKey: Boolean(opts.altKey),
-          ctrlKey: Boolean(opts.ctrlKey),
-          metaKey: Boolean(opts.metaKey),
-          shiftKey: Boolean(opts.shiftKey),
-          preventDefault: () => {
-            prevented = true
-          },
-        }
-        handler(event)
-        return { prevented }
-      },
-      getStats: () => ({ prevCalled, nextCalled }),
-    }
-  }
+  const multiSheetDoc = createMockDocument({ sheetCount: 2 })
+  assert.equal(hasBlockingModalOrOverlay(multiSheetDoc), true)
 
-  // Case 1: Target is an <input> inside an edit modal
-  const inputTarget = {
-    tagName: 'INPUT',
-    closest: (sel) => (sel.includes('input') ? {} : null),
-  }
-  const inputEnv = createEnvironment({ activeTarget: inputTarget, canGoPrev: true, canGoNext: true })
-  const inputResultLeft = inputEnv.dispatch('ArrowLeft')
-  const inputResultRight = inputEnv.dispatch('ArrowRight')
-  assert.equal(inputResultLeft.prevented, false, 'ArrowLeft in input should not be prevented')
-  assert.equal(inputResultRight.prevented, false, 'ArrowRight in input should not be prevented')
-  assert.deepEqual(inputEnv.getStats(), { prevCalled: 0, nextCalled: 0 }, 'Should not call prev/next')
+  const singleSheetDoc = createMockDocument({ sheetCount: 1 })
+  assert.equal(hasBlockingModalOrOverlay(singleSheetDoc), false)
 
-  // Case 2: Target is a <textarea>
-  const textareaTarget = {
-    tagName: 'TEXTAREA',
-    closest: (sel) => (sel.includes('textarea') ? {} : null),
-  }
-  const textareaEnv = createEnvironment({ activeTarget: textareaTarget })
-  const textareaResult = textareaEnv.dispatch('ArrowLeft')
-  assert.equal(textareaResult.prevented, false)
-  assert.deepEqual(textareaEnv.getStats(), { prevCalled: 0, nextCalled: 0 })
+  assert.equal(hasBlockingModalOrOverlay(null), false)
+})
 
-  // Case 3: Shift + ArrowLeft (e.g. text selection)
-  const plainTarget = { closest: () => null }
-  const shiftEnv = createEnvironment({ activeTarget: plainTarget })
-  const shiftResult = shiftEnv.dispatch('ArrowLeft', { shiftKey: true })
-  assert.equal(shiftResult.prevented, false)
-  assert.deepEqual(shiftEnv.getStats(), { prevCalled: 0, nextCalled: 0 })
+test('shouldHandleAccountDetailKeyNavigation gates keyboard navigation', () => {
+  const normalDoc = createMockDocument({ sheetCount: 1 })
+  const plainTarget = createMockElement([])
+  const inputTarget = createMockElement(['input'])
+  const blockingDoc = createMockDocument({ matchingSelectors: ['[data-slot="dialog-content"]'] })
+  const multiSheetDoc = createMockDocument({ sheetCount: 2 })
 
-  // Case 4: An edit modal is open (hasDialog = true), user presses arrow keys
-  const dialogEnv = createEnvironment({ activeTarget: plainTarget, hasDialog: true })
-  const dialogResult = dialogEnv.dispatch('ArrowLeft')
-  assert.equal(dialogResult.prevented, false)
-  assert.deepEqual(dialogEnv.getStats(), { prevCalled: 0, nextCalled: 0 })
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'ArrowLeft', target: plainTarget }, normalDoc),
+    true,
+  )
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'ArrowRight', target: plainTarget }, normalDoc),
+    true,
+  )
 
-  // Case 5: Normal sheet usage, no input focused, no modal open -> ArrowLeft switches to prev
-  const normalEnv = createEnvironment({ activeTarget: plainTarget, hasDialog: false, canGoPrev: true, canGoNext: true })
-  const normalResultLeft = normalEnv.dispatch('ArrowLeft')
-  assert.equal(normalResultLeft.prevented, true)
-  assert.deepEqual(normalEnv.getStats(), { prevCalled: 1, nextCalled: 0 })
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'Enter', target: plainTarget }, normalDoc),
+    false,
+  )
 
-  // Case 6: Normal sheet usage -> ArrowRight switches to next
-  const normalResultRight = normalEnv.dispatch('ArrowRight')
-  assert.equal(normalResultRight.prevented, true)
-  assert.deepEqual(normalEnv.getStats(), { prevCalled: 1, nextCalled: 1 })
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation(
+      { key: 'ArrowLeft', shiftKey: true, target: plainTarget },
+      normalDoc,
+    ),
+    false,
+  )
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation(
+      { key: 'ArrowLeft', ctrlKey: true, target: plainTarget },
+      normalDoc,
+    ),
+    false,
+  )
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation(
+      { key: 'ArrowRight', altKey: true, target: plainTarget },
+      normalDoc,
+    ),
+    false,
+  )
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation(
+      { key: 'ArrowRight', metaKey: true, target: plainTarget },
+      normalDoc,
+    ),
+    false,
+  )
+
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'ArrowLeft', target: inputTarget }, normalDoc),
+    false,
+  )
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'ArrowRight', target: inputTarget }, normalDoc),
+    false,
+  )
+
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'ArrowLeft', target: plainTarget }, blockingDoc),
+    false,
+  )
+  assert.equal(
+    shouldHandleAccountDetailKeyNavigation({ key: 'ArrowRight', target: plainTarget }, multiSheetDoc),
+    false,
+  )
+})
+
+test('AccountDetailSheet integrates keyboard navigation guard', () => {
+  assert.match(
+    detailSheetSource,
+    /shouldHandleAccountDetailKeyNavigation\(\s*event\s*\)/,
+  )
+  assert.match(
+    detailSheetSource,
+    /window\.addEventListener\(\s*['"]keydown['"]\s*,\s*onKeyDown\s*\)/,
+  )
+})
+
+test('accountDetailSheetKeyboard source declares required overlay and sheet count selectors', () => {
+  assert.match(keyboardHelperSource, /\[data-slot="dialog-content"\]/)
+  assert.match(
+    keyboardHelperSource,
+    /querySelectorAll\(\s*['"]\[data-slot="sheet-content"\]['"]\s*\)\.length\s*>\s*1/,
+  )
 })

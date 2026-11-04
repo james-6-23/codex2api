@@ -47,6 +47,7 @@ import {
 } from "@/components/ui/sheet";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
 import { formatLongUsageWindowLabel, getAccountStatusBadgeStatus } from "../lib/usageFormat";
+import { shouldHandleAccountDetailKeyNavigation } from "../lib/accountDetailSheetKeyboard";
 
 function isFutureTime(value?: string): boolean {
   if (!value) return false;
@@ -275,19 +276,11 @@ export default function AccountDetailSheet({
 
   useEffect(() => {
     if (!open) return;
+    /**
+     * Keyboard navigation handler for switching accounts via ArrowLeft / ArrowRight.
+     */
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-      const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"]')) {
-        return;
-      }
-      if (
-        document.querySelector(
-          '[data-slot="dialog-content"], [role="dialog"]:not([data-slot="sheet-content"]), [role="alertdialog"], [data-select-dropdown="true"]',
-        ) ||
-        document.querySelectorAll('[data-slot="sheet-content"]').length > 1
-      ) {
+      if (!shouldHandleAccountDetailKeyNavigation(event)) {
         return;
       }
       if (event.key === "ArrowLeft" && canGoPrev) {
