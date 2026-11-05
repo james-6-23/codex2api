@@ -18,7 +18,9 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-func TestGPTImage25ImagesIngressToUpstream(t *testing.T) {
+// TestImagesIngressToUpstream covers Images and Image Studio against an upstream
+// that rejects explicit reasoning effort while preserving image quality and inputs.
+func TestImagesIngressToUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime, previousResin := CurrentRuntimeSettings(), resinCfg.Load()
 	t.Cleanup(func() { ApplyRuntimeSettings(previousRuntime); resinCfg.Store(previousResin) })
@@ -29,8 +31,16 @@ func TestGPTImage25ImagesIngressToUpstream(t *testing.T) {
 	observed := make(chan []byte, 1)
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forwarded := readUpstreamRequestBody(r)
-		observed <- forwarded
 		w.Header().Set("Content-Type", "text/event-stream")
+		// The Codex backend rejects explicit reasoning effort on image turns,
+		// independently of the image tool's quality setting.
+		if effort := gjson.GetBytes(forwarded, "reasoning.effort"); effort.Exists() {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			fmt.Fprintf(w, `{"error":{"type":"invalid_request_error","code":"invalid_value","message":"Complexity '%s' is not supported for this image model."}}`, effort.String())
+			return
+		}
+		observed <- forwarded
 		fmt.Fprint(w, `data: {"type":"response.completed","response":{"tool_usage":{"image_gen":{"input_tokens":1550,"input_tokens_details":{"text_tokens":29,"image_tokens":1521},"output_tokens":515,"output_tokens_details":{"image_tokens":515}}},"tools":[{"type":"image_generation","model":"gpt-image-2-codex"}],"output":[{"type":"image_generation_call","result":"`+tinyPNGBase64+`","output_format":"png"}]}}`+"\n\n")
 	}))
 	defer upstream.Close()
@@ -43,6 +53,8 @@ func TestGPTImage25ImagesIngressToUpstream(t *testing.T) {
 		model, quality, mode, driver string
 		stream                       bool
 	}{
+		{"gpt-image-2", "auto", "generate", "gpt-6.1-terra", false},
+		{"gpt-image-2", "medium", "json", "gpt-6.1-terra", false},
 		{"gpt-image-2.5-flare", "xhigh", "generate", "gpt-5.6-sol", false},
 		{"gpt-image-2.5-sunburst", "max", "generate", "gpt-5.6-terra", true},
 		{"gpt-image-2.5-sunburst-2026-09-08", "max", "json", "gpt-5.6-sol", false},
@@ -109,6 +121,9 @@ func TestGPTImage25ImagesIngressToUpstream(t *testing.T) {
 				t.Fatalf("image request failed: %d %s", recorder.Code, recorder.Body.String())
 			}
 			forwarded := <-observed
+			if gjson.GetBytes(forwarded, "reasoning.summary").String() != "auto" || gjson.GetBytes(forwarded, "include.0").String() != "reasoning.encrypted_content" {
+				t.Fatalf("reasoning metadata changed: %s", forwarded)
+			}
 			if gjson.GetBytes(forwarded, "model").String() != tc.driver || gjson.GetBytes(forwarded, "tools.0.model").String() != tc.model || gjson.GetBytes(forwarded, "tools.0.quality").String() != tc.quality {
 				t.Fatalf("outbound model/quality changed: %s", forwarded)
 			}
