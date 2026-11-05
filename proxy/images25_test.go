@@ -18,6 +18,8 @@ import (
 	"github.com/tidwall/gjson"
 )
 
+// TestImagesIngressToUpstream covers Images and Image Studio against an upstream
+// that rejects explicit reasoning effort while preserving image quality and inputs.
 func TestImagesIngressToUpstream(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	previousRuntime, previousResin := CurrentRuntimeSettings(), resinCfg.Load()

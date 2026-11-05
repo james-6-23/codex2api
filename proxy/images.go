@@ -1549,6 +1549,8 @@ func (h *Handler) imagesEditsFromJSON(c *gin.Context) {
 	h.forwardImagesRequest(c, "/v1/images/edits", imageModel, requestModel, logEffectiveModel, responsesBody, responseFormat, "image_edit", stream)
 }
 
+// buildImagesResponsesRequest builds the shared Images envelope, leaving reasoning
+// effort unset so the upstream can choose a supported image complexity.
 func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte) []byte {
 	// Explicit reasoning effort is rejected as unsupported image complexity.
 	// Let the upstream choose its default while retaining reasoning metadata.
