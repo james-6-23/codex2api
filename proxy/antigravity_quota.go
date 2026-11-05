@@ -553,8 +553,16 @@ func applyAntigravityCooldownWithPenalty(store *auth.Store, account *auth.Accoun
 	if wireModel != "" && !strings.EqualFold(wireModel, decision.Model) {
 		store.MarkModelCooldownUntilAtLeast(account, wireModel, decision.Reason, decision.ResetAt)
 	}
-	if quota.Kind == antigravityQuotaKindQuotaExhausted && (antigravityIsGeminiModel(decision.Model) || antigravityIsGeminiModel(quota.Model)) {
-		store.MarkModelCooldownUntilAtLeast(account, antigravityGeminiQuotaCooldownKey(decision.Model, wireModel), decision.Reason, decision.ResetAt)
+	if quota.Kind == antigravityQuotaKindQuotaExhausted {
+		familyKey := antigravityGeminiQuotaCooldownKey(decision.Model, wireModel)
+		// Upstream metadata can identify the Gemini pool behind a non-Gemini
+		// request. Use it only when the request has no known Gemini family.
+		if familyKey == "" {
+			familyKey = antigravityGeminiQuotaCooldownKey(quota.Model, "")
+		}
+		if familyKey != "" {
+			store.MarkModelCooldownUntilAtLeast(account, familyKey, decision.Reason, decision.ResetAt)
+		}
 	}
 	if recordPenalty {
 		auth.RecordAntigravityRateLimitEvent(account, antigravityRateLimitEvent(statusCode, decision.Model, wireModel, quota, true, decision.ResetAt))

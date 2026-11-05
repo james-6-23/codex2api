@@ -115,3 +115,46 @@ func TestAntigravityQuotaCooldownIsolation(t *testing.T) {
 		}
 	})
 }
+
+// TestAntigravityQuotaCooldownMetadataFallback ensures upstream model metadata
+// fills a missing Gemini quota family without overriding a known request family.
+func TestAntigravityQuotaCooldownMetadataFallback(t *testing.T) {
+	const argonFamily = "antigravity:quota-family:argon"
+	const geminiFamily = "antigravity:quota-family:gemini"
+	for _, tc := range []struct {
+		name       string
+		request    string
+		upstream   string
+		wantFamily string
+	}{
+		{"Argon metadata fallback", "claude-sonnet-4-6", "gemini-4-argon-high", argonFamily},
+		{"Gemini metadata fallback", "claude-sonnet-4-6", "gemini-3.8-flash-tiered", geminiFamily},
+		{"known Argon request takes precedence", "gemini-4-argon-low", "gemini-3.8-flash-tiered", argonFamily},
+		{"known Gemini request takes precedence", "gemini-3.8-flash-low", "gemini-4-argon-high", geminiFamily},
+		{"non-Gemini metadata", "claude-sonnet-4-6", "claude-sonnet-4-6", ""},
+		{"missing metadata model", "claude-sonnet-4-6", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := newProxyPremiumTestStore()
+			defer store.Stop()
+			account := newAntigravityCooldownTestAccount(9753)
+			account.Models = []string{"gemini-4-argon-high", "gemini-3.8-flash-tiered", "claude-sonnet-4-6"}
+			store.AddAccount(account)
+			body := strings.ReplaceAll(antigravityQuotaExhaustedBody, "gemini-3.7-flash-tiered", tc.upstream)
+			decision := applyAntigravityCooldown(store, account, http.StatusTooManyRequests, []byte(body), nil, tc.request)
+			if decision.Model != tc.request || !account.IsModelRateLimited(tc.request) {
+				t.Fatal("metadata fallback must preserve the public-model cooldown")
+			}
+			for _, key := range []string{argonFamily, geminiFamily} {
+				remaining := account.ModelCooldownRemaining(key)
+				if key == tc.wantFamily {
+					if remaining < 4*time.Minute {
+						t.Fatalf("family %s cooldown = %s, want the upstream retry window", key, remaining)
+					}
+				} else if remaining > 0 {
+					t.Fatalf("unrelated family %s must not be cooled down", key)
+				}
+			}
+		})
+	}
+}
