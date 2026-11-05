@@ -74,4 +74,44 @@ func TestAntigravityQuotaCooldownIsolation(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("argon family key alone", func(t *testing.T) {
+		for _, channel := range []struct {
+			name  string
+			value string
+		}{{"auto", ""}, {"antigravity", database.UpstreamChannelAntigravity}} {
+			t.Run(channel.name, func(t *testing.T) {
+				tokenCache := cache.NewMemory(8)
+				defer tokenCache.Close()
+				writer := auth.NewStore(nil, tokenCache, &database.SystemSettings{MaxConcurrency: 4})
+				defer writer.Stop()
+				account := newAntigravityCooldownTestAccount(9752)
+				writer.AddAccount(account)
+				const model = "gemini-4-argon-low"
+				const wire = "gemini-4-argon-high"
+				const familyKey = "antigravity:quota-family:argon"
+				writer.MarkModelCooldownUntil(account, familyKey, "quota_exhausted", time.Now().Add(time.Minute))
+				if account.IsModelRateLimited(model) || account.IsModelRateLimited(wire) {
+					t.Fatal("family-only fixture must leave public and wire cooldowns clear")
+				}
+				if !antigravityAccountModelRateLimited(account, model, wire) {
+					t.Fatal("local admission must reject Argon using only its family key")
+				}
+				reader := auth.NewStore(nil, tokenCache, &database.SystemSettings{MaxConcurrency: 4})
+				defer reader.Stop()
+				remote := newAntigravityCooldownTestAccount(account.DBID)
+				handler := NewHandler(reader, nil, nil, nil)
+				filter := handler.withRequestModelCooldownFilter(newChannelTestGin(channel.value), context.Background(), model, nil)
+				if filter(remote) {
+					t.Fatal("cross-instance admission must reject Argon using only its family key")
+				}
+				if !remote.IsModelRateLimited(familyKey) {
+					t.Fatal("the Argon family cooldown must be hydrated from shared cache")
+				}
+				if remote.IsModelRateLimited(model) || remote.IsModelRateLimited(wire) {
+					t.Fatal("admission must not depend on a public or wire cooldown")
+				}
+			})
+		}
+	})
 }
