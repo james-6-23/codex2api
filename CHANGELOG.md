@@ -1,5 +1,15 @@
 # Changelog
 
+## v3.1.4 - 2026-11-05
+
+### Fixes
+
+- **Image generation and edits no longer send an explicit reasoning effort (#855, reported by @caoyanyi; #854, @cuiks).** The shared Codex request builder used by `/v1/images/generations`, `/v1/images/edits` and the admin Image Studio always sent `reasoning.effort=medium`, which the upstream now rejects as an unsupported image complexity (`Complexity 'medium' is not supported for this image model`) regardless of the requested `quality`. The builder now omits `reasoning.effort` and lets the upstream choose its default, while keeping `reasoning.summary`, encrypted reasoning content and the image tool's `model` / `quality` unchanged. No automatic retry or account switching is added. A regression test with a simulated upstream that rejects explicit effort covers generation, JSON and multipart edits, streaming and admin generation/edit paths.
+
+- **`/v1/models` no longer hides image models behind text-only account allowlists (#826, reported by @depress77; #852).** When a Codex account saved a non-empty `credentials.models` allowlist containing only text models, model discovery filtered out every `gpt-image-*` entry even though the Images endpoints, which schedule by image capability and ignore that allowlist, could still generate images. Image models are now treated as a separate capability in discovery as well: catalog eligibility, enabled state and Pro-only plan gating still apply, and the text allowlist continues to filter text models. Key-level `ModelAllow` / `ModelDeny` and account visibility rules still hide image models as before.
+
+- **Account detail sheet arrow keys no longer hijack text cursors or overlays (#851, @yanhao98).** The sheet's window-level Left/Right handler called `preventDefault` and switched accounts even while focus was in an input, textarea, select or contenteditable element, or while an edit dialog, dropdown or stacked sheet was open. Navigation now ignores modified arrow keys, editable targets and blocking overlays, and only switches accounts from the standalone sheet.
+
 ## v3.1.3 - 2026-11-04
 
 ### Features
