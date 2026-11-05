@@ -524,13 +524,13 @@ func TestApplyAntigravityCooldownGeminiFamilyDeadlineNotShortened(t *testing.T) 
 
 	longBody := strings.Replace(antigravityQuotaExhaustedBody, `"4m50s"`, `"10m"`, 1)
 	applyAntigravityCooldown(store, account, http.StatusTooManyRequests, []byte(longBody), nil, "gemini-3.7-flash-high")
-	if remaining := account.ModelCooldownRemaining(antigravityGeminiFamilyCooldownKey); remaining < 9*time.Minute {
+	if remaining := account.ModelCooldownRemaining(antigravityGeminiQuotaCooldownKey("gemini-3.8-flash-low", "")); remaining < 9*time.Minute {
 		t.Fatalf("family cooldown = %s after the long event, want ~10m", remaining)
 	}
 
 	shortBody := strings.Replace(antigravityQuotaExhaustedBody, `"4m50s"`, `"60s"`, 1)
 	applyAntigravityCooldown(store, account, http.StatusTooManyRequests, []byte(shortBody), nil, "gemini-3.6-flash-low")
-	if remaining := account.ModelCooldownRemaining(antigravityGeminiFamilyCooldownKey); remaining < 9*time.Minute {
+	if remaining := account.ModelCooldownRemaining(antigravityGeminiQuotaCooldownKey("gemini-3.8-flash-low", "")); remaining < 9*time.Minute {
 		t.Fatalf("family cooldown = %s after a shorter quota window, want the longer deadline kept", remaining)
 	}
 	if !antigravityAccountModelRateLimited(account, "gemini-3.5-pro-high", "gemini-3.5-pro-high") {

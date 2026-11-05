@@ -63,7 +63,7 @@ func TestWithRequestModelCooldownFilterAutoChannelInterceptsAntigravityCandidate
 		AntigravityProjectID: "google-project", Status: auth.StatusReady,
 	}
 	familyWriter.AddAccount(quotaAccount)
-	familyWriter.MarkModelCooldownUntil(quotaAccount, antigravityGeminiFamilyCooldownKey, "quota_exhausted", time.Now().Add(time.Minute))
+	familyWriter.MarkModelCooldownUntil(quotaAccount, antigravityGeminiQuotaCooldownKey("gemini-3.8-flash-low", ""), "quota_exhausted", time.Now().Add(time.Minute))
 	remoteFamily := &auth.Account{
 		DBID: 9111, UpstreamType: auth.UpstreamAntigravity, AccessToken: "google-token",
 		AntigravityProjectID: "google-project", Status: auth.StatusReady,
@@ -87,7 +87,7 @@ func TestWithRequestModelCooldownFilterAutoChannelKeepsSingleKeyForOtherAccounts
 	writer.AddAccount(publicHot)
 	writer.MarkModelCooldownUntil(wireHot, "gemini-3.8-flash-tiered", "rate_limited_model", time.Now().Add(time.Minute))
 	writer.MarkModelCooldownUntil(publicHot, "gemini-3.8-flash-low", "rate_limited_model", time.Now().Add(time.Minute))
-	writer.MarkModelCooldownUntil(publicHot, antigravityGeminiFamilyCooldownKey, "quota_exhausted", time.Now().Add(time.Minute))
+	writer.MarkModelCooldownUntil(publicHot, antigravityGeminiQuotaCooldownKey("gemini-3.8-flash-low", ""), "quota_exhausted", time.Now().Add(time.Minute))
 
 	reader := auth.NewStore(nil, tokenCache, &database.SystemSettings{MaxConcurrency: 4})
 	defer reader.Stop()
