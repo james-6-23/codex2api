@@ -187,15 +187,15 @@ func (h *Handler) withModelCooldownFilter(ctx context.Context, model string, fil
 	return h.store.WithModelCooldownFilterContext(ctx, model, filter)
 }
 
-// antigravityRequestCooldownKeys 解析 public model 对应的 wireModel 与（Gemini 家族）
-// 共享 familyKey，供跨实例三键冷却检查使用。wireModel 取自模型目录
+// antigravityRequestCooldownKeys 解析 public model 对应的 wireModel 与（Argon / 普通 Gemini）
+// 各自共享的 familyKey，供跨实例三键冷却检查使用。wireModel 取自模型目录
 // （AntigravityWireModelID），与 antigravityResolvePublicModelForAccount 对受支持账号返回
 // 的 wire 完全一致；账号是否具备该 wire 支撑已由 antigravityChannelAccountFilter 单独把关，
 // 这里只负责冷却键。非 Gemini 模型的 familyKey 为空串。
 func antigravityRequestCooldownKeys(model string) (wireModel string, familyKey string) {
 	wireModel, _ = AntigravityWireModelID(model)
 	if antigravityIsGeminiModel(model) || antigravityIsGeminiModel(wireModel) {
-		familyKey = antigravityGeminiFamilyCooldownKey
+		familyKey = antigravityGeminiQuotaCooldownKey(model, wireModel)
 	}
 	return wireModel, familyKey
 }

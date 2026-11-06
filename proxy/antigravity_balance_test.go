@@ -79,7 +79,7 @@ func TestWithRequestModelCooldownFilterInterceptsGeminiFamilyCooldown(t *testing
 		AntigravityProjectID: "google-project", Status: auth.StatusReady,
 	}
 	writer.AddAccount(hotAccount)
-	writer.MarkModelCooldownUntil(hotAccount, antigravityGeminiFamilyCooldownKey, "rate_limited_model", time.Now().Add(time.Minute))
+	writer.MarkModelCooldownUntil(hotAccount, antigravityGeminiQuotaCooldownKey("gemini-3.8-flash-low", ""), "rate_limited_model", time.Now().Add(time.Minute))
 
 	reader := auth.NewStore(nil, tokenCache, &database.SystemSettings{MaxConcurrency: 4})
 	defer reader.Stop()

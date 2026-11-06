@@ -62,13 +62,6 @@ const (
 	antigravityUnclassifiedRateLimitCooldown = 5 * time.Second
 	antigravityDefaultQuotaCooldown          = 5 * time.Minute
 	antigravityMaxQuotaCooldown              = 30 * time.Minute
-
-	// antigravityGeminiFamilyCooldownKey is the synthetic model key that a
-	// QUOTA_EXHAUSTED on any Gemini model also cools down. Cloud Code meters
-	// Gemini usage in one shared bucket (retrieveUserQuotaSummary reports a
-	// single "Gemini Models" group), so one exhausted Gemini model means the
-	// account's other Gemini tiers are exhausted too.
-	antigravityGeminiFamilyCooldownKey = "antigravity:gemini"
 )
 
 // antigravitySleep is the wait used for same-endpoint retries. Injectable so
@@ -270,15 +263,28 @@ func (b *antigravitySameEndpointRetryBudget) retryDelay(statusCode int, body []b
 	}
 }
 
-// antigravityIsGeminiModel reports whether a public or wire model id belongs
-// to the shared Gemini quota bucket.
+// antigravityIsGeminiModel reports whether a public or wire model id is Gemini.
 func antigravityIsGeminiModel(model string) bool {
 	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(model)), "gemini")
 }
 
+// antigravityGeminiQuotaCooldownKey separates Argon's independent quota pool
+// from ordinary Gemini, whose models still share a family-wide quota fence.
+// Use a new namespace: the legacy antigravity:gemini key could have been written
+// by either pool and cannot safely be attributed to one during a rolling upgrade.
+func antigravityGeminiQuotaCooldownKey(model, wireModel string) string {
+	if !antigravityIsGeminiModel(model) && !antigravityIsGeminiModel(wireModel) {
+		return ""
+	}
+	if strings.Contains(strings.ToLower(model), "argon") || strings.Contains(strings.ToLower(wireModel), "argon") {
+		return "antigravity:quota-family:argon"
+	}
+	return "antigravity:quota-family:gemini"
+}
+
 // antigravityAccountModelRateLimited is the single admission check for an
 // Antigravity account: the public id, the resolved wire id, and (for Gemini)
-// the shared family key must all be clear.
+// the appropriate quota-family key must all be clear.
 func antigravityAccountModelRateLimited(account *auth.Account, model, wireModel string) bool {
 	if account == nil {
 		return false
@@ -286,8 +292,8 @@ func antigravityAccountModelRateLimited(account *auth.Account, model, wireModel 
 	if account.IsModelRateLimited(model) || account.IsModelRateLimited(wireModel) {
 		return true
 	}
-	if antigravityIsGeminiModel(model) || antigravityIsGeminiModel(wireModel) {
-		return account.IsModelRateLimited(antigravityGeminiFamilyCooldownKey)
+	if familyKey := antigravityGeminiQuotaCooldownKey(model, wireModel); familyKey != "" {
+		return account.IsModelRateLimited(familyKey)
 	}
 	return false
 }
@@ -376,7 +382,7 @@ func antigravityRateLimitEvent(statusCode int, model, wireModel string, quota an
 		ObservedAt:  time.Now(),
 	}
 	if antigravityIsGeminiModel(event.PublicModel) || antigravityIsGeminiModel(event.WireModel) {
-		event.Family = antigravityGeminiFamilyCooldownKey
+		event.Family = antigravityGeminiQuotaCooldownKey(model, wireModel)
 	}
 	if !parsed {
 		// A 429 with no google.rpc detail says nothing about this credential,
@@ -394,7 +400,7 @@ func antigravityRateLimitEvent(statusCode int, model, wireModel string, quota an
 		event.Scope = auth.AGScopeSharedCapacity
 		event.Weight = auth.AntigravityPenaltyWeightNone
 	case antigravityQuotaKindQuotaExhausted:
-		// Already covered by the long per-model cooldown plus the Gemini
+		// Already covered by the long per-model cooldown plus its quota
 		// family cooldown; a short-term penalty would only double-count it.
 		event.Scope = auth.AGScopeAccountQuota
 		event.Weight = auth.AntigravityPenaltyWeightNone
@@ -547,8 +553,16 @@ func applyAntigravityCooldownWithPenalty(store *auth.Store, account *auth.Accoun
 	if wireModel != "" && !strings.EqualFold(wireModel, decision.Model) {
 		store.MarkModelCooldownUntilAtLeast(account, wireModel, decision.Reason, decision.ResetAt)
 	}
-	if quota.Kind == antigravityQuotaKindQuotaExhausted && (antigravityIsGeminiModel(decision.Model) || antigravityIsGeminiModel(quota.Model)) {
-		store.MarkModelCooldownUntilAtLeast(account, antigravityGeminiFamilyCooldownKey, decision.Reason, decision.ResetAt)
+	if quota.Kind == antigravityQuotaKindQuotaExhausted {
+		familyKey := antigravityGeminiQuotaCooldownKey(decision.Model, wireModel)
+		// Upstream metadata can identify the Gemini pool behind a non-Gemini
+		// request. Use it only when the request has no known Gemini family.
+		if familyKey == "" {
+			familyKey = antigravityGeminiQuotaCooldownKey(quota.Model, "")
+		}
+		if familyKey != "" {
+			store.MarkModelCooldownUntilAtLeast(account, familyKey, decision.Reason, decision.ResetAt)
+		}
 	}
 	if recordPenalty {
 		auth.RecordAntigravityRateLimitEvent(account, antigravityRateLimitEvent(statusCode, decision.Model, wireModel, quota, true, decision.ResetAt))
