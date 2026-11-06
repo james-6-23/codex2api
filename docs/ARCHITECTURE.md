@@ -436,7 +436,9 @@ CREATE TABLE accounts (
     deleted_at TIMESTAMP                 -- 软删除
 );
 
--- 用量日志表
+-- 用量日志表。请求结束先进内存缓冲，按 usage_log_flush_interval_seconds / usage_log_batch_size 批量落库。
+-- created_at = 请求完成时刻（进缓冲时由网关写入，不是落库时刻），所以晚落库的行 created_at 会早于
+-- 已落库的行；增量抽取请按 id 游标（单调递增），不要用 created_at > 上次水位。请求开始时刻 ≈ created_at - duration_ms。
 CREATE TABLE usage_logs (
     id BIGSERIAL PRIMARY KEY,
     account_id BIGINT REFERENCES accounts(id),

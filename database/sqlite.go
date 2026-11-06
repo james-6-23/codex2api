@@ -962,64 +962,31 @@ func (db *DB) sqliteTableColumns(ctx context.Context, table string) (map[string]
 	return result, rows.Err()
 }
 
-func (db *DB) getTrafficSnapshotSQLite(ctx context.Context) (*TrafficSnapshot, error) {
+func (db *DB) loadTrafficSecondsSQLite(ctx context.Context, since time.Time, buckets *trafficSecondBuckets) error {
 	rows, err := db.conn.QueryContext(ctx, `
 		SELECT created_at, total_tokens
 		FROM usage_logs
 		WHERE created_at >= $1
 		  AND TRIM(COALESCE(internal_reason, '')) = ''
-	`, db.timeArg(time.Now().Add(-5*time.Minute)))
+	`, db.timeArg(since))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-
-	perSecondRequests := make(map[int64]float64)
-	perSecondTokens := make(map[int64]float64)
-	now := time.Now()
-	windowStart := now.Add(-10 * time.Second).Unix()
 
 	for rows.Next() {
 		var createdRaw interface{}
 		var totalTokens int64
 		if err := rows.Scan(&createdRaw, &totalTokens); err != nil {
-			return nil, err
+			return err
 		}
 		createdAt, err := parseDBTimeValue(createdRaw)
 		if err != nil || createdAt.IsZero() {
 			continue
 		}
-		sec := createdAt.Unix()
-		perSecondRequests[sec]++
-		perSecondTokens[sec] += float64(totalTokens)
+		buckets.add(createdAt.Unix(), 1, float64(totalTokens))
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	result := &TrafficSnapshot{}
-	var qpsPeak float64
-	var tpsPeak float64
-	var qpsWindow float64
-	var tpsWindow float64
-	for sec, reqCount := range perSecondRequests {
-		if reqCount > qpsPeak {
-			qpsPeak = reqCount
-		}
-		tokenCount := perSecondTokens[sec]
-		if tokenCount > tpsPeak {
-			tpsPeak = tokenCount
-		}
-		if sec >= windowStart {
-			qpsWindow += reqCount
-			tpsWindow += tokenCount
-		}
-	}
-	result.QPS = qpsWindow / 10.0
-	result.TPS = tpsWindow / 10.0
-	result.QPSPeak = qpsPeak
-	result.TPSPeak = tpsPeak
-	return result, nil
+	return rows.Err()
 }
 
 func (db *DB) getChartAggregationSQLite(ctx context.Context, start, end time.Time, bucketMinutes int, channel string) (*ChartAggregation, error) {
