@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 const intelligenceSwitchWire = "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"21\"}]}]}}\n\n"
@@ -29,6 +30,49 @@ func TestIntelligenceSourceSwitchesGrokUsesResponsesExecutor(t *testing.T) {
 	}
 	if intelligenceAccountChannel(account) != "grok" {
 		t.Fatal("wrong source")
+	}
+}
+
+// TestIntelligenceSourceSwitchesGrokHTTPFailures reuses native auth isolation and free-quota accounting.
+func TestIntelligenceSourceSwitchesGrokHTTPFailures(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, reason string
+		status             int
+	}{
+		{"unauthorized", `{"error":{"code":"invalid_token"}}`, "credential_refresh", http.StatusUnauthorized},
+		{"free quota", `{"code":"subscription:free-usage-exhausted","error":"tokens (actual/limit): 42/40"}`, "usage_limited", http.StatusTooManyRequests},
+		{"rate limited", `{"error":{"message":"too many requests"}}`, "rate_limited", http.StatusTooManyRequests},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, account, _ := newCodexDiagnosticsTestHandler(t, func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Retry-After", "120")
+				w.WriteHeader(tc.status)
+				fmt.Fprint(w, tc.body)
+			})
+			account.UpstreamType = auth.UpstreamGrok
+			account.Models = []string{"grok-4.5"}
+			account.PlanType = "free"
+			if tc.status == http.StatusUnauthorized {
+				account.APIKey, account.AccessToken = "", "expired-access"
+				// Keep this transport fixture out of the store's async refresh lookup;
+				// the shared mapper still takes its OAuth recovery branch.
+				account.DBID = 0
+			}
+			started := time.Now()
+			got := h.executeIntelligenceCheck(context.Background(), account, "grok-4.5", "", "Return 21")
+			if got.Error == "" || got.Complete || got.Interrupted || account.GetCooldownReason() != tc.reason || account.IsBanned() {
+				t.Fatalf("result=%+v reason=%s banned=%v", got, account.GetCooldownReason(), account.IsBanned())
+			}
+			if tc.name == "free quota" {
+				snapshot, ok := account.GetGrokFreeQuotaSnapshot()
+				if !ok || snapshot.UsedTokens != 42 || snapshot.LimitTokens != 40 || snapshot.Model != "grok-4.5" {
+					t.Fatalf("lost free quota snapshot: %+v %v", snapshot, ok)
+				}
+			}
+			if tc.name == "rate limited" && account.CooldownUtil.Before(started.Add(119*time.Second)) {
+				t.Fatalf("Retry-After ignored: %v", account.CooldownUtil)
+			}
+		})
 	}
 }
 

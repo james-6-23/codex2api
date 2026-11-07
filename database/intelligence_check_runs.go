@@ -42,6 +42,7 @@ func (db *DB) GetIntelligenceCheckRun(ctx context.Context, id int64) (Intelligen
 
 var errIntelligenceNoEnabledQuestion = errors.New("no enabled question")
 
+// intelligenceCheckSnapshot freezes the source-specific model, question and policy for a run.
 func intelligenceCheckSnapshot(s ic.Settings, a IntelligenceCheckAccount, source string, created time.Time) (IntelligenceCheckRun, error) {
 	// Remember the last stable question ID, rather than indexing the enabled
 	// subset: disabling an earlier question must not shift the next question.
@@ -200,6 +201,8 @@ func (db *DB) EnqueueDueIntelligenceChecks(ctx context.Context, now time.Time, l
 	})
 	return count, err
 }
+
+// ClaimIntelligenceCheck leases eligible work and refreshes its snapshot against current policy.
 func (db *DB) ClaimIntelligenceCheck(ctx context.Context, owner string, now time.Time, lease time.Duration) (*IntelligenceCheckRun, error) {
 	if owner == "" || lease <= 0 {
 		return nil, errors.New("nonempty owner and positive lease are required")
@@ -326,6 +329,8 @@ func (db *DB) intelligenceRetainTx(ctx context.Context, tx *sql.Tx, accountID in
 	_, err := tx.ExecContext(ctx, `DELETE FROM intelligence_check_runs WHERE account_id=$1 AND status NOT IN ('queued','running') AND id NOT IN (SELECT id FROM intelligence_check_runs WHERE account_id=$1 AND status NOT IN ('queued','running') ORDER BY id DESC LIMIT $2)`, accountID, retention)
 	return err
 }
+
+// FinishIntelligenceCheck commits a fenced result and its scheduling or credential-block state.
 func (db *DB) FinishIntelligenceCheck(ctx context.Context, id int64, owner string, o ic.Observation, now time.Time) (bool, error) {
 	committed := false
 	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
@@ -576,6 +581,8 @@ func (db *DB) ListIntelligenceCheckRuns(ctx context.Context, f IntelligenceCheck
 	}
 	return out, total, rows.Err()
 }
+
+// IntelligenceCheckBars returns bounded history and source-aware automatic scheduling metadata.
 func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64]IntelligenceCheckBar, error) {
 	ids = normalizeIDSlice(ids)
 	out := map[int64]IntelligenceCheckBar{}

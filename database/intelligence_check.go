@@ -108,6 +108,7 @@ type IntelligenceCheckRunSummary struct {
 	CompletedAt  *time.Time `json:"completed_at"`
 }
 
+// ensureIntelligenceCheckSchema installs detector storage and source-aware enrollment triggers.
 func (db *DB) ensureIntelligenceCheckSchema(ctx context.Context) error {
 	idType := "BIGSERIAL PRIMARY KEY"
 	if db.isSQLite() {
@@ -197,6 +198,8 @@ func (db *DB) GetIntelligenceCheckSettings(ctx context.Context) (ic.Settings, er
 	}
 	return ic.AdaptiveDefaults(s), err
 }
+
+// SaveIntelligenceCheckSettings atomically updates policy while preserving source-specific credential fences.
 func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) (ic.Settings, error) {
 	s = ic.AdaptiveDefaults(s)
 	if err := ic.ValidateSettings(s); err != nil {
@@ -253,15 +256,16 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 		if _, err := tx.ExecContext(ctx, `UPDATE intelligence_check_settings SET revision=$1,config_json=$2,new_accounts_enabled=$3 WHERE id=1`, s.Revision, string(raw), s.NewAccountsEnabled); err != nil {
 			return err
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT account_id,state_json FROM intelligence_check_accounts`)
+		rows, err := tx.QueryContext(ctx, `SELECT st.account_id,st.state_json,`+db.intelligenceChannelExpr()+` FROM intelligence_check_accounts st JOIN accounts a ON a.id=st.account_id`)
 		if err != nil {
 			return err
 		}
 		states := map[int64]ic.State{}
+		channels := map[int64]string{}
 		for rows.Next() {
 			var id int64
-			var raw string
-			if err = rows.Scan(&id, &raw); err != nil {
+			var raw, channel string
+			if err = rows.Scan(&id, &raw, &channel); err != nil {
 				rows.Close()
 				return err
 			}
@@ -273,6 +277,7 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 			state.DegradeStreak = 0
 			state.RecoverStreak = 0
 			states[id] = state
+			channels[id] = channel
 		}
 		err = rows.Err()
 		rows.Close()
@@ -295,7 +300,9 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 					delay, state.ProbePhase = state.PauseBackoffSeconds, "backoff"
 				}
 			} else {
-				state.BlockedCredentialGeneration = nil
+				if channels[id] != "antigravity" {
+					state.BlockedCredentialGeneration = nil
+				}
 				state.PauseBackoffSeconds = 0
 			}
 			state.NextIntervalSeconds = delay
@@ -316,6 +323,8 @@ func (db *DB) intelligenceUpstreamExpr() string {
 	}
 	return `LOWER(COALESCE(a.credentials->>'upstream_type',''))`
 }
+
+// intelligenceChannelExpr gives explicit upstream metadata precedence over legacy platform labels.
 func (db *DB) intelligenceChannelExpr() string {
 	upstream := `TRIM(` + db.intelligenceUpstreamExpr() + `)`
 	return `CASE WHEN ` + upstream + `='antigravity' THEN 'antigravity' WHEN ` + upstream + `='grok' THEN 'grok' WHEN ` + upstream + `='claude' THEN 'claude' WHEN ` + upstream + `<>'' THEN 'codex' WHEN LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' ELSE 'codex' END`
@@ -391,6 +400,8 @@ func scanIntelligenceAccount(row interface{ Scan(...interface{}) error }) (Intel
 	}
 	return a, err
 }
+
+// ListIntelligenceCheckAccounts returns filtered detector enrollment and source metadata.
 func (db *DB) ListIntelligenceCheckAccounts(ctx context.Context, f IntelligenceCheckAccountFilter) ([]IntelligenceCheckAccount, int, error) {
 	settings, err := db.GetIntelligenceCheckSettings(ctx)
 	if err != nil {
@@ -564,6 +575,7 @@ type intelligenceQueryRower interface {
 	QueryRowContext(context.Context, string, ...interface{}) *sql.Row
 }
 
+// intelligenceTargetGroupChannel validates the configured action target against supported sources.
 func intelligenceTargetGroupChannel(ctx context.Context, q intelligenceQueryRower, s ic.Settings) (string, error) {
 	var channel string
 	err := q.QueryRowContext(ctx, `SELECT COALESCE(channel,'codex') FROM account_groups WHERE id=$1`, s.TargetGroupID).Scan(&channel)

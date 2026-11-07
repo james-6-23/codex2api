@@ -367,6 +367,19 @@ func TestIntelligenceChannelSwitchesAntigravityCredentialFence(t *testing.T) {
 	if ok, err := db.FinishIntelligenceCheck(ctx, run.ID, "worker", ic.Observation{Error: "final 401", CredentialRejected: true}, now.Add(time.Second)); err != nil || !ok {
 		t.Fatal(ok, err)
 	}
+	// An unrelated save with adaptive scheduling off must not unblock this credential.
+	s, err = db.GetIntelligenceCheckSettings(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.IntervalSeconds++
+	if _, err = db.SaveIntelligenceCheckSettings(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	bars, err := db.IntelligenceCheckBars(ctx, []int64{id})
+	if err != nil || bars[id].ProbePhase != "credential_blocked" || bars[id].NextDueAt != nil {
+		t.Fatalf("settings save cleared credential block: %+v %v", bars, err)
+	}
 	if n, err := db.EnqueueDueIntelligenceChecks(ctx, now.Add(72*time.Hour), 1); err != nil || n != 0 {
 		t.Fatalf("rejected credential rescheduled: %d %v", n, err)
 	}

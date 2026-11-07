@@ -169,6 +169,7 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 	return
 }
 
+// applyIntelligenceUpstreamFailure preserves each source's native HTTP failure policy.
 func (h *Handler) applyIntelligenceUpstreamFailure(account *auth.Account, resp *http.Response, model string, raw []byte) {
 	detail := truncate(sanitizeCodexTestText(string(raw), codexTestSecrets(account)), 500)
 	if account.IsAntigravityAPI() {
@@ -177,6 +178,10 @@ func (h *Handler) applyIntelligenceUpstreamFailure(account *auth.Account, resp *
 		if resp.StatusCode == http.StatusUnauthorized {
 			h.store.MarkError(account, detail)
 		}
+		return
+	}
+	if account.IsGrokAPI() {
+		proxy.ApplyGrokCooldown(h.store, account, resp.StatusCode, raw, resp, model)
 		return
 	}
 	if account.IsClaudeOAuth() {

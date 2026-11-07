@@ -763,6 +763,12 @@ func (h *Handler) applyGrokCooldownForModel(account *auth.Account, statusCode in
 	return applyGrokCooldown(h.store, account, statusCode, body, resp, model)
 }
 
+// ApplyGrokCooldown shares Grok's HTTP authentication and quota mapping with internal probes.
+// Stream failures continue to use their existing terminal-event handling.
+func ApplyGrokCooldown(store *auth.Store, account *auth.Account, statusCode int, body []byte, resp *http.Response, model string) codex429Decision {
+	return applyGrokCooldown(store, account, statusCode, body, resp, model)
+}
+
 // applyGrokCooldown 把 Grok 上游错误映射到调度状态，并在免费额度耗尽时落权威用量快照。
 // 抽成包级函数供代理主路径与 Apply429Cooldown（批量测试/连通性测试）共用——两条路径都必须
 // 走这里才能识别 free-usage-exhausted、保存 grok_free_quota 快照并标 usage_limited。

@@ -137,6 +137,8 @@ func (h *Handler) SetIntelligenceAccounts(c *gin.Context) {
 	}
 	c.JSON(200, gin.H{"updated": len(ids)})
 }
+
+// CreateIntelligenceRuns validates selected accounts and queues explicit manual detector runs.
 func (h *Handler) CreateIntelligenceRuns(c *gin.Context) {
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16*1024)
 	var body struct {

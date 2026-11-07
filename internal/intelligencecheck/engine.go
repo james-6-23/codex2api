@@ -104,6 +104,7 @@ func (s Settings) ModelForChannel(channel string) (string, string) {
 	}
 }
 
+// ValidateSettings checks source switches, optional model overrides and detector policy bounds.
 func ValidateSettings(s Settings) error {
 	for channel := range s.Channels {
 		switch channel {

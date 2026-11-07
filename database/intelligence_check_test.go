@@ -290,6 +290,8 @@ func TestIntelligenceCheckSchedulerMetadataManualOverride(t *testing.T) {
 		t.Fatal("manual scheduler groups edit released owned pause")
 	}
 }
+
+// TestIntelligenceCheckDueFiltersBarsAndDisabledPause verifies due selection and disabled-account presentation.
 func TestIntelligenceCheckDueFiltersBarsAndDisabledPause(t *testing.T) {
 	db := intelligenceDB(t)
 	ctx := context.Background()
@@ -347,6 +349,7 @@ func TestIntelligenceCheckDueFiltersBarsAndDisabledPause(t *testing.T) {
 	}
 }
 
+// TestIntelligenceCheckPostgres runs detector lifecycle regressions against isolated PostgreSQL schemas.
 func TestIntelligenceCheckPostgres(t *testing.T) {
 	if os.Getenv("CODEX2API_TEST_POSTGRES_DSN") == "" {
 		t.Skip("requires isolated CODEX2API_TEST_POSTGRES_DSN")
