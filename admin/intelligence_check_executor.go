@@ -34,6 +34,7 @@ type intelligenceExecution struct {
 	EffectiveContext   map[string]string
 }
 
+// intelligenceAccountChannel classifies the account source, not the requested model family.
 func intelligenceAccountChannel(account *auth.Account) string {
 	switch {
 	case account.IsAntigravityAPI():
@@ -125,6 +126,8 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 		resp, err = proxy.ExecuteClaudeMessagesRequest(ctx, account, body, proxyURL, make(http.Header), fingerprint, security)
 	case account.IsAntigravityAPI():
 		resp, err = h.executeAntigravityConnectionTest(ctx, account, model, body, proxyURL, true)
+	case account.IsGrokAPI():
+		resp, err = proxy.ExecuteGrokProtocolRequest(ctx, account, proxy.GrokProtocolResponses, nil, body, proxyURL, nil)
 	case account.IsRelayStyle():
 		resp, err = proxy.ExecuteRelayStyleRequest(ctx, account, body, proxyURL, nil)
 	default:
@@ -139,7 +142,7 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		result.Error = fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(raw), 4096))
-		result.CredentialRejected = intelligenceCredentialRejected(raw)
+		result.CredentialRejected = intelligenceCredentialRejected(raw) || account.IsAntigravityAPI() && resp.StatusCode == http.StatusUnauthorized
 		h.applyIntelligenceUpstreamFailure(account, resp, model, raw)
 		return
 	}
@@ -167,10 +170,15 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 }
 
 func (h *Handler) applyIntelligenceUpstreamFailure(account *auth.Account, resp *http.Response, model string, raw []byte) {
+	detail := truncate(sanitizeCodexTestText(string(raw), codexTestSecrets(account)), 500)
 	if account.IsAntigravityAPI() {
+		// The dedicated executor already attempted OAuth refresh. Record the final
+		// authentication failure without a Codex ban or account-wide quota cooldown.
+		if resp.StatusCode == http.StatusUnauthorized {
+			h.store.MarkError(account, detail)
+		}
 		return
 	}
-	detail := truncate(sanitizeCodexTestText(string(raw), codexTestSecrets(account)), 500)
 	if account.IsClaudeOAuth() {
 		syncClaudeTestUsageState(h.store, account, model, resp, raw)
 		if resp.StatusCode == http.StatusUnauthorized {

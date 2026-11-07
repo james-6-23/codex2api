@@ -3,6 +3,7 @@
 package intelligencecheck
 
 import (
+	"encoding/json"
 	"fmt"
 	"golang.org/x/text/unicode/norm"
 	"regexp"
@@ -19,31 +20,50 @@ type Question struct {
 	Enabled        bool   `json:"enabled"`
 }
 type Settings struct {
-	Channels               map[string]bool `json:"channels,omitempty"`
-	GrokModel              string          `json:"grok_model,omitempty"`
-	AntigravityModel       string          `json:"antigravity_model,omitempty"`
-	AdaptiveEnabled        bool            `json:"adaptive_enabled"`
-	PauseInitialSeconds    int             `json:"pause_initial_seconds"`
-	PauseMaxSeconds        int             `json:"pause_max_seconds"`
-	RecoveryInitialSeconds int             `json:"recovery_initial_seconds"`
-	RecoveryMinSeconds     int             `json:"recovery_min_seconds"`
-	Revision               int64           `json:"revision"`
-	Enabled                bool            `json:"enabled"`
-	GPTModel               string          `json:"gpt_model"`
-	ClaudeModel            string          `json:"claude_model"`
-	ReasoningEffort        string          `json:"reasoning_effort"`
-	JudgeMode              string          `json:"judge_mode"`
-	IntervalSeconds        int             `json:"interval_seconds"`
-	RetrySeconds           int             `json:"retry_seconds"`
-	TimeoutSeconds         int             `json:"timeout_seconds"`
-	Concurrency            int             `json:"concurrency"`
-	Retention              int             `json:"retention"`
-	NewAccountsEnabled     bool            `json:"new_accounts_enabled"`
-	Action                 string          `json:"action"`
-	DegradeThreshold       int             `json:"degrade_threshold"`
-	RecoverThreshold       int             `json:"recover_threshold"`
-	TargetGroupID          int64           `json:"target_group_id"`
-	Questions              []Question      `json:"questions"`
+	GrokModelSupplied        bool            `json:"-"`
+	AntigravityModelSupplied bool            `json:"-"`
+	Channels                 map[string]bool `json:"channels,omitempty"`
+	GrokModel                string          `json:"grok_model,omitempty"`
+	AntigravityModel         string          `json:"antigravity_model,omitempty"`
+	AdaptiveEnabled          bool            `json:"adaptive_enabled"`
+	PauseInitialSeconds      int             `json:"pause_initial_seconds"`
+	PauseMaxSeconds          int             `json:"pause_max_seconds"`
+	RecoveryInitialSeconds   int             `json:"recovery_initial_seconds"`
+	RecoveryMinSeconds       int             `json:"recovery_min_seconds"`
+	Revision                 int64           `json:"revision"`
+	Enabled                  bool            `json:"enabled"`
+	GPTModel                 string          `json:"gpt_model"`
+	ClaudeModel              string          `json:"claude_model"`
+	ReasoningEffort          string          `json:"reasoning_effort"`
+	JudgeMode                string          `json:"judge_mode"`
+	IntervalSeconds          int             `json:"interval_seconds"`
+	RetrySeconds             int             `json:"retry_seconds"`
+	TimeoutSeconds           int             `json:"timeout_seconds"`
+	Concurrency              int             `json:"concurrency"`
+	Retention                int             `json:"retention"`
+	NewAccountsEnabled       bool            `json:"new_accounts_enabled"`
+	Action                   string          `json:"action"`
+	DegradeThreshold         int             `json:"degrade_threshold"`
+	RecoverThreshold         int             `json:"recover_threshold"`
+	TargetGroupID            int64           `json:"target_group_id"`
+	Questions                []Question      `json:"questions"`
+}
+
+// UnmarshalJSON distinguishes an explicitly cleared model from an older client's omitted field.
+func (s *Settings) UnmarshalJSON(data []byte) error {
+	type settingsAlias Settings
+	var decoded settingsAlias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	_, decoded.GrokModelSupplied = fields["grok_model"]
+	_, decoded.AntigravityModelSupplied = fields["antigravity_model"]
+	*s = Settings(decoded)
+	return nil
 }
 
 // CandyPrompt is the built-in reasoning check. Keep the no-tools/no-network
@@ -93,6 +113,9 @@ func ValidateSettings(s Settings) error {
 		}
 	}
 	for _, model := range []string{s.GrokModel, s.AntigravityModel} {
+		if model != "" && strings.TrimSpace(model) == "" {
+			return fmt.Errorf("model must not contain only whitespace")
+		}
 		if len(model) > 255 {
 			return fmt.Errorf("model too long")
 		}

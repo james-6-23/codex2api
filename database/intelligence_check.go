@@ -214,10 +214,10 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 		if s.Channels == nil {
 			s.Channels = old.Channels
 		}
-		if s.GrokModel == "" {
+		if !s.GrokModelSupplied && s.GrokModel == "" {
 			s.GrokModel = old.GrokModel
 		}
-		if s.AntigravityModel == "" {
+		if !s.AntigravityModelSupplied && s.AntigravityModel == "" {
 			s.AntigravityModel = old.AntigravityModel
 		}
 		if s.Action == "switch_group" {
@@ -317,7 +317,8 @@ func (db *DB) intelligenceUpstreamExpr() string {
 	return `LOWER(COALESCE(a.credentials->>'upstream_type',''))`
 }
 func (db *DB) intelligenceChannelExpr() string {
-	return `CASE WHEN ` + db.intelligenceUpstreamExpr() + `='antigravity' OR LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN ` + db.intelligenceUpstreamExpr() + `='grok' OR LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN ` + db.intelligenceUpstreamExpr() + `='claude' OR LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' ELSE 'codex' END`
+	upstream := `TRIM(` + db.intelligenceUpstreamExpr() + `)`
+	return `CASE WHEN ` + upstream + `='antigravity' THEN 'antigravity' WHEN ` + upstream + `='grok' THEN 'grok' WHEN ` + upstream + `='claude' THEN 'claude' WHEN ` + upstream + `<>'' THEN 'codex' WHEN LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' ELSE 'codex' END`
 }
 func (db *DB) intelligenceEligibleSQL() string {
 	return `a.status<>'deleted' AND COALESCE(a.error_message,'')<>'deleted'`
