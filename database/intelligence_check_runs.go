@@ -42,6 +42,7 @@ func (db *DB) GetIntelligenceCheckRun(ctx context.Context, id int64) (Intelligen
 
 var errIntelligenceNoEnabledQuestion = errors.New("no enabled question")
 
+// intelligenceCheckSnapshot freezes the source-specific model, question and policy for a run.
 func intelligenceCheckSnapshot(s ic.Settings, a IntelligenceCheckAccount, source string, created time.Time) (IntelligenceCheckRun, error) {
 	// Remember the last stable question ID, rather than indexing the enabled
 	// subset: disabling an earlier question must not shift the next question.
@@ -76,11 +77,7 @@ func intelligenceCheckSnapshot(s ic.Settings, a IntelligenceCheckAccount, source
 	if !found {
 		return IntelligenceCheckRun{}, errIntelligenceNoEnabledQuestion
 	}
-	model, effort := s.GPTModel, s.ReasoningEffort
-	if a.Channel == "claude" {
-		model = s.ClaudeModel
-		effort = ""
-	}
+	model, effort := s.ModelForChannel(a.Channel)
 	snapshot := s
 	snapshot.Questions = nil
 	r := IntelligenceCheckRun{CredentialGeneration: a.CredentialGeneration, AccountID: a.AccountID, AccountName: a.AccountName, Channel: a.Channel, Source: source, Status: "queued", ConfigRevision: s.Revision, ManualRevision: a.ManualRevision, Model: model, ReasoningEffort: effort, JudgeMode: s.JudgeMode, Question: question, Settings: snapshot, CreatedAt: created.UTC()}
@@ -204,6 +201,8 @@ func (db *DB) EnqueueDueIntelligenceChecks(ctx context.Context, now time.Time, l
 	})
 	return count, err
 }
+
+// ClaimIntelligenceCheck leases eligible work and refreshes its snapshot against current policy.
 func (db *DB) ClaimIntelligenceCheck(ctx context.Context, owner string, now time.Time, lease time.Duration) (*IntelligenceCheckRun, error) {
 	if owner == "" || lease <= 0 {
 		return nil, errors.New("nonempty owner and positive lease are required")
@@ -271,7 +270,7 @@ func (db *DB) ClaimIntelligenceCheck(ctx context.Context, owner string, now time
 				continue
 			}
 
-			if r.Source == "automatic" && (!s.Enabled || !a.Enabled || !a.ManualEnabled) {
+			if r.Source == "automatic" && (!s.Enabled || !a.Enabled || !a.ManualEnabled || !s.ChannelEnabled(a.Channel)) {
 				continue
 			}
 			if minimum := time.Duration(r.Settings.TimeoutSeconds+30) * time.Second; lease < minimum {
@@ -330,6 +329,8 @@ func (db *DB) intelligenceRetainTx(ctx context.Context, tx *sql.Tx, accountID in
 	_, err := tx.ExecContext(ctx, `DELETE FROM intelligence_check_runs WHERE account_id=$1 AND status NOT IN ('queued','running') AND id NOT IN (SELECT id FROM intelligence_check_runs WHERE account_id=$1 AND status NOT IN ('queued','running') ORDER BY id DESC LIMIT $2)`, accountID, retention)
 	return err
 }
+
+// FinishIntelligenceCheck commits a fenced result and its scheduling or credential-block state.
 func (db *DB) FinishIntelligenceCheck(ctx context.Context, id int64, owner string, o ic.Observation, now time.Time) (bool, error) {
 	committed := false
 	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
@@ -371,7 +372,7 @@ func (db *DB) FinishIntelligenceCheck(ctx context.Context, id int64, owner strin
 			if next.BlockedCredentialGeneration != nil && *next.BlockedCredentialGeneration != a.CredentialGeneration {
 				next.BlockedCredentialGeneration = nil
 			}
-			if s.AdaptiveEnabled && o.CredentialRejected {
+			if o.CredentialRejected && (s.AdaptiveEnabled || a.Channel == "antigravity") {
 				generation := a.CredentialGeneration
 				next.BlockedCredentialGeneration = &generation
 			} else if grade.Status == "normal" {
@@ -580,6 +581,8 @@ func (db *DB) ListIntelligenceCheckRuns(ctx context.Context, f IntelligenceCheck
 	}
 	return out, total, rows.Err()
 }
+
+// IntelligenceCheckBars returns bounded history and source-aware automatic scheduling metadata.
 func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64]IntelligenceCheckBar, error) {
 	ids = normalizeIDSlice(ids)
 	out := map[int64]IntelligenceCheckBar{}
@@ -599,7 +602,7 @@ func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64
 		automaticEnabled = `json_extract(config_json,'$.enabled')`
 	}
 	active := `r.status='running' OR (r.status='queued' AND (` + db.intelligenceJSONField("source") + `='manual' OR (` + db.intelligenceAutomaticSQL("acc", "a") + ` AND (SELECT ` + automaticEnabled + ` FROM intelligence_check_settings WHERE id=1))))`
-	rows, err := db.conn.QueryContext(ctx, `SELECT a.account_id,a.enabled,a.quality_paused,a.state_json,a.next_due_ms,COALESCE(acc.credential_generation,1),(COALESCE(acc.enabled,TRUE) AND (SELECT `+automaticEnabled+` FROM intelligence_check_settings WHERE id=1)),COALESCE(r.id,0),COALESCE(r.status,'') FROM intelligence_check_accounts a JOIN accounts acc ON acc.id=a.account_id LEFT JOIN intelligence_check_runs r ON r.account_id=a.account_id AND r.status IN ('queued','running') AND (`+active+`) WHERE a.account_id IN (`+ph+`)`, args...)
+	rows, err := db.conn.QueryContext(ctx, `SELECT a.account_id,a.enabled,a.quality_paused,a.state_json,a.next_due_ms,COALESCE(acc.credential_generation,1),(COALESCE(acc.enabled,TRUE) AND (SELECT `+automaticEnabled+` AND `+db.intelligenceSourceEnabledSQL("acc", "intelligence_check_settings")+` FROM intelligence_check_settings WHERE id=1)),COALESCE(r.id,0),COALESCE(r.status,'') FROM intelligence_check_accounts a JOIN accounts acc ON acc.id=a.account_id LEFT JOIN intelligence_check_runs r ON r.account_id=a.account_id AND r.status IN ('queued','running') AND (`+active+`) WHERE a.account_id IN (`+ph+`)`, args...)
 	if err != nil {
 		return nil, err
 	}

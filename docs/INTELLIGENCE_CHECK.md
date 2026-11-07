@@ -2,7 +2,7 @@
 
 在 `/admin/intelligence-check` 管理固定账号的自动或手动检测。每次按题库顺序选取
 一道启用题目，将最终可见答案和耗时与管理员配置比较，保存结果及配置快照。
-支持 GPT/Codex、Responses 中转和 Claude 账号；Grok、Antigravity 暂不支持。
+支持 GPT/Codex、Responses 中转、Claude、Grok 和 Antigravity 账号。
 检测结果表示当前题目和判定规则下的表现，不用于证明上游实际模型身份。
 
 ## 目录
@@ -23,7 +23,9 @@
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `enabled` | `false` | 自动检测总开关 |
+| `channels` | Codex/Claude 开，Grok/Antigravity 关 | 按账号来源分别控制自动检测；省略字段保留旧行为 |
 | `gpt_model` / `claude_model` | `gpt-6-astra` / `claude-sonnet-4-6` | 各渠道检测模型，发送前验证账号能力 |
+| `grok_model` / `antigravity_model` | `grok-4.5` / `gemini-3.8-flash-medium` | 新增来源的检测模型，仍须属于该账号支持的模型目录 |
 | `reasoning_effort` | `high` | GPT 推理强度；Claude 不发送此字段 |
 | `judge_mode` | `answer` | `answer`、`latency` 或 `both` |
 | `interval_seconds` / `retry_seconds` | 300 / 60 | 正常检测间隔及异常后重试间隔，范围 1–86400 |
@@ -34,6 +36,24 @@
 | `action` | `none` | `none`、`pause` 或 `switch_group` |
 | `degrade_threshold` / `recover_threshold` | 2 / 1 | 连续未通过及恢复阈值，范围 1–1000 |
 | `target_group_id` | 0 | 切组时必须指定与账号渠道相容的有效分组 |
+
+“自动检测来源”提供 GPT/Codex、Claude、Grok、Antigravity 四个独立开关。
+以账号的来源识别，不按所调用模型的名字识别：Antigravity 内的 Claude 模型仍属于
+Antigravity。只自动检测 GPT 时，开启 Codex，关闭其余三项，再开启总开关并保存。
+账号自身的自动检测开关也须开启；来源开关不修改账号选择、历史或已有处置。
+
+关闭来源会停止新增、领取该来源的自动任务，并隐藏未运行任务的转圈和下次检测时间。
+已执行的请求可正常结束，仍遵守配置版本、凭据代次和人工状态的提交保护。
+重新开启来源后，原有账号选择恢复参与；手动“立即检测”不受自动来源开关影响。
+新增账号的默认参与状态同时受来源开关和 `new_accounts_enabled` 控制。
+Grok、Antigravity 默认关闭，避免升级后意外产生新的上游用量。
+
+```json
+{"channels":{"codex":true,"claude":false,"grok":false,"antigravity":false}}
+```
+
+以上为设置字段示例，保存 API 时仍须提供完整配置与当前 `revision`。
+旧客户端省略新增字段保存时，不会覆盖已保存的来源开关和检测模型。
 
 每道题包含 `id`、`name`、`prompt`、`expected_answer`、`match_mode`、
 `max_duration_ms`、`enabled`；最多 100 题。开启自动检测或提交手动任务前必须
@@ -78,7 +98,11 @@
 
 ## 请求与代理
 
-检测固定账号，复用现有 Codex/Responses/Claude 请求执行器和账号身份配置；
+检测固定账号，复用现有 Codex/Responses/Claude/Grok 请求执行器和账号身份配置；
+Grok 按模型目录选择后端协议和地址；自定义检测模型清空后恢复来源默认值，旧客户端省略字段则保留原值。
+Antigravity 走其专属执行器并归一化为 Responses SSE，不套用 Codex 的账号级 429 冷却。
+OAuth 401 先刷新一次；最终仍为 401 时记录鉴权错误并暂停该凭据代际的自动检测，
+即使未启用自适应调度也生效。更新凭据后恢复自动检测，显式手动检测仍可用于验证修复。
 不换号兜底、不注入质量测试的 HTML 指令、不将管理员浏览器身份转发给上游。
 成功判定要求协议成功终态，仅使用最终可见答案，不从思考内容或工具参数取答案。
 

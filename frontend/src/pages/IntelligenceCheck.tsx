@@ -227,6 +227,34 @@ export default function IntelligenceCheck() {
                 />,
                 "保存后生效；关闭时仍可手动检测。",
               )}
+              <div className="col-span-full space-y-3 rounded-lg border p-4">
+                <h3 className="text-sm font-medium">自动检测来源</h3>
+                <p className="text-xs text-muted-foreground">按账号来源独立控制，不按所调用的模型名称分类。保存后停止该来源的新自动检测，手动立即检测不受影响；已有账号的单独开关保留。</p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {([
+                    ["codex", "GPT / Codex"],
+                    ["claude", "Claude"],
+                    ["grok", "Grok"],
+                    ["antigravity", "Antigravity"],
+                  ] as const).map(([channel, label]) => (
+                    <label key={channel} className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-3 py-2 text-sm">
+                      <span>{label}</span>
+                      <Switch aria-label={`${label} 自动降智检测`}
+                        checked={settings.channels?.[channel] ?? (channel === "codex" || channel === "claude")}
+                        onCheckedChange={(value) => change("channels", {
+                          codex: settings.channels?.codex ?? true,
+                          claude: settings.channels?.claude ?? true,
+                          grok: settings.channels?.grok ?? false,
+                          antigravity: settings.channels?.antigravity ?? false,
+                          [channel]: value,
+                        })} />
+                    </label>
+                  ))}
+                </div>
+                <p className="text-xs text-muted-foreground">Antigravity 来源的 Claude 模型仍归 Antigravity。Grok 和 Antigravity 为新增支持，默认关闭，开启前请核对检测模型。</p>
+              </div>
+              {field("Grok 检测模型", <Input value={settings.grok_model ?? "grok-4.5"} onChange={(e) => change("grok_model", e.target.value)} />)}
+              {field("Antigravity 检测模型", <Input value={settings.antigravity_model ?? "gemini-3.8-flash-medium"} onChange={(e) => change("antigravity_model", e.target.value)} />)}
               {field(
                 "GPT / Codex 模型",
                 <Input
@@ -283,7 +311,7 @@ export default function IntelligenceCheck() {
                   checked={settings.new_accounts_enabled}
                   onCheckedChange={(v) => change("new_accounts_enabled", v)}
                 />,
-                "仅支持 Codex 和 Claude；切换分组时，仅同通道新账号默认参与。已有账号不受此选项影响。",
+                "仅对已开启来源的新账号生效；切换分组时，仅同来源新账号默认参与。已有账号不受此选项影响。",
               )}
             </CardContent>
           </Card>
@@ -343,10 +371,10 @@ export default function IntelligenceCheck() {
                       }
                       placeholder="选择分组"
                       options={groups
-                        .filter(g => !g.channel || g.channel === "codex" || g.channel === "claude")
+                        .filter(g => !g.channel || ["codex", "claude", "grok", "antigravity"].includes(g.channel))
                         .map(g => ({
                           value: String(g.id),
-                          label: `${g.name}（${g.channel === "claude" ? "Claude" : "Codex"}）`,
+                          label: `${g.name}（${({ codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity" } as Record<string, string>)[g.channel ?? "codex"] ?? g.channel}）`,
                         }))}
                     />,
                   )}
