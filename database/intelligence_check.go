@@ -149,7 +149,8 @@ func (db *DB) ensureIntelligenceCheckSchema(ctx context.Context) error {
 			action = `(s.config_json::jsonb)->>'action'`
 			target = `((s.config_json::jsonb)->>'target_group_id')::bigint`
 		}
-		defaultEnabled := `COALESCE((SELECT s.new_accounts_enabled AND (` + db.intelligenceEligibleSQL() + `) AND
+		channelEnabled := db.intelligenceSourceEnabledSQL("a", "s")
+		defaultEnabled := `COALESCE((SELECT s.new_accounts_enabled AND (` + db.intelligenceEligibleSQL() + `) AND (` + channelEnabled + `) AND
 			(COALESCE(` + action + `,'none')<>'switch_group' OR EXISTS (
 				SELECT 1 FROM account_groups g WHERE g.id=` + target + ` AND LOWER(TRIM(COALESCE(g.channel,'codex')))=` + db.intelligenceChannelExpr() + `))
 			FROM intelligence_check_settings s JOIN accounts a ON a.id=NEW.id WHERE s.id=1),FALSE)`
@@ -209,13 +210,23 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 		if old.Revision != s.Revision {
 			return ErrIntelligenceCheckRevisionConflict
 		}
+		// Old admin clients must not reset the source switches when saving.
+		if s.Channels == nil {
+			s.Channels = old.Channels
+		}
+		if s.GrokModel == "" {
+			s.GrokModel = old.GrokModel
+		}
+		if s.AntigravityModel == "" {
+			s.AntigravityModel = old.AntigravityModel
+		}
 		if s.Action == "switch_group" {
 			channel, err := intelligenceTargetGroupChannel(ctx, tx, s)
 			if err != nil {
 				return err
 			}
 			conflict := &IntelligenceCheckTargetConflictError{TargetGroupID: s.TargetGroupID, TargetGroupChannel: channel}
-			rows, err := tx.QueryContext(ctx, `SELECT a.id,COALESCE(a.name,''),`+db.intelligenceChannelExpr()+`,COUNT(*) OVER () FROM accounts a JOIN intelligence_check_accounts st ON st.account_id=a.id WHERE `+db.intelligenceEligibleSQL()+` AND st.enabled=TRUE AND COALESCE(`+db.intelligenceStateActionExpr("st")+`,'')='' AND `+db.intelligenceChannelExpr()+`<>$1 ORDER BY a.id LIMIT 200`, channel)
+			rows, err := tx.QueryContext(ctx, `SELECT a.id,COALESCE(a.name,''),`+db.intelligenceChannelExpr()+`,COUNT(*) OVER () FROM accounts a JOIN intelligence_check_accounts st ON st.account_id=a.id WHERE `+db.intelligenceEligibleSQL()+` AND `+db.intelligenceEnabledChannelsSQL(s)+` AND st.enabled=TRUE AND COALESCE(`+db.intelligenceStateActionExpr("st")+`,'')='' AND `+db.intelligenceChannelExpr()+`<>$1 ORDER BY a.id LIMIT 200`, channel)
 			if err != nil {
 				return err
 			}
@@ -306,20 +317,49 @@ func (db *DB) intelligenceUpstreamExpr() string {
 	return `LOWER(COALESCE(a.credentials->>'upstream_type',''))`
 }
 func (db *DB) intelligenceChannelExpr() string {
-	return `CASE WHEN ` + db.intelligenceUpstreamExpr() + `='claude' OR LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' ELSE 'codex' END`
+	return `CASE WHEN ` + db.intelligenceUpstreamExpr() + `='antigravity' OR LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN ` + db.intelligenceUpstreamExpr() + `='grok' OR LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN ` + db.intelligenceUpstreamExpr() + `='claude' OR LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' ELSE 'codex' END`
 }
 func (db *DB) intelligenceEligibleSQL() string {
-	return `a.status<>'deleted' AND COALESCE(a.error_message,'')<>'deleted' AND ` + db.intelligenceUpstreamExpr() + ` NOT IN ('grok','antigravity') AND LOWER(COALESCE(a.platform,'openai')) NOT IN ('xai','grok','antigravity','google')`
+	return `a.status<>'deleted' AND COALESCE(a.error_message,'')<>'deleted'`
 }
 
-// intelligenceAutomaticSQL admits scheduled checks only for accounts that opted
-// in and are not manually disabled. Manual checks bypass both switches.
+// Use the proposed (not yet persisted) settings for target-group validation.
+func (db *DB) intelligenceEnabledChannelsSQL(settings ic.Settings) string {
+	channels := []string{}
+	for _, channel := range []string{"codex", "claude", "grok", "antigravity"} {
+		if settings.ChannelEnabled(channel) {
+			channels = append(channels, "'"+channel+"'")
+		}
+	}
+	if len(channels) == 0 {
+		return "FALSE"
+	}
+	return db.intelligenceChannelExpr() + " IN (" + strings.Join(channels, ",") + ")"
+}
+
+// intelligenceSourceEnabledSQL uses only fixed source names and trusted SQL
+// aliases. Defaults preserve the original Codex/Claude scheduling behavior.
+func (db *DB) intelligenceSourceEnabledSQL(account, config string) string {
+	channel := strings.ReplaceAll(db.intelligenceChannelExpr(), "a.", account+".")
+	query := "CASE " + channel
+	for _, name := range []string{"codex", "claude", "grok", "antigravity"} {
+		value := "json_extract(" + config + ".config_json,'$.channels." + name + "')"
+		if !db.isSQLite() {
+			value = "((" + config + ".config_json::jsonb)->'channels'->>'" + name + "')::boolean"
+		}
+		query += fmt.Sprintf(" WHEN '%s' THEN COALESCE(%s,%t)", name, value, name == "codex" || name == "claude")
+	}
+	return query + " ELSE FALSE END"
+}
+
+// intelligenceAutomaticSQL combines account opt-in, source selection and the
+// credential-generation fence. Manual checks bypass automatic admission.
 func (db *DB) intelligenceAutomaticSQL(account, state string) string {
 	blocked := "(" + state + ".state_json::jsonb->>'blocked_credential_generation')::bigint"
 	if db.isSQLite() {
 		blocked = "json_extract(" + state + ".state_json,'$.blocked_credential_generation')"
 	}
-	return state + `.enabled=TRUE AND COALESCE(` + account + `.enabled,TRUE)=TRUE AND (` + blocked + ` IS NULL OR ` + blocked + `<>COALESCE(` + account + `.credential_generation,1))`
+	return state + `.enabled=TRUE AND COALESCE(` + account + `.enabled,TRUE)=TRUE AND (` + blocked + ` IS NULL OR ` + blocked + `<>COALESCE(` + account + `.credential_generation,1)) AND (SELECT ` + db.intelligenceSourceEnabledSQL(account, "source_config") + ` FROM intelligence_check_settings source_config WHERE id=1)`
 }
 func intelligencePage(offset, limit int) (int, int) {
 	if offset < 0 {
@@ -403,7 +443,7 @@ func (db *DB) ListIntelligenceCheckAccounts(ctx context.Context, f IntelligenceC
 		if e != nil {
 			return nil, 0, e
 		}
-		if a.Enabled && a.OwnedAction == "" && settings.Action == "switch_group" {
+		if a.Enabled && settings.ChannelEnabled(a.Channel) && a.OwnedAction == "" && settings.Action == "switch_group" {
 			if targetError != "" {
 				a.ConfigError = targetError
 			} else if a.Channel != targetChannel {
@@ -533,8 +573,8 @@ func intelligenceTargetGroupChannel(ctx context.Context, q intelligenceQueryRowe
 		return "", err
 	}
 	channel = strings.ToLower(strings.TrimSpace(channel))
-	if channel != "codex" && channel != "claude" {
-		return "", fmt.Errorf("%w: target must belong to Codex or Claude", ErrIntelligenceCheckTargetGroup)
+	if channel != "codex" && channel != "claude" && channel != "grok" && channel != "antigravity" {
+		return "", fmt.Errorf("%w: unsupported target channel", ErrIntelligenceCheckTargetGroup)
 	}
 	return channel, nil
 }

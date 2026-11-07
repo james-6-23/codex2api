@@ -76,11 +76,7 @@ func intelligenceCheckSnapshot(s ic.Settings, a IntelligenceCheckAccount, source
 	if !found {
 		return IntelligenceCheckRun{}, errIntelligenceNoEnabledQuestion
 	}
-	model, effort := s.GPTModel, s.ReasoningEffort
-	if a.Channel == "claude" {
-		model = s.ClaudeModel
-		effort = ""
-	}
+	model, effort := s.ModelForChannel(a.Channel)
 	snapshot := s
 	snapshot.Questions = nil
 	r := IntelligenceCheckRun{CredentialGeneration: a.CredentialGeneration, AccountID: a.AccountID, AccountName: a.AccountName, Channel: a.Channel, Source: source, Status: "queued", ConfigRevision: s.Revision, ManualRevision: a.ManualRevision, Model: model, ReasoningEffort: effort, JudgeMode: s.JudgeMode, Question: question, Settings: snapshot, CreatedAt: created.UTC()}
@@ -271,7 +267,7 @@ func (db *DB) ClaimIntelligenceCheck(ctx context.Context, owner string, now time
 				continue
 			}
 
-			if r.Source == "automatic" && (!s.Enabled || !a.Enabled || !a.ManualEnabled) {
+			if r.Source == "automatic" && (!s.Enabled || !a.Enabled || !a.ManualEnabled || !s.ChannelEnabled(a.Channel)) {
 				continue
 			}
 			if minimum := time.Duration(r.Settings.TimeoutSeconds+30) * time.Second; lease < minimum {
@@ -599,7 +595,7 @@ func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64
 		automaticEnabled = `json_extract(config_json,'$.enabled')`
 	}
 	active := `r.status='running' OR (r.status='queued' AND (` + db.intelligenceJSONField("source") + `='manual' OR (` + db.intelligenceAutomaticSQL("acc", "a") + ` AND (SELECT ` + automaticEnabled + ` FROM intelligence_check_settings WHERE id=1))))`
-	rows, err := db.conn.QueryContext(ctx, `SELECT a.account_id,a.enabled,a.quality_paused,a.state_json,a.next_due_ms,COALESCE(acc.credential_generation,1),(COALESCE(acc.enabled,TRUE) AND (SELECT `+automaticEnabled+` FROM intelligence_check_settings WHERE id=1)),COALESCE(r.id,0),COALESCE(r.status,'') FROM intelligence_check_accounts a JOIN accounts acc ON acc.id=a.account_id LEFT JOIN intelligence_check_runs r ON r.account_id=a.account_id AND r.status IN ('queued','running') AND (`+active+`) WHERE a.account_id IN (`+ph+`)`, args...)
+	rows, err := db.conn.QueryContext(ctx, `SELECT a.account_id,a.enabled,a.quality_paused,a.state_json,a.next_due_ms,COALESCE(acc.credential_generation,1),(COALESCE(acc.enabled,TRUE) AND (SELECT `+automaticEnabled+` AND `+db.intelligenceSourceEnabledSQL("acc", "intelligence_check_settings")+` FROM intelligence_check_settings WHERE id=1)),COALESCE(r.id,0),COALESCE(r.status,'') FROM intelligence_check_accounts a JOIN accounts acc ON acc.id=a.account_id LEFT JOIN intelligence_check_runs r ON r.account_id=a.account_id AND r.status IN ('queued','running') AND (`+active+`) WHERE a.account_id IN (`+ph+`)`, args...)
 	if err != nil {
 		return nil, err
 	}

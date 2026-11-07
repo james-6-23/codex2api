@@ -170,15 +170,7 @@ func (h *Handler) CreateIntelligenceRuns(c *gin.Context) {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("账号 %d 不在运行时池中", id)})
 			return
 		}
-		if account.IsGrokAPI() || account.IsAntigravityAPI() {
-			c.JSON(400, gin.H{"error": "该渠道暂不支持降智检测"})
-			return
-		}
-		model, effort := settings.GPTModel, settings.ReasoningEffort
-		if account.IsClaudeOAuth() {
-			model = settings.ClaudeModel
-			effort = ""
-		}
+		model, effort := settings.ModelForChannel(intelligenceAccountChannel(account))
 		if err = h.validateQualityTestForAccount(c.Request.Context(), account, qualityTestRequest{Model: model, ReasoningEffort: effort}); err != nil {
 			c.JSON(400, gin.H{"error": fmt.Sprintf("账号 %d: %s", id, err)})
 			return

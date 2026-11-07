@@ -19,28 +19,31 @@ type Question struct {
 	Enabled        bool   `json:"enabled"`
 }
 type Settings struct {
-	AdaptiveEnabled        bool       `json:"adaptive_enabled"`
-	PauseInitialSeconds    int        `json:"pause_initial_seconds"`
-	PauseMaxSeconds        int        `json:"pause_max_seconds"`
-	RecoveryInitialSeconds int        `json:"recovery_initial_seconds"`
-	RecoveryMinSeconds     int        `json:"recovery_min_seconds"`
-	Revision               int64      `json:"revision"`
-	Enabled                bool       `json:"enabled"`
-	GPTModel               string     `json:"gpt_model"`
-	ClaudeModel            string     `json:"claude_model"`
-	ReasoningEffort        string     `json:"reasoning_effort"`
-	JudgeMode              string     `json:"judge_mode"`
-	IntervalSeconds        int        `json:"interval_seconds"`
-	RetrySeconds           int        `json:"retry_seconds"`
-	TimeoutSeconds         int        `json:"timeout_seconds"`
-	Concurrency            int        `json:"concurrency"`
-	Retention              int        `json:"retention"`
-	NewAccountsEnabled     bool       `json:"new_accounts_enabled"`
-	Action                 string     `json:"action"`
-	DegradeThreshold       int        `json:"degrade_threshold"`
-	RecoverThreshold       int        `json:"recover_threshold"`
-	TargetGroupID          int64      `json:"target_group_id"`
-	Questions              []Question `json:"questions"`
+	Channels               map[string]bool `json:"channels,omitempty"`
+	GrokModel              string          `json:"grok_model,omitempty"`
+	AntigravityModel       string          `json:"antigravity_model,omitempty"`
+	AdaptiveEnabled        bool            `json:"adaptive_enabled"`
+	PauseInitialSeconds    int             `json:"pause_initial_seconds"`
+	PauseMaxSeconds        int             `json:"pause_max_seconds"`
+	RecoveryInitialSeconds int             `json:"recovery_initial_seconds"`
+	RecoveryMinSeconds     int             `json:"recovery_min_seconds"`
+	Revision               int64           `json:"revision"`
+	Enabled                bool            `json:"enabled"`
+	GPTModel               string          `json:"gpt_model"`
+	ClaudeModel            string          `json:"claude_model"`
+	ReasoningEffort        string          `json:"reasoning_effort"`
+	JudgeMode              string          `json:"judge_mode"`
+	IntervalSeconds        int             `json:"interval_seconds"`
+	RetrySeconds           int             `json:"retry_seconds"`
+	TimeoutSeconds         int             `json:"timeout_seconds"`
+	Concurrency            int             `json:"concurrency"`
+	Retention              int             `json:"retention"`
+	NewAccountsEnabled     bool            `json:"new_accounts_enabled"`
+	Action                 string          `json:"action"`
+	DegradeThreshold       int             `json:"degrade_threshold"`
+	RecoverThreshold       int             `json:"recover_threshold"`
+	TargetGroupID          int64           `json:"target_group_id"`
+	Questions              []Question      `json:"questions"`
 }
 
 // CandyPrompt is the built-in reasoning check. Keep the no-tools/no-network
@@ -51,7 +54,49 @@ const CandyPrompt = "不允许调用工具和联网。在一个黑色的袋子�
 func DefaultSettings() Settings {
 	return Settings{PauseInitialSeconds: 1800, PauseMaxSeconds: 172800, RecoveryInitialSeconds: 300, RecoveryMinSeconds: 120, Revision: 1, GPTModel: "gpt-6-astra", ClaudeModel: "claude-sonnet-4-6", ReasoningEffort: "high", JudgeMode: "answer", IntervalSeconds: 300, RetrySeconds: 60, TimeoutSeconds: 180, Concurrency: 4, Retention: 200, NewAccountsEnabled: true, Action: "none", DegradeThreshold: 2, RecoverThreshold: 1, Questions: []Question{{ID: "candy", Name: "糖果配对", Prompt: CandyPrompt, ExpectedAnswer: "21", MatchMode: "exact", MaxDurationMS: 20000, Enabled: true}}}
 }
+
+// ChannelEnabled reports whether automatic checks include this account source.
+// Missing fields retain legacy behavior; newly supported sources are opt-in.
+func (s Settings) ChannelEnabled(channel string) bool {
+	if value, exists := s.Channels[channel]; exists {
+		return value
+	}
+	return channel == "codex" || channel == "claude"
+}
+
+// ModelForChannel returns the saved source model and supported reasoning effort.
+func (s Settings) ModelForChannel(channel string) (string, string) {
+	switch channel {
+	case "claude":
+		return s.ClaudeModel, ""
+	case "grok":
+		if s.GrokModel != "" {
+			return s.GrokModel, ""
+		}
+		return "grok-4.5", ""
+	case "antigravity":
+		if s.AntigravityModel != "" {
+			return s.AntigravityModel, ""
+		}
+		return "gemini-3.8-flash-medium", ""
+	default:
+		return s.GPTModel, s.ReasoningEffort
+	}
+}
+
 func ValidateSettings(s Settings) error {
+	for channel := range s.Channels {
+		switch channel {
+		case "codex", "claude", "grok", "antigravity":
+		default:
+			return fmt.Errorf("unknown intelligence check channel: %s", channel)
+		}
+	}
+	for _, model := range []string{s.GrokModel, s.AntigravityModel} {
+		if len(model) > 255 {
+			return fmt.Errorf("model too long")
+		}
+	}
 	s = AdaptiveDefaults(s)
 	if s.PauseInitialSeconds < 1 || s.PauseMaxSeconds < s.PauseInitialSeconds || s.PauseMaxSeconds > 30*86400 || s.RecoveryMinSeconds < 1 || s.RecoveryInitialSeconds < s.RecoveryMinSeconds || s.RecoveryInitialSeconds > s.PauseInitialSeconds {
 		return fmt.Errorf("invalid adaptive check intervals")
