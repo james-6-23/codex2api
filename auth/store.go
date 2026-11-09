@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12571,6 +12573,8 @@ const (
 	antigravityPendingRevalidationAccountCredentialKey = "antigravity_pending_revalidation_account_id"
 )
 
+// antigravityRowNeedsIdentityRevalidation 判断持久化账号行是否因换票后 /userinfo 未能
+// 完成身份复验而处于待复验隔离状态（且非永久刷新失败）。
 func antigravityRowNeedsIdentityRevalidation(row *database.AccountRow) bool {
 	if row == nil {
 		return false
@@ -12585,6 +12589,7 @@ func antigravityRowNeedsIdentityRevalidation(row *database.AccountRow) bool {
 	return true
 }
 
+// antigravityPriorSubjectID 提取账号在进入待复验隔离前已确认的 Google 主体 ID。
 func antigravityPriorSubjectID(row *database.AccountRow) string {
 	if row == nil {
 		return ""
@@ -12593,6 +12598,50 @@ func antigravityPriorSubjectID(row *database.AccountRow) string {
 		row.GetCredential("account_id"),
 		row.GetCredential(antigravityPendingRevalidationAccountCredentialKey),
 	)
+}
+
+// antigravitySubjectCredentialFamilyID 按 Google 主体 ID (sub) 计算标准凭据家族哈希。
+func antigravitySubjectCredentialFamilyID(profileID string) string {
+	profileID = strings.TrimSpace(profileID)
+	if profileID == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte("antigravity-credential-v1\x00google-sub\x00" + profileID))
+	return "ag_" + hex.EncodeToString(sum[:])
+}
+
+// antigravityRowMatchesSubjectFamily 判断账号持久化的 credential_family_id 是否已经
+// 绑定到指定的 Google 主体 profileID。
+func antigravityRowMatchesSubjectFamily(row *database.AccountRow, profileID string) bool {
+	if row == nil {
+		return false
+	}
+	expected := antigravitySubjectCredentialFamilyID(profileID)
+	if expected == "" {
+		return false
+	}
+	familyID := firstNonEmpty(row.CredentialFamilyID, row.GetCredential("credential_family_id"))
+	return strings.EqualFold(familyID, expected)
+}
+
+// antigravityIdentityTransitionTarget 判定当前同步结果是否发生了跨主体迁移或无法确认
+// 先前主体，返回需要记录的原主体描述与是否需要转入管理端身份同步隔离。
+func antigravityIdentityTransitionTarget(row *database.AccountRow, nextID string) (string, bool) {
+	nextID = strings.TrimSpace(nextID)
+	if nextID == "" {
+		return "", false
+	}
+	previousID := antigravityPriorSubjectID(row)
+	if previousID == "" && antigravityRowMatchesSubjectFamily(row, nextID) {
+		previousID = nextID
+	}
+	if previousID != "" && previousID != nextID {
+		return previousID, true
+	}
+	if previousID == "" && antigravityRowNeedsIdentityRevalidation(row) {
+		return "unknown", true
+	}
+	return previousID, false
 }
 
 func antigravityRefreshCredentialUpdates(row *database.AccountRow, result AntigravitySyncResult, syncErr error) (map[string]any, error) {
@@ -12613,12 +12662,12 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 	}
 	previousID := antigravityPriorSubjectID(row)
 	nextID := strings.TrimSpace(result.Profile.ID)
-	if previousID != "" && nextID != "" && previousID != nextID {
+	if priorLabel, transitioned := antigravityIdentityTransitionTarget(row, nextID); transitioned {
 		// A rotated RT must not be lost, but it is equally unsafe to publish the
 		// new principal under the old project/catalog. Persist the new token
 		// generation in a quarantined shape; the administrative identity sync can
 		// then establish the replacement family and authoritative snapshots.
-		transitionErr := fmt.Sprintf("Antigravity refresh changed Google principal from %s to %s; administrative identity sync required", previousID, nextID)
+		transitionErr := fmt.Sprintf("Antigravity refresh changed Google principal from %s to %s; administrative identity sync required", priorLabel, nextID)
 		updates["account_id"] = nextID
 		updates[antigravityPendingRevalidationAccountCredentialKey] = ""
 		updates["email"] = strings.TrimSpace(result.Profile.Email)
@@ -13023,9 +13072,7 @@ func (s *Store) refreshAntigravityAccountDurable(ctx context.Context, acc *Accou
 			}
 			criticalCtx := lease.CriticalContext()
 			result, syncErr := client.Sync(criticalCtx, credential)
-			priorSubject := antigravityPriorSubjectID(lockedRow)
-			nextSubject := strings.TrimSpace(result.Profile.ID)
-			principalChanged := priorSubject != "" && nextSubject != "" && priorSubject != nextSubject
+			_, principalChanged := antigravityIdentityTransitionTarget(lockedRow, result.Profile.ID)
 			if syncErr != nil && !antigravityCredentialRotated(lockedRow, result.Credential) && !principalChanged {
 				if isNonRetryable(syncErr) {
 					return s.persistAntigravityPermanentRefreshFailure(criticalCtx, acc, lockedRow, syncErr)

@@ -893,6 +893,9 @@ const (
 	antigravityProfileRetryBaseDelay = 200 * time.Millisecond
 )
 
+// isTransientAntigravityTransportError 判定 err 是否为收到 HTTP 响应前的瞬时传输层
+// 错误（*url.Error，且非调用方 Context 取消或超时）。HTTP 状态码错误、超大响应体与
+// JSON 解码错误均不属于传输层错误，不触发重试。
 func isTransientAntigravityTransportError(err error) bool {
 	if err == nil {
 		return false
@@ -900,8 +903,8 @@ func isTransientAntigravityTransportError(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	var httpErr *antigravityHTTPError
-	return !errors.As(err, &httpErr)
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
 }
 
 func (c *AntigravityClient) fetchProfile(ctx context.Context, accessToken string) (AntigravityProfile, error) {
