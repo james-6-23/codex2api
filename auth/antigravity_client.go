@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -894,13 +896,20 @@ const (
 )
 
 // isTransientAntigravityTransportError 判定 err 是否为收到 HTTP 响应前的瞬时传输层
-// 错误（*url.Error，且非调用方 Context 取消或超时）。HTTP 状态码错误、超大响应体与
-// JSON 解码错误均不属于传输层错误，不触发重试。
+// 错误（*url.Error，且非调用方 Context 取消、超时或永久性 TLS 证书校验失败）。
+// HTTP 状态码错误、超大响应体与 JSON 解码错误均不属于传输层错误，不触发重试。
 func isTransientAntigravityTransportError(err error) bool {
 	if err == nil {
 		return false
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var certVerifyErr *tls.CertificateVerificationError
+	var unknownAuthErr x509.UnknownAuthorityError
+	var certInvalidErr x509.CertificateInvalidError
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &certVerifyErr) || errors.As(err, &unknownAuthErr) || errors.As(err, &certInvalidErr) || errors.As(err, &hostnameErr) {
 		return false
 	}
 	var urlErr *url.Error

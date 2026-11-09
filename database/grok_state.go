@@ -840,6 +840,9 @@ func (db *DB) UpdateAccountCredentialsCAS(ctx context.Context, accountID, expect
 			return nil
 		}
 		merged := mergeCredentialMaps(decodeCredentials(raw), updates)
+		if _, explicit := updates["antigravity_pending_revalidation_account_id"]; !explicit {
+			delete(merged, "antigravity_pending_revalidation_account_id")
+		}
 		familyID = strings.TrimSpace(familyID)
 		if familyID == "" {
 			familyID = credentialFamilyCandidate(merged)

@@ -12589,10 +12589,27 @@ func antigravityRowNeedsIdentityRevalidation(row *database.AccountRow) bool {
 	return true
 }
 
-// antigravityPriorSubjectID 提取账号在进入待复验隔离前已确认的 Google 主体 ID。
+// antigravityRowHasPrincipalTransitionFence 判断持久化账号行是否正处于跨 Google 主体
+// 变更隔离状态（需管理端执行身份替换同步）。
+func antigravityRowHasPrincipalTransitionFence(row *database.AccountRow) bool {
+	if row == nil {
+		return false
+	}
+	syncErr := strings.ToLower(strings.TrimSpace(row.GetCredential("antigravity_sync_error")))
+	return strings.Contains(syncErr, "changed google principal")
+}
+
+// antigravityPriorSubjectID 提取账号在进入待复验或跨主体隔离前已确认的原始 Google 主体 ID。
+// 当账号处于待复验或跨主体隔离状态时，优先读取 antigravity_pending_revalidation_account_id
+// （含 "unknown" 哨兵），避免隔离期间写入的临时 account_id 在再次刷新时自证通过。
 func antigravityPriorSubjectID(row *database.AccountRow) string {
 	if row == nil {
 		return ""
+	}
+	if antigravityRowNeedsIdentityRevalidation(row) || antigravityRowHasPrincipalTransitionFence(row) {
+		if pending := strings.TrimSpace(row.GetCredential(antigravityPendingRevalidationAccountCredentialKey)); pending != "" {
+			return pending
+		}
 	}
 	return firstNonEmpty(
 		row.GetCredential("account_id"),
@@ -12632,13 +12649,16 @@ func antigravityIdentityTransitionTarget(row *database.AccountRow, nextID string
 		return "", false
 	}
 	previousID := antigravityPriorSubjectID(row)
-	if previousID == "" && antigravityRowMatchesSubjectFamily(row, nextID) {
+	if (previousID == "" || previousID == "unknown") && antigravityRowMatchesSubjectFamily(row, nextID) {
 		previousID = nextID
+	}
+	if previousID == "unknown" {
+		return "unknown", true
 	}
 	if previousID != "" && previousID != nextID {
 		return previousID, true
 	}
-	if previousID == "" && antigravityRowNeedsIdentityRevalidation(row) {
+	if previousID == "" && (antigravityRowNeedsIdentityRevalidation(row) || antigravityRowHasPrincipalTransitionFence(row)) {
 		return "unknown", true
 	}
 	return previousID, false
@@ -12669,7 +12689,7 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 		// then establish the replacement family and authoritative snapshots.
 		transitionErr := fmt.Sprintf("Antigravity refresh changed Google principal from %s to %s; administrative identity sync required", priorLabel, nextID)
 		updates["account_id"] = nextID
-		updates[antigravityPendingRevalidationAccountCredentialKey] = ""
+		updates[antigravityPendingRevalidationAccountCredentialKey] = priorLabel
 		updates["email"] = strings.TrimSpace(result.Profile.Email)
 		updates["name"] = strings.TrimSpace(result.Profile.Name)
 		updates["avatar_url"] = strings.TrimSpace(result.Profile.Picture)
@@ -12693,7 +12713,7 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 			// prior subject's project, catalog, quota, or capability proof.
 			quarantineErr := antigravityIdentityRevalidationErrorPrefix + ": " + syncErr.Error()
 			updates["account_id"] = ""
-			updates[antigravityPendingRevalidationAccountCredentialKey] = previousID
+			updates[antigravityPendingRevalidationAccountCredentialKey] = firstNonEmpty(previousID, "unknown")
 			updates["email"] = ""
 			updates["name"] = ""
 			updates["avatar_url"] = ""
@@ -13122,6 +13142,11 @@ func (s *Store) refreshAntigravityAccountDurable(ctx context.Context, acc *Accou
 				s.projectAntigravityManualAccessFence(criticalCtx, current)
 			}
 			if syncErr != nil {
+				if principalChanged {
+					if reason, _ := antigravityPersistedHardFence(current); reason != "" {
+						return fmt.Errorf("%s: %w", reason, syncErr)
+					}
+				}
 				return syncErr
 			}
 			if reason, _ := antigravityPersistedHardFence(current); reason != "" {

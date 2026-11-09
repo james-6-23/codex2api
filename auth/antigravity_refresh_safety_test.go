@@ -800,17 +800,15 @@ func TestRefreshAntigravityAccountRetriesTransientUserInfoTransportFailure(t *te
 		}
 	})
 
-	t.Run("does not retry when context is canceled", func(t *testing.T) {
+	t.Run("does not retry when request fails due to canceled context", func(t *testing.T) {
 		var userinfoCalls atomic.Int32
+		var sleepCalls atomic.Int32
+		ctx, cancel := context.WithCancel(context.Background())
 		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/userinfo" {
 				userinfoCalls.Add(1)
-				if hj, ok := w.(http.Hijacker); ok {
-					if conn, _, err := hj.Hijack(); err == nil {
-						_ = conn.Close()
-						return
-					}
-				}
+				cancel()
+				<-r.Context().Done()
 			}
 		}))
 		defer server.Close()
@@ -819,16 +817,41 @@ func TestRefreshAntigravityAccountRetriesTransientUserInfoTransportFailure(t *te
 		if err != nil {
 			t.Fatal(err)
 		}
-		ctx, cancel := context.WithCancel(context.Background())
 		client.sleep = func(context.Context, time.Duration) error {
-			cancel()
-			return context.Canceled
+			sleepCalls.Add(1)
+			return nil
 		}
 		if _, err := client.fetchProfile(ctx, "tok"); err == nil {
-			t.Fatal("expected error when context is canceled during retry sleep")
+			t.Fatal("expected error when request context is canceled")
 		}
 		if got := userinfoCalls.Load(); got != 1 {
-			t.Fatalf("userinfo calls = %d, want 1 after cancellation", got)
+			t.Fatalf("userinfo calls = %d, want 1", got)
+		}
+		if got := sleepCalls.Load(); got != 0 {
+			t.Fatalf("sleep calls = %d, want 0 for canceled request error", got)
+		}
+	})
+
+	t.Run("does not retry permanent TLS certificate verification errors", func(t *testing.T) {
+		var sleepCalls atomic.Int32
+		tlsServer := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer tlsServer.Close()
+		useAntigravityTestEndpoints(t, tlsServer.URL)
+		client, err := NewAntigravityClient("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		client.sleep = func(context.Context, time.Duration) error {
+			sleepCalls.Add(1)
+			return nil
+		}
+		if _, err := client.fetchProfile(context.Background(), "tok"); err == nil {
+			t.Fatal("expected TLS certificate verification error")
+		}
+		if got := sleepCalls.Load(); got != 0 {
+			t.Fatalf("sleep calls = %d, want 0 for permanent TLS certificate error", got)
 		}
 	})
 }
@@ -908,6 +931,20 @@ func TestRefreshAntigravityAccountDetectsPrincipalTransitionAfterRevalidationQua
 	if unknownRow.GetCredential("project_id") != "" || unknownAcc.IsAvailable() {
 		t.Fatalf("unknown prior subject should remain quarantined: row=%#v available=%t", unknownRow.Credentials, unknownAcc.IsAvailable())
 	}
+	// 再次触发刷新时，不得将上一次写入的 account_id 当作已验证原主体自动放行。
+	if err := unknownStore.RefreshAntigravityAccount(context.Background(), unknownAcc); err == nil || !strings.Contains(strings.ToLower(err.Error()), "changed google principal") {
+		t.Fatalf("repeated refresh on unknown prior subject error = %v, want persistent principal transition fence", err)
+	}
+	if unknownAcc.IsAvailable() {
+		t.Fatal("unknown prior subject became available on repeated refresh without identity replacement")
+	}
+	// 同理，已知原主体发生跨主体变更后，再次刷新同样必须保持围栏不自愈。
+	if err := store.RefreshAntigravityAccount(context.Background(), account); err == nil || !strings.Contains(strings.ToLower(err.Error()), "changed google principal") {
+		t.Fatalf("repeated refresh after subject-1 -> subject-2 transition error = %v, want persistent principal transition fence", err)
+	}
+	if account.IsAvailable() {
+		t.Fatal("transitioned account became available on repeated refresh without identity replacement")
+	}
 
 	legacyStore, legacyDB, legacyAcc, legacyID := newAntigravityRefreshTestAccount(t, map[string]any{
 		"account_id":             "",
@@ -925,5 +962,32 @@ func TestRefreshAntigravityAccountDetectsPrincipalTransitionAfterRevalidationQua
 	}
 	if legacyRow.GetCredential("account_id") != "subject-2" || legacyRow.GetCredential("project_id") == "" || !legacyAcc.IsAvailable() {
 		t.Fatalf("legacy quarantined row did not recover cleanly: row=%#v available=%t", legacyRow.Credentials, legacyAcc.IsAvailable())
+	}
+
+	// 当发生主体变更且后续 /quota 同时失败时，返回值必须包含主体变更隔离原因并保留配额错误。
+	quotaFailServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/token":
+			_, _ = io.WriteString(w, `{"access_token":"access-subject-3","refresh_token":"refresh-subject-3","expires_in":3600}`)
+		case "/userinfo":
+			_, _ = io.WriteString(w, `{"id":"subject-3","email":"three@example.com","verified_email":true}`)
+		case "/load":
+			_, _ = io.WriteString(w, `{"cloudaicompanionProject":"project-3","paidTier":{"name":"Pro"}}`)
+		case "/quota":
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"quota backend down"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer quotaFailServer.Close()
+	useAntigravityTestEndpoints(t, quotaFailServer.URL)
+	qfStore, _, qfAcc, _ := newAntigravityRefreshTestAccount(t, map[string]any{
+		"antigravity_client_id": "client", "antigravity_client_secret": "secret",
+	})
+	qfErr := qfStore.RefreshAntigravityAccount(context.Background(), qfAcc)
+	if qfErr == nil || !strings.Contains(strings.ToLower(qfErr.Error()), "changed google principal") || !strings.Contains(strings.ToLower(qfErr.Error()), "quota backend down") {
+		t.Fatalf("expected combined principal transition and quota error, got: %v", qfErr)
 	}
 }
