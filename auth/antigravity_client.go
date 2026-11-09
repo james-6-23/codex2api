@@ -3,6 +3,8 @@ package auth
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -888,16 +890,58 @@ func (c *AntigravityClient) oauthCandidates(credential AntigravityCredential) []
 	return result
 }
 
-func (c *AntigravityClient) fetchProfile(ctx context.Context, accessToken string) (AntigravityProfile, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoints.UserInfoURL, nil)
-	if err != nil {
-		return AntigravityProfile{}, err
+const (
+	antigravityProfileFetchAttempts  = 3
+	antigravityProfileRetryBaseDelay = 200 * time.Millisecond
+)
+
+// isTransientAntigravityTransportError 判定 err 是否为收到 HTTP 响应前的瞬时传输层
+// 错误（*url.Error，且非调用方 Context 取消、超时或永久性 TLS 证书校验失败）。
+// HTTP 状态码错误、超大响应体与 JSON 解码错误均不属于传输层错误，不触发重试。
+func isTransientAntigravityTransportError(err error) bool {
+	if err == nil {
+		return false
 	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("User-Agent", c.userAgent)
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	var certVerifyErr *tls.CertificateVerificationError
+	var unknownAuthErr x509.UnknownAuthorityError
+	var certInvalidErr x509.CertificateInvalidError
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &certVerifyErr) || errors.As(err, &unknownAuthErr) || errors.As(err, &certInvalidErr) || errors.As(err, &hostnameErr) {
+		return false
+	}
+	var urlErr *url.Error
+	return errors.As(err, &urlErr)
+}
+
+func (c *AntigravityClient) fetchProfile(ctx context.Context, accessToken string) (AntigravityProfile, error) {
 	var profile AntigravityProfile
-	if err := c.doJSON(req, &profile); err != nil {
-		return AntigravityProfile{}, err
+	var lastErr error
+	for attempt := range antigravityProfileFetchAttempts {
+		if attempt > 0 {
+			if err := c.sleepFor(ctx, antigravityProfileRetryBaseDelay*time.Duration(attempt)); err != nil {
+				return AntigravityProfile{}, lastErr
+			}
+		}
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.endpoints.UserInfoURL, nil)
+		if err != nil {
+			return AntigravityProfile{}, err
+		}
+		req.Header.Set("Authorization", "Bearer "+accessToken)
+		req.Header.Set("User-Agent", c.userAgent)
+		profile = AntigravityProfile{}
+		lastErr = c.doJSON(req, &profile)
+		if lastErr == nil {
+			break
+		}
+		if !isTransientAntigravityTransportError(lastErr) {
+			return AntigravityProfile{}, lastErr
+		}
+	}
+	if lastErr != nil {
+		return AntigravityProfile{}, lastErr
 	}
 	profile.Email = strings.TrimSpace(profile.Email)
 	if profile.Email == "" {

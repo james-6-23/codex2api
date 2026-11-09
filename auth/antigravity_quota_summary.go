@@ -84,11 +84,12 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 	account.mu.RLock()
 	dbID := account.DBID
 	projectID := strings.TrimSpace(account.AntigravityProjectID)
+	pendingRevalidation := account.antigravityNeedsIdentityRevalidationLocked()
 	account.mu.RUnlock()
 	if dbID == 0 {
 		return errors.New("antigravity quota summary refresh requires a persisted account id")
 	}
-	if projectID == "" {
+	if projectID == "" && !pendingRevalidation {
 		return fmt.Errorf("Antigravity account %d has no project id for quota summary", dbID)
 	}
 	if kind := account.AntigravityAuthKind(); kind != AntigravityAuthKindOAuth {
@@ -114,7 +115,8 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 	if err != nil {
 		return fmt.Errorf("load Antigravity account %d: %w", dbID, err)
 	}
-	if reason, _ := antigravityPersistedHardFence(row); reason != "" {
+	rowPendingRevalidation := antigravityRowNeedsIdentityRevalidation(row)
+	if reason, _ := antigravityPersistedHardFence(row); reason != "" && !rowPendingRevalidation {
 		return fmt.Errorf("Antigravity account %d carries a durable hard fence: %s", dbID, reason)
 	}
 	// 身份栅栏 fail-closed：OAuth 账号的正常路径必有 credential family，缺 family 属
@@ -131,16 +133,19 @@ func (s *Store) RefreshAntigravityQuotaSummary(ctx context.Context, account *Acc
 		return ErrAntigravityNoUsableProxy
 	}
 
-	// 预检换票（Spec §5.1「必要认证恢复例外」）：存量 AT 已过期或缺失时，直接拿它去
-	// 观测只会恒定 401——线上「调度器正确派发但 summary 全量 401」正是这个形态。换票
+	// 预检换票与待复验恢复（Spec §5.1「必要认证恢复例外」）：存量 AT 已过期/缺失，或上次
+	// 换票后因 /userinfo 瞬时失败处于待复验隔离态时，走安全同步链路完成换票与身份复验。
 	// 失败即返回：不预约、不联网，调度器据错误退避。
-	if account.NeedsRefresh() || strings.TrimSpace(row.GetCredential("access_token")) == "" {
+	if account.NeedsRefresh() || strings.TrimSpace(row.GetCredential("access_token")) == "" || rowPendingRevalidation {
 		if err := s.refreshAntigravityAccountDurable(ctx, account, false); err != nil {
 			return fmt.Errorf("recover Antigravity credential before quota summary account=%d: %w", dbID, err)
 		}
 		if row, familyScope, err = s.reloadAntigravityQuotaSummaryRow(ctx, dbID); err != nil {
 			return err
 		}
+	}
+	if strings.TrimSpace(row.GetCredential("project_id")) == "" {
+		return fmt.Errorf("Antigravity account %d has no project id for quota summary", dbID)
 	}
 
 	interval := time.Duration(ConfiguredAntigravitySettings().GetQuotaRefreshIntervalMinutes()) * time.Minute

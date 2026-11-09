@@ -598,3 +598,24 @@ func TestAntigravityQuotaSchedulerResetsPendingOnReenable(t *testing.T) {
 
 // ptr 返回指向给定布尔值的指针辅助函数。
 func ptr(v bool) *bool { return &v }
+
+func TestAntigravityQuotaSchedulerRetainsPendingIdentityRevalidationAccount(t *testing.T) {
+	previous := ConfiguredAntigravitySettings()
+	minutes := 60
+	SetConfiguredAntigravitySettings(AntigravitySettings{QuotaRefreshEnabled: ptr(true), QuotaRefreshIntervalMinutes: &minutes})
+	t.Cleanup(func() { SetConfiguredAntigravitySettings(previous) })
+
+	revalidating := antigravityQuotaTestAccount(805)
+	revalidating.AntigravityProjectID = ""
+	revalidating.AntigravityHardBlocked = true
+	revalidating.AntigravityHardBlockReason = antigravityIdentityRevalidationErrorPrefix + ": Get https://www.googleapis.com/oauth2/v2/userinfo: net/http: TLS handshake timeout"
+	revalidating.PermanentRefreshFailures = 0
+
+	h := newAntigravityQuotaHarnessWithPhase(t, 0, true, revalidating)
+	h.start()
+	h.advance(2, 30*time.Minute)
+
+	if got := len(h.callsFor(revalidating.DBID)); got == 0 {
+		t.Fatalf("account pending identity revalidation must remain eligible for scheduled recovery, got %d calls", got)
+	}
+}

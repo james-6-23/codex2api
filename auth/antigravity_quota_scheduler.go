@@ -291,9 +291,10 @@ func (s *antigravityQuotaScheduler) eligible() []*Account {
 		acc.mu.RLock()
 		dbID := acc.DBID
 		projectID := strings.TrimSpace(acc.AntigravityProjectID)
+		pendingRevalidation := acc.antigravityNeedsIdentityRevalidationLocked()
 		isolated := acc.antigravityAccountPermanentlyIsolatedLocked()
 		acc.mu.RUnlock()
-		if dbID == 0 || projectID == "" || isolated {
+		if dbID == 0 || (projectID == "" && !pendingRevalidation) || isolated {
 			continue
 		}
 		eligible = append(eligible, acc)
@@ -315,6 +316,18 @@ func (a *Account) antigravityAccountPermanentlyIsolatedLocked() bool {
 		return false
 	}
 	return a.AntigravityHardBlocked && a.PermanentRefreshFailures >= permanentRefreshFailureTerminalLimit
+}
+
+// antigravityNeedsIdentityRevalidationLocked 判断账号是否因换票后 /userinfo 瞬时失败
+// 处于待复验隔离状态（antigravityIdentityRevalidationErrorPrefix）。这类账号在未完成复验前
+// 清空了 project_id 并挂起硬门禁以阻断线上派发，但并非 RT 谱系永久断裂，必须保留在后台巡检
+// 与 ComputeBackoff 退避队列中以自动完成身份复验与恢复。调用方必须持有该账号的读锁。
+func (a *Account) antigravityNeedsIdentityRevalidationLocked() bool {
+	if a == nil || a.antigravityAccountPermanentlyIsolatedLocked() {
+		return false
+	}
+	return a.AntigravityHardBlocked &&
+		strings.HasPrefix(strings.TrimSpace(a.AntigravityHardBlockReason), antigravityIdentityRevalidationErrorPrefix)
 }
 
 // nextDue 计算全部资格账号的下一次候选时刻（名义槽位叠加失败退避），返回全局最早
