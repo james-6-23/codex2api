@@ -619,3 +619,64 @@ func TestRefreshAntigravityQuotaSummaryRejectsAccountWithoutFamilyScope(t *testi
 		t.Fatalf("the fail-closed path must not reach the network, summary calls=%d", calls)
 	}
 }
+
+func TestRefreshAntigravityQuotaSummaryRecoversIdentityRevalidationQuarantine(t *testing.T) {
+	const rotatedToken = "access-rotated-quarantined"
+	var failUserinfo atomic.Bool
+	failUserinfo.Store(true)
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/token":
+			_, _ = io.WriteString(w, `{"access_token":"`+rotatedToken+`","refresh_token":"refresh-rotated","expires_in":3600}`)
+		case "/userinfo":
+			if failUserinfo.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"error":"temporary userinfo error"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":"subject-1","email":"user@example.com","verified_email":true}`)
+		case "/load":
+			_, _ = io.WriteString(w, `{"cloudaicompanionProject":"project-recovered","paidTier":{"name":"Pro"}}`)
+		case "/quota":
+			_, _ = io.WriteString(w, `{"models":{"gemini-3.8-flash-high":{"quotaInfo":{"remainingFraction":1}}}}`)
+		case "/summary":
+			_, _ = io.WriteString(w, `{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.95}]}]}`)
+		case "/credits":
+			_, _ = io.WriteString(w, `{"paidTier":{"availableCredits":[]}}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useAntigravityTestEndpoints(t, server.URL)
+
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, map[string]any{
+		"expires_at": time.Now().Add(-time.Hour).UTC().Format(time.RFC3339),
+	})
+	ctx := context.Background()
+
+	if err := store.RefreshAntigravityQuotaSummary(ctx, account); err == nil {
+		t.Fatal("first quota summary refresh should fail when userinfo returns 500")
+	}
+	quarantinedRow, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quarantinedRow.GetCredential("project_id") != "" || !strings.HasPrefix(quarantinedRow.GetCredential("antigravity_sync_error"), antigravityIdentityRevalidationErrorPrefix) || account.IsAvailable() {
+		t.Fatalf("expected account to be in identity revalidation quarantine, row=%#v available=%t", quarantinedRow.Credentials, account.IsAvailable())
+	}
+
+	failUserinfo.Store(false)
+	if err := store.RefreshAntigravityQuotaSummary(ctx, account); err != nil {
+		t.Fatalf("second RefreshAntigravityQuotaSummary should auto-recover quarantined account: %v", err)
+	}
+	recoveredRow, err := db.GetAccountByID(ctx, accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recoveredRow.GetCredential("project_id") != "project-recovered" || recoveredRow.GetCredential("account_id") != "subject-1" || recoveredRow.GetCredential("antigravity_sync_error") != "" || !account.IsAvailable() {
+		t.Fatalf("quarantined account was not fully recovered: row=%#v available=%t", recoveredRow.Credentials, account.IsAvailable())
+	}
+}

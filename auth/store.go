@@ -12566,9 +12566,34 @@ func antigravityCredentialRotated(row *database.AccountRow, credential Antigravi
 }
 
 const (
-	antigravityIdentityRevalidationErrorPrefix    = "Antigravity credential rotated before Google identity could be reverified"
-	antigravityPermanentRefreshErrorCredentialKey = "antigravity_permanent_refresh_error"
+	antigravityIdentityRevalidationErrorPrefix         = "Antigravity credential rotated before Google identity could be reverified"
+	antigravityPermanentRefreshErrorCredentialKey      = "antigravity_permanent_refresh_error"
+	antigravityPendingRevalidationAccountCredentialKey = "antigravity_pending_revalidation_account_id"
 )
+
+func antigravityRowNeedsIdentityRevalidation(row *database.AccountRow) bool {
+	if row == nil {
+		return false
+	}
+	syncErr := strings.TrimSpace(row.GetCredential("antigravity_sync_error"))
+	if !strings.HasPrefix(syncErr, antigravityIdentityRevalidationErrorPrefix) {
+		return false
+	}
+	if permanentErr := strings.TrimSpace(row.GetCredential(antigravityPermanentRefreshErrorCredentialKey)); permanentErr != "" && permanentErr == syncErr {
+		return false
+	}
+	return true
+}
+
+func antigravityPriorSubjectID(row *database.AccountRow) string {
+	if row == nil {
+		return ""
+	}
+	return firstNonEmpty(
+		row.GetCredential("account_id"),
+		row.GetCredential(antigravityPendingRevalidationAccountCredentialKey),
+	)
+}
 
 func antigravityRefreshCredentialUpdates(row *database.AccountRow, result AntigravitySyncResult, syncErr error) (map[string]any, error) {
 	credential := result.Credential
@@ -12586,7 +12611,7 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 	} else {
 		updates["expires_at"] = credential.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	previousID := strings.TrimSpace(row.GetCredential("account_id"))
+	previousID := antigravityPriorSubjectID(row)
 	nextID := strings.TrimSpace(result.Profile.ID)
 	if previousID != "" && nextID != "" && previousID != nextID {
 		// A rotated RT must not be lost, but it is equally unsafe to publish the
@@ -12595,6 +12620,7 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 		// then establish the replacement family and authoritative snapshots.
 		transitionErr := fmt.Sprintf("Antigravity refresh changed Google principal from %s to %s; administrative identity sync required", previousID, nextID)
 		updates["account_id"] = nextID
+		updates[antigravityPendingRevalidationAccountCredentialKey] = ""
 		updates["email"] = strings.TrimSpace(result.Profile.Email)
 		updates["name"] = strings.TrimSpace(result.Profile.Name)
 		updates["avatar_url"] = strings.TrimSpace(result.Profile.Picture)
@@ -12612,12 +12638,13 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 	}
 	if syncErr != nil {
 		profileVerified := result.Profile.VerifiedEmail && strings.TrimSpace(result.Profile.ID) != "" && strings.TrimSpace(result.Profile.Email) != ""
-		if antigravityCredentialRotated(row, credential) && !profileVerified {
+		if (antigravityCredentialRotated(row, credential) && !profileVerified) || antigravityRowNeedsIdentityRevalidation(row) {
 			// A rotating refresh token may belong to a different Google principal.
 			// Keep the newly issued token durable, but never publish it with the
 			// prior subject's project, catalog, quota, or capability proof.
 			quarantineErr := antigravityIdentityRevalidationErrorPrefix + ": " + syncErr.Error()
 			updates["account_id"] = ""
+			updates[antigravityPendingRevalidationAccountCredentialKey] = previousID
 			updates["email"] = ""
 			updates["name"] = ""
 			updates["avatar_url"] = ""
@@ -12649,6 +12676,7 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 		return nil, err
 	}
 	updates["account_id"] = strings.TrimSpace(result.Profile.ID)
+	updates[antigravityPendingRevalidationAccountCredentialKey] = ""
 	updates["email"] = strings.TrimSpace(result.Profile.Email)
 	updates["name"] = strings.TrimSpace(result.Profile.Name)
 	updates["avatar_url"] = strings.TrimSpace(result.Profile.Picture)
@@ -12995,7 +13023,10 @@ func (s *Store) refreshAntigravityAccountDurable(ctx context.Context, acc *Accou
 			}
 			criticalCtx := lease.CriticalContext()
 			result, syncErr := client.Sync(criticalCtx, credential)
-			if syncErr != nil && !antigravityCredentialRotated(lockedRow, result.Credential) {
+			priorSubject := antigravityPriorSubjectID(lockedRow)
+			nextSubject := strings.TrimSpace(result.Profile.ID)
+			principalChanged := priorSubject != "" && nextSubject != "" && priorSubject != nextSubject
+			if syncErr != nil && !antigravityCredentialRotated(lockedRow, result.Credential) && !principalChanged {
 				if isNonRetryable(syncErr) {
 					return s.persistAntigravityPermanentRefreshFailure(criticalCtx, acc, lockedRow, syncErr)
 				}

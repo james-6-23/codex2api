@@ -662,3 +662,101 @@ func TestRefreshAntigravityAccountRemovesRuntimeWhenRotatedCredentialCASFails(t 
 		t.Fatalf("forced CAS failure unexpectedly mutated durable credential: %#v", row.Credentials)
 	}
 }
+
+func TestRefreshAntigravityAccountRetriesTransientUserInfoTransportFailure(t *testing.T) {
+	var userinfoCalls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeAntigravityRefreshFixture(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/token":
+			_, _ = io.WriteString(w, `{"access_token":"access-retry-ok","refresh_token":"refresh-retry-ok","expires_in":3600}`)
+		case "/userinfo":
+			if userinfoCalls.Add(1) == 1 {
+				if hj, ok := w.(http.Hijacker); ok {
+					if conn, _, err := hj.Hijack(); err == nil {
+						_ = conn.Close()
+						return
+					}
+				}
+			}
+			_, _ = io.WriteString(w, `{"id":"subject-1","email":"user@example.com","verified_email":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useAntigravityTestEndpoints(t, server.URL)
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, map[string]any{
+		"antigravity_client_id": "client", "antigravity_client_secret": "secret",
+	})
+
+	if err := store.RefreshAntigravityAccount(context.Background(), account); err != nil {
+		t.Fatalf("RefreshAntigravityAccount should recover from transient userinfo transport drop: %v", err)
+	}
+	if got := userinfoCalls.Load(); got < 2 {
+		t.Fatalf("userinfo calls = %d, want >= 2", got)
+	}
+	row, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.GetCredential("access_token") != "access-retry-ok" || row.GetCredential("account_id") != "subject-1" || row.GetCredential("antigravity_sync_error") != "" || !account.IsAvailable() {
+		t.Fatalf("account was not healthy after transient userinfo retry: row=%#v available=%t", row.Credentials, account.IsAvailable())
+	}
+}
+
+func TestRefreshAntigravityAccountDetectsPrincipalTransitionAfterRevalidationQuarantine(t *testing.T) {
+	var failUserinfo atomic.Bool
+	failUserinfo.Store(true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if writeAntigravityRefreshFixture(w, r) {
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/token":
+			_, _ = io.WriteString(w, `{"access_token":"access-subject-2","refresh_token":"refresh-subject-2","expires_in":3600}`)
+		case "/userinfo":
+			if failUserinfo.Load() {
+				w.WriteHeader(http.StatusInternalServerError)
+				_, _ = io.WriteString(w, `{"error":"temporary identity failure"}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"id":"subject-2","email":"other@example.com","verified_email":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+	useAntigravityTestEndpoints(t, server.URL)
+	store, db, account, accountID := newAntigravityRefreshTestAccount(t, map[string]any{
+		"antigravity_client_id": "client", "antigravity_client_secret": "secret",
+	})
+
+	if err := store.RefreshAntigravityAccount(context.Background(), account); err == nil {
+		t.Fatal("first refresh should fail on userinfo 500")
+	}
+	quarantinedRow, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if quarantinedRow.GetCredential("account_id") != "" || !strings.HasPrefix(quarantinedRow.GetCredential("antigravity_sync_error"), antigravityIdentityRevalidationErrorPrefix) {
+		t.Fatalf("expected quarantine after first refresh: %#v", quarantinedRow.Credentials)
+	}
+
+	failUserinfo.Store(false)
+	err = store.RefreshAntigravityAccount(context.Background(), account)
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "changed google principal") {
+		t.Fatalf("second refresh error = %v, want principal transition quarantine", err)
+	}
+	row, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.GetCredential("project_id") != "" || !strings.Contains(strings.ToLower(row.GetCredential("antigravity_sync_error")), "changed google principal") || account.IsAvailable() {
+		t.Fatalf("principal transition after quarantine was not blocked: row=%#v available=%t", row.Credentials, account.IsAvailable())
+	}
+}
