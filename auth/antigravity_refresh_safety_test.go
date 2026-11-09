@@ -2,7 +2,9 @@ package auth
 
 import (
 	"context"
+	"crypto/tls"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -847,8 +849,10 @@ func TestRefreshAntigravityAccountRetriesTransientUserInfoTransportFailure(t *te
 			sleepCalls.Add(1)
 			return nil
 		}
-		if _, err := client.fetchProfile(context.Background(), "tok"); err == nil {
-			t.Fatal("expected TLS certificate verification error")
+		_, err = client.fetchProfile(context.Background(), "tok")
+		var certVerifyErr *tls.CertificateVerificationError
+		if !errors.As(err, &certVerifyErr) {
+			t.Fatalf("fetchProfile error = %v, want *tls.CertificateVerificationError", err)
 		}
 		if got := sleepCalls.Load(); got != 0 {
 			t.Fatalf("sleep calls = %d, want 0 for permanent TLS certificate error", got)
@@ -983,11 +987,57 @@ func TestRefreshAntigravityAccountDetectsPrincipalTransitionAfterRevalidationQua
 	}))
 	defer quotaFailServer.Close()
 	useAntigravityTestEndpoints(t, quotaFailServer.URL)
-	qfStore, _, qfAcc, _ := newAntigravityRefreshTestAccount(t, map[string]any{
+	qfStore, qfDB, qfAcc, qfID := newAntigravityRefreshTestAccount(t, map[string]any{
 		"antigravity_client_id": "client", "antigravity_client_secret": "secret",
 	})
 	qfErr := qfStore.RefreshAntigravityAccount(context.Background(), qfAcc)
 	if qfErr == nil || !strings.Contains(strings.ToLower(qfErr.Error()), "changed google principal") || !strings.Contains(strings.ToLower(qfErr.Error()), "quota backend down") {
 		t.Fatalf("expected combined principal transition and quota error, got: %v", qfErr)
+	}
+	qfRow, err := qfDB.GetAccountByID(context.Background(), qfID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if qfRow.GetCredential("project_id") != "" || qfAcc.IsAvailable() {
+		t.Fatalf("principal transition was not quarantined: row=%#v available=%t", qfRow.Credentials, qfAcc.IsAvailable())
+	}
+
+	// 已处于 changed Google principal 围栏的账号，若后续换票时 /userinfo 失败，
+	// 不得降级为待复验前缀（防止被后台调度器重新纳入自动复验）。
+	failUserinfo.Store(true)
+	useAntigravityTestEndpoints(t, server.URL)
+	if err := store.RefreshAntigravityAccount(context.Background(), account); err == nil {
+		t.Fatal("expected error when fenced account fails userinfo on rotation")
+	}
+	fencedAfterFail, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.ToLower(fencedAfterFail.GetCredential("antigravity_sync_error")), "changed google principal") {
+		t.Fatalf("principal transition fence was overwritten on userinfo failure: %q", fencedAfterFail.GetCredential("antigravity_sync_error"))
+	}
+
+	// 验证 UpdateAccountCredentialsCAS 无关写入保留待复验原主体，而 ReplaceAccountCredentialsCAS 清除它。
+	if _, applied, err := db.UpdateAccountCredentialsCAS(context.Background(), accountID, fencedAfterFail.CredentialGeneration, map[string]any{"custom_note": "keep-pending"}); err != nil || !applied {
+		t.Fatalf("UpdateAccountCredentialsCAS failed: applied=%t err=%v", applied, err)
+	}
+	afterPartial, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterPartial.GetCredential(antigravityPendingRevalidationAccountCredentialKey); got != "subject-1" {
+		t.Fatalf("UpdateAccountCredentialsCAS lost pending revalidation subject: got %q, want subject-1", got)
+	}
+	if _, applied, err := db.ReplaceAccountCredentialsCAS(context.Background(), accountID, afterPartial.CredentialGeneration, antigravitySubjectCredentialFamilyID("subject-2"), map[string]any{
+		"upstream_type": UpstreamAntigravity, "account_id": "subject-2", "antigravity_sync_error": "",
+	}); err != nil || !applied {
+		t.Fatalf("ReplaceAccountCredentialsCAS failed: applied=%t err=%v", applied, err)
+	}
+	afterReplace, err := db.GetAccountByID(context.Background(), accountID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterReplace.GetCredential(antigravityPendingRevalidationAccountCredentialKey); got != "" {
+		t.Fatalf("ReplaceAccountCredentialsCAS did not clear pending revalidation subject: got %q", got)
 	}
 }

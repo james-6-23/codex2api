@@ -12706,6 +12706,24 @@ func antigravityRefreshCredentialUpdates(row *database.AccountRow, result Antigr
 		return updates, nil
 	}
 	if syncErr != nil {
+		if antigravityRowHasPrincipalTransitionFence(row) {
+			existingFence := strings.TrimSpace(row.GetCredential("antigravity_sync_error"))
+			updates[antigravityPendingRevalidationAccountCredentialKey] = firstNonEmpty(previousID, "unknown")
+			updates["project_id"] = ""
+			updates["plan_type"] = ""
+			updates["models"] = []string{}
+			updates["antigravity_quota"] = ""
+			updates["antigravity_permissions"] = ""
+			updates["antigravity_entitlements"] = ""
+			updates["antigravity_capabilities"] = ""
+			updates["antigravity_capability_last_probe_at"] = ""
+			updates["antigravity_catalog_source"] = ""
+			updates["antigravity_catalog_verified"] = false
+			updates["antigravity_last_synced_at"] = ""
+			updates["antigravity_sync_error"] = existingFence
+			updates["antigravity_sync_warning"] = result.Warning
+			return updates, nil
+		}
 		profileVerified := result.Profile.VerifiedEmail && strings.TrimSpace(result.Profile.ID) != "" && strings.TrimSpace(result.Profile.Email) != ""
 		if (antigravityCredentialRotated(row, credential) && !profileVerified) || antigravityRowNeedsIdentityRevalidation(row) {
 			// A rotating refresh token may belong to a different Google principal.
@@ -13142,7 +13160,7 @@ func (s *Store) refreshAntigravityAccountDurable(ctx context.Context, acc *Accou
 				s.projectAntigravityManualAccessFence(criticalCtx, current)
 			}
 			if syncErr != nil {
-				if principalChanged {
+				if principalChanged || antigravityRowHasPrincipalTransitionFence(current) {
 					if reason, _ := antigravityPersistedHardFence(current); reason != "" {
 						return fmt.Errorf("%s: %w", reason, syncErr)
 					}
