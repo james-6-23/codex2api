@@ -95,7 +95,12 @@ func (s *Store) MarkUsageFrameCooldowns(acc *Account, at time.Time) (bool, bool)
 	}
 	limited7d := s.markUsage7dRateLimited(acc, false)
 	pct, reset, valid := acc.GetUsageSnapshot5h()
-	limited5h := valid && pct >= 100 && acc.IsPremium5hPlan() && !acc.SkipsUsageWindowLimits()
+	// The 5h snapshot is only evidence of an exhausted *current* window while
+	// its reset time is still in the future. A frame observed after the window
+	// rolled over must not re-arm the cooldown from the stale 100% snapshot:
+	// markPremium5hRateLimited would fabricate a fresh 5h fallback window and
+	// keep the account unavailable long after the 5h quota reset (issue #862).
+	limited5h := valid && reset.After(at) && pct >= 100 && acc.IsPremium5hPlan() && !acc.SkipsUsageWindowLimits()
 	if limited5h {
 		s.markPremium5hRateLimited(acc, reset, at, premium5hCooldownReason, false)
 	}
