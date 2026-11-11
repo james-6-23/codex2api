@@ -822,11 +822,14 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     }
     const maxStatsRetries = disabledSorts.includes("requests") ? 60 : 20;
     if (statsStaleRetriesRef.current >= maxStatsRetries) return undefined;
+    // loadError is a dep so a failed silent reload re-runs this effect and
+    // rearms the one-shot poll; otherwise the pills stay stale until another
+    // action reloads the page.
     return scheduleAccountStatsPoll(3000, () => {
       statsStaleRetriesRef.current += 1;
       void reload({ silent: true });
     });
-  }, [accounts, disabledSorts, loading, reload, statsState]);
+  }, [accounts, disabledSorts, loadError, loading, reload, statsState]);
 
   // 导入接口只负责入队，首轮 native Messages 采样在后台完成。对仍未
   // 采样的 Claude 账号做有限次数静默轮询，让页面自动显示采样结果，同时

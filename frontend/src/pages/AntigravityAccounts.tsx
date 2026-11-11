@@ -519,11 +519,13 @@ function AntigravityAccounts({
     }
     const maxStatsRetries = (disabledSorts ?? []).includes("requests") ? 60 : 20;
     if (statsStaleRetriesRef.current >= maxStatsRetries) return undefined;
+    // error is a dep so a failed silent reload re-runs this effect and rearms
+    // the one-shot poll; otherwise the pills stay stale until another action.
     return scheduleAccountStatsPoll(3000, () => {
       statsStaleRetriesRef.current += 1;
       void reload({ silent: true });
     });
-  }, [accounts, disabledSorts, listFilterKey, loading, reload, statsState]);
+  }, [accounts, disabledSorts, error, listFilterKey, loading, reload, statsState]);
 
   // 当前页的网关侧用量明细(今日 / 5h / 7d)与健康条;失败不阻断列表。
   const accountIDsKey = useMemo(() => accounts.map((account) => account.id).join(","), [accounts]);
