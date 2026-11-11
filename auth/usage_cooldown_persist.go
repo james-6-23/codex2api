@@ -24,13 +24,14 @@ func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool
 	defer acc.usageCooldownPersistMu.Unlock()
 	acc.mu.RLock()
 	pending := acc.usageCooldownPersistPending
+	clearError = clearError || acc.usageCooldownClearErrorPending
 	status, errorMsg := acc.Status, acc.ErrorMsg
 	reason, until := acc.CooldownReason, acc.CooldownUtil
 	acc.mu.RUnlock()
-// A failed clear must also be retried: if the DB write of a runtime clear is
-// lost, the stale persisted cooldown survives and any later scheduler-outbox
-// reload (issue #813) resurrects it, blocking a healthy account with 429s.
-// The guard therefore only requires a pending write, for any runtime status.
+	// A failed clear must also be retried: if the DB write of a runtime clear is
+	// lost, the stale persisted cooldown survives and any later scheduler-outbox
+	// reload (issue #813) resurrects it, blocking a healthy account with 429s.
+	// The guard therefore only requires a pending write, for any runtime status.
 	if !force && !pending {
 		return
 	}
@@ -67,12 +68,17 @@ func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool
 		// cooldown in the database forever.
 		acc.mu.Lock()
 		acc.usageCooldownPersistPending = true
+		// Preserve the operation as well as the dirty bit. ClearCooldown does
+		// not remove a persisted error, so it cannot retry a failed ClearError.
+		// The status switch above still gives newer errors/cooldowns priority.
+		acc.usageCooldownClearErrorPending = clearError && status != StatusError && status != StatusCooldown
 		acc.mu.Unlock()
 		return
 	}
 	acc.mu.Lock()
-	if acc.Status == status && acc.CooldownReason == reason && acc.CooldownUtil.Equal(until) {
+	if acc.Status == status && acc.ErrorMsg == errorMsg && acc.CooldownReason == reason && acc.CooldownUtil.Equal(until) {
 		acc.usageCooldownPersistPending = false
+		acc.usageCooldownClearErrorPending = false
 	}
 	acc.mu.Unlock()
 }

@@ -82,11 +82,17 @@ func TestLostUsageCooldownClearIsRetried(t *testing.T) {
 		t.Fatal("precondition: the clear write was lost, DB must still hold the cooldown")
 	}
 
-	// The next usage-frame publication retries the lost clear.
-	acc.mu.Lock()
-	acc.usageCooldownPersistPending = true
-	acc.mu.Unlock()
-	store.persistUsageCooldown(acc)
+	acc.mu.RLock()
+	pending := acc.usageCooldownPersistPending
+	acc.mu.RUnlock()
+	if !pending {
+		t.Fatal("failed clear must remain pending")
+	}
+	// Retry through the actual usage-frame publication path, without manually
+	// repairing the pending flag or explicitly requesting another clear.
+	store.usageFramePersist.persist(store, usageFramePersistJob{
+		account: acc, dbID: id, observedAt: time.Now(),
+	})
 
 	row, err = db.GetAccountByID(ctx, id)
 	if err != nil {
