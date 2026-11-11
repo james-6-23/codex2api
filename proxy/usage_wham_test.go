@@ -744,6 +744,27 @@ func TestApplyWhamUsage_MarksPremium5hLimitedAt100Percent(t *testing.T) {
 	}
 }
 
+func TestApplyWhamUsage_SkipsCooldownForExpiredResetAt100Percent(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.4"})
+	account := &auth.Account{DBID: 1, AccessToken: "at", PlanType: "plus"}
+
+	now := time.Now()
+	// 100% 但 reset 时刻已过期：快照属于上一个已翻新的窗口，不得重新武装 5h 冷却。
+	usage := &WhamUsage{PlanType: "plus"}
+	usage.RateLimit.PrimaryWindow = &WhamUsageWindow{UsedPercent: 100, LimitWindowSeconds: 18000, ResetAt: now.Add(-time.Minute).Unix()}
+
+	result := ApplyWhamUsage(store, account, usage)
+	if result.Premium5hRateLimited {
+		t.Errorf("Premium5hRateLimited = true, want false for expired reset, result=%+v", result)
+	}
+	if account.IsPremium5hRateLimited() {
+		t.Error("account must not be re-armed into premium 5h cooldown by an expired reset")
+	}
+	if account.HasActiveCooldown() {
+		t.Error("expired-reset WHAM snapshot must not put the account into cooldown")
+	}
+}
+
 func TestApplyWhamUsage_CreditAccountSkipsPremium5hWindowLimit(t *testing.T) {
 	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2, TestConcurrency: 1, TestModel: "gpt-5.5"})
 	account := &auth.Account{

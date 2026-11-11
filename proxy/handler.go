@@ -9324,7 +9324,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 		// 被动 /responses 头刷新了 5h 窗口重置时刻：武装「到点即探」，窗口翻新即刷新进度条。
 		store.WakeBoundaryProbe(result.Reset5hAt)
 	}
-	if !opts.asyncPersist && usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
+	if !opts.asyncPersist && usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && result.Reset5hAt.After(observedAt) && !account.SkipsUsageWindowLimits() {
 		if store != nil {
 			// The per-frame path may decide not to persist this observation; a
 			// repeated 100% frame must not issue another cooldown write.

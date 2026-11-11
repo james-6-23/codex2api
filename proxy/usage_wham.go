@@ -740,7 +740,13 @@ func ApplyWhamUsage(store *auth.Store, account *auth.Account, usage *WhamUsage) 
 
 	// premium 5h 限流标记
 	if usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
-		if store != nil {
+		// 重置时刻已知且已经过去：这条 100% 快照属于上一个已翻新的窗口，
+		// 不能据此重新武装 5h 冷却（否则会把已恢复的账号再压满 5 小时）。
+		// reset 时刻缺失时保留原 fallback 行为（markPremium5hRateLimited
+		// 内部按 now+5h 兜底武装）。
+		if !result.Reset5hAt.IsZero() && !result.Reset5hAt.After(observedAt) {
+			// 已过期重置：跳过冷却标记，不做任何判罚。
+		} else if store != nil {
 			result.Premium5hRateLimited = store.MarkPremium5hRateLimitedAt(account, result.Reset5hAt, observedAt)
 		} else {
 			result.Premium5hRateLimited = true
