@@ -1777,6 +1777,11 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			// OpenAI Responses 中转账号走自己的 /responses 出站（issue #820）；
 			// 生图请求体由执行器强制保持 HTTP，不受账号 WebSocket 出站设置影响。
 			if account.IsOpenAIResponsesAPI() {
+				if replay != nil {
+					return executePipelineImage(c.Request.Context(), replay, gjson.GetBytes(responsesBody, "model").String(), func(body []byte) (*http.Response, error) {
+						return ExecuteOpenAIResponsesRequest(c.Request.Context(), account, body, proxyURL, c.Request.Header.Clone())
+					})
+				}
 				return ExecuteOpenAIResponsesRequest(c.Request.Context(), account, responsesBody, proxyURL, c.Request.Header.Clone())
 			}
 			if replay != nil {
