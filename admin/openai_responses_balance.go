@@ -320,15 +320,20 @@ func parseNewAPITokenUsageBalance(
 	if !data.Exists() {
 		return openAIResponsesBalanceResponse{}, fmt.Errorf("响应中未找到 data")
 	}
-	if data.Get("unlimited_quota").Bool() {
+	remaining := data.Get("total_available")
+	if !remaining.Exists() || remaining.Type != gjson.Number {
+		return openAIResponsesBalanceResponse{}, fmt.Errorf("响应中未找到有效的 total_available")
+	}
+	userQuota := data.Get("user_quota.total_available")
+	if data.Get("unlimited_quota").Bool() && !(userQuota.Exists() && userQuota.Type == gjson.Number) {
 		return openAIResponsesBalanceResponse{Unit: "quota", Unlimited: true}, nil
 	}
-	remaining := data.Get("total_available").Float()
-	if userQuota := data.Get("user_quota.total_available"); userQuota.Exists() {
-		remaining = math.Min(remaining, userQuota.Float())
+	amount := remaining.Float()
+	if userQuota.Exists() && userQuota.Type == gjson.Number {
+		amount = math.Min(amount, userQuota.Float())
 	}
-	if remaining < 0 {
-		remaining = 0
+	if amount < 0 {
+		amount = 0
 	}
 	statusURL, err := openAIResponsesOriginEndpoint(baseURL, "/api/status")
 	if err != nil {
@@ -342,7 +347,7 @@ func parseNewAPITokenUsageBalance(
 	if quotaPerUnit <= 0 {
 		return openAIResponsesBalanceResponse{}, fmt.Errorf("quota 换算失败: /api/status 响应缺少有效的 quota_per_unit")
 	}
-	return openAIResponsesBalanceResponse{Balance: remaining / quotaPerUnit, Unit: "USD"}, nil
+	return openAIResponsesBalanceResponse{Balance: amount / quotaPerUnit, Unit: "USD"}, nil
 }
 
 func queryNewAPIBalance(
