@@ -18,6 +18,11 @@ func AdaptiveDefaults(c Settings) Settings {
 	return c
 }
 
+// PhaseQuotaWait marks an account whose automatic checks are postponed until
+// its rate limit or quota recovers. It is set outside Schedule, because a
+// postponed check is never graded, and the next graded result replaces it.
+const PhaseQuotaWait = "quota_wait"
+
 // Schedule applies timing after the ownership transition. PauseBackoffSeconds
 // is retained through recovery; NextIntervalSeconds is the current nominal wait.
 // Errors never become degraded grades, but do back off unavailable paused accounts.

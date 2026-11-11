@@ -136,9 +136,105 @@ func (db *DB) EnqueueIntelligenceChecks(ctx context.Context, ids []int64, now ti
 	})
 	return out, err
 }
-func (db *DB) EnqueueDueIntelligenceChecks(ctx context.Context, now time.Time, limit int) (int, error) {
+
+// IntelligenceCheckHold reports whether an account's automatic check should
+// wait because the upstream would reject it for rate-limit or quota reasons.
+// until is the expected recovery time, zero when unknown.
+type IntelligenceCheckHold func(accountID int64, model string) (until time.Time, held bool)
+
+type intelligenceQueryer interface {
+	intelligenceQueryRower
+	QueryContext(context.Context, string, ...interface{}) (*sql.Rows, error)
+}
+
+type intelligenceDueAccount struct {
+	id      int64
+	channel string
+}
+
+// intelligenceDueAccounts lists accounts whose automatic check is due, with
+// the source that selects the detector model.
+func (db *DB) intelligenceDueAccounts(ctx context.Context, q intelligenceQueryer, s ic.Settings, now time.Time, limit int) ([]intelligenceDueAccount, error) {
+	filter := ""
+	args := []interface{}{now.UnixMilli(), limit}
+	if s.Action == "switch_group" {
+		channel, e := intelligenceTargetGroupChannel(ctx, q, s)
+		owned := "COALESCE(" + db.intelligenceStateActionExpr("s") + ",'')<>''"
+		if e != nil {
+			if !errors.Is(e, ErrIntelligenceCheckTargetGroup) && !errors.Is(e, errIntelligenceNoEnabledQuestion) {
+				return nil, e
+			}
+			filter = " AND (" + owned + ")"
+		} else {
+			filter = " AND (" + db.intelligenceChannelExpr() + "=$3 OR " + owned + ")"
+			args = append(args, channel)
+		}
+	}
+	rows, err := q.QueryContext(ctx, `SELECT a.id,`+db.intelligenceChannelExpr()+` FROM accounts a JOIN intelligence_check_accounts s ON s.account_id=a.id WHERE `+db.intelligenceEligibleSQL()+filter+` AND `+db.intelligenceAutomaticSQL("a", "s")+` AND s.next_due_ms<=$1 AND NOT EXISTS(SELECT 1 FROM intelligence_check_runs r WHERE r.account_id=a.id AND r.status IN ('queued','running')) ORDER BY s.next_due_ms,a.id LIMIT $2`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	due := []intelligenceDueAccount{}
+	for rows.Next() {
+		var a intelligenceDueAccount
+		if err = rows.Scan(&a.id, &a.channel); err != nil {
+			return nil, err
+		}
+		due = append(due, a)
+	}
+	return due, rows.Err()
+}
+
+// intelligenceHoldTx postpones an automatic check without grading it: streaks,
+// retry backoff and the latest status are untouched, so a quota wait is
+// neither a pass nor a failure. The account is examined again at the expected
+// recovery time, or after one regular interval when that is unknown or later,
+// so an early reset is noticed.
+func (db *DB) intelligenceHoldTx(ctx context.Context, tx *sql.Tx, s ic.Settings, a IntelligenceCheckAccount, until, now time.Time) error {
+	delay := time.Duration(s.IntervalSeconds) * time.Second
+	if wait := until.Sub(now); !until.IsZero() && wait < delay {
+		delay = max(wait, time.Second)
+	}
+	state := a.State
+	state.ProbePhase = ic.PhaseQuotaWait
+	state.NextIntervalSeconds = int((delay + time.Second - 1) / time.Second)
+	raw, err := json.Marshal(state)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE intelligence_check_accounts SET state_json=$1,next_due_ms=$2 WHERE account_id=$3`, string(raw), now.Add(delay).UnixMilli(), a.AccountID)
+	return err
+}
+
+// EnqueueDueIntelligenceChecks queues due automatic checks. With hold, accounts
+// it reports as rate limited or out of quota are postponed instead of queued.
+func (db *DB) EnqueueDueIntelligenceChecks(ctx context.Context, now time.Time, limit int, hold ...IntelligenceCheckHold) (int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100
+	}
+	// hold reads runtime account state, so it runs before the write transaction
+	// rather than under database locks. An account that becomes due in between
+	// is simply queued; the runner checks again before sending.
+	held := map[int64]time.Time{}
+	if len(hold) > 0 && hold[0] != nil {
+		s, err := db.GetIntelligenceCheckSettings(ctx)
+		if err != nil {
+			return 0, err
+		}
+		if !s.Enabled {
+			return 0, nil
+		}
+		due, err := db.intelligenceDueAccounts(ctx, db.conn, s, now, limit)
+		if err != nil {
+			return 0, err
+		}
+		for _, a := range due {
+			model, _ := s.ModelForChannel(a.channel)
+			if until, ok := hold[0](a.id, model); ok {
+				held[a.id] = until
+			}
+		}
 	}
 	count := 0
 	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
@@ -149,45 +245,20 @@ func (db *DB) EnqueueDueIntelligenceChecks(ctx context.Context, now time.Time, l
 		if !s.Enabled {
 			return nil
 		}
-		filter := ""
-		args := []interface{}{now.UnixMilli(), limit}
-		if s.Action == "switch_group" {
-			channel, e := intelligenceTargetGroupChannel(ctx, tx, s)
-			owned := "COALESCE(" + db.intelligenceStateActionExpr("s") + ",'')<>''"
-			if e != nil {
-				if !errors.Is(e, ErrIntelligenceCheckTargetGroup) && !errors.Is(e, errIntelligenceNoEnabledQuestion) {
-					return e
-				}
-				filter = " AND (" + owned + ")"
-			} else {
-				filter = " AND (" + db.intelligenceChannelExpr() + "=$3 OR " + owned + ")"
-				args = append(args, channel)
-			}
-		}
-
-		rows, err := tx.QueryContext(ctx, `SELECT a.id FROM accounts a JOIN intelligence_check_accounts s ON s.account_id=a.id WHERE `+db.intelligenceEligibleSQL()+filter+` AND `+db.intelligenceAutomaticSQL("a", "s")+` AND s.next_due_ms<=$1 AND NOT EXISTS(SELECT 1 FROM intelligence_check_runs r WHERE r.account_id=a.id AND r.status IN ('queued','running')) ORDER BY s.next_due_ms,a.id LIMIT $2`, args...)
-
+		due, err := db.intelligenceDueAccounts(ctx, tx, s, now, limit)
 		if err != nil {
 			return err
 		}
-		ids := []int64{}
-		for rows.Next() {
-			var id int64
-			if err = rows.Scan(&id); err != nil {
-				rows.Close()
-				return err
-			}
-			ids = append(ids, id)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return err
-		}
-		for _, id := range ids {
-			a, err := db.intelligenceAccountTx(ctx, tx, id)
+		for _, d := range due {
+			a, err := db.intelligenceAccountTx(ctx, tx, d.id)
 			if err != nil {
 				return err
+			}
+			if until, ok := held[d.id]; ok {
+				if err = db.intelligenceHoldTx(ctx, tx, s, a, until, now); err != nil {
+					return err
+				}
+				continue
 			}
 			if _, err = db.intelligenceEnqueueTx(ctx, tx, s, a, "automatic", now); err != nil {
 				if errors.Is(err, ErrIntelligenceCheckTargetGroup) {
@@ -626,6 +697,14 @@ func (db *DB) IntelligenceCheckBars(ctx context.Context, ids []int64) (map[int64
 		if due > 0 && automaticAllowed && b.Enabled {
 			when := time.UnixMilli(due)
 			b.NextDueAt = &when
+		}
+		// The stored deadline of a quota wait is only the next re-examination,
+		// and the wait itself ends with automatic checks on the account.
+		if b.ProbePhase == ic.PhaseQuotaWait {
+			b.NextDueAt = nil
+			if !automaticAllowed || !b.Enabled {
+				b.ProbePhase = ""
+			}
 		}
 		if s.BlockedCredentialGeneration != nil && *s.BlockedCredentialGeneration == generation {
 			b.ProbePhase = "credential_blocked"

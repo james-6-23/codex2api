@@ -179,6 +179,7 @@ export function intelligenceScheduleLabel(bar: IntelligenceBar): string {
   const labels: Record<string, string> = {
     normal: '正常检测', backoff: '退避中', recovering: '恢复确认',
     retrying: '异常重试', credential_blocked: '等待凭证修复',
+    quota_wait: '等待额度恢复',
   };
   const label = labels[bar.probe_phase || ''];
   if (!label) return '';

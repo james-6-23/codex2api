@@ -2993,4 +2993,4 @@ Retry-After: 3600
 
 ### 自适应降智检测配置
 
-`PUT /api/admin/intelligence-check/settings` 支持 `adaptive_enabled`、`pause_initial_seconds`、`pause_max_seconds`、`recovery_initial_seconds`、`recovery_min_seconds`。仍需提交当前 `revision` 和完整设置。字段语义、边界与兼容规则见 [自适应降智检测](INTELLIGENCE_BACKOFF.md)。检测 bars 增加 `probe_phase`、`next_interval_seconds`、`passed_streak`、`next_due_at`，用于展示退避或恢复确认进度。
+`PUT /api/admin/intelligence-check/settings` 支持 `adaptive_enabled`、`pause_initial_seconds`、`pause_max_seconds`、`recovery_initial_seconds`、`recovery_min_seconds`。仍需提交当前 `revision` 和完整设置。字段语义、边界与兼容规则见 [自适应降智检测](INTELLIGENCE_BACKOFF.md)。检测 bars 增加 `probe_phase`、`next_interval_seconds`、`passed_streak`、`next_due_at`，用于展示退避或恢复确认进度。账号限流或额度耗尽、自动检测正在等待恢复时，`probe_phase` 为 `quota_wait` 且不返回 `next_due_at`。

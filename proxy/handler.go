@@ -178,6 +178,12 @@ func dispatchPolicyForModel(model string) auth.DispatchPolicy {
 	return auth.DispatchPolicyStandard
 }
 
+// DispatchPolicyForModel 供请求处理之外的调用方（如后台检测）按模型取得与选号一致的
+// 用量窗口口径。
+func DispatchPolicyForModel(model string) auth.DispatchPolicy {
+	return dispatchPolicyForModel(model)
+}
+
 // withModelCooldownFilter 在既有过滤器上叠加单一公开模型的跨实例共享缓存冷却检查，
 // 其它实例写入的冷却也能在本实例选号时滤掉该账号；store 未装配时原样返回入参过滤器。
 func (h *Handler) withModelCooldownFilter(ctx context.Context, model string, filter auth.AccountFilter) auth.AccountFilter {

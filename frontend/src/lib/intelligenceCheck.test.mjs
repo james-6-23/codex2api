@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { intelligenceWindow, intelligenceColor, intelligenceQuery, latestRequestGuard, intelligenceTargetConflict } from './intelligenceCheck.ts'
+import { intelligenceWindow, intelligenceColor, intelligenceQuery, latestRequestGuard, intelligenceTargetConflict, intelligenceScheduleLabel } from './intelligenceCheck.ts'
 test('last 20 completed checks remain chronological and errors do not dilute pass rate', () => {
   const records = Array.from({ length: 23 }, (_, i) => ({ id: i, status: i % 3 === 0 ? 'normal' : i % 3 === 1 ? 'degraded' : 'error', created_at: new Date(i * 1000).toISOString() }))
   records.push({ id: 24, status: 'running' })
@@ -34,4 +34,8 @@ test('conflict actions require structured account details and never infer IDs fr
   for (const error of [null, new Error('1 enabled accounts belong to another channel'), { details: null }, { details: {...details, code: 'revision_conflict'} }, { details: {...details, conflicts: [{account_id: -1}]} }, { details: {...details, conflicts: []} }]) {
     assert.equal(intelligenceTargetConflict(error), null)
   }
+})
+test('a quota wait is labelled without promising a check time', () => {
+  assert.equal(intelligenceScheduleLabel({ enabled: true, action: 'none', records: [], probe_phase: 'quota_wait', next_due_at: null }), '等待额度恢复')
+  assert.equal(intelligenceScheduleLabel({ enabled: true, action: 'none', records: [] }), '')
 })
