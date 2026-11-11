@@ -578,7 +578,9 @@ func (o *ClaudeAuth) RefreshTokens(ctx context.Context, refreshToken string) (*C
 		return nil, err
 	}
 	if status != http.StatusOK {
-		return nil, fmt.Errorf("token 刷新失败 (status %d): %s", status, string(body))
+		// Classify by OAuth error code and strip the refresh token from the body
+		// so invalid_grant is distinct from transport noise without leaking the RT.
+		return nil, newOAuthRefreshHTTPError(status, body, refreshToken)
 	}
 
 	var tokenResp claudeTokenResponse
