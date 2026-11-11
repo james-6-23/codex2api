@@ -1,11 +1,18 @@
-const IMAGE_BASE_MODELS = ['gpt-image-2.5-flare', 'gpt-image-2.5-sunburst', 'gpt-image-2']
+const IMAGE_BASE_MODELS = [
+  'gpt-image-2.6-flare',
+  'gpt-image-2.6-sunburst',
+  'gpt-image-2.6',
+  'gpt-image-2.5-flare',
+  'gpt-image-2.5-sunburst',
+  'gpt-image-2',
+]
 
 export const IMAGE_MODELS = IMAGE_BASE_MODELS.flatMap(model =>
   ['', '-2k', '-4k'].map(suffix => ({ label: model + suffix, value: model + suffix })),
 )
 
 export function isImage25Model(model: string): boolean {
-  return /^gpt-image-2\.5-(flare|sunburst)(-\d{4}-\d{2}-\d{2})?$/.test(
+  return /^(gpt-image-2\.[56]-(?:flare|sunburst)|gpt-image-2\.6)(-\d{4}-\d{2}-\d{2})?$/.test(
     model.trim().toLowerCase().replace(/-(2k|4k)$/, ''),
   )
 }

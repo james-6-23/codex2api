@@ -9,7 +9,10 @@ import (
 )
 
 func TestGPTImage25BillingSeparatesImageInputAndCache(t *testing.T) {
-	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst-4k", "gpt-image-2.5-flare-2026-09-08-2k"} {
+	for _, model := range []string{
+		"gpt-image-2.5-flare", "gpt-image-2.5-sunburst-4k", "gpt-image-2.5-flare-2026-09-08-2k",
+		"gpt-image-2.6-flare", "gpt-image-2.6-sunburst-4k", "gpt-image-2.6", "gpt-image-2.6-2k",
+	} {
 		log := &UsageLogInput{Model: model, InputTokens: 1550, ImageInputTokens: 1521, OutputTokens: 515, ImageOutputTokens: 515}
 		if got := UsageLogBilledCost(log); !approxEqual(got, 0.027763) {
 			t.Fatalf("%s: cost = %v, want 0.027763", model, got)

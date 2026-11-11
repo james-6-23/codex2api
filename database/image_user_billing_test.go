@@ -33,6 +33,14 @@ func TestImageUserBillingPolicyAndSnapshot(t *testing.T) {
 			}
 		})
 	}
+	SetModelPricingOverrides(map[string]ModelPricingOverride{"gpt-image-2.6-flare": {UserBillingMode: UserBillingModePerImage, ImageUnitPrice: .06}})
+	input26 := &UsageLogInput{Model: "gpt-image-2.6-flare-2026-11-10-4k", StatusCode: 200, ImageCount: 2, InputTokens: 1000, OutputTokens: 100}
+	if got := UsageLogUserBilledCost(input26); !approxEqual(got, .12) {
+		t.Fatalf("2.6 fee %v want 0.12", got)
+	}
+	if got := UsageLogBilledCost(input26); !approxEqual(got, .008) {
+		t.Fatalf("2.6 upstream cost changed: %v", got)
+	}
 	input := &UsageLogInput{Model: "gpt-image-2.5-flare", StatusCode: 200, ImageCount: 2, InputTokens: 1000, OutputTokens: 100}
 	frozen := SnapshotUsageLogBilling(input)
 	SetModelPricingOverrides(map[string]ModelPricingOverride{"gpt-image-2.5-flare": {UserBillingMode: UserBillingModePerImage, ImageUnitPrice: .25, Input: 50}})

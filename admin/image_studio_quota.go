@@ -76,7 +76,7 @@ func (h *Handler) GetPortalImageQuota(c *gin.Context) {
 		RefreshAfterSeconds: h.db.GetUsageLogFlushIntervalSeconds() + 1,
 	}
 	result.ImagePricing = make(map[string]imageStudioPublicPricing)
-	for _, base := range []string{"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst"} {
+	for _, base := range []string{"gpt-image-2", "gpt-image-2.5-flare", "gpt-image-2.5-sunburst", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst", "gpt-image-2.6"} {
 		for _, suffix := range []string{"", "-2k", "-4k"} {
 			model := base + suffix
 			p := database.GetModelPricing(model)

@@ -5,9 +5,10 @@ import (
 	"strings"
 )
 
-var gptImage25ModelPattern = regexp.MustCompile(`^(gpt-image-2\.5-(?:flare|sunburst))(?:-\d{4}-\d{2}-\d{2})?(?:-(?:2k|4k))?$`)
+var gptImage25ModelPattern = regexp.MustCompile(`^(gpt-image-2\.[56]-(?:flare|sunburst)|gpt-image-2\.6)(?:-\d{4}-\d{2}-\d{2})?(?:-(?:2k|4k))?$`)
 
 // GPTImage25BillingModel 将日期快照和本地尺寸别名归到对应的图片模型费率。
+// 支持 gpt-image-2.5 与 gpt-image-2.6 及其 flare/sunburst/尺寸变体。
 func GPTImage25BillingModel(model string) string {
 	match := gptImage25ModelPattern.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model)))
 	if len(match) == 0 {
