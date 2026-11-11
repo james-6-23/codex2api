@@ -364,6 +364,13 @@ func (s *Store) shouldBackgroundRefresh(acc *Account, codexOnly bool) bool {
 	if codexOnly && !codex {
 		return false
 	}
+	// A recoverable Claude 401 latches Banned/unauthorized before the refresh
+	// token is known to be dead. Keep one background exchange available until
+	// that exchange reports a permanent failure. Terminal errors and revoked
+	// refresh tokens stay on the bounded backoff below.
+	if claudeAuthFailureNeedsBackgroundRefreshLocked(acc) {
+		return true
+	}
 	if acc.isAntigravityAPILocked() || acc.Status == StatusError || acc.healthTierLocked() == HealthTierBanned || strings.TrimSpace(acc.RefreshToken) == "" {
 		return false
 	}
