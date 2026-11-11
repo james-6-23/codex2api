@@ -300,13 +300,14 @@ type Account struct {
 	// 客户端压缩阈值。仅内存保留：值只能在收到响应后才知道，落库也救不了首个请求。
 	grokContextWindow int64
 	// grokFreeQuota 是免费额度耗尽 429 解析出的权威用量快照，随 credentials 落库。
-	grokFreeQuota               *GrokFreeQuotaSnapshot
-	Status                      AccountStatus
-	CooldownUtil                time.Time
-	CooldownReason              string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
-	usageCooldownPersistMu      sync.Mutex
-	usageCooldownPersistPending bool
-	ErrorMsg                    string
+	grokFreeQuota                  *GrokFreeQuotaSnapshot
+	Status                         AccountStatus
+	CooldownUtil                   time.Time
+	CooldownReason                 string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
+	usageCooldownPersistMu         sync.Mutex
+	usageCooldownPersistPending    bool
+	usageCooldownClearErrorPending bool
+	ErrorMsg                       string
 
 	// 用量进度（从 Codex 响应头被动解析）
 	UsagePercent7d      float64 // 7d 窗口使用率 0-100+
