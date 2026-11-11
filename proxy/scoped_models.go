@@ -162,6 +162,7 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 
 	filteredCatalog := 0
 	filteredCatalogSample := make([]string, 0, 8)
+	visibleAccounts := 0
 	for _, account := range accounts {
 		if !h.accountVisibleToAPIKey(account, row.ID, now) {
 			filteredCatalog++
@@ -170,6 +171,7 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 			}
 			continue
 		}
+		visibleAccounts++
 		switch {
 		case account.IsGrokAPI():
 			visible := GrokVisibleModelIDsForAccount(account)
@@ -310,8 +312,8 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 			addScopedModel(records, id, modelBackingCodex, time.Time{}, true)
 		}
 	}
-	if len(records) == 0 && filteredCatalog > 0 {
-		logEmptyModelCatalog(row.ID, row.Limits.ResolveUpstreamChannel(), filteredCatalog, strings.Join(filteredCatalogSample, "; "))
+	if len(records) == 0 && (filteredCatalog > 0 || visibleAccounts > 0) {
+		logEmptyModelCatalog(row.ID, row.Limits.ResolveUpstreamChannel(), filteredCatalog, visibleAccounts, strings.Join(filteredCatalogSample, "; "))
 	}
 	return records
 }
@@ -324,7 +326,7 @@ var (
 	catalogEmptyLogAt = map[int64]time.Time{}
 )
 
-func logEmptyModelCatalog(keyID int64, channel string, filtered int, sample string) {
+func logEmptyModelCatalog(keyID int64, channel string, filtered int, visible int, sample string) {
 	now := time.Now()
 	catalogEmptyLogMu.Lock()
 	if last, ok := catalogEmptyLogAt[keyID]; ok && now.Sub(last) < time.Minute {
@@ -340,7 +342,7 @@ func logEmptyModelCatalog(keyID int64, channel string, filtered int, sample stri
 		}
 	}
 	catalogEmptyLogMu.Unlock()
-	log.Printf("model catalog empty for api_key_id=%d channel=%s filtered=%d sample=%s", keyID, channel, filtered, sample)
+	log.Printf("model catalog empty for api_key_id=%d channel=%s filtered=%d visible=%d sample=%s", keyID, channel, filtered, visible, sample)
 }
 
 // catalogFilterSample is a redacted reason an account contributed no models.

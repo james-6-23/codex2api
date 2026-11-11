@@ -1200,7 +1200,13 @@ func (h *Handler) Messages(c *gin.Context) {
 					continue
 				}
 				log.Printf("Claude OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
-				h.finishClaudeOAuth401WithoutRetry(c, account, affinityKey, isStream, &database.UsageLogInput{
+				// 刷新失败不代表账号永久失效（可能是瞬时传输错误），不立即 503：
+				// 释放账号、解绑会话亲和并把该账号从本轮请求排除，继续换号重试。
+				// 不调用 ReportRequestFailure，避免传输噪声把账号打入冷却/封禁；
+				// 记账保留，账号池耗尽时由 account == nil 分支统一返回 503。
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				h.logUsageForRequest(c, &database.UsageLogInput{
 					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
 					EffectiveModel: attemptEffectiveModel, StatusCode: resp.StatusCode,
 					DurationMs: durationMs, ReasoningEffort: reasoningEffort,
@@ -1211,7 +1217,10 @@ func (h *Handler) Messages(c *gin.Context) {
 					UpstreamErrorKind: "unauthorized",
 					ErrorMessage:      usageLogErrorMessage(resp.StatusCode, errBody),
 				})
-				return
+				retryExclusions.MarkHard(account.ID())
+				lastStatusCode = resp.StatusCode
+				lastBody = errBody
+				continue
 			}
 			if kind := classifyHTTPFailure(resp.StatusCode, errBody); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) && !(account.IsClaudeOAuth() && isMissingScopeUnauthorized(errBody)) {
 				// missing_scope is a benign 401: applyCooldown keeps the Claude
@@ -1974,25 +1983,6 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		return
 	}
-}
-
-// finishClaudeOAuth401WithoutRetry ends a Claude OAuth 401 whose refresh did
-// not produce a usable access token. The request is not retried. Permanent
-// revocation has already been recorded by the refresh; transport failures
-// leave the account eligible for a later attempt.
-func (h *Handler) finishClaudeOAuth401WithoutRetry(c *gin.Context, account *auth.Account, affinityKey string, isStream bool, usage *database.UsageLogInput) {
-	if h != nil && h.store != nil && account != nil {
-		h.store.Release(account)
-		h.store.UnbindSessionAffinity(affinityKey, account.ID())
-	}
-	if usage != nil {
-		h.logUsageForRequest(c, usage)
-	}
-	const message = "账号池暂无可用账号（上游账号鉴权失效），请稍后重试"
-	if isStream && writeCommittedAnthropicRetryError(c, "overloaded_error", message) {
-		return
-	}
-	sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", message)
 }
 
 func sameAnthropicPromptContent(a, b []byte) bool {
