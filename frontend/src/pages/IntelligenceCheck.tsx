@@ -33,6 +33,19 @@ import {
 
 const fieldClass =
   "w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring";
+// 非 HTTPS 的 HTTP 站点不是安全上下文，crypto.randomUUID 可能不存在，
+// 退回用 crypto.getRandomValues 生成 UUID v4。
+function createQuestionId(): string {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (b) =>
+    b.toString(16).padStart(2, "0"),
+  ).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 const field = (label: string, child: ReactNode, hint?: string) => (
   <label className="flex flex-col gap-2 text-sm">
     <span className="font-medium">{label}</span>
@@ -462,7 +475,7 @@ export default function IntelligenceCheck() {
             <Button
               variant="outline"
               onClick={() => {
-                const id = crypto.randomUUID();
+                const id = createQuestionId();
                 change("questions", [
                   ...settings.questions,
                   {
