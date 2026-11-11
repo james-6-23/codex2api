@@ -603,6 +603,8 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
   const [domains, setDomains] = useState<AccountEmailDomainFacet[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [statsState, setStatsState] = useState<"ready" | "stale" | "warming">("warming");
+  const [disabledSorts, setDisabledSorts] = useState<string[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [proxyPool, setProxyPool] = useState<ProxyRow[]>([]);
   // 代理池开关 + 全局代理:代理徽章要靠这两个才能把"未自绑"的账号判成继承池/全局/直连。
@@ -763,6 +765,8 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
       setTags(res.facets?.tags ?? []);
       setDomains(res.facets?.email_domains ?? []);
       setTotal(res.total ?? rows.length);
+      setStatsState(res.stats_state ?? "ready");
+      setDisabledSorts(res.disabled_sorts ?? []);
       if (res.page && res.page !== page) setPage(res.page);
       // 累积已知套餐,供套餐 Tab 使用。
       setKnownPlans((prev) => {
@@ -799,6 +803,30 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     void reload();
     return () => reloadAbortRef.current?.abort();
   }, [reload]);
+
+  // Request-count pills are filled by a detached usage_logs scan. Keep polling
+  // until stats_state is ready so a slow scan does not leave them at zero.
+  const statsStaleRetriesRef = useRef(0);
+  const statsReloadRef = useRef(reload);
+  useEffect(() => {
+    if (statsReloadRef.current !== reload) {
+      statsReloadRef.current = reload;
+      statsStaleRetriesRef.current = 0;
+    }
+    if (loading) return undefined;
+    if (statsState === "ready") {
+      statsStaleRetriesRef.current = 0;
+      return undefined;
+    }
+    const maxStatsRetries = disabledSorts.includes("requests") ? 60 : 20;
+    if (statsStaleRetriesRef.current >= maxStatsRetries) return undefined;
+    const timer = window.setTimeout(() => {
+      if (document.hidden) return;
+      statsStaleRetriesRef.current += 1;
+      void reload({ silent: true });
+    }, 3000);
+    return () => window.clearTimeout(timer);
+  }, [accounts, disabledSorts, loading, reload, statsState]);
 
   // 导入接口只负责入队，首轮 native Messages 采样在后台完成。对仍未
   // 采样的 Claude 账号做有限次数静默轮询，让页面自动显示采样结果，同时
