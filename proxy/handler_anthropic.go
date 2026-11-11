@@ -739,6 +739,7 @@ func (h *Handler) Messages(c *gin.Context) {
 	retryExclusions := newRetryAccountExclusions()
 	var wsHTTPFallback websocketHTTPFallbackState
 	antigravityRefreshRetried := map[int64]bool{}
+	claudeRefreshRetried := map[int64]bool{}
 
 	var lastUpstreamCancel context.CancelFunc
 	defer func() {
@@ -1184,7 +1185,37 @@ func (h *Handler) Messages(c *gin.Context) {
 					log.Printf("Antigravity OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
 				}
 			}
-			if kind := classifyHTTPFailure(resp.StatusCode, errBody); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) {
+			// Claude OAuth 401 is usually an expired access token. Refresh once
+			// under the shared lease and retry this request at most once.
+			// missing_scope stays on the benign path below. A revoked refresh
+			// token records bounded backoff inside the refresh; transport noise
+			// must not latch Banned/Disabled or the catalog stays empty.
+			if resp.StatusCode == http.StatusUnauthorized && !isMissingScopeUnauthorized(errBody) && account.ClaudeOAuthRefreshable() && !claudeRefreshRetried[account.ID()] {
+				claudeRefreshRetried[account.ID()] = true
+				refreshErr := h.store.RefreshClaudeOAuthAfterUnauthorized(c.Request.Context(), account)
+				if refreshErr == nil {
+					h.store.Release(account)
+					h.store.UnbindSessionAffinity(affinityKey, account.ID())
+					log.Printf("Claude OAuth token refreshed after upstream 401 (account=%d, endpoint=/v1/messages)", account.ID())
+					continue
+				}
+				log.Printf("Claude OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
+				h.finishClaudeOAuth401WithoutRetry(c, account, affinityKey, isStream, &database.UsageLogInput{
+					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
+					EffectiveModel: attemptEffectiveModel, StatusCode: resp.StatusCode,
+					DurationMs: durationMs, ReasoningEffort: reasoningEffort,
+					InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
+					Stream: isStream, ViaWebsocket: useWebsocket,
+					ServiceTier: serviceTier, RequestedServiceTier: serviceTier,
+					AttemptIndex:      attempt + 1,
+					UpstreamErrorKind: "unauthorized",
+					ErrorMessage:      usageLogErrorMessage(resp.StatusCode, errBody),
+				})
+				return
+			}
+			if kind := classifyHTTPFailure(resp.StatusCode, errBody); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) && !(account.IsClaudeOAuth() && isMissingScopeUnauthorized(errBody)) {
+				// missing_scope is a benign 401: applyCooldown keeps the Claude
+				// account in the pool, so the health penalty must not ban it.
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			// Claude 的 429 credits_required 是模型级计费门槛:只冷却该模型,不按账号级限流处理
@@ -1943,6 +1974,25 @@ func (h *Handler) Messages(c *gin.Context) {
 		}
 		return
 	}
+}
+
+// finishClaudeOAuth401WithoutRetry ends a Claude OAuth 401 whose refresh did
+// not produce a usable access token. The request is not retried. Permanent
+// revocation has already been recorded by the refresh; transport failures
+// leave the account eligible for a later attempt.
+func (h *Handler) finishClaudeOAuth401WithoutRetry(c *gin.Context, account *auth.Account, affinityKey string, isStream bool, usage *database.UsageLogInput) {
+	if h != nil && h.store != nil && account != nil {
+		h.store.Release(account)
+		h.store.UnbindSessionAffinity(affinityKey, account.ID())
+	}
+	if usage != nil {
+		h.logUsageForRequest(c, usage)
+	}
+	const message = "账号池暂无可用账号（上游账号鉴权失效），请稍后重试"
+	if isStream && writeCommittedAnthropicRetryError(c, "overloaded_error", message) {
+		return
+	}
+	sendAnthropicError(c, http.StatusServiceUnavailable, "overloaded_error", message)
 }
 
 func sameAnthropicPromptContent(a, b []byte) bool {

@@ -13,7 +13,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"log"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -135,6 +137,7 @@ func (s *Store) refreshClaudeAccount(ctx context.Context, acc *Account, forceRef
 		// 读库失败不阻断刷新,继续用入口快照的 rt 尝试。
 	} else if changed && usable && !forceRefresh {
 		s.finishReloadedOAuthRefresh(ctx, acc)
+		s.clearClaudeStaleAuthFailure(ctx, acc)
 		return nil
 	} else if changed {
 		acc.mu.RLock()
@@ -145,12 +148,24 @@ func (s *Store) refreshClaudeAccount(ctx context.Context, acc *Account, forceRef
 		}
 	}
 
-	client := NewClaudeAuth(proxyURL)
-	td, err := client.RefreshTokens(ctx, rt)
-	if err != nil {
-		return fmt.Errorf("claude token 刷新失败: %w", err)
+	var td *ClaudeTokenData
+	var err error
+	if s.claudeTokenRefresh != nil {
+		td, err = s.claudeTokenRefresh(ctx, proxyURL, rt)
+	} else {
+		td, err = NewClaudeAuth(proxyURL).RefreshTokens(ctx, rt)
 	}
-	if strings.TrimSpace(td.AccessToken) == "" {
+	if err != nil {
+		wrapped := fmt.Errorf("claude token 刷新失败: %w", err)
+		// invalid_grant and the other permanent OAuth codes mean the refresh
+		// token itself is gone. Record bounded backoff and do not treat a
+		// transport or 5xx failure as the same revocation.
+		if IsPermanentRefreshFailure(err) {
+			s.markPermanentRefreshFailure(acc, wrapped)
+		}
+		return wrapped
+	}
+	if td == nil || strings.TrimSpace(td.AccessToken) == "" {
 		return fmt.Errorf("claude 刷新响应缺少 access_token")
 	}
 
@@ -178,7 +193,8 @@ func (s *Store) refreshClaudeAccount(ctx context.Context, acc *Account, forceRef
 		}
 	}
 
-	// 更新内存态与调度器。冷却中的账号保留冷却状态,仅刷新令牌。
+	// 更新内存态与调度器。限流等非鉴权冷却保留,只换令牌。
+	// unauthorized 冷却来自过期 AT 的 401:新令牌已经有效,不能继续盖住账号。
 	acc.mu.Lock()
 	acc.AccessToken = td.AccessToken
 	if strings.TrimSpace(td.RefreshToken) != "" {
@@ -194,10 +210,13 @@ func (s *Store) refreshClaudeAccount(ctx context.Context, acc *Account, forceRef
 	if plan := strings.TrimSpace(td.PlanType); plan != "" {
 		acc.PlanType = plan
 	}
-	if !cooldownActive {
+	unauthorized := strings.EqualFold(strings.TrimSpace(acc.CooldownReason), "unauthorized")
+	preserveCooldown := cooldownActive && !unauthorized
+	if !preserveCooldown {
 		acc.Status = StatusReady
 		acc.CooldownUtil = time.Time{}
 		acc.CooldownReason = ""
+		acc.ErrorMsg = ""
 	}
 	if acc.Status != StatusError {
 		acc.HealthTier = HealthTierHealthy
@@ -206,8 +225,100 @@ func (s *Store) refreshClaudeAccount(ctx context.Context, acc *Account, forceRef
 	acc.mu.Unlock()
 
 	s.fastSchedulerUpdate(acc)
-	if !cooldownActive && s.db != nil {
+	if !preserveCooldown && s.db != nil {
 		_ = s.db.ClearError(ctx, dbID)
+		s.deleteCachedAccountCooldown(dbID)
 	}
+	s.clearClaudeStaleAuthFailure(ctx, acc)
 	return nil
+}
+
+// ClaudeOAuthRefreshable reports whether an upstream 401 can be recovered by
+// refreshing this account's Claude OAuth refresh token once.
+func (a *Account) ClaudeOAuthRefreshable() bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if !a.isClaudeOAuthLocked() || a.isClaudeAPIKeyLocked() || a.isClaudeSetupTokenLocked() {
+		return false
+	}
+	return strings.TrimSpace(a.RefreshToken) != ""
+}
+
+// RefreshClaudeOAuthAfterUnauthorized exchanges the refresh token once after
+// an upstream 401, serialized by the shared OAuth refresh lease. A successful
+// exchange clears stale disabled, banned, and unauthorized cooldown state. A
+// revoked refresh token (invalid_grant) keeps the bounded permanent-refresh
+// backoff. Transport and upstream failures are returned without banning.
+func (s *Store) RefreshClaudeOAuthAfterUnauthorized(ctx context.Context, acc *Account) error {
+	if s == nil || acc == nil || !acc.ClaudeOAuthRefreshable() {
+		return fmt.Errorf("account is not a refreshable Claude OAuth account")
+	}
+	return s.refreshClaudeAccount(ctx, acc, false)
+}
+
+// SetClaudeTokenRefreshForTest replaces the Claude token endpoint. The
+// returned function restores the previous hook.
+func (s *Store) SetClaudeTokenRefreshForTest(fn func(context.Context, string, string) (*ClaudeTokenData, error)) func() {
+	if s == nil {
+		return func() {}
+	}
+	previous := s.claudeTokenRefresh
+	s.claudeTokenRefresh = fn
+	return func() { s.claudeTokenRefresh = previous }
+}
+
+// claudeAuthFailureNeedsBackgroundRefreshLocked reports a Claude OAuth account
+// whose access token was latched unauthorized while the refresh token may
+// still be valid. The caller holds acc.mu. Permanent refresh failures and
+// terminal errors stay excluded so a revoked token is not retried forever.
+func claudeAuthFailureNeedsBackgroundRefreshLocked(acc *Account) bool {
+	if acc == nil || !acc.isClaudeOAuthLocked() || acc.isClaudeAPIKeyLocked() || acc.isClaudeSetupTokenLocked() {
+		return false
+	}
+	if acc.Status == StatusError || acc.PermanentRefreshFailures > 0 || strings.TrimSpace(acc.RefreshToken) == "" {
+		return false
+	}
+	if atomic.LoadInt32(&acc.Disabled) != 0 || acc.healthTierLocked() == HealthTierBanned {
+		return true
+	}
+	return acc.Status == StatusCooldown && strings.EqualFold(strings.TrimSpace(acc.CooldownReason), "unauthorized")
+}
+
+// clearClaudeStaleAuthFailure drops the 401 latch after a Claude access token
+// has been refreshed or reloaded from another instance. Rate-limit cooldowns
+// are left in place.
+func (s *Store) clearClaudeStaleAuthFailure(ctx context.Context, acc *Account) {
+	if s == nil || acc == nil || !acc.IsClaudeOAuth() || acc.IsClaudeAPIKey() {
+		return
+	}
+	atomic.StoreInt32(&acc.Disabled, 0)
+	acc.mu.Lock()
+	unauthorized := strings.EqualFold(strings.TrimSpace(acc.CooldownReason), "unauthorized")
+	if unauthorized {
+		acc.Status = StatusReady
+		acc.CooldownUtil = time.Time{}
+		acc.CooldownReason = ""
+		acc.ErrorMsg = ""
+	}
+	if acc.Status != StatusError && (unauthorized || acc.HealthTier == HealthTierBanned) {
+		acc.HealthTier = HealthTierHealthy
+	}
+	acc.PermanentRefreshFailures = 0
+	acc.recomputeSchedulerLocked(s.maxConcurrency.Load())
+	dbID := acc.DBID
+	acc.mu.Unlock()
+	s.fastSchedulerUpdate(acc)
+	if !unauthorized {
+		return
+	}
+	s.deleteCachedAccountCooldown(dbID)
+	if s.db == nil || dbID <= 0 {
+		return
+	}
+	if err := s.db.ClearError(ctx, dbID); err != nil {
+		log.Printf("[账号 %d] 清理 Claude unauthorized 状态失败: %v", dbID, err)
+	}
 }
