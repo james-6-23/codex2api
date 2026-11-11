@@ -342,3 +342,22 @@ test('source switches preserve legacy defaults, change independently and save wi
  assert.equal(config.recovery_initial_seconds,300)
  assert.equal(config.adaptive_enabled,false)
 })
+
+test('adding a question works on insecure HTTP origins without crypto.randomUUID', async t => {
+ const page = await fixture(t)
+ // 模拟非安全上下文（HTTP 站点）：randomUUID 不存在，但 getRandomValues 仍在。
+ await page.evaluate(() => {
+  const source = window.crypto
+  const getRandomValues = source.getRandomValues.bind(source)
+  Object.defineProperty(window, 'crypto', { value: { getRandomValues } })
+ })
+ assert.equal(await page.evaluate(() => typeof crypto.randomUUID), 'undefined')
+ await page.getByRole('region', { name: '检测题库' }).getByRole('button', { name: '新增题目' }).click()
+ await page.getByLabel('题目正文').fill('回退题目正文')
+ await page.getByRole('button', { name: '保存配置', exact: true }).click()
+ const ids = await page.evaluate(() => window.__config.questions.map(q => q.id))
+ assert.equal(ids.length, 2)
+ assert.notEqual(ids[1], ids[0])
+ assert.match(ids[1], /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+ assert.equal(await page.evaluate(() => window.__config.questions[1].prompt), '回退题目正文')
+})
