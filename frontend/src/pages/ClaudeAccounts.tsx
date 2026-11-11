@@ -114,6 +114,7 @@ import { useToast } from "../hooks/useToast";
 import { useConfirmDialog } from "../hooks/useConfirmDialog";
 import { getErrorMessage } from "../utils/error";
 import { getAccountStatusBadgeStatus } from "../lib/usageFormat";
+import { scheduleAccountStatsPoll } from "../lib/accountStatsPoll";
 import {
   CLAUDE_TIMEZONE_CUSTOM,
   CLAUDE_TIMEZONE_OPTIONS,
@@ -806,6 +807,7 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
 
   // Request-count pills are filled by a detached usage_logs scan. Keep polling
   // until stats_state is ready so a slow scan does not leave them at zero.
+  // A hidden tab keeps the same delay and retry budget, then reloads once visible.
   const statsStaleRetriesRef = useRef(0);
   const statsReloadRef = useRef(reload);
   useEffect(() => {
@@ -820,12 +822,10 @@ export default function ClaudeAccounts({ headerSlot }: { headerSlot?: ReactNode 
     }
     const maxStatsRetries = disabledSorts.includes("requests") ? 60 : 20;
     if (statsStaleRetriesRef.current >= maxStatsRetries) return undefined;
-    const timer = window.setTimeout(() => {
-      if (document.hidden) return;
+    return scheduleAccountStatsPoll(3000, () => {
       statsStaleRetriesRef.current += 1;
       void reload({ silent: true });
-    }, 3000);
-    return () => window.clearTimeout(timer);
+    });
   }, [accounts, disabledSorts, loading, reload, statsState]);
 
   // 导入接口只负责入队，首轮 native Messages 采样在后台完成。对仍未

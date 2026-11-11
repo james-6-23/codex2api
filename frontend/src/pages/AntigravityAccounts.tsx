@@ -88,6 +88,7 @@ import {
   type ProxyBindingContext,
 } from "../lib/accountProxyBinding";
 import { shouldDeferAccountListFetch } from "../lib/accountListFetch";
+import { scheduleAccountStatsPoll } from "../lib/accountStatsPoll";
 import {
   isLargePoolSortDisabled,
   resolveDisabledAccountSorts,
@@ -505,6 +506,7 @@ function AntigravityAccounts({
   // Request-count pills come from a detached usage_logs scan. Poll while
   // stats_state is not ready so a slow scan cannot leave the pills at zero.
   // A few hundred thousand log rows can take longer than a handful of tries.
+  // A hidden tab keeps the same delay and retry budget, then reloads once visible.
   useEffect(() => {
     if (statsFilterKeyRef.current !== listFilterKey) {
       statsFilterKeyRef.current = listFilterKey;
@@ -517,12 +519,10 @@ function AntigravityAccounts({
     }
     const maxStatsRetries = (disabledSorts ?? []).includes("requests") ? 60 : 20;
     if (statsStaleRetriesRef.current >= maxStatsRetries) return undefined;
-    const timer = window.setTimeout(() => {
-      if (document.hidden) return;
+    return scheduleAccountStatsPoll(3000, () => {
       statsStaleRetriesRef.current += 1;
       void reload({ silent: true });
-    }, 3000);
-    return () => window.clearTimeout(timer);
+    });
   }, [accounts, disabledSorts, listFilterKey, loading, reload, statsState]);
 
   // 当前页的网关侧用量明细(今日 / 5h / 7d)与健康条;失败不阻断列表。
