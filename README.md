@@ -332,7 +332,7 @@ Each successful budget change receives a read-only generation and is polled by e
 | ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- |
 | `POST /v1/chat/completions`                            | Chat Completions style endpoint                                                                                                       |
 | `POST /v1/responses`                                   | Responses style endpoint                                                                                                              |
-| `POST /v1/images/generations`                          | OpenAI Images generation endpoint (gpt-image-2 / gpt-image-2.5 via Codex, grok-imagine via Grok)                                                      |
+| `POST /v1/images/generations`                          | OpenAI Images generation endpoint (gpt-image-2 / gpt-image-2.5 / gpt-image-2.6 via Codex, grok-imagine via Grok)                                      |
 | `POST /v1/images/edits`                                | OpenAI Images edit endpoint                                                                                                           |
 | `POST /v1/videos/generations`                          | Grok Imagine video generation (async, returns `request_id`)                                                                           |
 | `POST /v1/videos/edits` / `POST /v1/videos/extensions` | Grok Imagine video edit / extension                                                                                                   |

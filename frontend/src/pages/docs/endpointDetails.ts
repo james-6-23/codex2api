@@ -170,8 +170,8 @@ export function addEndpointDetails(
         "string",
         false,
         c(
-          "gpt-image-2、gpt-image-2.5-flare/sunburst 或可用 Grok Imagine 模型。",
-          "gpt-image-2, gpt-image-2.5-flare/sunburst or an available Grok Imagine model.",
+          "gpt-image-2、gpt-image-2.5/2.6（flare/sunburst）或可用 Grok Imagine 模型。",
+          "gpt-image-2, gpt-image-2.5/2.6 (flare/sunburst) or an available Grok Imagine model.",
         ),
         "gpt-image-2",
       ),
