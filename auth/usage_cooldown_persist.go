@@ -27,7 +27,11 @@ func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool
 	status, errorMsg := acc.Status, acc.ErrorMsg
 	reason, until := acc.CooldownReason, acc.CooldownUtil
 	acc.mu.RUnlock()
-	if !force && (!pending || status != StatusCooldown) {
+// A failed clear must also be retried: if the DB write of a runtime clear is
+// lost, the stale persisted cooldown survives and any later scheduler-outbox
+// reload (issue #813) resurrects it, blocking a healthy account with 429s.
+// The guard therefore only requires a pending write, for any runtime status.
+	if !force && !pending {
 		return
 	}
 	if status == StatusCooldown {
@@ -58,6 +62,12 @@ func (s *Store) persistAccountCooldownState(acc *Account, force, clearError bool
 	}
 	if err != nil {
 		log.Printf("[账号 %d] 持久化用量冷却失败: %v", acc.DBID, err)
+		// Keep a failed write pending so a later usage-frame publication
+		// retries it (issue #813). Otherwise a lost clear leaves the stale
+		// cooldown in the database forever.
+		acc.mu.Lock()
+		acc.usageCooldownPersistPending = true
+		acc.mu.Unlock()
 		return
 	}
 	acc.mu.Lock()
