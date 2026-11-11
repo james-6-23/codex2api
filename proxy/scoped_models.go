@@ -6,8 +6,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/api"
@@ -157,10 +160,18 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 		return ok
 	}
 
+	filteredCatalog := 0
+	filteredCatalogSample := make([]string, 0, 8)
+	visibleAccounts := 0
 	for _, account := range accounts {
 		if !h.accountVisibleToAPIKey(account, row.ID, now) {
+			filteredCatalog++
+			if len(filteredCatalogSample) < 8 {
+				filteredCatalogSample = append(filteredCatalogSample, catalogFilterSample(account))
+			}
 			continue
 		}
+		visibleAccounts++
 		switch {
 		case account.IsGrokAPI():
 			visible := GrokVisibleModelIDsForAccount(account)
@@ -301,7 +312,79 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 			addScopedModel(records, id, modelBackingCodex, time.Time{}, true)
 		}
 	}
+	if len(records) == 0 && (filteredCatalog > 0 || visibleAccounts > 0) {
+		logEmptyModelCatalog(row.ID, row.Limits.ResolveUpstreamChannel(), filteredCatalog, visibleAccounts, strings.Join(filteredCatalogSample, "; "))
+	}
 	return records
+}
+
+// catalogEmptyLogAt throttles the empty-catalog diagnostic. Clients poll
+// /v1/models, and one redacted line per key per minute is enough to explain
+// a stuck empty list.
+var (
+	catalogEmptyLogMu sync.Mutex
+	catalogEmptyLogAt = map[int64]time.Time{}
+)
+
+func logEmptyModelCatalog(keyID int64, channel string, filtered int, visible int, sample string) {
+	now := time.Now()
+	catalogEmptyLogMu.Lock()
+	if last, ok := catalogEmptyLogAt[keyID]; ok && now.Sub(last) < time.Minute {
+		catalogEmptyLogMu.Unlock()
+		return
+	}
+	catalogEmptyLogAt[keyID] = now
+	if len(catalogEmptyLogAt) > 1024 {
+		for id, at := range catalogEmptyLogAt {
+			if now.Sub(at) >= time.Minute {
+				delete(catalogEmptyLogAt, id)
+			}
+		}
+	}
+	catalogEmptyLogMu.Unlock()
+	log.Printf("model catalog empty for api_key_id=%d channel=%s filtered=%d visible=%d sample=%s", keyID, channel, filtered, visible, sample)
+}
+
+// catalogFilterSample is a redacted reason an account contributed no models.
+// It never includes tokens, email, or proxy URLs.
+func catalogFilterSample(account *auth.Account) string {
+	if account == nil {
+		return "id=0 reason=nil"
+	}
+	upstream := strings.TrimSpace(account.UpstreamType)
+	if len(upstream) > 32 {
+		upstream = upstream[:32]
+	}
+	return fmt.Sprintf("id=%d upstream=%s reason=%s", account.ID(), upstream, catalogFilterReason(account))
+}
+
+func catalogFilterReason(account *auth.Account) string {
+	if account == nil {
+		return "nil"
+	}
+	disabled := atomic.LoadInt32(&account.Disabled) != 0
+	if disabled && account.IsBanned() {
+		return "disabled_banned"
+	}
+	if disabled {
+		return "disabled"
+	}
+	if atomic.LoadInt32(&account.DispatchPaused) != 0 {
+		return "dispatch_paused"
+	}
+	if atomic.LoadInt32(&account.IntelligencePaused) != 0 {
+		return "intelligence_paused"
+	}
+	if !account.ModelCatalogEligible() && !account.DaybreakCatalogEligible() {
+		if account.IsBanned() {
+			return "banned"
+		}
+		if status := account.RuntimeStatus(); status != "" {
+			return "catalog_" + status
+		}
+		return "catalog_ineligible"
+	}
+	return "scope"
 }
 
 func (h *Handler) scopedModels(ctx context.Context, row *database.APIKeyRow) []api.Model {

@@ -3993,6 +3993,7 @@ type Store struct {
 	promptRiskTrustPolicies            map[string]database.PromptRiskTrustPolicy
 	usageProbeMu                       sync.RWMutex
 	usageProbe                         func(context.Context, *Account) error
+	claudeTokenRefresh                 func(context.Context, string, string) (*ClaudeTokenData, error)
 	usageProbeCompletion               func()
 	usageProbeBatch                    atomic.Bool
 	antigravityCatalogBatch            atomic.Bool

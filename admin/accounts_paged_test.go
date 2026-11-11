@@ -370,7 +370,7 @@ func TestLargePoolEnablesUsageSortAfterBatchedCache(t *testing.T) {
 		2: {AccountID: 2, SuccessCount: 9},
 	}, map[int64]*database.AccountTimeRangeUsage{
 		2: {AccountID: 2, Requests: 9},
-	}, database.StartOfDay(time.Now()))
+	}, database.StartOfDay(time.Now()), false, nil)
 	if got := handler.disabledUsageSorts(database.UpstreamChannelCodex, requestCountFullPoolScanMax+1); got != nil {
 		t.Fatalf("disabled sorts after batched cache = %v, want nil", got)
 	}
@@ -837,7 +837,7 @@ func TestBatchOperationsRejectIDsTogetherWithSelector(t *testing.T) {
 // 该刷新完成时会推进快照代数;若抢在同步重建安装快照之前落地,快照根本不会
 // 入缓存,后续"命中热快照"的断言就成了对全量投影的断言(CI 上偶发失败)。
 func warmRequestCountCache(handler *Handler, channel string) {
-	handler.storeRequestCountCache(channel, map[int64]*database.AccountRequestCount{}, map[int64]*database.AccountTimeRangeUsage{}, time.Time{})
+	handler.storeRequestCountCache(channel, map[int64]*database.AccountRequestCount{}, map[int64]*database.AccountTimeRangeUsage{}, time.Time{}, false, nil)
 }
 
 func TestAccountMutationInvalidationServesFreshSummary(t *testing.T) {
