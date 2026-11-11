@@ -17,7 +17,7 @@
 
 ### 前置要求
 
-- Go 1.26.10 或更高版本
+- Go 1.26.11 或更高版本
 - Node.js 22.12 或更高版本
 - Docker 和 Docker Compose
 - Git

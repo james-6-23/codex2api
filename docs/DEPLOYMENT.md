@@ -235,7 +235,7 @@ https://<your-service>.onrender.com/health
 
 ### 环境要求
 
-- Go 1.26.10+
+- Go 1.26.11+
 - Node.js 22.12+
 - PostgreSQL 14+ (可选，可用 SQLite)
 - Redis 7+ (可选，可用内存缓存)
