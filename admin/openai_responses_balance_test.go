@@ -85,16 +85,17 @@ func TestQueryOpenAIResponsesBalanceFallsBackToNewAPI(t *testing.T) {
 
 func TestQueryOpenAIResponsesBalanceUsesNewAPITokenEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/usage" {
+		switch r.URL.Path {
+		case "/v1/usage":
 			http.NotFound(w, r)
-			return
+		case "/api/usage/token/":
+			_, _ = w.Write([]byte(`{"code":true,"data":{"total_available":450000,"unlimited_quota":false}}`))
+		case "/api/status":
+			_, _ = w.Write([]byte(`{"success":true,"data":{"quota_per_unit":500000}}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
 		}
-		if r.URL.Path != "/api/usage/token/" {
-			t.Errorf("path = %s, want /api/usage/token/", r.URL.Path)
-			http.Error(w, "unexpected path", http.StatusNotFound)
-			return
-		}
-		_, _ = w.Write([]byte(`{"code":true,"data":{"total_available":4500,"unlimited_quota":false}}`))
 	}))
 	defer server.Close()
 
@@ -102,7 +103,83 @@ func TestQueryOpenAIResponsesBalanceUsesNewAPITokenEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query balance: %v", err)
 	}
-	if got.Balance != 4500 || got.Unit != "quota" || got.Source != "new-api" || got.Unlimited {
+	// New API 的 total_available 是原始 quota 单位，必须按 /api/status 的
+	// quota_per_unit 换算成 USD，而不是直接透传 quota 数值。
+	if got.Balance != 0.9 || got.Unit != "USD" || got.Source != "new-api" || got.Unlimited {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestQueryOpenAIResponsesBalanceNewAPITokenUnlimited(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/usage":
+			http.NotFound(w, r)
+		case "/api/usage/token/":
+			_, _ = w.Write([]byte(`{"code":true,"data":{"total_available":-1,"unlimited_quota":true}}`))
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	got, err := queryOpenAIResponsesBalance(context.Background(), server.URL, "sk-test", "", nil, "")
+	if err != nil {
+		t.Fatalf("query balance: %v", err)
+	}
+	if !got.Unlimited || got.Source != "new-api" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestQueryOpenAIResponsesBalanceNewAPITokenFallsBackWithoutStatus(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/usage":
+			http.NotFound(w, r)
+		case "/api/usage/token/":
+			_, _ = w.Write([]byte(`{"code":true,"data":{"total_available":450000,"unlimited_quota":false}}`))
+		case "/v1/dashboard/billing/subscription":
+			_, _ = w.Write([]byte(`{"hard_limit_usd":100}`))
+		case "/v1/dashboard/billing/usage":
+			_, _ = w.Write([]byte(`{"total_usage":1250}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	// /api/status 不可用（换算失败）时应回退到 billing 端点，而不是透传 quota 值。
+	got, err := queryOpenAIResponsesBalance(context.Background(), server.URL, "sk-test", "", nil, "")
+	if err != nil {
+		t.Fatalf("query balance: %v", err)
+	}
+	if got.Balance != 87.5 || got.Unit != "USD" || got.Source != "new-api" {
+		t.Fatalf("got %#v", got)
+	}
+}
+
+func TestQueryOpenAIResponsesBalanceNewAPIBillingUnlimitedSentinel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/usage", "/api/usage/token/":
+			http.NotFound(w, r)
+		case "/v1/dashboard/billing/subscription":
+			_, _ = w.Write([]byte(`{"hard_limit_usd":100000000,"soft_limit_usd":100000000,"system_hard_limit_usd":100000000}`))
+		case "/v1/dashboard/billing/usage":
+			_, _ = w.Write([]byte(`{"total_usage":1250}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	got, err := queryOpenAIResponsesBalance(context.Background(), server.URL, "sk-test", "", nil, "")
+	if err != nil {
+		t.Fatalf("query balance: %v", err)
+	}
+	if !got.Unlimited || got.Balance != 0 || got.Source != "new-api" {
 		t.Fatalf("got %#v", got)
 	}
 }

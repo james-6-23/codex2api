@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -303,6 +304,47 @@ func parseOpenAIResponsesBalancePayload(body []byte) (openAIResponsesBalanceResp
 	return openAIResponsesBalanceResponse{Balance: amount, Unit: unit, Unlimited: unlimited}, nil
 }
 
+// parseNewAPITokenUsageBalance 解析 New API /api/usage/token/ 响应。New API 的
+// total_available 是原始 quota 单位（默认每 USD 500000 quota），直接透传会让成本列
+// 显示形如 "4500000 quota" 的无效余额。这里与 New API 自身的渠道余额查询保持一致：
+// 取 min(token 剩余, 用户剩余)，再用上游 /api/status 公开的 quota_per_unit 换算成
+// USD。换算失败时报错，让调用方回退到 billing 端点。
+func parseNewAPITokenUsageBalance(
+	ctx context.Context,
+	client *http.Client,
+	body []byte,
+	baseURL, apiKey string,
+	customHeaders map[string]string,
+) (openAIResponsesBalanceResponse, error) {
+	data := gjson.GetBytes(body, "data")
+	if !data.Exists() {
+		return openAIResponsesBalanceResponse{}, fmt.Errorf("响应中未找到 data")
+	}
+	if data.Get("unlimited_quota").Bool() {
+		return openAIResponsesBalanceResponse{Unit: "quota", Unlimited: true}, nil
+	}
+	remaining := data.Get("total_available").Float()
+	if userQuota := data.Get("user_quota.total_available"); userQuota.Exists() {
+		remaining = math.Min(remaining, userQuota.Float())
+	}
+	if remaining < 0 {
+		remaining = 0
+	}
+	statusURL, err := openAIResponsesOriginEndpoint(baseURL, "/api/status")
+	if err != nil {
+		return openAIResponsesBalanceResponse{}, err
+	}
+	statusBody, err := fetchOpenAIResponsesBalancePayload(ctx, client, statusURL, apiKey, customHeaders)
+	if err != nil {
+		return openAIResponsesBalanceResponse{}, fmt.Errorf("quota 换算失败: %w", err)
+	}
+	quotaPerUnit := gjson.GetBytes(statusBody, "data.quota_per_unit").Float()
+	if quotaPerUnit <= 0 {
+		return openAIResponsesBalanceResponse{}, fmt.Errorf("quota 换算失败: /api/status 响应缺少有效的 quota_per_unit")
+	}
+	return openAIResponsesBalanceResponse{Balance: remaining / quotaPerUnit, Unit: "USD"}, nil
+}
+
 func queryNewAPIBalance(
 	ctx context.Context,
 	client *http.Client,
@@ -315,7 +357,7 @@ func queryNewAPIBalance(
 	}
 	tokenAttempt := ""
 	if tokenBody, tokenErr := fetchOpenAIResponsesBalancePayload(ctx, client, tokenURL, apiKey, customHeaders); tokenErr == nil {
-		if result, parseErr := parseOpenAIResponsesBalancePayload(tokenBody); parseErr == nil {
+		if result, parseErr := parseNewAPITokenUsageBalance(ctx, client, tokenBody, baseURL, apiKey, customHeaders); parseErr == nil {
 			result.Source = "new-api"
 			if result.Unit == "" {
 				result.Unit = "quota"
@@ -348,6 +390,15 @@ func queryNewAPIBalance(
 	totalUsage := gjson.GetBytes(usageBody, "total_usage")
 	if !hardLimit.Exists() || !totalUsage.Exists() {
 		return openAIResponsesBalanceResponse{}, fmt.Errorf("%s; 账单响应缺少 hard_limit_usd 或 total_usage", tokenAttempt)
+	}
+	// New API 对无限额度令牌回填 100000000 哨兵值（soft/hard/system 三字段同源），
+	// 不能当作真实余额参与减法。
+	softLimit := gjson.GetBytes(subscriptionBody, "soft_limit_usd")
+	systemLimit := gjson.GetBytes(subscriptionBody, "system_hard_limit_usd")
+	if hardLimit.Float() >= 100000000 &&
+		(!softLimit.Exists() || softLimit.Float() == hardLimit.Float()) &&
+		(!systemLimit.Exists() || systemLimit.Float() == hardLimit.Float()) {
+		return openAIResponsesBalanceResponse{Balance: 0, Unit: "quota", Unlimited: true, Source: "new-api"}, nil
 	}
 	balance := hardLimit.Float() - totalUsage.Float()/100
 	if balance < 0 {
