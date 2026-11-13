@@ -329,7 +329,7 @@ func antigravityCanonicalPricingModel(model string) string {
 	}
 	lower := strings.ToLower(strings.TrimSpace(normalized))
 	if strings.HasPrefix(lower, "gemini-") {
-		for _, suffix := range []string{"-high", "-medium", "-low", "-tiered"} {
+		for _, suffix := range []string{"-xhigh", "-high", "-medium", "-low", "-tiered"} {
 			if strings.HasSuffix(lower, suffix) {
 				return strings.TrimSuffix(lower, suffix)
 			}
