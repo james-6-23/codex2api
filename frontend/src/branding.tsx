@@ -1,4 +1,6 @@
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useState } from 'react'
+import { useTranslation } from 'react-i18next'
+import { useLocation } from 'react-router-dom'
 import { api } from './api'
 import type { SiteBranding } from './types'
 import defaultLogo from './assets/logo.png'
@@ -77,6 +79,8 @@ function setIconLink(rel: string, href: string) {
 }
 
 export function BrandingProvider({ children }: PropsWithChildren) {
+  const { pathname } = useLocation()
+  const { t } = useTranslation()
   const [branding, setBranding] = useState<SiteBranding>({
     site_name: DEFAULT_SITE_NAME,
     site_logo: '',
@@ -122,10 +126,23 @@ export function BrandingProvider({ children }: PropsWithChildren) {
   const faviconHref = siteLogo || DEFAULT_FAVICON
 
   useEffect(() => {
-    document.title = `${siteName} 管理后台`
+    const [, portal, view] = pathname.split('/')
+    if (portal === 'key-usage') {
+      const activeView = view === 'quota' || view === 'logs' ? view : 'overview'
+      document.title = `${t(`keyUsage.views.${activeView}`)} · ${t('keyUsage.title')} · ${siteName}`
+    } else if (portal === 'image-studio') {
+      document.title = `${t('imageStudioPortal.title')} · ${siteName}`
+    } else if (portal === 'account-portal') {
+      document.title = `${t('accountPortal.title')} · ${siteName}`
+    } else {
+      document.title = `${siteName} ${t('auth.title')}`
+    }
+  }, [pathname, siteName, t])
+
+  useEffect(() => {
     setIconLink('icon', faviconHref)
     setIconLink('apple-touch-icon', faviconHref)
-  }, [faviconHref, siteName])
+  }, [faviconHref])
 
   const value = useMemo<BrandingContextValue>(() => ({
     siteName,
