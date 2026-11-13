@@ -1125,6 +1125,11 @@ func (db *DB) migrate(ctx context.Context) error {
 		return db.migrateSQLite(ctx)
 	}
 	query := codexClientVersionCacheSchema + `;
+	CREATE TABLE IF NOT EXISTS key_usage_account_permissions (key_id BIGINT PRIMARY KEY, view_enabled BOOLEAN NOT NULL DEFAULT FALSE, reset_enabled BOOLEAN NOT NULL DEFAULT FALSE);
+	CREATE TABLE IF NOT EXISTS key_usage_reset_attempts (request_id TEXT PRIMARY KEY, key_id BIGINT NOT NULL, account_id BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
+	CREATE TABLE IF NOT EXISTS key_usage_reset_leases (scope TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at BIGINT NOT NULL);
+	CREATE TABLE IF NOT EXISTS key_usage_reset_cooldowns (scope TEXT PRIMARY KEY, expires_at BIGINT NOT NULL);
+	CREATE TABLE IF NOT EXISTS key_usage_reset_uncertain (scope TEXT PRIMARY KEY, request_id TEXT NOT NULL, source TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 	CREATE TABLE IF NOT EXISTS accounts (
 		id            SERIAL PRIMARY KEY,
 		name          VARCHAR(255) DEFAULT '',

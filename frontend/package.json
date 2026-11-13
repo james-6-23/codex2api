@@ -10,6 +10,7 @@
     "test": "node --experimental-strip-types --test src/lib/*.test.mjs",
     "test:svg": "node --experimental-strip-types --test tests/qualityTestSVG.browser.test.mjs",
     "test:intelligence": "node --experimental-strip-types --test tests/intelligenceCheck.browser.test.mjs",
+    "test:key-usage": "node --experimental-strip-types --test tests/keyUsageAccounts.browser.test.mjs",
     "test:version": "node --experimental-strip-types --test tests/useVersionCheck.browser.test.mjs",
     "typecheck": "tsc --noEmit",
     "audit:ci": "node scripts/audit-gate.mjs"

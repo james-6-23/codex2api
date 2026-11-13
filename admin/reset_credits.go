@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -211,12 +212,62 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 		return resetCreditConsumeOutcome{InProgress: true}, nil
 	}
 	defer releaseLease()
-	if source == "auto" {
+	sameAutoRetry := false
+	if h.db != nil && (source == "auto" || strings.HasPrefix(source, "key_usage:")) {
+		previousID, previousSource, uncertain, err := h.db.GetKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account))
+		if err != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("read reset uncertainty: %w", err)}
+		}
+		sameAutoRetry = uncertain && source == "auto" && previousSource == "auto" && redeemRequestID != "" && previousID == redeemRequestID
+		if uncertain && !sameAutoRetry {
+			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
+		}
+	}
+	if source == "auto" || strings.HasPrefix(source, "key_usage:") {
 		coolingDown, cooldownErr := h.resetCreditCooldownActive(ctx, account)
 		if cooldownErr != nil {
 			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("recheck reset-credit cooldown: %w", cooldownErr)}
 		}
 		if coolingDown {
+			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
+		}
+	}
+	if h.db != nil {
+		now := time.Now()
+		scope, expires := resetCreditDatabaseScope(account), now.Add(autoResetCreditsScanInterval).Unix()
+		if source == "auto" || strings.HasPrefix(source, "key_usage:") {
+			allowed, err := h.db.ReserveKeyUsageResetCooldown(ctx, scope, now.Unix(), expires)
+			if err != nil {
+				return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("reserve reset cooldown: %w", err)}
+			}
+			if !allowed {
+				return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
+			}
+		} else if err := h.db.RecordKeyUsageResetCooldown(ctx, scope, expires); err != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("record reset cooldown: %w", err)}
+		}
+	} else if strings.HasPrefix(source, "key_usage:") {
+		return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("reset database unavailable")}
+	}
+	if strings.HasPrefix(source, "key_usage:") {
+		keyID, err := strconv.ParseInt(strings.TrimPrefix(source, "key_usage:key_id="), 10, 64)
+		if err != nil || keyID <= 0 {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("invalid reset key identity")}
+		}
+		reserved, err := h.db.ReserveKeyUsageReset(ctx, redeemRequestID, keyID, account.DBID)
+		if err != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("reserve reset request: %w", err)}
+		}
+		if !reserved {
+			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
+		}
+	}
+	if h.db != nil && (source == "auto" || strings.HasPrefix(source, "key_usage:")) {
+		reserved, err := h.db.ReserveKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account), redeemRequestID, source)
+		if err != nil {
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("reserve reset uncertainty: %w", err)}
+		}
+		if !reserved && !sameAutoRetry {
 			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
 		}
 	}
@@ -242,6 +293,13 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 	}
 	if err != nil {
 		return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{Status: status, RequestErr: err}
+	}
+	if h.db != nil && (source == "auto" || strings.HasPrefix(source, "key_usage:")) {
+		if err := h.db.ClearKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account)); err != nil {
+			// The upstream succeeded. Keep the uncertainty fence and return a
+			// generic failure so an administrator can reconcile it safely.
+			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("clear reset uncertainty: %w", err)}
+		}
 	}
 
 	outcome := resetCreditConsumeOutcome{Remaining: h.applyOptimisticResetDecrement(account)}
@@ -288,22 +346,50 @@ func (h *Handler) rememberAutoResetCreditRequest(redeemRequestID string, now tim
 }
 
 func (h *Handler) acquireResetCreditLease(ctx context.Context, account *auth.Account) (bool, func(), error) {
-	if h == nil || h.cache == nil {
+	if h == nil {
 		return true, func() {}, nil
 	}
 	owner := uuid.New().String()
 	key := resetCreditLockKey(account)
-	acquired, err := h.cache.AcquireLease(ctx, "reset-credit", key, owner, resetCreditLeaseTTL)
-	if err != nil || !acquired {
-		return acquired, func() {}, err
+	scope := resetCreditDatabaseScope(account)
+	if h.db != nil {
+		now := time.Now()
+		acquired, err := h.db.AcquireKeyUsageResetLease(ctx, scope, owner, now.Unix(), now.Add(resetCreditLeaseTTL).Unix())
+		if err != nil || !acquired {
+			return acquired, func() {}, err
+		}
+	}
+	releaseDB := func() {
+		if h.db != nil {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := h.db.ReleaseKeyUsageResetLease(releaseCtx, scope, owner); err != nil {
+				log.Printf("释放重置数据库租约失败: %v", err)
+			}
+		}
+	}
+	if h.cache != nil {
+		acquired, err := h.cache.AcquireLease(ctx, "reset-credit", key, owner, resetCreditLeaseTTL)
+		if err != nil || !acquired {
+			releaseDB()
+			return acquired, func() {}, err
+		}
 	}
 	return true, func() {
-		releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer cancel()
-		if releaseErr := h.cache.ReleaseLease(releaseCtx, "reset-credit", key, owner); releaseErr != nil {
-			log.Printf("[账号 %d] 释放主动重置分布式租约失败: %v", account.DBID, releaseErr)
+		if h.cache != nil {
+			releaseCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if releaseErr := h.cache.ReleaseLease(releaseCtx, "reset-credit", key, owner); releaseErr != nil {
+				log.Printf("[账号 %d] 释放主动重置分布式租约失败: %v", account.DBID, releaseErr)
+			}
 		}
+		releaseDB()
 	}, nil
+}
+
+func resetCreditDatabaseScope(account *auth.Account) string {
+	sum := sha256.Sum256([]byte(resetCreditLockKey(account)))
+	return fmt.Sprintf("%x", sum[:])
 }
 
 func (h *Handler) resetCreditConsumedRecently(account *auth.Account, now time.Time, window time.Duration) bool {

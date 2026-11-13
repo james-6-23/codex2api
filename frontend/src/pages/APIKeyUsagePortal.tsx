@@ -1,4 +1,5 @@
 import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
+import KeyUsageAccounts from '../components/KeyUsageAccounts'
 import { mediaBillingUnit } from '../lib/imageBilling'
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -481,6 +482,7 @@ export default function APIKeyUsagePortal() {
                   <LimitsCard limits={data.key.limits} />
                 </div>
                 <APIKeyModelRequestUsageCard items={data.model_request_usage ?? []} />
+                <KeyUsageAccounts apiKey={activeAPIKey} />
               </div>
             ) : null}
 

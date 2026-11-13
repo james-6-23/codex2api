@@ -11,6 +11,7 @@ import { useTranslation } from "react-i18next";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import APIKeyConcurrencyBadge, { useAPIKeyConcurrency } from "../components/APIKeyConcurrencyBadge";
+import KeyUsageAccountPermissions from "../components/KeyUsageAccountPermissions";
 import APIKeyChannelBadge from "../components/APIKeyChannelBadge";
 import APIKeyTokenUsagePanel from "../components/APIKeyTokenUsagePanel";
 import APIKeyModelRequestLimitsEditor from "../components/APIKeyModelRequestLimitsEditor";
@@ -2018,6 +2019,7 @@ export default function APIKeys() {
                     <p className="text-sm leading-relaxed text-muted-foreground">
                       {t("apiKeys.keyAuthNote")}
                     </p>
+                    <KeyUsageAccountPermissions keys={keys} />
                     <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold text-foreground">

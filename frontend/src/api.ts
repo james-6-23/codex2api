@@ -326,6 +326,25 @@ async function requestAccountPortal<T>(path: string, options: RequestInit = {}):
   return (text ? JSON.parse(text) : undefined) as T
 }
 
+export interface PublicKeyUsageAccount {
+  id: number
+  name: string
+  email: string
+  plan_type: string
+  status: string
+  group_ids: number[]
+  usage_percent_5h: number | null
+  usage_percent_7d: number | null
+  long_window_seconds?: number
+  reset_5h_at?: string
+  reset_7d_at?: string
+  usage_updated_at_5h?: string
+  usage_updated_at_7d?: string
+  reset_credits?: number
+  reset_allowed: boolean
+  reset_uncertain: boolean
+}
+
 async function requestAPIKeyUsage<T>(path: string, apiKey: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers)
   headers.set('Authorization', `Bearer ${apiKey}`)
@@ -570,6 +589,12 @@ export interface ModelTraceBankUpdateResult extends ModelTraceBankStatus {
 }
 
 export const api = {
+  getKeyUsageAccountPermissions: (id: number) => request<{ view_enabled: boolean; reset_enabled: boolean }>(`/key-usage-account-permissions/${id}`),
+  setKeyUsageAccountPermissions: (id: number, data: { view_enabled: boolean; reset_enabled: boolean }) =>
+    request<{ view_enabled: boolean; reset_enabled: boolean }>(`/key-usage-account-permissions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+  clearKeyUsageResetUncertain: (accountID: number) => request<{ message: string }>(`/key-usage-reset-uncertain/${accountID}`, { method: 'DELETE' }),
+  getPublicKeyUsageAccounts: (key: string) => requestAPIKeyUsage<{ accounts: PublicKeyUsageAccount[]; groups: { id: number; name: string }[]; reset_enabled: boolean }>('/accounts', key),
+  resetPublicKeyUsageCredits: (key: string, id: number, requestID: string) => requestAPIKeyUsage<{ message: string; usage_refreshed: boolean }>(`/accounts/${id}/reset-credits`, key, { method: 'POST', headers: { 'Idempotency-Key': requestID } }),
   getBranding: () => requestPublic<SiteBranding>('/api/branding'),
   // 公开账号自助门户:生成 OpenAI 授权链接(无鉴权)。
   generateAccountPortalAuthURL: (data: { contact_email: string }) =>
