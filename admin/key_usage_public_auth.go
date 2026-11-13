@@ -4,12 +4,18 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"log"
 	"net/http"
 
 	"github.com/codex2api/database"
 	"github.com/codex2api/security"
 	"github.com/gin-gonic/gin"
 )
+
+func writePublicKeyUsageInternalError(c *gin.Context, err error) {
+	log.Printf("[key-usage] backend failure type=%T", err)
+	writeError(c, http.StatusInternalServerError, "服务内部错误，请联系管理员")
+}
 
 func (h *Handler) publicAPIKeyUsageRow(c *gin.Context, ctx context.Context) *database.APIKeyRow {
 	if h == nil || h.db == nil {
@@ -18,7 +24,7 @@ func (h *Handler) publicAPIKeyUsageRow(c *gin.Context, ctx context.Context) *dat
 	}
 	enabled, err := h.PublicAPIKeyUsagePageEnabled(ctx)
 	if err != nil {
-		writeInternalError(c, err)
+		writePublicKeyUsageInternalError(c, err)
 		return nil
 	}
 	if !enabled {
@@ -37,7 +43,7 @@ func (h *Handler) publicAPIKeyUsageRow(c *gin.Context, ctx context.Context) *dat
 		return nil
 	}
 	if err != nil {
-		writeInternalError(c, err)
+		writePublicKeyUsageInternalError(c, err)
 		return nil
 	}
 	// 过期或额度用尽仍可查询，管理员停用的凭据直接拒绝。

@@ -111,6 +111,11 @@ func (db *DB) configureSQLite(ctx context.Context) error {
 func (db *DB) migrateSQLite(ctx context.Context) error {
 	statements := []string{
 		codexClientVersionCacheSchema,
+		`CREATE TABLE IF NOT EXISTS key_usage_account_permissions (key_id INTEGER PRIMARY KEY, view_enabled BOOLEAN NOT NULL DEFAULT 0, reset_enabled BOOLEAN NOT NULL DEFAULT 0);`,
+		`CREATE TABLE IF NOT EXISTS key_usage_reset_attempts (request_id TEXT PRIMARY KEY, key_id INTEGER NOT NULL, account_id INTEGER NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);`,
+		`CREATE TABLE IF NOT EXISTS key_usage_reset_leases (scope TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at BIGINT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS key_usage_reset_cooldowns (scope TEXT PRIMARY KEY, expires_at BIGINT NOT NULL);`,
+		`CREATE TABLE IF NOT EXISTS key_usage_reset_uncertain (scope TEXT PRIMARY KEY, request_id TEXT NOT NULL, source TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);`,
 		`CREATE TABLE IF NOT EXISTS accounts (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT DEFAULT '',

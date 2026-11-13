@@ -10300,6 +10300,25 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	allowedPlans := s.apiKeyAllowedPlanSets[apiKeyID]
 	channel := s.apiKeyUpstreamChannels[apiKeyID]
 	s.apiKeyGroupsMu.RUnlock()
+	return apiKeyAllowsAccountConstraints(acc, allowedGroups, noAffinityGroups, allowedPlans, channel)
+}
+
+// APIKeyRowAllowsAccount evaluates the current database row without relying on
+// asynchronously refreshed scheduler caches.
+func APIKeyRowAllowsAccount(row *database.APIKeyRow, acc *Account) bool {
+	if row == nil || acc == nil || row.ID <= 0 || !acc.AllowsAPIKey(row.ID) {
+		return false
+	}
+	groups := int64Set(normalizeAllowedGroupIDs(row.AllowedGroupIDs))
+	noAffinity := int64Set(normalizeAllowedGroupIDs(row.Limits.NoAffinityGroupIDs))
+	plans := make(map[string]struct{})
+	for _, plan := range normalizeAllowedPlans(row.Limits.PlanAllow) {
+		plans[plan] = struct{}{}
+	}
+	return apiKeyAllowsAccountConstraints(acc, groups, noAffinity, plans, row.Limits.ResolveUpstreamChannel())
+}
+
+func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroups map[int64]struct{}, allowedPlans map[string]struct{}, channel string) bool {
 	// 渠道限定是硬门：grok 渠道只允许 Grok 账号，codex 渠道排除 Grok 账号。
 	switch channel {
 	case database.UpstreamChannelGrok:

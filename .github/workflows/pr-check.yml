@@ -61,6 +61,10 @@ jobs:
         working-directory: frontend
         run: npm run test:intelligence
 
+      - name: Test API key account portal in the browser
+        working-directory: frontend
+        run: npm run test:key-usage
+
       - name: Build frontend
         working-directory: frontend
         env:
@@ -129,7 +133,7 @@ jobs:
       - name: Test PostgreSQL compatibility and pending-account transactions
         env:
           CODEX2API_TEST_POSTGRES_DSN: postgres://codex2api_test:test-only@localhost:5432/codex2api_test?sslmode=disable
-        run: go test -race -count=1 ./database -run '^(TestPostgresTraceAndCapabilities|TestIntelligenceCheckPostgres|TestPendingAccountTransaction)$'
+        run: go test -race -count=1 ./database -run '^(TestPostgresTraceAndCapabilities|TestIntelligenceCheckPostgres|TestPendingAccountTransaction|TestKeyUsageAccountPermissionsPostgres)$'
 
   test-race:
     name: test-race (${{ matrix.name }})

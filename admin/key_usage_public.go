@@ -72,12 +72,12 @@ func (h *Handler) GetPublicAPIKeyUsageSummary(c *gin.Context) {
 
 	report, err := h.db.GetAPIKeySelfUsageReportFiltered(ctx, row.ID, rangeStart, rangeEnd, logPage, logPageSize, logFilter)
 	if err != nil {
-		writeInternalError(c, err)
+		writePublicKeyUsageInternalError(c, err)
 		return
 	}
 	modelRequestUsage, err := h.db.GetAPIKeyModelRequestUsage(ctx, row.ID, row.Limits.ModelRequestLimits, rangeEnd)
 	if err != nil {
-		writeInternalError(c, err)
+		writePublicKeyUsageInternalError(c, err)
 		return
 	}
 	if modelRequestUsage == nil {

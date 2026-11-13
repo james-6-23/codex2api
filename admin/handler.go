@@ -1116,6 +1116,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	keyUsage.GET("/summary", h.GetPublicAPIKeyUsageSummary)
 	keyUsage.GET("/me", h.GetPublicAPIKeyUsageSummary)
 	keyUsage.GET("/concurrency", h.GetPublicAPIKeyConcurrency)
+	keyUsage.GET("/accounts", h.GetPublicKeyUsageAccounts)
+	keyUsage.POST("/accounts/:id/reset-credits", h.ResetPublicKeyUsageAccountCredits)
 
 	// 账号自助添加公开门户（无 admin 鉴权；开关门控 + IP 限流；见 self_service.go）
 	accountPortal := r.Group("/api/account-portal")
@@ -1152,6 +1154,9 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 		}
 	})
 	api.GET("/stats", h.GetStats)
+	api.GET("/key-usage-account-permissions/:id", h.GetKeyUsageAccountPermissions)
+	api.PUT("/key-usage-account-permissions/:id", h.SetKeyUsageAccountPermissions)
+	api.DELETE("/key-usage-reset-uncertain/:id", h.ClearKeyUsageResetUncertain)
 	api.GET("/accounts", h.ListAccounts)
 	api.GET("/accounts/analysis", h.GetAccountAnalysis)
 	api.GET("/accounts/page-stats", h.GetAccountPageStats)
