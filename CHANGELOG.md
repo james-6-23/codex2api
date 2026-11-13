@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.1.6 - 2026-11-14
+
+### Features
+
+- **API Key holders can view account usage and use reset credits when enabled (#878, @Blaskyy).** Adds account names, email addresses, usage windows and cached reset-credit counts to the self-service quota page, with group, channel, plan and account-side authorization checks. Global viewing and reset switches default to off; individual keys inherit the global policy unless restricted. Reset requests require an unexpired key and affect the shared upstream workspace. PostgreSQL and SQLite migrations add permission, request-deduplication, lease, cooldown and pending-reconciliation records, with an administrator action to clear unresolved reset state. Expired keys retain read access when viewing is enabled.
+
+### Fixes
+
+- **Antigravity Gemini `-xhigh` variants inherit base-model pricing (#877, @yanhao98).** Recognizes the `-xhigh` suffix during pricing alias resolution, so variants such as `gemini-4-hydrogen-xhigh` inherit synchronized base-model prices while retaining independent management keys and explicit custom-price overrides.
+
+- **Public portal browser titles reflect the current page.** API Key usage tabs show the active overview, quota or request-log section together with the site name. Image Studio and account-contribution portals use their own titles instead of the administrator label. Titles follow language and branding changes, and the initial HTML title no longer labels every page as an admin panel.
+
 ## v3.1.5 - 2026-11-12
 
 ### Features
