@@ -244,7 +244,7 @@ func TestPublicKeyUsageAccountAuthorizationAndReset(t *testing.T) {
 	}
 }
 
-func TestPublicResetAcrossInstancesLostResponseFailsClosed(t *testing.T) {
+func TestPublicResetAcrossInstancesUsesAutomaticCooldown(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 	db := newTestAdminDB(t)
@@ -304,51 +304,33 @@ func TestPublicResetAcrossInstancesLostResponseFailsClosed(t *testing.T) {
 		t.Fatalf("lost response status=%d", got)
 	}
 	scope := resetCreditDatabaseScope(h2.store.FindByID(id))
-	if uncertain, err := db.KeyUsageResetUncertain(ctx, scope); err != nil || !uncertain {
-		t.Fatalf("uncertain=%v err=%v", uncertain, err)
-	}
 	if got := call(r2, uuid.NewString()); got != 409 {
 		t.Fatalf("cooldown status=%d", got)
 	}
-	if got := call(r2, firstID); got != 409 {
-		t.Fatalf("idempotent replay status=%d", got)
-	}
-	// Expire the ordinary cooldown: uncertainty must still fence automatic work.
 	now := time.Now().Unix()
 	if ok, err := db.ReserveKeyUsageResetCooldown(ctx, scope, now+360, now-1); err != nil || !ok {
 		t.Fatalf("expire cooldown: ok=%v err=%v", ok, err)
 	}
-	outcome, failure := h2.consumeResetCreditLocked(ctx, h2.store.FindByID(id), uuid.NewString(), "auto")
-	if failure != nil || !outcome.AlreadyHandled {
-		t.Fatalf("automatic retry after ambiguous result: outcome=%+v failure=%+v", outcome, failure)
+	if got := call(r2, firstID); got != 409 {
+		t.Fatalf("idempotent replay status=%d", got)
 	}
-	if calls.Load() != 1 {
-		t.Fatalf("upstream calls=%d, want 1", calls.Load())
+	if ok, err := db.ReserveKeyUsageResetCooldown(ctx, scope, now+360, now-1); err != nil || !ok {
+		t.Fatalf("expire cooldown: ok=%v err=%v", ok, err)
 	}
-	adminRouter := gin.New()
-	adminRouter.DELETE("/uncertain/:id", h2.ClearKeyUsageResetUncertain)
-	recorder := httptest.NewRecorder()
-	adminRouter.ServeHTTP(recorder, httptest.NewRequest("DELETE", fmt.Sprintf("/uncertain/%d", id), nil))
-	if recorder.Code != 200 {
-		t.Fatalf("admin reconcile status=%d body=%s", recorder.Code, recorder.Body.String())
+	h2.consumeResetCredit = func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
+		calls.Add(1)
+		return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
 	}
-	if uncertain, err := db.KeyUsageResetUncertain(ctx, scope); err != nil || uncertain {
-		t.Fatalf("reconciled uncertain=%v err=%v", uncertain, err)
+	h2.probeUsage = func(context.Context, *auth.Account) error { return nil }
+	if got := call(r2, uuid.NewString()); got != 200 {
+		t.Fatalf("retry after automatic cooldown status=%d", got)
 	}
-	// A prior automatic/manual attempt on another instance must fence a new
-	// public action even after explicit uncertainty reconciliation.
-	if err := db.RecordKeyUsageResetCooldown(ctx, scope, time.Now().Add(5*time.Minute).Unix()); err != nil {
-		t.Fatal(err)
-	}
-	if got := call(r2, uuid.NewString()); got != 409 {
-		t.Fatalf("prior automatic reset status=%d", got)
-	}
-	if calls.Load() != 1 {
-		t.Fatalf("upstream calls after cooldown=%d", calls.Load())
+	if calls.Load() != 2 {
+		t.Fatalf("upstream calls=%d, want 2", calls.Load())
 	}
 }
 
-func TestAutomaticLostResetResponseBlocksPublicAfterCooldown(t *testing.T) {
+func TestFailedAutoResetDoesNotRequireManualReconciliation(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ctx := context.Background()
 	db := newTestAdminDB(t)
@@ -368,23 +350,16 @@ func TestAutomaticLostResetResponseBlocksPublicAfterCooldown(t *testing.T) {
 	account.SetRateLimitResetCredits(3)
 	store.AddAccount(account)
 	var calls atomic.Int32
-	autoID := uuid.NewString()
-	h := &Handler{db: db, store: store, probeUsage: func(context.Context, *auth.Account) error { return nil }, consumeResetCredit: func(_ context.Context, _ *auth.Account, _ string, requestID string) (*proxy.WhamResetResult, *http.Response, error) {
-		if requestID != autoID {
-			t.Errorf("unexpected auto id %s", requestID)
-		}
+	h := &Handler{db: db, store: store, probeUsage: func(context.Context, *auth.Account) error { return nil }, consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
 		if calls.Add(1) == 1 {
 			return nil, nil, fmt.Errorf("synthetic lost response")
 		}
 		return &proxy.WhamResetResult{WindowsReset: 1}, &http.Response{StatusCode: http.StatusOK}, nil
 	}}
-	if _, failure := h.consumeResetCreditLocked(ctx, account, autoID, "auto"); failure == nil {
+	if _, failure := h.consumeResetCreditLocked(ctx, account, uuid.NewString(), "auto"); failure == nil {
 		t.Fatal("expected lost response")
 	}
 	scope := resetCreditDatabaseScope(account)
-	if uncertain, err := db.KeyUsageResetUncertain(ctx, scope); err != nil || !uncertain {
-		t.Fatalf("uncertain=%v err=%v", uncertain, err)
-	}
 	now := time.Now().Unix()
 	if ok, err := db.ReserveKeyUsageResetCooldown(ctx, scope, now+360, now-1); err != nil || !ok {
 		t.Fatalf("expire cooldown: ok=%v err=%v", ok, err)
@@ -396,16 +371,7 @@ func TestAutomaticLostResetResponseBlocksPublicAfterCooldown(t *testing.T) {
 	req.Header.Set("Idempotency-Key", uuid.NewString())
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if w.Code != 409 || calls.Load() != 1 {
+	if w.Code != 200 || calls.Load() != 2 {
 		t.Fatalf("public reset status=%d calls=%d body=%s", w.Code, calls.Load(), w.Body.String())
-	}
-	if outcome, failure := h.consumeResetCreditLocked(ctx, account, uuid.NewString(), "auto"); failure != nil || !outcome.AlreadyHandled {
-		t.Fatalf("different auto id: outcome=%+v failure=%+v", outcome, failure)
-	}
-	if outcome, failure := h.consumeResetCreditLocked(ctx, account, autoID, "auto"); failure != nil || outcome.AlreadyHandled || calls.Load() != 2 {
-		t.Fatalf("same auto id retry: outcome=%+v failure=%+v calls=%d", outcome, failure, calls.Load())
-	}
-	if uncertain, err := db.KeyUsageResetUncertain(ctx, scope); err != nil || uncertain {
-		t.Fatalf("successful retry uncertain=%v err=%v", uncertain, err)
 	}
 }

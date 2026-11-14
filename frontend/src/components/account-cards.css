@@ -835,3 +835,15 @@
     transition: none;
   }
 }
+
+/* The public card shares the management shell with a smaller action set. */
+.codex-account-card__actions--portal {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 2.75rem;
+}
+
+.codex-account-card__actions--portal > button:last-child {
+  width: auto;
+  min-width: 0;
+  padding-inline: 0.625rem;
+}

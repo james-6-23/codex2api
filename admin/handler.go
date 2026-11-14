@@ -1156,7 +1156,6 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/stats", h.GetStats)
 	api.GET("/key-usage-account-permissions/:id", h.GetKeyUsageAccountPermissions)
 	api.PUT("/key-usage-account-permissions/:id", h.SetKeyUsageAccountPermissions)
-	api.DELETE("/key-usage-reset-uncertain/:id", h.ClearKeyUsageResetUncertain)
 	api.GET("/accounts", h.ListAccounts)
 	api.GET("/accounts/analysis", h.GetAccountAnalysis)
 	api.GET("/accounts/page-stats", h.GetAccountPageStats)

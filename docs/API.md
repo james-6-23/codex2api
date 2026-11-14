@@ -2842,8 +2842,7 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 
 - `GET /api/admin/key-usage-account-permissions/:id` / `PUT /api/admin/key-usage-account-permissions/:id`：需要管理鉴权；`id=0` 为全局，其他值为 API Key ID。PUT 的 JSON 为 `{"view_enabled":true,"reset_enabled":false}`，两个字段均必填。
 - `GET /api/key-usage/accounts`：使用自助页的 API Key 鉴权，返回当前允许范围内的账号、套餐、状态、用量窗口、更新时间和缓存的重置卡数量；不返回上游凭据、代理或自定义请求头。未装载到运行池的账号显示为 `unavailable`，用量未知且不能重置；当这类账号的渠道或套餐权限无法确定时不予返回。已删除账号不在列表中。页面或查看权限关闭返回 404。
-- `POST /api/key-usage/accounts/:id/reset-credits`：使用同一 API Key 鉴权，必须传入每次操作唯一的 `Idempotency-Key` UUID；同一请求 ID 再次提交返回 409，不重复调用上游。需要查看和重置权限，并重新校验 Key、账号分组、渠道、套餐和账号反向授权。过期 Key 不能重置。只允许支持的 Codex 账号。操作消耗该账号的上游重置卡，会影响共享同一工作区的其他用户；近期已重置或结果不确定的工作区会暂时拒绝新操作。网络异常后请先检查账号状态，勿盲目重试。
-- 自助或自动重置发出后若结果不明确，会持久保留待核实状态，禁止该工作区的自助重置以及新请求 ID 的自动重置；自动流程可以用原有稳定请求 ID 重试，确认成功后清除标记。管理员确认上游卡券及用量后，也可在 API Key 管理页输入账号 ID 解除待核实，或使用管理鉴权调用 `DELETE /api/admin/key-usage-reset-uncertain/:id`；该操作不使用重置卡，也不会清除短时冷却。
+- `POST /api/key-usage/accounts/:id/reset-credits`：使用同一 API Key 鉴权，必须传入每次操作唯一的 `Idempotency-Key` UUID；同一请求 ID 再次提交返回 409，不重复调用上游。需要查看和重置权限，并重新校验 Key、账号分组、渠道、套餐和账号反向授权。过期 Key 不能重置。只允许支持的 Codex 账号。操作消耗该账号的上游重置卡，会影响共享同一工作区的其他用户；近期已提交重置的工作区会暂时拒绝重复操作。网络异常后请先检查账号状态，勿盲目重试。
 
 自助账号列表的 5h/长窗口是账号运行态缓存，可能滞后；未知值为 `null`，不是 0。`long_window_seconds` 给出长窗口的实际上游周期（未知为 0）；部分套餐可能是月窗口，而非 7 天。API Key 的金额与请求预算和上游账号用量是不同的额度。空的 API Key 分组限制表示不限分组；公开账号信息之前，管理员应检查 Key 的授权范围。
 

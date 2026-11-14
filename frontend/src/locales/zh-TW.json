@@ -1,10 +1,13 @@
 {
+  "status": {
+    "unavailable": "暫不可用"
+  },
+  "keyUsage": {
+    "views": {
+      "accounts": "帳號用量"
+    }
+  },
   "keyUsageAccounts": {
-    "uncertain": "上次重置結果待管理員核實，暫不能再次使用重置卡。",
-    "reconcile": "解除待核實",
-    "reconcileConfirm": "請先在上游核實此帳號的重置卡和用量。確認已核實並解除保護？",
-    "reconcileHint": "僅在核實上游重置結果後，輸入帳號 ID 解除待核實狀態。",
-    "accountID": "帳號 ID",
     "group": "群組",
     "allGroups": "全部群組",
     "ungrouped": "未分組",
@@ -29,7 +32,26 @@
     "done": "重置請求已完成",
     "pending": "處理中…",
     "globalOff": "全域關閉時，個別金鑰無法啟用此功能。",
-    "resetWarning": "重置卡屬於帳號，操作會影響共用同一工作區的其他使用者。"
+    "resetWarning": "重置卡屬於帳號，操作會影響共用同一工作區的其他使用者。",
+    "accountScope": "這裡顯示可存取上游帳號的共用額度，與 API Key 自身的金額及次數限制不同。",
+    "accountCount": "{{count}} 個帳號",
+    "search": "搜尋信箱或帳號名稱",
+    "refreshPending": "重置已完成，用量正在更新，可稍後重新整理。",
+    "disabled": "帳號用量查看未開啟",
+    "disabledHint": "目前 API Key 未獲准查看帳號用量。",
+    "emptyHint": "請調整搜尋或群組篩選。",
+    "idLabel": "ID {{id}}",
+    "groupLabel": "群組 {{id}}",
+    "cardCount": "重置卡 {{value}}",
+    "globalTitle": "自助頁帳號權限",
+    "globalDesc": "控制公開用量頁能否查看群組帳號，以及使用帳號重置卡。",
+    "keyTitle": "此 API Key 的自助帳號權限",
+    "keyDesc": "關閉後可進一步限制此 Key；開啟僅繼承全域設定，不會突破全域權限。",
+    "inheritView": "繼承全域帳號查看權限",
+    "inheritReset": "繼承全域重置卡權限",
+    "viewHint": "使用者只能查看此 Key 已授權群組和帳號的資訊。",
+    "resetHint": "重置卡屬於上游帳號，會影響共用同一帳號的其他使用者。",
+    "immediateSave": "修改即時儲存。"
   },
   "qualityTest": {
     "studioTab": "檢測工作台",

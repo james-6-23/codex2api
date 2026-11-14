@@ -1,3 +1,4 @@
+import { normalizeKeyUsageView } from './lib/keyUsageViews'
 import { createContext, type PropsWithChildren, useCallback, useContext, useEffect, useMemo, useState } from 'react'
 import { useTranslation } from 'react-i18next'
 import { useLocation } from 'react-router-dom'
@@ -128,7 +129,7 @@ export function BrandingProvider({ children }: PropsWithChildren) {
   useEffect(() => {
     const [, portal, view] = pathname.split('/')
     if (portal === 'key-usage') {
-      const activeView = view === 'quota' || view === 'logs' ? view : 'overview'
+      const activeView = normalizeKeyUsageView(view)
       document.title = `${t(`keyUsage.views.${activeView}`)} · ${t('keyUsage.title')} · ${siteName}`
     } else if (portal === 'image-studio') {
       document.title = `${t('imageStudioPortal.title')} · ${siteName}`

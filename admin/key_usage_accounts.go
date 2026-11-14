@@ -203,11 +203,6 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 		writePublicKeyUsageInternalError(c, err)
 		return
 	}
-	uncertain, err := h.db.ListKeyUsageResetUncertain(ctx)
-	if err != nil {
-		writePublicKeyUsageInternalError(c, err)
-		return
-	}
 	visibleGroups := make(map[int64]bool)
 	items := make([]gin.H, 0)
 	runtime := make(map[int64]*auth.Account)
@@ -245,16 +240,15 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 		for _, groupID := range groups {
 			visibleGroups[groupID] = true
 		}
-		item := gin.H{"id": id, "name": accountRow.Name, "email": accountRow.Email, "plan_type": accountRow.PlanType, "status": "unavailable", "group_ids": groups, "reset_allowed": false, "reset_uncertain": false, "usage_percent_5h": nil, "usage_percent_7d": nil}
+		item := gin.H{"id": id, "name": accountRow.Name, "email": accountRow.Email, "plan_type": accountRow.PlanType, "status": "unavailable", "group_ids": groups, "reset_allowed": false, "usage_percent_5h": nil, "usage_percent_7d": nil}
 		if account == nil {
 			items = append(items, item)
 			continue
 		}
 		u := account.GetAccountLiveUsageSnapshot()
-		pending := uncertain[resetCreditDatabaseScope(account)]
-		canReset := p.ResetEnabled && !row.IsExpired(time.Now()) && !pending && isKeyUsageResetEligible(account)
+		canReset := p.ResetEnabled && !row.IsExpired(time.Now()) && isKeyUsageResetEligible(account)
 		item["plan_type"], item["status"] = u.PlanType, u.Status
-		item["reset_allowed"], item["reset_uncertain"] = canReset, pending
+		item["reset_allowed"] = canReset
 		item["active_requests"], item["dynamic_concurrency_limit"] = account.GetActiveRequests(), account.GetDynamicConcurrencyLimit()
 		item["long_window_seconds"] = account.GetWindow7dSeconds()
 		if u.UsagePercent5hValid {
@@ -288,46 +282,6 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{"accounts": items, "groups": groups, "reset_enabled": p.ResetEnabled})
-}
-
-// ClearKeyUsageResetUncertain is an admin-only acknowledgement after checking
-// the upstream account; it does not redeem a credit or clear the cooldown.
-func (h *Handler) ClearKeyUsageResetUncertain(c *gin.Context) {
-	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
-	if err != nil || id <= 0 {
-		writeError(c, http.StatusBadRequest, "无效的账号 ID")
-		return
-	}
-	if h.store == nil || h.db == nil {
-		writeError(c, http.StatusServiceUnavailable, "服务未就绪")
-		return
-	}
-	account := h.store.FindByID(id)
-	if account == nil {
-		writeError(c, http.StatusNotFound, "账号不存在")
-		return
-	}
-	lock := h.resetCreditLock(account)
-	lock.Lock()
-	defer lock.Unlock()
-	ctx, cancel := context.WithTimeout(c.Request.Context(), 8*time.Second)
-	defer cancel()
-	acquired, release, err := h.acquireResetCreditLease(ctx, account)
-	if err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	if !acquired {
-		writeError(c, http.StatusConflict, "该工作区正在执行额度重置")
-		return
-	}
-	defer release()
-	if err := h.db.ClearKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account)); err != nil {
-		writeInternalError(c, err)
-		return
-	}
-	security.SecurityAuditLog("KEY_USAGE_RESET_RECONCILED", fmt.Sprintf("account_id=%d ip=%s", id, security.SanitizeLog(c.ClientIP())))
-	c.JSON(http.StatusOK, gin.H{"message": "已解除待核实状态"})
 }
 
 func isKeyUsageResetEligible(account *auth.Account) bool {
@@ -427,11 +381,8 @@ func (h *Handler) ResetPublicKeyUsageAccountCredits(c *gin.Context) {
 	security.SecurityAuditLog("KEY_USAGE_RESET_CREDIT", fmt.Sprintf("key_id=%d account_id=%d ip=%s", row.ID, id, security.SanitizeLog(c.ClientIP())))
 	outcome, failure := h.consumeResetCreditLocked(consumeCtx, account, requestID.String(), fmt.Sprintf("key_usage:key_id=%d", row.ID))
 	if failure != nil {
-		// The upstream may have consumed the credit even when its reply was lost.
-		// Conservatively fence new public requests until the normal cooldown ends.
-		h.markResetCreditSuccess(account)
 		log.Printf("[key-usage] reset failed: key_id=%d account_id=%d upstream_status=%d request_error_type=%T refresh_error_type=%T", row.ID, id, failure.Status, failure.RequestErr, failure.RefreshErr)
-		writeError(c, http.StatusBadGateway, "使用重置卡失败，请联系管理员确认后再重试")
+		writeError(c, http.StatusBadGateway, "使用重置卡失败，请稍后重试或联系管理员")
 		return
 	}
 	if outcome.InProgress {
@@ -439,7 +390,7 @@ func (h *Handler) ResetPublicKeyUsageAccountCredits(c *gin.Context) {
 		return
 	}
 	if outcome.AlreadyHandled {
-		writeError(c, http.StatusConflict, "该工作区近期已使用重置卡，请稍后重试")
+		writeError(c, http.StatusConflict, "该工作区暂时不能重复提交，请稍后重试")
 		return
 	}
 	refreshed := waitUsageRefreshAfterReset(outcome.UsageRefreshed)

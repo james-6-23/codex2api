@@ -342,7 +342,6 @@ export interface PublicKeyUsageAccount {
   usage_updated_at_7d?: string
   reset_credits?: number
   reset_allowed: boolean
-  reset_uncertain: boolean
 }
 
 async function requestAPIKeyUsage<T>(path: string, apiKey: string, options: RequestInit = {}): Promise<T> {
@@ -592,8 +591,7 @@ export const api = {
   getKeyUsageAccountPermissions: (id: number) => request<{ view_enabled: boolean; reset_enabled: boolean }>(`/key-usage-account-permissions/${id}`),
   setKeyUsageAccountPermissions: (id: number, data: { view_enabled: boolean; reset_enabled: boolean }) =>
     request<{ view_enabled: boolean; reset_enabled: boolean }>(`/key-usage-account-permissions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
-  clearKeyUsageResetUncertain: (accountID: number) => request<{ message: string }>(`/key-usage-reset-uncertain/${accountID}`, { method: 'DELETE' }),
-  getPublicKeyUsageAccounts: (key: string) => requestAPIKeyUsage<{ accounts: PublicKeyUsageAccount[]; groups: { id: number; name: string }[]; reset_enabled: boolean }>('/accounts', key),
+  getPublicKeyUsageAccounts: (key: string, options: RequestInit = {}) => requestAPIKeyUsage<{ accounts: PublicKeyUsageAccount[]; groups: { id: number; name: string }[]; reset_enabled: boolean }>('/accounts', key, options),
   resetPublicKeyUsageCredits: (key: string, id: number, requestID: string) => requestAPIKeyUsage<{ message: string; usage_refreshed: boolean }>(`/accounts/${id}/reset-credits`, key, { method: 'POST', headers: { 'Idempotency-Key': requestID } }),
   getBranding: () => requestPublic<SiteBranding>('/api/branding'),
   // 公开账号自助门户:生成 OpenAI 授权链接(无鉴权)。

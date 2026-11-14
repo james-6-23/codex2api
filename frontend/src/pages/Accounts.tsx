@@ -1,9 +1,12 @@
+import { AccountCardSurface } from "../components/AccountCardSurface";
+import AccountUsageBar from "../components/AccountUsageBar";
+import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
 import { useIntelligenceBars } from "../hooks/useIntelligenceBars";
 import AccountIntelligenceBar, { AccountIntelligenceActions } from "../components/AccountIntelligenceBar";
 import type { IntelligenceBar } from "../lib/intelligenceCheck";
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
-import "./accounts-cards.css";
+
 import { useLocation, useNavigate } from "react-router-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import type { ProxyRow } from "../api";
@@ -13108,22 +13111,6 @@ function SchedulerPriorityBadge({ account }: { account: AccountRow }) {
 // OpenAI reports the $100 Pro tier as "prolite" and the top Pro tier as
 // "promax" — functionally Pro plans with a different usage cap. Keep behavioral comparisons (usage windows, plan filter,
 // scheduler bias) aligned with the Go side by folding it into "pro".
-function normalizePlanType(planType?: string): string {
-  const raw = (planType || "").toLowerCase().trim();
-  if (raw === "prolite" || raw === "pro_lite" || raw === "pro-lite")
-    return "pro";
-  if (raw === "promax" || raw === "pro_max" || raw === "pro-max")
-    return "pro";
-  if (
-    raw === "ent26" ||
-    raw === "enterprise_cbp_usage_based" ||
-    raw === "enterprise_cbp_automation"
-  )
-    return "enterprise";
-  if (raw === "edu_plus" || raw === "edu_pro") return "edu";
-  return raw;
-}
-
 function isFutureTime(value?: string): boolean {
   if (!value) return false;
   const timestamp = Date.parse(value);
@@ -13451,105 +13438,8 @@ function OperationProgressToast({
   );
 }
 
-function formatPlanLabel(planType?: string): string {
-  const raw = (planType || "").trim();
-  if (!raw) return "-";
-  const lower = raw.toLowerCase();
-  if (lower === "prolite" || lower === "pro_lite" || lower === "pro-lite")
-    return "ProLite";
-  if (lower === "promax" || lower === "pro_max" || lower === "pro-max")
-    return "ProMax";
-  if (lower === "self_serve_business_prolite") return "team5x";
-  if (lower === "self_serve_business_usage_based") return "Business";
-  if (lower === "ent26" || lower === "enterprise_cbp_usage_based")
-    return "Enterprise";
-  if (lower === "enterprise_cbp_automation") return "Enterprise (Automation)";
-  if (lower === "edu_plus") return "Edu Plus";
-  if (lower === "edu_pro") return "Edu Pro";
-  return raw;
-}
-
-function isWorkspacePlan(planType?: string): boolean {
-  const normalized = normalizePlanType(planType);
-  return (
-    normalized === "team" ||
-    normalized === "teamplus" ||
-    normalized === "k12" ||
-    normalized === "edu" ||
-    normalized === "education"
-  );
-}
-
 function accountWorkspaceId(account: Pick<AccountRow, "effective_workspace_id" | "token_workspace_id">): string {
   return (account.effective_workspace_id || account.token_workspace_id || "").trim();
-}
-
-function PlanBadge({
-  planType,
-  workspaceId,
-}: {
-  planType?: string;
-  workspaceId?: string;
-}) {
-  const { t } = useTranslation();
-  const label = formatPlanLabel(planType);
-  if (label === "-")
-    return <span className="text-[12px] text-muted-foreground">-</span>;
-
-  const style: Record<string, string> = {
-    pro: "bg-violet-100 text-violet-700 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/30",
-    prolite:
-      "bg-purple-50 text-purple-600 ring-purple-400/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/25",
-    promax:
-      "bg-fuchsia-100 text-fuchsia-700 ring-fuchsia-500/35 dark:bg-fuchsia-500/20 dark:text-fuchsia-300 dark:ring-fuchsia-400/35",
-    plus: "bg-blue-100 text-blue-700 ring-blue-500/30 dark:bg-blue-500/20 dark:text-blue-300 dark:ring-blue-400/30",
-    team: "bg-amber-100 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30",
-    k12: "bg-emerald-100 text-emerald-700 ring-emerald-500/30 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/30",
-    free: "bg-zinc-100 text-zinc-500 ring-zinc-400/20 dark:bg-zinc-500/10 dark:text-zinc-400 dark:ring-zinc-400/15",
-  };
-
-  const normalized = normalizePlanType(planType);
-  const key =
-    normalized === "pro" && label === "ProLite"
-      ? "prolite"
-      : normalized === "pro" && label === "ProMax"
-        ? "promax"
-        : label === "team5x"
-        ? "team"
-        : normalized;
-  const cls =
-    style[key] ||
-    "bg-slate-100 text-slate-600 ring-slate-400/20 dark:bg-slate-500/15 dark:text-slate-300 dark:ring-slate-400/20";
-  const trimmedWorkspaceId = workspaceId?.trim() ?? "";
-  const badge = (
-    <span
-      className={`inline-flex min-w-0 max-w-full items-center truncate rounded-md px-2.5 py-1 text-[13px] font-semibold ring-1 ring-inset ${cls}`}
-    >
-      {label}
-    </span>
-  );
-  if (!isWorkspacePlan(planType) || !trimmedWorkspaceId) {
-    return badge;
-  }
-
-  return (
-    <TooltipProvider delayDuration={0} skipDelayDuration={0}>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <span className="inline-flex min-w-0 max-w-full cursor-help">
-            {badge}
-          </span>
-        </TooltipTrigger>
-        <TooltipContent
-          side="top"
-          sideOffset={6}
-          className="max-w-[360px] font-mono text-[11px]"
-        >
-          {t("accounts.planWorkspaceId", { id: trimmedWorkspaceId })}
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
 }
 
 function getDefaultScoreBias(planType?: string): number {
@@ -14130,7 +14020,7 @@ function AccountMobileCard({
   const showMetadata = showTags || showColumn("groups") || showColumn("proxy");
 
   return (
-    <article
+    <AccountCardSurface
       className={cn(
         "codex-account-card",
         isPersonal && "codex-account-card--personal",
@@ -14516,7 +14406,7 @@ function AccountMobileCard({
           onDelete={onDelete}
         />
       </footer>
-    </article>
+    </AccountCardSurface>
   );
 }
 
@@ -14614,70 +14504,14 @@ function hasUsageWindowDetail(detail?: AccountRow["usage_5h_detail"]): boolean {
   );
 }
 
-// 用量进度条颜色
-function usageBarColor(pct: number): string {
-  if (pct >= 90) return "bg-red-500";
-  if (pct >= 70) return "bg-amber-500";
-  return "bg-emerald-500";
-}
-
-// 标签 / 条 / 百分比 三列固定，避免 7d 与 spark 把进度条拉成不同长度。
-const USAGE_BAR_LABEL_CLASS =
-  "w-10 shrink-0 text-[11px] font-medium text-muted-foreground";
-const USAGE_BAR_TRACK_CLASS =
-  "account-usage-track h-1.5 w-[88px] shrink-0 rounded-full bg-muted overflow-hidden";
-const USAGE_BAR_META_CLASS =
-  "account-usage-meta text-[11px] font-medium text-muted-foreground mt-0.5 pl-[46px]";
-
 // 单行用量进度条
-function UsageBar({
-  label,
-  pct,
-  resetAt,
-  detail,
-}: {
-  label: string;
-  pct: number;
-  resetAt?: string;
-  detail?: AccountRow["usage_5h_detail"];
-}) {
-  const resetTime = formatResetAt(resetAt);
+const USAGE_BAR_LABEL_CLASS = "w-10 shrink-0 text-[11px] font-medium text-muted-foreground";
+function UsageBar({ label, pct, resetAt, detail }: { label: string; pct: number; resetAt?: string; detail?: AccountRow["usage_5h_detail"] }) {
   const { t } = useTranslation();
   const detailText = hasUsageWindowDetail(detail)
     ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
-    : "";
-  return (
-    <div className="account-usage-window">
-      <div className="flex items-center gap-1.5">
-        <span className={USAGE_BAR_LABEL_CLASS}>{label}</span>
-        <div
-          className={USAGE_BAR_TRACK_CLASS}
-          role="progressbar"
-          aria-label={label}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={Math.max(0, Math.min(100, pct))}
-          aria-valuetext={`${pct.toFixed(1)}%`}
-        >
-          <div
-            className={`h-full rounded-full transition-all ${usageBarColor(pct)}`}
-            style={{ width: `${Math.min(100, pct)}%` }}
-          />
-        </div>
-        <span className="w-[42px] shrink-0 text-right text-[12px] font-semibold tabular-nums">
-          {pct.toFixed(1)}%
-        </span>
-      </div>
-      <div className="account-usage-window__details">
-        {detailText && <div className={USAGE_BAR_META_CLASS}>{detailText}</div>}
-        {resetTime && (
-          <div className={USAGE_BAR_META_CLASS} title={resetTime.title}>
-            ⏱ {resetTime.label}
-          </div>
-        )}
-      </div>
-    </div>
-  );
+    : undefined;
+  return <AccountUsageBar label={label} pct={pct} resetAt={resetAt} detailText={detailText} />;
 }
 
 function UsageWindowStat({

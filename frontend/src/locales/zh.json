@@ -2384,7 +2384,8 @@
     "paused": "已暂停",
     "unsampled": "未采样",
     "unknown": "未知",
-    "usage_limited": "限流"
+    "usage_limited": "限流",
+    "unavailable": "暂不可用"
   },
   "ops": {
     "title": "系统运维",
@@ -5984,11 +5985,6 @@
     "keyGroupsReconcileHint": "分组卡片会重复计入多分组账号；加上 {{ungrouped}} 个未分组账号，再减去 {{multi}} 个多分组账号的重复归属后，即为 Key 去重总计。"
   },
   "keyUsageAccounts": {
-    "uncertain": "上次重置结果待管理员核实，暂不能再次使用重置卡。",
-    "reconcile": "解除待核实",
-    "reconcileConfirm": "请先在上游核实该账号的重置卡和用量。确认已核实并解除保护？",
-    "reconcileHint": "仅在核实上游重置结果后，输入账号 ID 解除待核实状态。",
-    "accountID": "账号 ID",
     "group": "分组",
     "allGroups": "全部分组",
     "ungrouped": "未分组",
@@ -6013,7 +6009,26 @@
     "done": "重置请求已完成",
     "pending": "正在处理…",
     "globalOff": "全局关闭时，单个密钥无法开启该功能。",
-    "resetWarning": "重置卡属于账号，操作会影响共享同一工作区的其他用户。"
+    "resetWarning": "重置卡属于账号，操作会影响共享同一工作区的其他用户。",
+    "accountScope": "这里展示可访问上游账号的共享额度，与 API Key 自身的金额和次数限额不同。",
+    "accountCount": "{{count}} 个账号",
+    "search": "搜索邮箱或账号名称",
+    "refreshPending": "重置已完成，用量正在更新，可稍后刷新。",
+    "disabled": "账号用量查看未开启",
+    "disabledHint": "当前 API Key 未获准查看账号用量。",
+    "emptyHint": "请调整搜索或分组筛选。",
+    "idLabel": "ID {{id}}",
+    "groupLabel": "分组 {{id}}",
+    "cardCount": "重置卡 {{value}}",
+    "globalTitle": "自助页账号权限",
+    "globalDesc": "控制公开用量页能否查看分组账号，以及使用账号重置卡。",
+    "keyTitle": "此 API Key 的自助账号权限",
+    "keyDesc": "关闭后可进一步限制此 Key；开启仅继承全局设置，不会突破全局权限。",
+    "inheritView": "继承全局账号查看权限",
+    "inheritReset": "继承全局重置卡权限",
+    "viewHint": "用户只能查看此 Key 已授权分组和账号的信息。",
+    "resetHint": "重置卡属于上游账号，会影响共享同一账号的其他用户。",
+    "immediateSave": "修改即时保存。"
   },
   "keyUsage": {
     "title": "API Key 使用统计",
@@ -6075,7 +6090,8 @@
     "views": {
       "overview": "概览",
       "quota": "额度与限额",
-      "logs": "请求日志"
+      "logs": "请求日志",
+      "accounts": "账号用量"
     }
   },
   "nav2": {
