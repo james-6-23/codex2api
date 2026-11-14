@@ -23,8 +23,13 @@ before(async () => {
       return `import React from 'react'; import {createRoot} from 'react-dom/client';
         import Accounts from ${JSON.stringify(path.join(root, 'src/components/KeyUsageAccounts.tsx'))};
         import Permissions from ${JSON.stringify(path.join(root, 'src/components/KeyUsageAccountPermissions.tsx'))};
+        import APIKeys from ${JSON.stringify(path.join(root, 'src/pages/APIKeys.tsx'))};
+        import {ToastProvider} from ${JSON.stringify(path.join(root, 'src/components/ToastProvider.tsx'))};
+        import {MemoryRouter} from 'react-router-dom';
         import ${JSON.stringify(path.join(root, 'src/i18n.ts'))}; import ${JSON.stringify(path.join(root, 'src/index.css'))};
-        createRoot(document.getElementById('root')).render(React.createElement(React.Fragment,null,
+        createRoot(document.getElementById('root')).render(window.__keyEditor
+          ? React.createElement(MemoryRouter,null,React.createElement(ToastProvider,null,React.createElement(APIKeys)))
+          : React.createElement(React.Fragment,null,
           React.createElement(Permissions), React.createElement(Accounts,{apiKey:'fixture-key'})));`
     },
   }], resolve: { alias: { '@': path.join(root, 'src') } }, define: { 'process.env.NODE_ENV': '"production"' }, build: { write: false, minify: false, rollupOptions: { input: 'virtual:portal-harness' }, lib: { entry: 'virtual:portal-harness', formats: ['iife'], name: 'PortalHarness' } } })
@@ -34,6 +39,74 @@ before(async () => {
   browser = await chromium.launch({ headless: true, executablePath: process.env.CHROMIUM_PATH || undefined, args: ['--no-sandbox'] })
 })
 after(async () => { await browser?.close() })
+
+test('key permissions retain an in-flight save across edit tabs', async t => {
+  const page = await browser.newPage()
+  page.setDefaultTimeout(5000)
+  const errors = []
+  page.on('pageerror', error => errors.push(error.message))
+  t.after(() => assert.deepEqual(errors, []))
+  t.after(() => page.close())
+  await page.route('http://portal.test/**', route => route.fulfill({ contentType: 'text/html', body: '<div id="root"></div>' }))
+  await page.goto('http://portal.test/')
+  await page.evaluate(() => {
+    localStorage.setItem('lang', 'zh')
+    window.__keyEditor = true
+    window.__policyReads = 0
+    window.__policyWrites = []
+    let policy = { view_enabled: true, reset_enabled: true }
+    const pendingSave = new Promise(resolve => { window.__completeSave = resolve })
+    window.fetch = async (url, options = {}) => {
+      const path = String(url)
+      let body = {}
+      if (path === '/api/admin/keys') body = { keys: [{
+        id: 10, name: 'fixture-key', key: 'sk-fixture', status: 'active',
+        quota_limit: 0, quota_used: 0, total_used: 0, allowed_group_ids: [], limits: {},
+        created_at: '2026-01-01T00:00:00Z',
+      }] }
+      else if (path === '/api/admin/account-groups') body = { groups: [] }
+      else if (path === '/api/admin/models') body = { models: ['gpt-5.5'] }
+      else if (path === '/api/admin/settings') body = { public_key_usage_page_enabled: true }
+      else if (path === '/api/admin/prompt-filter/newapi-bindings') body = { bindings: [] }
+      else if (path === '/api/admin/keys-concurrency') body = { concurrency: {} }
+      else if (path === '/api/admin/keys/10/model-request-usage') body = { model_request_usage: [] }
+      else if (path === '/api/admin/key-usage-account-permissions/10') {
+        if (options.method === 'PUT') {
+          const next = JSON.parse(options.body)
+          window.__policyWrites.push(next)
+          if (window.__policyWrites.length === 1) await pendingSave
+          policy = next
+        } else window.__policyReads += 1
+        body = policy
+      } else throw new Error(`Unexpected request: ${options.method || 'GET'} ${path}`)
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+    }
+  })
+  await page.addStyleTag({ content: css })
+  await page.addScriptTag({ content: script })
+  await page.getByRole('button', { name: '编辑', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  const view = dialog.getByRole('switch', { name: '继承全局账号查看权限', exact: true })
+  const reset = dialog.getByRole('switch', { name: '继承全局重置卡权限', exact: true })
+  await view.click()
+  await page.waitForFunction(() => window.__policyWrites.length === 1)
+  await dialog.getByRole('tab', { name: '高级限额', exact: true }).click()
+  assert.equal(await view.isVisible(), false)
+  await dialog.getByRole('tab', { name: '基本设置', exact: true }).click()
+  await view.waitFor()
+  assert.equal(await view.isDisabled(), true, 'tab changes must preserve the pending save')
+  assert.equal(await reset.isDisabled(), true)
+  assert.equal(await page.evaluate(() => window.__policyReads), 1, 'tab changes must not reload stale permissions')
+  await page.evaluate(() => window.__completeSave())
+  await dialog.getByText('已保存', { exact: true }).waitFor()
+  assert.equal(await view.isChecked(), false)
+  await reset.click()
+  await page.waitForFunction(() => window.__policyWrites.length === 2)
+  assert.deepEqual(await page.evaluate(() => window.__policyWrites), [
+    { view_enabled: false, reset_enabled: true },
+    { view_enabled: false, reset_enabled: false },
+  ])
+})
 
 test('portal filters groups, confirms redemption and uses a UUID on HTTP', async t => {
   const page = await browser.newPage()

@@ -2452,9 +2452,13 @@ export default function APIKeys() {
                 error={modelRequestUsageError}
               />
 
+              {/* Keep pending permission saves mounted while switching edit tabs. */}
+              <div hidden={editTab !== "basic"}>
+                <KeyUsageAccountPermissions key={editingKey.id} keyID={editingKey.id} />
+              </div>
+
               {editTab === "basic" ? (
                 <>
-                  <KeyUsageAccountPermissions key={editingKey.id} keyID={editingKey.id} />
                   <div className="grid gap-4 sm:grid-cols-2">
                     <FormField label={t("apiKeys.nameLabel")}>
                       <Input
