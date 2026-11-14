@@ -2384,7 +2384,8 @@
     "paused": "Paused",
     "unsampled": "Unsampled",
     "unknown": "Unknown",
-    "usage_limited": "Rate Limited"
+    "usage_limited": "Rate Limited",
+    "unavailable": "Unavailable"
   },
   "ops": {
     "title": "Operations",
@@ -5985,11 +5986,6 @@
     "keyGroupsReconcileHint": "Group totals include repeated usage for multi-group accounts. {{ungrouped}} ungrouped account(s) are added and repeated assignments from {{multi}} multi-group account(s) are subtracted to match the deduplicated key total."
   },
   "keyUsageAccounts": {
-    "uncertain": "The previous reset needs administrator reconciliation before another attempt.",
-    "reconcile": "Clear pending review",
-    "reconcileConfirm": "First verify the upstream account credits and usage. Confirm that verification is complete?",
-    "reconcileHint": "Only after verifying the upstream result, enter the account ID to clear the pending state.",
-    "accountID": "Account ID",
     "group": "Group",
     "allGroups": "All groups",
     "ungrouped": "Ungrouped",
@@ -6014,7 +6010,26 @@
     "done": "Reset completed",
     "pending": "Working…",
     "globalOff": "A key cannot enable a globally disabled feature.",
-    "resetWarning": "Reset credits belong to the account and affect everyone sharing its workspace."
+    "resetWarning": "Reset credits belong to the account and affect everyone sharing its workspace.",
+    "accountScope": "Shared upstream account allowances are separate from this API key’s spending and request limits.",
+    "accountCount": "{{count}} accounts",
+    "search": "Search email or account name",
+    "refreshPending": "Reset completed. Usage is updating; refresh again shortly.",
+    "disabled": "Account usage is not enabled",
+    "disabledHint": "This API key is not permitted to view account usage.",
+    "emptyHint": "Try another search or group filter.",
+    "idLabel": "ID {{id}}",
+    "groupLabel": "Group {{id}}",
+    "cardCount": "Reset credits {{value}}",
+    "globalTitle": "Self-service account permissions",
+    "globalDesc": "Control whether the usage portal can display group accounts and redeem their reset credits.",
+    "keyTitle": "Account portal permissions for this API key",
+    "keyDesc": "Disable to restrict this key. Enabled options inherit the global policy and cannot override it.",
+    "inheritView": "Inherit global account visibility",
+    "inheritReset": "Inherit global reset credit access",
+    "viewHint": "Users can only view accounts and groups already authorized for this key.",
+    "resetHint": "Credits belong to the upstream account and affect other users sharing that account.",
+    "immediateSave": "Changes are saved immediately."
   },
   "keyUsage": {
     "title": "API Key Usage",
@@ -6076,7 +6091,8 @@
     "views": {
       "overview": "Overview",
       "quota": "Quota & Limits",
-      "logs": "Request Logs"
+      "logs": "Request Logs",
+      "accounts": "Account usage"
     }
   },
   "nav2": {

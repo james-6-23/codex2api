@@ -72,7 +72,6 @@ func TestKeyUsageAccountPermissionsPostgres(t *testing.T) {
 		_, _ = db.conn.ExecContext(ctx, `DELETE FROM key_usage_reset_attempts WHERE request_id=$1`, requestID)
 		_, _ = db.conn.ExecContext(ctx, `DELETE FROM key_usage_reset_leases WHERE scope=$1`, scope)
 		_, _ = db.conn.ExecContext(ctx, `DELETE FROM key_usage_reset_cooldowns WHERE scope=$1`, scope)
-		_, _ = db.conn.ExecContext(ctx, `DELETE FROM key_usage_reset_uncertain WHERE scope=$1`, scope)
 	}()
 	accounts, err := db.ListKeyUsageAccountAccess(ctx)
 	if err != nil {
@@ -111,18 +110,6 @@ func TestKeyUsageAccountPermissionsPostgres(t *testing.T) {
 		t.Fatalf("duplicate cooldown=%v err=%v", ok, err)
 	}
 	if err := db.RecordKeyUsageResetCooldown(ctx, scope, 102); err != nil {
-		t.Fatal(err)
-	}
-	if ok, err := db.ReserveKeyUsageResetUncertain(ctx, scope, requestID, "auto"); err != nil || !ok {
-		t.Fatalf("uncertain=%v err=%v", ok, err)
-	}
-	if gotID, gotSource, ok, err := db.GetKeyUsageResetUncertain(ctx, scope); err != nil || !ok || gotID != requestID || gotSource != "auto" {
-		t.Fatalf("uncertain detail id=%q source=%q exists=%v err=%v", gotID, gotSource, ok, err)
-	}
-	if ok, err := db.KeyUsageResetUncertain(ctx, scope); err != nil || !ok {
-		t.Fatalf("uncertain lookup=%v err=%v", ok, err)
-	}
-	if err := db.ClearKeyUsageResetUncertain(ctx, scope); err != nil {
 		t.Fatal(err)
 	}
 }

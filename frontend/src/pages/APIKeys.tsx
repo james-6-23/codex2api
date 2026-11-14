@@ -2019,7 +2019,7 @@ export default function APIKeys() {
                     <p className="text-sm leading-relaxed text-muted-foreground">
                       {t("apiKeys.keyAuthNote")}
                     </p>
-                    <KeyUsageAccountPermissions keys={keys} />
+                    <KeyUsageAccountPermissions />
                     <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-muted/20 p-3 sm:flex-row sm:items-center sm:justify-between">
                       <div className="min-w-0">
                         <div className="text-sm font-semibold text-foreground">
@@ -2451,6 +2451,11 @@ export default function APIKeys() {
                 loading={modelRequestUsageLoading}
                 error={modelRequestUsageError}
               />
+
+              {/* Keep pending permission saves mounted while switching edit tabs. */}
+              <div hidden={editTab !== "basic"}>
+                <KeyUsageAccountPermissions key={editingKey.id} keyID={editingKey.id} />
+              </div>
 
               {editTab === "basic" ? (
                 <>

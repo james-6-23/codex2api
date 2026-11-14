@@ -212,17 +212,6 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 		return resetCreditConsumeOutcome{InProgress: true}, nil
 	}
 	defer releaseLease()
-	sameAutoRetry := false
-	if h.db != nil && (source == "auto" || strings.HasPrefix(source, "key_usage:")) {
-		previousID, previousSource, uncertain, err := h.db.GetKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account))
-		if err != nil {
-			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("read reset uncertainty: %w", err)}
-		}
-		sameAutoRetry = uncertain && source == "auto" && previousSource == "auto" && redeemRequestID != "" && previousID == redeemRequestID
-		if uncertain && !sameAutoRetry {
-			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
-		}
-	}
 	if source == "auto" || strings.HasPrefix(source, "key_usage:") {
 		coolingDown, cooldownErr := h.resetCreditCooldownActive(ctx, account)
 		if cooldownErr != nil {
@@ -262,15 +251,6 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
 		}
 	}
-	if h.db != nil && (source == "auto" || strings.HasPrefix(source, "key_usage:")) {
-		reserved, err := h.db.ReserveKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account), redeemRequestID, source)
-		if err != nil {
-			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("reserve reset uncertainty: %w", err)}
-		}
-		if !reserved && !sameAutoRetry {
-			return resetCreditConsumeOutcome{AlreadyHandled: true}, nil
-		}
-	}
 	proxyURL := h.store.ResolveProxyForAccount(account)
 	result, resp, err := h.consumeResetCreditUpstream(ctx, account, proxyURL, redeemRequestID)
 	status := upstreamResetStatus(resp)
@@ -294,14 +274,6 @@ func (h *Handler) consumeResetCreditLocked(ctx context.Context, account *auth.Ac
 	if err != nil {
 		return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{Status: status, RequestErr: err}
 	}
-	if h.db != nil && (source == "auto" || strings.HasPrefix(source, "key_usage:")) {
-		if err := h.db.ClearKeyUsageResetUncertain(ctx, resetCreditDatabaseScope(account)); err != nil {
-			// The upstream succeeded. Keep the uncertainty fence and return a
-			// generic failure so an administrator can reconcile it safely.
-			return resetCreditConsumeOutcome{}, &resetCreditConsumeFailure{RequestErr: fmt.Errorf("clear reset uncertainty: %w", err)}
-		}
-	}
-
 	outcome := resetCreditConsumeOutcome{Remaining: h.applyOptimisticResetDecrement(account)}
 	if result != nil {
 		outcome.WindowsReset = result.WindowsReset

@@ -1,68 +1,58 @@
 import { useEffect, useState } from 'react'
 import { useTranslation } from 'react-i18next'
+import { Eye, RotateCcw, Loader2 } from 'lucide-react'
 import { api } from '../api'
-import { Button } from '@/components/ui/button'
 import { Switch } from '@/components/ui/switch'
-import { Select } from '@/components/ui/select'
-import { Input } from '@/components/ui/input'
-import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { getErrorMessage } from '../utils/error'
 
 type Policy = { view_enabled: boolean; reset_enabled: boolean }
 
-export default function KeyUsageAccountPermissions({ keys }: { keys: { id: number; name: string }[] }) {
+export default function KeyUsageAccountPermissions({ keyID = 0 }: { keyID?: number }) {
   const { t } = useTranslation()
-  const [id, setId] = useState(0)
   const [policy, setPolicy] = useState<Policy | null>(null)
-  const [message, setMessage] = useState('')
+  const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
-  const [accountID, setAccountID] = useState('')
-  const { confirm, confirmDialog } = useConfirmDialog()
+  const [saved, setSaved] = useState(false)
+  const global = keyID === 0
 
   useEffect(() => {
     let cancelled = false
     setPolicy(null)
-    setMessage('')
-    void api.getKeyUsageAccountPermissions(id).then(p => { if (!cancelled) setPolicy(p) }).catch(e => { if (!cancelled) setMessage(getErrorMessage(e)) })
+    setError('')
+    setSaved(false)
+    void api.getKeyUsageAccountPermissions(keyID).then(value => { if (!cancelled) setPolicy(value) }).catch(e => { if (!cancelled) setError(getErrorMessage(e)) })
     return () => { cancelled = true }
-  }, [id])
+  }, [keyID])
 
-  const save = async () => {
-    if (!policy) return
+  const update = async (patch: Partial<Policy>) => {
+    if (!policy || saving) return
     setSaving(true)
-    setMessage('')
-    try { await api.setKeyUsageAccountPermissions(id, policy); setMessage(t('keyUsageAccounts.saved')) }
-    catch (e) { setMessage(getErrorMessage(e)) }
+    setSaved(false)
+    setError('')
+    try {
+      const value = await api.setKeyUsageAccountPermissions(keyID, { ...policy, ...patch })
+      setPolicy(value)
+      setSaved(true)
+    } catch (e) { setError(getErrorMessage(e)) }
     finally { setSaving(false) }
   }
 
-  const reconcile = async () => {
-    const account = Number(accountID)
-    if (!Number.isSafeInteger(account) || account <= 0 || !await confirm({ title: t('keyUsageAccounts.reconcile'), description: t('keyUsageAccounts.reconcileConfirm'), tone: 'destructive' })) return
-    setSaving(true); setMessage('')
-    try { await api.clearKeyUsageResetUncertain(account); setMessage(t('keyUsageAccounts.saved')) }
-    catch (e) { setMessage(getErrorMessage(e)) }
-    finally { setSaving(false) }
-  }
-
-  return <div className="space-y-3 rounded-xl border border-border/80 bg-muted/20 p-3">
-    {confirmDialog}
-    <div className="text-sm font-semibold">{t('keyUsageAccounts.title')}</div>
-    <p className="text-xs text-muted-foreground">{t('keyUsageAccounts.intro')}</p>
-    <div className="space-y-1 text-sm">{t('keyUsageAccounts.specific')}
-      <Select aria-label={t('keyUsageAccounts.specific')} value={String(id)} onValueChange={value => setId(Number(value))} disabled={saving}
-        options={[{ value: '0', label: t('keyUsageAccounts.global') }, ...keys.map(key => ({ value: String(key.id), label: `${key.name} (#${key.id})` }))]} />
+  return <section className="rounded-xl border border-border/80 bg-muted/20" aria-label={t(global ? 'keyUsageAccounts.globalTitle' : 'keyUsageAccounts.keyTitle')}>
+    <header className="border-b border-border/70 p-3">
+      <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold">{t(global ? 'keyUsageAccounts.globalTitle' : 'keyUsageAccounts.keyTitle')}</h3>{saving && <Loader2 className="size-3.5 animate-spin text-muted-foreground" aria-label={t('common.saving')} />}</div>
+      <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t(global ? 'keyUsageAccounts.globalDesc' : 'keyUsageAccounts.keyDesc')}</p>
+    </header>
+    <div className="divide-y divide-border/60 px-3">
+      {([
+        ['view_enabled', Eye, global ? 'keyUsageAccounts.view' : 'keyUsageAccounts.inheritView', 'keyUsageAccounts.viewHint'],
+        ['reset_enabled', RotateCcw, global ? 'keyUsageAccounts.reset' : 'keyUsageAccounts.inheritReset', 'keyUsageAccounts.resetHint'],
+      ] as const).map(([field, Icon, label, hint]) => <div key={field} className="flex items-center justify-between gap-4 py-3">
+        <div className="min-w-0"><label htmlFor={`key-usage-${keyID}-${field}`} className="inline-flex items-center gap-2 text-sm font-medium"><Icon className="size-3.5 text-muted-foreground" />{t(label)}</label><p className="mt-1 text-xs leading-relaxed text-muted-foreground">{t(hint)}</p></div>
+        <Switch id={`key-usage-${keyID}-${field}`} checked={policy?.[field] ?? false} onCheckedChange={value => void update({ [field]: value })} disabled={!policy || saving} />
+      </div>)}
     </div>
-    {id !== 0 && <p className="text-xs text-muted-foreground">{t('keyUsageAccounts.globalOff')}</p>}
-    {policy && <>
-      <label className="flex items-center justify-between gap-4 text-sm">{t('keyUsageAccounts.view')}<Switch checked={policy.view_enabled} onCheckedChange={v => setPolicy({ ...policy, view_enabled: v })} disabled={saving} /></label>
-      <label className="flex items-center justify-between gap-4 text-sm">{t('keyUsageAccounts.reset')}<Switch checked={policy.reset_enabled} onCheckedChange={v => setPolicy({ ...policy, reset_enabled: v })} disabled={saving} /></label>
-      <Button size="sm" onClick={() => void save()} disabled={saving}>{t('keyUsageAccounts.save')}</Button>
-    </>}
-    {message && <p className="text-xs" role="status">{message}</p>}
-    <div className="space-y-2 border-t pt-3">
-      <p className="text-xs text-muted-foreground">{t('keyUsageAccounts.reconcileHint')}</p>
-      <div className="flex gap-2"><Input type="number" min="1" aria-label={t('keyUsageAccounts.accountID')} placeholder={t('keyUsageAccounts.accountID')} value={accountID} onChange={e => setAccountID(e.target.value)} disabled={saving} /><Button variant="outline" size="sm" disabled={saving || !accountID} onClick={() => void reconcile()}>{t('keyUsageAccounts.reconcile')}</Button></div>
-    </div>
-  </div>
+    <footer className="border-t border-border/70 px-3 py-2 text-xs text-muted-foreground" role={error ? 'alert' : 'status'}>
+      {error ? <span className="text-destructive">{error}</span> : t(saved ? 'keyUsageAccounts.saved' : 'keyUsageAccounts.immediateSave')}
+    </footer>
+  </section>
 }
