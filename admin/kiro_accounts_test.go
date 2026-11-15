@@ -1,0 +1,126 @@
+package admin
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/codex2api/auth"
+	"github.com/codex2api/database"
+	"github.com/gin-gonic/gin"
+)
+
+func TestParseKiroImportFormats(t *testing.T) {
+	kam := `{"version":"1.0","accounts":[{"email":"a@example.com","idp":"Google","machineId":"m-1","profileArn":"arn:aws:codewhisperer:us-east-1:1:profile/P",
+	  "credentials":{"accessToken":"at-1","refreshToken":"rt-1","expiresAt":1767225600000,"authMethod":"social","provider":"Google"}}]}`
+	kiroRS := `[{"refreshToken":"rt-2","authMethod":"idc","clientId":"cid","clientSecret":"csec","region":"eu-west-1","apiRegion":"us-east-1","startUrl":"https://d-1.awsapps.com/start"},
+	  {"kiroApiKey":"ksk_test","authMethod":"api_key"}]`
+	ide := `{"accessToken":"at-3","refreshToken":"rt-3","expiresAt":"2026-12-01T00:00:00Z","authMethod":"social","provider":"Github","profileArn":"arn:p"}`
+
+	items, err := parseKiroImport(kam)
+	if err != nil || len(items) != 1 {
+		t.Fatalf("KAM: %v %+v", err, items)
+	}
+	if got := items[0]; got.Email != "a@example.com" || got.RefreshToken != "rt-1" || got.Credential.LoginSource != "Google" || got.Credential.MachineID != "m-1" || got.Credential.ProfileARN == "" || got.ExpiresAt.UnixMilli() != 1767225600000 {
+		t.Fatalf("KAM item = %+v", got)
+	}
+	items, err = parseKiroImport(kiroRS)
+	if err != nil || len(items) != 2 {
+		t.Fatalf("kiro.rs: %v %+v", err, items)
+	}
+	if got := items[0].Credential; got.ClientSecret != "csec" || got.Region != "eu-west-1" || got.APIRegion != "us-east-1" || got.StartURL == "" {
+		t.Fatalf("kiro.rs idc = %+v", got)
+	}
+	if items[1].APIKey != "ksk_test" {
+		t.Fatalf("kiro.rs api key = %+v", items[1])
+	}
+	items, err = parseKiroImport(ide)
+	if err != nil || len(items) != 1 || items[0].Credential.LoginSource != "Github" || items[0].ExpiresAt.IsZero() {
+		t.Fatalf("IDE token: %v %+v", err, items)
+	}
+	if _, err := parseKiroImport(`[{"accessToken":"only-at"}]`); err == nil {
+		t.Fatal("an entry without refreshToken or kiroApiKey must be rejected")
+	}
+}
+
+func TestExportKiroAccountsRoundTripsThroughImporter(t *testing.T) {
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, nil)
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+	id, err := db.InsertAccountWithUpstream(context.Background(), "kiro", "kiro", auth.UpstreamKiro, map[string]any{
+		"upstream_type": auth.UpstreamKiro, "email": "a@example.com", "access_token": "at-1", "refresh_token": "rt-1",
+		"expires_at": "2026-12-01T00:00:00Z", "kiro_auth_kind": auth.KiroAuthKindSocial, "kiro_login_source": "Google",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, format := range []string{"kam", "kiro-rs"} {
+		recorder := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(recorder)
+		c.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/kiro/export?format="+format+"&ids="+strconv.FormatInt(id, 10), nil)
+		handler.ExportKiroAccounts(c)
+		if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store, max-age=0" || !strings.Contains(recorder.Header().Get("Content-Disposition"), "attachment") {
+			t.Fatalf("%s: status=%d headers=%v", format, recorder.Code, recorder.Header())
+		}
+		items, err := parseKiroImport(recorder.Body.String())
+		if err != nil || len(items) != 1 || items[0].RefreshToken != "rt-1" || items[0].Email != "a@example.com" || items[0].ExpiresAt.IsZero() {
+			t.Fatalf("%s round trip: %v %+v\n%s", format, err, items, recorder.Body.String())
+		}
+	}
+}
+
+func TestKiroSettingsRoundTrip(t *testing.T) {
+	handler, db := newTestAdminHandlerFixture(t)
+	t.Cleanup(func() { ApplyKiroSettings(database.KiroSettings{}) })
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings/kiro", strings.NewReader(`{"api_domain":"kiro","cache_simulation":true}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateKiroSettings(c)
+	if recorder.Code != http.StatusOK || auth.KiroAPIDomain() != "kiro" {
+		t.Fatalf("status=%d body=%s domain=%q", recorder.Code, recorder.Body.String(), auth.KiroAPIDomain())
+	}
+	saved, err := db.LoadKiroSettings(context.Background())
+	if err != nil || saved.APIDomain != "kiro" || !saved.CacheSimulation {
+		t.Fatalf("saved = %+v err=%v", saved, err)
+	}
+	recorder = httptest.NewRecorder()
+	c, _ = gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/admin/settings/kiro", strings.NewReader(`{"api_domain":"example.com"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	handler.UpdateKiroSettings(c)
+	if recorder.Code != http.StatusBadRequest {
+		t.Fatalf("unknown domain must be rejected: %d", recorder.Code)
+	}
+}
+
+func TestKiroUsageSnapshotSurvivesCredentialStorage(t *testing.T) {
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithUpstream(ctx, "kiro", "kiro", auth.UpstreamKiro, map[string]any{"upstream_type": auth.UpstreamKiro, "refresh_token": "rt"}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := &auth.KiroUsageSnapshot{SubscriptionTitle: "KIRO FREE", Used: 1, Limit: 50, BaseLimit: 50, FetchedAt: time.Now()}
+	if err := db.UpdateCredentials(ctx, id, map[string]interface{}{auth.KiroUsageCredentialKey: kiroUsageCredential(usage)}); err != nil {
+		t.Fatal(err)
+	}
+	row, err := db.GetAccountByID(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if raw := kiroUsageForRow(row, true); !strings.Contains(string(raw), `"subscription_title":"KIRO FREE"`) {
+		t.Fatalf("kiro_usage must be readable after storage, got %q", raw)
+	}
+}
+
+func TestKiroAccountsAreNeverUnsampled(t *testing.T) {
+	if accountListUnsampled(&accountListSnapshotItem{Status: "active", KiroAuthKind: auth.KiroAuthKindSocial}) {
+		t.Fatal("Kiro quota comes from the control plane, not 5h/7d windows; it must not count as unsampled")
+	}
+}

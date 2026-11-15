@@ -10,11 +10,12 @@ export interface IntelligenceQuestion {
   max_duration_ms: number;
   enabled: boolean;
 }
-export type IntelligenceChannel = "codex" | "claude" | "grok" | "antigravity";
+export type IntelligenceChannel = "codex" | "claude" | "grok" | "antigravity" | "kiro";
 export interface IntelligenceSettings {
   channels?: Partial<Record<IntelligenceChannel, boolean>>;
   grok_model?: string;
   antigravity_model?: string;
+  kiro_model?: string;
   adaptive_enabled: boolean;
   pause_initial_seconds: number;
   pause_max_seconds: number;

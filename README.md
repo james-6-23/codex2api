@@ -198,6 +198,10 @@ Notes:
 
 Antigravity accounts are managed as a dedicated Google channel with browser/imported OAuth credentials and an optional Google API Key credential shape. Admin tooling includes secret-bearing JSON/ZIP credential export plus sanitized state, explicit control-plane sync, and bounded capability probing. OAuth requests use the Cloud Code `v1internal` adapter. API Key requests target the Generative Language `v1beta/interactions` endpoint, but ordinary API-key dispatch is fail-closed by default and requires `ANTIGRAVITY_ENABLE_EXPERIMENTAL_INTERACTIONS=true`. The opt-in real-upstream integration test has not succeeded in this environment, so this path remains experimental rather than production-certified. See [docs/ANTIGRAVITY.md](docs/ANTIGRAVITY.md) for endpoints, test instructions, models, channel restrictions, plaintext credential-storage risk, and the certification checklist.
 
+## Kiro channel
+
+Kiro accounts (social Google/GitHub, AWS Builder ID, Enterprise IAM Identity Center, external IdP, and Kiro API keys) are a dedicated upstream channel. The protocol layer is a Go port of [ZyphrZero/kiro.rs](https://github.com/ZyphrZero/kiro.rs): `/v1/messages` is served natively, while `/v1/responses` and `/v1/chat/completions` go through a dedicated Kiro bridge that restores custom tools, hosted web search and Codex inline compaction. The admin page imports kiro.rs, Kiro IDE and Kiro Account Manager credential files, supports social and device-code sign-in, syncs credits and model catalogs, and exports to Kiro Account Manager or kiro.rs format. See [docs/KIRO.md](docs/KIRO.md).
+
 ## Documentation
 
 | Document | Description | Path |
@@ -206,6 +210,7 @@ Antigravity accounts are managed as a dedicated Google channel with browser/impo
 | [Usage Guide](docs/USAGE.md) | Client setup, SDK examples, media workflows, and troubleshooting | `docs/USAGE.md` |
 | [API Documentation](docs/API.md) | API endpoints, request and response examples, error codes | `docs/API.md` |
 | [Antigravity Integration](docs/ANTIGRAVITY.md) | Google OAuth and experimental API Key channel, models, risks, and protocol status | `docs/ANTIGRAVITY.md` |
+| [Kiro Integration](docs/KIRO.md) | Kiro credentials, import/export, sign-in, models, protocol behavior, settings | `docs/KIRO.md` |
 | [Codex Multi-Agent v2 Compatibility](docs/CODEX_MULTI_AGENT_V2_COMPAT.md) | Opt-in plaintext compatibility for third-party subagents, risks, rollout, rollback | `docs/CODEX_MULTI_AGENT_V2_COMPAT.md` |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Deployment modes, upgrade guide, backup and restore | `docs/DEPLOYMENT.md` |
 | [Configuration Guide](docs/CONFIGURATION.md) | Environment variables, system settings, configuration priority | `docs/CONFIGURATION.md` |

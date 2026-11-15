@@ -2,7 +2,7 @@ import { cn } from "@/lib/utils";
 import type { UpstreamChannel } from "@/types";
 
 /**
- * 渠道品牌图标（Codex / Grok / Antigravity）。
+ * 渠道品牌图标（Codex / Grok / Antigravity / Claude / Kiro）。
  *
  * 使用 `@lobehub/icons-static-svg`，对齐 `@lobehub/icons` 的 Codex.Avatar 彩色方案，
  * 但不引入 antd / @lobehub/ui peer deps。
@@ -18,6 +18,7 @@ const ICON_URLS = import.meta.glob(
     "../../node_modules/@lobehub/icons-static-svg/icons/antigravity-color.svg",
     "../../node_modules/@lobehub/icons-static-svg/icons/claudecode-color.svg",
     "../../node_modules/@lobehub/icons-static-svg/icons/claude-color.svg",
+    "../../node_modules/@lobehub/icons-static-svg/icons/kiro-color.svg",
   ],
   { eager: true, query: "?url", import: "default" },
 ) as Record<string, string>;
@@ -78,11 +79,12 @@ export default function ChannelLogo({
   className?: string;
   title?: string;
 }) {
-  if (channel === "codex" || channel === "antigravity" || channel === "claude") {
+  if (channel === "codex" || channel === "antigravity" || channel === "claude" || channel === "kiro") {
     const fileByChannel: Record<string, { file: string; alt: string }> = {
       codex: { file: "codex-color", alt: "Codex" },
       antigravity: { file: "antigravity-color", alt: "Antigravity" },
       claude: { file: "claude-color", alt: "Claude" },
+      kiro: { file: "kiro-color", alt: "Kiro" },
     };
     const meta = fileByChannel[channel];
     const src = URL_BY_FILE.get(meta.file);

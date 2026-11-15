@@ -146,7 +146,9 @@ export default function TestConnectionModal({
   );
   // 白名单为空的 Grok 账号以上游模型目录为准，不能只读 account.models。
   const isGrokAccount = Boolean(account.grok_api);
-  const isCodexOAuthAccount = !isClaudeAccount && !isOpenAIResponsesAccount && !isAntigravityAccount;
+  // Kiro 用账号自己的模型目录，测试模型优先取 Kiro 渠道测连设置。
+  const isKiroAccount = Boolean(account.kiro_api);
+  const isCodexOAuthAccount = !isClaudeAccount && !isOpenAIResponsesAccount && !isAntigravityAccount && !isKiroAccount;
   const supportsModelDetector = isCodexOAuthAccount || isClaudeAccount || Boolean(account.openai_responses_api && !account.grok_api);
 
   const modelSelectOptions = useMemo(
@@ -154,12 +156,12 @@ export default function TestConnectionModal({
       uniqueTestModels(
         modelOptions,
         isAntigravityAccount && !modelOptions.includes(selectedModel) ? undefined : selectedModel,
-        !isOpenAIResponsesAccount && !isClaudeAccount && !isAntigravityAccount,
+        isCodexOAuthAccount,
       ).filter((item) => !isAntigravityAccount || !isAntigravityDisabledModel(item)).map((item) => ({
         label: item,
         value: item,
       })),
-    [isAntigravityAccount, isClaudeAccount, isOpenAIResponsesAccount, modelOptions, selectedModel],
+    [isAntigravityAccount, isCodexOAuthAccount, modelOptions, selectedModel],
   );
 
   useEffect(() => {
@@ -181,6 +183,28 @@ export default function TestConnectionModal({
           const ordered = orderAntigravityTestModels(account.models ?? [], preferred, account.antigravity_quota);
           setModelOptions(ordered);
           setSelectedModel((current) => resolveAntigravityTestModelSelection(ordered, current));
+          return;
+        }
+
+        if (isKiroAccount) {
+          let preferred = "";
+          try {
+            const channelSettings = await api.getChannelTestSettings();
+            if (!active) return;
+            preferred = channelSettings.kiro?.test_model ?? "";
+            setTestContent(channelSettings.kiro?.test_content || channelSettings.default_test_content || "hi");
+          } catch {
+            /* 渠道测试设置读不到就按目录自动选 */
+          }
+          if (!active) return;
+          const kiroModels = uniqueTestModels(account.models ?? [], undefined, false);
+          const pick =
+            kiroModels.find((item) => item.toLowerCase() === preferred.toLowerCase()) ??
+            kiroModels.find((item) => item.toLowerCase().includes("haiku")) ??
+            kiroModels[0];
+          const nextModels = uniqueTestModels(kiroModels, pick, false);
+          setModelOptions(nextModels);
+          setSelectedModel((current) => current || nextModels[0] || "");
           return;
         }
 
@@ -275,6 +299,10 @@ export default function TestConnectionModal({
           const fallbackModels = uniqueTestModels(grokConnectionTestModels(account), undefined, false);
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0] || "");
+        } else if (isKiroAccount) {
+          const fallbackModels = uniqueTestModels(account.models ?? [], undefined, false);
+          setModelOptions(fallbackModels);
+          setSelectedModel((current) => current || fallbackModels[0] || "");
         } else if (isOpenAIResponsesAccount) {
           const accountModels = (account.models ?? []).filter(
             isConnectionTestModel,
@@ -307,7 +335,7 @@ export default function TestConnectionModal({
     return () => {
       active = false;
     };
-  }, [account.antigravity_quota, account.claude_api, account.grok_models, account.model_mapping, account.models, isAntigravityAccount, isClaudeAccount, isGrokAccount, isOpenAIResponsesAccount]);
+  }, [account.antigravity_quota, account.claude_api, account.grok_models, account.model_mapping, account.models, isAntigravityAccount, isClaudeAccount, isGrokAccount, isKiroAccount, isOpenAIResponsesAccount]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 

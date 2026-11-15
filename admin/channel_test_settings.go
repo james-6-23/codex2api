@@ -22,11 +22,13 @@ import (
 const (
 	channelTestChannelAntigravity = "antigravity"
 	channelTestChannelClaude      = "claude"
+	channelTestChannelKiro        = "kiro"
 )
 
 type channelTestSettingsResponse struct {
 	Antigravity database.ChannelTestSettings `json:"antigravity"`
 	Claude      database.ChannelTestSettings `json:"claude"`
+	Kiro        database.ChannelTestSettings `json:"kiro"`
 	// 渠道留空内容时实际生效的全局测活内容，前端用作占位提示。
 	DefaultTestContent string `json:"default_test_content"`
 	// 渠道并发为 0 时实际生效的全局批量测试并发。
@@ -40,8 +42,10 @@ type channelTestSettingsResponse struct {
 func (h *Handler) channelTestModelChoices() map[string][]string {
 	antigravity := make([]string, 0, 16)
 	claude := make([]string, 0, 16)
+	kiro := make([]string, 0, 24)
 	seenAG := map[string]struct{}{}
 	seenClaude := map[string]struct{}{}
+	seenKiro := map[string]struct{}{}
 	appendUnique := func(dst []string, seen map[string]struct{}, models []string) []string {
 		for _, model := range models {
 			model = strings.TrimSpace(model)
@@ -64,6 +68,8 @@ func (h *Handler) channelTestModelChoices() map[string][]string {
 				antigravity = appendUnique(antigravity, seenAG, antigravityConnectionTestModels(account))
 			case account.IsClaudeOAuth():
 				claude = appendUnique(claude, seenClaude, claudeProbeModelIDs(account))
+			case account.IsKiro():
+				kiro = appendUnique(kiro, seenKiro, proxy.KiroAccountModelIDs(account))
 			}
 		}
 	}
@@ -73,9 +79,13 @@ func (h *Handler) channelTestModelChoices() map[string][]string {
 	if len(claude) == 0 {
 		claude = appendUnique(claude, seenClaude, []string{"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"})
 	}
+	if len(kiro) == 0 {
+		kiro = appendUnique(kiro, seenKiro, proxy.KiroAccountModelIDs(nil))
+	}
 	return map[string][]string{
 		channelTestChannelAntigravity: antigravity,
 		channelTestChannelClaude:      claude,
+		channelTestChannelKiro:        kiro,
 	}
 }
 
@@ -111,6 +121,8 @@ func (h *Handler) channelTestSettingsForAccount(ctx context.Context, account *au
 		return cfg.Antigravity
 	case account.IsClaudeOAuth():
 		return cfg.Claude
+	case account.IsKiro():
+		return cfg.Kiro
 	}
 	return database.ChannelTestSettings{}
 }
@@ -142,6 +154,7 @@ func (h *Handler) buildChannelTestSettingsResponse(cfg database.ChannelTestConfi
 	return channelTestSettingsResponse{
 		Antigravity:            cfg.Antigravity,
 		Claude:                 cfg.Claude,
+		Kiro:                   cfg.Kiro,
 		DefaultTestContent:     defaultContent,
 		DefaultTestConcurrency: defaultConcurrency,
 		ModelChoices:           h.channelTestModelChoices(),
@@ -162,13 +175,14 @@ func (h *Handler) UpdateChannelTestSettings(c *gin.Context) {
 	var req struct {
 		Antigravity *database.ChannelTestSettings `json:"antigravity"`
 		Claude      *database.ChannelTestSettings `json:"claude"`
+		Kiro        *database.ChannelTestSettings `json:"kiro"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	if req.Antigravity == nil && req.Claude == nil {
-		writeError(c, http.StatusBadRequest, "缺少 antigravity 或 claude 字段")
+	if req.Antigravity == nil && req.Claude == nil && req.Kiro == nil {
+		writeError(c, http.StatusBadRequest, "缺少 antigravity、claude 或 kiro 字段")
 		return
 	}
 	if h.db == nil {
@@ -195,13 +209,17 @@ func (h *Handler) UpdateChannelTestSettings(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
+	if err := apply(channelTestChannelKiro, &cfg.Kiro, req.Kiro); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := h.db.SaveChannelTestConfig(c.Request.Context(), cfg); err != nil {
 		writeError(c, http.StatusInternalServerError, "保存失败: "+err.Error())
 		return
 	}
 	normalized := cfg.Normalized()
 	h.channelTestCfg.Store(&normalized)
-	log.Printf("设置已更新: channel_test_config antigravity.model=%q claude.model=%q", normalized.Antigravity.TestModel, normalized.Claude.TestModel)
+	log.Printf("设置已更新: channel_test_config antigravity.model=%q claude.model=%q kiro.model=%q", normalized.Antigravity.TestModel, normalized.Claude.TestModel, normalized.Kiro.TestModel)
 	c.JSON(http.StatusOK, h.buildChannelTestSettingsResponse(normalized))
 }
 
@@ -254,6 +272,8 @@ func (h *Handler) batchTestConcurrency(ctx context.Context, accounts []*auth.Acc
 			current = channelTestChannelAntigravity
 		case account.IsClaudeOAuth():
 			current = channelTestChannelClaude
+		case account.IsKiro():
+			current = channelTestChannelKiro
 		default:
 			return global
 		}
@@ -270,6 +290,8 @@ func (h *Handler) batchTestConcurrency(ctx context.Context, accounts []*auth.Acc
 		configured = cfg.Antigravity.TestConcurrency
 	case channelTestChannelClaude:
 		configured = cfg.Claude.TestConcurrency
+	case channelTestChannelKiro:
+		configured = cfg.Kiro.TestConcurrency
 	}
 	if configured > 0 {
 		return configured

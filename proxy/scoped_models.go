@@ -31,6 +31,7 @@ const (
 	modelBackingRelay
 	modelBackingAntigravity
 	modelBackingClaude
+	modelBackingKiro
 )
 
 type scopedModelRecord struct {
@@ -82,6 +83,8 @@ func scopedModelOwner(record *scopedModelRecord) string {
 		return "google"
 	case modelBackingClaude:
 		return "anthropic"
+	case modelBackingKiro:
+		return "kiro"
 	default:
 		return "codex2api"
 	}
@@ -233,6 +236,12 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 			models := antigravityPublicModelsForAccount(account)
 			for _, id := range models {
 				addScopedModel(records, id, modelBackingAntigravity, time.Time{}, false)
+				addTarget(id)
+			}
+
+		case account.IsKiro():
+			for _, id := range KiroAccountModelIDs(account) {
+				addScopedModel(records, id, modelBackingKiro, time.Time{}, false)
 				addTarget(id)
 			}
 

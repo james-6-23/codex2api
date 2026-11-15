@@ -254,6 +254,13 @@ func main() {
 		}
 	}
 	antigravityCfgCancel()
+	kiroCfgCtx, kiroCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	if kiroSettings, err := db.LoadKiroSettings(kiroCfgCtx); err != nil {
+		log.Printf("加载 Kiro 渠道设置失败(按默认值运行): %v", err)
+	} else {
+		admin.ApplyKiroSettings(kiroSettings)
+	}
+	kiroCfgCancel()
 
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
@@ -428,6 +435,7 @@ func main() {
 	adminHandler.StartAutoResetCredits(backgroundCtx)
 	adminHandler.StartAutoActivate5hWindow(backgroundCtx)
 	adminHandler.StartScheduledConnectionTests(backgroundCtx)
+	adminHandler.StartKiroSync(backgroundCtx)
 	// Grok 账号状态定期探测（默认关，由 grok 系统设置开关/间隔控制）
 	adminHandler.StartGrokStatusProbe(backgroundCtx)
 	// 官方结算用量按天快照：上游只保留 7 天，不落库就永久丢失，长期历史全靠这个任务。

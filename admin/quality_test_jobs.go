@@ -65,6 +65,8 @@ func (h *Handler) CreateQualityTestJob(c *gin.Context) {
 		channel = "grok"
 	case account.IsAntigravityAPI():
 		channel = "antigravity"
+	case account.IsKiro():
+		channel = "kiro"
 	}
 	account.Mu().RLock()
 	name, plan := account.Email, account.PlanType

@@ -969,6 +969,22 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				return r, e
 			})
+		} else if account.IsKiro() {
+			// Kiro 内核直接吃 Anthropic Messages、吐 Anthropic SSE，复用原生直通链路（ADR-0002）。
+			kiroBody := canonicalBody
+			if !strings.EqualFold(gjson.GetBytes(kiroBody, "model").String(), attemptEffectiveModel) {
+				kiroBody, _ = sjson.SetBytes(kiroBody, "model", attemptEffectiveModel)
+			}
+			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(kiroBody, account); ok {
+				kiroBody, attemptEffectiveModel = mappedBody, mappedModel
+			}
+			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
+				r, e := ExecuteKiroMessagesRequest(upstreamCtx, account, kiroBody, proxyURL)
+				if e == nil {
+					markClaudeNativeRoute(r)
+				}
+				return r, e
+			})
 		} else if isRelayAccount {
 			upstreamBody := routingBody
 			if !account.IsGrokAPI() {
@@ -1172,6 +1188,11 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusBadRequest, ErrorTypeInvalidRequest, message)
 				return
 			}
+			if h.kiroRefreshAfterUnauthorized(c.Request.Context(), account, resp.StatusCode, antigravityRefreshRetried) {
+				h.store.Release(account)
+				h.store.UnbindSessionAffinity(affinityKey, account.ID())
+				continue
+			}
 			// Antigravity 的 401 是过期 access token，刷新后同号重试一次即可恢复
 			// （与 /v1/responses 一致）。
 			if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
@@ -1355,7 +1376,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			// 显式传入 attempt 作用域，隔离各 attempt 的通道身份。
 			attemptScope := fmt.Sprintf("a%d", attempt)
 			usage, outcome, wroteAnyBody, firstTokenMs := forwardGrokNativeResponseObservedWithScope(readCtx, c, resp, GrokProtocolMessages, isStream, start, ttftGuard.Stop, streamAttempt.writerOr(c.Writer), streamAttempt.flusherOr(downstreamFlusher), nil, requestGuard, attemptScope)
-			if account.IsClaudeOAuth() {
+			if account.IsClaudeOAuth() || account.IsKiro() {
 				// Anthropic 的 input_tokens 不含缓存命中/写入，转换成计费层的总输入口径。
 				applyAnthropicUsageSemantics(usage)
 			}

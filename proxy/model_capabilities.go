@@ -481,9 +481,11 @@ func codexManifestCapabilityAccountFilter(row *database.APIKeyRow, model string)
 		}
 		switch row.Limits.ResolveUpstreamChannel() {
 		case database.UpstreamChannelCodex:
-			return !account.IsGrokAPI() && !account.IsAntigravityAPI() && !account.IsClaudeOAuth()
+			return !account.IsGrokAPI() && !account.IsAntigravityAPI() && !account.IsClaudeOAuth() && !account.IsKiro()
 		case database.UpstreamChannelGrok:
 			return grokChannelAccountFilter(model)(account)
+		case database.UpstreamChannelKiro:
+			return kiroChannelAccountFilterWithGate(model, enforceModelRateLimits)(account)
 		case database.UpstreamChannelAntigravity:
 			return antigravityChannelAccountFilter(model)(account)
 		case database.UpstreamChannelClaude:

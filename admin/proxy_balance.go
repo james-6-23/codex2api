@@ -54,7 +54,7 @@ func isOAuthProxyBalanceTarget(row *database.AccountRow) bool {
 	switch upstreamType {
 	case "":
 		return strings.EqualFold(strings.TrimSpace(row.Type), "oauth")
-	case auth.UpstreamGrok, auth.UpstreamAntigravity, auth.UpstreamClaude:
+	case auth.UpstreamGrok, auth.UpstreamAntigravity, auth.UpstreamClaude, auth.UpstreamKiro:
 		return true
 	default:
 		return false
@@ -178,8 +178,8 @@ func (h *Handler) AutoBalanceProxies(c *gin.Context) {
 		return
 	}
 	channel := strings.ToLower(strings.TrimSpace(req.Channel))
-	if channel != "" && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude {
-		writeError(c, http.StatusBadRequest, "channel 仅支持 grok / codex / antigravity / claude / 空")
+	if channel != "" && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude && channel != database.UpstreamChannelKiro {
+		writeError(c, http.StatusBadRequest, "channel 仅支持 grok / codex / antigravity / claude / kiro / 空")
 		return
 	}
 	if req.MaxPerProxy < 0 {

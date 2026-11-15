@@ -264,7 +264,7 @@ func whamDailyUsageChannelSupported(account *auth.Account) bool {
 	if account == nil {
 		return false
 	}
-	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI())
+	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI() || account.IsKiro())
 }
 
 // isCodexATAccount 识别 at-... 形态的纯 AT 凭据。未补充工作区 ID 的纯 AT 凭据能调用

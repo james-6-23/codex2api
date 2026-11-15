@@ -39,6 +39,7 @@ import {
 import GrokAccounts from "./GrokAccounts";
 import AntigravityAccounts from "./AntigravityAccounts";
 import ClaudeAccounts from "./ClaudeAccounts";
+import KiroAccounts from "./KiroAccounts";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
 import {
@@ -1844,7 +1845,9 @@ export default function Accounts() {
       ? "antigravity"
       : normalizedPath.endsWith("/accounts/claude")
         ? "claude"
-        : "codex";
+        : normalizedPath.endsWith("/accounts/kiro")
+          ? "kiro"
+          : "codex";
   const { channels: visibleChannels, isChannelVisible } = useVisibleChannels();
   // 设置页隐藏了某个渠道后，直接打开它的账号路由要回落到 Codex 视图。
   useEffect(() => {
@@ -1859,7 +1862,9 @@ export default function Accounts() {
             ? "/accounts/antigravity"
             : view === "claude"
               ? "/accounts/claude"
-              : "/accounts",
+              : view === "kiro"
+                ? "/accounts/kiro"
+                : "/accounts",
       );
     },
     [navigate],
@@ -6338,13 +6343,14 @@ export default function Accounts() {
           ["grok", t("accounts.providerViewGrok")],
           ["antigravity", t("accounts.providerViewAntigravity")],
           ["claude", t("accounts.providerViewClaude")],
+          ["kiro", t("accounts.providerViewKiro")],
         ] as const
       ).filter(([key]) => visibleChannels.includes(key)),
     [t, visibleChannels],
   );
   const providerSwitcher = useMemo(() => (
     <div
-      className="relative grid w-full max-w-[560px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
+      className="relative grid w-full max-w-[680px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
       style={{ gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))` }}
     >
       <span
@@ -6424,6 +6430,14 @@ export default function Accounts() {
     return (
       <div key="provider-claude" className="animate-channel-switch-in">
         <ClaudeAccounts headerSlot={providerSwitcher} />
+      </div>
+    );
+  }
+
+  if (providerView === "kiro") {
+    return (
+      <div key="provider-kiro" className="animate-channel-switch-in">
+        <KiroAccounts headerSlot={providerSwitcher} />
       </div>
     );
   }
@@ -11277,7 +11291,9 @@ export default function Accounts() {
                                       ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                                       : group.channel === "claude"
                                         ? "bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
-                                        : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                                        : group.channel === "kiro"
+                                          ? "bg-purple-50 text-purple-700 dark:bg-purple-950 dark:text-purple-300"
+                                          : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
                                 }`}
                               >
                                 <ChannelLogo channel={group.channel} size={11} />
@@ -11287,7 +11303,9 @@ export default function Accounts() {
                                     ? t("accounts.providerViewAntigravity")
                                     : group.channel === "claude"
                                       ? t("accounts.providerViewClaude")
-                                      : t("accounts.providerViewCodex")}
+                                      : group.channel === "kiro"
+                                        ? t("accounts.providerViewKiro")
+                                        : t("accounts.providerViewCodex")}
                               </span>
                               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
                                 {t("accounts.groupMembers")}{" "}
@@ -11381,7 +11399,7 @@ export default function Accounts() {
                       return (
                         <>
                           <div className="flex gap-2">
-                            {(["codex", "grok", "antigravity", "claude"] as const).map((channel) => (
+                            {(["codex", "grok", "antigravity", "claude", "kiro"] as const).map((channel) => (
                               <button
                                 key={channel}
                                 type="button"
@@ -11405,7 +11423,9 @@ export default function Accounts() {
                                     ? t("accounts.providerViewAntigravity")
                                     : channel === "claude"
                                       ? t("accounts.providerViewClaude")
-                                      : t("accounts.providerViewCodex")}
+                                      : channel === "kiro"
+                                        ? t("accounts.providerViewKiro")
+                                        : t("accounts.providerViewCodex")}
                               </button>
                             ))}
                           </div>

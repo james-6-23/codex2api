@@ -1039,6 +1039,8 @@ func parseUsageChannel(c *gin.Context) string {
 		return database.UpstreamChannelAntigravity
 	case database.UpstreamChannelClaude:
 		return database.UpstreamChannelClaude
+	case database.UpstreamChannelKiro:
+		return database.UpstreamChannelKiro
 	}
 	return ""
 }
@@ -1191,6 +1193,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/accounts/claude/export", h.ExportClaudeAccounts)
 	api.POST("/accounts/:id/claude/models", h.RefreshClaudeModels)
 	api.POST("/accounts/claude/models/refresh", h.RefreshAllClaudeModels)
+	h.registerKiroRoutes(api)
 	api.POST("/accounts/antigravity", h.AddAntigravityAccount)
 	api.POST("/accounts/antigravity/models", h.FetchAntigravityModels)
 	api.POST("/accounts/antigravity/batch-models", h.BatchUpdateAntigravityModels)
@@ -1338,6 +1341,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.PUT("/settings/channel-tests", h.UpdateChannelTestSettings)
 	api.GET("/settings/antigravity", h.GetAntigravitySettings)
 	api.PUT("/settings/antigravity", h.UpdateAntigravitySettings)
+	api.GET("/settings/kiro", h.GetKiroSettings)
+	api.PUT("/settings/kiro", h.UpdateKiroSettings)
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
@@ -1600,6 +1605,7 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		database.UpstreamChannelGrok:        {},
 		database.UpstreamChannelAntigravity: {},
 		database.UpstreamChannelClaude:      {},
+		database.UpstreamChannelKiro:        {},
 	}
 	counts.total = len(rows)
 	for _, row := range rows {
@@ -1616,6 +1622,8 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 			channel = database.UpstreamChannelAntigravity
 		} else if strings.EqualFold(upstreamType, auth.UpstreamClaude) {
 			channel = database.UpstreamChannelClaude
+		} else if strings.EqualFold(upstreamType, auth.UpstreamKiro) {
+			channel = database.UpstreamChannelKiro
 		}
 		usingCredits := false
 		acc := runtimeByID[row.ID]
@@ -1631,6 +1639,8 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 				channel = database.UpstreamChannelGrok
 			} else if acc.IsClaudeOAuth() {
 				channel = database.UpstreamChannelClaude
+			} else if acc.IsKiro() {
+				channel = database.UpstreamChannelKiro
 			}
 		}
 		perChannel := channelCounts[channel]
@@ -1664,7 +1674,7 @@ func isDashboardAbnormalAccount(status string) bool {
 
 func isDashboardUnsampledAccount(row *database.AccountRow, acc *auth.Account) bool {
 	if acc != nil {
-		if acc.IsGrokAPI() || acc.IsOpenAIResponsesAPI() || acc.IsAntigravityAPI() {
+		if acc.IsGrokAPI() || acc.IsOpenAIResponsesAPI() || acc.IsAntigravityAPI() || acc.IsKiro() {
 			return false
 		}
 		snapshot := acc.GetAccountListRuntimeSnapshot()
@@ -1685,7 +1695,8 @@ func isDashboardUnsampledAccount(row *database.AccountRow, acc *auth.Account) bo
 	upstreamType := strings.TrimSpace(row.GetCredential("upstream_type"))
 	if strings.EqualFold(upstreamType, auth.UpstreamGrok) ||
 		strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses) ||
-		strings.EqualFold(upstreamType, auth.UpstreamAntigravity) {
+		strings.EqualFold(upstreamType, auth.UpstreamAntigravity) ||
+		strings.EqualFold(upstreamType, auth.UpstreamKiro) {
 		return false
 	}
 	status := strings.ToLower(strings.TrimSpace(row.Status))
@@ -1748,6 +1759,10 @@ type accountResponse struct {
 	AntigravityAPI                bool                        `json:"antigravity_api,omitempty"`
 	ClaudeAPI                     bool                        `json:"claude_api,omitempty"`
 	ClaudeAuthKind                string                      `json:"claude_auth_kind,omitempty"`
+	KiroAPI                       bool                        `json:"kiro_api,omitempty"`
+	KiroAuthKind                  string                      `json:"kiro_auth_kind,omitempty"`
+	KiroLoginSource               string                      `json:"kiro_login_source,omitempty"`
+	KiroUsage                     json.RawMessage             `json:"kiro_usage,omitempty"`
 	ClaudeBaseURL                 string                      `json:"claude_base_url,omitempty"`
 	AntigravityAuthKind           string                      `json:"antigravity_auth_kind,omitempty"`
 	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
@@ -6440,7 +6455,7 @@ type batchUpdateAccountsReq struct {
 
 func (h *Handler) accountOperationIdentity(id int64) (string, string) {
 	h.accountListCacheMu.RLock()
-	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude} {
+	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude, database.UpstreamChannelKiro} {
 		snapshot := h.accountListCache[channel]
 		if snapshot == nil {
 			continue
@@ -13003,6 +13018,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 	// Keep claudeChannelModels for pricing/history, where those entries remain
 	// useful to operators.
 	catalog.ClaudeModels = h.claudeAvailableChannelModels()
+	catalog.KiroModels = h.kiroChannelModels()
 	c.JSON(http.StatusOK, catalog)
 }
 

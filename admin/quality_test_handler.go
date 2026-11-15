@@ -124,6 +124,10 @@ func (h *Handler) qualityTestOptionsForAccount(ctx context.Context, account *aut
 		candidates = antigravityConnectionTestModels(account)
 		// Public Antigravity model IDs already encode a fixed thinking tier.
 		options.ReasoningEfforts = []string{""}
+	case account.IsKiro():
+		candidates = proxy.KiroAccountModelIDs(account)
+		// Kiro 桥按模型把 effort 收敛到其可接受的档位。
+		options.ReasoningEfforts = []string{"", "low", "medium", "high", "xhigh", "max"}
 	case account.IsRelayStyle():
 		candidates = account.OpenAIResponsesModels()
 		if account.IsGrokAPI() {
