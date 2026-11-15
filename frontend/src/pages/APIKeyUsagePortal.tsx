@@ -1203,6 +1203,7 @@ const CHANNEL_LABELS: Record<UpstreamChannel, string> = {
   grok: 'Grok',
   antigravity: 'Antigravity',
   claude: 'Claude',
+  kiro: 'Kiro',
 }
 
 function isKnownChannel(channel?: string): channel is UpstreamChannel {

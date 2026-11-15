@@ -45,6 +45,7 @@ test("Claude usage probe without quota headers still counts as sampled", () => {
 test("Antigravity accounts never show as unsampled", () => {
   const antigravity = { status: "active", antigravity_api: true };
   assert.equal(isUnsampledQuotaAccount(antigravity), false);
+  assert.equal(isUnsampledQuotaAccount({ status: "active", kiro_api: true }), false);
   assert.equal(getAccountStatusBadgeStatus(antigravity), "active");
 });
 

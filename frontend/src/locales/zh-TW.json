@@ -395,13 +395,15 @@
       "upstreamChannelGrok": "Grok",
       "upstreamChannelAntigravity": "Antigravity",
       "upstreamChannelClaude": "Claude",
+      "upstreamChannelKiro": "Kiro",
       "upstreamChannelAutoTab": "自動",
       "upstreamChannelHint": {
-        "auto": "不限渠道：請求依模型路由到 Codex、Grok、Antigravity 或 Claude 帳號。",
+        "auto": "不限渠道：請求依模型路由到 Codex、Grok、Antigravity、Claude 或 Kiro 帳號。",
         "codex": "此 Key 只調度 Codex 帳號，不會使用其他渠道帳號。",
         "grok": "此 Key 只調度 Grok 帳號，並使用該渠道的模型目錄。",
         "antigravity": "此 Key 只調度 Google Antigravity 帳號，並使用 Gemini 模型目錄。",
-        "claude": "此 Key 只調度 Claude 帳號，並使用 Claude 模型目錄。"
+        "claude": "此 Key 只調度 Claude 帳號，並使用 Claude 模型目錄。",
+        "kiro": "此 Key 只調度 Kiro 帳號，並使用 Kiro 模型目錄。"
       }
     }
   },
@@ -589,6 +591,7 @@
       "grokBanner": "{{count}} 條 Codex 自助提交待審核"
     },
     "providerViewClaude": "Claude",
+    "providerViewKiro": "Kiro",
     "testProxySuccess": "代理可用",
     "testProxyFailed": "代理測試失敗",
     "proxyPoolEmpty": "代理池為空(可在「代理」頁新增)",
@@ -818,7 +821,25 @@
     "claudeMaxToolCount": "最大工具數量",
     "claudeMaxToolCountDesc": "0 表示不設閘道工具數量上限；非 0 用於營運側資源保護。",
     "claudeMaxToolSchemaBytes": "工具 Schema 上限",
-    "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。"
+    "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。",
+    "nav": {
+      "kiro": "Kiro",
+      "kiroDesc": "Kiro 上游網域、本地用量模擬與連通性測試"
+    },
+    "channelTest": {
+      "kiroDesc": "Kiro 帳號頁「測試連線」與批次測試預設使用的探測模型與測活內容。模型留空時依帳號目錄自動選擇（優先 haiku）。"
+    },
+    "kiro": {
+      "title": "Kiro 渠道",
+      "description": "上游網域與本地用量模擬，變更即時生效。",
+      "apiDomain": "上游網域",
+      "apiDomainDesc": "預設走 AWS 的 q.{region}.amazonaws.com；遇到網路問題可切換到 kiro.dev 網域。",
+      "apiDomainAws": "amazonaws.com",
+      "apiDomainKiro": "kiro.dev",
+      "cacheSimulation": "本地 prompt cache 模擬",
+      "cacheSimulationDesc": "Kiro 不回報快取命中。開啟後，上游未提供精確用量時依請求中的 cache_control 斷點估算 cache 讀寫拆分；只影響用量記錄，不減少上游開銷。",
+      "saved": "Kiro 設定已儲存"
+    }
   },
   "promptFilter": {
     "views": {
@@ -1815,11 +1836,13 @@
     "idle": "空閒",
     "bindKindAntigravity": "Antigravity",
     "bindKindClaude": "Claude",
+    "bindKindKiro": "Kiro",
     "accountKind": {
       "codex": "Codex",
       "grok": "Grok",
       "antigravity": "Antigravity",
       "claude": "Claude",
+      "kiro": "Kiro",
       "openai": "OpenAI",
       "agent": "Agent",
       "at": "AT"
@@ -2203,6 +2226,67 @@
     "modelAvailable": "可用",
     "empty": "暫無 Claude 帳號",
     "emptyFiltered": "沒有符合篩選的帳號"
+  },
+  "kiro": {
+    "pageTitle": "Kiro 帳號",
+    "pageSubtitle": "管理 Kiro 帳號：匯入憑證、互動登入、同步額度與模型目錄。",
+    "import": "匯入",
+    "importTitle": "匯入 Kiro 帳號",
+    "importSubmit": "匯入",
+    "importFile": "選擇 JSON 檔案",
+    "importHint": "支援 kiro.rs credentials.json、Kiro IDE 的 kiro-auth-token.json 與 Kiro Account Manager 匯出檔，自動識別格式；多個帳號逐一匯入。",
+    "importPlaceholder": "貼上 JSON 內容",
+    "importResult": "匯入成功 {{imported}} 個，失敗 {{failed}} 個",
+    "proxyLabel": "代理（選填，留空沿用全域解析）",
+    "login": "登入",
+    "loginDone": "已新增帳號 {{account}}",
+    "socialTitle": "Social 登入（Google / GitHub）",
+    "socialStart": "開啟登入頁",
+    "socialFinish": "完成登入",
+    "socialHint": "在新視窗完成 Google 或 GitHub 登入。瀏覽器最後會跳到 localhost 回呼位址（頁面打不開屬正常），把網址列中的完整 URL 貼到下方。",
+    "socialCallback": "回呼 URL",
+    "deviceTitle": "裝置碼登入（Builder ID / Enterprise）",
+    "deviceStart": "取得裝置碼",
+    "deviceBuilder": "AWS Builder ID",
+    "deviceEnterprise": "Enterprise（IAM Identity Center）",
+    "deviceHint": "取得裝置碼後在新視窗確認授權，本頁會自動輪詢直到完成。",
+    "deviceWaiting": "請在開啟的頁面中確認下方裝置碼：",
+    "devicePolling": "等待授權…",
+    "syncAll": "全部同步",
+    "syncAllResult": "同步成功 {{refreshed}} 個，失敗 {{failed}} 個",
+    "export": "匯出",
+    "exportKam": "Kiro Account Manager 格式",
+    "exportKiroRs": "kiro.rs credentials.json 格式",
+    "exportOne": "匯出此帳號",
+    "searchPlaceholder": "搜尋信箱 / 名稱 / ID",
+    "status": {
+      "all": "全部狀態",
+      "normal": "正常",
+      "rate_limited": "限流",
+      "abnormal": "異常",
+      "disabled": "已停用"
+    },
+    "empty": "尚無 Kiro 帳號",
+    "emptyHint": "點選「匯入」貼上憑證，或用「登入」走 Social / 裝置碼授權。",
+    "colAccount": "帳號",
+    "colPlan": "方案",
+    "colQuota": "額度（credit）",
+    "colStatus": "狀態",
+    "colModels": "模型",
+    "colActions": "操作",
+    "quotaBase": "基礎",
+    "quotaBonus": "贈送",
+    "quotaUnknown": "未同步",
+    "test": "測試連線",
+    "sync": "同步額度與模型",
+    "synced": "已同步",
+    "enable": "啟用",
+    "disable": "停用",
+    "enabled": "已啟用",
+    "disabled": "已停用",
+    "deleteTitle": "刪除 Kiro 帳號",
+    "deleteDescription": "確定刪除 {{account}}？刪除後可在回收站還原。",
+    "deleted": "已刪除"
   },
   "accountGroups": {
     "manageTitle": "管理分組",

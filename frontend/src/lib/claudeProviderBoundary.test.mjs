@@ -44,6 +44,7 @@ test("Claude API key plan allowlist is isolated from Codex plans", () => {
     "GROK_PLAN_FILTER_OPTIONS",
     "CLAUDE_PLAN_FILTER_OPTIONS",
     "ANTIGRAVITY_PLAN_FILTER_OPTIONS",
+    "KIRO_PLAN_FILTER_OPTIONS",
     "PLAN_FILTER_OPTIONS",
   ]);
   const statements = source.statements.filter((statement) =>
@@ -71,10 +72,11 @@ test("Claude API key plan allowlist is isolated from Codex plans", () => {
   assert.deepEqual(plans("antigravity"), [
     "free", "pro", "ultra", "standard", "api",
   ]);
+  assert.deepEqual(plans("kiro"), ["kiro free", "kiro pro", "kiro pro+", "kiro power"]);
 
   const automatic = plans("auto");
   const providerUnion = new Set(
-    ["codex", "grok", "claude", "antigravity"].flatMap(plans),
+    ["codex", "grok", "claude", "antigravity", "kiro"].flatMap(plans),
   );
   assert.equal(automatic.length, new Set(automatic).size);
   assert.deepEqual(new Set(automatic), providerUnion);

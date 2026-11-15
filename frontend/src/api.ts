@@ -159,6 +159,10 @@ import type {
   ChannelTestSettings,
   ChannelTestSettingsResponse,
   AntigravitySettingsResponse,
+  KiroSettings,
+  KiroImportResponse,
+  KiroDeviceLoginStart,
+  KiroUsageSnapshot,
 } from './types'
 
 const BASE = '/api/admin'
@@ -690,7 +694,7 @@ export const api = {
     if (params.order) searchParams.set('order', params.order)
     return request<AccountsPageResponse>(`/accounts?${searchParams.toString()}`, { signal })
   },
-  getAccountAnalysis: (channel: 'codex' | 'grok' | 'antigravity' | 'claude' = 'codex', signal?: AbortSignal) =>
+  getAccountAnalysis: (channel: UpstreamChannel = 'codex', signal?: AbortSignal) =>
     request<AccountAnalysisResponse>(`/accounts/analysis?channel=${channel}`, { signal }),
   getAccountPageStats: (ids: number[], signal?: AbortSignal) => {
     const query = new URLSearchParams({ ids: ids.join(',') })
@@ -897,6 +901,56 @@ export const api = {
     request<{ message: string; refreshed: number; failed: number; model_count: number }>('/accounts/claude/models/refresh', {
       method: 'POST',
       timeoutMs: 60_000,
+    }),
+  /** 导入 kiro.rs credentials.json / Kiro IDE kiro-auth-token.json / Kiro Account Manager 导出，自动识别格式。 */
+  importKiroAccounts: (data: { content: string; name?: string; proxy_url?: string; use_proxy_pool?: boolean }) =>
+    request<KiroImportResponse>('/accounts/kiro/import', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 180_000,
+    }),
+  exportKiroAccounts: (format: 'kam' | 'kiro-rs', ids?: number[]) => {
+    const params = new URLSearchParams({ format })
+    if (ids && ids.length > 0) params.set('ids', ids.join(','))
+    return requestNamedBlob(`/accounts/kiro/export?${params.toString()}`)
+  },
+  startKiroSocialLogin: (data: { name?: string; proxy_url?: string; use_proxy_pool?: boolean }) =>
+    request<{ auth_url: string; session: string; redirect_uri: string }>('/accounts/kiro/social/auth-url', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  finishKiroSocialLogin: (data: { session: string; callback_url: string }) =>
+    request<{ status: string; id: number; email?: string; warnings?: string[] }>('/accounts/kiro/social/exchange', {
+      method: 'POST',
+      body: JSON.stringify(data),
+      timeoutMs: 60_000,
+    }),
+  startKiroDeviceLogin: (data: { start_url?: string; region?: string; name?: string; proxy_url?: string; use_proxy_pool?: boolean }) =>
+    request<KiroDeviceLoginStart>('/accounts/kiro/device/start', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  pollKiroDeviceLogin: (session: string) =>
+    request<{ status: 'pending' | 'completed'; id?: number; email?: string; warnings?: string[] }>('/accounts/kiro/device/poll', {
+      method: 'POST',
+      body: JSON.stringify({ session }),
+      timeoutMs: 60_000,
+    }),
+  syncKiroAccount: (id: number) =>
+    request<{ usage?: KiroUsageSnapshot; models?: string[] }>(`/accounts/${id}/kiro/sync`, {
+      method: 'POST',
+      timeoutMs: 60_000,
+    }),
+  syncAllKiroAccounts: () =>
+    request<{ refreshed: number; failed: number }>('/accounts/kiro/sync', {
+      method: 'POST',
+      timeoutMs: 180_000,
+    }),
+  getKiroSettings: () => request<KiroSettings>('/settings/kiro'),
+  updateKiroSettings: (patch: Partial<KiroSettings>) =>
+    request<KiroSettings>('/settings/kiro', {
+      method: 'PUT',
+      body: JSON.stringify(patch),
     }),
   refreshAllModels: () =>
     request<RefreshAllModelsResponse>('/models/refresh-all', {
@@ -1106,7 +1160,7 @@ export const api = {
       body: JSON.stringify({ account_ids: ids }),
     }),
   getChannelTestSettings: () => request<ChannelTestSettingsResponse>('/settings/channel-tests'),
-  updateChannelTestSettings: (patch: Partial<Record<'antigravity' | 'claude', Partial<ChannelTestSettings>>>) =>
+  updateChannelTestSettings: (patch: Partial<Record<'antigravity' | 'claude' | 'kiro', Partial<ChannelTestSettings>>>) =>
     request<ChannelTestSettingsResponse>('/settings/channel-tests', {
       method: 'PUT',
       body: JSON.stringify(patch),
