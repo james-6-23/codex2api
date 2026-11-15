@@ -109,6 +109,7 @@ type accountListSnapshotItem struct {
 	Antigravity         bool
 	Claude              bool
 	ClaudeAuthKind      string
+	KiroAuthKind        string
 	ClaudeUsageProbeAt  string
 	ClaudeUsageProbeErr string
 	SearchText          string
@@ -228,8 +229,8 @@ func (h *Handler) resolveAccountOperationSelector(ctx context.Context, selector 
 		return nil, fmt.Errorf("selector is required")
 	}
 	channel := strings.ToLower(strings.TrimSpace(selector.Channel))
-	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude {
-		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, or claude")
+	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude && channel != database.UpstreamChannelKiro {
+		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, claude, or kiro")
 	}
 	snapshot, err := h.getAccountListSnapshot(ctx, channel)
 	if err != nil {
@@ -716,6 +717,7 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 	isAntigravity := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
 	isOpenAIResponses := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	isClaude := strings.EqualFold(upstreamType, auth.UpstreamClaude)
+	isKiro := strings.EqualFold(upstreamType, auth.UpstreamKiro)
 	email := row.GetCredential("email")
 	if isOpenAIResponses && email == "" {
 		email = row.GetCredential("base_url")
@@ -752,6 +754,7 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 		SchedulerPriority: valueOrZero(accountSchedulerPriority(row)), OpenAIResponses: isOpenAIResponses,
 		Antigravity: isAntigravity, AntigravityAuthKind: antigravityAuthKind, Claude: isClaude,
 		ClaudeAuthKind:      claudeAuthKindForRow(row, isClaude),
+		KiroAuthKind:        kiroAuthKindForRow(row, isKiro),
 		ClaudeUsageProbeAt:  row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
 		ClaudeUsageProbeErr: row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
 	}
@@ -1317,6 +1320,11 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			if item.AntigravityAuthKind != query.AuthKind {
 				return false
 			}
+		} else if channel == database.UpstreamChannelKiro {
+			// Kiro 渠道:social / idc / external_idp / api_key。
+			if item.KiroAuthKind != query.AuthKind {
+				return false
+			}
 		} else if item.OpenAIResponses != (query.AuthKind == auth.GrokAuthKindAPIKey) {
 			// Codex 渠道复用 auth_kind：api_key=Responses API 中转账号，oauth=官方账号（issue #522）
 			return false
@@ -1424,7 +1432,7 @@ func accountListOverloadPaused(item *accountListSnapshotItem) bool {
 }
 
 func accountListUnsampled(item *accountListSnapshotItem) bool {
-	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity {
+	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity || item.KiroAuthKind != "" {
 		return false
 	}
 	if item.Status == "unauthorized" || item.Status == "error" {

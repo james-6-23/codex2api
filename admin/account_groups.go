@@ -477,6 +477,9 @@ func accountRowGroupChannel(row *database.AccountRow) string {
 	if row != nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamClaude) {
 		return database.AccountGroupChannelClaude
 	}
+	if row != nil && strings.EqualFold(strings.TrimSpace(row.GetCredential("upstream_type")), auth.UpstreamKiro) {
+		return database.AccountGroupChannelKiro
+	}
 	if isGrokAccountRow(row) {
 		return database.AccountGroupChannelGrok
 	}

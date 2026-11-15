@@ -142,10 +142,10 @@ func keyUsageUnloadedAccountAllowed(row *database.APIKeyRow, account database.Ke
 	upstream := strings.ToLower(strings.TrimSpace(account.UpstreamType))
 	switch row.Limits.ResolveUpstreamChannel() {
 	case database.UpstreamChannelCodex:
-		if upstream == "grok" || upstream == "antigravity" || upstream == "claude" {
+		if upstream == "grok" || upstream == "antigravity" || upstream == "claude" || upstream == "kiro" {
 			return false
 		}
-	case database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude:
+	case database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude, database.UpstreamChannelKiro:
 		if upstream != row.Limits.ResolveUpstreamChannel() {
 			return false
 		}
@@ -285,7 +285,7 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 }
 
 func isKeyUsageResetEligible(account *auth.Account) bool {
-	return account != nil && !account.IsGrokAPI() && !account.IsAntigravityAPI() && !account.IsClaudeOAuth() && !account.IsOpenAIResponsesAPI() && account.GetAccessToken() != ""
+	return account != nil && !account.IsGrokAPI() && !account.IsAntigravityAPI() && !account.IsClaudeOAuth() && !account.IsKiro() && !account.IsOpenAIResponsesAPI() && account.GetAccessToken() != ""
 }
 
 func (h *Handler) ResetPublicKeyUsageAccountCredits(c *gin.Context) {
