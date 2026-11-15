@@ -450,24 +450,34 @@ func antigravityNormalizeNativeGeminiContents(request map[string]any) {
 // native function response. The result is often a raw tool value, so only the
 // OpenMausBot-specific patterns run here, never billing headers.
 func antigravityNormalizeNativeFunctionResponse(functionResponse map[string]any) {
-	if response, ok := functionResponse["response"].(map[string]any); ok {
-		if result, ok := response["result"].(string); ok {
-			response["result"] = normalizeProductScaffolding(result)
-		}
+	if response, ok := functionResponse["response"]; ok {
+		functionResponse["response"] = antigravityNormalizeNativeResponseValue(response)
 	}
-	if result, ok := functionResponse["response"].(string); ok {
-		functionResponse["response"] = normalizeProductScaffolding(result)
+	if parts, ok := functionResponse["parts"]; ok {
+		functionResponse["parts"] = antigravityNormalizeNativeResponseValue(parts)
 	}
-	if parts, ok := functionResponse["parts"].([]any); ok {
-		for _, rawPart := range parts {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, ok := part["text"].(string); ok {
-				part["text"] = normalizeProductScaffolding(text)
-			}
+}
+
+// antigravityNormalizeNativeResponseValue neutralizes product notices in every
+// string inside a function response. Gemini lets the caller choose response keys
+// such as result, output or error, so walking the tree is more complete than
+// assuming one key name. Non-string values and the response shape are kept.
+func antigravityNormalizeNativeResponseValue(value any) any {
+	switch typed := value.(type) {
+	case string:
+		return normalizeProductScaffolding(typed)
+	case map[string]any:
+		for key, item := range typed {
+			typed[key] = antigravityNormalizeNativeResponseValue(item)
 		}
+		return typed
+	case []any:
+		for index, item := range typed {
+			typed[index] = antigravityNormalizeNativeResponseValue(item)
+		}
+		return typed
+	default:
+		return value
 	}
 }
 

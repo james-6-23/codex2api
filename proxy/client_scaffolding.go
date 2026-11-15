@@ -112,28 +112,39 @@ var clientScaffoldingLinePatterns = func() []*regexp.Regexp {
 
 const clientScaffoldingVolatileContextPrefix = "context from openmausbot updated since this conversation started"
 
-// clientScaffoldingCodePattern protects fenced blocks and inline code while
-// line patterns run. Without it a payload such as a billing header pasted
-// inside a code sample would be deleted from the user's source.
-var clientScaffoldingCodePattern = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
-
 var clientScaffoldingCodePlaceholder = regexp.MustCompile("\x00code([0-9]+)\x00")
 
-// maskCodeBlocksAndApply runs apply over text with code blocks replaced by
-// opaque placeholders, then restores them byte for byte.
+// maskCodeBlocksAndApply runs apply over text with fenced blocks and inline
+// code spans replaced by opaque placeholders, then restores them byte for byte.
+// Fences are matched by length so a shorter fence inside a longer one does not
+// end protection early.
 func maskCodeBlocksAndApply(text string, apply func(string) string) string {
 	if text == "" || apply == nil {
 		return text
 	}
 	blocks := make([]string, 0, 2)
-	masked := clientScaffoldingCodePattern.ReplaceAllStringFunc(text, func(block string) string {
-		blocks = append(blocks, block)
-		return fmt.Sprintf("\x00code%d\x00", len(blocks)-1)
-	})
+	var masked strings.Builder
+	masked.Grow(len(text))
+	for index := 0; index < len(text); {
+		if end, ok := clientScaffoldingFencedBlockEnd(text, index); ok {
+			blocks = append(blocks, text[index:end])
+			masked.WriteString(fmt.Sprintf("\x00code%d\x00", len(blocks)-1))
+			index = end
+			continue
+		}
+		if end, ok := clientScaffoldingInlineCodeEnd(text, index); ok {
+			blocks = append(blocks, text[index:end])
+			masked.WriteString(fmt.Sprintf("\x00code%d\x00", len(blocks)-1))
+			index = end
+			continue
+		}
+		masked.WriteByte(text[index])
+		index++
+	}
 	if len(blocks) == 0 {
 		return apply(text)
 	}
-	applied := apply(masked)
+	applied := apply(masked.String())
 	return clientScaffoldingCodePlaceholder.ReplaceAllStringFunc(applied, func(token string) string {
 		index, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(token, "\x00code"), "\x00"))
 		if err != nil || index < 0 || index >= len(blocks) {
@@ -141,6 +152,93 @@ func maskCodeBlocksAndApply(text string, apply func(string) string) string {
 		}
 		return blocks[index]
 	})
+}
+
+// clientScaffoldingFencedBlockEnd returns the end of a fenced code block that
+// starts at index, or false when index is not a valid opening fence or no
+// closing fence follows. A closing fence must use the same character and be at
+// least as long as the opening fence.
+func clientScaffoldingFencedBlockEnd(text string, index int) (int, bool) {
+	if index != 0 && text[index-1] != '\n' {
+		return 0, false
+	}
+	cursor := index
+	for cursor < len(text) && cursor-index < 3 && (text[cursor] == ' ' || text[cursor] == '\t') {
+		cursor++
+	}
+	if cursor >= len(text) || (text[cursor] != '`' && text[cursor] != '~') {
+		return 0, false
+	}
+	fence := text[cursor]
+	fenceStart := cursor
+	for cursor < len(text) && text[cursor] == fence {
+		cursor++
+	}
+	fenceLength := cursor - fenceStart
+	if fenceLength < 3 {
+		return 0, false
+	}
+	openingLineEnd := strings.IndexByte(text[cursor:], '\n')
+	if openingLineEnd < 0 {
+		return 0, false
+	}
+	cursor += openingLineEnd + 1
+	for cursor < len(text) {
+		lineEnd := strings.IndexByte(text[cursor:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(text)
+		} else {
+			lineEnd += cursor
+		}
+		closing := cursor
+		for closing < lineEnd && closing-cursor < 4 && (text[closing] == ' ' || text[closing] == '\t') {
+			closing++
+		}
+		closeStart := closing
+		for closing < lineEnd && text[closing] == fence {
+			closing++
+		}
+		if closing-closeStart >= fenceLength && strings.TrimSpace(text[closing:lineEnd]) == "" {
+			if lineEnd < len(text) {
+				lineEnd++
+			}
+			return lineEnd, true
+		}
+		if lineEnd >= len(text) {
+			break
+		}
+		cursor = lineEnd + 1
+	}
+	return 0, false
+}
+
+// clientScaffoldingInlineCodeEnd returns the end of an inline code span that
+// starts at index, or false when the backtick run has no matching run on the
+// same line.
+func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
+	if index >= len(text) || text[index] != '`' {
+		return 0, false
+	}
+	runEnd := index
+	for runEnd < len(text) && text[runEnd] == '`' {
+		runEnd++
+	}
+	runLength := runEnd - index
+	for cursor := runEnd; cursor < len(text) && text[cursor] != '\n'; {
+		if text[cursor] != '`' {
+			cursor++
+			continue
+		}
+		closeEnd := cursor
+		for closeEnd < len(text) && text[closeEnd] == '`' {
+			closeEnd++
+		}
+		if closeEnd-cursor == runLength {
+			return closeEnd, true
+		}
+		cursor = closeEnd
+	}
+	return 0, false
 }
 
 // clientScaffoldingStripEnabled reports whether the neutralizer is active. It
@@ -233,27 +331,48 @@ var clientScaffoldingBrandPhrases = []string{
 // space. It is used for the bare volatile-context body, which is generated by
 // OpenMausBot rather than typed by the user and has no block delimiter.
 func obfuscateClientBrand(text string) string {
-	if text == "" {
+	return obfuscateWithPhrases(text, clientScaffoldingBrandPhrases)
+}
+
+// obfuscateWithPhrases breaks every listed phrase with a zero-width space. It
+// repeats until no phrase matches, so overlapping names such as OpenMausBot and
+// MausBot are both broken in one call. The result is deterministic and
+// idempotent.
+func obfuscateWithPhrases(text string, phrases []string) string {
+	if text == "" || len(phrases) == 0 {
 		return text
 	}
-	escaped := make([]string, 0, len(clientScaffoldingBrandPhrases))
-	for _, phrase := range clientScaffoldingBrandPhrases {
-		escaped = append(escaped, regexp.QuoteMeta(phrase))
+	escaped := make([]string, 0, len(phrases))
+	for _, phrase := range phrases {
+		phrase = strings.TrimSpace(phrase)
+		if utf8.RuneCountInString(phrase) >= 2 && !strings.Contains(phrase, "\u200B") {
+			escaped = append(escaped, regexp.QuoteMeta(phrase))
+		}
+	}
+	if len(escaped) == 0 {
+		return text
 	}
 	matcher, err := regexp.Compile("(?i)" + strings.Join(escaped, "|"))
 	if err != nil {
 		return text
 	}
-	return matcher.ReplaceAllStringFunc(text, func(match string) string {
-		if strings.Contains(match, "\u200B") {
-			return match
+	for pass := 0; pass <= len(escaped); pass++ {
+		next := matcher.ReplaceAllStringFunc(text, func(match string) string {
+			if strings.Contains(match, "\u200B") {
+				return match
+			}
+			_, size := utf8.DecodeRuneInString(match)
+			if size <= 0 || size >= len(match) {
+				return match
+			}
+			return match[:size] + "\u200B" + match[size:]
+		})
+		if next == text {
+			break
 		}
-		_, size := utf8.DecodeRuneInString(match)
-		if size <= 0 || size >= len(match) {
-			return match
-		}
-		return match[:size] + "\u200B" + match[size:]
-	})
+		text = next
+	}
+	return text
 }
 
 // officialAntigravityIdentity is the identity the upstream Antigravity channel
@@ -261,29 +380,23 @@ func obfuscateClientBrand(text string) string {
 // byte-compatible with the official client.
 const officialAntigravityIdentity = "You are Antigravity, a large language model built by Google."
 
-var clientScaffoldingThirdPartyIdentityPattern = regexp.MustCompile(`(?i)^You [^\n]*?\.\s*`)
-
-// clientScaffoldingIdentityRewriteMarkers limit the identity rewrite to
-// harnesses whose preamble is a known client fingerprint. Other preambles are
-// left intact: their wording is still obfuscated as sensitive phrasing, and the
-// existing upstream behaviour for those clients must not change.
-var clientScaffoldingIdentityRewriteMarkers = []string{
-	"claude code",
-	"codex",
-	"mausbot",
-	"openmausbot",
-	"maus-bot",
-	"chief of staff",
+// clientScaffoldingThirdPartyIdentityPatterns match the known identity
+// preamble shapes only. They stop at the first sentence boundary so ordinary
+// instructions that merely mention a client name are left intact.
+var clientScaffoldingThirdPartyIdentityPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^You are [^.\n]*?\b(?:OpenMausBot|MausBot|Maus-Bot)\b[^.\n]*?\.\s*`),
+	regexp.MustCompile(`(?i)^You are [^.\n]*?\bChief of Staff\b[^.\n]*?\.\s*`),
+	regexp.MustCompile(`(?i)^You hold a Chief of Staff's tools[^.\n]*?\.\s*`),
+	regexp.MustCompile(`(?i)^You are (?:Claude Code|Codex)\b[^.\n]*?\.\s*`),
 }
 
-func clientScaffoldingIdentityRewriteWanted(preamble string) bool {
-	lower := strings.ToLower(preamble)
-	for _, marker := range clientScaffoldingIdentityRewriteMarkers {
-		if strings.Contains(lower, marker) {
-			return true
+func clientScaffoldingIdentityPreamble(text string) string {
+	for _, pattern := range clientScaffoldingThirdPartyIdentityPatterns {
+		if matched := pattern.FindString(text); matched != "" {
+			return matched
 		}
 	}
-	return false
+	return ""
 }
 
 // normalizeAntigravitySystemInstruction strips harness scaffolding from a system
@@ -296,7 +409,7 @@ func normalizeAntigravitySystemInstruction(system string) string {
 	}
 	return maskCodeBlocksAndApply(system, func(masked string) string {
 		masked = normalizeClientScaffolding(masked)
-		if matched := clientScaffoldingThirdPartyIdentityPattern.FindString(masked); matched != "" && clientScaffoldingIdentityRewriteWanted(matched) {
+		if matched := clientScaffoldingIdentityPreamble(masked); matched != "" {
 			masked = officialAntigravityIdentity + " " + masked[len(matched):]
 		}
 		return masked

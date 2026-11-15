@@ -950,45 +950,28 @@ func antigravitySensitivePhrases() []string {
 }
 
 func antigravityObfuscateSystemInstruction(text string) string {
-	phrases := antigravitySensitivePhrases()
-	if text == "" || len(phrases) == 0 {
+	if text == "" {
 		return text
 	}
-	escaped := make([]string, 0, len(phrases))
-	for _, phrase := range phrases {
-		phrase = strings.TrimSpace(phrase)
-		if utf8.RuneCountInString(phrase) >= 2 && !strings.Contains(phrase, antigravityZeroWidthSpace) {
-			escaped = append(escaped, regexp.QuoteMeta(phrase))
-		}
-	}
-	if len(escaped) == 0 {
-		return text
-	}
-	matcher, err := regexp.Compile("(?i)" + strings.Join(escaped, "|"))
-	if err != nil {
-		return text
-	}
-	return matcher.ReplaceAllStringFunc(text, func(match string) string {
-		if strings.Contains(match, antigravityZeroWidthSpace) {
-			return match
-		}
-		_, size := utf8.DecodeRuneInString(match)
-		if size <= 0 || size >= len(match) {
-			return match
-		}
-		return match[:size] + antigravityZeroWidthSpace + match[size:]
+	return maskCodeBlocksAndApply(text, func(masked string) string {
+		return obfuscateWithPhrases(masked, antigravitySensitivePhrases())
 	})
 }
 
 // antigravityObfuscateDeclarations rewrites product names in tool descriptions
 // and nested schema descriptions. Tool names stay untouched: renaming them would
 // break the caller's tool calls, but a description is prose and can carry the
-// same zero-width obfuscation as the system instruction.
+// same zero-width obfuscation as the system instruction. Literal subtrees
+// (enum, const, default and examples) are left byte for byte because their
+// object members are data, not schema annotations.
 func antigravityObfuscateDeclarations(value any) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, item := range typed {
-			if strings.EqualFold(key, "description") {
+			switch strings.ToLower(strings.TrimSpace(key)) {
+			case "enum", "const", "default", "examples", "example":
+				continue
+			case "description":
 				if text, ok := item.(string); ok {
 					typed[key] = antigravityObfuscateSystemInstruction(text)
 					continue

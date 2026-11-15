@@ -679,3 +679,82 @@ func TestAntigravityNormalizeInteractionsRequestStripsOpenMausBot(t *testing.T) 
 		t.Fatalf("tool description was not obfuscated: %q", description)
 	}
 }
+
+func TestNormalizeAntigravitySystemInstructionLeavesOrdinaryInstructionsAlone(t *testing.T) {
+	for _, in := range []string{
+		"You must preserve codex.go when editing files. Run tests.",
+		"You must not change Codex configuration files. Keep all other files unchanged.",
+		"You are a helpful assistant. OpenMausBot docs are here.",
+	} {
+		if got := normalizeAntigravitySystemInstruction(in); got != in {
+			t.Fatalf("ordinary instruction was rewritten: %q -> %q", in, got)
+		}
+	}
+}
+
+func TestObfuscateSystemInstructionBreaksOverlappingNames(t *testing.T) {
+	for _, phrase := range []string{"OpenMausBot", "learned by MausBot", "MausBot Cloud"} {
+		got := antigravityObfuscateSystemInstruction("value: " + phrase)
+		for _, leak := range []string{"OpenMausBot", "MausBot"} {
+			if strings.Contains(got, leak) {
+				t.Fatalf("%q leaked inside %q: %q", leak, phrase, got)
+			}
+		}
+		if again := antigravityObfuscateSystemInstruction(got); again != got {
+			t.Fatalf("obfuscation is not idempotent: %q -> %q", got, again)
+		}
+	}
+}
+
+func TestObfuscateSystemInstructionProtectsInlineCode(t *testing.T) {
+	in := "Use `OpenMausBot` and `/opt/OpenMausBot/config.json` exactly."
+	got := antigravityObfuscateSystemInstruction(in)
+	if !strings.Contains(got, "`OpenMausBot`") || !strings.Contains(got, "`/opt/OpenMausBot/config.json`") {
+		t.Fatalf("inline code was obfuscated: %q", got)
+	}
+}
+
+func TestAntigravityObfuscateDeclarationsKeepsSchemaLiterals(t *testing.T) {
+	value := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"payload": map[string]any{
+				"type":        "object",
+				"description": "OpenMausBot payload",
+				"const":       map[string]any{"description": "MausBot"},
+				"enum":        []any{map[string]any{"description": "OpenMausBot"}},
+			},
+		},
+	}
+	got := antigravityObfuscateDeclarations(value).(map[string]any)
+	payload := got["properties"].(map[string]any)["payload"].(map[string]any)
+	description := payload["description"].(string)
+	if strings.Contains(description, "OpenMausBot") || !strings.Contains(description, "\u200B") {
+		t.Fatalf("schema description was not obfuscated: %q", description)
+	}
+	if constValue := payload["const"].(map[string]any)["description"]; constValue != "MausBot" {
+		t.Fatalf("const literal was modified: %#v", constValue)
+	}
+	if enumValue := payload["enum"].([]any)[0].(map[string]any)["description"]; enumValue != "OpenMausBot" {
+		t.Fatalf("enum literal was modified: %#v", enumValue)
+	}
+}
+
+func TestNormalizeClientScaffoldingProtectsLongFences(t *testing.T) {
+	in := "````markdown\n```\nx-anthropic-billing-header: keep_me\n```\n````\nAfter"
+	got := normalizeClientScaffolding(in)
+	if !strings.Contains(got, "x-anthropic-billing-header: keep_me") {
+		t.Fatalf("long fence content was modified: %q", got)
+	}
+}
+
+func TestAntigravityNormalizeNativeFunctionResponseWalksAllKeys(t *testing.T) {
+	response := map[string]any{
+		"output": "[OpenMausBot: permission timed out]\nreal output",
+		"error":  "[OpenMausBot: duplicate ask id]\nreal error",
+	}
+	antigravityNormalizeNativeFunctionResponse(map[string]any{"response": response})
+	if response["output"] != "real output" || response["error"] != "real error" {
+		t.Fatalf("response keys were not normalized: %#v", response)
+	}
+}
