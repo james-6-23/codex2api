@@ -50,6 +50,7 @@ type ModelCatalog struct {
 	GrokModels        []string   `json:"grok_models,omitempty"`
 	AntigravityModels []string   `json:"antigravity_models,omitempty"`
 	ClaudeModels      []string   `json:"claude_models,omitempty"`
+	KiroModels        []string   `json:"kiro_models,omitempty"`
 	LastSyncedAt      *time.Time `json:"last_synced_at,omitempty"`
 	SourceURL         string     `json:"source_url"`
 	Warning           string     `json:"warning,omitempty"`
