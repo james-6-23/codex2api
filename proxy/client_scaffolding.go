@@ -136,8 +136,16 @@ func maskCodeBlocksAndApply(text string, apply func(string) string) string {
 	masked.Grow(len(text))
 	for index := 0; index < len(text); {
 		if end, ok := clientScaffoldingFencedBlockEnd(text, index); ok {
-			blocks = append(blocks, text[index:end])
+			block := text[index:end]
+			suffix := ""
+			if strings.HasSuffix(block, "\r\n") {
+				block, suffix = block[:len(block)-2], "\r\n"
+			} else if strings.HasSuffix(block, "\n") {
+				block, suffix = block[:len(block)-1], "\n"
+			}
+			blocks = append(blocks, block)
 			masked.WriteString(fmt.Sprintf("\x00code%d\x00", len(blocks)-1))
+			masked.WriteString(suffix)
 			index = end
 			continue
 		}
@@ -145,6 +153,15 @@ func maskCodeBlocksAndApply(text string, apply func(string) string) string {
 			blocks = append(blocks, text[index:end])
 			masked.WriteString(fmt.Sprintf("\x00code%d\x00", len(blocks)-1))
 			index = end
+			continue
+		}
+		if text[index] == '`' {
+			// No matching span. Copy the whole run so the next search starts
+			// after it instead of rescanning the same suffix.
+			for index < len(text) && text[index] == '`' {
+				masked.WriteByte(text[index])
+				index++
+			}
 			continue
 		}
 		masked.WriteByte(text[index])
@@ -200,7 +217,7 @@ func clientScaffoldingFencedBlockEnd(text string, index int) (int, bool) {
 			lineEnd += cursor
 		}
 		closing := cursor
-		for closing < lineEnd && closing-cursor < 4 && (text[closing] == ' ' || text[closing] == '\t') {
+		for closing < lineEnd && closing-cursor < 3 && (text[closing] == ' ' || text[closing] == '\t') {
 			closing++
 		}
 		closeStart := closing
@@ -222,8 +239,9 @@ func clientScaffoldingFencedBlockEnd(text string, index int) (int, bool) {
 }
 
 // clientScaffoldingInlineCodeEnd returns the end of an inline code span that
-// starts at index, or false when the backtick run has no matching run on the
-// same line.
+// starts at index, or false when the backtick run has no matching run in the
+// same paragraph. CommonMark permits a span to cross a single line ending, so
+// the scan stops at a blank line rather than at every newline.
 func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
 	if index >= len(text) || text[index] != '`' {
 		return 0, false
@@ -233,13 +251,14 @@ func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
 		runEnd++
 	}
 	runLength := runEnd - index
-	for cursor := runEnd; cursor < len(text) && text[cursor] != '\n'; {
+	paragraphEnd := clientScaffoldingParagraphEnd(text, runEnd)
+	for cursor := runEnd; cursor < paragraphEnd; {
 		if text[cursor] != '`' {
 			cursor++
 			continue
 		}
 		closeEnd := cursor
-		for closeEnd < len(text) && text[closeEnd] == '`' {
+		for closeEnd < paragraphEnd && text[closeEnd] == '`' {
 			closeEnd++
 		}
 		if closeEnd-cursor == runLength {
@@ -248,6 +267,16 @@ func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
 		cursor = closeEnd
 	}
 	return 0, false
+}
+
+func clientScaffoldingParagraphEnd(text string, start int) int {
+	end := len(text)
+	for _, separator := range []string{"\n\n", "\r\n\r\n"} {
+		if index := strings.Index(text[start:], separator); index >= 0 && start+index < end {
+			end = start + index
+		}
+	}
+	return end
 }
 
 // clientScaffoldingStripEnabled reports whether the neutralizer is active. It
@@ -420,8 +449,11 @@ const officialAntigravityIdentity = "You are Antigravity, a large language model
 // preamble shapes only. They stop at the first sentence boundary so ordinary
 // instructions that merely mention a client name are left intact.
 var clientScaffoldingThirdPartyIdentityPatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)^You are [^.\n]*?\b(?:OpenMausBot|MausBot|Maus-Bot)\b[^.\n]*?\.\s*`),
-	regexp.MustCompile(`(?i)^You are [^.\n]*?\bChief of Staff\b[^.\n]*?\.\s*`),
+	regexp.MustCompile(`(?i)^You are [^.\n]*?, a personal bot in (?:OpenMausBot|MausBot|Maus-Bot)\.\s*`),
+	regexp.MustCompile(`(?i)^You are [^.\n]*?, a bot in the room "[^"\n]*" in (?:OpenMausBot|MausBot|Maus-Bot)\.\s*`),
+	regexp.MustCompile(`(?i)^You are [^.\n]*?, an AI agent that [^.\n]*?(?:OpenMausBot|MausBot|Maus-Bot)[^.\n]*?\.\s*`),
+	regexp.MustCompile(`(?i)^You are [^.\n]*?'s assistant and Chief of Staff: [^.\n]*?\.\s*`),
+	regexp.MustCompile(`(?i)^You are the person's assistant and the Chief of Staff for the [^.\n]*? department: [^.\n]*?\.\s*`),
 	regexp.MustCompile(`(?i)^You hold a Chief of Staff's tools[^.\n]*?\.\s*`),
 	regexp.MustCompile(`(?i)^You are (?:Claude Code|Codex)\b[^.\n]*?\.\s*`),
 }

@@ -61,7 +61,7 @@ const (
 	antigravityZeroWidthSpace        = "\u200B"
 )
 
-var antigravitySensitiveMarkerPattern = regexp.MustCompile(`(?i)(?:hermes agent|nous research|claude agent sdk|you are codex, an agent based on gpt-5|openmausbot|mausbot|maus-bot|chief of staff|my cloud|learned by)`)
+var antigravitySensitiveMarkerPattern = regexp.MustCompile(`(?i)(?:hermes agent|nous research|claude agent sdk|you are codex, an agent based on gpt-5|openmausbot|openmaus|mausbot|maus-bot|chief of staff|my cloud|learned by)`)
 
 var antigravityDefaultSensitivePhrases = []string{
 	"Hermes Agent",
@@ -982,9 +982,20 @@ func antigravityNormalizeAndObfuscateSystemInstruction(system string) string {
 // (enum, const, default and examples) are left byte for byte because their
 // object members are data, not schema annotations.
 func antigravityObfuscateDeclarations(value any) any {
+	return antigravityObfuscateSchemaValue(value, false)
+}
+
+// antigravityObfuscateSchemaValue tracks whether the current map is a property
+// bag. Keywords such as enum and const hold literal data and are skipped, but a
+// property that happens to be named "enum" is still a schema and is traversed.
+func antigravityObfuscateSchemaValue(value any, inProperties bool) any {
 	switch typed := value.(type) {
 	case map[string]any:
 		for key, item := range typed {
+			if inProperties {
+				typed[key] = antigravityObfuscateSchemaValue(item, false)
+				continue
+			}
 			switch strings.ToLower(strings.TrimSpace(key)) {
 			case "enum", "const", "default", "examples", "example":
 				continue
@@ -993,13 +1004,16 @@ func antigravityObfuscateDeclarations(value any) any {
 					typed[key] = antigravityObfuscateSystemInstruction(text)
 					continue
 				}
+			case "properties":
+				typed[key] = antigravityObfuscateSchemaValue(item, true)
+				continue
 			}
-			typed[key] = antigravityObfuscateDeclarations(item)
+			typed[key] = antigravityObfuscateSchemaValue(item, false)
 		}
 		return typed
 	case []any:
 		for index, item := range typed {
-			typed[index] = antigravityObfuscateDeclarations(item)
+			typed[index] = antigravityObfuscateSchemaValue(item, inProperties)
 		}
 		return typed
 	default:

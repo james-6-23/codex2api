@@ -758,3 +758,62 @@ func TestAntigravityNormalizeNativeFunctionResponseWalksAllKeys(t *testing.T) {
 		t.Fatalf("response keys were not normalized: %#v", response)
 	}
 }
+
+func TestNormalizeAntigravitySystemInstructionLeavesAssignmentsAlone(t *testing.T) {
+	for _, in := range []string{
+		"You are reviewing OpenMausBot documentation. Report inaccuracies.",
+		"You are building OpenMausBot integrations. Keep tests.",
+	} {
+		if got := normalizeAntigravitySystemInstruction(in); got != in {
+			t.Fatalf("assignment was rewritten: %q -> %q", in, got)
+		}
+	}
+}
+
+func TestNormalizeClientScaffoldingKeepsLineAfterFence(t *testing.T) {
+	in := "~~~\nliteral\n~~~\n[OpenMausBot: notice]\nanswer"
+	got := normalizeClientScaffolding(in)
+	if !strings.Contains(got, "literal") || strings.Contains(got, "OpenMausBot") || !strings.Contains(got, "answer") {
+		t.Fatalf("fence boundary handling is wrong: %q", got)
+	}
+}
+
+func TestNormalizeClientScaffoldingDoesNotCloseOnFourSpaceFence(t *testing.T) {
+	in := "~~~\n    ~~~\n[OpenMausBot: notice]\n~~~\nanswer"
+	got := normalizeClientScaffolding(in)
+	if !strings.Contains(got, "[OpenMausBot: notice]") {
+		t.Fatalf("four-space line closed the fence early: %q", got)
+	}
+}
+
+func TestObfuscateSystemInstructionProtectsMultilineInlineCode(t *testing.T) {
+	in := "Use `OpenMausBot\nconfiguration` exactly."
+	got := antigravityObfuscateSystemInstruction(in)
+	if !strings.Contains(got, "`OpenMausBot\nconfiguration`") {
+		t.Fatalf("multiline inline code was obfuscated: %q", got)
+	}
+}
+
+func TestObfuscateSystemInstructionCoversOpenMaus(t *testing.T) {
+	got := antigravityObfuscateSystemInstruction("OpenMaus tool")
+	if strings.Contains(got, "OpenMaus") || !strings.Contains(got, "\u200B") {
+		t.Fatalf("OpenMaus was not obfuscated: %q", got)
+	}
+}
+
+func TestAntigravityObfuscateDeclarationsTraversesPropertyNamedEnum(t *testing.T) {
+	value := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"enum": map[string]any{
+				"type":        "string",
+				"description": "OpenMausBot value",
+			},
+		},
+	}
+	got := antigravityObfuscateDeclarations(value).(map[string]any)
+	description := got["properties"].(map[string]any)["enum"].(map[string]any)["description"].(string)
+	if strings.Contains(description, "OpenMausBot") || !strings.Contains(description, "\u200B") {
+		t.Fatalf("property named enum was skipped: %q", description)
+	}
+}
