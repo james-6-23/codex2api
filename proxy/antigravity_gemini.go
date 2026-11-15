@@ -390,11 +390,11 @@ func antigravityObfuscateNativeGeminiSystemInstruction(request map[string]any) {
 			kept = append(kept, part)
 			continue
 		}
-		text = strings.TrimSpace(normalizeAntigravitySystemInstruction(text))
+		text = strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(text))
 		if text == "" {
 			continue
 		}
-		partMap["text"] = antigravityObfuscateSystemInstruction(text)
+		partMap["text"] = text
 		kept = append(kept, partMap)
 	}
 	if len(kept) == 0 {

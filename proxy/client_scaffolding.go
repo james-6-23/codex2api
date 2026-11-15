@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -111,6 +112,14 @@ var clientScaffoldingLinePatterns = func() []*regexp.Regexp {
 }()
 
 const clientScaffoldingVolatileContextPrefix = "context from openmausbot updated since this conversation started"
+
+// clientScaffoldingMarkerPattern is the cheap pre-check that keeps ordinary
+// prompts off the regex and code-scan path.
+var clientScaffoldingMarkerPattern = regexp.MustCompile(`(?i)(?:openmausbot|mausbot|maus-bot|chief of staff|learned by |\[from |<system-reminder>|co-authored-by:|generated with \[claude code\]|you are powered by the model|you are claude code|you are codex|x-anthropic-billing-header:|custom-billing-id:|cc_version=|cc_entrypoint=|cch=)`)
+
+// clientScaffoldingProductMarkerPattern is the narrower pre-check for tool
+// results, which only need product notices and reminder blocks.
+var clientScaffoldingProductMarkerPattern = regexp.MustCompile(`(?i)(?:openmausbot|mausbot|maus-bot|learned by |\[from |<system-reminder>)`)
 
 var clientScaffoldingCodePlaceholder = regexp.MustCompile("\x00code([0-9]+)\x00")
 
@@ -277,20 +286,27 @@ func normalizeClientScaffolding(text string) string {
 	if text == "" || len(text) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
 		return text
 	}
+	if !clientScaffoldingMarkerPattern.MatchString(text) {
+		return strings.TrimSpace(text)
+	}
+	return strings.TrimSpace(maskCodeBlocksAndApply(text, normalizeClientScaffoldingUnmasked))
+}
+
+// normalizeClientScaffoldingUnmasked runs the line patterns on text whose code
+// blocks are already masked.
+func normalizeClientScaffoldingUnmasked(text string) string {
 	volatileBody := strings.HasPrefix(strings.ToLower(strings.TrimSpace(text)), clientScaffoldingVolatileContextPrefix)
-	out := maskCodeBlocksAndApply(text, func(masked string) string {
-		if clientScaffoldingReminderStripEnabled() {
-			masked = stripSystemReminderBlocks(masked)
-		}
-		for _, pattern := range clientScaffoldingLinePatterns {
-			masked = pattern.ReplaceAllString(masked, "")
-		}
-		if volatileBody {
-			masked = obfuscateClientBrand(masked)
-		}
-		return masked
-	})
-	return strings.TrimSpace(out)
+	out := text
+	if clientScaffoldingReminderStripEnabled() {
+		out = stripSystemReminderBlocks(out)
+	}
+	for _, pattern := range clientScaffoldingLinePatterns {
+		out = pattern.ReplaceAllString(out, "")
+	}
+	if volatileBody {
+		out = obfuscateClientBrand(out)
+	}
+	return out
 }
 
 // normalizeProductScaffolding is the narrower pass used on tool results. It
@@ -299,6 +315,9 @@ func normalizeClientScaffolding(text string) string {
 // reminder block.
 func normalizeProductScaffolding(text string) string {
 	if text == "" || len(text) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
+		return text
+	}
+	if !clientScaffoldingProductMarkerPattern.MatchString(text) {
 		return text
 	}
 	out := maskCodeBlocksAndApply(text, func(masked string) string {
@@ -338,9 +357,12 @@ func obfuscateClientBrand(text string) string {
 // repeats until no phrase matches, so overlapping names such as OpenMausBot and
 // MausBot are both broken in one call. The result is deterministic and
 // idempotent.
-func obfuscateWithPhrases(text string, phrases []string) string {
-	if text == "" || len(phrases) == 0 {
-		return text
+var obfuscationMatcherCache sync.Map
+
+func obfuscationMatcher(phrases []string) *regexp.Regexp {
+	key := strings.Join(phrases, "\x00")
+	if cached, ok := obfuscationMatcherCache.Load(key); ok {
+		return cached.(*regexp.Regexp)
 	}
 	escaped := make([]string, 0, len(phrases))
 	for _, phrase := range phrases {
@@ -350,13 +372,27 @@ func obfuscateWithPhrases(text string, phrases []string) string {
 		}
 	}
 	if len(escaped) == 0 {
-		return text
+		return nil
 	}
 	matcher, err := regexp.Compile("(?i)" + strings.Join(escaped, "|"))
 	if err != nil {
+		return nil
+	}
+	actual, _ := obfuscationMatcherCache.LoadOrStore(key, matcher)
+	return actual.(*regexp.Regexp)
+}
+
+func obfuscateWithPhrases(text string, phrases []string) string {
+	if text == "" || len(phrases) == 0 {
 		return text
 	}
-	for pass := 0; pass <= len(escaped); pass++ {
+	matcher := obfuscationMatcher(phrases)
+	if matcher == nil {
+		return text
+	}
+	// Our phrase set has at most two levels of overlap. Three passes cover it
+	// and keep the cost bounded when text is large.
+	for pass := 0; pass < 3; pass++ {
 		next := matcher.ReplaceAllStringFunc(text, func(match string) string {
 			if strings.Contains(match, "\u200B") {
 				return match
@@ -404,11 +440,14 @@ func clientScaffoldingIdentityPreamble(text string) string {
 // one. Code blocks are masked first: an example persona inside backticks is
 // content, not an instruction.
 func normalizeAntigravitySystemInstruction(system string) string {
-	if system == "" || !clientScaffoldingStripEnabled() {
+	if system == "" || len(system) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
 		return system
 	}
+	if !clientScaffoldingMarkerPattern.MatchString(system) {
+		return strings.TrimSpace(system)
+	}
 	return maskCodeBlocksAndApply(system, func(masked string) string {
-		masked = normalizeClientScaffolding(masked)
+		masked = normalizeClientScaffoldingUnmasked(masked)
 		if matched := clientScaffoldingIdentityPreamble(masked); matched != "" {
 			masked = officialAntigravityIdentity + " " + masked[len(matched):]
 		}

@@ -61,6 +61,8 @@ const (
 	antigravityZeroWidthSpace        = "\u200B"
 )
 
+var antigravitySensitiveMarkerPattern = regexp.MustCompile(`(?i)(?:hermes agent|nous research|claude agent sdk|you are codex, an agent based on gpt-5|openmausbot|mausbot|maus-bot|chief of staff|my cloud|learned by)`)
+
 var antigravityDefaultSensitivePhrases = []string{
 	"Hermes Agent",
 	"Nous Research",
@@ -547,11 +549,11 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 // never reaches the Gemini envelope converter and needs its own pass.
 func antigravityNormalizeInteractionsRequest(request map[string]any) {
 	if instructions, ok := request["instructions"].(string); ok {
-		instructions = strings.TrimSpace(normalizeAntigravitySystemInstruction(instructions))
+		instructions = strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(instructions))
 		if instructions == "" {
 			delete(request, "instructions")
 		} else {
-			request["instructions"] = antigravityObfuscateSystemInstruction(instructions)
+			request["instructions"] = instructions
 		}
 	}
 	if system, ok := request["system"]; ok {
@@ -637,11 +639,7 @@ func antigravityNormalizeInteractionsContent(raw any) any {
 func antigravityNormalizeInteractionsSystemContent(raw any) any {
 	switch typed := raw.(type) {
 	case string:
-		text := strings.TrimSpace(normalizeAntigravitySystemInstruction(typed))
-		if text == "" {
-			return ""
-		}
-		return antigravityObfuscateSystemInstruction(text)
+		return strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(typed))
 	case []any:
 		for _, rawPart := range typed {
 			part, ok := rawPart.(map[string]any)
@@ -649,12 +647,7 @@ func antigravityNormalizeInteractionsSystemContent(raw any) any {
 				continue
 			}
 			if text, ok := part["text"].(string); ok {
-				text = strings.TrimSpace(normalizeAntigravitySystemInstruction(text))
-				if text == "" {
-					part["text"] = ""
-				} else {
-					part["text"] = antigravityObfuscateSystemInstruction(text)
-				}
+				part["text"] = strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(text))
 			}
 		}
 		return typed
@@ -740,7 +733,7 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 	callNames := map[string]string{}
 	systemParts := make([]string, 0, 2)
 	if s, ok := in["instructions"].(string); ok {
-		if s = normalizeClientScaffolding(s); s != "" {
+		if s = strings.TrimSpace(s); s != "" {
 			systemParts = append(systemParts, s)
 		}
 	}
@@ -766,11 +759,12 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 					return nil, partsErr
 				}
 				// Message text carries the harness scaffolding; structured
-				// payloads (function calls, images) are never rewritten.
-				parts = normalizeClientScaffoldingParts(parts)
+				// payloads (function calls, images) are never rewritten. System
+				// parts wait for the joined system-instruction pass so they are
+				// not normalized twice.
 				switch role {
 				case "assistant":
-					addParts("model", parts)
+					addParts("model", normalizeClientScaffoldingParts(parts))
 				case "system", "developer":
 					for _, p := range parts {
 						if pm, ok := p.(map[string]any); ok {
@@ -780,7 +774,7 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 						}
 					}
 				case "user":
-					addParts("user", parts)
+					addParts("user", normalizeClientScaffoldingParts(parts))
 				default:
 					return nil, antigravityOAuthUnsupported("message role " + role)
 				}
@@ -865,9 +859,9 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 	}
 	request := map[string]any{"contents": contents}
 	if len(systemParts) > 0 {
-		system := strings.TrimSpace(normalizeAntigravitySystemInstruction(strings.Join(systemParts, "\n\n")))
+		system := strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(strings.Join(systemParts, "\n\n")))
 		if system != "" {
-			request["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": antigravityObfuscateSystemInstruction(system)}}}
+			request["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": system}}}
 		}
 	}
 	request["sessionId"] = antigravitySessionID(in, contents)
@@ -953,7 +947,30 @@ func antigravityObfuscateSystemInstruction(text string) string {
 	if text == "" {
 		return text
 	}
+	if os.Getenv(antigravitySensitivePhrasesEnv) == "" && !antigravitySensitiveMarkerPattern.MatchString(text) {
+		return text
+	}
 	return maskCodeBlocksAndApply(text, func(masked string) string {
+		return obfuscateWithPhrases(masked, antigravitySensitivePhrases())
+	})
+}
+
+// antigravityNormalizeAndObfuscateSystemInstruction masks code once and then
+// runs scaffolding normalization, identity rewriting and brand obfuscation in
+// the same pass. The converters use this instead of normalizing and obfuscating
+// separately, which would scan the code twice.
+func antigravityNormalizeAndObfuscateSystemInstruction(system string) string {
+	if system == "" || len(system) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
+		return system
+	}
+	if !clientScaffoldingMarkerPattern.MatchString(system) {
+		return antigravityObfuscateSystemInstruction(system)
+	}
+	return maskCodeBlocksAndApply(system, func(masked string) string {
+		masked = normalizeClientScaffoldingUnmasked(masked)
+		if matched := clientScaffoldingIdentityPreamble(masked); matched != "" {
+			masked = officialAntigravityIdentity + " " + masked[len(matched):]
+		}
 		return obfuscateWithPhrases(masked, antigravitySensitivePhrases())
 	})
 }
