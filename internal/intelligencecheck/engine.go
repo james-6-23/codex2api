@@ -22,9 +22,11 @@ type Question struct {
 type Settings struct {
 	GrokModelSupplied        bool            `json:"-"`
 	AntigravityModelSupplied bool            `json:"-"`
+	KiroModelSupplied        bool            `json:"-"`
 	Channels                 map[string]bool `json:"channels,omitempty"`
 	GrokModel                string          `json:"grok_model,omitempty"`
 	AntigravityModel         string          `json:"antigravity_model,omitempty"`
+	KiroModel                string          `json:"kiro_model,omitempty"`
 	AdaptiveEnabled          bool            `json:"adaptive_enabled"`
 	PauseInitialSeconds      int             `json:"pause_initial_seconds"`
 	PauseMaxSeconds          int             `json:"pause_max_seconds"`
@@ -62,9 +64,26 @@ func (s *Settings) UnmarshalJSON(data []byte) error {
 	}
 	_, decoded.GrokModelSupplied = fields["grok_model"]
 	_, decoded.AntigravityModelSupplied = fields["antigravity_model"]
+	_, decoded.KiroModelSupplied = fields["kiro_model"]
 	*s = Settings(decoded)
 	return nil
 }
+
+// Channels lists every account source the detector knows, in display order.
+var Channels = []string{"codex", "claude", "grok", "antigravity", "kiro"}
+
+// IsChannel reports whether channel is a known account source.
+func IsChannel(channel string) bool {
+	for _, known := range Channels {
+		if channel == known {
+			return true
+		}
+	}
+	return false
+}
+
+// DefaultKiroModel matches the Claude source default so scores stay comparable.
+const DefaultKiroModel = "claude-sonnet-4.6"
 
 // CandyPrompt is the built-in reasoning check. Keep the no-tools/no-network
 // constraint: the question is public, so a browsing model could otherwise look
@@ -99,6 +118,11 @@ func (s Settings) ModelForChannel(channel string) (string, string) {
 			return s.AntigravityModel, ""
 		}
 		return "gemini-3.8-flash-medium", ""
+	case "kiro":
+		if s.KiroModel != "" {
+			return s.KiroModel, ""
+		}
+		return DefaultKiroModel, ""
 	default:
 		return s.GPTModel, s.ReasoningEffort
 	}
@@ -107,13 +131,11 @@ func (s Settings) ModelForChannel(channel string) (string, string) {
 // ValidateSettings checks source switches, optional model overrides and detector policy bounds.
 func ValidateSettings(s Settings) error {
 	for channel := range s.Channels {
-		switch channel {
-		case "codex", "claude", "grok", "antigravity":
-		default:
+		if !IsChannel(channel) {
 			return fmt.Errorf("unknown intelligence check channel: %s", channel)
 		}
 	}
-	for _, model := range []string{s.GrokModel, s.AntigravityModel} {
+	for _, model := range []string{s.GrokModel, s.AntigravityModel, s.KiroModel} {
 		if model != "" && strings.TrimSpace(model) == "" {
 			return fmt.Errorf("model must not contain only whitespace")
 		}

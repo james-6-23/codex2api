@@ -245,6 +245,8 @@ type Account struct {
 	ClaudeClientPlatformOverride string
 	ClaudeVersionPolicyOverride  string
 	ClaudeClientVersionOverride  string
+	// Kiro 是 upstream_type=kiro 账号的专有凭据投影（见 kiro_account.go）。
+	Kiro KiroCredential
 	// claudeSessionWindow 是 Claude 账号的全局默认并发会话窗口数(装载时从系统设置
 	// 快照,>0 时作为无账号级/分组覆盖时的基础并发回退)。
 	claudeSessionWindow int64
@@ -6203,11 +6205,12 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	}
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	isAntigravityAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamAntigravity) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
+	isKiroAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamKiro) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
 	isAgentIdentityAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("auth_mode")), CodexAuthModeAgentIdentity) &&
 		strings.TrimSpace(row.GetCredential("agent_runtime_id")) != "" &&
 		strings.TrimSpace(row.GetCredential("agent_private_key")) != ""
-	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isAgentIdentityAccount {
+	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isKiroAccount && !isAgentIdentityAccount {
 		log.Printf("[账号 %d] 缺少 refresh_token、session_token 和 access_token，跳过", row.ID)
 		return nil
 	}
@@ -6414,6 +6417,9 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		account.RefreshToken = ""
 		account.SessionToken = ""
 		account.ExpiresAt = time.Time{}
+	}
+	if isKiroAccount {
+		account.applyKiroRowLocked(row)
 	}
 	if subExp := row.GetCredential("subscription_expires_at"); subExp != "" {
 		if parsed, err := time.Parse(time.RFC3339, subExp); err == nil {
@@ -10326,7 +10332,7 @@ func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroup
 			return false
 		}
 	case database.UpstreamChannelCodex:
-		if acc.IsGrokAPI() || acc.IsAntigravityAPI() || acc.IsClaudeOAuth() {
+		if acc.IsGrokAPI() || acc.IsAntigravityAPI() || acc.IsClaudeOAuth() || acc.IsKiro() {
 			return false
 		}
 	case database.UpstreamChannelAntigravity:
@@ -10335,6 +10341,10 @@ func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroup
 		}
 	case database.UpstreamChannelClaude:
 		if !acc.IsClaudeOAuth() {
+			return false
+		}
+	case database.UpstreamChannelKiro:
+		if !acc.IsKiro() {
 			return false
 		}
 	}
@@ -12590,6 +12600,9 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	// ChatGPT 不同，单独处理。对所有非 claude 账号此分支恒不进入。
 	if acc.IsClaudeOAuth() {
 		return s.refreshClaudeAccount(ctx, acc, forceRefresh)
+	}
+	if acc.IsKiro() {
+		return s.refreshKiroAccount(ctx, acc, forceRefresh)
 	}
 	return s.refreshCodexAccount(ctx, acc, forceRefresh)
 }
