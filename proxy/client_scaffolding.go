@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Neutralizer for client-side agent scaffolding.
@@ -58,17 +61,86 @@ var clientScaffoldingReminderMarkers = []string{
 	"attribution for git commits and pull requests",
 	"# session-specific guidance",
 	"here is useful information about the environment",
+	"this part of your instructions changes from turn to turn",
+	"this part of your instructions changed since this session started",
+	"the notes that were in your instructions when this session started have been cleared",
+	"the openmausbot context notes from earlier in this conversation have been cleared",
 }
 
 var clientScaffoldingReminderBlockPattern = regexp.MustCompile(`(?is)<system-reminder>\s*(.*?)\s*</system-reminder>`)
 
+// clientScaffoldingProductLinePatterns are OpenMausBot notices, truncation
+// banners, provenance labels, memory fragments and volatile-context headers.
+// They are safe on tool results as well as message text because each one names
+// the harness explicitly rather than matching generic prose.
+var clientScaffoldingProductLinePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?im)^[ \t]*\[OpenMausBot:[^\]\r\n]*\][ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*\[OpenMausBot started this again by itself, once:[^\]\r\n]*\][ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*\[(?:Payload|Event) truncated by OpenMausBot\][ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*⚠️?[ \t]*(?:TRUNCATED|SHAPED) by OpenMausBot:[^\r\n]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*\[(?:Escalation notice from|From) OpenMausBot[^\]\r\n]*\][ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*\[From [^\]\r\n]*·[^\]\r\n]*·[^\]\r\n]*\][ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*\[Message from @[^\]\r\n]*OpenMausBot[^\]\r\n]*\][ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*(?:-[ \t]*)?OpenMausBot (?:already retried this run|did not retry it|cannot trace this work)[^\r\n]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*Context from OpenMausBot updated since this conversation started; it replaces any earlier copy:[ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*The OpenMausBot context notes from earlier in this conversation have been cleared; the standing instructions still apply\.[ \t]*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*-[ \t]*\d{4}-\d{2}-\d{2}[ \t]*·[ \t]*learned by [^·\r\n]*[ \t]*·.*\r?\n?`),
+	regexp.MustCompile(`(?i)[ \t]*TEST EVENT, started from OpenMausBot:[^\r\n]*`),
+}
+
+var clientScaffoldingBillingLinePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?im)^[ \t]*x-anthropic-billing-header:.*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*custom-billing-id:.*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*cc_version=.*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*cc_entrypoint=.*\r?\n?`),
+	regexp.MustCompile(`(?im)^[ \t]*cch=.*\r?\n?`),
+}
+
 // clientScaffoldingLinePatterns match standalone scaffolding lines that appear
 // outside a reminder block. Each is anchored to its own line so prose that
 // merely mentions the wording is left alone.
-var clientScaffoldingLinePatterns = []*regexp.Regexp{
-	regexp.MustCompile(`(?im)^[ \t]*Co-Authored-By:[ \t]*Claude Code[ \t]*<noreply@anthropic\.com>[ \t]*\r?\n?`),
-	regexp.MustCompile(`(?im)^[ \t]*🤖[ \t]*Generated with \[Claude Code\]\(https://claude\.com/claude-code\)[ \t]*\r?\n?`),
-	regexp.MustCompile(`(?im)^[ \t]*You are powered by the model[ \t]+\S+\.?[ \t]*\r?\n?`),
+var clientScaffoldingLinePatterns = func() []*regexp.Regexp {
+	patterns := []*regexp.Regexp{
+		regexp.MustCompile(`(?im)^[ \t]*Co-Authored-By:[ \t]*Claude Code[ \t]*<noreply@anthropic\.com>[ \t]*\r?\n?`),
+		regexp.MustCompile(`(?im)^[ \t]*🤖[ \t]*Generated with \[Claude Code\]\(https://claude\.com/claude-code\)[ \t]*\r?\n?`),
+		regexp.MustCompile(`(?im)^[ \t]*You are powered by the model[ \t]+\S+\.?[ \t]*\r?\n?`),
+	}
+	patterns = append(patterns, clientScaffoldingBillingLinePatterns...)
+	patterns = append(patterns, clientScaffoldingProductLinePatterns...)
+	return patterns
+}()
+
+const clientScaffoldingVolatileContextPrefix = "context from openmausbot updated since this conversation started"
+
+// clientScaffoldingCodePattern protects fenced blocks and inline code while
+// line patterns run. Without it a payload such as a billing header pasted
+// inside a code sample would be deleted from the user's source.
+var clientScaffoldingCodePattern = regexp.MustCompile("(?s)```.*?```|~~~.*?~~~|`[^`\\n]*`")
+
+var clientScaffoldingCodePlaceholder = regexp.MustCompile("\x00code([0-9]+)\x00")
+
+// maskCodeBlocksAndApply runs apply over text with code blocks replaced by
+// opaque placeholders, then restores them byte for byte.
+func maskCodeBlocksAndApply(text string, apply func(string) string) string {
+	if text == "" || apply == nil {
+		return text
+	}
+	blocks := make([]string, 0, 2)
+	masked := clientScaffoldingCodePattern.ReplaceAllStringFunc(text, func(block string) string {
+		blocks = append(blocks, block)
+		return fmt.Sprintf("\x00code%d\x00", len(blocks)-1)
+	})
+	if len(blocks) == 0 {
+		return apply(text)
+	}
+	applied := apply(masked)
+	return clientScaffoldingCodePlaceholder.ReplaceAllStringFunc(applied, func(token string) string {
+		index, err := strconv.Atoi(strings.TrimSuffix(strings.TrimPrefix(token, "\x00code"), "\x00"))
+		if err != nil || index < 0 || index >= len(blocks) {
+			return token
+		}
+		return blocks[index]
+	})
 }
 
 // clientScaffoldingStripEnabled reports whether the neutralizer is active. It
@@ -107,14 +179,128 @@ func normalizeClientScaffolding(text string) string {
 	if text == "" || len(text) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
 		return text
 	}
-	out := text
-	if clientScaffoldingReminderStripEnabled() {
-		out = stripSystemReminderBlocks(out)
-	}
-	for _, pattern := range clientScaffoldingLinePatterns {
-		out = pattern.ReplaceAllString(out, "")
-	}
+	volatileBody := strings.HasPrefix(strings.ToLower(strings.TrimSpace(text)), clientScaffoldingVolatileContextPrefix)
+	out := maskCodeBlocksAndApply(text, func(masked string) string {
+		if clientScaffoldingReminderStripEnabled() {
+			masked = stripSystemReminderBlocks(masked)
+		}
+		for _, pattern := range clientScaffoldingLinePatterns {
+			masked = pattern.ReplaceAllString(masked, "")
+		}
+		if volatileBody {
+			masked = obfuscateClientBrand(masked)
+		}
+		return masked
+	})
 	return strings.TrimSpace(out)
+}
+
+// normalizeProductScaffolding is the narrower pass used on tool results. It
+// removes harness notices and memory fragments but leaves billing headers and
+// other prose alone, because a tool result can be a raw file rather than a
+// reminder block.
+func normalizeProductScaffolding(text string) string {
+	if text == "" || len(text) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
+		return text
+	}
+	out := maskCodeBlocksAndApply(text, func(masked string) string {
+		if clientScaffoldingReminderStripEnabled() {
+			masked = stripSystemReminderBlocks(masked)
+		}
+		for _, pattern := range clientScaffoldingProductLinePatterns {
+			masked = pattern.ReplaceAllString(masked, "")
+		}
+		return masked
+	})
+	if strings.TrimSpace(out) == "" {
+		return ""
+	}
+	return out
+}
+
+var clientScaffoldingBrandPhrases = []string{
+	"learned by MausBot",
+	"OpenMausBot",
+	"OpenMaus",
+	"MausBot Cloud",
+	"Maus-Bot",
+	"MausBot",
+	"My Cloud",
+	"Chief of Staff",
+}
+
+// obfuscateClientBrand breaks exact product-name matches with a zero-width
+// space. It is used for the bare volatile-context body, which is generated by
+// OpenMausBot rather than typed by the user and has no block delimiter.
+func obfuscateClientBrand(text string) string {
+	if text == "" {
+		return text
+	}
+	escaped := make([]string, 0, len(clientScaffoldingBrandPhrases))
+	for _, phrase := range clientScaffoldingBrandPhrases {
+		escaped = append(escaped, regexp.QuoteMeta(phrase))
+	}
+	matcher, err := regexp.Compile("(?i)" + strings.Join(escaped, "|"))
+	if err != nil {
+		return text
+	}
+	return matcher.ReplaceAllStringFunc(text, func(match string) string {
+		if strings.Contains(match, "\u200B") {
+			return match
+		}
+		_, size := utf8.DecodeRuneInString(match)
+		if size <= 0 || size >= len(match) {
+			return match
+		}
+		return match[:size] + "\u200B" + match[size:]
+	})
+}
+
+// officialAntigravityIdentity is the identity the upstream Antigravity channel
+// expects. Third-party harness preambles are rewritten to it so the request is
+// byte-compatible with the official client.
+const officialAntigravityIdentity = "You are Antigravity, a large language model built by Google."
+
+var clientScaffoldingThirdPartyIdentityPattern = regexp.MustCompile(`(?i)^You [^\n]*?\.\s*`)
+
+// clientScaffoldingIdentityRewriteMarkers limit the identity rewrite to
+// harnesses whose preamble is a known client fingerprint. Other preambles are
+// left intact: their wording is still obfuscated as sensitive phrasing, and the
+// existing upstream behaviour for those clients must not change.
+var clientScaffoldingIdentityRewriteMarkers = []string{
+	"claude code",
+	"codex",
+	"mausbot",
+	"openmausbot",
+	"maus-bot",
+	"chief of staff",
+}
+
+func clientScaffoldingIdentityRewriteWanted(preamble string) bool {
+	lower := strings.ToLower(preamble)
+	for _, marker := range clientScaffoldingIdentityRewriteMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// normalizeAntigravitySystemInstruction strips harness scaffolding from a system
+// instruction and rewrites a known third-party identity preamble to the official
+// one. Code blocks are masked first: an example persona inside backticks is
+// content, not an instruction.
+func normalizeAntigravitySystemInstruction(system string) string {
+	if system == "" || !clientScaffoldingStripEnabled() {
+		return system
+	}
+	return maskCodeBlocksAndApply(system, func(masked string) string {
+		masked = normalizeClientScaffolding(masked)
+		if matched := clientScaffoldingThirdPartyIdentityPattern.FindString(masked); matched != "" && clientScaffoldingIdentityRewriteWanted(matched) {
+			masked = officialAntigravityIdentity + " " + masked[len(matched):]
+		}
+		return masked
+	})
 }
 
 func stripSystemReminderBlocks(text string) string {

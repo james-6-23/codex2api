@@ -66,6 +66,14 @@ var antigravityDefaultSensitivePhrases = []string{
 	"Nous Research",
 	"Claude Agent SDK",
 	"You are Codex, an agent based on GPT-5",
+	"learned by MausBot",
+	"OpenMausBot",
+	"OpenMaus",
+	"MausBot Cloud",
+	"Maus-Bot",
+	"MausBot",
+	"My Cloud",
+	"Chief of Staff",
 }
 
 type antigravityHTTPClientKey struct {
@@ -497,6 +505,7 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 	if _, ok := request["input"]; !ok {
 		return nil, fmt.Errorf("antigravity interactions request requires input")
 	}
+	antigravityNormalizeInteractionsRequest(request)
 	reasoning, _ := request["reasoning"].(map[string]any)
 	wireModel := antigravityGeminiResolvedModel(model, reasoning)
 	if variant, ok := antigravityResolvedVariant(model, reasoning); ok {
@@ -531,6 +540,147 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 		return nil, err
 	}
 	return doTracedUpstreamRequest(client, req, account, proxyURL)
+}
+
+// antigravityNormalizeInteractionsRequest neutralizes an API-key Interactions
+// request in place. That path sends the Responses body straight to Google, so it
+// never reaches the Gemini envelope converter and needs its own pass.
+func antigravityNormalizeInteractionsRequest(request map[string]any) {
+	if instructions, ok := request["instructions"].(string); ok {
+		instructions = strings.TrimSpace(normalizeAntigravitySystemInstruction(instructions))
+		if instructions == "" {
+			delete(request, "instructions")
+		} else {
+			request["instructions"] = antigravityObfuscateSystemInstruction(instructions)
+		}
+	}
+	if system, ok := request["system"]; ok {
+		request["system"] = antigravityNormalizeInteractionsSystemContent(system)
+	}
+	if input, ok := request["input"]; ok {
+		request["input"] = antigravityNormalizeInteractionsInput(input)
+	}
+	if tools, ok := request["tools"]; ok {
+		request["tools"] = antigravityObfuscateDeclarations(tools)
+	}
+	antigravityStripInteractionsClientIdentity(request)
+}
+
+// antigravityStripInteractionsClientIdentity removes caller metadata that
+// names the harness. The OAuth envelope converter only copies known fields, but
+// the Interactions path forwards the whole map, so clientInfo and any branded
+// metadata value have to be deleted here.
+func antigravityStripInteractionsClientIdentity(request map[string]any) {
+	delete(request, "clientInfo")
+	delete(request, "client_info")
+	if user, ok := request["user"].(string); ok && clientScaffoldingHasBrand(user) {
+		delete(request, "user")
+	}
+	if metadata, ok := request["metadata"].(map[string]any); ok {
+		for key, value := range metadata {
+			if text, ok := value.(string); ok && clientScaffoldingHasBrand(text) {
+				delete(metadata, key)
+			}
+		}
+	}
+}
+
+func clientScaffoldingHasBrand(text string) bool {
+	lower := strings.ToLower(text)
+	for _, phrase := range []string{"openmausbot", "openmaus", "mausbot", "maus-bot", "chief of staff", "my cloud"} {
+		if strings.Contains(lower, phrase) {
+			return true
+		}
+	}
+	return false
+}
+
+func antigravityNormalizeInteractionsInput(raw any) any {
+	switch typed := raw.(type) {
+	case string:
+		return normalizeClientScaffolding(typed)
+	case []any:
+		for _, item := range typed {
+			message, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			switch lowerStringField(message, "type") {
+			case "", "message":
+				role := lowerStringField(message, "role")
+				if role == "system" || role == "developer" {
+					message["content"] = antigravityNormalizeInteractionsSystemContent(message["content"])
+				} else {
+					message["content"] = antigravityNormalizeInteractionsContent(message["content"])
+				}
+			case "function_call_output", "custom_tool_call_output":
+				message["output"] = antigravityNormalizeInteractionsFunctionOutput(message["output"])
+			}
+		}
+		return typed
+	default:
+		return raw
+	}
+}
+
+func antigravityNormalizeInteractionsContent(raw any) any {
+	switch typed := raw.(type) {
+	case string:
+		return normalizeClientScaffolding(typed)
+	case []any:
+		return normalizeClientScaffoldingParts(typed)
+	default:
+		return raw
+	}
+}
+
+func antigravityNormalizeInteractionsSystemContent(raw any) any {
+	switch typed := raw.(type) {
+	case string:
+		text := strings.TrimSpace(normalizeAntigravitySystemInstruction(typed))
+		if text == "" {
+			return ""
+		}
+		return antigravityObfuscateSystemInstruction(text)
+	case []any:
+		for _, rawPart := range typed {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := part["text"].(string); ok {
+				text = strings.TrimSpace(normalizeAntigravitySystemInstruction(text))
+				if text == "" {
+					part["text"] = ""
+				} else {
+					part["text"] = antigravityObfuscateSystemInstruction(text)
+				}
+			}
+		}
+		return typed
+	default:
+		return raw
+	}
+}
+
+func antigravityNormalizeInteractionsFunctionOutput(raw any) any {
+	switch typed := raw.(type) {
+	case string:
+		return normalizeProductScaffolding(typed)
+	case []any:
+		for _, rawPart := range typed {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := part["text"].(string); ok {
+				part["text"] = normalizeProductScaffolding(text)
+			}
+		}
+		return typed
+	default:
+		return raw
+	}
 }
 
 func responsesToGeminiInternal(raw []byte, project, model string) (map[string]any, error) {
@@ -675,6 +825,7 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 				if outputErr != nil {
 					return nil, outputErr
 				}
+				output = normalizeProductScaffolding(output)
 				functionResponse := map[string]any{
 					"name":     name,
 					"response": map[string]any{"result": output},
@@ -714,12 +865,15 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 	}
 	request := map[string]any{"contents": contents}
 	if len(systemParts) > 0 {
-		request["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": antigravityObfuscateSystemInstruction(strings.Join(systemParts, "\n\n"))}}}
+		system := strings.TrimSpace(normalizeAntigravitySystemInstruction(strings.Join(systemParts, "\n\n")))
+		if system != "" {
+			request["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": antigravityObfuscateSystemInstruction(system)}}}
+		}
 	}
 	request["sessionId"] = antigravitySessionID(in, contents)
 	if tools, ok := in["tools"].([]any); ok {
 		if declarations := antigravityGeminiFunctionDeclarations(tools); len(declarations) > 0 && antigravityGeminiFunctionToolsEnabled() && antigravityGeminiSupportsFunctionTools(wireModel) {
-			request["tools"] = []any{map[string]any{"functionDeclarations": declarations}}
+			request["tools"] = antigravityObfuscateDeclarations([]any{map[string]any{"functionDeclarations": declarations}})
 			callingConfig := map[string]any{"mode": antigravityGeminiToolMode(in["tool_choice"])}
 			if choice, ok := in["tool_choice"].(map[string]any); ok && lowerStringField(choice, "type") == "function" {
 				if name := firstAntigravityString(choice, "name"); name != "" {
@@ -824,6 +978,33 @@ func antigravityObfuscateSystemInstruction(text string) string {
 		}
 		return match[:size] + antigravityZeroWidthSpace + match[size:]
 	})
+}
+
+// antigravityObfuscateDeclarations rewrites product names in tool descriptions
+// and nested schema descriptions. Tool names stay untouched: renaming them would
+// break the caller's tool calls, but a description is prose and can carry the
+// same zero-width obfuscation as the system instruction.
+func antigravityObfuscateDeclarations(value any) any {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if strings.EqualFold(key, "description") {
+				if text, ok := item.(string); ok {
+					typed[key] = antigravityObfuscateSystemInstruction(text)
+					continue
+				}
+			}
+			typed[key] = antigravityObfuscateDeclarations(item)
+		}
+		return typed
+	case []any:
+		for index, item := range typed {
+			typed[index] = antigravityObfuscateDeclarations(item)
+		}
+		return typed
+	default:
+		return value
+	}
 }
 
 func antigravityStructuredTextRequested(textConfig map[string]any) bool {

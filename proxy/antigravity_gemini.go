@@ -156,6 +156,9 @@ func geminiNativeToAntigravityEnvelope(rawBody []byte, project, model string) ([
 	}
 	antigravityNormalizeGeminiContentRoles(request)
 	antigravitySanitizeNativeGeminiTools(request, nameMap)
+	if tools, ok := request["tools"]; ok {
+		request["tools"] = antigravityObfuscateDeclarations(tools)
+	}
 	antigravityRewriteNativeGeminiFunctionNames(request, nameMap)
 	wireModel := antigravityGeminiResolvedModel(model, nil)
 	antigravityApplyNativeGeminiThinkingConfig(request, model, wireModel)
@@ -387,7 +390,7 @@ func antigravityObfuscateNativeGeminiSystemInstruction(request map[string]any) {
 			kept = append(kept, part)
 			continue
 		}
-		text = normalizeClientScaffolding(text)
+		text = strings.TrimSpace(normalizeAntigravitySystemInstruction(text))
 		if text == "" {
 			continue
 		}
@@ -396,6 +399,7 @@ func antigravityObfuscateNativeGeminiSystemInstruction(request map[string]any) {
 	}
 	if len(kept) == 0 {
 		delete(request, "systemInstruction")
+		delete(request, "system_instruction")
 		return
 	}
 	systemInstruction["parts"] = kept
@@ -428,17 +432,43 @@ func antigravityNormalizeNativeGeminiContents(request map[string]any) {
 			if !ok {
 				continue
 			}
-			text, ok := part["text"].(string)
-			if !ok {
-				continue
+			if text, ok := part["text"].(string); ok {
+				part["text"] = normalizeClientScaffolding(text)
 			}
-			part["text"] = normalizeClientScaffolding(text)
+			if functionResponse, ok := part["functionResponse"].(map[string]any); ok {
+				antigravityNormalizeNativeFunctionResponse(functionResponse)
+			}
 			parts[partIndex] = part
 		}
 		content["parts"] = parts
 		contents[index] = content
 	}
 	request["contents"] = contents
+}
+
+// antigravityNormalizeNativeFunctionResponse neutralizes harness notices in a
+// native function response. The result is often a raw tool value, so only the
+// OpenMausBot-specific patterns run here, never billing headers.
+func antigravityNormalizeNativeFunctionResponse(functionResponse map[string]any) {
+	if response, ok := functionResponse["response"].(map[string]any); ok {
+		if result, ok := response["result"].(string); ok {
+			response["result"] = normalizeProductScaffolding(result)
+		}
+	}
+	if result, ok := functionResponse["response"].(string); ok {
+		functionResponse["response"] = normalizeProductScaffolding(result)
+	}
+	if parts, ok := functionResponse["parts"].([]any); ok {
+		for _, rawPart := range parts {
+			part, ok := rawPart.(map[string]any)
+			if !ok {
+				continue
+			}
+			if text, ok := part["text"].(string); ok {
+				part["text"] = normalizeProductScaffolding(text)
+			}
+		}
+	}
 }
 
 func antigravitySanitizeNativeGeminiTools(request map[string]any, nameMap map[string]string) {
