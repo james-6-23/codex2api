@@ -284,7 +284,7 @@ func clientScaffoldingParagraphEnd(text string, start int) int {
 		}
 		lineEnd += cursor
 		line := text[cursor:lineEnd]
-		if strings.TrimSpace(line) == "" && cursor > start {
+		if clientScaffoldingBlankLine(line) && cursor > start {
 			return cursor
 		}
 		if clientScaffoldingLineStartsFence(line) {
@@ -293,6 +293,19 @@ func clientScaffoldingParagraphEnd(text string, start int) int {
 		cursor = lineEnd + 1
 	}
 	return len(text)
+}
+
+// clientScaffoldingBlankLine follows CommonMark: a blank line contains only
+// spaces or tabs, plus the CR of a CRLF ending. Unicode whitespace such as an
+// NBSP does not end a paragraph.
+func clientScaffoldingBlankLine(line string) bool {
+	line = strings.TrimSuffix(line, "\r")
+	for index := 0; index < len(line); index++ {
+		if line[index] != ' ' && line[index] != '\t' {
+			return false
+		}
+	}
+	return true
 }
 
 func clientScaffoldingLineStartsFence(line string) bool {
@@ -309,7 +322,13 @@ func clientScaffoldingLineStartsFence(line string) bool {
 		length++
 		cursor++
 	}
-	return length >= 3
+	if length < 3 {
+		return false
+	}
+	if fence == '`' && strings.ContainsRune(line[cursor:], '`') {
+		return false
+	}
+	return true
 }
 
 // clientScaffoldingStripEnabled reports whether the neutralizer is active. It

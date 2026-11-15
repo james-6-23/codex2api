@@ -833,3 +833,19 @@ func TestNormalizeClientScaffoldingDoesNotPairBackticksAcrossFence(t *testing.T)
 		t.Fatalf("inline scanner paired with a backtick inside a fence: %q", got)
 	}
 }
+
+func TestNormalizeClientScaffoldingKeepsNBSPInlineCode(t *testing.T) {
+	in := "`sample\n\u00a0\n[OpenMausBot: keep]\nend`"
+	got := normalizeClientScaffolding(in)
+	if !strings.Contains(got, "[OpenMausBot: keep]") {
+		t.Fatalf("NBSP line ended the paragraph too early: %q", got)
+	}
+}
+
+func TestNormalizeClientScaffoldingRejectsBacktickInInfoString(t *testing.T) {
+	in := "`sample\n```x```\n[OpenMausBot: keep]\nend`"
+	got := normalizeClientScaffolding(in)
+	if !strings.Contains(got, "[OpenMausBot: keep]") {
+		t.Fatalf("backtick info string was treated as a fence: %q", got)
+	}
+}
