@@ -817,3 +817,19 @@ func TestAntigravityObfuscateDeclarationsTraversesPropertyNamedEnum(t *testing.T
 		t.Fatalf("property named enum was skipped: %q", description)
 	}
 }
+
+func TestNormalizeClientScaffoldingStopsInlineCodeAtWhitespaceBlankLine(t *testing.T) {
+	in := "`unfinished\n \n[OpenMausBot: notice]\n \nfinished`"
+	got := normalizeClientScaffolding(in)
+	if strings.Contains(got, "OpenMausBot") {
+		t.Fatalf("notice survived across a whitespace-only blank line: %q", got)
+	}
+}
+
+func TestNormalizeClientScaffoldingDoesNotPairBackticksAcrossFence(t *testing.T) {
+	in := "`unfinished\n~~~\n`literal`\n[OpenMausBot: keep]\n~~~\nanswer"
+	got := normalizeClientScaffolding(in)
+	if !strings.Contains(got, "[OpenMausBot: keep]") {
+		t.Fatalf("inline scanner paired with a backtick inside a fence: %q", got)
+	}
+}

@@ -134,6 +134,7 @@ func maskCodeBlocksAndApply(text string, apply func(string) string) string {
 	blocks := make([]string, 0, 2)
 	var masked strings.Builder
 	masked.Grow(len(text))
+	paragraphEnd := 0
 	for index := 0; index < len(text); {
 		if end, ok := clientScaffoldingFencedBlockEnd(text, index); ok {
 			block := text[index:end]
@@ -149,7 +150,10 @@ func maskCodeBlocksAndApply(text string, apply func(string) string) string {
 			index = end
 			continue
 		}
-		if end, ok := clientScaffoldingInlineCodeEnd(text, index); ok {
+		if paragraphEnd <= index {
+			paragraphEnd = clientScaffoldingParagraphEnd(text, index)
+		}
+		if end, ok := clientScaffoldingInlineCodeEnd(text, index, paragraphEnd); ok {
 			blocks = append(blocks, text[index:end])
 			masked.WriteString(fmt.Sprintf("\x00code%d\x00", len(blocks)-1))
 			index = end
@@ -239,10 +243,10 @@ func clientScaffoldingFencedBlockEnd(text string, index int) (int, bool) {
 }
 
 // clientScaffoldingInlineCodeEnd returns the end of an inline code span that
-// starts at index, or false when the backtick run has no matching run in the
-// same paragraph. CommonMark permits a span to cross a single line ending, so
-// the scan stops at a blank line rather than at every newline.
-func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
+// starts at index, or false when the backtick run has no matching run before
+// paragraphEnd. CommonMark permits a span to cross a single line ending, so the
+// caller passes a paragraph boundary rather than the next newline.
+func clientScaffoldingInlineCodeEnd(text string, index, paragraphEnd int) (int, bool) {
 	if index >= len(text) || text[index] != '`' {
 		return 0, false
 	}
@@ -251,7 +255,6 @@ func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
 		runEnd++
 	}
 	runLength := runEnd - index
-	paragraphEnd := clientScaffoldingParagraphEnd(text, runEnd)
 	for cursor := runEnd; cursor < paragraphEnd; {
 		if text[cursor] != '`' {
 			cursor++
@@ -269,14 +272,44 @@ func clientScaffoldingInlineCodeEnd(text string, index int) (int, bool) {
 	return 0, false
 }
 
+// clientScaffoldingParagraphEnd returns the first blank line or fenced-block
+// opener after start. Whitespace-only lines count as blank, and fences interrupt
+// paragraphs without a blank line, so both are boundaries for a code span.
 func clientScaffoldingParagraphEnd(text string, start int) int {
-	end := len(text)
-	for _, separator := range []string{"\n\n", "\r\n\r\n"} {
-		if index := strings.Index(text[start:], separator); index >= 0 && start+index < end {
-			end = start + index
+	cursor := start
+	for cursor < len(text) {
+		lineEnd := strings.IndexByte(text[cursor:], '\n')
+		if lineEnd < 0 {
+			return len(text)
 		}
+		lineEnd += cursor
+		line := text[cursor:lineEnd]
+		if strings.TrimSpace(line) == "" && cursor > start {
+			return cursor
+		}
+		if clientScaffoldingLineStartsFence(line) {
+			return cursor
+		}
+		cursor = lineEnd + 1
 	}
-	return end
+	return len(text)
+}
+
+func clientScaffoldingLineStartsFence(line string) bool {
+	cursor := 0
+	for cursor < len(line) && cursor < 3 && (line[cursor] == ' ' || line[cursor] == '\t') {
+		cursor++
+	}
+	if cursor >= len(line) || (line[cursor] != '`' && line[cursor] != '~') {
+		return false
+	}
+	fence := line[cursor]
+	length := 0
+	for cursor < len(line) && line[cursor] == fence {
+		length++
+		cursor++
+	}
+	return length >= 3
 }
 
 // clientScaffoldingStripEnabled reports whether the neutralizer is active. It
