@@ -1,0 +1,10 @@
+kiro.rs
+https://github.com/ZyphrZero/kiro.rs
+
+The Kiro channel (auth/kiro_*.go, proxy/kiro_*.go, admin/kiro_*.go) contains a
+Go port of the kiro.rs Anthropic/Responses protocol conversion, Kiro event
+stream handling, credential refresh, control-plane calls and prompt-cache
+metering, pinned to upstream revision c37fe5afe7ee3adba836abfcee9a97aba5ea54f9.
+
+The upstream work is licensed under the MIT License. See LICENSE in this
+directory.

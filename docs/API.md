@@ -18,6 +18,7 @@
   - [账号管理](#账号管理) — 添加 RT / AT 账号、批量导入、导出、迁移
   - [降智检测](#降智检测) — 固定账号检测、自动处置和逐次历史
   - [Claude OAuth 与原生 Messages](#claude-oauth-与原生-messages) — 导入、采样、模型与指纹配置
+  - [Kiro 账号与渠道设置](#kiro-账号与渠道设置) — 导入导出、Social / 设备码登录、额度与模型同步
   - [用量统计](#用量统计)
   - [API Key 管理](#api-key-管理)
   - [系统设置](#系统设置)
@@ -1758,6 +1759,52 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
   "trend": [{ "timestamp": "2024-01-01T00:00:00Z", "added": 5, "deleted": 0 }]
 }
 ```
+
+### Kiro 账号与渠道设置
+
+以下接口都挂在 `/api/admin` 鉴权中间件下，需要管理密钥。完整说明见 [KIRO.md](KIRO.md)。
+
+#### POST /api/admin/accounts/kiro/import
+
+自动识别 kiro.rs `credentials.json`、Kiro IDE `kiro-auth-token.json` 与 Kiro Account Manager 导出三种格式，逐个换票、补全 profile ARN、额度与模型目录后入库；单项失败不影响其他项。
+
+```json
+{ "content": "<JSON 字符串或对象>", "name": "可选", "proxy_url": "可选", "use_proxy_pool": false }
+```
+
+```json
+{ "imported": 1, "failed": 0, "results": [{ "index": 0, "id": 12, "email": "user@example.com" }] }
+```
+
+#### GET /api/admin/accounts/kiro/export
+
+`format=kam`（默认，Kiro Account Manager 格式）或 `format=kiro-rs`（kiro.rs `credentials.json` 数组）；`ids=1,2` 可选。响应含明文令牌，带 `Content-Disposition: attachment` 与 `Cache-Control: no-store, max-age=0`，可原样导回。
+
+#### POST /api/admin/accounts/kiro/social/auth-url 与 /social/exchange
+
+`auth-url` 返回 `{ "auth_url", "session", "redirect_uri" }`。用户在浏览器完成 Google / GitHub 登录后，把地址栏里的 localhost 回调 URL 提交给 `exchange`：
+
+```json
+{ "session": "<auth-url 返回的 session>", "callback_url": "http://127.0.0.1:3128/oauth/callback?code=...&state=..." }
+```
+
+#### POST /api/admin/accounts/kiro/device/start 与 /device/poll
+
+`start` 默认走 AWS Builder ID；Enterprise 传 `{ "start_url": "https://d-xxxx.awsapps.com/start", "region": "us-east-1" }`。返回 `{ "session", "user_code", "verification_uri_complete", "interval", "expires_at" }`。`poll` 传 `{ "session" }`，未授权时返回 `{ "status": "pending" }`，完成后返回 `{ "status": "completed", "id", "email" }`。
+
+#### POST /api/admin/accounts/:id/kiro/sync 与 /accounts/kiro/sync
+
+同步单个或全部启用的 Kiro 账号的额度快照与模型目录。单号返回 `{ "usage": {...}, "models": [...] }`，全量返回 `{ "refreshed", "failed" }`。后台每 30 分钟自动执行一次全量同步。
+
+#### GET / PUT /api/admin/settings/kiro
+
+```json
+{ "api_domain": "amazonaws", "cache_simulation": false }
+```
+
+`api_domain` 只能是 `amazonaws`（`q.{region}.amazonaws.com`）或 `kiro`（`*.kiro.dev`）；`cache_simulation` 开启后，上游未给精确用量时按 `cache_control` 断点估算 cache 读写拆分。PUT 只更新出现的字段，保存后立即生效。
+
+Kiro 渠道的连通性测试默认模型、测活内容与并发在 `PUT /api/admin/settings/channel-tests` 的 `kiro` 字段里配置；账号列表、启停、删除、测连、质量测试、降智检测、分组与代理沿用通用账号接口，渠道参数为 `channel=kiro`。
 
 ### 用量统计
 
