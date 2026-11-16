@@ -68,6 +68,12 @@ Ported from kiro.rs:
 - Repetition guard, context-window-full and content-filter stop reasons.
 - Upstream error mapping: invalid bearer → `401` (refresh and retry), monthly request limit → cooldown until the next reset, account throttling → 30-minute cooldown, suspended account → error state, generic `429` → 1-minute cooldown.
 
+When structured output is requested with only `web_search`, the gateway uses the model/search loop to generate the answer before extracting JSON. The plain-search shortcut remains available when no schema is requested. Schema extraction prefers candidates satisfying supported bounds and falls back to kiro.rs's basic rules if none do; it is not a guarantee of strict schema compliance. Numeric bounds and nested equality preserve decimal precision.
+
+Image decoding uses a conservative budget for pixels and decoder working buffers, including transparent 16-bit PNG and progressive JPEG. Images beyond the budget are forwarded without local decoding. Image input is advertised only when every visible Kiro account serving that model declares support; accounts without synchronized capability data are treated conservatively.
+
+During rolling upgrades from older Kiro builds, drain their refresh workers before enabling refresh on the new deployment. Sharing the refresh-token lease prevents concurrent exchange of the same token, but old binaries do not retry under a new lease after observing a rotated token.
+
 Not ported (kiro.rs-specific): its own account pool and load balancing, self-update, Feishu alerts, the `/cc/v1` path, the Claude Code tool-compatibility mode, the overage switch and credit columns in its usage log.
 
 ## Usage accounting

@@ -243,9 +243,15 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 
 		case account.IsKiro():
 			for _, id := range KiroAccountModelIDs(account) {
+				key := strings.ToLower(strings.TrimSpace(id))
+				previous := records[key]
+				imageInput := account.KiroAcceptsImage(id)
+				if previous != nil && previous.backing&modelBackingKiro != 0 {
+					imageInput = imageInput && previous.imageInput
+				}
 				addScopedModel(records, id, modelBackingKiro, time.Time{}, false)
-				if record := records[strings.ToLower(strings.TrimSpace(id))]; record != nil && account.KiroAcceptsImage(id) {
-					record.imageInput = true
+				if record := records[key]; record != nil {
+					record.imageInput = imageInput
 				}
 				addTarget(id)
 			}
@@ -314,6 +320,9 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 	// request path applies the same source-name policy before mapping.
 	// Daybreak 另外校验目标程序模型，避免映射绕过该 Key 的权限名单。
 	for key, record := range records {
+		if record.backing != modelBackingKiro {
+			record.imageInput = false
+		}
 		if checkAPIKeyModel(record.id, row.Limits) != "" || h.daybreakMappedModelDenied(record.id, row.Limits) {
 			delete(records, key)
 		}

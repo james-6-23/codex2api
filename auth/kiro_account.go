@@ -428,7 +428,12 @@ func (s *Store) ApplyKiroAccountRow(row *database.AccountRow) bool {
 	if !acc.isKiroLocked() {
 		return false
 	}
-	acc.applyKiroRowLocked(row)
+	metadata := KiroCredentialFromRow(row)
+	acc.Kiro.UsageResetAt = metadata.UsageResetAt
+	acc.Kiro.ImageModels = metadata.ImageModels
+	if plan := strings.TrimSpace(row.GetCredential("plan_type")); plan != "" {
+		acc.PlanType = plan
+	}
 	acc.Models = normalizeModelList(row.GetCredentialStringSlice("models"))
 	return true
 }

@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"hash/crc32"
 	"image"
-	"image/color"
 	"image/png"
 	"strings"
 	"testing"
@@ -159,15 +158,14 @@ func TestKiroCLIBodyOnlyRewritesMessageOrigin(t *testing.T) {
 }
 
 func TestKiroImageDecodeBudgetRejectsHugeImages(t *testing.T) {
-	if !kiroImageDecodeWithinBudget(1568, 1568, color.RGBAModel) || !kiroImageDecodeWithinBudget(8000, 8000, color.NRGBAModel) {
+	if !kiroImageDecodeWithinBudget(1568, 1568) || !kiroImageDecodeWithinBudget(3840, 2160) {
 		t.Fatal("ordinary images must be decodable")
 	}
-	if kiroImageDecodeWithinBudget(30000, 30000, color.RGBAModel) || kiroImageDecodeWithinBudget(1<<31-1, 2, color.GrayModel) || kiroImageDecodeWithinBudget(0, 10, color.RGBAModel) {
+	if kiroImageDecodeWithinBudget(30000, 30000) || kiroImageDecodeWithinBudget(1<<31-1, 2) || kiroImageDecodeWithinBudget(0, 10) {
 		t.Fatal("images above the 512 MiB decode budget must not be decoded")
 	}
-	// 16 位 PNG 解码成 NRGBA64，每像素 8 字节：10000×10000 需要 800 MB。
-	if kiroImageDecodeWithinBudget(10000, 10000, color.NRGBA64Model) || !kiroImageDecodeWithinBudget(10000, 10000, color.RGBAModel) {
-		t.Fatal("the decode budget must follow the decoded color model")
+	if kiroImageDecodeWithinBudget(10000, 10000) || kiroImageDecodeWithinBudget(20000, 20000) || kiroImageDecodeWithinBudget(1, 1<<30) {
+		t.Fatal("the decode budget must include intermediate buffers, regardless of color model")
 	}
 	var huge bytes.Buffer
 	if err := png.Encode(&huge, image.NewGray(image.Rect(0, 0, 1, 1))); err != nil {

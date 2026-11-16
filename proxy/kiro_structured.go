@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"encoding/json"
-	"math"
 	"math/big"
 	"strconv"
 	"strings"
@@ -29,7 +28,7 @@ func kiroInjectStructuredInstruction(req *kiroInboundRequest) map[string]any {
 		Type   string         `json:"type"`
 		Schema map[string]any `json:"schema"`
 	}
-	if json.Unmarshal(req.OutputConfig.Format, &format) != nil || format.Type != "json_schema" || format.Schema == nil {
+	if kiroDecodeJSON(req.OutputConfig.Format, &format) != nil || format.Type != "json_schema" || format.Schema == nil {
 		return nil
 	}
 	pretty, _ := json.MarshalIndent(format.Schema, "", "  ")
@@ -188,31 +187,33 @@ func (v *kiroSchemaValidator) object(obj map[string]any, value any, depth int) b
 func kiroSchemaConstraints(obj map[string]any, value any) bool {
 	switch typed := value.(type) {
 	case json.Number:
-		n, err := typed.Float64()
-		if err != nil {
-			return true
+		number, valid := kiroExactNumber(typed)
+		if !valid {
+			return false
 		}
 		// draft-04 的 exclusiveMinimum/exclusiveMaximum 是修饰 minimum/maximum 的布尔值。
 		exclusiveMin, _ := obj["exclusiveMinimum"].(bool)
 		exclusiveMax, _ := obj["exclusiveMaximum"].(bool)
-		if limit, ok := kiroSchemaNumber(obj, "minimum"); ok && (n < limit || exclusiveMin && n == limit) {
-			return false
-		}
-		if limit, ok := kiroSchemaNumber(obj, "maximum"); ok && (n > limit || exclusiveMax && n == limit) {
-			return false
-		}
-		if limit, ok := kiroSchemaNumber(obj, "exclusiveMinimum"); ok && n <= limit {
-			return false
-		}
-		if limit, ok := kiroSchemaNumber(obj, "exclusiveMaximum"); ok && n >= limit {
-			return false
+		for _, bound := range []struct {
+			key                string
+			minimum, exclusive bool
+		}{{"minimum", true, exclusiveMin}, {"maximum", false, exclusiveMax}, {"exclusiveMinimum", true, true}, {"exclusiveMaximum", false, true}} {
+			if raw, present := obj[bound.key].(json.Number); present {
+				limit, ok := kiroExactNumber(raw)
+				if !ok {
+					return false
+				}
+				comparison := number.Cmp(limit)
+				if bound.minimum && comparison < 0 || !bound.minimum && comparison > 0 || bound.exclusive && comparison == 0 {
+					return false
+				}
+			}
 		}
 		// multipleOf 要求商为整数，用精确有理数运算，浮点容差会把 1e-10 当成 1 的倍数。
 		if divisor, ok := obj["multipleOf"].(json.Number); ok {
-			if value, vok := kiroExactNumber(typed); vok {
-				if d, dok := kiroExactNumber(divisor); dok && d.Sign() > 0 && !new(big.Rat).Quo(value, d).IsInt() {
-					return false
-				}
+			denominator, valid := kiroExactNumber(divisor)
+			if !valid || denominator.Sign() <= 0 || !new(big.Rat).Quo(number, denominator).IsInt() {
+				return false
 			}
 		}
 	case string:
@@ -236,22 +237,16 @@ func kiroSchemaConstraints(obj map[string]any, value any) bool {
 }
 
 func kiroSchemaWithin(obj map[string]any, minKey, maxKey string, count int) bool {
-	if limit, ok := kiroSchemaNumber(obj, minKey); ok && float64(count) < limit {
-		return false
-	}
-	if limit, ok := kiroSchemaNumber(obj, maxKey); ok && float64(count) > limit {
-		return false
+	actual := new(big.Rat).SetInt64(int64(count))
+	for _, key := range []string{minKey, maxKey} {
+		if raw, present := obj[key].(json.Number); present {
+			limit, valid := kiroExactNumber(raw)
+			if !valid || key == minKey && actual.Cmp(limit) < 0 || key == maxKey && actual.Cmp(limit) > 0 {
+				return false
+			}
+		}
 	}
 	return true
-}
-
-func kiroSchemaNumber(obj map[string]any, key string) (float64, bool) {
-	number, ok := obj[key].(json.Number)
-	if !ok {
-		return 0, false
-	}
-	value, err := number.Float64()
-	return value, err == nil
 }
 
 func kiroJSONPointer(root any, pointer string) (any, bool) {
@@ -296,11 +291,8 @@ func kiroTypeMatches(name string, value any) bool {
 		if !ok {
 			return false
 		}
-		if _, err := number.Int64(); err == nil {
-			return true
-		}
-		f, err := number.Float64()
-		return err == nil && !math.IsInf(f, 0) && f == math.Trunc(f)
+		exact, valid := kiroExactNumber(number)
+		return valid && exact.IsInt()
 	}
 	return false
 }
@@ -316,15 +308,13 @@ func kiroCanonicalJSON(value any) string {
 	normalize = func(value any) any {
 		switch typed := value.(type) {
 		case json.Number:
-			if f, err := typed.Float64(); err == nil {
-				return kiroCanonicalFloat(f)
-			}
+			return kiroCanonicalNumber(typed)
 		case float64:
-			return kiroCanonicalFloat(typed)
+			return kiroCanonicalNumber(json.Number(strconv.FormatFloat(typed, 'g', -1, 64)))
 		case int:
-			return kiroCanonicalFloat(float64(typed))
+			return kiroCanonicalNumber(json.Number(strconv.Itoa(typed)))
 		case int64:
-			return kiroCanonicalFloat(float64(typed))
+			return kiroCanonicalNumber(json.Number(strconv.FormatInt(typed, 10)))
 		case []any:
 			out := make([]any, len(typed))
 			for i, item := range typed {
@@ -343,16 +333,39 @@ func kiroCanonicalJSON(value any) string {
 	return kiroMarshalString(normalize(value))
 }
 
-func kiroCanonicalFloat(f float64) json.Number {
-	if f == 0 {
-		f = 0 // -0 与 0 相等
+// Keep a decimal coefficient and exponent so even extreme exponents do not expand into huge buffers.
+func kiroCanonicalNumber(number json.Number) json.Number {
+	mantissa, exponentText, hasExponent := strings.Cut(strings.ToLower(number.String()), "e")
+	exponent := new(big.Int)
+	if hasExponent {
+		if _, ok := exponent.SetString(exponentText, 10); !ok {
+			return number
+		}
 	}
-	return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+	negative := strings.HasPrefix(mantissa, "-")
+	mantissa = strings.TrimPrefix(mantissa, "-")
+	if point := strings.IndexByte(mantissa, '.'); point >= 0 {
+		exponent.Sub(exponent, big.NewInt(int64(len(mantissa)-point-1)))
+		mantissa = mantissa[:point] + mantissa[point+1:]
+	}
+	mantissa = strings.TrimLeft(mantissa, "0")
+	if mantissa == "" {
+		return json.Number("0")
+	}
+	coefficient := strings.TrimRight(mantissa, "0")
+	exponent.Add(exponent, big.NewInt(int64(len(mantissa)-len(coefficient))))
+	if negative {
+		coefficient = "-" + coefficient
+	}
+	return json.Number(coefficient + "e" + exponent.String())
 }
 
 // kiroExactNumber 把 JSON 数值解析成有理数；指数过大时放弃，避免模型输出 1e100000000 撑爆内存。
 func kiroExactNumber(number json.Number) (*big.Rat, bool) {
 	text := number.String()
+	if len(text) > 4096 {
+		return nil, false
+	}
 	if i := strings.IndexAny(text, "eE"); i >= 0 {
 		if exp, err := strconv.Atoi(text[i+1:]); err != nil || exp > 400 || exp < -400 {
 			return nil, false

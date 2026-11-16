@@ -61,7 +61,7 @@ func kiroShrinkImage(format, data string) (string, string) {
 		}
 	}
 	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
-	if err != nil || !kiroImageDecodeWithinBudget(config.Width, config.Height, config.ColorModel) {
+	if err != nil || !kiroImageDecodeWithinBudget(config.Width, config.Height) {
 		return kiroDetectImageFormat(format, data), data
 	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
@@ -126,26 +126,15 @@ func kiroDetectImageFormat(declared, data string) string {
 	return declared
 }
 
-// kiroImageDecodeWithinBudget 按解码后颜色模型的每像素字节数估算像素缓冲，并防止宽高相乘溢出。
-func kiroImageDecodeWithinBudget(width, height int, model color.Model) bool {
-	if width <= 0 || height <= 0 {
+// Budget padded pixels conservatively for tRNS expansion, progressive JPEG coefficients, scan buffers and resize copies.
+func kiroImageDecodeWithinBudget(width, height int) bool {
+	const bytesPerPixel = 64
+	const overhead = 1 << 20
+	const maxPixels = (kiroImageMaxDecodeBytes - overhead) / bytesPerPixel
+	if width <= 0 || height <= 0 || width > maxPixels || height > maxPixels {
 		return false
 	}
-	return width <= kiroImageMaxDecodeBytes/kiroImageBytesPerPixel(model)/height
-}
-
-// kiroImageBytesPerPixel 对应 image 包各解码结果的像素存储；未知模型按最宽的 8 字节保守计算。
-func kiroImageBytesPerPixel(model color.Model) int {
-	switch model {
-	case color.GrayModel, color.AlphaModel:
-		return 1
-	case color.Gray16Model, color.Alpha16Model:
-		return 2
-	case color.RGBAModel, color.NRGBAModel, color.YCbCrModel, color.NYCbCrAModel, color.CMYKModel:
-		return 4
-	}
-	if _, paletted := model.(color.Palette); paletted {
-		return 1
-	}
-	return 8
+	paddedWidth := (width + 15) / 16 * 16
+	paddedHeight := (height + 15) / 16 * 16
+	return paddedWidth <= maxPixels/paddedHeight
 }

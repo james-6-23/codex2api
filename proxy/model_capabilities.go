@@ -408,7 +408,7 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 			// of this model (relay-style upstreams never learn; new or rotated
 			// credentials have not been seen yet) is unknown rather than a
 			// downgrade. Request-side gates still handle such accounts per call.
-			if upstream && snapshotsLoaded && !observed {
+			if upstream && snapshotsLoaded && !observed && !account.IsKiro() {
 				continue
 			}
 			validated := make(map[string]json.RawMessage)
@@ -429,6 +429,7 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 			// Kiro 从不产生能力快照：上游原生支持一次发出多个工具调用，图片输入按模型目录声明。
 			if account.IsKiro() {
 				validated["supports_parallel_tool_calls"] = json.RawMessage("true")
+				validated["input_modalities"] = json.RawMessage(`["text"]`)
 				if account.KiroAcceptsImage(target) {
 					validated["input_modalities"] = json.RawMessage(`["text","image"]`)
 				}
