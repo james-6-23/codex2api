@@ -61,7 +61,7 @@ const (
 	antigravityZeroWidthSpace        = "\u200B"
 )
 
-var antigravitySensitiveMarkerPattern = regexp.MustCompile(`(?i)(?:hermes agent|nous research|claude agent sdk|you are codex, an agent based on gpt-5|openmausbot|openmaus|mausbot|maus-bot|chief of staff|my cloud|learned by)`)
+var antigravitySensitiveMarkerPattern = regexp.MustCompile(`(?i)(?:hermes agent|nous research|claude agent sdk|you are codex, an agent based on gpt-5|openmausbot|openmaus|mausbot|maus-bot|opencode|chief of staff|my cloud|learned by)`)
 
 var antigravityDefaultSensitivePhrases = []string{
 	"Hermes Agent",
@@ -71,6 +71,7 @@ var antigravityDefaultSensitivePhrases = []string{
 	"learned by MausBot",
 	"OpenMausBot",
 	"OpenMaus",
+	"OpenCode",
 	"MausBot Cloud",
 	"Maus-Bot",
 	"MausBot",

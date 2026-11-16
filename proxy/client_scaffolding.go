@@ -115,7 +115,7 @@ const clientScaffoldingVolatileContextPrefix = "context from openmausbot updated
 
 // clientScaffoldingMarkerPattern is the cheap pre-check that keeps ordinary
 // prompts off the regex and code-scan path.
-var clientScaffoldingMarkerPattern = regexp.MustCompile(`(?i)(?:openmausbot|mausbot|maus-bot|chief of staff|learned by |\[from |<system-reminder>|co-authored-by:|generated with \[claude code\]|you are powered by the model|you are claude code|you are codex|x-anthropic-billing-header:|custom-billing-id:|cc_version=|cc_entrypoint=|cch=)`)
+var clientScaffoldingMarkerPattern = regexp.MustCompile(`(?i)(?:openmausbot|mausbot|maus-bot|chief of staff|opencode|learned by |\[from |<system-reminder>|co-authored-by:|generated with \[claude code\]|you are powered by the model|you are claude code|you are codex|x-anthropic-billing-header:|custom-billing-id:|cc_version=|cc_entrypoint=|cch=)`)
 
 // clientScaffoldingProductMarkerPattern is the narrower pre-check for tool
 // results, which only need product notices and reminder blocks.
@@ -420,6 +420,7 @@ var clientScaffoldingBrandPhrases = []string{
 	"learned by MausBot",
 	"OpenMausBot",
 	"OpenMaus",
+	"OpenCode",
 	"MausBot Cloud",
 	"Maus-Bot",
 	"MausBot",
@@ -501,6 +502,7 @@ const officialAntigravityIdentity = "You are Antigravity, a large language model
 // preamble shapes only. They stop at the first sentence boundary so ordinary
 // instructions that merely mention a client name are left intact.
 var clientScaffoldingThirdPartyIdentityPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)^You are opencode, [^.\n]*?\.\s*`),
 	regexp.MustCompile(`(?i)^You are [^.\n]*?, a personal bot in (?:OpenMausBot|MausBot|Maus-Bot)\.\s*`),
 	regexp.MustCompile(`(?i)^You are [^.\n]*?, a bot in the room "[^"\n]*" in (?:OpenMausBot|MausBot|Maus-Bot)\.\s*`),
 	regexp.MustCompile(`(?i)^You are [^.\n]*?, an AI agent that [^.\n]*?(?:OpenMausBot|MausBot|Maus-Bot)[^.\n]*?\.\s*`),

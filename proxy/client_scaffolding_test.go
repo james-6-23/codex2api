@@ -849,3 +849,45 @@ func TestNormalizeClientScaffoldingRejectsBacktickInInfoString(t *testing.T) {
 		t.Fatalf("backtick info string was treated as a fence: %q", got)
 	}
 }
+
+func TestNormalizeAntigravitySystemInstructionCoversOpenCodeVariants(t *testing.T) {
+	cases := map[string]string{
+		"cli":       "You are opencode, an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you.",
+		"agent":     "You are opencode, an agent - please keep going until the user's query is completely resolved, before ending your turn and yielding back to the user.",
+		"best":      "You are OpenCode, the best coding agent on the planet. You are an interactive CLI tool.",
+		"workspace": "You are OpenCode, You and the user share the same workspace and collaborate to achieve the user's goals. You are a deeply pragmatic engineer.",
+		"computer":  "You are OpenCode, an interactive general AI agent running on a user's computer. Help the user.",
+	}
+	for name, in := range cases {
+		t.Run(name, func(t *testing.T) {
+			got := normalizeAntigravitySystemInstruction(in)
+			if !strings.HasPrefix(got, officialAntigravityIdentity) {
+				t.Fatalf("OpenCode identity not converted: %q", got)
+			}
+			for _, leak := range []string{"opencode", "OpenCode"} {
+				if strings.Contains(got, leak) {
+					t.Fatalf("%s leaked: %q", leak, got)
+				}
+			}
+		})
+	}
+}
+
+func TestNormalizeAntigravitySystemInstructionLeavesOpenCodeAssignmentsAlone(t *testing.T) {
+	in := "You are reviewing opencode documentation. Report inaccuracies."
+	if got := normalizeAntigravitySystemInstruction(in); got != in {
+		t.Fatalf("OpenCode assignment was rewritten: %q -> %q", in, got)
+	}
+}
+
+func TestObfuscateSystemInstructionCoversOpenCode(t *testing.T) {
+	got := antigravityObfuscateSystemInstruction("OpenCode tool and opencode.ai docs")
+	for _, leak := range []string{"OpenCode", "opencode"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("%s was not obfuscated: %q", leak, got)
+		}
+	}
+	if !strings.Contains(got, "\u200B") {
+		t.Fatalf("expected zero-width obfuscation: %q", got)
+	}
+}
