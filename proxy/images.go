@@ -2886,6 +2886,13 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 			}
 			out, readErr = buildImagesAPIResponse(ctx, results, createdAt, usageRaw, firstMeta, responseFormat, urlFor)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
+			// response.created 已自报 model 而 response.completed 未带时，
+			// extractImagesFromResponsesCompleted 返回的结果集不携带该观察，
+			// 会把模型信息丢在 firstMeta 里；这里把生命周期累积的观察合入
+			// 用量日志，保证成功日志仍能记录 upstream_response_model。
+			if imageLogInfo.ResponseModel == "" {
+				imageLogInfo.ResponseModel = strings.TrimSpace(firstMeta.ResponseModel)
+			}
 			return false
 		case "error":
 			readErr = newImageSSEFailureError("error", data)

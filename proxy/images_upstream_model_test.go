@@ -1,6 +1,8 @@
 package proxy
 
 import (
+	"context"
+	"strings"
 	"testing"
 
 	"github.com/codex2api/database"
@@ -100,5 +102,34 @@ func TestMergeImageMetaAndUsageLogInfoCarryResponseModel(t *testing.T) {
 	merged := mergeImageUsageLogInfo(imageUsageLogInfo{Count: 1}, info)
 	if merged.ResponseModel != "gpt-image-2.6-sunburst" {
 		t.Fatalf("mergeImageUsageLogInfo 丢失 ResponseModel: %+v", merged)
+	}
+}
+
+// 回归：response.created 自报了 model 而 response.completed 未带时，
+// 非流式路径不能把生命周期累积的观察丢在 firstMeta 里——imageLogInfo
+// 必须携带该观察，成功用量日志才能记录 upstream_response_model 并回填
+// effective_model。
+func TestCollectImagesResponseKeepsCreatedModelObservationWithoutCompletedModel(t *testing.T) {
+	upstream := `data: {"type":"response.created","response":{"model":"gpt-image-2.6-sunburst","tools":[{"type":"image_generation","model":"gpt-image-2"}],"created_at":1700000000}}` + "\n\n" +
+		`data: {"type":"response.completed","response":{"created_at":1700000000,"tools":[{"type":"image_generation","model":"gpt-image-2","output_format":"png","size":"1024x1024"}],"output":[{"type":"image_generation_call","result":"` + tinyPNGBase64 + `","output_format":"png"}]}}` + "\n\n"
+
+	_, _, imageCount, imageLogInfo, err := collectImagesResponse(context.Background(), strings.NewReader(upstream), "b64_json", "gpt-image-2", nil, imageUpscalePlan{})
+	if err != nil {
+		t.Fatalf("collectImagesResponse returned error: %v", err)
+	}
+	if imageCount != 1 {
+		t.Fatalf("imageCount = %d, want 1", imageCount)
+	}
+	if imageLogInfo.ResponseModel != "gpt-image-2.6-sunburst" {
+		t.Fatalf("imageLogInfo.ResponseModel = %q, want gpt-image-2.6-sunburst（created 自报不丢）", imageLogInfo.ResponseModel)
+	}
+
+	logInput := &database.UsageLogInput{Model: "gpt-image-2"}
+	applyImageUpstreamModelObservation(logInput, imageLogInfo, "gpt-image-2", "gpt-image-2")
+	if logInput.UpstreamResponseModel != "gpt-image-2.6-sunburst" {
+		t.Fatalf("upstream_response_model = %q, want gpt-image-2.6-sunburst", logInput.UpstreamResponseModel)
+	}
+	if logInput.EffectiveModel != "gpt-image-2.6-sunburst" {
+		t.Fatalf("effective_model = %q, want gpt-image-2.6-sunburst", logInput.EffectiveModel)
 	}
 }
