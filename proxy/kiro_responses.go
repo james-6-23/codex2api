@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
+	"github.com/tidwall/sjson"
 )
 
 // Kiro 专用 Responses 桥（ADR-0002），移植自 kiro.rs src/anthropic/responses.rs：
@@ -71,6 +73,22 @@ type kiroResponsesTranslation struct {
 	webSearch bool
 }
 
+const kiroSingleToolCallInstruction = "Call at most one tool in each response. Wait for its result before calling another tool."
+
+// kiroRestoreChatControls 把 Codex 形态的 Chat 翻译丢掉、而 Kiro 桥要读的控制项从原始 Chat 体补回。
+func kiroRestoreChatControls(body, chat []byte) []byte {
+	root := gjson.ParseBytes(chat)
+	// max_completion_tokens 是新写法，排在后面覆盖 max_tokens。
+	for _, field := range [][2]string{{"parallel_tool_calls", "parallel_tool_calls"}, {"tool_choice", "tool_choice"}, {"max_tokens", "max_output_tokens"}, {"max_completion_tokens", "max_output_tokens"}} {
+		if value := root.Get(field[0]); value.Exists() && value.Type != gjson.Null {
+			if next, err := sjson.SetRawBytes(body, field[1], []byte(value.Raw)); err == nil {
+				body = next
+			}
+		}
+	}
+	return body
+}
+
 // kiroResponsesToMessages 把 Responses 请求翻成 Anthropic Messages 请求体。
 func kiroResponsesToMessages(body []byte, headers http.Header) (*kiroResponsesTranslation, error) {
 	root := gjson.ParseBytes(body)
@@ -128,7 +146,7 @@ func kiroResponsesToMessages(body []byte, headers http.Header) (*kiroResponsesTr
 				arguments = "{}"
 			}
 			var parsed any
-			if err := json.Unmarshal([]byte(arguments), &parsed); err != nil {
+			if err := kiroDecodeJSON([]byte(arguments), &parsed); err != nil {
 				conversionErr = fmt.Errorf("input function_call %s has invalid JSON arguments: %w", callID, err)
 				return false
 			}
@@ -196,6 +214,10 @@ func kiroResponsesToMessages(body []byte, headers http.Header) (*kiroResponsesTr
 	}
 	if !choiceNone && len(tools) > 0 {
 		request["tools"] = tools
+		// Kiro 上游没有关闭并行工具调用的字段：先提示模型，流里再兜底只保留第一个调用。
+		if !out.config.parallelToolCalls {
+			system = append(system, kiroSingleToolCallInstruction)
+		}
 	}
 	if len(system) > 0 {
 		blocks := make([]any, 0, len(system))
@@ -204,9 +226,22 @@ func kiroResponsesToMessages(body []byte, headers http.Header) (*kiroResponsesTr
 		}
 		request["system"] = blocks
 	}
+	outputConfig := map[string]any{}
 	if effort := strings.TrimSpace(root.Get("reasoning.effort").String()); effort != "" {
-		request["output_config"] = map[string]any{"effort": effort}
+		outputConfig["effort"] = effort
 		request["thinking"] = map[string]any{"type": "enabled", "budget_tokens": kiroThinkingBudgetDefault}
+	}
+	// text.format 接到 Messages 侧的结构化输出模拟（output_config.format）。
+	switch format := root.Get("text.format"); format.Get("type").String() {
+	case "json_schema":
+		if schema := format.Get("schema"); schema.IsObject() {
+			outputConfig["format"] = map[string]any{"type": "json_schema", "schema": json.RawMessage(schema.Raw)}
+		}
+	case "json_object":
+		outputConfig["format"] = map[string]any{"type": "json_schema", "schema": map[string]any{"type": "object"}}
+	}
+	if len(outputConfig) > 0 {
+		request["output_config"] = outputConfig
 	}
 	if sessionID := kiroResolveSessionID(root.Get("prompt_cache_key").String(), headers); sessionID != "" {
 		request["metadata"] = map[string]any{"user_id": "session_" + sessionID}
@@ -317,13 +352,14 @@ func kiroConvertResponsesToolChoice(choice gjson.Result) (map[string]any, error)
 		return map[string]any{"type": "any"}, nil
 	case "none":
 		return map[string]any{"type": "none"}, nil
-	case "function":
+	case "function", "custom":
+		// custom 工具在桥里按扁平名声明成普通工具，响应时再还原成 custom_tool_call。
 		if !choice.IsObject() {
 			break
 		}
-		name := firstNonEmptyString(choice.Get("name").String(), choice.Get("function.name").String())
+		name := firstNonEmptyString(choice.Get("name").String(), choice.Get("function.name").String(), choice.Get("custom.name").String())
 		if name == "" {
-			return nil, fmt.Errorf("tool_choice function is missing name")
+			return nil, fmt.Errorf("tool_choice %s is missing name", kind)
 		}
 		return map[string]any{"type": "tool", "name": kiroFlatToolName(choice.Get("namespace").String(), name)}, nil
 	}
@@ -350,6 +386,9 @@ func kiroResponsesContentBlocks(content gjson.Result) []any {
 				if mediaType, data, ok := strings.Cut(rest, ";base64,"); ok {
 					out = append(out, map[string]any{"type": "image", "source": map[string]any{"type": "base64", "media_type": mediaType, "data": data}})
 				}
+			} else if url != "" {
+				// 与 Messages 路径一致：远程图片交给转换器换成占位文字，让模型知道少了一张图。
+				out = append(out, map[string]any{"type": "image", "source": map[string]any{"type": "url", "url": url}})
 			}
 		}
 		return true
@@ -436,6 +475,7 @@ type kiroResponsesStream struct {
 	sawMessageStop bool
 	terminal       bool
 	failure        map[string]any
+	toolCalls      int
 }
 
 func newKiroResponsesStream(translation *kiroResponsesTranslation) *kiroResponsesStream {
@@ -523,6 +563,11 @@ func (s *kiroResponsesStream) blockStart(index int, raw any) [][]byte {
 	case "thinking":
 		state.kind, state.itemID = "reasoning", kiroNewItemID("rs")
 	case "tool_use":
+		// parallel_tool_calls=false：只交出第一个工具调用，其余丢弃，模型会在下一轮重新发起。
+		if !s.config.parallelToolCalls && s.toolCalls > 0 {
+			break
+		}
+		s.toolCalls++
 		state.kind = "tool"
 		state.callID, _ = block["id"].(string)
 		state.query, _ = block["name"].(string)
@@ -576,7 +621,9 @@ func (s *kiroResponsesStream) blockDelta(index int, raw any) [][]byte {
 		var out [][]byte
 		if block.outputIndex < 0 {
 			block.outputIndex = s.allocateOutput()
-			out = append(out, s.emit("response.output_item.added", map[string]any{"output_index": block.outputIndex, "item": map[string]any{"type": "reasoning", "id": block.itemID, "summary": []any{}}}))
+			out = append(out, s.emit("response.output_item.added", map[string]any{"output_index": block.outputIndex, "item": map[string]any{"type": "reasoning", "id": block.itemID, "summary": []any{}}}),
+				// 官方 Responses 累加器按 summary_index 写入，必须先创建这一段摘要。
+				s.emit("response.reasoning_summary_part.added", map[string]any{"item_id": block.itemID, "output_index": block.outputIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": ""}}))
 		}
 		block.text.WriteString(text)
 		return append(out, s.emit("response.reasoning_summary_text.delta", map[string]any{"item_id": block.itemID, "output_index": block.outputIndex, "summary_index": 0, "delta": text}))
@@ -616,6 +663,7 @@ func (s *kiroResponsesStream) blockStop(index int) [][]byte {
 		s.output = append(s.output, item)
 		return [][]byte{
 			s.emit("response.reasoning_summary_text.done", map[string]any{"item_id": block.itemID, "output_index": block.outputIndex, "summary_index": 0, "text": text}),
+			s.emit("response.reasoning_summary_part.done", map[string]any{"item_id": block.itemID, "output_index": block.outputIndex, "summary_index": 0, "part": map[string]any{"type": "summary_text", "text": text}}),
 			s.emit("response.output_item.done", map[string]any{"output_index": block.outputIndex, "item": item}),
 		}
 	case "tool":
@@ -771,8 +819,11 @@ func ExecuteKiroResponsesRequest(ctx context.Context, account *auth.Account, bod
 	if err != nil {
 		return nil, ErrBadRequest(err.Error())
 	}
+	// 结构化输出要求先注入，托管 web_search 路径也要生效（kiro.rs 在此只告警、原样返回）；
+	// 搜索词只取用户消息，注入的 system 不影响搜索请求。
+	schema := kiroInjectStructuredInstruction(inbound)
 	if translation.webSearch {
-		return executeKiroWebSearchResponses(ctx, account, inbound, translation, proxyOverride)
+		return executeKiroWebSearchResponses(ctx, account, inbound, translation, proxyOverride, schema)
 	}
 	conversion, err := convertKiroRequest(inbound, kiroPurposeGenerate)
 	if err != nil {
@@ -784,7 +835,38 @@ func ExecuteKiroResponsesRequest(ctx context.Context, account *auth.Account, bod
 	}
 	stream := newKiroStreamContext(inbound.Model, kiroEstimateInputTokens(inbound), inbound.Thinking.enabled(), conversion)
 	stream.cache = kiroComputeCacheUsage(ctx, inbound)
+	if schema != nil {
+		return kiroServeStructuredResponses(upstream, stream, translation, schema), nil
+	}
 	return kiroServeResponses(upstream, stream, translation), nil
+}
+
+// kiroServeStructuredResponses 与 Messages 路径一致：结构化输出要等全文到齐才能抽出合规 JSON，
+// 流式请求也整条缓冲后再回放成 Responses 事件。
+func kiroServeStructuredResponses(upstream *http.Response, stream *kiroStreamContext, translation *kiroResponsesTranslation, schema map[string]any) *http.Response {
+	var events []kiroSSEEvent
+	kiroDrainUpstream(upstream, stream, func(event kiroSSEEvent) error { events = append(events, event); return nil })
+	responses := newKiroResponsesStream(translation)
+	var body bytes.Buffer
+	if translation.stream {
+		for _, chunk := range responses.initialEvents() {
+			body.Write(chunk)
+		}
+	}
+	for _, event := range kiroRewriteStructuredEvents(events, schema) {
+		for _, chunk := range responses.handle(event) {
+			body.Write(chunk)
+		}
+	}
+	if !translation.stream {
+		return kiroResponsesJSON(responses)
+	}
+	if !responses.terminal {
+		for _, chunk := range responses.finish() {
+			body.Write(chunk)
+		}
+	}
+	return kiroSSEResponse(body.Bytes())
 }
 
 // kiroServeResponses 把 Anthropic 事件流按客户端要求输出成 Responses SSE 或 JSON。
@@ -813,14 +895,15 @@ func kiroServeResponses(upstream *http.Response, stream *kiroStreamContext, tran
 	return kiroResponsesJSON(responses)
 }
 
-// kiroResponsesJSON 输出非流式 Responses 结果；流内失败返回 502。
+// kiroResponsesJSON 输出非流式 Responses 结果；流内失败按错误类型映射状态码。
 func kiroResponsesJSON(responses *kiroResponsesStream) *http.Response {
 	if !responses.terminal {
 		responses.finish()
 	}
 	if responses.failure != nil {
 		encoded, _ := json.Marshal(map[string]any{"error": responses.failure})
-		return kiroSyntheticResponse(http.StatusBadGateway, encoded)
+		errorType, _ := responses.failure["type"].(string)
+		return kiroSyntheticResponse(kiroFailureStatus(errorType), encoded)
 	}
 	response := responses.responseObject("completed")
 	if reason := kiroIncompleteReason(responses.stopReason); reason != "" {

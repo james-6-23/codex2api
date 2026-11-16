@@ -101,6 +101,8 @@ type Model struct {
 	Parent                   string                `json:"parent,omitempty"`
 	SupportedReasoningLevels []ModelReasoningLevel `json:"supported_reasoning_levels,omitempty"`
 	DefaultReasoningLevel    string                `json:"default_reasoning_level,omitempty"`
+	// ImageInput 只供网关生成 Codex 模型清单时声明图片输入，不出现在 /v1/models 响应里。
+	ImageInput bool `json:"-"`
 }
 
 type ModelReasoningLevel struct {

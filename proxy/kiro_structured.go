@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"encoding/json"
-	"math"
+	"math/big"
+	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // 结构化输出模拟（output_config.format = json_schema）：Kiro 没有原生 JSON Schema 模式，
@@ -26,7 +28,7 @@ func kiroInjectStructuredInstruction(req *kiroInboundRequest) map[string]any {
 		Type   string         `json:"type"`
 		Schema map[string]any `json:"schema"`
 	}
-	if json.Unmarshal(req.OutputConfig.Format, &format) != nil || format.Type != "json_schema" || format.Schema == nil {
+	if kiroDecodeJSON(req.OutputConfig.Format, &format) != nil || format.Type != "json_schema" || format.Schema == nil {
 		return nil
 	}
 	pretty, _ := json.MarshalIndent(format.Schema, "", "  ")
@@ -42,6 +44,8 @@ func kiroInjectStructuredInstruction(req *kiroInboundRequest) map[string]any {
 type kiroSchemaValidator struct {
 	root      any
 	remaining int
+	// strict 额外检查数值范围、长度、数量等约束（kiro.rs 忽略这些关键字），只用于在候选里优先挑完全合规的。
+	strict bool
 }
 
 func (v *kiroSchemaValidator) conforms(schema, value any) bool {
@@ -173,6 +177,75 @@ func (v *kiroSchemaValidator) object(obj map[string]any, value any, depth int) b
 			return false
 		}
 	}
+	if v.strict && !kiroSchemaConstraints(obj, value) {
+		return false
+	}
+	return true
+}
+
+// kiroSchemaConstraints 检查 minimum/maxLength/minItems 这类约束；pattern 不查，Go 正则与 ECMA 方言不一致。
+func kiroSchemaConstraints(obj map[string]any, value any) bool {
+	switch typed := value.(type) {
+	case json.Number:
+		number, valid := kiroExactNumber(typed)
+		if !valid {
+			return false
+		}
+		// draft-04 的 exclusiveMinimum/exclusiveMaximum 是修饰 minimum/maximum 的布尔值。
+		exclusiveMin, _ := obj["exclusiveMinimum"].(bool)
+		exclusiveMax, _ := obj["exclusiveMaximum"].(bool)
+		for _, bound := range []struct {
+			key                string
+			minimum, exclusive bool
+		}{{"minimum", true, exclusiveMin}, {"maximum", false, exclusiveMax}, {"exclusiveMinimum", true, true}, {"exclusiveMaximum", false, true}} {
+			if raw, present := obj[bound.key].(json.Number); present {
+				limit, ok := kiroExactNumber(raw)
+				if !ok {
+					return false
+				}
+				comparison := number.Cmp(limit)
+				if bound.minimum && comparison < 0 || !bound.minimum && comparison > 0 || bound.exclusive && comparison == 0 {
+					return false
+				}
+			}
+		}
+		// multipleOf 要求商为整数，用精确有理数运算，浮点容差会把 1e-10 当成 1 的倍数。
+		if divisor, ok := obj["multipleOf"].(json.Number); ok {
+			denominator, valid := kiroExactNumber(divisor)
+			if !valid || denominator.Sign() <= 0 || !new(big.Rat).Quo(number, denominator).IsInt() {
+				return false
+			}
+		}
+	case string:
+		return kiroSchemaWithin(obj, "minLength", "maxLength", utf8.RuneCountInString(typed))
+	case []any:
+		if unique, _ := obj["uniqueItems"].(bool); unique {
+			seen := make(map[string]struct{}, len(typed))
+			for _, item := range typed {
+				key := kiroCanonicalJSON(item)
+				if _, dup := seen[key]; dup {
+					return false
+				}
+				seen[key] = struct{}{}
+			}
+		}
+		return kiroSchemaWithin(obj, "minItems", "maxItems", len(typed))
+	case map[string]any:
+		return kiroSchemaWithin(obj, "minProperties", "maxProperties", len(typed))
+	}
+	return true
+}
+
+func kiroSchemaWithin(obj map[string]any, minKey, maxKey string, count int) bool {
+	actual := new(big.Rat).SetInt64(int64(count))
+	for _, key := range []string{minKey, maxKey} {
+		if raw, present := obj[key].(json.Number); present {
+			limit, valid := kiroExactNumber(raw)
+			if !valid || key == minKey && actual.Cmp(limit) < 0 || key == maxKey && actual.Cmp(limit) > 0 {
+				return false
+			}
+		}
+	}
 	return true
 }
 
@@ -218,30 +291,87 @@ func kiroTypeMatches(name string, value any) bool {
 		if !ok {
 			return false
 		}
-		if _, err := number.Int64(); err == nil {
-			return true
-		}
-		f, err := number.Float64()
-		return err == nil && !math.IsInf(f, 0) && f == math.Trunc(f)
+		exact, valid := kiroExactNumber(number)
+		return valid && exact.IsInt()
 	}
 	return false
 }
 
 func kiroJSONEqual(a, b any) bool {
-	left, lok := a.(json.Number)
-	right, rok := b.(json.Number)
-	if lok || rok {
-		if !lok {
-			left = json.Number(strings.TrimSpace(kiroMarshalString(a)))
+	return kiroCanonicalJSON(a) == kiroCanonicalJSON(b)
+}
+
+// kiroCanonicalJSON 把值序列化成可比较的规范形式：数值（含嵌套）统一成同一写法，对象键有序，
+// 1 与 1.0、{"n":1} 与 {"n":1.0} 因此相等，数值与字符串仍可区分。
+func kiroCanonicalJSON(value any) string {
+	var normalize func(any) any
+	normalize = func(value any) any {
+		switch typed := value.(type) {
+		case json.Number:
+			return kiroCanonicalNumber(typed)
+		case float64:
+			return kiroCanonicalNumber(json.Number(strconv.FormatFloat(typed, 'g', -1, 64)))
+		case int:
+			return kiroCanonicalNumber(json.Number(strconv.Itoa(typed)))
+		case int64:
+			return kiroCanonicalNumber(json.Number(strconv.FormatInt(typed, 10)))
+		case []any:
+			out := make([]any, len(typed))
+			for i, item := range typed {
+				out[i] = normalize(item)
+			}
+			return out
+		case map[string]any:
+			out := make(map[string]any, len(typed))
+			for key, item := range typed {
+				out[key] = normalize(item)
+			}
+			return out
 		}
-		if !rok {
-			right = json.Number(strings.TrimSpace(kiroMarshalString(b)))
-		}
-		lf, lerr := left.Float64()
-		rf, rerr := right.Float64()
-		return lerr == nil && rerr == nil && lf == rf
+		return value
 	}
-	return kiroMarshalString(a) == kiroMarshalString(b)
+	return kiroMarshalString(normalize(value))
+}
+
+// Keep a decimal coefficient and exponent so even extreme exponents do not expand into huge buffers.
+func kiroCanonicalNumber(number json.Number) json.Number {
+	mantissa, exponentText, hasExponent := strings.Cut(strings.ToLower(number.String()), "e")
+	exponent := new(big.Int)
+	if hasExponent {
+		if _, ok := exponent.SetString(exponentText, 10); !ok {
+			return number
+		}
+	}
+	negative := strings.HasPrefix(mantissa, "-")
+	mantissa = strings.TrimPrefix(mantissa, "-")
+	if point := strings.IndexByte(mantissa, '.'); point >= 0 {
+		exponent.Sub(exponent, big.NewInt(int64(len(mantissa)-point-1)))
+		mantissa = mantissa[:point] + mantissa[point+1:]
+	}
+	mantissa = strings.TrimLeft(mantissa, "0")
+	if mantissa == "" {
+		return json.Number("0")
+	}
+	coefficient := strings.TrimRight(mantissa, "0")
+	exponent.Add(exponent, big.NewInt(int64(len(mantissa)-len(coefficient))))
+	if negative {
+		coefficient = "-" + coefficient
+	}
+	return json.Number(coefficient + "e" + exponent.String())
+}
+
+// kiroExactNumber 把 JSON 数值解析成有理数；指数过大时放弃，避免模型输出 1e100000000 撑爆内存。
+func kiroExactNumber(number json.Number) (*big.Rat, bool) {
+	text := number.String()
+	if len(text) > 4096 {
+		return nil, false
+	}
+	if i := strings.IndexAny(text, "eE"); i >= 0 {
+		if exp, err := strconv.Atoi(text[i+1:]); err != nil || exp > 400 || exp < -400 {
+			return nil, false
+		}
+	}
+	return new(big.Rat).SetString(text)
 }
 
 func kiroMarshalString(value any) string {
@@ -257,17 +387,19 @@ func kiroDecodeJSONNumber(text string) (any, int, error) {
 	return value, int(decoder.InputOffset()), err
 }
 
-// kiroExtractConformingJSON 先试整段（可去掉代码围栏），否则逐个 {/[ 起点尝试解析，取最后一个合规值。
+// kiroExtractConformingJSON 先试整段（可去掉代码围栏），否则逐个 {/[ 起点尝试解析，取最后一个合规值；
+// 有满足全部约束的候选时优先取它，没有就按 kiro.rs 的规则取最后一个基本合规的。
 func kiroExtractConformingJSON(text string, schema map[string]any) (string, bool) {
 	schemaNumbers, _, _ := kiroDecodeJSONNumber(kiroMarshalString(schema))
 	validator := &kiroSchemaValidator{root: schemaNumbers, remaining: kiroStructuredMaxSteps}
+	strict := &kiroSchemaValidator{root: schemaNumbers, remaining: kiroStructuredMaxSteps, strict: true}
 	whole := kiroStripFence(strings.TrimSpace(text))
-	if value, offset, err := kiroDecodeJSONNumber(whole); err == nil && strings.TrimSpace(whole[offset:]) == "" && validator.conforms(schemaNumbers, value) {
+	if value, offset, err := kiroDecodeJSONNumber(whole); err == nil && strings.TrimSpace(whole[offset:]) == "" && (strict.conforms(schemaNumbers, value) || validator.conforms(schemaNumbers, value)) {
 		return kiroMarshalString(value), true
 	}
-	var last any
-	found, failed := false, 0
-	for pos := 0; pos < len(text) && validator.remaining > 0; {
+	var last, lastStrict any
+	found, foundStrict, failed := false, false, 0
+	for pos := 0; pos < len(text) && (validator.remaining > 0 || strict.remaining > 0); {
 		rel := strings.IndexAny(text[pos:], "{[")
 		if rel < 0 {
 			break
@@ -281,10 +413,16 @@ func kiroExtractConformingJSON(text string, schema map[string]any) (string, bool
 			pos = start + 1
 			continue
 		}
-		if validator.conforms(schemaNumbers, value) {
+		// 严格校验单独判断：oneOf 分支只靠数值范围区分时，忽略范围的基本校验会误判两支都命中。
+		if strict.conforms(schemaNumbers, value) {
+			lastStrict, foundStrict = value, true
+		} else if validator.conforms(schemaNumbers, value) {
 			last, found = value, true
 		}
 		pos = start + max(offset, 1)
+	}
+	if foundStrict {
+		return kiroMarshalString(lastStrict), true
 	}
 	if !found {
 		return "", false

@@ -256,8 +256,7 @@ func KiroFetchUsage(ctx context.Context, cred KiroCredential, bearer, proxyURL s
 }
 
 // KiroFetchModels 拉取账号实际可用的模型 ID（auto 是上游路由别名，不作为可调度模型发布）。
-func KiroFetchModels(ctx context.Context, cred KiroCredential, bearer, proxyURL string) ([]string, error) {
-	var models []string
+func KiroFetchModels(ctx context.Context, cred KiroCredential, bearer, proxyURL string) (models, imageModels []string, err error) {
 	seen := map[string]struct{}{}
 	next := ""
 	for page := 0; page < 10; page++ {
@@ -267,16 +266,17 @@ func KiroFetchModels(ctx context.Context, cred KiroCredential, bearer, proxyURL 
 		}
 		raw, err := kiroManagementGET(ctx, cred, bearer, proxyURL, path)
 		if err != nil {
-			return nil, fmt.Errorf("kiro 模型目录查询失败: %w", err)
+			return nil, nil, fmt.Errorf("kiro 模型目录查询失败: %w", err)
 		}
 		var parsed struct {
 			Models []struct {
-				ModelID string `json:"modelId"`
+				ModelID             string   `json:"modelId"`
+				SupportedInputTypes []string `json:"supportedInputTypes"`
 			} `json:"models"`
 			NextToken string `json:"nextToken"`
 		}
 		if err := json.Unmarshal(raw, &parsed); err != nil {
-			return nil, fmt.Errorf("kiro 模型目录无法解析: %w", err)
+			return nil, nil, fmt.Errorf("kiro 模型目录无法解析: %w", err)
 		}
 		for _, model := range parsed.Models {
 			id := strings.TrimSpace(model.ModelID)
@@ -286,6 +286,12 @@ func KiroFetchModels(ctx context.Context, cred KiroCredential, bearer, proxyURL 
 			if _, dup := seen[strings.ToLower(id)]; !dup {
 				seen[strings.ToLower(id)] = struct{}{}
 				models = append(models, id)
+				for _, kind := range model.SupportedInputTypes {
+					if strings.EqualFold(kind, "IMAGE") {
+						imageModels = append(imageModels, id)
+						break
+					}
+				}
 			}
 		}
 		if parsed.NextToken == "" {
@@ -293,7 +299,7 @@ func KiroFetchModels(ctx context.Context, cred KiroCredential, bearer, proxyURL 
 		}
 		next = parsed.NextToken
 	}
-	return models, nil
+	return models, imageModels, nil
 }
 
 // KiroResolveProfileARN 为 Enterprise / IdC 账号解析真实 profile ARN；Builder ID 没有 profile 时返回空。

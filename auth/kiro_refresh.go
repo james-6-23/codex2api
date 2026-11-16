@@ -229,37 +229,56 @@ func (s *Store) RefreshKiroAccount(ctx context.Context, acc *Account) error {
 	return s.refreshKiroAccount(ctx, acc, true)
 }
 
-// refreshKiroAccount 在跨实例共享的 OAuth 刷新租约下换票：拿到锁后先重读库，
-// 别的实例已刷新且可用就直接复用，避免第二次刷新消耗刚轮换出的新 RT。
+// kiroRefreshRotationAttempts 限制「等锁期间 RT 被别人轮换、换新 RT 的锁重来」的次数。
+const kiroRefreshRotationAttempts = 3
+
+// refreshKiroAccount 在跨实例共享的 OAuth 刷新租约下换票。租约按 RT 指纹加锁，与已发布版本、
+// Codex / Claude 同键，滚动发布时新旧实例对同一个 RT 互斥；等锁期间 RT 被轮换时换新 RT 的锁重来，
+// 绝不在旧 RT 的锁下兑换新 RT。
 func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefresh bool) error {
+	for range kiroRefreshRotationAttempts {
+		done, err := s.refreshKiroAccountOnce(ctx, acc, forceRefresh)
+		if done || err != nil {
+			return err
+		}
+	}
+	return fmt.Errorf("kiro refresh_token 在等待刷新锁期间被反复轮换")
+}
+
+// refreshKiroAccountOnce 在当前 RT 的租约下尝试一次；done=false 表示 RT 已被轮换，需要重来。
+func (s *Store) refreshKiroAccountOnce(ctx context.Context, acc *Account, forceRefresh bool) (bool, error) {
 	acc.mu.RLock()
 	cred := acc.Kiro
 	rt := strings.TrimSpace(acc.RefreshToken)
 	lockedAccessToken := acc.AccessToken
 	dbID := acc.DBID
 	proxyURL := strings.TrimSpace(acc.ProxyURL)
-	cooldownActive := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	acc.mu.RUnlock()
 
 	if cred.AuthKind == KiroAuthKindAPIKey {
-		return nil
+		return true, nil
 	}
 	if rt == "" {
-		return fmt.Errorf("kiro refresh_token 为空")
+		return true, fmt.Errorf("kiro refresh_token 为空")
 	}
 	lease, err := s.acquireOAuthRefreshLease(ctx, rt)
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer lease.Release()
 	ctx = lease.Context()
 	if changed, usable, reloadErr := s.reloadOAuthCredentialsAfterLock(ctx, acc, rt, lockedAccessToken); reloadErr == nil && changed && usable && !forceRefresh {
 		s.finishReloadedOAuthRefresh(ctx, acc)
-		return nil
-	} else if reloadErr == nil && changed {
-		acc.mu.RLock()
-		rt = strings.TrimSpace(acc.RefreshToken)
-		acc.mu.RUnlock()
+		return true, nil
+	}
+	// 拿锁后读最新凭据（kiro.rs force_refresh_token_for 同样如此）：客户端注册可能已随重载更新；
+	// RT 已被轮换时，本租约护不住新 RT，交给下一轮在新 RT 的租约下处理。
+	acc.mu.RLock()
+	rotated := strings.TrimSpace(acc.RefreshToken) != rt
+	cred = acc.Kiro
+	acc.mu.RUnlock()
+	if rotated {
+		return false, nil
 	}
 
 	td, err := kiroTokenRefreshFunc(ctx, cred, rt, proxyURL)
@@ -268,7 +287,7 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 		if IsPermanentRefreshFailure(err) {
 			s.markPermanentRefreshFailure(acc, wrapped)
 		}
-		return wrapped
+		return true, wrapped
 	}
 	updates := map[string]interface{}{
 		"access_token": td.AccessToken,
@@ -282,7 +301,7 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 	}
 	if s.db != nil {
 		if err := s.db.UpdateCredentials(ctx, dbID, updates); err != nil {
-			return fmt.Errorf("kiro 刷新结果落库失败: %w", err)
+			return true, fmt.Errorf("kiro 刷新结果落库失败: %w", err)
 		}
 	}
 
@@ -296,7 +315,9 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 	}
 	acc.ExpiresAt = td.ExpiresAt
 	acc.PermanentRefreshFailures = 0
-	// 限流冷却保留；过期 AT 造成的 unauthorized 冷却在新令牌下不再成立。
+	// 限流冷却保留；过期 AT 造成的 unauthorized 冷却在新令牌下不再成立。按当前状态判断：
+	// 刷新进行中别的请求刚设的限流冷却也要保留。
+	cooldownActive := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	preserveCooldown := cooldownActive && !strings.EqualFold(strings.TrimSpace(acc.CooldownReason), "unauthorized")
 	if !preserveCooldown {
 		acc.Status = StatusReady
@@ -314,5 +335,5 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 		_ = s.db.ClearError(ctx, dbID)
 		s.deleteCachedAccountCooldown(dbID)
 	}
-	return nil
+	return true, nil
 }

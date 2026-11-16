@@ -9153,6 +9153,8 @@ var knownAPIKeyPlanFilters = map[string]struct{}{
 	// Antigravity keys derived from Google tier ids (g1-ultra-tier → ultra,
 	// standard-tier → standard); free/pro/api are shared with the lists above.
 	"ultra": {}, "standard": {},
+	// Kiro 账号的 plan_type 是上游订阅标题（KIRO FREE / PRO / PRO+ / POWER），匹配时统一小写。
+	"kiro free": {}, "kiro pro": {}, "kiro pro+": {}, "kiro power": {},
 }
 
 // cleanPlanAllow 归一账号套餐白名单:小写去空白、丢弃未知值并去重。

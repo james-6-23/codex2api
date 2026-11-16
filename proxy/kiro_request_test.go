@@ -1,7 +1,13 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
+	"image"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -133,5 +139,122 @@ func TestKiroStructuredOutput(t *testing.T) {
 	content := message["content"].([]any)
 	if len(content) != 2 || content[1].(map[string]any)["text"] != `{"n":7}` {
 		t.Fatalf("structured rewrite: %+v", content)
+	}
+}
+
+func TestKiroCLIBodyOnlyRewritesMessageOrigin(t *testing.T) {
+	body := []byte(`{"conversationState":{"agentContinuationId":"x","currentMessage":{"userInputMessage":{"origin":"AI_EDITOR","content":"hi"}},
+	  "history":[{"userInputMessage":{"origin":"AI_EDITOR","modelId":"m"}},
+	             {"assistantResponseMessage":{"toolUses":[{"input":{"origin":"AI_EDITOR","id":9007199254740993}}]}}]}}`)
+	out := string(kiroCLIBody(body))
+	for _, want := range []string{`"currentMessage":{"userInputMessage":{"content":"hi","origin":"KIRO_CLI"}}`, `{"userInputMessage":{"origin":"KIRO_CLI"}}`, `"input":{"id":9007199254740993,"origin":"AI_EDITOR"}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %s", want, out)
+		}
+	}
+	if strings.Contains(out, "agentContinuationId") {
+		t.Fatalf("agentContinuationId must be dropped: %s", out)
+	}
+}
+
+func TestKiroImageDecodeBudgetRejectsHugeImages(t *testing.T) {
+	if !kiroImageDecodeWithinBudget(1568, 1568) || !kiroImageDecodeWithinBudget(3840, 2160) {
+		t.Fatal("ordinary images must be decodable")
+	}
+	if kiroImageDecodeWithinBudget(30000, 30000) || kiroImageDecodeWithinBudget(1<<31-1, 2) || kiroImageDecodeWithinBudget(0, 10) {
+		t.Fatal("images above the 512 MiB decode budget must not be decoded")
+	}
+	if kiroImageDecodeWithinBudget(10000, 10000) || kiroImageDecodeWithinBudget(20000, 20000) || kiroImageDecodeWithinBudget(1, 1<<30) {
+		t.Fatal("the decode budget must include intermediate buffers, regardless of color model")
+	}
+	var huge bytes.Buffer
+	if err := png.Encode(&huge, image.NewGray(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	// 改写 IHDR 宽高为 30000x30000：DecodeConfig 只读头部，解码会因预算被跳过而原样透传。
+	raw := huge.Bytes()
+	binary.BigEndian.PutUint32(raw[16:20], 30000)
+	binary.BigEndian.PutUint32(raw[20:24], 30000)
+	binary.BigEndian.PutUint32(raw[29:33], crc32.ChecksumIEEE(raw[12:29]))
+	if config, _, err := image.DecodeConfig(bytes.NewReader(raw)); err != nil || config.Width != 30000 {
+		t.Fatalf("fixture header must stay readable: %v", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	if format, data := kiroShrinkImage("png", encoded); data != encoded || format != "png" {
+		t.Fatalf("oversized image must pass through untouched, got %s", format)
+	}
+}
+
+func TestKiroStructuredOutputPrefersFullyConstrainedCandidate(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"age":  map[string]any{"type": "integer", "minimum": 0, "maximum": 150},
+		"tags": map[string]any{"type": "array", "uniqueItems": true, "maxItems": 2},
+	}}
+	cases := map[string]string{
+		`first {"age": 30} then {"age": 200}`:                        `{"age":30}`,
+		`only {"age": 200}`:                                          `{"age":200}`,
+		`{"age": 1, "tags": ["a","a"]} or {"age": 2, "tags": ["a"]}`: `{"age":2,"tags":["a"]}`,
+	}
+	for text, want := range cases {
+		if got, ok := kiroExtractConformingJSON(text, schema); !ok || got != want {
+			t.Errorf("extract(%q) = %q,%t want %q", text, got, ok, want)
+		}
+	}
+	for raw, want := range map[string]bool{
+		`[{"multipleOf":0.1},0.3]`:                    true,
+		`[{"multipleOf":0.1},0.35]`:                   false,
+		`[{"exclusiveMinimum":0},0]`:                  false,
+		`[{"minimum":0,"exclusiveMinimum":true},0]`:   false,
+		`[{"minLength":2,"maxLength":3},"你好"]`:        true,
+		`[{"maxLength":1},"你好"]`:                      false,
+		`[{"minProperties":1},{}]`:                    false,
+		`[{"pattern":"^x$","maxItems":5},"anything"]`: true,
+	} {
+		var pair []any
+		if err := kiroDecodeJSON([]byte(raw), &pair); err != nil {
+			t.Fatal(err)
+		}
+		if got := kiroSchemaConstraints(pair[0].(map[string]any), pair[1]); got != want {
+			t.Errorf("constraints %s = %v want %v", raw, got, want)
+		}
+	}
+}
+
+func TestKiroDecodeJSONRejectsTrailingData(t *testing.T) {
+	var value any
+	for _, raw := range []string{`{"id":1}}`, `[1]]`, `{"a":1} {"b":2}`, `{"a":1} x`} {
+		if err := kiroDecodeJSON([]byte(raw), &value); err == nil {
+			t.Errorf("%s must be rejected", raw)
+		}
+	}
+	if err := kiroDecodeJSON([]byte("{\"id\":9007199254740993}\n  "), &value); err != nil {
+		t.Fatalf("trailing whitespace is valid JSON: %v", err)
+	}
+}
+
+func TestKiroStructuredOutputExactMultipleOfAndNestedEquality(t *testing.T) {
+	multiple := map[string]any{"type": "array", "items": map[string]any{"type": "number", "multipleOf": 1}}
+	if got, ok := kiroExtractConformingJSON("first [1] then [0.0000000001]", multiple); !ok || got != "[1]" {
+		t.Fatalf("multipleOf must require an exact integer quotient, got %q", got)
+	}
+	unique := map[string]any{"type": "array", "uniqueItems": true}
+	if got, ok := kiroExtractConformingJSON(`first [{"n":1},{"n":2}] then [{"n":1},{"n":1.0}]`, unique); !ok || got != `[{"n":1},{"n":2}]` {
+		t.Fatalf("uniqueItems must compare nested numbers semantically, got %q", got)
+	}
+	if !kiroJSONEqual(map[string]any{"a": []any{json.Number("1.0")}}, map[string]any{"a": []any{json.Number("1")}}) || kiroJSONEqual(json.Number("1"), "1") {
+		t.Fatal("JSON equality must normalize nested numbers and keep numbers distinct from strings")
+	}
+	ranged := map[string]any{"oneOf": []any{
+		map[string]any{"type": "integer", "minimum": 0, "maximum": 9},
+		map[string]any{"type": "integer", "minimum": 10, "maximum": 19},
+	}}
+	if got, ok := kiroExtractConformingJSON("answer: 2", ranged); ok {
+		t.Fatalf("a bare number outside JSON containers is not extracted: %q", got)
+	}
+	if got, ok := kiroExtractConformingJSON("2", ranged); !ok || got != "2" {
+		t.Fatalf("oneOf branches separated by ranges must accept 2, got %q %v", got, ok)
+	}
+	if !kiroInvokeInputConforms(map[string]any{"type": "object", "properties": map[string]any{"ids": map[string]any{"type": "array", "items": ranged}}}, map[string]any{"ids": []any{2, 15}}) {
+		t.Fatal("the invoke gate must evaluate range keywords inside oneOf")
 	}
 }

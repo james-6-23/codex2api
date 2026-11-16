@@ -65,7 +65,8 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 		return intelligenceExecution{Interrupted: true, Error: "配置错误：" + err.Error()}
 	}
 	if err := h.ensureKiroBearer(ctx, account); err != nil {
-		return intelligenceExecution{Error: "Kiro 账号令牌刷新失败: " + err.Error(), CredentialRejected: true}
+		// 只有上游明确拒绝凭据才封住本代凭据的自动检测；网络或 5xx 之类的临时故障保持可重试。
+		return intelligenceExecution{Error: "Kiro 账号令牌刷新失败: " + err.Error(), CredentialRejected: auth.IsPermanentRefreshFailure(err)}
 	}
 	payload := map[string]any{"model": model, "stream": true}
 	security := h.store.ClaudeSecurityConfig()

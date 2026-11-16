@@ -68,6 +68,12 @@ Ported from kiro.rs:
 - Repetition guard, context-window-full and content-filter stop reasons.
 - Upstream error mapping: invalid bearer → `401` (refresh and retry), monthly request limit → cooldown until the next reset, account throttling → 30-minute cooldown, suspended account → error state, generic `429` → 1-minute cooldown.
 
+When structured output is requested with only `web_search`, the gateway uses the model/search loop to generate the answer before extracting JSON. The plain-search shortcut remains available when no schema is requested. Schema extraction prefers candidates satisfying supported bounds and falls back to kiro.rs's basic rules if none do; it is not a guarantee of strict schema compliance. Numeric bounds and nested equality preserve decimal precision.
+
+Image decoding uses a conservative budget for pixels and decoder working buffers, including transparent 16-bit PNG and progressive JPEG. Images beyond the budget are forwarded without local decoding. The gateway advertises image input and parallel tool calls for all available Kiro models, including mapped models, without per-model or per-account selection. Catalog input-type metadata does not narrow this channel policy. Mixed-channel models retain the gateway's existing capability intersection rules.
+
+During rolling upgrades from older Kiro builds, remove all old instances serving Kiro accounts from routing, stop their background refresh and admin/manual refresh entry points, and wait for in-flight Kiro requests and refreshes to finish before enabling the new deployment. Stopping only background refresh workers is insufficient: old instances can also refresh after an upstream `401`. Keep old instances stopped or unable to serve Kiro traffic throughout the handover; they do not retry under a new lease after observing a rotated token.
+
 Not ported (kiro.rs-specific): its own account pool and load balancing, self-update, Feishu alerts, the `/cc/v1` path, the Claude Code tool-compatibility mode, the overage switch and credit columns in its usage log.
 
 ## Usage accounting

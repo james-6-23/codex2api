@@ -34,3 +34,11 @@ func TestCleanPlanAllowAcceptsAntigravityPlans(t *testing.T) {
 		t.Fatalf("cleanPlanAllow() = %#v, want %#v", got, want)
 	}
 }
+
+func TestCleanPlanAllowAcceptsKiroPlans(t *testing.T) {
+	input := []string{"KIRO FREE", "kiro pro", "Kiro Pro+", "kiro power", "kiro team"}
+	want := []string{"kiro free", "kiro pro", "kiro pro+", "kiro power"}
+	if got := cleanPlanAllow(input); !reflect.DeepEqual(got, want) {
+		t.Fatalf("cleanPlanAllow() = %#v, want %#v", got, want)
+	}
+}

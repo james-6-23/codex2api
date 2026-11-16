@@ -46,6 +46,8 @@ const (
 	KiroMachineIDCredentialKey     = "kiro_machine_id"
 	KiroEndpointCredentialKey      = "kiro_endpoint"
 	KiroUsageCredentialKey         = "kiro_usage"
+	// KiroImageModelsCredentialKey 记录上游 supportedInputTypes 含 IMAGE 的模型（逗号分隔）。
+	KiroImageModelsCredentialKey = "kiro_image_models"
 	// KiroClientSecretCredentialKey 复用通用 client_secret 键以进入加密名单。
 	KiroClientSecretCredentialKey = "client_secret"
 )
@@ -77,6 +79,8 @@ type KiroCredential struct {
 	Endpoint      string
 	// UsageResetAt 是最近一次额度快照里的下次重置时间，用于额度用尽时的冷却截止。
 	UsageResetAt time.Time
+	// ImageModels 是模型目录里接受图片输入的模型。
+	ImageModels []string
 }
 
 var kiroExternalIdPAliases = map[string]struct{}{
@@ -291,7 +295,27 @@ func KiroCredentialFromRow(row *database.AccountRow) KiroCredential {
 	if resetAt, err := time.Parse(time.RFC3339, gjsonString(row.GetCredential(KiroUsageCredentialKey), "next_reset_at")); err == nil {
 		cred.UsageResetAt = resetAt
 	}
+	for _, model := range strings.Split(get(KiroImageModelsCredentialKey), ",") {
+		if model = strings.TrimSpace(model); model != "" {
+			cred.ImageModels = append(cred.ImageModels, model)
+		}
+	}
 	return cred
+}
+
+// KiroAcceptsImage 判断模型目录是否声明该模型接受图片输入。
+func (a *Account) KiroAcceptsImage(model string) bool {
+	if a == nil {
+		return false
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	for _, id := range a.Kiro.ImageModels {
+		if strings.EqualFold(id, strings.TrimSpace(model)) {
+			return true
+		}
+	}
+	return false
 }
 
 // applyKiroRowLocked 在装载时填充 Kiro 专有字段。调用方持有账号的独占访问。
@@ -387,4 +411,29 @@ func (a *Account) SetKiroProfileARN(arn string) {
 	a.mu.Lock()
 	a.Kiro.ProfileARN = strings.TrimSpace(arn)
 	a.mu.Unlock()
+}
+
+// ApplyKiroAccountRow 把同步写库后的行（套餐、额度快照、模型目录与图片能力）应用到运行时账号；
+// LoadAccountByID 对已在池中的账号不做任何事，同步结果要靠这里生效。
+func (s *Store) ApplyKiroAccountRow(row *database.AccountRow) bool {
+	if s == nil || row == nil {
+		return false
+	}
+	acc := s.FindByID(row.ID)
+	if acc == nil {
+		return false
+	}
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	if !acc.isKiroLocked() {
+		return false
+	}
+	metadata := KiroCredentialFromRow(row)
+	acc.Kiro.UsageResetAt = metadata.UsageResetAt
+	acc.Kiro.ImageModels = metadata.ImageModels
+	if plan := strings.TrimSpace(row.GetCredential("plan_type")); plan != "" {
+		acc.PlanType = plan
+	}
+	acc.Models = normalizeModelList(row.GetCredentialStringSlice("models"))
+	return true
 }

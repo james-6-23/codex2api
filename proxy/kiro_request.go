@@ -1,11 +1,13 @@
 package proxy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -154,8 +156,22 @@ func kiroContent(raw json.RawMessage) (text string, isString bool, blocks []map[
 	if json.Unmarshal(raw, &text) == nil {
 		return text, true, nil
 	}
-	_ = json.Unmarshal(raw, &blocks)
+	_ = kiroDecodeJSON(raw, &blocks)
 	return "", false, blocks
+}
+
+// kiroDecodeJSON 保留数字原文：透传的工具参数与历史经 float64 往返会丢失大整数精度。
+func kiroDecodeJSON(data []byte, out any) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(out); err != nil {
+		return err
+	}
+	// More 只判断当前数组 / 对象里还有没有元素，顶层多出的 } 或 ] 要靠再读一次确认已到 EOF。
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
+		return fmt.Errorf("unexpected data after JSON value")
+	}
+	return nil
 }
 
 func kiroString(block map[string]any, key string) string {

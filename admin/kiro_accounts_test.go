@@ -124,3 +124,30 @@ func TestKiroAccountsAreNeverUnsampled(t *testing.T) {
 		t.Fatal("Kiro quota comes from the control plane, not 5h/7d windows; it must not count as unsampled")
 	}
 }
+
+func TestExportKiroKAMKeepsExternalIdPFields(t *testing.T) {
+	db := newTestAdminDB(t)
+	store := auth.NewStore(db, nil, nil)
+	t.Cleanup(store.Stop)
+	handler := &Handler{db: db, store: store}
+	id, err := db.InsertAccountWithUpstream(context.Background(), "entra", "kiro", auth.UpstreamKiro, map[string]any{
+		"upstream_type": auth.UpstreamKiro, "email": "e@example.com", "refresh_token": "rt-e", "kiro_auth_kind": auth.KiroAuthKindExternalIdP,
+		auth.KiroTokenEndpointCredentialKey: "https://login.microsoftonline.com/tenant/oauth2/v2.0/token", auth.KiroIssuerURLCredentialKey: "https://login.microsoftonline.com/tenant/v2.0",
+		auth.KiroScopesCredentialKey: "openid offline_access", auth.KiroAPIRegionCredentialKey: "eu-central-1", auth.KiroClientIDCredentialKey: "client-e",
+	}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	c.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/kiro/export?ids="+strconv.FormatInt(id, 10), nil)
+	handler.ExportKiroAccounts(c)
+	items, err := parseKiroImport(recorder.Body.String())
+	if err != nil || len(items) != 1 {
+		t.Fatalf("round trip: %v %s", err, recorder.Body.String())
+	}
+	got := items[0].Credential
+	if got.TokenEndpoint == "" || got.IssuerURL == "" || got.Scopes == "" || got.APIRegion != "eu-central-1" || items[0].RawAuthMethod != auth.KiroAuthKindExternalIdP {
+		t.Fatalf("KAM export dropped authentication fields: %+v", got)
+	}
+}

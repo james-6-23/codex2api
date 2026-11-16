@@ -290,3 +290,17 @@ func TestStoredCapabilitiesUnknownAndCredentialGenerationAreConservative(t *test
 		assertUnknown(t, withoutDB.applyUpstreamModelCapabilities(ctx, &database.APIKeyRow{ID: 1}, []byte(`{"models":[{"slug":"gpt-6-astra","use_responses_lite":true,"prefer_websockets":true,"experimental_supported_tools":["function"],"context_window":1000}]}`)))
 	})
 }
+
+func TestStoredCapabilitiesKeepKiroParallelToolCalls(t *testing.T) {
+	store := auth.NewStore(nil, nil, nil)
+	store.AddAccount(&auth.Account{DBID: 9400, UpstreamType: auth.UpstreamKiro, AccessToken: "at", Status: auth.StatusReady, Models: []string{"gpt-5.6-luna"}, Kiro: auth.KiroCredential{ImageModels: []string{"gpt-5.6-luna"}}})
+	h := NewHandler(store, newTestModelRegistryDB(t), nil, nil)
+	body, err := buildScopedCodexManifest([]api.Model{{ID: "gpt-5.6-luna", OwnedBy: "kiro"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := h.applyStoredModelCapabilities(context.Background(), &database.APIKeyRow{ID: 1}, body)
+	if !gjson.GetBytes(got, "models.0.supports_parallel_tool_calls").Bool() || gjson.GetBytes(got, "models.0.input_modalities").Raw != `["text","image"]` {
+		t.Fatalf("Kiro-served Codex slug lost parallel tool calls or image input: %s", got)
+	}
+}

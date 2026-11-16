@@ -170,7 +170,7 @@ func kiroPrepareCompactionMessages(requestBody []byte, headers http.Header, fall
 		return nil, err
 	}
 	var request map[string]any
-	if err := json.Unmarshal(translation.messages, &request); err != nil {
+	if err := kiroDecodeJSON(translation.messages, &request); err != nil {
 		return nil, err
 	}
 	request["stream"] = false
@@ -264,7 +264,8 @@ func runKiroCompactionAttempt(ctx context.Context, account *auth.Account, messag
 	message, problem := kiroAggregateEvents(events)
 	if problem != nil {
 		encoded, _ := json.Marshal(map[string]any{"error": problem})
-		return &kiroCompactionAttempt{failure: kiroSyntheticResponse(http.StatusBadGateway, encoded)}, nil
+		errorType, _ := problem["type"].(string)
+		return &kiroCompactionAttempt{failure: kiroSyntheticResponse(kiroFailureStatus(errorType), encoded)}, nil
 	}
 	attempt := &kiroCompactionAttempt{usage: map[string]any{}}
 	attempt.stopReason, _ = message["stop_reason"].(string)

@@ -270,8 +270,9 @@ func (h *Handler) createKiroAccount(ctx context.Context, item kiroImportCredenti
 		credentials["refresh_token"] = item.RefreshToken
 		credentials["expires_at"] = item.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	if models, err := auth.KiroFetchModels(ctx, cred, bearer, proxyURL); err == nil && len(models) > 0 {
+	if models, imageModels, err := auth.KiroFetchModels(ctx, cred, bearer, proxyURL); err == nil && len(models) > 0 {
 		credentials["models"] = models
+		credentials[auth.KiroImageModelsCredentialKey] = strings.Join(imageModels, ",")
 	} else if err != nil {
 		warnings = append(warnings, "模型目录同步失败，暂用默认目录")
 	}
@@ -406,8 +407,10 @@ func (h *Handler) ExportKiroAccounts(c *gin.Context) {
 			kiroRS = append(kiroRS, kiroCompactMap(entry))
 			continue
 		}
+		// 导入器认得的认证字段全部带上，External IdP / IdC 账号导出再导入不丢配置。
 		credentials := kiroCompactMap(map[string]any{"accessToken": row.GetCredential("access_token"), "refreshToken": row.GetCredential("refresh_token"), "authMethod": cred.AuthKind,
-			"provider": cred.LoginSource, "clientId": cred.ClientID, "clientSecret": cred.ClientSecret, "region": cred.Region, "startUrl": cred.StartURL, "kiroApiKey": row.GetCredential("api_key")})
+			"provider": cred.LoginSource, "clientId": cred.ClientID, "clientSecret": cred.ClientSecret, "region": cred.Region, "apiRegion": cred.APIRegion, "startUrl": cred.StartURL,
+			"endpoint": cred.Endpoint, "tokenEndpoint": cred.TokenEndpoint, "issuerUrl": cred.IssuerURL, "scopes": cred.Scopes, "kiroApiKey": row.GetCredential("api_key")})
 		if !expires.IsZero() {
 			credentials["expiresAt"] = expires.UnixMilli()
 		}
@@ -633,7 +636,7 @@ func (h *Handler) refreshKiroChannelModels(ctx context.Context, emit modelRefres
 			count := 0
 			for _, member := range group.Members {
 				_, models, err := h.syncKiroAccount(ctx, member.ID())
-				if err != nil {
+				if err != nil && len(models) == 0 {
 					lastErr = err
 					continue
 				}
@@ -658,7 +661,7 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	}
 	requestAuth := account.KiroRequestAuth()
 	usage, usageErr := auth.KiroFetchUsage(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
-	models, modelErr := auth.KiroFetchModels(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
+	models, imageModels, modelErr := auth.KiroFetchModels(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
 	if usageErr != nil && modelErr != nil {
 		return nil, nil, usageErr
 	}
@@ -671,14 +674,21 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	}
 	if modelErr == nil && len(models) > 0 {
 		updates["models"] = models
+		updates[auth.KiroImageModelsCredentialKey] = strings.Join(imageModels, ",")
 	}
 	if err := h.db.UpdateCredentials(ctx, id, updates); err != nil {
 		return nil, nil, err
 	}
-	if err := h.store.LoadAccountByID(ctx, id); err != nil {
+	row, err := h.db.GetAccountByID(ctx, id)
+	if err != nil {
 		return nil, nil, err
 	}
+	h.store.ApplyKiroAccountRow(row)
 	h.invalidateClaudeCatalogCaches()
+	// 与 kiro.rs 一致：额度查不到就报错，不让旧快照冒充最新额度；模型目录已照常保存。
+	if usageErr != nil {
+		return nil, models, fmt.Errorf("Kiro 额度查询失败: %w", usageErr)
+	}
 	return usage, models, nil
 }
 
