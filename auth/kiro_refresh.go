@@ -231,6 +231,7 @@ func (s *Store) RefreshKiroAccount(ctx context.Context, acc *Account) error {
 
 // refreshKiroAccount 在跨实例共享的 OAuth 刷新租约下换票：拿到锁后先重读库，
 // 别的实例已刷新且可用就直接复用，避免第二次刷新消耗刚轮换出的新 RT。
+// 租约按账号这个稳定身份加锁（同 kiro.rs 按凭据 ID 串行刷新），RT 轮换后各调用方仍抢同一把锁。
 func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefresh bool) error {
 	acc.mu.RLock()
 	cred := acc.Kiro
@@ -238,7 +239,6 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 	lockedAccessToken := acc.AccessToken
 	dbID := acc.DBID
 	proxyURL := strings.TrimSpace(acc.ProxyURL)
-	cooldownActive := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	acc.mu.RUnlock()
 
 	if cred.AuthKind == KiroAuthKindAPIKey {
@@ -247,7 +247,11 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 	if rt == "" {
 		return fmt.Errorf("kiro refresh_token 为空")
 	}
-	lease, err := s.acquireOAuthRefreshLease(ctx, rt)
+	leaseKey := rt
+	if dbID > 0 {
+		leaseKey = fmt.Sprintf("kiro-account:%d", dbID)
+	}
+	lease, err := s.acquireOAuthRefreshLease(ctx, leaseKey)
 	if err != nil {
 		return err
 	}
@@ -256,11 +260,13 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 	if changed, usable, reloadErr := s.reloadOAuthCredentialsAfterLock(ctx, acc, rt, lockedAccessToken); reloadErr == nil && changed && usable && !forceRefresh {
 		s.finishReloadedOAuthRefresh(ctx, acc)
 		return nil
-	} else if reloadErr == nil && changed {
-		acc.mu.RLock()
-		rt = strings.TrimSpace(acc.RefreshToken)
-		acc.mu.RUnlock()
 	}
+	// 拿锁后读最新凭据（kiro.rs force_refresh_token_for 同样如此）：等锁期间 RT 可能已轮换、
+	// 客户端注册可能已更新，不能用拿锁前的旧快照去换票。
+	acc.mu.RLock()
+	rt = strings.TrimSpace(acc.RefreshToken)
+	cred = acc.Kiro
+	acc.mu.RUnlock()
 
 	td, err := kiroTokenRefreshFunc(ctx, cred, rt, proxyURL)
 	if err != nil {
@@ -296,7 +302,9 @@ func (s *Store) refreshKiroAccount(ctx context.Context, acc *Account, forceRefre
 	}
 	acc.ExpiresAt = td.ExpiresAt
 	acc.PermanentRefreshFailures = 0
-	// 限流冷却保留；过期 AT 造成的 unauthorized 冷却在新令牌下不再成立。
+	// 限流冷却保留；过期 AT 造成的 unauthorized 冷却在新令牌下不再成立。按当前状态判断：
+	// 刷新进行中别的请求刚设的限流冷却也要保留。
+	cooldownActive := acc.Status == StatusCooldown && time.Now().Before(acc.CooldownUtil)
 	preserveCooldown := cooldownActive && !strings.EqualFold(strings.TrimSpace(acc.CooldownReason), "unauthorized")
 	if !preserveCooldown {
 		acc.Status = StatusReady

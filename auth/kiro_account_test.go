@@ -3,6 +3,9 @@ package auth
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,5 +119,68 @@ func TestKiroAPIKeyAccountUsesKeyAsBearer(t *testing.T) {
 	account := &Account{UpstreamType: UpstreamKiro, APIKey: "ksk_test", Kiro: KiroCredential{AuthKind: KiroAuthKindAPIKey}}
 	if !account.IsKiro() || account.KiroRefreshable() || account.KiroRequestAuth().BearerToken != "ksk_test" {
 		t.Fatal("API Key Kiro account must use the key as bearer and never refresh")
+	}
+}
+
+func TestKiroRefreshSerializesAcrossRotationAndKeepsNewCooldown(t *testing.T) {
+	store := NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	t.Cleanup(store.Stop)
+	account := &Account{DBID: 902, UpstreamType: UpstreamKiro, AccessToken: "at", RefreshToken: "rt-1", Status: StatusReady,
+		ExpiresAt: time.Now().Add(time.Minute), Kiro: KiroCredential{AuthKind: KiroAuthKindIdC, ClientID: "c", ClientSecret: "s", Region: "us-east-1"}}
+	store.AddAccount(account)
+	previous := kiroTokenRefreshFunc
+	t.Cleanup(func() { kiroTokenRefreshFunc = previous })
+
+	var mu sync.Mutex
+	spent := map[string]bool{}
+	kiroTokenRefreshFunc = func(_ context.Context, _ KiroCredential, rt, _ string) (*KiroTokenData, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if spent[rt] {
+			return nil, &kiroRefreshInvalidError{message: "refresh token already used: " + rt}
+		}
+		spent[rt] = true
+		time.Sleep(20 * time.Millisecond)
+		return &KiroTokenData{AccessToken: "at-" + rt, RefreshToken: rt + "+", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- store.RefreshKiroAccount(context.Background(), account)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent refreshes must not spend the same rotated refresh token: %v", err)
+		}
+	}
+
+	kiroTokenRefreshFunc = func(_ context.Context, _ KiroCredential, rt, _ string) (*KiroTokenData, error) {
+		// 刷新进行中，另一个请求给账号设了限流冷却。
+		store.MarkCooldown(account, time.Hour, "rate_limited")
+		return &KiroTokenData{AccessToken: "at-new", ExpiresAt: time.Now().Add(time.Hour)}, nil
+	}
+	if err := store.RefreshKiroAccount(context.Background(), account); err != nil {
+		t.Fatal(err)
+	}
+	if !account.HasActiveCooldown() {
+		t.Fatal("a rate-limit cooldown set during refresh must survive the refresh")
+	}
+}
+
+func TestKiroTransientRefreshFailureIsNotPermanent(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, `{"message":"Service Unavailable"}`, http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	request, _ := http.NewRequest(http.MethodPost, server.URL, nil)
+	_, err := doKiroTokenRequest(server.Client(), request, "test")
+	if err == nil || IsPermanentRefreshFailure(err) {
+		t.Fatalf("a 503 from the token endpoint is temporary, got %v", err)
 	}
 }
