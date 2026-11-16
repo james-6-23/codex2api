@@ -284,3 +284,28 @@ func TestApplyKiroAccountRowRefreshesRuntimeCatalog(t *testing.T) {
 		t.Fatalf("runtime account not refreshed: plan=%q models=%v", account.GetPlanType(), account.Models)
 	}
 }
+
+func TestKiroPlanKeyAndAllowlist(t *testing.T) {
+	for title, want := range map[string]string{
+		"KIRO FREE":          "kiro free",
+		"KIRO PRO":           "kiro pro",
+		"KIRO PRO+":          "kiro pro+",
+		"Kiro Pro Plus":      "kiro pro+",
+		"KIRO MAX":           "kiro max",
+		"KIRO POWER":         "kiro power",
+		"KIRO STUDENT":       "kiro student",
+		"Kiro Pro (Student)": "kiro student",
+		"Enterprise":         "",
+	} {
+		if got := KiroPlanKey(title); got != want {
+			t.Errorf("KiroPlanKey(%q) = %q, want %q", title, got, want)
+		}
+	}
+	store := NewStore(nil, nil, nil)
+	account := &Account{DBID: 7, UpstreamType: UpstreamKiro, AccessToken: "at", PlanType: "KIRO STUDENT"}
+	store.SetAPIKeyAllowedPlans(1, []string{"kiro student"})
+	store.SetAPIKeyAllowedPlans(2, []string{"kiro pro"})
+	if !store.APIKeyAllowsAccount(1, account) || store.APIKeyAllowsAccount(2, account) {
+		t.Fatal("Kiro plan_allow must match the normalized plan key, not the raw title")
+	}
+}

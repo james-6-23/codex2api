@@ -48,6 +48,13 @@ func kiroRowString(row *database.AccountRow, key string, isKiro bool) string {
 	return strings.TrimSpace(row.GetCredential(key))
 }
 
+func kiroPlanForRow(row *database.AccountRow, isKiro bool) string {
+	if !isKiro {
+		return ""
+	}
+	return auth.KiroPlanKey(row.GetCredential("plan_type"))
+}
+
 // kiroUsageCredential 把额度快照存成 JSON 字符串：凭据读取（GetCredential）只认字符串值。
 func kiroUsageCredential(usage *auth.KiroUsageSnapshot) string {
 	encoded, _ := json.Marshal(usage)

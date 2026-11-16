@@ -437,3 +437,25 @@ func (s *Store) ApplyKiroAccountRow(row *database.AccountRow) bool {
 	acc.Models = normalizeModelList(row.GetCredentialStringSlice("models"))
 	return true
 }
+
+// KiroPlanKey 把上游订阅标题（KIRO FREE、KIRO PRO+ 等）归一成套餐白名单与筛选用的标识。
+// 按关键词识别、不要求标题逐字一致；student 先判，避免带 PRO 字样的学生版被当成 pro，
+// pro+ 先于 pro。认不出时返回空串。
+func KiroPlanKey(title string) string {
+	upper := strings.ToUpper(title)
+	switch {
+	case strings.Contains(upper, "STUDENT"):
+		return "kiro student"
+	case strings.Contains(upper, "POWER"):
+		return "kiro power"
+	case strings.Contains(upper, "MAX"):
+		return "kiro max"
+	case strings.Contains(upper, "PRO+"), strings.Contains(upper, "PRO PLUS"), strings.Contains(upper, "PRO_PLUS"):
+		return "kiro pro+"
+	case strings.Contains(upper, "PRO"):
+		return "kiro pro"
+	case strings.Contains(upper, "FREE"):
+		return "kiro free"
+	}
+	return ""
+}

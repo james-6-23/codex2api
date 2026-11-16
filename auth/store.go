@@ -10372,6 +10372,10 @@ func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroup
 		if acc.isAntigravityAPILocked() {
 			plan = acc.AntigravityPlanKey
 		}
+		// Kiro plan_type 是上游订阅标题原文，按关键词归一后再匹配。
+		if acc.isKiroLocked() {
+			plan = KiroPlanKey(acc.PlanType)
+		}
 		if _, ok := allowedPlans[plan]; !ok {
 			return false
 		}

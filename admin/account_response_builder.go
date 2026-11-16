@@ -248,6 +248,7 @@ func (h *Handler) buildAccountResponse(
 		KiroAuthKind:                 kiroAuthKindForRow(row, isKiroAccount),
 		KiroLoginSource:              kiroRowString(row, auth.KiroLoginSourceCredentialKey, isKiroAccount),
 		KiroUsage:                    kiroUsageForRow(row, isKiroAccount),
+		KiroPlan:                     kiroPlanForRow(row, isKiroAccount),
 		ClaudeBaseURL:                row.GetCredential(auth.ClaudeBaseURLCredentialKey),
 		AntigravityAuthKind:          antigravityAuthKind,
 		AgentIdentity:                isAgentIdentityCredentialRow(row),

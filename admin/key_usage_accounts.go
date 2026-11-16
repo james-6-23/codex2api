@@ -155,8 +155,12 @@ func keyUsageUnloadedAccountAllowed(row *database.APIKeyRow, account database.Ke
 			return false
 		}
 		matched := false
+		accountPlan := account.PlanType
+		if upstream == "kiro" {
+			accountPlan = auth.KiroPlanKey(account.PlanType)
+		}
 		for _, plan := range row.Limits.PlanAllow {
-			if strings.EqualFold(strings.TrimSpace(plan), strings.TrimSpace(account.PlanType)) && strings.TrimSpace(plan) != "" {
+			if strings.EqualFold(strings.TrimSpace(plan), strings.TrimSpace(accountPlan)) && strings.TrimSpace(plan) != "" {
 				matched = true
 				break
 			}
