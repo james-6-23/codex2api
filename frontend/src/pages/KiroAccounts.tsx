@@ -635,6 +635,8 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
   const detailAbortRef = useRef<AbortController | null>(null);
   const detailRequestSeqRef = useRef(0);
   useEffect(() => () => detailAbortRef.current?.abort(), []);
+  const editAbortRef = useRef<AbortController | null>(null);
+  useEffect(() => () => editAbortRef.current?.abort(), []);
   const [pageStats, setPageStats] = useState<Record<string, AccountPageStatsItem>>({});
   const [pageStatsToken, setPageStatsToken] = useState(0);
   const [liveState, setLiveState] = useState<Record<string, { active_requests: number; occupied_requests: number }>>({});
@@ -825,6 +827,22 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
     setDetailTarget(null);
   }, []);
 
+  const openEditor = useCallback(async (account: AccountRow) => {
+    editAbortRef.current?.abort();
+    const controller = new AbortController();
+    editAbortRef.current = controller;
+    try {
+      const detail = await api.getAccount(account.id, controller.signal);
+      if (!controller.signal.aborted && editAbortRef.current === controller) {
+        setEditTarget(detail);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted) showToast(getErrorMessage(error), "error");
+    } finally {
+      if (editAbortRef.current === controller) editAbortRef.current = null;
+    }
+  }, [showToast]);
+
   const handleSaveDetailCooldownPolicy = useCallback(async (account: AccountRow, data: {
     mode: "off" | "fixed" | "adaptive" | null;
     seconds: number | null;
@@ -937,7 +955,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
     return () => {
       cancelled = true;
     };
-  }, [accountIDsKey]);
+  }, [accountIDsKey, pageStatsToken]);
 
   const displayRows = useMemo(() => {
     return accounts.map((acc) => {
@@ -1676,7 +1694,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
                       onUsageRefreshed={() => handleRefreshUsage(acc)}
                       onOpenDetail={() => void openDetail(acc)}
                       onTest={() => setTestingTarget(acc)}
-                      onEdit={() => setEditTarget(acc)}
+                      onEdit={() => void openEditor(acc)}
                       onDelete={() => void handleDelete(acc)}
                     />
                   ))}
@@ -1751,6 +1769,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
 
       {editTarget ? (
         <KiroEditAccountModal
+          key={editTarget.id}
           account={editTarget}
           proxies={proxyPool}
           apiKeys={apiKeys}
@@ -1781,7 +1800,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
           }
           providerSlot={<KiroProviderSection acc={detailTarget} busy={busyIDs.has(detailTarget.id)} onSync={() => void handleSync(detailTarget)} />}
           onClose={closeDetail}
-          onEdit={() => { setEditTarget(detailTarget); closeDetail(); }}
+          onEdit={() => { void openEditor(detailTarget); closeDetail(); }}
           onUsage={() => { setUsageTarget(detailTarget); closeDetail(); }}
           onTest={() => { closeDetail(); setTestingTarget(detailTarget); }}
           onRefresh={() => void handleRefreshToken(detailTarget)}
@@ -2474,10 +2493,8 @@ function KiroEditAccountModal({
   const [concurrency, setConcurrency] = useState(account.base_concurrency_override != null ? String(account.base_concurrency_override) : "");
   const [skipWarmTier, setSkipWarmTier] = useState(account.skip_warm_tier === true);
   const [keepConcurrency, setKeepConcurrency] = useState(account.keep_concurrency_on_degrade === true);
-  const [allowedKeys, setAllowedKeys] = useState<number[]>(() => {
-    const existing = new Set(apiKeys.map((key) => key.id));
-    return (account.allowed_api_key_ids ?? []).filter((id) => apiKeys.length === 0 || existing.has(id));
-  });
+  const [allowedKeys, setAllowedKeys] = useState<number[]>(() => [...(account.allowed_api_key_ids ?? [])]);
+  const [allowedKeysChanged, setAllowedKeysChanged] = useState(false);
   const [busy, setBusy] = useState(false);
 
   const parseInteger = (value: string, min: number, max: number): number | null | undefined => {
@@ -2504,7 +2521,7 @@ function KiroEditAccountModal({
         base_concurrency_override: parsedConcurrency,
         skip_warm_tier: skipWarmTier,
         keep_concurrency_on_degrade: keepConcurrency,
-        allowed_api_key_ids: allowedKeys,
+        ...(allowedKeysChanged ? { allowed_api_key_ids: allowedKeys } : {}),
       });
       showToast(t("kiro.saved"), "success");
       onSaved();
@@ -2513,7 +2530,7 @@ function KiroEditAccountModal({
     } finally {
       setBusy(false);
     }
-  }, [account.id, allowedKeys, concurrency, keepConcurrency, onSaved, priority, proxyUrl, scoreBias, showToast, skipWarmTier, t, tags]);
+  }, [account.id, allowedKeys, allowedKeysChanged, concurrency, keepConcurrency, onSaved, priority, proxyUrl, scoreBias, showToast, skipWarmTier, t, tags]);
 
   const field = (label: string, node: ReactNode, hint?: string) => (
     <div className="space-y-1">
@@ -2580,7 +2597,7 @@ function KiroEditAccountModal({
                 options={apiKeys}
                 value={allowedKeys}
                 disabled={apiKeys.length === 0}
-                onChange={setAllowedKeys}
+                onChange={(next) => { setAllowedKeys(next); setAllowedKeysChanged(true); }}
                 allLabel={t("accounts.allowedAPIKeysAll")}
                 selectedLabel={t("accounts.allowedAPIKeysSelected", { count: allowedKeys.length })}
                 placeholder={t("accounts.allowedAPIKeysPlaceholder")}
