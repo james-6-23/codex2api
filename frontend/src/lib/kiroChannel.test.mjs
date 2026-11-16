@@ -15,7 +15,7 @@ test('Kiro accounts page uses the shared controls and Kiro admin APIs', () => {
   }
   assert.match(page, /channel: "kiro"/)
   assert.match(page, /<TestConnectionModal/)
-  assert.match(page, /from "@\/components\/ui\/select"/)
+  assert.match(page, /from "\.\.\/components\/ui\/select"/)
   assert.doesNotMatch(page, /<select/)
   assert.match(read('../pages/Accounts.tsx'), /<KiroAccounts headerSlot=\{providerSwitcher\} \/>/)
   assert.match(read('../App.tsx'), /path="\/accounts\/kiro"/)
@@ -54,4 +54,26 @@ test('connection test modal uses the Kiro catalog instead of the Codex model lis
   assert.match(modal, /const isKiroAccount = Boolean\(account\.kiro_api\)/)
   assert.match(modal, /channelSettings\.kiro\?\.test_model/)
   assert.match(modal, /!isAntigravityAccount && !isKiroAccount;/)
+})
+
+test('Kiro accounts page mirrors the shared account tooling', () => {
+  for (const component of ['AccountDetailSheet', 'AccountUsageModal', 'AccountHealthBar', 'AccountIntelligenceBar', 'RequestCountPills', 'BatchAccountGroupModal', 'AccountGroupManagerModal', 'AccountProxyQuickEditor', 'APIKeyMultiSelect', 'ColumnSettingsMenu']) {
+    assert.match(page, new RegExp(`<${component}\\b`), component)
+  }
+  for (const call of ['updateAccountScheduler', 'batchUpdateAccounts', 'batchDeleteAccounts', 'refreshAccount', 'refreshAccountUsage', 'toggleAccountLock', 'resetAccountStatus', 'getAccountPageStats', 'getAccountHealthBars']) {
+    assert.match(page, new RegExp(`\\.${call}\\(`), call)
+  }
+  // Kiro 按积分计费，没有 5h/7d 窗口：不提供按窗口的自动暂停。
+  assert.doesNotMatch(page, /auto_pause_(5h|7d)_threshold/)
+  assert.match(page, /kiro_auth_kinds/)
+  assert.match(page, /"kiro student"/)
+  assert.match(page, /"kiro max"/)
+  // 套餐筛选固定列出全部档位；已隔离计数与 health_tier=banned 同口径；操作完成按当前筛选刷新。
+  assert.match(page, /const planTabs = \["all", \.\.\.planOrder\]/)
+  assert.match(page, /s\?\.health_banned/)
+  assert.match(page, /const reloadLatest = useCallback/)
+  assert.doesNotMatch(page, /!options\?\.silent && !controller\.signal\.aborted/)
+  const multiSelect = read('../components/APIKeyMultiSelect.tsx')
+  assert.match(multiSelect, /aria-expanded=\{open\}/)
+  assert.match(multiSelect, /aria-pressed=\{checked\}/)
 })

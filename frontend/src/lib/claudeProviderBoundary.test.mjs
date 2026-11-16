@@ -72,7 +72,7 @@ test("Claude API key plan allowlist is isolated from Codex plans", () => {
   assert.deepEqual(plans("antigravity"), [
     "free", "pro", "ultra", "standard", "api",
   ]);
-  assert.deepEqual(plans("kiro"), ["kiro free", "kiro pro", "kiro pro+", "kiro power"]);
+  assert.deepEqual(plans("kiro"), ["kiro free", "kiro pro", "kiro pro+", "kiro max", "kiro power", "kiro student"]);
 
   const automatic = plans("auto");
   const providerUnion = new Set(

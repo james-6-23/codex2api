@@ -151,3 +151,28 @@ func TestExportKiroKAMKeepsExternalIdPFields(t *testing.T) {
 		t.Fatalf("KAM export dropped authentication fields: %+v", got)
 	}
 }
+
+func TestKiroAccountPageFiltersByAuthKindAndPlan(t *testing.T) {
+	for _, kind := range []string{auth.KiroAuthKindSocial, auth.KiroAuthKindIdC, auth.KiroAuthKindExternalIdP, auth.KiroAuthKindAPIKey} {
+		if err := validateAccountPageFilters(accountPageQuery{AuthKind: kind}); err != nil {
+			t.Fatalf("auth_kind=%s rejected: %v", kind, err)
+		}
+	}
+	student := &accountListSnapshotItem{PlanType: "KIRO STUDENT", KiroAuthKind: auth.KiroAuthKindIdC}
+	if !accountListItemMatches(student, accountPageQuery{Plan: "kiro student", AuthKind: auth.KiroAuthKindIdC}, database.UpstreamChannelKiro) {
+		t.Fatal("Kiro plan filter must match the normalized plan key")
+	}
+	if accountListItemMatches(student, accountPageQuery{Plan: "kiro pro"}, database.UpstreamChannelKiro) {
+		t.Fatal("a student account must not match the pro filter")
+	}
+	quarantined := &accountListSnapshotItem{KiroAuthKind: auth.KiroAuthKindSocial, HealthTier: "banned", Status: "active"}
+	cooling := &accountListSnapshotItem{KiroAuthKind: auth.KiroAuthKindSocial, HealthTier: "risky", Status: "unauthorized"}
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{student, quarantined, cooling}, database.UpstreamChannelKiro)
+	if summary.KiroAuthKinds[auth.KiroAuthKindIdC] != 1 || summary.KiroAuthKinds[auth.KiroAuthKindSocial] != 2 {
+		t.Fatalf("kiro_auth_kinds = %v", summary.KiroAuthKinds)
+	}
+	// 「已隔离」标签按健康档计数，点进去的 health_tier=banned 筛选才不会是空的。
+	if summary.HealthBanned != 1 || !accountListItemMatches(quarantined, accountPageQuery{HealthTier: "banned"}, database.UpstreamChannelKiro) {
+		t.Fatalf("health_banned = %d", summary.HealthBanned)
+	}
+}
