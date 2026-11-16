@@ -664,7 +664,6 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       /* localStorage 不可用时忽略 */
     }
   }, [visibleCols]);
-  const [knownPlans, setKnownPlans] = useState<string[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [batchGroupOpen, setBatchGroupOpen] = useState(false);
   const reloadAbortRef = useRef<AbortController | null>(null);
@@ -732,11 +731,6 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       setStatsState(res.stats_state ?? "ready");
       setDisabledSorts(res.disabled_sorts ?? []);
       if (res.page && res.page !== page) setPage(res.page);
-      setKnownPlans((prev) => {
-        const set = new Set(prev);
-        for (const r of rows) if (r.kiro_plan) set.add(r.kiro_plan);
-        return set.size === prev.length ? prev : Array.from(set);
-      });
     } catch (error) {
       if (!controller.signal.aborted && generation === reloadGenerationRef.current) {
         const message = getErrorMessage(error);
@@ -744,7 +738,8 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
         if (!options?.silent) showToast(message, "error");
       }
     } finally {
-      if (!options?.silent && !controller.signal.aborted && generation === reloadGenerationRef.current) setLoading(false);
+      // 由最新一次请求收尾 loading：静默请求顶替了可见刷新时，也要把它清掉。
+      if (!controller.signal.aborted && generation === reloadGenerationRef.current) setLoading(false);
     }
   }, [page, pageSize, debouncedSearch, statusFilter, healthTier, planFilter, authFilter, tagFilter, domainFilter, groupFilter, sortKey, sortDir, showToast]);
 
@@ -773,6 +768,13 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       void reload({ silent: true });
     });
   }, [accounts, disabledSorts, loadError, loading, reload, statsState]);
+
+  // 操作完成时按当前筛选刷新：异步操作捕获的是发起时的 reload，期间改了筛选 / 页码会用旧条件覆盖列表。
+  const reloadRef = useRef(reload);
+  useEffect(() => {
+    reloadRef.current = reload;
+  }, [reload]);
+  const reloadLatest = useCallback((options?: { silent?: boolean }) => reloadRef.current(options), []);
 
   const mergeLiveStateIntoAccount = useCallback((account: AccountRow): AccountRow => {
     const live = liveState[String(account.id)];
@@ -832,33 +834,33 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       await api.updateAccountModelCooldownPolicy(account.id, data);
       showToast(t("accounts.modelCooldownPolicySaved"), "success");
       await refreshOpenDetail(account.id);
-      void reload();
+      void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [refreshOpenDetail, reload, showToast, t]);
+  }, [refreshOpenDetail, reloadLatest, showToast, t]);
 
   const handleClearDetailCooldown = useCallback(async (account: AccountRow, model: string) => {
     try {
       await api.clearAccountModelCooldown(account.id, model);
       showToast(t("accounts.modelCooldownCleared", { model }), "success");
       await refreshOpenDetail(account.id);
-      void reload();
+      void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [refreshOpenDetail, reload, showToast, t]);
+  }, [refreshOpenDetail, reloadLatest, showToast, t]);
 
   const handleClearAllDetailCooldowns = useCallback(async (account: AccountRow) => {
     try {
       const result = await api.clearAllAccountModelCooldowns(account.id);
       showToast(t("accounts.allModelCooldownsCleared", { count: result.cleared }), "success");
       await refreshOpenDetail(account.id);
-      void reload();
+      void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [refreshOpenDetail, reload, showToast, t]);
+  }, [refreshOpenDetail, reloadLatest, showToast, t]);
 
   const accountIDsKey = useMemo(() => accounts.map((a) => a.id).join(","), [accounts]);
   useEffect(() => {
@@ -1004,7 +1006,8 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
         await action();
         if (success) showToast(success, "success");
         await refreshOpenDetail(acc.id);
-        void reload({ silent: true });
+        setPageStatsToken((v) => v + 1);
+        void reloadLatest({ silent: true });
       } catch (error) {
         showToast(getErrorMessage(error), "error");
       } finally {
@@ -1015,7 +1018,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
         });
       }
     },
-    [refreshOpenDetail, reload, showToast],
+    [refreshOpenDetail, reloadLatest, showToast],
   );
 
   const handleDelete = useCallback(async (acc: AccountRow) => {
@@ -1030,11 +1033,11 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
     try {
       await api.deleteAccount(acc.id);
       showToast(t("kiro.deleted"), "success");
-      void reload();
+      void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [confirm, reload, showToast, t]);
+  }, [confirm, reloadLatest, showToast, t]);
 
   const handleRefreshToken = (acc: AccountRow) => runAccountAction(acc, () => api.refreshAccount(acc.id), t("kiro.tokenRefreshed"));
   const handleSync = (acc: AccountRow) => runAccountAction(acc, () => api.syncKiroAccount(acc.id), t("kiro.synced"));
@@ -1056,21 +1059,21 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       showToast(getErrorMessage(error), "error");
     }
     setPageStatsToken((v) => v + 1);
-    void reload({ silent: true });
-  }, [reload, showToast]);
+    void reloadLatest({ silent: true });
+  }, [reloadLatest, showToast]);
 
   const syncAll = useCallback(async () => {
     setSyncingAll(true);
     try {
       const result = await api.syncAllKiroAccounts();
       showToast(t("kiro.syncAllResult", { refreshed: result.refreshed, failed: result.failed }), result.failed > 0 ? "error" : "success");
-      void reload({ silent: true });
+      void reloadLatest({ silent: true });
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     } finally {
       setSyncingAll(false);
     }
-  }, [reload, showToast, t]);
+  }, [reloadLatest, showToast, t]);
 
   // ── 批量与导出 ──────────────────────────────────────────────
   const selectedIds = useMemo(() => Array.from(selected), [selected]);
@@ -1107,11 +1110,11 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
     try {
       await api.batchUpdateAccounts({ ids: selectedIds, ...patch });
       setSelected(new Set());
-      void reload();
+      void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [selectedIds, reload, showToast]);
+  }, [selectedIds, reloadLatest, showToast]);
 
   const handleBatchDelete = useCallback(async () => {
     if (selectedIds.length === 0) return;
@@ -1123,11 +1126,11 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
     try {
       await api.batchDeleteAccounts(selectedIds);
       setSelected(new Set());
-      void reload();
+      void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [confirm, reload, selectedIds, showToast, t]);
+  }, [confirm, reloadLatest, selectedIds, showToast, t]);
 
   const toggleSort = useCallback((key: SortKey) => {
     if (sortKey === key) {
@@ -1162,12 +1165,14 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       { id: "healthy" as HealthTier, count: s?.healthy ?? 0, tone: "success" as const },
       { id: "warm" as HealthTier, count: s?.warm ?? 0, tone: "warning" as const },
       { id: "risky" as HealthTier, count: s?.risky ?? 0, tone: "danger" as const },
-      { id: "banned" as HealthTier, count: s?.banned ?? 0, tone: "neutral" as const },
+      // 与 health_tier=banned 筛选同口径（按健康档计数，不是按 unauthorized 状态）。
+      { id: "banned" as HealthTier, count: s?.health_banned ?? 0, tone: "neutral" as const },
     ].map((chip) => ({ ...chip, label: t(`kiro.health.${chip.id}`) }));
   }, [summary, t]);
 
   const planOrder = Object.keys(KIRO_PLAN_LABELS);
-  const planTabs = ["all", ...knownPlans.filter(Boolean).sort((a, b) => planOrder.indexOf(a) - planOrder.indexOf(b))];
+  // 套餐筛选固定列出全部档位，不依赖当前页出现过哪些套餐。
+  const planTabs = ["all", ...planOrder];
   const planLabel = (plan: string) => (plan === "all" ? t("accounts.filterAll") : KIRO_PLAN_LABELS[plan] ?? plan);
 
   const authCounts = summary?.kiro_auth_kinds ?? {};
@@ -1318,7 +1323,11 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
               title={t("common.refresh")}
               aria-label={t("common.refresh")}
               disabled={loading}
-              onClick={() => void reload()}
+              onClick={() => {
+                // 分页列表不带今日 / 7 天明细，显式刷新时一并重拉。
+                setPageStatsToken((v) => v + 1);
+                void reloadLatest();
+              }}
             >
               <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
             </Button>
@@ -1329,7 +1338,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
       {loadError && accounts.length > 0 ? (
         <div className="mb-2 flex items-center justify-between gap-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive" role="alert">
           <span className="truncate">{loadError}</span>
-          <Button variant="outline" size="sm" onClick={() => void reload()}>{t("common.retry")}</Button>
+          <Button variant="outline" size="sm" onClick={() => void reloadLatest()}>{t("common.retry")}</Button>
         </div>
       ) : null}
       {loading && accounts.length > 0 ? (
@@ -1596,7 +1605,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
             variant="section"
             loading={loading && accounts.length === 0}
             error={accounts.length === 0 ? loadError : null}
-            onRetry={() => void reload()}
+            onRetry={() => void reloadLatest()}
             isEmpty={accounts.length === 0}
             emptyIcon={<ChannelLogo channel="kiro" size={30} />}
             emptyTitle={poolEmpty ? t("kiro.empty") : t("kiro.noMatchesTitle")}
@@ -1690,9 +1699,9 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
         </CardContent>
       </Card>
 
-      <ImportModal show={modal === "import"} onClose={() => setModal(null)} onDone={() => void reload()} />
-      <SocialLoginModal show={modal === "social"} onClose={() => setModal(null)} onDone={() => void reload()} />
-      <DeviceLoginModal show={modal === "device"} onClose={() => setModal(null)} onDone={() => void reload()} />
+      <ImportModal show={modal === "import"} onClose={() => setModal(null)} onDone={() => void reloadLatest()} />
+      <SocialLoginModal show={modal === "social"} onClose={() => setModal(null)} onDone={() => void reloadLatest()} />
+      <DeviceLoginModal show={modal === "device"} onClose={() => setModal(null)} onDone={() => void reloadLatest()} />
 
       {showManageGroups ? (
         <AccountGroupManagerModal
@@ -1702,7 +1711,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
           onClose={() => setShowManageGroups(false)}
           onChanged={() => {
             void reloadGroups();
-            void reload();
+            void reloadLatest();
           }}
         />
       ) : null}
@@ -1717,7 +1726,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
           setBatchGroupOpen(false);
           setSelected(new Set());
           void reloadGroups();
-          void reload();
+          void reloadLatest();
         }}
         onGroupsChanged={reloadGroups}
       />
@@ -1731,7 +1740,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
           onSaved={() => {
             setAssignTarget(null);
             void reloadGroups();
-            void reload();
+            void reloadLatest();
           }}
         />
       ) : null}
@@ -1751,7 +1760,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
             const id = editTarget.id;
             setEditTarget(null);
             void refreshOpenDetail(id);
-            void reload();
+            void reloadLatest();
           }}
         />
       ) : null}
@@ -1794,7 +1803,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
           onClose={() => setTestingTarget(null)}
           onSettled={() => {
             setPageStatsToken((v) => v + 1);
-            void reload({ silent: true });
+            void reloadLatest({ silent: true });
           }}
         />
       ) : null}
@@ -1805,7 +1814,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
         proxies={proxyPool}
         ctx={proxyBindingCtx}
         onClose={() => setQuickProxyAccount(null)}
-        onSaved={() => reload({ silent: true })}
+        onSaved={() => reloadLatest({ silent: true })}
       />
 
       {confirmDialog}

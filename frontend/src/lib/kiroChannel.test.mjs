@@ -68,4 +68,12 @@ test('Kiro accounts page mirrors the shared account tooling', () => {
   assert.match(page, /kiro_auth_kinds/)
   assert.match(page, /"kiro student"/)
   assert.match(page, /"kiro max"/)
+  // 套餐筛选固定列出全部档位；已隔离计数与 health_tier=banned 同口径；操作完成按当前筛选刷新。
+  assert.match(page, /const planTabs = \["all", \.\.\.planOrder\]/)
+  assert.match(page, /s\?\.health_banned/)
+  assert.match(page, /const reloadLatest = useCallback/)
+  assert.doesNotMatch(page, /!options\?\.silent && !controller\.signal\.aborted/)
+  const multiSelect = read('../components/APIKeyMultiSelect.tsx')
+  assert.match(multiSelect, /aria-expanded=\{open\}/)
+  assert.match(multiSelect, /aria-pressed=\{checked\}/)
 })

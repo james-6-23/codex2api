@@ -71,6 +71,7 @@ export default function APIKeyMultiSelect({
       <button
         type="button"
         disabled={disabled}
+        aria-expanded={open}
         className={`flex w-full items-center justify-between gap-3 rounded-md border border-input bg-background px-3.5 py-3 text-left shadow-xs transition-[border-color,box-shadow] ${
           disabled
             ? "cursor-not-allowed opacity-70"
@@ -107,6 +108,7 @@ export default function APIKeyMultiSelect({
                   <button
                     key={option.id}
                     type="button"
+                    aria-pressed={checked}
                     className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${
                       checked
                         ? "bg-primary/10 text-primary"

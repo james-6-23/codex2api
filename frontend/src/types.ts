@@ -653,6 +653,8 @@ export interface AccountListSummary {
   setup_token?: number
   /** Kiro 渠道:按 social / idc / external_idp / api_key 计数。 */
   kiro_auth_kinds?: Record<string, number>
+  /** 健康档为 banned 的账号数（与 health_tier=banned 筛选同口径）。 */
+  health_banned?: number
   subscription_unlocked: number
   unauthorized_24h: number
   rate_limited_1h: number

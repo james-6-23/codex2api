@@ -143,6 +143,8 @@ type accountListSummary struct {
 
 	// KiroAuthKinds 按 social / idc / external_idp / api_key 计数，供 Kiro 页凭据类型筛选。
 	KiroAuthKinds map[string]int `json:"kiro_auth_kinds,omitempty"`
+	// HealthBanned 按健康档计数，与 health_tier=banned 筛选同口径（Banned 按 unauthorized 状态计数）。
+	HealthBanned int `json:"health_banned"`
 }
 
 type accountListDomainFacet struct {
@@ -1656,6 +1658,8 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 			summary.Warm++
 		case "risky":
 			summary.Risky++
+		case "banned":
+			summary.HealthBanned++
 		}
 		if item.GrokAuthKind == auth.GrokAuthKindOAuth {
 			summary.OAuth++

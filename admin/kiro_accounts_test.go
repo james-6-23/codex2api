@@ -165,8 +165,14 @@ func TestKiroAccountPageFiltersByAuthKindAndPlan(t *testing.T) {
 	if accountListItemMatches(student, accountPageQuery{Plan: "kiro pro"}, database.UpstreamChannelKiro) {
 		t.Fatal("a student account must not match the pro filter")
 	}
-	summary, _ := summarizeAccountList([]*accountListSnapshotItem{student, {KiroAuthKind: auth.KiroAuthKindSocial}}, database.UpstreamChannelKiro)
-	if summary.KiroAuthKinds[auth.KiroAuthKindIdC] != 1 || summary.KiroAuthKinds[auth.KiroAuthKindSocial] != 1 {
+	quarantined := &accountListSnapshotItem{KiroAuthKind: auth.KiroAuthKindSocial, HealthTier: "banned", Status: "active"}
+	cooling := &accountListSnapshotItem{KiroAuthKind: auth.KiroAuthKindSocial, HealthTier: "risky", Status: "unauthorized"}
+	summary, _ := summarizeAccountList([]*accountListSnapshotItem{student, quarantined, cooling}, database.UpstreamChannelKiro)
+	if summary.KiroAuthKinds[auth.KiroAuthKindIdC] != 1 || summary.KiroAuthKinds[auth.KiroAuthKindSocial] != 2 {
 		t.Fatalf("kiro_auth_kinds = %v", summary.KiroAuthKinds)
+	}
+	// 「已隔离」标签按健康档计数，点进去的 health_tier=banned 筛选才不会是空的。
+	if summary.HealthBanned != 1 || !accountListItemMatches(quarantined, accountPageQuery{HealthTier: "banned"}, database.UpstreamChannelKiro) {
+		t.Fatalf("health_banned = %d", summary.HealthBanned)
 	}
 }
