@@ -114,10 +114,10 @@ func ExecuteKiroMessagesRequest(ctx context.Context, account *auth.Account, body
 	if err != nil {
 		return nil, ErrBadRequest(err.Error())
 	}
-	if kiroOnlyWebSearchTool(inbound) || kiroWebSearchAmongTools(inbound) {
-		return executeKiroWebSearchMessages(ctx, account, inbound, proxyOverride)
-	}
 	schema := kiroInjectStructuredInstruction(inbound)
+	if kiroOnlyWebSearchTool(inbound) || kiroWebSearchAmongTools(inbound) {
+		return executeKiroWebSearchMessages(ctx, account, inbound, proxyOverride, schema)
+	}
 	conversion, err := convertKiroRequest(inbound, kiroPurposeGenerate)
 	if err != nil {
 		return nil, ErrBadRequest(err.Error())

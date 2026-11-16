@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"hash/crc32"
 	"image"
+	"image/color"
 	"image/png"
 	"strings"
 	"testing"
@@ -158,11 +159,15 @@ func TestKiroCLIBodyOnlyRewritesMessageOrigin(t *testing.T) {
 }
 
 func TestKiroImageDecodeBudgetRejectsHugeImages(t *testing.T) {
-	if !kiroImageDecodeWithinBudget(1568, 1568) || !kiroImageDecodeWithinBudget(8000, 8000) {
+	if !kiroImageDecodeWithinBudget(1568, 1568, color.RGBAModel) || !kiroImageDecodeWithinBudget(8000, 8000, color.NRGBAModel) {
 		t.Fatal("ordinary images must be decodable")
 	}
-	if kiroImageDecodeWithinBudget(30000, 30000) || kiroImageDecodeWithinBudget(1<<31-1, 2) || kiroImageDecodeWithinBudget(0, 10) {
+	if kiroImageDecodeWithinBudget(30000, 30000, color.RGBAModel) || kiroImageDecodeWithinBudget(1<<31-1, 2, color.GrayModel) || kiroImageDecodeWithinBudget(0, 10, color.RGBAModel) {
 		t.Fatal("images above the 512 MiB decode budget must not be decoded")
+	}
+	// 16 位 PNG 解码成 NRGBA64，每像素 8 字节：10000×10000 需要 800 MB。
+	if kiroImageDecodeWithinBudget(10000, 10000, color.NRGBA64Model) || !kiroImageDecodeWithinBudget(10000, 10000, color.RGBAModel) {
+		t.Fatal("the decode budget must follow the decoded color model")
 	}
 	var huge bytes.Buffer
 	if err := png.Encode(&huge, image.NewGray(image.Rect(0, 0, 1, 1))); err != nil {
@@ -214,5 +219,44 @@ func TestKiroStructuredOutputPrefersFullyConstrainedCandidate(t *testing.T) {
 		if got := kiroSchemaConstraints(pair[0].(map[string]any), pair[1]); got != want {
 			t.Errorf("constraints %s = %v want %v", raw, got, want)
 		}
+	}
+}
+
+func TestKiroDecodeJSONRejectsTrailingData(t *testing.T) {
+	var value any
+	for _, raw := range []string{`{"id":1}}`, `[1]]`, `{"a":1} {"b":2}`, `{"a":1} x`} {
+		if err := kiroDecodeJSON([]byte(raw), &value); err == nil {
+			t.Errorf("%s must be rejected", raw)
+		}
+	}
+	if err := kiroDecodeJSON([]byte("{\"id\":9007199254740993}\n  "), &value); err != nil {
+		t.Fatalf("trailing whitespace is valid JSON: %v", err)
+	}
+}
+
+func TestKiroStructuredOutputExactMultipleOfAndNestedEquality(t *testing.T) {
+	multiple := map[string]any{"type": "array", "items": map[string]any{"type": "number", "multipleOf": 1}}
+	if got, ok := kiroExtractConformingJSON("first [1] then [0.0000000001]", multiple); !ok || got != "[1]" {
+		t.Fatalf("multipleOf must require an exact integer quotient, got %q", got)
+	}
+	unique := map[string]any{"type": "array", "uniqueItems": true}
+	if got, ok := kiroExtractConformingJSON(`first [{"n":1},{"n":2}] then [{"n":1},{"n":1.0}]`, unique); !ok || got != `[{"n":1},{"n":2}]` {
+		t.Fatalf("uniqueItems must compare nested numbers semantically, got %q", got)
+	}
+	if !kiroJSONEqual(map[string]any{"a": []any{json.Number("1.0")}}, map[string]any{"a": []any{json.Number("1")}}) || kiroJSONEqual(json.Number("1"), "1") {
+		t.Fatal("JSON equality must normalize nested numbers and keep numbers distinct from strings")
+	}
+	ranged := map[string]any{"oneOf": []any{
+		map[string]any{"type": "integer", "minimum": 0, "maximum": 9},
+		map[string]any{"type": "integer", "minimum": 10, "maximum": 19},
+	}}
+	if got, ok := kiroExtractConformingJSON("answer: 2", ranged); ok {
+		t.Fatalf("a bare number outside JSON containers is not extracted: %q", got)
+	}
+	if got, ok := kiroExtractConformingJSON("2", ranged); !ok || got != "2" {
+		t.Fatalf("oneOf branches separated by ranges must accept 2, got %q %v", got, ok)
+	}
+	if !kiroInvokeInputConforms(map[string]any{"type": "object", "properties": map[string]any{"ids": map[string]any{"type": "array", "items": ranged}}}, map[string]any{"ids": []any{2, 15}}) {
+		t.Fatal("the invoke gate must evaluate range keywords inside oneOf")
 	}
 }

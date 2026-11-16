@@ -426,9 +426,12 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 					}
 				}
 			}
-			// Kiro 从不产生能力快照，但上游原生支持一次发出多个工具调用。
+			// Kiro 从不产生能力快照：上游原生支持一次发出多个工具调用，图片输入按模型目录声明。
 			if account.IsKiro() {
 				validated["supports_parallel_tool_calls"] = json.RawMessage("true")
+				if account.KiroAcceptsImage(target) {
+					validated["input_modalities"] = json.RawMessage(`["text","image"]`)
+				}
 			}
 			candidates = append(candidates, validated)
 		}

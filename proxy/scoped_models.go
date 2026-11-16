@@ -39,6 +39,8 @@ type scopedModelRecord struct {
 	created int64
 	backing modelBacking
 	alias   bool
+	// imageInput 由上游模型目录声明（目前只有 Kiro 提供逐模型的输入类型）。
+	imageInput bool
 }
 
 func stableModelCreated(t time.Time) int64 {
@@ -242,6 +244,9 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 		case account.IsKiro():
 			for _, id := range KiroAccountModelIDs(account) {
 				addScopedModel(records, id, modelBackingKiro, time.Time{}, false)
+				if record := records[strings.ToLower(strings.TrimSpace(id))]; record != nil && account.KiroAcceptsImage(id) {
+					record.imageInput = true
+				}
 				addTarget(id)
 			}
 
@@ -401,7 +406,7 @@ func (h *Handler) scopedModels(ctx context.Context, row *database.APIKeyRow) []a
 	models := make([]api.Model, 0, len(records))
 	for _, record := range records {
 		models = append(models, api.Model{
-			ID: record.id, Object: "model", Created: record.created, OwnedBy: scopedModelOwner(record),
+			ID: record.id, Object: "model", Created: record.created, OwnedBy: scopedModelOwner(record), ImageInput: record.imageInput,
 		})
 	}
 	sort.Slice(models, func(i, j int) bool {

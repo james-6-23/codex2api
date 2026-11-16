@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -166,7 +167,8 @@ func kiroDecodeJSON(data []byte, out any) error {
 	if err := decoder.Decode(out); err != nil {
 		return err
 	}
-	if decoder.More() {
+	// More 只判断当前数组 / 对象里还有没有元素，顶层多出的 } 或 ] 要靠再读一次确认已到 EOF。
+	if err := decoder.Decode(new(json.RawMessage)); err != io.EOF {
 		return fmt.Errorf("unexpected data after JSON value")
 	}
 	return nil

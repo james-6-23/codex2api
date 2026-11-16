@@ -364,11 +364,14 @@ func TestFetchCodexModelsManifest_UsesCustomHeaderAccountIDOverride(t *testing.T
 }
 
 func TestScopedManifestMarksKiroModelsParallel(t *testing.T) {
-	body, err := buildScopedCodexManifest([]api.Model{{ID: "claude-sonnet-4.6", OwnedBy: "kiro"}, {ID: "relay-model", OwnedBy: "codex2api"}})
+	body, err := buildScopedCodexManifest([]api.Model{{ID: "claude-sonnet-4.6", OwnedBy: "kiro", ImageInput: true}, {ID: "glm-5", OwnedBy: "kiro"}, {ID: "relay-model", OwnedBy: "codex2api"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !gjson.GetBytes(body, `models.#(slug=="claude-sonnet-4.6").supports_parallel_tool_calls`).Bool() || gjson.GetBytes(body, `models.#(slug=="relay-model").supports_parallel_tool_calls`).Bool() {
 		t.Fatalf("only Kiro models should advertise parallel tool calls: %s", body)
+	}
+	if gjson.GetBytes(body, `models.#(slug=="claude-sonnet-4.6").input_modalities`).Raw != `["text","image"]` || gjson.GetBytes(body, `models.#(slug=="glm-5").input_modalities`).Raw != `["text"]` {
+		t.Fatalf("image input must follow the per-model catalog: %s", body)
 	}
 }

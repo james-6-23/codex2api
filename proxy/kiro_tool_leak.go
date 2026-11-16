@@ -569,8 +569,14 @@ func kiroInvokeInputConforms(schema map[string]any, input map[string]any) bool {
 	if kiroDecodeJSON(encoded, &value) != nil {
 		return false
 	}
-	validator := &kiroSchemaValidator{root: schema, remaining: kiroStructuredMaxSteps}
-	return validator.conforms(schema, value)
+	// 约束关键字只认 json.Number，schema 也要按保留数字原文的方式重新解码；用严格校验，
+	// oneOf 按数值范围区分的分支才能正确判定。
+	var schemaNumbers any
+	if kiroDecodeJSON([]byte(kiroMarshalString(schema)), &schemaNumbers) != nil {
+		return false
+	}
+	validator := &kiroSchemaValidator{root: schemaNumbers, remaining: kiroStructuredMaxSteps, strict: true}
+	return validator.conforms(schemaNumbers, value)
 }
 
 func kiroCouldBecomeInvokeOpen(tail string) bool {

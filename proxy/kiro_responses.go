@@ -819,10 +819,12 @@ func ExecuteKiroResponsesRequest(ctx context.Context, account *auth.Account, bod
 	if err != nil {
 		return nil, ErrBadRequest(err.Error())
 	}
-	if translation.webSearch {
-		return executeKiroWebSearchResponses(ctx, account, inbound, translation, proxyOverride)
-	}
+	// 结构化输出要求先注入，托管 web_search 路径也要生效（kiro.rs 在此只告警、原样返回）；
+	// 搜索词只取用户消息，注入的 system 不影响搜索请求。
 	schema := kiroInjectStructuredInstruction(inbound)
+	if translation.webSearch {
+		return executeKiroWebSearchResponses(ctx, account, inbound, translation, proxyOverride, schema)
+	}
 	conversion, err := convertKiroRequest(inbound, kiroPurposeGenerate)
 	if err != nil {
 		return nil, ErrBadRequest(err.Error())

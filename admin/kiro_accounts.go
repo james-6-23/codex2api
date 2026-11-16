@@ -270,8 +270,9 @@ func (h *Handler) createKiroAccount(ctx context.Context, item kiroImportCredenti
 		credentials["refresh_token"] = item.RefreshToken
 		credentials["expires_at"] = item.ExpiresAt.UTC().Format(time.RFC3339)
 	}
-	if models, err := auth.KiroFetchModels(ctx, cred, bearer, proxyURL); err == nil && len(models) > 0 {
+	if models, imageModels, err := auth.KiroFetchModels(ctx, cred, bearer, proxyURL); err == nil && len(models) > 0 {
 		credentials["models"] = models
+		credentials[auth.KiroImageModelsCredentialKey] = strings.Join(imageModels, ",")
 	} else if err != nil {
 		warnings = append(warnings, "模型目录同步失败，暂用默认目录")
 	}
@@ -660,7 +661,7 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	}
 	requestAuth := account.KiroRequestAuth()
 	usage, usageErr := auth.KiroFetchUsage(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
-	models, modelErr := auth.KiroFetchModels(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
+	models, imageModels, modelErr := auth.KiroFetchModels(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
 	if usageErr != nil && modelErr != nil {
 		return nil, nil, usageErr
 	}
@@ -673,13 +674,16 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	}
 	if modelErr == nil && len(models) > 0 {
 		updates["models"] = models
+		updates[auth.KiroImageModelsCredentialKey] = strings.Join(imageModels, ",")
 	}
 	if err := h.db.UpdateCredentials(ctx, id, updates); err != nil {
 		return nil, nil, err
 	}
-	if err := h.store.LoadAccountByID(ctx, id); err != nil {
+	row, err := h.db.GetAccountByID(ctx, id)
+	if err != nil {
 		return nil, nil, err
 	}
+	h.store.ApplyKiroAccountRow(row)
 	h.invalidateClaudeCatalogCaches()
 	// 与 kiro.rs 一致：额度查不到就报错，不让旧快照冒充最新额度；模型目录已照常保存。
 	if usageErr != nil {

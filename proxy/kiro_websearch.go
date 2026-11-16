@@ -357,10 +357,13 @@ func kiroEventsFromMessage(model string, content []any, stopReason string, usage
 }
 
 // executeKiroWebSearchMessages 是 /v1/messages 的托管 web_search 入口。
-func executeKiroWebSearchMessages(ctx context.Context, account *auth.Account, req *kiroInboundRequest, proxyOverride string) (*http.Response, error) {
+func executeKiroWebSearchMessages(ctx context.Context, account *auth.Account, req *kiroInboundRequest, proxyOverride string, schema map[string]any) (*http.Response, error) {
 	events, failure, err := runKiroWebSearch(ctx, account, req, proxyOverride)
 	if err != nil || failure != nil {
 		return failure, err
+	}
+	if schema != nil {
+		events = kiroRewriteStructuredEvents(events, schema)
 	}
 	if !req.Stream {
 		message, _ := kiroAggregateEvents(events)
@@ -377,10 +380,13 @@ func executeKiroWebSearchMessages(ctx context.Context, account *auth.Account, re
 }
 
 // executeKiroWebSearchResponses 是 /v1/responses 的托管 web_search 入口。
-func executeKiroWebSearchResponses(ctx context.Context, account *auth.Account, req *kiroInboundRequest, translation *kiroResponsesTranslation, proxyOverride string) (*http.Response, error) {
+func executeKiroWebSearchResponses(ctx context.Context, account *auth.Account, req *kiroInboundRequest, translation *kiroResponsesTranslation, proxyOverride string, schema map[string]any) (*http.Response, error) {
 	events, failure, err := runKiroWebSearch(ctx, account, req, proxyOverride)
 	if err != nil || failure != nil {
 		return failure, err
+	}
+	if schema != nil {
+		events = kiroRewriteStructuredEvents(events, schema)
 	}
 	responses := newKiroResponsesStream(translation)
 	if translation.stream {
