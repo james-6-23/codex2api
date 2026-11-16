@@ -1375,7 +1375,7 @@ func TestBuildImageErrorUsageLogRecordsFailure(t *testing.T) {
 	usage := &UsageInfo{InputTokens: 12, OutputTokens: 3, TotalTokens: 15, PromptTokens: 12, CompletionTokens: 3}
 	imageLogInfo := imageUsageLogInfo{Count: 1, Width: 1024, Height: 1024, Bytes: 2048, Format: "png", Size: "1024x1024"}
 
-	logInput := buildImageErrorUsageLog(account, "/v1/images/generations", "gpt-image-2", "gpt-image-2", false, 1500, 1, true, readErr, usage, imageLogInfo)
+	logInput := buildImageErrorUsageLog(account, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", false, 1500, 1, true, readErr, usage, imageLogInfo)
 
 	if logInput.AccountID != 42 {
 		t.Fatalf("AccountID = %d, want 42", logInput.AccountID)
