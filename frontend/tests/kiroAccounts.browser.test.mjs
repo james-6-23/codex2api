@@ -57,15 +57,30 @@ async function fixture(testContext, options = {}) {
     window.__calls = []
     window.__saved = null
     window.__detail = {id:1, name:'Kiro fixture', email:'kiro@example.test', status:'active', enabled:true, kiro_api:true, kiro_auth_kind:'social', kiro_plan:'kiro student', plan_type:'KIRO STUDENT', health_tier:'healthy', models:['claude-haiku-4.5'], group_ids:[], tags:[], allowed_api_key_ids:[7], detail_loaded:true, created_at:'2026-11-17T00:00:00Z'}
+    window.__secondDetail = {...window.__detail, id:2, email:'second@example.test', kiro_login_source:'Second account detail loaded'}
+    window.__batchFailure = options.batchFailure ?? false
+    window.__abortedDetails = []
     window.__api = async (name, args) => {
       window.__calls.push({name, args})
       if (name === 'getAccountsPage') {
         const {allowed_api_key_ids, detail_loaded, ...row} = window.__detail
-        return {accounts:[row], total:1, page:1, page_size:20, stats_state:'ready', summary:{total:1, normal:1, healthy:1, kiro_auth_kinds:{social:1}}, facets:{tags:[],email_domains:[]}}
+        const accounts = options.secondAccount ? [row, {...row,id:2,email:'second@example.test'}] : [row]
+        return {accounts, total:accounts.length, page:1, page_size:20, stats_state:'ready', summary:{total:accounts.length, normal:accounts.length, healthy:accounts.length, kiro_auth_kinds:{social:accounts.length}}, facets:{tags:[],email_domains:[]}}
       }
       if (name === 'getAccount') {
         if (options.detailError) throw new Error('fixture detail unavailable')
+        if (args[0] === 2) {
+          return new Promise((resolve, reject) => {
+            window.__finishSecondDetail = () => resolve({...window.__secondDetail})
+            args[1]?.addEventListener('abort', () => {window.__abortedDetails.push(2); reject(new DOMException('aborted','AbortError'))}, {once:true})
+          })
+        }
         return {...window.__detail}
+      }
+      if (name === 'refreshAccount') return new Promise(resolve => {window.__finishRefresh = () => resolve({})})
+      if (name === 'batchUpdateAccounts') {
+        const failed = window.__batchFailure ? (options.partialFailure ? 1 : args[0].ids.length) : 0
+        return {success:args[0].ids.length - failed, failed, message:failed ? 'fixture account unavailable' : 'ok'}
       }
       if (name === 'updateAccountScheduler') { window.__saved=args[1]; Object.assign(window.__detail, args[1]); return {} }
       if (name === 'getAccountHealthBars') return {buckets:{'1':[{success:9,failed:1}]}}
@@ -131,4 +146,51 @@ test('explicit refresh reloads health history for the same visible IDs', async t
   await page.getByRole('button', {name:'刷新',exact:true}).click()
   await page.waitForFunction(before => window.__calls.filter(call => call.name === 'getAccountHealthBars').length > before, before)
   await page.screenshot({path:path.join(artifacts,'health-refreshed.png')})
+})
+
+test('batch failures retain the selection and still reload the list', async testContext => {
+  const page = await fixture(testContext, {batchFailure:true, partialFailure:true, secondAccount:true})
+  await page.getByRole('checkbox', {name:'全选',exact:true}).check()
+  const before = await page.evaluate(() => window.__calls.filter(call => call.name === 'getAccountsPage').length)
+  await page.getByRole('button', {name:'启用',exact:true}).click()
+  await page.getByText('批量保存完成：成功 1，失败 1', {exact:true}).waitFor()
+  await page.waitForFunction(before => window.__calls.filter(call => call.name === 'getAccountsPage').length > before, before)
+  assert.equal(await page.getByRole('checkbox', {name:'kiro@example.test',exact:true}).isChecked(), true)
+  assert.equal(await page.getByRole('checkbox', {name:'second@example.test',exact:true}).isChecked(), true)
+  await page.screenshot({path:path.join(artifacts,'batch-failure-selection.png')})
+  await page.evaluate(() => {window.__batchFailure=false})
+  await page.getByRole('button', {name:'启用',exact:true}).click()
+  await page.waitForFunction(() => document.querySelectorAll('tbody input:checked').length === 0)
+})
+
+test('failed group assignment keeps the modal open for retry', async testContext => {
+  const page = await fixture(testContext, {batchFailure:true})
+  await page.getByRole('button', {name:'设置分组',exact:true}).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', {name:'保存',exact:true}).click()
+  await page.getByText('批量保存完成：成功 0，失败 1', {exact:true}).waitFor()
+  assert.equal(await dialog.isVisible(), true)
+  assert.equal(await page.getByText('分组已更新', {exact:true}).count(), 0)
+  await page.evaluate(() => {window.__batchFailure=false})
+  await dialog.getByRole('button', {name:'保存',exact:true}).click()
+  await dialog.waitFor({state:'hidden'})
+})
+
+test('completion of an old account action cannot cancel the new detail request', async testContext => {
+  const page = await fixture(testContext, {secondAccount:true})
+  await page.getByRole('button', {name:'kiro@example.test',exact:true}).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', {name:'AT刷新',exact:true}).click()
+  await page.waitForFunction(() => typeof window.__finishRefresh === 'function')
+  await page.keyboard.press('Escape')
+  await dialog.waitFor({state:'hidden'})
+  await page.getByRole('button', {name:'second@example.test',exact:true}).click()
+  await page.waitForFunction(() => typeof window.__finishSecondDetail === 'function')
+  const before = await page.evaluate(() => window.__calls.filter(call => call.name === 'getAccountsPage').length)
+  await page.evaluate(() => window.__finishRefresh())
+  await page.waitForFunction(before => window.__calls.filter(call => call.name === 'getAccountsPage').length > before, before)
+  assert.deepEqual(await page.evaluate(() => window.__abortedDetails), [])
+  assert.equal(await page.evaluate(() => window.__calls.filter(call => call.name === 'getAccount' && call.args[0] === 1).length), 1)
+  await page.evaluate(() => window.__finishSecondDetail())
+  await dialog.getByText('Second account detail loaded', {exact:true}).waitFor()
 })

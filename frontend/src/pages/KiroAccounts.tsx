@@ -631,6 +631,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
   const [usageTarget, setUsageTarget] = useState<AccountRow | null>(null);
   const [editTarget, setEditTarget] = useState<AccountRow | null>(null);
   const [detailTarget, setDetailTarget] = useState<AccountRow | null>(null);
+  const detailTargetIDRef = useRef<number | null>(null);
   const [testingTarget, setTestingTarget] = useState<AccountRow | null>(null);
   const detailAbortRef = useRef<AbortController | null>(null);
   const detailRequestSeqRef = useRef(0);
@@ -786,7 +787,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
   }, [liveSessionSlotBufferEnabled, liveState]);
 
   const refreshOpenDetail = useCallback(async (id: number) => {
-    if (detailTarget?.id !== id) return;
+    if (detailTargetIDRef.current !== id) return;
     detailAbortRef.current?.abort();
     const controller = new AbortController();
     detailAbortRef.current = controller;
@@ -801,9 +802,10 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
     } finally {
       if (detailAbortRef.current === controller) detailAbortRef.current = null;
     }
-  }, [detailTarget?.id, mergeLiveStateIntoAccount]);
+  }, [mergeLiveStateIntoAccount]);
 
   const openDetail = useCallback(async (acc: AccountRow) => {
+    detailTargetIDRef.current = acc.id;
     detailAbortRef.current?.abort();
     const controller = new AbortController();
     detailAbortRef.current = controller;
@@ -822,6 +824,7 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
   }, [mergeLiveStateIntoAccount]);
 
   const closeDetail = useCallback(() => {
+    detailTargetIDRef.current = null;
     detailAbortRef.current?.abort();
     detailRequestSeqRef.current += 1;
     setDetailTarget(null);
@@ -1126,13 +1129,17 @@ export default function KiroAccounts({ headerSlot }: { headerSlot?: ReactNode } 
   const runBatch = useCallback(async (patch: { enabled?: boolean; locked?: boolean }) => {
     if (selectedIds.length === 0) return;
     try {
-      await api.batchUpdateAccounts({ ids: selectedIds, ...patch });
-      setSelected(new Set());
+      const result = await api.batchUpdateAccounts({ ids: selectedIds, ...patch });
+      if (result.failed > 0) {
+        showToast(t("accounts.batchMetaDone", { success: result.success, fail: result.failed }), "error");
+      } else {
+        setSelected(new Set());
+      }
       void reloadLatest();
     } catch (error) {
       showToast(getErrorMessage(error), "error");
     }
-  }, [selectedIds, reloadLatest, showToast]);
+  }, [selectedIds, reloadLatest, showToast, t]);
 
   const handleBatchDelete = useCallback(async () => {
     if (selectedIds.length === 0) return;
@@ -2423,7 +2430,10 @@ function AssignGroupsModal({
   const save = useCallback(async () => {
     setBusy(true);
     try {
-      await api.batchUpdateAccounts({ ids: [account.id], group_ids: selected });
+      const result = await api.batchUpdateAccounts({ ids: [account.id], group_ids: selected });
+      if (result.failed > 0) {
+        throw new Error(t("accounts.batchMetaDone", { success: result.success, fail: result.failed }));
+      }
       showToast(t("kiro.groupsUpdated"), "success");
       onSaved();
     } catch (error) {
