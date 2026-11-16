@@ -234,7 +234,7 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			ExperimentalSupportedTools: []string{},
 			TruncationPolicy:           map[string]any{"mode": "tokens", "limit": 10000},
 		}
-		if model.ImageInput || model.OwnedBy != "kiro" && strings.Contains(key, "image") {
+		if model.OwnedBy == "kiro" || model.ImageInput || strings.Contains(key, "image") {
 			item.InputModalities = []string{"text", "image"}
 		}
 		// Kiro 模型原生支持一次发出多个工具调用；Codex 据此发 parallel_tool_calls=true。

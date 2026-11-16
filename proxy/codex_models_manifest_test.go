@@ -371,7 +371,7 @@ func TestScopedManifestMarksKiroModelsParallel(t *testing.T) {
 	if !gjson.GetBytes(body, `models.#(slug=="claude-sonnet-4.6").supports_parallel_tool_calls`).Bool() || gjson.GetBytes(body, `models.#(slug=="relay-model").supports_parallel_tool_calls`).Bool() {
 		t.Fatalf("only Kiro models should advertise parallel tool calls: %s", body)
 	}
-	if gjson.GetBytes(body, `models.#(slug=="claude-sonnet-4.6").input_modalities`).Raw != `["text","image"]` || gjson.GetBytes(body, `models.#(slug=="glm-5").input_modalities`).Raw != `["text"]` {
-		t.Fatalf("image input must follow the per-model catalog: %s", body)
+	if gjson.GetBytes(body, `models.#(slug=="claude-sonnet-4.6").input_modalities`).Raw != `["text","image"]` || gjson.GetBytes(body, `models.#(slug=="glm-5").input_modalities`).Raw != `["text","image"]` {
+		t.Fatalf("Kiro models must advertise image input: %s", body)
 	}
 }

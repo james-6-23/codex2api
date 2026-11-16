@@ -39,7 +39,7 @@ type scopedModelRecord struct {
 	created int64
 	backing modelBacking
 	alias   bool
-	// imageInput 由上游模型目录声明（目前只有 Kiro 提供逐模型的输入类型）。
+	// imageInput carries the Kiro channel's image-input contract into the manifest.
 	imageInput bool
 }
 
@@ -244,14 +244,9 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 		case account.IsKiro():
 			for _, id := range KiroAccountModelIDs(account) {
 				key := strings.ToLower(strings.TrimSpace(id))
-				previous := records[key]
-				imageInput := account.KiroAcceptsImage(id)
-				if previous != nil && previous.backing&modelBackingKiro != 0 {
-					imageInput = imageInput && previous.imageInput
-				}
 				addScopedModel(records, id, modelBackingKiro, time.Time{}, false)
 				if record := records[key]; record != nil {
-					record.imageInput = imageInput
+					record.imageInput = true
 				}
 				addTarget(id)
 			}
