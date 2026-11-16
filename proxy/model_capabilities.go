@@ -426,6 +426,10 @@ func (h *Handler) applyModelCapabilities(ctx context.Context, row *database.APIK
 					}
 				}
 			}
+			// Kiro 从不产生能力快照，但上游原生支持一次发出多个工具调用。
+			if account.IsKiro() {
+				validated["supports_parallel_tool_calls"] = json.RawMessage("true")
+			}
 			candidates = append(candidates, validated)
 		}
 		if upstream {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"math"
 	"strings"
+	"unicode/utf8"
 )
 
 // 结构化输出模拟（output_config.format = json_schema）：Kiro 没有原生 JSON Schema 模式，
@@ -42,6 +43,8 @@ func kiroInjectStructuredInstruction(req *kiroInboundRequest) map[string]any {
 type kiroSchemaValidator struct {
 	root      any
 	remaining int
+	// strict 额外检查数值范围、长度、数量等约束（kiro.rs 忽略这些关键字），只用于在候选里优先挑完全合规的。
+	strict bool
 }
 
 func (v *kiroSchemaValidator) conforms(schema, value any) bool {
@@ -173,7 +176,83 @@ func (v *kiroSchemaValidator) object(obj map[string]any, value any, depth int) b
 			return false
 		}
 	}
+	if v.strict && !kiroSchemaConstraints(obj, value) {
+		return false
+	}
 	return true
+}
+
+// kiroSchemaConstraints 检查 minimum/maxLength/minItems 这类约束；pattern 不查，Go 正则与 ECMA 方言不一致。
+func kiroSchemaConstraints(obj map[string]any, value any) bool {
+	switch typed := value.(type) {
+	case json.Number:
+		n, err := typed.Float64()
+		if err != nil {
+			return true
+		}
+		// draft-04 的 exclusiveMinimum/exclusiveMaximum 是修饰 minimum/maximum 的布尔值。
+		exclusiveMin, _ := obj["exclusiveMinimum"].(bool)
+		exclusiveMax, _ := obj["exclusiveMaximum"].(bool)
+		if limit, ok := kiroSchemaNumber(obj, "minimum"); ok && (n < limit || exclusiveMin && n == limit) {
+			return false
+		}
+		if limit, ok := kiroSchemaNumber(obj, "maximum"); ok && (n > limit || exclusiveMax && n == limit) {
+			return false
+		}
+		if limit, ok := kiroSchemaNumber(obj, "exclusiveMinimum"); ok && n <= limit {
+			return false
+		}
+		if limit, ok := kiroSchemaNumber(obj, "exclusiveMaximum"); ok && n >= limit {
+			return false
+		}
+		if divisor, ok := kiroSchemaNumber(obj, "multipleOf"); ok && divisor > 0 {
+			quotient := n / divisor
+			if math.Abs(quotient-math.Round(quotient)) > 1e-9 {
+				return false
+			}
+		}
+	case string:
+		return kiroSchemaWithin(obj, "minLength", "maxLength", utf8.RuneCountInString(typed))
+	case []any:
+		if unique, _ := obj["uniqueItems"].(bool); unique {
+			seen := make(map[string]struct{}, len(typed))
+			for _, item := range typed {
+				key := kiroMarshalString(item)
+				if number, ok := item.(json.Number); ok {
+					if f, err := number.Float64(); err == nil {
+						key = kiroMarshalString(f)
+					}
+				}
+				if _, dup := seen[key]; dup {
+					return false
+				}
+				seen[key] = struct{}{}
+			}
+		}
+		return kiroSchemaWithin(obj, "minItems", "maxItems", len(typed))
+	case map[string]any:
+		return kiroSchemaWithin(obj, "minProperties", "maxProperties", len(typed))
+	}
+	return true
+}
+
+func kiroSchemaWithin(obj map[string]any, minKey, maxKey string, count int) bool {
+	if limit, ok := kiroSchemaNumber(obj, minKey); ok && float64(count) < limit {
+		return false
+	}
+	if limit, ok := kiroSchemaNumber(obj, maxKey); ok && float64(count) > limit {
+		return false
+	}
+	return true
+}
+
+func kiroSchemaNumber(obj map[string]any, key string) (float64, bool) {
+	number, ok := obj[key].(json.Number)
+	if !ok {
+		return 0, false
+	}
+	value, err := number.Float64()
+	return value, err == nil
 }
 
 func kiroJSONPointer(root any, pointer string) (any, bool) {
@@ -257,16 +336,18 @@ func kiroDecodeJSONNumber(text string) (any, int, error) {
 	return value, int(decoder.InputOffset()), err
 }
 
-// kiroExtractConformingJSON 先试整段（可去掉代码围栏），否则逐个 {/[ 起点尝试解析，取最后一个合规值。
+// kiroExtractConformingJSON 先试整段（可去掉代码围栏），否则逐个 {/[ 起点尝试解析，取最后一个合规值；
+// 有满足全部约束的候选时优先取它，没有就按 kiro.rs 的规则取最后一个基本合规的。
 func kiroExtractConformingJSON(text string, schema map[string]any) (string, bool) {
 	schemaNumbers, _, _ := kiroDecodeJSONNumber(kiroMarshalString(schema))
 	validator := &kiroSchemaValidator{root: schemaNumbers, remaining: kiroStructuredMaxSteps}
+	strict := &kiroSchemaValidator{root: schemaNumbers, remaining: kiroStructuredMaxSteps, strict: true}
 	whole := kiroStripFence(strings.TrimSpace(text))
 	if value, offset, err := kiroDecodeJSONNumber(whole); err == nil && strings.TrimSpace(whole[offset:]) == "" && validator.conforms(schemaNumbers, value) {
 		return kiroMarshalString(value), true
 	}
-	var last any
-	found, failed := false, 0
+	var last, lastStrict any
+	found, foundStrict, failed := false, false, 0
 	for pos := 0; pos < len(text) && validator.remaining > 0; {
 		rel := strings.IndexAny(text[pos:], "{[")
 		if rel < 0 {
@@ -283,8 +364,14 @@ func kiroExtractConformingJSON(text string, schema map[string]any) (string, bool
 		}
 		if validator.conforms(schemaNumbers, value) {
 			last, found = value, true
+			if strict.conforms(schemaNumbers, value) {
+				lastStrict, foundStrict = value, true
+			}
 		}
 		pos = start + max(offset, 1)
+	}
+	if foundStrict {
+		return kiroMarshalString(lastStrict), true
 	}
 	if !found {
 		return "", false

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/codex2api/auth"
 	"github.com/google/uuid"
@@ -67,21 +68,35 @@ func kiroUpstreamRequest(ctx context.Context, requestAuth auth.KiroRequestAuth, 
 }
 
 // kiroCLIBody：kiro-cli 的请求来源是 KIRO_CLI，且不带 agentContinuationId 与历史 modelId。
+// 只改消息自身的 origin；工具参数与 schema 里的同名字段保持原样。
 func kiroCLIBody(payload []byte) []byte {
 	var body map[string]any
-	if json.Unmarshal(bytes.ReplaceAll(payload, []byte(`"origin":"AI_EDITOR"`), []byte(`"origin":"KIRO_CLI"`)), &body) != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payload))
+	decoder.UseNumber()
+	if decoder.Decode(&body) != nil {
 		return payload
 	}
-	if state, ok := body["conversationState"].(map[string]any); ok {
-		delete(state, "agentContinuationId")
-		if history, ok := state["history"].([]any); ok {
-			for _, entry := range history {
-				if message, ok := entry.(map[string]any); ok {
-					if user, ok := message["userInputMessage"].(map[string]any); ok {
-						delete(user, "modelId")
-					}
-				}
-			}
+	state, ok := body["conversationState"].(map[string]any)
+	if !ok {
+		return payload
+	}
+	delete(state, "agentContinuationId")
+	setOrigin := func(message any, history bool) {
+		user, ok := kiroMapValue(message, "userInputMessage").(map[string]any)
+		if !ok {
+			return
+		}
+		if user["origin"] == "AI_EDITOR" {
+			user["origin"] = "KIRO_CLI"
+		}
+		if history {
+			delete(user, "modelId")
+		}
+	}
+	setOrigin(state["currentMessage"], false)
+	if history, ok := state["history"].([]any); ok {
+		for _, entry := range history {
+			setOrigin(entry, true)
 		}
 	}
 	encoded, err := json.Marshal(body)
@@ -264,40 +279,108 @@ func kiroPumpSSE(source io.Reader, stream *kiroStreamContext, sink func(kiroSSEE
 		return err
 	}
 	frames := newKiroFrameReader(source)
-	upstreamFailure := ""
 	for {
 		frame, err := frames.Next()
 		if errors.Is(err, io.EOF) {
 			break
 		}
 		if err != nil {
-			return emit(stream.errorEvents("api_error", "Kiro upstream stream interrupted: "+err.Error()))
+			log.Printf("[Kiro] 上游事件帧损坏: %v", err)
+			return emit(stream.errorEvents("api_error", kiroInterruptedMessage("malformed event frame from upstream")))
 		}
+		// 与 kiro.rs 一致：error / exception 帧（ContentLengthExceededException 除外）立即中断，
+		// 已输出的部分内容不能伪装成正常结束。
 		if frame.MessageType != "event" && frame.ExceptionType != "ContentLengthExceededException" {
-			upstreamFailure = kiroFrameFailureMessage(frame)
-			log.Printf("[Kiro] 上游流内 %s: %s", frame.MessageType, upstreamFailure)
+			code, message := kiroFrameFailure(frame)
+			log.Printf("[Kiro] 上游流内 %s: %s: %s", frame.MessageType, code, message)
+			errorType, clientMessage := kiroClassifyUpstreamFailure(code, message)
+			return emit(stream.errorEvents(errorType, clientMessage))
 		}
 		if err := emit(stream.processFrame(frame)); err != nil {
 			return err
 		}
 	}
-	// 上游只回了错误帧、没有任何内容时，不能伪装成正常的空回答。
-	if upstreamFailure != "" && len(stream.state.blocks) <= 1 && stream.outputTokens == 0 && !stream.state.hasToolUse {
-		return emit(stream.errorEvents("api_error", upstreamFailure))
-	}
 	return emit(stream.finalEvents())
 }
 
-func kiroFrameFailureMessage(frame kiroFrame) string {
-	kind := frame.ErrorCode
-	if kind == "" {
-		kind = frame.ExceptionType
+func kiroFrameFailure(frame kiroFrame) (string, string) {
+	code := frame.ErrorCode
+	if code == "" {
+		code = frame.ExceptionType
 	}
 	message := strings.TrimSpace(gjson.GetBytes(frame.Payload, "message").String())
 	if message == "" {
 		message = strings.TrimSpace(string(frame.Payload))
 	}
-	return strings.TrimSpace(kind + ": " + message)
+	return code, message
+}
+
+func kiroInterruptedMessage(reason string) string {
+	return "Upstream response stream was interrupted: " + reason + ". Retry the request."
+}
+
+// kiroSanitizeUpstreamCode 只保留异常类型名（去掉 com.amazon...# 前缀，限制字符与长度），不回传上游原文。
+func kiroSanitizeUpstreamCode(code string) string {
+	if index := strings.LastIndexAny(code, "#.:"); index >= 0 {
+		code = code[index+1:]
+	}
+	var out strings.Builder
+	for _, r := range code {
+		if out.Len() >= 64 {
+			break
+		}
+		if r == '_' || r < 128 && (unicode.IsLetter(r) || unicode.IsDigit(r)) {
+			out.WriteRune(r)
+		}
+	}
+	return out.String()
+}
+
+// kiroClassifyUpstreamFailure 移植 kiro.rs classify_upstream_failure：按类型名与说明归类，
+// 说明只用于归类，不出现在返回给客户端的消息里。
+func kiroClassifyUpstreamFailure(code, message string) (string, string) {
+	label := kiroSanitizeUpstreamCode(code)
+	if label == "" {
+		label = "unknown upstream error"
+	}
+	codeLower := strings.ToLower(code)
+	lower := codeLower + " " + strings.ToLower(message)
+	has := func(needles ...string) bool {
+		for _, needle := range needles {
+			if strings.Contains(lower, needle) {
+				return true
+			}
+		}
+		return false
+	}
+	switch {
+	case has("throttl", "rate exceeded", "rate limit", "too many requests", "toomanyrequests"):
+		return "rate_limit_error", "Upstream rate limit reached (" + label + "). Retry after a short wait."
+	case has("serviceunavailable", "service unavailable", "overloaded", "high load", "insufficient capacity", "temporarily unavailable", "temporarily_unavailable"):
+		return "overloaded_error", "Upstream model is overloaded (" + label + "). Retry later."
+	case has("input is too long", "prompt is too long", "too many tokens", "context window", "context length", "exceeds the maximum"):
+		return "invalid_request_error", "prompt is too long: the upstream rejected the input as exceeding the model context (" + label + ")."
+	case has("accessdenied", "access denied", "unauthorized", "forbidden"):
+		return "permission_error", "Upstream denied access (" + label + ")."
+	case strings.Contains(codeLower, "validation"):
+		return "invalid_request_error", "Upstream rejected the request (" + label + ")."
+	}
+	return "api_error", kiroInterruptedMessage("upstream reported " + label)
+}
+
+// kiroFailureStatus 是非流式路径的 HTTP 状态码，与 Anthropic 错误类型对应（kiro.rs StreamFailure::status）。
+func kiroFailureStatus(errorType string) int {
+	switch errorType {
+	case "rate_limit_error":
+		return http.StatusTooManyRequests
+	case "overloaded_error":
+		return http.StatusServiceUnavailable
+	case "invalid_request_error":
+		return http.StatusBadRequest
+	case "permission_error":
+		return http.StatusForbidden
+	}
+	return http.StatusBadGateway
 }
 
 // kiroAnthropicJSONResponse 把聚合后的事件序列返回成非流式 Anthropic 响应。
@@ -305,7 +388,8 @@ func kiroAnthropicJSONResponse(events []kiroSSEEvent, stream *kiroStreamContext)
 	message, failure := kiroAggregateEvents(events)
 	if failure != nil {
 		encoded, _ := json.Marshal(map[string]any{"type": "error", "error": failure})
-		return kiroSyntheticResponse(http.StatusBadGateway, encoded), nil
+		errorType, _ := failure["type"].(string)
+		return kiroSyntheticResponse(kiroFailureStatus(errorType), encoded), nil
 	}
 	message["id"] = stream.messageID
 	message["model"] = stream.model

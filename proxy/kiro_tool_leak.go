@@ -552,7 +552,25 @@ func kiroValidateInvokeBlock(block string, schemas map[string]map[string]any) (k
 		return kiroInvokeCall{}, false
 	}
 	input, ok := kiroCoerceInvokeParams(params, schema)
-	return kiroInvokeCall{name, input}, ok
+	if !ok || !kiroInvokeInputConforms(schema, input) {
+		return kiroInvokeCall{}, false
+	}
+	return kiroInvokeCall{name, input}, true
+}
+
+// kiroInvokeInputConforms 用结构化输出的 schema 校验器校验完整的还原结果（含数组元素、嵌套对象），
+// 不合规就保留原文本，不发出参数非法的工具调用。
+func kiroInvokeInputConforms(schema map[string]any, input map[string]any) bool {
+	encoded, err := json.Marshal(input)
+	if err != nil {
+		return false
+	}
+	var value any
+	if kiroDecodeJSON(encoded, &value) != nil {
+		return false
+	}
+	validator := &kiroSchemaValidator{root: schema, remaining: kiroStructuredMaxSteps}
+	return validator.conforms(schema, value)
 }
 
 func kiroCouldBecomeInvokeOpen(tail string) bool {

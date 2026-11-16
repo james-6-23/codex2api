@@ -1,7 +1,13 @@
 package proxy
 
 import (
+	"bytes"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
+	"hash/crc32"
+	"image"
+	"image/png"
 	"strings"
 	"testing"
 )
@@ -133,5 +139,80 @@ func TestKiroStructuredOutput(t *testing.T) {
 	content := message["content"].([]any)
 	if len(content) != 2 || content[1].(map[string]any)["text"] != `{"n":7}` {
 		t.Fatalf("structured rewrite: %+v", content)
+	}
+}
+
+func TestKiroCLIBodyOnlyRewritesMessageOrigin(t *testing.T) {
+	body := []byte(`{"conversationState":{"agentContinuationId":"x","currentMessage":{"userInputMessage":{"origin":"AI_EDITOR","content":"hi"}},
+	  "history":[{"userInputMessage":{"origin":"AI_EDITOR","modelId":"m"}},
+	             {"assistantResponseMessage":{"toolUses":[{"input":{"origin":"AI_EDITOR","id":9007199254740993}}]}}]}}`)
+	out := string(kiroCLIBody(body))
+	for _, want := range []string{`"currentMessage":{"userInputMessage":{"content":"hi","origin":"KIRO_CLI"}}`, `{"userInputMessage":{"origin":"KIRO_CLI"}}`, `"input":{"id":9007199254740993,"origin":"AI_EDITOR"}`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %s in %s", want, out)
+		}
+	}
+	if strings.Contains(out, "agentContinuationId") {
+		t.Fatalf("agentContinuationId must be dropped: %s", out)
+	}
+}
+
+func TestKiroImageDecodeBudgetRejectsHugeImages(t *testing.T) {
+	if !kiroImageDecodeWithinBudget(1568, 1568) || !kiroImageDecodeWithinBudget(8000, 8000) {
+		t.Fatal("ordinary images must be decodable")
+	}
+	if kiroImageDecodeWithinBudget(30000, 30000) || kiroImageDecodeWithinBudget(1<<31-1, 2) || kiroImageDecodeWithinBudget(0, 10) {
+		t.Fatal("images above the 512 MiB decode budget must not be decoded")
+	}
+	var huge bytes.Buffer
+	if err := png.Encode(&huge, image.NewGray(image.Rect(0, 0, 1, 1))); err != nil {
+		t.Fatal(err)
+	}
+	// 改写 IHDR 宽高为 30000x30000：DecodeConfig 只读头部，解码会因预算被跳过而原样透传。
+	raw := huge.Bytes()
+	binary.BigEndian.PutUint32(raw[16:20], 30000)
+	binary.BigEndian.PutUint32(raw[20:24], 30000)
+	binary.BigEndian.PutUint32(raw[29:33], crc32.ChecksumIEEE(raw[12:29]))
+	if config, _, err := image.DecodeConfig(bytes.NewReader(raw)); err != nil || config.Width != 30000 {
+		t.Fatalf("fixture header must stay readable: %v", err)
+	}
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	if format, data := kiroShrinkImage("png", encoded); data != encoded || format != "png" {
+		t.Fatalf("oversized image must pass through untouched, got %s", format)
+	}
+}
+
+func TestKiroStructuredOutputPrefersFullyConstrainedCandidate(t *testing.T) {
+	schema := map[string]any{"type": "object", "properties": map[string]any{
+		"age":  map[string]any{"type": "integer", "minimum": 0, "maximum": 150},
+		"tags": map[string]any{"type": "array", "uniqueItems": true, "maxItems": 2},
+	}}
+	cases := map[string]string{
+		`first {"age": 30} then {"age": 200}`:                        `{"age":30}`,
+		`only {"age": 200}`:                                          `{"age":200}`,
+		`{"age": 1, "tags": ["a","a"]} or {"age": 2, "tags": ["a"]}`: `{"age":2,"tags":["a"]}`,
+	}
+	for text, want := range cases {
+		if got, ok := kiroExtractConformingJSON(text, schema); !ok || got != want {
+			t.Errorf("extract(%q) = %q,%t want %q", text, got, ok, want)
+		}
+	}
+	for raw, want := range map[string]bool{
+		`[{"multipleOf":0.1},0.3]`:                    true,
+		`[{"multipleOf":0.1},0.35]`:                   false,
+		`[{"exclusiveMinimum":0},0]`:                  false,
+		`[{"minimum":0,"exclusiveMinimum":true},0]`:   false,
+		`[{"minLength":2,"maxLength":3},"你好"]`:        true,
+		`[{"maxLength":1},"你好"]`:                      false,
+		`[{"minProperties":1},{}]`:                    false,
+		`[{"pattern":"^x$","maxItems":5},"anything"]`: true,
+	} {
+		var pair []any
+		if err := kiroDecodeJSON([]byte(raw), &pair); err != nil {
+			t.Fatal(err)
+		}
+		if got := kiroSchemaConstraints(pair[0].(map[string]any), pair[1]); got != want {
+			t.Errorf("constraints %s = %v want %v", raw, got, want)
+		}
 	}
 }

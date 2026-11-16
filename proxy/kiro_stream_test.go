@@ -120,8 +120,11 @@ func TestKiroMapUpstreamStatus(t *testing.T) {
 }
 
 func TestKiroToolLeakFilters(t *testing.T) {
-	conversion := &kiroConversion{KnownToolNames: map[string]struct{}{"Bash": {}}, Request: kiroRequest{ConversationState: kiroConversationState{CurrentMessage: kiroCurrentMessage{UserInputMessage: kiroUserMessage{UserInputMessageContext: &kiroUserContext{
-		Tools: []kiroTool{{ToolSpecification: kiroToolSpecification{Name: "Bash", InputSchema: kiroInputSchema{JSON: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string"}, "timeout": map[string]any{"type": "integer"}}, "required": []any{"command"}}}}}},
+	conversion := &kiroConversion{KnownToolNames: map[string]struct{}{"Bash": {}, "Fetch": {}}, Request: kiroRequest{ConversationState: kiroConversationState{CurrentMessage: kiroCurrentMessage{UserInputMessage: kiroUserMessage{UserInputMessageContext: &kiroUserContext{
+		Tools: []kiroTool{
+			{ToolSpecification: kiroToolSpecification{Name: "Bash", InputSchema: kiroInputSchema{JSON: map[string]any{"type": "object", "properties": map[string]any{"command": map[string]any{"type": "string"}, "timeout": map[string]any{"type": "integer"}}, "required": []any{"command"}}}}},
+			{ToolSpecification: kiroToolSpecification{Name: "Fetch", InputSchema: kiroInputSchema{JSON: map[string]any{"type": "object", "properties": map[string]any{"ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}}, "required": []any{"ids"}}}}},
+		},
 	}}}}}}
 	run := func(chunks ...string) []kiroSniffOutput {
 		filters := newKiroToolLeakFilters(conversion)
@@ -144,8 +147,65 @@ func TestKiroToolLeakFilters(t *testing.T) {
 	if len(unknown) != 1 || unknown[0].toolName != "" {
 		t.Fatalf("undeclared tool must stay text: %+v", unknown)
 	}
+	wrongItems := run("<invoke name=\"Fetch\"><parameter name=\"ids\">[\"wrong\"]</parameter></invoke>")
+	if len(wrongItems) != 1 || wrongItems[0].toolName != "" {
+		t.Fatalf("array items that violate the schema must stay text: %+v", wrongItems)
+	}
+	goodItems := run("<invoke name=\"Fetch\"><parameter name=\"ids\">[1, 2]</parameter></invoke>")
+	if len(goodItems) != 1 || goodItems[0].toolName != "Fetch" {
+		t.Fatalf("valid array items must still become a tool call: %+v", goodItems)
+	}
 	leaked := run("before <tool_use name=\"x\">{\"a\":1}</tool_use> after `<tool_use x>` kept")
 	if len(leaked) != 1 || leaked[0].text != "before  after `<tool_use x>` kept" {
 		t.Fatalf("tool_use XML leak handling: %+v", leaked)
+	}
+}
+
+func TestKiroErrorFrameAfterPartialOutputInterrupts(t *testing.T) {
+	buffer := kiroTestFrames(t, [2]string{"assistantResponseEvent", `{"content":"Hello"}`})
+	encoder := eventstream.NewEncoder()
+	exception := eventstream.Message{Headers: eventstream.Headers{
+		{Name: ":message-type", Value: eventstream.StringValue("exception")},
+		{Name: ":exception-type", Value: eventstream.StringValue("com.amazon.aws.codewhisperer#ThrottlingException")},
+	}, Payload: []byte(`{"message":"Rate exceeded for request id secret-123"}`)}
+	if err := encoder.Encode(buffer, exception); err != nil {
+		t.Fatal(err)
+	}
+	events := kiroCollect(t, newKiroStreamContext("m", 10, false, nil), buffer)
+	last := events[len(events)-1]
+	if last.Event != "error" {
+		t.Fatalf("an exception after partial output must end the stream with an error, got %s", last.Event)
+	}
+	failure, _ := last.Data["error"].(map[string]any)
+	if failure["type"] != "rate_limit_error" || strings.Contains(failure["message"].(string), "secret-123") || !strings.Contains(failure["message"].(string), "ThrottlingException") {
+		t.Fatalf("failure = %v", failure)
+	}
+	for _, event := range events {
+		if event.Event == "message_delta" {
+			t.Fatal("an interrupted stream must not report a normal stop")
+		}
+	}
+	response, _ := kiroAnthropicJSONResponse(events, newKiroStreamContext("m", 10, false, nil))
+	if response.StatusCode != 429 {
+		t.Fatalf("non-streaming status = %d, want 429", response.StatusCode)
+	}
+}
+
+func TestKiroClassifyUpstreamFailure(t *testing.T) {
+	cases := map[string][2]string{
+		"ServiceUnavailableException|high load":               {"overloaded_error", "503"},
+		"ValidationException|Input is too long for requested": {"invalid_request_error", "prompt is too long"},
+		"AccessDeniedException|nope":                          {"permission_error", "denied"},
+		"InternalServerException|secret-request-id":           {"api_error", "InternalServerException"},
+	}
+	for input, want := range cases {
+		code, message, _ := strings.Cut(input, "|")
+		errorType, clientMessage := kiroClassifyUpstreamFailure(code, message)
+		if errorType != want[0] || strings.Contains(clientMessage, "secret") || (want[1] != "503" && !strings.Contains(clientMessage, want[1])) {
+			t.Errorf("%s -> %s %q", input, errorType, clientMessage)
+		}
+	}
+	if kiroFailureStatus("overloaded_error") != 503 || kiroFailureStatus("api_error") != 502 {
+		t.Fatal("status mapping drifted from kiro.rs")
 	}
 }

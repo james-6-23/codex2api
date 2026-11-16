@@ -2189,6 +2189,9 @@ func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account
 		if len(responsesBody) == 0 {
 			responsesBody = inboundBody
 		}
+		if inbound == GrokProtocolChatCompletions {
+			responsesBody = kiroRestoreChatControls(responsesBody, inboundBody)
+		}
 		return ExecuteKiroResponsesRequest(ctx, account, responsesBody, proxyOverride, headers)
 	}
 	if len(responsesBody) == 0 {

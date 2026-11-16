@@ -362,3 +362,13 @@ func TestFetchCodexModelsManifest_UsesCustomHeaderAccountIDOverride(t *testing.T
 		t.Errorf("chatgpt-account-id = %q, want acc-override", gotAccountID)
 	}
 }
+
+func TestScopedManifestMarksKiroModelsParallel(t *testing.T) {
+	body, err := buildScopedCodexManifest([]api.Model{{ID: "claude-sonnet-4.6", OwnedBy: "kiro"}, {ID: "relay-model", OwnedBy: "codex2api"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !gjson.GetBytes(body, `models.#(slug=="claude-sonnet-4.6").supports_parallel_tool_calls`).Bool() || gjson.GetBytes(body, `models.#(slug=="relay-model").supports_parallel_tool_calls`).Bool() {
+		t.Fatalf("only Kiro models should advertise parallel tool calls: %s", body)
+	}
+}

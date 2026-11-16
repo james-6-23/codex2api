@@ -251,7 +251,8 @@ func runKiroWebSearch(ctx context.Context, account *auth.Account, req *kiroInbou
 		message, problem := kiroAggregateEvents(events)
 		if problem != nil {
 			encoded, _ := json.Marshal(map[string]any{"type": "error", "error": problem})
-			return nil, kiroSyntheticResponse(http.StatusBadGateway, encoded), nil
+			errorType, _ := problem["type"].(string)
+			return nil, kiroSyntheticResponse(kiroFailureStatus(errorType), encoded), nil
 		}
 		kiroAddUsage(totals, message["usage"])
 		var text, searchUses, clientUses, others []any

@@ -19,6 +19,10 @@ import (
 // 入站图片按需缩放 / 重编码，降低 AWS Q 单字段大小限制导致的 400。规则移植自
 // kiro.rs src/image_resize.rs；GIF 可能是动图，原样透传。
 
+// kiroImageMaxDecodeBytes 对齐 kiro.rs 所用 image crate 的默认解码上限（Limits::max_alloc = 512 MiB）：
+// 解码需要的内存超过它时不解码、原样透传，避免高压缩比的超大图片耗尽内存。
+const kiroImageMaxDecodeBytes = 512 << 20
+
 type kiroImageResizeConfig struct {
 	enabled     bool
 	maxLongSide int
@@ -55,6 +59,10 @@ func kiroShrinkImage(format, data string) (string, string) {
 		if config, _, err := image.DecodeConfig(bytes.NewReader(raw)); err == nil && max(config.Width, config.Height) <= cfg.maxLongSide {
 			return kiroDetectImageFormat(format, data), data
 		}
+	}
+	config, _, err := image.DecodeConfig(bytes.NewReader(raw))
+	if err != nil || !kiroImageDecodeWithinBudget(config.Width, config.Height) {
+		return kiroDetectImageFormat(format, data), data
 	}
 	img, _, err := image.Decode(bytes.NewReader(raw))
 	if err != nil {
@@ -116,4 +124,12 @@ func kiroDetectImageFormat(declared, data string) string {
 		return "webp"
 	}
 	return declared
+}
+
+// kiroImageDecodeWithinBudget 按每像素 4 字节估算解码内存，并防止宽高相乘溢出。
+func kiroImageDecodeWithinBudget(width, height int) bool {
+	if width <= 0 || height <= 0 {
+		return false
+	}
+	return width <= kiroImageMaxDecodeBytes/4/height
 }
