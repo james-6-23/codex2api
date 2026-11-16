@@ -454,6 +454,8 @@ export interface AccountRow {
   /** Kiro 登录来源：Google / Github / BuilderId / Enterprise 等。 */
   kiro_login_source?: string
   kiro_usage?: KiroUsageSnapshot
+  /** Kiro 套餐标识（按订阅标题归一）：kiro free / pro / pro+ / max / power / student。 */
+  kiro_plan?: string
   /** Claude 凭据形态(仅 Claude 账号有值)。 */
   claude_auth_kind?: ClaudeAuthKind | string
   claude_base_url?: string
@@ -649,6 +651,8 @@ export interface AccountListSummary {
   api_key: number
   /** Claude 渠道:长效 Setup Token 账号数。 */
   setup_token?: number
+  /** Kiro 渠道:按 social / idc / external_idp / api_key 计数。 */
+  kiro_auth_kinds?: Record<string, number>
   subscription_unlocked: number
   unauthorized_24h: number
   rate_limited_1h: number

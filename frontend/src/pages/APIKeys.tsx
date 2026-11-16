@@ -3934,12 +3934,14 @@ const CLAUDE_PLAN_FILTER_OPTIONS = [
   "business",
 ] as const;
 
-// Kiro 套餐键是上游订阅标题（小写比较）。
+// Kiro 套餐键由后端按订阅标题关键词归一（auth.KiroPlanKey）。
 const KIRO_PLAN_FILTER_OPTIONS = [
   "kiro free",
   "kiro pro",
   "kiro pro+",
+  "kiro max",
   "kiro power",
+  "kiro student",
 ] as const;
 
 // Antigravity 套餐键由 Google tier id 折叠而来(g1-pro-tier → pro,
