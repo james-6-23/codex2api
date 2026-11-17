@@ -156,6 +156,7 @@ func (e *Executor) ExecuteRequestViaWebsocket(
 	} else {
 		wsBody = jsonbody.DeletePath(wsBody, "client_metadata.x-codex-turn-state")
 	}
+	proxy.FinalizeCodexWebsocketHandshakeHeaders(headers, account)
 	// Record the attempted handshake UA immediately so failed handshakes are
 	// still auditable. A reused connection replaces this below with the UA that
 	// was actually sent when that connection was established.
@@ -321,8 +322,8 @@ func (e *Executor) prepareWebsocketBody(body []byte, sessionID string) []byte {
 	// 克隆并修改请求体
 	wsBody := bytes.Clone(body)
 
-	// 1. 确保 instructions 字段存在
-	if !gjson.GetBytes(wsBody, "instructions").Exists() {
+	// Keep missing instructions absent for the verified official payload shape.
+	if !gjson.GetBytes(wsBody, "instructions").Exists() && !proxy.PreserveCodexOfficialRequestFields(wsBody) {
 		wsBody, _ = sjson.SetBytes(wsBody, "instructions", "")
 	}
 
@@ -447,6 +448,7 @@ func (e *Executor) prepareWebsocketHeadersChecked(ctx context.Context, accessTok
 	if err := proxy.ApplyCodexAttestation(ctx, proxy.CodexAttestationInput{Headers: headers, Account: account}); err != nil {
 		return nil, err
 	}
+	proxy.FinalizeCodexIdentityHeaders(headers, account)
 
 	// routing hint 由网关按最终 WS 帧体合成，在账号自定义头之后设置。
 	// 握手头逐连接冻结：复用连接沿用建连时的 hint，语义为拨号期软亲和。

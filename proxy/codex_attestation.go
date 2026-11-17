@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -31,6 +32,11 @@ func ApplyCodexAttestation(ctx context.Context, input CodexAttestationInput) err
 		return nil
 	}
 	setCodexAttestation(input.Headers, "")
+	// The official TUI has no built-in hardware attestation provider. Do not
+	// manufacture desktop display/language signals when emulating that client.
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("CODEX_DISABLE_GENERATED_ATTESTATION")), "true") {
+		return nil
+	}
 	if input.FrozenValue != nil {
 		setCodexAttestation(input.Headers, *input.FrozenValue)
 		return nil
