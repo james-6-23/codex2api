@@ -139,13 +139,13 @@ func TestKiroUsageCooldownFollowsUpstreamSnapshot(t *testing.T) {
 	}
 
 	exhausted := newAccount(1)
-	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000, OverageStatus: "DISABLED"})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000, OverageStatus: "DISABLED"}, time.Now())
 	reason, until := exhausted.GetCooldownSnapshot()
 	if !exhausted.HasActiveCooldown() || reason != "usage_limited" || until.Sub(resetAt).Abs() > time.Second {
 		t.Fatalf("exhausted account: cooling=%v reason=%q until=%v want %v", exhausted.HasActiveCooldown(), reason, until, resetAt)
 	}
 	exhausted.FailureStreak = 0
-	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000}, time.Now())
 	if exhausted.FailureStreak != 0 {
 		t.Fatal("an unchanged usage_limit cooldown must not be re-marked on every sync")
 	}
@@ -155,19 +155,34 @@ func TestKiroUsageCooldownFollowsUpstreamSnapshot(t *testing.T) {
 	store.ApplyKiroAccountRow(&database.AccountRow{ID: 1, Credentials: map[string]interface{}{
 		"upstream_type": auth.UpstreamKiro, auth.KiroUsageCredentialKey: `{"next_reset_at":"` + movedResetAt.Format(time.RFC3339) + `"}`,
 	}})
-	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000}, time.Now())
 	if _, until := exhausted.GetCooldownSnapshot(); until.Sub(movedResetAt).Abs() > time.Second {
 		t.Fatalf("cooldown until=%v, want upstream reset %v", until, movedResetAt)
 	}
 	// 解析不到额度时不能放行。
-	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{}, time.Now())
 	if !exhausted.HasActiveCooldown() {
 		t.Fatal("an empty snapshot must not release a usage_limit cooldown")
 	}
+	// 查额度之后代理才记下的冷却，不能被这份较早的快照解除。
+	observedAt := time.Now().Add(-time.Second)
+	store.MarkKiroUsageExhausted(exhausted, "newer upstream MONTHLY_REQUEST_COUNT")
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 0, Limit: 1000}, observedAt)
+	if !exhausted.HasActiveCooldown() {
+		t.Fatal("a cooldown recorded after the usage observation must survive an older recovered snapshot")
+	}
 	// 上游恢复额度（重置 / 补发积分）：立即解除。
-	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 0, Limit: 1000})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 0, Limit: 1000}, time.Now())
 	if exhausted.HasActiveCooldown() {
 		t.Fatal("restored upstream credits must release the usage_limit cooldown")
+	}
+
+	// 封禁等错误状态不能被积分冷却盖掉。
+	suspended := newAccount(5)
+	store.MarkError(suspended, "Kiro 账号已被暂停")
+	handler.syncKiroUsageCooldown(5, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000}, time.Now())
+	if status := suspended.RuntimeStatus(); status != "error" {
+		t.Fatalf("suspended account status = %q, want error", status)
 	}
 
 	for id, usage := range map[int64]*auth.KiroUsageSnapshot{
@@ -176,7 +191,7 @@ func TestKiroUsageCooldownFollowsUpstreamSnapshot(t *testing.T) {
 		4: {},
 	} {
 		acc := newAccount(id)
-		handler.syncKiroUsageCooldown(id, usage)
+		handler.syncKiroUsageCooldown(id, usage, time.Now())
 		if acc.HasActiveCooldown() {
 			t.Fatalf("account %d with usage %+v must stay schedulable", id, usage)
 		}

@@ -313,7 +313,7 @@ func (h *Handler) createKiroAccount(ctx context.Context, item kiroImportCredenti
 			log.Printf("Kiro 账号 %d 装载进号池失败: %v", id, err)
 			warnings = append(warnings, "已保存，但装载进号池失败，请重载账号")
 		} else if usageErr == nil {
-			h.syncKiroUsageCooldown(id, usage)
+			h.syncKiroUsageCooldown(id, usage, usage.FetchedAt)
 		}
 	}
 	return &kiroCreateResult{ID: id, Email: item.Email, Warnings: warnings}, http.StatusOK, nil
@@ -678,6 +678,7 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 		}
 	}
 	requestAuth := account.KiroRequestAuth()
+	observedAt := time.Now()
 	usage, usageErr := auth.KiroFetchUsage(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
 	models, imageModels, modelErr := auth.KiroFetchModels(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
 	if usageErr != nil && modelErr != nil {
@@ -709,16 +710,20 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	if usageErr != nil {
 		return nil, models, fmt.Errorf("Kiro 额度查询失败: %w", usageErr)
 	}
-	h.syncKiroUsageCooldown(id, usage)
+	h.syncKiroUsageCooldown(id, usage, observedAt)
 	return usage, models, nil
 }
 
 // syncKiroUsageCooldown 让积分冷却（usage_limited）跟随上游最新额度快照：用尽就冷却到上游给的重置时间
 // （状态显示限流、调度不派单；重置时间变了随之调整），上游恢复额度（到期重置、补发积分、开启超额）就解除。
-// 截止时间没变时不重复标记，避免每 30 分钟同步就累加失败计数；误放行时上游会再拒并重新冷却，代价是一个请求。
-func (h *Handler) syncKiroUsageCooldown(id int64, usage *auth.KiroUsageSnapshot) {
+// 截止时间没变时不重复标记，避免每 30 分钟同步就累加失败计数。错误 / 封禁状态不改写；
+// 解除只针对 observedAt（开始查额度）之前已有的冷却，期间代理新记下的限流不会被这份旧快照清掉。
+func (h *Handler) syncKiroUsageCooldown(id int64, usage *auth.KiroUsageSnapshot, observedAt time.Time) {
 	account := h.store.FindByID(id)
 	if account == nil || usage == nil {
+		return
+	}
+	if status := account.RuntimeStatus(); status == "error" || status == "unauthorized" {
 		return
 	}
 	reason, until := account.GetCooldownSnapshot()
@@ -729,8 +734,9 @@ func (h *Handler) syncKiroUsageCooldown(id int64, usage *auth.KiroUsageSnapshot)
 			h.store.MarkKiroUsageExhausted(account, fmt.Sprintf("Kiro 积分已用尽 (%g/%g)，到重置日自动恢复", usage.Used, usage.Limit))
 		}
 	case cooling && usage.Limit > 0: // Limit=0 是解析不到额度，不能据此放行
-		h.store.ClearCooldown(account)
-		log.Printf("Kiro 账号 %d 额度已恢复 (%g/%g)，解除积分冷却", id, usage.Used, usage.Limit)
+		if h.store.ClearUsageLimitCooldownSince(account, observedAt) {
+			log.Printf("Kiro 账号 %d 额度已恢复 (%g/%g)，解除积分冷却", id, usage.Used, usage.Limit)
+		}
 	}
 }
 
