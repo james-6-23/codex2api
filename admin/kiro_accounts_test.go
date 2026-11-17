@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -179,6 +180,17 @@ func TestKiroUsageCooldownFollowsUpstreamSnapshot(t *testing.T) {
 		if acc.HasActiveCooldown() {
 			t.Fatalf("account %d with usage %+v must stay schedulable", id, usage)
 		}
+	}
+}
+
+func TestKiroSyncWaitsForSameAccountSync(t *testing.T) {
+	lock := accountProbeLock(9001)
+	lock <- struct{}{} // 模拟同一账号的另一次同步正在进行
+	defer func() { <-lock }()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, _, err := (&Handler{}).syncKiroAccount(ctx, 9001); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sync must wait for the in-flight sync of the same account, got %v", err)
 	}
 }
 

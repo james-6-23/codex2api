@@ -660,6 +660,14 @@ func (h *Handler) refreshKiroChannelModels(ctx context.Context, emit modelRefres
 
 // syncKiroAccount 刷新一个账号的额度快照与模型目录，并重新装载进号池。
 func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsageSnapshot, []string, error) {
+	// 同一账号的同步排队执行：并发同步各自写库后，冷却必须按最后写入的那份快照判定。
+	lock := accountProbeLock(id)
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+	defer func() { <-lock }()
 	account := h.store.FindByID(id)
 	if account == nil || !account.IsKiro() {
 		return nil, nil, fmt.Errorf("Kiro 账号不存在")
