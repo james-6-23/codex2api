@@ -39,7 +39,7 @@ func TestOfficialWireHTTPAndCompact(t *testing.T) {
 					}))
 					defer server.Close()
 					previous := resinCfg.Load()
-					t.Cleanup(func() { resinCfg.Store(previous) })
+					t.Cleanup(func() { SetResinConfig(previous) })
 					SetResinConfig(&ResinConfig{BaseURL: server.URL, PlatformName: "test"})
 					clientPool.Delete(fmt.Sprintf("resin|%d", id))
 					var resp *http.Response
