@@ -653,12 +653,7 @@ func applyKiroCooldown(store *auth.Store, account *auth.Account, statusCode int,
 	message := upstreamAccountErrorMessage(statusCode, body)
 	switch {
 	case kiroIsMonthlyRequestLimit(text):
-		resetAt := account.KiroUsageResetAt()
-		if !resetAt.After(time.Now()) {
-			now := time.Now().UTC()
-			resetAt = time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
-		}
-		store.MarkCooldownWithErrorExactDuration(account, time.Until(resetAt), "usage_limit", message)
+		resetAt := store.MarkKiroUsageExhausted(account, message)
 		return codex429Decision{Scope: rateLimitScopeAccount, Reason: "usage_limit", ResetAt: resetAt, Cooldown: time.Until(resetAt)}
 	case kiroIsAccountSuspended(text):
 		store.MarkError(account, "Kiro 账号已被暂停: "+message)

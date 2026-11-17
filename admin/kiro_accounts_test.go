@@ -125,6 +125,63 @@ func TestKiroAccountsAreNeverUnsampled(t *testing.T) {
 	}
 }
 
+func TestKiroUsageCooldownFollowsUpstreamSnapshot(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	t.Cleanup(store.Stop)
+	handler := &Handler{store: store}
+	resetAt := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	newAccount := func(id int64) *auth.Account {
+		acc := &auth.Account{DBID: id, UpstreamType: auth.UpstreamKiro, AccessToken: "at", RefreshToken: "rt", Status: auth.StatusReady,
+			Kiro: auth.KiroCredential{AuthKind: auth.KiroAuthKindSocial, UsageResetAt: resetAt}}
+		store.AddAccount(acc)
+		return acc
+	}
+
+	exhausted := newAccount(1)
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000, OverageStatus: "DISABLED"})
+	reason, until := exhausted.GetCooldownSnapshot()
+	if !exhausted.HasActiveCooldown() || reason != "usage_limited" || until.Sub(resetAt).Abs() > time.Second {
+		t.Fatalf("exhausted account: cooling=%v reason=%q until=%v want %v", exhausted.HasActiveCooldown(), reason, until, resetAt)
+	}
+	exhausted.FailureStreak = 0
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000})
+	if exhausted.FailureStreak != 0 {
+		t.Fatal("an unchanged usage_limit cooldown must not be re-marked on every sync")
+	}
+
+	// 上游改了重置时间（同步写库后经 ApplyKiroAccountRow 生效）：冷却截止跟着走。
+	movedResetAt := resetAt.Add(72 * time.Hour)
+	store.ApplyKiroAccountRow(&database.AccountRow{ID: 1, Credentials: map[string]interface{}{
+		"upstream_type": auth.UpstreamKiro, auth.KiroUsageCredentialKey: `{"next_reset_at":"` + movedResetAt.Format(time.RFC3339) + `"}`,
+	}})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000})
+	if _, until := exhausted.GetCooldownSnapshot(); until.Sub(movedResetAt).Abs() > time.Second {
+		t.Fatalf("cooldown until=%v, want upstream reset %v", until, movedResetAt)
+	}
+	// 解析不到额度时不能放行。
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{})
+	if !exhausted.HasActiveCooldown() {
+		t.Fatal("an empty snapshot must not release a usage_limit cooldown")
+	}
+	// 上游恢复额度（重置 / 补发积分）：立即解除。
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 0, Limit: 1000})
+	if exhausted.HasActiveCooldown() {
+		t.Fatal("restored upstream credits must release the usage_limit cooldown")
+	}
+
+	for id, usage := range map[int64]*auth.KiroUsageSnapshot{
+		2: {Used: 0.17, Limit: 1000},
+		3: {Used: 1000, Limit: 1000, OverageStatus: "ENABLED"},
+		4: {},
+	} {
+		acc := newAccount(id)
+		handler.syncKiroUsageCooldown(id, usage)
+		if acc.HasActiveCooldown() {
+			t.Fatalf("account %d with usage %+v must stay schedulable", id, usage)
+		}
+	}
+}
+
 func TestExportKiroKAMKeepsExternalIdPFields(t *testing.T) {
 	db := newTestAdminDB(t)
 	store := auth.NewStore(db, nil, nil)
