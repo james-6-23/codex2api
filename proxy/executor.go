@@ -503,7 +503,7 @@ func IsolateCodexSessionID(apiKeyID int64, raw string) string {
 	if raw == "" || apiKeyID <= 0 {
 		return raw
 	}
-	return DeriveStableSessionUUIDv7(fmt.Sprintf("api-key:%d:%s", apiKeyID, raw))
+	return deriveCodexIdentityUUIDv7(fmt.Sprintf("api-key:%d:%s", apiKeyID, raw), raw)
 }
 
 // resolveUpstreamSessionID 决定传给上游的会话/缓存身份键。

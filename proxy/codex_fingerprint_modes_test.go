@@ -131,6 +131,15 @@ func TestSingleMachineFingerprintPoolIdentityIsolation(t *testing.T) {
 }
 
 func TestSingleMachineFingerprintHTTPAndCompactWire(t *testing.T) {
+	testSingleMachineFingerprintHTTPAndCompactWire(t, false)
+}
+
+func TestCodexIdentityTimeHTTPAndCompactWire(t *testing.T) {
+	configureIdentityTimeForTest(t, "1")
+	testSingleMachineFingerprintHTTPAndCompactWire(t, true)
+}
+
+func testSingleMachineFingerprintHTTPAndCompactWire(t *testing.T, timePreserving bool) {
 	t.Setenv("CODEX_SESSION_HEADER_MODE", "native")
 	for _, compact := range []bool{false, true} {
 		t.Run(fmt.Sprintf("compact=%v", compact), func(t *testing.T) {
@@ -138,6 +147,11 @@ func TestSingleMachineFingerprintHTTPAndCompactWire(t *testing.T) {
 			a.AccessToken = "test-token"
 			// Body-only identity: real executor must share original IDs with headers.
 			body := []byte(`{"model":"gpt-5.6-codex","input":[],"prompt_cache_key":"private-cache","client_metadata":{"installation_id":"device","session_id":"root","thread_id":"child","parent_thread_id":"root"}}`)
+			if timePreserving {
+				body, _ = sjson.SetBytes(body, "client_metadata.session_id", identityTimeFixture)
+				body, _ = sjson.SetBytes(body, "client_metadata.parent_thread_id", identityTimeFixture)
+				body, _ = sjson.SetBytes(body, "client_metadata.thread_id", deriveStableCodexUUIDv7("child", identityTimeFixtureMilli+1))
+			}
 			h := http.Header{}
 			expected := resolveCodexFingerprintIDs(a, PrepareCodexFingerprintHeaders(a, h, body))
 			var gotBody []byte
@@ -169,6 +183,9 @@ func TestSingleMachineFingerprintHTTPAndCompactWire(t *testing.T) {
 			}
 			if gjson.GetBytes(gotBody, "client_metadata.thread_id").String() != expected.threadID {
 				t.Fatalf("wire body identity differs: %s", gotBody)
+			}
+			if timePreserving && identityTimeMillis(t, gotHeaders.Get("Thread-Id")) != identityTimeFixtureMilli+1 {
+				t.Fatal("actual upstream request lost source creation time")
 			}
 			if gjson.GetBytes(gotBody, "prompt_cache_key").String() != "private-cache" {
 				t.Fatalf("wire cache key differs: %s", gotBody)
