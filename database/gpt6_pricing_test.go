@@ -167,6 +167,34 @@ func TestGPT62UltrafastMultiplierResolvesByTime(t *testing.T) {
 	}
 }
 
+func TestUsageLogHistoricalUltrafastUsesRecordTime(t *testing.T) {
+	previous := currentModelPricingOverrides()
+	SetModelPricingOverrides(nil)
+	t.Cleanup(func() { SetModelPricingOverrides(previous) })
+
+	prevNow := ultrafastNow
+	t.Cleanup(func() { ultrafastNow = prevNow })
+
+	// 当前时钟已在促销期之后；历史日志仍应按记录的计费时间解析倍率。
+	ultrafastNow = func() time.Time { return time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC) }
+
+	// 促销期内（2027-02-28）计费的记录：3×
+	early := &UsageLogInput{Model: "gpt-6.2-sol", BillingServiceTier: "ultrafast", InputTokens: 1000, CreatedAt: time.Date(2027, 2, 28, 0, 0, 0, 0, time.UTC)}
+	gotEarly := UsageLogCostBreakdown(early)
+	assertFloatEqual(t, gotEarly.ServiceTierCostMultiplier, 3)
+	assertFloatEqual(t, gotEarly.TotalCost, 1000.0/1e6*2*3)
+
+	// 促销期后（2027-06-01）计费的记录：6×
+	late := &UsageLogInput{Model: "gpt-6.2-sol", BillingServiceTier: "ultrafast", InputTokens: 1000, CreatedAt: time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)}
+	gotLate := UsageLogCostBreakdown(late)
+	assertFloatEqual(t, gotLate.ServiceTierCostMultiplier, 6)
+	assertFloatEqual(t, gotLate.TotalCost, 1000.0/1e6*2*6)
+
+	// CreatedAt 为零值的实时请求：回退当前时钟（6×）
+	live := &UsageLogInput{Model: "gpt-6.2-sol", BillingServiceTier: "ultrafast", InputTokens: 1000}
+	assertFloatEqual(t, UsageLogCostBreakdown(live).ServiceTierCostMultiplier, 6)
+}
+
 func TestGPT6SolAndLunaCostBreakdown(t *testing.T) {
 	previous := currentModelPricingOverrides()
 	SetModelPricingOverrides(nil)

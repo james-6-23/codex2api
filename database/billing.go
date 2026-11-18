@@ -474,7 +474,14 @@ func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model s
 // UltrafastMultiplier（如 3×），过了 ultrafastPromoCutoff 且配置了
 // UltrafastMultiplierAfter 时切换为后者（如 6×）。
 func resolveUltrafastMultiplier(pricing *ModelPricing) float64 {
-	if pricing.UltrafastMultiplierAfter > 0 && ultrafastNow().After(ultrafastPromoCutoff) {
+	return resolveUltrafastMultiplierAt(pricing, ultrafastNow())
+}
+
+// resolveUltrafastMultiplierAt 按给定计费时间返回 Ultrafast 倍率：促销期用
+// UltrafastMultiplier（如 3×），过了 ultrafastPromoCutoff 且配置了
+// UltrafastMultiplierAfter 时切换为后者（如 6×）。
+func resolveUltrafastMultiplierAt(pricing *ModelPricing, at time.Time) float64 {
+	if pricing.UltrafastMultiplierAfter > 0 && at.After(ultrafastPromoCutoff) {
 		return pricing.UltrafastMultiplierAfter
 	}
 	return pricing.UltrafastMultiplier
@@ -484,6 +491,16 @@ func resolveUltrafastMultiplier(pricing *ModelPricing) float64 {
 // 提示缓存写入（5 分钟 / 1 小时）。inputTokens 是总输入（未缓存 + 缓存命中 + 缓存写入），
 // 写入价缺省按输入价的 1.25 倍 / 2 倍。
 func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens int, model string, serviceTier string) CostBreakdown {
+	return CalculateCostBreakdownWithCacheWritesAt(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens, model, serviceTier, time.Time{})
+}
+
+// CalculateCostBreakdownWithCacheWritesAt 与 CalculateCostBreakdownWithCacheWrites 相同，
+// 但按 at 指定的计费时间解析 Ultrafast 倍率：历史日志应传记录的计费时间，避免促销期
+// 结束后按当前时钟重算导致历史总额漂移；at 为零值时用当前时间。
+func CalculateCostBreakdownWithCacheWritesAt(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens int, model string, serviceTier string, at time.Time) CostBreakdown {
+	if at.IsZero() {
+		at = ultrafastNow()
+	}
 	pricing := GetModelPricing(model)
 	if GPTImage25BillingModel(model) != "" {
 		return imageTokenCostBreakdown(inputTokens, outputTokens, cachedTokens, 0, 0, 0, pricing)
@@ -510,7 +527,7 @@ func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedToke
 
 	tierMultiplier := serviceTierCostMultiplier(serviceTier)
 	if normalizeServiceTier(serviceTier) == "ultrafast" && pricing.UltrafastMultiplier > 0 {
-		tierMultiplier = resolveUltrafastMultiplier(pricing)
+		tierMultiplier = resolveUltrafastMultiplierAt(pricing, at)
 	} else if usePriorityPricing(serviceTier, pricing) {
 		tierMultiplier = 1
 		if isLong && pricing.LongInputPricePerMTokenPriority > 0 {
