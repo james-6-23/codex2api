@@ -138,7 +138,7 @@ func TestCreateAgentIdentityAccountIfAbsentChecksDatabase(t *testing.T) {
 		PrivateKey: privateKey,
 		AccountID:  "acc-new",
 		UserID:     "user-new",
-	}, "new-agent", "", "test")
+	}, "new-agent", "", "", "test")
 	if err != nil {
 		t.Fatalf("create account: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestCreateAgentIdentityAccountIfAbsentSerializesConcurrentImports(t *testin
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, duplicate, err := handler.createAgentIdentityAccountIfAbsent(context.Background(), fields, "concurrent-agent", "", "test")
+			_, duplicate, err := handler.createAgentIdentityAccountIfAbsent(context.Background(), fields, "concurrent-agent", "", "", "test")
 			results <- result{duplicate: duplicate, err: err}
 		}()
 	}

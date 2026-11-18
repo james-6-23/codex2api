@@ -30,6 +30,7 @@ type importAgentIdentityReq struct {
 	Name     string `json:"name"`
 	AuthJSON string `json:"auth_json"`
 	ProxyURL string `json:"proxy_url"`
+	Timezone string `json:"timezone"`
 }
 
 // agentIdentityFields 从 auth.json（agent_identity 对象或 auth_mode=agentIdentity 的根）
@@ -165,6 +166,10 @@ func (h *Handler) ImportCodexAgentIdentity(c *gin.Context) {
 		writeError(c, http.StatusBadRequest, "名称长度不能超过100字符")
 		return
 	}
+	if err := validateAccountTimezone(req.Timezone); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
@@ -178,7 +183,7 @@ func (h *Handler) ImportCodexAgentIdentity(c *gin.Context) {
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
-	id, duplicate, err := h.createAgentIdentityAccountIfAbsent(ctx, fields, req.Name, req.ProxyURL, "agent_identity_import")
+	id, duplicate, err := h.createAgentIdentityAccountIfAbsent(ctx, fields, req.Name, req.ProxyURL, req.Timezone, "agent_identity_import")
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -238,7 +243,7 @@ func (h *Handler) beginAgentIdentityImport(ctx context.Context, allowDuplicate b
 	return runtimeIDs, unlock, nil
 }
 
-func (h *Handler) createAgentIdentityAccountChecked(ctx context.Context, fields *agentIdentityFields, name, proxyURL, source string, runtimeIDs map[string]struct{}, allowDuplicate bool) (int64, bool, error) {
+func (h *Handler) createAgentIdentityAccountChecked(ctx context.Context, fields *agentIdentityFields, name, proxyURL, timezone, source string, runtimeIDs map[string]struct{}, allowDuplicate bool) (int64, bool, error) {
 	if err := validateAgentIdentityFields(fields); err != nil {
 		return 0, false, err
 	}
@@ -248,7 +253,7 @@ func (h *Handler) createAgentIdentityAccountChecked(ctx context.Context, fields 
 			return 0, true, nil
 		}
 	}
-	id, err := h.createAgentIdentityAccount(ctx, fields, name, proxyURL, source)
+	id, err := h.createAgentIdentityAccount(ctx, fields, name, proxyURL, timezone, source)
 	if err != nil {
 		return 0, false, err
 	}
@@ -258,17 +263,17 @@ func (h *Handler) createAgentIdentityAccountChecked(ctx context.Context, fields 
 	return id, false, nil
 }
 
-func (h *Handler) createAgentIdentityAccountIfAbsent(ctx context.Context, fields *agentIdentityFields, name, proxyURL, source string) (int64, bool, error) {
+func (h *Handler) createAgentIdentityAccountIfAbsent(ctx context.Context, fields *agentIdentityFields, name, proxyURL, timezone, source string) (int64, bool, error) {
 	runtimeIDs, unlock, err := h.beginAgentIdentityImport(ctx, false)
 	if err != nil {
 		return 0, false, err
 	}
 	defer unlock()
-	return h.createAgentIdentityAccountChecked(ctx, fields, name, proxyURL, source, runtimeIDs, false)
+	return h.createAgentIdentityAccountChecked(ctx, fields, name, proxyURL, timezone, source, runtimeIDs, false)
 }
 
 // createAgentIdentityAccount 用解析出的字段建号并加载进池，返回账号 ID。
-func (h *Handler) createAgentIdentityAccount(ctx context.Context, fields *agentIdentityFields, name, proxyURL, source string) (int64, error) {
+func (h *Handler) createAgentIdentityAccount(ctx context.Context, fields *agentIdentityFields, name, proxyURL, timezone, source string) (int64, error) {
 	if err := validateAgentIdentityFields(fields); err != nil {
 		return 0, err
 	}
@@ -285,6 +290,9 @@ func (h *Handler) createAgentIdentityAccount(ctx context.Context, fields *agentI
 		"email":                      fields.Email,
 		"plan_type":                  planType,
 		"chatgpt_account_is_fedramp": fields.FedRAMP,
+	}
+	if tz := strings.TrimSpace(timezone); tz != "" {
+		credentials[auth.AccountTimezoneCredentialKey] = tz
 	}
 	if fields.TaskID != "" {
 		credentials["task_id"] = fields.TaskID
@@ -336,7 +344,7 @@ func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []import
 			PlanType:   strings.TrimSpace(t.planType),
 			FedRAMP:    t.agentFedRAMP,
 		}
-		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, t.name, settings.proxyForToken(t), "import_agent_identity", runtimeIDs, allowDuplicate)
+		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, t.name, settings.proxyForToken(t), settings.timezone, "import_agent_identity", runtimeIDs, allowDuplicate)
 		if err != nil {
 			failed++
 			continue
@@ -358,6 +366,7 @@ func (h *Handler) importAgentIdentityTokens(ctx context.Context, tokens []import
 type batchImportAgentIdentityReq struct {
 	Files    []string `json:"files"`
 	ProxyURL string   `json:"proxy_url"`
+	Timezone string   `json:"timezone"`
 }
 
 type agentIdentityImportItem struct {
@@ -378,6 +387,10 @@ func (h *Handler) BatchImportCodexAgentIdentity(c *gin.Context) {
 		return
 	}
 	req.ProxyURL = security.SanitizeInput(req.ProxyURL)
+	if err := validateAccountTimezone(req.Timezone); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
 	if err := security.ValidateProxyURL(req.ProxyURL); err != nil {
 		writeError(c, http.StatusBadRequest, "代理URL无效")
 		return
@@ -411,7 +424,7 @@ func (h *Handler) BatchImportCodexAgentIdentity(c *gin.Context) {
 			continue
 		}
 		item.Email = fields.Email
-		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, "", req.ProxyURL, "agent_identity_file_import", runtimeIDs, false)
+		id, duplicated, err := h.createAgentIdentityAccountChecked(ctx, fields, "", req.ProxyURL, req.Timezone, "agent_identity_file_import", runtimeIDs, false)
 		if duplicated {
 			item.Error = "账号已存在，已跳过"
 			items = append(items, item)
