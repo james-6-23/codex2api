@@ -66,7 +66,13 @@ func TestCodexClientIdentityPreviewMatchesOutboundAndArchitecture(t *testing.T) 
 	codexTestIdentityCache(t)
 	settings := CurrentRuntimeSettings()
 	settings.ClientCompatMode, settings.CodexMinCLIVersion, settings.CodexSyncedCLIVersion = ClientCompatModeForce, "0.999.0", "0.200.0"
-	for _, cfg := range []string{`{"client_kind":"codex-desktop","os_name":"Mac OS","arch":"arm64"}`, `{"client_kind":"codex-desktop","os_name":"Windows","arch":"x86_64"}`} {
+	for _, tc := range []struct {
+		osName, arch, target, cliVersion, source string
+	}{
+		{"Mac OS", "arm64", "darwin-arm64", "0.158.1-alpha.1", "official_appcast"},
+		{"Windows", "x86_64", "win32-x64", "0.158.0-alpha.2.1", "third_party_windows_mapping"},
+	} {
+		cfg := fmt.Sprintf(`{"client_kind":"codex-desktop","os_name":%q,"arch":%q}`, tc.osName, tc.arch)
 		settings.CodexUserAgentConfig = cfg
 		ApplyRuntimeSettings(settings)
 		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{})
@@ -77,8 +83,9 @@ func TestCodexClientIdentityPreviewMatchesOutboundAndArchitecture(t *testing.T) 
 		if err != nil || identity.Version != preview.Persona.Version || identity.UserAgent != preview.Persona.UserAgent || preview.Persona.AppVersion != "26.928.31416" {
 			t.Fatalf("preview mismatch: %+v / %+v / %v", identity, preview, err)
 		}
-		if strings.Contains(cfg, "Mac OS") && identity.Version != "0.158.1-alpha.1" {
-			t.Fatalf("wrong architecture: %+v", identity)
+		if identity.Version != tc.cliVersion || preview.Persona.TargetPlatform != tc.target ||
+			preview.Persona.Source != tc.source || preview.Persona.Status != "verified" {
+			t.Fatalf("wrong version or platform for %s: %+v / %+v", cfg, identity, preview.Persona)
 		}
 	}
 }
