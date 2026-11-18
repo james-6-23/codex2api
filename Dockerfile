@@ -10,6 +10,7 @@ ARG BUILD_VERSION=dev
 
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
+COPY frontend/scripts/patch-picomatch.mjs ./scripts/
 RUN --mount=type=cache,target=/root/.npm \
     npm ci --no-audit --no-fund
 COPY frontend/ .
