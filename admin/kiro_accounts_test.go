@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -122,6 +123,89 @@ func TestKiroUsageSnapshotSurvivesCredentialStorage(t *testing.T) {
 func TestKiroAccountsAreNeverUnsampled(t *testing.T) {
 	if accountListUnsampled(&accountListSnapshotItem{Status: "active", KiroAuthKind: auth.KiroAuthKindSocial}) {
 		t.Fatal("Kiro quota comes from the control plane, not 5h/7d windows; it must not count as unsampled")
+	}
+}
+
+func TestKiroUsageCooldownFollowsUpstreamSnapshot(t *testing.T) {
+	store := auth.NewStore(nil, nil, &database.SystemSettings{MaxConcurrency: 2})
+	t.Cleanup(store.Stop)
+	handler := &Handler{store: store}
+	resetAt := time.Now().UTC().Add(48 * time.Hour).Truncate(time.Second)
+	newAccount := func(id int64) *auth.Account {
+		acc := &auth.Account{DBID: id, UpstreamType: auth.UpstreamKiro, AccessToken: "at", RefreshToken: "rt", Status: auth.StatusReady,
+			Kiro: auth.KiroCredential{AuthKind: auth.KiroAuthKindSocial, UsageResetAt: resetAt}}
+		store.AddAccount(acc)
+		return acc
+	}
+
+	exhausted := newAccount(1)
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000, OverageStatus: "DISABLED"}, time.Now())
+	reason, until := exhausted.GetCooldownSnapshot()
+	if !exhausted.HasActiveCooldown() || reason != "usage_limited" || until.Sub(resetAt).Abs() > time.Second {
+		t.Fatalf("exhausted account: cooling=%v reason=%q until=%v want %v", exhausted.HasActiveCooldown(), reason, until, resetAt)
+	}
+	exhausted.FailureStreak = 0
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000}, time.Now())
+	if exhausted.FailureStreak != 0 {
+		t.Fatal("an unchanged usage_limit cooldown must not be re-marked on every sync")
+	}
+
+	// 上游改了重置时间（同步写库后经 ApplyKiroAccountRow 生效）：冷却截止跟着走。
+	movedResetAt := resetAt.Add(72 * time.Hour)
+	store.ApplyKiroAccountRow(&database.AccountRow{ID: 1, Credentials: map[string]interface{}{
+		"upstream_type": auth.UpstreamKiro, auth.KiroUsageCredentialKey: `{"next_reset_at":"` + movedResetAt.Format(time.RFC3339) + `"}`,
+	}})
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000}, time.Now())
+	if _, until := exhausted.GetCooldownSnapshot(); until.Sub(movedResetAt).Abs() > time.Second {
+		t.Fatalf("cooldown until=%v, want upstream reset %v", until, movedResetAt)
+	}
+	// 解析不到额度时不能放行。
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{}, time.Now())
+	if !exhausted.HasActiveCooldown() {
+		t.Fatal("an empty snapshot must not release a usage_limit cooldown")
+	}
+	// 查额度之后代理才记下的冷却，不能被这份较早的快照解除。
+	observedAt := time.Now().Add(-time.Second)
+	store.MarkKiroUsageExhausted(exhausted, "newer upstream MONTHLY_REQUEST_COUNT")
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 0, Limit: 1000}, observedAt)
+	if !exhausted.HasActiveCooldown() {
+		t.Fatal("a cooldown recorded after the usage observation must survive an older recovered snapshot")
+	}
+	// 上游恢复额度（重置 / 补发积分）：立即解除。
+	handler.syncKiroUsageCooldown(1, &auth.KiroUsageSnapshot{Used: 0, Limit: 1000}, time.Now())
+	if exhausted.HasActiveCooldown() {
+		t.Fatal("restored upstream credits must release the usage_limit cooldown")
+	}
+
+	// 封禁等错误状态不能被积分冷却盖掉。
+	suspended := newAccount(5)
+	store.MarkError(suspended, "Kiro 账号已被暂停")
+	handler.syncKiroUsageCooldown(5, &auth.KiroUsageSnapshot{Used: 1000, Limit: 1000}, time.Now())
+	if status := suspended.RuntimeStatus(); status != "error" {
+		t.Fatalf("suspended account status = %q, want error", status)
+	}
+
+	for id, usage := range map[int64]*auth.KiroUsageSnapshot{
+		2: {Used: 0.17, Limit: 1000},
+		3: {Used: 1000, Limit: 1000, OverageStatus: "ENABLED"},
+		4: {},
+	} {
+		acc := newAccount(id)
+		handler.syncKiroUsageCooldown(id, usage, time.Now())
+		if acc.HasActiveCooldown() {
+			t.Fatalf("account %d with usage %+v must stay schedulable", id, usage)
+		}
+	}
+}
+
+func TestKiroSyncWaitsForSameAccountSync(t *testing.T) {
+	lock := accountProbeLock(9001)
+	lock <- struct{}{} // 模拟同一账号的另一次同步正在进行
+	defer func() { <-lock }()
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, _, err := (&Handler{}).syncKiroAccount(ctx, 9001); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("sync must wait for the in-flight sync of the same account, got %v", err)
 	}
 }
 

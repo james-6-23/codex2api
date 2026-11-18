@@ -67,6 +67,7 @@ Ported from kiro.rs:
 - Hosted `web_search` through Kiro's MCP endpoint.
 - Repetition guard, context-window-full and content-filter stop reasons.
 - Upstream error mapping: invalid bearer → `401` (refresh and retry), monthly request limit → cooldown until the next reset, account throttling → 30-minute cooldown, suspended account → error state, generic `429` → 1-minute cooldown.
+- The credits sync applies the same cooldown before any request fails: an account whose credits are used up (with overage disabled) cools as `usage_limited` until Kiro's reported reset, the cooldown follows a changed reset time, and it is released once a later snapshot shows credits again.
 
 When structured output is requested with only `web_search`, the gateway uses the model/search loop to generate the answer before extracting JSON. The plain-search shortcut remains available when no schema is requested. Schema extraction prefers candidates satisfying supported bounds and falls back to kiro.rs's basic rules if none do; it is not a guarantee of strict schema compliance. Numeric bounds and nested equality preserve decimal precision.
 
@@ -93,7 +94,7 @@ Kiro does not report prompt-cache hits. **Settings → Kiro → Local prompt cac
 
 Environment variables for image handling: `KIRO_IMAGE_RESIZE` (`0`/`false` disables resizing), `KIRO_IMAGE_MAX_LONG_SIDE` (default `1568`), `KIRO_IMAGE_MAX_BYTES` (default `400000`), `KIRO_IMAGE_JPEG_QUALITY` (default `85`).
 
-The Kiro IDE version used in request fingerprints is fetched from Kiro's release metadata and cached; a built-in version is used when the lookup fails.
+The Kiro IDE version used in request fingerprints, including the credits and model-catalog calls, is fetched from Kiro's release metadata and cached for 6 hours; a built-in version is used when the lookup fails. Control-plane calls send the profile ARN the IDE uses (the shared Social or Builder ID ARN when the account has none): current versions reject them without it, and Kiro rejects `ListAvailableModels` for Student accounts from outdated versions.
 
 ## Admin endpoints
 

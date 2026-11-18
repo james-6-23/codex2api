@@ -394,6 +394,24 @@ func (a *Account) KiroUsageResetAt() time.Time {
 	return a.Kiro.UsageResetAt
 }
 
+// KiroUsageCooldownUntil 是积分用尽时的冷却截止：最近一次快照里上游给的重置时间；
+// 已过期或未知时取下月 1 日 00:00 UTC（Kiro 的月度重置点），之后的同步会按上游新快照修正。
+func (a *Account) KiroUsageCooldownUntil() time.Time {
+	if resetAt := a.KiroUsageResetAt(); resetAt.After(time.Now()) {
+		return resetAt
+	}
+	now := time.Now().UTC()
+	return time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, time.UTC)
+}
+
+// MarkKiroUsageExhausted 把积分用尽的账号冷却到 KiroUsageCooldownUntil。
+// 用 usage_limited：状态徽章（限流）、限流筛选和仪表盘计数只认这个原因，usage_limit 会显示成“未知”。
+func (s *Store) MarkKiroUsageExhausted(acc *Account, message string) time.Time {
+	resetAt := acc.KiroUsageCooldownUntil()
+	s.MarkCooldownWithErrorExactDuration(acc, time.Until(resetAt), "usage_limited", message)
+	return resetAt
+}
+
 func gjsonString(raw, path string) string {
 	var parsed map[string]any
 	if json.Unmarshal([]byte(raw), &parsed) != nil {

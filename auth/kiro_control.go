@@ -22,11 +22,9 @@ import (
 // 移植自 kiro.rs src/kiro/{token_manager,auth/social,auth/idc}.rs。
 
 const (
-	// kiroUsageAPIVersion 是用量类接口固定使用的 IDE 版本，避免版本漂移影响查询结果。
-	kiroUsageAPIVersion = "0.9.2"
-	KiroPortalURL       = "https://app.kiro.dev"
-	KiroAuthEndpoint    = "https://prod.us-east-1.auth.desktop.kiro.dev"
-	KiroBuilderIDStart  = "https://view.awsapps.com/start"
+	KiroPortalURL      = "https://app.kiro.dev"
+	KiroAuthEndpoint   = "https://prod.us-east-1.auth.desktop.kiro.dev"
+	KiroBuilderIDStart = "https://view.awsapps.com/start"
 	// KiroSocialCallbackPort 是官方门户接受的本地回调端口之一。
 	KiroSocialCallbackPort = 3128
 )
@@ -71,8 +69,10 @@ func kiroRESTRegions(ssoRegion string) []string {
 }
 
 func kiroManagementHeaders(req *http.Request, cred KiroCredential, bearer string) {
-	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.0 KiroIDE-"+kiroUsageAPIVersion+"-"+cred.MachineID)
-	req.Header.Set("User-Agent", "aws-sdk-js/1.0.0 ua/2.1 os/"+KiroOSName+" lang/js md/nodejs#"+KiroNodeVersion+" api/codewhispererruntime#1.0.0 m/N,E KiroIDE-"+kiroUsageAPIVersion+"-"+cred.MachineID)
+	// 用当前 IDE 版本：上游对旧版本（如 0.9.2）的 Student 账号拒绝 ListAvailableModels（403 FEATURE_NOT_SUPPORTED）。
+	version := KiroIDEVersion()
+	req.Header.Set("x-amz-user-agent", "aws-sdk-js/1.0.0 KiroIDE-"+version+"-"+cred.MachineID)
+	req.Header.Set("User-Agent", "aws-sdk-js/1.0.0 ua/2.1 os/"+KiroOSName+" lang/js md/nodejs#"+KiroNodeVersion+" api/codewhispererruntime#1.0.0 m/N,E KiroIDE-"+version+"-"+cred.MachineID)
 	req.Header.Set("amz-sdk-invocation-id", uuid.NewString())
 	req.Header.Set("amz-sdk-request", "attempt=1; max=1")
 	req.Header.Set("Authorization", "Bearer "+bearer)
@@ -88,7 +88,8 @@ func kiroManagementGET(ctx context.Context, cred KiroCredential, bearer, proxyUR
 	if err != nil {
 		return nil, err
 	}
-	arn := cred.EffectiveProfileARN()
+	// 新版本号要求带 profileArn（否则 400 Invalid profileArn），Builder ID / Social 用官方 IDE 的回退 ARN。
+	arn := cred.StreamingProfileARN()
 	var lastErr error
 	for _, region := range kiroRESTRegions(cred.AuthRegion()) {
 		arns := []string{""}
@@ -140,6 +141,11 @@ type KiroUsageSnapshot struct {
 	CreditsExpireAt   string    `json:"credits_expire_at,omitempty"`
 	OverageStatus     string    `json:"overage_status,omitempty"`
 	FetchedAt         time.Time `json:"fetched_at"`
+}
+
+// Exhausted：积分用完且未开启超额付费时，上游必然返回 MONTHLY_REQUEST_COUNT，直到重置日。
+func (u *KiroUsageSnapshot) Exhausted() bool {
+	return u != nil && u.Limit > 0 && u.Used >= u.Limit && !strings.EqualFold(u.OverageStatus, "ENABLED")
 }
 
 type kiroUsageResponse struct {

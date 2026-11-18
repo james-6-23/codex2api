@@ -283,7 +283,8 @@ func (h *Handler) createKiroAccount(ctx context.Context, item kiroImportCredenti
 	} else if err != nil {
 		warnings = append(warnings, "模型目录同步失败，暂用默认目录")
 	}
-	if usage, err := auth.KiroFetchUsage(ctx, cred, bearer, proxyURL); err == nil {
+	usage, usageErr := auth.KiroFetchUsage(ctx, cred, bearer, proxyURL)
+	if usageErr == nil {
 		credentials[auth.KiroUsageCredentialKey] = kiroUsageCredential(usage)
 		if usage.SubscriptionTitle != "" {
 			credentials["plan_type"] = usage.SubscriptionTitle
@@ -311,6 +312,8 @@ func (h *Handler) createKiroAccount(ctx context.Context, item kiroImportCredenti
 		if err := h.store.LoadAccountByID(ctx, id); err != nil {
 			log.Printf("Kiro 账号 %d 装载进号池失败: %v", id, err)
 			warnings = append(warnings, "已保存，但装载进号池失败，请重载账号")
+		} else if usageErr == nil {
+			h.syncKiroUsageCooldown(id, usage, usage.FetchedAt)
 		}
 	}
 	return &kiroCreateResult{ID: id, Email: item.Email, Warnings: warnings}, http.StatusOK, nil
@@ -657,6 +660,14 @@ func (h *Handler) refreshKiroChannelModels(ctx context.Context, emit modelRefres
 
 // syncKiroAccount 刷新一个账号的额度快照与模型目录，并重新装载进号池。
 func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsageSnapshot, []string, error) {
+	// 同一账号的同步排队执行：并发同步各自写库后，冷却必须按最后写入的那份快照判定。
+	lock := accountProbeLock(id)
+	select {
+	case lock <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	}
+	defer func() { <-lock }()
 	account := h.store.FindByID(id)
 	if account == nil || !account.IsKiro() {
 		return nil, nil, fmt.Errorf("Kiro 账号不存在")
@@ -667,6 +678,7 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 		}
 	}
 	requestAuth := account.KiroRequestAuth()
+	observedAt := time.Now()
 	usage, usageErr := auth.KiroFetchUsage(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
 	models, imageModels, modelErr := auth.KiroFetchModels(ctx, requestAuth.Credential, requestAuth.BearerToken, requestAuth.ProxyURL)
 	if usageErr != nil && modelErr != nil {
@@ -682,6 +694,8 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	if modelErr == nil && len(models) > 0 {
 		updates["models"] = models
 		updates[auth.KiroImageModelsCredentialKey] = strings.Join(imageModels, ",")
+	} else if modelErr != nil {
+		log.Printf("Kiro 账号 %d 模型目录同步失败: %v", id, modelErr)
 	}
 	if err := h.db.UpdateCredentials(ctx, id, updates); err != nil {
 		return nil, nil, err
@@ -696,7 +710,34 @@ func (h *Handler) syncKiroAccount(ctx context.Context, id int64) (*auth.KiroUsag
 	if usageErr != nil {
 		return nil, models, fmt.Errorf("Kiro 额度查询失败: %w", usageErr)
 	}
+	h.syncKiroUsageCooldown(id, usage, observedAt)
 	return usage, models, nil
+}
+
+// syncKiroUsageCooldown 让积分冷却（usage_limited）跟随上游最新额度快照：用尽就冷却到上游给的重置时间
+// （状态显示限流、调度不派单；重置时间变了随之调整），上游恢复额度（到期重置、补发积分、开启超额）就解除。
+// 截止时间没变时不重复标记，避免每 30 分钟同步就累加失败计数。错误 / 封禁状态不改写；
+// 解除只针对 observedAt（开始查额度）之前已有的冷却，期间代理新记下的限流不会被这份旧快照清掉。
+func (h *Handler) syncKiroUsageCooldown(id int64, usage *auth.KiroUsageSnapshot, observedAt time.Time) {
+	account := h.store.FindByID(id)
+	if account == nil || usage == nil {
+		return
+	}
+	if status := account.RuntimeStatus(); status == "error" || status == "unauthorized" {
+		return
+	}
+	reason, until := account.GetCooldownSnapshot()
+	cooling := account.HasActiveCooldown() && reason == "usage_limited"
+	switch {
+	case usage.Exhausted():
+		if !cooling || until.Sub(account.KiroUsageCooldownUntil()).Abs() > time.Minute {
+			h.store.MarkKiroUsageExhausted(account, fmt.Sprintf("Kiro 积分已用尽 (%g/%g)，到重置日自动恢复", usage.Used, usage.Limit))
+		}
+	case cooling && usage.Limit > 0: // Limit=0 是解析不到额度，不能据此放行
+		if h.store.ClearUsageLimitCooldownSince(account, observedAt) {
+			log.Printf("Kiro 账号 %d 额度已恢复 (%g/%g)，解除积分冷却", id, usage.Used, usage.Limit)
+		}
+	}
 }
 
 // SyncKiroAccount 刷新单个账号的额度与模型目录。
