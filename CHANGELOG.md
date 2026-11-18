@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.1.7 - 2026-11-18
+
+### Features
+
+- **Kiro accounts can serve Messages, Responses and Chat Completions over HTTP (#840, #884, #886, #888, #893, @wangbingnan136).** Administrators can sign in or import credentials, manage accounts and groups, and sync credits and model catalogs. The gateway recognizes Max and Student plans, refreshes the Student catalog with the current IDE version, and pauses accounts with exhausted credits until the upstream allowance recovers. The protocol adapter is based on `kiro.rs`.
+
+- **The built-in Codex catalog includes GPT-6.2 Astra and Sol (#895, @mianfeikejiwl).** Adds model metadata and pricing for cached tokens, long contexts and Ultrafast requests. Historical usage uses each record's timestamp to select the applicable Ultrafast multiplier. The built-in Codex CLI version and default minimum are now `0.170.0`.
+
+- **Codex accounts can bind a timezone before their first request (#890, requested by @skybbk1001).** Token entry, OAuth, Session JSON, Agent Identity and batch imports accept an optional IANA timezone. The first database record and runtime account use the selected value. Reimports and reauthorization preserve an existing account's binding.
+
+- **Codex official-format request compatibility is configurable (#891, @Alexander4731).** Optional settings control per-account installation IDs, generated attestation and preservation of message IDs and metadata on qualifying Responses requests. The settings apply to HTTP and WebSocket requests and are disabled by default.
+
+- **API Key holders have a dedicated account-usage tab (#879, @Blaskyy).** The portal separates account usage from the key's own quota and uses the same plan badges and usage bars as the admin page. Per-key permissions save across edit tabs. Reset requests retain authorization, idempotency, workspace leases and cooldowns. The manual uncertain-reset clearing endpoint and response field have been removed.
+
+### Fixes
+
+- **Chat Completions preserves the developer role in Codex Responses (#889, reported by @mice33, #892, @koeria).** Developer messages previously became user messages during translation. Both plain-text and multipart messages retain their role, content and position.
+
+- **Image usage statistics show the model reported by the upstream (#882, reported by @MagnetOscar, #887, @koeria).** Streaming and non-streaming requests record the upstream model alongside the requested model. When there is no local mapping, a reported image model can supply the effective model used for aggregation.
+
+- **Antigravity handles OpenMausBot and OpenCode client text more consistently (#883, #885, @frank8ai).** Normalization recognizes additional client preambles and OpenMausBot notices across message and tool content. Regression coverage includes Markdown code spans and fenced blocks.
+
+- **Frontend builds guard against the picomatch ReDoS advisory (GHSA-fc5q-39xc-vjpf).** A checksum-verified patch protects the pinned build dependency when it compiles repeated wildcard patterns. Tailwind's build tools are development dependencies, and production dependency audits no longer need an exception for this advisory.
+
 ## v3.1.6 - 2026-11-14
 
 ### Features
