@@ -2948,7 +2948,7 @@ func convertMessagesToInputSlice(messages []openAIMessage) []any {
 				})
 			}
 
-		case "system":
+		case "system", "developer":
 			input = append(input, map[string]any{
 				"type":    "message",
 				"role":    "developer",
