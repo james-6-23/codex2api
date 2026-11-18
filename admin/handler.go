@@ -2138,7 +2138,7 @@ func (h *Handler) GetAccount(c *gin.Context) {
 		requestCounts = make(map[int64]*database.AccountRequestCount)
 	}
 	now := time.Now()
-	usage5h, usage7d, err := h.db.GetAccountUsageWindowsByIDs(ctx, []int64{id}, now.Add(-5*time.Hour), now.AddDate(0, 0, -7))
+	usage5h, usage7d, err := h.loadAccountUsageDetails(ctx, []int64{id}, now)
 	if err != nil {
 		log.Printf("获取账号 %d 用量统计失败: %v", id, err)
 		usage5h = make(map[int64]*database.AccountTimeRangeUsage)
@@ -3573,6 +3573,9 @@ func (h *Handler) getAccountUsageWindows(ctx context.Context) (map[int64]*databa
 	if h.getRuntimeJSON(ctx, adminAccountWindowsNamespace, "global", &cached) && cached.Usage5h != nil && cached.Usage7d != nil {
 		return cached.Usage5h, cached.Usage7d
 	}
+	// The legacy full-list cache still uses one rolling 5h/7d window for every
+	// account. The paged page-stats and GetAccount paths (issue #798) align
+	// usage details to each account's official reset when one is available.
 	now := time.Now()
 	usage5h, usage7d, err := h.db.GetAccountUsageWindows(ctx, now.Add(-5*time.Hour), now.AddDate(0, 0, -7))
 	if err != nil {

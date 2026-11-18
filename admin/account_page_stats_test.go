@@ -508,3 +508,147 @@ func TestGetAccountPageStatsIncludesTodayModelCounts(t *testing.T) {
 		t.Fatalf("today model first-token averages = %#v, want gpt-5.4=1500 gpt-5.2=500", today.ModelAvgFirstTokenMs)
 	}
 }
+
+func insertAccountUsageLog(t *testing.T, db *database.DB, id int64, tokens int, createdAt time.Time) {
+	t.Helper()
+	if err := db.InsertUsageLog(context.Background(), &database.UsageLogInput{
+		AccountID:   id,
+		Endpoint:    "/v1/messages",
+		Model:       "claude-sonnet-4-6",
+		StatusCode:  http.StatusOK,
+		TotalTokens: tokens,
+		CreatedAt:   createdAt,
+	}); err != nil {
+		t.Fatalf("InsertUsageLog: %v", err)
+	}
+}
+
+func newAccountPageStatsHandler(t *testing.T, db *database.DB) *Handler {
+	t.Helper()
+	store := auth.NewStore(db, nil, nil)
+	store.SetLazyMode(true)
+	if err := store.Init(context.Background()); err != nil {
+		t.Fatalf("store.Init: %v", err)
+	}
+	tokenCache := cache.NewMemory(1)
+	t.Cleanup(func() { _ = tokenCache.Close() })
+	return NewHandler(store, db, tokenCache, nil, "")
+}
+
+func TestGetAccountPageStatsAlignsUsageWithOfficial5hReset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "claude", map[string]interface{}{
+		"refresh_token": "rt-claude-5h",
+		"access_token":  "at-claude-5h",
+		"email":         "claude-5h@example.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+
+	now := time.Now()
+	insertAccountUsageLog(t, db, id, 100, now.Add(-4*time.Hour))
+	insertAccountUsageLog(t, db, id, 40, now.Add(-10*time.Minute))
+	db.FlushUsageLogs()
+
+	handler := newAccountPageStatsHandler(t, db)
+	account := handler.store.FindByID(id)
+	if account == nil {
+		t.Fatal("account missing from store")
+	}
+	// Official 5h window started 3 hours ago (resets in 2 hours). A log from
+	// 4 hours ago is inside the rolling last-5h scan but belongs to the
+	// previous official cycle; a log from 10 minutes ago is in the current one.
+	account.SetUsageSnapshot5hAt(5, now.Add(2*time.Hour), now)
+
+	stats := invokeAccountPageStats(t, handler, []int64{id})
+	detail := stats[strconv.FormatInt(id, 10)].Usage5hDetail
+	if detail == nil || detail.Requests != 1 || detail.Tokens != 40 {
+		t.Fatalf("usage_5h_detail = %+v, want 1 request / 40 tokens from the current official window", detail)
+	}
+
+	recorder := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(recorder)
+	ginContext.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/"+strconv.FormatInt(id, 10), nil)
+	ginContext.Params = gin.Params{{Key: "id", Value: strconv.FormatInt(id, 10)}}
+	handler.GetAccount(ginContext)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("GetAccount status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var accountPayload struct {
+		Usage5hDetail *accountUsageWindow `json:"usage_5h_detail"`
+	}
+	if err := json.Unmarshal(recorder.Body.Bytes(), &accountPayload); err != nil {
+		t.Fatalf("decode GetAccount: %v", err)
+	}
+	if accountPayload.Usage5hDetail == nil || accountPayload.Usage5hDetail.Requests != 1 || accountPayload.Usage5hDetail.Tokens != 40 {
+		t.Fatalf("GetAccount usage_5h_detail = %+v, want 1 request / 40 tokens", accountPayload.Usage5hDetail)
+	}
+}
+
+func TestGetAccountPageStatsAlignsLongWindowWithOfficialDuration(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "claude", map[string]interface{}{
+		"refresh_token": "rt-claude-30d",
+		"access_token":  "at-claude-30d",
+		"email":         "claude-30d@example.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+
+	now := time.Now()
+	insertAccountUsageLog(t, db, id, 200, now.Add(-20*24*time.Hour))
+	insertAccountUsageLog(t, db, id, 800, now.Add(-40*24*time.Hour))
+	db.FlushUsageLogs()
+
+	handler := newAccountPageStatsHandler(t, db)
+	account := handler.store.FindByID(id)
+	if account == nil {
+		t.Fatal("account missing from store")
+	}
+	// 30-day official window starting 25 days ago; the 20-day-old log is
+	// inside it, but a rolling 7-day scan would miss it.
+	account.SetReset7dAt(now.Add(5 * 24 * time.Hour))
+	account.SetWindow7dSeconds(30 * 24 * 60 * 60)
+
+	stats := invokeAccountPageStats(t, handler, []int64{id})
+	detail := stats[strconv.FormatInt(id, 10)].Usage7dDetail
+	if detail == nil || detail.Requests != 1 || detail.Tokens != 200 {
+		t.Fatalf("usage_7d_detail = %+v, want the 20-day-old log only", detail)
+	}
+}
+
+func TestGetAccountPageStatsUsesRollingWindowsWithoutReset(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	db := newTestAdminDB(t)
+	ctx := context.Background()
+	id, err := db.InsertAccountWithCredentials(ctx, "claude", map[string]interface{}{
+		"refresh_token": "rt-claude-rolling",
+		"access_token":  "at-claude-rolling",
+		"email":         "claude-rolling@example.com",
+	}, "")
+	if err != nil {
+		t.Fatalf("insert account: %v", err)
+	}
+
+	now := time.Now()
+	insertAccountUsageLog(t, db, id, 15, now.Add(-4*time.Hour))
+	insertAccountUsageLog(t, db, id, 25, now.Add(-36*time.Hour))
+	insertAccountUsageLog(t, db, id, 90, now.Add(-10*24*time.Hour))
+	db.FlushUsageLogs()
+
+	handler := newAccountPageStatsHandler(t, db)
+	stats := invokeAccountPageStats(t, handler, []int64{id})
+	item := stats[strconv.FormatInt(id, 10)]
+	if item.Usage5hDetail == nil || item.Usage5hDetail.Requests != 1 || item.Usage5hDetail.Tokens != 15 {
+		t.Fatalf("usage_5h_detail = %+v, want rolling last-5h log only", item.Usage5hDetail)
+	}
+	if item.Usage7dDetail == nil || item.Usage7dDetail.Requests != 2 || item.Usage7dDetail.Tokens != 40 {
+		t.Fatalf("usage_7d_detail = %+v, want rolling last-7d logs", item.Usage7dDetail)
+	}
+}
