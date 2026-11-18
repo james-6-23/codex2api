@@ -694,8 +694,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// ==================== Codex 请求体优化 ====================
 	// 参考 CLIProxyAPI/codex_executor.go + sub2api 的实现
 
-	// 1. 确保 instructions 字段存在（Codex 后端要求）
-	if !gjson.GetBytes(requestBody, "instructions").Exists() {
+	// Preserve the verified official shape; generic clients still receive the
+	// existing instructions compatibility default.
+	if !gjson.GetBytes(requestBody, "instructions").Exists() && !PreserveCodexOfficialRequestFields(requestBody) {
 		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
 	}
 
@@ -1337,6 +1338,7 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if err := ApplyCodexAttestation(req.Context(), CodexAttestationInput{Headers: req.Header, Account: account}); err != nil {
 		return err
 	}
+	FinalizeCodexIdentityHeaders(req.Header, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 	return nil
 }

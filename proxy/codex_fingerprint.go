@@ -201,6 +201,10 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 		}
 		// Missing identity must not collapse every anonymous request into one thread.
 		if clientSession == "" {
+			if configuredCodexInstallationID(account) != "" {
+				// Preserve the pinned device without inventing conversation IDs.
+				return ids
+			}
 			return nil
 		}
 		ids.sessionID = singleMachineIdentity(accountID, clientSession)
@@ -238,6 +242,9 @@ func resolveCodexFingerprintIDs(account *auth.Account, downstreamHeaders http.He
 // 真实设备标识上，且该值本来就会覆盖出站头（自定义头最后应用），这里一并采用可
 // 保证请求头与 metadata 中的取值一致。
 func resolveConvergedInstallationID(account *auth.Account, accountID int64) string {
+	if pinned := configuredCodexInstallationID(account); pinned != "" {
+		return pinned
+	}
 	for name, value := range account.GetCustomHeaders() {
 		if strings.EqualFold(strings.TrimSpace(name), codexInstallationIDHeader) {
 			if pinned := strings.TrimSpace(value); pinned != "" {

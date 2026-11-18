@@ -1295,6 +1295,9 @@ func isResponsesMessageInputItem(item map[string]any) bool {
 }
 
 func normalizeResponsesInputItemIDs(body map[string]any) bool {
+	if preserveCodexOfficialInputFields(body) {
+		return false
+	}
 	inputItems, ok := body["input"].([]any)
 	if !ok {
 		return false
@@ -1321,6 +1324,9 @@ const responsesInputInternalMetadataField = "internal_chat_message_metadata_pass
 // stripResponsesInputInternalMetadata 只删 input[] 顶层项上的内部元数据字段，
 // 不碰 content/arguments 里恰好同名的用户内容。
 func stripResponsesInputInternalMetadata(body map[string]any) bool {
+	if preserveCodexOfficialInputFields(body) {
+		return false
+	}
 	inputItems, ok := body["input"].([]any)
 	if !ok {
 		return false
@@ -2602,7 +2608,10 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	// Responses Lite 把工具声明搬进 input[] 的 additional_tools 载体项；顶层
 	// tools[] 的清洗必须同样覆盖那里，否则坏 schema 绕过全部修正直达上游。
 	normalizeResponsesAdditionalToolSchemas(body)
-	if shouldAutoInjectResponsesImageGenerationTool(body) {
+	// Official clients supply their own tool declarations. Avoid inventing a
+	// default image tool and its bridge instructions for the preserved shape.
+	// Explicit tools still receive the normal schema and transport handling.
+	if !preserveCodexOfficialInputFields(body) && shouldAutoInjectResponsesImageGenerationTool(body) {
 		ensureResponsesImageGenerationTool(body)
 	}
 	moveTopLevelResponsesImageOptions(body)
