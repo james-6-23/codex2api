@@ -104,6 +104,36 @@ var (
 			LongOutputPricePerMToken:    7.5,
 			LongCacheReadPricePerMToken: 0.1,
 		}},
+		// gpt-6.2-sol 官方价（developers.openai.com/api/docs/models/gpt-6.2-sol）：
+		// $2/$10、缓存读取 $0.10、缓存写入 $2.50（30 分钟）/ $5（12 小时）；
+		// 超过 272K 输入/缓存 2×（$4/$0.20）、输出 1.5×（$15），fast 档 2×，
+		// Ultrafast 2027-02-28 前 3×、之后 6×。
+		{model: "gpt-6.2-sol", pricing: ModelPricing{
+			InputPricePerMToken:         2.0,
+			OutputPricePerMToken:        10.0,
+			CacheReadPricePerMToken:     0.1,
+			CacheWrite5mPricePerMToken:  2.5,
+			CacheWrite1hPricePerMToken:  5.0,
+			LongInputPricePerMToken:     4.0,
+			LongOutputPricePerMToken:    15.0,
+			LongCacheReadPricePerMToken: 0.2,
+			UltrafastMultiplier:         3.0,
+		}},
+		// gpt-6.2-astra 官方价（developers.openai.com/api/docs/models/gpt-6.2-astra）：
+		// $8/$40、缓存读取 $0.40、缓存写入 $10（30 分钟）/ $20（12 小时）；
+		// 超过 272K 输入/缓存 2×（$16/$0.80）、输出 1.5×（$60），fast 档 2×，
+		// Ultrafast 2027-02-28 前 3×、之后 6×。
+		{model: "gpt-6.2-astra", pricing: ModelPricing{
+			InputPricePerMToken:         8.0,
+			OutputPricePerMToken:        40.0,
+			CacheReadPricePerMToken:     0.4,
+			CacheWrite5mPricePerMToken:  10.0,
+			CacheWrite1hPricePerMToken:  20.0,
+			LongInputPricePerMToken:     16.0,
+			LongOutputPricePerMToken:    60.0,
+			LongCacheReadPricePerMToken: 0.8,
+			UltrafastMultiplier:         3.0,
+		}},
 		{model: "gpt-6-luna", pricing: ModelPricing{
 			InputPricePerMToken:         0.1,
 			OutputPricePerMToken:        0.5,
@@ -558,6 +588,10 @@ func normalizeCodexBillingModel(model string) (string, bool) {
 		return "gpt-6.1-sol", true
 	case strings.HasPrefix(compact, "gpt-6.1-terra") || strings.HasPrefix(compact, "gpt6.1-terra"):
 		return "gpt-6.1-terra", true
+	case strings.HasPrefix(compact, "gpt-6.2-sol") || strings.HasPrefix(compact, "gpt6.2-sol"):
+		return "gpt-6.2-sol", true
+	case strings.HasPrefix(compact, "gpt-6.2-astra") || strings.HasPrefix(compact, "gpt6.2-astra"):
+		return "gpt-6.2-astra", true
 	case strings.HasPrefix(compact, "gpt-6-luna") || strings.HasPrefix(compact, "gpt6-luna"):
 		return "gpt-6-luna", true
 	// 未知 gpt-6 变体按 astra 兜底，避免掉进 $1/$2 的默认价严重低估。

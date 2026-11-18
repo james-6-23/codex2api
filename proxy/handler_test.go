@@ -60,7 +60,7 @@ func (r *dataThenErrorReadCloser) Close() error {
 }
 
 func TestSupportedModelsIncludeLatestRequestedModels(t *testing.T) {
-	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k"} {
+	for _, model := range []string{"gpt-5.5", "gpt-5.3-codex-spark", "gpt-image-2", "gpt-image-2-2k", "gpt-image-2-4k", "gpt-6.2-astra", "gpt-6.2-sol"} {
 		if !slices.Contains(SupportedModels, model) {
 			t.Fatalf("SupportedModels missing %q", model)
 		}

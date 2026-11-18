@@ -99,6 +99,50 @@ func TestGPT61SolUsesIndependentSolPricing(t *testing.T) {
 	assertFloatEqual(t, long.OutputPricePerMToken, 15)
 }
 
+func TestGPT62SolAndAstraUseIndependentPricing(t *testing.T) {
+	previous := currentModelPricingOverrides()
+	SetModelPricingOverrides(nil)
+	t.Cleanup(func() { SetModelPricingOverrides(previous) })
+
+	for _, tc := range []struct {
+		model                             string
+		input, cached, output             float64
+		longInput, longCached, longOutput float64
+		ultrafast                         float64
+	}{
+		{"gpt-6.2-sol", 2, 0.1, 10, 4, 0.2, 15, 3},
+		{"gpt-6.2-astra", 8, 0.4, 40, 16, 0.8, 60, 3},
+	} {
+		for _, model := range []string{
+			tc.model,
+			strings.ToUpper(tc.model),
+			"models/" + tc.model,
+			tc.model + "-high",
+			tc.model + "(xhigh)",
+		} {
+			t.Run(model, func(t *testing.T) {
+				if got := CanonicalBillingModelKey(model); got != tc.model {
+					t.Fatalf("CanonicalBillingModelKey(%q) = %q, want %q", model, got, tc.model)
+				}
+				if got := PricingManagementModelKey(model); got != tc.model {
+					t.Fatalf("PricingManagementModelKey(%q) = %q, want %q", model, got, tc.model)
+				}
+				if got := PricingAliasTarget(model); got != "" {
+					t.Fatalf("PricingAliasTarget(%q) = %q, want canonical model", model, got)
+				}
+				p := GetModelPricing(model)
+				assertFloatEqual(t, p.InputPricePerMToken, tc.input)
+				assertFloatEqual(t, p.CacheReadPricePerMToken, tc.cached)
+				assertFloatEqual(t, p.OutputPricePerMToken, tc.output)
+				assertFloatEqual(t, p.LongInputPricePerMToken, tc.longInput)
+				assertFloatEqual(t, p.LongCacheReadPricePerMToken, tc.longCached)
+				assertFloatEqual(t, p.LongOutputPricePerMToken, tc.longOutput)
+				assertFloatEqual(t, p.UltrafastMultiplier, tc.ultrafast)
+			})
+		}
+	}
+}
+
 func TestGPT6SolAndLunaCostBreakdown(t *testing.T) {
 	previous := currentModelPricingOverrides()
 	SetModelPricingOverrides(nil)

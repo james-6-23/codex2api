@@ -71,6 +71,11 @@ type ModelSyncResult struct {
 }
 
 var builtinModelInfos = []ModelInfo{
+	// gpt-6.2 系列（Astra/Sol）：6.2 代旗舰，先内置兜底，保证冷启动 / 未同步的
+	// 部署也能直接调用，不必等一次同步或一次带清单的请求。官方文档同步与
+	// manifest 学习同样能发现它们（major 6 > 5 放行）。
+	modelInfoForID("gpt-6.2-astra", ModelSourceBuiltin),
+	modelInfoForID("gpt-6.2-sol", ModelSourceBuiltin),
 	// gpt-6-astra：官方模型页与定价页均已收录（$10/$50，长上下文 $20/$75）。
 	// 官方文档同步与 manifest 学习都能发现它，但内置一行保证冷启动 / 未同步的
 	// 部署也能直接调用，不必等一次同步或一次带清单的请求。
@@ -145,7 +150,7 @@ func modelInfoForID(id string, source string) ModelInfo {
 	switch strings.ToLower(id) {
 	case "gpt-5.3-codex-spark":
 		info.ProOnly = true
-	case "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol":
+	case "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-6.1-sol", "gpt-6.2-astra", "gpt-6.2-sol":
 		info.APIKeyAuthAvailable = false
 	case "gpt-image-2":
 		info.Category = ModelCategoryImage

@@ -128,6 +128,26 @@
     "cached_input_long": 0.1,
     "output_long": 7.5
   },
+  "gpt-6.2-sol": {
+    "input": 2,
+    "cached_input": 0.1,
+    "cache_write_5m": 2.5,
+    "cache_write_1h": 5,
+    "output": 10,
+    "input_long": 4,
+    "cached_input_long": 0.2,
+    "output_long": 15
+  },
+  "gpt-6.2-astra": {
+    "input": 8,
+    "cached_input": 0.4,
+    "cache_write_5m": 10,
+    "cache_write_1h": 20,
+    "output": 40,
+    "input_long": 16,
+    "cached_input_long": 0.8,
+    "output_long": 60
+  },
   "gpt-6-sol": {
     "input": 2,
     "cached_input": 0.2,
