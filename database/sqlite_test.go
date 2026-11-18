@@ -77,8 +77,8 @@ func TestSQLitePromptFilterColumnDefaultsRemainUpgradeCompatible(t *testing.T) {
 	if strings.TrimSpace(settings.PromptFilterAdvancedConfig) != "{}" {
 		t.Fatalf("compatibility advanced config = %q, want {}", settings.PromptFilterAdvancedConfig)
 	}
-	if settings.CodexMinCLIVersion != "0.160.0" {
-		t.Fatalf("fresh SQLite minimum Codex CLI version = %q, want 0.160.0", settings.CodexMinCLIVersion)
+	if settings.CodexMinCLIVersion != "0.170.0" {
+		t.Fatalf("fresh SQLite minimum Codex CLI version = %q, want 0.170.0", settings.CodexMinCLIVersion)
 	}
 	if settings.SessionSlotBufferEnabled || settings.SessionSlotBufferSeconds != 10 {
 		t.Fatalf("session slot buffer defaults = enabled:%t seconds:%d, want false/10", settings.SessionSlotBufferEnabled, settings.SessionSlotBufferSeconds)

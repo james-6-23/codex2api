@@ -1507,8 +1507,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	SET test_model = 'gpt-5.5'
 	WHERE LOWER(COALESCE(test_model, '')) IN ('gpt-5.4', 'gpt-5.4-mini');
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS client_compat_mode VARCHAR(20) DEFAULT 'preserve';
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.160.0';
-	ALTER TABLE system_settings ALTER COLUMN codex_min_cli_version SET DEFAULT '0.160.0';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.170.0';
+	ALTER TABLE system_settings ALTER COLUMN codex_min_cli_version SET DEFAULT '0.170.0';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_user_agent_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_telemetry_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_turn_state_template_cache_enabled BOOLEAN DEFAULT FALSE;
@@ -2723,7 +2723,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_review_timeout_seconds, 10),
 		       COALESCE(prompt_filter_review_fail_closed, true),
 		       COALESCE(client_compat_mode, 'preserve'),
-		       COALESCE(codex_min_cli_version, '0.160.0'),
+		       COALESCE(codex_min_cli_version, '0.170.0'),
 		       COALESCE(codex_user_agent_config, '{}'),
 		       COALESCE(usage_log_mode, 'full'),
 		       COALESCE(usage_log_batch_size, 200),

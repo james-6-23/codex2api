@@ -16,8 +16,8 @@ import (
 
 func TestDefaultBootstrapSettingsUseRecommendedPromptFilterPreset(t *testing.T) {
 	settings := defaultBootstrapSettings()
-	if settings.CodexMinCLIVersion != "0.160.0" {
-		t.Fatalf("fresh install minimum Codex CLI version = %q, want 0.160.0", settings.CodexMinCLIVersion)
+	if settings.CodexMinCLIVersion != "0.170.0" {
+		t.Fatalf("fresh install minimum Codex CLI version = %q, want 0.170.0", settings.CodexMinCLIVersion)
 	}
 	if settings.PromptFilterEnabled {
 		t.Fatal("fresh install must keep the prompt-filter master switch explicit")
