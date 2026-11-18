@@ -3,6 +3,7 @@ package database
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -292,6 +293,94 @@ func (db *DB) GetAccountModelCountsSinceByIDs(ctx context.Context, ids []int64, 
 		result[accountID][model] = count
 	}
 	return result, rows.Err()
+}
+
+// GetAccountUsageSinceWindows aggregates requests, tokens, and billing for each
+// account since its own window start. Filters match GetAccountUsageWindowsByIDs
+// so list-page usage details can follow official 5h/7d resets (issue #798).
+func (db *DB) GetAccountUsageSinceWindows(ctx context.Context, windows map[int64]time.Time) (map[int64]*AccountTimeRangeUsage, error) {
+	result := make(map[int64]*AccountTimeRangeUsage, len(windows))
+	if len(windows) == 0 {
+		return result, nil
+	}
+
+	ids := make([]int64, 0, len(windows))
+	for accountID, since := range windows {
+		if accountID <= 0 || since.IsZero() {
+			continue
+		}
+		ids = append(ids, accountID)
+	}
+	if len(ids) == 0 {
+		return result, nil
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+
+	const maxRowsPerBatch = 1000
+	for start := 0; start < len(ids); start += maxRowsPerBatch {
+		end := start + maxRowsPerBatch
+		if end > len(ids) {
+			end = len(ids)
+		}
+		if err := db.getAccountUsageSinceWindowsChunk(ctx, ids[start:end], windows, result); err != nil {
+			return nil, err
+		}
+	}
+	return result, nil
+}
+
+func (db *DB) getAccountUsageSinceWindowsChunk(ctx context.Context, ids []int64, windows map[int64]time.Time, result map[int64]*AccountTimeRangeUsage) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	values := make([]string, 0, len(ids))
+	args := make([]interface{}, 0, len(ids)*2)
+	argIdx := 1
+	for _, accountID := range ids {
+		if db.isSQLite() {
+			values = append(values, fmt.Sprintf("($%d, $%d)", argIdx, argIdx+1))
+		} else {
+			values = append(values, fmt.Sprintf("($%d::BIGINT, $%d::TIMESTAMPTZ)", argIdx, argIdx+1))
+		}
+		args = append(args, accountID, db.timeArg(windows[accountID]))
+		argIdx += 2
+	}
+
+	query := fmt.Sprintf(`
+	WITH usage_windows(account_id, since_at) AS (
+		VALUES %s
+	)
+	SELECT usage_windows.account_id,
+		COUNT(*),
+		COALESCE(SUM(usage_logs.total_tokens), 0),
+		COALESCE(SUM(usage_logs.account_billed), 0),
+		COALESCE(SUM(usage_logs.user_billed), 0)
+	FROM usage_windows
+	JOIN usage_logs
+		ON usage_logs.account_id = usage_windows.account_id
+		AND usage_logs.created_at >= usage_windows.since_at
+		AND usage_logs.status_code <> 499
+		AND %s
+		AND %s
+		AND %s
+	GROUP BY usage_windows.account_id
+	`, strings.Join(values, ","), db.nonRetryUsageLogPredicate(), db.currentAccountUsageGenerationPredicate(), db.endUserUsageLogPredicate())
+
+	rows, err := db.conn.QueryContext(ctx, query, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		usage := &AccountTimeRangeUsage{}
+		if err := rows.Scan(&usage.AccountID, &usage.Requests, &usage.Tokens, &usage.AccountBilled, &usage.UserBilled); err != nil {
+			return err
+		}
+		result[usage.AccountID] = usage
+	}
+	return rows.Err()
 }
 
 func positiveUniqueIDs(ids []int64) []int64 {

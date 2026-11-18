@@ -54,7 +54,7 @@ func (h *Handler) GetAccountPageStats(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 10*time.Second)
 	defer cancel()
 	now := time.Now()
-	usage5h, usage7d, err := h.db.GetAccountUsageWindowsByIDs(ctx, ids, now.Add(-5*time.Hour), now.AddDate(0, 0, -7))
+	usage5h, usage7d, err := h.loadAccountUsageDetails(ctx, ids, now)
 	if err != nil {
 		writeInternalError(c, err)
 		return
@@ -177,6 +177,49 @@ func (h *Handler) accountBillingWindows(ids []int64) (map[int64]time.Time, map[i
 				window = time.Duration(seconds) * time.Second
 			}
 			longWindows[id] = resetAt.Add(-window)
+		}
+	}
+	return shortWindows, longWindows
+}
+
+// loadAccountUsageDetails aggregates list/detail usage windows per account.
+// Official 5h/7d reset timestamps bound the window when present; otherwise
+// the rolling last 5 hours / last 7 days are used (issue #798).
+func (h *Handler) loadAccountUsageDetails(ctx context.Context, ids []int64, now time.Time) (map[int64]*database.AccountTimeRangeUsage, map[int64]*database.AccountTimeRangeUsage, error) {
+	shortWindows, longWindows := h.accountUsageWindows(ids, now)
+	usage5h, err := h.db.GetAccountUsageSinceWindows(ctx, shortWindows)
+	if err != nil {
+		return nil, nil, err
+	}
+	usage7d, err := h.db.GetAccountUsageSinceWindows(ctx, longWindows)
+	if err != nil {
+		return nil, nil, err
+	}
+	return usage5h, usage7d, nil
+}
+
+// accountUsageWindows returns per-account start times for the short (5h) and
+// long (7d/monthly) usage aggregates. Accounts with an official reset use
+// the same start as accountBillingWindows; the rest fall back to a rolling
+// last 5 hours / last 7 days so unsynced accounts keep today's behavior.
+func (h *Handler) accountUsageWindows(ids []int64, now time.Time) (map[int64]time.Time, map[int64]time.Time) {
+	shortWindows := make(map[int64]time.Time, len(ids))
+	longWindows := make(map[int64]time.Time, len(ids))
+	fallbackShort := now.Add(-5 * time.Hour)
+	fallbackLong := now.AddDate(0, 0, -7)
+	for _, id := range ids {
+		shortWindows[id] = fallbackShort
+		longWindows[id] = fallbackLong
+	}
+	officialShort, officialLong := h.accountBillingWindows(ids)
+	for id, since := range officialShort {
+		if !since.IsZero() {
+			shortWindows[id] = since
+		}
+	}
+	for id, since := range officialLong {
+		if !since.IsZero() {
+			longWindows[id] = since
 		}
 	}
 	return shortWindows, longWindows
