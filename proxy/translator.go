@@ -4644,6 +4644,14 @@ func extractUsageFromResult(usage gjson.Result) *UsageInfo {
 	result.ImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.image_tokens").Int())), max(0, inputTokens))
 	result.ImageOutputTokens = min(max(0, int(usage.Get("output_tokens_details.image_tokens").Int())), max(0, outputTokens))
 	result.CachedImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.cached_tokens_details.image_tokens").Int())), min(result.ImageInputTokens, max(0, cachedTokens)))
+	// OpenAI Responses 的缓存写入按保留时长拆分（GPT-6.2 起）：
+	// ttl_30m_tokens → 短保留（5m 槽）、ttl_12h_tokens → 长保留（1h 槽）。
+	// Anthropic 的 cache_creation 细分走 claude_usage_semantics 路径，互不影响。
+	write30m := int(usage.Get("input_tokens_details.cache_write_tokens_details.ttl_30m_tokens").Int())
+	write12h := int(usage.Get("input_tokens_details.cache_write_tokens_details.ttl_12h_tokens").Int())
+	result.CacheWrite5mTokens = write30m
+	result.CacheWrite1hTokens = write12h
+	result.CacheWriteTokens = write30m + write12h
 	return result
 }
 

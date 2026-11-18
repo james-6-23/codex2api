@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestGPT6SolAndLunaIndependentPricingKeys(t *testing.T) {
@@ -109,9 +110,10 @@ func TestGPT62SolAndAstraUseIndependentPricing(t *testing.T) {
 		input, cached, output             float64
 		longInput, longCached, longOutput float64
 		ultrafast                         float64
+		ultrafastAfter                    float64
 	}{
-		{"gpt-6.2-sol", 2, 0.1, 10, 4, 0.2, 15, 3},
-		{"gpt-6.2-astra", 8, 0.4, 40, 16, 0.8, 60, 3},
+		{"gpt-6.2-sol", 2, 0.1, 10, 4, 0.2, 15, 3, 6},
+		{"gpt-6.2-astra", 8, 0.4, 40, 16, 0.8, 60, 3, 6},
 	} {
 		for _, model := range []string{
 			tc.model,
@@ -138,8 +140,30 @@ func TestGPT62SolAndAstraUseIndependentPricing(t *testing.T) {
 				assertFloatEqual(t, p.LongCacheReadPricePerMToken, tc.longCached)
 				assertFloatEqual(t, p.LongOutputPricePerMToken, tc.longOutput)
 				assertFloatEqual(t, p.UltrafastMultiplier, tc.ultrafast)
+				assertFloatEqual(t, p.UltrafastMultiplierAfter, tc.ultrafastAfter)
 			})
 		}
+	}
+}
+
+func TestGPT62UltrafastMultiplierResolvesByTime(t *testing.T) {
+	previous := currentModelPricingOverrides()
+	SetModelPricingOverrides(nil)
+	t.Cleanup(func() { SetModelPricingOverrides(previous) })
+
+	prevNow := ultrafastNow
+	t.Cleanup(func() { ultrafastNow = prevNow })
+
+	for _, model := range []string{"gpt-6.2-sol", "gpt-6.2-astra"} {
+		p := GetModelPricing(model)
+
+		// 促销期内（2027-03-01 00:00 太平洋时间前）：3×
+		ultrafastNow = func() time.Time { return time.Date(2027, 2, 28, 23, 59, 0, 0, time.UTC) }
+		assertFloatEqual(t, resolveUltrafastMultiplier(p), 3)
+
+		// 促销期后（2027-03-01 00:00 太平洋时间起）：6×
+		ultrafastNow = func() time.Time { return time.Date(2027, 3, 2, 0, 0, 0, 0, time.UTC) }
+		assertFloatEqual(t, resolveUltrafastMultiplier(p), 6)
 	}
 }
 

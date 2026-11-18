@@ -45,7 +45,8 @@ func TestCodexClientIdentitySelectsCompletePairAndManualOverrides(t *testing.T) 
 	}{
 		{"newest app with alpha", codexVersionSelection{}, "0.158.0-alpha.2.1", "26.928.31416", false},
 		{"stable floor excludes alpha", codexVersionSelection{VersionFloor: "0.158.0"}, "0.159.2", "26.927.1", false},
-		{"unavailable floor", codexVersionSelection{VersionFloor: "0.160.0"}, "", "", true},
+		{"cached below floor falls back to builtin", codexVersionSelection{VersionFloor: "0.160.0"}, "0.170.0", "26.1111.71025", false},
+		{"unavailable floor", codexVersionSelection{VersionFloor: "0.171.0"}, "", "", true},
 		{"CLI override keeps default app", codexVersionSelection{CLIOverride: "0.140.0", VersionFloor: "0.999.0"}, "0.140.0", "26.928.31416", false},
 		{"app override leaves auto CLI floor", codexVersionSelection{AppOverride: "99.1.1", VersionFloor: "0.158.0"}, "0.159.2", "99.1.1", false},
 		{"both overrides", codexVersionSelection{CLIOverride: "0.140.0-alpha.1", AppOverride: "99.1.1", VersionFloor: "9.999.0"}, "0.140.0-alpha.1", "99.1.1", false},
