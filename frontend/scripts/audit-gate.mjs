@@ -16,6 +16,11 @@ import { spawnSync } from "node:child_process";
 const ALLOWLIST = new Map([
   // GHSA-qwww-vcr4-c8h2(React Router RSC CSRF)已随 react-router 7.18.2 修复,
   // 条目于 2026-08-08 移除;新增放行前先确认触发路径在本项目里不存在。
+  // GHSA-fc5q-39xc-vjpf (picomatch <=4.0.7 ReDoS, CWE-1333):
+  // picomatch 仅由 tailwindcss(经 tinyglobby)/vite 在前端构建期做 glob 匹配,
+  // 产物是纯静态文件,运行时不存在不可信 glob 输入路径,ReDoS 无法被终端用户触发;
+  // 上游暂无修复版本(patched: None)。复查时间: 2026-11-18。
+  ["GHSA-fc5q-39xc-vjpf", "仅构建期 glob 匹配、无不可信输入路径;上游无 patched 版本,待发布后升级并移除本条"],
 ]);
 
 const BLOCKING_SEVERITIES = new Set(["high", "critical"]);
