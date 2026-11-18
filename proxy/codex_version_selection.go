@@ -74,21 +74,37 @@ func resolveCodexCLISelection(spec *codexUAKindSpec, choice codexVersionSelectio
 }
 
 func selectCodexClientPair(spec *codexUAKindSpec, target, floor string) (codexUAVersionPair, bool) {
-	pairs := make([]codexUAVersionPair, 0)
+	cachedPairs := make([]codexUAVersionPair, 0)
 	for _, cached := range codexClientVersionTarget(string(spec.Kind), target).Pairs {
-		pairs = append(pairs, codexUAVersionPair{CLIVersion: cached.CLIVersion, AppVersion: cached.AppVersion})
+		cachedPairs = append(cachedPairs, codexUAVersionPair{CLIVersion: cached.CLIVersion, AppVersion: cached.AppVersion})
 	}
+	// 缓存优先；缓存里没有满足 floor 的配对时，回退内置 spec.VersionPairs，
+	// 保证未同步的部署在 floor 提高后仍能拿到内置的更高版本配对，而不是直接
+	// 返回 codex_client_version_unavailable（HTTP 503、不可重试）。
+	if pair, ok := firstCodexPairMeetingFloor(cachedPairs, floor); ok {
+		return pair, true
+	}
+	if pair, ok := firstCodexPairMeetingFloor(spec.VersionPairs, floor); ok {
+		return pair, true
+	}
+	return codexUAVersionPair{}, false
+}
+
+// firstCodexPairMeetingFloor 从给定配对里挑出满足最低版本的最新配对（按应用构建号
+// 新→旧排序）。返回 false 表示没有满足 floor 的配对。
+func firstCodexPairMeetingFloor(pairs []codexUAVersionPair, floor string) (codexUAVersionPair, bool) {
 	if len(pairs) == 0 {
-		pairs = append(pairs, spec.VersionPairs...)
+		return codexUAVersionPair{}, false
 	}
-	sort.SliceStable(pairs, func(i, j int) bool {
-		if pairs[i].AppVersion != pairs[j].AppVersion {
-			return codexBuildIsNewer(pairs[i].AppVersion, pairs[j].AppVersion)
+	sorted := append([]codexUAVersionPair(nil), pairs...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		if sorted[i].AppVersion != sorted[j].AppVersion {
+			return codexBuildIsNewer(sorted[i].AppVersion, sorted[j].AppVersion)
 		}
-		cmp, valid := compareCodexClientVersions(pairs[i].CLIVersion, pairs[j].CLIVersion)
+		cmp, valid := compareCodexClientVersions(sorted[i].CLIVersion, sorted[j].CLIVersion)
 		return valid && cmp > 0
 	})
-	for _, pair := range pairs {
+	for _, pair := range sorted {
 		if codexVersionAtLeast(pair.CLIVersion, floor) {
 			return pair, true
 		}

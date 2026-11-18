@@ -40,7 +40,9 @@ func UsageLogCostBreakdown(log *UsageLogInput) CostBreakdown {
 		return CostBreakdown{TotalCost: mediaUsageCost(log, model, unit)}
 	}
 	if GPTImage25BillingModel(model) == "" {
-		return CalculateCostBreakdownWithCacheWrites(log.InputTokens, log.OutputTokens, log.CachedTokens, log.CacheWrite5mTokens, log.CacheWrite1hTokens, model, usageLogBillingServiceTier(log))
+		// 按记录自身的计费时间解析 Ultrafast 倍率，历史日志在促销期结束后不会被
+		// 按当前时钟重算；CreatedAt 为零值时回退当前时间。
+		return CalculateCostBreakdownWithCacheWritesAt(log.InputTokens, log.OutputTokens, log.CachedTokens, log.CacheWrite5mTokens, log.CacheWrite1hTokens, model, usageLogBillingServiceTier(log), log.CreatedAt)
 	}
 	return imageTokenCostBreakdown(log.InputTokens, log.OutputTokens, log.CachedTokens, log.ImageInputTokens, log.ImageOutputTokens, log.CachedImageInputTokens, GetModelPricing(model))
 }

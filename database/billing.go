@@ -1,6 +1,9 @@
 package database
 
-import "strings"
+import (
+	"strings"
+	"time"
+)
 
 const longContextThreshold = 272000
 
@@ -39,6 +42,9 @@ type ModelPricing struct {
 	// 大于 0 时 ultrafast 请求按 standard 价乘此倍率计费,不走 Fast 的 2× 与
 	// priority 价;为 0 的模型 ultrafast 继续跟随 Fast 策略。不参与价格覆盖。
 	UltrafastMultiplier float64
+	// UltrafastMultiplierAfter 是促销期结束后的 Ultrafast 倍率；为 0 表示
+	// 无时间切换（恒用 UltrafastMultiplier）。计费时按当前时间自动切换。
+	UltrafastMultiplierAfter float64
 }
 
 type modelPricingRule struct {
@@ -66,6 +72,14 @@ type CostBreakdown struct {
 	LongContext                  bool    `json:"long_context"`
 	LongContextThreshold         int     `json:"long_context_threshold"`
 }
+
+// ultrafastPromoCutoff 是 Ultrafast 促销倍率的切换点：2027-03-01 00:00 太平洋时间
+// （北美此时为 PST，即 08:00 UTC）。此前用 UltrafastMultiplier（3×），此后切换为
+// UltrafastMultiplierAfter（6×）。
+var ultrafastPromoCutoff = time.Date(2027, 3, 1, 8, 0, 0, 0, time.UTC)
+
+// ultrafastNow 返回计费当前时间；测试可替换。生产代码不要赋值。
+var ultrafastNow = time.Now
 
 var (
 	defaultModelPricing = &ModelPricing{InputPricePerMToken: 1.0, OutputPricePerMToken: 2.0}
@@ -103,6 +117,38 @@ var (
 			LongInputPricePerMToken:     2.0,
 			LongOutputPricePerMToken:    7.5,
 			LongCacheReadPricePerMToken: 0.1,
+		}},
+		// gpt-6.2-sol 官方价（developers.openai.com/api/docs/models/gpt-6.2-sol）：
+		// $2/$10、缓存读取 $0.10、缓存写入 $2.50（30 分钟）/ $5（12 小时）；
+		// 超过 272K 输入/缓存 2×（$4/$0.20）、输出 1.5×（$15），fast 档 2×，
+		// Ultrafast 促销期 3×（至 2027-02-28），之后 6×（按计费时间自动切换）。
+		{model: "gpt-6.2-sol", pricing: ModelPricing{
+			InputPricePerMToken:         2.0,
+			OutputPricePerMToken:        10.0,
+			CacheReadPricePerMToken:     0.1,
+			CacheWrite5mPricePerMToken:  2.5,
+			CacheWrite1hPricePerMToken:  5.0,
+			LongInputPricePerMToken:     4.0,
+			LongOutputPricePerMToken:    15.0,
+			LongCacheReadPricePerMToken: 0.2,
+			UltrafastMultiplier:         3.0,
+			UltrafastMultiplierAfter:    6.0,
+		}},
+		// gpt-6.2-astra 官方价（developers.openai.com/api/docs/models/gpt-6.2-astra）：
+		// $8/$40、缓存读取 $0.40、缓存写入 $10（30 分钟）/ $20（12 小时）；
+		// 超过 272K 输入/缓存 2×（$16/$0.80）、输出 1.5×（$60），fast 档 2×，
+		// Ultrafast 促销期 3×（至 2027-02-28），之后 6×（按计费时间自动切换）。
+		{model: "gpt-6.2-astra", pricing: ModelPricing{
+			InputPricePerMToken:         8.0,
+			OutputPricePerMToken:        40.0,
+			CacheReadPricePerMToken:     0.4,
+			CacheWrite5mPricePerMToken:  10.0,
+			CacheWrite1hPricePerMToken:  20.0,
+			LongInputPricePerMToken:     16.0,
+			LongOutputPricePerMToken:    60.0,
+			LongCacheReadPricePerMToken: 0.8,
+			UltrafastMultiplier:         3.0,
+			UltrafastMultiplierAfter:    6.0,
 		}},
 		{model: "gpt-6-luna", pricing: ModelPricing{
 			InputPricePerMToken:         0.1,
@@ -424,10 +470,37 @@ func CalculateCostBreakdown(inputTokens, outputTokens, cachedTokens int, model s
 	return CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedTokens, 0, 0, model, serviceTier)
 }
 
+// resolveUltrafastMultiplier 按计费时间返回 Ultrafast 档倍率：促销期用
+// UltrafastMultiplier（如 3×），过了 ultrafastPromoCutoff 且配置了
+// UltrafastMultiplierAfter 时切换为后者（如 6×）。
+func resolveUltrafastMultiplier(pricing *ModelPricing) float64 {
+	return resolveUltrafastMultiplierAt(pricing, ultrafastNow())
+}
+
+// resolveUltrafastMultiplierAt 按给定计费时间返回 Ultrafast 倍率：促销期用
+// UltrafastMultiplier（如 3×），过了 ultrafastPromoCutoff 且配置了
+// UltrafastMultiplierAfter 时切换为后者（如 6×）。
+func resolveUltrafastMultiplierAt(pricing *ModelPricing, at time.Time) float64 {
+	if pricing.UltrafastMultiplierAfter > 0 && at.After(ultrafastPromoCutoff) {
+		return pricing.UltrafastMultiplierAfter
+	}
+	return pricing.UltrafastMultiplier
+}
+
 // CalculateCostBreakdownWithCacheWrites 在 CalculateCostBreakdown 的基础上计入 Anthropic
 // 提示缓存写入（5 分钟 / 1 小时）。inputTokens 是总输入（未缓存 + 缓存命中 + 缓存写入），
 // 写入价缺省按输入价的 1.25 倍 / 2 倍。
 func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens int, model string, serviceTier string) CostBreakdown {
+	return CalculateCostBreakdownWithCacheWritesAt(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens, model, serviceTier, time.Time{})
+}
+
+// CalculateCostBreakdownWithCacheWritesAt 与 CalculateCostBreakdownWithCacheWrites 相同，
+// 但按 at 指定的计费时间解析 Ultrafast 倍率：历史日志应传记录的计费时间，避免促销期
+// 结束后按当前时钟重算导致历史总额漂移；at 为零值时用当前时间。
+func CalculateCostBreakdownWithCacheWritesAt(inputTokens, outputTokens, cachedTokens, cacheWrite5mTokens, cacheWrite1hTokens int, model string, serviceTier string, at time.Time) CostBreakdown {
+	if at.IsZero() {
+		at = ultrafastNow()
+	}
 	pricing := GetModelPricing(model)
 	if GPTImage25BillingModel(model) != "" {
 		return imageTokenCostBreakdown(inputTokens, outputTokens, cachedTokens, 0, 0, 0, pricing)
@@ -454,7 +527,7 @@ func CalculateCostBreakdownWithCacheWrites(inputTokens, outputTokens, cachedToke
 
 	tierMultiplier := serviceTierCostMultiplier(serviceTier)
 	if normalizeServiceTier(serviceTier) == "ultrafast" && pricing.UltrafastMultiplier > 0 {
-		tierMultiplier = pricing.UltrafastMultiplier
+		tierMultiplier = resolveUltrafastMultiplierAt(pricing, at)
 	} else if usePriorityPricing(serviceTier, pricing) {
 		tierMultiplier = 1
 		if isLong && pricing.LongInputPricePerMTokenPriority > 0 {
@@ -558,6 +631,10 @@ func normalizeCodexBillingModel(model string) (string, bool) {
 		return "gpt-6.1-sol", true
 	case strings.HasPrefix(compact, "gpt-6.1-terra") || strings.HasPrefix(compact, "gpt6.1-terra"):
 		return "gpt-6.1-terra", true
+	case strings.HasPrefix(compact, "gpt-6.2-sol") || strings.HasPrefix(compact, "gpt6.2-sol"):
+		return "gpt-6.2-sol", true
+	case strings.HasPrefix(compact, "gpt-6.2-astra") || strings.HasPrefix(compact, "gpt6.2-astra"):
+		return "gpt-6.2-astra", true
 	case strings.HasPrefix(compact, "gpt-6-luna") || strings.HasPrefix(compact, "gpt6-luna"):
 		return "gpt-6-luna", true
 	// 未知 gpt-6 变体按 astra 兜底，避免掉进 $1/$2 的默认价严重低估。

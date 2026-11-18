@@ -59,7 +59,7 @@ func TestPreviewCodexUserAgentUsesFormValues(t *testing.T) {
 	if preview.Persona == nil || preview.Persona.Version != "0.152.0" {
 		t.Fatalf("manual CLI override should retain 0.152.0, got %+v", preview.Persona)
 	}
-	if !strings.HasSuffix(preview.Persona.UserAgent, "(Codex Desktop; 26.930.51102)") || preview.Persona.Originator != "Codex Desktop" {
+	if !strings.HasSuffix(preview.Persona.UserAgent, "(Codex Desktop; 26.1111.71025)") || preview.Persona.Originator != "Codex Desktop" {
 		t.Fatalf("persona = %+v", preview.Persona)
 	}
 
