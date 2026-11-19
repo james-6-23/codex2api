@@ -222,14 +222,6 @@ Antigravity 渠道的首绑 / Fresh 选号默认启用加权避险：候选账�
 
 #### Codex 客户端版本
 
-「系统设置 → Codex → 客户端与指纹 → 版本与兼容」中的客户端兼容模式保存后对新请求生效。
-
-- **保留客户端**（默认）沿用已识别客户端的完整 User-Agent，包括 Desktop 的平台、应用构建号和内置 CLI 预发布版本。
-- **自动兼容**仅对符合升级条件且低于最低 CLI 版本的客户端使用服务端画像。其余已识别客户端保留原始 User-Agent。
-- **强制模拟**对所有请求使用服务端生成的身份。可以选择单一画像或按账号分配的画像池。
-
-前两种模式遇到缺失或无法识别的 User-Agent 时优先使用后台配置的备用画像。未配置时，设备稳定化（`STABILIZE_DEVICE_PROFILE`，默认开启）可以提供回退画像。账号自定义请求头仍可覆盖最终字段。「服务端画像预览」展示网关生成的身份，单次请求发出的 UA 可在 `/usage` 查看。WebSocket 握手携带身份时，新会话按出站身份复用连接。
-
 管理后台「系统设置 → Codex」可同步并展示 Desktop / VSCode 各架构的应用版本与内置 CLI 配对。macOS 使用官方 appcast，Windows 优先第三方映射、失败后局部读取官方 MSIX，VSCode 使用官方原生 VSIX。每个包最多读取 12 MiB，保留 alpha CLI、缓存和历史，不下载全包分析。
 
 CLI/应用版本留空使用自动配对；手填字段独立覆盖。`auto` 模式最低 CLI 版本只筛选已有配对，无可用配对时返回 `codex_client_version_unavailable`，不会凭空抬升版本。详见 [真实版本配对与 Windows fallback](CODEX_CLIENT_VERSIONS.md)。

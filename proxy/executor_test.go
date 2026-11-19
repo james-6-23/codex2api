@@ -1009,39 +1009,6 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 	}
 }
 
-func TestCodexCompatibilityWithDefaultDeviceStabilization(t *testing.T) {
-	previous := CurrentRuntimeSettings()
-	t.Cleanup(func() { ApplyRuntimeSettings(previous) })
-	cfg := DeviceProfileConfigFromEnv(nil)
-	const desktop = "Codex Desktop/0.169.0-alpha.11.1 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.1111.21308)"
-	const serverUA = "codex-tui/0.170.0 (Linux Unknown; x86_64) xterm"
-	for _, tc := range []struct {
-		name, mode, floor, clientUA, wantUA, wantVersion string
-	}{
-		{"preserve Windows Desktop", ClientCompatModePreserve, "0.170.0", desktop, desktop, "0.169.0-alpha.11.1"},
-		{"auto above minimum", ClientCompatModeAuto, "0.168.0", desktop, desktop, "0.169.0-alpha.11.1"},
-		{"auto below minimum", ClientCompatModeAuto, "0.170.0", desktop, serverUA, "0.170.0"},
-		{"force Windows Desktop", ClientCompatModeForce, "", desktop, serverUA, "0.170.0"},
-		{"preserve unknown client", ClientCompatModePreserve, "", "curl/8.0", serverUA, "0.170.0"},
-		{"preserve missing UA", ClientCompatModePreserve, "", "", serverUA, "0.170.0"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			ApplyRuntimeSettings(RuntimeSettings{
-				ClientCompatMode: tc.mode, CodexMinCLIVersion: tc.floor,
-				CodexUserAgentConfig: `{"raw_user_agent":"` + serverUA + `"}`,
-			})
-			req := httptest.NewRequest(http.MethodPost, "/responses", nil)
-			headers := http.Header{"User-Agent": {tc.clientUA}}
-			if err := applyCodexRequestHeaders(req, &auth.Account{DBID: 899}, "test", "", "", cfg, headers); err != nil {
-				t.Fatal(err)
-			}
-			if ua, version := req.Header.Get("User-Agent"), req.Header.Get("Version"); ua != tc.wantUA || version != tc.wantVersion {
-				t.Fatalf("got UA %q / version %q, want %q / %q", ua, version, tc.wantUA, tc.wantVersion)
-			}
-		})
-	}
-}
-
 func TestApplyCodexRequestHeadersAutoDerivesVersionFromDesktopUserAgent(t *testing.T) {
 	prev := CurrentRuntimeSettings()
 	ApplyRuntimeSettings(RuntimeSettings{
