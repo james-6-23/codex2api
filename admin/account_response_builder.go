@@ -413,10 +413,12 @@ func (h *Handler) buildAccountResponse(
 				}
 			}
 		}
-		if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
+		// Keep the selected pause window, status and reset times from the same usage update.
+		liveUsage := runtimeAccount.GetAccountLiveUsageSnapshot()
+		if t := liveUsage.Reset5hAt; !t.IsZero() {
 			resp.Reset5hAt = t.Format(time.RFC3339)
 		}
-		if t := runtimeAccount.GetReset7dAt(); !t.IsZero() {
+		if t := liveUsage.Reset7dAt; !t.IsZero() {
 			resp.Reset7dAt = t.Format(time.RFC3339)
 		}
 		if t := runtimeAccount.GetResetSparkAt(); !t.IsZero() {
@@ -456,8 +458,9 @@ func (h *Handler) buildAccountResponse(
 			}
 		}
 		if !isAntigravityAccount {
-			resp.Status = runtimeAccount.RuntimeStatus()
-			resp.UsingCredits = runtimeAccount.UsingCredits()
+			resp.Status = liveUsage.Status
+			resp.QuotaPauseWindow = liveUsage.QuotaPauseWindow
+			resp.UsingCredits = liveUsage.UsingCredits
 			runtimeAccount.Mu().RLock()
 			resp.ErrorMessage = runtimeAccount.ErrorMsg
 			runtimeAccount.Mu().RUnlock()
