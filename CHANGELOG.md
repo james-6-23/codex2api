@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.1.8 - 2026-11-20
+
+### Fixes
+
+- **Account usage totals follow each account's official quota resets (#798, reported by @orangestar0829, #896, @koeria).** The account list and detail page now count requests, tokens and costs from the start of the current quota window, including monthly windows where applicable. When a reset time is unavailable, that window still uses the rolling 5-hour or 7-day total.
+
+- **Automatic quota pauses show the window and reset time that triggered them (#897, reported by @MagnetOscar, #898, @koeria).** The account page uses the scheduler's effective threshold, including thresholds inherited from a group or global settings. When both thresholds are reached, the page shows the 7-day reset. Live updates clear the pause indicator after recovery.
+
+- **Codex preserve mode keeps recognized client User-Agents on HTTP and WebSocket requests (#899, reported by @mice33, #900, @koeria).** Device-profile stabilization could replace a Windows Codex Desktop identity with the default macOS CLI profile. Preserve mode now forwards a recognized official User-Agent with a parseable version. Explicit User-Agent overrides retain precedence.
+
+- **Account mode names are fully visible in the management menu (#901, reported by @MagnetOscar).** Pool Mode and Personal Mode have distinct icons and room for the selection checkmark. The trigger stays compact, and the header controls wrap on narrow screens.
+
 ## v3.1.7 - 2026-11-18
 
 ### Features
