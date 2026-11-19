@@ -6513,11 +6513,12 @@ export default function Accounts() {
             actionsBelow
             autoRefresh={accountAutoRefresh}
             titleAdornment={
-              <div className="flex items-center gap-2">
-                {providerSwitcher}
+              <div className="flex max-w-full flex-wrap items-center gap-2">
+                <div className="min-w-0 max-w-full">{providerSwitcher}</div>
                 <Select
-                  className="w-32"
+                  className="w-auto shrink-0"
                   compact
+                  dropdownMinWidth={192}
                   value={pageMode}
                   onValueChange={(value) => {
                     const mode = value === "personal" ? "personal" : "pool";
@@ -6527,9 +6528,18 @@ export default function Accounts() {
                     setPageMode(mode);
                   }}
                   options={[
-                    { value: "pool", label: t("accounts.pageModePool") },
-                    { value: "personal", label: t("accounts.pageModePersonal") },
-                  ]}
+                    { value: "pool", label: t("accounts.pageModePool"), icon: Rows3 },
+                    { value: "personal", label: t("accounts.pageModePersonal"), icon: LayoutGrid },
+                  ].map(({ value, label, icon: Icon }) => ({
+                    value,
+                    label,
+                    content: (
+                      <span className="flex items-center gap-2 font-medium">
+                        <Icon aria-hidden="true" className="size-4 shrink-0" />
+                        {label}
+                      </span>
+                    ),
+                  }))}
                 />
               </div>
             }
