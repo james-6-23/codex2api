@@ -175,6 +175,71 @@ func TestCodexAlphaSearchKeepsVersionUnavailableStatus(t *testing.T) {
 	}
 }
 
+func TestCodexClientIdentityPreserveKeepsRecognizedDesktopUnderStabilization(t *testing.T) {
+	prev := CurrentRuntimeSettings()
+	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
+	deviceProfileCacheMu.Lock()
+	deviceProfileCache = make(map[string]deviceProfileCacheEntry)
+	deviceProfileCacheMu.Unlock()
+
+	const desktopUA = "Codex Desktop/0.169.0-alpha.11.1 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.1111.21308)"
+
+	t.Run("desktop below stabilization baseline", func(t *testing.T) {
+		ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
+		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{
+			Account:      &auth.Account{DBID: 899},
+			APIKey:       "issue-899-desktop",
+			DeviceConfig: &DeviceProfileConfig{StabilizeDeviceProfile: true},
+			Headers: http.Header{
+				"User-Agent": {desktopUA},
+				"Originator": {"Codex Desktop"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if identity.UserAgent != desktopUA || identity.Version != "0.169.0-alpha.11.1" || identity.Generated {
+			t.Fatalf("preserve mode rewrote recognized desktop identity: %+v", identity)
+		}
+	})
+
+	t.Run("unrecognized client stays stabilized", func(t *testing.T) {
+		ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
+		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{
+			Account:      &auth.Account{DBID: 899},
+			APIKey:       "issue-899-unrecognized",
+			DeviceConfig: &DeviceProfileConfig{StabilizeDeviceProfile: true},
+			Headers:      http.Header{"User-Agent": {"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if identity.UserAgent != defaultCodexCLIUserAgent || identity.Version != latestCodexCLIVersion {
+			t.Fatalf("unrecognized client bypassed stabilization: %+v", identity)
+		}
+	})
+
+	t.Run("explicit user agent override still wins", func(t *testing.T) {
+		ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
+		const overrideUA = "codex-tui/0.171.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.171.0)"
+		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{
+			Account:      &auth.Account{DBID: 899},
+			APIKey:       "issue-899-override",
+			DeviceConfig: &DeviceProfileConfig{UserAgent: overrideUA, StabilizeDeviceProfile: true},
+			Headers: http.Header{
+				"User-Agent": {desktopUA},
+				"Originator": {"Codex Desktop"},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if identity.UserAgent != overrideUA || identity.Version != "0.171.0" {
+			t.Fatalf("explicit override was replaced by downstream identity: %+v", identity)
+		}
+	})
+}
+
 func TestSyncCodexClientVersionsSharedRunSurvivesFirstCallerCancel(t *testing.T) {
 	previous := codexClientVersionSyncRun
 	t.Cleanup(func() { codexClientVersionSyncRun = previous })
