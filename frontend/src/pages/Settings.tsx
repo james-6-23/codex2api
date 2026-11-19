@@ -3743,6 +3743,9 @@ export default function Settings() {
       window.clearTimeout(timer)
     }
   }, [settingsForm.codex_user_agent_config, settingsForm.client_compat_mode, settingsForm.codex_min_cli_version, codexClientVersions])
+  const clientCompatMode = settingsForm.client_compat_mode === 'auto' || settingsForm.client_compat_mode === 'force'
+    ? settingsForm.client_compat_mode
+    : 'preserve'
   const codexUAMode: 'single' | 'pool' = codexUserAgentConfig.mode === 'pool' ? 'pool' : 'single'
   const codexUAKind: CodexUAKind = CODEX_UA_KINDS.includes(codexUserAgentConfig.client_kind as CodexUAKind)
     ? (codexUserAgentConfig.client_kind as CodexUAKind)
@@ -4938,33 +4941,38 @@ export default function Settings() {
                     <CodexClientVersionsPanel targets={codexClientVersions} />
                   </div>
                   <div className={SETTINGS_FIELD_GRID}>
-                    <SettingField label={t('settings.clientCompatMode')} description={t('settings.clientCompatModeDesc')}>
+                    <SettingField label={t('settings.clientCompatMode')}>
                       <SegmentedPillGroup
-                        value={settingsForm.client_compat_mode}
+                        value={clientCompatMode}
                         onChange={(value) => autoSaveStringField('client_compat_mode', value)}
                         options={clientCompatOptions}
                       />
+                      <p className="mt-2 text-xs leading-relaxed text-muted-foreground" aria-live="polite">
+                        {t(`settings.clientCompatHelp.${clientCompatMode}`)}
+                      </p>
                     </SettingField>
-                    <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
-                      <div className="flex items-center gap-2">
-                        <Input
-                          className="min-w-0 flex-1 font-mono tabular-nums"
-                          value={settingsForm.codex_min_cli_version}
-                          onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
-                        />
-                        {/* 一键把阈值对齐到当前同步到的 CLI 版本；只改表单值,随「保存设置」落库 */}
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="shrink-0"
-                          disabled={!effectiveCliVersion || settingsForm.codex_min_cli_version.trim() === effectiveCliVersion}
-                          title={effectiveCliVersion ? t('settings.codexMinCliVersionUseSyncedDesc', { version: effectiveCliVersion }) : t('settings.codexMinCliVersionNoSynced')}
-                          onClick={() => setSettingsForm(f => ({ ...f, codex_min_cli_version: effectiveCliVersion }))}
-                        >
-                          {t('settings.codexMinCliVersionUseSynced')}
-                        </Button>
-                      </div>
-                    </SettingField>
+                    {clientCompatMode === 'auto' && (
+                      <SettingField label={t('settings.codexMinCliVersion')} description={t('settings.codexMinCliVersionDesc')}>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            className="min-w-0 flex-1 font-mono tabular-nums"
+                            value={settingsForm.codex_min_cli_version}
+                            onChange={(e: ChangeEvent<HTMLInputElement>) => setSettingsForm(f => ({ ...f, codex_min_cli_version: e.target.value }))}
+                          />
+                          {/* 一键把阈值对齐到当前同步到的 CLI 版本；只改表单值,随「保存设置」落库 */}
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="shrink-0"
+                            disabled={!effectiveCliVersion || settingsForm.codex_min_cli_version.trim() === effectiveCliVersion}
+                            title={effectiveCliVersion ? t('settings.codexMinCliVersionUseSyncedDesc', { version: effectiveCliVersion }) : t('settings.codexMinCliVersionNoSynced')}
+                            onClick={() => setSettingsForm(f => ({ ...f, codex_min_cli_version: effectiveCliVersion }))}
+                          >
+                            {t('settings.codexMinCliVersionUseSynced')}
+                          </Button>
+                        </div>
+                      </SettingField>
+                    )}
                   </div>
                 </div>
               </SettingsCard>
@@ -5021,8 +5029,14 @@ export default function Settings() {
                 </div>
               </SettingsCard>
 
-              <SettingsCard title={t('settings.codexClientTitle')} description={t('settings.codexClientDesc')} icon={<Terminal className="size-4" />}>
-                <div className="space-y-4">
+              <details key={clientCompatMode} open={clientCompatMode === 'force'} className="group rounded-xl border border-border/60 bg-card shadow-2xs">
+                <summary className="flex cursor-pointer list-none items-center gap-3 rounded-xl p-4.5 focus-visible:outline-ring sm:p-5.5 [&::-webkit-details-marker]:hidden">
+                  <Terminal className="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                  <span className="min-w-0 flex-1 text-sm font-semibold">{t('settings.codexClientTitle')}</span>
+                  <ChevronDown className="size-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" aria-hidden="true" />
+                </summary>
+                <div className="space-y-4 px-4.5 pb-4.5 sm:px-5.5 sm:pb-5.5">
+                  <p className="text-xs text-muted-foreground">{t('settings.codexClientDesc')}</p>
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-[minmax(0,15rem)_minmax(0,1fr)]">
                     <SettingField label={t('settings.codexUAMode')} description={t('settings.codexUAModeDesc')}>
                       <SegmentedPillGroup
@@ -5220,7 +5234,7 @@ export default function Settings() {
                     </>
                   )}
                 </div>
-              </SettingsCard>
+              </details>
               </SettingsSection>
 
               <SettingsSection id="settings-codex-images" title={t('settings.nav.codexImages')} description={t('settings.nav.codexImagesDesc')} icon={<ImageIcon className="size-4" />}>

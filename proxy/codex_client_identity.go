@@ -24,10 +24,6 @@ type CodexOutboundClientIdentity struct {
 // ResolveCodexOutboundClientIdentity 将版本不可用错误传到出站前的调用者。
 func ResolveCodexOutboundClientIdentity(input CodexClientIdentityInput) (CodexOutboundClientIdentity, error) {
 	settings := CurrentRuntimeSettings()
-	// 强制模拟优先于设备稳定化，避免下游画像覆盖已配置的客户端身份。
-	if settings.ClientCompatMode != ClientCompatModeForce && IsDeviceProfileStabilizationEnabled(input.DeviceConfig) {
-		return codexDeviceClientIdentity(input), nil
-	}
 	userAgent := strings.TrimSpace(input.Headers.Get("User-Agent"))
 	originator := strings.TrimSpace(input.Headers.Get("Originator"))
 	if shouldGenerateCodexClientHeaders(settings, userAgent, originator) {
@@ -46,6 +42,13 @@ func ResolveCodexOutboundClientIdentity(input CodexClientIdentityInput) (CodexOu
 	ua, version, configured, err := codexUserAgentFromConfigChecked(settings.CodexUserAgentConfig, accountID, floor)
 	if err != nil || configured {
 		return CodexOutboundClientIdentity{UserAgent: ua, Version: version, Generated: true}, err
+	}
+	// 兼容模式和后台备用画像都已处理，才使用部署的设备默认值。
+	if IsDeviceProfileStabilizationEnabled(input.DeviceConfig) {
+		identity := codexDeviceClientIdentity(input)
+		if codexVersionAtLeast(identity.Version, floor) {
+			return identity, nil
+		}
 	}
 	version = effectiveLatestCodexCLIVersion()
 	if !codexVersionAtLeast(version, floor) {
