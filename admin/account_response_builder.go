@@ -457,6 +457,7 @@ func (h *Handler) buildAccountResponse(
 		}
 		if !isAntigravityAccount {
 			resp.Status = runtimeAccount.RuntimeStatus()
+			resp.QuotaPauseWindow = runtimeAccount.GetQuotaAutoPauseWindow()
 			resp.UsingCredits = runtimeAccount.UsingCredits()
 			runtimeAccount.Mu().RLock()
 			resp.ErrorMessage = runtimeAccount.ErrorMsg

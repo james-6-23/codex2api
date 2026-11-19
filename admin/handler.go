@@ -1744,6 +1744,7 @@ type accountResponse struct {
 	// 套餐（api/无到期时间的 free）为空。
 	Subscription          *auth.SubscriptionStatusView `json:"subscription,omitempty"`
 	Status                string                       `json:"status"`
+	QuotaPauseWindow      string                       `json:"quota_pause_window,omitempty"`
 	ErrorMessage          string                       `json:"error_message,omitempty"`
 	ATOnly                bool                         `json:"at_only"`
 	CreditEnabled         bool                         `json:"credit_enabled"`

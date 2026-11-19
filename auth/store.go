@@ -1799,16 +1799,32 @@ func (a *Account) quotaAutoPause5hGuardDispatchPenaltyLocked(now time.Time) floa
 }
 
 func (a *Account) quotaAutoPausedLocked(now time.Time) bool {
+	return a.quotaAutoPauseWindowLocked(now) != ""
+}
+
+// quotaAutoPauseWindowLocked uses the scheduler's effective thresholds, including
+// inherited group/global settings. Prefer the weekly window when both pause.
+func (a *Account) quotaAutoPauseWindowLocked(now time.Time) string {
 	// 积分顶替限流开着且当下确有积分时，自动暂停让位：阈值最高只到 100%，照常按阈值
 	// 停调度的话，窗口永远走不到「打满后改扣积分」那一步，账号级开关形同虚设（issue #791）。
 	// 积分归零或工作区 hard-stop 后 creditSkipsUsageWindowLocked 转 false，阈值恢复生效。
 	if a.creditSkipsUsageWindowLocked() {
-		return false
+		return ""
+	}
+	if quotaAutoPausedByWindow(a.UsagePercent7d, a.UsagePercent7dValid, a.Reset7dAt, a.effectiveAutoPause7d, a.AutoPause7dDisabled, now) {
+		return "7d"
 	}
 	if quotaAutoPausedByWindow(a.UsagePercent5h, a.UsagePercent5hValid, a.Reset5hAt, a.effectiveAutoPause5h, a.AutoPause5hDisabled, now) {
-		return true
+		return "5h"
 	}
-	return quotaAutoPausedByWindow(a.UsagePercent7d, a.UsagePercent7dValid, a.Reset7dAt, a.effectiveAutoPause7d, a.AutoPause7dDisabled, now)
+	return ""
+}
+
+// GetQuotaAutoPauseWindow returns the window responsible for an automatic pause.
+func (a *Account) GetQuotaAutoPauseWindow() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.quotaAutoPauseWindowLocked(time.Now())
 }
 
 func (a *Account) recomputeEffectiveAutoPause(s *Store) {
@@ -2732,6 +2748,7 @@ func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
 // It intentionally avoids GetSchedulerDebugSnapshot and other recomputing
 // getters, which are too expensive for a one-second cadence over a large page.
 type AccountLiveUsageSnapshot struct {
+	QuotaPauseWindow    string
 	Status              string
 	UsingCredits        bool
 	PlanType            string
@@ -2761,6 +2778,7 @@ func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
 	defer a.mu.RUnlock()
 	now := time.Now()
 	return AccountLiveUsageSnapshot{
+		QuotaPauseWindow:    a.quotaAutoPauseWindowLocked(now),
 		Status:              a.runtimeStatusLocked(now),
 		UsingCredits:        a.usingCreditsLocked(now),
 		PlanType:            a.PlanType,

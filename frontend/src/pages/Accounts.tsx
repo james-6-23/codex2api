@@ -1,3 +1,4 @@
+import { getAccountQuotaPausePresentation } from "@/lib/accountQuotaPause";
 import { AccountCardSurface } from "../components/AccountCardSurface";
 import AccountUsageBar from "../components/AccountUsageBar";
 import APIKeyMultiSelect from "../components/APIKeyMultiSelect";
@@ -13081,6 +13082,8 @@ function isRateLimitedAccount(account: AccountRow): boolean {
 function getAccountRateLimitWindow(
   account: AccountRow,
 ): RateLimitWindow | null {
+  const pause = getAccountQuotaPausePresentation(account);
+  if (pause) return pause.window;
   const status = (account.status || "").toLowerCase();
   const reason = (account.cooldown_reason || "").toLowerCase();
   const explicitlyRateLimited =
@@ -15069,6 +15072,8 @@ function formatOfficialUSD(value: number): string {
 function getAccountStatusCountdownUntil(
   account: AccountRow,
 ): string | undefined {
+  const pause = getAccountQuotaPausePresentation(account);
+  if (pause) return pause.resetAt;
   const status = account.status;
   const rateLimited =
     status === "rate_limited" ||

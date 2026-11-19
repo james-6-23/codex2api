@@ -25,6 +25,7 @@ type accountLiveItem struct {
 	// the list value); a pointer that is nil serializes as null (frontend clears
 	// the now-invalid window).
 	Status           *string  `json:"status,omitempty"`
+	QuotaPauseWindow *string  `json:"quota_pause_window,omitempty"`
 	UsingCredits     *bool    `json:"using_credits,omitempty"`
 	PlanType         *string  `json:"plan_type,omitempty"`
 	UsagePercent5h   *float64 `json:"usage_percent_5h"`
@@ -94,6 +95,7 @@ func (h *Handler) GetAccountLiveState(c *gin.Context) {
 			}
 			status := usage.Status
 			item.Status = &status
+			item.QuotaPauseWindow = &usage.QuotaPauseWindow
 			usingCredits := usage.UsingCredits
 			item.UsingCredits = &usingCredits
 			if usage.UsagePercent5hValid {
