@@ -28,12 +28,14 @@ func antigravityModelChoiceGroups(models []api.Model) (map[string]string, map[st
 }
 
 func antigravityModelChoiceDefaultLevel(model string, available []string) string {
-	// Argon defaults to high, but a scoped key may only allow lower tiers.
+	// Gemini 4 families default to high, but a scoped key may only allow lower tiers.
 	// Keep the existing default selection for older model families.
-	if strings.EqualFold(model, "gemini-4-argon") {
-		for _, level := range available {
-			if level == "high" {
-				return level
+	if strings.HasPrefix(strings.ToLower(model), "gemini-4-") {
+		if logical, ok := antigravityLogicalCompatibilityModel(model); ok {
+			for _, level := range available {
+				if level == logical.defaultReasoningLevel {
+					return level
+				}
 			}
 		}
 	}

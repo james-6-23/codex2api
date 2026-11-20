@@ -58,6 +58,19 @@ var antigravityPublicModelCatalog = []antigravityPublicModelDefinition{
 	{id: "gemini-4-argon-low", wireModel: "gemini-4-argon-high", variants: []antigravityReasoningVariant{{level: "low", wireModel: "gemini-4-argon-high"}}},
 	{id: "gemini-4-argon-medium", wireModel: "gemini-4-argon-high", variants: []antigravityReasoningVariant{{level: "medium", wireModel: "gemini-4-argon-high"}}},
 	{id: "gemini-4-argon-high", wireModel: "gemini-4-argon-high", variants: []antigravityReasoningVariant{{level: "high", wireModel: "gemini-4-argon-high"}}},
+	// Neon, Carbon and Hydrogen list one backing per tier, but the backing ID
+	// alone does not set the depth: each request also names its thinkingLevel.
+	{id: "gemini-4-neon-low", wireModel: "gemini-4-neon-low", variants: []antigravityReasoningVariant{{level: "low", wireModel: "gemini-4-neon-low"}}},
+	{id: "gemini-4-neon-medium", wireModel: "gemini-4-neon-medium", variants: []antigravityReasoningVariant{{level: "medium", wireModel: "gemini-4-neon-medium"}}},
+	{id: "gemini-4-neon-high", wireModel: "gemini-4-neon-high", variants: []antigravityReasoningVariant{{level: "high", wireModel: "gemini-4-neon-high"}}},
+	{id: "gemini-4-neon-xhigh", wireModel: "gemini-4-neon-xhigh", variants: []antigravityReasoningVariant{{level: "xhigh", wireModel: "gemini-4-neon-xhigh"}}},
+	{id: "gemini-4-carbon-low", wireModel: "gemini-4-carbon-low", variants: []antigravityReasoningVariant{{level: "low", wireModel: "gemini-4-carbon-low"}}},
+	{id: "gemini-4-carbon-medium", wireModel: "gemini-4-carbon-medium", variants: []antigravityReasoningVariant{{level: "medium", wireModel: "gemini-4-carbon-medium"}}},
+	{id: "gemini-4-carbon-high", wireModel: "gemini-4-carbon-high", variants: []antigravityReasoningVariant{{level: "high", wireModel: "gemini-4-carbon-high"}}},
+	{id: "gemini-4-hydrogen-low", wireModel: "gemini-4-hydrogen-low", variants: []antigravityReasoningVariant{{level: "low", wireModel: "gemini-4-hydrogen-low"}}},
+	{id: "gemini-4-hydrogen-medium", wireModel: "gemini-4-hydrogen-medium", variants: []antigravityReasoningVariant{{level: "medium", wireModel: "gemini-4-hydrogen-medium"}}},
+	{id: "gemini-4-hydrogen-high", wireModel: "gemini-4-hydrogen-high", variants: []antigravityReasoningVariant{{level: "high", wireModel: "gemini-4-hydrogen-high"}}},
+	{id: "gemini-4-hydrogen-xhigh", wireModel: "gemini-4-hydrogen-xhigh", variants: []antigravityReasoningVariant{{level: "xhigh", wireModel: "gemini-4-hydrogen-xhigh"}}},
 	{id: "gemini-3.1-pro-low", wireModel: "gemini-3.1-pro-low", variants: []antigravityReasoningVariant{{level: "low", wireModel: "gemini-3.1-pro-low", thinkingBudget: 1001}}},
 	{id: "gemini-3.1-pro-high", wireModel: "gemini-pro-agent", variants: []antigravityReasoningVariant{{level: "high", wireModel: "gemini-pro-agent", thinkingBudget: 10001}}},
 	// Claude 5.5 encodes effort in the model ID; each tier is its own backing and
@@ -95,6 +108,23 @@ var antigravityLogicalCompatibilityCatalog = []antigravityPublicModelDefinition{
 		{level: "low", wireModel: "gemini-4-argon-high"},
 		{level: "medium", wireModel: "gemini-4-argon-high"},
 		{level: "high", wireModel: "gemini-4-argon-high"},
+	}},
+	{id: "gemini-4-neon", defaultReasoningLevel: "high", variants: []antigravityReasoningVariant{
+		{level: "low", wireModel: "gemini-4-neon-low"},
+		{level: "medium", wireModel: "gemini-4-neon-medium"},
+		{level: "high", wireModel: "gemini-4-neon-high"},
+		{level: "xhigh", wireModel: "gemini-4-neon-xhigh"},
+	}},
+	{id: "gemini-4-carbon", defaultReasoningLevel: "high", variants: []antigravityReasoningVariant{
+		{level: "low", wireModel: "gemini-4-carbon-low"},
+		{level: "medium", wireModel: "gemini-4-carbon-medium"},
+		{level: "high", wireModel: "gemini-4-carbon-high"},
+	}},
+	{id: "gemini-4-hydrogen", defaultReasoningLevel: "high", variants: []antigravityReasoningVariant{
+		{level: "low", wireModel: "gemini-4-hydrogen-low"},
+		{level: "medium", wireModel: "gemini-4-hydrogen-medium"},
+		{level: "high", wireModel: "gemini-4-hydrogen-high"},
+		{level: "xhigh", wireModel: "gemini-4-hydrogen-xhigh"},
 	}},
 	{id: "gemini-3.1-pro", defaultReasoningLevel: "high", variants: []antigravityReasoningVariant{
 		{level: "low", wireModel: "gemini-3.1-pro-low", thinkingBudget: 1001},
@@ -291,15 +321,10 @@ func antigravityProjectedModelIDs(rawModels []string, includeDisabled bool) []st
 		if name == "gemini-4-argon" {
 			continue
 		}
-		// Provider-internal chat placeholders, IDE tab completions, and an
-		// alternate physical backing of a known base are not extra chat models.
-		if name == "chat_20706" || name == "chat_23310" || strings.HasPrefix(name, "tab_") || antigravityRetiredModel(name) {
+		// Provider-internal chat placeholders, IDE tab completions, and role
+		// backings of a known base are not extra chat models.
+		if name == "chat_20706" || name == "chat_23310" || strings.HasPrefix(name, "tab_") || antigravityRetiredModel(name) || antigravityRoleBacking(name) {
 			continue
-		}
-		if strings.HasSuffix(name, "-tiered") {
-			if _, known := antigravityLogicalCompatibilityModel(strings.TrimSuffix(name, "-tiered")); known {
-				continue
-			}
 		}
 		// These old IDs currently identify Gemini 3.1 Flash Lite in the upstream
 		// catalog. Hide redundant menu entries when its actual public ID exists;
@@ -319,6 +344,21 @@ func antigravityProjectedModelIDs(rawModels []string, includeDisabled bool) []st
 	sort.Strings(discovered)
 	models = append(models, discovered...)
 	return models
+}
+
+// antigravityRoleBacking reports Antigravity's role backings of a known base:
+// the tieredModelIds flash/pro slots (-tiered, -tiered-high, -tiered-xhigh)
+// and the -sonar monitor model. The IDE never offers them as chat choices.
+func antigravityRoleBacking(name string) bool {
+	for _, marker := range []string{"-tiered", "-sonar"} {
+		base, rest, found := strings.Cut(name, marker)
+		if found && (rest == "" || strings.HasPrefix(rest, "-")) {
+			if _, known := antigravityLogicalCompatibilityModel(base); known {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func antigravityKnownWireModel(model string) bool {
@@ -408,6 +448,14 @@ func antigravityVariantForDefinition(definition antigravityPublicModelDefinition
 	level := definition.defaultReasoningLevel
 	if len(reasoning) > 0 {
 		level = antigravityGeminiReasoningTier(reasoning)
+		// Families with an xhigh tier keep xhigh/max/ultra there; others fold them into high.
+		if level == "high" && lowerStringField(reasoning, "effort") != "high" {
+			for _, variant := range definition.variants {
+				if variant.level == "xhigh" {
+					level = "xhigh"
+				}
+			}
+		}
 	}
 	for _, variant := range definition.variants {
 		if variant.level == level {
