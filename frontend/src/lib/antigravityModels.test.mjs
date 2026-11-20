@@ -11,9 +11,9 @@ import {
 test('frontend fallbacks match public backend IDs including Flash 3.8', () => {
   const source = readFileSync(new URL('../../../proxy/antigravity_models.go', import.meta.url), 'utf8')
   const catalog = source.split('var antigravityPublicModelCatalog =')[1].split('var antigravityLogicalCompatibilityCatalog')[0]
-  // Claude and Argon require account discovery; neither belongs in the fallback.
+  // Claude and Gemini 4 require account discovery; neither belongs in the fallback.
   const ids = Array.from(catalog.matchAll(/id: "([^"]+)"/g), match => match[1])
-    .filter(id => !id.startsWith('claude-') && !id.startsWith('gemini-4-argon-'))
+    .filter(id => !id.startsWith('claude-') && !id.startsWith('gemini-4-'))
   assert.deepEqual([...ANTIGRAVITY_DEFAULT_MODELS].sort(), ids.sort())
   assert.equal(ANTIGRAVITY_DEFAULT_MODELS[0], 'gemini-3.8-flash-low')
 })
