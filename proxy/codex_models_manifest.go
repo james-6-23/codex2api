@@ -251,7 +251,7 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			item.DefaultReasoningLevel = antigravityModelChoiceDefaultLevel(slug, available)
 			item.SupportsReasoningSummaries = true
 		}
-		if slug == "gemini-3.8-flash" || (slug == "gemini-4-argon" && len(levels[slug]) > 0) {
+		if slug == "gemini-3.8-flash" || (strings.HasPrefix(slug, "gemini-4-") && len(levels[slug]) > 0) {
 			item.ContextWindow = 1048576
 			// The current OAuth adapter accepts text parts only, even though the
 			// upstream model itself has vision. Advertise the gateway contract.
