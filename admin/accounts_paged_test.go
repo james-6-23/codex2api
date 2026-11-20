@@ -202,6 +202,28 @@ func TestAccountListItemMatchesEveryFilter(t *testing.T) {
 	}
 }
 
+func TestAccountListTeamPlanIncludesCodexTeam5x(t *testing.T) {
+	const team5x = "self_serve_business_prolite"
+	for _, tc := range []struct {
+		name, channel, plan, filter, status string
+		want                                bool
+	}{
+		{"team", database.UpstreamChannelCodex, "team", "team", "active", true},
+		{"team5x", database.UpstreamChannelCodex, team5x, "team", "active", true},
+		{"team5x raw plan", database.UpstreamChannelCodex, team5x, team5x, "active", true},
+		{"prolite", database.UpstreamChannelCodex, "prolite", "team", "active", false},
+		{"claude", database.UpstreamChannelClaude, team5x, "team", "active", false},
+		{"unauthorized", database.UpstreamChannelCodex, team5x, "team", "unauthorized", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := &accountListSnapshotItem{PlanType: tc.plan, Status: tc.status, Enabled: true, UsagePercent5hOK: true}
+			if got := accountListItemMatches(item, accountPageQuery{Plan: tc.filter, Status: "normal"}, tc.channel); got != tc.want {
+				t.Fatalf("matched = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestResponsesRateLimitedClassification(t *testing.T) {
 	item := &accountListSnapshotItem{
 		Row:      &database.AccountRow{ID: 1},

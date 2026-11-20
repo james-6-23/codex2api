@@ -1313,8 +1313,12 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			if auth.KiroPlanKey(item.PlanType) != query.Plan {
 				return false
 			}
-		} else if !strings.EqualFold(strings.TrimSpace(item.PlanType), query.Plan) {
-			return false
+		} else {
+			plan := strings.TrimSpace(item.PlanType)
+			team5xMatch := channel == database.UpstreamChannelCodex && query.Plan == "team" && strings.EqualFold(plan, "self_serve_business_prolite")
+			if !strings.EqualFold(plan, query.Plan) && !team5xMatch {
+				return false
+			}
 		}
 	}
 	if query.AuthKind != "" && query.AuthKind != "all" {
