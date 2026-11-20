@@ -954,6 +954,18 @@ func (h *Handler) invalidateAPIKeyRuntimeCaches(ctx context.Context, apiKey stri
 	}
 }
 
+// usageKeyStatsCacheKey scopes cached labels to the current API key configuration.
+func (h *Handler) usageKeyStatsCacheKey(ctx context.Context, key string) string {
+	if key == "" || h.cache == nil {
+		return ""
+	}
+	revision, err := h.db.GetAPIKeyAuthRevision(ctx)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("%s:%d:%s", revision.Namespace, revision.Generation, key)
+}
+
 func (h *Handler) getUsageStatsCached(ctx context.Context, rangeStart, rangeEnd time.Time, channel string) (*database.UsageStats, error) {
 	return h.getUsageStatsFilteredCached(ctx, rangeStart, rangeEnd, channel, database.UsageLogFilter{})
 }
@@ -972,6 +984,7 @@ func (h *Handler) getUsageStatsFilteredCached(ctx context.Context, rangeStart, r
 		cacheKey = fmt.Sprintf("range:%d:%d:%s%s", rangeStart.Unix()/30, rangeEnd.Unix()/30, channel, dimKey)
 		cacheTTL = adminUsageRangeCacheTTL
 	}
+	cacheKey = h.usageKeyStatsCacheKey(ctx, cacheKey)
 	if cacheKey != "" {
 		var cached database.UsageStats
 		if h.getRuntimeJSON(ctx, adminUsageStatsCacheNamespace, cacheKey, &cached) {
@@ -7715,12 +7728,12 @@ func (h *Handler) GetAPIKeyTokenStats(c *gin.Context) {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 15*time.Second)
 	defer cancel()
 
-	cacheKey := fmt.Sprintf("%d:%d", rangeStart.Unix()/30, rangeEnd.Unix()/30)
+	cacheKey := h.usageKeyStatsCacheKey(ctx, fmt.Sprintf("%d:%d", rangeStart.Unix()/30, rangeEnd.Unix()/30))
 	type cachedResponse struct {
 		Items []database.APIKeyTokenStat `json:"items"`
 	}
 	var response cachedResponse
-	if h.getRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, &response) {
+	if cacheKey != "" && h.getRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, &response) {
 		c.JSON(http.StatusOK, response)
 		return
 	}
@@ -7734,7 +7747,9 @@ func (h *Handler) GetAPIKeyTokenStats(c *gin.Context) {
 		items = []database.APIKeyTokenStat{}
 	}
 	response.Items = items
-	h.setRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
+	if cacheKey != "" {
+		h.setRuntimeJSON(ctx, adminAPIKeyStatsNamespace, cacheKey, response, adminUsageRangeCacheTTL)
+	}
 	c.JSON(http.StatusOK, response)
 }
 

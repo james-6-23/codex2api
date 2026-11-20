@@ -5637,7 +5637,8 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 				COALESCE(NULLIF(u.effective_model, ''), NULLIF(u.model, ''), 'unknown') AS model_name,
 				COALESCE(NULLIF(u.inbound_endpoint, ''), NULLIF(u.endpoint, ''), 'unknown') AS endpoint_name,
 				COALESCE(u.api_key_id, 0) AS api_key_id,
-				COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown') AS api_key_label,
+				CASE WHEN u.api_key_id > 0 THEN '' ELSE
+					COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown') END AS api_key_label,
 				COUNT(*) AS requests,
 				COALESCE(SUM(u.total_tokens), 0) AS tokens,
 				COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
@@ -5670,7 +5671,8 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 				COALESCE(NULLIF(u.effective_model, ''), NULLIF(u.model, ''), 'unknown'),
 				COALESCE(NULLIF(u.inbound_endpoint, ''), NULLIF(u.endpoint, ''), 'unknown'),
 				u.api_key_id,
-				COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown'),
+				CASE WHEN u.api_key_id > 0 THEN '' ELSE
+					COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown') END,
 				`+sumBigint("u.requests")+`,
 				`+sumBigint("u.total_tokens")+`,
 				`+sumBigint("u.input_tokens")+`,
@@ -5709,6 +5711,21 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 		}
 		return a.Endpoint < b.Endpoint
 	})
+	var keyIDs []int64
+	for key := range apiKeys {
+		if key.id > 0 {
+			keyIDs = append(keyIDs, key.id)
+		}
+	}
+	metadata, err := db.usageAPIKeyMetadata(ctx, keyIDs)
+	if err != nil {
+		return err
+	}
+	for key, item := range apiKeys {
+		if key.id > 0 {
+			item.Label = metadata[key.id].label()
+		}
+	}
 	stats.APIKeyStats = topUsageStats(apiKeys, 8, func(a, b *UsageAPIKeyStat) bool {
 		if a.Requests != b.Requests {
 			return a.Requests > b.Requests
@@ -6041,14 +6058,10 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 	}
 	defer rows.Close()
 
-	type accountUsageKey struct {
-		ID     int64
-		Name   string
-		Masked string
-	}
 	dayStats := make(map[string]*AccountUsageDayStat)
 	modelStats := make(map[string]*AccountModelStat)
-	keyStats := make(map[accountUsageKey]*AccountKeyStat)
+	keyStats := make(map[usageAPIKeyIdentity]*AccountKeyStat)
+	var keyIDs []int64
 	durations := make([]int64, 0, 1024)
 	var cacheHitRequests, durationSamples int64
 	var durationMsSum, firstTokenMsSum float64
@@ -6139,11 +6152,17 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		modelStat.AccountBilled += accountBilled
 		modelStat.UserBilled += userBilled
 
-		key := accountUsageKey{ID: apiKeyID, Name: apiKeyName, Masked: apiKeyMasked}
+		key := usageAPIKeyIdentity{id: apiKeyID}
+		if apiKeyID <= 0 {
+			key.name, key.masked = apiKeyName, apiKeyMasked
+		}
 		keyStat := keyStats[key]
 		if keyStat == nil {
-			keyStat = &AccountKeyStat{APIKeyID: apiKeyID, APIKeyName: apiKeyName, APIKeyMasked: apiKeyMasked}
+			keyStat = &AccountKeyStat{APIKeyID: key.id, APIKeyName: key.name, APIKeyMasked: key.masked}
 			keyStats[key] = keyStat
+			if apiKeyID > 0 {
+				keyIDs = append(keyIDs, apiKeyID)
+			}
 		}
 		keyStat.Requests++
 		keyStat.Tokens += totalTokens
@@ -6178,7 +6197,15 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		}
 		return result.Models[i].Requests > result.Models[j].Requests
 	})
+	metadata, err := db.usageAPIKeyMetadata(ctx, keyIDs)
+	if err != nil {
+		return nil, err
+	}
 	for _, item := range keyStats {
+		if item.APIKeyID > 0 {
+			key := metadata[item.APIKeyID]
+			item.APIKeyName, item.APIKeyMasked = key.name, key.masked
+		}
 		result.ByAPIKey = append(result.ByAPIKey, *item)
 	}
 	sort.Slice(result.ByAPIKey, func(i, j int) bool {
