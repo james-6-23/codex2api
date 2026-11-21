@@ -470,6 +470,19 @@ func firstResponsesImageGenerationTool(body map[string]any) map[string]any {
 	return nil
 }
 
+// takeResponsesReasoningSummaryDelivery 提取并剥离客户端显式传入的
+// stream_options.reasoning_summary_delivery（已知选项 sequential_cutoff，
+// openai/codex#31306），其余 stream_options 子字段随顶层剥离 (issue #905)。
+func takeResponsesReasoningSummaryDelivery(body map[string]any) string {
+	options, ok := body["stream_options"].(map[string]any)
+	if !ok {
+		return ""
+	}
+	delete(body, "stream_options")
+	delivery, _ := options["reasoning_summary_delivery"].(string)
+	return delivery
+}
+
 func moveTopLevelResponsesImageOptions(body map[string]any) bool {
 	toolMap := firstResponsesImageGenerationTool(body)
 	if len(body) == 0 || toolMap == nil {
@@ -2656,6 +2669,9 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	}
 
 	// 7. 删除 Codex 不支持的字段
+	// stream_options.reasoning_summary_delivery 是 Codex 客户端已知选项
+	// (sequential_cutoff，openai/codex#31306)，剥离后按子字段原样转发 (issue #905)。
+	delivery := takeResponsesReasoningSummaryDelivery(body)
 	// 注意：prompt_cache_retention 上游(HTTP 与 WS 路径)均不接受，会返回
 	// 400 Unsupported parameter，因此在此一并剥离，executor / wsrelay 层也各自兜底删除。
 	// 顶层 type 是 Responses WS 事件信封字段(response.create)，native WS ingress 会
@@ -2672,6 +2688,9 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		"prompt_cache_retention", "safety_identifier", "type",
 	} {
 		delete(body, field)
+	}
+	if delivery != "" {
+		body["stream_options"] = map[string]any{"reasoning_summary_delivery": delivery}
 	}
 	if !opts.preservePreviousResponseID {
 		delete(body, "previous_response_id")

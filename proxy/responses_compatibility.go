@@ -38,7 +38,6 @@ var codexRelayResponsesCompatibilityFields = []string{
 	"user",
 	"logit_bias",
 	"metadata",
-	"stream_options",
 	"truncation",
 	"disable_response_storage",
 	"prompt_cache_retention",
@@ -129,6 +128,28 @@ func validateCodexRelayResponsesCompatibility(rawBody []byte) *api.APIError {
 		requested = strings.TrimSpace(requested)
 		if _, preserved := upstreamServiceTier(requested); !preserved && requested != "auto" {
 			addIssue("service_tier", "Codex relay would discard the requested service tier")
+		}
+	}
+	// stream_options.reasoning_summary_delivery 是 Codex 客户端已知选项
+	// (sequential_cutoff，openai/codex#31306)，可原样转发；其余子字段仍不支持。
+	if rawOptions, present := nonNull("stream_options"); present {
+		var options map[string]json.RawMessage
+		if json.Unmarshal(rawOptions, &options) != nil {
+			addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
+		} else {
+			for key, raw := range options {
+				if key == "reasoning_summary_delivery" {
+					var delivery string
+					trimmed := bytes.TrimSpace(raw)
+					if bytes.Equal(trimmed, []byte("null")) || json.Unmarshal(raw, &delivery) != nil {
+						addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
+						break
+					}
+					continue
+				}
+				addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
+				break
+			}
 		}
 	}
 	var model string
