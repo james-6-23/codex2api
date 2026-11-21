@@ -154,7 +154,7 @@ func ResolveCodexMaintenanceIdentity(account *auth.Account, downstream http.Head
 	}
 	// 账号自定义头在对话出站里最后应用（applyAccountCustomHeaders），钉死的身份头
 	// 同样作用于维护请求，否则对话与探针又是两套身份。
-	for name, value := range account.GetCustomHeaders() {
+	for name, value := range CodexAccountCustomHeaders(account) {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue

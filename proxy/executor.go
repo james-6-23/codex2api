@@ -1258,7 +1258,7 @@ func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
 	if req == nil || account == nil {
 		return
 	}
-	for name, value := range account.GetCustomHeaders() {
+	for name, value := range CodexAccountCustomHeaders(account) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
