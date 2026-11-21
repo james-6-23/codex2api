@@ -610,6 +610,16 @@
     "hrefClickHint": "點擊開啟跳轉位址（未設定時開啟 api-base）；Alt/Option+點擊 設定自訂連結"
   },
   "settings": {
+    "quietHours": "巡檢暫停時段（北京時間 UTC+8）",
+    "quietHoursDesc": "在每天指定時段暫停自動 Token 更新、用量探針、封禁恢復探測、定時連線測試及官方用量同步。支援多時段、跨午夜及重疊；包含開始，不包含結束。手動操作、請求觸發的驗證修復及正常呼叫不受影響；已開始的任務允許完成。結束可填 24:00。",
+    "quietHoursEmpty": "未設定暫停時段，全天按巡檢間隔執行。",
+    "quietHoursStart": "開始時間",
+    "quietHoursEnd": "結束時間",
+    "quietHoursAdd": "新增時段",
+    "quietHoursRemove": "移除",
+    "quietHoursSave": "儲存暫停時段",
+    "quietHoursInvalid": "請填寫有效 HH:MM 時間，起止不能相同。全天暫停用 00:00–24:00。",
+    "quietHoursSaveFailed": "儲存失敗，請重試。",
     "schedulerModeReset5hFirst": "5 小時即將重置優先",
     "schedulerModeReset5hFirstDesc": "在相同調度優先級與健康檔位內，優先使用 5 小時窗口最早重置且仍有額度的 Codex 帳號；額度耗盡、限流、無權限或併發已滿時順延。以已觀測的重置時間為準，過期、未知或不適用的窗口沿用原有調度。不自動啟用帳號、不推算下個週期。保留既有會話綁定；新會話首次選號優先於親和雜湊。週限額與現有安全限制繼續生效。",
     "codexClientVersions": {

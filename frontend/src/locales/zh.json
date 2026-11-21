@@ -4448,6 +4448,16 @@
     }
   },
   "settings": {
+    "quietHours": "巡检暂停时段（北京时间 UTC+8）",
+    "quietHoursDesc": "每天在以下时段暂停自动 Token 刷新、用量探针、封禁恢复探测、定时连通性测试及官方用量同步。支持多个时段、跨午夜和重叠；包含开始，不包含结束。手动刷新、请求触发的鉴权修复和正常调用照常执行；已开始的任务允许完成。结束可填 24:00。",
+    "quietHoursEmpty": "未设置暂停时段，全天按巡检间隔运行。",
+    "quietHoursStart": "开始时间",
+    "quietHoursEnd": "结束时间",
+    "quietHoursAdd": "添加时段",
+    "quietHoursRemove": "移除",
+    "quietHoursSave": "保存暂停时段",
+    "quietHoursInvalid": "请填写 HH:MM 格式的有效时间，起止不能相同。全天暂停用 00:00–24:00。",
+    "quietHoursSaveFailed": "保存失败，请重试。",
     "schedulerModeReset5hFirst": "5 小时临近重置优先",
     "schedulerModeReset5hFirstDesc": "同一调度优先级和健康档位内，优先使用 5 小时窗口最早重置且仍有额度的 Codex 账号；额度耗尽、限流、无权限或并发已满时顺延。以已观测的重置时间为准，过期、未知或不适用的窗口沿用原调度兜底；不自动激活账号、不推算下一个周期。已有会话绑定继续保留；新会话首次选号优先于亲和散列。周限额和现有安全限制继续生效。",
     "codexClientVersions": {
