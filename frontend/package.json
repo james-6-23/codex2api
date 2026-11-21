@@ -13,6 +13,7 @@
     "test:intelligence": "node --experimental-strip-types --test tests/intelligenceCheck.browser.test.mjs",
     "test:key-usage": "node --experimental-strip-types --test tests/keyUsageAccounts.browser.test.mjs",
     "test:version": "node --experimental-strip-types --test tests/useVersionCheck.browser.test.mjs",
+    "test:quiet-hours": "node --experimental-strip-types --test tests/backgroundQuietHours.browser.test.mjs",
     "typecheck": "tsc --noEmit",
     "audit:ci": "node scripts/audit-gate.mjs"
   },

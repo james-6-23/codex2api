@@ -667,6 +667,7 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 		{"system_settings", "usage_probe_concurrency", "INTEGER DEFAULT 16"},
 		{"system_settings", "usage_probe_responses_fallback_enabled", "INTEGER DEFAULT 1"},
 		{"system_settings", "recovery_probe_interval_minutes", "INTEGER DEFAULT 30"},
+		{"system_settings", "background_quiet_hours", "TEXT DEFAULT '[]'"},
 		{"system_settings", "admin_secret", "TEXT DEFAULT ''"},
 		{"system_settings", "auto_clean_full_usage", "INTEGER DEFAULT 0"},
 		{"system_settings", "auto_clean_error", "INTEGER DEFAULT 0"},

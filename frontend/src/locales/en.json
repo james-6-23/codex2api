@@ -4440,6 +4440,16 @@
     }
   },
   "settings": {
+    "quietHours": "Inspection quiet hours (Beijing UTC+8)",
+    "quietHoursDesc": "Pause automatic token refresh, usage/recovery probes, scheduled connection tests and official usage sync during these daily periods. Multiple, overnight and overlapping periods are supported. Start is inclusive, end exclusive. Manual actions, request-triggered authentication recovery and normal requests remain available; running tasks may finish. End accepts 24:00.",
+    "quietHoursEmpty": "No quiet periods: inspections run throughout the day.",
+    "quietHoursStart": "Start time",
+    "quietHoursEnd": "End time",
+    "quietHoursAdd": "Add period",
+    "quietHoursRemove": "Remove",
+    "quietHoursSave": "Save quiet hours",
+    "quietHoursInvalid": "Use valid HH:MM times with different start and end. For all day use 00:00–24:00.",
+    "quietHoursSaveFailed": "Save failed. Please retry.",
     "schedulerModeReset5hFirst": "5h Reset First",
     "schedulerModeReset5hFirstDesc": "Within the same account priority and health tier, prefer Codex accounts with remaining quota and the earliest observed 5-hour reset. Skip exhausted, rate-limited, unauthorized or full accounts. Expired, unknown or inapplicable windows use normal scheduling fallback. This does not activate accounts or predict future cycles. Existing session bindings remain; fresh selection takes precedence over affinity hashing. Weekly limits and existing admission rules still apply.",
     "codexClientVersions": {

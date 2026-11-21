@@ -409,6 +409,9 @@ func (s *RefreshScheduler) scheduleLoop() {
 // processScheduledTasks 处理计划任务
 func (s *RefreshScheduler) processScheduledTasks() {
 	now := time.Now()
+	if s.store.BackgroundInspectionPaused(now) {
+		return
+	}
 
 	for {
 		task := s.peekQueue()
@@ -515,6 +518,15 @@ func (s *RefreshScheduler) executeTask(task *RefreshTask) {
 	go func() {
 		defer s.wg.Done()
 		defer func() { <-s.semaphore }()
+		if s.store.BackgroundInspectionPaused(time.Now()) {
+			task.mu.Lock()
+			task.State = RefreshStatePending
+			task.ScheduledAt = time.Now()
+			task.mu.Unlock()
+			s.metrics.PendingTasks.Add(1)
+			s.pushToQueue(task)
+			return
+		}
 
 		start := time.Now()
 		s.metrics.RunningTasks.Add(1)

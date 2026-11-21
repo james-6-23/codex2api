@@ -57,6 +57,10 @@ jobs:
         working-directory: frontend
         run: npm run test:svg
 
+      - name: Test inspection quiet hours in the browser
+        working-directory: frontend
+        run: npm run test:quiet-hours
+
       - name: Test intelligence checks in the browser
         working-directory: frontend
         run: npm run test:intelligence

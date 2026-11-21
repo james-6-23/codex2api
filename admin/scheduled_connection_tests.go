@@ -253,6 +253,9 @@ func (h *Handler) WaitScheduledConnectionTests() {
 }
 
 func (h *Handler) runScheduledConnectionTests(ctx context.Context, now time.Time) {
+	if h.store.BackgroundInspectionPaused(now) {
+		return
+	}
 	loc, err := time.LoadLocation(scheduledTestTimezone)
 	if err != nil {
 		log.Printf("[scheduled-test] 时区不可用")
@@ -321,6 +324,11 @@ func (h *Handler) runScheduledConnectionTestSlot(parent context.Context, id int6
 		h.finishScheduledConnectionTestSlot(key, result)
 	}()
 	// Re-read before execution so deletion/disable of an account or plan cancels queued work.
+	if h.store.BackgroundInspectionPaused(time.Now()) {
+		result.Status = "skipped"
+		result.Error = "当前处于巡检暂停时段"
+		return
+	}
 	row, err := h.db.GetAccountByID(parent, id)
 	if err != nil || !row.Enabled {
 		result.Status = "skipped"
