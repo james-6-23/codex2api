@@ -11,6 +11,7 @@ import (
 
 	"github.com/codex2api/auth"
 	"github.com/codex2api/proxy"
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/tidwall/gjson"
 )
@@ -18,6 +19,25 @@ import (
 // Run through the real executor and reusable slot selection. Inspect each
 // frame against its socket's frozen handshake, not just the pool-key helper.
 func TestSessionIdentityFingerprintReusableWebsocket(t *testing.T) {
+	testSessionIdentityFingerprintReusableWebsocket(t, false)
+}
+
+func TestSessionIdentityTimePreservingReusableWebsocket(t *testing.T) {
+	// Register before Setenv so the environment is restored before reloading
+	// process configuration during cleanup.
+	t.Cleanup(func() {
+		if err := proxy.ConfigureCodexIdentityTimeFromEnv(); err != nil {
+			t.Error(err)
+		}
+	})
+	t.Setenv("CODEX_IDENTITY_V2_FROM_UNIX_MS", "1")
+	if err := proxy.ConfigureCodexIdentityTimeFromEnv(); err != nil {
+		t.Fatal(err)
+	}
+	testSessionIdentityFingerprintReusableWebsocket(t, true)
+}
+
+func testSessionIdentityFingerprintReusableWebsocket(t *testing.T, timePreserving bool) {
 	t.Setenv("CODEX_WS_STATELESS_ONESHOT", "false")
 	t.Setenv("CODEX_SESSION_HEADER_MODE", "native")
 	previous := proxy.GetResinConfig()
@@ -55,8 +75,12 @@ func TestSessionIdentityFingerprintReusableWebsocket(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	var sockets []*WsConnection
-	for i, thread := range []string{"root", "child", "root"} {
-		original := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":"test","prompt_cache_key":"private-cache","client_metadata":{"session_id":"root","thread_id":%q}}`, thread))
+	root, child := "root", "child"
+	if timePreserving {
+		root, child = "01a1e838-fc93-7ef0-b32b-c0c0c3466899", "01a1e838-fc94-7ef0-b32b-c0c0c3466899"
+	}
+	for i, thread := range []string{root, child, root} {
+		original := []byte(fmt.Sprintf(`{"model":"gpt-5.4","input":"test","prompt_cache_key":"private-cache","client_metadata":{"session_id":%q,"thread_id":%q}}`, root, thread))
 		headers := proxy.PrepareCodexFingerprintHeaders(account, nil, original)
 		body := proxy.ApplyCodexFingerprintToBody(original, account, headers)
 		response, err := executor.ExecuteRequestViaWebsocket(ctx, account, body, fmt.Sprintf("stateless-fixture-%d", i), "", "fixture-key", nil, headers, "fixture-key-pool")
@@ -80,6 +104,9 @@ func TestSessionIdentityFingerprintReusableWebsocket(t *testing.T) {
 			}
 			if gjson.GetBytes(frame.body, "prompt_cache_key").String() != "private-cache" {
 				t.Fatal("cache partition changed")
+			}
+			if timePreserving && uuid.MustParse(mappedThread).Time() != uuid.MustParse(thread).Time() {
+				t.Fatal("actual WebSocket handshake/frame lost thread creation time")
 			}
 		case <-ctx.Done():
 			t.Fatal("no local WebSocket frame")
