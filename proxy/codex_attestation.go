@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,6 +13,7 @@ import (
 )
 
 var codexAttestationService = attestation.NewService(nil)
+var codexAttestationPlatformPattern = regexp.MustCompile(`^.+/[^ ]+ \((.+) [^ ;]+; ([^;)]+)\)`)
 
 type CodexAttestationInput struct {
 	Headers http.Header
@@ -58,7 +60,7 @@ func ApplyCodexAttestation(ctx context.Context, input CodexAttestationInput) err
 }
 
 func codexAttestationRequest(userAgent string) attestation.Request {
-	parts := codexPersonaPlatformPattern.FindStringSubmatch(strings.TrimSpace(userAgent))
+	parts := codexAttestationPlatformPattern.FindStringSubmatch(strings.TrimSpace(userAgent))
 	if len(parts) != 3 {
 		return attestation.Request{}
 	}

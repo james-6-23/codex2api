@@ -5,14 +5,14 @@ import (
 	"strings"
 )
 
-var codexPersonaPlatformPattern = regexp.MustCompile(`^.+/[^ ]+ \((.+) [^ ;]+; ([^;)]+)\)`)
+var codexPreviewPlatformPattern = regexp.MustCompile(`^[^/()]+/[^ ]+ \(([^();]+) [^ ();]+; ([^ ();]+)\)`)
 var codexPersonaAppVersionPattern = regexp.MustCompile(`\([^();]+; ([^()]+)\)$`)
 
 func codexPersonaVersionSource(persona CodexUserAgentPersona, cfg CodexUserAgentConfig) CodexUserAgentPersona {
 	if app := codexPersonaAppVersionPattern.FindStringSubmatch(persona.UserAgent); len(app) == 2 {
 		persona.AppVersion = app[1]
 	}
-	if platform := codexPersonaPlatformPattern.FindStringSubmatch(persona.UserAgent); len(platform) == 3 {
+	if platform := codexPreviewPlatformPattern.FindStringSubmatch(persona.UserAgent); len(platform) == 3 {
 		persona.TargetPlatform = codexTargetPlatform(platform[1], platform[2])
 	}
 	if codexHasManualVersionOverride(cfg) {
