@@ -137,11 +137,18 @@ func validateCodexRelayResponsesCompatibility(rawBody []byte) *api.APIError {
 		if json.Unmarshal(rawOptions, &options) != nil {
 			addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
 		} else {
-			for key := range options {
-				if key != "reasoning_summary_delivery" {
-					addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
-					break
+			for key, raw := range options {
+				if key == "reasoning_summary_delivery" {
+					var delivery string
+					trimmed := bytes.TrimSpace(raw)
+					if bytes.Equal(trimmed, []byte("null")) || json.Unmarshal(raw, &delivery) != nil {
+						addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
+						break
+					}
+					continue
 				}
+				addIssue("stream_options", "Codex relay currently cannot preserve this Responses field")
+				break
 			}
 		}
 	}
