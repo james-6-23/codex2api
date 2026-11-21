@@ -115,6 +115,12 @@ The switch is on by default. `0`, `false`, `off`, `none`, and `no` (case-insensi
 
 Cooldown correctness is independent of this switch and always applies: the public and shared wire keys are cooled together (the Gemini-family key is added when the quota bucket is exhausted), a shared wire/family deadline is never shortened by a briefer event on the same account, and cooldowns written by another instance are honoured during selection. Entries whose candidate pool excludes Antigravity accounts (`/v1/responses/compact`, native remote compaction, the `/v1/responses` WebSocket upgrade path) never apply the weighting, even behind an Antigravity key.
 
+## Per-account scheduling, auto-pause and request-count limits
+
+The Antigravity account editor exposes the same per-account scheduling fields as Codex accounts (score bias, base concurrency, scheduler priority, skip warm tier, keep concurrency on degrade, request-count limit, allowed API keys, tags). They are saved through the shared `PATCH /api/admin/accounts/:id/scheduler` endpoint.
+
+Antigravity quota is split by model family (Gemini, Claude/GPT, Argon), and each family has its own 5h and weekly bucket. The 5h / 7d auto-pause thresholds (account, then group, then global) are applied per family bucket: when one family's used share reaches the threshold before that bucket's trusted reset time, only requests for that family are filtered out until the reset; the whole account becomes unavailable only when every family is paused. Buckets without a trusted reset time are never paused by a threshold. The request-count limit resets at the earliest trusted 5h / weekly reset across families, falling back to 24 hours when the snapshot has no reset times.
+
 ## Supported gateway endpoints
 
 Antigravity inference is admitted through `/v1/responses`, `/v1/chat/completions`, and `/v1/messages`; its models are exposed through `/v1/models` and the Codex model manifest. Chat and Messages translate their inbound body into a Responses payload before dispatch, which is exactly what the `v1internal` adapter consumes, so all three transports share one admission gate and one adapter. `/v1/responses/compact` still excludes Antigravity accounts because no compaction adapter exists, and the official Codex executors reject Antigravity credentials before any network request as a provider-boundary safeguard.

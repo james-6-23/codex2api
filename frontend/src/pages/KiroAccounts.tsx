@@ -36,6 +36,13 @@ import {
   LogIn,
   KeyRound,
   Plus,
+  Flame,
+  Gauge,
+  Globe,
+  Network,
+  ShieldCheck,
+  Sliders,
+  Tag,
 } from "lucide-react";
 
 import { api } from "../api";
@@ -71,6 +78,7 @@ import AccountProxyBadge from "../components/AccountProxyBadge";
 import AccountProxyQuickEditor from "../components/AccountProxyQuickEditor";
 import { buildProxyBindingContext, type ProxyBindingContext } from "../lib/accountProxyBinding";
 import ChipInput from "../components/ChipInput";
+import { ConfigCard, ConfigCategory } from "../components/AccountConfigCards";
 import { AccountGroupManagerModal, ACCOUNT_GROUP_COLORS } from "../components/AccountGroupManagerModal";
 import { Select } from "../components/ui/select";
 import ChannelLogo from "../components/ChannelLogo";
@@ -87,6 +95,7 @@ import AccountGroupFilterSelect, {
 import type { AccountGroupFilterValue } from "../components/AccountGroupFilterSelect";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { Card, CardContent } from "@/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
@@ -2542,35 +2551,17 @@ function KiroEditAccountModal({
     }
   }, [account.id, allowedKeys, allowedKeysChanged, concurrency, keepConcurrency, onSaved, priority, proxyUrl, scoreBias, showToast, skipWarmTier, t, tags]);
 
-  const field = (label: string, node: ReactNode, hint?: string) => (
-    <div className="space-y-1">
-      <span className="text-xs font-semibold text-muted-foreground">{label}</span>
-      {node}
-      {hint ? <p className="text-[10px] leading-tight text-muted-foreground/70">{hint}</p> : null}
-    </div>
+  const switchAction = (label: string, checked: boolean, onChange: (next: boolean) => void) => (
+    <Switch aria-label={label} checked={checked} onCheckedChange={onChange} />
   );
-  const toggle = (label: string, hint: string, checked: boolean, onChange: (next: boolean) => void) => (
-    <label className="flex cursor-pointer items-start gap-2.5">
-      <input type="checkbox" className="mt-0.5 size-4 shrink-0 cursor-pointer accent-primary" checked={checked} onChange={(e) => onChange(e.target.checked)} />
-      <span className="space-y-0.5">
-        <span className="block text-xs font-semibold text-foreground">{label}</span>
-        <span className="block text-[10px] leading-tight text-muted-foreground/70">{hint}</span>
-      </span>
-    </label>
-  );
-  const section = (title: string, children: ReactNode) => (
-    <div className="space-y-3 rounded-lg border border-border/60 p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{title}</div>
-      {children}
-    </div>
-  );
+  const plan = kiroPlanBadge(account.kiro_plan, account.kiro_usage?.subscription_title || account.plan_type);
 
   return (
     <Modal
       show
       onClose={onClose}
       title={t("kiro.editTitle")}
-      contentClassName="sm:max-w-[640px]"
+      contentClassName="sm:max-w-[760px]"
       footer={
         <div className="flex justify-end gap-2">
           <Button variant="ghost" onClick={onClose}>{t("common.cancel")}</Button>
@@ -2581,45 +2572,64 @@ function KiroEditAccountModal({
         </div>
       }
     >
-      <div className="max-h-[70vh] space-y-4 overflow-y-auto pr-1">
+      <div className="space-y-6">
         <p className="text-xs text-muted-foreground">
           {accountLabel(account)} · {kiroAuthLabel(account, t)}
-          {kiroPlanBadge(account.kiro_plan, account.kiro_usage?.subscription_title || account.plan_type) ? ` · ${kiroPlanBadge(account.kiro_plan, account.kiro_usage?.subscription_title || account.plan_type)?.label}` : ""}
+          {plan ? ` · ${plan.label}` : ""}
         </p>
-        {section(t("accounts.categoryDispatch"), (
-          <div className="grid gap-3 sm:grid-cols-3">
-            {field(t("accounts.schedulerScoreLabel"), <Input value={scoreBias} onChange={(e) => setScoreBias(e.target.value)} placeholder="0" inputMode="numeric" />, t("kiro.scoreBiasHint"))}
-            {field(t("accounts.schedulerConcurrencyLabel"), <Input value={concurrency} onChange={(e) => setConcurrency(e.target.value)} placeholder={t("accounts.schedulerConcurrencyAuto")} inputMode="numeric" />, t("accounts.schedulerConcurrencyHint"))}
-            {field(t("accounts.schedulerPriorityTitle"), <Input value={priority} onChange={(e) => setPriority(e.target.value)} placeholder="0" inputMode="numeric" />, t("accounts.schedulerPriorityDefault"))}
-          </div>
-        ))}
-        {section(t("accounts.categorySafety"), (
-          <div className="space-y-3">
-            {toggle(t("accounts.schedulerSkipWarmLabel"), t("accounts.schedulerSkipWarmHint"), skipWarmTier, setSkipWarmTier)}
-            {toggle(t("accounts.schedulerKeepConcurrencyLabel"), t("kiro.keepConcurrencyHint"), keepConcurrency, setKeepConcurrency)}
-          </div>
-        ))}
-        {section(t("accounts.categoryNetwork"), (
-          <div className="space-y-3">
-            {field(
-              t("accounts.allowedAPIKeysLabel"),
-              <APIKeyMultiSelect
-                options={apiKeys}
-                value={allowedKeys}
-                disabled={apiKeys.length === 0}
-                onChange={(next) => { setAllowedKeys(next); setAllowedKeysChanged(true); }}
-                allLabel={t("accounts.allowedAPIKeysAll")}
-                selectedLabel={t("accounts.allowedAPIKeysSelected", { count: allowedKeys.length })}
-                placeholder={t("accounts.allowedAPIKeysPlaceholder")}
-                emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
-                emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
-              />,
-              t("accounts.allowedAPIKeysHint"),
-            )}
-            {field(t("kiro.proxyField"), <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label="" />, t("kiro.proxyHint"))}
-          </div>
-        ))}
-        {field(t("accounts.tagsLabel"), <ChipInput value={tags} onChange={setTags} options={tagOptions} placeholder={t("kiro.tagsPlaceholder")} maxVisible={8} />)}
+        <ConfigCategory icon={Gauge} title={t("accounts.categoryDispatch")}>
+          <ConfigCard icon={Gauge} iconClassName="text-blue-500" title={t("accounts.schedulerScoreLabel")} hint={t("kiro.scoreBiasHint")}>
+            <Input value={scoreBias} onChange={(e) => setScoreBias(e.target.value)} placeholder={t("accounts.schedulerScorePlaceholder")} inputMode="numeric" />
+          </ConfigCard>
+          <ConfigCard icon={Zap} iconClassName="text-amber-500" title={t("accounts.schedulerConcurrencyLabel")} hint={t("accounts.schedulerConcurrencyHint")}>
+            <Input
+              value={concurrency}
+              onChange={(e) => setConcurrency(e.target.value)}
+              placeholder={t("accounts.schedulerConcurrencyAutoValue", { value: account.base_concurrency_effective ?? "-" })}
+              inputMode="numeric"
+            />
+          </ConfigCard>
+          <ConfigCard icon={Sliders} iconClassName="text-indigo-500" title={t("accounts.schedulerPriorityTitle")} hint={t("accounts.schedulerPriorityHint")} wide>
+            <Input value={priority} onChange={(e) => setPriority(e.target.value)} placeholder={t("accounts.schedulerPriorityPlaceholder")} inputMode="numeric" />
+          </ConfigCard>
+        </ConfigCategory>
+        <ConfigCategory icon={ShieldCheck} title={t("accounts.categorySafety")}>
+          <ConfigCard
+            icon={Flame}
+            iconClassName="text-orange-500"
+            title={t("accounts.schedulerSkipWarmLabel")}
+            hint={t("accounts.schedulerSkipWarmHint")}
+            action={switchAction(t("accounts.schedulerSkipWarmLabel"), skipWarmTier, setSkipWarmTier)}
+          />
+          <ConfigCard
+            icon={Gauge}
+            iconClassName="text-sky-500"
+            title={t("accounts.schedulerKeepConcurrencyLabel")}
+            hint={t("kiro.keepConcurrencyHint")}
+            action={switchAction(t("accounts.schedulerKeepConcurrencyLabel"), keepConcurrency, setKeepConcurrency)}
+          />
+        </ConfigCategory>
+        <ConfigCategory icon={Globe} title={t("accounts.categoryNetwork")}>
+          <ConfigCard icon={KeyRound} iconClassName="text-emerald-500" title={t("accounts.allowedAPIKeysLabel")} hint={t("accounts.allowedAPIKeysHint")} wide>
+            <APIKeyMultiSelect
+              options={apiKeys}
+              value={allowedKeys}
+              disabled={apiKeys.length === 0}
+              onChange={(next) => { setAllowedKeys(next); setAllowedKeysChanged(true); }}
+              allLabel={t("accounts.allowedAPIKeysAll")}
+              selectedLabel={t("accounts.allowedAPIKeysSelected", { count: allowedKeys.length })}
+              placeholder={t("accounts.allowedAPIKeysPlaceholder")}
+              emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
+              emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
+            />
+          </ConfigCard>
+          <ConfigCard icon={Network} iconClassName="text-cyan-500" title={t("kiro.proxyField")} hint={t("kiro.proxyHint")} wide>
+            <ProxyField value={proxyUrl} onChange={setProxyUrl} proxies={proxies} label="" />
+          </ConfigCard>
+          <ConfigCard icon={Tag} iconClassName="text-pink-500" title={t("accounts.tagsLabel")} hint={t("accounts.tagsHint")} wide>
+            <ChipInput value={tags} onChange={setTags} options={tagOptions} placeholder={t("kiro.tagsPlaceholder")} maxVisible={8} />
+          </ConfigCard>
+        </ConfigCategory>
       </div>
     </Modal>
   );

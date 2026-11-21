@@ -34,6 +34,7 @@ import type {
   AccountGroup,
   AccountHealthBucket,
   AccountListSummary,
+  AccountLiveStateResponse,
   AccountOperationSelector,
   AccountPageStatsItem,
   AccountRow,
@@ -220,6 +221,7 @@ function AntigravityAccounts({
   }, [sortKey, sortDir]);
   const [showFilters, setShowFilters] = useState(false);
   const [pageStats, setPageStats] = useState<Record<string, AccountPageStatsItem>>({});
+  const [liveState, setLiveState] = useState<AccountLiveStateResponse["accounts"]>({});
   const [healthBars, setHealthBars] = useState<Record<string, AccountHealthBucket[]>>({});
   // 跨页勾选的账号只知道 id;这里记住见过的行,用来判断勾选里有没有 API Key 号。
   const knownAccountsRef = useRef<Map<number, AccountRow>>(new Map());
@@ -556,19 +558,59 @@ function AntigravityAccounts({
     };
   }, [accountIDsKey]);
 
+  // 并发徽章的实时计数,与 Codex/Kiro 页同一个 /accounts/live 接口;失败保留上一次快照。
+  useEffect(() => {
+    if (!accountIDsKey) {
+      setLiveState({});
+      return undefined;
+    }
+    const controller = new AbortController();
+    const ids = accountIDsKey.split(",").map(Number);
+    let inFlight = false;
+    const load = async () => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const res = await api.getAccountLiveState(ids, controller.signal);
+        if (!controller.signal.aborted) setLiveState(res.accounts ?? {});
+      } catch {
+        /* 实时状态失败不阻断列表 */
+      } finally {
+        inFlight = false;
+      }
+    };
+    void load();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void load();
+    }, 5000);
+    return () => {
+      controller.abort();
+      window.clearInterval(timer);
+    };
+  }, [accountIDsKey]);
+
   // 渲染行 = 基础行 + page-stats 补齐(只补缺失字段,基础行已有的以基础行为准)。
   const displayRows = useMemo(
     () =>
       accounts.map((account) => {
         const stats = pageStats[String(account.id)];
-        if (!stats) return account;
+        const live = liveState[String(account.id)];
+        if (!stats && !live) return account;
         const merged = { ...account };
-        if (!merged.usage_today_detail && stats.usage_today_detail) merged.usage_today_detail = stats.usage_today_detail;
-        if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
-        if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
+        if (live) {
+          merged.active_requests = live.active_requests;
+          merged.occupied_requests = live.occupied_requests;
+          if (typeof live.dynamic_concurrency_limit === "number") merged.dynamic_concurrency_limit = live.dynamic_concurrency_limit;
+          if (typeof live.base_concurrency_effective === "number") merged.base_concurrency_effective = live.base_concurrency_effective;
+        }
+        if (stats) {
+          if (!merged.usage_today_detail && stats.usage_today_detail) merged.usage_today_detail = stats.usage_today_detail;
+          if (!merged.usage_5h_detail && stats.usage_5h_detail) merged.usage_5h_detail = stats.usage_5h_detail;
+          if (!merged.usage_7d_detail && stats.usage_7d_detail) merged.usage_7d_detail = stats.usage_7d_detail;
+        }
         return merged;
       }),
-    [accounts, pageStats],
+    [accounts, liveState, pageStats],
   );
 
   // 跨页切换详情时旧页行先消失、新页行随后到达;保留上一次解析到的行,避免抽屉闪关。
