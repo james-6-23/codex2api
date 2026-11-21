@@ -250,6 +250,20 @@ API Key 启用多个 RPM/RPD/费用/Token 窗口时，Redis 会通过一次 `MGE
 
 系统设置存储在数据库的 `SystemSettings` 表中，可通过管理后台 `/admin/settings` 实时修改。
 
+### Codex Responses 请求的默认国家码
+
+Codex 默认按客户端请求转发顶层 `request_country`。如果部署需要为省略该字段的请求指定国家，可在管理后台「请求体重写 → JSON」的 `default` 数组中添加规则。下面是尚未配置规则时的完整示例，已有规则时只需追加数组中的条目。
+
+```json
+{
+  "default": [
+    { "params": { "request_country": "JP" } }
+  ]
+}
+```
+
+保存后，省略字段的请求会带上 `"request_country": "JP"`。客户端显式发送的 `null` 或其他国家码优先于这条默认规则。示例适用于普通 Codex Responses 的 HTTP 和 WebSocket 出站。生图、内部探测、独立的 `/v1/responses/compact` 和 Responses 中转账号会跳过这套规则。
+
 ### Codex 生图设置
 
 管理后台「系统设置 → Codex → 生图设置」可选择生图使用的文本驱动模型。选择后自动保存，对本实例之后构造的生图请求立即生效，重启后从数据库恢复。
