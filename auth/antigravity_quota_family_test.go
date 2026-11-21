@@ -80,18 +80,18 @@ func TestAntigravityQuotaGateIsolatesFamilies(t *testing.T) {
 		agFamilyBucket("3p-5h", "5h", agFloat(1), now, now.Add(3*time.Hour)),
 	)
 
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlock(&snap, now); blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlock(&snap, now, antigravityQuotaPause{}); blocked {
 		t.Fatal("account must stay schedulable while the Gemini family still has quota")
 	}
-	blocked, reason, resetAt := antigravityQuotaSnapshotGateBlockForModel(&snap, "claude-sonnet-4-6", now)
+	blocked, reason, resetAt := antigravityQuotaSnapshotGateBlockForModel(&snap, "claude-sonnet-4-6", now, antigravityQuotaPause{})
 	if !blocked || reason != "known_zero" || !resetAt.Equal(weeklyReset) {
 		t.Fatalf("claude request: blocked=%v reason=%q reset=%v, want blocked until %v", blocked, reason, resetAt, weeklyReset)
 	}
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&snap, "gemini-3.8-flash-high", now); blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&snap, "gemini-3.8-flash-high", now, antigravityQuotaPause{}); blocked {
 		t.Fatal("gemini request must not be blocked by the exhausted 3p family")
 	}
 	// 无法归族的模型退回严格口径：任一桶为零即阻断。
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&snap, "mystery-model", now); !blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&snap, "mystery-model", now, antigravityQuotaPause{}); !blocked {
 		t.Fatal("unclassified model must fall back to the strict any-bucket gate")
 	}
 }
@@ -105,7 +105,7 @@ func TestAntigravityQuotaGateAllFamiliesExhausted(t *testing.T) {
 		agFamilyBucket("3p-weekly", "weekly", agFloat(0.5), now, now.Add(72*time.Hour)),
 		agFamilyBucket("3p-5h", "5h", agFloat(0), now, now.Add(4*time.Hour)),
 	)
-	blocked, _, resetAt := antigravityQuotaSnapshotGateBlock(&snap, now)
+	blocked, _, resetAt := antigravityQuotaSnapshotGateBlock(&snap, now, antigravityQuotaPause{})
 	if !blocked {
 		t.Fatal("account with every family exhausted must be blocked")
 	}
@@ -113,7 +113,7 @@ func TestAntigravityQuotaGateAllFamiliesExhausted(t *testing.T) {
 	if want := now.Add(4 * time.Hour); !resetAt.Equal(want) {
 		t.Fatalf("reset=%v want earliest family recovery %v", resetAt, want)
 	}
-	_, _, geminiReset := antigravityQuotaSnapshotGateBlockForModel(&snap, "gemini-3.8-flash-high", now)
+	_, _, geminiReset := antigravityQuotaSnapshotGateBlockForModel(&snap, "gemini-3.8-flash-high", now, antigravityQuotaPause{})
 	if want := now.Add(72 * time.Hour); !geminiReset.Equal(want) {
 		t.Fatalf("gemini reset=%v want latest zero bucket %v", geminiReset, want)
 	}
@@ -126,10 +126,10 @@ func TestAntigravityQuotaGateUnknownBucketIsAccountWide(t *testing.T) {
 		agFamilyBucket("gemini-weekly", "weekly", agFloat(1), now, now.Add(72*time.Hour)),
 		agFamilyBucket("mystery-weekly", "weekly", agFloat(0), now, now.Add(24*time.Hour)),
 	)
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlock(&snap, now); !blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlock(&snap, now, antigravityQuotaPause{}); !blocked {
 		t.Fatal("unknown-family zero bucket must block the account")
 	}
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&snap, "gemini-3.8-flash-high", now); !blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&snap, "gemini-3.8-flash-high", now, antigravityQuotaPause{}); !blocked {
 		t.Fatal("unknown-family zero bucket must block every model")
 	}
 }
@@ -141,10 +141,10 @@ func TestAntigravityQuotaGateArgonScope(t *testing.T) {
 		agFamilyBucket("gemini-weekly", "weekly", agFloat(1), now, now.Add(72*time.Hour)),
 		agFamilyBucket("gemini-argon-wtu-weekly", "weekly", agFloat(0), now, now.Add(72*time.Hour)),
 	)
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&withArgon, "gemini-4-argon-high", now); !blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&withArgon, "gemini-4-argon-high", now, antigravityQuotaPause{}); !blocked {
 		t.Fatal("argon request must be blocked by the exhausted argon bucket")
 	}
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&withArgon, "gemini-3.8-flash-high", now); blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&withArgon, "gemini-3.8-flash-high", now, antigravityQuotaPause{}); blocked {
 		t.Fatal("flash request must not be blocked by the argon bucket")
 	}
 
@@ -152,7 +152,7 @@ func TestAntigravityQuotaGateArgonScope(t *testing.T) {
 		agFamilyBucket("gemini-weekly", "weekly", agFloat(0), now, now.Add(72*time.Hour)),
 		agFamilyBucket("3p-weekly", "weekly", agFloat(1), now, now.Add(72*time.Hour)),
 	)
-	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&withoutArgon, "gemini-4-argon-high", now); !blocked {
+	if blocked, _, _ := antigravityQuotaSnapshotGateBlockForModel(&withoutArgon, "gemini-4-argon-high", now, antigravityQuotaPause{}); !blocked {
 		t.Fatal("argon request without an argon bucket must follow the gemini family")
 	}
 }

@@ -79,7 +79,41 @@ func (a *Account) isAntigravityModelQuotaExhaustedLocked(model string, now time.
 	if a == nil || a.UpstreamType != UpstreamAntigravity {
 		return false, "", time.Time{}
 	}
-	return antigravityQuotaSnapshotGateBlockForModel(&a.AntigravityQuota, model, now)
+	return antigravityQuotaSnapshotGateBlockForModel(&a.AntigravityQuota, model, now, a.antigravityQuotaPauseLocked())
+}
+
+// antigravityQuotaPause 是「用量自动暂停」阈值（已用比例，0 = 不启用），按窗口作用到每个
+// 配额族的桶上：某族 5h / 周用量达到阈值只挡该族请求，到该窗口可信重置时刻恢复。
+type antigravityQuotaPause struct{ fiveHour, weekly float64 }
+
+// antigravityQuotaPauseLocked 读取账号生效的阈值（账号 → 分组 → 全局继承，与 Codex 同源），
+// 账号级禁用开关优先。调用方持有 a.mu。
+func (a *Account) antigravityQuotaPauseLocked() antigravityQuotaPause {
+	var p antigravityQuotaPause
+	if !a.AutoPause5hDisabled {
+		p.fiveHour = a.effectiveAutoPause5h
+	}
+	if !a.AutoPause7dDisabled {
+		p.weekly = a.effectiveAutoPause7d
+	}
+	return p
+}
+
+// antigravityQuotaResetTimesLocked 返回快照里各族 5h / 周窗口的可信重置时刻。
+func (a *Account) antigravityQuotaResetTimesLocked() []time.Time {
+	var out []time.Time
+	for _, g := range a.AntigravityQuota.Groups {
+		for _, b := range g.Buckets {
+			w, ok := NormalizeAntigravityWindow(b.Window)
+			if !ok {
+				continue
+			}
+			if resetAt, ok := ValidateResetTime(b.ResetTime, b.ObservedAt, w); ok {
+				out = append(out, resetAt)
+			}
+		}
+	}
+	return out
 }
 
 // antigravityAccountModelQuotaBlocked 是自锁封装的模型级门禁查询。
@@ -214,7 +248,7 @@ func (a *Account) IsAntigravityQuotaExhaustedLocked(now time.Time) (bool, string
 	if a == nil || a.UpstreamType != UpstreamAntigravity {
 		return false, "", time.Time{}
 	}
-	return antigravityQuotaSnapshotGateBlock(&a.AntigravityQuota, now)
+	return antigravityQuotaSnapshotGateBlock(&a.AntigravityQuota, now, a.antigravityQuotaPauseLocked())
 }
 
 // antigravityQuotaSnapshotGateBlock 是整号口径的硬门禁谓词：只依赖一份 V2 配额快照
@@ -227,13 +261,13 @@ func (a *Account) IsAntigravityQuotaExhaustedLocked(now time.Time) (bool, string
 //   - 所有已识别族都各自被阻断：整号阻断，到期取最早恢复的那一族；
 //   - 否则放行，由携带模型上下文的选号过滤器（antigravityQuotaSnapshotGateBlockForModel）
 //     按请求模型所在族再判一次。
-func antigravityQuotaSnapshotGateBlock(snapshot *AntigravityQuotaSnapshot, now time.Time) (bool, string, time.Time) {
+func antigravityQuotaSnapshotGateBlock(snapshot *AntigravityQuotaSnapshot, now time.Time, pause antigravityQuotaPause) (bool, string, time.Time) {
 	if !antigravityQuotaGateApplicable(snapshot, now) {
 		return false, "", time.Time{}
 	}
 	if blocked, reason, resetAt := antigravityQuotaScopeGateBlock(snapshot, func(b AntigravityQuotaBucket) bool {
 		return antigravityBucketQuotaFamily(b.BucketID) == antigravityQuotaFamilyUnknown
-	}, now); blocked {
+	}, now, pause); blocked {
 		return true, reason, resetAt
 	}
 	seen := map[antigravityQuotaFamily]bool{}
@@ -261,7 +295,7 @@ func antigravityQuotaSnapshotGateBlock(snapshot *AntigravityQuotaSnapshot, now t
 	for _, family := range families {
 		blocked, reason, resetAt := antigravityQuotaScopeGateBlock(snapshot, func(b AntigravityQuotaBucket) bool {
 			return antigravityBucketQuotaFamily(b.BucketID) == family
-		}, now)
+		}, now, pause)
 		if !blocked {
 			return false, "", time.Time{} // 至少还有一族可用：整号不阻断
 		}
@@ -275,12 +309,12 @@ func antigravityQuotaSnapshotGateBlock(snapshot *AntigravityQuotaSnapshot, now t
 // antigravityQuotaSnapshotGateBlockForModel 是带模型上下文的硬门禁谓词：只看 model
 // 所在族（以及无法归族的保守桶）。model 无法归族时退回「任一桶为零即阻断」的整号严格
 // 口径——与分族之前的行为一致，宁可多挡不可错放。
-func antigravityQuotaSnapshotGateBlockForModel(snapshot *AntigravityQuotaSnapshot, model string, now time.Time) (bool, string, time.Time) {
+func antigravityQuotaSnapshotGateBlockForModel(snapshot *AntigravityQuotaSnapshot, model string, now time.Time, pause antigravityQuotaPause) (bool, string, time.Time) {
 	if !antigravityQuotaGateApplicable(snapshot, now) {
 		return false, "", time.Time{}
 	}
 	scope, _ := antigravityQuotaScopeForModel(snapshot, model, true)
-	return antigravityQuotaScopeGateBlock(snapshot, scope, now)
+	return antigravityQuotaScopeGateBlock(snapshot, scope, now, pause)
 }
 
 // antigravityQuotaGateApplicable 校验门禁的全局前提：开关开启、V2 快照、且 groups 来源
@@ -314,7 +348,7 @@ func antigravityQuotaGroupsMetaTrusted(snapshot *AntigravityQuotaSnapshot, now t
 // antigravityQuotaScopeGateBlock 在 scope 内的桶上求值硬门禁：任一桶处于阻断态即阻断。
 // 多个桶同时阻断时，到期取最晚的那个——作用域要等所有零桶都恢复才可用（例如 5h 与
 // weekly 同时为零，Retry-After 应指向周重置而不是 5h 重置）。
-func antigravityQuotaScopeGateBlock(snapshot *AntigravityQuotaSnapshot, scope antigravityQuotaBucketScope, now time.Time) (bool, string, time.Time) {
+func antigravityQuotaScopeGateBlock(snapshot *AntigravityQuotaSnapshot, scope antigravityQuotaBucketScope, now time.Time, pause antigravityQuotaPause) (bool, string, time.Time) {
 	var (
 		blocked      bool
 		latestReason string
@@ -326,6 +360,9 @@ func antigravityQuotaScopeGateBlock(snapshot *AntigravityQuotaSnapshot, scope an
 				continue
 			}
 			bucketBlocked, reason, resetAt := antigravityQuotaBucketGateBlock(b, now)
+			if !bucketBlocked {
+				bucketBlocked, reason, resetAt = antigravityQuotaBucketPauseBlock(b, now, pause)
+			}
 			if !bucketBlocked {
 				continue
 			}
@@ -368,6 +405,28 @@ func antigravityQuotaBucketGateBlock(b AntigravityQuotaBucket, now time.Time) (b
 	return false, "", time.Time{}
 }
 
+// antigravityQuotaBucketPauseBlock 是单桶的用量阈值判定：已用比例达到该窗口阈值且可信重置
+// 时刻未到即阻断到重置时刻。没有可信重置时刻时不按阈值阻断（阈值是软限制，宁可放行）。
+func antigravityQuotaBucketPauseBlock(b AntigravityQuotaBucket, now time.Time, pause antigravityQuotaPause) (bool, string, time.Time) {
+	w, ok := NormalizeAntigravityWindow(b.Window)
+	if !ok || !b.FractionPresent || b.RemainingFraction == nil {
+		return false, "", time.Time{}
+	}
+	threshold := pause.fiveHour
+	if w == "weekly" {
+		threshold = pause.weekly
+	}
+	// 与 Codex 的「usage >= threshold」同口径；1e-9 吸收 1-remaining 的浮点误差。
+	if threshold <= 0 || 1-*b.RemainingFraction+1e-9 < threshold {
+		return false, "", time.Time{}
+	}
+	resetAt, hasReset := ValidateResetTime(b.ResetTime, b.ObservedAt, w)
+	if !hasReset || !now.Before(resetAt) {
+		return false, "", time.Time{}
+	}
+	return true, "auto_pause", resetAt
+}
+
 // AntigravityQuotaGateView 是硬门禁的只读视图，供管理端展示四态与来源元数据
 // （Spec §3.3「管理端按来源显示事实过期」、§9 管理层落点）。它不参与任何调度决策，
 // 判定与调度侧共用 antigravityQuotaSnapshotGateBlock 同一函数。
@@ -394,7 +453,8 @@ func EvaluateAntigravityQuotaGate(snapshot *AntigravityQuotaSnapshot, now time.T
 			}
 		}
 	}
-	view.Blocked, view.Reason, view.ResetAt = antigravityQuotaSnapshotGateBlock(snapshot, now)
+	// 管理端视图只展示上游配额事实（硬门禁），账号级自动暂停阈值不在快照里。
+	view.Blocked, view.Reason, view.ResetAt = antigravityQuotaSnapshotGateBlock(snapshot, now, antigravityQuotaPause{})
 	view.Stale = view.Blocked && view.Reason == "stale_zero"
 	return view
 }

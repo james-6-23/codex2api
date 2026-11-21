@@ -494,7 +494,16 @@
     "hideSecret": "隐藏密钥",
     "addMoreFiles": "继续添加文件",
     "importingBatch": "正在导入第 {{current}}/{{total}} 批…",
-    "importBatchStopped": "已完成 {{done}}/{{total}} 批，后续批次失败：{{error}}"
+    "importBatchStopped": "已完成 {{done}}/{{total}} 批，后续批次失败：{{error}}",
+    "scoreBiasHint": "调度打分加减项（-200~200），越高越优先被选中；留空跟随默认。",
+    "keepConcurrencyHint": "开启后预热 / 风险层级仍按配置的基础并发调度，封禁仍为 0。若上游 429 本身就是并发限制，请勿开启。",
+    "dispatchCountLimitHint": "达到次数后账号进入 rate_limited 倒计时，到最早到期的 5h / 周配额窗口（各模型族取最早的那个）重置后恢复；读不到配额窗口时按 24 小时重置。留空或 0 关闭。",
+    "concurrencyTitle": "进行中 {{active}} 个请求 · 当前并发上限 {{limit}}（基础 {{base}}，{{health}}）",
+    "autoPauseHint": "按模型族分别判断（Gemini、Claude/GPT 各有自己的 5h 和周额度）：某一族用量达到阈值，只暂停这一族的请求，到该窗口重置后自动恢复；所有族都暂停时整个账号暂停。",
+    "autoPause5hThreshold": "5h 用量阈值(%)",
+    "autoPause7dThreshold": "周用量阈值(%)",
+    "autoPause5hDisabled": "禁用 5h 自动暂停",
+    "autoPause7dDisabled": "禁用周自动暂停"
   },
   "grok": {
     "pageTitle": "Grok 账号",
