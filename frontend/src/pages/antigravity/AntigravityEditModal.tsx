@@ -1,50 +1,21 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import {
-  Boxes,
-  Flame,
-  Gauge,
-  Globe,
-  KeyRound,
-  Loader2,
-  Network,
-  Pencil,
-  RotateCw,
-  ShieldAlert,
-  ShieldCheck,
-  Sliders,
-  Tag,
-  Timer,
-  UserRound,
-  Zap,
-} from "lucide-react";
+import { Loader2, Pencil, RotateCw } from "lucide-react";
 import { api } from "../../api";
 import type { ProxyRow } from "../../api";
 import type {
   AccountGroup,
   AccountRow,
   AntigravityAuthKind,
-  APIKeyRow,
   UpdateAntigravityAccountRequest,
 } from "../../types";
 import Modal from "../../components/Modal";
-import { ConfigCategory } from "../../components/AccountConfigCards";
-import APIKeyMultiSelect from "../../components/APIKeyMultiSelect";
-import ChipInput from "../../components/ChipInput";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Switch } from "@/components/ui/switch";
 import { useToast } from "../../hooks/useToast";
 import { ANTIGRAVITY_DEFAULT_MODELS } from "../../lib/antigravityModels";
 import { accountLabel, parseModelList } from "../../lib/antigravityQuota";
-import {
-  buildSchedulerPatch,
-  schedulerDraftFromAccount,
-  type AntigravitySchedulerDraft,
-  type AntigravitySchedulerError,
-} from "../../lib/antigravityScheduler";
 import { getErrorMessage } from "../../utils/error";
-import { formatBeijingTime } from "../../utils/time";
 import {
   AccountMetadataFields,
   APIKeyModelFields,
@@ -78,14 +49,6 @@ const EMPTY_EDIT_DRAFT: EditDraft = {
   proxyUrl: "",
   groupIds: [],
   userProjectId: "",
-};
-
-const SCHEDULER_ERROR_KEYS: Record<AntigravitySchedulerError, string> = {
-  score: "accounts.schedulerScoreRange",
-  concurrency: "accounts.schedulerConcurrencyRange",
-  priority: "accounts.schedulerPriorityRange",
-  dispatchLimit: "accounts.dispatchCountLimitRange",
-  autoPause: "accounts.autoPauseThresholdRange",
 };
 
 function editDraftFromAccount(account: AccountRow): EditDraft {
@@ -132,8 +95,6 @@ export default function AntigravityEditModal({
   const { showToast } = useToast();
   const [editingAccount, setEditingAccount] = useState<AccountRow | null>(null);
   const [editDraft, setEditDraft] = useState<EditDraft>(EMPTY_EDIT_DRAFT);
-  const [schedulerDraft, setSchedulerDraft] = useState<AntigravitySchedulerDraft | null>(null);
-  const [apiKeys, setAPIKeys] = useState<APIKeyRow[]>([]);
   const [editing, setEditing] = useState(false);
   const [editingDetailsLoading, setEditingDetailsLoading] = useState(false);
   const [editingDetailsError, setEditingDetailsError] = useState<string | null>(null);
@@ -147,7 +108,6 @@ export default function AntigravityEditModal({
 
     if (account.detail_loaded !== false) {
       setEditDraft(editDraftFromAccount(account));
-      setSchedulerDraft(schedulerDraftFromAccount(account));
       setEditingDetailsLoading(false);
       return;
     }
@@ -159,7 +119,6 @@ export default function AntigravityEditModal({
       if (detail.id !== account.id) throw new Error(t("common.loadFailed"));
       setEditingAccount(detail);
       setEditDraft(editDraftFromAccount(detail));
-      setSchedulerDraft(schedulerDraftFromAccount(detail));
     } catch (detailError) {
       if (editLoadGenerationRef.current === generation) {
         setEditingDetailsError(getErrorMessage(detailError));
@@ -184,22 +143,6 @@ export default function AntigravityEditModal({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [account]);
 
-  // 「允许调用 Token」的候选列表;失败时按空列表处理(等同全部 Key 可调用)。
-  const isOpen = account !== null;
-  useEffect(() => {
-    if (!isOpen) return;
-    let cancelled = false;
-    void api
-      .getAPIKeys({ view: "lite" })
-      .then((res) => {
-        if (!cancelled) setAPIKeys(res.keys ?? []);
-      })
-      .catch(() => undefined);
-    return () => {
-      cancelled = true;
-    };
-  }, [isOpen]);
-
   const closeEditor = useCallback(() => {
     if (editing) return;
     editLoadGenerationRef.current += 1;
@@ -207,12 +150,7 @@ export default function AntigravityEditModal({
   }, [editing, onClose]);
 
   const handleEdit = async () => {
-    if (!editingAccount || !schedulerDraft || editing || editingDetailsLoading || editingDetailsError) return;
-    const scheduler = buildSchedulerPatch(editingAccount, schedulerDraft);
-    if ("error" in scheduler) {
-      showToast(t(SCHEDULER_ERROR_KEYS[scheduler.error]), "error");
-      return;
-    }
+    if (!editingAccount || editing || editingDetailsLoading || editingDetailsError) return;
     const payload: UpdateAntigravityAccountRequest = {
       name: editDraft.name.trim(),
       proxy_url: editDraft.proxyUrl.trim(),
@@ -233,9 +171,6 @@ export default function AntigravityEditModal({
     setEditing(true);
     try {
       const result = await api.updateAntigravityAccount(editingAccount.id, payload);
-      if (Object.keys(scheduler.patch).length > 0) {
-        await api.updateAccountScheduler(editingAccount.id, scheduler.patch);
-      }
       showToast(result.warning || t("antigravity.editSuccess"), result.warning ? "warning" : "success");
       editLoadGenerationRef.current += 1;
       onClose();
@@ -267,7 +202,7 @@ export default function AntigravityEditModal({
         )
       }
       onClose={closeEditor}
-      contentClassName="sm:max-w-[760px]"
+      contentClassName="sm:max-w-[620px]"
       footer={
         <>
           <Button variant="outline" onClick={closeEditor} disabled={editing}>
@@ -304,223 +239,83 @@ export default function AntigravityEditModal({
           </Button>
         </div>
       ) : (
-        <div className="space-y-6">
-          <ConfigCategory icon={UserRound} title={t("antigravity.editSectionBasic")}>
-            <FormSection icon={UserRound} iconClassName="text-blue-500" title={t("antigravity.accountName")} wide>
+        <div className="space-y-3">
+          <FormSection title={t("antigravity.editSectionBasic")}>
+            <label className="block space-y-1.5">
+              <FieldLabel>{t("antigravity.accountName")}</FieldLabel>
               <Input
                 value={editDraft.name}
                 onChange={(event) => setEditDraft((current) => ({ ...current, name: event.target.value }))}
               />
-            </FormSection>
+            </label>
+          </FormSection>
 
-            <FormSection
-              icon={KeyRound}
-              iconClassName="text-emerald-500"
-              title={t("antigravity.editSectionCredential")}
-              description={t("antigravity.editSectionCredentialHint")}
-              wide
-            >
-              {editDraft.authKind === "oauth" ? (
-                <label className="block space-y-1.5">
-                  <FieldLabel>{t("antigravity.replacementAuthJson")}</FieldLabel>
-                  <textarea
-                    value={editDraft.authJson}
-                    onChange={(event) => setEditDraft((current) => ({ ...current, authJson: event.target.value }))}
-                    rows={5}
-                    spellCheck={false}
-                    placeholder={t("antigravity.replacementAuthJsonPlaceholder")}
-                    className={TEXTAREA_CLASS}
-                  />
-                  <FieldHint>{t("antigravity.replacementAuthJsonHint")}</FieldHint>
-                </label>
-              ) : (
-                <label className="block space-y-1.5">
-                  <FieldLabel>{t("antigravity.replacementApiKey")}</FieldLabel>
-                  <SecretInput
-                    value={editDraft.apiKey}
-                    onChange={(apiKey) => setEditDraft((current) => ({ ...current, apiKey }))}
-                    placeholder={t("antigravity.replacementApiKeyPlaceholder")}
-                  />
-                  <FieldHint>{t("antigravity.replacementApiKeyHint")}</FieldHint>
-                </label>
-              )}
-              {editDraft.authKind === "oauth" ? (
-                <label className="block space-y-1.5">
-                  <FieldLabel>{t("antigravity.userProjectId")}</FieldLabel>
-                  <Input
-                    value={editDraft.userProjectId}
-                    onChange={(event) => setEditDraft((current) => ({ ...current, userProjectId: event.target.value }))}
-                    spellCheck={false}
-                    placeholder={t("antigravity.userProjectIdPlaceholder")}
-                    className="font-mono"
-                  />
-                  <FieldHint>{t("antigravity.userProjectIdHint")}</FieldHint>
-                </label>
-              ) : null}
-            </FormSection>
-
-            {editDraft.authKind === "api_key" ? (
-              <FormSection icon={Boxes} iconClassName="text-violet-500" title={t("antigravity.editSectionModels")} wide>
-                <APIKeyModelFields
-                  models={editDraft.models}
-                  modelMapping={editDraft.modelMapping}
-                  onModelsChange={(models) => setEditDraft((current) => ({ ...current, models }))}
-                  onModelMappingChange={(modelMapping) => setEditDraft((current) => ({ ...current, modelMapping }))}
+          <FormSection
+            title={t("antigravity.editSectionCredential")}
+            description={t("antigravity.editSectionCredentialHint")}
+          >
+            {editDraft.authKind === "oauth" ? (
+              <label className="block space-y-1.5">
+                <FieldLabel>{t("antigravity.replacementAuthJson")}</FieldLabel>
+                <textarea
+                  value={editDraft.authJson}
+                  onChange={(event) => setEditDraft((current) => ({ ...current, authJson: event.target.value }))}
+                  rows={6}
+                  spellCheck={false}
+                  placeholder={t("antigravity.replacementAuthJsonPlaceholder")}
+                  className={TEXTAREA_CLASS}
                 />
-              </FormSection>
+                <FieldHint>{t("antigravity.replacementAuthJsonHint")}</FieldHint>
+              </label>
+            ) : (
+              <label className="block space-y-1.5">
+                <FieldLabel>{t("antigravity.replacementApiKey")}</FieldLabel>
+                <SecretInput
+                  value={editDraft.apiKey}
+                  onChange={(apiKey) => setEditDraft((current) => ({ ...current, apiKey }))}
+                  placeholder={t("antigravity.replacementApiKeyPlaceholder")}
+                />
+                <FieldHint>{t("antigravity.replacementApiKeyHint")}</FieldHint>
+              </label>
+            )}
+            {editDraft.authKind === "oauth" ? (
+              <label className="block space-y-1.5">
+                <FieldLabel>{t("antigravity.userProjectId")}</FieldLabel>
+                <Input
+                  value={editDraft.userProjectId}
+                  onChange={(event) => setEditDraft((current) => ({ ...current, userProjectId: event.target.value }))}
+                  spellCheck={false}
+                  placeholder={t("antigravity.userProjectIdPlaceholder")}
+                  className="font-mono"
+                />
+                <FieldHint>{t("antigravity.userProjectIdHint")}</FieldHint>
+              </label>
             ) : null}
-          </ConfigCategory>
+          </FormSection>
 
-          {schedulerDraft ? (
-            <ConfigCategory icon={Gauge} title={t("accounts.categoryDispatch")}>
-              <FormSection icon={Gauge} iconClassName="text-blue-500" title={t("accounts.schedulerScoreLabel")} description={t("antigravity.scoreBiasHint")}>
-                <Input
-                  value={schedulerDraft.scoreBias}
-                  onChange={(e) => setSchedulerDraft({ ...schedulerDraft, scoreBias: e.target.value })}
-                  placeholder={t("accounts.schedulerScorePlaceholder")}
-                  inputMode="numeric"
-                />
-              </FormSection>
-              <FormSection icon={Zap} iconClassName="text-amber-500" title={t("accounts.schedulerConcurrencyLabel")} description={t("accounts.schedulerConcurrencyHint")}>
-                <Input
-                  value={schedulerDraft.concurrency}
-                  onChange={(e) => setSchedulerDraft({ ...schedulerDraft, concurrency: e.target.value })}
-                  placeholder={t("accounts.schedulerConcurrencyAutoValue", {
-                    value: editingAccount?.base_concurrency_effective ?? "-",
-                  })}
-                  inputMode="numeric"
-                />
-              </FormSection>
-              <FormSection icon={Sliders} iconClassName="text-indigo-500" title={t("accounts.schedulerPriorityTitle")} description={t("accounts.schedulerPriorityHint")} wide>
-                <Input
-                  value={schedulerDraft.priority}
-                  onChange={(e) => setSchedulerDraft({ ...schedulerDraft, priority: e.target.value })}
-                  placeholder={t("accounts.schedulerPriorityPlaceholder")}
-                  inputMode="numeric"
-                />
-              </FormSection>
-            </ConfigCategory>
+          {editDraft.authKind === "api_key" ? (
+            <FormSection title={t("antigravity.editSectionModels")}>
+              <APIKeyModelFields
+                models={editDraft.models}
+                modelMapping={editDraft.modelMapping}
+                onModelsChange={(models) => setEditDraft((current) => ({ ...current, models }))}
+                onModelMappingChange={(modelMapping) => setEditDraft((current) => ({ ...current, modelMapping }))}
+              />
+            </FormSection>
           ) : null}
 
-          {schedulerDraft ? (
-            <ConfigCategory icon={ShieldCheck} title={t("accounts.categorySafety")}>
-              <FormSection
-                icon={Flame}
-                iconClassName="text-orange-500"
-                title={t("accounts.schedulerSkipWarmLabel")}
-                description={t("accounts.schedulerSkipWarmHint")}
-                action={
-                  <Switch
-                    aria-label={t("accounts.schedulerSkipWarmLabel")}
-                    checked={schedulerDraft.skipWarmTier}
-                    onCheckedChange={(skipWarmTier) => setSchedulerDraft({ ...schedulerDraft, skipWarmTier })}
-                  />
-                }
-              />
-              <FormSection
-                icon={Gauge}
-                iconClassName="text-sky-500"
-                title={t("accounts.schedulerKeepConcurrencyLabel")}
-                description={t("antigravity.keepConcurrencyHint")}
-                action={
-                  <Switch
-                    aria-label={t("accounts.schedulerKeepConcurrencyLabel")}
-                    checked={schedulerDraft.keepConcurrency}
-                    onCheckedChange={(keepConcurrency) => setSchedulerDraft({ ...schedulerDraft, keepConcurrency })}
-                  />
-                }
-              />
-              <FormSection icon={Timer} iconClassName="text-purple-500" title={t("accounts.dispatchCountLimitTitle")} description={t("antigravity.dispatchCountLimitHint")} wide>
-                <Input
-                  value={schedulerDraft.dispatchLimit}
-                  onChange={(e) => setSchedulerDraft({ ...schedulerDraft, dispatchLimit: e.target.value })}
-                  placeholder={t("accounts.dispatchCountLimitPlaceholder")}
-                  inputMode="numeric"
-                />
-                {editingAccount?.dispatch_count_limit ? (
-                  <FieldHint>
-                    {t("accounts.dispatchCountLimitStatus", {
-                      used: editingAccount.dispatch_count_used ?? 0,
-                      limit: editingAccount.dispatch_count_limit,
-                    })}
-                    {editingAccount.dispatch_count_reset_at
-                      ? ` · ${t("accounts.dispatchCountLimitResetAt", { time: formatBeijingTime(editingAccount.dispatch_count_reset_at) })}`
-                      : ""}
-                  </FieldHint>
-                ) : null}
-              </FormSection>
-              <FormSection icon={ShieldAlert} iconClassName="text-rose-500" title={t("accounts.autoPauseTitle")} description={t("antigravity.autoPauseHint")} wide>
-                <div className="grid gap-3 md:grid-cols-2">
-                  {(
-                    [
-                      ["autoPause5h", "autoPause5hDisabled", "antigravity.autoPause5hThreshold", "antigravity.autoPause5hDisabled"],
-                      ["autoPause7d", "autoPause7dDisabled", "antigravity.autoPause7dThreshold", "antigravity.autoPause7dDisabled"],
-                    ] as const
-                  ).map(([valueKey, disabledKey, label, disabledLabel]) => (
-                    <div key={valueKey} className="space-y-2 rounded-lg border border-border/60 bg-muted/20 p-3">
-                      <label className="flex cursor-pointer items-center justify-between gap-3 text-xs font-semibold text-foreground">
-                        <span>{t(disabledLabel)}</span>
-                        <Switch
-                          checked={schedulerDraft[disabledKey]}
-                          onCheckedChange={(checked) => setSchedulerDraft({ ...schedulerDraft, [disabledKey]: checked })}
-                        />
-                      </label>
-                      <label className="block space-y-1.5">
-                        <FieldLabel>{t(label)}</FieldLabel>
-                        <Input
-                          value={schedulerDraft[valueKey]}
-                          disabled={schedulerDraft[disabledKey]}
-                          onChange={(e) => setSchedulerDraft({ ...schedulerDraft, [valueKey]: e.target.value })}
-                          placeholder={t("accounts.autoPauseThresholdPlaceholder")}
-                          inputMode="decimal"
-                        />
-                      </label>
-                    </div>
-                  ))}
-                </div>
-                <FieldHint>{t("accounts.autoPauseThresholdHint")}</FieldHint>
-              </FormSection>
-            </ConfigCategory>
-          ) : null}
-
-          <ConfigCategory icon={Globe} title={t("accounts.categoryNetwork")}>
-            {schedulerDraft ? (
-              <FormSection icon={KeyRound} iconClassName="text-emerald-500" title={t("accounts.allowedAPIKeysLabel")} description={t("accounts.allowedAPIKeysHint")} wide>
-                <APIKeyMultiSelect
-                  options={apiKeys}
-                  value={schedulerDraft.allowedAPIKeyIDs}
-                  disabled={apiKeys.length === 0}
-                  onChange={(next) => setSchedulerDraft({ ...schedulerDraft, allowedAPIKeyIDs: next })}
-                  allLabel={t("accounts.allowedAPIKeysAll")}
-                  selectedLabel={t("accounts.allowedAPIKeysSelected", { count: schedulerDraft.allowedAPIKeyIDs.length })}
-                  placeholder={t("accounts.allowedAPIKeysPlaceholder")}
-                  emptyLabel={t("accounts.allowedAPIKeysNoOptions")}
-                  emptyHint={t("accounts.allowedAPIKeysNoOptionsHint")}
-                />
-              </FormSection>
-            ) : null}
-            <FormSection icon={Network} iconClassName="text-cyan-500" title={t("antigravity.editSectionNetwork")} wide>
-              <AccountMetadataFields
-                stacked
-                proxyUrl={editDraft.proxyUrl}
-                proxies={proxies}
-                onProxyUrlChange={(proxyUrl) => setEditDraft((current) => ({ ...current, proxyUrl }))}
-                groupIds={editDraft.groupIds}
-                onGroupIdsChange={(groupIds) => setEditDraft((current) => ({ ...current, groupIds }))}
-                groups={groups}
-                onCreateGroup={onCreateGroup}
-              />
-            </FormSection>
-            {schedulerDraft ? (
-              <FormSection icon={Tag} iconClassName="text-pink-500" title={t("accounts.tagsLabel")} description={t("accounts.tagsHint")} wide>
-                <ChipInput
-                  value={schedulerDraft.tags}
-                  onChange={(tags) => setSchedulerDraft({ ...schedulerDraft, tags })}
-                  placeholder={t("accounts.tagsPlaceholder")}
-                />
-              </FormSection>
-            ) : null}
-          </ConfigCategory>
+          <FormSection title={t("antigravity.editSectionNetwork")}>
+            <AccountMetadataFields
+              stacked
+              proxyUrl={editDraft.proxyUrl}
+              proxies={proxies}
+              onProxyUrlChange={(proxyUrl) => setEditDraft((current) => ({ ...current, proxyUrl }))}
+              groupIds={editDraft.groupIds}
+              onGroupIdsChange={(groupIds) => setEditDraft((current) => ({ ...current, groupIds }))}
+              groups={groups}
+              onCreateGroup={onCreateGroup}
+            />
+          </FormSection>
         </div>
       )}
     </Modal>

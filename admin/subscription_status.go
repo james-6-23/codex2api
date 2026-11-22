@@ -79,7 +79,7 @@ func (h *Handler) RefreshAccountSubscription(c *gin.Context) {
 		return
 	}
 	// 只有 Codex/ChatGPT 账号有订阅提供方可查；其他渠道直接报不支持。
-	if account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() || account.IsClaudeAPIKey() || account.IsKiro() {
+	if account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() || account.IsClaudeAPIKey() {
 		c.JSON(http.StatusOK, gin.H{"outcome": string(proxy.SubscriptionSyncUnsupported)})
 		return
 	}

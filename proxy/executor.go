@@ -503,7 +503,7 @@ func IsolateCodexSessionID(apiKeyID int64, raw string) string {
 	if raw == "" || apiKeyID <= 0 {
 		return raw
 	}
-	return deriveCodexIdentityUUIDv7(fmt.Sprintf("api-key:%d:%s", apiKeyID, raw), raw)
+	return DeriveStableSessionUUIDv7(fmt.Sprintf("api-key:%d:%s", apiKeyID, raw))
 }
 
 // resolveUpstreamSessionID 决定传给上游的会话/缓存身份键。
@@ -694,9 +694,8 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
 	// ==================== Codex 请求体优化 ====================
 	// 参考 CLIProxyAPI/codex_executor.go + sub2api 的实现
 
-	// Preserve the verified official shape; generic clients still receive the
-	// existing instructions compatibility default.
-	if !gjson.GetBytes(requestBody, "instructions").Exists() && !PreserveCodexOfficialRequestFields(requestBody) {
+	// 1. 确保 instructions 字段存在（Codex 后端要求）
+	if !gjson.GetBytes(requestBody, "instructions").Exists() {
 		requestBody, _ = sjson.SetBytes(requestBody, "instructions", "")
 	}
 
@@ -1258,7 +1257,7 @@ func applyAccountCustomHeaders(req *http.Request, account *auth.Account) {
 	if req == nil || account == nil {
 		return
 	}
-	for name, value := range CodexAccountCustomHeaders(account) {
+	for name, value := range account.GetCustomHeaders() {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue
@@ -1338,7 +1337,6 @@ func applyCodexRequestHeaders(req *http.Request, account *auth.Account, accessTo
 	if err := ApplyCodexAttestation(req.Context(), CodexAttestationInput{Headers: req.Header, Account: account}); err != nil {
 		return err
 	}
-	FinalizeCodexIdentityHeaders(req.Header, account)
 	RecordUpstreamUserAgent(req.Context(), req.Header.Get("User-Agent"))
 	return nil
 }

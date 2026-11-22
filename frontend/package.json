@@ -4,21 +4,19 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
-    "postinstall": "node scripts/patch-picomatch.mjs",
-    "dev": "node --import ./scripts/patch-picomatch.mjs ./node_modules/vite/bin/vite.js",
-    "build": "node --import ./scripts/patch-picomatch.mjs ./node_modules/vite/bin/vite.js build",
-    "preview": "node --import ./scripts/patch-picomatch.mjs ./node_modules/vite/bin/vite.js preview",
-    "test": "node --experimental-strip-types --test src/lib/*.test.mjs tests/picomatch.test.mjs",
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test": "node --experimental-strip-types --test src/lib/*.test.mjs",
     "test:svg": "node --experimental-strip-types --test tests/qualityTestSVG.browser.test.mjs",
     "test:intelligence": "node --experimental-strip-types --test tests/intelligenceCheck.browser.test.mjs",
-    "test:key-usage": "node --experimental-strip-types --test tests/keyUsageAccounts.browser.test.mjs",
     "test:version": "node --experimental-strip-types --test tests/useVersionCheck.browser.test.mjs",
-    "test:quiet-hours": "node --experimental-strip-types --test tests/backgroundQuietHours.browser.test.mjs",
     "typecheck": "tsc --noEmit",
     "audit:ci": "node scripts/audit-gate.mjs"
   },
   "dependencies": {
     "@lobehub/icons-static-svg": "^1.91.0",
+    "@tailwindcss/vite": "^4.2.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "framer-motion": "^13.3.0",
@@ -31,16 +29,15 @@
     "react-router-dom": "^7.18.0",
     "recharts": "^3.8.0",
     "shiki": "^3.23.0",
-    "tailwind-merge": "^3.5.0"
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.2"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.2.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^6.0.1",
     "playwright": "^1.63.0",
     "prettier": "^3.9.6",
-    "tailwindcss": "^4.2.2",
     "typescript": "^5.9.3",
     "vite": "^8.3.5"
   }

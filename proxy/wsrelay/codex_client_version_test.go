@@ -32,34 +32,6 @@ func TestCodexClientVersionUnavailableStopsWebsocketBeforeHandshake(t *testing.T
 	}
 }
 
-func TestWebsocketPreservesDesktopIdentityUnderStabilization(t *testing.T) {
-	old := proxy.CurrentRuntimeSettings()
-	proxy.ApplyRuntimeSettings(proxy.RuntimeSettings{ClientCompatMode: proxy.ClientCompatModePreserve})
-	t.Cleanup(func() { proxy.ApplyRuntimeSettings(old) })
-	t.Setenv("CODEX_WS_SEND_USER_AGENT", "true")
-
-	const desktopUA = "Codex Desktop/0.169.0-alpha.11.1 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.1111.21308)"
-	headers, err := NewExecutor().prepareWebsocketHeadersChecked(
-		context.Background(), "token-899", &auth.Account{DBID: 899, AccountID: "899"},
-		"899", "session-899", "api-key-899",
-		&proxy.DeviceProfileConfig{StabilizeDeviceProfile: true},
-		http.Header{"User-Agent": {desktopUA}, "Originator": {"Codex Desktop"}},
-		nil, "",
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := headers.Get("User-Agent"); got != desktopUA {
-		t.Fatalf("User-Agent = %q, want downstream desktop UA", got)
-	}
-	if got := headers.Get("Version"); got != "0.169.0-alpha.11.1" {
-		t.Fatalf("Version = %q, want 0.169.0-alpha.11.1", got)
-	}
-	if got := headers.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %q, want Codex Desktop", got)
-	}
-}
-
 func TestWebsocketClientPoolScopesFullVersionPair(t *testing.T) {
 	headers := http.Header{"User-Agent": {"codex/0.158.0-alpha.1 (Windows 10; x86_64) (Codex Desktop; 26.928.31416)"}, "Version": {"0.158.0-alpha.1"}, "Originator": {"Codex Desktop"}}
 	key := websocketClientPoolKey("pool", headers)

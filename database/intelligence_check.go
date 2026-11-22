@@ -223,9 +223,6 @@ func (db *DB) SaveIntelligenceCheckSettings(ctx context.Context, s ic.Settings) 
 		if !s.AntigravityModelSupplied && s.AntigravityModel == "" {
 			s.AntigravityModel = old.AntigravityModel
 		}
-		if !s.KiroModelSupplied && s.KiroModel == "" {
-			s.KiroModel = old.KiroModel
-		}
 		if s.Action == "switch_group" {
 			channel, err := intelligenceTargetGroupChannel(ctx, tx, s)
 			if err != nil {
@@ -330,7 +327,7 @@ func (db *DB) intelligenceUpstreamExpr() string {
 // intelligenceChannelExpr gives explicit upstream metadata precedence over legacy platform labels.
 func (db *DB) intelligenceChannelExpr() string {
 	upstream := `TRIM(` + db.intelligenceUpstreamExpr() + `)`
-	return `CASE WHEN ` + upstream + `='antigravity' THEN 'antigravity' WHEN ` + upstream + `='grok' THEN 'grok' WHEN ` + upstream + `='claude' THEN 'claude' WHEN ` + upstream + `='kiro' THEN 'kiro' WHEN ` + upstream + `<>'' THEN 'codex' WHEN LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' WHEN LOWER(COALESCE(a.platform,''))='kiro' THEN 'kiro' ELSE 'codex' END`
+	return `CASE WHEN ` + upstream + `='antigravity' THEN 'antigravity' WHEN ` + upstream + `='grok' THEN 'grok' WHEN ` + upstream + `='claude' THEN 'claude' WHEN ` + upstream + `<>'' THEN 'codex' WHEN LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' ELSE 'codex' END`
 }
 func (db *DB) intelligenceEligibleSQL() string {
 	return `a.status<>'deleted' AND COALESCE(a.error_message,'')<>'deleted'`
@@ -339,7 +336,7 @@ func (db *DB) intelligenceEligibleSQL() string {
 // Use the proposed (not yet persisted) settings for target-group validation.
 func (db *DB) intelligenceEnabledChannelsSQL(settings ic.Settings) string {
 	channels := []string{}
-	for _, channel := range ic.Channels {
+	for _, channel := range []string{"codex", "claude", "grok", "antigravity"} {
 		if settings.ChannelEnabled(channel) {
 			channels = append(channels, "'"+channel+"'")
 		}
@@ -355,7 +352,7 @@ func (db *DB) intelligenceEnabledChannelsSQL(settings ic.Settings) string {
 func (db *DB) intelligenceSourceEnabledSQL(account, config string) string {
 	channel := strings.ReplaceAll(db.intelligenceChannelExpr(), "a.", account+".")
 	query := "CASE " + channel
-	for _, name := range ic.Channels {
+	for _, name := range []string{"codex", "claude", "grok", "antigravity"} {
 		value := "json_extract(" + config + ".config_json,'$.channels." + name + "')"
 		if !db.isSQLite() {
 			value = "((" + config + ".config_json::jsonb)->'channels'->>'" + name + "')::boolean"
@@ -589,7 +586,7 @@ func intelligenceTargetGroupChannel(ctx context.Context, q intelligenceQueryRowe
 		return "", err
 	}
 	channel = strings.ToLower(strings.TrimSpace(channel))
-	if !ic.IsChannel(channel) {
+	if channel != "codex" && channel != "claude" && channel != "grok" && channel != "antigravity" {
 		return "", fmt.Errorf("%w: unsupported target channel", ErrIntelligenceCheckTargetGroup)
 	}
 	return channel, nil

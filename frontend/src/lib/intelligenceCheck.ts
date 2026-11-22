@@ -10,12 +10,11 @@ export interface IntelligenceQuestion {
   max_duration_ms: number;
   enabled: boolean;
 }
-export type IntelligenceChannel = "codex" | "claude" | "grok" | "antigravity" | "kiro";
+export type IntelligenceChannel = "codex" | "claude" | "grok" | "antigravity";
 export interface IntelligenceSettings {
   channels?: Partial<Record<IntelligenceChannel, boolean>>;
   grok_model?: string;
   antigravity_model?: string;
-  kiro_model?: string;
   adaptive_enabled: boolean;
   pause_initial_seconds: number;
   pause_max_seconds: number;
@@ -180,7 +179,6 @@ export function intelligenceScheduleLabel(bar: IntelligenceBar): string {
   const labels: Record<string, string> = {
     normal: '正常检测', backoff: '退避中', recovering: '恢复确认',
     retrying: '异常重试', credential_blocked: '等待凭证修复',
-    quota_wait: '等待额度恢复',
   };
   const label = labels[bar.probe_phase || ''];
   if (!label) return '';

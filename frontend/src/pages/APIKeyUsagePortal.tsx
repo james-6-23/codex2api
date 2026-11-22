@@ -1,6 +1,4 @@
 import { ImageBillingCost } from '../components/image-studio/ImageBillingCost'
-import KeyUsageAccounts from '../components/KeyUsageAccounts'
-import { KEY_USAGE_VIEWS as USAGE_VIEWS, normalizeKeyUsageView as normalizeUsageView, type KeyUsageView as UsageView } from '../lib/keyUsageViews'
 import { mediaBillingUnit } from '../lib/imageBilling'
 import { type FormEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
@@ -80,6 +78,13 @@ type UsageRange = 'today' | '7d' | '30d' | 'all'
 const STORAGE_KEY = 'codex2api_key_usage_api_key'
 const RANGE_OPTIONS: UsageRange[] = ['today', '7d', '30d', 'all']
 const LOG_PAGE_SIZE_OPTIONS = [10, 20, 25, 50, 100]
+
+const USAGE_VIEWS = ['overview', 'quota', 'logs'] as const
+type UsageView = typeof USAGE_VIEWS[number]
+
+function normalizeUsageView(value?: string): UsageView {
+  return USAGE_VIEWS.includes(value as UsageView) ? (value as UsageView) : 'overview'
+}
 
 export default function APIKeyUsagePortal() {
   const { t, i18n } = useTranslation()
@@ -479,8 +484,6 @@ export default function APIKeyUsagePortal() {
               </div>
             ) : null}
 
-            {activeView === 'accounts' ? <KeyUsageAccounts key={activeAPIKey} apiKey={activeAPIKey} /> : null}
-
             {/* 请求日志：整页表格 */}
             {activeView === 'logs' ? (
               <RecentLogsTable
@@ -515,21 +518,19 @@ function UsageTabs({ activeView, className = '' }: { activeView: UsageView; clas
   const tabs: Array<{ view: UsageView; label: string; icon: ReactNode }> = [
     { view: 'overview', label: t('keyUsage.views.overview'), icon: <LayoutDashboard /> },
     { view: 'quota', label: t('keyUsage.views.quota'), icon: <Gauge /> },
-    { view: 'accounts', label: t('keyUsage.views.accounts'), icon: <KeyRound /> },
     { view: 'logs', label: t('keyUsage.views.logs'), icon: <ScrollText /> },
   ]
   const activeIndex = Math.max(0, tabs.findIndex((tab) => tab.view === activeView))
 
   return (
     <div
-      className={`relative grid rounded-xl border border-border bg-muted/50 p-0.5 ${className}`}
-      style={{ gridTemplateColumns: `repeat(${tabs.length}, minmax(0, 1fr))` }}
+      className={`relative grid grid-cols-3 rounded-xl border border-border bg-muted/50 p-0.5 ${className}`}
       role="tablist"
       aria-label={t('keyUsage.title')}
     >
       <div
         className="pointer-events-none absolute left-0.5 top-0.5 h-[calc(100%-0.25rem)] rounded-[10px] border border-border bg-background shadow-sm transition-transform duration-300 ease-out motion-reduce:transition-none"
-        style={{ width: `calc((100% - 0.25rem) / ${tabs.length})`, transform: `translateX(${activeIndex * 100}%)` }}
+        style={{ width: 'calc((100% - 0.25rem) / 3)', transform: `translateX(${activeIndex * 100}%)` }}
       />
       {tabs.map((tab) => (
         <NavLink
@@ -1203,7 +1204,6 @@ const CHANNEL_LABELS: Record<UpstreamChannel, string> = {
   grok: 'Grok',
   antigravity: 'Antigravity',
   claude: 'Claude',
-  kiro: 'Kiro',
 }
 
 function isKnownChannel(channel?: string): channel is UpstreamChannel {

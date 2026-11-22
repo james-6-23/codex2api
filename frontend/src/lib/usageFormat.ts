@@ -76,7 +76,6 @@ type AccountStatusSource = {
   grok_api?: boolean
   antigravity_api?: boolean
   claude_api?: boolean
-  kiro_api?: boolean
   claude_usage_probe_at?: string | null
   claude_usage_probe_error?: string | null
   usage_percent_5h?: number | null
@@ -98,9 +97,8 @@ export function isUnsampledQuotaAccount(account: AccountStatusSource): boolean {
     status === 'error' ||
     account.openai_responses_api ||
     account.grok_api ||
-    // Antigravity / Kiro 的额度来自控制面配额快照,没有 5h/7d 采样窗口(与后端口径一致)。
-    account.antigravity_api ||
-    account.kiro_api
+    // Antigravity 的额度来自控制面配额快照,没有 5h/7d 采样窗口(与后端口径一致)。
+    account.antigravity_api
   ) {
     return false
   }

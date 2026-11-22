@@ -370,8 +370,6 @@ export default function AccountDetailSheet({
                 <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-card ring-1 ring-border shadow-sm">
                   {account.claude_api ? (
                     <ChannelLogo channel="claude" size={22} />
-                  ) : account.kiro_api ? (
-                    <ChannelLogo channel="kiro" size={22} />
                   ) : account.antigravity_api ? (
                     <ChannelLogo channel="antigravity" size={22} />
                   ) : account.grok_api ? (

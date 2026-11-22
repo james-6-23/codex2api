@@ -50,7 +50,6 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 	sessionID := "oauth-test-session"
 	globalOAuthStore.set(sessionID, &oauthSession{
 		State:        "state-test",
-		Timezone:     "Asia/Tokyo",
 		CodeVerifier: "verifier-test",
 		RedirectURI:  oauthDefaultRedirectURI,
 		CreatedAt:    time.Now(),
@@ -96,9 +95,6 @@ func TestExchangeOAuthCodeSeedsAccessTokenFromExchangeResponse(t *testing.T) {
 	row, err := db.GetAccountByID(context.Background(), payload.ID)
 	if err != nil {
 		t.Fatalf("GetAccountByID: %v", err)
-	}
-	if row.GetCredential(auth.AccountTimezoneCredentialKey) != "Asia/Tokyo" || account.EffectiveCodexTimezone() != "Asia/Tokyo" {
-		t.Fatal("manual OAuth exchange lost the session timezone")
 	}
 	if got := row.GetCredential("access_token"); got != "access-from-exchange" {
 		t.Fatalf("stored access_token = %q, want exchange access token", got)
@@ -279,7 +275,6 @@ func TestExchangeOAuthCodeUpdatesDuplicateOAuthIdentity(t *testing.T) {
 		"email":         "duplicate@example.com",
 		"account_id":    "acc-duplicate",
 		"workspace_id":  "acc-duplicate",
-		"timezone":      "Europe/Berlin",
 	}, "")
 	if err != nil {
 		t.Fatalf("InsertAccountWithCredentials: %v", err)
@@ -290,7 +285,6 @@ func TestExchangeOAuthCodeUpdatesDuplicateOAuthIdentity(t *testing.T) {
 	sessionID := "oauth-duplicate-session"
 	globalOAuthStore.set(sessionID, &oauthSession{
 		State:        "state-duplicate",
-		Timezone:     "Asia/Tokyo",
 		CodeVerifier: "verifier-duplicate",
 		RedirectURI:  oauthDefaultRedirectURI,
 		CreatedAt:    time.Now(),
@@ -337,9 +331,6 @@ func TestExchangeOAuthCodeUpdatesDuplicateOAuthIdentity(t *testing.T) {
 	if got := row.GetCredential("refresh_token"); got != "refresh-from-exchange" {
 		t.Fatalf("refresh_token = %q, want updated exchange token", got)
 	}
-	if got := row.GetCredential(auth.AccountTimezoneCredentialKey); got != "Europe/Berlin" {
-		t.Fatalf("duplicate exchange changed existing timezone to %q", got)
-	}
 	if account := store.FindByID(existingID); account == nil {
 		t.Fatalf("runtime account %d not found after update", existingID)
 	}
@@ -353,31 +344,27 @@ func TestOAuthCallbackTriggersUsageProbe(t *testing.T) {
 	probed := make(chan int64, 1)
 	handler := &Handler{db: db, store: store}
 	handler.probeUsage = func(_ context.Context, account *auth.Account) error {
-		if got := account.EffectiveCodexTimezone(); got != "Asia/Tokyo" {
-			t.Errorf("first OAuth probe timezone = %q", got)
-		}
 		probed <- account.DBID
 		return nil
 	}
 
 	newOAuthExchangeTestServer(t)
 
-	generated := invokeAccountGroupHandler(t, http.MethodPost, "/api/admin/oauth/generate-auth-url", nil, `{"timezone":" Asia/Tokyo "}`, handler.GenerateOAuthURL)
-	var result struct {
-		SessionID string `json:"session_id"`
+	sessionID := "oauth-callback-probe-session"
+	sess := &oauthSession{
+		State:        "state-callback-probe",
+		CodeVerifier: "verifier-callback-probe",
+		RedirectURI:  oauthDefaultRedirectURI,
+		CreatedAt:    time.Now(),
 	}
-	if generated.Code != http.StatusOK || json.Unmarshal(generated.Body.Bytes(), &result) != nil {
-		t.Fatal("could not generate OAuth session")
-	}
-	sess, ok := globalOAuthStore.get(result.SessionID)
-	if !ok {
-		t.Fatal("OAuth session missing")
-	}
-	t.Cleanup(func() { globalOAuthStore.delete(result.SessionID) })
+	globalOAuthStore.set(sessionID, sess)
+	t.Cleanup(func() {
+		globalOAuthStore.delete(sessionID)
+	})
 
 	recorder := httptest.NewRecorder()
 	ctx, _ := gin.CreateTestContext(recorder)
-	ctx.Request = httptest.NewRequest(http.MethodGet, "/oauth/callback?code=code-callback-probe&state="+sess.State, nil)
+	ctx.Request = httptest.NewRequest(http.MethodGet, "/oauth/callback?code=code-callback-probe&state=state-callback-probe", nil)
 
 	handler.OAuthCallback(ctx)
 

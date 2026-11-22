@@ -45,8 +45,7 @@ func TestCodexClientIdentitySelectsCompletePairAndManualOverrides(t *testing.T) 
 	}{
 		{"newest app with alpha", codexVersionSelection{}, "0.158.0-alpha.2.1", "26.928.31416", false},
 		{"stable floor excludes alpha", codexVersionSelection{VersionFloor: "0.158.0"}, "0.159.2", "26.927.1", false},
-		{"cached below floor falls back to builtin", codexVersionSelection{VersionFloor: "0.160.0"}, "0.170.0", "26.1111.71025", false},
-		{"unavailable floor", codexVersionSelection{VersionFloor: "0.171.0"}, "", "", true},
+		{"unavailable floor", codexVersionSelection{VersionFloor: "0.160.0"}, "", "", true},
 		{"CLI override keeps default app", codexVersionSelection{CLIOverride: "0.140.0", VersionFloor: "0.999.0"}, "0.140.0", "26.928.31416", false},
 		{"app override leaves auto CLI floor", codexVersionSelection{AppOverride: "99.1.1", VersionFloor: "0.158.0"}, "0.159.2", "99.1.1", false},
 		{"both overrides", codexVersionSelection{CLIOverride: "0.140.0-alpha.1", AppOverride: "99.1.1", VersionFloor: "9.999.0"}, "0.140.0-alpha.1", "99.1.1", false},
@@ -66,13 +65,7 @@ func TestCodexClientIdentityPreviewMatchesOutboundAndArchitecture(t *testing.T) 
 	codexTestIdentityCache(t)
 	settings := CurrentRuntimeSettings()
 	settings.ClientCompatMode, settings.CodexMinCLIVersion, settings.CodexSyncedCLIVersion = ClientCompatModeForce, "0.999.0", "0.200.0"
-	for _, tc := range []struct {
-		osName, arch, target, cliVersion, source string
-	}{
-		{"Mac OS", "arm64", "darwin-arm64", "0.158.1-alpha.1", "official_appcast"},
-		{"Windows", "x86_64", "win32-x64", "0.158.0-alpha.2.1", "third_party_windows_mapping"},
-	} {
-		cfg := fmt.Sprintf(`{"client_kind":"codex-desktop","os_name":%q,"arch":%q}`, tc.osName, tc.arch)
+	for _, cfg := range []string{`{"client_kind":"codex-desktop","os_name":"Mac OS","arch":"arm64"}`, `{"client_kind":"codex-desktop","os_name":"Windows","arch":"x86_64"}`} {
 		settings.CodexUserAgentConfig = cfg
 		ApplyRuntimeSettings(settings)
 		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{})
@@ -83,9 +76,8 @@ func TestCodexClientIdentityPreviewMatchesOutboundAndArchitecture(t *testing.T) 
 		if err != nil || identity.Version != preview.Persona.Version || identity.UserAgent != preview.Persona.UserAgent || preview.Persona.AppVersion != "26.928.31416" {
 			t.Fatalf("preview mismatch: %+v / %+v / %v", identity, preview, err)
 		}
-		if identity.Version != tc.cliVersion || preview.Persona.TargetPlatform != tc.target ||
-			preview.Persona.Source != tc.source || preview.Persona.Status != "verified" {
-			t.Fatalf("wrong version or platform for %s: %+v / %+v", cfg, identity, preview.Persona)
+		if strings.Contains(cfg, "Mac OS") && identity.Version != "0.158.1-alpha.1" {
+			t.Fatalf("wrong architecture: %+v", identity)
 		}
 	}
 }
@@ -180,71 +172,6 @@ func TestCodexAlphaSearchKeepsVersionUnavailableStatus(t *testing.T) {
 	if rec.Code != http.StatusServiceUnavailable || calls.Load() != 0 {
 		t.Fatalf("status=%d upstream calls=%d body=%s", rec.Code, calls.Load(), rec.Body.String())
 	}
-}
-
-func TestCodexClientIdentityPreserveKeepsRecognizedDesktopUnderStabilization(t *testing.T) {
-	prev := CurrentRuntimeSettings()
-	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
-	deviceProfileCacheMu.Lock()
-	deviceProfileCache = make(map[string]deviceProfileCacheEntry)
-	deviceProfileCacheMu.Unlock()
-
-	const desktopUA = "Codex Desktop/0.169.0-alpha.11.1 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.1111.21308)"
-
-	t.Run("desktop below stabilization baseline", func(t *testing.T) {
-		ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
-		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{
-			Account:      &auth.Account{DBID: 899},
-			APIKey:       "issue-899-desktop",
-			DeviceConfig: &DeviceProfileConfig{StabilizeDeviceProfile: true},
-			Headers: http.Header{
-				"User-Agent": {desktopUA},
-				"Originator": {"Codex Desktop"},
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if identity.UserAgent != desktopUA || identity.Version != "0.169.0-alpha.11.1" || identity.Generated {
-			t.Fatalf("preserve mode rewrote recognized desktop identity: %+v", identity)
-		}
-	})
-
-	t.Run("unrecognized client stays stabilized", func(t *testing.T) {
-		ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
-		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{
-			Account:      &auth.Account{DBID: 899},
-			APIKey:       "issue-899-unrecognized",
-			DeviceConfig: &DeviceProfileConfig{StabilizeDeviceProfile: true},
-			Headers:      http.Header{"User-Agent": {"Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if identity.UserAgent != defaultCodexCLIUserAgent || identity.Version != latestCodexCLIVersion {
-			t.Fatalf("unrecognized client bypassed stabilization: %+v", identity)
-		}
-	})
-
-	t.Run("explicit user agent override still wins", func(t *testing.T) {
-		ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
-		const overrideUA = "codex-tui/0.171.0 (Linux Unknown; x86_64) xterm-256color (codex-tui; 0.171.0)"
-		identity, err := ResolveCodexOutboundClientIdentity(CodexClientIdentityInput{
-			Account:      &auth.Account{DBID: 899},
-			APIKey:       "issue-899-override",
-			DeviceConfig: &DeviceProfileConfig{UserAgent: overrideUA, StabilizeDeviceProfile: true},
-			Headers: http.Header{
-				"User-Agent": {desktopUA},
-				"Originator": {"Codex Desktop"},
-			},
-		})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if identity.UserAgent != overrideUA || identity.Version != "0.171.0" {
-			t.Fatalf("explicit override was replaced by downstream identity: %+v", identity)
-		}
-	})
 }
 
 func TestSyncCodexClientVersionsSharedRunSurvivesFirstCallerCancel(t *testing.T) {

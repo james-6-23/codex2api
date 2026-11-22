@@ -63,7 +63,7 @@ import { cn } from "@/lib/utils";
 const PROXY_SCHEMES = ["http:", "https:", "socks5:", "socks5h:"];
 
 type BindFilter = "all" | "unbound" | "this" | "other";
-type BindKindFilter = "all" | "codex" | "grok" | "antigravity" | "claude" | "kiro";
+type BindKindFilter = "all" | "codex" | "grok" | "antigravity" | "claude";
 type StatusFilter = "all" | "enabled" | "disabled" | "error" | "untested";
 type RiskFilter = "all" | "unscored" | "low" | "medium" | "high" | "very_high" | "error" | "stale";
 
@@ -100,7 +100,6 @@ function accountDisplayName(account: AccountRow): string {
 
 function accountKindKey(account: AccountRow): string {
   if (account.claude_api) return "claude";
-  if (account.kiro_api) return "kiro";
   if (account.antigravity_api) return "antigravity";
   if (account.grok_api) return "grok";
   if (account.openai_responses_api) return "openai";
@@ -499,7 +498,7 @@ export default function Proxies() {
   const [bindSubmitting, setBindSubmitting] = useState(false);
 
   const [showBalance, setShowBalance] = useState(false);
-  const [balanceChannel, setBalanceChannel] = useState<"" | "codex" | "grok" | "antigravity" | "claude" | "kiro">("grok");
+  const [balanceChannel, setBalanceChannel] = useState<"" | "codex" | "grok" | "antigravity" | "claude">("grok");
   const [balanceMode, setBalanceMode] = useState<"unbound" | "all">("unbound");
   const [balanceMaxPerProxy, setBalanceMaxPerProxy] = useState("");
   const [balanceSubmitting, setBalanceSubmitting] = useState(false);
@@ -2200,7 +2199,6 @@ export default function Proxies() {
                   ["codex", t("proxies.bindKindCodex")],
                   ["antigravity", t("proxies.bindKindAntigravity")],
                   ["claude", t("proxies.bindKindClaude")],
-                  ["kiro", t("proxies.bindKindKiro")],
                   ["", t("proxies.bindKindAll")],
                 ] as const
               ).map(([key, label]) => (
@@ -2385,7 +2383,6 @@ export default function Proxies() {
                       ["grok", t("proxies.bindKindGrok")],
                       ["antigravity", t("proxies.bindKindAntigravity")],
                       ["claude", t("proxies.bindKindClaude")],
-                      ["kiro", t("proxies.bindKindKiro")],
                     ] as const
                   ).map(([key, label]) => (
                     <button

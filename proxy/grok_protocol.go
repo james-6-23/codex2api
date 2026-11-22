@@ -2185,15 +2185,6 @@ func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account
 	if account != nil && account.IsGrokAPI() {
 		return ExecuteGrokProtocolRequest(ctx, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
 	}
-	if account != nil && account.IsKiro() {
-		if len(responsesBody) == 0 {
-			responsesBody = inboundBody
-		}
-		if inbound == GrokProtocolChatCompletions {
-			responsesBody = kiroRestoreChatControls(responsesBody, inboundBody)
-		}
-		return ExecuteKiroResponsesRequest(ctx, account, responsesBody, proxyOverride, headers)
-	}
 	if len(responsesBody) == 0 {
 		responsesBody = inboundBody
 	}
@@ -2203,9 +2194,6 @@ func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account
 func relayUpstreamEndpointForProtocol(account *auth.Account, inbound GrokProtocol, model string) string {
 	if account != nil && account.IsGrokAPI() {
 		return ResolveGrokUpstreamRoute(account, model, inbound, time.Now()).Endpoint
-	}
-	if account != nil && account.IsKiro() {
-		return "/generateAssistantResponse"
 	}
 	return relayUpstreamEndpointForAccount(account)
 }

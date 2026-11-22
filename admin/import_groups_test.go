@@ -187,15 +187,12 @@ func TestAddATAccountRejectsUnknownGroupBeforeCreatingAccounts(t *testing.T) {
 }
 
 func TestImportAccountsFormBindsGroupsForNewAccounts(t *testing.T) {
-	handler, db, store, groupID := newImportGroupsTestHandler(t)
+	handler, db, _, groupID := newImportGroupsTestHandler(t)
 
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
 	_ = writer.WriteField("format", "at_txt")
 	_ = writer.WriteField("group_ids", "["+itoa(groupID)+"]")
-	if err := writer.WriteField("timezone", "Australia/Sydney"); err != nil {
-		t.Fatal(err)
-	}
 	filePart, err := writer.CreateFormFile("file", "accounts.txt")
 	if err != nil {
 		t.Fatalf("CreateFormFile: %v", err)
@@ -226,9 +223,6 @@ func TestImportAccountsFormBindsGroupsForNewAccounts(t *testing.T) {
 		t.Fatalf("accounts = %d, want 2 imported", len(accounts))
 	}
 	for _, account := range accounts {
-		if account.GetCredential(auth.AccountTimezoneCredentialKey) != "Australia/Sydney" || store.FindByID(account.ID).EffectiveCodexTimezone() != "Australia/Sydney" {
-			t.Errorf("imported account %d lost the form timezone", account.ID)
-		}
 		groups, err := db.GetAccountGroupIDs(ctx, account.ID)
 		if err != nil {
 			t.Fatalf("GetAccountGroupIDs(%d): %v", account.ID, err)

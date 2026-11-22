@@ -57,17 +57,9 @@ jobs:
         working-directory: frontend
         run: npm run test:svg
 
-      - name: Test inspection quiet hours in the browser
-        working-directory: frontend
-        run: npm run test:quiet-hours
-
       - name: Test intelligence checks in the browser
         working-directory: frontend
         run: npm run test:intelligence
-
-      - name: Test API key account portal in the browser
-        working-directory: frontend
-        run: npm run test:key-usage
 
       - name: Build frontend
         working-directory: frontend
@@ -137,7 +129,7 @@ jobs:
       - name: Test PostgreSQL compatibility and pending-account transactions
         env:
           CODEX2API_TEST_POSTGRES_DSN: postgres://codex2api_test:test-only@localhost:5432/codex2api_test?sslmode=disable
-        run: go test -race -count=1 ./database -run '^(TestPostgresTraceAndCapabilities|TestIntelligenceCheckPostgres|TestPendingAccountTransaction|TestKeyUsageAccountPermissionsPostgres)$'
+        run: go test -race -count=1 ./database -run '^(TestPostgresTraceAndCapabilities|TestIntelligenceCheckPostgres|TestPendingAccountTransaction)$'
 
   test-race:
     name: test-race (${{ matrix.name }})

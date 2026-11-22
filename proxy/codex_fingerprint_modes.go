@@ -18,16 +18,12 @@ func singleMachineIdentity(accountID int64, original string) string {
 		return ""
 	}
 	seed := fmt.Sprintf("codex2api:single-machine-identity:v1:%d:%s", accountID, original)
-	return deriveCodexIdentityUUIDv7(seed, original)
+	return deriveStableCodexUUIDv7(seed, seededIdentityUnixMilli(seed))
 }
 
 func convergeFingerprintLineageValue(ids *codexFingerprintIDs, key, original string) string {
-	if ids.mode == auth.CodexFingerprintModeSingleMachineMultiWindow {
-		if key != "context_window_id" {
-			return singleMachineIdentity(ids.accountID, original)
-		}
-		seed := fmt.Sprintf("codex2api:codex-lineage:v1:%s:%d:%s", key, ids.accountID, original)
-		return deriveCodexIdentityUUIDv7(seed, original)
+	if ids.mode == auth.CodexFingerprintModeSingleMachineMultiWindow && key != "context_window_id" {
+		return singleMachineIdentity(ids.accountID, original)
 	}
 	return convergeCodexLineageValue(ids.accountID, key, original)
 }

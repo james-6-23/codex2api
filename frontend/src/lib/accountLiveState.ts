@@ -12,7 +12,6 @@ export type AccountLiveMergeable = {
   session_slot_buffer_enabled?: boolean
   dynamic_concurrency_limit?: number
   base_concurrency_effective?: number
-  quota_pause_window?: '5h' | '7d' | ''
   status?: string
   using_credits?: boolean
   plan_type?: string
@@ -77,7 +76,6 @@ export function mergeAccountLiveState<T extends AccountLiveMergeable>(
     // Existing plan/credit badges use the list API's field names and null
     // semantics. A hidden balance must clear an older visible value.
     const details = {
-      quota_pause_window: live.quota_pause_window === undefined ? account.quota_pause_window : live.quota_pause_window,
       plan_type: live.plan_type === undefined ? account.plan_type : live.plan_type,
       credits_valid: live.credits_valid === undefined ? account.credits_valid : live.credits_valid,
       credits_balance: live.credits_balance === undefined ? account.credits_balance : live.credits_balance,

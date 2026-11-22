@@ -6,11 +6,10 @@ import { formatBeijingTime } from '../utils/time'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import PageHeader from '../components/PageHeader'
 import CodexClientVersionsPanel from '../components/CodexClientVersionsPanel'
-import BackgroundQuietHoursEditor from '../components/BackgroundQuietHoursEditor'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
-import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexClientVersionSyncResult, CodexClientVersionTarget, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, KiroSettings, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
+import type { AntigravityOAuthClientSetting, AntigravitySettingsResponse, ChannelTestSettings, CodexClientVersionSyncResult, CodexClientVersionTarget, CodexUserAgentCatalog, CodexUserAgentPreview, HealthResponse, ModelInfo, SiteBranding, SystemSettings, UpstreamChannel } from '../types'
 import { ANTIGRAVITY_DEFAULT_MODELS, isAntigravityDisabledModel } from '../lib/antigravityModels'
 import { countPayloadRules, PAYLOAD_RULE_GROUPS } from './PayloadRules'
 import { getErrorMessage } from '../utils/error'
@@ -237,7 +236,7 @@ const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   pool_mix: {},
 }
 
-type SettingsTabKey = 'codex' | 'claude' | 'antigravity' | 'grok' | 'kiro' | 'appearance' | 'general'
+type SettingsTabKey = 'codex' | 'claude' | 'antigravity' | 'grok' | 'appearance' | 'general'
 // 设置项适用渠道（按后端消费点核对）：
 //   CODEX_ONLY   仅 Codex（Responses/WS、生图存储、Tier 计费、模型清单）
 //   CODEX_CLAUDE 依赖 5h/7d 用量窗口的逻辑，Codex 与 Claude 都会写该窗口
@@ -247,7 +246,7 @@ const CHANNELS_CODEX_ONLY: readonly UpstreamChannel[] = ['codex']
 const CHANNELS_CODEX_CLAUDE: readonly UpstreamChannel[] = ['codex', 'claude']
 const CHANNELS_STREAMING: readonly UpstreamChannel[] = ['codex', 'grok', 'antigravity']
 const CHANNELS_RELAY: readonly UpstreamChannel[] = ['codex', 'antigravity']
-const SETTINGS_TAB_KEYS: readonly SettingsTabKey[] = ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'appearance', 'general']
+const SETTINGS_TAB_KEYS: readonly SettingsTabKey[] = ['codex', 'claude', 'antigravity', 'grok', 'appearance', 'general']
 const DEFAULT_SETTINGS_TAB: SettingsTabKey = 'codex'
 const HIDDEN_IMAGE_DRIVER_MODELS = new Set(['gpt-5.3-codex-spark', 'codex-auto-review', 'gpt-reserve'])
 const isSettingsTabKey = (value: string | null): value is SettingsTabKey =>
@@ -268,7 +267,6 @@ const LEGACY_SECTION_TABS: Record<string, SettingsTabKey> = {
   'settings-grok': 'grok',
   'settings-claude': 'claude',
   'settings-antigravity': 'antigravity',
-  'settings-kiro': 'kiro',
   'settings-appearance': 'appearance',
 }
 // 每个 Tab 内的分区目录：多于一个分区的 Tab 渲染侧边目录并按滚动位置高亮。
@@ -284,7 +282,6 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
   claude: [{ id: 'settings-claude', labelKey: 'settings.nav.claude', icon: <ChannelLogo channel="claude" size={16} /> }],
   antigravity: [{ id: 'settings-antigravity', labelKey: 'settings.nav.antigravity', icon: <ChannelLogo channel="antigravity" size={16} /> }],
   grok: [{ id: 'settings-grok', labelKey: 'settings.nav.grok', icon: <ChannelLogo channel="grok" size={16} /> }],
-  kiro: [{ id: 'settings-kiro', labelKey: 'settings.nav.kiro', icon: <ChannelLogo channel="kiro" size={16} /> }],
   appearance: [{ id: 'settings-appearance', labelKey: 'settings.nav.appearance', icon: <Palette /> }],
   general: [
     { id: 'settings-overview', labelKey: 'settings.nav.overview', icon: <Activity /> },
@@ -835,9 +832,8 @@ const SETTINGS_CARD_GRID_2 = 'grid gap-4 lg:grid-cols-2 lg:items-stretch'
 // Claude / Antigravity 渠道的连通性测试卡片:独立于全局 test_model/test_content(那是
 // Codex 语义),按渠道保存默认探测模型与测活内容;留空模型 = 按账号目录自动选。
 const CLAUDE_TEST_MODEL_CHOICES = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-5']
-const KIRO_TEST_MODEL_CHOICES = ['claude-haiku-4.5', 'claude-sonnet-4.6', 'claude-sonnet-4.5', 'claude-opus-4.6']
 
-function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'claude' | 'kiro' }) {
+function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'claude' }) {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const [settings, setSettings] = useState<ChannelTestSettings | null>(null)
@@ -886,7 +882,7 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
   const modelChoices = useMemo(() => {
     const base = catalogChoices.length > 0
       ? catalogChoices
-      : channel === 'antigravity' ? [...ANTIGRAVITY_DEFAULT_MODELS] : channel === 'kiro' ? KIRO_TEST_MODEL_CHOICES : CLAUDE_TEST_MODEL_CHOICES
+      : channel === 'antigravity' ? [...ANTIGRAVITY_DEFAULT_MODELS] : CLAUDE_TEST_MODEL_CHOICES
     const current = settings?.test_model?.trim() ?? ''
     const list = current && !base.includes(current) ? [current, ...base] : base
     return [
@@ -900,7 +896,7 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
   return (
     <SettingsCard
       title={t('settings.connectivityTest')}
-      description={t(channel === 'antigravity' ? 'settings.channelTest.antigravityDesc' : channel === 'kiro' ? 'settings.channelTest.kiroDesc' : 'settings.channelTest.claudeDesc')}
+      description={t(channel === 'antigravity' ? 'settings.channelTest.antigravityDesc' : 'settings.channelTest.claudeDesc')}
       icon={<Wifi className="size-4" />}
     >
       <div className="space-y-4">
@@ -943,65 +939,6 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
             className={cn(
               'flex min-h-[88px] w-full resize-y rounded-md border border-input bg-background px-3 py-2 text-sm text-foreground shadow-xs transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:outline-none focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:cursor-not-allowed disabled:opacity-50',
             )}
-          />
-        </SettingField>
-      </div>
-    </SettingsCard>
-  )
-}
-
-// Kiro 渠道设置:上游域名(AWS 默认 / kiro.dev)与本地 prompt cache 模拟(默认关,
-// 只在上游没给精确用量时按 cache_control 断点估算 cache 读写拆分)。改动即时生效。
-function KiroSettingsCard() {
-  const { t } = useTranslation()
-  const { showToast } = useToast()
-  const [settings, setSettings] = useState<KiroSettings | null>(null)
-  const [saving, setSaving] = useState(false)
-
-  useEffect(() => {
-    let active = true
-    void api.getKiroSettings().then((response) => {
-      if (active) setSettings(response)
-    }).catch((error) => {
-      if (active) showToast(getErrorMessage(error), 'error')
-    })
-    return () => {
-      active = false
-    }
-  }, [showToast])
-
-  const save = useCallback(async (patch: Partial<KiroSettings>) => {
-    setSaving(true)
-    try {
-      setSettings(await api.updateKiroSettings(patch))
-      showToast(t('settings.kiro.saved'), 'success')
-    } catch (error) {
-      showToast(getErrorMessage(error), 'error')
-    } finally {
-      setSaving(false)
-    }
-  }, [showToast, t])
-
-  return (
-    <SettingsCard title={t('settings.kiro.title')} description={t('settings.kiro.description')} icon={<SlidersHorizontal className="size-4" />}>
-      <div className={SETTINGS_ROW_LIST}>
-        <SettingField label={t('settings.kiro.apiDomain')} description={t('settings.kiro.apiDomainDesc')} layout="row">
-          <SegmentedPillGroup
-            value={settings?.api_domain ?? 'amazonaws'}
-            onChange={(value) => void save({ api_domain: value })}
-            disabled={settings === null || saving}
-            options={[
-              { value: 'amazonaws', label: t('settings.kiro.apiDomainAws') },
-              { value: 'kiro', label: t('settings.kiro.apiDomainKiro') },
-            ]}
-          />
-        </SettingField>
-        <SettingField label={t('settings.kiro.cacheSimulation')} description={t('settings.kiro.cacheSimulationDesc')} layout="row">
-          <Switch
-            aria-label={t('settings.kiro.cacheSimulation')}
-            checked={settings?.cache_simulation ?? false}
-            disabled={settings === null || saving}
-            onCheckedChange={(checked) => void save({ cache_simulation: checked })}
           />
         </SettingField>
       </div>
@@ -2403,7 +2340,6 @@ const VISIBLE_CHANNEL_LABELS: Record<UpstreamChannel, string> = {
   claude: 'Claude',
   antigravity: 'Antigravity',
   grok: 'Grok',
-  kiro: 'Kiro',
 }
 
 // 供应商显示选择器：一排可多选的胶囊，点一下即保存；兜底渠道锁定在选中态。
@@ -2797,8 +2733,7 @@ export default function Settings() {
     test_model: '',
     test_content: 'hi',
     test_concurrency: 50,
-	    background_quiet_hours: [],
-    background_refresh_interval_minutes: 2,
+	    background_refresh_interval_minutes: 2,
 	    usage_probe_max_age_minutes: 10,
 	    usage_probe_concurrency: 16,
 	    usage_probe_responses_fallback_enabled: true,
@@ -3905,7 +3840,6 @@ export default function Settings() {
         { id: 'claude', label: t('settings.nav.claude'), icon: <ChannelLogo channel="claude" size={16} /> },
         { id: 'antigravity', label: t('settings.nav.antigravity'), icon: <ChannelLogo channel="antigravity" size={16} /> },
         { id: 'grok', label: t('settings.nav.grok'), icon: <ChannelLogo channel="grok" size={16} /> },
-        { id: 'kiro', label: t('settings.nav.kiro'), icon: <ChannelLogo channel="kiro" size={16} /> },
         { id: 'appearance', label: t('settings.nav.appearance'), icon: <Palette className="size-4" /> },
         { id: 'general', label: t('settings.nav.general'), icon: <SlidersHorizontal className="size-4" /> },
       ] as const satisfies ReadonlyArray<{ id: SettingsTabKey; label: string; icon: ReactNode }>,
@@ -4110,10 +4044,6 @@ export default function Settings() {
                         )}
                       </SettingField>
                     </div>
-                    <BackgroundQuietHoursEditor
-                      value={settingsForm.background_quiet_hours ?? []}
-                      onSave={(periods) => autoSaveSettingsPatch({ background_quiet_hours: periods })}
-                    />
                     <div className={SETTINGS_SWITCH_GRID}>
                       <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')} layout="switch">
                         <Switch
@@ -5423,13 +5353,6 @@ export default function Settings() {
                 <ClaudeCodeSettingsCard />
               </SettingsSection>
             </>
-          ) : null}
-
-          {activeTab === 'kiro' ? (
-            <SettingsSection id="settings-kiro" title={t('settings.nav.kiro')} description={t('settings.nav.kiroDesc')} icon={<ChannelLogo channel="kiro" size={16} />}>
-              <ChannelConnectivityTestCard channel="kiro" />
-              <KiroSettingsCard />
-            </SettingsSection>
           ) : null}
 
           {activeTab === 'antigravity' ? (

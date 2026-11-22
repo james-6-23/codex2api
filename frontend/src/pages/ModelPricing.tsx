@@ -60,18 +60,17 @@ type Row = {
   media_unit?: MediaBillingUnit
 }
 type SourceFilter = 'all' | 'custom' | 'synced' | 'default' | 'unsaved'
-type ChannelFilter = 'all' | 'codex' | 'grok' | 'antigravity' | 'claude' | 'kiro'
-const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'grok', 'antigravity', 'claude', 'kiro']
+type ChannelFilter = 'all' | 'codex' | 'grok' | 'antigravity' | 'claude'
+const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'grok', 'antigravity', 'claude']
 const CHANNEL_LABEL: Record<Exclude<ChannelFilter, 'all'>, string> = {
   codex: 'Codex',
   grok: 'Grok',
   antigravity: 'Antigravity',
   claude: 'Claude',
-  kiro: 'Kiro',
 }
 function rowChannel(r: Row): Exclude<ChannelFilter, 'all'> {
   const c = (r.channel || '').toLowerCase()
-  if (c === 'grok' || c === 'antigravity' || c === 'claude' || c === 'kiro') return c
+  if (c === 'grok' || c === 'antigravity' || c === 'claude') return c
   return 'codex'
 }
 // 已见过的模型集(localStorage):用于给新出现的模型打"新"标。首次加载会播种、不标新。
@@ -902,7 +901,7 @@ export default function ModelPricing() {
 
   // 各 provider(渠道)模型数量:仅当存在多于一个渠道时才显示渠道过滤条。
   const channelCounts = useMemo(() => {
-    const m: Record<string, number> = { codex: 0, grok: 0, antigravity: 0, claude: 0, kiro: 0 }
+    const m: Record<string, number> = { codex: 0, grok: 0, antigravity: 0, claude: 0 }
     for (const r of rows) m[rowChannel(r)] += 1
     return m
   }, [rows])

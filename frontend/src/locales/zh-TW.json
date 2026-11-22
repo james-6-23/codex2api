@@ -1,58 +1,4 @@
 {
-  "status": {
-    "unavailable": "暫不可用"
-  },
-  "keyUsage": {
-    "views": {
-      "accounts": "帳號用量"
-    }
-  },
-  "keyUsageAccounts": {
-    "group": "群組",
-    "allGroups": "全部群組",
-    "ungrouped": "未分組",
-    "title": "群組帳號與用量",
-    "intro": "全域控制帳號查看和重置卡權限；個別金鑰只能進一步限制。",
-    "global": "全域權限",
-    "specific": "個別 API Key",
-    "view": "允許查看帳號",
-    "reset": "允許使用重置卡",
-    "save": "儲存",
-    "saved": "已儲存",
-    "loadFailed": "讀取失敗",
-    "empty": "沒有可查看的帳號",
-    "refresh": "重新整理帳號",
-    "used": "已用",
-    "unknown": "未知",
-    "resetTime": "重置",
-    "updated": "更新時間",
-    "cards": "可用重置卡",
-    "redeem": "使用重置卡",
-    "confirm": "確定消耗此帳號的一張重置卡？這會影響共用同一上游工作區的其他使用者，且無法復原。",
-    "done": "重置請求已完成",
-    "pending": "處理中…",
-    "globalOff": "全域關閉時，個別金鑰無法啟用此功能。",
-    "resetWarning": "重置卡屬於帳號，操作會影響共用同一工作區的其他使用者。",
-    "accountScope": "這裡顯示可存取上游帳號的共用額度，與 API Key 自身的金額及次數限制不同。",
-    "accountCount": "{{count}} 個帳號",
-    "search": "搜尋信箱或帳號名稱",
-    "refreshPending": "重置已完成，用量正在更新，可稍後重新整理。",
-    "disabled": "帳號用量查看未開啟",
-    "disabledHint": "目前 API Key 未獲准查看帳號用量。",
-    "emptyHint": "請調整搜尋或群組篩選。",
-    "idLabel": "ID {{id}}",
-    "groupLabel": "群組 {{id}}",
-    "cardCount": "重置卡 {{value}}",
-    "globalTitle": "自助頁帳號權限",
-    "globalDesc": "控制公開用量頁能否查看群組帳號，以及使用帳號重置卡。",
-    "keyTitle": "此 API Key 的自助帳號權限",
-    "keyDesc": "關閉後可進一步限制此 Key；開啟僅繼承全域設定，不會突破全域權限。",
-    "inheritView": "繼承全域帳號查看權限",
-    "inheritReset": "繼承全域重置卡權限",
-    "viewHint": "使用者只能查看此 Key 已授權群組和帳號的資訊。",
-    "resetHint": "重置卡屬於上游帳號，會影響共用同一帳號的其他使用者。",
-    "immediateSave": "修改即時儲存。"
-  },
   "qualityTest": {
     "studioTab": "檢測工作台",
     "recordsTab": "檢測記錄",
@@ -395,15 +341,13 @@
       "upstreamChannelGrok": "Grok",
       "upstreamChannelAntigravity": "Antigravity",
       "upstreamChannelClaude": "Claude",
-      "upstreamChannelKiro": "Kiro",
       "upstreamChannelAutoTab": "自動",
       "upstreamChannelHint": {
-        "auto": "不限渠道：請求依模型路由到 Codex、Grok、Antigravity、Claude 或 Kiro 帳號。",
+        "auto": "不限渠道：請求依模型路由到 Codex、Grok、Antigravity 或 Claude 帳號。",
         "codex": "此 Key 只調度 Codex 帳號，不會使用其他渠道帳號。",
         "grok": "此 Key 只調度 Grok 帳號，並使用該渠道的模型目錄。",
         "antigravity": "此 Key 只調度 Google Antigravity 帳號，並使用 Gemini 模型目錄。",
-        "claude": "此 Key 只調度 Claude 帳號，並使用 Claude 模型目錄。",
-        "kiro": "此 Key 只調度 Kiro 帳號，並使用 Kiro 模型目錄。"
+        "claude": "此 Key 只調度 Claude 帳號，並使用 Claude 模型目錄。"
       }
     }
   },
@@ -591,7 +535,6 @@
       "grokBanner": "{{count}} 條 Codex 自助提交待審核"
     },
     "providerViewClaude": "Claude",
-    "providerViewKiro": "Kiro",
     "testProxySuccess": "代理可用",
     "testProxyFailed": "代理測試失敗",
     "proxyPoolEmpty": "代理池為空(可在「代理」頁新增)",
@@ -610,16 +553,6 @@
     "hrefClickHint": "點擊開啟跳轉位址（未設定時開啟 api-base）；Alt/Option+點擊 設定自訂連結"
   },
   "settings": {
-    "quietHours": "巡檢暫停時段（北京時間 UTC+8）",
-    "quietHoursDesc": "在每天指定時段暫停自動 Token 更新、用量探針、封禁恢復探測、定時連線測試及官方用量同步。支援多時段、跨午夜及重疊；包含開始，不包含結束。手動操作、請求觸發的驗證修復及正常呼叫不受影響；已開始的任務允許完成。結束可填 24:00。",
-    "quietHoursEmpty": "未設定暫停時段，全天按巡檢間隔執行。",
-    "quietHoursStart": "開始時間",
-    "quietHoursEnd": "結束時間",
-    "quietHoursAdd": "新增時段",
-    "quietHoursRemove": "移除",
-    "quietHoursSave": "儲存暫停時段",
-    "quietHoursInvalid": "請填寫有效 HH:MM 時間，起止不能相同。全天暫停用 00:00–24:00。",
-    "quietHoursSaveFailed": "儲存失敗，請重試。",
     "schedulerModeReset5hFirst": "5 小時即將重置優先",
     "schedulerModeReset5hFirstDesc": "在相同調度優先級與健康檔位內，優先使用 5 小時窗口最早重置且仍有額度的 Codex 帳號；額度耗盡、限流、無權限或併發已滿時順延。以已觀測的重置時間為準，過期、未知或不適用的窗口沿用原有調度。不自動啟用帳號、不推算下個週期。保留既有會話綁定；新會話首次選號優先於親和雜湊。週限額與現有安全限制繼續生效。",
     "codexClientVersions": {
@@ -831,25 +764,7 @@
     "claudeMaxToolCount": "最大工具數量",
     "claudeMaxToolCountDesc": "0 表示不設閘道工具數量上限；非 0 用於營運側資源保護。",
     "claudeMaxToolSchemaBytes": "工具 Schema 上限",
-    "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。",
-    "nav": {
-      "kiro": "Kiro",
-      "kiroDesc": "Kiro 上游網域、本地用量模擬與連通性測試"
-    },
-    "channelTest": {
-      "kiroDesc": "Kiro 帳號頁「測試連線」與批次測試預設使用的探測模型與測活內容。模型留空時依帳號目錄自動選擇（優先 haiku）。"
-    },
-    "kiro": {
-      "title": "Kiro 渠道",
-      "description": "上游網域與本地用量模擬，變更即時生效。",
-      "apiDomain": "上游網域",
-      "apiDomainDesc": "預設走 AWS 的 q.{region}.amazonaws.com；遇到網路問題可切換到 kiro.dev 網域。",
-      "apiDomainAws": "amazonaws.com",
-      "apiDomainKiro": "kiro.dev",
-      "cacheSimulation": "本地 prompt cache 模擬",
-      "cacheSimulationDesc": "Kiro 不回報快取命中。開啟後，上游未提供精確用量時依請求中的 cache_control 斷點估算 cache 讀寫拆分；只影響用量記錄，不減少上游開銷。",
-      "saved": "Kiro 設定已儲存"
-    }
+    "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。"
   },
   "promptFilter": {
     "views": {
@@ -1846,13 +1761,11 @@
     "idle": "空閒",
     "bindKindAntigravity": "Antigravity",
     "bindKindClaude": "Claude",
-    "bindKindKiro": "Kiro",
     "accountKind": {
       "codex": "Codex",
       "grok": "Grok",
       "antigravity": "Antigravity",
       "claude": "Claude",
-      "kiro": "Kiro",
       "openai": "OpenAI",
       "agent": "Agent",
       "at": "AT"
@@ -2236,120 +2149,6 @@
     "modelAvailable": "可用",
     "empty": "暫無 Claude 帳號",
     "emptyFiltered": "沒有符合篩選的帳號"
-  },
-  "kiro": {
-    "pageTitle": "Kiro 帳號",
-    "pageSubtitle": "管理 Kiro 帳號：匯入憑證、互動登入、同步額度與模型目錄。",
-    "import": "匯入",
-    "importTitle": "匯入 Kiro 帳號",
-    "importSubmit": "匯入",
-    "importFile": "選擇 JSON 檔案",
-    "importHint": "支援 kiro.rs credentials.json、Kiro IDE 的 kiro-auth-token.json 與 Kiro Account Manager 匯出檔，自動識別格式；多個帳號逐一匯入。",
-    "importPlaceholder": "貼上 JSON 內容",
-    "importResult": "匯入成功 {{imported}} 個，失敗 {{failed}} 個",
-    "proxyLabel": "代理（選填，留空沿用全域解析）",
-    "login": "登入",
-    "loginDone": "已新增帳號 {{account}}",
-    "socialTitle": "Social 登入（Google / GitHub）",
-    "socialStart": "開啟登入頁",
-    "socialFinish": "完成登入",
-    "socialHint": "在新視窗完成 Google 或 GitHub 登入。瀏覽器最後會跳到 localhost 回呼位址（頁面打不開屬正常），把網址列中的完整 URL 貼到下方。",
-    "socialCallback": "回呼 URL",
-    "deviceTitle": "裝置碼登入（Builder ID / Enterprise）",
-    "deviceStart": "取得裝置碼",
-    "deviceBuilder": "AWS Builder ID",
-    "deviceEnterprise": "Enterprise（IAM Identity Center）",
-    "deviceHint": "取得裝置碼後在新視窗確認授權，本頁會自動輪詢直到完成。",
-    "deviceWaiting": "請在開啟的頁面中確認下方裝置碼：",
-    "devicePolling": "等待授權…",
-    "syncAll": "全部同步",
-    "syncAllResult": "同步成功 {{refreshed}} 個，失敗 {{failed}} 個",
-    "exportKam": "Kiro Account Manager 格式",
-    "exportKiroRs": "kiro.rs credentials.json 格式",
-    "exportOne": "匯出此帳號",
-    "searchPlaceholder": "搜尋信箱 / 名稱 / ID",
-    "empty": "尚無 Kiro 帳號",
-    "emptyHint": "點選「匯入」貼上憑證，或用「登入」走 Social / 裝置碼授權。",
-    "colQuota": "額度（credit）",
-    "quotaBase": "基礎",
-    "quotaBonus": "贈送",
-    "quotaUnknown": "未同步",
-    "sync": "同步額度與模型",
-    "synced": "已同步",
-    "enabled": "已啟用",
-    "disabled": "已停用",
-    "deleteTitle": "刪除 Kiro 帳號",
-    "deleteDescription": "確定刪除 {{account}}？刪除後可在回收站還原。",
-    "deleted": "已刪除",
-    "stat": {
-      "all": "全部",
-      "normal": "正常",
-      "scheduling": "排程中",
-      "rate_limited": "限流",
-      "abnormal": "異常",
-      "banned": "授權失效",
-      "error": "錯誤",
-      "disabled": "已停用",
-      "locked": "已鎖定"
-    },
-    "health": {
-      "healthy": "健康",
-      "warm": "預熱",
-      "risky": "風險",
-      "banned": "已隔離"
-    },
-    "schedulingView": "排程檢視",
-    "sort": {
-      "default": "預設排序",
-      "group": "分組排序",
-      "priority": "優先度排序",
-      "requests": "請求數排序",
-      "today": "今日用量排序"
-    },
-    "sortAscending": "升序",
-    "sortDescending": "降序",
-    "clearSearch": "清除搜尋",
-    "noMatchesTitle": "沒有匹配的帳號",
-    "noMatchesDescription": "請清除篩選或調整搜尋關鍵字。",
-    "justNow": "剛剛",
-    "lastUsed": "最近",
-    "resetIn": "恢復",
-    "authKind": {
-      "social": "Social",
-      "idc": "IdC",
-      "external_idp": "外部 IdP",
-      "api_key": "API Key"
-    },
-    "tokenRefreshed": "權杖已重新整理",
-    "lockedToast": "已鎖定",
-    "unlockedToast": "已解鎖",
-    "statusReset": "已重置狀態",
-    "exportSelected": "匯出所選",
-    "exportAll": "匯出全部",
-    "exporting": "匯出中…",
-    "manageGroups": "管理分組",
-    "groupsUpdated": "分組已更新",
-    "assignGroupsTitle": "設定帳號分組",
-    "editTitle": "編輯帳號設定",
-    "saved": "已儲存",
-    "scoreBiasHint": "排程評分加減項（-200~200），越高越優先被選中；Kiro 帳號預設 0。",
-    "keepConcurrencyHint": "開啟後預熱 / 風險層級仍按設定的基礎並發排程，授權失效仍為 0。若上游 429 本身就是並發限制，請勿開啟。",
-    "proxyField": "代理",
-    "proxyHint": "出站代理決定該帳號的對外 IP；留空時依序按分組、代理池、全域設定解析。",
-    "tagsPlaceholder": "輸入標籤後按 Enter",
-    "modelCount": "{{count}} 個模型",
-    "provider": {
-      "title": "Kiro 帳號",
-      "authKind": "登入方式",
-      "plan": "方案",
-      "subscriptionType": "訂閱類型",
-      "resetAt": "額度重置",
-      "creditsExpire": "贈送額度到期",
-      "overage": "超額",
-      "models": "模型目錄",
-      "lastSync": "最近同步",
-      "unknown": "未知"
-    }
   },
   "accountGroups": {
     "manageTitle": "管理分組",

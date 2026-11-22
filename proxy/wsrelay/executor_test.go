@@ -661,7 +661,7 @@ func TestPrepareWebsocketHeadersGeneratedDesktopClientSendsMatchingOriginator(t 
 
 	headers := exec.prepareWebsocketHeaders(context.Background(), "token-123", &auth.Account{DBID: 42, AccountID: "42"}, "42", "session-123", "api-key-1", nil, ginHeaders, nil, "")
 
-	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.1111.71025)"
+	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.930.51102)"
 	if got := headers.Get("User-Agent"); got != wantUA {
 		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
 	}

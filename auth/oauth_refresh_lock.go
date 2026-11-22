@@ -402,10 +402,6 @@ func (s *Store) reloadOAuthCredentialsAfterLock(
 	if planType := strings.TrimSpace(row.GetCredential("plan_type")); planType != "" {
 		acc.PlanType = planType
 	}
-	// Kiro 的 client 注册（IdC client_id / secret、token 端点）随 RT 一起换发，必须与库里的 RT 同步。
-	if acc.isKiroLocked() {
-		acc.Kiro = KiroCredentialFromRow(row)
-	}
 	effectiveAccessToken := acc.AccessToken
 	effectiveExpiresAt := acc.ExpiresAt
 	acc.mu.Unlock()

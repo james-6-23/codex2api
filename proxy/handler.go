@@ -178,12 +178,6 @@ func dispatchPolicyForModel(model string) auth.DispatchPolicy {
 	return auth.DispatchPolicyStandard
 }
 
-// DispatchPolicyForModel 供请求处理之外的调用方（如后台检测）按模型取得与选号一致的
-// 用量窗口口径。
-func DispatchPolicyForModel(model string) auth.DispatchPolicy {
-	return dispatchPolicyForModel(model)
-}
-
 // withModelCooldownFilter 在既有过滤器上叠加单一公开模型的跨实例共享缓存冷却检查，
 // 其它实例写入的冷却也能在本实例选号时滤掉该账号；store 未装配时原样返回入参过滤器。
 func (h *Handler) withModelCooldownFilter(ctx context.Context, model string, filter auth.AccountFilter) auth.AccountFilter {
@@ -522,11 +516,9 @@ func (h *Handler) applyUpstreamChannelFilterWithGate(c *gin.Context, effectiveMo
 		return combine(antigravityChannelAccountFilterWithGate(effectiveModel, gate))
 	case database.UpstreamChannelClaude:
 		return combine(claudeChannelAccountFilterWithGate(effectiveModel, gate))
-	case database.UpstreamChannelKiro:
-		return combine(kiroChannelAccountFilterWithGate(effectiveModel, gate))
 	case database.UpstreamChannelCodex:
 		return func(account *auth.Account) bool {
-			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() || account.IsKiro() {
+			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() {
 				return false
 			}
 			return filter == nil || filter(account)
@@ -615,9 +607,9 @@ func accountFilterForResponsesModelWithGate(originalModel string, effectiveModel
 func accountFilterForCompactResponsesModelWithOriginal(originalModel string, effectiveModel string, allowCodexAccounts bool) auth.AccountFilter {
 	inner := accountFilterForInlineCompactionModelWithOriginal(originalModel, effectiveModel, allowCodexAccounts)
 	return func(account *auth.Account) bool {
-		// The dedicated compact executor has no Grok or Kiro adapter. Inline compaction
+		// The dedicated compact executor has no Grok adapter. Inline compaction
 		// on ordinary Responses has a separate provider capability boundary.
-		return account != nil && !account.IsGrokAPI() && !account.IsKiro() && inner(account)
+		return account != nil && !account.IsGrokAPI() && inner(account)
 	}
 }
 
@@ -696,9 +688,6 @@ func relayAccountSupportsModel(account *auth.Account, model string) bool {
 	if account.IsClaudeOAuth() {
 		return claudeAccountSupportsModel(account, model)
 	}
-	if account.IsKiro() {
-		return kiroAccountSupportsModel(account, model)
-	}
 	if account.IsAntigravityAPI() {
 		if !account.AntigravityDispatchEnabled() {
 			return false
@@ -760,10 +749,6 @@ func (h *Handler) modelSupportedByAccountMapping(model string) bool {
 				return true
 			}
 			continue
-		}
-		// Kiro 账号直接服务自己目录里的模型（含 claude-*），不需要先配映射。
-		if account.IsKiro() && kiroAccountSupportsModel(account, model) {
-			return true
 		}
 		mappedModel, ok := resolveAccountModelMapping(account, model)
 		if ok && mappedModel != "" && relayAccountSupportsModel(account, mappedModel) {
@@ -1715,8 +1700,6 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 					input.Channel = database.UpstreamChannelAntigravity
 				case acc.IsClaudeOAuth():
 					input.Channel = database.UpstreamChannelClaude
-				case acc.IsKiro():
-					input.Channel = database.UpstreamChannelKiro
 				}
 			}
 		}
@@ -4741,11 +4724,6 @@ func (h *Handler) Responses(c *gin.Context) {
 					return
 				}
 				antigravityRefreshFailed := false
-				if h.kiroRefreshAfterUnauthorized(c.Request.Context(), account, resp.StatusCode, antigravityRefreshRetried) {
-					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
-					continue
-				}
 				if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
 					antigravityRefreshRetried[account.ID()] = true
 					if refreshErr := h.store.RefreshAntigravityAccount(c.Request.Context(), account); refreshErr == nil {
@@ -7716,11 +7694,6 @@ func (h *Handler) ChatCompletions(c *gin.Context) {
 			}
 			// Antigravity 的 401 是过期 access token，刷新后同号重试一次即可恢复；
 			// 不刷新会把可用账号当成鉴权失败换掉（与 /v1/responses 一致）。
-			if h.kiroRefreshAfterUnauthorized(c.Request.Context(), account, resp.StatusCode, antigravityRefreshRetried) {
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				continue
-			}
 			if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
 				antigravityRefreshRetried[account.ID()] = true
 				if refreshErr := h.store.RefreshAntigravityAccount(c.Request.Context(), account); refreshErr == nil {
@@ -9006,9 +8979,6 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 	if account.IsGrokAPI() {
 		return h.applyGrokCooldownForModel(account, statusCode, body, resp, model)
 	}
-	if account.IsKiro() {
-		return applyKiroCooldown(h.store, account, statusCode, body, model)
-	}
 	// Antigravity 401 is recovered by RefreshAntigravityAccount. Do not apply
 	// Codex subscription/payment semantics. 429/503 carry Google's structured
 	// quota status instead, which sizes the per-(account, model) cooldown from
@@ -9354,7 +9324,7 @@ func syncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
 		// 被动 /responses 头刷新了 5h 窗口重置时刻：武装「到点即探」，窗口翻新即刷新进度条。
 		store.WakeBoundaryProbe(result.Reset5hAt)
 	}
-	if !opts.asyncPersist && usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && result.Reset5hAt.After(observedAt) && !account.SkipsUsageWindowLimits() {
+	if !opts.asyncPersist && usageApplied && result.Used5hHeaders && account.IsPremium5hPlan() && result.HasUsage5h && result.UsagePct5h >= 100 && !account.SkipsUsageWindowLimits() {
 		if store != nil {
 			// The per-frame path may decide not to persist this observation; a
 			// repeated 100% frame must not issue another cooldown write.
@@ -9743,9 +9713,6 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 			// 且被 resolveAnthropicModel 视为已知模型(保持原生路由,不降级为 Codex)。
 			if account.IsClaudeOAuth() {
 				declared = DefaultClaudeModelIDsForAccount(account)
-			}
-			if account.IsKiro() {
-				declared = KiroAccountModelIDs(account)
 			}
 			// 未声明 models 白名单的 Grok 账号：补默认 Grok 模型集，让 grok-4.5 等
 			// 出现在 /v1/models（否则下游客户端拉不到可用的 Grok 模型名）。

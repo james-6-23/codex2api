@@ -1,11 +1,10 @@
 import { useState } from "react";
-import type { ComponentProps, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { Check, ChevronDown, Eye, EyeOff, SlidersHorizontal } from "lucide-react";
 import type { ProxyRow } from "../../api";
 import type { AccountGroup } from "../../types";
 import AccountGroupMultiSelect from "../../components/AccountGroupMultiSelect";
-import { ConfigCard } from "../../components/AccountConfigCards";
 import { ProxyField } from "../../components/ProxyField";
 import { ANTIGRAVITY_DEFAULT_MODELS } from "../../lib/antigravityModels";
 import { parseModelList } from "../../lib/antigravityQuota";
@@ -33,21 +32,24 @@ export function FieldHint({ children, tone = "muted" }: { children: ReactNode; t
   );
 }
 
-/** 弹窗内的分块:与 Codex 编辑页同款卡片(ConfigCard),用来把长表单切成几段。 */
+/** 弹窗内的分块:小标题 + 卡片容器,用来把长表单切成几段。 */
 export function FormSection({
   title,
   description,
   children,
-  ...card
 }: {
   title: string;
   description?: string;
-  children?: ReactNode;
-} & Pick<ComponentProps<typeof ConfigCard>, "icon" | "iconClassName" | "action" | "wide">) {
+  children: ReactNode;
+}) {
   return (
-    <ConfigCard title={title} hint={description} {...card}>
+    <section className="space-y-3 rounded-xl border border-border bg-card/60 p-3.5">
+      <div>
+        <h3 className="text-[12px] font-semibold text-foreground">{title}</h3>
+        {description ? <p className="mt-0.5 text-[11px] text-muted-foreground">{description}</p> : null}
+      </div>
       {children}
-    </ConfigCard>
+    </section>
   );
 }
 

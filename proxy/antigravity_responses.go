@@ -61,22 +61,11 @@ const (
 	antigravityZeroWidthSpace        = "\u200B"
 )
 
-var antigravitySensitiveMarkerPattern = regexp.MustCompile(`(?i)(?:hermes agent|nous research|claude agent sdk|you are codex, an agent based on gpt-5|openmausbot|openmaus|mausbot|maus-bot|opencode|chief of staff|my cloud|learned by)`)
-
 var antigravityDefaultSensitivePhrases = []string{
 	"Hermes Agent",
 	"Nous Research",
 	"Claude Agent SDK",
 	"You are Codex, an agent based on GPT-5",
-	"learned by MausBot",
-	"OpenMausBot",
-	"OpenMaus",
-	"OpenCode",
-	"MausBot Cloud",
-	"Maus-Bot",
-	"MausBot",
-	"My Cloud",
-	"Chief of Staff",
 }
 
 type antigravityHTTPClientKey struct {
@@ -508,7 +497,6 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 	if _, ok := request["input"]; !ok {
 		return nil, fmt.Errorf("antigravity interactions request requires input")
 	}
-	antigravityNormalizeInteractionsRequest(request)
 	reasoning, _ := request["reasoning"].(map[string]any)
 	wireModel := antigravityGeminiResolvedModel(model, reasoning)
 	if variant, ok := antigravityResolvedVariant(model, reasoning); ok {
@@ -543,138 +531,6 @@ func executeAntigravityInteractionsRequest(ctx context.Context, account *auth.Ac
 		return nil, err
 	}
 	return doTracedUpstreamRequest(client, req, account, proxyURL)
-}
-
-// antigravityNormalizeInteractionsRequest neutralizes an API-key Interactions
-// request in place. That path sends the Responses body straight to Google, so it
-// never reaches the Gemini envelope converter and needs its own pass.
-func antigravityNormalizeInteractionsRequest(request map[string]any) {
-	if instructions, ok := request["instructions"].(string); ok {
-		instructions = strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(instructions))
-		if instructions == "" {
-			delete(request, "instructions")
-		} else {
-			request["instructions"] = instructions
-		}
-	}
-	if system, ok := request["system"]; ok {
-		request["system"] = antigravityNormalizeInteractionsSystemContent(system)
-	}
-	if input, ok := request["input"]; ok {
-		request["input"] = antigravityNormalizeInteractionsInput(input)
-	}
-	if tools, ok := request["tools"]; ok {
-		request["tools"] = antigravityObfuscateDeclarations(tools)
-	}
-	antigravityStripInteractionsClientIdentity(request)
-}
-
-// antigravityStripInteractionsClientIdentity removes caller metadata that
-// names the harness. The OAuth envelope converter only copies known fields, but
-// the Interactions path forwards the whole map, so clientInfo and any branded
-// metadata value have to be deleted here.
-func antigravityStripInteractionsClientIdentity(request map[string]any) {
-	delete(request, "clientInfo")
-	delete(request, "client_info")
-	if user, ok := request["user"].(string); ok && clientScaffoldingHasBrand(user) {
-		delete(request, "user")
-	}
-	if metadata, ok := request["metadata"].(map[string]any); ok {
-		for key, value := range metadata {
-			if text, ok := value.(string); ok && clientScaffoldingHasBrand(text) {
-				delete(metadata, key)
-			}
-		}
-	}
-}
-
-func clientScaffoldingHasBrand(text string) bool {
-	lower := strings.ToLower(text)
-	for _, phrase := range []string{"openmausbot", "openmaus", "mausbot", "maus-bot", "chief of staff", "my cloud"} {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	return false
-}
-
-func antigravityNormalizeInteractionsInput(raw any) any {
-	switch typed := raw.(type) {
-	case string:
-		return normalizeClientScaffolding(typed)
-	case []any:
-		for _, item := range typed {
-			message, ok := item.(map[string]any)
-			if !ok {
-				continue
-			}
-			switch lowerStringField(message, "type") {
-			case "", "message":
-				role := lowerStringField(message, "role")
-				if role == "system" || role == "developer" {
-					message["content"] = antigravityNormalizeInteractionsSystemContent(message["content"])
-				} else {
-					message["content"] = antigravityNormalizeInteractionsContent(message["content"])
-				}
-			case "function_call_output", "custom_tool_call_output":
-				message["output"] = antigravityNormalizeInteractionsFunctionOutput(message["output"])
-			}
-		}
-		return typed
-	default:
-		return raw
-	}
-}
-
-func antigravityNormalizeInteractionsContent(raw any) any {
-	switch typed := raw.(type) {
-	case string:
-		return normalizeClientScaffolding(typed)
-	case []any:
-		return normalizeClientScaffoldingParts(typed)
-	default:
-		return raw
-	}
-}
-
-func antigravityNormalizeInteractionsSystemContent(raw any) any {
-	switch typed := raw.(type) {
-	case string:
-		return strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(typed))
-	case []any:
-		for _, rawPart := range typed {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, ok := part["text"].(string); ok {
-				part["text"] = strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(text))
-			}
-		}
-		return typed
-	default:
-		return raw
-	}
-}
-
-func antigravityNormalizeInteractionsFunctionOutput(raw any) any {
-	switch typed := raw.(type) {
-	case string:
-		return normalizeProductScaffolding(typed)
-	case []any:
-		for _, rawPart := range typed {
-			part, ok := rawPart.(map[string]any)
-			if !ok {
-				continue
-			}
-			if text, ok := part["text"].(string); ok {
-				part["text"] = normalizeProductScaffolding(text)
-			}
-		}
-		return typed
-	default:
-		return raw
-	}
 }
 
 func responsesToGeminiInternal(raw []byte, project, model string) (map[string]any, error) {
@@ -734,7 +590,7 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 	callNames := map[string]string{}
 	systemParts := make([]string, 0, 2)
 	if s, ok := in["instructions"].(string); ok {
-		if s = strings.TrimSpace(s); s != "" {
+		if s = normalizeClientScaffolding(s); s != "" {
 			systemParts = append(systemParts, s)
 		}
 	}
@@ -760,12 +616,11 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 					return nil, partsErr
 				}
 				// Message text carries the harness scaffolding; structured
-				// payloads (function calls, images) are never rewritten. System
-				// parts wait for the joined system-instruction pass so they are
-				// not normalized twice.
+				// payloads (function calls, images) are never rewritten.
+				parts = normalizeClientScaffoldingParts(parts)
 				switch role {
 				case "assistant":
-					addParts("model", normalizeClientScaffoldingParts(parts))
+					addParts("model", parts)
 				case "system", "developer":
 					for _, p := range parts {
 						if pm, ok := p.(map[string]any); ok {
@@ -775,7 +630,7 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 						}
 					}
 				case "user":
-					addParts("user", normalizeClientScaffoldingParts(parts))
+					addParts("user", parts)
 				default:
 					return nil, antigravityOAuthUnsupported("message role " + role)
 				}
@@ -820,7 +675,6 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 				if outputErr != nil {
 					return nil, outputErr
 				}
-				output = normalizeProductScaffolding(output)
 				functionResponse := map[string]any{
 					"name":     name,
 					"response": map[string]any{"result": output},
@@ -860,15 +714,12 @@ func responsesToGeminiInternalPrepared(raw []byte, project, model string, accoun
 	}
 	request := map[string]any{"contents": contents}
 	if len(systemParts) > 0 {
-		system := strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(strings.Join(systemParts, "\n\n")))
-		if system != "" {
-			request["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": system}}}
-		}
+		request["systemInstruction"] = map[string]any{"parts": []any{map[string]any{"text": antigravityObfuscateSystemInstruction(strings.Join(systemParts, "\n\n"))}}}
 	}
 	request["sessionId"] = antigravitySessionID(in, contents)
 	if tools, ok := in["tools"].([]any); ok {
 		if declarations := antigravityGeminiFunctionDeclarations(tools); len(declarations) > 0 && antigravityGeminiFunctionToolsEnabled() && antigravityGeminiSupportsFunctionTools(wireModel) {
-			request["tools"] = antigravityObfuscateDeclarations([]any{map[string]any{"functionDeclarations": declarations}})
+			request["tools"] = []any{map[string]any{"functionDeclarations": declarations}}
 			callingConfig := map[string]any{"mode": antigravityGeminiToolMode(in["tool_choice"])}
 			if choice, ok := in["tool_choice"].(map[string]any); ok && lowerStringField(choice, "type") == "function" {
 				if name := firstAntigravityString(choice, "name"); name != "" {
@@ -945,81 +796,34 @@ func antigravitySensitivePhrases() []string {
 }
 
 func antigravityObfuscateSystemInstruction(text string) string {
-	if text == "" {
+	phrases := antigravitySensitivePhrases()
+	if text == "" || len(phrases) == 0 {
 		return text
 	}
-	if os.Getenv(antigravitySensitivePhrasesEnv) == "" && !antigravitySensitiveMarkerPattern.MatchString(text) {
+	escaped := make([]string, 0, len(phrases))
+	for _, phrase := range phrases {
+		phrase = strings.TrimSpace(phrase)
+		if utf8.RuneCountInString(phrase) >= 2 && !strings.Contains(phrase, antigravityZeroWidthSpace) {
+			escaped = append(escaped, regexp.QuoteMeta(phrase))
+		}
+	}
+	if len(escaped) == 0 {
 		return text
 	}
-	return maskCodeBlocksAndApply(text, func(masked string) string {
-		return obfuscateWithPhrases(masked, antigravitySensitivePhrases())
+	matcher, err := regexp.Compile("(?i)" + strings.Join(escaped, "|"))
+	if err != nil {
+		return text
+	}
+	return matcher.ReplaceAllStringFunc(text, func(match string) string {
+		if strings.Contains(match, antigravityZeroWidthSpace) {
+			return match
+		}
+		_, size := utf8.DecodeRuneInString(match)
+		if size <= 0 || size >= len(match) {
+			return match
+		}
+		return match[:size] + antigravityZeroWidthSpace + match[size:]
 	})
-}
-
-// antigravityNormalizeAndObfuscateSystemInstruction masks code once and then
-// runs scaffolding normalization, identity rewriting and brand obfuscation in
-// the same pass. The converters use this instead of normalizing and obfuscating
-// separately, which would scan the code twice.
-func antigravityNormalizeAndObfuscateSystemInstruction(system string) string {
-	if system == "" || len(system) > clientScaffoldingMaxNormalizeBytes || !clientScaffoldingStripEnabled() {
-		return system
-	}
-	if !clientScaffoldingMarkerPattern.MatchString(system) {
-		return antigravityObfuscateSystemInstruction(system)
-	}
-	return maskCodeBlocksAndApply(system, func(masked string) string {
-		masked = normalizeClientScaffoldingUnmasked(masked)
-		if matched := clientScaffoldingIdentityPreamble(masked); matched != "" {
-			masked = officialAntigravityIdentity + " " + masked[len(matched):]
-		}
-		return obfuscateWithPhrases(masked, antigravitySensitivePhrases())
-	})
-}
-
-// antigravityObfuscateDeclarations rewrites product names in tool descriptions
-// and nested schema descriptions. Tool names stay untouched: renaming them would
-// break the caller's tool calls, but a description is prose and can carry the
-// same zero-width obfuscation as the system instruction. Literal subtrees
-// (enum, const, default and examples) are left byte for byte because their
-// object members are data, not schema annotations.
-func antigravityObfuscateDeclarations(value any) any {
-	return antigravityObfuscateSchemaValue(value, false)
-}
-
-// antigravityObfuscateSchemaValue tracks whether the current map is a property
-// bag. Keywords such as enum and const hold literal data and are skipped, but a
-// property that happens to be named "enum" is still a schema and is traversed.
-func antigravityObfuscateSchemaValue(value any, inProperties bool) any {
-	switch typed := value.(type) {
-	case map[string]any:
-		for key, item := range typed {
-			if inProperties {
-				typed[key] = antigravityObfuscateSchemaValue(item, false)
-				continue
-			}
-			switch strings.ToLower(strings.TrimSpace(key)) {
-			case "enum", "const", "default", "examples", "example":
-				continue
-			case "description":
-				if text, ok := item.(string); ok {
-					typed[key] = antigravityObfuscateSystemInstruction(text)
-					continue
-				}
-			case "properties":
-				typed[key] = antigravityObfuscateSchemaValue(item, true)
-				continue
-			}
-			typed[key] = antigravityObfuscateSchemaValue(item, false)
-		}
-		return typed
-	case []any:
-		for index, item := range typed {
-			typed[index] = antigravityObfuscateSchemaValue(item, inProperties)
-		}
-		return typed
-	default:
-		return value
-	}
 }
 
 func antigravityStructuredTextRequested(textConfig map[string]any) bool {
@@ -1217,7 +1021,7 @@ func antigravityGeminiResolvedModel(model string, reasoning map[string]any) stri
 // Named-level models do not use the older numeric budget ladder. Fixed
 // suffixes win over conflicting effort; logical models use their own default.
 func antigravityGeminiThinkingLevel(requestedModel, wireModel string, reasoning map[string]any) (string, bool) {
-	if !antigravityNamedThinkingWire(wireModel) {
+	if wireModel != "gemini-3.8-flash-tiered" && wireModel != "gemini-4-argon-high" {
 		return "", false
 	}
 	if wireModel == "gemini-4-argon-high" && lowerStringField(reasoning, "effort") == "" {
@@ -1231,17 +1035,6 @@ func antigravityGeminiThinkingLevel(requestedModel, wireModel string, reasoning 
 		return "LOW", true
 	}
 	return strings.ToUpper(antigravityGeminiReasoningTier(reasoning)), true
-}
-
-// antigravityNamedThinkingWire covers Gemini 3.8 Flash's tiered backing and
-// every Gemini 4 tier backing in the public catalog. Raw pass-through IDs
-// outside the catalog get no injected thinking config.
-func antigravityNamedThinkingWire(wireModel string) bool {
-	if wireModel == "gemini-3.8-flash-tiered" {
-		return true
-	}
-	definition, ok := antigravityPublicModel(wireModel)
-	return ok && strings.HasPrefix(definition.id, "gemini-4-") && definition.wireModel == wireModel
 }
 
 func antigravityGeminiThinkingBudget(requestedModel, wireModel string, reasoning map[string]any) (int, bool) {

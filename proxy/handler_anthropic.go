@@ -739,7 +739,6 @@ func (h *Handler) Messages(c *gin.Context) {
 	retryExclusions := newRetryAccountExclusions()
 	var wsHTTPFallback websocketHTTPFallbackState
 	antigravityRefreshRetried := map[int64]bool{}
-	claudeRefreshRetried := map[int64]bool{}
 
 	var lastUpstreamCancel context.CancelFunc
 	defer func() {
@@ -969,22 +968,6 @@ func (h *Handler) Messages(c *gin.Context) {
 				}
 				return r, e
 			})
-		} else if account.IsKiro() {
-			// Kiro 内核直接吃 Anthropic Messages、吐 Anthropic SSE，复用原生直通链路（ADR-0002）。
-			kiroBody := canonicalBody
-			if !strings.EqualFold(gjson.GetBytes(kiroBody, "model").String(), attemptEffectiveModel) {
-				kiroBody, _ = sjson.SetBytes(kiroBody, "model", attemptEffectiveModel)
-			}
-			if mappedBody, mappedModel, ok := h.applyAccountModelMappingToBody(kiroBody, account); ok {
-				kiroBody, attemptEffectiveModel = mappedBody, mappedModel
-			}
-			resp, reqErr = executeHTTPWithContinuousRetryKeepalive(upstreamCtx, func() (*http.Response, error) {
-				r, e := ExecuteKiroMessagesRequest(upstreamCtx, account, kiroBody, proxyURL)
-				if e == nil {
-					markClaudeNativeRoute(r)
-				}
-				return r, e
-			})
 		} else if isRelayAccount {
 			upstreamBody := routingBody
 			if !account.IsGrokAPI() {
@@ -1188,11 +1171,6 @@ func (h *Handler) Messages(c *gin.Context) {
 				sendAnthropicError(c, http.StatusBadRequest, ErrorTypeInvalidRequest, message)
 				return
 			}
-			if h.kiroRefreshAfterUnauthorized(c.Request.Context(), account, resp.StatusCode, antigravityRefreshRetried) {
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				continue
-			}
 			// Antigravity 的 401 是过期 access token，刷新后同号重试一次即可恢复
 			// （与 /v1/responses 一致）。
 			if resp.StatusCode == http.StatusUnauthorized && account.IsAntigravityAPI() && account.AntigravityAuthKind() == auth.AntigravityAuthKindOAuth && !antigravityRefreshRetried[account.ID()] {
@@ -1206,46 +1184,7 @@ func (h *Handler) Messages(c *gin.Context) {
 					log.Printf("Antigravity OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
 				}
 			}
-			// Claude OAuth 401 is usually an expired access token. Refresh once
-			// under the shared lease and retry this request at most once.
-			// missing_scope stays on the benign path below. A revoked refresh
-			// token records bounded backoff inside the refresh; transport noise
-			// must not latch Banned/Disabled or the catalog stays empty.
-			if resp.StatusCode == http.StatusUnauthorized && !isMissingScopeUnauthorized(errBody) && account.ClaudeOAuthRefreshable() && !claudeRefreshRetried[account.ID()] {
-				claudeRefreshRetried[account.ID()] = true
-				refreshErr := h.store.RefreshClaudeOAuthAfterUnauthorized(c.Request.Context(), account)
-				if refreshErr == nil {
-					h.store.Release(account)
-					h.store.UnbindSessionAffinity(affinityKey, account.ID())
-					log.Printf("Claude OAuth token refreshed after upstream 401 (account=%d, endpoint=/v1/messages)", account.ID())
-					continue
-				}
-				log.Printf("Claude OAuth refresh failed after upstream 401 (account=%d, endpoint=/v1/messages): %v", account.ID(), refreshErr)
-				// 刷新失败不代表账号永久失效（可能是瞬时传输错误），不立即 503：
-				// 释放账号、解绑会话亲和并把该账号从本轮请求排除，继续换号重试。
-				// 不调用 ReportRequestFailure，避免传输噪声把账号打入冷却/封禁；
-				// 记账保留，账号池耗尽时由 account == nil 分支统一返回 503。
-				h.store.Release(account)
-				h.store.UnbindSessionAffinity(affinityKey, account.ID())
-				h.logUsageForRequest(c, &database.UsageLogInput{
-					AccountID: account.ID(), Endpoint: "/v1/messages", Model: model,
-					EffectiveModel: attemptEffectiveModel, StatusCode: resp.StatusCode,
-					DurationMs: durationMs, ReasoningEffort: reasoningEffort,
-					InboundEndpoint: "/v1/messages", UpstreamEndpoint: upstreamEndpoint,
-					Stream: isStream, ViaWebsocket: useWebsocket,
-					ServiceTier: serviceTier, RequestedServiceTier: serviceTier,
-					AttemptIndex:      attempt + 1,
-					UpstreamErrorKind: "unauthorized",
-					ErrorMessage:      usageLogErrorMessage(resp.StatusCode, errBody),
-				})
-				retryExclusions.MarkHard(account.ID())
-				lastStatusCode = resp.StatusCode
-				lastBody = errBody
-				continue
-			}
-			if kind := classifyHTTPFailure(resp.StatusCode, errBody); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) && !(account.IsClaudeOAuth() && isMissingScopeUnauthorized(errBody)) {
-				// missing_scope is a benign 401: applyCooldown keeps the Claude
-				// account in the pool, so the health penalty must not ban it.
+			if kind := classifyHTTPFailure(resp.StatusCode, errBody); kind != "" && !antigravityNonPenalizingUpstreamFailure(account, resp.StatusCode, errBody) {
 				h.store.ReportRequestFailure(account, kind, time.Duration(durationMs)*time.Millisecond)
 			}
 			// Claude 的 429 credits_required 是模型级计费门槛:只冷却该模型,不按账号级限流处理
@@ -1376,7 +1315,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			// 显式传入 attempt 作用域，隔离各 attempt 的通道身份。
 			attemptScope := fmt.Sprintf("a%d", attempt)
 			usage, outcome, wroteAnyBody, firstTokenMs := forwardGrokNativeResponseObservedWithScope(readCtx, c, resp, GrokProtocolMessages, isStream, start, ttftGuard.Stop, streamAttempt.writerOr(c.Writer), streamAttempt.flusherOr(downstreamFlusher), nil, requestGuard, attemptScope)
-			if account.IsClaudeOAuth() || account.IsKiro() {
+			if account.IsClaudeOAuth() {
 				// Anthropic 的 input_tokens 不含缓存命中/写入，转换成计费层的总输入口径。
 				applyAnthropicUsageSemantics(usage)
 			}

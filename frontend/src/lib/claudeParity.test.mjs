@@ -39,12 +39,12 @@ test('usage and management filters keep Claude provider identity', () => {
   assert.match(usage, /channel === 'claude'/)
   assert.match(apiKeys, /claudeModelOptions/)
   assert.match(apiKeys, /key: "claude"/)
-  assert.match(proxies, /BindKindFilter = "all" \| "codex" \| "grok" \| "antigravity" \| "claude" \| "kiro"/)
+  assert.match(proxies, /BindKindFilter = "all" \| "codex" \| "grok" \| "antigravity" \| "claude"/)
   assert.match(proxies, /bindKindClaude/)
   assert.match(scheduler, /channel.*claude|claude.*channel/)
   assert.match(scheduler, /selectedAvailable|summary\?\.active/)
   assert.match(proxies, /\["claude", t\("proxies\.bindKindClaude"\)\]/)
-  assert.match(accountsPage, /\["codex", "grok", "antigravity", "claude", "kiro"\]/)
+  assert.match(accountsPage, /\["codex", "grok", "antigravity", "claude"\]/)
 })
 
 test('Claude rows expose sampling state and provider copy', () => {

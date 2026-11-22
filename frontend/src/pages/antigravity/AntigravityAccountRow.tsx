@@ -40,7 +40,6 @@ import {
   subscriptionTier,
 } from "../../lib/antigravityQuota";
 import { formatBeijingTime, formatRelativeTime } from "../../utils/time";
-import { soonestModelCooldown } from "../../lib/antigravityScheduler";
 import { AntigravityQuotaCell } from "./AntigravityQuotaCells";
 import {
   AccountAvatar,
@@ -101,142 +100,49 @@ function formatCompactNum(value: unknown): string {
   return String(Math.round(n));
 }
 
-// 有倒计时要走时才每秒刷新。
-function useNow(active: boolean): number {
-  const [now, setNow] = useState(() => Date.now());
-  useEffect(() => {
-    if (!active) return;
-    setNow(Date.now());
-    const id = window.setInterval(() => setNow(Date.now()), 1000);
-    return () => window.clearInterval(id);
-  }, [active]);
-  return now;
-}
-
-function formatRemain(remain: number): string {
-  const d = Math.floor(remain / 86400);
-  const h = Math.floor((remain % 86400) / 3600);
-  const m = Math.floor((remain % 3600) / 60);
-  const s = remain % 60;
-  return d > 0 ? `${d}d${h}h` : h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m${s}s` : `${s}s`;
-}
-
 function CooldownCountdown({ until }: { until?: string }) {
   const { t } = useTranslation();
-  const now = useNow(Boolean(until));
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (!until) return;
+    const id = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [until]);
   if (!until) return null;
   const target = new Date(until).getTime();
   if (!Number.isFinite(target)) return null;
   const remain = Math.max(0, Math.floor((target - now) / 1000));
   if (remain <= 0) return null;
+  const d = Math.floor(remain / 86400);
+  const h = Math.floor((remain % 86400) / 3600);
+  const m = Math.floor((remain % 3600) / 60);
+  const s = remain % 60;
+  const text = d > 0 ? `${d}d${h}h` : h > 0 ? `${h}h${m}m` : m > 0 ? `${m}m${s}s` : `${s}s`;
   return (
     <span
       className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full bg-amber-50 px-2 font-mono text-[11px] leading-none tabular-nums text-amber-700 ring-1 ring-inset ring-amber-200/70 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-400/20"
       title={`${t("antigravity.cooldownUntil")} ${formatBeijingTime(until)}`}
     >
       <Hourglass className="size-3 shrink-0" aria-hidden />
-      {formatRemain(remain)}
+      {text}
     </span>
   );
 }
 
 function ModelCooldownChip({ account }: { account: AccountRow }) {
   const { t } = useTranslation();
-  const now = useNow((account.model_cooldowns?.length ?? 0) > 0);
-  const soonest = soonestModelCooldown(account, now);
-  if (!soonest) return null;
-  const title = (account.model_cooldowns ?? [])
-    .map((cooldown) => `${cooldown.model} · ${cooldown.reason} · ${t("antigravity.cooldownUntil")} ${formatBeijingTime(cooldown.reset_at)}`)
+  const cooldowns = account.model_cooldowns ?? [];
+  if (cooldowns.length === 0) return null;
+  const title = cooldowns
+    .map((cooldown) => `${cooldown.model} · ${cooldown.reason} · ${cooldown.remaining_seconds}s`)
     .join("\n");
   return (
     <span
-      className="inline-flex h-6 max-w-full shrink-0 items-center gap-1 rounded-full bg-amber-500/10 px-2 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300"
-      title={`${t("antigravity.modelCooldownCount", { count: soonest.count })}\n${title}`}
+      className="inline-flex h-6 shrink-0 items-center gap-1 rounded-full bg-amber-500/10 px-2 text-[11px] font-medium text-amber-700 ring-1 ring-inset ring-amber-500/20 dark:text-amber-300"
+      title={title}
     >
       <Hourglass className="size-3 shrink-0" aria-hidden />
-      <span className="truncate">{soonest.first.model}</span>
-      <span className="font-mono tabular-nums">{formatRemain(Math.floor((soonest.first.resetMs - now) / 1000))}</span>
-      {soonest.count > 1 ? <span>+{soonest.count - 1}</span> : null}
-    </span>
-  );
-}
-
-const HEALTH_TIER_KEYS: Record<string, string> = {
-  healthy: "accounts.healthy",
-  warm: "accounts.warm",
-  risky: "accounts.risky",
-  banned: "accounts.quarantine",
-};
-
-// 调度器当前执行的并发:进行中请求 / 动态上限(健康层级收缩后的值)。
-function ConcurrencyChip({ account }: { account: AccountRow }) {
-  const { t } = useTranslation();
-  const limit = account.dynamic_concurrency_limit;
-  if (typeof limit !== "number") return null;
-  const active = Math.max(0, account.active_requests ?? 0);
-  return (
-    <span
-      className={cn(
-        "inline-flex h-6 shrink-0 items-center gap-1 rounded-full px-2 font-mono text-[11px] tabular-nums ring-1 ring-inset",
-        active > 0
-          ? "bg-blue-50 text-blue-700 ring-blue-500/20 dark:bg-blue-950 dark:text-blue-300"
-          : "bg-muted/40 text-muted-foreground ring-border",
-      )}
-      title={t("antigravity.concurrencyTitle", {
-        active,
-        limit,
-        base: account.base_concurrency_effective ?? limit,
-        health: t(HEALTH_TIER_KEYS[account.health_tier ?? ""] ?? "accounts.unknown"),
-      })}
-    >
-      <CircleGauge className="size-3 shrink-0" aria-hidden />
-      {active}/{limit}
-    </span>
-  );
-}
-
-function PriorityBadge({ account }: { account: AccountRow }) {
-  const { t } = useTranslation();
-  const priority = Math.trunc(account.scheduler_priority ?? 0);
-  if (!priority) return null;
-  const value = priority > 0 ? `+${priority}` : String(priority);
-  return (
-    <span
-      className={cn(
-        "inline-flex h-6 shrink-0 items-center rounded-full border px-2 text-[11px] font-semibold tabular-nums",
-        priority > 0
-          ? "border-blue-500/25 bg-blue-500/10 text-blue-700 dark:text-blue-300"
-          : "border-amber-500/25 bg-amber-500/10 text-amber-700 dark:text-amber-300",
-      )}
-      title={t("accounts.schedulerPriorityBadgeTitle", { value })}
-    >
-      P {value}
-    </span>
-  );
-}
-
-function DispatchCountChip({ account }: { account: AccountRow }) {
-  const { t } = useTranslation();
-  const limit = account.dispatch_count_limit;
-  if (!limit || limit <= 0) return null;
-  const used = account.dispatch_count_used ?? 0;
-  return (
-    <span
-      className={cn(
-        "inline-flex h-6 shrink-0 items-center gap-1 rounded-full px-2 font-mono text-[11px] tabular-nums ring-1 ring-inset",
-        account.dispatch_count_limited
-          ? "bg-amber-500/10 text-amber-700 ring-amber-500/20 dark:text-amber-300"
-          : "bg-muted/40 text-muted-foreground ring-border",
-      )}
-      title={[
-        t("accounts.dispatchCountLimitStatus", { used, limit }),
-        account.dispatch_count_reset_at
-          ? t("accounts.dispatchCountLimitResetAt", { time: formatBeijingTime(account.dispatch_count_reset_at) })
-          : "",
-      ].filter(Boolean).join("\n")}
-    >
-      <Activity className="size-3 shrink-0" aria-hidden />
-      {used}/{limit}
+      {t("antigravity.modelCooldownCount", { count: cooldowns.length })}
     </span>
   );
 }
@@ -403,9 +309,6 @@ function StatusCell({ account, healthBuckets }: { account: AccountRow; healthBuc
         />
         <CooldownCountdown until={account.cooldown_until} />
         <ModelCooldownChip account={account} />
-        <ConcurrencyChip account={account} />
-        <PriorityBadge account={account} />
-        <DispatchCountChip account={account} />
       </div>
       <AccountHealthBar buckets={healthBuckets} />
     </div>

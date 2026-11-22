@@ -47,10 +47,6 @@ func TestValidateCodexRelayResponsesCompatibility(t *testing.T) {
 		{"nullable metadata", `"metadata":null`, ""},
 		{"native text verbosity", `"text":{"verbosity":"low"}`, ""},
 		{"preserved tools", `"tools":[],"reasoning":{"effort":"high"}`, ""},
-		{"preserved delivery", `"stream_options":{"reasoning_summary_delivery":"sequential_cutoff"}`, ""},
-		{"non-string delivery", `"stream_options":{"reasoning_summary_delivery":true}`, "stream_options"},
-		{"null delivery", `"stream_options":{"reasoning_summary_delivery":null}`, "stream_options"},
-		{"other stream option", `"stream_options":{"include_usage":true}`, "stream_options"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -461,11 +461,6 @@ func TestNormalizeImageToolModelAliases(t *testing.T) {
 		{name: "2.5 sunburst 4k", model: "gpt-image-2.5-sunburst-4k", want: "gpt-image-2.5-sunburst", wantSize: defaultImages4KSize},
 		{name: "2.5 dated snapshot passthrough", model: "gpt-image-2.5-flare-2026-09-08", want: "gpt-image-2.5-flare-2026-09-08", wantSize: defaultImages1KSize},
 		{name: "2.5 dated snapshot 4k", model: "gpt-image-2.5-sunburst-2026-09-08-4k", want: "gpt-image-2.5-sunburst-2026-09-08", wantSize: defaultImages4KSize},
-		{name: "2.6 flare", model: "gpt-image-2.6-flare", want: "gpt-image-2.6-flare", wantSize: defaultImages1KSize},
-		{name: "2.6 flare 2k", model: "gpt-image-2.6-flare-2k", want: "gpt-image-2.6-flare", wantSize: defaultImages2KSize},
-		{name: "2.6 sunburst 4k", model: "gpt-image-2.6-sunburst-4k", want: "gpt-image-2.6-sunburst", wantSize: defaultImages4KSize},
-		{name: "2.6 base", model: "gpt-image-2.6", want: "gpt-image-2.6", wantSize: defaultImages1KSize},
-		{name: "2.6 base 4k", model: "gpt-image-2.6-4k", want: "gpt-image-2.6", wantSize: defaultImages4KSize},
 		{name: "uppercase alias", model: "GPT-Image-2-4K", want: "gpt-image-2", wantSize: defaultImages4KSize},
 		{name: "empty defaults", model: "", want: "gpt-image-2", wantSize: defaultImages1KSize},
 	}
@@ -1375,7 +1370,7 @@ func TestBuildImageErrorUsageLogRecordsFailure(t *testing.T) {
 	usage := &UsageInfo{InputTokens: 12, OutputTokens: 3, TotalTokens: 15, PromptTokens: 12, CompletionTokens: 3}
 	imageLogInfo := imageUsageLogInfo{Count: 1, Width: 1024, Height: 1024, Bytes: 2048, Format: "png", Size: "1024x1024"}
 
-	logInput := buildImageErrorUsageLog(account, "/v1/images/generations", "gpt-image-2", "gpt-image-2", "gpt-image-2", false, 1500, 1, true, readErr, usage, imageLogInfo)
+	logInput := buildImageErrorUsageLog(account, "/v1/images/generations", "gpt-image-2", "gpt-image-2", false, 1500, 1, true, readErr, usage, imageLogInfo)
 
 	if logInput.AccountID != 42 {
 		t.Fatalf("AccountID = %d, want 42", logInput.AccountID)
@@ -1560,11 +1555,6 @@ func TestImageUpscalePlanForRequestHonorsSuffixOnAnyImageModel(t *testing.T) {
 		{model: "gpt-image-2.5-flare-4k", scale: imageproc.Upscale4K},
 		{model: "gpt-image-2.5-sunburst-2k", scale: imageproc.Upscale2K},
 		{model: "gpt-image-2.5-flare", scale: ""},
-		{model: "gpt-image-2.6-flare-4k", scale: imageproc.Upscale4K},
-		{model: "gpt-image-2.6-sunburst-2k", scale: imageproc.Upscale2K},
-		{model: "gpt-image-2.6-flare", scale: ""},
-		{model: "gpt-image-2.6-4k", scale: imageproc.Upscale4K},
-		{model: "gpt-image-2.6", scale: ""},
 		{model: "gpt-image-2", scale: ""},
 	}
 	for _, test := range tests {

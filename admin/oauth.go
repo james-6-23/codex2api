@@ -47,7 +47,6 @@ type oauthSession struct {
 	CodeVerifier string
 	RedirectURI  string
 	ProxyURL     string
-	Timezone     string
 	ContactEmail string // 自助门户提交者的联系邮箱（仅自助流程写入，作为备注标识）
 	SelfService  bool   // 是否来自公开自助门户（决定待审核入池路径）
 	CreatedAt    time.Time
@@ -189,16 +188,8 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 	var req struct {
 		ProxyURL    string `json:"proxy_url"`
 		RedirectURI string `json:"redirect_uri"`
-		Timezone    string `json:"timezone"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil && err != io.EOF {
-		writeError(c, http.StatusBadRequest, "请求格式错误")
-		return
-	}
-	if err := validateAccountTimezone(req.Timezone); err != nil {
-		writeError(c, http.StatusBadRequest, err.Error())
-		return
-	}
+	_ = c.ShouldBindJSON(&req)
 
 	redirectURI := strings.TrimSpace(req.RedirectURI)
 	if redirectURI == "" {
@@ -233,7 +224,6 @@ func (h *Handler) GenerateOAuthURL(c *gin.Context) {
 		CodeVerifier: codeVerifier,
 		RedirectURI:  redirectURI,
 		ProxyURL:     strings.TrimSpace(req.ProxyURL),
-		Timezone:     strings.TrimSpace(req.Timezone),
 		CreatedAt:    time.Now(),
 	})
 
@@ -319,11 +309,10 @@ func (h *Handler) ExchangeOAuthCode(c *gin.Context) {
 		return
 	}
 	seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
-		newAccountTimezone: sess.Timezone,
-		refreshToken:       tokenResp.RefreshToken,
-		accessToken:        tokenResp.AccessToken,
-		idToken:            tokenResp.IDToken,
-		expiresIn:          tokenResp.ExpiresIn,
+		refreshToken: tokenResp.RefreshToken,
+		accessToken:  tokenResp.AccessToken,
+		idToken:      tokenResp.IDToken,
+		expiresIn:    tokenResp.ExpiresIn,
 	})
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 30*time.Second)
@@ -845,11 +834,10 @@ func (h *Handler) OAuthCallback(c *gin.Context) {
 		return
 	}
 	seed := normalizeTokenCredentialSeed(tokenCredentialSeed{
-		newAccountTimezone: sess.Timezone,
-		refreshToken:       tokenResp.RefreshToken,
-		accessToken:        tokenResp.AccessToken,
-		idToken:            tokenResp.IDToken,
-		expiresIn:          tokenResp.ExpiresIn,
+		refreshToken: tokenResp.RefreshToken,
+		accessToken:  tokenResp.AccessToken,
+		idToken:      tokenResp.IDToken,
+		expiresIn:    tokenResp.ExpiresIn,
 	})
 
 	// 公开自助门户发起的会话必须走「待审核」入库，不能因为 state 被带到公开

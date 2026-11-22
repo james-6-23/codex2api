@@ -57,13 +57,6 @@ func main() {
 		log.Fatalf("加载核心环境配置失败 (请检查 .env 文件): %v", err)
 	}
 	proxy.ConfigureDownstreamKeepaliveFromEnv()
-	if err := proxy.ConfigureCodexIdentityTimeFromEnv(); err != nil {
-		log.Fatal(err)
-	}
-	log.Printf("Codex identity UUIDv7 time cutoff: %d (0 = legacy)", proxy.CodexIdentityV2FromUnixMilli())
-	if err := proxy.ValidateCodexInstallationPins(); err != nil {
-		log.Fatal(err)
-	}
 	log.Printf("物理层配置加载成功: port=%d, database=%s, cache=%s, tz=%s", cfg.Port, cfg.Database.Label(), cfg.Cache.Label(), time.Local)
 
 	// 2. 初始化数据库
@@ -125,7 +118,7 @@ func main() {
 			PromptFilterCustomPatterns:        "[]",
 			PromptFilterDisabledPatterns:      "[]",
 			ClientCompatMode:                  proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:                "0.170.0",
+			CodexMinCLIVersion:                "0.160.0",
 			UsageLogMode:                      database.UsageLogModeFull,
 			UsageLogBatchSize:                 200,
 			UsageLogFlushIntervalSeconds:      5,
@@ -180,7 +173,7 @@ func main() {
 			PromptFilterCustomPatterns:        "[]",
 			PromptFilterDisabledPatterns:      "[]",
 			ClientCompatMode:                  proxy.ClientCompatModePreserve,
-			CodexMinCLIVersion:                "0.170.0",
+			CodexMinCLIVersion:                "0.160.0",
 			UsageLogMode:                      database.UsageLogModeFull,
 			UsageLogBatchSize:                 200,
 			UsageLogFlushIntervalSeconds:      5,
@@ -261,13 +254,6 @@ func main() {
 		}
 	}
 	antigravityCfgCancel()
-	kiroCfgCtx, kiroCfgCancel := context.WithTimeout(context.Background(), 3*time.Second)
-	if kiroSettings, err := db.LoadKiroSettings(kiroCfgCtx); err != nil {
-		log.Printf("加载 Kiro 渠道设置失败(按默认值运行): %v", err)
-	} else {
-		admin.ApplyKiroSettings(kiroSettings)
-	}
-	kiroCfgCancel()
 
 	appliedResponseCache := proxy.GetResponseCacheAppliedConfig()
 	log.Printf(
@@ -442,7 +428,6 @@ func main() {
 	adminHandler.StartAutoResetCredits(backgroundCtx)
 	adminHandler.StartAutoActivate5hWindow(backgroundCtx)
 	adminHandler.StartScheduledConnectionTests(backgroundCtx)
-	adminHandler.StartKiroSync(backgroundCtx)
 	// Grok 账号状态定期探测（默认关，由 grok 系统设置开关/间隔控制）
 	adminHandler.StartGrokStatusProbe(backgroundCtx)
 	// 官方结算用量按天快照：上游只保留 7 天，不落库就永久丢失，长期历史全靠这个任务。
@@ -692,12 +677,11 @@ func main() {
 			return
 		}
 		c.JSON(200, gin.H{
-			"status":                         "ok",
-			"build_version":                  version.Current(),
-			"codex_identity_v2_from_unix_ms": proxy.CodexIdentityV2FromUnixMilli(),
-			"available":                      available,
-			"total":                          total,
-			"counts_complete":                countsComplete,
+			"status":          "ok",
+			"build_version":   version.Current(),
+			"available":       available,
+			"total":           total,
+			"counts_complete": countsComplete,
 		})
 	})
 

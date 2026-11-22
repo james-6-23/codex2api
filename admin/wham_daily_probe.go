@@ -136,9 +136,6 @@ func whamDailyUsageDueTargets(all []*auth.Account, lastAttempt map[int64]time.Ti
 }
 
 func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[int64]time.Time) {
-	if h.store.BackgroundInspectionPaused(time.Now()) {
-		return
-	}
 	// 先把缺工作区的 PAT 补全，补上的账号本轮就能进候选。(issue #662)
 	h.hydratePATWorkspaces(ctx)
 	all := h.whamDailyUsageProbeTargets()
@@ -170,9 +167,6 @@ func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[in
 				return
 			}
 			defer func() { <-sem }()
-			if h.store.BackgroundInspectionPaused(time.Now()) {
-				return
-			}
 
 			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
@@ -209,7 +203,7 @@ func (h *Handler) runWhamDailyUsageProbe(ctx context.Context, lastAttempt map[in
 // 后台小时级探针会覆盖全池，但列表打开时快照往往还是空的：page-stats 只读本地表，
 // 不在这里即时回补的话，「官方结算」胶囊要等用户手动刷新或下一次探针才会出现。
 func (h *Handler) enqueueWhamDailyUsageBackfill(ids []int64) {
-	if h == nil || h.store == nil || len(ids) == 0 || h.store.BackgroundInspectionPaused(time.Now()) {
+	if h == nil || h.store == nil || len(ids) == 0 {
 		return
 	}
 	now := time.Now()
@@ -270,7 +264,7 @@ func whamDailyUsageChannelSupported(account *auth.Account) bool {
 	if account == nil {
 		return false
 	}
-	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI() || account.IsKiro())
+	return !(account.IsOpenAIResponsesAPI() || account.IsGrokAPI() || account.IsClaudeOAuth() || account.IsAntigravityAPI())
 }
 
 // isCodexATAccount 识别 at-... 形态的纯 AT 凭据。未补充工作区 ID 的纯 AT 凭据能调用
@@ -360,9 +354,6 @@ func (h *Handler) runWhamDailyUsageBackfill(accounts []*auth.Account) {
 			defer h.finishWhamDailyUsageBackfill(acc.DBID)
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			if h.store.BackgroundInspectionPaused(time.Now()) {
-				return
-			}
 
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()

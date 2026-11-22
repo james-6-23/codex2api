@@ -170,10 +170,6 @@ type imageCallResult struct {
 	Background    string
 	Quality       string
 	Model         string
-	// ResponseModel 是上游生命周期帧自报的 response.model。当上游侧（如
-	// New API 渠道）执行了模型映射时，它会与请求模型不同，是唯一能拿到
-	// 实际模型信号的来源；观测绝不影响转发与计费路径。
-	ResponseModel string
 }
 
 type imageOutputStats struct {
@@ -189,9 +185,6 @@ type imageUsageLogInfo struct {
 	Bytes  int
 	Format string
 	Size   string
-	// ResponseModel 承载上游自报模型（见 imageCallResult.ResponseModel），
-	// 用于在用量日志补记 upstream_response_model 与 effective_model。
-	ResponseModel string
 }
 
 func decodeImageBase64(raw string) ([]byte, bool) {
@@ -365,8 +358,6 @@ func imageUsageLogInfoFromImage(image imageCallResult) imageUsageLogInfo {
 		Bytes:  image.ByteSize,
 		Format: strings.TrimSpace(image.OutputFormat),
 		Size:   strings.TrimSpace(image.Size),
-		// 上游自报模型跟随本次结果传递给用量日志观测。
-		ResponseModel: strings.TrimSpace(image.ResponseModel),
 	}
 	return info
 }
@@ -393,9 +384,6 @@ func mergeImageUsageLogInfo(current imageUsageLogInfo, next imageUsageLogInfo) i
 	}
 	if current.Size == "" {
 		current.Size = next.Size
-	}
-	if current.ResponseModel == "" {
-		current.ResponseModel = next.ResponseModel
 	}
 	return current
 }
@@ -450,31 +438,6 @@ func applyImageUsageLogInfo(input *database.UsageLogInput, info imageUsageLogInf
 	input.ImageBytes = info.Bytes
 	input.ImageFormat = info.Format
 	input.ImageSize = info.Size
-}
-
-// applyImageUpstreamModelObservation 把上游自报模型写入用量日志。上游未自报时
-// 不改动任何字段。自报了则：
-//   - 始终记录 upstream_response_model / upstream_model_mismatch（与 chat 路径
-//     的 upstreamResponseModelObserver 观测口径一致，仅审计不改计费）；
-//   - 当本地未记录映射后的 effective_model，且自报模型属于图片模型族并与请求
-//     模型不同时，将其作为 effective_model 落库——使用统计与模型聚合按
-//     COALESCE(effective_model, model) 展示，这样上游侧（如 New API 渠道）
-//     执行的模型映射在统计中也能呈现实际模型（issue #882）。非图片族的自报
-//     （Codex /responses 容器模型如 gpt-5.x）不参与 effective_model 推导。
-func applyImageUpstreamModelObservation(input *database.UsageLogInput, info imageUsageLogInfo, sentModel, logModel string) {
-	if input == nil {
-		return
-	}
-	responseModel := strings.TrimSpace(info.ResponseModel)
-	if responseModel == "" {
-		return
-	}
-	input.UpstreamResponseModel = responseModel
-	input.UpstreamModelMismatch = upstreamModelMismatch(upstreamSentModelForAudit(sentModel, logModel), responseModel)
-	if input.EffectiveModel == "" && isImageOnlyModel(responseModel) &&
-		!strings.EqualFold(responseModel, strings.TrimSpace(logModel)) {
-		input.EffectiveModel = responseModel
-	}
 }
 
 func isImageOnlyModel(model string) bool {
@@ -1615,18 +1578,10 @@ func buildImagesResponsesRequest(prompt string, images []string, toolJSON []byte
 	return req
 }
 
-// imageCapableAccountFilter 生图上游支持 Codex 官方账号与 OpenAI Responses 中转
-// 账号（issue #820）：后者走同一 /responses 协议，中转开启生图时携带 image_generation
-// 工具即可正常生图，执行器会按请求体自动保持 HTTP 出站。Grok/Antigravity/Claude
+// imageCapableAccountFilter 生图上游目前只有 Codex 官方账号支持:中转/Grok
 // 账号拿到 image_generation 请求只会对上游 401/404,还会把自己误标成 unauthorized。
 func imageCapableAccountFilter(account *auth.Account) bool {
-	if account == nil {
-		return false
-	}
-	if account.IsOpenAIResponsesAPI() {
-		return true
-	}
-	return !account.IsRelayStyle()
+	return account != nil && !account.IsRelayStyle()
 }
 
 func imagePreferredAccountFilter(account *auth.Account) bool {
@@ -1811,16 +1766,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 		}
 
 		resp, reqErr := executeHTTPWithContinuousRetryKeepalive(c.Request.Context(), func() (*http.Response, error) {
-			// OpenAI Responses 中转账号走自己的 /responses 出站（issue #820）；
-			// 生图请求体由执行器强制保持 HTTP，不受账号 WebSocket 出站设置影响。
-			if account.IsOpenAIResponsesAPI() {
-				if replay != nil {
-					return executePipelineImage(c.Request.Context(), replay, gjson.GetBytes(responsesBody, "model").String(), func(body []byte) (*http.Response, error) {
-						return ExecuteOpenAIResponsesRequest(c.Request.Context(), account, body, proxyURL, c.Request.Header.Clone())
-					})
-				}
-				return ExecuteOpenAIResponsesRequest(c.Request.Context(), account, responsesBody, proxyURL, c.Request.Header.Clone())
-			}
 			if replay != nil {
 				return executePipelineImage(c.Request.Context(), replay, gjson.GetBytes(responsesBody, "model").String(), func(body []byte) (*http.Response, error) {
 					return ExecuteRequest(c.Request.Context(), account, body, "", proxyURL, apiKey, deviceCfg, c.Request.Header.Clone(), false)
@@ -2019,7 +1964,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				}
 				// Always record the failed attempt so it appears in usage stats,
 				// matching the chat completions error path.
-				failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, requestModel, stream, int(time.Since(start).Milliseconds()), attempt, willRetry, readErr, usage, imageLogInfo)
+				failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, stream, int(time.Since(start).Milliseconds()), attempt, willRetry, readErr, usage, imageLogInfo)
 				failedLog.PromptPolicyIncidentID = promptPolicyIncidentID
 				if promptPolicyIncidentID != "" {
 					failedLog.UpstreamErrorKind = "cyber_policy"
@@ -2084,7 +2029,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 				sameAccountRetryID = accountID
 			}
 			// Always record the failed attempt so it appears in usage stats.
-			failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, requestModel, stream, int(time.Since(start).Milliseconds()), attempt, willRetry, readErr, usage, imageLogInfo)
+			failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, stream, int(time.Since(start).Milliseconds()), attempt, willRetry, readErr, usage, imageLogInfo)
 			if localReplayFailure {
 				failedLog.StatusCode = http.StatusInternalServerError
 				failedLog.UpstreamErrorKind = "local"
@@ -2149,7 +2094,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			if commitErr := h.commitStreamAttempt(c, streamAttempt); commitErr != nil {
 				if isContinuousRetryLocalFailure(commitErr) {
 					localErr := errors.New(continuousRetryLocalFailureMessage)
-					failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, requestModel, stream, int(time.Since(start).Milliseconds()), attempt, false, localErr, usage, imageLogInfo)
+					failedLog := buildImageErrorUsageLog(account, inboundEndpoint, logModel, logEffectiveModel, stream, int(time.Since(start).Milliseconds()), attempt, false, localErr, usage, imageLogInfo)
 					failedLog.StatusCode = http.StatusInternalServerError
 					failedLog.UpstreamErrorKind = "local"
 					failedLog.ErrorMessage = usageLogFailureMessage(http.StatusInternalServerError, continuousRetryLocalFailureMessage)
@@ -2200,7 +2145,6 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 			logInput.TotalTokens = logInput.PromptTokens + imageCount
 		}
 		applyImageUsageLogInfo(logInput, imageLogInfo)
-		applyImageUpstreamModelObservation(logInput, imageLogInfo, requestModel, logModel)
 		h.logUsageForRequest(c, logInput)
 
 		resp.Body.Close()
@@ -2238,7 +2182,7 @@ func (h *Handler) forwardImagesRequest(c *gin.Context, inboundEndpoint, requestM
 // so that failures -- including retried attempts -- still appear in usage stats.
 // Previously the read-error retry paths called continue without logging, so
 // failed image requests were silently missing from the statistics.
-func buildImageErrorUsageLog(account *auth.Account, inboundEndpoint, logModel, logEffectiveModel, sentModel string, stream bool, durationMs, attempt int, willRetry bool, readErr error, usage *UsageInfo, imageLogInfo imageUsageLogInfo) *database.UsageLogInput {
+func buildImageErrorUsageLog(account *auth.Account, inboundEndpoint, logModel, logEffectiveModel string, stream bool, durationMs, attempt int, willRetry bool, readErr error, usage *UsageInfo, imageLogInfo imageUsageLogInfo) *database.UsageLogInput {
 	statusCode := imageErrorStatusCode(readErr)
 	logInput := &database.UsageLogInput{
 		AccountID:         account.ID(),
@@ -2266,7 +2210,6 @@ func buildImageErrorUsageLog(account *auth.Account, inboundEndpoint, logModel, l
 		logInput.ImageInputTokens, logInput.ImageOutputTokens, logInput.CachedImageInputTokens = usage.ImageInputTokens, usage.ImageOutputTokens, usage.CachedImageInputTokens
 	}
 	applyImageUsageLogInfo(logInput, imageLogInfo)
-	applyImageUpstreamModelObservation(logInput, imageLogInfo, sentModel, logModel)
 	return logInput
 }
 
@@ -2886,13 +2829,6 @@ func collectImagesResponse(ctx context.Context, body io.Reader, responseFormat, 
 			}
 			out, readErr = buildImagesAPIResponse(ctx, results, createdAt, usageRaw, firstMeta, responseFormat, urlFor)
 			imageLogInfo = imageUsageLogInfoFromImages(results)
-			// response.created 已自报 model 而 response.completed 未带时，
-			// extractImagesFromResponsesCompleted 返回的结果集不携带该观察，
-			// 会把模型信息丢在 firstMeta 里；这里把生命周期累积的观察合入
-			// 用量日志，保证成功日志仍能记录 upstream_response_model。
-			if imageLogInfo.ResponseModel == "" {
-				imageLogInfo.ResponseModel = strings.TrimSpace(firstMeta.ResponseModel)
-			}
 			return false
 		case "error":
 			readErr = newImageSSEFailureError("error", data)
@@ -3494,8 +3430,6 @@ func extractImageMetaFromLifecycleEvent(payload []byte) (imageCallResult, int64,
 		Background:   strings.TrimSpace(response.Get("tools.0.background").String()),
 		Quality:      strings.TrimSpace(response.Get("tools.0.quality").String()),
 		Model:        strings.TrimSpace(response.Get("tools.0.model").String()),
-		// tools.0.model 是请求侧回显；response.model 才是上游自报的实际模型。
-		ResponseModel: strings.TrimSpace(response.Get("model").String()),
 	}
 	return meta, response.Get("created_at").Int(), true
 }
@@ -3527,9 +3461,6 @@ func mergeImageMeta(target *imageCallResult, source imageCallResult) {
 	}
 	if target.Model == "" {
 		target.Model = source.Model
-	}
-	if target.ResponseModel == "" {
-		target.ResponseModel = source.ResponseModel
 	}
 }
 

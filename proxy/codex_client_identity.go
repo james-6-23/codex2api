@@ -26,14 +26,6 @@ func ResolveCodexOutboundClientIdentity(input CodexClientIdentityInput) (CodexOu
 	settings := CurrentRuntimeSettings()
 	// 强制模拟优先于设备稳定化，避免下游画像覆盖已配置的客户端身份。
 	if settings.ClientCompatMode != ClientCompatModeForce && IsDeviceProfileStabilizationEnabled(input.DeviceConfig) {
-		// 显式选择「保留客户端」时，已识别的官方客户端身份优先于稳定化兜底画像。
-		// 稳定化默认开启，若先返回设备画像，Windows Desktop 等版本低于内置 TUI
-		// 基线的合法客户端会被改写成默认 macOS codex-tui（issue #899）。
-		if settings.ClientCompatMode == ClientCompatModePreserve {
-			if identity, ok := preservedOfficialCodexClientIdentity(input); ok {
-				return identity, nil
-			}
-		}
 		return codexDeviceClientIdentity(input), nil
 	}
 	userAgent := strings.TrimSpace(input.Headers.Get("User-Agent"))
@@ -67,26 +59,6 @@ func codexIdentityVersionFloor(settings RuntimeSettings) string {
 		return settings.CodexMinCLIVersion
 	}
 	return ""
-}
-
-// preservedOfficialCodexClientIdentity 返回「保留客户端」模式下可直接透传的官方客户端
-// 身份。显式配置的出站 UA（CODEX_USER_AGENT）仍然优先，不会被下游 UA 覆盖。
-// 只透传能解析出版本的完整官方 UA；无法识别的客户端继续走设备稳定化兜底。
-func preservedOfficialCodexClientIdentity(input CodexClientIdentityInput) (CodexOutboundClientIdentity, bool) {
-	if input.DeviceConfig != nil && strings.TrimSpace(input.DeviceConfig.UserAgent) != "" {
-		return CodexOutboundClientIdentity{}, false
-	}
-	userAgent := strings.TrimSpace(input.Headers.Get("User-Agent"))
-	if userAgent == "" || !IsCodexOfficialClientByHeaders(userAgent, strings.TrimSpace(input.Headers.Get("Originator"))) {
-		return CodexOutboundClientIdentity{}, false
-	}
-	if _, _, ok := parseCodexClientVersionDetails(userAgent); !ok {
-		return CodexOutboundClientIdentity{}, false
-	}
-	return CodexOutboundClientIdentity{
-		UserAgent: userAgent,
-		Version:   firstNonEmptyHeader(input.Headers, "Version", codexVersionFromUserAgent(userAgent, effectiveLatestCodexCLIVersion())),
-	}, true
 }
 
 func codexDeviceClientIdentity(input CodexClientIdentityInput) CodexOutboundClientIdentity {
@@ -154,7 +126,7 @@ func ResolveCodexMaintenanceIdentity(account *auth.Account, downstream http.Head
 	}
 	// 账号自定义头在对话出站里最后应用（applyAccountCustomHeaders），钉死的身份头
 	// 同样作用于维护请求，否则对话与探针又是两套身份。
-	for name, value := range CodexAccountCustomHeaders(account) {
+	for name, value := range account.GetCustomHeaders() {
 		value = strings.TrimSpace(value)
 		if value == "" {
 			continue

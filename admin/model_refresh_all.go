@@ -38,7 +38,6 @@ var modelRefreshChannelOrder = []string{
 	database.UpstreamChannelClaude,
 	database.UpstreamChannelGrok,
 	database.UpstreamChannelAntigravity,
-	database.UpstreamChannelKiro,
 }
 
 // channelModelRefreshResult 是单个渠道的刷新结果。
@@ -192,7 +191,6 @@ func (h *Handler) defaultModelRefreshFuncs() map[string]channelModelRefreshFunc 
 		database.UpstreamChannelClaude:      h.refreshClaudeChannelModels,
 		database.UpstreamChannelGrok:        h.refreshGrokChannelModels,
 		database.UpstreamChannelAntigravity: h.refreshAntigravityChannelModels,
-		database.UpstreamChannelKiro:        h.refreshKiroChannelModels,
 	}
 }
 

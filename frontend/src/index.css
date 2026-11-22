@@ -1318,8 +1318,7 @@
     scrollbar-color: var(--color-border) transparent;
   }
 
-  .claude-account-table [data-account-actions],
-  .kiro-account-table [data-account-actions] {
+  .claude-account-table [data-account-actions] {
     position: sticky;
     right: 0;
     z-index: 1;
@@ -1327,13 +1326,11 @@
     box-shadow: -8px 0 12px -10px color-mix(in oklab, var(--color-foreground) 30%, transparent);
   }
 
-  .claude-account-table [data-slot="table-row"]:hover [data-account-actions],
-  .kiro-account-table [data-slot="table-row"]:hover [data-account-actions] {
+  .claude-account-table [data-slot="table-row"]:hover [data-account-actions] {
     background: color-mix(in oklab, var(--color-muted) 58%, var(--color-card));
   }
 
-  .claude-account-table [data-state="selected"] [data-account-actions],
-  .kiro-account-table [data-state="selected"] [data-account-actions] {
+  .claude-account-table [data-state="selected"] [data-account-actions] {
     background: var(--color-muted);
   }
 
@@ -1367,15 +1364,13 @@
     background: color-mix(in oklab, var(--color-muted) 58%, transparent);
   }
 
-  .claude-account-table [data-slot="table-head"],
-  .kiro-account-table [data-slot="table-head"] {
+  .claude-account-table [data-slot="table-head"] {
     height: 2.75rem;
     background: color-mix(in oklab, var(--color-muted) 30%, var(--color-card));
     text-transform: none;
   }
 
-  .claude-account-table th[data-account-actions],
-  .kiro-account-table th[data-account-actions] {
+  .claude-account-table th[data-account-actions] {
     z-index: 20;
   }
 
@@ -1744,12 +1739,6 @@
 
 .account-state-overlay__scrim {
   transition: opacity 180ms ease;
-}
-
-/* 吸附的操作列需要不透明底色，否则禁用 / 过载行滚动时会透出下层单元格。 */
-.claude-account-table .account-state-table-row > [data-account-actions],
-.kiro-account-table .account-state-table-row > [data-account-actions] {
-  background-color: var(--color-card);
 }
 
 .account-state-table-row > [data-slot="table-cell"] > :not(.account-state-overlay--marker-only),

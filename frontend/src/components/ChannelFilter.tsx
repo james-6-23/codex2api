@@ -4,9 +4,9 @@ import ChannelLogo from "./ChannelLogo";
 import { cn } from "@/lib/utils";
 import { useVisibleChannels } from "../visibleChannels";
 
-// 仪表盘/用量页共用的上游渠道过滤（全部/Codex/Grok/Antigravity/Claude/Kiro）。
+// 仪表盘/用量页共用的上游渠道过滤（全部/Codex/Grok/Antigravity/Claude）。
 // 选择持久化到 localStorage，两页共享同一份状态键。
-export type UsageChannel = "" | "codex" | "grok" | "antigravity" | "claude" | "kiro";
+export type UsageChannel = "" | "codex" | "grok" | "antigravity" | "claude";
 
 const USAGE_CHANNEL_KEY = "codex2api:usage:channel";
 
@@ -14,7 +14,7 @@ export function useUsageChannel(): [UsageChannel, (next: UsageChannel) => void] 
   const [channel, setChannel] = useState<UsageChannel>(() => {
     try {
       const raw = window.localStorage.getItem(USAGE_CHANNEL_KEY);
-      if (raw === "codex" || raw === "grok" || raw === "antigravity" || raw === "claude" || raw === "kiro") return raw;
+      if (raw === "codex" || raw === "grok" || raw === "antigravity" || raw === "claude") return raw;
     } catch {
       // ignore
     }
@@ -44,14 +44,13 @@ export default function ChannelFilter({
   const allOptions: Array<{
     key: UsageChannel;
     label: string;
-    logo?: "codex" | "grok" | "antigravity" | "claude" | "kiro";
+    logo?: "codex" | "grok" | "antigravity" | "claude";
   }> = [
     { key: "", label: t("usage.channelAll") },
     { key: "codex", label: "Codex", logo: "codex" },
     { key: "grok", label: "Grok", logo: "grok" },
     { key: "antigravity", label: "Antigravity", logo: "antigravity" },
     { key: "claude", label: "Claude", logo: "claude" },
-    { key: "kiro", label: "Kiro", logo: "kiro" },
   ];
   const options = allOptions.filter((o) => !o.logo || isChannelVisible(o.logo));
   const count = options.length;

@@ -278,7 +278,7 @@ func TestIsCodexStrictOfficialClientByHeaders(t *testing.T) {
 func TestCodexUserAgentConfigAllowsSpacedClientName(t *testing.T) {
 	// issue #653：ChatGPT 桌面端的 originator 是 "Codex Desktop"，客户端名必须允许空格；
 	// 首尾空白与内部连续空白折叠成单个空格。手填的名字会推断为桌面端形态，
-	// 末尾标记取目录里最新的桌面端构建号 26.1111.71025，CLI 版本沿用手填值。
+	// 末尾标记取目录里最新的桌面端构建号 26.930.51102，CLI 版本沿用手填值。
 	raw := `{"client_name":"  Codex \t  Desktop ","client_version":"0.153.3","os_name":"Windows","os_version":"10.0.26100","arch":"x86_64","terminal":"unknown"}`
 	normalized, err := NormalizeCodexUserAgentConfigJSON(raw)
 	if err != nil {
@@ -291,7 +291,7 @@ func TestCodexUserAgentConfigAllowsSpacedClientName(t *testing.T) {
 	if !ok {
 		t.Fatal("codexUserAgentFromConfig() ok = false")
 	}
-	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.1111.71025)"
+	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.930.51102)"
 	if userAgent != wantUA {
 		t.Fatalf("User-Agent = %q, want %q", userAgent, wantUA)
 	}

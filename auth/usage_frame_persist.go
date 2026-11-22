@@ -162,10 +162,7 @@ func (q *usageFramePersistQueue) persist(s *Store, job usageFramePersistJob) {
 	// Credit/cooldown publication and subscription hooks own their synchronization.
 	acc.mu.RLock()
 	creditsValid := acc.CreditsValid
-	// A failed clear must also be retried here (issue #813): if the DB write
-	// of a runtime clear was lost, only a pending-flag retry can remove the
-	// stale persisted cooldown before an outbox reload resurrects it.
-	cooldownPending := acc.usageCooldownPersistPending
+	cooldownPending := acc.usageCooldownPersistPending && acc.Status == StatusCooldown
 	acc.mu.RUnlock()
 	if creditsValid {
 		s.persistCreditSnapshot(acc, true)

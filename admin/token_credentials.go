@@ -37,8 +37,6 @@ type tokenCredentialSeed struct {
 	codex5HUsageUpdatedAt string
 	codexUsageUpdatedAt   string
 	customHeaders         map[string]string
-	// 新建时绑定，重新导入或轮换凭证时保留已有账号的时区。
-	newAccountTimezone string
 }
 
 func normalizeTokenCredentialSeed(seed tokenCredentialSeed) tokenCredentialSeed {
@@ -307,9 +305,6 @@ func (h *Handler) defaultCodexFingerprintModeForNewAccount() string {
 // 避免重新导入时覆盖用户在账号上手动调整过的档位。
 func (h *Handler) newCodexAccountCredentials(seed tokenCredentialSeed) map[string]interface{} {
 	credentials := tokenCredentialMap(seed)
-	if tz := strings.TrimSpace(seed.newAccountTimezone); tz != "" {
-		credentials[auth.AccountTimezoneCredentialKey] = tz
-	}
 	if mode := h.defaultCodexFingerprintModeForNewAccount(); mode != auth.CodexFingerprintModeOff {
 		credentials[auth.CodexFingerprintModeCredentialKey] = mode
 	}
@@ -320,7 +315,6 @@ func (h *Handler) newCodexAccountCredentials(seed tokenCredentialSeed) map[strin
 // newCodexAccountCredentials 落库内容保持一致（默认档位无需重载即生效）。
 func (h *Handler) newCodexAccountFromSeed(id int64, proxyURL string, seed tokenCredentialSeed) *auth.Account {
 	account := accountFromCredentialSeed(id, proxyURL, seed)
-	account.Timezone = strings.TrimSpace(seed.newAccountTimezone)
 	account.CodexFingerprintMode = h.defaultCodexFingerprintModeForNewAccount()
 	return account
 }

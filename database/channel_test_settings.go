@@ -30,7 +30,6 @@ const MaxChannelTestConcurrency = 200
 type ChannelTestConfig struct {
 	Antigravity ChannelTestSettings `json:"antigravity"`
 	Claude      ChannelTestSettings `json:"claude"`
-	Kiro        ChannelTestSettings `json:"kiro"`
 }
 
 // Normalized 去掉首尾空白，保证落库与回显的一致性。
@@ -38,7 +37,6 @@ func (c ChannelTestConfig) Normalized() ChannelTestConfig {
 	return ChannelTestConfig{
 		Antigravity: c.Antigravity.normalized(),
 		Claude:      c.Claude.normalized(),
-		Kiro:        c.Kiro.normalized(),
 	}
 }
 

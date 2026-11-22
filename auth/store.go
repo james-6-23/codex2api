@@ -245,8 +245,6 @@ type Account struct {
 	ClaudeClientPlatformOverride string
 	ClaudeVersionPolicyOverride  string
 	ClaudeClientVersionOverride  string
-	// Kiro 是 upstream_type=kiro 账号的专有凭据投影（见 kiro_account.go）。
-	Kiro KiroCredential
 	// claudeSessionWindow 是 Claude 账号的全局默认并发会话窗口数(装载时从系统设置
 	// 快照,>0 时作为无账号级/分组覆盖时的基础并发回退)。
 	claudeSessionWindow int64
@@ -302,14 +300,13 @@ type Account struct {
 	// 客户端压缩阈值。仅内存保留：值只能在收到响应后才知道，落库也救不了首个请求。
 	grokContextWindow int64
 	// grokFreeQuota 是免费额度耗尽 429 解析出的权威用量快照，随 credentials 落库。
-	grokFreeQuota                  *GrokFreeQuotaSnapshot
-	Status                         AccountStatus
-	CooldownUtil                   time.Time
-	CooldownReason                 string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
-	usageCooldownPersistMu         sync.Mutex
-	usageCooldownPersistPending    bool
-	usageCooldownClearErrorPending bool
-	ErrorMsg                       string
+	grokFreeQuota               *GrokFreeQuotaSnapshot
+	Status                      AccountStatus
+	CooldownUtil                time.Time
+	CooldownReason              string // rate_limited / rate_limited_5h / responses_rate_limited / unauthorized / 空
+	usageCooldownPersistMu      sync.Mutex
+	usageCooldownPersistPending bool
+	ErrorMsg                    string
 
 	// 用量进度（从 Codex 响应头被动解析）
 	UsagePercent7d      float64 // 7d 窗口使用率 0-100+
@@ -1799,32 +1796,16 @@ func (a *Account) quotaAutoPause5hGuardDispatchPenaltyLocked(now time.Time) floa
 }
 
 func (a *Account) quotaAutoPausedLocked(now time.Time) bool {
-	return a.quotaAutoPauseWindowLocked(now) != ""
-}
-
-// quotaAutoPauseWindowLocked uses the scheduler's effective thresholds, including
-// inherited group/global settings. Prefer the weekly window when both pause.
-func (a *Account) quotaAutoPauseWindowLocked(now time.Time) string {
 	// 积分顶替限流开着且当下确有积分时，自动暂停让位：阈值最高只到 100%，照常按阈值
 	// 停调度的话，窗口永远走不到「打满后改扣积分」那一步，账号级开关形同虚设（issue #791）。
 	// 积分归零或工作区 hard-stop 后 creditSkipsUsageWindowLocked 转 false，阈值恢复生效。
 	if a.creditSkipsUsageWindowLocked() {
-		return ""
-	}
-	if quotaAutoPausedByWindow(a.UsagePercent7d, a.UsagePercent7dValid, a.Reset7dAt, a.effectiveAutoPause7d, a.AutoPause7dDisabled, now) {
-		return "7d"
+		return false
 	}
 	if quotaAutoPausedByWindow(a.UsagePercent5h, a.UsagePercent5hValid, a.Reset5hAt, a.effectiveAutoPause5h, a.AutoPause5hDisabled, now) {
-		return "5h"
+		return true
 	}
-	return ""
-}
-
-// GetQuotaAutoPauseWindow returns the window responsible for an automatic pause.
-func (a *Account) GetQuotaAutoPauseWindow() string {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.quotaAutoPauseWindowLocked(time.Now())
+	return quotaAutoPausedByWindow(a.UsagePercent7d, a.UsagePercent7dValid, a.Reset7dAt, a.effectiveAutoPause7d, a.AutoPause7dDisabled, now)
 }
 
 func (a *Account) recomputeEffectiveAutoPause(s *Store) {
@@ -2748,7 +2729,6 @@ func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
 // It intentionally avoids GetSchedulerDebugSnapshot and other recomputing
 // getters, which are too expensive for a one-second cadence over a large page.
 type AccountLiveUsageSnapshot struct {
-	QuotaPauseWindow    string
 	Status              string
 	UsingCredits        bool
 	PlanType            string
@@ -2778,7 +2758,6 @@ func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
 	defer a.mu.RUnlock()
 	now := time.Now()
 	return AccountLiveUsageSnapshot{
-		QuotaPauseWindow:    a.quotaAutoPauseWindowLocked(now),
 		Status:              a.runtimeStatusLocked(now),
 		UsingCredits:        a.usingCreditsLocked(now),
 		PlanType:            a.PlanType,
@@ -4014,7 +3993,6 @@ type Store struct {
 	promptRiskTrustPolicies            map[string]database.PromptRiskTrustPolicy
 	usageProbeMu                       sync.RWMutex
 	usageProbe                         func(context.Context, *Account) error
-	claudeTokenRefresh                 func(context.Context, string, string) (*ClaudeTokenData, error)
 	usageProbeCompletion               func()
 	usageProbeBatch                    atomic.Bool
 	antigravityCatalogBatch            atomic.Bool
@@ -4029,7 +4007,6 @@ type Store struct {
 	autoCleanupBatch                   atomic.Bool
 	maxRetries                         atomic.Int64 // 请求失败最大重试次数（换号重试）
 	maxRateLimitRetries                atomic.Int64 // 429 最大换号重试次数
-	backgroundQuietHours               atomic.Pointer[backgroundQuietSchedule]
 	backgroundRefreshInterval          atomic.Int64 // 后台刷新/探针巡检间隔（ns）
 	usageProbeMaxAge                   atomic.Int64 // 用量探针快照最大缓存时长（ns）
 	usageProbeConcurrency              atomic.Int64 // 用量探针并行度
@@ -4851,9 +4828,6 @@ func NewStore(db *database.DB, tc cache.TokenCache, settings *database.SystemSet
 	}
 	s.testModel.Store(settings.TestModel)
 	s.testContent.Store(NormalizeTestContent(settings.TestContent))
-	if err := s.SetBackgroundQuietHours(settings.BackgroundQuietHours); err != nil {
-		log.Printf("忽略无效的巡检暂停时段: %v", err)
-	}
 	s.SetBackgroundRefreshInterval(time.Duration(settings.BackgroundRefreshIntervalMinutes) * time.Minute)
 	s.SetUsageProbeMaxAge(time.Duration(settings.UsageProbeMaxAgeMinutes) * time.Minute)
 	s.SetUsageProbeConcurrency(settings.UsageProbeConcurrency)
@@ -6227,12 +6201,11 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 	}
 	isGrokAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamGrok) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	isAntigravityAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamAntigravity) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
-	isKiroAccount := strings.EqualFold(strings.TrimSpace(upstreamType), UpstreamKiro) && (strings.TrimSpace(apiKey) != "" || rt != "" || at != "")
 	// Agent Identity：无 AT/RT，凭 agent_private_key 动态签名，不能被下面的空凭据 guard 拒绝。
 	isAgentIdentityAccount := strings.EqualFold(strings.TrimSpace(row.GetCredential("auth_mode")), CodexAuthModeAgentIdentity) &&
 		strings.TrimSpace(row.GetCredential("agent_runtime_id")) != "" &&
 		strings.TrimSpace(row.GetCredential("agent_private_key")) != ""
-	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isKiroAccount && !isAgentIdentityAccount {
+	if rt == "" && st == "" && at == "" && !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isAgentIdentityAccount {
 		log.Printf("[账号 %d] 缺少 refresh_token、session_token 和 access_token，跳过", row.ID)
 		return nil
 	}
@@ -6439,9 +6412,6 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
 		account.RefreshToken = ""
 		account.SessionToken = ""
 		account.ExpiresAt = time.Time{}
-	}
-	if isKiroAccount {
-		account.applyKiroRowLocked(row)
 	}
 	if subExp := row.GetCredential("subscription_expires_at"); subExp != "" {
 		if parsed, err := time.Parse(time.RFC3339, subExp); err == nil {
@@ -6837,7 +6807,7 @@ func (s *Store) StartBackgroundRefresh() {
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		refreshTimer := time.NewTimer(s.backgroundRefreshDelay(time.Now()))
+		refreshTimer := time.NewTimer(s.GetBackgroundRefreshInterval())
 		catalogTimer := time.NewTimer(10 * time.Second)
 		defer catalogTimer.Stop()
 		autoCleanupTicker := time.NewTicker(30 * time.Second)
@@ -6867,7 +6837,7 @@ func (s *Store) StartBackgroundRefresh() {
 				default:
 				}
 			}
-			refreshTimer.Reset(s.backgroundRefreshDelay(time.Now()))
+			refreshTimer.Reset(s.GetBackgroundRefreshInterval())
 		}
 
 		// 启动时先武装一次；此后每次巡检/唤醒/到点后都会重排，保证始终盯住最近边界。
@@ -6889,7 +6859,7 @@ func (s *Store) StartBackgroundRefresh() {
 					s.TriggerUsageProbeAsync()
 					s.TriggerRecoveryProbeAsync()
 				}
-				refreshTimer.Reset(s.backgroundRefreshDelay(time.Now()))
+				refreshTimer.Reset(s.GetBackgroundRefreshInterval())
 				// 巡检可能刷新了各账号的重置时间，顺带重排「到点即探」定时器，
 				// 兜底那些两次唤醒之间未显式 WakeBoundaryProbe 的边界变化。
 				s.armNextBoundaryProbe(boundaryProbeTimer)
@@ -10328,25 +10298,6 @@ func (s *Store) APIKeyAllowsAccount(apiKeyID int64, acc *Account) bool {
 	allowedPlans := s.apiKeyAllowedPlanSets[apiKeyID]
 	channel := s.apiKeyUpstreamChannels[apiKeyID]
 	s.apiKeyGroupsMu.RUnlock()
-	return apiKeyAllowsAccountConstraints(acc, allowedGroups, noAffinityGroups, allowedPlans, channel)
-}
-
-// APIKeyRowAllowsAccount evaluates the current database row without relying on
-// asynchronously refreshed scheduler caches.
-func APIKeyRowAllowsAccount(row *database.APIKeyRow, acc *Account) bool {
-	if row == nil || acc == nil || row.ID <= 0 || !acc.AllowsAPIKey(row.ID) {
-		return false
-	}
-	groups := int64Set(normalizeAllowedGroupIDs(row.AllowedGroupIDs))
-	noAffinity := int64Set(normalizeAllowedGroupIDs(row.Limits.NoAffinityGroupIDs))
-	plans := make(map[string]struct{})
-	for _, plan := range normalizeAllowedPlans(row.Limits.PlanAllow) {
-		plans[plan] = struct{}{}
-	}
-	return apiKeyAllowsAccountConstraints(acc, groups, noAffinity, plans, row.Limits.ResolveUpstreamChannel())
-}
-
-func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroups map[int64]struct{}, allowedPlans map[string]struct{}, channel string) bool {
 	// 渠道限定是硬门：grok 渠道只允许 Grok 账号，codex 渠道排除 Grok 账号。
 	switch channel {
 	case database.UpstreamChannelGrok:
@@ -10354,7 +10305,7 @@ func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroup
 			return false
 		}
 	case database.UpstreamChannelCodex:
-		if acc.IsGrokAPI() || acc.IsAntigravityAPI() || acc.IsClaudeOAuth() || acc.IsKiro() {
+		if acc.IsGrokAPI() || acc.IsAntigravityAPI() || acc.IsClaudeOAuth() {
 			return false
 		}
 	case database.UpstreamChannelAntigravity:
@@ -10363,10 +10314,6 @@ func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroup
 		}
 	case database.UpstreamChannelClaude:
 		if !acc.IsClaudeOAuth() {
-			return false
-		}
-	case database.UpstreamChannelKiro:
-		if !acc.IsKiro() {
 			return false
 		}
 	}
@@ -10393,10 +10340,6 @@ func apiKeyAllowsAccountConstraints(acc *Account, allowedGroups, noAffinityGroup
 		// match the key derived from the entitlement tier id instead.
 		if acc.isAntigravityAPILocked() {
 			plan = acc.AntigravityPlanKey
-		}
-		// Kiro plan_type 是上游订阅标题原文，按关键词归一后再匹配。
-		if acc.isKiroLocked() {
-			plan = KiroPlanKey(acc.PlanType)
 		}
 		if _, ok := allowedPlans[plan]; !ok {
 			return false
@@ -11976,9 +11919,6 @@ func (s *Store) VerifyAccountAuthAsync(account *Account) {
 
 // TriggerUsageProbeAsync 异步触发一次批量用量探针
 func (s *Store) TriggerUsageProbeAsync() {
-	if s.BackgroundInspectionPaused(time.Now()) {
-		return
-	}
 	if !s.usageProbeBatch.CompareAndSwap(false, true) {
 		return
 	}
@@ -12050,9 +11990,6 @@ func (s *Store) armNextBoundaryProbe(timer *time.Timer) {
 
 // TriggerRecoveryProbeAsync 异步触发一次封禁账号恢复探测
 func (s *Store) TriggerRecoveryProbeAsync() {
-	if s.BackgroundInspectionPaused(time.Now()) {
-		return
-	}
 	if s.GetLazyMode() {
 		return
 	}
@@ -12300,9 +12237,6 @@ func (s *Store) parallelProbeUsage(ctx context.Context) {
 // parallelProbeUsageWith 以指定 maxAge 阈值执行一次批量用量探针。
 // maxAge<=0 时视为"立即探针"——只要账号能跑就刷一次。
 func (s *Store) parallelProbeUsageWith(ctx context.Context, maxAge time.Duration) {
-	if maxAge > 0 && s.BackgroundInspectionPaused(time.Now()) {
-		return
-	}
 	s.usageProbeMu.RLock()
 	probeFn := s.usageProbe
 	s.usageProbeMu.RUnlock()
@@ -12329,9 +12263,6 @@ func (s *Store) parallelProbeUsageWith(ctx context.Context, maxAge time.Duration
 			defer wg.Done()
 			defer func() { <-sem }()
 			defer account.FinishUsageProbe()
-			if maxAge > 0 && s.BackgroundInspectionPaused(time.Now()) {
-				return
-			}
 
 			probeCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 			defer cancel()
@@ -12360,9 +12291,6 @@ func (s *Store) TriggerUsageProbeForceAsync() {
 }
 
 func (s *Store) parallelRecoveryProbe(ctx context.Context) {
-	if s.BackgroundInspectionPaused(time.Now()) {
-		return
-	}
 	s.usageProbeMu.RLock()
 	probeFn := s.usageProbe
 	s.usageProbeMu.RUnlock()
@@ -12389,9 +12317,6 @@ func (s *Store) parallelRecoveryProbe(ctx context.Context) {
 			defer wg.Done()
 			defer func() { <-sem }()
 			defer account.FinishRecoveryProbe()
-			if s.BackgroundInspectionPaused(time.Now()) {
-				return
-			}
 
 			probeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 			defer cancel()
@@ -12591,9 +12516,6 @@ func (s *Store) Accounts() []*Account {
 
 // parallelRefreshAll 并行刷新所有需要刷新的账号（Worker Pool，并发度 10）
 func (s *Store) parallelRefreshAll(ctx context.Context) {
-	if s.BackgroundInspectionPaused(time.Now()) {
-		return
-	}
 	accounts := s.accountSnapshotAccounts()
 
 	sem := make(chan struct{}, 10)
@@ -12609,9 +12531,6 @@ func (s *Store) parallelRefreshAll(ctx context.Context) {
 		go func(idx int, account *Account) {
 			defer wg.Done()
 			defer func() { <-sem }()
-			if s.BackgroundInspectionPaused(time.Now()) {
-				return
-			}
 
 			if err := s.refreshAccount(ctx, account); err != nil {
 				log.Printf("[账号 %d] 刷新失败: %v", idx+1, err)
@@ -12650,9 +12569,6 @@ func (s *Store) refreshAccountWithOptions(ctx context.Context, acc *Account, for
 	// ChatGPT 不同，单独处理。对所有非 claude 账号此分支恒不进入。
 	if acc.IsClaudeOAuth() {
 		return s.refreshClaudeAccount(ctx, acc, forceRefresh)
-	}
-	if acc.IsKiro() {
-		return s.refreshKiroAccount(ctx, acc, forceRefresh)
 	}
 	return s.refreshCodexAccount(ctx, acc, forceRefresh)
 }

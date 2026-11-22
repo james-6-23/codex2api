@@ -151,10 +151,10 @@ func (h *Handler) extraRelayManifestModels(ctx context.Context, row *database.AP
 			continue
 		}
 		_, daybreak := auth.ParseDaybreakAlias(record.id)
-		if record.backing&(modelBackingRelay|modelBackingGrok|modelBackingAntigravity|modelBackingKiro) == 0 && daybreak == "" {
+		if record.backing&(modelBackingRelay|modelBackingGrok|modelBackingAntigravity) == 0 && daybreak == "" {
 			continue
 		}
-		extras = append(extras, api.Model{ID: record.id, Object: "model", OwnedBy: scopedModelOwner(record), ImageInput: record.imageInput})
+		extras = append(extras, api.Model{ID: record.id, Object: "model", OwnedBy: scopedModelOwner(record)})
 	}
 	sort.Slice(extras, func(i, j int) bool {
 		return strings.ToLower(extras[i].ID) < strings.ToLower(extras[j].ID)
@@ -234,12 +234,8 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			ExperimentalSupportedTools: []string{},
 			TruncationPolicy:           map[string]any{"mode": "tokens", "limit": 10000},
 		}
-		if model.OwnedBy == "kiro" || model.ImageInput || strings.Contains(key, "image") {
+		if strings.Contains(key, "image") {
 			item.InputModalities = []string{"text", "image"}
-		}
-		// Kiro 模型原生支持一次发出多个工具调用；Codex 据此发 parallel_tool_calls=true。
-		if model.OwnedBy == "kiro" {
-			item.SupportsParallelToolCalls = true
 		}
 		// Antigravity's reasoning metadata is provider-specific. Never infer
 		// levels from names such as "thinking" or "reason": Claude Opus
@@ -251,7 +247,7 @@ func buildScopedCodexManifest(models []api.Model) ([]byte, error) {
 			item.DefaultReasoningLevel = antigravityModelChoiceDefaultLevel(slug, available)
 			item.SupportsReasoningSummaries = true
 		}
-		if slug == "gemini-3.8-flash" || (strings.HasPrefix(slug, "gemini-4-") && len(levels[slug]) > 0) {
+		if slug == "gemini-3.8-flash" || (slug == "gemini-4-argon" && len(levels[slug]) > 0) {
 			item.ContextWindow = 1048576
 			// The current OAuth adapter accepts text parts only, even though the
 			// upstream model itself has vision. Advertise the gateway contract.

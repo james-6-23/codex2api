@@ -80,8 +80,6 @@ func usageChannelForAccount(account *auth.Account) string {
 		return database.UpstreamChannelGrok
 	case account.IsAntigravityAPI():
 		return database.UpstreamChannelAntigravity
-	case account.IsKiro():
-		return database.UpstreamChannelKiro
 	case account.IsClaudeOAuth():
 		return database.UpstreamChannelClaude
 	default:

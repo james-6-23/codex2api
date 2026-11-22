@@ -63,7 +63,6 @@ func (h *Handler) buildAccountResponse(
 	isGrokAccount := strings.EqualFold(upstreamType, auth.UpstreamGrok)
 	isAntigravityAccount := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
 	isClaudeAccount := strings.EqualFold(upstreamType, auth.UpstreamClaude)
-	isKiroAccount := strings.EqualFold(upstreamType, auth.UpstreamKiro)
 	antigravityAuthKind := ""
 	if isAntigravityAccount {
 		if strings.TrimSpace(row.GetCredential("api_key")) != "" {
@@ -244,11 +243,6 @@ func (h *Handler) buildAccountResponse(
 		AntigravityAPI:               isAntigravityAccount,
 		ClaudeAPI:                    isClaudeAccount,
 		ClaudeAuthKind:               claudeAuthKindForRow(row, isClaudeAccount),
-		KiroAPI:                      isKiroAccount,
-		KiroAuthKind:                 kiroAuthKindForRow(row, isKiroAccount),
-		KiroLoginSource:              kiroRowString(row, auth.KiroLoginSourceCredentialKey, isKiroAccount),
-		KiroUsage:                    kiroUsageForRow(row, isKiroAccount),
-		KiroPlan:                     kiroPlanForRow(row, isKiroAccount),
 		ClaudeBaseURL:                row.GetCredential(auth.ClaudeBaseURLCredentialKey),
 		AntigravityAuthKind:          antigravityAuthKind,
 		AgentIdentity:                isAgentIdentityCredentialRow(row),
@@ -413,12 +407,10 @@ func (h *Handler) buildAccountResponse(
 				}
 			}
 		}
-		// Keep the selected pause window, status and reset times from the same usage update.
-		liveUsage := runtimeAccount.GetAccountLiveUsageSnapshot()
-		if t := liveUsage.Reset5hAt; !t.IsZero() {
+		if t := runtimeAccount.GetReset5hAt(); !t.IsZero() {
 			resp.Reset5hAt = t.Format(time.RFC3339)
 		}
-		if t := liveUsage.Reset7dAt; !t.IsZero() {
+		if t := runtimeAccount.GetReset7dAt(); !t.IsZero() {
 			resp.Reset7dAt = t.Format(time.RFC3339)
 		}
 		if t := runtimeAccount.GetResetSparkAt(); !t.IsZero() {
@@ -458,9 +450,8 @@ func (h *Handler) buildAccountResponse(
 			}
 		}
 		if !isAntigravityAccount {
-			resp.Status = liveUsage.Status
-			resp.QuotaPauseWindow = liveUsage.QuotaPauseWindow
-			resp.UsingCredits = liveUsage.UsingCredits
+			resp.Status = runtimeAccount.RuntimeStatus()
+			resp.UsingCredits = runtimeAccount.UsingCredits()
 			runtimeAccount.Mu().RLock()
 			resp.ErrorMessage = runtimeAccount.ErrorMsg
 			runtimeAccount.Mu().RUnlock()

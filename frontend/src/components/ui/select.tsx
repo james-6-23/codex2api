@@ -23,7 +23,6 @@ interface SelectProps {
   className?: string
   compact?: boolean
   triggerClassName?: string
-  dropdownMinWidth?: number
 }
 
 interface DropdownPosition {
@@ -77,7 +76,6 @@ export function Select({
   className,
   compact = false,
   triggerClassName,
-  dropdownMinWidth = 0,
 }: SelectProps) {
   const [open, setOpen] = useState(false)
   const [position, setPosition] = useState<DropdownPosition | null>(null)
@@ -99,7 +97,7 @@ export function Select({
     const openUp = spaceBelow < Math.min(DROPDOWN_MAX_HEIGHT, 160) && spaceAbove > spaceBelow
     const maxHeight = Math.max(140, Math.min(DROPDOWN_MAX_HEIGHT, openUp ? spaceAbove : spaceBelow))
     // Keep dropdown fully inside the viewport on small screens.
-    const width = Math.min(Math.max(rect.width, dropdownMinWidth), viewportWidth - VIEWPORT_PADDING * 2)
+    const width = Math.min(rect.width, viewportWidth - VIEWPORT_PADDING * 2)
     const maxLeft = viewportWidth - width - VIEWPORT_PADDING
     const left = Math.min(Math.max(VIEWPORT_PADDING, rect.left), Math.max(VIEWPORT_PADDING, maxLeft))
     setPosition({
@@ -109,7 +107,7 @@ export function Select({
       maxHeight,
       openUp,
     })
-  }, [dropdownMinWidth])
+  }, [])
 
   useLayoutEffect(() => {
     if (!open) return

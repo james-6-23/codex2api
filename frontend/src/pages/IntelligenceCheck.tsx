@@ -24,7 +24,6 @@ import { Select } from "../components/ui/select";
 import { useToast } from "../hooks/useToast";
 import { getErrorMessage } from "../utils/error";
 import { refreshIntelligenceBars } from "../hooks/useIntelligenceBars";
-import { createUUID } from "../lib/uuid";
 import {
   intelligenceTargetConflict,
   type IntelligenceTargetConflict,
@@ -237,7 +236,6 @@ export default function IntelligenceCheck() {
                     ["claude", "Claude"],
                     ["grok", "Grok"],
                     ["antigravity", "Antigravity"],
-                    ["kiro", "Kiro"],
                   ] as const).map(([channel, label]) => (
                     <label key={channel} className="flex items-center justify-between gap-3 rounded-md bg-muted/40 px-3 py-2 text-sm">
                       <span>{label}</span>
@@ -257,7 +255,6 @@ export default function IntelligenceCheck() {
               </div>
               {field("Grok 检测模型", <Input value={settings.grok_model ?? "grok-4.5"} onChange={(e) => change("grok_model", e.target.value)} />)}
               {field("Antigravity 检测模型", <Input value={settings.antigravity_model ?? "gemini-3.8-flash-medium"} onChange={(e) => change("antigravity_model", e.target.value)} />)}
-              {field("Kiro 检测模型", <Input value={settings.kiro_model ?? "claude-sonnet-4.6"} onChange={(e) => change("kiro_model", e.target.value)} />)}
               {field(
                 "GPT / Codex 模型",
                 <Input
@@ -374,10 +371,10 @@ export default function IntelligenceCheck() {
                       }
                       placeholder="选择分组"
                       options={groups
-                        .filter(g => !g.channel || ["codex", "claude", "grok", "antigravity", "kiro"].includes(g.channel))
+                        .filter(g => !g.channel || ["codex", "claude", "grok", "antigravity"].includes(g.channel))
                         .map(g => ({
                           value: String(g.id),
-                          label: `${g.name}（${({ codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity", kiro: "Kiro" } as Record<string, string>)[g.channel ?? "codex"] ?? g.channel}）`,
+                          label: `${g.name}（${({ codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity" } as Record<string, string>)[g.channel ?? "codex"] ?? g.channel}）`,
                         }))}
                     />,
                   )}
@@ -465,7 +462,7 @@ export default function IntelligenceCheck() {
             <Button
               variant="outline"
               onClick={() => {
-                const id = createUUID();
+                const id = crypto.randomUUID();
                 change("questions", [
                   ...settings.questions,
                   {

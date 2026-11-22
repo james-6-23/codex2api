@@ -22,7 +22,7 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			antigravity_sync_error text, antigravity_sync_warning text,
 			antigravity_permissions text, antigravity_entitlements text, antigravity_quota text,
 			claude_usage_probe_at text, claude_usage_probe_error text,
-			claude_auth_kind text, kiro_auth_kind text, kiro_login_source text, kiro_usage text,
+			claude_auth_kind text,
 			subscription_expires_at text, subscription_sync_state text, subscription_grace_until text
 		)`
 	credentialColumns := `
@@ -44,9 +44,6 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 		COALESCE(account_public.claude_usage_probe_at, ''),
 		COALESCE(account_public.claude_usage_probe_error, ''),
 		COALESCE(account_public.claude_auth_kind, ''),
-		COALESCE(account_public.kiro_auth_kind, ''),
-		COALESCE(account_public.kiro_login_source, ''),
-		COALESCE(account_public.kiro_usage, ''),
 		COALESCE(account_public.subscription_expires_at, ''),
 		COALESCE(account_public.subscription_sync_state, ''),
 		COALESCE(account_public.subscription_grace_until, '')`
@@ -72,9 +69,6 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			COALESCE(json_extract(credentials, '$.claude_usage_probe_at'), ''),
 			COALESCE(json_extract(credentials, '$.claude_usage_probe_error'), ''),
 			COALESCE(json_extract(credentials, '$.claude_auth_kind'), ''),
-			COALESCE(json_extract(credentials, '$.kiro_auth_kind'), ''),
-			COALESCE(json_extract(credentials, '$.kiro_login_source'), ''),
-			COALESCE(json_extract(credentials, '$.kiro_usage'), ''),
 			COALESCE(json_extract(credentials, '$.subscription_expires_at'), ''),
 			COALESCE(json_extract(credentials, '$.subscription_sync_state'), ''),
 			COALESCE(json_extract(credentials, '$.subscription_grace_until'), '')`
@@ -119,7 +113,6 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	var avatarURL, projectID string
 	var antigravitySyncError, antigravitySyncWarning, antigravityPermissions, antigravityQuota string
 	var claudeUsageProbeAt, claudeUsageProbeError, claudeAuthKind string
-	var kiroAuthKind, kiroLoginSource, kiroUsage string
 	var subscriptionExpiresAt, subscriptionSyncState, subscriptionGraceUntil string
 	var modelsRaw interface{}
 	var hasAPIKey, hasRefreshToken, verifiedEmail bool
@@ -132,7 +125,6 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 		&avatarURL, &verifiedEmail, &projectID,
 		&antigravitySyncError, &antigravitySyncWarning, &antigravityPermissions, &antigravityQuota,
 		&claudeUsageProbeAt, &claudeUsageProbeError, &claudeAuthKind,
-		&kiroAuthKind, &kiroLoginSource, &kiroUsage,
 		&subscriptionExpiresAt, &subscriptionSyncState, &subscriptionGraceUntil,
 	); err != nil {
 		return nil, fmt.Errorf("扫描账号列表投影失败: %w", err)
@@ -196,11 +188,6 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	}
 	// 订阅状态筛选按快照行计算业务状态（到期/宽限期/同步状态）;投影缺了这三个键会让
 	// 全部账号被判成"状态未知"。
-	for key, value := range map[string]string{"kiro_auth_kind": kiroAuthKind, "kiro_login_source": kiroLoginSource, "kiro_usage": kiroUsage} {
-		if trimmed := strings.TrimSpace(value); trimmed != "" && trimmed != "{}" {
-			row.Credentials[key] = trimmed
-		}
-	}
 	if trimmed := strings.TrimSpace(subscriptionExpiresAt); trimmed != "" {
 		row.Credentials["subscription_expires_at"] = trimmed
 	}

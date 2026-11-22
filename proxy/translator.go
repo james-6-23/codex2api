@@ -470,19 +470,6 @@ func firstResponsesImageGenerationTool(body map[string]any) map[string]any {
 	return nil
 }
 
-// takeResponsesReasoningSummaryDelivery 提取并剥离客户端显式传入的
-// stream_options.reasoning_summary_delivery（已知选项 sequential_cutoff，
-// openai/codex#31306），其余 stream_options 子字段随顶层剥离 (issue #905)。
-func takeResponsesReasoningSummaryDelivery(body map[string]any) string {
-	options, ok := body["stream_options"].(map[string]any)
-	if !ok {
-		return ""
-	}
-	delete(body, "stream_options")
-	delivery, _ := options["reasoning_summary_delivery"].(string)
-	return delivery
-}
-
 func moveTopLevelResponsesImageOptions(body map[string]any) bool {
 	toolMap := firstResponsesImageGenerationTool(body)
 	if len(body) == 0 || toolMap == nil {
@@ -1308,9 +1295,6 @@ func isResponsesMessageInputItem(item map[string]any) bool {
 }
 
 func normalizeResponsesInputItemIDs(body map[string]any) bool {
-	if preserveCodexOfficialInputFields(body) {
-		return false
-	}
 	inputItems, ok := body["input"].([]any)
 	if !ok {
 		return false
@@ -1337,9 +1321,6 @@ const responsesInputInternalMetadataField = "internal_chat_message_metadata_pass
 // stripResponsesInputInternalMetadata 只删 input[] 顶层项上的内部元数据字段，
 // 不碰 content/arguments 里恰好同名的用户内容。
 func stripResponsesInputInternalMetadata(body map[string]any) bool {
-	if preserveCodexOfficialInputFields(body) {
-		return false
-	}
 	inputItems, ok := body["input"].([]any)
 	if !ok {
 		return false
@@ -2621,10 +2602,7 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	// Responses Lite 把工具声明搬进 input[] 的 additional_tools 载体项；顶层
 	// tools[] 的清洗必须同样覆盖那里，否则坏 schema 绕过全部修正直达上游。
 	normalizeResponsesAdditionalToolSchemas(body)
-	// Official clients supply their own tool declarations. Avoid inventing a
-	// default image tool and its bridge instructions for the preserved shape.
-	// Explicit tools still receive the normal schema and transport handling.
-	if !preserveCodexOfficialInputFields(body) && shouldAutoInjectResponsesImageGenerationTool(body) {
+	if shouldAutoInjectResponsesImageGenerationTool(body) {
 		ensureResponsesImageGenerationTool(body)
 	}
 	moveTopLevelResponsesImageOptions(body)
@@ -2669,9 +2647,6 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 	}
 
 	// 7. 删除 Codex 不支持的字段
-	// stream_options.reasoning_summary_delivery 是 Codex 客户端已知选项
-	// (sequential_cutoff，openai/codex#31306)，剥离后按子字段原样转发 (issue #905)。
-	delivery := takeResponsesReasoningSummaryDelivery(body)
 	// 注意：prompt_cache_retention 上游(HTTP 与 WS 路径)均不接受，会返回
 	// 400 Unsupported parameter，因此在此一并剥离，executor / wsrelay 层也各自兜底删除。
 	// 顶层 type 是 Responses WS 事件信封字段(response.create)，native WS ingress 会
@@ -2688,9 +2663,6 @@ func prepareResponsesBodyWithOptions(rawBody []byte, opts responsesBodyPrepareOp
 		"prompt_cache_retention", "safety_identifier", "type",
 	} {
 		delete(body, field)
-	}
-	if delivery != "" {
-		body["stream_options"] = map[string]any{"reasoning_summary_delivery": delivery}
 	}
 	if !opts.preservePreviousResponseID {
 		delete(body, "previous_response_id")
@@ -2976,7 +2948,7 @@ func convertMessagesToInputSlice(messages []openAIMessage) []any {
 				})
 			}
 
-		case "system", "developer":
+		case "system":
 			input = append(input, map[string]any{
 				"type":    "message",
 				"role":    "developer",
@@ -4672,14 +4644,6 @@ func extractUsageFromResult(usage gjson.Result) *UsageInfo {
 	result.ImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.image_tokens").Int())), max(0, inputTokens))
 	result.ImageOutputTokens = min(max(0, int(usage.Get("output_tokens_details.image_tokens").Int())), max(0, outputTokens))
 	result.CachedImageInputTokens = min(max(0, int(usage.Get("input_tokens_details.cached_tokens_details.image_tokens").Int())), min(result.ImageInputTokens, max(0, cachedTokens)))
-	// OpenAI Responses 的缓存写入按保留时长拆分（GPT-6.2 起）：
-	// ttl_30m_tokens → 短保留（5m 槽）、ttl_12h_tokens → 长保留（1h 槽）。
-	// Anthropic 的 cache_creation 细分走 claude_usage_semantics 路径，互不影响。
-	write30m := int(usage.Get("input_tokens_details.cache_write_tokens_details.ttl_30m_tokens").Int())
-	write12h := int(usage.Get("input_tokens_details.cache_write_tokens_details.ttl_12h_tokens").Int())
-	result.CacheWrite5mTokens = write30m
-	result.CacheWrite1hTokens = write12h
-	result.CacheWriteTokens = write30m + write12h
 	return result
 }
 

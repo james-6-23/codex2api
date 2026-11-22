@@ -61,9 +61,6 @@ func TestImagesIngressToUpstream(t *testing.T) {
 		{"gpt-image-2.5-flare", "xhigh", "multipart", "gpt-5.6-terra", true},
 		{"gpt-image-2.5-flare", "max", "studio_generate", "gpt-5.6-sol", false},
 		{"gpt-image-2.5-sunburst", "xhigh", "studio_edit", "gpt-5.6-terra", false},
-		{"gpt-image-2.6-flare", "xhigh", "generate", "gpt-5.6-sol", false},
-		{"gpt-image-2.6-sunburst", "max", "generate", "gpt-5.6-terra", true},
-		{"gpt-image-2.6", "max", "studio_generate", "gpt-5.6-sol", false},
 	} {
 		t.Run(tc.mode+tc.model, func(t *testing.T) {
 			// One handler observes changes made between requests without restarting.
@@ -139,7 +136,7 @@ func TestImagesIngressToUpstream(t *testing.T) {
 
 func TestGPTImage25UsageAndResponsesModel(t *testing.T) {
 	usage := extractUsageFromResult(gjson.Parse(`{"input_tokens":1550,"input_tokens_details":{"image_tokens":1521},"output_tokens":515,"output_tokens_details":{"image_tokens":515}}`))
-	log := buildImageErrorUsageLog(&auth.Account{DBID: 1}, "/v1/images/edits", "gpt-image-2.5-flare", "", "gpt-image-2.5-flare", false, 0, 0, false, fmt.Errorf("interrupted"), usage, imageUsageLogInfo{})
+	log := buildImageErrorUsageLog(&auth.Account{DBID: 1}, "/v1/images/edits", "gpt-image-2.5-flare", "", false, 0, 0, false, fmt.Errorf("interrupted"), usage, imageUsageLogInfo{})
 	if log.ImageInputTokens != 1521 || log.ImageOutputTokens != 515 {
 		t.Fatalf("usage detail lost: %+v", log)
 	}
@@ -150,7 +147,7 @@ func TestGPTImage25UsageAndResponsesModel(t *testing.T) {
 	if gjson.GetBytes(body, "model").String() != "gpt-5.6-sol" || gjson.GetBytes(body, "tools.0.model").String() != "gpt-image-2.5-sunburst-2026-09-08" || gjson.GetBytes(body, "tools.0.quality").String() != "max" {
 		t.Fatalf("Responses fields changed: %s", body)
 	}
-	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst-4k", "gpt-image-2.6-flare", "gpt-image-2.6-sunburst-4k", "gpt-image-2.6"} {
+	for _, model := range []string{"gpt-image-2.5-flare", "gpt-image-2.5-sunburst-4k"} {
 		if !slices.Contains(SupportedModelIDs(context.Background(), nil), model) {
 			t.Fatalf("model not exposed: %s", model)
 		}

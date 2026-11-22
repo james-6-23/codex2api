@@ -138,12 +138,6 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 			}
 		}
 	}
-	if !isTransient {
-		if err := h.ensureKiroBearer(c.Request.Context(), account); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Kiro 账号令牌刷新失败: " + err.Error()})
-			return
-		}
-	}
 
 	requestedModel := strings.TrimSpace(c.Query("model"))
 	if quality != nil {
@@ -292,8 +286,6 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 					h.store.MarkCooldownWithErrorExactDuration(account, 24*time.Hour, "unauthorized", errMsg)
 				} else if proxy.IsDeactivatedWorkspaceError(errBody) {
 					h.store.MarkDeactivatedWorkspace(account, errMsg)
-				} else if account.IsKiro() {
-					proxy.ApplyKiroCooldown(h.store, account, resp.StatusCode, errBody)
 				}
 			case http.StatusTooManyRequests:
 				// Grok 虽是 relay 风格，但有自己的免费额度语义（free-usage-exhausted → 24h），
@@ -301,8 +293,6 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 				// Antigravity 的 429 带 Google 结构化配额状态，按（账号,模型）冷却并取上游重试提示。
 				if isAntigravityAccount {
 					proxy.ApplyAntigravityCooldown(h.store, account, resp.StatusCode, errBody, resp, testModel)
-				} else if account.IsKiro() {
-					proxy.ApplyKiroCooldown(h.store, account, resp.StatusCode, errBody)
 				} else if isOpenAIResponsesAccount && !account.IsGrokAPI() {
 					h.store.MarkCooldown(account, time.Minute, "rate_limited")
 				} else {
@@ -1050,9 +1040,6 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 		}
 		return antigravityConnectionTestModel(account, requested, defaults...)
 	}
-	if account != nil && account.IsKiro() {
-		return kiroConnectionTestModel(account, requested, h.channelTestSettingsForAccount(ctx, account).TestModel)
-	}
 	if account == nil || !account.IsRelayStyle() {
 		if requested == "" {
 			return h.connectionTestModel(ctx), nil
@@ -1664,9 +1651,6 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 		}
 		return "failed", "账号缺少 access_token 和 refresh_token"
 	}
-	if err := h.ensureKiroBearer(testCtx, acc); err != nil {
-		return "failed", "Kiro 账号令牌刷新失败: " + err.Error()
-	}
 
 	if status, msg, done := h.batchTestSkipDeactivatedWorkspace(acc); done {
 		return status, msg
@@ -1774,8 +1758,6 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 			proxy.SyncClaudeUsageState(h.store, acc, resp)
 		} else if acc.IsAntigravityAPI() {
 			proxy.ApplyAntigravityCooldown(h.store, acc, resp.StatusCode, body, resp, testModel)
-		} else if acc.IsKiro() {
-			proxy.ApplyKiroCooldown(h.store, acc, resp.StatusCode, body)
 		} else if acc.IsRelayStyle() && !acc.IsGrokAPI() {
 			h.store.MarkCooldown(acc, time.Minute, "rate_limited")
 		} else {

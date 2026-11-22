@@ -156,9 +156,6 @@ func geminiNativeToAntigravityEnvelope(rawBody []byte, project, model string) ([
 	}
 	antigravityNormalizeGeminiContentRoles(request)
 	antigravitySanitizeNativeGeminiTools(request, nameMap)
-	if tools, ok := request["tools"]; ok {
-		request["tools"] = antigravityObfuscateDeclarations(tools)
-	}
 	antigravityRewriteNativeGeminiFunctionNames(request, nameMap)
 	wireModel := antigravityGeminiResolvedModel(model, nil)
 	antigravityApplyNativeGeminiThinkingConfig(request, model, wireModel)
@@ -390,16 +387,15 @@ func antigravityObfuscateNativeGeminiSystemInstruction(request map[string]any) {
 			kept = append(kept, part)
 			continue
 		}
-		text = strings.TrimSpace(antigravityNormalizeAndObfuscateSystemInstruction(text))
+		text = normalizeClientScaffolding(text)
 		if text == "" {
 			continue
 		}
-		partMap["text"] = text
+		partMap["text"] = antigravityObfuscateSystemInstruction(text)
 		kept = append(kept, partMap)
 	}
 	if len(kept) == 0 {
 		delete(request, "systemInstruction")
-		delete(request, "system_instruction")
 		return
 	}
 	systemInstruction["parts"] = kept
@@ -432,53 +428,17 @@ func antigravityNormalizeNativeGeminiContents(request map[string]any) {
 			if !ok {
 				continue
 			}
-			if text, ok := part["text"].(string); ok {
-				part["text"] = normalizeClientScaffolding(text)
+			text, ok := part["text"].(string)
+			if !ok {
+				continue
 			}
-			if functionResponse, ok := part["functionResponse"].(map[string]any); ok {
-				antigravityNormalizeNativeFunctionResponse(functionResponse)
-			}
+			part["text"] = normalizeClientScaffolding(text)
 			parts[partIndex] = part
 		}
 		content["parts"] = parts
 		contents[index] = content
 	}
 	request["contents"] = contents
-}
-
-// antigravityNormalizeNativeFunctionResponse neutralizes harness notices in a
-// native function response. The result is often a raw tool value, so only the
-// OpenMausBot-specific patterns run here, never billing headers.
-func antigravityNormalizeNativeFunctionResponse(functionResponse map[string]any) {
-	if response, ok := functionResponse["response"]; ok {
-		functionResponse["response"] = antigravityNormalizeNativeResponseValue(response)
-	}
-	if parts, ok := functionResponse["parts"]; ok {
-		functionResponse["parts"] = antigravityNormalizeNativeResponseValue(parts)
-	}
-}
-
-// antigravityNormalizeNativeResponseValue neutralizes product notices in every
-// string inside a function response. Gemini lets the caller choose response keys
-// such as result, output or error, so walking the tree is more complete than
-// assuming one key name. Non-string values and the response shape are kept.
-func antigravityNormalizeNativeResponseValue(value any) any {
-	switch typed := value.(type) {
-	case string:
-		return normalizeProductScaffolding(typed)
-	case map[string]any:
-		for key, item := range typed {
-			typed[key] = antigravityNormalizeNativeResponseValue(item)
-		}
-		return typed
-	case []any:
-		for index, item := range typed {
-			typed[index] = antigravityNormalizeNativeResponseValue(item)
-		}
-		return typed
-	default:
-		return value
-	}
 }
 
 func antigravitySanitizeNativeGeminiTools(request map[string]any, nameMap map[string]string) {

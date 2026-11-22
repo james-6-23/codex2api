@@ -328,7 +328,7 @@ function PresetCard({ preset, onUse, onEdit, onDelete }: { preset: QualityTestPr
 }
 
 type TestOptions = { models: string[]; reasoning_efforts: string[] }
-const channelNames: Record<UpstreamChannel, string> = { codex: 'Codex / Responses', claude: 'Claude', grok: 'Grok', antigravity: 'Antigravity', kiro: 'Kiro' }
+const channelNames: Record<UpstreamChannel, string> = { codex: 'Codex / Responses', claude: 'Claude', grok: 'Grok', antigravity: 'Antigravity' }
 
 export default function QualityTest() {
   const { t } = useTranslation()

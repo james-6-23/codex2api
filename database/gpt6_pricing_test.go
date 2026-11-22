@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestGPT6SolAndLunaIndependentPricingKeys(t *testing.T) {
@@ -98,101 +97,6 @@ func TestGPT61SolUsesIndependentSolPricing(t *testing.T) {
 	assertFloatEqual(t, long.InputPricePerMToken, 4)
 	assertFloatEqual(t, long.CacheReadPricePerMToken, 0.2)
 	assertFloatEqual(t, long.OutputPricePerMToken, 15)
-}
-
-func TestGPT62SolAndAstraUseIndependentPricing(t *testing.T) {
-	previous := currentModelPricingOverrides()
-	SetModelPricingOverrides(nil)
-	t.Cleanup(func() { SetModelPricingOverrides(previous) })
-
-	for _, tc := range []struct {
-		model                             string
-		input, cached, output             float64
-		longInput, longCached, longOutput float64
-		ultrafast                         float64
-		ultrafastAfter                    float64
-	}{
-		{"gpt-6.2-sol", 2, 0.1, 10, 4, 0.2, 15, 3, 6},
-		{"gpt-6.2-astra", 8, 0.4, 40, 16, 0.8, 60, 3, 6},
-	} {
-		for _, model := range []string{
-			tc.model,
-			strings.ToUpper(tc.model),
-			"models/" + tc.model,
-			tc.model + "-high",
-			tc.model + "(xhigh)",
-		} {
-			t.Run(model, func(t *testing.T) {
-				if got := CanonicalBillingModelKey(model); got != tc.model {
-					t.Fatalf("CanonicalBillingModelKey(%q) = %q, want %q", model, got, tc.model)
-				}
-				if got := PricingManagementModelKey(model); got != tc.model {
-					t.Fatalf("PricingManagementModelKey(%q) = %q, want %q", model, got, tc.model)
-				}
-				if got := PricingAliasTarget(model); got != "" {
-					t.Fatalf("PricingAliasTarget(%q) = %q, want canonical model", model, got)
-				}
-				p := GetModelPricing(model)
-				assertFloatEqual(t, p.InputPricePerMToken, tc.input)
-				assertFloatEqual(t, p.CacheReadPricePerMToken, tc.cached)
-				assertFloatEqual(t, p.OutputPricePerMToken, tc.output)
-				assertFloatEqual(t, p.LongInputPricePerMToken, tc.longInput)
-				assertFloatEqual(t, p.LongCacheReadPricePerMToken, tc.longCached)
-				assertFloatEqual(t, p.LongOutputPricePerMToken, tc.longOutput)
-				assertFloatEqual(t, p.UltrafastMultiplier, tc.ultrafast)
-				assertFloatEqual(t, p.UltrafastMultiplierAfter, tc.ultrafastAfter)
-			})
-		}
-	}
-}
-
-func TestGPT62UltrafastMultiplierResolvesByTime(t *testing.T) {
-	previous := currentModelPricingOverrides()
-	SetModelPricingOverrides(nil)
-	t.Cleanup(func() { SetModelPricingOverrides(previous) })
-
-	prevNow := ultrafastNow
-	t.Cleanup(func() { ultrafastNow = prevNow })
-
-	for _, model := range []string{"gpt-6.2-sol", "gpt-6.2-astra"} {
-		p := GetModelPricing(model)
-
-		// 促销期内（2027-03-01 00:00 太平洋时间前）：3×
-		ultrafastNow = func() time.Time { return time.Date(2027, 2, 28, 23, 59, 0, 0, time.UTC) }
-		assertFloatEqual(t, resolveUltrafastMultiplier(p), 3)
-
-		// 促销期后（2027-03-01 00:00 太平洋时间起）：6×
-		ultrafastNow = func() time.Time { return time.Date(2027, 3, 2, 0, 0, 0, 0, time.UTC) }
-		assertFloatEqual(t, resolveUltrafastMultiplier(p), 6)
-	}
-}
-
-func TestUsageLogHistoricalUltrafastUsesRecordTime(t *testing.T) {
-	previous := currentModelPricingOverrides()
-	SetModelPricingOverrides(nil)
-	t.Cleanup(func() { SetModelPricingOverrides(previous) })
-
-	prevNow := ultrafastNow
-	t.Cleanup(func() { ultrafastNow = prevNow })
-
-	// 当前时钟已在促销期之后；历史日志仍应按记录的计费时间解析倍率。
-	ultrafastNow = func() time.Time { return time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC) }
-
-	// 促销期内（2027-02-28）计费的记录：3×
-	early := &UsageLogInput{Model: "gpt-6.2-sol", BillingServiceTier: "ultrafast", InputTokens: 1000, CreatedAt: time.Date(2027, 2, 28, 0, 0, 0, 0, time.UTC)}
-	gotEarly := UsageLogCostBreakdown(early)
-	assertFloatEqual(t, gotEarly.ServiceTierCostMultiplier, 3)
-	assertFloatEqual(t, gotEarly.TotalCost, 1000.0/1e6*2*3)
-
-	// 促销期后（2027-06-01）计费的记录：6×
-	late := &UsageLogInput{Model: "gpt-6.2-sol", BillingServiceTier: "ultrafast", InputTokens: 1000, CreatedAt: time.Date(2027, 6, 1, 0, 0, 0, 0, time.UTC)}
-	gotLate := UsageLogCostBreakdown(late)
-	assertFloatEqual(t, gotLate.ServiceTierCostMultiplier, 6)
-	assertFloatEqual(t, gotLate.TotalCost, 1000.0/1e6*2*6)
-
-	// CreatedAt 为零值的实时请求：回退当前时钟（6×）
-	live := &UsageLogInput{Model: "gpt-6.2-sol", BillingServiceTier: "ultrafast", InputTokens: 1000}
-	assertFloatEqual(t, UsageLogCostBreakdown(live).ServiceTierCostMultiplier, 6)
 }
 
 func TestGPT6SolAndLunaCostBreakdown(t *testing.T) {

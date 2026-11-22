@@ -843,7 +843,7 @@ func TestApplyCodexRequestHeadersGeneratedDesktopClientSendsMatchingOriginator(t
 
 	applyCodexRequestHeaders(req, &auth.Account{DBID: 42}, "token-123", "", "api-key-1", nil, downstreamHeaders)
 
-	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.1111.71025)"
+	wantUA := "Codex Desktop/0.153.3 (Windows 10.0.26100; x86_64) unknown (Codex Desktop; 26.930.51102)"
 	if got := req.Header.Get("User-Agent"); got != wantUA {
 		t.Fatalf("User-Agent = %q, want %q", got, wantUA)
 	}
@@ -1006,37 +1006,6 @@ func TestApplyCodexRequestHeadersPreservesOfficialClientHeaders(t *testing.T) {
 		if got := req.Header.Get(name); got != downstreamHeaders.Get(name) {
 			t.Fatalf("%s = %q, want %q", name, got, downstreamHeaders.Get(name))
 		}
-	}
-}
-
-func TestApplyCodexRequestHeadersPreservesDesktopIdentityUnderStabilization(t *testing.T) {
-	prev := CurrentRuntimeSettings()
-	ApplyRuntimeSettings(RuntimeSettings{ClientCompatMode: ClientCompatModePreserve})
-	t.Cleanup(func() { ApplyRuntimeSettings(prev) })
-	deviceProfileCacheMu.Lock()
-	deviceProfileCache = make(map[string]deviceProfileCacheEntry)
-	deviceProfileCacheMu.Unlock()
-
-	const desktopUA = "Codex Desktop/0.169.0-alpha.11.1 (Windows 10.0.26200; x86_64) unknown (Codex Desktop; 26.1111.21308)"
-	req, err := http.NewRequest(http.MethodPost, "https://example.com/v1/responses", nil)
-	if err != nil {
-		t.Fatalf("http.NewRequest() error = %v", err)
-	}
-	downstreamHeaders := http.Header{
-		"User-Agent": {desktopUA},
-		"Originator": {"Codex Desktop"},
-	}
-
-	applyCodexRequestHeaders(req, &auth.Account{DBID: 899}, "token-899", "", "api-key-899", &DeviceProfileConfig{StabilizeDeviceProfile: true}, downstreamHeaders)
-
-	if got := req.Header.Get("User-Agent"); got != desktopUA {
-		t.Fatalf("User-Agent = %q, want downstream desktop UA", got)
-	}
-	if got := req.Header.Get("Version"); got != "0.169.0-alpha.11.1" {
-		t.Fatalf("Version = %q, want 0.169.0-alpha.11.1", got)
-	}
-	if got := req.Header.Get("Originator"); got != "Codex Desktop" {
-		t.Fatalf("Originator = %q, want Codex Desktop", got)
 	}
 }
 

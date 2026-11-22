@@ -1125,10 +1125,6 @@ func (db *DB) migrate(ctx context.Context) error {
 		return db.migrateSQLite(ctx)
 	}
 	query := codexClientVersionCacheSchema + `;
-	CREATE TABLE IF NOT EXISTS key_usage_account_permissions (key_id BIGINT PRIMARY KEY, view_enabled BOOLEAN NOT NULL DEFAULT FALSE, reset_enabled BOOLEAN NOT NULL DEFAULT FALSE);
-	CREATE TABLE IF NOT EXISTS key_usage_reset_attempts (request_id TEXT PRIMARY KEY, key_id BIGINT NOT NULL, account_id BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
-	CREATE TABLE IF NOT EXISTS key_usage_reset_leases (scope TEXT PRIMARY KEY, owner TEXT NOT NULL, expires_at BIGINT NOT NULL);
-	CREATE TABLE IF NOT EXISTS key_usage_reset_cooldowns (scope TEXT PRIMARY KEY, expires_at BIGINT NOT NULL);
 	CREATE TABLE IF NOT EXISTS accounts (
 		id            SERIAL PRIMARY KEY,
 		name          VARCHAR(255) DEFAULT '',
@@ -1362,7 +1358,6 @@ func (db *DB) migrate(ctx context.Context) error {
 				visible_channels_config TEXT DEFAULT '{}',
 				channel_test_config TEXT DEFAULT '{}',
 				antigravity_config TEXT DEFAULT '{}',
-				kiro_config TEXT DEFAULT '{}',
 				max_concurrency    INT DEFAULT 2,
 			global_rpm         INT DEFAULT 0,
 			test_model         VARCHAR(100) DEFAULT 'gpt-5.5',
@@ -1439,7 +1434,6 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS visible_channels_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS channel_test_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS antigravity_config TEXT DEFAULT '{}';
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS kiro_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS test_content TEXT DEFAULT 'hi';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS pg_max_conns INT DEFAULT 50;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS redis_pool_size INT DEFAULT 30;
@@ -1466,7 +1460,6 @@ func (db *DB) migrate(ctx context.Context) error {
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_probe_concurrency INT DEFAULT 16;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS usage_probe_responses_fallback_enabled BOOLEAN DEFAULT TRUE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS recovery_probe_interval_minutes INT DEFAULT 30;
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS background_quiet_hours TEXT DEFAULT '[]';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS scheduler_mode VARCHAR(20) DEFAULT 'round_robin';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS affinity_mode VARCHAR(16) DEFAULT 'bounded';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS session_affinity_spread BOOLEAN DEFAULT FALSE;
@@ -1508,8 +1501,8 @@ func (db *DB) migrate(ctx context.Context) error {
 	SET test_model = 'gpt-5.5'
 	WHERE LOWER(COALESCE(test_model, '')) IN ('gpt-5.4', 'gpt-5.4-mini');
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS client_compat_mode VARCHAR(20) DEFAULT 'preserve';
-	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.170.0';
-	ALTER TABLE system_settings ALTER COLUMN codex_min_cli_version SET DEFAULT '0.170.0';
+	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_min_cli_version VARCHAR(32) DEFAULT '0.160.0';
+	ALTER TABLE system_settings ALTER COLUMN codex_min_cli_version SET DEFAULT '0.160.0';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_user_agent_config TEXT DEFAULT '{}';
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_telemetry_enabled BOOLEAN DEFAULT FALSE;
 	ALTER TABLE system_settings ADD COLUMN IF NOT EXISTS codex_turn_state_template_cache_enabled BOOLEAN DEFAULT FALSE;
@@ -1930,7 +1923,6 @@ const (
 	UpstreamChannelGrok        = "grok"
 	UpstreamChannelAntigravity = "antigravity"
 	UpstreamChannelClaude      = "claude"
-	UpstreamChannelKiro        = "kiro"
 )
 
 // ResolveUpstreamChannel 归一 Key 的上游渠道限定；未知值一律视为不限（auto）。
@@ -1944,8 +1936,6 @@ func (l APIKeyLimits) ResolveUpstreamChannel() string {
 		return UpstreamChannelAntigravity
 	case UpstreamChannelClaude:
 		return UpstreamChannelClaude
-	case UpstreamChannelKiro:
-		return UpstreamChannelKiro
 	}
 	return UpstreamChannelAuto
 }
@@ -1960,11 +1950,9 @@ func accountChannelFilterSQL(channel, upstreamTypeExpr string) string {
 		return ` AND ` + upstreamTypeExpr + ` = 'antigravity'`
 	case UpstreamChannelClaude:
 		return ` AND ` + upstreamTypeExpr + ` = 'claude'`
-	case UpstreamChannelKiro:
-		return ` AND ` + upstreamTypeExpr + ` = 'kiro'`
 	case UpstreamChannelCodex:
 		// Blank legacy rows and OpenAI Responses relays remain in the Codex view.
-		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity', 'claude', 'kiro')`
+		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity', 'claude')`
 	default:
 		return ""
 	}
@@ -2444,7 +2432,6 @@ type SystemSettings struct {
 	CodexModelMapping                  string // JSON: {"requested_codex_model": "upstream_codex_model", ...}
 	PayloadRules                       string // JSON: 请求体重写规则（default/override/append/filter 等规则组）
 	ReasoningEffortModels              string // JSON: [{"model":"gpt-5.5","effort":"xhigh"}, ...]
-	BackgroundQuietHours               string
 	BackgroundRefreshIntervalMinutes   int
 	UsageProbeMaxAgeMinutes            int
 	UsageProbeConcurrency              int
@@ -2725,7 +2712,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(prompt_filter_review_timeout_seconds, 10),
 		       COALESCE(prompt_filter_review_fail_closed, true),
 		       COALESCE(client_compat_mode, 'preserve'),
-		       COALESCE(codex_min_cli_version, '0.170.0'),
+		       COALESCE(codex_min_cli_version, '0.160.0'),
 		       COALESCE(codex_user_agent_config, '{}'),
 		       COALESCE(usage_log_mode, 'full'),
 		       COALESCE(usage_log_batch_size, 200),
@@ -2801,8 +2788,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		       COALESCE(codex_oauth_keepalive_enabled, false),
 		       COALESCE(codex_telemetry_timing_debug, false),
 		       COALESCE(auto_reset_credits_on_exhaustion_enabled, false),
-		       COALESCE(codex_ws_downstream_keepalive_slots, 8),
-		       COALESCE(background_quiet_hours, '[]')
+		       COALESCE(codex_ws_downstream_keepalive_slots, 8)
 			FROM system_settings WHERE id = 1
 		`).Scan(
 		&s.SiteName, &s.SiteLogo,
@@ -2891,7 +2877,7 @@ func (db *DB) GetSystemSettings(ctx context.Context) (*SystemSettings, error) {
 		&s.CodexOAuthKeepaliveEnabled,
 		&s.CodexTelemetryTimingDebug,
 		&s.AutoResetCreditsOnExhaustionEnabled,
-		&s.CodexWSDownstreamKeepaliveSlots, &s.BackgroundQuietHours,
+		&s.CodexWSDownstreamKeepaliveSlots,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -3064,10 +3050,6 @@ func (db *DB) UpdateSystemSettings(ctx context.Context, s *SystemSettings) error
 // updateSystemSettingsWithExecer 执行全局设置 upsert。它不关心调用方是
 // *sql.DB 还是 *sql.Tx，由调用方决定是否与其他写入共享事务。
 func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsExecer, s *SystemSettings) error {
-	quietHours, quietErr := NormalizeBackgroundQuietHours(s.BackgroundQuietHours)
-	if quietErr != nil {
-		return quietErr
-	}
 	reasoningEffortModels := strings.TrimSpace(s.ReasoningEffortModels)
 	if reasoningEffortModels == "" {
 		reasoningEffortModels = "[]"
@@ -3173,9 +3155,9 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 					codex_oauth_keepalive_enabled,
 					codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled,
-					codex_ws_downstream_keepalive_slots, background_quiet_hours
+					codex_ws_downstream_keepalive_slots
 					)
-						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $130, $131)
+						VALUES (1, $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28, $29, $30, $31, $32, $33, $34, $35, $36, $37, $38, $39, $40, $41, $42, $43, $44, $45, $46, $47, $48, $49, $50, $51, $52, $53, $54, $55, $56, $57, $58, $59, $60, $61, $62, $63, $64, $65, $66, $67, $68, $69, $70, $71, $72, $73, $74, $75, $76, $77, $78, $79, $80, $81, $82, $83, $84, $85, $86, $87, $88, $89, $90, $91, $92, $93, $94, $95, $96, $97, $98, $99, $100, $101, $102, $103, $104, $105, $106, $107, $108, $109, $110, $111, $112, $113, $114, $115, $116, $117, $118, $119, $120, $121, $122, $123, $124, $125, $126, $127, $130)
 				ON CONFLICT (id) DO UPDATE SET
 				site_name               = EXCLUDED.site_name,
 				site_logo               = EXCLUDED.site_logo,
@@ -3301,8 +3283,7 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 					codex_oauth_keepalive_enabled = EXCLUDED.codex_oauth_keepalive_enabled,
 					codex_telemetry_timing_debug = EXCLUDED.codex_telemetry_timing_debug,
 					auto_reset_credits_on_exhaustion_enabled = EXCLUDED.auto_reset_credits_on_exhaustion_enabled,
-					codex_ws_downstream_keepalive_slots = EXCLUDED.codex_ws_downstream_keepalive_slots,
-					background_quiet_hours = EXCLUDED.background_quiet_hours
+					codex_ws_downstream_keepalive_slots = EXCLUDED.codex_ws_downstream_keepalive_slots
 			`, NormalizeSiteName(s.SiteName), strings.TrimSpace(s.SiteLogo),
 		s.MaxConcurrency, s.GlobalRPM, s.TestModel, testContent, s.TestConcurrency, s.ProxyURL, s.PgMaxConns, s.RedisPoolSize,
 		s.AutoCleanUnauthorized, s.AutoCleanRateLimited, s.AdminSecret, s.AutoCleanFullUsage, s.ProxyPoolEnabled,
@@ -3360,7 +3341,7 @@ func updateSystemSettingsWithExecer(ctx context.Context, execer systemSettingsEx
 		s.CodexTelemetryTimingDebug,
 		s.AutoResetCreditsOnExhaustionEnabled,
 		s.PreservePromptFilterCustomPatterns,
-		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots), quietHours)
+		s.PreservePromptFilterReviewAPIKey, NormalizeCodexWSDownstreamKeepaliveSlots(s.CodexWSDownstreamKeepaliveSlots))
 	return err
 }
 
@@ -4695,7 +4676,7 @@ func (l *UsageLog) populateBillingBreakdown() {
 	if billingServiceTier == "" {
 		billingServiceTier = l.ServiceTier
 	}
-	breakdown := UsageLogCostBreakdown(&UsageLogInput{Model: billingModel, DaybreakProgram: l.DaybreakProgram, BillingServiceTier: billingServiceTier, InputTokens: l.InputTokens, OutputTokens: l.OutputTokens, CachedTokens: l.CachedTokens, CacheWrite5mTokens: l.CacheWrite5mTokens, CacheWrite1hTokens: l.CacheWrite1hTokens, ImageInputTokens: l.ImageInputTokens, ImageOutputTokens: l.ImageOutputTokens, CachedImageInputTokens: l.CachedImageInputTokens, CreatedAt: l.CreatedAt})
+	breakdown := UsageLogCostBreakdown(&UsageLogInput{Model: billingModel, DaybreakProgram: l.DaybreakProgram, BillingServiceTier: billingServiceTier, InputTokens: l.InputTokens, OutputTokens: l.OutputTokens, CachedTokens: l.CachedTokens, CacheWrite5mTokens: l.CacheWrite5mTokens, CacheWrite1hTokens: l.CacheWrite1hTokens, ImageInputTokens: l.ImageInputTokens, ImageOutputTokens: l.ImageOutputTokens, CachedImageInputTokens: l.CachedImageInputTokens})
 	l.ImageInputCost, l.ImageCacheReadCost = breakdown.ImageInputCost, breakdown.ImageCacheReadCost
 	l.ImageInputPrice, l.CachedImageInputPrice = breakdown.ImageInputPricePerMToken, breakdown.CacheReadImagePricePerMToken
 	l.InputCost = breakdown.InputCost
@@ -5645,8 +5626,7 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 				COALESCE(NULLIF(u.effective_model, ''), NULLIF(u.model, ''), 'unknown') AS model_name,
 				COALESCE(NULLIF(u.inbound_endpoint, ''), NULLIF(u.endpoint, ''), 'unknown') AS endpoint_name,
 				COALESCE(u.api_key_id, 0) AS api_key_id,
-				CASE WHEN u.api_key_id > 0 THEN '' ELSE
-					COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown') END AS api_key_label,
+				COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown') AS api_key_label,
 				COUNT(*) AS requests,
 				COALESCE(SUM(u.total_tokens), 0) AS tokens,
 				COALESCE(SUM(u.input_tokens), 0) AS input_tokens,
@@ -5679,8 +5659,7 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 				COALESCE(NULLIF(u.effective_model, ''), NULLIF(u.model, ''), 'unknown'),
 				COALESCE(NULLIF(u.inbound_endpoint, ''), NULLIF(u.endpoint, ''), 'unknown'),
 				u.api_key_id,
-				CASE WHEN u.api_key_id > 0 THEN '' ELSE
-					COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown') END,
+				COALESCE(NULLIF(u.api_key_name, ''), NULLIF(u.api_key_masked, ''), 'unknown'),
 				`+sumBigint("u.requests")+`,
 				`+sumBigint("u.total_tokens")+`,
 				`+sumBigint("u.input_tokens")+`,
@@ -5719,21 +5698,6 @@ func (db *DB) populateUsageBreakdownStats(ctx context.Context, stats *UsageStats
 		}
 		return a.Endpoint < b.Endpoint
 	})
-	var keyIDs []int64
-	for key := range apiKeys {
-		if key.id > 0 {
-			keyIDs = append(keyIDs, key.id)
-		}
-	}
-	metadata, err := db.usageAPIKeyMetadata(ctx, keyIDs)
-	if err != nil {
-		return err
-	}
-	for key, item := range apiKeys {
-		if key.id > 0 {
-			item.Label = metadata[key.id].label()
-		}
-	}
 	stats.APIKeyStats = topUsageStats(apiKeys, 8, func(a, b *UsageAPIKeyStat) bool {
 		if a.Requests != b.Requests {
 			return a.Requests > b.Requests
@@ -6066,10 +6030,14 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 	}
 	defer rows.Close()
 
+	type accountUsageKey struct {
+		ID     int64
+		Name   string
+		Masked string
+	}
 	dayStats := make(map[string]*AccountUsageDayStat)
 	modelStats := make(map[string]*AccountModelStat)
-	keyStats := make(map[usageAPIKeyIdentity]*AccountKeyStat)
-	var keyIDs []int64
+	keyStats := make(map[accountUsageKey]*AccountKeyStat)
 	durations := make([]int64, 0, 1024)
 	var cacheHitRequests, durationSamples int64
 	var durationMsSum, firstTokenMsSum float64
@@ -6160,17 +6128,11 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		modelStat.AccountBilled += accountBilled
 		modelStat.UserBilled += userBilled
 
-		key := usageAPIKeyIdentity{id: apiKeyID}
-		if apiKeyID <= 0 {
-			key.name, key.masked = apiKeyName, apiKeyMasked
-		}
+		key := accountUsageKey{ID: apiKeyID, Name: apiKeyName, Masked: apiKeyMasked}
 		keyStat := keyStats[key]
 		if keyStat == nil {
-			keyStat = &AccountKeyStat{APIKeyID: key.id, APIKeyName: key.name, APIKeyMasked: key.masked}
+			keyStat = &AccountKeyStat{APIKeyID: apiKeyID, APIKeyName: apiKeyName, APIKeyMasked: apiKeyMasked}
 			keyStats[key] = keyStat
-			if apiKeyID > 0 {
-				keyIDs = append(keyIDs, apiKeyID)
-			}
 		}
 		keyStat.Requests++
 		keyStat.Tokens += totalTokens
@@ -6205,15 +6167,7 @@ func (db *DB) GetAccountUsageStats(ctx context.Context, accountID int64, days in
 		}
 		return result.Models[i].Requests > result.Models[j].Requests
 	})
-	metadata, err := db.usageAPIKeyMetadata(ctx, keyIDs)
-	if err != nil {
-		return nil, err
-	}
 	for _, item := range keyStats {
-		if item.APIKeyID > 0 {
-			key := metadata[item.APIKeyID]
-			item.APIKeyName, item.APIKeyMasked = key.name, key.masked
-		}
 		result.ByAPIKey = append(result.ByAPIKey, *item)
 	}
 	sort.Slice(result.ByAPIKey, func(i, j int) bool {

@@ -6,11 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/api"
@@ -31,7 +28,6 @@ const (
 	modelBackingRelay
 	modelBackingAntigravity
 	modelBackingClaude
-	modelBackingKiro
 )
 
 type scopedModelRecord struct {
@@ -39,8 +35,6 @@ type scopedModelRecord struct {
 	created int64
 	backing modelBacking
 	alias   bool
-	// imageInput carries the Kiro channel's image-input contract into the manifest.
-	imageInput bool
 }
 
 func stableModelCreated(t time.Time) int64 {
@@ -85,8 +79,6 @@ func scopedModelOwner(record *scopedModelRecord) string {
 		return "google"
 	case modelBackingClaude:
 		return "anthropic"
-	case modelBackingKiro:
-		return "kiro"
 	default:
 		return "codex2api"
 	}
@@ -165,18 +157,10 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 		return ok
 	}
 
-	filteredCatalog := 0
-	filteredCatalogSample := make([]string, 0, 8)
-	visibleAccounts := 0
 	for _, account := range accounts {
 		if !h.accountVisibleToAPIKey(account, row.ID, now) {
-			filteredCatalog++
-			if len(filteredCatalogSample) < 8 {
-				filteredCatalogSample = append(filteredCatalogSample, catalogFilterSample(account))
-			}
 			continue
 		}
-		visibleAccounts++
 		switch {
 		case account.IsGrokAPI():
 			visible := GrokVisibleModelIDsForAccount(account)
@@ -238,16 +222,6 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 			models := antigravityPublicModelsForAccount(account)
 			for _, id := range models {
 				addScopedModel(records, id, modelBackingAntigravity, time.Time{}, false)
-				addTarget(id)
-			}
-
-		case account.IsKiro():
-			for _, id := range KiroAccountModelIDs(account) {
-				key := strings.ToLower(strings.TrimSpace(id))
-				addScopedModel(records, id, modelBackingKiro, time.Time{}, false)
-				if record := records[key]; record != nil {
-					record.imageInput = true
-				}
 				addTarget(id)
 			}
 
@@ -315,9 +289,6 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 	// request path applies the same source-name policy before mapping.
 	// Daybreak 另外校验目标程序模型，避免映射绕过该 Key 的权限名单。
 	for key, record := range records {
-		if record.backing != modelBackingKiro {
-			record.imageInput = false
-		}
 		if checkAPIKeyModel(record.id, row.Limits) != "" || h.daybreakMappedModelDenied(record.id, row.Limits) {
 			delete(records, key)
 		}
@@ -330,79 +301,7 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 			addScopedModel(records, id, modelBackingCodex, time.Time{}, true)
 		}
 	}
-	if len(records) == 0 && (filteredCatalog > 0 || visibleAccounts > 0) {
-		logEmptyModelCatalog(row.ID, row.Limits.ResolveUpstreamChannel(), filteredCatalog, visibleAccounts, strings.Join(filteredCatalogSample, "; "))
-	}
 	return records
-}
-
-// catalogEmptyLogAt throttles the empty-catalog diagnostic. Clients poll
-// /v1/models, and one redacted line per key per minute is enough to explain
-// a stuck empty list.
-var (
-	catalogEmptyLogMu sync.Mutex
-	catalogEmptyLogAt = map[int64]time.Time{}
-)
-
-func logEmptyModelCatalog(keyID int64, channel string, filtered int, visible int, sample string) {
-	now := time.Now()
-	catalogEmptyLogMu.Lock()
-	if last, ok := catalogEmptyLogAt[keyID]; ok && now.Sub(last) < time.Minute {
-		catalogEmptyLogMu.Unlock()
-		return
-	}
-	catalogEmptyLogAt[keyID] = now
-	if len(catalogEmptyLogAt) > 1024 {
-		for id, at := range catalogEmptyLogAt {
-			if now.Sub(at) >= time.Minute {
-				delete(catalogEmptyLogAt, id)
-			}
-		}
-	}
-	catalogEmptyLogMu.Unlock()
-	log.Printf("model catalog empty for api_key_id=%d channel=%s filtered=%d visible=%d sample=%s", keyID, channel, filtered, visible, sample)
-}
-
-// catalogFilterSample is a redacted reason an account contributed no models.
-// It never includes tokens, email, or proxy URLs.
-func catalogFilterSample(account *auth.Account) string {
-	if account == nil {
-		return "id=0 reason=nil"
-	}
-	upstream := strings.TrimSpace(account.UpstreamType)
-	if len(upstream) > 32 {
-		upstream = upstream[:32]
-	}
-	return fmt.Sprintf("id=%d upstream=%s reason=%s", account.ID(), upstream, catalogFilterReason(account))
-}
-
-func catalogFilterReason(account *auth.Account) string {
-	if account == nil {
-		return "nil"
-	}
-	disabled := atomic.LoadInt32(&account.Disabled) != 0
-	if disabled && account.IsBanned() {
-		return "disabled_banned"
-	}
-	if disabled {
-		return "disabled"
-	}
-	if atomic.LoadInt32(&account.DispatchPaused) != 0 {
-		return "dispatch_paused"
-	}
-	if atomic.LoadInt32(&account.IntelligencePaused) != 0 {
-		return "intelligence_paused"
-	}
-	if !account.ModelCatalogEligible() && !account.DaybreakCatalogEligible() {
-		if account.IsBanned() {
-			return "banned"
-		}
-		if status := account.RuntimeStatus(); status != "" {
-			return "catalog_" + status
-		}
-		return "catalog_ineligible"
-	}
-	return "scope"
 }
 
 func (h *Handler) scopedModels(ctx context.Context, row *database.APIKeyRow) []api.Model {
@@ -410,7 +309,7 @@ func (h *Handler) scopedModels(ctx context.Context, row *database.APIKeyRow) []a
 	models := make([]api.Model, 0, len(records))
 	for _, record := range records {
 		models = append(models, api.Model{
-			ID: record.id, Object: "model", Created: record.created, OwnedBy: scopedModelOwner(record), ImageInput: record.imageInput,
+			ID: record.id, Object: "model", Created: record.created, OwnedBy: scopedModelOwner(record),
 		})
 	}
 	sort.Slice(models, func(i, j int) bool {

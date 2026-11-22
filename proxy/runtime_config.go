@@ -37,7 +37,7 @@ const (
 	RequestIsolationModePerAPIKey = "per-api-key"
 
 	defaultClientCompatMode      = ClientCompatModePreserve
-	defaultCodexMinCLIVersion    = "0.170.0"
+	defaultCodexMinCLIVersion    = "0.160.0"
 	defaultStreamFlushPolicy     = StreamFlushPolicyImmediate
 	defaultStreamFlushIntervalMS = 20
 	minStreamFlushIntervalMS     = 1

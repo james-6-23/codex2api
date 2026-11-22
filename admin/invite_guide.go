@@ -130,7 +130,7 @@ func inviteGuideCandidate(acc *auth.Account) bool {
 	if acc == nil || acc.GetAccessToken() == "" {
 		return false
 	}
-	if acc.IsOpenAIResponsesAPI() || acc.IsGrokAPI() || acc.IsAntigravityAPI() || acc.IsKiro() {
+	if acc.IsOpenAIResponsesAPI() || acc.IsGrokAPI() || acc.IsAntigravityAPI() {
 		return false
 	}
 	return acc.RefreshToken != ""

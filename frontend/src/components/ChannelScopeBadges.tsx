@@ -5,14 +5,13 @@ import { cn } from '@/lib/utils'
 
 // 设置项适用渠道标记：用在 SettingsCard / SettingField 标题旁，让"这条设置对哪家上游生效"
 // 一眼可见。四家全适用时只显示四个 logo；单一渠道时补渠道名。
-export const ALL_UPSTREAM_CHANNELS: readonly UpstreamChannel[] = ['codex', 'claude', 'antigravity', 'grok', 'kiro']
+export const ALL_UPSTREAM_CHANNELS: readonly UpstreamChannel[] = ['codex', 'claude', 'antigravity', 'grok']
 
 const CHANNEL_NAMES: Record<UpstreamChannel, string> = {
   codex: 'Codex',
   claude: 'Claude',
   antigravity: 'Antigravity',
   grok: 'Grok',
-  kiro: 'Kiro',
 }
 
 export function channelScopeLabel(channels: readonly UpstreamChannel[]): string {

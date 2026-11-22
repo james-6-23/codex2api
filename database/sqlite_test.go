@@ -77,8 +77,8 @@ func TestSQLitePromptFilterColumnDefaultsRemainUpgradeCompatible(t *testing.T) {
 	if strings.TrimSpace(settings.PromptFilterAdvancedConfig) != "{}" {
 		t.Fatalf("compatibility advanced config = %q, want {}", settings.PromptFilterAdvancedConfig)
 	}
-	if settings.CodexMinCLIVersion != "0.170.0" {
-		t.Fatalf("fresh SQLite minimum Codex CLI version = %q, want 0.170.0", settings.CodexMinCLIVersion)
+	if settings.CodexMinCLIVersion != "0.160.0" {
+		t.Fatalf("fresh SQLite minimum Codex CLI version = %q, want 0.160.0", settings.CodexMinCLIVersion)
 	}
 	if settings.SessionSlotBufferEnabled || settings.SessionSlotBufferSeconds != 10 {
 		t.Fatalf("session slot buffer defaults = enabled:%t seconds:%d, want false/10", settings.SessionSlotBufferEnabled, settings.SessionSlotBufferSeconds)
@@ -3530,54 +3530,6 @@ func TestGetAccountsBilledSinceUsesPerAccountWindows(t *testing.T) {
 	}
 	if got[3] != 0 {
 		t.Fatalf("account 3 billed = %.2f, want 0", got[3])
-	}
-}
-
-func TestGetAccountUsageSinceWindowsUsesPerAccountStarts(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "codex2api.db")
-	db, err := New("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("New(sqlite) 返回错误: %v", err)
-	}
-	defer db.Close()
-
-	ctx := context.Background()
-	now := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
-	insertUsage := func(accountID int64, tokens int, billed float64, createdAt time.Time) {
-		t.Helper()
-		if _, err := db.conn.ExecContext(ctx, `
-			INSERT INTO usage_logs (account_id, status_code, total_tokens, account_billed, user_billed, created_at)
-			VALUES ($1, 200, $2, $3, $3, $4)
-		`, accountID, tokens, billed, sqliteTimeParam(createdAt)); err != nil {
-			t.Fatalf("insert usage log: %v", err)
-		}
-	}
-
-	insertUsage(1, 10, 1.25, now.Add(-4*time.Hour))
-	insertUsage(1, 20, 2.50, now.Add(-30*time.Minute))
-	insertUsage(1, 99, 9.99, now.Add(-30*time.Minute)) // 499 excluded below
-	if _, err := db.conn.ExecContext(ctx, `UPDATE usage_logs SET status_code = 499 WHERE total_tokens = 99`); err != nil {
-		t.Fatalf("mark cancelled log: %v", err)
-	}
-	insertUsage(2, 40, 4.00, now.AddDate(0, 0, -20))
-	insertUsage(2, 80, 8.00, now.AddDate(0, 0, -40))
-
-	got, err := db.GetAccountUsageSinceWindows(ctx, map[int64]time.Time{
-		1: now.Add(-1 * time.Hour),
-		2: now.AddDate(0, 0, -30),
-		3: now.Add(-1 * time.Hour),
-	})
-	if err != nil {
-		t.Fatalf("GetAccountUsageSinceWindows: %v", err)
-	}
-	if got[1] == nil || got[1].Requests != 1 || got[1].Tokens != 20 || got[1].AccountBilled != 2.50 {
-		t.Fatalf("account 1 usage = %+v, want 1 request / 20 tokens / 2.50 billed (4h-old log excluded)", got[1])
-	}
-	if got[2] == nil || got[2].Requests != 1 || got[2].Tokens != 40 || got[2].AccountBilled != 4.00 {
-		t.Fatalf("account 2 usage = %+v, want 20-day-old log only", got[2])
-	}
-	if _, ok := got[3]; ok {
-		t.Fatalf("account 3 usage = %+v, want omitted (no logs)", got[3])
 	}
 }
 

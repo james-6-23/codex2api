@@ -18,7 +18,6 @@
   - [账号管理](#账号管理) — 添加 RT / AT 账号、批量导入、导出、迁移
   - [降智检测](#降智检测) — 固定账号检测、自动处置和逐次历史
   - [Claude OAuth 与原生 Messages](#claude-oauth-与原生-messages) — 导入、采样、模型与指纹配置
-  - [Kiro 账号与渠道设置](#kiro-账号与渠道设置) — 导入导出、Social / 设备码登录、额度与模型同步
   - [用量统计](#用量统计)
   - [API Key 管理](#api-key-管理)
   - [系统设置](#系统设置)
@@ -213,8 +212,6 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 
 完整的分阶段边界与后续实现顺序见 [Responses 兼容性说明](RESPONSES_COMPATIBILITY.md)。
 
-转发到 Codex 上游时，HTTP 请求体和 WebSocket 的每个 `response.create` 帧都支持顶层 `request_country`。默认情况下，省略字段会让上游自行判断请求来源，显式 `null` 表示国家未知并要求上游跳过来源推断，两位大写国家码（如 `"JP"`）会原样传递。同一 WebSocket 上的后续帧可更改或省略该字段。[默认国家码配置](CONFIGURATION.md#codex-responses-请求的默认国家码)
-
 默认模式保持现有兼容行为。若客户端需要检查已知有损转换，可发送 `X-Codex2API-Strict-Compatibility: true`，或设置 `CODEX_STRICT_RESPONSES_COMPAT=true`。网关按实际选中的原生 Codex 账号检查字段及 schema，无法保留时，尚未提交的 HTTP 请求返回 `400 unsupported_feature` 和字段列表，已提交的 SSE 返回 `response.failed`，WebSocket 返回 `status:400` 错误帧；Responses 中转不受 Codex 专用限制。`background:false/null` 等空操作可通过，`background:true`、非空 `conversation` 和 `store:true` 会拒绝；reasoning、格式别名、服务档位按实际转换语义校验。工具或输出 schema 约束会被清洗改变时同样拒绝。完整范围与限制见 [Responses 兼容性说明](RESPONSES_COMPATIBILITY.md)。
 
 **请求示例:**
@@ -314,17 +311,17 @@ OpenAI Responses 中转账号默认仍用 HTTP POST `/v1/responses`。账号设�
 
 **端点:** `POST /v1/images/generations`
 
-**说明:** OpenAI Images 兼容入口。外部请求使用 `gpt-image-2`、`gpt-image-2.5-flare`、`gpt-image-2.5-sunburst`、`gpt-image-2.6-flare`、`gpt-image-2.6-sunburst` 或 `gpt-image-2.6`（支持日期快照及 `-2k` / `-4k` 档位后缀），内部按 `CLIProxyAPI/` 与 `sub2api/` 的链路转换为 Codex `/responses`：主模型默认 `gpt-5.6-luna`（优先使用「系统设置 → Codex → 生图设置」中的文本模型，未配置时沿用环境变量 `CODEX_IMAGES_MAIN_MODEL`；被上游拒绝时按 `gpt-5.5` → `gpt-5.6-terra` → `gpt-5.6-sol` → `gpt-6-astra` 顺序换驱动重试），图像模型写入 `tools[0].model`。
+**说明:** OpenAI Images 兼容入口。外部请求使用 `gpt-image-2`、`gpt-image-2.5-flare` 或 `gpt-image-2.5-sunburst`（支持日期快照及 `-2k` / `-4k` 档位后缀），内部按 `CLIProxyAPI/` 与 `sub2api/` 的链路转换为 Codex `/responses`：主模型默认 `gpt-5.6-luna`（优先使用「系统设置 → Codex → 生图设置」中的文本模型，未配置时沿用环境变量 `CODEX_IMAGES_MAIN_MODEL`；被上游拒绝时按 `gpt-5.5` → `gpt-5.6-terra` → `gpt-5.6-sol` → `gpt-6-astra` 顺序换驱动重试），图像模型写入 `tools[0].model`。
 
 Images 入口及后台生图自动构造的 Codex 请求不强制 `reasoning.effort`，由上游选择默认值，避免显式 effort 被作为图片 complexity 拒绝。`reasoning.summary`、加密 reasoning 元数据及图片工具的 `quality` 参数保持原有语义。
 
 Codex/GPT 图片生成与编辑在 `stream=false` 或省略 `stream` 时，只返回最终 JSON，不发送 HTTP `102 Processing` 或提前提交 HTTP 200；`stream=true` 仍使用原有 SSE 心跳。`DOWNSTREAM_HTTP_KEEPALIVE_INTERVAL` 不再为这两个入口的 Codex/GPT 非流式分支提供保活。客户端和反向代理仍需给完整生成时长足够的等待/空闲超时；需要异步调用时可使用下文的图片任务接口。Grok 图片分支不受此例外影响，仍保留既有 102 行为。
 
-GPT Image 2.5 / 2.6 支持 `auto`、`low`、`medium`、`high`、`xhigh`、`max`。质量参数原样传给图片工具；工作台切回旧型号时会将 `xhigh` / `max` 调整为 `high`。省略模型仍默认使用 `gpt-image-2`。`-2k` / `-4k` 是本项目的尺寸与超分别名，发往上游前会剥掉该后缀。
+GPT Image 2.5 支持 `auto`、`low`、`medium`、`high`、`xhigh`、`max`。质量参数原样传给图片工具；工作台切回旧型号时会将 `xhigh` / `max` 调整为 `high`。省略模型仍默认使用 `gpt-image-2`。`-2k` / `-4k` 是本项目的尺寸与超分别名，发往上游前会剥掉该后缀。
 
 直接使用 `/v1/responses` 时，文本主控放在顶层 `model`，图片模型放在 `tools[].model`；显式文本主控优先于后台生图设置及 `CODEX_IMAGES_MAIN_MODEL`。顶层 `model` 直接填图像模型时，则使用后台配置的文本主控。工具模型省略时仍补为 `gpt-image-2`。
 
-Images 入口的 2.5/2.6 token 计费区分文本输入、图片输入与各自缓存：内置费率分别为 $5、$8、$1.25、$2 / 百万 token，图片输出 $30 / 百万 token（[官方价格](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)，2026-09-09 核对）。Flare/Sunburst 各有独立定价键，日期快照和尺寸别名使用对应基础型号费率；自定义覆盖优先。usage 日志新增 `image_input_tokens`、`image_output_tokens`、`cached_image_input_tokens`，是总输入/输出/缓存的子集，不重复计费。历史日志无法补回未记录的图片 token 明细。
+Images 入口的 2.5 token 计费区分文本输入、图片输入与各自缓存：内置费率分别为 $5、$8、$1.25、$2 / 百万 token，图片输出 $30 / 百万 token（[官方价格](https://developers.openai.com/api/docs/models/gpt-image-2.5-sunburst)，2026-09-09 核对）。Flare/Sunburst 各有独立定价键，日期快照和尺寸别名使用对应基础型号费率；自定义覆盖优先。usage 日志新增 `image_input_tokens`、`image_output_tokens`、`cached_image_input_tokens`，是总输入/输出/缓存的子集，不重复计费。历史日志无法补回未记录的图片 token 明细。
 
 **请求示例:**
 
@@ -1292,10 +1289,7 @@ Wrong-channel accounts return `400`; missing accounts return `404`; a concurrent
 | name          | string | 否   | 账号名称，批量时自动追加序号，默认 `account-{n}`       |
 | refresh_token | string | 是   | Refresh Token，多个用 `\n` 换行分隔（单次最多 100 个） |
 | proxy_url     | string | 否   | 代理 URL                                               |
-| timezone | string | 否 | 新建账号的 IANA 时区，如 `Asia/Tokyo`。留空表示不绑定，同批次的新账号共用该值。 |
 | custom_headers | object | 否   | 自定义上游请求头；`Chatgpt-Account-Id` 用于指定目标工作区 |
-
-时区在账号首次入池前生效。重复导入和重新授权会保留已有账号的时区。Agent Identity 单条及批量新增接口也接受相同的 `timezone` 字段。
 
 同一份 RT 可以分别以“默认工作区”和多个 `Chatgpt-Account-Id` 路由加入账号池。额度、冷却、调度和统计按账号记录独立维护；同一登录身份下的相同目标工作区仍会去重。
 
@@ -1365,7 +1359,6 @@ curl -X POST http://localhost:8080/api/admin/accounts \
 | name         | string | 否   | 账号名称，批量时自动追加序号，默认 `at-account-{n}`   |
 | access_token | string | 是   | Access Token，多个用 `\n` 换行分隔（单次最多 100 个） |
 | proxy_url    | string | 否   | 代理 URL                                              |
-| timezone | string | 否 | 新建账号的 IANA 时区，如 `Asia/Tokyo`。留空表示不绑定，同批次的新账号共用该值。 |
 | custom_headers | object | 否 | 自定义上游请求头；`Chatgpt-Account-Id` 用于指定目标工作区 |
 
 同一个 AT 可以按不同目标工作区保存为多条独立路由。对于无法从 AT 解析登录身份的情况，系统至少会按“AT 原文 + 目标工作区”避免同一路由重复写入。
@@ -1526,7 +1519,6 @@ data: {"type":"diagnostics","codex_diagnostics":{"model":"gpt-5.5","http_status"
 | file         | file   | 是   | 上传文件（最大 20MB，JSON 格式支持多文件） |
 | format       | string | 否   | 文件格式：`txt`（默认）、`json`、`at_txt`  |
 | proxy_url    | string | 否   | 代理 URL                                   |
-| timezone | string | 否 | 新建账号的 IANA 时区，如 `Asia/Tokyo`。留空表示不绑定，同批次的新账号共用该值。 |
 | import_proxy | bool   | 否   | 采用文件内携带的代理，并注册进代理池       |
 
 **import_proxy 说明:**
@@ -1766,52 +1758,6 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
   "trend": [{ "timestamp": "2024-01-01T00:00:00Z", "added": 5, "deleted": 0 }]
 }
 ```
-
-### Kiro 账号与渠道设置
-
-以下接口都挂在 `/api/admin` 鉴权中间件下，需要管理密钥。完整说明见 [KIRO.md](KIRO.md)。
-
-#### POST /api/admin/accounts/kiro/import
-
-自动识别 kiro.rs `credentials.json`、Kiro IDE `kiro-auth-token.json` 与 Kiro Account Manager 导出三种格式，逐个换票、补全 profile ARN、额度与模型目录后入库；单项失败不影响其他项。
-
-```json
-{ "content": "<JSON 字符串或对象>", "name": "可选", "proxy_url": "可选", "use_proxy_pool": false }
-```
-
-```json
-{ "imported": 1, "failed": 0, "results": [{ "index": 0, "id": 12, "email": "user@example.com" }] }
-```
-
-#### GET /api/admin/accounts/kiro/export
-
-`format=kam`（默认，Kiro Account Manager 格式）或 `format=kiro-rs`（kiro.rs `credentials.json` 数组）；`ids=1,2` 可选。响应含明文令牌，带 `Content-Disposition: attachment` 与 `Cache-Control: no-store, max-age=0`，可原样导回。
-
-#### POST /api/admin/accounts/kiro/social/auth-url 与 /social/exchange
-
-`auth-url` 返回 `{ "auth_url", "session", "redirect_uri" }`。用户在浏览器完成 Google / GitHub 登录后，把地址栏里的 localhost 回调 URL 提交给 `exchange`：
-
-```json
-{ "session": "<auth-url 返回的 session>", "callback_url": "http://127.0.0.1:3128/oauth/callback?code=...&state=..." }
-```
-
-#### POST /api/admin/accounts/kiro/device/start 与 /device/poll
-
-`start` 默认走 AWS Builder ID；Enterprise 传 `{ "start_url": "https://d-xxxx.awsapps.com/start", "region": "us-east-1" }`。返回 `{ "session", "user_code", "verification_uri_complete", "interval", "expires_at" }`。`poll` 传 `{ "session" }`，未授权时返回 `{ "status": "pending" }`，完成后返回 `{ "status": "completed", "id", "email" }`。
-
-#### POST /api/admin/accounts/:id/kiro/sync 与 /accounts/kiro/sync
-
-同步单个或全部启用的 Kiro 账号的额度快照与模型目录。单号返回 `{ "usage": {...}, "models": [...] }`，全量返回 `{ "refreshed", "failed" }`。后台每 30 分钟自动执行一次全量同步。
-
-#### GET / PUT /api/admin/settings/kiro
-
-```json
-{ "api_domain": "amazonaws", "cache_simulation": false }
-```
-
-`api_domain` 只能是 `amazonaws`（`q.{region}.amazonaws.com`）或 `kiro`（`*.kiro.dev`）；`cache_simulation` 开启后，上游未给精确用量时按 `cache_control` 断点估算 cache 读写拆分。PUT 只更新出现的字段，保存后立即生效。
-
-Kiro 渠道的连通性测试默认模型、测活内容与并发在 `PUT /api/admin/settings/channel-tests` 的 `kiro` 字段里配置；账号列表、启停、删除、测连、质量测试、降智检测、分组与代理沿用通用账号接口，渠道参数为 `channel=kiro`。
 
 ### 用量统计
 
@@ -2738,7 +2684,6 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 | 参数         | 类型   | 必填 | 说明                         |
 | ------------ | ------ | ---- | ---------------------------- |
 | proxy_url    | string | 否   | 账号使用的代理 URL           |
-| timezone | string | 否 | 新建账号的 IANA 时区。生成授权链接时选定，手动兑换和自动回调均沿用该值。 |
 | redirect_uri | string | 否   | 回调地址，默认为系统内置地址 |
 
 **响应:**
@@ -2890,16 +2835,6 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 
 - `global_rpm = 0`: 无限流
 - `global_rpm > 0`: 启用 RPM 限流
-
-### API Key 自助账号用量与重置卡
-
-管理员可在 API Key 页面设置全局账号查看、重置权限，并选择单个 Key 进一步收紧。两个全局开关默认关闭；Key 的默认设置继承全局，不能突破全局限制。查看关闭时重置也不可用。
-
-- `GET /api/admin/key-usage-account-permissions/:id` / `PUT /api/admin/key-usage-account-permissions/:id`：需要管理鉴权；`id=0` 为全局，其他值为 API Key ID。PUT 的 JSON 为 `{"view_enabled":true,"reset_enabled":false}`，两个字段均必填。
-- `GET /api/key-usage/accounts`：使用自助页的 API Key 鉴权，返回当前允许范围内的账号、套餐、状态、用量窗口、更新时间和缓存的重置卡数量；不返回上游凭据、代理或自定义请求头。未装载到运行池的账号显示为 `unavailable`，用量未知且不能重置；当这类账号的渠道或套餐权限无法确定时不予返回。已删除账号不在列表中。页面或查看权限关闭返回 404。
-- `POST /api/key-usage/accounts/:id/reset-credits`：使用同一 API Key 鉴权，必须传入每次操作唯一的 `Idempotency-Key` UUID；同一请求 ID 再次提交返回 409，不重复调用上游。需要查看和重置权限，并重新校验 Key、账号分组、渠道、套餐和账号反向授权。过期 Key 不能重置。只允许支持的 Codex 账号。操作消耗该账号的上游重置卡，会影响共享同一工作区的其他用户；近期已提交重置的工作区会暂时拒绝重复操作。网络异常后请先检查账号状态，勿盲目重试。
-
-自助账号列表的 5h/长窗口是账号运行态缓存，可能滞后；未知值为 `null`，不是 0。`long_window_seconds` 给出长窗口的实际上游周期（未知为 0）；部分套餐可能是月窗口，而非 7 天。API Key 的金额与请求预算和上游账号用量是不同的额度。空的 API Key 分组限制表示不限分组；公开账号信息之前，管理员应检查 Key 的授权范围。
 
 ### API Key 级窗口限额
 
@@ -3058,4 +2993,4 @@ Retry-After: 3600
 
 ### 自适应降智检测配置
 
-`PUT /api/admin/intelligence-check/settings` 支持 `adaptive_enabled`、`pause_initial_seconds`、`pause_max_seconds`、`recovery_initial_seconds`、`recovery_min_seconds`。仍需提交当前 `revision` 和完整设置。字段语义、边界与兼容规则见 [自适应降智检测](INTELLIGENCE_BACKOFF.md)。检测 bars 增加 `probe_phase`、`next_interval_seconds`、`passed_streak`、`next_due_at`，用于展示退避或恢复确认进度。账号限流或额度耗尽、自动检测正在等待恢复时，`probe_phase` 为 `quota_wait` 且不返回 `next_due_at`。
+`PUT /api/admin/intelligence-check/settings` 支持 `adaptive_enabled`、`pause_initial_seconds`、`pause_max_seconds`、`recovery_initial_seconds`、`recovery_min_seconds`。仍需提交当前 `revision` 和完整设置。字段语义、边界与兼容规则见 [自适应降智检测](INTELLIGENCE_BACKOFF.md)。检测 bars 增加 `probe_phase`、`next_interval_seconds`、`passed_streak`、`next_due_at`，用于展示退避或恢复确认进度。

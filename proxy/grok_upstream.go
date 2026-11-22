@@ -628,9 +628,6 @@ func ExecuteRelayStyleRequest(ctx context.Context, account *auth.Account, reques
 	if account.IsGrokAPI() {
 		return ExecuteGrokRequest(ctx, account, requestBody, proxyOverride, headers)
 	}
-	if account.IsKiro() {
-		return ExecuteKiroResponsesRequest(ctx, account, requestBody, proxyOverride, headers)
-	}
 	return ExecuteOpenAIResponsesRequest(ctx, account, requestBody, proxyOverride, headers)
 }
 

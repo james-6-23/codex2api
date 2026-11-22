@@ -14,9 +14,6 @@ func TestAntigravityPublicModelCatalogIsExact(t *testing.T) {
 		"gemini-3.7-flash-low", "gemini-3.7-flash-medium", "gemini-3.7-flash-high",
 		"gemini-3.8-flash-low", "gemini-3.8-flash-medium", "gemini-3.8-flash-high",
 		"gemini-4-argon-low", "gemini-4-argon-medium", "gemini-4-argon-high",
-		"gemini-4-neon-low", "gemini-4-neon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh",
-		"gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high",
-		"gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh",
 		"gemini-3.1-pro-low", "gemini-3.1-pro-high",
 		"claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high",
 		"claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high",
@@ -84,9 +81,6 @@ func TestAntigravityPublishedModelsProjectCompleteRawCatalog(t *testing.T) {
 		"gemini-3.5-flash-extra-low", "gemini-3.5-flash-low", "gemini-3-flash-agent",
 		"gemini-3.6-flash-low", "gemini-3.6-flash-medium", "gemini-3.6-flash-high",
 		"gemini-3.7-flash-tiered", "gemini-3.8-flash-tiered", "gemini-4-argon-high", "gemini-3.1-pro-low", "gemini-pro-agent",
-		"gemini-4-neon-low", "gemini-4-neon-medium", "gemini-4-neon-high", "gemini-4-neon-xhigh",
-		"gemini-4-carbon-low", "gemini-4-carbon-medium", "gemini-4-carbon-high",
-		"gemini-4-hydrogen-low", "gemini-4-hydrogen-medium", "gemini-4-hydrogen-high", "gemini-4-hydrogen-xhigh",
 		"claude-opus-5-5-low", "claude-opus-5-5-medium", "claude-opus-5-5-high",
 		"claude-sonnet-5-5-low", "claude-sonnet-5-5-medium", "claude-sonnet-5-5-high",
 		"claude-opus-4-6-thinking", "claude-sonnet-4-6", "gpt-oss-120b-medium",
@@ -95,11 +89,11 @@ func TestAntigravityPublishedModelsProjectCompleteRawCatalog(t *testing.T) {
 	if got := AntigravityPublishedModelIDs(raw); !reflect.DeepEqual(got, want) {
 		t.Fatalf("published raw projection = %v, want %v", got, want)
 	}
-	// The fallback catalog omits Claude and Gemini 4: their backing availability
+	// The fallback catalog omits Claude and Argon: their backing availability
 	// must be established by an account sync.
 	wantDefault := make([]string, 0, len(want))
 	for _, model := range want {
-		if !strings.HasPrefix(model, "claude-") && !strings.HasPrefix(model, "gemini-4-") {
+		if !strings.HasPrefix(model, "claude-") && !strings.HasPrefix(model, "gemini-4-argon-") {
 			wantDefault = append(wantDefault, model)
 		}
 	}

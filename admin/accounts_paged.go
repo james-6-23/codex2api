@@ -45,12 +45,6 @@ const (
 	// 永续循环,把数据库拖垮(表现为管理页整体变慢、接口超时)。统计本身
 	// 是 7 天累计值,分钟级陈旧完全可接受。
 	requestCountCacheTTL = 5 * time.Minute
-	// pageRequestCountRefreshTimeout bounds the detached usage_logs aggregation
-	// that fills request-count pills. The list handler does not wait on it.
-	// A page of accounts against a few hundred thousand log rows can take
-	// longer than the interactive request timeout; the result still has to
-	// be allowed to land in the cache.
-	pageRequestCountRefreshTimeout = 60 * time.Second
 )
 
 type accountListSnapshot struct {
@@ -109,7 +103,6 @@ type accountListSnapshotItem struct {
 	Antigravity         bool
 	Claude              bool
 	ClaudeAuthKind      string
-	KiroAuthKind        string
 	ClaudeUsageProbeAt  string
 	ClaudeUsageProbeErr string
 	SearchText          string
@@ -140,11 +133,6 @@ type accountListSummary struct {
 	RateLimited1h        int `json:"rate_limited_1h"`
 	Timeout15m           int `json:"timeout_15m"`
 	SelfServicePending   int `json:"self_service_pending"`
-
-	// KiroAuthKinds 按 social / idc / external_idp / api_key 计数，供 Kiro 页凭据类型筛选。
-	KiroAuthKinds map[string]int `json:"kiro_auth_kinds,omitempty"`
-	// HealthBanned 按健康档计数，与 health_tier=banned 筛选同口径（Banned 按 unauthorized 状态计数）。
-	HealthBanned int `json:"health_banned"`
 }
 
 type accountListDomainFacet struct {
@@ -234,8 +222,8 @@ func (h *Handler) resolveAccountOperationSelector(ctx context.Context, selector 
 		return nil, fmt.Errorf("selector is required")
 	}
 	channel := strings.ToLower(strings.TrimSpace(selector.Channel))
-	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude && channel != database.UpstreamChannelKiro {
-		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, claude, or kiro")
+	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude {
+		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, or claude")
 	}
 	snapshot, err := h.getAccountListSnapshot(ctx, channel)
 	if err != nil {
@@ -367,10 +355,7 @@ func validateAccountPageFilters(query accountPageQuery) error {
 	if !validStatuses[query.Status] {
 		return fmt.Errorf("unsupported status")
 	}
-	validAuthKinds := map[string]bool{
-		"": true, "all": true, auth.GrokAuthKindOAuth: true, auth.GrokAuthKindAPIKey: true, auth.ClaudeAuthKindSetupToken: true,
-		auth.KiroAuthKindSocial: true, auth.KiroAuthKindIdC: true, auth.KiroAuthKindExternalIdP: true,
-	}
+	validAuthKinds := map[string]bool{"": true, "all": true, auth.GrokAuthKindOAuth: true, auth.GrokAuthKindAPIKey: true, auth.ClaudeAuthKindSetupToken: true}
 	if !validAuthKinds[query.AuthKind] {
 		return fmt.Errorf("unsupported auth_kind")
 	}
@@ -725,7 +710,6 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 	isAntigravity := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
 	isOpenAIResponses := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	isClaude := strings.EqualFold(upstreamType, auth.UpstreamClaude)
-	isKiro := strings.EqualFold(upstreamType, auth.UpstreamKiro)
 	email := row.GetCredential("email")
 	if isOpenAIResponses && email == "" {
 		email = row.GetCredential("base_url")
@@ -762,7 +746,6 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 		SchedulerPriority: valueOrZero(accountSchedulerPriority(row)), OpenAIResponses: isOpenAIResponses,
 		Antigravity: isAntigravity, AntigravityAuthKind: antigravityAuthKind, Claude: isClaude,
 		ClaudeAuthKind:      claudeAuthKindForRow(row, isClaude),
-		KiroAuthKind:        kiroAuthKindForRow(row, isKiro),
 		ClaudeUsageProbeAt:  row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
 		ClaudeUsageProbeErr: row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
 	}
@@ -883,18 +866,6 @@ type requestCountCacheEntry struct {
 	today      map[int64]*database.AccountTimeRangeUsage
 	todayStart time.Time
 	expiresAt  time.Time
-	// includesBreakdown is set when counts were aggregated with error-code
-	// and success-model breakdowns, and covered lists every account that
-	// aggregation included (including accounts with zero matching logs).
-	includesBreakdown bool
-	covered           map[int64]struct{}
-}
-
-// pageRequestBreakdown is one visible page's detached request-count scan.
-type pageRequestBreakdown struct {
-	key       string
-	counts    map[int64]*database.AccountRequestCount
-	expiresAt time.Time
 }
 
 func requestCountCacheReady(entry *requestCountCacheEntry, now time.Time) bool {
@@ -931,8 +902,6 @@ func (h *Handler) getCachedRequestCountsNonBlocking(channel string, ids []int64)
 }
 
 func (h *Handler) refreshRequestCountsAsync(channel string, ids []int64) {
-	coveredIDs := uniquePositiveAccountIDs(ids)
-	includesBreakdown := len(coveredIDs) > 0 && len(coveredIDs) <= requestCountBatchSize
 	h.reqCountRefreshMu.Lock()
 	if h.reqCountRefreshing == nil {
 		h.reqCountRefreshing = make(map[string]bool)
@@ -942,10 +911,6 @@ func (h *Handler) refreshRequestCountsAsync(channel string, ids []int64) {
 		return
 	}
 	h.reqCountRefreshing[channel] = true
-	if h.reqCountRefreshBreakdown == nil {
-		h.reqCountRefreshBreakdown = make(map[string]bool)
-	}
-	h.reqCountRefreshBreakdown[channel] = includesBreakdown
 	h.reqCountRefreshMu.Unlock()
 	go func() {
 		defer func() {
@@ -956,8 +921,6 @@ func (h *Handler) refreshRequestCountsAsync(channel string, ids []int64) {
 		timeout := 15 * time.Second
 		if len(ids) > requestCountFullPoolScanMax {
 			timeout = requestCountBatchRefreshTimeout(accountRequestStatBatchCount(len(ids)))
-		} else if includesBreakdown {
-			timeout = pageRequestCountRefreshTimeout
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
@@ -972,7 +935,7 @@ func (h *Handler) refreshRequestCountsAsync(channel string, ids []int64) {
 		if elapsed := time.Since(started); elapsed > 2*time.Second {
 			log.Printf("账号请求统计刷新耗时 %s channel=%s ids=%d batches=%d(分批 7 天聚合)", elapsed.Round(time.Millisecond), channel, len(ids), accountRequestStatBatchCount(len(ids)))
 		}
-		h.storeRequestCountCache(channel, counts, today, todayStart, includesBreakdown, coveredIDs)
+		h.storeRequestCountCache(channel, counts, today, todayStart)
 		// stats_state 是烙在列表快照里的:快照重建时统计缓存还没刷完,烙出来
 		// 就是 stale,并一直随快照被返回。统计刷完后把本渠道快照标记为过期,
 		// 下一次轮询即触发重建、烙上 ready——否则要等快照自然过期再叠一轮轮询,
@@ -988,7 +951,7 @@ func (h *Handler) loadAccountRequestStats(ctx context.Context, channel string, i
 		return map[int64]*database.AccountRequestCount{}, map[int64]*database.AccountTimeRangeUsage{}, todayStart, nil
 	}
 	if len(ids) <= requestCountBatchSize {
-		counts, err := h.loadPageRequestCounts(ctx, ids)
+		counts, err := h.db.GetAccountRequestCountsByIDs(ctx, ids)
 		if err != nil {
 			return nil, nil, time.Time{}, err
 		}
@@ -1128,155 +1091,18 @@ func accountRequestStatBatchCount(idCount int) int {
 	return (idCount + requestCountBatchSize - 1) / requestCountBatchSize
 }
 
-func (h *Handler) storeRequestCountCache(channel string, counts map[int64]*database.AccountRequestCount, today map[int64]*database.AccountTimeRangeUsage, todayStart time.Time, includesBreakdown bool, coveredIDs []int64) {
-	var covered map[int64]struct{}
-	if includesBreakdown {
-		covered = make(map[int64]struct{}, len(coveredIDs))
-		for _, id := range coveredIDs {
-			if id > 0 {
-				covered[id] = struct{}{}
-			}
-		}
-	}
+func (h *Handler) storeRequestCountCache(channel string, counts map[int64]*database.AccountRequestCount, today map[int64]*database.AccountTimeRangeUsage, todayStart time.Time) {
 	h.reqCountMu.Lock()
 	if h.reqCountCache == nil {
 		h.reqCountCache = make(map[string]*requestCountCacheEntry)
 	}
 	h.reqCountCache[channel] = &requestCountCacheEntry{
-		counts:            counts,
-		today:             today,
-		todayStart:        todayStart,
-		expiresAt:         time.Now().Add(requestCountCacheTTL),
-		includesBreakdown: includesBreakdown,
-		covered:           covered,
+		counts:     counts,
+		today:      today,
+		todayStart: todayStart,
+		expiresAt:  time.Now().Add(requestCountCacheTTL),
 	}
 	h.reqCountMu.Unlock()
-}
-
-// loadPageRequestCounts is the usage_logs aggregation behind request-count
-// pills. The paged list must not call it on the request goroutine.
-func (h *Handler) loadPageRequestCounts(ctx context.Context, ids []int64) (map[int64]*database.AccountRequestCount, error) {
-	if h.pageRequestCountHook != nil {
-		return h.pageRequestCountHook(ctx, ids)
-	}
-	return h.db.GetAccountRequestCountsByIDs(ctx, ids)
-}
-
-// pageRequestCounts returns seven-day request counters for the visible page
-// without waiting on usage_logs. The bool is true when a detached scan is
-// still filling totals or error/model breakdowns; callers surface that as
-// stats_state so the client can poll.
-func (h *Handler) pageRequestCounts(channel string, pageIDs []int64) (map[int64]*database.AccountRequestCount, bool) {
-	if len(pageIDs) == 0 {
-		return map[int64]*database.AccountRequestCount{}, false
-	}
-	counts, covered := h.cachedPageRequestCounts(channel, pageIDs)
-	if covered {
-		return counts, false
-	}
-	h.reqCountRefreshMu.Lock()
-	inflightBreakdown := h.reqCountRefreshing[channel] && h.reqCountRefreshBreakdown[channel]
-	h.reqCountRefreshMu.Unlock()
-	if inflightBreakdown {
-		return counts, true
-	}
-	// The channel refresh may have stored breakdowns between the cache read
-	// and the in-flight check. Use them instead of scanning the page again.
-	if latest, ok := h.cachedPageRequestCounts(channel, pageIDs); ok {
-		return latest, false
-	}
-	if fresh := h.freshPageBreakdown(channel, pageIDs); fresh != nil {
-		return fresh, false
-	}
-	h.refreshPageBreakdownAsync(channel, pageIDs)
-	return counts, true
-}
-
-func (h *Handler) cachedPageRequestCounts(channel string, pageIDs []int64) (map[int64]*database.AccountRequestCount, bool) {
-	counts := make(map[int64]*database.AccountRequestCount, len(pageIDs))
-	h.reqCountMu.RLock()
-	defer h.reqCountMu.RUnlock()
-	entry := h.reqCountCache[channel]
-	if entry == nil {
-		return counts, false
-	}
-	for _, id := range pageIDs {
-		if count := entry.counts[id]; count != nil {
-			counts[id] = count
-		}
-	}
-	if !entry.includesBreakdown {
-		return counts, false
-	}
-	for _, id := range pageIDs {
-		if _, ok := entry.covered[id]; !ok {
-			return counts, false
-		}
-	}
-	return counts, true
-}
-
-func (h *Handler) freshPageBreakdown(channel string, pageIDs []int64) map[int64]*database.AccountRequestCount {
-	key := pageRequestBreakdownKey(channel, pageIDs)
-	h.pageBreakdownMu.Lock()
-	defer h.pageBreakdownMu.Unlock()
-	entry := h.pageBreakdown[channel]
-	if entry == nil || entry.key != key || !time.Now().Before(entry.expiresAt) {
-		return nil
-	}
-	return entry.counts
-}
-
-func (h *Handler) refreshPageBreakdownAsync(channel string, ids []int64) {
-	key := pageRequestBreakdownKey(channel, ids)
-	h.pageBreakdownMu.Lock()
-	if h.pageBreakdownInflight == nil {
-		h.pageBreakdownInflight = make(map[string]string)
-	}
-	if _, running := h.pageBreakdownInflight[channel]; running {
-		h.pageBreakdownMu.Unlock()
-		return
-	}
-	h.pageBreakdownInflight[channel] = key
-	h.pageBreakdownMu.Unlock()
-
-	copied := append([]int64(nil), ids...)
-	go func() {
-		defer func() {
-			h.pageBreakdownMu.Lock()
-			if h.pageBreakdownInflight[channel] == key {
-				delete(h.pageBreakdownInflight, channel)
-			}
-			h.pageBreakdownMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), pageRequestCountRefreshTimeout)
-		defer cancel()
-		counts, err := h.loadPageRequestCounts(ctx, copied)
-		if err != nil || counts == nil {
-			if err != nil {
-				log.Printf("刷新当前页账号请求统计失败 channel=%s(列表不等待该查询): %v", channel, err)
-			}
-			return
-		}
-		h.pageBreakdownMu.Lock()
-		if h.pageBreakdown == nil {
-			h.pageBreakdown = make(map[string]*pageRequestBreakdown)
-		}
-		h.pageBreakdown[channel] = &pageRequestBreakdown{
-			key: key, counts: counts, expiresAt: time.Now().Add(requestCountCacheTTL),
-		}
-		h.pageBreakdownMu.Unlock()
-	}()
-}
-
-func pageRequestBreakdownKey(channel string, ids []int64) string {
-	sorted := append([]int64(nil), ids...)
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
-	parts := make([]string, len(sorted))
-	for i, id := range sorted {
-		parts[i] = strconv.FormatInt(id, 10)
-	}
-	return channel + "\x00" + strings.Join(parts, ",")
 }
 
 // expireAccountListSnapshot 把指定渠道的列表快照标记为过期,但保留内容:
@@ -1309,10 +1135,6 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			if item.GrokPlanCategory != query.Plan {
 				return false
 			}
-		} else if channel == database.UpstreamChannelKiro {
-			if auth.KiroPlanKey(item.PlanType) != query.Plan {
-				return false
-			}
 		} else if !strings.EqualFold(strings.TrimSpace(item.PlanType), query.Plan) {
 			return false
 		}
@@ -1330,11 +1152,6 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 		} else if channel == database.UpstreamChannelAntigravity {
 			// Antigravity 渠道:oauth=Google OAuth 凭据,api_key=Gemini API Key。
 			if item.AntigravityAuthKind != query.AuthKind {
-				return false
-			}
-		} else if channel == database.UpstreamChannelKiro {
-			// Kiro 渠道:social / idc / external_idp / api_key。
-			if item.KiroAuthKind != query.AuthKind {
 				return false
 			}
 		} else if item.OpenAIResponses != (query.AuthKind == auth.GrokAuthKindAPIKey) {
@@ -1444,7 +1261,7 @@ func accountListOverloadPaused(item *accountListSnapshotItem) bool {
 }
 
 func accountListUnsampled(item *accountListSnapshotItem) bool {
-	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity || item.KiroAuthKind != "" {
+	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity {
 		return false
 	}
 	if item.Status == "unauthorized" || item.Status == "error" {
@@ -1658,8 +1475,6 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 			summary.Warm++
 		case "risky":
 			summary.Risky++
-		case "banned":
-			summary.HealthBanned++
 		}
 		if item.GrokAuthKind == auth.GrokAuthKindOAuth {
 			summary.OAuth++
@@ -1682,12 +1497,6 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 			} else {
 				summary.OAuth++
 			}
-		}
-		if item.KiroAuthKind != "" {
-			if summary.KiroAuthKinds == nil {
-				summary.KiroAuthKinds = map[string]int{}
-			}
-			summary.KiroAuthKinds[item.KiroAuthKind]++
 		}
 		if channel == database.UpstreamChannelCodex {
 			if item.OpenAIResponses {

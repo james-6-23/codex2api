@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/codex2api/auth"
-	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
@@ -183,47 +182,5 @@ func TestGetAccountLiveStateSerializesNullWindowsAndSkipsAntigravityFields(t *te
 	}
 	if got := string(antigravityItem["usage_percent_5h"]); got != "null" {
 		t.Fatalf("antigravity usage_percent_5h = %s, want null", got)
-	}
-}
-
-func TestAccountAutoPauseWindowProjection(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	store := auth.NewStore(nil, nil, nil)
-	account := &auth.Account{DBID: 7, AccessToken: "token", PlanType: "plus", Status: auth.StatusReady, HealthTier: auth.HealthTierHealthy}
-	account.UsagePercent5h, account.UsagePercent7d = 20, 95
-	account.UsagePercent5hValid, account.UsagePercent7dValid = true, true
-	account.Reset5hAt, account.Reset7dAt = time.Now().Add(time.Hour), time.Now().Add(24*time.Hour)
-	store.AddAccount(account)
-	store.SetGlobalAutoPauseThresholds(0.9, 0.9)
-	handler := &Handler{store: store}
-	for _, detailed := range []bool{false, true} {
-		response := handler.buildAccountResponse(&database.AccountRow{ID: 7}, account, nil, nil, nil, detailed)
-		if response.Status != "quota_paused" || response.QuotaPauseWindow != "7d" {
-			t.Fatalf("detail=%v: status=%s, window=%s", detailed, response.Status, response.QuotaPauseWindow)
-		}
-		if response.Reset7dAt != account.Reset7dAt.Format(time.RFC3339) {
-			t.Fatalf("wrong weekly reset: %s", response.Reset7dAt)
-		}
-		if response.AutoPause7dThreshold != nil {
-			t.Fatal("global threshold must not be mistaken for an account override")
-		}
-	}
-	for _, want := range []string{"7d", ""} {
-		if want == "" {
-			account.SetUsagePercent7d(20)
-		}
-		recorder := httptest.NewRecorder()
-		ctx, _ := gin.CreateTestContext(recorder)
-		ctx.Request = httptest.NewRequest(http.MethodGet, "/api/admin/accounts/live?ids=7", nil)
-		handler.GetAccountLiveState(ctx)
-		var response struct {
-			Accounts map[string]map[string]json.RawMessage `json:"accounts"`
-		}
-		if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
-			t.Fatal(err)
-		}
-		if got := string(response.Accounts["7"]["quota_pause_window"]); got != `"`+want+`"` {
-			t.Fatalf("live window=%s, want %q", got, want)
-		}
 	}
 }

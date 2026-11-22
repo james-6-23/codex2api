@@ -74,10 +74,6 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 	if account.IsAntigravityAPI() {
 		return errors.New("Antigravity 账号请使用专用配额刷新，不能执行 Codex wham 探针")
 	}
-	if account.IsKiro() {
-		_, _, err := h.syncKiroAccount(ctx, account.ID())
-		return err
-	}
 
 	// Grok 账号绝不能走 ChatGPT wham / codex responses 探针——
 	// 否则会用错误的上游把有效 token 判成 unauthorized 并封禁。

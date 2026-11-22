@@ -1,14 +1,9 @@
-import { getAccountQuotaPausePresentation } from "@/lib/accountQuotaPause";
-import { AccountCardSurface } from "../components/AccountCardSurface";
-import AccountUsageBar from "../components/AccountUsageBar";
-import APIKeyMultiSelect from "../components/APIKeyMultiSelect";
-import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
 import { useIntelligenceBars } from "../hooks/useIntelligenceBars";
 import AccountIntelligenceBar, { AccountIntelligenceActions } from "../components/AccountIntelligenceBar";
 import type { IntelligenceBar } from "../lib/intelligenceCheck";
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
-
+import "./accounts-cards.css";
 import { useLocation, useNavigate } from "react-router-dom";
 import { api, getAdminKey, resetAdminAuthState } from "../api";
 import type { ProxyRow } from "../api";
@@ -41,7 +36,6 @@ import {
 import GrokAccounts from "./GrokAccounts";
 import AntigravityAccounts from "./AntigravityAccounts";
 import ClaudeAccounts from "./ClaudeAccounts";
-import KiroAccounts from "./KiroAccounts";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
 import {
@@ -690,7 +684,6 @@ function TimezoneSelect({
   return (
     <div className="mt-3 space-y-1.5">
       <Select
-        aria-label={t("accounts.codexTimezoneTitle")}
         value={choice}
         disabled={disabled}
         onValueChange={(next) => {
@@ -715,7 +708,6 @@ function TimezoneSelect({
       ) : null}
       {custom ? (
         <Input
-          aria-label={t("accounts.codexTimezoneCustom")}
           value={value}
           disabled={disabled}
           onChange={(e) => onChange(e.target.value)}
@@ -723,29 +715,6 @@ function TimezoneSelect({
         />
       ) : null}
     </div>
-  );
-}
-
-function NewAccountTimezoneField({
-  value,
-  onChange,
-  disabled,
-}: Pick<TimezoneSelectProps, "value" | "onChange" | "disabled">) {
-  const { t } = useTranslation();
-  const [custom, setCustom] = useState(() => Boolean(value && !findClaudeTimezoneOption(value)));
-  return (
-    <fieldset className="mt-4 min-w-0">
-      <legend className="text-sm font-semibold text-muted-foreground">
-        {t("accounts.codexTimezoneTitle")}
-      </legend>
-      <TimezoneSelect
-        value={value}
-        custom={custom}
-        disabled={disabled}
-        onChange={onChange}
-        onCustomChange={setCustom}
-      />
-    </fieldset>
   );
 }
 
@@ -1872,9 +1841,7 @@ export default function Accounts() {
       ? "antigravity"
       : normalizedPath.endsWith("/accounts/claude")
         ? "claude"
-        : normalizedPath.endsWith("/accounts/kiro")
-          ? "kiro"
-          : "codex";
+        : "codex";
   const { channels: visibleChannels, isChannelVisible } = useVisibleChannels();
   // 设置页隐藏了某个渠道后，直接打开它的账号路由要回落到 Codex 视图。
   useEffect(() => {
@@ -1889,9 +1856,7 @@ export default function Accounts() {
             ? "/accounts/antigravity"
             : view === "claude"
               ? "/accounts/claude"
-              : view === "kiro"
-                ? "/accounts/kiro"
-                : "/accounts",
+              : "/accounts",
       );
     },
     [navigate],
@@ -1974,11 +1939,6 @@ export default function Accounts() {
     session_token: "",
     proxy_url: "",
   });
-  const [addTimezone, setAddTimezone] = useState("");
-  const openAddAccount = () => {
-    setAddTimezone("");
-    setShowAdd(true);
-  };
   const [addCustomHeadersText, setAddCustomHeadersText] = useState("");
   const [workspaceRouteID, setWorkspaceRouteID] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -2108,7 +2068,6 @@ export default function Accounts() {
   const [editOpenAIModelsLoading, setEditOpenAIModelsLoading] = useState(false);
   const [importing, setImporting] = useState(false);
   const [showImportPicker, setShowImportPicker] = useState(false);
-  const [importTimezone, setImportTimezone] = useState("");
   const [importProxyUrl, setImportProxyUrl] = useState("");
   const [importCustomHeadersText, setImportCustomHeadersText] = useState("");
   const [importWorkspaceRouteID, setImportWorkspaceRouteID] = useState("");
@@ -3644,28 +3603,34 @@ export default function Accounts() {
     }
   }, [allPageSelected, pagedAccountIds]);
 
-  const addTimezoneField = (
-    <NewAccountTimezoneField
-      value={addTimezone}
-      onChange={setAddTimezone}
-      disabled={oauthGenerating || submitting || agentIdentityFilesImporting}
-    />
-  );
-
   const handleAdd = async (credential: "rt" | "st" = "rt") => {
     const parsedCustomHeaders = parseCustomHeadersText(addCustomHeadersText);
     if (!parsedCustomHeaders.ok) {
       showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
       return;
     }
-    const payload: AddAccountRequest = {
-      ...addForm,
-      ...(credential === "st" ? { refresh_token: "" } : { session_token: "" }),
-      timezone: addTimezone.trim() || undefined,
-      allow_duplicate: allowDuplicate,
-      custom_headers: applyWorkspaceRouteHeader(parsedCustomHeaders.value, workspaceRouteID),
-      group_ids: importGroupIds,
-    };
+    const payload: AddAccountRequest =
+      credential === "st"
+        ? {
+            ...addForm,
+            refresh_token: "",
+            allow_duplicate: allowDuplicate,
+            custom_headers: applyWorkspaceRouteHeader(
+              parsedCustomHeaders.value,
+              workspaceRouteID,
+            ),
+            group_ids: importGroupIds,
+          }
+        : {
+            ...addForm,
+            session_token: "",
+            allow_duplicate: allowDuplicate,
+            custom_headers: applyWorkspaceRouteHeader(
+              parsedCustomHeaders.value,
+              workspaceRouteID,
+            ),
+            group_ids: importGroupIds,
+          };
     if (
       !payload.refresh_token?.trim() &&
       !payload.session_token?.trim()
@@ -3722,7 +3687,6 @@ export default function Accounts() {
       // 身份去重/合并结果（已有账号更新、重复跳过）。
       const res = await postAdminSSE("/accounts/at?stream=true", {
         ...atForm,
-        timezone: addTimezone.trim() || undefined,
         allow_duplicate: allowDuplicate,
         custom_headers: applyWorkspaceRouteHeader(
           parsedCustomHeaders.value,
@@ -3829,13 +3793,13 @@ export default function Accounts() {
       const items = Array.isArray(parsed) ? parsed : [parsed];
       const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
       const file = new File([blob], "session.json", { type: "application/json" });
-      const imported = await importFiles([file], "json", {
-        proxyUrl: sessionProxyUrl,
-        customHeadersText: addCustomHeadersText,
+      await importFiles(
+        [file],
+        "json",
+        sessionProxyUrl,
+        addCustomHeadersText,
         workspaceRouteID,
-        timezone: addTimezone,
-      });
-      if (!imported) return;
+      );
       setShowAdd(false);
       setSessionJson("");
       setAddCustomHeadersText("");
@@ -3860,7 +3824,6 @@ export default function Accounts() {
       const res = await api.importCodexAgentIdentity({
         auth_json: agentIdentityJson,
         proxy_url: agentIdentityProxyUrl.trim() || undefined,
-        timezone: addTimezone.trim() || undefined,
       });
       showToast(
         res.email
@@ -3892,7 +3855,6 @@ export default function Accounts() {
       const res = await api.batchImportCodexAgentIdentity({
         files,
         proxy_url: agentIdentityProxyUrl.trim() || undefined,
-        timezone: addTimezone.trim() || undefined,
       });
       setAgentIdentityFilesResult(res);
       if (res.imported > 0) {
@@ -4045,10 +4007,7 @@ export default function Accounts() {
   };
 
   const startOAuthSession = async () => {
-    const result = await api.generateOAuthURL({
-      proxy_url: oauthProxyUrl,
-      timezone: addTimezone.trim() || undefined,
-    });
+    const result = await api.generateOAuthURL({ proxy_url: oauthProxyUrl });
     setOauthSession(result);
     setOauthCallbackUrl("");
     setOauthStep("exchange");
@@ -4364,17 +4323,14 @@ export default function Accounts() {
   const importFiles = async (
     files: File[],
     format: "txt" | "json" | "json_at" | "at_txt",
-    options: {
-      proxyUrl?: string;
-      customHeadersText?: string;
-      workspaceRouteID?: string;
-      timezone?: string;
-    } = {},
+    proxyOverride?: string,
+    customHeadersText?: string,
+    workspaceOverride?: string,
   ) => {
-    const parsedCustomHeaders = parseCustomHeadersText(options.customHeadersText ?? "");
+    const parsedCustomHeaders = parseCustomHeadersText(customHeadersText ?? "");
     if (!parsedCustomHeaders.ok) {
       showToast("自定义请求头必须是 JSON 对象，且所有值必须是字符串", "error");
-      return false;
+      return;
     }
 
     // 单个文件超过后端导入上限(200MB)无法再切分,直接拒绝并提示。
@@ -4387,7 +4343,7 @@ export default function Accounts() {
         }),
         "error",
       );
-      return false;
+      return;
     }
 
     // 按累计大小把文件切成多批,每批控制在 IMPORT_BATCH_MAX_BYTES 内,避免单个
@@ -4428,14 +4384,12 @@ export default function Accounts() {
         const batch = batches[i];
         const formData = new FormData();
         if (format !== "txt") formData.append("format", format);
-        const trimmedImportProxy = (options.proxyUrl ?? importProxyUrl).trim();
+        const trimmedImportProxy = (proxyOverride ?? importProxyUrl).trim();
         if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
-        const timezone = options.timezone?.trim();
-        if (timezone) formData.append("timezone", timezone);
         if (carriesFileProxies) formData.append("import_proxy", "true");
         const routedHeaders = applyOptionalWorkspaceRouteHeader(
           parsedCustomHeaders.value,
-          options.workspaceRouteID,
+          workspaceOverride,
         );
         if (routedHeaders) {
           formData.append("custom_headers", JSON.stringify(routedHeaders));
@@ -4472,7 +4426,7 @@ export default function Accounts() {
                 : t("accounts.importFailed"),
               "error",
             );
-            return false;
+            return;
           }
           totals.current += data.total ?? 0;
           totals.total += data.total ?? 0;
@@ -4512,7 +4466,6 @@ export default function Accounts() {
       if (importedAccountIDs.length > 0) {
         void maybeOpenInviteGuide(importedAccountIDs);
       }
-      return true;
     } catch (error) {
       setImportProgress({
         show: true,
@@ -4528,7 +4481,6 @@ export default function Accounts() {
         t("accounts.importFailedWithReason", { error: getErrorMessage(error) }),
         "error",
       );
-      return false;
     } finally {
       setImporting(false);
     }
@@ -4665,12 +4617,6 @@ export default function Accounts() {
     }
   };
 
-  const fileImportOptions = {
-    customHeadersText: importCustomHeadersText,
-    workspaceRouteID: importWorkspaceRouteID.trim() || undefined,
-    timezone: importTimezone,
-  };
-
   const handleFileImport = async (event: ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(event.target.files ?? []);
     if (files.length === 0) return;
@@ -4679,7 +4625,13 @@ export default function Accounts() {
       return;
     }
     setShowImportPicker(false);
-    await importFiles(files, "txt", fileImportOptions);
+    await importFiles(
+      files,
+      "txt",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     if (fileInputRef.current) fileInputRef.current.value = "";
   };
 
@@ -4687,7 +4639,13 @@ export default function Accounts() {
     const files = event.target.files;
     if (!files || files.length === 0) return;
     setShowImportPicker(false);
-    await importFiles(Array.from(files), "json", fileImportOptions);
+    await importFiles(
+      Array.from(files),
+      "json",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     if (jsonInputRef.current) jsonInputRef.current.value = "";
   };
 
@@ -4695,7 +4653,13 @@ export default function Accounts() {
     const files = event.target.files;
     if (!files || files.length === 0) return;
     setShowImportPicker(false);
-    await importFiles(Array.from(files), "json_at", fileImportOptions);
+    await importFiles(
+      Array.from(files),
+      "json_at",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     if (jsonAtInputRef.current) jsonAtInputRef.current.value = "";
   };
 
@@ -4707,7 +4671,13 @@ export default function Accounts() {
       return;
     }
     setShowImportPicker(false);
-    await importFiles(files, "at_txt", fileImportOptions);
+    await importFiles(
+      files,
+      "at_txt",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     if (atFileInputRef.current) atFileInputRef.current.value = "";
   };
 
@@ -4735,10 +4705,22 @@ export default function Accounts() {
     );
 
     if (jsonFiles.length > 0) {
-      await importFiles(jsonFiles, "json", fileImportOptions);
+      await importFiles(
+        jsonFiles,
+        "json",
+        undefined,
+        importCustomHeadersText,
+        importWorkspaceRouteID.trim() || undefined,
+      );
     }
     if (txtFiles.length > 0) {
-      await importFiles(txtFiles, "txt", fileImportOptions);
+      await importFiles(
+        txtFiles,
+        "txt",
+        undefined,
+        importCustomHeadersText,
+        importWorkspaceRouteID.trim() || undefined,
+      );
     }
 
     if (folderInputRef.current) folderInputRef.current.value = "";
@@ -4757,8 +4739,13 @@ export default function Accounts() {
     }
     const blob = new Blob([JSON.stringify(items)], { type: "application/json" });
     const file = new File([blob], "paste.json", { type: "application/json" });
-    const imported = await importFiles([file], "json", fileImportOptions);
-    if (!imported) return;
+    await importFiles(
+      [file],
+      "json",
+      undefined,
+      importCustomHeadersText,
+      importWorkspaceRouteID.trim() || undefined,
+    );
     setShowPasteImport(false);
     setPasteImportText("");
   };
@@ -6348,14 +6335,13 @@ export default function Accounts() {
           ["grok", t("accounts.providerViewGrok")],
           ["antigravity", t("accounts.providerViewAntigravity")],
           ["claude", t("accounts.providerViewClaude")],
-          ["kiro", t("accounts.providerViewKiro")],
         ] as const
       ).filter(([key]) => visibleChannels.includes(key)),
     [t, visibleChannels],
   );
   const providerSwitcher = useMemo(() => (
     <div
-      className="relative grid w-full max-w-[680px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
+      className="relative grid w-full max-w-[560px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
       style={{ gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))` }}
     >
       <span
@@ -6439,14 +6425,6 @@ export default function Accounts() {
     );
   }
 
-  if (providerView === "kiro") {
-    return (
-      <div key="provider-kiro" className="animate-channel-switch-in">
-        <KiroAccounts headerSlot={providerSwitcher} />
-      </div>
-    );
-  }
-
   return (
     <div
       key="provider-codex"
@@ -6513,12 +6491,11 @@ export default function Accounts() {
             actionsBelow
             autoRefresh={accountAutoRefresh}
             titleAdornment={
-              <div className="flex max-w-full flex-wrap items-center gap-2">
-                <div className="min-w-0 max-w-full">{providerSwitcher}</div>
+              <div className="flex items-center gap-2">
+                {providerSwitcher}
                 <Select
-                  className="w-auto shrink-0"
+                  className="w-32"
                   compact
-                  dropdownMinWidth={192}
                   value={pageMode}
                   onValueChange={(value) => {
                     const mode = value === "personal" ? "personal" : "pool";
@@ -6528,18 +6505,9 @@ export default function Accounts() {
                     setPageMode(mode);
                   }}
                   options={[
-                    { value: "pool", label: t("accounts.pageModePool"), icon: Rows3 },
-                    { value: "personal", label: t("accounts.pageModePersonal"), icon: LayoutGrid },
-                  ].map(({ value, label, icon: Icon }) => ({
-                    value,
-                    label,
-                    content: (
-                      <span className="flex items-center gap-2 font-medium">
-                        <Icon aria-hidden="true" className="size-4 shrink-0" />
-                        {label}
-                      </span>
-                    ),
-                  }))}
+                    { value: "pool", label: t("accounts.pageModePool") },
+                    { value: "personal", label: t("accounts.pageModePersonal") },
+                  ]}
                 />
               </div>
             }
@@ -6671,7 +6639,7 @@ export default function Accounts() {
                       <Button
                         size="sm"
                         className="min-w-0 sm:flex-none"
-                        onClick={openAddAccount}
+                        onClick={() => setShowAdd(true)}
                       >
                         <Plus className="size-3.5" />
                         {t("accounts.addAccount")}
@@ -6716,10 +6684,7 @@ export default function Accounts() {
                         size="sm"
                         className="shrink-0"
                         disabled={importing}
-                        onClick={() => {
-                          setImportTimezone("");
-                          setShowImportPicker(true);
-                        }}
+                        onClick={() => setShowImportPicker(true)}
                       >
                         <Upload className="size-3.5" />
                         <span className="hidden md:inline">
@@ -7682,7 +7647,7 @@ export default function Accounts() {
                 emptyTitle={t("accounts.noData")}
                 emptyDescription={t("accounts.noDataDesc")}
                 action={
-                  <Button onClick={openAddAccount}>
+                  <Button onClick={() => setShowAdd(true)}>
                     {t("accounts.addAccount")}
                   </Button>
                 }
@@ -8274,7 +8239,6 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
-                {addTimezoneField}
                 {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
@@ -8308,7 +8272,6 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
-                {addTimezoneField}
                 {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
@@ -8345,7 +8308,6 @@ export default function Accounts() {
                       proxy_url: value,
                     })),
                 })}
-                {addTimezoneField}
                 {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
@@ -8376,7 +8338,6 @@ export default function Accounts() {
                   label: t("accounts.importProxyLabel"),
                   onChange: setSessionProxyUrl,
                 })}
-                {addTimezoneField}
                 {renderWorkspaceRouteInput()}
                 {renderCustomHeadersTextarea({
                   value: addCustomHeadersText,
@@ -8648,11 +8609,6 @@ export default function Accounts() {
                 <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-800 dark:border-blue-800 dark:bg-blue-950/50 dark:text-blue-300">
                   {t("accounts.agentIdentityHint")}
                 </div>
-                {renderProxyInput({
-                  value: agentIdentityProxyUrl,
-                  onChange: setAgentIdentityProxyUrl,
-                })}
-                {addTimezoneField}
                 <div>
                   <label className="block mb-2 text-sm font-semibold text-muted-foreground">
                     {t("accounts.agentIdentityJsonLabel")} *
@@ -8745,6 +8701,11 @@ export default function Accounts() {
                     </div>
                   ) : null}
                 </div>
+
+                {renderProxyInput({
+                  value: agentIdentityProxyUrl,
+                  onChange: setAgentIdentityProxyUrl,
+                })}
               </div>
             ) : (
               <div className="space-y-5">
@@ -8774,7 +8735,6 @@ export default function Accounts() {
                       placeholder: t("accounts.oauthProxyUrlPlaceholder"),
                       onChange: setOauthProxyUrl,
                     })}
-                    {addTimezoneField}
                   </>
                 ) : (
                   <>
@@ -8893,7 +8853,6 @@ export default function Accounts() {
               <p className="text-[11px] text-muted-foreground">
                 {t("accounts.importProxyHint")}
               </p>
-              <NewAccountTimezoneField value={importTimezone} onChange={setImportTimezone} />
               {renderCustomHeadersTextarea({
                 value: importCustomHeadersText,
                 onChange: setImportCustomHeadersText,
@@ -11315,9 +11274,7 @@ export default function Accounts() {
                                       ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300"
                                       : group.channel === "claude"
                                         ? "bg-orange-50 text-orange-700 dark:bg-orange-950 dark:text-orange-300"
-                                        : group.channel === "kiro"
-                                          ? "bg-purple-50 text-purple-700 dark:bg-purple-950 dark:text-purple-300"
-                                          : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
+                                        : "bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300"
                                 }`}
                               >
                                 <ChannelLogo channel={group.channel} size={11} />
@@ -11327,9 +11284,7 @@ export default function Accounts() {
                                     ? t("accounts.providerViewAntigravity")
                                     : group.channel === "claude"
                                       ? t("accounts.providerViewClaude")
-                                      : group.channel === "kiro"
-                                        ? t("accounts.providerViewKiro")
-                                        : t("accounts.providerViewCodex")}
+                                      : t("accounts.providerViewCodex")}
                               </span>
                               <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-semibold text-muted-foreground">
                                 {t("accounts.groupMembers")}{" "}
@@ -11423,7 +11378,7 @@ export default function Accounts() {
                       return (
                         <>
                           <div className="flex gap-2">
-                            {(["codex", "grok", "antigravity", "claude", "kiro"] as const).map((channel) => (
+                            {(["codex", "grok", "antigravity", "claude"] as const).map((channel) => (
                               <button
                                 key={channel}
                                 type="button"
@@ -11447,9 +11402,7 @@ export default function Accounts() {
                                     ? t("accounts.providerViewAntigravity")
                                     : channel === "claude"
                                       ? t("accounts.providerViewClaude")
-                                      : channel === "kiro"
-                                        ? t("accounts.providerViewKiro")
-                                        : t("accounts.providerViewCodex")}
+                                      : t("accounts.providerViewCodex")}
                               </button>
                             ))}
                           </div>
@@ -12673,6 +12626,136 @@ function filterExistingAPIKeyIDs(
   );
 }
 
+function formatAPIKeyOptionLabel(apiKey: APIKeyRow): string {
+  const name = apiKey.name?.trim() || `API Key #${apiKey.id}`;
+  return `${name} · ${apiKey.key}`;
+}
+
+function APIKeyMultiSelect({
+  options,
+  value,
+  disabled,
+  onChange,
+  allLabel,
+  selectedLabel,
+  placeholder,
+  emptyLabel,
+  emptyHint,
+}: {
+  options: APIKeyRow[];
+  value: number[];
+  disabled: boolean;
+  onChange: (value: number[]) => void;
+  allLabel: string;
+  selectedLabel: string;
+  placeholder: string;
+  emptyLabel: string;
+  emptyHint: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    };
+
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [open]);
+
+  const summary = value.length === 0 ? allLabel : selectedLabel;
+
+  const toggleOption = (id: number) => {
+    if (disabled) return;
+    if (value.includes(id)) {
+      onChange(value.filter((item) => item !== id));
+      return;
+    }
+    onChange([...value, id].sort((a, b) => a - b));
+  };
+
+  return (
+    <div ref={rootRef} className="relative">
+      <button
+        type="button"
+        disabled={disabled}
+        className={`flex w-full items-center justify-between gap-3 rounded-md border border-input bg-background px-3.5 py-3 text-left shadow-xs transition-[border-color,box-shadow] ${
+          disabled
+            ? "cursor-not-allowed opacity-70"
+            : "hover:border-primary/30 hover:bg-accent/40"
+        } ${open ? "border-primary/35 ring-[3px] ring-primary/10" : ""}`}
+        onClick={() => {
+          if (!disabled) {
+            setOpen((current) => !current);
+          }
+        }}
+      >
+        <div className="min-w-0">
+          <div className="truncate text-[15px] text-foreground">{summary}</div>
+          <div className="mt-0.5 truncate text-xs text-muted-foreground">
+            {disabled ? emptyHint : placeholder}
+          </div>
+        </div>
+        <ChevronDown
+          className={`size-4 shrink-0 text-muted-foreground transition-transform ${open ? "rotate-180" : ""}`}
+        />
+      </button>
+
+      {open ? (
+        <div className="absolute left-0 right-0 top-[calc(100%+0.5rem)] z-50 overflow-hidden rounded-lg border border-border bg-popover shadow-[0_18px_40px_hsl(222_30%_18%/0.12)] backdrop-blur-sm">
+          {options.length === 0 ? (
+            <div className="px-4 py-3 text-sm text-muted-foreground">
+              {emptyLabel}
+            </div>
+          ) : (
+            <div className="max-h-72 space-y-1 overflow-auto p-2">
+              {options.map((option) => {
+                const checked = value.includes(option.id);
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    className={`flex w-full items-center gap-3 rounded-md px-3 py-2.5 text-left transition-colors ${
+                      checked
+                        ? "bg-primary/10 text-primary"
+                        : "text-foreground hover:bg-accent/70"
+                    }`}
+                    onClick={() => toggleOption(option.id)}
+                  >
+                    <span
+                      className={`flex size-4 items-center justify-center rounded border ${checked ? "border-primary bg-primary text-primary-foreground" : "border-border bg-background text-transparent"}`}
+                    >
+                      <Check className="size-3" />
+                    </span>
+                    <span className="min-w-0 flex-1 truncate text-sm">
+                      {formatAPIKeyOptionLabel(option)}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 type ModelProbeStatus =
   | "pending"
   | "testing"
@@ -13025,6 +13108,22 @@ function SchedulerPriorityBadge({ account }: { account: AccountRow }) {
 // OpenAI reports the $100 Pro tier as "prolite" and the top Pro tier as
 // "promax" — functionally Pro plans with a different usage cap. Keep behavioral comparisons (usage windows, plan filter,
 // scheduler bias) aligned with the Go side by folding it into "pro".
+function normalizePlanType(planType?: string): string {
+  const raw = (planType || "").toLowerCase().trim();
+  if (raw === "prolite" || raw === "pro_lite" || raw === "pro-lite")
+    return "pro";
+  if (raw === "promax" || raw === "pro_max" || raw === "pro-max")
+    return "pro";
+  if (
+    raw === "ent26" ||
+    raw === "enterprise_cbp_usage_based" ||
+    raw === "enterprise_cbp_automation"
+  )
+    return "enterprise";
+  if (raw === "edu_plus" || raw === "edu_pro") return "edu";
+  return raw;
+}
+
 function isFutureTime(value?: string): boolean {
   if (!value) return false;
   const timestamp = Date.parse(value);
@@ -13092,8 +13191,6 @@ function isRateLimitedAccount(account: AccountRow): boolean {
 function getAccountRateLimitWindow(
   account: AccountRow,
 ): RateLimitWindow | null {
-  const pause = getAccountQuotaPausePresentation(account);
-  if (pause) return pause.window;
   const status = (account.status || "").toLowerCase();
   const reason = (account.cooldown_reason || "").toLowerCase();
   const explicitlyRateLimited =
@@ -13354,8 +13451,105 @@ function OperationProgressToast({
   );
 }
 
+function formatPlanLabel(planType?: string): string {
+  const raw = (planType || "").trim();
+  if (!raw) return "-";
+  const lower = raw.toLowerCase();
+  if (lower === "prolite" || lower === "pro_lite" || lower === "pro-lite")
+    return "ProLite";
+  if (lower === "promax" || lower === "pro_max" || lower === "pro-max")
+    return "ProMax";
+  if (lower === "self_serve_business_prolite") return "team5x";
+  if (lower === "self_serve_business_usage_based") return "Business";
+  if (lower === "ent26" || lower === "enterprise_cbp_usage_based")
+    return "Enterprise";
+  if (lower === "enterprise_cbp_automation") return "Enterprise (Automation)";
+  if (lower === "edu_plus") return "Edu Plus";
+  if (lower === "edu_pro") return "Edu Pro";
+  return raw;
+}
+
+function isWorkspacePlan(planType?: string): boolean {
+  const normalized = normalizePlanType(planType);
+  return (
+    normalized === "team" ||
+    normalized === "teamplus" ||
+    normalized === "k12" ||
+    normalized === "edu" ||
+    normalized === "education"
+  );
+}
+
 function accountWorkspaceId(account: Pick<AccountRow, "effective_workspace_id" | "token_workspace_id">): string {
   return (account.effective_workspace_id || account.token_workspace_id || "").trim();
+}
+
+function PlanBadge({
+  planType,
+  workspaceId,
+}: {
+  planType?: string;
+  workspaceId?: string;
+}) {
+  const { t } = useTranslation();
+  const label = formatPlanLabel(planType);
+  if (label === "-")
+    return <span className="text-[12px] text-muted-foreground">-</span>;
+
+  const style: Record<string, string> = {
+    pro: "bg-violet-100 text-violet-700 ring-violet-500/30 dark:bg-violet-500/20 dark:text-violet-300 dark:ring-violet-400/30",
+    prolite:
+      "bg-purple-50 text-purple-600 ring-purple-400/25 dark:bg-purple-500/15 dark:text-purple-300 dark:ring-purple-400/25",
+    promax:
+      "bg-fuchsia-100 text-fuchsia-700 ring-fuchsia-500/35 dark:bg-fuchsia-500/20 dark:text-fuchsia-300 dark:ring-fuchsia-400/35",
+    plus: "bg-blue-100 text-blue-700 ring-blue-500/30 dark:bg-blue-500/20 dark:text-blue-300 dark:ring-blue-400/30",
+    team: "bg-amber-100 text-amber-700 ring-amber-500/30 dark:bg-amber-500/20 dark:text-amber-300 dark:ring-amber-400/30",
+    k12: "bg-emerald-100 text-emerald-700 ring-emerald-500/30 dark:bg-emerald-500/20 dark:text-emerald-300 dark:ring-emerald-400/30",
+    free: "bg-zinc-100 text-zinc-500 ring-zinc-400/20 dark:bg-zinc-500/10 dark:text-zinc-400 dark:ring-zinc-400/15",
+  };
+
+  const normalized = normalizePlanType(planType);
+  const key =
+    normalized === "pro" && label === "ProLite"
+      ? "prolite"
+      : normalized === "pro" && label === "ProMax"
+        ? "promax"
+        : label === "team5x"
+        ? "team"
+        : normalized;
+  const cls =
+    style[key] ||
+    "bg-slate-100 text-slate-600 ring-slate-400/20 dark:bg-slate-500/15 dark:text-slate-300 dark:ring-slate-400/20";
+  const trimmedWorkspaceId = workspaceId?.trim() ?? "";
+  const badge = (
+    <span
+      className={`inline-flex min-w-0 max-w-full items-center truncate rounded-md px-2.5 py-1 text-[13px] font-semibold ring-1 ring-inset ${cls}`}
+    >
+      {label}
+    </span>
+  );
+  if (!isWorkspacePlan(planType) || !trimmedWorkspaceId) {
+    return badge;
+  }
+
+  return (
+    <TooltipProvider delayDuration={0} skipDelayDuration={0}>
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <span className="inline-flex min-w-0 max-w-full cursor-help">
+            {badge}
+          </span>
+        </TooltipTrigger>
+        <TooltipContent
+          side="top"
+          sideOffset={6}
+          className="max-w-[360px] font-mono text-[11px]"
+        >
+          {t("accounts.planWorkspaceId", { id: trimmedWorkspaceId })}
+        </TooltipContent>
+      </Tooltip>
+    </TooltipProvider>
+  );
 }
 
 function getDefaultScoreBias(planType?: string): number {
@@ -13936,7 +14130,7 @@ function AccountMobileCard({
   const showMetadata = showTags || showColumn("groups") || showColumn("proxy");
 
   return (
-    <AccountCardSurface
+    <article
       className={cn(
         "codex-account-card",
         isPersonal && "codex-account-card--personal",
@@ -14322,7 +14516,7 @@ function AccountMobileCard({
           onDelete={onDelete}
         />
       </footer>
-    </AccountCardSurface>
+    </article>
   );
 }
 
@@ -14420,14 +14614,70 @@ function hasUsageWindowDetail(detail?: AccountRow["usage_5h_detail"]): boolean {
   );
 }
 
+// 用量进度条颜色
+function usageBarColor(pct: number): string {
+  if (pct >= 90) return "bg-red-500";
+  if (pct >= 70) return "bg-amber-500";
+  return "bg-emerald-500";
+}
+
+// 标签 / 条 / 百分比 三列固定，避免 7d 与 spark 把进度条拉成不同长度。
+const USAGE_BAR_LABEL_CLASS =
+  "w-10 shrink-0 text-[11px] font-medium text-muted-foreground";
+const USAGE_BAR_TRACK_CLASS =
+  "account-usage-track h-1.5 w-[88px] shrink-0 rounded-full bg-muted overflow-hidden";
+const USAGE_BAR_META_CLASS =
+  "account-usage-meta text-[11px] font-medium text-muted-foreground mt-0.5 pl-[46px]";
+
 // 单行用量进度条
-const USAGE_BAR_LABEL_CLASS = "w-10 shrink-0 text-[11px] font-medium text-muted-foreground";
-function UsageBar({ label, pct, resetAt, detail }: { label: string; pct: number; resetAt?: string; detail?: AccountRow["usage_5h_detail"] }) {
+function UsageBar({
+  label,
+  pct,
+  resetAt,
+  detail,
+}: {
+  label: string;
+  pct: number;
+  resetAt?: string;
+  detail?: AccountRow["usage_5h_detail"];
+}) {
+  const resetTime = formatResetAt(resetAt);
   const { t } = useTranslation();
   const detailText = hasUsageWindowDetail(detail)
     ? `${formatCompactUsageNumber(detail?.requests)} ${t("accounts.usageReqUnit")} / ${formatCompactUsageNumber(detail?.tokens)} ${t("accounts.usageTokUnit")}`
-    : undefined;
-  return <AccountUsageBar label={label} pct={pct} resetAt={resetAt} detailText={detailText} />;
+    : "";
+  return (
+    <div className="account-usage-window">
+      <div className="flex items-center gap-1.5">
+        <span className={USAGE_BAR_LABEL_CLASS}>{label}</span>
+        <div
+          className={USAGE_BAR_TRACK_CLASS}
+          role="progressbar"
+          aria-label={label}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.max(0, Math.min(100, pct))}
+          aria-valuetext={`${pct.toFixed(1)}%`}
+        >
+          <div
+            className={`h-full rounded-full transition-all ${usageBarColor(pct)}`}
+            style={{ width: `${Math.min(100, pct)}%` }}
+          />
+        </div>
+        <span className="w-[42px] shrink-0 text-right text-[12px] font-semibold tabular-nums">
+          {pct.toFixed(1)}%
+        </span>
+      </div>
+      <div className="account-usage-window__details">
+        {detailText && <div className={USAGE_BAR_META_CLASS}>{detailText}</div>}
+        {resetTime && (
+          <div className={USAGE_BAR_META_CLASS} title={resetTime.title}>
+            ⏱ {resetTime.label}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function UsageWindowStat({
@@ -15082,8 +15332,6 @@ function formatOfficialUSD(value: number): string {
 function getAccountStatusCountdownUntil(
   account: AccountRow,
 ): string | undefined {
-  const pause = getAccountQuotaPausePresentation(account);
-  if (pause) return pause.resetAt;
   const status = account.status;
   const rateLimited =
     status === "rate_limited" ||
