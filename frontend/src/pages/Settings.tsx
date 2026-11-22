@@ -6,6 +6,7 @@ import { formatBeijingTime } from '../utils/time'
 import DisplayTimezoneSelect from '../components/DisplayTimezoneSelect'
 import PageHeader from '../components/PageHeader'
 import CodexClientVersionsPanel from '../components/CodexClientVersionsPanel'
+import BackgroundQuietHoursEditor from '../components/BackgroundQuietHoursEditor'
 import StateShell from '../components/StateShell'
 import { useDataLoader } from '../hooks/useDataLoader'
 import { useToast } from '../hooks/useToast'
@@ -2796,7 +2797,8 @@ export default function Settings() {
     test_model: '',
     test_content: 'hi',
     test_concurrency: 50,
-	    background_refresh_interval_minutes: 2,
+	    background_quiet_hours: [],
+    background_refresh_interval_minutes: 2,
 	    usage_probe_max_age_minutes: 10,
 	    usage_probe_concurrency: 16,
 	    usage_probe_responses_fallback_enabled: true,
@@ -4108,6 +4110,10 @@ export default function Settings() {
                         )}
                       </SettingField>
                     </div>
+                    <BackgroundQuietHoursEditor
+                      value={settingsForm.background_quiet_hours ?? []}
+                      onSave={(periods) => autoSaveSettingsPatch({ background_quiet_hours: periods })}
+                    />
                     <div className={SETTINGS_SWITCH_GRID}>
                       <SettingField label={t('settings.usageProbeResponsesFallback')} description={t('settings.usageProbeResponsesFallbackDesc')} layout="switch">
                         <Switch

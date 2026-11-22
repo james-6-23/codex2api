@@ -213,6 +213,8 @@ Messages 的 `tool_use.input` 必须使用对象，因此自由文本工具输�
 
 完整的分阶段边界与后续实现顺序见 [Responses 兼容性说明](RESPONSES_COMPATIBILITY.md)。
 
+转发到 Codex 上游时，HTTP 请求体和 WebSocket 的每个 `response.create` 帧都支持顶层 `request_country`。默认情况下，省略字段会让上游自行判断请求来源，显式 `null` 表示国家未知并要求上游跳过来源推断，两位大写国家码（如 `"JP"`）会原样传递。同一 WebSocket 上的后续帧可更改或省略该字段。[默认国家码配置](CONFIGURATION.md#codex-responses-请求的默认国家码)
+
 默认模式保持现有兼容行为。若客户端需要检查已知有损转换，可发送 `X-Codex2API-Strict-Compatibility: true`，或设置 `CODEX_STRICT_RESPONSES_COMPAT=true`。网关按实际选中的原生 Codex 账号检查字段及 schema，无法保留时，尚未提交的 HTTP 请求返回 `400 unsupported_feature` 和字段列表，已提交的 SSE 返回 `response.failed`，WebSocket 返回 `status:400` 错误帧；Responses 中转不受 Codex 专用限制。`background:false/null` 等空操作可通过，`background:true`、非空 `conversation` 和 `store:true` 会拒绝；reasoning、格式别名、服务档位按实际转换语义校验。工具或输出 schema 约束会被清洗改变时同样拒绝。完整范围与限制见 [Responses 兼容性说明](RESPONSES_COMPATIBILITY.md)。
 
 **请求示例:**

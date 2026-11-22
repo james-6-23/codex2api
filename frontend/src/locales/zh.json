@@ -494,7 +494,16 @@
     "hideSecret": "隐藏密钥",
     "addMoreFiles": "继续添加文件",
     "importingBatch": "正在导入第 {{current}}/{{total}} 批…",
-    "importBatchStopped": "已完成 {{done}}/{{total}} 批，后续批次失败：{{error}}"
+    "importBatchStopped": "已完成 {{done}}/{{total}} 批，后续批次失败：{{error}}",
+    "scoreBiasHint": "调度打分加减项（-200~200），越高越优先被选中；留空跟随默认。",
+    "keepConcurrencyHint": "开启后预热 / 风险层级仍按配置的基础并发调度，封禁仍为 0。若上游 429 本身就是并发限制，请勿开启。",
+    "dispatchCountLimitHint": "达到次数后账号进入 rate_limited 倒计时，到最早到期的 5h / 周配额窗口（各模型族取最早的那个）重置后恢复；读不到配额窗口时按 24 小时重置。留空或 0 关闭。",
+    "concurrencyTitle": "进行中 {{active}} 个请求 · 当前并发上限 {{limit}}（基础 {{base}}，{{health}}）",
+    "autoPauseHint": "按模型族分别判断（Gemini、Claude/GPT 各有自己的 5h 和周额度）：某一族用量达到阈值，只暂停这一族的请求，到该窗口重置后自动恢复；所有族都暂停时整个账号暂停。",
+    "autoPause5hThreshold": "5h 用量阈值(%)",
+    "autoPause7dThreshold": "周用量阈值(%)",
+    "autoPause5hDisabled": "禁用 5h 自动暂停",
+    "autoPause7dDisabled": "禁用周自动暂停"
   },
   "grok": {
     "pageTitle": "Grok 账号",
@@ -4709,6 +4718,16 @@
     }
   },
   "settings": {
+    "quietHours": "巡检暂停时段（北京时间 UTC+8）",
+    "quietHoursDesc": "每天在以下时段暂停自动 Token 刷新、用量探针、封禁恢复探测、定时连通性测试及官方用量同步。支持多个时段、跨午夜和重叠；包含开始，不包含结束。手动刷新、请求触发的鉴权修复和正常调用照常执行；已开始的任务允许完成。结束可填 24:00。",
+    "quietHoursEmpty": "未设置暂停时段，全天按巡检间隔运行。",
+    "quietHoursStart": "开始时间",
+    "quietHoursEnd": "结束时间",
+    "quietHoursAdd": "添加时段",
+    "quietHoursRemove": "移除",
+    "quietHoursSave": "保存暂停时段",
+    "quietHoursInvalid": "请填写 HH:MM 格式的有效时间，起止不能相同。全天暂停用 00:00–24:00。",
+    "quietHoursSaveFailed": "保存失败，请重试。",
     "schedulerModeReset5hFirst": "5 小时临近重置优先",
     "schedulerModeReset5hFirstDesc": "同一调度优先级和健康档位内，优先使用 5 小时窗口最早重置且仍有额度的 Codex 账号；额度耗尽、限流、无权限或并发已满时顺延。以已观测的重置时间为准，过期、未知或不适用的窗口沿用原调度兜底；不自动激活账号、不推算下一个周期。已有会话绑定继续保留；新会话首次选号优先于亲和散列。周限额和现有安全限制继续生效。",
     "codexClientVersions": {

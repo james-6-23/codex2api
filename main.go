@@ -57,6 +57,10 @@ func main() {
 		log.Fatalf("加载核心环境配置失败 (请检查 .env 文件): %v", err)
 	}
 	proxy.ConfigureDownstreamKeepaliveFromEnv()
+	if err := proxy.ConfigureCodexIdentityTimeFromEnv(); err != nil {
+		log.Fatal(err)
+	}
+	log.Printf("Codex identity UUIDv7 time cutoff: %d (0 = legacy)", proxy.CodexIdentityV2FromUnixMilli())
 	if err := proxy.ValidateCodexInstallationPins(); err != nil {
 		log.Fatal(err)
 	}
@@ -691,11 +695,12 @@ func main() {
 			return
 		}
 		c.JSON(200, gin.H{
-			"status":          "ok",
-			"build_version":   version.Current(),
-			"available":       available,
-			"total":           total,
-			"counts_complete": countsComplete,
+			"status":                         "ok",
+			"build_version":                  version.Current(),
+			"codex_identity_v2_from_unix_ms": proxy.CodexIdentityV2FromUnixMilli(),
+			"available":                      available,
+			"total":                          total,
+			"counts_complete":                countsComplete,
 		})
 	})
 

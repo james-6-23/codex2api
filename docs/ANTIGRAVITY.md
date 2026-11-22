@@ -47,6 +47,10 @@ The Codex model manifest folds available Argon tiers into one `gemini-4-argon` c
 
 As of 2026-10-14, [Google's model availability documentation](https://antigravity.google/docs/models/) lists Argon for Google AI Ultra and Enterprise, and Claude 5.5 for non-trial Google AI Pro subscriptions, Ultra, and Enterprise. Actual routing still requires the account's discovered backing model. Argon generation against a real upstream has not yet been verified by this project; the available local validation accounts are Pro accounts whose refreshed catalogs contain the disabled placeholder rather than the callable Argon backing.
 
+### Gemini 4 Neon, Carbon and Hydrogen
+
+The upstream catalog lists one backing per tier (`gemini-4-neon-low|medium|high|xhigh`, `gemini-4-carbon-low|medium|high`, `gemini-4-hydrogen-low|medium|high|xhigh`) and groups them in `groupedModels`. Each tier is published under its own ID, routed to the backing of the same name, and sent with `thinkingConfig.thinkingLevel` set to the tier (`LOW` … `XHIGH`). The level is required: verified 2026-11-20 on an Ultra account, the backing ID alone did not change thinking depth (neon low and xhigh both spent about 2.7k–3.3k thought tokens on the same prompt), while `LOW` versus `XHIGH` spent about 1.7k–2.0k versus 9.3k–9.8k. `/v1/models` and the Codex manifest fold the tiers into `gemini-4-neon`, `gemini-4-carbon` and `gemini-4-hydrogen` (default `high`, 1,048,576-token context). For families with an xhigh tier, `reasoning.effort` `xhigh` selects it; Carbon rejects `xhigh` on the bare alias. Hydrogen's role backings `gemini-4-hydrogen-tiered-high`, `-tiered-xhigh` (the catalog's `tieredModelIds` flash/pro slots) and `gemini-4-hydrogen-sonar` are hidden from public lists, like `gemini-3.8-flash-tiered`.
+
 ### Model pricing
 
 There is no verified Argon-specific built-in tariff. A custom or synchronized pricing entry for the billed model ID can override the gateway's default; without one, Argon uses the generic fallback estimate. Do not interpret that estimate as Google's published Argon price. After discovery, the model appears in the model-pricing page where an operator can configure its price.
@@ -110,6 +114,12 @@ ANTIGRAVITY_BALANCED_AFFINITY=false
 The switch is on by default. `0`, `false`, `off`, `none`, and `no` (case-insensitive) turn the weighting off and restore plain round-robin; any other value keeps it on. It is read once when the process starts, so changing it requires a restart.
 
 Cooldown correctness is independent of this switch and always applies: the public and shared wire keys are cooled together (the Gemini-family key is added when the quota bucket is exhausted), a shared wire/family deadline is never shortened by a briefer event on the same account, and cooldowns written by another instance are honoured during selection. Entries whose candidate pool excludes Antigravity accounts (`/v1/responses/compact`, native remote compaction, the `/v1/responses` WebSocket upgrade path) never apply the weighting, even behind an Antigravity key.
+
+## Per-account scheduling, auto-pause and request-count limits
+
+The Antigravity account editor exposes the same per-account scheduling fields as Codex accounts (score bias, base concurrency, scheduler priority, skip warm tier, keep concurrency on degrade, request-count limit, allowed API keys, tags). They are saved through the shared `PATCH /api/admin/accounts/:id/scheduler` endpoint.
+
+Antigravity quota is split by model family (Gemini, Claude/GPT, Argon), and each family has its own 5h and weekly bucket. The 5h / 7d auto-pause thresholds (account, then group, then global) are applied per family bucket: when one family's used share reaches the threshold before that bucket's trusted reset time, only requests for that family are filtered out until the reset; the whole account becomes unavailable only when every family is paused. Buckets without a trusted reset time are never paused by a threshold. The request-count limit resets at the earliest trusted 5h / weekly reset across families, falling back to 24 hours when the snapshot has no reset times.
 
 ## Supported gateway endpoints
 

@@ -1217,7 +1217,7 @@ func antigravityGeminiResolvedModel(model string, reasoning map[string]any) stri
 // Named-level models do not use the older numeric budget ladder. Fixed
 // suffixes win over conflicting effort; logical models use their own default.
 func antigravityGeminiThinkingLevel(requestedModel, wireModel string, reasoning map[string]any) (string, bool) {
-	if wireModel != "gemini-3.8-flash-tiered" && wireModel != "gemini-4-argon-high" {
+	if !antigravityNamedThinkingWire(wireModel) {
 		return "", false
 	}
 	if wireModel == "gemini-4-argon-high" && lowerStringField(reasoning, "effort") == "" {
@@ -1231,6 +1231,17 @@ func antigravityGeminiThinkingLevel(requestedModel, wireModel string, reasoning 
 		return "LOW", true
 	}
 	return strings.ToUpper(antigravityGeminiReasoningTier(reasoning)), true
+}
+
+// antigravityNamedThinkingWire covers Gemini 3.8 Flash's tiered backing and
+// every Gemini 4 tier backing in the public catalog. Raw pass-through IDs
+// outside the catalog get no injected thinking config.
+func antigravityNamedThinkingWire(wireModel string) bool {
+	if wireModel == "gemini-3.8-flash-tiered" {
+		return true
+	}
+	definition, ok := antigravityPublicModel(wireModel)
+	return ok && strings.HasPrefix(definition.id, "gemini-4-") && definition.wireModel == wireModel
 }
 
 func antigravityGeminiThinkingBudget(requestedModel, wireModel string, reasoning map[string]any) (int, bool) {

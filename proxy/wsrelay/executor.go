@@ -438,7 +438,7 @@ func (e *Executor) prepareWebsocketHeadersChecked(ctx context.Context, accessTok
 	// 都是 session-id / thread-id / x-client-request-id，也都不发 Conversation_id。
 	// legacy 档下该函数恢复旧的 Session_id + 清 Conversation_id 行为。
 	proxy.ApplyCodexSessionHeaders(headers, account, sessionID, ginHeaders, true)
-	for name, value := range account.GetCustomHeaders() {
+	for name, value := range proxy.CodexAccountCustomHeaders(account) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			continue

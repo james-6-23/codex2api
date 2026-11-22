@@ -2246,6 +2246,7 @@ export interface SystemSettings {
   test_model: string
   test_content: string
   test_concurrency: number
+  background_quiet_hours: { start: string; end: string }[]
   background_refresh_interval_minutes: number
 	  usage_probe_max_age_minutes: number
 	  usage_probe_concurrency: number

@@ -57,7 +57,12 @@ func (a *Account) dispatchCountConfig(now time.Time) (int64, time.Time) {
 
 func (a *Account) dispatchCountResetAtLocked(now time.Time) time.Time {
 	var resetAt time.Time
-	for _, candidate := range []time.Time{a.Reset5hAt, a.Reset7dAt} {
+	candidates := []time.Time{a.Reset5hAt, a.Reset7dAt}
+	if a.UpstreamType == UpstreamAntigravity {
+		// Antigravity 的 5h / 周窗口在配额快照里按模型族分桶，取最早到期的那个。
+		candidates = append(candidates, a.antigravityQuotaResetTimesLocked()...)
+	}
+	for _, candidate := range candidates {
 		if candidate.IsZero() || !candidate.After(now) {
 			continue
 		}
