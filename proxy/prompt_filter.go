@@ -71,6 +71,7 @@ func (h *Handler) inspectPromptFilterOpenAIWithBlockWriter(c *gin.Context, rawBo
 		return true
 	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
+		markPromptRequestAction(c, "block")
 		return true
 	}
 	// Skip envelope construction and body traversal when neither the local
@@ -151,6 +152,7 @@ func (h *Handler) inspectPromptFilterAnthropic(c *gin.Context, rawBody []byte, e
 		return true
 	}
 	if h.rejectLockedPromptConversation(c, cfg, signedBody, rawBody, endpoint, model) {
+		markPromptRequestAction(c, "block")
 		return true
 	}
 	if !promptfilter.RequiresRequestText(cfg) {
@@ -188,6 +190,7 @@ func (h *Handler) logPromptFilterVerdict(c *gin.Context, endpoint string, model 
 }
 
 func (h *Handler) logPromptGuardEvaluation(c *gin.Context, endpoint string, model string, source string, errorCode string, evaluation promptGuardEvaluation) {
+	markPromptRequestAction(c, string(evaluation.Verdict.Action))
 	h.capturePromptRuleLearningEvidence(c, endpoint, model, evaluation)
 	h.logPromptFilterVerdictWithDecision(c, endpoint, model, source, errorCode, evaluation.Verdict, &evaluation.Decision, &evaluation.Envelope)
 	h.scheduleDeferredPromptGuardAudit(c, endpoint, model, source, errorCode, evaluation)

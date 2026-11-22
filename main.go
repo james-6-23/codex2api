@@ -499,6 +499,9 @@ func main() {
 	deviceCfg := proxy.DeviceProfileConfigFromEnv(os.Getenv)
 	handler := proxy.NewHandler(store, db, cfg, deviceCfg)
 	handler.SetRuntimeCache(tc)
+	handler.StartPromptRequestRetention(backgroundCtx)
+	adminHandler.ConfigurePromptRequestRecords(cfg.PromptRequestRecording)
+	adminHandler.StartPromptTraceExport(backgroundCtx, cfg.PromptTraceExport)
 	defer handler.CloseAPIKeyAuthCache()
 	adminHandler.SetAPIKeyAuthCacheHandler(handler)
 

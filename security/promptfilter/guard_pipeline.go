@@ -489,6 +489,11 @@ type applicationTemplateSignature struct {
 	SuffixSHA256 string
 }
 
+// IsCodexCheckpointPrompt matches the fixed text emitted for a Codex checkpoint.
+func IsCodexCheckpointPrompt(text string) bool {
+	return strings.TrimSpace(text) == checkpointPrompt
+}
+
 var ambientApplicationSignatures = []applicationTemplateSignature{{
 	PrefixSHA256: ambientPrefixSHA256,
 	SuffixSHA256: ambientSuffixSHA256,
@@ -549,7 +554,7 @@ func classifyKnownApplicationPrompt(envelope RequestEnvelope, globalMode string,
 		}
 		return envelope, "ambient_safety_drift"
 	}
-	if strings.TrimSpace(text) == strings.TrimSpace(checkpointPrompt) {
+	if IsCodexCheckpointPrompt(text) {
 		return replaceSingleCurrentUserWithApplicationCandidate(envelope, currentIndex, ""), "context_checkpoint"
 	}
 	if candidate, ok := parseCompactionSummaryPrompt(text); ok {

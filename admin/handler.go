@@ -66,6 +66,9 @@ type Handler struct {
 	refreshAccount           func(context.Context, int64) error
 	probeUsage               func(context.Context, *auth.Account) error
 
+	promptRequestRecording bool
+	promptTraceExporter    *promptTraceExporter
+
 	codexUsageRefreshRunning atomic.Bool
 
 	// executeClaudeUsageProbe is injectable for tests; production uses the
@@ -1346,6 +1349,14 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/settings/background-upload", h.UploadBackgroundAsset)
 	api.POST("/settings/image-storage/test", h.TestImageStorageConnection)
 	api.GET("/prompt-filter/logs", h.ListPromptFilterLogs)
+	api.GET("/prompt-filter/requests", h.ListPromptRequests)
+	api.GET("/prompt-filter/request-conversations", h.ListPromptRequestConversations)
+	api.GET("/prompt-filter/request-conversations/:id", h.ListPromptRequestRounds)
+	api.GET("/prompt-filter/request-conversations/:id/tasks", h.ListPromptRequestTasks)
+	api.GET("/prompt-filter/request-tasks/:id", h.GetPromptRequestTask)
+	api.PUT("/prompt-filter/requests/retention", h.UpdatePromptRequestRetention)
+	api.GET("/prompt-filter/requests/:id", h.GetPromptRequest)
+	api.GET("/prompt-filter/requests/:id/images/:image", h.GetPromptRequestImage)
 	api.GET("/prompt-filter/logs/match", h.MatchPromptFilterLog)
 	api.DELETE("/prompt-filter/logs", h.ClearPromptFilterLogs)
 	api.GET("/prompt-filter/retention", h.GetPromptLogRetention)

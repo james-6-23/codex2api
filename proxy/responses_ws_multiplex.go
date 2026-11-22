@@ -88,7 +88,7 @@ func withResponsesWSStreamID(payload []byte, streamID string) []byte {
 }
 
 func writeResponsesWSErrorForContext(c *gin.Context, conn *websocket.Conn, err *api.APIError) error {
-	return writeResponsesWSErrorForStream(conn, err, c.GetString(responsesWSStreamContextKey), responsesWSWriteTimeout)
+	return writeResponsesWSRecordedError(c, conn, err, c.GetString(responsesWSStreamContextKey), responsesWSWriteTimeout)
 }
 
 // Each lane gets frame-local Gin state, headers and an inert HTTP writer:

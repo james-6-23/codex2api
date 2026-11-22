@@ -31,7 +31,7 @@ func (h *Handler) RegisterExternalImageRoutes(r *gin.Engine, imageProxy *proxy.H
 	h.imageProxy = imageProxy
 	v1 := r.Group("/v1")
 	v1.Use(imageProxy.APIKeyAuthMiddleware())
-	v1.POST("/images/jobs", h.CreateExternalImageJob)
+	v1.POST("/images/jobs", imageProxy.RecordModelRequest, h.CreateExternalImageJob)
 	v1.GET("/images/jobs/:id", h.GetExternalImageJob)
 	v1.POST("/images/jobs/result", h.GetExternalImageJobResults)
 	v1.POST("/images/jobs/results", h.GetExternalImageJobResults)

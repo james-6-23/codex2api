@@ -502,6 +502,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 		if err := db.ensurePromptRuleCandidatesTable(ctx); err != nil {
 			return nil, fmt.Errorf("创建提示词规则候选表失败: %w", err)
 		}
+		if err := db.ensurePromptRequestTable(ctx); err != nil {
+			return nil, fmt.Errorf("initialize Prompt request records: %w", err)
+		}
 		if err := db.ensurePromptPolicyIncidentsTable(ctx); err != nil {
 			return nil, fmt.Errorf("创建提示词策略事件表失败: %w", err)
 		}

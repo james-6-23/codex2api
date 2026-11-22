@@ -331,6 +331,15 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 	resetPromptRequestSecurityFrame(c)
 	resetPromptPolicyRequestCorrelationID(c)
 	resetUpstreamRequestTrace(c)
+	if h.promptRequestRecordingEnabled() {
+		finish := h.beginPromptRequest(c, rawPayload, "application/json", "websocket")
+		defer func() {
+			if returnErr != nil && c.GetString(promptRequestAction) != "block" {
+				markPromptRequestAction(c, "error")
+			}
+			finish(0)
+		}()
+	}
 	quotaParentRequest := c.Request
 	if err := h.refreshAPIKeyModelRequestQuotaTurn(c); err != nil {
 		return writeResponsesWSErrorForContext(c, conn, apiKeyModelRequestError(err).apiErr)
@@ -392,6 +401,7 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 		}
 	}
 	if blocked, delegated := h.inspectPromptFilterOpenAIForWebSocket(c, conn, rawBody, auditEndpoint, model, policyEventID); blocked {
+		markPromptRequestAction(c, "block")
 		// A verified NewAPI connection owns warning/ban state. Keep the upstream
 		// WebSocket alive after returning the signed decision so NewAPI can show
 		// the first warning and accept another frame; it closes both peers only
@@ -400,6 +410,9 @@ func (h *Handler) forwardResponsesWebSocketTurn(c *gin.Context, conn *websocket.
 			return nil
 		}
 		return newResponsesWSCloseError(websocket.ClosePolicyViolation, "prompt blocked", nil)
+	}
+	if c.GetString(promptRequestAction) == "" {
+		markPromptRequestAction(c, "allow")
 	}
 
 	rawBody = normalizeServiceTierField(rawBody)
@@ -1247,7 +1260,9 @@ func (h *Handler) streamResponsesWSUpstream(
 				finishLineageCommit = options.lineage.beginCommit(gjson.GetBytes(payload, "response.id").String(), lineageScope)
 			}
 		}
-		return writeResponsesWSObservedMessage(c.Request.Context(), conn, payload)
+		err := writeResponsesWSObservedMessage(c.Request.Context(), conn, payload)
+		observePromptResponseWS(c, payload, err)
+		return err
 	}
 	// 首 token 前收到不可重试的 response.failed 时置位:不把原始失败帧透传给客户端,
 	// 循环外改写 error 帧并按错误类别用非正常 close code 关闭,
@@ -1913,6 +1928,10 @@ func writeResponsesWSErrorWithin(conn *websocket.Conn, apiErr *api.APIError, tim
 }
 
 func writeResponsesWSErrorForStream(conn *websocket.Conn, apiErr *api.APIError, streamID string, timeout time.Duration) error {
+	return writeResponsesWSRecordedError(nil, conn, apiErr, streamID, timeout)
+}
+
+func writeResponsesWSRecordedError(c *gin.Context, conn *websocket.Conn, apiErr *api.APIError, streamID string, timeout time.Duration) error {
 	if apiErr == nil {
 		apiErr = api.NewAPIError(api.ErrCodeServerError, "Internal server error", api.ErrorTypeServer)
 	}
@@ -1933,7 +1952,11 @@ func writeResponsesWSErrorForStream(conn *websocket.Conn, apiErr *api.APIError, 
 	if conn == nil {
 		return errResponsesWSClientGone
 	}
-	return writeResponsesWSPayload(conn, payload, timeout)
+	err = writeResponsesWSPayload(conn, payload, timeout)
+	if c != nil {
+		observePromptResponseWS(c, payload, err)
+	}
+	return err
 }
 
 func responsesWSClientUpstreamAPIError(apiErr *api.APIError, hideUpstreamErrors bool) *api.APIError {
