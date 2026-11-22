@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Ban, Check, ChevronDown, Eye } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AccountGroup } from "../types";
-import { applyManualScroll } from "../lib/selectScroll";
+import { applyManualScroll, applyWheelScroll } from "../lib/selectScroll";
 
 const FALLBACK_GROUP_COLOR = "#2563eb";
 
@@ -111,7 +111,7 @@ export default function AccountGroupFilterSelect({
       const list = listRef.current;
       const target = event.target as Node | null;
       if (!list || !target || !list.contains(target)) return;
-      if (applyManualScroll(list, event.deltaX, event.deltaY)) {
+      if (applyWheelScroll(list, event)) {
         event.preventDefault();
       }
     };

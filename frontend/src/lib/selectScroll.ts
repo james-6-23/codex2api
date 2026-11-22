@@ -39,3 +39,20 @@ export function applyManualScroll(
   }
   return scrolled;
 }
+
+// Wheel deltas may be pixels, lines, or pages. Read deltaMode before the
+// delta properties: some browsers adjust the units for legacy listeners.
+export function applyWheelScroll(el: HTMLElement, event: WheelEvent): boolean {
+  switch (event.deltaMode) {
+    case 1: { // DOM_DELTA_LINE
+      const css = el.ownerDocument.defaultView?.getComputedStyle(el);
+      const height = Number.parseFloat(css?.lineHeight ?? "");
+      const line = Number.isFinite(height) ? height : 16; // line-height: normal
+      return applyManualScroll(el, event.deltaX * line, event.deltaY * line);
+    }
+    case 2: // DOM_DELTA_PAGE
+      return applyManualScroll(el, event.deltaX * el.clientWidth, event.deltaY * el.clientHeight);
+    default: // DOM_DELTA_PIXEL
+      return applyManualScroll(el, event.deltaX, event.deltaY);
+  }
+}

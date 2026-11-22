@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import type { APIKeyRow } from "../types";
-import { applyManualScroll } from "../lib/selectScroll";
+import { applyManualScroll, applyWheelScroll } from "../lib/selectScroll";
 
 function formatAPIKeyOptionLabel(apiKey: APIKeyRow): string {
   const name = apiKey.name?.trim() || `API Key #${apiKey.id}`;
@@ -55,7 +55,7 @@ export default function APIKeyMultiSelect({
       const list = listRef.current;
       const target = event.target as Node | null;
       if (!list || !target || !list.contains(target)) return;
-      if (applyManualScroll(list, event.deltaX, event.deltaY)) {
+      if (applyWheelScroll(list, event)) {
         event.preventDefault();
       }
     };

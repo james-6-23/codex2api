@@ -3,7 +3,7 @@ import { Check, Columns3, RotateCcw } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
-import { applyManualScroll } from "@/lib/selectScroll";
+import { applyManualScroll, applyWheelScroll } from "@/lib/selectScroll";
 
 interface ColumnSettingsMenuProps<Column extends string> {
   columns: Record<Column, boolean>;
@@ -36,7 +36,7 @@ export default function ColumnSettingsMenu<Column extends string>({
       const el = contentRef.current;
       const target = event.target as Node | null;
       if (!el || !target || !el.contains(target)) return;
-      if (applyManualScroll(el, event.deltaX, event.deltaY)) {
+      if (applyWheelScroll(el, event)) {
         event.preventDefault();
       }
     };
