@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { applyManualScroll } from "@/lib/selectScroll";
 
 export interface HeaderActionMenuItem {
   key: string;
@@ -47,6 +48,54 @@ export function HeaderActionMenu({
       ? [{ key: "default", items }]
       : [];
 
+  // Radix DropdownMenu 通过 Portal 挂到 body，处于 Dialog 内时 remove-scroll
+  // 会拦截原生 wheel/touchmove，这里手动驱动 Content 滚动（手机端）。
+  const contentRef = useRef<HTMLDivElement>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
+
+  useEffect(() => {
+    const handleWheel = (event: WheelEvent) => {
+      const el = contentRef.current;
+      const target = event.target as Node | null;
+      if (!el || !target || !el.contains(target)) return;
+      if (applyManualScroll(el, event.deltaX, event.deltaY)) {
+        event.preventDefault();
+      }
+    };
+    const handleTouchStart = (event: TouchEvent) => {
+      const el = contentRef.current;
+      const target = event.target as Node | null;
+      if (!el || !target || !el.contains(target)) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      const el = contentRef.current;
+      const start = touchStartRef.current;
+      if (!el || !start) return;
+      const target = event.target as Node | null;
+      if (!target || !el.contains(target)) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      const deltaX = start.x - touch.clientX;
+      const deltaY = start.y - touch.clientY;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+      if (applyManualScroll(el, deltaX, deltaY)) {
+        event.preventDefault();
+      }
+    };
+    document.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    document.addEventListener("touchstart", handleTouchStart, { passive: true, capture: true });
+    document.addEventListener("touchmove", handleTouchMove, { passive: false, capture: true });
+    return () => {
+      document.removeEventListener("wheel", handleWheel, true);
+      document.removeEventListener("touchstart", handleTouchStart, true);
+      document.removeEventListener("touchmove", handleTouchMove, true);
+      touchStartRef.current = null;
+    };
+  }, []);
+
   return (
     <DropdownMenu.Root open={open} onOpenChange={setOpen} modal={false}>
       <DropdownMenu.Trigger asChild>
@@ -69,6 +118,7 @@ export function HeaderActionMenu({
       </DropdownMenu.Trigger>
       <DropdownMenu.Portal>
         <DropdownMenu.Content
+          ref={contentRef}
           data-slot="action-menu-popover"
           align={align}
           sideOffset={8}

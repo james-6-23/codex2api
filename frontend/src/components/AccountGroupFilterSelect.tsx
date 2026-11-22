@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Ban, Check, ChevronDown, Eye } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import type { AccountGroup } from "../types";
+import { applyManualScroll } from "../lib/selectScroll";
 
 const FALLBACK_GROUP_COLOR = "#2563eb";
 
@@ -87,6 +88,8 @@ export default function AccountGroupFilterSelect({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -103,11 +106,51 @@ export default function AccountGroupFilterSelect({
       }
     };
 
+    // 手机端在弹窗内下拉列表可能因 remove-scroll 无法原生滚动，手动驱动。
+    const handleWheel = (event: WheelEvent) => {
+      const list = listRef.current;
+      const target = event.target as Node | null;
+      if (!list || !target || !list.contains(target)) return;
+      if (applyManualScroll(list, event.deltaX, event.deltaY)) {
+        event.preventDefault();
+      }
+    };
+    const handleTouchStart = (event: TouchEvent) => {
+      const list = listRef.current;
+      const target = event.target as Node | null;
+      if (!list || !target || !list.contains(target)) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      const list = listRef.current;
+      const start = touchStartRef.current;
+      if (!list || !start) return;
+      const target = event.target as Node | null;
+      if (!target || !list.contains(target)) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      const deltaX = start.x - touch.clientX;
+      const deltaY = start.y - touch.clientY;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+      if (applyManualScroll(list, deltaX, deltaY)) {
+        event.preventDefault();
+      }
+    };
+
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleEscape);
+    document.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    document.addEventListener("touchstart", handleTouchStart, { passive: true, capture: true });
+    document.addEventListener("touchmove", handleTouchMove, { passive: false, capture: true });
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
+      document.removeEventListener("wheel", handleWheel, true);
+      document.removeEventListener("touchstart", handleTouchStart, true);
+      document.removeEventListener("touchmove", handleTouchMove, true);
+      touchStartRef.current = null;
     };
   }, [open]);
 
@@ -195,7 +238,7 @@ export default function AccountGroupFilterSelect({
           {groups.length > 0 ? (
             <>
               <div className="border-t border-border" />
-              <div className="max-h-64 space-y-0.5 overflow-auto p-1.5">
+              <div ref={listRef} className="max-h-64 space-y-0.5 overflow-auto p-1.5">
                 {groups.map((group) => {
                   const state = groupStateOf(value, group.id);
                   const color = normalizeGroupColor(group.color);

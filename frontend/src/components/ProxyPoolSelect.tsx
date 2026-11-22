@@ -54,6 +54,7 @@ export function ProxyPoolSelect({
   const [position, setPosition] = useState<DropdownPosition | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
+  const touchStartRef = useRef<{ y: number } | null>(null);
 
   const computePosition = useCallback(() => {
     const anchor = rootRef.current;
@@ -106,17 +107,44 @@ export function ProxyPoolSelect({
       if (!list || !target || !list.contains(target)) return;
       if (applyManualScroll(list, e.deltaY)) e.preventDefault();
     };
+    // 触屏滑动：与 wheel 相同，react-remove-scroll 会 preventDefault 掉原生
+    // touchmove，这里在 capture 阶段手动改 scrollTop。
+    const onTouchStart = (e: TouchEvent) => {
+      const list = dropdownRef.current;
+      const target = e.target as Node | null;
+      if (!list || !target || !list.contains(target)) return;
+      const touch = e.touches[0];
+      if (!touch) return;
+      touchStartRef.current = { y: touch.clientY };
+    };
+    const onTouchMove = (e: TouchEvent) => {
+      const list = dropdownRef.current;
+      const start = touchStartRef.current;
+      if (!list || !start) return;
+      const target = e.target as Node | null;
+      if (!target || !list.contains(target)) return;
+      const touch = e.touches[0];
+      if (!touch) return;
+      const deltaY = start.y - touch.clientY;
+      touchStartRef.current = { y: touch.clientY };
+      if (applyManualScroll(list, deltaY)) e.preventDefault();
+    };
     document.addEventListener("pointerdown", onDown);
     document.addEventListener("keydown", onEsc);
     window.addEventListener("resize", onReposition);
     window.addEventListener("scroll", onReposition, true);
     document.addEventListener("wheel", onWheel, { passive: false, capture: true });
+    document.addEventListener("touchstart", onTouchStart, { passive: true, capture: true });
+    document.addEventListener("touchmove", onTouchMove, { passive: false, capture: true });
     return () => {
       document.removeEventListener("pointerdown", onDown);
       document.removeEventListener("keydown", onEsc);
       window.removeEventListener("resize", onReposition);
       window.removeEventListener("scroll", onReposition, true);
       document.removeEventListener("wheel", onWheel, true);
+      document.removeEventListener("touchstart", onTouchStart, true);
+      document.removeEventListener("touchmove", onTouchMove, true);
+      touchStartRef.current = null;
     };
   }, [open, computePosition]);
 
