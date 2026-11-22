@@ -151,7 +151,7 @@ export function AutoRefreshButton({
             align="end"
             sideOffset={8}
             collisionPadding={12}
-            className="action-menu-surface z-[200] w-44 rounded-xl border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-[0_12px_40px_-12px_hsl(222_30%_12%/0.3)] outline-none"
+            className="action-menu-surface z-[200] w-44 overflow-y-auto overscroll-contain rounded-xl border border-border/80 bg-popover p-1.5 text-popover-foreground shadow-[0_12px_40px_-12px_hsl(222_30%_12%/0.3)] outline-none"
           >
             <DropdownMenu.Label className="px-2.5 pb-1 pt-1.5 text-[10px] font-semibold tracking-wide text-muted-foreground">
               {t("common.autoRefresh")}

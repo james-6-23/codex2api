@@ -203,6 +203,11 @@ export default function CodexInviteView({ accounts, onClose, loading = false }: 
   const [accountTyping, setAccountTyping] = useState(Boolean(presetAccount))
   // 下拉键盘导航的高亮项索引（指向 filteredAccounts）。-1 表示未高亮任何项。
   const [activeIndex, setActiveIndex] = useState(-1)
+  // Only scroll when the highlighted option mounts/changes, not when background
+  // credit updates re-render the same row while the user is scrolling.
+  const revealActiveOption = useCallback((node: HTMLButtonElement | null) => {
+    node?.scrollIntoView({ block: 'nearest' })
+  }, [])
   const [emailsText, setEmailsText] = useState('')
   const [inviteRecipientIndex, setInviteRecipientIndex] = useState<InviteRecipientIndex>({})
   const [checkedRecipientSignature, setCheckedRecipientSignature] = useState('')
@@ -695,7 +700,7 @@ export default function CodexInviteView({ accounts, onClose, loading = false }: 
                                 type="button"
                                 role="option"
                                 aria-selected={active}
-                                ref={highlighted ? (el) => el?.scrollIntoView({ block: 'nearest' }) : undefined}
+                                ref={highlighted ? revealActiveOption : undefined}
                                 onMouseDown={(event) => event.preventDefault()}
                                 onMouseEnter={() => setActiveIndex(index)}
                                 onClick={() => selectAccount(account)}
