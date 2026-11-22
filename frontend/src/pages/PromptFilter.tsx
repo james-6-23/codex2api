@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next'
 import { Activity, AlertTriangle, BookOpen, CheckCircle2, ChevronDown, ClipboardCheck, Copy, FileText, Gauge, GitBranch, HelpCircle, Layers, ListChecks, Loader2, Network, Pencil, Plus, Power, PowerOff, RefreshCw, Save, Search, Shield, ShieldAlert, Sparkles, Trash2, Users, Wand2, X } from 'lucide-react'
 import { AdminAPIError, api } from '../api'
 import PageHeader from '../components/PageHeader'
+import PromptRequestRecords from './PromptRequestRecords'
 import Pagination from '../components/Pagination'
 import PromptFilterNewAPIBindings from '../components/PromptFilterNewAPIBindings'
 import StateShell from '../components/StateShell'
@@ -44,7 +45,7 @@ import {
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { cn } from '@/lib/utils'
 
-const PROMPT_FILTER_VIEWS = ['overview', 'logs', 'profiles', 'rules', 'intelligence', 'docs'] as const
+const PROMPT_FILTER_VIEWS = ['overview', 'logs', 'requests', 'profiles', 'rules', 'intelligence', 'docs'] as const
 const HIT_START_MARKER = '⟦PF_HIT⟧'
 const HIT_END_MARKER = '⟦/PF_HIT⟧'
 type PromptFilterView = typeof PROMPT_FILTER_VIEWS[number]
@@ -586,6 +587,7 @@ export default function PromptFilter() {
   const { toast, showToast } = useToast()
   const [form, setForm] = useState<PromptFilterForm>(defaultForm)
   const [saving, setSaving] = useState(false)
+  const [requestRefresh, setRequestRefresh] = useState(0)
   const [settingsSaveRevision, setSettingsSaveRevision] = useState(0)
   const advancedConfigError = useMemo(
     () => parseAdvancedConfigDocument(form.prompt_filter_advanced_config).error,
@@ -751,7 +753,10 @@ export default function PromptFilter() {
                 </Button>
               </>
             ) : (
-              <Button variant="outline" onClick={() => void reload()}>
+              <Button variant="outline" onClick={() => {
+                if (activeView === 'requests') setRequestRefresh((value) => value + 1)
+                else void reload()
+              }}>
                 <RefreshCw className="size-3.5" />
                 {t('common.refresh')}
               </Button>
@@ -801,6 +806,8 @@ export default function PromptFilter() {
 
         {activeView === 'logs' ? <LogsView onPromptLogsChanged={refreshRecentLogs} /> : null}
 
+        {activeView === 'requests' ? <PromptRequestRecords refresh={requestRefresh} /> : null}
+
         {activeView === 'profiles' ? <RiskProfilesView /> : null}
 
         {activeView === 'rules' ? (
@@ -829,6 +836,7 @@ function PromptFilterTabs({ activeView }: { activeView: PromptFilterView }) {
   const tabs = [
     { view: 'overview' as const, label: t('promptFilter.views.overview'), to: '/prompt-filter/overview' },
     { view: 'logs' as const, label: t('promptFilter.views.logs'), to: '/prompt-filter/logs' },
+    { view: 'requests' as const, label: t('promptFilter.requests.tab'), to: '/prompt-filter/requests' },
     { view: 'profiles' as const, label: t('promptFilter.views.profiles'), to: '/prompt-filter/profiles' },
     { view: 'rules' as const, label: t('promptFilter.views.rules'), to: '/prompt-filter/rules' },
     { view: 'intelligence' as const, label: t('promptFilter.views.intelligence'), to: '/prompt-filter/intelligence' },

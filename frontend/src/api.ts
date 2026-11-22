@@ -107,6 +107,12 @@ import type {
   OpsOverviewResponse,
   PromptFilterLog,
   PromptFilterLogsResponse,
+  PromptRequestConversationPage,
+  PromptRequestDetail,
+  PromptRequestRoundPage,
+  PromptRequestPage,
+  PromptRequestTaskDetail,
+  PromptRequestTaskPage,
 	PromptPolicyIncidentDetailResponse,
 	PromptPolicyAuditHealth,
 	PromptPolicyIncidentsResponse,
@@ -1474,6 +1480,25 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  listPromptRequests: (before: number, signal?: AbortSignal) =>
+    request<PromptRequestPage>(`/prompt-filter/requests?before=${before}`, { signal }),
+  listPromptRequestConversations: (before: number, signal?: AbortSignal) =>
+    request<PromptRequestConversationPage>(`/prompt-filter/request-conversations?before=${before}`, { signal }),
+  listPromptRequestRounds: (id: number, before: number, signal?: AbortSignal) =>
+    request<PromptRequestRoundPage>(`/prompt-filter/request-conversations/${id}?before=${before}`, { signal }),
+  listPromptRequestTasks: (id: number, before: number, signal?: AbortSignal) =>
+    request<PromptRequestTaskPage>(`/prompt-filter/request-conversations/${id}/tasks?before=${before}`, { signal }),
+  getPromptRequestTask: (id: number, signal?: AbortSignal) =>
+    request<PromptRequestTaskDetail>(`/prompt-filter/request-tasks/${id}`, { signal }),
+  updatePromptRequestRetention: (days: number) =>
+    request<{ retention_days: number }>('/prompt-filter/requests/retention', {
+      method: 'PUT',
+      body: JSON.stringify({ retention_days: days }),
+    }),
+  getPromptRequest: (id: number, signal?: AbortSignal) =>
+    request<PromptRequestDetail>(`/prompt-filter/requests/${id}`, { signal }),
+  getPromptRequestImage: (id: number, index: number, signal?: AbortSignal) =>
+    requestBlob(`/prompt-filter/requests/${id}/images/${index}`, { signal }),
   getPromptFilterLogs: (params: number | { page?: number; pageSize?: number; limit?: number; source?: string; action?: string; endpoint?: string; model?: string; apiKeyId?: string; q?: string; reviewed?: boolean; reviewResult?: string } = 100) => {
     const search = new URLSearchParams()
     if (typeof params === 'number') {
