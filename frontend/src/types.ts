@@ -4110,6 +4110,8 @@ export interface PublicAPIKeyWindowUsage {
   requests: number
   tokens: number
   user_billed: number
+  /** Actual cost exempted from the 30-day cost quota by an administrator. */
+  cost_exempted?: number
   /** 窗口内最早一笔用量时间(无用量时缺省)。 */
   oldest_at?: ISODateString
   /** fixed=自然日固定窗口(reset_at 清零);sliding=滑动窗口(decay_at 开始回落)。 */

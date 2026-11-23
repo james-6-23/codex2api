@@ -3,6 +3,7 @@
     "unavailable": "暫不可用"
   },
   "keyUsage": {
+    "windowCostExemption": "實際費用 {{actual}}，其中 {{exempted}} 經管理員重置後不計入此視窗費用限額。歷史帳單保留。",
     "views": {
       "accounts": "帳號用量"
     }
@@ -382,6 +383,12 @@
     "notProbed": "未驗證"
   },
   "apiKeys": {
+    "resetWeeklyQuota": "重置7天額度",
+    "resetWeeklyQuotaTitle": "重置7天額度並免計對應費用？",
+    "resetWeeklyQuotaDesc": "重置目前7天費用及Token用量，並將對應實際費用從30天計費用量中扣除，最多免計 {{amount}}。額度上限、累計額度、5小時及其他限制保持不變，歷史帳單保留。此操作無法復原。",
+    "resetWeeklyQuotaConfirm": "重置並免計",
+    "resetWeeklyQuotaSuccess": "7天額度已重置，本次30天費用免計 {{amount}}",
+    "resetWeeklyQuotaFailed": "7天額度重置失敗，可重試同一次操作",
     "promptFilterScopeGlobal": "Prompt：沿用全域檢查",
     "promptFilterScopeLocal": "Prompt：僅本地規則",
     "promptFilterScopeOff": "Prompt：已關閉",

@@ -1323,6 +1323,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/keys/reset-all-quotas", h.ResetAllAPIKeyQuotas)
 	api.PATCH("/keys/:id", h.UpdateAPIKey)
 	api.POST("/keys/:id/reset-quota", h.ResetAPIKeyQuota)
+	api.POST("/keys/:id/reset-weekly-quota", h.ResetAPIKeyWeeklyQuota)
 	api.GET("/keys/:id/scope-usage", h.GetAPIKeyScopeUsage)
 	api.GET("/keys/:id/model-request-usage", h.GetAPIKeyModelRequestUsage)
 	api.GET("/keys-scope-summary", h.GetAPIKeysScopeSummary)
