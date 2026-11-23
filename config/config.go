@@ -114,6 +114,9 @@ type Config struct {
 	UseWebsocket              bool     // 是否启用 WebSocket 传输
 	CodexUpstreamTransport    string   // http|auto|ws，默认 http；USE_WEBSOCKET 作为旧开关兼容
 	TrustedProxies            []string // Gin 可信反向代理 CIDR/IP；默认信任回环与私有网段以兼容 Docker 反代，none/off/false/0 表示禁用
+
+	PromptRequestRecording bool
+	PromptTraceExport      PromptTraceExportConfig
 }
 
 // applyTimezone 让 TZ 环境变量(含 .env 里的)真正作用于自然日限额等本地时间语义。
@@ -155,6 +158,12 @@ func Load(envPath string) (*Config, error) {
 	}
 	cfg.AdminSecret = strings.TrimSpace(os.Getenv("ADMIN_SECRET"))
 	cfg.AllowAnonymousV1 = parseBoolEnv(os.Getenv("CODEX_ALLOW_ANONYMOUS"))
+	cfg.PromptRequestRecording = parseBoolEnv(os.Getenv("CODEX_PROMPT_REQUEST_RECORDING"))
+	promptTraceExport, err := loadPromptTraceExportConfig()
+	if err != nil {
+		return nil, err
+	}
+	cfg.PromptTraceExport = promptTraceExport
 	cfg.APIKeyAuthCacheEnabled = true
 	if value := strings.TrimSpace(os.Getenv("CODEX_API_KEY_AUTH_CACHE_ENABLED")); value != "" {
 		enabled, err := strconv.ParseBool(value)

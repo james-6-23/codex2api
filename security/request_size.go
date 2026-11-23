@@ -10,7 +10,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const MaxPromptTaskClientBodySize = 512 << 10
+
 func requestBodySizeLimit(path string, maxSize int64) int64 {
+	if path == "/v1/codex/task-replays" {
+		return min(maxSize, MaxPromptTaskClientBodySize)
+	}
 	if MaxImportBodySize > 0 && IsLargeImportUploadPath(path) {
 		return MaxImportBodySize
 	}
