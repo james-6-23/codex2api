@@ -29,6 +29,7 @@ type PromptRequestRecord struct {
 
 type PromptRequestBody struct {
 	PromptRequestRecord
+	APIKeyID          int64  `json:"-"`
 	ContentType       string `json:"-"`
 	Body              []byte `json:"-"`
 	ConversationScope string `json:"-"`
@@ -55,7 +56,11 @@ func (db *DB) ensurePromptRequestTable(ctx context.Context) error {
 		conversation_group TEXT NOT NULL DEFAULT '',
 		task_anchor TEXT,
 		task_turn TEXT NOT NULL DEFAULT '',
-		task_preview TEXT NOT NULL DEFAULT ''
+		task_preview TEXT NOT NULL DEFAULT '',
+		chat_key_id BIGINT,
+		chat_indexed INTEGER NOT NULL DEFAULT 0,
+		chat_turn_root BIGINT NOT NULL DEFAULT 0,
+		chat_replay_kind TEXT NOT NULL DEFAULT ''
 	)`); err != nil {
 		return err
 	}
@@ -73,12 +78,28 @@ func (db *DB) ensurePromptRequestTable(ctx context.Context) error {
 				return err
 			}
 		}
+		if err := db.ensureSQLiteColumn(ctx, "prompt_request_records", "chat_key_id", "BIGINT"); err != nil {
+			return err
+		}
+		if err := db.ensureSQLiteColumn(ctx, "prompt_request_records", "chat_indexed", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+		if err := db.ensureSQLiteColumn(ctx, "prompt_request_records", "chat_turn_root", "BIGINT NOT NULL DEFAULT 0"); err != nil {
+			return err
+		}
+		if err := db.ensureSQLiteColumn(ctx, "prompt_request_records", "chat_replay_kind", "TEXT NOT NULL DEFAULT ''"); err != nil {
+			return err
+		}
 	} else if _, err := db.conn.ExecContext(ctx, `ALTER TABLE prompt_request_records
 		ADD COLUMN IF NOT EXISTS conversation_scope TEXT NOT NULL DEFAULT '',
 		ADD COLUMN IF NOT EXISTS conversation_group TEXT NOT NULL DEFAULT '',
 		ADD COLUMN IF NOT EXISTS task_anchor TEXT,
 		ADD COLUMN IF NOT EXISTS task_turn TEXT NOT NULL DEFAULT '',
-		ADD COLUMN IF NOT EXISTS task_preview TEXT NOT NULL DEFAULT ''`); err != nil {
+		ADD COLUMN IF NOT EXISTS task_preview TEXT NOT NULL DEFAULT '',
+		ADD COLUMN IF NOT EXISTS chat_key_id BIGINT,
+		ADD COLUMN IF NOT EXISTS chat_indexed INTEGER NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS chat_turn_root BIGINT NOT NULL DEFAULT 0,
+		ADD COLUMN IF NOT EXISTS chat_replay_kind TEXT NOT NULL DEFAULT ''`); err != nil {
 		return err
 	}
 	if _, err := db.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_prompt_request_records_conversation
@@ -95,6 +116,9 @@ func (db *DB) ensurePromptRequestTable(ctx context.Context) error {
 	}
 	if _, err := db.conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_prompt_request_records_task_pending
 		ON prompt_request_records (id) WHERE task_anchor IS NULL`); err != nil {
+		return err
+	}
+	if err := db.ensurePromptRequestChatIndexes(ctx); err != nil {
 		return err
 	}
 	_, err := db.conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS prompt_request_settings (
@@ -146,10 +170,10 @@ func (db *DB) InsertPromptRequest(ctx context.Context, input PromptRequestBody) 
 	task := promptRequestTaskMetadata(input.Body)
 	err := db.withSQLiteWriteLock(ctx, func() error {
 		return db.conn.QueryRowContext(ctx, `INSERT INTO prompt_request_records
-			(created_at, endpoint, transport, model, api_key_name, content_type, body, conversation_scope, conversation_group, task_anchor, task_turn, task_preview)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) RETURNING id`,
+			(created_at, endpoint, transport, model, api_key_name, content_type, body, conversation_scope, conversation_group, task_anchor, task_turn, task_preview, chat_key_id)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
 			input.CreatedAt, input.Endpoint, input.Transport, input.Model, input.APIKey, input.ContentType,
-			input.Body, input.ConversationScope, input.ConversationGroup, task.Anchor, task.Turn, task.Preview).Scan(&id)
+			input.Body, input.ConversationScope, input.ConversationGroup, task.Anchor, task.Turn, task.Preview, input.APIKeyID).Scan(&id)
 	})
 	return id, err
 }

@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -16,6 +17,8 @@ const (
 	promptTaskOverviewBodyBudget = 64 << 20
 	promptTaskUserTextLimit      = 64 << 10
 	promptTaskFinalPreviewLimit  = 8 << 10
+	promptTaskToolContinuation   = 2 * time.Minute
+	promptTaskPendingWindow      = 30 * time.Minute
 )
 
 func (h *Handler) readPromptTaskOverview(ctx context.Context, conversation string, groups []promptTaskGroup, before int64) ([]promptTaskSummary, error) {
@@ -53,7 +56,7 @@ func (h *Handler) readPromptTaskOverview(ctx context.Context, conversation strin
 		appendBody(promptTaskUserAnchor(task))
 		details[i].promptTaskSummary = task.promptTaskSummary
 		for _, id := range task.RequestIDs {
-			if reply := replies[id]; reply.FinalObserved && reply.FinalText != "" {
+			if reply := replies[id]; reply.FinalObserved && reply.FinalText != "" && !slices.Contains(task.compactions, id) {
 				details[i].Final = &promptTaskFinal{Text: reply.FinalText, Status: reply.Status, Source: "gateway", Truncated: reply.Truncated}
 				details[i].FinishedAt = reply.FinishedAt
 			}
@@ -80,9 +83,15 @@ func (h *Handler) readPromptTaskOverview(ctx context.Context, conversation strin
 		case isPromptTaskCompaction(task.terminal.Endpoint, anchor.Body, input):
 			detail.Kind = promptTaskContextCompaction
 			detail.UserPreview = ""
+		case detail.Kind == database.PromptRequestChatResume:
+			detail.UserPreview = ""
 		case input.Field != "":
 			detail.UserRequestID = anchor.ID
-			detail.UserText, detail.UserTextTruncated = limitPromptTaskPreview(input.Text, promptTaskUserTextLimit)
+			text := promptTaskReplayUserText(task.terminal.Endpoint, anchor.Body, input)
+			detail.UserText, detail.UserTextTruncated = limitPromptTaskPreview(text, promptTaskUserTextLimit)
+			if text != input.Text {
+				detail.UserPreview = ""
+			}
 			if input.HasAttachment || input.Field == "prompt" {
 				detail.UserImages = promptTaskUserImages(anchor, input)
 			}
@@ -100,7 +109,12 @@ func (h *Handler) readPromptTaskOverview(ctx context.Context, conversation strin
 				detail.FinishedAt = terminal.FinishedAt
 			}
 		}
-		detail.setGatewayCompletion(task.terminal.PromptRequestRecord, terminal.Status, terminal.FinishedAt, terminal.FinalObserved, input.TurnStartedAt)
+		if detail.Kind == "" && detail.Final == nil {
+			if err := h.applyArchivedChatReply(ctx, detail, task.terminal.PromptRequestRecord, bodies[task.terminal.ID].Body, terminal); err != nil {
+				return nil, err
+			}
+		}
+		detail.setGatewayCompletion(task.terminal.PromptRequestRecord, terminal, task.followLatest, input.TurnStartedAt)
 		if detail.Kind == "" && input.Field != "" {
 			if err := h.applyPromptTaskClient(ctx, conversation, task, input, detail); err != nil {
 				return nil, err
@@ -117,6 +131,9 @@ func (h *Handler) readPromptTaskOverview(ctx context.Context, conversation strin
 }
 
 func promptTaskUserAnchor(task promptTaskGroup) int64 {
+	if task.Kind == database.PromptRequestChatResume {
+		return 0
+	}
 	if task.userAnchorID > 0 {
 		return task.userAnchorID
 	}
@@ -216,6 +233,20 @@ func promptTaskHasCurrentToolItems(body []byte) bool {
 	return false
 }
 
+func (h *Handler) applyArchivedChatReply(ctx context.Context, detail *promptTaskDetail, terminal database.PromptRequestRecord,
+	body []byte, reply database.PromptRequestTaskResponse,
+) error {
+	if reply.UnconfirmedChatText == "" || !isPromptTaskSingleChatReply(terminal, body) {
+		return nil
+	}
+	confirmed, err := h.db.PromptRequestChatReplyEchoed(ctx, terminal.ID, body, reply.UnconfirmedChatText)
+	if confirmed {
+		detail.Final = &promptTaskFinal{Text: reply.UnconfirmedChatText, Status: "completed", Source: "gateway"}
+		detail.FinishedAt = reply.FinishedAt
+	}
+	return err
+}
+
 func isPromptTaskSingleChatReply(row database.PromptRequestRecord, body []byte) bool {
 	if safeTraceEndpoint(row.Endpoint) != "chat" || row.Status < 200 || row.Status >= 300 || len(body) == 0 {
 		return false
@@ -239,17 +270,27 @@ func (h *Handler) applyPromptTaskClient(ctx context.Context, group string, task 
 	return err
 }
 
-func (detail *promptTaskDetail) setGatewayCompletion(row database.PromptRequestRecord, replyStatus string, replyFinished *time.Time, finalObserved bool, clientStart *time.Time) {
+func (detail *promptTaskDetail) setGatewayCompletion(row database.PromptRequestRecord, reply database.PromptRequestTaskResponse, followLatest bool, clientStart *time.Time) {
 	detail.Status = promptTaskGatewayStatus(row.Status, row.Action)
-	if detail.Status != "interrupted" && detail.Status != "failed" && replyStatus != "" {
-		detail.Status = replyStatus
-		if replyStatus == "completed" && !finalObserved {
+	if detail.Status != "interrupted" && detail.Status != "failed" && reply.Status != "" {
+		detail.Status = reply.Status
+		if reply.Status == "completed" && !reply.FinalObserved {
 			detail.Status = "unobserved"
 		}
 	}
+	if detail.Status == "pending" && !recentPromptTaskActivity(row.CreatedAt, promptTaskPendingWindow) {
+		detail.Status = "unobserved"
+	}
+	if followLatest && detail.Status == "unobserved" && detail.Final == nil &&
+		reply.Status == "completed" && reply.HasToolCalls && reply.FinishedAt != nil &&
+		recentPromptTaskActivity(*reply.FinishedAt, promptTaskToolContinuation) {
+		// The next gateway call can arrive after the client runs the tool.
+		// Keep that gap active without leaving older tool-only turns pending.
+		detail.Status = "pending"
+	}
 	switch detail.Status {
 	case "interrupted", "failed":
-		detail.FinishedAt = replyFinished
+		detail.FinishedAt = reply.FinishedAt
 	case "pending":
 		detail.FinishedAt = nil
 	default:
@@ -265,6 +306,11 @@ func (detail *promptTaskDetail) setGatewayCompletion(row database.PromptRequestR
 		start = *clientStart
 	}
 	detail.setTiming(start, *detail.FinishedAt, "gateway_observed")
+}
+
+func recentPromptTaskActivity(at time.Time, window time.Duration) bool {
+	age := time.Since(at)
+	return age >= 0 && age <= window
 }
 
 func limitPromptTaskPreview(text string, maxBytes int) (string, bool) {

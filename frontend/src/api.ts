@@ -1486,8 +1486,8 @@ export const api = {
     request<PromptRequestConversationPage>(`/prompt-filter/request-conversations?before=${before}`, { signal }),
   listPromptRequestRounds: (id: number, before: number, signal?: AbortSignal) =>
     request<PromptRequestRoundPage>(`/prompt-filter/request-conversations/${id}?before=${before}`, { signal }),
-  listPromptRequestTasks: (id: number, before: number, signal?: AbortSignal) =>
-    request<PromptRequestTaskPage>(`/prompt-filter/request-conversations/${id}/tasks?before=${before}`, { signal }),
+  listPromptRequestTasks: (id: number, before: number, signal?: AbortSignal, live = false) =>
+    request<PromptRequestTaskPage>(`/prompt-filter/request-conversations/${id}/tasks?before=${before}${live ? '&live=1' : ''}`, { signal }),
   getPromptRequestTask: (id: number, signal?: AbortSignal) =>
     request<PromptRequestTaskDetail>(`/prompt-filter/request-tasks/${id}`, { signal }),
   updatePromptRequestRetention: (days: number) =>

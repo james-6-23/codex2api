@@ -552,3 +552,113 @@ func TestPromptRequestTasksShowsOnlyTerminalArchivedChatReply(t *testing.T) {
 		}
 	})
 }
+
+func TestPromptRequestTasksReplaysChatToolContinuationAndArchivedFinal(t *testing.T) {
+	ctx := context.Background()
+	handler, db := newTestAdminHandlerFixture(t)
+	now := time.Now().UTC()
+	const start = `{"role":"user","content":"Look up the status"}`
+	const tool = `{"role":"assistant","content":null,"tool_calls":[{"id":"call-status","type":"function","function":{"name":"lookup","arguments":"{}"}}]}`
+	const result = `{"role":"tool","tool_call_id":"call-status","content":"ready"}`
+	const localTool = `{"role":"assistant","tool_calls":[{"id":"local-1","type":"function","function":{"name":"note","arguments":"{}"}}]}`
+	const localResult = `{"role":"tool","tool_call_id":"local-1","content":"ok"}`
+	continuation := start + "," + tool + "," + result + "," + localTool + "," + localResult
+	const next = `{"role":"user","content":"What happens next?"}`
+	const echo = `{"role":"assistant","content":[{"type":"text","text":"The status is ready."}]}`
+	body := func(messages string) string { return `{"messages":[` + messages + `],"stream":true}` }
+	add := func(keyID int64, messages string, reply *database.PromptRequestResponse) int64 {
+		t.Helper()
+		now = now.Add(time.Millisecond)
+		id, err := db.InsertPromptRequest(ctx, database.PromptRequestBody{
+			PromptRequestRecord: database.PromptRequestRecord{CreatedAt: now, Endpoint: "/v1/chat/completions", Transport: "http"},
+			APIKeyID:            keyID,
+			Body:                []byte(body(messages)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if reply != nil {
+			if err := db.SavePromptRequestResponse(ctx, id, *reply); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := db.FinishPromptRequest(ctx, id, "allow", 200); err != nil {
+			t.Fatal(err)
+		}
+		return id
+	}
+	toolReply := &database.PromptRequestResponse{
+		Status: "completed", ChatReplyClassified: true,
+		ToolCalls: []database.PromptRequestResponseCall{{CallID: "call-status", Name: "lookup", Arguments: "{}"}},
+	}
+	archivedReply := &database.PromptRequestResponse{
+		Status: "completed", ChatReplyClassified: true, Text: "The status is ready.", FinishedAt: &now,
+	}
+	first := add(7, start, toolReply)
+	otherKey := add(8, start+","+tool+","+result, nil)
+	wrongHistory := add(7, start+`,{"role":"assistant","content":"different history"},`+tool+","+result, nil)
+	last := add(7, continuation, archivedReply)
+	add(8, continuation+","+echo+","+next, nil)
+	if err := db.IndexArchivedPromptRequestChats(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	check := func(wantReply bool) {
+		t.Helper()
+		rows, err := db.ReadPromptRequestTaskRows(ctx, first, 0, false, 12)
+		if err != nil {
+			t.Fatal(err)
+		}
+		groups := groupPromptTaskRows(rows.Rows)
+		if len(groups) != 1 || !slices.Equal(groups[0].RequestIDs, []int64{first, last}) {
+			t.Fatalf("wrong task grouping: %+v", groups)
+		}
+		detail, err := handler.projectPromptTask(ctx, rows.Group, groups[0], rows.Rows, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		summaries, err := handler.readPromptTaskOverview(ctx, rows.Group, groups, 0)
+		if err != nil || len(summaries) != 1 {
+			t.Fatalf("wrong overview: %+v, %v", summaries, err)
+		}
+		if len(detail.Steps[0].Tools) != 1 || detail.Steps[0].Tools[0].FromRequestID != last {
+			t.Fatalf("missing matched tool result: %+v", detail.Steps[0].Tools)
+		}
+		if wantReply {
+			if detail.Final == nil || detail.Final.Text != archivedReply.Text || summaries[0].FinalPreview != archivedReply.Text ||
+				detail.Status != "completed" || summaries[0].FinalStatus != "completed" {
+				t.Fatalf("archived reply missing from overview or detail: %+v, %+v", summaries[0], detail.Final)
+			}
+		} else if detail.Final != nil || summaries[0].FinalPreview != "" {
+			t.Fatal("a reply was shown without a matching assistant message under the same key")
+		}
+	}
+	check(false)
+
+	// A newer user context item was inserted earlier in the transcript. The
+	// latest exact tool exchange still identifies the same assistant reply.
+	add(7, `{"role":"developer","content":"Updated context"},`+continuation+","+echo+","+next, nil)
+	if err := db.IndexArchivedPromptRequestChats(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check(true)
+
+	conversations, err := db.ListPromptRequestConversations(ctx, 0, 12)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, conversation := range conversations {
+		switch conversation.ID {
+		case first:
+			t.Fatal("tool call is still listed as its own conversation")
+		case last:
+			if conversation.Rounds != 2 {
+				t.Fatalf("wrong number of grouped calls: %d", conversation.Rounds)
+			}
+		case otherKey, wrongHistory:
+			if conversation.Rounds != 1 {
+				t.Fatalf("unrelated request %d was grouped", conversation.ID)
+			}
+		}
+	}
+}

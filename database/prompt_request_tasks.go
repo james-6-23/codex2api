@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ type PromptRequestTaskInput struct {
 	TurnID        string
 	TurnStartedAt *time.Time
 	HasAttachment bool
+	Delegations   []PromptRequestTaskDelegation
 
 	anchor string
 }
@@ -34,6 +36,10 @@ type promptRequestTaskIndex struct {
 
 func promptRequestTaskMetadata(body []byte) promptRequestTaskIndex {
 	input := DecodePromptRequestTaskInput(body)
+	return promptRequestTaskInputMetadata(input)
+}
+
+func promptRequestTaskInputMetadata(input PromptRequestTaskInput) promptRequestTaskIndex {
 	var turnHash string
 	if input.TurnID != "" {
 		id := sha256.Sum256([]byte(input.TurnID))
@@ -64,15 +70,43 @@ func DecodePromptRequestTaskUser(body []byte) PromptRequestTaskInput {
 	return decodePromptRequestTaskInput(body, false)
 }
 
+// ChatTextParts returns the selected user message's text in original part
+// order, using the same text extraction as DecodePromptRequestTaskUser.
+func (input PromptRequestTaskInput) ChatTextParts(body []byte) []string {
+	if input.Field != "messages" || input.Index < 0 {
+		return []string{input.Text}
+	}
+	content := gjson.GetBytes(body, fmt.Sprintf("messages.%d.content", input.Index))
+	if !content.IsArray() {
+		return []string{input.Text}
+	}
+	var texts []string
+	content.ForEach(func(_, part gjson.Result) bool {
+		if text, _ := taskUserContent(part, 2); text != "" {
+			texts = append(texts, text)
+		}
+		return true
+	})
+	return texts
+}
+
 func decodePromptRequestTaskInput(body []byte, hashAnchor bool) PromptRequestTaskInput {
 	input := PromptRequestTaskInput{Index: -1}
 	if len(body) == 0 || len(body) > promptRequestTaskMaxBody || !gjson.ValidBytes(body) {
 		return input
 	}
 	turn := gjson.GetBytes(body, "client_metadata.turn_id").Str
+	var delegationThread string
 	if turn != "" && len(turn) <= 128 {
 		input.TurnID = turn
-		input.TurnStartedAt = promptRequestTaskClientStart(body, turn)
+		thread, metadata := promptRequestTaskClientMetadata(body, turn)
+		if millis := metadata.Get("turn_started_at_unix_ms").Int(); millis > 0 {
+			at := time.UnixMilli(millis).UTC()
+			input.TurnStartedAt = &at
+		}
+		if metadata.Get("request_kind").Str == "turn" {
+			delegationThread = thread
+		}
 	}
 	for _, field := range []string{"input", "messages", "contents", "prompt"} {
 		value := gjson.GetBytes(body, field)
@@ -90,11 +124,18 @@ func decodePromptRequestTaskInput(body []byte, hashAnchor bool) PromptRequestTas
 				if kind := item.Get("type").Str; kind != "" && kind != "message" {
 					continue
 				}
+				if field == "input" && delegationThread != "" {
+					if delegation, ok := decodePromptTaskDelegation(item, delegationThread); ok {
+						input.Delegations = append(input.Delegations, delegation)
+						continue
+					}
+				}
 				text, attachment := taskUserContent(item, 0)
 				if text == "" && !attachment {
 					continue
 				}
 				input.Text, input.Field, input.Index, input.HasAttachment = text, field, i, attachment
+				slices.Reverse(input.Delegations)
 				if !hashAnchor {
 					return input
 				}
@@ -113,6 +154,7 @@ func decodePromptRequestTaskInput(body []byte, hashAnchor bool) PromptRequestTas
 				}
 				return input
 			}
+			slices.Reverse(input.Delegations)
 			return input
 		case value.Type == gjson.String && (field == "input" || field == "prompt"):
 			if text := value.Str; strings.TrimSpace(text) != "" && !isInjectedTaskText(text) {
@@ -128,24 +170,19 @@ func decodePromptRequestTaskInput(body []byte, hashAnchor bool) PromptRequestTas
 	return input
 }
 
-func promptRequestTaskClientStart(body []byte, turn string) *time.Time {
+func promptRequestTaskClientMetadata(body []byte, turn string) (string, gjson.Result) {
 	metadata := gjson.GetBytes(body, "client_metadata").Get("x-codex-turn-metadata")
 	if metadata.Type == gjson.String {
 		metadata = gjson.Parse(metadata.Str)
 	}
 	if !metadata.IsObject() || metadata.Get("turn_id").Str != turn {
-		return nil
+		return "", gjson.Result{}
 	}
 	thread := gjson.GetBytes(body, "client_metadata.thread_id").Str
 	if thread == "" || (metadata.Get("thread_id").Str != thread && metadata.Get("session_id").Str != thread) {
-		return nil
+		return "", gjson.Result{}
 	}
-	millis := metadata.Get("turn_started_at_unix_ms").Int()
-	if millis <= 0 {
-		return nil
-	}
-	at := time.UnixMilli(millis).UTC()
-	return &at
+	return thread, metadata
 }
 
 func promptRequestTaskPrefix(field string, items []gjson.Result) string {
@@ -285,10 +322,13 @@ func (db *DB) indexPromptTaskRows(ctx context.Context, group string, id int64, l
 
 type PromptRequestTaskRow struct {
 	PromptRequestRecord
-	Anchor  string
-	Turn    string
-	Preview string
-	Indexed bool
+	Anchor         string
+	Turn           string
+	Preview        string
+	Indexed        bool
+	ChatTurnRoot   int64
+	ChatReplayKind string
+	Delegations    []PromptRequestTaskDelegation
 }
 
 type PromptRequestTaskRows struct {
@@ -306,7 +346,7 @@ func (db *DB) ReadPromptRequestTaskRows(ctx context.Context, id, before int64, n
 	if err != nil {
 		return result, err
 	}
-	const columns = promptRequestSummaryColumns + ", task_anchor, task_turn, task_preview"
+	const columns = promptRequestSummaryColumns + ", task_anchor, task_turn, task_preview, chat_turn_root, chat_replay_kind"
 	query := "SELECT " + columns + " FROM prompt_request_records"
 	args := []any{id}
 	switch {
@@ -337,13 +377,23 @@ func (db *DB) ReadPromptRequestTaskRows(ctx context.Context, id, before int64, n
 	for rows.Next() {
 		var row PromptRequestTaskRow
 		var anchor sql.NullString
-		if err := rows.Scan(append(row.scanTargets(), &anchor, &row.Turn, &row.Preview)...); err != nil {
+		if err := rows.Scan(append(row.scanTargets(), &anchor, &row.Turn, &row.Preview, &row.ChatTurnRoot, &row.ChatReplayKind)...); err != nil {
 			return result, err
 		}
 		row.Anchor, row.Indexed = anchor.String, anchor.Valid
 		result.Rows = append(result.Rows, row)
 	}
 	return result, rows.Err()
+}
+
+// PromptRequestReplayTurnID resolves a previously visible resume or checkpoint
+// to the real user turn while keeping retained steps addressable on their own.
+func (db *DB) PromptRequestReplayTurnID(ctx context.Context, id int64) (int64, error) {
+	var root int64
+	err := db.conn.QueryRowContext(ctx, `SELECT CASE WHEN chat_turn_root>0 AND EXISTS
+		(SELECT 1 FROM prompt_request_records parent WHERE parent.id=r.chat_turn_root AND parent.conversation_group=r.conversation_group)
+		THEN chat_turn_root ELSE id END FROM prompt_request_records r WHERE id=$1`, id).Scan(&root)
+	return root, err
 }
 
 // A client Stop event identifies a Codex turn, which may contain multiple

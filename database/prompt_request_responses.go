@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -21,7 +22,18 @@ type PromptRequestResponse struct {
 	FinalObserved  bool   `json:"final_observed,omitempty"`
 	// Distinguishes a classified Chat Completions reply from archived text.
 	ChatReplyClassified bool       `json:"chat_reply_classified,omitempty"`
+	ChatFinishReason    string     `json:"chat_finish_reason,omitempty"`
 	FinishedAt          *time.Time `json:"finished_at,omitempty"`
+}
+
+// UnconfirmedChatReply returns archived text that needs independent evidence
+// from a later request before it can be shown as the final reply.
+func (r PromptRequestResponse) UnconfirmedChatReply() string {
+	if !r.ChatReplyClassified || r.ChatFinishReason != "" || r.FinalObserved || r.Status != "completed" ||
+		r.Truncated || r.Error != "" || r.CommentaryText != "" || len(r.ToolCalls) != 0 || strings.TrimSpace(r.Text) == "" {
+		return ""
+	}
+	return r.Text
 }
 
 type PromptRequestResponseCall struct {

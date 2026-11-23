@@ -73,7 +73,9 @@ async function reviewFixture(context, detail, location = '/prompt-filter/request
     localStorage.setItem('lang', 'zh')
     window.fixtureLocation = location
     window.fixtureImageCalls = []
+    window.fixtureTaskPageCalls = []
     window.fixtureTaskDetailCalls = []
+    window.fixtureReplay = replay
     window.fixtureAPI = async (name, args) => {
       const { id, created_at, endpoint, model, api_key_name, action, status, transport } = detail
       const record = { id, created_at, endpoint, model, api_key_name, action, status, transport }
@@ -81,7 +83,10 @@ async function reviewFixture(context, detail, location = '/prompt-filter/request
         return { groups: [{ ...record, rounds: 1 }], next_before: 0, enabled: true, retention_days: 30 }
       }
       if (name === 'listPromptRequestRounds') return { rounds: [record], total: 1, next_before: 0 }
-      if (name === 'listPromptRequestTasks' && replay?.pages[args[1]]) return replay.pages[args[1]]
+      if (name === 'listPromptRequestTasks' && replay?.pages[args[1]]) {
+        window.fixtureTaskPageCalls.push([args[0], args[1], args[3]])
+        return replay.pages[args[1]]
+      }
       if (name === 'getPromptRequestTask' && replay?.tasks[args[0]]) {
         window.fixtureTaskDetailCalls.push(args[0])
         return replay.tasks[args[0]]
@@ -131,6 +136,76 @@ function readArchive(buffer) {
   }
   return entries
 }
+
+test('shows delegation in the running task and refreshes its final answer in the same card', async (context) => {
+  const userText = '请核对住房与存档。'
+  const delegatedText = '另一个会话已完成接口核对。\n下一步确认读档。'
+  const finalText = '已核对住房和存档恢复。'
+  const active = {
+    id: 680, started_at: record.created_at, request_ids: [680, 724], request_count: 2,
+    user_text: userText, status: 'pending',
+  }
+  const step = { created_at: record.created_at, model: record.model, endpoint: record.endpoint,
+    action: 'allow', status: 200, tools: [] }
+  const activeDetail = {
+    ...active, user: { text: userText, request_id: 680 }, skills: [],
+    steps: [
+      { ...step, request_id: 680 },
+      { ...step, request_id: 724, delegations: [{ text: delegatedText, source_thread_id: 'fixture-source-thread' }] },
+    ],
+  }
+  const taskPage = (task) => ({ tasks: [task], next_before: 0, total_requests: task.request_count })
+  const page = await reviewFixture(context, { ...record, id: 724 }, undefined, {
+    pages: { 0: taskPage(active) }, tasks: { 680: activeDetail },
+  })
+  await page.clock.install()
+  await page.getByRole('button', { name: '查看会话' }).click()
+  const replay = page.getByRole('dialog')
+  const original = replay.getByRole('article', { name: '任务 #680', exact: true })
+  await original.getByText('进行中', { exact: true }).waitFor()
+  assert.equal(await original.getByText('答复未记录', { exact: true }).count(), 0)
+  assert.equal(await original.getByText('整轮用时未记录', { exact: true }).count(), 0)
+  const user = original.getByRole('region', { name: '用户发送了什么' })
+  await user.getByText(userText, { exact: true }).waitFor()
+  assert.equal(await replay.getByRole('article').count(), 1)
+  await original.getByRole('button', { name: '展开执行过程' }).click()
+  await original.locator('summary').filter({ hasText: /内部委派结果.*#724/ }).click()
+  await original.getByRole('heading', { name: '内部委派结果', exact: true }).waitFor()
+  await original.getByText('来源会话 fixture-source-thread', { exact: true }).waitFor()
+  await original.getByText(delegatedText, { exact: true }).waitFor()
+  assert.equal(await user.getByText(delegatedText).count(), 0)
+  assert.deepEqual(await page.evaluate(() => window.fixtureTaskPageCalls), [[724, 0, true]])
+
+  const completed = {
+    ...active, request_ids: [680, 724, 725], request_count: 3, status: 'completed',
+    final_status: 'completed', final_preview: finalText, final_source: 'gateway',
+  }
+  await page.evaluate(({ completedPage, detail }) => {
+    window.fixtureReplay.pages[0] = completedPage
+    window.fixtureReplay.tasks[680] = detail
+  }, {
+    completedPage: taskPage(completed),
+    detail: { ...activeDetail, ...completed, steps: [...activeDetail.steps, { ...step, request_id: 725 }],
+      final: { text: finalText, status: 'completed', source: 'gateway' } },
+  })
+  await page.clock.fastForward(15_000)
+  await original.getByText(finalText, { exact: true }).waitFor()
+  await original.getByRole('list', { name: '执行步骤' }).getByText('#725', { exact: false }).waitFor()
+  await original.getByRole('heading', { name: '内部委派结果', exact: true }).waitFor()
+  assert.equal(await replay.getByRole('article').count(), 1)
+  assert.equal(await original.getByText('进行中', { exact: true }).count(), 0)
+  await page.clock.fastForward(30_000)
+  assert.deepEqual(await page.evaluate(() => window.fixtureTaskPageCalls), [[724, 0, true], [724, 0, true]])
+
+  await replay.getByRole('button', { name: 'Close' }).click()
+  await page.evaluate((activePage) => { window.fixtureReplay.pages[0] = activePage }, taskPage(active))
+  await page.getByRole('button', { name: '查看会话' }).click()
+  await original.getByText('进行中', { exact: true }).waitFor()
+  await replay.getByRole('button', { name: 'Close' }).click()
+  await replay.waitFor({ state: 'hidden' })
+  await page.clock.fastForward(30_000)
+  assert.deepEqual(await page.evaluate(() => window.fixtureTaskPageCalls), [[724, 0, true], [724, 0, true], [724, 0, true]])
+})
 
 test('renders per-round provenance and Skill evidence with one default disclosure for a covered body', async (context) => {
   const developer = 'Fixture developer text\nSecond line.'
