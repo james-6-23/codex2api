@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, ChevronDown } from "lucide-react";
 import type { APIKeyRow } from "../types";
+import { applyManualScroll, applyWheelScroll } from "../lib/selectScroll";
 
 function formatAPIKeyOptionLabel(apiKey: APIKeyRow): string {
   const name = apiKey.name?.trim() || `API Key #${apiKey.id}`;
@@ -31,6 +32,8 @@ export default function APIKeyMultiSelect({
 }) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const touchStartRef = useRef<{ x: number; y: number } | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -47,11 +50,51 @@ export default function APIKeyMultiSelect({
       }
     };
 
+    // 手机端在弹窗内下拉列表可能因 remove-scroll 无法原生滚动，手动驱动。
+    const handleWheel = (event: WheelEvent) => {
+      const list = listRef.current;
+      const target = event.target as Node | null;
+      if (!list || !target || !list.contains(target)) return;
+      if (applyWheelScroll(list, event)) {
+        event.preventDefault();
+      }
+    };
+    const handleTouchStart = (event: TouchEvent) => {
+      const list = listRef.current;
+      const target = event.target as Node | null;
+      if (!list || !target || !list.contains(target)) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+    };
+    const handleTouchMove = (event: TouchEvent) => {
+      const list = listRef.current;
+      const start = touchStartRef.current;
+      if (!list || !start) return;
+      const target = event.target as Node | null;
+      if (!target || !list.contains(target)) return;
+      const touch = event.touches[0];
+      if (!touch) return;
+      const deltaX = start.x - touch.clientX;
+      const deltaY = start.y - touch.clientY;
+      touchStartRef.current = { x: touch.clientX, y: touch.clientY };
+      if (applyManualScroll(list, deltaX, deltaY)) {
+        event.preventDefault();
+      }
+    };
+
     document.addEventListener("mousedown", handlePointerDown);
     document.addEventListener("keydown", handleEscape);
+    document.addEventListener("wheel", handleWheel, { passive: false, capture: true });
+    document.addEventListener("touchstart", handleTouchStart, { passive: true, capture: true });
+    document.addEventListener("touchmove", handleTouchMove, { passive: false, capture: true });
     return () => {
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleEscape);
+      document.removeEventListener("wheel", handleWheel, true);
+      document.removeEventListener("touchstart", handleTouchStart, true);
+      document.removeEventListener("touchmove", handleTouchMove, true);
+      touchStartRef.current = null;
     };
   }, [open]);
 
@@ -101,7 +144,7 @@ export default function APIKeyMultiSelect({
               {emptyLabel}
             </div>
           ) : (
-            <div className="max-h-72 space-y-1 overflow-auto p-2">
+            <div ref={listRef} className="max-h-72 space-y-1 overflow-auto p-2">
               {options.map((option) => {
                 const checked = value.includes(option.id);
                 return (

@@ -155,8 +155,7 @@ export default function ChipInput({
   useEffect(() => {
     if (!showDropdown) return
 
-    // Bubble phase only — option handlers use onPointerDown in the target phase
-    // so selection commits before this outside-dismiss runs.
+    // The portaled options count as inside, even though they are outside the trigger.
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null
       if (!target) return
@@ -426,13 +425,8 @@ export default function ChipInput({
                             : 'text-foreground hover:bg-accent/70 hover:text-accent-foreground',
                         )}
                         onMouseEnter={() => setHighlightIndex(index)}
-                        // pointerdown 在 target 阶段 commit，早于 document 的 outside dismiss，
-                        // 避免 portal 场景下菜单先被关掉、click 永远收不到。
-                        onPointerDown={(event) => {
-                          event.preventDefault()
-                          event.stopPropagation()
-                          selectOption(opt)
-                        }}
+                        // Keep input focus on mouse clicks without selecting during a swipe.
+                        onMouseDown={(event) => event.preventDefault()}
                         onClick={(event) => {
                           event.preventDefault()
                           event.stopPropagation()
@@ -454,11 +448,7 @@ export default function ChipInput({
                 <button
                   type="button"
                   className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs font-medium text-primary transition-colors hover:bg-primary/10"
-                  onPointerDown={(event) => {
-                    event.preventDefault()
-                    event.stopPropagation()
-                    addChip(draft)
-                  }}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={(event) => {
                     event.preventDefault()
                     event.stopPropagation()
