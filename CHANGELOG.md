@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.2.0 - 2026-11-23
+
+> **Security upgrade notice.** [Issue #916](https://github.com/james-6-23/codex2api/issues/916), reported by @azure9, identified backdoored releases tagged `v3.1.10`, `v3.1.11` and `v3.1.12`. Upgrade to `v3.2.0` from the official release. If you ran an affected version, isolate the deployment, preserve logs, redeploy from a trusted environment and rotate credentials accessible to the old instance. The seven commits identified in the report are outside the history of this release.
+
+### Features
+
+- **Administrators can review recorded requests and replay tasks by conversation (#914, @BobChuang).** The admin view shows user input, images, model replies, tool calls and results, and captured Skill content. Full request recording is opt-in and defaults to 30 days of retention when enabled. Clients can submit task outcomes, and operators can separately configure Langfuse to receive trace metadata.
+
+### Fixes
+
+- **Dropdowns scroll reliably on touchscreens (#915, @mianfeikejiwl).** Swiping through options in dialogs keeps the list open until the user taps a choice. The invite account list keeps its scroll position when the highlighted row rerenders, and the auto-refresh menu scrolls on small screens.
+
 ## v3.1.9 - 2026-11-22
 
 ### Features
