@@ -3185,6 +3185,12 @@
         }
       },
       "tab": "Request history",
+      "excludeKeys": {
+        "label": "Exclude API Keys",
+        "description": "Selected keys stop recording and their existing requests are hidden. Clearing a selection and saving starts recording and counting again from that point.",
+        "search": "Search by name or key ID",
+        "empty": "No matching API keys."
+      },
       "retentionLabel": "Retention",
       "retentionOption": "{{days}} days",
       "retention": "Request contents are kept for {{days}} days.",

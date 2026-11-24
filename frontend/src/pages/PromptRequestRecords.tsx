@@ -12,7 +12,7 @@ import {
 import { downloadPromptSkill, promptSkillDownloadFileName, promptSkillMarkdown, promptSkillMarkdownIsPartial } from '../lib/promptSkillDownload'
 import type {
   PromptRequestChanges, PromptRequestContextSection, PromptRequestConversationPage, PromptRequestDetail, PromptRequestImage,
-  PromptRequestRecord, PromptRequestResult, PromptRequestTask, PromptRequestTaskDetail, PromptRequestTaskInternalEvent,
+  PromptRequestKeyRecording, PromptRequestRecord, PromptRequestResult, PromptRequestTask, PromptRequestTaskDetail, PromptRequestTaskInternalEvent,
   PromptRequestTaskStep, PromptRequestToolResult,
 } from '../types'
 import { formatBeijingTime } from '../utils/time'
@@ -21,6 +21,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import { Select } from '@/components/ui/select'
+import { Input } from '@/components/ui/input'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '@/components/ui/dialog'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 
@@ -47,6 +48,7 @@ export default function PromptRequestRecords({ refresh }: { refresh: number }) {
   const [draftRetention, setDraftRetention] = useState<number>()
   const [savingRetention, setSavingRetention] = useState(false)
   const [retentionError, setRetentionError] = useState('')
+  const [recordingSettingsRevision, setRecordingSettingsRevision] = useState(0)
   const [selectedID, setSelectedID] = useState<number>()
 
   useEffect(() => {
@@ -58,7 +60,7 @@ export default function PromptRequestRecords({ refresh }: { refresh: number }) {
       .catch((err: unknown) => { if (!controller.signal.aborted) setError(getErrorMessage(err)) })
       .finally(() => { if (!controller.signal.aborted) setLoading(false) })
     return () => controller.abort()
-  }, [cursor, refresh])
+  }, [cursor, refresh, recordingSettingsRevision])
 
   async function saveRetention() {
     if (draftRetention === undefined || savingRetention) return
@@ -82,6 +84,14 @@ export default function PromptRequestRecords({ refresh }: { refresh: number }) {
       next.delete('request')
       setSearchParams(next, { replace: true })
     }
+  }
+
+  function reloadAfterExclusions() {
+    closeRequestDialog()
+    setLoading(true)
+    setPage((current) => current && { ...current, groups: [], next_before: 0 })
+    setCursors([0])
+    setRecordingSettingsRevision((revision) => revision + 1)
   }
 
   return (
@@ -114,6 +124,7 @@ export default function PromptRequestRecords({ refresh }: { refresh: number }) {
                   disabled={loading || savingRetention || draftRetention === undefined || draftRetention === page.retention_days}>
                   {savingRetention ? t('common.saving') : t('common.save')}
                 </Button>
+                <PromptRequestKeyExclusions onSave={reloadAfterExclusions} />
               </div>
             </div>
           )}
@@ -189,6 +200,95 @@ export default function PromptRequestRecords({ refresh }: { refresh: number }) {
         </DialogContent>
       </Dialog>
     </>
+  )
+}
+
+function PromptRequestKeyExclusions({ onSave }: { onSave: () => void }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const [keys, setKeys] = useState<PromptRequestKeyRecording[]>()
+  const [selected, setSelected] = useState<Set<number>>(new Set())
+  const [search, setSearch] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [error, setError] = useState('')
+
+  useEffect(() => {
+    if (!open) return
+    const controller = new AbortController()
+    setKeys(undefined)
+    setSearch('')
+    setError('')
+    void api.getPromptRequestKeyExclusions(controller.signal)
+      .then(({ keys }) => {
+        if (controller.signal.aborted) return
+        setKeys(keys)
+        setSelected(new Set(keys.filter((key) => key.excluded).map((key) => key.id)))
+      })
+      .catch((err: unknown) => { if (!controller.signal.aborted) setError(getErrorMessage(err)) })
+    return () => controller.abort()
+  }, [open])
+
+  async function save() {
+    setSaving(true)
+    setError('')
+    try {
+      await api.updatePromptRequestKeyExclusions([...selected])
+      setOpen(false)
+      onSave()
+    } catch (err: unknown) {
+      setError(getErrorMessage(err))
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const query = search.trim().toLowerCase()
+  const matches = keys?.filter((key) => key.name.toLowerCase().includes(query) || String(key.id).includes(query))
+  const changed = keys?.some((key) => key.excluded !== selected.has(key.id))
+  const label = t('promptFilter.requests.excludeKeys.label')
+
+  return (
+    <Dialog open={open} onOpenChange={(next) => { if (!saving) setOpen(next) }}>
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline" size="sm">{label}</Button>
+      </DialogTrigger>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle>{label}</DialogTitle>
+          <DialogDescription>{t('promptFilter.requests.excludeKeys.description')}</DialogDescription>
+        </DialogHeader>
+        {error ? <p role="alert" className="text-sm text-destructive">{error}</p> : null}
+        {keys ? <>
+          <Input aria-label={t('promptFilter.requests.excludeKeys.search')}
+            placeholder={t('promptFilter.requests.excludeKeys.search')} value={search}
+            onChange={(event) => setSearch(event.target.value)} disabled={saving} />
+          {matches?.length ? (
+            <fieldset className="max-h-64 min-w-0 space-y-1 overflow-y-auto rounded-md border p-2" disabled={saving}>
+              <legend className="sr-only">{label}</legend>
+              {matches.map((key) => (
+                <label key={key.id} className="flex min-w-0 cursor-pointer items-center gap-2 rounded px-2 py-1.5 text-sm hover:bg-muted">
+                  <input type="checkbox" className="size-4 shrink-0 accent-primary" checked={selected.has(key.id)}
+                    onChange={(event) => {
+                      const next = new Set(selected)
+                      if (event.target.checked) next.add(key.id)
+                      else next.delete(key.id)
+                      setSelected(next)
+                    }} />
+                  <span className="break-all">{key.name || 'API Key'}</span>
+                  <span className="shrink-0 text-xs text-muted-foreground">#{key.id}</span>
+                </label>
+              ))}
+            </fieldset>
+          ) : <p className="text-sm text-muted-foreground">{t('promptFilter.requests.excludeKeys.empty')}</p>}
+        </> : !error ? <p role="status" className="text-sm text-muted-foreground">{t('common.loading')}</p> : null}
+        <DialogFooter>
+          <Button type="button" variant="outline" disabled={saving} onClick={() => setOpen(false)}>{t('common.cancel')}</Button>
+          <Button type="button" disabled={saving || !changed} onClick={() => void save()}>
+            {t(saving ? 'common.saving' : 'common.save')}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }
 

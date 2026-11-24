@@ -69,6 +69,37 @@ func (h *Handler) UpdatePromptRequestRetention(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"retention_days": input.Days})
 }
 
+func (h *Handler) GetPromptRequestKeyExclusions(c *gin.Context) {
+	keys, err := h.db.ListPromptRequestKeyRecording(c.Request.Context())
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, gin.H{"keys": keys})
+}
+
+func (h *Handler) UpdatePromptRequestKeyExclusions(c *gin.Context) {
+	var input struct {
+		ExcludedKeyIDs *[]int64 `json:"excluded_key_ids"`
+	}
+	if err := c.ShouldBindJSON(&input); err != nil || input.ExcludedKeyIDs == nil {
+		writeError(c, http.StatusBadRequest, "excluded_key_ids must be an array of API Key IDs")
+		return
+	}
+	keys, err := h.db.SetPromptRequestExcludedKeys(c.Request.Context(), *input.ExcludedKeyIDs)
+	if errors.Is(err, database.ErrInvalidPromptRequestKey) {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err != nil {
+		writeInternalError(c, err)
+		return
+	}
+	c.Header("Cache-Control", "private, no-store")
+	c.JSON(http.StatusOK, gin.H{"keys": keys})
+}
+
 func (h *Handler) loadPromptRequest(c *gin.Context) (database.PromptRequestBody, bool) {
 	id, err := strconv.ParseInt(c.Param("id"), 10, 64)
 	if err != nil || id <= 0 {

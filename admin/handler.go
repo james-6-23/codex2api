@@ -1368,6 +1368,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.GET("/prompt-filter/request-conversations/:id/tasks", h.ListPromptRequestTasks)
 	api.GET("/prompt-filter/request-tasks/:id", h.GetPromptRequestTask)
 	api.PUT("/prompt-filter/requests/retention", h.UpdatePromptRequestRetention)
+	api.GET("/prompt-filter/requests/key-exclusions", h.GetPromptRequestKeyExclusions)
+	api.PUT("/prompt-filter/requests/key-exclusions", h.UpdatePromptRequestKeyExclusions)
 	api.GET("/prompt-filter/requests/:id", h.GetPromptRequest)
 	api.GET("/prompt-filter/requests/:id/images/:image", h.GetPromptRequestImage)
 	api.GET("/prompt-filter/logs/match", h.MatchPromptFilterLog)

@@ -70,6 +70,9 @@ func (h *Handler) beginPromptRequest(c *gin.Context, body []byte, contentType, t
 		log.Printf("[prompt-requests] could not persist request on %s: %T", c.FullPath(), err)
 		return func(int) {}
 	}
+	if id == 0 {
+		return func(int) {}
+	}
 	c.Set(promptRequestRecordID, id)
 	capture := &promptResponseCapture{chatReplyClassified: chat}
 	if h.cfg.PromptTraceExport.Enabled() {
