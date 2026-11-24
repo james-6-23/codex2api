@@ -4794,7 +4794,11 @@ export default function Accounts() {
       }
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       if (format === "json") {
-        const blob = new Blob([JSON.stringify(data, null, 2)], {
+        // CPA 要求认证文件顶层是单个 JSON 对象：只导出一个账号时直接写对象，
+        // 多账号仍用数组（供备份/迁移）。
+        const payload =
+          data.length === 1 ? JSON.stringify(data[0], null, 2) : JSON.stringify(data, null, 2);
+        const blob = new Blob([payload], {
           type: "application/json",
         });
         downloadBlob(blob, `codex2api-codex-${ts}-${data.length}.json`);
@@ -12052,7 +12056,11 @@ function RecycleBinView({
       const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
       let exportedCount = data.length;
       if (format === "json") {
-        const blob = new Blob([JSON.stringify(data, null, 2)], {
+        // CPA 要求认证文件顶层是单个 JSON 对象：只导出一个账号时直接写对象，
+        // 多账号仍用数组（供备份/迁移）。
+        const payload =
+          data.length === 1 ? JSON.stringify(data[0], null, 2) : JSON.stringify(data, null, 2);
+        const blob = new Blob([payload], {
           type: "application/json",
         });
         downloadBlob(blob, `codex2api-recycle-${ts}-${data.length}.json`);
