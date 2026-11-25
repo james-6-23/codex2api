@@ -5,15 +5,22 @@ import (
 	"encoding/hex"
 	"net/http"
 	"strings"
+
+	"github.com/codex2api/proxy"
 )
 
 func websocketClientIdentity(headers http.Header) string {
-	parts := []string{headers.Get("User-Agent"), headers.Get("Version"), headers.Get("Originator")}
+	parts := []string{
+		headers.Get("User-Agent"),
+		headers.Get("Version"),
+		headers.Get("Originator"),
+		proxy.CodexExcludeHeaderValue(headers),
+	}
 	hash := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
 	return hex.EncodeToString(hash[:])
 }
 
-// 握手头固定到连接；版本更新后须使用对应身份的连接池。
+// 握手头固定到连接；客户端版本或 X-Codex-Exclude 变化后须使用对应连接池。
 func websocketClientPoolKey(key string, headers http.Header) string {
 	if key == "" {
 		return key

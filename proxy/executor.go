@@ -381,6 +381,8 @@ const (
 
 const (
 	codexBetaFeaturesHeader = "X-Codex-Beta-Features"
+	// CodexExcludeHeader 供客户端控制上游在 Responses 响应中省略的字段（如 tools,usage.attribution）。
+	CodexExcludeHeader = "X-Codex-Exclude"
 	// defaultCodexBetaFeatures 是默认安装的真实 Codex 发出的会话级特性协商值。
 	defaultCodexBetaFeatures = "remote_compaction_v2"
 )
@@ -390,7 +392,30 @@ var codexAllowedForwardHeaders = []string{
 	"X-Codex-Turn-Metadata",
 	"X-Client-Request-Id",
 	"X-Codex-Beta-Features",
+	CodexExcludeHeader,
 	codexResponsesLiteHeader,
+}
+
+// CodexExcludeHeaderValue 读取客户端传入的 X-Codex-Exclude 头值：
+// 省略或仅空白时返回空串；单条头按原值（去首尾空白）返回；多条同名头按 RFC 9110 以逗号合并。
+func CodexExcludeHeaderValue(headers http.Header) string {
+	if headers == nil {
+		return ""
+	}
+	values := headers.Values(CodexExcludeHeader)
+	if len(values) == 0 {
+		return ""
+	}
+	if len(values) == 1 {
+		return strings.TrimSpace(values[0])
+	}
+	parts := make([]string, 0, len(values))
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			parts = append(parts, trimmed)
+		}
+	}
+	return strings.Join(parts, ",")
 }
 
 func codexResponsesLiteRequested(requestBody []byte, headers http.Header) bool {
@@ -1248,7 +1273,13 @@ func applyCodexAllowedForwardHeaders(req *http.Request, downstreamHeaders http.H
 		return
 	}
 	for _, name := range codexAllowedForwardHeaders {
-		if value := strings.TrimSpace(downstreamHeaders.Get(name)); value != "" {
+		var value string
+		if name == CodexExcludeHeader {
+			value = CodexExcludeHeaderValue(downstreamHeaders)
+		} else {
+			value = strings.TrimSpace(downstreamHeaders.Get(name))
+		}
+		if value != "" {
 			req.Header.Set(name, value)
 		}
 	}

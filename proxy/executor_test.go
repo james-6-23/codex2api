@@ -2118,3 +2118,116 @@ func TestExecuteRequestHTTPStripsTopLevelEnvelopeType(t *testing.T) {
 		t.Fatal("timed out waiting for upstream request")
 	}
 }
+
+func TestApplyCodexRequestHeadersForwardsCodexExclude(t *testing.T) {
+	account := &auth.Account{DBID: 42, AccountID: "acct-42"}
+	cases := []struct {
+		name       string
+		downstream http.Header
+		account    *auth.Account
+		want       string
+		wantExists bool
+	}{
+		{
+			name:       "default tools and usage attribution",
+			downstream: http.Header{CodexExcludeHeader: {"tools,usage.attribution"}},
+			account:    account,
+			want:       "tools,usage.attribution",
+			wantExists: true,
+		},
+		{
+			name:       "tools only",
+			downstream: http.Header{CodexExcludeHeader: {"tools"}},
+			account:    account,
+			want:       "tools",
+			wantExists: true,
+		},
+		{
+			name:       "multiple values joined",
+			downstream: http.Header{CodexExcludeHeader: {"tools", "usage.attribution"}},
+			account:    account,
+			want:       "tools,usage.attribution",
+			wantExists: true,
+		},
+		{
+			name:       "omitted stays omitted",
+			downstream: http.Header{},
+			account:    account,
+			want:       "",
+			wantExists: false,
+		},
+		{
+			name:       "whitespace only stays omitted",
+			downstream: http.Header{CodexExcludeHeader: {"   "}},
+			account:    account,
+			want:       "",
+			wantExists: false,
+		},
+		{
+			name:       "account custom header overrides downstream",
+			downstream: http.Header{CodexExcludeHeader: {"tools,usage.attribution"}},
+			account:    &auth.Account{DBID: 42, AccountID: "acct-42", CustomHeaders: map[string]string{"x-codex-exclude": "tools"}},
+			want:       "tools",
+			wantExists: true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, CodexBaseURL+"/responses", nil)
+			if err != nil {
+				t.Fatalf("http.NewRequest() error = %v", err)
+			}
+			if err := applyCodexRequestHeaders(req, tc.account, "access-token", "session-1", "sk-test", nil, tc.downstream); err != nil {
+				t.Fatalf("applyCodexRequestHeaders() error = %v", err)
+			}
+			_, exists := req.Header[CodexExcludeHeader]
+			if exists != tc.wantExists {
+				t.Fatalf("header presence = %v, want %v (header=%v)", exists, tc.wantExists, req.Header[CodexExcludeHeader])
+			}
+			if got := req.Header.Get(CodexExcludeHeader); got != tc.want {
+				t.Fatalf("%s = %q, want %q", CodexExcludeHeader, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestExecuteRequestHTTPForwardsCodexExcludeHeader(t *testing.T) {
+	previousResin := resinCfg.Load()
+	t.Cleanup(func() { resinCfg.Store(previousResin) })
+
+	headerCh := make(chan http.Header, 2)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		headerCh <- r.Header.Clone()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"resp_test"}`))
+	}))
+	t.Cleanup(upstream.Close)
+	SetResinConfig(&ResinConfig{BaseURL: upstream.URL, PlatformName: "test"})
+
+	body := []byte(`{"model":"gpt-5.4","input":"hello"}`)
+	account := &auth.Account{DBID: 1, AccessToken: "token"}
+
+	withExclude := http.Header{}
+	withExclude.Set("x-codex-exclude", "tools,usage.attribution")
+	resp, err := ExecuteRequest(context.Background(), account, body, "", "", "sk-local", nil, withExclude, false)
+	if err != nil {
+		t.Fatalf("ExecuteRequest(with exclude) error = %v", err)
+	}
+	resp.Body.Close()
+
+	resp, err = ExecuteRequest(context.Background(), account, body, "", "", "sk-local", nil, http.Header{}, false)
+	if err != nil {
+		t.Fatalf("ExecuteRequest(without exclude) error = %v", err)
+	}
+	resp.Body.Close()
+
+	first := <-headerCh
+	if got := first.Get(CodexExcludeHeader); got != "tools,usage.attribution" {
+		t.Fatalf("first request %s = %q, want tools,usage.attribution", CodexExcludeHeader, got)
+	}
+	second := <-headerCh
+	if _, exists := second[CodexExcludeHeader]; exists {
+		t.Fatalf("second request unexpectedly forwarded %s: %v", CodexExcludeHeader, second[CodexExcludeHeader])
+	}
+}

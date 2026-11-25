@@ -418,6 +418,9 @@ func (e *Executor) prepareWebsocketHeadersChecked(ctx context.Context, accessTok
 			headers.Set(name, value)
 		}
 	}
+	if exclude := proxy.CodexExcludeHeaderValue(ginHeaders); exclude != "" {
+		headers.Set(proxy.CodexExcludeHeader, exclude)
+	}
 	if headers.Get("X-Codex-Turn-State") == "" {
 		if state := strings.TrimSpace(gjson.GetBytes(wsBody, "client_metadata.x-codex-turn-state").String()); state != "" {
 			headers.Set("X-Codex-Turn-State", state)
