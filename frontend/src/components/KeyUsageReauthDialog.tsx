@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { KeyRound } from "lucide-react";
 import { api, type PublicKeyUsageAccount } from "../api";
@@ -37,9 +37,12 @@ export default function KeyUsageReauthDialog({
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [completed, setCompleted] = useState(false);
-  const pending = useRef(false);
+  const pending = useRef<AbortController | null>(null);
+  useEffect(() => () => pending.current?.abort(), []);
   function changeOpen(next: boolean) {
-    if (pending.current) return;
+    pending.current?.abort();
+    pending.current = null;
+    setBusy(false);
     setOpen(next);
     setCompleted(false);
     setSession(null);
@@ -49,7 +52,8 @@ export default function KeyUsageReauthDialog({
   }
   async function submit(restart = false) {
     if (pending.current || !account.reauth_allowed) return;
-    pending.current = true;
+    const controller = new AbortController();
+    pending.current = controller;
     setBusy(true);
     setError("");
     setNotice("");
@@ -57,29 +61,48 @@ export default function KeyUsageReauthDialog({
       if (!session || restart) {
         setCallbackUrl("");
         setSession(null);
-        setSession(await api.startPublicAccountReauth(apiKey, account.id));
+        const next = await api.startPublicAccountReauth(
+          apiKey,
+          account.id,
+          controller.signal,
+        );
+        if (!controller.signal.aborted) setSession(next);
       } else {
         const { code, state } = parseOAuthCallbackParams(callbackUrl);
         if (!code || !state) {
           setError(t("accounts.oauthParseError"));
           return;
         }
-        await api.completePublicAccountReauth(apiKey, account.id, {
-          session_id: session.session_id,
-          code,
-          state,
-        });
+        const result = await api.completePublicAccountReauth(
+          apiKey,
+          account.id,
+          {
+            session_id: session.session_id,
+            code,
+            state,
+          },
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
         setCallbackUrl("");
         setSession(null);
         setCompleted(true);
-        setNotice(t("accounts.oauthUpdateSuccessNoEmail"));
+        setNotice(
+          t(
+            result.reload_pending
+              ? "keyUsageAccounts.reauthReloadPending"
+              : "accounts.oauthUpdateSuccessNoEmail",
+          ),
+        );
         onComplete();
       }
     } catch (err) {
-      setError(getErrorMessage(err));
+      if (!controller.signal.aborted) setError(getErrorMessage(err));
     } finally {
-      pending.current = false;
-      setBusy(false);
+      if (pending.current === controller && !controller.signal.aborted) {
+        pending.current = null;
+        setBusy(false);
+      }
     }
   }
   async function copy() {
@@ -134,11 +157,7 @@ export default function KeyUsageReauthDialog({
           </p>
         )}
         <DialogFooter>
-          <Button
-            variant="outline"
-            onClick={() => changeOpen(false)}
-            disabled={busy}
-          >
+          <Button variant="outline" onClick={() => changeOpen(false)}>
             {t("common.close")}
           </Button>
           {!completed && (

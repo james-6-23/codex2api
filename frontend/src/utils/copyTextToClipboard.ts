@@ -18,13 +18,19 @@ export async function copyTextToClipboard(text: string) {
   textarea.style.height = "1px";
   textarea.style.opacity = "0";
   textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.focus({ preventScroll: true });
-  textarea.select();
-  textarea.setSelectionRange(0, text.length);
-  const copied = document.execCommand("copy");
-  document.body.removeChild(textarea);
-  if (!copied) {
-    throw new Error("copy failed");
+  // Radix moves focus back inside an open dialog when focus leaves its scope.
+  const previous = document.activeElement;
+  const host =
+    previous?.closest('[role="dialog"], [role="alertdialog"]') ?? document.body;
+  host.appendChild(textarea);
+  try {
+    textarea.focus({ preventScroll: true });
+    textarea.select();
+    textarea.setSelectionRange(0, text.length);
+    if (!document.execCommand("copy")) throw new Error("copy failed");
+  } finally {
+    textarea.remove();
+    if (previous instanceof HTMLElement && previous.isConnected)
+      previous.focus({ preventScroll: true });
   }
 }

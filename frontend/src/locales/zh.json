@@ -6293,6 +6293,7 @@
     "keyGroupsReconcileHint": "分组卡片会重复计入多分组账号；加上 {{ungrouped}} 个未分组账号，再减去 {{multi}} 个多分组账号的重复归属后，即为 Key 去重总计。"
   },
   "keyUsageAccounts": {
+    "reauthReloadPending": "授权已保存，但账号尚未重新加载。请刷新账号列表，不要重复提交回调。",
     "reauthorize": "重新授权",
     "keyRequests": "此 Key 请求数",
     "keyCost": "此 Key 费用",

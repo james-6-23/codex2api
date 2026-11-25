@@ -156,7 +156,35 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
   await thirdCard.getByRole('button', { name: '重新授权', exact: true }).click()
   const reauth = page.getByRole('dialog')
   assert.equal(await reauth.getByRole('combobox').count(), 0, 'no editable group or proxy')
+  await page.evaluate(() => {
+    const fetch = window.fetch
+    window.fetch = (url, opts) => {
+      if (!String(url).endsWith('/reauth/start')) return fetch(url, opts)
+      window.fetch = fetch
+      window.__stalledSignal = opts.signal
+      return new Promise(resolve => { window.__lateStart = () => resolve(new Response(JSON.stringify({ session_id: 'stale', auth_url: 'https://example.invalid/stale' }))) })
+    }
+  })
   await reauth.getByRole('button', { name: '生成授权链接' }).click()
+  await page.waitForFunction(() => !!window.__lateStart)
+  await page.keyboard.press('Escape')
+  await reauth.waitFor({state: 'hidden'})
+  assert.equal(await page.evaluate(() => window.__stalledSignal.aborted), true)
+  await thirdCard.getByRole('button', { name: '重新授权', exact: true }).click()
+  await page.evaluate(() => window.__lateStart())
+  await reauth.getByRole('button', { name: '生成授权链接' }).click()
+  await reauth.getByRole('link').waitFor()
+  await page.evaluate(() => {
+    document.execCommand = cmd => {
+      const input = document.activeElement
+      if (cmd !== 'copy' || !(input instanceof HTMLTextAreaElement) || !input.closest('[role="dialog"]')) return false
+      window.__copied = input.value.slice(input.selectionStart, input.selectionEnd)
+      return true
+    }
+  })
+  await reauth.getByRole('button', {name: '复制', exact: true}).click()
+  assert.equal(await page.evaluate(() => window.__copied), 'https://example.invalid/fixture')
+  assert.equal(await reauth.locator('textarea').count(), 0)
   await reauth.getByRole('textbox').fill('http://localhost/fixture?state=fixture-state&code=fixture-code')
   await reauth.getByRole('button', { name: '更新授权参数' }).click()
   await reauth.getByText('OAuth 授权参数已更新', { exact: true }).waitFor()
@@ -165,6 +193,19 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
   assert.equal(complete.path, '/api/key-usage/accounts/3/reauth/complete')
   assert.equal(complete.auth, 'Bearer fixture-key')
   assert.deepEqual(JSON.parse(complete.body), { session_id: 'session-3', state: 'fixture-state', code: 'fixture-code' })
+  await page.keyboard.press('Escape')
+  // A committed write with a delayed runtime reload is not a retryable OAuth failure.
+  await page.evaluate(() => {
+    const fetch = window.fetch
+    window.fetch = (url, opts) => String(url).endsWith('/reauth/complete')
+      ? Promise.resolve(new Response(JSON.stringify({id: 3, reload_pending: true}))) : fetch(url, opts)
+  })
+  await thirdCard.getByRole('button', { name: '重新授权', exact: true }).click()
+  await reauth.getByRole('button', { name: '生成授权链接' }).click()
+  await reauth.getByRole('textbox').fill('http://localhost/fixture?state=second-state&code=second-code')
+  await reauth.getByRole('button', { name: '更新授权参数' }).click()
+  await reauth.getByText(/授权已保存，但账号尚未重新加载/).waitFor()
+  assert.equal(await reauth.getByRole('textbox').count(), 0)
   await page.keyboard.press('Escape')
   await firstCard.getByRole('button', { name: '详情' }).click()
   const details = page.getByRole('dialog', { name: 'a@example.test' })

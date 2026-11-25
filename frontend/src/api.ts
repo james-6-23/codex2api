@@ -616,8 +616,8 @@ export const api = {
   setKeyUsageAccountPermissions: (id: number, data: { view_enabled: boolean; reset_enabled: boolean }) =>
     request<{ view_enabled: boolean; reset_enabled: boolean }>(`/key-usage-account-permissions/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
   getPublicKeyUsageAccounts: (key: string, options: RequestInit = {}) => requestAPIKeyUsage<{ accounts: PublicKeyUsageAccount[]; groups: { id: number; name: string }[]; reset_enabled: boolean }>('/accounts', key, options),
-  startPublicAccountReauth: (key: string, id: number) => requestAPIKeyUsage<{auth_url: string; session_id: string}>(`/accounts/${id}/reauth/start`, key, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
-  completePublicAccountReauth: (key: string, id: number, data: { session_id: string; code: string; state: string }) => requestAPIKeyUsage<{id: number}>(`/accounts/${id}/reauth/complete`, key, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
+  startPublicAccountReauth: (key: string, id: number, signal?: AbortSignal) => requestAPIKeyUsage<{auth_url: string; session_id: string}>(`/accounts/${id}/reauth/start`, key, { signal, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }),
+  completePublicAccountReauth: (key: string, id: number, data: { session_id: string; code: string; state: string }, signal?: AbortSignal) => requestAPIKeyUsage<{id: number; reload_pending?: boolean}>(`/accounts/${id}/reauth/complete`, key, { signal, method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) }),
   resetPublicKeyUsageCredits: (key: string, id: number, requestID: string) => requestAPIKeyUsage<{ message: string; usage_refreshed: boolean }>(`/accounts/${id}/reset-credits`, key, { method: 'POST', headers: { 'Idempotency-Key': requestID } }),
   getBranding: () => requestPublic<SiteBranding>('/api/branding'),
   // 公开账号自助门户:生成 OpenAI 授权链接(无鉴权)。
