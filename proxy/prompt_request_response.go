@@ -36,7 +36,7 @@ type promptResponseCapture struct {
 	textByKey            map[string]*promptResponseText
 	messagePhases        map[string]string
 	chatReplyClassified  bool
-	chatPrimaryStopped   bool
+	chatFinishReason     string
 	chatPrimaryHasTool   bool
 	chatPrimaryOtherRole bool
 	chatStreamDone       bool
@@ -364,7 +364,7 @@ func (r *promptResponseCapture) observeChat(root gjson.Result, stream bool) {
 		function := message.Get("function_call")
 		if index == 0 {
 			if finish := choice.Get("finish_reason").Str; finish != "" {
-				r.chatPrimaryStopped = finish == "stop"
+				r.chatFinishReason = strings.Clone(r.limit(finish, 64))
 			}
 			r.chatPrimaryHasTool = r.chatPrimaryHasTool || tools.Get("0").Exists() || function.IsObject()
 			if role := message.Get("role").Str; role != "" && role != "assistant" {
@@ -533,10 +533,11 @@ func (r *promptResponseCapture) result(status int, cancelled bool) database.Prom
 	}
 	// Chat choices do not carry Responses phases. A regular terminal stop
 	// proves the primary assistant choice ended, while a stream also needs
-	// the wire sentinel to rule out a disconnected downstream.
-	chatFinal := r.chatPrimaryStopped && !r.chatPrimaryHasTool && !r.chatPrimaryOtherRole &&
-		!cancelled && !r.writeFailed && status >= 200 && status < 300 && r.status == "completed" &&
-		(r.mode == "json" || (r.mode == "sse" && r.chatStreamDone))
+	// the wire sentinel. A peer can close the connection immediately after
+	// receiving [DONE], before the handler has returned.
+	chatFinal := r.chatFinishReason == "stop" && !r.chatPrimaryHasTool && !r.chatPrimaryOtherRole &&
+		!r.writeFailed && status >= 200 && status < 300 && r.status == "completed" &&
+		((r.mode == "json" && !cancelled) || (r.mode == "sse" && r.chatStreamDone))
 	var answer, final, commentary strings.Builder
 	for _, part := range r.textParts {
 		if part.value.Len() == 0 {
@@ -554,8 +555,8 @@ func (r *promptResponseCapture) result(status int, cancelled bool) database.Prom
 	response := database.PromptRequestResponse{
 		Status: r.status, Text: answer.String(), Error: r.message, Truncated: r.truncated,
 		FinalText: final.String(), FinalObserved: final.Len() != 0, CommentaryText: commentary.String(),
-		ChatReplyClassified: r.chatReplyClassified,
-		ToolCalls:           make([]database.PromptRequestResponseCall, 0, len(r.calls)),
+		ChatReplyClassified: r.chatReplyClassified, ChatFinishReason: r.chatFinishReason,
+		ToolCalls: make([]database.PromptRequestResponseCall, 0, len(r.calls)),
 	}
 	for _, call := range r.calls {
 		if call.name != "" || call.id != "" || call.args.Len() > 0 {

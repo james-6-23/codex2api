@@ -4635,6 +4635,7 @@ export interface PromptRequestTask {
   started_at: string
   request_ids: number[]
   request_count?: number
+  kind?: 'context_compaction' | 'context_resume'
   user_preview?: string
   user_text?: string
   user_text_truncated?: boolean
@@ -4685,11 +4686,13 @@ export interface PromptRequestTaskStep {
   created_at: string
   model: string
   endpoint: string
+  kind?: 'context_compaction' | 'context_resume'
   action: string
   status: number
   commentary?: string
-  response?: { status: string; text?: string; error?: string; truncated?: boolean }
+  response?: { status: string; text?: string; error?: string; truncated?: boolean; tool_only?: boolean }
   tools: PromptRequestTaskTool[]
+  delegations?: { text: string; source_thread_id: string }[]
   skills?: { name: string; path?: string; source: string; source_request_id: number }[]
   skill_usage?: PromptRequestTaskSkillUsage[]
 }

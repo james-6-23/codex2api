@@ -51,16 +51,19 @@ func (h *Handler) beginPromptRequest(c *gin.Context, body []byte, contentType, t
 	c.Set(promptRequestRecordID, int64(0))
 	c.Set(promptRequestAction, "")
 	endpoint := c.Request.URL.Path
+	chat := database.IsPromptRequestChat(endpoint, transport)
+	keyID := requestAPIKeyID(c)
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
 	id, err := h.db.InsertPromptRequest(ctx, database.PromptRequestBody{
 		PromptRequestRecord: database.PromptRequestRecord{
 			CreatedAt: time.Now().UTC(), Endpoint: endpoint, Transport: transport,
 			Model: gjson.GetBytes(body, "model").String(), APIKey: c.GetString(contextAPIKeyName),
 		},
+		APIKeyID:          keyID,
 		ContentType:       contentType,
 		Body:              body,
-		ConversationScope: database.PromptRequestConversationScope(body, requestAPIKeyID(c), endpoint, transport),
-		ConversationGroup: database.PromptRequestConversationGroup(body, requestAPIKeyID(c)),
+		ConversationScope: database.PromptRequestConversationScope(body, keyID, endpoint, transport),
+		ConversationGroup: database.PromptRequestConversationGroup(body, keyID),
 	})
 	cancel()
 	if err != nil {
@@ -68,7 +71,7 @@ func (h *Handler) beginPromptRequest(c *gin.Context, body []byte, contentType, t
 		return func(int) {}
 	}
 	c.Set(promptRequestRecordID, id)
-	capture := &promptResponseCapture{chatReplyClassified: endpoint == "/v1/chat/completions" || endpoint == "/chat/completions"}
+	capture := &promptResponseCapture{chatReplyClassified: chat}
 	if h.cfg.PromptTraceExport.Enabled() {
 		capture.traceUsage = &promptRequestTraceUsage{}
 	}
@@ -93,6 +96,13 @@ func (h *Handler) beginPromptRequest(c *gin.Context, body []byte, contentType, t
 		c.Set(promptResponseCaptureKey, nil)
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
 		defer cancel()
+		if chat {
+			defer func() {
+				if err := h.db.IndexPromptRequestChat(ctx, id, body); err != nil {
+					log.Printf("[prompt-requests] chat replay indexing failed for request %d: %T", id, err)
+				}
+			}()
+		}
 		response := capture.result(status, c.Request.Context().Err() != nil)
 		response.FinishedAt = &finishedAt
 		if capture.traceUsage != nil {
@@ -142,6 +152,12 @@ func (h *Handler) StartPromptRequestRetention(ctx context.Context) {
 			cancelTasks()
 			if taskErr != nil && ctx.Err() == nil {
 				log.Printf("[prompt-requests] task replay indexing failed: %T", taskErr)
+			}
+			chatCtx, cancelChat := context.WithTimeout(ctx, time.Minute)
+			chatErr := h.db.IndexArchivedPromptRequestChats(chatCtx)
+			cancelChat()
+			if chatErr != nil && ctx.Err() == nil {
+				log.Printf("[prompt-requests] archived chat replay indexing failed: %T", chatErr)
 			}
 			purgeCtx, cancel := context.WithTimeout(ctx, time.Minute)
 			err := h.db.PurgeExpiredPromptRequests(purgeCtx, time.Now())

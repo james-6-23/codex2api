@@ -57,17 +57,19 @@ type promptTaskUser struct {
 }
 
 type promptTaskStep struct {
-	RequestID  int64                      `json:"request_id"`
-	CreatedAt  time.Time                  `json:"created_at"`
-	Model      string                     `json:"model"`
-	Endpoint   string                     `json:"endpoint"`
-	Action     string                     `json:"action"`
-	Status     int                        `json:"status"`
-	Commentary string                     `json:"commentary,omitempty"`
-	Response   *promptTaskStepResponse    `json:"response,omitempty"`
-	Tools      []promptTaskTool           `json:"tools"`
-	Skills     []promptTaskStepSkill      `json:"skills,omitempty"`
-	SkillUsage []promptTaskStepSkillUsage `json:"skill_usage,omitempty"`
+	RequestID   int64                                  `json:"request_id"`
+	CreatedAt   time.Time                              `json:"created_at"`
+	Model       string                                 `json:"model"`
+	Endpoint    string                                 `json:"endpoint"`
+	Kind        string                                 `json:"kind,omitempty"`
+	Action      string                                 `json:"action"`
+	Status      int                                    `json:"status"`
+	Commentary  string                                 `json:"commentary,omitempty"`
+	Response    *promptTaskStepResponse                `json:"response,omitempty"`
+	Tools       []promptTaskTool                       `json:"tools"`
+	Skills      []promptTaskStepSkill                  `json:"skills,omitempty"`
+	SkillUsage  []promptTaskStepSkillUsage             `json:"skill_usage,omitempty"`
+	Delegations []database.PromptRequestTaskDelegation `json:"delegations,omitempty"`
 }
 
 type promptTaskStepSkill struct {
@@ -114,7 +116,10 @@ type promptTaskGroup struct {
 	promptTaskSummary
 	anchor, turn string
 	userAnchorID int64
+	chatTurnRoot int64
+	compactions  []int64
 	terminal     database.PromptRequestTaskRow
+	followLatest bool
 }
 
 func groupPromptTaskRows(rows []database.PromptRequestTaskRow) []promptTaskGroup {
@@ -126,11 +131,21 @@ func groupPromptTaskRows(rows []database.PromptRequestTaskRow) []promptTaskGroup
 			}})
 		}
 		task := &groups[len(groups)-1]
-		if task.anchor == "" && row.Anchor != "" {
-			task.anchor, task.UserPreview = row.Anchor, row.Preview
-			task.userAnchorID = row.ID
+		if task.RequestCount == 0 && (row.ChatTurnRoot != 0 || row.ChatReplayKind == database.PromptRequestChatResume) {
+			task.chatTurnRoot = row.ChatTurnRoot
+			task.Kind = database.PromptRequestChatResume
 		}
-		if task.UserPreview == "" {
+		if row.ChatReplayKind == database.PromptRequestChatCompaction {
+			task.compactions = append(task.compactions, row.ID)
+		}
+		hasUser := row.ChatTurnRoot == 0 && row.ChatReplayKind == ""
+		if task.anchor == "" && row.Anchor != "" {
+			task.anchor = row.Anchor
+			if hasUser && task.Kind == "" {
+				task.userAnchorID = row.ID
+			}
+		}
+		if hasUser && task.Kind == "" && task.UserPreview == "" {
 			task.UserPreview = row.Preview
 		}
 		if task.turn == "" {
@@ -147,6 +162,9 @@ func groupPromptTaskRows(rows []database.PromptRequestTaskRow) []promptTaskGroup
 func (task promptTaskGroup) contains(row database.PromptRequestTaskRow) bool {
 	if !row.Indexed || (task.turn != "" && row.Turn != "" && task.turn != row.Turn) {
 		return false
+	}
+	if row.ChatTurnRoot != 0 {
+		return row.ChatTurnRoot == task.ID || row.ChatTurnRoot == task.chatTurnRoot
 	}
 	if task.anchor != "" && row.Anchor != "" {
 		return task.anchor == row.Anchor
@@ -176,6 +194,13 @@ func (h *Handler) ListPromptRequestTasks(c *gin.Context) {
 	before, _ := strconv.ParseInt(c.Query("before"), 10, 64)
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 12*time.Second)
 	defer cancel()
+	followLatest := before <= 0 && c.Query("live") == "1"
+	if followLatest {
+		id, err = h.db.LatestPromptRequestConversationID(ctx, id)
+		if !writePromptTaskError(c, err) {
+			return
+		}
+	}
 	rows, err := h.readPromptTaskRows(ctx, id, max(before, 0), true, promptTaskScanLimit+1)
 	if !writePromptTaskError(c, err) {
 		return
@@ -185,7 +210,13 @@ func (h *Handler) ListPromptRequestTasks(c *gin.Context) {
 		rows.Rows = rows.Rows[:promptTaskScanLimit]
 	}
 	slices.Reverse(rows.Rows)
+	if !writePromptTaskError(c, h.db.ReconcilePromptRequestTaskDelegations(ctx, rows.Rows)) {
+		return
+	}
 	groups := groupPromptTaskRows(rows.Rows)
+	if followLatest && len(groups) > 0 {
+		groups[len(groups)-1].followLatest = true
+	}
 	if hasEarlier && len(groups) > 0 {
 		groups[0].StepsTruncated = true
 	}
@@ -222,8 +253,15 @@ func (h *Handler) GetPromptRequestTask(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 22*time.Second)
 	defer cancel()
+	id, err = h.db.PromptRequestReplayTurnID(ctx, id)
+	if !writePromptTaskError(c, err) {
+		return
+	}
 	rows, err := h.readPromptTaskRows(ctx, id, 0, false, promptTaskScanLimit+1)
 	if !writePromptTaskError(c, err) {
+		return
+	}
+	if !writePromptTaskError(c, h.db.ReconcilePromptRequestTaskDelegations(ctx, rows.Rows)) {
 		return
 	}
 	groups := groupPromptTaskRows(rows.Rows)
@@ -237,6 +275,7 @@ func (h *Handler) GetPromptRequestTask(c *gin.Context) {
 	if len(groups) > 1 {
 		following = &rows.Rows[task.RequestCount]
 	}
+	task.followLatest = following == nil && !task.StepsTruncated
 	detail, err := h.projectPromptTask(ctx, rows.Group, task, rows.Rows[:task.RequestCount], following)
 	if !writePromptTaskError(c, err) {
 		return
@@ -286,6 +325,7 @@ type promptTaskProjection struct {
 	loadedDirectories map[string]promptTaskSkillDirectory
 	inheritedSkills   map[[sha256.Size]byte]int
 	skillSessions     map[string]*promptTaskSkillSession
+	delegationCounts  map[[sha256.Size]byte]int
 }
 
 func (h *Handler) projectPromptTask(ctx context.Context, conversation string, task promptTaskGroup,
@@ -307,13 +347,13 @@ func (h *Handler) projectPromptTask(ctx context.Context, conversation string, ta
 	detail.StepsTruncated = detail.StepsTruncated || len(rows) > promptTaskStepLimit
 	var prior database.PromptRequestBody
 	var priorReply *database.PromptRequestResponse
-	var terminalReply *database.PromptRequestResponse
+	var terminalReply database.PromptRequestTaskResponse
 	var clientInput database.PromptRequestTaskInput
 	var processedBytes int
 	var checkedSkillBaseline bool
 	for index, row := range rows[:min(len(rows), promptTaskStepLimit)] {
 		detail.Steps = append(detail.Steps, promptTaskStep{
-			RequestID: row.ID, CreatedAt: row.CreatedAt, Model: row.Model,
+			RequestID: row.ID, CreatedAt: row.CreatedAt, Model: row.Model, Kind: row.ChatReplayKind,
 			Endpoint: row.Endpoint, Action: row.Action, Status: row.Status, Tools: []promptTaskTool{},
 		})
 		reply, err := h.db.GetPromptRequestResponse(ctx, row.ID)
@@ -323,11 +363,14 @@ func (h *Handler) projectPromptTask(ctx context.Context, conversation string, ta
 		if reply != nil {
 			detail.Steps[index].Commentary = boundPromptTaskText(reply.CommentaryText)
 		}
-		if row.ID == task.terminal.ID {
-			terminalReply = reply
+		if row.ID == task.terminal.ID && reply != nil {
+			terminalReply = database.PromptRequestTaskResponse{Status: reply.Status, FinishedAt: reply.FinishedAt,
+				FinalObserved: reply.FinalObserved, HasToolCalls: len(reply.ToolCalls) > 0,
+				UnconfirmedChatText: reply.UnconfirmedChatReply()}
 		}
 		if processedBytes >= promptTaskReadBytes {
 			detail.StepsTruncated = true
+			projection.observeDelegations(index, row.Delegations)
 			if reply != nil {
 				projection.observeResponse(index, reply)
 			}
@@ -339,8 +382,13 @@ func (h *Handler) projectPromptTask(ctx context.Context, conversation string, ta
 		}
 		processedBytes += len(request.Body)
 		input := database.DecodePromptRequestTaskUser(request.Body)
-		if detail.User == nil && input.Field != "" {
+		projection.observeDelegations(index, input.Delegations)
+		if detail.User == nil && input.Field != "" && detail.Kind != database.PromptRequestChatResume &&
+			row.ChatTurnRoot == 0 && row.ChatReplayKind == "" {
 			detail.User = promptTaskUserFromRequest(request, input)
+			if detail.User.Text != input.Text {
+				detail.UserPreview = ""
+			}
 			clientInput = input
 			if isPromptTaskCompaction(request.Endpoint, request.Body, input) {
 				detail.Kind = promptTaskContextCompaction
@@ -384,7 +432,8 @@ func (h *Handler) projectPromptTask(ctx context.Context, conversation string, ta
 	for _, evidence := range projection.reads.sections {
 		projection.addSkill(evidence)
 	}
-	if detail.Final == nil && detail.User != nil && !detail.StepsTruncated && len(detail.Steps) > 0 {
+	if detail.Final == nil && (detail.User != nil || detail.Kind == database.PromptRequestChatResume) &&
+		!detail.StepsTruncated && len(detail.Steps) > 0 {
 		projection.observeLegacyChatFinal(prior, priorReply)
 	}
 	if len(rows) > promptTaskStepLimit {
@@ -400,18 +449,28 @@ func (h *Handler) projectPromptTask(ctx context.Context, conversation string, ta
 			}
 			observation := database.PromptRequestResponse{Status: reply.Status, FinishedAt: reply.FinishedAt,
 				FinalText: reply.FinalText, FinalObserved: reply.FinalObserved, Truncated: reply.Truncated}
-			if observation.FinalObserved && observation.FinalText != "" {
+			if observation.FinalObserved && observation.FinalText != "" && !slices.Contains(task.compactions, id) {
 				projection.setGatewayFinal(observation.FinalText, &observation)
 			}
 			if id == task.terminal.ID {
-				terminalReply = &observation
+				terminalReply = reply
 			}
 		}
 	}
-	if terminalReply == nil {
-		terminalReply = &database.PromptRequestResponse{}
+	if detail.Kind == "" && detail.Final == nil && terminalReply.UnconfirmedChatText != "" {
+		terminalBody := prior.Body
+		if prior.ID != task.terminal.ID {
+			bodies, err := h.db.ReadPromptRequestTaskBodies(ctx, []int64{task.terminal.ID}, promptTaskOverviewBodyBudget)
+			if err != nil {
+				return detail, err
+			}
+			terminalBody = bodies[task.terminal.ID].Body
+		}
+		if err := h.applyArchivedChatReply(ctx, &detail, task.terminal.PromptRequestRecord, terminalBody, terminalReply); err != nil {
+			return detail, err
+		}
 	}
-	detail.setGatewayCompletion(task.terminal.PromptRequestRecord, terminalReply.Status, terminalReply.FinishedAt, terminalReply.FinalObserved, clientInput.TurnStartedAt)
+	detail.setGatewayCompletion(task.terminal.PromptRequestRecord, terminalReply, task.followLatest, clientInput.TurnStartedAt)
 	if detail.User != nil && detail.Kind == "" {
 		if err := h.applyPromptTaskClient(ctx, conversation, task, clientInput, &detail); err != nil {
 			return detail, err
@@ -420,8 +479,31 @@ func (h *Handler) projectPromptTask(ctx context.Context, conversation string, ta
 	return detail, nil
 }
 
+func (p *promptTaskProjection) observeDelegations(step int, delegations []database.PromptRequestTaskDelegation) {
+	if len(delegations) == 0 {
+		return
+	}
+	if p.delegationCounts == nil {
+		p.delegationCounts = make(map[[sha256.Size]byte]int)
+	}
+	occurrences := make(map[[sha256.Size]byte]int, len(delegations))
+	for _, delegation := range delegations {
+		digest := sha256.Sum256([]byte(delegation.SourceThreadID + "\x00" + delegation.Text))
+		occurrences[digest]++
+		if occurrences[digest] <= p.delegationCounts[digest] {
+			continue
+		}
+		p.delegationCounts[digest] = occurrences[digest]
+		delegation.Text = boundPromptTaskText(delegation.Text)
+		p.detail.Steps[step].Delegations = append(p.detail.Steps[step].Delegations, delegation)
+	}
+}
+
 func promptTaskUserFromRequest(request database.PromptRequestBody, input database.PromptRequestTaskInput) *promptTaskUser {
-	user := &promptTaskUser{Text: input.Text, RequestID: request.ID, Images: []promptRequestImage{}, Source: "gateway"}
+	user := &promptTaskUser{
+		Text:      promptTaskReplayUserText(request.Endpoint, request.Body, input),
+		RequestID: request.ID, Images: []promptRequestImage{}, Source: "gateway",
+	}
 	if input.HasAttachment || input.Field == "prompt" {
 		user.Images = append(user.Images, promptTaskUserImages(request, input)...)
 	}
@@ -429,7 +511,13 @@ func promptTaskUserFromRequest(request database.PromptRequestBody, input databas
 }
 
 func (p *promptTaskProjection) observeResponse(step int, reply *database.PromptRequestResponse) {
-	p.detail.Steps[step].Response = previewPromptTaskStepResponse(reply)
+	entry := &p.detail.Steps[step]
+	entry.Response = previewPromptTaskStepResponse(reply)
+	entry.Response.ToolOnly = safeTraceEndpoint(entry.Endpoint) == "chat" &&
+		reply.Status == "completed" && entry.Response.Text == "" && len(reply.ToolCalls) > 0
+	if entry.Kind == database.PromptRequestChatCompaction {
+		return
+	}
 	p.detail.Status = reply.Status
 	if p.detail.Status == "completed" && !reply.FinalObserved {
 		p.detail.Status = "unobserved"
@@ -640,6 +728,10 @@ func (p *promptTaskProjection) setToolResult(step int, tool *promptTaskTool, res
 			usage.SourceRequestID, usage.Evidence = result.FromRequestID, evidence
 			p.detail.Steps[step].SkillUsage = append(p.detail.Steps[step].SkillUsage, *usage)
 		}
+	}
+	if skill, ok := promptTaskWorkBuddySkill(p.detail.Steps[step].Endpoint, tool, result); ok {
+		p.addSkill(skill)
+		p.addStepSkill(step, skill, tool.workDir)
 	}
 	p.reads.addReceipt(tool.CallID, result.Text, promptContextReceived, result.FromRequestID, result.failed)
 	for _, index := range p.reads.byCallID[tool.CallID].sections {

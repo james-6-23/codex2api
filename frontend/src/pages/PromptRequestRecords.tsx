@@ -27,6 +27,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 const retentionChoices = [30, 90, 7, 1]
 const replayPreviewLines = 5
 const replayPreviewSteps = 5
+const replayRefreshIntervalMs = 15_000
 
 function compareReplayPosition(leftAt: string, leftID: number, rightAt: string, rightID: number) {
   return Date.parse(leftAt) - Date.parse(rightAt) || leftID - rightID
@@ -205,19 +206,34 @@ function ConversationTimeline({ id }: { id: number }) {
 
   useEffect(() => {
     const controller = new AbortController()
+    const live = cursor === 0
+    let timer: number | undefined
     setLoading(true)
     setError('')
-    void api.listPromptRequestTasks(id, cursor, controller.signal)
-      .then((result) => {
+
+    async function loadPage() {
+      try {
+        const result = await api.listPromptRequestTasks(id, cursor, controller.signal, live)
         if (controller.signal.aborted) return
         setTasks((previous) => cursor ? [...result.tasks, ...previous] : result.tasks)
         setInternalEvents((previous) => cursor ? [...(result.internal_events ?? []), ...previous] : result.internal_events ?? [])
         setTotal(result.total_requests)
         setNextBefore(result.next_before)
-      })
-      .catch((err: unknown) => { if (!controller.signal.aborted) setError(getErrorMessage(err)) })
-      .finally(() => { if (!controller.signal.aborted) setLoading(false) })
-    return () => controller.abort()
+        if (live && result.tasks.some((task) => task.status === 'pending')) {
+          timer = window.setTimeout(() => void loadPage(), replayRefreshIntervalMs)
+        }
+      } catch (err) {
+        if (!controller.signal.aborted) setError(getErrorMessage(err))
+      } finally {
+        if (!controller.signal.aborted) setLoading(false)
+      }
+    }
+
+    void loadPage()
+    return () => {
+      controller.abort()
+      window.clearTimeout(timer)
+    }
   }, [id, cursor, retry])
 
   const orderedEvents = [...internalEvents].sort((left, right) => compareReplayPosition(left.started_at, left.id, right.started_at, right.id))
@@ -337,15 +353,20 @@ function TaskCard({ summary, events }: { summary: PromptRequestTask; events: Pro
   const [attempt, setAttempt] = useState(0)
   const [task, setTask] = useState<PromptRequestTaskDetail>()
   const [error, setError] = useState('')
+  const awaitingReply = summary.status === 'pending'
 
   useEffect(() => {
     if (!load) return
     const controller = new AbortController()
     void api.getPromptRequestTask(summary.id, controller.signal)
-      .then((result) => { if (!controller.signal.aborted) setTask(result) })
+      .then((result) => {
+        if (controller.signal.aborted) return
+        setTask(result)
+        setError('')
+      })
       .catch((err: unknown) => { if (!controller.signal.aborted) setError(getErrorMessage(err)) })
     return () => controller.abort()
-  }, [summary.id, load, attempt])
+  }, [summary.id, load, attempt, awaitingReply])
 
   function requestDetails() {
     if (error) {
@@ -359,7 +380,7 @@ function TaskCard({ summary, events }: { summary: PromptRequestTask; events: Pro
   const userImages = task?.user?.images ?? summary.user_images
   const userRequestID = task?.user?.request_id ?? summary.user_request_id ?? summary.id
   const needsFullUser = summary.user_text_truncated || (summary.user_text === undefined && Boolean(summary.user_preview))
-  const loadingDetails = load && !task && !error
+  const loadingDetails = load && !error && (!task || (task.status === 'pending' && !awaitingReply))
 
   return (
     <article aria-labelledby={headingID} className="min-w-0 space-y-3 rounded-lg border p-3">
@@ -368,7 +389,9 @@ function TaskCard({ summary, events }: { summary: PromptRequestTask; events: Pro
         <time dateTime={summary.started_at}>{formatBeijingTime(summary.started_at)}</time>
         <span>{t('promptFilter.requests.replay.modelCallsCount', { count: summary.request_count ?? summary.request_ids.length })}</span>
       </div>
-      <section aria-labelledby={userID} className="flex min-w-0 flex-col items-end gap-2">
+      {summary.kind === 'context_resume' ? <p className="text-sm text-muted-foreground">
+        {t('promptFilter.requests.replay.contextResume')}
+      </p> : <section aria-labelledby={userID} className="flex min-w-0 flex-col items-end gap-2">
         <h4 id={userID} className="flex items-center gap-2 text-sm font-semibold"><Send className="size-4" aria-hidden="true" />{t('promptFilter.requests.replay.user')}</h4>
         {userText || needsFullUser || userImages?.length ? (
           <div className="w-fit max-w-full space-y-2 rounded-xl border bg-muted/25 px-3 py-2 sm:max-w-[85%]">
@@ -382,7 +405,7 @@ function TaskCard({ summary, events }: { summary: PromptRequestTask; events: Pro
           </div>
         ) : null}
         {!userText && !userImages?.length && (!needsFullUser || task) ? <p className="text-sm text-muted-foreground">{t('promptFilter.requests.replay.userMissing')}</p> : null}
-      </section>
+      </section>}
       <Button type="button" variant="outline" size="sm" aria-controls={activityID} aria-expanded={activityOpen}
         onClick={() => {
           if (!activityOpen && !load) requestDetails()
@@ -647,8 +670,17 @@ function TaskStep({ step, context }: { step: PromptRequestTaskStep; context: Pro
   const names = [...new Set(tools.flatMap((tool) => tool.name ? [tool.name] : []))]
   const loaded = step.skills ?? []
   const used = step.skill_usage ?? []
+  const delegations = step.delegations ?? []
   const commentary = step.commentary?.trim()
   const showCommentary = commentary && !step.response?.text?.includes(commentary)
+
+  const stepLabel = step.kind === 'context_compaction' ? t('promptFilter.requests.replay.contextCompaction')
+    : step.kind === 'context_resume' ? t('promptFilter.requests.replay.contextResume')
+    : names.length ? names.map((name) => t(`promptFilter.requests.readable.tools.${name}`, { defaultValue: name })).join(' · ')
+    : t('promptFilter.requests.replay.requestStep')
+  let emptyResponseLabel = t('promptFilter.requests.outcome.missingReply')
+  if (step.response?.tool_only) emptyResponseLabel = t('promptFilter.requests.replay.stepToolOnly')
+  else if (step.response) emptyResponseLabel = t('promptFilter.requests.outcome.emptyReply')
 
   return (
     <details className="min-w-0 rounded-md border" onToggle={(event) => setOpen(event.currentTarget.open)}>
@@ -656,9 +688,8 @@ function TaskStep({ step, context }: { step: PromptRequestTaskStep; context: Pro
         <span className="flex min-w-0 flex-1 items-center gap-1">
           <ChevronRight aria-hidden="true" className={`size-3 shrink-0 ${open ? 'rotate-90' : ''}`} />
           <span className="break-words">
-            {names.length
-              ? names.map((name) => t(`promptFilter.requests.readable.tools.${name}`, { defaultValue: name })).join(' · ')
-              : t('promptFilter.requests.replay.requestStep')}
+            {delegations.length ? `${t('promptFilter.requests.replay.delegationResult')} · ` : ''}
+            {stepLabel}
             <span className="ml-2 whitespace-nowrap text-muted-foreground">#{step.request_id}{step.status ? ` · ${step.status}` : ''}</span>
           </span>
         </span>
@@ -692,6 +723,17 @@ function TaskStep({ step, context }: { step: PromptRequestTaskStep; context: Pro
           {step.model ? <span className="break-all">{step.model}</span> : null}
           {step.action ? <span>{t(`promptFilter.requests.actions.${step.action}`, { defaultValue: step.action })}</span> : null}
         </div>
+        {delegations.length ? <section className="min-w-0 space-y-2 rounded-md border bg-muted/20 p-2">
+          <h5 className="text-xs font-semibold">{t('promptFilter.requests.replay.delegationResult')}</h5>
+          {delegations.map((delegation, index) => (
+            <div key={index} className="min-w-0 space-y-1">
+              <p className="break-all text-xs text-muted-foreground">
+                {t('promptFilter.requests.replay.delegationSource', { id: delegation.source_thread_id })}
+              </p>
+              <ReplayTextPreview><p className="whitespace-pre-wrap [overflow-wrap:anywhere]">{delegation.text}</p></ReplayTextPreview>
+            </div>
+          ))}
+        </section> : null}
         <Button type="button" size="sm" variant="outline" aria-expanded={showRequest} onClick={() => setShowRequest(!showRequest)}>
           {t('promptFilter.requests.replay.requestDetails', { id: step.request_id })}
         </Button>
@@ -705,8 +747,7 @@ function TaskStep({ step, context }: { step: PromptRequestTaskStep; context: Pro
             {step.response?.truncated ? <Badge variant="outline">{t('promptFilter.requests.replay.stepResponsePreviewTruncated')}</Badge> : null}
           </div>
           {step.response?.text ? <ReplayTextPreview><TaskReplyMarkdown text={step.response.text} /></ReplayTextPreview>
-            : <p className="text-xs text-muted-foreground">{t(step.response
-              ? 'promptFilter.requests.outcome.emptyReply' : 'promptFilter.requests.outcome.missingReply')}</p>}
+            : <p className="text-xs text-muted-foreground">{emptyResponseLabel}</p>}
           {step.response?.error ? <div className="text-destructive"><ReadableText text={step.response.error} /></div> : null}
         </section>
         {showCommentary ? <div className="space-y-1 rounded-md bg-muted/25 p-2">
@@ -775,7 +816,7 @@ function TaskReply({ summary, task, loadFull, loading }: {
   const { t } = useTranslation()
   const reply = task?.final
   const text = reply?.text ?? summary.final_preview
-  const taskStatus = task?.status ?? summary.status
+  const taskStatus = summary.status ?? task?.status
   const finalStatus = reply?.status ?? summary.final_status ?? taskStatus
   const status = taskStatus === 'interrupted' || taskStatus === 'failed' ? taskStatus : finalStatus
   const source = reply?.source ?? summary.final_source
@@ -793,18 +834,18 @@ function TaskReply({ summary, task, loadFull, loading }: {
   }
 
   return <div className="min-w-0 space-y-2 rounded-md border bg-muted/20 px-3 py-2">
-    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-      <span>{durationText || t('promptFilter.requests.replay.timeMissing')}</span>
+    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
+      {status !== 'pending' || durationText ? <span>{durationText || t('promptFilter.requests.replay.timeMissing')}</span> : null}
       {source ? <Badge variant="outline">{t(`promptFilter.requests.replay.source.${source === 'gateway' && finalStatus !== 'completed' ? 'gatewayResponse' : source}`)}</Badge> : null}
       {status === 'interrupted' || status === 'failed' || status === 'pending' ? (
         <Badge variant={status === 'pending' ? 'outline' : 'destructive'}>{t(`promptFilter.requests.replay.status.${status}`)}</Badge>
       ) : null}
     </div>
     {text && finalStatus !== 'completed' ? <p className="text-xs text-muted-foreground">{t('promptFilter.requests.replay.partialReply')}</p> : null}
-    {text ? <ReplayTextPreview loadFull={summary.final_preview_truncated && !task ? loadFull : undefined} loading={loading}>
+    {text ? <ReplayTextPreview loadFull={summary.final_preview_truncated && (!task || loading) ? loadFull : undefined} loading={loading}>
       <TaskReplyMarkdown text={text} />
-    </ReplayTextPreview> : <p className="text-sm text-muted-foreground">{t(finalStatus === 'completed' && source
-      ? 'promptFilter.requests.outcome.emptyReply' : 'promptFilter.requests.replay.replyMissing')}</p>}
+    </ReplayTextPreview> : status !== 'pending' ? <p className="text-sm text-muted-foreground">{t(finalStatus === 'completed' && source
+      ? 'promptFilter.requests.outcome.emptyReply' : 'promptFilter.requests.replay.replyMissing')}</p> : null}
     {reply?.truncated || (summary.final_preview_truncated && task && !reply) ? <p className="text-xs text-muted-foreground">{t('promptFilter.requests.outcome.truncated')}</p> : null}
     {(reply?.redacted ?? summary.final_redacted) ? <p className="text-xs text-muted-foreground">{t('promptFilter.requests.replay.redacted')}</p> : null}
   </div>
