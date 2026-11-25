@@ -109,14 +109,43 @@ func openAIIslandRows(props map[string]json.RawMessage, out map[string]database.
 	return parseOpenAIPricingTable(table, out)
 }
 
+// openAIIslandModelLabel 读取模型列。旧版页面直接给字符串；新版把已下线模型
+// 包成 {"label":[0,"gpt-5.4-nano"],"deprecated":[0,true]}，需要再解一层。
+func openAIIslandModelLabel(value any) string {
+	switch cell := value.(type) {
+	case string:
+		return strings.TrimSpace(cell)
+	case map[string]any:
+		label, ok := cell["label"]
+		if !ok {
+			return ""
+		}
+		encoded, err := json.Marshal(label)
+		if err != nil {
+			return ""
+		}
+		decoded, err := decodePricingProp(encoded)
+		if err != nil {
+			return ""
+		}
+		if text, ok := decoded.(string); ok {
+			return strings.TrimSpace(text)
+		}
+	}
+	return ""
+}
+
 func openAIIslandRow(value any) (officialPricingRow, error) {
 	cells, ok := value.([]any)
 	if !ok || (len(cells) != openAIOlderPriceColumns && len(cells) != openAILatestPriceColumns) {
 		return nil, fmt.Errorf("OpenAI 文本价格数据列数不符")
 	}
-	model, ok := cells[0].(string)
-	if !ok || !strings.HasPrefix(model, "gpt-") && !strings.HasPrefix(model, "o") {
-		return nil, fmt.Errorf("OpenAI 模型列格式不符")
+	// 模型列有两种编码：纯字符串，或 {"label":[0,"gpt-…"],"deprecated":[0,true]}。
+	// 解析不出名字时留空，由 parseOpenAIPricingTable 跳过该行，避免单行格式变化
+	// 中断整次官方价格同步。
+	model := openAIIslandModelLabel(cells[0])
+	if model == "" {
+		return officialPricingRow{"model": ""}, nil
 	}
 	row := officialPricingRow{"model": model}
 	for key, index := range map[string]int{"input": 1, "cached input": 2, "output": len(cells) - 1} {
