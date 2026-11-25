@@ -1371,6 +1371,16 @@ export const api = {
     request<MessageResponse & { limits?: APIKeyLimits }>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   resetAPIKeyQuota: (id: number) =>
     request<MessageResponse>(`/keys/${id}/reset-quota`, { method: 'POST' }),
+  resetAPIKeyWeeklyQuota: (id: number, requestId: string) =>
+    request<MessageResponse & {
+      request_id: string
+      exempted_cost: number
+      reset_at: string
+      replayed: boolean
+    }>(`/keys/${id}/reset-weekly-quota`, {
+      method: 'POST',
+      body: JSON.stringify({ request_id: requestId }),
+    }),
   resetAllAPIKeyQuotas: () =>
     request<MessageResponse & { reset_count: number }>('/keys/reset-all-quotas', { method: 'POST' }),
   // 分组 / 账号维度限额的当前用量（issue #439）。

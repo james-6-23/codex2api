@@ -40,6 +40,84 @@ before(async () => {
 })
 after(async () => { await browser?.close() })
 
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`admin weekly reset retries one operation and refreshes quota usage (${viewport.width}px)`, async t => {
+    const page = await browser.newPage({ viewport })
+    page.setDefaultTimeout(5000)
+    const errors = []
+    page.on('pageerror', error => errors.push(error.message))
+    t.after(() => assert.deepEqual(errors, []))
+    t.after(() => page.close())
+    await page.route('http://portal.test/**', route => route.fulfill({ contentType: 'text/html', body: '<div id="root"></div>' }))
+    await page.goto('http://portal.test/')
+    await page.evaluate(() => {
+      localStorage.setItem('lang', 'zh')
+      window.__keyEditor = true
+      window.__weeklyResets = []
+      window.__keyReads = 0
+      let resetComplete = false
+      const pendingReset = new Promise(resolve => { window.__failWeeklyReset = resolve })
+      window.fetch = async (url, options = {}) => {
+        const path = String(url)
+        let body = {}
+        if (path === '/api/admin/keys') {
+          window.__keyReads += 1
+          body = { keys: [{
+            id: 10, name: 'weekly-limited', key: 'sk-fixture', status: 'active',
+            quota_limit: 1000, quota_used: 600, total_used: 600, allowed_group_ids: [],
+            limits: { cost_limit_7d: 120, cost_limit_30d: 480 },
+            window_usage: { cost_5h: 0, cost_7d: resetComplete ? 0 : 120, cost_30d: resetComplete ? 360 : 480 },
+            created_at: '2026-01-01T00:00:00Z',
+          }, {
+            id: 11, name: 'weekly-only', key: 'sk-other-fixture', status: 'active',
+            quota_limit: 0, quota_used: 0, total_used: 0, allowed_group_ids: [],
+            limits: { cost_limit_7d: 120 }, created_at: '2026-01-01T00:00:00Z',
+          }] }
+        } else if (path === '/api/admin/account-groups') body = { groups: [] }
+        else if (path === '/api/admin/models') body = { models: ['gpt-5.5'] }
+        else if (path === '/api/admin/settings') body = { public_key_usage_page_enabled: true }
+        else if (path === '/api/admin/prompt-filter/newapi-bindings') body = { bindings: [] }
+        else if (path === '/api/admin/keys-concurrency') body = { concurrency: {} }
+        else if (path === '/api/admin/keys/10/reset-weekly-quota' && options.method === 'POST') {
+          const payload = JSON.parse(options.body)
+          window.__weeklyResets.push(payload)
+          if (window.__weeklyResets.length === 1) {
+            await pendingReset
+            return new Response(JSON.stringify({ error: 'temporary failure' }), { status: 500 })
+          }
+          resetComplete = true
+          body = { message: 'ok', request_id: payload.request_id, reset_at: new Date().toISOString(), exempted_cost: 120, replayed: true }
+        } else throw new Error(`Unexpected request: ${options.method || 'GET'} ${path}`)
+        return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
+      }
+    })
+    await page.addStyleTag({ content: css })
+    await page.addScriptTag({ content: script })
+    const reset = page.getByRole('button', { name: '重置7天额度', exact: true })
+    await reset.waitFor()
+    assert.equal(await reset.count(), 1, 'keys without a monthly cost limit must not offer this action')
+    await reset.click()
+    await page.getByRole('dialog').getByText(/最多免计 \$120\.00/).waitFor()
+    await page.getByRole('button', { name: '取消', exact: true }).click()
+    assert.equal(await page.evaluate(() => window.__weeklyResets.length), 0)
+    await reset.click()
+    await page.getByRole('button', { name: '重置并免计', exact: true }).click()
+    await page.waitForFunction(() => window.__weeklyResets.length === 1)
+    assert.equal(await reset.isDisabled(), true)
+    assert.equal(await page.getByRole('button', { name: '重置全部额度', exact: true }).isDisabled(), true)
+    await page.evaluate(() => window.__failWeeklyReset())
+    await page.getByText(/7天额度重置失败/).waitFor()
+    await reset.click()
+    await page.getByRole('button', { name: '重置并免计', exact: true }).click()
+    await page.getByText('7天额度已重置，本次30天费用免计 $120.00', { exact: true }).waitFor()
+    await page.getByText('$360.00/$480.00', { exact: true }).filter({ visible: true }).waitFor()
+    assert.deepEqual(await page.evaluate(() => window.__weeklyResets[0]), await page.evaluate(() => window.__weeklyResets[1]))
+    assert.match(await page.evaluate(() => window.__weeklyResets[0].request_id), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i)
+    assert.equal(await page.evaluate(() => window.__keyReads), 2, 'success must fetch authoritative usage')
+    await page.screenshot({ path: path.join(artifactDir, `weekly-reset-${viewport.width}.png`), fullPage: true })
+  })
+}
+
 test('key permissions retain an in-flight save across edit tabs', async t => {
   const page = await browser.newPage()
   page.setDefaultTimeout(5000)
