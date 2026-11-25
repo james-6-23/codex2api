@@ -4549,6 +4549,12 @@ export interface PromptRequestConversation extends PromptRequestRecord {
   rounds: number
 }
 
+export interface PromptRequestKeyRecording {
+  id: number
+  name: string
+  excluded: boolean
+}
+
 export interface PromptRequestConversationPage {
   groups: PromptRequestConversation[]
   next_before: number

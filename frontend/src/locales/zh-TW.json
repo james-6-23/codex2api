@@ -1107,6 +1107,12 @@
         }
       },
       "tab": "請求記錄",
+      "excludeKeys": {
+        "label": "排除 API Key",
+        "description": "勾選的 Key 會停止記錄，既有請求會從重播隱藏。取消勾選並儲存後，從恢復錄製時起重新計數。",
+        "search": "搜尋名稱或 Key ID",
+        "empty": "沒有符合的 API Key。"
+      },
       "retentionLabel": "保留天數",
       "retentionOption": "{{days}} 天",
       "retention": "請求內容保留 {{days}} 天。",

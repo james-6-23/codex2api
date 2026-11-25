@@ -108,6 +108,7 @@ import type {
   PromptFilterLog,
   PromptFilterLogsResponse,
   PromptRequestConversationPage,
+  PromptRequestKeyRecording,
   PromptRequestDetail,
   PromptRequestRoundPage,
   PromptRequestPage,
@@ -1504,6 +1505,13 @@ export const api = {
     request<{ retention_days: number }>('/prompt-filter/requests/retention', {
       method: 'PUT',
       body: JSON.stringify({ retention_days: days }),
+    }),
+  getPromptRequestKeyExclusions: (signal?: AbortSignal) =>
+    request<{ keys: PromptRequestKeyRecording[] }>('/prompt-filter/requests/key-exclusions', { signal }),
+  updatePromptRequestKeyExclusions: (excludedKeyIDs: number[]) =>
+    request<{ keys: PromptRequestKeyRecording[] }>('/prompt-filter/requests/key-exclusions', {
+      method: 'PUT',
+      body: JSON.stringify({ excluded_key_ids: excludedKeyIDs }),
     }),
   getPromptRequest: (id: number, signal?: AbortSignal) =>
     request<PromptRequestDetail>(`/prompt-filter/requests/${id}`, { signal }),

@@ -26,10 +26,10 @@ func (db *DB) ReadPromptRequestTaskBodies(ctx context.Context, ids []int64, budg
 	rows, err := db.conn.QueryContext(ctx, `WITH requested(id, priority) AS (VALUES `+strings.Join(values, ",")+`),
 		bounded AS MATERIALIZED (
 			SELECT r.id, SUM(LENGTH(r.body)) OVER (ORDER BY requested.priority) AS bytes_read
-			FROM requested JOIN prompt_request_records r ON r.id = requested.id
+			FROM requested JOIN prompt_request_visible_records r ON r.id = requested.id
 			WHERE LENGTH(r.body) <= `+placeholders[len(ids)]+`
 		)
-		SELECT r.id, r.content_type, r.body FROM bounded b JOIN prompt_request_records r ON r.id = b.id
+		SELECT r.id, r.content_type, r.body FROM bounded b JOIN prompt_request_visible_records r ON r.id = b.id
 		WHERE b.bytes_read <= `+placeholders[len(ids)+1], args...)
 	if err != nil {
 		return nil, err

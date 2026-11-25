@@ -152,7 +152,7 @@ func indexPromptChatCompaction(ctx context.Context, tx *sql.Tx, keyID int64, end
 	if root == 0 {
 		root = previous.id
 		if previous.group != singlePromptRequestGroup {
-			if err := tx.QueryRowContext(ctx, `SELECT MIN(id) FROM prompt_request_records
+			if err := tx.QueryRowContext(ctx, `SELECT MIN(id) FROM prompt_request_visible_records
 				WHERE conversation_group=$1 AND task_anchor=$2 AND id<=$3 AND chat_key_id=$4`,
 				previous.group, previous.anchor, previous.id, keyID).Scan(&root); err != nil {
 				return current, err
@@ -191,7 +191,7 @@ func linkPromptChatReplayGroups(ctx context.Context, tx *sql.Tx, current, previo
 		// A second child of a previous turn may be a branch of the
 		// transcript. Leave it independent when a later turn is known.
 		var successor bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM prompt_request_records
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM prompt_request_visible_records
 			WHERE conversation_group=$1 AND id>$2 AND id<$3 AND task_anchor<>$4 AND chat_turn_root=0)`,
 			group, previous.id, current.id, previous.anchor).Scan(&successor); err != nil || successor {
 			return current.group, false, err
@@ -200,7 +200,7 @@ func linkPromptChatReplayGroups(ctx context.Context, tx *sql.Tx, current, previo
 	if current.group != singlePromptRequestGroup {
 		if _, err := tx.ExecContext(ctx, `UPDATE prompt_request_records SET conversation_group=$1,
 			chat_turn_root=CASE WHEN task_anchor=$2 AND id>=$3 AND $4>0 THEN $4 ELSE chat_turn_root END
-			WHERE conversation_group=$5 AND `+promptRequestChatRoutes,
+			WHERE conversation_group=$5 AND recording_hidden=FALSE AND `+promptRequestChatRoutes,
 			group, current.anchor, current.id, turnRoot, current.group); err != nil {
 			return current.group, false, err
 		}
@@ -216,7 +216,7 @@ func readPromptChatReplayCandidates(ctx context.Context, tx *sql.Tx, keyID int64
 		pattern = `%"tool_calls":[{%`
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT r.id, r.conversation_group, COALESCE(r.task_anchor,''), r.chat_turn_root,
-		p.response FROM prompt_request_records r JOIN prompt_request_responses p ON p.request_id=r.id
+		p.response FROM prompt_request_visible_records r JOIN prompt_request_responses p ON p.request_id=r.id
 		WHERE r.chat_key_id=$1 AND r.chat_key_id>0 AND r.endpoint=$2 AND r.transport='http'
 		AND r.endpoint IN ('/v1/chat/completions','/chat/completions')
 		AND r.id<$3 AND r.status>=200 AND r.status<300 AND r.chat_indexed>0 AND r.chat_replay_kind<>'context_compaction'
@@ -238,7 +238,7 @@ func readPromptChatReplayCandidates(ctx context.Context, tx *sql.Tx, keyID int64
 
 func readPromptChatReplayMessages(ctx context.Context, tx *sql.Tx, id int64) ([]gjson.Result, error) {
 	var body []byte
-	err := tx.QueryRowContext(ctx, "SELECT body FROM prompt_request_records WHERE id=$1 AND LENGTH(body)<=$2",
+	err := tx.QueryRowContext(ctx, "SELECT body FROM prompt_request_visible_records WHERE id=$1 AND LENGTH(body)<=$2",
 		id, promptRequestTaskMaxBody).Scan(&body)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil

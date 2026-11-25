@@ -342,26 +342,26 @@ type PromptRequestTaskRows struct {
 func (db *DB) ReadPromptRequestTaskRows(ctx context.Context, id, before int64, newestFirst bool, limit int) (PromptRequestTaskRows, error) {
 	var result PromptRequestTaskRows
 	var at time.Time
-	err := db.conn.QueryRowContext(ctx, "SELECT conversation_group, created_at FROM prompt_request_records WHERE id=$1", id).Scan(&result.Group, &at)
+	err := db.conn.QueryRowContext(ctx, "SELECT conversation_group, created_at FROM prompt_request_visible_records WHERE id=$1", id).Scan(&result.Group, &at)
 	if err != nil {
 		return result, err
 	}
 	const columns = promptRequestSummaryColumns + ", task_anchor, task_turn, task_preview, chat_turn_root, chat_replay_kind"
-	query := "SELECT " + columns + " FROM prompt_request_records"
+	query := "SELECT " + columns + " FROM prompt_request_visible_records"
 	args := []any{id}
 	switch {
 	case result.Group == "" || result.Group == singlePromptRequestGroup:
 		query += " WHERE id=$1"
 		result.Total = 1
 	case newestFirst:
-		err = db.conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM prompt_request_records WHERE conversation_group=$1 AND id<=$2", result.Group, id).Scan(&result.Total)
+		err = db.conn.QueryRowContext(ctx, "SELECT COUNT(*) FROM prompt_request_visible_records WHERE conversation_group=$1 AND id<=$2", result.Group, id).Scan(&result.Total)
 		if err != nil {
 			return result, err
 		}
 		query += " WHERE id<=$1 AND conversation_group=$2"
 		args = append(args, result.Group, limit)
 		if before > 0 {
-			query += " AND (created_at,id) < (SELECT created_at,id FROM prompt_request_records WHERE id=$4 AND conversation_group=$2)"
+			query += " AND (created_at,id) < (SELECT created_at,id FROM prompt_request_visible_records WHERE id=$4 AND conversation_group=$2)"
 			args = append(args, before)
 		}
 		query += " ORDER BY created_at DESC,id DESC LIMIT $3"
@@ -391,8 +391,8 @@ func (db *DB) ReadPromptRequestTaskRows(ctx context.Context, id, before int64, n
 func (db *DB) PromptRequestReplayTurnID(ctx context.Context, id int64) (int64, error) {
 	var root int64
 	err := db.conn.QueryRowContext(ctx, `SELECT CASE WHEN chat_turn_root>0 AND EXISTS
-		(SELECT 1 FROM prompt_request_records parent WHERE parent.id=r.chat_turn_root AND parent.conversation_group=r.conversation_group)
-		THEN chat_turn_root ELSE id END FROM prompt_request_records r WHERE id=$1`, id).Scan(&root)
+		(SELECT 1 FROM prompt_request_visible_records parent WHERE parent.id=r.chat_turn_root AND parent.conversation_group=r.conversation_group)
+		THEN chat_turn_root ELSE id END FROM prompt_request_visible_records r WHERE id=$1`, id).Scan(&root)
 	return root, err
 }
 
@@ -404,7 +404,7 @@ func (db *DB) PromptRequestTaskTurnIsUnambiguous(ctx context.Context, group, tur
 		return false, nil
 	}
 	var count int
-	err := db.conn.QueryRowContext(ctx, `SELECT COUNT(DISTINCT task_anchor) FROM prompt_request_records
+	err := db.conn.QueryRowContext(ctx, `SELECT COUNT(DISTINCT task_anchor) FROM prompt_request_visible_records
 		WHERE conversation_group=$1 AND task_turn=$2 AND task_anchor<>''`, group, turn).Scan(&count)
 	return count == 1, err
 }

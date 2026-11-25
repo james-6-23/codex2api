@@ -110,7 +110,7 @@ func (db *DB) ReconcilePromptRequestTaskDelegations(ctx context.Context, rows []
 func (db *DB) LatestPromptRequestConversationID(ctx context.Context, id int64) (int64, error) {
 	var latest int64
 	err := db.conn.QueryRowContext(ctx, `SELECT CASE WHEN r.conversation_group IN ('', 'single') THEN r.id
-		ELSE (SELECT MAX(member.id) FROM prompt_request_records member WHERE member.conversation_group=r.conversation_group)
-		END FROM prompt_request_records r WHERE r.id=$1`, id).Scan(&latest)
+		ELSE (SELECT MAX(member.id) FROM prompt_request_visible_records member WHERE member.conversation_group=r.conversation_group)
+		END FROM prompt_request_visible_records r WHERE r.id=$1`, id).Scan(&latest)
 	return latest, err
 }

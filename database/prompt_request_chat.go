@@ -40,7 +40,7 @@ func (db *DB) ensurePromptRequestChatIndexes(ctx context.Context) error {
 // including continuations that arrived before the preceding response was saved.
 func (db *DB) IndexArchivedPromptRequestChats(ctx context.Context) error {
 	for after := int64(0); ; {
-		rows, err := db.conn.QueryContext(ctx, `SELECT id FROM prompt_request_records WHERE id>$1
+		rows, err := db.conn.QueryContext(ctx, `SELECT id FROM prompt_request_visible_records WHERE id>$1
 			AND chat_indexed<2 AND task_anchor IS NOT NULL AND `+promptRequestChatRoutes+` ORDER BY id LIMIT 64`, after)
 		if err != nil {
 			return err
@@ -83,7 +83,7 @@ func (db *DB) IndexPromptRequestChat(ctx context.Context, id int64, requestBody 
 			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtextextended('prompt-chat-replay:' ||
 				CAST(COALESCE(r.chat_key_id, (SELECT MIN(k.id) FROM api_keys k WHERE k.name=r.api_key_name
 				HAVING COUNT(*)=1 AND MAX(k.created_at)<=r.created_at), 0) AS TEXT), 0))
-				FROM prompt_request_records r WHERE r.id=$1 AND r.chat_indexed<2`, id); err != nil {
+				FROM prompt_request_visible_records r WHERE r.id=$1 AND r.chat_indexed<2`, id); err != nil {
 				return err
 			}
 			lock = " FOR UPDATE"
@@ -91,9 +91,9 @@ func (db *DB) IndexPromptRequestChat(ctx context.Context, id int64, requestBody 
 		query := `SELECT chat_key_id, api_key_name, endpoint, conversation_group, task_anchor, created_at, chat_indexed, chat_turn_root, chat_replay_kind,
 			CASE WHEN $3 AND LENGTH(body)<=$2 AND
 				(chat_indexed=0 OR conversation_group='single' OR NOT EXISTS (
-					SELECT 1 FROM prompt_request_records previous WHERE previous.conversation_group=r.conversation_group
+					SELECT 1 FROM prompt_request_visible_records previous WHERE previous.conversation_group=r.conversation_group
 					AND previous.task_anchor=r.task_anchor AND previous.id<r.id
-				)) THEN body END FROM prompt_request_records r WHERE id=$1
+				)) THEN body END FROM prompt_request_visible_records r WHERE id=$1
 			AND chat_indexed<2 AND task_anchor IS NOT NULL AND ` + promptRequestChatRoutes + lock
 		err := tx.QueryRowContext(ctx, query, id, promptRequestTaskMaxBody, requestBody == nil).
 			Scan(&key, &keyName, &endpoint, &group, &anchor, &createdAt, &indexed, &turnRoot, &kind, &body)
@@ -130,7 +130,7 @@ func (db *DB) IndexPromptRequestChat(ctx context.Context, id int64, requestBody 
 						}
 					}
 					if indexed == 0 && group != singlePromptRequestGroup && turnRoot == 0 {
-						if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(chat_turn_root),0) FROM prompt_request_records
+						if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(chat_turn_root),0) FROM prompt_request_visible_records
 							WHERE conversation_group=$1 AND task_anchor=$2 AND id<$3`,
 							group, anchor, id).Scan(&turnRoot); err != nil {
 							return err
@@ -156,7 +156,7 @@ func (db *DB) IndexPromptRequestChat(ctx context.Context, id int64, requestBody 
 func (db *DB) linkPromptChatContinuation(ctx context.Context, tx *sql.Tx, id, keyID int64, keyName, endpoint, anchor string,
 	messages []gjson.Result, lock string,
 ) (string, bool, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT id FROM prompt_request_records WHERE endpoint=$2 AND task_anchor=$3 AND id<$4 AND `+promptRequestChatRoutes+`
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM prompt_request_visible_records WHERE endpoint=$2 AND task_anchor=$3 AND id<$4 AND `+promptRequestChatRoutes+`
 		AND (conversation_group='single' OR conversation_group LIKE 'chat:%')
 		AND ((chat_key_id=$1 AND chat_key_id>0) OR (chat_indexed=0 AND chat_key_id IS NULL AND api_key_name=$5))
 		ORDER BY id DESC LIMIT 12`, keyID, endpoint, anchor, id, keyName)
@@ -182,7 +182,7 @@ func (db *DB) linkPromptChatContinuation(ctx context.Context, tx *sql.Tx, id, ke
 		var candidateKey sql.NullInt64
 		var recent bool
 		err := tx.QueryRowContext(ctx, `SELECT conversation_group, chat_indexed, status, chat_key_id, created_at>$2
-			FROM prompt_request_records WHERE id=$1`+lock,
+			FROM prompt_request_visible_records WHERE id=$1`+lock,
 			candidate, time.Now().UTC().Add(-30*time.Minute)).Scan(&group, &indexed, &status, &candidateKey, &recent)
 		if errors.Is(err, sql.ErrNoRows) {
 			continue
@@ -203,7 +203,7 @@ func (db *DB) linkPromptChatContinuation(ctx context.Context, tx *sql.Tx, id, ke
 			continue
 		}
 		var body []byte
-		if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN LENGTH(body)<=$2 THEN body END FROM prompt_request_records WHERE id=$1`,
+		if err := tx.QueryRowContext(ctx, `SELECT CASE WHEN LENGTH(body)<=$2 THEN body END FROM prompt_request_visible_records WHERE id=$1`,
 			candidate, promptRequestTaskMaxBody).Scan(&body); err != nil {
 			return "", false, err
 		}
@@ -316,7 +316,7 @@ func samePromptChatHistory(left, right []gjson.Result) bool {
 func (db *DB) PromptRequestChatReplyEchoed(ctx context.Context, id int64, body []byte, reply string) (bool, error) {
 	const lookahead = 12
 	var laterIDs []int64
-	rows, err := db.conn.QueryContext(ctx, `SELECT n.id FROM prompt_request_records p JOIN prompt_request_records n
+	rows, err := db.conn.QueryContext(ctx, `SELECT n.id FROM prompt_request_visible_records p JOIN prompt_request_visible_records n
 		ON n.chat_key_id=p.chat_key_id AND n.endpoint=p.endpoint AND n.id>p.id
 		WHERE p.id=$1 AND n.chat_key_id>0 AND n.transport='http'
 		AND n.endpoint IN ('/v1/chat/completions','/chat/completions')

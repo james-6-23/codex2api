@@ -35,12 +35,12 @@ func (db *DB) ListPromptRequestConversations(ctx context.Context, before int64, 
 	}
 	result, err := db.conn.QueryContext(ctx, `WITH grouped AS (
 		SELECT MAX(id) AS latest_id, COUNT(*) AS rounds
-		FROM prompt_request_records
+		FROM prompt_request_visible_records
 		GROUP BY CASE WHEN conversation_group IN ('', 'single') THEN 'request:' || CAST(id AS TEXT) ELSE conversation_group END
 		HAVING MAX(id) < $1
 		ORDER BY MAX(id) DESC LIMIT $2
 	) SELECT r.`+strings.ReplaceAll(promptRequestSummaryColumns, ", ", ", r.")+`, g.rounds
-	  FROM grouped g JOIN prompt_request_records r ON r.id = g.latest_id ORDER BY g.latest_id DESC`, before, limit)
+	  FROM grouped g JOIN prompt_request_visible_records r ON r.id = g.latest_id ORDER BY g.latest_id DESC`, before, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -58,25 +58,25 @@ func (db *DB) ListPromptRequestConversations(ctx context.Context, before int64, 
 
 func (db *DB) ListPromptRequestRounds(ctx context.Context, anchorID, before int64, limit int) ([]PromptRequestRecord, int, error) {
 	var group string
-	if err := db.conn.QueryRowContext(ctx, `SELECT conversation_group FROM prompt_request_records WHERE id = $1`, anchorID).Scan(&group); err != nil {
+	if err := db.conn.QueryRowContext(ctx, `SELECT conversation_group FROM prompt_request_visible_records WHERE id = $1`, anchorID).Scan(&group); err != nil {
 		return nil, 0, err
 	}
 	if group == "" || group == singlePromptRequestGroup {
 		var record PromptRequestRecord
-		err := db.conn.QueryRowContext(ctx, `SELECT `+promptRequestSummaryColumns+` FROM prompt_request_records WHERE id = $1`, anchorID).
+		err := db.conn.QueryRowContext(ctx, `SELECT `+promptRequestSummaryColumns+` FROM prompt_request_visible_records WHERE id = $1`, anchorID).
 			Scan(record.scanTargets()...)
 		return []PromptRequestRecord{record}, 1, err
 	}
 
 	var total int
-	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_request_records WHERE conversation_group = $1 AND id <= $2`, group, anchorID).Scan(&total); err != nil {
+	if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM prompt_request_visible_records WHERE conversation_group = $1 AND id <= $2`, group, anchorID).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	query := `SELECT ` + promptRequestSummaryColumns + ` FROM prompt_request_records WHERE conversation_group = $1 AND id <= $2`
+	query := `SELECT ` + promptRequestSummaryColumns + ` FROM prompt_request_visible_records WHERE conversation_group = $1 AND id <= $2`
 	args := []any{group, anchorID, limit}
 	if before > 0 {
 		query += ` AND (created_at, id) < (
-			SELECT created_at, id FROM prompt_request_records WHERE id = $4 AND conversation_group = $1
+			SELECT created_at, id FROM prompt_request_visible_records WHERE id = $4 AND conversation_group = $1
 		)`
 		args = append(args, before)
 	}
@@ -103,7 +103,7 @@ func (db *DB) PromptRequestNeighborIDs(ctx context.Context, current PromptReques
 	if current.ConversationGroup == "" || current.ConversationGroup == singlePromptRequestGroup {
 		return nil, nil
 	}
-	query := `SELECT id FROM prompt_request_records
+	query := `SELECT id FROM prompt_request_visible_records
 		WHERE conversation_group = $1 AND conversation_group <> '' AND conversation_group <> 'single'`
 	if following {
 		query += ` AND (created_at, id) > ($2, $3) ORDER BY created_at, id LIMIT $4`

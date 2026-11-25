@@ -3181,6 +3181,12 @@
         }
       },
       "tab": "请求记录",
+      "excludeKeys": {
+        "label": "排除 API Key",
+        "description": "勾选的 Key 会停止记录，已有请求会从回放隐藏。取消勾选并保存后，从恢复录制时起重新计数。",
+        "search": "搜索名称或 Key ID",
+        "empty": "没有匹配的 API Key。"
+      },
       "retentionLabel": "保留天数",
       "retentionOption": "{{days}} 天",
       "retention": "请求内容保留 {{days}} 天。",

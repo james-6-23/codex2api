@@ -128,6 +128,9 @@ func (db *DB) ensurePromptRequestTable(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	if err := db.ensurePromptRequestExclusions(ctx); err != nil {
+		return err
+	}
 	if err := db.ensurePromptRequestResponseTable(ctx); err != nil {
 		return err
 	}
@@ -167,9 +170,24 @@ func (db *DB) InsertPromptRequest(ctx context.Context, input PromptRequestBody) 
 	if input.ConversationGroup == "" {
 		input.ConversationGroup = singlePromptRequestGroup
 	}
-	task := promptRequestTaskMetadata(input.Body)
-	err := db.withSQLiteWriteLock(ctx, func() error {
-		return db.conn.QueryRowContext(ctx, `INSERT INTO prompt_request_records
+	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
+		if !db.isSQLite() && input.APIKeyID > 0 {
+			if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock_shared(hashtextextended('prompt-request-recording:' || $1::bigint::text, 0))`, input.APIKeyID); err != nil {
+				return err
+			}
+		}
+		var excluded bool
+		if input.APIKeyID > 0 {
+			if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM api_keys WHERE id=$1 AND prompt_request_excluded=TRUE)`,
+				input.APIKeyID).Scan(&excluded); err != nil {
+				return err
+			}
+		}
+		if excluded {
+			return nil
+		}
+		task := promptRequestTaskMetadata(input.Body)
+		return tx.QueryRowContext(ctx, `INSERT INTO prompt_request_records
 			(created_at, endpoint, transport, model, api_key_name, content_type, body, conversation_scope, conversation_group, task_anchor, task_turn, task_preview, chat_key_id)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13) RETURNING id`,
 			input.CreatedAt, input.Endpoint, input.Transport, input.Model, input.APIKey, input.ContentType,
@@ -192,7 +210,7 @@ func (r *PromptRequestRecord) scanTargets() []any {
 }
 
 func (db *DB) ListPromptRequests(ctx context.Context, before int64, limit int) ([]PromptRequestRecord, error) {
-	query := `SELECT ` + promptRequestSummaryColumns + ` FROM prompt_request_records`
+	query := `SELECT ` + promptRequestSummaryColumns + ` FROM prompt_request_visible_records`
 	var rows *sql.Rows
 	var err error
 	if before > 0 {
@@ -216,9 +234,19 @@ func (db *DB) ListPromptRequests(ctx context.Context, before int64, limit int) (
 }
 
 func (db *DB) GetPromptRequest(ctx context.Context, id int64) (PromptRequestBody, error) {
+	return db.getPromptRequest(ctx, id, "prompt_request_visible_records")
+}
+
+// GetStoredPromptRequest reads an archived record for trace exports already
+// enrolled or explicitly requested by the operator.
+func (db *DB) GetStoredPromptRequest(ctx context.Context, id int64) (PromptRequestBody, error) {
+	return db.getPromptRequest(ctx, id, "prompt_request_records")
+}
+
+func (db *DB) getPromptRequest(ctx context.Context, id int64, table string) (PromptRequestBody, error) {
 	var item PromptRequestBody
 	err := db.conn.QueryRowContext(ctx, `SELECT `+promptRequestSummaryColumns+`, content_type, body, conversation_scope, conversation_group
-		FROM prompt_request_records WHERE id = $1`, id).
+		FROM `+table+` WHERE id = $1`, id).
 		Scan(append(item.scanTargets(), &item.ContentType, &item.Body, &item.ConversationScope, &item.ConversationGroup)...)
 	return item, err
 }
@@ -252,7 +280,7 @@ func (db *DB) PreviousPromptRequest(ctx context.Context, current PromptRequestBo
 	var id int64
 	var body []byte
 	if current.ConversationGroup != "" && current.ConversationGroup != singlePromptRequestGroup {
-		err := db.conn.QueryRowContext(ctx, `SELECT id, body FROM prompt_request_records
+		err := db.conn.QueryRowContext(ctx, `SELECT id, body FROM prompt_request_visible_records
 			WHERE conversation_group = $1 AND (created_at, id) < ($2, $3)
 			ORDER BY created_at DESC, id DESC LIMIT 1`, current.ConversationGroup, current.CreatedAt, current.ID).Scan(&id, &body)
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -260,7 +288,7 @@ func (db *DB) PreviousPromptRequest(ctx context.Context, current PromptRequestBo
 		}
 	}
 	if current.ConversationScope != "" {
-		err := db.conn.QueryRowContext(ctx, `SELECT id, body FROM prompt_request_records
+		err := db.conn.QueryRowContext(ctx, `SELECT id, body FROM prompt_request_visible_records
 			WHERE conversation_scope = $1 AND conversation_scope <> '' AND id < $2 ORDER BY id DESC LIMIT 1`,
 			current.ConversationScope, current.ID).Scan(&id, &body)
 		if !errors.Is(err, sql.ErrNoRows) {
@@ -274,7 +302,7 @@ func (db *DB) PreviousPromptRequest(ctx context.Context, current PromptRequestBo
 	if marker == "" {
 		return 0, nil, nil
 	}
-	rows, err := db.conn.QueryContext(ctx, `SELECT id, body FROM prompt_request_records
+	rows, err := db.conn.QueryContext(ctx, `SELECT id, body FROM prompt_request_visible_records
 		WHERE id < $1 AND endpoint = $2 AND transport = $3 AND api_key_name = $4 AND conversation_scope = ''
 		ORDER BY id DESC LIMIT 12`, current.ID, current.Endpoint, current.Transport, current.APIKey)
 	if err != nil {
