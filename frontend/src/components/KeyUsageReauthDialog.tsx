@@ -57,6 +57,7 @@ export default function KeyUsageReauthDialog({
     setBusy(true);
     setError("");
     setNotice("");
+    let exchangeAttempted = false;
     try {
       if (!session || restart) {
         setCallbackUrl("");
@@ -73,6 +74,7 @@ export default function KeyUsageReauthDialog({
           setError(t("accounts.oauthParseError"));
           return;
         }
+        exchangeAttempted = true;
         const result = await api.completePublicAccountReauth(
           apiKey,
           account.id,
@@ -97,7 +99,13 @@ export default function KeyUsageReauthDialog({
         onComplete();
       }
     } catch (err) {
-      if (!controller.signal.aborted) setError(getErrorMessage(err));
+      if (controller.signal.aborted) return;
+      // After submission the server may have consumed the single-use session.
+      if (exchangeAttempted) {
+        setSession(null);
+        setCallbackUrl("");
+      }
+      setError(getErrorMessage(err));
     } finally {
       if (pending.current === controller && !controller.signal.aborted) {
         pending.current = null;

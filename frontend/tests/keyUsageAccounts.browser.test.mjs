@@ -194,6 +194,26 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
   assert.equal(complete.auth, 'Bearer fixture-key')
   assert.deepEqual(JSON.parse(complete.body), { session_id: 'session-3', state: 'fixture-state', code: 'fixture-code' })
   await page.keyboard.press('Escape')
+  await thirdCard.getByRole('button', { name: '重新授权', exact: true }).click()
+  await reauth.getByRole('button', { name: '生成授权链接' }).click()
+  await reauth.getByRole('textbox').fill('http://localhost/fixture?state=missing-code')
+  await reauth.getByRole('button', { name: '更新授权参数' }).click()
+  await reauth.getByRole('alert').waitFor()
+  assert.equal(await reauth.getByRole('textbox').inputValue(), 'http://localhost/fixture?state=missing-code')
+  assert.equal(await page.evaluate(() => window.__calls.filter(call => call.path.endsWith('/reauth/complete')).length), 1)
+  await page.evaluate(() => {
+    const fetch = window.fetch
+    window.fetch = (url, opts) => {
+      if (!String(url).endsWith('/reauth/complete')) return fetch(url, opts)
+      window.fetch = fetch
+      return Promise.resolve(new Response(JSON.stringify({message: 'fixture exchange failed'}), {status: 502}))
+    }
+  })
+  await reauth.getByRole('textbox').fill('http://localhost/fixture?state=fixture-state&code=used-code')
+  await reauth.getByRole('button', { name: '更新授权参数' }).click()
+  await reauth.getByRole('button', { name: '生成授权链接' }).waitFor()
+  assert.equal(await reauth.getByRole('textbox').count(), 0)
+  await page.keyboard.press('Escape')
   // A committed write with a delayed runtime reload is not a retryable OAuth failure.
   await page.evaluate(() => {
     const fetch = window.fetch
