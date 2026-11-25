@@ -9,16 +9,18 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/gin-gonic/gin"
 )
 
 func TestScopedReauthPaths(t *testing.T) {
-	h, db := newTestAdminHandlerFixture(t)
+	h, db, dbPath := newTestAdminHandlerFixtureWithPath(t)
 	ctx := context.Background()
 	h.reauthExchange = func(context.Context, string, string, string, string, ...string) (*rawOAuthTokenResp, *auth.AccountInfo, error) {
 		t.Fatal("unexpected token exchange")
@@ -47,9 +49,10 @@ func TestScopedReauthPaths(t *testing.T) {
 	must(db.SetKeyUsageAccountPermissions(ctx, 0, policy))
 	r := gin.New()
 	h.RegisterRoutes(r)
+	requestCtx := context.Background()
 	call := func(method, path, key, body string, want int) string {
 		t.Helper()
-		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req := httptest.NewRequestWithContext(requestCtx, method, path, strings.NewReader(body))
 		req.Header.Set("Authorization", "Bearer "+key)
 		req.Header.Set("Content-Type", "application/json")
 		w := httptest.NewRecorder()
@@ -57,7 +60,7 @@ func TestScopedReauthPaths(t *testing.T) {
 		if w.Code != want {
 			t.Fatalf("%s %s: status %d want %d: %s", method, path, w.Code, want, w.Body.String())
 		}
-		for _, secret := range []string{proxyURL, "old-sensitive", "new-sensitive", "code_verifier"} {
+		for _, secret := range []string{proxyURL, "old-sensitive", "new-sensitive", "winning-sensitive", "code_verifier"} {
 			if strings.Contains(w.Body.String(), secret) {
 				t.Fatal("private data in response")
 			}
@@ -126,17 +129,19 @@ func TestScopedReauthPaths(t *testing.T) {
 	must(db.SetKeyUsageAccountPermissions(ctx, kid, policy))
 	calls := 0
 	user, workspace := "user-b", "workspace"
+	refreshToken := "new-sensitive"
 	var during func()
 	h.reauthExchange = func(_ context.Context, code, verifier, redirect, proxy string, ids ...string) (*rawOAuthTokenResp, *auth.AccountInfo, error) {
 		calls++
 		if code != "example-code" || oauthCodeChallenge(verifier) != challenge || redirect != oauthDefaultRedirectURI || proxy != proxyURL {
 			t.Fatal("unexpected exchange inputs")
 		}
+		issuedToken := refreshToken
 		if during != nil {
 			during()
 		}
 		jwt := "e30." + base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"email":"test@example.test","https://api.openai.com/auth":{"user_id":%q,"chatgpt_account_id":%q}}`, user, workspace))) + ".sig"
-		return &rawOAuthTokenResp{RefreshToken: "new-sensitive", AccessToken: "mock-opaque", IDToken: jwt}, nil, nil
+		return &rawOAuthTokenResp{RefreshToken: issuedToken, AccessToken: "mock-opaque", IDToken: jwt}, nil, nil
 	}
 	call("POST", complete, key, body, 409)
 	call("POST", complete, key, body, 400)
@@ -155,6 +160,35 @@ func TestScopedReauthPaths(t *testing.T) {
 	if row.GetCredential("refresh_token") != "old-sensitive" {
 		t.Fatal("unauthorized write")
 	}
+	// A second completion can finish while the first is still in its exchange.
+	gen := h.accountCachesGen.Load()
+	during = func() {
+		during = nil
+		refreshToken = "winning-sensitive"
+		call("POST", complete, key, begin(), 200)
+	}
+	call("POST", complete, key, begin(), 409)
+	row, err = db.GetAccountByID(ctx, id)
+	must(err)
+	if row.GetCredential("refresh_token") != refreshToken {
+		t.Fatal("stale completion overwrote the winning grant")
+	}
+	refreshToken = "new-sensitive"
+	if h.accountCachesGen.Load() != gen+1 {
+		t.Fatal("only the winning reload should invalidate snapshots")
+	}
+
+	deadline := time.Now().UTC().Add(time.Hour).Truncate(time.Second)
+	must(db.SetError(ctx, id, "refresh error"))
+	must(db.SetCooldown(ctx, id, "rate_limited", deadline))
+	cacheKey := fmt.Sprint(id)
+	setCached := func(reason string) {
+		raw, err := json.Marshal(cache.RuntimeCooldown{Reason: reason, ResetAt: deadline})
+		must(err)
+		must(h.cache.SetRuntime(ctx, "account-cooldown", cacheKey, raw, time.Hour))
+	}
+	setCached("rate_limited")
+	during = func() { must(db.UpdateUsageSnapshot(ctx, id, 43, time.Now())) }
 	body = begin()
 	if got := call("POST", complete, key, body, 200); got != fmt.Sprintf(`{"id":%d}`, id) {
 		t.Fatal(got)
@@ -164,6 +198,64 @@ func TestScopedReauthPaths(t *testing.T) {
 	must(err)
 	if row.GetCredential("refresh_token") != "new-sensitive" || row.ProxyURL != proxyURL {
 		t.Fatal("wrong persisted update")
+	}
+	if row.GetCredential("codex_7d_used_percent") == "" || row.Status != "active" || row.ErrorMessage != "" || row.CooldownReason != "rate_limited" || !row.CooldownUntil.Time.Equal(deadline) {
+		t.Fatal("lost unrelated update or persisted cooldown")
+	}
+	if reason, until := h.store.FindByID(id).GetCooldownSnapshot(); reason != "rate_limited" || !until.Equal(deadline) {
+		t.Fatal("lost runtime cooldown")
+	}
+	if _, ok, err := h.cache.GetRuntime(ctx, "account-cooldown", cacheKey); err != nil || !ok {
+		t.Fatal("lost cached rate limit", err)
+	}
+	during = nil
+	must(db.SetCooldown(ctx, id, "unauthorized", deadline))
+	setCached("unauthorized")
+	h.store.FindByID(id).SetCooldownUntil(deadline, "unauthorized")
+	atomic.StoreInt32(&h.store.FindByID(id).Disabled, 1)
+	call("POST", complete, key, begin(), 200)
+	row, err = db.GetAccountByID(ctx, id)
+	must(err)
+	if row.CooldownReason != "" || row.CooldownUntil.Valid || h.store.FindByID(id).HasActiveCooldown() || atomic.LoadInt32(&h.store.FindByID(id).Disabled) != 0 {
+		t.Fatal("did not recover unauthorized cooldown")
+	}
+	if _, ok, err := h.cache.GetRuntime(ctx, "account-cooldown", cacheKey); err != nil || ok {
+		t.Fatal("cached unauthorized cooldown remains", err)
+	}
+
+	// Even a purely local throttle must survive a credential reload.
+	h.store.FindByID(id).SetCooldownUntil(deadline, "rate_limited")
+	call("POST", complete, key, begin(), 200)
+	if reason, until := h.store.FindByID(id).GetCooldownSnapshot(); reason != "rate_limited" || !until.Equal(deadline) {
+		t.Fatal("local-only gate was removed")
+	}
+	row, err = db.GetAccountByID(ctx, id)
+	must(err)
+
+	// Break only the post-commit group read, after the last permission check.
+	previous := h.store.FindByID(id)
+	gen = h.accountCachesGen.Load()
+	var cancelRequest context.CancelFunc
+	requestCtx, cancelRequest = context.WithCancel(ctx)
+	defer cancelRequest()
+	h.cache = scopedReloadTestCache{TokenCache: h.cache, onRead: func(reloadCtx context.Context) {
+		cancelRequest()
+		if reloadCtx.Err() != nil {
+			t.Fatal("request cancellation reached post-commit reload")
+		}
+		if until, ok := reloadCtx.Deadline(); !ok || time.Until(until) > 5*time.Second {
+			t.Fatal("reload is not bounded")
+		}
+		execAdminOutputGuardTestSQLite(t, dbPath, "ALTER TABLE account_group_members RENAME TO unavailable_members")
+	}}
+	before := row.CredentialGeneration
+	if got := call("POST", complete, key, begin(), 200); got != fmt.Sprintf(`{"id":%d,"reload_pending":true}`, id) {
+		t.Fatal(got)
+	}
+	row, err = db.GetAccountByID(ctx, id)
+	must(err)
+	if row.CredentialGeneration != before+1 || h.store.FindByID(id) != previous || previous.GetCredentialGeneration() != before || h.accountCachesGen.Load() != gen {
+		t.Fatal("reload failure lost committed write, runtime account or snapshot")
 	}
 	row, err = db.GetAccountByID(ctx, id2)
 	must(err)
@@ -210,4 +302,16 @@ func TestScopedReauthEligibility(t *testing.T) {
 			t.Errorf("offered reauthorization for %s", label)
 		}
 	}
+}
+
+type scopedReloadTestCache struct {
+	cache.TokenCache
+	onRead func(context.Context)
+}
+
+func (c scopedReloadTestCache) GetRuntime(ctx context.Context, ns, key string) (json.RawMessage, bool, error) {
+	if ns == "account-cooldown" {
+		c.onRead(ctx)
+	}
+	return c.TokenCache.GetRuntime(ctx, ns, key)
 }

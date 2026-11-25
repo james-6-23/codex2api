@@ -8341,7 +8341,9 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 
 // UpdateScopedOAuthCredentials refuses to overwrite a changed authorization snapshot.
 func (db *DB) UpdateScopedOAuthCredentials(ctx context.Context, expected *AccountRow, credentials map[string]interface{}) error {
-	return db.updateOAuthAccountCredentials(ctx, expected.ID, credentials, expected.ProxyURL, expected)
+	return db.withSQLiteWriteLock(ctx, func() error {
+		return db.updateOAuthAccountCredentials(ctx, expected.ID, credentials, expected.ProxyURL, expected)
+	})
 }
 
 func (db *DB) updateOAuthAccountCredentials(ctx context.Context, id int64, credentials map[string]interface{}, proxyURL string, expected *AccountRow) error {
@@ -8354,8 +8356,8 @@ func (db *DB) updateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	selectQuery := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 	args := []interface{}{id}
 	if expected != nil {
-		selectQuery += ` AND platform = $2 AND type = $3 AND COALESCE(proxy_url,'') = $4`
-		args = append(args, expected.Platform, expected.Type, expected.ProxyURL)
+		selectQuery += ` AND platform = $2 AND type = $3 AND COALESCE(proxy_url,'') = $4 AND credential_generation = $5`
+		args = append(args, expected.Platform, expected.Type, expected.ProxyURL, expected.CredentialGeneration)
 	}
 	if !db.isSQLite() {
 		selectQuery += ` FOR UPDATE`
@@ -8367,8 +8369,15 @@ func (db *DB) updateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	}
 
 	current := decodeCredentials(currentRaw)
-	if expected != nil && !reflect.DeepEqual(current, expected.Credentials) {
-		return sql.ErrNoRows
+	if expected != nil {
+		// Fence grant replacement and scoped authorization/routing changes, not
+		// expiry updates or usage probes. A rotation of the actual tokens is
+		// a competing write, including a rotation by a background refresher.
+		for _, k := range []string{"refresh_token", "access_token", "id_token", "user_id", "workspace_id", "account_id", "upstream_type", "allowed_api_key_ids", "plan_type", "custom_headers"} {
+			if !reflect.DeepEqual(current[k], expected.Credentials[k]) {
+				return sql.ErrNoRows
+			}
+		}
 	}
 	merged := mergeCredentialMaps(current, credentials)
 	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
@@ -8376,14 +8385,22 @@ func (db *DB) updateOAuthAccountCredentials(ctx context.Context, id int64, crede
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
 
-	updateQuery := `UPDATE accounts SET credentials = $1, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+	credParam := "$1"
 	if !db.isSQLite() {
-		updateQuery = `UPDATE accounts SET credentials = $1::jsonb, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+		credParam += "::jsonb"
 	}
+	generationUpdate := ""
+	if expected != nil {
+		generationUpdate = ", credential_generation = credential_generation + 1"
+	}
+	updateQuery := `UPDATE accounts SET credentials = ` + credParam + generationUpdate + `, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
 	// Recover only an existing authentication error under the same row lock.
 	// A public action must not revive a deleted account or undo rate limiting.
 	if expected != nil {
-		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='active', error_message='', cooldown_reason='', cooldown_until=NULL WHERE id=$1 AND (status='error' OR cooldown_reason='unauthorized')`, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='active', error_message='',
+			cooldown_reason=CASE WHEN cooldown_reason='unauthorized' THEN '' ELSE cooldown_reason END,
+			cooldown_until=CASE WHEN cooldown_reason='unauthorized' THEN NULL ELSE cooldown_until END
+			WHERE id=$1 AND (status='error' OR cooldown_reason='unauthorized')`, id); err != nil {
 			return err
 		}
 	}

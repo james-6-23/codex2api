@@ -7,13 +7,16 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/codex2api/auth"
+	"github.com/codex2api/cache"
 	"github.com/codex2api/database"
 	"github.com/codex2api/internal/openaiidentity"
 	"github.com/gin-gonic/gin"
@@ -277,7 +280,7 @@ func (h *Handler) completeScopedReauth(c *gin.Context) {
 		return
 	}
 	seed.customHeaders = nil // routing configuration is never part of a scoped update
-	if err := h.db.UpdateScopedOAuthCredentials(ctx, target, tokenCredentialMap(seed)); err != nil {
+	if err := h.db.UpdateScopedOAuthCredentials(ctx, row, tokenCredentialMap(seed)); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			writeError(c, 409, "账号授权已变更")
 		} else {
@@ -285,14 +288,87 @@ func (h *Handler) completeScopedReauth(c *gin.Context) {
 		}
 		return
 	}
-	if accountErrorStateNeedsReset(target) {
-		h.store.ForgetCachedAccountCooldown(target.ID)
-	}
-	h.store.RemoveAccount(target.ID)
-	if err := h.store.LoadAccountByID(ctx, target.ID); err != nil {
-		writePublicKeyUsageInternalError(c, err)
+	h.db.InsertAccountEventAsync(target.ID, "updated", "key_usage_reauth")
+	h.finishScopedReauth(c, target.ID)
+}
+
+func (h *Handler) finishScopedReauth(c *gin.Context, id int64) {
+	// The single-use exchange is committed. A client disconnect must not
+	// cancel runtime recovery or turn a stored update into a retryable error.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
+	defer cancel()
+	if err := h.reloadScopedReauth(ctx, id); err != nil {
+		log.Printf("scoped reauthorization committed for account %d; runtime reload pending: %v", id, err)
+		c.JSON(http.StatusOK, gin.H{"id": id, "reload_pending": true})
 		return
 	}
-	h.db.InsertAccountEventAsync(target.ID, "updated", "key_usage_reauth")
-	c.JSON(200, gin.H{"id": target.ID})
+	h.invalidateAccountSnapshotCaches()
+	c.JSON(http.StatusOK, gin.H{"id": id})
+}
+
+func (h *Handler) clearScopedUnauthorizedCooldown(ctx context.Context, id int64) error {
+	// The shared cooldown can differ from the DB (e.g. a transient 429).
+	// Compare-and-delete the actual record, never a newer rate-limit gate.
+	if h.cache == nil {
+		return nil
+	}
+	const namespace = "account-cooldown"
+	key := strconv.FormatInt(id, 10)
+	raw, ok, err := h.cache.GetRuntime(ctx, namespace, key)
+	if err != nil || !ok {
+		return err
+	}
+	var record cache.RuntimeCooldown
+	if err := json.Unmarshal(raw, &record); err != nil {
+		return err
+	}
+	if record.Reason != "unauthorized" {
+		return nil
+	}
+	cas, ok := h.cache.(cache.RuntimeOwnerStore)
+	if !ok {
+		return errors.New("conditional cooldown removal unavailable")
+	}
+	_, err = cas.CompareAndDeleteRuntimeOwner(ctx, namespace, key, raw)
+	return err
+}
+
+func (h *Handler) reloadScopedReauth(ctx context.Context, id int64) error {
+	if err := h.clearScopedUnauthorizedCooldown(ctx, id); err != nil {
+		return err
+	}
+	previous := h.store.FindByID(id)
+	var reason string
+	var until time.Time
+	var disabled bool
+	if previous != nil {
+		reason, until = previous.GetCooldownSnapshot()
+		disabled = atomic.LoadInt32(&previous.Disabled) != 0
+	}
+	// Publish via the store's outbox snapshot path. It reads the row, groups
+	// and model cooldowns before touching dispatch, and updates a live account
+	// in place so a read failure cannot strand it or its in-flight requests.
+	if err := h.store.RefreshIntelligenceAccount(ctx, id); err != nil {
+		return err
+	}
+	fresh := h.store.FindByID(id)
+	if fresh == nil {
+		return sql.ErrNoRows
+	}
+	if fresh == previous {
+		fresh.Mu().Lock()
+		// A transient 429 can be entirely local. Preserve its deadline without
+		// resetting the live object's backoff or recovery timer.
+		if fresh.Status == auth.StatusReady && reason != "unauthorized" && until.After(time.Now()) {
+			fresh.Status, fresh.CooldownReason, fresh.CooldownUtil = auth.StatusCooldown, reason, until
+		}
+		// The snapshot refresh restores the status and credentials, but not the
+		// immediate 401 dispatch latch. Never clear the separate pause flags.
+		if disabled && fresh.Status != auth.StatusError && fresh.CooldownReason != "unauthorized" {
+			atomic.StoreInt32(&fresh.Disabled, 0)
+		}
+		fresh.Mu().Unlock()
+		h.store.RefreshUsageFrameScheduler(fresh)
+	}
+	return nil
 }
