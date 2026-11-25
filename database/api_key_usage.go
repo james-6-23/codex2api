@@ -96,12 +96,42 @@ func (db *DB) getAPIKeyUsageSince(ctx context.Context, apiKeyID int64, since tim
 	return usage, nil
 }
 
+// The two sources are disjoint by construction: retained audit rows (including
+// pre-upgrade history) and just the accounting fields for omitted audit rows.
+const scopeWindowEvents = `(SELECT api_key_id, account_id, created_at, total_tokens, user_billed
+	FROM usage_logs WHERE status_code <> 499
+	UNION ALL SELECT api_key_id, account_id, created_at, total_tokens, user_billed
+	FROM api_key_scope_unaudited_usage) AS scope_events`
+
+func (db *DB) recordUnauditedScopeUsage(ctx context.Context, tx *sql.Tx, batch []usageLogEntry) error {
+	var values []string
+	var args []any
+	for _, e := range batch {
+		if e.StoreUsageLog || e.APIKeyID <= 0 || e.AccountID <= 0 || e.StatusCode == 499 {
+			continue
+		}
+		n := len(args)
+		values = append(values, fmt.Sprintf("($%d,$%d,$%d,$%d,$%d)", n+1, n+2, n+3, n+4, n+5))
+		args = append(args, e.APIKeyID, e.AccountID, db.usageLogCreatedAtArg(e.CreatedAt), e.TotalTokens, e.UserBilled)
+	}
+	if len(values) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO api_key_scope_unaudited_usage
+		(api_key_id, account_id, created_at, total_tokens, user_billed) VALUES `+strings.Join(values, ","), args...); err != nil {
+		return err
+	}
+	// No supported scope window needs more than 30 days of filtered traffic.
+	_, err := tx.ExecContext(ctx, `DELETE FROM api_key_scope_unaudited_usage WHERE created_at < $1`, db.timeArg(time.Now().Add(-30*24*time.Hour)))
+	return err
+}
+
 // GetAPIKeyAccountWindowUsage 聚合指定 API Key 在窗口内**按账号拆分**的使用情况,
 // 供 scope 维度限额(issue #439)判定。一次查询即可覆盖该 Key 的全部 scope 条目:
 // 分组维度在调用方按账号当前所属分组折算,因此分组成员变动即时生效,无需在
 // usage_logs 里冗余 group_id。
 //
-// 复用索引 idx_usage_logs_api_key_created_at,扫描量与同窗口的 Key 级 cost 聚合同级。
+// 两个来源均按 (api_key_id, created_at) 索引过滤；未保留审计明细的事件只保留最长 scope 窗口。
 // 已从账号池删除的账号仍会出现在返回值里,但调用方无法把它折算到分组——这部分历史
 // 用量在分组维度上会被忽略(账号维度仍准确)。
 func (db *DB) GetAPIKeyAccountWindowUsage(ctx context.Context, apiKeyID int64, window time.Duration) (map[int64]APIKeyWindowUsage, error) {
@@ -115,10 +145,9 @@ func (db *DB) GetAPIKeyAccountWindowUsage(ctx context.Context, apiKeyID int64, w
 			COUNT(*),
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(user_billed), 0)
-		FROM usage_logs
+		FROM `+scopeWindowEvents+`
 		WHERE api_key_id = $1
 		  AND created_at >= $2
-		  AND status_code <> 499
 		GROUP BY account_id
 	`, apiKeyID, db.timeArg(since))
 	if err != nil {
@@ -145,7 +174,7 @@ func (db *DB) GetAPIKeyAccountWindowUsage(ctx context.Context, apiKeyID int64, w
 }
 
 // GetAPIKeyAccountWindowsUsage aggregates all supported scope windows in one
-// index range scan. The previous caller issued one GROUP BY query per window,
+// range query. The previous caller issued one GROUP BY query per window,
 // making the 30-day view scan the same rows up to four times.
 func (db *DB) GetAPIKeyAccountWindowsUsage(ctx context.Context, apiKeyID int64) (map[string]map[int64]APIKeyWindowUsage, error) {
 	out := make(map[string]map[int64]APIKeyWindowUsage, len(APIKeyScopeWindows))
@@ -173,8 +202,8 @@ func (db *DB) GetAPIKeyAccountWindowsUsage(ctx context.Context, apiKeyID int64) 
 			COALESCE(SUM(CASE WHEN created_at >= $4 THEN total_tokens ELSE 0 END), 0),
 			COALESCE(SUM(CASE WHEN created_at >= $4 THEN user_billed ELSE 0 END), 0),
 			COUNT(*), COALESCE(SUM(total_tokens), 0), COALESCE(SUM(user_billed), 0)
-		FROM usage_logs
-		WHERE api_key_id = $1 AND created_at >= $5 AND status_code <> 499
+		FROM `+scopeWindowEvents+`
+		WHERE api_key_id = $1 AND created_at >= $5
 		GROUP BY account_id
 	`, apiKeyID, since5h, since1d, since7d, since30d)
 	if err != nil {
@@ -234,10 +263,9 @@ func (db *DB) GetAPIKeysAccountWindowUsage(ctx context.Context, apiKeyIDs []int6
 			COUNT(*),
 			COALESCE(SUM(total_tokens), 0),
 			COALESCE(SUM(user_billed), 0)
-		FROM usage_logs
+		FROM `+scopeWindowEvents+`
 		WHERE api_key_id IN (%s)
 		  AND created_at >= %s
-		  AND status_code <> 499
 		GROUP BY api_key_id, account_id
 	`, strings.Join(placeholders, ","), sincePlaceholder)
 

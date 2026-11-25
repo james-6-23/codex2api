@@ -242,6 +242,12 @@ func (db *DB) migrateSQLite(ctx context.Context) error {
 			created_at INTEGER NOT NULL,
 			PRIMARY KEY (api_key_id, rule_id, request_id)
 		);`,
+		`CREATE TABLE IF NOT EXISTS api_key_scope_unaudited_usage (
+			api_key_id INTEGER NOT NULL, account_id INTEGER NOT NULL, created_at TIMESTAMP NOT NULL,
+			total_tokens INTEGER NOT NULL, user_billed REAL NOT NULL
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_scope_unaudited_key_time ON api_key_scope_unaudited_usage(api_key_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_scope_unaudited_time ON api_key_scope_unaudited_usage(created_at);`,
 		`CREATE TABLE IF NOT EXISTS api_key_scope_counters (
 			api_key_id INTEGER NOT NULL,
 			scope_type TEXT NOT NULL,

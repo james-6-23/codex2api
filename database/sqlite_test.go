@@ -3993,6 +3993,7 @@ func TestFlushLogsRetriesQuotaOnlyBatchWithoutDoubleCharge(t *testing.T) {
 		t.Fatalf("rename api_keys 返回错误: %v", err)
 	}
 	if err := db.InsertUsageLog(ctx, &UsageLogInput{
+		AccountID:   1,
 		APIKeyID:    apiKeyID,
 		Endpoint:    "/v1/responses",
 		Model:       "gpt-5.4",
@@ -4027,6 +4028,11 @@ func TestFlushLogsRetriesQuotaOnlyBatchWithoutDoubleCharge(t *testing.T) {
 	}
 	if math.Abs(quotaUsed-want) > 1e-12 || math.Abs(totalUsed-want) > 1e-12 {
 		t.Fatalf("API Key usage = quota %.12f total %.12f, want exactly one charge %.12f", quotaUsed, totalUsed, want)
+	}
+
+	usage, err := db.GetAPIKeyAccountWindowUsage(ctx, apiKeyID, 5*time.Hour)
+	if err != nil || usage[1].Requests != 1 || math.Abs(usage[1].UserBilled-want) > 1e-12 {
+		t.Fatalf("scope usage after retry = %+v, err = %v; want exactly one charge", usage, err)
 	}
 
 	var count int

@@ -1412,6 +1412,12 @@ func (db *DB) migrate(ctx context.Context) error {
 		created_at BIGINT NOT NULL,
 		PRIMARY KEY (api_key_id, rule_id, request_id)
 	);
+	CREATE TABLE IF NOT EXISTS api_key_scope_unaudited_usage (
+		api_key_id INTEGER NOT NULL, account_id INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+		total_tokens INTEGER NOT NULL, user_billed DOUBLE PRECISION NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_scope_unaudited_key_time ON api_key_scope_unaudited_usage(api_key_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_scope_unaudited_time ON api_key_scope_unaudited_usage(created_at);
 	CREATE TABLE IF NOT EXISTS api_key_scope_counters (
 		api_key_id BIGINT NOT NULL,
 		scope_type VARCHAR(16) NOT NULL,
@@ -4508,7 +4514,8 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 	// User image fees are independent of upstream token cost.
 	userBilled := UsageLogUserBilledCost(log)
-	if !storeUsageLog && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
+	// Account-scoped request and token limits also count zero-cost events.
+	if !storeUsageLog && (log.APIKeyID <= 0 || (log.AccountID <= 0 && userBilled <= 0) || log.StatusCode == 499) {
 		return nil
 	}
 
@@ -5033,6 +5040,9 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 		}
 	}
 
+	if err := db.recordUnauditedScopeUsage(ctx, tx, batch); err != nil {
+		return fmt.Errorf("record unaudited scope usage: %w", err)
+	}
 	if err := db.applyAPIKeyScopeCountersWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新 scope 累计额度: %w", err)
 	}
@@ -5085,6 +5095,9 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 			return err
 		}
 		insertedIDs = append(insertedIDs, ids...)
+	}
+	if err := db.recordUnauditedScopeUsage(ctx, tx, batch); err != nil {
+		return fmt.Errorf("record unaudited scope usage: %w", err)
 	}
 	if err := db.applyAPIKeyScopeCountersWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新 scope 累计额度: %w", err)
@@ -6924,6 +6937,9 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 			return err
 		}
 	} else if _, err = tx.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM api_key_scope_unaudited_usage`); err != nil {
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM usage_stats_rollup WHERE channel <> ''`); err != nil {
