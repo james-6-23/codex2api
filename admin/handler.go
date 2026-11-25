@@ -46,6 +46,8 @@ import (
 
 // Handler 管理后台 API 处理器
 type Handler struct {
+	reauth                   scopedReauthStore
+	reauthExchange           scopedCodeExchange
 	intelligenceDeviceConfig *proxy.DeviceProfileConfig
 	intelligenceOnce         sync.Once
 	intelligenceWG           sync.WaitGroup
@@ -1135,6 +1137,8 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	keyUsage.GET("/me", h.GetPublicAPIKeyUsageSummary)
 	keyUsage.GET("/concurrency", h.GetPublicAPIKeyConcurrency)
 	keyUsage.GET("/accounts", h.GetPublicKeyUsageAccounts)
+	keyUsage.POST("/accounts/:id/reauth/start", h.startScopedReauth)
+	keyUsage.POST("/accounts/:id/reauth/complete", h.completeScopedReauth)
 	keyUsage.POST("/accounts/:id/reset-credits", h.ResetPublicKeyUsageAccountCredits)
 
 	// 账号自助添加公开门户（无 admin 鉴权；开关门控 + IP 限流；见 self_service.go）

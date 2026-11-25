@@ -6298,6 +6298,10 @@
     "keyGroupsReconcileHint": "Group totals include repeated usage for multi-group accounts. {{ungrouped}} ungrouped account(s) are added and repeated assignments from {{multi}} multi-group account(s) are subtracted to match the deduplicated key total."
   },
   "keyUsageAccounts": {
+    "reauthorize": "Reauthorize",
+    "keyRequests": "Requests by this key",
+    "keyCost": "Cost for this key",
+    "lastActive": "Last used",
     "group": "Group",
     "allGroups": "All groups",
     "ungrouped": "Ungrouped",

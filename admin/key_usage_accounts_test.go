@@ -111,11 +111,35 @@ func TestPublicKeyUsageAccountAuthorizationAndReset(t *testing.T) {
 	}
 	store := auth.NewStore(nil, nil, nil)
 	a := &auth.Account{DBID: aID, AccountID: "workspace-a", AccessToken: "secret-access-token", PlanType: "plus"}
+	now := time.Now().UTC().Truncate(time.Second)
+	a.HealthTier = auth.HealthTierHealthy
+	a.LastUsedAt.Store(now.UnixNano())
+	a.SetCreditBalance("12.50", true, false, false)
 	a.SetRateLimitResetCredits(2)
 	a.SetUsageSnapshot5hAt(25, time.Now().Add(time.Hour), time.Now())
 	b := &auth.Account{DBID: bID, AccountID: "workspace-b", AccessToken: "secret-other-access-token", PlanType: "plus"}
 	store.AddAccounts([]*auth.Account{a, b})
 	store.ApplyAccountGroupMemberships(map[int64][]int64{aID: {groupA}, bID: {groupB}})
+	otherKey, err := db.InsertAPIKey(ctx, "second", "sk-second-portal-test-key")
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertUsage := func(k, accountID int64, at time.Time) float64 {
+		t.Helper()
+		entry := &database.UsageLogInput{APIKeyID: k, AccountID: accountID, Model: "gpt-5.4", StatusCode: 200, InputTokens: 1000000, CreatedAt: at}
+		if err := db.InsertUsageLog(ctx, entry); err != nil {
+			t.Fatal(err)
+		}
+		return database.UsageLogUserBilledCost(entry)
+	}
+	bill := insertUsage(keyID, aID, now)
+	if bill <= 0 {
+		t.Fatal("test request must have a nonzero user charge")
+	}
+	insertUsage(keyID, aID, now.Add(-8*time.Hour))
+	insertUsage(otherKey, aID, now)
+	insertUsage(keyID, bID, now)
+	db.FlushUsageLogs()
 	var calls atomic.Int32
 	h := &Handler{db: db, store: store,
 		consumeResetCredit: func(context.Context, *auth.Account, string, string) (*proxy.WhamResetResult, *http.Response, error) {
@@ -148,11 +172,22 @@ func TestPublicKeyUsageAccountAuthorizationAndReset(t *testing.T) {
 	}
 	var result struct {
 		Accounts []struct {
-			ID           int64    `json:"id"`
-			Email        string   `json:"email"`
-			Usage        *float64 `json:"usage_percent_5h"`
-			Status       string   `json:"status"`
-			ResetAllowed bool     `json:"reset_allowed"`
+			ID            int64      `json:"id"`
+			Email         string     `json:"email"`
+			Usage         *float64   `json:"usage_percent_5h"`
+			Status        string     `json:"status"`
+			ResetAllowed  bool       `json:"reset_allowed"`
+			Requests5h    *int64     `json:"requests_5h"`
+			Requests7d    *int64     `json:"requests_7d"`
+			Billed5h      *float64   `json:"user_billed_5h"`
+			Billed7d      *float64   `json:"user_billed_7d"`
+			Health        string     `json:"health_tier"`
+			Created       time.Time  `json:"created_at"`
+			LastUsed      *time.Time `json:"last_used_at"`
+			CreditValid   bool       `json:"credits_valid"`
+			CreditBalance *string    `json:"credits_balance"`
+			HasCredits    bool       `json:"credits_has_credits"`
+			Unlimited     *bool      `json:"credits_unlimited"`
 		} `json:"accounts"`
 		Groups []struct {
 			ID   int64  `json:"id"`
@@ -165,10 +200,20 @@ func TestPublicKeyUsageAccountAuthorizationAndReset(t *testing.T) {
 	if len(result.Accounts) != 2 || result.Accounts[0].ID != aID || result.Accounts[0].Email != "allowed@example.test" || result.Accounts[0].Usage == nil || *result.Accounts[0].Usage != 25 || result.Accounts[1].ID != unloadedID || result.Accounts[1].Status != "unavailable" || result.Accounts[1].ResetAllowed {
 		t.Fatalf("list=%+v", result)
 	}
+	loaded, unavailable := result.Accounts[0], result.Accounts[1]
+	if loaded.Requests5h == nil || *loaded.Requests5h != 1 || loaded.Requests7d == nil || *loaded.Requests7d != 2 || loaded.Billed5h == nil || *loaded.Billed5h != bill || loaded.Billed7d == nil || *loaded.Billed7d != 2*bill {
+		t.Fatalf("wrong rolling or cross-key usage: %s", w.Body.String())
+	}
+	if loaded.Health != "healthy" || loaded.Created.IsZero() || loaded.LastUsed == nil || !loaded.LastUsed.Equal(now) || !loaded.CreditValid || !loaded.HasCredits || loaded.CreditBalance == nil || *loaded.CreditBalance != "12.50" || loaded.Unlimited == nil || *loaded.Unlimited {
+		t.Fatalf("wrong public account snapshot: %s", w.Body.String())
+	}
+	if unavailable.Created.IsZero() || unavailable.LastUsed != nil || unavailable.CreditBalance != nil || unavailable.Requests5h == nil || *unavailable.Requests5h != 0 || unavailable.Billed7d == nil || *unavailable.Billed7d != 0 {
+		t.Fatalf("wrong unavailable account projection: %s", w.Body.String())
+	}
 	if len(result.Groups) != 1 || result.Groups[0].ID != groupA || result.Groups[0].Name != "group-a" {
 		t.Fatalf("groups=%+v", result.Groups)
 	}
-	for _, secret := range []string{"secret-access-token", "secret-refresh-token", "secret-proxy", "secret-other-token", "other"} {
+	for _, secret := range []string{"secret-access-token", "secret-refresh-token", "secret-proxy", "secret-other-token", "other", "account_billed", "workspace-a", "allowed_api_key_ids"} {
 		if strings.Contains(w.Body.String(), secret) {
 			t.Fatalf("unexpected sensitive or out-of-scope field %q", secret)
 		}

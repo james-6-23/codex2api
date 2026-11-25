@@ -1,4 +1,12 @@
-import AccountIntelligenceBar, { AccountIntelligenceActions } from "./AccountIntelligenceBar";
+import {
+  AccountDetailBody,
+  AccountDetailContent,
+  AccountDetailSection as Section,
+  AccountDetailMetric as MetricCard,
+} from "./AccountDetailContent";
+import AccountIntelligenceBar, {
+  AccountIntelligenceActions,
+} from "./AccountIntelligenceBar";
 import type { IntelligenceBar } from "../lib/intelligenceCheck";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
@@ -36,17 +44,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import {
-  Sheet,
-  SheetBody,
-  SheetContent,
-  SheetDescription,
-  SheetFooter,
-  SheetHeader,
-  SheetTitle,
-} from "@/components/ui/sheet";
+import { Sheet, SheetDescription, SheetFooter } from "@/components/ui/sheet";
 import { formatBeijingTime, formatRelativeTime } from "../utils/time";
-import { formatLongUsageWindowLabel, getAccountStatusBadgeStatus } from "../lib/usageFormat";
+import {
+  formatLongUsageWindowLabel,
+  getAccountStatusBadgeStatus,
+} from "../lib/usageFormat";
 import { shouldHandleAccountDetailKeyNavigation } from "../lib/accountDetailSheetKeyboard";
 
 function isFutureTime(value?: string): boolean {
@@ -142,45 +145,6 @@ function CopyValueButton({ value, label }: { value: string; label: string }) {
         <Copy className="size-3.5" />
       )}
     </button>
-  );
-}
-
-function Section({
-  title,
-  children,
-  action,
-}: {
-  title: string;
-  children: ReactNode;
-  action?: ReactNode;
-}) {
-  return (
-    <section className="space-y-2.5">
-      <div className="flex items-center justify-between gap-2">
-        <h3 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          {title}
-        </h3>
-        {action}
-      </div>
-      {children}
-    </section>
-  );
-}
-
-function MetricCard({
-  label,
-  children,
-}: {
-  label: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="min-w-0 rounded-lg border border-border bg-muted/20 px-3 py-2.5">
-      <div className="mb-1 text-[11px] font-medium text-muted-foreground">
-        {label}
-      </div>
-      <div className="min-w-0 text-sm text-foreground">{children}</div>
-    </div>
   );
 }
 
@@ -360,118 +324,100 @@ export default function AccountDetailSheet({
       }}
     >
       {account ? (
-        <SheetContent
-          side="right"
-          className="w-[min(calc(100%-1.5rem),460px)] max-w-[min(calc(100%-1.5rem),460px)] sm:w-[min(calc(100%-2rem),460px)] sm:max-w-[min(calc(100%-2rem),460px)]"
-        >
-          <SheetHeader>
-            <div className="flex items-start justify-between gap-3 pr-2">
-              <div className="flex min-w-0 flex-1 items-start gap-3">
-                <span className="mt-0.5 flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-card ring-1 ring-border shadow-sm">
-                  {account.claude_api ? (
-                    <ChannelLogo channel="claude" size={22} />
-                  ) : account.kiro_api ? (
-                    <ChannelLogo channel="kiro" size={22} />
-                  ) : account.antigravity_api ? (
-                    <ChannelLogo channel="antigravity" size={22} />
-                  ) : account.grok_api ? (
-                    <ChannelLogo channel="grok" size={22} />
-                  ) : account.openai_responses_api ? (
-                    <ModelLogo model="openai" variant="plain" size={22} />
-                  ) : (
-                    <ChannelLogo channel="codex" size={40} className="rounded-xl" />
-                  )}
-                </span>
-                <div className="min-w-0 flex-1">
-                <div className="mb-1.5 flex flex-wrap items-center gap-1.5">
-                  {sequence != null && (
-                    <span className="rounded-md bg-muted px-1.5 py-0.5 font-mono text-[11px] font-semibold text-muted-foreground">
-                      #{sequence}
-                    </span>
-                  )}
-                  <span className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
-                    ID {account.id}
-                  </span>
-                  {account.plan_type && (
-                    <span className="rounded-md bg-primary/10 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
-                      {account.plan_type}
-                    </span>
-                  )}
-                </div>
-                <div className="flex items-start gap-1.5">
-                  <SheetTitle className="break-all text-[17px] leading-snug">
-                    {displayName}
-                  </SheetTitle>
-                  {copyableName && (
-                    <span className="mt-0.5">
-                      <CopyValueButton
-                        value={displayName}
-                        label={
-                          displayName.includes("@")
-                            ? t("accounts.detailCopyEmail")
-                            : t("common.copy")
-                        }
-                      />
-                    </span>
-                  )}
-                </div>
-                {account.effective_workspace_id ? (
-                  <div className="mt-1 space-y-0.5">
-                    <SheetDescription className="break-all font-mono text-[11px]">
-                      {account.workspace_id_override
-                        ? `${t("accounts.workspaceRouteBadge")}: `
-                        : ""}
-                      {account.effective_workspace_id}
-                    </SheetDescription>
-                    {account.workspace_id_override &&
-                    account.token_workspace_id &&
-                    account.token_workspace_id !==
-                      account.effective_workspace_id ? (
-                      <SheetDescription className="break-all font-mono text-[10px] text-muted-foreground/70">
-                        {t("accounts.tokenWorkspaceLabel")}:{" "}
-                        {account.token_workspace_id}
-                      </SheetDescription>
-                    ) : null}
-                  </div>
-                ) : (isGrok || isAntigravity) && account.email && account.name && account.email !== account.name ? (
-                  <SheetDescription className="mt-1 break-all text-[12px]">
-                    {account.email}
+        <AccountDetailContent
+          id={account.id}
+          sequence={sequence}
+          name={displayName}
+          plan={account.plan_type}
+          icon={
+            account.claude_api ? (
+              <ChannelLogo channel="claude" size={22} />
+            ) : account.kiro_api ? (
+              <ChannelLogo channel="kiro" size={22} />
+            ) : account.antigravity_api ? (
+              <ChannelLogo channel="antigravity" size={22} />
+            ) : account.grok_api ? (
+              <ChannelLogo channel="grok" size={22} />
+            ) : account.openai_responses_api ? (
+              <ModelLogo model="openai" variant="plain" size={22} />
+            ) : (
+              <ChannelLogo channel="codex" size={40} className="rounded-xl" />
+            )
+          }
+          titleAction={
+            copyableName && (
+              <span className="mt-0.5">
+                <CopyValueButton
+                  value={displayName}
+                  label={
+                    displayName.includes("@")
+                      ? t("accounts.detailCopyEmail")
+                      : t("common.copy")
+                  }
+                />
+              </span>
+            )
+          }
+          description={
+            account.effective_workspace_id ? (
+              <div className="mt-1 space-y-0.5">
+                <SheetDescription className="break-all font-mono text-[11px]">
+                  {account.workspace_id_override
+                    ? `${t("accounts.workspaceRouteBadge")}: `
+                    : ""}
+                  {account.effective_workspace_id}
+                </SheetDescription>
+                {account.workspace_id_override &&
+                account.token_workspace_id &&
+                account.token_workspace_id !==
+                  account.effective_workspace_id ? (
+                  <SheetDescription className="break-all font-mono text-[10px] text-muted-foreground/70">
+                    {t("accounts.tokenWorkspaceLabel")}:{" "}
+                    {account.token_workspace_id}
                   </SheetDescription>
-                ) : (
-                  <SheetDescription className="mt-1">
-                    {t("accounts.detailSubtitle")}
-                  </SheetDescription>
-                )}
-                </div>
+                ) : null}
               </div>
-              <div className="flex shrink-0 items-center gap-0.5">
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  disabled={!canGoPrev}
-                  onClick={onPrev}
-                  title={t("accounts.detailPrev")}
-                  aria-label={t("accounts.detailPrev")}
-                >
-                  <ChevronLeft className="size-4" />
-                </Button>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="icon-sm"
-                  disabled={!canGoNext}
-                  onClick={onNext}
-                  title={t("accounts.detailNext")}
-                  aria-label={t("accounts.detailNext")}
-                >
-                  <ChevronRight className="size-4" />
-                </Button>
-              </div>
+            ) : (isGrok || isAntigravity) &&
+              account.email &&
+              account.name &&
+              account.email !== account.name ? (
+              <SheetDescription className="mt-1 break-all text-[12px]">
+                {account.email}
+              </SheetDescription>
+            ) : (
+              <SheetDescription className="mt-1">
+                {t("accounts.detailSubtitle")}
+              </SheetDescription>
+            )
+          }
+          navigation={
+            <div className="flex shrink-0 items-center gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={!canGoPrev}
+                onClick={onPrev}
+                title={t("accounts.detailPrev")}
+                aria-label={t("accounts.detailPrev")}
+              >
+                <ChevronLeft className="size-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon-sm"
+                disabled={!canGoNext}
+                onClick={onNext}
+                title={t("accounts.detailNext")}
+                aria-label={t("accounts.detailNext")}
+              >
+                <ChevronRight className="size-4" />
+              </Button>
             </div>
-          </SheetHeader>
-
-          <SheetBody className="space-y-5">
+          }
+        >
+          <AccountDetailBody>
             <Section title={t("accounts.status")}>
               <div className="space-y-3 rounded-xl border border-border bg-card p-3">
                 <div className="flex flex-wrap items-center gap-2">
@@ -904,7 +850,7 @@ export default function AccountDetailSheet({
                 </div>
               </Section>
             )}
-          </SheetBody>
+          </AccountDetailBody>
 
           <SheetFooter>
             <div className="grid grid-cols-2 gap-2">
@@ -1039,7 +985,7 @@ export default function AccountDetailSheet({
               </Button>
             </div>
           </SheetFooter>
-        </SheetContent>
+        </AccountDetailContent>
       ) : null}
     </Sheet>
   );

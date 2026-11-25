@@ -1,18 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import { Clock3, Gauge, RefreshCw, RotateCcw, Search, Ticket } from 'lucide-react'
+import { RefreshCw, Search } from 'lucide-react'
 import { AdminAPIError, api, type PublicKeyUsageAccount } from '../api'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
-import { Badge } from '@/components/ui/badge'
-import { AccountCardSurface } from './AccountCardSurface'
-import AccountUsageBar from './AccountUsageBar'
-import PlanBadge from './AccountPlanBadge'
-import StatusBadge from './StatusBadge'
+import KeyUsageAccountCard from './KeyUsageAccountCard'
 import StateShell from './StateShell'
 import { getErrorMessage } from '../utils/error'
-import { formatBeijingTime, formatRelativeTime } from '../utils/time'
 import { useConfirmDialog } from '../hooks/useConfirmDialog'
 import { createUUID } from '../lib/uuid'
 
@@ -43,8 +38,9 @@ export default function KeyUsageAccounts({ apiKey }: { apiKey: string }) {
       setGroup(current => current === 'all' || current === 'ungrouped' || data.groups.some(g => String(g.id) === current) ? current : 'all')
     }).catch(e => {
       if (controller.signal.aborted) return
-      if (e instanceof AdminAPIError && e.status === 404) {
-        setDisabled(true)
+      if (e instanceof AdminAPIError && [401, 403, 404].includes(e.status)) {
+        setDisabled(e.status === 404)
+        if (e.status !== 404) setError(getErrorMessage(e))
         setAccounts([])
         setGroups([])
       } else setError(getErrorMessage(e))
@@ -94,30 +90,10 @@ export default function KeyUsageAccounts({ apiKey }: { apiKey: string }) {
     <StateShell variant="section" loading={loading && accounts.length === 0} error={accounts.length === 0 ? error : undefined}
       isEmpty={disabled || (!loading && visible.length === 0)} emptyTitle={t(disabled ? 'keyUsageAccounts.disabled' : 'keyUsageAccounts.empty')}
       emptyDescription={t(disabled ? 'keyUsageAccounts.disabledHint' : 'keyUsageAccounts.emptyHint')} onRetry={() => setGeneration(value => value + 1)}>
-      <div className="codex-account-grid">{visible.map(account => {
-        const displayName = account.email || account.name || `#${account.id}`
-        const updated = [account.usage_updated_at_5h, account.usage_updated_at_7d].filter((value): value is string => !!value && Number.isFinite(Date.parse(value))).sort((a, b) => Date.parse(b) - Date.parse(a))[0]
-        return <AccountCardSurface key={account.id} data-state={account.status} aria-label={account.name || displayName}>
-          <header className="codex-account-card__header">
-            <div className="codex-account-card__identity">
-              <div className="codex-account-card__avatar" aria-hidden="true">{displayName[0].toUpperCase()}</div>
-              <div className="min-w-0 flex-1"><div className="codex-account-card__name truncate" title={displayName}>{displayName}</div>{account.name && account.name !== displayName && <p className="mt-1 truncate text-xs text-muted-foreground" title={account.name}>{account.name}</p>}</div>
-              <span className="codex-account-card__sequence">{t('keyUsageAccounts.idLabel', { id: account.id })}</span>
-            </div>
-            <div className="codex-account-card__topline"><PlanBadge planType={account.plan_type} /><StatusBadge status={account.status} /></div>
-          </header>
-          <div className="codex-account-card__body"><section className="codex-account-card__usage">
-            <div className="codex-account-card__section-title"><span className="inline-flex items-center gap-1.5"><Gauge className="size-3.5 text-primary/80" />{t('accounts.cardUsageTitle')}</span></div>
-            <div className="account-usage-cell"><div className="account-usage-windows"><AccountUsageBar label="5h" pct={account.usage_percent_5h} resetAt={account.reset_5h_at} /><AccountUsageBar label={account.long_window_seconds ? `${Math.round(account.long_window_seconds / 86400)}d` : '7d'} pct={account.usage_percent_7d} resetAt={account.reset_7d_at} /></div></div>
-          </section></div>
-          <div className="codex-account-card__metadata"><div className="codex-account-card__tags">{account.group_ids.length ? account.group_ids.map(id => <Badge key={id} variant="secondary">{groups.find(item => item.id === id)?.name || t('keyUsageAccounts.groupLabel', { id })}</Badge>) : <Badge variant="outline">{t('keyUsageAccounts.ungrouped')}</Badge>}</div></div>
-          <dl className="codex-account-card__timestamps"><div><dt><Clock3 className="size-3 text-muted-foreground/75" />{t('keyUsageAccounts.updated')}</dt><dd><time dateTime={updated} title={updated ? formatBeijingTime(updated) : undefined}>{updated ? formatRelativeTime(updated) : t('keyUsageAccounts.unknown')}</time></dd></div></dl>
-          <footer className="codex-account-card__actions codex-account-card__actions--portal">
-            <span className="inline-flex items-center gap-1.5 px-2 text-xs text-muted-foreground"><Ticket className="size-3.5" />{t('keyUsageAccounts.cardCount', { value: account.reset_credits ?? t('keyUsageAccounts.unknown') })}</span>
-            {account.reset_allowed && <Button variant="ghost" size="sm" onClick={() => void redeem(account)} disabled={busy !== null || account.reset_credits === 0}><RotateCcw className={`size-3.5 ${busy === account.id ? 'animate-spin' : ''}`} />{t(busy === account.id ? 'keyUsageAccounts.pending' : 'keyUsageAccounts.redeem')}</Button>}
-          </footer>
-        </AccountCardSurface>
-      })}</div>
+      <div className="codex-account-grid">{visible.map((account, index) =>
+        <KeyUsageAccountCard key={account.id} apiKey={apiKey} onRefresh={() => setGeneration(value => value + 1)} account={account} sequence={index + 1} groups={groups}
+          busy={busy !== null} pending={busy === account.id} onRedeem={() => void redeem(account)} />
+      )}</div>
     </StateShell>
   </section>
 }

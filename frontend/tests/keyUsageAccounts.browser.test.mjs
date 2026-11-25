@@ -108,7 +108,7 @@ test('key permissions retain an in-flight save across edit tabs', async t => {
   ])
 })
 
-test('portal filters groups, confirms redemption and uses a UUID on HTTP', async t => {
+test('portal keeps groups read-only, scopes reauthorization and confirms reset credits on HTTP', async t => {
   const page = await browser.newPage()
   page.setDefaultTimeout(5000)
   const errors = []
@@ -127,11 +127,13 @@ test('portal filters groups, confirms redemption and uses a UUID on HTTP', async
       window.__calls.push({ path, method: options.method || 'GET', auth: headers.get('Authorization'), idempotency: headers.get('Idempotency-Key'), body: options.body })
       let body = { view_enabled: true, reset_enabled: true }
       if (path === '/api/key-usage/accounts') body = { accounts: [
-        { id: 1, name: '账号甲', email: 'a@example.test', plan_type: 'plus', status: 'active', group_ids: [1], usage_percent_5h: 25, usage_percent_7d: 10, long_window_seconds: 2592000, reset_credits: 2, reset_allowed: true },
+        { id: 1, name: '账号甲', email: 'a@example.test', plan_type: 'plus', status: 'active', group_ids: [1], usage_percent_5h: 25, usage_percent_7d: 10, long_window_seconds: 2592000, requests_5h: 12, requests_7d: 301, user_billed_5h: 0.43, user_billed_7d: 8.24, health_tier: 'healthy', active_requests: 1, dynamic_concurrency_limit: 4, created_at: '2026-01-02T12:00:00Z', reset_credits: 2, reset_allowed: true, reauth_allowed: true },
         { id: 2, name: '账号乙', email: '', plan_type: 'plus', status: 'active', group_ids: [2], usage_percent_5h: 60, usage_percent_7d: null, reset_credits: 0, reset_allowed: true },
-        { id: 3, name: '账号丙', email: '', plan_type: 'plus', status: 'active', group_ids: [1], usage_percent_5h: null, usage_percent_7d: null, reset_credits: 1, reset_allowed: false },
+        { id: 3, name: '账号丙', email: '', plan_type: 'plus', status: 'active', group_ids: [1], usage_percent_5h: null, usage_percent_7d: null, reset_credits: 1, reset_allowed: false, reauth_allowed: true },
       ], groups: [{ id: 1, name: '一组' }, { id: 2, name: '二组' }], reset_enabled: true }
       if (options.method === 'PUT') body = JSON.parse(options.body)
+      if (path === '/api/key-usage/accounts/3/reauth/start') body = { session_id: 'session-3', auth_url: 'https://example.invalid/fixture' }
+      if (path === '/api/key-usage/accounts/3/reauth/complete') body = { message: 'ok' }
       if (path.endsWith('/reset-credits')) body = { message: 'ok', usage_refreshed: true }
       return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } })
     }
@@ -142,6 +144,33 @@ test('portal filters groups, confirms redemption and uses a UUID on HTTP', async
   await page.getByRole('progressbar', { name: '30d' }).waitFor()
   assert.equal(await page.getByRole('progressbar', { name: '30d' }).getAttribute('aria-valuenow'), '10')
   assert.equal(await page.locator('.codex-account-card').count(), 3)
+  const firstCard = page.getByRole('article', { name: '账号甲' })
+  assert.match(await firstCard.innerText(), /此 Key 请求数/)
+  assert.match(await firstCard.innerText(), /7d: 301/)
+  assert.match(await firstCard.innerText(), /7d: \$8\.24/)
+  assert.equal(await firstCard.locator('[data-health="healthy"]').count(), 1)
+  assert.equal(await firstCard.locator('time[datetime="2026-01-02T12:00:00Z"]').count(), 1)
+  assert.equal(await page.getByRole('article', { name: '账号丙' }).getByRole('button', { name: '使用重置卡' }).count(), 0)
+  assert.equal(await page.getByRole('article', { name: '账号乙' }).getByRole('button', { name: '重新授权', exact: true }).count(), 0)
+  const thirdCard = page.getByRole('article', { name: '账号丙' })
+  await thirdCard.getByRole('button', { name: '重新授权', exact: true }).click()
+  const reauth = page.getByRole('dialog')
+  assert.equal(await reauth.getByRole('combobox').count(), 0, 'no editable group or proxy')
+  await reauth.getByRole('button', { name: '生成授权链接' }).click()
+  await reauth.getByRole('textbox').fill('http://localhost/fixture?state=fixture-state&code=fixture-code')
+  await reauth.getByRole('button', { name: '更新授权参数' }).click()
+  await reauth.getByText('OAuth 授权参数已更新', { exact: true }).waitFor()
+  const [start, complete] = (await page.evaluate(() => window.__calls)).filter(call => call.path.includes('/reauth/'))
+  assert.equal(start.path, '/api/key-usage/accounts/3/reauth/start')
+  assert.equal(complete.path, '/api/key-usage/accounts/3/reauth/complete')
+  assert.equal(complete.auth, 'Bearer fixture-key')
+  assert.deepEqual(JSON.parse(complete.body), { session_id: 'session-3', state: 'fixture-state', code: 'fixture-code' })
+  await page.keyboard.press('Escape')
+  await firstCard.getByRole('button', { name: '详情' }).click()
+  const details = page.getByRole('dialog', { name: 'a@example.test' })
+  await details.getByRole('progressbar', { name: '30d' }).waitFor()
+  assert.match(await details.innerText(), /7d: \$8\.24/)
+  await page.keyboard.press('Escape')
   assert.equal(await page.getByText('解除待核实').count(), 0)
   await page.getByRole('switch').first().click()
   await page.getByText('已保存', { exact: true }).waitFor()
@@ -157,12 +186,20 @@ test('portal filters groups, confirms redemption and uses a UUID on HTTP', async
   await page.getByRole('dialog').getByRole('button', { name: '使用重置卡' }).click()
   await page.getByText('重置请求已完成').waitFor()
   const calls = await page.evaluate(() => window.__calls)
-  const reset = calls.find(call => call.method === 'POST')
+  assert.deepEqual(calls.filter(call => call.path.startsWith('/api/admin/') && !call.path.includes('/key-usage-account-permissions/')), [], 'account cards must not call management endpoints')
+  const reset = calls.find(call => call.method === 'POST' && call.path.endsWith('/reset-credits'))
   assert.equal(reset.path, '/api/key-usage/accounts/1/reset-credits')
   assert.equal(reset.auth, 'Bearer fixture-key')
   assert.match(reset.idempotency, /^[0-9a-f-]{36}$/)
   await page.screenshot({ path: path.join(artifactDir, 'account-cards-desktop.png'), fullPage: true })
+  await page.emulateMedia({ reducedMotion: 'reduce' })
   await page.setViewportSize({ width: 390, height: 844 })
+  const actions = await firstCard.locator('footer button').evaluateAll(buttons => buttons.map(button => {
+    const {top, width, height} = button.getBoundingClientRect()
+    return {top, width, height}
+  }))
+  assert.equal(actions.length, 3)
+  assert.ok(actions.every(item => item.top === actions[0].top && Math.abs(item.width - actions[0].width) <= 1 && item.height >= 44), JSON.stringify(actions))
   await page.screenshot({ path: path.join(artifactDir, 'account-cards-mobile.png'), fullPage: true })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)
   await page.evaluate(() => document.documentElement.classList.add('dark'))

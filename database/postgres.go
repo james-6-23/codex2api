@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -8319,6 +8320,15 @@ func (db *DB) UpdateOpenAIResponsesAccount(ctx context.Context, id int64, name s
 }
 
 func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, credentials map[string]interface{}, proxyURL string) error {
+	return db.updateOAuthAccountCredentials(ctx, id, credentials, proxyURL, nil)
+}
+
+// UpdateScopedOAuthCredentials refuses to overwrite a changed authorization snapshot.
+func (db *DB) UpdateScopedOAuthCredentials(ctx context.Context, expected *AccountRow, credentials map[string]interface{}) error {
+	return db.updateOAuthAccountCredentials(ctx, expected.ID, credentials, expected.ProxyURL, expected)
+}
+
+func (db *DB) updateOAuthAccountCredentials(ctx context.Context, id int64, credentials map[string]interface{}, proxyURL string, expected *AccountRow) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -8326,16 +8336,25 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	defer tx.Rollback()
 
 	selectQuery := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+	args := []interface{}{id}
+	if expected != nil {
+		selectQuery += ` AND platform = $2 AND type = $3 AND COALESCE(proxy_url,'') = $4`
+		args = append(args, expected.Platform, expected.Type, expected.ProxyURL)
+	}
 	if !db.isSQLite() {
 		selectQuery += ` FOR UPDATE`
 	}
 
 	var currentRaw interface{}
-	if err := tx.QueryRowContext(ctx, selectQuery, id).Scan(&currentRaw); err != nil {
+	if err := tx.QueryRowContext(ctx, selectQuery, args...).Scan(&currentRaw); err != nil {
 		return err
 	}
 
-	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
+	current := decodeCredentials(currentRaw)
+	if expected != nil && !reflect.DeepEqual(current, expected.Credentials) {
+		return sql.ErrNoRows
+	}
+	merged := mergeCredentialMaps(current, credentials)
 	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
@@ -8344,6 +8363,13 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	updateQuery := `UPDATE accounts SET credentials = $1, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
 	if !db.isSQLite() {
 		updateQuery = `UPDATE accounts SET credentials = $1::jsonb, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+	}
+	// Recover only an existing authentication error under the same row lock.
+	// A public action must not revive a deleted account or undo rate limiting.
+	if expected != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='active', error_message='', cooldown_reason='', cooldown_until=NULL WHERE id=$1 AND (status='error' OR cooldown_reason='unauthorized')`, id); err != nil {
+			return err
+		}
 	}
 	res, err := tx.ExecContext(ctx, updateQuery, credJSON, proxyURL, id)
 	if err != nil {

@@ -1,5 +1,8 @@
+import AccountReauthorizationForm from "../components/AccountReauthorizationForm";
+import { parseOAuthCallbackParams } from "../utils/oauthCallback";
+import { copyTextToClipboard } from "../utils/copyTextToClipboard";
 import { getAccountQuotaPausePresentation } from "@/lib/accountQuotaPause";
-import { AccountCardSurface } from "../components/AccountCardSurface";
+import { AccountCardSurface, AccountCardHeader, AccountCardBody, AccountCardDetailLink, AccountCardMetric, AccountCardTimestamp } from "../components/AccountCardSurface";
 import AccountUsageBar from "../components/AccountUsageBar";
 import APIKeyMultiSelect from "../components/APIKeyMultiSelect";
 import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
@@ -920,24 +923,6 @@ function showsAccountHrefLink(account: AccountRow): boolean {
       account.grok_api ||
       account.account_href?.trim(),
   );
-}
-
-function parseOAuthCallbackParams(rawUrl: string): { code: string; state: string } {
-  const raw = rawUrl.trim();
-  try {
-    const url = new URL(raw);
-    return {
-      code: url.searchParams.get("code") ?? "",
-      state: url.searchParams.get("state") ?? "",
-    };
-  } catch {
-    const qs = raw.includes("?") ? raw.split("?")[1] : raw;
-    const params = new URLSearchParams(qs);
-    return {
-      code: params.get("code") ?? "",
-      state: params.get("state") ?? "",
-    };
-  }
 }
 
 function formatDispatchCountLimitInput(value?: number | null): string {
@@ -9873,102 +9858,15 @@ export default function Accounts() {
                     </div>
                   </div>
                 ) : editTab === "account" && isOAuthAccount(editingAccount) ? (
-                  <div className="space-y-4">
-                    <div className="rounded-xl border border-border/80 bg-muted/30 p-4.5 text-sm text-muted-foreground">
-                      <p className="font-semibold text-foreground mb-1">
-                        {t("accounts.oauthEditIntroTitle")}
-                      </p>
-                      <p>{t("accounts.oauthEditIntroDesc")}</p>
-                    </div>
-                    <div>
-                      <label className="block mb-2 text-xs font-semibold text-muted-foreground">
-                        {t("accounts.oauthCurrentAccount")}
-                      </label>
-                      <div className="rounded-lg border border-dashed border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
-                        {formatAccountName(editingAccount)}
-                      </div>
-                    </div>
-                    {editOAuthStep === "generate" ? (
-                      <>
-                        <div className="rounded-xl border border-border/80 bg-muted/30 p-4.5 text-sm text-muted-foreground">
-                          <p className="font-semibold text-foreground mb-1">
-                            {t("accounts.oauthStep1Title")}
-                          </p>
-                          <p>{t("accounts.oauthStep1Desc")}</p>
-                        </div>
-                        {renderProxyInput({
+                  <AccountReauthorizationForm accountName={formatAccountName(editingAccount)} step={editOAuthStep}
+                    session={editOAuthSession} callbackUrl={editOAuthCallbackUrl} onCallbackChange={setEditOAuthCallbackUrl}
+                    onCopy={handleEditOAuthCopyLink} onRestart={handleEditOAuthRestart} busy={editOAuthGenerating}
+                    extraSettings={editOAuthStep === "generate" && renderProxyInput({
                           value: editOAuthProxyUrl,
                           label: t("accounts.oauthProxyUrl"),
                           placeholder: t("accounts.oauthProxyUrlPlaceholder"),
                           onChange: setEditOAuthProxyUrl,
-                        })}
-                      </>
-                    ) : (
-                      <>
-                        <div className="rounded-xl border border-border/80 bg-muted/30 p-4.5 text-sm text-muted-foreground">
-                          <p className="font-semibold text-foreground mb-1">
-                            {t("accounts.oauthStep2Title")}
-                          </p>
-                          <p>{t("accounts.oauthStep2Desc")}</p>
-                        </div>
-                        {editOAuthSession && (
-                          <div className="rounded-xl border border-primary/30 bg-primary/5 p-4.5">
-                            <p className="text-xs font-semibold text-muted-foreground mb-2">
-                              {t("accounts.oauthAuthLinkLabel")}
-                            </p>
-                            <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:items-start">
-                              <a
-                                href={editOAuthSession.auth_url}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                title={editOAuthSession.auth_url}
-                                className="inline-flex min-h-10 min-w-0 max-w-full flex-1 items-start gap-1.5 overflow-hidden rounded-lg border bg-background px-3 py-2 text-sm font-semibold text-primary hover:bg-muted/50"
-                              >
-                                <ExternalLink className="mt-0.5 size-3.5 shrink-0" />
-                                <span className="block min-w-0 flex-1 break-all leading-relaxed [overflow-wrap:anywhere]">
-                                  {editOAuthSession.auth_url}
-                                </span>
-                              </a>
-                              <Button
-                                type="button"
-                                variant="outline"
-                                onClick={() => void handleEditOAuthCopyLink()}
-                                className="w-full shrink-0 sm:w-auto"
-                              >
-                                <Copy className="size-4" />
-                                {t("common.copy")}
-                              </Button>
-                            </div>
-                          </div>
-                        )}
-                        <div>
-                          <label className="block mb-2 text-xs font-semibold text-muted-foreground">
-                            {t("accounts.oauthCallbackUrlLabel")}
-                          </label>
-                          <Input
-                            placeholder={t("accounts.oauthCallbackUrlPlaceholder")}
-                            value={editOAuthCallbackUrl}
-                            onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                              setEditOAuthCallbackUrl(event.target.value)
-                            }
-                          />
-                          <p className="mt-1.5 text-xs text-muted-foreground">
-                            {t("accounts.oauthCallbackUrlHint")}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => void handleEditOAuthRestart()}
-                          disabled={editOAuthGenerating}
-                          className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
-                        >
-                          {editOAuthGenerating
-                            ? t("accounts.oauthGenerating")
-                            : t("accounts.oauthRestart")}
-                        </button>
-                      </>
-                    )}
-                  </div>
+                        })} />
                 ) : (
                   <div className="space-y-6">
                     {/* 分组 1: 调度与并发加权 */}
@@ -12629,37 +12527,6 @@ function formatJSONText(text: string) {
   }
 }
 
-async function copyTextToClipboard(text: string) {
-  if (window.isSecureContext && navigator.clipboard?.writeText) {
-    try {
-      await navigator.clipboard.writeText(text);
-      return;
-    } catch {
-      // Fall back for browsers that block clipboard writes.
-    }
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "true");
-  textarea.style.position = "fixed";
-  textarea.style.top = "0";
-  textarea.style.left = "0";
-  textarea.style.width = "1px";
-  textarea.style.height = "1px";
-  textarea.style.opacity = "0";
-  textarea.style.pointerEvents = "none";
-  document.body.appendChild(textarea);
-  textarea.focus({ preventScroll: true });
-  textarea.select();
-  textarea.setSelectionRange(0, text.length);
-  const copied = document.execCommand("copy");
-  document.body.removeChild(textarea);
-  if (!copied) {
-    throw new Error("copy failed");
-  }
-}
-
 function filterExistingAPIKeyIDs(
   selected: number[],
   apiKeys: APIKeyRow[],
@@ -13954,8 +13821,8 @@ function AccountMobileCard({
           <div className="account-state-overlay__scrim absolute inset-0" />
         </div>
       )}
-      <header className="codex-account-card__header">
-        <div className="codex-account-card__identity">
+      <AccountCardHeader
+        identity={<>
           <button
             type="button"
             className="codex-account-card__avatar"
@@ -14019,8 +13886,8 @@ function AccountMobileCard({
               aria-label={fullName}
             />
           </label>
-        </div>
-        <div className="codex-account-card__topline">
+        </>}
+        topline={<>
           <div className="flex min-w-0 flex-wrap items-center gap-2">
             {showColumn("plan") && (
               <PlanBadge
@@ -14115,8 +13982,8 @@ function AccountMobileCard({
               <AccountConcurrencyBadge account={account} />
             </div>
           ) : null}
-        </div>
-      </header>
+        </>}
+      />
 
       <div className="codex-account-card__notices">
         {overlayKind === "overload" && (
@@ -14145,74 +14012,57 @@ function AccountMobileCard({
         )}
       </div>
 
-      {(showUsage || showMetrics) && (
-        <div className="codex-account-card__body">
-          {showUsage && (
-            <section className="codex-account-card__usage" aria-label={t("accounts.cardUsageTitle")}>
-              <div className="codex-account-card__section-title">
-                <span className="inline-flex items-center gap-1.5 font-medium">
-                  <Gauge className="size-3.5 text-primary/80" />
-                  {t("accounts.cardUsageTitle")}
+      <AccountCardBody
+        usageAction={
+          <AccountCardDetailLink onClick={onUsage} title={t("accounts.usageDetail")} />
+        }
+        usage={showUsage && (
+          <>
+            <UsageCell account={account} wide onRefreshed={onUsageRefreshed} />
+            <div
+              className="codex-account-card__health"
+              title={t("accounts.healthSummary", {
+                health: formatHealthTier(account.health_tier, t),
+                score: Math.round(getDispatchScore(account)),
+                concurrency: account.dynamic_concurrency_limit ?? "-",
+              })}
+            >
+              <div className="mb-2 flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted-foreground">
+                <span>{t("accounts.healthBarLabel")}</span>
+                <span className="codex-account-card__health-tier" data-health={account.health_tier}>
+                  {formatHealthTier(account.health_tier, t)}
                 </span>
-                <button
-                  type="button"
-                  className="codex-account-card__usage-link"
-                  onClick={onUsage}
-                  title={t("accounts.usageDetail")}
-                >
-                  {t("accounts.cardDetails")}
-                  <ExternalLink className="size-3" />
-                </button>
               </div>
-              <UsageCell account={account} wide onRefreshed={onUsageRefreshed} />
-              <div
-                className="codex-account-card__health"
-                title={t("accounts.healthSummary", {
-                  health: formatHealthTier(account.health_tier, t),
-                  score: Math.round(getDispatchScore(account)),
-                  concurrency: account.dynamic_concurrency_limit ?? "-",
-                })}
-              >
-                <div className="mb-2 flex flex-wrap items-center justify-between gap-1 text-[11px] text-muted-foreground">
-                  <span>{t("accounts.healthBarLabel")}</span>
-                  <span className="codex-account-card__health-tier" data-health={account.health_tier}>
-                    {formatHealthTier(account.health_tier, t)}
-                  </span>
-                </div>
-                <AccountHealthBar buckets={healthBuckets} />
-                <AccountIntelligenceBar bar={intelligenceBar} accountID={account.id} accountName={account.email || account.name} error={intelligenceError} />
-              </div>
-            </section>
-          )}
-
-          {showMetrics && (
-            <div className="codex-account-card__metrics-slot">
-              <div className="codex-account-card__metrics">
-                {showColumn("requests") && (
-                  <AccountCardMetric
-                    label={t("accounts.requests")}
-                    icon={<Activity className="size-3.5 text-muted-foreground/90" />}
-                  >
-                    <RequestCountPills account={account} compact variant="card" />
-                  </AccountCardMetric>
-                )}
-                {showColumn("billed") && (
-                  <AccountCardMetric
-                    label={t("accounts.billed")}
-                    icon={<Wallet className="size-3.5 text-muted-foreground/90" />}
-                  >
-                    <BilledCell
-                      account={account}
-                      channelMonitorBilling={channelMonitorBilling}
-                      onOpenOfficial={onOpenOfficialUsage}
-                    />
-                  </AccountCardMetric>
-                )}
-              </div>
+              <AccountHealthBar buckets={healthBuckets} />
+              <AccountIntelligenceBar bar={intelligenceBar} accountID={account.id} accountName={account.email || account.name} error={intelligenceError} />
             </div>
-          )}
-        </div>
-      )}
+          </>
+        )}
+        metrics={showMetrics && (
+          <>
+            {showColumn("requests") && (
+              <AccountCardMetric
+                label={t("accounts.requests")}
+                icon={<Activity className="size-3.5 text-muted-foreground/90" />}
+              >
+                <RequestCountPills account={account} compact variant="card" />
+              </AccountCardMetric>
+            )}
+            {showColumn("billed") && (
+              <AccountCardMetric
+                label={t("accounts.billed")}
+                icon={<Wallet className="size-3.5 text-muted-foreground/90" />}
+              >
+                <BilledCell
+                  account={account}
+                  channelMonitorBilling={channelMonitorBilling}
+                  onOpenOfficial={onOpenOfficialUsage}
+                />
+              </AccountCardMetric>
+            )}
+          </>
+        )}
+      />
 
       {showMetadata && (
         <div className="codex-account-card__metadata">
@@ -14242,45 +14092,13 @@ function AccountMobileCard({
       {(showColumn("updatedAt") || showColumn("importTime")) && (
         <dl className="codex-account-card__timestamps">
           {showColumn("updatedAt") && (
-            <div>
-              <dt>
-                <RefreshCw className="size-3 text-muted-foreground/75" />
-                <span>{t("accounts.updatedAt")}</span>
-              </dt>
-              <dd>
-                <time dateTime={account.updated_at} title={formatBeijingTime(account.updated_at)}>
-                  {formatRelativeTime(account.updated_at)}
-                </time>
-              </dd>
-            </div>
+            <AccountCardTimestamp icon={<RefreshCw className="size-3 text-muted-foreground/75" />} label={t("accounts.updatedAt")} value={account.updated_at} />
           )}
           {showColumn("updatedAt") && lazyMode && (
-            <div>
-              <dt>
-                <Clock className="size-3 text-muted-foreground/75" />
-                <span>{t("accounts.usageUpdatedAtShort")}</span>
-              </dt>
-              <dd>
-                {account.codex_usage_updated_at ? (
-                  <time dateTime={account.codex_usage_updated_at} title={formatBeijingTime(account.codex_usage_updated_at)}>
-                    {formatRelativeTime(account.codex_usage_updated_at)}
-                  </time>
-                ) : t("accounts.noUsageUpdatedAt")}
-              </dd>
-            </div>
+            <AccountCardTimestamp icon={<Clock className="size-3 text-muted-foreground/75" />} label={t("accounts.usageUpdatedAtShort")} value={account.codex_usage_updated_at} fallback={t("accounts.noUsageUpdatedAt")} />
           )}
           {showColumn("importTime") && (
-            <div>
-              <dt>
-                <FolderOpen className="size-3 text-muted-foreground/75" />
-                <span>{t("accounts.importTime")}</span>
-              </dt>
-              <dd>
-                <time dateTime={account.created_at} title={formatBeijingTime(account.created_at)}>
-                  {formatBeijingTime(account.created_at).slice(0, 10)}
-                </time>
-              </dd>
-            </div>
+            <AccountCardTimestamp icon={<FolderOpen className="size-3 text-muted-foreground/75" />} label={t("accounts.importTime")} value={account.created_at} dateOnly />
           )}
         </dl>
       )}
@@ -14323,26 +14141,6 @@ function AccountMobileCard({
         />
       </footer>
     </AccountCardSurface>
-  );
-}
-
-function AccountCardMetric({
-  label,
-  icon,
-  children,
-}: {
-  label: string;
-  icon: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <div className="codex-account-card__metric">
-      <div className="codex-account-card__metric-label">
-        {icon}
-        <span>{label}</span>
-      </div>
-      <div className="codex-account-card__metric-value">{children}</div>
-    </div>
   );
 }
 

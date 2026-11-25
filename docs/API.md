@@ -2893,11 +2893,13 @@ curl -X DELETE http://localhost:8080/api/admin/images/jobs/1 \
 
 ### API Key 自助账号用量与重置卡
 
-管理员可在 API Key 页面设置全局账号查看、重置权限，并选择单个 Key 进一步收紧。两个全局开关默认关闭；Key 的默认设置继承全局，不能突破全局限制。查看关闭时重置也不可用。
+管理员可在 API Key 页面设置全局账号查看、重置权限，并选择单个 Key 进一步收紧。两个全局开关默认关闭；Key 的默认设置继承全局，不能突破全局限制。查看关闭时重置和重新授权都不可用。开启查看后，持有效 Key 的用户可以为授权范围内、能验证原上游用户及工作区的 OpenAI OAuth 账号重新授权；关闭重置开关不会关闭重新授权。
 
 - `GET /api/admin/key-usage-account-permissions/:id` / `PUT /api/admin/key-usage-account-permissions/:id`：需要管理鉴权；`id=0` 为全局，其他值为 API Key ID。PUT 的 JSON 为 `{"view_enabled":true,"reset_enabled":false}`，两个字段均必填。
-- `GET /api/key-usage/accounts`：使用自助页的 API Key 鉴权，返回当前允许范围内的账号、套餐、状态、用量窗口、更新时间和缓存的重置卡数量；不返回上游凭据、代理或自定义请求头。未装载到运行池的账号显示为 `unavailable`，用量未知且不能重置；当这类账号的渠道或套餐权限无法确定时不予返回。已删除账号不在列表中。页面或查看权限关闭返回 404。
+- `GET /api/key-usage/accounts`：使用自助页的 API Key 鉴权，返回当前允许范围内的账号、套餐、状态、用量窗口、导入和更新时间，以及缓存的重置卡数量。账号在运行池中时还可返回健康档位、并发、最近使用时间及可用积分信息。`requests_5h` / `requests_7d` 和 `user_billed_5h` / `user_billed_7d` 是当前 Key 在该账号上最近 5 小时 / 7 天的请求数和费用，不是账号全部用户的统计；不返回上游凭据、代理或自定义请求头。未装载到运行池的账号显示为 `unavailable`，用量未知且不能重置；当这类账号的渠道或套餐权限无法确定时不予返回。已删除账号不在列表中。页面或查看权限关闭返回 404。
 - `POST /api/key-usage/accounts/:id/reset-credits`：使用同一 API Key 鉴权，必须传入每次操作唯一的 `Idempotency-Key` UUID；同一请求 ID 再次提交返回 409，不重复调用上游。需要查看和重置权限，并重新校验 Key、账号分组、渠道、套餐和账号反向授权。过期 Key 不能重置。只允许支持的 Codex 账号。操作消耗该账号的上游重置卡，会影响共享同一工作区的其他用户；近期已提交重置的工作区会暂时拒绝重复操作。网络异常后请先检查账号状态，勿盲目重试。
+- `POST /api/key-usage/accounts/:id/reauth/start`：发送 `{}`，为 `reauth_allowed: true` 的账号生成一次性授权链接，返回 `auth_url` 和 `session_id`。需要有效且可查看当前账号的 Key，与重置卡开关无关。
+- `POST /api/key-usage/accounts/:id/reauth/complete`：用同一 Key 向同一账号提交 `session_id`、回调里的 `code` 和 `state`。只允许重新授权原来的上游用户和工作区，不支持换绑、导入新账号或传入代理。自助页不提供分组、调度、代理等管理设置写入接口。
 
 自助账号列表的 5h/长窗口是账号运行态缓存，可能滞后；未知值为 `null`，不是 0。`long_window_seconds` 给出长窗口的实际上游周期（未知为 0）；部分套餐可能是月窗口，而非 7 天。API Key 的金额与请求预算和上游账号用量是不同的额度。空的 API Key 分组限制表示不限分组；公开账号信息之前，管理员应检查 Key 的授权范围。
 

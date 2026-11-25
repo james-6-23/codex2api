@@ -8,6 +8,10 @@
     }
   },
   "keyUsageAccounts": {
+    "reauthorize": "重新授權",
+    "keyRequests": "此 Key 請求數",
+    "keyCost": "此 Key 費用",
+    "lastActive": "最近使用",
     "group": "群組",
     "allGroups": "全部群組",
     "ungrouped": "未分組",
