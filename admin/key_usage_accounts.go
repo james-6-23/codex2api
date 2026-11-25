@@ -93,6 +93,14 @@ func (h *Handler) keyUsageAccountAllowed(row *database.APIKeyRow, account *auth.
 	return true
 }
 
+// Keep the public list and scoped actions on the same visibility policy.
+func (h *Handler) keyUsageAccountVisible(key *database.APIKeyRow, row database.KeyUsageAccountAccess, account *auth.Account, groups []int64) bool {
+	if account == nil {
+		return keyUsageUnloadedAccountAllowed(key, row, groups)
+	}
+	return h.keyUsageAccountAllowed(key, account, groups, row.AllowedAPIKeyIDs)
+}
+
 func keyUsageAccountScopeAllowed(row *database.APIKeyRow, groups, allowedKeys []int64) bool {
 	if row == nil {
 		return false
@@ -207,6 +215,17 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 		writePublicKeyUsageInternalError(c, err)
 		return
 	}
+	// Use the caller's rolling usage, not the admin account-wide costs or counters.
+	usage5h, err := h.db.GetAPIKeyAccountWindowUsage(ctx, row.ID, 5*time.Hour)
+	if err != nil {
+		writePublicKeyUsageInternalError(c, err)
+		return
+	}
+	usage7d, err := h.db.GetAPIKeyAccountWindowUsage(ctx, row.ID, 7*24*time.Hour)
+	if err != nil {
+		writePublicKeyUsageInternalError(c, err)
+		return
+	}
 	visibleGroups := make(map[int64]bool)
 	items := make([]gin.H, 0)
 	runtime := make(map[int64]*auth.Account)
@@ -222,10 +241,7 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	for _, id := range ids {
 		accountRow, account := rowsByID[id], runtime[id]
-		if account == nil && !keyUsageUnloadedAccountAllowed(row, accountRow, memberships[id]) {
-			continue
-		}
-		if account != nil && !h.keyUsageAccountAllowed(row, account, memberships[id], accountRow.AllowedAPIKeyIDs) {
+		if !h.keyUsageAccountVisible(row, accountRow, account, memberships[id]) {
 			continue
 		}
 		groups := make([]int64, 0)
@@ -244,7 +260,12 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 		for _, groupID := range groups {
 			visibleGroups[groupID] = true
 		}
-		item := gin.H{"id": id, "name": accountRow.Name, "email": accountRow.Email, "plan_type": accountRow.PlanType, "status": "unavailable", "group_ids": groups, "reset_allowed": false, "usage_percent_5h": nil, "usage_percent_7d": nil}
+		item := gin.H{"id": id, "name": accountRow.Name, "email": accountRow.Email, "plan_type": accountRow.PlanType, "status": "unavailable", "group_ids": groups, "reauth_allowed": !row.IsExpired(time.Now()) && scopedIdentity(accountRow).valid(), "reset_allowed": false, "usage_percent_5h": nil, "usage_percent_7d": nil}
+		item["requests_5h"], item["requests_7d"] = usage5h[id].Requests, usage7d[id].Requests
+		item["user_billed_5h"], item["user_billed_7d"] = usage5h[id].UserBilled, usage7d[id].UserBilled
+		if !accountRow.CreatedAt.IsZero() {
+			item["created_at"] = accountRow.CreatedAt
+		}
 		if account == nil {
 			items = append(items, item)
 			continue
@@ -253,6 +274,15 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 		canReset := p.ResetEnabled && !row.IsExpired(time.Now()) && isKeyUsageResetEligible(account)
 		item["plan_type"], item["status"] = u.PlanType, u.Status
 		item["reset_allowed"] = canReset
+		item["health_tier"] = account.GetHealthTier()
+		if lastUsed := account.GetLastUsedAt(); !lastUsed.IsZero() {
+			item["last_used_at"] = lastUsed
+		}
+		item["credits_valid"] = u.CreditsValid
+		if u.CreditsValid {
+			item["credits_balance"] = u.Credits.Balance
+			item["credits_has_credits"], item["credits_unlimited"] = u.Credits.HasCredits, u.Credits.Unlimited
+		}
 		item["active_requests"], item["dynamic_concurrency_limit"] = account.GetActiveRequests(), account.GetDynamicConcurrencyLimit()
 		item["long_window_seconds"] = account.GetWindow7dSeconds()
 		if u.UsagePercent5hValid {

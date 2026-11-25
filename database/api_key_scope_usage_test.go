@@ -390,3 +390,85 @@ func TestDeleteAPIKeyRemovesScopeCounters(t *testing.T) {
 		t.Fatalf("counters = %+v, want the rows removed with the key", counters)
 	}
 }
+
+func TestScopeWindowUsageAcrossLogModes(t *testing.T) {
+	for _, driver := range []string{"sqlite", "postgres"} {
+		t.Run(driver, func(t *testing.T) {
+			db := newManualFlushTestDB(t, driver)
+			ctx := context.Background()
+			now := time.Now()
+			const keyID, accountID = 925, 11
+			insert := func(mode string, key, account int64, status, tokens int, age time.Duration) {
+				t.Helper()
+				db.SetUsageLogConfig(mode, 100, 5)
+				err := db.InsertUsageLog(ctx, &UsageLogInput{APIKeyID: key, AccountID: account, Model: "gpt-5.4", StatusCode: status, InputTokens: tokens, TotalTokens: tokens, CreatedAt: now.Add(-age)})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			insert(UsageLogModeFull, keyID, accountID, 200, 1000, 0)
+			// Simulate an upgrade: keep a legacy audit row but remove the new table.
+			db.FlushUsageLogs()
+			if _, err := db.conn.ExecContext(ctx, `DROP TABLE api_key_scope_unaudited_usage`); err != nil {
+				t.Fatal(err)
+			}
+			if err := db.migrate(ctx); err != nil {
+				t.Fatal(err)
+			}
+			insert(UsageLogModeErrors, keyID, accountID, 200, 2000, 0)
+			insert(UsageLogModeErrors, keyID, accountID, 500, 0, 0)
+			insert(UsageLogModeErrors, keyID, accountID, 499, 1000, 0)
+			insert(UsageLogModeOff, keyID, accountID, 500, 0, 0)
+			insert(UsageLogModeOff, keyID, accountID, 200, 3000, 6*time.Hour)
+			insert(UsageLogModeOff, keyID, accountID, 200, 4000, 8*24*time.Hour)
+			insert(UsageLogModeOff, keyID, accountID, 200, 5000, 31*24*time.Hour)
+			insert(UsageLogModeOff, keyID, accountID+1, 200, 1000, 0)
+			insert(UsageLogModeOff, keyID+1, accountID, 200, 1000, 0)
+			db.FlushUsageLogs()
+			var audits int
+			if err := db.conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM usage_logs WHERE api_key_id=$1`, keyID).Scan(&audits); err != nil || audits != 3 {
+				t.Fatalf("audit rows=%d err=%v", audits, err)
+			}
+			windows, err := db.GetAPIKeyAccountWindowsUsage(ctx, keyID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, w := range APIKeyScopeWindows {
+				single, err := db.GetAPIKeyAccountWindowUsage(ctx, keyID, w.Window)
+				if err != nil {
+					t.Fatal(err)
+				}
+				batch, err := db.GetAPIKeysAccountWindowUsage(ctx, []int64{keyID, keyID + 1}, w.Window)
+				if err != nil {
+					t.Fatal(err)
+				}
+				requests, tokens := int64(4), 3000
+				if w.Window > 6*time.Hour {
+					requests++
+					tokens += 3000
+				}
+				if w.Window > 8*24*time.Hour {
+					requests++
+					tokens += 4000
+				}
+				if batch[keyID+1][accountID].Requests != 1 {
+					t.Fatalf("%s unexpected second key usage: %+v", w.Label, batch[keyID+1])
+				}
+				cost := calculateCost(tokens, 0, 0, "gpt-5.4", "")
+				for _, m := range []map[int64]APIKeyWindowUsage{single, batch[keyID], windows[w.Label]} {
+					got := m[accountID]
+					if got.Requests != requests || got.Tokens != int64(tokens) || math.Abs(got.UserBilled-cost) > 1e-12 || m[accountID+1].Requests != 1 {
+						t.Fatalf("%s account usage = %+v; want %d requests, %d tokens, %g cost", w.Label, m, requests, tokens, cost)
+					}
+				}
+			}
+			if err := db.ClearUsageLogs(ctx); err != nil {
+				t.Fatal(err)
+			}
+			m, err := db.GetAPIKeyAccountWindowUsage(ctx, keyID, time.Hour)
+			if err != nil || len(m) != 0 {
+				t.Fatalf("after clear: %v, %v", m, err)
+			}
+		})
+	}
+}

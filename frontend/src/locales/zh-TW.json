@@ -9,6 +9,11 @@
     }
   },
   "keyUsageAccounts": {
+    "reauthReloadPending": "授權已儲存，但帳號尚未重新載入。請重新整理帳號清單，不要重複提交回呼。",
+    "reauthorize": "重新授權",
+    "keyRequests": "此 Key 請求數",
+    "keyCost": "此 Key 費用",
+    "lastActive": "最近使用",
     "group": "群組",
     "allGroups": "全部群組",
     "ungrouped": "未分組",

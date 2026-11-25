@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 // KeyUsageAccountPermissions represents the global policy (key 0) or a
@@ -16,18 +17,22 @@ type KeyUsageAccountPermissions struct {
 
 // KeyUsageAccountAccess is a credential-free projection for portal authorization.
 type KeyUsageAccountAccess struct {
-	ID               int64
-	Name             string
-	Email            string
-	UpstreamType     string
-	PlanType         string
-	AllowedAPIKeyIDs []int64
+	ID                             int64
+	Name                           string
+	CreatedAt                      time.Time
+	Email                          string
+	Platform, Type                 string
+	UserID, WorkspaceID, AccountID string
+	HasRefreshToken                bool
+	UpstreamType                   string
+	PlanType                       string
+	AllowedAPIKeyIDs               []int64
 }
 
 func (db *DB) ListKeyUsageAccountAccess(ctx context.Context) (map[int64]KeyUsageAccountAccess, error) {
-	query := `SELECT id, name, COALESCE(credentials->>'email', ''), COALESCE(credentials->>'upstream_type', ''), COALESCE(credentials->>'plan_type', ''), COALESCE(credentials->'allowed_api_key_ids', '[]'::jsonb)::text FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+	query := `SELECT id, name, created_at, COALESCE(platform, ''), COALESCE(type, ''), COALESCE(credentials->>'user_id', ''), COALESCE(credentials->>'workspace_id', ''), COALESCE(credentials->>'account_id', ''), COALESCE(credentials->>'refresh_token', '') <> '', COALESCE(credentials->>'email', ''), COALESCE(credentials->>'upstream_type', ''), COALESCE(credentials->>'plan_type', ''), COALESCE(credentials->'allowed_api_key_ids', '[]'::jsonb)::text FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 	if db.isSQLite() {
-		query = `SELECT id, name, COALESCE(json_extract(credentials, '$.email'), ''), COALESCE(json_extract(credentials, '$.upstream_type'), ''), COALESCE(json_extract(credentials, '$.plan_type'), ''), COALESCE(json_extract(credentials, '$.allowed_api_key_ids'), '[]') FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+		query = `SELECT id, name, created_at, COALESCE(platform, ''), COALESCE(type, ''), COALESCE(json_extract(credentials, '$.user_id'), ''), COALESCE(json_extract(credentials, '$.workspace_id'), ''), COALESCE(json_extract(credentials, '$.account_id'), ''), COALESCE(json_extract(credentials, '$.refresh_token'), '') <> '', COALESCE(json_extract(credentials, '$.email'), ''), COALESCE(json_extract(credentials, '$.upstream_type'), ''), COALESCE(json_extract(credentials, '$.plan_type'), ''), COALESCE(json_extract(credentials, '$.allowed_api_key_ids'), '[]') FROM accounts WHERE status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
 	}
 	rows, err := db.conn.QueryContext(ctx, query)
 	if err != nil {
@@ -38,7 +43,12 @@ func (db *DB) ListKeyUsageAccountAccess(ctx context.Context) (map[int64]KeyUsage
 	for rows.Next() {
 		var item KeyUsageAccountAccess
 		var allowed string
-		if err := rows.Scan(&item.ID, &item.Name, &item.Email, &item.UpstreamType, &item.PlanType, &allowed); err != nil {
+		var createdAt any
+		if err := rows.Scan(&item.ID, &item.Name, &createdAt, &item.Platform, &item.Type, &item.UserID, &item.WorkspaceID, &item.AccountID, &item.HasRefreshToken, &item.Email, &item.UpstreamType, &item.PlanType, &allowed); err != nil {
+			return nil, err
+		}
+		item.CreatedAt, err = parseDBTimeValue(createdAt)
+		if err != nil {
 			return nil, err
 		}
 		if err := json.Unmarshal([]byte(allowed), &item.AllowedAPIKeyIDs); err != nil {

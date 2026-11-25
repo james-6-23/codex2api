@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -1414,6 +1415,12 @@ func (db *DB) migrate(ctx context.Context) error {
 		created_at BIGINT NOT NULL,
 		PRIMARY KEY (api_key_id, rule_id, request_id)
 	);
+	CREATE TABLE IF NOT EXISTS api_key_scope_unaudited_usage (
+		api_key_id INTEGER NOT NULL, account_id INTEGER NOT NULL, created_at TIMESTAMPTZ NOT NULL,
+		total_tokens INTEGER NOT NULL, user_billed DOUBLE PRECISION NOT NULL
+	);
+	CREATE INDEX IF NOT EXISTS idx_scope_unaudited_key_time ON api_key_scope_unaudited_usage(api_key_id, created_at);
+	CREATE INDEX IF NOT EXISTS idx_scope_unaudited_time ON api_key_scope_unaudited_usage(created_at);
 	CREATE TABLE IF NOT EXISTS api_key_scope_counters (
 		api_key_id BIGINT NOT NULL,
 		scope_type VARCHAR(16) NOT NULL,
@@ -4516,7 +4523,8 @@ func (db *DB) InsertUsageLog(ctx context.Context, log *UsageLogInput) error {
 
 	// User image fees are independent of upstream token cost.
 	userBilled := UsageLogUserBilledCost(log)
-	if !storeUsageLog && (log.APIKeyID <= 0 || userBilled <= 0 || log.StatusCode == 499) {
+	// Account-scoped request and token limits also count zero-cost events.
+	if !storeUsageLog && (log.APIKeyID <= 0 || (log.AccountID <= 0 && userBilled <= 0) || log.StatusCode == 499) {
 		return nil
 	}
 
@@ -5041,6 +5049,9 @@ func (db *DB) insertSQLiteUsageLogBatch(ctx context.Context, batch []usageLogEnt
 		}
 	}
 
+	if err := db.recordUnauditedScopeUsage(ctx, tx, batch); err != nil {
+		return fmt.Errorf("record unaudited scope usage: %w", err)
+	}
 	if err := db.applyAPIKeyScopeCountersWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新 scope 累计额度: %w", err)
 	}
@@ -5093,6 +5104,9 @@ func (db *DB) batchInsertLogs(ctx context.Context, batch []usageLogEntry) error 
 			return err
 		}
 		insertedIDs = append(insertedIDs, ids...)
+	}
+	if err := db.recordUnauditedScopeUsage(ctx, tx, batch); err != nil {
+		return fmt.Errorf("record unaudited scope usage: %w", err)
 	}
 	if err := db.applyAPIKeyScopeCountersWithExec(ctx, tx, batch); err != nil {
 		return fmt.Errorf("更新 scope 累计额度: %w", err)
@@ -6939,6 +6953,9 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 	} else if _, err = tx.ExecContext(ctx, `TRUNCATE TABLE usage_logs RESTART IDENTITY`); err != nil {
 		return err
 	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM api_key_scope_unaudited_usage`); err != nil {
+		return err
+	}
 	if _, err = tx.ExecContext(ctx, `DELETE FROM usage_stats_rollup WHERE channel <> ''`); err != nil {
 		return err
 	}
@@ -8333,6 +8350,17 @@ func (db *DB) UpdateOpenAIResponsesAccount(ctx context.Context, id int64, name s
 }
 
 func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, credentials map[string]interface{}, proxyURL string) error {
+	return db.updateOAuthAccountCredentials(ctx, id, credentials, proxyURL, nil)
+}
+
+// UpdateScopedOAuthCredentials refuses to overwrite a changed authorization snapshot.
+func (db *DB) UpdateScopedOAuthCredentials(ctx context.Context, expected *AccountRow, credentials map[string]interface{}) error {
+	return db.withSQLiteWriteLock(ctx, func() error {
+		return db.updateOAuthAccountCredentials(ctx, expected.ID, credentials, expected.ProxyURL, expected)
+	})
+}
+
+func (db *DB) updateOAuthAccountCredentials(ctx context.Context, id int64, credentials map[string]interface{}, proxyURL string, expected *AccountRow) error {
 	tx, err := db.conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -8340,24 +8368,55 @@ func (db *DB) UpdateOAuthAccountCredentials(ctx context.Context, id int64, crede
 	defer tx.Rollback()
 
 	selectQuery := `SELECT credentials FROM accounts WHERE id = $1 AND status <> 'deleted' AND COALESCE(error_message, '') <> 'deleted'`
+	args := []interface{}{id}
+	if expected != nil {
+		selectQuery += ` AND platform = $2 AND type = $3 AND COALESCE(proxy_url,'') = $4 AND credential_generation = $5`
+		args = append(args, expected.Platform, expected.Type, expected.ProxyURL, expected.CredentialGeneration)
+	}
 	if !db.isSQLite() {
 		selectQuery += ` FOR UPDATE`
 	}
 
 	var currentRaw interface{}
-	if err := tx.QueryRowContext(ctx, selectQuery, id).Scan(&currentRaw); err != nil {
+	if err := tx.QueryRowContext(ctx, selectQuery, args...).Scan(&currentRaw); err != nil {
 		return err
 	}
 
-	merged := mergeCredentialMaps(decodeCredentials(currentRaw), credentials)
+	current := decodeCredentials(currentRaw)
+	if expected != nil {
+		// Fence grant replacement and scoped authorization/routing changes, not
+		// expiry updates or usage probes. A rotation of the actual tokens is
+		// a competing write, including a rotation by a background refresher.
+		for _, k := range []string{"refresh_token", "access_token", "id_token", "user_id", "workspace_id", "account_id", "upstream_type", "allowed_api_key_ids", "plan_type", "custom_headers"} {
+			if !reflect.DeepEqual(current[k], expected.Credentials[k]) {
+				return sql.ErrNoRows
+			}
+		}
+	}
+	merged := mergeCredentialMaps(current, credentials)
 	credJSON, err := json.Marshal(encryptSensitiveCredentials(merged))
 	if err != nil {
 		return fmt.Errorf("序列化 credentials 失败: %w", err)
 	}
 
-	updateQuery := `UPDATE accounts SET credentials = $1, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+	credParam := "$1"
 	if !db.isSQLite() {
-		updateQuery = `UPDATE accounts SET credentials = $1::jsonb, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+		credParam += "::jsonb"
+	}
+	generationUpdate := ""
+	if expected != nil {
+		generationUpdate = ", credential_generation = credential_generation + 1"
+	}
+	updateQuery := `UPDATE accounts SET credentials = ` + credParam + generationUpdate + `, proxy_url = $2, platform = 'openai', type = 'oauth', updated_at = CURRENT_TIMESTAMP WHERE id = $3`
+	// Recover only an existing authentication error under the same row lock.
+	// A public action must not revive a deleted account or undo rate limiting.
+	if expected != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE accounts SET status='active', error_message='',
+			cooldown_reason=CASE WHEN cooldown_reason='unauthorized' THEN '' ELSE cooldown_reason END,
+			cooldown_until=CASE WHEN cooldown_reason='unauthorized' THEN NULL ELSE cooldown_until END
+			WHERE id=$1 AND (status='error' OR cooldown_reason='unauthorized')`, id); err != nil {
+			return err
+		}
 	}
 	res, err := tx.ExecContext(ctx, updateQuery, credJSON, proxyURL, id)
 	if err != nil {
