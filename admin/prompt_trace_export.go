@@ -132,7 +132,7 @@ func (e *promptTraceExporter) process(ctx context.Context, h *Handler, job *data
 	jobCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
 	readCtx, cancelRead := context.WithTimeout(jobCtx, 10*time.Second)
-	request, err := h.db.GetPromptRequest(readCtx, job.RequestID)
+	request, err := h.db.GetStoredPromptRequest(readCtx, job.RequestID)
 	if errors.Is(err, sql.ErrNoRows) {
 		cancelRead()
 		return nil

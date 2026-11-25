@@ -191,7 +191,7 @@ func TestPromptResponseCaptureChatFinalReply(t *testing.T) {
 			name: "stream interrupted after stop", mode: "sse", payload: textDelta + stop,
 		},
 		{
-			name: "stream cancelled", mode: "sse", payload: textDelta + stop + done, cancelled: true,
+			name: "peer closes after the stream sentinel", mode: "sse", payload: textDelta + stop + done, cancelled: true, wantFinal: "第一行\n第二行",
 		},
 		{
 			name: "stream write failed", mode: "sse", payload: textDelta + stop + done, writeFailed: true,

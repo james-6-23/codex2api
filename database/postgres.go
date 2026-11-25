@@ -517,6 +517,9 @@ func New(driver string, dsn string, schema ...string) (*DB, error) {
 			_ = conn.Close()
 			return nil, fmt.Errorf("initialize image asset retention: %w", err)
 		}
+		if err := db.ensureAPIKeyWeeklyResetSchema(ctx); err != nil {
+			return nil, fmt.Errorf("initialize API key weekly resets: %w", err)
+		}
 	}
 	if err := db.ensureProxyRiskScoringTables(ctx); err != nil {
 		return nil, fmt.Errorf("创建代理风险评分表失败: %w", err)
@@ -3655,6 +3658,12 @@ func (db *DB) DeleteAPIKey(ctx context.Context, id int64) error {
 		}
 		// scope 累计计数器没有外键约束，删 Key 时顺带清掉，避免留下永远不会再被读到的孤行。
 		if _, err := tx.ExecContext(ctx, `DELETE FROM api_key_scope_counters WHERE api_key_id = $1`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM api_key_weekly_reset_usage WHERE api_key_id = $1`, id); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM api_key_weekly_resets WHERE api_key_id = $1`, id); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -6928,6 +6937,11 @@ func (db *DB) ClearUsageLogs(ctx context.Context) error {
 		rollup.PromptTokens, rollup.CompletionTokens, rollup.CachedTokens, rollup.CacheHitRequests,
 		rollup.FirstTokenMsSum, rollup.FirstTokenSamples, rollup.TotalAccountBilled, rollup.TotalUserBilled); err != nil {
 		return fmt.Errorf("快照统计基线失败: %w", err)
+	}
+	// Log IDs can be reused after clearing. Remove reset snapshots atomically;
+	// retain operation headers so retries cannot reset newly arriving usage.
+	if _, err = tx.ExecContext(ctx, `DELETE FROM api_key_weekly_reset_usage`); err != nil {
+		return err
 	}
 	if db.isSQLite() {
 		if _, err = tx.ExecContext(ctx, `DELETE FROM usage_logs`); err != nil {

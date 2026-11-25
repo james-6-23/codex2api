@@ -26,10 +26,10 @@ func (db *DB) ReadPromptRequestTaskBodies(ctx context.Context, ids []int64, budg
 	rows, err := db.conn.QueryContext(ctx, `WITH requested(id, priority) AS (VALUES `+strings.Join(values, ",")+`),
 		bounded AS MATERIALIZED (
 			SELECT r.id, SUM(LENGTH(r.body)) OVER (ORDER BY requested.priority) AS bytes_read
-			FROM requested JOIN prompt_request_records r ON r.id = requested.id
+			FROM requested JOIN prompt_request_visible_records r ON r.id = requested.id
 			WHERE LENGTH(r.body) <= `+placeholders[len(ids)]+`
 		)
-		SELECT r.id, r.content_type, r.body FROM bounded b JOIN prompt_request_records r ON r.id = b.id
+		SELECT r.id, r.content_type, r.body FROM bounded b JOIN prompt_request_visible_records r ON r.id = b.id
 		WHERE b.bytes_read <= `+placeholders[len(ids)+1], args...)
 	if err != nil {
 		return nil, err
@@ -49,9 +49,11 @@ type PromptRequestTaskResponse struct {
 	Status              string
 	FinalText           string
 	FinalObserved       bool
+	HasToolCalls        bool
 	FinishedAt          *time.Time
 	Truncated           bool
 	LegacyChatFinalText string
+	UnconfirmedChatText string
 }
 
 // ReadPromptRequestTaskResponses fetches terminal responses and responses
@@ -79,17 +81,21 @@ func (db *DB) ReadPromptRequestTaskResponses(ctx context.Context, ids, terminalI
 			return nil, err
 		}
 		fields := gjson.GetMany(encoded, "status", "final_text", "final_observed", "finished_at", "truncated",
-			"chat_reply_classified", "error", "commentary_text", "tool_calls.#", "text")
+			"chat_reply_classified", "error", "commentary_text", "tool_calls.#", "text", "chat_finish_reason")
 		entry := PromptRequestTaskResponse{
 			Status: fields[0].Str, FinalText: fields[1].Str, FinalObserved: fields[2].Type == gjson.True,
-			Truncated: fields[4].Type == gjson.True,
+			Truncated: fields[4].Type == gjson.True, HasToolCalls: fields[8].Int() > 0,
 		}
 		if finished, err := time.Parse(time.RFC3339Nano, fields[3].Str); err == nil {
 			entry.FinishedAt = &finished
 		}
-		if entry.Status == "completed" && !entry.FinalObserved && !entry.Truncated && fields[5].Type != gjson.True &&
-			fields[6].Str == "" && fields[7].Str == "" && fields[8].Int() == 0 && strings.TrimSpace(fields[9].Str) != "" {
-			entry.LegacyChatFinalText = fields[9].Str
+		if entry.Status == "completed" && !entry.FinalObserved && !entry.Truncated &&
+			fields[6].Str == "" && fields[7].Str == "" && !entry.HasToolCalls && strings.TrimSpace(fields[9].Str) != "" {
+			if fields[5].Type != gjson.True {
+				entry.LegacyChatFinalText = fields[9].Str
+			} else if fields[10].Str == "" {
+				entry.UnconfirmedChatText = fields[9].Str
+			}
 		}
 		result[id] = entry
 	}

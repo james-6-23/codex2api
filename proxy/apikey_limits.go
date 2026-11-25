@@ -243,10 +243,11 @@ func (h *Handler) enforceAPIKeyLimitsChecks(c *gin.Context, model string, reserv
 	if limits.CostLimit30d > 0 || limits.TokenLimit30d > 0 {
 		usage, err := h.apiKeyWindowUsage(ctx, row.ID, "30d", apiKey30dWindow)
 		if err == nil && usage != nil {
-			if limits.CostLimit30d > 0 && usage.UserBilled >= limits.CostLimit30d {
+			cost := usage.QuotaCost()
+			if limits.CostLimit30d > 0 && cost >= limits.CostLimit30d {
 				return http.StatusTooManyRequests,
 					fmt.Sprintf("API key cost limit exceeded: $%.2f / $%.2f in last 30d",
-						usage.UserBilled, limits.CostLimit30d)
+						cost, limits.CostLimit30d)
 			}
 			if limits.TokenLimit30d > 0 && usage.Tokens >= limits.TokenLimit30d {
 				return http.StatusTooManyRequests,

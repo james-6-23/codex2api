@@ -41,6 +41,8 @@ import type {
   SystemSettings,
 } from "../types";
 import { canStartAPIKeyBulkReset } from "../lib/apiKeyOperationState";
+import { canResetAPIKeyWeeklyQuota } from "../lib/apiKeyQuota";
+import { createUUID } from "../lib/uuid";
 import { supportsChatGPTLive } from "../lib/apiKeyLive";
 import {
   modelRequestLimitsFromAPIKey,
@@ -326,6 +328,8 @@ export default function APIKeys() {
   const [editDirty, setEditDirty] = useState(false);
   const [saving, setSaving] = useState(false);
   const [resettingAll, setResettingAll] = useState(false);
+  const weeklyResetRequestIds = useRef(new Map<number, string>());
+  const weeklyResetInFlight = useRef(new Set<number>());
   const [savingPublicUsagePage, setSavingPublicUsagePage] = useState(false);
   const [savingPublicImageStudioPage, setSavingPublicImageStudioPage] =
     useState(false);
@@ -943,6 +947,56 @@ export default function APIKeys() {
         "error",
       );
     } finally {
+      setResettingIds((prev) => {
+        const next = new Set(prev);
+        next.delete(keyRow.id);
+        return next;
+      });
+    }
+  };
+
+  const handleResetWeeklyQuota = async (keyRow: APIKeyRow) => {
+    if (
+      !canResetAPIKeyWeeklyQuota(keyRow.limits) || resettingAll ||
+      resettingIds.has(keyRow.id) || deletingIds.has(keyRow.id) ||
+      weeklyResetInFlight.current.has(keyRow.id)
+    ) return;
+
+    weeklyResetInFlight.current.add(keyRow.id);
+    try {
+      const confirmed = await confirm({
+        title: t("apiKeys.resetWeeklyQuotaTitle"),
+        description: t("apiKeys.resetWeeklyQuotaDesc", {
+          amount: formatUSD(keyRow.limits?.cost_limit_7d ?? 0),
+        }),
+        confirmText: t("apiKeys.resetWeeklyQuotaConfirm"),
+        tone: "destructive",
+        confirmVariant: "destructive",
+      });
+      if (!confirmed) return;
+
+      setResettingIds((prev) => new Set(prev).add(keyRow.id));
+      // Keep the same ID after a lost response so a retry cannot apply a second reset.
+      const requestId = weeklyResetRequestIds.current.get(keyRow.id) ?? createUUID();
+      weeklyResetRequestIds.current.set(keyRow.id, requestId);
+      const result = await api.resetAPIKeyWeeklyQuota(keyRow.id, requestId);
+      weeklyResetRequestIds.current.delete(keyRow.id);
+      showToast(t("apiKeys.resetWeeklyQuotaSuccess", {
+        amount: formatUSD(result.exempted_cost),
+      }));
+      const refreshed = await reloadSilently();
+      if (refreshed) {
+        setEditingKey((current) => current?.id === keyRow.id
+          ? refreshed.keys.find((item) => item.id === keyRow.id) ?? null
+          : current);
+      }
+    } catch (error) {
+      showToast(
+        `${t("apiKeys.resetWeeklyQuotaFailed")}: ${getErrorMessage(error)}`,
+        "error",
+      );
+    } finally {
+      weeklyResetInFlight.current.delete(keyRow.id);
       setResettingIds((prev) => {
         const next = new Set(prev);
         next.delete(keyRow.id);
@@ -1679,6 +1733,19 @@ export default function APIKeys() {
                                 )}
                                 {t("apiKeys.resetQuota")}
                               </Button>
+                              {canResetAPIKeyWeeklyQuota(keyRow.limits) ? (
+                                <Button
+                                  variant="outline"
+                                  size="sm"
+                                  disabled={isBusy}
+                                  onClick={() => void handleResetWeeklyQuota(keyRow)}
+                                  title={t("apiKeys.resetWeeklyQuotaTitle")}
+                                  className="min-w-[7rem] flex-1"
+                                >
+                                  <CalendarClock className="size-3.5" />
+                                  {t("apiKeys.resetWeeklyQuota")}
+                                </Button>
+                              ) : null}
                               <Button
                                 variant="outline"
                                 size="sm"
@@ -1914,6 +1981,18 @@ export default function APIKeys() {
                                       )}
                                       {t("apiKeys.resetQuota")}
                                     </Button>
+                                    {canResetAPIKeyWeeklyQuota(keyRow.limits) ? (
+                                      <Button
+                                        variant="outline"
+                                        size="sm"
+                                        disabled={isBusy}
+                                        onClick={() => void handleResetWeeklyQuota(keyRow)}
+                                        title={t("apiKeys.resetWeeklyQuotaTitle")}
+                                      >
+                                        <CalendarClock className="size-3.5" />
+                                        {t("apiKeys.resetWeeklyQuota")}
+                                      </Button>
+                                    ) : null}
                                     <Button
                                       variant="outline"
                                       size="sm"

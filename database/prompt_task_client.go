@@ -138,14 +138,14 @@ func selectPromptTaskClientAnchor(ctx context.Context, tx *sql.Tx, group, digest
 	const maxCandidates = 8
 	rows, err := tx.QueryContext(ctx, `WITH candidates AS (
 		SELECT MIN(id) AS id
-		FROM prompt_request_records
+		FROM prompt_request_visible_records
 		WHERE conversation_group = $1 AND conversation_group <> '' AND conversation_group <> 'single'
 		AND created_at >= $2 AND created_at <= $3
 		AND (task_turn = $4 OR task_turn = '')
 		AND length(body) <= $5
 		GROUP BY CASE WHEN task_anchor IS NULL OR task_anchor = '' THEN CAST(id AS TEXT) ELSE task_anchor END
 		ORDER BY MIN(id) LIMIT $6
-	) SELECT r.id, r.body FROM candidates c JOIN prompt_request_records r ON r.id = c.id ORDER BY r.id`,
+	) SELECT r.id, r.body FROM candidates c JOIN prompt_request_visible_records r ON r.id = c.id ORDER BY r.id`,
 		group, snapshot.StartedAt.Add(-promptTaskClientClockSkew), snapshot.FinishedAt.Add(promptTaskClientClockSkew),
 		hex.EncodeToString(turnHash[:]), maxMatchBody, maxCandidates+1)
 	if err != nil {
@@ -200,8 +200,9 @@ func (db *DB) MatchPromptTaskClient(ctx context.Context, group, turnID, userText
 	}
 	start := observedStart.UTC()
 	args := []any{group, PromptTaskClientUserDigest(userText), start.Add(promptTaskClientClockSkew), start.Add(-promptTaskClientClockSkew)}
-	query := `SELECT snapshot FROM prompt_task_client_snapshots
-		WHERE conversation_group = $1 AND user_digest = $2
+	query := `SELECT snapshot FROM prompt_task_client_snapshots snapshot_row
+		WHERE EXISTS(SELECT 1 FROM prompt_request_visible_records r WHERE r.id=snapshot_row.request_id)
+		AND conversation_group = $1 AND user_digest = $2
 		AND started_at <= $3 AND finished_at >= $4`
 	if turnID != "" {
 		query += " AND turn_id = $5"

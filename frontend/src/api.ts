@@ -108,6 +108,7 @@ import type {
   PromptFilterLog,
   PromptFilterLogsResponse,
   PromptRequestConversationPage,
+  PromptRequestKeyRecording,
   PromptRequestDetail,
   PromptRequestRoundPage,
   PromptRequestPage,
@@ -1387,6 +1388,16 @@ export const api = {
     request<MessageResponse & { limits?: APIKeyLimits }>(`/keys/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
   resetAPIKeyQuota: (id: number) =>
     request<MessageResponse>(`/keys/${id}/reset-quota`, { method: 'POST' }),
+  resetAPIKeyWeeklyQuota: (id: number, requestId: string) =>
+    request<MessageResponse & {
+      request_id: string
+      exempted_cost: number
+      reset_at: string
+      replayed: boolean
+    }>(`/keys/${id}/reset-weekly-quota`, {
+      method: 'POST',
+      body: JSON.stringify({ request_id: requestId }),
+    }),
   resetAllAPIKeyQuotas: () =>
     request<MessageResponse & { reset_count: number }>('/keys/reset-all-quotas', { method: 'POST' }),
   // 分组 / 账号维度限额的当前用量（issue #439）。
@@ -1502,14 +1513,21 @@ export const api = {
     request<PromptRequestConversationPage>(`/prompt-filter/request-conversations?before=${before}`, { signal }),
   listPromptRequestRounds: (id: number, before: number, signal?: AbortSignal) =>
     request<PromptRequestRoundPage>(`/prompt-filter/request-conversations/${id}?before=${before}`, { signal }),
-  listPromptRequestTasks: (id: number, before: number, signal?: AbortSignal) =>
-    request<PromptRequestTaskPage>(`/prompt-filter/request-conversations/${id}/tasks?before=${before}`, { signal }),
+  listPromptRequestTasks: (id: number, before: number, signal?: AbortSignal, live = false) =>
+    request<PromptRequestTaskPage>(`/prompt-filter/request-conversations/${id}/tasks?before=${before}${live ? '&live=1' : ''}`, { signal }),
   getPromptRequestTask: (id: number, signal?: AbortSignal) =>
     request<PromptRequestTaskDetail>(`/prompt-filter/request-tasks/${id}`, { signal }),
   updatePromptRequestRetention: (days: number) =>
     request<{ retention_days: number }>('/prompt-filter/requests/retention', {
       method: 'PUT',
       body: JSON.stringify({ retention_days: days }),
+    }),
+  getPromptRequestKeyExclusions: (signal?: AbortSignal) =>
+    request<{ keys: PromptRequestKeyRecording[] }>('/prompt-filter/requests/key-exclusions', { signal }),
+  updatePromptRequestKeyExclusions: (excludedKeyIDs: number[]) =>
+    request<{ keys: PromptRequestKeyRecording[] }>('/prompt-filter/requests/key-exclusions', {
+      method: 'PUT',
+      body: JSON.stringify({ excluded_key_ids: excludedKeyIDs }),
     }),
   getPromptRequest: (id: number, signal?: AbortSignal) =>
     request<PromptRequestDetail>(`/prompt-filter/requests/${id}`, { signal }),

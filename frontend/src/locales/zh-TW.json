@@ -3,6 +3,7 @@
     "unavailable": "暫不可用"
   },
   "keyUsage": {
+    "windowCostExemption": "實際費用 {{actual}}，其中 {{exempted}} 經管理員重置後不計入此視窗費用限額。歷史帳單保留。",
     "views": {
       "accounts": "帳號用量"
     }
@@ -387,6 +388,12 @@
     "notProbed": "未驗證"
   },
   "apiKeys": {
+    "resetWeeklyQuota": "重置7天額度",
+    "resetWeeklyQuotaTitle": "重置7天額度並免計對應費用？",
+    "resetWeeklyQuotaDesc": "重置目前7天費用及Token用量，並將對應實際費用從30天計費用量中扣除，最多免計 {{amount}}。額度上限、累計額度、5小時及其他限制保持不變，歷史帳單保留。此操作無法復原。",
+    "resetWeeklyQuotaConfirm": "重置並免計",
+    "resetWeeklyQuotaSuccess": "7天額度已重置，本次30天費用免計 {{amount}}",
+    "resetWeeklyQuotaFailed": "7天額度重置失敗，可重試同一次操作",
     "promptFilterScopeGlobal": "Prompt：沿用全域檢查",
     "promptFilterScopeLocal": "Prompt：僅本地規則",
     "promptFilterScopeOff": "Prompt：已關閉",
@@ -878,6 +885,7 @@
         "modelCallsCount": "共 {{count}} 次模型呼叫",
         "earlier": "載入較早的任務",
         "contextCompaction": "上下文壓縮",
+        "contextResume": "從摘要繼續執行",
         "beforeModelCalls": "本任務模型呼叫前",
         "rawRequests": "逐筆查看原始請求",
         "earlierRequests": "載入較早的請求",
@@ -919,6 +927,9 @@
         "gatewaySteps": "閘道請求與工具細節",
         "requestStep": "模型請求",
         "stepResponse": "對應的模型回應",
+        "stepToolOnly": "此步驟只請求了工具呼叫。",
+        "delegationResult": "內部委派結果",
+        "delegationSource": "來源會話 {{id}}",
         "stepResponsePreviewTruncated": "可在請求詳情中查看其餘已記錄內容",
         "requestDetails": "檢視請求 #{{id}}",
         "stepsTruncated": "此處顯示部分步驟，可繼續核對原始請求。",
@@ -1101,6 +1112,12 @@
         }
       },
       "tab": "請求記錄",
+      "excludeKeys": {
+        "label": "排除 API Key",
+        "description": "勾選的 Key 會停止記錄，既有請求會從重播隱藏。取消勾選並儲存後，從恢復錄製時起重新計數。",
+        "search": "搜尋名稱或 Key ID",
+        "empty": "沒有符合的 API Key。"
+      },
       "retentionLabel": "保留天數",
       "retentionOption": "{{days}} 天",
       "retention": "請求內容保留 {{days}} 天。",

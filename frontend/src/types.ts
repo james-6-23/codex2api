@@ -4110,6 +4110,8 @@ export interface PublicAPIKeyWindowUsage {
   requests: number
   tokens: number
   user_billed: number
+  /** Actual cost exempted from the 30-day cost quota by an administrator. */
+  cost_exempted?: number
   /** 窗口内最早一笔用量时间(无用量时缺省)。 */
   oldest_at?: ISODateString
   /** fixed=自然日固定窗口(reset_at 清零);sliding=滑动窗口(decay_at 开始回落)。 */
@@ -4547,6 +4549,12 @@ export interface PromptRequestConversation extends PromptRequestRecord {
   rounds: number
 }
 
+export interface PromptRequestKeyRecording {
+  id: number
+  name: string
+  excluded: boolean
+}
+
 export interface PromptRequestConversationPage {
   groups: PromptRequestConversation[]
   next_before: number
@@ -4633,6 +4641,7 @@ export interface PromptRequestTask {
   started_at: string
   request_ids: number[]
   request_count?: number
+  kind?: 'context_compaction' | 'context_resume'
   user_preview?: string
   user_text?: string
   user_text_truncated?: boolean
@@ -4683,11 +4692,13 @@ export interface PromptRequestTaskStep {
   created_at: string
   model: string
   endpoint: string
+  kind?: 'context_compaction' | 'context_resume'
   action: string
   status: number
   commentary?: string
-  response?: { status: string; text?: string; error?: string; truncated?: boolean }
+  response?: { status: string; text?: string; error?: string; truncated?: boolean; tool_only?: boolean }
   tools: PromptRequestTaskTool[]
+  delegations?: { text: string; source_thread_id: string }[]
   skills?: { name: string; path?: string; source: string; source_request_id: number }[]
   skill_usage?: PromptRequestTaskSkillUsage[]
 }

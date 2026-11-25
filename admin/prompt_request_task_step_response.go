@@ -13,6 +13,7 @@ type promptTaskStepResponse struct {
 	Status    string `json:"status"`
 	Text      string `json:"text,omitempty"`
 	Error     string `json:"error,omitempty"`
+	ToolOnly  bool   `json:"tool_only,omitempty"`
 	Truncated bool   `json:"truncated,omitempty"`
 }
 
