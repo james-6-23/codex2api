@@ -59,7 +59,7 @@ func continuousRetryHTTPSelected(policy database.ContinuousRetryPolicy, status i
 	// 明确的上游 CYB 是请求级安全终态；即使开启 catch-all 也不能换号重放。
 	// An explicit upstream CYB is a request-level safety terminal and must not
 	// rotate accounts even when catch-all is enabled.
-	if isExplicitUpstreamCyberPolicy(body) {
+	if isExplicitUpstreamCyberPolicy(body) || isInvalidInputImagePayload(body) {
 		return false
 	}
 	if isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures() {
@@ -100,7 +100,7 @@ func continuousRetryLimitForRequestError(err error, generalLimit int, policies .
 	if isContinuousRetryLocalFailure(err) {
 		return generalLimit
 	}
-	if isExplicitUpstreamCyberPolicyError(err) {
+	if isExplicitUpstreamCyberPolicyError(err) || isInvalidInputImageRequestError(err) {
 		return generalLimit
 	}
 	if status, body, ok := continuousRetryHTTPErrorDetails(err); ok {
@@ -154,7 +154,7 @@ func continuousRetryRequestErrorSelected(policy database.ContinuousRetryPolicy, 
 	if errors.Is(err, errContinuousRetryDeadlineExceeded) || isContinuousRetryLocalFailure(err) {
 		return false
 	}
-	if isExplicitUpstreamCyberPolicyError(err) {
+	if isExplicitUpstreamCyberPolicyError(err) || isInvalidInputImageRequestError(err) {
 		return false
 	}
 	status, body, ok := continuousRetryHTTPErrorDetails(err)
@@ -176,6 +176,9 @@ func continuousRetryStreamSelected(outcome streamOutcome, payload []byte, eventT
 	}
 	eventType = normalizedUpstreamSSEEventType(eventType, payload)
 	if !isActualUpstreamStreamFailure(outcome, eventType) {
+		return false
+	}
+	if isInvalidInputImagePayload(payload) || isInvalidInputImagePayload(outcome.failurePayload) {
 		return false
 	}
 	if strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") || isExplicitUpstreamCyberPolicy(payload) || isExplicitUpstreamCyberPolicy(outcome.failurePayload) {
@@ -275,6 +278,9 @@ func terminalUpstreamErrorPayload(payload []byte) []byte {
 // not penalized.
 func continuousRetryStreamFailureSelected(outcome streamOutcome, payload []byte, eventType string, policies ...database.ContinuousRetryPolicy) bool {
 	if outcome.terminalLocal || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "continuous_retry_timeout") {
+		return false
+	}
+	if isInvalidInputImagePayload(payload) || isInvalidInputImagePayload(outcome.failurePayload) {
 		return false
 	}
 	if isExplicitUpstreamCyberPolicy(payload) || isExplicitUpstreamCyberPolicy(outcome.failurePayload) || strings.EqualFold(strings.TrimSpace(outcome.failureKind), "cyber_policy") {
