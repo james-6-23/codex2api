@@ -59,3 +59,28 @@ test('sender backticks cannot break out of the code span', () => {
   const out = formatAgentMessageTags('<agent-message from="a`b">x</agent-message>')
   assert.match(out, /from `a b`/)
 })
+
+test('fenced code inside the body stays inside the same blockquote', () => {
+  const out = formatAgentMessageTags('<agent-message from="a">intro\n```js\nlet x=1\n```\noutro</agent-message>\ntail')
+  assert.match(out, /> intro\n> ```js\n> let x=1\n> ```\n> outro/)
+  assert.match(out, /outro\n\n\ntail$/)
+  assert.doesNotMatch(out, /\n```js/)
+})
+
+test('closing tag text inside a fence within the body does not end the block', () => {
+  const out = formatAgentMessageTags('<agent-message from="a">x\n```\n</agent-message>\n```\ny</agent-message>')
+  assert.match(out, /> ```\n> <\/agent-message>\n> ```\n> y/)
+})
+
+test('self-closing tag yields a header-only quote and does not swallow later text', () => {
+  const out = formatAgentMessageTags('<agent-message from="a"/>\nafter text')
+  assert.match(out, /> \*\*agent-message\*\* · from `a`\n\n/)
+  assert.match(out, /\nafter text$/)
+  assert.doesNotMatch(out, /> after text/)
+})
+
+test('a new opening tag ends a previous unclosed block', () => {
+  const out = formatAgentMessageTags('<agent-message from="a">one\n<agent-message from="b">two')
+  assert.match(out, /from `a`\n>\n> one/)
+  assert.match(out, /from `b`\n>\n> two/)
+})

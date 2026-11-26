@@ -4,54 +4,15 @@
 // 被 skipHtml 吞掉后，后台只剩空白或丢失正文。这里在交给 Markdown 之前，把该标签转成
 // 带来源标注的引用块：标签语义可见、正文仍按 Markdown 渲染。
 //
-// - 围栏代码块（``` / ~~~）内的内容原样保留，不做转换。
-// - 未闭合的标签（流式 / 截断预览）视为一直延伸到所在非代码段落末尾。
-// - 孤立的 </agent-message> 直接去掉，避免被 skipHtml 吞成空行以外的副作用。
+// - 逐行扫描并维护围栏（``` / ~~~）状态：围栏内的内容（包括其中的标签文本）原样保留；
+//   位于标签正文中的围栏代码块属于该标签，会随正文一起进入引用块，不会把引用截断。
+// - 未闭合的标签（流式 / 截断预览）视为一直延伸到文本末尾；新的开标签会结束上一个未闭合块。
+// - 自闭合标签 <agent-message from="x"/> 生成只含标题的引用块，不吞后续文本。
+// - 孤立的 </agent-message> 直接去掉。
 
-const AGENT_MESSAGE_BLOCK = /<agent-message(\s[^>]*)?>([\s\S]*?)(?:<\/agent-message\s*>|$)/gi
-const AGENT_MESSAGE_CLOSE = /<\/agent-message\s*>/gi
+const TAG = /<agent-message(\s[^>]*?)?(\/)?>|<\/agent-message\s*>/gi
 const FROM_ATTRIBUTE = /\bfrom\s*=\s*(?:"([^"]*)"|'([^']*)')/i
 const FENCE_OPEN = /^[ \t]{0,3}(`{3,}|~{3,})/
-
-interface Segment {
-  text: string
-  code: boolean
-}
-
-function splitByFence(text: string): Segment[] {
-  const lines = text.split('\n')
-  const segments: Segment[] = []
-  let buffer: string[] = []
-  let fence: string | null = null
-
-  const flush = (code: boolean) => {
-    if (buffer.length === 0) return
-    segments.push({ text: buffer.join('\n'), code })
-    buffer = []
-  }
-
-  for (const line of lines) {
-    if (fence === null) {
-      const open = FENCE_OPEN.exec(line)
-      if (open) {
-        flush(false)
-        fence = open[1]
-        buffer.push(line)
-      } else {
-        buffer.push(line)
-      }
-      continue
-    }
-    buffer.push(line)
-    const trimmed = line.trim()
-    if (trimmed.length >= fence.length && trimmed[0] === fence[0] && trimmed === trimmed[0].repeat(trimmed.length)) {
-      flush(true)
-      fence = null
-    }
-  }
-  flush(fence !== null)
-  return segments
-}
 
 function quote(body: string): string {
   return body.split('\n').map((line) => (line.trim() === '' ? '>' : `> ${line}`)).join('\n')
@@ -66,12 +27,69 @@ function renderBlock(attributes: string | undefined, body: string): string {
   return `\n\n${quote(lines)}\n\n`
 }
 
+function closesFence(line: string, fence: string): boolean {
+  const trimmed = line.trim()
+  return trimmed.length >= fence.length && trimmed[0] === fence[0] && trimmed === trimmed[0].repeat(trimmed.length)
+}
+
 export function formatAgentMessageTags(text: string): string {
   if (!text || !/<\/?agent-message/i.test(text)) return text
-  return splitByFence(text).map((segment) => {
-    if (segment.code) return segment.text
-    return segment.text
-      .replace(AGENT_MESSAGE_BLOCK, (_match, attributes: string | undefined, body: string) => renderBlock(attributes, body))
-      .replace(AGENT_MESSAGE_CLOSE, '')
-  }).join('\n')
+
+  let out = ''
+  let body = ''
+  let attributes: string | undefined
+  let collecting = false
+  let fence: string | null = null
+
+  const append = (value: string) => {
+    if (collecting) body += value
+    else out += value
+  }
+  const finish = () => {
+    out += renderBlock(attributes, body)
+    collecting = false
+    body = ''
+    attributes = undefined
+  }
+
+  const lines = text.split('\n')
+  lines.forEach((line, index) => {
+    const lastLine = index === lines.length - 1
+
+    if (fence !== null) {
+      append(line)
+      if (closesFence(line, fence)) fence = null
+    } else {
+      const open = FENCE_OPEN.exec(line)
+      if (open) {
+        fence = open[1]
+        append(line)
+      } else {
+        let cursor = 0
+        TAG.lastIndex = 0
+        for (let match = TAG.exec(line); match !== null; match = TAG.exec(line)) {
+          append(line.slice(cursor, match.index))
+          cursor = match.index + match[0].length
+          const isClose = match[0].startsWith('</')
+          if (isClose) {
+            if (collecting) finish()
+            continue
+          }
+          if (collecting) finish()
+          if (match[2]) {
+            out += renderBlock(match[1], '')
+          } else {
+            collecting = true
+            attributes = match[1]
+          }
+        }
+        append(line.slice(cursor))
+      }
+    }
+
+    if (!lastLine) append('\n')
+  })
+
+  if (collecting) finish()
+  return out
 }
