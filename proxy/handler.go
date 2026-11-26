@@ -3703,7 +3703,7 @@ func isRetryableStatus(code int) bool {
 
 func shouldRetryHTTPStatus(statusCode int, body []byte, generalRetries *int, rateLimitRetries *int, maxGeneralRetries, maxRateLimitRetries int, policies ...database.ContinuousRetryPolicy) bool {
 	policy := continuousRetryPolicyForCall(policies)
-	if isExplicitUpstreamCyberPolicy(body) {
+	if isExplicitUpstreamCyberPolicy(body) || isInvalidInputImagePayload(body) {
 		return false
 	}
 	if isExplicitUpstreamSafetyPolicy(body) && !policy.CatchesAllUpstreamFailures() {
@@ -3756,7 +3756,7 @@ func shouldRetryRequestError(err error, generalRetries *int, maxGeneralRetries i
 // ErrUpstream(0, ..., cause) for failures from http.Client.Do; those remain
 // retryable even though a status-less Error cannot set Retryable by status.
 func isRetryableRequestError(err error) bool {
-	if err == nil {
+	if err == nil || isInvalidInputImageRequestError(err) {
 		return false
 	}
 	if errors.Is(err, context.Canceled) {

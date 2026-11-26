@@ -376,7 +376,9 @@ Codex 瞬时账号限流按 `15s → 30s → 60s → 120s → 240s → 300s` 退
 
 启用后，类别、精确 HTTP 状态码或精确上游错误代码任一命中即可持续重试；`http_4xx`、403、404、上下文错误以及“全部 `response.failed`”等宽泛或确定性故障需要管理员显式选择，501 则已由默认的 `http_5xx` 类别覆盖。普通自选模式不会把未选中的 `invalid_request` 或结构化安全策略拒绝自动升级为无限重试。
 
-`catch_all` 是默认关闭的超级模式。开启后不再依赖已知类别或错误码清单；除明确的上游 `cyber_policy` 外，任何真实上游 HTTP、传输、流读取、`error`、`response.failed` 或未知失败都会进入持续重试，包括永久额度、余额、鉴权、无效请求和其他结构化安全策略错误。明确的上游 `cyber_policy` 始终终止当前请求，不换号、不重放。文本推理只接受上游 HTTP `200` 及协议正常终态；其他状态、失败终态及无终态 EOF 都会丢弃整次尝试并继续。管理界面的超级开关会在一次保存中同时设置 `enabled=true` 和 `catch_all=true`；关闭总开关会同步清除 `catch_all`，避免隐藏启用。
+`catch_all` 是默认关闭的超级模式。开启后不再依赖已知类别或错误码清单；除明确的上游 `cyber_policy` 和已识别的无效输入图片终态外，任何真实上游 HTTP、传输、流读取、`error`、`response.failed` 或未知失败都会进入持续重试，包括永久额度、余额、鉴权、无效请求和其他结构化安全策略错误。明确的上游 `cyber_policy` 始终终止当前请求，不换号、不重放。文本推理只接受上游 HTTP `200` 及协议正常终态；其他状态、失败终态及无终态 EOF 都会丢弃整次尝试并继续。管理界面的超级开关会在一次保存中同时设置 `enabled=true` 和 `catch_all=true`；关闭总开关会同步清除 `catch_all`，避免隐藏启用。
+
+无效输入图片终态只匹配结构化 `invalid_request_error` / `invalid_value` / `param=input`，且消息为 `The image data you provided does not represent a valid image.`（可带 `Please check your input and try again.`）。HTTP、流内错误和 Images 均停止重试，即使显式选择400、该错误码或超级模式也不例外。其他 `invalid_value`、通用400和瞬态错误沿用既有策略；网关不会删除或修复请求里的图片。
 
 持续重试会把每次流式上游尝试完整暂存；失败整次丢弃，正常终态才一次性回放。目标端点等待上游响应头、读取响应体或流数据时保持下游连接：Responses、Chat Completions 和 Images 在首个保活周期到达时建立 SSE 200 并发送 `: keepalive` 注释，Messages 发送 Anthropic 原生 `event: ping`；Responses、Realtime 与 Live Sideband WebSocket 使用 Ping 控制帧。原生 Grok SSE 仍保留上游帧格式并允许插入保活帧。心跳提交 SSE 后，随后的上游错误会使用协议错误事件，不再改变 HTTP 200。非流式 JSON（包括 relay/native Responses、compact、Grok 图片和 Alpha Search，但不包括 Codex/GPT Images）使用标准 HTTP `102 Processing` 信息响应，不提交最终状态或 JSON；Cloudflare 收到 102 后仍要求在 125 秒内收到最终响应，因此它只能延长等待，不是无限期保活。`max_duration_seconds` 设置无限预算的墙钟时间上限（默认 600 秒，范围 1 到 900 秒），从请求第一次进入无限重试时开始，后续尝试不会重置。期限到达会立即取消上游并返回最近一次真实上游失败；仅在尚无失败可返回时使用 `504 upstream_timeout`。普通自选模式不会无限重试未选中的结构化安全策略拒绝；`catch_all` 可覆盖其他拒绝，但不能覆盖明确的上游 `cyber_policy` 或本地重试期限。
 
