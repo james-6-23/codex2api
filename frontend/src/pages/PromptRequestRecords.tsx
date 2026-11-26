@@ -5,6 +5,7 @@ import { ChevronDown, ChevronRight, Download, ExternalLink, ListChecks, MessageS
 import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { api } from '../api'
+import { formatAgentMessageTags } from '../lib/agentMessageMarkdown'
 import {
   formatPromptRequestSections, formatPromptRequestChange, formatPromptRequestChangeSections,
   promptRequestContextCoversPart, promptRequestReadInstruction, type PromptRequestTextPart,
@@ -957,7 +958,7 @@ function TaskReplyMarkdown({ text }: { text: string }) {
     <Markdown skipHtml remarkPlugins={[remarkGfm]} urlTransform={(value) => requestTraceHref(value) ?? ''} components={{
       a: ({ href, children }) => href ? <a href={href} target="_blank" rel="noopener noreferrer">{children}</a> : <span>{children}</span>,
       img: ({ alt }) => <span>{alt || t('promptFilter.requests.readable.image')}</span>,
-    }}>{text}</Markdown>
+    }}>{formatAgentMessageTags(text)}</Markdown>
   </div>
 }
 
