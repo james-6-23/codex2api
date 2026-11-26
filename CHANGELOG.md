@@ -1,5 +1,31 @@
 # Changelog
 
+## v3.2.1 - 2026-11-27
+
+### Features
+
+- **Codex OAuth requests forward the client's `x-codex-exclude` header (#922, requested by @mice33).** HTTP requests and WebSocket handshakes pass the client's value to the upstream unchanged and omit the header when the client omits it. Upstream WebSocket reuse includes the value in the connection identity, so changing the setting within a session switches to a matching connection.
+
+- **Administrators can reset an API key's weekly quota without raising its 30-day limit (#917, @ghchdll).** The new key-list action clears the current 7-day usage and exempts the covered costs from the rolling 30-day spending limit. Exemptions expire with the original records, the configured limits remain unchanged, and billing history is preserved. Retries are idempotent, and PostgreSQL and SQLite both store per-record snapshots.
+
+- **Request recording can exclude selected API keys (#919, @BobChuang).** Administrators can search for and select keys next to the retention setting. Excluded keys skip recording and their existing records are hidden from the list and replays. Clearing the exclusion resumes recording for new requests.
+
+- **The public usage page shows full account cards and supports self-service reauthorization (#925, @Blaskyy).** Cards reuse the admin account display, with request counts and costs limited to the current key. Besides using reset credits, key holders can reauthorize an existing visible account through a single-use session that expires after five minutes and is bound to the key, account, upstream user and workspace. The page cannot add or rebind accounts.
+
+### Fixes
+
+- **WorkBuddy conversations replay as complete multi-turn tasks (#918, @BobChuang).** Chat Completions requests from the same key are linked through request history, recorded replies and tool results. Context compaction and automatic continuations stay within the original user turn. Tool-only, interrupted and final responses are labeled separately, and active tasks refresh automatically.
+
+- **Request replays display `agent-message` blocks from sub-agents (#926, @TsinHzl).** Tags emitted by multi-agent clients are rendered as labeled quotes instead of being dropped. Tags inside code fences remain unchanged, and unclosed tags in truncated previews extend to the end of the text.
+
+- **Official OpenAI pricing sync parses retired-model rows (#920, @mianfeikejiwl).** The pricing page now wraps some model names in `{"label": ...}` objects, which caused the entire sync to fail. The parser accepts both formats and skips rows without a usable model name.
+
+- **Single-account CPA JSON exports are top-level objects (#923, reported by @MagnetOscar, #924, @koeria).** CPA rejects auth files whose top level is an array. Exporting one account from the account page or recycle bin now writes the object itself, while multi-account exports remain arrays.
+
+- **The Codex Team plan filter includes Team 5x accounts (#927, @saiveen1).** Accounts on `self_serve_business_prolite` appear when filtering by Team. Filtering by the original plan name still works, and other channels keep their existing matching.
+
+- **Updated `gorilla/websocket` to address GO-2026-6278 (#920, @mianfeikejiwl).** The previous version used a weak random number generator for WebSocket masking keys. `govulncheck` reports no vulnerabilities.
+
 ## v3.2.0 - 2026-11-23
 
 > **Security upgrade notice.** [Issue #916](https://github.com/james-6-23/codex2api/issues/916), reported by @azure9, identified backdoored releases tagged `v3.1.10`, `v3.1.11` and `v3.1.12`. Upgrade to `v3.2.0` from the official release. If you ran an affected version, isolate the deployment, preserve logs, redeploy from a trusted environment and rotate credentials accessible to the old instance. The seven commits identified in the report are outside the history of this release.
