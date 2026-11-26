@@ -9,6 +9,7 @@ import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
 import { useIntelligenceBars } from "../hooks/useIntelligenceBars";
 import AccountIntelligenceBar, { AccountIntelligenceActions } from "../components/AccountIntelligenceBar";
 import type { IntelligenceBar } from "../lib/intelligenceCheck";
+import { accountGroupChanges } from "../lib/accountQuickConfig";
 import type { ChangeEvent, DragEvent, ReactNode } from "react";
 import { memo, useCallback, useEffect, useRef, useState, useMemo } from "react";
 
@@ -5341,11 +5342,15 @@ export default function Accounts() {
 
   const handleQuickGroupSave = async () => {
     if (!quickGroupAccount) return;
+    const changes = accountGroupChanges(quickGroupAccount.group_ids ?? [], quickGroupIds);
+    if (!changes.group_ids) {
+      setQuickGroupAccount(null);
+      setQuickGroupIds([]);
+      return;
+    }
     setQuickGroupSubmitting(true);
     try {
-      await api.updateAccountScheduler(quickGroupAccount.id, {
-        group_ids: quickGroupIds,
-      });
+      await api.updateAccountScheduler(quickGroupAccount.id, changes);
       showToast(t("accounts.groupQuickSaveDone"));
       await Promise.all([reload(), reloadGroups()]);
       setQuickGroupAccount(null);
@@ -6063,7 +6068,7 @@ export default function Accounts() {
         allowed_api_key_ids: allowedAPIKeySelection,
         proxy_url: editProxyUrl.trim() || null,
         tags: editTags,
-        group_ids: editGroupIds,
+        ...accountGroupChanges(editingAccount.group_ids ?? [], editGroupIds),
         auto_pause_5h_threshold: percentThresholdInputToRatio(
           editAutoPause5hThresholdInput,
         ),

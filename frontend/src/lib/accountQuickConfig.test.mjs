@@ -123,6 +123,16 @@ test("ready details round-trip custom headers and full fingerprint mode", () => 
   assert.equal(result.payload.proxy_url, "http://127.0.0.1:7890");
 });
 
+test("quick configuration sends groups only when the selection changes", () => {
+  const form = formStateFromAccount({ ...detailedRow, group_ids: [1, 2] });
+  for (const [groupIds, expected] of [[[2, 1], undefined], [[2, 3], [2, 3]], [[], []]]) {
+    const result = buildQuickConfigSavePayload({ ...form, groupIds }, true);
+    assert.equal(result.ok, true);
+    assert.equal("group_ids" in result.payload, expected !== undefined);
+    assert.deepEqual(result.payload.group_ids, expected);
+  }
+});
+
 test("clearing the headers field after details loaded sends null, not an omitted key", () => {
   const form = {
     ...formStateFromAccount(detailedRow),

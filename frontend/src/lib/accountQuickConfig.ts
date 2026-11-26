@@ -45,6 +45,7 @@ export interface QuickConfigFormState {
   customHeadersText: string;
   tags: string[];
   groupIds: number[];
+  initialGroupIds: number[];
 }
 
 export function accountHasQuickConfigDetails(
@@ -130,6 +131,7 @@ export function formStateFromAccount(
     customHeadersText: formatCustomHeadersText(account.custom_headers),
     tags: account.tags ?? [],
     groupIds: account.group_ids ?? [],
+    initialGroupIds: account.group_ids ?? [],
   };
 }
 
@@ -151,6 +153,17 @@ export function canSaveQuickConfig(options: {
     !options.saving &&
     isQuickConfigFormCurrent(options.form, options.accountId)
   );
+}
+
+export function accountGroupChanges(
+  initial: readonly number[],
+  current: number[],
+): Pick<UpdateAccountSchedulerRequest, "group_ids"> {
+  const before = new Set(initial);
+  const after = new Set(current);
+  return before.size === after.size && [...after].every((id) => before.has(id))
+    ? {}
+    : { group_ids: current };
 }
 
 export function buildQuickConfigSavePayload(
@@ -209,7 +222,7 @@ export function buildQuickConfigSavePayload(
       upstream_request_id_header: form.upstreamRequestIdHeader.trim(),
       codex_fingerprint_mode: form.fingerprintMode,
       tags: form.tags,
-      group_ids: form.groupIds,
+      ...accountGroupChanges(form.initialGroupIds, form.groupIds),
     },
   };
 }
