@@ -618,7 +618,7 @@ function normalizePlanType(planType?: string): string {
 }
 
 export function isPremiumUsagePlan(planType?: string): boolean {
-  return ['plus', 'pro', 'team', 'teamplus', 'k12', 'edu', 'education', 'go'].includes(normalizePlanType(planType))
+  return ['plus', 'pro', 'team', 'teamplus', 'k12', 'edu', 'education', 'go', 'business', 'self_serve_business_usage_based', 'self_serve_business_prolite'].includes(normalizePlanType(planType))
 }
 
 /** Claude OAuth 的订阅档位，按 profile 归一化后的 plan_type 匹配。 */

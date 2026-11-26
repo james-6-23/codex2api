@@ -7,6 +7,7 @@ import {
   getAccountWindowMs,
   hasBurnPrediction,
   isClaudeUsagePlan,
+  isWindowRateLimitLike,
   selectPoolRunway,
   selectPoolRunwayFromAnalysis,
 } from "./poolRunway.ts";
@@ -33,6 +34,19 @@ test("hasBurnPrediction skips premium 5h when snapshot is missing (#382)", () =>
   const account = baseAccount({ plan_type: "plus", usage_percent_5h: null, reset_5h_at: undefined });
   assert.equal(hasBurnPrediction(account, "5h"), false);
   assert.equal(hasBurnPrediction({ ...account, usage_percent_5h: 40 }, "5h"), true);
+});
+
+test("Business aliases use the Codex 5h window only when observed", () => {
+  for (const plan of ["business", " Self_serve_business_usage_based ", "self_serve_business_prolite"]) {
+    const account = baseAccount({ plan_type: plan });
+    assert.equal(hasBurnPrediction(account, "5h"), false);
+    assert.equal(hasBurnPrediction({ ...account, usage_percent_5h: 40 }, "5h"), true);
+    assert.equal(isWindowRateLimitLike(account, "5h"), false);
+    assert.equal(isWindowRateLimitLike({ ...account, usage_percent_5h: 100 }, "5h"), true);
+  }
+  for (const plan of ["free", "not_business", "self_serve_business_unknown"]) {
+    assert.equal(hasBurnPrediction(baseAccount({ plan_type: plan, usage_percent_5h: 40 }), "5h"), false);
+  }
 });
 
 test("Claude Max plans participate in native 5h burn prediction", () => {
