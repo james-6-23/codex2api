@@ -127,3 +127,21 @@ test('real tags outside code spans are still converted next to code spans', () =
   const inBody = formatAgentMessageTags('<agent-message from="a">use `</agent-message>` literally</agent-message>')
   assert.match(inBody, /> use `<\/agent-message>` literally/)
 })
+
+test('fence on the same line as the opening tag keeps its contents literal', () => {
+  const out = formatAgentMessageTags('<agent-message from="a">```xml\n</agent-message>\n```\nafter\n</agent-message>\ntail')
+  assert.match(out, /> \*\*agent-message\*\* · from `a`\n>\n> ```xml\n> <\/agent-message>\n> ```\n> after\n\n\ntail$/)
+})
+
+test('backtick fence with a backtick in its info string is not a fence', () => {
+  const out = formatAgentMessageTags('```not`a-fence\n\n<agent-message from="a">\nhello\n</agent-message>')
+  assert.match(out, /> \*\*agent-message\*\* · from `a`\n>\n> hello/)
+  assert.doesNotMatch(out, /<\/?agent-message/)
+})
+
+test('tilde fence info strings may contain backticks and still protect tags', () => {
+  const text = '~~~a`b\n<agent-message>x</agent-message>\n~~~'
+  assert.equal(formatAgentMessageTags(text), text)
+  const valid = '```js title=x\n<agent-message>x</agent-message>\n```'
+  assert.equal(formatAgentMessageTags(valid), valid)
+})

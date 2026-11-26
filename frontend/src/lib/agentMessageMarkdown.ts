@@ -6,7 +6,8 @@
 //
 // - 逐行扫描并维护围栏（``` / ~~~）状态：围栏内的内容（包括其中的标签文本）原样保留；
 //   位于标签正文中的围栏代码块属于该标签，会随正文一起进入引用块，不会把引用截断。
-//   围栏的开/闭缩进遵循 CommonMark：最多 3 个空格，缩进 4 个及以上不算围栏。
+//   围栏的开/闭缩进遵循 CommonMark：最多 3 个空格，缩进 4 个及以上不算围栏；
+//   反引号围栏的信息串含反引号时不是围栏；围栏紧跟在开标签同一行时同样识别。
 // - 行内代码（`...`）中的标签保持字面显示，不转换。
 // - 开标签允许跨多行书写（属性中含换行）；超过上限仍未出现 ">" 时按普通文本处理。
 // - 未闭合的标签（流式 / 截断预览）视为一直延伸到文本末尾；新的开标签会结束上一个未闭合块。
@@ -17,8 +18,14 @@ const TAG = /<agent-message(\s[^>]*?)?(\/)?>|<\/agent-message\s*>/gi
 // 行尾处于“开标签尚未写完”的状态：<agent-message 或 <agent-message ...（没有 ">"）
 const INCOMPLETE_OPEN_TAG = /<agent-message(?:\s[^>]*)?$/i
 const FROM_ATTRIBUTE = /\bfrom\s*=\s*(?:"([^"]*)"|'([^']*)')/i
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/
+// CommonMark 围栏开头：反引号围栏的信息串（info string）不能再含反引号，波浪线围栏不受此限制。
+const FENCE_OPEN = /^ {0,3}(?:(`{3,})[^`]*|(~{3,})[^\n]*)$/
 const MAX_OPEN_TAG_LINES = 8
+
+function fenceMarker(line: string): string | null {
+  const match = FENCE_OPEN.exec(line)
+  return match ? (match[1] ?? match[2]) : null
+}
 
 type Range = [start: number, end: number]
 
@@ -130,6 +137,15 @@ export function formatAgentMessageTags(text: string): string {
       } else {
         collecting = true
         attributes = match[1]
+        // 围栏紧跟在开标签之后（同一行）：生成引用块后它位于正文行首，是合法围栏，
+        // 其内容（包括其中的标签文本）必须保持字面。
+        const rest = segment.slice(cursor)
+        const marker = fenceMarker(rest)
+        if (marker) {
+          fence = marker
+          append(rest)
+          return
+        }
       }
     }
     append(segment.slice(cursor))
@@ -147,13 +163,13 @@ export function formatAgentMessageTags(text: string): string {
       continue
     }
 
-    const open = FENCE_OPEN.exec(line)
-    if (open) {
+    const marker = fenceMarker(line)
+    if (marker) {
       if (pending !== null) {
         append(`${pending}\n`)
         pending = null
       }
-      fence = open[1]
+      fence = marker
       append(line)
       if (!lastLine) append('\n')
       continue
