@@ -84,3 +84,46 @@ test('a new opening tag ends a previous unclosed block', () => {
   assert.match(out, /from `a`\n>\n> one/)
   assert.match(out, /from `b`\n>\n> two/)
 })
+
+test('four-space indented fence marker does not close a fence', () => {
+  const text = '```xml\n    ```\n<agent-message>literal</agent-message>\n```'
+  assert.equal(formatAgentMessageTags(text), text)
+})
+
+test('fence marker indented up to three spaces still closes the fence', () => {
+  const out = formatAgentMessageTags('```\nx\n   ```\n<agent-message from="a">real</agent-message>')
+  assert.match(out, /> \*\*agent-message\*\* · from `a`\n>\n> real/)
+  const tab = '```\n\t```\n<agent-message>literal</agent-message>\n```'
+  assert.equal(formatAgentMessageTags(tab), tab)
+})
+
+test('opening tag split across lines is recognised and sender newlines are flattened', () => {
+  const out = formatAgentMessageTags('<agent-message\nfrom="a\nb">body</agent-message>\nafter')
+  assert.match(out, /> \*\*agent-message\*\* · from `a b`\n>\n> body/)
+  assert.match(out, /\nafter$/)
+  assert.doesNotMatch(out, /<agent-message/)
+  const closeOnNextLine = formatAgentMessageTags('before <agent-message from="x"\n>hi</agent-message>')
+  assert.match(closeOnNextLine, /^before \n\n> \*\*agent-message\*\* · from `x`\n>\n> hi/)
+})
+
+test('an unfinished opening tag stays literal when no closing bracket arrives', () => {
+  assert.equal(formatAgentMessageTags('text <agent-message'), 'text <agent-message')
+  const withFence = '<agent-message\n```\ncode\n```'
+  assert.equal(formatAgentMessageTags(withFence), withFence)
+  const long = '<agent-message\n' + 'x\n'.repeat(12) + 'y'
+  assert.equal(formatAgentMessageTags(long), long)
+})
+
+test('tags inside inline code spans stay literal', () => {
+  const single = 'Use `<agent-message from="x">literal</agent-message>` here.'
+  assert.equal(formatAgentMessageTags(single), single)
+  const double = 'a ``<agent-message>`x</agent-message>`` b'
+  assert.equal(formatAgentMessageTags(double), double)
+})
+
+test('real tags outside code spans are still converted next to code spans', () => {
+  const out = formatAgentMessageTags('`<agent-message>` and <agent-message from="y">real</agent-message>')
+  assert.match(out, /^`<agent-message>` and \n\n> \*\*agent-message\*\* · from `y`\n>\n> real/)
+  const inBody = formatAgentMessageTags('<agent-message from="a">use `</agent-message>` literally</agent-message>')
+  assert.match(inBody, /> use `<\/agent-message>` literally/)
+})

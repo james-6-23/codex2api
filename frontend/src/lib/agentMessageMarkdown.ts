@@ -6,13 +6,21 @@
 //
 // - 逐行扫描并维护围栏（``` / ~~~）状态：围栏内的内容（包括其中的标签文本）原样保留；
 //   位于标签正文中的围栏代码块属于该标签，会随正文一起进入引用块，不会把引用截断。
+//   围栏的开/闭缩进遵循 CommonMark：最多 3 个空格，缩进 4 个及以上不算围栏。
+// - 行内代码（`...`）中的标签保持字面显示，不转换。
+// - 开标签允许跨多行书写（属性中含换行）；超过上限仍未出现 ">" 时按普通文本处理。
 // - 未闭合的标签（流式 / 截断预览）视为一直延伸到文本末尾；新的开标签会结束上一个未闭合块。
 // - 自闭合标签 <agent-message from="x"/> 生成只含标题的引用块，不吞后续文本。
 // - 孤立的 </agent-message> 直接去掉。
 
 const TAG = /<agent-message(\s[^>]*?)?(\/)?>|<\/agent-message\s*>/gi
+// 行尾处于“开标签尚未写完”的状态：<agent-message 或 <agent-message ...（没有 ">"）
+const INCOMPLETE_OPEN_TAG = /<agent-message(?:\s[^>]*)?$/i
 const FROM_ATTRIBUTE = /\bfrom\s*=\s*(?:"([^"]*)"|'([^']*)')/i
-const FENCE_OPEN = /^[ \t]{0,3}(`{3,}|~{3,})/
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/
+const MAX_OPEN_TAG_LINES = 8
+
+type Range = [start: number, end: number]
 
 function quote(body: string): string {
   return body.split('\n').map((line) => (line.trim() === '' ? '>' : `> ${line}`)).join('\n')
@@ -28,8 +36,58 @@ function renderBlock(attributes: string | undefined, body: string): string {
 }
 
 function closesFence(line: string, fence: string): boolean {
-  const trimmed = line.trim()
-  return trimmed.length >= fence.length && trimmed[0] === fence[0] && trimmed === trimmed[0].repeat(trimmed.length)
+  // CommonMark：闭合围栏最多缩进 3 个空格（制表符视为 4 个空格），因此必须先看原始缩进。
+  const indent = /^[ \t]*/.exec(line)?.[0] ?? ''
+  if (indent.includes('\t') || indent.length > 3) return false
+  const marker = line.trim()
+  return marker.length >= fence.length && marker[0] === fence[0] && marker === marker[0].repeat(marker.length)
+}
+
+// 返回一行（或跨行拼接文本）中所有行内代码的 [start, end) 区间。
+// 规则：N 个反引号开头，到下一个恰好 N 个反引号的串结束；找不到结束串则这些反引号是字面量。
+function codeSpanRanges(text: string): Range[] {
+  const ranges: Range[] = []
+  let i = 0
+  while (i < text.length) {
+    const ch = text[i]
+    if (ch === '\\') {
+      i += 2
+      continue
+    }
+    if (ch !== '`') {
+      i += 1
+      continue
+    }
+    let runEnd = i
+    while (text[runEnd] === '`') runEnd += 1
+    const runLength = runEnd - i
+    let cursor = runEnd
+    let spanEnd = -1
+    while (cursor < text.length) {
+      if (text[cursor] !== '`') {
+        cursor += 1
+        continue
+      }
+      let closeEnd = cursor
+      while (text[closeEnd] === '`') closeEnd += 1
+      if (closeEnd - cursor === runLength) {
+        spanEnd = closeEnd
+        break
+      }
+      cursor = closeEnd
+    }
+    if (spanEnd < 0) {
+      i = runEnd
+      continue
+    }
+    ranges.push([i, spanEnd])
+    i = spanEnd
+  }
+  return ranges
+}
+
+function insideRange(ranges: Range[], index: number): boolean {
+  return ranges.some(([start, end]) => index >= start && index < end)
 }
 
 export function formatAgentMessageTags(text: string): string {
@@ -40,6 +98,7 @@ export function formatAgentMessageTags(text: string): string {
   let attributes: string | undefined
   let collecting = false
   let fence: string | null = null
+  let pending: string | null = null // 尚未写完的开标签（可能跨多行）
 
   const append = (value: string) => {
     if (collecting) body += value
@@ -52,44 +111,68 @@ export function formatAgentMessageTags(text: string): string {
     attributes = undefined
   }
 
+  // 处理一段不含围栏的正文：把标签转成引用块，行内代码中的标签保持原样。
+  const processProse = (segment: string) => {
+    const spans = codeSpanRanges(segment)
+    let cursor = 0
+    TAG.lastIndex = 0
+    for (let match = TAG.exec(segment); match !== null; match = TAG.exec(segment)) {
+      if (insideRange(spans, match.index)) continue
+      append(segment.slice(cursor, match.index))
+      cursor = match.index + match[0].length
+      if (match[0].startsWith('</')) {
+        if (collecting) finish()
+        continue
+      }
+      if (collecting) finish()
+      if (match[2]) {
+        out += renderBlock(match[1], '')
+      } else {
+        collecting = true
+        attributes = match[1]
+      }
+    }
+    append(segment.slice(cursor))
+  }
+
   const lines = text.split('\n')
-  lines.forEach((line, index) => {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index]
     const lastLine = index === lines.length - 1
 
     if (fence !== null) {
       append(line)
       if (closesFence(line, fence)) fence = null
-    } else {
-      const open = FENCE_OPEN.exec(line)
-      if (open) {
-        fence = open[1]
-        append(line)
-      } else {
-        let cursor = 0
-        TAG.lastIndex = 0
-        for (let match = TAG.exec(line); match !== null; match = TAG.exec(line)) {
-          append(line.slice(cursor, match.index))
-          cursor = match.index + match[0].length
-          const isClose = match[0].startsWith('</')
-          if (isClose) {
-            if (collecting) finish()
-            continue
-          }
-          if (collecting) finish()
-          if (match[2]) {
-            out += renderBlock(match[1], '')
-          } else {
-            collecting = true
-            attributes = match[1]
-          }
-        }
-        append(line.slice(cursor))
-      }
+      if (!lastLine) append('\n')
+      continue
     }
 
-    if (!lastLine) append('\n')
-  })
+    const open = FENCE_OPEN.exec(line)
+    if (open) {
+      if (pending !== null) {
+        append(`${pending}\n`)
+        pending = null
+      }
+      fence = open[1]
+      append(line)
+      if (!lastLine) append('\n')
+      continue
+    }
 
+    const work: string = pending !== null ? `${pending}\n${line}` : line
+    pending = null
+    const partial = INCOMPLETE_OPEN_TAG.exec(work)
+    if (partial && !insideRange(codeSpanRanges(work), partial.index) && work.split('\n').length <= MAX_OPEN_TAG_LINES) {
+      processProse(work.slice(0, partial.index))
+      pending = work.slice(partial.index)
+      continue
+    }
+
+    processProse(work)
+    if (!lastLine) append('\n')
+  }
+
+  if (pending !== null) append(pending)
   if (collecting) finish()
   return out
 }
