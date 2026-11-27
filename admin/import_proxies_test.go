@@ -354,7 +354,8 @@ func TestImportDedupIsUnaffectedByProxyFields(t *testing.T) {
 	if got, want := importTokenCredentialFingerprint(withProxy, conflicts), importTokenCredentialFingerprint(base, conflicts); got != want {
 		t.Fatalf("credential fingerprint drifted with proxy: %q vs %q", got, want)
 	}
-	if got, want := importTokenOAuthIdentityKey(withProxy, conflicts), importTokenOAuthIdentityKey(base, conflicts); got != want {
+	guard := newImportOAuthIdentityGuard(conflicts, nil)
+	if got, want := guard.key(withProxy), guard.key(base); got != want {
 		t.Fatalf("oauth identity key drifted with proxy: %q vs %q", got, want)
 	}
 	if got, want := importTokenSeed(withProxy, conflicts), importTokenSeed(base, conflicts); !reflect.DeepEqual(got, want) {

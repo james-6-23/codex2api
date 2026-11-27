@@ -5,6 +5,7 @@ import { getAccountQuotaPausePresentation } from "@/lib/accountQuotaPause";
 import { AccountCardSurface, AccountCardHeader, AccountCardBody, AccountCardDetailLink, AccountCardMetric, AccountCardTimestamp } from "../components/AccountCardSurface";
 import AccountUsageBar from "../components/AccountUsageBar";
 import APIKeyMultiSelect from "../components/APIKeyMultiSelect";
+import { sendAccountImportBatches, splitAccountImportFiles } from "../lib/accountImportBatches";
 import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
 import { useIntelligenceBars } from "../hooks/useIntelligenceBars";
 import AccountIntelligenceBar, { AccountIntelligenceActions } from "../components/AccountIntelligenceBar";
@@ -283,11 +284,8 @@ import ChipInput from "../components/ChipInput";
 
 const OPERATION_PROGRESS_FLUSH_INTERVAL_MS = 200;
 
-// 账号导入的体积约束。后端对导入端点放宽到 200MB;单个文件无法再切分,超过
-// 上限直接拒绝。多文件按累计大小切成多批,每批控制在 150MB 内(留余量给
-// multipart 边界与其它表单字段),避免单个请求体触发后端上限。
+// Single files cannot be split; multipart batch limits are applied separately.
 const IMPORT_MAX_FILE_BYTES = 200 * 1024 * 1024;
-const IMPORT_BATCH_MAX_BYTES = 150 * 1024 * 1024;
 const API_BALANCE_CACHE_TTL_MS = 60_000;
 const API_BALANCE_ERROR_CACHE_TTL_MS = 15_000;
 
@@ -391,25 +389,6 @@ function AccountConcurrencyBadge({ account }: { account: AccountRow }) {
       )}
     </span>
   );
-}
-
-// splitFilesIntoBatches 按累计字节大小把文件分批。单个文件即便超过 batchMax
-// 也自成一批(交由后端上限兜底),保证每个文件都被投递。
-function splitFilesIntoBatches(files: File[], batchMax: number): File[][] {
-  const batches: File[][] = [];
-  let current: File[] = [];
-  let currentSize = 0;
-  for (const file of files) {
-    if (current.length > 0 && currentSize + file.size > batchMax) {
-      batches.push(current);
-      current = [];
-      currentSize = 0;
-    }
-    current.push(file);
-    currentSize += file.size;
-  }
-  if (current.length > 0) batches.push(current);
-  return batches.length > 0 ? batches : [[]];
 }
 
 const ACCOUNT_ANALYSIS_VISIBILITY_KEY = "codex2api:accounts:analysis-visible";
@@ -2143,6 +2122,7 @@ export default function Accounts() {
     failed: 0,
     done: false,
   });
+  const [importPreflight, setImportPreflight] = useState<{ current: number; total: number } | null>(null);
   // 导入后的邀请积分引导。ids 是本次导入新建的账号,后端会过滤出能发邀请的。
   const [inviteGuide, setInviteGuide] = useState<{ show: boolean; ids: number[] }>({
     show: false,
@@ -4376,9 +4356,8 @@ export default function Accounts() {
       return false;
     }
 
-    // 按累计大小把文件切成多批,每批控制在 IMPORT_BATCH_MAX_BYTES 内,避免单个
-    // 请求体过大触发后端限制;后端导入无状态且按凭据幂等去重,分批完全安全。
-    const batches = splitFilesIntoBatches(files, IMPORT_BATCH_MAX_BYTES);
+    if (!files.length) return false;
+    const batches = splitAccountImportFiles(files);
 
     setImporting(true);
     setImportProgress({
@@ -4405,41 +4384,50 @@ export default function Accounts() {
     const importedAccountIDs: number[] = [];
     // 本次导入注册进代理池的代理统计,跨批累加后在结束 toast 里汇报。
     const proxySummary = { imported: 0, skipped: 0, warnings: [] as string[] };
+    const isJSON = format === "json" || format === "json_at";
     // 只有 JSON 系格式的文件才可能携带代理,后端也只对这两种格式认这个开关。
-    const carriesFileProxies =
-      importFileProxies && (format === "json" || format === "json_at");
+    const carriesFileProxies = importFileProxies && isJSON;
+
+    const makeForm = (batch: File[]) => {
+      const formData = new FormData();
+      if (format !== "txt") formData.append("format", format);
+      const trimmedImportProxy = (options.proxyUrl ?? importProxyUrl).trim();
+      if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
+      const timezone = options.timezone?.trim();
+      if (timezone) formData.append("timezone", timezone);
+      if (carriesFileProxies) formData.append("import_proxy", "true");
+      const routedHeaders = applyOptionalWorkspaceRouteHeader(
+        parsedCustomHeaders.value,
+        options.workspaceRouteID,
+      );
+      if (routedHeaders) {
+        formData.append("custom_headers", JSON.stringify(routedHeaders));
+      }
+      if (allowDuplicate) formData.append("allow_duplicate", "true");
+      if (importGroupIds.length > 0) {
+        formData.append("group_ids", JSON.stringify(importGroupIds));
+      }
+      for (const f of batch) formData.append("file", f);
+      return formData;
+    };
 
     try {
-      for (let i = 0; i < batches.length; i++) {
-        const batch = batches[i];
-        const formData = new FormData();
-        if (format !== "txt") formData.append("format", format);
-        const trimmedImportProxy = (options.proxyUrl ?? importProxyUrl).trim();
-        if (trimmedImportProxy) formData.append("proxy_url", trimmedImportProxy);
-        const timezone = options.timezone?.trim();
-        if (timezone) formData.append("timezone", timezone);
-        if (carriesFileProxies) formData.append("import_proxy", "true");
-        const routedHeaders = applyOptionalWorkspaceRouteHeader(
-          parsedCustomHeaders.value,
-          options.workspaceRouteID,
-        );
-        if (routedHeaders) {
-          formData.append("custom_headers", JSON.stringify(routedHeaders));
-        }
-        if (allowDuplicate) formData.append("allow_duplicate", "true");
-        if (importGroupIds.length > 0) {
-          formData.append("group_ids", JSON.stringify(importGroupIds));
-        }
-        for (const f of batch) formData.append("file", f);
-
-        const res = await fetch("/api/admin/accounts/import", {
+      const adminKey = getAdminKey();
+      const responses = sendAccountImportBatches(
+        batches,
+        isJSON,
+        makeForm,
+        (path, headers, body) => fetch(path, {
           method: "POST",
-          body: formData,
-          headers: getAdminKey() ? { "X-Admin-Key": getAdminKey() } : {},
-        });
-
+          body,
+          headers: { ...headers, ...(adminKey ? { "X-Admin-Key": adminKey } : {}) },
+        }),
+        setImportPreflight,
+      );
+      let batchIndex = 0;
+      for await (const res of responses) {
         // 只有最后一批完成后才标记 done,让进度条在多批之间保持运行态。
-        const isLastBatch = i === batches.length - 1;
+        const isLastBatch = ++batchIndex === batches.length;
         if (res.headers.get("content-type")?.includes("text/event-stream")) {
           await readImportSSE(
             res,
@@ -4449,7 +4437,7 @@ export default function Accounts() {
             proxySummary,
           );
         } else {
-          const data = await res.json();
+          const data = res.ok ? await res.json() : await res.json().catch(() => ({}));
           if (!res.ok) {
             setImportProgress((p) => ({ ...p, show: false }));
             showToast(
@@ -11543,16 +11531,20 @@ export default function Accounts() {
                   className="h-full bg-primary rounded-full transition-all duration-300 ease-out"
                   style={{
                     width:
-                      importProgress.total > 0
-                        ? `${Math.round((importProgress.current / importProgress.total) * 100)}%`
-                        : "0%",
+                      importPreflight
+                        ? `${Math.round((importPreflight.current / importPreflight.total) * 100)}%`
+                        : importProgress.total > 0
+                          ? `${Math.round((importProgress.current / importProgress.total) * 100)}%`
+                          : "0%",
                   }}
                 />
               </div>
               <div className="text-center text-sm text-muted-foreground">
-                {importProgress.total > 0
-                  ? `${importProgress.current} / ${importProgress.total}  (${Math.round((importProgress.current / importProgress.total) * 100)}%)`
-                  : t("accounts.importPreparing")}
+                {importPreflight
+                  ? `${t("accounts.importPreparing")} ${importPreflight.current} / ${importPreflight.total}`
+                  : importProgress.total > 0
+                    ? `${importProgress.current} / ${importProgress.total}  (${Math.round((importProgress.current / importProgress.total) * 100)}%)`
+                    : t("accounts.importPreparing")}
               </div>
               <div className="grid grid-cols-4 gap-2 text-center">
                 <div className="rounded-xl bg-emerald-500/10 px-2 py-2">
