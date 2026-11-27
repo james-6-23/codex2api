@@ -1,5 +1,6 @@
 {
   "status": {
+    "forbidden": "禁止存取",
     "unavailable": "暫不可用"
   },
   "keyUsage": {
@@ -9,6 +10,7 @@
     }
   },
   "keyUsageAccounts": {
+    "usageSampled": "用量取樣時間",
     "reauthReloadPending": "授權已儲存，但帳號尚未重新載入。請重新整理帳號清單，不要重複提交回呼。",
     "reauthorize": "重新授權",
     "keyRequests": "此 Key 請求數",

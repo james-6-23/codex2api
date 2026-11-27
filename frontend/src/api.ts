@@ -1,6 +1,7 @@
 import { intelligenceQuery, type IntelligenceSettings, type IntelligenceAccount, type IntelligenceRun, type IntelligenceBar, type IntelligencePage } from './lib/intelligenceCheck.ts'
 import { qualityTestFilterQuery, type QualityTestJob, type QualityTestJobsFilter, type QualityTestJobsResponse, type QualityTestPrompt } from './lib/qualityTest.ts'
 import type {
+  SubscriptionStatus,
   AccountEventTrendPoint,
   AccountPortalAuthURLResponse,
   AccountPortalSubmitResponse,
@@ -338,6 +339,14 @@ async function requestAccountPortal<T>(path: string, options: RequestInit = {}):
 }
 
 export interface PublicKeyUsageAccount {
+  updated_at?: string
+  using_credits?: boolean
+  limit_reason?: 'window_5h' | 'window_7d' | 'quota_paused' | 'quota_paused_5h' | 'quota_paused_7d' | 'rate_limited' | 'cooldown'
+  recovery_at?: string
+  subscription?: Pick<SubscriptionStatus, 'business_status' | 'plan' | 'expires_at' | 'days_remaining' | 'days_overdue' | 'auto_renew' | 'grace_until' | 'last_checked_at' | 'sync_state' | 'renewal_detected_at' | 'last_known_status' | 'timezone'>
+  usage_percent_spark?: number | null
+  usage_updated_at_spark?: string
+  reset_spark_at?: string
   id: number
   name: string
   email: string

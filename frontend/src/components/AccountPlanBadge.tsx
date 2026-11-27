@@ -17,6 +17,10 @@ export function normalizePlanType(planType?: string): string {
   return raw;
 }
 
+export function isSparkUsagePlan(planType?: string): boolean {
+  return normalizePlanType(planType) === "pro";
+}
+
 function formatPlanLabel(planType?: string): string {
   const raw = (planType || "").trim();
   if (!raw) return "-";

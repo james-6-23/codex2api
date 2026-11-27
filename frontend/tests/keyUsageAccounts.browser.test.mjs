@@ -205,9 +205,9 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
       window.__calls.push({ path, method: options.method || 'GET', auth: headers.get('Authorization'), idempotency: headers.get('Idempotency-Key'), body: options.body })
       let body = { view_enabled: true, reset_enabled: true }
       if (path === '/api/key-usage/accounts') body = { accounts: [
-        { id: 1, name: '账号甲', email: 'a@example.test', plan_type: 'plus', status: 'active', group_ids: [1], usage_percent_5h: 25, usage_percent_7d: 10, long_window_seconds: 2592000, requests_5h: 12, requests_7d: 301, user_billed_5h: 0.43, user_billed_7d: 8.24, health_tier: 'healthy', active_requests: 1, dynamic_concurrency_limit: 4, created_at: '2026-01-02T12:00:00Z', reset_credits: 2, reset_allowed: true, reauth_allowed: true },
-        { id: 2, name: '账号乙', email: '', plan_type: 'plus', status: 'active', group_ids: [2], usage_percent_5h: 60, usage_percent_7d: null, reset_credits: 0, reset_allowed: true },
-        { id: 3, name: '账号丙', email: '', plan_type: 'plus', status: 'active', group_ids: [1], usage_percent_5h: null, usage_percent_7d: null, reset_credits: 1, reset_allowed: false, reauth_allowed: true },
+        { id: 1, name: '账号甲', email: 'a@example.test', plan_type: 'free', status: 'active', group_ids: [1], updated_at: '2026-11-15T12:00:00Z', usage_updated_at_7d: '2026-11-17T12:00:00Z', usage_percent_5h: null, usage_percent_7d: 10, long_window_seconds: 2592000, requests_5h: 12, requests_7d: 301, user_billed_5h: 0.43, user_billed_7d: 8.24, health_tier: 'healthy', active_requests: 1, dynamic_concurrency_limit: 4, created_at: '2026-01-02T12:00:00Z', reset_credits: 2, reset_allowed: true, reauth_allowed: true },
+        { id: 2, name: '账号乙', email: '', plan_type: 'pro_lite', status: 'rate_limited', limit_reason: 'window_5h', recovery_at: new Date(Date.now()+3600000).toISOString(), using_credits: true, subscription: {plan: 'pro_lite', business_status: 'active', expires_at: '2030-01-15T12:00:00Z', days_remaining: 15, sync_state: 'confirmed'}, group_ids: [2], usage_percent_spark: 0, usage_percent_5h: 60, usage_percent_7d: null, reset_credits: 0, reset_allowed: true },
+        { id: 3, name: '账号丙', email: '', plan_type: 'pro_max', status: 'active', group_ids: [1], usage_percent_spark: null, usage_percent_5h: null, usage_percent_7d: null, reset_credits: 1, reset_allowed: false, reauth_allowed: true },
       ], groups: [{ id: 1, name: '一组' }, { id: 2, name: '二组' }], reset_enabled: true }
       if (options.method === 'PUT') body = JSON.parse(options.body)
       if (path === '/api/key-usage/accounts/3/reauth/start') body = { session_id: 'session-3', auth_url: 'https://example.invalid/fixture' }
@@ -229,8 +229,25 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
   assert.equal(await firstCard.locator('[data-health="healthy"]').count(), 1)
   assert.equal(await firstCard.locator('time[datetime="2026-01-02T12:00:00Z"]').count(), 1)
   assert.equal(await page.getByRole('article', { name: '账号丙' }).getByRole('button', { name: '使用重置卡' }).count(), 0)
-  assert.equal(await page.getByRole('article', { name: '账号乙' }).getByRole('button', { name: '重新授权', exact: true }).count(), 0)
+  assert.equal(await page.getByRole('article', { name: '账号乙' }).getByRole('button', { name: '重新授权', exact: true }).isDisabled(), true)
   const thirdCard = page.getByRole('article', { name: '账号丙' })
+  assert.equal(await firstCard.locator('.account-usage-track[aria-label="5h"]').count(), 0, 'do not invent a 5h quota for monthly-only accounts')
+  const secondCard = page.getByRole('article', {name: '账号乙'})
+  assert.match(await secondCard.locator('[data-subscription-status=active]').innerText(), /2030-01-1[56] 续费/)
+  assert.equal(await secondCard.getByLabel('使用积分', {exact:true}).count(), 1)
+  assert.equal(await firstCard.locator('time[datetime="2026-11-15T12:00:00Z"]').count(), 1)
+  assert.equal(await firstCard.locator('time[datetime="2026-11-17T12:00:00Z"]').count(), 1)
+  assert.equal(await secondCard.getByRole('progressbar', {name: /^spark$/i}).getAttribute('aria-valuenow'), '0')
+  assert.equal(await thirdCard.getByRole('progressbar', {name: /^spark$/i}).count(), 0, 'unknown is not zero')
+  // Inspect the balance without granting redemption or making any write.
+  const countWrites = () => page.evaluate(() => window.__calls.filter(call => call.method === 'POST').length)
+  const writesBefore = await countWrites()
+  await thirdCard.getByRole('button', {name: '剩余主动重置次数：1'}).click()
+  await page.getByRole('dialog').getByText('可用重置卡', {exact: true}).waitFor()
+  assert.equal(await page.getByRole('dialog').getByRole('button', {name: '使用重置卡'}).isDisabled(), true)
+  assert.equal(await countWrites(), writesBefore)
+  await page.keyboard.press('Escape')
+  assert.equal(await page.getByRole('article', {name: '账号乙'}).getByRole('button', {name: /剩余主动重置次数/}).count(), 0)
   await thirdCard.getByRole('button', { name: '重新授权', exact: true }).click()
   const reauth = page.getByRole('dialog')
   assert.equal(await reauth.getByRole('combobox').count(), 0, 'no editable group or proxy')
@@ -309,6 +326,8 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
   const details = page.getByRole('dialog', { name: 'a@example.test' })
   await details.getByRole('progressbar', { name: '30d' }).waitFor()
   assert.match(await details.innerText(), /7d: \$8\.24/)
+  assert.match(await details.innerText(), /一组/)
+  assert.match(await details.innerText(), /1 \/ 4/)
   await page.keyboard.press('Escape')
   assert.equal(await page.getByText('解除待核实').count(), 0)
   await page.getByRole('switch').first().click()
@@ -321,7 +340,8 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
   assert.equal(await page.getByText('账号乙').count(), 1)
   await page.getByLabel('分组', { exact: true }).click()
   await page.getByRole('option', { name: '一组' }).click()
-  await page.getByRole('button', { name: '使用重置卡' }).click()
+  await firstCard.getByRole('button', {name: '剩余主动重置次数：2'}).click()
+  await page.getByRole('dialog', {name:'a@example.test'}).getByRole('button', { name: '使用重置卡' }).click()
   await page.getByRole('dialog').getByRole('button', { name: '使用重置卡' }).click()
   await page.getByText('重置请求已完成').waitFor()
   const calls = await page.evaluate(() => window.__calls)
@@ -337,7 +357,7 @@ test('portal keeps groups read-only, scopes reauthorization and confirms reset c
     const {top, width, height} = button.getBoundingClientRect()
     return {top, width, height}
   }))
-  assert.equal(actions.length, 3)
+  assert.equal(actions.length, 2)
   assert.ok(actions.every(item => item.top === actions[0].top && Math.abs(item.width - actions[0].width) <= 1 && item.height >= 44), JSON.stringify(actions))
   await page.screenshot({ path: path.join(artifactDir, 'account-cards-mobile.png'), fullPage: true })
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true)

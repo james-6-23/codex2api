@@ -1,3 +1,5 @@
+import { useState } from "react";
+import AccountResetCreditBadge from "./AccountResetCreditBadge";
 import KeyUsageReauthDialog from "./KeyUsageReauthDialog";
 import {
   AccountDetailContent,
@@ -9,7 +11,6 @@ import { useTranslation } from "react-i18next";
 import {
   Clock3,
   RotateCcw,
-  Ticket,
   Eye,
   Activity,
   Wallet,
@@ -30,8 +31,11 @@ import {
 import { Sheet, SheetDescription, SheetTrigger } from "@/components/ui/sheet";
 import { formatBeijingTime } from "../utils/time";
 import AccountUsageBar from "./AccountUsageBar";
-import PlanBadge from "./AccountPlanBadge";
-import StatusBadge from "./StatusBadge";
+import PlanBadge, { isSparkUsagePlan } from "./AccountPlanBadge";
+import {
+  KeyUsageAccountStatus,
+  KeyUsageSubscription,
+} from "./KeyUsageAccountStatus";
 import { formatLongUsageWindowLabel } from "../lib/usageFormat";
 
 export default function KeyUsageAccountCard({
@@ -54,24 +58,68 @@ export default function KeyUsageAccountCard({
   onRefresh: () => void;
 }) {
   const { t } = useTranslation();
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const displayName = account.email || account.name || `#${account.id}`;
-  const updated = [account.usage_updated_at_5h, account.usage_updated_at_7d]
+  const updated = [account.usage_updated_at_5h, account.usage_updated_at_7d, account.usage_updated_at_spark]
     .filter(
       (value): value is string => !!value && Number.isFinite(Date.parse(value)),
     )
     .sort((a, b) => Date.parse(b) - Date.parse(a))[0];
-  const credit =
-    account.credits_valid &&
-    (account.credits_unlimited
+  const unknown = t("keyUsageAccounts.unknown");
+  const credit = !account.credits_valid
+    ? undefined
+    : account.credits_unlimited
       ? "∞"
-      : (account.credits_balance ??
-        (account.credits_has_credits ? "✓" : undefined)));
+      : account.credits_balance?.trim() ||
+        (account.credits_has_credits ? "✓" : undefined);
+  const windows: {
+    label: string;
+    pct: number | null;
+    reset?: string;
+    update?: string;
+  }[] = [];
+  if (account.usage_percent_5h != null || account.reset_5h_at) {
+    windows.push({
+      label: "5h",
+      pct: account.usage_percent_5h,
+      reset: account.reset_5h_at,
+      update: account.usage_updated_at_5h,
+    });
+  }
+  if (isSparkUsagePlan(account.plan_type)) {
+    windows.push({
+      label: "spark",
+      pct: account.usage_percent_spark ?? null,
+      reset: account.reset_spark_at,
+      update: account.usage_updated_at_spark,
+    });
+  }
+  if (account.usage_percent_7d != null || account.reset_7d_at) {
+    windows.push({
+      label: formatLongUsageWindowLabel({
+        usage_window_7d_seconds: account.long_window_seconds,
+      }),
+      pct: account.usage_percent_7d,
+      reset: account.reset_7d_at,
+      update: account.usage_updated_at_7d,
+    });
+  }
+  const groupNames = account.group_ids.map(
+    (id) =>
+      groups.find((group) => group.id === id)?.name ||
+      t("keyUsageAccounts.groupLabel", { id }),
+  );
   const healthLabels: Record<string, string> = {
     healthy: "accounts.healthy",
     warm: "accounts.warm",
     risky: "accounts.risky",
     banned: "accounts.quarantine",
   };
+  const health =
+    account.health_tier &&
+    Object.prototype.hasOwnProperty.call(healthLabels, account.health_tier)
+      ? t(healthLabels[account.health_tier])
+      : unknown;
   const windowPair = (short?: number, week?: number, currency = false) => {
     const format = (value?: number) =>
       value == null
@@ -123,15 +171,11 @@ export default function KeyUsageAccountCard({
           <>
             <div className="flex min-w-0 flex-wrap items-center gap-2">
               <PlanBadge planType={account.plan_type} />
-              <span
-                className="codex-account-card__flag"
-                title={t("keyUsageAccounts.cards")}
-              >
-                <Ticket className="size-3" />
-                {t("keyUsageAccounts.cardCount", {
-                  value: account.reset_credits ?? t("keyUsageAccounts.unknown"),
-                })}
-              </span>
+              <KeyUsageSubscription account={account} />
+              <AccountResetCreditBadge
+                count={account.reset_credits}
+                onClick={() => setDetailsOpen(true)}
+              />
               {credit && (
                 <span
                   className="codex-account-card__flag"
@@ -152,7 +196,7 @@ export default function KeyUsageAccountCard({
                 </span>
               )}
             </div>
-            <StatusBadge status={account.status} />
+            <KeyUsageAccountStatus account={account} />
           </>
         }
       />
@@ -161,18 +205,19 @@ export default function KeyUsageAccountCard({
           <>
             <div className="account-usage-cell">
               <div className="account-usage-windows">
-                <AccountUsageBar
-                  label="5h"
-                  pct={account.usage_percent_5h}
-                  resetAt={account.reset_5h_at}
-                />
-                <AccountUsageBar
-                  label={formatLongUsageWindowLabel({
-                    usage_window_7d_seconds: account.long_window_seconds,
-                  })}
-                  pct={account.usage_percent_7d}
-                  resetAt={account.reset_7d_at}
-                />
+                {windows.map((row) => (
+                  <AccountUsageBar
+                    key={row.label}
+                    label={row.label}
+                    pct={row.pct}
+                    resetAt={row.reset}
+                  />
+                ))}
+                {!windows.length && (
+                  <span className="text-xs text-muted-foreground">
+                    {t("accounts.cardUsageEmpty")}
+                  </span>
+                )}
               </div>
             </div>
             {account.health_tier && (
@@ -182,7 +227,7 @@ export default function KeyUsageAccountCard({
                   className="codex-account-card__health-tier"
                   data-health={account.health_tier}
                 >
-                  {t(healthLabels[account.health_tier] ?? "accounts.unknown")}
+                  {health}
                 </span>
               </div>
             )}
@@ -208,10 +253,9 @@ export default function KeyUsageAccountCard({
       <div className="codex-account-card__metadata">
         <div className="codex-account-card__tags">
           {account.group_ids.length ? (
-            account.group_ids.map((id) => (
-              <Badge key={id} variant="secondary">
-                {groups.find((item) => item.id === id)?.name ||
-                  t("keyUsageAccounts.groupLabel", { id })}
+            groupNames.map((name, index) => (
+              <Badge key={account.group_ids[index]} variant="secondary">
+                {name}
               </Badge>
             ))
           ) : (
@@ -222,7 +266,12 @@ export default function KeyUsageAccountCard({
       <dl className="codex-account-card__timestamps">
         <AccountCardTimestamp
           icon={<Clock3 className="size-3" />}
-          label={t("accounts.usageUpdatedAtShort")}
+          label={t("accounts.recordUpdatedAt")}
+          value={account.updated_at}
+        />
+        <AccountCardTimestamp
+          icon={<Clock3 className="size-3" />}
+          label={t("keyUsageAccounts.usageSampled")}
           value={updated}
           fallback={t("accounts.noUsageUpdatedAt")}
         />
@@ -241,7 +290,7 @@ export default function KeyUsageAccountCard({
         />
       </dl>
       <footer className="codex-account-card__actions codex-account-card__actions--portal">
-        <Sheet>
+        <Sheet open={detailsOpen} onOpenChange={setDetailsOpen}>
           <SheetTrigger asChild>
             <Button
               variant="ghost"
@@ -264,39 +313,81 @@ export default function KeyUsageAccountCard({
             }
           >
             <AccountDetailBody>
+              <AccountDetailSection title={t("keyUsageAccounts.cards")}>
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <span className="text-sm font-medium tabular-nums">{t("keyUsageAccounts.cardCount", {value: account.reset_credits ?? t("keyUsageAccounts.unknown")})}</span>
+                  <Button variant="outline" size="sm" disabled={!account.reset_allowed || busy || account.reset_credits === 0}
+                    onClick={() => { setDetailsOpen(false); onRedeem(); }}>
+                    <RotateCcw className={`size-3.5 ${pending ? "animate-spin" : ""}`} />
+                    {t(pending ? "keyUsageAccounts.pending" : "keyUsageAccounts.redeem")}
+                  </Button>
+                </div>
+              </AccountDetailSection>
               <AccountDetailSection title={t("accounts.status")}>
-                <StatusBadge status={account.status} />
+                <KeyUsageAccountStatus account={account} />
+                <KeyUsageSubscription account={account} />
               </AccountDetailSection>
               <AccountDetailSection title={t("accounts.usage")}>
-                {[
-                  {
-                    label: "5h",
-                    pct: account.usage_percent_5h,
-                    reset: account.reset_5h_at,
-                    update: account.usage_updated_at_5h,
-                  },
-                  {
-                    label: formatLongUsageWindowLabel({
-                      usage_window_7d_seconds: account.long_window_seconds,
-                    }),
-                    pct: account.usage_percent_7d,
-                    reset: account.reset_7d_at,
-                    update: account.usage_updated_at_7d,
-                  },
-                ].map((row, index) => (
+                {!windows.length && (
+                  <p className="text-xs text-muted-foreground">
+                    {t("accounts.cardUsageEmpty")}
+                  </p>
+                )}
+                {windows.map((row) => (
                   <section
-                    key={index}
+                    key={row.label}
                     className="space-y-2 rounded-xl border p-3"
                   >
                     <AccountUsageBar label={row.label} pct={row.pct} />
                     <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
                       <dt>{t("keyUsageAccounts.resetTime")}</dt>
                       <dd>{formatBeijingTime(row.reset, "—")}</dd>
-                      <dt>{t("keyUsageAccounts.updated")}</dt>
+                      <dt>{t("keyUsageAccounts.usageSampled")}</dt>
                       <dd>{formatBeijingTime(row.update, "—")}</dd>
                     </dl>
                   </section>
                 ))}
+              </AccountDetailSection>
+              <AccountDetailSection title={t("accounts.cardDetails")}>
+                <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2 text-sm">
+                  {[
+                    [
+                      t("accounts.groupsLabel"),
+                      groupNames.join(", ") || t("keyUsageAccounts.ungrouped"),
+                    ],
+                    [t("accounts.healthBarLabel"), health],
+                    [
+                      t("accounts.concurrency"),
+                      `${account.active_requests ?? "—"} / ${account.dynamic_concurrency_limit ?? "—"}`,
+                    ],
+                    [t("accounts.creditsBalanceLabel"), credit ?? unknown],
+                    [
+                      t("accounts.importTime"),
+                      formatBeijingTime(account.created_at, "—"),
+                    ],
+                    [
+                      t("keyUsageAccounts.lastActive"),
+                      formatBeijingTime(account.last_used_at, "—"),
+                    ],
+                    [
+                      t("accounts.recordUpdatedAt"),
+                      formatBeijingTime(account.updated_at, "—"),
+                    ],
+                    [
+                      t("keyUsageAccounts.usageSampled"),
+                      formatBeijingTime(updated, "—"),
+                    ],
+                    [
+                      t("accounts.subscriptionColumn"),
+                      formatBeijingTime(account.subscription?.expires_at, "—"),
+                    ],
+                  ].map(([label, value]) => (
+                    <div key={label} className="contents">
+                      <dt className="text-muted-foreground">{label}</dt>
+                      <dd className="break-words">{value}</dd>
+                    </div>
+                  ))}
+                </dl>
               </AccountDetailSection>
               <AccountDetailSection title={t("accounts.detailMetrics")}>
                 <div className="grid grid-cols-2 gap-2">
@@ -312,37 +403,12 @@ export default function KeyUsageAccountCard({
                       true,
                     )}
                   </AccountDetailMetric>
-                  <AccountDetailMetric label={t("keyUsageAccounts.cards")}>
-                    {account.reset_credits ?? "—"}
-                  </AccountDetailMetric>
                 </div>
               </AccountDetailSection>
             </AccountDetailBody>
           </AccountDetailContent>
         </Sheet>
-        {account.reset_allowed && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="codex-account-card__action"
-            onClick={onRedeem}
-            disabled={busy || account.reset_credits === 0}
-          >
-            <RotateCcw
-              className={`size-3.5 ${pending ? "animate-spin" : ""}`}
-            />
-            {t(
-              pending ? "keyUsageAccounts.pending" : "keyUsageAccounts.redeem",
-            )}
-          </Button>
-        )}
-        {account.reauth_allowed && (
-          <KeyUsageReauthDialog
-            account={account}
-            apiKey={apiKey}
-            onComplete={onRefresh}
-          />
-        )}
+        <KeyUsageReauthDialog account={account} apiKey={apiKey} onComplete={onRefresh} />
       </footer>
     </AccountCardSurface>
   );
