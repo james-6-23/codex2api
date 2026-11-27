@@ -37,7 +37,7 @@ test('all eight new palettes apply on the first render in both appearances', () 
       const classes = runBootstrap({ colorTheme, mode })
       assert.ok(classes.has(`theme-${colorTheme}`), `${colorTheme}: ${mode}`)
       assert.equal(classes.has('dark'), mode === 'dark')
-      assert.equal(classes.has('theme-default'), false)
+      assert.equal(classes.has('theme-studio'), false)
     }
   }
 })
@@ -82,7 +82,7 @@ test('explicit light and dark modes override the device appearance', () => {
 
 test('existing saved palettes remain supported', () => {
   for (const colorTheme of [
-    'default', 'claude', 'chatgpt', 'deepseek', 'graphite', 'aurora', 'rose', 'mono',
+    'studio', 'default', 'claude', 'chatgpt', 'deepseek', 'graphite', 'aurora', 'rose', 'mono',
     'one-dark-pro', 'github-dimmed', 'tokyo-night', 'dracula', 'monokai-pro',
     'nord', 'catppuccin', 'gruvbox', 'solarized-light', 'quiet-light', 'ayu-light', 'noctis-lux',
   ]) {
@@ -90,17 +90,17 @@ test('existing saved palettes remain supported', () => {
   }
 })
 
-test('missing and unknown palettes fall back to the default without adding stored text as a class', () => {
+test('missing and unknown palettes fall back to the studio default without adding stored text as a class', () => {
   for (const colorTheme of [undefined, '', 'unknown', 'ocean extra-class', 'OCEAN']) {
-    assert.deepEqual([...runBootstrap({ colorTheme, mode: 'light' })], ['theme-default'])
+    assert.deepEqual([...runBootstrap({ colorTheme, mode: 'light' })], ['theme-studio'])
   }
 })
 
-test('unavailable storage still initializes default colors and follows the device', () => {
+test('unavailable storage still initializes the studio default and follows the device', () => {
   for (const failure of [{ storageError: true }, { accessError: true }]) {
     for (const systemDark of [false, true]) {
       const classes = runBootstrap({ ...failure, systemDark })
-      assert.ok(classes.has('theme-default'))
+      assert.ok(classes.has('theme-studio'))
       assert.equal(classes.has('dark'), systemDark)
     }
   }
