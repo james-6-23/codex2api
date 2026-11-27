@@ -2483,7 +2483,10 @@ func cooldownMatchesReset(cooldownUntil, resetAt time.Time) bool {
 // Authentication failures retain the higher priority used by the runtime cache.
 // The caller must hold a.mu.
 func (a *Account) usageCooldownTargetLocked(now, resetAt time.Time, reason string) (time.Time, string, bool) {
-	if a.hasCodexAuthorizationCooldownLocked() {
+	// An expired 401 is eligible for verification, not for replacement by a
+	// quota cooldown. While it is active, the normal max-deadline rule below
+	// can extend it without changing the authorization reason.
+	if a.hasCodexAuthorizationCooldownLocked() && !now.Before(a.CooldownUtil) {
 		return a.CooldownUtil, a.CooldownReason, false
 	}
 	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {

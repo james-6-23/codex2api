@@ -94,6 +94,21 @@ func TestCodexRestartPreservesUnauthorizedUntilVerified(t *testing.T) {
 	}
 }
 
+func TestExpiredCodex401CannotBeReplacedByUsageCooldown(t *testing.T) {
+	now := time.Now()
+	expired := now.Add(-time.Second)
+	a := &Account{AccessToken: "fixture"}
+	a.SetCooldownUntil(expired, "unauthorized")
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	for _, observation := range []string{"rate_limited", premium5hCooldownReason, ResponsesRateLimitedCooldownReason} {
+		until, reason, changed := a.usageCooldownTargetLocked(now, now.Add(time.Hour), observation)
+		if changed || !until.Equal(expired) || reason != "unauthorized" {
+			t.Fatalf("%s replaced an expired 401: (%v, %q, %t)", observation, until, reason, changed)
+		}
+	}
+}
+
 func TestCodexAuthorizationRecoveryProbeEligibility(t *testing.T) {
 	now := time.Now()
 	for _, tc := range []struct {

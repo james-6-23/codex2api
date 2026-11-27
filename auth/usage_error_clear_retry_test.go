@@ -76,6 +76,13 @@ func testLostErrorClearRetry(t *testing.T, newerStatus AccountStatus) {
 		acc.CooldownUtil = until
 	}
 	acc.mu.Unlock()
+	if newerStatus == StatusCooldown {
+		// A second failed publication must retain both the error-clear intent
+		// and the new cooldown until they can be written together.
+		store.db = broken
+		store.persistUsageCooldown(acc)
+		store.db = db
+	}
 	store.usageFramePersist.persist(store, usageFramePersistJob{
 		account: acc, dbID: id, observedAt: time.Now(),
 	})
