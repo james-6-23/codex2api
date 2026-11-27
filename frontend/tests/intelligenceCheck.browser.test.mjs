@@ -237,7 +237,7 @@ async function assertActionsFollowStatus(scope) {
  const history = scope.getByRole('button', {name: '检测记录', exact: true})
  await detect.waitFor()
  const group = detect.locator('..').locator('..')
- const badge = group.locator('[data-slot="badge"]').first()
+ const badge = group.locator('[data-slot="status-badge"]').first()
  const [statusBox, detectBox, historyBox] = await Promise.all([badge.boundingBox(), detect.boundingBox(), history.boundingBox()])
  assert.ok(detectBox.x > statusBox.x + statusBox.width, 'detect follows the status badge')
  assert.ok(historyBox.x > detectBox.x, 'history follows detect')
