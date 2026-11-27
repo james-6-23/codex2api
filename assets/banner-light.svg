@@ -1,0 +1,384 @@
+<svg width="1400" height="420" viewBox="0 0 1400 420" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="lt-title lt-desc">
+  <title id="lt-title">Codex2API — Multi-Channel AI Gateway</title>
+  <desc id="lt-desc">Codex2API gateway banner showing 6 upstream channels (Codex, Claude, Antigravity, OpenCode, Grok, Kiro) routing into the centered 3D frosted-glass hub</desc>
+  <defs>
+    <clipPath id="lt-canvas-clip"><rect width="1400" height="420" rx="28"/></clipPath>
+    <clipPath id="lt-hub-logo-clip"><rect x="655" y="123" width="90" height="90" rx="20"/></clipPath>
+
+    <linearGradient id="lt-bg" x1="0" y1="0" x2="1400" y2="420" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#F6F9FF"/><stop offset="50%" stop-color="#FFFFFF"/><stop offset="100%" stop-color="#F5F3FF"/>
+    </linearGradient>
+
+    <radialGradient id="lt-aurora-center" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(700 170) rotate(90) scale(210 380)">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.14"/>
+      <stop offset="45%" stop-color="#34D399" stop-opacity="0.08"/>
+      <stop offset="75%" stop-color="#A855F7" stop-opacity="0.09"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="lt-aurora-left" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(180 120) scale(260 190)">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.09"/>
+      <stop offset="100%" stop-color="#38BDF8" stop-opacity="0"/>
+    </radialGradient>
+
+    <radialGradient id="lt-aurora-right" cx="0" cy="0" r="1" gradientUnits="userSpaceOnUse" gradientTransform="translate(1220 290) scale(280 210)">
+      <stop offset="0%" stop-color="#A855F7" stop-opacity="0.09"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </radialGradient>
+
+    <linearGradient id="lt-ring-grad" gradientUnits="userSpaceOnUse" x1="420" y1="40" x2="980" y2="320">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.24"/>
+      <stop offset="50%" stop-color="#34D399" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0.24"/>
+    </linearGradient>
+
+    <linearGradient id="lt-prism-rail" gradientUnits="userSpaceOnUse" x1="180" y1="0" x2="1220" y2="420">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0"/>
+      <stop offset="30%" stop-color="#38BDF8" stop-opacity="0.16"/>
+      <stop offset="50%" stop-color="#34D399" stop-opacity="0.14"/>
+      <stop offset="70%" stop-color="#A855F7" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="lt-card-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.96"/><stop offset="58%" stop-color="#F8FAFF" stop-opacity="0.88"/><stop offset="100%" stop-color="#EFF4FF" stop-opacity="0.82"/>
+    </linearGradient>
+
+    <linearGradient id="lt-hub-bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.98"/><stop offset="55%" stop-color="#F5F8FF" stop-opacity="0.92"/><stop offset="100%" stop-color="#EBF1FF" stop-opacity="0.86"/>
+    </linearGradient>
+
+    <linearGradient id="lt-sheen" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.68"/>
+      <stop offset="65%" stop-color="#FFFFFF" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="lt-title-fill" x1="510" y1="290" x2="890" y2="355" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#0F172A"/><stop offset="48%" stop-color="#2563EB"/><stop offset="100%" stop-color="#7C3AED"/>
+    </linearGradient>
+
+    <linearGradient id="lt-bar-grad" x1="420" y1="394" x2="980" y2="394" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0"/>
+      <stop offset="28%" stop-color="#38BDF8" stop-opacity="0.7"/>
+      <stop offset="52%" stop-color="#34D399" stop-opacity="0.7"/>
+      <stop offset="76%" stop-color="#A855F7" stop-opacity="0.7"/>
+      <stop offset="100%" stop-color="#A855F7" stop-opacity="0"/>
+    </linearGradient>
+
+    <linearGradient id="lt-stem-grad" gradientUnits="userSpaceOnUse" x1="700" y1="229" x2="700" y2="275">
+      <stop offset="0%" stop-color="#38BDF8" stop-opacity="0.85"/>
+      <stop offset="65%" stop-color="#8B5CF6" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.1"/>
+    </linearGradient>
+
+    <marker id="lt-stem-arrow" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="5.5" markerHeight="5.5" orient="auto">
+      <path d="M 1.5 2 L 8 5 L 1.5 8 L 3.1 5 Z" fill="#8B5CF6" fill-opacity="0.72"/>
+    </marker>
+
+    <pattern id="lt-dots" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="14" cy="14" r="1.1" fill="#334155" fill-opacity="0.16"/>
+    </pattern>
+
+    <radialGradient id="lt-dot-mask-grad" cx="50%" cy="46%" r="54%">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="1"/>
+      <stop offset="72%" stop-color="#FFFFFF" stop-opacity="0.65"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="lt-dot-mask">
+      <rect width="1400" height="420" fill="url(#lt-dot-mask-grad)"/>
+    </mask>
+
+    <filter id="lt-soft-blur" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="8"/>
+    </filter>
+    <filter id="lt-orb-glow" x="-120%" y="-120%" width="340%" height="340%">
+      <feGaussianBlur stdDeviation="2.5" result="b"/>
+      <feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+    <filter id="lt-card-shadow" x="-30%" y="-30%" width="160%" height="180%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#0F172A" flood-opacity="0.10"/>
+    </filter>
+    <filter id="lt-hub-shadow" x="-35%" y="-35%" width="170%" height="185%">
+      <feDropShadow dx="0" dy="14" stdDeviation="14" flood-color="#1E293B" flood-opacity="0.14"/>
+    </filter>
+
+
+      <linearGradient id="lt-rg-codex" gradientUnits="userSpaceOnUse" x1="286" y1="82" x2="628" y2="168">
+        <stop offset="0%" stop-color="#6366F1" stop-opacity="0.78"/>
+        <stop offset="58%" stop-color="#38BDF8" stop-opacity="0.82"/>
+        <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.9"/>
+      </linearGradient>
+      <marker id="lt-ar-codex" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z" fill="#6366F1" fill-opacity="0.92"/>
+      </marker>
+      <linearGradient id="lt-rg-claude" gradientUnits="userSpaceOnUse" x1="202" y1="168" x2="628" y2="168">
+        <stop offset="0%" stop-color="#D97757" stop-opacity="0.78"/>
+        <stop offset="58%" stop-color="#38BDF8" stop-opacity="0.82"/>
+        <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.9"/>
+      </linearGradient>
+      <marker id="lt-ar-claude" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z" fill="#6366F1" fill-opacity="0.92"/>
+      </marker>
+      <linearGradient id="lt-rg-antigravity" gradientUnits="userSpaceOnUse" x1="286" y1="254" x2="628" y2="168">
+        <stop offset="0%" stop-color="#0EA5E9" stop-opacity="0.78"/>
+        <stop offset="58%" stop-color="#38BDF8" stop-opacity="0.82"/>
+        <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.9"/>
+      </linearGradient>
+      <marker id="lt-ar-antigravity" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z" fill="#6366F1" fill-opacity="0.92"/>
+      </marker>
+      <linearGradient id="lt-rg-opencode" gradientUnits="userSpaceOnUse" x1="1114" y1="82" x2="772" y2="168">
+        <stop offset="0%" stop-color="#10B981" stop-opacity="0.78"/>
+        <stop offset="58%" stop-color="#38BDF8" stop-opacity="0.82"/>
+        <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.9"/>
+      </linearGradient>
+      <marker id="lt-ar-opencode" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z" fill="#6366F1" fill-opacity="0.92"/>
+      </marker>
+      <linearGradient id="lt-rg-grok" gradientUnits="userSpaceOnUse" x1="1198" y1="168" x2="772" y2="168">
+        <stop offset="0%" stop-color="#64748B" stop-opacity="0.78"/>
+        <stop offset="58%" stop-color="#38BDF8" stop-opacity="0.82"/>
+        <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.9"/>
+      </linearGradient>
+      <marker id="lt-ar-grok" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z" fill="#6366F1" fill-opacity="0.92"/>
+      </marker>
+      <linearGradient id="lt-rg-kiro" gradientUnits="userSpaceOnUse" x1="1114" y1="254" x2="772" y2="168">
+        <stop offset="0%" stop-color="#9046FF" stop-opacity="0.78"/>
+        <stop offset="58%" stop-color="#38BDF8" stop-opacity="0.82"/>
+        <stop offset="100%" stop-color="#8B5CF6" stop-opacity="0.9"/>
+      </linearGradient>
+      <marker id="lt-ar-kiro" viewBox="0 0 10 10" refX="7.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto">
+        <path d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z" fill="#6366F1" fill-opacity="0.92"/>
+      </marker>
+  </defs>
+
+  <g clip-path="url(#lt-canvas-clip)">
+    <!-- Background base + prism aurora blooms -->
+    <rect width="1400" height="420" fill="url(#lt-bg)"/>
+    <rect width="1400" height="420" fill="url(#lt-aurora-center)"/>
+    <rect width="1400" height="420" fill="url(#lt-aurora-left)"/>
+    <rect width="1400" height="420" fill="url(#lt-aurora-right)"/>
+
+    <!-- Fine architectural dot matrix -->
+    <rect width="1400" height="420" fill="url(#lt-dots)" mask="url(#lt-dot-mask)"/>
+
+    <!-- Isometric diamond prism rails echoing the 3D glass stack -->
+    <path d="M 700 -80 L 1160 168 L 700 416 L 240 168 Z" stroke="url(#lt-prism-rail)" stroke-width="1.1"/>
+    <path d="M 700 -18 L 1060 168 L 700 354 L 340 168 Z" stroke="url(#lt-prism-rail)" stroke-width="1" stroke-dasharray="4 10" opacity="0.72"/>
+
+    <!-- Concentric orbital arcs behind the centered hub -->
+    <g transform="translate(700 168)">
+      <circle r="138" stroke="url(#lt-ring-grad)" stroke-width="1" stroke-dasharray="3 8" opacity="0.9"/>
+      <circle r="228" stroke="url(#lt-ring-grad)" stroke-width="1" opacity="0.55"/>
+      <circle r="336" stroke="url(#lt-ring-grad)" stroke-width="1" stroke-dasharray="6 14" opacity="0.45"/>
+      <circle cx="228" cy="0" r="3" fill="#38BDF8" fill-opacity="0.75"/>
+      <circle cx="228" cy="0" r="7.5" fill="#38BDF8" fill-opacity="0.16"/>
+      <circle cx="-161" cy="-161" r="2.6" fill="#A855F7" fill-opacity="0.72"/>
+      <circle cx="-161" cy="-161" r="6.8" fill="#A855F7" fill-opacity="0.15"/>
+      <circle cx="0" cy="-138" r="2.4" fill="#34D399" fill-opacity="0.75"/>
+      <circle cx="0" cy="-138" r="6.5" fill="#34D399" fill-opacity="0.15"/>
+    </g>
+
+    <!-- 6-channel routing arrow curves & animated data pulses -->
+
+    <g>
+      <path d="M 286 82 C 430 82, 468 144, 628 144" stroke="url(#lt-rg-codex)" stroke-width="1.75" stroke-linecap="round" stroke-opacity="0.38" marker-end="url(#lt-ar-codex)"/>
+      <path d="M 286 82 C 430 82, 468 144, 628 144" stroke="url(#lt-rg-codex)" stroke-width="1.9" stroke-linecap="round" stroke-dasharray="7 16" stroke-opacity="0.68">
+        <animate attributeName="stroke-dashoffset" from="46" to="0" dur="2.4s" repeatCount="indefinite"/>
+      </path>
+      <circle cx="286" cy="82" r="3.4" fill="#6366F1" fill-opacity="0.9"/>
+      <circle cx="286" cy="82" r="6.5" fill="#6366F1" fill-opacity="0.18"/>
+      <circle r="3.4" fill="#6366F1" filter="url(#lt-orb-glow)">
+        <animateMotion dur="3.4s" begin="0s" repeatCount="indefinite" path="M 286 82 C 430 82, 468 144, 628 144"/>
+      </circle>
+    </g>
+    <g>
+      <path d="M 202 168 L 626 168" stroke="url(#lt-rg-claude)" stroke-width="1.75" stroke-linecap="round" stroke-opacity="0.38" marker-end="url(#lt-ar-claude)"/>
+      <path d="M 202 168 L 626 168" stroke="url(#lt-rg-claude)" stroke-width="1.9" stroke-linecap="round" stroke-dasharray="7 16" stroke-opacity="0.68">
+        <animate attributeName="stroke-dashoffset" from="46" to="0" dur="2.4s" repeatCount="indefinite"/>
+      </path>
+      <circle cx="202" cy="168" r="3.4" fill="#D97757" fill-opacity="0.9"/>
+      <circle cx="202" cy="168" r="6.5" fill="#D97757" fill-opacity="0.18"/>
+      <circle r="3.4" fill="#D97757" filter="url(#lt-orb-glow)">
+        <animateMotion dur="3.0s" begin="-1.1s" repeatCount="indefinite" path="M 202 168 L 626 168"/>
+      </circle>
+    </g>
+    <g>
+      <path d="M 286 254 C 430 254, 468 192, 628 192" stroke="url(#lt-rg-antigravity)" stroke-width="1.75" stroke-linecap="round" stroke-opacity="0.38" marker-end="url(#lt-ar-antigravity)"/>
+      <path d="M 286 254 C 430 254, 468 192, 628 192" stroke="url(#lt-rg-antigravity)" stroke-width="1.9" stroke-linecap="round" stroke-dasharray="7 16" stroke-opacity="0.68">
+        <animate attributeName="stroke-dashoffset" from="46" to="0" dur="2.4s" repeatCount="indefinite"/>
+      </path>
+      <circle cx="286" cy="254" r="3.4" fill="#0EA5E9" fill-opacity="0.9"/>
+      <circle cx="286" cy="254" r="6.5" fill="#0EA5E9" fill-opacity="0.18"/>
+      <circle r="3.4" fill="#0EA5E9" filter="url(#lt-orb-glow)">
+        <animateMotion dur="3.6s" begin="-2.2s" repeatCount="indefinite" path="M 286 254 C 430 254, 468 192, 628 192"/>
+      </circle>
+    </g>
+    <g>
+      <path d="M 1114 82 C 970 82, 932 144, 772 144" stroke="url(#lt-rg-opencode)" stroke-width="1.75" stroke-linecap="round" stroke-opacity="0.38" marker-end="url(#lt-ar-opencode)"/>
+      <path d="M 1114 82 C 970 82, 932 144, 772 144" stroke="url(#lt-rg-opencode)" stroke-width="1.9" stroke-linecap="round" stroke-dasharray="7 16" stroke-opacity="0.68">
+        <animate attributeName="stroke-dashoffset" from="46" to="0" dur="2.4s" repeatCount="indefinite"/>
+      </path>
+      <circle cx="1114" cy="82" r="3.4" fill="#10B981" fill-opacity="0.9"/>
+      <circle cx="1114" cy="82" r="6.5" fill="#10B981" fill-opacity="0.18"/>
+      <circle r="3.4" fill="#10B981" filter="url(#lt-orb-glow)">
+        <animateMotion dur="3.5s" begin="-0.5s" repeatCount="indefinite" path="M 1114 82 C 970 82, 932 144, 772 144"/>
+      </circle>
+    </g>
+    <g>
+      <path d="M 1198 168 L 774 168" stroke="url(#lt-rg-grok)" stroke-width="1.75" stroke-linecap="round" stroke-opacity="0.38" marker-end="url(#lt-ar-grok)"/>
+      <path d="M 1198 168 L 774 168" stroke="url(#lt-rg-grok)" stroke-width="1.9" stroke-linecap="round" stroke-dasharray="7 16" stroke-opacity="0.68">
+        <animate attributeName="stroke-dashoffset" from="46" to="0" dur="2.4s" repeatCount="indefinite"/>
+      </path>
+      <circle cx="1198" cy="168" r="3.4" fill="#64748B" fill-opacity="0.9"/>
+      <circle cx="1198" cy="168" r="6.5" fill="#64748B" fill-opacity="0.18"/>
+      <circle r="3.4" fill="#64748B" filter="url(#lt-orb-glow)">
+        <animateMotion dur="3.1s" begin="-1.6s" repeatCount="indefinite" path="M 1198 168 L 774 168"/>
+      </circle>
+    </g>
+    <g>
+      <path d="M 1114 254 C 970 254, 932 192, 772 192" stroke="url(#lt-rg-kiro)" stroke-width="1.75" stroke-linecap="round" stroke-opacity="0.38" marker-end="url(#lt-ar-kiro)"/>
+      <path d="M 1114 254 C 970 254, 932 192, 772 192" stroke="url(#lt-rg-kiro)" stroke-width="1.9" stroke-linecap="round" stroke-dasharray="7 16" stroke-opacity="0.68">
+        <animate attributeName="stroke-dashoffset" from="46" to="0" dur="2.4s" repeatCount="indefinite"/>
+      </path>
+      <circle cx="1114" cy="254" r="3.4" fill="#9046FF" fill-opacity="0.9"/>
+      <circle cx="1114" cy="254" r="6.5" fill="#9046FF" fill-opacity="0.18"/>
+      <circle r="3.4" fill="#9046FF" filter="url(#lt-orb-glow)">
+        <animateMotion dur="3.7s" begin="-2.6s" repeatCount="indefinite" path="M 1114 254 C 970 254, 932 192, 772 192"/>
+      </circle>
+    </g>
+
+    <!-- Downward gateway stem linking hub to wordmark -->
+    <path d="M 700 232 L 700 272" stroke="url(#lt-stem-grad)" stroke-width="1.65" stroke-linecap="round" stroke-dasharray="4 6" marker-end="url(#lt-stem-arrow)"/>
+
+    <!-- 6 channel 3D frosted glass mini cards -->
+
+    <g>
+      <defs><clipPath id="lt-ic-codex"><rect x="231" y="65" width="34" height="34" rx="7.5"/></clipPath></defs>
+      <!-- Colored ambient caustic beneath 3D glass card -->
+      <ellipse cx="248" cy="108" rx="28" ry="10" fill="#6366F1" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass bottom thickness lip -->
+      <rect x="216" y="54" width="64" height="64" rx="17" fill="#CBD5E1" fill-opacity="0.72"/>
+      <!-- Frosted glass surface -->
+      <rect x="216" y="50" width="64" height="64" rx="17" fill="url(#lt-card-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1" filter="url(#lt-card-shadow)"/>
+      <!-- Inner crisp glass bevel highlight -->
+      <rect x="217" y="51" width="62" height="62" rx="16" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1"/>
+      <!-- Diagonal frosted glass sheen -->
+      <path d="M 232 51 H 264 A 16 16 0 0 1 279 67 V 78 L 217 94 V 67 A 16 16 0 0 1 232 51 Z" fill="url(#lt-sheen)"/>
+      <!-- Authentic channel logo -->
+      <g clip-path="url(#lt-ic-codex)"><svg x="231" y="65" width="34" height="34" viewBox="0 0 24 24"><title>Codex</title><path d="M19.503 0H4.496A4.496 4.496 0 000 4.496v15.007A4.496 4.496 0 004.496 24h15.007A4.496 4.496 0 0024 19.503V4.496A4.496 4.496 0 0019.503 0z" fill="#fff"></path><path d="M9.064 3.344a4.578 4.578 0 012.285-.312c1 .115 1.891.54 2.673 1.275.01.01.024.017.037.021a.09.09 0 00.043 0 4.55 4.55 0 013.046.275l.047.022.116.057a4.581 4.581 0 012.188 2.399c.209.51.313 1.041.315 1.595a4.24 4.24 0 01-.134 1.223.123.123 0 00.03.115c.594.607.988 1.33 1.183 2.17.289 1.425-.007 2.71-.887 3.854l-.136.166a4.548 4.548 0 01-2.201 1.388.123.123 0 00-.081.076c-.191.551-.383 1.023-.74 1.494-.9 1.187-2.222 1.846-3.711 1.838-1.187-.006-2.239-.44-3.157-1.302a.107.107 0 00-.105-.024c-.388.125-.78.143-1.204.138a4.441 4.441 0 01-1.945-.466 4.544 4.544 0 01-1.61-1.335c-.152-.202-.303-.392-.414-.617a5.81 5.81 0 01-.37-.961 4.582 4.582 0 01-.014-2.298.124.124 0 00.006-.056.085.085 0 00-.027-.048 4.467 4.467 0 01-1.034-1.651 3.896 3.896 0 01-.251-1.192 5.189 5.189 0 01.141-1.6c.337-1.112.982-1.985 1.933-2.618.212-.141.413-.251.601-.33.215-.089.43-.164.646-.227a.098.098 0 00.065-.066 4.51 4.51 0 01.829-1.615 4.535 4.535 0 011.837-1.388zm3.482 10.565a.637.637 0 000 1.272h3.636a.637.637 0 100-1.272h-3.636zM8.462 9.23a.637.637 0 00-1.106.631l1.272 2.224-1.266 2.136a.636.636 0 101.095.649l1.454-2.455a.636.636 0 00.005-.64L8.462 9.23z" fill="url(#lt-codex-lobe-icons-codex-_R_0_)"></path><defs><linearGradient gradientUnits="userSpaceOnUse" id="lt-codex-lobe-icons-codex-_R_0_" x1="12" x2="12" y1="3" y2="21"><stop stop-color="#B1A7FF"></stop><stop offset=".5" stop-color="#7A9DFF"></stop><stop offset="1" stop-color="#3941FF"></stop></linearGradient></defs></svg></g>
+      <!-- Subtle mono channel caption -->
+      <text x="248" y="129" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">Codex</text>
+    </g>
+    <g>
+
+      <!-- Colored ambient caustic beneath 3D glass card -->
+      <ellipse cx="164" cy="194" rx="28" ry="10" fill="#D97757" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass bottom thickness lip -->
+      <rect x="132" y="140" width="64" height="64" rx="17" fill="#CBD5E1" fill-opacity="0.72"/>
+      <!-- Frosted glass surface -->
+      <rect x="132" y="136" width="64" height="64" rx="17" fill="url(#lt-card-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1" filter="url(#lt-card-shadow)"/>
+      <!-- Inner crisp glass bevel highlight -->
+      <rect x="133" y="137" width="62" height="62" rx="16" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1"/>
+      <!-- Diagonal frosted glass sheen -->
+      <path d="M 148 137 H 180 A 16 16 0 0 1 195 153 V 164 L 133 180 V 153 A 16 16 0 0 1 148 137 Z" fill="url(#lt-sheen)"/>
+      <!-- Authentic channel logo -->
+      <g ><svg x="147" y="151" width="34" height="34" viewBox="0 0 24 24"><title>Claude</title><path d="M4.709 15.955l4.72-2.647.08-.23-.08-.128H9.2l-.79-.048-2.698-.073-2.339-.097-2.266-.122-.571-.121L0 11.784l.055-.352.48-.321.686.06 1.52.103 2.278.158 1.652.097 2.449.255h.389l.055-.157-.134-.098-.103-.097-2.358-1.596-2.552-1.688-1.336-.972-.724-.491-.364-.462-.158-1.008.656-.722.881.06.225.061.893.686 1.908 1.476 2.491 1.833.365.304.145-.103.019-.073-.164-.274-1.355-2.446-1.446-2.49-.644-1.032-.17-.619a2.97 2.97 0 01-.104-.729L6.283.134 6.696 0l.996.134.42.364.62 1.414 1.002 2.229 1.555 3.03.456.898.243.832.091.255h.158V9.01l.128-1.706.237-2.095.23-2.695.08-.76.376-.91.747-.492.584.28.48.685-.067.444-.286 1.851-.559 2.903-.364 1.942h.212l.243-.242.985-1.306 1.652-2.064.73-.82.85-.904.547-.431h1.033l.76 1.129-.34 1.166-1.064 1.347-.881 1.142-1.264 1.7-.79 1.36.073.11.188-.02 2.856-.606 1.543-.28 1.841-.315.833.388.091.395-.328.807-1.969.486-2.309.462-3.439.813-.042.03.049.061 1.549.146.662.036h1.622l3.02.225.79.522.474.638-.079.485-1.215.62-1.64-.389-3.829-.91-1.312-.329h-.182v.11l1.093 1.068 2.006 1.81 2.509 2.33.127.578-.322.455-.34-.049-2.205-1.657-.851-.747-1.926-1.62h-.128v.17l.444.649 2.345 3.521.122 1.08-.17.353-.608.213-.668-.122-1.374-1.925-1.415-2.167-1.143-1.943-.14.08-.674 7.254-.316.37-.729.28-.607-.461-.322-.747.322-1.476.389-1.924.315-1.53.286-1.9.17-.632-.012-.042-.14.018-1.434 1.967-2.18 2.945-1.726 1.845-.414.164-.717-.37.067-.662.401-.589 2.388-3.036 1.44-1.882.93-1.086-.006-.158h-.055L4.132 18.56l-1.13.146-.487-.456.061-.746.231-.243 1.908-1.312-.006.006z" fill="#D97757" fill-rule="nonzero"></path></svg></g>
+      <!-- Subtle mono channel caption -->
+      <text x="164" y="215" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">Claude</text>
+    </g>
+    <g>
+
+      <!-- Colored ambient caustic beneath 3D glass card -->
+      <ellipse cx="248" cy="280" rx="28" ry="10" fill="#0EA5E9" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass bottom thickness lip -->
+      <rect x="216" y="226" width="64" height="64" rx="17" fill="#CBD5E1" fill-opacity="0.72"/>
+      <!-- Frosted glass surface -->
+      <rect x="216" y="222" width="64" height="64" rx="17" fill="url(#lt-card-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1" filter="url(#lt-card-shadow)"/>
+      <!-- Inner crisp glass bevel highlight -->
+      <rect x="217" y="223" width="62" height="62" rx="16" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1"/>
+      <!-- Diagonal frosted glass sheen -->
+      <path d="M 232 223 H 264 A 16 16 0 0 1 279 239 V 250 L 217 266 V 239 A 16 16 0 0 1 232 223 Z" fill="url(#lt-sheen)"/>
+      <!-- Authentic channel logo -->
+      <g ><svg x="231" y="237" width="34" height="34" viewBox="0 0 24 24"><title>Antigravity</title><mask height="23" id="lt-antigravity-lobe-icons-antigravity-0-_R_0_" maskUnits="userSpaceOnUse" width="24" x="0" y="1"><path d="M21.751 22.607c1.34 1.005 3.35.335 1.508-1.508C17.73 15.74 18.904 1 12.037 1 5.17 1 6.342 15.74.815 21.1c-2.01 2.009.167 2.511 1.507 1.506 5.192-3.517 4.857-9.714 9.715-9.714 4.857 0 4.522 6.197 9.714 9.715z" fill="#fff"></path></mask><g mask="url(#lt-antigravity-lobe-icons-antigravity-0-_R_0_)"><g filter="url(#lt-antigravity-lobe-icons-antigravity-1-_R_0_)"><path d="M-1.018-3.992c-.408 3.591 2.686 6.89 6.91 7.37 4.225.48 7.98-2.043 8.387-5.633.408-3.59-2.686-6.89-6.91-7.37-4.225-.479-7.98 2.043-8.387 5.633z" fill="#FFE432"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-2-_R_0_)"><path d="M15.269 7.747c1.058 4.557 5.691 7.374 10.348 6.293 4.657-1.082 7.575-5.653 6.516-10.21-1.058-4.556-5.691-7.374-10.348-6.292-4.657 1.082-7.575 5.653-6.516 10.21z" fill="#FC413D"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-3-_R_0_)"><path d="M-12.443 10.804c1.338 4.703 7.36 7.11 13.453 5.378 6.092-1.733 9.947-6.95 8.61-11.652C8.282-.173 2.26-2.58-3.833-.848-9.925.884-13.78 6.1-12.443 10.804z" fill="#00B95C"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-4-_R_0_)"><path d="M-12.443 10.804c1.338 4.703 7.36 7.11 13.453 5.378 6.092-1.733 9.947-6.95 8.61-11.652C8.282-.173 2.26-2.58-3.833-.848-9.925.884-13.78 6.1-12.443 10.804z" fill="#00B95C"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-5-_R_0_)"><path d="M-7.608 14.703c3.352 3.424 9.126 3.208 12.896-.483 3.77-3.69 4.108-9.459.756-12.883C2.69-2.087-3.083-1.871-6.853 1.82c-3.77 3.69-4.108 9.458-.755 12.883z" fill="#00B95C"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-6-_R_0_)"><path d="M9.932 27.617c1.04 4.482 5.384 7.303 9.7 6.3 4.316-1.002 6.971-5.448 5.93-9.93-1.04-4.483-5.384-7.304-9.7-6.301-4.316 1.002-6.971 5.448-5.93 9.93z" fill="#3186FF"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-7-_R_0_)"><path d="M2.572-8.185C.392-3.329 2.778 2.472 7.9 4.771c5.122 2.3 11.042.227 13.222-4.63 2.18-4.855-.205-10.656-5.327-12.955-5.122-2.3-11.042-.227-13.222 4.63z" fill="#FBBC04"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-8-_R_0_)"><path d="M-3.267 38.686c-5.277-2.072 3.742-19.117 5.984-24.83 2.243-5.712 8.34-8.664 13.616-6.592 5.278 2.071 11.533 13.482 9.29 19.195-2.242 5.713-23.613 14.298-28.89 12.227z" fill="#3186FF"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-9-_R_0_)"><path d="M28.71 17.471c-1.413 1.649-5.1.808-8.236-1.878-3.135-2.687-4.531-6.201-3.118-7.85 1.412-1.649 5.1-.808 8.235 1.878s4.532 6.2 3.119 7.85z" fill="#749BFF"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-10-_R_0_)"><path d="M18.163 9.077c5.81 3.93 12.502 4.19 14.946.577 2.443-3.612-.287-9.727-6.098-13.658-5.81-3.931-12.502-4.19-14.946-.577-2.443 3.612.287 9.727 6.098 13.658z" fill="#FC413D"></path></g><g filter="url(#lt-antigravity-lobe-icons-antigravity-11-_R_0_)"><path d="M-.915 2.684c-1.44 3.473-.97 6.967 1.05 7.804 2.02.837 4.824-1.3 6.264-4.772 1.44-3.473.97-6.967-1.05-7.804-2.02-.837-4.824 1.3-6.264 4.772z" fill="#FFEE48"></path></g></g><defs><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="17.587" id="lt-antigravity-lobe-icons-antigravity-1-_R_0_" width="19.838" x="-3.288" y="-11.917"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="1.117"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="38.565" id="lt-antigravity-lobe-icons-antigravity-2-_R_0_" width="38.9" x="4.251" y="-13.493"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="5.4"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="36.517" id="lt-antigravity-lobe-icons-antigravity-3-_R_0_" width="40.955" x="-21.889" y="-10.592"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.591"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="36.517" id="lt-antigravity-lobe-icons-antigravity-4-_R_0_" width="40.955" x="-21.889" y="-10.592"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.591"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="36.595" id="lt-antigravity-lobe-icons-antigravity-5-_R_0_" width="36.632" x="-19.099" y="-10.278"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.591"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="34.087" id="lt-antigravity-lobe-icons-antigravity-6-_R_0_" width="33.533" x=".981" y="8.758"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="4.363"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="35.276" id="lt-antigravity-lobe-icons-antigravity-7-_R_0_" width="35.978" x="-6.143" y="-21.659"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.954"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="46.523" id="lt-antigravity-lobe-icons-antigravity-8-_R_0_" width="45.114" x="-11.96" y="-.46"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.531"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="24.054" id="lt-antigravity-lobe-icons-antigravity-9-_R_0_" width="25.094" x="10.485" y=".58"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.159"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="30.007" id="lt-antigravity-lobe-icons-antigravity-10-_R_0_" width="33.508" x="5.833" y="-12.467"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="2.669"></feGaussianBlur></filter><filter color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" height="26.151" id="lt-antigravity-lobe-icons-antigravity-11-_R_0_" width="22.194" x="-8.355" y="-8.876"><feFlood flood-opacity="0" result="BackgroundImageFix"></feFlood><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"></feBlend><feGaussianBlur result="effect1_foregroundBlur_977_115" stdDeviation="3.303"></feGaussianBlur></filter></defs></svg></g>
+      <!-- Subtle mono channel caption -->
+      <text x="248" y="301" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">Antigravity</text>
+    </g>
+    <g>
+
+      <!-- Colored ambient caustic beneath 3D glass card -->
+      <ellipse cx="1152" cy="108" rx="28" ry="10" fill="#10B981" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass bottom thickness lip -->
+      <rect x="1120" y="54" width="64" height="64" rx="17" fill="#CBD5E1" fill-opacity="0.72"/>
+      <!-- Frosted glass surface -->
+      <rect x="1120" y="50" width="64" height="64" rx="17" fill="url(#lt-card-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1" filter="url(#lt-card-shadow)"/>
+      <!-- Inner crisp glass bevel highlight -->
+      <rect x="1121" y="51" width="62" height="62" rx="16" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1"/>
+      <!-- Diagonal frosted glass sheen -->
+      <path d="M 1136 51 H 1168 A 16 16 0 0 1 1183 67 V 78 L 1121 94 V 67 A 16 16 0 0 1 1136 51 Z" fill="url(#lt-sheen)"/>
+      <!-- Authentic channel logo -->
+      <g ><svg x="1135" y="65" width="34" height="34" viewBox="0 0 24 24"><g fill="#0F172A"><title>opencode</title><path d="M16 6H8v12h8V6zm4 16H4V2h16v20z"></path></g></svg></g>
+      <!-- Subtle mono channel caption -->
+      <text x="1152" y="129" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">OpenCode</text>
+    </g>
+    <g>
+
+      <!-- Colored ambient caustic beneath 3D glass card -->
+      <ellipse cx="1236" cy="194" rx="28" ry="10" fill="#64748B" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass bottom thickness lip -->
+      <rect x="1204" y="140" width="64" height="64" rx="17" fill="#CBD5E1" fill-opacity="0.72"/>
+      <!-- Frosted glass surface -->
+      <rect x="1204" y="136" width="64" height="64" rx="17" fill="url(#lt-card-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1" filter="url(#lt-card-shadow)"/>
+      <!-- Inner crisp glass bevel highlight -->
+      <rect x="1205" y="137" width="62" height="62" rx="16" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1"/>
+      <!-- Diagonal frosted glass sheen -->
+      <path d="M 1220 137 H 1252 A 16 16 0 0 1 1267 153 V 164 L 1205 180 V 153 A 16 16 0 0 1 1220 137 Z" fill="url(#lt-sheen)"/>
+      <!-- Authentic channel logo -->
+      <g ><svg x="1219" y="151" width="34" height="34" viewBox="0 0 24 24"><g fill="#0F172A"><title>Grok</title><path d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815"></path></g></svg></g>
+      <!-- Subtle mono channel caption -->
+      <text x="1236" y="215" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">Grok</text>
+    </g>
+    <g>
+      <defs><clipPath id="lt-ic-kiro"><rect x="1135" y="237" width="34" height="34" rx="7.5"/></clipPath></defs>
+      <!-- Colored ambient caustic beneath 3D glass card -->
+      <ellipse cx="1152" cy="280" rx="28" ry="10" fill="#9046FF" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass bottom thickness lip -->
+      <rect x="1120" y="226" width="64" height="64" rx="17" fill="#CBD5E1" fill-opacity="0.72"/>
+      <!-- Frosted glass surface -->
+      <rect x="1120" y="222" width="64" height="64" rx="17" fill="url(#lt-card-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1" filter="url(#lt-card-shadow)"/>
+      <!-- Inner crisp glass bevel highlight -->
+      <rect x="1121" y="223" width="62" height="62" rx="16" fill="none" stroke="rgba(255,255,255,0.95)" stroke-width="1"/>
+      <!-- Diagonal frosted glass sheen -->
+      <path d="M 1136 223 H 1168 A 16 16 0 0 1 1183 239 V 250 L 1121 266 V 239 A 16 16 0 0 1 1136 223 Z" fill="url(#lt-sheen)"/>
+      <!-- Authentic channel logo -->
+      <g clip-path="url(#lt-ic-kiro)"><svg x="1135" y="237" width="34" height="34" viewBox="0 0 24 24"><title>Kiro</title><path d="M18.8 0H5.2A5.2 5.2 0 000 5.2v13.6A5.2 5.2 0 005.2 24h13.6a5.2 5.2 0 005.2-5.2V5.2A5.2 5.2 0 0018.8 0z" fill="#9046FF"></path><path d="M7.97 16.376c-1.644 3.642 1.86 4.556 4.443 2.424.76 2.39 3.608.607 4.631-1.247 2.251-4.084 1.342-8.249 1.108-9.108-1.6-5.859-9.6-5.869-10.976.03-.323 1.033-.328 2.206-.507 3.423-.09.617-.16 1.009-.393 1.655-.139.373-.323.7-.62 1.257-.458.865-.264 2.53 2.101 1.665l.224-.1h-.01l-.001.001z" fill="#fff"></path><path d="M12.722 10.985c-.656 0-.755-.785-.755-1.252 0-.423.074-.756.218-.97a.61.61 0 01.537-.283c.229 0 .428.095.567.289.159.218.243.55.243.964 0 .785-.303 1.252-.805 1.252h-.005zm2.703 0c-.656 0-.755-.785-.755-1.252 0-.423.074-.756.219-.97a.61.61 0 01.536-.283c.229 0 .428.095.567.289.159.218.243.55.243.964 0 .785-.303 1.252-.805 1.252h-.005z" fill="#000"></path></svg></g>
+      <!-- Subtle mono channel caption -->
+      <text x="1152" y="301" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="11.5" font-weight="600" letter-spacing="0.4" fill="#64748B">Kiro</text>
+    </g>
+
+    <!-- Centered 3D stacked frosted-glass logo hub -->
+    <g>
+      <ellipse cx="700" cy="220" rx="54" ry="15" fill="#38BDF8" fill-opacity="0.18" filter="url(#lt-soft-blur)"/>
+      <ellipse cx="700" cy="224" rx="42" ry="12" fill="#A855F7" fill-opacity="0.15" filter="url(#lt-soft-blur)"/>
+      <!-- Physical 3D glass pedestal lip -->
+      <rect x="643" y="117" width="114" height="114" rx="28" fill="#CBD5E1" fill-opacity="0.78"/>
+      <!-- Main frosted glass hub card -->
+      <rect x="643" y="111" width="114" height="114" rx="28" fill="url(#lt-hub-bg)" stroke="rgba(148,163,184,0.30)" stroke-width="1.2" filter="url(#lt-hub-shadow)"/>
+      <!-- Crisp inner glass rim -->
+      <rect x="644.2" y="112.2" width="111.6" height="111.6" rx="26.8" fill="none" stroke="rgba(255,255,255,0.98)" stroke-width="1.2"/>
+      <!-- Glossy top-left sheen -->
+      <path d="M 669 112.5 H 731 A 26 26 0 0 1 755.5 138.5 V 155 L 644.5 183 V 138.5 A 26 26 0 0 1 669 112.5 Z" fill="url(#lt-sheen)"/>
+      <!-- Embedded tight-cropped 3D glass logo -->
+      <image href="data:image/jpeg;base64,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" x="655" y="123" width="90" height="90" clip-path="url(#lt-hub-logo-clip)" preserveAspectRatio="xMidYMid slice"/>
+    </g>
+
+    <!-- Brand wordmark & subtitle -->
+    <text x="700" y="334" text-anchor="middle" font-family="Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" font-size="56" font-weight="900" letter-spacing="-1" fill="url(#lt-title-fill)" >Codex2API</text>
+    <text x="700" y="368" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace" font-size="14.5" font-weight="700" letter-spacing="3.2" fill="#475569">UNIFIED MULTI-CHANNEL AI GATEWAY · OPENAI &amp; ANTHROPIC COMPATIBLE</text>
+    <path d="M 420 392 H 980" stroke="url(#lt-bar-grad)" stroke-width="2" stroke-linecap="round"/>
+
+    <rect x="0.75" y="0.75" width="1398.5" height="418.5" rx="27.25" stroke="#E2E8F0" stroke-width="1.5"/>
+  </g>
+</svg>

@@ -2122,9 +2122,28 @@
     0 6px 16px -4px rgba(0, 0, 0, 0.35);
 }
 
+@keyframes auth-orbit-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.auth-orbit-slow {
+  animation: auth-orbit-spin 42s linear infinite;
+}
+
+.auth-orbit-reverse {
+  animation: auth-orbit-spin 28s linear infinite reverse;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .auth-glass-node,
-  .auth-route-dash {
+  .auth-route-dash,
+  .auth-orbit-slow,
+  .auth-orbit-reverse {
     animation: none;
   }
   .auth-route-orb {

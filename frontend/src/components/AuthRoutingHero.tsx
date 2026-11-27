@@ -5,7 +5,7 @@ import type { UpstreamChannel } from '../types'
 interface ChannelNodeSpec {
   id: UpstreamChannel
   label: string
-  /** Position in the 560x212 SVG coordinate space */
+  /** Position in the 580x236 SVG coordinate space */
   x: number
   y: number
   /** Cubic Bézier or line path from node edge to central hub edge */
@@ -21,20 +21,22 @@ interface ChannelNodeSpec {
   pulseDuration: string
 }
 
-const VIEWBOX_W = 560
-const VIEWBOX_H = 212
+const VIEWBOX_W = 580
+const VIEWBOX_H = 236
+const HUB_CX = 290
+const HUB_CY = 108
 
 const CHANNEL_NODES: ChannelNodeSpec[] = [
   {
     id: 'codex',
     label: 'Codex',
-    x: 68,
-    y: 36,
-    pinX: 98,
-    pinY: 36,
-    path: 'M 98 36 C 168 36, 174 88, 224 88',
+    x: 74,
+    y: 34,
+    pinX: 105,
+    pinY: 34,
+    path: 'M 105 34 C 176 34, 182 88, 232 88',
     accent: '#6366F1',
-    accentSoft: 'rgba(99, 102, 241, 0.24)',
+    accentSoft: 'rgba(99, 102, 241, 0.26)',
     floatDelay: '0s',
     pulseDelay: '0s',
     pulseDuration: '3.2s',
@@ -42,13 +44,13 @@ const CHANNEL_NODES: ChannelNodeSpec[] = [
   {
     id: 'claude',
     label: 'Claude',
-    x: 38,
-    y: 106,
-    pinX: 68,
-    pinY: 106,
-    path: 'M 68 106 L 220 106',
+    x: 42,
+    y: 108,
+    pinX: 73,
+    pinY: 108,
+    path: 'M 73 108 L 228 108',
     accent: '#D97757',
-    accentSoft: 'rgba(217, 119, 87, 0.24)',
+    accentSoft: 'rgba(217, 119, 87, 0.26)',
     floatDelay: '-1.6s',
     pulseDelay: '0.9s',
     pulseDuration: '2.9s',
@@ -56,13 +58,13 @@ const CHANNEL_NODES: ChannelNodeSpec[] = [
   {
     id: 'antigravity',
     label: 'Antigravity',
-    x: 68,
-    y: 176,
-    pinX: 98,
-    pinY: 176,
-    path: 'M 98 176 C 168 176, 174 124, 224 124',
+    x: 74,
+    y: 182,
+    pinX: 105,
+    pinY: 182,
+    path: 'M 105 182 C 176 182, 182 128, 232 128',
     accent: '#0EA5E9',
-    accentSoft: 'rgba(14, 165, 233, 0.24)',
+    accentSoft: 'rgba(14, 165, 233, 0.26)',
     floatDelay: '-3.1s',
     pulseDelay: '1.8s',
     pulseDuration: '3.4s',
@@ -70,13 +72,13 @@ const CHANNEL_NODES: ChannelNodeSpec[] = [
   {
     id: 'opencode',
     label: 'OpenCode',
-    x: 492,
-    y: 36,
-    pinX: 462,
-    pinY: 36,
-    path: 'M 462 36 C 392 36, 386 88, 336 88',
+    x: 506,
+    y: 34,
+    pinX: 475,
+    pinY: 34,
+    path: 'M 475 34 C 404 34, 398 88, 348 88',
     accent: '#10B981',
-    accentSoft: 'rgba(16, 185, 129, 0.24)',
+    accentSoft: 'rgba(16, 185, 129, 0.26)',
     floatDelay: '-0.8s',
     pulseDelay: '0.45s',
     pulseDuration: '3.3s',
@@ -84,13 +86,13 @@ const CHANNEL_NODES: ChannelNodeSpec[] = [
   {
     id: 'grok',
     label: 'Grok',
-    x: 522,
-    y: 106,
-    pinX: 492,
-    pinY: 106,
-    path: 'M 492 106 L 340 106',
+    x: 538,
+    y: 108,
+    pinX: 507,
+    pinY: 108,
+    path: 'M 507 108 L 352 108',
     accent: '#64748B',
-    accentSoft: 'rgba(148, 163, 184, 0.26)',
+    accentSoft: 'rgba(148, 163, 184, 0.28)',
     floatDelay: '-2.3s',
     pulseDelay: '1.35s',
     pulseDuration: '3.0s',
@@ -98,13 +100,13 @@ const CHANNEL_NODES: ChannelNodeSpec[] = [
   {
     id: 'kiro',
     label: 'Kiro',
-    x: 492,
-    y: 176,
-    pinX: 462,
-    pinY: 176,
-    path: 'M 462 176 C 392 176, 386 124, 336 124',
+    x: 506,
+    y: 182,
+    pinX: 475,
+    pinY: 182,
+    path: 'M 475 182 C 404 182, 398 128, 348 128',
     accent: '#9046FF',
-    accentSoft: 'rgba(144, 70, 255, 0.24)',
+    accentSoft: 'rgba(144, 70, 255, 0.26)',
     floatDelay: '-3.8s',
     pulseDelay: '2.2s',
     pulseDuration: '3.5s',
@@ -119,13 +121,13 @@ interface AuthRoutingHeroProps {
 export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroProps) {
   return (
     <div
-      className="relative mx-auto mb-5 aspect-[560/212] w-full max-w-[520px] select-none"
+      className="relative mx-auto mb-3 aspect-[580/236] w-full max-w-[540px] select-none"
       aria-label={siteName}
     >
-      {/* Subtle central aurora aura behind the gateway hub */}
+      {/* Subtle 3-tone prism halo behind the centered gateway hub */}
       <div
         aria-hidden
-        className="pointer-events-none absolute left-1/2 top-1/2 h-[58%] w-[36%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(56,189,248,0.22)_0%,rgba(168,85,247,0.16)_48%,transparent_76%)] blur-2xl dark:bg-[radial-gradient(circle,rgba(34,211,238,0.28)_0%,rgba(168,85,247,0.22)_50%,transparent_78%)]"
+        className="pointer-events-none absolute left-1/2 top-[45.8%] h-[56%] w-[36%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[radial-gradient(circle,rgba(56,189,248,0.24)_0%,rgba(52,211,153,0.14)_42%,rgba(168,85,247,0.16)_68%,transparent_82%)] blur-2xl dark:bg-[radial-gradient(circle,rgba(34,211,238,0.30)_0%,rgba(52,211,153,0.16)_44%,rgba(168,85,247,0.24)_70%,transparent_84%)]"
       />
 
       {/* Synchronized SVG routing arrows & animated energy pulses */}
@@ -137,7 +139,7 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
       >
         <defs>
           {CHANNEL_NODES.map((node) => {
-            const isLeft = node.x < VIEWBOX_W / 2
+            const isLeft = node.x < HUB_CX
             return (
               <linearGradient
                 key={`grad-${node.id}`}
@@ -145,15 +147,28 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
                 gradientUnits="userSpaceOnUse"
                 x1={node.pinX}
                 y1={node.pinY}
-                x2={isLeft ? 224 : 336}
-                y2={106}
+                x2={isLeft ? 232 : 348}
+                y2={HUB_CY}
               >
                 <stop offset="0%" stopColor={node.accent} stopOpacity="0.72" />
-                <stop offset="60%" stopColor="#38BDF8" stopOpacity="0.78" />
-                <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.9" />
+                <stop offset="56%" stopColor="#38BDF8" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.92" />
               </linearGradient>
             )
           })}
+
+          <linearGradient
+            id="auth-route-stem"
+            gradientUnits="userSpaceOnUse"
+            x1={HUB_CX}
+            y1={164}
+            x2={HUB_CX}
+            y2={232}
+          >
+            <stop offset="0%" stopColor="#38BDF8" stopOpacity="0.78" />
+            <stop offset="55%" stopColor="#8B5CF6" stopOpacity="0.58" />
+            <stop offset="100%" stopColor="#8B5CF6" stopOpacity="0.1" />
+          </linearGradient>
 
           {CHANNEL_NODES.map((node) => (
             <marker
@@ -169,10 +184,26 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
               <path
                 d="M 1.5 1.8 L 8.2 5 L 1.5 8.2 L 3.1 5 Z"
                 fill="#6366F1"
-                fillOpacity="0.88"
+                fillOpacity="0.9"
               />
             </marker>
           ))}
+
+          <marker
+            id="auth-stem-arrow"
+            viewBox="0 0 10 10"
+            refX="7.5"
+            refY="5"
+            markerWidth="6"
+            markerHeight="6"
+            orient="auto"
+          >
+            <path
+              d="M 1.5 2 L 8 5 L 1.5 8 L 3.1 5 Z"
+              fill="#8B5CF6"
+              fillOpacity="0.65"
+            />
+          </marker>
 
           <filter id="auth-pulse-glow" x="-100%" y="-100%" width="300%" height="300%">
             <feGaussianBlur stdDeviation="2.4" result="blur" />
@@ -191,7 +222,7 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
               stroke={`url(#auth-route-grad-${node.id})`}
               strokeWidth="1.65"
               strokeLinecap="round"
-              strokeOpacity="0.45"
+              strokeOpacity="0.46"
               markerEnd={`url(#auth-route-arrow-${node.id})`}
             />
 
@@ -199,7 +230,7 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
             <path
               d={node.path}
               stroke={`url(#auth-route-grad-${node.id})`}
-              strokeWidth="1.8"
+              strokeWidth="1.85"
               strokeLinecap="round"
               strokeDasharray="6 14"
               className="auth-route-dash"
@@ -212,12 +243,12 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
               cy={node.pinY}
               r="3"
               fill={node.accent}
-              fillOpacity="0.85"
+              fillOpacity="0.88"
             />
             <circle
               cx={node.pinX}
               cy={node.pinY}
-              r="5.5"
+              r="5.8"
               fill={node.accent}
               fillOpacity="0.16"
             />
@@ -242,6 +273,17 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
             </circle>
           </g>
         ))}
+
+        {/* Downward unified gateway output stem linking hub -> title & login card */}
+        <path
+          d={`M ${HUB_CX} 166 L ${HUB_CX} 226`}
+          stroke="url(#auth-route-stem)"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeDasharray="4 7"
+          markerEnd="url(#auth-stem-arrow)"
+          className="auth-route-dash"
+        />
       </svg>
 
       {/* 6 Channel 3D Frosted Glass Mini Cards */}
@@ -254,31 +296,47 @@ export default function AuthRoutingHero({ siteName, logoSrc }: AuthRoutingHeroPr
           }}
           className="absolute -translate-x-1/2 -translate-y-1/2"
         >
-          <div
-            title={node.label}
-            aria-label={node.label}
-            style={
-              {
-                '--node-accent': node.accent,
-                '--node-glow': node.accentSoft,
-                animationDelay: node.floatDelay,
-              } as CSSProperties
-            }
-            className="auth-glass-node group relative flex size-10 items-center justify-center rounded-[14px] sm:size-[50px] sm:rounded-[16px]"
-          >
-            <ChannelLogo
-              channel={node.id}
-              size={22}
+          <div className="relative flex items-center justify-center">
+            <div
               title={node.label}
-              className="relative z-10 text-foreground/90 transition-transform duration-300 group-hover:scale-110 sm:scale-110"
-            />
+              aria-label={node.label}
+              style={
+                {
+                  '--node-accent': node.accent,
+                  '--node-glow': node.accentSoft,
+                  animationDelay: node.floatDelay,
+                } as CSSProperties
+              }
+              className="auth-glass-node group relative flex size-10 items-center justify-center rounded-[14px] sm:size-[50px] sm:rounded-[16px]"
+            >
+              <ChannelLogo
+                channel={node.id}
+                size={22}
+                title={node.label}
+                className="relative z-10 text-foreground/90 transition-transform duration-300 group-hover:scale-110 sm:scale-110"
+              />
+            </div>
+            <span className="pointer-events-none absolute left-1/2 top-full mt-1.5 hidden -translate-x-1/2 whitespace-nowrap font-mono text-[9.5px] font-medium tracking-wide text-muted-foreground/75 sm:block">
+              {node.label}
+            </span>
           </div>
         </div>
       ))}
 
-      {/* Centered Site Logo 3D Frosted Glass Hub Card */}
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2">
-        <div className="auth-glass-hub relative flex size-[74px] items-center justify-center rounded-[22px] p-2 sm:size-[88px] sm:rounded-[26px] sm:p-2.5">
+      {/* Centered Site Logo 3D Stacked Frosted Glass Hub Card */}
+      <div
+        style={{
+          left: '50%',
+          top: `${(HUB_CY / VIEWBOX_H) * 100}%`,
+        }}
+        className="absolute -translate-x-1/2 -translate-y-1/2"
+      >
+        {/* Subtle stacked glass echo plate underneath */}
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-2 -bottom-2 h-6 rounded-[20px] bg-gradient-to-r from-sky-400/25 via-emerald-400/20 to-violet-500/25 blur-sm dark:from-cyan-400/30 dark:via-emerald-400/22 dark:to-fuchsia-500/30"
+        />
+        <div className="auth-glass-hub relative flex size-[76px] items-center justify-center rounded-[22px] p-2 sm:size-[90px] sm:rounded-[26px] sm:p-2.5">
           <img
             src={logoSrc}
             alt={siteName}
