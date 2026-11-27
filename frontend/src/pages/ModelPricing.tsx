@@ -37,6 +37,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { SegmentedPillGroup } from '@/components/ui/segmented-pill-group'
 import { DraftNumberInput } from '@/components/ui/draft-number-input'
+import { GlideMenu, PixelLoader, ValuePill } from '@/components/ui/beautiful'
 import { mediaBillingUnit, supportsImageBilling, type MediaBillingUnit } from '../lib/imageBilling'
 import { cn } from '@/lib/utils'
 import { useToast } from '../hooks/useToast'
@@ -60,8 +61,8 @@ type Row = {
   media_unit?: MediaBillingUnit
 }
 type SourceFilter = 'all' | 'custom' | 'synced' | 'default' | 'unsaved'
-type ChannelFilter = 'all' | 'codex' | 'grok' | 'antigravity' | 'claude' | 'kiro' | 'opencode'
-const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'grok', 'antigravity', 'claude', 'kiro', 'opencode']
+type ChannelFilter = 'all' | 'codex' | 'claude' | 'grok' | 'antigravity' | 'kiro' | 'opencode'
+const CHANNEL_ORDER: Array<Exclude<ChannelFilter, 'all'>> = ['codex', 'claude', 'grok', 'antigravity', 'kiro', 'opencode']
 const CHANNEL_LABEL: Record<Exclude<ChannelFilter, 'all'>, string> = {
   codex: 'Codex',
   grok: 'Grok',
@@ -332,9 +333,8 @@ function ModelRefreshProgressPanel({ progress, running }: { progress: ModelRefre
   const channels = CHANNEL_ORDER.filter((c) => progress[c]).map((c) => progress[c])
   if (channels.length === 0) {
     return (
-      <div className="flex items-center gap-2 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">
-        <Loader2 className="size-3.5 animate-spin" />
-        {t('settings.pricing.refreshStarting')}
+      <div className="flex items-center gap-2.5 rounded-xl border border-sky-500/20 bg-sky-500/5 p-3 text-xs text-sky-700 dark:text-sky-300">
+        <PixelLoader mode="drive" size="sm" label={t('settings.pricing.refreshStarting')} />
       </div>
     )
   }
@@ -633,6 +633,13 @@ function PricingModelRow({ row: r, draft, expanded, advancedOpen, busy, isNew, h
             <span className="pricing-model-name">{r.model}{isNew && <span className="pricing-new-badge">{t('settings.pricing.newBadge')}</span>}</span>
             <span className="pricing-model-meta">
               <span className={cn('pricing-source-badge', source.className)}><i className={source.dot} />{t(source.labelKey)}</span>
+              {!mediaUnit && !imageModel && (normalizePrice(draft.cache_write_5m) > 0 || normalizePrice(draft.cache_write_1h) > 0) && (
+                <span className="pricing-cache-write-chip">
+                  {normalizePrice(draft.cache_write_5m) > 0 && `5m $${formatPriceDisplay(normalizePrice(draft.cache_write_5m))}`}
+                  {normalizePrice(draft.cache_write_5m) > 0 && normalizePrice(draft.cache_write_1h) > 0 && ' · '}
+                  {normalizePrice(draft.cache_write_1h) > 0 && `1h $${formatPriceDisplay(normalizePrice(draft.cache_write_1h))}`}
+                </span>
+              )}
               {r.is_alias && r.canonical_model && <span className="pricing-alias" title={t('settings.pricing.aliasOf', { model: r.canonical_model })}><Link2 size={11} aria-hidden="true" />{r.canonical_model}</span>}
               {dirty && <span className="pricing-dirty-label"><span />{t('settings.pricing.unsaved')}</span>}
             </span>
@@ -1057,26 +1064,82 @@ export default function ModelPricing() {
       <StateShell variant="page" loading={loading && rows.length === 0} error={loadError && rows.length === 0 ? loadError : null} onRetry={() => void load()}>
         <div className="pricing-overview">
           <div className="pricing-metrics" role="group" aria-label={t('settings.pricing.sourceFilterLabel')}>
-            {metricItems.map(({ id, label, sub, value, icon: Icon }) => (
-              <button key={id} type="button" className="pricing-metric" data-source={id} aria-pressed={sourceFilter === id} onClick={() => setSourceFilter(id)}>
-                <span className="pricing-metric-icon"><Icon size={18} strokeWidth={1.6} aria-hidden="true" /></span>
-                <span className="pricing-metric-content"><span>{t(`settings.pricing.${label}`)}</span><strong>{value}<small>{t('settings.pricing.modelsUnit')}</small></strong><span className="pricing-metric-caption">{t(`settings.pricing.${sub}`)}</span></span>
-                <span className="pricing-metric-bar" aria-hidden="true"><i style={{ width: `${counts.total ? value / counts.total * 100 : 0}%` }} /></span>
-              </button>
-            ))}
+            {metricItems.map(({ id, label, sub, value, icon: Icon }) => {
+              const pct = counts.total ? Math.round((value / counts.total) * 100) : 0
+              return (
+                <button key={id} type="button" className="pricing-metric" data-source={id} aria-pressed={sourceFilter === id} onClick={() => setSourceFilter(id)}>
+                  <span className="pricing-metric-top">
+                    <span className="pricing-metric-icon"><Icon size={18} strokeWidth={1.7} aria-hidden="true" /></span>
+                    <span className="pricing-metric-share">{pct}%</span>
+                  </span>
+                  <span className="pricing-metric-content">
+                    <span>{t(`settings.pricing.${label}`)}</span>
+                    <strong>{value}<small>{t('settings.pricing.modelsUnit')}</small></strong>
+                    <span className="pricing-metric-caption">{t(`settings.pricing.${sub}`)}</span>
+                  </span>
+                  <span className="pricing-metric-bar" aria-hidden="true"><i style={{ width: `${counts.total ? value / counts.total * 100 : 0}%` }} /></span>
+                </button>
+              )
+            })}
           </div>
-          <div className="pricing-status-strip"><span><Clock3 size={13} aria-hidden="true" />{t(officialConfig.enabled ? 'settings.pricing.autoSyncEnabled' : 'settings.pricing.manualSync')}</span>{officialConfig.last_success_at && <span>{t('settings.pricing.lastOfficialSuccess')} · {new Date(officialConfig.last_success_at).toLocaleString()}</span>}<button type="button" onClick={() => setSyncOpen(true)}>{t('settings.pricing.manageSources')}<ArrowUpRight size={12} aria-hidden="true" /></button></div>
+          <div className="pricing-status-strip">
+            <span>
+              <span className={cn('pricing-status-dot', officialConfig.enabled && 'is-live')} aria-hidden="true" />
+              <Clock3 size={13} aria-hidden="true" />
+              {t(officialConfig.enabled ? 'settings.pricing.autoSyncEnabled' : 'settings.pricing.manualSync')}
+            </span>
+            {officialConfig.last_success_at && <span>{t('settings.pricing.lastOfficialSuccess')} · {new Date(officialConfig.last_success_at).toLocaleString()}</span>}
+            <button type="button" onClick={() => setSyncOpen(true)}>{t('settings.pricing.manageSources')}<ArrowUpRight size={12} aria-hidden="true" /></button>
+          </div>
         </div>
 
         <section className="pricing-toolbar" aria-label={t('settings.pricing.filtersTitle')}>
           <div className="pricing-toolbar-top">
-            <div className="pricing-list-title"><h3>{t('settings.pricing.priceList')}</h3><span role="status">{t('settings.pricing.listCount', { shown: filteredRows.length, total: counts.total })}</span></div>
-            <div className="pricing-search"><Search size={16} aria-hidden="true" /><Input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('settings.pricing.searchPlaceholder')} aria-label={t('settings.pricing.searchPlaceholder')} />{query && <button type="button" onClick={() => setQuery('')} aria-label={t('settings.pricing.clearSearch')}><X size={14} /></button>}</div>
-            <Button variant="ghost" size="sm" className="pricing-expand-all" onClick={toggleAllAdvanced} aria-label={t(isAllAdvancedExpanded ? 'settings.pricing.collapseAllAdvanced' : 'settings.pricing.expandAllAdvanced')}><ChevronsUpDown className="size-3.5" /><span>{t(isAllAdvancedExpanded ? 'settings.pricing.collapseAllAdvanced' : 'settings.pricing.expandAllAdvanced')}</span></Button>
+            <div className="pricing-list-title">
+              <h3>{t('settings.pricing.priceList')}</h3>
+              <ValuePill tone="primary" className="text-[11px]">
+                <span role="status">{t('settings.pricing.listCount', { shown: filteredRows.length, total: counts.total })}</span>
+              </ValuePill>
+            </div>
+            <div className="pricing-search"><Search size={15} aria-hidden="true" /><Input value={query} onChange={event => setQuery(event.target.value)} placeholder={t('settings.pricing.searchPlaceholder')} aria-label={t('settings.pricing.searchPlaceholder')} />{query && <button type="button" onClick={() => setQuery('')} aria-label={t('settings.pricing.clearSearch')}><X size={14} /></button>}</div>
+            <Button variant="outline" size="sm" className="pricing-expand-all" onClick={toggleAllAdvanced} aria-label={t(isAllAdvancedExpanded ? 'settings.pricing.collapseAllAdvanced' : 'settings.pricing.expandAllAdvanced')}><ChevronsUpDown className="size-3.5" /><span>{t(isAllAdvancedExpanded ? 'settings.pricing.collapseAllAdvanced' : 'settings.pricing.expandAllAdvanced')}</span></Button>
           </div>
           <div className="pricing-filter-layout">
-            {activeChannels.length > 1 && <div className="pricing-filter-section"><span>{t('settings.pricing.channelFilterLabel')}</span><div className="pricing-filter-options" role="group" aria-label={t('settings.pricing.channelFilterLabel')}><button type="button" aria-pressed={channelFilter === 'all'} onClick={() => setChannelFilter('all')}>{t('settings.pricing.filterAll')}<span>{counts.total}</span></button>{activeChannels.map(channel => <button key={channel} type="button" aria-pressed={channelFilter === channel} onClick={() => setChannelFilter(channel)}><ChannelLogo channel={channel} size={14} />{CHANNEL_LABEL[channel]}<span>{channelCounts[channel]}</span></button>)}</div></div>}
-            <div className="pricing-filter-section"><span>{t('settings.pricing.sourceFilterLabel')}</span><div className="pricing-filter-options" role="group" aria-label={t('settings.pricing.sourceFilterLabel')}>{sourceFilters.map(item => <button key={item.id} type="button" aria-pressed={sourceFilter === item.id} data-source={item.id} onClick={() => setSourceFilter(item.id)}>{item.id === 'unsaved' && dirtyCount > 0 && <i className="pricing-dirty-dot" />}{item.label}<span>{item.count}</span></button>)}</div></div>
+            <div className="pricing-filter-row">
+              {activeChannels.length > 1 && (
+                <div className="pricing-filter-section">
+                  <span>{t('settings.pricing.channelFilterLabel')}</span>
+                  <GlideMenu
+                    className="pricing-channel-rail"
+                    indicatorClassName="rounded-[9px]"
+                    aria-label={t('settings.pricing.channelFilterLabel')}
+                  >
+                    <button type="button" data-glide-item="true" className="pricing-channel-pill" aria-pressed={channelFilter === 'all'} onClick={() => setChannelFilter('all')}>
+                      {t('settings.pricing.filterAll')}<small>{counts.total}</small>
+                    </button>
+                    {activeChannels.map(channel => (
+                      <button key={channel} type="button" data-glide-item="true" className="pricing-channel-pill" aria-pressed={channelFilter === channel} onClick={() => setChannelFilter(channel)}>
+                        <ChannelLogo channel={channel} size={14} />{CHANNEL_LABEL[channel]}<small>{channelCounts[channel]}</small>
+                      </button>
+                    ))}
+                  </GlideMenu>
+                </div>
+              )}
+              <div className="pricing-filter-section">
+                <span>{t('settings.pricing.sourceFilterLabel')}</span>
+                <div className="pricing-filter-options" role="group" aria-label={t('settings.pricing.sourceFilterLabel')}>
+                  {sourceFilters.map(item => (
+                    <button key={item.id} type="button" aria-pressed={sourceFilter === item.id} data-source={item.id} onClick={() => setSourceFilter(item.id)}>
+                      {item.id === 'custom' && <i className="pricing-source-dot bg-primary" />}
+                      {item.id === 'synced' && <i className="pricing-source-dot bg-sky-500" />}
+                      {item.id === 'default' && <i className="pricing-source-dot bg-muted-foreground/50" />}
+                      {item.id === 'unsaved' && dirtyCount > 0 && <i className="pricing-dirty-dot" />}
+                      {item.label}<span>{item.count}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
           {(query || sourceFilter !== 'all' || channelFilter !== 'all') && <div className="pricing-active-filters"><ListFilter size={12} aria-hidden="true" /><span>{t('settings.pricing.filteredView')}</span><button type="button" onClick={clearFilters}>{t('settings.pricing.clearFilters')}<X size={12} aria-hidden="true" /></button></div>}
         </section>
@@ -1087,7 +1150,12 @@ export default function ModelPricing() {
           <div className="pricing-model-groups">
             {groupedRows.map(group => (
               <section key={group.channel} className="pricing-channel-group" aria-label={CHANNEL_LABEL[group.channel]}>
-                <div className="pricing-channel-heading"><ChannelLogo channel={group.channel} size={18} /><h3>{CHANNEL_LABEL[group.channel]}</h3><span>{group.rows.length}</span><small>{t('settings.pricing.unitHint')}</small></div>
+                <div className="pricing-channel-heading">
+                  <span className="pricing-channel-logo-badge"><ChannelLogo channel={group.channel} size={17} /></span>
+                  <h3>{CHANNEL_LABEL[group.channel]}</h3>
+                  <ValuePill tone="neutral" className="text-[11px]">{group.rows.length}</ValuePill>
+                  <small>{t('settings.pricing.unitHint')}</small>
+                </div>
                 <div className="pricing-column-head" aria-hidden="true"><span>{t('settings.pricing.modelColumn')}</span><span className="pricing-column-rates"><span>{t('settings.pricing.input')}</span><span>{t('settings.pricing.cached')}</span><span>{t('settings.pricing.output')}</span></span><span /></div>
                 {group.rows.map(r => <PricingModelRow key={r.model} row={r} draft={drafts[r.model] ?? {}} expanded={expandedModels[r.model] ?? false} advancedOpen={expandedAdvanced[r.model] ?? false} busy={savingModel === r.model || bulkSaving} isNew={newModels.has(r.model.toLowerCase())} highlighted={jumpedModel === r.model.toLowerCase()} onToggle={() => setExpandedModels(prev => ({ ...prev, [r.model]: !prev[r.model] }))} onToggleAdvanced={() => setExpandedAdvanced(prev => ({ ...prev, [r.model]: !prev[r.model] }))} onFieldChange={(key, value) => {
                   if (key === 'user_billing_mode') setDrafts(prev => ({ ...prev, [r.model]: { ...prev[r.model], user_billing_mode: parseUserBillingMode(value) } }))

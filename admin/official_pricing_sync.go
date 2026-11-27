@@ -68,6 +68,7 @@ func (h *Handler) officialPricingModelIDs(ctx context.Context) []string {
 	models := h.codexPricingModelIDs(ctx)
 	models = append(models, h.grokBillingModelIDs()...)
 	models = append(models, h.claudeChannelModels()...)
+	models = append(models, claudeDefaultDisplayModelIDs()...)
 	return models
 }
 

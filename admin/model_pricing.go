@@ -171,6 +171,22 @@ func grokDefaultDisplayModelIDs() []string {
 	return ids
 }
 
+// claudeDefaultDisplayModelIDs 是定价页始终展示的 Claude 内置模型集（即使尚未配置 Claude 账号），
+// 与 Codex、Grok、Antigravity、OpenCode 的常显行为对齐。
+func claudeDefaultDisplayModelIDs() []string {
+	return []string{
+		"claude-fable-5-1",
+		"claude-fable-5",
+		"claude-sonnet-5",
+		"claude-opus-4-7",
+		"claude-opus-4-6",
+		"claude-opus-4-5",
+		"claude-sonnet-4-6",
+		"claude-sonnet-4-5",
+		"claude-haiku-4-5",
+	}
+}
+
 // modelPricingRow 是定价管理页每个规范模型的一行：当前生效价 + 来源。
 type modelPricingRow struct {
 	Model          string                        `json:"model"`
@@ -296,23 +312,23 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 		}
 		return out
 	}
-	// Grok 内置默认模型始终并入,使定价页像 Codex 内置模型一样常显 grok 家族,
-	// 即使当前没有任何 Grok 账号(官方同步的 grok 采集逻辑不受影响)。
+	// Grok / Claude 内置默认模型始终并入，使定价页像 Codex 内置模型一样常显各主流渠道家族，
+	// 即使当前尚未配置对应账号；Claude 先于 Antigravity/Kiro/OpenCode 去重，确保原生 claude-* 归属 Claude 渠道。
 	grokKeys := dedup(append(h.grokBillingModelIDs(), grokDefaultDisplayModelIDs()...))
+	claudeKeys := dedup(append(h.claudeChannelModels(), claudeDefaultDisplayModelIDs()...))
 	antigravityKeys := dedup(h.antigravityChannelModels())
-	claudeKeys := dedup(h.claudeChannelModels())
 	kiroKeys := dedup(h.kiroChannelModels())
 	openCodeKeys := dedup(h.openCodeChannelModels())
 
 	// 每个渠道内按新版本在前排序；渠道之间整体拼接,避免版本号交叉穿插。
 	sortModelKeysNewestFirst(keys)
+	sortModelKeysNewestFirst(claudeKeys)
 	sortModelKeysNewestFirst(grokKeys)
 	sortModelKeysNewestFirst(antigravityKeys)
-	sortModelKeysNewestFirst(claudeKeys)
 	sortModelKeysNewestFirst(kiroKeys)
 	sortModelKeysNewestFirst(openCodeKeys)
 
-	rows := make([]modelPricingRow, 0, len(keys)+len(grokKeys)+len(antigravityKeys)+len(claudeKeys)+len(kiroKeys)+len(openCodeKeys))
+	rows := make([]modelPricingRow, 0, len(keys)+len(claudeKeys)+len(grokKeys)+len(antigravityKeys)+len(kiroKeys)+len(openCodeKeys))
 	appendRows := func(modelKeys []string, channel string) {
 		for _, key := range modelKeys {
 			canonicalModel := database.PricingAliasTarget(key)
@@ -328,9 +344,9 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 		}
 	}
 	appendRows(keys, database.UpstreamChannelCodex)
+	appendRows(claudeKeys, database.UpstreamChannelClaude)
 	appendRows(grokKeys, database.UpstreamChannelGrok)
 	appendRows(antigravityKeys, database.UpstreamChannelAntigravity)
-	appendRows(claudeKeys, database.UpstreamChannelClaude)
 	appendRows(kiroKeys, database.UpstreamChannelKiro)
 	appendRows(openCodeKeys, database.UpstreamChannelOpenCode)
 

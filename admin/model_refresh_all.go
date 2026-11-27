@@ -216,8 +216,10 @@ func (h *Handler) modelPricingCatalogKeys(ctx context.Context) []string {
 		}
 	}
 	appendUnique(append(h.grokBillingModelIDs(), grokDefaultDisplayModelIDs()...))
+	appendUnique(append(h.claudeChannelModels(), claudeDefaultDisplayModelIDs()...))
 	appendUnique(h.antigravityChannelModels())
-	appendUnique(h.claudeChannelModels())
+	appendUnique(h.kiroChannelModels())
+	appendUnique(h.openCodeChannelModels())
 	return keys
 }
 
