@@ -20,7 +20,7 @@ import (
 
 // contentSecurityPolicy is kept in a constant so a unit test can verify that
 // every inline script in frontend/index.html is covered by its hash.
-const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'sha256-8jI3h1oN0D7cJ3eKd/Mjk+hKunZV0rZrmg9g4u/5+Nk='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; font-src 'self'; connect-src 'self' https://api.github.com;"
+const contentSecurityPolicy = "default-src 'self'; script-src 'self' 'sha256-yKQ057bKhkhwp6iLlSZteifRHfn8mLFgPyGIjuZt6EE='; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https: http:; media-src 'self' data: blob: https: http:; font-src 'self'; connect-src 'self' https://api.github.com;"
 
 // Security headers middleware
 func SecurityHeadersMiddleware() gin.HandlerFunc {
