@@ -58,7 +58,7 @@ import {
   validateOutputGuardHierarchy,
   validateOutputGuardRanges,
 } from '../lib/outputGuardSettings'
-import { DEFAULT_SITE_LOGO, isBrandingVideo, sanitizeBrandingImage, sanitizeBrandingLogo, useBranding } from '../branding'
+import { isBrandingVideo, sanitizeBrandingImage, sanitizeBrandingLogo, useBranding } from '../branding'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -2665,7 +2665,7 @@ async function compressSiteLogoFile(file: File, mimeType: string) {
 export default function Settings() {
   const { t } = useTranslation()
   const navigate = useNavigate()
-  const { applyBranding } = useBranding()
+  const { applyBranding, defaultLogo } = useBranding()
   const defaultClaudeModelMappingEntries = useMemo(() => getDefaultModelMappingEntries(), [])
   const schedulerModeOptions = [
     { label: t('settings.schedulerModeRoundRobin'), value: 'round_robin' },
@@ -3624,7 +3624,7 @@ export default function Settings() {
   const resinActive = Boolean(codexEgress?.resin_enabled)
   const canConfigureRemoteMigration = settingsForm.admin_auth_source === 'env' || settingsForm.admin_secret.trim() !== ''
   const saveButtonLabel = savingSettings ? t('common.saving') : t('settings.saveSettings')
-  const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || DEFAULT_SITE_LOGO
+  const siteLogoPreview = sanitizeBrandingLogo(settingsForm.site_logo) || defaultLogo
   const backgroundImagePreview = sanitizeBrandingImage(settingsForm.background_image)
   const backgroundIsVideo = isBrandingVideo(backgroundImagePreview)
   const visibleModelItems = useMemo(() => {

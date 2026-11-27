@@ -13,7 +13,8 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { ADMIN_AUTH_REQUIRED_EVENT, api, getAdminKey, setAdminKey } from '../api'
-import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
+import { useBranding } from '../branding'
+import AuthRoutingHero from './AuthRoutingHero'
 import type { SetupHintsResponse, SystemSettings } from '../types'
 
 type AuthStatus =
@@ -247,8 +248,8 @@ function PanelShell({
       <AuthBackdrop />
       <div className="relative z-10 w-full max-w-[920px]">
         <div className="mb-7 text-center">
-          <div className="mx-auto mb-4 inline-flex rounded-2xl bg-card/80 p-1.5 shadow-sm ring-1 ring-border/80 backdrop-blur-sm">
-            <img src={logoSrc} alt={siteName} className="size-14 rounded-xl object-cover" />
+          <div className="auth-glass-hub mx-auto mb-4 inline-flex size-[72px] items-center justify-center rounded-[22px] p-2">
+            <img src={logoSrc} alt={siteName} className="relative z-10 size-full rounded-[15px] object-cover shadow-sm" />
           </div>
           <h1 className="text-[28px] font-bold tracking-tight text-foreground">{siteName}</h1>
           <p className="mx-auto mt-1.5 max-w-lg text-sm leading-relaxed text-muted-foreground">{subtitle}</p>
@@ -316,8 +317,8 @@ export default function AuthGate({ children }: PropsWithChildren) {
   const { t, i18n } = useTranslation()
   const lang = (i18n.language || 'zh').startsWith('zh') ? 'zh' : 'en'
   const copy = COPY[lang]
-  const { siteName, siteLogo } = useBranding()
-  const logoSrc = siteLogo || DEFAULT_SITE_LOGO
+  const { siteName, siteLogo, defaultLogo } = useBranding()
+  const logoSrc = siteLogo || defaultLogo
 
   const [status, setStatus] = useState<AuthStatus>('checking')
   const [inputKey, setInputKey] = useState('')
@@ -899,16 +900,14 @@ export default function AuthGate({ children }: PropsWithChildren) {
     return (
       <div className="relative flex min-h-dvh items-center justify-center bg-background px-4 py-10">
         <AuthBackdrop />
-        <div className="relative z-10 mx-auto w-full max-w-[420px]">
-          <div className="mb-7 text-center">
-            <div className="mx-auto mb-4 inline-flex rounded-2xl bg-card/80 p-1.5 shadow-sm ring-1 ring-border/80 backdrop-blur-sm">
-              <img src={logoSrc} alt={siteName} className="size-14 rounded-xl object-cover" />
-            </div>
+        <div className="relative z-10 mx-auto w-full max-w-[540px]">
+          <div className="mb-6 text-center">
+            <AuthRoutingHero siteName={siteName} logoSrc={logoSrc} />
             <h1 className="text-[28px] font-bold tracking-tight text-foreground">{siteName}</h1>
             <p className="mt-1.5 text-sm text-muted-foreground">{copy.loginSubtitle}</p>
           </div>
 
-          <div className="rounded-2xl border border-border/80 bg-card/90 p-5 shadow-lg backdrop-blur-sm sm:p-6">
+          <div className="auth-login-card mx-auto w-full max-w-[420px] rounded-2xl p-5 sm:p-6">
             <div className="mb-5 flex items-center gap-2.5">
               <div className="flex size-9 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-primary/15">
                 <KeyRound className="size-4" />

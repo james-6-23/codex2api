@@ -4,7 +4,7 @@ import { NavLink, useLocation } from 'react-router-dom'
 import { LayoutDashboard, Users, Activity, Settings, Server, Languages, Globe, BookOpen, KeyRound, Image as ImageIcon, ShieldAlert, ExternalLink, ChevronLeft, Palette, Sun, Moon, LogOut, Download, Loader2, RefreshCw, Menu, X, CircleDollarSign, Braces, FlaskConical, RadioTower } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { api, resetAdminAuthState } from '../api'
-import { DEFAULT_SITE_LOGO, isBrandingVideo, useBranding } from '../branding'
+import { isBrandingVideo, useBranding } from '../branding'
 import { useVersionCheck } from '../hooks/useVersionCheck'
 import { buildVersionLabel } from '../lib/buildVersion'
 import { useTheme } from '../hooks/useTheme'
@@ -54,11 +54,11 @@ export default function Layout({ children }: PropsWithChildren) {
   const location = useLocation()
   const { t, i18n } = useTranslation()
   const { currentVersion, frontendVersion, versionMismatch, isCustomBuild, hasUpdate, latestVersion, updateInfo, refreshVersion } = useVersionCheck(location.pathname)
-  const { siteName, siteLogo, backgroundImage, backgroundOpacity, backgroundBlur, backgroundGlassOpacity, backgroundGlassBlur } = useBranding()
+  const { siteName, siteLogo, defaultLogo, backgroundImage, backgroundOpacity, backgroundBlur, backgroundGlassOpacity, backgroundGlassBlur } = useBranding()
   const { theme, toggle } = useTheme()
   const { showToast } = useToast()
   const [spinning, setSpinning] = useState(false)
-  const logoSrc = siteLogo || DEFAULT_SITE_LOGO
+  const logoSrc = siteLogo || defaultLogo
   const [showVersionPopover, setShowVersionPopover] = useState(false)
   const [updatingVersion, setUpdatingVersion] = useState(false)
   const [restartingAfterUpdate, setRestartingAfterUpdate] = useState(false)

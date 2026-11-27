@@ -33,7 +33,7 @@ import {
   X,
 } from 'lucide-react'
 import { api } from '../api'
-import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
+import { useBranding } from '../branding'
 import Pagination from '../components/Pagination'
 import type { CreateImageJobPayload, ImageAsset, ImageGenerationJob, ImageStudioQuota } from '../types'
 import { getErrorMessage } from '../utils/error'
@@ -225,11 +225,11 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
 
 export default function ImageStudioPortal() {
   const { t, i18n } = useTranslation()
-  const { siteName, siteLogo } = useBranding()
+  const { siteName, siteLogo, defaultLogo } = useBranding()
   const { view } = useParams()
   const navigate = useNavigate()
   const activeView = normalizeView(view)
-  const logoSrc = siteLogo || DEFAULT_SITE_LOGO
+  const logoSrc = siteLogo || defaultLogo
   const fileInputRef = useRef<HTMLInputElement>(null)
   const promptRef = useRef<HTMLTextAreaElement>(null)
   const workspaceRef = useRef<HTMLDivElement>(null)

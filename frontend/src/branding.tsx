@@ -3,18 +3,24 @@ import { createContext, type PropsWithChildren, useCallback, useContext, useEffe
 import { useTranslation } from 'react-i18next'
 import { useLocation } from 'react-router-dom'
 import { api } from './api'
+import { useTheme } from './hooks/useTheme'
 import type { SiteBranding } from './types'
-import defaultLogo from './assets/logo.png'
+import defaultDarkLogo from './assets/logo.png'
+import defaultLightLogo from './assets/logo-light.png'
 
 export const DEFAULT_SITE_NAME = 'CodexProxy'
-export const DEFAULT_SITE_LOGO = defaultLogo
-const DEFAULT_FAVICON = `${import.meta.env.BASE_URL}favicon.png`
+export const DEFAULT_SITE_LOGO = defaultDarkLogo
+export const DEFAULT_SITE_LOGO_DARK = defaultDarkLogo
+export const DEFAULT_SITE_LOGO_LIGHT = defaultLightLogo
+const DEFAULT_FAVICON_DARK = `${import.meta.env.BASE_URL}favicon.png`
+const DEFAULT_FAVICON_LIGHT = `${import.meta.env.BASE_URL}favicon-light.png`
 const DEFAULT_BACKGROUND_GLASS_OPACITY = 58
 const DEFAULT_BACKGROUND_GLASS_BLUR = 5
 
 type BrandingContextValue = {
   siteName: string
   siteLogo: string
+  defaultLogo: string
   backgroundImage: string
   backgroundOpacity: number
   backgroundBlur: number
@@ -82,6 +88,7 @@ function setIconLink(rel: string, href: string) {
 export function BrandingProvider({ children }: PropsWithChildren) {
   const { pathname } = useLocation()
   const { t } = useTranslation()
+  const { theme } = useTheme()
   const [branding, setBranding] = useState<SiteBranding>({
     site_name: DEFAULT_SITE_NAME,
     site_logo: '',
@@ -119,12 +126,14 @@ export function BrandingProvider({ children }: PropsWithChildren) {
 
   const siteName = normalizeSiteName(branding.site_name)
   const siteLogo = sanitizeBrandingLogo(branding.site_logo)
+  const defaultLogo = theme === 'dark' ? defaultDarkLogo : defaultLightLogo
   const backgroundImage = sanitizeBrandingImage(branding.background_image)
   const backgroundOpacity = clampPercent(branding.background_opacity)
   const backgroundBlur = clampBlur(branding.background_blur)
   const backgroundGlassOpacity = clampPercent(branding.background_glass_opacity, DEFAULT_BACKGROUND_GLASS_OPACITY)
   const backgroundGlassBlur = clampGlassBlur(branding.background_glass_blur)
-  const faviconHref = siteLogo || DEFAULT_FAVICON
+  const defaultFavicon = theme === 'dark' ? DEFAULT_FAVICON_DARK : DEFAULT_FAVICON_LIGHT
+  const faviconHref = siteLogo || defaultFavicon
 
   useEffect(() => {
     const [, portal, view] = pathname.split('/')
@@ -148,6 +157,7 @@ export function BrandingProvider({ children }: PropsWithChildren) {
   const value = useMemo<BrandingContextValue>(() => ({
     siteName,
     siteLogo,
+    defaultLogo,
     backgroundImage,
     backgroundOpacity,
     backgroundBlur,
@@ -156,7 +166,7 @@ export function BrandingProvider({ children }: PropsWithChildren) {
     faviconHref,
     refreshBranding,
     applyBranding,
-  }), [applyBranding, backgroundBlur, backgroundGlassBlur, backgroundGlassOpacity, backgroundImage, backgroundOpacity, faviconHref, refreshBranding, siteLogo, siteName])
+  }), [applyBranding, backgroundBlur, backgroundGlassBlur, backgroundGlassOpacity, backgroundImage, backgroundOpacity, defaultLogo, faviconHref, refreshBranding, siteLogo, siteName])
 
   return (
     <BrandingContext.Provider value={value}>

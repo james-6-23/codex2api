@@ -37,7 +37,7 @@ import {
   Zap,
 } from 'lucide-react'
 import { api } from '../api'
-import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
+import { useBranding } from '../branding'
 import Pagination from '../components/Pagination'
 import { PublicUsageRequestType, PublicUsageTokens, PublicUsageUserAgent } from '../components/PublicAPIKeyUsageLogDetails'
 import { TimingCell, TokensPerSecCell, UsageCacheBadges } from '../components/UsageLogMetrics'
@@ -84,7 +84,7 @@ const LOG_PAGE_SIZE_OPTIONS = [10, 20, 25, 50, 100]
 
 export default function APIKeyUsagePortal() {
   const { t, i18n } = useTranslation()
-  const { siteName, siteLogo } = useBranding()
+  const { siteName, siteLogo, defaultLogo } = useBranding()
   const { view } = useParams()
   const navigate = useNavigate()
   const activeView = normalizeUsageView(view)
@@ -105,7 +105,7 @@ export default function APIKeyUsagePortal() {
   const [error, setError] = useState('')
   const [data, setData] = useState<PublicAPIKeyUsageResponse | null>(null)
   const [logFilter, setLogFilter] = useState<PublicAPIKeyUsageLogFilter>({})
-  const logoSrc = siteLogo || DEFAULT_SITE_LOGO
+  const logoSrc = siteLogo || defaultLogo
 
   // 已登录后的刷新/切换时间范围（沿用当前会话的 key）
   const reload = async (nextRange = range, nextLogPage = logPage, nextLogPageSize = logPageSize, nextFilter = logFilter) => {

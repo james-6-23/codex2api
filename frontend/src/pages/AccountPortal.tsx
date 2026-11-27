@@ -15,7 +15,7 @@ import {
   ShieldCheck,
 } from 'lucide-react'
 import { api } from '../api'
-import { DEFAULT_SITE_LOGO, useBranding } from '../branding'
+import { useBranding } from '../branding'
 import { getErrorMessage } from '../utils/error'
 import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
 import { Button } from '@/components/ui/button'
@@ -70,8 +70,8 @@ function StepBadge({ index, active, done }: { index: number; active: boolean; do
 
 export default function AccountPortal() {
   const { t, i18n } = useTranslation()
-  const { siteName, siteLogo } = useBranding()
-  const logoSrc = siteLogo || DEFAULT_SITE_LOGO
+  const { siteName, siteLogo, defaultLogo } = useBranding()
+  const logoSrc = siteLogo || defaultLogo
 
   const [contactEmail, setContactEmail] = useState('')
   const [generating, setGenerating] = useState(false)
