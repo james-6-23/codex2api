@@ -34,21 +34,28 @@ export function resolveBuildVersions(frontendVersion: string, backendVersion?: s
   const versionMismatch = isReleaseVersion(frontendVersion)
     && isReleaseVersion(backendVersion)
     && normalizeVersion(frontendVersion) !== normalizeVersion(backendVersion)
+  // Release-like numeric identities keep the legacy fallback when malformed.
+  const backendIdentity = normalizeVersion(backendVersion)
+  const customBackend = isReleaseVersion(frontendVersion)
+    && /^[0-9a-z._-]{1,64}$/i.test(backendIdentity) && !/^\d+(?:[.+-]|$)/.test(backendIdentity)
 
   return {
     frontendVersion,
     // Preserve the existing release label when it already matches the service.
-    currentVersion: versionMismatch ? versionLabel(normalizeVersion(backendVersion))! : frontendVersion,
+    currentVersion: customBackend ? backendVersion!.trim() : versionMismatch ? versionLabel(normalizeVersion(backendVersion))! : frontendVersion,
     versionMismatch,
   }
+}
+
+export function isComparableVersion(version: string): boolean {
+  return parseVersion(version) !== null
 }
 
 function compareVersions(a: string, b: string): number {
   const parsedA = parseVersion(a)
   const parsedB = parseVersion(b)
-  if (!parsedA && !parsedB) return normalizeVersion(a).localeCompare(normalizeVersion(b))
-  if (!parsedA) return -1
-  if (!parsedB) return 1
+  // A custom build has no known ordering relative to an upstream release.
+  if (!parsedA || !parsedB) return 0
 
   for (let i = 0; i < 3; i += 1) {
     if (parsedA[i] < parsedB[i]) return -1

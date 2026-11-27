@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import type { SystemUpdateInfo } from '../types'
-import { hasRemoteUpdate, normalizeVersion, resolveBuildVersions, versionLabel } from '../lib/versionCheck'
+import { hasRemoteUpdate, isComparableVersion, normalizeVersion, resolveBuildVersions, versionLabel } from '../lib/versionCheck'
 
 const REMOTE_RELEASE_CACHE_KEY = 'codex2api_latest_release'
 const LEGACY_UPDATE_CACHE_KEY = 'codex2api_latest_version'
@@ -84,12 +84,14 @@ export function useVersionCheck(triggerKey?: string) {
   const [updateInfo, setUpdateInfo] = useState<SystemUpdateInfo | null>(null)
   const [latestVersion, setLatestVersion] = useState<string | null>(null)
   const [backendVersion, setBackendVersion] = useState<string | null>(null)
+  const [healthResolved, setHealthResolved] = useState(false)
   const activeRef = useRef(false)
   const healthRequestRef = useRef(0)
   const updateRequestRef = useRef(0)
   const lastTriggerRef = useRef<string | undefined>(undefined)
   const versions = resolveBuildVersions(__APP_VERSION__, backendVersion)
-  const hasUpdate = hasRemoteUpdate(versions.currentVersion, latestVersion)
+  const hasUpdate = healthResolved && hasRemoteUpdate(versions.currentVersion, latestVersion)
+  const isCustomBuild = !isComparableVersion(versions.currentVersion)
 
   const check = useCallback(async (forceNetwork = false) => {
     if (__APP_VERSION__ === 'dev' || !activeRef.current) return
@@ -107,6 +109,7 @@ export function useVersionCheck(triggerKey?: string) {
       }
       if (activeRef.current && healthRequest === healthRequestRef.current) {
         setBackendVersion(runtimeVersion)
+        setHealthResolved(true)
       }
     })()
 
@@ -157,5 +160,5 @@ export function useVersionCheck(triggerKey?: string) {
     void check(true)
   }, [check, triggerKey])
 
-  return { ...versions, hasUpdate, latestVersion, updateInfo, refreshVersion: check }
+  return { ...versions, isCustomBuild, hasUpdate, latestVersion, updateInfo, refreshVersion: check }
 }

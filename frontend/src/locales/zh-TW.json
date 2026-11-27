@@ -331,6 +331,8 @@
   "common": {
     "frontendBuildVersion": "前端建置：{{version}}",
     "versionMismatch": "前端資源與服務版本不一致，建議重新建置前端後再編譯程式。",
+    "versionCustomBuild": "自訂建置",
+    "versionCustomBuildHint": "目前建置無法與上游發佈版本比較，尚未判定需要更新。請透過原建置部署流程升級，以保留自訂功能。",
     "success": "成功",
     "autoRefresh": "自動重新整理",
     "autoRefreshOff": "關閉自動重新整理",

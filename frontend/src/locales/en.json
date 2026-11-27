@@ -739,6 +739,8 @@
     "versionMismatch": "The frontend and service versions differ. Rebuild the frontend before compiling the program again.",
     "latestVersion": "Latest version: {{version}}",
     "versionLatest": "You are on the latest version",
+    "versionCustomBuild": "Custom build",
+    "versionCustomBuildHint": "This build cannot be compared with upstream releases; no update requirement has been determined. Upgrade through your original build and deployment process to preserve custom changes.",
     "versionChecking": "Checking for the latest version…",
     "viewReleaseNotes": "View release notes",
     "updateNow": "Update now",

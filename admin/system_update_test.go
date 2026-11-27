@@ -61,6 +61,13 @@ func TestCompareSystemVersions(t *testing.T) {
 		{a: "2.10.0", b: "2.9.9", want: 1},
 		{a: "2.4.3", b: "v2.4.3", want: 0},
 		{a: "2.4", b: "2.4.1", want: -1},
+		{a: "custom.abcdef1", b: "v3.1.6", want: 0},
+		{a: "v3.1.6", b: "main", want: 0},
+		{a: "main", b: "preview", want: 0},
+		{a: "dev", b: "v3.1.6", want: 0},
+		{a: "", b: "v3.1.6", want: 0},
+		{a: "v3.1.5+build.7", b: "v3.1.6", want: -1},
+		{a: "v3.1.6+build.7", b: "v3.1.6", want: 0},
 	}
 	for _, tt := range tests {
 		t.Run(tt.a+"_"+tt.b, func(t *testing.T) {
@@ -188,23 +195,33 @@ func TestSystemUpdaterRejectsDevBuild(t *testing.T) {
 }
 
 func TestSystemUpdaterRejectsNonSemverBuild(t *testing.T) {
-	client := &fakeSystemReleaseClient{release: &systemGitHubRelease{
-		TagName: "v2.4.4",
-		Assets:  []systemGitHubAsset{{Name: "codex2api_2.4.4_linux_amd64.tar.gz"}},
-	}}
-	updater := &systemUpdater{
-		currentVersion: "main",
-		client:         client,
-		goos:           "linux",
-		goarch:         "amd64",
-	}
-
-	info, err := updater.Check(context.Background())
-	if err != nil {
-		t.Fatalf("Check() error: %v", err)
-	}
-	if info.Supported {
-		t.Fatal("Supported = true, want false")
+	for _, current := range []string{"main", "custom.abcdef1", "local-20261002-1234-abc", "dev", ""} {
+		t.Run(current, func(t *testing.T) {
+			client := &fakeSystemReleaseClient{release: &systemGitHubRelease{
+				TagName: "v3.1.6",
+				HTMLURL: "https://github.com/james-6-23/codex2api/releases/tag/v3.1.6",
+				Assets:  []systemGitHubAsset{{Name: "codex2api_3.1.6_linux_amd64.tar.gz"}},
+			}}
+			updater := &systemUpdater{
+				currentVersion: current,
+				client:         client,
+				goos:           "linux",
+				goarch:         "amd64",
+			}
+			info, err := updater.Check(context.Background())
+			if err != nil {
+				t.Fatalf("Check() error: %v", err)
+			}
+			if info.Supported || info.HasUpdate || info.UnsupportedReason == "" {
+				t.Fatalf("custom build must be unsupported without claiming an update: %+v", info)
+			}
+			if info.LatestVersion != "3.1.6" || info.ReleaseURL != client.release.HTMLURL {
+				t.Fatalf("upstream release metadata must remain available: %+v", info)
+			}
+			if _, err := updater.PerformUpdate(context.Background()); !errors.Is(err, errSystemUpdateUnsupported) {
+				t.Fatalf("PerformUpdate() error = %v, want unsupported", err)
+			}
+		})
 	}
 }
 

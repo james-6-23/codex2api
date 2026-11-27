@@ -739,6 +739,8 @@
     "versionMismatch": "前端资源与服务版本不一致，建议重新构建前端后再编译程序。",
     "latestVersion": "最新版本：{{version}}",
     "versionLatest": "已是最新版本",
+    "versionCustomBuild": "自定义构建",
+    "versionCustomBuildHint": "当前构建无法与上游发布版本比较，未判定需要更新。请通过原构建部署流程升级，以保留定制功能。",
     "versionChecking": "正在检查最新版本…",
     "viewReleaseNotes": "查看更新内容",
     "updateNow": "立即更新",
