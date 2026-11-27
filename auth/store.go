@@ -2748,20 +2748,26 @@ func (a *Account) MarkUsageFrameObserved(kind string, at time.Time) {
 // It intentionally avoids GetSchedulerDebugSnapshot and other recomputing
 // getters, which are too expensive for a one-second cadence over a large page.
 type AccountLiveUsageSnapshot struct {
-	QuotaPauseWindow    string
-	Status              string
-	UsingCredits        bool
-	PlanType            string
-	CreditsValid        bool
-	Credits             CreditBalanceSnapshot
-	UsagePercent5h      float64
-	UsagePercent5hValid bool
-	Reset5hAt           time.Time
-	UsageUpdatedAt5h    time.Time
-	UsagePercent7d      float64
-	UsagePercent7dValid bool
-	Reset7dAt           time.Time
-	UsageUpdatedAt      time.Time
+	CooldownUntil          time.Time
+	Window7dSeconds        int64
+	UsagePercentSpark      float64
+	UsagePercentSparkValid bool
+	ResetSparkAt           time.Time
+	UsageUpdatedAtSpark    time.Time
+	QuotaPauseWindow       string
+	Status                 string
+	UsingCredits           bool
+	PlanType               string
+	CreditsValid           bool
+	Credits                CreditBalanceSnapshot
+	UsagePercent5h         float64
+	UsagePercent5hValid    bool
+	Reset5hAt              time.Time
+	UsageUpdatedAt5h       time.Time
+	UsagePercent7d         float64
+	UsagePercent7dValid    bool
+	Reset7dAt              time.Time
+	UsageUpdatedAt         time.Time
 	// UsageFrameLastAt/Kind record the last WS quota frame ingested for this
 	// account, as opposed to snapshots that only advance on WHAM probes.
 	UsageFrameLastAt   time.Time
@@ -2778,22 +2784,28 @@ func (a *Account) GetAccountLiveUsageSnapshot() AccountLiveUsageSnapshot {
 	defer a.mu.RUnlock()
 	now := time.Now()
 	return AccountLiveUsageSnapshot{
-		QuotaPauseWindow:    a.quotaAutoPauseWindowLocked(now),
-		Status:              a.runtimeStatusLocked(now),
-		UsingCredits:        a.usingCreditsLocked(now),
-		PlanType:            a.PlanType,
-		CreditsValid:        a.CreditsValid,
-		Credits:             a.creditSnapshotLocked(),
-		UsagePercent5h:      a.UsagePercent5h,
-		UsagePercent5hValid: a.UsagePercent5hValid,
-		Reset5hAt:           a.Reset5hAt,
-		UsageUpdatedAt5h:    a.UsageUpdatedAt5h,
-		UsagePercent7d:      a.UsagePercent7d,
-		UsagePercent7dValid: a.UsagePercent7dValid,
-		Reset7dAt:           a.Reset7dAt,
-		UsageUpdatedAt:      a.UsageUpdatedAt,
-		UsageFrameLastAt:    a.usageFrameLastAt,
-		UsageFrameLastKind:  a.usageFrameLastKind,
+		CooldownUntil:          a.CooldownUtil,
+		Window7dSeconds:        a.Window7dSeconds,
+		UsagePercentSpark:      a.UsagePercentSpark,
+		UsagePercentSparkValid: a.UsagePercentSparkValid,
+		ResetSparkAt:           a.ResetSparkAt,
+		UsageUpdatedAtSpark:    a.UsageUpdatedAtSpark,
+		QuotaPauseWindow:       a.quotaAutoPauseWindowLocked(now),
+		Status:                 a.runtimeStatusLocked(now),
+		UsingCredits:           a.usingCreditsLocked(now),
+		PlanType:               a.PlanType,
+		CreditsValid:           a.CreditsValid,
+		Credits:                a.creditSnapshotLocked(),
+		UsagePercent5h:         a.UsagePercent5h,
+		UsagePercent5hValid:    a.UsagePercent5hValid,
+		Reset5hAt:              a.Reset5hAt,
+		UsageUpdatedAt5h:       a.UsageUpdatedAt5h,
+		UsagePercent7d:         a.UsagePercent7d,
+		UsagePercent7dValid:    a.UsagePercent7dValid,
+		Reset7dAt:              a.Reset7dAt,
+		UsageUpdatedAt:         a.UsageUpdatedAt,
+		UsageFrameLastAt:       a.usageFrameLastAt,
+		UsageFrameLastKind:     a.usageFrameLastKind,
 	}
 }
 

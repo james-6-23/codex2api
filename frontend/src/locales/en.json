@@ -2378,6 +2378,7 @@
     }
   },
   "status": {
+    "forbidden": "Forbidden",
     "active": "Available",
     "ready": "Ready",
     "cooldown": "Cooling Down",
@@ -6314,6 +6315,7 @@
     "keyGroupsReconcileHint": "Group totals include repeated usage for multi-group accounts. {{ungrouped}} ungrouped account(s) are added and repeated assignments from {{multi}} multi-group account(s) are subtracted to match the deduplicated key total."
   },
   "keyUsageAccounts": {
+    "usageSampled": "Usage sampled",
     "reauthReloadPending": "Authorization was saved, but the account has not reloaded yet. Refresh the account list; do not submit the callback again.",
     "reauthorize": "Reauthorize",
     "keyRequests": "Requests by this key",

@@ -266,13 +266,36 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 		if !accountRow.CreatedAt.IsZero() {
 			item["created_at"] = accountRow.CreatedAt
 		}
+		if !accountRow.UpdatedAt.IsZero() {
+			item["updated_at"] = accountRow.UpdatedAt
+		}
 		if account == nil {
 			items = append(items, item)
 			continue
 		}
 		u := account.GetAccountLiveUsageSnapshot()
 		canReset := p.ResetEnabled && !row.IsExpired(time.Now()) && isKeyUsageResetEligible(account)
-		item["plan_type"], item["status"] = u.PlanType, u.Status
+		now := time.Now()
+		item["plan_type"], item["status"] = u.PlanType, publicAccountStatus(u.Status)
+		item["using_credits"] = u.UsingCredits
+		if sub := account.SubscriptionStatusView(now); sub != nil {
+			item["subscription"] = publicAccountSubscription(sub)
+		}
+		if u.UsagePercentSparkValid {
+			item["usage_percent_spark"] = u.UsagePercentSpark
+			if !u.ResetSparkAt.IsZero() {
+				item["reset_spark_at"] = u.ResetSparkAt
+			}
+			if !u.UsageUpdatedAtSpark.IsZero() {
+				item["usage_updated_at_spark"] = u.UsageUpdatedAtSpark
+			}
+		}
+		if reason, recovery := publicAccountLimit(u, now); reason != "" {
+			item["limit_reason"] = reason
+			if recovery.After(now) {
+				item["recovery_at"] = recovery
+			}
+		}
 		item["reset_allowed"] = canReset
 		item["health_tier"] = account.GetHealthTier()
 		if lastUsed := account.GetLastUsedAt(); !lastUsed.IsZero() {
@@ -284,7 +307,7 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 			item["credits_has_credits"], item["credits_unlimited"] = u.Credits.HasCredits, u.Credits.Unlimited
 		}
 		item["active_requests"], item["dynamic_concurrency_limit"] = account.GetActiveRequests(), account.GetDynamicConcurrencyLimit()
-		item["long_window_seconds"] = account.GetWindow7dSeconds()
+		item["long_window_seconds"] = u.Window7dSeconds
 		if u.UsagePercent5hValid {
 			item["usage_percent_5h"] = u.UsagePercent5h
 		}
@@ -316,6 +339,88 @@ func (h *Handler) GetPublicKeyUsageAccounts(c *gin.Context) {
 	}
 	c.Header("Cache-Control", "no-store")
 	c.JSON(http.StatusOK, gin.H{"accounts": items, "groups": groups, "reset_enabled": p.ResetEnabled})
+}
+
+// Keep an explicit allowlist: the admin view contains upstream error text, and
+// persisted sync/last-known values need not actually be enum members.
+type publicSubscription struct {
+	BusinessStatus    string `json:"business_status"`
+	Plan              string `json:"plan,omitempty"`
+	ExpiresAt         string `json:"expires_at,omitempty"`
+	DaysRemaining     int    `json:"days_remaining"`
+	DaysOverdue       int    `json:"days_overdue"`
+	LastKnownStatus   string `json:"last_known_status,omitempty"`
+	AutoRenew         string `json:"auto_renew"`
+	GraceUntil        string `json:"grace_until,omitempty"`
+	LastCheckedAt     string `json:"last_checked_at,omitempty"`
+	SyncState         string `json:"sync_state"`
+	RenewalDetectedAt string `json:"renewal_detected_at,omitempty"`
+	Timezone          string `json:"timezone"`
+}
+
+func publicAccountSubscription(v *auth.SubscriptionStatusView) publicSubscription {
+	out := publicSubscription{
+		BusinessStatus: v.BusinessStatus, Plan: v.Plan, ExpiresAt: v.ExpiresAt,
+		DaysRemaining: v.DaysRemaining, DaysOverdue: v.DaysOverdue, AutoRenew: v.AutoRenew,
+		GraceUntil: v.GraceUntil, LastCheckedAt: v.LastCheckedAt, RenewalDetectedAt: v.RenewalDetectedAt,
+		Timezone: v.Timezone, SyncState: auth.SubscriptionSyncUnknown,
+	}
+	switch v.SyncState {
+	case auth.SubscriptionSyncConfirmed, auth.SubscriptionSyncPending, auth.SubscriptionSyncFailed, auth.SubscriptionSyncUnsupported:
+		out.SyncState = v.SyncState
+	}
+	switch v.LastKnownStatus {
+	case auth.SubscriptionStatusActive, auth.SubscriptionStatusExpiringToday, auth.SubscriptionStatusExpired, auth.SubscriptionStatusGracePeriod, auth.SubscriptionStatusUnknown:
+		out.LastKnownStatus = v.LastKnownStatus
+	}
+	return out
+}
+
+// RuntimeStatus can contain the raw cooldown reason. Never echo unknown text.
+func publicAccountStatus(status string) string {
+	switch status {
+	case "active", "refreshing", "error", "unauthorized", "forbidden", "cooldown", "quota_paused", "usage_exhausted", "rate_limited", "rate_limited_5h", "rate_limited_7d", "responses_rate_limited", "usage_limit", "usage_limited", "upstream_429":
+		return status
+	default:
+		return "cooldown"
+	}
+}
+
+func publicAccountLimit(u auth.AccountLiveUsageSnapshot, now time.Time) (string, time.Time) {
+	var reason string
+	var reset time.Time
+	switch publicAccountStatus(u.Status) {
+	case "quota_paused":
+		reason = "quota_paused"
+		switch u.QuotaPauseWindow {
+		case "5h":
+			reason, reset = "quota_paused_5h", u.Reset5hAt
+		case "7d":
+			reason, reset = "quota_paused_7d", u.Reset7dAt
+		}
+	case "rate_limited_5h":
+		reason, reset = "window_5h", u.Reset5hAt
+	case "rate_limited_7d", "usage_exhausted":
+		reason, reset = "window_7d", u.Reset7dAt
+	case "rate_limited":
+		reason = "rate_limited"
+		if u.UsagePercent5hValid && u.UsagePercent5h >= 100 && u.Reset5hAt.After(now) {
+			reason, reset = "window_5h", u.Reset5hAt
+		}
+		if u.UsagePercent7dValid && u.UsagePercent7d >= 100 && (u.Reset7dAt.IsZero() || u.Reset7dAt.After(now) && u.Reset7dAt.After(reset)) {
+			reason, reset = "window_7d", u.Reset7dAt
+		}
+	case "responses_rate_limited", "usage_limit", "usage_limited", "upstream_429":
+		reason = "rate_limited"
+	case "cooldown":
+		reason = "cooldown"
+	default:
+		return "", time.Time{}
+	}
+	if u.CooldownUntil.After(reset) {
+		reset = u.CooldownUntil
+	}
+	return reason, reset
 }
 
 func isKeyUsageResetEligible(account *auth.Account) bool {

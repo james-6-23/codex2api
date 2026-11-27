@@ -122,14 +122,15 @@ export default function KeyUsageReauthDialog({
       setError(t("common.copyFailed"));
     }
   }
-  if (!account.reauth_allowed) return null;
+
   return (
-    <Dialog open={open} onOpenChange={changeOpen}>
+    <Dialog open={open && !!account.reauth_allowed} onOpenChange={changeOpen}>
       <DialogTrigger asChild>
         <Button
           variant="ghost"
           size="sm"
           className="codex-account-card__action"
+          disabled={!account.reauth_allowed}
         >
           <KeyRound className="size-3.5" />
           {t("keyUsageAccounts.reauthorize")}

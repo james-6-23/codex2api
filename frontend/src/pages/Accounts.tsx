@@ -1,3 +1,4 @@
+import { CooldownTimer, UsingCreditsBadge } from "../components/AccountStatusIndicators";
 import AccountResetCreditBadge from "../components/AccountResetCreditBadge";
 import AccountReauthorizationForm from "../components/AccountReauthorizationForm";
 import { parseOAuthCallbackParams } from "../utils/oauthCallback";
@@ -6,7 +7,7 @@ import { getAccountQuotaPausePresentation } from "@/lib/accountQuotaPause";
 import { AccountCardSurface, AccountCardHeader, AccountCardBody, AccountCardDetailLink, AccountCardMetric, AccountCardTimestamp } from "../components/AccountCardSurface";
 import AccountUsageBar from "../components/AccountUsageBar";
 import APIKeyMultiSelect from "../components/APIKeyMultiSelect";
-import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
+import PlanBadge, { isSparkUsagePlan, normalizePlanType } from "../components/AccountPlanBadge";
 import { useIntelligenceBars } from "../hooks/useIntelligenceBars";
 import AccountIntelligenceBar, { AccountIntelligenceActions } from "../components/AccountIntelligenceBar";
 import type { IntelligenceBar } from "../lib/intelligenceCheck";
@@ -1148,41 +1149,6 @@ interface AccountRowActions {
   openModelsEditor: (account: AccountRow) => void;
   remove: (account: AccountRow) => void;
   usageRefreshed: () => void;
-}
-
-function formatCountdownRemaining(untilMs: number, nowMs: number): string {
-  const diff = Math.max(0, untilMs - nowMs);
-  if (diff <= 0) return "";
-  const hours = Math.floor(diff / 3600000);
-  const minutes = Math.floor((diff % 3600000) / 60000);
-  const seconds = Math.floor((diff % 60000) / 1000);
-  if (hours > 0) {
-    return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
-  }
-  if (minutes > 0) {
-    return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
-  }
-  return `${seconds}s`;
-}
-
-function useCountdownRemaining(until?: string): string {
-  const [remaining, setRemaining] = useState("");
-
-  useEffect(() => {
-    if (!until) {
-      setRemaining("");
-      return;
-    }
-    const target = new Date(until).getTime();
-    const update = () => {
-      setRemaining(formatCountdownRemaining(target, Date.now()));
-    };
-    update();
-    const id = setInterval(update, 1000);
-    return () => clearInterval(id);
-  }, [until]);
-
-  return remaining;
 }
 
 // memo 边界:宿主 Accounts 组件有上百个 state,任何弹窗/表单/进度条状态变化都会
@@ -12862,26 +12828,6 @@ function getSchedulerPriority(account: AccountRow): number {
     : 0;
 }
 
-// UsingCreditsBadge 紧跟在限流徽章后面：账号显示仍是「限流」（用量窗口客观上确实打满了），
-// 这个积分徽章表示"正在用积分顶替限流，因此仍在参与调度"。
-// 后端 using_credits 已经算过全部前提（两个开关 + 当下确有余额 + 窗口真打满），
-// 这里只负责显示，不重算，避免两边判定漂移。
-function UsingCreditsBadge({ account }: { account: AccountRow }) {
-  const { t } = useTranslation();
-  if (!account.using_credits) return null;
-  // 纯图标：余额已经在邮箱下方的徽章里显示过，这里再写一遍是重复信息，
-  // 而且会把「限流 | 7d」和倒计时之间撑开。语义靠 title / aria-label 承载。
-  return (
-    <span
-      className="inline-flex size-5 shrink-0 items-center justify-center rounded-md border border-teal-500/30 bg-teal-500/10 text-teal-700 dark:text-teal-300"
-      title={t("accounts.usingCreditsBadgeTooltip")}
-      aria-label={t("accounts.usingCreditsBadge")}
-    >
-      <Coins className="size-3" />
-    </span>
-  );
-}
-
 function SchedulerPriorityBadge({ account }: { account: AccountRow }) {
   const { t } = useTranslation();
   const priority = getSchedulerPriority(account);
@@ -12943,10 +12889,6 @@ function isActiveAutoPauseWindowReached(
 
 // Plans that carry a rolling 5h usage window (mirrors Go isPremium5hPlan).
 // k12/edu are paid education workspaces with 5h limits (issue #307/#309).
-function isSparkUsagePlan(planType?: string): boolean {
-  return normalizePlanType(planType) === "pro";
-}
-
 function isPremiumUsagePlan(planType?: string): boolean {
   return [
     "plus",
@@ -14923,23 +14865,6 @@ function AccountStatusCountdown({ account }: { account: AccountRow }) {
   const until = getAccountStatusCountdownUntil(account);
   if (!until) return null;
   return <CooldownTimer until={until} />;
-}
-
-// 冷却倒计时组件
-function CooldownTimer({ until }: { until: string }) {
-  const remaining = useCountdownRemaining(until);
-  const title = formatBeijingTime(until);
-
-  if (!remaining) return null;
-  return (
-    <span
-      className="inline-flex h-6 min-w-[112px] shrink-0 items-center justify-center gap-1.5 rounded-full bg-amber-50 px-2 text-[11px] font-mono leading-none tabular-nums text-amber-700 ring-1 ring-inset ring-amber-200/70 dark:bg-amber-950/40 dark:text-amber-300 dark:ring-amber-400/20"
-      title={title}
-    >
-      <Hourglass className="size-3 shrink-0" aria-hidden="true" />
-      {remaining}
-    </span>
-  );
 }
 
 // 自助提交待审核面板:列出 enabled=false 且带 self-service 标签的账号,

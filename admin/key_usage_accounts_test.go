@@ -112,6 +112,12 @@ func TestPublicKeyUsageAccountAuthorizationAndReset(t *testing.T) {
 	store := auth.NewStore(nil, nil, nil)
 	a := &auth.Account{DBID: aID, AccountID: "workspace-a", AccessToken: "secret-access-token", PlanType: "plus"}
 	now := time.Now().UTC().Truncate(time.Second)
+	a.SubscriptionExpiresAt = now.Add(48 * time.Hour)
+	a.SetUsageSnapshotSparkAt(0, now.Add(time.Hour), now)
+	a.SetWindow7dSeconds(30 * 24 * 3600)
+	a.CreditEnabled, a.CreditSkipUsageWindow = true, true
+	a.SetUsageSnapshot(100, now)
+	a.SetReset7dAt(now.Add(12 * time.Hour))
 	a.HealthTier = auth.HealthTierHealthy
 	a.LastUsedAt.Store(now.UnixNano())
 	a.SetCreditBalance("12.50", true, false, false)
@@ -199,6 +205,32 @@ func TestPublicKeyUsageAccountAuthorizationAndReset(t *testing.T) {
 	}
 	if len(result.Accounts) != 2 || result.Accounts[0].ID != aID || result.Accounts[0].Email != "allowed@example.test" || result.Accounts[0].Usage == nil || *result.Accounts[0].Usage != 25 || result.Accounts[1].ID != unloadedID || result.Accounts[1].Status != "unavailable" || result.Accounts[1].ResetAllowed {
 		t.Fatalf("list=%+v", result)
+	}
+	var fields struct {
+		Accounts []map[string]json.RawMessage `json:"accounts"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &fields); err != nil {
+		t.Fatal(err)
+	}
+	active, unloaded := fields.Accounts[0], fields.Accounts[1]
+	if active["updated_at"] == nil || unloaded["updated_at"] == nil {
+		t.Fatal("missing account updated_at")
+	}
+	for _, key := range []string{"subscription", "using_credits", "usage_percent_spark", "reset_spark_at", "usage_updated_at_spark", "long_window_seconds", "limit_reason", "recovery_at"} {
+		if active[key] == nil || unloaded[key] != nil {
+			t.Fatalf("invalid runtime projection for %s", key)
+		}
+	}
+	if string(active["using_credits"]) != "true" || string(active["limit_reason"]) != `"window_7d"` || string(active["usage_percent_spark"]) != "0" || string(active["long_window_seconds"]) != "2592000" {
+		t.Fatalf("wrong usage windows: %s", w.Body.String())
+	}
+	var recovery time.Time
+	if err := json.Unmarshal(active["recovery_at"], &recovery); err != nil || !recovery.Equal(now.Add(12*time.Hour)) {
+		t.Fatalf("wrong recovery: %s", active["recovery_at"])
+	}
+	var sub auth.SubscriptionStatusView
+	if err := json.Unmarshal(active["subscription"], &sub); err != nil || sub.BusinessStatus != auth.SubscriptionStatusActive || sub.ExpiresAt != a.SubscriptionExpiresAt.Format(time.RFC3339) {
+		t.Fatalf("wrong public subscription: %s", active["subscription"])
 	}
 	loaded, unavailable := result.Accounts[0], result.Accounts[1]
 	if loaded.Requests5h == nil || *loaded.Requests5h != 1 || loaded.Requests7d == nil || *loaded.Requests7d != 2 || loaded.Billed5h == nil || *loaded.Billed5h != bill || loaded.Billed7d == nil || *loaded.Billed7d != 2*bill {
@@ -418,5 +450,34 @@ func TestFailedAutoResetDoesNotRequireManualReconciliation(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != 200 || calls.Load() != 2 {
 		t.Fatalf("public reset status=%d calls=%d body=%s", w.Code, calls.Load(), w.Body.String())
+	}
+}
+
+func TestPublicAccountSubscriptionRejectsInternalData(t *testing.T) {
+	v := auth.BuildSubscriptionStatusView("plus", time.Now(), auth.SubscriptionMeta{Error: "private", Source: "private", LastKnownStatus: "private", SyncState: "private"}, time.Now(), time.UTC)
+	sub := publicAccountSubscription(v)
+	raw, err := json.Marshal(sub)
+	if err != nil || strings.Contains(string(raw), "private") || sub.SyncState != "unknown" || strings.Contains(string(raw), `"error":`) || strings.Contains(string(raw), `"source":`) {
+		t.Fatalf("unsafe subscription: %s", raw)
+	}
+}
+
+func TestPublicAccountLimit(t *testing.T) {
+	now := time.Now()
+	later := now.Add(time.Hour)
+	for _, tc := range []struct {
+		u              auth.AccountLiveUsageSnapshot
+		status, reason string
+		reset          time.Time
+	}{
+		{auth.AccountLiveUsageSnapshot{Status: "private diagnostic", CooldownUntil: later}, "cooldown", "cooldown", later},
+		{auth.AccountLiveUsageSnapshot{Status: "quota_paused", QuotaPauseWindow: "5h", Reset5hAt: later}, "quota_paused", "quota_paused_5h", later},
+		{auth.AccountLiveUsageSnapshot{Status: "rate_limited", UsagePercent7dValid: true, UsagePercent7d: 100, Reset7dAt: later, UsingCredits: true}, "rate_limited", "window_7d", later},
+		{auth.AccountLiveUsageSnapshot{Status: "active", Reset5hAt: later}, "active", "", time.Time{}},
+	} {
+		reason, reset := publicAccountLimit(tc.u, now)
+		if publicAccountStatus(tc.u.Status) != tc.status || reason != tc.reason || !reset.Equal(tc.reset) {
+			t.Errorf("status=%s reason=%s reset=%v", publicAccountStatus(tc.u.Status), reason, reset)
+		}
 	}
 }
