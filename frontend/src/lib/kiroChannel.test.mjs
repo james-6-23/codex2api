@@ -33,7 +33,7 @@ test('Kiro is a first-class channel in the shared enumerations', () => {
   assert.match(read('../types.ts'), /export type UpstreamChannel = .*'kiro'/)
   assert.match(read('../components/ChannelLogo.tsx'), /kiro-color\.svg/)
   assert.match(read('../components/ChannelFilter.tsx'), /key: "kiro"/)
-  assert.match(read('./visibleChannels.ts'), /'kiro'\]/)
+  assert.match(read('./visibleChannels.ts'), /'kiro'/)
 })
 
 test('Kiro copy exists in every locale', () => {
@@ -53,7 +53,7 @@ test('connection test modal uses the Kiro catalog instead of the Codex model lis
   const modal = read('../components/TestConnectionModal.tsx')
   assert.match(modal, /const isKiroAccount = Boolean\(account\.kiro_api\)/)
   assert.match(modal, /channelSettings\.kiro\?\.test_model/)
-  assert.match(modal, /!isAntigravityAccount && !isKiroAccount;/)
+  assert.match(modal, /!isAntigravityAccount && !isKiroAccount/)
 })
 
 test('Kiro accounts page mirrors the shared account tooling', () => {

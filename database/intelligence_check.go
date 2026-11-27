@@ -330,7 +330,7 @@ func (db *DB) intelligenceUpstreamExpr() string {
 // intelligenceChannelExpr gives explicit upstream metadata precedence over legacy platform labels.
 func (db *DB) intelligenceChannelExpr() string {
 	upstream := `TRIM(` + db.intelligenceUpstreamExpr() + `)`
-	return `CASE WHEN ` + upstream + `='antigravity' THEN 'antigravity' WHEN ` + upstream + `='grok' THEN 'grok' WHEN ` + upstream + `='claude' THEN 'claude' WHEN ` + upstream + `='kiro' THEN 'kiro' WHEN ` + upstream + `<>'' THEN 'codex' WHEN LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' WHEN LOWER(COALESCE(a.platform,''))='kiro' THEN 'kiro' ELSE 'codex' END`
+	return `CASE WHEN ` + upstream + `='antigravity' THEN 'antigravity' WHEN ` + upstream + `='grok' THEN 'grok' WHEN ` + upstream + `='claude' THEN 'claude' WHEN ` + upstream + `='kiro' THEN 'kiro' WHEN ` + upstream + `='opencode' THEN 'opencode' WHEN ` + upstream + `<>'' THEN 'codex' WHEN LOWER(COALESCE(a.platform,'')) IN ('antigravity','google') THEN 'antigravity' WHEN LOWER(COALESCE(a.platform,'')) IN ('grok','xai') THEN 'grok' WHEN LOWER(COALESCE(a.platform,'')) IN ('anthropic','claude') THEN 'claude' WHEN LOWER(COALESCE(a.platform,''))='kiro' THEN 'kiro' WHEN LOWER(COALESCE(a.platform,'')) IN ('opencode','opencode_go') THEN 'opencode' ELSE 'codex' END`
 }
 func (db *DB) intelligenceEligibleSQL() string {
 	return `a.status<>'deleted' AND COALESCE(a.error_message,'')<>'deleted'`

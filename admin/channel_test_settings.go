@@ -23,12 +23,14 @@ const (
 	channelTestChannelAntigravity = "antigravity"
 	channelTestChannelClaude      = "claude"
 	channelTestChannelKiro        = "kiro"
+	channelTestChannelOpenCode    = "opencode"
 )
 
 type channelTestSettingsResponse struct {
 	Antigravity database.ChannelTestSettings `json:"antigravity"`
 	Claude      database.ChannelTestSettings `json:"claude"`
 	Kiro        database.ChannelTestSettings `json:"kiro"`
+	OpenCode    database.ChannelTestSettings `json:"opencode"`
 	// 渠道留空内容时实际生效的全局测活内容，前端用作占位提示。
 	DefaultTestContent string `json:"default_test_content"`
 	// 渠道并发为 0 时实际生效的全局批量测试并发。
@@ -43,9 +45,11 @@ func (h *Handler) channelTestModelChoices() map[string][]string {
 	antigravity := make([]string, 0, 16)
 	claude := make([]string, 0, 16)
 	kiro := make([]string, 0, 24)
+	openCode := make([]string, 0, 32)
 	seenAG := map[string]struct{}{}
 	seenClaude := map[string]struct{}{}
 	seenKiro := map[string]struct{}{}
+	seenOpenCode := map[string]struct{}{}
 	appendUnique := func(dst []string, seen map[string]struct{}, models []string) []string {
 		for _, model := range models {
 			model = strings.TrimSpace(model)
@@ -70,6 +74,8 @@ func (h *Handler) channelTestModelChoices() map[string][]string {
 				claude = appendUnique(claude, seenClaude, claudeProbeModelIDs(account))
 			case account.IsKiro():
 				kiro = appendUnique(kiro, seenKiro, proxy.KiroAccountModelIDs(account))
+			case account.IsOpenCode():
+				openCode = appendUnique(openCode, seenOpenCode, proxy.OpenCodeAccountModelIDs(account))
 			}
 		}
 	}
@@ -82,10 +88,14 @@ func (h *Handler) channelTestModelChoices() map[string][]string {
 	if len(kiro) == 0 {
 		kiro = appendUnique(kiro, seenKiro, proxy.KiroAccountModelIDs(nil))
 	}
+	if len(openCode) == 0 {
+		openCode = appendUnique(openCode, seenOpenCode, auth.DefaultOpenCodeGoModelIDs())
+	}
 	return map[string][]string{
 		channelTestChannelAntigravity: antigravity,
 		channelTestChannelClaude:      claude,
 		channelTestChannelKiro:        kiro,
+		channelTestChannelOpenCode:    openCode,
 	}
 }
 
@@ -123,6 +133,8 @@ func (h *Handler) channelTestSettingsForAccount(ctx context.Context, account *au
 		return cfg.Claude
 	case account.IsKiro():
 		return cfg.Kiro
+	case account.IsOpenCode():
+		return cfg.OpenCode
 	}
 	return database.ChannelTestSettings{}
 }
@@ -155,6 +167,7 @@ func (h *Handler) buildChannelTestSettingsResponse(cfg database.ChannelTestConfi
 		Antigravity:            cfg.Antigravity,
 		Claude:                 cfg.Claude,
 		Kiro:                   cfg.Kiro,
+		OpenCode:               cfg.OpenCode,
 		DefaultTestContent:     defaultContent,
 		DefaultTestConcurrency: defaultConcurrency,
 		ModelChoices:           h.channelTestModelChoices(),
@@ -176,13 +189,14 @@ func (h *Handler) UpdateChannelTestSettings(c *gin.Context) {
 		Antigravity *database.ChannelTestSettings `json:"antigravity"`
 		Claude      *database.ChannelTestSettings `json:"claude"`
 		Kiro        *database.ChannelTestSettings `json:"kiro"`
+		OpenCode    *database.ChannelTestSettings `json:"opencode"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		writeError(c, http.StatusBadRequest, "请求体解析失败: "+err.Error())
 		return
 	}
-	if req.Antigravity == nil && req.Claude == nil && req.Kiro == nil {
-		writeError(c, http.StatusBadRequest, "缺少 antigravity、claude 或 kiro 字段")
+	if req.Antigravity == nil && req.Claude == nil && req.Kiro == nil && req.OpenCode == nil {
+		writeError(c, http.StatusBadRequest, "缺少 antigravity、claude、kiro 或 opencode 字段")
 		return
 	}
 	if h.db == nil {
@@ -210,6 +224,10 @@ func (h *Handler) UpdateChannelTestSettings(c *gin.Context) {
 		return
 	}
 	if err := apply(channelTestChannelKiro, &cfg.Kiro, req.Kiro); err != nil {
+		writeError(c, http.StatusBadRequest, err.Error())
+		return
+	}
+	if err := apply(channelTestChannelOpenCode, &cfg.OpenCode, req.OpenCode); err != nil {
 		writeError(c, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -274,6 +292,8 @@ func (h *Handler) batchTestConcurrency(ctx context.Context, accounts []*auth.Acc
 			current = channelTestChannelClaude
 		case account.IsKiro():
 			current = channelTestChannelKiro
+		case account.IsOpenCode():
+			current = channelTestChannelOpenCode
 		default:
 			return global
 		}
@@ -292,6 +312,8 @@ func (h *Handler) batchTestConcurrency(ctx context.Context, accounts []*auth.Acc
 		configured = cfg.Claude.TestConcurrency
 	case channelTestChannelKiro:
 		configured = cfg.Kiro.TestConcurrency
+	case channelTestChannelOpenCode:
+		configured = cfg.OpenCode.TestConcurrency
 	}
 	if configured > 0 {
 		return configured

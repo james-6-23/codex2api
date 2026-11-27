@@ -334,6 +334,8 @@ export default function AccountDetailSheet({
               <ChannelLogo channel="claude" size={22} />
             ) : account.kiro_api ? (
               <ChannelLogo channel="kiro" size={22} />
+            ) : account.opencode_api ? (
+              <ChannelLogo channel="opencode" size={22} />
             ) : account.antigravity_api ? (
               <ChannelLogo channel="antigravity" size={22} />
             ) : account.grok_api ? (

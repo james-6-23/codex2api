@@ -6,14 +6,14 @@ const settings = readFileSync(new URL('../pages/Settings.tsx', import.meta.url),
 const zh = JSON.parse(readFileSync(new URL('../locales/zh.json', import.meta.url), 'utf8'))
 const en = JSON.parse(readFileSync(new URL('../locales/en.json', import.meta.url), 'utf8'))
 
-const TABS = ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'appearance', 'general']
+const TABS = ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'opencode', 'appearance', 'general']
 
 test('settings page is split into one panel per tab driven by ?tab=', () => {
   assert.match(settings, /useSearchParams\(\)/)
   assert.match(settings, /searchParams\.get\('tab'\)/)
-  assert.match(settings, /type SettingsTabKey = 'codex' \| 'claude' \| 'antigravity' \| 'grok' \| 'kiro' \| 'appearance' \| 'general'/)
+  assert.match(settings, /type SettingsTabKey = 'codex' \| 'claude' \| 'antigravity' \| 'grok' \| 'kiro' \| 'opencode' \| 'appearance' \| 'general'/)
   for (const tab of TABS) {
-    assert.match(settings, new RegExp(`\\{ id: '${tab}', label: t\\('settings\\.nav\\.${tab}'\\)`), `tab pill ${tab}`)
+    assert.match(settings, new RegExp(`\\{ id: '${tab}', label: t\\('settings\\.nav\\.${tab}'`), `tab pill ${tab}`)
     assert.match(settings, new RegExp(`\\{activeTab === '${tab}' \\? \\(`), `panel ${tab}`)
   }
   // 旧滚动定位导航已移除，避免回退成单页长滚动。

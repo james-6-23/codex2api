@@ -1817,6 +1817,66 @@ data: {"type":"complete","current":3,"total":3,"success":2,"failed":1}
 
 Kiro 渠道的连通性测试默认模型、测活内容与并发在 `PUT /api/admin/settings/channel-tests` 的 `kiro` 字段里配置；账号列表、启停、删除、测连、质量测试、降智检测、分组与代理沿用通用账号接口，渠道参数为 `channel=kiro`。
 
+### OpenCode 渠道
+
+OpenCode 渠道支持 **OpenCode Go 订阅版**（`mode: "go"`，默认地址 `https://opencode.ai/zen/go/v1`，带 `rolling` / `weekly` / `monthly` 额度窗口）与 **OpenCode Zen 按量付费**（`mode: "zen"`，默认地址 `https://opencode.ai/zen/v1`）。同一个账号池同时服务 `/v1/chat/completions`、`/v1/responses`、`/v1/messages`（以及 `/v1/models`），按模型协议规则自动路由到对应原生端点或执行协议转换；对 Go 模式自动注入 `X-OpenCode-Session`，并使用 `User-Agent: opencode/<version>`（可通过环境变量 `OPENCODE_USER_AGENT_VERSION` 覆盖）以通过 Cloudflare WAF。
+
+#### POST /api/admin/accounts/opencode
+
+新增单个 OpenCode 账号。`api_key` 必填；`mode` 为 `go`（默认）或 `zen`。创建时可选自动同步模型目录与 Go 用量快照（`auto_sync: true`，默认开启）。
+
+```json
+{
+  "name": "OpenCode Go #1",
+  "email": "user@example.com",
+  "api_key": "sk-...",
+  "mode": "go",
+  "base_url": "https://opencode.ai/zen/go/v1",
+  "anthropic_base_url": "https://opencode.ai/zen/go",
+  "proxy_url": "http://127.0.0.1:7890",
+  "models": ["glm-5.3", "kimi-k2.5"],
+  "model_mapping": "claude-opus-4-6=minimax-m2.7",
+  "protocol_rules": [
+    { "pattern": "minimax-*", "protocol": "anthropic" },
+    { "pattern": "gpt-*", "protocol": "responses" }
+  ],
+  "custom_headers": { "X-Custom": "value" },
+  "auto_sync": true
+}
+```
+
+#### PUT /api/admin/accounts/:id/opencode
+
+更新指定 OpenCode 账号的名称、邮箱、API Key（留空不修改）、模式（`go`/`zen`）、Base URL、Anthropic Base URL、代理、模型白名单、模型映射、协议路由规则和自定义请求头。
+
+#### POST /api/admin/accounts/opencode/import
+
+批量导入 OpenCode 账号。自动识别以下格式，并在入库前按 API Key 指纹去重：
+
+- 纯文本逐行：`sk-...` 或 `名称,sk-...`
+- JSON 对象或数组（含 `api_key`、`mode`、`base_url` 等字段）
+- Sub2API 导出的 `opencode_go` 数据 JSON
+
+```json
+{
+  "content": "<文本或 JSON 字符串>",
+  "mode": "go",
+  "base_url": "可选",
+  "proxy_url": "可选",
+  "auto_sync": true
+}
+```
+
+#### GET /api/admin/accounts/opencode/export
+
+导出 OpenCode 账号（支持 `?ids=1,2` 指定 ID）。响应为 JSON 附件，含明文 API Key，带 `Content-Disposition: attachment` 与 `Cache-Control: no-store, max-age=0`，可原样导回。
+
+#### POST /api/admin/accounts/:id/opencode/sync 与 /accounts/opencode/sync
+
+同步单个或全部启用 OpenCode 账号的模型目录（`/models`）；Go 模式同时抓取 `/usage` 的 `rolling` / `weekly` / `monthly` 额度快照。后台同步任务每 5 分钟检查并按 5 分钟最小间隔 / 15 分钟保底间隔自动刷新活跃 Go 账号用量。
+
+OpenCode 渠道的连通性测试配置位于 `PUT /api/admin/settings/channel-tests` 的 `opencode` 字段；账号列表、启停、删除、测连、质量测试、降智检测、分组与代理沿用通用账号接口，渠道参数为 `channel=opencode`。
+
 ### 用量统计
 
 #### GET /api/admin/usage/stats

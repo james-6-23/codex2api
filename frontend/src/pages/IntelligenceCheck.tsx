@@ -374,10 +374,10 @@ export default function IntelligenceCheck() {
                       }
                       placeholder="选择分组"
                       options={groups
-                        .filter(g => !g.channel || ["codex", "claude", "grok", "antigravity", "kiro"].includes(g.channel))
+                        .filter(g => !g.channel || ["codex", "claude", "grok", "antigravity", "kiro", "opencode"].includes(g.channel))
                         .map(g => ({
                           value: String(g.id),
-                          label: `${g.name}（${({ codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity", kiro: "Kiro" } as Record<string, string>)[g.channel ?? "codex"] ?? g.channel}）`,
+                          label: `${g.name}（${({ codex: "Codex", claude: "Claude", grok: "Grok", antigravity: "Antigravity", kiro: "Kiro", opencode: "OpenCode" } as Record<string, string>)[g.channel ?? "codex"] ?? g.channel}）`,
                         }))}
                     />,
                   )}

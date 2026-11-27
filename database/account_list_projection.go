@@ -23,6 +23,7 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			antigravity_permissions text, antigravity_entitlements text, antigravity_quota text,
 			claude_usage_probe_at text, claude_usage_probe_error text,
 			claude_auth_kind text, kiro_auth_kind text, kiro_login_source text, kiro_usage text,
+			opencode_mode text, opencode_anthropic_base_url text, opencode_protocol_rules text, opencode_catalog_models text, opencode_usage text,
 			subscription_expires_at text, subscription_sync_state text, subscription_grace_until text
 		)`
 	credentialColumns := `
@@ -47,6 +48,11 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 		COALESCE(account_public.kiro_auth_kind, ''),
 		COALESCE(account_public.kiro_login_source, ''),
 		COALESCE(account_public.kiro_usage, ''),
+		COALESCE(account_public.opencode_mode, ''),
+		COALESCE(account_public.opencode_anthropic_base_url, ''),
+		COALESCE(account_public.opencode_protocol_rules, ''),
+		COALESCE(account_public.opencode_catalog_models, ''),
+		COALESCE(account_public.opencode_usage, ''),
 		COALESCE(account_public.subscription_expires_at, ''),
 		COALESCE(account_public.subscription_sync_state, ''),
 		COALESCE(account_public.subscription_grace_until, '')`
@@ -75,6 +81,11 @@ func (db *DB) ListAccountListProjection(ctx context.Context, channel string) ([]
 			COALESCE(json_extract(credentials, '$.kiro_auth_kind'), ''),
 			COALESCE(json_extract(credentials, '$.kiro_login_source'), ''),
 			COALESCE(json_extract(credentials, '$.kiro_usage'), ''),
+			COALESCE(json_extract(credentials, '$.opencode_mode'), ''),
+			COALESCE(json_extract(credentials, '$.opencode_anthropic_base_url'), ''),
+			COALESCE(json_extract(credentials, '$.opencode_protocol_rules'), ''),
+			COALESCE(json_extract(credentials, '$.opencode_catalog_models'), ''),
+			COALESCE(json_extract(credentials, '$.opencode_usage'), ''),
 			COALESCE(json_extract(credentials, '$.subscription_expires_at'), ''),
 			COALESCE(json_extract(credentials, '$.subscription_sync_state'), ''),
 			COALESCE(json_extract(credentials, '$.subscription_grace_until'), '')`
@@ -120,6 +131,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	var antigravitySyncError, antigravitySyncWarning, antigravityPermissions, antigravityQuota string
 	var claudeUsageProbeAt, claudeUsageProbeError, claudeAuthKind string
 	var kiroAuthKind, kiroLoginSource, kiroUsage string
+	var openCodeMode, openCodeAnthropicBaseURL, openCodeProtocolRules, openCodeCatalogModels, openCodeUsage string
 	var subscriptionExpiresAt, subscriptionSyncState, subscriptionGraceUntil string
 	var modelsRaw interface{}
 	var hasAPIKey, hasRefreshToken, verifiedEmail bool
@@ -133,6 +145,7 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 		&antigravitySyncError, &antigravitySyncWarning, &antigravityPermissions, &antigravityQuota,
 		&claudeUsageProbeAt, &claudeUsageProbeError, &claudeAuthKind,
 		&kiroAuthKind, &kiroLoginSource, &kiroUsage,
+		&openCodeMode, &openCodeAnthropicBaseURL, &openCodeProtocolRules, &openCodeCatalogModels, &openCodeUsage,
 		&subscriptionExpiresAt, &subscriptionSyncState, &subscriptionGraceUntil,
 	); err != nil {
 		return nil, fmt.Errorf("扫描账号列表投影失败: %w", err)
@@ -196,7 +209,16 @@ func scanAccountListProjection(scanner accountProjectionScanner) (*AccountRow, e
 	}
 	// 订阅状态筛选按快照行计算业务状态（到期/宽限期/同步状态）;投影缺了这三个键会让
 	// 全部账号被判成"状态未知"。
-	for key, value := range map[string]string{"kiro_auth_kind": kiroAuthKind, "kiro_login_source": kiroLoginSource, "kiro_usage": kiroUsage} {
+	for key, value := range map[string]string{
+		"kiro_auth_kind":              kiroAuthKind,
+		"kiro_login_source":           kiroLoginSource,
+		"kiro_usage":                  kiroUsage,
+		"opencode_mode":               openCodeMode,
+		"opencode_anthropic_base_url": openCodeAnthropicBaseURL,
+		"opencode_protocol_rules":     openCodeProtocolRules,
+		"opencode_catalog_models":     openCodeCatalogModels,
+		"opencode_usage":              openCodeUsage,
+	} {
 		if trimmed := strings.TrimSpace(value); trimmed != "" && trimmed != "{}" {
 			row.Credentials[key] = trimmed
 		}

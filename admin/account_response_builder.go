@@ -64,6 +64,7 @@ func (h *Handler) buildAccountResponse(
 	isAntigravityAccount := strings.EqualFold(upstreamType, auth.UpstreamAntigravity)
 	isClaudeAccount := strings.EqualFold(upstreamType, auth.UpstreamClaude)
 	isKiroAccount := strings.EqualFold(upstreamType, auth.UpstreamKiro)
+	isOpenCodeAccount := strings.EqualFold(upstreamType, auth.UpstreamOpenCode)
 	antigravityAuthKind := ""
 	if isAntigravityAccount {
 		if strings.TrimSpace(row.GetCredential("api_key")) != "" {
@@ -141,7 +142,7 @@ func (h *Handler) buildAccountResponse(
 	}
 	// 指纹收敛只作用于 Codex 官方出站路径，中转/Grok 账号不暴露该字段。
 	codexFingerprintMode := ""
-	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount {
+	if !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && !isKiroAccount && !isOpenCodeAccount {
 		codexFingerprintMode = auth.NormalizeCodexFingerprintMode(row.GetCredential(auth.CodexFingerprintModeCredentialKey))
 	}
 	// Claude Code 指纹收敛模式仅 Claude OAuth 账号暴露；绑定时区对所有账号暴露：
@@ -236,7 +237,7 @@ func (h *Handler) buildAccountResponse(
 		ClaudeRefreshNextRetryAt:     claudeRowOAuthRefreshMeta(row, isClaudeAccount, auth.ClaudeRefreshNextRetryAtCredentialKey),
 		Status:                       row.Status,
 		ErrorMessage:                 row.ErrorMessage,
-		ATOnly:                       !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
+		ATOnly:                       !isOpenAIResponsesAccount && !isGrokAccount && !isAntigravityAccount && !isClaudeAccount && !isKiroAccount && !isOpenCodeAccount && row.GetCredential("refresh_token") == "" && row.GetCredential("access_token") != "",
 		CreditEnabled:                row.CreditEnabled,
 		CreditSkipUsageWindow:        row.CreditSkipUsageWindow,
 		SkipWarmTier:                 row.SkipWarmTier,
@@ -252,6 +253,12 @@ func (h *Handler) buildAccountResponse(
 		KiroLoginSource:              kiroRowString(row, auth.KiroLoginSourceCredentialKey, isKiroAccount),
 		KiroUsage:                    kiroUsageForRow(row, isKiroAccount),
 		KiroPlan:                     kiroPlanForRow(row, isKiroAccount),
+		OpenCodeAPI:                  isOpenCodeAccount,
+		OpenCodeMode:                 openCodeModeForRow(row, isOpenCodeAccount),
+		OpenCodeAnthropicBaseURL:     openCodeRowString(row, auth.OpenCodeAnthropicBaseURLCredentialKey, isOpenCodeAccount),
+		OpenCodeProtocolRules:        openCodeProtocolRulesForRow(row, isOpenCodeAccount),
+		OpenCodeCatalogModels:        openCodeCatalogModelsForRow(row, isOpenCodeAccount),
+		OpenCodeUsage:                openCodeUsageForRow(row, isOpenCodeAccount),
 		ClaudeBaseURL:                row.GetCredential(auth.ClaudeBaseURLCredentialKey),
 		AntigravityAuthKind:          antigravityAuthKind,
 		AgentIdentity:                isAgentIdentityCredentialRow(row),

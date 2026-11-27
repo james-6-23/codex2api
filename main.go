@@ -443,6 +443,7 @@ func main() {
 	adminHandler.StartAutoActivate5hWindow(backgroundCtx)
 	adminHandler.StartScheduledConnectionTests(backgroundCtx)
 	adminHandler.StartKiroSync(backgroundCtx)
+	adminHandler.StartOpenCodeSync(backgroundCtx)
 	// Grok 账号状态定期探测（默认关，由 grok 系统设置开关/间隔控制）
 	adminHandler.StartGrokStatusProbe(backgroundCtx)
 	// 官方结算用量按天快照：上游只保留 7 天，不落库就永久丢失，长期历史全靠这个任务。

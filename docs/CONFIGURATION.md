@@ -140,6 +140,12 @@ Antigravity 渠道的首绑 / Fresh 选号默认启用加权避险：候选账�
 |------|------|--------|------|
 | `ANTIGRAVITY_BALANCED_AFFINITY` | 否 | `true` | 加权避险开关。取 `0` / `false` / `off` / `none` / `no`（大小写不敏感）时关闭，回退为原有 round-robin；其它值按开启处理。进程启动时读取一次，改动需重启生效。冷却正确性修复不受该开关影响、始终生效：public / wire 冷却写入（Gemini 配额耗尽时追加 family 键）、共享 wire / family 冷却不被更短事件缩短、跨实例冷却过滤（Antigravity 候选查三键） |
 
+### OpenCode 上游配置
+
+| 变量 | 必填 | 默认值 | 说明 |
+|------|------|--------|------|
+| `OPENCODE_USER_AGENT_VERSION` | 否 | `1.19.6` | OpenCode 上游请求（模型同步、Go 用量查询与代理转发）默认发送的 `User-Agent: opencode/<version>` 版本号，用于通过 Cloudflare WAF 校验；若账号自定义请求头中显式配置了 `User-Agent`，以账号配置为准 |
+
 ### 数据库配置
 
 #### PostgreSQL 模式

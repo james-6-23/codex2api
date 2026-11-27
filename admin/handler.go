@@ -1060,6 +1060,8 @@ func parseUsageChannel(c *gin.Context) string {
 		return database.UpstreamChannelClaude
 	case database.UpstreamChannelKiro:
 		return database.UpstreamChannelKiro
+	case database.UpstreamChannelOpenCode:
+		return database.UpstreamChannelOpenCode
 	}
 	return ""
 }
@@ -1218,6 +1220,7 @@ func (h *Handler) RegisterRoutes(r *gin.Engine) {
 	api.POST("/accounts/:id/claude/models", h.RefreshClaudeModels)
 	api.POST("/accounts/claude/models/refresh", h.RefreshAllClaudeModels)
 	h.registerKiroRoutes(api)
+	h.registerOpenCodeRoutes(api)
 	api.POST("/accounts/antigravity", h.AddAntigravityAccount)
 	api.POST("/accounts/antigravity/models", h.FetchAntigravityModels)
 	api.POST("/accounts/antigravity/batch-models", h.BatchUpdateAntigravityModels)
@@ -1645,6 +1648,7 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 		database.UpstreamChannelAntigravity: {},
 		database.UpstreamChannelClaude:      {},
 		database.UpstreamChannelKiro:        {},
+		database.UpstreamChannelOpenCode:    {},
 	}
 	counts.total = len(rows)
 	for _, row := range rows {
@@ -1663,6 +1667,8 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 			channel = database.UpstreamChannelClaude
 		} else if strings.EqualFold(upstreamType, auth.UpstreamKiro) {
 			channel = database.UpstreamChannelKiro
+		} else if strings.EqualFold(upstreamType, auth.UpstreamOpenCode) {
+			channel = database.UpstreamChannelOpenCode
 		}
 		usingCredits := false
 		acc := runtimeByID[row.ID]
@@ -1680,6 +1686,8 @@ func summarizeDashboardAccounts(rows []*database.AccountRow, runtimeAccounts []*
 				channel = database.UpstreamChannelClaude
 			} else if acc.IsKiro() {
 				channel = database.UpstreamChannelKiro
+			} else if acc.IsOpenCode() {
+				channel = database.UpstreamChannelOpenCode
 			}
 		}
 		perChannel := channelCounts[channel]
@@ -1807,6 +1815,12 @@ type accountResponse struct {
 	KiroLoginSource               string                      `json:"kiro_login_source,omitempty"`
 	KiroUsage                     json.RawMessage             `json:"kiro_usage,omitempty"`
 	KiroPlan                      string                      `json:"kiro_plan,omitempty"`
+	OpenCodeAPI                   bool                        `json:"opencode_api,omitempty"`
+	OpenCodeMode                  string                      `json:"opencode_mode,omitempty"`
+	OpenCodeAnthropicBaseURL      string                      `json:"opencode_anthropic_base_url,omitempty"`
+	OpenCodeProtocolRules         []auth.OpenCodeProtocolRule `json:"opencode_protocol_rules,omitempty"`
+	OpenCodeCatalogModels         []string                    `json:"opencode_catalog_models,omitempty"`
+	OpenCodeUsage                 json.RawMessage             `json:"opencode_usage,omitempty"`
 	ClaudeBaseURL                 string                      `json:"claude_base_url,omitempty"`
 	AntigravityAuthKind           string                      `json:"antigravity_auth_kind,omitempty"`
 	AgentIdentity                 bool                        `json:"agent_identity,omitempty"`
@@ -6549,7 +6563,7 @@ type batchUpdateAccountsReq struct {
 
 func (h *Handler) accountOperationIdentity(id int64) (string, string) {
 	h.accountListCacheMu.RLock()
-	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude, database.UpstreamChannelKiro} {
+	for _, channel := range []string{database.UpstreamChannelCodex, database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude, database.UpstreamChannelKiro, database.UpstreamChannelOpenCode} {
 		snapshot := h.accountListCache[channel]
 		if snapshot == nil {
 			continue
@@ -13151,6 +13165,7 @@ func (h *Handler) ListModels(c *gin.Context) {
 	// useful to operators.
 	catalog.ClaudeModels = h.claudeAvailableChannelModels()
 	catalog.KiroModels = h.kiroChannelModels()
+	catalog.OpenCodeModels = h.openCodeChannelModels()
 	c.JSON(http.StatusOK, catalog)
 }
 

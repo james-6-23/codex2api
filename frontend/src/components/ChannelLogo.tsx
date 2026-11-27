@@ -24,7 +24,10 @@ const ICON_URLS = import.meta.glob(
 ) as Record<string, string>;
 
 const RAW_SVGS = import.meta.glob(
-  ["../../node_modules/@lobehub/icons-static-svg/icons/grok.svg"],
+  [
+    "../../node_modules/@lobehub/icons-static-svg/icons/grok.svg",
+    "../../node_modules/@lobehub/icons-static-svg/icons/opencode.svg",
+  ],
   { eager: true, query: "?raw", import: "default" },
 ) as Record<string, string>;
 
@@ -114,7 +117,7 @@ export default function ChannelLogo({
       className={cn("inline-flex shrink-0", className)}
       style={{ fontSize: size }}
     >
-      <MonoSvg name="grok" />
+      <MonoSvg name={channel === "opencode" ? "opencode" : "grok"} />
     </span>
   );
 }

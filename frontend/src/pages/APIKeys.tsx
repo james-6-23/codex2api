@@ -152,7 +152,7 @@ interface LimitsFormState {
 }
 
 type ImageGenerationPolicy = "allow" | "strip" | "block";
-type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity" | "claude" | "kiro";
+type UpstreamChannel = "auto" | "codex" | "grok" | "antigravity" | "claude" | "kiro" | "opencode";
 
 // ScopeLimitFormState 是「该 Key × 某分组/账号」预算的一行表单（issue #439）。
 // 数值统一按字符串保存,空串表示不限,与其它限额字段一致。
@@ -378,6 +378,7 @@ export default function APIKeys() {
         antigravity_models?: string[];
         claude_models?: string[];
         kiro_models?: string[];
+        opencode_models?: string[];
       }>,
       api.getSettings().catch((): SystemSettings | null => null),
       api.getPromptFilterNewAPIBindings().catch(() => ({ bindings: [] as PromptFilterNewAPIBinding[] })),
@@ -390,6 +391,7 @@ export default function APIKeys() {
       antigravityModelOptions: modelsResponse.antigravity_models ?? [],
       claudeModelOptions: modelsResponse.claude_models ?? [],
       kiroModelOptions: modelsResponse.kiro_models ?? [],
+      openCodeModelOptions: modelsResponse.opencode_models ?? [],
       settings: settingsResponse,
       promptBindings: promptBindingsResponse.bindings ?? [],
     };
@@ -403,6 +405,7 @@ export default function APIKeys() {
     antigravityModelOptions: string[];
     claudeModelOptions: string[];
     kiroModelOptions: string[];
+    openCodeModelOptions: string[];
     settings: SystemSettings | null;
     promptBindings: PromptFilterNewAPIBinding[];
   }>({
@@ -414,6 +417,7 @@ export default function APIKeys() {
       antigravityModelOptions: [],
       claudeModelOptions: [],
       kiroModelOptions: [],
+      openCodeModelOptions: [],
       settings: null,
       promptBindings: [],
     },
@@ -471,9 +475,10 @@ export default function APIKeys() {
       if (channel === "codex") return modelOptions;
       if (channel === "claude") return claudeModelOptions;
       if (channel === "kiro") return data.kiroModelOptions;
+      if (channel === "opencode") return data.openCodeModelOptions;
       const seen = new Set(modelOptions.map((m) => m.toLowerCase()));
       const merged = [...modelOptions];
-      for (const candidate of [...grokModelOptions, ...antigravityModelOptions, ...claudeModelOptions, ...data.kiroModelOptions]) {
+      for (const candidate of [...grokModelOptions, ...antigravityModelOptions, ...claudeModelOptions, ...data.kiroModelOptions, ...data.openCodeModelOptions]) {
         if (!seen.has(candidate.toLowerCase())) {
           seen.add(candidate.toLowerCase());
           merged.push(candidate);
@@ -481,7 +486,7 @@ export default function APIKeys() {
       }
       return merged;
     },
-    [modelOptions, grokModelOptions, antigravityModelOptions, claudeModelOptions, data.kiroModelOptions],
+    [modelOptions, grokModelOptions, antigravityModelOptions, claudeModelOptions, data.kiroModelOptions, data.openCodeModelOptions],
   );
   const createSelectableGroups = useMemo(
     () =>
@@ -2875,6 +2880,7 @@ function limitsFromAPIKey(limits: APIKeyLimits | undefined): LimitsFormState {
       limits.upstream_channel === "antigravity"
       || limits.upstream_channel === "claude"
       || limits.upstream_channel === "kiro"
+      || limits.upstream_channel === "opencode"
         ? limits.upstream_channel
         : "auto",
     scopeLimits: scopeLimitsFromAPIKey(limits.scope_limits),
@@ -2974,6 +2980,11 @@ function UpstreamChannelPicker({
       key: "kiro",
       label: t("apiKeys.limits.upstreamChannelKiro"),
       icon: <ChannelLogo channel="kiro" size={18} />,
+    },
+    {
+      key: "opencode",
+      label: t("apiKeys.limits.upstreamChannelOpenCode", { defaultValue: "OpenCode" }),
+      icon: <ChannelLogo channel="opencode" size={18} />,
     },
   ];
   return (

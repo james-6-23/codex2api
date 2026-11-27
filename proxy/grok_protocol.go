@@ -1119,6 +1119,9 @@ func readSSEDataLine(reader *bufio.Reader) ([]byte, error) {
 
 func (r *chatToResponsesReader) Read(p []byte) (int, error) {
 	for r.queue.Len() == 0 {
+		if r.terminal {
+			return 0, io.EOF
+		}
 		data, err := readSSEDataLine(r.reader)
 		if err != nil {
 			if err == io.EOF && !r.terminal {
@@ -2185,6 +2188,9 @@ func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account
 	if account != nil && account.IsGrokAPI() {
 		return ExecuteGrokProtocolRequest(ctx, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
 	}
+	if account != nil && account.IsOpenCode() {
+		return ExecuteOpenCodeProtocolRequest(ctx, account, inbound, inboundBody, responsesBody, proxyOverride, headers)
+	}
 	if account != nil && account.IsKiro() {
 		if len(responsesBody) == 0 {
 			responsesBody = inboundBody
@@ -2203,6 +2209,9 @@ func ExecuteRelayStyleProtocolRequest(ctx context.Context, account *auth.Account
 func relayUpstreamEndpointForProtocol(account *auth.Account, inbound GrokProtocol, model string) string {
 	if account != nil && account.IsGrokAPI() {
 		return ResolveGrokUpstreamRoute(account, model, inbound, time.Now()).Endpoint
+	}
+	if account != nil && account.IsOpenCode() {
+		return ResolveOpenCodeUpstreamRoute(account, model, inbound).Endpoint
 	}
 	if account != nil && account.IsKiro() {
 		return "/generateAssistantResponse"

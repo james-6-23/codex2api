@@ -628,6 +628,9 @@ func ExecuteRelayStyleRequest(ctx context.Context, account *auth.Account, reques
 	if account.IsGrokAPI() {
 		return ExecuteGrokRequest(ctx, account, requestBody, proxyOverride, headers)
 	}
+	if account.IsOpenCode() {
+		return ExecuteOpenCodeProtocolRequest(ctx, account, GrokProtocolResponses, nil, requestBody, proxyOverride, headers)
+	}
 	if account.IsKiro() {
 		return ExecuteKiroResponsesRequest(ctx, account, requestBody, proxyOverride, headers)
 	}
@@ -639,6 +642,9 @@ func relayUpstreamEndpointForAccount(account *auth.Account) string {
 	if account.IsGrokAPI() {
 		baseURL, _ := account.GrokCredentials()
 		return grokResponsesEndpoint(baseURL)
+	}
+	if account.IsOpenCode() {
+		return ResolveOpenCodeUpstreamRoute(account, "", GrokProtocolResponses).Endpoint
 	}
 	baseURL, _ := account.OpenAIResponsesCredentials()
 	return auth.OpenAIResponsesEndpoint(baseURL, "/v1/responses")

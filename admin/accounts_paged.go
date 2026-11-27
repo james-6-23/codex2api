@@ -110,6 +110,7 @@ type accountListSnapshotItem struct {
 	Claude              bool
 	ClaudeAuthKind      string
 	KiroAuthKind        string
+	OpenCodeMode        string
 	ClaudeUsageProbeAt  string
 	ClaudeUsageProbeErr string
 	SearchText          string
@@ -143,6 +144,8 @@ type accountListSummary struct {
 
 	// KiroAuthKinds 按 social / idc / external_idp / api_key 计数，供 Kiro 页凭据类型筛选。
 	KiroAuthKinds map[string]int `json:"kiro_auth_kinds,omitempty"`
+	// OpenCodeModes 按 go / zen 计数，供 OpenCode 页模式筛选。
+	OpenCodeModes map[string]int `json:"opencode_modes,omitempty"`
 	// HealthBanned 按健康档计数，与 health_tier=banned 筛选同口径（Banned 按 unauthorized 状态计数）。
 	HealthBanned int `json:"health_banned"`
 }
@@ -234,8 +237,8 @@ func (h *Handler) resolveAccountOperationSelector(ctx context.Context, selector 
 		return nil, fmt.Errorf("selector is required")
 	}
 	channel := strings.ToLower(strings.TrimSpace(selector.Channel))
-	if channel != database.UpstreamChannelCodex && channel != database.UpstreamChannelGrok && channel != database.UpstreamChannelAntigravity && channel != database.UpstreamChannelClaude && channel != database.UpstreamChannelKiro {
-		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, claude, or kiro")
+	if !database.IsValidUpstreamChannel(channel) {
+		return nil, fmt.Errorf("selector channel must be codex, grok, antigravity, claude, kiro, or opencode")
 	}
 	snapshot, err := h.getAccountListSnapshot(ctx, channel)
 	if err != nil {
@@ -370,6 +373,7 @@ func validateAccountPageFilters(query accountPageQuery) error {
 	validAuthKinds := map[string]bool{
 		"": true, "all": true, auth.GrokAuthKindOAuth: true, auth.GrokAuthKindAPIKey: true, auth.ClaudeAuthKindSetupToken: true,
 		auth.KiroAuthKindSocial: true, auth.KiroAuthKindIdC: true, auth.KiroAuthKindExternalIdP: true,
+		auth.OpenCodeModeGo: true, auth.OpenCodeModeZen: true,
 	}
 	if !validAuthKinds[query.AuthKind] {
 		return fmt.Errorf("unsupported auth_kind")
@@ -726,6 +730,7 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 	isOpenAIResponses := strings.EqualFold(upstreamType, auth.UpstreamOpenAIResponses)
 	isClaude := strings.EqualFold(upstreamType, auth.UpstreamClaude)
 	isKiro := strings.EqualFold(upstreamType, auth.UpstreamKiro)
+	isOpenCode := strings.EqualFold(upstreamType, auth.UpstreamOpenCode)
 	email := row.GetCredential("email")
 	if isOpenAIResponses && email == "" {
 		email = row.GetCredential("base_url")
@@ -763,6 +768,7 @@ func (h *Handler) buildAccountListSnapshotItem(row *database.AccountRow, request
 		Antigravity: isAntigravity, AntigravityAuthKind: antigravityAuthKind, Claude: isClaude,
 		ClaudeAuthKind:      claudeAuthKindForRow(row, isClaude),
 		KiroAuthKind:        kiroAuthKindForRow(row, isKiro),
+		OpenCodeMode:        openCodeModeForRow(row, isOpenCode),
 		ClaudeUsageProbeAt:  row.GetCredential(auth.ClaudeUsageProbeAtCredentialKey),
 		ClaudeUsageProbeErr: row.GetCredential(auth.ClaudeUsageProbeErrorCredentialKey),
 	}
@@ -1341,6 +1347,11 @@ func accountListItemMatches(item *accountListSnapshotItem, query accountPageQuer
 			if item.KiroAuthKind != query.AuthKind {
 				return false
 			}
+		} else if channel == database.UpstreamChannelOpenCode {
+			// OpenCode 渠道复用 auth_kind 筛选接入模式:go / zen。
+			if item.OpenCodeMode != query.AuthKind {
+				return false
+			}
 		} else if item.OpenAIResponses != (query.AuthKind == auth.GrokAuthKindAPIKey) {
 			// Codex 渠道复用 auth_kind：api_key=Responses API 中转账号，oauth=官方账号（issue #522）
 			return false
@@ -1448,7 +1459,7 @@ func accountListOverloadPaused(item *accountListSnapshotItem) bool {
 }
 
 func accountListUnsampled(item *accountListSnapshotItem) bool {
-	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity || item.KiroAuthKind != "" {
+	if item == nil || item.OpenAIResponses || item.GrokAuthKind != "" || item.Antigravity || item.KiroAuthKind != "" || item.OpenCodeMode != "" {
 		return false
 	}
 	if item.Status == "unauthorized" || item.Status == "error" {
@@ -1692,6 +1703,12 @@ func summarizeAccountList(items []*accountListSnapshotItem, channel string) (acc
 				summary.KiroAuthKinds = map[string]int{}
 			}
 			summary.KiroAuthKinds[item.KiroAuthKind]++
+		}
+		if item.OpenCodeMode != "" {
+			if summary.OpenCodeModes == nil {
+				summary.OpenCodeModes = map[string]int{}
+			}
+			summary.OpenCodeModes[item.OpenCodeMode]++
 		}
 		if channel == database.UpstreamChannelCodex {
 			if item.OpenAIResponses {

@@ -414,8 +414,16 @@ func (h *Handler) hasDirectMessagesModelAccountMatching(c *gin.Context, model st
 			if !account.IsGrokAPI() {
 				continue
 			}
+		case database.UpstreamChannelKiro:
+			if !account.IsKiro() {
+				continue
+			}
+		case database.UpstreamChannelOpenCode:
+			if !account.IsOpenCode() {
+				continue
+			}
 		case database.UpstreamChannelCodex:
-			if account.IsGrokAPI() || account.IsAntigravityAPI() {
+			if account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsKiro() || account.IsOpenCode() {
 				continue
 			}
 		}
@@ -987,7 +995,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			})
 		} else if isRelayAccount {
 			upstreamBody := routingBody
-			if !account.IsGrokAPI() {
+			if !account.IsGrokAPI() && !account.IsOpenCode() {
 				var translateErr error
 				upstreamBody, translateErr = h.translateAnthropicMessagesToCodexOnce(c, &codexTranslation, canonicalBody, supportedModels)
 				if translateErr != nil {
@@ -1376,7 +1384,7 @@ func (h *Handler) Messages(c *gin.Context) {
 			// 显式传入 attempt 作用域，隔离各 attempt 的通道身份。
 			attemptScope := fmt.Sprintf("a%d", attempt)
 			usage, outcome, wroteAnyBody, firstTokenMs := forwardGrokNativeResponseObservedWithScope(readCtx, c, resp, GrokProtocolMessages, isStream, start, ttftGuard.Stop, streamAttempt.writerOr(c.Writer), streamAttempt.flusherOr(downstreamFlusher), nil, requestGuard, attemptScope)
-			if account.IsClaudeOAuth() || account.IsKiro() {
+			if account.IsClaudeOAuth() || account.IsKiro() || account.IsOpenCode() {
 				// Anthropic 的 input_tokens 不含缓存命中/写入，转换成计费层的总输入口径。
 				applyAnthropicUsageSemantics(usage)
 			}

@@ -150,10 +150,10 @@ func keyUsageUnloadedAccountAllowed(row *database.APIKeyRow, account database.Ke
 	upstream := strings.ToLower(strings.TrimSpace(account.UpstreamType))
 	switch row.Limits.ResolveUpstreamChannel() {
 	case database.UpstreamChannelCodex:
-		if upstream == "grok" || upstream == "antigravity" || upstream == "claude" || upstream == "kiro" {
+		if upstream == "grok" || upstream == "antigravity" || upstream == "claude" || upstream == "kiro" || upstream == "opencode" {
 			return false
 		}
-	case database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude, database.UpstreamChannelKiro:
+	case database.UpstreamChannelGrok, database.UpstreamChannelAntigravity, database.UpstreamChannelClaude, database.UpstreamChannelKiro, database.UpstreamChannelOpenCode:
 		if upstream != row.Limits.ResolveUpstreamChannel() {
 			return false
 		}

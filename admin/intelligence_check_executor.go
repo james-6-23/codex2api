@@ -58,7 +58,7 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 		return intelligenceExecution{Interrupted: true, Error: "配置错误：该账号渠道不支持降智检测"}
 	}
 	claude := account.IsClaudeOAuth()
-	if claude || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsKiro() {
+	if claude || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsKiro() || account.IsOpenCode() {
 		effort = ""
 	}
 	if err := h.validateQualityTestForAccount(ctx, account, qualityTestRequest{Model: model, ReasoningEffort: effort}); err != nil {
@@ -148,7 +148,7 @@ func (h *Handler) executeIntelligenceCheck(ctx context.Context, account *auth.Ac
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 		result.Error = fmt.Sprintf("上游返回 %d: %s", resp.StatusCode, truncate(string(raw), 4096))
-		result.CredentialRejected = intelligenceCredentialRejected(raw) || (account.IsAntigravityAPI() || account.IsKiro()) && resp.StatusCode == http.StatusUnauthorized
+		result.CredentialRejected = intelligenceCredentialRejected(raw) || (account.IsAntigravityAPI() || account.IsKiro() || account.IsOpenCode()) && resp.StatusCode == http.StatusUnauthorized
 		h.applyIntelligenceUpstreamFailure(account, resp, model, raw)
 		return
 	}
@@ -192,6 +192,10 @@ func (h *Handler) applyIntelligenceUpstreamFailure(account *auth.Account, resp *
 	}
 	if account.IsKiro() {
 		proxy.ApplyKiroCooldown(h.store, account, resp.StatusCode, raw)
+		return
+	}
+	if account.IsOpenCode() {
+		proxy.ApplyOpenCodeCooldown(h.store, account, resp.StatusCode, raw, resp)
 		return
 	}
 	if account.IsClaudeOAuth() {

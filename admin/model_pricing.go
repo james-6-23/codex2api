@@ -302,6 +302,7 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 	antigravityKeys := dedup(h.antigravityChannelModels())
 	claudeKeys := dedup(h.claudeChannelModels())
 	kiroKeys := dedup(h.kiroChannelModels())
+	openCodeKeys := dedup(h.openCodeChannelModels())
 
 	// 每个渠道内按新版本在前排序；渠道之间整体拼接,避免版本号交叉穿插。
 	sortModelKeysNewestFirst(keys)
@@ -309,8 +310,9 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 	sortModelKeysNewestFirst(antigravityKeys)
 	sortModelKeysNewestFirst(claudeKeys)
 	sortModelKeysNewestFirst(kiroKeys)
+	sortModelKeysNewestFirst(openCodeKeys)
 
-	rows := make([]modelPricingRow, 0, len(keys)+len(grokKeys)+len(antigravityKeys)+len(claudeKeys)+len(kiroKeys))
+	rows := make([]modelPricingRow, 0, len(keys)+len(grokKeys)+len(antigravityKeys)+len(claudeKeys)+len(kiroKeys)+len(openCodeKeys))
 	appendRows := func(modelKeys []string, channel string) {
 		for _, key := range modelKeys {
 			canonicalModel := database.PricingAliasTarget(key)
@@ -330,6 +332,7 @@ func (h *Handler) ListModelPricing(c *gin.Context) {
 	appendRows(antigravityKeys, database.UpstreamChannelAntigravity)
 	appendRows(claudeKeys, database.UpstreamChannelClaude)
 	appendRows(kiroKeys, database.UpstreamChannelKiro)
+	appendRows(openCodeKeys, database.UpstreamChannelOpenCode)
 
 	syncURL := ""
 	if s, err := h.db.GetSystemSettings(ctx); err == nil && s != nil {

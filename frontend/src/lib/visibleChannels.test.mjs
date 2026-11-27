@@ -4,12 +4,12 @@ import { readFileSync } from 'node:fs'
 import { normalizeVisibleChannels, toggleVisibleChannel } from './visibleChannels.ts'
 
 test('normalizeVisibleChannels mirrors the backend rules', () => {
-  assert.deepEqual(normalizeVisibleChannels(null), ['codex', 'claude', 'antigravity', 'grok', 'kiro'])
-  assert.deepEqual(normalizeVisibleChannels(undefined), ['codex', 'claude', 'antigravity', 'grok', 'kiro'])
+  assert.deepEqual(normalizeVisibleChannels(null), ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'opencode'])
+  assert.deepEqual(normalizeVisibleChannels(undefined), ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'opencode'])
   assert.deepEqual(normalizeVisibleChannels([]), ['codex'])
   assert.deepEqual(normalizeVisibleChannels(['grok']), ['codex', 'grok'])
   assert.deepEqual(normalizeVisibleChannels([' Grok ', '', 'claude', 'grok', 'openai', 42]), ['codex', 'claude', 'grok'])
-  assert.deepEqual(normalizeVisibleChannels('codex'), ['codex', 'claude', 'antigravity', 'grok', 'kiro'])
+  assert.deepEqual(normalizeVisibleChannels('codex'), ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'opencode'])
 })
 
 test('toggleVisibleChannel never drops the fallback channel', () => {

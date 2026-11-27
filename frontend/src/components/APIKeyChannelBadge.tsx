@@ -10,6 +10,7 @@ const CHANNEL_NAMES: Record<UpstreamChannel, string> = {
   antigravity: 'Antigravity',
   claude: 'Claude',
   kiro: 'Kiro',
+  opencode: 'OpenCode',
 }
 
 export default function APIKeyChannelBadge({ channel }: { channel?: UpstreamChannel }) {

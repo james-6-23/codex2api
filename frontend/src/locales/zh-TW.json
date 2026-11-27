@@ -412,6 +412,7 @@
       "upstreamChannelAntigravity": "Antigravity",
       "upstreamChannelClaude": "Claude",
       "upstreamChannelKiro": "Kiro",
+      "upstreamChannelOpenCode": "OpenCode",
       "upstreamChannelAutoTab": "自動",
       "upstreamChannelHint": {
         "auto": "不限渠道：請求依模型路由到 Codex、Grok、Antigravity、Claude 或 Kiro 帳號。",
@@ -609,6 +610,7 @@
     },
     "providerViewClaude": "Claude",
     "providerViewKiro": "Kiro",
+    "providerViewOpenCode": "OpenCode",
     "testProxySuccess": "代理可用",
     "testProxyFailed": "代理測試失敗",
     "proxyPoolEmpty": "代理池為空(可在「代理」頁新增)",
@@ -854,10 +856,13 @@
     "claudeMaxToolSchemaBytesDesc": "0 表示不設閘道 Schema 上限；請求體仍受系統大小與上游限制。",
     "nav": {
       "kiro": "Kiro",
-      "kiroDesc": "Kiro 上游網域、本地用量模擬與連通性測試"
+      "kiroDesc": "Kiro 上游網域、本地用量模擬與連通性測試",
+      "opencode": "OpenCode",
+      "opencodeDesc": "OpenCode Go / Zen 渠道連通性測試與預設探測參數"
     },
     "channelTest": {
-      "kiroDesc": "Kiro 帳號頁「測試連線」與批次測試預設使用的探測模型與測活內容。模型留空時依帳號目錄自動選擇（優先 haiku）。"
+      "kiroDesc": "Kiro 帳號頁「測試連線」與批次測試預設使用的探測模型與測活內容。模型留空時依帳號目錄自動選擇（優先 haiku）。",
+      "opencodeDesc": "OpenCode 帳號頁「測試連線」與批次測試預設使用的探測模型與測活內容。模型留空時依帳號目錄自動選擇。"
     },
     "kiro": {
       "title": "Kiro 渠道",

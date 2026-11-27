@@ -32,6 +32,7 @@ const (
 	modelBackingAntigravity
 	modelBackingClaude
 	modelBackingKiro
+	modelBackingOpenCode
 )
 
 type scopedModelRecord struct {
@@ -87,6 +88,8 @@ func scopedModelOwner(record *scopedModelRecord) string {
 		return "anthropic"
 	case modelBackingKiro:
 		return "kiro"
+	case modelBackingOpenCode:
+		return "opencode"
 	default:
 		return "codex2api"
 	}
@@ -248,6 +251,12 @@ func (h *Handler) scopedModelRecords(ctx context.Context, row *database.APIKeyRo
 				if record := records[key]; record != nil {
 					record.imageInput = true
 				}
+				addTarget(id)
+			}
+
+		case account.IsOpenCode():
+			for _, id := range OpenCodeAccountModelIDs(account) {
+				addScopedModel(records, id, modelBackingOpenCode, time.Time{}, false)
 				addTarget(id)
 			}
 

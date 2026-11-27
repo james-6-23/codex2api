@@ -33,6 +33,8 @@ func (a *Account) usagePercentForSchedulingLocked(now time.Time) float64 {
 		return a.grokUsagePercentForSchedulingLocked(now)
 	case a.isAntigravityAPILocked():
 		return a.antigravityUsagePercentForSchedulingLocked(now)
+	case a.isOpenCodeLocked():
+		return a.openCodeUsagePercentForSchedulingLocked(now)
 	}
 	if a.UsagePercent7dValid {
 		return a.UsagePercent7d

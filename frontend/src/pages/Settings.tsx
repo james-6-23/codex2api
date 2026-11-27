@@ -237,7 +237,7 @@ const DEFAULT_CODEX_UA_CONFIG: Required<CodexUserAgentConfig> = {
   pool_mix: {},
 }
 
-type SettingsTabKey = 'codex' | 'claude' | 'antigravity' | 'grok' | 'kiro' | 'appearance' | 'general'
+type SettingsTabKey = 'codex' | 'claude' | 'antigravity' | 'grok' | 'kiro' | 'opencode' | 'appearance' | 'general'
 // 设置项适用渠道（按后端消费点核对）：
 //   CODEX_ONLY   仅 Codex（Responses/WS、生图存储、Tier 计费、模型清单）
 //   CODEX_CLAUDE 依赖 5h/7d 用量窗口的逻辑，Codex 与 Claude 都会写该窗口
@@ -247,7 +247,7 @@ const CHANNELS_CODEX_ONLY: readonly UpstreamChannel[] = ['codex']
 const CHANNELS_CODEX_CLAUDE: readonly UpstreamChannel[] = ['codex', 'claude']
 const CHANNELS_STREAMING: readonly UpstreamChannel[] = ['codex', 'grok', 'antigravity']
 const CHANNELS_RELAY: readonly UpstreamChannel[] = ['codex', 'antigravity']
-const SETTINGS_TAB_KEYS: readonly SettingsTabKey[] = ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'appearance', 'general']
+const SETTINGS_TAB_KEYS: readonly SettingsTabKey[] = ['codex', 'claude', 'antigravity', 'grok', 'kiro', 'opencode', 'appearance', 'general']
 const DEFAULT_SETTINGS_TAB: SettingsTabKey = 'codex'
 const HIDDEN_IMAGE_DRIVER_MODELS = new Set(['gpt-5.3-codex-spark', 'codex-auto-review', 'gpt-reserve'])
 const isSettingsTabKey = (value: string | null): value is SettingsTabKey =>
@@ -269,6 +269,7 @@ const LEGACY_SECTION_TABS: Record<string, SettingsTabKey> = {
   'settings-claude': 'claude',
   'settings-antigravity': 'antigravity',
   'settings-kiro': 'kiro',
+  'settings-opencode': 'opencode',
   'settings-appearance': 'appearance',
 }
 // 每个 Tab 内的分区目录：多于一个分区的 Tab 渲染侧边目录并按滚动位置高亮。
@@ -285,6 +286,7 @@ const SETTINGS_TAB_SECTION_INDEX: Record<SettingsTabKey, ReadonlyArray<{ id: str
   antigravity: [{ id: 'settings-antigravity', labelKey: 'settings.nav.antigravity', icon: <ChannelLogo channel="antigravity" size={16} /> }],
   grok: [{ id: 'settings-grok', labelKey: 'settings.nav.grok', icon: <ChannelLogo channel="grok" size={16} /> }],
   kiro: [{ id: 'settings-kiro', labelKey: 'settings.nav.kiro', icon: <ChannelLogo channel="kiro" size={16} /> }],
+  opencode: [{ id: 'settings-opencode', labelKey: 'settings.nav.opencode', icon: <ChannelLogo channel="opencode" size={16} /> }],
   appearance: [{ id: 'settings-appearance', labelKey: 'settings.nav.appearance', icon: <Palette /> }],
   general: [
     { id: 'settings-overview', labelKey: 'settings.nav.overview', icon: <Activity /> },
@@ -836,8 +838,9 @@ const SETTINGS_CARD_GRID_2 = 'grid gap-4 lg:grid-cols-2 lg:items-stretch'
 // Codex 语义),按渠道保存默认探测模型与测活内容;留空模型 = 按账号目录自动选。
 const CLAUDE_TEST_MODEL_CHOICES = ['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5', 'claude-opus-4-5', 'claude-sonnet-4-5']
 const KIRO_TEST_MODEL_CHOICES = ['claude-haiku-4.5', 'claude-sonnet-4.6', 'claude-sonnet-4.5', 'claude-opus-4.6']
+const OPENCODE_TEST_MODEL_CHOICES = ['glm-5.3', 'glm-5.3-flash', 'gpt-5.6-luna', 'grok-4.7', 'minimax-m2.7', 'qwen3.8-max']
 
-function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'claude' | 'kiro' }) {
+function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'claude' | 'kiro' | 'opencode' }) {
   const { t } = useTranslation()
   const { showToast } = useToast()
   const [settings, setSettings] = useState<ChannelTestSettings | null>(null)
@@ -886,7 +889,7 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
   const modelChoices = useMemo(() => {
     const base = catalogChoices.length > 0
       ? catalogChoices
-      : channel === 'antigravity' ? [...ANTIGRAVITY_DEFAULT_MODELS] : channel === 'kiro' ? KIRO_TEST_MODEL_CHOICES : CLAUDE_TEST_MODEL_CHOICES
+      : channel === 'antigravity' ? [...ANTIGRAVITY_DEFAULT_MODELS] : channel === 'kiro' ? KIRO_TEST_MODEL_CHOICES : channel === 'opencode' ? OPENCODE_TEST_MODEL_CHOICES : CLAUDE_TEST_MODEL_CHOICES
     const current = settings?.test_model?.trim() ?? ''
     const list = current && !base.includes(current) ? [current, ...base] : base
     return [
@@ -900,7 +903,7 @@ function ChannelConnectivityTestCard({ channel }: { channel: 'antigravity' | 'cl
   return (
     <SettingsCard
       title={t('settings.connectivityTest')}
-      description={t(channel === 'antigravity' ? 'settings.channelTest.antigravityDesc' : channel === 'kiro' ? 'settings.channelTest.kiroDesc' : 'settings.channelTest.claudeDesc')}
+      description={t(channel === 'antigravity' ? 'settings.channelTest.antigravityDesc' : channel === 'kiro' ? 'settings.channelTest.kiroDesc' : channel === 'opencode' ? 'settings.channelTest.opencodeDesc' : 'settings.channelTest.claudeDesc', { defaultValue: '配置 OpenCode 账号的默认连通性测试模型、内容与并发数。' })}
       icon={<Wifi className="size-4" />}
     >
       <div className="space-y-4">
@@ -2404,6 +2407,7 @@ const VISIBLE_CHANNEL_LABELS: Record<UpstreamChannel, string> = {
   antigravity: 'Antigravity',
   grok: 'Grok',
   kiro: 'Kiro',
+  opencode: 'OpenCode',
 }
 
 // 供应商显示选择器：一排可多选的胶囊，点一下即保存；兜底渠道锁定在选中态。
@@ -3907,6 +3911,7 @@ export default function Settings() {
         { id: 'antigravity', label: t('settings.nav.antigravity'), icon: <ChannelLogo channel="antigravity" size={16} /> },
         { id: 'grok', label: t('settings.nav.grok'), icon: <ChannelLogo channel="grok" size={16} /> },
         { id: 'kiro', label: t('settings.nav.kiro'), icon: <ChannelLogo channel="kiro" size={16} /> },
+        { id: 'opencode', label: t('settings.nav.opencode', { defaultValue: 'OpenCode' }), icon: <ChannelLogo channel="opencode" size={16} /> },
         { id: 'appearance', label: t('settings.nav.appearance'), icon: <Palette className="size-4" /> },
         { id: 'general', label: t('settings.nav.general'), icon: <SlidersHorizontal className="size-4" /> },
       ] as const satisfies ReadonlyArray<{ id: SettingsTabKey; label: string; icon: ReactNode }>,
@@ -5442,6 +5447,12 @@ export default function Settings() {
             <SettingsSection id="settings-kiro" title={t('settings.nav.kiro')} description={t('settings.nav.kiroDesc')} icon={<ChannelLogo channel="kiro" size={16} />}>
               <ChannelConnectivityTestCard channel="kiro" />
               <KiroSettingsCard />
+            </SettingsSection>
+          ) : null}
+
+          {activeTab === 'opencode' ? (
+            <SettingsSection id="settings-opencode" title={t('settings.nav.opencode', { defaultValue: 'OpenCode' })} description={t('settings.nav.opencodeDesc', { defaultValue: 'OpenCode Go / Zen 渠道连通性测试与默认探测参数' })} icon={<ChannelLogo channel="opencode" size={16} />}>
+              <ChannelConnectivityTestCard channel="opencode" />
             </SettingsSection>
           ) : null}
 

@@ -1945,7 +1945,17 @@ const (
 	UpstreamChannelAntigravity = "antigravity"
 	UpstreamChannelClaude      = "claude"
 	UpstreamChannelKiro        = "kiro"
+	UpstreamChannelOpenCode    = "opencode"
 )
+
+// IsValidUpstreamChannel 判断是否为已注册的非空上游渠道标识。
+func IsValidUpstreamChannel(channel string) bool {
+	switch strings.ToLower(strings.TrimSpace(channel)) {
+	case UpstreamChannelCodex, UpstreamChannelGrok, UpstreamChannelAntigravity, UpstreamChannelClaude, UpstreamChannelKiro, UpstreamChannelOpenCode:
+		return true
+	}
+	return false
+}
 
 // ResolveUpstreamChannel 归一 Key 的上游渠道限定；未知值一律视为不限（auto）。
 func (l APIKeyLimits) ResolveUpstreamChannel() string {
@@ -1960,6 +1970,8 @@ func (l APIKeyLimits) ResolveUpstreamChannel() string {
 		return UpstreamChannelClaude
 	case UpstreamChannelKiro:
 		return UpstreamChannelKiro
+	case UpstreamChannelOpenCode:
+		return UpstreamChannelOpenCode
 	}
 	return UpstreamChannelAuto
 }
@@ -1976,9 +1988,11 @@ func accountChannelFilterSQL(channel, upstreamTypeExpr string) string {
 		return ` AND ` + upstreamTypeExpr + ` = 'claude'`
 	case UpstreamChannelKiro:
 		return ` AND ` + upstreamTypeExpr + ` = 'kiro'`
+	case UpstreamChannelOpenCode:
+		return ` AND ` + upstreamTypeExpr + ` = 'opencode'`
 	case UpstreamChannelCodex:
 		// Blank legacy rows and OpenAI Responses relays remain in the Codex view.
-		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity', 'claude', 'kiro')`
+		return ` AND ` + upstreamTypeExpr + ` NOT IN ('grok', 'antigravity', 'claude', 'kiro', 'opencode')`
 	default:
 		return ""
 	}

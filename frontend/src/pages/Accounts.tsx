@@ -55,6 +55,7 @@ import GrokAccounts from "./GrokAccounts";
 import AntigravityAccounts from "./AntigravityAccounts";
 import ClaudeAccounts from "./ClaudeAccounts";
 import KiroAccounts from "./KiroAccounts";
+import OpenCodeAccounts from "./OpenCodeAccounts";
 import { mergeAccountLiveState, useAccountLiveState } from "../hooks/useAccountLiveState";
 import PageHeader from "../components/PageHeader";
 import {
@@ -1812,7 +1813,9 @@ export default function Accounts() {
         ? "claude"
         : normalizedPath.endsWith("/accounts/kiro")
           ? "kiro"
-          : "codex";
+          : normalizedPath.endsWith("/accounts/opencode")
+            ? "opencode"
+            : "codex";
   const { channels: visibleChannels, isChannelVisible } = useVisibleChannels();
   // 设置页隐藏了某个渠道后，直接打开它的账号路由要回落到 Codex 视图。
   useEffect(() => {
@@ -1829,7 +1832,9 @@ export default function Accounts() {
               ? "/accounts/claude"
               : view === "kiro"
                 ? "/accounts/kiro"
-                : "/accounts",
+                : view === "opencode"
+                  ? "/accounts/opencode"
+                  : "/accounts",
       );
     },
     [navigate],
@@ -6343,14 +6348,19 @@ export default function Accounts() {
           ["antigravity", t("accounts.providerViewAntigravity")],
           ["claude", t("accounts.providerViewClaude")],
           ["kiro", t("accounts.providerViewKiro")],
+          ["opencode", t("accounts.providerViewOpenCode", { defaultValue: "OpenCode" })],
         ] as const
       ).filter(([key]) => visibleChannels.includes(key)),
     [t, visibleChannels],
   );
+  const providerSwitcherMaxWidth = Math.max(260, providerSwitcherOptions.length * 144);
   const providerSwitcher = useMemo(() => (
     <div
-      className="relative grid w-full max-w-[680px] items-center rounded-lg border border-border bg-muted/40 p-0.5"
-      style={{ gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))` }}
+      className="relative grid w-full max-w-full items-center rounded-lg border border-border bg-muted/40 p-0.5"
+      style={{
+        maxWidth: `${providerSwitcherMaxWidth}px`,
+        gridTemplateColumns: `repeat(${providerSwitcherOptions.length}, minmax(0, 1fr))`,
+      }}
     >
       <span
         aria-hidden
@@ -6366,8 +6376,9 @@ export default function Accounts() {
           type="button"
           onClick={() => setProviderView(key)}
           aria-pressed={providerView === key}
+          title={label}
           className={cn(
-            "relative z-10 inline-flex min-w-0 items-center justify-center gap-1 rounded-md px-1.5 py-2 text-xs font-semibold transition-all duration-200 active:scale-[0.97] sm:gap-2 sm:px-3 sm:text-sm",
+            "relative z-10 inline-flex min-w-0 items-center justify-center gap-1 rounded-md px-1.5 py-2 text-xs font-semibold transition-all duration-200 active:scale-[0.97] sm:gap-1.5 sm:px-2.5 sm:text-sm",
             providerView === key
               ? "text-foreground"
               : "text-muted-foreground opacity-75 grayscale hover:opacity-100 hover:grayscale-0 hover:text-foreground",
@@ -6378,7 +6389,7 @@ export default function Accounts() {
         </button>
       ))}
     </div>
-  ), [providerView, setProviderView, t, providerSwitcherOptions]);
+  ), [providerView, setProviderView, t, providerSwitcherOptions, providerSwitcherMaxWidth]);
 
   if (providerView === "grok") {
     // key 触发渠道切换时整块内容淡入过渡，切换器由 headerSlot 常驻不闪。
@@ -6437,6 +6448,14 @@ export default function Accounts() {
     return (
       <div key="provider-kiro" className="animate-channel-switch-in">
         <KiroAccounts headerSlot={providerSwitcher} />
+      </div>
+    );
+  }
+
+  if (providerView === "opencode") {
+    return (
+      <div key="provider-opencode" className="animate-channel-switch-in">
+        <OpenCodeAccounts headerSlot={providerSwitcher} />
       </div>
     );
   }
@@ -6507,8 +6526,13 @@ export default function Accounts() {
             actionsBelow
             autoRefresh={accountAutoRefresh}
             titleAdornment={
-              <div className="flex max-w-full flex-wrap items-center gap-2">
-                <div className="min-w-0 max-w-full">{providerSwitcher}</div>
+              <div className="flex w-full max-w-full flex-wrap items-center gap-2">
+                <div
+                  className="w-full min-w-0 max-w-full"
+                  style={{ maxWidth: `${providerSwitcherMaxWidth}px` }}
+                >
+                  {providerSwitcher}
+                </div>
                 <Select
                   className="w-auto shrink-0"
                   compact

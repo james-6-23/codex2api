@@ -1,6 +1,6 @@
 export type ToastType = 'success' | 'error' | 'warning' | 'info'
 export type ISODateString = string
-export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'claude' | 'kiro'
+export type UpstreamChannel = 'codex' | 'grok' | 'antigravity' | 'claude' | 'kiro' | 'opencode'
 
 export type ChannelMonitorStatus = 'unknown' | 'operational' | 'degraded' | 'failed'
 export type ChannelMonitorBillingStatus = 'unknown' | 'ok' | 'unsupported' | 'failed'
@@ -103,9 +103,52 @@ export interface ChannelTestSettingsResponse {
   antigravity: ChannelTestSettings
   claude: ChannelTestSettings
   kiro: ChannelTestSettings
+  opencode: ChannelTestSettings
   default_test_content: string
   default_test_concurrency: number
-  model_choices?: Partial<Record<'antigravity' | 'claude' | 'kiro', string[]>>
+  model_choices?: Partial<Record<'antigravity' | 'claude' | 'kiro' | 'opencode', string[]>>
+}
+
+export type OpenCodeMode = 'go' | 'zen'
+export type OpenCodeNativeProtocol = 'chat_completions' | 'anthropic' | 'responses'
+
+export interface OpenCodeProtocolRule {
+  pattern: string
+  protocol: OpenCodeNativeProtocol
+  protocols?: OpenCodeNativeProtocol[]
+}
+
+export interface OpenCodeUsageWindow {
+  status?: string
+  percent: number
+  resets_at?: string
+}
+
+export interface OpenCodeUsageSnapshot {
+  status: 'ok' | 'unauthorized' | 'failed' | string
+  rolling?: OpenCodeUsageWindow
+  weekly?: OpenCodeUsageWindow
+  monthly?: OpenCodeUsageWindow
+  fetched_at?: string
+  last_attempt_at?: string
+  http_status?: number
+  last_error?: string
+}
+
+export interface OpenCodeImportResponse {
+  total: number
+  imported: number
+  duplicates: number
+  failed: number
+  results: Array<{
+    index: number
+    id?: number
+    name?: string
+    mode?: string
+    status: 'imported' | 'duplicate' | 'failed'
+    error?: string
+    warnings?: string[]
+  }>
 }
 
 export interface KiroSettings {
@@ -459,6 +502,13 @@ export interface AccountRow {
   /** Kiro 登录来源：Google / Github / BuilderId / Enterprise 等。 */
   kiro_login_source?: string
   kiro_usage?: KiroUsageSnapshot
+  opencode_api?: boolean
+  /** OpenCode 接入模式：go（订阅）或 zen（按量）。 */
+  opencode_mode?: OpenCodeMode
+  opencode_anthropic_base_url?: string
+  opencode_protocol_rules?: OpenCodeProtocolRule[]
+  opencode_catalog_models?: string[]
+  opencode_usage?: OpenCodeUsageSnapshot
   /** Kiro 套餐标识（按订阅标题归一）：kiro free / pro / pro+ / max / power / student。 */
   kiro_plan?: string
   /** Claude 凭据形态(仅 Claude 账号有值)。 */
@@ -658,6 +708,8 @@ export interface AccountListSummary {
   setup_token?: number
   /** Kiro 渠道:按 social / idc / external_idp / api_key 计数。 */
   kiro_auth_kinds?: Record<string, number>
+  /** OpenCode 渠道:按 go / zen 模式计数。 */
+  opencode_modes?: Record<string, number>
   /** 健康档为 banned 的账号数（与 health_tier=banned 筛选同口径）。 */
   health_banned?: number
   subscription_unlocked: number
@@ -3457,6 +3509,8 @@ export interface ModelsResponse {
   claude_models?: string[]
   // Kiro 渠道账号模型目录的并集;渠道选 kiro 时模型下拉用这份
   kiro_models?: string[]
+  // OpenCode 渠道账号模型目录的并集;渠道选 opencode 时模型下拉用这份
+  opencode_models?: string[]
   items?: ModelInfo[]
   last_synced_at?: string
   source_url: string

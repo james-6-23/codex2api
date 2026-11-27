@@ -148,7 +148,9 @@ export default function TestConnectionModal({
   const isGrokAccount = Boolean(account.grok_api);
   // Kiro 用账号自己的模型目录，测试模型优先取 Kiro 渠道测连设置。
   const isKiroAccount = Boolean(account.kiro_api);
-  const isCodexOAuthAccount = !isClaudeAccount && !isOpenAIResponsesAccount && !isAntigravityAccount && !isKiroAccount;
+  // OpenCode 用账号白名单或同步的模型目录，测试模型优先取 OpenCode 渠道测连设置。
+  const isOpenCodeAccount = Boolean(account.opencode_api);
+  const isCodexOAuthAccount = !isClaudeAccount && !isOpenAIResponsesAccount && !isAntigravityAccount && !isKiroAccount && !isOpenCodeAccount;
   const supportsModelDetector = isCodexOAuthAccount || isClaudeAccount || Boolean(account.openai_responses_api && !account.grok_api);
 
   const modelSelectOptions = useMemo(
@@ -203,6 +205,36 @@ export default function TestConnectionModal({
             kiroModels.find((item) => item.toLowerCase().includes("haiku")) ??
             kiroModels[0];
           const nextModels = uniqueTestModels(kiroModels, pick, false);
+          setModelOptions(nextModels);
+          setSelectedModel((current) => current || nextModels[0] || "");
+          return;
+        }
+
+        if (isOpenCodeAccount) {
+          let preferred = "";
+          try {
+            const channelSettings = await api.getChannelTestSettings();
+            if (!active) return;
+            preferred = channelSettings.opencode?.test_model ?? "";
+            setTestContent(channelSettings.opencode?.test_content || channelSettings.default_test_content || "hi");
+          } catch {
+            /* 渠道测试设置读不到就按目录自动选 */
+          }
+          if (!active) return;
+          const rawModels = [
+            ...(account.models ?? []),
+            ...(account.opencode_catalog_models ?? []),
+          ];
+          const ocModels = uniqueTestModels(
+            rawModels.length > 0 ? rawModels : ["glm-5.3", "glm-5", "kimi-k2.5", "minimax-m2.7"],
+            undefined,
+            false,
+          );
+          const pick =
+            ocModels.find((item) => item.toLowerCase() === preferred.toLowerCase()) ??
+            ocModels.find((item) => item.toLowerCase() === "glm-5.3") ??
+            ocModels[0];
+          const nextModels = uniqueTestModels(ocModels, pick, false);
           setModelOptions(nextModels);
           setSelectedModel((current) => current || nextModels[0] || "");
           return;
@@ -301,6 +333,15 @@ export default function TestConnectionModal({
           setSelectedModel((current) => current || fallbackModels[0] || "");
         } else if (isKiroAccount) {
           const fallbackModels = uniqueTestModels(account.models ?? [], undefined, false);
+          setModelOptions(fallbackModels);
+          setSelectedModel((current) => current || fallbackModels[0] || "");
+        } else if (isOpenCodeAccount) {
+          const rawModels = [...(account.models ?? []), ...(account.opencode_catalog_models ?? [])];
+          const fallbackModels = uniqueTestModels(
+            rawModels.length > 0 ? rawModels : ["glm-5.3", "glm-5", "kimi-k2.5", "minimax-m2.7"],
+            undefined,
+            false,
+          );
           setModelOptions(fallbackModels);
           setSelectedModel((current) => current || fallbackModels[0] || "");
         } else if (isOpenAIResponsesAccount) {

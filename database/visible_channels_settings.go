@@ -13,7 +13,7 @@ import (
 // 巨型 UPSERT——那条语句的占位符已经排到 $119，每加一列都要整体顺移。
 
 // AllUpstreamChannels 是管理台可见性开关能控制的全部渠道，顺序即展示顺序。
-var AllUpstreamChannels = []string{"codex", "claude", "antigravity", "grok", "kiro"}
+var AllUpstreamChannels = []string{"codex", "claude", "antigravity", "grok", "kiro", "opencode"}
 
 // FallbackVisibleChannel 是兜底渠道：无论怎么配置都保持显示，避免把管理台关成空白。
 const FallbackVisibleChannel = "codex"

@@ -524,9 +524,11 @@ func (h *Handler) applyUpstreamChannelFilterWithGate(c *gin.Context, effectiveMo
 		return combine(claudeChannelAccountFilterWithGate(effectiveModel, gate))
 	case database.UpstreamChannelKiro:
 		return combine(kiroChannelAccountFilterWithGate(effectiveModel, gate))
+	case database.UpstreamChannelOpenCode:
+		return combine(openCodeChannelAccountFilterWithGate(effectiveModel, gate))
 	case database.UpstreamChannelCodex:
 		return func(account *auth.Account) bool {
-			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() || account.IsKiro() {
+			if account == nil || account.IsGrokAPI() || account.IsAntigravityAPI() || account.IsClaudeOAuth() || account.IsKiro() || account.IsOpenCode() {
 				return false
 			}
 			return filter == nil || filter(account)
@@ -615,9 +617,9 @@ func accountFilterForResponsesModelWithGate(originalModel string, effectiveModel
 func accountFilterForCompactResponsesModelWithOriginal(originalModel string, effectiveModel string, allowCodexAccounts bool) auth.AccountFilter {
 	inner := accountFilterForInlineCompactionModelWithOriginal(originalModel, effectiveModel, allowCodexAccounts)
 	return func(account *auth.Account) bool {
-		// The dedicated compact executor has no Grok or Kiro adapter. Inline compaction
+		// The dedicated compact executor has no Grok, Kiro, or OpenCode adapter. Inline compaction
 		// on ordinary Responses has a separate provider capability boundary.
-		return account != nil && !account.IsGrokAPI() && !account.IsKiro() && inner(account)
+		return account != nil && !account.IsGrokAPI() && !account.IsKiro() && !account.IsOpenCode() && inner(account)
 	}
 }
 
@@ -699,6 +701,9 @@ func relayAccountSupportsModel(account *auth.Account, model string) bool {
 	if account.IsKiro() {
 		return kiroAccountSupportsModel(account, model)
 	}
+	if account.IsOpenCode() {
+		return openCodeAccountSupportsModel(account, model)
+	}
 	if account.IsAntigravityAPI() {
 		if !account.AntigravityDispatchEnabled() {
 			return false
@@ -761,8 +766,11 @@ func (h *Handler) modelSupportedByAccountMapping(model string) bool {
 			}
 			continue
 		}
-		// Kiro 账号直接服务自己目录里的模型（含 claude-*），不需要先配映射。
+		// Kiro / OpenCode 账号直接服务自己目录里的模型，不需要先配映射。
 		if account.IsKiro() && kiroAccountSupportsModel(account, model) {
+			return true
+		}
+		if account.IsOpenCode() && openCodeAccountSupportsModel(account, model) {
 			return true
 		}
 		mappedModel, ok := resolveAccountModelMapping(account, model)
@@ -1717,6 +1725,8 @@ func (h *Handler) logUsage(input *database.UsageLogInput) {
 					input.Channel = database.UpstreamChannelClaude
 				case acc.IsKiro():
 					input.Channel = database.UpstreamChannelKiro
+				case acc.IsOpenCode():
+					input.Channel = database.UpstreamChannelOpenCode
 				}
 			}
 		}
@@ -9011,6 +9021,9 @@ func (h *Handler) applyCooldownForModel(account *auth.Account, statusCode int, b
 	if account.IsKiro() {
 		return applyKiroCooldown(h.store, account, statusCode, body, model)
 	}
+	if account.IsOpenCode() {
+		return applyOpenCodeCooldown(h.store, account, statusCode, body, resp, model)
+	}
 	// Antigravity 401 is recovered by RefreshAntigravityAccount. Do not apply
 	// Codex subscription/payment semantics. 429/503 carry Google's structured
 	// quota status instead, which sizes the per-(account, model) cooldown from
@@ -9748,6 +9761,9 @@ func (h *Handler) supportedModelIDs(ctx context.Context) []string {
 			}
 			if account.IsKiro() {
 				declared = KiroAccountModelIDs(account)
+			}
+			if account.IsOpenCode() {
+				declared = OpenCodeAccountModelIDs(account)
 			}
 			// 未声明 models 白名单的 Grok 账号：补默认 Grok 模型集，让 grok-4.5 等
 			// 出现在 /v1/models（否则下游客户端拉不到可用的 Grok 模型名）。

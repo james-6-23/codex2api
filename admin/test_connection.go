@@ -294,6 +294,8 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 					h.store.MarkDeactivatedWorkspace(account, errMsg)
 				} else if account.IsKiro() {
 					proxy.ApplyKiroCooldown(h.store, account, resp.StatusCode, errBody)
+				} else if account.IsOpenCode() {
+					proxy.ApplyOpenCodeCooldown(h.store, account, resp.StatusCode, errBody, resp)
 				}
 			case http.StatusTooManyRequests:
 				// Grok 虽是 relay 风格，但有自己的免费额度语义（free-usage-exhausted → 24h），
@@ -303,6 +305,8 @@ func (h *Handler) testConnection(c *gin.Context, quality *qualityTestRequest) {
 					proxy.ApplyAntigravityCooldown(h.store, account, resp.StatusCode, errBody, resp, testModel)
 				} else if account.IsKiro() {
 					proxy.ApplyKiroCooldown(h.store, account, resp.StatusCode, errBody)
+				} else if account.IsOpenCode() {
+					proxy.ApplyOpenCodeCooldown(h.store, account, resp.StatusCode, errBody, resp)
 				} else if isOpenAIResponsesAccount && !account.IsGrokAPI() {
 					h.store.MarkCooldown(account, time.Minute, "rate_limited")
 				} else {
@@ -1053,6 +1057,9 @@ func (h *Handler) connectionTestModelForAccount(ctx context.Context, account *au
 	if account != nil && account.IsKiro() {
 		return kiroConnectionTestModel(account, requested, h.channelTestSettingsForAccount(ctx, account).TestModel)
 	}
+	if account != nil && account.IsOpenCode() {
+		return openCodeConnectionTestModel(account, requested, h.channelTestSettingsForAccount(ctx, account).TestModel)
+	}
 	if account == nil || !account.IsRelayStyle() {
 		if requested == "" {
 			return h.connectionTestModel(ctx), nil
@@ -1776,6 +1783,8 @@ func (h *Handler) runSingleBatchTest(ctx context.Context, acc *auth.Account) (st
 			proxy.ApplyAntigravityCooldown(h.store, acc, resp.StatusCode, body, resp, testModel)
 		} else if acc.IsKiro() {
 			proxy.ApplyKiroCooldown(h.store, acc, resp.StatusCode, body)
+		} else if acc.IsOpenCode() {
+			proxy.ApplyOpenCodeCooldown(h.store, acc, resp.StatusCode, body, resp)
 		} else if acc.IsRelayStyle() && !acc.IsGrokAPI() {
 			h.store.MarkCooldown(acc, time.Minute, "rate_limited")
 		} else {
