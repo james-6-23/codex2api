@@ -740,14 +740,9 @@ func normalizeSystemVersion(v string) string {
 func compareSystemVersions(a, b string) int {
 	av, okA := parseSystemVersion(a)
 	bv, okB := parseSystemVersion(b)
-	if !okA && !okB {
-		return strings.Compare(a, b)
-	}
-	if !okA {
-		return -1
-	}
-	if !okB {
-		return 1
+	// Custom builds cannot be ordered against upstream releases.
+	if !okA || !okB {
+		return 0
 	}
 	for i := 0; i < 3; i++ {
 		if av[i] < bv[i] {

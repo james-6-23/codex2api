@@ -53,7 +53,7 @@ const mobileMoreNav = navDefs.filter((item) => !mobilePrimaryPathSet.has(item.to
 export default function Layout({ children }: PropsWithChildren) {
   const location = useLocation()
   const { t, i18n } = useTranslation()
-  const { currentVersion, frontendVersion, versionMismatch, hasUpdate, latestVersion, updateInfo, refreshVersion } = useVersionCheck(location.pathname)
+  const { currentVersion, frontendVersion, versionMismatch, isCustomBuild, hasUpdate, latestVersion, updateInfo, refreshVersion } = useVersionCheck(location.pathname)
   const { siteName, siteLogo, backgroundImage, backgroundOpacity, backgroundBlur, backgroundGlassOpacity, backgroundGlassBlur } = useBranding()
   const { theme, toggle } = useTheme()
   const { showToast } = useToast()
@@ -404,15 +404,22 @@ export default function Layout({ children }: PropsWithChildren) {
                           className="z-[100] w-[240px] rounded-lg border border-border bg-popover p-3 text-left shadow-xl"
                         >
                           <div className="text-[13px] font-semibold text-foreground">
-                            {latestVersion
-                              ? hasUpdate
-                                ? t('common.newVersionAvailable', { version: latestVersion })
-                                : t('common.versionLatest')
-                              : t('common.versionChecking')}
+                            {isCustomBuild
+                              ? t('common.versionCustomBuild')
+                              : latestVersion
+                                ? hasUpdate
+                                  ? t('common.newVersionAvailable', { version: latestVersion })
+                                  : t('common.versionLatest')
+                                : t('common.versionChecking')}
                           </div>
                           <div className="mt-1 break-words text-[11px] text-muted-foreground">
                             {t('common.currentVersion', { version: currentVersion })}
                           </div>
+                          {isCustomBuild && (
+                            <div role="status" className="mt-3 rounded-md border border-border bg-muted/50 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+                              {t('common.versionCustomBuildHint')}
+                            </div>
+                          )}
                           {versionMismatch && (
                             <>
                               <div className="mt-1 break-words text-[11px] text-muted-foreground">
