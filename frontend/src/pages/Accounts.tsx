@@ -5,7 +5,13 @@ import { getAccountQuotaPausePresentation } from "@/lib/accountQuotaPause";
 import { AccountCardSurface, AccountCardHeader, AccountCardBody, AccountCardDetailLink, AccountCardMetric, AccountCardTimestamp } from "../components/AccountCardSurface";
 import AccountUsageBar from "../components/AccountUsageBar";
 import APIKeyMultiSelect from "../components/APIKeyMultiSelect";
-import { sendAccountImportBatches, splitAccountImportFiles } from "../lib/accountImportBatches";
+import {
+  exceedsFolderImportBatchLimit,
+  MAX_FOLDER_IMPORT_BATCHES,
+  runMixedAccountImport,
+  sendAccountImportBatches,
+  splitAccountImportFiles,
+} from "../lib/accountImportBatches";
 import PlanBadge, { normalizePlanType } from "../components/AccountPlanBadge";
 import { useIntelligenceBars } from "../hooks/useIntelligenceBars";
 import AccountIntelligenceBar, { AccountIntelligenceActions } from "../components/AccountIntelligenceBar";
@@ -4357,7 +4363,18 @@ export default function Accounts() {
     }
 
     if (!files.length) return false;
+    const isJSON = format === "json" || format === "json_at";
     const batches = splitAccountImportFiles(files);
+    if (exceedsFolderImportBatchLimit(batches, isJSON)) {
+      showToast(
+        t("accounts.importTooManyBatches", {
+          count: batches.length,
+          max: MAX_FOLDER_IMPORT_BATCHES,
+        }),
+        "error",
+      );
+      return false;
+    }
 
     setImporting(true);
     setImportProgress({
@@ -4384,7 +4401,6 @@ export default function Accounts() {
     const importedAccountIDs: number[] = [];
     // 本次导入注册进代理池的代理统计,跨批累加后在结束 toast 里汇报。
     const proxySummary = { imported: 0, skipped: 0, warnings: [] as string[] };
-    const isJSON = format === "json" || format === "json_at";
     // 只有 JSON 系格式的文件才可能携带代理,后端也只对这两种格式认这个开关。
     const carriesFileProxies = importFileProxies && isJSON;
 
@@ -4411,6 +4427,7 @@ export default function Accounts() {
       return formData;
     };
 
+    let completedBatches = 0;
     try {
       const adminKey = getAdminKey();
       const responses = sendAccountImportBatches(
@@ -4436,16 +4453,33 @@ export default function Accounts() {
             importedAccountIDs,
             proxySummary,
           );
+          completedBatches++;
         } else {
           const data = res.ok ? await res.json() : await res.json().catch(() => ({}));
           if (!res.ok) {
-            setImportProgress((p) => ({ ...p, show: false }));
-            showToast(
-              data.error
-                ? t("accounts.importFailedWithReason", { error: data.error })
-                : t("accounts.importFailed"),
-              "error",
-            );
+            if (completedBatches > 0) {
+              setImportProgress({ show: true, ...totals, done: true });
+              void reload();
+              showToast(
+                data.error
+                  ? t("accounts.importPartialFailedWithReason", {
+                      completed: completedBatches,
+                      error: data.error,
+                    })
+                  : t("accounts.importPartialFailed", {
+                      completed: completedBatches,
+                    }),
+                "error",
+              );
+            } else {
+              setImportProgress((p) => ({ ...p, show: false }));
+              showToast(
+                data.error
+                  ? t("accounts.importFailedWithReason", { error: data.error })
+                  : t("accounts.importFailed"),
+                "error",
+              );
+            }
             return false;
           }
           totals.current += data.total ?? 0;
@@ -4460,6 +4494,7 @@ export default function Accounts() {
           if (data.warning && !proxySummary.warnings.includes(data.warning)) {
             proxySummary.warnings.push(data.warning);
           }
+          completedBatches++;
           setImportProgress({ show: true, ...totals, done: isLastBatch });
           if (isLastBatch) void reload();
         }
@@ -4488,6 +4523,9 @@ export default function Accounts() {
       }
       return true;
     } catch (error) {
+      if (completedBatches > 0) {
+        void reload();
+      }
       setImportProgress({
         show: true,
         current: Math.max(totals.current, 1),
@@ -4499,7 +4537,12 @@ export default function Accounts() {
         done: true,
       });
       showToast(
-        t("accounts.importFailedWithReason", { error: getErrorMessage(error) }),
+        completedBatches > 0
+          ? t("accounts.importPartialFailedWithReason", {
+              completed: completedBatches,
+              error: getErrorMessage(error),
+            })
+          : t("accounts.importFailedWithReason", { error: getErrorMessage(error) }),
         "error",
       );
       return false;
@@ -4606,12 +4649,12 @@ export default function Accounts() {
         (f) => f.name.split(".").pop()?.toLowerCase() === "json",
       );
 
-      if (jsonFiles.length > 0) {
-        await importFiles(jsonFiles, "json");
-      }
-      if (txtFiles.length > 0) {
-        await importFiles(txtFiles, "txt");
-      }
+      await runMixedAccountImport(
+        jsonFiles.length > 0,
+        txtFiles.length > 0,
+        () => importFiles(jsonFiles, "json"),
+        () => importFiles(txtFiles, "txt"),
+      );
       return;
     }
 
@@ -4631,12 +4674,12 @@ export default function Accounts() {
       }
     }
 
-    if (jsonFiles.length > 0) {
-      await importFiles(jsonFiles, "json");
-    }
-    if (txtFiles.length > 0) {
-      await importFiles(txtFiles, "txt");
-    }
+    await runMixedAccountImport(
+      jsonFiles.length > 0,
+      txtFiles.length > 0,
+      () => importFiles(jsonFiles, "json"),
+      () => importFiles(txtFiles, "txt"),
+    );
   };
 
   const fileImportOptions = {
@@ -4708,14 +4751,16 @@ export default function Accounts() {
       (f) => f.name.split(".").pop()?.toLowerCase() === "json",
     );
 
-    if (jsonFiles.length > 0) {
-      await importFiles(jsonFiles, "json", fileImportOptions);
+    try {
+      await runMixedAccountImport(
+        jsonFiles.length > 0,
+        txtFiles.length > 0,
+        () => importFiles(jsonFiles, "json", fileImportOptions),
+        () => importFiles(txtFiles, "txt", fileImportOptions),
+      );
+    } finally {
+      if (folderInputRef.current) folderInputRef.current.value = "";
     }
-    if (txtFiles.length > 0) {
-      await importFiles(txtFiles, "txt", fileImportOptions);
-    }
-
-    if (folderInputRef.current) folderInputRef.current.value = "";
   };
 
   const handlePasteImport = async () => {

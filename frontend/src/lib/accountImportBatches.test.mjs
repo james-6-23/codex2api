@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { sendAccountImportBatches, splitAccountImportFiles } from './accountImportBatches.ts';
+import {
+  exceedsFolderImportBatchLimit,
+  MAX_FOLDER_IMPORT_BATCHES,
+  runMixedAccountImport,
+  sendAccountImportBatches,
+  splitAccountImportFiles,
+} from './accountImportBatches.ts';
 
 const MiB = 1024 * 1024;
 
@@ -96,4 +102,57 @@ test('a later preparation failure cancels the folder without any commit', async 
     break;
   }
   assert.deepEqual(phases, ['stage', 'stage-last', 'prepare', 'prepare', 'cancel']);
+});
+
+test('JSON selections exceeding 100 batches are rejected before sending any request', async () => {
+  const batches = Array.from({ length: MAX_FOLDER_IMPORT_BATCHES + 1 }, (_, i) => [{ name: `${i}.json` }]);
+  assert.equal(exceedsFolderImportBatchLimit(batches, true), true);
+  assert.equal(exceedsFolderImportBatchLimit(batches.slice(0, MAX_FOLDER_IMPORT_BATCHES), true), false);
+  assert.equal(exceedsFolderImportBatchLimit(batches, false), false);
+
+  let called = 0;
+  const send = async () => {
+    called++;
+    return new Response(null, { status: 204 });
+  };
+  await assert.rejects(async () => {
+    for await (const _ of sendAccountImportBatches(batches, true, makeForm, send)) {
+      // should not yield
+    }
+  }, /maximum batch count/);
+  assert.equal(called, 0);
+});
+
+test('mixed JSON and TXT imports stop when JSON fails and continue when JSON succeeds', async () => {
+  const order = [];
+  const failed = await runMixedAccountImport(
+    true,
+    true,
+    async () => {
+      order.push('json');
+      return false;
+    },
+    async () => {
+      order.push('txt');
+      return true;
+    },
+  );
+  assert.equal(failed, false);
+  assert.deepEqual(order, ['json']);
+
+  order.length = 0;
+  const succeeded = await runMixedAccountImport(
+    true,
+    true,
+    async () => {
+      order.push('json');
+      return true;
+    },
+    async () => {
+      order.push('txt');
+      return true;
+    },
+  );
+  assert.equal(succeeded, true);
+  assert.deepEqual(order, ['json', 'txt']);
 });

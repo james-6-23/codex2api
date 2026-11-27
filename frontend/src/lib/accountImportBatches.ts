@@ -1,5 +1,26 @@
 const MAX_BATCH_BYTES = 150 * 1024 * 1024;
 const MAX_BATCH_FILES = 100; // Leave room for non-file multipart fields, even with tiny files.
+export const MAX_FOLDER_IMPORT_BATCHES = 100;
+
+export function exceedsFolderImportBatchLimit(batches: readonly unknown[], isJSON: boolean): boolean {
+  return isJSON && batches.length > MAX_FOLDER_IMPORT_BATCHES;
+}
+
+export async function runMixedAccountImport(
+  hasJSON: boolean,
+  hasTXT: boolean,
+  importJSON: () => Promise<boolean>,
+  importTXT: () => Promise<boolean>,
+): Promise<boolean> {
+  if (hasJSON) {
+    const ok = await importJSON();
+    if (!ok) return false;
+  }
+  if (hasTXT) {
+    return await importTXT();
+  }
+  return true;
+}
 
 export function splitAccountImportFiles<T extends { size: number }>(files: readonly T[]): T[][] {
   const batches: T[][] = [];
@@ -31,6 +52,9 @@ export async function* sendAccountImportBatches<T>(
   send: (path: string, headers: Record<string, string>, body?: FormData) => Promise<Response>,
   onPreflight?: (progress: { current: number; total: number } | null) => void,
 ): AsyncGenerator<Response> {
+  if (exceedsFolderImportBatchLimit(batches, isJSON)) {
+    throw new Error(`JSON import exceeds maximum batch count (${batches.length} > ${MAX_FOLDER_IMPORT_BATCHES})`);
+  }
   if (!isJSON || batches.length < 2) {
     for (const batch of batches) yield await send(importPath, {}, makeForm(batch));
     return;
