@@ -38,7 +38,7 @@ export default function App() {
       <BrandingProvider>
         <ToastProvider>
           <RouteErrorBoundary>
-            <Suspense fallback={<StateShell variant="page" loading>{null}</StateShell>}>
+            <Suspense fallback={<StateShell variant="fullscreen" loading>{null}</StateShell>}>
               <Routes>
                 <Route path="/key-usage" element={<Navigate to="/key-usage/overview" replace />} />
                 <Route path="/key-usage/:view" element={<APIKeyUsagePortal />} />
@@ -61,39 +61,41 @@ function AdminApp() {
     <AuthGate>
       <VisibleChannelsProvider>
       <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/accounts" element={<Accounts />} />
-          <Route path="/accounts/grok" element={<Accounts />} />
-          <Route path="/accounts/antigravity" element={<Accounts />} />
-          <Route path="/accounts/claude" element={<Accounts />} />
-          <Route path="/accounts/kiro" element={<Accounts />} />
-          <Route path="/accounts/opencode" element={<Accounts />} />
-          <Route path="/accounts/invite" element={<Accounts />} />
-          <Route path="/api-keys" element={<APIKeys />} />
-          <Route path="/proxies" element={<Proxies />} />
-          <Route path="/images" element={<Navigate to="/images/studio" replace />} />
-          <Route path="/images/:view" element={<ImageStudio />} />
-          <Route path="/intelligence-check" element={<IntelligenceCheck />} />
-          <Route path="/quality-test" element={<QualityTest />} />
-          <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
-          <Route path="/prompt-filter/:view" element={<PromptFilter />} />
-          <Route path="/ops" element={<Navigate to="/ops/overview" replace />} />
-          <Route path="/ops/overview" element={<Operations />} />
-          <Route path="/ops/runtime" element={<RuntimeStatus />} />
-          <Route path="/ops/errors" element={<OperationsErrors />} />
-          <Route path="/ops/scheduler" element={<SchedulerBoard />} />
-          <Route path="/usage" element={<Usage />} />
-          <Route path="/channel-monitor" element={<ChannelMonitor />} />
-          <Route path="/model-pricing" element={<ModelPricing />} />
-          <Route path="/payload-rules" element={<Navigate to="/payload-rules/editor" replace />} />
-          <Route path="/payload-rules/:view" element={<PayloadRules />} />
-          <Route path="/theme" element={<ThemeSettings />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/docs" element={<Docs />} />
-          <Route path="/guide" element={<Navigate to="/docs" replace />} />
-          <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />
-        </Routes>
+        <Suspense fallback={<StateShell variant="page" loading>{null}</StateShell>}>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/accounts" element={<Accounts />} />
+            <Route path="/accounts/grok" element={<Accounts />} />
+            <Route path="/accounts/antigravity" element={<Accounts />} />
+            <Route path="/accounts/claude" element={<Accounts />} />
+            <Route path="/accounts/kiro" element={<Accounts />} />
+            <Route path="/accounts/opencode" element={<Accounts />} />
+            <Route path="/accounts/invite" element={<Accounts />} />
+            <Route path="/api-keys" element={<APIKeys />} />
+            <Route path="/proxies" element={<Proxies />} />
+            <Route path="/images" element={<Navigate to="/images/studio" replace />} />
+            <Route path="/images/:view" element={<ImageStudio />} />
+            <Route path="/intelligence-check" element={<IntelligenceCheck />} />
+            <Route path="/quality-test" element={<QualityTest />} />
+            <Route path="/prompt-filter" element={<Navigate to="/prompt-filter/overview" replace />} />
+            <Route path="/prompt-filter/:view" element={<PromptFilter />} />
+            <Route path="/ops" element={<Navigate to="/ops/overview" replace />} />
+            <Route path="/ops/overview" element={<Operations />} />
+            <Route path="/ops/runtime" element={<RuntimeStatus />} />
+            <Route path="/ops/errors" element={<OperationsErrors />} />
+            <Route path="/ops/scheduler" element={<SchedulerBoard />} />
+            <Route path="/usage" element={<Usage />} />
+            <Route path="/channel-monitor" element={<ChannelMonitor />} />
+            <Route path="/model-pricing" element={<ModelPricing />} />
+            <Route path="/payload-rules" element={<Navigate to="/payload-rules/editor" replace />} />
+            <Route path="/payload-rules/:view" element={<PayloadRules />} />
+            <Route path="/theme" element={<ThemeSettings />} />
+            <Route path="/settings" element={<Settings />} />
+            <Route path="/docs" element={<Docs />} />
+            <Route path="/guide" element={<Navigate to="/docs" replace />} />
+            <Route path="/api-reference" element={<Navigate to="/docs#model-api" replace />} />
+          </Routes>
+        </Suspense>
       </Layout>
       </VisibleChannelsProvider>
     </AuthGate>

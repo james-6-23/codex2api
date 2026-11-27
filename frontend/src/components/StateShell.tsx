@@ -5,6 +5,8 @@ import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { PixelLoader, ShimmerText } from '@/components/ui/beautiful'
 
+type StateShellVariant = 'page' | 'section' | 'fullscreen'
+
 interface StateShellProps {
   children: ReactNode
   loading?: boolean
@@ -12,7 +14,8 @@ interface StateShellProps {
   isEmpty?: boolean
   onRetry?: () => void
   action?: ReactNode
-  variant?: 'page' | 'section'
+  variant?: StateShellVariant
+  className?: string
   loadingTitle?: string
   loadingDescription?: string
   errorTitle?: string
@@ -29,25 +32,34 @@ function ShellFrame({
   role,
   ...rest
 }: {
-  variant: 'page' | 'section'
+  variant: StateShellVariant
   children: ReactNode
   className?: string
   role?: string
 } & HTMLAttributes<HTMLDivElement>) {
-  const minH = variant === 'page' ? 'min-h-[320px]' : 'min-h-[220px]'
+  const frameClass =
+    variant === 'fullscreen'
+      ? 'min-h-dvh w-full bg-background p-6'
+      : variant === 'page'
+        ? 'min-h-[max(320px,calc(100dvh-12rem))] rounded-2xl border border-border/80 bg-card/85 p-8 shadow-sm lg:min-h-[max(360px,calc(100dvh-6rem))]'
+        : 'min-h-[220px] rounded-2xl border border-border/80 bg-card/85 p-8 shadow-sm'
+  const glowClass =
+    variant === 'section'
+      ? 'bg-[radial-gradient(ellipse_at_top,color-mix(in_oklab,var(--color-primary)_8%,transparent),transparent_60%)]'
+      : 'bg-[radial-gradient(ellipse_at_center,color-mix(in_oklab,var(--color-primary)_8%,transparent),transparent_60%)]'
   return (
     <div
       role={role}
       {...rest}
       className={cn(
-        'relative flex flex-col items-center justify-center gap-3 overflow-hidden rounded-2xl border border-border/80 bg-card/85 p-8 text-center shadow-sm',
-        minH,
+        'relative flex flex-col items-center justify-center gap-3 overflow-hidden text-center',
+        frameClass,
         className,
       )}
     >
       <div
         aria-hidden
-        className="pointer-events-none absolute inset-0 bg-[radial-gradient(ellipse_at_top,color-mix(in_oklab,var(--color-primary)_8%,transparent),transparent_60%)]"
+        className={cn('pointer-events-none absolute inset-0', glowClass)}
       />
       <div className="relative z-10 flex w-full max-w-md flex-col items-center gap-3">
         {children}
@@ -64,6 +76,7 @@ export default function StateShell({
   onRetry,
   action,
   variant = 'section',
+  className,
   loadingTitle,
   loadingDescription,
   errorTitle,
@@ -80,7 +93,7 @@ export default function StateShell({
 
   if (loading) {
     return (
-      <ShellFrame variant={variant} role="status" aria-live="polite">
+      <ShellFrame variant={variant} className={className} role="status" aria-live="polite">
         <div className="flex size-14 items-center justify-center rounded-2xl border border-primary/15 bg-primary/[0.08] text-primary shadow-2xs ring-1 ring-inset ring-primary/10">
           <PixelLoader mode="drive" size="lg" />
         </div>
@@ -97,7 +110,7 @@ export default function StateShell({
 
   if (error) {
     return (
-      <ShellFrame variant={variant} role="alert">
+      <ShellFrame variant={variant} className={className} role="alert">
         <div className="flex size-14 items-center justify-center rounded-2xl bg-destructive/12 text-destructive ring-1 ring-destructive/15">
           <AlertCircle className="size-6" />
         </div>
@@ -115,7 +128,7 @@ export default function StateShell({
 
   if (isEmpty) {
     return (
-      <ShellFrame variant={variant}>
+      <ShellFrame variant={variant} className={className}>
         <div className="relative">
           <div className="flex size-16 items-center justify-center rounded-2xl bg-[hsl(var(--info-bg))] text-[hsl(var(--info))] ring-1 ring-[hsl(var(--info))]/15">
             {emptyIcon ?? <Inbox className="size-7" />}
