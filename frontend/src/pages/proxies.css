@@ -1,0 +1,339 @@
+.proxies-page {
+  container: proxies / inline-size;
+  --proxies-radius: var(--website-card-radius, 18px);
+  --proxies-field-radius: var(--website-field-radius, 11px);
+  --proxies-surface: color-mix(in oklab, var(--color-card) 82%, var(--color-background));
+  --proxies-ring: color-mix(in oklab, var(--color-border) 86%, transparent);
+  --proxies-line: color-mix(in oklab, var(--color-border) 74%, transparent);
+  --proxies-soft: color-mix(in oklab, var(--color-primary) 7%, var(--color-card));
+}
+
+/* ===== Two-Card Control Deck (Proxy Pool + Risk Engine) ===== */
+.proxies-control-deck {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.proxies-control-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 14px;
+  min-width: 0;
+  padding: 16px 18px;
+  border: 1px solid var(--proxies-ring);
+  border-radius: var(--proxies-radius);
+  background: var(--color-card);
+  box-shadow: var(--bui-shadow-card);
+  overflow: hidden;
+  transition: border-color 0.18s var(--bui-ease-out), box-shadow 0.2s var(--bui-ease-out);
+}
+.proxies-control-card[data-active='true'] {
+  border-color: color-mix(in oklab, var(--color-primary) 34%, var(--color-border));
+  background:
+    radial-gradient(ellipse 75% 95% at 100% 0%, color-mix(in oklab, var(--color-primary) 9%, transparent), transparent 72%),
+    var(--color-card);
+}
+.proxies-control-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.proxies-control-identity {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  min-width: 0;
+}
+.proxies-control-icon {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 11px;
+  border: 1px solid var(--proxies-line);
+  background: var(--proxies-surface);
+  color: var(--color-muted-foreground);
+}
+.proxies-control-card[data-active='true'] .proxies-control-icon {
+  border-color: color-mix(in oklab, var(--color-primary) 24%, transparent);
+  background: color-mix(in oklab, var(--color-primary) 11%, var(--color-card));
+  color: var(--color-primary);
+}
+.proxies-control-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  font-size: 13.5px;
+  font-weight: 640;
+  letter-spacing: -0.015em;
+  color: var(--color-foreground);
+}
+.proxies-control-desc {
+  margin-top: 3px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--color-muted-foreground);
+}
+.proxies-control-footer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--proxies-line);
+}
+
+/* ===== KPI Metric Cards ===== */
+.proxies-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+.proxies-metric-card {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px 18px 18px;
+  border: 1px solid var(--proxies-ring);
+  border-radius: var(--proxies-radius);
+  background: var(--color-card);
+  box-shadow: var(--bui-shadow-card);
+  text-align: left;
+  overflow: hidden;
+  transition: border-color 0.18s var(--bui-ease-out), box-shadow 0.2s var(--bui-ease-out), transform 0.2s var(--bui-ease-out);
+}
+button.proxies-metric-card {
+  cursor: pointer;
+}
+button.proxies-metric-card:hover {
+  border-color: color-mix(in oklab, var(--color-primary) 36%, var(--color-border));
+  box-shadow: var(--bui-shadow-raised);
+  transform: translateY(-2px);
+}
+.proxies-metric-card[data-active='true'] {
+  border-color: color-mix(in oklab, var(--color-primary) 52%, var(--color-border));
+  background:
+    radial-gradient(ellipse 85% 95% at 100% 0%, color-mix(in oklab, var(--color-primary) 11%, transparent), transparent 72%),
+    var(--color-card);
+  box-shadow: 0 0 0 1px color-mix(in oklab, var(--color-primary) 18%, transparent), var(--bui-shadow-card);
+}
+.proxies-metric-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.proxies-metric-icon {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  border: 1px solid var(--proxies-line);
+  background: var(--proxies-surface);
+  color: var(--color-muted-foreground);
+}
+.proxies-metric-card[data-tone='primary'] .proxies-metric-icon {
+  background: color-mix(in oklab, var(--color-primary) 10%, var(--color-card));
+  border-color: color-mix(in oklab, var(--color-primary) 22%, transparent);
+  color: var(--color-primary);
+}
+.proxies-metric-card[data-tone='success'] .proxies-metric-icon {
+  background: oklch(0.696 0.17 162.48 / 0.11);
+  border-color: oklch(0.696 0.17 162.48 / 0.24);
+  color: #059669;
+}
+.dark .proxies-metric-card[data-tone='success'] .proxies-metric-icon { color: #34d399; }
+.proxies-metric-card[data-tone='info'] .proxies-metric-icon {
+  background: oklch(0.685 0.169 237.323 / 0.11);
+  border-color: oklch(0.685 0.169 237.323 / 0.24);
+  color: #0284c7;
+}
+.dark .proxies-metric-card[data-tone='info'] .proxies-metric-icon { color: #38bdf8; }
+.proxies-metric-card[data-tone='warning'] .proxies-metric-icon {
+  background: oklch(0.769 0.188 70.08 / 0.12);
+  border-color: oklch(0.769 0.188 70.08 / 0.26);
+  color: #d97706;
+}
+.dark .proxies-metric-card[data-tone='warning'] .proxies-metric-icon { color: #fbbf24; }
+
+.proxies-metric-value {
+  font-size: 27px;
+  font-weight: 680;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.05;
+  letter-spacing: -0.04em;
+  color: var(--color-foreground);
+}
+.proxies-metric-label {
+  margin-top: 4px;
+  font-size: 12px;
+  font-weight: 540;
+  color: var(--color-muted-foreground);
+}
+.proxies-metric-bar {
+  position: absolute;
+  right: 18px;
+  bottom: 9px;
+  left: 18px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--color-muted) 85%, transparent);
+  overflow: hidden;
+}
+.proxies-metric-bar > i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--color-primary);
+  opacity: 0.72;
+  transition: width 0.35s var(--bui-ease-out);
+}
+.proxies-metric-card[data-tone='success'] .proxies-metric-bar > i { background: #10b981; }
+.proxies-metric-card[data-tone='info'] .proxies-metric-bar > i { background: #0ea5e9; }
+.proxies-metric-card[data-tone='warning'] .proxies-metric-bar > i { background: #f59e0b; }
+
+/* ===== Sticky Filter Toolbar ===== */
+.proxies-toolbar-shell {
+  position: sticky;
+  top: 10px;
+  z-index: 20;
+}
+.proxies-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  padding: 11px 14px;
+  border: 1px solid var(--proxies-ring);
+  border-radius: var(--proxies-radius);
+  background: color-mix(in oklab, var(--color-card) 88%, transparent);
+  box-shadow: var(--bui-shadow-raised);
+  backdrop-filter: blur(18px) saturate(1.3);
+}
+.proxies-search {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 210px;
+  flex: 1 1 240px;
+  max-width: 340px;
+}
+.proxies-status-rail {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 100%;
+  overflow-x: auto;
+  padding: 3px;
+  border-radius: 12px;
+  border: 1px solid color-mix(in oklab, var(--color-border) 74%, transparent);
+  background: color-mix(in oklab, var(--color-muted) 52%, transparent);
+  scrollbar-width: none;
+}
+.proxies-status-rail::-webkit-scrollbar { display: none; }
+.dark .proxies-status-rail {
+  background: oklch(1 0 0 / 0.04);
+  border-color: oklch(1 0 0 / 0.08);
+}
+.proxies-status-tab {
+  position: relative;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 31px;
+  padding: 0 10px;
+  border-radius: 9px;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 540;
+  color: var(--color-muted-foreground);
+  transition: color 0.16s var(--bui-ease-out), background 0.16s var(--bui-ease-out), box-shadow 0.16s;
+}
+.proxies-status-tab:hover { color: var(--color-foreground); }
+.proxies-status-tab[aria-selected='true'] {
+  background: var(--color-card);
+  color: var(--color-foreground);
+  font-weight: 620;
+  box-shadow: var(--bui-shadow-card);
+}
+
+/* ===== Table Card & Sticky Actions Column ===== */
+.proxies-table-card {
+  border: 1px solid var(--proxies-ring);
+  border-radius: var(--proxies-radius);
+  background: var(--color-card);
+  box-shadow: var(--bui-shadow-card);
+  overflow: hidden;
+}
+.proxies-table-card thead th {
+  background: color-mix(in oklab, var(--color-muted) 42%, var(--color-card));
+  font-size: 11px;
+  font-weight: 620;
+  letter-spacing: 0.02em;
+  color: var(--color-muted-foreground);
+}
+.proxies-sticky-actions-head {
+  position: sticky;
+  right: 0;
+  z-index: 12;
+  background: color-mix(in oklab, var(--color-muted) 48%, var(--color-card)) !important;
+  box-shadow: -8px 0 14px -10px oklch(0 0 0 / 0.18), inset 1px 0 0 var(--proxies-line);
+}
+.proxies-sticky-actions-cell {
+  position: sticky;
+  right: 0;
+  z-index: 10;
+  background: color-mix(in oklab, var(--color-card) 94%, transparent);
+  backdrop-filter: blur(10px);
+  box-shadow: -8px 0 14px -10px oklch(0 0 0 / 0.16), inset 1px 0 0 var(--proxies-line);
+}
+.proxies-table-card tbody tr:hover .proxies-sticky-actions-cell {
+  background: color-mix(in oklab, var(--color-muted) 40%, var(--color-card));
+}
+
+/* ===== Add Panel & Mobile Cards ===== */
+.proxies-add-card {
+  border: 1px solid color-mix(in oklab, var(--color-primary) 26%, var(--color-border));
+  border-radius: var(--proxies-radius);
+  background:
+    radial-gradient(ellipse 65% 55% at 100% 0%, color-mix(in oklab, var(--color-primary) 8%, transparent), transparent 72%),
+    var(--color-card);
+  box-shadow: var(--bui-shadow-raised);
+  overflow: hidden;
+}
+.proxies-mobile-card {
+  border: 1px solid var(--proxies-ring);
+  border-radius: 16px;
+  background: var(--color-card);
+  box-shadow: var(--bui-shadow-card);
+  padding: 15px;
+  transition: border-color 0.18s var(--bui-ease-out), box-shadow 0.18s;
+}
+.proxies-mobile-card[data-selected='true'] {
+  border-color: color-mix(in oklab, var(--color-primary) 48%, var(--color-border));
+  background: var(--proxies-soft);
+}
+
+/* ===== Responsive ===== */
+@container proxies (max-width: 960px) {
+  .proxies-control-deck { grid-template-columns: minmax(0, 1fr); }
+}
+@container proxies (max-width: 720px) {
+  .proxies-metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .proxies-toolbar-shell { position: static; }
+  .proxies-search { max-width: none; flex-basis: 100%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .proxies-page *, .proxies-page *::before { transition: none !important; animation: none !important; }
+}

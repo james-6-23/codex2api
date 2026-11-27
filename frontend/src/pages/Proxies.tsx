@@ -22,12 +22,16 @@ import {
   RotateCcw,
   ExternalLink,
   Settings2,
+  X,
+  Activity,
+  CheckCircle2,
 } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Select } from "@/components/ui/select";
+import { GlideMenu, PixelLoader, ShimmerText, ValuePill } from "@/components/ui/beautiful";
 import {
   Table,
   TableBody,
@@ -42,8 +46,8 @@ import ChannelLogo from "../components/ChannelLogo";
 import Modal from "../components/Modal";
 import PageHeader from "../components/PageHeader";
 import Pagination from "../components/Pagination";
-import { StatTile } from "../components/StatTile";
 import StatusBadge from "../components/StatusBadge";
+import "./proxies.css";
 import {
   DEFAULT_PAGE_SIZE_OPTIONS,
   usePersistedPageSize,
@@ -1224,99 +1228,46 @@ export default function Proxies() {
     { id: "untested", label: t("proxies.filterUntested"), count: counts.untested },
   ];
 
+  const addInputStats = useMemo(() => {
+    const lines = addInput.split("\n").map((s) => s.trim()).filter(Boolean);
+    const valid = lines.filter((line) => validateProxyInput(line)).length;
+    return { total: lines.length, valid };
+  }, [addInput]);
+
   return (
-    <div className="space-y-5 sm:space-y-6">
+    <div className="proxies-page space-y-5">
       {confirmDialog}
-      {/* Header */}
+      {/* Header — clean primary actions only */}
       <PageHeader
         title={t("nav.proxies")}
         description={t("proxies.description")}
         className="mb-0 sm:mb-0"
+        onRefresh={() => void reload()}
         actions={
           <>
-            <div className="flex h-9 shrink-0 items-center gap-2 rounded-lg border border-border/60 bg-muted/20 px-2.5" title={t("proxies.riskReferenceOnly")}>
-              <ShieldCheck className="size-3.5 text-primary" />
-              <span className="hidden text-[12px] font-medium text-muted-foreground sm:inline">
-                {activeRiskProfile ? `${t("proxies.riskEnabled")} · ${activeRiskProfile.name}` : t("proxies.riskDisabled")}
-              </span>
-              <Button type="button" variant="ghost" size="icon-xs" onClick={() => openRiskProfile(activeRiskProfile ?? undefined)} title={t("proxies.riskConfigure")}>
-                <Settings2 className="size-3.5" />
-              </Button>
-            </div>
-            <Button type="button" variant="outline" onClick={() => void startRiskScoring(pagedProxies.map((proxy) => proxy.id))} disabled={!activeRiskProfile || testsRunning || Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}>
-              <ShieldCheck className="size-4" />
-              {t("proxies.riskScoreCurrentPage")}
-            </Button>
-            <Button type="button" variant="outline" onClick={() => void startRiskScoring()} disabled={!activeRiskProfile || testsRunning || Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}>
-              <ShieldCheck className="size-4" />
-              {t("proxies.riskScoreAll")}
-            </Button>
-            <div
-              className="flex h-9 shrink-0 items-center gap-2.5 rounded-lg border border-border/60 bg-muted/20 px-3"
-              title={
-                !canEnable && !poolEnabled
-                  ? t("proxies.addFirstProxy")
-                  : t("proxies.poolFailClosedHint")
-              }
-            >
-              <span
-                className={`text-[13px] font-medium ${poolEnabled ? "text-foreground" : "text-muted-foreground"}`}
-              >
-                {poolEnabled
-                  ? t("proxies.poolEnabled")
-                  : t("proxies.poolDisabled")}
-              </span>
-              <Switch
-                checked={poolEnabled}
-                onCheckedChange={handleTogglePool}
-                disabled={!canEnable && !poolEnabled}
-              />
-            </div>
-
-            {selected.size > 0 && (
-              <Button variant="destructive" onClick={handleBatchDelete}>
-                <Trash2 className="size-4" />
-                {t("proxies.deleteSelected", { count: selected.size })}
-              </Button>
-            )}
-
             <Button
               variant="outline"
-              onClick={handleCleanErrors}
-              disabled={errorCount === 0 || cleaningErrors || testsRunning}
-              className="text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/10"
-            >
-              {cleaningErrors ? (
-                <Loader2 className="size-4 animate-spin" />
-              ) : (
-                <AlertTriangle className="size-4" />
-              )}
-              {cleaningErrors
-                ? t("proxies.cleaningErrors")
-                : t("proxies.cleanErrors", { count: errorCount })}
-            </Button>
-
-            <Button
-              variant="outline"
+              size="sm"
               onClick={() => setShowBalance(true)}
               disabled={
                 balanceSubmitting ||
                 !proxies.some((p) => p.enabled && p.test_status !== "error")
               }
             >
-              <Scale className="size-4" />
+              <Scale className="size-3.5" />
               {t("proxies.autoBalance")}
             </Button>
 
             <Button
               variant="outline"
+              size="sm"
               onClick={handleTestAll}
               disabled={proxies.length === 0 || testsRunning || cleaningErrors}
             >
               {testAllLoading ? (
-                <Loader2 className="size-4 animate-spin" />
+                <Loader2 className="size-3.5 animate-spin" />
               ) : (
-                <Zap className="size-4" />
+                <Zap className="size-3.5" />
               )}
               {testAllLoading
                 ? t("proxies.testingAllProgress", {
@@ -1327,33 +1278,165 @@ export default function Proxies() {
                 : t("proxies.testAll")}
             </Button>
 
-            <Button onClick={() => setShowAdd(!showAdd)}>
-              <Plus className="size-4" />
+            <Button size="sm" onClick={() => setShowAdd(!showAdd)}>
+              {showAdd ? <X className="size-3.5" /> : <Plus className="size-3.5" />}
               {t("proxies.addProxy")}
             </Button>
           </>
         }
       />
 
+      {/* Two-Card Control Deck: Proxy Pool Switch & Risk Scoring Engine */}
+      <div className="proxies-control-deck">
+        <section
+          className="proxies-control-card"
+          data-active={poolEnabled}
+          title={
+            !canEnable && !poolEnabled
+              ? t("proxies.addFirstProxy")
+              : t("proxies.poolFailClosedHint")
+          }
+        >
+          <div className="proxies-control-head">
+            <div className="proxies-control-identity">
+              <span className="proxies-control-icon" aria-hidden="true">
+                <Globe className="size-4" />
+              </span>
+              <div className="min-w-0">
+                <div className="proxies-control-title">
+                  <span>{poolEnabled ? t("proxies.poolEnabled") : t("proxies.poolDisabled")}</span>
+                  <ValuePill tone={poolEnabled ? "success" : "neutral"} dot pulse={poolEnabled}>
+                    {poolEnabled ? t("proxies.enabled") : t("proxies.disabled")}
+                  </ValuePill>
+                </div>
+                <p className="proxies-control-desc">
+                  {!canEnable && !poolEnabled
+                    ? t("proxies.addFirstProxy")
+                    : t("proxies.poolFailClosedHint")}
+                </p>
+              </div>
+            </div>
+            <Switch
+              checked={poolEnabled}
+              onCheckedChange={handleTogglePool}
+              disabled={!canEnable && !poolEnabled}
+            />
+          </div>
+          <div className="proxies-control-footer">
+            <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+              <span className="inline-flex items-center gap-1.5 font-mono tabular-nums">
+                <CheckCircle2 className="size-3.5 text-emerald-500" />
+                {counts.enabled} / {counts.total}
+              </span>
+              {errorCount > 0 ? (
+                <ValuePill tone="danger" dot>
+                  {t("proxies.filterError")} {errorCount}
+                </ValuePill>
+              ) : null}
+            </div>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleCleanErrors}
+              disabled={errorCount === 0 || cleaningErrors || testsRunning}
+              className="h-8 text-xs text-destructive hover:bg-destructive/10 hover:text-destructive dark:hover:bg-destructive/10"
+            >
+              {cleaningErrors ? (
+                <Loader2 className="size-3.5 animate-spin" />
+              ) : (
+                <AlertTriangle className="size-3.5" />
+              )}
+              {cleaningErrors
+                ? t("proxies.cleaningErrors")
+                : t("proxies.cleanErrors", { count: errorCount })}
+            </Button>
+          </div>
+        </section>
+
+        <section
+          className="proxies-control-card"
+          data-active={Boolean(activeRiskProfile)}
+          title={t("proxies.riskReferenceOnly")}
+        >
+          <div className="proxies-control-head">
+            <div className="proxies-control-identity">
+              <span className="proxies-control-icon" aria-hidden="true">
+                <ShieldCheck className="size-4" />
+              </span>
+              <div className="min-w-0">
+                <div className="proxies-control-title">
+                  <span>{t("proxies.riskScoreColumn")}</span>
+                  <ValuePill tone={activeRiskProfile ? "info" : "neutral"} dot pulse={Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}>
+                    {activeRiskProfile ? `${t("proxies.riskEnabled")} · ${activeRiskProfile.name}` : t("proxies.riskDisabled")}
+                  </ValuePill>
+                </div>
+                <p className="proxies-control-desc">{t("proxies.riskReferenceOnly")}</p>
+              </div>
+            </div>
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-8 shrink-0 gap-1.5 text-xs"
+              onClick={() => openRiskProfile(activeRiskProfile ?? undefined)}
+              title={t("proxies.riskConfigure")}
+            >
+              <Settings2 className="size-3.5" />
+              <span className="hidden sm:inline">{t("proxies.riskConfigure")}</span>
+            </Button>
+          </div>
+          <div className="proxies-control-footer">
+            <span className="text-[11px] text-muted-foreground">
+              {t("proxies.riskBuiltInEngine")}
+            </span>
+            <div className="flex flex-wrap items-center gap-1.5">
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => void startRiskScoring(pagedProxies.map((proxy) => proxy.id))}
+                disabled={!activeRiskProfile || testsRunning || Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}
+              >
+                <ShieldCheck className="size-3.5" />
+                {t("proxies.riskScoreCurrentPage")}
+              </Button>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-8 text-xs"
+                onClick={() => void startRiskScoring()}
+                disabled={!activeRiskProfile || testsRunning || Boolean(riskJob && ["queued", "running"].includes(riskJob.status))}
+              >
+                <ShieldCheck className="size-3.5" />
+                {t("proxies.riskScoreAll")}
+              </Button>
+            </div>
+          </div>
+        </section>
+      </div>
+
       {/* 批量测试进度条 */}
       {testAllLoading && testAllTotal > 0 ? (
-        <div className="rounded-xl border border-primary/20 bg-primary/5 p-3.5 space-y-2">
-          <div className="flex items-center justify-between text-xs font-semibold">
-            <span className="flex items-center gap-1.5 text-primary">
-              <Loader2 className="size-3.5 animate-spin" />
-              {t("proxies.testingAllProgress", {
+        <div className="rounded-2xl border border-primary/25 bg-primary/5 p-4 shadow-sm space-y-2.5">
+          <div className="flex items-center justify-between gap-3 text-xs font-semibold">
+            <PixelLoader
+              mode="drive"
+              size="sm"
+              label={t("proxies.testingAllProgress", {
                 current: testAllDone,
                 total: testAllTotal,
                 failed: testAllFailed,
               })}
-            </span>
-            <span className="tabular-nums text-muted-foreground">
+            />
+            <span className="font-mono tabular-nums text-muted-foreground">
               {Math.round((testAllDone / testAllTotal) * 100)}%
             </span>
           </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/10">
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-primary/12">
             <div
-              className="h-full bg-primary transition-all duration-300 rounded-full"
+              className="h-full rounded-full bg-primary transition-all duration-300"
               style={{ width: `${(testAllDone / testAllTotal) * 100}%` }}
             />
           </div>
@@ -1361,52 +1444,64 @@ export default function Proxies() {
       ) : null}
 
       {codexEgress?.resin_enabled ? (
-        <div className="flex items-start gap-2.5 rounded-xl border border-amber-500/30 bg-amber-500/5 p-3.5 text-xs leading-relaxed text-amber-800 dark:text-amber-200">
-          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+        <div className="flex items-start gap-2.5 rounded-2xl border border-amber-500/30 bg-amber-500/7 px-4 py-3 text-xs leading-relaxed text-amber-800 dark:text-amber-200">
+          <AlertTriangle className="mt-0.5 size-4 shrink-0" />
           <span>{t("proxies.resinOverrideNotice", { endpoint: codexEgress.resin_endpoint || "" })}</span>
         </div>
       ) : null}
 
       {riskJob && ["queued", "running"].includes(riskJob.status) ? (
-        <div className="rounded-xl border border-sky-500/20 bg-sky-500/5 p-3.5 space-y-2">
+        <div className="rounded-2xl border border-sky-500/25 bg-sky-500/6 p-4 shadow-sm space-y-2.5">
           <div className="flex items-center justify-between gap-3 text-xs font-semibold">
-            <span className="flex min-w-0 items-center gap-1.5 text-sky-700 dark:text-sky-300">
-              <Loader2 className="size-3.5 shrink-0 animate-spin" />
-              <span className="truncate">{t("proxies.riskScoringProgress", { done: riskJob.done, total: riskJob.total, success: riskJob.success, failed: riskJob.failed, skipped: riskJob.skipped, cache: riskJob.cache_hits })}</span>
+            <div className="flex min-w-0 items-center gap-2 text-sky-700 dark:text-sky-300">
+              <PixelLoader mode="orbit" size="sm" className="text-sky-500" />
+              <ShimmerText className="truncate font-semibold">
+                {t("proxies.riskScoringProgress", { done: riskJob.done, total: riskJob.total, success: riskJob.success, failed: riskJob.failed, skipped: riskJob.skipped, cache: riskJob.cache_hits })}
+              </ShimmerText>
               {riskJob.current ? (
                 <span className="truncate font-mono text-[11px] font-normal text-sky-700/80 dark:text-sky-300/80">· {t("proxies.riskScoringCurrent", { label: riskJob.current })}</span>
               ) : null}
-            </span>
+            </div>
             <Button type="button" variant="ghost" size="sm" onClick={() => void cancelRiskScoring()} className="h-7 shrink-0 text-xs">{t("proxies.riskCancel")}</Button>
           </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-sky-500/10">
-            <div className="h-full bg-sky-500 transition-all duration-300" style={{ width: `${riskJob.total > 0 ? Math.min(100, (riskJob.done / riskJob.total) * 100) : 0}%` }} />
+          <div className="h-1.5 w-full overflow-hidden rounded-full bg-sky-500/12">
+            <div className="h-full rounded-full bg-sky-500 transition-all duration-300" style={{ width: `${riskJob.total > 0 ? Math.min(100, (riskJob.done / riskJob.total) * 100) : 0}%` }} />
           </div>
         </div>
       ) : null}
 
       {/* Add Panel */}
       {showAdd && (
-        <Card className="py-0">
-          <CardContent className="p-5 space-y-4">
-            <div className="flex items-center justify-between">
-              <div>
-                <h4 className="text-base font-semibold text-foreground">
-                  {t("proxies.addProxyTitle")}
-                </h4>
-                <p className="mt-0.5 text-xs text-muted-foreground">
-                  {t("proxies.addProxyDesc")}
-                </p>
+        <div className="proxies-add-card animate-image-studio-fade-in">
+          <div className="p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-3">
+                <span className="flex size-9 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
+                  <Plus className="size-4" />
+                </span>
+                <div>
+                  <h4 className="text-sm font-semibold text-foreground">
+                    {t("proxies.addProxyTitle")}
+                  </h4>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {t("proxies.addProxyDesc")}
+                  </p>
+                </div>
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
+                {addInputStats.total > 0 ? (
+                  <ValuePill tone={addInputStats.valid === addInputStats.total ? "success" : "warning"}>
+                    {addInputStats.valid} / {addInputStats.total}
+                  </ValuePill>
+                ) : null}
                 <Button
                   type="button"
-                  variant="ghost"
+                  variant="outline"
                   size="sm"
-                  className="h-8 text-xs text-muted-foreground"
+                  className="h-8 text-xs"
                   onClick={() => setAddInput("socks5://127.0.0.1:1080\nhttp://user:pass@1.2.3.4:8080")}
                 >
-                  <RotateCcw className="size-3 mr-1" />
+                  <RotateCcw className="size-3" />
                   {t("proxies.insertTemplate")}
                 </Button>
                 {addInput ? (
@@ -1426,152 +1521,236 @@ export default function Proxies() {
               value={addInput}
               onChange={(e) => setAddInput(e.target.value)}
               placeholder={"http://user:pass@ip:port\nsocks5://ip:port"}
-              className="w-full h-32 px-3.5 py-2.5 text-xs rounded-xl border border-border bg-background text-foreground placeholder:text-muted-foreground resize-none outline-none focus:ring-2 focus:ring-primary/30 font-mono"
+              className="h-32 w-full resize-none rounded-xl border border-input bg-background/80 px-3.5 py-3 font-mono text-xs leading-relaxed text-foreground outline-none transition-[border-color,box-shadow] placeholder:text-muted-foreground focus:border-primary focus:ring-[3px] focus:ring-primary/15"
             />
-            <div className="flex items-center gap-3">
+            <div className="flex flex-col gap-2.5 sm:flex-row sm:items-center">
               <Input
                 type="text"
                 value={addLabel}
                 onChange={(e) => setAddLabel(e.target.value)}
                 placeholder={t("proxies.labelPlaceholder")}
-                className="flex-1 rounded-xl h-10"
+                className="h-10 flex-1 rounded-xl"
               />
               <Button
                 onClick={handleAdd}
                 disabled={addLoading || !addInput.trim()}
-                className="rounded-xl h-10 px-5"
+                className="h-10 rounded-xl px-5"
               >
+                {addLoading ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />}
                 {addLoading ? t("proxies.adding") : t("proxies.confirmAdd")}
               </Button>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       )}
 
-      {/* Stats （点击快捷筛选） */}
+      {/* KPI Overview Cards */}
       {loading ? (
-        <div
-          className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-4 sm:gap-4"
-          aria-busy="true"
-        >
+        <div className="proxies-metrics" aria-busy="true">
           {[0, 1, 2, 3].map((i) => (
             <div
               key={i}
-              className="h-[76px] animate-pulse rounded-lg border border-border bg-muted/40"
+              className="h-[104px] animate-pulse rounded-[18px] border border-border bg-muted/40"
             />
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 gap-3 min-[520px]:grid-cols-4 sm:gap-4">
-          <StatTile
-            label={t("proxies.totalProxies")}
-            value={counts.total}
-            icon={<Globe className="size-4" />}
-            active={statusFilter === "all"}
+        <div className="proxies-metrics">
+          <button
+            type="button"
+            className="proxies-metric-card"
+            data-tone="primary"
+            data-active={statusFilter === "all"}
             onClick={() => setStatusFilter("all")}
-          />
-          <StatTile
-            label={t("proxies.enabledCount")}
-            value={counts.enabled}
-            icon={<Power className="size-4" />}
-            tone="success"
-            active={statusFilter === "enabled"}
+          >
+            <span className="proxies-metric-top">
+              <span className="proxies-metric-icon"><Globe className="size-4" /></span>
+              <span className="font-mono text-[11px] text-muted-foreground">100%</span>
+            </span>
+            <div>
+              <div className="proxies-metric-value">{counts.total}</div>
+              <div className="proxies-metric-label">{t("proxies.totalProxies")}</div>
+            </div>
+            <span className="proxies-metric-bar" aria-hidden="true"><i style={{ width: counts.total > 0 ? "100%" : "0%" }} /></span>
+          </button>
+
+          <button
+            type="button"
+            className="proxies-metric-card"
+            data-tone="success"
+            data-active={statusFilter === "enabled"}
             onClick={() => setStatusFilter("enabled")}
-          />
-          <StatTile
-            label={t("proxies.boundAccounts")}
-            value={totalBoundAccounts}
-            icon={<Users className="size-4" />}
-            tone="info"
-          />
-          <StatTile
-            label={t("proxies.untestedCount")}
-            value={counts.untested}
-            icon={<Zap className="size-4" />}
-            tone="warning"
-            active={statusFilter === "untested"}
+          >
+            <span className="proxies-metric-top">
+              <span className="proxies-metric-icon"><Power className="size-4" /></span>
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {counts.total > 0 ? `${Math.round((counts.enabled / counts.total) * 100)}%` : "0%"}
+              </span>
+            </span>
+            <div>
+              <div className="proxies-metric-value">{counts.enabled}</div>
+              <div className="proxies-metric-label">{t("proxies.enabledCount")}</div>
+            </div>
+            <span className="proxies-metric-bar" aria-hidden="true">
+              <i style={{ width: `${counts.total > 0 ? (counts.enabled / counts.total) * 100 : 0}%` }} />
+            </span>
+          </button>
+
+          <div className="proxies-metric-card" data-tone="info">
+            <span className="proxies-metric-top">
+              <span className="proxies-metric-icon"><Users className="size-4" /></span>
+              <span className="font-mono text-[11px] text-muted-foreground">
+                <Activity className="size-3.5" />
+              </span>
+            </span>
+            <div>
+              <div className="proxies-metric-value">{totalBoundAccounts}</div>
+              <div className="proxies-metric-label">{t("proxies.boundAccounts")}</div>
+            </div>
+            <span className="proxies-metric-bar" aria-hidden="true">
+              <i style={{ width: totalBoundAccounts > 0 ? "100%" : "0%" }} />
+            </span>
+          </div>
+
+          <button
+            type="button"
+            className="proxies-metric-card"
+            data-tone="warning"
+            data-active={statusFilter === "untested"}
             onClick={() => setStatusFilter("untested")}
-          />
+          >
+            <span className="proxies-metric-top">
+              <span className="proxies-metric-icon"><Zap className="size-4" /></span>
+              <span className="font-mono text-[11px] text-muted-foreground">
+                {counts.total > 0 ? `${Math.round((counts.untested / counts.total) * 100)}%` : "0%"}
+              </span>
+            </span>
+            <div>
+              <div className="proxies-metric-value">{counts.untested}</div>
+              <div className="proxies-metric-label">{t("proxies.untestedCount")}</div>
+            </div>
+            <span className="proxies-metric-bar" aria-hidden="true">
+              <i style={{ width: `${counts.total > 0 ? (counts.untested / counts.total) * 100 : 0}%` }} />
+            </span>
+          </button>
         </div>
       )}
 
-      {/* Sticky toolbar */}
-      <div className="sticky top-2 z-20 -mx-1 px-1">
-        <div className="flex flex-col gap-3 rounded-xl border border-border/80 bg-card/95 p-2.5 shadow-sm backdrop-blur-xl sm:flex-row sm:items-center sm:justify-between sm:p-2 sm:pl-3">
-          <div className="relative min-w-0 flex-1 sm:max-w-xs">
+      {/* Sticky Filter & Search Command Bar */}
+      <div className="proxies-toolbar-shell">
+        <div className="proxies-toolbar">
+          <div className="proxies-search">
             <Search className="pointer-events-none absolute left-3 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
             <Input
-              className="h-9 border-transparent bg-muted/40 pl-9 text-sm shadow-none focus-visible:bg-background"
+              className="h-9 rounded-xl border-input/80 bg-background/70 pl-9 pr-8 text-xs shadow-none focus-visible:bg-background"
               value={query}
               onChange={(e) => setQuery(e.target.value)}
               placeholder={t("proxies.searchPlaceholder")}
             />
+            {query ? (
+              <button
+                type="button"
+                onClick={() => setQuery("")}
+                className="absolute right-2 top-1/2 inline-flex size-5 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                aria-label={t("proxies.clearAll")}
+              >
+                <X className="size-3.5" />
+              </button>
+            ) : null}
           </div>
 
-          <div
-            className="flex max-w-full gap-0.5 overflow-x-auto rounded-xl bg-muted/50 p-0.5 [-ms-overflow-style:none] [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
-            role="tablist"
-          >
-            {statusFilterItems.map((item) => {
-              const active = statusFilter === item.id;
-              return (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={active}
-                  onClick={() => setStatusFilter(item.id)}
-                  className={cn(
-                    "inline-flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs font-semibold transition-all",
-                    active
-                      ? "bg-background text-foreground shadow-sm"
-                      : "text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                  <span
-                    className={cn(
-                      "tabular-nums rounded-md px-1 py-px text-[10px] font-bold",
-                      active
-                        ? item.id === "error" && item.count > 0
-                          ? "bg-destructive/20 text-destructive"
-                          : "bg-primary/10 text-primary"
-                        : item.id === "error" && item.count > 0
-                          ? "bg-destructive/10 text-destructive"
-                          : "bg-background/60 text-muted-foreground",
-                    )}
+          <div className="flex flex-wrap items-center gap-2">
+            <GlideMenu
+              className="proxies-status-rail"
+              indicatorClassName="rounded-[9px]"
+            >
+              {statusFilterItems.map((item) => {
+                const active = statusFilter === item.id;
+                const dotClass =
+                  item.id === "enabled"
+                    ? "bg-emerald-500"
+                    : item.id === "error"
+                      ? "bg-destructive"
+                      : item.id === "untested"
+                        ? "bg-amber-500"
+                        : item.id === "disabled"
+                          ? "bg-muted-foreground/50"
+                          : "";
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    data-glide-item="true"
+                    aria-selected={active}
+                    onClick={() => setStatusFilter(item.id)}
+                    className="proxies-status-tab"
                   >
-                    {item.count}
-                  </span>
-                </button>
-              );
-            })}
+                    {dotClass ? <span className={cn("size-1.5 shrink-0 rounded-full", dotClass)} /> : null}
+                    <span>{item.label}</span>
+                    <span
+                      className={cn(
+                        "tabular-nums rounded-md px-1.5 py-px font-mono text-[10px] font-semibold",
+                        active
+                          ? item.id === "error" && item.count > 0
+                            ? "bg-destructive/15 text-destructive"
+                            : "bg-primary/12 text-primary"
+                          : item.id === "error" && item.count > 0
+                            ? "bg-destructive/10 text-destructive"
+                            : "bg-muted/80 text-muted-foreground",
+                      )}
+                    >
+                      {item.count}
+                    </span>
+                  </button>
+                );
+              })}
+            </GlideMenu>
+            <Select
+              compact
+              value={riskFilter}
+              onValueChange={(value) => {
+                setRiskFilter(value as RiskFilter);
+                setPage(1);
+              }}
+              className="w-auto shrink-0"
+              triggerClassName="h-9 shrink-0 rounded-xl text-xs font-medium"
+              options={[
+                { value: "all", label: t("proxies.riskFilterAll") },
+                { value: "unscored", label: t("proxies.riskFilterUnscored") },
+                { value: "low", label: t("proxies.riskFilterLow") },
+                { value: "medium", label: t("proxies.riskFilterMedium") },
+                { value: "high", label: t("proxies.riskFilterHigh") },
+                { value: "very_high", label: t("proxies.riskFilterVeryHigh") },
+                { value: "stale", label: t("proxies.riskFilterStale") },
+                { value: "error", label: t("proxies.riskFilterError") },
+              ]}
+            />
           </div>
-          <Select
-            compact
-            value={riskFilter}
-            onValueChange={(value) => {
-              setRiskFilter(value as RiskFilter);
-              setPage(1);
-            }}
-            className="w-auto shrink-0"
-            triggerClassName="h-8 shrink-0 text-xs font-medium"
-            options={[
-              { value: "all", label: t("proxies.riskFilterAll") },
-              { value: "unscored", label: t("proxies.riskFilterUnscored") },
-              { value: "low", label: t("proxies.riskFilterLow") },
-              { value: "medium", label: t("proxies.riskFilterMedium") },
-              { value: "high", label: t("proxies.riskFilterHigh") },
-              { value: "very_high", label: t("proxies.riskFilterVeryHigh") },
-              { value: "stale", label: t("proxies.riskFilterStale") },
-              { value: "error", label: t("proxies.riskFilterError") },
-            ]}
-          />
         </div>
       </div>
 
+      {/* Inline Selection Action Strip */}
+      {selected.size > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/25 bg-primary/6 px-4 py-2.5 animate-image-studio-fade-in">
+          <div className="flex items-center gap-2 text-xs font-medium text-foreground">
+            <ValuePill tone="primary">{selected.size}</ValuePill>
+            <span>{t("proxies.deleteSelected", { count: selected.size })}</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button variant="ghost" size="sm" className="h-8 text-xs" onClick={() => setSelected(new Set())}>
+              {t("common.cancel")}
+            </Button>
+            <Button variant="destructive" size="sm" className="h-8 text-xs" onClick={handleBatchDelete}>
+              <Trash2 className="size-3.5" />
+              {t("proxies.deleteSelected", { count: selected.size })}
+            </Button>
+          </div>
+        </div>
+      )}
+
       {/* Table */}
-      <Card className="py-0">
+      <Card className="proxies-table-card gap-0 py-0">
         <CardContent className="p-0">
           {loading ? (
             <div className="space-y-2 p-4" aria-busy="true">
@@ -1584,22 +1763,25 @@ export default function Proxies() {
               ))}
             </div>
           ) : filteredProxies.length === 0 ? (
-            <div className="text-center py-16 text-muted-foreground">
-              <Globe className="size-12 mx-auto mb-3 opacity-30" />
-              <p className="text-sm font-medium">{t("proxies.noProxies")}</p>
-              <p className="text-xs mt-1">{t("proxies.noProxiesDesc")}</p>
+            <div className="flex flex-col items-center justify-center gap-2.5 px-4 py-16 text-center text-muted-foreground">
+              <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-muted/35 text-muted-foreground/80 shadow-sm">
+                <Globe className="size-5" />
+              </span>
+              <p className="text-sm font-semibold text-foreground">{t("proxies.noProxies")}</p>
+              <p className="max-w-sm text-xs leading-relaxed">{t("proxies.noProxiesDesc")}</p>
             </div>
           ) : (
             <>
               {/* Mobile cards */}
-              <div className="grid gap-3 p-3 lg:hidden">
+              <div className="grid gap-3 p-3.5 lg:hidden">
                 {pagedProxies.map((p) => {
                   const isTesting = testingIds.has(p.id);
                   const scheme = getProxyScheme(p.url);
                   return (
                     <div
                       key={p.id}
-                      className="rounded-xl border border-border bg-background/70 p-3.5 shadow-sm"
+                      data-selected={selected.has(p.id)}
+                      className="proxies-mobile-card"
                     >
                       <div className="flex items-start gap-2.5">
                         <input
@@ -1785,7 +1967,7 @@ export default function Proxies() {
                       <TableHead className="w-[250px] min-w-[250px]">{t("proxies.riskFeaturesColumn")}</TableHead>
                       <TableHead className="w-[270px] min-w-[270px]">{t("proxies.riskISPColumn")}</TableHead>
                       <TableHead className="w-[180px] min-w-[180px]">{t("proxies.riskRecommendationColumn")}</TableHead>
-                      <TableHead className="w-[270px] min-w-[270px] text-right">
+                      <TableHead className="proxies-sticky-actions-head w-[270px] min-w-[270px] text-right">
                         {t("proxies.colActions")}
                       </TableHead>
                     </TableRow>
@@ -1905,7 +2087,7 @@ export default function Proxies() {
                             )}
                           </TableCell>
                           <ProxyRiskScoreTableCells score={p.risk_score} />
-                          <TableCell className="w-[270px] min-w-[270px] max-w-[270px] overflow-hidden">
+                          <TableCell className="proxies-sticky-actions-cell w-[270px] min-w-[270px] max-w-[270px] overflow-hidden">
                             <div className="flex flex-nowrap items-center justify-end gap-1">
                               <Button
                                 variant="outline"
@@ -2210,12 +2392,13 @@ export default function Proxies() {
                   key={key || "all"}
                   type="button"
                   onClick={() => setBalanceChannel(key)}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                  className={`inline-flex items-center gap-1.5 rounded-xl border px-3 py-1.5 text-xs font-semibold transition-all ${
                     balanceChannel === key
-                      ? "border-primary/30 bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:bg-muted/50 hover:text-foreground"
+                      ? "border-primary/40 bg-primary/10 text-primary shadow-2xs"
+                      : "border-border bg-muted/20 text-muted-foreground hover:bg-muted/50 hover:text-foreground"
                   }`}
                 >
+                  {key ? <ChannelLogo channel={key} size={14} /> : null}
                   {label}
                 </button>
               ))}
@@ -2432,9 +2615,8 @@ export default function Proxies() {
 
             <div className="max-h-[min(420px,50dvh)] overflow-y-auto">
               {accountsLoading ? (
-                <div className="flex items-center justify-center gap-2 py-16 text-sm text-muted-foreground">
-                  <Loader2 className="size-4 animate-spin" />
-                  {t("proxies.bindLoadingAccounts")}
+                <div className="flex items-center justify-center py-16 text-sm text-muted-foreground">
+                  <PixelLoader mode="drive" size="sm" label={t("proxies.bindLoadingAccounts")} />
                 </div>
               ) : bindFilteredAccounts.length === 0 ? (
                 <div className="px-5 py-14 text-center text-sm text-muted-foreground sm:px-6">
