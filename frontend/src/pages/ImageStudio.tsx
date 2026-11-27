@@ -27,6 +27,7 @@ import {
 import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
+import { GlideMenu, PixelLoader, ShimmerText, ValuePill } from '@/components/ui/beautiful'
 import {
   ArrowRight,
   ArrowUpRight,
@@ -1801,9 +1802,18 @@ export default function ImageStudio() {
           <p>{t('images.workspace.description')}</p>
         </div>
         <div className="studio-header-note">
-          <span><Images className="size-3.5" />{t('images.imageCount', { count: assetTotal })}</span>
-          <span className="h-4 w-px bg-border" aria-hidden="true" />
-          <span><Sparkles className="size-3.5 text-primary" />{t('images.workspace.headerNote')}</span>
+          <ValuePill tone="neutral">
+            <span className="inline-flex items-center gap-1.5">
+              <Images className="size-3.5" />
+              {t('images.imageCount', { count: assetTotal })}
+            </span>
+          </ValuePill>
+          <ValuePill tone="primary">
+            <span className="inline-flex items-center gap-1.5">
+              <Sparkles className="size-3.5" />
+              {t('images.workspace.headerNote')}
+            </span>
+          </ValuePill>
         </div>
       </header>
       <ImageStudioTabs activeView={activeView} />
@@ -1899,16 +1909,30 @@ function ImageStudioTabs({ activeView }: { activeView: ImageView }) {
     },
   ]
   return (
-    <nav className="studio-navigation" aria-label={t('images.title')}>
-      {tabs.map(tab => {
-        const Icon = tab.icon
-        return (
-          <NavLink key={tab.view} to={tab.to} aria-current={activeView === tab.view ? 'page' : undefined} className="studio-nav-link">
-            <Icon className="size-4" /><span>{tab.label}</span>
-          </NavLink>
-        )
-      })}
-    </nav>
+    <div className="studio-navigation-wrap">
+      <GlideMenu
+        as="nav"
+        className="studio-navigation"
+        indicatorClassName="rounded-[9px]"
+        aria-label={t('images.title')}
+      >
+        {tabs.map(tab => {
+          const Icon = tab.icon
+          return (
+            <NavLink
+              key={tab.view}
+              to={tab.to}
+              data-glide-item="true"
+              aria-current={activeView === tab.view ? 'page' : undefined}
+              className="studio-nav-link"
+            >
+              <Icon className="size-3.5 shrink-0" />
+              <span>{tab.label}</span>
+            </NavLink>
+          )
+        })}
+      </GlideMenu>
+    </div>
   )
 }
 
@@ -1986,16 +2010,20 @@ function StudioCanvas({
         )}
 
         {currentJob && busy && (
-          <div className="flex w-full max-w-md flex-col items-center gap-5 py-5 animate-image-studio-fade-in" role="status">
-            <div className="image-studio-checkerboard relative aspect-[4/3] w-full overflow-hidden rounded-2xl border border-border">
-              <div className="absolute inset-y-0 w-1/2 animate-image-studio-shimmer bg-gradient-to-r from-transparent via-primary/8 to-transparent" />
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 bg-background/40">
-                <div className="flex size-14 items-center justify-center rounded-2xl border border-primary/20 bg-card shadow-sm"><Loader2 className="size-6 animate-spin text-primary" /></div>
-                <div className="text-center">
-                  <h3 className="text-base font-semibold">{stageLabel}</h3>
-                  <p className="mt-2 text-xs tabular-nums text-muted-foreground" aria-live="off">{elapsedSeconds !== null ? t('images.elapsedSeconds', { seconds: elapsedSeconds }) : t('images.canvasGeneratingHint')}</p>
+          <div className="flex w-full max-w-md flex-col items-center gap-4 py-5 animate-image-studio-fade-in" role="status">
+            <div className="studio-busy-stage">
+              <div className="absolute inset-y-0 w-1/2 animate-image-studio-shimmer bg-gradient-to-r from-transparent via-primary/10 to-transparent" />
+              <div className="studio-busy-loader-shell relative">
+                <PixelLoader mode="orbit" size="lg" />
+              </div>
+              <div className="relative flex flex-col items-center gap-2 text-center">
+                <ShimmerText className="text-base font-semibold">{stageLabel}</ShimmerText>
+                <p className="text-xs tabular-nums text-muted-foreground" aria-live="off">
+                  {elapsedSeconds !== null ? t('images.elapsedSeconds', { seconds: elapsedSeconds }) : t('images.canvasGeneratingHint')}
+                </p>
+                <div className="mt-1 h-1.5 w-36 overflow-hidden rounded-full bg-muted">
+                  <div className="h-full w-1/2 animate-image-studio-progress rounded-full bg-primary/80" />
                 </div>
-                <div className="h-1 w-32 overflow-hidden rounded-full bg-muted"><div className="h-full w-1/2 animate-image-studio-progress rounded-full bg-primary/70" /></div>
               </div>
             </div>
             <p className="line-clamp-2 max-w-sm text-center text-xs leading-relaxed text-muted-foreground">{prompt}</p>
@@ -2577,7 +2605,7 @@ function AssetPreviewDialog({ asset, imageURL, prompt, open, position, count, on
         <Button type="button" size="icon-sm" variant="ghost" onClick={onClose} className="absolute right-3 top-3 z-10" aria-label={t('common.close')}><X className="size-4" /></Button>
         <div className="studio-preview-layout">
           <div className="studio-preview-image">
-            {imageURL ? <img key={imageURL} src={imageURL} alt={prompt || asset.filename} /> : <Loader2 className="size-6 animate-spin text-white/60" />}
+            {imageURL ? <img key={imageURL} src={imageURL} alt={prompt || asset.filename} /> : <PixelLoader mode="orbit" size="lg" className="text-white" />}
           </div>
           <aside className="studio-preview-info">
             <h3>{t('images.collections.creationDetails')}</h3>

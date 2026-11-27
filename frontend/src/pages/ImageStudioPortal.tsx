@@ -25,9 +25,12 @@ import {
   LogIn,
   LogOut,
   Pencil,
+  RectangleHorizontal,
+  RectangleVertical,
   RefreshCw,
   ShieldCheck,
   Sparkles,
+  Square,
   Trash2,
   Upload,
   X,
@@ -39,7 +42,6 @@ import type { CreateImageJobPayload, ImageAsset, ImageGenerationJob, ImageStudio
 import { getErrorMessage } from '../utils/error'
 import { formatBeijingTime } from '../utils/time'
 import { CinematicThemeSwitcher } from '@/components/ui/cinematic-theme-switcher'
-import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
 import {
@@ -53,6 +55,7 @@ import { Input } from '@/components/ui/input'
 import { Select } from '@/components/ui/select'
 import { cn } from '@/lib/utils'
 import { SegmentedPillGroup } from '@/components/ui/segmented-pill-group'
+import { GlideMenu, PixelLoader, ShimmerText, ValuePill } from '@/components/ui/beautiful'
 import { StudioArtwork, type StudioScene } from '@/components/image-studio/StudioArtwork'
 import { PortalQuota } from '@/components/image-studio/PortalQuota'
 import './image-studio-portal.css'
@@ -86,17 +89,44 @@ const PORTAL_INSPIRATIONS: Array<{ scene: StudioScene; size: string }> = [
   { scene: 'architecture', size: '864x1536' },
 ]
 
+const PORTAL_QUICK_RATIOS = [
+  { id: 'auto', size: 'auto', labelKey: 'images.aspect.auto', icon: Sparkles },
+  { id: '1:1', size: '1024x1024', labelKey: 'images.aspect.square', icon: Square },
+  { id: '16:9', size: '1536x864', labelKey: 'images.aspect.landscape', icon: RectangleHorizontal },
+  { id: '9:16', size: '864x1536', labelKey: 'images.aspect.portrait', icon: RectangleVertical },
+] as const
+
+function portalRatioForSize(size: string): string {
+  switch (size) {
+    case '1024x1024':
+    case '2048x2048':
+      return '1:1'
+    case '1536x864':
+    case '2560x1440':
+      return '16:9'
+    case '864x1536':
+    case '1440x2560':
+      return '9:16'
+    default:
+      return 'auto'
+  }
+}
+
 function PortalInspiration({ onSelect }: { onSelect: (scene: StudioScene, size: string) => void }) {
   const { t } = useTranslation()
   return (
-    <div className="portal-inspiration">
+    <div className="portal-inspiration animate-image-studio-fade-in">
       <span className="portal-eyebrow"><Lightbulb className="size-3.5" />{t('imageStudioPortal.design.inspirationEyebrow')}</span>
       <h2>{t('imageStudioPortal.design.inspirationTitle')}</h2>
       <p>{t('imageStudioPortal.design.inspirationDesc')}</p>
       <div className="portal-inspiration-grid">
         {PORTAL_INSPIRATIONS.map(({ scene, size }) => (
           <Button key={scene} type="button" variant="ghost" className="portal-inspiration-card" onClick={() => onSelect(scene, size)}>
-            <div className="portal-inspiration-art"><StudioArtwork scene={scene} className="size-full" /><span><ArrowUpRight className="size-4" /></span></div>
+            <div className="portal-inspiration-art">
+              <StudioArtwork scene={scene} className="size-full" />
+              <span className="portal-inspiration-size">{size.replace('x', '×')}</span>
+              <span className="portal-inspiration-arrow"><ArrowUpRight className="size-3.5" /></span>
+            </div>
             <span className="portal-inspiration-name">{t(`imageStudioPortal.design.inspiration.${scene}.title`)}</span>
             <span className="portal-inspiration-note">{t(`imageStudioPortal.design.inspiration.${scene}.description`)}</span>
           </Button>
@@ -173,16 +203,16 @@ async function assetToDataURL(apiKey: string, asset: ImageAsset): Promise<string
   return blobToDataURL(blob)
 }
 
-function jobStatusClass(status: string): string {
+function jobStatusTone(status: string): 'success' | 'danger' | 'info' | 'neutral' {
   switch (status) {
     case 'succeeded':
-      return 'border-transparent bg-emerald-500/14 text-emerald-600 dark:bg-emerald-500/20 dark:text-emerald-300'
+      return 'success'
     case 'failed':
-      return 'border-transparent bg-red-500/14 text-red-600 dark:bg-red-500/20 dark:text-red-300'
+      return 'danger'
     case 'running':
-      return 'border-transparent bg-blue-500/14 text-blue-600 dark:bg-blue-500/20 dark:text-blue-300'
+      return 'info'
     default:
-      return 'border-transparent bg-slate-500/14 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300'
+      return 'neutral'
   }
 }
 
@@ -203,7 +233,12 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
     { view: 'gallery' as const, label: t('imageStudioPortal.views.gallery'), icon: Images, to: '/image-studio/gallery' },
   ]
   return (
-    <nav className={cn('portal-navigation', className)} aria-label={t('imageStudioPortal.title')}>
+    <GlideMenu
+      as="nav"
+      className={cn('portal-navigation', className)}
+      indicatorClassName="rounded-[9px]"
+      aria-label={t('imageStudioPortal.title')}
+    >
       {tabs.map((tab) => {
         const Icon = tab.icon
         const active = activeView === tab.view
@@ -211,6 +246,7 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
           <NavLink
             key={tab.view}
             to={tab.to}
+            data-glide-item="true"
             aria-current={active ? 'page' : undefined}
             className="portal-nav-link"
           >
@@ -219,7 +255,7 @@ function PortalTabs({ activeView, className }: { activeView: PortalView; classNa
           </NavLink>
         )
       })}
-    </nav>
+    </GlideMenu>
   )
 }
 
@@ -832,13 +868,13 @@ export default function ImageStudioPortal() {
 
   if (bootstrapping) {
     return (
-      <div className="flex min-h-dvh items-center justify-center bg-background text-foreground">
-        <div className="flex flex-col items-center gap-3 text-muted-foreground">
-          <div className="relative">
-            <div className="absolute inset-0 animate-ping rounded-full bg-primary/20" />
-            <Loader2 className="relative size-8 animate-spin text-primary" />
+      <div className="portal-login-shell">
+        <div aria-hidden="true" className="portal-login-grid" />
+        <div className="relative flex flex-col items-center gap-4">
+          <div className="portal-busy-loader-shell">
+            <PixelLoader mode="orbit" size="lg" />
           </div>
-          <div className="text-sm">{t('common.loading')}</div>
+          <ShimmerText className="text-sm font-medium">{t('common.loading')}</ShimmerText>
         </div>
       </div>
     )
@@ -846,84 +882,86 @@ export default function ImageStudioPortal() {
 
   if (!activeAPIKey) {
     return (
-      <div className="relative flex min-h-dvh items-center justify-center overflow-hidden bg-background px-4 py-10 text-foreground">
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-0 opacity-80 [background:radial-gradient(55%_45%_at_50%_-8%,color-mix(in_oklab,var(--color-primary)_18%,transparent),transparent_72%)]"
-        />
-        <div
-          aria-hidden="true"
-          className="pointer-events-none absolute inset-x-0 bottom-0 h-1/3 opacity-40 [background:radial-gradient(50%_80%_at_50%_100%,color-mix(in_oklab,var(--color-primary)_10%,transparent),transparent)]"
-        />
+      <div className="portal-login-shell">
+        <div aria-hidden="true" className="portal-login-grid" />
         <div className="absolute right-4 top-4 z-10">{toolbar}</div>
-        <Card className="relative w-full max-w-md border-border/70 shadow-2xl shadow-primary/5">
-          <CardContent className="p-7 sm:p-8">
-            <div className="mb-7 flex flex-col items-center text-center">
-              <div className="relative">
-                <div className="absolute -inset-3 rounded-3xl bg-primary/10 blur-xl" />
+        <div className="portal-login-card animate-image-studio-fade-in">
+          <div className="portal-login-showcase" aria-hidden="true">
+            <div className="portal-login-art"><StudioArtwork scene="landscape" /></div>
+            <div className="portal-login-art"><StudioArtwork scene="product" /></div>
+            <div className="portal-login-art"><StudioArtwork scene="architecture" /></div>
+          </div>
+          <div className="p-7 sm:p-8">
+            <div className="mb-6 flex flex-col items-center text-center">
+              <div className="relative -mt-12 mb-3">
+                <div className="absolute -inset-2 rounded-2xl bg-primary/15 blur-lg" />
                 <img
                   src={logoSrc}
                   alt={siteName}
-                  className="relative size-16 rounded-2xl object-cover shadow-md ring-1 ring-border/60"
+                  className="relative size-14 rounded-2xl border-2 border-card object-cover shadow-lg ring-1 ring-border/70"
                 />
               </div>
-              <h1 className="mt-5 text-xl font-semibold tracking-tight text-foreground">
+              <span className="portal-eyebrow mb-2">
+                <Sparkles className="size-3" />
+                {siteName}
+              </span>
+              <h1 className="text-xl font-semibold tracking-tight text-foreground">
                 {t('imageStudioPortal.loginTitle')}
               </h1>
-              <p className="mt-1.5 max-w-sm text-sm leading-relaxed text-muted-foreground">
+              <p className="mt-1.5 max-w-sm text-[13px] leading-relaxed text-muted-foreground">
                 {t('imageStudioPortal.loginSubtitle')}
               </p>
             </div>
             <form onSubmit={handleLogin} className="space-y-4">
               <div className="relative">
-                <KeyRound className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
+                <KeyRound className="pointer-events-none absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
                 <Input
                   type={showKey ? 'text' : 'password'}
                   value={apiKeyInput}
                   onChange={(event) => setAPIKeyInput(event.target.value)}
                   placeholder={t('imageStudioPortal.keyPlaceholder')}
-                  className="h-11 pl-9 pr-10 font-mono"
+                  className="h-11 rounded-xl pl-10 pr-10 font-mono text-[13px]"
                   autoComplete="off"
                   autoFocus
                 />
                 <button
                   type="button"
-                  className="absolute right-2 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
+                  className="absolute right-2 top-1/2 inline-flex size-7 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
                   onClick={() => setShowKey((v) => !v)}
                 >
                   {showKey ? <EyeOff className="size-4" /> : <Eye className="size-4" />}
                 </button>
               </div>
-              <label className="flex cursor-pointer items-start gap-2.5 select-none">
+              <label className="flex cursor-pointer items-start gap-2.5 rounded-xl border border-border/60 bg-muted/25 px-3 py-2.5 select-none transition-colors hover:border-border">
                 <input
                   type="checkbox"
                   checked={remember}
                   onChange={(e) => setRemember(e.target.checked)}
                   className="mt-0.5 size-4 shrink-0 cursor-pointer rounded border-border accent-primary"
                 />
-                <span className="text-sm">
+                <span className="text-xs leading-relaxed">
                   <span className="font-medium text-foreground">{t('imageStudioPortal.rememberKey')}</span>
-                  <span className="mt-0.5 block text-xs text-muted-foreground">
+                  <span className="mt-0.5 block text-[11px] text-muted-foreground">
                     {t('imageStudioPortal.rememberHint')}
                   </span>
                 </span>
               </label>
               {loginError ? (
-                <div className="rounded-lg border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-3.5 py-2.5 text-xs leading-relaxed text-destructive animate-image-studio-shake">
                   {loginError}
                 </div>
               ) : null}
-              <Button type="submit" className="h-11 w-full" disabled={loginLoading}>
+              <Button type="submit" className="portal-generate h-11 w-full" disabled={loginLoading}>
                 {loginLoading ? <Loader2 className="size-4 animate-spin" /> : <LogIn className="size-4" />}
                 {t('imageStudioPortal.loginButton')}
               </Button>
             </form>
-            <p className="mt-5 flex items-center justify-center gap-1.5 text-center text-xs text-muted-foreground">
-              <ShieldCheck className="size-3.5" />
+            <p className="mt-5 flex items-center justify-center gap-1.5 text-center text-[11px] text-muted-foreground">
+              <ShieldCheck className="size-3.5 text-primary/80" />
               {t('imageStudioPortal.loginHint')}
             </p>
-          </CardContent>
-        </Card>
+          </div>
+        </div>
       </div>
     )
   }
@@ -936,9 +974,9 @@ export default function ImageStudioPortal() {
       <header className="portal-header">
         <div className="portal-header-inner">
           <div className="portal-brand">
-            <img src={logoSrc} alt={siteName} className="size-8 rounded-lg object-cover shadow-sm ring-1 ring-border/60" />
+            <img src={logoSrc} alt={siteName} className="portal-brand-logo" />
             <div className="min-w-0">
-              <div className="portal-brand-title truncate text-sm font-semibold tracking-tight leading-tight">{t('imageStudioPortal.title')}</div>
+              <div className="portal-brand-title truncate leading-tight">{t('imageStudioPortal.title')}</div>
               <div className="truncate text-[11px] text-muted-foreground leading-tight">{siteName}</div>
             </div>
           </div>
@@ -1025,16 +1063,48 @@ export default function ImageStudioPortal() {
                     <Field label={t('images.model')}>
                       <Select value={model} onValueChange={setModel} options={IMAGE_MODELS} compact />
                     </Field>
-                    <Field label={t('images.size')}>
-                      <Select value={size} onValueChange={setSize} options={SIZE_OPTIONS.map(option => ({ ...option, label: option.value === 'auto' ? t('imageStudioPortal.design.autoSize') : option.label.replace('x', ' × ') }))} compact />
-                    </Field>
+                    <div className="flex min-w-0 flex-col gap-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs font-semibold text-foreground">{t('images.size')}</span>
+                        <span className="font-mono text-[10.5px] text-muted-foreground">
+                          {size === 'auto' ? t('imageStudioPortal.design.autoSize') : size.replace('x', ' × ')}
+                        </span>
+                      </div>
+                      <div className="portal-ratio-pills" role="group" aria-label={t('images.size')}>
+                        {PORTAL_QUICK_RATIOS.map((ratio) => {
+                          const Icon = ratio.icon
+                          const active = portalRatioForSize(size) === ratio.id
+                          return (
+                            <button
+                              key={ratio.id}
+                              type="button"
+                              className="portal-ratio-pill"
+                              aria-pressed={active}
+                              onClick={() => setSize(ratio.size)}
+                            >
+                              <Icon />
+                              <span>{t(ratio.labelKey)}</span>
+                            </button>
+                          )
+                        })}
+                      </div>
+                      <Select
+                        value={size}
+                        onValueChange={setSize}
+                        options={SIZE_OPTIONS.map(option => ({ ...option, label: option.value === 'auto' ? t('imageStudioPortal.design.autoSize') : option.label.replace('x', ' × ') }))}
+                        compact
+                      />
+                    </div>
                   </div>
 
                   {imageToImageMode ? (
                     <div className="flex min-w-0 flex-col gap-1.5">
                       <div className="flex h-5 items-center justify-between gap-2">
-                        <span className="text-xs font-semibold text-muted-foreground">
+                        <span className="flex items-center gap-1.5 text-xs font-semibold text-foreground">
                           {t('images.inputImage')}
+                          <span className="rounded-full bg-muted px-1.5 py-0.5 font-mono text-[10px] font-medium text-muted-foreground">
+                            {inputImageDataURLs.length}/{MAX_INPUT_IMAGES}
+                          </span>
                         </span>
                         <div className="flex items-center gap-0.5">
                           <Button
@@ -1063,10 +1133,10 @@ export default function ImageStudioPortal() {
                       </div>
                       <div
                         className={cn(
-                          'relative flex min-h-[96px] flex-col items-center justify-center rounded-xl border border-dashed px-3 py-2.5 transition-colors',
+                          'relative flex min-h-[104px] flex-col items-center justify-center rounded-xl border border-dashed px-3 py-3 transition-all',
                           dragOver
-                            ? 'border-primary bg-primary/8'
-                            : 'border-border/80 bg-muted/20 hover:border-primary/30 hover:bg-muted/35',
+                            ? 'border-primary bg-primary/10 shadow-sm'
+                            : 'border-border/80 bg-muted/20 hover:border-primary/35 hover:bg-muted/35',
                         )}
                         onDragOver={(e) => {
                           e.preventDefault()
@@ -1092,8 +1162,10 @@ export default function ImageStudioPortal() {
                         />
                         {inputImageDataURLs.length === 0 ? (
                           <div className="flex w-full flex-col items-center gap-2.5 text-center text-muted-foreground">
-                            <Upload className="size-4 opacity-70" />
-                            <div className="text-[11px] font-medium text-foreground">{t('imageStudioPortal.dropImages')}</div>
+                            <span className="flex size-8 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                              <Upload className="size-4" />
+                            </span>
+                            <div className="text-[11.5px] font-medium text-foreground">{t('imageStudioPortal.dropImages')}</div>
                             <div className="flex flex-wrap items-center justify-center gap-1.5">
                               <Button type="button" size="sm" variant="outline" className="h-7 text-xs" onClick={() => fileInputRef.current?.click()}>
                                 <Upload className="size-3" />
@@ -1110,15 +1182,18 @@ export default function ImageStudioPortal() {
                             {inputImageDataURLs.map((url, index) => (
                               <div
                                 key={`${index}-${url.slice(0, 24)}`}
-                                className="relative size-14 overflow-hidden rounded-lg border border-border/80 shadow-sm"
+                                className="group relative size-15 overflow-hidden rounded-xl border border-border/80 shadow-sm"
                               >
-                                <img src={url} alt="" className="size-full object-cover" />
+                                <img src={url} alt="" className="size-full object-cover transition-transform duration-200 group-hover:scale-105" />
+                                <span className="absolute bottom-1 left-1 rounded bg-black/60 px-1 font-mono text-[9px] text-white">
+                                  {index + 1}
+                                </span>
                                 <button
                                   type="button"
-                                  className="absolute right-0.5 top-0.5 rounded-md bg-black/65 p-0.5 text-white"
+                                  className="absolute right-1 top-1 flex size-4.5 items-center justify-center rounded-full bg-black/70 text-white transition-colors hover:bg-destructive"
                                   onClick={() => setInputImageDataURLs((list) => list.filter((_, i) => i !== index))}
                                 >
-                                  <X className="size-3" />
+                                  <X className="size-2.5" />
                                 </button>
                               </div>
                             ))}
@@ -1127,7 +1202,7 @@ export default function ImageStudioPortal() {
                                 <button
                                   type="button"
                                   onClick={() => fileInputRef.current?.click()}
-                                  className="flex size-14 flex-col items-center justify-center gap-0.5 rounded-lg border border-dashed border-border text-muted-foreground hover:border-primary/40 hover:text-primary"
+                                  className="flex size-15 flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-border text-muted-foreground transition-colors hover:border-primary/45 hover:bg-primary/5 hover:text-primary"
                                   title={t('images.upload')}
                                 >
                                   <Upload className="size-3.5" />
@@ -1135,7 +1210,7 @@ export default function ImageStudioPortal() {
                                 <button
                                   type="button"
                                   onClick={() => void openGalleryPicker()}
-                                  className="flex size-14 flex-col items-center justify-center gap-0.5 rounded-lg border border-dashed border-border text-muted-foreground hover:border-primary/40 hover:text-primary"
+                                  className="flex size-15 flex-col items-center justify-center gap-0.5 rounded-xl border border-dashed border-border text-muted-foreground transition-colors hover:border-primary/45 hover:bg-primary/5 hover:text-primary"
                                   title={t('imageStudioPortal.fromGallery')}
                                 >
                                   <FolderOpen className="size-3.5" />
@@ -1161,7 +1236,7 @@ export default function ImageStudioPortal() {
                       <ChevronDown className={cn('size-4 transition-transform motion-reduce:transition-none', advancedOpen && 'rotate-180')} />
                     </Button>
                     {advancedOpen ? (
-                      <div id="portal-advanced-settings" className="grid grid-cols-2 gap-3 border-t border-border p-3">
+                      <div id="portal-advanced-settings" className="portal-advanced-panel animate-image-studio-fade-in">
                         <Field label={t('images.quality')}>
                           <Select value={quality} onValueChange={setQuality} options={imageQualityOptions(model)} compact />
                         </Field>
@@ -1184,7 +1259,12 @@ export default function ImageStudioPortal() {
                 </div>
 
                 <div className="portal-composer-footer">
-                  {quota?.image_pricing?.[model]?.user_billing_mode === 'per_image' ? <p className="text-center text-xs text-muted-foreground" role="status">{t('imageStudioPortal.quota.imagePrice', { price: formatImageStudioQuota(quota.image_pricing[model].image_unit_price) })}</p> : null}
+                  {quota?.image_pricing?.[model]?.user_billing_mode === 'per_image' ? (
+                    <p className="portal-price-pill" role="status">
+                      <Sparkles className="size-3 text-primary" />
+                      {t('imageStudioPortal.quota.imagePrice', { price: formatImageStudioQuota(quota.image_pricing[model].image_unit_price) })}
+                    </p>
+                  ) : null}
                   <Button
                     className="portal-generate"
                     disabled={submitting || !prompt.trim() || quotaLocked}
@@ -1226,21 +1306,29 @@ export default function ImageStudioPortal() {
               <div className={cn('portal-canvas-body', currentJob && !inspirationOpen && 'portal-canvas-has-job')}>
                 {currentJob && !inspirationOpen ? (
                   busy ? (
-                    <div className="flex w-full max-w-md flex-col items-center gap-4 animate-image-studio-fade-in">
-                      <div className="image-studio-checkerboard relative aspect-[16/10] w-full overflow-hidden rounded-2xl border border-border/70 shadow-inner">
-                        <div className="absolute inset-y-0 w-1/2 animate-image-studio-shimmer bg-gradient-to-r from-transparent via-white/25 to-transparent dark:via-white/10" />
-                      </div>
-                      <div className="flex flex-col items-center gap-2">
-                        <div className="h-1.5 w-44 overflow-hidden rounded-full bg-muted">
-                          <div className="h-full w-1/2 animate-image-studio-progress rounded-full bg-primary/70" />
+                    <div className="flex w-full max-w-lg flex-col items-center gap-4 animate-image-studio-fade-in">
+                      <div className="portal-busy-stage">
+                        <div className="absolute inset-y-0 w-1/2 animate-image-studio-shimmer bg-gradient-to-r from-transparent via-primary/10 to-transparent" />
+                        <div className="portal-busy-loader-shell relative">
+                          <PixelLoader mode="orbit" size="lg" />
                         </div>
-                        <div className="text-sm font-medium">{statusLabel(currentJob.status)}</div>
-                        <div className="text-xs text-muted-foreground">{t('imageStudioPortal.design.runningHint')}</div>
+                        <div className="relative flex flex-col items-center gap-2 text-center">
+                          <ShimmerText className="text-sm font-semibold">{statusLabel(currentJob.status)}</ShimmerText>
+                          <div className="text-xs text-muted-foreground">{t('imageStudioPortal.design.runningHint')}</div>
+                          <div className="mt-1 h-1.5 w-44 overflow-hidden rounded-full bg-muted">
+                            <div className="h-full w-1/2 animate-image-studio-progress rounded-full bg-primary/80" />
+                          </div>
+                        </div>
                       </div>
+                      {currentJob.prompt ? (
+                        <p className="line-clamp-2 max-w-md text-center text-xs leading-relaxed text-muted-foreground">
+                          {currentJob.prompt}
+                        </p>
+                      ) : null}
                     </div>
                   ) : currentJob.status === 'failed' ? (
-                    <div className="flex max-w-md flex-col items-center gap-3 px-2 text-center animate-image-studio-fade-in">
-                      <div className="rounded-2xl border border-destructive/25 bg-destructive/10 px-5 py-3.5 animate-image-studio-shake">
+                    <div className="flex max-w-md flex-col items-center gap-3.5 px-2 text-center animate-image-studio-fade-in">
+                      <div className="rounded-2xl border border-destructive/25 bg-destructive/10 px-5 py-4 shadow-sm animate-image-studio-shake">
                         <div className="text-sm font-semibold text-destructive">{t('images.createJobFailed')}</div>
                         <div className="mt-1.5 text-xs leading-relaxed text-destructive/90">
                           {currentJob.error_message || t('imageStudioPortal.tryAgain')}
@@ -1252,11 +1340,11 @@ export default function ImageStudioPortal() {
                       </Button>
                     </div>
                   ) : (
-                    <div className="flex w-full flex-col items-center gap-3 animate-image-studio-result-in">
+                    <div className="flex w-full flex-col items-center gap-3.5 animate-image-studio-result-in">
                       {resultAssets.length === 0 ? (
                         <div className="text-sm text-muted-foreground">{t('imageStudioPortal.emptyResult')}</div>
                       ) : (
-                        <div className="flex w-full flex-wrap items-stretch justify-center gap-3">
+                        <div className="flex w-full flex-wrap items-stretch justify-center gap-4">
                           {resultAssets.map((asset) => {
                             const src = imageSrc(asset, assetURLs)
                             return (
@@ -1279,31 +1367,49 @@ export default function ImageStudioPortal() {
                                     />
                                   ) : (
                                     <div className="flex size-full items-center justify-center text-muted-foreground">
-                                      <Loader2 className="size-5 animate-spin" />
+                                      <PixelLoader mode="dots" size="md" />
                                     </div>
                                   )}
-                                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all group-hover:bg-black/25 group-hover:opacity-100">
-                                    <span className="inline-flex items-center gap-1.5 rounded-full bg-black/65 px-2.5 py-1 text-xs font-medium text-white">
+                                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all duration-200 group-hover:bg-black/25 group-hover:opacity-100">
+                                    <span className="inline-flex items-center gap-1.5 rounded-full border border-white/20 bg-black/65 px-3 py-1.5 text-xs font-medium text-white backdrop-blur-md shadow-lg">
                                       <Expand className="size-3.5" />
                                       {t('imageStudioPortal.viewFullscreen')}
                                     </span>
                                   </div>
                                 </Button>
-                                <div className="flex items-center justify-between gap-2 border-t border-border/60 px-3 py-2">
-                                  <span className="truncate text-[11px] text-muted-foreground">
-                                    {asset.actual_size || (asset.width && asset.height ? `${asset.width}x${asset.height}` : asset.model)}
-                                  </span>
-                                  <div className="flex shrink-0 gap-1">
+                                <div className="flex items-center justify-between gap-2 border-t border-border/70 bg-muted/20 px-3.5 py-2.5">
+                                  <div className="flex min-w-0 items-center gap-1.5">
+                                    <span className="truncate rounded-md bg-muted px-2 py-0.5 font-mono text-[11px] font-medium text-foreground/85">
+                                      {asset.actual_size || (asset.width && asset.height ? `${asset.width}×${asset.height}` : asset.model)}
+                                    </span>
+                                    {asset.output_format ? (
+                                      <span className="rounded-md border border-border/80 px-1.5 py-0.5 font-mono text-[10px] uppercase text-muted-foreground">
+                                        {asset.output_format}
+                                      </span>
+                                    ) : null}
+                                  </div>
+                                  <div className="flex shrink-0 items-center gap-1">
+                                    <Button
+                                      size="icon-sm"
+                                      variant="ghost"
+                                      className="size-7"
+                                      onClick={() => void copyPreviewPrompt(currentJob.prompt)}
+                                      aria-label={t('images.copyPrompt')}
+                                      title={t('images.copyPrompt')}
+                                    >
+                                      <Copy className="size-3.5" />
+                                    </Button>
                                     <Button
                                       size="icon-sm"
                                       variant="ghost"
                                       className="size-7"
                                       onClick={() => openPreview(asset, currentJob.prompt)}
                                       aria-label={t('imageStudioPortal.viewFullscreen')}
+                                      title={t('imageStudioPortal.viewFullscreen')}
                                     >
                                       <Expand className="size-3.5" />
                                     </Button>
-                                    <Button size="icon-sm" variant="ghost" className="size-7" onClick={() => void downloadAsset(asset)} aria-label={t('images.download')}>
+                                    <Button size="icon-sm" variant="ghost" className="size-7" onClick={() => void downloadAsset(asset)} aria-label={t('images.download')} title={t('images.download')}>
                                       <Download className="size-3.5" />
                                     </Button>
                                   </div>
@@ -1322,16 +1428,28 @@ export default function ImageStudioPortal() {
               </div>
             </Card>
             <section className="portal-recent" aria-label={t('imageStudioPortal.design.recentTitle')}>
-              <div className="portal-recent-heading"><h2>{t('imageStudioPortal.design.recentTitle')}</h2><NavLink to="/image-studio/history">{t('imageStudioPortal.design.allHistory')}<ArrowRight className="size-3.5" /></NavLink></div>
+              <div className="portal-recent-heading">
+                <h2><History className="size-3.5 text-primary" />{t('imageStudioPortal.design.recentTitle')}</h2>
+                <NavLink to="/image-studio/history">{t('imageStudioPortal.design.allHistory')}<ArrowRight className="size-3.5" /></NavLink>
+              </div>
               {historyLoading && historyJobs.length === 0 ? <p className="portal-recent-empty">{t('common.loading')}</p> : historyJobs.length === 0 ? <p className="portal-recent-empty">{t('imageStudioPortal.design.recentEmpty')}</p> : (
                 <div className="portal-recent-grid">
                   {historyJobs.slice(0, RECENT_JOB_COUNT).map(job => {
                     const asset = job.assets?.[0]
                     const src = asset ? thumbnailSrc(asset, assetURLs) : ''
-                    return <Button key={job.id} type="button" variant="ghost" className="portal-recent-item" onClick={() => { setCurrentJob(job); setInspirationOpen(false); selectMobilePanel('canvas') }}>
-                      <span className="portal-recent-thumb">{src ? <img loading="lazy" decoding="async" src={src} alt="" /> : <ImageIcon className="size-4" />}</span>
-                      <span className="portal-recent-description"><span>{job.prompt}</span><small><span className={cn('portal-status-dot', `portal-status-${job.status}`)} />{statusLabel(job.status)}</small></span>
-                    </Button>
+                    return (
+                      <Button
+                        key={job.id}
+                        type="button"
+                        variant="ghost"
+                        aria-pressed={currentJob?.id === job.id && !inspirationOpen}
+                        className="portal-recent-item"
+                        onClick={() => { setCurrentJob(job); setInspirationOpen(false); selectMobilePanel('canvas') }}
+                      >
+                        <span className="portal-recent-thumb">{src ? <img loading="lazy" decoding="async" src={src} alt="" /> : <ImageIcon className="size-4" />}</span>
+                        <span className="portal-recent-description"><span>{job.prompt}</span><small><span className={cn('portal-status-dot', `portal-status-${job.status}`)} />{statusLabel(job.status)}</small></span>
+                      </Button>
+                    )
                   })}
                 </div>
               )}
@@ -1342,58 +1460,59 @@ export default function ImageStudioPortal() {
         ) : null}
 
         {activeView === 'history' ? (
-          <Card className="border-border/70 shadow-md shadow-black/[0.03] animate-image-studio-fade-in dark:shadow-black/20">
-            <CardContent className="p-3.5 sm:p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="flex size-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                    <Clock3 className="size-4" />
+          <Card className="portal-collection-card gap-0 py-0 animate-image-studio-fade-in">
+            <div className="portal-collection-head">
+              <div className="flex items-center gap-3">
+                <div className="portal-collection-icon">
+                  <Clock3 className="size-4.5" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-[15px] font-semibold tracking-tight">{t('imageStudioPortal.historyHeading')}</h2>
+                    <ValuePill tone="primary" count={historyTotal}>{t('imageStudioPortal.jobCount', { count: historyTotal })}</ValuePill>
                   </div>
-                  <div>
-                    <div className="text-sm font-semibold tracking-tight">{t('imageStudioPortal.historyHeading')}</div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {t('imageStudioPortal.jobCount', { count: historyTotal })} · {t('imageStudioPortal.historyDesc')}
-                    </div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    {t('imageStudioPortal.historyDesc')}
                   </div>
                 </div>
-                <Button size="sm" variant="outline" className="h-8" onClick={() => void loadHistory()} disabled={historyLoading}>
-                  <RefreshCw className={cn('size-3.5', historyLoading && 'animate-spin')} />
-                  {t('common.refresh')}
-                </Button>
               </div>
-
+              <Button size="sm" variant="outline" className="h-8.5 rounded-xl" onClick={() => void loadHistory()} disabled={historyLoading}>
+                <RefreshCw className={cn('size-3.5', historyLoading && 'animate-spin')} />
+                {t('common.refresh')}
+              </Button>
+            </div>
+            <CardContent className="p-4 sm:p-5">
               {historyLoading && historyJobs.length === 0 ? (
-                <div className="flex items-center justify-center py-16 text-muted-foreground">
-                  <Loader2 className="size-6 animate-spin" />
+                <div className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
+                  <PixelLoader mode="drive" size="md" label={t('common.loading')} />
                 </div>
               ) : historyJobs.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border py-14 text-center">
-                  <History className="size-8 text-muted-foreground/50" />
-                  <div className="text-sm text-muted-foreground">{t('imageStudioPortal.emptyHistory')}</div>
+                <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-muted/15 py-16 text-center">
+                  <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground shadow-sm">
+                    <History className="size-5" />
+                  </span>
+                  <div className="text-sm font-medium text-muted-foreground">{t('imageStudioPortal.emptyHistory')}</div>
                 </div>
               ) : (
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   {historyJobs.map((job) => {
                     const thumb = job.assets?.[0]
                     const thumbSrc = thumb ? thumbnailSrc(thumb, assetURLs) : ''
                     const canPreview = Boolean(thumb)
                     return (
-                      <div
-                        key={job.id}
-                        className="group flex gap-3 rounded-xl border border-border/70 bg-muted/15 p-2.5 transition-colors hover:border-primary/25 hover:bg-muted/30 sm:p-3"
-                      >
+                      <div key={job.id} className="portal-history-row group">
                         <button
                           type="button"
                           disabled={!canPreview}
                           onClick={() => thumb && openPreview(thumb, job.prompt)}
                           className={cn(
-                            'image-studio-checkerboard size-16 shrink-0 overflow-hidden rounded-xl border border-border/60',
-                            canPreview && 'cursor-zoom-in hover:ring-2 hover:ring-primary/30',
+                            'image-studio-checkerboard relative size-18 shrink-0 overflow-hidden rounded-xl border border-border/70 transition-all',
+                            canPreview && 'cursor-zoom-in hover:border-primary/45 hover:ring-2 hover:ring-primary/20',
                           )}
                           title={canPreview ? t('imageStudioPortal.viewFullscreen') : undefined}
                         >
                           {thumbSrc ? (
-                            <img loading="lazy" decoding="async" src={thumbSrc} alt="" className="size-full object-cover" />
+                            <img loading="lazy" decoding="async" src={thumbSrc} alt="" className="size-full object-cover transition-transform duration-300 group-hover:scale-105" />
                           ) : (
                             <div className="flex size-full items-center justify-center text-muted-foreground/50">
                               <ImageIcon className="size-5" />
@@ -1402,13 +1521,15 @@ export default function ImageStudioPortal() {
                         </button>
                         <div className="min-w-0 flex-1">
                           <div className="flex flex-wrap items-center gap-2">
-                            <Badge className={jobStatusClass(job.status)}>{statusLabel(job.status)}</Badge>
-                            <span className="text-[11px] tabular-nums text-muted-foreground">#{job.id}</span>
+                            <ValuePill tone={jobStatusTone(job.status)} dot pulse={job.status === 'running'}>
+                              {statusLabel(job.status)}
+                            </ValuePill>
+                            <span className="font-mono text-[11px] tabular-nums text-muted-foreground">#{job.id}</span>
                             <span className="text-[11px] text-muted-foreground">{formatBeijingTime(job.created_at)}</span>
                           </div>
-                          <div className="mt-1 line-clamp-2 text-sm leading-snug text-foreground">{job.prompt}</div>
+                          <div className="mt-1.5 line-clamp-2 text-[13.5px] leading-relaxed text-foreground">{job.prompt}</div>
                           {job.error_message || job.warning ? (
-                            <div className={`mt-1 line-clamp-1 text-xs ${job.status === 'failed' ? 'text-destructive' : 'text-amber-700 dark:text-amber-300'}`}>
+                            <div className={`mt-1.5 line-clamp-1 rounded-lg px-2 py-1 text-xs ${job.status === 'failed' ? 'bg-destructive/8 text-destructive' : 'bg-amber-500/10 text-amber-700 dark:text-amber-300'}`}>
                               {job.error_message || job.warning}
                             </div>
                           ) : null}
@@ -1418,7 +1539,7 @@ export default function ImageStudioPortal() {
                             <Button
                               size="sm"
                               variant="outline"
-                              className="h-8"
+                              className="h-8 rounded-lg"
                               onClick={() => thumb && openPreview(thumb, job.prompt)}
                             >
                               <Expand className="size-3.5" />
@@ -1428,7 +1549,7 @@ export default function ImageStudioPortal() {
                           <Button
                             size="sm"
                             variant="outline"
-                            className="h-8"
+                            className="h-8 rounded-lg"
                             onClick={() => usePromptInStudio(job.prompt)}
                             title={t('imageStudioPortal.usePrompt')}
                           >
@@ -1438,7 +1559,7 @@ export default function ImageStudioPortal() {
                           <Button
                             size="icon-sm"
                             variant="outline"
-                            className="h-8 w-8"
+                            className="h-8 w-8 rounded-lg hover:border-destructive/40 hover:text-destructive"
                             onClick={() => void deleteJob(job)}
                             disabled={['queued', 'running'].includes(job.status)}
                             title={t('common.delete')}
@@ -1468,47 +1589,49 @@ export default function ImageStudioPortal() {
         ) : null}
 
         {activeView === 'gallery' ? (
-          <Card className="border-border/70 shadow-md shadow-black/[0.03] animate-image-studio-fade-in dark:shadow-black/20">
-            <CardContent className="p-3.5 sm:p-4">
-              <div className="mb-3 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-2.5">
-                  <div className="flex size-9 items-center justify-center rounded-xl bg-primary/10 text-primary">
-                    <Images className="size-4" />
+          <Card className="portal-collection-card gap-0 py-0 animate-image-studio-fade-in">
+            <div className="portal-collection-head">
+              <div className="flex items-center gap-3">
+                <div className="portal-collection-icon">
+                  <Images className="size-4.5" />
+                </div>
+                <div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <h2 className="text-[15px] font-semibold tracking-tight">{t('imageStudioPortal.galleryHeading')}</h2>
+                    <ValuePill tone="primary" count={assetTotal}>{t('imageStudioPortal.assetCount', { count: assetTotal })}</ValuePill>
                   </div>
-                  <div>
-                    <div className="text-sm font-semibold tracking-tight">{t('imageStudioPortal.galleryHeading')}</div>
-                    <div className="text-[11px] text-muted-foreground">
-                      {t('imageStudioPortal.assetCount', { count: assetTotal })} · {t('imageStudioPortal.galleryDesc')}
-                    </div>
+                  <div className="mt-0.5 text-xs text-muted-foreground">
+                    {t('imageStudioPortal.galleryDesc')}
                   </div>
                 </div>
-                <Button size="sm" variant="outline" className="h-8" onClick={() => void loadAssets()} disabled={galleryLoading}>
-                  <RefreshCw className={cn('size-3.5', galleryLoading && 'animate-spin')} />
-                  {t('common.refresh')}
-                </Button>
               </div>
-
+              <Button size="sm" variant="outline" className="h-8.5 rounded-xl" onClick={() => void loadAssets()} disabled={galleryLoading}>
+                <RefreshCw className={cn('size-3.5', galleryLoading && 'animate-spin')} />
+                {t('common.refresh')}
+              </Button>
+            </div>
+            <CardContent className="p-4 sm:p-5">
               {galleryLoading && assets.length === 0 ? (
-                <div className="flex items-center justify-center py-16 text-muted-foreground">
-                  <Loader2 className="size-6 animate-spin" />
+                <div className="flex flex-col items-center justify-center gap-3 py-16 text-muted-foreground">
+                  <PixelLoader mode="drive" size="md" label={t('common.loading')} />
                 </div>
               ) : assets.length === 0 ? (
-                <div className="flex flex-col items-center gap-2 rounded-2xl border border-dashed border-border py-14 text-center">
-                  <Images className="size-8 text-muted-foreground/50" />
-                  <div className="text-sm text-muted-foreground">{t('imageStudioPortal.emptyGallery')}</div>
+                <div className="flex flex-col items-center gap-3 rounded-2xl border border-dashed border-border bg-muted/15 py-16 text-center">
+                  <span className="flex size-12 items-center justify-center rounded-2xl border border-border bg-card text-muted-foreground shadow-sm">
+                    <Images className="size-5" />
+                  </span>
+                  <div className="text-sm font-medium text-muted-foreground">{t('imageStudioPortal.emptyGallery')}</div>
                 </div>
               ) : (
-                <div className="grid grid-cols-2 gap-2.5 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+                <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 xl:grid-cols-5">
                   {assets.map((asset) => {
                     const src = thumbnailSrc(asset, assetURLs)
+                    const resolution = asset.actual_size || (asset.width && asset.height ? `${asset.width}×${asset.height}` : '')
                     return (
-                      <div
-                        key={asset.id}
-                        className="group relative overflow-hidden rounded-2xl border border-border/70 bg-card shadow-sm transition-all hover:-translate-y-0.5 hover:border-primary/25 hover:shadow-md"
-                      >
+                      <div key={asset.id} className="portal-gallery-tile group">
                         <button
                           type="button"
-                          className="image-studio-checkerboard relative aspect-square w-full cursor-zoom-in"
+                          className="image-studio-checkerboard relative aspect-square w-full cursor-zoom-in overflow-hidden"
                           onClick={() => openPreview(asset)}
                           title={t('imageStudioPortal.viewFullscreen')}
                         >
@@ -1516,23 +1639,28 @@ export default function ImageStudioPortal() {
                             <img loading="lazy" decoding="async" src={src} alt={asset.filename} className="size-full object-cover" />
                           ) : (
                             <div className="flex size-full items-center justify-center text-muted-foreground">
-                              <Loader2 className="size-5 animate-spin" />
+                              <PixelLoader mode="dots" size="sm" />
                             </div>
                           )}
-                          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all group-hover:bg-black/20 group-hover:opacity-100">
-                            <span className="inline-flex items-center gap-1 rounded-full bg-black/65 px-2 py-1 text-[11px] font-medium text-white">
+                          {resolution ? (
+                            <span className="pointer-events-none absolute left-2 top-2 rounded-md bg-black/55 px-1.5 py-0.5 font-mono text-[10px] text-white/95 backdrop-blur-md opacity-0 transition-opacity group-hover:opacity-100">
+                              {resolution}
+                            </span>
+                          ) : null}
+                          <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all duration-200 group-hover:bg-black/20 group-hover:opacity-100">
+                            <span className="inline-flex items-center gap-1 rounded-full border border-white/20 bg-black/65 px-2.5 py-1 text-[11px] font-medium text-white backdrop-blur-md">
                               <Expand className="size-3" />
                               {t('imageStudioPortal.preview')}
                             </span>
                           </div>
                         </button>
-                        <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-gradient-to-t from-black/70 via-black/40 to-transparent p-2 pt-8 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
-                          <span className="truncate text-[11px] text-white/90">#{asset.id}</span>
+                        <div className="absolute inset-x-0 bottom-0 flex items-center justify-between gap-1 bg-gradient-to-t from-black/75 via-black/45 to-transparent p-2.5 pt-8 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+                          <span className="truncate font-mono text-[11px] text-white/90">#{asset.id}</span>
                           <div className="flex gap-1">
                             <Button
                               size="icon-sm"
                               variant="secondary"
-                              className="size-7 bg-white/15 text-white hover:bg-white/25"
+                              className="size-7 rounded-lg border border-white/15 bg-black/45 text-white backdrop-blur-md hover:bg-black/70"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 openPreview(asset)
@@ -1544,7 +1672,7 @@ export default function ImageStudioPortal() {
                             <Button
                               size="icon-sm"
                               variant="secondary"
-                              className="size-7 bg-white/15 text-white hover:bg-white/25"
+                              className="size-7 rounded-lg border border-white/15 bg-black/45 text-white backdrop-blur-md hover:bg-black/70"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 void downloadAsset(asset)
@@ -1556,7 +1684,7 @@ export default function ImageStudioPortal() {
                             <Button
                               size="icon-sm"
                               variant="secondary"
-                              className="size-7 bg-white/15 text-white hover:bg-white/25"
+                              className="size-7 rounded-lg border border-white/15 bg-black/45 text-white backdrop-blur-md hover:bg-destructive/85"
                               onClick={(e) => {
                                 e.stopPropagation()
                                 void deleteAsset(asset)
@@ -1591,8 +1719,9 @@ export default function ImageStudioPortal() {
 
       {toast ? (
         <div className="pointer-events-none fixed inset-x-0 bottom-5 z-50 flex justify-center px-4">
-          <div className="pointer-events-auto rounded-xl border border-border/80 bg-card/95 px-4 py-2.5 text-sm shadow-lg backdrop-blur animate-image-studio-fade-in">
-            {toast}
+          <div className="pointer-events-auto inline-flex items-center gap-2 rounded-full border border-border/80 bg-card/95 px-4 py-2 text-xs font-medium shadow-xl backdrop-blur-md animate-image-studio-fade-in">
+            <Sparkles className="size-3.5 text-primary" />
+            <span>{toast}</span>
           </div>
         </div>
       ) : null}
@@ -1769,52 +1898,52 @@ function PortalImagePreviewDialog({
         <button
           type="button"
           onClick={onClose}
-          className="absolute right-3 top-3 z-10 inline-flex size-9 items-center justify-center rounded-full bg-black/60 text-white shadow-lg transition hover:bg-black/75"
+          className="absolute right-3.5 top-3.5 z-10 inline-flex size-9 items-center justify-center rounded-full border border-white/15 bg-black/55 text-white shadow-lg backdrop-blur-md transition hover:bg-black/80"
           aria-label={t('common.close')}
         >
           <X className="size-4" />
         </button>
-        <div className="flex min-h-0 flex-1 items-center justify-center bg-black/92 p-3 sm:p-5">
+        <div className="portal-lightbox-stage">
           {imageURL ? (
             <img
               key={imageURL}
               src={imageURL}
               alt={prompt || asset.filename}
-              className="h-full max-h-full w-full max-w-full rounded-md object-contain shadow-2xl"
+              className="h-full max-h-full w-full max-w-full rounded-lg object-contain shadow-2xl"
             />
           ) : (
-            <div className="flex h-full w-full items-center justify-center text-white/70">
-              <Loader2 className="size-8 animate-spin" />
+            <div className="flex h-full w-full items-center justify-center text-white/75">
+              <PixelLoader mode="orbit" size="lg" className="text-white" />
             </div>
           )}
         </div>
-        <div className="shrink-0 border-t border-border bg-background p-3 sm:p-3.5">
+        <div className="shrink-0 border-t border-border bg-card p-3.5 sm:p-4">
           {prompt ? (
-            <p className="mb-3 line-clamp-2 text-sm leading-relaxed text-muted-foreground">{prompt}</p>
+            <p className="mb-3 line-clamp-2 text-[13px] leading-relaxed text-muted-foreground">{prompt}</p>
           ) : null}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="grid w-full grid-cols-2 gap-2 sm:w-auto sm:min-w-[320px] sm:grid-cols-3">
-              <div className="min-w-0 rounded-md bg-muted/55 px-2.5 py-1.5">
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/75">
+            <div className="grid w-full grid-cols-2 gap-2 sm:w-auto sm:min-w-[330px] sm:grid-cols-3">
+              <div className="min-w-0 rounded-xl border border-border/70 bg-muted/40 px-3 py-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">
                   {t('images.resolution')}
                 </div>
-                <div className="mt-0.5 truncate font-mono text-xs text-foreground">{resolution}</div>
+                <div className="mt-0.5 truncate font-mono text-xs font-medium text-foreground">{resolution}</div>
               </div>
-              <div className="min-w-0 rounded-md bg-muted/55 px-2.5 py-1.5">
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/75">
+              <div className="min-w-0 rounded-xl border border-border/70 bg-muted/40 px-3 py-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">
                   {t('images.format')}
                 </div>
-                <div className="mt-0.5 truncate font-mono text-xs text-foreground">{format}</div>
+                <div className="mt-0.5 truncate font-mono text-xs font-medium text-foreground">{format}</div>
               </div>
-              <div className="min-w-0 rounded-md bg-muted/55 px-2.5 py-1.5">
-                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/75">
+              <div className="min-w-0 rounded-xl border border-border/70 bg-muted/40 px-3 py-1.5">
+                <div className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/80">
                   {t('images.model')}
                 </div>
-                <div className="mt-0.5 truncate font-mono text-xs text-foreground">{asset.model || '-'}</div>
+                <div className="mt-0.5 truncate font-mono text-xs font-medium text-foreground">{asset.model || '-'}</div>
               </div>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-1.5">
-              <Button size="sm" variant="outline" onClick={() => onDownload(asset)}>
+              <Button size="sm" onClick={() => onDownload(asset)}>
                 <Download className="size-3.5" />
                 {t('images.download')}
               </Button>
