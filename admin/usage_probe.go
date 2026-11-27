@@ -26,6 +26,8 @@ import (
 // 须由 ProbeUsageSnapshot 决定是否用 /responses 探针裁决。
 var errWhamUnauthorized = errors.New("wham usage probe unauthorized")
 
+var errWhamRecoveryUnproven = errors.New("WHAM 未确认鉴权恢复")
+
 type usageProbeRequestFunc func(context.Context, *auth.Account, []byte, string, string, string, *proxy.DeviceProfileConfig, http.Header, ...bool) (*http.Response, error)
 
 func inspectResponsesProbeBody(body []byte) (responsesTerminalOutcome, []byte, error) {
@@ -113,6 +115,8 @@ func (h *Handler) ProbeUsageSnapshot(ctx context.Context, account *auth.Account)
 			return nil
 		}
 		log.Printf("[账号 %d] wham 用量元数据刷新成功，继续用 /responses 裁决限流恢复", account.DBID)
+	} else if errors.Is(err, errWhamRecoveryUnproven) {
+		return err
 	} else if errors.Is(err, errWhamUnauthorized) {
 		// wham 401 不直接封号（codex_at 账号可能 wham 恒 401 但流量可用，issue #328）：
 		// 能回退时交给 /responses 探针做鉴权最终裁决（200 恢复 / 401 才封）；
@@ -379,6 +383,17 @@ func (h *Handler) recordClaudeUsageProbe(account *auth.Account, probeErr error, 
 	h.invalidateClaudeCatalogCaches()
 }
 
+func (h *Handler) usageProbeProxy(ctx context.Context, account *auth.Account) (string, error) {
+	if !auth.IsCodexAuthorizationRecoveryProbe(ctx, account) {
+		return h.store.ResolveProxyForAccount(account), nil
+	}
+	proxyURL, usable := h.store.ResolveUsableProxyForAccount(account)
+	if !usable {
+		return "", errors.New("鉴权恢复探针没有可用的代理路由")
+	}
+	return proxyURL, nil
+}
+
 // probeUsageViaWham 通过 /backend-api/wham/usage 拉取用量，
 // 不消耗任何 token 额度。
 //
@@ -387,7 +402,11 @@ func (h *Handler) recordClaudeUsageProbe(account *auth.Account, probeErr error, 
 // 避免把一次额度查询误判为账号已恢复。
 func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, limited bool) error {
 	probeStartedAt := time.Now()
-	usage, resp, err := proxy.QueryWhamUsage(ctx, account, h.store.ResolveProxyForAccount(account))
+	proxyURL, err := h.usageProbeProxy(ctx, account)
+	if err != nil {
+		return err
+	}
+	usage, resp, err := proxy.QueryWhamUsage(ctx, account, proxyURL)
 	if resp != nil {
 		// QueryWhamUsage 在非 200 时不会读 body；这里读取一小段用于账号错误详情。
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
@@ -401,6 +420,9 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 				h.store.ReportRequestFailure(account, "client", 0)
 				errorMsg := fmt.Sprintf("用量探针上游返回 %d: %s", resp.StatusCode, truncate(string(body), 300))
 				h.store.MarkCooldownWithError(account, 24*time.Hour, "unauthorized", errorMsg)
+				if auth.IsCodexAuthorizationRecoveryProbe(ctx, account) {
+					return errWhamRecoveryUnproven
+				}
 				return nil
 			}
 			// 不在此处上报失败/封号：wham 401 对 codex_at 账号可能是误报，
@@ -421,6 +443,9 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 				} else {
 					h.store.MarkDeactivatedWorkspace(account, errorMsg)
 				}
+				if auth.IsCodexAuthorizationRecoveryProbe(ctx, account) {
+					return errWhamRecoveryUnproven
+				}
 				return nil
 			}
 		}
@@ -433,6 +458,19 @@ func (h *Handler) probeUsageViaWham(ctx context.Context, account *auth.Account, 
 	}
 
 	state := proxy.ApplyWhamUsage(h.store, account, usage)
+	if auth.IsCodexAuthorizationRecoveryProbe(ctx, account) {
+		// A parsed but empty body, a handled 401, or metadata alone is not proof.
+		if limited {
+			return nil // In authoritative mode the caller will continue to Responses.
+		}
+		if !usage.RateLimit.Allowed && !usage.RateLimit.LimitReached {
+			return errors.New("WHAM 响应缺少明确的用量状态")
+		}
+		if usage.RateLimit.Allowed && !usage.RateLimit.LimitReached && !applyUsageLimitedAccountState(h.store, account, state) {
+			auth.ReportCodexAuthorizationProbeSuccess(ctx, account)
+		}
+		return nil
+	}
 	// wham 不含订阅到期字段，按需从网页端 /subscriptions 补权威到期时间
 	// （带节流，best-effort，失败不影响探针结果）。(issue #360)
 	proxy.MaybeSyncSubscriptionExpiry(ctx, h.store, account, h.store.ResolveProxyForAccount(account))
@@ -517,7 +555,12 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 	if h.executeUsageProbe != nil {
 		executeRequest = h.executeUsageProbe
 	}
-	resp, err := executeRequest(ctx, account, payload, "", h.store.ResolveProxyForAccount(account), "", nil, nil)
+	recovery := auth.IsCodexAuthorizationRecoveryProbe(ctx, account)
+	proxyURL, err := h.usageProbeProxy(ctx, account)
+	if err != nil {
+		return err
+	}
+	resp, err := executeRequest(ctx, account, payload, "", proxyURL, "", nil, nil)
 	if err != nil {
 		return err
 	}
@@ -525,7 +568,10 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 
 	usageState := proxy.SyncCodexUsageState(h.store, account, resp)
 
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if recovery && resp.StatusCode == http.StatusOK && readErr != nil {
+		return readErr
+	}
 
 	switch resp.StatusCode {
 	case http.StatusOK:
@@ -535,12 +581,21 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 		}
 		switch outcome {
 		case responsesTerminalUsageLimited:
-			h.applyResponsesUsageLimitFailure(account, resp, h.store.GetTestModel(), terminalPayload)
+			if !recovery {
+				h.applyResponsesUsageLimitFailure(account, resp, h.store.GetTestModel(), terminalPayload)
+			}
 			return nil
 		case responsesTerminalFailed:
 			return fmt.Errorf("Responses 恢复探针未成功: %s", formatUpstreamTestError(terminalPayload, "上游返回失败终止事件"))
 		case responsesTerminalUnknown:
 			return fmt.Errorf("Responses 恢复探针缺少明确终止事件")
+		}
+		if recovery {
+			if outcome == responsesTerminalSuccess && gjson.ValidBytes(terminalPayload) &&
+				strings.EqualFold(gjson.GetBytes(terminalPayload, "response.status").String(), "completed") && !applyUsageLimitedAccountState(h.store, account, usageState) {
+				auth.ReportCodexAuthorizationProbeSuccess(ctx, account)
+			}
+			return nil
 		}
 		h.store.ReportRequestSuccess(account, 0)
 		// 只有用量未耗尽时才重置状态
@@ -554,12 +609,18 @@ func (h *Handler) probeUsageViaResponses(ctx context.Context, account *auth.Acco
 		return nil
 	case http.StatusTooManyRequests:
 		h.store.ReportRequestFailure(account, "client", 0)
-		proxy.Apply429Cooldown(h.store, account, body, resp, h.store.GetTestModel())
+		// A quota rejection isn't successful authentication evidence. Do not
+		// replace the 401 latch with a cooldown that can expire into dispatch.
+		if !recovery {
+			proxy.Apply429Cooldown(h.store, account, body, resp, h.store.GetTestModel())
+		}
 		return nil
 	default:
 		if proxy.IsUsageLimitReachedError(body) {
 			h.store.ReportRequestFailure(account, "client", 0)
-			proxy.Apply429Cooldown(h.store, account, body, resp, h.store.GetTestModel())
+			if !recovery {
+				proxy.Apply429Cooldown(h.store, account, body, resp, h.store.GetTestModel())
+			}
 			return nil
 		}
 		if shouldMarkUsageProbeAccountError(resp.StatusCode, body) {

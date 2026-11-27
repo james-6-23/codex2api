@@ -53,6 +53,11 @@ func TestCodexRefreshTransactions(t *testing.T) {
 			if err := db.UpdateCredentials(ctx, ids[2], map[string]any{"access_token": "admin-at"}); err != nil {
 				t.Fatal(err)
 			}
+			// A new 401 on a sibling route during the exchange remains durable.
+			until := time.Now().UTC().Add(-time.Hour)
+			if err := db.SetCooldownWithError(ctx, ids[1], "unauthorized", until, "sibling rejected"); err != nil {
+				t.Fatal(err)
+			}
 			published, err := db.FinishCodexRefresh(ctx, attempt, map[string]any{"access_token": "new-at", "refresh_token": "new-" + rt})
 			if err != nil || len(published) != 2 {
 				t.Fatalf("publish count %d: %v", len(published), err)
@@ -64,6 +69,16 @@ func TestCodexRefreshTransactions(t *testing.T) {
 				}
 				if row.GetCredential("refresh_token") != "new-"+rt || row.GetCredentialStringMap("custom_headers")["Chatgpt-Account-Id"] != "keep-route" {
 					t.Fatal("atomic shared route publication failed")
+				}
+			}
+			quarantined, err := db.GetAccountByID(ctx, ids[1])
+			if err != nil || quarantined.CooldownReason != "unauthorized" || !quarantined.CooldownUntil.Valid || quarantined.ErrorMessage != "sibling rejected" {
+				t.Fatal("rotation changed the sibling's 401", err)
+			}
+			for _, token := range []string{"old-at", "new-at"} {
+				cleared, err := db.ClearCodexAuthorizationCooldown(ctx, ids[1], quarantined.CredentialGeneration, token, until, "sibling rejected")
+				if err != nil || cleared != (token == "new-at") {
+					t.Fatalf("authorization cooldown comparison: changed=%t current_bearer=%t err=%v", cleared, token == "new-at", err)
 				}
 			}
 			replaced, err := db.GetAccountByID(ctx, ids[2])

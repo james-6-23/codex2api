@@ -248,7 +248,9 @@ func (db *DB) writeCodexRefreshCredentials(ctx context.Context, tx *sql.Tx, row 
 	}
 	status := ""
 	if advance {
-		status = ", status='active', error_message=''"
+		// Credential publication is not proof that the upstream 401 is gone.
+		status = ", status=CASE WHEN cooldown_reason='unauthorized' THEN status ELSE 'active' END" +
+			", error_message=CASE WHEN cooldown_reason='unauthorized' THEN error_message ELSE '' END"
 	}
 	// Cooldown columns are deliberately untouched, including concurrent 429s.
 	result, err := tx.ExecContext(ctx, `UPDATE accounts SET credentials=`+value+`, credential_generation=$2`+status+`, updated_at=CURRENT_TIMESTAMP WHERE id=$3 AND credential_generation=$4`, string(encoded), generation, row.ID, row.CredentialGeneration)
@@ -263,4 +265,43 @@ func (db *DB) writeCodexRefreshCredentials(ctx context.Context, tx *sql.Tx, row 
 		return fmt.Errorf("%w: account %d", ErrCodexCredentialsChanged, row.ID)
 	}
 	return invalidateDaybreakIdentity(ctx, tx, row.ID)
+}
+
+// ClearCodexAuthorizationCooldown clears only the rejection observed by a
+// successful probe for the still-current bearer (including AT-only accounts).
+func (db *DB) ClearCodexAuthorizationCooldown(ctx context.Context, id, generation int64, accessToken string, until time.Time, detail string) (bool, error) {
+	cleared := false
+	err := db.withWriteTx(ctx, func(tx *sql.Tx) error {
+		query := `SELECT credentials, cooldown_until FROM accounts WHERE id=$1 AND credential_generation=$2
+			AND status='active' AND cooldown_reason='unauthorized' AND COALESCE(error_message,'')=$3`
+		if !db.isSQLite() {
+			query += ` FOR UPDATE`
+		}
+		var credentials, rawUntil any
+		if err := tx.QueryRowContext(ctx, query, id, generation, detail).Scan(&credentials, &rawUntil); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil
+			}
+			return err
+		}
+		currentUntil, err := parseDBNullTimeValue(rawUntil)
+		if err != nil {
+			return err
+		}
+		if !db.isSQLite() {
+			until = until.Truncate(time.Microsecond)
+		}
+		row := AccountRow{Credentials: decodeCredentials(credentials)}
+		upstream := strings.ToLower(strings.TrimSpace(row.GetCredential("upstream_type")))
+		if !currentUntil.Valid || !currentUntil.Time.Equal(until) || (upstream != "" && upstream != "codex") ||
+			strings.EqualFold(strings.TrimSpace(row.GetCredential("auth_mode")), "agentIdentity") || row.GetCredential("access_token") != accessToken {
+			return nil
+		}
+		if _, err = tx.ExecContext(ctx, `UPDATE accounts SET cooldown_reason='', cooldown_until=NULL, error_message='', updated_at=CURRENT_TIMESTAMP WHERE id=$1`, id); err != nil {
+			return err
+		}
+		cleared = true
+		return nil
+	})
+	return cleared && err == nil, err
 }
